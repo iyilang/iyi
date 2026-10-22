@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **std/acme requires HTTPS (RFC 8555 section 6.1).** Every URL is
+  `https://` or refused by an `AcmeError` naming it, before anything is
+  sent: `AcmeClient.new`'s directory and `account_url`, each URL the
+  directory names, the account's and the order's Location, and every URL
+  an object carries, as it is asked. Over plaintext an on-path attacker
+  could act as the CA. `bench/std_acme_exercise.sh`'s scripted server is
+  HTTPS now, under a test PKI of its own, and five broken copies are
+  caught, one per site.
+- **std/autocert checks a chain to its roots before it keeps or shows
+  it.** `AutocertManager#roots`, the system's unless set, is what a chain
+  the CA issues, or the cache holds, must reach (std/x509's `verify`, for
+  the name); a chain from any other CA is refused with internal_error and
+  not cached. The gate shows a cached chain under the root that issued it,
+  refuses it under another, and has a manager that trusts only Pebble's
+  minica refuse what Pebble issues.
+- **std/autocert: a handshake waits for an order no longer than its
+  deadline.** Its wait is cut to what is left of the handshake's time
+  (and to `wait_ms`), where it was `wait_ms`, 60 s by default, past the
+  30 s handshake deadline. While `run` runs, orders run in its group, so
+  one outlives the handshake that asked and the handshakes after it take
+  its certificate; without `run`, the order is cancelled at the deadline,
+  not remembered as a failure, and the next handshake starts it again.
+  Against a CA that never answers, a handshake given 1 s ends within the
+  gate's 3 s bound with `run` and without. `run` also ends when its task
+  is cancelled, as `stop` ends it, and cancels the orders it runs.
+- **std/x509: `X509.self_signed` holds to RFC 5280's bounds.** A first
+  name over 64 characters (ub-common-name) is refused: the subject is the
+  issuer of a self-signed certificate and may not be left empty, so the
+  CN cannot be dropped as `X509.request` drops it. A caller's serial is
+  refused when it is zero or when its INTEGER, sign byte included, runs
+  past 20 octets (a 20-byte serial with its top bit set was written in
+  21). The sixteen random bytes drawn when none is given are drawn again
+  if all zero. std/acme's tls-alpn-01 certificate therefore refuses a
+  domain over 64 characters; http-01 or dns-01 proves one.
+
+### Changed
+
+- **std/tls: `TlsServerConfig#identity_source` is given the milliseconds
+  left of the handshake's deadline** as a third argument (`Int32?`, nil
+  when the handshake has none), so a source that waits can stay within
+  it. A proc of two arguments is now one of three.
+
 ## 0.19.0 — 2026-10-22
 
 **iyi's TLS gets its own certificates and keeps its sessions, and its

@@ -7,8 +7,9 @@
 # Finished values, the client's Finished sealed into exactly the trace's
 # record, and the application data both ways after a NewSessionTicket -
 # and TLS 1.2's PRF over SHA-256 and SHA-384 against the vectors that
-# circulate for it, and the form a host takes in server_name. The modes
-# the gate script drives:
+# circulate for it, the form a host takes in server_name, and a session's
+# tickets between a client and a server of this run's own on loopback
+# (127.0.0.1, ports the kernel picks). The modes the gate script drives:
 #   scenarios DIR       every scenario of bench/std_tls_server.py, whose
 #                       port and roots are in DIR, each holding or refused
 #                       for its reason;
@@ -36,8 +37,9 @@
 #                       what was agreed, then close_notify;
 #   config CHAIN KEY    TlsServerConfig.from_pem's answer.
 
-import std/tls::{TlsClient, TlsConfig, TlsEarlyData, TlsError, TlsHeldTicket, TlsIdentity, TlsKeySchedule, TlsRecordCipher, TlsReplayGuard, TlsServer, TlsServerConfig, TlsSession, TlsTicket, TlsTicketKeys, TlsVersion}
+import std/tls::{TlsClient, TlsConfig, TlsEarlyData, TlsError, TlsHeldTicket, TlsIdentity, TlsKeySchedule, TlsMadeUnder, TlsRecordCipher, TlsReplayGuard, TlsServer, TlsServerConfig, TlsSession, TlsTicket, TlsTicketKeys, TlsVersion}
 import std/x509::{Certificate}
+import std/time::{Time}
 import std/socket::{IyiSocket, SocketError}
 import std/file::{File}
 import std/env::{ENV}
@@ -243,6 +245,12 @@ EOED_RECORD                = "1703030015aca6fc944841298df99593725f9bf9754429b12f
 PSK_CLIENT_FINISHED        = "7230a9c952c25cd6138fc5e6628308c41c5335dd81b9f96bcea50fd32bda416d"
 PSK_CLIENT_FINISHED_RECORD = "170303003500f8b467d14cf22a4b3f0b6ae0d8e6cc8d08e0db3515ef5c2bdf1922eafbb70009964716d834fb70c3d2a56c5b1f5f6bdba6c333cf"
 PSK_RES_MASTER             = "5e95bdf1f89005ea2e9aa0ba85e728e3c19c5fe0c699e3f5bee59faebd0b5406"
+# A root and a leaf for fuzz.test it issued (Ed25519, valid 2025-01-01 to
+# 2045-01-01), and the leaf's seed: bench/std_fuzz_exercise.iyi's, for the
+# connections this run makes to a server of its own.
+BINDING_ROOT = "308201183081cba003020102020101300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0946757a7a20526f6f74302a300506032b65700321001494a1cac4481d11b3723830767cce21261aaca39cbd624c5b4d51b3163e8382a3423040301d0603551d0e0416041497ae92205c7302b9b25c2c7219607c7f767904fc300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b657003410081f88cec5b495303ce00ae5a18679fc9d43fc5c2d3a86fd3ff7dd265fd1f1a20f053fe81ae0db33be74fff0cb487b516fc7e489253e914000ec818988635e607"
+BINDING_LEAF = "3082016e30820120a003020102020102300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0966757a7a2e74657374302a300506032b65700321007fc71c44df1a089f4322e5a7dd03ef64fed0164490819aa2236ea7d4b552c8fba38196308193301d0603551d0e04160414d2780a2e2b99d3a1c8d027b498befbae72ebcdf2301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b6570034100b6c428830f0b30218d3fe05a43c4b2110f9797356a58d361c0ebc499910287ea3dc5ebc7260c117d8258db51ee3ed2a7c125a0f1f6cf3fb42032f4543ae65b08"
+BINDING_SEED = "3c9cb8fdef08086c92abb13f615fcbd54466dac12a3a363db6fb289ef88bc7a2"
 
 args = Program.args
 
@@ -782,18 +790,84 @@ keys.rotate(1_i64)
 check !TlsTicket.open(keys, sealed, 2_i64, period).nil?, "rotated once by hand, a ticket still opens"
 keys.rotate(3_i64)
 check TlsTicket.open(keys, sealed, 4_i64, period).nil?, "rotated twice by hand, it does not"
+
+# A ticket held, for localhost on *port*, under *under*, received at
+# *received_ms* for two hours, its full handshake at *authenticated_ms*.
+def held_for(port : Int32, under : TlsMadeUnder, certificates : Array(Certificate) = [] of Certificate,
+             authenticated_ms : Int64 = 0_i64, received_ms : Int64 = 0_i64) : TlsHeldTicket
+  TlsHeldTicket.new([1_u8], [] of UInt8, 0x1301, received_ms, 7200000_i64, 0_i64, "localhost", port, under, nil, certificates, authenticated_ms)
+end
+
+held_under = TlsConfig.new
+under = TlsMadeUnder.new(held_under)
 session = TlsSession.new
 # Tickets 0 to 9, the sixth for other.test: the first two go past the
 # limit, and other.test's is not the newest left.
-10.times { |i| session.keep(TlsHeldTicket.new([i.to_u8], [] of UInt8, 0x1301, i.to_i64, 1000_i64, 0_i64, i == 5 ? "other.test" : "localhost", nil, [] of Certificate)) }
+10.times { |i| session.keep(TlsHeldTicket.new([i.to_u8], [] of UInt8, 0x1301, i.to_i64, 1000_i64, 0_i64, i == 5 ? "other.test" : "localhost", 443, under, nil, [] of Certificate, 0_i64)) }
 check session.size == TlsSession::MAX_TICKETS, "a session holds #{TlsSession::MAX_TICKETS} tickets, not #{session.size}"
-newest = session.take("localhost", 500_i64)
+newest = session.take("localhost", 443, held_under, 500_i64)
 check !newest.nil? && newest.ticket == [9_u8] && session.size == 7, "the newest ticket for the host is taken out"
-other = session.take("other.test", 500_i64)
+other = session.take("other.test", 443, held_under, 500_i64)
 check !other.nil? && other.ticket == [5_u8], "a ticket is for the host it came from"
-check session.take("other.test", 500_i64).nil?, "a ticket goes out once"
-check session.take("localhost", 1010_i64).nil? && session.size == 0, "a ticket past its lifetime is not offered, and goes"
-puts "  a ticket sealed and opened, one bit off, past its lifetime, its key rotated out; a session's limit, hosts and single use"
+check session.take("other.test", 443, held_under, 500_i64).nil?, "a ticket goes out once"
+check session.take("localhost", 443, held_under, 1010_i64).nil? && session.size == 0, "a ticket past its lifetime is not offered, and goes"
+# The port it came from, and the configuration it came under: another
+# object, or the same with a part that decides trust assigned in place.
+session.keep(held_for(443, under))
+check session.take("localhost", 8443, held_under, 10_i64).nil?, "a ticket is not offered to another port"
+check !session.take("localhost", 443, held_under, 10_i64).nil?, "a ticket is offered to the port it came from"
+session.keep(held_for(443, under))
+check session.take("localhost", 443, TlsConfig.new, 10_i64).nil?, "a ticket is not offered under another configuration"
+# Each starts set, and is replaced by an equal one - roots and an
+# identity as new objects, which is all `TlsMadeUnder` tells apart.
+binding_root = Certificate.parse(b(BINDING_ROOT)).or_panic
+binding_identity = TlsIdentity.from_der([b(BINDING_LEAF), b(BINDING_ROOT)], b(BINDING_SEED)).or_panic
+[
+  {"roots", ->(c : TlsConfig) { c.roots = [binding_root]; nil }},
+  {"identity", ->(c : TlsConfig) { c.identity = TlsIdentity.from_der([b(BINDING_LEAF), b(BINDING_ROOT)], b(BINDING_SEED)).or_panic; nil }},
+  {"now", ->(c : TlsConfig) { c.now = Time.utc(2030, 1, 1); nil }},
+  {"min_version", ->(c : TlsConfig) { c.min_version = TlsVersion::TLS12; nil }},
+  {"require_staple", ->(c : TlsConfig) { c.require_staple = true; nil }},
+].each do |part|
+  changed = TlsConfig.new
+  changed.roots = [binding_root]
+  changed.identity = binding_identity
+  changed.now = Time.utc(2026, 6, 1)
+  bound = TlsSession.new
+  bound.keep(held_for(443, TlsMadeUnder.new(changed)))
+  check !bound.take("localhost", 443, changed, 10_i64).nil?, "a ticket is offered under the configuration it came under, #{part[0]} unchanged"
+  bound.keep(held_for(443, TlsMadeUnder.new(changed)))
+  part[1].call(changed)
+  check bound.take("localhost", 443, changed, 10_i64).nil?, "a ticket is not offered after #{part[0]} is assigned in place"
+end
+# The server's certificate valid at the configuration's `now`: the
+# binding leaf is good until 2045-01-01.
+binding_leaf = Certificate.parse(b(BINDING_LEAF)).or_panic
+expiring = TlsConfig.new
+expiring.now = Time.utc(2044, 12, 31)
+session = TlsSession.new
+session.keep(held_for(443, TlsMadeUnder.new(expiring), [binding_leaf]))
+check !session.take("localhost", 443, expiring, 10_i64).nil?, "a ticket whose server certificate is valid is offered"
+expired = TlsConfig.new
+expired.now = Time.utc(2045, 1, 2)
+session.keep(held_for(443, TlsMadeUnder.new(expired), [binding_leaf]))
+check session.take("localhost", 443, expired, 10_i64).nil? && session.size == 0, "a ticket whose server certificate has expired is not offered, and goes"
+# Seven days from the full handshake, whatever lifetime a ticket a
+# resumption received was given.
+week = 604800000_i64
+session.keep(held_for(443, under, authenticated_ms: 1_i64, received_ms: week - 1000_i64))
+check !session.take("localhost", 443, held_under, week).nil?, "a ticket short of seven days from its full handshake is offered"
+session.keep(held_for(443, under, authenticated_ms: 0_i64, received_ms: week - 1000_i64))
+check session.take("localhost", 443, held_under, week).nil?, "a ticket seven days from its full handshake is not offered, though its own lifetime is not over"
+# A server's ticket state: a name past 255 bytes and an identity's place
+# past 255 come back whole.
+wide = TlsTicket.new(0x1301, 0_i64, 30_i64, 7_i64, Array(UInt8).new(32, 1_u8), "a" * 300, nil, 300, [[2_u8, 3_u8]], 0_i64)
+keys = TlsTicketKeys.new(0_i64)
+opened = TlsTicket.open(keys, keys.seal(wide.encode, 0_i64, period), 1_i64, period)
+check !opened.nil? && opened.server_name == "a" * 300, "a ticket's name past 255 bytes comes back whole"
+check !opened.nil? && opened.identity == 300, "a ticket's identity past 255 comes back whole"
+puts "  a ticket sealed and opened, one bit off, past its lifetime, its key rotated out, its name and identity past a byte;"
+puts "  a session's limit, hosts, ports, configurations, expired certificates, seven days and single use"
 
 puts "== TLS 1.2's PRF, through the key schedule"
 # The P_SHA256 and P_SHA384 vectors that circulate for TLS 1.2 (Python's
@@ -814,5 +888,148 @@ check TlsClient.server_name_for("Example.COM") == "Example.COM", "an ASCII host 
 check TlsClient.server_name_for(".").is_a?(TlsError), "a dot alone names no host"
 check TlsClient.server_name_for("bücher..example").is_a?(TlsError), "a Unicode host IDNA refuses is an error before anything is sent"
 puts "  A-labels, no final dot, ASCII as written, and what names no host refused"
+
+puts "== a session's tickets, between this run's own client and server"
+
+# One connection to *listener* for *host* under *config* through
+# *session*, *early* sent with it, met by a `TlsServer` under *served*:
+# "client <what it came to>; server <what it came to>". The client writes
+# "hi" and reads to the end - the server's tickets with it - and the
+# server reads any early data, then "hi", and answers.
+def binding_round(listener : IyiSocket, served : TlsServerConfig, host : String, config : TlsConfig, session : TlsSession, early : String? = nil) : String
+  port = listener.local_port
+  ends = ["", ""]
+  group do |g|
+    server = g.spawn do
+      accepted = listener.accept
+      if accepted.is_a?(IyiSocket)
+        conn = TlsServer.over(accepted, served, 5000)
+        if conn.is_a?(TlsError)
+          accepted.close
+          conn.message
+        else
+          heard = ""
+          refused = nil.as(String?)
+          if conn.early_data?
+            while true
+              chunk = conn.read_early
+              if chunk.is_a?(TlsError)
+                refused = chunk.message
+                break
+              end
+              break if chunk.empty?
+              heard = heard + chunk
+            end
+          end
+          if why = refused
+            accepted.close
+            why
+          else
+            got = conn.read
+            conn.write("echo") unless got.is_a?(TlsError)
+            conn.close
+            "resumed=#{conn.resumed? ? "yes" : "no"} early=#{heard.bytesize}"
+          end
+        end
+      else
+        "no connection"
+      end
+    end
+    client = g.spawn do
+      socket = IyiSocket.connect("127.0.0.1", port)
+      if socket.is_a?(IyiSocket)
+        conn = TlsClient.over(socket, host, config, 5000, session, early)
+        if conn.is_a?(TlsError)
+          socket.close
+          conn.message
+        else
+          conn.write("hi")
+          drain(conn)
+          # Its close_notify ends the server's close: without it the server
+          # waited out `DRAIN_GAP_MS` and each round here took 1005-1008 ms.
+          conn.close
+          "resumed=#{conn.resumed? ? "yes" : "no"} early=#{conn.early_data}"
+        end
+      else
+        "no connection"
+      end
+    end
+    said = client.value
+    ends[0] = said.is_a?(String) ? said : "PANIC: #{said.message}"
+    heard = server.value
+    ends[1] = heard.is_a?(String) ? heard : "PANIC: #{heard.message}"
+    0
+  end
+  "client #{ends[0]}; server #{ends[1]}"
+end
+
+# The client's configuration: the binding root, at a time its leaf is good.
+def binding_config : TlsConfig
+  config = TlsConfig.new
+  config.roots = [Certificate.parse(b(BINDING_ROOT)).or_panic]
+  config.now = Time.utc(2026, 6, 1)
+  config
+end
+
+def now_ms : Int64
+  Time.monotonic_nanoseconds.to_i64 // 1000000_i64
+end
+
+# The newest ticket *session* holds for fuzz.test on *port* under
+# *config*, taken out.
+def newest_held(session : TlsSession, port : Int32, config : TlsConfig) : TlsHeldTicket
+  held = session.take("fuzz.test", port, config, now_ms)
+  raise "ASSERTION FAILED: no ticket held for port #{port}" unless held
+  held
+end
+
+FULL    = "client resumed=no early=Unused; server resumed=no early=0"
+RESUMED = "client resumed=yes early=Unused; server resumed=yes early=0"
+served = TlsServerConfig.from_der([b(BINDING_LEAF), b(BINDING_ROOT)], b(BINDING_SEED)).or_panic
+first_listener = IyiSocket.listen("127.0.0.1", 0)
+second_listener = IyiSocket.listen("127.0.0.1", 0)
+trusting = binding_config
+session = TlsSession.new
+check binding_round(first_listener, served, "fuzz.test", trusting, session) == FULL, "the first connection is a full handshake"
+# Both servers open the same tickets: a ticket offered to the second port
+# was taken there.
+check binding_round(second_listener, served, "fuzz.test", trusting, session) == FULL, "a ticket from one port is not offered to another"
+check binding_round(first_listener, served, "fuzz.test", trusting, session) == RESUMED, "a ticket is offered to the port it came from"
+check binding_round(first_listener, served, "fuzz.test", binding_config, session) == FULL, "a ticket from one configuration is not offered under another"
+# A resumed connection's tickets keep the time of the full handshake it
+# resumed: the newest held after it is one of them.
+chained = TlsSession.new
+binding_round(first_listener, served, "fuzz.test", trusting, chained)
+first_ticket = newest_held(chained, first_listener.local_port, trusting)
+chained.keep(first_ticket)
+sleep(20)
+check binding_round(first_listener, served, "fuzz.test", trusting, chained) == RESUMED, "a ticket kept by hand resumes"
+renewed = newest_held(chained, first_listener.local_port, trusting)
+check renewed.received_ms > first_ticket.received_ms && renewed.authenticated_ms == first_ticket.authenticated_ms,
+  "a ticket a resumed connection receives keeps its full handshake's time"
+# Early data on a ticket issued under 16 KiB: taken while the server's
+# limit is unchanged; once it has come down to 100 bytes, declined - the
+# client sends it again after the handshake - rather than taken and cut
+# off past the 100.
+eager = TlsServerConfig.from_der([b(BINDING_LEAF), b(BINDING_ROOT)], b(BINDING_SEED)).or_panic
+eager.max_early_data = 16384
+early_session = TlsSession.new
+check binding_round(first_listener, eager, "fuzz.test", trusting, early_session) == FULL, "the first connection to a server taking early data"
+check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Accepted; server resumed=yes early=1000",
+  "early data within an unchanged limit is taken"
+eager.max_early_data = 100
+check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Resent; server resumed=yes early=0",
+  "early data a ticket allows past a lowered limit is declined, and sent again"
+# A server_name of 254 bytes is refused before anything is sealed with it;
+# one of 253 is taken, and the client then refuses the certificate.
+long_name = "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 62
+said_long = binding_round(first_listener, served, long_name, trusting, TlsSession.new)
+check said_long.includes?("server tls: a server_name of 254 bytes, past the 253 a host name has (decode_error)"), "a server_name past 253 bytes is refused"
+said_most = binding_round(first_listener, served, long_name[0, 253], trusting, TlsSession.new)
+check said_most.ends_with?("server tls: the client sent alert bad_certificate (42)"), "a server_name of 253 bytes is taken"
+first_listener.close
+second_listener.close
+puts "  tickets held to their port and configuration, a resumption's to its full handshake's time, early data past a"
+puts "  lowered limit declined, and a server_name past 253 bytes refused"
 
 puts "\nALL CHECKS PASSED"

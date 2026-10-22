@@ -120,7 +120,7 @@ fi
 
 echo
 echo "== every tls section reported"
-for phrase in "== RFC 8448's simple 1-RTT handshake, through the key schedule" "== the trace's records, sealed and opened" "== TLS 1.2's PRF, through the key schedule" "== server_name's form (RFC 6066 section 3)"; do
+for phrase in "== RFC 8448's simple 1-RTT handshake, through the key schedule" "== the trace's records, sealed and opened" "== TLS 1.2's PRF, through the key schedule" "== server_name's form (RFC 6066 section 3)" "== a session's tickets, between this run's own client and server"; do
   if ! grep -q "$phrase" "$WORK/tls-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -2830,7 +2830,48 @@ prove_broken "a ticket offered to any host" "a ticket is for the host it came fr
 prove_broken "a ticket offered and kept" "the newest ticket for the host is taken out" \
   '        @tickets = kept' ''
 prove_broken "a ticket past its lifetime offered" "a ticket past its lifetime is not offered" \
-  '    @tickets = @tickets.select { |held| now_ms - held.received_ms < held.lifetime_ms }' ''
+  'now_ms - held.received_ms < held.lifetime_ms && ' ''
+# A client's ticket held to where and how it was taken (`TlsSession`):
+# the port, the configuration and each part `TlsMadeUnder` compares, the
+# server certificate's notAfter, seven days from the full handshake - and
+# a resumption's tickets keeping that handshake's time - by the trace's
+# own tickets and by its own client and server; a port the client never
+# reads breaks only the second.
+prove_broken "a ticket offered to another port" "a ticket is not offered to another port" \
+  ' && held.port == port' ''
+prove_broken "a client's port not read off its socket" "a ticket from one port is not offered to another" \
+  '      @port = @socket.unix? ? 0 : (@socket.remote_port || 0)' '      @port = 0'
+prove_broken "a ticket offered under another configuration" "a ticket is not offered under another configuration" \
+  ' && held.under.same?(config)' ''
+prove_broken "roots assigned in place not seen" "a ticket is not offered after roots is assigned in place" \
+  '(!roots.nil? && held.object_id == roots.object_id)' '!roots.nil?'
+prove_broken "an identity assigned in place not seen" "a ticket is not offered after identity is assigned in place" \
+  '(!identity.nil? && mine.object_id == identity.object_id)' '!identity.nil?'
+prove_broken "now assigned in place not seen" "a ticket is not offered after now is assigned in place" \
+  '@now == config.now && ' ''
+prove_broken "min_version assigned in place not seen" "a ticket is not offered after min_version is assigned in place" \
+  '@min_version == config.min_version && ' ''
+prove_broken "require_staple assigned in place not seen" "a ticket is not offered after require_staple is assigned in place" \
+  ' && @require_staple == config.require_staple' ''
+prove_broken "a ticket offered past its server certificate's notAfter" "a ticket whose server certificate has expired is not offered" \
+  '        return held unless leaf && checked_at > leaf.not_after' '        return held'
+prove_broken "a ticket offered past seven days from its full handshake" "a ticket seven days from its full handshake is not offered" \
+  ' && now_ms - held.authenticated_ms < MAX_LIFETIME * 1000_i64' ''
+prove_broken "a resumption's time of authentication not carried on" "a ticket a resumed connection receives keeps its full handshake's time" \
+  '      @authenticated_ms = offered.authenticated_ms' ''
+prove_broken "a ticket kept with the time it came" "a ticket a resumed connection receives keeps its full handshake's time" \
+  '@peer_certificates, @authenticated_ms, early))' '@peer_certificates, TlsTime.now_ms, early))'
+# The server's ticket state, each length its own size: a name and an
+# identity's place past a byte, as version 1 cut them.
+prove_broken "a ticket's name length cut to a byte" "a ticket's name past 255 bytes comes back whole" \
+  '+ @psk + TlsBytes.u16(name.size) + name' '+ @psk + TlsBytes.u16(name.size & 0xFF) + name'
+prove_broken "a ticket's identity cut to a byte" "a ticket's identity past 255 comes back whole" \
+  'TlsBytes.u32(@identity.to_i64)' 'TlsBytes.u32((@identity & 0xFF).to_i64)'
+# server_name held to a DNS name's 253 bytes, and no shorter.
+prove_broken "a server_name of any length taken" "a server_name past 253 bytes is refused" \
+  '          if name.size > MAX_HOST_NAME' '          if false'
+prove_broken "a server_name of 253 bytes refused" "a server_name of 253 bytes is taken" \
+  '          if name.size > MAX_HOST_NAME' '          if name.size >= MAX_HOST_NAME'
 prove_broken "a binder over the whole ClientHello" "resume: refused" \
   '    binder = schedule.binder(offered.psk, prefix + hello[0, hello.size - binders.size])' '    binder = schedule.binder(offered.psk, prefix + hello)' scenarios
 prove_broken "a ticket's age sent without its age_add" "resume: refused" \
@@ -2893,6 +2934,10 @@ prove_broken "early data delivered as 1-RTT data" "FAIL early-ok " \
   '        return content unless content.empty?' '        @pending = content unless content.empty?' server
 prove_broken "early data past the ticket's max_early_data_size taken" "FAIL early-too-much " \
   '        if @early_read > @early_limit' '        if false' server
+prove_broken "early data a ticket allows past a lowered limit taken" "early data a ticket allows past a lowered limit is declined, and sent again" \
+  '    return false if ticket.max_early_data > @config.early_limit' ''
+prove_broken "early data declined at a limit no lower than the ticket's" "early data within an unchanged limit is taken" \
+  '    return false if ticket.max_early_data > @config.early_limit' '    return false if ticket.max_early_data >= @config.early_limit'
 prove_broken "early data taken outside the freshness window" "FAIL early-stale " \
   '    return false unless TlsReplayGuard.fresh?((offer.identities[index][1] - ticket.age_add) & 0xFFFFFFFF_i64, now - ticket.issued_ms)' '' server
 prove_broken "early data taken under another ALPN protocol" "FAIL early-alpn " \

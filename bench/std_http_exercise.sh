@@ -1300,12 +1300,13 @@ else
     [ "$resume_openssl" = yes ] && printf '%s\n' "$RESUME_SSERVER" | sed 's/^/    want: /'
     status=1
   fi
-  # resume_breaks <label> <old> <new> <line>: the program over a copy of
-  # std/http with <old> made <new> must fail at <line>: say "FAIL <line>:"
+  # resume_breaks <label> <old> <new> <line> [module]: the program over a
+  # copy of std/http - or of std/<module>, for what std/http takes from
+  # it - with <old> made <new> must fail at <line>: say "FAIL <line>:"
   # with no arguments, or answer s_server's line otherwise than the module
   # does.
   resume_breaks() {
-    local label="$1" old="$2" new="$3" line="$4" which=self want got said
+    local label="$1" old="$2" new="$3" line="$4" module="${5:-http}" which=self want got said
     case "$line" in
       s_server*)
         which=s_server
@@ -1316,7 +1317,7 @@ else
         ;;
     esac
     rm -rf "$WORK/resumebreak" && mkdir -p "$WORK/resumebreak/std"
-    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/http.iyi" "$WORK/resumebreak/std/http.iyi" <<'PY'
+    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module.iyi" "$WORK/resumebreak/std/$module.iyi" <<'PY'
 import os, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 if src.count(os.environ["OLD"]) != 1:
@@ -1350,10 +1351,14 @@ PY
       status=1
     fi
   }
-  resume_breaks "sessions kept under the origin alone, the configuration ignored" \
+  resume_breaks "an origin's tickets from under the old configuration kept beside the new" \
     '      elsif held.under.same?(tls)' '      elsif true' "new roots"
   resume_breaks "a client's own tls: passed over, its tickets kept under HTTP.tls_config" \
     'session_for(origin, under)' 'session_for(origin, tls_config)' "own tls"
+  # `TlsMadeUnder` is std/tls's, which std/http's kept connections and
+  # tickets are both held to.
+  resume_breaks "require_staple assigned in place not seen" \
+    ' && @require_staple == config.require_staple' '' "staple" tls
   resume_breaks "a ticket offered to another origin" \
     '      if held.origin != origin' '      if false' "another origin"
   resume_breaks "resumption never attempted" \

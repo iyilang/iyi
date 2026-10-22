@@ -411,6 +411,7 @@ module Iyi
           raise Error.new(ex.message)
         end
       end
+      program.iyi_root_package = iyi_root_package_of(sources)
       program.warnings = @warnings
       program.iyi_file_overrides = @iyi_file_overrides
       program.iyi_project_root = @iyi_project_root
@@ -651,6 +652,7 @@ module Iyi
       type = program.types?.try &.[]?(root)
       return unless type.is_a?(ModuleType)
 
+      program.iyi_fills_boundary = true
       program.iyi_exported_owners << type
       collect_iyi_owners type, program.iyi_exported_owners
     end
@@ -731,6 +733,7 @@ module Iyi
           # nothing. See `Artifact#module_extends_self`.
           module_extends_self: true,
           reopened: reopened,
+          package_name: program.iyi_module_packages[module_name]? || "",
         )
 
         # Here rather than in `write_iyimods`, so that they are taken from the
@@ -2578,7 +2581,11 @@ module Iyi
     # def's already does: the consumer compiles it at the types it asked for,
     # and there is no symbol to miss. The producer's own narrow instantiation
     # stays in the object code for its own callers; the two have different
-    # names and do not collide.
+    # names and do not collide. Where the parameter admits a type it does not
+    # name — a trait, a class with subclasses — that instantiation is private
+    # to the unit that called it instead (`IyiMod.open_parameter?`), because
+    # the type may be another module's and the module's own unit would then
+    # call into code nothing ties it to (issue #134).
     #
     # Three places the declaration can be wider than what this build
     # compiled, and a symbol carries all three:
@@ -3175,7 +3182,24 @@ module Iyi
           raise Error.new(ex.message)
         end
       end
+      program.iyi_root_package = iyi_root_package_of(sources)
       program
+    end
+
+    # iyi: the program's own package (`Program#iyi_root_package`): the
+    # module path the manifest at the root names - the root a tool set, or
+    # the one the entry is answered from, which is where the table above
+    # was read - and that directory. Nil where there is no manifest; one
+    # that does not parse was refused by the table already, or is a tool's
+    # to refuse.
+    private def iyi_root_package_of(sources : Array(Source)) : {String, String}?
+      root = @iyi_project_root || sources.first?.try { |entry| Compiler.entry_root_of(entry.filename, entry.code) }
+      return nil unless root
+      manifest = File.join(root, Mod::Installer::MANIFEST)
+      return nil unless File.file?(manifest)
+      {Mod::ModFile.parse(File.read(manifest), manifest).path, root}
+    rescue Mod::ModError
+      nil
     end
 
     private def parse(program, sources : Array)
@@ -3201,6 +3225,12 @@ module Iyi
       parser = program.new_parser(source.code)
       parser.filename = source.filename
       parser.wants_doc = program.wants_doc?
+      # The entry is a module of the program's own package as much as a
+      # file it imports is (`SemanticVisitor#import_file`).
+      if module_path = Compiler.module_header_of(source.code)
+        parser.iyi_package_name = program.iyi_record_module_package(module_path,
+          program.iyi_root_package_name_for(module_path, source.filename))
+      end
       parser.parse
     rescue ex : InvalidByteSequenceError
       # iyi: whichever language the file is written in. A `.iyi` file full of

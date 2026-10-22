@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Twelve steps, the last seven failure proofs:
+# Fourteen steps, the last eight failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -28,26 +28,33 @@
 #      is freed while a mark may have it queued.
 #   5. Small chunks handed back by `GC.free` in bursts, ten runs, plain:
 #      every chunk kept since is intact, the pauses landing among the
-#      frees included.
-#   6. Failure proof: the barrier's shade removed from a copy of the
+#      frees included; and chunks the last mark kept, freed while a slice
+#      of their arena is in flight, intact until they are freed.
+#   6. The same program on a copy of the prelude whose sweep waits at
+#      each kept chunk of a kilobyte or more for a free to land, ten runs:
+#      none lands, because such a free waits for the slice.
+#   7. Failure proof: that copy with the free of a chunk the sweep has
+#      not reached put back to the cache alone, no lock; the sweep sees
+#      the free land and the program exits 1 saying so.
+#   8. Failure proof: the barrier's shade removed from a copy of the
 #      prelude; the first payload moved under a mark is freed, and the
 #      program exits 1 saying so.
-#   7. Failure proof: the barrier's own look at the marking flag removed;
+#   9. Failure proof: the barrier's own look at the marking flag removed;
 #      a barrier run after its mark ended grays a holder, the next mark
 #      sweeps the payload it held, and the program exits 1 saying so.
-#   8. Failure proof: `free`'s look at the mark removed; a large block
+#  10. Failure proof: `free`'s look at the mark removed; a large block
 #      outgrown under a mark is unmapped beside the helpers at once, which
 #      is how a helper walking the large list faulted, and the program
 #      exits 1 saying so.
-#   9. Failure proof: `free` outside the allocator's bracket; a pause
+#  11. Failure proof: `free` outside the allocator's bracket; a pause
 #      among the frees puts the lists it dropped back on the cache, and
 #      step 5's program exits 1 within ten runs.
-#  10. Failure proof, on Windows: the helpers given back the boost a
+#  12. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
 #      program's wakes past a millisecond - exits 1.
-#  11. Failure proof, on Windows: the cap on the helpers beside a busy
+#  13. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
-#  12. Failure proof, on Windows: the first collection's wait for every
+#  14. Failure proof, on Windows: the first collection's wait for every
 #      helper to reach its park put back, and the crowded check fires.
 set -u
 
@@ -321,6 +328,18 @@ while i < 20000
 end
 ring = Pointer(Pointer(UInt64)).malloc(4096_u64)
 burst = Pointer(Pointer(UInt64)).malloc(64_u64)
+# Chunks a mark kept, freed beside the lazy sweep of their arena: 2 KB
+# each, a class nothing else here allocates, all in one arena.
+aged = Pointer(Pointer(UInt64)).malloc(64_u64)
+generation = 1_u64
+j = 0
+while j < 64
+  chunk = Pointer(UInt64).malloc(256_u64)
+  chunk[0] = generation.unsafe_shl(8_u64) | j.to_u64
+  chunk[255] = chunk[0] ^ 0x5A5A_u64
+  aged[j] = chunk
+  j += 1
+end
 lost = 0
 round = 0
 while round < 200000
@@ -336,8 +355,33 @@ while round < 200000
     j += 1
   end
   if IyiMark.epoch != epoch
+    # The pause just past dropped every list, and the helpers sweep: 2 ms
+    # before the list is allocated from. In it the aged chunks - the mark
+    # that just ended kept them - are checked and freed, all at once, as
+    # soon as a slice of their arena is seen in flight or 5 ms have gone.
     until_ns = IyiMark.now_ns + 2000000_u64
+    watch_ns = IyiMark.now_ns + 5000000_u64
+    arena = IyiHeap.arena_of(aged[0].address)
+    while IyiMark.now_ns < watch_ns && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) != IyiMark.epoch
+    end
+    j = 64
+    while j > 0
+      j -= 1
+      chunk = aged[j]
+      tag = generation.unsafe_shl(8_u64) | j.to_u64
+      lost += 1 if chunk[0] != tag || chunk[255] != tag ^ 0x5A5A_u64
+      GC.free(chunk.as(Void*))
+    end
     while IyiMark.now_ns < until_ns
+    end
+    generation = generation &+ 1_u64
+    j = 0
+    while j < 64
+      chunk = Pointer(UInt64).malloc(256_u64)
+      chunk[0] = generation.unsafe_shl(8_u64) | j.to_u64
+      chunk[255] = chunk[0] ^ 0x5A5A_u64
+      aged[j] = chunk
+      j += 1
     end
   end
   slot = round % 4096
@@ -377,6 +421,74 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
   fi
 done
 echo "  ten runs of 200,000 bursts of frees, every kept chunk intact"
+fi
+
+# A chunk the last mark kept, freed before the lazy sweep of its arena
+# reached it - the aged chunks above. A slice walking past it reads its
+# entry, then its colour, and writes the entry back: freed between the two
+# reads it read as allocated before the mark and white, dead, and the
+# slice linked it into its batch while it sat on the freeing thread's
+# list; freed between the read and the write it lost its free flag. Such a
+# free now waits for the slice. On four cores beside two busy loops the
+# old free faulted step 5's program in 4 runs of 1,000, plain, and 108 of
+# 1,000 release: ten runs are no proof. So a copy of the prelude widens
+# the window: a slice that meets a chunk of a kilobyte or more the last
+# mark kept waits up to 100 us for its entry to change, and says so and
+# exits 1 if it does. The aged chunks are freed all at once as soon as a
+# slice of their arena is in flight, while it waits at one of them. With
+# the old free that copy exited 1 by name in 200 runs of 200, plain and
+# release alike, and with the lock in 0 of 1,000 of each. Small classes
+# are left alone: a slice meets thousands of kept chunks there, and a
+# wait at each stalls the sweep.
+if [ "$(uname -s)" = "Darwin" ]; then
+  echo "  the sweep's widened look is measured on Windows and Linux, as the bursts are"
+else
+step "chunks the last mark kept, freed beside a sweep that waits at each, ten runs"
+mkdir -p widened/iyi
+cp "$REPO"/src/iyi/*.iyi widened/iyi/
+awk '/^          word = IyiHeap\.read8\(byte\)$/ { print
+    print "          if chunk >= 1024_u64 && word & IyiHeap::EPOCH_FLAG != epoch && word & IyiHeap::FREE_FLAG == 0 && IyiHeap.read8(mark) != WHITE"
+    print "            window_end = IyiMark.now_ns &+ 100000_u64"
+    print "            while IyiHeap.read8(byte) == word && IyiMark.now_ns < window_end"
+    print "              spin_pause"
+    print "            end"
+    print "            if IyiHeap.read8(byte) != word"
+    print "              __iyi_write(2, \"freed: a chunk the last mark kept was freed while the sweep looked at it\\n\".to_unsafe.as(Void*), 73_u64)"
+    print "              __iyi_exit(1)"
+    print "            end"
+    print "          end"
+    found = 1; next }
+  { print } END { if (!found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's two reads this step widens are not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-widened > build-widened.log 2>&1; then
+  cat build-widened.log; exit 1
+fi
+for run in 1 2 3 4 5 6 7 8 9 10; do
+  timeout -k 5 120 ./freed-widened > widened.txt 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -qx "lost 0" widened.txt; then
+    echo "  run $run of 10 beside the widened sweep lost a chunk or saw a free land (exit $code):"; tail -3 widened.txt; exit 1
+  fi
+done
+echo "  ten runs, no free inside the sweep's look at a kept chunk, every chunk intact"
+
+step "failure proof: a chunk the sweep has not reached, freed with no lock, is freed inside the sweep's look"
+mkdir -p unlocked/iyi
+cp "$REPO"/src/iyi/*.iyi unlocked/iyi/
+awk '{ if (sub(/^            free_unswept\(arena, head, slot, table, index\)$/, "            list_freed(arena, head, slot, table, index)")) found = 1; print } END { if (!found) exit 3 }' \
+  widened/iyi/prelude.iyi > unlocked/iyi/prelude.iyi || { echo "the free this proof puts back is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-unlocked > build-unlocked.log 2>&1; then
+  cat build-unlocked.log; exit 1
+fi
+caught=""
+for try in 1 2 3 4 5 6 7 8 9 10; do
+  timeout -k 5 120 ./freed-unlocked > unlocked.txt 2>&1
+  code=$?
+  if [ "$code" -eq 1 ] && grep -q "^freed: a chunk the last mark kept was freed while the sweep looked at it$" unlocked.txt; then
+    caught="$try"; break
+  fi
+done
+[ -n "$caught" ] || { echo "ten runs of the free with no lock saw no free inside the sweep's look:"; tail -3 unlocked.txt; exit 1; }
+printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 '^freed: a chunk the last mark kept' unlocked.txt)"
 fi
 
 step "failure proof: a barrier that shades nothing loses the moved payload"
@@ -454,7 +566,7 @@ step "failure proof: a free outside the allocator's bracket puts a dropped list 
 mkdir -p unbracketed/iyi
 cp "$REPO"/src/iyi/*.iyi unbracketed/iyi/
 awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered = 1; next }
-  prev ~ /^          table\[index\] = head$/ && /^          leave\(table\)$/ { left = 1; prev = $0; next }
+  prev ~ /^          end$/ && /^          leave\(table\)$/ { left = 1; prev = $0; next }
   { prev = $0; print } END { if (!entered || !left) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > unbracketed/iyi/prelude.iyi || { echo "the bracket this proof removes from free is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/unbracketed${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-unbracketed > build-unbracketed.log 2>&1; then

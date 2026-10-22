@@ -753,6 +753,118 @@ for where in main fiber thread; do
 $out"
   done
 done
+# A frame larger than the guard page, on a fiber's stack, with writable
+# memory under the guard: the overrun is the same sentence, never a quiet
+# write into whatever lies below (issue #130). A frame is carved with one
+# `sub`, and this one is written first at its low end, 64 KiB below the
+# frame above it - over a 4 KiB guard page in one step. Without stack
+# probes on Linux it landed in the memory under the stack, and the
+# program finished as if nothing had happened: this check printed "the
+# dive came back" there. The compiler now has every frame touch its pages
+# top down (`iyi_probe_stack`), and Windows' `__chkstk` always did, so
+# the guard is the first page past the end anything touches.
+#
+# The writable memory comes from no free address space under a stack:
+# a floor mapped by address under the runtime's own stack was refused in
+# ten runs of ten on the Windows and darwin runners, where something else
+# is always mapped there. On Linux and darwin the program makes the stack
+# itself - one mapping of 128 KiB of floor, the guard page and 256 KiB of
+# stack, the guard `mprotect`ed as `IyiFiber#map_stack` does (16 KiB of
+# it on darwin arm64, whose pages are that size) - and hands it to the
+# scheduler's pool, so the task it spawns next runs on it; the task
+# checks that it did. On Windows a fiber stack carries its own writable
+# memory under the guard: the 16 KB of committed slack at
+# the bottom of the reservation, the fault handler's room
+# (`IyiFiber#map_stack`), which the kernel's growth never reaches. So
+# there the task walks down in frames under a page, which grow the stack
+# through the guard page as any thread's grows, until one 64 KiB frame
+# from where it stands would end in the middle of that room, and then
+# takes that frame. `__chkstk` probes it from StackLimit down, the guard
+# page is the first page touched past the committed stack, and the
+# kernel answers STATUS_STACK_OVERFLOW; a frame that skipped the probes
+# would have written only committed memory and come back.
+cat > "$work/overrun.iyi" <<'EOF'
+module overrun
+
+# 64 KiB of frame, written first at its lowest byte, the one farthest
+# from the frame above.
+def plunge(n : Int32) : Int32
+  room = uninitialized StaticArray(UInt8, 65536)
+  low = pointerof(room).as(Pointer(UInt8))
+  low.value = 1_u8
+  return 1 if n == 0
+  plunge(n - 1) + low.value.to_i32
+end
+
+{% if flag?(:win32) %}
+  # Down in frames under a page, each touched, until a 64 KiB frame from
+  # here would end at *target*; then that frame.
+  def descend(target : UInt64) : Int32
+    pad = uninitialized StaticArray(UInt8, 512)
+    here = pointerof(pad).as(Pointer(UInt8))
+    here.value = 1_u8
+    return plunge(0) if here.address - 65536_u64 <= target
+    descend(target) + here.value.to_i32
+  end
+{% else %}
+  # A fiber stack of the runtime's shape with 128 KiB of writable floor
+  # under its guard page, all one mapping: its base, as the pool holds it.
+  def floored_stack : UInt64
+    floor = 131072_u64
+    size = floor + IyiFiber::STACK_BYTES
+    base = 0_u64
+    {% if flag?(:darwin) %}
+      region = LibC.mmap(Pointer(Void).new(0_u64), size, 3, 4098, -1, 0_i64).address
+      raise "the floored stack's mmap failed" if region &+ 1_u64 == 0_u64
+      base = region + floor
+      raise "the floored stack's guard failed" if LibC.mprotect(Pointer(Void).new(base), IyiFiber::PAGE, 0) != 0
+    {% else %}
+      mapped = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, size.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+      raise "the floored stack's mmap failed" if mapped < 0 && mapped >= -4095
+      base = mapped.to_u64 + floor
+      raise "the floored stack's guard failed" if __iyi_conc_syscall3(IYI_SYS_MPROTECT, base.to_i64, IyiFiber::PAGE.to_i64, 0_i64) != 0
+    {% end %}
+    base
+  end
+{% end %}
+
+{% if flag?(:win32) %}
+  group do |g|
+    g.spawn do
+      base = IyiScheduler.current_stack_top - IyiFiber::STACK_BYTES
+      # The middle of the committed room: the uncommitted wall page is at
+      # `base`, and the room is GUARD_SLACK and a page above it.
+      room = base + IyiFiber::PAGE + (IyiFiber::GUARD_SLACK + IyiFiber::PAGE) // 2_u64
+      puts "the dive came back: #{descend(room)}"
+    end
+  end
+{% else %}
+  base = floored_stack
+  IyiScheduler.give_stack(base)
+  group do |g|
+    g.spawn do
+      if IyiScheduler.current_stack_top != base + IyiFiber::STACK_BYTES
+        puts "the task ran on a stack other than the floored one"
+      else
+        # Five such frames are about 64 KiB past a 256 KiB stack: inside
+        # the floor.
+        puts "the dive came back: #{plunge(4)}"
+      end
+    end
+  end
+{% end %}
+EOF
+"$IYI" build -o "$work/overrun_bin" "$work/overrun.iyi" > "$work/overrun.log" 2>&1 ||
+  fail "the overrun program did not build: $(cat "$work/overrun.log")"
+set +e
+out=$("$work/overrun_bin" 2>&1)
+code=$?
+set -e
+[ "$code" = 1 ] || fail "a frame larger than the guard page exited $code, wanted 1: $out"
+[ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
+  fail "a frame larger than the guard page said:
+$out"
+step "a frame larger than the guard page is a stack overflow, not a write under the stack"
 # The repeats catch a thread's missing guarantee only now and then: the
 # room it leaves was enough on this machine's CPUs and not always on the
 # runners'. What the guarantee is can be asked, though - a call with 0

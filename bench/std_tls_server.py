@@ -101,7 +101,12 @@ SCENARIOS = {
     "slow-echo": "the echo a second and a half late",
     "client-rekey": "the client's records read across its KeyUpdates, counted",
     "certreq-context": "a CertificateRequest with a request context, in the handshake",
-    "cert-entry-ext": "a certificate entry with a status_request extension nobody asked for",
+    "cert-entry-ext": "a certificate entry with a signed_certificate_timestamp extension nobody asked for",
+    "staple-garbage": "a stapled OCSP response that is DER and no OCSPResponse",
+    "staple-type": "a CertificateStatus of status_type 2, where ocsp (1) was asked for",
+    "staple-empty": "a CertificateStatus whose OCSPResponse is empty",
+    "staple-twice": "the leaf's entry with status_request twice",
+    "staple-other-cert": "a staple the issuer signed, for another certificate of its own",
     "sni-ack-data": "a server_name acknowledgement that is not empty",
     "user-canceled": "a user_canceled warning before the echo",
     "padded-max": "the echo padded to 2^14 + 1 bytes of inner plaintext, the most section 5.4 allows",
@@ -197,6 +202,15 @@ class Pki:
         # A leaf whose keyUsage is keyEncipherment alone: it may not sign.
         no_sign = x509.KeyUsage(False, False, True, False, False, False, False, False, False)
         self.no_sign = issue("leaf", self.keys["p256"], self.inter.subject, self.inter_key, False, ["*.tls.test"], extra=[(no_sign, True)])
+
+    def staple_for(self, cert):
+        """A good OCSP response for *cert*, signed by the intermediate that
+        issued it: valid in every way, and for *cert* alone."""
+        from cryptography.x509 import ocsp
+        b = (ocsp.OCSPResponseBuilder().add_response(cert=cert, issuer=self.inter, algorithm=hashes.SHA1(),
+             cert_status=ocsp.OCSPCertStatus.GOOD, this_update=NOW - DAY, next_update=NOW + DAY,
+             revocation_time=None, revocation_reason=None).responder_id(ocsp.OCSPResponderEncoding.NAME, self.inter))
+        return b.sign(self.inter_key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
 
 
 def der(cert):
@@ -591,8 +605,20 @@ class Conn:
         leaf = {"wrong-host": self.pki.wrong_host, "expired": self.pki.expired, "untrusted": self.pki.untrusted,
                 "ku-no-sign": self.pki.no_sign}.get(s, self.pki.leaves[kind])
         sent = (leaf, self.pki.inter) * (6 if s == "cert-many" else 1)
-        entry_ext = b"\x00\x04" + ext(5, b"") if s == "cert-entry-ext" else b"\x00\x00"
-        entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + entry_ext for c in sent)
+        # Extensions on the leaf's entry (on every entry for cert-entry-ext):
+        # signed_certificate_timestamp, which nobody asked for, and the
+        # status_request staples the client did ask for, broken one way each.
+        leaf_ext = {"cert-entry-ext": ext(18, b""),
+                    "staple-garbage": ext(5, b"\x01" + (5).to_bytes(3, "big") + b"\x30\x03\x02\x01\x00"),
+                    "staple-type": ext(5, b"\x02" + (3).to_bytes(3, "big") + b"abc"),
+                    "staple-empty": ext(5, b"\x01\x00\x00\x00"),
+                    "staple-twice": ext(5, b"\x01\x00\x00\x01\x00") * 2}.get(s, b"")
+        if s == "staple-other-cert":
+            staple = self.pki.staple_for(self.pki.wrong_host)
+            leaf_ext = ext(5, b"\x01" + len(staple).to_bytes(3, "big") + staple)
+        entry_ext = [leaf_ext if i == 0 or s == "cert-entry-ext" else b"" for i in range(len(sent))]
+        entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + len(e).to_bytes(2, "big") + e
+                                                         for c, e in zip(sent, entry_ext))
         messages.append(message(11, b"\x00" + len(entries).to_bytes(3, "big") + entries))
         if s == "cert-empty":
             messages.append(message(15, b"\x04\x03\x00\x00"))
@@ -646,7 +672,8 @@ class Conn:
             self.sock.sendall(writer.seal(22, flight, corrupt=(s == "bad-record-mac")))
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
                  "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign",
-                 "certreq-context", "cert-entry-ext", "sni-ack-data") or (psk is not None and s in ("resume-cert", "early-unoffered")):
+                 "certreq-context", "cert-entry-ext", "sni-ack-data", "staple-garbage", "staple-type", "staple-empty",
+                 "staple-twice", "staple-other-cert") or (psk is not None and s in ("resume-cert", "early-unoffered")):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
@@ -909,6 +936,42 @@ def main():
         threading.Thread(target=serve_one, args=(sock, pki), daemon=True).start()
 
 
+# The close. What the client still sends once a scenario is done is read
+# and dropped first, until the client closes, for at most LINGER_BYTES and
+# LINGER_SECONDS in all, as std/tls's own server lingers after an alert:
+# the second write of early-refused and early-small, whose echo is of the
+# first alone, and the alert a client answers a refusal with. A close with
+# it unread is a reset, which can take from the client what it has not
+# yet read: when the second write landed after the read that took the
+# first, early-small read "echo:hello" and then "the connection was reset
+# by the peer" where the close_notify belonged (Windows, CI job
+# 118946639209). This side's half ends first, a FIN after the
+# close_notify, so the client reads the end of the stream while the rest
+# is drained. shutdown(SHUT_RDWR) ended the reading half too, which on
+# Windows alone resets a connection with data waiting or still to come.
+LINGER_BYTES = 65536
+LINGER_SECONDS = 1.0
+
+
+def close_gracefully(sock):
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + LINGER_SECONDS
+        left = LINGER_BYTES
+        while left > 0:
+            wait = deadline - time.monotonic()
+            if wait <= 0:
+                break
+            sock.settimeout(wait)
+            got = sock.recv(min(left, 16384))
+            if not got:
+                break
+            left -= len(got)
+    except OSError:
+        pass
+    sock.close()
+
+
 def serve_one(sock, pki):
     sock.settimeout(10)
     try:
@@ -916,11 +979,7 @@ def serve_one(sock, pki):
     except Exception as e:
         print(f"server: {type(e).__name__}: {e}", file=sys.stderr)
     finally:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        sock.close()
+        close_gracefully(sock)
 
 
 if __name__ == "__main__":

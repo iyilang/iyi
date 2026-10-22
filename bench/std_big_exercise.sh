@@ -7,7 +7,8 @@
 # section to report, checks the arithmetic the program printed against
 # python3 (`decimal` for BigDecimal, `fractions.Fraction` for BigRational,
 # `int(digits, base)` for every base 2..36, `pow(b, e, m)` for 3000 modular
-# exponentiations), sets the release build's 2048-, 3072- and 4096-bit
+# exponentiations, `pow(x, -1, m)` for a thousand inverses), sets the
+# release build's 2048-, 3072- and 4096-bit
 # `pow_mod` times beside python's and the square-and-multiply it replaced,
 # proves that what the module refuses is refused with the prelude's sentence
 # (`division by zero`, `modulo by zero`, `not a decimal: "12x"`), reads the
@@ -21,9 +22,11 @@
 # division rounding, exact-division detection, zero printing, rational
 # reduction, the unbalanced Karatsuba split, the split that prints and
 # parses long values and the recursive division a long print splits by,
-# Montgomery's n', its final subtraction, both window tables, the even
-# modulus' exponent bits and the correction of a one-limb quotient, and
-# requires each break to be caught at a named check.
+# Montgomery's n', its final subtraction, a column's third word, the
+# square's last-added reduction term, both window tables, the even
+# modulus' exponent bits, the binary GCD inverse's rounds, negations,
+# Montgomery step, range and GCD check, and the correction of a one-limb
+# quotient, and requires each break to be caught at a named check.
 #
 # Exits non-zero if any check fails.
 
@@ -97,13 +100,13 @@ fi
 
 echo
 echo "== every big number section reported"
-for phrase in "construction and conversions:" "predicates and comparisons:" "basic arithmetic:" "division corner cases:" "bitwise operations:" "known large values:" "round trips:" "modular exponentiation:" "algebraic identities:" "karatsuba:" "hashing:" "decimal arithmetic:" "rational arithmetic:" "base round trips:" "long print:" "binary floats:"; do
+for phrase in "construction and conversions:" "predicates and comparisons:" "basic arithmetic:" "division corner cases:" "bitwise operations:" "known large values:" "round trips:" "modular exponentiation:" "modular inverses:" "algebraic identities:" "karatsuba:" "hashing:" "decimal arithmetic:" "rational arithmetic:" "base round trips:" "long print:" "binary floats:"; do
   if ! grep -q "$phrase" "$WORK/big-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  construction, predicates, arithmetic, division, bitwise, known values, roundtrips, pow_mod, identities, karatsuba, hashing, decimals, rationals, bases and long prints all reported"
+[ "$status" -eq 0 ] && echo "  construction, predicates, arithmetic, division, bitwise, known values, roundtrips, pow_mod, inverses, identities, karatsuba, hashing, decimals, rationals, bases and long prints all reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -112,7 +115,7 @@ if ! grep -q "all std/big checks passed" "$WORK/big-release.out" 2>/dev/null; th
   echo "release: missing pass sentinel"
   status=1
 fi
-if ! diff <(grep '^oracle \|^powmod: ' "$WORK/big-plain.out") <(grep '^oracle \|^powmod: ' "$WORK/big-release.out") >/dev/null 2>&1; then
+if ! diff <(grep '^oracle \|^powmod: \|^inverse: ' "$WORK/big-plain.out") <(grep '^oracle \|^powmod: \|^inverse: ' "$WORK/big-release.out") >/dev/null 2>&1; then
   echo "  release build printed different oracle lines than the plain build"
   status=1
 fi
@@ -387,12 +390,13 @@ PY
 fi
 
 echo
-echo "== modular exponentiation against python's pow"
-# Every `powmod: b e m = r` line (hex) recomputed with pow(b, e, m), with a
-# floor on how many of each kind of case there were; then the release
-# build's `powtime: bits b e m = r pow_mod pow_mod_secret before` lines
-# (microseconds) checked the same way and timed against python's own pow
-# on the same operands, best of three.
+echo "== modular exponentiation and inverses against python's pow"
+# Every `powmod: b e m = r` line (hex) recomputed with pow(b, e, m), and
+# every `inverse: x m = r` line with pow(x, -1, m) ("none" where python
+# raises, x and m sharing a factor), with a floor on how many of each kind
+# of case there were; then the release build's `powtime: bits b e m = r
+# pow_mod pow_mod_secret before` lines (microseconds) checked the same way
+# and timed against python's own pow on the same operands, best of three.
 cat > "$WORK/pow.py" << 'EOF'
 import sys, time
 if hasattr(sys, "set_int_max_str_digits"):
@@ -401,13 +405,29 @@ bad = 0
 seen = {"cases": 0, "odd moduli": 0, "even moduli": 0, "over 2048 bits": 0, "exponent 0": 0,
         "exponent 1": 0, "exponents over 2048 bits": 0, "base 0": 0, "base past the modulus": 0,
         "negative base": 0, "modulus 1": 0}
+inverses = {"inverses": 0, "with none": 0, "moduli over 2048 bits": 0, "negative x": 0, "x past the modulus": 0}
 timed = []
 for line in open(sys.argv[1]):
     kind, _, rest = line.rstrip("\n").partition(": ")
-    if kind not in ("powmod", "powtime"):
+    if kind not in ("powmod", "powtime", "inverse"):
         continue
     lhs, got = rest.split(" = ")
     words = lhs.split(" ")
+    if kind == "inverse":
+        x, m = (int(w, 16) for w in words)
+        try:
+            want = format(pow(x, -1, m), "x")
+        except ValueError:
+            want = "none"
+        if got != want:
+            bad += 1
+            print(f"  python disagrees: pow({lhs[:60]}..., -1) is {want[:40]}, std/big said {got[:40]}")
+        inverses["inverses"] += 1
+        inverses["with none"] += want == "none"
+        inverses["moduli over 2048 bits"] += m.bit_length() > 2048
+        inverses["negative x"] += x < 0
+        inverses["x past the modulus"] += x >= m
+        continue
     if kind == "powtime":
         bits, words = int(words[0]), words[1:]
         got, *micros = got.split(" ")
@@ -437,11 +457,14 @@ for line in open(sys.argv[1]):
 floor = {"cases": 3000, "odd moduli": 2000, "even moduli": 600, "over 2048 bits": 60, "exponent 0": 40,
          "exponent 1": 40, "exponents over 2048 bits": 60, "base 0": 50, "base past the modulus": 50,
          "negative base": 200, "modulus 1": 1}
+inverse_floor = {"inverses": 1000, "with none": 100, "moduli over 2048 bits": 40, "negative x": 60, "x past the modulus": 20}
 print("  " + ", ".join(f"{v} {k}" for k, v in seen.items()))
-for k, need in floor.items():
-    if seen[k] < need:
-        bad += 1
-        print(f"  too few cases of {k}: {seen[k]} < {need}")
+print("  " + ", ".join(f"{v} {k}" for k, v in inverses.items()))
+for counts, floors in ((seen, floor), (inverses, inverse_floor)):
+    for k, need in floors.items():
+        if counts[k] < need:
+            bad += 1
+            print(f"  too few cases of {k}: {counts[k]} < {need}")
 for bits, (fast, secret, before), python in timed:
     print(f"  {bits} bits: pow_mod {fast / 1000:.1f} ms, pow_mod_secret {secret / 1000:.1f} ms,"
           f" square-and-multiply {before / 1000:.1f} ms, python's pow {python / 1000:.1f} ms")
@@ -477,6 +500,17 @@ else
     status=1
   else
     echo "  the pow oracle rejects one result off by a digit"
+  fi
+  # And on an inverse: the first "none" answered as 1.
+  awk '!done && /^inverse: .* = none/ { sub(/ = none/, " = 1"); done = 1 } { print }' "$WORK/big-plain.out" >"$WORK/inverse-broken.out"
+  if cmp -s "$WORK/big-plain.out" "$WORK/inverse-broken.out"; then
+    echo "  no inverse answered none, so the inverse oracle's own check proves nothing"
+    status=1
+  elif "$PY" "$WORK/pow.py" "$WORK/inverse-broken.out" >"$WORK/inverse-broken.verdict" 2>&1; then
+    echo "  the inverse oracle accepted a wrong answer, so it checks nothing"
+    status=1
+  else
+    echo "  the inverse oracle rejects a value answered for one that has no inverse"
   fi
 fi
 
@@ -533,6 +567,7 @@ big_panics_with "pow_mod modulo a negative" pow_neg_mod "modulus must be positiv
 big_panics_with "pow_mod with a negative exponent" pow_neg_exp "negative exponent in pow_mod: -1" '3.to_big.pow_mod(-(1.to_big), 7.to_big)'
 big_panics_with "pow_mod_secret modulo an even number" pow_secret_even "pow_mod_secret needs an odd modulus, not 10" '3.to_big.pow_mod_secret(5.to_big, 10.to_big)'
 big_panics_with "pow_mod_secret with a negative exponent" pow_secret_neg "negative exponent in pow_mod_secret: -2" '3.to_big.pow_mod_secret(-(2.to_big), 7.to_big)'
+big_panics_with "inverse_mod_secret modulo an even number" inverse_secret_even "inverse_mod_secret needs an odd modulus, not 10" '3.to_big.inverse_mod_secret(10.to_big).to_s'
 
 # ---------------------------------------------------------------------------
 # Negative proofs: each check is proven to fail when its mechanism is broken
@@ -569,8 +604,10 @@ prove_fails() {
     return
   fi
   if ! grep -q "$phrase" "$WORK/$dir/out"; then
-    echo "  $label: failed, but not at expected check (expected '$phrase')"
-    sed -n '$p' "$WORK/$dir/out"
+    # Fifteen lines, not one: a panic's backtrace on darwin ends at dyld's
+    # `start`, and that last line alone said nothing of what had failed.
+    echo "  $label: failed, but not at expected check (expected '$phrase', exit $exit_code); its last 15 lines:"
+    tail -n 15 "$WORK/$dir/out" | sed 's/^/    /'
     status=1
     return
   fi
@@ -740,19 +777,46 @@ prove_fails "a decimal longer than it needs" no_flt_shortest "flt: the square ro
 
 # Montgomery: n' right to 48 bits of 64 (four Newton steps, not five);
 # a product's final subtraction dropped, its t copied out whatever it is;
-# the sliding window's table one power of g apart where it should be two
+# a column's carries out of its two low words dropped; the square's
+# reduction without the q_(k-1) m_1 it adds last in each column; the
+# sliding window's table one power of g apart where it should be two
 # (g^(i+1) where g^(2i+1) belongs); the fixed window's lookup one entry
 # low; and an even modulus reading its exponent's bits sixteen to a limb.
 prove_fails "montgomery n' right to 48 bits" no_mont_inverse "pow_mod: short exponents modulo a modulus with room in its top word" \
   's/^    5.times { x = x \&\* (2_u64 \&- m0 \&\* x) }$/    4.times { x = x \&* (2_u64 \&- m0 \&* x) }/'
 prove_fails "a product's final subtraction dropped" no_mont_subtract "pow_mod: short exponents modulo a modulus that fills its top word" \
   's/^    reduce(t, t\[n\], r)$/    n.times { |j| r[j] = t[j] }/'
+prove_fails "a column's third word never carried into" no_mont_column_carry "pow_mod: short exponents modulo a modulus with room in its top word" \
+  's/top = top \&+ (acc < w ? 1_u64 : 0_u64)/top = top \&+ 0_u64/'
+prove_fails "a square's reduction without q_(k-1) m_1" no_mont_late_term "pow_mod: short exponents modulo a modulus with room in its top word" \
+  's/^        w = q\[k \&- 1\].to_u128 \&\* m\[1\].to_u128$/        w = 0_u128/'
 prove_fails "the sliding window's table one power apart" no_mont_table "exponent through the window table" \
   's/mul(tp + ((i - 1) \* n).to_i64, g2.to_unsafe, tp + (i \* n).to_i64)/mul(tp + ((i - 1) * n).to_i64, tp, tp + (i * n).to_i64)/'
 prove_fails "the fixed window's lookup one entry low" no_fixed_lookup "pow_mod_secret: agrees with pow_mod" \
   's/^        d = e.to_u64 ^ value$/        d = (e + 1).to_u64 ^ value/'
 prove_fails "an even modulus' exponent read sixteen bits a limb" no_even_bits "pow_mod: an even modulus" \
   's/exp.limbs\[i >> 5\].unsafe_shr((i \& 31).to_u64)/exp.limbs[i >> 5].unsafe_shr((i \& 15).to_u64)/'
+# The binary GCD inverse: a round fewer than (2 len - 1) / 31 rounded up;
+# a negative a or b left negative, or a's factors left unnegated; u's
+# Montgomery step without its q m; a value at m or more never taken down;
+# the stand-ins' low bits 30 where they are 31; and the GCD unchecked, so
+# a value sharing a factor answers one.
+prove_fails "the binary GCD a round short" no_inverse_rounds "inverse_mod_secret: 2^(len - 1), which takes every step" \
+  's/^    rounds = (2 \* Montgomery.bit_length(@mod.limbs) - 1 + 30) \/\/ 31$/    rounds = (2 * Montgomery.bit_length(@mod.limbs) - 1) \/\/ 31/'
+prove_fails "a negative a left negative" no_inverse_negate_a "inverse_mod_secret: a round that leaves a negative" \
+  's/^      Montgomery.negate(ap, n, negative_a)$//'
+prove_fails "a negative b left negative" no_inverse_negate_b "inverse_mod_secret: a round that leaves a negative" \
+  's/^      Montgomery.negate(bp, n, negative_b)$//'
+prove_fails "a negated a's factor left as it was" no_inverse_factor "inverse_mod_secret: a round that leaves a negative" \
+  's/^      f0 = (f0 ^ negative_a) \&- negative_a$//'
+prove_fails "u divided by 2^31 without its q m" no_inverse_q "inverse_mod_secret: 2^(len - 1), which takes every step" \
+  's/^      qu = .*$/      qu = 0_i128/'
+prove_fails "a u or v of m or more kept" no_inverse_range "inverse_mod_secret: x times its inverse is 1" \
+  's/^      keep = top_less.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero$/      keep = ~zero/'
+prove_fails "the stand-ins' low bits one short" no_inverse_low "inverse_mod_secret: 2^(len - 1), which takes every step" \
+  's/(ap\[0\] \& 0x7FFFFFFF_u64)/(ap[0] \& 0x3FFFFFFF_u64)/; s/(bp\[0\] \& 0x7FFFFFFF_u64)/(bp[0] \& 0x3FFFFFFF_u64)/'
+prove_fails "the GCD left unchecked" no_inverse_gcd "inverse_mod_secret: nil exactly when x shares a factor with the modulus" \
+  's/^    return nil unless rest == 0_u64$//'
 
 # A one-limb quotient left at its estimate, which can be up to three
 # short: the divisor no longer taken off what is left.

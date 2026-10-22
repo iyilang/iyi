@@ -19,16 +19,18 @@
 #     2822, RFC 3339, ISO 8601), RFC 9110's three HTTP date forms, bad text
 #     refused as a `TimeParseError` rather than a panic, ISO weeks and
 #     `shift(months:)`; the same program optimised (`--release`).
-#   * `Time::Location`: the exercise's own TZif files; then the machine's
+#   * `Time::Location`: the exercise's own TZif files; Windows
+#     TIME_ZONE_INFORMATION bytes made by hand for six zones, checked against
+#     Python's zoneinfo, and the machine's own zone; then the machine's
 #     zone database read for fifteen zones and checked against Python's
 #     zoneinfo, and twelve `TZ` settings against glibc's `localtime`.
 #   * Negative proofs: the exercise script breaks the leap-year rule, roundtrip
 #     arithmetic, RFC 3339 offset handling, eight parts of `Time::Format`
 #     (month names, both offset directions, trailing text, RFC 9110's year
-#     rule, the month's last day, ISO weeks, the 12-hour clock) and seven of
+#     rule, the month's last day, ISO weeks, the 12-hour clock) and eight of
 #     `Time::Location` (a rule's weekday, the footer, the version 2 block,
-#     signed words, header counts, a repeated wall time, a shifted day),
-#     asserting each is caught.
+#     signed words, header counts, a repeated wall time, a shifted day, a
+#     Windows bias read unsigned), asserting each is caught.
 #   * Dependency floor: audits symbols and libraries to prove zero new dependencies.
 #
 # Needs `make` for bin/iyi, plus `nm`, and `otool` on Darwin or `readelf` on Linux.
@@ -149,13 +151,13 @@ fi
 
 echo
 echo "== every time check reported"
-for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "hash keys" "strftime directives" "format round-trips" "RFC 9110 date forms" "parse refusals" "ISO weeks and month arithmetic" "== locations" "times in a location" "wall clocks in a location" "ALL CHECKS PASSED"; do
+for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "hash keys" "strftime directives" "format round-trips" "RFC 9110 date forms" "parse refusals" "ISO weeks and month arithmetic" "== locations" "times in a location" "wall clocks in a location" "Windows zone information" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-time.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339, Comparable, hash keys, directives, round trips, HTTP dates, refusals, ISO weeks, month arithmetic and locations all reported"
+[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339, Comparable, hash keys, directives, round trips, HTTP dates, refusals, ISO weeks, month arithmetic, locations and Windows zones all reported"
 
 # ---------------------------------------------------------------------------
 # Negative failure proofs
@@ -293,13 +295,21 @@ format_break_caught "the version 2 block read where version 1's is" version_two 
 ' '      at = 0
 '
 format_break_caught "a 32-bit word read unsigned" signed_word \
-  'value >= 2147483648_i64 ? value - 4294967296_i64 : value' 'value'
+  'value = u32(p, at)
+    value >= 2147483648_i64 ? value - 4294967296_i64 : value' 'value = u32(p, at)
+    value'
 format_break_caught "a header's counts trusted" header_counts \
   'return nil if count > 1000000_i64 ||' 'return nil if false ||'
 format_break_caught "a repeated wall time read as the later instant" resolve_earlier \
   'best = candidate if lookup_range(candidate)[0].offset == offset && candidate < best' 'best = candidate if lookup_range(candidate)[0].offset == offset && candidate > best'
 format_break_caught "a day shifted by 24 hours rather than on the wall clock" shift_wall \
   'moved = Time.new(@location.resolve(date), @nanoseconds, @location)' 'moved = Time.new(date - @offset.to_i64, @nanoseconds, @location)'
+# Issue #133: Windows' Bias is a signed LONG, and Turkey's -180 read
+# unsigned is 4294967116, which `Location.local` panicked on.
+format_break_caught "a Windows bias read unsigned" windows_bias \
+  '(p[at + 3].to_i64 << 24)
+    value >= 2147483648_i64 ? value - 4294967296_i64 : value' '(p[at + 3].to_i64 << 24)
+    value'
 
 echo
 echo "== locations against the machine's own zone database"

@@ -26,7 +26,11 @@
 # the Date and the Message-ID from the caller - `Mail.date` writes a Date
 # from Unix seconds and an offset, and no identifier is made up here, since
 # both would need the clock or a source of randomness - and a text body, an
-# HTML body, and attachments. Text alone is one `text/plain` part; text
+# HTML body, and attachments. A From and a Date are required, as RFC 5322
+# section 3.6 requires them: set the Date with `msg.date = Mail.date(...)`,
+# as the example does, since a message without one panics when it is
+# written (`mail: a message has no Date`), and so does `SmtpClient#send`,
+# which writes it. The Message-ID is optional and is left out when unset. Text alone is one `text/plain` part; text
 # and HTML are `multipart/alternative`, plain first as RFC 2046 section
 # 5.1.4 orders them; attachments put that body and themselves in a
 # `multipart/mixed`. A text part's line breaks are written as CRLF, the
@@ -1874,7 +1878,17 @@ pub struct Mail
       (@to + @cc + @bcc + @reply_to).any? { |a| a.utf8? }
     end
 
-    # The message, CRLF line breaks and all.
+    # The message, CRLF line breaks and all. A From and a Date are
+    # required - set the Date with `msg.date = Mail.date(...)` - and the
+    # Message-ID is optional. Writing a message the caller left incomplete
+    # is a mistake, so it panics, with one of:
+    #
+    # - `mail: a message has no From` when no From was set;
+    # - `mail: a message has no Date` when no Date was set.
+    #
+    # Those are the only panics here: every other value - a header, an
+    # address, a Date, a Message-ID, a body, an attachment - is checked,
+    # and refused with a panic, by the setter or method that takes it.
     def to_s : String
       sender = @from
       raise "mail: a message has no From" unless sender

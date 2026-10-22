@@ -71,6 +71,12 @@
 # a key out of memory - keys, round keys and key streams live in the
 # collected heap and on the stack, and nothing wipes them.
 
+# bench/ct_timing.sh, `open` of a tag wrong in its first byte against one
+# wrong in its last (an early-exit compare would tell them apart): AES-GCM
+# |t| = 2.0 to 4.4, ChaCha20-Poly1305 4.2 to 4.9, over 50,000 to 100,000.
+# In the --release assembly both `open`s compare the 16 tag bytes as one
+# vector (`pcmpeqb`) and branch once, on the verdict.
+
 module std/aead
 
 import std/int

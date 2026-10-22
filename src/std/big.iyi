@@ -25,6 +25,27 @@
 # Int32 rule. `hash` mixes every limb with wrapping arithmetic, so any size
 # hashes.
 #
+# `inverse_mod_secret`'s constant time, read off the assembly of a
+# --release x86_64 build (the whole of `BigInt#inverse_mod_secret`, into
+# which `Montgomery#inverse`, `negate`, `borrow_of`, `equal_mask` and
+# `bits_of` are inlined, and `Montgomery#into_range`, which is not).
+# Before the rounds: the modulus' checks, `%`, `Montgomery.new` and
+# `Montgomery.words`, whose branches and loops follow the sizes of x and
+# m - x's length shows there, as with `pow_mod_secret`'s base. In the
+# rounds every conditional jump compares a counter (the round, j against
+# n, the 31 steps, the vector loops' trip counts against n, n against 0
+# and 2) or is an overflow check on one; every load and store indexes by
+# such a counter or by n - 1, the word at the longer length being taken
+# by a masked read of every word, not by an index; each choice is an and,
+# an or or an xor of a mask, no cmov. `into_range`'s 21 jumps compare its
+# counters and n alone. After the rounds: the test that b is 1 branches,
+# which is the answer's nil and public, and `BigInt.new` trims the
+# answer's leading zero limbs, which shows how many it has.
+# bench/ct_timing.sh, x = (m - 1) / 2 against random x modulo 2048 bits:
+# |t| = 2.4 to 3.4 over 50,000 to 100,000 inversions (under 10 is no
+# leak seen), where the extended Euclid's algorithm std/rsa had reached
+# |t| = 317 to 403 on 2,000 to 5,000.
+#
 # BigDecimal is `value * 10^-scale` with an exact BigInt value. `+ - *` are
 # exact. `/` is the one operation that can be inexact: `div(other, precision)`
 # answers the quotient rounded half away from zero to `precision` fractional
@@ -787,8 +808,8 @@ pub struct BigInt
     # D below copies both operands to normalise them and the remainder
     # twice more to give it back. A 2048-bit value over a 2046-bit one took
     # 0.60 us and takes 0.15 in a --release build, and the extended Euclid
-    # that inverts a 2048-bit RSA signature's blinding factor took 592 us
-    # and takes 281, where the two CRT halves of the signature take 620.
+    # that inverted a 2048-bit RSA signature's blinding factor went from
+    # 592 us to 281 with it (std/rsa now takes `inverse_mod_secret`).
     shift = BigInt.bit_length(other) - 32
     return divmod_one_limb(other, shift, q_sign, r_sign) if BigInt.bit_length(self) - shift <= 63
 
@@ -1192,6 +1213,24 @@ pub struct BigInt
     exp_bits = BigInt.bit_length(exp)
     mod_bits = BigInt.bit_length(mod)
     Montgomery.new(mod, true).pow_fixed(base, exp, exp_bits > mod_bits ? exp_bits : mod_bits)
+  end
+
+  # The inverse of self modulo an odd *mod*, in 0...mod, or nil when the
+  # two share a factor (Python's `pow(self, -1, mod)`, which raises
+  # there): for a value that is a secret, such as RSA's blinding factor.
+  # The steps taken, their branches and the words they read depend on the
+  # modulus' length alone (`Montgomery#inverse`); an even modulus is a
+  # misuse, refused. As with `pow_mod_secret`, self is reduced by `%`
+  # first, whose time depends on it: a caller hands in a value below the
+  # modulus.
+  def inverse_mod_secret(mod : BigInt) : BigInt?
+    raise "modulo by zero" if mod.zero?
+    raise "modulus must be positive" if mod.negative?
+    raise "inverse_mod_secret needs an odd modulus, not #{mod}" if mod.even?
+    return BigInt.zero if mod == 1_i64
+    x = self % mod
+    x = x + mod if x.negative?
+    Montgomery.new(mod, false).inverse(x)
   end
 
   def pow_mod(exp : Int64, mod : Int64) : BigInt
@@ -1829,9 +1868,10 @@ struct Montgomery
   @m : Array(UInt64)
   @n : Int32
   @inv : UInt64
-  # n + 2 words, the product while it is reduced
+  # n + 2 words: a product before its final subtraction, or a square's q
+  # words
   @t : Array(UInt64)
-  # 2n words, a square before it is reduced
+  # 2n words: a product's q words, or a square while it is reduced
   @p : Array(UInt64)
   # R mod m, which is 1 in Montgomery form, and R^2 mod m, which takes a
   # value into it (made only for a secret exponent)
@@ -1969,78 +2009,114 @@ struct Montgomery
     end
   end
 
-  # r = a b / R mod m by coarsely integrated operand scanning (CIOS): n
-  # rounds of a times one word of b and one word's reduction, the two in
-  # one pass over t (q comes from t's low word and a's first product, so
-  # it is known before the pass), where two passes read and wrote t twice.
-  # r may be a or b: it is written once both have been read.
+  # r = a b / R mod m by finely integrated product scanning (FIPS): the
+  # words of a b + q m are summed a column at a time, low column first,
+  # and column k's low word either fixes q_k, the multiple of m that
+  # clears it, or is word k - n of the result. Nothing is stored per
+  # product: a column's products go into three words held in registers,
+  # a `UInt128` and the carries out of it, which LLVM writes as one add
+  # and two adds with carry, no branch (the assembly of a --release build
+  # branches on counters alone). Word k - n of a and b is not read again
+  # once column k is reached, so r may be a or b. A 1024-bit product, the
+  # size of a 2048-bit RSA key's CRT halves, took 237 ns by operand
+  # scanning (CIOS), which loaded and stored a word of t for every
+  # product, and takes 220 (best of seven runs of 20,000, --release, a
+  # machine other jobs shared). That is 0.43 ns for each of its 512
+  # products, where a loop of nothing but one column's products ran at
+  # 0.36 to 0.47 ns a product here, so what is left to save is products.
+  # Tried and dropped: the column
+  # fully unrolled for 16 words by a macro, 622 ns (LLVM spilled and
+  # shuffled the products through vector registers); the sums split into
+  # one of low words and one of high, no faster.
   def mul(a : Pointer(UInt64), b : Pointer(UInt64), r : Pointer(UInt64)) : Nil
     n = @n
     m = @m.to_unsafe
     t = @t.to_unsafe
+    q = @p.to_unsafe
     inv = @inv
+    acc = 0_u128
+    top = 0_u64
     k = 0
-    while k < n + 1
-      t[k] = 0_u64
-      k = k + 1
-    end
-    i = 0
-    while i < n
-      bi = b[i].to_u128
-      w = a[0].to_u128 &* bi &+ t[0].to_u128
-      c = w.unsafe_shr(64)
-      low = w.unsafe_to_u64
-      q = (low &* inv).to_u128
-      d = (q &* m[0].to_u128 &+ low.to_u128).unsafe_shr(64)
-      j = 1
-      while j < n
-        w = a[j].to_u128 &* bi &+ t[j].to_u128 &+ c
-        c = w.unsafe_shr(64)
-        v = q &* m[j].to_u128 &+ w.unsafe_to_u64.to_u128 &+ d
-        d = v.unsafe_shr(64)
-        t[j - 1] = v.unsafe_to_u64
-        j = j + 1
+    while k < n
+      i = 0
+      while i < k
+        w = a[i].to_u128 &* b[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        w = q[i].to_u128 &* m[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        i = i &+ 1
       end
-      w = t[n].to_u128 &+ c &+ d
-      t[n - 1] = w.unsafe_to_u64
-      t[n] = w.unsafe_shr(64).unsafe_to_u64
-      i = i + 1
+      w = a[k].to_u128 &* b[0].to_u128
+      acc = acc &+ w
+      top = top &+ (acc < w ? 1_u64 : 0_u64)
+      qk = acc.unsafe_to_u64 &* inv
+      q[k] = qk
+      w = qk.to_u128 &* m[0].to_u128
+      acc = acc &+ w
+      top = top &+ (acc < w ? 1_u64 : 0_u64)
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
     end
+    while k < 2 * n - 1
+      i = k &- n &+ 1
+      while i < n
+        w = a[i].to_u128 &* b[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        w = q[i].to_u128 &* m[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        i = i &+ 1
+      end
+      t[k &- n] = acc.unsafe_to_u64
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
+    end
+    t[n - 1] = acc.unsafe_to_u64
+    t[n] = acc.unsafe_shr(64).unsafe_to_u64
     reduce(t, t[n], r)
   end
 
-  # r = a^2 / R mod m: the square first, each product off the diagonal
-  # taken once and doubled, then reduced a word at a time (separated
-  # operand scanning). A square is most of what an exponentiation does,
-  # and this one takes n(n - 1)/2 + n products where `mul` takes n^2,
-  # before the n^2 of its reduction. r may be a.
+  # r = a^2 / R mod m in three passes: the products off the diagonal by
+  # columns, each once, n(n - 1)/2 of them; that doubled with the
+  # squares on the diagonal added, n more; then the reduction by columns
+  # as `mul` takes it, n^2. Column k of the reduction's first half sums
+  # its products that do not need q_(k - 1) apart from the running total
+  # and adds q_(k - 1) m_1 last, so the next column's products are not
+  # held up behind the multiply that made q_(k - 1). r may be a. A
+  # 1024-bit square took 241 ns with the off-diagonal products in rows
+  # and the reduction in rows (separated operand scanning), and takes 222
+  # (measured as `mul` is); the products and the reduction interleaved in
+  # one set of columns took 235.
   def sqr(a : Pointer(UInt64), r : Pointer(UInt64)) : Nil
     n = @n
     m = @m.to_unsafe
+    q = @t.to_unsafe
     p = @p.to_unsafe
     inv = @inv
-    k = 0
-    while k < 2 * n
-      p[k] = 0_u64
-      k = k + 1
-    end
-    i = 0
-    while i < n - 1
-      ai = a[i].to_u128
-      row = p + i.to_i64
-      c = 0_u128
-      j = i + 1
-      while j < n
-        w = ai &* a[j].to_u128 &+ row[j].to_u128 &+ c
-        row[j] = w.unsafe_to_u64
-        c = w.unsafe_shr(64)
-        j = j + 1
+    acc = 0_u128
+    top = 0_u64
+    p[0] = 0_u64
+    k = 1
+    while k < 2 * n - 2
+      i = k < n ? 0 : k &- n &+ 1
+      while i < k &- i
+        w = a[i].to_u128 &* a[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        i = i &+ 1
       end
-      row[n] = c.unsafe_to_u64
-      i = i + 1
+      p[k] = acc.unsafe_to_u64
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
     end
-    # Doubled, and the diagonal added: a^2 < 2^(128 n), so nothing carries
-    # out of the top word.
+    p[2 * n - 2] = acc.unsafe_to_u64
+    p[2 * n - 1] = acc.unsafe_shr(64).unsafe_to_u64
     shifted = 0_u64
     c = 0_u128
     i = 0
@@ -2055,29 +2131,51 @@ struct Montgomery
       p[2 * i + 1] = w.unsafe_to_u64
       c = w.unsafe_shr(64)
       shifted = high.unsafe_shr(63_u64)
-      i = i + 1
+      i = i &+ 1
     end
-    # Word i cleared by q m 2^(64 i); what carries out past word i + n is
-    # held over and added where the next round's carry lands.
-    extra = 0_u64
-    i = 0
-    while i < n
-      row = p + i.to_i64
-      q = (row[0] &* inv).to_u128
-      c = 0_u128
-      j = 0
-      while j < n
-        w = q &* m[j].to_u128 &+ row[j].to_u128 &+ c
-        row[j] = w.unsafe_to_u64
-        c = w.unsafe_shr(64)
-        j = j + 1
+    acc = 0_u128
+    k = 0
+    while k < n
+      s = p[k].to_u128
+      s_top = 0_u64
+      i = 0
+      while i &+ 1 < k
+        w = q[i].to_u128 &* m[k &- i].to_u128
+        s = s &+ w
+        s_top = s_top &+ (s < w ? 1_u64 : 0_u64)
+        i = i &+ 1
       end
-      w = row[n].to_u128 &+ c &+ extra.to_u128
-      row[n] = w.unsafe_to_u64
-      extra = w.unsafe_shr(64).unsafe_to_u64
-      i = i + 1
+      acc = acc &+ s
+      top = s_top &+ (acc < s ? 1_u64 : 0_u64)
+      if k > 0
+        w = q[k &- 1].to_u128 &* m[1].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+      end
+      qk = acc.unsafe_to_u64 &* inv
+      q[k] = qk
+      w = qk.to_u128 &* m[0].to_u128
+      acc = acc &+ w
+      top = top &+ (acc < w ? 1_u64 : 0_u64)
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
     end
-    reduce(p + n.to_i64, extra, r)
+    while k < 2 * n
+      acc = acc &+ p[k].to_u128
+      i = k &- n &+ 1
+      while i < n
+        w = q[i].to_u128 &* m[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        i = i &+ 1
+      end
+      p[k &- n] = acc.unsafe_to_u64
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
+    end
+    reduce(p, acc.unsafe_to_u64, r)
   end
 
   # *base*, below m, into Montgomery form at *r*.
@@ -2243,6 +2341,274 @@ struct Montgomery
       w = w - 1
     end
     leave(ap)
+  end
+
+  # 1 / x mod m for x below m, or nil when they share a factor: Pornin's
+  # optimised binary GCD ("Optimized Binary GCD for Modular Inversion",
+  # IACR ePrint 2020/972, algorithm 2 with k = 32), which runs the same
+  # steps for every x. The classic extended binary GCD keeps a = u x and
+  # b = v x mod m from a = x, b = m, halves a while it is even and takes
+  # the smaller of two odd values from the larger, and is done in at most
+  # 2 len(m) - 1 steps, when a is 0 and b is the GCD. Here 31 steps at a
+  # time are taken on 64-bit stand-ins for a and b - their low 31 bits
+  # and their top 33 at the length of the longer - and what those steps
+  # did is kept as four factors, f0 g0 f1 g1, each under 2^31, which are
+  # then applied to a, b, u and v with one product a word. The paper
+  # proves that the 31 steps shrink len(a) + len(b) by at least 31 even
+  # when the stand-ins mislead them, so ceil((2 len(m) - 1) / 31) rounds
+  # are enough for every x; a value they leave negative is negated with
+  # its factors. The factors also stand for a division by 2^31, which u
+  # and v take as a Montgomery reduction (q m added to clear their low
+  # 31 bits), so no correction is left at the end. Every choice is a
+  # mask, and the word at the length of the longer is found by reading
+  # every word. std/rsa inverts its blinding factor with this, and
+  # std/ecdsa a signature's s: the extended Euclid's algorithm std/rsa had
+  # took 249 us for a 2048-bit modulus, its time following the factor's
+  # quotients, and this takes 64 in the same run (best of five runs of
+  # 100, --release, a machine other jobs shared); s mod P-256's n takes
+  # 2.5, where Fermat's x^(n - 2) on std/ecdsa's words took 10.
+  def inverse(x : BigInt) : BigInt?
+    n = @n
+    m = @m.to_unsafe
+    zero = @zero.get
+    a = Montgomery.words(x.limbs, n)
+    b = @m.dup
+    u = Array(UInt64).new(n, 0_u64)
+    u[0] = 1_u64
+    v = Array(UInt64).new(n, 0_u64)
+    ap = a.to_unsafe
+    bp = b.to_unsafe
+    up = u.to_unsafe
+    vp = v.to_unsafe
+    rounds = (2 * Montgomery.bit_length(@mod.limbs) - 1 + 30) // 31
+    rounds.times do
+      # The length of the longer of a and b, at least 64, and the 33 bits
+      # of each below it.
+      top = 0_u64
+      word = 0_u64
+      j = 0
+      while j < n
+        c = ap[j] | bp[j]
+        keep = (0_u64 &- (c | (0_u64 &- c)).unsafe_shr(63)) ^ zero
+        top = (j.to_u64 & keep) | (top & ~keep)
+        word = (c & keep) | (word & ~keep)
+        j = j &+ 1
+      end
+      length = top.unsafe_shl(6) &+ Montgomery.bits_of(word, zero)
+      short = (0_u64 &- Montgomery.borrow_of(length, 64_u64, 0_u64)) ^ zero
+      length = (64_u64 & short) | (length & ~short)
+      at = length &- 33_u64
+      shift = at & 63_u64
+      w = at.unsafe_shr(6)
+      a_low = 0_u64
+      a_high = 0_u64
+      b_low = 0_u64
+      b_high = 0_u64
+      j = 0
+      while j < n
+        here = Montgomery.equal_mask(j.to_u64, w, zero)
+        above = Montgomery.equal_mask(j.to_u64, w &+ 1_u64, zero)
+        a_low = a_low | (ap[j] & here)
+        a_high = a_high | (ap[j] & above)
+        b_low = b_low | (bp[j] & here)
+        b_high = b_high | (bp[j] & above)
+        j = j &+ 1
+      end
+      xa = (ap[0] & 0x7FFFFFFF_u64) | (((a_low.unsafe_shr(shift) | a_high.unsafe_shl(1_u64).unsafe_shl(63_u64 &- shift)) & 0x1FFFFFFFF_u64).unsafe_shl(31_u64))
+      xb = (bp[0] & 0x7FFFFFFF_u64) | (((b_low.unsafe_shr(shift) | b_high.unsafe_shl(1_u64).unsafe_shl(63_u64 &- shift)) & 0x1FFFFFFFF_u64).unsafe_shl(31_u64))
+      # 31 steps of the binary GCD on the stand-ins.
+      f0 = 1_u64
+      g0 = 0_u64
+      f1 = 0_u64
+      g1 = 1_u64
+      31.times do
+        odd = (0_u64 &- (xa & 1_u64)) ^ zero
+        swap = odd & (0_u64 &- Montgomery.borrow_of(xa, xb, 0_u64))
+        d = (xa ^ xb) & swap
+        xa = xa ^ d
+        xb = xb ^ d
+        d = (f0 ^ f1) & swap
+        f0 = f0 ^ d
+        f1 = f1 ^ d
+        d = (g0 ^ g1) & swap
+        g0 = g0 ^ d
+        g1 = g1 ^ d
+        xa = xa &- (xb & odd)
+        f0 = f0 &- (f1 & odd)
+        g0 = g0 &- (g1 & odd)
+        xa = xa.unsafe_shr(1_u64)
+        f1 = f1 &+ f1
+        g1 = g1 &+ g1
+      end
+      # (a f0 + b g0) / 2^31 and (a f1 + b g1) / 2^31, exact, each turned
+      # positive with its factors when it is not.
+      sf0 = f0.unsafe_to_i64.to_i128
+      sg0 = g0.unsafe_to_i64.to_i128
+      sf1 = f1.unsafe_to_i64.to_i128
+      sg1 = g1.unsafe_to_i64.to_i128
+      ca = 0_i128
+      cb = 0_i128
+      before_a = 0_u64
+      before_b = 0_u64
+      j = 0
+      while j < n
+        aj = ap[j].unsafe_to_i128
+        bj = bp[j].unsafe_to_i128
+        ca = ca &+ aj &* sf0 &+ bj &* sg0
+        cb = cb &+ aj &* sf1 &+ bj &* sg1
+        low_a = ca.unsafe_to_u64
+        low_b = cb.unsafe_to_u64
+        ca = ca.unsafe_shr(64)
+        cb = cb.unsafe_shr(64)
+        if j > 0
+          ap[j &- 1] = before_a.unsafe_shr(31_u64) | low_a.unsafe_shl(33_u64)
+          bp[j &- 1] = before_b.unsafe_shr(31_u64) | low_b.unsafe_shl(33_u64)
+        end
+        before_a = low_a
+        before_b = low_b
+        j = j &+ 1
+      end
+      ap[n - 1] = before_a.unsafe_shr(31_u64) | ca.unsafe_to_u64.unsafe_shl(33_u64)
+      bp[n - 1] = before_b.unsafe_shr(31_u64) | cb.unsafe_to_u64.unsafe_shl(33_u64)
+      negative_a = ca.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      negative_b = cb.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      Montgomery.negate(ap, n, negative_a)
+      Montgomery.negate(bp, n, negative_b)
+      f0 = (f0 ^ negative_a) &- negative_a
+      g0 = (g0 ^ negative_a) &- negative_a
+      f1 = (f1 ^ negative_b) &- negative_b
+      g1 = (g1 ^ negative_b) &- negative_b
+      # (u f0 + v g0) / 2^31 mod m and (u f1 + v g1) / 2^31 mod m.
+      sf0 = f0.unsafe_to_i64.to_i128
+      sg0 = g0.unsafe_to_i64.to_i128
+      sf1 = f1.unsafe_to_i64.to_i128
+      sg1 = g1.unsafe_to_i64.to_i128
+      u0 = up[0].unsafe_to_i128
+      v0 = vp[0].unsafe_to_i128
+      qu = ((u0 &* sf0 &+ v0 &* sg0).unsafe_to_u64 &* @inv & 0x7FFFFFFF_u64).unsafe_to_i128
+      qv = ((u0 &* sf1 &+ v0 &* sg1).unsafe_to_u64 &* @inv & 0x7FFFFFFF_u64).unsafe_to_i128
+      cu = 0_i128
+      cv = 0_i128
+      before_u = 0_u64
+      before_v = 0_u64
+      j = 0
+      while j < n
+        uj = up[j].unsafe_to_i128
+        vj = vp[j].unsafe_to_i128
+        mj = m[j].unsafe_to_i128
+        cu = cu &+ uj &* sf0 &+ vj &* sg0 &+ mj &* qu
+        cv = cv &+ uj &* sf1 &+ vj &* sg1 &+ mj &* qv
+        low_u = cu.unsafe_to_u64
+        low_v = cv.unsafe_to_u64
+        cu = cu.unsafe_shr(64)
+        cv = cv.unsafe_shr(64)
+        if j > 0
+          up[j &- 1] = before_u.unsafe_shr(31_u64) | low_u.unsafe_shl(33_u64)
+          vp[j &- 1] = before_v.unsafe_shr(31_u64) | low_v.unsafe_shl(33_u64)
+        end
+        before_u = low_u
+        before_v = low_v
+        j = j &+ 1
+      end
+      up[n - 1] = before_u.unsafe_shr(31_u64) | cu.unsafe_to_u64.unsafe_shl(33_u64)
+      vp[n - 1] = before_v.unsafe_shr(31_u64) | cv.unsafe_to_u64.unsafe_shl(33_u64)
+      into_range(up, cu.unsafe_shr(31).unsafe_to_u64)
+      into_range(vp, cv.unsafe_shr(31).unsafe_to_u64)
+    end
+    # b is the GCD: 1 when x has an inverse, and v is it.
+    rest = bp[0] ^ 1_u64
+    j = 1
+    while j < n
+      rest = rest | bp[j]
+      j = j &+ 1
+    end
+    return nil unless rest == 0_u64
+    limbs = Array(UInt64).new(2 * n, 0_u64)
+    j = 0
+    while j < n
+      limbs[2 * j] = vp[j] & 0xFFFFFFFF_u64
+      limbs[2 * j + 1] = vp[j].unsafe_shr(32_u64)
+      j = j &+ 1
+    end
+    BigInt.new(1, limbs)
+  end
+
+  # The n words at *r* and the signed word *top* above them, a value in
+  # (-2m, 3m), taken into [0, m): m added twice where the value is
+  # negative, then taken off twice where what is left is at least m.
+  private def into_range(r : Pointer(UInt64), top : UInt64) : Nil
+    n = @n
+    m = @m.to_unsafe
+    zero = @zero.get
+    2.times do
+      negative = top.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      carry = 0_u64
+      j = 0
+      while j < n
+        w = r[j].to_u128 &+ (m[j] & negative).to_u128 &+ carry.to_u128
+        r[j] = w.unsafe_to_u64
+        carry = w.unsafe_shr(64).unsafe_to_u64
+        j = j &+ 1
+      end
+      top = top &+ carry
+    end
+    t = @t.to_unsafe
+    2.times do
+      borrow = 0_u64
+      j = 0
+      while j < n
+        t[j] = r[j] &- m[j] &- borrow
+        borrow = Montgomery.borrow_of(r[j], m[j], borrow)
+        j = j &+ 1
+      end
+      top_less = top &- borrow
+      keep = top_less.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      j = 0
+      while j < n
+        r[j] = (r[j] & keep) | (t[j] & ~keep)
+        j = j &+ 1
+      end
+      top = (top & keep) | (top_less & ~keep)
+    end
+  end
+
+  # The n words at *r* negated, two's complement, where *mask* is all ones.
+  def self.negate(r : Pointer(UInt64), n : Int32, mask : UInt64) : Nil
+    carry = mask & 1_u64
+    j = 0
+    while j < n
+      w = (r[j] ^ mask).to_u128 &+ carry.to_u128
+      r[j] = w.unsafe_to_u64
+      carry = w.unsafe_shr(64).unsafe_to_u64
+      j = j &+ 1
+    end
+  end
+
+  # The borrow out of x - y - c, 0 or 1, without a comparison (Hacker's
+  # Delight 2-13), as std/p256 takes it.
+  def self.borrow_of(x : UInt64, y : UInt64, c : UInt64) : UInt64
+    d = x &- y &- c
+    ((~x & y) | (~(x ^ y) & d)).unsafe_shr(63_u64)
+  end
+
+  # All ones where x is y, else 0.
+  def self.equal_mask(x : UInt64, y : UInt64, zero : UInt64) : UInt64
+    d = x ^ y
+    ((d | (0_u64 &- d)).unsafe_shr(63_u64) &- 1_u64) ^ zero
+  end
+
+  # The bits *x* takes to write, by a search of six masked halvings.
+  def self.bits_of(x : UInt64, zero : UInt64) : UInt64
+    bits = 0_u64
+    step = 32_u64
+    while step > 0_u64
+      high = x.unsafe_shr(step)
+      moved = (0_u64 &- (high | (0_u64 &- high)).unsafe_shr(63_u64)) ^ zero
+      bits = bits &+ (step & moved)
+      x = (high & moved) | (x & ~moved)
+      step = step.unsafe_shr(1_u64)
+    end
+    bits &+ x
   end
 end
 

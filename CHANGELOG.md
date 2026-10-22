@@ -4,6 +4,227 @@
 
 ### Added
 
+- **Encrypted DNS: a `Resolver` can ask DNS over TLS (RFC 7858) and DNS
+  over HTTPS (RFC 8484) instead of plaintext servers.** std/secure_dns has
+  the two upstreams: `DnsOverTls.new(name, address)` connects to the
+  address on port 853 and checks the certificate for the name (RFC 8310's
+  strict profile), frames each message with its two-byte length, keeps
+  one connection for every exchange until it sits idle `idle_ms`, sends
+  A and AAAA in one write and matches the answers by ID in any order, and
+  resumes with the tickets the server sent; `DnsOverHttps.new(url,
+  address)` POSTs `application/dns-message` or GETs with the `dns`
+  parameter in base64url without padding, with the ID 0, through an
+  `HTTPClient` of its own that offers `h2` first and keeps its
+  connection. `resolver.encrypted(upstreams)` (or
+  `Resolver.encrypted(upstreams)` for the machine's hosts file and
+  search list) is the resolver that asks them, and
+  `IyiSocket.connect(host, port, resolver)` connects through it. Its
+  plaintext servers are never asked unless the program passes
+  `plaintext_fallback: true`, and then only when no upstream could be:
+  falling back by default would hand the question the program meant to
+  keep private to the path. An answer over either is refused when its ID
+  or question is not the query's, when it has TC set, when its frame holds
+  bytes past the message, or when the connection ends inside it; a DoH
+  answer also when its status is not 200, its `Content-Type` is not
+  `application/dns-message`, or its body is past 65535 bytes. std/dns
+  keeps no cache, so `Cache-Control` is not read. `Resolver#txt` reads
+  TXT records over any transport (`DnsRecord.character_strings`), and
+  `HTTPClient.new` takes `tls:` and `resolver:` of its own.
+  `bench/std_secure_dns_exercise.sh` runs the resolver against
+  `bench/std_secure_dns_server.py` - Python's ssl and http.server, and
+  HTTP/2 through the `h2` package when it imports - answering a fixed zone
+  under a test root, plain and release; asks `dig +tls`, `+https` and
+  `+https-get` the same questions of the same servers and holds the
+  answers equal (dig's DoH is HTTP/2's alone, so without `h2` only `+tls`
+  is compared); and catches fourteen broken copies at the check that
+  names each: the server's name not checked, the length prefix dropped,
+  the `dns` parameter padded, the ID not matched over TLS, the plaintext
+  servers asked unasked, TC or trailing bytes taken, a connection per
+  exchange, an idle connection kept, a DoH status or `Content-Type` not
+  read, a DoH ID not 0, and an `HTTPClient`'s own TLS configuration or
+  resolver ignored.
+- **std/autocert: an HTTPS server that gets and renews its own
+  certificates, Go's autocert over std/acme.** `AutocertManager.new(directory,
+  cache, hosts)`'s `tls_config` is a std/tls server config that asks the
+  manager for each handshake's certificate by server_name: the first
+  handshake for a name with none held takes one from the cache, or orders
+  one (a P-256 key, one name) while it waits. Names outside `hosts` - or
+  `host_policy`, which replaces the list - are refused (unrecognized_name)
+  before the cache or the CA is asked, each compared as server_name
+  carries it: A-labels, no trailing dot, lower case. Handshakes for a name
+  whose order is running wait for it (`wait_ms`, a minute unless set)
+  instead of placing their own; a failed order is remembered and its name
+  refused at once for `retry_ms`, doubling to an hour. tls-alpn-01 is
+  answered by the same listener - `acme-tls/1` is added to its protocols
+  and a client offering it alone is shown the challenge certificate while
+  the order runs, a client offering anything beside it never is - and
+  http-01 on port 80 by `answer(request)`, tried in `challenges`' order,
+  a fresh order for the next when one's authorization fails. `run`, in a
+  task of the caller's group until `stop`, renews each certificate held
+  `renew_before` (thirty days) before its end, or two thirds into a life no
+  longer than that, under a new key, swaps it in for the handshakes after,
+  and retries a failure after `retry_ms`, doubling. The cache is a trait
+  (`AutocertCache`: get, put, delete); `AutocertDirCache` keeps the
+  account key under `acme_account+key` and each name's key and chain as
+  PEM under the name, in a directory made 0700, each entry written to a
+  file created 0600 and renamed over the old. Not done: ACME Renewal
+  Information, renewal jitter, RSA certificates beside ECDSA ones,
+  external account binding, deactivating authorizations a failed order
+  left pending, revocation, dns-01 and wildcards, several names on one
+  certificate. `bench/std_autocert_exercise.sh` holds it to Python's
+  `ssl` and `cryptography` and, where Go is there to build it, to two of
+  Let's Encrypt's Pebbles: a chain verified to Pebble's root in TLS 1.3
+  and 1.2, tls-alpn-01 answered with no http-01 fetch in Pebble's log; a
+  disallowed name refused with no newOrder in the log; ten first
+  handshakes at once verifying one certificate from one order; a name
+  Pebble blocks asked for once in three handshakes; a second process
+  showing the first's serials with no order; http-01 fetched from port
+  80; the cache's files 0600 and its keys read by `cryptography`; and from
+  a Pebble issuing for 24 seconds, the renewed serial seen 5.9 to 6.9
+  seconds before the first certificate ended, in five runs here, and in
+  the cache. Eight broken copies are caught by name - the host policy
+  ignored, no single flight, the cache not read, renewal never scheduled,
+  the challenge certificate shown beside other protocols, a key written
+  0644, and std/tls's identity source left unasked in 1.3 and in 1.2;
+  where Pebble is not running, the four whose checks order from it say
+  so. The gate took 1m55s here.
+- **std/tls: `TlsServerConfig#identity_source`, the identity chosen per
+  ClientHello by the program.** A proc given the client's server_name and
+  ALPN offer, asked first in TLS 1.3 and 1.2, that answers the identity to
+  show, nil for the config's own choice (`others` by name, then
+  `identity`), or a `TlsError` that refuses the handshake with its alert.
+  An identity it answers is held to the client's schemes, and in 1.2 to
+  its suites and curves, as `others` are; a resumption shows none, its
+  ticket counting the session as `identity`'s. It is how std/autocert
+  shows tls-alpn-01's certificate beside the certificates it serves on
+  one listener, which std/acme's header said std/tls could not do.
+- **std/acme: an ACME client (RFC 8555), so an iyi server gets its own
+  certificate.** `AcmeClient.new(directory, key)` reads the directory;
+  every request after it is a JWS in the flattened JSON serialization,
+  its protected header `alg`, `nonce`, `url` and `jwk` for newAccount
+  alone and `kid` after it, a read POST-as-GET. Nonces are used once,
+  newNonce asked when none is held, and a `badNonce` answer sent again
+  with the nonce it carried, ten times at most (`bad_nonce_retries`
+  counts them). Keys are std/x509's new `SigningKey`: ES256 and ES384
+  through std/p256 and std/p384 with the signature as R || S at the
+  curve's width, not DER; RS256 through std/rsa's PKCS #1 v1.5; EdDSA on
+  Ed25519 for a server that takes it. The `jwk` is RFC 7638's canonical
+  form and the key authorization `token.thumbprint`. `register` (contact,
+  `termsOfServiceAgreed`, `onlyReturnExisting`), `roll_key` (keyChange,
+  the inner JWS under the new key), `new_order` for DNS names,
+  `authorization`, `respond`, `wait_authorization`, `finalize` (a PKCS
+  #10 request std/x509 writes for the order's names and signs with the
+  certificate's key, then the order polled to `valid`) and `certificate`
+  (the chain as PEM, each block read by std/x509). http-01:
+  `AcmeHttp01` answers `/.well-known/acme-challenge/<token>` from a
+  std/http server's block. dns-01: `dns_txt(token)` and
+  `AcmeClient.dns_name(domain)`. tls-alpn-01 (RFC 8737):
+  `AcmeTlsAlpn01.certificate` is the self-signed certificate with its one
+  dNSName and the critical id-pe-acmeIdentifier extension, and
+  `AcmeTlsAlpn01.config` a std/tls server config that shows it to a
+  client offering `acme-tls/1`. Polls wait what Retry-After says,
+  seconds or an HTTP-date, `poll_ms` when there is none; every wait
+  stops at `max_polls` and `wait_ms`, a Retry-After past what is left
+  ends it at once, and every exchange is bounded by `timeout_ms` and its
+  answer by a megabyte. An answer of 400 or more is an `AcmeError` naming
+  the problem document's type and detail (RFC 7807), its subproblems
+  each with their identifier. Not done: external account binding,
+  renewal scheduling and ARI, revocation, account deactivation, newAuthz,
+  IP identifiers, alternate chains, profiles. `bench/std_acme_exercise.sh`
+  holds it to RFC 7638's and RFC 8037's thumbprints, RFC 7515 A.2's RS256
+  and RFC 8037's EdDSA signatures byte for byte and A.3's ES256 as R ||
+  S, base64url without padding, OpenSSL's `req -verify` and Python's
+  `load_der_x509_csr` on its requests, both on the tls-alpn-01
+  certificate and Python's `ssl` in a handshake under `acme-tls/1`, a
+  server in the exercise that holds it to RFC 8555 and breaks the
+  protocol one rule at a time (a problem document, a badNonce, a
+  Retry-After of two seconds against a poll interval of half of one, a
+  key rollover, an invalid challenge, waits past their polls and their
+  time), and - where Go is there to build it - Let's Encrypt's Pebble:
+  whole orders by http-01 (served by std/http), dns-01 (through
+  pebble-challtestsrv) and tls-alpn-01 (served by std/tls), with 30% of
+  nonces refused (24 and 22 sent again in two runs here), an ES384 and
+  an RS256 account, the RS256 account rolled over to P-256, a blocked
+  name's problem and EdDSA's refusal, each of the five chains verified
+  by std/x509 against Pebble's root and by `openssl verify`. Thirteen
+  broken copies are caught by name, among them a nonce reused, the
+  thumbprint over non-canonical JSON, a DER signature, a jwk where the
+  kid belongs, Retry-After ignored, a problem document taken as success
+  and the request signed by another key. The Linux module-exercise
+  shards set Go up for it; elsewhere it runs where the runner has Go.
+- **std/x509 writes and signs: `X509.request` (PKCS #10) and
+  `X509.self_signed`.** A `SigningKey` - P-256 or P-384 (`SigningKey.p256`
+  and `.p384` draw one), RSA, or Ed25519, or any of them `from_pem` -
+  signs under ecdsa-with-SHA256 or -SHA384, sha256WithRSAEncryption or
+  Ed25519, in constant time. A request carries CN=<the first name> (an
+  empty subject past 64 bytes) and the names as subjectAltName in an
+  extensionRequest; a self-signed certificate carries subjectAltName and
+  the caller's `X509Extension`s, critical or not. Names are refused
+  unless they are ASCII host names. The DER is written in its one
+  shortest form, which std/asn1 reads back; std/acme's gate holds both to
+  OpenSSL and Python's cryptography, and std/x509's own gate still holds
+  its 35 broken copies.
+- **std/ocsp: OCSP responses read and checked (RFC 6960), and requests
+  built, in iyi.** `OcspResponse.parse` reads an OCSPResponse - its
+  responseStatus, and for a successful one the responder by name or key
+  hash, producedAt, each SingleResponse's CertID, status (good, revoked
+  with its time and CRLReason, unknown), thisUpdate and nextUpdate, the
+  nonce, the signature and the certificates carried - and refuses what is
+  not RFC 6960's DER with an `OcspError` naming it (an unsuccessful
+  status is one too, carrying the status). `verify(leaf, issuer, now)`
+  checks what OpenSSL's `ocsp -verify` checks, in its order: the
+  signature, by the issuer or by a delegated responder the response
+  carries (issued and signed by the issuer, id-kp-OCSPSigning itself, valid
+  then, digitalSignature if it has keyUsage), through std/x509's signature
+  checks; a SingleResponse for the leaf's CertID; and its time, five
+  minutes either way, a response without nextUpdate taken for a day. A
+  responder's id-pkix-ocsp-nocheck is accepted, and its own status never
+  asked. `Ocsp.request` writes a request byte for byte as `openssl ocsp
+  -no_nonce -reqout` does under SHA-1 and SHA-256, and as Python's
+  OCSPRequestBuilder does with a nonce. No CRLs and no fetching: stapling
+  only (SPEC.md decision #18). std/x509 reads the TLS Feature extension
+  (RFC 7633; `Certificate#must_staple?`), id-pkix-ocsp-nocheck and the
+  key's BIT STRING (`public_key_bits`, what CertIDs hash), and its
+  signature check is `X509.signature_error`, which std/ocsp shares. New
+  gate `bench/std_ocsp_exercise.sh`: 59 responses Python's cryptography
+  built or written by hand in DER, each verdict held to the one written,
+  every truncation and flipped byte of two refused; the same vectors judged
+  by OpenSSL, 44 alike, 4 refused by both for reasons that differ, and 10
+  parting where written down (std/ocsp holding to DER, to RFC 5280's
+  critical extensions and keyUsage, and refusing SHA-1) - whether a
+  response is taken is held exactly, the reason for a refusal not, since
+  OpenSSL builds differ in which check refuses first; 20 judgments of `openssl ocsp -index` responses - from the CA,
+  delegated, by key id, without the responder's certificate, two at once,
+  SHA-256 CertIDs, RSA, RSA-PSS and P-384 - each OpenSSL's own; 29
+  responses Python builds at run time each judged as OpenSSL judges them
+  but one (no nextUpdate, three days old); every response read field by
+  field as Python's `load_der_ocsp_response` reads it, 8 refused here
+  that Python reads, each named; and 32 broken copies caught by name.
+- **std/tls staples OCSP responses, both ends (RFC 6066, RFC 8446
+  section 4.4.2.1, RFC 7633).** Every ClientHello asks for a staple
+  (status_request, 9 bytes: 197 and 1,419 bytes now as OpenSSL 3.5's
+  s_server read them, without and with the X25519MLKEM768 share); one that
+  comes - in TLS 1.3 on the leaf's CertificateEntry, in 1.2 as a
+  CertificateStatus the ServerHello announced - is checked by std/ocsp
+  once the chain is, and `ocsp_response` and `ocsp_status` are on the
+  connection. Revoked is refused with certificate_revoked; unknown, a
+  response that does not hold, and no staple where `TlsConfig
+  #require_staple` or a must-staple leaf asks for one, with
+  bad_certificate_status_response. `TlsServerConfig#staple(der,
+  identity)` gives an identity a response, refused unless it has a
+  SingleResponse for the identity's leaf; it is stapled to a client that
+  asks, in either version, and not once past its nextUpdate; an identity
+  `TlsServerConfig#identity_source` answers, as std/autocert's manager
+  does, is sent with its own staple.
+  `bench/std_tls_exercise.sh` holds it to OpenSSL: the client against
+  `s_server -status_file` in TLS 1.3 and 1.2 (good, delegated, revoked,
+  unknown, another certificate's, expired, forged, none, required and
+  must-staple, each alert as s_server read it) and the server against
+  `s_client -status`, which shows the response, and the std/tls client,
+  with the config's identity and with one an identity source answers;
+  the scripted server's four broken staples; and 19 more broken copies.
+  The scripted server's cert-entry-ext scenario sends an SCT, since a
+  status_request entry is now one asked for.
 - **Tasks run across cores: `g.spawn_parallel { }` starts a task on a
   pool of worker threads (SPEC.md III.4.13).** The pool starts at the
   first parallel spawn with as many workers as the cores the process may
@@ -196,8 +417,9 @@
   4.2.10 forbids - `TlsClient#early_data` (`TlsEarlyData`) says Accepted,
   Resent, Late or Withheld. It fails a TLS 1.2 ServerHello after early
   data (appendix D.3). std/http takes none - its server passes
-  `early_data: false` whatever the config allows - and sends none, as its
-  client keeps no session: HTTP cannot tell a request safe to replay.
+  `early_data: false` whatever the config allows - and sends none: its
+  client resumes sessions but never sends early data, as HTTP cannot
+  tell a request safe to replay.
   Held by `bench/std_tls_exercise.sh`: RFC 8448's early traffic secret,
   its "ABCDEF" and EndOfEarlyData records sealed byte for byte, the
   Finished and resumption secret after them; the guard's single use,
@@ -216,6 +438,46 @@
   it, another ALPN, an acceptance of nothing sent); and seventeen broken
   copies, among them a replay taken, early data delivered as 1-RTT, the
   size limit, freshness window, ALPN and suite checks ignored.
+- **std/http's `HTTPClient` resumes TLS sessions by the tickets servers
+  send it.** Each `https://` origin - scheme, host and port, whichever
+  proxy's tunnel is between - has a `TlsSession` in the client, kept under
+  the TLS configuration its tickets came under - the client's own `tls:`,
+  or else `HTTP.tls_config` - by the same identity (`TlsMadeUnder`) that already kept a pooled connection from carrying a
+  request made under another configuration; a new connection to the
+  origin hands it to the handshake, and the server's new tickets go into
+  it. A resumed handshake checks no certificate, so a ticket is never
+  offered to another origin nor under another trust store or identity:
+  after `HTTP.tls_config=`, or roots or an identity assigned in place in
+  either configuration, the next connection is a full handshake, and the
+  origin's tickets from
+  under the old configuration are dropped. At most `origin_tickets` (4)
+  are kept an origin and `tickets` (256) in all - as many origins as that
+  leaves room for, the one longest unused dropped first; 0 keeps none.
+  `TlsSession.new(limit)` holds a session to fewer than its eight.
+  0-RTT stays off: no early data goes with a ticket, whatever it allows.
+  `HTTPClient#connections_resumed`, `#tickets_held`,
+  `Response#tls_resumed?` and, at the server, `Request#tls_resumed?` say
+  what was kept and used. Measured with `bench/std_http_resume.iyi
+  --release` on a 12-core machine other jobs shared, medians of 200, the
+  median of three runs: the handshake took 0.96 ms full and 0.51 resumed
+  against std/http's server, 1.03 and 0.57 against OpenSSL 3.5's
+  s_server; a GET on a new connection took 82.98 ms and 82.00 against
+  std/http's server, 42.04 and 40.96 against s_server, nearly all of it
+  waits that are not the handshake's (curl's GET to the same iyi server
+  took 42 ms, to s_server 2). Held by `bench/std_http_exercise.sh`: a
+  second connection resumed as std/http's server and s_server's page
+  ("Reused, TLSv1.3") both say; a ticket from one origin not offered to
+  another whose server would take it; after the roots change, a full
+  handshake whose ClientHello, as s_server's `-msg` dump shows it, has no
+  pre_shared_key, and other roots refused, in `HTTP.tls_config` and in a
+  client's own `tls:`; the limits; no ClientHello asking for early data
+  from s_server, whose tickets allow it; and seven broken copies (the
+  configuration ignored, a client's own `tls:` passed over for
+  `HTTP.tls_config`, a ticket offered to any origin, no session handed
+  over, early data sent, each limit left out),
+  each caught at the line that names it. `bench/std_http_resume.iyi`
+  holds the iyi server's half alone, under a test PKI of its own, when
+  run with no arguments, as CI runs every bench program.
 - **std/mlkem: ML-KEM-768 (FIPS 203), the post-quantum key-encapsulation
   mechanism, written in iyi and constant-time on its secrets.**
   `MlKem768PrivateKey.from_seed(d || z)` is Algorithm 16's key
@@ -341,6 +603,75 @@
 
 ### Changed
 
+- **std/mail and std/smtp say that a message needs a Date (#137).**
+  `Mail::Message#to_s` has always panicked with `mail: a message has no
+  Date` (and `no From`), and `SmtpClient#send` with it, but the docs listed
+  the Date beside the optional Message-ID. std/mail's header and `to_s`'s
+  comment now say a From and a Date are required (`msg.date =
+  Mail.date(...)`), the Message-ID is optional, and which panics `to_s`
+  raises; both `send` overloads say which mistakes panic and that every
+  other failure is an `SmtpError`. std_smtp's gate refuses a message with
+  no Date through `send`. No `Mail::Message#valid?` was added: std/mail
+  checks every value where it is set, so From and Date are the only gaps,
+  and `msg.from` and `msg.date` already answer whether they are set.
+
+- **`Certificate` (std/x509) is a class, not a struct.** It is 472
+  bytes of fields that nothing writes after `Certificate.parse`, and a
+  struct was copied whole into every array slot, block argument and
+  union it passed through - in a debug build each copy a stack slot of
+  its own, which is most of what ran a task out of stack in issue #130.
+  Sharing a certificate is not observable, and `==` still compares two by
+  their DER (and `hash` hashes it), as the struct's field-by-field `==`
+  did.
+- **`IyiSocket.connect` races a name's addresses: Happy Eyeballs v2
+  (RFC 8305).** A name with more than one address was tried one address
+  after another, IPv4 first, each with the whole timeout, so a host whose
+  first address dropped SYNs cost all of `timeout_ms` - or the kernel's
+  two minutes of retries, unbounded - before its second was tried. Now
+  the first address is tried, the next 250 ms later (section 5's
+  recommended Connection Attempt Delay) without waiting for the first to
+  fail, or at once when an attempt fails; the first handshake to finish
+  wins, and every other attempt is cancelled and its socket closed before
+  `connect` answers. The order is `IyiSocket.attempt_order`'s (section
+  4): IPv6 first when the machine has a route to the name's first IPv6
+  address, asked by connecting a UDP socket, which sends nothing, and the
+  families alternating. Each attempt is a task in a group the caller
+  opens, so a cancelled caller cancels every attempt. `timeout_ms` bounds
+  the whole connect now, not each address's handshake, and a connect
+  that fails at every address is one `SocketError` naming each address
+  in the order tried and how its attempt ended (`SocketError#tried`):
+  `cannot connect to example.com:443: [2001:db8::1]:443 timed out;
+  192.0.2.1:443 connection refused`, where it answered the first
+  address's failure alone. `localhost` is raced the same way, 127.0.0.1
+  first, which replaces the retry at ::1 after a refusal: Windows, which
+  takes 2 s to refuse a connect, reached a ::1-only listener in 2017 ms
+  that way. A name with one address, and an address, connect as they
+  did. A and AAAA are still asked one after the other: section 3's
+  parallel queries would save the AAAA round trip, 5 to 65 ms uncached
+  here, and are left out (std/socket's `Resolver` says why). std/http,
+  std/websocket, std/smtp and std/tls connect through it and assumed no
+  order. `bench/std_dns_exercise.sh` holds it, plain and release, with a
+  hosts-file resolver and loopback listeners: a name whose first address
+  is a listener with a full backlog connected through its second,
+  127.0.0.1, in 250 ms under a 5,000 ms bound; ::1 is taken before
+  127.0.0.1; every address refused is one error naming both in order;
+  twenty races at once leave /proc/self/fd's count where it was; a
+  400 ms bound ends in 401 ms with two attempts timed out and the third
+  address never tried; a caller cancelled 600 ms in answers `Cancelled`
+  in 601 ms with every attempt's socket closed. Broken copies are caught
+  by name: the attempt delay an hour (5,006 ms), the delay ignored
+  (1 ms), a losing attempt's socket left open (16 descriptors before, 36
+  after), the error naming the last address alone, IPv4 first whatever
+  the routes say, and a refusal that waits for the delay to start the
+  next address (250 ms). `bench/socket_exercise.sh` adds `localhost`
+  refused at both addresses, and `localhost` raced ::1 first; on Windows
+  it also holds a ::1-only listener to under 1,500 ms through
+  `localhost`, and proves it with the delay an hour. A section that needs
+  IPv6, or a backlog that fills, says it was skipped where the machine
+  has neither.
+  The race costs a task: a loopback connect, accept and close took
+  19.3 us through `localhost` and 16.2 us to 127.0.0.1, which is not
+  raced (best of eight rounds of 1,000, release).
 - **Faster pure-iyi cryptography, constant time kept.** Measured with
   `--release` on one x86_64 QEMU machine (AES-NI, no carry-less multiply)
   that other jobs shared, the best of five, set beside Python's
@@ -374,6 +705,81 @@
   entry still read, masked); blinding is unchanged. std/digest runs SHA-2 eight rounds a pass with the
   names turned. Tried and dropped, slower here: Poly1305 in 44-bit limbs,
   and ChaCha20 four blocks at a time.
+- **RSA-2048 signatures a quarter faster and P-256 signature checks
+  nearly four times faster, constant time kept on every secret; and
+  `BigInt#inverse_mod_secret(mod)`, a modular inverse in constant
+  time.** Measured with `--release` on the x86_64 QEMU machine above,
+  shared with other jobs (load 6 to 8), the best of several runs,
+  before and after in the same run beside Python's `cryptography`:
+
+  | | before | after | OpenSSL |
+  |---|---|---|---|
+  | RSA-2048 PSS sign (best of 8 runs of 50) | 1,062 us | 784 us | 479 us |
+  | P-256 verify (best of 5 runs of 200) | 196 us | 53 us | 42 us |
+  | `pow_mod_secret`, 1024-bit exponent and modulus | 338 us | 312 us | - |
+  | 1024-bit Montgomery product / square (quieter run) | 237 / 241 ns | 220 / 222 ns | - |
+  | 2048-bit inverse (Euclid / binary GCD) | 234 us | 64 us | - |
+
+  std/big's Montgomery product sums by columns into three words held in
+  registers (FIPS) where it loaded and stored a word of t for every
+  product, and its square takes the off-diagonal products by columns,
+  doubles them, and adds q_(k-1) m_1 last in each reduction column.
+  `inverse_mod_secret` is Pornin's optimised binary GCD (ePrint
+  2020/972, 31 steps on 64-bit stand-ins a round, every choice a mask);
+  std/rsa takes off its blinding with it, where the extended Euclid's
+  algorithm took about a fifth of a signature and followed r's
+  quotients, and std/ecdsa inverts s with it (2.5 us at 256 bits, where
+  Fermat took 10). P-256 verification has its own path in std/ecdsa:
+  four limbs in registers reduced in p's shape (std/p256's field, which
+  std/ecdsa cannot import), and u2·Q + u1·G in width-5 and width-7
+  non-adjacent form, the odd multiples of G made once and kept affine.
+  A full handshake with Python's ssl, the median of 100 (the gate's
+  run): RSA-2048 1.47 ms in TLS 1.3 (X25519) and 1.41 in 1.2, against
+  1.88 and 1.79 in the run quoted above; RSA-4096 5.78 and 5.85 (7.76,
+  7.85); P-256 0.57 and 0.62. Tried and dropped, slower here: the 16-word
+  product fully unrolled by a macro (622 ns), a P-256 square of its own
+  (67 us a check against 52), the column sums split in two (no faster).
+  Left as they were: P-384 and P-521 still read their scalars' bits one
+  at a time, and Karatsuba was not tried at 1024 bits, where the product
+  is already at this machine's cost per multiply. Held by the gates:
+  1,010 inverses against Python's `pow(x, -1, m)`, 2^(len - 1) at every
+  length to 700 bits, the rounds that leave a negative, and ten new
+  broken copies in `bench/std_big_exercise.sh`; P-256 signatures from
+  keys 1 and n - 1 that meet the doubling and the identity in the new
+  path, P-384's for the old, and ten new broken copies in
+  `bench/std_ecdsa_exercise.sh`; one more in `bench/std_rsa_exercise.sh`.
+- **P-256 signing no longer branches on its nonce's digits, and
+  `bench/ct_timing.sh` times std's secret paths.** The tool is a
+  dudect-style check (Welch's t between a fixed input and random ones,
+  interleaved, with percentile crops): it found P-256 signing at |t| = 16
+  to 24 over 100,000 signatures, and the --release assembly of
+  `P256BaseTable.pick` showed why - LLVM had made its masked table read
+  a conditional jump per entry on the digit. The selectors are xored with
+  a zero read by an atomic load now, as std/big's are; |t| = 3.8 to 6.0.
+  On one shared machine (load 6 to 8): `inverse_mod_secret` 3.3 over
+  100,000, `sign_pss` 0.8 over 20,000, P-256 signing 3.8 over 100,000,
+  X25519 7.3 over 100,000; the extended Euclid inverse std/rsa had, run
+  as the leak the tool must see, 403 over 5,000. It fails past 10 and is
+  not run by CI, whose shared runners are too noisy for that line.
+  std/big's header records the assembly audit of `inverse_mod_secret`.
+  The tool also times P-384 signing (|t| 1.7 over 50,000), Ed25519
+  signing (4.2 over 100,000), ML-KEM-768 decapsulation (valid against
+  tampered ciphertexts 2.1, one key against others 6.3, over 50,000) and
+  the AEADs' tag checks (a tag wrong in its first byte against its last:
+  AES-GCM 2.0, ChaCha20-Poly1305 4.9, over 100,000), and the --release
+  assembly of P-384's table selection, ML-KEM's re-encryption compare
+  and key selection, curve25519's swaps and table reads and the tag
+  compares has no branch on a secret: nothing there needed the P-256 fix.
+  X25519 reran at 2.0 to 5.0. Later runs put P-256 signing back at |t| =
+  10 to 19 with `pick` branch-free; timed a step at a time, every secret
+  step is flat (r and s together 3.0 to 5.3 over 100,000) and the DER
+  encoding of the public r and s is the signal (100 to 212 alone), with
+  where an input lives adding more (std/p256's header has the numbers).
+  The driver now times P-256 against messages whose r and s match the
+  fixed one's DER lengths.
+  `bench/ct_timing.iyi` run with no argument, as CI runs every bench
+  program, checks itself instead: Welch's t against Python's `statistics`
+  on six fixed samples and every target run 40 times with no bound.
 - **`Server.serve` serves at most 1,024 connections at once and wants a
   whole request within five minutes.** It accepted every connection, and
   past the head's `timeout_ms` a body was bounded per read alone, so one
@@ -444,7 +850,428 @@
   slow scenarios. On Linux x86-64 with 12 threads the gate took 511
   seconds, from 1537, with all 236 copies caught.
 
+- **std/router redirects with 307 Temporary Redirect, as Go 1.26's
+  `ServeMux` does, not 301.** Both of the router's own redirects - `/x`
+  to a registered `/x/`, and a path with `.`, `..` or `//` to its cleaned
+  form - answer 307 with the same `Location`, the query kept. Go's
+  reasons, given when it made the change: a client may turn a POST it is
+  sent on by a 301 into a GET and drop its body, where a 307 is sent again
+  as it was; and a client may keep a permanent redirect for good, though
+  the redirect is the mux's and a pattern registered later may answer the
+  path. Go's release notes name the trailing-slash redirect; its
+  `server.go` answers the cleaned path with 307 too, and the router
+  follows the code. The status is fixed, not an option.
+  `bench/std_router_exercise.sh` reads `go version`: under Go 1.26 or
+  later Go's answers must be the router's line for line; under 1.22 to
+  1.25 Go's 301s are read as 307s, the gate prints a sentence naming
+  that difference and how many redirects it covers, and any other
+  difference still fails. Go's program prints every redirect's status
+  with its `Location`, so a target is compared under either Go, and a
+  copy of the router that answers 301 is among the broken copies the gate
+  must catch. CI's Go "stable" (go1.27.3) had failed the gate on each of
+  the tables' 13 redirects, the router answering 301.
+
 ### Fixed
+
+- **`Location.local` no longer panics with `arithmetic overflow` on
+  Windows in a zone east of UTC, or in one with daylight time** (#133).
+  `TIME_ZONE_INFORMATION`'s `Bias`, `StandardBias` and `DaylightBias` are
+  signed LONGs, and they were read unsigned and then converted: Turkey's
+  Bias of -180 was 4294967116 and the conversion panicked, so
+  `Time.local` ended the program unless `TZ` was set. They are read as
+  the 32 bits' two's complement now. The decoding is
+  `Location.read_windows_zone(name, bytes)`, pure and public, so
+  `bench/std_time_exercise.iyi` feeds it hand-made structs for Turkey,
+  India, UTC, Eastern, Newfoundland and AUS Eastern on every platform and
+  checks each offset, name and 2024-2030 transition against Python's
+  zoneinfo; a broken copy reading the bias unsigned is caught. Bytes that
+  are no zone - the wrong size, a thirteenth month, a bias of a day or
+  more - are a `LocationError`, and `Location.local` answers UTC for them.
+
+- **On Windows, `IyiSocket.connect` to an address keeps its `timeout_ms`
+  (#131).** The handshake is waited for inside `ConnectEx`, and that park
+  had no deadline, so the bound was read only by a wait that came after
+  the kernel had given up: a connect to 10.255.255.1, which nothing
+  answers, with a 2000 ms bound answered "timed out" after 21,043 ms on
+  the reporter's machine. The park now carries the bound; at the deadline
+  the scheduler cancels the `ConnectEx` with `CancelIoEx` and the
+  cancellation's completion wakes the connect, so its OVERLAPPED is never
+  left to the kernel, and the connect answers a `SocketError` whose
+  `timed_out?` is true. A handshake that finished before the cancel
+  reached it is a connection, and a cancelled task still answers
+  `Cancelled`. A name with one address, and the resolver's TCP query, went
+  the same way and are bounded the same. Linux and darwin were not
+  affected: their connect answers "in progress" at once and the wait after
+  it holds the bound (10.255.255.1 with 2000 ms timed out after 2,002 ms
+  on Linux, x86-64). The workaround of running the connect in a task and
+  cancelling it at the deadline, as iyi-pg does for `connect_timeout`, is
+  no longer needed. `bench/socket_exercise` connects to 10.255.255.1 with
+  2000 ms on every platform and, on Windows, to a loopback port nobody
+  holds with 500 ms, which Windows takes about 2 s to refuse; the copy
+  without the bound fails it on Windows, and on Linux and darwin it is
+  the same program.
+- **`JSON.to_json` writes a union-typed value, and `JSON.from_json` reads
+  one (#135).** `JSON.to_json(1.as(Int32 | String))`, an
+  `Array(Int32 | String)` and a `Hash(String, Int32 | String)` did not
+  build ("undefined method 'to_json' for Int32 (compile-time type is
+  (Int32 | String))"), so JWT claims such as `{"sub" => "1", "sv" => 0,
+  "exp" => 1792618239_i64}` could not be encoded: the union reached
+  `write_value`'s `ToJSON` overload as one type. A union is now written by
+  the member it holds, through that member's own overload, called as
+  `Object#__json_write` so it runs as the member's own type: an enum, a
+  float, a bool, a derived or `ToJSON` type, an array, a hash and an `Any`
+  each write as they do alone. Naming the members in a macro on `Union`
+  was tried first; from std/json that refused `Std::Time::Time` as not
+  imported (SPEC.md R-1) and a program's private type as an undefined
+  constant. Reading picks the member by the kind of value there, in
+  Crystal's order for integers (`Int64`, `UInt64`, `Int32`, `UInt8`, then
+  `Float64`), an array into the `Array` member, an object into the `Hash`
+  member and the rest into the one other member. Crystal tries each member
+  until one does not raise; with no rescue to go back with, a union that
+  would need that, such as two derived types or two arrays, is refused
+  when it is compiled, naming them. `bench/std_json_exercise.sh` checks
+  the issue's cases, JWT claims both ways, every kind of member against
+  hand-written text and against each member written alone, union fields of
+  a derived type, two refusals and the compile-time refusal; its broken
+  copies write a union as one type (the issue's error back), drop the enum
+  members where a union is written, and drop the `Int32` member where one
+  is read. std/json still writes no `Time`, alone or in a union.
+- **A frame larger than a page no longer steps over a fiber stack's guard
+  page (issue #130): every function the compiler emits on Linux and
+  darwin probes its frame.** A fiber's stack has one 4 KiB guard page
+  under it, and a frame is carved with one `sub`; a larger frame written
+  first at its low end landed past the guard, in whatever was mapped
+  under the stack, and the program went on with that memory overwritten.
+  On Linux a task whose stack had 128 KiB of writable memory placed under
+  it ran five 64 KiB frames deep and finished, in each of the 19 runs of
+  20 that could place that memory. Each
+  function now carries LLVM's `"probe-stack"="inline-asm"`: a frame over
+  a page is touched a page at a time from the top before it is used, so
+  the guard is the first page past the end anything touches and the
+  overrun is `iyi: panic: stack overflow`, as a deep recursion is.
+  Windows already had this: there a frame over a page calls `__chkstk`,
+  which touches each page under the TEB's StackLimit in order, and the
+  attribute is not set. Frames of a page or less are unchanged, and a
+  P-256 signature check timed the same in `--release` (54 and 51 us
+  before, 53 and 53 after; two runs, each the best of five rounds of
+  200). `bench/panics.sh`
+  holds a 64 KiB frame over writable memory under a fiber's stack to the
+  stack-overflow sentence, on Linux, darwin and Windows.
+- **A debug build's chain check takes a third of the stack it did, and
+  the issue's program runs 46 frames down in a task where it ran 27
+  (issue #130).** In a debug build every value an expression makes is a
+  stack slot of its own, and `Certificate`, a 472-byte struct, was copied
+  into one wherever it passed: `Certificate.parse`'s frame was 31,832
+  bytes, `X509.grow`'s 13,640, and the issue's padding frames 8,360, of
+  which 3,344 were for the two certificates they named. `Certificate` is
+  a class now (see
+  Changed), and `EcdsaP256.check` is three frames rather than one of
+  4,696 bytes. Measured on Linux x86_64 in a task, `X509.verify` of a
+  two-certificate P-256 chain took 35,608 bytes of stack and takes
+  11,768, and `Certificate#signed_by?` 14,456 and 10,680; the issue's
+  program ran 27 frames down in a task before overflowing and runs 46.
+  The issue's figure of 230 KB for one check was mostly those padding
+  frames, which held 8 KB each rather than the 1 KB they were written
+  as. `bench/std_x509_exercise.iyi` checks the issue's signature and
+  chain inside a task 32 such frames down, which the old code could not
+  do past 16 and 15.
+- **`Math.max` and `Math.min` take two integers, of any width, and any
+  pair `<` compares; a call with a literal no longer reads the literal
+  where the call failed on another argument (#136).** They had a Float64
+  and a Float32 overload only, and `Math.max(2, x)` with `x : Int32` said
+  "ambiguous call, implicit cast of 2 matches all of Float64, Float32",
+  as did `Math.max(2, 5)`. Each is now one overload, `(a : T, b : T)`:
+  two doubles or two singles keep the old answers, the number when one
+  side is NaN and -0.0 below 0.0, and every other type compares with `<`
+  and answers the first argument on a tie, as the other library's
+  untyped `Math.max` does. An integer overload beside the float ones
+  would have tied with them wherever an integer variable can widen to a
+  double. `Math.max(2, page - 1)` is the Int32 2, `Math.max(2, 2.5)` the
+  Float64 2.5, and `Math.max(n, 0.5)` with `n : Int32` a Float64 as
+  before; `Math.max(n, m)` with `n : Int32` and `m : Int16`, which
+  widened both to Float64 and answered 5.0, is now the Int32 5.
+  `Math.copysign` takes any two numbers as Float64s, as the other
+  library's does: `copysign(3, -1)` was the same ambiguous call. Three
+  compiler faults were under the message. A literal records each type an
+  overload casts it to, and the record is what calls a call ambiguous;
+  an overload that failed on another argument left its record, so the
+  Float32 overload, which `x` rules out, made the Float64 one look tied
+  (the record is now put back when an overload fails). The mismatch
+  message took a literal cast to the parameter's type for a mismatch, so
+  `Math.max(2, x)` with `x : Int64` said "expected argument #1 ... not
+  Int32" about the `2`; it now names argument #2 and the Int64. And a
+  free variable was bound by the first argument restricted to it, so
+  `Math.gcd(4, n)` with `n : Int64` bound T to Int32 and refused `n`
+  while `Math.gcd(n, 4)` was an Int64; an overload with free variables
+  that fails in the written order is now tried with each later argument
+  bound first, so T is the first argument's type the others cast to, and
+  a call that matched before keeps its type. `bench/std_math_exercise`
+  checks integer max and min, Int64's ends, negatives, UInt8s, a literal
+  either side of an Int64 and a UInt8, an integer beside a double,
+  Strings and `copysign(3, -1)`, and catches three more broken copies: max
+  and min answering the other argument, and max of doubles compared
+  without the NaN rule. `spec/compiler/semantic/iyi_spec.cr` holds the
+  three compiler cases and that `pick(2, 5)` against a Float64 and a
+  Float32 overload is still ambiguous.
+- **A package's module has one name in the package's own build and in a
+  consumer's, so a `pub macro` can name it (#132).** A consumer's build
+  puts a package's modules under the package's name, and the package's
+  own build put them at the root: `codec.iyi` of `github.com/x/iyi-web`
+  was `::Codec` in `iyi run inside.iyi` and `::IyiWeb::Codec` in the
+  application requiring it, so a `pub macro` - which expands in the
+  caller's file and so names a module absolutely - had no spelling that
+  built in both, and a library had to keep its modules in `iyi_web/`.
+  A program whose root holds an `iyi.mod` now names its own modules the
+  way a consumer does, through the same function: `codec` and
+  `iyi_web/codec` are `IyiWeb::Codec`, `web/codec` is
+  `IyiWeb::Web::Codec`, in both builds. A `.iyimod` records the package
+  name it was written under (format v57), so `--use-iyimod` reads a
+  module back under the same name, and a manifest that renames the
+  package makes the artifact stale. `::Codec`, or a bare `Codec` nothing
+  else answers, still builds the package, as `IyiWeb::Codec`, with a
+  warning naming the new spelling, which `iyi fix` writes where a file
+  says it; inside a macro the warning names the macro and its line.
+  In a consumer, `::Codec` is refused naming `::IyiWeb::Codec`, as `Codec`
+  already was. What a type's name prints is `IyiWeb::Codec` in both
+  builds now. `spec/compiler/iyi_import_spec.cr` builds the issue's two
+  projects in four layouts, from source and from artifacts, and
+  `bench/packages_resolve.sh` runs the first one end to end, `iyi fix`
+  included.
+- **A rebuild that writes and reads artifacts links when a
+  `derive serializable` type lives in a module importing a package
+  (#134).** The second `iyi build --emit-iyimod mods --use-iyimod mods`
+  ended on an undefined `*Lib::Thing::Item#to_json<Std::Json::Builder>:Nil`
+  (LNK2019 on Windows), referenced from `std/json`'s artifact. A def with
+  an untyped parameter, `std/json`'s `write_or_null(val, b : Builder)`,
+  travelled as a header, so the first build's instantiation at `Item`
+  went into `std/json`'s object code and called `Item#to_json` from
+  there; the package has no artifact, so the second build compiled
+  `lib/thing` from source, and nothing in it called `to_json`. Such a def
+  is now the caller's to compile, as a `forall` def is: its body travels,
+  the producer compiles each instantiation into the unit that called it,
+  and `std/json`'s object code names no `Item`. A parameter written as a
+  trait, a module or a class with subclasses is the same edge with a
+  bound: `kit/lib`'s `area_of(x : Shape)` called at `lib/thing`'s `Tri`
+  left `Lib::Thing::Tri#area` undefined in a later program that no longer
+  called it, and its instantiations are now the caller's too. Asked of the
+  def as written, so a record's `new(kind: …)`, whose named-argument
+  expansion has untyped parameters, keeps its symbol; `iyi bind`'s fill
+  build keeps the old answer, since a boundary declares such a parameter
+  at the type its keep file passes. SPEC.md IV.1g records the choice, and
+  the case it leaves to III.6: a value held as a trait, whose dispatch
+  names every implementor the producing build had. The `untyped` and
+  `bounded` cases of `bench/samples_roundtrip.sh` build the two layouts
+  twice each; the old compiler's second build failed to link in both.
+
+  chain inside a task under 100 frames that each hold a kilobyte array
+  and name the certificates, as the issue's did - 124 to 128 KB of
+  stack on Linux, darwin and Windows, at least what the issue's 24
+  frames hold on Windows - where the old code held 24 such frames at
+  most. The issue's own `StaticArray(UInt8, 1000).new` frame is 10,912
+  bytes on darwin arm64 in a debug build, against 5,104 on Windows: the
+  compiler copies that returned value a byte at a time through stack
+  slots on aarch64, which this change does not touch.
+- **`bench/std_tls_exercise.sh` no longer times Python's first
+  certificate check on a Windows runner against the server's handshake
+  deadline.** The first Python ssl handshake against the Ed25519 server
+  failed twice on Windows CI (jobs 117686264720 and 118404949498): the
+  server's deadline ran out waiting for the client's Finished, and
+  Python's `sendall` met the reset (10053). The server and the runtime
+  were not at fault: traced on the same clock, the server's flight
+  reached Python within a millisecond and every wait of the runtime's woke
+  promptly, while Python's own step from its Certificate to its
+  CertificateVerify took up to 1,598 ms on runners replaying those
+  shards, against 0.4 to 1.1 ms once warm. That step is the first read of
+  OpenSSL's X.509 code from disk on the runner. The gate now reads
+  Python's `_ssl`, libssl and libcrypto in and runs one handshake over
+  memory before its served section, and prints how long that took: 6,301
+  and 2,354 ms on two loaded runners, after which the timed check took
+  0.6 ms on both.
+- **A new `https://` connection between std/http's ends no longer waits
+  80 ms, nor 40 ms to another server: std/socket sets TCP_NODELAY, and
+  std/tls writes a flight in one write.** The TLS client wrote its
+  ChangeCipherSpec and Finished as two writes; under Nagle's algorithm
+  the Finished waited for the first to be acknowledged, and the server,
+  waiting for the Finished, delayed that ACK 40 ms (strace showed the
+  Finished leave 40 ms after the ChangeCipherSpec, and so did the
+  server's read of it); std/http's server then wrote its tickets and its
+  answer apart and waited 40 ms more for the client's ACK. Every
+  connected and accepted TCP socket now has TCP_NODELAY, as Go's net
+  package sets its own, through each platform's own call (the raw
+  syscall on Linux, libSystem's `setsockopt` on darwin, ws2_32's on
+  Windows); `IyiSocket#nodelay=` turns Nagle back on, and `nodelay?`
+  reads the option. std/tls writes the client's ChangeCipherSpec,
+  Certificate, CertificateVerify and Finished in one write, the server's
+  ServerHello, ChangeCipherSpec and encrypted flight in one, and a
+  ClientHello with its early data in one. A streamed answer on a kept
+  connection - the head, then each chunk - waited 40 ms per answer the
+  same way. Measured on loopback, --release, medians of 200, the middle
+  of three runs, before and after: a GET on a new connection over TLS
+  82.89 ms to 1.07 between std/http's ends and 42.00 to 1.10 from its
+  client to OpenSSL's s_server; curl to std/http's TLS server 1.89 to
+  1.72 and over plain HTTP 0.129 to 0.128 ms; std/http's client over
+  plain HTTP 0.119 to 0.108 on a new connection and 0.062 to 0.058 on a
+  kept one, and over a kept TLS connection 0.114 to 0.059. wrk -t2 -c50
+  against `bench/std_http_server.iyi` answered 76,241 to 79,063
+  requests a second for a whole body and 1,211 to 10,702 for a streamed
+  one (middle of three, 5 s each). Held by `bench/socket_exercise.sh`
+  (TCP_NODELAY read back by `getsockopt` on a connected and an accepted
+  socket, and `nodelay = false` reading back off; copies that leave
+  either end with Nagle on, or a setter that sets nothing, caught) and
+  by `bench/std_http_exercise.sh`'s loopback latency section
+  (`bench/std_http_latency.iyi`, --release): the median of 50 GETs under
+  15 ms - plain and TLS on new connections, a streamed answer on a kept
+  connection, a TLS client with Nagle back on, the same against s_server,
+  curl against std/http's TLS server - and, where strace runs, no
+  ChangeCipherSpec written alone by either end; copies with Nagle left
+  on (41 ms), the client's flight in two writes (42 ms with Nagle on) and
+  the server's in separate writes (two lone ChangeCipherSpecs) are each
+  caught at the line that names it. Run with no arguments, as CI runs
+  every bench program, `bench/std_http_latency.iyi` checks alone
+  TCP_NODELAY at both ends and the streamed answer under the bound, and
+  ends ALL CHECKS PASSED; the copy with Nagle left on fails it too.
+- **std/http closes a connection by lingering, so an answer is no
+  longer lost to a client still sending (RFC 9112 section 9.6).** A
+  server that closed with the client's bytes unread - a body the block
+  never read, pipelined requests behind an answer that says `close`, the
+  rest of a refused request - made the kernel reset the connection, and
+  the reset threw away what the server had yet to send (Linux) or what
+  the client had yet to read (Windows). Closed at once, in 50 runs of
+  each case on Linux (`bench/http2_exercise.iyi serve-close`, a 1 MB
+  answer to an 8 MiB body it does not read), Python's http.client lost
+  the answer in every run, plain and over TLS, its send reset before it
+  read; under `Connection: close` a client reading as it sent lost the
+  end of the answer in every run, as did curl and the first of 200
+  pipelined requests; past the megabyte a kept connection reads past,
+  every curl run ended in a reset. Now a connection the server wrote last
+  on shuts its sending half (close_notify first over TLS), reads and
+  drops what the client still sends until it closes - while it comes a
+  second apart at most (`Conn::LINGER_GAP_MS`), for ten seconds
+  (`LINGER_MS`) and 64 MiB (`LINGER_BYTES`, `Server::MAX_BODY`) at most,
+  so a closing connection holds its task and its place among
+  `max_connections` no longer - and then closes: nginx's
+  lingering_close; Go's server half-closes the same way and then sleeps
+  500 ms without reading. HTTP/2 does the same after its GOAWAY. A
+  connection that timed out, or whose client said `close` and sent
+  nothing past its request, closes at once, as nothing of the client's
+  is left to come. The client closes the same way: an idle connection
+  half-closed and its server's end awaited, an answer abandoned partway
+  closed at once. After the fix every case answered whole in 50 runs of
+  50, plain and over TLS. `bench/std_http_exercise.sh`'s "a close while
+  the client still sends" holds it: Python reading as it sends, Python's
+  http.client, 200 pipelined requests and curl, 5 runs of each
+  (`CLOSE_RUNS=` for more), the cases side by side, plain and over
+  std/tls, every answer whole, no reset, and the end within half
+  a second of the answer; and the client's close against a Python server
+  that holds its end back 300 ms. Broken copies are caught by name: the
+  linger removed (http.client reset, and the client's close returning at
+  once), the sending half never shut (the end a second late), TLS's
+  drain removed, TLS's close without close_notify, and the client
+  closing TLS at once; the three refusals' and the GOAWAY's own copies
+  now break the new sites. Measured with `wrk -t2 -c50 -d5s`, release,
+  median of three beside the old code: keep-alive requests 76,230 req/s
+  (77,515 before), clients that say `close` 59,096 (57,685), and a
+  server that says `close` to clients that did not 46,714 (62,328) - the
+  price of each such close's half-close and its wait, parked, for the
+  client's end. The first cut bounded the whole linger to one second,
+  and a body slower than that to arrive was cut off: over TLS on a
+  Windows runner Python's http.client waited out its 20 s timeout in
+  every run (CI job 118872747607), and on Linux, the server's CPU shared
+  with six busy loops, it was reset with 4.75 to 7.25 of its 8 MiB
+  sent in six runs; with nginx's two bounds - a gap between reads
+  (lingering_timeout) and a whole (lingering_time) - every run there was
+  whole, the slowest in 5.3 s. http.client's case now says, when it
+  fails, how much of the body it had sent and when - and that said the
+  rest: on Windows it stalled with 768 KiB of 8 MiB sent, plain and over
+  TLS, the server still writing its megabyte of answer. http.client
+  reads nothing until its body is sent, and the server writes its answer
+  before it reads past the body, so an answer past what the sockets'
+  buffers hold leaves each end waiting on the other whatever the close
+  does - Windows' loopback holds less than a megabyte, Linux's stalls
+  the same at 16 MB. That case's answer is 8 KiB now; the reset it is
+  for comes at any size. A client in this section gives up after five
+  seconds of no progress (curl too), and a case stops at its first
+  failure, so a failing case costs seconds: the run that found this
+  waited 20 s a run and took its job to the 90-minute cap. A curl case
+  that fails says what curl saw: the last lines of its `-v
+  --trace-time` trace and its `-w` timings, `--max-time 15` stopping it
+  before the gate's 30 s do - once on Windows, over TLS, a run waited
+  out the 30 s with nothing to show (CI job 119211068616).
+- **std/tls closes gracefully (RFC 8446 section 6.1).**
+  `TlsConnection#close_write` sends close_notify and shuts the socket's
+  sending half (`IyiSocket#close_write`), and reading goes on until the
+  peer's own close_notify; `write` and `key_update` are refused after
+  it. `close` is `close_write`, then what the peer still sends read and
+  dropped until its close_notify or the socket's end - while it comes a
+  second apart at most (`DRAIN_GAP_MS`), for ten seconds (`DRAIN_MS`)
+  and 64 MiB (`DRAIN_BYTES`) at most - and then the socket
+  closed, where it closed at once after its close_notify and a peer
+  still sending was reset. Nothing is waited for once the peer's
+  close_notify has come. `abort` still closes at once. TLS 1.2 has no
+  half-close: RFC 5246 section 7.2.1 has a close_notify answered by one's
+  own and the connection closed, pending writes discarded, so once a 1.2
+  peer's close_notify has been read `write` is refused; in 1.3 it goes
+  on. `bench/std_tls_client.py` holds the server to it: close-half (the
+  socket's end within half a second of the server's close_notify, and
+  records sent after it read past, not reset), peer-close (1.3: written
+  to after this side's close_notify), 12-peer-close (1.2: nothing but
+  the server's close_notify after this side's) and 12-close-half.
+  Broken copies of the drain, the half-close, the close_notify and each
+  version's write rule are caught at those scenarios. The drain decrypts
+  what it reads, to see the close_notify: 8 MiB took 0.04 s in a release
+  build and 0.21 s in a plain one.
+- **A TLS server stopped while a client keeps a connection to it no longer
+  panics, and ends that connection with close_notify.** `Server.serve`
+  closes the sockets of the connections it waits on when its listener
+  closes. A kept-alive TLS connection's own task then sent close_notify
+  on that closed socket, and `IyiSocket#write`, which refuses a closed
+  socket by panicking, printed "iyi: panic: socket is closed" while the
+  program went on to exit 0: once each for a kept HTTP/1.1 and a kept
+  HTTP/2 connection over TLS, and once more for a TLS upgrade's protocol
+  writing its goodbye. Python's ssl, holding such a connection with
+  `suppress_ragged_eofs=False`, read an end without close_notify
+  (SSLEOFError). Now a stopping server sends close_notify on each TLS
+  connection waiting between requests, shuts its sending half
+  (`TlsConnection#close_write`) and then closes it
+  (`Conn#close_for_stop`, the write held to 100 ms against a client that
+  reads nothing) - without the drain of the lingering close, which could
+  hold the stop up to ten seconds for each connection whose client keeps
+  sending; one an upgrade handed over is its protocol's to write
+  on and is closed alone, as before. std/tls takes a socket closed under
+  a connection for the connection's end: `TlsConnection#closed?` says so,
+  and a read, a write, a KeyUpdate or close_notify answers a `TlsError`
+  instead of reaching the socket - so a wss:// protocol that asks
+  `closed?` before its goodbye, as std/websocket does, is told.
+  `IyiSocket#write`'s own contract is unchanged. Held by
+  `bench/std_http_exercise.sh` with `bench/std_http_stop.iyi`: std/http's
+  clients keeping HTTP/1.1 and HTTP/2 over TLS, HTTP/1.1 and h2c in the
+  clear, and an upgrade each way, while the server stops - exit 0, no
+  panic printed, both upgrades told "closed" - and Python's ssl reading
+  close_notify on its kept connection; copies without the write's check
+  (a panic printed), with `closed?` blind to the socket (the TLS
+  upgrade's goodbye written, and refused) and with a stop that sends no
+  close_notify (SSLEOFError) are each caught there. Run with no
+  arguments, as CI runs every bench program, `bench/std_http_stop.iyi`
+  holds the iyi half alone, under a test PKI of its own: a std/tls client
+  waiting on the stop reads close_notify, as Python's ssl does.
+- **A chunk freed by the program while the lazy sweep walks past it is
+  not handed out twice.** A chunk the last mark kept, freed before the
+  sweep of its arena reached it, went straight onto the thread's own
+  list while a sweep slice on another thread could be between reading
+  its entry and its colour: the slice took it for an unmarked object,
+  dead, and linked it into its batch as well. Freed between the slice's
+  read and its write, it lost its free flag instead. Windows' CI printed
+  "run 2 of 10 lost a chunk kept beside chunks freed" and then died of a
+  memory fault. Such a free now takes the runtime lock and waits out any
+  slice of that arena in flight; every other free keeps the lock-free
+  path, one load dearer (an alloc+free pair 3.4 ns before, 3.5 after,
+  release). Measured on four cores beside two busy loops with
+  `bench/concurrent_mark.sh`'s bursts of frees, which now free chunks a
+  mark kept while a slice of their arena is in flight: the plain build
+  faulted in 4 runs of 1,000 and the release build in 108 of 1,000, and
+  0 of 1,000 each after. The gate also runs that program on a copy of
+  the prelude whose sweep waits at each kept chunk of a kilobyte or
+  more, and proves the copy with the old free fails by name.
 
 - **P-256 signing no longer branches on the nonce's digits.** The
   fixed-base table read is masked in the source, and in a release build
@@ -23182,7 +24009,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,456-line library and nothing else. Every other
+  written against iyi's own 22,509-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

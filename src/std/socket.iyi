@@ -11,19 +11,23 @@
 # dynamic NSS modules (libnss_dns, libnss_files), and resolver state, which destroys
 # the zero-undefined-symbol dependency floor (SPEC.md III.9).
 # So an address is parsed in pure iyi arithmetic ("localhost" is
-# 127.0.0.1, and a connect refused there is tried at ::1), and a host name
+# 127.0.0.1 and ::1, raced as a name's addresses are), and a host name
 # is iyi's own stub resolver's (`Resolver`, below): the hosts file first,
 # then the name servers the machine is configured with, over UDP and, for
 # an answer too long for a datagram, TCP - the same sockets this file
 # already makes, so Linux programs retain raw syscall purity (zero
 # undefined symbols) and Darwin programs only link standard socket
 # symbols provided by libSystem. The wire format and the configuration
-# files are `std/dns`'s. `listen` and `std/udp` still take addresses
-# only: a listener names its own interface, and a datagram's peer is
-# whoever the program already heard from. A socket listening on `::`
-# takes IPv6 alone on every platform (IPV6_V6ONLY): Linux's default is
-# both families and Windows' is IPv6 alone, and a program should not
-# change meaning with the machine it runs on.
+# files are `std/dns`'s; a resolver can ask DNS over TLS or over HTTPS
+# instead (`Resolver#encrypted`, std/secure_dns's upstreams), which
+# `connect` with that resolver then uses. `listen` and `std/udp` still
+# take addresses only: a listener names its own interface, and a
+# datagram's peer is whoever the program already heard from. A socket
+# listening on `::` takes IPv6 alone on every platform (IPV6_V6ONLY):
+# Linux's default is both families and Windows' is IPv6 alone, and a
+# program should not change meaning with the machine it runs on. A name
+# with more than one address is connected to by Happy Eyeballs (RFC
+# 8305): see `connect`.
 #
 # Concurrency:
 # On the targets that have the runtime (SPEC.md III.4), every socket is
@@ -46,6 +50,15 @@
 # as long as the peer does. The bound is per wait, not per call: a write
 # that parks three times may wait three times as long, and a write that
 # times out may have sent part of its bytes.
+#
+# Nagle:
+# A connected or accepted TCP socket has TCP_NODELAY set, as Go's net
+# package sets its own: a small write goes at once rather than waiting for
+# an earlier one's acknowledgement, which a peer delays - 40 ms at least
+# on Linux. A writer that would rather have its pieces joined turns Nagle
+# back on with `nodelay = false`, and joins what it can before writing
+# either way: std/tls writes a flight of records in one write, std/http a
+# head with a body it has whole.
 #
 # Errors:
 # What the other end or the network does is a value, not a panic: a
@@ -170,7 +183,8 @@ pub alias IPAddress = IPv4Address | IPv6Address
 # number for why - or, for a host name that could not be turned into an
 # address, the resolver's `DnsError`, and no number (`code` 0); or, for a
 # protocol layered on the connection (TLS), that protocol's own sentence,
-# and no number either.
+# and no number either; or, for a name whose addresses were all tried and
+# none connected, every one of them with how its attempt ended.
 pub struct SocketError
   getter operation : String
   getter code : Int32
@@ -178,6 +192,11 @@ pub struct SocketError
   getter dns_error : DnsError? = nil
   # What the protocol over the connection said went wrong; nil otherwise.
   getter layer_reason : String? = nil
+  # For a connect to a name that stood for more than one address: each
+  # address in the order it was tried and how its attempt ended -
+  # `[2001:db8::1]:443 timed out; 192.0.2.1:443 connection refused` - which
+  # `reason` answers. Nil for every other failure.
+  getter tried : String? = nil
 
   def initialize(@operation : String, @code : Int32)
   end
@@ -192,6 +211,16 @@ pub struct SocketError
   end
 
   def initialize(@operation : String, @code : Int32, @dns_error : DnsError?, @layer_reason : String?)
+  end
+
+  # A connect to a name none of whose addresses took the connection:
+  # *code* is what `refused?` and `timed_out?` read, and *tried* the
+  # sentence naming every address.
+  def self.every_address(operation : String, code : Int32, tried : String) : SocketError
+    SocketError.new(operation, code, nil, nil, tried)
+  end
+
+  def initialize(@operation : String, @code : Int32, @dns_error : DnsError?, @layer_reason : String?, @tried : String?)
   end
 
   # The host was a name, and no address came of it: `dns_error` says why
@@ -228,6 +257,9 @@ pub struct SocketError
   def reason : String
     if (layered = @layer_reason).is_a?(String)
       return layered
+    end
+    if (sentence = @tried).is_a?(String)
+      return sentence
     end
     if (dns = @dns_error).is_a?(DnsError)
       return dns.reason
@@ -384,6 +416,36 @@ pub class IyiSocket
     @write_timeout_ms = ms
   end
 
+  # Whether a small write goes at once (TCP_NODELAY) rather than waiting
+  # for an earlier one's acknowledgement, as Nagle's algorithm (RFC 896)
+  # has it wait. A connected or accepted TCP socket here sends at once, as
+  # Go's net package sets its own; `nodelay = false` turns Nagle back on
+  # for a program that writes in pieces it would rather have joined. With
+  # Nagle on, a write behind an unacknowledged one waited out the peer's
+  # delayed ACK, 40 ms on Linux: measured on loopback, --release, medians
+  # of 200, a GET on a new https:// connection took 82.89 ms between
+  # std/http's ends and 42.00 to OpenSSL's s_server, and takes 1.07 and
+  # 1.10 now; wrk against a server answering a streamed body went from
+  # 1,211 to 10,702 requests a second. A unix socket has no Nagle to turn
+  # off: it answers false and is left alone.
+  def nodelay=(on : ::Bool) : ::Bool
+    raise "socket is closed" if @fd < 0
+    IyiSocket.__sys_set_nodelay(@fd, on) unless @family == AF_UNIX
+    on
+  end
+
+  # Whether TCP_NODELAY is on, as the socket's option reads.
+  def nodelay? : ::Bool
+    raise "socket is closed" if @fd < 0
+    @family != AF_UNIX && IyiSocket.__sys_nodelay?(@fd)
+  end
+
+  # What every connected and accepted socket starts with: TCP_NODELAY, on
+  # TCP; a unix socket has no Nagle.
+  def self.__send_at_once(fd : Int32, family : Int32) : Nil
+    __sys_set_nodelay(fd, true) unless family == AF_UNIX
+  end
+
   def to_unsafe : Int32
     @fd
   end
@@ -411,36 +473,56 @@ pub class IyiSocket
   # blocking `poll` on the descriptor and never do, but the type is the
   # same, so a program reads the same everywhere.
 
-  # `localhost` is 127.0.0.1 and then ::1: a refused or unreachable
-  # 127.0.0.1 is tried again at ::1. Windows names both, ::1 first, and a
-  # dev server that binds `localhost` there is often on ::1 alone, where
-  # a connect to 127.0.0.1 only was "connection refused". 127.0.0.1 goes
-  # first because a listener here binds `localhost` there. Windows takes
-  # 2 s to refuse a connect, so a ::1-only listener is reached in 2 s
-  # (2017 ms measured) and a port nobody holds is refused in 4 s, not 2.
+  # A host name is resolved by the machine's resolver (`Resolver.system`);
+  # a name that does not resolve is a `SocketError` whose `unresolved?` is
+  # true and whose sentence names the host. It panicked, "cannot resolve
+  # address: \"example.com\"", for every name but `localhost`, so
+  # `HTTP.get("http://example.com/")` could not run.
   #
-  # Any other host name is resolved by the machine's resolver
-  # (`Resolver.system`) and its addresses tried in the order the resolver
-  # answers them - IPv4 first, then IPv6, as `localhost` is - until one
-  # connects; a name that does not resolve is a `SocketError` whose
-  # `unresolved?` is true and whose sentence names the host. It panicked,
-  # "cannot resolve address: \"example.com\"", for every name but
-  # `localhost`, so `HTTP.get("http://example.com/")` could not run.
+  # A name with more than one address is raced, Happy Eyeballs v2 (RFC
+  # 8305): the first address is tried, the next `ATTEMPT_DELAY_MS` later
+  # without waiting for the first to fail, or at once when an attempt
+  # fails, and so on down the list (`attempt_order`'s: IPv6 first when
+  # this machine has a route to it, the families alternating). The first
+  # handshake to finish wins, and every other attempt is cancelled and its
+  # socket closed before `connect` answers. The addresses were tried one
+  # after another, IPv4 first, each with the whole timeout: a name whose
+  # first address dropped SYNs cost all of *timeout_ms* - or the kernel's
+  # two minutes of retries, unbounded - before the second was tried. Now
+  # it costs the delay: 250 ms to a name whose first address is a full
+  # listen queue and whose second listens (`bench/std_dns_exercise.sh`,
+  # under a 5,000 ms bound).
   #
-  # *timeout_ms* bounds each address's handshake (-1: as long as the
-  # kernel waits, which on Linux is about two minutes of SYN retries for
-  # a host that drops them); one that runs out is a `SocketError` whose
-  # `timed_out?` is true, and the next address is tried.
+  # `localhost` is raced the same way, 127.0.0.1 and then ::1, without
+  # asking the routing table: a listener here binds `localhost` at
+  # 127.0.0.1, so it goes first, and Windows, which names ::1 first, has
+  # dev servers that bind ::1 alone. This replaces the rule that tried
+  # ::1 only after 127.0.0.1 refused: Windows takes 2 s to refuse a
+  # connect, so a ::1-only listener was reached in 2017 ms and a port
+  # nobody holds refused in 4059 ms, where now ::1 starts 250 ms after
+  # 127.0.0.1 whatever 127.0.0.1 is still doing.
+  #
+  # *timeout_ms* bounds the whole connect, every attempt together (-1: as
+  # long as the kernel waits, which on Linux is about two minutes of SYN
+  # retries for a host that drops them). It bounded each address's
+  # handshake, which a race has no use for: an attempt started 500 ms in
+  # would have run 500 ms past the caller's bound. A connect that runs out
+  # is a `SocketError` whose `timed_out?` is true. The name's lookup is
+  # outside it, held by the resolver's own `timeout_ms` and `attempts`.
+  #
+  # A name none of whose addresses connects is one `SocketError` that
+  # names each address in the order tried and how its attempt ended,
+  # `tried`: `cannot connect to example.com:443: [2001:db8::1]:443 timed
+  # out; 192.0.2.1:443 connection refused`. It answered the first
+  # address's failure alone. Its `code` is the first attempt's, or a
+  # timeout's when the time ran out first. A name with one address is
+  # connected to as an address is, and fails with that address's error.
   def self.connect(host : String, port : Int32, timeout_ms : Int32 = -1) : IyiSocket | Cancelled | SocketError
     raise "negative timeout: #{timeout_ms}" if timeout_ms < -1
     return connect_named(host, port, Resolver.system, timeout_ms) if named?(host)
+    return race(host, port, loopback, timeout_ms) if localhost?(host)
     addr, family = sockaddr(host, port)
-    got = connect_to(addr, family, endpoint(host, port), timeout_ms)
-    if localhost?(host) && got.is_a?(SocketError) && (got.refused? || got.unreachable?)
-      six = connect_to(make_sockaddr_in6(parse_ipv6("::1"), port), AF_INET6, endpoint(host, port), timeout_ms)
-      return six unless six.is_a?(SocketError)
-    end
-    got
+    connect_to(addr, family, endpoint(host, port), timeout_ms)
   end
 
   # The same, with a host name resolved by *resolver*: name servers, a
@@ -468,26 +550,240 @@ pub class IyiSocket
     found = resolver.resolve(host)
     return found if found.is_a?(Cancelled)
     return SocketError.new("resolve #{host}", 0, found) if found.is_a?(DnsError)
-    # The first failure is the one answered: it is the preferred family's,
-    # and the later ones are fallbacks that were tried because of it.
-    first = nil.as(SocketError?)
-    index = 0
-    while index < found.size
-      address = found[index]
-      got = if address.is_a?(IPv4Address)
-              connect_to(make_sockaddr_in(address, port), AF_INET, "#{endpoint(host, port)} (#{address})", timeout_ms)
-            else
-              connect_to(make_sockaddr_in6(address, port), AF_INET6, "#{endpoint(host, port)} (#{address})", timeout_ms)
-            end
-      return got unless got.is_a?(SocketError)
-      first = got if first.nil?
-      index = index + 1
-    end
-    first.as(SocketError)
+    race(host, port, attempt_order(found), timeout_ms)
   end
 
-  # Every address *host* stands for, by the machine's resolver: what
-  # `connect` tries, in the order it tries them. See `Resolver#resolve`.
+  # What `localhost` stands for, in the order `connect` tries it.
+  def self.loopback : Array(IPAddress)
+    [IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8).as(IPAddress), IPv6Address.new(0_u64, 1_u64).as(IPAddress)]
+  end
+
+  # RFC 8305's Connection Attempt Delay, the value its section 5
+  # recommends; it bounds the delay to 100 ms - 2 s, and the round-trip
+  # history that would move it within them is not kept here.
+  ATTEMPT_DELAY_MS = 250
+
+  # The order `connect` tries a name's addresses in (RFC 8305 section 4):
+  # one family's first address, then the other's, alternating, each family
+  # in the resolver's order, and the longer family's rest at the end.
+  # IPv6 goes first when this machine has a route to the first IPv6
+  # address - RFC 6724's first rule, asked the way glibc's getaddrinfo
+  # asks it, by connecting a UDP socket, which sends nothing - and IPv4
+  # first when it has none, so a machine without IPv6 does not start every
+  # connect with an attempt that cannot leave it. A name of one family is
+  # left in the resolver's order, and asks nothing.
+  def self.attempt_order(addresses : Array(IPAddress)) : Array(IPAddress)
+    four = [] of IPAddress
+    six = [] of IPAddress
+    addresses.each do |address|
+      if address.is_a?(IPv6Address)
+        six << address
+      else
+        four << address
+      end
+    end
+    return addresses if four.empty? || six.empty?
+    first = four
+    second = six
+    if routed?(six[0].as(IPv6Address))
+      first = six
+      second = four
+    end
+    ordered = [] of IPAddress
+    index = 0
+    while index < first.size || index < second.size
+      ordered << first[index] if index < first.size
+      ordered << second[index] if index < second.size
+      index = index + 1
+    end
+    ordered
+  end
+
+  # Whether this machine has a route to *address*: a UDP connect only
+  # looks the destination up and records it, and fails at once without a
+  # route (ENETUNREACH).
+  private def self.routed?(address : IPv6Address) : ::Bool
+    fd = __sys_dgram_socket(AF_INET6)
+    return false if fd < 0
+    connected = __sys_dgram_connect(fd, make_sockaddr_in6(address, 9), AF_INET6)
+    __sys_close(fd)
+    connected >= 0
+  end
+
+  # One address of *host*'s, connected to: a failure names the host and
+  # the address, `cannot connect to example.com:443 (192.0.2.1): ...`.
+  private def self.attempt(host : String, port : Int32, address : IPAddress, ms : Int32) : IyiSocket | Cancelled | SocketError
+    peer = "#{endpoint(host, port)} (#{address})"
+    if address.is_a?(IPv4Address)
+      connect_to(make_sockaddr_in(address, port), AF_INET, peer, ms)
+    else
+      connect_to(make_sockaddr_in6(address, port), AF_INET6, peer, ms)
+    end
+  end
+
+  {% if @top_level.has_constant?("IyiScheduler") %}
+    # *addresses*, in order, raced (see `connect`). The caller is the race:
+    # each attempt is a task of a group opened here, the caller waits on a
+    # channel for the next one to be in, with the time until the next
+    # attempt is due, or the deadline, as the bound on the wait, and it
+    # starts attempts as that time comes or a failure frees it. Tasks,
+    # not sockets polled from here, because a connect parks its caller
+    # until the handshake is over - on Windows inside `ConnectEx` itself,
+    # with no descriptor to poll - and the race must go on meanwhile.
+    #
+    # The deadline is kept here, not by each attempt: an attempt waits as
+    # long as the kernel does, and the ones still under way when the time
+    # runs out are cancelled with the rest. A cancelled attempt closes its
+    # own socket (`connect_to`); one that connected after the winner, in
+    # the same turn of the scheduler, is closed here, once the group has
+    # ended and no task can still write its answer. A cancelled caller
+    # cancels the group's tasks too (SPEC.md III.4.2), and answers
+    # `Cancelled` once they have ended.
+    #
+    # What the tasks cost: a connect, accept and close over the loopback
+    # took 19.3 us through `localhost`, raced, and 16.2 us to 127.0.0.1,
+    # not (best of eight rounds of 1,000, release). A name with one
+    # address is not raced, and pays nothing.
+    private def self.race(host : String, port : Int32, addresses : Array(IPAddress), timeout_ms : Int32) : IyiSocket | Cancelled | SocketError
+      raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+      return attempt(host, port, addresses[0], timeout_ms) if addresses.size == 1
+      count = addresses.size
+      outcomes = Array(IyiSocket | Cancelled | SocketError | Nil).new(count, nil)
+      done = Channel(Int32).new(count)
+      deadline = timeout_ms < 0 ? -1_i64 : Resolver.now_ms + timeout_ms.to_i64
+      winner = -1
+      started = 0
+      cancelled = false
+      out_of_time = false
+      group do |g|
+        running = 0
+        next_at = 0_i64
+        while true
+          now = Resolver.now_ms
+          if deadline >= 0_i64 && now >= deadline
+            out_of_time = true
+            break
+          end
+          if started < count && now >= next_at
+            start_attempt(g, outcomes, done, started, host, port, addresses[started])
+            started = started + 1
+            running = running + 1
+            next_at = now + ATTEMPT_DELAY_MS.to_i64
+            next
+          end
+          # Every address started, and every attempt failed.
+          break if running == 0 && started == count
+          wake = started < count ? next_at : -1_i64
+          wake = deadline if deadline >= 0_i64 && (wake < 0_i64 || deadline < wake)
+          finished = next_finished(done, wake < 0_i64 ? -1 : (wake - now).to_i32)
+          if finished.is_a?(Cancelled)
+            cancelled = true
+            break
+          end
+          next if finished.nil?
+          running = running - 1
+          if outcomes[finished].is_a?(IyiSocket)
+            winner = finished
+            break
+          end
+          # A failure starts the next attempt now, not when it was due.
+          next_at = 0_i64
+        end
+        g.cancel_children
+        0
+      end
+      index = 0
+      while index < count
+        outcome = outcomes[index]
+        outcome.close if index != winner && outcome.is_a?(IyiSocket)
+        index = index + 1
+      end
+      if winner >= 0
+        won = outcomes[winner]
+        return won if won.is_a?(IyiSocket)
+      end
+      return Cancelled.new if cancelled
+      every_address_failed(host, port, addresses, outcomes, started, out_of_time ? timeout_ms : -1)
+    end
+
+    # One attempt, a task of the race's group: its answer kept at *index*,
+    # and *index* sent once it is in. The task answers 0, not the outcome: a
+    # `SocketError` answered is a failure under the group's policy (SPEC.md
+    # III.4.3), and it would cancel the attempts still racing.
+    private def self.start_attempt(g : IyiGroup, outcomes : Array(IyiSocket | Cancelled | SocketError | Nil), done : Channel(Int32), index : Int32, host : String, port : Int32, address : IPAddress) : Nil
+      g.spawn do
+        outcomes[index] = attempt(host, port, address, -1)
+        done.send(index)
+        0
+      end
+    end
+
+    # The index of the next attempt that is in, nil when *ms* ran out
+    # first (-1: no bound), `Cancelled` when the caller was.
+    private def self.next_finished(done : Channel(Int32), ms : Int32) : Int32 | Cancelled | Nil
+      if ms < 0
+        got = done.receive
+        return got.is_a?(Int32) ? got : Cancelled.new
+      end
+      answer = nil.as(Int32 | Cancelled | Nil)
+      select
+      when got = done.receive
+        answer = got.is_a?(Int32) ? got : Cancelled.new
+      when timeout(ms)
+        answer = nil
+      end
+      answer
+    end
+  {% else %}
+    # Without the runtime there is no task to race in: the addresses are
+    # tried one after another in the same order, each with the whole
+    # *timeout_ms*, and fail the same way.
+    private def self.race(host : String, port : Int32, addresses : Array(IPAddress), timeout_ms : Int32) : IyiSocket | Cancelled | SocketError
+      raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+      return attempt(host, port, addresses[0], timeout_ms) if addresses.size == 1
+      outcomes = Array(IyiSocket | Cancelled | SocketError | Nil).new(addresses.size, nil)
+      index = 0
+      while index < addresses.size
+        got = attempt(host, port, addresses[index], timeout_ms)
+        return got unless got.is_a?(SocketError)
+        outcomes[index] = got
+        index = index + 1
+      end
+      every_address_failed(host, port, addresses, outcomes, addresses.size, -1)
+    end
+  {% end %}
+
+  # The one error for a race nobody won: each address and how its attempt
+  # ended, in the order tried - its own failure, `timed out` for one still
+  # under way when the time ran out, `not tried` for one whose turn never
+  # came. *ran_out* is the timeout that ended the race, -1 when every
+  # attempt failed on its own; the code is then a timeout's, and the first
+  # attempt's otherwise, the most preferred address's failure.
+  private def self.every_address_failed(host : String, port : Int32, addresses : Array(IPAddress), outcomes : Array(IyiSocket | Cancelled | SocketError | Nil), started : Int32, ran_out : Int32) : SocketError
+    parts = [] of String
+    code = 0
+    index = 0
+    while index < addresses.size
+      outcome = outcomes[index]
+      said = if index >= started
+               "not tried"
+             elsif outcome.is_a?(SocketError)
+               outcome.reason
+             else
+               "timed out"
+             end
+      code = outcome.code if index == 0 && outcome.is_a?(SocketError)
+      parts << "#{endpoint(addresses[index].to_s, port)} #{said}"
+      index = index + 1
+    end
+    operation = "connect to #{endpoint(host, port)}"
+    return SocketError.every_address(operation, code, parts.join("; ")) if ran_out < 0
+    SocketError.every_address(operation, SocketError.timed_out(operation).code, "timed out after #{ran_out} ms: #{parts.join("; ")}")
+  end
+
+  # Every address *host* stands for, by the machine's resolver, in the
+  # resolver's order (see `Resolver#resolve`); `connect` tries them in
+  # `attempt_order`'s.
   def self.resolve(host : String) : Array(IPAddress) | DnsError | Cancelled
     Resolver.system.resolve(host)
   end
@@ -506,15 +802,19 @@ pub class IyiSocket
 
   # A connect to *addr*, waiting at most *ms* milliseconds for the
   # handshake (-1: as long as the kernel does). The resolver's TCP query
-  # is the caller with a bound; `connect` waits as the kernel does, as it
-  # always has.
+  # and `connect` to an address are its callers with a bound; a race's
+  # attempts wait as the kernel does, and the race keeps the bound. The
+  # bound reaches `__sys_connect` as well as the wait after it, because
+  # on Windows that call is the wait: it parks in `ConnectEx` until the
+  # handshake is over.
   def self.connect_to(addr : Pointer(UInt8), family : Int32, peer : String, ms : Int32 = -1) : IyiSocket | Cancelled | SocketError
     fd = __sys_socket(family)
     return SocketError.new("create a socket", __sys_code(fd.to_i64)) if fd < 0
     __sys_no_sigpipe(fd)
+    __send_at_once(fd, family)
     blocking = __sys_connects_blocking?(family)
     __sys_set_nonblock(fd) unless blocking
-    res = __sys_connect(fd, addr, family)
+    res = __sys_connect(fd, addr, family, ms)
     if res < 0 && !__sys_in_progress?(res)
       code = __sys_code(res.to_i64)
       __sys_close(fd)
@@ -550,6 +850,7 @@ pub class IyiSocket
       client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len), @family)
       if client_fd >= 0
         IyiSocket.__sys_no_sigpipe(client_fd)
+        IyiSocket.__send_at_once(client_fd, @family)
         IyiSocket.__sys_set_nonblock(client_fd)
         return IyiSocket.new(client_fd, @family)
       end
@@ -1267,7 +1568,8 @@ pub class IyiSocket
       LibC.accept(fd, addr.as(Void*), addrlen)
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    # *ms* is `connect_to`'s wait's: the call answers EINPROGRESS at once.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       LibC.connect(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
@@ -1313,6 +1615,18 @@ pub class IyiSocket
     def self.__sys_set_v6only(fd : Int32) : Int32
       val = 1_i32
       LibC.setsockopt(fd, 41, 27, pointerof(val).as(Void*), 4_u32)
+    end
+
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      LibC.setsockopt(fd, 6, 1, pointerof(val).as(Void*), 4_u32)
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4_u32
+      LibC.getsockopt(fd, 6, 1, pointerof(val).as(Void*), pointerof(len)) == 0 && val != 0
     end
 
     # One `pollfd` (fd, events, revents) for *ms* milliseconds, -1 for as
@@ -1364,7 +1678,7 @@ pub class IyiSocket
     end
 
     def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
-      __sys_connect(fd, addr, family)
+      __sys_connect(fd, addr, family, -1)
     end
 
     def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
@@ -1492,7 +1806,8 @@ pub class IyiSocket
       __sys3(SYS_ACCEPT, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    # *ms* is `connect_to`'s wait's: the call answers EINPROGRESS at once.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       __sys3(SYS_CONNECT, fd.to_i64, addr.address.to_i64, __sys_addr_size(family)).to_i32
     end
 
@@ -1535,6 +1850,18 @@ pub class IyiSocket
     def self.__sys_set_v6only(fd : Int32) : Int32
       val = 1_i32
       __sys5(SYS_SETSOCKOPT, fd.to_i64, 41_i64, 26_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      __sys5(SYS_SETSOCKOPT, fd.to_i64, 6_i64, 1_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4_i32
+      __sys5(SYS_GETSOCKOPT, fd.to_i64, 6_i64, 1_i64, pointerof(val).address.to_i64, pointerof(len).address.to_i64) == 0_i64 && val != 0
     end
 
     # `ppoll` on one descriptor for *ms* milliseconds - a timespec, or none
@@ -1589,7 +1916,7 @@ pub class IyiSocket
     end
 
     def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
-      __sys_connect(fd, addr, family)
+      __sys_connect(fd, addr, family, -1)
     end
 
     def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
@@ -1909,7 +2236,15 @@ pub class IyiSocket
       client.unsafe_to_i32
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    # The handshake is waited for here, inside `ConnectEx`, so *ms* bounds
+    # this park: the deadline cancels the operation (the poller's
+    # `wake_expired_sleepers`) and the cancellation's completion is what
+    # wakes this frame, so the OVERLAPPED and `sent` are no longer the
+    # kernel's when the park returns. Without the bound the park lasted as
+    # long as the kernel's own SYN retries, and `connect_to`'s wait, which
+    # holds *ms* on the POSIX arms, came after it was all over: issue #131
+    # measured 21043 ms for a 2000 ms bound to an address that drops SYNs.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       s = __sys_handle(fd)
       return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
       # `ConnectEx` is TCP's alone: a unix socket connects with the plain
@@ -1933,7 +2268,7 @@ pub class IyiSocket
       if answered == 0
         err = LibWs2_32.WSAGetLastError
         return -err if err != ERROR_IO_PENDING
-        parked = IyiScheduler.park_overlapped_current
+        parked = IyiScheduler.park_overlapped_current(ms)
         # A cancelled task answers Winsock's "under way", which for a connect
         # is WSAEWOULDBLOCK: the shared `connect` above then waits, and
         # `wait_writable` answers `Cancelled` for a cancelled task, which is
@@ -1951,7 +2286,13 @@ pub class IyiSocket
         # is 0 whether it succeeded or failed, so the operation's own result
         # is the only thing that knows: WSAECONNREFUSED comes back as -10061
         # and the shared `connect` refuses it by name.
+        #
+        # A handshake that finished before the deadline's cancel reached it
+        # is a connection whatever the clock says; one the cancel ended is
+        # the bound running out, and answers WSAETIMEDOUT, the code the
+        # POSIX arms' timed-out wait gives the same connect.
         result = __sys_overlapped_result(s, ov)
+        return -WSAETIMEDOUT if result < 0_i64 && IyiScheduler.current.timed_out
         return result.to_i32 if result < 0_i64
       end
       LibWs2_32.setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, Pointer(Void).new(0_u64), 0)
@@ -2056,6 +2397,20 @@ pub class IyiSocket
     def self.__sys_set_v6only(fd : Int32) : Int32
       val = 1_i32
       LibWs2_32.setsockopt(__sys_handle(fd), 41, 27, pointerof(val).as(Void*), 4)
+    end
+
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    # Winsock may answer the option in one byte (a BOOLEAN); the rest of
+    # the word is left 0, so any byte set reads as on.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      LibWs2_32.setsockopt(__sys_handle(fd), 6, 1, pointerof(val).as(Void*), 4)
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4
+      LibWs2_32.getsockopt(__sys_handle(fd), 6, 1, pointerof(val).as(Void*), pointerof(len)) == 0 && val != 0
     end
 
     def self.__sys_set_nonblock(fd : Int32) : Int32
@@ -2366,7 +2721,7 @@ pub class IyiSocket
       -1
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       -1
     end
 
@@ -2392,6 +2747,14 @@ pub class IyiSocket
 
     def self.__sys_set_v6only(fd : Int32) : Int32
       -1
+    end
+
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      -1
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      false
     end
 
     def self.__sys_set_nonblock(fd : Int32) : Int32
@@ -2443,6 +2806,29 @@ pub class IyiSocket
   {% end %}
 end
 
+# An encrypted way to a name server, asked by a resolver `Resolver#encrypted`
+# made instead of its plaintext servers: std/secure_dns's `DnsOverTls`
+# (RFC 7858) and `DnsOverHttps` (RFC 8484). The trait is here and they are
+# there because they speak std/tls and std/http, which import this module,
+# and R-1 refuses the cycle - as std/http's `CookieStore` is std/cookie's
+# to implement.
+pub trait DnsUpstream
+  # How a message names it: `dns.test (127.0.0.1:853) over TLS`.
+  abstract def label : String
+  # Whether its queries carry the ID 0: DNS over HTTPS's, which RFC 8484
+  # 4.1 asks for so that an HTTP cache sees one request for one question.
+  # The answer must carry the ID the query did all the same.
+  abstract def zero_id? : Bool
+  # The answer to each of *queries*, in their order, each one whole
+  # message as it came; or why there are none. *timeout_ms* bounds each
+  # wait on the server. An answer is matched to its query by the
+  # transport - by ID over one connection, by request over HTTP - and the
+  # resolver then reads it as it reads a datagram.
+  abstract def exchange(queries : Array(Bytes), timeout_ms : Int32) : Array(Bytes) | DnsError | Cancelled
+  # Its connections closed; the next exchange opens new ones.
+  abstract def close : Nil
+end
+
 # One name server: the address a call takes, its family, and how a
 # message names it (`192.0.2.1:53`).
 struct NameServer
@@ -2465,9 +2851,9 @@ end
 # resolver built with `new` or `from_config` asks exactly what it was
 # given, which is how a test asks a server it runs itself.
 #
-# `resolve` answers every address for a name, IPv4 first and then IPv6
-# (the order `connect` tries `localhost` in), each family in the order
-# the hosts file or the server gave it:
+# `resolve` answers every address for a name, IPv4 first and then IPv6,
+# each family in the order the hosts file or the server gave it;
+# `connect` races them in `IyiSocket.attempt_order`'s order:
 #
 # 1. An address, or `localhost` (127.0.0.1 and ::1: RFC 6761 6.3 keeps it
 #    off the network), is itself. Anything that is not a host name is
@@ -2480,6 +2866,16 @@ end
 #    with that failure - a server that timed out on `db.corp.example` must
 #    not turn the answer into `db.example`'s (musl's rule; glibc moves on).
 #
+# A and AAAA are asked one after the other, and `connect` starts its race
+# once both have answered. RFC 8305 section 3 asks both at once and
+# starts connecting on the A answer when AAAA is 50 ms behind it; that
+# makes a lookup answer in pieces, and saves the AAAA query's round trip
+# at most - 5 to 65 ms uncached for five names through systemd-resolved
+# on the machine this was written on, 0 to 1 ms cached (dig's query
+# times) - where the race saves what an address that drops SYNs costs,
+# the whole timeout. Asked in turn, an NXDOMAIN for A spares the AAAA
+# query, as it does for most of a search list's candidates.
+#
 # A query is one UDP datagram from a fresh socket (so a fresh source
 # port), with an ID from `Random::Secure`, to each server in turn, each
 # waited for `timeout_ms`, and the round repeated `attempts` times. A
@@ -2490,6 +2886,26 @@ end
 # the next server; NXDOMAIN is the answer. An answer that cannot be read
 # is ignored like a forgery, and is the failure reported if nothing
 # better arrives before the timeout.
+#
+# Encrypted:
+# `encrypted(upstreams)` is the same resolver - hosts file, search list,
+# `ndots`, timeout and attempts - asking `DnsUpstream`s instead of its
+# plaintext servers: DNS over TLS or over HTTPS, std/secure_dns's
+# `DnsOverTls` and `DnsOverHttps`. Each upstream is asked in turn, the
+# round repeated `attempts` times, as the servers are; A and AAAA go in
+# one exchange. An answer over one is held to more than a datagram is:
+# the ID and the question as ever, and no TC and no byte past the message,
+# since a stream has room for any answer and its frame is the message.
+# The plaintext servers are not asked at all, not even when every
+# upstream is down, unless the caller passes *plaintext_fallback*: RFC
+# 8310 5's strict profile, where a lookup that cannot be private fails,
+# is the default, because falling back hands the very question the
+# program meant to keep private to anyone on the path, and a program
+# that would rather have an answer says so. With *plaintext_fallback*
+# (the opportunistic profile) the plaintext servers are asked only when
+# no upstream could be: one that answered, SERVFAIL included, has spoken.
+# One task at a time per resolver with upstreams: an upstream holds its
+# connection, as an `HTTPClient` does.
 pub class Resolver
   RESOLV_CONF = "/etc/resolv.conf"
   HOSTS       = "/etc/hosts"
@@ -2501,6 +2917,12 @@ pub class Resolver
   getter attempts : Int32
   # The hosts file's text, read before any server is asked.
   getter hosts : String
+  # The encrypted upstreams asked instead of `nameservers`; none for a
+  # plaintext resolver.
+  getter upstreams : Array(DnsUpstream) = [] of DnsUpstream
+  # Whether `nameservers` are asked when no upstream could be (RFC 8310's
+  # opportunistic profile); false, the strict one, by default.
+  getter plaintext_fallback : Bool = false
 
   @servers : Array(NameServer)
 
@@ -2521,6 +2943,40 @@ pub class Resolver
       raise server if server.is_a?(String)
       @servers << server
     end
+  end
+
+  # This resolver asking *upstreams* instead of its plaintext servers,
+  # which are asked only with *plaintext_fallback*, and then only when no
+  # upstream could be (see the class).
+  def encrypted(upstreams : Array(DnsUpstream), plaintext_fallback : Bool = false) : Resolver
+    raise "an encrypted resolver asks at least one upstream" if upstreams.empty?
+    made = Resolver.new(@nameservers, @search, @ndots, @timeout_ms, @attempts, @hosts)
+    made.ask_upstreams_instead(upstreams.dup, plaintext_fallback)
+    made
+  end
+
+  def encrypted(upstream : DnsUpstream, plaintext_fallback : Bool = false) : Resolver
+    encrypted([upstream] of DnsUpstream, plaintext_fallback)
+  end
+
+  # The machine's resolver - its hosts file and search list - asking
+  # *upstreams*; its name servers only with *plaintext_fallback*.
+  def self.encrypted(upstreams : Array(DnsUpstream), plaintext_fallback : Bool = false) : Resolver
+    system.encrypted(upstreams, plaintext_fallback)
+  end
+
+  def self.encrypted(upstream : DnsUpstream, plaintext_fallback : Bool = false) : Resolver
+    system.encrypted(upstream, plaintext_fallback)
+  end
+
+  protected def ask_upstreams_instead(upstreams : Array(DnsUpstream), plaintext_fallback : Bool) : Nil
+    @upstreams = upstreams
+    @plaintext_fallback = plaintext_fallback
+  end
+
+  # Every upstream's connections closed.
+  def close : Nil
+    @upstreams.each { |upstream| upstream.close }
   end
 
   # A resolver from a parsed resolv.conf and a hosts file's text. A
@@ -2629,7 +3085,7 @@ pub class Resolver
     four = IyiSocket.read_ipv4(host)
     return [four.as(IPAddress)] if four.is_a?(IPv4Address)
     if IyiSocket.localhost?(host)
-      return [IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8).as(IPAddress), IPv6Address.new(0_u64, 1_u64).as(IPAddress)]
+      return IyiSocket.loopback
     end
     why = DnsName.why(host)
     return DnsError.new(DnsError::INVALID_NAME, host, "", why) if why.is_a?(String)
@@ -2680,14 +3136,22 @@ pub class Resolver
 
   # One fully qualified name's A and then AAAA records. NXDOMAIN for A
   # is NXDOMAIN for the name, and AAAA is not asked; an AAAA lookup that
-  # fails after A answered leaves the A records the answer.
+  # fails after A answered leaves the A records the answer. Over
+  # upstreams both questions go in one exchange - pipelined, over TLS -
+  # and the AAAA answer is read as if it had been asked second.
   private def lookup(name : String) : Array(IPAddress) | DnsError | Cancelled
-    four = records(name, DnsRecord::A)
+    early = nil.as(Array(Tuple(DnsMessage, String) | DnsError)?)
+    unless @upstreams.empty?
+      asked = ask_upstreams(name, [DnsRecord::A, DnsRecord::AAAA])
+      return asked if asked.is_a?(Cancelled)
+      early = asked
+    end
+    four = addresses(name, DnsRecord::A, early ? early[0] : nil)
     return four if four.is_a?(Cancelled)
     if four.is_a?(DnsError)
       return four unless four.no_address?
     end
-    six = records(name, DnsRecord::AAAA)
+    six = addresses(name, DnsRecord::AAAA, early ? early[1] : nil)
     return six if six.is_a?(Cancelled)
     found = four.is_a?(Array(IPAddress)) ? four : [] of IPAddress
     if six.is_a?(DnsError)
@@ -2699,41 +3163,78 @@ pub class Resolver
     four.is_a?(DnsError) ? four : DnsError.new(DnsError::NO_ADDRESS, name)
   end
 
+  private def addresses(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Array(IPAddress) | DnsError | Cancelled
+    got = records(name, type, first)
+    return got unless got.is_a?(Tuple(Array(Bytes), String))
+    addresses = [] of IPAddress
+    got[0].each do |data|
+      if data.size == 4
+        addresses << IPv4Address.new(data[0], data[1], data[2], data[3])
+      else
+        addresses << IPv6Address.new(data.to_unsafe)
+      end
+    end
+    addresses
+  end
+
+  # The TXT records of *name*, each one's character-strings joined
+  # (`DnsRecord.character_strings`), in the order the answer gave them,
+  # CNAMEs followed as `resolve` follows them. The name is asked as
+  # written - no hosts file, no search list - since a TXT name
+  # (`_acme-challenge.example.com`, a domain's SPF) is written in full.
+  def txt(name : String) : Array(String) | DnsError | Cancelled
+    why = DnsName.why(name)
+    return DnsError.new(DnsError::INVALID_NAME, name, "", why) if why.is_a?(String)
+    got = records(DnsName.relative(name), DnsRecord::TXT, nil)
+    return got unless got.is_a?(Tuple(Array(Bytes), String))
+    found, label = got
+    texts = [] of String
+    found.each do |data|
+      strings = DnsRecord.character_strings(data)
+      return DnsMessage.malformed("a TXT record's strings run past its data").about(name, label) if strings.nil?
+      texts << strings.join
+    end
+    texts
+  end
+
   # *name*'s records of *type*, following CNAMEs - within an answer, and
   # by asking again when a chain leaves one - at most
-  # `DnsMessage::MAX_CNAMES` links in all.
-  private def records(name : String, type : Int32) : Array(IPAddress) | DnsError | Cancelled
+  # `DnsMessage::MAX_CNAMES` links in all; with the label of the server
+  # that answered. *first* is the answer to the first question when it
+  # has been asked already.
+  private def records(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Tuple(Array(Bytes), String) | DnsError | Cancelled
     target = name
     budget = DnsMessage::MAX_CNAMES
+    answered = first
     while true
-      answered = exchange(target, type)
-      return answered unless answered.is_a?(Tuple(DnsMessage, NameServer))
-      message, server = answered
+      answered = exchange(target, type) if answered.nil?
+      return answered unless answered.is_a?(Tuple(DnsMessage, String))
+      message, label = answered
+      answered = nil
       read = message.addresses(target, type, budget)
-      return read.about(name, server.label) if read.is_a?(DnsError)
+      return read.about(name, label) if read.is_a?(DnsError)
       found, ends, links = read
-      unless found.empty?
-        addresses = [] of IPAddress
-        found.each do |data|
-          if data.size == 4
-            addresses << IPv4Address.new(data[0], data[1], data[2], data[3])
-          else
-            addresses << IPv6Address.new(data.to_unsafe)
-          end
-        end
-        return addresses
-      end
-      return DnsError.new(DnsError::NO_ADDRESS, name, server.label) if links == 0
+      return {found, label} unless found.empty?
+      return DnsError.new(DnsError::NO_ADDRESS, name, label, type == DnsRecord::TXT ? "no TXT record" : "") if links == 0
       budget = budget - links
-      return DnsMessage.malformed("a chain of more than #{DnsMessage::MAX_CNAMES} CNAMEs").about(name, server.label) if budget <= 0
+      return DnsMessage.malformed("a chain of more than #{DnsMessage::MAX_CNAMES} CNAMEs").about(name, label) if budget <= 0
       target = ends
     end
   end
 
-  # The answer to one question: each server in turn, the round repeated
-  # `attempts` times, until one answers NOERROR or NXDOMAIN. The failure
-  # answered otherwise is the last server's.
-  private def exchange(name : String, type : Int32) : Tuple(DnsMessage, NameServer) | DnsError | Cancelled
+  # The answer to one question, from the upstreams when there are any and
+  # from the plaintext servers otherwise.
+  private def exchange(name : String, type : Int32) : Tuple(DnsMessage, String) | DnsError | Cancelled
+    return plaintext(name, type) if @upstreams.empty?
+    asked = ask_upstreams(name, [type])
+    return asked if asked.is_a?(Cancelled)
+    asked[0]
+  end
+
+  # The answer to one question over plaintext: each server in turn, the
+  # round repeated `attempts` times, until one answers NOERROR or
+  # NXDOMAIN. The failure answered otherwise is the last server's.
+  protected def plaintext(name : String, type : Int32) : Tuple(DnsMessage, String) | DnsError | Cancelled
     return DnsError.new(DnsError::UNREACHABLE, name, "", "no name server is configured") if @servers.empty?
     failure = nil.as(DnsError?)
     attempt = 0
@@ -2748,20 +3249,118 @@ pub class Resolver
           failure = got
           next
         end
-        case got.rcode
-        when DnsMessage::RCODE_NOERROR
-          return {got, server}
-        when DnsMessage::RCODE_NXDOMAIN
-          return DnsError.new(DnsError::NOT_FOUND, name, server.label)
-        when DnsMessage::RCODE_SERVFAIL
-          failure = DnsError.new(DnsError::SERVER_FAILURE, name, server.label)
-        else
-          failure = DnsError.new(DnsError::REFUSED, name, server.label, Resolver.rcode_name(got.rcode))
-        end
+        read = Resolver.read_rcode(got, name, server.label)
+        return read if read.is_a?(Tuple(DnsMessage, String)) || read.not_found?
+        failure = read
       end
       attempt = attempt + 1
     end
     failure || DnsError.new(DnsError::TIMED_OUT, name)
+  end
+
+  # What an answer's RCODE makes of it: the message for NOERROR, and the
+  # failure it says otherwise.
+  def self.read_rcode(message : DnsMessage, name : String, label : String) : Tuple(DnsMessage, String) | DnsError
+    case message.rcode
+    when DnsMessage::RCODE_NOERROR
+      {message, label}
+    when DnsMessage::RCODE_NXDOMAIN
+      DnsError.new(DnsError::NOT_FOUND, name, label)
+    when DnsMessage::RCODE_SERVFAIL
+      DnsError.new(DnsError::SERVER_FAILURE, name, label)
+    else
+      DnsError.new(DnsError::REFUSED, name, label, Resolver.rcode_name(message.rcode))
+    end
+  end
+
+  # The answers to *types* of questions about *name*, from the upstreams:
+  # each in turn, the round repeated `attempts` times, until one answers
+  # every question NOERROR or NXDOMAIN. An upstream that answered at all
+  # - SERVFAIL included - is the last one's word when none does better.
+  # When no upstream could be asked, the plaintext servers are asked
+  # instead only when `plaintext_fallback` says so (see the class).
+  private def ask_upstreams(name : String, types : Array(Int32)) : Array(Tuple(DnsMessage, String) | DnsError) | Cancelled
+    failure = nil.as(DnsError?)
+    spoken = nil.as(Array(Tuple(DnsMessage, String) | DnsError)?)
+    attempt = 0
+    while attempt < @attempts
+      index = 0
+      while index < @upstreams.size
+        upstream = @upstreams[index]
+        index = index + 1
+        got = ask_upstream(upstream, name, types)
+        return got if got.is_a?(Cancelled)
+        if got.is_a?(DnsError)
+          failure = got
+          next
+        end
+        return got if got.all? { |one| one.is_a?(Tuple(DnsMessage, String)) || one.not_found? }
+        spoken = got
+      end
+      attempt = attempt + 1
+    end
+    if said = spoken
+      return said
+    end
+    lost = failure || DnsError.new(DnsError::TIMED_OUT, name)
+    answers = [] of Tuple(DnsMessage, String) | DnsError
+    types.each do |type|
+      if @plaintext_fallback && !@servers.empty?
+        asked = plaintext(name, type)
+        return asked if asked.is_a?(Cancelled)
+        answers << asked
+      else
+        answers << lost
+      end
+    end
+    answers
+  end
+
+  # One exchange with one upstream: a query per type, each with its own
+  # ID from `Random::Secure` (or 0, `zero_id?`), and each answer held to
+  # what a stream's answer must be - the ID and the question, no TC (a
+  # stream has room for any answer), and no byte past the message (the
+  # frame is the message: RFC 7858 3.3, RFC 8484 6).
+  private def ask_upstream(upstream : DnsUpstream, name : String, types : Array(Int32)) : Array(Tuple(DnsMessage, String) | DnsError) | DnsError | Cancelled
+    label = upstream.label
+    ids = [] of UInt16
+    queries = [] of Bytes
+    types.each do |type|
+      id = 0_u16
+      unless upstream.zero_id?
+        # Distinct within the exchange: over one connection the ID is what
+        # an answer is matched to its query by.
+        id = (Random::Secure.next_u & 0xFFFF_u32).to_u16
+        while ids.includes?(id)
+          id = (Random::Secure.next_u & 0xFFFF_u32).to_u16
+        end
+      end
+      ids << id
+      queries << DnsMessage.query(id, name, type)
+    end
+    got = upstream.exchange(queries, @timeout_ms)
+    return got if got.is_a?(Cancelled)
+    return got.about(name, label) if got.is_a?(DnsError)
+    return DnsMessage.malformed("#{got.size} answers to #{queries.size} queries").about(name, label) unless got.size == queries.size
+    answers = [] of Tuple(DnsMessage, String) | DnsError
+    index = 0
+    while index < got.size
+      answers << Resolver.read_streamed(got[index], ids[index], name, types[index], label)
+      index = index + 1
+    end
+    answers
+  end
+
+  # An answer that came over a stream, read: see `ask_upstream`.
+  def self.read_streamed(bytes : Bytes, id : UInt16, name : String, type : Int32, label : String) : Tuple(DnsMessage, String) | DnsError
+    message = DnsMessage.parse(bytes)
+    return message.about(name, label) if message.is_a?(DnsError)
+    return DnsMessage.malformed("the answer is not to the question asked").about(name, label) unless message.answers?(id, name, type)
+    return DnsMessage.malformed("the answer is truncated (TC), which an answer over a stream never is").about(name, label) if message.truncated?
+    ends = DnsMessage.ends_at(bytes)
+    return DnsMessage.malformed("its records run past the message").about(name, label) if ends < 0
+    return DnsMessage.malformed("oversized: #{bytes.size - ends} bytes past the end of the message").about(name, label) if ends < bytes.size
+    read_rcode(message, name, label)
   end
 
   def self.rcode_name(rcode : Int32) : String

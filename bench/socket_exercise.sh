@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every socket check reported"
-phrases="connect_accept message_exchange short_read closed_peer close_write ipv6 localhost unix timeout closed_under_read stream"
+phrases="connect_accept message_exchange short_read nodelay connect_bound closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
@@ -91,7 +91,7 @@ for phrase in $phrases; do
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, close_write, ipv6, localhost, unix, timeout and stream all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, connect_bound, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -211,9 +211,48 @@ prove_fails "a socket read that takes all it may read from the heap" heapread "s
 prove_fails "the peer's address read from this end" peername "remote_port:" \
   '{ sub(/return nil if IyiSocket.__sys_getpeername\(@fd, addr, pointerof\(len\)\) < 0$/, "return nil if IyiSocket.__sys_getsockname(@fd, addr, pointerof(len)) < 0"); print }'
 
+# Nagle left on: at the connected end, at the accepted end, and a
+# `nodelay = false` that sets nothing.
+prove_fails "a connected socket left with Nagle on" nagleconnect "nodelay: the connected end" \
+  '{ sub(/^    __send_at_once\(fd, family\)$/, ""); print }'
+prove_fails "an accepted socket left with Nagle on" nagleaccept "nodelay: the accepted end" \
+  '{ sub(/^        IyiSocket.__send_at_once\(client_fd, @family\)$/, ""); print }'
+prove_fails "nodelay = false that sets nothing" naglesetter "nodelay: TCP_NODELAY still set" \
+  '{ sub(/^    IyiSocket.__sys_set_nodelay\(@fd, on\) unless @family == AF_UNIX$/, ""); print }'
+
 # 5. A write to a gone peer panicking, as it did
 prove_fails "a gone peer is a panic" panicwrite "cannot write to socket" \
   '{ sub(/return SocketError.new\("write to socket", n < 0_i64 \? IyiSocket.__sys_code\(n\) : 0\) if n <= 0_i64/, "raise \"cannot write to socket\" if n <= 0_i64"); print }'
+
+# 5b. `localhost` raced ::1 first, as a name with a route to ::1 is: the
+#     refusal names the two the other way round.
+prove_fails "localhost raced ::1 first" localhostorder "localhost_race:" \
+  '{ sub(/return race\(host, port, loopback, timeout_ms\) if localhost\?\(host\)/, "return race(host, port, loopback.reversed, timeout_ms) if localhost?(host)"); print }'
+# 5c. The attempt delay an hour: ::1 starts only once 127.0.0.1 has been
+#     refused, which Windows takes 2 s to do. Elsewhere the refusal is at
+#     once and the delay is never waited; std_dns_exercise.sh proves it
+#     with a listener that drops SYNs.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "localhost's ::1 waiting for 127.0.0.1's refusal" localhostserial "localhost_v6:" \
+      '{ sub(/ATTEMPT_DELAY_MS = 250/, "ATTEMPT_DELAY_MS = 3600000"); print }' ;;
+  *)
+    echo "  localhost's ::1 waiting for 127.0.0.1's refusal: Windows' 2 s refusal shows it, proved there" ;;
+esac
+
+# 5d. A connect whose handshake wait has no deadline, as Windows' had:
+#     `ConnectEx` parked until the kernel gave up, 2 s for a loopback port
+#     nobody holds against a 500 ms bound and 21 s for 10.255.255.1
+#     against 2000 ms. The POSIX arms' call answers "in progress" at once
+#     and never reads the bound it is handed, so on Linux and darwin this
+#     copy is the same program and nothing can catch it there.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "a ConnectEx parked without the connect's bound" connectunbound "connect_bound:" \
+      '{ sub(/res = __sys_connect\(fd, addr, family, ms\)/, "res = __sys_connect(fd, addr, family, -1)"); print }' ;;
+  *)
+    echo "  a ConnectEx parked without the connect's bound: the POSIX arms' connect never waits, proved on Windows" ;;
+esac
 
 # 6. The write without MSG_NOSIGNAL: on Linux the kernel's SIGPIPE ends the
 #    process at the first write to the gone peer, with nothing printed.

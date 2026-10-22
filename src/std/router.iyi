@@ -1,9 +1,10 @@
 # A request router for std/http: `Router#handle(pattern) { |req, params|
 # Response }` registers a handler, and `router.call(req)` is what a
 # `Server.serve` block answers with. The patterns, their precedence and
-# the answers when none applies are Go 1.22's `http.ServeMux`, implemented
-# from its documentation (pkg.go.dev/net/http#ServeMux), so a table of
-# routes reads the same in both.
+# the answers when none applies are Go's `http.ServeMux` - its 1.22
+# patterns, its 1.26 redirects - implemented from its documentation
+# (pkg.go.dev/net/http#ServeMux), so a table of routes reads the same in
+# both.
 #
 # A pattern is `[METHOD ][HOST]/[PATH]`. A method matches exactly, except
 # that `GET` matches `HEAD` too; no method matches every method, no host
@@ -31,12 +32,24 @@
 # methods - itself, or with a slash added - is 405 with `Allow` listing
 # them, sorted, `HEAD` beside `GET`; a request for `/x` where `/x/` (or
 # `/x/{rest...}`) is registered and `/x` is not is redirected to `/x/`
-# (301, the query kept); a path with a `.` or `..` segment or a repeated
-# slash is redirected to its cleaned form (301), as Go's is, so a handler
+# (307, the query kept); a path with a `.` or `..` segment or a repeated
+# slash is redirected to its cleaned form (307), as Go's is, so a handler
 # is only ever handed the path its pattern matched; anything else is
 # 404. An escaped `%2e%2e` or `%2F` is not a dot segment or a separator,
 # and arrives in a wildcard's value as `..` or `/`: a handler that turns
 # a value into a file name checks it (std/fileserver does its own).
+#
+# Both redirects are 307 Temporary Redirect, as Go's have been since 1.26;
+# 1.22 to 1.25 answered 301 Moved Permanently. Go's reasons, which are
+# this router's: a client may turn a POST it is sent on with a 301 into a
+# GET, where a 307 is sent again with its method and body, and a client
+# may keep a permanent redirect for good, where the redirect is the
+# router's and not the program's, and a pattern registered in a later
+# version of the program may answer that path itself. Go's release notes
+# name the trailing-slash redirect, and its `server.go` answers the
+# cleaned path with 307 as well; this follows the code. The status is
+# fixed, not an option: a router that could answer either would need its
+# tables checked twice, and the older answer is the one Go left.
 #
 # Where this departs from Go, and why: a path with a malformed percent
 # escape is 400 here - Go's server refuses it before its mux sees it, and
@@ -47,9 +60,11 @@
 # names are ASCII identifiers (Go takes any Unicode letter). The `Host`
 # is matched as Go matches it: its port dropped, otherwise as sent.
 # `bench/std_router_exercise.sh` hands its tables - 70 requests, 23 pairs
-# of patterns registered in turn, 28 patterns read - to Go 1.25's own
-# `ServeMux` where a Go toolchain is installed, and every answer is the
-# same.
+# of patterns registered in turn, 28 patterns read - to Go's own
+# `ServeMux` where a Go toolchain is installed. Under Go 1.26 or later
+# every answer is the same; under 1.22 to 1.25 the one difference allowed
+# is a redirect's 301 where this answers 307 with the same `Location`,
+# and the gate names it.
 #
 # Patterns are registered before the router answers: a `handle` after its
 # first `call` panics. Go takes them at any time under a lock; refusing
@@ -447,7 +462,7 @@ end
 # `handle` panics on a pattern that is not one, on one that conflicts with
 # a pattern already registered, and after the router has answered a
 # request. `call` answers with the most specific pattern's handler, or a
-# 301 (to the cleaned path, or to a subtree's `/`), a 405 with `Allow`, a
+# 307 (to the cleaned path, or to a subtree's `/`), a 405 with `Allow`, a
 # 400 for a malformed escape, a 404.
 pub class Router
   @patterns : Array(Pattern)
@@ -479,7 +494,7 @@ pub class Router
     @patterns.dup
   end
 
-  # The answer to *req*: its handler's, or the router's own 301, 400, 404
+  # The answer to *req*: its handler's, or the router's own 307, 400, 404
   # or 405.
   def call(req : Request) : Response
     @answering = true
@@ -596,7 +611,7 @@ pub class Router
     if (q = query) && !q.empty?
       target = target + "?" + q
     end
-    Response.new(301, "", {"Location" => target})
+    Response.new(307, "", {"Location" => target})
   end
 
   def self.plain(status : Int32, text : String) : Response

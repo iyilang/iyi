@@ -6,8 +6,10 @@
 # Proves the exercise holds plain and --release, the compact corpus round-trips
 # through python3's json, what the reader refuses is refused in the program,
 # what the pull parser, the builder and from_json refuse by panic is refused
-# in a small program each, and a copy that stops treating a repeated object
-# key as a mistake is caught, in the parser and in the pull parser.
+# in a small program each, a union from_json cannot read without guessing is
+# refused when it is compiled, and a copy that stops treating a repeated
+# object key as a mistake is caught, in the parser and in the pull parser, as
+# is a copy that drops a union member's branch, writing or reading.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -81,13 +83,13 @@ fi
 
 echo
 echo "== every json section reported"
-for phrase in "== parse corpus" "== to_json and to_pretty_json" "== pull parser walk" "== builder" "== equality and hash" "== to_json and from_json" "== derive serializable" "== what the reader refuses" "== differential corpus"; do
+for phrase in "== parse corpus" "== to_json and to_pretty_json" "== pull parser walk" "== builder" "== equality and hash" "== to_json and from_json" "== derive serializable" "== unions" "== what the reader refuses" "== differential corpus"; do
   if ! grep -aq "$phrase" "$WORK/json-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  parse, print, pull, builder, hash, from_json, refusals and the corpus all reported"
+[ "$status" -eq 0 ] && echo "  parse, print, pull, builder, hash, from_json, unions, refusals and the corpus all reported"
 
 echo
 echo "== compact corpus against python3 json"
@@ -185,6 +187,10 @@ refuses "a build that wrote nothing" build_empty "build wrote no value" \
   'puts JSON.build { |b| }'
 refuses "a build that left an array open" build_open "to_s with an array still open" \
   'puts JSON.build { |b| b.start_array }'
+refuses "a float into Int32 | String" union_float "expected (Int32 | String), got Float at line 1, column 1" \
+  'puts JSON.from_json("1.5", Int32 | String)'
+refuses "an integer past Int32 into Int32 | String" union_range "integer 5000000000 out of (Int32 | String) range at line 1, column 1" \
+  'puts JSON.from_json("5000000000", Int32 | String)'
 
 echo
 echo "== what derive serializable refuses when the type is compiled, by name"
@@ -216,6 +222,8 @@ compile_refuses "two fields under one key" one_key "two fields from the key \"b\
 compile_refuses "a field never read with neither a default nor nil" unread "a: a field that is not read needs a default, or a type that admits nil" \
   '  @[JSON::Field(ignore: true)]
   getter a : Int32'
+compile_refuses "a union whose array member would be a guess" two_arrays "JSON cannot read (Array(Int32) | Array(String)): which of Array(Int32) and Array(String) a value is read into would be a guess" \
+  '  getter a : Array(Int32) | Array(String)'
 echo
 echo "== proving the checks can fail when a repeated key is accepted"
 if [ -z "$PY" ]; then
@@ -344,6 +352,17 @@ broken "an enum written by its own name" "renamed, ignored, emit_null: false, co
         b.string(member.to_s)'
 broken "an enum name matched as written" "is no Bench::StdJsonExercise::Shade member\|ASSERTION FAILED" \
   '    wanted = enum_key(text)' '    wanted = text'
+# A union: written as one type, which is issue #135 back; a member's branch
+# dropped where it is written and where it is read. The written member is
+# an enum because an `Int32` member never reaches `Object#__json_write`:
+# its own `write_value` overload takes it when the program runs, and a copy
+# that dropped `Int32` there passed.
+broken "a union written as one type, as before #135" "undefined method 'to_json' for Int32" \
+  'val.__json_write(b)' 'val.to_json(b)'
+broken "a union written without its enum members" "integers, a ToJSON type, a derived type, an array, a hash and an Any as members" \
+  '::Std::Json::JSON.write_value(self, json)' '::Std::Json::JSON.write_value(self, json) unless self.is_a?(::Enum)'
+broken "a union read without its Int32 member" "an integer into the first integer member that holds it" \
+  'return read_value(pull, ::Int32) if int >= -2147483648_i64 && int <= 2147483647_i64' 'nil'
 
 echo
 if [ "$status" -eq 0 ]; then

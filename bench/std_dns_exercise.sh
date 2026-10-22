@@ -7,8 +7,9 @@
 # the program itself, on 127.0.0.1, so nothing leaves the machine - checks
 # every section reported, and proves the checks can fail: each proof
 # builds the exercise against a copy of the library with one rule of the
-# resolver taken out, and the exercise must stop at the section that rule
-# holds.
+# resolver, or of the race `connect` runs over a name's addresses (Happy
+# Eyeballs, RFC 8305), taken out, and the exercise must stop at the
+# section that rule holds.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -86,7 +87,9 @@ build_and_run() {
   return 0
 }
 
-SECTIONS="query_bytes compression codec a_record aaaa_record cname_chain cname_dangling cname_loop nxdomain servfail nodata mismatched_id forged_source truncated_tcp pointer_loop retry timeout hosts_override search_list literals from_files connect_by_name connect_fallback unresolved_connect"
+# A section that needs what this machine lacks - IPv6, a listener whose
+# backlog fills - reports itself skipped, with the reason.
+SECTIONS="query_bytes compression codec a_record aaaa_record cname_chain cname_dangling cname_loop nxdomain servfail nodata mismatched_id forged_source truncated_tcp pointer_loop retry timeout hosts_override search_list literals from_files connect_by_name connect_fallback unresolved_connect he_order he_refused he_blackhole he_family he_fds he_deadline he_cancel"
 
 for mode in plain release; do
   if [ "$mode" = plain ]; then
@@ -103,13 +106,14 @@ for mode in plain release; do
   fi
   missing=""
   for section in $SECTIONS; do
-    grep -q "^$section: ok" "$WORK/dns-$mode.out" 2>/dev/null || missing="$missing $section"
+    grep -Eq "^$section: (ok|skipped)" "$WORK/dns-$mode.out" 2>/dev/null || missing="$missing $section"
   done
   if [ -n "$missing" ]; then
     echo "  $mode: nothing reported for:$missing"
     status=1
   else
-    echo "  $mode: all $(echo $SECTIONS | wc -w | tr -d ' ') sections reported ok"
+    echo "  $mode: all $(echo $SECTIONS | wc -w | tr -d ' ') sections reported"
+    grep -E "^he_[a-z]+: skipped" "$WORK/dns-$mode.out" 2>/dev/null | sed 's/^/  /'
   fi
 done
 
@@ -192,8 +196,8 @@ else
     'next unless DnsMessage.id_of(packet) == id.to_i32' \
     ''
   breaks "NXDOMAIN read as a server's failure" nxservfail "NXDOMAIN is not_found?" socket.iyi \
-    'return DnsError.new(DnsError::NOT_FOUND, name, server.label)' \
-    'return DnsError.new(DnsError::SERVER_FAILURE, name, server.label)'
+    'DnsError.new(DnsError::NOT_FOUND, name, label)' \
+    'DnsError.new(DnsError::SERVER_FAILURE, name, label)'
   breaks "a CNAME not followed" nocname "a CNAME chain in one answer" dns.iyi \
     'next_name = record.target if record.type == DnsRecord::CNAME && next_name.empty?' \
     'next_name = "" if record.type == DnsRecord::CNAME'
@@ -215,6 +219,55 @@ else
   breaks "a name read as an address, as it was" noname 'cannot resolve address: "web.test"' socket.iyi \
     '!localhost?(host) && DnsName.valid?(host)' \
     'false'
+
+  # The race. Each copy needs what its section had in the plain run - a
+  # full listener to race past, the descriptors counted (Linux), IPv6 to
+  # put first - and says it was skipped where the section was.
+  ran="$WORK/dns-plain.out"
+  if grep -q "^he_blackhole: ok" "$ran"; then
+    breaks "one address after another, the attempt delay an hour" heserial "the second address does not wait for the first to fail" socket.iyi \
+      'ATTEMPT_DELAY_MS = 250' \
+      'ATTEMPT_DELAY_MS = 3600000'
+    breaks "every address at once, the attempt delay ignored" heatonce "the second address waits the attempt delay" socket.iyi \
+      'ATTEMPT_DELAY_MS = 250' \
+      'ATTEMPT_DELAY_MS = 0'
+  else
+    echo "  the attempt delay's two copies: skipped, he_blackhole did not run on this machine"
+  fi
+  if grep -q "^he_fds: ok (.*descriptors before and after" "$ran"; then
+    breaks "a losing attempt's socket left open" heleak "every losing attempt's socket is closed" socket.iyi \
+      $'if waited.is_a?(Cancelled)\n        __sys_close(fd)\n' \
+      $'if waited.is_a?(Cancelled)\n'
+  else
+    echo "  a losing attempt's socket left open: skipped, descriptors are counted on Linux alone"
+  fi
+  if grep -q "^he_refused: ok" "$ran"; then
+    breaks "the error naming the last address alone" helast "one error naming every address, in the order tried" socket.iyi \
+      'parts.join("; ")) if ran_out < 0' \
+      'parts.last) if ran_out < 0'
+  else
+    echo "  the error naming the last address alone: skipped, he_refused did not run on this machine"
+  fi
+  if grep -q "^he_order: ok (IPv6 first" "$ran"; then
+    breaks "IPv4 first whatever the routes say" hefour "IPv6 first when this machine has a route to it" socket.iyi \
+      'if routed?(six[0].as(IPv6Address))' \
+      'if false'
+  else
+    echo "  IPv4 first whatever the routes say: skipped, this machine has no route to ::1"
+  fi
+  # Windows refuses a connect after 2 s, so there the attempt delay starts
+  # the next address first and `connect_fallback` does not time it.
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT) windows=1 ;;
+    *) windows=0 ;;
+  esac
+  if [ "$windows" -eq 0 ] && grep -q "^he_order: ok (IPv6 first" "$ran"; then
+    breaks "a failure that waits for the attempt delay" hewait "a refused first address starts the next at once" socket.iyi \
+      $'# A failure starts the next attempt now, not when it was due.\n          next_at = 0_i64\n' \
+      ''
+  else
+    echo "  a failure that waits for the attempt delay: skipped, it needs IPv6 to refuse first and a refusal that is not Windows' 2 s"
+  fi
 fi
 
 echo

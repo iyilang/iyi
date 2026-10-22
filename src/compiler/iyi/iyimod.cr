@@ -62,7 +62,11 @@ module Iyi::IyiMod
   # v56: a signature carries its `forall` and `where` bounds, because a bound
   # is checked where a call matches and a consumer reading the names alone
   # accepted calls the source build refused (`Signature#where_bounds`).
-  FORMAT_VERSION = 56_u32
+  # v57: the header carries the package name the module's types live under,
+  # because a package's own build names its modules the way a consumer's
+  # does and `module codec` alone no longer says `IyiWeb::Codec`
+  # (`Artifact#package_name`).
+  FORMAT_VERSION = 57_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -1264,6 +1268,13 @@ module Iyi::IyiMod
     # reads it as it reads any other: its declarations are all it wants.
     property declarations_only : Bool
 
+    # The package name the module's types live under, empty for a module of
+    # no package: `iyi_web` for `codec.iyi` of `github.com/x/iyi-web`, whose
+    # types are `IyiWeb::Codec` in every build (SPEC.md III.7). The header
+    # below writes `module codec`, and the reader puts it under this name,
+    # which the object code's symbols already spell.
+    property package_name : String
+
     # Whether this artifact's root is a *class* rather than a module.
     #
     # It decides one thing and it is structural: a module's declarations are
@@ -1347,7 +1358,7 @@ module Iyi::IyiMod
                    @reopened = [] of TypeDecl, @libs = [] of String,
                    @layouts = [] of {String, TypeLayout},
                    @inputs = [] of String, @symbol_literals = [] of String,
-                   @declarations_only = false)
+                   @declarations_only = false, @package_name = "")
     end
   end
 
@@ -1537,7 +1548,10 @@ module Iyi::IyiMod
     # Which library the artifact was built under, so a refusal can name the
     # verb that rebuilds it: `iyi bind` for a boundary, `--emit-iyimod` for a
     # module of one's own.
-    crystal_library : Bool = false
+    crystal_library : Bool = false,
+    # The package name its types live under (`Artifact#package_name`), so a
+    # manifest that renames the package makes the artifact stale.
+    package_name : String = ""
 
   def self.read_summary(path : String) : Summary
     File.open(path, "rb") do |file|
@@ -1573,7 +1587,7 @@ module Iyi::IyiMod
 
       Summary.new(header[:module_name], header[:source_path],
         header[:compiler_version], header[:target_triple], header[:flags],
-        hashes, imports, inputs, header[:crystal_library])
+        hashes, imports, inputs, header[:crystal_library], header[:package_name])
     end
   rescue ex : Error
     raise ex
@@ -1688,7 +1702,7 @@ module Iyi::IyiMod
         header[:class_root], header[:filled], header[:module_extends_self],
         regexes, class_vars, match_types, symbols,
         top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals,
-        declarations_only: header[:declarations_only])
+        declarations_only: header[:declarations_only], package_name: header[:package_name])
     end
   rescue ex : Error
     raise ex
@@ -1714,6 +1728,7 @@ module Iyi::IyiMod
   # format nobody can read is a cache format nobody can debug.
   def self.dump(artifact : Artifact, io : IO) : Nil
     io.puts "module        #{artifact.module_name}"
+    io.puts "package       #{artifact.package_name}" unless artifact.package_name.empty?
     io.puts "source        #{artifact.source_path}"
     io.puts "compiler      #{artifact.compiler_version}"
     io.puts "target        #{artifact.target_triple}"
@@ -2445,9 +2460,75 @@ module Iyi::IyiMod
   # `count(1)` by the producing build carried `count<Int32>` alone, and a
   # consumer's `count("s")` was refused because the artifact's object code
   # "has no symbol for it".
+  #
+  # Or a parameter written with no type at all (`untyped_parameter?`).
   def self.caller_instantiated?(a_def : Def) : Bool
+    caller_bound?(a_def) || untyped_parameter?(a_def)
+  end
+
+  # The block and `forall` half of `caller_instantiated?`: the two shapes
+  # whose instantiation is the caller's however the declaration is written.
+  def self.caller_bound?(a_def : Def) : Bool
     return true if a_def.block_arg || a_def.block_arity
     !!a_def.free_vars.try { |vars| !vars.empty? }
+  end
+
+  # iyi: whether a parameter has no written type, which is a free variable
+  # nobody named: the def is instantiated at whatever each call passes, so
+  # an instantiation is the caller's for the reason a `forall` one is.
+  #
+  # Left behind as a header, its instantiations went into the module's own
+  # unit at the producing build's types, and the artifact served exactly
+  # those (issue #134). `std/json`'s `write_or_null(val, b : Builder)` is
+  # the case: written from a program whose `lib/thing` serialised an
+  # `Item`, `std/json`'s `JSON` unit defined
+  # `write_or_null<Lib::Thing::Item, Builder>` and called
+  # `*Lib::Thing::Item#to_json<Std::Json::Builder>:Nil` from it. `std/json`
+  # does not import `lib/thing`, so nothing ties that call to a unit that
+  # defines it: the next build compiled `lib/thing` from source, which never
+  # instantiated `to_json` because the only caller was machine code it did
+  # not compile, and the link ended on the undefined symbol. A program that
+  # serialised a type the producing build never saw was refused at the call
+  # instead ("its object code has no symbol for it").
+  def self.untyped_parameter?(a_def : Def) : Bool
+    a_def.args.any? { |arg| arg.restriction.nil? || arg.restriction.is_a?(Underscore) } ||
+      !!a_def.double_splat.try { |arg| arg.restriction.nil? || arg.restriction.is_a?(Underscore) }
+  end
+
+  # iyi: whether a parameter's written type admits types it does not name,
+  # which makes it a bounded free variable: a trait or module (`x : Shape`
+  # is `forall T : Shape` with nothing written), a class something inherits
+  # from or its `.class`, or a union holding one. Each call instantiates the
+  # def at the type it passes, so that instantiation is the caller's for the
+  # reason an untyped one is. `kit/lib`'s `area_of(x : Shape)` called with
+  # `lib/thing`'s `Tri` put `area_of<Lib::Thing::Tri>` in `kit/lib`'s unit,
+  # calling `*Lib::Thing::Tri#area:Int32`; a later build that compiled
+  # `lib/thing` from source and no longer called `area_of` ended its link on
+  # that symbol.
+  #
+  # The body travels already (`Iyi::Compiler#iyi_widened_parameters?`, a
+  # superset of this), so a consumer compiles its own; what this decides is
+  # where the producer's instantiation lives. A union of types it names
+  # admits nothing else and keeps its symbols where they were.
+  #
+  # Only the written forms that name a type are looked up: `self` is the
+  # receiver, and a `typeof` is not this question's to evaluate.
+  def self.open_parameter?(owner : Type, a_def : Def) : Bool
+    a_def.args.any? do |arg|
+      case restriction = arg.restriction
+      when Path, Generic, Union, Metaclass
+        open_type?(owner.lookup_type?(restriction, allow_typeof: false))
+      else
+        false
+      end
+    end
+  end
+
+  private def self.open_type?(declared : Type?) : Bool
+    return false unless declared
+    return false if declared.is_a?(TypeParameter)
+    return declared.union_types.any? { |member| open_type?(member) } if declared.is_a?(UnionType)
+    declared.module? || declared.is_a?(VirtualMetaclassType) || declared.virtual_type != declared
   end
 
   # Marks a parsed reconstruction as what it is.
@@ -3115,6 +3196,7 @@ module Iyi::IyiMod
     io.write_byte(artifact.filled ? 1_u8 : 0_u8)
     io.write_byte(artifact.module_extends_self ? 1_u8 : 0_u8)
     io.write_byte(artifact.declarations_only ? 1_u8 : 0_u8)
+    write_string io, artifact.package_name
     io.to_slice
   end
 
@@ -3131,11 +3213,15 @@ module Iyi::IyiMod
     filled = io.read_byte == 1_u8
     module_extends_self = io.read_byte == 1_u8
     declarations_only = io.read_byte == 1_u8
+    # Last, and read the way the flag bytes above are: a header that ends
+    # before it - a hand-written one - names no package.
+    package_name = io.pos < io.size ? read_string(io) : ""
     {module_name: module_name, source_path: source_path,
      compiler_version: compiler_version, target_triple: target_triple, flags: flags,
      has_initialiser: has_initialiser, crystal_library: crystal_library,
      class_root: class_root, filled: filled,
-     module_extends_self: module_extends_self, declarations_only: declarations_only}
+     module_extends_self: module_extends_self, declarations_only: declarations_only,
+     package_name: package_name}
   end
 
   private def self.encode_requires(artifact : Artifact) : Bytes

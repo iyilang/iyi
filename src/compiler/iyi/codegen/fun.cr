@@ -155,12 +155,38 @@ class Iyi::CodeGenVisitor
   end
 
   # iyi: whether this def's machine code is the caller's rather than the
-  # module's — a block-taking or `forall` method of a module whose artifact
-  # is being written (SPEC.md IV.1g, `IyiMod.caller_instantiated?`).
+  # module's — a block-taking or `forall` method, one with an untyped
+  # parameter, or one whose parameter's type admits types it does not name,
+  # of a module whose artifact is being written (SPEC.md IV.1g,
+  # `IyiMod.caller_instantiated?`, `IyiMod.open_parameter?`). Not the last
+  # two in `iyi bind`'s fill build: the boundary declares such a parameter
+  # at the type its keep file passes, and the consumer links the symbol
+  # (`Program#iyi_fills_boundary?`).
+  #
+  # Asked of the def as it was written, which is what the artifact writer
+  # asks it of. A call with named arguments instantiates an expansion this
+  # compiler wrote, whose parameters carry no restriction whatever the
+  # written ones said: `FilterDefinition.new(kind: kind, …)` reached
+  # `new:kind:method:path:handler` with four untyped parameters, its code
+  # went private to the caller, and `webapp` built from its artifacts was
+  # refused on `FilterDefinition#initialize`, which "its object code has no
+  # symbol for".
+  #
+  # An impl's method is left out of the open-parameter rule. Whether its
+  # body travels is decided from the written text before any type resolves
+  # (`iyi_impl_signature_widened?` in the top-level visitor), so one with a
+  # trait-typed parameter on a type its module declares travels as a header,
+  # and moving its instantiations here would leave the consumer's call to
+  # the header with no symbol.
   private def iyi_caller_instantiated?(target_def, self_type) : Bool
     return false if @program.iyi_exported_owners.empty?
-    return false unless IyiMod.caller_instantiated?(target_def)
-    @program.iyi_exported_owners.includes?(self_type.instance_type)
+    return false unless @program.iyi_exported_owners.includes?(self_type.instance_type)
+    written = target_def.iyi_origin || target_def
+    return true if IyiMod.caller_bound?(written)
+    return false if @program.iyi_fills_boundary?
+    return true if IyiMod.untyped_parameter?(written)
+    return false if written.iyi_from_impl?
+    IyiMod.open_parameter?(written.owner? || self_type, written)
   end
 
   # iyi: the refusal for a call to a method an artifact declares and none

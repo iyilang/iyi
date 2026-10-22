@@ -1,0 +1,298 @@
+# TLS resumption in std/http's client, exercised: the tickets an
+# `HTTPClient` keeps, and whom it offers them to.
+#
+#   ./bin/iyi run bench/std_http_resume.iyi
+#   ./bin/iyi run bench/std_http_resume.iyi s_server PORT ROOT.pem
+#   ./bin/iyi run bench/std_http_resume.iyi serve PORTFILE CHAIN.pem KEY.pem
+#   ./bin/iyi run bench/std_http_resume.iyi speed PORT ROOT.pem COUNT
+#
+# With no arguments it runs std/http's own TLS server on four listeners
+# and the client against them in one program, under the test PKI below;
+# each answer is "resumed=yes" or "resumed=no", as the server's
+# `Request#tls_resumed?` says. Three of the listeners share one
+# `TlsServerConfig`, and with it the keys its tickets are sealed under, so
+# a ticket one origin sent would be taken by another: the server resuming
+# is what proves a ticket was offered. The fourth sends eight tickets a
+# handshake. Each line is one check, its properties alone - no port, no
+# time - and one that is not what it should be is followed by "FAIL
+# <check>: <found>, not <wanted>"; the run ends "ALL CHECKS PASSED" or
+# exits 1. CI runs it so, as it runs every bench program, and
+# bench/std_http_exercise.sh with its broken copies of std/http.
+#
+# `s_server` is the client against OpenSSL's `s_server -www` on PORT,
+# whose page says "New, TLSv1.3" or "Reused, TLSv1.3".
+#
+# `serve` and `speed` are the measurement: the server on one listener,
+# and COUNT handshakes with a server on PORT at localhost, full and
+# resumed by turns - std/tls's handshake alone, then a GET on a new
+# connection through an `HTTPClient` - their medians printed.
+
+module bench/std_http_resume
+
+import std/http::{HTTP, HTTPClient, HTTPError, Request, Response, Server}
+import std/socket::{IyiSocket, SocketError}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsServerConfig, TlsSession}
+import std/x509::{Certificate}
+import std/file::{File}
+
+# A test PKI of this program's own, for the run with no arguments: a root
+# and a leaf for localhost it signed, Ed25519, valid from 2025 to 9999 so
+# that no clock retires them, and a second root that signs nothing here.
+# The leaf's key is in the open on purpose: it guards nothing but this
+# test. Made once with Python's cryptography.
+LEAF_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBQzCB9qADAgECAgEDMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowFDESMBAGA1UEAwwJ\n" \
+           "bG9jYWxob3N0MCowBQYDK2VwAyEAOeskudtTVi76JObK6QHqJy6M7PaEu/aLlC5H\n" \
+           "B5OLks+jZjBkMBQGA1UdEQQNMAuCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAAMB0G\n" \
+           "A1UdDgQWBBQN8ZJay/U7zf07disj78hKukvGAjAfBgNVHSMEGDAWgBSNjkTWVhBs\n" \
+           "a874Ao2cPFX4w4saajAFBgMrZXADQQAcAgj9qe58GnzceRkYfxyfNHxmqWOgDJkn\n" \
+           "b3rO1pz+8OCRioO1P+BhFa1FR/FMHSH9bOFEKfXfy3Nwr+y+GkMM\n" \
+           "-----END CERTIFICATE-----\n"
+ROOT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBJDCB16ADAgECAgEBMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowGTEXMBUGA1UEAwwO\n" \
+           "aXlpIGJlbmNoIHJvb3QwKjAFBgMrZXADIQCQIEeX9suXr4DL8DiLdBUfoWaJU+Hv\n" \
+           "7JhN3IpqspsuOqNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYw\n" \
+           "HQYDVR0OBBYEFI2ORNZWEGxrzvgCjZw8VfjDixpqMAUGAytlcANBAFEfpUf437+b\n" \
+           "PwJvPGD/gB0zIegp6+3cJzF42Tx6Hj8tIJgdtXVKA58EXmitGetqb788+xoJ49My\n" \
+           "4Wc3L1uxxAI=\n" \
+           "-----END CERTIFICATE-----\n"
+KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
+          "MC4CAQAwBQYDK2VwBCIEIOYKs3OzEJYJ/j+ZQYLoAU929MQeanF9kupAR9HpeHJ8\n" \
+          "-----END PRIVATE KEY-----\n"
+OTHER_ROOT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+                 "MIIBMDCB46ADAgECAgECMAUGAytlcDAfMR0wGwYDVQQDDBRpeWkgYmVuY2ggb3Ro\n" \
+                 "ZXIgcm9vdDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowHzEdMBsG\n" \
+                 "A1UEAwwUaXlpIGJlbmNoIG90aGVyIHJvb3QwKjAFBgMrZXADIQDh3dhJu9Bl2I1j\n" \
+                 "zgqPmqiaSW8vq5CT6/p1c+A4ukXqfaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNV\n" \
+                 "HQ8BAf8EBAMCAQYwHQYDVR0OBBYEFClOnhrWMIRDzAqfGARIS2jN4MC9MAUGAytl\n" \
+                 "cANBAFnLIoL5ipEp5op1BpX/BGS6vJf4NBA7hacttlU3bxc7G4KjWRnYHeWLwMF8\n" \
+                 "ardj3lvPMq2FzwqxBZzUkhIhhQY=\n" \
+                 "-----END CERTIFICATE-----\n"
+
+# What the server said of the connection, or why there is no answer.
+def said(got : Response | HTTPError | SocketError | Cancelled) : String
+  case got
+  in Response
+    got.body
+  in HTTPError
+    got.message
+  in SocketError
+    got.message
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# What s_server's page says of the session: "New" or "Reused", or the
+# failure.
+def page(got : Response | HTTPError | SocketError | Cancelled) : String
+  return said(got) unless got.is_a?(Response)
+  body = got.body
+  return "Reused" if body.includes?("Reused, TLSv1.3")
+  return "New" if body.includes?("New, TLSv1.3")
+  "neither: #{body.size} bytes"
+end
+
+def answer(req : Request) : Response
+  Response.new(200, req.tls_resumed? ? "resumed=yes" : "resumed=no")
+end
+
+def median(samples : Array(Int64)) : String
+  sorted = samples.sorted
+  ns = sorted[sorted.size // 2]
+  "#{ns // 1000000_i64}.#{(ns % 1000000_i64 // 1000_i64).to_s.rjust(3, '0')} ms"
+end
+
+# One TLS handshake with the server on *port*, under *session* when one
+# is given, and how long it took (ns); then a request read to its end,
+# which takes the tickets the server sends after the handshake. A
+# handshake under a session that holds a ticket must resume, and one
+# under none must not.
+def shake(port : Int32, config : TlsConfig, session : TlsSession?) : Int64
+  offered = (held = session) ? held.size > 0 : false
+  started = __iyi_monotonic_ns
+  tls = TlsClient.connect("localhost", port, config, session: session)
+  took = __iyi_monotonic_ns - started
+  raise "no handshake: #{tls.message}" if tls.is_a?(TlsError)
+  raise "resumed #{tls.resumed?} with a ticket offered #{offered}" unless tls.resumed? == offered
+  tls.write("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+  while true
+    got = tls.read
+    break if got.is_a?(TlsError) || got.empty?
+  end
+  tls.close
+  took
+end
+
+args = Program.args
+mode = args.size > 0 ? args[0] : ""
+
+# One check's line, *label* and what was found; and when it is not
+# *wanted*, a FAIL line naming the check, what was found and what
+# should have been.
+def check(label : String, got : String, wanted : String, failures : Array(String)) : Nil
+  puts "#{label}: #{got}"
+  return if got == wanted
+  puts "FAIL #{label}: #{got}, not #{wanted}"
+  failures << label
+end
+
+if mode.empty?
+  shared = TlsServerConfig.from_pem(LEAF_PEM + ROOT_PEM, KEY_PEM).or_panic
+  generous = TlsServerConfig.from_pem(LEAF_PEM + ROOT_PEM, KEY_PEM).or_panic
+  generous.tickets = 8
+  listeners = [IyiSocket.listen("127.0.0.1", 0), IyiSocket.listen("127.0.0.1", 0), IyiSocket.listen("127.0.0.1", 0), IyiSocket.listen("127.0.0.1", 0)]
+  bases = listeners.map { |l| "https://localhost:#{l.local_port}/" }
+  origins = listeners.map { |l| "https://localhost:#{l.local_port}" }
+  roots = Certificate.from_pem(ROOT_PEM).or_panic
+  other = Certificate.from_pem(OTHER_ROOT_PEM).or_panic
+  failures = [] of String
+  group do |g|
+    listeners.each_with_index do |listener, i|
+      g.spawn do
+        Server.serve(listener, tls: i == 3 ? generous : shared) do |req|
+          listener.close if req.path == "/stop"
+          answer(req)
+        end
+        0
+      end
+    end
+    g.spawn do
+      config = TlsConfig.new
+      config.roots = roots
+      config.alpn = ["http/1.1"]
+      HTTP.tls_config = config
+      # A new connection for every request: none is kept to be reused.
+      client = HTTPClient.new(idle: 0)
+      first = client.get(bases[0])
+      second = client.get(bases[0])
+      resumed = second.is_a?(Response) && second.tls_resumed?
+      check("same origin", "#{said(first)} then #{said(second)}, the response says #{resumed}, #{client.connections_resumed} resumed",
+        "resumed=no then resumed=yes, the response says true, 1 resumed", failures)
+      check("another origin", "#{said(client.get(bases[1]))} then #{said(client.get(bases[1]))}", "resumed=no then resumed=yes", failures)
+      # The same root, in an array of its own: the roots changed in place.
+      config.roots = Certificate.from_pem(ROOT_PEM).or_panic
+      check("new roots", "#{said(client.get(bases[0]))} then #{said(client.get(bases[0]))}", "resumed=no then resumed=yes", failures)
+      config.roots = other
+      check("other roots", said(client.get(bases[0])),
+        "HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=iyi bench root, the issuer of CN=localhost (bad_certificate)", failures)
+      config.roots = roots
+      # A client with a TLS configuration of its own (`tls:`): its tickets
+      # are kept under that one, so roots assigned there in place make the
+      # next connection a full handshake, refused under roots that do not
+      # reach the server, while `HTTP.tls_config` is unchanged.
+      mine = TlsConfig.new
+      mine.roots = roots
+      mine.alpn = ["http/1.1"]
+      own = HTTPClient.new(idle: 0, tls: mine)
+      before = said(own.get(bases[0]))
+      again = said(own.get(bases[0]))
+      mine.roots = other
+      check("own tls", "#{before} then #{again}, then under other roots: #{said(own.get(bases[0]))}",
+        "resumed=no then resumed=yes, then under other roots: HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=iyi bench root, the issuer of CN=localhost (bad_certificate)", failures)
+      # A server that sends eight tickets a handshake.
+      plenty = HTTPClient.new(idle: 0)
+      plenty.get(bases[3])
+      few = HTTPClient.new(idle: 0, origin_tickets: 2, tickets: 4)
+      few.get(bases[3])
+      check("an origin's tickets", "#{plenty.tickets_held(origins[3])} of 8 by default, #{few.tickets_held(origins[3])} of 8 when 2 are asked for",
+        "4 of 8 by default, 2 of 8 when 2 are asked for", failures)
+      # Room for two origins at two each: the third drops the oldest.
+      few.get(bases[0])
+      few.get(bases[1])
+      few.get(bases[2])
+      held = few.tickets_held
+      dropped = few.tickets_held(origins[3]) + few.tickets_held(origins[0])
+      check("tickets in all", "#{held} held over four origins, #{dropped} of the two oldest, then #{said(few.get(bases[0]))} at the oldest and #{said(few.get(bases[2]))} at the newest",
+        "4 held over four origins, 0 of the two oldest, then resumed=no at the oldest and resumed=yes at the newest", failures)
+      none = HTTPClient.new(idle: 0, tickets: 0)
+      check("none kept", "#{said(none.get(bases[0]))} then #{said(none.get(bases[0]))}, #{none.tickets_held} held", "resumed=no then resumed=no, 0 held", failures)
+      # A kept connection still carries the next request, and says the
+      # handshake it was made by.
+      pooled = HTTPClient.new
+      pooled.get(bases[2])
+      kept = pooled.get(bases[2])
+      check("kept", "#{said(kept)}, #{pooled.connections_made} made, #{pooled.connections_reused} reused", "resumed=no, 1 made, 1 reused", failures)
+      pooled.close
+      bases.each { |base| HTTP.get(base + "stop") }
+      0
+    end
+  end
+  exit 1 unless failures.empty?
+  puts "ALL CHECKS PASSED"
+  exit 0
+end
+
+if mode == "s_server"
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  config.alpn = ["http/1.1"]
+  HTTP.tls_config = config
+  base = "https://localhost:#{args[1]}/"
+  # Ten seconds a read: a broken copy that confuses s_server fails rather
+  # than waits.
+  client = HTTPClient.new(idle: 0, timeout_ms: 10000)
+  first = client.get(base)
+  second = client.get(base)
+  resumed = second.is_a?(Response) && second.tls_resumed?
+  puts "s_server: #{page(first)} then #{page(second)}, the response says #{resumed}"
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  puts "s_server under new roots: #{page(client.get(base))} then #{page(client.get(base))}"
+  exit 0
+end
+
+if mode == "serve"
+  config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  Server.serve(listener, tls: config) do |req|
+    listener.close if req.path == "/quit"
+    answer(req)
+  end
+  exit 0
+end
+
+if mode == "speed"
+  port = args[1].to_i
+  base = "https://localhost:#{port}/"
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  config.alpn = ["http/1.1"]
+  HTTP.tls_config = config
+  count = args[3].to_i
+  # The handshake alone, as the client makes it: std/tls's, with the
+  # session an `HTTPClient` would hand it or none.
+  session = TlsSession.new
+  shake(port, config, nil)
+  shake(port, config, session)
+  full_shakes = [] of Int64
+  resumed_shakes = [] of Int64
+  count.times do
+    full_shakes << shake(port, config, nil)
+    resumed_shakes << shake(port, config, session)
+  end
+  puts "the handshake, #{count} each: full #{median(full_shakes)}, resumed #{median(resumed_shakes)}"
+  # And a GET on a new connection, the handshake and all.
+  full = HTTPClient.new(idle: 0, tickets: 0)
+  resuming = HTTPClient.new(idle: 0)
+  # The first of each warms the code and, for the second, takes tickets.
+  full.get(base).or_panic
+  resuming.get(base).or_panic
+  fulls = [] of Int64
+  resumes = [] of Int64
+  count.times do
+    started = __iyi_monotonic_ns
+    full.get(base).or_panic
+    fulls << __iyi_monotonic_ns - started
+    started = __iyi_monotonic_ns
+    resuming.get(base).or_panic
+    resumes << __iyi_monotonic_ns - started
+  end
+  puts "a GET on a new connection, #{count} each: full #{median(fulls)}, resumed #{median(resumes)} (#{resuming.connections_resumed} of #{count} resumed, #{full.connections_resumed} of the full)"
+  exit 0
+end
+
+puts "usage: std_http_resume [s_server | serve | speed] ..."
+exit 2

@@ -356,6 +356,11 @@ when "no-from"
   m = Mail::Message.new
   m.to << Mail::Address.new("b@x.test")
   client.send(m)
+when "no-date"
+  m = Mail::Message.new
+  m.from = Mail::Address.new("a@x.test")
+  m.to << Mail::Address.new("b@x.test")
+  client.send(m)
 when "or-panic"
   SmtpClient.connect("127.0.0.1", listener.local_port, SmtpSecurity::Cleartext, TlsConfig.new, nil, 300).or_panic
 end
@@ -379,6 +384,7 @@ refuse angle "SMTP: \"b@x.test>\" is not an address to put in angle brackets"
 refuse command-break "SMTP: a command holds a line break"
 refuse password-break "SMTP: a user name or password holds a line break"
 refuse no-from "SMTP: a message has no From"
+refuse no-date "mail: a message has no Date"
 # An error value is not a panic until it is asked to be one.
 refuse or-panic "SMTP: reading from 127.0.0.1 failed: cannot read from socket: timed out"
 

@@ -4578,12 +4578,20 @@ pub struct Math
     pow(base.to_f64, exp.to_f64)
   end
 
+  # The magnitude of mag with the sign of sgn. Any other pair of numbers is
+  # taken as two Float64s, as the other library's untyped overload takes
+  # it: `copysign(3, -1)` was an ambiguous call between the two float
+  # overloads, as `max(2, 5)` was.
   def self.copysign(mag : Float64, sgn : Float64) : Float64
     LibLLVMMath.copysign_f64(mag, sgn)
   end
 
   def self.copysign(mag : Float32, sgn : Float32) : Float32
     LibLLVMMath.copysign_f32(mag, sgn)
+  end
+
+  def self.copysign(mag : T, sgn : U) : Float64 forall T, U
+    copysign(mag.to_f64, sgn.to_f64)
   end
 
   # a * b + c rounded once, as IEEE 754 defines it and as the other
@@ -4828,8 +4836,41 @@ pub struct Math
     IyiFloatText.from_bits(bits).to_f32
   end
 
+  # min and max take two values of one type, any type `<` compares, and
+  # answer one of them. Each is one overload: they were a Float64 and a
+  # Float32 one, which took no integer pair, and an integer overload beside
+  # them ties with them wherever an integer variable can widen to a
+  # double: with all three, `Math.max(1_i64, x)` with `x : Int32` is
+  # "ambiguous call, implicit cast of Int32 matches all of Float64,
+  # Int64". Two doubles or two singles are ordered as IEEE 754-2019's
+  # minimumNumber and maximumNumber order them, as they were: the number
+  # when one side is NaN, and -0.0 below 0.0. Every other type compares
+  # with `<` alone and answers the first argument on a tie, as the other
+  # library's untyped `Math.min` and `Math.max` do. The one type is the
+  # first argument's that the other can be cast to, so `Math.max(2,
+  # page - 1)` is an Int32, `Math.max(0, n)` with `n : Int64` an Int64,
+  # `Math.max(2, 2.5)` the Float64 2.5, and `Math.max(n, 0.5)` with
+  # `n : Int32` a Float64, as it was; a pair neither of which casts to the
+  # other's type, an Int64 and a UInt64 or a number and a String, is
+  # refused at the call.
+  def self.min(a : T, b : T) : T forall T
+    {% if T == ::Float64 || T == ::Float32 %}
+      ieee_min(a, b)
+    {% else %}
+      b < a ? b : a
+    {% end %}
+  end
+
+  def self.max(a : T, b : T) : T forall T
+    {% if T == ::Float64 || T == ::Float32 %}
+      ieee_max(a, b)
+    {% else %}
+      a < b ? b : a
+    {% end %}
+  end
+
   # The smaller, with the number when one side is NaN, and -0.0 over 0.0.
-  def self.min(a : Float64, b : Float64) : Float64
+  private def self.ieee_min(a : Float64, b : Float64) : Float64
     return b if a != a
     return a if b != b
     return a if a < b
@@ -4837,7 +4878,7 @@ pub struct Math
     copysign(1.0, a) < 0.0 ? a : b
   end
 
-  def self.min(a : Float32, b : Float32) : Float32
+  private def self.ieee_min(a : Float32, b : Float32) : Float32
     return b if a != a
     return a if b != b
     return a if a < b
@@ -4846,7 +4887,7 @@ pub struct Math
   end
 
   # The larger, with the number when one side is NaN, and 0.0 over -0.0.
-  def self.max(a : Float64, b : Float64) : Float64
+  private def self.ieee_max(a : Float64, b : Float64) : Float64
     return b if a != a
     return a if b != b
     return a if a > b
@@ -4854,7 +4895,7 @@ pub struct Math
     copysign(1.0, a) < 0.0 ? b : a
   end
 
-  def self.max(a : Float32, b : Float32) : Float32
+  private def self.ieee_max(a : Float32, b : Float32) : Float32
     return b if a != a
     return a if b != b
     return a if a > b

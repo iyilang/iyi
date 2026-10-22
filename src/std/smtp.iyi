@@ -32,7 +32,11 @@
 #
 # **Sending.** `send` takes a `Mail::Message` - its From as the sender,
 # its To, Cc and Bcc as the recipients, its text with Bcc left out - or a
-# sender, recipients and the message's bytes. MAIL FROM carries SIZE when
+# sender, recipients and the message's bytes. The message must have a
+# From and a Date, as `Mail::Message#to_s` asks (`msg.date =
+# Mail.date(...)`): `send` panics as `to_s` does for a message `to_s`
+# refuses, since that is the caller's mistake; every other failure is an
+# `SmtpError`. MAIL FROM carries SIZE when
 # the server offers it (RFC 1870), and a message larger than the size it
 # names is refused before it is sent; BODY=8BITMIME (RFC 6152) when the
 # message has bytes past ASCII, which a server that does not offer
@@ -316,7 +320,14 @@ pub class SmtpClient
     answer
   end
 
-  # *message* to its recipients - To, Cc and Bcc - from its From.
+  # *message* to its recipients - To, Cc and Bcc - from its From. The
+  # message must have a From and a Date, as `Mail::Message#to_s` asks
+  # (`msg.date = Mail.date(...)`), and at least one recipient. A message
+  # without them is the caller's mistake and panics: `SMTP: a message has
+  # no From`, then `to_s`'s `mail: a message has no Date`, then `SMTP: a
+  # message with no recipients`. Every other failure - the connection, the
+  # server's replies, a size or extension the server refuses - is the
+  # `SmtpError` returned.
   def send(message : Mail::Message) : SmtpError?
     sender = message.from
     raise "SMTP: a message has no From" unless sender
@@ -324,7 +335,12 @@ pub class SmtpClient
   end
 
   # *data*, a whole message, from *sender* to *recipients*; *utf8* when
-  # the message is RFC 6532's, as SMTPUTF8 carries.
+  # the message is RFC 6532's, as SMTPUTF8 carries. *data* is sent as it
+  # is, so a message written with `Mail::Message#to_s` must have had its
+  # Date to get here. No recipients, or an address that holds a line break
+  # or an angle bracket, panics (`SMTP: a message with no recipients`,
+  # `SMTP: ... is not an address to put in angle brackets`); every other
+  # failure is the `SmtpError` returned.
   def send(sender : String, recipients : Array(String), data : String, utf8 : Bool = false) : SmtpError?
     raise "SMTP: a message with no recipients" if recipients.empty?
     ([sender] + recipients).each do |a|

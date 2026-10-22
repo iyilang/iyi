@@ -87,6 +87,20 @@ raise "remote_port: #{conn.remote_port.inspect}, not #{client.local_port}" unles
 raise "remote_address: the client's #{client.remote_address.inspect}" unless client.remote_address == "127.0.0.1" && client.remote_port == port
 puts "remote_address: ok"
 
+# Nagle's algorithm off at both ends of a TCP connection, as the socket's
+# own TCP_NODELAY option reads back (`getsockopt`): the connected end and
+# the accepted one, as Go's net package leaves its own. On, a write
+# behind an unacknowledged one waited out the peer's delayed ACK, 40 ms
+# on Linux, and every new https:// connection between std/http's ends
+# paid it twice. `nodelay = false` turns Nagle back on, and true off.
+raise "nodelay: the connected end has Nagle on (TCP_NODELAY reads 0)" unless client.nodelay?
+raise "nodelay: the accepted end has Nagle on (TCP_NODELAY reads 0)" unless conn.nodelay?
+client.nodelay = false
+raise "nodelay: TCP_NODELAY still set after nodelay = false" if client.nodelay?
+client.nodelay = true
+raise "nodelay: TCP_NODELAY not set again after nodelay = true" unless client.nodelay?
+puts "nodelay: ok"
+
 # A connect waits at most `timeout_ms` for its handshake. A listener whose
 # backlog of one is full and never accepted: Linux drops the SYNs past it,
 # and a connect without a limit waited the kernel's two minutes of
@@ -114,6 +128,43 @@ puts "remote_address: ok"
 {% else %}
   puts "connect_timeout: ok"
 {% end %}
+
+# The bound holds for the handshake on every platform, wherever the
+# connect waits for it. On Windows it waits inside `ConnectEx`, and that
+# park had no deadline: a connect to 10.255.255.1, which nothing answers,
+# with a 2000 ms bound answered "timed out" after the kernel's own 21 s
+# of SYN retries (#131). An answer that came well past its bound, or a
+# timeout that came before it, fails here; an answer before the bound
+# that is not a timeout is the network's, and leaves this endpoint
+# unable to show the bound.
+def connect_bound(host : String, port : Int32, bound : Int32) : Nil
+  started = __iyi_monotonic_ns
+  tried = IyiSocket.connect(host, port, timeout_ms: bound)
+  took = (__iyi_monotonic_ns - started) // 1000000_i64
+  raise "connect_bound: a connect to #{host} was cancelled" if tried.is_a?(Cancelled)
+  tried.close if tried.is_a?(IyiSocket)
+  timed_out = tried.is_a?(SocketError) && tried.timed_out?
+  answer = tried.is_a?(SocketError) ? tried.message : "connected"
+  raise "connect_bound: a #{bound} ms bound on a connect to #{host}:#{port} answered after #{took} ms: #{answer}" if took >= bound + 1000
+  raise "connect_bound: a #{bound} ms bound on a connect to #{host}:#{port} timed out early, after #{took} ms" if timed_out && took < bound
+end
+
+# The issue's own: 10.255.255.1 is private and routed nowhere, so its
+# SYNs are dropped wherever no network answers for it. On Linux
+# (x86-64), where `connect_to`'s wait already held the bound, it timed
+# out after 2002 ms on the machine this was written on.
+connect_bound("10.255.255.1", 5432, 2000)
+{% if flag?(:win32) %}
+  # And one this exercise controls: Windows retries a connect a port
+  # refuses for about 2 s before it gives up (8c, `localhost_v6`), so a
+  # 500 ms bound on a loopback port nobody holds runs out first, network
+  # or none.
+  unheld = IyiSocket.listen("127.0.0.1", 0)
+  unheld_port = unheld.local_port
+  unheld.close
+  connect_bound("127.0.0.1", unheld_port, 500)
+{% end %}
+puts "connect_bound: ok"
 
 # 4. Closed peer detection (EOF)
 client.close
@@ -360,10 +411,16 @@ puts "localhost: ok"
 
 # 8c. A connect to `localhost` reaches a listener on ::1 alone: Windows
 #     names both addresses and dev servers often bind ::1, where the
-#     connect went to 127.0.0.1 only and was "connection refused".
+#     connect went to 127.0.0.1 only and was "connection refused". The
+#     two are raced (RFC 8305), ::1 started 250 ms after 127.0.0.1 or at
+#     its refusal, so Windows' 2 s refusal of 127.0.0.1 is not waited
+#     for: ::1 was reached in 2017 ms there when it was tried only after.
 v6_only = IyiSocket.listen("::1", 0)
+v6_began = __iyi_monotonic_ns
 v6_client = IyiSocket.connect("localhost", v6_only.local_port)
+v6_took = (__iyi_monotonic_ns - v6_began) // 1000000_i64
 raise "localhost_v6: the connect answered #{v6_client.inspect}" unless v6_client.is_a?(IyiSocket)
+raise "localhost_v6: ::1 waited for 127.0.0.1's refusal, #{v6_took} ms" unless v6_took < 1500
 v6_conn = v6_only.accept.or_panic
 v6_client.write("over ::1")
 heard_v6 = v6_conn.read(64).or_panic
@@ -371,7 +428,20 @@ raise "localhost_v6: the server read #{heard_v6.inspect}" unless heard_v6 == "ov
 v6_client.close
 v6_conn.close
 v6_only.close
-puts "localhost_v6: ok"
+puts "localhost_v6: ok (#{v6_took} ms)"
+
+# 8d. `localhost` refused at both addresses: one error naming both, in
+#     the order they were raced - 127.0.0.1 first, since a listener here
+#     binds `localhost` there. It answered 127.0.0.1's refusal alone.
+nobody = IyiSocket.listen("127.0.0.1", 0)
+nobody_port = nobody.local_port
+nobody.close
+both_refused = IyiSocket.connect("localhost", nobody_port)
+raise "localhost_race: the connect answered #{both_refused.inspect}" unless both_refused.is_a?(SocketError)
+expected_refusal = "cannot connect to localhost:#{nobody_port}: 127.0.0.1:#{nobody_port} connection refused; [::1]:#{nobody_port} connection refused"
+raise "localhost_race: #{both_refused.message}, not #{expected_refusal}" unless both_refused.message == expected_refusal
+raise "localhost_race: both refused is not refused?" unless both_refused.refused?
+puts "localhost_race: ok (#{both_refused.message})"
 
 # 9. A unix socket: a listener at a path, a connection to it, bytes each
 #    way, the path as the listener's address and no port. Closing the
@@ -580,6 +650,15 @@ puts "timeout: ok"
 # object's address kept the object alive. The address is sent hidden
 # behind a key, and computed and checked in frames of their own, so only
 # the reader's stack could hold it bare.
+#
+# It is sent twice, sixteen bytes. A frame over a page probes it: the
+# function steps the stack pointer down a page and stores a zero word
+# there before using it (issue #130). With the buffer inlined into
+# `IyiSocket#read`, that frame is 4,408 bytes on Linux x86_64 and its one
+# probe store lands on the buffer's first eight bytes, so a reader that
+# came back for its next read zeroed the one copy of the address before
+# it parked, and the broken copy below passed. A store is one aligned
+# word, so it can wipe one copy and not both.
 class Victim
   @a = 0_i64
   @b = 0_i64
@@ -597,8 +676,8 @@ end
 
 @[NoInline]
 def victim_bytes(word : UInt64) : String
-  String.new(8) do |buffer|
-    8.times { |i| buffer[i] = ((word ^ VICTIM_KEY).unsafe_shr((8 * i).to_u64) & 0xFF_u64).to_u8 }
+  String.new(16) do |buffer|
+    16.times { |i| buffer[i] = ((word ^ VICTIM_KEY).unsafe_shr((8 * (i % 8)).to_u64) & 0xFF_u64).to_u8 }
   end
 end
 
@@ -626,7 +705,7 @@ group do |g|
   g.spawn do
     reader = k_server.accept.or_panic
     got = reader.read(64).or_panic
-    raise "retain: the reader got #{got.bytesize} bytes, not the 8 sent" unless got.bytesize == 8
+    raise "retain: the reader got #{got.bytesize} bytes, not the 16 sent" unless got.bytesize == 16
     reader.read(64).or_panic
     reader.close
     0

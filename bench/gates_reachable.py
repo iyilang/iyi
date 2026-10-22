@@ -59,6 +59,11 @@ TOOLS = {
     # shared CI runner other jobs' load reaches |t| = 10 with nothing
     # leaking, so no workflow runs it.
     "ct_timing.sh",
+    # `python3 bench/sibling_times.py LOG...` reads the seconds each std
+    # sibling took from a run's std-siblings shard logs. Its numbers are the
+    # WEIGHTS `bench/std_siblings.sh` deals its shards by; the logs are a
+    # run's, downloaded, so there is nothing in a checkout to point it at.
+    "sibling_times.py",
 }
 
 

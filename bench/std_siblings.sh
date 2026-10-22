@@ -4,29 +4,97 @@
 #
 #     bash bench/std_siblings.sh          # all of them
 #     bash bench/std_siblings.sh 2 4      # the second of four shards
+#     bash bench/std_siblings.sh --plan 4 # which shard each goes to; runs none
 #
-# Shard K of N is every exercise whose place in the sorted list, counted from
-# one, leaves K when divided by N, N for none: interleaved rather than cut in
-# runs, so the slow ones (std/http's proofs, the crypto oracles) spread out
-# instead of landing in one shard. `bench/std_exercise.sh` runs all of them
-# after its own sections; CI runs the shards side by side, because one after
-# another they outgrew the hour the job had - and the sum is the same set,
-# which the shard header line says so a log can be added up.
+# `bench/std_exercise.sh` runs all of them after its own sections; CI runs
+# the shards side by side, because one after another they outgrew the hour
+# the job had - and the sum is the same set, which the shard header line
+# says so a log can be added up.
+#
+# The shards are dealt by weight: every sibling, heaviest first, goes to the
+# shard with the least weight so far (the first such shard on a tie, and
+# siblings of one weight by name, so the deal is the same everywhere). A
+# weight is the seconds the sibling took on the slowest of the three
+# platforms in run 39840302846 (jobs 120039255535 to 120040655672), read
+# from the twelve shard logs by sibling_times.py, beside this script; a
+# sibling not in WEIGHTS weighs 20, about what the 69 left out took at their
+# slowest (median 22 s, mean 24 s). Shard K of N used to be every sibling
+# whose sorted place left K divided by N: with the heaviest four of them
+# std_a* to std_w*, that put std/http, std/big, std/websocket and
+# std/autocert in shard 2, and the shard ran 60 to 80 minutes beside others
+# of 16 to 40. Added up from the same logs, the most a shard carries:
+#
+#                  interleaved   by WEIGHTS   by the platform's own
+#     Linux          4,641 s      2,580 s       2,345 s
+#     darwin         4,509 s      2,875 s       2,684 s
+#     Windows        4,019 s      2,936 s       2,724 s
+#
+# One table for every platform, though the platforms disagree (std/tls took
+# 801 s on Linux and 1,864 on Windows): a deal from each platform's own
+# seconds would save it 191 to 235 s more, on shards of 45 minutes, and the
+# same gate moves further than that from run to run (the shard holding
+# std/http took 29 to 45 minutes in four runs on Linux). Rerun
+# sibling_times.py on a green run's shard logs when a gate's weight changes
+# much; its `--predict 4` adds the logs up as above.
+WEIGHTS="
+  tls 1864   http 1632   big 988   xz 460   websocket 422
+  autocert 399   acme 343   mutex 252   zip 249   math 237
+  smtp 223   process 211   sse 199   zstd 195   text_scale 189
+  secure_dns 188   router 160   bzip2 151   x509 149   dir 145
+  compress 140   tar 140   regex 137   rsa 130   dns 122
+  yaml 121   term 116   cookie 115   time 103   ocsp 99
+  xml 99   p384 97   fileserver 94   toml 88   fuzz 86
+  file 84   png 84   curve25519 81   csv 77   mail 76
+  digest 71   complex 69   eiy 64
+"
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-shard="${1:-1}"
-shards="${2:-1}"
+plan=""
+if [ "${1:-}" = "--plan" ]; then
+  plan=1
+  shard=1
+  shards="${2:-}"
+else
+  shard="${1:-1}"
+  shards="${2:-1}"
+fi
 case "$shard$shards" in
-  *[!0-9]*)
-    echo "usage: bash bench/std_siblings.sh [K N]: K and N are numbers"
+  "" | *[!0-9]*)
+    echo "usage: bash bench/std_siblings.sh [K N | --plan N]: K and N are numbers"
     exit 2
     ;;
 esac
-if [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -gt "$shards" ]; then
-  echo "usage: bash bench/std_siblings.sh [K N]: 1 <= K <= N"
+if [ -z "$shards" ] || [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -gt "$shards" ]; then
+  echo "usage: bash bench/std_siblings.sh [K N | --plan N]: 1 <= K <= N"
   exit 2
 fi
+
+# "K WEIGHT NAME" for every sibling, in the order they are dealt.
+deal() {
+  for sibling in "$REPO"/bench/std_*_exercise.sh; do
+    [ -f "$sibling" ] || continue
+    name="$(basename "$sibling" .sh)"
+    [ "$name" = "std_exercise" ] || echo "$name"
+  done | awk -v table="$WEIGHTS" '
+    BEGIN { n = split(table, t); for (i = 1; i < n; i += 2) w["std_" t[i] "_exercise"] = t[i + 1] }
+    { print $1, (($1 in w) ? w[$1] : 20) }' |
+    LC_ALL=C sort -k2,2nr -k1,1 |
+    awk -v n="$shards" '{
+      k = 1
+      for (i = 2; i <= n; i++) if (load[i] < load[k]) k = i
+      load[k] += $2
+      print k, $2, $1 }'
+}
+dealt="$(deal)"
+
+if [ -n "$plan" ]; then
+  echo "$dealt" | LC_ALL=C sort -s -k1,1n
+  echo "$dealt" | awk -v n="$shards" '{ c[$1]++; s[$1] += $2 }
+    END { for (k = 1; k <= n; k++) printf "# shard %d of %d: %d of %d siblings, %d s by the weights\n", k, n, c[k], NR, s[k] }'
+  exit 0
+fi
+mine=" $(echo "$dealt" | awk -v k="$shard" '$1 == k { printf "%s ", $3 }')"
 
 # Each sibling has SIBLING_MINUTES (35: std/http's, the slowest, takes 25
 # on Linux) and is stopped past them, failing by name. A hang left to the
@@ -87,7 +155,7 @@ for sibling in "$REPO"/bench/std_*_exercise.sh; do
   [ -f "$sibling" ] || continue
   [ "$(basename "$sibling")" = "std_exercise.sh" ] && continue
   place=$((place + 1))
-  [ $(((place - 1) % shards + 1)) -eq "$shard" ] || continue
+  case "$mine" in *" $(basename "$sibling" .sh) "*) ;; *) continue ;; esac
   ran="$ran $(basename "$sibling" .sh)"
   echo "-- running sibling: $(basename "$sibling")"
   sampler=""
@@ -119,6 +187,6 @@ done
 
 [ -n "$trace" ] && rm -f "$trace"
 echo
-echo "== shard $shard of $shards: $(echo $ran | wc -w | tr -d ' ') of $place sibling exercises"
+echo "== shard $shard of $shards: $(echo $ran | wc -w | tr -d ' ') of $place sibling exercises, dealt by weight"
 [ -n "$ran" ] || echo "  (none in this shard)"
 exit "$status"

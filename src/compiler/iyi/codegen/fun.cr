@@ -411,6 +411,17 @@ class Iyi::CodeGenVisitor
         context.fun.linkage = LLVM::Linkage::Internal
       end
 
+      # iyi: the prelude's `memcpy`, `memmove` and `memset` are there to
+      # answer the calls LLVM makes for this program's own code, and are
+      # hidden so they answer nobody else's. Linked with `-rdynamic` they
+      # were in the dynamic symbol table, and on Linux a C library the
+      # program links (`@[Link]`) bound its own copies to these simple loops
+      # rather than to libc's. Hidden, the static link still resolves the
+      # program's calls to them, and a shared library keeps libc's.
+      if is_exported_fun && needs_body && mangled_name.in?("memcpy", "memmove", "memset")
+        context.fun.visibility = LLVM::Visibility::Hidden
+      end
+
       if needs_body
         emit_def_debug_metadata target_def unless @debug.none?
         set_current_debug_location target_def if @debug.line_numbers?

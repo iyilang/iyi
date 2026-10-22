@@ -148,6 +148,7 @@ lib LibLLVM
   fun get_linkage = LLVMGetLinkage(global : ValueRef) : LLVM::Linkage
   fun set_linkage = LLVMSetLinkage(global : ValueRef, linkage : LLVM::Linkage)
   fun set_dll_storage_class = LLVMSetDLLStorageClass(global : ValueRef, class : LLVM::DLLStorageClass)
+  fun set_visibility = LLVMSetVisibility(global : ValueRef, viz : LLVM::Visibility)
 
   fun set_alignment = LLVMSetAlignment(v : ValueRef, bytes : UInt)
 

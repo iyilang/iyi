@@ -8577,9 +8577,9 @@ require "./file"
 # copied that way, and which the floor gates (`bench/dependency_floor.sh` and
 # the exercises') would read as a dependency taken on.
 #
-# `memcpy` goes a word at a time while both ends are word-aligned, a byte at
-# a time otherwise and for the tail. LLVM's loop-idiom pass leaves a function
-# named `memcpy` alone, so its loop is not folded back into a call to itself.
+# `memcpy` goes 32 bytes a turn while both ends are word-aligned, then a word,
+# and a byte at a time otherwise and for the tail. LLVM's loop-idiom pass
+# leaves `memcpy` alone, so its loops are not folded into calls to itself.
 # It does not leave `memmove` alone, and folds a copy loop whose ends may
 # overlap into exactly the `llvm.memmove` that calls this function: so
 # `memmove` hands two regions that do not overlap to `memcpy`, and copies
@@ -8592,6 +8592,18 @@ require "./file"
     from = source.address
     done = 0_u64
     if (to | from) & 7_u64 == 0_u64
+      # Four words read before any is written, then the rest one at a time.
+      while done &+ 32_u64 <= count
+        a = Pointer(UInt64).new(from &+ done).value
+        b = Pointer(UInt64).new(from &+ done &+ 8_u64).value
+        c = Pointer(UInt64).new(from &+ done &+ 16_u64).value
+        d = Pointer(UInt64).new(from &+ done &+ 24_u64).value
+        Pointer(UInt64).new(to &+ done).value = a
+        Pointer(UInt64).new(to &+ done &+ 8_u64).value = b
+        Pointer(UInt64).new(to &+ done &+ 16_u64).value = c
+        Pointer(UInt64).new(to &+ done &+ 24_u64).value = d
+        done = done &+ 32_u64
+      end
       while done &+ 8_u64 <= count
         Pointer(UInt64).new(to &+ done).value = Pointer(UInt64).new(from &+ done).value
         done = done &+ 8_u64

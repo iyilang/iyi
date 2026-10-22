@@ -628,19 +628,34 @@
   | returning that struct in an `Int32` union | 3,432 → 1,448 | 3,024 → 1,488 | 3,480 → 1,480 |
 
   `StaticArray(UInt8, 1000).new` is 19, 25 and 20 instructions where it
-  was 7,969, 14,479 and 7,975. Issue #130's program, in a debug build in a
+  was 7,969, 14,483 and 7,975. Issue #130's program, in a debug build in a
   task on Linux x86_64, runs 119 frames deep where it ran 47; it was not
   run on darwin arm64, for want of a machine, so there it is the frames
-  above. `bench/std_x509_exercise.iyi` built plain is 1,332,104 bytes of
-  text where it was 1,394,882. In `--release` (Linux x86_64, best of 30
-  interleaved runs) a P-256 signature check took 52,446 ns against
-  52,351 (medians 53,251 and 53,539), a 128-byte 4x4 matrix product 4.80
-  ns against 4.81, and a 472-byte struct passed down a chain of calls and
-  returned 55.7 ns a link against 82.4. The line is at 128 because there
+  above. `bench/std_x509_exercise.iyi` built plain is 1,332,200 bytes of
+  text where it was 1,394,255. In `--release` (Linux x86_64, best of 20
+  interleaved runs) a P-256 signature check took 51,727 ns against
+  51,793 (medians 52,548 and 52,814), a 128-byte 4x4 matrix product 4.78
+  ns against 4.78, and a 472-byte struct passed down a chain of calls and
+  returned 37.6 ns a link against 82.3. The line is at 128 because there
   --release is unchanged: at 64 the signature check, whose points are 96
-  bytes, was 1.7% slower (best of fifteen), and at 32 10%. Because a large
-  copy can be a call, the prelude defines `memcpy` and `memmove` beside
-  its `memset`, so no program asks the C library for them.
+  bytes, was 1.7% slower (best of fifteen), and at 32 10%.
+
+  A large copy can be a call, so the prelude defines `memcpy` (32 bytes a
+  turn while both ends are word-aligned) and `memmove` (disjoint regions
+  to `memcpy`, an overlap a byte at a time through `asm`) beside its
+  `memset`, and no program asks the C library for them. Only the
+  compiler's own value copies reach them: `Array#insert`, `delete_at`,
+  `dup`, `Slice#move_to` and `copy_to` and string building are loops LLVM
+  vectorises in place, with no call to either before or after, and time
+  the same (`--release`, best of five: insert and delete at the front of
+  a million `Int32` 265 and 267 us, an overlapping 8 MB `move_to` 87 and
+  86 us, an 8 MB `copy_to` 103 and 100 us). The three are hidden: under
+  `-rdynamic` the prelude's `memset` was in the dynamic symbol table, so a
+  C library a program links on Linux bound its own calls to it, and it
+  and the two new ones now answer only the program's own code.
+  `.iyimod` is v58: a v57 artifact's object code passes these values the
+  old way, and is refused as `.iyimod format v57, this compiler writes
+  v58` rather than linked.
   `spec/compiler/codegen/indirect_value_spec.cr` holds the IR of a
   1,000-byte copy to `llvm.memcpy`, which the old compiler fails, and the
   copies' meaning: argument order, a callee's own copy, overlap, unions,
@@ -24052,7 +24067,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,574-line library and nothing else. Every other
+  written against iyi's own 22,586-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

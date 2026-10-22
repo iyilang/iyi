@@ -66,7 +66,13 @@ module Iyi::IyiMod
   # because a package's own build names its modules the way a consumer's
   # does and `module codec` alone no longer says `IyiWeb::Codec`
   # (`Artifact#package_name`).
-  FORMAT_VERSION = 57_u32
+  # v58: nothing in the file's own layout changed, but its object code
+  # passes and returns a value over 128 bytes through memory
+  # (`LLVMTyper::INDIRECT_ABOVE`), and a v57 artifact's object code takes
+  # and returns it as a first-class aggregate. Linked together the two
+  # disagreed on every such call without a word, so a v57 artifact is
+  # refused here as any other stale format is.
+  FORMAT_VERSION = 58_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 

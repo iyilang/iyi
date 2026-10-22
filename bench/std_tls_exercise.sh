@@ -565,13 +565,18 @@ else
     done
   }
   # tls12_round <binary>: the binary's std/tls client against TLS 1.2
-  # servers, a line each; "FAIL" before what did not hold.
+  # servers, a line each; "FAIL" before what did not hold. TLS12_ONLY
+  # names the one line to ask, for a broken copy judged by that one: asked
+  # them all, the 14 copies of `client12` ran 12 s each, 171 s of the
+  # 1,057 s all 289 copies ran (Linux, x86-64, 12 threads).
   tls12_round() {
     local bin="$1" failed=0 port pid proxy got
     cd "$PKI" || return 1
+    asked12() { [ -z "${TLS12_ONLY:-}" ] || [ "$TLS12_ONLY" = "$1" ]; }
     one() {
       local label="$1" want="$2" mode="$3"
       shift 3
+      asked12 "$label" || return 0
       port="$(free_port)"
       "$OPENSSL" s_server -accept "127.0.0.1:$port" -www "$@" >"$CW/s12.log" 2>&1 </dev/null &
       pid=$!
@@ -639,46 +644,50 @@ else
     one "the downgrade sentinel written into a TLS 1.2 ServerHello" "carrying RFC 8446's downgrade sentinel, where TLS 1.3 was offered: a downgrade (illegal_parameter)" \
       sentinel -tls1_2 -cert p256.pem -key p256.key
     # The exporter (RFC 5705) against OpenSSL's, one connection.
-    port="$(free_port)"
-    : >"$CW/s12-export.log"
-    { sleep 6 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_2 -cert p256.pem -key p256.key \
-      -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16 >"$CW/s12-export.log" 2>&1; } &
-    pid=$!
-    for _ in $(seq 1 50); do grep -q ACCEPT "$CW/s12-export.log" && break; sleep 0.1; done
-    got="$(TLS_MIN_VERSION=1.2 TLS_EXPORT="EXPERIMENTAL iyi" "$bin" get "$port" ca.pem localhost 2>&1 | grep -o 'exported=[0-9a-f]*' | cut -d= -f2)"
-    wait "$pid" 2>/dev/null
-    local theirs
-    theirs="$(grep -o 'Keying material: [0-9A-Fa-f]*' "$CW/s12-export.log" | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
-    if [ -n "$got" ] && [ "$got" = "$theirs" ]; then
-      echo "  exported for \"EXPERIMENTAL iyi\" over TLS 1.2, the same at both ends: $got"
-    else
-      echo "  FAIL the TLS 1.2 exporter: the client's '$got', OpenSSL's '$theirs'"
-      failed=1
+    if asked12 "the TLS 1.2 exporter"; then
+      port="$(free_port)"
+      : >"$CW/s12-export.log"
+      { sleep 6 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_2 -cert p256.pem -key p256.key \
+        -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16 >"$CW/s12-export.log" 2>&1; } &
+      pid=$!
+      for _ in $(seq 1 50); do grep -q ACCEPT "$CW/s12-export.log" && break; sleep 0.1; done
+      got="$(TLS_MIN_VERSION=1.2 TLS_EXPORT="EXPERIMENTAL iyi" "$bin" get "$port" ca.pem localhost 2>&1 | grep -o 'exported=[0-9a-f]*' | cut -d= -f2)"
+      wait "$pid" 2>/dev/null
+      local theirs
+      theirs="$(grep -o 'Keying material: [0-9A-Fa-f]*' "$CW/s12-export.log" | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
+      if [ -n "$got" ] && [ "$got" = "$theirs" ]; then
+        echo "  exported for \"EXPERIMENTAL iyi\" over TLS 1.2, the same at both ends: $got"
+      else
+        echo "  FAIL the TLS 1.2 exporter: the client's '$got', OpenSSL's '$theirs'"
+        failed=1
+      fi
     fi
     # A HelloRequest: s_server renegotiates ("r" on its stdin) once "first"
     # has reached it; its -msg log must show the no_renegotiation warning.
-    port="$(free_port)"
-    rm -f "$CW/fifo12" && mkfifo "$CW/fifo12"
-    : >"$CW/s12-reneg.log"
-    "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_2 -msg -cert p256.pem -key p256.key <"$CW/fifo12" >"$CW/s12-reneg.log" 2>&1 &
-    pid=$!
-    exec 7>"$CW/fifo12"
-    for _ in $(seq 1 50); do grep -q ACCEPT "$CW/s12-reneg.log" && break; sleep 0.1; done
-    "$bin" renegotiate "$port" ca.pem localhost >"$CW/reneg.out" 2>&1 &
-    local client=$!
-    for _ in $(seq 1 50); do grep -q '^first' "$CW/s12-reneg.log" && break; sleep 0.1; done
-    # In a subshell: a server already gone would SIGPIPE the gate itself.
-    (echo r >&7) 2>/dev/null
-    wait "$client"
-    exec 7>&-
-    sleep 0.3
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
-    if grep -q 'HelloRequest' "$CW/s12-reneg.log" && grep -q 'warning no_renegotiation' "$CW/s12-reneg.log"; then
-      echo "  a HelloRequest answered: OpenSSL read \"warning no_renegotiation\"; the client: $(head -1 "$CW/reneg.out")"
-    else
-      echo "  FAIL a HelloRequest: OpenSSL read no no_renegotiation: $(tr '\n' ' ' <"$CW/reneg.out")"
-      failed=1
+    if asked12 "a HelloRequest"; then
+      port="$(free_port)"
+      rm -f "$CW/fifo12" && mkfifo "$CW/fifo12"
+      : >"$CW/s12-reneg.log"
+      "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_2 -msg -cert p256.pem -key p256.key <"$CW/fifo12" >"$CW/s12-reneg.log" 2>&1 &
+      pid=$!
+      exec 7>"$CW/fifo12"
+      for _ in $(seq 1 50); do grep -q ACCEPT "$CW/s12-reneg.log" && break; sleep 0.1; done
+      "$bin" renegotiate "$port" ca.pem localhost >"$CW/reneg.out" 2>&1 &
+      local client=$!
+      for _ in $(seq 1 50); do grep -q '^first' "$CW/s12-reneg.log" && break; sleep 0.1; done
+      # In a subshell: a server already gone would SIGPIPE the gate itself.
+      (echo r >&7) 2>/dev/null
+      wait "$client"
+      exec 7>&-
+      sleep 0.3
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      if grep -q 'HelloRequest' "$CW/s12-reneg.log" && grep -q 'warning no_renegotiation' "$CW/s12-reneg.log"; then
+        echo "  a HelloRequest answered: OpenSSL read \"warning no_renegotiation\"; the client: $(head -1 "$CW/reneg.out")"
+      else
+        echo "  FAIL a HelloRequest: OpenSSL read no no_renegotiation: $(tr '\n' ' ' <"$CW/reneg.out")"
+        failed=1
+      fi
     fi
     cd "$REPO" || return 1
     return $failed
@@ -2241,6 +2250,27 @@ prove_copy() {
   local n="$1" W="$2" label="$3" phrase="$4" mode="${7:-trace}" rc
   CW="$W"
   export IYI_CACHE_DIR="$W/cache"
+  # A copy judged by one line of a round is asked that line alone, wherever
+  # the round would have asked it; the others prove nothing about the
+  # copy. A copy of the server judged by one scenario of the scripted
+  # client - its phrase "FAIL <scenario> " - is asked that one
+  # (TLS_CLIENT_ONLY, bench/std_tls_client.py); a copy of the TLS 1.2
+  # client judged by one line of tls12_round, that line (TLS12_ONLY).
+  # Asked all of them, the 68 copies of `server` ran 447 s, the 38 of
+  # `server12` 123 s and the 14 of `client12` 171 s, of the 1,057 s all
+  # 289 copies ran, and the section took 442 s; asked the one, 328 s
+  # (Linux, x86-64, 12 threads).
+  local only="${phrase#FAIL }"
+  only="${only% }"
+  case "$mode:$phrase" in
+    server*:"FAIL "*" ")
+      case "$only" in
+        "" | *" "*) ;;
+        *) export TLS_CLIENT_ONLY="$only" ;;
+      esac
+      ;;
+    client12:"FAIL "*) export TLS12_ONLY="$only" ;;
+  esac
   if ! IYI_PATH="$W/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$W/tlsx" \
        "$REPO/bench/std_tls_exercise.iyi" >"$W/build.log" 2>&1; then
     mutation_failed "$n" "  the $label copy did not build:" "$(tail -3 "$W/build.log" | sed 's/^/    /')"

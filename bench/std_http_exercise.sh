@@ -1438,6 +1438,10 @@ else
   cat >"$WORK/h2frames.py" <<'PY'
 import socket, struct, sys, time
 port = int(sys.argv[1])
+# Cases named after the port are the only ones asked: a broken copy is
+# judged by the one its break names, and against a server broken there the
+# others proved nothing and could wait out their reads.
+ONLY = set(sys.argv[2:])
 PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 NAMES = {0: "NO_ERROR", 1: "PROTOCOL_ERROR", 3: "FLOW_CONTROL_ERROR", 5: "STREAM_CLOSED", 6: "FRAME_SIZE_ERROR",
          9: "COMPRESSION_ERROR", 11: "ENHANCE_YOUR_CALM", 7: "REFUSED_STREAM"}
@@ -1543,8 +1547,11 @@ def reset_then_ping(sent):
     return code, False
 
 failures = 0
-def expect(name, got, want):
+def expect(name, ask, want):
     global failures
+    if ONLY and name not in ONLY:
+        return
+    got = ask()
     if got == want:
         print(f"  {name}: {NAMES.get(want, want)}")
     else:
@@ -1553,6 +1560,8 @@ def expect(name, got, want):
 
 def stream_error(name, sent, want):
     global failures
+    if ONLY and name not in ONLY:
+        return
     code, alive = reset_then_ping(sent)
     if code == want and alive:
         print(f"  {name}: RST_STREAM {NAMES.get(want, want)}, and the connection answers PING after")
@@ -1562,47 +1571,48 @@ def stream_error(name, sent, want):
 
 # The ordinary: SETTINGS acknowledged, PING answered, an unknown frame type
 # passed over.
-sock = run(frame(0xFA, 0, 0, b"ignored") + frame(6, 0, 0, b"12345678"))
-acked = pinged = False
-for kind, flags, stream, payload in frames_of(sock):
-    acked = acked or (kind == 4 and flags & 1 == 1)
-    if kind == 6 and flags & 1 and payload == b"12345678":
-        pinged = True
-        break
-if acked and pinged:
-    print("  SETTINGS acknowledged, an unknown frame type passed over, PING answered with its bytes")
-else:
-    failures += 1
-    print(f"  FAIL: SETTINGS acknowledged {acked}, PING answered {pinged}")
+if not ONLY:
+    sock = run(frame(0xFA, 0, 0, b"ignored") + frame(6, 0, 0, b"12345678"))
+    acked = pinged = False
+    for kind, flags, stream, payload in frames_of(sock):
+        acked = acked or (kind == 4 and flags & 1 == 1)
+        if kind == 6 and flags & 1 and payload == b"12345678":
+            pinged = True
+            break
+    if acked and pinged:
+        print("  SETTINGS acknowledged, an unknown frame type passed over, PING answered with its bytes")
+    else:
+        failures += 1
+        print(f"  FAIL: SETTINGS acknowledged {acked}, PING answered {pinged}")
 
-expect("the first frame not SETTINGS", goaway(frame(6, 0, 0, b"12345678"), settings=False), 1)
-expect("DATA on stream 0", goaway(frame(0, 0, 0, b"x")), 1)
-expect("a frame past 16384 bytes", goaway(frame(0, 0, 1, b"x" * 16385)), 6)
+expect("the first frame not SETTINGS", lambda: goaway(frame(6, 0, 0, b"12345678"), settings=False), 1)
+expect("DATA on stream 0", lambda: goaway(frame(0, 0, 0, b"x")), 1)
+expect("a frame past 16384 bytes", lambda: goaway(frame(0, 0, 1, b"x" * 16385)), 6)
 big = frame(0, 0, 1, b"x" * 16385)
-expect("a frame past 16384 bytes, its rest sent after the GOAWAY", goaway_late(big[:200], big[200:]), 6)
+expect("a frame past 16384 bytes, its rest sent after the GOAWAY", lambda: goaway_late(big[:200], big[200:]), 6)
 expect("a malformed head, a body sent after the answer",
-       status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nno colon here\r\nContent-Length: 8000\r\n\r\n", b"y" * 8000),
+       lambda: status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nno colon here\r\nContent-Length: 8000\r\n\r\n", b"y" * 8000),
        "HTTP/1.1 400 Bad Request")
 expect("a head past 1 MiB, more sent after the answer",
-       status_late(b"GET / HTTP/1.1\r\nX-Big: " + b"a" * 1048600, b"a" * 8000), "HTTP/1.1 431 Request Header Fields Too Large")
+       lambda: status_late(b"GET / HTTP/1.1\r\nX-Big: " + b"a" * 1048600, b"a" * 8000), "HTTP/1.1 431 Request Header Fields Too Large")
 expect("a broken chunk, more sent after the answer",
-       status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", b"y" * 8000),
+       lambda: status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", b"y" * 8000),
        "HTTP/1.1 400 Bad Request")
-expect("SETTINGS of 5 bytes", goaway(frame(4, 0, 0, b"\x00\x04\x00\x00\x00")), 6)
-expect("SETTINGS_INITIAL_WINDOW_SIZE past 2^31-1", goaway(frame(4, 0, 0, b"\x00\x04\x80\x00\x00\x00")), 3)
-expect("SETTINGS_MAX_FRAME_SIZE under 16384", goaway(frame(4, 0, 0, b"\x00\x05\x00\x00\x00\x64")), 1)
-expect("SETTINGS_ENABLE_PUSH of 2", goaway(frame(4, 0, 0, b"\x00\x02\x00\x00\x00\x02")), 1)
-expect("PING of 7 bytes", goaway(frame(6, 0, 0, b"1234567")), 6)
-expect("a WINDOW_UPDATE of 0 for the connection", goaway(frame(8, 0, 0, b"\x00\x00\x00\x00")), 1)
-expect("the connection's window past 2^31-1", goaway(frame(8, 0, 0, b"\x7f\xff\xff\xff")), 3)
-expect("a stream with an even number", goaway(frame(1, 5, 2, request())), 1)
-expect("a header block broken off by another frame", goaway(frame(1, 1, 1, request()) + frame(6, 0, 0, b"12345678")), 1)
-expect("CONTINUATION with no header block open", goaway(frame(9, 4, 1, request())), 1)
-expect("a CONTINUATION flood", goaway(frame(1, 1, 1, request()) + b"".join(frame(9, 0, 1, b"\x00" * 16000) for _ in range(70))), 11)
-expect("a header block that does not decode", goaway(frame(1, 5, 1, b"\x80")), 9)
-expect("a PUSH_PROMISE from a client", goaway(frame(5, 4, 0, b"\x00\x00\x00\x02")), 1)
-expect("RST_STREAM on a stream never opened", goaway(frame(3, 0, 5, b"\x00\x00\x00\x08")), 1)
-expect("HEADERS on a closed stream", goaway(frame(1, 5, 1, request()) + frame(1, 5, 1, request())), 5)
+expect("SETTINGS of 5 bytes", lambda: goaway(frame(4, 0, 0, b"\x00\x04\x00\x00\x00")), 6)
+expect("SETTINGS_INITIAL_WINDOW_SIZE past 2^31-1", lambda: goaway(frame(4, 0, 0, b"\x00\x04\x80\x00\x00\x00")), 3)
+expect("SETTINGS_MAX_FRAME_SIZE under 16384", lambda: goaway(frame(4, 0, 0, b"\x00\x05\x00\x00\x00\x64")), 1)
+expect("SETTINGS_ENABLE_PUSH of 2", lambda: goaway(frame(4, 0, 0, b"\x00\x02\x00\x00\x00\x02")), 1)
+expect("PING of 7 bytes", lambda: goaway(frame(6, 0, 0, b"1234567")), 6)
+expect("a WINDOW_UPDATE of 0 for the connection", lambda: goaway(frame(8, 0, 0, b"\x00\x00\x00\x00")), 1)
+expect("the connection's window past 2^31-1", lambda: goaway(frame(8, 0, 0, b"\x7f\xff\xff\xff")), 3)
+expect("a stream with an even number", lambda: goaway(frame(1, 5, 2, request())), 1)
+expect("a header block broken off by another frame", lambda: goaway(frame(1, 1, 1, request()) + frame(6, 0, 0, b"12345678")), 1)
+expect("CONTINUATION with no header block open", lambda: goaway(frame(9, 4, 1, request())), 1)
+expect("a CONTINUATION flood", lambda: goaway(frame(1, 1, 1, request()) + b"".join(frame(9, 0, 1, b"\x00" * 16000) for _ in range(70))), 11)
+expect("a header block that does not decode", lambda: goaway(frame(1, 5, 1, b"\x80")), 9)
+expect("a PUSH_PROMISE from a client", lambda: goaway(frame(5, 4, 0, b"\x00\x00\x00\x02")), 1)
+expect("RST_STREAM on a stream never opened", lambda: goaway(frame(3, 0, 5, b"\x00\x00\x00\x08")), 1)
+expect("HEADERS on a closed stream", lambda: goaway(frame(1, 5, 1, request()) + frame(1, 5, 1, request())), 5)
 stream_error("a field name in upper case", frame(1, 5, 1, request(extra=[("X-Up", "1")])), 1)
 stream_error("no :method", frame(1, 5, 1, request(drop=[":method"])), 1)
 stream_error("an empty :path", frame(1, 5, 1, request(path="")), 1)
@@ -2263,6 +2273,9 @@ https_checks() {
     got="$(timeout -k 5 "${HTTPS_GET_SECONDS:-60}" "$H2BIN" tls-get "$base" "$WORK/tls/root.pem" "$alpn" 2>&1 | tr '\n' '|')"
     want="echo 200 GET /echo x=1 $version host=localhost:$tport length=0 fnv=cbf29ce484222325 x=iyi|big 200 1000000 true|post 200 true|connections 1|"
     [ "$got" = "$want" ] || https_fail "the iyi client offering $alpn: $got"
+    # The first failure ends a broken copy's round here too: "the TLS
+    # handshake skipped" waited its 20 s out once for each offer, 45 s.
+    [ -n "${HTTPS_FIRST_FAIL:-}" ] && [ "$failed" -gt 0 ] && break
   done
   # A broken copy is caught at its first failure, and the clients after
   # it only wait out their timeouts against a server that cannot answer
@@ -2393,6 +2406,11 @@ import select, socket, ssl, struct, sys, threading, time
 
 port, root = int(sys.argv[1]), sys.argv[2]
 head_ms, request_ms = int(sys.argv[3]), int(sys.argv[4])
+# How long a drip goes on: five seconds past the latest close judged in
+# time (a body's, at the deadline and 2.5 s), where it was 30. A close
+# after that fails as a close outside its time would, and the two copies
+# that never close waited out all 30 s each.
+LIMIT = (request_ms + 2500) / 1000 + 5
 cases = sys.argv[5:] or ["cap", "head", "body", "h2"]
 failed = 0
 
@@ -2404,7 +2422,7 @@ def connect(alpn, timeout=20):
     return ctx.wrap_socket(raw, server_hostname="localhost")
 
 
-def drip(s, first, unit, every=0.5, limit=30):
+def drip(s, first, unit, every=0.5, limit=LIMIT):
     """Sends *first*, then *unit* every *every* seconds, reading what comes:
     the seconds until the server closed (None if it had not in *limit*),
     and what it sent."""
@@ -2442,7 +2460,7 @@ def drip(s, first, unit, every=0.5, limit=30):
 def judge(name, closed, low_ms, high_ms, extra=None):
     global failed
     if closed is None:
-        print(f"FAIL {name}: still open after 30 s")
+        print(f"FAIL {name}: still open after {LIMIT:.1f} s")
         failed += 1
     elif not (low_ms <= closed * 1000 <= high_ms):
         print(f"FAIL {name}: closed after {closed:.1f} s, outside {low_ms / 1000:.1f}-{high_ms / 1000:.1f} s")
@@ -2988,12 +3006,30 @@ fi
 echo
 echo "== proving the checks can fail when the module is broken"
 mutations=0
-# The broken copies are built one after another and run beside each other,
-# MUT_JOBS at a time: a run of the exercise is 21 seconds of mostly waiting
-# on its own sockets and clocks, and ninety-seven of them one at a time
-# took the gate past the 35 minutes `bench/std_siblings.sh` gives a
-# sibling. Each answer goes to a file of its own and they are printed in
-# order once all have ended.
+# The broken copies are built and run beside each other, MUT_JOBS at a
+# time: a run of the exercise is 21 seconds of mostly waiting on its own
+# sockets and clocks, and ninety-seven of them one at a time took the gate
+# past the 35 minutes `bench/std_siblings.sh` gives a sibling. Each answer
+# goes to a file of its own and they are printed in order once all have
+# ended.
+#
+# The builds were one after another too, sharing the compiler's cache, and
+# they were what the copies waited on: 97 builds of 2.6 s, 254 s in a row,
+# ran under 886 s of runs four at a time, and the copies took 353 s from
+# the first build to the last answer (Linux, x86-64, 12 threads). So each
+# copy is built in its own job, from a patched module and into a compiler
+# cache of its own, as std/tls's copies are: two builds writing one cache
+# at once would race. So built, and stopped at 60 s as below, the copies
+# took 293 s.
+#
+# A copy is stopped at 60 s, where it was 120: two copies never end - a
+# client that waits on a silent server for as long as it takes, a server
+# that joins a 24 MB body anew at every read - and each held its place
+# for the whole 120 s. Of the copies that end, the slowest failed after
+# 64 s (a server that never says 100 Continue), the next after 28, and
+# half of them within 5; a copy stopped is a copy that did not pass, as at
+# 120. What 60 s must leave room for is an unbroken run, which takes 21 s
+# on CI's runners (its plain build and run, 23.5 to 24.8 s).
 MUT_JOBS="${MUT_JOBS:-4}"
 mutation_pids=""
 mkdir -p "$WORK/mutres"
@@ -3008,12 +3044,12 @@ mutate() { # mutate <label> <old> <new> [module, http.iyi by default]
   # LNK1104 - three of thirty mutations here, whichever came after.
   mutations=$((mutations + 1))
   local label="$1" old="$2" new="$3" module="${4:-http.iyi}" n="$mutations"
+  local P="$WORK/patched-$n"
   if [ -z "$PY" ]; then
     mutation_said "$n" "  $label: skipped, no working python3 to make the broken copy with"
     return 0
   fi
-  rm -rf "$WORK/patched"
-  mkdir -p "$WORK/patched/std"
+  mkdir -p "$P/std"
   OLD="$old" NEW="$new" "$PY" - <<PY
 import os
 from pathlib import Path
@@ -3021,31 +3057,33 @@ src = Path("$REPO/src/std/$module").read_text()
 old = os.environ["OLD"]
 if old not in src:
     raise SystemExit("patch site missing: " + old)
-Path("$WORK/patched/std/$module").write_text(src.replace(old, os.environ["NEW"], 1))
+Path("$P/std/$module").write_text(src.replace(old, os.environ["NEW"], 1))
 PY
   if [ $? -ne 0 ]; then
     mutation_said "$n" "  $label: the patch did not apply"
     touch "$WORK/mutres/failed"
-  # Build first, then run: a patch that does not compile would also "fail",
-  # and that proves nothing about whether the exercise catches the break.
-  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut-$n.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-    mutation_said "$n" "  $label: the broken copy did not compile" "$(sed -n '1,6p' "$WORK/mut.out")"
-    touch "$WORK/mutres/failed"
-  else
-    (
-      if timeout -k 5 120 "$WORK/mut-$n.bin" >"$WORK/mut-$n.out" 2>&1; then
-        mutation_said "$n" "  $label: the exercise PASSED on a broken module"
-        touch "$WORK/mutres/failed"
-      else
-        mutation_said "$n" "  $label: caught"
-      fi
-    ) &
-    mutation_pids="$mutation_pids $!"
-    # `wait -n` where the shell has it (bash 4.3); darwin's 3.2 polls.
-    while [ "$(jobs -rp | wc -l)" -ge "$MUT_JOBS" ]; do
-      wait -n 2>/dev/null || sleep 0.2
-    done
+    return 0
   fi
+  (
+    # Build first, then run: a patch that does not compile would also
+    # "fail", and that proves nothing about whether the exercise catches
+    # the break.
+    if ! IYI_CACHE_DIR="$P/cache" IYI_PATH="$P${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut-$n.bin" "$REPO/bench/std_http_exercise.iyi" >"$P/build.log" 2>&1; then
+      mutation_said "$n" "  $label: the broken copy did not compile" "$(sed -n '1,6p' "$P/build.log")"
+      touch "$WORK/mutres/failed"
+    elif timeout -k 5 60 "$WORK/mut-$n.bin" >"$WORK/mut-$n.out" 2>&1; then
+      mutation_said "$n" "  $label: the exercise PASSED on a broken module"
+      touch "$WORK/mutres/failed"
+    else
+      mutation_said "$n" "  $label: caught"
+    fi
+    rm -rf "$P/cache"
+  ) &
+  mutation_pids="$mutation_pids $!"
+  # `wait -n` where the shell has it (bash 4.3); darwin's 3.2 polls.
+  while [ "$(jobs -rp | wc -l)" -ge "$MUT_JOBS" ]; do
+    wait -n 2>/dev/null || sleep 0.2
+  done
 }
 mutations_report() { # every answer, in the order the mutations were made
   local pid n=1
@@ -3206,16 +3244,44 @@ mutate "NO_PROXY's CIDR ranges passed over" 'return false if ip && in_range?(ip,
 mutate "an IPv6 range holding IPv4 addresses" '    return false unless mapped?(ip) == mapped?(cut)' ''
 mutate "a NO_PROXY address's port passed over" 'return false if ip && ip == pip && (pport.bytesize == 0 || pport == port)' 'return false if ip && ip == pip'
 mutate "a NO_PROXY domain's port passed over" 'return false if pport.bytesize == 0 || pport == port' 'return false'
-mutations_report
 
 # HTTP/2, each mechanism taken out of a copy that compiles: the iyi-to-iyi
 # exercise stops at the check that names it, or the raw frames find the
 # answer RFC 9113 asks for missing.
-h2_patched() { # h2_patched <name> <old> <new> [module, http.iyi by default]: a broken http2_exercise in $WORK/<name>.bin
-  local module="${4:-http.iyi}"
-  rm -rf "$WORK/$1"
-  mkdir -p "$WORK/$1/std"
-  OLD="$2" NEW="$3" "$PY" - "$REPO/src/std/$module" "$WORK/$1/std/$module" <<'PY'
+#
+# Every copy from here on - std/http or std/tls broken under
+# http2_exercise, the HTTPS server, the slow clients, the proxy's client -
+# is patched and built when its call below is reached, in a job of its own
+# beside the copies above (MUT_JOBS at a time, the same places), and its
+# call is kept. Once the copies above have answered, the calls are made
+# again, `judging` set: those of one kind one after another, as written,
+# the kinds side by side, MUT_JOBS at a time; their answers are printed in
+# the order the calls are written. A kind's servers write their ports to
+# files of its own (h2.port, h2tls.port, guarded.port, mtls.port, the
+# proxy's), every server takes a port the system gives it, and the
+# lingering close's copies are judged in this shell, as they were.
+# Built and judged one after another, these 39 copies took 255 s after
+# the copies above had answered; built beside those, 159 s, 142 of them
+# in eleven copies each waiting out a timeout of the round it fails;
+# judged side by side too, 49 s (Linux, x86-64, 12 threads).
+later_n=0
+later_pids=""
+judging=""
+mkdir -p "$WORK/later" "$WORK/judged"
+# later <name> <program> <module> <old> <new> <call>...: <name>'s copy of
+# std/<module>, <old> replaced by <new>, built from <program> into
+# $WORK/<name>.bin in a job of its own, a compiler cache of its own too;
+# <call> kept, to be made when judging.
+later() {
+  local name="$1" program="$2" module="$3" old="$4" new="$5"
+  shift 5
+  later_n=$((later_n + 1))
+  printf '%q ' "$@" >"$WORK/later/$later_n"
+  [ -n "$PY" ] || return 0
+  (
+    rm -rf "$WORK/$name"
+    mkdir -p "$WORK/$name/std"
+    if OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module" "$WORK/$name/std/$module" >"$WORK/$name.log" 2>&1 <<'PY'
 import os, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 old = os.environ["OLD"]
@@ -3223,14 +3289,82 @@ if src.count(old) != 1:
     raise SystemExit("patch site missing or not unique: " + old)
 open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(old, os.environ["NEW"], 1))
 PY
-  [ $? -eq 0 ] || return 1
-  IYI_PATH="$WORK/$1${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/$1.bin" "$REPO/bench/http2_exercise.iyi" >"$WORK/$1.log" 2>&1
+    then
+      IYI_CACHE_DIR="$WORK/$name/cache" IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" \
+        timeout 300 "$IYI" build -o "$WORK/$name.bin" "$program" >"$WORK/$name.log" 2>&1
+    else
+      false
+    fi
+    echo $? >"$WORK/$name.built"
+    rm -rf "$WORK/$name/cache"
+  ) &
+  later_pids="$later_pids $!"
+  while [ "$(jobs -rp | wc -l)" -ge "$MUT_JOBS" ]; do
+    wait -n 2>/dev/null || sleep 0.2
+  done
+}
+h2_patched() { # h2_patched <name>: whether later's copy <name> built
+  [ "$(cat "$WORK/$1.built" 2>/dev/null)" = 0 ]
+}
+judged_kind() { # judged_kind <n>: which kind the n-th kept call is
+  local fn
+  read -r fn _ <"$WORK/later/$1"
+  case "$fn" in
+    h2_node_breaks | h2_frames_breaks) echo h2_serve ;;
+    *) echo "$fn" ;;
+  esac
+}
+judge_later() { # every call later kept, made and answered as above
+  local pid kind n running kinds=""
+  for pid in $later_pids; do
+    wait "$pid" 2>/dev/null
+  done
+  judging=1
+  # The longest kinds first: 47, 41, 24, 23, 22 and 1 s here.
+  for kind in guard_breaks h2_breaks h2_serve https_breaks proxy_breaks mtls_breaks; do
+    (
+      n=1
+      while [ "$n" -le "$later_n" ]; do
+        if [ "$(judged_kind "$n")" = "$kind" ]; then
+          status=0
+          eval "$(cat "$WORK/later/$n")" >"$WORK/judged/$n" 2>&1
+          [ "$status" -eq 0 ] || touch "$WORK/judged/failed"
+        fi
+        n=$((n + 1))
+      done
+    ) &
+    kinds="$kinds $!"
+    while :; do
+      running=""
+      for pid in $kinds; do
+        kill -0 "$pid" 2>/dev/null && running="$running $pid"
+      done
+      [ "$(echo $running | wc -w)" -lt "$MUT_JOBS" ] && break
+      sleep 0.2
+    done
+  done
+  n=1
+  while [ "$n" -le "$later_n" ]; do
+    [ "$(judged_kind "$n")" = close_breaks ] && eval "$(cat "$WORK/later/$n")"
+    n=$((n + 1))
+  done
+  for pid in $kinds; do
+    wait "$pid"
+  done
+  n=1
+  while [ "$n" -le "$later_n" ]; do
+    [ -f "$WORK/judged/$n" ] && cat "$WORK/judged/$n"
+    n=$((n + 1))
+  done
+  [ -e "$WORK/judged/failed" ] && status=1
+  return 0
 }
 h2_breaks() { # h2_breaks <label> <name> <old> <new> <check>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" h2_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4" check="$5"
   if [ "$h2_built" -ne 1 ] || [ -z "$PY" ]; then
     echo "  $label: skipped, no HTTP/2 exercise or no python3"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3251,10 +3385,11 @@ h2_breaks() { # h2_breaks <label> <name> <old> <new> <check>
 # h2_node_breaks <label> <name> <old> <new>: Node's client, which holds a
 # server to the 1000-byte windows it advertises, fails on the broken one.
 h2_node_breaks() {
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" h2_node_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4"
   if [ "$h2_built" -ne 1 ] || [ -z "$PY" ] || [ -z "$NODE" ] || [ ! -s "$WORK/h2-client.js" ]; then
     echo "  $label: skipped, no HTTP/2 server, python3 or node"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3275,10 +3410,11 @@ h2_node_breaks() {
   fi
 }
 h2_frames_breaks() { # h2_frames_breaks <label> <name> <old> <new> <case>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" h2_frames_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4" case_name="$5"
   if [ "$h2_built" -ne 1 ] || [ -z "$PY" ] || [ ! -s "$WORK/h2frames.py" ]; then
     echo "  $label: skipped, no HTTP/2 server, python3 or frames to send it"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3287,7 +3423,10 @@ h2_frames_breaks() { # h2_frames_breaks <label> <name> <old> <new> <case>
     H2BIN="$WORK/$name.bin"
     h2_serve
     local code=0
-    timeout -k 5 300 "$PY" "$WORK/h2frames.py" "$H2PORT" >"$WORK/$name.out" 2>&1 || code=$?
+    # The named case alone: asked every case, "a request's fields
+    # unchecked" took 48 s and "HEADERS on a closed stream passed over" 37,
+    # the other seven 7 to 13 s each (CI, Linux, job 120040655161).
+    timeout -k 5 300 "$PY" "$WORK/h2frames.py" "$H2PORT" "$case_name" >"$WORK/$name.out" 2>&1 || code=$?
     h2_stop
     H2BIN="$good"
     if grep -qF -- "FAIL: $case_name:" "$WORK/$name.out"; then
@@ -3373,9 +3512,9 @@ h2_frames_breaks "a broken body's 400 closed on at once" linger_body \
   'a broken chunk, more sent after the answer'
 # The lingering close broken, in std/http or under it in std/tls: the case
 # that names the break, three runs, must fail - and the client's own close
-# where that is named. The copies are built one after another (they share
-# the compiler's cache) and run MUT_JOBS at a time, each against servers
-# of its own; the answers are printed in order once all have ended.
+# where that is named. The copies are built as the others here are (later,
+# above) and run MUT_JOBS at a time, each against servers of its own; the
+# answers are printed in order once all have ended.
 close_n=0
 close_pids=""
 mkdir -p "$WORK/closeres"
@@ -3404,12 +3543,13 @@ close_judged() { # close_judged <n> <label> <name> <plain|tls|-> <case> <client|
   printf '%s\n' "$said" >"$WORK/closeres/$n"
 }
 close_breaks() { # close_breaks <label> <name> <module> <old> <new> <plain|tls|-> <case> [client|client-tls]
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" "$3" "$4" "$5" close_breaks "$@"; return; }
   local label="$1" name="$2" module="$3" old="$4" new="$5" over="$6" case_name="$7" client="${8:--}" pid running
   close_n=$((close_n + 1))
   if [ "$close_ready" -ne 1 ] || { case "$over$client" in *tls*) true ;; *) false ;; esac && [ ! -s "$WORK/tls/p256.pem" ]; }; then
     echo "  $label: skipped with the close cases" >"$WORK/closeres/$close_n"
     return
-  elif ! h2_patched "$name" "$old" "$new" "$module"; then
+  elif ! h2_patched "$name"; then
     printf '%s\n' "  $label: the broken copy did not build" "$(sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /')" >"$WORK/closeres/$close_n"
     touch "$WORK/closeres/failed"
     return
@@ -3465,10 +3605,11 @@ h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
 # The HTTPS server broken, the checks above run against it with the good
 # client: each must fail somewhere.
 https_breaks() { # https_breaks <label> <name> <old> <new>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" https_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4"
   if [ "$https_ready" -ne 1 ] || [ -z "$PY" ]; then
     echo "  $label: skipped, no HTTPS server to break"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3491,10 +3632,11 @@ https_breaks "no close_notify at the end" https_notify \
 # The cap and the request deadline broken, the slow clients run against
 # the copy: each must fail at the case that names it.
 guard_breaks() { # guard_breaks <label> <name> <old> <new> <case> <phrase>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" guard_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4" case_name="$5" phrase="$6"
   if [ "${guard_ready:-0}" -ne 1 ]; then
     echo "  $label: skipped with the slow clients' section"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3530,10 +3672,11 @@ guard_breaks "a head held to the whole request's deadline alone" guard_head \
 # The client's certificate, lost on the way to the handler or the server:
 # the mTLS checks must fail.
 mtls_breaks() { # mtls_breaks <label> <name> <old> <new>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" mtls_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4"
   if [ "$https_ready" -ne 1 ] || [ -z "$PY" ]; then
     echo "  $label: skipped, no HTTPS server to break"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3556,22 +3699,13 @@ mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
 # The client through a proxy, broken in a copy: the round against the
 # Python proxy and the iyi server above must fail.
 proxy_breaks() { # proxy_breaks <label> <name> <old> <new>
+  [ -n "$judging" ] || { later "$2" "$WORK/proxy_client.iyi" http.iyi "$3" "$4" proxy_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4"
   if [ "$proxy_ready" -ne 1 ]; then
     echo "  $label: skipped, no proxy round to break"
     return
   fi
-  rm -rf "$WORK/$name"
-  mkdir -p "$WORK/$name/std"
-  OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/http.iyi" "$WORK/$name/std/http.iyi" <<'PY'
-import os, sys
-src = open(sys.argv[1], encoding="utf-8").read()
-old = os.environ["OLD"]
-if src.count(old) != 1:
-    raise SystemExit("patch site missing or not unique: " + old)
-open(sys.argv[2], "w", encoding="utf-8").write(src.replace(old, os.environ["NEW"], 1))
-PY
-  if [ $? -ne 0 ] || ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/$name.bin" "$WORK/proxy_client.iyi" >"$WORK/$name.log" 2>&1; then
+  if ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3600,7 +3734,10 @@ proxy_breaks "an upgrade sent past its proxy" proxy_upgrade_direct \
 proxy_breaks "a ws:// handshake sent to the proxy in absolute form" proxy_upgrade_absolute \
   'tunneled = !route.nil? && (secure || !upgrade.nil?)' 'tunneled = !route.nil? && secure'
 
-# The lingering close's copies, started above beside what came after.
+# The copies above, then those whose calls later kept, judged now, then
+# the lingering close's, which judging started beside what came after it.
+mutations_report
+judge_later
 close_breaks_report
 echo
 if [ "$status" -eq 0 ]; then

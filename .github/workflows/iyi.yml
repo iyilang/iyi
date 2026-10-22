@@ -912,7 +912,14 @@ jobs:
   # branch's): the same shard took 29 to 45 minutes in four runs, so it
   # has the hour Windows' shards have. And ninety, as Windows' now do: on
   # tls/mlkem shard 3 reached std/tls after forty minutes, and std/tls's
-  # broken copies, grown with the hybrid's, ran it past sixty.
+  # broken copies, grown with the hybrid's, ran it past sixty. Interleaved
+  # by sorted place, shard 2 then held std/http, std/big, std/websocket and
+  # std/autocert: 4,641 s of siblings on Linux in run 39840302846, where
+  # shard 4 held 838. The shards are dealt by weight now, the seconds each
+  # sibling took in that run (bench/std_siblings.sh's WEIGHTS): added up
+  # from the same logs, the heaviest shard holds 2,580 s on Linux, 2,875
+  # on darwin and 2,936 on Windows, where it held 4,641, 4,509 and 4,019.
+  # The limits stay until a run dealt so has been measured.
   std-siblings:
     needs: build
     runs-on: ubuntu-24.04

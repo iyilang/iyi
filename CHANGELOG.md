@@ -146,6 +146,31 @@ and caught by a broken copy in `bench/std_tls_exercise.sh`;
   ticket by port. `bench/socket_exercise.iyi` checks it at both kinds of
   end, and a broken copy is caught.
 
+- **CI's std shards are dealt by weight, not by sorted place.**
+  `bench/std_siblings.sh K N` gives each exercise, heaviest first, to the
+  shard with the least weight so far, a weight being the seconds it took
+  on its slowest platform in run 39840302846. Interleaved, one shard held
+  std/http, std/big, std/websocket and std/autocert and ran 60 to 80
+  minutes beside shards of 16 to 40; added up from that run's logs, the
+  heaviest shard drops from 4,641 s to 2,580 s on Linux, 4,509 to 2,875 on
+  darwin and 4,019 to 2,936 on Windows. `bash bench/std_siblings.sh
+  --plan N` prints the deal and runs nothing; `bench/sibling_times.py`
+  reads each exercise's seconds, and each section's, from a run's shard
+  logs.
+
+- **std/http's and std/tls's gates take 632 and 461 s where they took
+  1,026 and 640 (Linux, x86-64, 12 threads), every check and broken copy
+  kept.** Their broken copies took most of it. std/http's are built in
+  jobs of their own rather than one after another, and those judged by a
+  round of their own are judged a kind at a time, the kinds side by side;
+  a copy that never ends is stopped at 60 s, not 120; and a copy is asked
+  only what it is judged by - the raw HTTP/2 frames' named case, the
+  first failed HTTPS client, a slow client's drip to five seconds past the
+  latest close it judges. std/tls's copies of the server are asked the
+  scripted client's one scenario that names them
+  (`TLS_CLIENT_ONLY`), and its TLS 1.2 client's copies the one line of
+  the round against OpenSSL.
+
 ## 0.19.0 — 2026-10-22
 
 **iyi's TLS gets its own certificates and keeps its sessions, and its

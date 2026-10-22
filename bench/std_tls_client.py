@@ -33,6 +33,10 @@ and the client's list call for; the master secret over the session hash
 (RFC 7627), the server's Finished, and every AES-GCM explicit nonce
 unrepeated under its key.
 
+TLS_CLIENT_ONLY=NAME in the environment narrows whatever would run, named
+or by default, to that one scenario: what a broken copy of the server is
+judged by.
+
 The TLS 1.3 key schedule, records and messages are
 bench/std_tls_server.py's; TLS 1.2's PRF and records are below. Written
 for this one purpose; not a TLS client for anything else.
@@ -1431,6 +1435,11 @@ def main():
     else:
         default = [n for n in MTLS if n != "mtls-optional-none"] if MTLS_DIR else list(SCENARIOS)
     names = rest or default
+    # One scenario out of whichever would run, for a broken copy that is
+    # judged by that one alone (bench/std_tls_exercise.sh's prove_copy).
+    only = os.environ.get("TLS_CLIENT_ONLY")
+    if only:
+        names = [n for n in names if n == only]
     failures = 0
     table = {**SCENARIOS, **MTLS, **TLS12, **MTLS12}
     skipped = 0

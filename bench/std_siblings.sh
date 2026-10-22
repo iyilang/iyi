@@ -43,12 +43,15 @@ command -v timeout >/dev/null 2>&1 && bounded="timeout -k 30 $limit"
 # 118492675680, 118598972995, 118855592816, 119406415714, 119550880710
 # and 119648405209), and such a job keeps no log; these lines, from the
 # shards that finish, say which siblings bring a runner nearest to the end
-# of its memory.
+# of its memory. The first shards traced kept 7,623 MB of 16,378 free at
+# their lowest (std/acme's, job 119732733162), so the free space of the
+# disk the temporary files go to is traced beside it: a runner that cannot
+# write its own log loses its connection too.
 trace=""
 if [ -r /proc/meminfo ]; then
   trace="$(mktemp)"
   total=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
-  echo "== memory: $total MB here; each sibling's lowest available and most swap follow it"
+  echo "== memory: $total MB here; each sibling's lowest available, most swap and least disk free follow it"
 else
   echo "== memory: no /proc/meminfo here, so no sibling's memory is traced"
 fi
@@ -56,7 +59,8 @@ sample_memory() {
   while :; do
     awk '/^(MemFree|MemAvailable|SwapTotal|SwapFree):/ { v[$1] = $2 }
       END { a = ("MemAvailable:" in v) ? v["MemAvailable:"] : v["MemFree:"]
-            print int(a / 1024), int((v["SwapTotal:"] - v["SwapFree:"]) / 1024) }' /proc/meminfo >>"$trace"
+            printf "%d %d ", a / 1024, (v["SwapTotal:"] - v["SwapFree:"]) / 1024 }' /proc/meminfo >>"$trace"
+    df -Pm "${TMPDIR:-/tmp}" 2>/dev/null | awk 'NR == 2 { d = $4 } END { print d + 0 }' >>"$trace"
     sleep 2
   done
 }
@@ -82,8 +86,8 @@ for sibling in "$REPO"/bench/std_*_exercise.sh; do
   if [ -n "$sampler" ]; then
     kill "$sampler" 2>/dev/null
     wait "$sampler" 2>/dev/null
-    awk 'NR == 1 || $1 < low { low = $1 } $2 > swap { swap = $2 }
-      END { if (NR) printf "   memory: lowest available %d MB, swap in use at most %d MB\n", low, swap }' "$trace"
+    awk 'NR == 1 || $1 < low { low = $1 } $2 > swap { swap = $2 } NR == 1 || $3 < disk { disk = $3 }
+      END { if (NR) printf "   memory: lowest available %d MB, swap in use at most %d MB, least disk free %d MB\n", low, swap, disk }' "$trace"
   fi
   if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
     echo "FAIL: sibling $(basename "$sibling") had not finished in $((limit / 60)) minutes, and was stopped"

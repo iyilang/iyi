@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **std/hpke: Hybrid Public Key Encryption (RFC 9180), the building
+  block of TLS Encrypted Client Hello and Oblivious HTTP, written in iyi
+  over std/curve25519, std/p256, std/p384, std/crypto and std/aead.**
+  All four modes (base, psk, auth, auth_psk); the KEMs DHKEM(X25519,
+  HKDF-SHA256), DHKEM(P-256, HKDF-SHA256) and DHKEM(P-384, HKDF-SHA384);
+  HKDF-SHA256, -SHA384 and -SHA512; AES-128-GCM, AES-256-GCM,
+  ChaCha20-Poly1305 and the export-only AEAD.
+  - `HpkeSuite#seal`, `#open`, `#send_export` and `#receive_export` are
+    section 6's single-shot functions; `#sender` and `#recipient` set up
+    section 5's contexts, which seal and open at sequence 0, 1, 2 and on,
+    refuse to go past 2^96 - 2, and export secrets (section 5.3).
+    `HpkeKem#encapsulate` and `#decapsulate` are the KEM itself.
+  - `HpkePrivateKey.derive` is DeriveKeyPair (section 7.1.3);
+    `HpkePrivateKey.from_bytes`, `HpkePublicKey.from_bytes` and `bytes`
+    serialise keys as section 7.1.1 has them, P-256 and P-384 points
+    validated when read.
+  - An encapsulation of the wrong length, a point off its curve, an
+    X25519 shared secret of all zero bytes (section 7.1.4), a ciphertext
+    that does not open and a context whose nonces are spent are an
+    `HpkeError`, a value; a failed open leaves the sequence where it was.
+    The caller brings the randomness, as std/curve25519's and std/mlkem's
+    do.
+  - Not there: DHKEM(P-521) and DHKEM(X448), whose curves std lacks, and
+    the post-quantum KEMs ML-KEM-768 and X-Wing, whose code points and
+    test vectors were still being redefined by draft-ietf-hpke-pq.
+  - Measured (--release, best of five runs of 200, X25519, HKDF-SHA256,
+    AES-128-GCM, a 1 KiB message): a single-shot seal 46 us and open 36;
+    in a context, seal 3.8 us and open 5.0.
+
+  Held by `bench/std_hpke_exercise.sh`: RFC 9180's test vectors for every
+  suite of them std/hpke has, 64 vectors (a subset vendored in
+  `bench/std_hpke_fixture`, every encryption of each checked by its
+  ciphertexts' SHA-256, and the CFRG's whole file fetched and checked one
+  encryption at a time when the network answers): the key pairs, the
+  encapsulation and shared secret, all 257 encryptions at both ends, the
+  key and base nonce at sequence 2^96 - 2, and the exports. An HPKE
+  written in Python over the primitives of `cryptography`
+  (`bench/std_hpke_oracle.py`), held to the same vectors first, gives the
+  same bytes from the same randomness and opens what std/hpke seals, and
+  std/hpke opens what it seals, five rounds of each of the 36 suites in
+  each mode; known answers from it hold DHKEM(P-384) and HKDF-SHA384,
+  which the RFC has no vectors for. Twenty-two broken copies, among them
+  a LabeledExtract without its suite_id, a nonce without the sequence
+  XORed in, a sequence not incremented, a psk_id or info not bound, the
+  all-zero X25519 check removed from std/curve25519, and AuthEncap
+  without the sender's key, are each caught at the check that names it.
+
 ## 0.19.0 — 2026-10-22
 
 **iyi's TLS gets its own certificates and keeps its sessions, and its

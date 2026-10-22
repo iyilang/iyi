@@ -5702,6 +5702,67 @@ describe Iyi::IyiMod do
     end
   end
 
+  # The producer lays out Holder's trait field with a definition witness.
+  # A consumer recompiling its generic forwarding body must restore that
+  # witness too; a smaller trait representation reads the stored value with
+  # the wrong ABI and can segfault.
+  it "preserves a trait field layout when a consumer recompiles a generic forwarding body" do
+    with_tempdir("iyimod_witness_field") do
+      modules = {"app/values.iyi" => <<-IYI, "app/holder.iyi" => <<-IYI}
+        module app/values
+
+        pub trait Value
+          abstract def value : Int32
+        end
+
+        pub class Number
+          getter value : Int32
+
+          def initialize(@value : Int32)
+          end
+        end
+
+        impl Value for Number
+        end
+
+        # A fully declared trait parameter creates the producer-only witness.
+        pub def check_value(value : Value) : Int32
+          value.value
+        end
+        IYI
+        module app/holder
+
+        import app/values::{Value}
+
+        pub def forward(value : Value, &block : Int32 -> T) : T forall T
+          block.call(value.value)
+        end
+
+        pub class Holder
+          @value : Value
+
+          def initialize(@value : Value)
+          end
+
+          def apply(&block : Int32 -> T) : T forall T
+            forward(@value) { |value| block.call(value) }
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/values::{Number}
+        import app/holder::{Holder}
+
+        puts Holder.new(Number.new(40)).apply { |value| value + 2 }
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "42\n"
+      from_artifact.should eq from_source
+    end
+  end
+
   # Definition-site typing gave `Named` a witness type in the producing build,
   # so `names`'s dispatch over `Named` tests for it and the object code
   # numbers it. The consumer has no witness - nothing in its own source is
@@ -5960,6 +6021,119 @@ describe Iyi::IyiMod do
       from_artifact.should eq from_source
     end
   end
+
+  # The producer's is_a? uses a union match containing a definition witness.
+  # Execute both real-member and non-member branches from source-free code.
+  it "round-trips object code matching a trait union containing a witness" do
+    with_tempdir("iyimod_witness_union_round_trip") do
+      modules = {"app/values.iyi" => <<-IYI}
+        module app/values
+
+        pub trait Value
+          abstract def value : Int32
+        end
+
+        pub struct Number
+          getter value : Int32
+
+          def initialize(@value : Int32)
+          end
+        end
+
+        impl Value for Number
+        end
+
+        # A direct trait restriction ensures definition typing builds a witness.
+        pub def check_value(item : Value) : Int32
+          item.value
+        end
+
+        pub class Reader
+          @item : Value | Bool
+
+          def initialize(@item : Value | Bool)
+          end
+
+          def read : Int32
+            item = @item
+            if item.is_a?(Value)
+              item.value
+            else
+              -1
+            end
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/values::{Number, Reader}
+
+        puts Reader.new(Number.new(42)).read
+        puts Reader.new(false).read
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "42\n-1\n"
+      from_artifact.should eq from_source
+      artifact = Iyi::IyiMod.read(File.join("mods", "app", "values.iyimod"))
+      artifact.match_types.select(&.includes?(" | ")).join("\n")
+        .should contain(Iyi::DefinitionTyping::WITNESS_PREFIX)
+    end
+  end
+
+  # Carried matches may embed witnesses in unions or generic arguments.
+  # Restore those members without accepting missing ordinary types.
+  it "restores witnesses needed by union matches before resolving carried references" do
+    with_tempdir("iyimod_witness_match_refs") do
+      text = <<-IYI
+        module app/witness
+
+        pub trait Value
+          abstract def value : Int32
+        end
+
+        pub class Number
+          def value : Int32
+            40
+          end
+        end
+
+        impl Value for Number
+        end
+
+        pub class Box(T)
+        end
+        IYI
+      File.write "main.iyi", text
+      witness = "IyiDefTypeWitness_App_Witness_Value"
+      names = ["(App::Witness::Number | #{witness})", "App::Witness::Box(#{witness})"]
+      program = Iyi::Program.new
+      program.filename = File.expand_path("main.iyi")
+      parser = program.new_parser(text)
+      parser.filename = program.filename
+      node = program.normalize(parser.parse)
+      names.each do |name|
+        program.iyi_artifact_refs << Iyi::Program::IyiArtifactRef.new("app/carried", name, node, true)
+      end
+      program.semantic node
+      names.each { |name| program.iyi_artifact_match_types.has_key?(name).should be_true }
+      program.types.has_key?(witness).should be_true
+      program.iyi_artifact_refs.should be_empty
+
+      # The witness may be restored, but a missing real union member must
+      # still be refused; the compound type is not an unmatchable phantom.
+      rejecting = Iyi::Program.new
+      rejecting.filename = File.expand_path("main.iyi")
+      reject_parser = rejecting.new_parser(text)
+      reject_parser.filename = rejecting.filename
+      reject_node = rejecting.normalize(reject_parser.parse)
+      name = "(#{witness} | MissingRealType)"
+      rejecting.iyi_artifact_refs << Iyi::Program::IyiArtifactRef.new("app/carried", name, reject_node, true)
+      expect_raises(Iyi::CodeError, /MissingRealType/) do
+        rejecting.semantic reject_node
+      end
+    end
+  end
 end
 
 # iyi: the ecosystem and R-1, together (SPEC.md Part V item 12d).
@@ -5971,6 +6145,7 @@ end
 # consumer's numbering is its own, and a module's requires are not the
 # consumer's. All three have answers, so the combination is now supported and
 # these are what keeps it working.
+
 describe "a module compiled against Crystal's library" do
   it "travels through a .iyimod and links, replaying its requires" do
     with_tempdir("iyimod_crystal_library") do

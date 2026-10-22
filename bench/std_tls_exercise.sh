@@ -2798,15 +2798,14 @@ prove_broken "an alert in the clear after the server's keys" "FAIL bad-finished 
 prove_broken "a private key that is not the certificate's taken" "FAIL another key" \
   '    return TlsError.new("the private key is not the certificate'"'"'s") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes' '' config
 prove_broken "a secp256r1 share taken before an X25519 one" "FAIL both-shares " \
-  '    TlsConnection::GROUPS12.find { |group| !share(group).nil? } || 0' '    @p256 ? TlsConnection::GROUP_SECP256R1 : (@x25519 ? TlsConnection::GROUP_X25519 : 0)' server
+  'property groups : Array(String) = ["X25519MLKEM768", "X25519", "secp256r1", "secp384r1"]' 'property groups : Array(String) = ["X25519MLKEM768", "secp256r1", "X25519", "secp384r1"]' server
 # X25519MLKEM768 at the server: preferred, its share's size, the modulus
 # check's alert, and the secret's and the share's order against OpenSSL.
 prove_broken "an X25519 share taken before X25519MLKEM768 is asked for" "FAIL OpenSSL, ed25519, an X25519 share, X25519MLKEM768 listed" \
-  '    return TlsConnection::GROUP_X25519MLKEM768 if @groups.includes?(TlsConnection::GROUP_X25519MLKEM768)' \
-  '    return TlsConnection::GROUP_X25519MLKEM768 if @hybrid' server-hybrid
+  '      return group if group == TlsConnection::GROUP_X25519MLKEM768 || !share(group).nil?' \
+  '      return group unless share(group).nil?' server-hybrid
 prove_broken "X25519 taken before X25519MLKEM768 when both shares come" "FAIL OpenSSL, ed25519, its default groups" \
-  '    return TlsConnection::GROUP_X25519MLKEM768 if @groups.includes?(TlsConnection::GROUP_X25519MLKEM768)
-' '' server-hybrid
+  'property groups : Array(String) = ["X25519MLKEM768", "X25519", "secp256r1", "secp384r1"]' 'property groups : Array(String) = ["X25519", "X25519MLKEM768", "secp256r1", "secp384r1"]' server-hybrid
 prove_broken "the server's hybrid secret in the wrong order, X25519's first" "FAIL OpenSSL, ed25519, X25519MLKEM768 alone" \
   '      secret = sent_kem[1] + TlsBytes.of(shared)' '      secret = TlsBytes.of(shared) + sent_kem[1]' server-hybrid
 prove_broken "the server's hybrid share with its X25519 key first" "FAIL OpenSSL, ed25519, X25519MLKEM768 alone" \
@@ -2817,7 +2816,7 @@ prove_broken "an encapsulation key that fails the modulus check answered with in
   '      return TlsError.new("the client'"'"'s X25519MLKEM768 share: #{sent_kem.message}", TlsAlert::ILLEGAL_PARAMETER) if sent_kem.is_a?(MlKemError)' \
   '      return TlsError.new("the client'"'"'s X25519MLKEM768 share: #{sent_kem.message}", TlsAlert::INTERNAL_ERROR) if sent_kem.is_a?(MlKemError)' server
 prove_broken "a HelloRetryRequest for secp256r1 whatever the groups" "FAIL hrr " \
-  '    TlsConnection::GROUPS.find { |group| @groups.includes?(group) } || 0' '    TlsConnection::GROUP_SECP256R1' server
+  '    preferred.find { |group| @groups.includes?(group) } || 0' '    TlsConnection::GROUP_SECP256R1' server
 prove_broken "the server's secp256r1 share not its key's" "FAIL p256-share " \
   '      public = ephemeral.public_point' '      public = ec_ephemeral(group).public_point' server
 prove_broken "a secp384r1 share passed over" "FAIL p384-share " \
@@ -2826,7 +2825,7 @@ prove_broken "a secp384r1 share passed over" "FAIL p384-share " \
 prove_broken "secp384r1 not among the server's groups" "FAIL p384-share " \
   '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1]' server
 prove_broken "a secp384r1 share taken before a secp256r1 one" "FAIL ec-shares " \
-  '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS12 = [GROUP_X25519, GROUP_SECP384R1, GROUP_SECP256R1]' server
+  'property groups : Array(String) = ["X25519MLKEM768", "X25519", "secp256r1", "secp384r1"]' 'property groups : Array(String) = ["X25519MLKEM768", "X25519", "secp384r1", "secp256r1"]' server
 prove_broken "the server's secp384r1 share made in secp256r1" "FAIL p384-share " \
   '      ephemeral = ec_ephemeral(group)
       got = ephemeral.shared_secret(peer)
@@ -2946,7 +2945,7 @@ prove_broken "a NewSessionTicket cut short taken" "ticket-bad:" \
 prove_broken "the client's resumption master secret short of its Finished" "FAIL resumed by OpenSSL's tickets, the default suites" \
   '    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript + finished)' '    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript)' client-resume
 prove_broken "a second ClientHello's binder without the HelloRetryRequest" "FAIL resumed by OpenSSL's tickets, secp256r1 alone" \
-  '      hello = client_hello(random, session, shares, cookie, @transcript)' '      hello = client_hello(random, session, shares, cookie, [] of UInt8)' client-resume
+  '      hello = client_hello(random, session, shares, cookie, @transcript, ech ? TlsEch::INNER : grease)' '      hello = client_hello(random, session, shares, cookie, Array(UInt8).new, ech ? TlsEch::INNER : grease)' client-resume
 prove_broken "a binder that does not match taken" "FAIL resume-bad-binder " \
   '      unless Subtle.constant_time_compare(offer.binders[index], @schedule.binder(ticket.psk, transcript))' '      if false' server
 prove_broken "a ticket under another hash's suite taken" "FAIL resume-other-hash " \

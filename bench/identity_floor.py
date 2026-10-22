@@ -131,6 +131,12 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"Manas Technology", "copyright holder"),
     (r"crystal-lang\.org", "upstream's site"),
     (r"github\.com/crystal-lang", "upstream's repository"),
+    # The tarball job builds on ubuntu:20.04 from Crystal's own 1.21.0
+    # release, the bootstrap compiler the fork is built with: it prints its
+    # version, and its libraries, `libgc.a` among them, are on disk under
+    # `/usr/lib/crystal`, the path the job's LIBRARY_PATH names.
+    (r"/usr/lib/crystal\b", "the bootstrap release's library directory, as a path"),
+    (r"^\s*crystal --version$", "the bootstrap compiler reporting itself"),
     (r"[Cc]opyright.*Crystal", "copyright"),
     # The compiler still declares these names itself, in
     # `src/compiler/iyi/macros.cr`: `__crystal_pseudo_sizeof`,

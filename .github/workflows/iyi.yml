@@ -2272,9 +2272,12 @@ jobs:
   # with tools this platform does not have, and the collector's own
   # exercises refusing a platform whose collector they had never been
   # asked about.
+  # Two and a half hours: it took 56, 74 and 89 minutes on master and
+  # integration/0.20, and was cut off at ninety on a branch (job
+  # 119640679755) while its socket exercise was still going.
   windows-std:
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 150
     name: "The standard library and the collector, gated on Windows"
     steps:
       - uses: actions/checkout@v7

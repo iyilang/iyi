@@ -1,0 +1,593 @@
+# Exercises `std/hpke`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_hpke_exercise.iyi [-- VECTORS.json]
+#
+# With no argument: seven of RFC 9180's test vectors, embedded below, then
+# three known answers for the suites the RFC has no vectors for, round trips
+# in every suite and mode, the refusals of section 7.1.4, failed opens and
+# the nonce limit - no file, network or Python. With VECTORS.json, RFC
+# 9180's vectors in the shape bench/std_hpke_exercise.sh cuts them
+# (bench/std_hpke_fixture has the vendored subset), every vector is checked
+# first. The other modes the gate drives:
+#   oracle   reads lines from standard input, answers a line each:
+#              k KEM IKM                    -> SK PK
+#              p KEM PK                     -> ok | refused: why
+#              s KEM KDF AEAD PKR INFO IKME PSK PSKID SKS CTX L MESSAGES
+#                                           -> ENC EXPORT CIPHERTEXTS | refused: why
+#              o KEM KDF AEAD SKR ENC INFO PSK PSKID PKS CTX L MESSAGES
+#                                           -> EXPORT PLAINTEXTS | refused: why
+#            the ids decimal, everything else hex, `-` for an empty field
+#            or no key; MESSAGES is AAD.PT (or AAD.CT) pairs joined by
+#            commas, sealed or opened in order in one context, and
+#            CIPHERTEXTS and PLAINTEXTS are joined the same way;
+#   cost     what single-shot and in-context seal and open of 1 KiB take.
+
+module bench/std_hpke_exercise
+
+import std/int
+import std/hpke::{HpkeSuite, HpkeKem, HpkeKdf, HpkeAead, HpkeMode, HpkePrivateKey, HpkePublicKey, HpkeError, HpkeSender, HpkeRecipient}
+import std/aead::{AesGcm, ChaCha20Poly1305}
+import std/digest::{SHA256, SHAKE256}
+import std/json::{JSON, Any}
+import std/file::{File}
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+def b(hex : String) : Array(UInt8)
+  p = hex.to_unsafe
+  Array(UInt8).new(hex.bytesize // 2) do |i|
+    hi = p[i * 2].to_i32 | 32
+    lo = p[i * 2 + 1].to_i32 | 32
+    hi = hi >= 97 ? hi - 87 : hi - 48
+    lo = lo >= 97 ? lo - 87 : lo - 48
+    (hi * 16 + lo).to_u8
+  end
+end
+
+def hex(bytes : Array(UInt8)) : String
+  digits = "0123456789abcdef".to_unsafe
+  String.new(bytes.size * 2) do |buf|
+    i = 0
+    while i < bytes.size
+      buf[i * 2] = digits[bytes[i] >> 4]
+      buf[i * 2 + 1] = digits[bytes[i] & 15_u8]
+      i = i + 1
+    end
+  end
+end
+
+def bytes_of(s : String) : Array(UInt8)
+  p = s.to_unsafe
+  Array(UInt8).new(s.bytesize) { |i| p[i] }
+end
+
+def hex(s : String) : String
+  hex(bytes_of(s))
+end
+
+# A deterministic stream of test bytes: SHAKE256 of a label.
+def drawn(label : String, count : Int32) : Array(UInt8)
+  SHAKE256.new.update(label).read(count)
+end
+
+# 2^96 - 1, the sequence a context refuses to seal or open at.
+LAST = 1_u128.unsafe_shl(96) &- 1_u128
+
+MODES = ["base", "psk", "auth", "auth_psk"]
+KEMS  = [HpkeKem::X25519Sha256, HpkeKem::P256Sha256, HpkeKem::P384Sha384]
+KDFS  = [HpkeKdf::HkdfSha256, HpkeKdf::HkdfSha384, HpkeKdf::HkdfSha512]
+AEADS = [HpkeAead::Aes128Gcm, HpkeAead::Aes256Gcm, HpkeAead::ChaCha20Poly1305, HpkeAead::ExportOnly]
+
+def id4(n : Int32) : String
+  "0x" + n.to_s(16).rjust(4, '0')
+end
+
+# SerializePrivateKey of a vector's sk: the RFC's vectors print an X25519
+# key as DeriveKeyPair made it, and section 7.1.2 clamps it when it is
+# serialised.
+def serialised(kem : HpkeKem, sk : String) : String
+  return sk unless kem == HpkeKem::X25519Sha256
+  k = b(sk)
+  k[0] = k[0] & 248_u8
+  k[31] = (k[31] & 127_u8) | 64_u8
+  hex(k)
+end
+
+# The nonce of section 5.2's ComputeNonce, worked here from the vector's
+# base nonce, for a sequence number no vector reaches.
+def nonce_at(base : Array(UInt8), seq : UInt128) : Array(UInt8)
+  Array(UInt8).new(12) { |i| base[i] ^ seq.unsafe_shr((11 - i) * 8).unsafe_to_u8 }
+end
+
+def aead_seal(aead : HpkeAead, key : Array(UInt8), nonce : Array(UInt8), pt : Array(UInt8), aad : String) : String
+  case aead
+  when HpkeAead::ChaCha20Poly1305 then ChaCha20Poly1305.new(key).seal(nonce, pt, aad)
+  else                                 AesGcm.new(key).seal(nonce, pt, aad)
+  end
+end
+
+def opened?(got : String | HpkeError, want : Array(UInt8)) : Bool
+  got.is_a?(String) && bytes_of(got) == want
+end
+
+def refused?(got, phrase : String) : Bool
+  got.is_a?(HpkeError) && got.message.includes?(phrase)
+end
+
+def optional(c : Any, field : String) : Array(UInt8) | Nil
+  value = c.as_h[field]?
+  value.nil? ? nil : b(value.as_s)
+end
+
+# One of RFC 9180's vectors, in the shape bench/std_hpke_exercise.sh cuts
+# them: the key pairs DeriveKeyPair makes of ikmR, ikmE and ikmS, read
+# back from their serialisations; Encap or AuthEncap with the vector's
+# ephemeral, and Decap; the contexts at both ends, sealing all `count`
+# encryptions in order (each listed one compared, all of them by the
+# SHA-256 of their ciphertexts) and opening each; a recipient that skips
+# to each listed one; the vector's key and base nonce at sequence 2^96 - 2
+# and the refusal at 2^96 - 1; the single-shot functions of section 6; and
+# every export, at both ends. Answers the encryptions and exports checked.
+def run_vector(c : Any, label : String) : {Int32, Int32}
+  found = HpkeSuite.from_ids(c["kem_id"].as_i, c["kdf_id"].as_i, c["aead_id"].as_i)
+  check found.is_a?(HpkeSuite), "#{label}: the suite"
+  suite = found.as(HpkeSuite)
+  kem = suite.kem
+  mode = c["mode"].as_i
+  info = b(c["info"].as_s)
+  ikm_e = b(c["ikmE"].as_s)
+  psk = optional(c, "psk")
+  psk_id = optional(c, "psk_id")
+  check (mode == 1 || mode == 3) == !psk.nil?, "#{label}: a psk exactly in the psk modes"
+
+  key_r = HpkePrivateKey.derive(kem, b(c["ikmR"].as_s))
+  check hex(key_r.bytes) == serialised(kem, c["skRm"].as_s), "#{label}: skRm from ikmR"
+  check hex(key_r.public_key.bytes) == c["pkRm"].as_s, "#{label}: pkRm from ikmR"
+  key_e = HpkePrivateKey.derive(kem, ikm_e)
+  check hex(key_e.bytes) == serialised(kem, c["skEm"].as_s), "#{label}: skEm from ikmE"
+  check hex(key_e.public_key.bytes) == c["pkEm"].as_s, "#{label}: pkEm from ikmE"
+  read_r = HpkePrivateKey.from_bytes(kem, b(c["skRm"].as_s))
+  check read_r.is_a?(HpkePrivateKey) && read_r.public_key.bytes == key_r.public_key.bytes, "#{label}: skRm read back"
+  read_r = read_r.as(HpkePrivateKey)
+  public_r = HpkePublicKey.from_bytes(kem, b(c["pkRm"].as_s))
+  check public_r.is_a?(HpkePublicKey), "#{label}: pkRm read back"
+  public_r = public_r.as(HpkePublicKey)
+
+  sender_key = nil.as(HpkePrivateKey | Nil)
+  sender_public = nil.as(HpkePublicKey | Nil)
+  if mode >= 2
+    key_s = HpkePrivateKey.derive(kem, b(c["ikmS"].as_s))
+    check hex(key_s.bytes) == serialised(kem, c["skSm"].as_s), "#{label}: skSm from ikmS"
+    check hex(key_s.public_key.bytes) == c["pkSm"].as_s, "#{label}: pkSm from ikmS"
+    sender_key = key_s
+    sender_public = HpkePublicKey.from_bytes(kem, b(c["pkSm"].as_s)).as(HpkePublicKey)
+  end
+
+  sent = kem.encapsulate(public_r, ikm_e, sender_key)
+  check !sent.is_a?(HpkeError), "#{label}: the encapsulation refused"
+  sent = sent.as({Array(UInt8), Array(UInt8)})
+  check hex(sent[0]) == c["enc"].as_s, "#{label}: the encapsulation"
+  check hex(sent[1]) == c["shared_secret"].as_s, "#{label}: the encapsulation's shared secret"
+  secret = kem.decapsulate(read_r, b(c["enc"].as_s), sender_public)
+  check secret.is_a?(Array(UInt8)) && hex(secret) == c["shared_secret"].as_s, "#{label}: the decapsulated shared secret"
+
+  sender = suite.sender(public_r, info, ikm_e, psk, psk_id, sender_key).as(HpkeSender)
+  check hex(sender.enc) == c["enc"].as_s, "#{label}: the sender's enc"
+  check sender.mode.value == mode, "#{label}: the sender's mode"
+  recipient = suite.recipient(read_r, sender.enc, info, psk, psk_id, sender_public).as(HpkeRecipient)
+  check recipient.mode.value == mode, "#{label}: the recipient's mode"
+
+  count = c["count"].as_i
+  listed = c["encryptions"].as_a
+  if count > 0
+    pt = b(listed[0]["pt"].as_s)
+    digest = SHA256.new
+    at = 0
+    i = 0
+    while i < count
+      aad = "Count-#{i}"
+      sealed = sender.seal(pt, aad)
+      check sealed.is_a?(String), "#{label}: encryption #{i} refused"
+      sealed = sealed.as(String)
+      digest.update(sealed)
+      if at < listed.size && listed[at]["seq"].as_i == i
+        check listed[at]["aad"].as_s == hex(aad) && b(listed[at]["pt"].as_s) == pt, "#{label}: encryption #{i}'s aad and plaintext"
+        check hex(sealed) == listed[at]["ct"].as_s, "#{label}: encryption #{i}"
+        at = at + 1
+      end
+      check opened?(recipient.open(sealed, aad), pt), "#{label}: encryption #{i} opened"
+      i = i + 1
+    end
+    check at == listed.size, "#{label}: every listed encryption reached"
+    check hex(digest.final) == c["ciphertexts_sha256"].as_s, "#{label}: all #{count} encryptions, by the SHA-256 of their ciphertexts"
+    check sender.sequence == count.to_u128 && recipient.sequence == count.to_u128, "#{label}: both sequences at #{count}"
+
+    skipper = suite.recipient(read_r, sender.enc, info, psk, psk_id, sender_public).as(HpkeRecipient)
+    listed.each do |e|
+      seq = e["seq"].as_i
+      skipper.advance_to(seq.to_u128)
+      check opened?(skipper.open(b(e["ct"].as_s), "Count-#{seq}"), pt), "#{label}: encryption #{seq} opened after skipping to it"
+    end
+
+    # Sequence 2^96 - 2 is the last a context seals at; the vector's key
+    # and base nonce give its ciphertext through std/aead directly.
+    late = suite.sender(public_r, info, ikm_e, psk, psk_id, sender_key).as(HpkeSender)
+    late.advance_to(LAST &- 1_u128)
+    last = late.seal(pt, "late")
+    want = aead_seal(suite.aead, b(c["key"].as_s), nonce_at(b(c["base_nonce"].as_s), LAST &- 1_u128), pt, "late")
+    check last.is_a?(String) && last == want, "#{label}: the key and base nonce, at sequence 2^96 - 2"
+    check refused?(late.seal(pt, "late"), "nonces are spent"), "#{label}: sealing at sequence 2^96 - 1 refused"
+    late_r = suite.recipient(read_r, sender.enc, info, psk, psk_id, sender_public).as(HpkeRecipient)
+    late_r.advance_to(LAST &- 1_u128)
+    check opened?(late_r.open(want, "late"), pt), "#{label}: opened at sequence 2^96 - 2"
+    check refused?(late_r.open(want, "late"), "nonces are spent"), "#{label}: opening at sequence 2^96 - 1 refused"
+
+    one = suite.seal(public_r, info, "Count-0", pt, ikm_e, psk, psk_id, sender_key)
+    check one.is_a?(Tuple) && hex(one[0]) == c["enc"].as_s && hex(one[1]) == listed[0]["ct"].as_s, "#{label}: single-shot seal"
+    check opened?(suite.open(read_r, b(c["enc"].as_s), info, "Count-0", b(listed[0]["ct"].as_s), psk, psk_id, sender_public), pt), "#{label}: single-shot open"
+  end
+
+  exports = c["exports"].as_a
+  exports.each_with_index do |e, k|
+    context = b(e["exporter_context"].as_s)
+    length = e["L"].as_i
+    want = e["exported_value"].as_s
+    check hex(sender.export(context, length)) == want, "#{label}: export #{k}"
+    check hex(recipient.export(context, length)) == want, "#{label}: export #{k} at the recipient"
+    shot = suite.send_export(public_r, info, context, length, ikm_e, psk, psk_id, sender_key)
+    check shot.is_a?(Tuple) && hex(shot[0]) == c["enc"].as_s && hex(shot[1]) == want, "#{label}: single-shot export #{k}"
+    got = suite.receive_export(read_r, b(c["enc"].as_s), info, context, length, psk, psk_id, sender_public)
+    check got.is_a?(Array(UInt8)) && hex(got) == want, "#{label}: single-shot export #{k} received"
+  end
+  {count, exports.size}
+end
+
+def run_vectors(vectors : Any, prefix : String) : Nil
+  total = 0
+  sealed = 0
+  exported = 0
+  modes = [0, 0, 0, 0]
+  vectors.as_a.each_with_index do |c, n|
+    label = "#{prefix} #{n} (#{MODES[c["mode"].as_i]}, kem #{id4(c["kem_id"].as_i)}, kdf #{id4(c["kdf_id"].as_i)}, aead #{id4(c["aead_id"].as_i)})"
+    got = run_vector(c, label)
+    sealed = sealed + got[0]
+    exported = exported + got[1]
+    modes[c["mode"].as_i] = modes[c["mode"].as_i] + 1
+    total = total + 1
+  end
+  puts "  #{total} vectors (#{modes[0]} base, #{modes[1]} psk, #{modes[2]} auth, #{modes[3]} auth_psk): #{sealed} encryptions sealed and opened, #{exported} exports"
+end
+
+# A context's messages: AAD.PT pairs, comma-joined, hex.
+def messages(field : String) : Array({Array(UInt8), Array(UInt8)})
+  return [] of {Array(UInt8), Array(UInt8)} if field == "-"
+  field.split(',').map do |pair|
+    parts = pair.split('.')
+    {b(parts[0]), parts.size > 1 ? b(parts[1]) : [] of UInt8}
+  end
+end
+
+def kem_of(id : String) : HpkeKem
+  kem = HpkeKem.from_value?(id.to_i)
+  raise "no KEM #{id}" if kem.nil?
+  kem
+end
+
+def field(s : String) : Array(UInt8) | Nil
+  s == "-" ? nil : b(s)
+end
+
+def bytes_or_empty(s : String) : Array(UInt8)
+  s == "-" ? [] of UInt8 : b(s)
+end
+
+def oracle_seal(w : Array(String)) : String
+  suite = HpkeSuite.from_ids(w[1].to_i, w[2].to_i, w[3].to_i)
+  return "refused: #{suite.message}" if suite.is_a?(HpkeError)
+  kem = suite.kem
+  public_r = HpkePublicKey.from_bytes(kem, b(w[4]))
+  return "refused: #{public_r.message}" if public_r.is_a?(HpkeError)
+  sender_key = nil.as(HpkePrivateKey | Nil)
+  if w[9] != "-"
+    got = HpkePrivateKey.from_bytes(kem, b(w[9]))
+    return "refused: #{got.message}" if got.is_a?(HpkeError)
+    sender_key = got
+  end
+  sender = suite.sender(public_r, bytes_or_empty(w[5]), b(w[6]), field(w[7]), field(w[8]), sender_key)
+  return "refused: #{sender.message}" if sender.is_a?(HpkeError)
+  exported = sender.export(bytes_or_empty(w[10]), w[11].to_i)
+  sealed = messages(w[12]).map do |m|
+    got = sender.seal(m[1], m[0])
+    return "refused: #{got.message}" if got.is_a?(HpkeError)
+    hex(got)
+  end
+  "#{hex(sender.enc)} #{hex(exported)} #{sealed.empty? ? "-" : sealed.join(",")}"
+end
+
+def oracle_open(w : Array(String)) : String
+  suite = HpkeSuite.from_ids(w[1].to_i, w[2].to_i, w[3].to_i)
+  return "refused: #{suite.message}" if suite.is_a?(HpkeError)
+  kem = suite.kem
+  key = HpkePrivateKey.from_bytes(kem, b(w[4]))
+  return "refused: #{key.message}" if key.is_a?(HpkeError)
+  sender_public = nil.as(HpkePublicKey | Nil)
+  if w[9] != "-"
+    got = HpkePublicKey.from_bytes(kem, b(w[9]))
+    return "refused: #{got.message}" if got.is_a?(HpkeError)
+    sender_public = got
+  end
+  recipient = suite.recipient(key, b(w[5]), bytes_or_empty(w[6]), field(w[7]), field(w[8]), sender_public)
+  return "refused: #{recipient.message}" if recipient.is_a?(HpkeError)
+  exported = recipient.export(bytes_or_empty(w[10]), w[11].to_i)
+  opened = messages(w[12]).map_with_index do |m, i|
+    got = recipient.open(m[1], m[0])
+    return "refused: message #{i}: #{got.message}" if got.is_a?(HpkeError)
+    got.empty? ? "-" : hex(got)
+  end
+  "#{hex(exported)} #{opened.empty? ? "-" : opened.join(",")}"
+end
+
+args = Program.args
+
+if args.size > 0 && args[0] == "oracle"
+  while line = STDIN.gets
+    w = line.strip.split(' ')
+    next if w.empty? || w[0].empty?
+    case w[0]
+    when "k"
+      key = HpkePrivateKey.derive(kem_of(w[1]), b(w[2]))
+      puts "#{hex(key.bytes)} #{hex(key.public_key.bytes)}"
+    when "p"
+      got = HpkePublicKey.from_bytes(kem_of(w[1]), b(w[2]))
+      puts got.is_a?(HpkeError) ? "refused: #{got.message}" : "ok"
+    when "s"
+      puts oracle_seal(w)
+    when "o"
+      puts oracle_open(w)
+    else
+      puts "refused: no such request #{w[0]}"
+    end
+    STDOUT.flush
+  end
+  exit 0
+end
+
+# The fastest of five runs of 200, in nanoseconds a call.
+def best_of(& : -> _) : Int64
+  fastest = 0_i64
+  5.times do |k|
+    t0 = IyiMark.now_ns
+    200.times { yield }
+    took = (IyiMark.now_ns - t0).to_i64
+    fastest = took if k == 0 || took < fastest
+  end
+  fastest // 200
+end
+
+def micro(ns : Int64) : String
+  "#{ns // 1000}.#{(ns % 1000) // 100}"
+end
+
+if args.size > 0 && args[0] == "cost"
+  suite = HpkeSuite.new(HpkeKem::X25519Sha256, HpkeKdf::HkdfSha256, HpkeAead::Aes128Gcm)
+  key = HpkePrivateKey.derive(suite.kem, drawn("cost key", 32))
+  public = key.public_key
+  randomness = drawn("cost randomness", 32)
+  message = drawn("cost message", 1024)
+  info = "cost info"
+  shot = suite.seal(public, info, "", message, randomness).as(Tuple)
+  ok = true
+  seal_one = best_of { suite.seal(public, info, "", message, randomness) }
+  open_one = best_of { ok = ok && opened?(suite.open(key, shot[0], info, "", shot[1]), message) }
+  sender = suite.sender(public, info, randomness).as(HpkeSender)
+  sealed = Array(String).new(1000) { |_| sender.seal(message).as(String) }
+  sender = suite.sender(public, info, randomness).as(HpkeSender)
+  seal_ctx = best_of { sender.seal(message) }
+  recipients = Array(HpkeRecipient).new(5) { |_| suite.recipient(key, shot[0], info).as(HpkeRecipient) }
+  run = -1
+  fastest = 0_i64
+  5.times do |k|
+    r = recipients[k]
+    t0 = IyiMark.now_ns
+    200.times { |i| ok = ok && opened?(r.open(sealed[i]), message) }
+    took = (IyiMark.now_ns - t0).to_i64
+    fastest = took if k == 0 || took < fastest
+  end
+  open_ctx = fastest // 200
+  raise "the timed opens did not agree" unless ok
+  puts "iyi: #{suite}, a 1 KiB message: single-shot seal #{micro(seal_one)} us, open #{micro(open_one)} us; in a context, seal #{micro(seal_ctx)} us, open #{micro(open_ctx)} us"
+  exit 0
+end
+
+# Seven of RFC 9180's vectors, cut from
+# bench/std_hpke_fixture/rfc9180_vectors.json as the gate cuts them (its
+# vectors 0, 3, 9, 12, 18, 34 and 54): every mode, both KEMs, both KDFs,
+# every AEAD, export-only among them.
+EMBEDDED = <<-JSON
+  [
+  {"mode":0,"kem_id":32,"kdf_id":1,"aead_id":1,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"6db9df30aa07dd42ee5e8181afdb977e538f5e1fec8a06223f33f7013e525037","ikmE":"7268600d403fce431561aef583ee1613527cff655c1343f29812e66706df3234","skRm":"4612c550263fc8ad58375df3f557aac531d26850903e55a9f23f21d8534e8ac8","skEm":"52c4a758a802cd8b936eceea314432798d5baf2d7e9235dc084ab1b9cfa2f736","pkRm":"3948cfe0ad1ddb695d780e59077195da6c56506b027329794ab02bca80815c4d","pkEm":"37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431","enc":"37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431","shared_secret":"fe0e18c9f024ce43799ae393c7e8fe8fce9d218875e8227b0187c04e7d2ea1fc","key":"4531685d41d65f03dc48f6b8302c05b0","base_nonce":"56d890e5accaaf011cff4b7d","count":257,"ciphertexts_sha256":"33ef37d63a1e75fa2846265cce10f8ee7f94258ce9d995be5c3d2c0fbe5d4c83","encryptions":[{"aad":"436f756e742d30","ct":"f938558b5d72f1a23810b4be2ab4f84331acc02fc97babc53a52ae8218a355a96d8770ac83d07bea87e13c512a","nonce":"56d890e5accaaf011cff4b7d","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":0},{"aad":"436f756e742d31","ct":"af2d7e9ac9ae7e270f46ba1f975be53c09f8d875bdc8535458c2494e8a6eab251c03d0c22a56b8ca42c2063b84","nonce":"56d890e5accaaf011cff4b7c","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":1},{"aad":"436f756e742d32","ct":"498dfcabd92e8acedc281e85af1cb4e3e31c7dc394a1ca20e173cb72516491588d96a19ad4a683518973dcc180","nonce":"56d890e5accaaf011cff4b7f","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":2},{"aad":"436f756e742d323535","ct":"7175db9717964058640a3a11fb9007941a5d1757fda1a6935c805c21af32505bf106deefec4a49ac38d71c9e0a","nonce":"56d890e5accaaf011cff4b82","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":255},{"aad":"436f756e742d323536","ct":"957f9800542b0b8891badb026d79cc54597cb2d225b54c00c5238c25d05c30e3fbeda97d2e0e1aba483a2df9f2","nonce":"56d890e5accaaf011cff4a7d","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":256}],"exports":[{"exporter_context":"","L":32,"exported_value":"3853fe2b4035195a573ffc53856e77058e15d9ea064de3e59f4961d0095250ee"},{"exporter_context":"00","L":32,"exported_value":"2e8f0b54673c7029649d4eb9d5e33bf1872cf76d623ff164ac185da9e88c21a5"},{"exporter_context":"54657374436f6e74657874","L":32,"exported_value":"e9e43065102c3836401bed8c3c3c75ae46be1639869391d62c61f1ec7af54931"}]},
+  {"mode":3,"kem_id":32,"kdf_id":1,"aead_id":1,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"4b16221f3b269a88e207270b5e1de28cb01f847841b344b8314d6a622fe5ee90","ikmE":"4303619085a20ebcf18edd22782952b8a7161e1dbae6e46e143a52a96127cf84","ikmS":"62f77dcf5df0dd7eac54eac9f654f426d4161ec850cc65c54f8b65d2e0b4e345","skRm":"cb29a95649dc5656c2d054c1aa0d3df0493155e9d5da6d7e344ed8b6a64a9423","skEm":"14de82a5897b613616a00c39b87429df35bc2b426bcfd73febcb45e903490768","skSm":"fc1c87d2f3832adb178b431fce2ac77c7ca2fd680f3406c77b5ecdf818b119f4","pkRm":"1d11a3cd247ae48e901939659bd4d79b6b959e1f3e7d66663fbc9412dd4e0976","pkEm":"820818d3c23993492cc5623ab437a48a0a7ca3e9639c140fe1e33811eb844b7c","pkSm":"2bfb2eb18fcad1af0e4f99142a1c474ae74e21b9425fc5c589382c69b50cc57e","psk":"0247fd33b913760fa1fa51e1892d9f307fbe65eb171e8132c2af18555a738b82","psk_id":"456e6e796e20447572696e206172616e204d6f726961","enc":"820818d3c23993492cc5623ab437a48a0a7ca3e9639c140fe1e33811eb844b7c","shared_secret":"f9d0e870aba28d04709b2680cb8185466c6a6ff1d6e9d1091d5bf5e10ce3a577","key":"1364ead92c47aa7becfa95203037b19a","base_nonce":"99d8b5c54669807e9fc70df1","count":257,"ciphertexts_sha256":"b7d507f514cf472d58cc4528b8ce5a39d2f1aca8867a4d4023dbf7695e9c338c","encryptions":[{"aad":"436f756e742d30","ct":"a84c64df1e11d8fd11450039d4fe64ff0c8a99fca0bd72c2d4c3e0400bc14a40f27e45e141a24001697737533e","nonce":"99d8b5c54669807e9fc70df1","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":0},{"aad":"436f756e742d31","ct":"4d19303b848f424fc3c3beca249b2c6de0a34083b8e909b6aa4c3688505c05ffe0c8f57a0a4c5ab9da127435d9","nonce":"99d8b5c54669807e9fc70df0","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":1},{"aad":"436f756e742d32","ct":"0c085a365fbfa63409943b00a3127abce6e45991bc653f182a80120868fc507e9e4d5e37bcc384fc8f14153b24","nonce":"99d8b5c54669807e9fc70df3","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":2},{"aad":"436f756e742d323535","ct":"576d39dd2d4cc77d1a14a51d5c5f9d5e77586c3d8d2ab33bdec6379e28ce5c502f0b1cbd09047cf9eb9269bb52","nonce":"99d8b5c54669807e9fc70d0e","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":255},{"aad":"436f756e742d323536","ct":"13239bab72e25e9fd5bb09695d23c90a24595158b99127505c8a9ff9f127e0d657f71af59d67d4f4971da028f9","nonce":"99d8b5c54669807e9fc70cf1","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":256}],"exports":[{"exporter_context":"","L":32,"exported_value":"08f7e20644bb9b8af54ad66d2067457c5f9fcb2a23d9f6cb4445c0797b330067"},{"exporter_context":"00","L":32,"exported_value":"52e51ff7d436557ced5265ff8b94ce69cf7583f49cdb374e6aad801fc063b010"},{"exporter_context":"54657374436f6e74657874","L":32,"exported_value":"a30c20370c026bbea4dca51cb63761695132d342bae33a6a11527d3e7679436d"}]},
+  {"mode":1,"kem_id":32,"kdf_id":1,"aead_id":3,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"26b923eade72941c8a85b09986cdfa3f1296852261adedc52d58d2930269812b","ikmE":"35706a0b09fb26fb45c39c2f5079c709c7cf98e43afa973f14d88ece7e29c2e3","skRm":"77d114e0212be51cb1d76fa99dd41cfd4d0166b08caa09074430a6c59ef17879","skEm":"0c35fdf49df7aa01cd330049332c40411ebba36e0c718ebc3edf5845795f6321","pkRm":"13640af826b722fc04feaa4de2f28fbd5ecc03623b317834e7ff4120dbe73062","pkEm":"2261299c3f40a9afc133b969a97f05e95be2c514e54f3de26cbe5644ac735b04","psk":"0247fd33b913760fa1fa51e1892d9f307fbe65eb171e8132c2af18555a738b82","psk_id":"456e6e796e20447572696e206172616e204d6f726961","enc":"2261299c3f40a9afc133b969a97f05e95be2c514e54f3de26cbe5644ac735b04","shared_secret":"4be079c5e77779d0215b3f689595d59e3e9b0455d55662d1f3666ec606e50ea7","key":"600d2fdb0313a7e5c86a9ce9221cd95bed069862421744cfb4ab9d7203a9c019","base_nonce":"112e0465562045b7368653e7","count":257,"ciphertexts_sha256":"602ce27c8ae79f61d00ec61a22808d5b93895c5da0a65320f1bd93ee32fbf770","encryptions":[{"aad":"436f756e742d30","ct":"4a177f9c0d6f15cfdf533fb65bf84aecdc6ab16b8b85b4cf65a370e07fc1d78d28fb073214525276f4a89608ff","nonce":"112e0465562045b7368653e7","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":0},{"aad":"436f756e742d31","ct":"5c3cabae2f0b3e124d8d864c116fd8f20f3f56fda988c3573b40b09997fd6c769e77c8eda6cda4f947f5b704a8","nonce":"112e0465562045b7368653e6","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":1},{"aad":"436f756e742d32","ct":"14958900b44bdae9cbe5a528bf933c5c990dbb8e282e6e495adf8205d19da9eb270e3a6f1e0613ab7e757962a4","nonce":"112e0465562045b7368653e5","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":2},{"aad":"436f756e742d323535","ct":"2414d0788e4bc39a59a26d7bd5d78e111c317d44c37bd5a4c2a1235f2ddc2085c487d406490e75210c958724a7","nonce":"112e0465562045b736865318","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":255},{"aad":"436f756e742d323536","ct":"c567ae1c3f0f75abe1dd9e4532b422600ed4a6e5b9484dafb1e43ab9f5fd662b28c00e2e81d3cde955dae7e218","nonce":"112e0465562045b7368652e7","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":256}],"exports":[{"exporter_context":"","L":32,"exported_value":"813c1bfc516c99076ae0f466671f0ba5ff244a41699f7b2417e4c59d46d39f40"},{"exporter_context":"00","L":32,"exported_value":"2745cf3d5bb65c333658732954ee7af49eb895ce77f8022873a62a13c94cb4e1"},{"exporter_context":"54657374436f6e74657874","L":32,"exported_value":"ad40e3ae14f21c99bfdebc20ae14ab86f4ca2dc9a4799d200f43a25f99fa78ae"}]},
+  {"mode":0,"kem_id":32,"kdf_id":1,"aead_id":65535,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"683ae0da1d22181e74ed2e503ebf82840deb1d5e872cade20f4b458d99783e31","ikmE":"55bc245ee4efda25d38f2d54d5bb6665291b99f8108a8c4b686c2b14893ea5d9","skRm":"33d196c830a12f9ac65d6e565a590d80f04ee9b19c83c87f2c170d972a812848","skEm":"095182b502f1f91f63ba584c7c3ec473d617b8b4c2cec3fad5af7fa6748165ed","pkRm":"194141ca6c3c3beb4792cd97ba0ea1faff09d98435012345766ee33aae2d7664","pkEm":"e5e8f9bfff6c2f29791fc351d2c25ce1299aa5eaca78a757c0b4fb4bcd830918","enc":"e5e8f9bfff6c2f29791fc351d2c25ce1299aa5eaca78a757c0b4fb4bcd830918","shared_secret":"e81716ce8f73141d4f25ee9098efc968c91e5b8ce52ffff59d64039e82918b66","key":"","base_nonce":"","count":0,"ciphertexts_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","encryptions":[],"exports":[{"exporter_context":"","L":32,"exported_value":"7a36221bd56d50fb51ee65edfd98d06a23c4dc87085aa5866cb7087244bd2a36"},{"exporter_context":"00","L":32,"exported_value":"d5535b87099c6c3ce80dc112a2671c6ec8e811a2f284f948cec6dd1708ee33f0"},{"exporter_context":"54657374436f6e74657874","L":32,"exported_value":"ffaabc85a776136ca0c378e5d084c9140ab552b78f039d2e8775f26efff4c70e"}]},
+  {"mode":2,"kem_id":32,"kdf_id":3,"aead_id":1,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"b456248e5f6a41868f17ac31def0bdc98ceafd38216ad45ba63a02db53bdbbee","ikmE":"3a7a2bb7ac023e7f2645c4ba7f9f63e0eed809c794ec5a6963b5dac1326b3c1f","ikmS":"c97e136cf8db8c7f06595253739aa27a888e4d3f062b9f92670d4f4e3a342970","skRm":"1ea5548fb3412eca9ca9d5165a382bea32877415b12253fb2c594b0cfa4e8197","skEm":"899bcc666197a9a9629248daaf7b2cae2020f450b42e2aa633a5dab67031c021","skSm":"bee14df75c1654067db5b7551d3ebd0a5e2e18495733639e6a054c91bde97a17","pkRm":"9144025cd5cf5049cd429d95efefa7e7ba1a896054cdb1d6c93bac79134b1f5f","pkEm":"cbbf4bf8393f27f04cdbc5e67a449cadc22df22dcf0c14f61d17471c8b49687f","pkSm":"4b65143baa4aaeae70c23e052972ca61467aa42883b1c3ef388821496f120717","enc":"cbbf4bf8393f27f04cdbc5e67a449cadc22df22dcf0c14f61d17471c8b49687f","shared_secret":"8d75921a2cfd345a076ac2dc64dd2af08598322dd3aadb90a43395c13445c654","key":"d9d173d39d6b281a0aec686097a9ebec","base_nonce":"8895a6427778c6d6219b1056","count":257,"ciphertexts_sha256":"7f9b13144c777c5148725b0a809ee7d01ae1ed28a396afd2ce2c1b1ed58deabf","encryptions":[{"aad":"436f756e742d30","ct":"4bf8568019638be84f424742a6fa07b29acaa39d0b56f67ab9dceaf5371f49bafccf6294f18da4d32a1a563175","nonce":"8895a6427778c6d6219b1056","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":0},{"aad":"436f756e742d31","ct":"0e9e00d7ce8a5251abfe4551028aeafd4c8f7797090cee547f0ed221e791a054be5a976964ab3ada3bf46fb34f","nonce":"8895a6427778c6d6219b1057","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":1},{"aad":"436f756e742d32","ct":"eebb0bfe4b7fc47df10ee33d88bdd14306aa065f75a235970f02164b71bcd1dd74d124b626ce493d30491392a8","nonce":"8895a6427778c6d6219b1054","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":2},{"aad":"436f756e742d323535","ct":"fbdce8b199045f4f7f4ff3fc9daa73924c8c4d2dd147ea515e6593573367ee3ec1f63a1bbf25524291c82f58b3","nonce":"8895a6427778c6d6219b10a9","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":255},{"aad":"436f756e742d323536","ct":"ddbf74069973b625f8853aedb1e03b119789e88bb26e9777bdecbce454dd1a0828d9a33c4229f3a57585ebffd5","nonce":"8895a6427778c6d6219b1156","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":256}],"exports":[{"exporter_context":"","L":32,"exported_value":"3797c85ceed01733b5fbbd0a6cea8f11f7ab4aefb4b7efa5b0f6533c735be190"},{"exporter_context":"00","L":32,"exported_value":"9e9f8ba0d531498e8f9caedb9b51edec7285219f526b88a7b7aa5782922a2931"},{"exporter_context":"54657374436f6e74657874","L":32,"exported_value":"b7f6b8b0755634589c47321fe3996ac102e76b41a0c79c8440b065670de7d044"}]},
+  {"mode":3,"kem_id":16,"kdf_id":1,"aead_id":1,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"abcc2da5b3fa81d8aabd91f7f800a8ccf60ec37b1b585a5d1d1ac77f258b6cca","ikmE":"3c1fceb477ec954c8d58ef3249e4bb4c38241b5925b95f7486e4d9f1d0d35fbb","ikmS":"6262031f040a9db853edd6f91d2272596eabbc78a2ed2bd643f770ecd0f19b82","skRm":"bdf4e2e587afdf0930644a0c45053889ebcadeca662d7c755a353d5b4e2a8394","skEm":"36f771e411cf9cf72f0701ef2b991ce9743645b472e835fe234fb4d6eb2ff5a0","skSm":"b0ed8721db6185435898650f7a677affce925aba7975a582653c4cb13c72d240","pkRm":"04d824d7e897897c172ac8a9e862e4bd820133b8d090a9b188b8233a64dfbc5f725aa0aa52c8462ab7c9188f1c4872f0c99087a867e8a773a13df48a627058e1b3","pkEm":"046a1de3fc26a3d43f4e4ba97dbe24f7e99181136129c48fbe872d4743e2b131357ed4f29a7b317dc22509c7b00991ae990bf65f8b236700c82ab7c11a84511401","pkSm":"049f158c750e55d8d5ad13ede66cf6e79801634b7acadcad72044eac2ae1d0480069133d6488bf73863fa988c4ba8bde1c2e948b761274802b4d8012af4f13af9e","psk":"0247fd33b913760fa1fa51e1892d9f307fbe65eb171e8132c2af18555a738b82","psk_id":"456e6e796e20447572696e206172616e204d6f726961","enc":"046a1de3fc26a3d43f4e4ba97dbe24f7e99181136129c48fbe872d4743e2b131357ed4f29a7b317dc22509c7b00991ae990bf65f8b236700c82ab7c11a84511401","shared_secret":"d4c27698391db126f1612d9e91a767f10b9b19aa17e1695549203f0df7d9aebe","key":"4d567121d67fae1227d90e11585988fb","base_nonce":"67c9d05330ca21e5116ecda6","count":257,"ciphertexts_sha256":"76ffc179607e79f72d671f32a64534dcb31100ef45795f5be5f38d021e4f6b54","encryptions":[{"aad":"436f756e742d30","ct":"b9f36d58d9eb101629a3e5a7b63d2ee4af42b3644209ab37e0a272d44365407db8e655c72e4fa46f4ff81b9246","nonce":"67c9d05330ca21e5116ecda6","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":0},{"aad":"436f756e742d31","ct":"51788c4e5d56276771032749d015d3eea651af0c7bb8e3da669effffed299ea1f641df621af65579c10fc09736","nonce":"67c9d05330ca21e5116ecda7","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":1},{"aad":"436f756e742d32","ct":"3b5a2be002e7b29927f06442947e1cf709b9f8508b03823127387223d712703471c266efc355f1bc2036f3027c","nonce":"67c9d05330ca21e5116ecda4","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":2},{"aad":"436f756e742d323535","ct":"6de25ceadeaec572fbaa25eda2558b73c383fe55106abaec24d518ef6724a7ce698f83ecdc53e640fe214d2f42","nonce":"67c9d05330ca21e5116ecd59","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":255},{"aad":"436f756e742d323536","ct":"f380e19d291e12c5e378b51feb5cd50f6d00df6cb2af8393794c4df342126c2e29633fe7e8ce49587531affd4d","nonce":"67c9d05330ca21e5116ecca6","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":256}],"exports":[{"exporter_context":"","L":32,"exported_value":"595ce0eff405d4b3bb1d08308d70a4e77226ce11766e0a94c4fdb5d90025c978"},{"exporter_context":"00","L":32,"exported_value":"110472ee0ae328f57ef7332a9886a1992d2c45b9b8d5abc9424ff68630f7d38d"},{"exporter_context":"54657374436f6e74657874","L":32,"exported_value":"18ee4d001a9d83a4c67e76f88dd747766576cac438723bad0700a910a4d717e6"}]},
+  {"mode":2,"kem_id":16,"kdf_id":3,"aead_id":2,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"e0ea0b1753ebf24fcd204f9fd86a5bd5aefd7550f653ebbc9dfdf68256dca4b5","ikmE":"d76e98d0bf2c7be050d328ac9efa266db8db37cff9b4ced6f7d24e90dc060058","ikmS":"d74ce3aa8a352d5b486c138b1aaab590a06a8277a715060a1b3c4dd6199cfe39","skRm":"1b18d5fa894ff8cc9682a3b540c56a93ed146711f1c7d4a7cf985bc2bf8bd20a","skEm":"27d7c7c966f345f7084d81e7a835c26e4ad01afbc41736975ac62a07e7d284f8","skSm":"7f209ec8f791935eefe39fdbb2b8b574747c69e9e082660a4fa194f1fac28664","pkRm":"04ba835cdff4e075ba97db2cf705f18471eff67d54039377be8a01fbe93a85bdde3265013c562b977969654d2dbf855b2cbe5950282f8226d94794eefb175bddab","pkEm":"048728fc2d342b8eba23e97b31731f85125ff14130829ba01a843d76487d1262fb8f1e67d9fd9f2fbcf8e0399968c21716be6b93c84134ba36b2529803f173c262","pkSm":"04c5f644ac06da9242231782dca7f0753abb82f909deae17d3ac041a8df848075dd50ece4df6fcd98bafb69441600477c76cacc6cada8d4ca67a6208a7f6e278ce","enc":"048728fc2d342b8eba23e97b31731f85125ff14130829ba01a843d76487d1262fb8f1e67d9fd9f2fbcf8e0399968c21716be6b93c84134ba36b2529803f173c262","shared_secret":"d4e32a68e5e4f00c1eb737975c6d16f4c0d2a7e0406dd13139f39ca95b7ede2c","key":"d9d10a6e718b8a230e259b97a7de54690f87d710623379021f60124e53fad1d8","base_nonce":"06ab4f04d6a36db110566315","count":257,"ciphertexts_sha256":"e3a15d874e496d1f087b0858e78246f5593f46141ce806c4971469bff60ba044","encryptions":[{"aad":"436f756e742d30","ct":"860171a270f1f02f3635047a054241c977878028491fb1dde6bf232e8c21b4e325a53d2f9816195f8563ceab3d","nonce":"06ab4f04d6a36db110566315","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":0},{"aad":"436f756e742d31","ct":"61ea3082b30de02e76a8abae96ace86ca826187b0d804a51cb67541ea2d9c146c07fd1c3161645697e7713509d","nonce":"06ab4f04d6a36db110566314","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":1},{"aad":"436f756e742d32","ct":"c5700be16b77c4f744f0fb56526e00bdbf40c3722df7730636594c7215a21784849acc68ff1a84cd0426c73769","nonce":"06ab4f04d6a36db110566317","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":2},{"aad":"436f756e742d323535","ct":"2ed96e41f28c57b5e68148dc9ab6ad04761f491b6491fcca47fde6e5e4cc8946be3ac12f18b20e458c94b7d523","nonce":"06ab4f04d6a36db1105663ea","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":255},{"aad":"436f756e742d323536","ct":"56764313736cbd47a2e745a873673614b823f33718114aded47b02fcd0382321c4d4cb4eed9cd5a15d56017379","nonce":"06ab4f04d6a36db110566215","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":256}],"exports":[{"exporter_context":"","L":32,"exported_value":"35361366275906f48d15493e2f3fbd02955dce15a2c7ef90663dd40ca1c31853"},{"exporter_context":"00","L":32,"exported_value":"02f1e9c4d41c18669f04d9f8436bbca817e8eac039e799812ec215c51ce94167"},{"exporter_context":"54657374436f6e74657874","L":32,"exported_value":"7b602374c2ff1d79e029684721f6bdbb53c18c6c8eeab01ff7dc49399893732e"}]}
+  ]
+  JSON
+
+# Three known answers for suites the RFC has no vectors for, DHKEM(P-384)
+# and HKDF-SHA384, from the gate's Python HPKE (over the primitives of
+# Python's `cryptography`), which passes the RFC's vectors itself.
+PYTHON_ANSWERS = <<-JSON
+  [
+  {"mode":3,"kem_id":17,"kdf_id":2,"aead_id":2,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"c0931b434bb7f775bbb57c0061fe9d994a3e3c501c4a0f89839462f56a9a2937b6c59f1cb14472a874c70d30036ec17a","ikmE":"e80acfd64cb7ed663790d1417404677c417303f9f3e644ae5a98f9f101a37c61d7aedaa9443e7b3d773f19a6fead5614","ikmS":"d58249cf35892b1e5a063f5216ccca4c0269f53322136af5964ce0579c75c9a944bc3d01f5a441090fedcd8c56653934","skRm":"a8c7936b1cc5b5c44f72938b3ffff3195530407a83e49ecad47b97bb212b7f14e55c4ade898b38e7f0c3ff62d56cbdf3","pkRm":"049fd08c4487f1c0e8426ebb19062b1eb353e12f18e55dcea93841543dc15e11047b6962edf941c77b0860d67a1e1933a8812db8fb19d9ac664d5844ff58f67072a31744897a689d9346152180ac78b6ea6dc098e7a7bdaab804c38ac4859ee8f7","skEm":"b1f70814b525877b99264988504a4086f9106ae0086db286b5b103c8e3f321717960fc0de63cc41ccce7ef9dc4aa50f1","pkEm":"04bb03a03492ccbee702fe5640687a499697cbf2fadc6e0c3352599a1f281ed811513deff9b0ce42a178fa6bdc4f3fb4264f440c599ecceb16e4964d554ebd2482d29b5cb64824185e18a81d3f7439f964a43fb399ab01dd00ba70b4877fea47d1","skSm":"4eaa28a33c7306ffd5dd66b856b2f41e8f02c5cbf1f82b60a0491fe74a90a97a866ce5f1c97a0512d68c57aefe86deb5","pkSm":"040d7b598d21ecc00a1eab79f2dfce3314c389f92fd22711ac5a339a0af99292d087d8b5ab20369c5cf332c2cb55b74e4980e38aa6c57ce1753ee1268c3e1c81cf88b8dc4b1c7e0e314d5b007aa61b293ef1c82e2cf5e81388413791eee953318f","psk":"f043206b5e7d5bc19b056bb96fc8d03afebe738e77bc0f38776be82cf855a856","psk_id":"456e6e796e20447572696e206172616e204d6f726961","enc":"04bb03a03492ccbee702fe5640687a499697cbf2fadc6e0c3352599a1f281ed811513deff9b0ce42a178fa6bdc4f3fb4264f440c599ecceb16e4964d554ebd2482d29b5cb64824185e18a81d3f7439f964a43fb399ab01dd00ba70b4877fea47d1","shared_secret":"e19a056eebe636caa4e20aeb24b9c8915a60449fe2705564c862ea917b142ff97f09d80d10614fba0464c899a2141d63","key":"a5dd5cf3b95f61133911c804deea42a0ec98c0f34f5d252d05b0d625259ed2aa","base_nonce":"c0d1ca4541428319fbc211bd","count":257,"ciphertexts_sha256":"99aeb29cfcebf27bf82f071399435f703e846165d4df257ade0b04a5a5597497","encryptions":[{"aad":"436f756e742d30","ct":"fcce1107d65476cdf23910745bb9a9e4557b8859a97a90bcb024aa3a5de9d23226556a01f59f9147013c80355d","nonce":"c0d1ca4541428319fbc211bd","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":0},{"aad":"436f756e742d31","ct":"d6b47778f559f0096bcb71aa4818e4524ee5ec51ea78a54e40f4337e01c6b0d8a58776262d567ef7c1ac92d7ec","nonce":"c0d1ca4541428319fbc211bc","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":1},{"aad":"436f756e742d32","ct":"15c2d85e0c41c72ed73bf74732a0647d4da5dafbeea66453f416bdbb05b35910dd6f7950c933610dfbe8b14c2e","nonce":"c0d1ca4541428319fbc211bf","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":2},{"aad":"436f756e742d323535","ct":"54eb77fc8d4d4813c98141a7ff88bd83add599a32767f88d783076249edf8939e0a47b302d78459bc05634bf55","nonce":"c0d1ca4541428319fbc21142","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":255},{"aad":"436f756e742d323536","ct":"686082ca2b63ece75a1e29fbc3b1ae95cfaf7d9cc233f7a1552af881cb697180b59f4c2573973b902e4f372634","nonce":"c0d1ca4541428319fbc210bd","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":256}],"exports":[{"L":32,"exported_value":"ab8840210e59bb7eb4a517c73139660147f0dc3e73dc4a05b7487b045437afe8","exporter_context":""},{"L":32,"exported_value":"99f442f1c84d00d091c2bb88361943753271c85400ab8077ecd4c6880babeb1f","exporter_context":"00"},{"L":32,"exported_value":"258a99f50e92dc892514538d2d3b276063bbd1d39901c316ae1f96317bae2a9b","exporter_context":"54657374436f6e74657874"}]},
+  {"mode":2,"kem_id":32,"kdf_id":2,"aead_id":3,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"4a2bcab58d007c836fd71024e5e4ae7e5ebc64ed66c08c5687501aa95cd58316","ikmE":"881617b524145ce4d2e32947d2394881c00e43e59980ec3687a561e68defa7c8","ikmS":"68ad94d7e2573005e41765b7f7d194efa275ac85a60d9df41dcaca75c0f90610","skRm":"38a2df8bc12a08e3c220a09e7a6b34e8e8ca0cc619cc601e86bb6a6f1cfb814a","pkRm":"3cacd95fb2824e1894f43cee71fb87265990726148a2f1c3d1de99198c239853","skEm":"3086534e3d8dbaa3bc764c62d38d8502e4aac2ba0ff8ef012439a0de5049e94b","pkEm":"f91ab24fd736bbe52a37885dbeb292bd1e87a21fd4f09f5c04619e33286cb110","skSm":"f8b0a5a83bb8adfae72e6f92a3f4d39293b20310e0625853f5c55157e106e247","pkSm":"ba72f50deeac457ea6953d991ac25bac4fa2ffd85b2bbcbb6fd2289c78e9cc7a","enc":"f91ab24fd736bbe52a37885dbeb292bd1e87a21fd4f09f5c04619e33286cb110","shared_secret":"5e701ace0abae3218be03aa9752dbb8061ce95d617ee6a12d6a276d49412c773","key":"71062bf1808a67644c1c26646e8d3b3e1cd3bd2969fd55896c8427ecb932fda2","base_nonce":"8f671adf919a647094c9be0e","count":257,"ciphertexts_sha256":"68696b593e619b9775b94d5733b1f07bf0392cb8d7654f2ea5292556fdf17a52","encryptions":[{"aad":"436f756e742d30","ct":"f588f33706c4624e169fee571788fe084c1e40edf5b3b1bd9271a8f37943bedddff12f88d2684fe1e4a2254859","nonce":"8f671adf919a647094c9be0e","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":0},{"aad":"436f756e742d31","ct":"d83908ca449231d9bff8196271a2933bac3be0649130fd87e06693b1e622fc6e6e248752f132f597398431f8ae","nonce":"8f671adf919a647094c9be0f","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":1},{"aad":"436f756e742d32","ct":"ce516ff447bdd04036d16968d051219353e1869271446f9510b6955d8823ea01ee2a1876d72081b430cfae59a6","nonce":"8f671adf919a647094c9be0c","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":2},{"aad":"436f756e742d323535","ct":"7a989b9badaadf8cad1cb6f775b9b9bc56b1f059ab81d24eb6efe360080874895d9458d679333c7f4d518da745","nonce":"8f671adf919a647094c9bef1","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":255},{"aad":"436f756e742d323536","ct":"8c18d8f7ebd324cd1854165fe2a7ded1cecb8727dbb9a82dc65518959d500ee707896e227f4d87b0797b898618","nonce":"8f671adf919a647094c9bf0e","pt":"4265617574792069732074727574682c20747275746820626561757479","seq":256}],"exports":[{"L":32,"exported_value":"a316b4e099c04103f79dfcf0fc7b8ed794b35288fc2fc8ab5a64a9b1819b0cb8","exporter_context":""},{"L":32,"exported_value":"8e6acfbb6102823f287e609d75d83e20853471c912460e3c0294cee65af0865c","exporter_context":"00"},{"L":32,"exported_value":"f52e3c7219b6dfcd94eb486eda2e6160090a358c40e2f874a3798a1aec4b7e2b","exporter_context":"54657374436f6e74657874"}]},
+  {"mode":1,"kem_id":17,"kdf_id":3,"aead_id":65535,"info":"4f6465206f6e2061204772656369616e2055726e","ikmR":"961cee2d9560a29ba41296058ba346f408dac5425b97b0a2a013422d8c15aecbd5e2a408f3905cb6d77bf646e4b30a2d","ikmE":"0b89f45002d4b833dbbe1b8894d6ed8daedb70c85ad7c6522d5a469af22a0fd8b14c9fab2042b3cd8ba847b223e54026","skRm":"d7246183a9fa0a22819263236bc8f20fb3583ba2703b01a848a3f0229a8ffa08ea8c15f421365d4cec6a6e317b2f357b","pkRm":"04f0f44628e42ebb55f998b025c2f2ff77453fb380cdeac77df6f341236b09050f836c76de17aa72fd609c48088eba52e521324c1cc2e06886fbb54d80eb723ede144ad32801051c421f3bc5c08b17b80a3416426f37f09210f138765cb33c9cdd","skEm":"0048e91a850aa5c3d8d68b00ef2e795342a061d55d005ea2e15a81f81fd1053d9637ff8a695f88d6f14cfea967fd8288","pkEm":"04e33c9b08719a89562fd5ca0191f258d12a170cc1ed66d0289907010ce22b80805137c522f5001a4120d5d63926d31c6c0e85088ab0bc59a8225dde950ee9229acbea232ac9d225749df8b591d2d5a380ca1ae5f33e34c06a85a3ce857d6c30fa","psk":"44b16c44a4c13a303bc5acf7a779670089b718699886a759fde208531aebe35a","psk_id":"456e6e796e20447572696e206172616e204d6f726961","enc":"04e33c9b08719a89562fd5ca0191f258d12a170cc1ed66d0289907010ce22b80805137c522f5001a4120d5d63926d31c6c0e85088ab0bc59a8225dde950ee9229acbea232ac9d225749df8b591d2d5a380ca1ae5f33e34c06a85a3ce857d6c30fa","shared_secret":"bdc3d469662e501419dd0881853162f6ac59ca1c8c84b4ecf21ce9a9c18da583a557cc04cd7697d770053c79444172ed","key":"","base_nonce":"","count":0,"ciphertexts_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","encryptions":[],"exports":[{"L":32,"exported_value":"7a11f755e5edb2436dfad140e34aee461a0e9a2d6120304edd199a541ca99df2","exporter_context":""},{"L":32,"exported_value":"fe9b79d1bb60d05b1c8ac9eb46c7e933a1870834c18e7cd44e02f133f3ab50ef","exporter_context":"00"},{"L":32,"exported_value":"44e6aaf93a0addd71dd9cdf759708b3b58ec2aa2a2347813d3128ced4c3390c5","exporter_context":"54657374436f6e74657874"}]}
+  ]
+  JSON
+
+puts "== sizes and code points (rfc 9180 section 7)"
+check HpkeKem::X25519Sha256.value == 0x20 && HpkeKem::P256Sha256.value == 0x10 && HpkeKem::P384Sha384.value == 0x11, "the KEM ids"
+check HpkeKdf::HkdfSha256.value == 1 && HpkeKdf::HkdfSha384.value == 2 && HpkeKdf::HkdfSha512.value == 3, "the KDF ids"
+check HpkeAead::Aes128Gcm.value == 1 && HpkeAead::Aes256Gcm.value == 2 && HpkeAead::ChaCha20Poly1305.value == 3 && HpkeAead::ExportOnly.value == 0xffff, "the AEAD ids"
+check KEMS.map(&.secret_size) == [32, 32, 48] && KEMS.map(&.public_key_size) == [32, 65, 97] && KEMS.map(&.private_key_size) == [32, 32, 48], "Nsecret, Nenc and Nsk"
+check KDFS.map(&.hash_size) == [32, 48, 64], "Nh"
+check AEADS.map(&.key_size) == [16, 32, 32, 0] && AEADS.map(&.nonce_size) == [12, 12, 12, 0] && AEADS.map(&.tag_size) == [16, 16, 16, 0], "Nk, Nn and Nt"
+[{0x12, 1, 1, "no KEM 0x0012"}, {0x21, 1, 1, "no KEM 0x0021"}, {0x41, 1, 1, "no KEM 0x0041"}, {0x647a, 1, 1, "no KEM 0x647a"},
+ {0x20, 4, 1, "no KDF 0x0004"}, {0x20, 1, 4, "no AEAD 0x0004"}].each do |ids|
+  check refused?(HpkeSuite.from_ids(ids[0], ids[1], ids[2]), ids[3]), "a suite of #{id4(ids[0])}, #{id4(ids[1])}, #{id4(ids[2])} refused"
+end
+check HpkeSuite.from_ids(0x11, 2, 0xffff).to_s == "DHKEM(P-384, HKDF-SHA384), HKDF-SHA384, Export-only", "a suite by its ids"
+puts "  3 KEMs, 3 KDFs and 4 AEADs; P-521, X448 and the post-quantum KEMs refused by id"
+
+# With a file, every vector of it; with none, the vectors embedded above.
+unless args.empty?
+  puts "\n== rfc 9180 vectors (#{args[0].split('/').last})"
+  run_vectors(JSON.parse(File.read(args[0])), "vector")
+end
+
+puts "\n== embedded rfc 9180 vectors"
+run_vectors(JSON.parse(EMBEDDED), "embedded vector")
+
+puts "\n== known answers for p-384 and hkdf-sha384 (the python hpke's)"
+run_vectors(JSON.parse(PYTHON_ANSWERS), "python vector")
+
+# Every suite in every mode, keys and inputs drawn from labels: three
+# messages each way in one context, the exports equal at both ends, and
+# the ciphertexts opened by a context set up from the serialised keys.
+puts "\n== round trips in every suite and mode"
+trips = 0
+KEMS.each do |kem|
+  KDFS.each do |kdf|
+    AEADS.each do |aead|
+      suite = HpkeSuite.new(kem, kdf, aead)
+      4.times do |mode|
+        name = "#{suite}, #{MODES[mode]}"
+        key = HpkePrivateKey.derive(kem, drawn("#{name} r", kem.private_key_size))
+        mine = HpkePrivateKey.derive(kem, drawn("#{name} s", kem.private_key_size + 7))
+        psk = mode == 1 || mode == 3 ? drawn("#{name} psk", 32 + mode) : nil
+        psk_id = psk.nil? ? nil : drawn("#{name} psk_id", mode)
+        sender_key = mode >= 2 ? mine : nil
+        sender_public = mode >= 2 ? HpkePublicKey.from_bytes(kem, mine.public_key.bytes).as(HpkePublicKey) : nil
+        public = HpkePublicKey.from_bytes(kem, key.public_key.bytes).as(HpkePublicKey)
+        info = drawn("#{name} info", mode * 9)
+        sender = suite.sender(public, info, drawn("#{name} e", kem.private_key_size), psk, psk_id, sender_key).as(HpkeSender)
+        check sender.mode.value == mode, "#{name}: the mode"
+        read = HpkePrivateKey.from_bytes(kem, key.bytes).as(HpkePrivateKey)
+        recipient = suite.recipient(read, sender.enc, info, psk, psk_id, sender_public).as(HpkeRecipient)
+        unless aead == HpkeAead::ExportOnly
+          3.times do |m|
+            pt = drawn("#{name} pt #{m}", m * 500)
+            aad = drawn("#{name} aad #{m}", m * 3)
+            sealed = sender.seal(pt, aad).as(String)
+            check sealed.bytesize == pt.size + 16, "#{name}: message #{m} is its plaintext and a tag"
+            check opened?(recipient.open(sealed, aad), pt), "#{name}: message #{m} opened"
+          end
+        end
+        check sender.export("ctx", 77) == recipient.export("ctx", 77), "#{name}: the exports"
+        check sender.export("ctx", 77) != sender.export("ctx2", 77), "#{name}: exports under two contexts"
+        check sender.export("", 255 * kdf.hash_size).size == 255 * kdf.hash_size, "#{name}: the longest export"
+        trips = trips + 1
+      end
+    end
+  end
+end
+puts "  #{trips} suites and modes: sealed, opened and exported alike at both ends"
+
+# Section 7.1.4: an X25519 shared secret of all zero bytes is refused,
+# which a public key of small order gives whatever the private key; these
+# are the u-coordinates of the points of order 1, 2, 4 and 8, and two of
+# them spelled again with p added. Refused at the recipient, as an enc,
+# and at the sender, as the recipient's key.
+puts "\n== x25519 points of small order refused (section 7.1.4)"
+x_suite = HpkeSuite.new(HpkeKem::X25519Sha256, HpkeKdf::HkdfSha256, HpkeAead::Aes128Gcm)
+x_key = HpkePrivateKey.derive(x_suite.kem, drawn("small order", 32))
+small = ["0000000000000000000000000000000000000000000000000000000000000000",
+         "0100000000000000000000000000000000000000000000000000000000000000",
+         "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+         "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+         "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+         "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+         "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"]
+small.each do |u|
+  check refused?(x_suite.recipient(x_key, b(u), "info"), "all zero"), "an X25519 encapsulation of small order (u = #{u[0, 8]}...) refused"
+  check refused?(x_suite.open(x_key, b(u), "info", "", "0123456789abcdef"), "all zero"), "an X25519 single-shot open of small order (u = #{u[0, 8]}...) refused"
+  theirs = HpkePublicKey.from_bytes(x_suite.kem, b(u)).as(HpkePublicKey)
+  check refused?(x_suite.sender(theirs, "info", drawn("e", 32)), "all zero"), "an X25519 recipient key of small order (u = #{u[0, 8]}...) refused"
+  check refused?(x_suite.recipient(x_key, x_key.public_key.bytes, "info", sender_public: theirs), "all zero"), "an X25519 sender key of small order (u = #{u[0, 8]}...) refused"
+end
+puts "  #{small.size} encapsulations, recipient keys and sender keys of small order: refused"
+
+puts "\n== encapsulations and keys refused"
+p_suite = HpkeSuite.new(HpkeKem::P256Sha256, HpkeKdf::HkdfSha256, HpkeAead::Aes128Gcm)
+p_key = HpkePrivateKey.derive(p_suite.kem, drawn("p256 refusals", 32))
+q_suite = HpkeSuite.new(HpkeKem::P384Sha384, HpkeKdf::HkdfSha384, HpkeAead::Aes256Gcm)
+q_key = HpkePrivateKey.derive(q_suite.kem, drawn("p384 refusals", 48))
+check refused?(x_suite.recipient(x_key, drawn("short", 31), "info"), "is 32 bytes, not 31"), "an X25519 encapsulation of 31 bytes refused"
+check refused?(x_suite.recipient(x_key, drawn("long", 33), "info"), "is 32 bytes, not 33"), "an X25519 encapsulation of 33 bytes refused"
+p_enc = p_suite.sender(p_key.public_key, "info", drawn("p e", 32)).as(HpkeSender).enc
+check refused?(p_suite.recipient(p_key, p_enc[0, 33], "info"), "is 65 bytes, not 33"), "a P-256 encapsulation compressed refused"
+bent = p_enc.dup
+bent[64] = bent[64] ^ 1_u8
+check refused?(p_suite.recipient(p_key, bent, "info"), "not on"), "a P-256 encapsulation off the curve refused"
+check refused?(HpkePublicKey.from_bytes(p_suite.kem, bent), "not on"), "a P-256 public key off the curve refused"
+bent[0] = 2_u8
+check refused?(p_suite.recipient(p_key, bent, "info"), "refused"), "a P-256 encapsulation not starting 0x04 refused"
+q_enc = q_suite.sender(q_key.public_key, "info", drawn("q e", 48)).as(HpkeSender).enc
+q_bent = q_enc.dup
+q_bent[96] = q_bent[96] ^ 1_u8
+check refused?(q_suite.recipient(q_key, q_bent, "info"), "not on"), "a P-384 encapsulation off the curve refused"
+check refused?(q_suite.recipient(q_key, q_enc[0, 65], "info"), "is 97 bytes, not 65"), "a P-384 encapsulation of 65 bytes refused"
+n256 = b("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+check refused?(HpkePrivateKey.from_bytes(p_suite.kem, n256), "1 to n - 1"), "a P-256 private key of n refused"
+check refused?(HpkePrivateKey.from_bytes(p_suite.kem, Array(UInt8).new(32, 0_u8)), "1 to n - 1"), "a P-256 private key of 0 refused"
+check refused?(HpkePrivateKey.from_bytes(q_suite.kem, Array(UInt8).new(48, 0xff_u8)), "1 to n - 1"), "a P-384 private key above n refused"
+check refused?(HpkePrivateKey.from_bytes(x_suite.kem, drawn("x", 31)), "is 32 bytes, not 31"), "an X25519 private key of 31 bytes refused"
+check refused?(HpkePublicKey.from_bytes(q_suite.kem, q_enc[0, 96]), "is 97 bytes, not 96"), "a P-384 public key of 96 bytes refused"
+puts "  wrong lengths, points off the curve, compressed points and scalars out of range: refused"
+
+# What a failed open leaves: the sequence where it was, so the right
+# ciphertext opens next; and what each input binds, a recipient set up
+# with any one of them different opening nothing.
+puts "\n== failed opens"
+a_suite = HpkeSuite.new(HpkeKem::X25519Sha256, HpkeKdf::HkdfSha256, HpkeAead::ChaCha20Poly1305)
+a_key = HpkePrivateKey.derive(a_suite.kem, drawn("auth r", 32))
+a_mine = HpkePrivateKey.derive(a_suite.kem, drawn("auth s", 32))
+a_other = HpkePrivateKey.derive(a_suite.kem, drawn("auth other", 32))
+a_psk = drawn("psk", 32)
+a_sender = a_suite.sender(a_key.public_key, "info", drawn("auth e", 32), a_psk, "psk id", a_mine).as(HpkeSender)
+first = a_sender.seal("first", "aad").as(String)
+second = a_sender.seal("second", "aad").as(String)
+a_recipient = a_suite.recipient(a_key, a_sender.enc, "info", a_psk, "psk id", a_mine.public_key).as(HpkeRecipient)
+check refused?(a_recipient.open(second, "aad"), "does not open"), "the second message opened first refused"
+check a_recipient.sequence == 0_u128, "a failed open leaves the sequence at 0"
+tampered = bytes_of(first)
+tampered[2] = tampered[2] ^ 0x40_u8
+check refused?(a_recipient.open(tampered, "aad"), "does not open"), "a ciphertext changed refused"
+check refused?(a_recipient.open(first, "aaD"), "does not open"), "other aad refused"
+check refused?(a_recipient.open(first[0, 4], "aad"), "does not open"), "a ciphertext shorter than a tag refused"
+check opened?(a_recipient.open(first, "aad"), bytes_of("first")) && opened?(a_recipient.open(second, "aad"), bytes_of("second")), "both opened in order after the refusals"
+[{"info", "inf0", "psk id", a_psk, a_mine}, {"psk_id", "info", "psk iD", a_psk, a_mine}, {"psk", "info", "psk id", drawn("other psk", 32), a_mine},
+ {"sender key", "info", "psk id", a_psk, a_other}].each do |t|
+  other = a_suite.recipient(a_key, a_sender.enc, t[1], t[3], t[2], t[4].public_key).as(HpkeRecipient)
+  check refused?(other.open(first, "aad"), "does not open"), "a recipient with another #{t[0]} opens nothing"
+  check other.export("ctx", 32) != a_recipient.export("ctx", 32), "a recipient with another #{t[0]} exports another secret"
+end
+base = a_suite.recipient(a_key, a_sender.enc, "info").as(HpkeRecipient)
+check refused?(base.open(first, "aad"), "does not open"), "a recipient in base mode opens no auth_psk message"
+puts "  out of order, changed, other aad, too short: refused, sequence kept; another info, psk_id, psk or sender key opens nothing"
+
+puts "\n== the nonce limit (section 5.2)"
+limit = x_suite.sender(x_key.public_key, "info", drawn("limit e", 32)).as(HpkeSender)
+limit.advance_to(LAST &- 2_u128)
+check limit.seal("a").is_a?(String) && limit.seal("b").is_a?(String), "sequences 2^96 - 3 and 2^96 - 2 sealed"
+check limit.sequence == LAST, "the sequence at 2^96 - 1"
+check refused?(limit.seal("c"), "nonces are spent"), "sequence 2^96 - 1 refused"
+check refused?(limit.seal("c"), "nonces are spent") && limit.sequence == LAST, "and refused again, the sequence kept"
+check limit.export("still", 16).size == 16, "a spent context still exports"
+puts "  2^96 - 2 sealed, 2^96 - 1 refused, exports still answered"
+
+puts "\nALL CHECKS PASSED"

@@ -69,3 +69,12 @@ path = ["bench/std_mlkem_fixture/**"]
 precedence = "override"
 SPDX-FileCopyrightText = "National Institute of Standards and Technology"
 SPDX-License-Identifier = "LicenseRef-NIST-Software"
+
+# iyi: a subset of RFC 9180's test vectors, from the CFRG's HPKE draft
+# repository, which `bench/std_hpke_exercise.sh` checks std/hpke against;
+# the source, its terms and what was changed are in the NOTICE beside them.
+[[annotations]]
+path = ["bench/std_hpke_fixture/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "IETF Trust and the persons identified as the document authors"
+SPDX-License-Identifier = "BSD-2-Clause"

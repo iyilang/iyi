@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **DNS over TLS and DNS over HTTPS queries are padded (RFC 7830), so a
+  name's length no longer shows through the encryption.** A query was a
+  12-byte header and the question, 18 bytes plus the name's, and TLS adds
+  a fixed overhead, so an on-path observer read the name's length off
+  every DoT record and DoH body. Every query a `Resolver` gives an
+  encrypted upstream now carries an EDNS(0) OPT record (payload size
+  1232, version 0) holding a Padding option of zero bytes that brings the
+  message to a multiple of 128 octets, RFC 8467 4.1's policy for a
+  client: a name of up to 95 characters goes out as 128 bytes, up to 223
+  as 256, and longer as 384, over TLS and over HTTPS, POST and GET alike.
+  Plaintext queries carry no OPT record, as before: RFC 7830 6 forbids
+  padding in the clear. `bench/std_secure_dns_exercise.sh` pads a query
+  for every name length from 1 to 253 and checks each byte of it, and its
+  scripted servers judge every query each transport brings them - one
+  OPT record owned by the root, one Padding option, last, of zero bytes,
+  a multiple of 128 - and count them; the gate holds that judge to dig's
+  `+padding=128`, which it passes, and to dig's unpadded query, which it
+  refuses. A broken copy that sends queries unpadded and one that does
+  not round to the block are caught. Found by the 0.19.0 PKI review.
+- **An answer's OPT record is read for the upper bits of its RCODE.** A
+  padded query has an OPT record, so a server answers with one (RFC 6891
+  6.1.1), and an answer of BADVERS (16) has 0 in its header's four RCODE
+  bits and 1 in its OPT record: read from the header alone, as every
+  answer was, it would be NOERROR with no records, "the name has no
+  address". `DnsMessage#rcode` is the whole twelve-bit RCODE now, and
+  BADVERS is a refusal (`refused?`) that names itself.
+  `bench/std_dns_exercise.sh` reads hand-made answers with an SOA in the
+  authority section and an OPT record in the additional one, and
+  `bench/std_secure_dns_exercise.sh`'s servers answer a query that has an
+  OPT record with one, padded to 468 octets when the query is padded, and
+  `badvers.zone.test` with BADVERS; a broken copy of std/dns reading the
+  header alone is caught by the std/dns gate.
+
+### Changed
+
+- **`DnsMessage.parse` walks the authority and additional sections.** It
+  read the header, the question and the answers and stopped; it now reads
+  past them to find the OPT record, so a message whose authority or
+  additional records run past its bytes, that has two OPT records (RFC
+  6891 6.1.1), or whose OPT record is owned by a name other than the root
+  is `malformed?`, over UDP as over a stream. `DnsMessage.query` takes a
+  `block`, the length to pad to; `DnsMessage::PADDING_BLOCK` is 128.
+
 ## 0.19.0 — 2026-10-22
 
 **iyi's TLS gets its own certificates and keeps its sessions, and its

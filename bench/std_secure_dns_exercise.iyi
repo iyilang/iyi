@@ -16,7 +16,7 @@
 
 module bench/std_secure_dns_exercise
 
-import std/dns::{DnsError, DnsMessage, DnsRecord}
+import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord}
 import std/socket::{DnsUpstream, IPAddress, IPv4Address, IPv6Address, IyiSocket, Resolver, SocketError}
 import std/secure_dns::{DnsOverHttps, DnsOverTls}
 import std/tls::{TlsConfig}
@@ -104,12 +104,68 @@ def stats(resolver : Resolver) : Hash(String, Int32)
   read
 end
 
+# The server's count of the queries one transport brought it since it was
+# last asked, this one included - how many, how many with an OPT record,
+# how many not padded as RFC 7830 and RFC 8467 4.1 have a client pad - and
+# the sentence it said them in, which names the first fault.
+def padding(resolver : Resolver) : Tuple(Int32, Int32, Int32, String)
+  got = resolver.txt("padding.zone.test")
+  raise "ASSERTION FAILED: the server's padding counts: #{show_txt(got)}" unless got.is_a?(Array(String)) && got.size == 1
+  words = got[0].split(' ')
+  {words[0].split('=')[1].to_i, words[1].split('=')[1].to_i, words[2].split('=')[1].to_i, got[0]}
+end
+
+# The server's counts for a transport started again, whatever an earlier
+# run left in them. What it answers is not read: a transport that cannot
+# ask is the next check's to report, in that check's words.
+def restart_counts(resolver : Resolver) : Nil
+  resolver.txt("padding.zone.test")
+end
+
+# Why *query*, asked about a name of *chars* characters, is not padded as
+# RFC 7830 and RFC 8467 4.1 have a client pad it; nil when it is. The
+# length wanted is found by counting up in blocks, not by the module's
+# arithmetic.
+def padding_fault(query : Bytes, chars : Int32) : String?
+  opt = 12 + chars + 2 + 4
+  wanted = 128
+  while wanted < opt + 15
+    wanted = wanted + 128
+  end
+  return "#{query.size} bytes, not a multiple of 128" unless query.size % 128 == 0
+  return "#{query.size} bytes, not #{wanted}, the first multiple of 128 to hold #{opt + 15}" unless query.size == wanted
+  return "ARCOUNT #{query[10]} #{query[11]}, not one record" unless query[10] == 0_u8 && query[11] == 1_u8
+  return "an OPT record not owned by the root" unless query[opt] == 0_u8
+  return "a record of type #{query[opt + 1]} #{query[opt + 2]}, not OPT (41)" unless query[opt + 1] == 0_u8 && query[opt + 2] == 41_u8
+  payload = (query[opt + 3].to_i32 << 8) | query[opt + 4].to_i32
+  return "a payload size of #{payload}, below the #{query.size} bytes sent (RFC 7830 4)" if payload < 512 || payload < query.size
+  index = opt + 5
+  while index < opt + 9
+    return "byte #{index} of the TTL is #{query[index]}: RCODE, version and flags are 0" unless query[index] == 0_u8
+    index = index + 1
+  end
+  data = (query[opt + 9].to_i32 << 8) | query[opt + 10].to_i32
+  return "OPT data of #{data} bytes where #{query.size - opt - 11} follow" unless data == query.size - opt - 11
+  code = (query[opt + 11].to_i32 << 8) | query[opt + 12].to_i32
+  return "option #{code}, not Padding (12)" unless code == 12
+  length = (query[opt + 13].to_i32 << 8) | query[opt + 14].to_i32
+  return "a Padding option of #{length} bytes where #{query.size - opt - 15} follow" unless length == query.size - opt - 15
+  index = opt + 15
+  while index < query.size
+    return "padding byte #{index} is #{query[index]}, not 0 (RFC 7830 3)" unless query[index] == 0_u8
+    index = index + 1
+  end
+  return "it ends at #{DnsMessage.ends_at(query)}" unless DnsMessage.ends_at(query) == query.size
+  nil
+end
+
 # --- The wire, with no network ---
 
 strings = DnsRecord.character_strings(Bytes.new(8) { |i| [5_u8, 104_u8, 101_u8, 108_u8, 108_u8, 111_u8, 1_u8, 33_u8][i] })
 check strings == ["hello", "!"], "a TXT record's character-strings: #{strings.inspect}"
 check DnsRecord.character_strings(Bytes.new(3) { |i| [5_u8, 104_u8, 101_u8][i] }).nil?, "a character-string running past the data is refused"
 query = DnsMessage.query(0_u16, "a.zone.test", DnsRecord::A)
+check query[11] == 0_u8, "a query for the clear has no OPT record (RFC 7830 6)"
 check DnsMessage.ends_at(query) == query.size, "a query ends where its question does: #{DnsMessage.ends_at(query)} of #{query.size}"
 longer = Bytes.new(query.size + 3) { |i| i < query.size ? query[i] : 0_u8 }
 check DnsMessage.ends_at(longer) == query.size, "bytes after a message are not the message's: #{DnsMessage.ends_at(longer)}"
@@ -119,6 +175,28 @@ check DnsMessage.ends_at(query[0, query.size - 1]) == -1, "a question cut short 
 parameter = DnsOverHttps.base64url(String.new(query.size) { |into| into.copy_from(query.to_unsafe, query.size) })
 same "AAABAAABAAAAAAAAAWEEem9uZQR0ZXN0AAABAAE", parameter, "the dns parameter is base64url without padding (RFC 8484 4.1)"
 puts "wire: ok"
+
+# Every name length a host name can have, 1 to 253 characters, so each
+# block's last length and the next block's first are both padded: labels
+# of 49 characters, a dot after each.
+chars = 1
+while chars <= 253
+  built = String::Builder.new
+  index = 0
+  while index < chars
+    built << (index % 50 == 49 && index != chars - 1 ? '.' : 'a')
+    index = index + 1
+  end
+  name = built.to_s
+  check DnsName.valid?(name), "#{chars} characters make a host name"
+  padded = DnsMessage.query(0x2A2A_u16, name, DnsRecord::AAAA, DnsMessage::PADDING_BLOCK)
+  fault = padding_fault(padded, chars)
+  raise "ASSERTION FAILED: a padded query for a name of #{chars} characters: #{fault}" if fault
+  read = DnsMessage.parse(padded)
+  check read.is_a?(DnsMessage) && read.question_name == name && read.rcode == 0, "a padded query parses back: #{read.is_a?(DnsError) ? read.message : read.question_name}"
+  chars = chars + 1
+end
+puts "wire_padding: ok"
 
 if Program.args.empty?
   puts "no server directory given: the sections over the network are bench/std_secure_dns_exercise.sh's"
@@ -150,6 +228,7 @@ bare = Resolver.new([] of String, timeout_ms: 3000, attempts: 1)
 
 dot = DnsOverTls.new("dns.test", "127.0.0.1", dot_port, config)
 over_tls = bare.encrypted(dot)
+restart_counts(over_tls)
 same "tls", show_txt(plain.encrypted(dot).txt("transport.zone.test")), "the encrypted resolver asks over TLS, not its plaintext server"
 first = stats(over_tls)
 answers("dot", over_tls)
@@ -182,7 +261,7 @@ distrusted = error_of(bare.encrypted(untrusted).resolve("a.zone.test"), "a serve
 check distrusted.unreachable?, "a chain to a root the configuration lacks is refused: #{distrusted.message}"
 puts "dot_wrong_name: ok"
 
-mismatched = dot.exchange([DnsMessage.query(0x1234_u16, "wrong-id.zone.test", DnsRecord::A)], 3000)
+mismatched = dot.exchange([DnsMessage.query(0x1234_u16, "wrong-id.zone.test", DnsRecord::A, DnsMessage::PADDING_BLOCK)], 3000)
 check mismatched.is_a?(DnsError) && mismatched.malformed? && mismatched.message.includes?("ID"), "an answer with an ID no query has is refused over TLS: #{mismatched.is_a?(DnsError) ? mismatched.message : "accepted"}"
 forged = error_of(over_tls.resolve("wrong-id.zone.test"), "a lookup answered with another ID")
 check forged.malformed?, "and through the resolver: #{forged.message}"
@@ -201,10 +280,30 @@ puts "dot_oversized: ok"
 same "192.0.2.1", show(over_tls.resolve("a.zone.test")), "the upstream answers again after the failures, on a new connection"
 puts "dot_recovers: ok"
 
+queries, edns, unpadded, said = padding(over_tls)
+check queries > 10 && edns == queries && unpadded == 0, "every DoT query is padded to a multiple of 128 with zero bytes (RFC 7830, RFC 8467 4.1): #{said}"
+puts "dot_padding: ok"
+
+# An answer as a server that speaks EDNS(0) writes it: an OPT record in
+# the additional section, padded to 468 octets (RFC 8467 4.1), and an
+# NXDOMAIN with the zone's SOA in its authority section, which every
+# `answers` above read through already (nx.zone.test).
+exchanged = dot.exchange([DnsMessage.query(0x4242_u16, "a.zone.test", DnsRecord::A, DnsMessage::PADDING_BLOCK)], 3000)
+raise "ASSERTION FAILED: a padded query over TLS: #{exchanged.is_a?(DnsError) ? exchanged.message : "cancelled"}" unless exchanged.is_a?(Array(Bytes))
+opt_answer = exchanged[0]
+check opt_answer[11] == 1_u8 && opt_answer.size % 468 == 0, "the server answers with an OPT record and pads to 468: #{opt_answer.size} bytes, ARCOUNT #{opt_answer[11]}"
+parsed = DnsMessage.parse(opt_answer)
+check parsed.is_a?(DnsMessage) && parsed.rcode == DnsMessage::RCODE_NOERROR && parsed.answers.size == 1, "an answer with an OPT record parses: #{parsed.is_a?(DnsError) ? parsed.message : parsed.rcode}"
+check DnsMessage.ends_at(opt_answer) == opt_answer.size, "and ends where its OPT record does: #{DnsMessage.ends_at(opt_answer)} of #{opt_answer.size}"
+badvers = error_of(over_tls.resolve("badvers.zone.test"), "an answer of BADVERS")
+check badvers.refused? && badvers.message.includes?("BADVERS"), "the OPT record's extended RCODE is read: BADVERS (16) is not NOERROR: #{badvers.message}"
+puts "edns_answers: ok"
+
 # --- DNS over HTTPS, HTTP/1.1 ---
 
 doh = DnsOverHttps.new("https://127.0.0.1:#{doh_port}/dns-query", config: https)
 over_https = bare.encrypted(doh)
+restart_counts(over_https)
 same "https/1.1", show_txt(over_https.txt("transport.zone.test")), "over HTTPS from a server without h2, HTTP/1.1"
 answers("doh", over_https)
 puts "doh_post: ok"
@@ -245,18 +344,33 @@ pinned = DnsOverHttps.new("https://dns.test:#{doh_port}/dns-query", "127.0.0.1",
 same "192.0.2.1", show(bare.encrypted(pinned).resolve("a.zone.test")), "a URL's host pinned to an address, checked by name"
 puts "doh_wrong_name: ok"
 
+queries, edns, unpadded, said = padding(over_https)
+check queries > 10 && edns == queries && unpadded == 0, "every DoH query, POST and GET, is padded to a multiple of 128 with zero bytes: #{said}"
+puts "doh_padding: ok"
+
 # --- DNS over HTTPS, HTTP/2 ---
 
 if File.file?(dir + "/h2.port")
   h2_port = File.read(dir + "/h2.port").to_i
   over_h2 = bare.encrypted(DnsOverHttps.new("https://127.0.0.1:#{h2_port}/dns-query", config: https))
+  restart_counts(over_h2)
   same "h2", show_txt(over_h2.txt("transport.zone.test")), "h2 is preferred where the server speaks it"
   answers("h2", over_h2)
   answers("h2-get", bare.encrypted(DnsOverHttps.new("https://127.0.0.1:#{h2_port}/dns-query", config: https, method: "GET")))
+  queries, edns, unpadded, said = padding(over_h2)
+  check queries > 10 && edns == queries && unpadded == 0, "every DoH query over HTTP/2 is padded: #{said}"
   puts "doh_h2: ok"
 else
   puts "doh_h2: skipped: #{File.read(dir + "/h2.missing").strip}"
 end
+
+# --- Plaintext, unpadded ---
+
+restart_counts(plain)
+same "192.0.2.1", show(plain.resolve("a.zone.test")), "a lookup over plaintext UDP"
+queries, edns, unpadded, said = padding(plain)
+check queries >= 3 && edns == 0, "a plaintext query carries no OPT record, so no padding (RFC 7830 6): #{said}"
+puts "plaintext_unpadded: ok"
 
 # --- Plaintext only when asked ---
 

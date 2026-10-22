@@ -1438,6 +1438,10 @@ else
   cat >"$WORK/h2frames.py" <<'PY'
 import socket, struct, sys, time
 port = int(sys.argv[1])
+# Cases named after the port are the only ones asked: a broken copy is
+# judged by the one its break names, and against a server broken there the
+# others proved nothing and could wait out their reads.
+ONLY = set(sys.argv[2:])
 PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 NAMES = {0: "NO_ERROR", 1: "PROTOCOL_ERROR", 3: "FLOW_CONTROL_ERROR", 5: "STREAM_CLOSED", 6: "FRAME_SIZE_ERROR",
          9: "COMPRESSION_ERROR", 11: "ENHANCE_YOUR_CALM", 7: "REFUSED_STREAM"}
@@ -1543,8 +1547,11 @@ def reset_then_ping(sent):
     return code, False
 
 failures = 0
-def expect(name, got, want):
+def expect(name, ask, want):
     global failures
+    if ONLY and name not in ONLY:
+        return
+    got = ask()
     if got == want:
         print(f"  {name}: {NAMES.get(want, want)}")
     else:
@@ -1553,6 +1560,8 @@ def expect(name, got, want):
 
 def stream_error(name, sent, want):
     global failures
+    if ONLY and name not in ONLY:
+        return
     code, alive = reset_then_ping(sent)
     if code == want and alive:
         print(f"  {name}: RST_STREAM {NAMES.get(want, want)}, and the connection answers PING after")
@@ -1562,47 +1571,48 @@ def stream_error(name, sent, want):
 
 # The ordinary: SETTINGS acknowledged, PING answered, an unknown frame type
 # passed over.
-sock = run(frame(0xFA, 0, 0, b"ignored") + frame(6, 0, 0, b"12345678"))
-acked = pinged = False
-for kind, flags, stream, payload in frames_of(sock):
-    acked = acked or (kind == 4 and flags & 1 == 1)
-    if kind == 6 and flags & 1 and payload == b"12345678":
-        pinged = True
-        break
-if acked and pinged:
-    print("  SETTINGS acknowledged, an unknown frame type passed over, PING answered with its bytes")
-else:
-    failures += 1
-    print(f"  FAIL: SETTINGS acknowledged {acked}, PING answered {pinged}")
+if not ONLY:
+    sock = run(frame(0xFA, 0, 0, b"ignored") + frame(6, 0, 0, b"12345678"))
+    acked = pinged = False
+    for kind, flags, stream, payload in frames_of(sock):
+        acked = acked or (kind == 4 and flags & 1 == 1)
+        if kind == 6 and flags & 1 and payload == b"12345678":
+            pinged = True
+            break
+    if acked and pinged:
+        print("  SETTINGS acknowledged, an unknown frame type passed over, PING answered with its bytes")
+    else:
+        failures += 1
+        print(f"  FAIL: SETTINGS acknowledged {acked}, PING answered {pinged}")
 
-expect("the first frame not SETTINGS", goaway(frame(6, 0, 0, b"12345678"), settings=False), 1)
-expect("DATA on stream 0", goaway(frame(0, 0, 0, b"x")), 1)
-expect("a frame past 16384 bytes", goaway(frame(0, 0, 1, b"x" * 16385)), 6)
+expect("the first frame not SETTINGS", lambda: goaway(frame(6, 0, 0, b"12345678"), settings=False), 1)
+expect("DATA on stream 0", lambda: goaway(frame(0, 0, 0, b"x")), 1)
+expect("a frame past 16384 bytes", lambda: goaway(frame(0, 0, 1, b"x" * 16385)), 6)
 big = frame(0, 0, 1, b"x" * 16385)
-expect("a frame past 16384 bytes, its rest sent after the GOAWAY", goaway_late(big[:200], big[200:]), 6)
+expect("a frame past 16384 bytes, its rest sent after the GOAWAY", lambda: goaway_late(big[:200], big[200:]), 6)
 expect("a malformed head, a body sent after the answer",
-       status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nno colon here\r\nContent-Length: 8000\r\n\r\n", b"y" * 8000),
+       lambda: status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nno colon here\r\nContent-Length: 8000\r\n\r\n", b"y" * 8000),
        "HTTP/1.1 400 Bad Request")
 expect("a head past 1 MiB, more sent after the answer",
-       status_late(b"GET / HTTP/1.1\r\nX-Big: " + b"a" * 1048600, b"a" * 8000), "HTTP/1.1 431 Request Header Fields Too Large")
+       lambda: status_late(b"GET / HTTP/1.1\r\nX-Big: " + b"a" * 1048600, b"a" * 8000), "HTTP/1.1 431 Request Header Fields Too Large")
 expect("a broken chunk, more sent after the answer",
-       status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", b"y" * 8000),
+       lambda: status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", b"y" * 8000),
        "HTTP/1.1 400 Bad Request")
-expect("SETTINGS of 5 bytes", goaway(frame(4, 0, 0, b"\x00\x04\x00\x00\x00")), 6)
-expect("SETTINGS_INITIAL_WINDOW_SIZE past 2^31-1", goaway(frame(4, 0, 0, b"\x00\x04\x80\x00\x00\x00")), 3)
-expect("SETTINGS_MAX_FRAME_SIZE under 16384", goaway(frame(4, 0, 0, b"\x00\x05\x00\x00\x00\x64")), 1)
-expect("SETTINGS_ENABLE_PUSH of 2", goaway(frame(4, 0, 0, b"\x00\x02\x00\x00\x00\x02")), 1)
-expect("PING of 7 bytes", goaway(frame(6, 0, 0, b"1234567")), 6)
-expect("a WINDOW_UPDATE of 0 for the connection", goaway(frame(8, 0, 0, b"\x00\x00\x00\x00")), 1)
-expect("the connection's window past 2^31-1", goaway(frame(8, 0, 0, b"\x7f\xff\xff\xff")), 3)
-expect("a stream with an even number", goaway(frame(1, 5, 2, request())), 1)
-expect("a header block broken off by another frame", goaway(frame(1, 1, 1, request()) + frame(6, 0, 0, b"12345678")), 1)
-expect("CONTINUATION with no header block open", goaway(frame(9, 4, 1, request())), 1)
-expect("a CONTINUATION flood", goaway(frame(1, 1, 1, request()) + b"".join(frame(9, 0, 1, b"\x00" * 16000) for _ in range(70))), 11)
-expect("a header block that does not decode", goaway(frame(1, 5, 1, b"\x80")), 9)
-expect("a PUSH_PROMISE from a client", goaway(frame(5, 4, 0, b"\x00\x00\x00\x02")), 1)
-expect("RST_STREAM on a stream never opened", goaway(frame(3, 0, 5, b"\x00\x00\x00\x08")), 1)
-expect("HEADERS on a closed stream", goaway(frame(1, 5, 1, request()) + frame(1, 5, 1, request())), 5)
+expect("SETTINGS of 5 bytes", lambda: goaway(frame(4, 0, 0, b"\x00\x04\x00\x00\x00")), 6)
+expect("SETTINGS_INITIAL_WINDOW_SIZE past 2^31-1", lambda: goaway(frame(4, 0, 0, b"\x00\x04\x80\x00\x00\x00")), 3)
+expect("SETTINGS_MAX_FRAME_SIZE under 16384", lambda: goaway(frame(4, 0, 0, b"\x00\x05\x00\x00\x00\x64")), 1)
+expect("SETTINGS_ENABLE_PUSH of 2", lambda: goaway(frame(4, 0, 0, b"\x00\x02\x00\x00\x00\x02")), 1)
+expect("PING of 7 bytes", lambda: goaway(frame(6, 0, 0, b"1234567")), 6)
+expect("a WINDOW_UPDATE of 0 for the connection", lambda: goaway(frame(8, 0, 0, b"\x00\x00\x00\x00")), 1)
+expect("the connection's window past 2^31-1", lambda: goaway(frame(8, 0, 0, b"\x7f\xff\xff\xff")), 3)
+expect("a stream with an even number", lambda: goaway(frame(1, 5, 2, request())), 1)
+expect("a header block broken off by another frame", lambda: goaway(frame(1, 1, 1, request()) + frame(6, 0, 0, b"12345678")), 1)
+expect("CONTINUATION with no header block open", lambda: goaway(frame(9, 4, 1, request())), 1)
+expect("a CONTINUATION flood", lambda: goaway(frame(1, 1, 1, request()) + b"".join(frame(9, 0, 1, b"\x00" * 16000) for _ in range(70))), 11)
+expect("a header block that does not decode", lambda: goaway(frame(1, 5, 1, b"\x80")), 9)
+expect("a PUSH_PROMISE from a client", lambda: goaway(frame(5, 4, 0, b"\x00\x00\x00\x02")), 1)
+expect("RST_STREAM on a stream never opened", lambda: goaway(frame(3, 0, 5, b"\x00\x00\x00\x08")), 1)
+expect("HEADERS on a closed stream", lambda: goaway(frame(1, 5, 1, request()) + frame(1, 5, 1, request())), 5)
 stream_error("a field name in upper case", frame(1, 5, 1, request(extra=[("X-Up", "1")])), 1)
 stream_error("no :method", frame(1, 5, 1, request(drop=[":method"])), 1)
 stream_error("an empty :path", frame(1, 5, 1, request(path="")), 1)
@@ -2263,6 +2273,9 @@ https_checks() {
     got="$(timeout -k 5 "${HTTPS_GET_SECONDS:-60}" "$H2BIN" tls-get "$base" "$WORK/tls/root.pem" "$alpn" 2>&1 | tr '\n' '|')"
     want="echo 200 GET /echo x=1 $version host=localhost:$tport length=0 fnv=cbf29ce484222325 x=iyi|big 200 1000000 true|post 200 true|connections 1|"
     [ "$got" = "$want" ] || https_fail "the iyi client offering $alpn: $got"
+    # The first failure ends a broken copy's round here too: "the TLS
+    # handshake skipped" waited its 20 s out once for each offer, 45 s.
+    [ -n "${HTTPS_FIRST_FAIL:-}" ] && [ "$failed" -gt 0 ] && break
   done
   # A broken copy is caught at its first failure, and the clients after
   # it only wait out their timeouts against a server that cannot answer
@@ -2393,6 +2406,11 @@ import select, socket, ssl, struct, sys, threading, time
 
 port, root = int(sys.argv[1]), sys.argv[2]
 head_ms, request_ms = int(sys.argv[3]), int(sys.argv[4])
+# How long a drip goes on: five seconds past the latest close judged in
+# time (a body's, at the deadline and 2.5 s), where it was 30. A close
+# after that fails as a close outside its time would, and the two copies
+# that never close waited out all 30 s each.
+LIMIT = (request_ms + 2500) / 1000 + 5
 cases = sys.argv[5:] or ["cap", "head", "body", "h2"]
 failed = 0
 
@@ -2404,7 +2422,7 @@ def connect(alpn, timeout=20):
     return ctx.wrap_socket(raw, server_hostname="localhost")
 
 
-def drip(s, first, unit, every=0.5, limit=30):
+def drip(s, first, unit, every=0.5, limit=LIMIT):
     """Sends *first*, then *unit* every *every* seconds, reading what comes:
     the seconds until the server closed (None if it had not in *limit*),
     and what it sent."""
@@ -2442,7 +2460,7 @@ def drip(s, first, unit, every=0.5, limit=30):
 def judge(name, closed, low_ms, high_ms, extra=None):
     global failed
     if closed is None:
-        print(f"FAIL {name}: still open after 30 s")
+        print(f"FAIL {name}: still open after {LIMIT:.1f} s")
         failed += 1
     elif not (low_ms <= closed * 1000 <= high_ms):
         print(f"FAIL {name}: closed after {closed:.1f} s, outside {low_ms / 1000:.1f}-{high_ms / 1000:.1f} s")
@@ -3287,7 +3305,10 @@ h2_frames_breaks() { # h2_frames_breaks <label> <name> <old> <new> <case>
     H2BIN="$WORK/$name.bin"
     h2_serve
     local code=0
-    timeout -k 5 300 "$PY" "$WORK/h2frames.py" "$H2PORT" >"$WORK/$name.out" 2>&1 || code=$?
+    # The named case alone: asked every case, "a request's fields
+    # unchecked" took 48 s and "HEADERS on a closed stream passed over" 37,
+    # the other seven 7 to 13 s each (CI, Linux, job 120040655161).
+    timeout -k 5 300 "$PY" "$WORK/h2frames.py" "$H2PORT" "$case_name" >"$WORK/$name.out" 2>&1 || code=$?
     h2_stop
     H2BIN="$good"
     if grep -qF -- "FAIL: $case_name:" "$WORK/$name.out"; then

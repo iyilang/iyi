@@ -11,9 +11,9 @@ the gate's broken copies are each caught at the name of the check that
 covers them. The exit status is 1 when any check failed.
 
 `pebble`'s PARTS, by commas or `all`, in the order they run: first,
-refused, ten, remembered, restart, http01, modes, renewal. A part runs the
-parts it rests on first (restart needs first and ten, http01 restart's
-server, modes the cache they wrote).
+refused, ten, remembered, restart, http01, modes, renewal, unknown. A
+part runs the parts it rests on first (restart needs first and ten,
+http01 restart's server, modes the cache they wrote).
 """
 
 import hashlib
@@ -190,13 +190,15 @@ class Pebble:
 class Served:
     """One `serve` process of the exercise, and its log."""
 
-    def __init__(self, setup, label, pebble, cache, hosts, challenges):
+    def __init__(self, setup, label, pebble, cache, hosts, challenges, roots=None):
         self.ready = os.path.join(setup["work"], f"{label}.ready")
         if os.path.exists(self.ready):
             os.remove(self.ready)
         self.out = os.path.join(setup["work"], f"{label}.out")
+        # ROOTS, which the manager checks each chain to: Pebble's own root
+        # unless another is given.
         self.process = subprocess.Popen(
-            [setup["exercise"], "serve", pebble.directory, setup["minica"], cache, str(setup["tls_port"]),
+            [setup["exercise"], "serve", pebble.directory, setup["minica"], roots or pebble.root, cache, str(setup["tls_port"]),
              str(setup["http_port"]), ",".join(hosts), ",".join(challenges), self.ready],
             stdout=open(self.out, "w"), stderr=subprocess.STDOUT)
         # The exercise tries a port held after the last server for a minute.
@@ -410,12 +412,36 @@ class Scenario:
         finally:
             server.stop()
 
+    def unknown(self):
+        print("\n== a chain from a CA the manager does not trust", flush=True)
+        if self.server:
+            self.server.stop()
+            self.server = None
+        # The manager trusts Pebble's minica alone, which signs Pebble's
+        # HTTPS and no certificate Pebble issues.
+        cache = os.path.join(self.setup["work"], "unknown-cache")
+        server = Served(self.setup, "unknown", self.a, cache, ["u.autocert.example"], ["tls-alpn-01"], roots=self.setup["minica"])
+        try:
+            before = self.a.orders()
+            try:
+                leaf, _, _, _ = handshake(server.port, "u.autocert.example")
+                outcome = f"a certificate, serial {serial(leaf)}"
+            except (ssl.SSLError, OSError) as e:
+                outcome = f"refused ({getattr(e, 'reason', None) or e})"
+            made = self.a.orders() - before
+            cached = os.path.exists(os.path.join(cache, "u.autocert.example"))
+            held(outcome.startswith("refused") and made == 1 and not cached,
+                 "a chain from a CA the manager does not trust is refused, not cached",
+                 f"{outcome}; Pebble made {made} orders; the cache {'holds' if cached else 'does not hold'} it")
+        finally:
+            server.stop()
+
     def close(self):
         if self.server:
             self.server.stop()
 
 
-PARTS = ["first", "refused", "ten", "remembered", "restart", "http01", "modes", "renewal"]
+PARTS = ["first", "refused", "ten", "remembered", "restart", "http01", "modes", "renewal", "unknown"]
 
 
 def pebble(exercise, setup_path, parts):

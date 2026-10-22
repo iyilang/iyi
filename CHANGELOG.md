@@ -1,6 +1,58 @@
 # Changelog
 
-## Unreleased
+## 0.19.0 — 2026-10-22
+
+**iyi's TLS gets its own certificates and keeps its sessions, and its
+tasks run across cores.** std/acme is an ACME client (RFC 8555), tested
+against Pebble, and std/autocert an HTTPS server that gets and renews its
+own certificates through it; std/x509 writes certificate requests and
+self-signed certificates, std/ocsp reads and checks OCSP responses, and
+std/tls staples them at both ends. std/tls resumes TLS 1.3 sessions by
+tickets, and std/http's `HTTPClient` keeps them per origin; it sends and
+takes early data when both ends opt in, which std/http does not; it agrees
+keys in X25519MLKEM768, the post-quantum hybrid OpenSSL 3.5, Chrome and
+Firefox send first, over std/mlkem (ML-KEM-768, FIPS 203), and in
+secp384r1 over std/p384; it serves TLS 1.2 to a client that speaks
+nothing newer, when asked; and it closes with close_notify. A `Resolver`
+can ask DNS over TLS or over HTTPS (std/secure_dns), `IyiSocket.connect`
+races a name's addresses (Happy Eyeballs v2, RFC 8305), and
+`g.spawn_parallel { }` starts a task on a pool of worker threads. A new
+`https://` connection between std/http's ends no longer waits 80 ms, now
+that std/socket sets TCP_NODELAY and std/tls writes a flight in one
+write. P-256 signature checks took 166 us where they took 1,477 on one
+machine, then became nearly four times faster again, and RSA-2048
+signatures a quarter faster, constant time kept on every secret.
+
+The eight issues reported against 0.18.0 are fixed. On Windows,
+`Location.local` no longer panics east of UTC (#133) and
+`IyiSocket.connect` to an address keeps its `timeout_ms` (#131). A
+union-typed value goes to JSON and back (#135); `Math.max` and `Math.min`
+take integers, and a failed call no longer blames its literal (#136); a
+package's module has one name in its own build and in a consumer's
+(#132); a rebuild from artifacts links a serializable type whose module
+imports a package (#134); a frame larger than a page no longer steps over
+a fiber stack's guard page, and a debug build's chain check takes a third
+of the stack (#130); std/mail and std/smtp say a message needs a Date
+(#137). The Linux tarball starts on glibc 2.31, Ubuntu 20.04 and later,
+where 0.18.0's needed 2.38. A value over 128 bytes is passed, returned and
+copied through memory, so a debug build's `StaticArray(UInt8, 1000).new`
+has a 2,048-byte frame on darwin arm64 where it had 9,888.
+
+**Some answers change:** `Certificate` is a class, `Math.max` of two
+`Int32` is an `Int32` where it was a `Float64`, `IyiSocket.connect`'s
+`timeout_ms` bounds the whole connect rather than each address, std/router
+redirects with 307 rather than 301, and `Server.serve` serves at most
+1,024 connections at once and wants a whole request within five minutes.
+`.iyimod` is v58, and an artifact an earlier compiler wrote is refused
+and built again. **Some programs warn:** a package's own file naming its
+module by the short `::Codec` rather than `::IyiWeb::Codec`, which
+`iyi fix` rewrites.
+
+**Not here, and said so:** std/tls has not been audited -
+`SECURITY_REVIEW_TLS.md` is an automated review, not an audit - and is not
+to be called secure until it is; std/http sends no early data; a
+`Resolver` given encrypted upstreams asks no plaintext server unless the
+program says `plaintext_fallback: true`.
 
 ### Added
 

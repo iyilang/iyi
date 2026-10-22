@@ -335,15 +335,15 @@ machine beside three reference timings. Line counts are `wc -l`, and
 
 ## Getting it
 
-The released version is 0.18.0, and a build from current source reports the
+The released version is 0.19.0, and a build from current source reports the
 same. [`install.sh`](install.sh) (POSIX sh over `curl` and `tar`) picks the
 tarball for your machine, linux-x86_64 or darwin-arm64, and refuses anything
 else. It checks the tarball against the release's `SHA256SUMS` and unpacks
 nothing on a mismatch. `IYI_PREFIX` moves the destination and
-`IYI_VERSION=0.18.0` pins a release. By hand it is the same two lines:
+`IYI_VERSION=0.19.0` pins a release. By hand it is the same two lines:
 
 ```sh
-tar -xzf iyi-0.18.0-linux-x86_64.tar.gz -C ~/.local
+tar -xzf iyi-0.19.0-linux-x86_64.tar.gz -C ~/.local
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
@@ -358,7 +358,7 @@ in a bare Ubuntu 20.04 image with nothing but `gcc` and builds a program there.
 The Linux tarball needs glibc 2.31 or newer (Ubuntu 20.04, Debian 11, RHEL 9
 and later), because it is built on Ubuntu 20.04.
 
-**Windows.** The release also carries `iyi-0.18.0-windows-x86_64.zip`, and
+**Windows.** The release also carries `iyi-0.19.0-windows-x86_64.zip`, and
 [`install.ps1`](install.ps1) installs it the way `install.sh` installs the
 tarball: checksums first, `IYI_PREFIX` and `IYI_VERSION` honoured, default
 prefix `%LOCALAPPDATA%\Programs\iyi`, `<prefix>\bin` added to the user's
@@ -366,7 +366,7 @@ prefix `%LOCALAPPDATA%\Programs\iyi`, `<prefix>\bin` added to the user's
 `powershell -ExecutionPolicy Bypass -File install.ps1`. By hand:
 
 ```powershell
-Expand-Archive iyi-0.18.0-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
+Expand-Archive iyi-0.19.0-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
 & "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
 ```
 
@@ -765,7 +765,7 @@ compiled against:
 ```console
 $ iyi mod dump mods/kemal/router.iyimod | head -20
 module        kemal/router
-compiler      0.18.0
+compiler      0.19.0
 ...
 exports
   pub struct Context
@@ -829,7 +829,7 @@ classes, and it should not.
 building iyi should, and they are separate commits for that reason. The rules
 will not.
 
-**Is the syntax stable?** No. 0.18.0 is a release of a language that is still
+**Is the syntax stable?** No. 0.19.0 is a release of a language that is still
 moving, and the parts of SPEC.md marked PROPOSED are exactly the parts that
 will move.
 
@@ -890,7 +890,7 @@ iyi's compiler is built on the Crystal compiler and carries Crystal's licence
 and copyright: Apache 2.0, Copyright 2012-2026 Manas Technology Solutions. See
 [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Everything here that is not
 Crystal's is a change to Crystal's source. `iyi --version` reports
-`iyi 0.18.0 (built on Crystal 1.22.0-dev)`: the language first, then what it
+`iyi 0.19.0 (built on Crystal 1.22.0-dev)`: the language first, then what it
 is built on. The compatibility binary in the same checkout still reports itself
 as `Crystal 1.22.0-dev`, because that is what it is. This paragraph is a licence
 obligation and an accurate one; the language above it is iyi's own.

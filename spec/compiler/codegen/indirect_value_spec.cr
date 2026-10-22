@@ -27,6 +27,14 @@ BIG_VALUE_PRELUDE = <<-CODE
   end
   CODE
 
+# The `define` line of the top-level def named *name*, whichever way the
+# target mangles its symbol: `@"*name..."` on Linux and darwin,
+# `@.2A.name...` on Windows.
+private def define_of(ir : String, name : String) : String
+  ir.lines.find { |line| line.starts_with?("define ") && line =~ /@"?(\*|\.2A\.)#{name}[^a-z_]/ } ||
+    fail "no definition of #{name} in the IR"
+end
+
 describe "Code gen: values passed indirectly" do
   it "returns and passes a large value through memory, with no aggregate load or store" do
     ir = codegen(<<-CODE).to_s
@@ -48,8 +56,10 @@ describe "Code gen: values passed indirectly" do
     ir.should_not contain("store [1000 x i8]")
     ir.should_not contain("ret [1000 x i8]")
     ir.should contain("@llvm.memcpy")
-    ir.should match(/define [^\n]*void @"\*make[^"]*"\(ptr noalias %return\)/)
-    ir.should match(/define [^\n]*void @"\*take[^"]*"\(ptr %x, ptr noalias %return\)/)
+    # A def's symbol is `"*make..."` on Linux and darwin and `.2A.make...` on
+    # Windows, so the definition is found by name and its shape asserted.
+    define_of(ir, "make").should match(/^define [^(@]*void @.*\(ptr noalias %return\)/)
+    define_of(ir, "take").should match(/^define [^(@]*void @.*\(ptr %x, ptr noalias %return\)/)
   end
 
   it "keeps a small value first-class" do
@@ -62,7 +72,8 @@ describe "Code gen: values passed indirectly" do
       1
       CODE
 
-    ir.should match(/define [^\n]*%"Tuple\(Int64, Int64\)" @"\*pair/)
+    define_of(ir, "pair").should match(/^define [^@]*%"Tuple\(Int64, Int64\)" @.*\(i64 %a\)/)
+    ir.should_not contain("noalias %return")
   end
 
   it "copies an argument before a later argument writes where it points" do

@@ -2293,9 +2293,17 @@ def main():
         s.send("exit", {}, wait=False)
         s.proc.wait(timeout=10)
         return best
-    small, large = symbol_seconds(500), symbol_seconds(2000)
+    # One pair of timings is one sample of a shared machine: a Windows
+    # runner once took longer than six times over the 2,000 files on a
+    # build that changed nothing here (job 119640679891). So a pair over
+    # the bound is measured again, up to twice, before it counts; the
+    # quadratic listing above measured nine times, well clear of six.
+    for attempt in range(3):
+        small, large = symbol_seconds(500), symbol_seconds(2000)
+        if large < 6 * small:
+            break
     step("70d", "workspace/symbol takes time linear in the workspace", large < 6 * small,
-         "2,000 files held under six times 500's")
+         f"2,000 files held under six times 500's: {large * 1000:.0f} ms against {small * 1000:.0f} ms")
 
     # 18k. The URIs an answer names are URIs: the client's own for a file
     #      it has open, and for any other one a percent-encoded URI that

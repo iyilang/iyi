@@ -26,10 +26,12 @@
   it resumed, so a server that sends fresh tickets on every resumption
   no longer stretches the session past RFC 8446 section 4.6.1's seven
   days from it.
-- **A std/tls server holds early data on a resumed connection to the
-  smaller of the ticket's allowance and `max_early_data` now.** Lowering
-  the limit left tickets issued before it with the allowance they were
-  issued with, for as long as they lived.
+- **A std/tls server declines early data on a resumed connection whose
+  ticket allows more than `max_early_data` now.** Lowering the limit left
+  tickets issued before it with the allowance they were issued with, for
+  as long as they lived; the early data is skipped as any declined early
+  data is, and the client sends it again after the handshake, so a client
+  keeping to the ticket's allowance is never cut off.
 - **A std/tls server refuses a server_name past 253 bytes**
   (decode_error), the longest a DNS name written without its trailing
   dot can be (RFC 1035 section 2.3.4, RFC 6066 section 3); one longer

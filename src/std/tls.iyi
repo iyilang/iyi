@@ -3952,9 +3952,8 @@ pub class TlsServer < TlsConnection
   end
 
   # The next of the client's early records (section 4.2.10): its data,
-  # counted against the less of what the ticket allows and what
-  # `max_early_data` allows now; or nil at EndOfEarlyData, which ends them
-  # and moves the reader to the client's handshake keys.
+  # counted against what the ticket allows; or nil at EndOfEarlyData,
+  # which ends them and moves the reader to the client's handshake keys.
   private def early_record : Array(UInt8)? | TlsError
     while true
       record = next_record
@@ -4073,11 +4072,10 @@ pub class TlsServer < TlsConnection
       if offer.early_data && !retried && take_early?(ticket, psk_identity, offer)
         # Taken: read under the client's early traffic keys, over this
         # ClientHello alone, until EndOfEarlyData - none passed over - and
-        # no more of it than the ticket allows or `max_early_data` allows
-        # now: a ticket issued before the limit was lowered kept the
-        # allowance it was issued with for as long as it lived.
+        # no more of it than the ticket allows, which `take_early?` held to
+        # no more than `max_early_data` allows now: the less of the two.
         @early_taken = true
-        @early_limit = ticket.max_early_data < @config.early_limit ? ticket.max_early_data : @config.early_limit
+        @early_limit = ticket.max_early_data
         @early_left = 0
         early_secret = @schedule.early_traffic(ticket.psk, hello)
       end
@@ -4192,11 +4190,19 @@ pub class TlsServer < TlsConnection
   end
 
   # Whether a ClientHello's early data is taken (section 4.2.10): this
-  # server takes early data and this connection may, the ticket allows it,
-  # it is the first identity's, under the ticket's own suite and protocol,
-  # fresh, and not taken before (`TlsReplayGuard`, which records it).
+  # server takes early data and this connection may, the ticket allows it
+  # and allows no more than `max_early_data` does now, it is the first
+  # identity's, under the ticket's own suite and protocol, fresh, and not
+  # taken before (`TlsReplayGuard`, which records it). A ticket issued
+  # before the limit was lowered kept the allowance it was issued with, and
+  # a client keeping to it may send more than the limit allows now: its
+  # early data is declined, skipped as any declined early data is (up to
+  # `EARLY_ALLOWANCE`, more than any ticket allows), and the client sends
+  # it again after the handshake. Taken and held to the lower limit, it
+  # cut off a client that sent no more than it had been told it could.
   private def take_early?(ticket : TlsTicket, index : Int32, offer : TlsOffer) : Bool
     return false unless @takes_early && @config.early_limit > 0 && ticket.max_early_data > 0
+    return false if ticket.max_early_data > @config.early_limit
     return false unless index == 0
     return false unless ticket.suite == @suite
     return false unless ticket.alpn == @alpn_protocol

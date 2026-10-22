@@ -2934,8 +2934,10 @@ prove_broken "early data delivered as 1-RTT data" "FAIL early-ok " \
   '        return content unless content.empty?' '        @pending = content unless content.empty?' server
 prove_broken "early data past the ticket's max_early_data_size taken" "FAIL early-too-much " \
   '        if @early_read > @early_limit' '        if false' server
-prove_broken "early data held to the ticket's allowance alone" "early data is held to the server's lowered limit" \
-  '@early_limit = ticket.max_early_data < @config.early_limit ? ticket.max_early_data : @config.early_limit' '@early_limit = ticket.max_early_data'
+prove_broken "early data a ticket allows past a lowered limit taken" "early data a ticket allows past a lowered limit is declined, and sent again" \
+  '    return false if ticket.max_early_data > @config.early_limit' ''
+prove_broken "early data declined at a limit no lower than the ticket's" "early data within an unchanged limit is taken" \
+  '    return false if ticket.max_early_data > @config.early_limit' '    return false if ticket.max_early_data >= @config.early_limit'
 prove_broken "early data taken outside the freshness window" "FAIL early-stale " \
   '    return false unless TlsReplayGuard.fresh?((offer.identities[index][1] - ticket.age_add) & 0xFFFFFFFF_i64, now - ticket.issued_ms)' '' server
 prove_broken "early data taken under another ALPN protocol" "FAIL early-alpn " \

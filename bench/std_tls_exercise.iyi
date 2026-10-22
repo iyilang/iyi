@@ -948,7 +948,7 @@ def binding_round(listener : IyiSocket, served : TlsServerConfig, host : String,
           # Its close_notify ends the server's close: without it the server
           # waited out `DRAIN_GAP_MS` and each round here took 1005-1008 ms.
           conn.close
-          "resumed=#{conn.resumed? ? "yes" : "no"}"
+          "resumed=#{conn.resumed? ? "yes" : "no"} early=#{conn.early_data}"
         end
       else
         "no connection"
@@ -983,8 +983,8 @@ def newest_held(session : TlsSession, port : Int32, config : TlsConfig) : TlsHel
   held
 end
 
-FULL    = "client resumed=no; server resumed=no early=0"
-RESUMED = "client resumed=yes; server resumed=yes early=0"
+FULL    = "client resumed=no early=Unused; server resumed=no early=0"
+RESUMED = "client resumed=yes early=Unused; server resumed=yes early=0"
 served = TlsServerConfig.from_der([b(BINDING_LEAF), b(BINDING_ROOT)], b(BINDING_SEED)).or_panic
 first_listener = IyiSocket.listen("127.0.0.1", 0)
 second_listener = IyiSocket.listen("127.0.0.1", 0)
@@ -1007,15 +1007,19 @@ check binding_round(first_listener, served, "fuzz.test", trusting, chained) == R
 renewed = newest_held(chained, first_listener.local_port, trusting)
 check renewed.received_ms > first_ticket.received_ms && renewed.authenticated_ms == first_ticket.authenticated_ms,
   "a ticket a resumed connection receives keeps its full handshake's time"
-# Early data on a ticket issued under 16 KiB, after the server's limit
-# came down to 100 bytes: the lower limit holds.
+# Early data on a ticket issued under 16 KiB: taken while the server's
+# limit is unchanged; once it has come down to 100 bytes, declined - the
+# client sends it again after the handshake - rather than taken and cut
+# off past the 100.
 eager = TlsServerConfig.from_der([b(BINDING_LEAF), b(BINDING_ROOT)], b(BINDING_SEED)).or_panic
 eager.max_early_data = 16384
 early_session = TlsSession.new
 check binding_round(first_listener, eager, "fuzz.test", trusting, early_session) == FULL, "the first connection to a server taking early data"
+check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Accepted; server resumed=yes early=1000",
+  "early data within an unchanged limit is taken"
 eager.max_early_data = 100
-check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000).includes?("server tls: 1000 bytes of early data, past the 100 allowed"),
-  "early data is held to the server's lowered limit"
+check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Resent; server resumed=yes early=0",
+  "early data a ticket allows past a lowered limit is declined, and sent again"
 # A server_name of 254 bytes is refused before anything is sealed with it;
 # one of 253 is taken, and the client then refuses the certificate.
 long_name = "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 62
@@ -1025,7 +1029,7 @@ said_most = binding_round(first_listener, served, long_name[0, 253], trusting, T
 check said_most.ends_with?("server tls: the client sent alert bad_certificate (42)"), "a server_name of 253 bytes is taken"
 first_listener.close
 second_listener.close
-puts "  tickets held to their port and configuration, a resumption's to its full handshake's time, early data to the"
-puts "  server's lowered limit, and a server_name past 253 bytes refused"
+puts "  tickets held to their port and configuration, a resumption's to its full handshake's time, early data past a"
+puts "  lowered limit declined, and a server_name past 253 bytes refused"
 
 puts "\nALL CHECKS PASSED"

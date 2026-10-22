@@ -2275,19 +2275,8 @@ jobs:
   # Two and a half hours: it took 56, 74 and 89 minutes on master and
   # integration/0.20, and was cut off at ninety on a branch (job
   # 119640679755) while its socket exercise was still going.
-  # On windows-2022, as the collector and runtime jobs are: on windows-2025
-  # this job and the shards below lost their runner ("lost communication
-  # with the server") eleven times - jobs 118492675680,
-  # 118598972995, 118855592816, 119293164185, 119406415714, 119550880710,
-  # 119648405209, 119673160400, 119732732855, 119732732924 and 119825970801
-  # - in no particular sibling. The finished shards' traces
-  # (bench/std_siblings.sh) kept 7,623 MB of 16,378 free and 30 GB of disk
-  # at their worst, and the most TIME_WAIT connections were 6,028, in a
-  # shard that did not lose its runner. A heavy job on windows-2025 losing
-  # its runner where the same job on windows-2022 does not is reported in
-  # github.com/orgs/community/discussions/173431.
   windows-std:
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 150
     name: "The standard library and the collector, gated on Windows"
     steps:
@@ -2358,7 +2347,20 @@ jobs:
   # with two broken copies at a time on Windows (below), std/http's broken
   # copies alone took 1,479 s there (integration/0.20, job 119078192918),
   # past the thirty-five a sibling had.
-  # On windows-2022 for the reason given at windows-std above.
+  # On windows-2022, as the collector and runtime jobs are. On windows-2025
+  # these shards, and once the job above, lost their runner ("lost
+  # communication with the server") eleven times, in no particular sibling:
+  # jobs 118492675680, 118598972995, 118855592816, 119293164185,
+  # 119406415714, 119550880710, 119648405209, 119673160400, 119732732855,
+  # 119732732924 and 119825970801. The shards that finished
+  # (bench/std_siblings.sh traces them) kept 7,623 MB of 16,378 free and
+  # 30 GB of disk at their worst, and the most connections in TIME_WAIT
+  # were 6,028, in a shard that did not lose its runner. A heavy job losing
+  # its runner on windows-2025 and not on windows-2022 is reported in
+  # github.com/orgs/community/discussions/173431. The job above stays on
+  # windows-2025: on 2022 its proof that helpers woken with Windows' wake
+  # boost hold the program's thread did not fire in ten runs (job
+  # 119973055363).
   windows-std-siblings:
     runs-on: windows-2022
     timeout-minutes: 120

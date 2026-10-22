@@ -1164,6 +1164,13 @@ pub class IyiSocket
     (addr[2].to_i32 << 8) | addr[3].to_i32
   end
 
+  # Whether this is a unix socket, which has a path where TCP has a port:
+  # `remote_port` and `local_port` refuse it. std/tls asks before it keys
+  # a session's tickets by the port they came from.
+  def unix? : ::Bool
+    @family == AF_UNIX
+  end
+
   # Room for any family's `sockaddr`, zeroed, so a unix path the kernel
   # did not end with a NUL still ends.
   def self.__address_room : Pointer(UInt8)

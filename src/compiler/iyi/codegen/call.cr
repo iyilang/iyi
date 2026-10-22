@@ -88,9 +88,12 @@ class Iyi::CodeGenVisitor
     end
 
     c_calling_convention = target_def.c_calling_convention?
+    indirect = !c_calling_convention && !is_primitive && !target_def.is_a?(External)
 
     # Then the arguments.
-    node.args.zip(target_def.args) do |arg, def_arg|
+    node.args.each_with_index do |arg, arg_index|
+      def_arg = target_def.args[arg_index]
+
       request_value(arg)
 
       # What the callee is handed, which is the parameter's type wherever the
@@ -144,7 +147,18 @@ class Iyi::CodeGenVisitor
 
       # - C calling convention passing needs a separate handling of pass-by-value
       # - Primitives might need a separate handling (for example invoking a Proc)
-      if passed_type.passed_by_value? && !c_calling_convention && !is_primitive
+      if indirect && passed_indirectly?(def_arg.type)
+        # iyi: the callee gets a pointer and copies the bytes on entry. An
+        # argument still to be evaluated may write where this one points -
+        # `f(v, v.reset)` - while the value is to be the one read here, as
+        # the whole-aggregate load made it; unless every later argument is
+        # one that cannot run code, it is copied to a slot of its own first.
+        unless node.args.each.skip(arg_index + 1).all? { |later| inert_argument?(later) }
+          snapshot = alloca llvm_type(def_arg.type)
+          copy_value snapshot, call_arg, def_arg.type, fresh: true
+          call_arg = snapshot
+        end
+      elsif passed_type.passed_by_value? && !c_calling_convention && !is_primitive
         call_arg = load(llvm_type(passed_type), call_arg)
       end
 
@@ -179,6 +193,18 @@ class Iyi::CodeGenVisitor
     @needs_value = old_needs_value
 
     call_args
+  end
+
+  # iyi: whether evaluating *node* as an argument runs no code that could
+  # write anywhere, which is what lets an argument passed indirectly before
+  # it point at its value where it is (see `prepare_call_args_non_external`).
+  private def inert_argument?(node : ASTNode) : Bool
+    case node
+    when Var, InstanceVar, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, SymbolLiteral
+      true
+    else
+      false
+    end
   end
 
   def call_abi_info(target_def, node)
@@ -592,6 +618,17 @@ class Iyi::CodeGenVisitor
     # using the original invocation
     set_current_debug_location node if @debug.line_numbers? && fun_type.nil?
 
+    # iyi: a result passed indirectly (`LLVMTyper#passed_indirectly?`) is
+    # written by the callee into a slot of this frame, passed last.
+    external = target_def.try &.c_calling_convention?
+    if !external && !target_def.is_a?(External)
+      return_type = fun_type ? fun_type.return_type : type
+      if passed_indirectly?(return_type)
+        return_slot = alloca llvm_type(return_type)
+        call_args = call_args + [return_slot]
+      end
+    end
+
     if raises && (rescue_block = @rescue_block)
       invoke_out_block = new_block "invoke_out"
       @last = invoke func, call_args, invoke_out_block, rescue_block
@@ -609,8 +646,6 @@ class Iyi::CodeGenVisitor
     end
 
     set_call_attributes node, target_def, self_type, is_closure, fun_type
-
-    external = target_def.try &.c_calling_convention?
 
     if external && (external.type.proc? || external.type.is_a?(NilableProcType))
       fun_ptr = cast_to_void_pointer(@last)
@@ -642,6 +677,8 @@ class Iyi::CodeGenVisitor
           # Nothing
         end
       end
+    elsif return_slot
+      @last = @needs_value ? return_slot : llvm_nil
     else
       case type
       when .no_return?

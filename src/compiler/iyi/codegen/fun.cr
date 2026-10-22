@@ -283,6 +283,7 @@ class Iyi::CodeGenVisitor
       context.type = self_type
       context.vars = LLVMVars.new
       context.block_context = nil
+      context.indirect_return = nil
 
       @llvm_mod = fun_module_info.mod
       @llvm_context = @llvm_mod.context
@@ -608,10 +609,17 @@ class Iyi::CodeGenVisitor
       args.push Arg.new(special_var_name, type: target_def.vars.not_nil![special_var_name].type)
     end
 
+    # iyi: an iyi function takes and returns a large value through memory
+    # (`LLVMTyper#passed_indirectly?`). An `External` keeps the shapes its
+    # declaration gives, an LLVM intrinsic's included.
+    indirect = !target_def.is_a?(External)
+
     llvm_args_types = args.map_with_index do |arg, i|
       arg_type = arg.type
       if arg_type.void?
         llvm_arg_type = llvm_context.int8
+      elsif indirect && !arg.special_var? && passed_indirectly?(arg_type)
+        llvm_arg_type = llvm_context.void_pointer
       else
         llvm_arg_type = llvm_type(arg_type)
 
@@ -645,7 +653,21 @@ class Iyi::CodeGenVisitor
       offset = 0
     end
 
+    indirect_return = indirect && passed_indirectly?(target_def.type)
+    if indirect_return
+      llvm_args_types << llvm_context.void_pointer
+      llvm_return_type = llvm_context.void
+    end
+
     setup_context_fun(mangled_name, target_def, llvm_args_types, llvm_return_type)
+
+    if indirect_return
+      # The caller's own slot, made for the call: nothing else reaches it.
+      return_param = context.fun.params[llvm_args_types.size - 1]
+      return_param.name = "return"
+      context.fun.add_attribute LLVM::Attribute::NoAlias, llvm_args_types.size
+      context.indirect_return = return_param
+    end
 
     if @debug.variables?
       context.fun_debug_params.clear
@@ -903,10 +925,16 @@ class Iyi::CodeGenVisitor
     var_type = (target_def_var || arg).type
     return if var_type.void?
 
+    # iyi: a value passed indirectly arrives as a pointer to the caller's
+    # bytes (`LLVMTyper#passed_indirectly?`), which is the form `assign`
+    # takes it in, and is copied from there into this function's own slot
+    # before anything else runs. A block's arguments arrive the same way.
+    in_memory = arg.type.passed_by_value? && value.type.kind.pointer?
+
     if closure_var = context.vars[arg.name]?
       pointer = closure_var.pointer
 
-      if arg.type.passed_by_value?
+      if arg.type.passed_by_value? && !in_memory
         # Create an alloca and store it there, so assign works well
         pointer2 = alloca(llvm_type(arg.type))
         store value, pointer2
@@ -955,7 +983,7 @@ class Iyi::CodeGenVisitor
 
           context.vars[arg.name] = LLVMVar.new(pointer, var_type)
 
-          if arg.type.passed_by_value? && !context.fun.attributes(index + 1).by_val?
+          if arg.type.passed_by_value? && !in_memory && !context.fun.attributes(index + 1).by_val?
             # Create an alloca and store it there, so assign works well
             pointer2 = alloca(llvm_type(arg.type))
             store value, pointer2
@@ -966,7 +994,11 @@ class Iyi::CodeGenVisitor
             # For pass-by-value we create an alloca so the value
             # is behind a pointer, as everywhere else
             pointer = alloca(llvm_type(var_type), arg.name)
-            store value, pointer
+            if in_memory
+              copy_value pointer, value, arg.type, fresh: true
+            else
+              store value, pointer
+            end
             pointer = declare_debug_for_function_argument(arg.name, var_type, index + 1, pointer, location) unless target_def.naked?
             context.vars[arg.name] = LLVMVar.new(pointer, var_type)
             return

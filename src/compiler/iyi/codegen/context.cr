@@ -8,6 +8,9 @@ class Iyi::CodeGenVisitor
     property type : Type
     property vars : Hash(String, LLVMVar)
     property return_type : Type?
+    # iyi: where the function writes its result when the result is passed
+    # indirectly (`LLVMTyper#passed_indirectly?`): its last parameter.
+    property indirect_return : LLVM::Value?
     property return_phi : Phi?
     property break_phi : Phi?
     property next_phi : Phi?
@@ -44,6 +47,7 @@ class Iyi::CodeGenVisitor
     def clone
       context = Context.new @fun, @fun_type, @type, @vars
       context.return_type = @return_type
+      context.indirect_return = @indirect_return
       context.return_phi = @return_phi
       context.break_phi = @break_phi
       context.next_phi = @next_phi

@@ -603,6 +603,49 @@
 
 ### Changed
 
+- **A value larger than 128 bytes is passed, returned and copied through
+  memory, so a debug build no longer copies it an element at a time
+  through stack slots.** iyi's codegen moved a struct, tuple, static
+  array or union as one LLVM first-class aggregate, loaded whole and
+  stored whole, and without optimisation LLVM lowers that load and store
+  an element at a time with every element spilled: in a debug build for
+  darwin arm64 `StaticArray(UInt8, 1000).new` had 2,000 `ldrb` and
+  `strb` in 14,479 instructions and a 9,888-byte frame. Above 128 bytes
+  an iyi function now takes a pointer to the caller's value and copies it
+  into its own slot on entry (an argument whose later siblings could run
+  code is copied first, so `f(v, v.reset)` still passes the old `v`),
+  writes its result through a pointer to the caller's slot, passed last,
+  and every copy between two places in memory is an `llvm.memcpy`, or an
+  `llvm.memmove` where the two may overlap. Frames, callee saves included
+  and the return address not, before and after, debug:
+
+  | Function | Linux x86_64 | darwin arm64 | Windows x64 |
+  |---|---|---|---|
+  | `StaticArray(UInt8, 1000).new` | 4,040 → 2,008 | 9,888 → 2,048 | 4,088 → 2,040 |
+  | issue #130's `deep` (a `StaticArray(UInt8, 1000).new` and a call) | 5,048 → 2,024 | 10,912 → 2,064 | 5,096 → 2,056 |
+  | returning a 472-byte struct it builds | 4,648 → 1,432 | 4,176 → 1,472 | 4,712 → 1,464 |
+  | taking a 472-byte struct, copying it, returning it | 2,064 → 968 | 2,016 → 992 | 2,208 → 1,000 |
+  | returning that struct in an `Int32` union | 3,432 → 1,448 | 3,024 → 1,488 | 3,480 → 1,480 |
+
+  `StaticArray(UInt8, 1000).new` is 19, 25 and 20 instructions where it
+  was 7,969, 14,479 and 7,975. Issue #130's program, in a debug build in a
+  task on Linux x86_64, runs 119 frames deep where it ran 47; it was not
+  run on darwin arm64, for want of a machine, so there it is the frames
+  above. `bench/std_x509_exercise.iyi` built plain is 1,332,104 bytes of
+  text where it was 1,394,882. In `--release` (Linux x86_64, best of 30
+  interleaved runs) a P-256 signature check took 52,446 ns against
+  52,351 (medians 53,251 and 53,539), a 128-byte 4x4 matrix product 4.80
+  ns against 4.81, and a 472-byte struct passed down a chain of calls and
+  returned 55.7 ns a link against 82.4. The line is at 128 because there
+  --release is unchanged: at 64 the signature check, whose points are 96
+  bytes, was 1.7% slower (best of fifteen), and at 32 10%. Because a large
+  copy can be a call, the prelude defines `memcpy` and `memmove` beside
+  its `memset`, so no program asks the C library for them.
+  `spec/compiler/codegen/indirect_value_spec.cr` holds the IR of a
+  1,000-byte copy to `llvm.memcpy`, which the old compiler fails, and the
+  copies' meaning: argument order, a callee's own copy, overlap, unions,
+  procs, closures, proc pointers and blocks.
+
 - **std/mail and std/smtp say that a message needs a Date (#137).**
   `Mail::Message#to_s` has always panicked with `mail: a message has no
   Date` (and `no From`), and `SmtpClient#send` with it, but the docs listed
@@ -24009,7 +24052,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,509-line library and nothing else. Every other
+  written against iyi's own 22,574-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

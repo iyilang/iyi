@@ -506,14 +506,60 @@ module Iyi
     end
 
     def closure_type(type : ProcInstanceType)
-      arg_types = type.arg_types.map { |arg_type| llvm_type(arg_type) }
-      arg_types.insert(0, @llvm_context.void_pointer)
-      LLVM::Type.function(arg_types, llvm_type(type.return_type))
+      function_type(type.arg_types, type.return_type, closure: true)
     end
 
     def proc_type(type : ProcInstanceType)
-      arg_types = type.arg_types.map { |arg_type| llvm_type(arg_type).as(LLVM::Type) }
-      LLVM::Type.function(arg_types, llvm_type(type.return_type))
+      function_type(type.arg_types, type.return_type, closure: false)
+    end
+
+    private def function_type(arg_types : Array(Type), return_type : Type, *, closure : Bool)
+      llvm_args = arg_types.map do |arg_type|
+        (passed_indirectly?(arg_type) ? @llvm_context.void_pointer : llvm_type(arg_type)).as(LLVM::Type)
+      end
+      llvm_args.insert(0, @llvm_context.void_pointer) if closure
+      if passed_indirectly?(return_type)
+        llvm_args << @llvm_context.void_pointer
+        LLVM::Type.function(llvm_args, @llvm_context.void)
+      else
+        LLVM::Type.function(llvm_args, llvm_type(return_type))
+      end
+    end
+
+    # iyi: the bytes above which a value travels between iyi functions in
+    # memory rather than as an LLVM first-class aggregate. Above it an
+    # argument is a pointer to the caller's value, which the callee copies
+    # into its own slot on entry, and a result is written through a pointer
+    # to the caller's slot, passed last; every copy of such a value between
+    # two places in memory is an `llvm.memcpy` or `llvm.memmove`.
+    #
+    # An aggregate in a register is what LLVM spills and reloads an element
+    # at a time without optimisation: in a debug build for darwin arm64,
+    # `StaticArray(UInt8, 1000).new` returned its value as 1,000 bytes
+    # loaded and 1,000 stored, in a 9,888-byte frame of 14,479 instructions,
+    # and is a 2,048-byte frame of 25 instructions this way.
+    #
+    # The line is where --release stops caring. Through memory, debug frames
+    # are smaller from 32 bytes up: a function returning a copy of its
+    # argument and its caller took 168 bytes of frame between them on Linux
+    # x86_64 for a 32-byte value against 264, and 480 for a 64-byte one
+    # against 640. But a P-256 signature check, whose points are 96 bytes
+    # and numbers 32, took 58,191 ns in --release with the line at 32
+    # against 52,664 (three runs), 52,549 at 64 against 51,681 (best of
+    # fifteen), and 51,821 at 128: unchanged. Issue #130's program, debug,
+    # in a task on Linux x86_64, ran 120 frames deep with the line at 64 and
+    # 119 at 128, where it ran 47 before. It is a constant rather than a
+    # choice per build, because a `.iyimod`'s object code and its consumer
+    # must agree on it whichever way each was built.
+    INDIRECT_ABOVE = 128_u64
+
+    # Whether a value of *type* is passed and returned through memory by an
+    # iyi function (see `INDIRECT_ABOVE`). A C function's are its ABI's,
+    # and an `extern` struct is left to that ABI whoever declares it.
+    def passed_indirectly?(type : Type) : Bool
+      return false unless type.passed_by_value?
+      return false if type.extern?
+      size_of(llvm_type(type)) > INDIRECT_ABOVE
     end
 
     def closure_context_type(vars, parent_llvm_type, self_type)

@@ -29,12 +29,21 @@
 # than followed. A CNAME chain is followed at most `DnsMessage::MAX_CNAMES`
 # links, which ends a loop of aliases the same way.
 #
-# What it does not do: no EDNS(0), so a UDP answer is at most 512 bytes and
-# a larger one comes back truncated and is asked again over TCP; no cache,
-# so every lookup asks - and so a DNS over HTTPS answer's `Cache-Control`
-# and every record's TTL go unread; no DNSSEC validation; no reverse
-# lookups. The encrypted transports, DNS over TLS and over HTTPS, are
-# std/secure_dns's, for the same reason the plaintext ones are
+# EDNS(0) (RFC 6891) is spoken only as far as privacy needs it. A query
+# for an encrypted transport carries an OPT record holding nothing but a
+# Padding option (RFC 7830), so its length says less about the name (see
+# `DnsMessage.query`); a plaintext query carries none, because RFC 7830 6
+# forbids padding in the clear and an OPT record there would ask for
+# answers past 512 bytes, which this resolver has no use for: it asks
+# again over TCP. An answer's OPT record is read for the upper bits of its
+# RCODE and nothing else.
+#
+# What it does not do: no EDNS(0) over UDP, so a UDP answer is at most 512
+# bytes and a larger one comes back truncated and is asked again over TCP;
+# no cache, so every lookup asks - and so a DNS over HTTPS answer's
+# `Cache-Control` and every record's TTL go unread; no DNSSEC validation;
+# no reverse lookups. The encrypted transports, DNS over TLS and over
+# HTTPS, are std/secure_dns's, for the same reason the plaintext ones are
 # std/socket's: they talk, and this module only reads and writes bytes.
 
 module std/dns
@@ -248,7 +257,10 @@ pub struct DnsRecord
   CNAME =  5
   TXT   = 16
   AAAA  = 28
-  IN    =  1
+  # EDNS(0)'s pseudo-record (RFC 6891 6.1.1), which an answer to a padded
+  # query carries in its additional section.
+  OPT = 41
+  IN  =  1
 
   getter name : String
   getter type : Int32
@@ -294,6 +306,27 @@ pub struct DnsMessage
   RCODE_NXDOMAIN = 3
   RCODE_NOTIMP   = 4
   RCODE_REFUSED  = 5
+  # The first RCODE past the header's four bits (RFC 6891 9): the server
+  # does not speak the EDNS version asked for.
+  RCODE_BADVERS = 16
+
+  # What a padded query is brought to a multiple of: RFC 8467 4.1's
+  # recommended block length for queries.
+  PADDING_BLOCK = 128
+  # RFC 7830 3's option code for Padding.
+  OPTION_PADDING = 12
+  # The UDP payload size a padded query's OPT record states. It goes out
+  # only over a stream, where it has no datagram to size: RFC 8484 6 tells
+  # a DNS over HTTPS server to ignore it, and RFC 6891 6.2.3 defines it for
+  # UDP alone. Where a front end passes the query on over UDP to the
+  # server behind it, the value does size that answer, so it is DNS Flag
+  # Day 2020's 1232, which keeps a datagram whole on common paths. Any
+  # value from 512 up is also at least the padded query, which RFC 7830 4
+  # requires: the longest one-question query pads to 384 bytes.
+  EDNS_PAYLOAD = 1232
+  # An OPT record with an empty name, and a Padding option's code and
+  # length: what a padded query adds before its padding bytes.
+  PADDING_OVERHEAD = 11 + 4
 
   getter id : UInt16
   getter flags : Int32
@@ -304,8 +337,10 @@ pub struct DnsMessage
   getter question_class : Int32
   getter answers : Array(DnsRecord)
 
+  # *extended_rcode* is the upper eight bits of the RCODE, from the
+  # answer's OPT record (RFC 6891 6.1.3); 0 without one.
   def initialize(@id : UInt16, @flags : Int32, @question_name : String, @question_type : Int32,
-                 @question_class : Int32, @answers : Array(DnsRecord))
+                 @question_class : Int32, @answers : Array(DnsRecord), @extended_rcode : Int32 = 0)
   end
 
   def response? : ::Bool
@@ -322,16 +357,34 @@ pub struct DnsMessage
     @flags & 0x0200 != 0
   end
 
+  # The whole twelve-bit RCODE: the header's four bits under the OPT
+  # record's eight. An answer that says BADVERS (16) has 0 in its header,
+  # and read from the header alone it would be NOERROR without records.
   def rcode : Int32
-    @flags & 15
+    (@extended_rcode << 4) | (@flags & 15)
   end
 
   # The query for *name*'s records of *type*, class IN, with recursion
   # desired: a 12-byte header and one question. *name* is a host name
   # (`DnsName.valid?`); a trailing dot is dropped.
-  def self.query(id : UInt16, name : String, type : Int32) : Bytes
+  #
+  # A *block* above 0 pads it (RFC 7830): an OPT record follows the
+  # question - the root for its name, `EDNS_PAYLOAD` for its class,
+  # extended RCODE, version and flags all 0 (RFC 6891 6.1.2-6.1.4) - and
+  # holds a single Padding option of zero bytes (RFC 7830 3's SHOULD), as
+  # many as bring the message to the next multiple of *block*. The length
+  # brought there is the message's own, without the two bytes that frame
+  # it over TCP (RFC 8467 3), so a question pads to the same length over
+  # TLS as over HTTPS. With no *block* there is no OPT record: that is the
+  # query that goes out in the clear, where RFC 7830 6 forbids padding.
+  def self.query(id : UInt16, name : String, type : Int32, block : Int32 = 0) : Bytes
     relative = DnsName.relative(name)
-    size = 12 + relative.bytesize + 2 + 4
+    question = 12 + relative.bytesize + 2 + 4
+    size = question
+    if block > 0
+      size = question + PADDING_OVERHEAD
+      size = size + (block - size % block) % block
+    end
     packet = Bytes.new(size)
     raw = packet.to_unsafe
     index = 0
@@ -362,6 +415,24 @@ pub struct DnsMessage
     raw[at + 2] = (type & 255).to_u8
     raw[at + 3] = 0_u8
     raw[at + 4] = DnsRecord::IN.to_u8
+    if block > 0
+      # The OPT record at *question*: name, type, class, TTL, length, then
+      # the option's code and length. Every byte not set here stays 0: the
+      # name (the root), the TTL's RCODE, version and flags, the padding.
+      raw[11] = 1_u8 # ARCOUNT
+      data = size - question - 11
+      padding = data - 4
+      raw[question + 1] = (DnsRecord::OPT >> 8).to_u8
+      raw[question + 2] = (DnsRecord::OPT & 255).to_u8
+      raw[question + 3] = (EDNS_PAYLOAD >> 8).to_u8
+      raw[question + 4] = (EDNS_PAYLOAD & 255).to_u8
+      raw[question + 9] = (data >> 8).to_u8
+      raw[question + 10] = (data & 255).to_u8
+      raw[question + 11] = (OPTION_PADDING >> 8).to_u8
+      raw[question + 12] = (OPTION_PADDING & 255).to_u8
+      raw[question + 13] = (padding >> 8).to_u8
+      raw[question + 14] = (padding & 255).to_u8
+    end
     packet
   end
 
@@ -403,8 +474,12 @@ pub struct DnsMessage
   end
 
   # The message in *packet*: its header, its one question, and - unless it
-  # is truncated - its answer section. Anything that does not fit the
-  # bytes is `DnsError` with `malformed?`, never a read past them.
+  # is truncated - its answer section, and the RCODE's upper bits from the
+  # OPT record in its additional section. The authority and additional
+  # sections are walked to find that record, so their records must fit
+  # the bytes too; one OPT record at most (RFC 6891 6.1.1), owned by the
+  # root. Anything that does not fit the bytes is `DnsError` with
+  # `malformed?`, never a read past them.
   def self.parse(packet : Bytes) : DnsMessage | DnsError
     size = packet.size
     raw = packet.to_unsafe
@@ -428,6 +503,7 @@ pub struct DnsMessage
       at = at + 4
     end
     answers = [] of DnsRecord
+    extended_rcode = 0
     if flags & 0x0200 == 0
       index = 0
       while index < count
@@ -461,8 +537,32 @@ pub struct DnsMessage
         at = at + length
         index = index + 1
       end
+      # Past the answers: the authority section, skipped, then the
+      # additional section, where an answer to a padded query has its OPT
+      # record. Only that record's TTL is read - its top byte is the
+      # extended RCODE (RFC 6891 6.1.3) - and its options, the server's
+      # own padding among them, are not.
+      authority = u16(raw, 8)
+      others = authority + u16(raw, 10)
+      seen_opt = false
+      index = 0
+      while index < others
+        read = read_name(packet, at)
+        return malformed("record #{count + index + 1}'s name") if read.nil?
+        owner, at = read
+        return malformed("record #{count + index + 1} runs past the message") if at + 10 > size
+        if index >= authority && u16(raw, at) == DnsRecord::OPT
+          return malformed("a second OPT record") if seen_opt
+          return malformed("an OPT record owned by #{owner}, not the root") unless owner.empty?
+          seen_opt = true
+          extended_rcode = raw[at + 4].to_i32
+        end
+        at = at + 10 + u16(raw, at + 8)
+        return malformed("record #{count + index + 1}'s data runs past the message") if at > size
+        index = index + 1
+      end
     end
-    DnsMessage.new(id, flags, question_name, question_type, question_class, answers)
+    DnsMessage.new(id, flags, question_name, question_type, question_class, answers, extended_rcode)
   end
 
   # Whether this is the answer to query *id* for *name* and *type*: a

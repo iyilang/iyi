@@ -11,9 +11,11 @@
 # asks dig the same questions over the same servers (`+tls`, `+https`,
 # `+https-get`) and holds the two to the same answers, which is what shows
 # the scripted servers speak the protocols and not merely what the iyi
-# client expects; and proves the checks can fail - each proof builds the
-# exercise against a copy of the library with one rule taken out, and the
-# exercise must stop at the check about that rule.
+# client expects; holds the servers' padding rule, which every DoT and DoH
+# query the iyi client sends must pass, to dig's `+padding`; and proves the
+# checks can fail - each proof builds the exercise against a copy of the
+# library with one rule taken out, and the exercise must stop at the check
+# about that rule.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -97,7 +99,7 @@ build_and_run() {
   return 0
 }
 
-SECTIONS="wire dot_answers dot_reuse dot_pipelined dot_idle dot_wrong_name dot_id_mismatch dot_truncated dot_oversized dot_recovers doh_post doh_get doh_zero_id doh_reuse doh_status doh_content_type doh_oversized doh_truncated doh_wrong_name no_plaintext_fallback plaintext_fallback connect_by_name"
+SECTIONS="wire wire_padding dot_answers dot_reuse dot_pipelined dot_idle dot_wrong_name dot_id_mismatch dot_truncated dot_oversized dot_recovers dot_padding edns_answers doh_post doh_get doh_zero_id doh_reuse doh_status doh_content_type doh_oversized doh_truncated doh_wrong_name doh_padding plaintext_unpadded no_plaintext_fallback plaintext_fallback connect_by_name"
 if [ -f "$SRV/h2.port" ]; then
   SECTIONS="$SECTIONS doh_h2"
 fi
@@ -212,6 +214,27 @@ else
   elif [ ! -f "$SRV/h2.port" ]; then
     echo "  +https skipped: there is no HTTP/2 server without the h2 package, and dig speaks DNS over HTTPS over HTTP/2 alone"
   fi
+  # The server's padding rule, which the iyi client is held to, held to
+  # dig's own padding (+padding, BIND's RFC 7830): a query dig pads to 128
+  # passes it, and one dig does not pad is counted unpadded. The first ask
+  # starts the server's counts again.
+  if [ "$HAS_TLS" = yes ]; then
+    pad_ask() {
+      dig +tls ${VERIFY[@]+"${VERIFY[@]}"} @127.0.0.1 -p "$DOT_PORT" padding.zone.test TXT +short +tries=1 +timeout=5 "$@" 2>&1
+    }
+    pad_ask >/dev/null
+    padded="$(pad_ask +padding=128)"
+    unpadded="$(pad_ask)"
+    if [ "$padded" != '"queries=1 edns=1 unpadded=0"' ]; then
+      echo "  the server's padding rule refused dig's padded query: $padded"
+      status=1
+    elif [ "$unpadded" != '"queries=1 edns=1 unpadded=1 first=no Padding option"' ]; then
+      echo "  the server's padding rule passed dig's unpadded query: $unpadded"
+      status=1
+    else
+      echo "  the server's padding rule passes dig's +padding=128 query and refuses its unpadded one"
+    fi
+  fi
 fi
 
 echo
@@ -311,6 +334,12 @@ breaks "an HTTPClient's own TLS configuration ignored" clienttls "over HTTPS fro
   'under = keeping.tls || under' ''
 breaks "an HTTPClient's own resolver ignored" clientresolver "a URL's host pinned to an address" http.iyi \
   'through = keeping.resolver' ''
+breaks "queries sent unpadded" unpadded "every DoT query is padded" socket.iyi \
+  'queries << DnsMessage.query(id, name, type, DnsMessage::PADDING_BLOCK)' \
+  'queries << DnsMessage.query(id, name, type)'
+breaks "the padding not brought to a block" unblocked "not a multiple of 128" dns.iyi \
+  '      size = size + (block - size % block) % block
+' ''
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -89,7 +89,7 @@ build_and_run() {
 
 # A section that needs what this machine lacks - IPv6, a listener whose
 # backlog fills - reports itself skipped, with the reason.
-SECTIONS="query_bytes compression codec a_record aaaa_record cname_chain cname_dangling cname_loop nxdomain servfail nodata mismatched_id forged_source truncated_tcp pointer_loop retry timeout hosts_override search_list literals from_files connect_by_name connect_fallback unresolved_connect he_order he_refused he_blackhole he_family he_fds he_deadline he_cancel"
+SECTIONS="query_bytes compression codec edns a_record aaaa_record cname_chain cname_dangling cname_loop nxdomain servfail nodata mismatched_id forged_source truncated_tcp pointer_loop retry timeout hosts_override search_list literals from_files connect_by_name connect_fallback unresolved_connect he_order he_refused he_blackhole he_family he_fds he_deadline he_cancel"
 
 for mode in plain release; do
   if [ "$mode" = plain ]; then
@@ -198,6 +198,9 @@ else
   breaks "NXDOMAIN read as a server's failure" nxservfail "NXDOMAIN is not_found?" socket.iyi \
     'DnsError.new(DnsError::NOT_FOUND, name, label)' \
     'DnsError.new(DnsError::SERVER_FAILURE, name, label)'
+  breaks "an OPT record's extended RCODE ignored" nobadvers "BADVERS (16), not NOERROR" dns.iyi \
+    '(@extended_rcode << 4) | (@flags & 15)' \
+    '@flags & 15'
   breaks "a CNAME not followed" nocname "a CNAME chain in one answer" dns.iyi \
     'next_name = record.target if record.type == DnsRecord::CNAME && next_name.empty?' \
     'next_name = "" if record.type == DnsRecord::CNAME'

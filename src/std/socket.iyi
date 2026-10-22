@@ -3317,10 +3317,16 @@ pub class Resolver
   end
 
   # One exchange with one upstream: a query per type, each with its own
-  # ID from `Random::Secure` (or 0, `zero_id?`), and each answer held to
-  # what a stream's answer must be - the ID and the question, no TC (a
-  # stream has room for any answer), and no byte past the message (the
-  # frame is the message: RFC 7858 3.3, RFC 8484 6).
+  # ID from `Random::Secure` (or 0, `zero_id?`), each padded to a multiple
+  # of `DnsMessage::PADDING_BLOCK` (RFC 8467 4.1) because every upstream
+  # is an encrypted transport, whose ciphertext would otherwise show the
+  # name's length; and each answer held to what a stream's answer must be
+  # - the ID and the question, no TC (a stream has room for any answer),
+  # and no byte past the message (the frame is the message: RFC 7858 3.3,
+  # RFC 8484 6). There is no retry without the OPT record when a server
+  # answers FORMERR to it, as RFC 6891 6.2.2 lets a client do: the retry
+  # would send the very length the padding hides, so the FORMERR is the
+  # answer, as any other refusal is.
   private def ask_upstream(upstream : DnsUpstream, name : String, types : Array(Int32)) : Array(Tuple(DnsMessage, String) | DnsError) | DnsError | Cancelled
     label = upstream.label
     ids = [] of UInt16
@@ -3336,7 +3342,7 @@ pub class Resolver
         end
       end
       ids << id
-      queries << DnsMessage.query(id, name, type)
+      queries << DnsMessage.query(id, name, type, DnsMessage::PADDING_BLOCK)
     end
     got = upstream.exchange(queries, @timeout_ms)
     return got if got.is_a?(Cancelled)
@@ -3368,6 +3374,7 @@ pub class Resolver
     when DnsMessage::RCODE_FORMERR then "FORMERR"
     when DnsMessage::RCODE_NOTIMP  then "NOTIMP"
     when DnsMessage::RCODE_REFUSED then "REFUSED"
+    when DnsMessage::RCODE_BADVERS then "BADVERS"
     else                                "RCODE #{rcode}"
     end
   end

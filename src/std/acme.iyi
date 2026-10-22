@@ -30,6 +30,14 @@
 # the nonce that answer carried, `MAX_BAD_NONCE` times at most
 # (section 6.5); `bad_nonce_retries` counts them.
 #
+# **HTTPS only.** Section 6.1: "Use of HTTPS is REQUIRED". Every URL is
+# `https://` or refused, by an error naming it, before anything is sent
+# to it: the directory's, each the directory names (termsOfService, a
+# page for people, aside), the account's and the order's from Location,
+# and every URL an object carries, as each is asked. Over plaintext an
+# attacker on the path would be the CA: it would read the account and
+# the requests, and answer a certificate of its own CA for the key.
+#
 # **Keys** are std/x509's `SigningKey`: ES256 on P-256 and ES384 on P-384
 # through std/p256 and std/p384, the signature R || S at the curve's
 # width as RFC 7518 section 3.4 has it and not the DER X.509 carries;
@@ -57,6 +65,9 @@
 # of its own on port 443 while the CA validates; a server already on 443
 # shows the certificate beside its own through its config's
 # `identity_source`, which sees the client's ALPN, as std/autocert does.
+# A domain past 64 characters has no tls-alpn-01 certificate: std/x509
+# refuses a self-signed one whose common name is that long (RFC 5280's
+# ub-common-name), so such a name is proved by http-01 or dns-01.
 #
 # **Waiting.** An authorization or an order is polled until it leaves
 # `pending` (or `processing`, or `ready`), waiting what each answer's
@@ -108,6 +119,7 @@ import std/json::{JSON, Any}
 import std/base64::{Base64}
 import std/digest::{SHA256}
 import std/time::{Time, Span}
+import std/uri::{URI}
 
 # What a request answered that it should not have, or could not do: a
 # problem document's `type` and `detail` (RFC 7807), or, with
@@ -167,13 +179,21 @@ pub struct AcmeDirectory
     account = AcmeJson.text(object, "newAccount")
     order = AcmeJson.text(object, "newOrder")
     return AcmeError.new("the directory names no newNonce, newAccount or newOrder") unless nonce && account && order
+    key_change = AcmeJson.text(object, "keyChange")
+    revoke = AcmeJson.text(object, "revokeCert")
+    {"newNonce" => nonce, "newAccount" => account, "newOrder" => order, "keyChange" => key_change, "revokeCert" => revoke}.each do |field, url|
+      if url
+        refused = AcmeClient.https(url, "the directory's #{field}")
+        return refused if refused
+      end
+    end
     terms = nil
     required = false
     if (meta = object["meta"]?) && (fields = meta.as_h?)
       terms = AcmeJson.text(fields, "termsOfService")
       required = AcmeJson.flag(fields, "externalAccountRequired")
     end
-    AcmeDirectory.new(nonce, account, order, AcmeJson.text(object, "keyChange"), AcmeJson.text(object, "revokeCert"), terms, required)
+    AcmeDirectory.new(nonce, account, order, key_change, revoke, terms, required)
   end
 end
 
@@ -298,15 +318,31 @@ pub class AcmeClient
   # A session with the server whose directory is at *url*, signing with
   # *key*: the directory read, or why it could not be. *account_url*, an
   # account `register` answered before, is the `kid` from the start, so a
-  # session that kept it need not register again.
+  # session that kept it need not register again. Both are `https://`.
   def self.new(url : String, key : SigningKey, timeout_ms : Int32 = 30000, account_url : String? = nil) : AcmeClient | AcmeError
     raise "acme: a timeout is a count of milliseconds, at least 1, not #{timeout_ms}" if timeout_ms < 1
+    if account_url
+      refused = https(account_url, "the account")
+      return refused if refused
+    end
     response = AcmeClient.exchange("GET", url, "", nil, timeout_ms)!
     problem = response.problem("the directory")
     return problem if problem
     client = AcmeClient.new(url, key, AcmeDirectory.parse(response.body)!, timeout_ms)
     client.account = account_url
     client
+  end
+
+  # Nil when *url* is an `https://` URL with a host, else the error that
+  # refuses it as *what*: RFC 8555 section 6.1 requires HTTPS of every
+  # ACME request, and anything else is plaintext an attacker on the path
+  # can answer as the CA.
+  def self.https(url : String, what : String) : AcmeError?
+    uri = URI.parse?(url)
+    scheme = uri ? uri.scheme : nil
+    host = uri ? uri.hostname : nil
+    return nil if scheme && scheme.downcase == "https" && host && !host.empty?
+    AcmeError.new("#{what} #{url.inspect} is not https://, which RFC 8555 section 6.1 requires of ACME")
   end
 
   protected def account=(url : String?) : String?
@@ -356,6 +392,8 @@ pub class AcmeClient
     response = post(@directory.new_account, payload)!
     url = response.location
     return AcmeError.new("newAccount answered #{response.status} without the account's Location") unless url
+    refused = AcmeClient.https(url, "newAccount's Location")
+    return refused if refused
     object = AcmeJson.object(response.body, "the account")!
     status = AcmeJson.text(object, "status")
     return AcmeError.new("the account #{url} is #{status || "without a status"}, not valid") unless status == "valid"
@@ -404,6 +442,8 @@ pub class AcmeClient
     response = post(@directory.new_order, payload)!
     url = response.location
     return AcmeError.new("newOrder answered #{response.status} without the order's Location") unless url
+    refused = AcmeClient.https(url, "newOrder's Location")
+    return refused if refused
     AcmeOrder.from(url, AcmeJson.object(response.body, "the order")!)
   end
 
@@ -558,8 +598,11 @@ pub class AcmeClient
     ms < 0 ? 0_i64 : ms
   end
 
-  # One HTTP exchange, its answer read whole up to `MAX_BODY`.
+  # One HTTP exchange, its answer read whole up to `MAX_BODY`; nothing
+  # sent to a URL that is not `https://`.
   protected def self.exchange(method : String, url : String, body : String, accept : String?, timeout_ms : Int32) : AcmeResponse | AcmeError
+    refused = https(url, method)
+    return refused if refused
     headers = {"User-Agent" => USER_AGENT}
     headers["Content-Type"] = "application/jose+json" if method == "POST"
     headers["Accept"] = accept if accept
@@ -831,7 +874,8 @@ pub struct AcmeTlsAlpn01
   # The self-signed certificate for *domain* (section 3): its one dNSName
   # *domain*, and the critical acmeIdentifier extension, an OCTET STRING
   # of the SHA-256 of *key_authorization*; signed by *key*, valid from a
-  # day before *now* to a week after.
+  # day before *now* to a week after. A *domain* past 64 characters is
+  # refused, as std/x509 refuses its common name.
   def self.certificate(domain : String, key_authorization : String, key : SigningKey, now : Time = Time.utc) : Array(UInt8) | AcmeError
     digest = SHA256.hash_bytes(key_authorization)
     value = [4_u8, digest.size.to_u8] + digest

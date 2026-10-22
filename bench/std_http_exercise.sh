@@ -3006,12 +3006,30 @@ fi
 echo
 echo "== proving the checks can fail when the module is broken"
 mutations=0
-# The broken copies are built one after another and run beside each other,
-# MUT_JOBS at a time: a run of the exercise is 21 seconds of mostly waiting
-# on its own sockets and clocks, and ninety-seven of them one at a time
-# took the gate past the 35 minutes `bench/std_siblings.sh` gives a
-# sibling. Each answer goes to a file of its own and they are printed in
-# order once all have ended.
+# The broken copies are built and run beside each other, MUT_JOBS at a
+# time: a run of the exercise is 21 seconds of mostly waiting on its own
+# sockets and clocks, and ninety-seven of them one at a time took the gate
+# past the 35 minutes `bench/std_siblings.sh` gives a sibling. Each answer
+# goes to a file of its own and they are printed in order once all have
+# ended.
+#
+# The builds were one after another too, sharing the compiler's cache, and
+# they were what the copies waited on: 97 builds of 2.6 s, 254 s in a row,
+# ran under 886 s of runs four at a time, and the copies took 353 s from
+# the first build to the last answer (Linux, x86-64, 12 threads). So each
+# copy is built in its own job, from a patched module and into a compiler
+# cache of its own, as std/tls's copies are: two builds writing one cache
+# at once would race. So built, and stopped at 60 s as below, the copies
+# took 293 s.
+#
+# A copy is stopped at 60 s, where it was 120: two copies never end - a
+# client that waits on a silent server for as long as it takes, a server
+# that joins a 24 MB body anew at every read - and each held its place
+# for the whole 120 s. Of the copies that end, the slowest failed after
+# 64 s (a server that never says 100 Continue), the next after 28, and
+# half of them within 5; a copy stopped is a copy that did not pass, as at
+# 120. What 60 s must leave room for is an unbroken run, which takes 21 s
+# on CI's runners (its plain build and run, 23.5 to 24.8 s).
 MUT_JOBS="${MUT_JOBS:-4}"
 mutation_pids=""
 mkdir -p "$WORK/mutres"
@@ -3026,12 +3044,12 @@ mutate() { # mutate <label> <old> <new> [module, http.iyi by default]
   # LNK1104 - three of thirty mutations here, whichever came after.
   mutations=$((mutations + 1))
   local label="$1" old="$2" new="$3" module="${4:-http.iyi}" n="$mutations"
+  local P="$WORK/patched-$n"
   if [ -z "$PY" ]; then
     mutation_said "$n" "  $label: skipped, no working python3 to make the broken copy with"
     return 0
   fi
-  rm -rf "$WORK/patched"
-  mkdir -p "$WORK/patched/std"
+  mkdir -p "$P/std"
   OLD="$old" NEW="$new" "$PY" - <<PY
 import os
 from pathlib import Path
@@ -3039,31 +3057,33 @@ src = Path("$REPO/src/std/$module").read_text()
 old = os.environ["OLD"]
 if old not in src:
     raise SystemExit("patch site missing: " + old)
-Path("$WORK/patched/std/$module").write_text(src.replace(old, os.environ["NEW"], 1))
+Path("$P/std/$module").write_text(src.replace(old, os.environ["NEW"], 1))
 PY
   if [ $? -ne 0 ]; then
     mutation_said "$n" "  $label: the patch did not apply"
     touch "$WORK/mutres/failed"
-  # Build first, then run: a patch that does not compile would also "fail",
-  # and that proves nothing about whether the exercise catches the break.
-  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut-$n.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-    mutation_said "$n" "  $label: the broken copy did not compile" "$(sed -n '1,6p' "$WORK/mut.out")"
-    touch "$WORK/mutres/failed"
-  else
-    (
-      if timeout -k 5 120 "$WORK/mut-$n.bin" >"$WORK/mut-$n.out" 2>&1; then
-        mutation_said "$n" "  $label: the exercise PASSED on a broken module"
-        touch "$WORK/mutres/failed"
-      else
-        mutation_said "$n" "  $label: caught"
-      fi
-    ) &
-    mutation_pids="$mutation_pids $!"
-    # `wait -n` where the shell has it (bash 4.3); darwin's 3.2 polls.
-    while [ "$(jobs -rp | wc -l)" -ge "$MUT_JOBS" ]; do
-      wait -n 2>/dev/null || sleep 0.2
-    done
+    return 0
   fi
+  (
+    # Build first, then run: a patch that does not compile would also
+    # "fail", and that proves nothing about whether the exercise catches
+    # the break.
+    if ! IYI_CACHE_DIR="$P/cache" IYI_PATH="$P${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut-$n.bin" "$REPO/bench/std_http_exercise.iyi" >"$P/build.log" 2>&1; then
+      mutation_said "$n" "  $label: the broken copy did not compile" "$(sed -n '1,6p' "$P/build.log")"
+      touch "$WORK/mutres/failed"
+    elif timeout -k 5 60 "$WORK/mut-$n.bin" >"$WORK/mut-$n.out" 2>&1; then
+      mutation_said "$n" "  $label: the exercise PASSED on a broken module"
+      touch "$WORK/mutres/failed"
+    else
+      mutation_said "$n" "  $label: caught"
+    fi
+    rm -rf "$P/cache"
+  ) &
+  mutation_pids="$mutation_pids $!"
+  # `wait -n` where the shell has it (bash 4.3); darwin's 3.2 polls.
+  while [ "$(jobs -rp | wc -l)" -ge "$MUT_JOBS" ]; do
+    wait -n 2>/dev/null || sleep 0.2
+  done
 }
 mutations_report() { # every answer, in the order the mutations were made
   local pid n=1
@@ -3224,16 +3244,44 @@ mutate "NO_PROXY's CIDR ranges passed over" 'return false if ip && in_range?(ip,
 mutate "an IPv6 range holding IPv4 addresses" '    return false unless mapped?(ip) == mapped?(cut)' ''
 mutate "a NO_PROXY address's port passed over" 'return false if ip && ip == pip && (pport.bytesize == 0 || pport == port)' 'return false if ip && ip == pip'
 mutate "a NO_PROXY domain's port passed over" 'return false if pport.bytesize == 0 || pport == port' 'return false'
-mutations_report
 
 # HTTP/2, each mechanism taken out of a copy that compiles: the iyi-to-iyi
 # exercise stops at the check that names it, or the raw frames find the
 # answer RFC 9113 asks for missing.
-h2_patched() { # h2_patched <name> <old> <new> [module, http.iyi by default]: a broken http2_exercise in $WORK/<name>.bin
-  local module="${4:-http.iyi}"
-  rm -rf "$WORK/$1"
-  mkdir -p "$WORK/$1/std"
-  OLD="$2" NEW="$3" "$PY" - "$REPO/src/std/$module" "$WORK/$1/std/$module" <<'PY'
+#
+# Every copy from here on - std/http or std/tls broken under
+# http2_exercise, the HTTPS server, the slow clients, the proxy's client -
+# is patched and built when its call below is reached, in a job of its own
+# beside the copies above (MUT_JOBS at a time, the same places), and its
+# call is kept. Once the copies above have answered, the calls are made
+# again, `judging` set: those of one kind one after another, as written,
+# the kinds side by side, MUT_JOBS at a time; their answers are printed in
+# the order the calls are written. A kind's servers write their ports to
+# files of its own (h2.port, h2tls.port, guarded.port, mtls.port, the
+# proxy's), every server takes a port the system gives it, and the
+# lingering close's copies are judged in this shell, as they were.
+# Built and judged one after another, these 39 copies took 255 s after
+# the copies above had answered; built beside those, 159 s, 142 of them
+# in eleven copies each waiting out a timeout of the round it fails;
+# judged side by side too, 49 s (Linux, x86-64, 12 threads).
+later_n=0
+later_pids=""
+judging=""
+mkdir -p "$WORK/later" "$WORK/judged"
+# later <name> <program> <module> <old> <new> <call>...: <name>'s copy of
+# std/<module>, <old> replaced by <new>, built from <program> into
+# $WORK/<name>.bin in a job of its own, a compiler cache of its own too;
+# <call> kept, to be made when judging.
+later() {
+  local name="$1" program="$2" module="$3" old="$4" new="$5"
+  shift 5
+  later_n=$((later_n + 1))
+  printf '%q ' "$@" >"$WORK/later/$later_n"
+  [ -n "$PY" ] || return 0
+  (
+    rm -rf "$WORK/$name"
+    mkdir -p "$WORK/$name/std"
+    if OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module" "$WORK/$name/std/$module" >"$WORK/$name.log" 2>&1 <<'PY'
 import os, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 old = os.environ["OLD"]
@@ -3241,14 +3289,82 @@ if src.count(old) != 1:
     raise SystemExit("patch site missing or not unique: " + old)
 open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(old, os.environ["NEW"], 1))
 PY
-  [ $? -eq 0 ] || return 1
-  IYI_PATH="$WORK/$1${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/$1.bin" "$REPO/bench/http2_exercise.iyi" >"$WORK/$1.log" 2>&1
+    then
+      IYI_CACHE_DIR="$WORK/$name/cache" IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" \
+        timeout 300 "$IYI" build -o "$WORK/$name.bin" "$program" >"$WORK/$name.log" 2>&1
+    else
+      false
+    fi
+    echo $? >"$WORK/$name.built"
+    rm -rf "$WORK/$name/cache"
+  ) &
+  later_pids="$later_pids $!"
+  while [ "$(jobs -rp | wc -l)" -ge "$MUT_JOBS" ]; do
+    wait -n 2>/dev/null || sleep 0.2
+  done
+}
+h2_patched() { # h2_patched <name>: whether later's copy <name> built
+  [ "$(cat "$WORK/$1.built" 2>/dev/null)" = 0 ]
+}
+judged_kind() { # judged_kind <n>: which kind the n-th kept call is
+  local fn
+  read -r fn _ <"$WORK/later/$1"
+  case "$fn" in
+    h2_node_breaks | h2_frames_breaks) echo h2_serve ;;
+    *) echo "$fn" ;;
+  esac
+}
+judge_later() { # every call later kept, made and answered as above
+  local pid kind n running kinds=""
+  for pid in $later_pids; do
+    wait "$pid" 2>/dev/null
+  done
+  judging=1
+  # The longest kinds first: 47, 41, 24, 23, 22 and 1 s here.
+  for kind in guard_breaks h2_breaks h2_serve https_breaks proxy_breaks mtls_breaks; do
+    (
+      n=1
+      while [ "$n" -le "$later_n" ]; do
+        if [ "$(judged_kind "$n")" = "$kind" ]; then
+          status=0
+          eval "$(cat "$WORK/later/$n")" >"$WORK/judged/$n" 2>&1
+          [ "$status" -eq 0 ] || touch "$WORK/judged/failed"
+        fi
+        n=$((n + 1))
+      done
+    ) &
+    kinds="$kinds $!"
+    while :; do
+      running=""
+      for pid in $kinds; do
+        kill -0 "$pid" 2>/dev/null && running="$running $pid"
+      done
+      [ "$(echo $running | wc -w)" -lt "$MUT_JOBS" ] && break
+      sleep 0.2
+    done
+  done
+  n=1
+  while [ "$n" -le "$later_n" ]; do
+    [ "$(judged_kind "$n")" = close_breaks ] && eval "$(cat "$WORK/later/$n")"
+    n=$((n + 1))
+  done
+  for pid in $kinds; do
+    wait "$pid"
+  done
+  n=1
+  while [ "$n" -le "$later_n" ]; do
+    [ -f "$WORK/judged/$n" ] && cat "$WORK/judged/$n"
+    n=$((n + 1))
+  done
+  [ -e "$WORK/judged/failed" ] && status=1
+  return 0
 }
 h2_breaks() { # h2_breaks <label> <name> <old> <new> <check>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" h2_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4" check="$5"
   if [ "$h2_built" -ne 1 ] || [ -z "$PY" ]; then
     echo "  $label: skipped, no HTTP/2 exercise or no python3"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3269,10 +3385,11 @@ h2_breaks() { # h2_breaks <label> <name> <old> <new> <check>
 # h2_node_breaks <label> <name> <old> <new>: Node's client, which holds a
 # server to the 1000-byte windows it advertises, fails on the broken one.
 h2_node_breaks() {
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" h2_node_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4"
   if [ "$h2_built" -ne 1 ] || [ -z "$PY" ] || [ -z "$NODE" ] || [ ! -s "$WORK/h2-client.js" ]; then
     echo "  $label: skipped, no HTTP/2 server, python3 or node"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3293,10 +3410,11 @@ h2_node_breaks() {
   fi
 }
 h2_frames_breaks() { # h2_frames_breaks <label> <name> <old> <new> <case>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" h2_frames_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4" case_name="$5"
   if [ "$h2_built" -ne 1 ] || [ -z "$PY" ] || [ ! -s "$WORK/h2frames.py" ]; then
     echo "  $label: skipped, no HTTP/2 server, python3 or frames to send it"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3394,9 +3512,9 @@ h2_frames_breaks "a broken body's 400 closed on at once" linger_body \
   'a broken chunk, more sent after the answer'
 # The lingering close broken, in std/http or under it in std/tls: the case
 # that names the break, three runs, must fail - and the client's own close
-# where that is named. The copies are built one after another (they share
-# the compiler's cache) and run MUT_JOBS at a time, each against servers
-# of its own; the answers are printed in order once all have ended.
+# where that is named. The copies are built as the others here are (later,
+# above) and run MUT_JOBS at a time, each against servers of its own; the
+# answers are printed in order once all have ended.
 close_n=0
 close_pids=""
 mkdir -p "$WORK/closeres"
@@ -3425,12 +3543,13 @@ close_judged() { # close_judged <n> <label> <name> <plain|tls|-> <case> <client|
   printf '%s\n' "$said" >"$WORK/closeres/$n"
 }
 close_breaks() { # close_breaks <label> <name> <module> <old> <new> <plain|tls|-> <case> [client|client-tls]
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" "$3" "$4" "$5" close_breaks "$@"; return; }
   local label="$1" name="$2" module="$3" old="$4" new="$5" over="$6" case_name="$7" client="${8:--}" pid running
   close_n=$((close_n + 1))
   if [ "$close_ready" -ne 1 ] || { case "$over$client" in *tls*) true ;; *) false ;; esac && [ ! -s "$WORK/tls/p256.pem" ]; }; then
     echo "  $label: skipped with the close cases" >"$WORK/closeres/$close_n"
     return
-  elif ! h2_patched "$name" "$old" "$new" "$module"; then
+  elif ! h2_patched "$name"; then
     printf '%s\n' "  $label: the broken copy did not build" "$(sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /')" >"$WORK/closeres/$close_n"
     touch "$WORK/closeres/failed"
     return
@@ -3486,10 +3605,11 @@ h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
 # The HTTPS server broken, the checks above run against it with the good
 # client: each must fail somewhere.
 https_breaks() { # https_breaks <label> <name> <old> <new>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" https_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4"
   if [ "$https_ready" -ne 1 ] || [ -z "$PY" ]; then
     echo "  $label: skipped, no HTTPS server to break"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3512,10 +3632,11 @@ https_breaks "no close_notify at the end" https_notify \
 # The cap and the request deadline broken, the slow clients run against
 # the copy: each must fail at the case that names it.
 guard_breaks() { # guard_breaks <label> <name> <old> <new> <case> <phrase>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" guard_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4" case_name="$5" phrase="$6"
   if [ "${guard_ready:-0}" -ne 1 ]; then
     echo "  $label: skipped with the slow clients' section"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3551,10 +3672,11 @@ guard_breaks "a head held to the whole request's deadline alone" guard_head \
 # The client's certificate, lost on the way to the handler or the server:
 # the mTLS checks must fail.
 mtls_breaks() { # mtls_breaks <label> <name> <old> <new>
+  [ -n "$judging" ] || { later "$2" "$REPO/bench/http2_exercise.iyi" http.iyi "$3" "$4" mtls_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4"
   if [ "$https_ready" -ne 1 ] || [ -z "$PY" ]; then
     echo "  $label: skipped, no HTTPS server to break"
-  elif ! h2_patched "$name" "$old" "$new"; then
+  elif ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3577,22 +3699,13 @@ mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
 # The client through a proxy, broken in a copy: the round against the
 # Python proxy and the iyi server above must fail.
 proxy_breaks() { # proxy_breaks <label> <name> <old> <new>
+  [ -n "$judging" ] || { later "$2" "$WORK/proxy_client.iyi" http.iyi "$3" "$4" proxy_breaks "$@"; return; }
   local label="$1" name="$2" old="$3" new="$4"
   if [ "$proxy_ready" -ne 1 ]; then
     echo "  $label: skipped, no proxy round to break"
     return
   fi
-  rm -rf "$WORK/$name"
-  mkdir -p "$WORK/$name/std"
-  OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/http.iyi" "$WORK/$name/std/http.iyi" <<'PY'
-import os, sys
-src = open(sys.argv[1], encoding="utf-8").read()
-old = os.environ["OLD"]
-if src.count(old) != 1:
-    raise SystemExit("patch site missing or not unique: " + old)
-open(sys.argv[2], "w", encoding="utf-8").write(src.replace(old, os.environ["NEW"], 1))
-PY
-  if [ $? -ne 0 ] || ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/$name.bin" "$WORK/proxy_client.iyi" >"$WORK/$name.log" 2>&1; then
+  if ! h2_patched "$name"; then
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
@@ -3621,7 +3734,10 @@ proxy_breaks "an upgrade sent past its proxy" proxy_upgrade_direct \
 proxy_breaks "a ws:// handshake sent to the proxy in absolute form" proxy_upgrade_absolute \
   'tunneled = !route.nil? && (secure || !upgrade.nil?)' 'tunneled = !route.nil? && secure'
 
-# The lingering close's copies, started above beside what came after.
+# The copies above, then those whose calls later kept, judged now, then
+# the lingering close's, which judging started beside what came after it.
+mutations_report
+judge_later
 close_breaks_report
 echo
 if [ "$status" -eq 0 ]; then

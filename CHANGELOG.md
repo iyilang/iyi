@@ -4,6 +4,30 @@
 
 ### Added
 
+- **std/tls: Encrypted Client Hello (RFC 9849), client and server, over
+  std/hpke.** `TlsConfig#ech_configs` takes an ECHConfigList (a DNS
+  HTTPS record's `ech`); the name, ALPN and any ticket and early data go
+  in the encrypted ClientHelloInner, the ClientHelloOuter names the
+  config's public_name, the extensions both share are named by
+  ech_outer_extensions, and the encoding is padded (section 6.1.3).
+  `TlsServerConfig#ech_keys` holds `TlsEchKey`s (`TlsEchKey.generate`,
+  `from_bytes`, `config_list`; several for rotation), confirms what it
+  took in ServerHello.random and in a HelloRetryRequest, and answers what
+  no key opens on the outer, with retry_configs. A client turned down
+  checks the certificate for the public_name and ends with ech_required,
+  the `TlsError`'s `retry_configs` the server's list.
+  `TlsConnection#ech_accepted?`, `TlsServer#outer_server_name`; GREASE
+  ECH without a config unless `TlsConfig#ech_grease` is off.
+  `TlsServerConfig#groups` orders the key exchange groups a server takes.
+  Split mode is not here. ECH cost 0.11 ms a handshake on loopback
+  (--release, iyi to iyi, the median of 200, the best of five: 0.619 ms
+  without, 0.730 with). Held by `bench/std_tls_exercise.sh`: this
+  program's client and server, ClientHellos crafted from the RFC's text
+  for each of the server's refusals and both confirmations, a scripted
+  server for the client's, Go's crypto/tls client and server
+  (`bench/std_tls_ech_oracle.go`, where Go 1.24 or later is here) each way
+  through a HelloRetryRequest, and 41 broken copies caught.
+
 - **std/hpke: Hybrid Public Key Encryption (RFC 9180), the building
   block of TLS Encrypted Client Hello and Oblivious HTTP, written in iyi
   over std/curve25519, std/p256, std/p384, std/crypto and std/aead.**

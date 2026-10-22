@@ -23,6 +23,7 @@
   `+padding=128`, which it passes, and to dig's unpadded query, which it
   refuses. A broken copy that sends queries unpadded and one that does
   not round to the block are caught. Found by the 0.19.0 PKI review.
+
 - **An answer's OPT record is read for the upper bits of its RCODE.** A
   padded query has an OPT record, so a server answers with one (RFC 6891
   6.1.1), and an answer of BADVERS (16) has 0 in its header's four RCODE
@@ -37,15 +38,6 @@
   `badvers.zone.test` with BADVERS; a broken copy of std/dns reading the
   header alone is caught by the std/dns gate.
 
-### Changed
-
-- **`DnsMessage.parse` walks the authority and additional sections.** It
-  read the header, the question and the answers and stopped; it now reads
-  past them to find the OPT record, so a message whose authority or
-  additional records run past its bytes, that has two OPT records (RFC
-  6891 6.1.1), or whose OPT record is owned by a name other than the root
-  is `malformed?`, over UDP as over a stream. `DnsMessage.query` takes a
-  `block`, the length to pad to; `DnsMessage::PADDING_BLOCK` is 128.
 - **std/acme requires HTTPS (RFC 8555 section 6.1).** Every URL is
   `https://` or refused by an `AcmeError` naming it, before anything is
   sent: `AcmeClient.new`'s directory and `account_url`, each URL the
@@ -54,6 +46,7 @@
   could act as the CA. `bench/std_acme_exercise.sh`'s scripted server is
   HTTPS now, under a test PKI of its own, and five broken copies are
   caught, one per site.
+
 - **std/autocert checks a chain to its roots before it keeps or shows
   it.** `AutocertManager#roots`, the system's unless set, is what a chain
   the CA issues, or the cache holds, must reach (std/x509's `verify`, for
@@ -61,6 +54,7 @@
   not cached. The gate shows a cached chain under the root that issued it,
   refuses it under another, and has a manager that trusts only Pebble's
   minica refuse what Pebble issues.
+
 - **std/autocert: a handshake waits for an order no longer than its
   deadline.** Its wait is cut to what is left of the handshake's time
   (and to `wait_ms`), where it was `wait_ms`, 60 s by default, past the
@@ -71,6 +65,7 @@
   Against a CA that never answers, a handshake given 1 s ends within the
   gate's 3 s bound with `run` and without. `run` also ends when its task
   is cancelled, as `stop` ends it, and cancels the orders it runs.
+
 - **std/x509: `X509.self_signed` holds to RFC 5280's bounds.** A first
   name over 64 characters (ub-common-name) is refused: the subject is the
   issuer of a self-signed certificate and may not be left empty, so the
@@ -81,12 +76,6 @@
   if all zero. std/acme's tls-alpn-01 certificate therefore refuses a
   domain over 64 characters; http-01 or dns-01 proves one.
 
-### Changed
-
-- **std/tls: `TlsServerConfig#identity_source` is given the milliseconds
-  left of the handshake's deadline** as a third argument (`Int32?`, nil
-  when the handshake has none), so a source that waits can stay within
-  it. A proc of two arguments is now one of three.
 - **A std/tls client's `TlsSession` offers a ticket only where the check
   it stands for would hold.** It matched tickets by host alone: one
   session shared by two `TlsConfig`s resumed the first one's ticket under
@@ -97,11 +86,13 @@
   came from (read off the socket; 0 over a unix socket) under the
   configuration it came under, compared by `TlsMadeUnder` - std/http's
   rule, moved into std/tls so that the two compare the same parts.
+
 - **std/http's kept connections and tickets are held to
   `require_staple`.** Set in place on `HTTP.tls_config`, it was not
   compared: a kept connection made without a staple carried the next
   request, and a ticket resumed without one. `TlsMadeUnder` compares it
   beside the roots, identity, `now` and `min_version`.
+
 - **A client does not resume a session past its server's certificate or
   past seven days.** A ticket whose leaf's notAfter has passed at the
   configuration's `now` is dropped, as Go's client drops it; and a ticket
@@ -109,12 +100,14 @@
   it resumed, so a server that sends fresh tickets on every resumption
   no longer stretches the session past RFC 8446 section 4.6.1's seven
   days from it.
+
 - **A std/tls server declines early data on a resumed connection whose
   ticket allows more than `max_early_data` now.** Lowering the limit left
   tickets issued before it with the allowance they were issued with, for
   as long as they lived; the early data is skipped as any declined early
   data is, and the client sends it again after the handshake, so a client
   keeping to the ticket's allowance is never cut off.
+
 - **A std/tls server refuses a server_name past 253 bytes**
   (decode_error), the longest a DNS name written without its trailing
   dot can be (RFC 1035 section 2.3.4, RFC 6066 section 3); one longer
@@ -130,10 +123,24 @@ and caught by a broken copy in `bench/std_tls_exercise.sh`;
 
 ### Changed
 
+- **`DnsMessage.parse` walks the authority and additional sections.** It
+  read the header, the question and the answers and stopped; it now reads
+  past them to find the OPT record, so a message whose authority or
+  additional records run past its bytes, that has two OPT records (RFC
+  6891 6.1.1), or whose OPT record is owned by a name other than the root
+  is `malformed?`, over UDP as over a stream. `DnsMessage.query` takes a
+  `block`, the length to pad to; `DnsMessage::PADDING_BLOCK` is 128.
+
+- **std/tls: `TlsServerConfig#identity_source` is given the milliseconds
+  left of the handshake's deadline** as a third argument (`Int32?`, nil
+  when the handshake has none), so a source that waits can stay within
+  it. A proc of two arguments is now one of three.
+
 - **`TlsSession#take(host, port, config, now_ms)`** takes the port and
   the `TlsConfig` a ticket must fit, and `TlsHeldTicket` carries the
   port, the configuration (`TlsMadeUnder`, now public in std/tls) and
   the time of its full handshake (`authenticated_ms`).
+
 - **`IyiSocket#unix?`** says whether a socket is a unix one, which has
   no port for `remote_port` to read; std/tls asks it before keying a
   ticket by port. `bench/socket_exercise.iyi` checks it at both kinds of

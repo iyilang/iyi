@@ -588,7 +588,7 @@ if args.size > 0 && args[0] == "serve"
   if File.file?(args[1] + "/sourced")
     own = TlsIdentity.from_pem(File.read(args[1] + "/chain.pem"), File.read(args[1] + "/key.pem")).or_panic
     sourced = own
-    config.identity_source = ->(name : String?, offered : Array(String)?) { own.as(TlsIdentity | TlsError | Nil) }
+    config.identity_source = ->(name : String?, offered : Array(String)?, left : Int32?) { own.as(TlsIdentity | TlsError | Nil) }
   end
   # DIR/staple.der: an OCSP response stapled for a client that asks.
   if File.file?(args[1] + "/staple.der")

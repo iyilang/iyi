@@ -11,7 +11,10 @@
 # a whole order against a server in this program that holds the client to
 # RFC 8555 and breaks the protocol one rule at a time: a problem
 # document, a badNonce answer, Retry-After, a finalize, a key rollover, an
-# invalid challenge, a wait past its polls and one past its time.
+# invalid challenge, a wait past its polls and one past its time, and
+# every URL that is not https:// refused by name - the directory's, one
+# the directory names, a Location, one an object carries - with nothing
+# sent to it. That server is HTTPS under the test PKI below.
 #
 # The modes the gate script drives:
 #   write DIR       requests, signatures and a tls-alpn-01 certificate,
@@ -306,6 +309,32 @@ def pure_checks : Nil
   puts "  the responder's four answers, the wildcard's TXT name, Retry-After by seconds and by date"
 end
 
+# A test PKI of this program's own, std/http_resume's: a root and a leaf
+# for localhost it signed, Ed25519, valid from 2025 to 9999 so that no
+# clock retires them. The leaf's key is in the open on purpose: it guards
+# nothing but this test. Made once with Python's cryptography.
+LEAF_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBQzCB9qADAgECAgEDMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowFDESMBAGA1UEAwwJ\n" \
+           "bG9jYWxob3N0MCowBQYDK2VwAyEAOeskudtTVi76JObK6QHqJy6M7PaEu/aLlC5H\n" \
+           "B5OLks+jZjBkMBQGA1UdEQQNMAuCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAAMB0G\n" \
+           "A1UdDgQWBBQN8ZJay/U7zf07disj78hKukvGAjAfBgNVHSMEGDAWgBSNjkTWVhBs\n" \
+           "a874Ao2cPFX4w4saajAFBgMrZXADQQAcAgj9qe58GnzceRkYfxyfNHxmqWOgDJkn\n" \
+           "b3rO1pz+8OCRioO1P+BhFa1FR/FMHSH9bOFEKfXfy3Nwr+y+GkMM\n" \
+           "-----END CERTIFICATE-----\n"
+ROOT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBJDCB16ADAgECAgEBMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowGTEXMBUGA1UEAwwO\n" \
+           "aXlpIGJlbmNoIHJvb3QwKjAFBgMrZXADIQCQIEeX9suXr4DL8DiLdBUfoWaJU+Hv\n" \
+           "7JhN3IpqspsuOqNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYw\n" \
+           "HQYDVR0OBBYEFI2ORNZWEGxrzvgCjZw8VfjDixpqMAUGAytlcANBAFEfpUf437+b\n" \
+           "PwJvPGD/gB0zIegp6+3cJzF42Tx6Hj8tIJgdtXVKA58EXmitGetqb788+xoJ49My\n" \
+           "4Wc3L1uxxAI=\n" \
+           "-----END CERTIFICATE-----\n"
+KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
+          "MC4CAQAwBQYDK2VwBCIEIOYKs3OzEJYJ/j+ZQYLoAU929MQeanF9kupAR9HpeHJ8\n" \
+          "-----END PRIVATE KEY-----\n"
+
 # --- a server in this program, holding the client to RFC 8555 ---
 
 # A request whose JWS checked: its protected header, payload, the
@@ -322,6 +351,11 @@ end
 
 class Script
   getter base : String
+  # The same origin as http://: what the server names where it breaks
+  # RFC 8555 section 6.1.
+  getter plain : String
+  # Requests the server answered at all.
+  getter requests : Int32 = 0
   getter reused : Int32 = 0
   getter unknown : Int32 = 0
   getter misplaced : Int32 = 0
@@ -349,6 +383,7 @@ class Script
   NAMES = ["", "a.example", "b.example", "c.example", "d.example"]
 
   def initialize(@base : String, @cert_pem : String)
+    @plain = @base.sub("https://", "http://")
   end
 
   def fresh : String
@@ -431,9 +466,13 @@ class Script
   end
 
   def answer(req : Request) : Response
+    @requests = @requests + 1
     path = req.path
     if path == "/dir"
       return json(200, "{\"newNonce\":\"#{@base}/nonce\",\"newAccount\":\"#{@base}/new-acct\",\"newOrder\":\"#{@base}/new-order\",\"keyChange\":\"#{@base}/key-change\",\"meta\":{\"termsOfService\":\"https://iyi-acme.example/terms\"}}")
+    end
+    if path == "/dir-plain"
+      return json(200, "{\"newNonce\":\"#{@plain}/nonce\",\"newAccount\":\"#{@base}/new-acct\",\"newOrder\":\"#{@base}/new-order\"}")
     end
     return Response.new(200, "", {"Replay-Nonce" => fresh, "Cache-Control" => "no-store"}) if path == "/nonce"
     return Response.new(405, "") unless req.method == "POST"
@@ -445,7 +484,11 @@ class Script
     when "new-acct"
       payload = JSON.parse(signed.payload).as_h
       @terms = field_b(payload, "termsOfServiceAgreed")
-      account = "#{@base}/acct/#{@accounts.size + 1}"
+      plain = false
+      if (contact = payload["contact"]?) && (items = contact.as_a?)
+        plain = items.any? { |x| x.as_s? == "mailto:plain@iyi-acme.example" }
+      end
+      account = "#{plain ? @plain : @base}/acct/#{@accounts.size + 1}"
       @accounts[account] = signed.key
       json(201, "{\"status\":\"valid\"}", {"Location" => account})
     when "new-order"
@@ -460,6 +503,11 @@ class Script
         @bad_nonce_value = answer.headers["Replay-Nonce"]
         return answer
       end
+      if name == "e.example"
+        return json(201, "{\"status\":\"pending\",\"identifiers\":[{\"type\":\"dns\",\"value\":\"e.example\"}],\"authorizations\":[\"#{@plain}/authz/5\"],\"finalize\":\"#{@base}/finalize/5\"}",
+          {"Location" => "#{@base}/order/5"})
+      end
+      return json(201, order_json(1, "pending"), {"Location" => "#{@plain}/order/6"}) if name == "f.example"
       number = NAMES.index(name) || 0
       return problem(400, "rejectedIdentifier", "#{name} is not one of this server's") if number == 0
       @challenges[number] = "pending"
@@ -673,6 +721,29 @@ def scripted(script : Script, certificate_pem : String) : Nil
   took = ms - started
   counters(script, "a wait past its time")
   check far.is_a?(AcmeError) && far.message.includes?("past the 5000 ms the wait has") && took < 2000_i64, "a Retry-After past the wait's time ends it at once, in #{took} ms: #{far}"
+
+  # RFC 8555 section 6.1: HTTPS is required. Each URL that is not is
+  # refused by name, and nothing is sent to it: the server counts every
+  # request it is asked.
+  plain = script.plain
+  asked = script.requests
+  bare = AcmeClient.new("#{plain}/dir", SigningKey.p256, 5000)
+  check bare.is_a?(AcmeError) && bare.message.includes?("\"#{plain}/dir\" is not https://") && script.requests == asked,
+    "an http:// directory is refused by name, nothing sent to it: #{bare}"
+  named = AcmeClient.new("#{script.base}/dir-plain", SigningKey.p256, 5000)
+  check named.is_a?(AcmeError) && named.message.includes?("newNonce \"#{plain}/nonce\" is not https://"), "a directory naming an http:// URL is refused by name: #{named}"
+  kept = AcmeClient.new("#{script.base}/dir", SigningKey.p256, 5000, account_url: "#{plain}/acct/1")
+  check kept.is_a?(AcmeError) && kept.message.includes?("\"#{plain}/acct/1\" is not https://"), "an http:// account URL given is refused by name: #{kept}"
+  fresh = AcmeClient.new("#{script.base}/dir", SigningKey.p256, 5000).or_panic
+  account = fresh.register(["mailto:plain@iyi-acme.example"], terms_agreed: true)
+  check account.is_a?(AcmeError) && account.message.includes?("Location \"#{plain}/acct/") && fresh.account_url.nil?, "an http:// account Location is refused by name: #{account}"
+  located = client.new_order(["f.example"])
+  check located.is_a?(AcmeError) && located.message.includes?("\"#{plain}/order/6\" is not https://"), "an http:// order Location is refused by name: #{located}"
+  carried = client.new_order(["e.example"]).or_panic
+  asked = script.requests
+  fetched = client.authorization(carried.authorizations[0])
+  check fetched.is_a?(AcmeError) && fetched.message.includes?("\"#{plain}/authz/5\" is not https://") && script.requests == asked,
+    "an http:// URL an order carries is refused by name, nothing sent to it: #{fetched}"
 end
 
 def scripted_checks : Nil
@@ -687,11 +758,16 @@ def scripted_checks : Nil
   end
   pem = "-----BEGIN CERTIFICATE-----\n#{lines.join("\n")}\n-----END CERTIFICATE-----\n"
   listener = IyiSocket.listen("127.0.0.1", 0)
-  script = Script.new("http://127.0.0.1:#{listener.local_port}", pem)
+  script = Script.new("https://localhost:#{listener.local_port}", pem)
+  trust = TlsConfig.new
+  trust.roots = Certificate.from_pem(ROOT_PEM).or_panic
+  trust.alpn = ["http/1.1"]
+  HTTP.tls_config = trust
+  served = TlsServerConfig.from_pem(LEAF_PEM, KEY_PEM).or_panic
   outcome = "no answer"
   group do |g|
     g.spawn do
-      Server.serve(listener) { |req| script.answer(req) }
+      Server.serve(listener, tls: served) { |req| script.answer(req) }
       0
     end
     g.spawn do
@@ -714,7 +790,8 @@ def scripted_checks : Nil
   end
   raise outcome unless outcome == "held"
   puts "  a problem document, a badNonce sent again, Retry-After honoured, a finalize with its CSR checked,"
-  puts "  the chain, a key rollover, an invalid challenge, and waits ended by their polls and their time"
+  puts "  the chain, a key rollover, an invalid challenge, waits ended by their polls and their time,"
+  puts "  and every http:// URL refused by name"
 end
 
 # --- the modes the gate drives ---

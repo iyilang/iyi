@@ -501,6 +501,18 @@ prove_broken acme "the acmeIdentifier extension not critical" "the acmeIdentifie
   'X509Extension.new(ACME_IDENTIFIER, true, value)' 'X509Extension.new(ACME_IDENTIFIER, false, value)'
 prove_broken x509 "a request without its extensionRequest" "by subjectAltName" \
   '      X509Der.tlv(0xA0_u8, attribute),' '      X509Der.tlv(0xA0_u8, [] of UInt8),'
+# RFC 8555 section 6.1, HTTPS required: each break below is the module as
+# it was before the 0.19.0 PKI review's finding 2, one site at a time.
+prove_broken acme "a request sent to an http:// URL" "an http:// directory is refused by name, nothing sent to it" \
+  '    refused = https(url, method)' '    refused = nil'
+prove_broken acme "a directory's http:// URLs taken" "a directory naming an http:// URL is refused by name" \
+  '        refused = AcmeClient.https(url, "the directory'"'"'s #{field}")' '        refused = nil'
+prove_broken acme "an http:// account URL given taken" "an http:// account URL given is refused by name" \
+  '      refused = https(account_url, "the account")' '      refused = nil'
+prove_broken acme "an http:// account Location taken" "an http:// account Location is refused by name" \
+  '    refused = AcmeClient.https(url, "newAccount'"'"'s Location")' '    refused = nil'
+prove_broken acme "an http:// order Location taken" "an http:// order Location is refused by name" \
+  '    refused = AcmeClient.https(url, "newOrder'"'"'s Location")' '    refused = nil'
 
 echo
 if [ "$status" -eq 0 ]; then

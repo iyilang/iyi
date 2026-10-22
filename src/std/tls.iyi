@@ -156,9 +156,10 @@
 # says.
 # An `identity_source` on the config, when set, is asked first, on each
 # ClientHello with signature_algorithms, for the identity to show: given
-# the server_name and the ALPN protocols the client offered, it answers
-# an identity, nil for the config's own choice, or an error that refuses
-# the handshake with the alert it names. std/autocert's manager is one,
+# the server_name, the ALPN protocols the client offered and the
+# milliseconds left of the handshake's deadline, it answers an identity,
+# nil for the config's own choice, or an error that refuses the
+# handshake with the alert it names. std/autocert's manager is one,
 # answering certificates it gets from an ACME CA as they are asked for,
 # and tls-alpn-01's challenge certificate (RFC 8737) on the same listener.
 # With `client_roots` the server asks for a client's certificate, checks
@@ -964,6 +965,14 @@ pub abstract class TlsConnection
     answer = block.call
     @deadline_ns = 0_i64
     answer
+  end
+
+  # The milliseconds left of the deadline `within` set, 0 once it has
+  # passed; nil when there is none.
+  protected def left_ms : Int32?
+    return nil if @deadline_ns == 0_i64
+    left = (@deadline_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
+    left > 0_i64 ? left.to_i32 : 0
   end
 
   private def read_now(max : Int32) : String | TlsError
@@ -3178,18 +3187,22 @@ pub class TlsServerConfig
   getter others : Array(TlsIdentity) = [] of TlsIdentity
   # Asked first, in TLS 1.3 and 1.2, for the identity a client is shown:
   # given the host the client named by server_name (nil when it named
-  # none) and the protocols its ALPN offered (nil when it offered none).
-  # An identity it answers is shown where one of `others` would have been
-  # - so a scheme of its key the client takes, and in 1.2 a suite and a
-  # curve for it, or the client is refused as for `identity`; nil leaves
-  # the choice to `others` and `identity` as without it; an error refuses
-  # the handshake, the client sent the alert that error names. Asked of
-  # each ClientHello that lists signature_algorithms - a second one after
-  # a HelloRetryRequest too, and one offering a ticket, which may yet come
-  # to a full handshake; a resumption shows no certificate, and its ticket
-  # counts the session as `identity`'s (`identity_index`). The handshake
-  # waits for it, and its timeout counts that time. Not asked when nil.
-  property identity_source : Proc(String?, Array(String)?, TlsIdentity | TlsError | Nil)? = nil
+  # none), the protocols its ALPN offered (nil when it offered none), and
+  # the milliseconds left of the handshake's deadline (0 once it has
+  # passed, nil when the handshake has none). An identity it answers is
+  # shown where one of `others` would have been - so a scheme of its key
+  # the client takes, and in 1.2 a suite and a curve for it, or the client
+  # is refused as for `identity`; nil leaves the choice to `others` and
+  # `identity` as without it; an error refuses the handshake, the client
+  # sent the alert that error names. Asked of each ClientHello that lists
+  # signature_algorithms - a second one after a HelloRetryRequest too, and
+  # one offering a ticket, which may yet come to a full handshake; a
+  # resumption shows no certificate, and its ticket counts the session as
+  # `identity`'s (`identity_index`). The handshake waits for it, and its
+  # deadline cuts only the reads after it: a source that may wait - for a
+  # CA, say - keeps its waits within the time it is given, or holds the
+  # connection past the deadline. Not asked when nil.
+  property identity_source : Proc(String?, Array(String)?, Int32?, TlsIdentity | TlsError | Nil)? = nil
   # The oldest version this server speaks: TLS 1.3 by default, and then a
   # client that does not offer it is refused (protocol_version); `TLS12`
   # answers a client that offers 1.2 and not 1.3 in 1.2, held to what the
@@ -4401,7 +4414,7 @@ pub class TlsServer < TlsConnection
     if schemes
       chosen = @config.identity_for(server_name, schemes)
       if source = @config.identity_source
-        given = source.call(server_name, alpn)
+        given = source.call(server_name, alpn, left_ms)
         return given if given.is_a?(TlsError)
         chosen = given.scheme_for(schemes) ? given : nil if given
       end
@@ -4754,7 +4767,7 @@ pub class TlsServer < TlsConnection
   # `identity` if it can; or why the client is refused.
   private def identity12(offer : TlsOffer12, schemes : Array(Int32)) : TlsIdentity | TlsError
     if source = @config.identity_source
-      given = source.call(offer.server_name, offer.alpn)
+      given = source.call(offer.server_name, offer.alpn, left_ms)
       return given if given.is_a?(TlsError)
       if given
         refused = refusal12(given, offer, schemes)

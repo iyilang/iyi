@@ -2317,17 +2317,24 @@ jobs:
       # And the parallel mark and the mark beside the program: Windows'
       # helpers park on a kernel32 semaphore between collections, and the
       # second stop is a helper's, suspending every registered thread.
+      # Each gate under a bound of its own (bench/bounded_gate.sh): job
+      # 120284584748 sat in bench/sweep_exercise.sh from its first line to
+      # the job's cancel at 150 minutes, and its log could not say what
+      # was still running. Fifteen minutes is over three times the longest
+      # gate's 4 min 33 s in master's green job 120284541992; a gate past
+      # it is ended with its processes and their threads printed, and the
+      # gates after it still run.
       - name: The collector's gates, on Windows
         shell: bash
         run: |
-          bash bench/arena_exercise.sh
-          bash bench/root_exercise.sh
-          bash bench/mark_exercise.sh
-          bash bench/sweep_exercise.sh
-          bash bench/collect_trigger.sh
-          bash bench/thread_exercise.sh
-          bash bench/parallel_mark.sh
-          bash bench/concurrent_mark.sh
+          failed=""
+          for gate in bench/arena_exercise.sh bench/root_exercise.sh \
+                      bench/mark_exercise.sh bench/sweep_exercise.sh \
+                      bench/collect_trigger.sh bench/thread_exercise.sh \
+                      bench/parallel_mark.sh bench/concurrent_mark.sh; do
+            bash bench/bounded_gate.sh 15 "$gate" || failed="$failed $gate"
+          done
+          [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
 
       # The foundation's own sections; the modules' exercises are the
       # windows-std-siblings shards below.

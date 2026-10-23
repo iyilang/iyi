@@ -4697,7 +4697,25 @@ require "./file"
         end
       end
 
-      # A round of `count` permits and no takers yet.
+      # A round of `count` permits and no takers yet, opened last: once
+      # every count a taker adds to - the workers active, the takers done
+      # - and the finish flag are this round's, and before the generation
+      # turns. A helper woken for an earlier round and preempted between
+      # its wake and its take takes one of these the instant they are
+      # open, a generation early. All three rounds opened them before
+      # those resets, and such a taker's counts were wiped under it: its
+      # finished drain dropped from the takers done, so the wait for them
+      # never ended, or its count dropped from the workers active, so the
+      # drains took it below zero and none ended. Either way the program
+      # spun and printed nothing more. Collections back to back with
+      # helpers, 24 runs at a time on twelve cores, plain builds: 200 of
+      # them with a 2 MiB block live never ended in 23 runs of 24,000,
+      # and bench/sweep_exercise.iyi in 14 of 24,000, each in its steady
+      # or rounding section. Windows' job 120284584748 sat 2 h 25 min in
+      # the gate that builds and runs that program - a stall this could
+      # be, and nothing in its log shows that it was. Opened last, 0 of
+      # 24,000 each: an early taker counts itself into this round's
+      # counts, as a taker woken by the turn does.
       def self.open_mark_permits(count : UInt64) : Nil
         pool_word(POOL_MARK_PERMITS).value.set(count)
       end
@@ -5500,7 +5518,6 @@ require "./file"
           helpers = @@helpers if @@helpers < helpers
         end
         @@workers = helpers + 1_u64
-        open_mark_permits(helpers)
         pool_word(POOL_FINISH).value.set(0_u64)
         @@helper_black = 0_u64
         # This thread is counted in now, before a helper can see the
@@ -5512,6 +5529,9 @@ require "./file"
         # tree's marks, and the collector marked a million nodes alone.
         pool_word(POOL_ACTIVE).value.set(1_u64)
         pool_word(POOL_HELPERS_DONE).value.set(0_u64)
+        # The permits last, once every count a taker adds to is this
+        # round's (`open_mark_permits` says why).
+        open_mark_permits(helpers)
         IyiRoots.each_root(->(base : UInt64) { shade(base) })
         # The helpers wake on the generation; from here every worker runs
         # the same drain, this thread included.
@@ -7205,7 +7225,6 @@ require "./file"
           {% end %}
           @@beside_helpers = helpers
           @@workers = helpers + 1_u64
-          open_mark_permits(helpers)
           pool_word(POOL_FINISH).value.set(1_u64)
           # Every helper counts itself in when it starts draining; the
           # triggering thread is not a worker after this.
@@ -7216,6 +7235,8 @@ require "./file"
           donate_all(w)
           @@concurrent = true
           LibIyiGCTable.__iyi_marking = 1_u8
+          # The permits last (`open_mark_permits` says why).
+          open_mark_permits(helpers)
           pool_word(POOL_GENERATION).value.add(1_u64)
           IyiThread.resume_others(others)
           @@stw_first_ns = now_ns - started
@@ -7401,12 +7422,13 @@ require "./file"
         def self.remainder_round(w : UInt64) : UInt64
           helpers = @@helpers
           @@workers = helpers
-          # This helper is inside the finish and drains below without a
-          # permit; every other may take one.
-          open_mark_permits(helpers - 1_u64)
           pool_word(POOL_FINISH).value.set(0_u64)
           pool_word(POOL_ACTIVE).value.set(0_u64)
           pool_word(POOL_HELPERS_DONE).value.set(0_u64)
+          # This helper is inside the finish and drains below without a
+          # permit; every other may take one, once the counts above are
+          # this round's (`open_mark_permits` says why).
+          open_mark_permits(helpers - 1_u64)
           generation = pool_word(POOL_GENERATION).value.add(1_u64) + 1_u64
           wake_helpers
           drain(w)

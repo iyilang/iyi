@@ -4,6 +4,27 @@
 
 ### Added
 
+- **std/dns: SVCB and HTTPS records (RFC 9460); std/http: `HTTPClient`
+  connects by them.** `SvcbRecord.parse` reads a record's priority,
+  target and params - mandatory, alpn, no-default-alpn, port, ipv4hint,
+  ech, ipv6hint, any other kept as bytes - refusing section 2.2's
+  malformed sets (keys out of order or twice, a param cut short, a
+  mandatory key missing), and `to_s` prints it as dig 9.20 does.
+  `Resolver#https_records(host, port)` asks `host` or
+  `_port._https.host`, follows AliasMode at most two links, and orders
+  ServiceMode records by priority, in the clear or over DoT/DoH upstreams.
+  `HTTPClient#use_https_records = true` (off by default: a DNS round trip
+  before each new ClientHello) connects to the first usable record's
+  target and port, takes its `ech` as the connection's `ech_configs`,
+  puts its alpn first, retries once under a refusal's retry_configs (RFC
+  9849 section 6.1.6), does not fall back to the clear when every
+  endpoint carries ech, and behaves as before without records.
+  `TlsMadeUnder` now holds `ech_configs`, so kept connections and tickets
+  do not cross between ECH and the clear; `TlsConfig#dup` copies a
+  configuration. bench/std_dns_exercise.sh holds the records to BIND's
+  nsupdate and dig; bench/std_http_https_records.iyi is the end-to-end
+  test, with broken copies in bench/std_http_exercise.sh.
+
 - **std/tls: Encrypted Client Hello (RFC 9849), client and server, over
   std/hpke.** `TlsConfig#ech_configs` takes an ECHConfigList (a DNS
   HTTPS record's `ech`); the name, ALPN and any ticket and early data go

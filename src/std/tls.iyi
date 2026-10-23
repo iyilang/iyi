@@ -559,6 +559,25 @@ pub class TlsConfig
   def initialize
   end
 
+  # A new configuration holding what this one holds - the same roots and
+  # identity objects, a copy of `alpn` - for a part to be changed in it
+  # and not here: std/http's client makes the configuration an HTTPS
+  # record's `ech` and protocols ask for so. It is another object, and
+  # what was made under this one (`TlsMadeUnder`) is not carried under it.
+  def dup : TlsConfig
+    made = TlsConfig.new
+    made.roots = @roots
+    made.alpn = @alpn.dup
+    made.now = @now
+    made.identity = @identity
+    made.min_version = @min_version
+    made.post_quantum = @post_quantum
+    made.require_staple = @require_staple
+    made.ech_configs = @ech_configs
+    made.ech_grease = @ech_grease
+    made
+  end
+
   @@system : Array(Certificate)? = nil
 
   def trusted_roots : Array(Certificate) | TlsError
@@ -3123,20 +3142,28 @@ class TlsServerHello
 end
 
 # The `TlsConfig` a client connection was made under, and the parts of it
-# that decide whom the connection trusts and what it presented: the
-# roots, the identity, the time certificates were checked at, the oldest
-# version spoken and whether an OCSP staple was required. Whatever was
-# made under it - a `TlsSession`'s ticket, std/http's kept connection -
-# is used again only under a configuration that is the same object
-# holding the same ones, so what one trust store, identity or staple rule
-# checked is never carried under another: set by assigning a new
-# configuration, or by assigning `roots`, `identity`, `now`,
-# `min_version` or `require_staple` on it in place. Objects are told
-# apart by `object_id`, and the references are held, so an address freed
-# and handed to a new configuration is never taken for the old one.
-# Certificates added to the same roots array in place are not seen: such
-# an array is still the same object. One definition serves std/tls and
-# std/http, so the two cannot come to compare different parts.
+# that decide whom the connection trusts, what it presented and whether
+# it named its server in the clear: the roots, the identity, the time
+# certificates were checked at, the oldest version spoken, whether an
+# OCSP staple was required, and the ECHConfigList it was encrypted under.
+# Whatever was made under it - a `TlsSession`'s ticket, std/http's kept
+# connection - is used again only under a configuration that is the same
+# object holding the same ones, so what one trust store, identity or
+# staple rule checked is never carried under another: set by assigning a
+# new configuration, or by assigning `roots`, `identity`, `now`,
+# `min_version`, `require_staple` or `ech_configs` on it in place. Objects
+# are told apart by `object_id`, and the references are held, so an
+# address freed and handed to a new configuration is never taken for the
+# old one. Certificates added to the same roots array in place are not
+# seen: such an array is still the same object. `ech_configs` is held to
+# its bytes, kept as they were: a connection made in the clear is not
+# handed a request made under a configuration that asks for ECH, nor its
+# ticket offered inside one, and a ticket that came inside one is not
+# offered in a ClientHello that names the server in the clear, where it
+# would tie the two connections together for anyone watching (RFC 9849
+# section 6.1.8 keeps ECH state to the source it came from). One
+# definition serves std/tls and std/http, so the two cannot come to
+# compare different parts.
 pub class TlsMadeUnder
   @config : TlsConfig
   @roots : Array(Certificate)?
@@ -3144,6 +3171,7 @@ pub class TlsMadeUnder
   @now : Time?
   @min_version : TlsVersion
   @require_staple : Bool
+  @ech_configs : Array(UInt8)?
 
   def initialize(@config : TlsConfig)
     @roots = @config.roots
@@ -3151,6 +3179,7 @@ pub class TlsMadeUnder
     @now = @config.now
     @min_version = @config.min_version
     @require_staple = @config.require_staple
+    @ech_configs = (list = @config.ech_configs) ? list.dup : nil
   end
 
   def same?(config : TlsConfig) : Bool
@@ -3161,6 +3190,7 @@ pub class TlsMadeUnder
     identity = config.identity
     mine = @identity
     return false unless mine.nil? ? identity.nil? : (!identity.nil? && mine.object_id == identity.object_id)
+    return false unless @ech_configs == config.ech_configs
     @now == config.now && @min_version == config.min_version && @require_staple == config.require_staple
   end
 end

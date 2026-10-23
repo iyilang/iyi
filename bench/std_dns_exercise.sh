@@ -5,9 +5,12 @@
 #
 # Runs bench/std_dns_exercise.iyi plain and --release - a name server in
 # the program itself, on 127.0.0.1, so nothing leaves the machine - checks
-# every section reported, and proves the checks can fail: each proof
-# builds the exercise against a copy of the library with one rule of the
-# resolver, or of the race `connect` runs over a name's addresses (Happy
+# every section reported, holds the HTTPS records it reads (RFC 9460) to
+# BIND's reading of the same - nsupdate's of their presentation format,
+# dig's printing of their bytes - where dig and nsupdate are installed,
+# and proves the checks can fail: each proof builds the exercise against
+# a copy of the library with one rule of the resolver, of the records'
+# format, or of the race `connect` runs over a name's addresses (Happy
 # Eyeballs, RFC 8305), taken out, and the exercise must stop at the
 # section that rule holds.
 set -u
@@ -89,7 +92,7 @@ build_and_run() {
 
 # A section that needs what this machine lacks - IPv6, a listener whose
 # backlog fills - reports itself skipped, with the reason.
-SECTIONS="query_bytes compression codec edns a_record aaaa_record cname_chain cname_dangling cname_loop nxdomain servfail nodata mismatched_id forged_source truncated_tcp pointer_loop retry timeout hosts_override search_list literals from_files connect_by_name connect_fallback unresolved_connect he_order he_refused he_blackhole he_family he_fds he_deadline he_cancel"
+SECTIONS="query_bytes compression codec edns svcb_wire svcb_malformed a_record aaaa_record cname_chain cname_dangling cname_loop nxdomain servfail nodata mismatched_id forged_source truncated_tcp pointer_loop retry timeout hosts_override search_list literals from_files connect_by_name connect_fallback unresolved_connect https_records https_alias https_alias_bound he_order he_refused he_blackhole he_family he_fds he_deadline he_cancel"
 
 for mode in plain release; do
   if [ "$mode" = plain ]; then
@@ -116,6 +119,119 @@ for mode in plain release; do
     grep -E "^he_[a-z]+: skipped" "$WORK/dns-$mode.out" 2>/dev/null | sed 's/^/  /'
   fi
 done
+
+echo
+echo "== BIND reads the same HTTPS records: nsupdate parses them, dig prints them"
+# The zone below is RFC 9460 appendix D's records as the RFC writes them
+# in presentation format - an SVCB example there is an HTTPS record here,
+# whose data is the same - and four of this gate's: all seven keys, and
+# the bytes alpn and a generic key escape. After each, the bytes the RFC
+# gives for it (this gate's worked out by hand from appendix A and
+# section 7). nsupdate, BIND's own reader of presentation format, sends
+# each record in an UPDATE to the exercise run as `zone DIR`; the bytes
+# it sent must be those; dig asks for each record back and prints it, and
+# `SvcbRecord#to_s` must print the same. Appendix D.3's failure cases go
+# to nsupdate too, which must refuse each, as the exercise refuses their
+# bytes (svcb_malformed).
+ZONE_RECORDS=$(cat <<'ZONE'
+d1.test. 0 foo.example.com.|0000 03666f6f076578616d706c6503636f6d00
+d2.test. 1 .|0001 00
+d3.test. 16 foo.example.com. port=53|0010 03666f6f076578616d706c6503636f6d00 0003 0002 0035
+d4.test. 1 foo.example.com. key667=hello|0001 03666f6f076578616d706c6503636f6d00 029b 0005 68656c6c6f
+d5.test. 1 foo.example.com. key667="hello\210qoo"|0001 03666f6f076578616d706c6503636f6d00 029b 0009 68656c6c6fd2716f6f
+d6.test. 1 foo.example.com. ipv6hint="2001:db8::1,2001:db8::53:1"|0001 03666f6f076578616d706c6503636f6d00 0006 0020 20010db8000000000000000000000001 20010db8000000000000000000530001
+d7.test. 1 example.com. ipv6hint="2001:db8:122:344::192.0.2.33"|0001 076578616d706c6503636f6d00 0006 0010 20010db80122034400000000c0000221
+d8.test. 16 foo.example.org. alpn=h2,h3-19 mandatory=ipv4hint,alpn ipv4hint=192.0.2.1|0010 03666f6f076578616d706c65036f726700 0000 0004 0001 0004 0001 0009 02 6832 05 68332d3139 0004 0004 c0000201
+d9.test. 16 foo.example.org. alpn="f\\\\oo\\,bar,h2"|0010 03666f6f076578616d706c65036f726700 0001 000c 08 665c6f6f2c626172 02 6832
+d10.test. 16 foo.example.org. alpn=f\\\092oo\092,bar,h2|0010 03666f6f076578616d706c65036f726700 0001 000c 08 665c6f6f2c626172 02 6832
+all.test. 1 . mandatory=port alpn=h2,http/1.1 no-default-alpn port=443 ipv4hint=192.0.2.1 ech=AEj+DQBEAQAgACAdd+scUi0IYFsXnUIU7ko2Nd9+F8M26pAGZVpz/KrWPgAEAAEAAWQVZWNoLXNpdGVzLmV4YW1wbGUubmV0AAA= ipv6hint=2001:db8::1|0001 00 0000 0002 0003 0001 000c 02 6832 08 687474702f312e31 0002 0000 0003 0002 01bb 0004 0004 c0000201 0005 004a 0048fe0d004401002000201d77eb1c522d08605b179d4214ee4a3635df7e17c336ea9006655a73fcaad63e00040001000164156563682d73697465732e6578616d706c652e6e65740000 0006 0010 20010db8000000000000000000000001
+alpn.test. 1 . alpn="a\032b,c\\,d,e\\\\f,\"g"|0001 00 0001 000f 03 612062 03 632c64 03 655c66 02 2267
+generic.test. 1 . key9 key65280="a\"b\\c;d e\000\127"|0001 00 0009 0000 ff00 000b 6122625c633b642065007f
+case.test. 2 Hello.Example. port=0 ipv6hint=::1,::,::1.2.3.4,::ffff:0.0.0.1,1:0:0:1:0:0:1:1|0002 0548656c6c6f074578616d706c6500 0003 0002 0000 0006 0050 00000000000000000000000000000001 00000000000000000000000000000000 00000000000000000000000001020304 00000000000000000000ffff00000001 00010000000000010000000000010001
+ZONE
+)
+ZONE_REFUSED=$(cat <<'ZONE'
+key123=abc key123=def
+mandatory
+alpn
+port
+ipv4hint
+ipv6hint
+no-default-alpn=abc
+mandatory=key123
+mandatory=mandatory
+mandatory=key123,key123 key123=abc
+ZONE
+)
+if ! command -v dig >/dev/null 2>&1 || ! command -v nsupdate >/dev/null 2>&1; then
+  echo "  skipped: no dig and nsupdate here (BIND's dnsutils), so nothing but this module reads the records"
+elif [ ! -x "$WORK/dns-plain" ]; then
+  echo "  the exercise did not build, so there is no name server to ask"
+  status=1
+else
+  ZONE_DIR="$WORK/zone"
+  mkdir -p "$ZONE_DIR"
+  timeout -k 5 60 "$WORK/dns-plain" zone "$ZONE_DIR" >"$WORK/zone.out" 2>&1 &
+  zone_pid=$!
+  for _ in $(seq 100); do
+    [ -s "$ZONE_DIR/port" ] && break
+    sleep 0.1
+  done
+  zone_port="$(cat "$ZONE_DIR/port" 2>/dev/null)"
+  # An UPDATE a record: the exercise answers over UDP alone, and nsupdate
+  # sends one past 512 bytes over TCP.
+  {
+    echo "server 127.0.0.1 $zone_port"
+    echo "zone test."
+    printf '%s\n' "$ZONE_RECORDS" | while IFS='|' read -r record _; do
+      owner="${record%% *}"
+      echo "update add $owner 60 IN HTTPS ${record#* }"
+      echo "send"
+    done
+  } >"$WORK/zone.nsupdate"
+  if [ -z "$zone_port" ]; then
+    echo "  the exercise's name server did not start: $(head -3 "$WORK/zone.out")"
+    status=1
+  elif ! timeout 20 nsupdate "$WORK/zone.nsupdate" >"$WORK/zone.nsupdate.out" 2>&1; then
+    echo "  nsupdate did not send the zone: $(head -3 "$WORK/zone.nsupdate.out")"
+    status=1
+  else
+    agreed=0
+    while IFS='|' read -r record wire; do
+      owner="${record%% *}"
+      name="${owner%.}"
+      want="$(printf '%s' "$wire" | tr -d ' ')"
+      seen="$(grep "^$name	" "$ZONE_DIR/seen" 2>/dev/null)"
+      sent="$(printf '%s' "$seen" | cut -f2)"
+      read_here="$(printf '%s' "$seen" | cut -f3)"
+      said="$(dig +noall +answer +tries=1 +timeout=5 @127.0.0.1 -p "$zone_port" "$name" HTTPS 2>&1 |
+        sed -E 's/^[^[:space:]]+[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+HTTPS[[:space:]]+//')"
+      if [ "$sent" != "$want" ]; then
+        echo "  $owner: nsupdate sent $sent, where the bytes are $want"
+        status=1
+      elif [ "$read_here" != "$said" ]; then
+        echo "  $owner: SvcbRecord printed \"$read_here\", dig \"$said\""
+        status=1
+      else
+        agreed=$((agreed + 1))
+      fi
+    done < <(printf '%s\n' "$ZONE_RECORDS")
+    echo "  $agreed of $(printf '%s\n' "$ZONE_RECORDS" | wc -l | tr -d ' ') records: the bytes nsupdate sent are the RFC's, and SvcbRecord prints each as dig does"
+    refused=0
+    while read -r params; do
+      printf 'server 127.0.0.1 %s\nzone test.\nupdate add refused.test. 60 IN HTTPS 1 foo.example.com. %s\nsend\n' "$zone_port" "$params" >"$WORK/zone.refused"
+      if timeout 20 nsupdate "$WORK/zone.refused" >/dev/null 2>&1 || grep -q '^refused.test	' "$ZONE_DIR/seen"; then
+        echo "  nsupdate took appendix D.3's \"$params\", which it should refuse"
+        status=1
+      else
+        refused=$((refused + 1))
+      fi
+    done < <(printf '%s\n' "$ZONE_REFUSED")
+    echo "  nsupdate refuses $refused of appendix D.3's $(printf '%s\n' "$ZONE_REFUSED" | wc -l | tr -d ' ') failure cases, whose bytes the exercise refuses"
+  fi
+  dig +tries=1 +timeout=2 @127.0.0.1 -p "${zone_port:-1}" stop.test HTTPS >/dev/null 2>&1
+  wait "$zone_pid" 2>/dev/null
+fi
 
 echo
 echo "== the checks fail when the resolver is broken"
@@ -222,6 +338,28 @@ else
   breaks "a name read as an address, as it was" noname 'cannot resolve address: "web.test"' socket.iyi \
     '!localhost?(host) && DnsName.valid?(host)' \
     'false'
+  # Service bindings: section 2.2's order and the mandatory keys
+  # (`SvcbRecord.parse`), and SVCB resolution's bound, order and name
+  # (`Resolver#https_records`). The chain the bound ends never ends, so
+  # without it the lookup asks until it is killed.
+  breaks "SvcParamKeys taken out of order" svcborder "keys out of order are refused" dns.iyi \
+    'return DnsMessage.malformed("SvcParamKey #{key_name(key)} after #{key_name(last)}: the keys are not in increasing order") if key < last' \
+    ''
+  breaks "a SvcParamKey taken twice" svcbtwice "a key twice is refused" dns.iyi \
+    'return DnsMessage.malformed("SvcParamKey #{key_name(key)} twice") if key == last' \
+    ''
+  breaks "mandatory keys not held to the record" svcbmandatory "a mandatory key the record does not carry is refused" dns.iyi \
+    'return DnsMessage.malformed("mandatory lists #{key_name(listed)}, which the record does not carry") unless keys.includes?(listed)' \
+    ''
+  breaks "an AliasMode chain without a bound" aliasbound HANG socket.iyi \
+    'if aliases > SvcbAnswer::MAX_ALIASES' \
+    'if false'
+  breaks "ServiceMode records in the order they came" svcbpriority "ServiceMode records by priority" socket.iyi \
+    'Resolver.by_priority(parsed)' \
+    'parsed'
+  breaks "another port asked at the host's own name" svcbport "another port asks _port._https.host" socket.iyi \
+    'asked = port == 443 ? relative : "_#{port}._https.#{relative}"' \
+    'asked = relative'
 
   # The race. Each copy needs what its section had in the plain run - a
   # full listener to race past, the descriptors counted (Linux), IPv6 to

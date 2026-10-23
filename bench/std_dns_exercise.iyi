@@ -2,20 +2,24 @@
 #
 # Run via:
 #     ./bin/iyi run bench/std_dns_exercise.iyi
+#     ./bin/iyi run bench/std_dns_exercise.iyi zone DIR
 #
 # Hermetic: the name server is this program. A UDP responder and a TCP
 # responder on 127.0.0.1 answer packets built here byte by byte - A, AAAA,
 # CNAME chains, NXDOMAIN, SERVFAIL, an answer with the wrong ID, one from
-# the wrong address, a truncated one, a compression loop, silence - and a
-# `Resolver` pointed at them is held to what each should come to. The
-# race `connect` runs over a name's addresses (Happy Eyeballs, RFC 8305)
-# is held against a resolver that reads only a hosts file, and listeners
-# on the loopback. Nothing leaves the machine. Each section prints
-# "<name>: ok", or "<name>: skipped" and why.
+# the wrong address, a truncated one, a compression loop, silence, HTTPS
+# records and AliasMode chains - and a `Resolver` pointed at them is held
+# to what each should come to. RFC 9460's own HTTPS record vectors are
+# read without a network. The race `connect` runs over a name's addresses
+# (Happy Eyeballs, RFC 8305) is held against a resolver that reads only a
+# hosts file, and listeners on the loopback. Nothing leaves the machine.
+# Each section prints "<name>: ok", or "<name>: skipped" and why. `zone
+# DIR` is the name server bench/std_dns_exercise.sh holds the records to
+# BIND's tools through (`serve_zone`).
 
 module bench/std_dns_exercise
 
-import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf}
+import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf, SvcbAnswer, SvcbRecord}
 import std/socket::{IPAddress, IPv4Address, IPv6Address, IyiSocket, Resolver, SocketError}
 import std/udp::{UdpSocket}
 import std/slice::{Bytes}
@@ -171,6 +175,161 @@ def error_of(got : Array(IPAddress) | DnsError | Cancelled, label : String) : Dn
   got
 end
 
+# Bytes from hex digits, anything else between them passed over: RFC 9460
+# appendix D's vectors as the RFC prints them.
+def hex_bytes(text : String) : Bytes
+  digits = [] of Int32
+  raw = text.to_unsafe
+  index = 0
+  while index < text.bytesize
+    byte = raw[index] | 32_u8
+    if byte >= 48_u8 && byte <= 57_u8
+      digits << byte.to_i32 - 48
+    elsif byte >= 97_u8 && byte <= 102_u8
+      digits << byte.to_i32 - 87
+    end
+    index = index + 1
+  end
+  out = Bytes.new(digits.size // 2)
+  index = 0
+  while index < out.size
+    out[index] = ((digits[index * 2] << 4) | digits[index * 2 + 1]).to_u8
+    index = index + 1
+  end
+  out
+end
+
+# The SVCB record in *text*'s hex, read as one owned by example.com, which
+# must read.
+def svcb_ok(text : String, label : String) : SvcbRecord
+  got = SvcbRecord.parse(hex_bytes(text), "example.com")
+  raise "ASSERTION FAILED: #{label}: #{got.message}" if got.is_a?(DnsError)
+  got
+end
+
+# Why the record in *text*'s hex is malformed, or "taken as" and what was
+# read when it is not.
+def svcb_refused(text : String) : String
+  got = SvcbRecord.parse(hex_bytes(text), "example.com")
+  got.is_a?(DnsError) && got.malformed? ? got.detail : "taken as #{got}"
+end
+
+def answer_of(got : SvcbAnswer | DnsError | Cancelled) : String
+  case got
+  in SvcbAnswer
+    "#{got.name} after #{got.aliases} aliases: #{got.records.map(&.to_s).join(" | ")}"
+  in DnsError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# The HTTPS records of an UPDATE (RFC 2136 2.5.1): its zone, its
+# prerequisites passed over, and from its update section each record of
+# type HTTPS's owner and data; nil when it does not read.
+def update_records(packet : Bytes) : Array(Tuple(String, Bytes))?
+  raw = packet.to_unsafe
+  zones = (raw[4].to_i32 << 8) | raw[5].to_i32
+  prerequisites = (raw[6].to_i32 << 8) | raw[7].to_i32
+  updates = (raw[8].to_i32 << 8) | raw[9].to_i32
+  at = 12
+  index = 0
+  while index < zones
+    read = DnsMessage.read_name(packet, at)
+    return nil if read.nil?
+    at = read[1] + 4
+    index = index + 1
+  end
+  found = [] of Tuple(String, Bytes)
+  index = 0
+  while index < prerequisites + updates
+    read = DnsMessage.read_name(packet, at)
+    return nil if read.nil?
+    owner, at = read
+    return nil if at + 10 > packet.size
+    type = (raw[at].to_i32 << 8) | raw[at + 1].to_i32
+    length = (raw[at + 8].to_i32 << 8) | raw[at + 9].to_i32
+    return nil if at + 10 + length > packet.size
+    if index >= prerequisites && type == DnsRecord::HTTPS
+      data = Bytes.new(length)
+      data.to_unsafe.copy_from(raw + at + 10, length)
+      found << {owner.downcase, data}
+    end
+    at = at + 10 + length
+    index = index + 1
+  end
+  found
+end
+
+# zone DIR: a name server for bench/std_dns_exercise.sh to hold this
+# module to BIND's: it takes the HTTPS records nsupdate sends it in an
+# UPDATE and answers dig's questions for them with the bytes it was sent.
+# DIR/port is its port, written once it listens; DIR/seen a line for each
+# record taken - its owner, its data in hex, and what `SvcbRecord` makes
+# of it, its presentation or "refused: " and why - rewritten whole after
+# each UPDATE. A question for stop.test ends it.
+def serve_zone(dir : String) : Nil
+  server = UdpSocket.bind("127.0.0.1", 0)
+  File.write("#{dir}/port", server.local_port.to_s)
+  held = [] of Tuple(String, Bytes)
+  while true
+    got = server.receive_from(65536)
+    break if got.is_a?(Cancelled)
+    packet, host, peer = got
+    next if packet.size < 12
+    if ((packet[2].to_i32 >> 3) & 15) == 5
+      taken = update_records(packet)
+      next if taken.nil?
+      taken.each { |record| held << record }
+      seen = held.map do |record|
+        parsed = SvcbRecord.parse(record[1], record[0])
+        "#{record[0]}\t#{record[1].hexstring}\t#{parsed.is_a?(DnsError) ? "refused: #{parsed.detail}" : parsed.to_s}"
+      end
+      File.write("#{dir}/seen", seen.join("\n") + "\n")
+      # NOERROR, the header and the zone section as they came.
+      zone_ends = DnsMessage.read_name(packet, 12)
+      next if zone_ends.nil?
+      reply = Bytes.new(zone_ends[1] + 4)
+      reply.to_unsafe.copy_from(packet.to_unsafe, reply.size)
+      reply[2] = reply[2] | 0x80_u8
+      reply[3] = 0_u8
+      index = 6
+      while index < 12
+        reply[index] = 0_u8
+        index = index + 1
+      end
+      server.send_to(reply, host, peer)
+      next
+    end
+    asked = DnsMessage.read_name(packet, 12)
+    next if asked.nil?
+    name, ends = asked
+    name = name.downcase
+    # The header and the question, then the records: no OPT record, though
+    # dig sends one.
+    question = [] of UInt8
+    index = 0
+    while index < ends + 4
+      question << packet[index]
+      index = index + 1
+    end
+    records = held.select { |record| record[0] == name }
+    buf = answer_head(bytes_of(question), name == "stop.test" ? 3 : 0, records.size)
+    buf[10] = 0_u8
+    buf[11] = 0_u8
+    records.each { |record| add_record(buf, QUESTION, DnsRecord::HTTPS, Array(UInt8).new(record[1].size) { |at| record[1][at] }) }
+    server.send_to(bytes_of(buf), host, peer)
+    break if name == "stop.test"
+  end
+  server.close
+end
+
+if Program.args.size == 2 && Program.args[0] == "zone"
+  serve_zone(Program.args[1])
+  exit 0
+end
+
 # --- The wire format, with no network ---
 
 query = DnsMessage.query(0xBEEF_u16, "a.Test.", DnsRecord::AAAA)
@@ -268,6 +427,88 @@ short_of = DnsMessage.parse(claimed)
 check short_of.is_a?(DnsError) && short_of.malformed?, "an additional section shorter than its count is refused"
 puts "edns: ok"
 
+# Service bindings (RFC 9460): appendix D's vectors, the RFC's own bytes,
+# read and printed as dig 9.20.24 prints them. The gate holds the same
+# text to BIND's through nsupdate and dig (`zone` above).
+FOO_COM = "03666f6f076578616d706c6503636f6d00"
+FOO_ORG = "03666f6f076578616d706c65036f726700"
+aliased = svcb_ok("0000 #{FOO_COM}", "D.1, AliasMode")
+check aliased.alias? && aliased.target == "foo.example.com" && aliased.keys.empty?, "AliasMode: priority 0 and the target"
+same "0 foo.example.com.", aliased.to_s, "AliasMode's presentation"
+rooted = svcb_ok("0001 00", "D.2, the target \".\"")
+check !rooted.alias? && rooted.target == "." && rooted.endpoint == "example.com", "ServiceMode to \".\": the owner is the endpoint (section 2.5.2), not #{rooted.endpoint}"
+same "1 .", rooted.to_s, "the root's presentation"
+ported = svcb_ok("0010 #{FOO_COM} 0003 0002 0035", "D.2, a port")
+check ported.priority == 16 && ported.port == 53 && ported.endpoint == "foo.example.com" && rooted.port.nil?, "port 53, and none without the key"
+same "16 foo.example.com. port=53", ported.to_s, "a port's presentation"
+generic = svcb_ok("0001 #{FOO_COM} 029b 0005 68656c6c6f", "D.2, a generic key")
+check generic.keys == [667] && generic.values[0].hexstring == "68656c6c6f", "key 667 kept as its bytes"
+same "1 foo.example.com. key667=\"hello\"", generic.to_s, "a generic key's presentation"
+same "1 foo.example.com. key667=\"hello\\210qoo\"", svcb_ok("0001 #{FOO_COM} 029b 0009 68656c6c6fd2716f6f", "D.2, a byte past ASCII").to_s, "a byte past ASCII as \\DDD"
+hinted = svcb_ok("0001 #{FOO_COM} 0006 0020 20010db8000000000000000000000001 20010db8000000000000000000530001", "D.2, two IPv6 hints")
+check hinted.ipv6hint.size == 2 && hinted.ipv6hint[1].hexstring == "20010db8000000000000000000530001", "two IPv6 hints"
+same "1 foo.example.com. ipv6hint=2001:db8::1,2001:db8::53:1", hinted.to_s, "IPv6 hints' presentation"
+same "1 example.com. ipv6hint=2001:db8:122:344::c000:221", svcb_ok("0001 076578616d706c6503636f6d00 0006 0010 20010db80122034400000000c0000221", "D.2, an embedded IPv4 hint").to_s,
+  "an IPv6 hint the RFC writes with an embedded IPv4 address, as BIND writes it"
+sorted = svcb_ok("0010 #{FOO_ORG} 0000 0004 0001 0004 0001 0009 02 6832 05 68332d3139 0004 0004 c0000201", "D.2, mandatory, alpn and ipv4hint")
+check sorted.mandatory == [1, 4] && sorted.alpn == ["h2", "h3-19"] && sorted.ipv4hint.map(&.hexstring) == ["c0000201"], "mandatory, alpn and ipv4hint read"
+same "16 foo.example.org. mandatory=alpn,ipv4hint alpn=\"h2,h3-19\" ipv4hint=192.0.2.1", sorted.to_s, "the keys in their wire order"
+escaped = svcb_ok("0010 #{FOO_ORG} 0001 000c 08 665c6f6f2c626172 02 6832", "D.2, an escaped comma and backslash")
+check escaped.alpn == ["f\\oo,bar", "h2"], "an alpn-id holding a comma and a backslash: #{escaped.alpn}"
+same "16 foo.example.org. alpn=\"f\\\\\\\\oo\\\\,bar,h2\"", escaped.to_s, "a comma and a backslash escaped twice inside alpn's quotes"
+# All seven keys, ech RFC 9848 3's example ECHConfigList.
+ech = "0048fe0d004401002000201d77eb1c522d08605b179d4214ee4a3635df7e17c336ea9006655a73fcaad63e00040001000164156563682d73697465732e6578616d706c652e6e65740000"
+every = svcb_ok("0001 00 0000 0002 0003 0001 000c 02 6832 08 687474702f312e31 0002 0000 0003 0002 01bb 0004 0004 c0000201 0005 004a #{ech} 0006 0010 20010db8000000000000000000000001", "all seven keys")
+check every.keys == [0, 1, 2, 3, 4, 5, 6] && every.mandatory == [3] && every.alpn == ["h2", "http/1.1"] && every.no_default_alpn? && every.port == 443, "mandatory, alpn, no-default-alpn and port read"
+check (every.ech || Bytes.new(0)).hexstring == ech && every.ipv4hint.size == 1 && every.ipv6hint.size == 1, "ech and the hints read"
+same "1 . mandatory=port alpn=\"h2,http/1.1\" no-default-alpn port=443 ipv4hint=192.0.2.1 ech=AEj+DQBEAQAgACAdd+scUi0IYFsXnUIU7ko2Nd9+F8M26pAGZVpz/KrWPgAEAAEAAWQVZWNoLXNpdGVzLmV4YW1wbGUubmV0AAA= ipv6hint=2001:db8::1",
+  every.to_s, "all seven keys' presentation"
+puts "svcb_wire: ok"
+
+# Section 2.2's refusals, and the values of each key's form: a key twice
+# and keys out of order, a param cut short, a key mandatory lists and the
+# record does not carry; appendix D.3's failure cases written as bytes;
+# and a target compressed, or with a dot in a label.
+said = svcb_refused("0001 00 0002 0000 0001 0003 026832")
+check said.includes?("not in increasing order"), "keys out of order are refused: #{said}"
+said = svcb_refused("0001 00 0001 0003 026832 0001 0003 026833")
+check said.includes?("twice"), "a key twice is refused: #{said}"
+said = svcb_refused("0001 00 0000 0002 0003")
+check said.includes?("does not carry"), "a mandatory key the record does not carry is refused: #{said}"
+said = svcb_refused("0001 #{FOO_COM} 0000 0002 007b")
+check said.includes?("mandatory lists key123"), "a mandatory key the record does not carry is refused, by its generic name (D.3): #{said}"
+said = svcb_refused("0001 00 0003 0002 01")
+check said.includes?("runs past the record"), "a value cut short by the end of the record is refused: #{said}"
+said = svcb_refused("0001 00 0003 00")
+check said.includes?("cut short"), "a key and length cut short are refused: #{said}"
+said = svcb_refused("00")
+check said.includes?("shorter than"), "a record shorter than a priority and a target is refused: #{said}"
+["0000", "0001", "0003", "0004", "0006"].each do |key|
+  said = svcb_refused("0001 #{FOO_COM} #{key} 0000")
+  check said.includes?("bytes, where") || said.includes?("empty, where"), "key #{key} without a value is refused (D.3): #{said}"
+end
+said = svcb_refused("0001 #{FOO_COM} 0001 0003 026832 0002 0003 616263")
+check said.includes?("where it is empty"), "no-default-alpn with a value is refused (D.3): #{said}"
+said = svcb_refused("0001 #{FOO_COM} 0000 0002 0000")
+check said.includes?("lists itself"), "mandatory listing itself is refused (D.3): #{said}"
+said = svcb_refused("0001 #{FOO_COM} 0000 0004 007b007b 007b 0003 616263")
+check said.includes?("not in increasing order"), "mandatory listing a key twice is refused (D.3): #{said}"
+said = svcb_refused("0001 00 0002 0000")
+check said.includes?("without alpn"), "no-default-alpn without alpn is refused: #{said}"
+{"0001 00 0001 0003 05 6832"                      => "an alpn-id past the value",
+ "0001 00 0001 0001 00"                           => "an empty alpn-id",
+ "0001 00 0004 0005 c000020100"                   => "five bytes of ipv4hint",
+ "0001 00 0006 000f 20010db800000000000000000000" => "fifteen bytes of ipv6hint",
+ "0001 00 0005 0006 0005 01020304"                => "an ECHConfigList whose length is not its own"}.each do |text, what|
+  said = svcb_refused(text)
+  check said.starts_with?("SvcParamKey "), "#{what} is refused: #{said}"
+end
+said = svcb_refused("0001 c00c")
+check said.includes?("compressed"), "a compressed target is refused: #{said}"
+said = svcb_refused("0001 03 612e62 00")
+check said.includes?("dot"), "a target with a dot in a label is refused: #{said}"
+puts "svcb_malformed: ok"
+
 # --- A name server in this process ---
 
 # TCP's port first, and UDP on the same number, tried again on a refusal:
@@ -298,13 +539,76 @@ forger = UdpSocket.bind("127.0.0.1", 0)
 log = [] of String
 slow_seen = 0
 
+# An SVCB record's data: *priority*, *target* ("." for the root), and the
+# params as hex.
+def svcb_data(priority : Int32, target : String, params : String = "") : Array(UInt8)
+  data = [] of UInt8
+  push16(data, priority)
+  (target == "." ? [0_u8] : wire_name(target)).each { |byte| data << byte }
+  hex_bytes(params).each { |byte| data << byte }
+  data
+end
+
+# The HTTPS answers the resolver's `https_records` is held to: ServiceMode
+# records out of order, AliasMode chains of one, two and three links and
+# one that never ends, an alias to "." and to a name with no HTTPS
+# records, ServiceMode beside AliasMode, a port-prefixed name, a CNAME, and
+# a set with a malformed record in it.
+def https_answer(query : Bytes, name : String) : Array(UInt8)
+  ported = "0003 0002"
+  if name.starts_with?("chain") && name.ends_with?(".test")
+    link = name[5, name.bytesize - 10].to_i
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(0, "chain#{link + 1}.test"))
+    return buf
+  end
+  case name
+  when "svc.test"
+    buf = answer_head(query, 0, 3)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(3, ".", "#{ported} 1f43"))
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(1, ".", "#{ported} 1f41"))
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(2, ".", "#{ported} 1f42"))
+  when "apex.test", "hop.test", "far.test", "gone.test", "bare.test"
+    target = {"apex.test" => "svc.test", "hop.test" => "apex.test", "far.test" => "hop.test", "gone.test" => ".", "bare.test" => "a.test"}[name]
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(0, target))
+  when "mixed.test"
+    buf = answer_head(query, 0, 2)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(1, ".", "#{ported} 0001"))
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(0, "svc.test"))
+  when "_8443._https.web.test"
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(1, ".", "0001 0003 026832"))
+  when "cn.test"
+    # cn.test CNAME svc2.test, and svc2.test's record: its target "." is
+    # svc2.test, the owner, not the name asked.
+    buf = answer_head(query, 0, 2)
+    alias_at = buf.size + 12
+    add_record(buf, QUESTION, DnsRecord::CNAME, wire_name("svc2.test"))
+    add_record(buf, [0xC0_u8, alias_at.to_u8], DnsRecord::HTTPS, svcb_data(1, ".", "#{ported} 24c3"))
+  when "bad.test"
+    buf = answer_head(query, 0, 2)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(1, ".", "#{ported} 01bb"))
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(2, ".", "0003 0002 01bb 0001 0003 026832"))
+  when "nx.test"
+    buf = answer_head(query, 3, 0)
+  else
+    buf = answer_head(query, 0, 0)
+  end
+  buf
+end
+
 # The answer to one query, by name: what each section below asks about.
 def respond(server : UdpSocket, forger : UdpSocket, query : Bytes, host : String, peer_port : Int32, log : Array(String), slow_seen : Int32) : Int32
   parsed = DnsMessage.parse(query)
   return slow_seen unless parsed.is_a?(DnsMessage)
   name = parsed.question_name.downcase
   type = parsed.question_type
-  log << "#{name}/#{type == 1 ? "A" : "AAAA"}"
+  log << "#{name}/#{type == DnsRecord::A ? "A" : (type == DnsRecord::AAAA ? "AAAA" : "HTTPS")}"
+  if type == DnsRecord::HTTPS
+    server.send_to(bytes_of(https_answer(query, name)), host, peer_port)
+    return slow_seen
+  end
   buf = [] of UInt8
   if type == DnsRecord::AAAA
     case name
@@ -784,6 +1088,40 @@ group do |g|
     check failure.unresolved? && failure.dns_error.as(DnsError).not_found?, "unresolved? and not_found?"
     check failure.message.starts_with?("cannot resolve nx.test.: the name does not exist"), "the sentence names the host: #{failure.message}"
     puts "unresolved_connect: ok"
+
+    # HTTPS records (RFC 9460 section 3), over the server above.
+    by_priority = "1 . port=8001 | 2 . port=8002 | 3 . port=8003"
+    same "svc.test after 0 aliases: #{by_priority}", answer_of(resolver.https_records("svc.test")), "ServiceMode records by priority"
+    cnamed = resolver.https_records("cn.test")
+    check cnamed.is_a?(SvcbAnswer) && cnamed.records.size == 1 && cnamed.records[0].endpoint == "svc2.test", "a CNAME followed, \".\" the owner it ended at: #{answer_of(cnamed)}"
+    log.clear
+    same "_8443._https.web.test after 0 aliases: 1 . alpn=\"h2\"", answer_of(resolver.https_records("web.test", 8443)), "another port asks _port._https.host (section 9.1)"
+    same "_8443._https.web.test/HTTPS", log.join(" "), "the port-prefixed name alone"
+    nodata = resolver.https_records("web.test")
+    check nodata.is_a?(DnsError) && nodata.no_address? && nodata.message.includes?("web.test: the name has no HTTPS record"), "NODATA: no HTTPS record: #{answer_of(nodata)}"
+    missing = resolver.https_records("nx.test")
+    check missing.is_a?(DnsError) && missing.not_found?, "NXDOMAIN: #{answer_of(missing)}"
+    bad = resolver.https_records("bad.test")
+    check bad.is_a?(DnsError) && bad.malformed? && bad.message.includes?("not in increasing order"), "one malformed record refuses the set (section 2.2): #{answer_of(bad)}"
+    puts "https_records: ok"
+
+    same "svc.test after 1 aliases: #{by_priority}", answer_of(resolver.https_records("apex.test")), "an AliasMode record followed to its target's records"
+    same "svc.test after 2 aliases: #{by_priority}", answer_of(resolver.https_records("hop.test")), "two AliasMode records followed"
+    same "svc.test after 1 aliases: #{by_priority}", answer_of(resolver.https_records("mixed.test")), "ServiceMode beside AliasMode passed over (section 2.4.1)"
+    gone = resolver.https_records("gone.test")
+    check gone.is_a?(SvcbAnswer) && gone.unavailable? && gone.records.empty?, "AliasMode to \".\": the service says it is not there: #{answer_of(gone)}"
+    same "a.test after 1 aliases: ", answer_of(resolver.https_records("bare.test")), "an alias to a name with no HTTPS records ends there, the target the endpoint left"
+    puts "https_alias: ok"
+
+    # The chain that never ends first: without the bound the lookup would
+    # ask until it was killed.
+    log.clear
+    endless = resolver.https_records("chain1.test")
+    check endless.is_a?(DnsError) && endless.malformed?, "a chain of AliasMode records that never ends is malformed: #{answer_of(endless)}"
+    same "chain1.test/HTTPS chain2.test/HTTPS chain3.test/HTTPS", log.join(" "), "and asked about #{SvcbAnswer::MAX_ALIASES + 1} times"
+    far = resolver.https_records("far.test")
+    check far.is_a?(DnsError) && far.malformed? && far.message.includes?("AliasMode"), "three AliasMode records are past the bound: #{answer_of(far)}"
+    puts "https_alias_bound: ok"
 
     happy_eyeballs
 

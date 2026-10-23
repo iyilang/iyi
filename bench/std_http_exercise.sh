@@ -103,11 +103,12 @@ echo "== what the module reaches"
 # std/socket, std/time and std/tls reaches anything: HTTP/2's std/hpack
 # and the byte slices it reads are iyi over the prelude, as std/zstd is
 # over std/digest's XXH64, and std/x509 - the certificate a request
-# carries - is std/tls's own already, as std/unicode is std/uri's. No
+# carries - is std/tls's own already, as std/unicode is std/uri's, and
+# std/dns - the HTTPS records a client may connect by - std/socket's. No
 # std/env: a proxy the environment names is std/http_proxy's to read.
 imports=$(grep -oE '^import std/[a-z_0-9]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/base64 std/compress std/digest std/hpack std/mime std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
-  echo "  std/socket, std/time and std/tls (std/x509 its own), and std/base64, std/compress, std/digest, std/hpack, std/mime, std/slice, std/unicode, std/uri and std/zstd, which reach nothing"
+if [ "$imports" = "std/base64 std/compress std/digest std/dns std/hpack std/mime std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
+  echo "  std/socket, std/time and std/tls (std/x509 its own, std/dns std/socket's), and std/base64, std/compress, std/digest, std/hpack, std/mime, std/slice, std/unicode, std/uri and std/zstd, which reach nothing"
 else
   echo "  std/http imports $imports"
   status=1
@@ -750,7 +751,7 @@ PY
       '      next if cookie.secure && !secure' '      nil' "downgrade"
     # And the proof: https:// written in the clear does not answer so.
     mkdir -p "$WORK/clear/std"
-    sed 's/^        if secure$/        if false/' "$REPO/src/std/http.iyi" > "$WORK/clear/std/http.iyi"
+    sed 's/^          if secure$/          if false/' "$REPO/src/std/http.iyi" > "$WORK/clear/std/http.iyi"
     if cmp -s "$REPO/src/std/http.iyi" "$WORK/clear/std/http.iyi"; then
       echo "  the patch that sends https:// in the clear changed nothing, so it proves nothing"
       status=1
@@ -1369,6 +1370,95 @@ PY
     'TlsSession.new(@origin_tickets)' 'TlsSession.new' "an origin's tickets"
   resume_breaks "the tickets in all unbounded" \
     '    while kept.size >= room' '    while false' "tickets in all"
+fi
+
+echo
+echo "== HTTPS records: an HTTPClient connecting by them (bench/std_http_https_records.iyi)"
+# A name server and a TLS server holding ECH keys, both in the program,
+# and a client with `use_https_records`: the record's ech taken as the
+# connection's ECH configuration - the server opens the ClientHelloInner
+# and answers for inner.test inside it, public.test outside - its alpn
+# put first in the ClientHello, an endpoint of no protocol the client has
+# passed over; AliasMode to a target and a port; a config the server no
+# longer holds retried once under the retry_configs it sent, a second
+# refusal the failure, a server with no keys retried without ECH; no fall
+# back to the origin in the clear past endpoints that all carry ech; no
+# records, and a failed lookup in the clear, as without records, and a
+# failed lookup over an encrypted upstream the request's failure; and the
+# connections and tickets kept held to the configuration they were made
+# under, ech_configs and all. The program's lines are the checks, and a
+# line that is not so says "FAIL <line>:". Then copies of std/http, and of
+# std/tls's `TlsMadeUnder`, with one rule taken out, each caught at the
+# line that names it.
+if ! "$IYI" build -o "$WORK/records" "$REPO/bench/std_http_https_records.iyi" >"$WORK/records.build" 2>&1; then
+  echo "  bench/std_http_https_records.iyi did not build"
+  sed -n '1,8p' "$WORK/records.build"
+  status=1
+else
+  said="$(timeout 120 "$WORK/records" 2>&1)"
+  if printf '%s\n' "$said" | grep -qx 'ALL CHECKS PASSED' && ! printf '%s\n' "$said" | grep -q '^FAIL'; then
+    printf '%s\n' "$said" | sed 's/^/  /'
+  else
+    echo "  the client's HTTPS records are not the expected ones:"
+    printf '%s\n' "$said" | sed 's/^/    /'
+    status=1
+  fi
+  # records_breaks <label> <old> <new> <line> [module]: the program over a
+  # copy of std/http - or of std/<module> - with <old> made <new> must say
+  # "FAIL <line>:".
+  records_breaks() {
+    local label="$1" old="$2" new="$3" line="$4" module="${5:-http}" got
+    rm -rf "$WORK/recordsbreak" && mkdir -p "$WORK/recordsbreak/std"
+    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module.iyi" "$WORK/recordsbreak/std/$module.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+    then
+      echo "  $label: the patch did not apply"
+      status=1
+      return
+    fi
+    if ! IYI_PATH="$WORK/recordsbreak${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/records-broken" "$REPO/bench/std_http_https_records.iyi" >"$WORK/records-broken.build" 2>&1; then
+      echo "  $label: the broken copy did not build"
+      sed -n '1,6p' "$WORK/records-broken.build" | sed 's/^/    /'
+      status=1
+      return
+    fi
+    got="$(timeout 120 "$WORK/records-broken" 2>&1)"
+    if printf '%s\n' "$got" | grep -q "^FAIL $line:"; then
+      echo "  $label: caught at \"$line\": $(printf '%s\n' "$got" | grep -m1 "^$line:" | cut -c1-110)"
+    else
+      echo "  $label: not caught at \"$line\""
+      printf '%s\n' "$got" | grep '^FAIL' | sed 's/^/    /'
+      status=1
+    fi
+  }
+  records_breaks "an HTTPS record's ech passed over" \
+    '        ech = bytes if configs.is_a?(Array(TlsEchConfig)) && configs.any? { |config| !config.hpke_suite.nil? }' '' "ech"
+  records_breaks "a turned-down ECH not retried" \
+    'if tls.is_a?(TlsError) && tls.alert == TlsAlert::ECH_REQUIRED && !config.ech_configs.nil? && address' \
+    'if tls.is_a?(TlsError) && tls.alert == TlsAlert::ECH_REQUIRED && !config.ech_configs.nil? && address && false' "retry"
+  records_breaks "the record's protocols not put first" \
+    'ordered = alpn.select { |protocol| listed.includes?(protocol) } + alpn.reject { |protocol| listed.includes?(protocol) }' 'ordered = alpn' "ech"
+  records_breaks "an endpoint of no protocol the client has taken" \
+    '      next unless spoken.any? { |protocol| offered.includes?(protocol) }' '' "an endpoint of no protocol the client has"
+  records_breaks "the origin fallen back to past endpoints that all carry ech" \
+    '    return failed if reliant && failed' '' "no fallback past ech"
+  records_breaks "HTTPS records asked for by default" \
+    'property use_https_records : Bool = false' 'property use_https_records : Bool = true' "off by default"
+  records_breaks "a failed lookup over an encrypted upstream passed over" \
+    'found.malformed? || resolver.upstreams.empty?' 'found.malformed? || true' "SERVFAIL over an encrypted upstream"
+  records_breaks "a record's configuration made anew for each connection" \
+    'if found.nil? && held.ech == ech && held.alpn == alpn' 'if false' "resumed"
+  records_breaks "a connection kept from before records were asked for taken" \
+    'current = keeping.https_current(origin, under)' 'current = keeping.https_current(origin, under) || under' "records turned on and off"
+  # `TlsMadeUnder` is std/tls's, which std/http's kept connections and
+  # tickets are both held to.
+  records_breaks "ech_configs assigned in place not seen" \
+    '    return false unless @ech_configs == config.ech_configs' '' "ech_configs assigned in place" tls
 fi
 
 echo
@@ -3210,7 +3300,7 @@ mutate "a redirect that never changes the method" 'unless keeps || (status != 30
 mutate "credentials carried to another host" 'sent = without(sent, ["Authorization", "Proxy-Authorization", "Cookie"]) unless same_authority?(current, target)' ''
 mutate "a part that does not end at its boundary" '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]
           @part_done = true' '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]'
-mutate "a client that never keeps a connection" 'conn = keeping.take(key, secure ? under : nil) unless upgrade' ''
+mutate "a client that never keeps a connection" 'conn = keeping.take(key, secure ? under : nil)' ''
 mutate "a client that keeps a connection the answer closed" 'keep = got.starts_with?("HTTP/1.1 ") && !reader.to_close? && status != 101 && (said.nil? || !has_token?(said, "close"))' 'keep = true'
 mutate "a client that holds a connection for whatever was left unread" 'client && @keep && !@conn.ended? && @reader.drain(65536_i64)' 'client && @keep && !@conn.ended? && @reader.drain(9223372036854775807_i64)'
 mutate "a GET not sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head ||' 'retry = false && (head ||'
@@ -3694,7 +3784,7 @@ mtls_breaks "an HTTP/2 request without the client's certificate" mtls_h2 \
   '      req.peer_certificates = peer
       response = handler.call(req)' '      response = handler.call(req)'
 mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
-  '            offered.identity = under.identity
+  '              offered.identity = under.identity
 ' ''
 # The client through a proxy, broken in a copy: the round against the
 # Python proxy and the iyi server above must fail.

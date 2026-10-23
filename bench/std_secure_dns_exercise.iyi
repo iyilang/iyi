@@ -16,7 +16,7 @@
 
 module bench/std_secure_dns_exercise
 
-import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord}
+import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, SvcbAnswer}
 import std/socket::{DnsUpstream, IPAddress, IPv4Address, IPv6Address, IyiSocket, Resolver, SocketError}
 import std/secure_dns::{DnsOverHttps, DnsOverTls}
 import std/tls::{TlsConfig}
@@ -72,9 +72,30 @@ def family(got : Array(IPAddress) | DnsError | Cancelled, type : String) : Strin
   kept.join(" ")
 end
 
+# The zone's HTTPS record at svc.zone.test, as `SvcbRecord#to_s` and dig
+# print it: alpn h2 and http/1.1, and RFC 9848 3's example ECHConfigList.
+SVC_HTTPS = "1 . alpn=\"h2,http/1.1\" ech=AEj+DQBEAQAgACAdd+scUi0IYFsXnUIU7ko2Nd9+F8M26pAGZVpz/KrWPgAEAAEAAWQVZWNoLXNpdGVzLmV4YW1wbGUubmV0AAA="
+
+# What SVCB resolution came to: the name, the aliases followed and the
+# ServiceMode records, or the failure.
+def show_https(got : SvcbAnswer | DnsError | Cancelled) : String
+  case got
+  in SvcbAnswer
+    "#{got.name} after #{got.aliases} aliases: #{got.records.map(&.to_s).join(" | ")}"
+  in DnsError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
 # The zone's answers through *resolver*, printed for the gate and held to
-# the zone as the server's script writes it.
+# the zone as the server's script writes it. Its HTTPS records first, to
+# the same text the plaintext path reads them as (`https_plaintext`).
 def answers(via : String, resolver : Resolver) : Nil
+  same "svc.zone.test after 0 aliases: #{SVC_HTTPS}", show_https(resolver.https_records("svc.zone.test")), "#{via}: a ServiceMode HTTPS record, its alpn and ech"
+  puts "answer #{via} HTTPS svc.zone.test #{SVC_HTTPS}"
+  same "svc.zone.test after 1 aliases: #{SVC_HTTPS}", show_https(resolver.https_records("https.zone.test")), "#{via}: an AliasMode HTTPS record followed"
   same "192.0.2.1", show(resolver.resolve("a.zone.test")), "#{via}: an A record"
   puts "answer #{via} A a.zone.test 192.0.2.1"
   same "2001:db8::6", show(resolver.resolve("six.zone.test")), "#{via}: an AAAA record"
@@ -371,6 +392,13 @@ same "192.0.2.1", show(plain.resolve("a.zone.test")), "a lookup over plaintext U
 queries, edns, unpadded, said = padding(plain)
 check queries >= 3 && edns == 0, "a plaintext query carries no OPT record, so no padding (RFC 7830 6): #{said}"
 puts "plaintext_unpadded: ok"
+
+# The same HTTPS records asked in the clear, of the same zone's UDP server:
+# the text `answers` holds every encrypted upstream to.
+same "svc.zone.test after 0 aliases: #{SVC_HTTPS}", show_https(plain.https_records("svc.zone.test")), "plaintext: a ServiceMode HTTPS record, its alpn and ech"
+same "svc.zone.test after 1 aliases: #{SVC_HTTPS}", show_https(plain.https_records("https.zone.test")), "plaintext: an AliasMode HTTPS record followed"
+puts "answer udp HTTPS svc.zone.test #{SVC_HTTPS}"
+puts "https_plaintext: ok"
 
 # --- Plaintext only when asked ---
 

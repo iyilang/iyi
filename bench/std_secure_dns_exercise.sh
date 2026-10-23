@@ -9,7 +9,8 @@
 # HTTP/2 through the `h2` package where it imports). The gate runs
 # bench/std_secure_dns_exercise.iyi against them, plain and --release;
 # asks dig the same questions over the same servers (`+tls`, `+https`,
-# `+https-get`) and holds the two to the same answers, which is what shows
+# `+https-get`) - HTTPS records (RFC 9460) among them, which dig prints as
+# `SvcbRecord#to_s` does - and holds the two to the same answers, which is what shows
 # the scripted servers speak the protocols and not merely what the iyi
 # client expects; holds the servers' padding rule, which every DoT and DoH
 # query the iyi client sends must pass, to dig's `+padding`; and proves the
@@ -99,7 +100,7 @@ build_and_run() {
   return 0
 }
 
-SECTIONS="wire wire_padding dot_answers dot_reuse dot_pipelined dot_idle dot_wrong_name dot_id_mismatch dot_truncated dot_oversized dot_recovers dot_padding edns_answers doh_post doh_get doh_zero_id doh_reuse doh_status doh_content_type doh_oversized doh_truncated doh_wrong_name doh_padding plaintext_unpadded no_plaintext_fallback plaintext_fallback connect_by_name"
+SECTIONS="wire wire_padding dot_answers dot_reuse dot_pipelined dot_idle dot_wrong_name dot_id_mismatch dot_truncated dot_oversized dot_recovers dot_padding edns_answers doh_post doh_get doh_zero_id doh_reuse doh_status doh_content_type doh_oversized doh_truncated doh_wrong_name doh_padding plaintext_unpadded https_plaintext no_plaintext_fallback plaintext_fallback connect_by_name"
 if [ -f "$SRV/h2.port" ]; then
   SECTIONS="$SECTIONS doh_h2"
 fi
@@ -185,10 +186,13 @@ else
     case " $over " in *" ${flags[0]} "*) ;; *) over="$over ${flags[0]}" ;; esac
     got="$(dig "${flags[@]}" ${VERIFY[@]+"${VERIFY[@]}"} @127.0.0.1 -p "$port" "$name" "$type" +short +tries=1 +timeout=5 2>&1)"
     # +short: an address a line, a CNAME's target ending in a dot, a TXT
-    # record's strings each quoted. The iyi line joins a record's strings
-    # and separates records with " | ".
+    # record's strings each quoted, an HTTPS record's data in presentation
+    # format, which the iyi line holds as `SvcbRecord#to_s` prints it. The
+    # iyi line joins a record's strings and separates records with " | ".
     if [ "$type" = TXT ]; then
       said="$(printf '%s\n' "$got" | "$PY" -c 'import sys, shlex; print(" | ".join("".join(shlex.split(line)) for line in sys.stdin.read().splitlines() if line))')"
+    elif [ "$type" = HTTPS ]; then
+      said="$(printf '%s\n' "$got" | sed '/^$/d' | sed ':a;N;$!ba;s/\n/ | /g')"
     else
       said="$(printf '%s\n' "$got" | grep -v '\.$' | tr '\n' ' ' | sed 's/ *$//')"
     fi
@@ -340,6 +344,15 @@ breaks "queries sent unpadded" unpadded "every DoT query is padded" socket.iyi \
 breaks "the padding not brought to a block" unblocked "not a multiple of 128" dns.iyi \
   '      size = size + (block - size % block) % block
 ' ''
+# HTTPS records over the upstreams: asked in the clear instead, of a
+# resolver whose upstreams are its only servers; and their data not read
+# as SVCB records when it came over an upstream.
+breaks "HTTPS records asked in the clear despite upstreams" httpsclear "dot: a ServiceMode HTTPS record" socket.iyi \
+  'return plaintext(name, type) if @upstreams.empty?' \
+  'return plaintext(name, type) if @upstreams.empty? || type == DnsRecord::HTTPS'
+breaks "HTTPS records not parsed when they came over an upstream" httpsparse "dot: a ServiceMode HTTPS record" socket.iyi \
+  'record = SvcbRecord.parse(data, owner)' \
+  'record = @upstreams.empty? ? SvcbRecord.parse(data, owner) : DnsMessage.malformed("an HTTPS record over an upstream, not read")'
 
 echo
 if [ "$status" -eq 0 ]; then

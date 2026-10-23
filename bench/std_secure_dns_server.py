@@ -61,18 +61,23 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-A, CNAME, TXT, AAAA = 1, 5, 16, 28
+A, CNAME, TXT, AAAA, HTTPS = 1, 5, 16, 28, 65
 MEDIA = "application/dns-message"
 
-# name -> [(type, data)]: data is the address text, the target, or the
-# TXT record's strings.
+# name -> [(type, data)]: data is the address text, the target, the TXT
+# record's strings, or an HTTPS record's data in hex (RFC 9460 2.2).
 ZONE = {
     "a.zone.test": [(A, "192.0.2.1")],
     "six.zone.test": [(AAAA, "2001:db8::6")],
     "dual.zone.test": [(A, "192.0.2.2"), (AAAA, "2001:db8::2")],
     "txt.zone.test": [(TXT, ["hello, encrypted world", "and a second string"]), (TXT, ["v=spf1 -all"])],
     "alias.zone.test": [(CNAME, "a.zone.test")],
-    "svc.zone.test": [(A, "127.0.0.1")],
+    # A ServiceMode HTTPS record - alpn h2 and http/1.1, and RFC 9848 3's
+    # example ECHConfigList as its ech - and an AliasMode one to it.
+    "svc.zone.test": [(A, "127.0.0.1"), (HTTPS, "0001" "00" "0001000c02683208687474702f312e31"
+                                                "0005004a0048fe0d004401002000201d77eb1c522d08605b179d4214ee4a3635df7e17c336ea"
+                                                "9006655a73fcaad63e00040001000164156563682d73697465732e6578616d706c652e6e65740000")],
+    "https.zone.test": [(HTTPS, "0000" "03737663047a6f6e65047465737400")],
     # The names that misbehave answer for themselves; these records are
     # what a well-behaved answer would have held.
     "wrong-id.zone.test": [(A, "192.0.2.66")],
@@ -221,6 +226,8 @@ def rdata(rtype, data):
         return ipaddress.IPv6Address(data).packed
     if rtype == CNAME:
         return wire_name(data)
+    if rtype == HTTPS:
+        return bytes.fromhex(data)
     return b"".join(bytes([len(s.encode())]) + s.encode() for s in data)
 
 

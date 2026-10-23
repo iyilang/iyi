@@ -269,6 +269,11 @@ module Iyi
     @@travelled_lines[filename]?.try &.[line_number]?
   end
 
+  # iyi: whether an artifact this build read located a body in *filename*.
+  def self.travelled_file?(filename : String) : Bool
+    @@travelled_lines.has_key?(filename)
+  end
+
   module ErrorFormat
     MACRO_LINES_TO_SHOW               = 3
     OFFSET_FROM_LINE_NUMBER_DECORATOR = 6
@@ -288,8 +293,10 @@ module Iyi
         end
         # iyi: a body read from an artifact is located in the module's source,
         # which a consumer need not have. Without its lines the place is still
-        # worth naming, where "error in line 4" named no file at all.
-        if !source && !filename.empty? && (line_number = @line_number)
+        # worth naming, where "error in line 4" named no file at all. Only
+        # there: any other file that cannot be read keeps the message it had
+        # ("syntax error in FILE:LINE"), which the parser's specs hold.
+        if !source && (line_number = @line_number) && Iyi.travelled_file?(filename)
           return "In #{filename_row_col_message(filename, line_number, @column_number)}"
         end
       in Nil

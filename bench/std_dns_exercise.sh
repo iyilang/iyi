@@ -189,8 +189,35 @@ else
       echo "send"
     done
   } >"$WORK/zone.nsupdate"
+  # A BIND that predates the HTTPS type does not know it: darwin's nsupdate refused
+  # the zone with "'HTTPS' is not a valid type: unknown class/type" (CI,
+  # measured), and an old dig says ";; Warning, ignoring invalid type
+  # HTTPS" to `-t HTTPS` - both BIND's sentences for a type it does not
+  # know, measured here with an unknown type's name. One record goes to
+  # each first, and only those sentences skip; any other refusal of the
+  # probe, or a probe read back otherwise than "1 .", is a failure.
+  bind_versions="$(nsupdate -V 2>&1 | head -1); $(dig -v 2>&1 | head -1)"
+  probe_said=""
+  probe_dig=""
+  probe_status=0
+  if [ -n "$zone_port" ]; then
+    printf 'server 127.0.0.1 %s\nzone test.\nupdate add probe.test. 60 IN HTTPS 1 .\nsend\n' "$zone_port" >"$WORK/zone.probe"
+    probe_said="$(timeout 20 nsupdate "$WORK/zone.probe" 2>&1)"
+    probe_status=$?
+    probe_dig="$(dig -t HTTPS +noall +answer +tries=1 +timeout=5 @127.0.0.1 -p "$zone_port" probe.test 2>&1)"
+  fi
   if [ -z "$zone_port" ]; then
     echo "  the exercise's name server did not start: $(head -3 "$WORK/zone.out")"
+    status=1
+  elif printf '%s' "$probe_said" | grep -qF "'HTTPS' is not a valid type"; then
+    echo "  skipped: this nsupdate does not know the HTTPS type ($bind_versions): it said \"$(printf '%s' "$probe_said" | head -1)\""
+  elif [ "$probe_status" -ne 0 ]; then
+    echo "  nsupdate knows the HTTPS type and refused a one-record update: $(printf '%s' "$probe_said" | head -2 | tr '\n' ' ')"
+    status=1
+  elif printf '%s' "$probe_dig" | grep -qF 'ignoring invalid type HTTPS'; then
+    echo "  skipped: this dig does not know the HTTPS type ($bind_versions): it said \"$(printf '%s' "$probe_dig" | head -1)\""
+  elif [ "$(printf '%s' "$probe_dig" | sed -E 's/^[^[:space:]]+[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+HTTPS[[:space:]]+//')" != "1 ." ]; then
+    echo "  dig read the probe record back as \"$probe_dig\", not \"1 .\""
     status=1
   elif ! timeout 20 nsupdate "$WORK/zone.nsupdate" >"$WORK/zone.nsupdate.out" 2>&1; then
     echo "  nsupdate did not send the zone: $(head -3 "$WORK/zone.nsupdate.out")"

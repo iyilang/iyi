@@ -173,10 +173,22 @@ else
       echo "  dig refuses it for wrong.test, as the iyi client does"
     fi
   fi
+  # A dig that predates the HTTPS type says ";; Warning, ignoring invalid
+  # type HTTPS" to `-t HTTPS` (BIND's sentence for a type it does not
+  # know, measured with an unknown type's name) and would read `HTTPS` as
+  # a second name to ask about: its HTTPS rows are skipped, and said so.
+  # Asked of the plaintext server, which every run has.
+  HAS_HTTPS_TYPE=yes
+  type_probe="$(dig -t HTTPS +short +tries=1 +timeout=5 @127.0.0.1 -p "$(cat "$SRV/udp.port")" svc.zone.test 2>&1)"
+  if printf '%s' "$type_probe" | grep -qF 'ignoring invalid type HTTPS'; then
+    HAS_HTTPS_TYPE=no
+    echo "  HTTPS records skipped: this dig does not know the type ($(dig -v 2>&1 | head -1)): it said \"$(printf '%s' "$type_probe" | head -1)\""
+  fi
   asked=0
   differs=0
   over=""
   while read -r _ via type name values; do
+    [ "$type" = HTTPS ] && [ "$HAS_HTTPS_TYPE" = no ] && continue
     case "$via" in
       dot) [ "$HAS_TLS" = yes ] || continue; flags=(+tls) port="$DOT_PORT" ;;
       h2) [ "$HAS_HTTPS" = yes ] || continue; flags=(+https) port="$(cat "$SRV/h2.port")" ;;
@@ -184,7 +196,7 @@ else
       *) continue ;;
     esac
     case " $over " in *" ${flags[0]} "*) ;; *) over="$over ${flags[0]}" ;; esac
-    got="$(dig "${flags[@]}" ${VERIFY[@]+"${VERIFY[@]}"} @127.0.0.1 -p "$port" "$name" "$type" +short +tries=1 +timeout=5 2>&1)"
+    got="$(dig "${flags[@]}" ${VERIFY[@]+"${VERIFY[@]}"} @127.0.0.1 -p "$port" "$name" -t "$type" +short +tries=1 +timeout=5 2>&1)"
     # +short: an address a line, a CNAME's target ending in a dot, a TXT
     # record's strings each quoted, an HTTPS record's data in presentation
     # format, which the iyi line holds as `SvcbRecord#to_s` prints it. The

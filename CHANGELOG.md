@@ -196,6 +196,24 @@ and caught by a broken copy in `bench/std_tls_exercise.sh`;
 `require_staple` and the tickets an `HTTPClient` drops are checked by
 `bench/std_http_resume.iyi` too.
 
+- **`bench/lsp_session.py` says why a server's pipe closed.** Windows CI
+  job 120203398014 ended on "server closed the pipe" alone, 60 ms after
+  step 73k. The server that closed it was not 73k's proxy, which the gate
+  was done with before it printed 73k, but the fresh `iyi lsp` the next
+  step had just started: that step (72a) prints 40 to 43 ms after 73k in
+  five passing Windows runs. Its stderr went to the log inherited and
+  nothing of it was there, and its exit status was never read. The cause
+  is not found: 200 loops of 73j, 73k and a fresh session after them all
+  held on Linux, and the 73j/73k paths that could end a proxy - its
+  reader when the holders are killed, its wait on the dead worker, the
+  cleanup's kills - all act before the server that died was started. The
+  gate now reads each server's stderr itself, echoing it as before and
+  keeping its last 40 lines, and a closed pipe, on the main thread or
+  under `answer_within`'s time limit (where Python dropped the report
+  without a word), names the server and its pid, its exit status ("exited
+  N", a Windows status in hex, or the signal), how long after its start
+  its stdout ended, the last request sent, and those lines.
+
 ### Changed
 
 - **`DnsMessage.parse` walks the authority and additional sections.** It

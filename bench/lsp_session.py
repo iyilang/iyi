@@ -20,6 +20,7 @@ document highlight, folding, workspace symbols, prepareRename,
 semantic tokens, inlay hints, type definition, and formatting.
 """
 
+import collections
 import json
 import os
 import pathlib
@@ -256,10 +257,69 @@ class Client:
         that compiles. `("lsp", "--worker")` is that child alone, which
         is the single-process shape `lsp_memory.py --direct` measures to
         show what the split is worth."""
+        self.argv = argv
+        # The server's stderr is read here, echoed as it comes and its last
+        # lines kept, so that a server that closes its stdout is reported
+        # with what it said last (`closed`). Inherited, it went straight to
+        # the runner's log, where nothing tied it to the failure: Windows CI
+        # job 120203398014 ended on "server closed the pipe" alone.
         self.proc = subprocess.Popen(
-            [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+        self.started = time.monotonic()
+        self.stderr_tail = collections.deque(maxlen=40)
+        self.stderr_reader = threading.Thread(target=self.keep_stderr, daemon=True)
+        self.stderr_reader.start()
         LIVE.append(self.proc)
         self.next_id = 0
+
+    def keep_stderr(self):
+        for line in iter(self.proc.stderr.readline, b""):
+            text = line.decode("utf-8", "replace").rstrip("\r\n")
+            self.stderr_tail.append(text)
+            print(text, file=sys.stderr, flush=True)
+
+    def closed(self):
+        """Why the server's stdout ended, as far as the gate can see: which
+        server, its exit status, how long it had run, the last request
+        sent, and the end of its stderr.
+
+        Windows CI job 120203398014 printed "server closed the pipe" and
+        nothing more, 60 ms after step 73k. The server that closed it was
+        not 73k's, which the gate was done with before it printed 73k, but
+        the fresh `iyi lsp` the next step had just started: in five passing
+        Windows runs that step (72a) printed 40 to 43 ms after 73k. Its
+        stderr, inherited, put nothing in the log, and its exit status,
+        which says whether the proxy ended its own session (0 or 1) or the
+        process was ended under it (a signal, or an NTSTATUS on Windows),
+        was never read."""
+        ended = time.monotonic() - self.started
+        try:
+            code = self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            code = None
+        # A worker or a process it started holds the same stderr and can
+        # outlive the server, so the tail is waited for briefly, not to
+        # its end.
+        self.stderr_reader.join(2)
+        if code is None:
+            status = "is still running 5 s later"
+        elif code < 0:
+            status = f"was killed by signal {-code}"
+        elif code > 0xFFFF:
+            status = f"exited 0x{code:08X}"
+        else:
+            status = f"exited {code}"
+        report = [f"server closed the pipe: `iyi {' '.join(self.argv)}` (pid {self.proc.pid}) {status}, "
+                  f"its stdout ended {ended:.2f} s after it started; the last request sent: "
+                  f"{LAST.get('sent', '(none)')}"]
+        tail = list(self.stderr_tail)
+        if tail:
+            report.append(f"  the last {len(tail)} line(s) of its stderr:")
+            report.extend(f"    {line}" for line in tail)
+        else:
+            report.append("  its stderr: nothing")
+        return "\n".join(report)
 
     def send(self, method, params, wait=True):
         self.next_id += 1
@@ -343,7 +403,7 @@ class Client:
         while True:
             line = self.proc.stdout.readline()
             if not line:
-                raise SystemExit("server closed the pipe")
+                raise SystemExit(self.closed())
             line = line.strip()
             if not line:
                 break
@@ -1077,7 +1137,13 @@ def answer_within(client, request_id, seconds):
     got = {}
 
     def read():
-        got["message"] = client.wait_for(lambda m: m.get("id") == request_id)
+        # A closed pipe raises `SystemExit` here, on a thread, where Python
+        # drops it without a word: the server's end went unreported, and
+        # the step saw no answer. The report is printed instead.
+        try:
+            got["message"] = client.wait_for(lambda m: m.get("id") == request_id)
+        except SystemExit as closed:
+            print(closed, flush=True)
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
     reader.join(seconds)

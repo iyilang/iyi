@@ -1350,7 +1350,9 @@ describe Iyi::IyiMod do
 
       rendered = error.to_s
       rendered.should contain "@item + @item"
-      rendered.should contain "app/box.iyi:10:11"
+      # The source's path as the source build spells it: `app\box.iyi` on
+      # Windows, where the first Windows run of this held it to `/`.
+      rendered.should contain "#{Path["app", "box.iyi"]}:10:11"
       # The bytes the artifact starts with, which is what used to be shown.
       rendered.should_not contain "IYIMOD"
     end
@@ -5483,7 +5485,7 @@ describe Iyi::IyiMod do
       error = expect_raises(Iyi::TypeException, /undefined method 'size' for Int32/) do
         consumer.compile unsized, "unused"
       end
-      error.to_s.should contain "app/box.iyi:12:5"
+      error.to_s.should contain "#{Path["app", "box.iyi"]}:12:5"
       error.to_s.should_not contain ".iyimod:"
     end
   end

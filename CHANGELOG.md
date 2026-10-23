@@ -261,6 +261,16 @@ and caught by a broken copy in `bench/std_tls_exercise.sh`;
 
 ### Changed
 
+- **A std/tls client sends a GREASE encrypted_client_hello extension in
+  every ClientHello that carries no ECH configuration** (RFC 9849 section
+  6.2), as browsers do, so a ClientHello with ECH looks like one without.
+  `TlsConfig#ech_grease = false` turns it off for a server or middlebox
+  that refuses an extension it does not know.
+- **`AutocertManager` checks the chains it is issued against
+  `AutocertManager#roots`, the system's roots unless it is set.** A
+  manager pointed at a private CA (a test CA, or Pebble) must set `roots`
+  to that CA, or its chains are refused and not cached.
+
 - **`DnsMessage.parse` walks the authority and additional sections.** It
   read the header, the question and the answers and stopped; it now reads
   past them to find the OPT record, so a message whose authority or

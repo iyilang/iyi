@@ -76,7 +76,7 @@ deal() {
     [ -f "$sibling" ] || continue
     name="$(basename "$sibling" .sh)"
     [ "$name" = "std_exercise" ] || echo "$name"
-  done | awk -v table="$WEIGHTS" '
+  done | awk -v table="$(echo $WEIGHTS)" '
     BEGIN { n = split(table, t); for (i = 1; i < n; i += 2) w["std_" t[i] "_exercise"] = t[i + 1] }
     { print $1, (($1 in w) ? w[$1] : 20) }' |
     LC_ALL=C sort -k2,2nr -k1,1 |
@@ -87,6 +87,20 @@ deal() {
       print k, $2, $1 }'
 }
 dealt="$(deal)"
+# The table goes to awk on one line: macOS's awk refuses a newline inside
+# a -v string, and there every shard was dealt nothing and passed having
+# run no sibling (integration/next, run 39870617415). So a deal that does
+# not hold every sibling once is refused here, before any shard runs.
+siblings_total=0
+for sibling in "$REPO"/bench/std_*_exercise.sh; do
+  [ -f "$sibling" ] && [ "$(basename "$sibling")" != "std_exercise.sh" ] && siblings_total=$((siblings_total + 1))
+done
+dealt_count=$(echo "$dealt" | awk 'NF == 3 && $1 >= 1' | wc -l | tr -d ' ')
+dealt_names=$(echo "$dealt" | awk 'NF == 3 { print $3 }' | LC_ALL=C sort -u | wc -l | tr -d ' ')
+if [ "$siblings_total" -eq 0 ] || [ "$dealt_count" -ne "$siblings_total" ] || [ "$dealt_names" -ne "$siblings_total" ]; then
+  echo "FAIL: the deal holds $dealt_count lines and $dealt_names siblings, not each of the $siblings_total once"
+  exit 1
+fi
 
 if [ -n "$plan" ]; then
   echo "$dealt" | LC_ALL=C sort -s -k1,1n
@@ -188,5 +202,14 @@ done
 [ -n "$trace" ] && rm -f "$trace"
 echo
 echo "== shard $shard of $shards: $(echo $ran | wc -w | tr -d ' ') of $place sibling exercises, dealt by weight"
-[ -n "$ran" ] || echo "  (none in this shard)"
+# A shard dealt nothing when there are at least as many siblings as
+# shards ran nothing, which is a broken deal, not a pass.
+if [ -z "$ran" ]; then
+  if [ "$siblings_total" -ge "$shards" ]; then
+    echo "FAIL: shard $shard of $shards ran no sibling of the $siblings_total"
+    status=1
+  else
+    echo "  (none in this shard)"
+  fi
+fi
 exit "$status"

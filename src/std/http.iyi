@@ -2662,7 +2662,7 @@ pub class HTTPClient
     kept = [] of HttpsBound
     found = nil.as(HttpsBound?)
     @bound.each do |held|
-      if held.origin != origin
+      if origin != held.origin
         kept << held
       elsif held.under.same?(base)
         if found.nil? && held.ech == ech && held.alpn == alpn

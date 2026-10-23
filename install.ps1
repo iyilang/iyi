@@ -214,7 +214,10 @@ try {
     $bin = Join-Path $Prefix 'bin'
     $existing = Join-Path $bin 'iyi.exe'
     if (Test-Path -LiteralPath $existing -PathType Leaf) {
-        $installed = (& $existing version 2>$null | Select-Object -First 1)
+        # The whole output is read, not its first line: a pipeline that stops
+        # at one line may hand back before the program has exited, and the
+        # delete below then meets its image still open.
+        $installed = @(& $existing version 2>$null)[0]
         Say "replacing what is already at ${Prefix}: $installed"
         foreach ($name in @('iyi.exe', 'LLVM-C.dll')) {
             $path = Join-Path $bin $name

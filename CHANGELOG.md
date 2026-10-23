@@ -214,6 +214,30 @@ and caught by a broken copy in `bench/std_tls_exercise.sh`;
   N", a Windows status in hex, or the signal), how long after its start
   its stdout ended, the last request sent, and those lines.
 
+- **A mark's helper that takes its permit a round early is counted.**
+  Every round of permits - a stopped mark's, a mark's beside the
+  program, and the remainder round's - was opened before the counts its
+  takers add to were reset. A helper woken for one round and preempted
+  between its wake and its permit took one the instant the next round
+  opened, and the reset wiped what it added: the collector waited
+  forever for a taker already done, or the count of workers active went
+  below zero and no drain ended. On Linux, 24 runs at a time on twelve
+  cores with plain builds, 200 back-to-back collections with a 2 MiB
+  block live never ended in 23 runs of 24,000, and
+  `bench/sweep_exercise.iyi` in 14 of 24,000, in its steady or rounding
+  section; the first, on a copy that names the wait after three seconds,
+  stopped in 15 of 24,000, 10 in the wait for the takers and 5 in a
+  drain whose count had gone below zero. The permits now open after the
+  resets, and none of 24,000 runs of either program stalled. Windows CI
+  job 120284584748 sat 2 h 25 min in `bench/sweep_exercise.sh` after its
+  first line, until the job was cancelled: this is a stall that program
+  can have, and nothing in that log shows it is the one it had.
+  `bench/parallel_mark.sh` holds the order on a copy of the prelude whose
+  helpers wait 200 us between their wake and their permit and whose
+  collector waits 50 us after opening a mark's: 200 back-to-back
+  collections end in each of five runs, and the same copy with the
+  permits opened first never ends (20 runs of 20 on Linux).
+
 ### Changed
 
 - **`DnsMessage.parse` walks the authority and additional sections.** It
@@ -24394,7 +24418,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,586-line library and nothing else. Every other
+  written against iyi's own 22,608-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

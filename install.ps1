@@ -219,9 +219,20 @@ try {
         foreach ($name in @('iyi.exe', 'LLVM-C.dll')) {
             $path = Join-Path $bin $name
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-            try {
-                Remove-Item -LiteralPath $path -Force
-            } catch {
+            # The `version` above has just ended, and Windows can hold its
+            # image a moment longer - a CI runner refused this delete right
+            # after it (job 120143817085) - so a lock is waited on for up to
+            # five seconds before it is reported as a program still running.
+            $removed = $false
+            for ($attempt = 0; $attempt -lt 10 -and -not $removed; $attempt++) {
+                try {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                    $removed = $true
+                } catch {
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+            if (-not $removed) {
                 Die ("$path is in use, so it cannot be replaced. Close anything running iyi, " +
                      "including a compile in another window, and run this again.")
             }

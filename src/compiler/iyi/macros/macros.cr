@@ -136,7 +136,16 @@ class Iyi::Program
     origins
   end
 
-  record MacroRunResult, stdout : String, stderr : String, status : Process::Status
+  # What a `run` program printed, and the files it said its output depends on:
+  # absolute paths, or nil when it said nothing (see `RUN_INPUTS`).
+  record MacroRunResult, stdout : String, stderr : String, status : Process::Status, inputs : Array(String)?
+
+  # iyi: the environment variable that names, to a program `run` at compile
+  # time, the file it writes the files it read into, one path a line.
+  # `std/eiy/process.iyi` writes the template it renders. A program that
+  # writes nothing has read what it pleased, as far as the compiler can tell,
+  # so nothing that has to know what a `run` depended on may assume it knows.
+  RUN_INPUTS = "IYI_RUN_INPUTS"
 
   # iyi: `run` compiles a program and executes it, so a front end that links no
   # LLVM cannot do it — and says so rather than failing somewhere in the middle
@@ -149,14 +158,28 @@ class Iyi::Program
     end
   {% else %}
 
+  # The file is named for this process and this run, beside the compiled
+  # program in the cache, and is gone once it has been read.
+  @@run_inputs_count = 0
+
   def macro_run(filename, args)
     compiled_macro_run = @compiled_macros_cache[filename] ||= macro_compile(filename)
     compiled_file = compiled_macro_run.filename
 
     out_io = IO::Memory.new
     err_io = IO::Memory.new
-    Process.run(compiled_file, args: args, output: out_io, error: err_io)
-    MacroRunResult.new(out_io.to_s, err_io.to_s, $?)
+    declared = "#{compiled_file}.inputs-#{Process.pid}-#{@@run_inputs_count += 1}"
+    status = Process.run(compiled_file, args: args, output: out_io, error: err_io, env: {RUN_INPUTS => declared})
+    MacroRunResult.new(out_io.to_s, err_io.to_s, status, read_run_inputs(declared))
+  end
+
+  private def read_run_inputs(declared : String) : Array(String)?
+    return nil unless File.file?(declared)
+    text = File.read(declared)
+    File.delete?(declared)
+    text.lines.reject(&.empty?).map { |line| File.expand_path(line) }
+  rescue File::Error
+    nil
   end
 
   record RequireWithTimestamp, filename : String, epoch : Int64 do

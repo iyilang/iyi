@@ -5,14 +5,26 @@
 # a tag that is never closed, is refused here with its sentence, and the
 # compiler reports it at the macro.
 #
+# It also says which file it read. A build keeping an up-to-date record
+# names a file in `IYI_RUN_INPUTS`, and a program `run` at compile time
+# writes there every file its output depends on, one a line; one that
+# writes nothing leaves the build unable to vouch for its output, and the
+# next build compiles (SPEC.md V.9 (e)). Written before the read, so a
+# template that cannot be read is still one the build depended on.
+#
 # Not a module: it declares no `std/` path, so `import` cannot reach it, and
 # `run` finds it by this file's place beside `eiy.iyi`.
 
 module eiy_process
 
 import std/eiy::{Eiy}
+import std/env::{ENV}
 
 args = Program.args
 raise "usage: eiy/process CALLER TEMPLATE IO_NAME, not #{args.size} arguments" unless args.size == 3
 
-print Eiy.process_file(Eiy.locate(args[1], args[0]), args[2])
+template = Eiy.locate(args[1], args[0])
+if declared = ENV["IYI_RUN_INPUTS"]?
+  File.write(declared, "#{template}\n")
+end
+print Eiy.process_file(template, args[2])

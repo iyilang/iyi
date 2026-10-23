@@ -64,8 +64,8 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 22,608 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 128,054 lines, none of it written in iyi |
-| artifact format | `.iyimod` v58, checksum per section |
+| compiler | 128,393 lines, none of it written in iyi |
+| artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 128,054 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 128,393 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 124,536 in std |
-| Specs | 21,146 lines | 15,107 for iyi |
+| Specs | 21,146 lines | 15,166 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -6466,6 +6466,7 @@ as valid is the worst failure mode a build cache has.
 | Macro bodies | serialised AST for exported macros and derives |
 | Mono bodies | the bodies a consumer has to compile: source text, not IR yet |
 | Initialiser | the module's own top-level code, as source text (IV.1g) |
+| Source positions | where each node of a mono body and of the initialiser was written (issue #140) |
 | Object code | machine code for this module's own definitions |
 
 Binary, for read speed. A `iyi mod dump` producing text is required, not
@@ -6511,6 +6512,24 @@ bodies that call it, because a macro is read before it is called. All of them
 rather than a chosen few: none is reachable from outside, so they are there for
 the bodies to expand against, exactly as the unexported defs beside them are
 there to typecheck against.
+
+`SourcePositions` puts what travels as text back where it was written. A
+consumer parses a mono body and the initialiser inside the declarations the
+artifact renders, and that parse located every node at a line of the
+rendering under the artifact's own path: a macro's `@caller.first.filename`
+was `mods/lib/page.iyimod`, so `Eiy.render("../views/greet.eiy")` in a
+travelling body read `mods/lib/../views/greet.eiy` and the build failed, and
+an error inside the body pointed at the rendering (#140). The producer notes,
+as it writes each text, the offset where each node starts and that node's
+location: the source's path exactly as its own build spelled it, line and
+column. The consumer hands them to its lexer as location pragmas, the
+mechanism a macro's expansion already uses, so `@caller`, an error, a `run`
+macro's arguments and the debug info answer what the source build answers.
+What is rendered rather than written stays the artifact's: a declaration's
+header, a macro and a field's default are located in the rendering. The
+positions are out of the implementation hash (IV.3), as doc comments are out
+of the interface hash: a line added above a body moves where it was written
+and leaves what a consumer compiles from it alone.
 
 Fields were meant to be in that second list and are not, which is worth saying
 plainly because the reason is a bug rather than a change of mind. A consumer

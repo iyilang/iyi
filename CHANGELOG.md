@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A body read back from an artifact is located in its module's source,
+  so `Eiy.render` in a travelling body finds its template (#140).** A
+  `forall` def's body, and any other a consumer compiles itself, travels
+  in the `.iyimod` as text, and the consumer parsed it inside the
+  declarations the artifact renders, so each of its nodes was located at
+  a line of that rendering under the artifact's path. A macro reading
+  `@caller.first.filename` read `mods/lib/page.iyimod`, and the second of
+  `iyi build --emit-iyimod mods` and `iyi build --emit-iyimod mods
+  --use-iyimod mods` ended on `cannot read mods/lib/../views/greet.eiy`;
+  an error inside such a body said `In mods/lib/sized.iyimod:6:5` where
+  the source build says `In lib/sized.iyi:4:5`. The artifact now records
+  where each node of a travelling body and of the module's initialiser
+  was written, and the consumer's parse puts it there: `@caller`, errors,
+  `run` macros and debug line info answer as the source build does, and
+  with the source gone an error names the source's line and shows it as
+  the artifact carried it. `.iyimod` is v59, and a v58 artifact is
+  refused and built again. The positions stay out of the implementation
+  hash, so a line added above a body rebuilds no dependent.
+  `bench/samples_roundtrip.sh` builds the issue's layout both ways it was
+  reported and checks the error's location, and
+  `spec/compiler/iyimod_spec.cr` checks `@caller` in a body and in the
+  initialiser; all of them failed before this.
+
 ## 0.19.1 — 2026-10-23
 
 **A collector hang and a handful of TLS and PKI edges fixed, and TLS

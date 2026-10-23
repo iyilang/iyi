@@ -722,8 +722,10 @@ module Iyi
           exports: exports,
           has_initialiser: program.iyi_module_initialisers.includes?(filename),
           mono_bodies: program.iyi_mono_bodies[filename]? || {} of String => String,
+          body_positions: program.iyi_mono_body_positions[filename]? || {} of String => Array(IyiMod::SourcePosition),
           macro_bodies: collect_iyi_macros(program, module_name),
           initialiser: program.iyi_module_initialiser_source[filename]? || "",
+          initialiser_positions: program.iyi_module_initialiser_positions[filename]? || [] of IyiMod::SourcePosition,
           requires: program.iyi_module_requires[filename]? || [] of String,
           crystal_library: !program.iyi_prelude?,
           # Always, for a module of iyi's own: the header it was written under
@@ -2744,8 +2746,10 @@ module Iyi
     private def iyi_record_mono_body(program : Program, filename : String,
                                      container : String, signature : IyiMod::Signature,
                                      a_def : Def) : Nil
-      bodies = program.iyi_mono_bodies[filename] ||= {} of String => String
-      bodies[IyiMod.mono_body_key(container, signature)] = a_def.body.to_s
+      key = IyiMod.mono_body_key(container, signature)
+      text, positions = IyiMod.located_source(a_def.body)
+      (program.iyi_mono_bodies[filename] ||= {} of String => String)[key] = text
+      (program.iyi_mono_body_positions[filename] ||= {} of String => Array(IyiMod::SourcePosition))[key] = positions
     end
 
     # iyi: a type's own instance variables, for `TypeDecl#fields` (IV.2).

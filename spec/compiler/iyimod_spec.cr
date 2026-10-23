@@ -1289,7 +1289,9 @@ describe Iyi::IyiMod do
   # An error in the declarations has a location in them, and the file that
   # location names is binary — so the line it showed was the bytes of the
   # container the declarations travelled in. The text is what the build read
-  # and the text is what it shows.
+  # and the text is what it shows. In a travelling body the location is the
+  # module's source, and with the source gone the line still comes from the
+  # text the artifact carried (issue #140).
   it "shows the declaration an error is in, not the bytes of the artifact" do
     with_tempdir("iyimod_error_source") do
       Dir.mkdir_p "app"
@@ -1348,7 +1350,7 @@ describe Iyi::IyiMod do
 
       rendered = error.to_s
       rendered.should contain "@item + @item"
-      rendered.should contain "box.iyimod"
+      rendered.should contain "app/box.iyi:10:11"
       # The bytes the artifact starts with, which is what used to be shown.
       rendered.should_not contain "IYIMOD"
     end
@@ -5418,6 +5420,63 @@ describe Iyi::IyiMod do
       from_source, from_artifact = iyimod_round_trip(modules, main)
       from_source.should eq "4\n\"four\"\n3\none\n"
       from_artifact.should eq from_source
+    end
+  end
+
+  # A body and an initialiser read back from an artifact are located where
+  # they were written, not in the artifact (issue #140). A macro that asks
+  # `@caller` where it was called from answered `mods/app/box.iyimod:13:3`
+  # from the artifact, a line of the declarations it renders, and
+  # `Eiy.render` read its template from beside the artifact; an error inside
+  # the body pointed into the rendering too.
+  it "locates a travelling body and the initialiser in the module's source" do
+    with_tempdir("iyimod_body_positions") do
+      modules = {"app/box.iyi" => <<-IYI}
+        module app/box
+
+        pub macro written_at
+          {{ "\#{@caller.first.filename.id}:\#{@caller.first.line_number}:\#{@caller.first.column_number}" }}
+        end
+
+        pub def where(x : T) : String forall T
+          written_at
+        end
+
+        pub def sized(x : T) : Int32 forall T
+          x.size +    1
+        end
+
+        Placed = written_at
+
+        pub def placed : String
+          Placed
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/box::{where, sized, placed}
+
+        puts where(1)
+        puts placed
+        puts sized("ab")
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      box = File.expand_path("app/box.iyi")
+      from_source.should eq "#{box}:8:3\n#{box}:15:10\n3\n"
+      from_artifact.should eq from_source
+
+      File.write "unsized.iyi", "module main\n\nimport app/box::{sized}\n\nputs sized(2)\n"
+      unsized = Iyi::Compiler::Source.new(File.expand_path("unsized.iyi"), File.read("unsized.iyi"))
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.no_codegen = true
+      error = expect_raises(Iyi::TypeException, /undefined method 'size' for Int32/) do
+        consumer.compile unsized, "unused"
+      end
+      error.to_s.should contain "app/box.iyi:12:5"
+      error.to_s.should_not contain ".iyimod:"
     end
   end
 

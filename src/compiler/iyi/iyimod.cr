@@ -72,7 +72,12 @@ module Iyi::IyiMod
   # and returns it as a first-class aggregate. Linked together the two
   # disagreed on every such call without a word, so a v57 artifact is
   # refused here as any other stale format is.
-  FORMAT_VERSION = 58_u32
+  # v59: a travelling body and the initialiser carry the place each of their
+  # nodes was written (`Section::SourcePositions`), because read back under
+  # the artifact's own path a body's `@caller.first.filename` named
+  # `mods/lib/page.iyimod`, and `Eiy.render("../views/greet.eiy")` read its
+  # template from beside the artifact (#140).
+  FORMAT_VERSION = 59_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -210,6 +215,12 @@ module Iyi::IyiMod
     # numbers of room, which is more than the format has spent in its whole
     # life, so the next merge is about content rather than about arithmetic.
     Layouts = 64
+
+    # iyi: where each node of a travelling text was written: the bodies in
+    # `MonoBodies` and the code in `Initialiser`, by the offset of the node in
+    # that text. See `SourcePosition`. 65, beside `Layouts`, for the reason
+    # `Layouts` gives for 64.
+    SourcePositions = 65
   end
 
   # A regex literal's constant: the name its object code reads, and what a
@@ -229,6 +240,157 @@ module Iyi::IyiMod
   # lazy branch, because that prelude has no `__crystal_once`, while one under
   # Crystal's takes it for anything with a live initialiser.
   record ClassVarRef, name : String, lazy : Bool
+
+  # Where one node of a travelling text was written: *offset* is the byte the
+  # node starts at in the text (`Artifact#mono_bodies`, `Artifact#initialiser`),
+  # and the rest is its location in the module's source, as the build that
+  # wrote the artifact read it.
+  #
+  # A body travels as text and is parsed again by the consumer, inside the
+  # declarations the artifact renders, and that parse put every node of it at
+  # a line of that rendering under the artifact's own path. Whatever asks a
+  # node where it was written then answered for the artifact: a macro's
+  # `@caller.first.filename` was `mods/lib/page.iyimod`, so
+  # `Eiy.render("../views/greet.eiy")` read `mods/lib/../views/greet.eiy`,
+  # and an error in a body pointed into the rendering (#140). These are the
+  # places the source build gives the same nodes, handed to the consumer's
+  # lexer as location pragmas (`Bodies`).
+  #
+  # *filename* is the node's location as the producer had it, unchanged:
+  # the path the source build's own locations carry, which is what
+  # `@caller.first.filename`, `__DIR__` and an error answer in that build.
+  # A node a macro wrote is placed at the call that expanded it, the place
+  # an error inside the expansion is reported from.
+  record SourcePosition, offset : Int32, filename : String, line : Int32, column : Int32
+
+  # A travelling text as `ASTNode#to_s` writes it, and where each node in it
+  # was written. The text is the same bytes `to_s` gives; the positions are
+  # taken as it is written, one per offset — the innermost node starting
+  # there, which is the one whose token the lexer reads at that offset.
+  def self.located_source(node : ASTNode) : {String, Array(SourcePosition)}
+    located_source([node] of ASTNode)
+  end
+
+  # *nodes*, each as `to_s` writes it, joined by newlines: the initialiser's
+  # shape (`SemanticVisitor#iyi_initialiser_source`).
+  def self.located_source(nodes : Array(ASTNode)) : {String, Array(SourcePosition)}
+    io = IO::Memory.new
+    positions = [] of SourcePosition
+    nodes.each_with_index do |node, index|
+      io << '\n' if index > 0
+      node.accept PositionWriter.new(io, positions)
+    end
+    {io.to_s, positions}
+  end
+
+  # `ToSVisitor`, noting where each node starts as it writes it.
+  private class PositionWriter < ToSVisitor
+    def initialize(@memory : IO::Memory, @positions : Array(SourcePosition))
+      super(@memory)
+    end
+
+    def visit_any(node)
+      if (location = node.location.try(&.expanded_location)) && (filename = location.filename).is_a?(String)
+        position = SourcePosition.new(@memory.pos.to_i32, filename, location.line_number, location.column_number)
+        if (last = @positions.last?) && last.offset == position.offset
+          @positions[-1] = position
+        else
+          @positions << position
+        end
+      end
+      super
+    end
+  end
+
+  # The travelling bodies a declarations text is written with, and — when the
+  # text is for a parser — the location pragmas that put each node of them
+  # back where it was written (`SourcePosition`).
+  #
+  # Pragmas rather than the positions written into the text: a node can start
+  # inside a string, in an interpolation, where text added to say where it
+  # was written would change the string. The lexer runs a pragma at the first
+  # token at or past its byte, as it does for a macro's expansion. A
+  # `LocPushPragma` before a text's first node and a `LocPopPragma` after
+  # its last bring the lexer back to the declarations' own lines, which it
+  # kept counting underneath.
+  class Bodies
+    NO_POSITIONS = [] of SourcePosition
+
+    # The source lines the placed nodes were written on, as this rendering
+    # has them, by filename and line number, for each source that is not on
+    # this machine: what an error shows from then
+    # (`Iyi.register_travelled_lines`). Each is indented so its first placed
+    # node stands at the column it was written at, which is where an error's
+    # caret is put.
+    getter travelled_lines = {} of String => Hash(Int32, String)
+    @missing = {} of String => Bool
+
+    def initialize(@artifact : Artifact, @pragmas : Hash(Int32, Array(Lexer::LocPragma))? = nil)
+    end
+
+    def []?(key : String) : String?
+      @artifact.mono_bodies[key]?
+    end
+
+    def positions(key : String) : Array(SourcePosition)
+      @artifact.body_positions[key]? || NO_POSITIONS
+    end
+
+    # Writes *text* to *io*, each line behind *prefix* and ended by a newline
+    # when *lines* is true — a body, indented back under its declaration —
+    # and as it stands otherwise.
+    def write(io : IO, text : String, positions : Array(SourcePosition),
+              prefix : String = "", lines : Bool = true) : Nil
+      pragmas = @pragmas
+      memory = io.as?(IO::Memory)
+      unless pragmas && memory && !positions.empty?
+        if lines
+          text.each_line { |line| io << prefix << line << '\n' }
+        else
+          io << text
+        end
+        return
+      end
+
+      base = memory.pos.to_i32
+      index = 0
+      offset = 0
+      text.each_line(chomp: false) do |raw|
+        line = raw.chomp
+        if lines
+          io << prefix
+          base = memory.pos.to_i32
+        end
+        # A position past the line's own text is at its line break, which
+        # the rendering writes as one `\n` whatever the text had.
+        while (position = positions[index]?) && position.offset < offset + raw.bytesize
+          within = {position.offset - offset, line.bytesize}.min
+          place pragmas, (lines ? base + within : base + position.offset), position, index, line, within
+          index += 1
+        end
+        io << line << '\n' if lines
+        offset += raw.bytesize
+      end
+      io << text unless lines
+      (pragmas[memory.pos.to_i32] ||= [] of Lexer::LocPragma) << Lexer::LocPopPragma.new if index > 0
+    end
+
+    private def place(pragmas, at : Int32, position : SourcePosition, index : Int32,
+                      line : String, within : Int32) : Nil
+      list = pragmas[at] ||= [] of Lexer::LocPragma
+      list << Lexer::LocPushPragma.new if index == 0
+      list << Lexer::LocSetPragma.new(position.filename, position.line, position.column)
+
+      missing = @missing.fetch(position.filename) { @missing[position.filename] = !File.file?(position.filename) }
+      return unless missing
+      written = @travelled_lines[position.filename] ||= {} of Int32 => String
+      unless written.has_key?(position.line)
+        stripped = line.lstrip
+        indent = position.column - 1 - (within - (line.bytesize - stripped.bytesize))
+        written[position.line] = " " * Math.max(indent, 0) + stripped
+      end
+    end
+  end
 
   class Error < Iyi::Error
   end
@@ -1063,6 +1225,16 @@ module Iyi::IyiMod
     # carry: code inside a *type* body, which belongs to the type.
     getter initialiser : String
 
+    # Where the nodes of each body in `mono_bodies` were written, by the same
+    # key, and of the `initialiser`. See `SourcePosition`.
+    #
+    # Out of IV.3's implementation hash, as a doc comment is out of the
+    # interface hash: an edit above a body moves where its nodes were written
+    # and leaves what a consumer compiles from it as it was. The bytes of the
+    # body are hashed, and a dependent rebuilds when they change.
+    getter body_positions : Hash(String, Array(SourcePosition))
+    getter initialiser_positions : Array(SourcePosition)
+
     # The types this module's object code refers to a type id of, by name.
     #
     # A type id is an external reference — the number belongs to the program,
@@ -1364,7 +1536,9 @@ module Iyi::IyiMod
                    @reopened = [] of TypeDecl, @libs = [] of String,
                    @layouts = [] of {String, TypeLayout},
                    @inputs = [] of String, @symbol_literals = [] of String,
-                   @declarations_only = false, @package_name = "")
+                   @declarations_only = false, @package_name = "",
+                   @body_positions = {} of String => Array(SourcePosition),
+                   @initialiser_positions = [] of SourcePosition)
     end
   end
 
@@ -1415,6 +1589,11 @@ module Iyi::IyiMod
 
     unless artifact.initialiser.empty?
       sections << {Section::Initialiser, encode_initialiser(artifact)}
+    end
+
+    # Behind the two texts it places.
+    unless artifact.body_positions.empty? && artifact.initialiser_positions.empty?
+      sections << {Section::SourcePositions, encode_source_positions(artifact)}
     end
 
     # With the object code rather than with the declarations, because it is
@@ -1653,6 +1832,7 @@ module Iyi::IyiMod
       hashes = Hashes.empty
       layouts = [] of {String, TypeLayout}
       inputs = [] of String
+      positions = {bodies: {} of String => Array(SourcePosition), initialiser: [] of SourcePosition}
 
       table.each do |(kind, length, sum)|
         section = Section.from_value?(kind)
@@ -1669,28 +1849,29 @@ module Iyi::IyiMod
         file.read_fully?(payload) || raise Error.new("#{path} ends inside a section")
         verify(path, section, payload, sum)
         case section
-        when Section::Header         then header = decode_header(payload)
-        when Section::Imports        then imports = decode_imports(payload)
-        when Section::Exports        then exports = decode_exports(payload)
-        when Section::ObjectCode     then object_code = decode_object_code(payload)
-        when Section::MonoBodies     then mono_bodies = decode_mono_bodies(payload)
-        when Section::MacroBodies    then macro_bodies = decode_macro_bodies(payload)
-        when Section::Initialiser    then initialiser = String.new(payload)
-        when Section::TypeIds        then type_ids = decode_type_ids(payload)
-        when Section::Constants      then constants = decode_constants(payload)
-        when Section::Regexes        then regexes = decode_regexes(payload)
-        when Section::ClassVars      then class_vars = decode_class_vars(payload)
-        when Section::MatchTypes     then match_types = decode_match_types(payload)
-        when Section::Symbols        then symbols = decode_symbols(payload)
-        when Section::Libs           then libs = decode_libs(payload)
-        when Section::TopLevel       then top_level = decode_top_level(payload)
-        when Section::TopLevelFuns   then top_level_funs = decode_strings(payload)
-        when Section::Reopened       then reopened = decode_reopened(payload)
-        when Section::Requires       then requires = decode_requires(payload)
-        when Section::Hashes         then hashes = decode_hashes(payload)
-        when Section::Layouts        then layouts = decode_layouts(payload)
-        when Section::Inputs         then inputs = decode_strings(payload)
-        when Section::SymbolLiterals then symbol_literals = decode_strings(payload)
+        when Section::Header          then header = decode_header(payload)
+        when Section::Imports         then imports = decode_imports(payload)
+        when Section::Exports         then exports = decode_exports(payload)
+        when Section::ObjectCode      then object_code = decode_object_code(payload)
+        when Section::MonoBodies      then mono_bodies = decode_mono_bodies(payload)
+        when Section::MacroBodies     then macro_bodies = decode_macro_bodies(payload)
+        when Section::Initialiser     then initialiser = String.new(payload)
+        when Section::TypeIds         then type_ids = decode_type_ids(payload)
+        when Section::Constants       then constants = decode_constants(payload)
+        when Section::Regexes         then regexes = decode_regexes(payload)
+        when Section::ClassVars       then class_vars = decode_class_vars(payload)
+        when Section::MatchTypes      then match_types = decode_match_types(payload)
+        when Section::Symbols         then symbols = decode_symbols(payload)
+        when Section::Libs            then libs = decode_libs(payload)
+        when Section::TopLevel        then top_level = decode_top_level(payload)
+        when Section::TopLevelFuns    then top_level_funs = decode_strings(payload)
+        when Section::Reopened        then reopened = decode_reopened(payload)
+        when Section::Requires        then requires = decode_requires(payload)
+        when Section::Hashes          then hashes = decode_hashes(payload)
+        when Section::Layouts         then layouts = decode_layouts(payload)
+        when Section::Inputs          then inputs = decode_strings(payload)
+        when Section::SymbolLiterals  then symbol_literals = decode_strings(payload)
+        when Section::SourcePositions then positions = decode_source_positions(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -1708,7 +1889,8 @@ module Iyi::IyiMod
         header[:class_root], header[:filled], header[:module_extends_self],
         regexes, class_vars, match_types, symbols,
         top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals,
-        declarations_only: header[:declarations_only], package_name: header[:package_name])
+        declarations_only: header[:declarations_only], package_name: header[:package_name],
+        body_positions: positions[:bodies], initialiser_positions: positions[:initialiser])
     end
   rescue ex : Error
     raise ex
@@ -1929,7 +2111,8 @@ module Iyi::IyiMod
     io.puts "              signatures, field lists in declaration order, the"
     io.puts "              constants and class variables this module's"
     io.puts "              own code reads, the macros and"
-    io.puts "              bodies a consumer has to compile for itself, the"
+    io.puts "              bodies a consumer has to compile for itself and"
+    io.puts "              where each was written, the"
     io.puts "              object code of this module's own non-generic"
     io.puts "              types, and the pointer maps of the types this"
     io.puts "              module owns (SPEC.md IV.2, GC_DESIGN.md Stage 1)."
@@ -1968,11 +2151,10 @@ module Iyi::IyiMod
     # `Artifact#top_level_funs`.
     artifact.top_level_funs.each { |source| io << source << '\n' }
 
-    bodies = artifact.mono_bodies
+    bodies = Bodies.new(artifact)
     artifact.top_level.each_with_index do |signature, index|
       io << '\n' if index > 0
-      render_declaration io, signature,
-        body: bodies[mono_body_key(TOP_LEVEL_CONTAINER, signature)]?
+      render_declaration io, signature, bodies, mono_body_key(TOP_LEVEL_CONTAINER, signature)
     end
   end
 
@@ -1983,6 +2165,21 @@ module Iyi::IyiMod
   end
 
   def self.declarations(artifact : Artifact, io : IO) : Nil
+    write_declarations artifact, io, Bodies.new(artifact)
+  end
+
+  # The declarations for a parser: with *pragmas* filled with the places the
+  # nodes of the travelling bodies and the initialiser were written, for
+  # `Parser#macro_expansion_pragmas=`. Answers the lines of the sources that
+  # are not on this machine, as they were rendered (`Bodies#travelled_lines`).
+  def self.declarations(artifact : Artifact, io : IO::Memory,
+                        pragmas : Hash(Int32, Array(Lexer::LocPragma))) : Hash(String, Hash(Int32, String))
+    bodies = Bodies.new(artifact, pragmas)
+    write_declarations artifact, io, bodies
+    bodies.travelled_lines
+  end
+
+  private def self.write_declarations(artifact : Artifact, io : IO, bodies : Bodies) : Nil
     # A class root writes no header, and the class below is the namespace. With
     # one, iyi wraps the whole file in a module of the header's name — which
     # for a class root is the class's own name — so `Widget` arrived as
@@ -2033,7 +2230,6 @@ module Iyi::IyiMod
     io << "\nextend self\n" if artifact.module_extends_self && !artifact.class_root
 
     exports = artifact.exports
-    bodies = artifact.mono_bodies
 
     # First, because a macro has to be defined before the code that calls it is
     # read, and the bodies below are full of code that calls them.
@@ -2062,8 +2258,8 @@ module Iyi::IyiMod
       # A module's own `pub def` that takes a block ships its body, because the
       # consumer is what instantiates it — the block is the consumer's code.
       # The container is the module's own path.
-      render_declaration io, signature, exported: true,
-        body: bodies[mono_body_key(artifact.module_name, signature)]?
+      render_declaration io, signature, bodies, mono_body_key(artifact.module_name, signature),
+        exported: true
     end
 
     # And the ones it does not export, written as they were written: without
@@ -2072,8 +2268,7 @@ module Iyi::IyiMod
     # its body along for the reason every travelling body does.
     exports.carried_functions.each do |signature|
       io << '\n'
-      render_declaration io, signature,
-        body: bodies[mono_body_key(artifact.module_name, signature)]?
+      render_declaration io, signature, bodies, mono_body_key(artifact.module_name, signature)
     end
 
     inheritance_order(exports.types).each do |declaration|
@@ -2089,8 +2284,7 @@ module Iyi::IyiMod
       io << '\n' << render_impl_header(record) << '\n'
       record.assoc_types.each { |(name, answer)| io << "  type " << name << " = " << answer << '\n' }
       record.methods.each do |signature|
-        render_declaration io, signature, indent: "  ",
-          body: bodies[mono_body_key(container, signature)]?
+        render_declaration io, signature, bodies, mono_body_key(container, signature), indent: "  "
       end
       io << "end\n"
     end
@@ -2111,7 +2305,9 @@ module Iyi::IyiMod
     # module, because the parser wrapped this whole text in one — which is what
     # puts the module's own code back in the namespace it was written in.
     unless artifact.initialiser.empty?
-      io << '\n' << artifact.initialiser << '\n'
+      io << '\n'
+      bodies.write io, artifact.initialiser, artifact.initialiser_positions, lines: false
+      io << '\n'
     end
   end
 
@@ -2607,8 +2803,8 @@ module Iyi::IyiMod
   end
 
   private def self.render_declaration(io : IO, signature : Signature,
-                                      exported = false, indent = "",
-                                      body : String? = nil) : Nil
+                                      bodies : Bodies, key : String,
+                                      exported = false, indent = "") : Nil
     # The doc comment, where it was written: above the declaration, as
     # comment lines a consumer's parser reattaches. Surface for a reader —
     # a model most of all — and absent from the interface hash on purpose.
@@ -2636,9 +2832,12 @@ module Iyi::IyiMod
     # the consumer's link ended on `G(Int32)@G(T)#noop:Nil` — and on every
     # generic struct's `initialize`, every empty trait default and every
     # empty block-taking def, each listed in `MonoBodies`.
-    body = "nil" if body && body.blank?
-    body.try &.each_line do |line|
-      io << indent << "  " << line << '\n'
+    if body = bodies[key]?
+      if body.blank?
+        io << indent << "  nil\n"
+      else
+        bodies.write io, body, bodies.positions(key), indent + "  "
+      end
     end
 
     io << indent << "end\n"
@@ -2697,7 +2896,7 @@ module Iyi::IyiMod
   # answers a different struct: `undefined method 'initial_pool_size' for
   # DB::Connection::Options`.
   def self.render_type_declaration(io : IO, declaration : TypeDecl,
-                                   bodies : Hash(String, String), indent = "",
+                                   bodies : Bodies, indent = "",
                                    path = "", in_lib = false) : Nil
     declaration.doc.each_line { |line| io << indent << "# " << line << '\n' } unless declaration.doc.empty?
     # Above the declaration, which is where they were written and the only
@@ -2781,8 +2980,8 @@ module Iyi::IyiMod
 
     ordinals = mono_body_ordinals(declaration.methods)
     declaration.methods.each_with_index do |signature, index|
-      render_declaration io, signature, indent: inner,
-        body: bodies[mono_body_key(here, signature, ordinals[index])]?
+      render_declaration io, signature, bodies, mono_body_key(here, signature, ordinals[index]),
+        indent: inner
     end
     io << indent << "end\n"
   end
@@ -3310,6 +3509,63 @@ module Iyi::IyiMod
       bodies[key] = read_string(io)
     end
     bodies
+  end
+
+  # The filenames once, in a table each position names by index: a module's
+  # positions are nearly all in its one file.
+  private def self.encode_source_positions(artifact : Artifact) : Bytes
+    filenames = [] of String
+    indices = {} of String => UInt32
+    index_of = ->(filename : String) do
+      indices[filename] ||= begin
+        filenames << filename
+        (filenames.size - 1).to_u32
+      end
+    end
+
+    lists = IO::Memory.new
+    write_positions = ->(positions : Array(SourcePosition)) do
+      lists.write_bytes positions.size.to_u32, FORMAT
+      positions.each do |position|
+        lists.write_bytes position.offset.to_u32, FORMAT
+        lists.write_bytes index_of.call(position.filename), FORMAT
+        lists.write_bytes position.line.to_u32, FORMAT
+        lists.write_bytes position.column.to_u32, FORMAT
+      end
+    end
+    bodies = artifact.body_positions
+    lists.write_bytes bodies.size.to_u32, FORMAT
+    # Sorted, for the reason `encode_mono_bodies` sorts.
+    bodies.keys.sort!.each do |key|
+      write_string lists, key
+      write_positions.call bodies[key]
+    end
+    write_positions.call artifact.initialiser_positions
+
+    io = IO::Memory.new
+    write_strings io, filenames
+    io.write lists.to_slice
+    io.to_slice
+  end
+
+  private def self.decode_source_positions(payload : Bytes) : NamedTuple(bodies: Hash(String, Array(SourcePosition)), initialiser: Array(SourcePosition))
+    io = IO::Memory.new(payload)
+    filenames = read_strings(io)
+    read_positions = -> do
+      Array(SourcePosition).new(io.read_bytes(UInt32, FORMAT)) do
+        offset = io.read_bytes(UInt32, FORMAT).to_i32
+        filename = filenames[io.read_bytes(UInt32, FORMAT)]? || raise IO::EOFError.new
+        line = io.read_bytes(UInt32, FORMAT).to_i32
+        column = io.read_bytes(UInt32, FORMAT).to_i32
+        SourcePosition.new(offset, filename, line, column)
+      end
+    end
+    bodies = {} of String => Array(SourcePosition)
+    io.read_bytes(UInt32, FORMAT).times do
+      key = read_string(io)
+      bodies[key] = read_positions.call
+    end
+    {bodies: bodies, initialiser: read_positions.call}
   end
 
   private def self.encode_hashes(artifact : Artifact) : Bytes

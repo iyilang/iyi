@@ -1022,9 +1022,18 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # records the far end's hashes whichever way the far end arrived (IV.3).
     @program.iyi_artifact_hashes[artifact.module_name] = artifact.hashes
 
-    source = String.build { |io| IyiMod.declarations(artifact, io) }
+    # With the places the travelling bodies and the initialiser were written,
+    # so their nodes are located in the module's source and not in this
+    # rendering of it (`IyiMod::SourcePosition`): a macro's
+    # `@caller.first.filename`, an error and the debug info answer as they
+    # do when the module is built from source.
+    io = IO::Memory.new
+    pragmas = {} of Int32 => Array(Lexer::LocPragma)
+    travelled = IyiMod.declarations(artifact, io, pragmas)
+    source = io.to_s
     parser = @program.new_parser(source)
     parser.filename = artifact_path
+    parser.macro_expansion_pragmas = pragmas unless pragmas.empty?
     # In the language of the module they came from, which the artifact's
     # name does not say: `.iyimod` is no extension the lexer knows, so an
     # iyi module's declarations were read by the other language's rules,
@@ -1044,11 +1053,15 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # The path is where these declarations came from and not a file anyone can
     # read them out of, so the text goes where an error will look for it.
     Iyi.register_iyi_declarations artifact_path, source
+    # And the lines its travelling code came from, for a source that is not
+    # here to show them from.
+    travelled.each { |filename, lines| Iyi.register_travelled_lines filename, lines }
     @iyi_importing << artifact_path
     # Where this module was written, for a `run` inside a macro that
     # travelled — see `Program#iyi_artifact_source_paths`.
     unless artifact.source_path.empty?
       @program.iyi_artifact_source_paths[artifact_path] = artifact.source_path
+      @program.iyi_artifact_read_from[artifact.source_path] = artifact_path
     end
     begin
       parsed_nodes = parser.parse
@@ -1433,8 +1446,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # separately whether any runnable code is somewhere this cannot reach —
     # which is what a consumer has to be refused over rather than given a
     # module that half sets itself up.
-    source = iyi_initialiser_source(parsed_nodes)
-    @program.iyi_module_initialiser_source[filename] = source unless source.empty?
+    source, positions = iyi_initialiser_source(parsed_nodes)
+    unless source.empty?
+      @program.iyi_module_initialiser_source[filename] = source
+      @program.iyi_module_initialiser_positions[filename] = positions
+    end
     @program.iyi_module_initialisers << filename if iyi_uncarried_initialiser?(parsed_nodes)
     FileNode.new(parsed_nodes, filename)
   end
@@ -1565,10 +1581,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # `iyi_uncarried_initialiser?` still sees it.
   #
   # In text order, because that is the order III.5 gives a module's own code.
-  private def iyi_initialiser_source(node : ASTNode) : String
+  # With where each node of it was written (`IyiMod::SourcePosition`).
+  private def iyi_initialiser_source(node : ASTNode) : {String, Array(IyiMod::SourcePosition)}
     statements = [] of ASTNode
     iyi_collect_initialiser node, statements
-    statements.join('\n', &.to_s)
+    IyiMod.located_source(statements)
   end
 
   private def iyi_collect_initialiser(node : ASTNode, statements : Array(ASTNode)) : Nil

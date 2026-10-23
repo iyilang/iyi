@@ -251,6 +251,24 @@ module Iyi
     @@iyi_declaration_lines[filename]?
   end
 
+  # iyi: the lines of a module's source that a `.iyimod` carries a travelling
+  # body or initialiser from, as the artifact renders them, by line number.
+  #
+  # Their nodes are located in the source (`IyiMod::SourcePosition`), and a
+  # consumer need not have it: R-1 is that it builds without. The line an
+  # error is on is then shown from what the build read, as the declarations
+  # are above. Only for a file that is not there, and asked only when it is
+  # still not there, so a source that comes back is read again.
+  @@travelled_lines = {} of String => Hash(Int32, String)
+
+  def self.register_travelled_lines(filename : String, lines : Hash(Int32, String)) : Nil
+    @@travelled_lines[filename] = lines
+  end
+
+  def self.travelled_line?(filename : String, line_number : Int32) : String?
+    @@travelled_lines[filename]?.try &.[line_number]?
+  end
+
   module ErrorFormat
     MACRO_LINES_TO_SHOW               = 3
     OFFSET_FROM_LINE_NUMBER_DECORATOR = 6
@@ -262,6 +280,17 @@ module Iyi
       in String
         if Iyi.iyi_declaration_lines?(filename) || File.file?(filename)
           return format_error_from_file(filename)
+        end
+        if (line_number = @line_number) && (line = Iyi.travelled_line?(filename, line_number))
+          shown = Array(String).new(line_number - 1, "")
+          shown << line
+          return "In #{format_error(filename, shown, line_number, @column_number, @size)}"
+        end
+        # iyi: a body read from an artifact is located in the module's source,
+        # which a consumer need not have. Without its lines the place is still
+        # worth naming, where "error in line 4" named no file at all.
+        if !source && !filename.empty? && (line_number = @line_number)
+          return "In #{filename_row_col_message(filename, line_number, @column_number)}"
         end
       in Nil
         # go on

@@ -302,9 +302,9 @@ module Iyi
       io << relative_filename(filename) << ':' << line_number
       io << "\n\n"
 
-      return unless lines
-
-      line = lines[line_number - 1]
+      # A body read from an artifact is located in the module's source, which
+      # may since have changed under it.
+      return unless lines && (line = lines[line_number - 1]?)
 
       name_location = node.name_location
       name_size = node.name_size

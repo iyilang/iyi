@@ -847,8 +847,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       # struct this module declares carried a header alone, and the
       # consumer's link ended on `Kit::Lib::B#walk<&Proc(Int32, Nil)>:Nil`.
       if file && (bodies_travel || IyiMod.caller_instantiated?(a_def) || iyi_impl_signature_widened?(a_def))
-        bodies = @program.iyi_mono_bodies[file] ||= {} of String => String
-        bodies[IyiMod.mono_body_key(container, signature)] = a_def.body.to_s
+        key = IyiMod.mono_body_key(container, signature)
+        text, positions = IyiMod.located_source(a_def.body)
+        (@program.iyi_mono_bodies[file] ||= {} of String => String)[key] = text
+        (@program.iyi_mono_body_positions[file] ||= {} of String => Array(IyiMod::SourcePosition))[key] = positions
       end
     end
 
@@ -3131,9 +3133,12 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     end.first?
     return unless existing
 
-    # A namespace this file declared is its own to add to.
+    # A namespace this file declared is its own to add to. Declared in an
+    # artifact built from this file is the same: the artifact's initialiser is
+    # placed in its source (`IyiMod::SourcePosition`), and `Eiy::DefaultIoName
+    # = "__io__"` there adds to the `Eiy` its declarations wrote.
     locations = existing.locations
-    return if locations.try &.any? { |location| location.filename == filename }
+    return if locations.try &.any? { |location| iyi_written_from?(location.filename, filename) }
 
     declared_in = locations.try(&.first?).try(&.filename)
     where = declared_in.is_a?(String) ? " (declared in `#{declared_in}`)" : ""
@@ -3148,6 +3153,13 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       Add the method where the type is declared, or write `impl Trait for #{path}`
       here, which R-3 allows when the trait is this module's.
       MSG
+  end
+
+  # iyi: whether *declared* is *file*, or an artifact built from it — whose
+  # declarations are parsed under the artifact's path while its travelling
+  # code is placed in *file* (`Program#iyi_artifact_source_paths`).
+  private def iyi_written_from?(declared : String | VirtualFile | Nil, file : String) : Bool
+    declared == file || (declared.is_a?(String) && @program.iyi_artifact_source_paths[declared]? == file)
   end
 
   def check_type_is_type_container(scope, path)

@@ -109,6 +109,10 @@ module Iyi
     # any other module's, because that order is over modules and not over text.
     getter iyi_module_initialiser_source = {} of String => String
 
+    # iyi: where the nodes of each module's initialiser were written, beside
+    # `iyi_module_initialiser_source` (`IyiMod::SourcePosition`).
+    getter iyi_module_initialiser_positions = {} of String => Array(IyiMod::SourcePosition)
+
     # iyi: which modules each file imports, by absolute filename (SPEC.md
     # III.5 rule 2). `iyi_module_inits` is one order the DAG allows; these are
     # the edges, which is what makes every *other* order it allows computable.
@@ -183,13 +187,17 @@ module Iyi
       # line outside the `{% if %}` meant the type.
       writer = location.try(&.original_filename)
       return unless writer
+      # A mono body or initialiser read from an artifact is located in the
+      # module's source (`IyiMod::SourcePosition`), and the file this build
+      # read it from is the artifact, which the edges are keyed on. Asked of
+      # the source path it found no edges, so `Tuple(DnsMessage, String)` in
+      # a body `std/socket` ships met `Std::Tuple`, a module std/socket never
+      # imports, and the build said "Std::Tuple is not a generic type".
+      writer = iyi_artifact_read_from[writer]? || writer
       return if writer == unit_file
       # Only writers this build read as files: the entry and everything
       # imported (artifact declaration replays included — their path is
-      # an edge value). A mono body or initialiser replayed out of an
-      # artifact carries its *far machine's* source path; it was checked
-      # when its own module built, and refusing it here would sanction
-      # code nobody on this machine wrote.
+      # an edge value).
       return unless writer == filename || iyi_imported_files.includes?(writer)
       return if iyi_reachable_files(writer).includes?(unit_file)
 
@@ -247,6 +255,13 @@ module Iyi
     # there. So this points at where it was, which is right whenever the
     # producer's tree is present and an honest error when it is not.
     getter iyi_artifact_source_paths = {} of String => String
+
+    # iyi: the other way: the `.iyimod` each module's source was read from,
+    # by `Artifact#source_path`. A travelling body and the initialiser are
+    # located in the source (`IyiMod::SourcePosition`), and what this build
+    # keys on the file it read — import edges, file-private names — is keyed
+    # on the artifact.
+    getter iyi_artifact_read_from = {} of String => String
 
     # iyi: true only while a `derive`'s macro is expanding (SPEC.md R-5, II.4).
     # A derive reads the declaration it is attached to, and the types that
@@ -888,6 +903,10 @@ module Iyi
     # could have emitted. Everything else stays behind and arrives as machine
     # code in `ObjectCode`.
     getter iyi_mono_bodies = {} of String => Hash(String, String)
+
+    # iyi: where the nodes of each body in `iyi_mono_bodies` were written, by
+    # the same two keys (`IyiMod::SourcePosition`).
+    getter iyi_mono_body_positions = {} of String => Hash(String, Array(IyiMod::SourcePosition))
 
     # iyi: the defs whose bodies travel because their machine code enumerates an
     # open type's members, by the location each was written at (SPEC.md III.6).
@@ -1872,7 +1891,7 @@ module Iyi
     end
 
     def file_module?(filename)
-      file_modules[filename]?
+      file_modules[filename]? || iyi_artifact_read_from[filename]?.try { |artifact| file_modules[artifact]? }
     end
 
     def file_module(filename)

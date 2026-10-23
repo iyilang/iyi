@@ -288,6 +288,19 @@ and caught by a broken copy in `bench/std_tls_exercise.sh`;
   (`TLS_CLIENT_ONLY`), and its TLS 1.2 client's copies the one line of
   the round against OpenSSL.
 
+- **Windows' collector gates each run under a bound of their own.** The
+  step ran its eight gates one after another with none, so job
+  120284584748's stall in `bench/sweep_exercise.sh` (under Fixed) held
+  the job to its 150-minute cancel, and the log could not say whether the
+  compiler, the linker or the program was still running.
+  `bench/bounded_gate.sh` runs a gate for fifteen minutes - over three
+  times the longest gate's 4 min 33 s in master's green job 120284541992 -
+  and past that prints every process under it, each thread's state,
+  wait and CPU over two seconds, their stacks where cdb is installed,
+  and the tail of every log and output file the gate wrote, then ends
+  them; the gates after it still run, and the step fails at its end
+  naming each gate that failed.
+
 ## 0.19.0 — 2026-10-22
 
 **iyi's TLS gets its own certificates and keeps its sessions, and its

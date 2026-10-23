@@ -48,8 +48,10 @@
   program's client and server, ClientHellos crafted from the RFC's text
   for each of the server's refusals and both confirmations, a scripted
   server for the client's, Go's crypto/tls client and server
-  (`bench/std_tls_ech_oracle.go`, where Go 1.24 or later is here) each way
-  through a HelloRetryRequest, and 42 broken copies caught.
+  (`bench/std_tls_ech_oracle.go`, where Go 1.25 or later is here) each way
+  through a HelloRetryRequest, and 42 broken copies caught. CI's Linux
+  shards set Go up; the darwin and Windows runners' Go predates 1.25, so
+  there the Go legs go unasked and say so.
 
 - **std/hpke: Hybrid Public Key Encryption (RFC 9180), the building
   block of TLS Encrypted Client Hello and Oblivious HTTP, written in iyi

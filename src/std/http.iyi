@@ -138,8 +138,9 @@
 
 module std/http
 
+import std/dns::{DnsError, DnsName, SvcbAnswer, SvcbRecord}
 import std/socket::{IyiSocket, Resolver, SocketError}
-import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsMadeUnder, TlsServer, TlsServerConfig, TlsSession}
+import std/tls::{TlsAlert, TlsClient, TlsConfig, TlsConnection, TlsEchConfig, TlsError, TlsMadeUnder, TlsServer, TlsServerConfig, TlsSession}
 import std/x509::{Certificate}
 import std/uri::{URI, Params}
 import std/mime::{MIME}
@@ -2405,6 +2406,56 @@ end
 # Over HTTP/2 - `https://` where ALPN chose `h2`, or `http://` with
 # *prior_knowledge* (h2c, RFC 9113 §3.3) - a kept connection carries the
 # next request on a new stream, until the server says GOAWAY.
+#
+# HTTPS records (RFC 9460), when `use_https_records` is set: before a new
+# connection to an `https://` origin - not through a proxy, and not for
+# an upgrade - the client asks its resolver for the origin's HTTPS
+# records (`Resolver#https_records`, AliasMode followed) and connects by
+# the first ServiceMode record it can use: one whose mandatory keys it
+# knows - the seven std/dns reads, port and no-default-alpn mandatory by
+# being there (section 9) - and whose protocols (alpn, and http/1.1
+# unless no-default-alpn) hold one of the configuration's `alpn`, or
+# http/1.1 where that is empty. Its target - the record's owner for "."
+# - and its port, or the origin's, are where the connection goes; its
+# `ech` is the connection's `ech_configs` (RFC 9848); and the protocols
+# it lists go first in the ClientHello's ALPN, which still offers every
+# one the configuration does (section 7.1.2: a record says which
+# protocols the endpoint has, and cannot take one away). The certificate
+# is checked, and the server named inside, for the origin's host,
+# whatever the target (section 2.3). An `ech` whose ECHConfigList holds
+# no config std/tls can use is passed over, as RFC 9849 section 6.1 has
+# it. The address hints are not read: the target's addresses are asked
+# for as any host's are.
+#
+# An endpoint that does not connect gives way to the next, then to the
+# last AliasMode target and to the origin itself (section 3) - unless
+# every endpoint carries `ech`, when the request fails rather than name
+# the server in the clear (RFC 9848 section 5.1). A TLS refusal is the
+# request's failure, but for one: a server that turned the encrypted
+# ClientHello down, its certificate checked for the config's
+# public_name, is asked once more on a new connection to the same
+# address, under the retry_configs it sent, or without ECH where it sent
+# none, which turns ECH off there (RFC 9849 section 6.1.6); a refusal of
+# that is the failure. No records (NXDOMAIN, NODATA), a set section 2.2
+# refuses, an AliasMode "." (the service says it is not there), or no
+# record the client can use: the connection is made as without records.
+# So is one whose lookup failed through a resolver that asks in the
+# clear, as section 3.1 lets a client choose; through encrypted
+# upstreams the failure is the request's, as section 3.1 asks, for
+# there the one who can drop the answer is an attacker taking the
+# records away. `localhost` and addresses are not asked about, and an
+# `http://` URL is not made `https://` by its records (section 9.5's
+# SHOULD): the program wrote the scheme.
+#
+# A record's `ech` and protocols make a configuration of their own - a
+# copy of the client's, made once and kept for the origin while the same
+# ones come under the same configuration - so that a kept connection and
+# a ticket are handed on only under the record they were made by
+# (`TlsMadeUnder` holds `ech_configs`). Off by default: every new
+# connection then waits on one DNS answer or more before its ClientHello
+# (RFC 9848 section 5.3 forbids sending it sooner), with no cache to
+# spare the next, and the records may move a connection to another host
+# and port, which is the program's to ask for.
 pub class HTTPClient
   @idle : Hash(String, Array(Conn))
   @limit : Int32
@@ -2416,6 +2467,9 @@ pub class HTTPClient
   @sessions : Array(HeldSession)
   @origin_tickets : Int32
   @tickets : Int32
+  # The configurations HTTPS records made, the one an origin's last
+  # connection by them was made under at the end.
+  @bound : Array(HttpsBound)
   # `http://` spoken as HTTP/2 from the first byte, without asking: for a
   # server known to take it.
   getter prior_knowledge : Bool
@@ -2430,6 +2484,9 @@ pub class HTTPClient
   # alone that pins a name to an address, as std/secure_dns's
   # `DnsOverHttps` pins its server's.
   getter resolver : Resolver?
+  # Whether a new `https://` connection is made by the origin's HTTPS
+  # records (the class's header); off by default.
+  property use_https_records : Bool = false
 
   # *timeout_ms* and *proxy* are `HTTP.open`'s, for every request the
   # client sends; *tls* and *resolver* are this client's own (above);
@@ -2447,6 +2504,7 @@ pub class HTTPClient
     @reused = 0
     @resumed = 0
     @sessions = [] of HeldSession
+    @bound = [] of HttpsBound
   end
 
   # Connections this client has opened, and requests sent over one it
@@ -2583,6 +2641,107 @@ pub class HTTPClient
     end
     waiting << conn
     @idle[key] = waiting
+  end
+
+  # The most configurations HTTPS records make an origin hold - a
+  # record's, its retry_configs' and ECH turned off - and the most in
+  # all, past which the one longest unused goes.
+  ORIGIN_BOUND =   4
+  BOUND        = 256
+
+  # The configuration a connection to *origin* is made under by a record
+  # whose `ech` is *ech* (nil: none) and whose protocols put *alpn* in its
+  # order, *base* being the client's own or `HTTP.tls_config`: *base*
+  # itself where those are its own, and otherwise a copy of it with them -
+  # the same object every time while *base* is the same (`TlsMadeUnder`),
+  # so that a connection kept and a ticket held under it serve the next
+  # connection by the same record. It becomes the one the origin's kept
+  # connections are taken under (`https_current`). The origin's
+  # configurations from under another *base* go.
+  protected def https_config(origin : String, base : TlsConfig, ech : Array(UInt8)?, alpn : Array(String)) : TlsConfig
+    kept = [] of HttpsBound
+    found = nil.as(HttpsBound?)
+    @bound.each do |held|
+      if held.origin != origin
+        kept << held
+      elsif held.under.same?(base)
+        if found.nil? && held.ech == ech && held.alpn == alpn
+          found = held
+        else
+          kept << held
+        end
+      end
+    end
+    held = found
+    unless held
+      config = base
+      unless ech == base.ech_configs && alpn == base.alpn
+        config = base.dup
+        config.ech_configs = ech
+        config.alpn = alpn
+      end
+      held = HttpsBound.new(origin, TlsMadeUnder.new(base), ech, alpn, config)
+    end
+    kept << held
+    over = kept.count { |other| other.origin == origin } - ORIGIN_BOUND
+    if over > 0
+      trimmed = [] of HttpsBound
+      kept.each do |other|
+        if over > 0 && other.origin == origin
+          over = over - 1
+        else
+          trimmed << other
+        end
+      end
+      kept = trimmed
+    end
+    while kept.size > BOUND
+      kept.shift
+    end
+    @bound = kept
+    held.config
+  end
+
+  # The configuration *origin*'s last connection by HTTPS records was made
+  # under, while *base* is the one it came from - *base* itself where it
+  # was made as without records: what a kept connection to the origin
+  # must have been made under to be taken. Nil when none was made by them
+  # under *base*, and then none is taken.
+  protected def https_current(origin : String, base : TlsConfig) : TlsConfig?
+    at = @bound.size - 1
+    while at >= 0
+      held = @bound[at]
+      return held.under.same?(base) ? held.config : nil if held.origin == origin
+      at = at - 1
+    end
+    nil
+  end
+end
+
+# A configuration an `HTTPClient` made for an origin from an HTTPS
+# record's `ech` and protocols, and the base it was made from.
+class HttpsBound
+  getter origin : String
+  getter under : TlsMadeUnder
+  getter ech : Array(UInt8)?
+  getter alpn : Array(String)
+  getter config : TlsConfig
+
+  def initialize(@origin : String, @under : TlsMadeUnder, @ech : Array(UInt8)?, @alpn : Array(String), @config : TlsConfig)
+  end
+end
+
+# One endpoint an origin's HTTPS records name, as `HTTP.https_endpoints`
+# reads it: the host and port to connect to, the ECHConfigList to encrypt
+# the ClientHello under (nil: none), and the protocols to offer by ALPN,
+# in order.
+pub struct HttpsEndpoint
+  getter host : String
+  getter port : Int32
+  getter ech : Array(UInt8)?
+  getter alpn : Array(String)
+
+  def initialize(@host : String, @port : Int32, @ech : Array(UInt8)?, @alpn : Array(String))
   end
 end
 
@@ -3046,57 +3205,81 @@ pub struct HTTP
       under = keeping.tls || under
       through = keeping.resolver
     end
+    # A client that asks connects to an `https://` origin by its HTTPS
+    # records, and takes a kept connection only when it was made under the
+    # configuration its last connection by them was
+    # (`HTTPClient#https_current`): one made before it asked is not.
+    recorded = secure && route.nil? && upgrade.nil? && !client.nil? && client.use_https_records
     while true
       conn = nil.as(Conn?)
-      if keeping = client
-        conn = keeping.take(key, secure ? under : nil) unless upgrade
+      if (keeping = client) && !upgrade
+        if recorded
+          current = keeping.https_current(origin, under)
+          conn = keeping.take(key, current) if current
+        else
+          conn = keeping.take(key, secure ? under : nil)
+        end
       end
       reused = !conn.nil?
       unless conn
         wait = timeout_ms > 0 ? timeout_ms : -1
-        socket = (through ? IyiSocket.connect(dial_host, dial_port, through, wait) : IyiSocket.connect(dial_host, dial_port, wait))!
-        client.made if client
-        if tunneled && (via = route)
-          unopened = tunnel(socket, via, named + ":" + port.to_s, tunnel_credential, timeout_ms, secure)
-          if unopened
-            socket.close
-            return unopened
-          end
+        made = nil.as(Tuple(IyiSocket, TlsClient, TlsConfig)?)
+        if recorded && (keeping = client)
+          found = by_records(keeping, origin, host, port, under, through, timeout_ms)
+          return found if found.is_a?(Cancelled) || found.is_a?(SocketError) || found.is_a?(HTTPError)
+          made = found
         end
-        if secure
-          # The handshake waits as long as a read does.
-          if timeout_ms > 0
-            socket.read_timeout_ms = timeout_ms
-            socket.write_timeout_ms = timeout_ms
-          end
-          offered = under
-          if upgrade
-            # An upgrade is HTTP/1.1's: ALPN offers that alone, as RFC
-            # 8441's way over HTTP/2 (an extended CONNECT) is not here.
-            offered = TlsConfig.new
-            offered.roots = under.roots
-            offered.now = under.now
-            offered.identity = under.identity
-            offered.alpn = ["http/1.1"]
-          end
-          # The tickets a client keeps for this origin under this
-          # configuration (`HTTPClient#session_for`); an upgrade, which no
-          # client carries, keeps none. Nothing goes early (0-RTT), whatever
-          # a ticket allows: the module's header says why.
-          session = nil.as(TlsSession?)
-          if keeping = client
-            session = keeping.session_for(origin, under) unless upgrade
-          end
-          tls = TlsClient.over(socket, host, offered, timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS, session)
-          return HTTPError.new(tls.message) if tls.is_a?(TlsError)
+        if by = made
+          socket, tls, config = by
           client.resumed if client && tls.resumed?
           conn = Conn.new(socket, stream: TlsStream.new(tls, host))
-          conn.made_under = TlsMadeUnder.new(under)
-          speaks_h2 = upgrade.nil? && tls.alpn_protocol == "h2"
+          conn.made_under = TlsMadeUnder.new(config)
+          speaks_h2 = tls.alpn_protocol == "h2"
         else
-          conn = Conn.new(socket)
-          # Through a proxy the request is HTTP/1.1's absolute form.
-          speaks_h2 = upgrade.nil? && !client.nil? && client.prior_knowledge && route.nil?
+          socket = (through ? IyiSocket.connect(dial_host, dial_port, through, wait) : IyiSocket.connect(dial_host, dial_port, wait))!
+          client.made if client
+          if tunneled && (via = route)
+            unopened = tunnel(socket, via, named + ":" + port.to_s, tunnel_credential, timeout_ms, secure)
+            if unopened
+              socket.close
+              return unopened
+            end
+          end
+          if secure
+            # The handshake waits as long as a read does.
+            if timeout_ms > 0
+              socket.read_timeout_ms = timeout_ms
+              socket.write_timeout_ms = timeout_ms
+            end
+            offered = under
+            if upgrade
+              # An upgrade is HTTP/1.1's: ALPN offers that alone, as RFC
+              # 8441's way over HTTP/2 (an extended CONNECT) is not here.
+              offered = TlsConfig.new
+              offered.roots = under.roots
+              offered.now = under.now
+              offered.identity = under.identity
+              offered.alpn = ["http/1.1"]
+            end
+            # The tickets a client keeps for this origin under this
+            # configuration (`HTTPClient#session_for`); an upgrade, which no
+            # client carries, keeps none. Nothing goes early (0-RTT), whatever
+            # a ticket allows: the module's header says why.
+            session = nil.as(TlsSession?)
+            if keeping = client
+              session = keeping.session_for(origin, under) unless upgrade
+            end
+            tls = TlsClient.over(socket, host, offered, timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS, session)
+            return HTTPError.new(tls.message) if tls.is_a?(TlsError)
+            client.resumed if client && tls.resumed?
+            conn = Conn.new(socket, stream: TlsStream.new(tls, host))
+            conn.made_under = TlsMadeUnder.new(under)
+            speaks_h2 = upgrade.nil? && tls.alpn_protocol == "h2"
+          else
+            conn = Conn.new(socket)
+            # Through a proxy the request is HTTP/1.1's absolute form.
+            speaks_h2 = upgrade.nil? && !client.nil? && client.prior_knowledge && route.nil?
+          end
         end
         conn.gap = timeout_ms if timeout_ms > 0
         if speaks_h2
@@ -3153,6 +3336,115 @@ pub struct HTTP
       conn.close_now unless answer.is_a?(Exchange)
       return answer
     end
+  end
+
+  # A connection to the origin *host*:*port* made by its HTTPS records for
+  # *client*, under *base*, its own configuration or `HTTP.tls_config`
+  # (`HTTPClient`'s header says how): the socket, the TLS connection and
+  # the configuration it was made under. Nil when the records give no
+  # endpoint to take, or every one they give failed to connect and the
+  # origin may be connected to as without them; the origin's kept
+  # connections are then taken under *base* again.
+  private def self.by_records(client : HTTPClient, origin : String, host : String, port : Int32, base : TlsConfig, through : Resolver?, timeout_ms : Int32) : Tuple(IyiSocket, TlsClient, TlsConfig) | Cancelled | SocketError | HTTPError | Nil
+    made = connect_by_records(client, origin, host, port, base, through, timeout_ms)
+    client.https_config(origin, base, base.ech_configs, base.alpn) if made.nil?
+    made
+  end
+
+  private def self.connect_by_records(client : HTTPClient, origin : String, host : String, port : Int32, base : TlsConfig, through : Resolver?, timeout_ms : Int32) : Tuple(IyiSocket, TlsClient, TlsConfig) | Cancelled | SocketError | HTTPError | Nil
+    return nil if IyiSocket.localhost?(host) || !DnsName.valid?(host)
+    resolver = through || Resolver.system
+    found = resolver.https_records(host, port)
+    return found if found.is_a?(Cancelled)
+    if found.is_a?(DnsError)
+      return nil if found.not_found? || found.no_address? || found.malformed? || resolver.upstreams.empty?
+      return HTTPError.new("#{found.message}; a failed lookup of HTTPS records over encrypted upstreams is not passed over (RFC 9460 section 3.1)")
+    end
+    endpoints = https_endpoints(found, base.alpn, port)
+    # RFC 9848 section 5.1: where every endpoint is encrypted, none that
+    # is not is fallen back to - not the last AliasMode target's, which
+    # section 3 adds for a client that may fall back, nor the origin.
+    reliant = !endpoints.empty? && endpoints.all? { |endpoint| !endpoint.ech.nil? }
+    if !reliant && found.aliases > 0 && !found.unavailable? && DnsName.valid?(found.name)
+      endpoints << HttpsEndpoint.new(found.name, port, nil, base.alpn)
+    end
+    wait = timeout_ms > 0 ? timeout_ms : -1
+    failed = nil.as(SocketError?)
+    endpoints.each do |endpoint|
+      socket = through ? IyiSocket.connect(endpoint.host, endpoint.port, through, wait) : IyiSocket.connect(endpoint.host, endpoint.port, wait)
+      return socket if socket.is_a?(Cancelled)
+      if socket.is_a?(SocketError)
+        failed = socket
+        next
+      end
+      client.made
+      # Where a retry goes: the address this connection reached, not one
+      # a new lookup might give, which could be another server's under
+      # another configuration (RFC 9849 section 6.1.6).
+      address = socket.remote_address
+      config = client.https_config(origin, base, endpoint.ech, endpoint.alpn)
+      tls = records_handshake(client, origin, socket, host, config, timeout_ms)
+      if tls.is_a?(TlsError) && tls.alert == TlsAlert::ECH_REQUIRED && !config.ech_configs.nil? && address
+        # Turned down, the server's certificate checked for the config's
+        # public_name: asked once more under the retry_configs it sent, or
+        # without ECH where it sent none. A second refusal is the failure.
+        socket = IyiSocket.connect(address, endpoint.port, wait)
+        return socket if socket.is_a?(Cancelled) || socket.is_a?(SocketError)
+        client.made
+        config = client.https_config(origin, base, tls.retry_configs, endpoint.alpn)
+        tls = records_handshake(client, origin, socket, host, config, timeout_ms)
+      end
+      return HTTPError.new(tls.message) if tls.is_a?(TlsError)
+      return {socket, tls, config}
+    end
+    return failed if reliant && failed
+    nil
+  end
+
+  # The handshake for *host* on *socket* under *config*, offering a ticket
+  # *client* keeps for *origin* under it; it waits as long as a read does.
+  private def self.records_handshake(client : HTTPClient, origin : String, socket : IyiSocket, host : String, config : TlsConfig, timeout_ms : Int32) : TlsClient | TlsError
+    if timeout_ms > 0
+      socket.read_timeout_ms = timeout_ms
+      socket.write_timeout_ms = timeout_ms
+    end
+    shake_ms = timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS
+    TlsClient.over(socket, host, config, shake_ms, client.session_for(origin, config))
+  end
+
+  # The endpoints *answer*'s ServiceMode records name for a client whose
+  # configuration offers *alpn* by ALPN (none: it speaks http/1.1 alone),
+  # to an origin on *port*, in the order to try them: a record whose
+  # mandatory keys are not all ones std/dns reads, or whose protocols -
+  # alpn, and http/1.1 unless no-default-alpn - hold none of the client's,
+  # names none (RFC 9460 sections 7.1.2 and 8), and neither does one whose
+  # target is not a host name. Each is the record's target, or its owner
+  # for "."; its port, or *port*; its `ech` where the ECHConfigList holds
+  # a config std/tls can use (RFC 9849 section 6.1), nil otherwise; and
+  # *alpn* with the protocols the record's alpn lists first, in *alpn*'s
+  # order otherwise.
+  def self.https_endpoints(answer : SvcbAnswer, alpn : Array(String), port : Int32) : Array(HttpsEndpoint)
+    spoken = alpn.empty? ? ["http/1.1"] : alpn
+    found = [] of HttpsEndpoint
+    answer.records.each do |record|
+      next if record.alias?
+      next unless record.mandatory.all? { |key| key <= SvcbRecord::IPV6HINT }
+      listed = record.alpn
+      offered = listed.dup
+      offered << "http/1.1" unless record.no_default_alpn?
+      next unless spoken.any? { |protocol| offered.includes?(protocol) }
+      host = record.endpoint
+      next unless DnsName.valid?(host)
+      ech = nil.as(Array(UInt8)?)
+      if list = record.ech
+        bytes = Array(UInt8).new(list.size) { |index| list[index] }
+        configs = TlsEchConfig.read_list(bytes)
+        ech = bytes if configs.is_a?(Array(TlsEchConfig)) && configs.any? { |config| !config.hpke_suite.nil? }
+      end
+      ordered = alpn.select { |protocol| listed.includes?(protocol) } + alpn.reject { |protocol| listed.includes?(protocol) }
+      found << HttpsEndpoint.new(host, record.port || port, ech, ordered)
+    end
+    found
   end
 
   # The tunnel to *authority* (`host:port`, an IPv6 host in brackets) on

@@ -1,38 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Fixed
-
-- **A body read back from an artifact is located in its module's source,
-  so `Eiy.render` in a travelling body finds its template (#140).** A
-  `forall` def's body, and any other a consumer compiles itself, travels
-  in the `.iyimod` as text, and the consumer parsed it inside the
-  declarations the artifact renders, so each of its nodes was located at
-  a line of that rendering under the artifact's path. A macro reading
-  `@caller.first.filename` read `mods/lib/page.iyimod`, and the second of
-  `iyi build --emit-iyimod mods` and `iyi build --emit-iyimod mods
-  --use-iyimod mods` ended on `cannot read mods/lib/../views/greet.eiy`;
-  an error inside such a body said `In mods/lib/sized.iyimod:6:5` where
-  the source build says `In lib/sized.iyi:4:5`. The artifact now records
-  where each node of a travelling body and of the module's initialiser
-  was written, and the consumer's parse puts it there: `@caller`, errors,
-  `run` macros and debug line info answer as the source build does, and
-  with the source gone an error names the source's line and shows it as
-  the artifact carried it. What the build decides is still asked of the
-  artifact the node was read from, which every location parsed from one
-  carries beside its filename (`Location#artifact`): import edges and
-  the import wall, file-private names, proc symbol names, and the
-  refusals the module's own build already made, so a `defer` in a
-  travelling body, which travels as the `ensure` it lowers to, is not
-  refused as an `ensure` written in the source. `.iyimod` is v59, and a
-  v58 artifact is refused and built again. The positions stay out of the
-  implementation hash, so a line added above a body rebuilds no
-  dependent. `bench/samples_roundtrip.sh` builds the issue's layout both
-  ways it was reported and checks the error's location, and
-  `spec/compiler/iyimod_spec.cr` checks `@caller` in a body and in the
-  initialiser, all of which failed before this, and a `defer` in a body.
-
 ## 0.19.1 — 2026-10-23
 
 **A collector hang and a handful of TLS and PKI edges fixed, and TLS
@@ -48,14 +15,15 @@ handshake that authenticated it; a server declines early data a lowered
 limit no longer allows rather than cutting the client off, and refuses a
 server_name past 253 bytes (in 0.19.0 one past 255 ended that
 connection's task with `arithmetic overflow` when its ticket was
-written, the server serving on); std/acme requires
-HTTPS; std/autocert checks an issued chain against its roots and holds a
+written, the server serving on); std/acme requires HTTPS; std/autocert checks an issued chain against its roots and holds a
 handshake no longer than its deadline; DNS over TLS and over HTTPS pad
 their queries to 128 bytes. std/hpke is Hybrid Public Key Encryption
 (RFC 9180), and std/tls speaks Encrypted Client Hello (RFC 9849) at both
 ends over it, held to Go's crypto/tls each way; std/dns reads SVCB and
 HTTPS records (RFC 9460), and an `HTTPClient` asked to takes a site's
-ECH configuration and protocols from them.
+ECH configuration and protocols from them. A body that travels in an
+artifact is located in its module's source, so `Eiy.render` in one finds
+its template from artifacts as it does from source (#140).
 
 **Some answers change:** a std/tls client sends a GREASE
 encrypted_client_hello extension in every ClientHello without an ECH
@@ -65,6 +33,8 @@ do not lead to, so a manager pointed at a private CA must set them;
 `TlsServerConfig#identity_source` is given a third argument, the
 milliseconds left of the handshake; and tickets a 0.19.0 server issued
 are not read by this one, so those clients make one full handshake.
+`.iyimod` is v59, and an artifact an earlier compiler wrote is refused
+and built again.
 
 **Not here, and said so:** std/tls has not been audited and is not to be
 called secure until it is; ECH's split mode is not here; the Go legs of
@@ -169,6 +139,35 @@ the ECH gate run on Linux CI alone, where Go is 1.25 or later.
   without the sender's key, are each caught at the check that names it.
 
 ### Fixed
+
+- **A body read back from an artifact is located in its module's source,
+  so `Eiy.render` in a travelling body finds its template (#140).** A
+  `forall` def's body, and any other a consumer compiles itself, travels
+  in the `.iyimod` as text, and the consumer parsed it inside the
+  declarations the artifact renders, so each of its nodes was located at
+  a line of that rendering under the artifact's path. A macro reading
+  `@caller.first.filename` read `mods/lib/page.iyimod`, and the second of
+  `iyi build --emit-iyimod mods` and `iyi build --emit-iyimod mods
+  --use-iyimod mods` ended on `cannot read mods/lib/../views/greet.eiy`;
+  an error inside such a body said `In mods/lib/sized.iyimod:6:5` where
+  the source build says `In lib/sized.iyi:4:5`. The artifact now records
+  where each node of a travelling body and of the module's initialiser
+  was written, and the consumer's parse puts it there: `@caller`, errors,
+  `run` macros and debug line info answer as the source build does, and
+  with the source gone an error names the source's line and shows it as
+  the artifact carried it. What the build decides is still asked of the
+  artifact the node was read from, which every location parsed from one
+  carries beside its filename (`Location#artifact`): import edges and
+  the import wall, file-private names, proc symbol names, and the
+  refusals the module's own build already made, so a `defer` in a
+  travelling body, which travels as the `ensure` it lowers to, is not
+  refused as an `ensure` written in the source. `.iyimod` is v59, and a
+  v58 artifact is refused and built again. The positions stay out of the
+  implementation hash, so a line added above a body rebuilds no
+  dependent. `bench/samples_roundtrip.sh` builds the issue's layout both
+  ways it was reported and checks the error's location, and
+  `spec/compiler/iyimod_spec.cr` checks `@caller` in a body and in the
+  initialiser, all of which failed before this, and a `defer` in a body.
 
 - **DNS over TLS and DNS over HTTPS queries are padded (RFC 7830), so a
   name's length no longer shows through the encryption.** A query was a

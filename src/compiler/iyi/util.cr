@@ -225,7 +225,7 @@ module Iyi
       File.delete?(probe)
       true
     {% else %}
-      File.writable?(directory)
+      File::Info.writable?(directory)
     {% end %}
   end
 

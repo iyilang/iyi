@@ -2014,11 +2014,14 @@ echo "== Encrypted Client Hello (RFC 9849) against Go's crypto/tls"
 # Windows' runners run this where their image puts `go` on the PATH, and
 # say so where not. A version manager's shim with no version chosen answers
 # `go version` with an error, so each candidate is run, not looked for.
+# Go 1.25 at least: the oracle reports the group a handshake settled on,
+# `ConnectionState.CurveID`, which 1.25 added - Windows' image had an
+# older Go, and the oracle did not build there (job 120173077039).
 GO_ECH=""
 for candidate in "${GO:-}" go /usr/local/go/bin/go "$HOME"/.local/share/mise/installs/go/*/bin/go; do
   [ -n "$candidate" ] || continue
   minor=$("$candidate" version 2>/dev/null | sed -n 's/^go version go1\.\([0-9]*\).*/\1/p')
-  if [ -n "$minor" ] && [ "$minor" -ge 24 ]; then
+  if [ -n "$minor" ] && [ "$minor" -ge 25 ]; then
     GO_ECH="$candidate"
     break
   fi
@@ -2052,7 +2055,7 @@ ech_lines() {
   echo "  $label"
 }
 if [ -z "$GO_ECH" ]; then
-  echo "  no Go 1.24 or later here, so Go's ECH client and server go unasked"
+  echo "  no Go 1.25 or later here, so Go's ECH client and server go unasked"
 elif ! "$GO_ECH" build -o "$WORK/ech-oracle" "$REPO/bench/std_tls_ech_oracle.go" >"$WORK/ech-oracle.log" 2>&1; then
   echo "  FAIL: the Go oracle did not build:"
   tail -3 "$WORK/ech-oracle.log" | sed 's/^/    /'

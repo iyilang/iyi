@@ -120,7 +120,7 @@ fi
 
 echo
 echo "== every tls section reported"
-for phrase in "== RFC 8448's simple 1-RTT handshake, through the key schedule" "== the trace's records, sealed and opened" "== TLS 1.2's PRF, through the key schedule" "== server_name's form (RFC 6066 section 3)" "== a session's tickets, between this run's own client and server"; do
+for phrase in "== RFC 8448's simple 1-RTT handshake, through the key schedule" "== the trace's records, sealed and opened" "== TLS 1.2's PRF, through the key schedule" "== server_name's form (RFC 6066 section 3)" "== a session's tickets, between this run's own client and server" "== Encrypted Client Hello (RFC 9849)"; do
   if ! grep -q "$phrase" "$WORK/tls-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -2001,6 +2001,100 @@ if [ "$stapling_ready" = yes ]; then
 fi
 
 echo
+echo "== Encrypted Client Hello (RFC 9849) against Go's crypto/tls"
+# Go's ECH client (Go 1.23 on) and server (EncryptedClientHelloKeys, Go
+# 1.24 on), bench/std_tls_ech_oracle.go: the std/tls client before Go's
+# server, which takes secp256r1 alone and so asks again
+# (HelloRetryRequest), and Go's client before the std/tls server told to
+# take secp256r1 alone (`TlsServerConfig#groups`), for the same - each
+# under the server's ECHConfigList, under a stale one, and under the
+# retry_configs that refusal carried. Go writes its own ECHConfig, from
+# RFC 9849 section 4, and reads the std/tls server's. Where CI has Go: the
+# Linux module-exercise shards set it up (`actions/setup-go`); darwin's and
+# Windows' runners run this where their image puts `go` on the PATH, and
+# say so where not. A version manager's shim with no version chosen answers
+# `go version` with an error, so each candidate is run, not looked for.
+GO_ECH=""
+for candidate in "${GO:-}" go /usr/local/go/bin/go "$HOME"/.local/share/mise/installs/go/*/bin/go; do
+  [ -n "$candidate" ] || continue
+  minor=$("$candidate" version 2>/dev/null | sed -n 's/^go version go1\.\([0-9]*\).*/\1/p')
+  if [ -n "$minor" ] && [ "$minor" -ge 24 ]; then
+    GO_ECH="$candidate"
+    break
+  fi
+done
+# ech_reap <pid>: the server is given ten seconds to print its last line
+# and end, and is ended then: one whose client made fewer connections than
+# it waits for would otherwise hold the gate.
+ech_reap() {
+  local _
+  for _ in $(seq 1 100); do
+    kill -0 "$1" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+}
+# ech_lines <file> <label> <line>...: the file is those lines, in order.
+ech_lines() {
+  local file="$1" label="$2" n=1 got
+  shift 2
+  for want in "$@"; do
+    got="$(sed -n "${n}p" "$file" | tr -d '\r')"
+    if [ "$got" != "$want" ]; then
+      echo "  FAIL $label, line $n: $got"
+      echo "    wanted: $want"
+      status=1
+      return 1
+    fi
+    n=$((n + 1))
+  done
+  echo "  $label"
+}
+if [ -z "$GO_ECH" ]; then
+  echo "  no Go 1.24 or later here, so Go's ECH client and server go unasked"
+elif ! "$GO_ECH" build -o "$WORK/ech-oracle" "$REPO/bench/std_tls_ech_oracle.go" >"$WORK/ech-oracle.log" 2>&1; then
+  echo "  FAIL: the Go oracle did not build:"
+  tail -3 "$WORK/ech-oracle.log" | sed 's/^/    /'
+  status=1
+else
+  echo "  $("$GO_ECH" version)"
+  mkdir -p "$WORK/ech-go" "$WORK/ech-iyi"
+  "$WORK/ech-oracle" server "$WORK/ech-go" 3 >"$WORK/ech-go/server.out" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/ech-go/port" ] && break
+    sleep 0.1
+  done
+  "$WORK/tls-release" ech-get "$(cat "$WORK/ech-go/port" 2>/dev/null || echo 1)" "$WORK/ech-go" >"$WORK/ech-go/client.out" 2>&1
+  ech_reap "$pid"
+  ech_lines "$WORK/ech-go/client.out" "the std/tls client before Go's server: taken through a HelloRetryRequest, turned down with retry_configs, taken again" \
+    "current: ech=true group=secp256r1 alpn=h2 got=echo:hello" \
+    "stale: refused: tls: inner.test did not take the encrypted ClientHello: the server, its certificate checked for public.test, sent configurations to retry with (ech_required); retry_configs the server's own" \
+    "retried: ech=true group=secp256r1 alpn=h2 got=echo:hello"
+  ech_lines "$WORK/ech-go/server.out" "Go's server read the inner name, two ClientHellos each, and the client's ech_required" \
+    "held ech=true name=inner.test group=CurveP256 alpn=h2 hellos=2 read=hello" \
+    "held ech=false name=public.test group=CurveP256 alpn= hellos=2 read=remote error: tls: encrypted client hello required" \
+    "held ech=true name=inner.test group=CurveP256 alpn=h2 hellos=2 read=hello"
+  "$WORK/tls-release" ech-serve "$WORK/ech-iyi" 3 secp256r1 >"$WORK/ech-iyi/server.out" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/ech-iyi/port" ] && break
+    sleep 0.1
+  done
+  "$WORK/ech-oracle" client "$(cat "$WORK/ech-iyi/port" 2>/dev/null || echo 1)" "$WORK/ech-iyi" >"$WORK/ech-iyi/client.out" 2>&1
+  ech_reap "$pid"
+  ech_lines "$WORK/ech-iyi/client.out" "Go's client before the std/tls server: taken through a HelloRetryRequest, turned down with retry_configs, taken again" \
+    "current: ech=true group=CurveP256 alpn=h2 hellos=2 got=echo:hello" \
+    "stale: refused: ECH rejected, hellos=2; retry_configs the server's own" \
+    "retried: ech=true group=CurveP256 alpn=h2 hellos=2 got=echo:hello"
+  ech_lines "$WORK/ech-iyi/server.out" "the std/tls server read the inner name under the outer's public_name, and Go's ech_required" \
+    "held ech=true name=inner.test outer=public.test group=secp256r1 alpn=h2 read=hello" \
+    "held ech=false name=public.test outer= group=secp256r1 alpn=h2 read=tls: the client sent alert ech_required (121)" \
+    "held ech=true name=inner.test outer=public.test group=secp256r1 alpn=h2 read=hello"
+fi
+
+echo
 echo "== a handshake's time, by the server's key (--release; measured, not checked)"
 # Python's ssl makes full TLS 1.3 handshakes with the exercise's server,
 # one after another over loopback, and closes each: the median wall time
@@ -2734,15 +2828,14 @@ prove_broken "an alert in the clear after the server's keys" "FAIL bad-finished 
 prove_broken "a private key that is not the certificate's taken" "FAIL another key" \
   '    return TlsError.new("the private key is not the certificate'"'"'s") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes' '' config
 prove_broken "a secp256r1 share taken before an X25519 one" "FAIL both-shares " \
-  '    TlsConnection::GROUPS12.find { |group| !share(group).nil? } || 0' '    @p256 ? TlsConnection::GROUP_SECP256R1 : (@x25519 ? TlsConnection::GROUP_X25519 : 0)' server
+  'property groups : Array(String) = ["X25519MLKEM768", "X25519", "secp256r1", "secp384r1"]' 'property groups : Array(String) = ["X25519MLKEM768", "secp256r1", "X25519", "secp384r1"]' server
 # X25519MLKEM768 at the server: preferred, its share's size, the modulus
 # check's alert, and the secret's and the share's order against OpenSSL.
 prove_broken "an X25519 share taken before X25519MLKEM768 is asked for" "FAIL OpenSSL, ed25519, an X25519 share, X25519MLKEM768 listed" \
-  '    return TlsConnection::GROUP_X25519MLKEM768 if @groups.includes?(TlsConnection::GROUP_X25519MLKEM768)' \
-  '    return TlsConnection::GROUP_X25519MLKEM768 if @hybrid' server-hybrid
+  '      return group if group == TlsConnection::GROUP_X25519MLKEM768 || !share(group).nil?' \
+  '      return group unless share(group).nil?' server-hybrid
 prove_broken "X25519 taken before X25519MLKEM768 when both shares come" "FAIL OpenSSL, ed25519, its default groups" \
-  '    return TlsConnection::GROUP_X25519MLKEM768 if @groups.includes?(TlsConnection::GROUP_X25519MLKEM768)
-' '' server-hybrid
+  'property groups : Array(String) = ["X25519MLKEM768", "X25519", "secp256r1", "secp384r1"]' 'property groups : Array(String) = ["X25519", "X25519MLKEM768", "secp256r1", "secp384r1"]' server-hybrid
 prove_broken "the server's hybrid secret in the wrong order, X25519's first" "FAIL OpenSSL, ed25519, X25519MLKEM768 alone" \
   '      secret = sent_kem[1] + TlsBytes.of(shared)' '      secret = TlsBytes.of(shared) + sent_kem[1]' server-hybrid
 prove_broken "the server's hybrid share with its X25519 key first" "FAIL OpenSSL, ed25519, X25519MLKEM768 alone" \
@@ -2753,7 +2846,7 @@ prove_broken "an encapsulation key that fails the modulus check answered with in
   '      return TlsError.new("the client'"'"'s X25519MLKEM768 share: #{sent_kem.message}", TlsAlert::ILLEGAL_PARAMETER) if sent_kem.is_a?(MlKemError)' \
   '      return TlsError.new("the client'"'"'s X25519MLKEM768 share: #{sent_kem.message}", TlsAlert::INTERNAL_ERROR) if sent_kem.is_a?(MlKemError)' server
 prove_broken "a HelloRetryRequest for secp256r1 whatever the groups" "FAIL hrr " \
-  '    TlsConnection::GROUPS.find { |group| @groups.includes?(group) } || 0' '    TlsConnection::GROUP_SECP256R1' server
+  '    preferred.find { |group| @groups.includes?(group) } || 0' '    TlsConnection::GROUP_SECP256R1' server
 prove_broken "the server's secp256r1 share not its key's" "FAIL p256-share " \
   '      public = ephemeral.public_point' '      public = ec_ephemeral(group).public_point' server
 prove_broken "a secp384r1 share passed over" "FAIL p384-share " \
@@ -2762,7 +2855,7 @@ prove_broken "a secp384r1 share passed over" "FAIL p384-share " \
 prove_broken "secp384r1 not among the server's groups" "FAIL p384-share " \
   '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1]' server
 prove_broken "a secp384r1 share taken before a secp256r1 one" "FAIL ec-shares " \
-  '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS12 = [GROUP_X25519, GROUP_SECP384R1, GROUP_SECP256R1]' server
+  'property groups : Array(String) = ["X25519MLKEM768", "X25519", "secp256r1", "secp384r1"]' 'property groups : Array(String) = ["X25519MLKEM768", "X25519", "secp384r1", "secp256r1"]' server
 prove_broken "the server's secp384r1 share made in secp256r1" "FAIL p384-share " \
   '      ephemeral = ec_ephemeral(group)
       got = ephemeral.shared_secret(peer)
@@ -2923,7 +3016,7 @@ prove_broken "a NewSessionTicket cut short taken" "ticket-bad:" \
 prove_broken "the client's resumption master secret short of its Finished" "FAIL resumed by OpenSSL's tickets, the default suites" \
   '    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript + finished)' '    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript)' client-resume
 prove_broken "a second ClientHello's binder without the HelloRetryRequest" "FAIL resumed by OpenSSL's tickets, secp256r1 alone" \
-  '      hello = client_hello(random, session, shares, cookie, @transcript)' '      hello = client_hello(random, session, shares, cookie, [] of UInt8)' client-resume
+  '      hello = client_hello(random, session, shares, cookie, @transcript, ech ? TlsEch::INNER : grease)' '      hello = client_hello(random, session, shares, cookie, Array(UInt8).new, ech ? TlsEch::INNER : grease)' client-resume
 prove_broken "a binder that does not match taken" "FAIL resume-bad-binder " \
   '      unless Subtle.constant_time_compare(offer.binders[index], @schedule.binder(ticket.psk, transcript))' '      if false' server
 prove_broken "a ticket under another hash's suite taken" "FAIL resume-other-hash " \
@@ -3189,6 +3282,117 @@ prove_broken "TLS 1.3's writing refused after the peer's close_notify" "FAIL pee
   ') if @tls12 && @eof' ') if @eof' server
 prove_broken "TLS 1.2's writing let on after the peer's close_notify" "FAIL 12-peer-close " \
   ') if @tls12 && @eof' ') if false' server12
+# Encrypted Client Hello (RFC 9849), over the exercise's own client and
+# server, its crafted ClientHellos and its scripted server: each copy
+# caught at the check that names what it broke.
+prove_broken 'the client'"'"'s acceptance confirmation unchecked' 'turned down by a server without public.test'"'"'s certificate' \
+  '      if Subtle.constant_time_compare(server[30, 8], TlsEch.confirmation(@schedule, random, @transcript + zeroed, false))' '      if true'
+prove_broken 'ech_outer_extensions'"'"' scan not moved past what it found: an extension named twice taken' 'an outer extension named twice' \
+  '        scan = scan + 1
+        i = i + 2' '        i = i + 2'
+prove_broken 'encrypted_client_hello named by ech_outer_extensions taken' 'encrypted_client_hello named by ech_outer_extensions' \
+  '        return TlsError.new("an ech_outer_extensions naming encrypted_client_hello", TlsAlert::ILLEGAL_PARAMETER) if wanted == EXTENSION
+' ''
+prove_broken 'no padding' 'the outer'"'"'s encrypted_client_hello: type outer' \
+  '    encoded + Array(UInt8).new(padding, 0_u8)' '    encoded'
+prove_broken 'the name not padded to maximum_name_length' 'names of 10 and 50 bytes are padded alike' \
+  '    padding = name >= 0 ? (longest > name ? longest - name : 0) : longest + 9' '    padding = 0'
+prove_broken 'the associated data'"'"'s payload not zeroed' 'ECH taken, at the client' \
+  '    aad.fill(0_u8, at - 4, size)
+' ''
+prove_broken 'a turned-down handshake'"'"'s certificate checked for the inner name' 'turned down by a server without public.test'"'"'s certificate' \
+  '      @name = ech.config.public_name
+' ''
+prove_broken 'retry_configs handed back before the certificate is checked' 'turned down by a server without public.test'"'"'s certificate' \
+  '        ech.retry_configs = data if ech' '        return TlsError.new("retry_configs", TlsAlert::ECH_REQUIRED, retry_configs: data) if ech'
+prove_broken 'the server'"'"'s ServerHello without its confirmation' 'ECH taken, at the client' \
+  '      reply = reply[0, 30] + TlsEch.confirmation(@schedule, hello[6, 32], @transcript + reply, false) + reply[38, reply.size - 38]' '      reply = reply.dup'
+prove_broken 'the server'"'"'s HelloRetryRequest without its confirmation' 'a server taking secp384r1 alone asks again' \
+  '        retry = retry[0, retry.size - 8] + confirmation' '        retry = retry.dup'
+prove_broken 'the client'"'"'s HelloRetryRequest confirmation unchecked' 'turned down at a HelloRetryRequest' \
+  '        if confirmation && Subtle.constant_time_compare(confirmation, expected)' '        if confirmation'
+prove_broken 'a second ClientHelloOuter'"'"'s enc taken' 'a second ClientHelloOuter (enc)' \
+  '    return TlsError.new("a second ClientHelloOuter with an enc, where the first one'"'"'s context goes on", TlsAlert::ILLEGAL_PARAMETER) unless enc.empty?
+' ''
+prove_broken 'a second ClientHelloOuter'"'"'s other config taken' 'a second ClientHelloOuter (config)' \
+  '    return TlsError.new("a second ClientHelloOuter naming another ECH suite or config than the first", TlsAlert::ILLEGAL_PARAMETER) unless {kdf, aead, id} == @ech_named
+' ''
+prove_broken 'a second ClientHelloOuter without encrypted_client_hello taken as it is' 'a second ClientHelloOuter (no ech)' \
+  '    return TlsError.new("a second ClientHelloOuter without the encrypted_client_hello the first one'"'"'s was taken by", TlsAlert::MISSING_EXTENSION) unless index' '    return hello unless index'
+prove_broken 'a second ClientHelloOuter that does not open taken as it is' 'a second ClientHelloOuter (context)' \
+  '    return TlsError.new("a second ClientHelloOuter whose encrypted ClientHelloInner does not open", TlsAlert::DECRYPT_ERROR) if opened.is_a?(HpkeError)' '    return hello if opened.is_a?(HpkeError)'
+prove_broken 'no GREASE' 'with no config, a GREASE encrypted_client_hello' \
+  '    elsif @config.ech_grease' '    elsif false'
+prove_broken 'no extension left to the outer' 'the key_share is in the outer alone' \
+  '  COMPRESSED = [10, 13, 5, 43, 51]' '  COMPRESSED = [] of Int32'
+prove_broken 'padding that is not zeros taken' 'padding that is not zeros' \
+  '      return TlsError.new("an EncodedClientHelloInner whose padding is not zeros", TlsAlert::ILLEGAL_PARAMETER) unless encoded[i] == 0_u8
+' ''
+prove_broken 'an inner offering TLS 1.2 taken' 'an inner offering TLS 1.2' \
+  'unless versions && tls13_alone?(parts.data(versions))' 'unless versions'
+prove_broken 'an inner without its encrypted_client_hello taken' 'an inner without encrypted_client_hello' \
+  '    return TlsError.new("a ClientHelloInner without the inner encrypted_client_hello", TlsAlert::ILLEGAL_PARAMETER) unless marker && parts.data(marker) == INNER
+' ''
+prove_broken 'an encrypted_client_hello that is refused passed over' 'type inner from the network' \
+  '    read = TlsEch.read_outer(parts, index)
+    return read if read.is_a?(TlsError)
+    return nil if @config.ech_keys.empty?' '    read = TlsEch.read_outer(parts, index)
+    return nil if read.is_a?(TlsError)
+    return nil if @config.ech_keys.empty?'
+prove_broken 'keys kept for rotation sent as retry_configs' 'retry_configs hold the keys whose retry is set' \
+  '    keys = @ech_keys.select { |key| key.retry }' '    keys = @ech_keys'
+prove_broken 'the identity'"'"'s certificate sent to a server that turned ECH down' 'an empty Certificate' \
+  '      identity = (ech = @ech) && ech.rejected ? nil : @config.identity' '      identity = @config.identity'
+prove_broken 'early data under keys of the outer' 'resumed with early data, inside ECH' \
+  '      sent = send_early(hello)' '      sent = send_early(wire)'
+prove_broken 'no GREASE pre_shared_key in the outer' 'a GREASE pre_shared_key outside' \
+  '        after = TlsBytes.extension(45, modes) + TlsBytes.extension(41, grease_psk(inner.data(i)))' '        after = [] of UInt8'
+prove_broken 'a ServerHello resuming by the outer'"'"'s GREASE pre_shared_key taken' 'a ServerHello resuming by the outer'"'"'s GREASE pre_shared_key' \
+  '      return TlsError.new("a ServerHello resuming by the ClientHelloOuter'"'"'s pre_shared_key, which is GREASE", TlsAlert::ILLEGAL_PARAMETER) if reply.psk_identity >= 0
+' ''
+prove_broken 'encrypted_client_hello in a ServerHello taken' 'a ServerHello carrying encrypted_client_hello' \
+  '        unless retry && (@ech || @grease_ech)' '        unless @ech || @grease_ech'
+prove_broken 'a HelloRetryRequest'"'"'s encrypted_client_hello of any length taken' 'of 7 bytes: decode_error' \
+  '        return TlsError.new("a HelloRetryRequest'"'"'s encrypted_client_hello of #{data.size} bytes, not 8", TlsAlert::DECODE_ERROR) unless data.size == 8
+' ''
+prove_broken 'a ServerHello that does not confirm what its HelloRetryRequest did taken as a turning down' 'then a ServerHello that does not' \
+  '        return TlsError.new("a ServerHello that does not confirm the ClientHelloInner its HelloRetryRequest took", TlsAlert::ILLEGAL_PARAMETER) if ech.hrr_accepted
+' ''
+prove_broken 'a mandatory ECHConfig extension taken' 'mandatory extension this does not know' \
+  '      return nil if seen.includes?(extension[0]) || (extension[0] & 0x8000) != 0' '      return nil if seen.includes?(extension[0])'
+prove_broken 'a public_name that reads as an address taken' '"1.2.3.4" is no public_name' \
+  '    return false if last.all? { |c| c >= 0x30_u8 && c <= 0x39_u8 }
+' ''
+prove_broken 'the first key alone tried' 'a key kept for rotation' \
+  '      next unless key.config.config_id == id && key.config.suites.includes?({kdf, aead}) && aead != HpkeAead::ExportOnly.value' '      next unless key == @config.ech_keys[0] && key.config.suites.includes?({kdf, aead}) && aead != HpkeAead::ExportOnly.value'
+prove_broken 'nothing in a turned-down HelloRetryRequest'"'"'s confirmation'"'"'s place' 'eight bytes in the confirmation'"'"'s place' \
+  '(@ech_rejected ? Random::Secure.random_bytes(8) : nil)' 'nil'
+prove_broken 'the outer naming the inner name' 'the outer naming public.test' \
+  '    before, after = TlsEch.outer_extensions(parts, ech.config.public_name)' '    before, after = TlsEch.outer_extensions(parts, @name)'
+prove_broken 'the inner'"'"'s protocols in the outer' 'neither the inner name nor the protocols' \
+  '      if COMPRESSED.includes?(type) || type == 44 || type == 42' '      if COMPRESSED.includes?(type) || type == 44 || type == 42 || type == 16'
+prove_broken 'the server'"'"'s groups passed over' 'a server whose groups put X25519 first' \
+  '    group = offer.chosen_group(preferred)' '    group = offer.chosen_group(TlsConnection::GROUPS)'
+prove_broken 'ECH offered beside TLS 1.2' 'ECH with TLS 1.2 beside it refused' \
+  '    return TlsError.new("ech_configs asks for an encrypted ClientHello, which is TLS 1.3'"'"'s alone, and min_version for TLS 1.2 too") if @config.min_version == TlsVersion::TLS12
+' ''
+prove_broken 'ech_outer_extensions in a ClientHello passed over' 'ech_outer_extensions in a ClientHello (section 5.1)' \
+  '        return TlsError.new("ech_outer_extensions in a ClientHello", TlsAlert::ILLEGAL_PARAMETER)
+' ''
+prove_broken 'an encoding'"'"'s session id taken' 'an encoding with a session id' \
+  '    return TlsError.new("an EncodedClientHelloInner with a session id, which the ClientHelloOuter'"'"'s stands for", TlsAlert::ILLEGAL_PARAMETER) unless session.empty?
+' ''
+prove_broken 'ech_outer_extensions twice taken' 'ech_outer_extensions twice: illegal_parameter' \
+  '      return TlsError.new("ech_outer_extensions twice in an EncodedClientHelloInner", TlsAlert::ILLEGAL_PARAMETER) if expanded
+' ''
+prove_broken 'an ECHConfigList cut short taken' 'a malformed ECHConfigList' \
+  '      return "an ECHConfig cut short" if entries.short?
+' ''
+# ECH and the session binding: a ticket that came over ECH is the inner
+# name's (its port and configuration are held by the session section's
+# proofs, which run before ECH's checks).
+prove_broken 'a ticket that came over ECH held for the public_name' 'a ticket that came over ECH is held for the inner name' \
+  'lifetime * 1000_i64, age_add, @host, @port, under, @alpn_protocol,' 'lifetime * 1000_i64, age_add, (ech = @ech) ? ech.config.public_name : @host, @port, under, @alpn_protocol,'
 mutations_report
 echo
 if [ "$status" -eq 0 ]; then

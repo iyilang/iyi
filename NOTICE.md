@@ -66,6 +66,11 @@ Its benches vendor test vectors:
 - [NIST's ACVP-Server][] (`bench/std_mlkem_fixture/`, ML-KEM-768 vectors,
   a subset) - NIST's notice for NIST-developed software, kept whole with
   the source and what was changed in `bench/std_mlkem_fixture/NOTICE`
+- [the CFRG's HPKE draft repository][] (`bench/std_hpke_fixture/`, RFC
+  9180's test vectors, a subset) - Contributions to the IETF Standards
+  Process under BCP 78 and the IETF Trust Legal Provisions, code
+  components under the Simplified BSD License; the source, its terms and
+  what was changed are in `bench/std_hpke_fixture/NOTICE`
 
 <!-- licenses -->
 [Apache-2.0]: https://www.openssl.org/source/apache-license-2.0.txt
@@ -79,6 +84,7 @@ Its benches vendor test vectors:
 [Arm optimized-routines]: https://github.com/ARM-software/optimized-routines
 [crystal-metric]: https://github.com/kostya/crystal-metric
 [NIST's ACVP-Server]: https://github.com/usnistgov/ACVP-Server
+[the CFRG's HPKE draft repository]: https://github.com/cfrg/draft-irtf-cfrg-hpke
 [musl]: https://musl.libc.org/
 [CORE-MATH]: https://core-math.gitlabpages.inria.fr/
 [bdwgc]: http://www.hboehm.info/gc/

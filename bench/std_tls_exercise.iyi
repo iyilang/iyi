@@ -37,12 +37,16 @@
 #                       what was agreed, then close_notify;
 #   config CHAIN KEY    TlsServerConfig.from_pem's answer.
 
-import std/tls::{TlsClient, TlsConfig, TlsEarlyData, TlsError, TlsHeldTicket, TlsIdentity, TlsKeySchedule, TlsMadeUnder, TlsRecordCipher, TlsReplayGuard, TlsServer, TlsServerConfig, TlsSession, TlsTicket, TlsTicketKeys, TlsVersion}
+import std/tls::{TlsClient, TlsConfig, TlsEarlyData, TlsEchConfig, TlsEchKey, TlsError, TlsHeldTicket, TlsIdentity, TlsKeySchedule, TlsMadeUnder, TlsRecordCipher, TlsReplayGuard, TlsServer, TlsServerConfig, TlsSession, TlsTicket, TlsTicketKeys, TlsVersion}
 import std/x509::{Certificate}
 import std/time::{Time}
 import std/socket::{IyiSocket, SocketError}
 import std/file::{File}
 import std/env::{ENV}
+import std/hpke::{HpkeSuite, HpkeKem, HpkeKdf, HpkeAead, HpkeSender}
+import std/curve25519::{X25519}
+import std/mlkem::{MlKem768PrivateKey}
+import std/random::{Random}
 
 def check(cond : Bool, label : String) : Nil
   raise "ASSERTION FAILED: #{label}" unless cond
@@ -251,6 +255,475 @@ PSK_RES_MASTER             = "5e95bdf1f89005ea2e9aa0ba85e728e3c19c5fe0c699e3f5be
 BINDING_ROOT = "308201183081cba003020102020101300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0946757a7a20526f6f74302a300506032b65700321001494a1cac4481d11b3723830767cce21261aaca39cbd624c5b4d51b3163e8382a3423040301d0603551d0e0416041497ae92205c7302b9b25c2c7219607c7f767904fc300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b657003410081f88cec5b495303ce00ae5a18679fc9d43fc5c2d3a86fd3ff7dd265fd1f1a20f053fe81ae0db33be74fff0cb487b516fc7e489253e914000ec818988635e607"
 BINDING_LEAF = "3082016e30820120a003020102020102300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0966757a7a2e74657374302a300506032b65700321007fc71c44df1a089f4322e5a7dd03ef64fed0164490819aa2236ea7d4b552c8fba38196308193301d0603551d0e04160414d2780a2e2b99d3a1c8d027b498befbae72ebcdf2301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b6570034100b6c428830f0b30218d3fe05a43c4b2110f9797356a58d361c0ebc499910287ea3dc5ebc7260c117d8258db51ee3ed2a7c125a0f1f6cf3fb42032f4543ae65b08"
 BINDING_SEED = "3c9cb8fdef08086c92abb13f615fcbd54466dac12a3a363db6fb289ef88bc7a2"
+
+# --- Encrypted Client Hello (RFC 9849) ---
+
+# A test PKI for ECH: a root and two leaves it signed, for inner.test (the
+# name ECH hides) and public.test (the ECHConfig's public_name), Ed25519,
+# valid from 2025 to 9999 so that no clock retires them. The keys are in
+# the open on purpose: they guard nothing but this test. Made once with
+# Python's cryptography.
+ECH_ROOT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+               "MIIBIDCB06ADAgECAgEBMAUGAytlcDAXMRUwEwYDVQQDDAxpeWkgZWNoIHJvb3Qw\n" \
+               "IBcNMjUwMTAxMDAwMDAwWhgPOTk5OTEyMzEyMzU5NTlaMBcxFTATBgNVBAMMDGl5\n" \
+               "aSBlY2ggcm9vdDAqMAUGAytlcAMhAFnMfRomzt6UPuRZ5V84J1LXLKo6RYPOjVos\n" \
+               "GQ0wBI69o0IwQDAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAdBgNV\n" \
+               "HQ4EFgQUEktj5/adOiJBSqL70oBmzM3aIPswBQYDK2VwA0EAm8Yp75Kd3u2ltgfy\n" \
+               "3RI6YGCCoZvMz/Tt3TN1dP5smr9LH2L9UvPWnBfS+mMyB0UFJuvoRrAwEVHUbZvD\n" \
+               "HmxjBA==\n" \
+               "-----END CERTIFICATE-----\n"
+ECH_INNER_CERT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+                     "MIIBJDCB16ADAgECAgECMAUGAytlcDAXMRUwEwYDVQQDDAxpeWkgZWNoIHJvb3Qw\n" \
+                     "IBcNMjUwMTAxMDAwMDAwWhgPOTk5OTEyMzEyMzU5NTlaMBUxEzARBgNVBAMMCmlu\n" \
+                     "bmVyLnRlc3QwKjAFBgMrZXADIQBqoh4oRK0Hfnx07YDLDR/dbRSjmAmw8GtJ559H\n" \
+                     "WSKZkqNIMEYwFQYDVR0RBA4wDIIKaW5uZXIudGVzdDAMBgNVHRMBAf8EAjAAMB8G\n" \
+                     "A1UdIwQYMBaAFBJLY+f2nToiQUqi+9KAZszN2iD7MAUGAytlcANBAIIwD10ZKtgW\n" \
+                     "2eWKc39USC57MPAxRyOCBHttITdG0zJ3sDpxCUAwFvMoCRqyV6o3TsfYNJbiXIBl\n" \
+                     "S2ZwC7CiiwA=\n" \
+                     "-----END CERTIFICATE-----\n"
+ECH_INNER_KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
+                    "MC4CAQAwBQYDK2VwBCIEII4Qgu6q8ObGUmcA25sLye85ol33DrCaVMkhUwft6dRt\n" \
+                    "-----END PRIVATE KEY-----\n"
+ECH_PUBLIC_CERT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+                      "MIIBJjCB2aADAgECAgEDMAUGAytlcDAXMRUwEwYDVQQDDAxpeWkgZWNoIHJvb3Qw\n" \
+                      "IBcNMjUwMTAxMDAwMDAwWhgPOTk5OTEyMzEyMzU5NTlaMBYxFDASBgNVBAMMC3B1\n" \
+                      "YmxpYy50ZXN0MCowBQYDK2VwAyEAOWbHmF1X4HXlCjIpD+Ku/+SRIbVQfnfch21L\n" \
+                      "3obFqHejSTBHMBYGA1UdEQQPMA2CC3B1YmxpYy50ZXN0MAwGA1UdEwEB/wQCMAAw\n" \
+                      "HwYDVR0jBBgwFoAUEktj5/adOiJBSqL70oBmzM3aIPswBQYDK2VwA0EA3ZnKHrGB\n" \
+                      "qCLOiXdVR1GHxTleDXkfMIrlvRNnFmJ6RqGUGT4k2ii3nq69B3y7wG8Iwjh58h2z\n" \
+                      "wa93OV63UuVFDQ==\n" \
+                      "-----END CERTIFICATE-----\n"
+ECH_PUBLIC_KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
+                     "MC4CAQAwBQYDK2VwBCIEIJxbmGaFWmcoTf5SHF1mF8wt3wrb29PBYxGI1cqVpgzJ\n" \
+                     "-----END PRIVATE KEY-----\n"
+# HPKE's X25519, HKDF-SHA256 and AES-128-GCM: what the crafted ClientHellos
+# below are sealed under.
+CRAFTED_SUITE = HpkeSuite.new(HpkeKem::X25519Sha256, HpkeKdf::HkdfSha256, HpkeAead::Aes128Gcm)
+
+def bytes_of(s : String) : Array(UInt8)
+  Array(UInt8).new(s.bytesize) { |i| s.to_unsafe[i] }
+end
+
+def u16b(n : Int32) : Array(UInt8)
+  [((n >> 8) & 0xFF).to_u8, (n & 0xFF).to_u8]
+end
+
+def ext(type : Int32, data : Array(UInt8)) : Array(UInt8)
+  u16b(type) + u16b(data.size) + data
+end
+
+# A handshake message: its type, a 24-bit length, the body.
+def message(type : Int32, body : Array(UInt8)) : Array(UInt8)
+  [type.to_u8, ((body.size >> 16) & 0xFF).to_u8, ((body.size >> 8) & 0xFF).to_u8, (body.size & 0xFF).to_u8] + body
+end
+
+# The extensions of *m*, a ClientHello or a ServerHello, in their order.
+def extensions_of(m : Array(UInt8)) : Array({Int32, Array(UInt8)})
+  at = 38
+  at = at + 1 + m[at].to_i32
+  if m[0] == 1_u8
+    at = at + 2 + ((m[at].to_i32 << 8) | m[at + 1].to_i32)
+    at = at + 1 + m[at].to_i32
+  else
+    at = at + 3
+  end
+  at = at + 2
+  found = [] of {Int32, Array(UInt8)}
+  while at + 4 <= m.size
+    size = (m[at + 2].to_i32 << 8) | m[at + 3].to_i32
+    found << {(m[at].to_i32 << 8) | m[at + 1].to_i32, m[at + 4, size]}
+    at = at + 4 + size
+  end
+  found
+end
+
+def extension_of(m : Array(UInt8), type : Int32) : Array(UInt8)?
+  extensions_of(m).each { |e| return e[1] if e[0] == type }
+  nil
+end
+
+# Whether *haystack* holds *needle*'s bytes anywhere.
+def holds?(haystack : Array(UInt8), needle : Array(UInt8)) : Bool
+  i = 0
+  while i + needle.size <= haystack.size
+    return true if haystack[i, needle.size] == needle
+    i = i + 1
+  end
+  false
+end
+
+# The server ECH is held to here: inner.test's identity, public.test's
+# beside it unless *public* is false, ALPN h2 and http/1.1, and *keys*.
+def ech_server(keys : Array(TlsEchKey), public : Bool = true) : TlsServerConfig
+  config = TlsServerConfig.from_pem(ECH_INNER_CERT_PEM + ECH_ROOT_PEM, ECH_INNER_KEY_PEM).or_panic
+  config.add_identity(TlsIdentity.from_pem(ECH_PUBLIC_CERT_PEM + ECH_ROOT_PEM, ECH_PUBLIC_KEY_PEM).or_panic) if public
+  config.alpn = ["h2", "http/1.1"]
+  config.ech_keys = keys
+  config
+end
+
+# A client of the test root, offering h2 by ALPN, under *configs*.
+def ech_client(configs : Array(UInt8)?) : TlsConfig
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(ECH_ROOT_PEM).or_panic
+  config.alpn = ["h2"]
+  config.ech_configs = configs
+  config
+end
+
+# One handshake of this program's client, asking for *host*, with its
+# server, and what each says of it: the client "ech=, alpn=, resumed=,
+# early=" and the answer to "hello", or "refused: " and why, with the
+# retry_configs the refusal carried; the server "ech=, name=, outer=,
+# alpn=" and what came early and then, or "refused: " and why. On a new
+# listener, or on *on* when it is given - a session's tickets are offered
+# only to the port they came from.
+def ech_pair(server : TlsServerConfig, client : TlsConfig, host : String = "inner.test", session : TlsSession? = nil,
+             early : String? = nil, on : IyiSocket? = nil) : {String, String, Array(UInt8)?}
+  listener = on || IyiSocket.listen("127.0.0.1", 0)
+  port = listener.local_port
+  served = ""
+  said = ""
+  retry = nil.as(Array(UInt8)?)
+  group do |g|
+    g.spawn do
+      socket = listener.accept.as(IyiSocket)
+      conn = TlsServer.over(socket, server, 5000)
+      if conn.is_a?(TlsError)
+        served = "refused: #{conn.message}"
+      else
+        came = conn.read_early
+        got = conn.read
+        served = "ech=#{conn.ech_accepted?} name=#{conn.server_name} outer=#{conn.outer_server_name} alpn=#{conn.alpn_protocol} " +
+                 "early=#{came.is_a?(TlsError) ? came.message : came} read=#{got.is_a?(TlsError) ? got.message : got}"
+        conn.write("echo:" + (got.is_a?(TlsError) ? "" : got))
+        conn.close
+      end
+      0
+    end
+    socket = IyiSocket.connect("127.0.0.1", port).as(IyiSocket)
+    conn = TlsClient.over(socket, host, client, 5000, session, early)
+    if conn.is_a?(TlsError)
+      said = "refused: #{conn.message}"
+      retry = conn.retry_configs
+    else
+      conn.write("hello")
+      said = "ech=#{conn.ech_accepted?} alpn=#{conn.alpn_protocol} group=#{conn.named_group} resumed=#{conn.resumed?} early=#{conn.early_data} got=#{drain(conn)}"
+      conn.close
+    end
+    0
+  end
+  listener.close unless on
+  {said, served, retry}
+end
+
+def take(socket : IyiSocket, count : Int32) : Array(UInt8)
+  got = [] of UInt8
+  while got.size < count
+    chunk = socket.read(count - got.size)
+    break unless chunk.is_a?(String) && !chunk.empty?
+    got.concat(bytes_of(chunk))
+  end
+  got
+end
+
+# The next record *socket* reads: its type and content; -1 when none came.
+def record_of(socket : IyiSocket) : {Int32, Array(UInt8)}
+  head = take(socket, 5)
+  return {-1, [] of UInt8} if head.size < 5
+  {head[0].to_i32, take(socket, (head[3].to_i32 << 8) | head[4].to_i32)}
+end
+
+# The first ClientHello this program's client sends under *client* for
+# *host*, read off the wire by a listener that answers nothing: a new one,
+# or *on*.
+def captured(client : TlsConfig, host : String, session : TlsSession? = nil, early : String? = nil, on : IyiSocket? = nil) : Array(UInt8)
+  listener = on || IyiSocket.listen("127.0.0.1", 0)
+  port = listener.local_port
+  hello = [] of UInt8
+  group do |g|
+    g.spawn do
+      socket = listener.accept.as(IyiSocket)
+      socket.read_timeout_ms = 5000
+      hello = record_of(socket)[1]
+      socket.close
+      0
+    end
+    TlsClient.over(IyiSocket.connect("127.0.0.1", port).as(IyiSocket), host, client, 5000, session, early)
+    0
+  end
+  listener.close unless on
+  hello
+end
+
+# An encrypted_client_hello's payload size (RFC 9849 section 5): after its
+# type, suite, config_id and an X25519 enc.
+def payload_size(ech : Array(UInt8)) : Int32
+  (ech[40].to_i32 << 8) | ech[41].to_i32
+end
+
+# What follows is a client written here from RFC 9849's text alone, for
+# what std/tls's client never sends: ClientHellos built and sealed by hand,
+# each breaking one rule of the server's.
+
+# A ClientHello's body: legacy version 1.2, *random*, *session*,
+# TLS_AES_128_GCM_SHA256 alone, null compression, *extensions*.
+def hello_body(random : Array(UInt8), session : Array(UInt8), extensions : Array(UInt8)) : Array(UInt8)
+  [3_u8, 3_u8] + random + [session.size.to_u8] + session + u16b(2) + [0x13_u8, 0x01_u8, 1_u8, 0_u8] + u16b(extensions.size) + extensions
+end
+
+def server_name_ext(name : String) : Array(UInt8)
+  host = bytes_of(name)
+  entry = [0_u8] + u16b(host.size) + host
+  ext(0, u16b(entry.size) + entry)
+end
+
+# The extensions a crafted inner and outer share, in this order:
+# supported_groups (*groups*), signature_algorithms (Ed25519 alone, the
+# test PKI's), supported_versions (TLS 1.3) and key_share (*shares*).
+def shared_extensions(groups : Array(Int32), shares : Array({Int32, Array(UInt8)})) : Array(UInt8)
+  listed = [] of UInt8
+  groups.each { |g| listed.concat(u16b(g)) }
+  entries = [] of UInt8
+  shares.each { |s| entries.concat(u16b(s[0]) + u16b(s[1].size) + s[1]) }
+  ext(10, u16b(listed.size) + listed) + ext(13, [0_u8, 2_u8, 0x08_u8, 0x07_u8]) + ext(43, [2_u8, 3_u8, 4_u8]) + ext(51, u16b(entries.size) + entries)
+end
+
+# ech_outer_extensions naming *types* (section 5.1).
+def outer_refs(types : Array(Int32)) : Array(UInt8)
+  named = [] of UInt8
+  types.each { |t| named.concat(u16b(t)) }
+  ext(0xfd00, [named.size.to_u8] + named)
+end
+
+# An EncodedClientHelloInner (section 5.1): *random*, *session* (none, as
+# it should be), *extensions*, then zeros to a multiple of 32 bytes - or
+# *padding* in their place.
+def encoded_inner(random : Array(UInt8), extensions : Array(UInt8), padding : Array(UInt8)? = nil, session : Array(UInt8) = [] of UInt8) : Array(UInt8)
+  body = hello_body(random, session, extensions)
+  body + (padding || Array(UInt8).new(31 - ((body.size - 1) % 32), 0_u8))
+end
+
+# A sealing context for *key*'s config: section 6.1's SetupBaseS, its info
+# "tls ech", a zero byte and the ECHConfig.
+def crafted_sender(key : TlsEchKey) : HpkeSender
+  CRAFTED_SUITE.sender(key.private_key.public_key, bytes_of("tls ech") + [0_u8] + key.config.raw, Random::Secure.random_bytes(32)).or_panic
+end
+
+# A ClientHelloOuter, its session id empty: *before*, then an
+# encrypted_client_hello of type outer - HKDF-SHA256 and AES-128-GCM,
+# *config_id*, *enc* - whose payload is *encoded* sealed by *sender*, this
+# message with the payload's bytes zero its associated data (section 5.2).
+def sealed_outer(sender : HpkeSender, config_id : Int32, enc : Array(UInt8), random : Array(UInt8), before : Array(UInt8), encoded : Array(UInt8)) : Array(UInt8)
+  size = encoded.size + 16
+  head = [0_u8] + u16b(1) + u16b(1) + [config_id.to_u8] + u16b(enc.size) + enc
+  blank = message(1, hello_body(random, [] of UInt8, before + ext(0xfe0d, head + u16b(size) + Array(UInt8).new(size, 0_u8))))
+  sealed = sender.seal(encoded, blank[4, blank.size - 4]).or_panic
+  message(1, hello_body(random, [] of UInt8, before + ext(0xfe0d, head + u16b(size) + bytes_of(sealed))))
+end
+
+# A connection to this program's server under *server*: each of *hellos*
+# written in a record of its own, by turns, each after the record that
+# answers the one before; those answers, and what the server said: "held",
+# or why it refused.
+def crafted(server : TlsServerConfig, hellos : Array(Array(UInt8))) : {Array({Int32, Array(UInt8)}), String}
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  port = listener.local_port
+  said = ""
+  answers = [] of {Int32, Array(UInt8)}
+  group do |g|
+    g.spawn do
+      conn = TlsServer.over(listener.accept.as(IyiSocket), server, 5000)
+      said = conn.is_a?(TlsError) ? conn.message : "held"
+      0
+    end
+    socket = IyiSocket.connect("127.0.0.1", port).as(IyiSocket)
+    socket.read_timeout_ms = 5000
+    hellos.each do |hello|
+      socket.write(text([22_u8, 3_u8, 1_u8] + u16b(hello.size) + hello))
+      answers << record_of(socket)
+    end
+    socket.close
+    0
+  end
+  listener.close
+  {answers, said}
+end
+
+# What a record answering a crafted ClientHello was: "alert <code>",
+# "HelloRetryRequest", "ServerHello", or "nothing".
+def answered(record : {Int32, Array(UInt8)}) : String
+  type, body = record
+  return "alert #{body[1]}" if type == 21 && body.size == 2
+  return "nothing" if type < 0 || body.size < 38
+  return "record #{type}" unless type == 22 && body[0] == 2_u8
+  body[6, 32] == b(HRR_RANDOM) ? "HelloRetryRequest" : "ServerHello"
+end
+
+# Section 7.2's accept_confirmation, or with *hrr* section 7.2.1's, as the
+# RFC writes it: HKDF-Expand-Label(HKDF-Extract(0, the inner random), its
+# label, the SHA-256 of *transcript*, 8).
+def ech_confirmation(inner_random : Array(UInt8), transcript : Array(UInt8), hrr : Bool) : Array(UInt8)
+  s = TlsKeySchedule.new(false)
+  s.expand_label(s.extract(s.zeros, inner_random), hrr ? "hrr ech accept confirmation" : "ech accept confirmation", s.hash(transcript), 8)
+end
+
+# A ServerHello *m* with its random's last eight bytes zero.
+def random_zeroed(m : Array(UInt8)) : Array(UInt8)
+  m[0, 30] + Array(UInt8).new(8, 0_u8) + m[38, m.size - 38]
+end
+
+# One crafted ClientHelloOuter to *server* under *key*: *before*, and
+# sealed inside it an encoding of *extensions*, with *padding* and
+# *session* when given; what answered it, and what the server said.
+def crafted_one(server : TlsServerConfig, key : TlsEchKey, before : Array(UInt8), extensions : Array(UInt8), padding : Array(UInt8)? = nil,
+                session : Array(UInt8) = [] of UInt8) : {String, String}
+  sender = crafted_sender(key)
+  encoded = encoded_inner(Random::Secure.random_bytes(32), extensions, padding, session)
+  answers, said = crafted(server, [sealed_outer(sender, key.config.config_id, sender.enc, Random::Secure.random_bytes(32), before, encoded)])
+  {answered(answers[0]), said}
+end
+
+# A crafted HelloRetryRequest round under *key* (section 7.1.1): a first
+# ClientHelloOuter whose inner has *first_shared* - X25519MLKEM768 listed,
+# X25519's share alone sent - so that the server asks again; then by
+# *variant* a second, its inner with *second_shared*: "valid", "no ech"
+# (no encrypted_client_hello), "enc" (one carrying enc again), "config"
+# (naming another config_id), or "context" (sealed in a new HPKE context).
+# What answered each, whether the HelloRetryRequest confirmed the inner
+# (section 7.2.1) and the ServerHello did (section 7.2), and what the
+# server said.
+def retried(server : TlsServerConfig, key : TlsEchKey, variant : String, first_shared : Array(UInt8),
+            second_shared : Array(UInt8)) : {String, String, Bool, Bool, String}
+  sender = crafted_sender(key)
+  random = Random::Secure.random_bytes(32)
+  outer_random = Random::Secure.random_bytes(32)
+  id = key.config.config_id
+  name = server_name_ext("inner.test")
+  marker = ext(0xfe0d, [1_u8])
+  encoded = encoded_inner(random, name + outer_refs([10, 13, 43, 51]) + marker)
+  first = sealed_outer(sender, id, sender.enc, outer_random, server_name_ext("public.test") + first_shared, encoded)
+  before = server_name_ext("public.test") + second_shared
+  second = case variant
+           when "no ech"  then message(1, hello_body(outer_random, [] of UInt8, before))
+           when "enc"     then sealed_outer(sender, id, sender.enc, outer_random, before, encoded)
+           when "config"  then sealed_outer(sender, id ^ 1, [] of UInt8, outer_random, before, encoded)
+           when "context" then sealed_outer(crafted_sender(key), id, [] of UInt8, outer_random, before, encoded)
+           else                sealed_outer(sender, id, [] of UInt8, outer_random, before, encoded)
+           end
+  answers, said = crafted(server, [first, second])
+  retry = answers[0][1]
+  prefix = [254_u8, 0_u8, 0_u8, 32_u8] + TlsKeySchedule.new(false).hash(message(1, hello_body(random, [] of UInt8, name + first_shared + marker)))
+  hrr_confirmed = retry.size > 8 && extension_of(retry, 0xfe0d) == retry[retry.size - 8, 8] &&
+                  retry[retry.size - 8, 8] == ech_confirmation(random, prefix + retry[0, retry.size - 8] + Array(UInt8).new(8, 0_u8), true)
+  second_answer = answers.size > 1 ? answers[1] : {-1, [] of UInt8}
+  reply = second_answer[1]
+  inner = message(1, hello_body(random, [] of UInt8, name + second_shared + marker))
+  sh_confirmed = answered(second_answer) == "ServerHello" && reply[30, 8] == ech_confirmation(random, prefix + retry + inner + random_zeroed(reply), false)
+  {answered(answers[0]), answered(second_answer), hrr_confirmed, sh_confirmed, said}
+end
+
+HRR_RANDOM = "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c"
+
+# A ServerHello answering ClientHello *hello* - a HelloRetryRequest when
+# *random* is HRR_RANDOM's - its session id echoed, TLS_AES_128_GCM_SHA256
+# and *extensions*.
+def server_hello_to(hello : Array(UInt8), random : Array(UInt8), extensions : Array(UInt8)) : Array(UInt8)
+  session = hello[39, hello[38].to_i32]
+  message(2, [3_u8, 3_u8] + random + [session.size.to_u8] + session + [0x13_u8, 0x01_u8, 0_u8] + u16b(extensions.size) + extensions)
+end
+
+# The ClientHelloInner sealed in ClientHelloOuter *outer* under *key*,
+# opened and rebuilt here from section 5.1's text: its encoding's
+# ech_outer_extensions replaced by the outer's extensions it names, and the
+# outer's session id put back.
+def opened_inner(outer : Array(UInt8), key : TlsEchKey) : Array(UInt8)
+  ech = extension_of(outer, 0xfe0d) || [] of UInt8
+  enc = ech[8, (ech[6].to_i32 << 8) | ech[7].to_i32]
+  at = 8 + enc.size
+  payload = ech[at + 2, (ech[at].to_i32 << 8) | ech[at + 1].to_i32]
+  aad = outer[4, outer.size - 4]
+  i = 0
+  until aad[i, payload.size] == payload
+    i = i + 1
+  end
+  aad.fill(0_u8, i, payload.size)
+  suite = HpkeSuite.from_ids(key.config.kem_id, (ech[1].to_i32 << 8) | ech[2].to_i32, (ech[3].to_i32 << 8) | ech[4].to_i32).or_panic
+  encoded = bytes_of(suite.open(key.private_key, enc, bytes_of("tls ech") + [0_u8] + key.config.raw, aad, payload).or_panic)
+  at = 35 + encoded[34].to_i32
+  suites = encoded[at, 2 + ((encoded[at].to_i32 << 8) | encoded[at + 1].to_i32)]
+  at = at + suites.size
+  compression = encoded[at, 1 + encoded[at].to_i32]
+  at = at + compression.size
+  listed = encoded[at + 2, (encoded[at].to_i32 << 8) | encoded[at + 1].to_i32]
+  rebuilt = [] of UInt8
+  at = 0
+  while at < listed.size
+    type = (listed[at].to_i32 << 8) | listed[at + 1].to_i32
+    data = listed[at + 4, (listed[at + 2].to_i32 << 8) | listed[at + 3].to_i32]
+    at = at + 4 + data.size
+    unless type == 0xfd00
+      rebuilt.concat(ext(type, data))
+      next
+    end
+    named = 1
+    while named < data.size
+      wanted = (data[named].to_i32 << 8) | data[named + 1].to_i32
+      rebuilt.concat(ext(wanted, extension_of(outer, wanted) || [] of UInt8))
+      named = named + 2
+    end
+  end
+  session = outer[39, outer[38].to_i32]
+  message(1, encoded[0, 34] + [session.size.to_u8] + session + suites + compression + u16b(rebuilt.size) + rebuilt)
+end
+
+# This program's client under *client*, with *session*, before a server
+# written here that answers its first ClientHello as *kind* says: "psk", a
+# ServerHello resuming by the ClientHelloOuter's GREASE pre_shared_key;
+# "sh-ech", a ServerHello carrying encrypted_client_hello; "hrr-short", a
+# HelloRetryRequest whose encrypted_client_hello is 7 bytes;
+# "hrr-unconfirmed", a HelloRetryRequest confirming the inner, opened here
+# under *key*, then a ServerHello that does not. The client's refusal. On
+# a new listener, or on *on*.
+def faked(client : TlsConfig, session : TlsSession?, kind : String, key : TlsEchKey, on : IyiSocket? = nil) : String
+  listener = on || IyiSocket.listen("127.0.0.1", 0)
+  port = listener.local_port
+  said = ""
+  group do |g|
+    g.spawn do
+      socket = listener.accept.as(IyiSocket)
+      socket.read_timeout_ms = 5000
+      hello = record_of(socket)[1]
+      versions = ext(43, [3_u8, 4_u8])
+      share = ext(51, u16b(0x1d) + u16b(32) + Random::Secure.random_bytes(32))
+      reply = case kind
+              when "psk"       then server_hello_to(hello, Random::Secure.random_bytes(32), versions + share + ext(41, u16b(0)))
+              when "sh-ech"    then server_hello_to(hello, Random::Secure.random_bytes(32), versions + share + ext(0xfe0d, Array(UInt8).new(8, 0_u8)))
+              when "hrr-short" then server_hello_to(hello, b(HRR_RANDOM), versions + ext(51, u16b(0x17)) + ext(0xfe0d, Array(UInt8).new(7, 0_u8)))
+              else
+                inner = opened_inner(hello, key)
+                retry = server_hello_to(hello, b(HRR_RANDOM), versions + ext(51, u16b(0x17)) + ext(0xfe0d, Array(UInt8).new(8, 0_u8)))
+                prefix = [254_u8, 0_u8, 0_u8, 32_u8] + TlsKeySchedule.new(false).hash(inner)
+                retry[0, retry.size - 8] + ech_confirmation(inner[6, 32], prefix + retry, true)
+              end
+      socket.write(text([22_u8, 3_u8, 3_u8] + u16b(reply.size) + reply))
+      if kind == "hrr-unconfirmed"
+        record_of(socket)
+        point = ext(51, u16b(0x17) + u16b(65) + [4_u8] + Random::Secure.random_bytes(64))
+        reply = server_hello_to(hello, Random::Secure.random_bytes(32), versions + point)
+        socket.write(text([22_u8, 3_u8, 3_u8] + u16b(reply.size) + reply))
+      end
+      record_of(socket)
+      socket.close
+      0
+    end
+    conn = TlsClient.over(IyiSocket.connect("127.0.0.1", port).as(IyiSocket), "inner.test", client, 5000, session)
+    said = conn.is_a?(TlsError) ? conn.message : "held"
+    0
+  end
+  listener.close unless on
+  said
+end
 
 args = Program.args
 
@@ -516,6 +989,133 @@ if args.size > 0 && args[0] == "config"
   else
     puts "config: #{answer.chain.size} certificates, leaf #{answer.leaf.subject_name}"
   end
+  exit 0
+end
+
+# ech-serve DIR COUNT [GROUP]: this program's ECH server on 127.0.0.1 -
+# inner.test and public.test, ALPN h2 and http/1.1, taking GROUP alone when
+# it is given - for COUNT connections, one at a time; DIR/ech_configs is
+# its ECHConfigList, DIR/stale_configs one of a key it does not hold,
+# DIR/root.pem the test root, and DIR/port the port, written last. A line
+# each: "held ech= name= outer= group= alpn= read=", the bytes read echoed
+# as "echo:...", or "refused: " and why.
+def ech_serve(dir : String, count : Int32, group : String?) : Nil
+  key = TlsEchKey.generate("public.test", 1).or_panic
+  File.write(dir + "/ech_configs", text(TlsEchKey.config_list([key])))
+  File.write(dir + "/stale_configs", text(TlsEchKey.config_list([TlsEchKey.generate("public.test", 1).or_panic])))
+  File.write(dir + "/root.pem", ECH_ROOT_PEM)
+  server = ech_server([key])
+  server.groups = [group] if group
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(dir + "/port", listener.local_port.to_s)
+  count.times do
+    socket = listener.accept
+    unless socket.is_a?(IyiSocket)
+      puts "no connection"
+      next
+    end
+    socket.read_timeout_ms = 5000
+    conn = TlsServer.over(socket, server, 5000)
+    if conn.is_a?(TlsError)
+      puts "refused: #{conn.message}"
+    else
+      got = conn.read
+      puts "held ech=#{conn.ech_accepted?} name=#{conn.server_name} outer=#{conn.outer_server_name} group=#{conn.named_group} alpn=#{conn.alpn_protocol} read=#{got.is_a?(TlsError) ? got.message : got}"
+      conn.write("echo:" + (got.is_a?(TlsError) ? "" : got))
+      conn.close
+    end
+    STDOUT.flush
+  end
+end
+
+if args.size > 0 && args[0] == "ech-serve"
+  ech_serve(args[1], args[2].to_i, args[3]?)
+  exit 0
+end
+
+# One connection of this program's client under *configs* to 127.0.0.1:
+# *port* for inner.test, its server's chain to *roots*: "ech= group= alpn=
+# got=", or "refused: " and why with the retry_configs it carried.
+def ech_get(port : Int32, roots : Array(Certificate), configs : Array(UInt8)) : {String, Array(UInt8)?}
+  config = TlsConfig.new
+  config.roots = roots
+  config.alpn = ["h2"]
+  config.ech_configs = configs
+  socket = IyiSocket.connect("127.0.0.1", port)
+  return {"no connection", nil} unless socket.is_a?(IyiSocket)
+  conn = TlsClient.over(socket, "inner.test", config, 5000)
+  return {"refused: #{conn.message}", conn.retry_configs} if conn.is_a?(TlsError)
+  conn.write("hello")
+  said = "ech=#{conn.ech_accepted?} group=#{conn.named_group} alpn=#{conn.alpn_protocol} got=#{drain(conn)}"
+  conn.close
+  {said, nil}
+end
+
+# ech-get PORT DIR: this program's client to a server on 127.0.0.1:PORT
+# for inner.test, its root DIR/root.pem: under DIR/ech_configs, under
+# DIR/stale_configs, and under the retry_configs that refusal carried. A
+# line each.
+if args.size > 0 && args[0] == "ech-get"
+  port = args[1].to_i
+  dir = args[2]
+  roots = Certificate.from_pem(File.read(dir + "/root.pem")).or_panic
+  current = bytes_of(File.read(dir + "/ech_configs"))
+  said, _ = ech_get(port, roots, current)
+  puts "current: #{said}"
+  said, retry = ech_get(port, roots, bytes_of(File.read(dir + "/stale_configs")))
+  puts "stale: #{said}; retry_configs #{retry == current ? "the server's own" : (retry ? "another list" : "none")}"
+  if retry
+    said, _ = ech_get(port, roots, retry)
+    puts "retried: #{said}"
+  end
+  exit 0
+end
+
+# ech-speed COUNT: COUNT handshakes of this program's client with its
+# server over loopback, each kind by turns - without ECH (GREASE off), with
+# GREASE ECH, and with ECH taken - each timed from the client's connect to
+# its handshake's end, the server's work in that too, both ends on this
+# program's one thread; and each kind's median, in ms. Run by hand, built
+# with --release: the module's header quotes it.
+def ech_speed(count : Int32) : String
+  key = TlsEchKey.generate("public.test", 1).or_panic
+  server = ech_server([key])
+  server.tickets = 0
+  clients = [ech_client(nil), ech_client(nil), ech_client(TlsEchKey.config_list([key]))]
+  clients[0].ech_grease = false
+  samples = [[] of Int64, [] of Int64, [] of Int64]
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  port = listener.local_port
+  group do |g|
+    g.spawn do
+      (count * 3).times do
+        served = TlsServer.over(listener.accept.as(IyiSocket), server, 5000)
+        served.abort unless served.is_a?(TlsError)
+      end
+      0
+    end
+    count.times do
+      3.times do |k|
+        started = __iyi_monotonic_ns
+        conn = TlsClient.over(IyiSocket.connect("127.0.0.1", port).as(IyiSocket), "inner.test", clients[k], 5000)
+        took = __iyi_monotonic_ns - started
+        raise "no handshake: #{conn.message}" if conn.is_a?(TlsError)
+        raise "ECH not taken" if k == 2 && !conn.ech_accepted?
+        samples[k] << took
+        conn.abort
+      end
+    end
+    0
+  end
+  shown = samples.map do |s|
+    ns = s.sorted[s.size // 2]
+    "#{ns // 1000000_i64}.#{(ns % 1000000_i64 // 1000_i64).to_s.rjust(3, '0')}"
+  end
+  "#{count} handshakes each, medians: no ECH #{shown[0]} ms, GREASE #{shown[1]} ms, ECH #{shown[2]} ms"
+end
+
+if args.size > 0 && args[0] == "ech-speed"
+  puts ech_speed(args[1].to_i)
   exit 0
 end
 
@@ -1031,5 +1631,262 @@ first_listener.close
 second_listener.close
 puts "  tickets held to their port and configuration, a resumption's to its full handshake's time, early data past a"
 puts "  lowered limit declined, and a server_name past 253 bytes refused"
+
+puts "== Encrypted Client Hello (RFC 9849)"
+# The configuration: written, read back, and what a client passes over.
+key = TlsEchKey.generate("public.test", 7, maximum_name_length: 64).or_panic
+list = TlsEchKey.config_list([key])
+read = TlsEchConfig.parse_list(list)
+check read.is_a?(Array(TlsEchConfig)) && read.size == 1, "a generated ECHConfigList reads back as one ECHConfig"
+config = read.as(Array(TlsEchConfig))[0]
+check config.config_id == 7 && config.kem_id == 0x20 && config.public_name == "public.test" && config.maximum_name_length == 64 &&
+      config.suites == [{1, 1}, {1, 3}] && config.extensions.empty? && config.public_key == key.private_key.public_key.bytes, "an ECHConfig's fields read back as made"
+check list.size == 68 && list[0, 4] == [0_u8, 66_u8, 0xfe_u8, 0x0d_u8], "an ECHConfigList of one X25519 config is 68 bytes, of version 0xfe0d"
+loaded = TlsEchKey.from_bytes(config.raw, key.private_key.bytes)
+check loaded.is_a?(TlsEchKey) && loaded.config.raw == config.raw, "a key read back from its config and private key"
+check TlsEchKey.from_bytes(config.raw, TlsEchKey.generate("public.test").or_panic.private_key.bytes).is_a?(TlsError), "a private key that is not the config's refused"
+# The last: a config of another version whose length runs past the list.
+[b(""), b("0000"), b("0004fe0d0000"), list[0, list.size - 1], list + [0_u8], b("0005fe0e000500")].each_with_index do |bad, i|
+  got = TlsEchConfig.parse_list(bad)
+  check got.is_a?(TlsError) && got.alert == 50_u8, "a malformed ECHConfigList (#{i}) is a decode_error"
+end
+unknown = TlsEchConfig.parse_list(b("0008fe0e0004deadbeef"))
+check unknown.is_a?(Array(TlsEchConfig)) && unknown.empty?, "an ECHConfig of another version is passed over"
+contents = config.raw[4, config.raw.size - 6] + u16b(4) + u16b(0xfa0a) + u16b(0)
+mandatory = u16b(contents.size + 4) + u16b(0xfe0d) + u16b(contents.size) + contents
+contents = config.raw[4, config.raw.size - 6] + u16b(4) + u16b(0x0a0a) + u16b(0)
+optional = u16b(contents.size + 4) + u16b(0xfe0d) + u16b(contents.size) + contents
+mandatory_read = TlsEchConfig.parse_list(mandatory)
+optional_read = TlsEchConfig.parse_list(optional)
+check mandatory_read.is_a?(Array(TlsEchConfig)) && mandatory_read[0].hpke_suite.nil?, "an ECHConfig with a mandatory extension this does not know is passed over (section 4.2)"
+check optional_read.is_a?(Array(TlsEchConfig)) && !optional_read[0].hpke_suite.nil?, "one with an extension that is not mandatory is not"
+["public.test", "a-b.example", "localhost", "x1.example"].each { |n| check TlsEchConfig.public_name?(n), "#{n} is a public_name" }
+["", ".", "a.", ".a", "a..b", "-a.test", "a-.test", "a_b.test", "1.2.3.4", "test.0x1F", "test.0x", "x.123", "a" * 64 + ".test"].each do |n|
+  check !TlsEchConfig.public_name?(n), "#{n.inspect} is no public_name (section 6.1.7)"
+end
+check TlsEchKey.generate("10.0.0.1").is_a?(TlsError), "a key with an address for its public_name refused"
+puts "  an ECHConfigList written and read back; malformed lists, other versions, mandatory extensions and public_name's form"
+
+# This program's client and server.
+said, served, retry = ech_pair(ech_server([key]), ech_client(list))
+check said == "ech=true alpn=h2 group=X25519MLKEM768 resumed=false early=Unused got=echo:hello", "ECH taken, at the client: #{said}"
+check served == "ech=true name=inner.test outer=public.test alpn=h2 early= read=hello", "ECH taken, the server reading the inner's name and protocol, the outer naming public.test: #{served}"
+outer = captured(ech_client(list), "inner.test")
+public_name = server_name_ext("public.test")
+check extension_of(outer, 0) == public_name[4, public_name.size - 4] && !holds?(outer, bytes_of("inner.test")) && extension_of(outer, 16).nil?,
+  "the ClientHelloOuter names public.test, and neither the inner name nor the protocols are in the clear"
+ech = extension_of(outer, 0xfe0d) || [] of UInt8
+check ech.size > 42 && ech[0] == 0_u8 && ech[5] == 7_u8 && (payload_size(ech) - 16) % 32 == 0,
+  "the outer's encrypted_client_hello: type outer, config 7, and a payload of whole 32-byte blocks and a tag (section 6.1.3)"
+check payload_size(ech) < 1258, "the key_share is in the outer alone, named by ech_outer_extensions (section 5.1): a payload of #{payload_size(ech)} bytes"
+# 10 and 50 bytes: more than a 32-byte block apart, so that rounding alone
+# could not make them one size.
+longer = extension_of(captured(ech_client(list), "a" * 45 + ".test"), 0xfe0d) || [] of UInt8
+check longer.size > 42 && payload_size(longer) == payload_size(ech), "names of 10 and 50 bytes are padded alike under a maximum_name_length of 64 (section 6.1.3)"
+greased = captured(ech_client(nil), "inner.test")
+grease = extension_of(greased, 0xfe0d) || [] of UInt8
+inner_name = server_name_ext("inner.test")
+check grease.size > 42 && grease[0] == 0_u8 && (payload_size(grease) - 16) % 32 == 0 && extension_of(greased, 0) == inner_name[4, inner_name.size - 4],
+  "with no config, a GREASE encrypted_client_hello of an outer's shape (section 6.2.1)"
+plain = ech_client(nil)
+plain.ech_grease = false
+check extension_of(captured(plain, "inner.test"), 0xfe0d).nil?, "and none with GREASE off"
+said, served, retry = ech_pair(ech_server([key]), ech_client(nil))
+check said.starts_with?("ech=false alpn=h2") && served.starts_with?("ech=false name=inner.test"), "GREASE to a server with keys: turned down, its retry_configs passed over: #{said}"
+# The server's groups: one that takes X25519 first answers in it though
+# X25519MLKEM768 is listed and sent; one that takes secp384r1 alone asks
+# for it again, ECH taken through the HelloRetryRequest.
+choosy = ech_server([key])
+choosy.groups = ["X25519", "X25519MLKEM768"]
+said, _, _ = ech_pair(choosy, ech_client(list))
+check said.starts_with?("ech=true alpn=h2 group=X25519 "), "a server whose groups put X25519 first answers in it: #{said}"
+choosy.groups = ["secp384r1"]
+said, served, _ = ech_pair(choosy, ech_client(list))
+check said == "ech=true alpn=h2 group=secp384r1 resumed=false early=Unused got=echo:hello" && served.starts_with?("ech=true name=inner.test outer=public.test"),
+  "a server taking secp384r1 alone asks again, and ECH is taken through the HelloRetryRequest at both ends: #{said}"
+choosy.groups = ["X448"]
+said, served, _ = ech_pair(choosy, ech_client(list))
+check served == "refused: tls: this server takes no key exchange group: its groups name none this module has (handshake_failure)", "a server whose groups name none it has refuses: #{served}"
+puts "  taken: the inner's name and protocol read, the outer's public.test and padding on the wire; GREASE; a HelloRetryRequest"
+
+# Turned down, the retry, and what a client takes from a server that
+# turned it down.
+stale = TlsEchKey.generate("public.test", 7).or_panic
+stale_list = TlsEchKey.config_list([stale])
+said, served, retry = ech_pair(ech_server([key], public: false), ech_client(stale_list))
+check said == "refused: tls: the server's certificate is not trusted: x509: CN=inner.test is not valid for public.test: it names inner.test (bad_certificate)" && retry.nil?,
+  "turned down by a server without public.test's certificate: refused for it, no retry_configs taken (section 6.1.7): #{said}"
+said, served, retry = ech_pair(ech_server([key]), ech_client(stale_list))
+check said.starts_with?("refused: tls: inner.test did not take the encrypted ClientHello") && said.ends_with?("(ech_required)") && retry == list,
+  "a config the server no longer holds: ech_required, its certificate checked for public.test, with its list to retry with: #{said}"
+check served.starts_with?("ech=false name=public.test outer= alpn= ") && served.ends_with?("read=tls: the client sent alert ech_required (121)"),
+  "the server went on with the ClientHelloOuter, for public.test: #{served}"
+said, served, _ = ech_pair(ech_server([key]), ech_client(retry))
+check said.starts_with?("ech=true alpn=h2"), "the retry under those retry_configs is taken: #{said}"
+# Turned down at a HelloRetryRequest, whose encrypted_client_hello then
+# holds eight random bytes: the handshake goes on, on the outer, a second
+# ClientHelloOuter carrying the first one's extension again.
+choosy.groups = ["secp384r1"]
+said, served, retry = ech_pair(choosy, ech_client(stale_list))
+check said.starts_with?("refused: tls: inner.test did not take the encrypted ClientHello") && said.ends_with?("(ech_required)") && retry == list,
+  "turned down at a HelloRetryRequest: ech_required, with the server's list to retry with: #{said}"
+old = TlsEchKey.generate("public.test", 9).or_panic
+old.retry = false
+rotating = ech_server([key, old])
+said, _, _ = ech_pair(rotating, ech_client(TlsEchKey.config_list([old])))
+check said.starts_with?("ech=true"), "a key kept for rotation opens what its config sealed: #{said}"
+_, _, retry = ech_pair(rotating, ech_client(stale_list))
+check retry == list, "retry_configs hold the keys whose retry is set"
+# And refusals of a server written here, for what std/tls's never sends.
+# Its tickets are offered only to the port and configuration they came
+# from, so the session's first connection and the fake server share both.
+fake_session = TlsSession.new
+fake_listener = IyiSocket.listen("127.0.0.1", 0)
+fake_client = ech_client(list)
+ech_pair(ech_server([key]), fake_client, session: fake_session, on: fake_listener)
+held = fake_session.take("inner.test", fake_listener.local_port, fake_client, now_ms)
+check !held.nil? && held.host == "inner.test" && held.port == fake_listener.local_port && held.peer_certificates[0].subject_name == "CN=inner.test",
+  "a ticket that came over ECH is held for the inner name and port, with the inner's certificate"
+fake_session.keep(held) if held
+said = faked(fake_client, fake_session, "psk", key, fake_listener)
+fake_listener.close
+check said == "tls: a ServerHello resuming by the ClientHelloOuter's pre_shared_key, which is GREASE (illegal_parameter)", "a ServerHello resuming by the outer's GREASE pre_shared_key: illegal_parameter (section 6.1.2): #{said}"
+said = faked(ech_client(list), nil, "sh-ech", key)
+check said == "tls: an encrypted_client_hello in a ServerHello, which was not offered there (unsupported_extension)", "a ServerHello carrying encrypted_client_hello: unsupported_extension: #{said}"
+said = faked(ech_client(list), nil, "hrr-short", key)
+check said == "tls: a HelloRetryRequest's encrypted_client_hello of 7 bytes, not 8 (decode_error)", "a HelloRetryRequest's encrypted_client_hello of 7 bytes: decode_error (section 6.1.4): #{said}"
+said = faked(ech_client(list), nil, "hrr-unconfirmed", key)
+check said == "tls: a ServerHello that does not confirm the ClientHelloInner its HelloRetryRequest took (illegal_parameter)",
+  "a HelloRetryRequest confirming the inner, then a ServerHello that does not: illegal_parameter (section 6.1.5): #{said}"
+said, _, retry = ech_pair(ech_server([] of TlsEchKey), ech_client(list))
+check said.ends_with?("(ech_required)") && retry.nil?, "a server with no keys: ech_required, and no retry_configs: #{said}"
+asking = ech_server([key])
+asking.client_roots = Certificate.from_pem(ECH_ROOT_PEM).or_panic
+mutual = ech_client(list)
+mutual.identity = TlsIdentity.from_pem(ECH_INNER_CERT_PEM + ECH_ROOT_PEM, ECH_INNER_KEY_PEM).or_panic
+said, served, _ = ech_pair(asking, mutual)
+check served.starts_with?("ech=true"), "a certificate asked for, ECH taken: the client's sent: #{served}"
+mutual.ech_configs = stale_list
+said, served, _ = ech_pair(asking, mutual)
+check said.ends_with?("(ech_required)") && served == "refused: tls: the client sent no certificate (certificate_required)",
+  "a certificate asked for, ECH turned down: an empty Certificate (section 6.1.7): #{served}"
+both = ech_client(list)
+both.min_version = TlsVersion::TLS12
+said, _, _ = ech_pair(ech_server([key]), both)
+check said == "refused: tls: ech_configs asks for an encrypted ClientHello, which is TLS 1.3's alone, and min_version for TLS 1.2 too", "ECH with TLS 1.2 beside it refused: #{said}"
+said, _, _ = ech_pair(ech_server([key]), ech_client(mandatory))
+check said.starts_with?("refused: tls: ech_configs holds no ECHConfig this client can use"), "a list of no config this client can use refused before anything is sent: #{said}"
+puts "  turned down: ech_required after the public_name's certificate, retry_configs, the retry; rotation; no keys; an empty Certificate"
+
+# A ticket and early data inside, held to the session binding: a ticket
+# that came over ECH is the inner name's, on the port and under the
+# configuration of the connection, with the inner's certificate; it is
+# offered by the inner name, inside, and not to another port.
+early_server = ech_server([key])
+early_server.max_early_data = 1024
+session = TlsSession.new
+early_listener = IyiSocket.listen("127.0.0.1", 0)
+early_port = early_listener.local_port
+early_client = ech_client(list)
+said, _, _ = ech_pair(early_server, early_client, session: session, on: early_listener)
+check said.starts_with?("ech=true") && session.size == 2, "ECH taken, and the tickets kept: #{said}"
+check session.take("public.test", early_port, early_client, now_ms).nil?, "no ticket is held for the public_name"
+check session.take("inner.test", early_port, ech_client(list), now_ms).nil?, "nor for the inner name under another configuration"
+held = session.take("inner.test", early_port, early_client, now_ms)
+check !held.nil? && held.host == "inner.test" && held.port == early_port && held.peer_certificates[0].subject_name == "CN=inner.test",
+  "a ticket that came over ECH is held for the inner name and port, with the inner's certificate"
+session.keep(held) if held
+said, _, _ = ech_pair(early_server, early_client, session: session)
+check said.starts_with?("ech=true") && said.includes?(" resumed=false ") && session.size == 4, "a ticket is not offered to another port, through ECH: #{said}"
+session = TlsSession.new
+ech_pair(early_server, early_client, session: session, on: early_listener)
+hello = captured(early_client, "inner.test", session, "early!", early_listener)
+check extensions_of(hello).last[0] == 41 && !extension_of(hello, 45).nil? && !extension_of(hello, 42).nil?,
+  "a ticket and early data inside: early_data, psk_key_exchange_modes and a GREASE pre_shared_key outside (sections 6.1 and 6.1.2)"
+said, served, _ = ech_pair(early_server, early_client, session: session, early: "early!", on: early_listener)
+check said == "ech=true alpn=h2 group=X25519MLKEM768 resumed=true early=Accepted got=echo:hello", "resumed with early data, inside ECH: #{said}"
+check served == "ech=true name=inner.test outer=public.test alpn=h2 early=early! read=hello", "the server resumed the inner's ticket and read its early data: #{served}"
+# Turned down, the handshake on the outer was for the public_name: its
+# tickets are passed over (section 6.1.7).
+turned = TlsSession.new
+stale_client = ech_client(stale_list)
+said, _, _ = ech_pair(early_server, stale_client, session: turned, on: early_listener)
+check said.ends_with?("(ech_required)") && turned.size == 0, "a handshake that turned ECH down keeps no ticket: #{said}"
+early_listener.close
+puts "  resumed by the inner's ticket, held to its name, port and configuration, its early data taken"
+
+# ClientHellos written here from the RFC's text, to the server.
+x_share = bytes_of(X25519.public_key(Random::Secure.random_bytes(32)))
+common = shared_extensions([0x1d], [{0x1d, x_share}])
+before = public_name + common
+marker = ext(0xfe0d, [1_u8])
+refs = outer_refs([10, 13, 43, 51])
+crafting = ech_server([key])
+inner_random = Random::Secure.random_bytes(32)
+sender = crafted_sender(key)
+answers, said = crafted(crafting, [sealed_outer(sender, 7, sender.enc, Random::Secure.random_bytes(32), before, encoded_inner(inner_random, inner_name + refs + marker))])
+reply = answers[0][1]
+check answered(answers[0]) == "ServerHello", "a ClientHelloOuter written from the RFC's text is answered: #{answered(answers[0])}, #{said}"
+inner = message(1, hello_body(inner_random, [] of UInt8, inner_name + common + marker))
+check reply[30, 8] == ech_confirmation(inner_random, inner + random_zeroed(reply), false),
+  "its ServerHello.random ends in section 7.2's accept_confirmation, over the ClientHelloInner section 5.1 rebuilds"
+sender = crafted_sender(key)
+altered = sealed_outer(sender, 7, sender.enc, Random::Secure.random_bytes(32), before, encoded_inner(inner_random, inner_name + refs + marker))
+altered[10] = altered[10] ^ 1_u8
+answers, said = crafted(crafting, [altered])
+reply = answers[0][1]
+check answered(answers[0]) == "ServerHello" && reply[30, 8] != ech_confirmation(inner_random, inner + random_zeroed(reply), false),
+  "a ClientHelloOuter changed after sealing: its inner does not open (section 5.2), and the ServerHello confirms none"
+got = crafted_one(crafting, key, before, inner_name + outer_refs([10, 10, 13, 43, 51]) + marker)
+check got == {"alert 47", "tls: an ech_outer_extensions naming extension 10, which the ClientHelloOuter does not have after those named before it (illegal_parameter)"},
+  "an outer extension named twice: illegal_parameter (section 5.1): #{got}"
+got = crafted_one(crafting, key, before, inner_name + outer_refs([10, 13, 43, 51, 0xfe0d]) + marker)
+check got == {"alert 47", "tls: an ech_outer_extensions naming encrypted_client_hello (illegal_parameter)"}, "encrypted_client_hello named by ech_outer_extensions: illegal_parameter (section 5.1): #{got}"
+got = crafted_one(crafting, key, before, inner_name + outer_refs([10, 13, 43, 51, 16]) + marker)
+check got == {"alert 47", "tls: an ech_outer_extensions naming extension 16, which the ClientHelloOuter does not have after those named before it (illegal_parameter)"},
+  "an outer extension the outer lacks: illegal_parameter (section 5.1): #{got}"
+got = crafted_one(crafting, key, before, inner_name + outer_refs([13, 10, 43, 51]) + marker)
+check got == {"alert 47", "tls: an ech_outer_extensions naming extension 10, which the ClientHelloOuter does not have after those named before it (illegal_parameter)"},
+  "outer extensions named out of their order: illegal_parameter (section 5.1): #{got}"
+got = crafted_one(crafting, key, before, inner_name + refs + outer_refs([10]) + marker)
+check got == {"alert 47", "tls: ech_outer_extensions twice in an EncodedClientHelloInner (illegal_parameter)"}, "ech_outer_extensions twice: illegal_parameter: #{got}"
+got = crafted_one(crafting, key, before, inner_name + refs + marker, Array(UInt8).new(15, 0_u8) + [1_u8])
+check got == {"alert 47", "tls: an EncodedClientHelloInner whose padding is not zeros (illegal_parameter)"}, "padding that is not zeros: illegal_parameter (section 5.1): #{got}"
+got = crafted_one(crafting, key, before, inner_name + refs + marker, nil, [1_u8, 2_u8])
+check got == {"alert 47", "tls: an EncodedClientHelloInner with a session id, which the ClientHelloOuter's stands for (illegal_parameter)"}, "an encoding with a session id: illegal_parameter: #{got}"
+got = crafted_one(crafting, key, before, inner_name + refs)
+check got == {"alert 47", "tls: a ClientHelloInner without the inner encrypted_client_hello (illegal_parameter)"}, "an inner without encrypted_client_hello: illegal_parameter (section 7.1): #{got}"
+got = crafted_one(crafting, key, before, inner_name + outer_refs([10, 13, 51]) + ext(43, [4_u8, 3_u8, 4_u8, 3_u8, 3_u8]) + marker)
+check got == {"alert 47", "tls: a ClientHelloInner that does not offer TLS 1.3 alone (illegal_parameter)"}, "an inner offering TLS 1.2: illegal_parameter (section 7.1): #{got}"
+[{marker, "alert 47", "tls: an encrypted_client_hello of type inner in a ClientHello off the network (illegal_parameter)", "type inner from the network (section 7)"},
+ {ext(0xfe0d, [2_u8]), "alert 47", "tls: an encrypted_client_hello of type 2, neither outer nor inner (illegal_parameter)", "no type there is (section 7)"},
+ {ext(0xfe0d, [0_u8, 0_u8, 1_u8]), "alert 50", "tls: an encrypted_client_hello cut short (decode_error)", "an encrypted_client_hello cut short"},
+ {outer_refs([10]), "alert 47", "tls: ech_outer_extensions in a ClientHello (illegal_parameter)", "ech_outer_extensions in a ClientHello (section 5.1)"}].each do |sent, alert, sentence, label|
+  answers, said = crafted(crafting, [message(1, hello_body(Random::Secure.random_bytes(32), [] of UInt8, before + sent))])
+  check answered(answers[0]) == alert && said == sentence, "#{label}: #{answered(answers[0])}, #{said}"
+end
+puts "  crafted ClientHellos: the confirmation; a changed outer; each of section 5.1's and 7's refusals, by its alert"
+
+# A HelloRetryRequest, crafted: the inner lists X25519MLKEM768 and sends
+# X25519's share alone.
+kem = MlKem768PrivateKey.from_seed(Random::Secure.random_bytes(64))
+first_shared = shared_extensions([0x11ec, 0x1d], [{0x1d, x_share}])
+second_shared = shared_extensions([0x11ec, 0x1d], [{0x11ec, kem.encapsulation_key + x_share}])
+first, second, hrr_confirmed, sh_confirmed, said = retried(crafting, key, "valid", first_shared, second_shared)
+check first == "HelloRetryRequest" && hrr_confirmed, "a crafted inner asked again: its HelloRetryRequest confirms the inner (section 7.2.1): #{first}"
+check second == "ServerHello" && sh_confirmed, "the second inner, in the same HPKE context, enc empty: its ServerHello confirms it (section 7.2): #{second}, #{said}"
+[{"no ech", "alert 109", "without the encrypted_client_hello", "missing_extension"},
+ {"enc", "alert 47", "with an enc", "illegal_parameter"},
+ {"config", "alert 47", "another ECH suite or config", "illegal_parameter"},
+ {"context", "alert 51", "does not open", "decrypt_error"}].each do |variant, alert, phrase, name|
+  _, second, _, _, said = retried(crafting, key, variant, first_shared, second_shared)
+  check second == alert && said.includes?(phrase), "a second ClientHelloOuter (#{variant}): #{name} (section 7.1.1): #{second}, #{said}"
+end
+stale_sender = crafted_sender(stale)
+answers, _ = crafted(crafting, [sealed_outer(stale_sender, 7, stale_sender.enc, Random::Secure.random_bytes(32), public_name + first_shared,
+  encoded_inner(Random::Secure.random_bytes(32), inner_name + refs + marker))])
+noise = extension_of(answers[0][1], 0xfe0d)
+check answered(answers[0]) == "HelloRetryRequest" && !noise.nil? && noise.size == 8, "a HelloRetryRequest to an encrypted ClientHello no key opens: eight bytes in the confirmation's place (section 7.1)"
+puts "  a HelloRetryRequest: both confirmations, the second ClientHelloOuter's refusals"
 
 puts "\nALL CHECKS PASSED"

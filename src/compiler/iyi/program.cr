@@ -175,7 +175,7 @@ module Iyi
       end
       return unless unit.is_a?(NamedType)
 
-      unit_file = unit.as?(ModuleType).try(&.iyi_unit_file) || unit.locations.try(&.first?).try(&.filename).as?(String)
+      unit_file = unit.as?(ModuleType).try(&.iyi_unit_file) || unit.locations.try(&.first?).try(&.read_from).as?(String)
       return unless unit_file && iyi_imported_files.includes?(unit_file)
 
       # Code a macro expanded was written in the file that expanded it, the
@@ -185,19 +185,18 @@ module Iyi
       # beside `std/bool`, `def self.remove_directory : Bool` there was
       # "must return Std::Bool but it is returning Bool", while the same
       # line outside the `{% if %}` meant the type.
-      writer = location.try(&.original_filename)
+      #
+      # The file it was read from, which is what the edges are keyed on: a
+      # mono body or initialiser read from an artifact is located in its
+      # module's source (`IyiMod::SourcePosition`), and asked of that path the
+      # walk found no edges, so `Tuple(DnsMessage, String)` in a body
+      # `std/socket` ships met `Std::Tuple`, a module std/socket never
+      # imports: "Std::Tuple is not a generic type".
+      writer = location.try(&.original_read_from)
       return unless writer
-      # A mono body or initialiser read from an artifact is located in the
-      # module's source (`IyiMod::SourcePosition`), and the file this build
-      # read it from is the artifact, which the edges are keyed on. Asked of
-      # the source path it found no edges, so `Tuple(DnsMessage, String)` in
-      # a body `std/socket` ships met `Std::Tuple`, a module std/socket never
-      # imports, and the build said "Std::Tuple is not a generic type".
-      writer = iyi_artifact_read_from[writer]? || writer
       return if writer == unit_file
       # Only writers this build read as files: the entry and everything
-      # imported (artifact declaration replays included — their path is
-      # an edge value).
+      # imported (artifact replays included — their path is an edge value).
       return unless writer == filename || iyi_imported_files.includes?(writer)
       return if iyi_reachable_files(writer).includes?(unit_file)
 
@@ -255,13 +254,6 @@ module Iyi
     # there. So this points at where it was, which is right whenever the
     # producer's tree is present and an honest error when it is not.
     getter iyi_artifact_source_paths = {} of String => String
-
-    # iyi: the other way: the `.iyimod` each module's source was read from,
-    # by `Artifact#source_path`. A travelling body and the initialiser are
-    # located in the source (`IyiMod::SourcePosition`), and what this build
-    # keys on the file it read — import edges, file-private names — is keyed
-    # on the artifact.
-    getter iyi_artifact_read_from = {} of String => String
 
     # iyi: true only while a `derive`'s macro is expanding (SPEC.md R-5, II.4).
     # A derive reads the declaration it is attached to, and the types that
@@ -1827,7 +1819,7 @@ module Iyi
     # the prefix `__temp_cd6ae5dd_*`. This localizes the impact on incremental
     # object file generation to all types defined or reopened in that same file.
     def new_temp_var_name(node : ASTNode) : String
-      if filename = node.location.try(&.original_filename)
+      if filename = node.location.try(&.original_read_from)
         # the parser creates `Location`s with an empty filename by default,
         # assume they are equivalent to `nil` to make compiler specs less noisy
         unless filename == ""
@@ -1891,7 +1883,7 @@ module Iyi
     end
 
     def file_module?(filename)
-      file_modules[filename]? || iyi_artifact_read_from[filename]?.try { |artifact| file_modules[artifact]? }
+      file_modules[filename]?
     end
 
     def file_module(filename)
@@ -1901,7 +1893,7 @@ module Iyi
     def check_private(node)
       return nil unless node.visibility.private?
 
-      filename = node.location.try &.original_filename
+      filename = node.location.try &.original_read_from
       return nil unless filename
 
       file_module(filename)

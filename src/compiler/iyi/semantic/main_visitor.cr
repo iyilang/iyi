@@ -2110,7 +2110,7 @@ module Iyi
           MSG
       end
 
-      return unless node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
+      return unless node.location.try(&.original_read_from.try(&.ends_with?(".iyi")))
 
       unassigned = scope.all_instance_vars.compact_map do |name, ivar|
         next if scope.has_instance_var_initializer?(name)
@@ -3357,7 +3357,7 @@ module Iyi
       #
       # Said at the keyword: a def's or a block's handler starts where its
       # body does, and `def foo ... rescue` was reported at `raise "x"`.
-      if @program.iyi_prelude? && !node.iyi_defer? && node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
+      if @program.iyi_prelude? && !node.iyi_defer? && node.location.try(&.original_read_from.try(&.ends_with?(".iyi")))
         if node.rescues || node.else
           (node.rescues.try(&.first) || node).raise "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), " \
                                                     "and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. " \

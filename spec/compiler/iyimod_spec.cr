@@ -5428,7 +5428,9 @@ describe Iyi::IyiMod do
   # `@caller` where it was called from answered `mods/app/box.iyimod:13:3`
   # from the artifact, a line of the declarations it renders, and
   # `Eiy.render` read its template from beside the artifact; an error inside
-  # the body pointed into the rendering too.
+  # the body pointed into the rendering too. Still read from the artifact for
+  # what the build decides: a `defer` travels as the `ensure` it lowers to,
+  # and located in an `.iyi` file that was refused as one written there.
   it "locates a travelling body and the initialiser in the module's source" do
     with_tempdir("iyimod_body_positions") do
       modules = {"app/box.iyi" => <<-IYI}
@@ -5451,19 +5453,25 @@ describe Iyi::IyiMod do
         pub def placed : String
           Placed
         end
+
+        pub def guarded(x : T) : Int32 forall T
+          defer puts "left"
+          x.size
+        end
         IYI
       main = <<-IYI
         module main
 
-        import app/box::{where, sized, placed}
+        import app/box::{where, sized, placed, guarded}
 
         puts where(1)
         puts placed
         puts sized("ab")
+        puts guarded("ab")
         IYI
       from_source, from_artifact = iyimod_round_trip(modules, main)
       box = File.expand_path("app/box.iyi")
-      from_source.should eq "#{box}:8:3\n#{box}:15:10\n3\n"
+      from_source.should eq "#{box}:8:3\n#{box}:15:10\n3\nleft\n2\n"
       from_artifact.should eq from_source
 
       File.write "unsized.iyi", "module main\n\nimport app/box::{sized}\n\nputs sized(2)\n"

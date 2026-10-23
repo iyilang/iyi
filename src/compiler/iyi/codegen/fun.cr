@@ -193,7 +193,7 @@ class Iyi::CodeGenVisitor
   # defines, naming the module the declaration came from — the parser read
   # it under the artifact's path, and `iyi_artifact_modules` is keyed on that.
   private def iyi_refuse_unreached(target_def : Def, self_type) : NoReturn
-    file = target_def.location.try(&.original_filename)
+    file = target_def.location.try(&.original_read_from)
     module_name = file.try { |path| @program.iyi_artifact_modules[path]? } || file || "an imported module"
     owner = target_def.owner? || self_type
     target_def.raise "#{module_name}'s artifact declares `#{Call.def_full_name(owner, target_def)}`, " \

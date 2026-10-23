@@ -175,7 +175,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         # iyi: `class MyError < Exception` compiled, and `MyError.new("bad")`
         # then listed `Reference.new()` as its one overload; the prelude's
         # `Exception` is the runtime's and has no hierarchy under it.
-        if superclass.same?(@program.types["Exception"]?) && @program.iyi_prelude? && Lexer.iyi_source?(node.location.try(&.filename))
+        if superclass.same?(@program.types["Exception"]?) && @program.iyi_prelude? && Lexer.iyi_source?(node.location.try(&.read_from))
           node_superclass.raise "iyi has no exception hierarchy: an error is a type of its own, `struct #{node.name}` " \
                                 "with a `def message : String` and `impl Error for #{node.name}`, returned as a member " \
                                 "of the result's union, `Int32 | #{node.name}` (SPEC.md III.1)"
@@ -570,10 +570,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     return false unless type = @program.types[name]?
     return false unless locations = type.locations
     return false unless module_locations = used_type.locations
-    files = module_locations.compact_map(&.original_filename).to_set
+    files = module_locations.compact_map(&.original_read_from).to_set
     return false if files.empty?
     locations.any? do |location|
-      (filename = location.original_filename) && files.includes?(filename)
+      (filename = location.original_read_from) && files.includes?(filename)
     end
   end
 
@@ -743,7 +743,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       # where `impl Comparable` gets the import line from the undefined
       # constant. The same std scan answers here.
       written = node.trait.is_a?(Generic) ? node.trait.as(Generic).name : node.trait
-      if written.is_a?(Path) && written.names.size == 1 && Lexer.iyi_source?(written.location.try(&.filename)) &&
+      if written.is_a?(Path) && written.names.size == 1 && Lexer.iyi_source?(written.location.try(&.read_from)) &&
          (hint = written.iyi_std_declares_hint(program, written.names.first))
         message = "#{message}\n#{hint}"
       end
@@ -815,7 +815,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # body as well makes the consumer define a symbol the artifact defines too.
     file = @iyi_importing.last?
     target_declared_here =
-      !!(file && target_type.locations.try &.any? { |location| location.filename == file })
+      !!(file && target_type.locations.try &.any? { |location| location.read_from == file })
     bodies_travel = target_type.is_a?(GenericType) || !target_declared_here
     container = IyiMod.mono_body_container(trait_type.to_s, target_type.to_s)
 
@@ -1292,9 +1292,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # (`class ::String` in `std/text`) is inside no module either, and is
   # not the entry.
   private def iyi_headerless_entry_type?(node : ASTNode) : Bool
-    file = node.location.try(&.filename)
+    file = node.location.try(&.read_from)
     while file.is_a?(VirtualFile)
-      file = file.expanded_location.try(&.filename)
+      file = file.expanded_location.try(&.read_from)
     end
     return false unless file.is_a?(String) && file == @program.filename
     unit = current_type
@@ -1432,7 +1432,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     type.private = true if node.visibility.private?
     if node.iyi_unit?
       type.iyi_unit = true
-      type.iyi_unit_file ||= node.location.try(&.original_filename)
+      type.iyi_unit_file ||= node.location.try(&.original_read_from)
     end
 
     node.resolved_type = type
@@ -1986,7 +1986,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         # replacing a def it wrote itself is its own business, as it is the
         # prelude's.
         return unless iyi_written_in?(replaced, ".iyi")
-        file = replaced.location.try(&.expanded_location).try(&.filename.as?(String))
+        file = replaced.location.try(&.expanded_location).try(&.read_from.as?(String))
         return if file.nil? || iyi_written_file(replaced) == iyi_written_file(node)
         writer = @program.iyi_module_paths[file]? || @program.iyi_artifact_modules[file]? || Iyi.relative_filename(file)
         whose = "#{writer}'s"
@@ -2035,7 +2035,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     return false unless dir = @program.iyi_prelude_dir
     prefix = "#{::Path[dir].to_posix}/"
     !!node.location.try(&.expanded_location).try do |at|
-      at.filename.as?(String).try do |filename|
+      at.read_from.as?(String).try do |filename|
         ::Path[filename].to_posix.to_s.starts_with?(prefix)
       end
     end
@@ -2044,14 +2044,14 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # Where a definition was written, following a macro back to its source.
   private def iyi_written_in?(node : Def | Macro, extension : String) : Bool
     !!node.location.try(&.expanded_location).try do |at|
-      at.filename.as?(String).try &.ends_with?(extension)
+      at.read_from.as?(String).try &.ends_with?(extension)
     end
   end
 
   # The file a definition was written in, following a macro back to its
   # source, as a posix path so that two spellings of one file are one.
   private def iyi_written_file(node : Def | Macro) : String?
-    node.location.try(&.expanded_location).try(&.filename.as?(String)).try { |file| ::Path[file].to_posix.to_s }
+    node.location.try(&.expanded_location).try(&.read_from.as?(String)).try { |file| ::Path[file].to_posix.to_s }
   end
 
   private def process_def_primitive_annotation(node, ann)
@@ -3117,7 +3117,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # qualified declaration is exactly how a `.cr` file reopens a type, which is
   # a thing Crystal has and iyi does not.
   private def iyi_check_not_reopening(node : ASTNode, path : Path, prefix : Path) : Nil
-    filename = path.location.try(&.filename)
+    filename = path.location.try(&.read_from)
     return unless filename.is_a?(String) && filename.ends_with?(".iyi")
 
     # `module app/formal` is a qualified declaration the parser wrote, not one
@@ -3133,12 +3133,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     end.first?
     return unless existing
 
-    # A namespace this file declared is its own to add to. Declared in an
-    # artifact built from this file is the same: the artifact's initialiser is
-    # placed in its source (`IyiMod::SourcePosition`), and `Eiy::DefaultIoName
-    # = "__io__"` there adds to the `Eiy` its declarations wrote.
+    # A namespace this file declared is its own to add to.
     locations = existing.locations
-    return if locations.try &.any? { |location| iyi_written_from?(location.filename, filename) }
+    return if locations.try &.any? { |location| location.read_from == filename }
 
     declared_in = locations.try(&.first?).try(&.filename)
     where = declared_in.is_a?(String) ? " (declared in `#{declared_in}`)" : ""
@@ -3153,13 +3150,6 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       Add the method where the type is declared, or write `impl Trait for #{path}`
       here, which R-3 allows when the trait is this module's.
       MSG
-  end
-
-  # iyi: whether *declared* is *file*, or an artifact built from it — whose
-  # declarations are parsed under the artifact's path while its travelling
-  # code is placed in *file* (`Program#iyi_artifact_source_paths`).
-  private def iyi_written_from?(declared : String | VirtualFile | Nil, file : String) : Bool
-    declared == file || (declared.is_a?(String) && @program.iyi_artifact_source_paths[declared]? == file)
   end
 
   def check_type_is_type_container(scope, path)

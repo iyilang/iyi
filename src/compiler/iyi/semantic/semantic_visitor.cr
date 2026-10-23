@@ -45,7 +45,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
 
     location = node.location
     filename = node.string
-    relative_to = location.try &.original_filename
+    relative_to = location.try &.original_read_from
 
     # iyi: `require "json"` in a `.iyi` file used to load Crystal's standard
     # library and fail somewhere inside it, on a syntax this parser does not
@@ -217,7 +217,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     path = iyi_expand_short_name(node, written)
     node.path = path.split('/') unless path == written
     location = node.location
-    relative_to = location.try &.original_filename
+    relative_to = location.try &.original_read_from
 
     # iyi: a package import (SPEC.md III.7). The manifest's prefix table is
     # asked first — longest prefix first, so `/v2` is a different module —
@@ -1026,13 +1026,16 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # so their nodes are located in the module's source and not in this
     # rendering of it (`IyiMod::SourcePosition`): a macro's
     # `@caller.first.filename`, an error and the debug info answer as they
-    # do when the module is built from source.
+    # do when the module is built from source. Every node keeps the artifact
+    # as `Location#artifact`, which is what decisions about the file this
+    # build read ask (`Location#read_from`).
     io = IO::Memory.new
     pragmas = {} of Int32 => Array(Lexer::LocPragma)
-    travelled = IyiMod.declarations(artifact, io, pragmas)
+    travelled = IyiMod.declarations(artifact, io, pragmas, artifact_path)
     source = io.to_s
     parser = @program.new_parser(source)
     parser.filename = artifact_path
+    parser.artifact = artifact_path
     parser.macro_expansion_pragmas = pragmas unless pragmas.empty?
     # In the language of the module they came from, which the artifact's
     # name does not say: `.iyimod` is no extension the lexer knows, so an
@@ -1061,7 +1064,6 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # travelled — see `Program#iyi_artifact_source_paths`.
     unless artifact.source_path.empty?
       @program.iyi_artifact_source_paths[artifact_path] = artifact.source_path
-      @program.iyi_artifact_read_from[artifact.source_path] = artifact_path
     end
     begin
       parsed_nodes = parser.parse
@@ -1098,6 +1100,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         top_source = String.build { |io| IyiMod.top_level_declarations(artifact, io) }
         top_path = "#{artifact_path} (top level)"
         top_parser = @program.new_parser(top_source)
+        top_parser.artifact = top_path
         top_parser.filename = top_path
         top_parser.iyi = true if iyi_declarations
         Iyi.register_iyi_declarations top_path, top_source

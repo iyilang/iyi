@@ -506,7 +506,7 @@ class Iyi::Call
 
   def lookup_matches_with_signature(owner : Program, signature, search_in_parents, with_autocast)
     location = self.location
-    if location && (filename = location.original_filename)
+    if location && (filename = location.original_read_from)
       matches = owner.lookup_private_matches(filename, signature, analyze_all: with_autocast)
     end
 
@@ -1238,7 +1238,7 @@ class Iyi::Call
 
     macros ||= yield program
 
-    if !macros && (location = self.location) && (filename = location.original_filename).is_a?(String) && (file_module = program.file_module?(filename))
+    if !macros && (location = self.location) && (filename = location.original_read_from).is_a?(String) && (file_module = program.file_module?(filename))
       macros ||= yield file_module
     end
 

@@ -25,6 +25,8 @@ module Iyi
 
     @filename : String | VirtualFile | Nil
     @stacked_filename : String | VirtualFile | Nil
+    @artifact : String? = nil
+    @stacked_artifact : String? = nil
     @token_end_location : Location?
     @string_pool : StringPool
 
@@ -54,12 +56,14 @@ module Iyi
 
     alias LocPragma = LocSetPragma | LocPushPragma | LocPopPragma | LocOriginPragma
 
+    # iyi: *artifact* is `Location#artifact` for what follows.
     record LocSetPragma,
       filename : String,
       line_number : Int32,
-      column_number : Int32 do
+      column_number : Int32,
+      artifact : String? = nil do
       def run_pragma(lexer)
-        lexer.set_location filename, line_number, column_number
+        lexer.set_location filename, line_number, column_number, artifact
       end
     end
 
@@ -145,6 +149,14 @@ module Iyi
     def filename=(filename)
       @filename = filename
       @iyi = Lexer.iyi_source?(filename)
+    end
+
+    # iyi: the `.iyimod` the source being lexed was read out of, which every
+    # location it makes carries (`Location#artifact`). A location pragma sets
+    # its own, so a travelling body placed in its module's source still says
+    # where it was read from.
+    def artifact=(@artifact : String?)
+      @token.artifact = @artifact
     end
 
     def self.iyi_source?(filename) : Bool
@@ -1186,7 +1198,7 @@ module Iyi
     end
 
     def token_end_location
-      @token_end_location ||= Location.new(@filename, @line_number, @column_number - 1)
+      @token_end_location ||= Location.new(@filename, @line_number, @column_number - 1, @artifact)
     end
 
     def slash_is_regex!
@@ -2178,13 +2190,13 @@ module Iyi
     # on the next line - `  {{x}}.nope` - put `nope` at column 8, not 5.
     def lookahead(preserve_token_on_fail = false, &)
       old_pos, old_line, old_column = current_pos, @line_number, @column_number
-      old_place = {@filename, @stacked, @stacked_filename, @stacked_line_number, @stacked_column_number, @location_pragma_index}
+      old_place = {@filename, @artifact, @stacked, @stacked_filename, @stacked_artifact, @stacked_line_number, @stacked_column_number, @location_pragma_index}
       @temp_token.copy_from(@token) if preserve_token_on_fail
 
       result = yield
       unless result
         self.current_pos, @line_number, @column_number = old_pos, old_line, old_column
-        @filename, @stacked, @stacked_filename, @stacked_line_number, @stacked_column_number, @location_pragma_index = old_place
+        @filename, @artifact, @stacked, @stacked_filename, @stacked_artifact, @stacked_line_number, @stacked_column_number, @location_pragma_index = old_place
         @token.copy_from(@temp_token) if preserve_token_on_fail
       end
       result
@@ -2839,8 +2851,9 @@ module Iyi
       end
     end
 
-    def set_location(filename, line_number, column_number)
+    def set_location(filename, line_number, column_number, artifact : String? = nil)
       @token.filename = @filename = filename
+      @token.artifact = @artifact = artifact
       @token.line_number = @line_number = line_number
       @token.column_number = @column_number = column_number
     end
@@ -2849,6 +2862,7 @@ module Iyi
       if @stacked
         @stacked = false
         @token.filename = @filename = @stacked_filename
+        @token.artifact = @artifact = @stacked_artifact
         @token.line_number = @line_number = @stacked_line_number
         @token.column_number = @column_number = @stacked_column_number
       end
@@ -2858,6 +2872,7 @@ module Iyi
       unless @stacked
         @stacked = true
         @stacked_filename, @stacked_line_number, @stacked_column_number = @filename, @line_number, @column_number
+        @stacked_artifact = @artifact
       end
     end
 
@@ -2936,6 +2951,7 @@ module Iyi
       @token.line_number = @line_number
       @token.column_number = @column_number
       @token.filename = @filename
+      @token.artifact = @artifact
       @token.location = nil
       @token.passed_backslash_newline = false
       @token.doc_buffer = nil unless @token.type.space? || @token.type.newline?

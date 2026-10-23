@@ -919,7 +919,12 @@ fi
 # was located in the artifact, and the build that read it ended on
 # `cannot read mods/lib/../views/greet.eiy`. Both of the issue's sequences:
 # a build writing artifacts and then one reading them too, and two builds
-# each writing and reading from an empty directory.
+# each writing and reading from an empty directory. The body has a `defer`
+# too: a travelling body comes back as text, its `defer` as the `ensure` it
+# was lowered to, and once the body was located in its `.iyi` the refusal
+# of `ensure` in iyi source took it for one a person wrote, which refused
+# 19 std exercises' artifacts until a node read from an artifact said so
+# by a mark of its own (`Location#artifact`) rather than by its filename.
 EIY="$WORK/eiyart"
 mkdir -p "$EIY/lib" "$EIY/views"
 printf 'module eiyart\n' > "$EIY/iyi.mod"
@@ -930,6 +935,8 @@ import std/eiy::{Eiy}
 
 # A `forall` def: the caller instantiates it, so its body travels in the artifact.
 pub def greet(name : T) : String forall T
+  said = [] of String
+  defer said << "done"
   Eiy.render("../views/greet.eiy")
 end
 IYI

@@ -1072,7 +1072,11 @@ module Iyi
       location = node.location.try &.expanded_location
       if location && (type = node.type?)
         proc_name = true
-        filename = location.filename.as(String)
+        # The file this build read it from, which for a body read from an
+        # artifact is the artifact (`Location#read_from`): the artifact's own
+        # object code names its procs after the source, and a body compiled
+        # here is not that code.
+        filename = location.read_from.as(String)
         fun_literal_name = Iyi.safe_mangling(@program, "~proc#{type}@#{Iyi.relative_filename(filename)}:#{location.line_number}")
       else
         proc_name = false

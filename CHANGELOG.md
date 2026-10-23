@@ -19,13 +19,19 @@
   was written, and the consumer's parse puts it there: `@caller`, errors,
   `run` macros and debug line info answer as the source build does, and
   with the source gone an error names the source's line and shows it as
-  the artifact carried it. `.iyimod` is v59, and a v58 artifact is
-  refused and built again. The positions stay out of the implementation
-  hash, so a line added above a body rebuilds no dependent.
-  `bench/samples_roundtrip.sh` builds the issue's layout both ways it was
-  reported and checks the error's location, and
+  the artifact carried it. What the build decides is still asked of the
+  artifact the node was read from, which every location parsed from one
+  carries beside its filename (`Location#artifact`): import edges and
+  the import wall, file-private names, proc symbol names, and the
+  refusals the module's own build already made, so a `defer` in a
+  travelling body, which travels as the `ensure` it lowers to, is not
+  refused as an `ensure` written in the source. `.iyimod` is v59, and a
+  v58 artifact is refused and built again. The positions stay out of the
+  implementation hash, so a line added above a body rebuilds no
+  dependent. `bench/samples_roundtrip.sh` builds the issue's layout both
+  ways it was reported and checks the error's location, and
   `spec/compiler/iyimod_spec.cr` checks `@caller` in a body and in the
-  initialiser; all of them failed before this.
+  initialiser, all of which failed before this, and a `defer` in a body.
 
 ## 0.19.1 — 2026-10-23
 

@@ -325,7 +325,10 @@ module Iyi::IyiMod
     getter travelled_lines = {} of String => Hash(Int32, String)
     @missing = {} of String => Bool
 
-    def initialize(@artifact : Artifact, @pragmas : Hash(Int32, Array(Lexer::LocPragma))? = nil)
+    # *path* is the artifact's own, which a placed node keeps as its
+    # `Location#artifact`.
+    def initialize(@artifact : Artifact, @pragmas : Hash(Int32, Array(Lexer::LocPragma))? = nil,
+                   @path : String? = nil)
     end
 
     def []?(key : String) : String?
@@ -379,7 +382,7 @@ module Iyi::IyiMod
                       line : String, within : Int32) : Nil
       list = pragmas[at] ||= [] of Lexer::LocPragma
       list << Lexer::LocPushPragma.new if index == 0
-      list << Lexer::LocSetPragma.new(position.filename, position.line, position.column)
+      list << Lexer::LocSetPragma.new(position.filename, position.line, position.column, @path)
 
       missing = @missing.fetch(position.filename) { @missing[position.filename] = !File.file?(position.filename) }
       return unless missing
@@ -2170,11 +2173,13 @@ module Iyi::IyiMod
 
   # The declarations for a parser: with *pragmas* filled with the places the
   # nodes of the travelling bodies and the initialiser were written, for
-  # `Parser#macro_expansion_pragmas=`. Answers the lines of the sources that
-  # are not on this machine, as they were rendered (`Bodies#travelled_lines`).
+  # `Parser#macro_expansion_pragmas=`, each still marked as read from *path*
+  # (`Location#artifact`). Answers the lines of the sources that are not on
+  # this machine, as they were rendered (`Bodies#travelled_lines`).
   def self.declarations(artifact : Artifact, io : IO::Memory,
-                        pragmas : Hash(Int32, Array(Lexer::LocPragma))) : Hash(String, Hash(Int32, String))
-    bodies = Bodies.new(artifact, pragmas)
+                        pragmas : Hash(Int32, Array(Lexer::LocPragma)),
+                        path : String) : Hash(String, Hash(Int32, String))
+    bodies = Bodies.new(artifact, pragmas, path)
     write_declarations artifact, io, bodies
     bodies.travelled_lines
   end

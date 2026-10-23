@@ -371,7 +371,7 @@ class Iyi::Call
     # Also consider private top-level defs
     if owner.is_a?(Program)
       location = self.location
-      if location && (filename = location.original_filename)
+      if location && (filename = location.original_read_from)
         private_defs = owner.file_module?(filename).try &.lookup_defs(def_name)
         defs.concat(private_defs) if private_defs
       end
@@ -1036,7 +1036,7 @@ class Iyi::Call
     return false unless type.is_a?(NamedType)
     location = type.locations.try(&.first?)
     return true unless location
-    filename = location.filename
+    filename = location.read_from
     return false unless filename.is_a?(String)
     # The posix reading, for the platform whose paths are spelled with `\`:
     # `iyi doc` asked the same question the same way and on Windows
@@ -1316,7 +1316,7 @@ class Iyi::Call
     # Declared in a file of the program's: the compiler's own types and the
     # macro-made integers have no such file, the library's are under it.
     declared = ->(other : Type) do
-      file = other.locations.try(&.first?).try(&.filename)
+      file = other.locations.try(&.first?).try(&.read_from)
       file.is_a?(String) && !Iyi.library_source?(file)
     end
     others = [] of Type
@@ -1330,7 +1330,7 @@ class Iyi::Call
       shadowed = type
     end
     return nil unless shadow.is_a?(InstanceVarContainer) && shadowed && shadow.all_instance_vars.empty?
-    return nil unless (location = shadow.locations.try(&.first?)) && (file = location.filename).is_a?(String)
+    return nil unless (location = shadow.locations.try(&.first?)) && (file = location.read_from).is_a?(String)
     top = shadowed.namespace.is_a?(Program)
     shown = top ? "::#{type.name}" : shadowed.to_s
     add = if top

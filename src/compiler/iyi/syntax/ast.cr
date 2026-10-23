@@ -1046,7 +1046,7 @@ module Iyi
       loc = @name_location
       return unless loc
 
-      Location.new(loc.filename, loc.line_number, loc.column_number + name_size - 1)
+      Location.new(loc.filename, loc.line_number, loc.column_number + name_size - 1, loc.artifact)
     end
 
     # Returns `true` if this call has any arguments.

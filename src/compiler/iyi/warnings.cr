@@ -86,7 +86,7 @@ module Iyi
     def ignore_warning_due_to_location?(location : Location?)
       return false unless location
 
-      filename = location.original_filename
+      filename = location.original_read_from
       return false unless filename
 
       if lib_path = @lib_path

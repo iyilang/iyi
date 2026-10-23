@@ -2633,7 +2633,7 @@ module Iyi
         end
         written = "#{@token.value}#{string_range(current_pos, stop)}"
         if written.includes?('\\')
-          written_end = Location.new(@filename, location.line_number, @token.column_number + written.size - 1)
+          written_end = Location.new(@filename, location.line_number, @token.column_number + written.size - 1, @artifact)
           refuse_import_path "path segments are separated by `/`", location, written_end, written.gsub('\\', '/')
         end
       end

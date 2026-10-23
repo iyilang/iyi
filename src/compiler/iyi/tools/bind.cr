@@ -3063,7 +3063,7 @@ module Iyi
 
     types.each do |name, type|
       next unless type.is_a?(NamedType)
-      written_here = type.locations.try(&.any? { |location| location.filename.to_s.starts_with?(root) })
+      written_here = type.locations.try(&.any? { |location| location.read_from.to_s.starts_with?(root) })
       next unless written_here || type.types?
 
       # A `private` type of the library is not a name a consumer can write.
@@ -3175,7 +3175,7 @@ module Iyi
       locations = type.locations
       next unless locations && !locations.empty?
       next unless locations.all? do |location|
-                    filename = location.filename
+                    filename = location.read_from
                     filename.is_a?(String) && filename.starts_with?(directory)
                   end
       # A namespace with nothing in it is nothing to bind: `PQ` holds types
@@ -3193,7 +3193,7 @@ module Iyi
     return false unless locations && !locations.empty?
 
     locations.all? do |location|
-      filename = location.filename
+      filename = location.read_from
       filename.is_a?(String) && filename.starts_with?(root)
     end
   end
@@ -4571,7 +4571,7 @@ module Iyi
   # `Location#expanded_location` is the walk, and it already exists for this.
   private def self.written_in(location : Location?) : String?
     return nil unless location
-    location.expanded_location.try(&.filename).as?(String)
+    location.expanded_location.try(&.read_from).as?(String)
   end
 
   # What the shard added to types it does not own.
@@ -4643,7 +4643,7 @@ module Iyi
     return nil unless type.is_a?(AliasType)
     return nil unless type.namespace.is_a?(Program)
 
-    written = type.locations.try(&.compact_map { |at| at.filename.as?(String) })
+    written = type.locations.try(&.compact_map { |at| at.read_from.as?(String) })
     return nil unless written.try(&.any?(&.starts_with?(directory)))
 
     # And this root's own only. A shard's files are read once per root it
@@ -4687,7 +4687,7 @@ module Iyi
     return nil unless type.responds_to?(:locations)
     locations = type.locations
     return nil unless locations
-    files = locations.compact_map { |location| location.filename.as?(String) }
+    files = locations.compact_map { |location| location.read_from.as?(String) }
     return nil unless files.any? &.starts_with?(directory)
     owned = !files.any?(&.starts_with?(library))
 
@@ -4963,7 +4963,7 @@ module Iyi
     return nil unless type.responds_to?(:locations)
     locations = type.locations
     return nil unless locations
-    files = locations.compact_map { |location| location.filename.as?(String) }
+    files = locations.compact_map { |location| location.read_from.as?(String) }
     return nil unless files.any? &.starts_with?(library)
     return nil unless files.any? &.starts_with?(directory)
 

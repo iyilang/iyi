@@ -1117,7 +1117,7 @@ module Iyi
         # library's artifact: the same program built from it was refused with
         # `superclass mismatch for class Main::User`, and a consumer with a
         # `struct User` of its own with `User is not a struct, it's a class`.
-        named_here = type.locations.try &.any? { |location| location.original_filename == filename }
+        named_here = type.locations.try &.any? { |location| location.original_read_from == filename }
         {type, type.metaclass}.each do |side|
           side.as?(ModuleType).try &.defs.try &.each_value do |items|
             items.each do |item|
@@ -1125,7 +1125,7 @@ module Iyi
               # `original_filename`, through the macro: the integer tower is
               # written once as `{% for %}` over eleven types, and a def a
               # macro wrote is located in its expansion, not in the file.
-              next unless a_def.location.try(&.original_filename) == filename
+              next unless a_def.location.try(&.original_read_from) == filename
               next if a_def.iyi_from_impl? || a_def.new? || a_def.abstract?
               next if a_def.macro_def? && !named_here
               # The compiler's instructions are not this module's to describe;
@@ -1211,7 +1211,7 @@ module Iyi
     private def iyi_declared_here?(type : Type, filename : String) : Bool
       locations = type.locations
       return false if locations.nil? || locations.empty?
-      locations.all? { |location| location.original_filename == filename }
+      locations.all? { |location| location.original_read_from == filename }
     end
 
     # iyi: the imports' names written inside *type*'s own body, as the
@@ -2110,7 +2110,7 @@ module Iyi
           next if a_def.external_var?
           # Through the macro, like every other location question here: a
           # platform's `lib` is written inside `{% if flag?(:darwin) %}`.
-          next unless a_def.location.try(&.original_filename) == filename
+          next unless a_def.location.try(&.original_read_from) == filename
           funs << iyi_render_fun(a_def)
         end
       end
@@ -2734,11 +2734,11 @@ module Iyi
       metaclass = type.try &.metaclass.as?(ModuleType)
       metaclass.try &.macros.try &.each_value do |overloads|
         overloads.each do |a_macro|
-          macros << a_macro if filename.nil? || a_macro.location.try(&.original_filename) == filename
+          macros << a_macro if filename.nil? || a_macro.location.try(&.original_read_from) == filename
         end
       end
       metaclass.try &.hooks.try &.each do |hook|
-        macros << hook.macro if filename.nil? || hook.macro.location.try(&.original_filename) == filename
+        macros << hook.macro if filename.nil? || hook.macro.location.try(&.original_read_from) == filename
       end
       macros.sort_by!(&.to_s).map { |a_macro| IyiMod.macro_source(a_macro) }
     end
@@ -2813,7 +2813,7 @@ module Iyi
                                       filename : String) : Array({String, String, String})
       return [] of {String, String, String} unless type.is_a?(InstanceVarContainer)
       written = type.instance_vars.each_with_object(Set(String).new) do |(name, variable), names|
-        names << name if variable.location.try(&.original_filename) == filename
+        names << name if variable.location.try(&.original_read_from) == filename
       end
       collect_iyi_fields(type).select { |field| written.includes?(field[0]) }
     end
@@ -2908,7 +2908,7 @@ module Iyi
         # assignment and has no `location` of its own, and it is exactly the
         # shape a consumer cannot infer.
         location = variable.location || variable.initializer.try(&.node.location)
-        next unless location.try(&.original_filename) == filename
+        next unless location.try(&.original_read_from) == filename
         # A subclass's copy of an ancestor's variable carries the ancestor's
         # location. It is declared where the subclass is: a base class's
         # artifact reopening `class ::Lib::Sub::Sub` for it declared `Sub`

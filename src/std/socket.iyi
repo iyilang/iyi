@@ -81,7 +81,7 @@
 
 module std/socket
 
-import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf}
+import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf, SvcbAnswer, SvcbRecord}
 import std/random::{Random}
 import std/slice::{Bytes, Slice}
 
@@ -3172,7 +3172,7 @@ pub class Resolver
 
   private def addresses(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Array(IPAddress) | DnsError | Cancelled
     got = records(name, type, first)
-    return got unless got.is_a?(Tuple(Array(Bytes), String))
+    return got unless got.is_a?(Tuple(Array(Bytes), String, String))
     addresses = [] of IPAddress
     got[0].each do |data|
       if data.size == 4
@@ -3193,8 +3193,8 @@ pub class Resolver
     why = DnsName.why(name)
     return DnsError.new(DnsError::INVALID_NAME, name, "", why) if why.is_a?(String)
     got = records(DnsName.relative(name), DnsRecord::TXT, nil)
-    return got unless got.is_a?(Tuple(Array(Bytes), String))
-    found, label = got
+    return got unless got.is_a?(Tuple(Array(Bytes), String, String))
+    found, _, label = got
     texts = [] of String
     found.each do |data|
       strings = DnsRecord.character_strings(data)
@@ -3204,12 +3204,96 @@ pub class Resolver
     texts
   end
 
+  # The HTTPS records (RFC 9460 section 9) of the origin `https://host:port`,
+  # by SVCB resolution (section 3): the question is *host* for port 443
+  # and `_port._https.host` for any other (section 9.1); an AliasMode
+  # answer is followed to its target's HTTPS records, at most
+  # `SvcbAnswer::MAX_ALIASES` of them, and CNAMEs on the way as `txt`
+  # follows them; and the ServiceMode records found are answered by
+  # priority, those of one priority in a random order (section 2.4.1).
+  # The name is asked as written, as for `txt`, over the upstreams when
+  # the resolver has them.
+  #
+  # Of an AliasMode set one record is followed, at random where there are
+  # several (section 2.4.2), and any ServiceMode record beside it is
+  # passed over (section 2.4.1). A target that has no HTTPS records ends
+  # resolution there, with none: the answer's `name` is the target, which
+  # section 3 still has a client connect to. An answer with a record
+  # `SvcbRecord.parse` refuses is the whole set refused, `malformed?`, as
+  # section 2.2 has it; so is a chain longer than the bound. NXDOMAIN and
+  # NODATA for the origin's own name are `not_found?` and `no_address?`,
+  # as they are for an address.
+  def https_records(host : String, port : Int32 = 443) : SvcbAnswer | DnsError | Cancelled
+    raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+    why = DnsName.why(host)
+    return DnsError.new(DnsError::INVALID_NAME, host, "", why) if why.is_a?(String)
+    relative = DnsName.relative(host)
+    asked = port == 443 ? relative : "_#{port}._https.#{relative}"
+    return DnsError.new(DnsError::INVALID_NAME, host, "", "#{asked} is longer than #{DnsName::MAX_LENGTH} characters") if asked.bytesize > DnsName::MAX_LENGTH
+    name = asked
+    aliases = 0
+    while true
+      got = records(name, DnsRecord::HTTPS, nil)
+      return got if got.is_a?(Cancelled)
+      if got.is_a?(DnsError)
+        # An alias whose target holds no HTTPS records: resolution ends
+        # there, and the target is the endpoint left.
+        return SvcbAnswer.new(name, aliases, [] of SvcbRecord) if aliases > 0 && (got.not_found? || got.no_address?)
+        return got.about(host, got.server)
+      end
+      found, owner, label = got
+      parsed = [] of SvcbRecord
+      found.each do |data|
+        record = SvcbRecord.parse(data, owner)
+        return record.about(host, label) if record.is_a?(DnsError)
+        parsed << record
+      end
+      aliased = parsed.select(&.alias?)
+      if aliased.empty?
+        return SvcbAnswer.new(name, aliases, Resolver.by_priority(parsed))
+      end
+      aliases = aliases + 1
+      if aliases > SvcbAnswer::MAX_ALIASES
+        return DnsMessage.malformed("a chain of more than #{SvcbAnswer::MAX_ALIASES} AliasMode records, or a loop of them").about(host, label)
+      end
+      chosen = aliased[aliased.size == 1 ? 0 : Random::Secure.rand(aliased.size)]
+      return SvcbAnswer.new(".", aliases, [] of SvcbRecord) if chosen.target == "."
+      name = chosen.target
+    end
+  end
+
+  # *records* by ascending priority, those of one priority shuffled.
+  def self.by_priority(records : Array(SvcbRecord)) : Array(SvcbRecord)
+    shuffled = records.dup
+    index = shuffled.size - 1
+    while index > 0
+      other = Random::Secure.rand(index + 1)
+      held = shuffled[index]
+      shuffled[index] = shuffled[other]
+      shuffled[other] = held
+      index = index - 1
+    end
+    # Stable, so the shuffle stands within each priority.
+    ordered = [] of SvcbRecord
+    shuffled.each do |record|
+      ordered << record
+      at = ordered.size - 1
+      while at > 0 && ordered[at - 1].priority > record.priority
+        ordered[at] = ordered[at - 1]
+        at = at - 1
+      end
+      ordered[at] = record
+    end
+    ordered
+  end
+
   # *name*'s records of *type*, following CNAMEs - within an answer, and
   # by asking again when a chain leaves one - at most
-  # `DnsMessage::MAX_CNAMES` links in all; with the label of the server
-  # that answered. *first* is the answer to the first question when it
-  # has been asked already.
-  private def records(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Tuple(Array(Bytes), String) | DnsError | Cancelled
+  # `DnsMessage::MAX_CNAMES` links in all; with the name they were found
+  # at, where the chain ended, and the label of the server that answered.
+  # *first* is the answer to the first question when it has been asked
+  # already.
+  private def records(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Tuple(Array(Bytes), String, String) | DnsError | Cancelled
     target = name
     budget = DnsMessage::MAX_CNAMES
     answered = first
@@ -3221,11 +3305,21 @@ pub class Resolver
       read = message.addresses(target, type, budget)
       return read.about(name, label) if read.is_a?(DnsError)
       found, ends, links = read
-      return {found, label} unless found.empty?
-      return DnsError.new(DnsError::NO_ADDRESS, name, label, type == DnsRecord::TXT ? "no TXT record" : "") if links == 0
+      return {found, ends, label} unless found.empty?
+      return DnsError.new(DnsError::NO_ADDRESS, name, label, Resolver.missing(type)) if links == 0
       budget = budget - links
       return DnsMessage.malformed("a chain of more than #{DnsMessage::MAX_CNAMES} CNAMEs").about(name, label) if budget <= 0
       target = ends
+    end
+  end
+
+  # What NODATA for *type* says the name lacks: its records, by name, for
+  # the types asked other than as addresses.
+  def self.missing(type : Int32) : String
+    case type
+    when DnsRecord::TXT   then "no TXT record"
+    when DnsRecord::HTTPS then "no HTTPS record"
+    else                       ""
     end
   end
 

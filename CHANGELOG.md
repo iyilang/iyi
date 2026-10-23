@@ -1,6 +1,41 @@
 # Changelog
 
-## Unreleased
+## 0.19.1 — 2026-10-23
+
+**A collector hang and a handful of TLS and PKI edges fixed, and TLS
+Encrypted Client Hello added.** A program whose collections mark with
+helper threads back to back could hang for good: a helper that took its
+permit a round early was erased by the round's reset, on every platform,
+14 runs in 24,000 of `bench/sweep_exercise.iyi` before the fix and none
+after. Two automated reviews of 0.19.0's new TLS and PKI code found
+nothing worse than low to medium severity, all of it fixed: a client's
+`TlsSession` offers a ticket only to the port and configuration that
+checked it, and not past its certificate's expiry or seven days from the
+handshake that authenticated it; a server declines early data a lowered
+limit no longer allows rather than cutting the client off, and refuses a
+server_name past 253 bytes (in 0.19.0 one past 255 ended that
+connection's task with `arithmetic overflow` when its ticket was
+written, the server serving on); std/acme requires
+HTTPS; std/autocert checks an issued chain against its roots and holds a
+handshake no longer than its deadline; DNS over TLS and over HTTPS pad
+their queries to 128 bytes. std/hpke is Hybrid Public Key Encryption
+(RFC 9180), and std/tls speaks Encrypted Client Hello (RFC 9849) at both
+ends over it, held to Go's crypto/tls each way; std/dns reads SVCB and
+HTTPS records (RFC 9460), and an `HTTPClient` asked to takes a site's
+ECH configuration and protocols from them.
+
+**Some answers change:** a std/tls client sends a GREASE
+encrypted_client_hello extension in every ClientHello without an ECH
+configuration (`TlsConfig#ech_grease = false` turns it off);
+`AutocertManager` refuses chains its `roots`, the system's unless set,
+do not lead to, so a manager pointed at a private CA must set them;
+`TlsServerConfig#identity_source` is given a third argument, the
+milliseconds left of the handshake; and tickets a 0.19.0 server issued
+are not read by this one, so those clients make one full handshake.
+
+**Not here, and said so:** std/tls has not been audited and is not to be
+called secure until it is; ECH's split mode is not here; the Go legs of
+the ECH gate run on Linux CI alone, where Go is 1.25 or later.
 
 ### Added
 

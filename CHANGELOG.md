@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`Semantic (main)` no longer pays for a process per template render,
+  and a spawn no longer costs more the more the compiler holds (#143).**
+  Every `Eiy.render` was a process inside `Semantic (main)`: the macro
+  names its buffer afresh, so no two renders passed the helper the same
+  arguments. The compiler now runs `std/eiy`'s helper under a placeholder
+  buffer name, keeps its output for the rest of the compile against the
+  text of the template it read, and gives each render that output with its
+  own buffer's name put back; any `run` whose program names the files it
+  read is reused the same way when its arguments and files match. On a
+  generated 24-template app (five no-change builds each, `--no-codegen`)
+  that took the helper from 144 runs to 24, and `Semantic (main)` from a
+  1.89 s median to 1.66 s; on a 40-template one, 240 renders are 40 runs.
+  On Linux and darwin a spawn is `posix_spawn` wherever every redirect,
+  `chdir:` and environment asked for maps onto it, `fork` + `exec` where
+  not: `fork` copies the parent's page tables, and a compiler built
+  without a collector never shrinks, so 100 runs of `/bin/true` from a
+  process holding 0, 256 and 1,024 MB took 0.73, 5.82 and 22.39 ms each
+  with `fork` and 0.52, 0.49 and 0.47 ms with `posix_spawn`. And the
+  helper was relinked on every build whose search path had a `..` in it,
+  as the compiler's own `$ORIGIN/../src` does: the up-to-date check
+  compared the paths it recorded against expanded ones. With all three,
+  the 24-template app's `Semantic (main)` went from 3.97 s to 1.66 s.
+  bench/std_eiy_exercise.sh holds the run counts, the output of two
+  renders of a template and of one with a partial, a template edited
+  between builds, a template with the placeholder in its text, the helper
+  reused by the second build, and a broken copy of the substitution.
+
+  **What of #143 this explains, and what not.** The report is of
+  `Semantic (main)` taking 2–5× its usual time on some builds of
+  identical input, on Windows. It did not reproduce on Linux: five
+  no-change builds of the 24-template app varied by at most 1.07× of
+  their median before and after. What is explained is where much of that
+  phase went, process starts and a relink, and those are now one run per
+  template and caller and no relink, on Windows too, where `CreateProcess`
+  is still what each run costs. Why some Windows builds take several
+  times longer is not explained. `-s` now prints, beside each phase,
+  the processor seconds and page faults it spent, and under "Macro runs"
+  how many runs there were and how long they took, so the next slow
+  build there can say whether the time was spent computing (processor
+  seconds near the wall time), waiting on a child or the machine (well
+  below it), or taking memory (page faults up).
+
+- **`-s` prints the compiler's resident set, not `0.00MB` (#144).** The
+  column read the collector's heap, which a compiler built `-Dgc_none` does
+  not have. It is now the process's resident set when the phase ended,
+  labelled `rss` (`/proc/self/statm` on Linux, `task_info` on darwin,
+  `K32GetProcessMemoryInfo`'s working set on Windows), and left out where a
+  platform cannot say. bench/verbs_exercise.sh checks every phase names a
+  figure and that the largest is a plausible one.
+
 ## 0.19.1 — 2026-10-23
 
 **A collector hang and a handful of TLS and PKI edges fixed, and TLS

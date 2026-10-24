@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 22,608 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 128,441 lines, none of it written in iyi |
+| compiler | 128,771 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,7 +1028,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 128,441 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 128,771 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 124,536 in std |
 | Specs | 21,146 lines | 15,176 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -1957,6 +1957,19 @@ It is memoised per *script*, not per call site: writing `run("x.cr")` twice
 costs once. But a second script costs in full, so the price is linear in the
 number of distinct generators a program and its dependencies contain, and a
 library that uses one imposes it on every consumer's cold build, forever.
+
+The compile is memoised; each *call* is still a process, inside `Semantic
+(main)`. Since #143 a call whose program says which files it read
+(`IYI_RUN_INPUTS`) and whose arguments and files match an earlier call in the
+same compile gets that call's output instead, and `std/eiy`'s helper is run
+under a placeholder buffer name, so two renders of one template from one file
+are one run. On a generated 24-template app that took 144 helper runs to 24,
+and `Semantic (main)` from a 1.89 s median to 1.66 s, five no-change builds
+each; `posix_spawn` in place of `fork` (100 runs of `/bin/true` from a process
+holding 0, 256 and 1,024 MB: 0.73, 5.82 and 22.39 ms a spawn with `fork`, 0.52,
+0.49 and 0.47 ms with `posix_spawn`) and a helper no longer relinked on every
+build had already taken it from 3.97 s. `-s` prints, under "Macro runs", how
+many ran and how many were reused.
 
 **What this settles.** R-5's derive scoping does not need a compile-time
 justification, and should stop being offered one: it earns its place through

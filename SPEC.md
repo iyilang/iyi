@@ -1958,6 +1958,19 @@ costs once. But a second script costs in full, so the price is linear in the
 number of distinct generators a program and its dependencies contain, and a
 library that uses one imposes it on every consumer's cold build, forever.
 
+The compile is memoised; each *call* is still a process, inside `Semantic
+(main)`. Since #143 a call whose program says which files it read
+(`IYI_RUN_INPUTS`) and whose arguments and files match an earlier call in the
+same compile gets that call's output instead, and `std/eiy`'s helper is run
+under a placeholder buffer name, so two renders of one template from one file
+are one run. On a generated 24-template app that took 144 helper runs to 24,
+and `Semantic (main)` from a 1.89 s median to 1.66 s, five no-change builds
+each; `posix_spawn` in place of `fork` (100 runs of `/bin/true` from a process
+holding 0, 256 and 1,024 MB: 0.73, 5.82 and 22.39 ms a spawn with `fork`, 0.52,
+0.49 and 0.47 ms with `posix_spawn`) and a helper no longer relinked on every
+build had already taken it from 3.97 s. `-s` prints, under "Macro runs", how
+many ran and how many were reused.
+
 **What this settles.** R-5's derive scoping does not need a compile-time
 justification, and should stop being offered one: it earns its place through
 separate compilation (a macro that can see the whole program cannot be compiled

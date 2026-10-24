@@ -11,6 +11,14 @@
 #     expected text byte for byte, plain and with --release.
 #   * Two builds of it at once, the template helper the macros run made
 #     stale before each of four rounds, all build.
+#   * One helper run per template per compile: two renders of a template
+#     from one file, and of a template that renders a partial, run the
+#     helper once each and print each to its own buffer; a template edited
+#     between two builds prints its new text; one with the placeholder name
+#     in its text is run under the real name; the second build reuses the
+#     helper rather than relinking it; and a copy of the compiler's
+#     substitution (`src/compiler/iyi/macros/eiy_io.cr`) that leaves the
+#     placeholder in place is caught.
 #   * `Eiy::Lexer` token types, values, flags and positions; the generated
 #     source of `process_string`, exactly; `process_file`, `locate`, and the
 #     nil-answering pair.
@@ -179,6 +187,103 @@ else
   status=1
 fi
 
+echo
+echo "== one helper run per template per compile"
+# `Eiy.render` names its buffer afresh (`%buf`), so every render passed the
+# helper different arguments and was a process of its own: 240 of them on
+# the generated app #143 was measured on, for 40 templates. The compiler
+# runs the helper under a placeholder name and gives each render the output
+# with its own buffer's name put back (#143), so this program costs three
+# runs and three reuses: `card.eiy` twice, `outer.eiy` twice, and the
+# `part.eiy` inside it once per `outer.eiy`, all from one caller each.
+#
+# The second build has to reuse the helper the first one linked. A search
+# path with `..` in it made every build relink it inside `Semantic (main)`
+# (`can_reuse_previous_compilation?`): measured with the compiler before
+# #143 and this path, a fresh cache linked it in 1.53 s and the next build
+# linked it again in 0.24 s. So the path is spelled through `bin/..`, and
+# the cache is this gate's own, where nothing else has linked the helper
+# first.
+R="$WORK/reuse"
+mkdir -p "$R"
+printf 'module main\n\nimport std/eiy::{Eiy}\n\nn = 1\na = Eiy.render("card.eiy")\nn = 2\nb = Eiy.render("card.eiy")\nn = 3\nc = Eiy.render("outer.eiy")\nn = 4\nd = Eiy.render("outer.eiy")\nputs a\nputs b\nputs c\nputs d\n' > "$R/main.iyi"
+printf 'card <%%= n %%>' > "$R/card.eiy"
+printf '[<%%= n %%> <%%= Eiy.render("part.eiy") %%> <%%= n %%>]' > "$R/outer.eiy"
+printf 'part <%%= n * 10 %%>' > "$R/part.eiy"
+reuse_path="$REPO/bin/../src${PSEP}$REPO/samples/iyi"
+reuse_build() { # reuse_build <name> <source> <expected output> <expected run line> <label>
+  local name="$1" source="$2" expected="$3" runs="$4" label="$5"
+  if ! IYI_PATH="$reuse_path" IYI_CACHE_DIR="$R/cache" "$IYI" build -s -o "$R/$name" "$R/$source" >"$R/$name.log" 2>&1; then
+    echo "  $label: build failed"
+    tail -12 "$R/$name.log" | sed 's/^/    /'
+    status=1
+    return 1
+  fi
+  local actual
+  actual="$("$R/$name" | tr -d '\r')"
+  if [ "$actual" != "$expected" ]; then
+    echo "  $label: printed"
+    printf '%s\n' "$actual" | sed 's/^/    /'
+    echo "  instead of"
+    printf '%s\n' "$expected" | sed 's/^/    /'
+    status=1
+    return 1
+  fi
+  if ! tr -d '\r' < "$R/$name.log" | grep -qE -- "process\.iyi: .*$runs"; then
+    echo "  $label: the macro runs were not '$runs':"
+    grep -A2 "^Macro runs" "$R/$name.log" | sed 's/^/    /'
+    status=1
+    return 1
+  fi
+  echo "  $label: right text, $(tr -d '\r' < "$R/$name.log" | grep -oE -- "process\.iyi: .*" | sed 's/process\.iyi: //')"
+}
+reuse_build first main.iyi "$(printf 'card 1\ncard 2\n[3 part 30 3]\n[4 part 40 4]')" \
+  "3 runs in [0-9:.]+, 3 reused$" "two renders each of a template and of one with a partial"
+printf 'CARD <%%= n %%>!' > "$R/card.eiy"
+reuse_build second main.iyi "$(printf 'CARD 1!\nCARD 2!\n[3 part 30 3]\n[4 part 40 4]')" \
+  "reused previous compilation .*, 3 runs in [0-9:.]+, 3 reused$" "the template edited, built again"
+# The placeholder written in a template could not be told from the buffer
+# in the helper's output, so the first render pays for the refused run and
+# its real one, and the second only for its real one.
+printf 'module main\n\nimport std/eiy::{Eiy}\n\nn = 1\nputs Eiy.render("literal.eiy")\nn = 2\nputs Eiy.render("literal.eiy")\n' > "$R/literal.iyi"
+printf '__iyi_eiy_io_7f3a__ <%%= n %%>' > "$R/literal.eiy"
+reuse_build literal literal.iyi "$(printf '__iyi_eiy_io_7f3a__ 1\n__iyi_eiy_io_7f3a__ 2')" \
+  "3 runs in [0-9:.]+$" "a template with the placeholder in its text"
+
+# The substitution on its own, built from the compiler's source, and a copy
+# that hands the output back with the placeholder still in it.
+eiy_io_check() { # eiy_io_check <dir>; the driver's output is in <dir>/out
+  local dir="$1"
+  cat > "$dir/drive.cr" <<'CRYSTAL'
+require "./eiy_io"
+
+failed = false
+check = ->(label : String, ok : Bool) do
+  puts "#{ok ? "ok" : "FAILED"}: #{label}"
+  failed = true unless ok
+end
+placeholder = Iyi::EiyIO::PLACEHOLDER
+output = "#{placeholder}.print(\"a\")\n#<loc:push>#{placeholder}.print((x\n))#<loc:pop>\n"
+check.call "the buffer's name stands where the placeholder stood",
+  Iyi::EiyIO.substitute(output, "__temp_7") == "__temp_7.print(\"a\")\n#<loc:push>__temp_7.print((x\n))#<loc:pop>\n"
+check.call "a placeholder inside a longer word is refused",
+  Iyi::EiyIO.substitute("x#{placeholder}.print(1)\n#{placeholder}_2", "b").nil?
+check.call "the placeholder is found in a template's text",
+  Iyi::EiyIO.in?("a #{placeholder} b") && !Iyi::EiyIO.in?("a b")
+exit(failed ? 1 : 0)
+CRYSTAL
+  "$IYI" build --crystal -o "$dir/drive" "$dir/drive.cr" >"$dir/out" 2>&1 && "$dir/drive" >"$dir/out" 2>&1
+}
+mkdir -p "$WORK/eiy_io"
+cp "$REPO/src/compiler/iyi/macros/eiy_io.cr" "$WORK/eiy_io/eiy_io.cr"
+if eiy_io_check "$WORK/eiy_io"; then
+  echo "  the compiler's substitution: $(grep -c '^ok' "$WORK/eiy_io/out") checks held"
+else
+  echo "  the compiler's substitution failed:"
+  sed 's/^/    /' "$WORK/eiy_io/out"
+  status=1
+fi
+
 # ---------------------------------------------------------------------------
 # Negative failure proofs
 # ---------------------------------------------------------------------------
@@ -252,6 +357,38 @@ prove_fails "def_to_s's parameter named io" patched_io "undefined method 'print'
   "content.replace('def to_s(__io__) : Nil\n      ::Std::Eiy::Eiy.embed({{filename}}, __io__)', 'def to_s(io) : Nil\n      ::Std::Eiy::Eiy.embed({{filename}}, io)')"
 prove_fails "a Buffer that writes to its target" patched_buffer "undefined method 'write' for Std::Eiy::Eiy::Buffer" \
   "content.replace('io.print(to_s)', 'io.write(to_s)')"
+
+# The compiler's half: a substitution that gives the helper's output back
+# as it came, placeholder and all, which every render would then print to a
+# buffer of that name that no render has.
+echo
+echo "== negative proof: a substitution that leaves the placeholder is caught"
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so this proof is unmeasured"
+else
+  mkdir -p "$WORK/eiy_io_broken"
+  "$PY" -c "
+import sys
+with open('$REPO/src/compiler/iyi/macros/eiy_io.cr') as f:
+    content = f.read()
+broken = content.replace('text.gsub(BOUNDED, io_name)', 'text')
+if broken == content:
+    sys.exit('the patch changed nothing')
+with open('$WORK/eiy_io_broken/eiy_io.cr', 'w') as f:
+    f.write(broken)
+" || { echo "  could not patch the substitution"; status=1; }
+  check="FAILED: the buffer's name stands where the placeholder stood"
+  if eiy_io_check "$WORK/eiy_io_broken"; then
+    echo "  the checks PASSED with the placeholder left in (they should have failed)"
+    status=1
+  elif grep -qF -- "$check" "$WORK/eiy_io_broken/out"; then
+    echo "  the placeholder left in was caught at '$check'"
+  else
+    echo "  the placeholder left in failed, but not at '$check':"
+    sed 's/^/    /' "$WORK/eiy_io_broken/out" | head -15
+    status=1
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # What the template compiler refuses

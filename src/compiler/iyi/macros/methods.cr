@@ -339,7 +339,7 @@ module Iyi
         run_args << @last.to_macro_id
       end
 
-      result = @program.macro_run(filename, run_args)
+      result = @program.cached_macro_run(filename, run_args)
       if result.status.success?
         @last = MacroId.new(result.stdout)
       else

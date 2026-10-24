@@ -328,9 +328,11 @@ def environment(cache):
 
 
 def build(root, entry, output, env, extra=()):
-    """`iyi build -s`: the objects it compiled again, or None when all were
-    reused."""
-    proc = subprocess.run([IYI, "build", "-s", *extra, entry, "-o", output], cwd=root, env=env,
+    """`iyi build -s --force`: the objects it compiled again, or None when all
+    were reused. `--force` because a build with nothing changed is now
+    skipped before codegen (#142), and the objects' reuse is what this gate
+    asks about."""
+    proc = subprocess.run([IYI, "build", "-s", "--force", *extra, entry, "-o", output], cwd=root, env=env,
                           capture_output=True, text=True)
     if proc.returncode != 0:
         sys.exit(f"rebuild_reuse: `iyi build {entry}` failed\n{proc.stdout}{proc.stderr}")

@@ -136,6 +136,34 @@ else
   sed -n '1,8p' build.log
   status=1
 fi
+# `-s` prints, beside each phase's time, what the process holds resident.
+# It printed the collector's heap there, which a compiler built `-Dgc_none`
+# does not have, so every phase read `( 0.00MB)` (#144). Every phase line
+# names its figure `rss`, none is under 1 MB, and the largest is a compiler
+# that has typed the prelude: tens to hundreds of MB, not zero and not a
+# count of bytes read as megabytes. A phase's name is printed, then
+# returned over with `\r` before its time follows, hence the `tr`.
+if "$IYI" build -s -o user-stats user.iyi > stats.log 2>&1 &&
+   tr '\r' '\n' < stats.log | awk '
+     /^[A-Z][^:]*: +[0-9][0-9]:[0-9][0-9]:[0-9.]+ / {
+       phases++
+       if (match($0, /\( *[0-9.]+MB rss/)) {
+         mb = substr($0, RSTART + 1, RLENGTH - 7) + 0
+         if (mb < 1) low++
+         if (mb > most) most = mb
+       } else unnamed++
+     }
+     END {
+       printf "  %d phases, largest %.2f MB rss\n", phases, most > "/dev/stderr"
+       exit !(phases >= 5 && unnamed == 0 && low == 0 && most >= 20 && most < 65536)
+     }' 2> stats.verdict; then
+  echo "  -s names each phase's resident set:$(sed 's/^ *//' stats.verdict | sed 's/^/ /')"
+else
+  echo "  -s does not name each phase's resident set:"
+  cat stats.verdict 2>/dev/null
+  tr '\r' '\n' < stats.log | grep -m4 -E '^[A-Z][^:]*: +[0-9]' | sed 's/^/    /'
+  status=1
+fi
 cp mods/app/lib.iyimod lib.good
 # A setter that writes no return (R-2 lets it: it answers what it was
 # handed) answers through its module's artifact what it answers from

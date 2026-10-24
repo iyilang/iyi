@@ -1,0 +1,9 @@
+module main
+
+pub def calc(a : Int32) : Int32
+  b = a + 1
+  c = b * 2
+  c - a
+end
+
+puts calc(5)

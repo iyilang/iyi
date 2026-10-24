@@ -4,8 +4,9 @@
     python3 bench/edit_loop.py [COMPILER] [--runs N] [--json OUT]
 
 `bench/incremental.py` times the loop on one generated project against Go and
-Crystal. Issue #142 timed a real application of about the same size and found
-it 28x slower than that table, so this times the loop on programs that are
+the language this fork began as. Issue #142 timed a real application of about
+the same size and found it 28x slower than that table, so this times the loop
+on programs that are
 not the generated one, and on the generated one again beside them:
 
   * IV.3a's generated project (`incremental/generate_project.py`);

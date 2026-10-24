@@ -254,7 +254,7 @@ reuse_build literal literal.iyi "$(printf '__iyi_eiy_io_7f3a__ 1\n__iyi_eiy_io_7
 # that hands the output back with the placeholder still in it.
 eiy_io_check() { # eiy_io_check <dir>; the driver's output is in <dir>/out
   local dir="$1"
-  cat > "$dir/drive.cr" <<'CRYSTAL'
+  cat > "$dir/drive.cr" <<'DRIVER'
 require "./eiy_io"
 
 failed = false
@@ -271,7 +271,7 @@ check.call "a placeholder inside a longer word is refused",
 check.call "the placeholder is found in a template's text",
   Iyi::EiyIO.in?("a #{placeholder} b") && !Iyi::EiyIO.in?("a b")
 exit(failed ? 1 : 0)
-CRYSTAL
+DRIVER
   "$IYI" build --crystal -o "$dir/drive" "$dir/drive.cr" >"$dir/out" 2>&1 && "$dir/drive" >"$dir/out" 2>&1
 }
 mkdir -p "$WORK/eiy_io"

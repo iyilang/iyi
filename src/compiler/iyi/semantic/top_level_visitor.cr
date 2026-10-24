@@ -1623,6 +1623,20 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         process_def_primitive_annotation(node, ann)
       end
 
+      # iyi: `@[Share]` on a def says its block crosses threads (SPEC.md
+      # III.4.13): what the block captures is checked at every call, as a
+      # parallel task's block is. Only a def that keeps its block has one
+      # to send anywhere.
+      if annotation_type == @program.share_annotation
+        unless ann.args.empty? && ann.named_args.nil?
+          ann.raise "Share on a def takes no arguments: it says the block the def keeps may run on other threads"
+        end
+        unless node.block_arg.try(&.name.presence)
+          ann.raise "Share on a def says the block it keeps may run on other threads, and `#{node.name}` keeps no block: name one, `&block : A -> R`"
+        end
+        node.iyi_share_block = true
+      end
+
       node.add_annotation(annotation_type, ann)
     end
 

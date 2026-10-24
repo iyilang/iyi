@@ -82,6 +82,8 @@ module std/router
 
 import std/http::{HTTP, Request, Response}
 import std/uri::{URI}
+import std/list::{List}
+import std/shared_proc::{SharedProc}
 
 # Why a pattern is refused: `Pattern.parse`'s answer for text that is not
 # a pattern. `Router#handle` panics with its `message`.
@@ -127,19 +129,22 @@ pub class Pattern
   getter host : String
   @text : String
   # Per segment its kind and its text: a literal decoded, a wildcard's
-  # name, "" for a trailing slash and for `{$}`.
-  @kinds : Array(Int32)
-  @names : Array(String)
+  # name, "" for a trailing slash and for `{$}`. Lists, so a pattern is
+  # `Share` and a `SharedRouter` may hold it.
+  @kinds : List(Int32)
+  @names : List(String)
 
-  protected def kinds : Array(Int32)
+  protected def kinds : List(Int32)
     @kinds
   end
 
-  protected def names : Array(String)
+  protected def names : List(String)
     @names
   end
 
-  def initialize(@text : String, @method : String, @host : String, @kinds : Array(Int32), @names : Array(String))
+  def initialize(@text : String, @method : String, @host : String, kinds : Array(Int32), names : Array(String))
+    @kinds = List(Int32).new(kinds)
+    @names = List(String).new(names)
   end
 
   # The pattern as it was written.
@@ -310,7 +315,7 @@ pub class Pattern
   # taking anything: `/x/` on `/x/`, not on `/x/y`. What decides whether
   # `/x` is redirected to `/x/`.
   def exact?(pieces : Array(String)) : Bool
-    return true unless @kinds.last == MULTI
+    return true unless @kinds[-1] == MULTI
     pieces.size == @kinds.size && pieces.last.empty?
   end
 
@@ -366,8 +371,8 @@ pub class Pattern
   private def compare_paths(other : Pattern) : Int32
     theirs = other.kinds
     their_names = other.names
-    mine_multi = @kinds.last == MULTI
-    theirs_multi = theirs.last == MULTI
+    mine_multi = @kinds[-1] == MULTI
+    theirs_multi = theirs[-1] == MULTI
     # Without a trailing wildcard a path matches only paths of its own
     # number of segments.
     return DISJOINT if @kinds.size != theirs.size && !mine_multi && !theirs_multi
@@ -479,13 +484,7 @@ pub class Router
   # and the wildcards' values by name.
   def handle(pattern : String, &handler : Request, Hash(String, String) -> Response) : Nil
     raise "Router: #{pattern.inspect} is registered after the router answered a request; patterns are registered before it serves" if @answering
-    parsed = Pattern.parse(pattern).or_panic
-    @patterns.each do |known|
-      if sentence = parsed.conflict(known)
-        raise sentence
-      end
-    end
-    @patterns << parsed
+    @patterns << Router.parse_against(pattern, @patterns)
     @handlers << handler
   end
 
@@ -498,28 +497,35 @@ pub class Router
   # or 405.
   def call(req : Request) : Response
     @answering = true
+    routed = Router.route(@patterns, req)
+    return routed if routed.is_a?(Response)
+    @handlers[routed[0]].call(req, routed[1])
+  end
+
+  # Which of *patterns* - a `Router`'s or a `SharedRouter`'s - takes *req*:
+  # its index and the wildcards' values, or the router's own 307, 400, 404
+  # or 405.
+  def self.route(patterns : P, req : Request) : {Int32, Hash(String, String)} | Response forall P
     raw = req.path
     return Router.plain(404, "not found\n") unless raw.starts_with?("/")
     return Router.plain(400, "bad request\n") unless URI.decode?(raw)
     path = Router.clean(raw)
     host = Router.host_of(req.header("Host") || "")
     pieces = Pattern.pieces(path) || [""]
-    found = find(host, req.method, pieces)
+    found = find(patterns, host, req.method, pieces)
     # `/x` where only `/x/`'s subtree would take it - or nothing would -
     # is sent to `/x/` when `/x/` itself is a request a pattern matches
     # exactly.
-    exact = found ? @patterns[found[0]].exact?(pieces) : false
+    exact = found ? patterns[found[0]].exact?(pieces) : false
     unless exact || path.ends_with?("/")
       slashed = Pattern.pieces(path + "/") || [""]
-      if (again = find(host, req.method, slashed)) && @patterns[again[0]].exact?(slashed)
+      if (again = find(patterns, host, req.method, slashed)) && patterns[again[0]].exact?(slashed)
         return Router.redirect(path + "/", req.query)
       end
     end
     return Router.redirect(path, req.query) unless path == raw
-    if found
-      return @handlers[found[0]].call(req, found[1])
-    end
-    allowed = allowed(host, path, pieces)
+    return found if found
+    allowed = allowed(patterns, host, path, pieces)
     unless allowed.empty?
       return Response.new(405, "method not allowed\n", {"Allow" => allowed.join(", "), "Content-Type" => "text/plain; charset=utf-8"})
     end
@@ -529,24 +535,24 @@ pub class Router
   # The pattern that takes the request, and its wildcards: of the host's
   # own patterns if one matches, else of those with no host, the one more
   # specific than every other that matches.
-  private def find(host : String, method : String, pieces : Array(String)) : {Int32, Hash(String, String)}?
+  private def self.find(patterns : P, host : String, method : String, pieces : Array(String)) : {Int32, Hash(String, String)}? forall P
     unless host.empty?
-      if found = best(host, method, pieces)
+      if found = best(patterns, host, method, pieces)
         return found
       end
     end
-    best("", method, pieces)
+    best(patterns, "", method, pieces)
   end
 
-  private def best(host : String, method : String, pieces : Array(String)) : {Int32, Hash(String, String)}?
+  private def self.best(patterns : P, host : String, method : String, pieces : Array(String)) : {Int32, Hash(String, String)}? forall P
     chosen = -1
     values = {} of String => String
     i = 0
-    while i < @patterns.size
-      pattern = @patterns[i]
+    while i < patterns.size
+      pattern = patterns[i]
       # Of two that match, one is more specific: registration refused
       # every pair for which that is not so.
-      if pattern.host == host && pattern.matches_method?(method) && (chosen < 0 || pattern.more_specific?(@patterns[chosen]))
+      if pattern.host == host && pattern.matches_method?(method) && (chosen < 0 || pattern.more_specific?(patterns[chosen]))
         if got = pattern.match_pieces(pieces)
           chosen = i
           values = got
@@ -562,10 +568,10 @@ pub class Router
   # slash added counts too - the request the redirect above would have
   # been, had the method matched - so `POST /x` beside `GET /x/` is 405
   # rather than 404.
-  private def allowed(host : String, path : String, pieces : Array(String)) : Array(String)
+  private def self.allowed(patterns : P, host : String, path : String, pieces : Array(String)) : Array(String) forall P
     slashed = path.ends_with?("/") ? nil : Pattern.pieces(path + "/")
     methods = [] of String
-    @patterns.each do |pattern|
+    patterns.each do |pattern|
       next if pattern.method.empty? || methods.includes?(pattern.method)
       next unless pattern.host.empty? || pattern.host == host
       if pattern.match_pieces(pieces) || (slashed && pattern.match_pieces(slashed))
@@ -574,6 +580,19 @@ pub class Router
     end
     methods << "HEAD" if methods.includes?("GET") && !methods.includes?("HEAD")
     methods.sorted
+  end
+
+  # *pattern* parsed, panicking on text that is not a pattern and on one
+  # that conflicts with one of *known*: what `handle` registers, here and
+  # in `SharedRouter`.
+  def self.parse_against(pattern : String, known : P) : Pattern forall P
+    parsed = Pattern.parse(pattern).or_panic
+    known.each do |other|
+      if sentence = parsed.conflict(other)
+        raise sentence
+      end
+    end
+    parsed
   end
 
   # *path* - rooted - with `.` and empty segments dropped and `..` taking
@@ -616,5 +635,57 @@ pub class Router
 
   def self.plain(status : Int32, text : String) : Response
     Response.new(status, text, {"Content-Type" => "text/plain; charset=utf-8"})
+  end
+end
+
+# `Router`'s table for `Server.serve_parallel`, where every worker routes
+# at once (SPEC.md III.4.13):
+#
+#     routes = SharedRouter.new
+#       .handle("GET /users/{id}") { |req, params| Response.new(200, params["id"]) }
+#       .handle("/static/") { |req, params| FileServer.serve(root, req) }
+#     Server.serve_parallel(listener, routes)
+#
+# The same patterns, precedence, conflicts and answers as `Router`'s, by
+# the same code (`Router.route`). What differs is what a handler may
+# capture: `handle` is `@[Share]`, so each block is checked where it is
+# written as a parallel task's is - every value it captures `Share`, a
+# pool behind a `Mutex`, a count in an `Atomic` - and kept as a
+# `SharedProc`. A `Router` holds procs nobody checked and is refused by
+# `serve_parallel` for that reason. A `SharedRouter` is never written:
+# `handle` answers a new router with the route added, so the one being
+# served is the table it was when the server was given it, with no
+# `handle` after the first request to refuse.
+pub class SharedRouter
+  @patterns : List(Pattern)
+  @handlers : List(SharedProc({Request, Hash(String, String)}, Response))
+
+  def initialize(@patterns : List(Pattern) = List(Pattern).new([] of Pattern),
+                 @handlers : List(SharedProc({Request, Hash(String, String)}, Response)) = List(SharedProc({Request, Hash(String, String)}, Response)).new([] of SharedProc({Request, Hash(String, String)}, Response)))
+  end
+
+  # This router with the requests *pattern* matches sent to the block,
+  # with the request and the wildcards' values by name. Panics as
+  # `Router#handle` does on a pattern that is not one or that conflicts.
+  @[Share]
+  def handle(pattern : String, &handler : Request, Hash(String, String) -> Response) : SharedRouter
+    parsed = Router.parse_against(pattern, @patterns)
+    kept = SharedProc({Request, Hash(String, String)}, Response).of { |pair| handler.call(pair[0], pair[1]) }
+    SharedRouter.new(@patterns.appended(parsed), @handlers.appended(kept))
+  end
+
+  # The patterns registered, in the order they were.
+  def patterns : Array(Pattern)
+    found = [] of Pattern
+    @patterns.each { |pattern| found << pattern }
+    found
+  end
+
+  # The answer to *req*: its handler's, or the router's own 307, 400, 404
+  # or 405.
+  def call(req : Request) : Response
+    routed = Router.route(@patterns, req)
+    return routed if routed.is_a?(Response)
+    @handlers[routed[0]].call({req, routed[1]})
   end
 end

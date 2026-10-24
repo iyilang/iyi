@@ -354,7 +354,7 @@ tar -xzf iyi-0.19.1-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 940 KB prelude, the 4,892 KB of `src/std` that `import std/...`
+iyi's own 940 KB prelude, the 4,898 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`
@@ -856,8 +856,9 @@ not the library.
   rather than run sequentially. A wasm32-wasi program is linked by a wasi
   toolchain's `cc` (CI uses wasi-sdk's clang), not by a bare linker.
 - **Only the threads and parallel tasks are gated by `Share`.** A block passed
-  to `IyiThread.start` or `spawn_parallel` may capture only `Share` values;
-  a `spawn` is not gated, and a task is never preempted.
+  to `IyiThread.start`, `spawn_parallel` or a def marked `@[Share]` (std/http's
+  `Server.serve_parallel`) may capture only `Share` values; a `spawn` is not
+  gated, and a task is never preempted.
 - **No registry and no self-hosting.** Packages resolve from git; the compiler
   is still a Crystal program.
 - **Windows has gaps.** No IANA zone database of its own (local time comes

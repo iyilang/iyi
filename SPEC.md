@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 22,608 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 129,827 lines, none of it written in iyi |
+| compiler | 129,939 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 129,827 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 124,671 in std |
-| Specs | 21,146 lines | 15,176 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 129,939 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 124,809 in std |
+| Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2780,14 +2780,30 @@ Array(Int32)`, which is not Share: Array(Int32)'s field @size is assigned
 in `unsafe_set_size` ``. The channel's `T : Share` (III.4.6) is the
 trust `@[Share]` on `Channel(T)` gives since a channel crosses threads
 (III.4.13), and the block `spawn_parallel` runs is gated as a thread's
-is. Held by `spec/compiler/semantic/iyi_spec.cr`
+is. So is the block of a def marked `@[Share]`: the mark says the block
+the def keeps may run on other threads, several at once, and every block
+given to it is checked where it is written - std/http's
+`Server.serve_parallel { }` and std/router's `SharedRouter#handle` are
+two, and std/shared_proc's `SharedProc.of` is the one that makes such a
+block a value: `@[Share(owns: true)]`, constructed by `of` alone, so
+`Share` whatever its arguments. Inside a `@[Share]` def its block, a
+`Proc`, is the one non-`Share` value a parallel block may capture or be
+given as `&block`, while the def leaves it as given; any other proc
+passed as a block to a boundary - `g.spawn_parallel(&work)`,
+`m.lock(&work)` - is refused, since nothing saw what it captured, and
+before it was refused such a call compiled whatever `work` closed over.
+Held by `spec/compiler/semantic/iyi_spec.cr`
 (thirteen shapes: immutable captures pass, a setter, an assignment outside
 `initialize`, a field one and two levels down, a field `pointerof` gives
 out, `@[Share]` trusted, a trusted generic refused by its argument, `self`,
 `self` reached by a call, a constant the block names, a class variable
-written after its initializer, a local a kept block assigns; and five for
+written after its initializer, a local a kept block assigns; five for
 the parallel block: shareable captures pass, a captured value with a
-setter, a local assigned after the spawn, a loop's local, a constant), by
+setter, a local assigned after the spawn, a loop's local, a constant; and
+six for a `@[Share]` def's: its block captured and passed on inside it,
+a captured value with a setter, a local assigned after the call, the mark
+on a def with no block, a proc passed as a parallel task's block, and the
+def's block no longer trusted once the def assigns it), by
 `spec/compiler/iyimod_spec.cr` (the marker written, read and refused
 across an artifact), by `bench/thread_exercise.sh`'s last step, a
 program that must not compile, and by `bench/parallel_exercise.sh`'s
@@ -3745,12 +3761,19 @@ runs has one core whatever the machine has: the Açık Türkiye port never
 passed 178% CPU on twelve vCPUs where its Go port reached 1,117%.
 `serve_parallel` starts each connection with `spawn_parallel` and accepts
 on the calling thread.
-What part 2 asks of a parallel block decides its shape: the user's handler
-is captured by every connection's block, a block is a `Proc` and a `Proc`
-is never `Share`, so the handler is a value with `call(Request) :
+What part 2 asks of a parallel block decided its first shape: the user's
+handler is captured by every connection's block, a block is a `Proc` and a
+`Proc` is never `Share`, so the handler was a value with `call(Request) :
 Response` - Go's `http.Handler` - and an unshareable one is refused at
-the call with the field that failed. The socket crosses as its descriptor
-and family, both `Share`; part 5 is what makes that enough, since a
+the call with the field that failed. The block form came with the
+`@[Share]` def (III.4.4): `serve_parallel(listener) { |request| ... }`
+checks the block where it is written and hands it on as a `SharedProc`,
+and std/router's `SharedRouter` is `Router`'s table, routed by the same
+code, whose `handle` checks each handler the same way and answers a new
+router rather than writing the one being served. A block capturing a
+`Router` is refused, naming `Router`'s `Array` field. The socket crosses
+as its descriptor and family, both `Share`; part 5 is what makes that
+enough, since a
 poller's registration is made per wait on the waiting thread and a Windows
 handle is moved to the waiting thread's port. The stop needs part 6
 alone: the accept loop closes a `Channel`, and a watcher beside each
@@ -3765,7 +3788,11 @@ second under `serve` to 410, 821, 1,617, 3,047 and 4,033 on 1, 2, 4, 8 and
 worker - the handoff's price - and 77,163 on four. `bench/std_http_parallel.iyi`
 holds it in `bench/std_http_exercise.sh`, with broken copies caught by
 name: a connection spawned on the accepting thread, and a stop never
-carried to a worker.
+carried to a worker. The block form measured the same: 392 and 3,751
+requests a second on one and twelve workers, a `SharedRouter` 393 and
+4,003; `bench/std_router_exercise.sh` routes every table through a
+`SharedRouter` and holds its answers to `Router`'s, and serves one under
+`serve_parallel` over the wire.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 

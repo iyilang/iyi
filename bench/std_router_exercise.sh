@@ -401,7 +401,7 @@ PY
 prove_broken "GET not taking HEAD" "routed HEAD any.example /static/app.js" \
   '@method.empty? || @method == method || (@method == "GET" && method == "HEAD")' '@method.empty? || @method == method'
 prove_broken "the first match taken, not the most specific" "routed GET example.com /" \
-  '(chosen < 0 || pattern.more_specific?(@patterns[chosen]))' '(chosen < 0)'
+  '(chosen < 0 || pattern.more_specific?(patterns[chosen]))' '(chosen < 0)'
 prove_broken "a host's pattern compared with the rest" "routed GET example.com /index.html" \
   'if pattern.host == host && pattern.matches_method?(method)' 'if (pattern.host == host || pattern.host.empty?) && pattern.matches_method?(method)'
 prove_broken "an overlap taken as no conflict" "/index.html beside GET / conflicts" \
@@ -414,7 +414,7 @@ prove_broken "{x} matching an empty segment" "no rest past the end, no empty seg
   '        return nil if piece.empty?
 ' ''
 prove_broken "a subtree's root not redirected" "routed GET any.example /static" \
-  'if (again = find(host, req.method, slashed)) && @patterns[again[0]].exact?(slashed)' 'if false'
+  'if (again = find(patterns, host, req.method, slashed)) && patterns[again[0]].exact?(slashed)' 'if false'
 prove_broken "an unclean path routed as it is" "routed GET any.example /a/../index.html" \
   '    return Router.redirect(path, req.query) unless path == raw
 ' ''

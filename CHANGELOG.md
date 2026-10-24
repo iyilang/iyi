@@ -4,19 +4,20 @@
 
 ### Added
 
-- **`Server.serve_parallel(listener, handler)` answers connections on
-  every core (#145).** `serve` runs every connection on the thread that
+- **`Server.serve_parallel(listener) { |request| ... }` answers
+  connections on every core (#145).** `serve` runs every connection on the thread that
   accepts it, so a server had one core whatever the machine had: the Açık
   Türkiye port never passed 178% CPU on 12 vCPUs where its Go port reached
   1,117%. `serve_parallel` starts each connection as a parallel task
   (SPEC.md III.4.13) - whichever pool worker is free starts it and serves
-  it to its end - while the calling thread accepts. The handler is a value
-  whose `call(Request) : Response` answers each request, Go's
-  `http.Handler`, and it must be `Share`: every worker calls it at once,
-  so a handler with a field assigned after `initialize` is refused at
-  compile time with the field named. A block is a `Proc`, which is never
-  `Share`, so there is no block form and a handler holding a `Router` is
-  refused; there is no `tls:`, since a `TlsServerConfig` is not `Share`.
+  it to its end - while the calling thread accepts. Its block is checked
+  where it is written as a parallel task's is: every value it captures
+  `Share` - a pool behind a `Mutex`, a count in an `Atomic` - and every
+  captured local assigned once, with the variable and the field that
+  failed named; a block capturing a `Router` or an `Array` is refused. It
+  also takes a value whose `call(Request) : Response` answers, Go's
+  `http.Handler`, refused the same way unless it is `Share`. There is no
+  `tls:`, since a `TlsServerConfig` is not `Share`.
   The rest is `serve`'s, the stop included: the listener closed on the
   accepting thread, a watcher beside each connection on its worker closes
   the ones waiting on their client, and answers in progress are written.
@@ -32,6 +33,26 @@
   connection, and the stop under watchdogs; copies with the connection
   spawned on the accepting thread and with the stop never carried to a
   worker are caught by name.
+- **`@[Share]` on a def: its block may run on other threads, and is
+  checked at every call (SPEC.md III.4.4).** What made the block form
+  possible: the block of a def marked `@[Share]` is held to what
+  `spawn_parallel`'s is, and inside the def that block, a `Proc`, is the
+  one non-`Share` value a parallel block may capture or be given as
+  `&block`. `std/shared_proc`'s `SharedProc(A, R).of { }` makes such a
+  block a value any thread may call. A proc passed to a boundary as
+  `&work` - `g.spawn_parallel(&work)`, `m.lock(&work)` - is refused now:
+  nothing saw what it captured, and it compiled whatever `work` closed
+  over. Six shapes in `spec/compiler/semantic/iyi_spec.cr`.
+- **std/router's `SharedRouter`: `Router`'s table for
+  `serve_parallel`.** The same patterns, precedence, conflicts and
+  answers, by the same code (`Router.route`); `handle` is `@[Share]` and
+  answers a new router with the route added, so the one being served is
+  never written. `Pattern` keeps its segments in `List`s, so it is `Share`.
+  The block form and a `SharedRouter` measured as the value did: 392 and
+  3,751 requests a second on one and twelve workers, and 393 and 4,003.
+  `bench/std_router_exercise.sh` routes every table through a
+  `SharedRouter`, holds its answers and its conflict sentence to
+  `Router`'s, and serves one under `serve_parallel` over the wire.
 
 ### Fixed
 

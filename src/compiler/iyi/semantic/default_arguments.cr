@@ -155,6 +155,9 @@ class Iyi::Def
     expansion.annotations = annotations
     expansion.special_vars = special_vars
     expansion.iyi_from_derive = iyi_from_derive?
+    # The block an expansion keeps is the def's: still checked at every
+    # call, still the one proc the def's own boundaries take on trust.
+    expansion.iyi_share_block = iyi_share_block?
     if owner = self.owner?
       expansion.owner = owner
     end

@@ -39,8 +39,9 @@ def spin(rounds : Int64) : UInt64
   x
 end
 
-# The handler, `Share` by its fields: a channel of Ints, which crosses
-# threads.
+# What the server's block answers with, `Share` by its fields: a channel
+# of Ints, which crosses threads. The block captures it, and the compiler
+# checks that it may (`serve_parallel` is `@[Share]`).
 class Answers
   @stop : Channel(Int32)
 
@@ -151,7 +152,8 @@ watched("the whole run", 60000) do
       0
     end
     g.spawn do
-      Server.serve_parallel(listener, Answers.new(stop))
+      answers = Answers.new(stop)
+      Server.serve_parallel(listener) { |request| answers.call(request) }
       returned = true
       0
     end

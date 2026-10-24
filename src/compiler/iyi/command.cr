@@ -1286,8 +1286,20 @@ class Iyi::Command
   # time cannot vouch for it (`BuildInputs.racy?`), so the recorder would read
   # the whole program to fingerprint it - 1.8 s of a debug compiler's 2.0 s,
   # on a 1.3 MB program, in the build after a build.
+  #
+  # And what the link writes beside it, which the build asks about too
+  # (`move_output_aside` moves a busy `.pdb`): taken for an input, the
+  # `.pdb` the last link wrote never matched its record, and a Windows build
+  # with nothing changed was never up to date (job 120808845030).
   private def ignore_output(output_filename : String) : Nil
-    BuildInputs.current.try &.ignore(output_filename)
+    return unless inputs = BuildInputs.current
+    inputs.ignore(output_filename)
+    {% if flag?(:msvc) %}
+      inputs.ignore("#{output_filename.rchop(::Path[output_filename].extension)}.pdb")
+    {% end %}
+    {% if flag?(:darwin) %}
+      inputs.ignore("#{output_filename}.dwarf")
+    {% end %}
   end
 
   # Windows will not write over a program that is running, nor over a

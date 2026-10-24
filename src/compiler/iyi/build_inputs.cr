@@ -104,7 +104,7 @@ module Iyi
     # A path this build writes and records itself — the output — so that
     # nothing the compiler asks about it on the way is taken for an input.
     def ignore(path : String) : Nil
-      @ignored << key(path)
+      @ignored << comparable(path)
       purge
     end
 
@@ -140,7 +140,14 @@ module Iyi
     # kernel's pseudo-files. A package checkout is in the cache too, under
     # `mod/`, and it is source.
     def excluded?(path : String) : Bool
-      return true if @ignored.includes?(path)
+      # Compared as Windows compares names, whatever case each was spelled in.
+      # *path* is already a `key`: asked under the recorder's lock (`purge`),
+      # and `key` expands it, which may ask the file system again.
+      {% if flag?(:win32) %}
+        return true if @ignored.includes?(path.downcase)
+      {% else %}
+        return true if @ignored.includes?(path)
+      {% end %}
       {% if flag?(:unix) %}
         return true if path.starts_with?("/proc/") || path.starts_with?("/sys/") || path.starts_with?("/dev/")
       {% end %}

@@ -89,7 +89,9 @@ describe "Compiler" do
       Iyi::Command.run args.call
       built = File.info(path).modification_time
 
-      Iyi::Command.run args.call
+      # With `-s`, which says why when the check found something changed: the
+      # first Windows run of this rebuilt, and said nothing of what it saw.
+      Iyi::Command.run args.call + ["-s"]
       File.info(path).modification_time.should eq built
 
       Iyi::Command.run args.call + ["--force"]

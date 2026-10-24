@@ -194,6 +194,12 @@ fresh machine rather than a claim about Go's compiler. Seconds are a machine,
 not a language: other sessions on the same box read 0.16 / 1.29 / 0.19 and
 0.22 / 1.81 / 0.27 on the first row. The ratios hold.
 
+The *nothing at all* row was taken before `iyi build` learned to stop when
+nothing changed: it now reads back what the last build read, finds it all as
+it was, and says `out is up to date` without compiling (`--force` builds
+anyway). On the machine SPEC.md IV.3a measures that on, the row went from
+0.60 s to 0.01 s, with `go build`'s at 0.04 s.
+
 The full build is the row iyi loses. `python3 bench/build_speed.py`, same
 session:
 
@@ -877,6 +883,8 @@ not the library.
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |
+| [`bench/edit_loop.py`](bench/edit_loop.py) | the edit loop on real programs and a generated web application, with and without artifacts |
+| [`bench/up_to_date.sh`](bench/up_to_date.sh) | a build with nothing changed compiles nothing, and every kind of change builds again |
 | [`bench/build_speed.py`](bench/build_speed.py) | the full builds, and the gate that fails until the target holds |
 | [GC_DESIGN.md](GC_DESIGN.md) | the collector |
 | [AI_FIRST.md](AI_FIRST.md) | the agent loop, and every recorded run |

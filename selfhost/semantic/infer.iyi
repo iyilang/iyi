@@ -17,10 +17,8 @@ module main
 # one file with no prelude, so `1 + 1` has no `+` to reach, and neither
 # fixture writes one.
 
-import std/file
-import parser/parser
-using std/file::{File}
-using parser/parser::{Parser, Node, NumNode, StrNode, BoolNode, NilNode, NopNode, CharNode, VarNode, AssignNode, ExprsNode, IfNode, UnlessNode, WhileNode, ReturnNode, DefNode, ArgNode, PathNode, CallNode}
+import std/file::{File}
+import parser/parser::{Parser, Node, NumNode, StrNode, BoolNode, NilNode, NopNode, CharNode, VarNode, AssignNode, ExprsNode, IfNode, UnlessNode, WhileNode, ReturnNode, DefNode, ArgNode, PathNode, CallNode}
 
 pub class TypeEnv
   @names : Array(String)

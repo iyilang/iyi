@@ -1,8 +1,7 @@
 module main
 
-import std/file
+import std/file::{File}
 import std/text
-using std/file::{File}
 
 # The first real slice of the self-hosted front end: a lexer written in iyi,
 # emitting the same `kind<TAB>line<TAB>column<TAB>value` stream the current

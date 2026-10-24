@@ -17,12 +17,9 @@ module main
 #   * an `impl`'s methods belong to the type it is for, not to the trait
 #     and not to a type of its own.
 
-import std/file
-import macro/expand
-import parser/parser
-using std/file::{File}
-using macro/expand::{expand, host_flags}
-using parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode, ImportNode}
+import std/file::{File}
+import macro/expand::{expand, host_flags}
+import parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode, ImportNode}
 
 # One declared type. `path` is what the compiler calls it, `vars` is the
 # parameter list it prints after that, and `defs` are the methods that

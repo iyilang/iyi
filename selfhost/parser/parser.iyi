@@ -1,8 +1,7 @@
 module parser/parser
 
-import std/file
+import std/file::{File}
 import std/text
-using std/file::{File}
 
 pub struct Token
   getter kind : String

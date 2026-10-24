@@ -1,9 +1,7 @@
 module main
 
-import std/file
-import parser/parser
-using std/file::{File}
-using parser/parser::{Parser}
+import std/file::{File}
+import parser/parser::{Parser}
 
 # The parser is a library now, because the semantic pass reads the same
 # tree and cannot import a program. This file is the command that was at

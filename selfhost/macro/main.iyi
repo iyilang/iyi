@@ -6,10 +6,8 @@ module main
 # exists so the expansion itself can be read and diffed rather than only
 # inferred from what a later pass answers.
 
-import std/file
-import macro/expand
-using std/file::{File}
-using macro/expand::{expand, host_flags}
+import std/file::{File}
+import macro/expand::{expand, host_flags}
 
 path = Program.args[0]?
 if path.nil?

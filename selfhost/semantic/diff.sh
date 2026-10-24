@@ -27,6 +27,10 @@ IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
   grep -aoE "Error[^\"]{0,120}" "$WORK/build.log" | head -3 | sed 's|^|    |'
   exit 1
 }
+CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" build -o "$WORK/oracle" "$HERE/oracle.cr" >/dev/null 2>&1 || {
+  echo "  the oracle does not build"
+  exit 1
+}
 
 files=("$REPO"/samples/iyi/*.iyi)
 [ "$#" -gt 0 ] && files=("$@")
@@ -35,7 +39,7 @@ agree=0
 differ=0
 no_oracle=0
 for f in "${files[@]}"; do
-  CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" run --no-color "$HERE/oracle.cr" -- "$f" 2>/dev/null \
+  "$WORK/oracle" "$f" 2>/dev/null \
     | grep -v "Using compiled" > "$WORK/a.txt"
   # An empty answer is the pass refusing the file, not a file that
   # declares nothing: every sample declares something.

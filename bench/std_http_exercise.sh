@@ -104,10 +104,12 @@ echo "== what the module reaches"
 # and the byte slices it reads are iyi over the prelude, as std/zstd is
 # over std/digest's XXH64, and std/x509 - the certificate a request
 # carries - is std/tls's own already, as std/unicode is std/uri's, and
-# std/dns - the HTTPS records a client may connect by - std/socket's. No
-# std/env: a proxy the environment names is std/http_proxy's to read.
+# std/dns - the HTTPS records a client may connect by - std/socket's.
+# std/shared_proc, the handler `serve_parallel` calls on every worker, is
+# iyi over the prelude and reaches nothing. No std/env: a proxy the
+# environment names is std/http_proxy's to read.
 imports=$(grep -oE '^import std/[a-z_0-9]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/base64 std/compress std/digest std/dns std/hpack std/mime std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
+if [ "$imports" = "std/base64 std/compress std/digest std/dns std/hpack std/mime std/shared_proc std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
   echo "  std/socket, std/time and std/tls (std/x509 its own, std/dns std/socket's), and std/base64, std/compress, std/digest, std/hpack, std/mime, std/slice, std/unicode, std/uri and std/zstd, which reach nothing"
 else
   echo "  std/http imports $imports"
@@ -3814,8 +3816,11 @@ guard_breaks "an HTTP/2 body bounded per read alone" guard_h2 \
   '      conn.deadline_at(whole, "read a request") if whole > 0_i64
       unless stream_bodies' '      unless stream_bodies' \
   h2 "an HTTP/2 body a frame of a byte at a time"
+# `serve`'s own line: `serve_parallel` makes its places the same way, and
+# the comment above this one is `serve`'s alone.
 guard_breaks "connections served without a cap" guard_cap \
-  'slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' 'slots = nil.as(Channel(Int32)?)' \
+  '    # A place per connection served: a send waits while every one is held.
+    slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' '    slots = nil.as(Channel(Int32)?)' \
   cap "cap"
 guard_breaks "a connection's place never given back" guard_leak \
   "      # The connection's place, given back however it ended.

@@ -388,7 +388,10 @@ pub class IyiSocket
 
   # The address family, the platform's number for it: an accepted
   # connection is its listener's, and on Windows the socket `AcceptEx`
-  # fills in has to be made in it.
+  # fills in has to be made in it. With `fd`, what makes the socket again
+  # on another thread (std/http's `Server.serve_parallel`).
+  getter family : Int32
+
   def initialize(@fd : Int32, @family : Int32 = AF_INET)
   end
 

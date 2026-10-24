@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Added
+
+- **`Server.serve_parallel(listener, handler)` answers connections on
+  every core (#145).** `serve` runs every connection on the thread that
+  accepts it, so a server had one core whatever the machine had: the Açık
+  Türkiye port never passed 178% CPU on 12 vCPUs where its Go port reached
+  1,117%. `serve_parallel` starts each connection as a parallel task
+  (SPEC.md III.4.13) - whichever pool worker is free starts it and serves
+  it to its end - while the calling thread accepts. The handler is a value
+  whose `call(Request) : Response` answers each request, Go's
+  `http.Handler`, and it must be `Share`: every worker calls it at once,
+  so a handler with a field assigned after `initialize` is refused at
+  compile time with the field named. A block is a `Proc`, which is never
+  `Share`, so there is no block form and a handler holding a `Router` is
+  refused; there is no `tls:`, since a `TlsServerConfig` is not `Share`.
+  The rest is `serve`'s, the stop included: the listener closed on the
+  accepting thread, a watcher beside each connection on its worker closes
+  the ones waiting on their client, and answers in progress are written.
+  `IyiSocket#family` is public: with `fd`, what makes a socket again on
+  another thread. Measured on Windows 11, 12 logical CPUs, release, 32
+  kept-alive connections: a request that computes (2,000,000 xorshift
+  rounds) went from 411 requests a second under `serve` to 410, 821,
+  1,617, 3,047 and 4,033 on 1, 2, 4, 8 and 12 workers; one that answers a
+  few bytes from 23,255 to 21,699 on one worker and 77,163 on four (oha on
+  the same machine). `bench/std_http_parallel.iyi`, run by
+  `bench/std_http_exercise.sh`, holds answers on more than one worker and
+  none on the accepting thread, a panicking handler ending its own
+  connection, and the stop under watchdogs; copies with the connection
+  spawned on the accepting thread and with the stop never carried to a
+  worker are caught by name.
+
 ### Fixed
 
 - **A rebuild with nothing changed reuses every object, `_main`

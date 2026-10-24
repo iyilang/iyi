@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 129,827 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 124,536 in std |
+| Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 124,671 in std |
 | Specs | 21,146 lines | 15,176 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3738,6 +3738,34 @@ that does not ring, a steal that leaves the task queued, a cancel never
 delivered, a cancel that skips the pool, and a pool held to one worker.
 The one name the pool adds to the floor is `environ`, the C runtime's
 table `IYI_WORKERS` is read from on Linux and darwin.
+
+**The first library caller: std/http's `Server.serve_parallel` (issue
+#145).** `serve` runs every connection with `g.spawn`, so a server it
+runs has one core whatever the machine has: the Açık Türkiye port never
+passed 178% CPU on twelve vCPUs where its Go port reached 1,117%.
+`serve_parallel` starts each connection with `spawn_parallel` and accepts
+on the calling thread.
+What part 2 asks of a parallel block decides its shape: the user's handler
+is captured by every connection's block, a block is a `Proc` and a `Proc`
+is never `Share`, so the handler is a value with `call(Request) :
+Response` - Go's `http.Handler` - and an unshareable one is refused at
+the call with the field that failed. The socket crosses as its descriptor
+and family, both `Share`; part 5 is what makes that enough, since a
+poller's registration is made per wait on the waiting thread and a Windows
+handle is moved to the waiting thread's port. The stop needs part 6
+alone: the accept loop closes a `Channel`, and a watcher beside each
+connection, on its worker, closes the connection there if it is waiting on
+its client - the listener's `closed?` that `serve`'s connections read is
+the accepting thread's, so each connection reads a stop of its own. No
+`tls:`: `TlsServerConfig` changes its ticket keys and replay guard as it
+serves. Measured on Windows 11, twelve logical CPUs, release, 32
+kept-alive connections: a request that computes went from 411 requests a
+second under `serve` to 410, 821, 1,617, 3,047 and 4,033 on 1, 2, 4, 8 and
+12 workers; one that answers a few bytes from 23,255 to 21,699 on one
+worker - the handoff's price - and 77,163 on four. `bench/std_http_parallel.iyi`
+holds it in `bench/std_http_exercise.sh`, with broken copies caught by
+name: a connection spawned on the accepting thread, and a stop never
+carried to a worker.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 

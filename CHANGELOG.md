@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A rebuild with nothing changed reuses every object, `_main`
+  included (#141).** Debug builds ordered the initialisers of
+  independent modules (SPEC.md III.5 rule 2) with a fresh random order
+  each build, and codegen follows the order the program's code runs in,
+  so every build was a slightly different program: `_main` changed, and
+  so did the order functions were emitted into whichever units an
+  initialiser reached first, `String`, `Hash(String, Int32)`,
+  `Std::Regex::RxCompiler` and the like. Ten no-change rebuilds of a
+  seven-module program compiled 1 to 12 of its 100 objects again and
+  relinked, the set changing from build to build. The order is now
+  Kahn's algorithm taking the ready module whose path hashes lowest -
+  Go's rule since 1.21, with a hash where Go sorts by import path - so it
+  is the same in every build of an import graph and in general not the
+  load order release builds keep, and those ten rebuilds compile
+  nothing. `IYI_INIT_SEED` now salts the hash rather than seeding a
+  shuffle, so a seed names another order and not the one it named
+  before.
+  `bench/rebuild_reuse.py` holds three no-change rebuilds of a program
+  with generics, unions, std/regex, `derive serializable` and an EIY
+  template to "all previous .o files were reused", a one-line edit to
+  its own unit, and the reordering to both orders across eight seeds.
+
 ## 0.19.1 — 2026-10-23
 
 **A collector hang and a handful of TLS and PKI edges fixed, and TLS

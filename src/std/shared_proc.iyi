@@ -1,0 +1,49 @@
+# `SharedProc`, a proc that may be called from any thread - SPEC.md
+# III.4.4, III.4.13.
+#
+# A `Proc` is never `Share`: what it captured is not written in its type.
+# So a value that holds one - a table of routes, a handler a server calls
+# on every core - is refused by every parallel block that reaches it,
+# whatever the proc closed over. `SharedProc(A, R)` is the one way past
+# that the compiler can vouch for: it is made only by `SharedProc.of`,
+# whose block is checked where it is written as a parallel task's is -
+# every value it captures `Share`, every captured local assigned once,
+# the constants and class variables it names `Share` - because `of` is
+# `@[Share]`. What it holds is then reached by nothing but `call`, from
+# as many threads as call it, and the type is `Share` whatever `A` and
+# `R` are: a call's argument and answer belong to the thread that makes
+# the call.
+#
+#     doubled = SharedProc(Int32, Int32).of { |n| n * 2 }
+#     group do |g|
+#       4.times { |i| g.spawn_parallel { doubled.call(i) } }
+#     end
+#
+# A def that keeps a block and is itself `@[Share]` - std/http's
+# `Server.serve_parallel { }`, std/router's `SharedRouter#handle` - hands
+# its block on with `SharedProc(...).of(&block)`: that block was checked
+# where the def was given it, and it is the one proc a boundary takes on
+# trust. Any other `&proc` is refused there.
+
+module std/shared_proc
+
+@[Share(owns: true)]
+pub struct SharedProc(A, R)
+  @proc : Proc(A, R)
+
+  # Private: a `SharedProc` made from a proc nobody checked would be the
+  # hole this type closes.
+  private def initialize(@proc : Proc(A, R))
+  end
+
+  # The block, checked as a parallel task's block is, as a value any
+  # thread may call.
+  @[Share]
+  def self.of(&block : A -> R) : SharedProc(A, R)
+    new(block)
+  end
+
+  def call(argument : A) : R
+    @proc.call(argument)
+  end
+end

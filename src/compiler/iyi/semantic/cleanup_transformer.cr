@@ -647,10 +647,13 @@ module Iyi
     end
 
     # iyi: a block that crosses a `Share` boundary may capture only `Share`
-    # values (SPEC.md III.4.4). Three blocks cross one. `IyiThread.start { }`'s
+    # values (SPEC.md III.4.4). Four blocks cross one. `IyiThread.start { }`'s
     # runs on another thread (III.4.11), and `IyiGroup#spawn_parallel { }`'s
     # may (III.4.13): a parallel task is started by whichever pool worker is
-    # free, so it is held to exactly what a thread's block is. And the block
+    # free, so it is held to exactly what a thread's block is. A def marked
+    # `@[Share]` keeps a block that may run on other threads, several at
+    # once - std/http's `Server.serve_parallel` - and its blocks are held to
+    # the same. And the block
     # a method of an owning type runs (`@[Share(owns: true)]`, `Mutex#lock`
     # and the rest) reaches the value the type keeps behind its lock: what
     # the block captures would come within reach of that value, so it must
@@ -668,9 +671,22 @@ module Iyi
                  THREAD_BOUNDARY
                elsif target_def.name == "spawn_parallel" && !owner.metaclass? && owner.to_s == "IyiGroup"
                  PARALLEL_BOUNDARY
+               elsif target_def.iyi_share_block?
+                 shared_block_boundary(owner, target_def)
                end
       owning = thread ? nil : share_owning_type(owner)
       return unless thread || owning
+      if owning
+        name = owning.to_s.split("::").last.split('(').first
+        subject = if owner.metaclass?
+                    "the block #{name}.#{target_def.name} makes the #{name}'s value in"
+                  else
+                    "the block #{name}##{target_def.name} runs behind the #{name}'s lock"
+                  end
+      else
+        subject = thread.not_nil!.subject
+      end
+      check_forwarded_block(node, subject)
       block = node.block
       return unless block
       fun_literal = block.fun_literal
@@ -679,11 +695,6 @@ module Iyi
 
       if owning
         name = owning.to_s.split("::").last.split('(').first
-        subject = if owner.metaclass?
-                    "the block #{name}.#{target_def.name} makes the #{name}'s value in"
-                  else
-                    "the block #{name}##{target_def.name} runs behind the #{name}'s lock"
-                  end
         consequence = "whatever the block can reach, the value behind the lock can reach, and the lock no longer guards it (SPEC.md III.4.4)"
         # What the call answers has left the lock: a constructor answers
         # the owning type itself, which is Share, and a method that answers
@@ -696,7 +707,6 @@ module Iyi
         check_share_constants(a_def, subject, consequence)
         check_share_class_var_types(a_def, subject, consequence)
       elsif thread
-        subject = thread.subject
         consequence = "(SPEC.md III.4.4)"
         check_thread_constants_share(a_def, thread)
         check_thread_class_vars_share(a_def, thread)
@@ -722,6 +732,9 @@ module Iyi
           next if meta.belongs_to?(a_def)
           type = meta.type?
           next unless type
+          # The block of the `@[Share]` def this call is in: checked where
+          # it was given, and a proc, which no type can say that of.
+          next if trusted_share_block?(captured.name)
           if why = Iyi::Share.reason(type)
             captured.raise "#{subject} captures `#{captured.name} : #{type}`, which is not Share: #{why}#{owning ? "; " : " "}#{consequence}"
           end
@@ -800,6 +813,79 @@ module Iyi
       pair: "the task and the code that spawned it",
       again: "spawns the task again",
       after: "the task was spawned")
+
+    # The block a `@[Share]` def keeps, in the words its refusals use: the
+    # def by its type's short name, as an owning type's are.
+    private def shared_block_boundary(owner : Type, target_def : Def) : ShareBoundary
+      type = owner.metaclass? ? owner.instance_type : owner
+      short = type.to_s.split('(').first.split("::").last
+      called = if type.is_a?(Program)
+                 target_def.name
+               elsif owner.metaclass?
+                 "#{short}.#{target_def.name}"
+               else
+                 "#{short}##{target_def.name}"
+               end
+      ShareBoundary.new(
+        subject: "the block #{called} keeps, which may run on other threads",
+        local_owner: "a local of the code that gave #{called} its block, so the block and that code",
+        pair: "the block and the code that gave it",
+        again: "gives the block again",
+        after: "the block was given")
+    end
+
+    # iyi: a proc passed as the block - `g.spawn_parallel(&work)` - was not
+    # written at the call, so nothing here saw what it captured, and its
+    # type cannot say: such a call compiled whatever `work` closed over.
+    # Refused at every boundary, owning types' included, with one
+    # exception: the block of the `@[Share]` def the call is in, which was
+    # checked where that def was given it.
+    private def check_forwarded_block(node : Call, subject : String) : Nil
+      forwarded = node.block_arg
+      return unless forwarded
+      return if forwarded.is_a?(Var) && trusted_share_block?(forwarded.name)
+      forwarded.raise "#{subject} is given a proc, `&#{forwarded}`, and what a proc captured is not written in its type: give it the block itself, written here, so what it captures is checked (SPEC.md III.4.4)"
+    end
+
+    # Whether *name* is the block parameter of the `@[Share]` def being
+    # transformed, never assigned in it: the one proc a boundary inside
+    # that def takes on trust, since every block given to the def was
+    # checked where it was written.
+    private def trusted_share_block?(name : String) : Bool
+      current = @current_def
+      return false unless current && current.iyi_share_block?
+      block_arg = current.block_arg
+      return false unless block_arg && block_arg.name == name
+      assigned = AssignedNames.new
+      current.body.accept assigned
+      !assigned.names.includes?(name)
+    end
+
+    # Every local a body assigns, by any spelling.
+    class AssignedNames < Visitor
+      getter names = Set(String).new
+
+      def visit(node : Assign) : Bool
+        target = node.target
+        @names << target.name if target.is_a?(Var)
+        true
+      end
+
+      def visit(node : OpAssign) : Bool
+        target = node.target
+        @names << target.name if target.is_a?(Var)
+        true
+      end
+
+      def visit(node : MultiAssign) : Bool
+        node.targets.each { |target| @names << target.name if target.is_a?(Var) }
+        true
+      end
+
+      def visit(node : ASTNode) : Bool
+        true
+      end
+    end
 
     # iyi: a captured local is one cell on the heap, and the thread and the
     # code that started it both reach that cell. A Share type makes the

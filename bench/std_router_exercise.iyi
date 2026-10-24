@@ -13,7 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/router::{Router, Pattern, RouterError}
+import std/router::{Router, Pattern, RouterError, SharedRouter}
 import std/http::{HTTP, Request, Response, Server}
 import std/socket::{IyiSocket}
 
@@ -49,11 +49,27 @@ def router_of(patterns : Array(String)) : Router
   router
 end
 
+# The same handler on a `SharedRouter`, whose `handle` answers the router
+# with the route added; the block captures *pattern*, a `String`, so the
+# compiler takes it for a block every worker may run.
+def shared_add(router : SharedRouter, pattern : String) : SharedRouter
+  router.handle(pattern) do |_, params|
+    names = params.keys.sorted
+    Response.new(200, pattern + "|" + names.map { |name| name + "=" + params[name] }.join(","))
+  end
+end
+
+def shared_of(patterns : Array(String)) : SharedRouter
+  router = SharedRouter.new
+  patterns.each { |pattern| router = shared_add(router, pattern) }
+  router
+end
+
 # A router's answer in one line: the handler's body for a 200, a
 # redirect's status and `Location`, the `Allow` of a 405, the status
 # otherwise. The gate's Go program writes Go's `ServeMux`'s answers the
 # same way.
-def describe(router : Router, method : String, host : String, target : String) : String
+def describe(router : R, method : String, host : String, target : String) : String forall R
   path = target
   query = nil.as(String?)
   if q = target.index('?')
@@ -262,7 +278,7 @@ PARSES = [
 ]
 DEPARTURES = 4
 
-def run_table(router : Router, requests : Array({String, String, String, String})) : Int32
+def run_table(router : R, requests : Array({String, String, String, String})) : Int32 forall R
   requests.each do |row|
     got = describe(router, row[0], row[1], row[2])
     assert_str row[3], got, "routed #{row[0]} #{row[1]} #{row[2]}"
@@ -443,5 +459,46 @@ group do |g|
   end
 end
 puts "  a wildcard, a HEAD, a 405 with Allow, a 307 read and followed, a 404"
+
+puts "\n== SharedRouter: the same tables, for serve_parallel"
+# Routed by the same code as `Router` (`Router.route`), so every table
+# answers the same, and a conflict is refused by the same sentence.
+shared = run_table(shared_of(MAIN), MAIN_REQUESTS) + run_table(shared_of(MAIN.reversed), MAIN_REQUESTS) +
+         run_table(shared_of(API), API_REQUESTS) + run_table(shared_of(HOSTS), HOSTS_REQUESTS)
+conflict_said = answer { router_of(["GET /", "/index.html"]); "registered" }
+assert_true conflict_said.starts_with?("refused: "), "Router refuses GET / beside /index.html: #{conflict_said}"
+assert_str conflict_said, answer { shared_of(["GET /", "/index.html"]); "registered" }, "SharedRouter refuses the conflict Router does"
+puts "  #{shared} requests routed as Router routes them; a conflict refused by the same sentence"
+
+puts "\n== a real server, on every core"
+# `Server.serve_parallel` with a `SharedRouter`: the handlers run on the
+# pool's workers, and the stop goes through a channel to the accepting
+# thread, which owns the listener.
+parallel = IyiSocket.listen("127.0.0.1", 0)
+parallel_base = "http://127.0.0.1:#{parallel.local_port}"
+stopping = Channel(Int32).new(1)
+routes = SharedRouter.new
+  .handle("GET /users/{id}") { |_, params| Response.new(200, "user " + params["id"]) }
+  .handle("GET /stop") { |_, _| stopping.put_now(0); Response.new(200, "bye") }
+group do |g|
+  g.spawn do
+    stopping.receive
+    parallel.close
+    0
+  end
+  g.spawn do
+    Server.serve_parallel(parallel, routes)
+    0
+  end
+  g.spawn do
+    user = HTTP.get(parallel_base + "/users/J%C3%BCrgen").or_panic
+    assert_true user.status == 200 && user.body == "user Jürgen", "a wildcard over the wire, on a worker: #{user.status} #{user.body}"
+    wrong = HTTP.delete(parallel_base + "/users/1").or_panic
+    assert_true wrong.status == 405 && wrong.header("Allow") == "GET, HEAD", "a DELETE is 405 with Allow, on a worker: #{wrong.status} #{wrong.header("Allow")}"
+    HTTP.get(parallel_base + "/stop").or_panic
+    0
+  end
+end
+puts "  a wildcard and a 405 answered by a SharedRouter under serve_parallel, and the stop"
 
 puts "\nALL CHECKS PASSED"

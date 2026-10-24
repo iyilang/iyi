@@ -1,0 +1,199 @@
+# std/http's `Server.serve_parallel`: connections answered on the pool's
+# workers, not on the thread that accepts them, and stopped as `serve`
+# stops.
+#
+#   ./bin/iyi run bench/std_http_parallel.iyi
+#
+# Four workers. Eight clients connect and send a request that computes
+# for a while before the server has accepted any of them, so each
+# connection's task finds its request waiting and holds the worker that
+# started it until it answers: the answers must name more than one
+# thread, and none the accepting one's. A handler that panics ends its
+# own connection, and the next connection is answered. Then the stop: a
+# client holding a kept-alive connection between requests, and one whose
+# request is being answered, while another asks the handler to stop -
+# the handler sends on a channel, and a task on the accepting thread
+# closes the listener. The answer in progress is written, the idle
+# connection is closed, and `serve_parallel` returns. Every step runs
+# under a watchdog, so a stop that never reaches a connection on another
+# thread is a named failure rather than a hung job. A line that is not
+# what it should be is followed by "FAIL <check>: <found>, not
+# <wanted>", and the run ends "ALL CHECKS PASSED" or exits 1. The panic
+# the third step makes is printed by its task, as any is.
+
+module bench/std_http_parallel
+
+import std/http::{Request, Response, Server}
+import std/socket::{IyiSocket, SocketError}
+
+# Integer work with nothing to park on: a xorshift walk.
+def spin(rounds : Int64) : UInt64
+  x = 7_u64
+  i = 0_i64
+  while i < rounds
+    x = x ^ x.unsafe_shl(13_u64)
+    x = x ^ x.unsafe_shr(7_u64)
+    x = x ^ x.unsafe_shl(17_u64)
+    i = i + 1
+  end
+  x
+end
+
+# What the server's block answers with, `Share` by its fields: a channel
+# of Ints, which crosses threads. The block captures it, and the compiler
+# checks that it may (`serve_parallel` is `@[Share]`).
+class Answers
+  @stop : Channel(Int32)
+
+  def initialize(@stop : Channel(Int32))
+  end
+
+  def call(request : Request) : Response
+    case request.path
+    when "/spin"
+      sum = spin(20000000_i64)
+      Response.new(200, "#{IyiScheduler.state.object_id} #{sum}")
+    when "/panic"
+      raise "a handler that panics, on purpose"
+    when "/slow"
+      sleep(300)
+      Response.new(200, "slow")
+    when "/stop"
+      @stop.put_now(0)
+      Response.new(200, "stopping")
+    else
+      Response.new(200, "here")
+    end
+  end
+end
+
+def check(label : String, got : String, wanted : String, failures : Array(String)) : Nil
+  puts "#{label}: #{got}"
+  return if got == wanted
+  puts "FAIL #{label}: #{got}, not #{wanted}"
+  failures << label
+end
+
+def connect(port : Int32) : IyiSocket
+  socket = IyiSocket.connect("127.0.0.1", port, 5000)
+  raise "connect: #{socket}" unless socket.is_a?(IyiSocket)
+  # Past every watchdog below: a connection the stop never reaches is
+  # the watchdog's to name, not a read timeout's to end as "ended".
+  socket.read_timeout_ms = 30000
+  socket
+end
+
+def send(socket : IyiSocket, path : String) : Nil
+  socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+end
+
+# The body of the answer to the request last sent on *socket*, or
+# "ended" when the connection ends before a whole one comes.
+def answer(socket : IyiSocket) : String
+  heard = ""
+  while true
+    at = heard.index("\r\n\r\n")
+    if at
+      length = 0
+      heard[0, at].split("\r\n").each do |line|
+        length = line[15, line.bytesize - 15].strip.to_i if line.downcase.starts_with?("content-length:")
+      end
+      return heard[at + 4, length] if heard.bytesize >= at + 4 + length
+    end
+    got = socket.read(4096)
+    return "ended" unless got.is_a?(String) && !got.empty?
+    heard = heard + got
+  end
+end
+
+def ask(socket : IyiSocket, path : String) : String
+  send(socket, path)
+  answer(socket)
+end
+
+# *name* under a watchdog: a task that sleeps *ms* and fails the run by
+# name unless the step ends first.
+def watched(name : String, ms : Int32, &block : -> Nil) : Nil
+  group do |w|
+    w.spawn do
+      waited = sleep(ms)
+      unless waited.is_a?(Cancelled)
+        puts "FAIL #{name}: still waiting after #{ms} ms"
+        exit 1
+      end
+      0
+    end
+    block.call
+    w.cancel_children
+  end
+end
+
+IyiWorkers.count = 4
+listener = IyiSocket.listen("127.0.0.1", 0)
+port = listener.local_port
+accepting = IyiScheduler.state.object_id
+stop = Channel(Int32).new(1)
+failures = [] of String
+returned = false
+
+# Connected and asked before anything accepts: the kernel holds both.
+early = [] of IyiSocket
+8.times do
+  socket = connect(port)
+  send(socket, "/spin")
+  early << socket
+end
+
+watched("the whole run", 60000) do
+  group do |g|
+    g.spawn do
+      stop.receive
+      listener.close
+      0
+    end
+    g.spawn do
+      answers = Answers.new(stop)
+      Server.serve_parallel(listener) { |request| answers.call(request) }
+      returned = true
+      0
+    end
+    g.spawn do
+      threads = [] of String
+      watched("eight answers", 30000) do
+        early.each { |socket| threads << answer(socket).split(" ").first }
+      end
+      distinct = threads.uniq
+      check("threads that answered", distinct.size > 1 ? "more than one" : "#{distinct.size}", "more than one", failures)
+      check("answered on the accepting thread", distinct.includes?(accepting.to_s) ? "yes" : "no", "no", failures)
+      early.each(&.close)
+
+      watched("a handler that panics", 10000) do
+        panicking = connect(port)
+        check("a handler that panics", ask(panicking, "/panic"), "ended", failures)
+        panicking.close
+        after = connect(port)
+        check("the next connection", ask(after, "/"), "here", failures)
+        after.close
+      end
+
+      watched("the stop", 10000) do
+        idle = connect(port)
+        check("kept alive", ask(idle, "/"), "here", failures)
+        slow = connect(port)
+        send(slow, "/slow")
+        sleep(50)
+        stopper = connect(port)
+        check("asked to stop", ask(stopper, "/stop"), "stopping", failures)
+        check("the answer being made at the stop", answer(slow), "slow", failures)
+        check("the kept-alive connection, on the stop", answer(idle), "ended", failures)
+        stopper.close
+        slow.close
+        idle.close
+      end
+      0
+    end
+  end
+end
+check("serve_parallel returned", returned ? "yes" : "no", "yes", failures)
+exit 1 unless failures.empty?
+puts "ALL CHECKS PASSED"

@@ -104,10 +104,12 @@ echo "== what the module reaches"
 # and the byte slices it reads are iyi over the prelude, as std/zstd is
 # over std/digest's XXH64, and std/x509 - the certificate a request
 # carries - is std/tls's own already, as std/unicode is std/uri's, and
-# std/dns - the HTTPS records a client may connect by - std/socket's. No
-# std/env: a proxy the environment names is std/http_proxy's to read.
+# std/dns - the HTTPS records a client may connect by - std/socket's.
+# std/shared_proc, the handler `serve_parallel` calls on every worker, is
+# iyi over the prelude and reaches nothing. No std/env: a proxy the
+# environment names is std/http_proxy's to read.
 imports=$(grep -oE '^import std/[a-z_0-9]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/base64 std/compress std/digest std/dns std/hpack std/mime std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
+if [ "$imports" = "std/base64 std/compress std/digest std/dns std/hpack std/mime std/shared_proc std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
   echo "  std/socket, std/time and std/tls (std/x509 its own, std/dns std/socket's), and std/base64, std/compress, std/digest, std/hpack, std/mime, std/slice, std/unicode, std/uri and std/zstd, which reach nothing"
 else
   echo "  std/http imports $imports"
@@ -1147,6 +1149,72 @@ PY
     @socket.close' '      nil
     end
     @socket.close' "the waiting std/tls client, on the stop"
+fi
+
+echo
+echo "== connections on every core: serve_parallel (bench/std_http_parallel.iyi)"
+# `Server.serve_parallel` starts each connection as a parallel task, so a
+# request is answered on a pool worker rather than on the thread that
+# accepts, and a stop closes the listener on that thread while the
+# connections it must close are on others. The program holds it: eight
+# requests that compute, waiting before anything accepts, answered on
+# more than one worker and on none of them the accepting thread; a
+# handler that panics ending its own connection; and the stop, an answer
+# in progress written and a kept-alive connection closed, under
+# watchdogs. Then copies of std/http with the connection spawned on the
+# accepting thread, and with the watcher that carries the stop to a
+# connection's worker made to do nothing, each caught at the line that
+# names it.
+if ! "$IYI" build -o "$WORK/parallel" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel.build" 2>&1; then
+  echo "  bench/std_http_parallel.iyi did not build"
+  sed -n '1,8p' "$WORK/parallel.build"
+  status=1
+elif ! timeout 120 "$WORK/parallel" >"$WORK/parallel.out" 2>&1; then
+  echo "  serve_parallel did not hold:"
+  grep -e '^FAIL ' "$WORK/parallel.out" | sed 's/^/    /'
+  status=1
+else
+  grep -v -e 'ALL CHECKS PASSED' -e '^iyi: panic' -e '^  at ' "$WORK/parallel.out" | tr -d '\r' | sed 's/^/  /'
+  # parallel_breaks <label> <old> <new> <check>: the program over a copy
+  # of http.iyi with <old> made <new> must print "FAIL <check>".
+  parallel_breaks() {
+    local label="$1" old="$2" new="$3" check="$4"
+    rm -rf "$WORK/parbreak" && mkdir -p "$WORK/parbreak/std"
+    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/http.iyi" "$WORK/parbreak/std/http.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+    then
+      echo "  $label: the patch did not apply"
+      status=1
+      return
+    fi
+    if ! IYI_PATH="$WORK/parbreak${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/parallel-broken" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel-broken.build" 2>&1; then
+      echo "  $label: the broken copy did not build"
+      sed -n '1,6p' "$WORK/parallel-broken.build" | sed 's/^/    /'
+      status=1
+      return
+    fi
+    timeout 120 "$WORK/parallel-broken" >"$WORK/parallel-broken.out" 2>&1
+    got="$(grep -m1 "^FAIL $check" "$WORK/parallel-broken.out" | tr -d '\r')"
+    if [ -n "$got" ]; then
+      echo "  $label: caught: $got"
+    else
+      echo "  $label: not caught at \"$check\""
+      sed -n '1,12p' "$WORK/parallel-broken.out" | sed 's/^/    /'
+      status=1
+    fi
+  }
+  parallel_breaks "a connection served on the thread that accepted it" \
+    '    g.spawn_parallel do
+      client = IyiSocket.new(fd, family)' '    g.spawn do
+      client = IyiSocket.new(fd, family)' "answered on the accepting thread"
+  parallel_breaks "a stop that never reaches a connection on another worker" \
+    '            stop.close
+            idle.values.each { |waiting| waiting.close_for_stop }' '            nil' "the stop"
 fi
 
 echo
@@ -3748,8 +3816,11 @@ guard_breaks "an HTTP/2 body bounded per read alone" guard_h2 \
   '      conn.deadline_at(whole, "read a request") if whole > 0_i64
       unless stream_bodies' '      unless stream_bodies' \
   h2 "an HTTP/2 body a frame of a byte at a time"
+# `serve`'s own line: `serve_parallel` makes its places the same way, and
+# the comment above this one is `serve`'s alone.
 guard_breaks "connections served without a cap" guard_cap \
-  'slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' 'slots = nil.as(Channel(Int32)?)' \
+  '    # A place per connection served: a send waits while every one is held.
+    slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' '    slots = nil.as(Channel(Int32)?)' \
   cap "cap"
 guard_breaks "a connection's place never given back" guard_leak \
   "      # The connection's place, given back however it ended.

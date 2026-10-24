@@ -1663,6 +1663,14 @@ module Iyi
     property? uses_block_arg = false
     property? assigns_special_var = false
     property? abstract : Bool
+    # iyi: `@[Share]` on the def: the block it keeps may run on other
+    # threads, several at once, so every block given to it is checked where
+    # it is written as a parallel task's is (SPEC.md III.4.4, III.4.13), and
+    # inside the def the proc it became is the one non-`Share` value a
+    # parallel block may capture or pass on. A flag rather than the
+    # annotation because an instance is a clone, and a clone carries no
+    # annotations.
+    property? iyi_share_block = false
 
     def initialize(@name, @args = [] of Arg, body = nil, @receiver = nil, @block_arg = nil, @return_type = nil, @macro_def = false, @block_arity = nil, @abstract = false, @splat_index = nil, @double_splat = nil, @free_vars = nil)
       @body = Expressions.from body
@@ -1698,6 +1706,7 @@ module Iyi
       a_def.iyi_open_travel = iyi_open_travel?
       a_def.iyi_defer = iyi_defer?
       a_def.iyi_from_derive = iyi_from_derive?
+      a_def.iyi_share_block = iyi_share_block?
       a_def.name_location = name_location
       a_def.visibility = visibility
       a_def.free_var_bounds = @free_var_bounds.clone

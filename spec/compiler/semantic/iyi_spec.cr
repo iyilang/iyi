@@ -4936,6 +4936,100 @@ describe "Semantic: iyi" do
           CODE
       end
     end
+
+    # SPEC.md III.4.13: `@[Share]` on a def says the block it keeps may run
+    # on other threads, several at once (std/http's `serve_parallel`).
+    describe "the block a @[Share] def keeps" do
+      group_stub = <<-STUB
+        class IyiGroup
+          def spawn_parallel(&block : -> T) : Nil forall T
+            keep = block
+            nil
+          end
+        end
+
+        G = IyiGroup.new
+
+        class Counter
+          def initialize
+            @count = 0
+          end
+
+          def count=(value : Int32)
+            @count = value
+          end
+        end
+
+        @[Share]
+        def everywhere(&work : -> Int32) : Nil
+          G.spawn_parallel do
+            kept = work
+            1
+          end
+          G.spawn_parallel(&work)
+          nil
+        end
+
+        STUB
+
+      it "checks every block given to it, and lets the def capture and pass on that block" do
+        assert_type(group_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          n = 3
+          everywhere { n }
+          CODE
+      end
+
+      it "refuses a captured value that is not shareable, naming the def" do
+        assert_error(group_stub + <<-CODE, "everywhere keeps, which may run on other threads captures `counter : Counter`, which is not Share", filename: "x.iyi")
+          counter = Counter.new
+          everywhere do
+            counter.count = 1
+            1
+          end
+          CODE
+      end
+
+      it "refuses a captured local assigned after the block was given" do
+        assert_error(group_stub + <<-CODE, "`count` is assigned here, after the block was given", filename: "x.iyi")
+          count = 1
+          everywhere { count }
+          count = 2
+          CODE
+      end
+
+      it "refuses Share on a def that keeps no block" do
+        assert_error(<<-CODE, "Share on a def says the block it keeps may run on other threads, and `plain` keeps no block", filename: "x.iyi")
+          @[Share]
+          def plain(x : Int32) : Int32
+            x
+          end
+          CODE
+      end
+
+      it "refuses a proc passed on as the block of a parallel task" do
+        assert_error(group_stub + <<-CODE, "the block spawn_parallel runs on another thread is given a proc, `&q`", filename: "x.iyi")
+          counter = Counter.new
+          q = ->do
+            counter.count = 1
+            1
+          end
+          G.spawn_parallel(&q)
+          CODE
+      end
+
+      it "takes the def's block on trust only while the def leaves it as given" do
+        assert_error(group_stub + <<-CODE, "the block spawn_parallel runs on another thread is given a proc, `&work`", filename: "x.iyi")
+          @[Share]
+          def swapped(&work : -> Int32) : Nil
+            work = ->{ 1 }
+            G.spawn_parallel(&work)
+            nil
+          end
+
+          swapped { 1 }
+          CODE
+      end
+    end
   end
 
   # #136. A literal records each type it can be cast to while the overloads

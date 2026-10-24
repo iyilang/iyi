@@ -20,7 +20,11 @@ describe "`iyi-*` external commands" do
   end
 
   it "runs iyi-* from PATH with the rest of the line" do
-    result = Process.capture_result(iyi, "echo_env", "foo", "bar", env: {"PATH" => "#{exec_path}#{Process::PATH_DELIMITER}#{ENV["PATH"]?}"})
+    # Without the IYI_EXEC_PATH and CRYSTAL_EXEC_PATH `bin/crystal` exports
+    # to the spec run, which `iyi` would take as its own directory and pass
+    # on instead of the one it is in.
+    result = Process.capture_result(iyi, "echo_env", "foo", "bar",
+      env: {"PATH" => "#{exec_path}#{Process::PATH_DELIMITER}#{ENV["PATH"]?}", "IYI_EXEC_PATH" => nil, "CRYSTAL_EXEC_PATH" => nil})
     result.should(be_success)
       .output.should(contain("PROGRAM_NAME=#{echo_env_path}"))
     result.output.should contain(%(ARGV=["foo", "bar"]))

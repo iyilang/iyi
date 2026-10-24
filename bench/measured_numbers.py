@@ -221,6 +221,32 @@ def check_context_threshold(wrong: list[str], held: list[str]) -> None:
     held.append(f"the context pack's line is {stated[0]}% in both")
 
 
+def check_webapp_size(wrong: list[str], held: list[str]) -> None:
+    """SPEC.md IV.3a quotes the generated web application's size; the generator writes it."""
+    webapp = load("bench/incremental/generate_webapp.py")
+    text = doc("SPEC.md")
+    prose = quoted(text, r"(\d+) controllers in (\d+) files and ([\d,]+) lines", "SPEC.md", wrong)
+    rows = quoted(text, r"\| generated web app \(\d+ controllers\) \| ([\d,]+, [\d,]+) \|", "SPEC.md", wrong)
+    if not prose or not rows:
+        return
+    with tempfile.TemporaryDirectory() as raw:
+        webapp.generate(raw, webapp.CONTROLLERS)
+        files = [p for p in pathlib.Path(raw).rglob("*") if p.suffix in (".iyi", ".eiy")]
+        lines = sum(p.read_bytes().count(b"\n") for p in files)
+    measured = (webapp.CONTROLLERS, len(files), lines)
+    stated = re.search(r"(\d+) controllers in (\d+) files and ([\d,]+) lines", text)
+    said = tuple(int(group.replace(",", "")) for group in stated.groups())
+    table = rows[0]
+    if said != measured or table != f"{measured[1]}, {measured[2]:,}":
+        wrong.append(
+            f"SPEC.md: the generated web application is quoted as {said} and `{table}`, "
+            f"bench/incremental/generate_webapp.py writes {measured[0]} controllers, "
+            f"{measured[1]} files, {measured[2]:,} lines"
+        )
+        return
+    held.append(f"the generated web application is {measured[1]} files and {measured[2]:,} lines, as SPEC.md says")
+
+
 # What no gate on a shared runner can check, named rather than left implied.
 # Each is a figure the docs state in the present tense and only a quiet,
 # release-built machine can produce; `bench/machine_probe.py` prints the
@@ -235,6 +261,7 @@ UNCHECKABLE = [
     "the macro tables' seconds (bench/macro_cost.py, needs a release compiler)",
     "the resident-set band (bench/resident_probe.py, needs a release build)",
     "the runtime ratios (bench/runtime.py, needs release builds of both libraries)",
+    "the real-program edit-loop table (bench/edit_loop.py, needs a release compiler)",
 ]
 
 
@@ -248,6 +275,7 @@ def main() -> int:
         check_macro_sizes,
         check_daemon_shape,
         check_context_threshold,
+        check_webapp_size,
     ):
         check(wrong, held)
 

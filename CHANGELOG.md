@@ -74,6 +74,35 @@
   `K32GetProcessMemoryInfo`'s working set on Windows), and left out where a
   platform cannot say. bench/verbs_exercise.sh checks every phase names a
   figure and that the largest is a plausible one.
+- **`iyi build` with nothing changed builds nothing (#142).** A build that
+  finishes records what it was built from - every file it opened or asked
+  about, every directory it listed, every environment variable it read, the
+  files a macro `run` program names (`std/eiy` names its template), the link
+  command's files and the libraries its `-l` flags find, the compiler, the
+  command line and the output - and the next build of that output reads the
+  record back and stops at `prog is up to date` when none of it moved: 0.009 s
+  to 0.011 s on every program SPEC.md IV.3a times, against 0.10 s to 1.09 s.
+  On by default; `--force` builds anyway, and `-s` says what moved, or why
+  the check was off. It is off for a build whose inputs cannot be listed - a
+  macro that runs a command, a `run` program that does not say what it read,
+  a linker flag that runs one, a library found nowhere the check looks, a
+  macro that prints, a build that warned - and the next build compiles. A
+  program on Crystal's prelude is one today, through `src/gc/boehm.cr`'s
+  `pkg-config`. `bench/up_to_date.sh` holds it: no change is skipped; a
+  source, a template, a variable a macro read, a flag, the output, an
+  artifact, a linked library and the compiler each rebuild a correct
+  program; each broken input is refused; and a record with one class of
+  input taken out takes that change for up to date. SPEC.md V.9 (e).
+- **SPEC.md IV.3a says what real programs cost.** `bench/edit_loop.py` times
+  the loop on `samples/iyi/webapp.iyi` with `kemal` and `app`, on
+  `bench/std_http_exercise.iyi`, on IV.3a's generated project and on a
+  generated web application of the issue's size
+  (`bench/incremental/generate_webapp.py`: generics, unions, `derive`, EIY).
+  The generated project understates the loop: from source the web
+  application rebuilds in 0.74 s against its 0.22 s. Measured on a 12-vCPU
+  Linux VM, where artifacts make the generated project's loop slower, not
+  faster (0.96 s an edit against 0.22 s), which is written down there and
+  not explained.
 
 ## 0.19.1 — 2026-10-23
 

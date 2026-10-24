@@ -360,6 +360,11 @@ jobs:
       - name: Build the samples again with their modules' source deleted
         run: bash bench/samples_roundtrip.sh
 
+      # V.9 (e): a build with nothing changed compiles nothing, and each kind
+      # of input a build reads, changed, builds again and prints the change.
+      - name: A build with nothing changed is up to date, and only then
+        run: bash bench/up_to_date.sh
+
       # III.4, built in III.4.8's order: a scheduler, cancellable blocking
       # primitives, then `group` and `Channel`. Two arms because the context
       # switch is naked asm and the optimiser is what corrupted it once; two
@@ -1534,6 +1539,9 @@ jobs:
       - name: Samples, from artifacts (R-1)
         run: bash bench/samples_roundtrip.sh
 
+      - name: Up to date, and only then (V.9 (e))
+        run: bash bench/up_to_date.sh
+
       - name: Token boundaries and the transport soak (III.8)
         run: |
           python3 bench/lsp_token_boundaries.py
@@ -2103,6 +2111,7 @@ jobs:
           bash bench/concurrency_exercise.sh
           bash bench/parallel_exercise.sh
           bash bench/library_boundaries.sh
+          bash bench/up_to_date.sh
 
       # And the rest of what an editor and an agent are handed. Every
       # sample again from its modules' artifacts alone (R-1), the agent

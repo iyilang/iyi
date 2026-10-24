@@ -318,7 +318,17 @@ module Iyi
 
     # Returns the result of running `pkg-config mod` but returns nil if
     # pkg-config is not installed, or the module does not exist.
+    #
+    # iyi: and tells a build's recorder what it answered. The `.pc` files
+    # behind the answer are pkg-config's to find, so the up-to-date check asks
+    # the same question again rather than guessing at them (SPEC.md V.9 (e)).
     private def pkg_config(mod, static = false) : String?
+      flags = Program.pkg_config_query(mod, static)
+      BuildInputs.current.try &.pkg_config_read(mod, static, flags)
+      flags
+    end
+
+    def self.pkg_config_query(mod : String, static : Bool) : String?
       return unless pkg_config_path = PKG_CONFIG_PATH
       return unless (Process.run(pkg_config_path, {mod}).success? rescue nil)
 

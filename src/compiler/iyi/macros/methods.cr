@@ -54,6 +54,8 @@ module Iyi
     end
 
     def interpret_top_level_call?(node)
+      iyi_tell_recorder(node)
+
       # Please order method names in lexicographical order
       case node.name
       when "compare_versions"
@@ -92,6 +94,21 @@ module Iyi
         interpret_run(node)
       else
         nil
+      end
+    end
+
+    # iyi: the macro calls a skipped build could not repeat, told to the
+    # up-to-date check (SPEC.md V.9 (e)). A command's output is an input
+    # nothing here can list, and a macro that prints prints while it compiles,
+    # which a build that does not compile would not do.
+    private def iyi_tell_recorder(node) : Nil
+      return unless inputs = BuildInputs.current
+      where = node.location.try { |location| " at #{Iyi.relative_filename(location.original_filename.to_s)}:#{location.line_number}" }
+      case node.name
+      when "system", "`"
+        inputs.cannot("a macro runs a command#{where}, and what it read cannot be listed")
+      when "debug", "puts", "print", "p", "pp", "p!", "pp!"
+        inputs.cannot("a macro prints while it compiles#{where}, which a skipped build would not")
       end
     end
 

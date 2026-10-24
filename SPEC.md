@@ -8297,7 +8297,8 @@ a language through whole builds.
 `bench/incremental.py` builds a project rather than a file: 30 modules, 300
 types, 7,207 lines, written by one generator in iyi, in Crystal and in Go, and
 refused if the three binaries do not print the same number. Then it changes one
-line and builds again. Best of 7, seconds, release compiler, idle machine:
+line and builds again. Best of 7, seconds, release compiler, idle machine (the
+WSL2 box README.md names), before the up-to-date check of V.9 (e):
 
 | what changed | iyi | Crystal | `go build` |
 |---|---|---|---|
@@ -8369,8 +8370,78 @@ glance is one the compiler can read at a glance too.
 link (0.1.0 item 2 measured the same shape on `hello`). Editing one module of
 thirty costs about 0.02 s over editing nothing. There is no version of this
 table where making the front end faster moves the number a person feels; the
-next thing that would is not compiling at all on a rebuild, which is V.9 (d)
-and is priced there at weeks.
+next thing that would is not compiling at all. When nothing changed, that is
+V.9 (e), built: the "nothing at all" row is now the up-to-date check. When
+something did, it is V.9 (d), not linking, priced there at weeks.
+
+**On programs shaped like real ones, the generated project understates the
+loop.** Issue #142 timed a real application of about this size - 100 files,
+10,713 lines and 19,547 more of packages, on a 12-vCPU Windows VM - at 6.46 s
+for a rebuild with nothing changed and 6.49 s after a one-line edit, from
+source: 28x the 0.23 s above. The generated project is thirty modules of
+structs with one method each, and has none of what a real program spends its
+analysis on. `bench/incremental/generate_webapp.py` writes what it leaves out,
+at the issue's size: 32 controllers in 131 files and 10,644 lines, each a
+`derive serializable` model kept in a generic `Repo(T)`, a controller
+answering `String | NotFound` taken apart with `case ... in`, and a view that
+embeds an EIY template. `bench/edit_loop.py` times it beside the generated
+project and the two largest real programs here, `samples/iyi/webapp.iyi` with
+the `kemal` and `app` modules it imports, and `bench/std_http_exercise.iyi`;
+each from source and with `--emit-iyimod mods --use-iyimod mods`. Medians of
+7, seconds, release compilers, 0.19.1 and this change in one session, on a
+12-vCPU QEMU VM with 11 GB (Linux 7.0, LLVM 21.1.8):
+
+| program | files, lines | mode | nothing changed, 0.19.1 | nothing changed | nothing changed, `--force` | one-line edit, 0.19.1 | one-line edit |
+|---|---|---|---:|---:|---:|---:|---:|
+| IV.3a's generated project | 31, 7,207 | source | 0.217 | 0.009 | 0.20 | 0.22 | 0.21 |
+| | | artifacts | 0.632 | 0.009 | 0.62 | 0.96 | 0.97 |
+| generated web app (32 controllers) | 131, 10,644 | source | 0.743 | 0.009 | 0.74 | 0.74 | 0.79 |
+| | | artifacts | 0.417 | 0.011 | 0.42 | 0.52 | 0.55 |
+| `samples/iyi/webapp.iyi` (kemal, app) | 5, 369 | source | 0.104 | 0.009 | 0.11 | 0.11 | 0.12 |
+| | | artifacts | 0.104 | 0.010 | 0.11 | 0.12 | 0.13 |
+| `bench/std_http_exercise.iyi` | 1, 1,847 | source | 1.087 | 0.009 | 1.06 | 1.06 | 1.07 |
+| | | artifacts | 0.786 | 0.010 | 0.83 | 0.83 | 0.83 |
+
+**From source, the web application costs 3.4x the generated project for 1.5x
+its lines: 0.74 s against 0.22 s.** Its `-s` says where: semantic (main) 0.37 s
+against 0.03 s, codegen 0.21 s against 0.09 s, and 0.09 s for the macro run
+that renders its templates, which the generated project does not have. So a
+number this section quotes for the generated project is a floor for a program
+of that size, not an estimate of one.
+
+**Artifacts pay on the web application and cost on the generated project,
+here.** The web application rebuilds in 0.42 s with them against 0.74 s
+without, and takes an edit in 0.52 s against 0.74 s. The generated project goes
+the other way: 0.63 s and 0.96 s with artifacts against 0.22 s from source, of
+which `-s` puts 0.23 s in reading the artifacts (semantic, top level) and 0.24 s
+in linking, against 0.03 s each from source. That is the opposite of the 1.8x
+of the first table, and `bench/incremental.py` run on this machine the same
+day sides with it rather than with the table: one module's body 0.89 s for
+0.19.1 against 0.70 s for Crystal and 0.11 s for Go, and its "without
+artifacts" row 9.39 s, because that row emits every artifact again. The first
+table was another machine; why this one reads and links artifacts that much
+slower is not answered here. The issue's 6.5 s is not reproduced either: the
+program nearest the issue's in size and shape costs 0.74 s here, on Linux, and
+this section has no Windows figure to set beside it.
+
+**Nothing changed costs 0.009 s to 0.011 s for every program in the table**,
+which is the up-to-date check (V.9 (e)) reading its record back and finding
+nothing moved: 11x under 0.19.1's 0.104 s on the smallest program and 120x
+under its 1.087 s on the largest. `bench/incremental.py` agrees: "nothing at
+all" is 0.01 s against 0.60 s, with Go's 0.04 s beside it. Its Crystal column
+stays at 0.76 s, because a program on Crystal's prelude runs `pkg-config` from
+a macro (`src/gc/boehm.cr`), which turns the check off for it. What the check
+costs where it cannot skip is the recording: a forced rebuild with nothing
+changed and a one-line edit cost what 0.19.1's did, within 0.05 s either way;
+the same 0.19.1, measured the evening before, read up to 0.15 s apart on the
+same rows (`std_http_exercise` from artifacts, 0.94 s and then 0.79 s), which
+is the size of difference this table can resolve.
+
+Reproduced with a release compiler, `make iyi release=1`, then `python3
+bench/edit_loop.py [COMPILER]` (`--json FILE` keeps every run and each build's
+`-s` phases); 0.19.1's columns are the same script given 0.19.1's binary, which
+has no `--force` and so no forced column. The first table is `python3
+bench/incremental.py`, which needs `go`.
 
 ### IV.2a The checksum, and what it is not for
 
@@ -8765,6 +8836,60 @@ Named honestly, so nobody mistakes this draft for complete.
    0.01–0.02 s, and at that figure the question is closed by (a) and the rest
    is not worth designing. **The recommendation is (a), then (b) if the number
    survives it, and (c) for no reason this section can find.**
+
+   **(e) Not building at all when nothing changed. Built, and on by
+   default.** (d) is the rebuild that has something to link. The rebuild that
+   has nothing to link - nothing the output was built from has changed -
+   needs no linker, in-process or not, and `go build` answers it by not
+   building. So does `iyi build` (#142): a build that finishes writes down what
+   it was built from, in the compiler cache beside its objects (one
+   `up-to-date-*.json` per output path), and the next build of the same output
+   with the same command line reads that back before anything is parsed. If
+   every entry is as it was it prints `prog is up to date`, exits 0 and
+   compiles nothing. `--force` builds anyway; `-s` and `--verbose` say which
+   entry moved, or why the check was off. Measured in IV.3a: 0.009 s to
+   0.011 s for every program timed there, against 0.10 s to 1.09 s before.
+
+   *What the record holds* is what the build was watched reading, not a list
+   of what a build is supposed to read, because the first place such a list
+   missed would be a stale program that runs - the failure (d) calls the worst
+   in this document. `File`, `Dir` and `ENV` are observed while a build holds
+   the recorder (`build_inputs.cr`), so the record is every file the compiler
+   opened or asked about: sources, the prelude, packages, artifacts, the files
+   a macro's `read_file` and `file_exists?` named, and the probes an import made
+   for files that are not there, kept as absent so that one appearing
+   rebuilds. Then every directory listed, by its names; every environment
+   variable read, the compiler's, a macro's `env`, and the ones the linker, its
+   driver and `pkg-config` are documented to read; `pkg-config`'s answers,
+   asked again; the files the link command names and the library each `-l`
+   finds, searched for the way the linker searches; the files a macro `run`
+   program says it read, one a line in the file `$IYI_RUN_INPUTS` names
+   (`std/eiy` names its template); the compiler, as version, path, size and
+   time; the working directory; the command line, less the switches that change
+   only what is printed. And the output, stamped after the build, so a deleted
+   or replaced program builds again.
+
+   A file is compared by size and modification time. One read within its
+   clock's resolution of being written (0.1 s; 2 s on a file system that keeps
+   whole seconds) is read whole and fingerprinted too, before the compiler
+   reads it, since a same-size edit inside that tick leaves size and time as
+   they were. `-s` names what was fingerprinted; in the edit loop it is the
+   file just edited.
+
+   *Off where it cannot see, and said so.* A macro that runs a command
+   (`system`, backticks), a `run` program that does not name what it read, a
+   linker flag that runs a command, a library found nowhere the check looks,
+   a macro that prints, a build that warned: any one, and the build writes no
+   record, so the next one compiles and `-s` says why. A program on Crystal's
+   prelude is one of these today, through `src/gc/boehm.cr`'s `pkg-config`
+   backticks. The check does not apply to `--no-codegen`, `--emit`, a
+   cross-compile or a source on standard input. A record is deleted before a
+   build starts and written only when one finishes, so a failed or interrupted
+   build leaves nothing that vouches for it. `bench/up_to_date.sh` is the gate:
+   each kind of input changed rebuilds a correct program, each broken input is
+   refused, and a record with any one class of input taken out of it takes
+   that change for up to date - which is what says the rebuild came from that
+   entry.
 
 10. **Two compilers at once.** Builds run while other builds were running
     failed at the link, asking for a `_main.o0.o` nobody had written, and once

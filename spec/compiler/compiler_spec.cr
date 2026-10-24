@@ -73,6 +73,31 @@ describe "Compiler" do
     end
   end
 
+  # iyi: a build that finds nothing changed since its output was built leaves
+  # the output as it is and compiles nothing (SPEC.md V.9 (e)); `--force`
+  # builds anyway. Asked of the output's time because a skipped build does
+  # not link, and a link writes the file again. bench/up_to_date.sh is the
+  # gate for each kind of input; this is the verb's contract, in process.
+  # An iyi program, because one on Crystal's prelude runs `pkg-config` from
+  # a macro (`src/gc/boehm.cr`), which turns the check off for it.
+  it "leaves a current output as it is, and builds it again under --force" do
+    with_tempdir("iyi-up-to-date") do
+      File.write "main.iyi", "module main\n\nputs \"Hello!\"\n"
+      path = File.expand_path("prog#{{{ flag?(:win32) ? ".exe" : "" }}}")
+      # A new array each time: `Command` shifts the verb off the one it is given.
+      args = -> { ["build", "main.iyi", "-o", path] }
+      Iyi::Command.run args.call
+      built = File.info(path).modification_time
+
+      Iyi::Command.run args.call
+      File.info(path).modification_time.should eq built
+
+      Iyi::Command.run args.call + ["--force"]
+      File.info(path).modification_time.should_not eq built
+      Process.capture(path).should eq("Hello!\n")
+    end
+  end
+
   # iyi: the linker probe is asked once per `PATH`, not once per build.
   #
   # Before linking, the compiler searches `PATH` for `mold` and then for

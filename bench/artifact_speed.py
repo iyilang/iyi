@@ -101,8 +101,10 @@ def main():
         for name in MODULE_DIRS:
             shutil.rmtree(artifact_dir / name, ignore_errors=True)
 
-        from_source = [str(CRYSTAL), "build", "-o", "out", PROGRAM]
-        from_artifact = [str(CRYSTAL), "build", "--use-iyimod", "mods", "-o", "out", PROGRAM]
+        # `--force`: a warm row is a reused cache, not an output the up-to-date
+        # check would find current and not compile at all.
+        from_source = [str(CRYSTAL), "build", "--force", "-o", "out", PROGRAM]
+        from_artifact = [str(CRYSTAL), "build", "--force", "--use-iyimod", "mods", "-o", "out", PROGRAM]
         front_source = from_source + ["--no-codegen"]
         front_artifact = from_artifact + ["--no-codegen"]
 

@@ -361,6 +361,10 @@ module Iyi
                                                  output_filename : String, & : Program -> Nil) : Result
       program = pre.program
 
+      # What the prelude was read from belongs to this build's record too:
+      # it was read before this build began, under the analysis's own.
+      BuildInputs.current.try &.merge(pre.inputs)
+
       # The prelude was analysed against a placeholder filename. Adopt this
       # build's, so that anything derived from it — `__temp_` prefixes, error
       # locations — matches what a normal compile would produce.
@@ -469,7 +473,11 @@ module Iyi
       # be silently, confusingly wrong.
       getter fingerprint : Hash(String, Time)
 
-      def initialize(@program, @node, @processor, @key)
+      # What the analysis read, for the up-to-date record of each build that
+      # adopts it.
+      getter inputs : BuildInputs
+
+      def initialize(@program, @node, @processor, @key, @inputs)
         @fingerprint = {} of String => Time
         @program.requires.each do |filename|
           if info = File.info?(filename)
@@ -558,12 +566,19 @@ module Iyi
     # The filename is a placeholder: the build that adopts this has its own, and
     # sets it before compiling.
     def preanalyse_prelude : Preanalysed
-      program = new_program([Source.new("", "")] of Source)
-      location = Location.new(program.filename, 1, 1)
-      node = program.normalize(Expressions.new([Require.new(prelude).tap(&.iyi_prelude=(true)).at(location)] of ASTNode))
-      node, processor = program.top_level_semantic(node)
+      inputs = BuildInputs.new(CacheDir.instance.dir)
+      held = BuildInputs.current
+      BuildInputs.current = inputs
+      begin
+        program = new_program([Source.new("", "")] of Source)
+        location = Location.new(program.filename, 1, 1)
+        node = program.normalize(Expressions.new([Require.new(prelude).tap(&.iyi_prelude=(true)).at(location)] of ASTNode))
+        node, processor = program.top_level_semantic(node)
+      ensure
+        BuildInputs.current = held
+      end
       @progress_tracker.clear
-      Preanalysed.new(program, node, processor, prelude_cache_key)
+      Preanalysed.new(program, node, processor, prelude_cache_key, inputs)
     end
 
     # :ditto:
@@ -3766,6 +3781,7 @@ module Iyi
       Rx.gsub(lib_flags, BACKTICK_SUBCOMMAND) do |match|
         # The group sits between the two backticks, so it always participated.
         command = match[1].not_nil!
+        BuildInputs.current.try &.cannot("a linker flag runs `#{command}`, and what that read cannot be listed")
         begin
           error_io = IO::Memory.new
           output = Process.run(command, shell: true, output: :pipe, error: error_io) do |process|
@@ -4088,6 +4104,8 @@ module Iyi
 
     private def run_linker(linker_name, command, args)
       print_command(command, args) if verbose?
+      # iyi: the files the linker will read, for the up-to-date check.
+      BuildInputs.current.try &.linked(command, args)
 
       begin
         Process.run(command, args, shell: true,

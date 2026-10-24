@@ -112,6 +112,10 @@ class Iyi::Command
     # iyi: `-f json` was asked for, so every refusal is data (`json_report`).
     @json_output = false
     @progress_tracker = ProgressTracker.new
+    # iyi: `build --force`, and whether the source came from standard input,
+    # which the up-to-date check has no file to look at again for.
+    @force_build = false
+    @stdin_source = false
   end
 
   def run
@@ -423,9 +427,97 @@ class Iyi::Command
     unreachable "vet"
   end
 
+  # iyi: a build that finds nothing changed since its output was built says
+  # so and compiles nothing (SPEC.md V.9 (e), `UpToDate`). The recorder
+  # starts before the options are read, because reading them reads files too:
+  # the source, `IYI_OPTS`, the workspace's `mods` that a build reads without
+  # being told.
   private def build
-    config = create_compiler "build"
-    config.compile
+    arguments = options.dup
+    inputs = BuildInputs.new(nil)
+    BuildInputs.current = inputs
+    begin
+      config = create_compiler "build", defer_move_aside: true
+      compiler = config.compiler
+      inputs.cache_root = CacheDir.instance.dir
+      check = up_to_date_check(config, arguments)
+
+      if check && !@force_build
+        reason = @progress_tracker.stage("Up-to-date check") { check.stale_reason }
+        unless reason
+          BuildInputs.current = nil
+          up_to_date_note(compiler, "none of the #{check.checked} files, listings and environment values it was built from changed")
+          fingerprint_note(compiler, inputs)
+          puts "#{Iyi.relative_filename(check.output)} is up to date" unless @json_output
+          return
+        end
+        up_to_date_note(compiler, "rebuilding: #{reason}")
+      elsif check
+        up_to_date_note(compiler, "rebuilding: --force")
+      end
+
+      check.try &.forget
+      move_output_aside(compiler, config.output_filename)
+      config.compile
+      BuildInputs.current = nil
+
+      if check
+        unless (warnings = compiler.warnings.reports.size).zero?
+          inputs.cannot("the build printed #{warnings} warning#{warnings == 1 ? "" : "s"}, which a skipped build would not")
+        end
+        if reasons = check.record(inputs)
+          up_to_date_note(compiler, "the next build compiles: #{reasons.join("; ")}")
+        end
+        fingerprint_note(compiler, inputs)
+      end
+    ensure
+      BuildInputs.current = nil
+    end
+  end
+
+  # The files the recorder read whole because their times could not vouch for
+  # them (`BuildInputs.racy?`), said when there were any: a file just written,
+  # which in the edit loop is the file just edited.
+  private def fingerprint_note(compiler : Compiler, inputs : BuildInputs) : Nil
+    return if (files = inputs.fingerprinted).empty?
+    names = files.first(3).map { |path| Iyi.relative_filename(path) }.join(", ")
+    names += " and #{files.size - 3} more" if files.size > 3
+    up_to_date_note(compiler, "fingerprinted #{names}, #{inputs.fingerprinted_bytes} bytes, written too recently for their times to vouch for them")
+  end
+
+  # The check for this build, or nil where it does not apply: a build that
+  # writes no program, or one whose inputs or outputs it cannot follow.
+  private def up_to_date_check(config : CompilerConfig, arguments : Array(String)) : UpToDate?
+    compiler = config.compiler
+    return nil if compiler.no_codegen?
+    reason =
+      if compiler.cross_compile?
+        "a cross-compile prints its link command rather than linking"
+      elsif !compiler.emit_targets.none?
+        "--emit writes files this check does not follow"
+      elsif @stdin_source
+        "the source came from standard input"
+      end
+    if reason
+      up_to_date_note(compiler, "off: #{reason}")
+      return nil
+    end
+
+    output = config.output_filename
+    extras = [] of String
+    {% if flag?(:msvc) %}
+      extras << "#{output.rchop(::Path[output].extension)}.pdb"
+    {% end %}
+    {% if flag?(:darwin) %}
+      extras << "#{output}.dwarf"
+    {% end %}
+    UpToDate.new(output, config.sources, arguments, extras)
+  end
+
+  # What the check decided and why, for `-s` and `--verbose`.
+  private def up_to_date_note(compiler : Compiler, text : String) : Nil
+    return unless @progress_tracker.stats? || compiler.verbose?
+    puts "Up-to-date check: #{text}"
   end
 
   # The compiler a `crystal build` with these arguments would use, so the daemon
@@ -709,7 +801,7 @@ class Iyi::Command
                               hierarchy = false, cursor_command = false,
                               single_file = false, dependencies = false,
                               path_filter = false, unreachable_command = false,
-                              allowed_formats = ["text", "json"])
+                              allowed_formats = ["text", "json"], defer_move_aside = false)
     compiler = new_compiler
     compiler.progress_tracker = @progress_tracker
     compiler.no_codegen = no_codegen
@@ -1009,6 +1101,11 @@ class Iyi::Command
         opts.on("--static", "Link statically") do
           compiler.static = true
         end
+        if command == "build"
+          opts.on("--force", "Build even when nothing the output was built from has changed") do
+            @force_build = true
+          end
+        end
       end
 
       opts.on("--stdin-filename ", "Source file name to be read from STDIN") do |stdin_filename|
@@ -1047,6 +1144,7 @@ class Iyi::Command
     sources = [] of Compiler::Source
     if has_stdin_filename
       sources << Compiler::Source.new(filenames.shift, STDIN.gets_to_end)
+      @stdin_source = true
     end
     sources.concat gather_sources(filenames)
 
@@ -1073,9 +1171,14 @@ class Iyi::Command
     # FIXME: The explicit cast should not be necessary (#15472)
     output_path = ::Path[opt_output_filename.as?(String) || "./"]
 
-    if output_path.ends_with_separator? || File.directory?(output_path)
+    # The recorder looks away for this one question, which may be about the
+    # output itself (`ignore_output`), and is told the answer when it is a
+    # directory, which is then an input like any other.
+    if output_path.ends_with_separator? || BuildInputs.paused { File.directory?(output_path) }
+      BuildInputs.current.try &.looked_at(output_path.to_s)
       first_filename = sources.first.filename
       output_filename = (output_path / "#{::Path[first_filename].stem}#{output_extension}").normalize.to_s
+      ignore_output(output_filename)
 
       # Check if we'll overwrite the main source file
       if !compiler.no_codegen? && !run && Iyi.same_file?(first_filename, output_filename)
@@ -1086,6 +1189,7 @@ class Iyi::Command
       if output_path.extension.empty?
         output_filename += output_extension
       end
+      ignore_output(output_filename)
 
       # iyi: and the same question of a name the author typed. The check
       # above covers only the name the compiler derives itself, so
@@ -1137,34 +1241,9 @@ class Iyi::Command
         abort! "#{directory} will not take #{File.basename(output_filename)}: no permission to write there", :USAGE_ERROR
       end
 
-      # Windows will not write over a program that is running, nor over a
-      # read-only file, and the linker said so only after the whole
-      # compile: "LNK1104: cannot open file", exit status 1104, and the
-      # linker's command line on stderr. It does let the file be renamed,
-      # which is how `make -f Makefile.win` replaces a running `iyi.exe`,
-      # so the old program is moved aside - it goes on running - and the
-      # new one written where it was.
-      {% if flag?(:win32) %}
-        unless compiler.cross_compile?
-          # And the program database the MSVC linker writes beside it,
-          # first, so a refusal leaves the program as it was. A `.pdb` a
-          # debugger holds open, or a read-only one from an extracted tree,
-          # failed the link after the whole compile - "LNK1201: error writing
-          # to program database", exit status 1201, the linker's command line
-          # - and the linker deleted the program on its way out.
-          {% if flag?(:msvc) %}
-            unless compiler.debug.none?
-              pdb = "#{output_filename.rchop(::Path[output_filename].extension)}.pdb"
-              unless Iyi.move_aside_if_busy(pdb)
-                abort! "#{pdb} is in use and cannot be replaced or moved aside", :USAGE_ERROR
-              end
-            end
-          {% end %}
-          unless Iyi.move_aside_if_busy(output_filename)
-            abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
-          end
-        end
-      {% end %}
+      # A build moves its output aside after the up-to-date check instead, so
+      # that a program that is running and current is left running in place.
+      move_output_aside(compiler, output_filename) unless defer_move_aside
     end
 
     if run
@@ -1199,6 +1278,46 @@ class Iyi::Command
     @config = CompilerConfig.new compiler, sources, output_filename, emit_base_filename,
       arguments, specified_output, hierarchy_exp, cursor_location, output_format.not_nil!,
       includes, excludes, verbose, check, tallies
+  end
+
+  # iyi: the output is what the up-to-date check stamps after the build, not
+  # an input, and the questions `create_compiler` asks next are about it. Told
+  # before they are asked: an output a build has just written is one whose
+  # time cannot vouch for it (`BuildInputs.racy?`), so the recorder would read
+  # the whole program to fingerprint it - 1.8 s of a debug compiler's 2.0 s,
+  # on a 1.3 MB program, in the build after a build.
+  private def ignore_output(output_filename : String) : Nil
+    BuildInputs.current.try &.ignore(output_filename)
+  end
+
+  # Windows will not write over a program that is running, nor over a
+  # read-only file, and the linker said so only after the whole
+  # compile: "LNK1104: cannot open file", exit status 1104, and the
+  # linker's command line on stderr. It does let the file be renamed,
+  # which is how `make -f Makefile.win` replaces a running `iyi.exe`,
+  # so the old program is moved aside - it goes on running - and the
+  # new one written where it was.
+  private def move_output_aside(compiler : Compiler, output_filename : String) : Nil
+    {% if flag?(:win32) %}
+      return if compiler.cross_compile?
+      # And the program database the MSVC linker writes beside it,
+      # first, so a refusal leaves the program as it was. A `.pdb` a
+      # debugger holds open, or a read-only one from an extracted tree,
+      # failed the link after the whole compile - "LNK1201: error writing
+      # to program database", exit status 1201, the linker's command line
+      # - and the linker deleted the program on its way out.
+      {% if flag?(:msvc) %}
+        unless compiler.debug.none?
+          pdb = "#{output_filename.rchop(::Path[output_filename].extension)}.pdb"
+          unless Iyi.move_aside_if_busy(pdb)
+            abort! "#{pdb} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+          end
+        end
+      {% end %}
+      unless Iyi.move_aside_if_busy(output_filename)
+        abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+      end
+    {% end %}
   end
 
   private def gather_sources(filenames)

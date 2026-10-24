@@ -38,6 +38,7 @@ require "./iyi/macros/*"
 require "./iyi/syntax"
 require "./iyi/types"
 require "./iyi/util"
+require "./iyi/build_inputs"
 require "./iyi/warnings"
 
 # Last, as the glob would have it: `@[Link]` is read by the front end, and the

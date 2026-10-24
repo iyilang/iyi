@@ -85,8 +85,12 @@ module Iyi
     # *cache_root* may be unknown when recording starts — `iyi build` starts
     # before its options are read, and the cache directory is one of them —
     # and is then set with `cache_root=`, which drops what it excludes.
-    @cache_root : String? = nil
-    @packages : String? = nil
+    # The cache root under each spelling a path may arrive in, with the
+    # packages directory inside it: on Windows `C:\Users\RUNNER~1\...` and
+    # `C:\Users\runneradmin\...` are one directory, and a cache file
+    # recorded under the long name while the root was set under the short one
+    # was taken for a source, gone by the next build (job 120812802049).
+    @roots = [] of {String, String}
 
     def initialize(cache_root : String?)
       @ignored = Set(String).new
@@ -95,10 +99,30 @@ module Iyi
     end
 
     def cache_root=(root : String) : Nil
-      prefix = comparable(root.rstrip(::File::SEPARATOR)) + ::File::SEPARATOR
-      @cache_root = prefix
-      @packages = prefix + "mod" + ::File::SEPARATOR
+      @roots = BuildInputs.spellings(root.rstrip(::File::SEPARATOR)).map do |spelled|
+        prefix = comparable(spelled) + ::File::SEPARATOR
+        {prefix, prefix + "mod" + ::File::SEPARATOR}
+      end.uniq
       purge
+    end
+
+    # *path* as given, and on Windows also as the file system spells it: the
+    # nearest part that exists, resolved (`File.realpath` gives long names),
+    # with the rest as given.
+    def self.spellings(path : String) : Array(String)
+      spelled = [path]
+      {% if flag?(:win32) %}
+        rest = [] of String
+        at = ::Path[::File.expand_path(path)]
+        while at.parent != at && !::File.exists?(at.to_s)
+          rest.unshift at.basename
+          at = at.parent
+        end
+        if real = (Iyi.unverbatim(::File.realpath(at.to_s)) rescue nil)
+          spelled << ::Path[real].join(rest).to_s
+        end
+      {% end %}
+      spelled
     end
 
     # A path this build writes and records itself — the output — so that
@@ -151,14 +175,15 @@ module Iyi
       {% if flag?(:unix) %}
         return true if path.starts_with?("/proc/") || path.starts_with?("/sys/") || path.starts_with?("/dev/")
       {% end %}
-      return false unless (cache_root = @cache_root) && (packages = @packages)
       {% if flag?(:win32) %}
         path = path.downcase
       {% end %}
-      # The root itself too: the cleaner lists it after every build, and what
-      # it holds is other programs' builds.
-      return true if path.size == cache_root.size - 1 && cache_root.starts_with?(path)
-      path.starts_with?(cache_root) && !path.starts_with?(packages)
+      @roots.any? do |(cache_root, packages)|
+        # The root itself too: the cleaner lists it after every build, and
+        # what it holds is other programs' builds.
+        next true if path.size == cache_root.size - 1 && cache_root.starts_with?(path)
+        path.starts_with?(cache_root) && !path.starts_with?(packages)
+      end
     end
 
     # A path the build asked about or opened, with the answer it got when it

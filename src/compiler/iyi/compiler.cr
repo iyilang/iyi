@@ -3986,6 +3986,10 @@ module Iyi
         else
           print compiled_macro_run.elapsed
         end
+        if stats = program.macro_run_stats[filename]?
+          print ", #{stats.runs} #{stats.runs == 1 ? "run" : "runs"} in #{stats.elapsed - compiled_macro_run.elapsed}"
+          print ", #{stats.reused} reused" if stats.reused > 0
+        end
         puts
       end
     end

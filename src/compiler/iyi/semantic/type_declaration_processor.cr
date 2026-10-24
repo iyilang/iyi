@@ -817,6 +817,15 @@ struct Iyi::TypeDeclarationProcessor
   end
 
   private def raise_doesnt_explicitly_initializes(info, name, ivar)
+    # iyi: `self.x = x`, the field assignment of Python, TypeScript, Java and
+    # Swift, calls the setter, so the field stays unset. The sentence below
+    # said `@x` was set in *other* initializers, and both its fixes made a
+    # field that is never nil nilable.
+    field = name.lchop('@')
+    if Lexer.iyi_source?(info.def.location.try(&.filename)) && (value = iyi_self_setter_value(info.def.body, field))
+      info.def.raise "`self.#{field} = #{value}` calls a setter, and does not assign the field, so this 'initialize' leaves '#{name}' of #{ivar.owner} unset: " \
+                     "write `#{name} = #{value}`, or take it as `def initialize(#{name} : #{ivar.type})`"
+    end
     info.def.raise <<-MSG
       this 'initialize' doesn't explicitly initialize instance variable '#{name}' of #{ivar.owner}, rendering it nilable
 
@@ -832,6 +841,15 @@ struct Iyi::TypeDeclarationProcessor
 
         #{name} : (#{ivar.type})?
       MSG
+  end
+
+  private def iyi_self_setter_value(body : ASTNode, field : String) : String?
+    statements = body.is_a?(Expressions) ? body.expressions : [body]
+    statements.each do |statement|
+      next unless statement.is_a?(Call) && statement.name == "#{field}=" && statement.args.size == 1
+      next unless (receiver = statement.obj).is_a?(Var) && receiver.name == "self"
+      return statement.args.first.to_s
+    end
   end
 
   private def sort_types_by_depth(types)

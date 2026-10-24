@@ -41,9 +41,12 @@ private def signature(name : String,
                       block_parameter = "",
                       free_variables = [] of String,
                       receiver = "",
-                      required = false)
+                      required = false,
+                      free_variable_bounds = [] of {String, String},
+                      where_bounds = [] of {String, String})
   Iyi::IyiMod::Signature.new(name, receiver, parameters, block_parameter,
-    return_type, free_variables, required)
+    return_type, free_variables, required,
+    free_variable_bounds: free_variable_bounds, where_bounds: where_bounds)
 end
 
 private def type_declaration(name : String,
@@ -75,6 +78,35 @@ private def with_temporary_file(&)
   ensure
     File.delete?(path)
   end
+end
+
+# Writes *modules* and `main.iyi`, builds the program from source writing the
+# modules' artifacts, deletes the modules' sources, builds it again from the
+# artifacts and answers what the two programs print. Inside a `with_tempdir`.
+private def iyimod_round_trip(modules : Hash(String, String), main : String,
+                              release = false) : {String, String}
+  modules.each do |path, text|
+    Dir.mkdir_p File.dirname(path)
+    File.write path, text
+  end
+  File.write "main.iyi", main
+  source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), main)
+
+  producer = create_spec_compiler
+  producer.prelude = "iyi/prelude"
+  producer.release! if release
+  producer.emit_iyimod = "mods"
+  producer.compile source, File.expand_path("from-source")
+  from_source = `./from-source`
+
+  modules.each_key { |path| File.delete path }
+
+  consumer = create_spec_compiler
+  consumer.prelude = "iyi/prelude"
+  consumer.release! if release
+  consumer.use_iyimod = "mods"
+  consumer.compile source, File.expand_path("from-artifact")
+  {from_source, `./from-artifact`}
 end
 
 describe Iyi::IyiMod do
@@ -158,6 +190,21 @@ describe Iyi::IyiMod do
     with_temporary_file do |path|
       Iyi::IyiMod.write sample_artifact(["std/list", "std/enumerable"]), path
       Iyi::IyiMod.read(path).import_names.should eq ["std/list", "std/enumerable"]
+    end
+  end
+
+  # A package's own build names its modules under the package's name, and
+  # `module app/greeter` alone does not say so (SPEC.md III.7, #132).
+  it "round-trips the package name the module's types live under" do
+    with_temporary_file do |path|
+      artifact = sample_artifact
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).package_name.should eq ""
+      Iyi::IyiMod.read_summary(path).package_name.should eq ""
+      artifact.package_name = "iyi_web"
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).package_name.should eq "iyi_web"
+      Iyi::IyiMod.read_summary(path).package_name.should eq "iyi_web"
     end
   end
 
@@ -331,6 +378,26 @@ describe Iyi::IyiMod do
       read[1].required.should be_true
       read[2].receiver.should eq "self"
       read[3].parameters.should eq ["*values : T", "**options"]
+    end
+  end
+
+  # A bound is checked where a call matches (II.6 §3), so a consumer that
+  # has only the artifact needs it as much as the names. The format carried
+  # `forall T` for `forall T : Show` and nothing for `where Elem : Show`, and
+  # a consumer accepted calls the source build refused.
+  it "round-trips and renders a def's bounds" do
+    signatures = [
+      signature("render", ["x : T", "y : U"], "String", free_variables: ["T", "U"],
+        free_variable_bounds: [{"T", "Show"}]),
+      signature("shown", return_type: "String", where_bounds: [{"Elem", "Show"}, {"Key", "Cmp"}]),
+    ]
+
+    with_temporary_file do |path|
+      Iyi::IyiMod.write sample_artifact(exports: signatures), path
+      read = Iyi::IyiMod.read(path).exports.functions
+
+      Iyi::IyiMod.render_signature(read[0]).should eq "def render(x : T, y : U) : String forall T : Show, U"
+      Iyi::IyiMod.render_signature(read[1]).should eq "def shown : String where Elem : Show, Key : Cmp"
     end
   end
 
@@ -563,6 +630,7 @@ describe Iyi::IyiMod do
         pub enum Mode
           Read
           Write
+          Append
         end
 
         pub def loudest : Level
@@ -572,8 +640,7 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import app/levels
-        using app/levels::{Level, Mode, loudest}
+        import app/levels::{Level, Mode, loudest}
 
         puts "\#{loudest} \#{loudest == Level::Warn} \#{loudest.warn?} \#{Level.values.size} \#{(Mode::Read | Mode::Write)}"
         IYI
@@ -597,7 +664,7 @@ describe Iyi::IyiMod do
       level.not_nil!.members.should eq [{"Debug", "0"}, {"Warn", "2"}]
       mode = artifact.exports.types.find { |declaration| declaration.name == "Mode" }
       mode.not_nil!.annotations.should eq ["@[Flags]"]
-      mode.not_nil!.members.map(&.[0]).should eq ["Read", "Write"]
+      mode.not_nil!.members.map(&.[0]).should eq ["Read", "Write", "Append"]
 
       File.delete "app/levels.iyi"
 
@@ -816,7 +883,7 @@ describe Iyi::IyiMod do
       artifact = Iyi::IyiMod.read(File.join("mods", "app", "box.iyimod"))
       secret = artifact.exports.types.find! { |declaration| declaration.name == "Secret" }
       secret.visibility.should eq "private"
-      secret.fields.should eq [{"@n", "Int32", ""}]
+      secret.fields.should eq [{"@n", "::Int32", ""}]
       # Headers, and only headers. The consumer cannot reach them and the
       # module's own object code already defines them — but a body that
       # travels calls them, and a call it cannot typecheck is refused before
@@ -1356,7 +1423,7 @@ describe Iyi::IyiMod do
 
       tally = artifact.exports.types.find { |type| type.name == "Tally" }.should_not be_nil
       tally.class_vars.map { |class_var| {class_var.name, class_var.type, class_var.value} }
-        .should eq [{"@@cache", "(String | Nil)", ""}, {"@@seen", "Int32", "0"}]
+        .should eq [{"@@cache", "(::String | ::Nil)", ""}, {"@@seen", "::Int32", "0"}]
       tally.class_vars.map(&.annotations).should eq [[] of String, [] of String]
 
       File.delete "app/counter.iyi"
@@ -1705,9 +1772,8 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/countable
+        import std/countable::{Countable}
 
-        using std/countable::{Countable}
 
         pub struct Three
         end
@@ -2033,6 +2099,10 @@ describe Iyi::IyiMod do
   # Run, with the source deleted, because the point is not that the build is
   # allowed: it is that `LOW` is 1 on the far side and the `fun` still reaches
   # the intrinsic.
+  #
+  # And a macro in the `lib` is more of the `lib`: `std/math` writes its
+  # `llvm.fma` binding inside `{% if flag?(:aarch64) %}`, and on arm64 alone
+  # the `fun`s that expanded read as code and refused the module.
   it "carries a lib's declarations and the constants a macro writes" do
     with_tempdir("iyimod_lib_and_macro") do
       Dir.mkdir_p "boot"
@@ -2048,6 +2118,9 @@ describe Iyi::IyiMod do
           end
 
           fun plat_abs = "llvm.fabs.f64"(x : Float64) : Float64
+          {% for name in ["plat_sqrt"] %}
+            fun {{name.id}} = "llvm.sqrt.f64"(x : Float64) : Float64
+          {% end %}
         end
 
         pub struct Plat
@@ -2057,6 +2130,10 @@ describe Iyi::IyiMod do
 
           pub def self.magnitude(x : Float64) : Float64
             LibPlat.plat_abs(x)
+          end
+
+          pub def self.root(x : Float64) : Float64
+            LibPlat.plat_sqrt(x)
           end
         end
         IYI
@@ -2068,10 +2145,11 @@ describe Iyi::IyiMod do
         puts Boot::Plat::Plat::LOW
         puts Boot::Plat::Plat::HIGH
         puts Boot::Plat::Plat.magnitude(-2.5)
+        puts Boot::Plat::Plat.root(6.25)
         IYI
 
       source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
-      expected = "1\n2\n2.5"
+      expected = "1\n2\n2.5\n2.5"
 
       producer = create_spec_compiler
       producer.prelude = "iyi/prelude"
@@ -2084,6 +2162,176 @@ describe Iyi::IyiMod do
       artifact.initialiser.lines.should eq ["pub Plat::LOW = 1", "pub Plat::HIGH = 2"]
 
       File.delete "boot/plat.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # A `--release` build that writes artifacts writes their object code.
+  # It forced one LLVM module, so no type had a unit of its own: the
+  # artifact said "object code (none)", and a `--release` consumer of it
+  # internalised the declarations it read and the IR was refused -
+  # "Global is external, but doesn't have external or weak linkage!".
+  #
+  # And a `--release` consumer made private what that object code reaches
+  # by name in the program that links it. `x // 2` reaches nothing, so this
+  # passed while a module with a checked `+` did not link
+  # (`__iyi_raise_overflow`), nor one with a class (`:type_id`, `:headed`);
+  # on Windows a `defer` names the `void*` type descriptor, which a consumer
+  # with no `defer` of its own never defined. A struct changed through a
+  # getter is the last line: called rather than inlined, the getter answered
+  # a copy and the bump was lost, in the build writing the artifact too.
+  it "carries object code from a release build to a release consumer" do
+    with_tempdir("iyimod_release_object_code") do
+      Dir.mkdir_p "boot"
+      File.write "boot/half.iyi", <<-IYI
+        module boot/half
+
+        pub struct Half
+          pub def self.of(x : Int32) : Int32
+            x // 2
+          end
+        end
+
+        pub struct Counter
+          property n : Int32
+
+          def initialize(@n : Int32)
+          end
+
+          def bump : Nil
+            @n += 1
+          end
+        end
+
+        pub class Holder
+          property counter : Counter
+
+          def initialize(@counter : Counter)
+          end
+        end
+
+        pub def add1(x : Int32) : Int32
+          x + 1
+        end
+
+        pub def with_defer(log : Array(String)) : Int32
+          defer log << "defer"
+          log << "body"
+          7
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/half
+
+        puts Boot::Half::Half.of(84)
+        puts Boot::Half.add1(41)
+        h = Boot::Half::Holder.new(Boot::Half::Counter.new(1))
+        h.counter.bump
+        puts h.counter.n
+        log = [] of String
+        puts Boot::Half.with_defer(log)
+        puts log.join(",")
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "42\n42\n2\n7\nbody,defer"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.release!
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "half.iyimod"), want_object_code: true)
+      artifact.object_code.empty?.should be_false
+
+      File.delete "boot/half.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.release!
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # The same reach without `--release`, where each type is a unit of its own
+  # and only two things were missing. A getter's caller has only a header,
+  # and a call answers a copy where the inlined body answered the field
+  # itself: `h.counter.bump` left 1 in the build writing the artifact and in
+  # the one reading it. And on Windows a module's `defer` is a catch pad over
+  # `void*`, whose type descriptor the main module defines when its own code
+  # first asks - which a consumer with no `defer`, `rescue` or `raise` of its
+  # own never did: `unresolved external symbol ... (??_R0PEAX@8)`.
+  it "changes a struct through an artifact's getter, and links its defer" do
+    with_tempdir("iyimod_getter_and_defer") do
+      Dir.mkdir_p "boot"
+      File.write "boot/shelf.iyi", <<-IYI
+        module boot/shelf
+
+        pub struct Counter
+          property n : Int32
+
+          def initialize(@n : Int32)
+          end
+
+          def me : self
+            self
+          end
+
+          def bump : Nil
+            @n += 1
+          end
+        end
+
+        pub class Holder
+          property counter : Counter
+
+          def initialize(@counter : Counter)
+          end
+        end
+
+        pub def with_defer(log : Array(String)) : Int32
+          defer log << "defer"
+          log << "body"
+          7
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/shelf
+
+        h = Boot::Shelf::Holder.new(Boot::Shelf::Counter.new(1))
+        h.counter.bump
+        puts h.counter.n
+        c = Boot::Shelf::Counter.new(1)
+        c.me.bump
+        puts c.n
+        log = [] of String
+        puts Boot::Shelf.with_defer(log)
+        puts log.join(",")
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "2\n2\n7\nbody,defer"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      File.delete "boot/shelf.iyi"
 
       consumer = create_spec_compiler
       consumer.prelude = "iyi/prelude"
@@ -2188,6 +2436,7 @@ describe Iyi::IyiMod do
         enum Mode
           Read
           Write
+          Append
         end
 
         pub struct Holder
@@ -2217,7 +2466,7 @@ describe Iyi::IyiMod do
         Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "kinds.iyimod")), io)
       end
       declarations.should contain "private enum Kind : Int32\n  Small = 3\n  Large = 9\nend"
-      declarations.should contain "@[Flags]\nprivate enum Mode : Int32\n  Read = 1\n  Write = 2\nend"
+      declarations.should contain "@[Flags]\nprivate enum Mode : Int32\n  Read = 1\n  Write = 2\n  Append = 4\nend"
 
       File.delete "boot/kinds.iyi"
 
@@ -2387,7 +2636,7 @@ describe Iyi::IyiMod do
   #   `std/bit_array` and `std/static_array` each do exactly this.
   #
   # The written form resolves on the far side because the declarations text
-  # replays the module's imports, requires and `using` directives and
+  # replays the module's imports with their names, its requires, and
   # declares its own nested types, which is the whole of what the module
   # itself could name.
   it "carries an alias as the module wrote it" do
@@ -2675,6 +2924,78 @@ describe Iyi::IyiMod do
     end
   end
 
+  # The other side of the one above: a module under this one's path is not
+  # a module this one keeps.
+  #
+  # `pkg/child` is the namespace `Pkg::Child`, inside `pkg`'s `Pkg`, and the
+  # walks that gather `pkg`'s artifact went into every module they found
+  # there. `pkg.iyimod` carried the child's declarations, aliases and
+  # machine code a second time, so a program built from both artifacts was
+  # refused (`alias Num is already defined`) or failed to link (LNK2005).
+  # A module with a `module` header of its own has its own artifact; the
+  # walks stop at it.
+  it "leaves a module under its path to that module's own artifact" do
+    with_tempdir("iyimod_nested_unit") do
+      modules = {
+        "pkg/child.iyi" => <<-IYI,
+          module pkg/child
+
+          pub alias Num = Int32 | Int64
+
+          pub class Foo
+            def initialize(@x : Int32)
+            end
+
+            def x : Int32
+              @x
+            end
+          end
+
+          pub def make : Foo
+            Foo.new(3)
+          end
+          IYI
+        "pkg.iyi" => <<-IYI,
+          module pkg
+
+          import pkg/child::*
+
+          pub def run : Int32
+            n : Num = make.x
+            n.to_i32 * 2
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import pkg
+        import pkg/child::*
+
+        puts Pkg.run
+        puts make.x
+        IYI
+
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "6\n3\n"
+      from_artifact.should eq from_source
+
+      parent = Iyi::IyiMod.read(File.join("mods", "pkg.iyimod"))
+      child = Iyi::IyiMod.read(File.join("mods", "pkg", "child.iyimod"))
+
+      parent.object_code.map(&.name).select(&.starts_with?("Pkg::Child")).should be_empty
+      parent.layouts.map(&.[0]).select(&.starts_with?("Pkg::Child")).should be_empty
+      (parent.object_code.map(&.name) & child.object_code.map(&.name)).should be_empty
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(parent, io)
+      end
+      declarations.should_not contain "class Foo"
+      declarations.should_not contain "def make"
+      declarations.should_not contain "alias Num"
+    end
+  end
+
   # A generic's splat parameter is part of its declaration.
   #
   # `*T` and `T` are different things and the parser says so: `struct
@@ -2816,8 +3137,9 @@ describe Iyi::IyiMod do
       end
       declarations.should contain "pub abstract class Sink"
       declarations.should contain "pub class Doubler < Sink"
-      # The field, named and not printed: no `+`.
-      declarations.should contain "@sink : Boot::Sink::Sink\n"
+      # The field, named and not printed: no `+`, and global, because it is
+      # read inside the module.
+      declarations.should contain "@sink : ::Boot::Sink::Sink\n"
 
       File.delete "boot/sink.iyi"
 
@@ -3023,8 +3345,8 @@ describe Iyi::IyiMod do
   # `@@temp_counter` that `std/file` wrote, and then the methods are not
   # the whole of it. What the consumer cannot infer is the state — the
   # fields, the class variable, the members — and what it cannot resolve
-  # is a name the file brought in with a `using` written *inside* the
-  # type, which the unit's own `using` does not reach.
+  # is a name the file brought in with an import written *inside* the
+  # type, which the unit's own imports do not reach.
   #
   # One program, because that is how it was found: each fix uncovered the
   # next on the same module. `can't infer the type of instance variable
@@ -3051,13 +3373,12 @@ describe Iyi::IyiMod do
       File.write "boot/vault.iyi", <<-IYI
         module boot/vault
 
-        import boot/tag
-        using boot/tag::{Tag}
+        import boot/tag::{Tag}
 
         struct ::Vault
-          # The `using` above does not reach in here: a reopened name is not
+          # The import above does not reach in here: a reopened name is not
           # lexically inside the unit, so the file writes a second one.
-          using boot/tag::{Tag}
+          import boot/tag::{Tag}
 
           @label : String
           @count : Int32
@@ -3161,8 +3482,7 @@ describe Iyi::IyiMod do
       File.write "boot/pair.iyi", <<-IYI
         module boot/pair
 
-        import boot/shown
-        using boot/shown::{Show}
+        import boot/shown::{Show}
 
         pub struct Pair
           pub struct Half
@@ -3289,8 +3609,7 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/reference_storage
-        using std/reference_storage::{ReferenceStorage}
+        import std/reference_storage::{ReferenceStorage}
 
         class Point
           getter x : Int32
@@ -3639,6 +3958,53 @@ describe Iyi::IyiMod do
     end
   end
 
+  # The remedy for a stale artifact compiles the module from its source. With
+  # the source gone that is not a remedy, and a build that had passed
+  # --emit-iyimod was still told to pass it.
+  it "does not offer --emit-iyimod for an artifact with no source to rebuild from" do
+    with_tempdir("iyimod_stale_no_source") do
+      Dir.mkdir_p "app"
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import app/half
+
+        puts App::Half.half(3.0)
+        IYI
+      File.write "app/half.iyi", <<-IYI
+        module app/half
+
+        import std/float
+
+        pub def half(x : Float64) : Float64
+          x / 2
+        end
+        IYI
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+
+      # Only the module's own artifact, without the `std/float` one it was
+      # compiled against, and without its source.
+      Dir.mkdir_p "only/app"
+      File.copy "mods/app/half.iyimod", "only/app/half.iyimod"
+      File.delete "app/half.iyi"
+
+      rewriter = create_spec_compiler
+      rewriter.prelude = "iyi/prelude"
+      rewriter.use_iyimod = "only"
+      rewriter.emit_iyimod = "only"
+      error = expect_raises(Iyi::TypeException, /"std\/float", which it imports, has: there is no artifact for it/) do
+        rewriter.compile source, File.expand_path("rewritten")
+      end
+      error.message.to_s.should contain %("app/half" has no source here to compile in its place)
+      error.message.to_s.should_not contain "pass --emit-iyimod to this build"
+    end
+  end
+
   # A module path is a file path (R-1), so the same name can come to mean a
   # different file: `src/std/` ships a `std/text`, and a program with one of
   # its own that deletes it finds the library's at that path. The artifact is
@@ -3658,8 +4024,7 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/text
-        using std/text::{mine}
+        import std/text::{mine}
 
         puts mine
         IYI
@@ -3690,8 +4055,9 @@ describe Iyi::IyiMod do
   # to the module being imported. A `.iyimod` copied onto another module's path
   # was adopted: its declarations were spliced in under its own name, and the
   # module actually asked for stayed undefined. The failure surfaced at the
-  # first `using` as "can't find module 'm1/a'", which sends the reader off to
-  # write `m1/a.iyi` when the file was there, valid, and already read.
+  # first `using` (the keyword `import X::{...}` replaced) as "can't find
+  # module 'm1/a'", which sends the reader off to write `m1/a.iyi` when the
+  # file was there, valid, and already read.
   it "refuses an artifact that declares a different module" do
     with_tempdir("iyimod_module_name") do
       Dir.mkdir_p "m1"
@@ -3712,16 +4078,14 @@ describe Iyi::IyiMod do
       File.write "usea.iyi", <<-IYI
         module usea
 
-        import m1/a
-        using m1/a
+        import m1/a::*
 
         puts v
         IYI
       File.write "useb.iyi", <<-IYI
         module useb
 
-        import m1/b
-        using m1/b
+        import m1/b::*
 
         puts v
         IYI
@@ -3762,8 +4126,8 @@ describe Iyi::IyiMod do
       # The file, so the reader knows which one to go and look at.
       ex.message.to_s.should contain File.join("mods", "m1", "a.iyimod")
 
-      # At the `import`, which is where the artifact is read, and not at the
-      # `using` on the next line where the old misdiagnosis landed.
+      # At the `import`, which is where the artifact is read, and not at its
+      # scope half, where the old misdiagnosis landed.
       ex.line_number.should eq 3
       ex.message.to_s.should_not match(/can't find module/)
 
@@ -4153,7 +4517,7 @@ describe Iyi::IyiMod do
       consumer = create_spec_compiler
       consumer.prelude = "iyi/prelude"
       consumer.use_iyimod = "mods"
-      expect_raises(Iyi::TypeException, /was never filled/) do
+      expect_raises(Iyi::TypeException, /was never filled: `iyi tool bind` wrote its declarations/) do
         consumer.compile source, File.expand_path("from-artifact")
       end
     end
@@ -4375,8 +4739,9 @@ describe Iyi::IyiMod do
       # In the order they were declared, because that order is the layout: a
       # field's offset is its position in this list, and a consumer compiling a
       # body of this module's has to reach the same field the module's own
-      # object code does.
-      declaration.fields.should eq [{"@item", "T", ""}, {"@count", "Int32", ""}]
+      # object code does. Global, the type parameter excepted: the declaration
+      # is read inside the module (`IyiMod.absolute_type`).
+      declaration.fields.should eq [{"@item", "T", ""}, {"@count", "::Int32", ""}]
     end
   end
 
@@ -4479,6 +4844,82 @@ describe Iyi::IyiMod do
     end
   end
 
+  # An owning type travels as one: read back as `@[Share]` alone it would be
+  # Share only when its argument is, and `Guard(Counter)` - the escape the
+  # marker exists for - would stop being Share at the artifact's edge.
+  it "carries an owning type's Share marker, and a consumer's thread reads it" do
+    with_tempdir("iyimod_share_owns") do
+      Dir.mkdir_p "std"
+      File.write "std/guard.iyi", <<-IYI
+        module std/guard
+
+        pub class Counter
+          @count : Int32
+
+          def initialize
+            @count = 0
+          end
+
+          def bump : Nil
+            @count = @count + 1
+          end
+        end
+
+        @[Share(owns: true)]
+        pub class Guard(T)
+          @value : T
+
+          def self.new(&block : -> U) : Guard(U) forall U
+            Guard(U).build(block.call)
+          end
+
+          protected def self.build(value : T) : Guard(T)
+            new(value)
+          end
+
+          private def initialize(@value : T)
+          end
+
+          def lock(&block : T -> _) : Nil
+            block.call(@value)
+            nil
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import std/guard::{Guard, Counter}
+
+        guard = Guard.new { Counter.new }
+        t = IyiThread.start do
+          guard.lock { |counter| counter.bump }
+          nil
+        end
+        t.join
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.no_codegen = true
+      producer.compile source, File.expand_path("unused")
+
+      types = Iyi::IyiMod.read(File.join("mods", "std", "guard.iyimod")).exports.types
+      types.find! { |candidate| candidate.name == "Guard" }.annotations.should eq ["@[Share(owns: true)]"]
+
+      File.delete "std/guard.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.no_codegen = true
+      consumer.compile source, File.expand_path("unused")
+    end
+  end
+
   it "renders a type's fields into the declarations a consumer reads" do
     declaration = type_declaration("List", "generic struct",
       type_parameters: ["T"],
@@ -4527,9 +4968,8 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/hold
+        import std/hold::{Hold}
 
-        using std/hold::{Hold}
 
         puts Std::Hold::Box.new(7).item
         IYI
@@ -4818,7 +5258,7 @@ describe Iyi::IyiMod do
     # reader of this file has to be able to tell from "carried and exported".
     text.should contain "  pub trait Greet"
     text.should contain "    def greet : String"
-    text.should contain "  impl Greet for User"
+    text.should contain "  impl ::Greet for ::User"
   end
 
   # II.6 keeps a trait's parameters and its associated types apart — the first
@@ -4860,7 +5300,7 @@ describe Iyi::IyiMod do
     # `generic` is how a type describes itself, not how anyone declares one.
     text.should contain "  pub trait Enumerable : Cmp"
     text.should contain "    type Elem"
-    text.should contain "  impl Std::Enumerable::Enumerable for Std::List::List(T) forall T : Cmp"
+    text.should contain "  impl ::Std::Enumerable::Enumerable for ::Std::List::List(T) forall T : Cmp"
     text.should contain "    type Elem = T"
   end
 
@@ -4884,10 +5324,10 @@ describe Iyi::IyiMod do
     text.should contain "pub trait Greet\n  abstract def greet : String\nend\n"
     # An `abstract def` ends at its signature and takes no `end` of its own.
     text.should_not contain "abstract def greet : String\n  end"
-    text.should contain "impl Greet for User\nend\n"
+    text.should contain "impl ::Greet for ::User\nend\n"
     # The impl comes after the type it targets, because the requirement check
     # reads the methods off the target rather than out of the impl's body.
-    text.index("pub trait Greet").not_nil!.should be < text.index("impl Greet for User").not_nil!
+    text.index("pub trait Greet").not_nil!.should be < text.index("impl ::Greet for ::User").not_nil!
   end
 
   it "renders a generic type and the impl that answers its associated type" do
@@ -4902,7 +5342,623 @@ describe Iyi::IyiMod do
 
     text.should contain "pub struct List(T)"
     text.should contain "  def each(& : (T -> Nil)) : Nil\n  end\n"
-    text.should contain "impl Std::Enumerable::Enumerable for Std::List::List(T) forall T\n  type Elem = T\nend\n"
+    text.should contain "impl ::Std::Enumerable::Enumerable for ::Std::List::List(T) forall T\n  type Elem = T\nend\n"
+  end
+
+  # A `--release` consumer is one LLVM module, and one module gives every
+  # symbol the program defines internal linkage. The artifact's object code
+  # names some of them from outside: `a + b` checks overflow through
+  # `__iyi_raise_overflow`, and `Tally.new` allocates through the collector's
+  # globals and reads a type id. `Half.of` above names none, which is why it
+  # linked.
+  it "links a release consumer against object code that checks overflow and allocates" do
+    with_tempdir("iyimod_release_closure") do
+      modules = {"app/sum.iyi" => <<-IYI}
+        module app/sum
+
+        pub class Tally
+          getter n : Int32
+
+          def initialize(@n : Int32)
+          end
+        end
+
+        pub def total(a : Int32, b : Int32) : Int32
+          a + b
+        end
+
+        pub def tally(n : Int32) : Tally
+          Tally.new(n * 2)
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/sum::*
+
+        puts total(40, 2)
+        puts tally(21).n
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main, release: true)
+      from_source.should eq "42\n42\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A union written wider than the body answers. The producer keyed its symbol
+  # on what the body inferred, `mixed<Bool>:(Int32 | String)`, and a consumer
+  # reading the declaration asked for `| Nil` on the end.
+  it "links a def whose body answers fewer union members than it declares" do
+    with_tempdir("iyimod_narrow_union") do
+      modules = {"app/mixed.iyi" => <<-IYI}
+        module app/mixed
+
+        pub def mixed(flag : Bool) : Int32 | String | Nil
+          flag ? 4 : "four"
+        end
+
+        pub def maybe(n : Int32) : Int32?
+          n
+        end
+
+        pub def either(flag : Bool) : Int32 | String
+          flag ? 1 : "one"
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/mixed::*
+
+        puts mixed(true).inspect
+        puts mixed(false).inspect
+        puts maybe(3).inspect
+        puts either(false)
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "4\n\"four\"\n3\none\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A parameter written as a trait. No value has a trait as its type, so the
+  # producer instantiated `area_of` per argument - including the consumer's
+  # own `Main::Tri` - and a consumer reading the declaration asked for
+  # `area_of<App::Shapes::Shape>`, which nobody emitted.
+  it "links a def whose parameter is written as a trait" do
+    with_tempdir("iyimod_trait_parameter") do
+      modules = {"app/shapes.iyi" => <<-IYI}
+        module app/shapes
+
+        pub trait Shape
+          abstract def area : Int32
+        end
+
+        pub struct Sq
+          getter side : Int32
+
+          def initialize(@side : Int32)
+          end
+        end
+
+        impl Shape for Sq
+          def area : Int32
+            side * side
+          end
+        end
+
+        pub def area_of(x : Shape) : Int32
+          x.area + 1
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/shapes::*
+
+        struct Tri
+          getter b : Int32
+
+          def initialize(@b : Int32)
+          end
+        end
+
+        impl Shape for Tri
+          def area : Int32
+            b * 3
+          end
+        end
+
+        puts area_of(Sq.new(3))
+        puts area_of(Tri.new(4))
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "10\n13\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # Two parameters the producer compiled narrower than written: a class
+  # parameter called with the consumer's own subclass, and a private def's
+  # union reached from a travelling body with one member. Each was declared
+  # as written with no symbol behind it.
+  it "links a def whose parameter is a class or a private union" do
+    with_tempdir("iyimod_narrow_instantiation") do
+      modules = {"lib/u.iyi" => <<-IYI}
+        module lib/u
+
+        pub abstract class Base
+          def initialize
+          end
+        end
+
+        pub def name_of(klass : Base.class) : String
+          klass.to_s
+        end
+
+        pub def open(uri : Int32 | String) : String
+          build(uri)
+        end
+
+        def build(uri : Int32 | String) : String
+          "built \#{uri}"
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/u::*
+
+        class Sub < Base
+        end
+
+        puts name_of(Sub)
+        puts open("x")
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "Main::Sub\nbuilt x\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A class variable on a base class is copied onto each subclass. The base
+  # module's artifact declared the copy on `Sub`, a type of another module,
+  # and that reopening declared `Sub` under `Reference` before `lib/sub`'s
+  # own artifact was read.
+  it "leaves a subclass in another module to that module's artifact" do
+    with_tempdir("iyimod_inherited_class_var") do
+      modules = {"lib/base.iyi" => <<-BASE, "lib/sub.iyi" => <<-SUB}
+        module lib/base
+
+        pub abstract class Base
+          @@count = 0
+
+          def self.bump : Int32
+            @@count += 1
+          end
+
+          def initialize
+          end
+
+          def count : Int32
+            @@count
+          end
+        end
+        BASE
+        module lib/sub
+
+        import lib/base::*
+
+        pub class Sub < Base
+        end
+        SUB
+      main = <<-IYI
+        module main
+
+        import lib/base::*
+        import lib/sub::*
+
+        Base.bump
+        Sub.bump
+        Sub.bump
+        puts Sub.new.count
+        puts Base.bump
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "2\n2\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A generic body with macro code travels as text and is expanded by the
+  # consumer, under the artifact's path. That path is no `.iyi`, so the
+  # expansion was lexed as the other language's and `raw!` was a method name.
+  it "reads a propagation in a travelled body's macro code" do
+    with_tempdir("iyimod_macro_propagate") do
+      modules = {"lib/r.iyi" => <<-IYI}
+        module lib/r
+
+        pub class Fail
+          def initialize
+          end
+        end
+
+        impl Error for Fail
+          def message : String
+            "fail"
+          end
+        end
+
+        pub class Reader
+          def initialize
+          end
+
+          def raw : Int32 | Fail
+            7
+          end
+
+          def get(klass : T.class) : T | Fail forall T
+            {% if T == Int32 %}
+              value = raw!
+              value
+            {% else %}
+              Fail.new
+            {% end %}
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/r::*
+
+        puts Reader.new.get(Int32).or_panic
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "7\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # `@items = [] of String` in a type body runs in `initialize`, the way the
+  # typed `@items : Array(String) = [] of String` does, and travels the same
+  # way. Read as a statement it refused every consumer: "has code inside a
+  # type body that has to run".
+  it "carries an instance variable's initialiser written without a type" do
+    with_tempdir("iyimod_untyped_ivar") do
+      modules = {"app/bag.iyi" => <<-IYI}
+        module app/bag
+
+        pub class Bag
+          @items = [] of String
+
+          def initialize
+          end
+
+          def add(item : String) : Int32
+            @items << item
+            @items.size
+          end
+        end
+
+        pub class Stack(T)
+          @items = [] of T
+
+          def initialize(first : T)
+            @items << first
+          end
+
+          def size : Int32
+            @items.size
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/bag::*
+
+        bag = Bag.new
+        bag.add("a")
+        puts bag.add("b")
+        puts Stack.new(1).size
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "2\n1\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A generic type's empty `initialize` travels as an empty body, and an empty
+  # body read back is a `Nop` - which is how a header looks. So the consumer
+  # declared `Stack(Int32)#initialize` and never defined it.
+  it "defines a generic type's empty method" do
+    with_tempdir("iyimod_empty_generic_body") do
+      modules = {"app/stack.iyi" => <<-IYI}
+        module app/stack
+
+        pub class Stack(T)
+          @items : Array(T) = [] of T
+
+          def initialize
+          end
+
+          def push(item : T) : Int32
+            @items << item
+            @items.size
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/stack::*
+
+        puts Stack(Int32).new.push(5)
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "1\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # Definition-site typing gave `Named` a witness type in the producing build,
+  # so `names`'s dispatch over `Named` tests for it and the object code
+  # numbers it. The consumer has no witness - nothing in its own source is
+  # typed against `Named` - and refused the import over a type no value can
+  # have.
+  it "links object code that dispatches over a trait with a definition-typing witness" do
+    with_tempdir("iyimod_witness") do
+      modules = {"app/names.iyi" => <<-IYI}
+        module app/names
+
+        pub trait Named
+          abstract def name : String
+        end
+
+        pub class Registry
+          @all : Array(Named) = [] of Named
+
+          def initialize
+          end
+
+          def add(item : Named) : Int32
+            @all << item
+            @all.size
+          end
+
+          def names : String
+            @all.map(&.name).join(",")
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/names::*
+
+        struct Own
+          def initialize
+          end
+        end
+
+        impl Named for Own
+          def name : String
+            "own"
+          end
+        end
+
+        registry = Registry.new
+        registry.add(Own.new)
+        puts registry.names
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "own\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A trait's default method runs on the implementing type, which may be
+  # another module's. Its unqualified names were looked up from that type,
+  # so `lib/core`'s `twice` called the consumer's own `helper` - 7 where its
+  # own module's says 106 - and, with no `helper` in the consumer, was
+  # refused. `run`'s definition-typing witness took the same wrong turn.
+  it "resolves a default method's functions in the trait's module" do
+    with_tempdir("iyimod_default_scope") do
+      modules = {"lib/core.iyi" => <<-IYI}
+        module lib/core
+
+        def helper(x : Int32) : Int32
+          x + 100
+        end
+
+        pub trait Op
+          abstract def apply(x : Int32) : Int32
+
+          def twice(x : Int32) : Int32
+            helper(apply(x))
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/core::*
+
+        def helper(x : Int32) : Int32
+          x + 1
+        end
+
+        struct A
+          def initialize
+          end
+        end
+
+        impl Op for A
+          def apply(x : Int32) : Int32
+            x * 2
+          end
+        end
+
+        def run(o : Op) : Int32
+          o.twice(3)
+        end
+
+        puts A.new.twice(3)
+        puts run(A.new)
+        puts helper(3)
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "106\n106\n4\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # `.or` lowers to a temporary and an `if`, and a body that travels is the
+  # normalized text: inside `#{}` that was two expressions where the parser
+  # reads one, and the consumer stopped on "Unterminated string
+  # interpolation" in a module that had compiled.
+  it "carries a recovery inside an interpolation in a body that travels" do
+    with_tempdir("iyimod_interpolated_or") do
+      modules = {"lib/core.iyi" => <<-IYI}
+        module lib/core
+
+        pub struct Bad
+          def initialize
+          end
+        end
+
+        impl Error for Bad
+          def message : String
+            "bad"
+          end
+        end
+
+        pub def half(x : Int32) : Int32 | Bad
+          return Bad.new if x.odd?
+          x // 2
+        end
+
+        pub def show(v : T, x : Int32) : String forall T
+          "\#{v}: \#{half(x).or(-1)}"
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/core::*
+
+        puts show("a", 8)
+        puts show(1, 3)
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "a: 4\n1: -1\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A signature with an error member is the def's type (III.1.8), and a
+  # default method's body travels for its implementers. Read from the
+  # artifact, where its location is no `.iyi`, the body's own answer typed
+  # it: `Int32`, and `.or` on it was refused as having nothing to recover.
+  it "keeps a travelled body's declared error union" do
+    with_tempdir("iyimod_declared_union") do
+      modules = {"lib/core.iyi" => <<-IYI}
+        module lib/core
+
+        pub struct Bad
+          def initialize
+          end
+        end
+
+        impl Error for Bad
+          def message : String
+            "bad"
+          end
+        end
+
+        pub trait Op
+          abstract def apply(x : Int32) : Int32 | Bad
+
+          def twice(x : Int32) : Int32 | Bad
+            apply(x).or(0) + 1
+          end
+        end
+
+        pub struct Half
+          def initialize
+          end
+        end
+
+        impl Op for Half
+          def apply(x : Int32) : Int32 | Bad
+            return Bad.new if x.odd?
+            x // 2
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/core::*
+
+        def run(o : Op, x : Int32) : Int32
+          o.twice(x).or(-1)
+        end
+
+        puts run(Half.new, 8)
+        puts run(Half.new, 3)
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "5\n1\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # An abstract generic class. Its kind is `abstract generic class`, and the
+  # header took `generic ` off the front only, so the consumer read
+  # `pub abstract generic class Src(T)` and stopped on "`pub abstract` takes a
+  # class, a struct or a def".
+  it "renders an abstract generic class it can read back" do
+    with_tempdir("iyimod_abstract_generic") do
+      modules = {"app/src.iyi" => <<-IYI}
+        module app/src
+
+        pub abstract class Src(T)
+          abstract def value : T
+
+          def pair : Array(T)
+            [value, value]
+          end
+        end
+
+        pub class IntSrc < Src(Int32)
+          def initialize(@n : Int32)
+          end
+
+          def value : Int32
+            @n * 2
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/src::*
+
+        class StrSrc < Src(String)
+          def value : String
+            "s"
+          end
+        end
+
+        puts IntSrc.new(4).pair
+        puts StrSrc.new.pair
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "[8, 8]\n[\"s\", \"s\"]\n"
+      from_artifact.should eq from_source
+    end
   end
 end
 
@@ -4939,8 +5995,7 @@ describe "a module compiled against Crystal's library" do
       File.write "main.iyi", <<-IYI
         module main
 
-        import app/store
-        using app/store
+        import app/store::*
 
         puts encode("iyi")
         puts slug("a b")
@@ -4990,8 +6045,7 @@ describe "a module compiled against Crystal's library" do
       File.write "main.iyi", <<-IYI
         module main
 
-        import app/ids
-        using app/ids
+        import app/ids::*
 
         puts stdout_id == STDOUT.object_id
         puts program_name_id == PROGRAM_NAME.object_id
@@ -5027,8 +6081,7 @@ describe "a module compiled against Crystal's library" do
       File.write "producer.iyi", <<-IYI
         module main
 
-        import app/store
-        using app/store
+        import app/store::*
 
         puts encode("iyi")
         IYI
@@ -5042,8 +6095,7 @@ describe "a module compiled against Crystal's library" do
       File.write "consumer.iyi", <<-IYI
         module main
 
-        import app/store
-        using app/store
+        import app/store::*
 
         puts 1
         IYI
@@ -5073,8 +6125,7 @@ describe "a module compiled against Crystal's library" do
       File.write "main.iyi", <<-IYI
         module main
 
-        import app/greet
-        using app/greet
+        import app/greet::*
 
         puts hello("iyi")
         IYI
@@ -5092,6 +6143,132 @@ describe "a module compiled against Crystal's library" do
       expect_raises Iyi::CodeError, /built against iyi's prelude/ do
         consumer.compile source, File.expand_path("consumer")
       end
+    end
+  end
+
+  # A generic method's body travels as source printed after the normalizer
+  # has expanded it, and `.or_panic` expands to an assignment and an `if` in
+  # one `Expressions`. Printed bare inside `twice(...)` the consumer read
+  # `twice(__temp = parse(text)` and stopped at "expecting token ')', not
+  # 'if'". The `!` beside it expands the same way, inside an array literal.
+  it "carries a body whose argument expanded to statements" do
+    with_tempdir("iyimod_expanded_argument") do
+      modules = {
+        "orp.iyi" => <<-IYI,
+          module orp
+
+          pub struct OrpError
+            getter text : String
+
+            def initialize(@text : String)
+            end
+          end
+
+          impl Error for OrpError
+            def message : String
+              @text
+            end
+          end
+
+          pub struct Orp
+            def self.parse(text : String) : Int32 | OrpError
+              text.empty? ? OrpError.new("empty") : text.size
+            end
+
+            def self.twice(value : Int32, type : T.class) : Int32 forall T
+              value * 2
+            end
+
+            def self.read(text : String, type : T.class) : Int32 forall T
+              twice(parse(text).or_panic, type)
+            end
+
+            def self.both(text : String, type : T.class) : Array(Int32) | OrpError forall T
+              [parse(text)!, twice(value: parse(text).or_panic, type: type)]
+            end
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import orp::{Orp}
+
+        puts Orp.read("abc", Int32)
+        puts Orp.both("ab", Int32)
+        IYI
+
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "6\n[2, 4]\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # Adding an overload orders it against the ones already there, and that
+  # resolves an alias one of them is restricted to on the spot. `std/toml`'s
+  # `Any` held `alias Type = ... | TOMLDateTime | ...` beside two
+  # `initialize`s, below `TOMLDateTime` in the source; the artifact declares
+  # types by name, so `Any` came first and the consumer said "undefined
+  # constant TOMLDateTime". The types an alias names are now declared before
+  # the type holding it, whether the alias names them bare or qualified.
+  it "declares the types an alias names before the alias" do
+    with_tempdir("iyimod_alias_order") do
+      modules = {
+        "al.iyi" => <<-IYI,
+          module al
+
+          pub struct Zed
+            getter n : Int32
+
+            def initialize(@n : Int32)
+            end
+          end
+
+          pub struct Any
+            alias Type = Int32 | Zed | Array(Any)
+
+            getter raw : Type
+
+            def initialize(@raw : Type)
+            end
+
+            def initialize(value : String)
+              @raw = value.size
+            end
+
+            def zed? : Bool
+              @raw.is_a?(Zed)
+            end
+          end
+
+          pub struct Box
+            alias Held = String | ::Al::Zed
+
+            getter held : Held
+
+            def initialize(@held : Held)
+            end
+
+            def initialize(value : Int32)
+              @held = value.to_s
+            end
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import al::{Any, Box, Zed}
+
+        puts Any.new(Zed.new(3)).zed?
+        puts Any.new("abc").raw
+        puts Box.new(4).held
+        puts Box.new(Zed.new(5)).held.is_a?(Zed)
+        IYI
+
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "true\n3\n4\ntrue\n"
+      from_artifact.should eq from_source
     end
   end
 end

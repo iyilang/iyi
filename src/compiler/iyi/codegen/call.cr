@@ -88,9 +88,12 @@ class Iyi::CodeGenVisitor
     end
 
     c_calling_convention = target_def.c_calling_convention?
+    indirect = !c_calling_convention && !is_primitive && !target_def.is_a?(External)
 
     # Then the arguments.
-    node.args.zip(target_def.args) do |arg, def_arg|
+    node.args.each_with_index do |arg, arg_index|
+      def_arg = target_def.args[arg_index]
+
       request_value(arg)
 
       # What the callee is handed, which is the parameter's type wherever the
@@ -133,11 +136,29 @@ class Iyi::CodeGenVisitor
           else
             downcast(call_arg, def_arg.type, arg.type, true)
           end
+        # A float literal autocast to `Float32` at a call is the decimal read
+        # as a single, as `x : Float32 = 0.1` and the `_f32` suffix read it.
+        # Converted from the double it was typed as, it rounded twice:
+        # `take(1.00000005960464477539062500001)` was 1.0, not 1.0000001.
+        if arg.is_a?(NumberLiteral) && arg.kind.f64? && def_arg.type == @program.float32
+          call_arg = float32(arg.value)
+        end
       end
 
       # - C calling convention passing needs a separate handling of pass-by-value
       # - Primitives might need a separate handling (for example invoking a Proc)
-      if passed_type.passed_by_value? && !c_calling_convention && !is_primitive
+      if indirect && passed_indirectly?(def_arg.type)
+        # iyi: the callee gets a pointer and copies the bytes on entry. An
+        # argument still to be evaluated may write where this one points -
+        # `f(v, v.reset)` - while the value is to be the one read here, as
+        # the whole-aggregate load made it; unless every later argument is
+        # one that cannot run code, it is copied to a slot of its own first.
+        unless node.args.each.skip(arg_index + 1).all? { |later| inert_argument?(later) }
+          snapshot = alloca llvm_type(def_arg.type)
+          copy_value snapshot, call_arg, def_arg.type, fresh: true
+          call_arg = snapshot
+        end
+      elsif passed_type.passed_by_value? && !c_calling_convention && !is_primitive
         call_arg = load(llvm_type(passed_type), call_arg)
       end
 
@@ -172,6 +193,18 @@ class Iyi::CodeGenVisitor
     @needs_value = old_needs_value
 
     call_args
+  end
+
+  # iyi: whether evaluating *node* as an argument runs no code that could
+  # write anywhere, which is what lets an argument passed indirectly before
+  # it point at its value where it is (see `prepare_call_args_non_external`).
+  private def inert_argument?(node : ASTNode) : Bool
+    case node
+    when Var, InstanceVar, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, SymbolLiteral
+      true
+    else
+      false
+    end
   end
 
   def call_abi_info(target_def, node)
@@ -309,6 +342,7 @@ class Iyi::CodeGenVisitor
     with_cloned_context do |old_block_context|
       context.vars = old_block_context.vars.dup
       context.closure_parent_context = old_block_context
+      context.repeats = true
 
       # Allocate block vars, but first undefine variables outside
       # the block with the same name. This can only happen in this case:
@@ -418,6 +452,15 @@ class Iyi::CodeGenVisitor
           if is_super
             # A super call always matches the obj type
             result = int1(1)
+          elsif !node_obj && (def_owner = a_def.owner).is_a?(MetaclassType) && def_owner.instance_type.iyi_unit?
+            # iyi: a module's function reached unqualified, through an import
+            # or from a type nested in the module, takes no receiver, so there
+            # is no self to match: the scope's self is some other type and its
+            # type id never equalled the module's. Every arm was then skipped
+            # and the call fell into `unreachable`, which ran on as "out of
+            # memory", a memory fault or a hang for `fr_show(v)` with
+            # `v : Int32 | String`, while `Kit::Lib2.fr_show(v)` worked.
+            result = int1(1)
           else
             result = match_type_id(owner, a_def.owner, obj_type_id)
           end
@@ -515,9 +558,18 @@ class Iyi::CodeGenVisitor
     # Asked of the instance type, because a module-level `def` is owned by the
     # module's *metaclass* — `App::Greeter::title` with a `::` in its symbol,
     # not a `#` — and that is most of what a module exports.
+    #
+    # Except a body that answers with the receiver's own storage, which is
+    # inlined here all the same and *also* emitted. Called, `@counter` comes
+    # back as a copy and `self` as a copy of the receiver, so `h.counter.bump`
+    # bumped a temporary: `h.counter.bump -> 1` in the build writing the
+    # artifact, 2 from source. The symbol is for a caller that only has the
+    # header (`iyi bind`'s); the consumer of an `--emit-iyimod` artifact has
+    # the body, which travels for this reason (`IyiMod.answer_travels?`).
     unless @program.iyi_exported_owners.empty?
-      if owner = target_def.owner
-        return false if @program.iyi_exported_owners.includes?(owner.instance_type)
+      if (owner = target_def.owner) && @program.iyi_exported_owners.includes?(owner.instance_type)
+        return false unless body.is_a?(InstanceVar) || (body.is_a?(Var) && body.name == "self")
+        target_def_fun(target_def, self_type)
       end
     end
 
@@ -566,6 +618,17 @@ class Iyi::CodeGenVisitor
     # using the original invocation
     set_current_debug_location node if @debug.line_numbers? && fun_type.nil?
 
+    # iyi: a result passed indirectly (`LLVMTyper#passed_indirectly?`) is
+    # written by the callee into a slot of this frame, passed last.
+    external = target_def.try &.c_calling_convention?
+    if !external && !target_def.is_a?(External)
+      return_type = fun_type ? fun_type.return_type : type
+      if passed_indirectly?(return_type)
+        return_slot = alloca llvm_type(return_type)
+        call_args = call_args + [return_slot]
+      end
+    end
+
     if raises && (rescue_block = @rescue_block)
       invoke_out_block = new_block "invoke_out"
       @last = invoke func, call_args, invoke_out_block, rescue_block
@@ -583,8 +646,6 @@ class Iyi::CodeGenVisitor
     end
 
     set_call_attributes node, target_def, self_type, is_closure, fun_type
-
-    external = target_def.try &.c_calling_convention?
 
     if external && (external.type.proc? || external.type.is_a?(NilableProcType))
       fun_ptr = cast_to_void_pointer(@last)
@@ -616,6 +677,8 @@ class Iyi::CodeGenVisitor
           # Nothing
         end
       end
+    elsif return_slot
+      @last = @needs_value ? return_slot : llvm_nil
     else
       case type
       when .no_return?
@@ -638,8 +701,28 @@ class Iyi::CodeGenVisitor
     if external = target_def.c_calling_convention?
       set_call_attributes_external(node, external)
     else
-      # Non-external methods/functions have no arguments attributes
+      keep_call_out_of_main(target_def)
     end
+  end
+
+  # iyi: a call the top level makes once stays a call in an optimised build.
+  # The top level is `__iyi_main`, whose frame lives as long as the program,
+  # and the collector reads every frame conservatively. LLVM inlines an
+  # internal function with one call site whatever its size, and the register
+  # allocator then spills the helper's locals to slots of that frame which
+  # nothing writes again. `def make` filling an array with 4,000 arrays of
+  # 80 KB and returning its size, called once from the top level, left the
+  # array at 72(%rsp) of `__iyi_main`, and after three `GC.collect` 312 MB
+  # were still marked live under --release: 0 MB in a debug build and 0 MB
+  # with the helper `@[NoInline]`. Out of line, the helper's frame is popped
+  # when it returns and its slots are below where the next scan starts. A
+  # call that runs once costs one call either way. One inside a `while` or
+  # a block may be a loop's, so the inliner keeps it (GC_DESIGN.md says what
+  # that leaves).
+  def keep_call_out_of_main(target_def)
+    return if context.repeats? || target_def.always_inline? || context.fun != @main
+
+    @last.add_instruction_attribute(LLVM::AttributeIndex::FunctionIndex.value, LLVM::Attribute::NoInline, llvm_context)
   end
 
   def set_call_attributes_external(node, target_def)

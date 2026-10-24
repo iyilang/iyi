@@ -1,0 +1,449 @@
+# Encrypted DNS: DNS over TLS (RFC 7858) and DNS over HTTPS (RFC 8484),
+# the `DnsUpstream`s a `Resolver` asks instead of its plaintext servers.
+#
+#     dot = DnsOverTls.new("dns.example", "192.0.2.53")
+#     doh = DnsOverHttps.new("https://dns.example/dns-query", "192.0.2.53")
+#     resolver = Resolver.encrypted([dot, doh] of DnsUpstream)
+#     IyiSocket.connect("example.com", 443, resolver)
+#
+# Why its own module:
+# A stub resolver's question goes in the clear over UDP port 53, where
+# anyone on the path reads it and an off-path forger need only guess an
+# ID and a port. These two carry the same messages inside TLS, the
+# server's certificate checked for the name it was configured by. They
+# speak std/tls and std/http, which import std/socket, so they cannot be
+# std/socket's; the resolver asks them through std/socket's `DnsUpstream`
+# trait, implemented here.
+#
+# The server is named, and the name checked (RFC 8310's strict profile):
+# `DnsOverTls` is given the authentication domain name and the address
+# together - the address to connect to, the name the certificate must
+# carry - so nothing is looked up to reach it and nothing about the server
+# is taken on trust from the network. A certificate that does not chain to
+# the configuration's roots or does not name the server ends the exchange,
+# and the resolver's plaintext servers are not asked in its place unless
+# the program built it with `plaintext_fallback` (see `Resolver`).
+#
+# DNS over TLS:
+# Port 853, each message after its two-byte length as over TCP (RFC 7858
+# 3.3, RFC 1035 4.2.2). One connection carries every exchange while it is
+# used: it is kept after one and closed when it has sat idle `idle_ms`, so
+# a burst of lookups pays one handshake, and a server's closing of an idle
+# connection, which RFC 7858 3.4 lets either side do, is met by asking
+# again once on a new one - only when nothing of an answer came, since a
+# question asked twice is harmless and an answer read half is not. The
+# queries of one exchange go out in one write before any answer is read
+# (pipelining, RFC 7766 6.2.1.1) and the answers are matched to them by ID
+# in whatever order they come: a server may answer out of order. An answer
+# whose ID no waiting query has ends the connection rather than being
+# skipped, as a datagram from somebody else is: on a stream nobody else
+# can write, so it is the server's mistake and nothing after it can be
+# trusted to line up. A connection that ends partway into an answer is a
+# truncated answer, and refused. Resumption (RFC 7858 3.4 recommends it):
+# the tickets the server sends are kept, and a new connection offers one.
+#
+# DNS over HTTPS:
+# A request per question, over std/http's client, which keeps the
+# connection between them and speaks HTTP/2 when the server's ALPN takes
+# it - offered first, as RFC 8484 5.2 asks for it. POST sends the message
+# as the body; GET as the `dns` parameter in base64url without padding
+# (4.1). The query's ID is 0, as 4.1 says it should be so an HTTP cache
+# sees one request for one question. Only a 200 whose `Content-Type` is
+# `application/dns-message` is an answer; anything else is the server's
+# refusal or mistake, and so is a body past 65535 bytes, which is more
+# than any DNS message can be (a stream's length says no more). std/dns
+# keeps no cache, so `Cache-Control` and the answer's TTLs are not read:
+# every lookup asks, over this transport as over UDP.
+#
+# Padding: TLS hides a query's bytes and not its length, and a query's
+# length is the name's plus a constant, so the resolver pads every query
+# it gives an upstream (`DnsMessage.query` with
+# `DnsMessage::PADDING_BLOCK`): an EDNS(0) OPT record with a Padding
+# option of zero bytes (RFC 7830) brings each one to a multiple of 128
+# octets, RFC 8467 4.1's policy for a client. A query is 33 bytes and its
+# name's characters before padding, so a name of up to 95 characters goes
+# out as 128 bytes, up to 223 as 256, and a longer one as 384. The
+# transports send what they are given, the same padded message over TLS
+# and over HTTPS, as the body of a POST and in a GET's `dns` parameter
+# alike. A server that follows RFC 8467 pads its answers too (to 468
+# octets); that is the server's to do, and an answer is read the same
+# either way: its OPT record is read for the RCODE's upper bits (std/dns)
+# and its options are not.
+#
+# The server's own name: `DnsOverHttps` with an address connects there and
+# checks the certificate for the URL's host; without one, a host that is a
+# name is found by the system's resolver - the one question asked in the
+# clear, about the DoH server itself, whose answer cannot impersonate it
+# because TLS checks the certificate either way. A URL with an address for
+# its host asks nothing.
+
+module std/secure_dns
+
+import std/dns::{DnsError, DnsMessage, DnsName}
+import std/socket::{DnsUpstream, IPv4Address, IPv6Address, IyiSocket, Resolver, SocketError}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsSession}
+import std/http::{HTTP, HTTPClient, HTTPError, Response}
+import std/uri::{URI}
+import std/base64::{Base64}
+import std/slice::{Bytes}
+
+# DNS over TLS to one server: see the module's header.
+pub class DnsOverTls
+  PORT = 853
+  # How long a connection is kept with nothing asked over it. A guess at
+  # what a burst of lookups needs, not a measured figure; a program that
+  # knows its server's own idle timeout sets it below that.
+  IDLE_MS = 10000
+
+  # The authentication domain name: what the certificate must carry.
+  getter name : String
+  # The address connected to, IPv4 or IPv6.
+  getter address : String
+  getter port : Int32
+  getter idle_ms : Int32
+  getter config : TlsConfig
+  # Connections this upstream has opened: what a program reads to see its
+  # connection kept.
+  getter connections_made : Int32 = 0
+
+  @tls : TlsClient? = nil
+  @used_ms : Int64 = 0_i64
+  # What the connection has delivered and no answer has taken yet.
+  @pending : Array(UInt8) = [] of UInt8
+  @session : TlsSession = TlsSession.new
+
+  # *name* is what the server's certificate is checked for and *address*
+  # where it is; *config* holds the roots it must chain to (the system's
+  # by default) and the versions spoken. A name that is not a host name,
+  # or an address that is not one, is the program's mistake and refused
+  # here.
+  def initialize(@name : String, @address : String, @port : Int32 = PORT, config : TlsConfig? = nil, @idle_ms : Int32 = IDLE_MS)
+    why = DnsName.why(@name)
+    raise "DNS over TLS: #{@name.inspect} is not a name to check the server by: #{why}" if why.is_a?(String)
+    read = @address.includes?(":") ? IyiSocket.read_ipv6(@address) : IyiSocket.read_ipv4(@address)
+    raise "DNS over TLS: #{@address.inspect} is not an address: #{read}" if read.is_a?(String)
+    raise "DNS over TLS: port #{@port} is not a port: 1 to 65535" if @port < 1 || @port > 65535
+    raise "DNS over TLS: an idle timeout of #{@idle_ms} ms" if @idle_ms < 0
+    @config = config || TlsConfig.new
+  end
+
+  def label : String
+    "#{@name} (#{IyiSocket.endpoint(@address, @port)}) over TLS"
+  end
+
+  def zero_id? : Bool
+    false
+  end
+
+  def exchange(queries : Array(Bytes), timeout_ms : Int32) : Array(Bytes) | DnsError | Cancelled
+    got = nil.as(Array(Bytes) | DnsError | Cancelled | Nil)
+    if kept = live
+      got = over(kept, queries, timeout_ms, true)
+    end
+    # Nothing kept, or the kept one closed before a byte of an answer.
+    if got.nil?
+      fresh = open(timeout_ms)
+      return fresh unless fresh.is_a?(TlsClient)
+      got = over(fresh, queries, timeout_ms, false)
+    end
+    return lost("the connection ended before an answer") if got.nil?
+    @used_ms = Resolver.now_ms if got.is_a?(Array(Bytes))
+    got
+  end
+
+  def close : Nil
+    if held = @tls
+      @tls = nil
+      held.close
+    end
+    @pending.clear
+  end
+
+  # The kept connection, unless it has sat idle too long.
+  private def live : TlsClient?
+    held = @tls
+    return nil unless held
+    if Resolver.now_ms - @used_ms > @idle_ms.to_i64
+      close
+      return nil
+    end
+    held
+  end
+
+  private def open(timeout_ms : Int32) : TlsClient | DnsError | Cancelled
+    close
+    socket = IyiSocket.connect(@address, @port, timeout_ms)
+    return socket if socket.is_a?(Cancelled)
+    return failed(socket.timed_out?, socket.reason) if socket.is_a?(SocketError)
+    socket.read_timeout_ms = timeout_ms
+    socket.write_timeout_ms = timeout_ms
+    @connections_made = @connections_made + 1
+    tls = TlsClient.over(socket, @name, @config, timeout_ms, @session)
+    if tls.is_a?(TlsError)
+      socket.close unless socket.closed?
+      return Cancelled.new if tls.cancelled?
+      return failed(tls.timed_out?, tls.message)
+    end
+    @tls = tls
+    @used_ms = Resolver.now_ms
+    tls
+  end
+
+  # *queries* written in one go, each after its length, and an answer read
+  # for each, matched by ID. Nil when *reused* and the connection turned
+  # out closed before a byte of an answer: the caller asks again on a new
+  # one. Every failure closes the connection.
+  private def over(tls : TlsClient, queries : Array(Bytes), timeout_ms : Int32, reused : Bool) : Array(Bytes) | DnsError | Cancelled | Nil
+    framed = [] of UInt8
+    ids = [] of Int32
+    queries.each do |query|
+      framed << (query.size >> 8).to_u8
+      framed << (query.size & 255).to_u8
+      index = 0
+      while index < query.size
+        framed << query[index]
+        index = index + 1
+      end
+      ids << DnsMessage.id_of(query)
+    end
+    wrote = tls.write(framed)
+    if wrote.is_a?(TlsError)
+      close
+      return Cancelled.new if wrote.cancelled?
+      return nil if reused && !wrote.timed_out?
+      return failed(wrote.timed_out?, wrote.message)
+    end
+    answers = [] of Bytes?
+    queries.each { answers << nil }
+    left = queries.size
+    while left > 0
+      frame = read_frame(tls)
+      if frame.nil?
+        close
+        return nil if reused && left == queries.size
+        return lost("the connection ended with #{left} of #{queries.size} answers to come")
+      end
+      unless frame.is_a?(Bytes)
+        close
+        return frame
+      end
+      id = DnsMessage.id_of(frame)
+      slot = -1
+      index = 0
+      while index < answers.size
+        if answers[index].nil? && ids[index] == id
+          slot = index
+          break
+        end
+        index = index + 1
+      end
+      if slot < 0
+        close
+        return DnsError.new(DnsError::MALFORMED, "", label, "an answer with the ID #{id}, which no query waiting on the connection has")
+      end
+      answers[slot] = frame
+      left = left - 1
+    end
+    whole = [] of Bytes
+    answers.each { |answer| whole << answer.as(Bytes) }
+    whole
+  end
+
+  # The next message: its two bytes of length, then that many. Nil when
+  # the connection ended cleanly between messages with nothing of the next
+  # one read; a truncated answer when it ended inside one.
+  private def read_frame(tls : TlsClient) : Bytes | DnsError | Cancelled | Nil
+    while @pending.size < 2
+      more = fill(tls)
+      return more unless more.is_a?(Bool)
+      return (@pending.empty? ? nil : truncated(@pending.size, -1)) unless more
+    end
+    length = (@pending[0].to_i32 << 8) | @pending[1].to_i32
+    while @pending.size < 2 + length
+      more = fill(tls)
+      return more unless more.is_a?(Bool)
+      return truncated(@pending.size - 2, length) unless more
+    end
+    frame = Bytes.new(length)
+    index = 0
+    while index < length
+      frame[index] = @pending[2 + index]
+      index = index + 1
+    end
+    @pending = @pending[2 + length, @pending.size - 2 - length]
+    frame
+  end
+
+  # One read's bytes added to `@pending`: true, or false at the end of the
+  # connection.
+  private def fill(tls : TlsClient) : Bool | DnsError | Cancelled
+    chunk = tls.read(16384)
+    if chunk.is_a?(TlsError)
+      return Cancelled.new if chunk.cancelled?
+      return failed(true, chunk.message) if chunk.timed_out?
+      return false
+    end
+    return false if chunk.empty?
+    raw = chunk.to_unsafe
+    index = 0
+    while index < chunk.bytesize
+      @pending << raw[index]
+      index = index + 1
+    end
+    true
+  end
+
+  private def truncated(got : Int32, length : Int32) : DnsError
+    said = length < 0 ? "#{got} byte of an answer's length" : "#{got} of an answer's #{length} bytes"
+    DnsError.new(DnsError::MALFORMED, "", label, "truncated: the connection ended after #{said}")
+  end
+
+  private def lost(why : String) : DnsError
+    DnsError.new(DnsError::UNREACHABLE, "", label, why)
+  end
+
+  private def failed(timed_out : Bool, why : String) : DnsError
+    return DnsError.new(DnsError::TIMED_OUT, "", label) if timed_out
+    DnsError.new(DnsError::UNREACHABLE, "", label, why)
+  end
+end
+
+impl DnsUpstream for DnsOverTls
+end
+
+# DNS over HTTPS to one URL: see the module's header.
+pub class DnsOverHttps
+  MEDIA = "application/dns-message"
+  # RFC 8484 6: the body is a DNS message, and none is longer than what
+  # a stream's two bytes of length can say.
+  MAX_ANSWER = 65535
+
+  getter url : String
+  # "POST" or "GET".
+  getter method : String
+
+  @client : HTTPClient
+
+  # *url* is `https://`: an `http://` upstream would be plaintext with
+  # extra steps, and is refused. *address*, when given, is where the URL's
+  # host is, and nothing is asked to find it. *config* holds the roots the
+  # server must chain to and the ALPN offered: by default the system's
+  # roots, and `h2` before `http/1.1`.
+  def initialize(@url : String, address : String? = nil, config : TlsConfig? = nil, @method : String = "POST")
+    uri = URI.parse?(@url)
+    raise "DNS over HTTPS: #{@url.inspect} is not a URL" unless uri
+    scheme = uri.scheme
+    raise "DNS over HTTPS: #{@url.inspect} is not https://, and anything else is plaintext" unless scheme && scheme.downcase == "https"
+    host = uri.hostname
+    raise "DNS over HTTPS: #{@url.inspect} names no host" unless host
+    raise "DNS over HTTPS: the method is POST or GET, not #{@method.inspect}" unless @method == "POST" || @method == "GET"
+    tls = config
+    unless tls
+      tls = TlsConfig.new
+      tls.alpn = ["h2", "http/1.1"]
+    end
+    pinned = nil.as(Resolver?)
+    if at = address
+      read = at.includes?(":") ? IyiSocket.read_ipv6(at) : IyiSocket.read_ipv4(at)
+      raise "DNS over HTTPS: #{at.inspect} is not an address: #{read}" if read.is_a?(String)
+      pinned = Resolver.new([] of String, hosts: "#{at} #{host}\n")
+    end
+    @client = HTTPClient.new(idle: 1, tls: tls, resolver: pinned)
+  end
+
+  def label : String
+    "#{@url} over HTTPS"
+  end
+
+  def zero_id? : Bool
+    true
+  end
+
+  # Connections the HTTP client has opened, and requests sent over one it
+  # kept.
+  def connections_made : Int32
+    @client.connections_made
+  end
+
+  def connections_reused : Int32
+    @client.connections_reused
+  end
+
+  def exchange(queries : Array(Bytes), timeout_ms : Int32) : Array(Bytes) | DnsError | Cancelled
+    answers = [] of Bytes
+    queries.each do |query|
+      one = ask(query, timeout_ms)
+      return one unless one.is_a?(Bytes)
+      answers << one
+    end
+    answers
+  end
+
+  def close : Nil
+    @client.close
+  end
+
+  # RFC 8484 4.1's `dns` parameter: base64url (RFC 4648 5) "with padding
+  # characters removed".
+  def self.base64url(message : String) : String
+    text = Base64.urlsafe_encode(message)
+    size = text.bytesize
+    while size > 0 && text.to_unsafe[size - 1] == 61_u8
+      size = size - 1
+    end
+    text[0, size]
+  end
+
+  private def ask(query : Bytes, timeout_ms : Int32) : Bytes | DnsError | Cancelled
+    body = String.new(query.size) { |into| into.copy_from(query.to_unsafe, query.size) }
+    headers = {"Accept" => MEDIA}
+    target = @url
+    if @method == "GET"
+      target = "#{@url}#{@url.includes?("?") ? "&" : "?"}dns=#{DnsOverHttps.base64url(body)}"
+      body = ""
+    else
+      headers["Content-Type"] = MEDIA
+    end
+    where = label
+    got = HTTP.open(@method, target, headers, body, redirects: 0, decompress: false, client: @client, timeout_ms: timeout_ms) { |response| DnsOverHttps.answer(response, where) }
+    case got
+    in Bytes, DnsError, Cancelled
+      got
+    in SocketError
+      return DnsError.new(DnsError::TIMED_OUT, "", where) if got.timed_out?
+      DnsError.new(DnsError::UNREACHABLE, "", where, got.reason)
+    in HTTPError
+      DnsError.new(DnsError::UNREACHABLE, "", where, got.message)
+    end
+  end
+
+  # The message a response carries: a 200 of `application/dns-message`
+  # (parameters after it allowed, the type in any case) of at most
+  # `MAX_ANSWER` bytes. RFC 8484 4.2.1 calls any 2xx a success, but no
+  # other 2xx carries an answer to a query: 204 has no body and 206 a part
+  # of one.
+  def self.answer(response : Response, label : String) : Bytes | DnsError | Cancelled
+    return DnsError.new(DnsError::REFUSED, "", label, "HTTP #{response.status} #{response.reason}") unless response.status == 200
+    said = response.header("Content-Type") || ""
+    media = said.split(';')[0].strip.downcase
+    return DnsError.new(DnsError::MALFORMED, "", label, "an answer of #{said.inspect}, not #{MEDIA}") unless media == MEDIA
+    length = (response.header("Content-Length") || "").to_i64?
+    if length.is_a?(Int64) && length > MAX_ANSWER.to_i64
+      return oversized(label)
+    end
+    body = response.body_io.read_all(MAX_ANSWER.to_i64)
+    return body if body.is_a?(Cancelled)
+    return oversized(label) if body.is_a?(HTTPError) && body.status == 413
+    return DnsError.new(DnsError::UNREACHABLE, "", label, body.message) if body.is_a?(HTTPError) || body.is_a?(SocketError)
+    message = Bytes.new(body.bytesize)
+    message.to_unsafe.copy_from(body.to_unsafe, body.bytesize)
+    message
+  end
+
+  private def self.oversized(label : String) : DnsError
+    DnsError.new(DnsError::MALFORMED, "", label, "oversized: an answer past #{MAX_ANSWER} bytes, longer than any DNS message")
+  end
+end
+
+impl DnsUpstream for DnsOverHttps
+end

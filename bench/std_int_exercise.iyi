@@ -15,26 +15,36 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/int
-import std/enumerable
-import std/list
-using std/enumerable::{Enumerable}
-using std/list::{List}
+import std/float
+import std/enumerable::{Enumerable}
+import std/list::{List}
 
 puts "== add"
 assert_true 1_u16 + 2_u16 == 3_u16, "u16"
 assert_true 1_i8 + 2_i8 == 3_i8, "i8"
 assert_true 1_u32 + 1_u32 == 2_u32, "u32"
+# `UInt8` and `UInt64` divide by a double as the rest of the tower does. The
+# prelude writes `/` for `Int32` and `Int64` only, so `x / 3.0` did not type
+# for these two, and a literal divisor took the `Float32` overload instead:
+# `1_u8 / 3.0` was a single, 0.33333334.
+assert_true 1_u8 / 3.0 == 1.0 / 3.0 && 1_u64 / 3.0 == 1.0 / 3.0, "UInt8 and UInt64 divided by a double are doubles"
 puts "  UInt16, Int8, UInt32 add"
 
 puts "\n== bits"
 assert_true 3_u16.popcount == 2, "popcount 0b11"
 assert_true 1_u16.bit_length == 1, "bit_length"
-puts "  popcount and bit_length"
+# A negative count shifts the other way, as the prelude's `Int32` does and
+# the other library's tower does: it answered 0 (or -1, shifting a negative
+# right), so `8_i16 >> -2` was 0. Past the width it is still 0, or the sign.
+assert_true (8_i16 >> -2) == 32_i16 && (8_i16 << -2) == 2_i16, "a negative shift count shifts the other way"
+assert_true (8_u32 >> -2) == 32_u32 && (8_u32 << -2) == 2_u32 && (-8_i8 >> -1) == -16_i8, "a negative count, unsigned and narrow"
+assert_true (-8_i16 >> 16) == -1_i16 && (8_u16 << 16) == 0_u16, "past the width"
+puts "  popcount, bit_length and shifts"
 
 # A wide integer compared with a double is compared exactly, not rounded
 # to a double first: `9007199254740993_i128 == 9007199254740992.0` was
-# true. The prelude's own `Int64 == Float64` is the prelude's to mend;
-# `Int64#<=>(Float64)` here is exact.
+# true. The prelude's own `Int64 == Float64` is exact as well, and agrees
+# with `Int64#<=>(Float64)` here.
 puts "\n== comparison with doubles"
 assert_true !(9007199254740993_i128 == 9007199254740992.0), "2^53 + 1 == 2^53"
 assert_true 9007199254740993_i128 != 9007199254740992.0, "2^53 + 1 != 2^53"
@@ -52,6 +62,9 @@ assert_true (9007199254740993_i64 <=> 9007199254740992.0) == 1, "Int64 <=> a dou
 assert_true (9223372036854775807_i64 <=> 9223372036854775808.0) == -1, "Int64::MAX <=> 2^63"
 assert_true (18446744073709551615_u64 <=> 18446744073709551616.0) == -1, "UInt64::MAX <=> 2^64"
 assert_true (2147483647 <=> 2147483647.5) == -1 && (200_u8 <=> 200.0) == 0, "the narrow spaceship"
+assert_true 9007199254740993_i64 > 9007199254740992.0 && 9223372036854775807_i64 < 9223372036854775808.0 &&
+            9223372036854775808.0 > 9223372036854775807_i64 && 18446744073709551615_u64 < 18446744073709551616.0,
+  "the prelude's Int64 and UInt64 operators agree with <=>"
 nan = 0.0 / 0.0
 assert_true (5_u128 <=> nan) == -1, "<=> places NaN after every number"
 assert_true !(5_u128 == nan) && 5_u128 != nan && !(5_u128 < nan) && !(5_u128 >= nan), "NaN is ordered against nothing"
@@ -76,10 +89,109 @@ assert_true 3.0e38.to_u128 == 300000000000000012135895401846682943488_u128, "3e3
 assert_true 255.9.to_u == 255_u32, "255.9 to_u"
 puts "  a double truncates, then the truncation is range-checked"
 
+# The unchecked conversions keep the low bits, and a wider target is
+# extended by the sign of the type the value leaves. `std/int` wrote the
+# checked and the `?` form for every pair and the unchecked form for a
+# double only, while the compiler's hint sent `x.unsafe_to_u32` here.
+# A 128-bit integer converts to the nearest double or single, ties to even,
+# rounded once. The conversion is a call LLVM makes behind the program's
+# back, and Windows' link step had none: `x.to_f64` of a `UInt128` it could
+# not see the value of failed to link ("unresolved external symbol
+# __floatuntidf"). The values are the edges of that rounding - exact
+# halves, a half with a bit set in the low word far below it, the word
+# boundary, the most negative value - and a few at random; the expected answers are Python's `float(n)` and the
+# single nearest `n`, found exactly. The zero added is one the optimiser
+# cannot see, so the conversion is the call and not a constant.
+puts "\n== conversion to doubles and singles"
+opaque_u = Program.args.size.to_u128
+opaque_i = Program.args.size.to_i128
+infinity = 1.0 / 0.0
+[
+  {9007199254740993_u128 + opaque_u, 9007199254740992.0, 9007199254740992.0},
+  {(-9007199254740993_i128) + opaque_i, -9007199254740992.0, -9007199254740992.0},
+  {18446744073709551615_u128 + opaque_u, 1.8446744073709552e+19, 1.8446744073709552e+19},
+  {(-18446744073709551615_i128) + opaque_i, -1.8446744073709552e+19, -1.8446744073709552e+19},
+  {18446744073709551617_u128 + opaque_u, 1.8446744073709552e+19, 1.8446744073709552e+19},
+  {(-18446744073709551617_i128) + opaque_i, -1.8446744073709552e+19, -1.8446744073709552e+19},
+  {170141183460469250621153235194464960512_u128 + opaque_u, 1.7014118346046923e+38, 1.7014118346046923e+38},
+  {170141183460469250621153235194464960513_u128 + opaque_u, 1.7014118346046927e+38, 1.7014118346046923e+38},
+  {170141183460469288400085098151626670080_u128 + opaque_u, 1.701411834604693e+38, 1.7014118346046923e+38},
+  {340282366920938463463374607431768211455_u128 + opaque_u, 3.402823669209385e+38, infinity},
+  {1267650675786093127411026624512_u128 + opaque_u, 1.267650675786093e+30, 1.2676506002282294e+30},
+  {(-1267650675786093127411026624512_i128) + opaque_i, -1.267650675786093e+30, -1.2676506002282294e+30},
+  {1267650675786093127411026624513_u128 + opaque_u, 1.267650675786093e+30, 1.2676507513439569e+30},
+  {(-1267650675786093127411026624513_i128) + opaque_i, -1.267650675786093e+30, -1.2676507513439569e+30},
+  {1267650826901820579239673462784_u128 + opaque_u, 1.2676508269018206e+30, 1.2676509024596843e+30},
+  {(-1267650826901820579239673462784_i128) + opaque_i, -1.2676508269018206e+30, -1.2676509024596843e+30},
+  {18446744073709553664_u128 + opaque_u, 1.8446744073709552e+19, 1.8446744073709552e+19},
+  {(-18446744073709553664_i128) + opaque_i, -1.8446744073709552e+19, -1.8446744073709552e+19},
+  {18446744073709555713_u128 + opaque_u, 1.8446744073709556e+19, 1.8446744073709552e+19},
+  {(-18446744073709555713_i128) + opaque_i, -1.8446744073709556e+19, -1.8446744073709552e+19},
+  {36893488147419107328_u128 + opaque_u, 3.6893488147419103e+19, 3.6893488147419103e+19},
+  {(-36893488147419107328_i128) + opaque_i, -3.6893488147419103e+19, -3.6893488147419103e+19},
+  {170141183460469231731687303715884105727_u128 + opaque_u, 1.7014118346046923e+38, 1.7014118346046923e+38},
+  {(-170141183460469231731687303715884105727_i128) + opaque_i, -1.7014118346046923e+38, -1.7014118346046923e+38},
+  {85070591730234625310576617597232481280_u128 + opaque_u, 8.507059173023463e+37, 8.507059173023462e+37},
+  {(-85070591730234625310576617597232481280_i128) + opaque_i, -8.507059173023463e+37, -8.507059173023462e+37},
+  {773801536743419589688_u128 + opaque_u, 7.738015367434195e+20, 7.73801521469125e+20},
+  {(-773801536743419589688_i128) + opaque_i, -7.738015367434195e+20, -7.73801521469125e+20},
+  {678745728143731729554941710_u128 + opaque_u, 6.787457281437318e+26, 6.787457345828541e+26},
+  {(-678745728143731729554941710_i128) + opaque_i, -6.787457281437318e+26, -6.787457345828541e+26},
+  {771249390860537241662564260851507_u128 + opaque_u, 7.712493908605372e+32, 7.71249410731447e+32},
+  {(-771249390860537241662564260851507_i128) + opaque_i, -7.712493908605372e+32, -7.71249410731447e+32},
+  {154778126055590420735941995455095622136_u128 + opaque_u, 1.5477812605559042e+38, 1.5477813032931605e+38},
+  {(-154778126055590420735941995455095622136_i128) + opaque_i, -1.5477812605559042e+38, -1.5477813032931605e+38},
+  {199387512534008114958209521681632284405_u128 + opaque_u, 1.993875125340081e+38, 1.9938750540050278e+38},
+  {(-170141183460469231731687303715884105728_i128) + opaque_i, -1.7014118346046923e+38, -1.7014118346046923e+38},
+].each do |pair|
+  value = pair[0]
+  assert_true value.to_f64 == pair[1], "#{value}.to_f64 is #{value.to_f64}, not #{pair[1]}"
+  # Past a single's range `to_f32` is refused, as in Crystal, before the
+  # conversion is reached.
+  assert_true value.to_f32.to_f64 == pair[2], "#{value}.to_f32 is #{value.to_f32}, not #{pair[2]}" unless pair[2] == infinity
+end
+puts "  every 128-bit value to its nearest double and single"
+
+puts "\n== unchecked conversions"
+assert_true (-1).unsafe_to_u32 == 4294967295_u32, "-1 unsafe_to_u32"
+assert_true 4294967297_u64.unsafe_to_u32 == 1_u32, "2^32 + 1 unsafe_to_u32"
+assert_true 65537.unsafe_to_u16 == 1_u16, "65537 unsafe_to_u16"
+assert_true 255_u8.unsafe_to_i8 == -1_i8, "255 unsafe_to_i8"
+assert_true (-2_i8).unsafe_to_i128 == -2_i128, "-2_i8 unsafe_to_i128 extends the sign"
+assert_true (-1_i8).unsafe_to_u128 == 340282366920938463463374607431768211455_u128, "-1_i8 unsafe_to_u128 extends the sign"
+assert_true 4294967295_u32.unsafe_to_i64 == 4294967295_i64, "a UInt32 extends by zeros"
+assert_true 65535_u16.unsafe_to_i16 == -1_i16, "65535 unsafe_to_i16"
+assert_true 340282366920938463463374607431768211455_u128.unsafe_to_u == 4294967295_u32, "UInt128 unsafe_to_u"
+puts "  low bits kept, wider targets extended by the source's sign"
+
 puts "\n== traits"
 assert_true (1_i8 <=> 2_i8) == -1, "i8 cmp"
 assert_true List(Int8).new([1_i8, 2_i8, 3_i8]).sum == 6_i8, "i8 sum"
 assert_true List(UInt16).new([] of UInt16).sum == 0_u16, "u16 empty sum"
 puts "  Comparable and Num for the rest of the tower"
+# Against any integer, as the other library's `Int#<=>` is. Against `self`
+# only, the `1_i64` in `1 <=> 1_i64` cast to `Int32` and to `Float64` once
+# `std/traits` was imported, and the line was "ambiguous call".
+assert_true (1 <=> 1_i64) == 0 && (1 <=> 2_u8) == -1 && (-1 <=> 18446744073709551615_u64) == -1 && (300_i16 <=> 255_u8) == 1, "<=> across widths"
+puts "  <=> between any two widths"
+
+# A type's minimum has a gcd whenever the answer fits, as `Math.gcd`
+# answers: `abs` came first and refused it, so `(-2147483648).gcd(6)`
+# panicked "arithmetic overflow" where Math.gcd gave 2.
+puts "\n== gcd"
+assert_true (-2147483648).gcd(6) == 2 && 6.gcd(-2147483648) == 2, "Int32::MIN and 6"
+assert_true (-128_i8).gcd(96_i8) == 32_i8, "Int8::MIN and 96"
+assert_true (-9223372036854775808_i64).gcd(12_i64) == 4_i64, "Int64::MIN and 12"
+assert_true (-170141183460469231731687303715884105728_i128).gcd(-6_i128) == 2_i128, "Int128::MIN and -6"
+assert_true 12.gcd(-18) == 6 && 0.gcd(-5) == 5 && 255_u8.gcd(85_u8) == 85_u8, "the ordinary answers stay"
+puts "  a minimum's gcd, where it fits"
+
+# `chr` takes every code point but the surrogates in every width, as the
+# prelude's `Int32#chr` does: past ASCII it panicked "233 is out of char
+# range" for every type but `Int32`, though `233.chr` was 'é'.
+puts "\n== chr"
+assert_true 233_i64.chr == 'é' && 233_u8.chr == 'é' && 0x263A_u32.chr == '☺', "chr past ASCII"
+assert_true 0x1F600_i128.chr.ord == 0x1F600 && 0x10FFFF_u64.chr.ord == 0x10FFFF && 65_i8.chr == 'A', "chr to the last code point"
+puts "  every code point, every width"
 
 puts "\nALL CHECKS PASSED"

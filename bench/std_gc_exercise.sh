@@ -11,7 +11,9 @@
 #   * A negative size is refused by name at every allocating verb.
 #   * Negative proofs: copies of the module that report a constant
 #     collection count, that leave the trigger on under `disable`, and that
-#     answer false for every heap pointer each fail at the named check.
+#     answer false for every heap pointer each fail at the named check; one
+#     whose `stats` walks without the runtime lock, and one whose
+#     `is_heap_ptr` does, each die of a memory fault.
 #
 # Exits non-zero if any check fails.
 set -u
@@ -69,7 +71,7 @@ build_and_run "std_gc" exercise-gc "$REPO/bench/std_gc_exercise.iyi"
 
 echo
 echo "== every gc check reported"
-for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "ALL CHECKS PASSED"; do
+for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "a string built in a reused chunk ends in a NUL" "stats beside threads that allocate" "is_heap_ptr beside threads whose large chunks come and go" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-gc.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
@@ -104,6 +106,24 @@ else
   status=1
 fi
 
+echo
+echo "== a bare import is told how to reach the module's GC"
+# `import std/gc` keeps the module's names qualified (SPEC.md R-2b), so a
+# bare `GC` is the prelude's own. `GC.collect` was told "iyi's prelude has
+# no `collect` on GC:Module: it is small by rule" and pointed at
+# `iyi build --crystal`, with the module's `GC` one import away.
+printf 'import std/gc\nGC.collect\nputs 1\n' > "$WORK/bare-import.iyi"
+if "$IYI" check "$WORK/bare-import.iyi" >"$WORK/bare-import.log" 2>&1; then
+  echo "  the bare import type-checked (it should have been told to import GC)"
+  status=1
+elif grep -qF 'Import it by name, `import std/gc::{GC}`' "$WORK/bare-import.log"; then
+  echo '  told: "Import it by name, `import std/gc::{GC}`"'
+else
+  echo "  refused, but without the import:"
+  tail -5 "$WORK/bare-import.log" | sed 's/^/    /'
+  status=1
+fi
+
 # ---------------------------------------------------------------------------
 # What the allocating verbs refuse
 # ---------------------------------------------------------------------------
@@ -112,7 +132,7 @@ echo
 echo "== a negative size is refused by name"
 gc_panics_with() { # gc_panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/gc\nusing std/gc::{GC}\n\nputs (%s).address\n' "$expression" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/gc::{GC}\n\nputs (%s).address\n' "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"
@@ -144,8 +164,8 @@ gc_panics_with "realloc to -64" realloc_neg "negative size: -64" 'GC.realloc(GC.
 
 echo
 echo "== proving the checks can fail when the module is broken"
-prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
-  local label="$1" dir="$2" phrase="$3" script="$4"
+prove_fails() { # prove_fails <label> <dir> <phrase> <sed script> [runs]
+  local label="$1" dir="$2" phrase="$3" script="$4" runs="${5:-1}"
   mkdir -p "$WORK/$dir/std"
   sed -e "$script" "$REPO/src/std/gc.iyi" > "$WORK/$dir/std/gc.iyi"
   if cmp -s "$REPO/src/std/gc.iyi" "$WORK/$dir/std/gc.iyi"; then
@@ -159,10 +179,16 @@ prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
     status=1
     return
   fi
-  "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
-  local exit_code=$?
+  # A race is run until it is caught, up to *runs* times.
+  local run=1 exit_code=0
+  while [ "$run" -le "$runs" ]; do
+    "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+    exit_code=$?
+    [ "$exit_code" -ne 0 ] && break
+    run=$((run + 1))
+  done
   if [ "$exit_code" -eq 0 ]; then
-    echo "  $label: the exercise still passed, so it does not test this"
+    echo "  $label: the exercise still passed in $runs run(s), so it does not test this"
     status=1
     return
   fi
@@ -180,9 +206,28 @@ prove_fails "collections reported as a constant" const_collections "churn crosse
 prove_fails "disable leaves the trigger on" disable_noop "no collection ran while disabled" \
   's/IyiMark.auto = false/IyiMark.auto = true/'
 prove_fails "is_heap_ptr answers false for every pointer" never_heap "a chunk's start is a heap pointer" \
-  's/IyiRoots.base_of(pointer.address) != 0_u64/IyiRoots.base_of(pointer.address) == 18446744073709551615_u64/'
+  's/^    base != 0_u64$/    base == 18446744073709551615_u64/'
 prove_fails "free does nothing" free_noop "a freed chunk is not" \
   's/    IyiHeap.free(pointer)/    pointer/'
+# Three threads allocate beside two seconds of `stats`: walked without the
+# lock, the walk died of a memory fault in 20 runs of 20 on Windows, where a
+# released arena is unmapped as the scavenge ends. `is_heap_ptr` beside
+# three threads whose large chunks come and go died the same way in 10 runs
+# of 10. A Linux runner's walk without the lock passed: the race is the
+# platform's to arrange, so the proofs run where they were measured.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # Races: 20 in 20 and 10 in 10 where measured, and one Windows runner
+    # once ran the second clean, so each runs up to five times.
+    prove_fails "stats walks without the lock" stats_unlocked "memory fault" \
+      '/def self.stats/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}' 5
+    prove_fails "is_heap_ptr walks without the lock" is_heap_unlocked "memory fault" \
+      '/def self.is_heap_ptr/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}' 5
+    ;;
+  *)
+    echo "  stats and is_heap_ptr walking without the lock: not proven here, the races were measured on Windows"
+    ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -16,18 +16,21 @@ end
 
 import std/float
 import std/int
-import std/number
-import std/enumerable
-import std/list
-using std/number::{RoundingMode}
-using std/enumerable::{Enumerable}
-using std/list::{List}
+import std/number::{RoundingMode}
+import std/enumerable::{Enumerable}
+import std/list::{List}
 
 puts "== arithmetic"
 assert_true 1.5_f32 + 1.5_f32 == 3.0_f32, "add"
 assert_true 4.0_f32 / 2.0_f32 == 2.0_f32, "div"
 assert_true (-1.5_f32).abs == 1.5_f32, "abs"
+assert_true (-0.0_f32).abs.to_f64.to_s == "0.0", "abs clears the sign of a zero"
 puts "  Float32 + / abs"
+# An integer over an integer is a double, as the other library divides
+# one: `7 / 2` printed 3.5 until this module was imported, and then was
+# "ambiguous call", its `2` cast to both a double and a single.
+assert_true 7 / 2 == 3.5 && 7_i64 / 2 == 3.5 && 7 / 2_i64 == 3.5 && 7_u8 / 2_u8 == 3.5 && 1 / 4_i128 == 0.25, "an integer over an integer is a double"
+puts "  an integer over an integer is a double, whatever the widths"
 
 puts "\n== constants"
 assert_true Float32::MAX > 1.0_f32, "max"
@@ -126,6 +129,14 @@ q, r = 7.5.divmod(-2.0)
 assert_true q == -4.0 && r == -0.5, "divmod(7.5, -2.0) is (-4.0, -0.5)"
 q32, r32 = 7.5_f32.divmod(2.0_f32)
 assert_true q32 == 3.0_f32 && r32 == 1.5_f32, "the single's divmod"
+# Past a quotient of 2^23 a single's `//` is the double's, narrowed: run in
+# 24 bits the remainder's multiple rounded, and the quotient came out one
+# over the floor, 12799595.0 and 16106953.0 for the two below, so `divmod`
+# did not give the dividend back.
+assert_true (-170277296.0_f32) // -13.303335_f32 == 12799594.0_f32, "a single's quotient past 2^23 is its floor"
+assert_true (-4.1095315e20_f32) // -25514022535168.0_f32 == 16106952.0_f32, "and a second one"
+q32, r32 = (-170277296.0_f32).divmod(-13.303335_f32)
+assert_true q32.to_f64 * (-13.303335_f32).to_f64 + r32.to_f64 == -170277296.0, "that divmod gives the dividend back"
 puts "  the zero of % is the divisor's, // floors, divmod is Python's"
 
 puts "\n== traits"
@@ -133,5 +144,51 @@ assert_true (1.5_f32 <=> 2.0_f32) == -1, "f32 cmp"
 assert_true List(Float32).new([1.5_f32, 2.5_f32]).sum == 4.0_f32, "f32 sum"
 assert_true 2.5_f32.round(RoundingMode::TiesEven) == 2.0_f32, "f32 ties even"
 puts "  Num and round(mode)"
+
+# A zero keeps its sign through the roundings, as the other library's
+# `trunc`, `round` and `round(mode)` answer: `trunc` went through an
+# integer, and `round`, `round(mode)` and `remainder` tested `self < 0.0`,
+# which is false for -0.0. `remainder` is C's `fmod`: the dividend's sign.
+puts "\n== signed zeros and the smallest exponent"
+assert_str "-0.0", (-0.5).trunc.to_s, "(-0.5).trunc is -0.0"
+assert_str "-0.0", (-0.0).trunc.to_s, "(-0.0).trunc is -0.0"
+assert_str "-0.0", (-0.5_f32).trunc.to_s, "(-0.5_f32).trunc is -0.0"
+assert_str "0.0", 0.5.trunc.to_s, "0.5.trunc is 0.0"
+assert_str "-0.0", (-0.0).round.to_s, "(-0.0).round is -0.0"
+assert_str "-0.0", (-0.0_f32).round.to_s, "(-0.0_f32).round is -0.0"
+assert_str "-0.0", (-0.0).round(2).to_s, "(-0.0).round(2) is -0.0"
+assert_str "-0.0", (-1.0e-300).round(-300).to_s, "(-1e-300).round(-300) is -0.0"
+assert_str "-0.0", (-0.0).round(RoundingMode::TiesAway).to_s, "(-0.0).round(TiesAway) is -0.0"
+assert_str "-0.0", (-0.0).round(RoundingMode::TiesEven).to_s, "(-0.0).round(TiesEven) is -0.0"
+assert_str "-0.0", (-1.0e-300).round(-300, RoundingMode::TiesAway).to_s, "(-1e-300).round(-300, TiesAway) is -0.0"
+assert_str "-0.0", (-0.0).remainder(2.0).to_s, "(-0.0).remainder(2.0) is -0.0"
+assert_str "-0.0", (-0.0_f32).remainder(2.0_f32).to_s, "(-0.0_f32).remainder(2.0_f32) is -0.0"
+assert_str "-0.0", (-4.0).remainder(2.0).to_s, "(-4.0).remainder(2.0) is -0.0"
+# `x ** Int32::MIN` negated the exponent and panicked "arithmetic
+# overflow"; the exponent is counted in an Int64 now. 5.444710317852295e-94
+# is the power rounded once (Python's `decimal` at 80 digits); squaring in
+# plain doubles answered 5.444710383108578e-94.
+assert_true 2.0 ** -2147483648 == 0.0, "2.0 ** Int32::MIN is 0.0"
+assert_true (0.5 ** -2147483648).infinite? == 1, "0.5 ** Int32::MIN is Infinity"
+assert_true (-1.0) ** -2147483648 == 1.0, "-1.0 ** Int32::MIN is 1.0"
+assert_str "5.444710317852295e-94", (1.0000001 ** -2147483648).to_s, "1.0000001 ** Int32::MIN"
+assert_true 2.0_f32 ** -2147483648 == 0.0_f32, "2.0_f32 ** Int32::MIN is 0.0"
+puts "  a zero keeps its sign; ** takes the smallest Int32"
+
+# The edges of a double's range. `2.0 ** -1074` is the smallest double,
+# where one over `2.0 ** 1074` - infinite - was 0.0, and
+# `2.0 ** -2147483648` panicked negating its exponent. `round(digits)`
+# answered Infinity or NaN where the scale left the range, and a zero lost
+# its sign through `round`, `trunc` and `round(mode)`.
+puts "\n== the edges of a double's range"
+negative_zero = ->(x : Float64) { x == 0.0 && 1.0 / x < 0.0 }
+assert_true 2.0 ** -1074 == 5.0e-324, "2.0 ** -1074 is the smallest double, not #{2.0 ** -1074}"
+assert_true 10.0 ** -320 == 1.0e-320, "10.0 ** -320 is 1e-320, not #{10.0 ** -320}"
+assert_true 2.0 ** -3 == 0.125 && 10.0 ** -2 == 0.01, "an ordinary negative power"
+assert_true 1.0e308.round(1) == 1.0e308 && 1.5.round(400) == 1.5 && 1.5.round(-400) == 0.0, "round(digits) past the range"
+assert_true 1.0e308.round(1, RoundingMode::TiesAway) == 1.0e308 && 1.5.round(400, RoundingMode::ToZero) == 1.5, "round(digits, mode) past the range"
+assert_true 3.14159.round(2) == 3.14 && 1234.0.round(-2) == 1200.0, "round(digits) inside it"
+assert_true negative_zero.call((-0.3).round(RoundingMode::ToZero)) && negative_zero.call((-1.5).round(-400)), "round(ToZero) and round(-400) keep a zero's sign"
+puts "  **, round(digits) and a zero's sign"
 
 puts "\nALL CHECKS PASSED"

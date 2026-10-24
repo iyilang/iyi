@@ -18,17 +18,28 @@ class String
   HEADER_SIZE = 8
 
   # Allocates *bytesize* bytes, hands the buffer to the block to fill, and
-  # returns the string that results. The character count is scanned rather
-  # than asked for: a caller that knew it would have to be trusted, and every
-  # caller here is copying bytes it did not decode.
+  # returns the string that results. The character count is left at zero,
+  # "not counted yet", for `size` to scan the first time it is asked: most
+  # strings built here - an encoding, a join, a line - are never asked, and
+  # counting them all was a second pass over every byte built.
+  #
+  # The byte after the last is a NUL, as a literal's is, so `to_unsafe` is
+  # a C string: `std/process` and `std/debug` hand one to the platform as a
+  # path. The byte was allocated for that and never written, and a string's
+  # chunk is atomic - not cleared - so a chunk that had held a longer
+  # string kept that string's byte there. Measured on Windows after a
+  # collection that freed longer strings: 961 of 1,000 strings built after
+  # it had no terminator, and `Process.run` of a path built that way
+  # answered "no such program" for a file that was there.
   def self.new(bytesize : Int32, & : Pointer(UInt8) -> Nil) : String
     memory = String.memory(bytesize + HEADER_SIZE + 1)
     buffer = memory + HEADER_SIZE
     yield buffer
+    buffer[bytesize] = 0_u8
 
     header = memory.as(Pointer(Int32))
     header[0] = bytesize
-    header[1] = character_count(buffer, bytesize)
+    header[1] = 0
     memory.as(String)
   end
 
@@ -42,54 +53,57 @@ class String
     {% end %}
   end
 
-  # UTF-8 continuation bytes are `10xxxxxx`; every other byte starts a
-  # character. That is the whole of the decoding this prelude does.
-  protected def self.character_count(buffer : Pointer(UInt8), bytesize : Int32) : Int32
-    count = 0
+  # Each character's code point and the byte it starts at, by the other
+  # library's rule and the compiler's for a literal: a lead byte without the
+  # `10xxxxxx` bytes it calls for, one of those alone, an overlong form, a
+  # surrogate or past U+10FFFF is -1, one byte, and `each_char` yields U+FFFD.
+  private def each_point(& : Int32, Int32 -> Nil) : Nil
     index = 0
-    while index < bytesize
-      count = count + 1 if (buffer[index] & 192_u8) != 128_u8
-      index = index + 1
+    while index < @bytesize
+      yield point = point_at(index), index
+      index = index + (point < 0 ? 1 : point.unsafe_chr.bytesize)
     end
-    count
+  end
+
+  private def point_at(index : Int32) : Int32
+    lead = to_unsafe[index].to_i32
+    width = lead < 0xC2 || lead > 0xF4 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
+    point = width > 1 ? lead & (0x7F >> width) : lead < 0x80 ? lead : -1
+    k = 1
+    while k < width && point >= 0
+      byte = index + k < @bytesize ? to_unsafe[index + k].to_i32 : 0
+      point = (byte & 0xC0) == 0x80 ? (point << 6) | (byte & 0x3F) : -1
+      k = k + 1
+    end
+    width > 1 && (point < (1 << (5 * width - 4)) || point > 0x10FFFF || (point >= 0xD800 && point < 0xE000)) ? -1 : point
   end
 
   def bytesize : Int32
     @bytesize
   end
 
-  # Crystal reads `@length == 0` on a non-empty string as "not counted yet" and
-  # scans; a string it builds without knowing the count leaves the field at
-  # zero. This prelude used to return the field, which was right for every
-  # string it makes itself and wrong for one that arrived from Crystal's own
-  # code — `to_json`'s result printed correctly here and answered `size` 0.
-  #
-  # No error, a wrong number, and the layout is shared on purpose (SPEC.md
-  # Part V item 12), so the invariant has to be shared too.
+  # A zero `@length` on a non-empty string is "not counted yet", which is
+  # how the other library's own code leaves a string it builds: `to_json`'s
+  # result answered `size` 0 here while the field was returned as it stood.
+  # The layout is shared on purpose (SPEC.md Part V item 12), so the
+  # invariant is too. The count is of what `each_char` yields, a byte that
+  # begins no character one U+FFFD.
   def size : Int32
     return @length if @length > 0 || @bytesize == 0
 
-    @length = String.character_count(to_unsafe, @bytesize)
-    @length
+    count = 0
+    each_point { count = count + 1 }
+    @length = count
   end
 
   def empty? : Bool
     @bytesize == 0
   end
 
-  # The character at *index*, and the substring that starts there, asked for by
-  # `samples/iyi/calc`, which scans its input a character at a time and cannot
-  # do it with `to_unsafe` without becoming a program about pointers.
-  #
-  # ASCII, like the rest of this file: a byte is a character here, which is true
-  # of every string this prelude is asked to handle and false in general. The
-  # place it stops being true is the place to make `Char` real, and `size`
-  # already counts UTF-8 properly, so the two would disagree, noted rather than
-  # hidden.
-  #
-  # A negative index counts from the end, so `s[-1]` is the last character.
-  # Out of range after that wrap still raises rather than returning nil: the
-  # caller knows the length. `[]?` is the question that allows absence.
+  # The character at *index*, asked for by `samples/iyi/calc`, which scans
+  # its input a character at a time. Byte-indexed: a byte is the character
+  # for ASCII, and `each_char` is the decoded walk. A negative index counts
+  # from the end; out of range after that wrap raises, `[]?` answers nil.
   def [](index : Int32) : Char
     asked = index
     index = @bytesize + index if index < 0
@@ -97,42 +111,14 @@ class String
     to_unsafe[index].unsafe_chr
   end
 
-  # Every character in order, decoded: `size` counts code points, so this
-  # yields exactly that many. It used to yield one per byte, which made the
-  # prelude disagree with itself — `"héllo".size` was 5 and `each_char` ran
-  # six times — and `samples/iyi/basics` counted the bytes of a word it
-  # printed. Indexing stays byte-indexed (`[]` above), which is the
-  # convention `samples/iyi/calc` scans with; a character is a unit only
-  # where a character is what was asked for.
-  #
-  # A byte that begins no sequence, or a sequence the string is too short to
-  # hold, is yielded as itself: this decodes, it does not validate.
+  # Every character in order, decoded, as many as `size` counts: it yielded
+  # one per byte, so `"héllo".size` was 5 and `each_char` ran six times.
+  # Indexing stays byte-indexed (`[]` above), as `samples/iyi/calc` scans.
+  # A byte that begins no character is one U+FFFD, as in the other library:
+  # a lead byte took the bytes after it whatever they were, C3 41 was the
+  # one character U+00C1, and `"a" C3 '"'` swallowed the quote.
   def each_char(& : Char -> Nil) : Nil
-    index = 0
-    while index < @bytesize
-      lead = to_unsafe[index].to_i32
-      if (lead & 0x80) == 0
-        yield lead.unsafe_chr
-        index = index + 1
-      elsif (lead & 0xE0) == 0xC0 && index + 1 < @bytesize
-        yield (((lead & 0x1F) << 6) | (to_unsafe[index + 1].to_i32 & 0x3F)).unsafe_chr
-        index = index + 2
-      elsif (lead & 0xF0) == 0xE0 && index + 2 < @bytesize
-        yield (((lead & 0x0F) << 12) |
-               ((to_unsafe[index + 1].to_i32 & 0x3F) << 6) |
-               (to_unsafe[index + 2].to_i32 & 0x3F)).unsafe_chr
-        index = index + 3
-      elsif (lead & 0xF8) == 0xF0 && index + 3 < @bytesize
-        yield (((lead & 0x07) << 18) |
-               ((to_unsafe[index + 1].to_i32 & 0x3F) << 12) |
-               ((to_unsafe[index + 2].to_i32 & 0x3F) << 6) |
-               (to_unsafe[index + 3].to_i32 & 0x3F)).unsafe_chr
-        index = index + 4
-      else
-        yield lead.unsafe_chr
-        index = index + 1
-      end
-    end
+    each_point { |point| yield point < 0 ? '\uFFFD' : point.unsafe_chr }
   end
 
   def []?(index : Int32) : Char?
@@ -158,15 +144,10 @@ class String
     end
   end
 
-  # Pad on the left (rjust) or the right (ljust) to *width*. A width that
-  # already fits returns the string unchanged.
-  # *width* is in characters, because `size` is: padding is asked for to line
-  # a column up, and a string measured one way and padded another lines up
-  # for ASCII and nothing else. `"héllo".rjust(7, '.')` used to answer a
-  # string whose own `size` was 6. The pad travels as its own bytes for the
-  # same reason — written as one byte, a `'·'` left a lone continuation byte
-  # in the middle of the result. It defaults rather than living in a second
-  # overload of each, which is two methods for one question.
+  # Pad on the left (rjust) or the right (ljust) to *width*, in characters
+  # as `size` counts them, the pad as its own bytes: in bytes,
+  # `"héllo".rjust(7, '.')` answered a string of `size` 6, and a `'·'`
+  # written as one byte left a lone continuation byte in the result.
   def rjust(width : Int32, pad : Char = ' ') : String
     count = size
     return self if width <= count
@@ -199,10 +180,9 @@ class String
     end
   end
 
-  # `"ab" * -3` answered `""` where Crystal raises, and III.1.7a says one
-  # name means one thing in both. The size is a division rather than the
-  # multiply below, so the refusal names the string: `"abcd" * 600_000_000`
-  # panicked with "arithmetic overflow", which is the machine's adder.
+  # `"ab" * -3` answered `""` where the other library raises (III.1.7a).
+  # The size is a division, so the refusal names the string: `"abcd" *
+  # 600_000_000` panicked "arithmetic overflow", the machine's adder.
   def *(count : Int32) : String
     raise "negative count: #{count}" if count < 0
     return "" if count == 0 || @bytesize == 0
@@ -226,43 +206,44 @@ class String
     self
   end
 
-  # Written down rather than printed: in double quotes, the way the
-  # literal is spelled, which is what `Object#inspect`'s comment promises
-  # and what makes `no such key "b"` read as a string and not a name.
-  # Nothing inside is escaped: the strings this prelude holds are the
-  # program's own, and a quote inside one is rare and reads as itself.
+  # The literal that spells it, escaped as the other library's, a byte that
+  # is no UTF-8 as `\x`: unescaped, `["a\", \"b"]` printed as two strings.
   def inspect : String
-    "\"" + self + "\""
+    io = String::Builder.new(@bytesize + 2) << '"'
+    each_point do |point, at|
+      next io << "\\x" << to_unsafe[at].to_i32.to_s(16).upcase if point < 0
+      io << '\\' if point == 35 && at + 1 < @bytesize && to_unsafe[at + 1] == 123_u8
+      point.unsafe_chr.inspect_into(io, '"')
+    end
+    (io << '"').to_s
   end
 
   # The number this string spells - an optional sign and decimal digits,
-  # the whole string - asked for by `samples/iyi/calc`, which reads a
-  # token's text and needs the integer behind it. Raises on anything else,
-  # as Crystal's `to_i` does: one name means one thing in both libraries
-  # (SPEC.md III.1.7a), and a silent 0 for `"oops"` is wrong twice over.
-  # `to_i?` answers nil for the same text, the pair `[]` and `[]?` are.
+  # the whole string - as `samples/iyi/calc` reads a token. Raises on
+  # anything else, as the other library's does (SPEC.md III.1.7a): a
+  # silent 0 for `"oops"` is wrong twice; `to_i?` answers nil for it.
   def to_i : Int32
     to_i? || raise "not a number: #{inspect}"
   end
 
-  # Read as a *negative* magnitude, the range that holds every value the
-  # type has: `Int32::MIN` has no positive twin, so accumulating
-  # `2147483648` and negating it could not read what `to_s` wrote - it
-  # overflowed on the last digit, and with checked arithmetic that was a
-  # panic rather than the `nil` a `?` promises.
+  # Around the digits, `Char#whitespace?` is skipped as the other
+  # library's `whitespace: true` skips it (`"42\n".to_i?` was nil). Read
+  # as a *negative* magnitude, which holds every value the type has:
+  # `2147483648` accumulated and negated, `Int32::MIN` overflowed on its
+  # last digit, a panic rather than the `nil` a `?` promises.
   def to_i? : Int32?
-    return nil if empty?
-
-    index = 0
-    negative = self[0] == '-'
-    if negative || self[0] == '+'
+    index = space_end
+    last = space_start(index)
+    return nil if index == last
+    negative = to_unsafe[index] == 45_u8
+    if negative || to_unsafe[index] == 43_u8
       # A sign alone is not a number; `+5` is one, as it is for `to_f`.
-      return nil if @bytesize == 1
-      index = 1
+      return nil if last - index == 1
+      index = index + 1
     end
 
     value = 0
-    while index < @bytesize
+    while index < last
       digit = to_unsafe[index].to_i - 48
       return nil if digit < 0 || digit > 9
       # The next step would leave the type: -214748364 * 10 is the last
@@ -288,9 +269,8 @@ class String
     end
   end
 
-  # The three the Kemal port's path joining needs. ASCII again — a `Char`
-  # argument here is always `\'/\'` — and byte-indexed, which is the same
-  # thing while the strings are ASCII.
+  # The three the Kemal port's path joining needs, byte-indexed: the same
+  # as by character while the strings are ASCII.
   def starts_with?(prefix : String) : Bool
     return false if prefix.bytesize > bytesize
 
@@ -309,8 +289,10 @@ class String
     starts_with?(char.to_s)
   end
 
+  # `'\n'` is a line's end, so it takes the `\r` before it, or a lone `\r`
+  # in its place, as the other library's does: `"a\r\n".chomp('\n')` is "a".
   def chomp(char : Char) : String
-    text = char.to_s
+    text = char == '\n' ? (ends_with?("\r\n") ? "\r\n" : (ends_with?("\r") ? "\r" : "\n")) : char.to_s
     return self unless ends_with?(text)
     byte_slice(0, bytesize - text.bytesize)
   end
@@ -353,17 +335,32 @@ class String
     matched == wanted.bytesize
   end
 
-  # Without the whitespace at either end.
+  # Without `Char#whitespace?`'s characters at either end, decoded: it read
+  # bytes, and `"b\u00A0".strip` kept the space the other library takes.
   def strip : String
-    first = 0
-    while first < bytesize && to_unsafe[first].unsafe_chr.whitespace?
-      first = first + 1
+    first = space_end
+    byte_slice(first, space_start(first) - first)
+  end
+
+  # Where the whitespace in front ends, and where the run behind starts no
+  # nearer the front than *floor*; `std/text`'s `lstrip`, `rstrip` and
+  # `blank?` ask them too. A whitespace character is three bytes at most.
+  private def space_end : Int32
+    each_point { |point, at| return at unless point.unsafe_chr.whitespace? }
+    @bytesize
+  end
+
+  private def space_start(floor : Int32) : Int32
+    last = @bytesize
+    while last > floor
+      start = last - 1
+      while start > floor && last - start < 3 && (to_unsafe[start] & 0xC0) == 0x80
+        start = start - 1
+      end
+      break unless (char = point_at(start).unsafe_chr).whitespace? && start + char.bytesize == last
+      last = start
     end
-    last = bytesize
-    while last > first && to_unsafe[last - 1].unsafe_chr.whitespace?
-      last = last - 1
-    end
-    byte_slice(first, last - first)
+    last
   end
 
   # The pieces between separators, empty ones included: `"a,,b".split(',')`
@@ -389,14 +386,14 @@ class String
     pieces
   end
 
-  # The lines of a text, blank ones included; a final newline ends the last
-  # line rather than opening an empty one, which is what a file ending in a
-  # newline means.
+  # The lines of a text, blank ones included, a final newline ending the last
+  # line; `\r\n` ends one too, and a last `\r` with no `\n` after it is kept:
+  # `"1\r\n".lines[0].to_i` panicked where `File.read_lines` read 1.
   def lines : Array(String)
     return [] of String if bytesize == 0
     pieces = split('\n')
-    pieces.pop if pieces.last.empty?
-    pieces
+    tail = pieces.pop
+    pieces.map { |line| line.chomp('\r') }.concat(tail.empty? ? [] of String : [tail])
   end
 
   private def byte_slice(start : Int32, count : Int32) : String
@@ -445,31 +442,82 @@ class String
     end
   end
 
-  # Substring search, the naive way: the strings a sample holds are short
-  # enough that the loop is the answer and an index would be the question.
   def includes?(other : String) : Bool
-    return true if other.bytesize == 0
-    return false if other.bytesize > bytesize
-
-    start = 0
-    limit = bytesize - other.bytesize
-    while start <= limit
-      index = 0
-      while index < other.bytesize && to_unsafe[start + index] == other.to_unsafe[index]
-        index = index + 1
-      end
-      return true if index == other.bytesize
-      start = start + 1
-    end
-    false
+    !byte_index(other).nil?
   end
 
+  # Where *search* first starts at or after byte *offset* - counted from
+  # the end when negative - in bytes, as Crystal's `byte_index` answers.
+  # Naive while that is cheap, and Rabin-Karp - one rolling hash per
+  # position, bytes compared only where it matches - once more than four
+  # bytes a position have been compared: a needle that keeps almost
+  # matching, `"a" * 1000 + "b"` in a run of `a`, made the naive loop
+  # n * m, 222 ms for a megabyte.
+  def byte_index(search : String, offset : Int32 = 0) : Int32?
+    offset = offset + bytesize if offset < 0
+    return nil if offset < 0 || offset > bytesize
+    return offset if search.bytesize == 0
+    return nil if search.bytesize > bytesize - offset
+    m = search.bytesize
+    limit = bytesize - m
+    s = to_unsafe
+    t = search.to_unsafe
+    i = offset
+    spent = 0
+    while i <= limit
+      j = 0
+      while j < m && s[i + j] == t[j]
+        j = j + 1
+      end
+      return i if j == m
+      spent = spent + j
+      break if spent > 4 * (i - offset) + 64
+      i = i + 1
+    end
+    return nil if i > limit
+
+    prime = 16777619_u64
+    power = 1_u64
+    want = 0_u64
+    have = 0_u64
+    k = 0
+    while k < m
+      want = want &* prime &+ t[k].to_u64
+      have = have &* prime &+ s[i + k].to_u64
+      power = power &* prime
+      k = k + 1
+    end
+    while true
+      if have == want
+        j = 0
+        while j < m && s[i + j] == t[j]
+          j = j + 1
+        end
+        return i if j == m
+      end
+      return nil if i == limit
+      have = have &* prime &+ s[i + m].to_u64 &- power &* s[i].to_u64
+      i = i + 1
+    end
+  end
+
+  # Thirty-two bytes a step while they last, then one at a time, and the
+  # same string is itself: a byte a step was eleven times Python's `==`,
+  # 230 ms for 1,000 compares of equal megabytes. No load needs alignment.
   def ==(other : String) : Bool
     return false unless bytesize == other.bytesize
-
+    a = to_unsafe
+    b = other.to_unsafe
+    return true if a.address == b.address
     index = 0
+    while index + 32 <= bytesize
+      x = (a + index).as(Pointer(UInt64))
+      y = (b + index).as(Pointer(UInt64))
+      return false unless (x[0] ^ y[0]) | (x[1] ^ y[1]) | (x[2] ^ y[2]) | (x[3] ^ y[3]) == 0_u64
+      index = index + 32
+    end
     while index < bytesize
-      return false unless to_unsafe[index] == other.to_unsafe[index]
+      return false unless a[index] == b[index]
       index = index + 1
     end
     true
@@ -509,58 +557,80 @@ class String
   end
 end
 
-# `Char`'s own, and it lives here rather than in `primitives.iyi` because the
-# one-byte string it builds needs `String.new`.
-#
-# Without it `puts s[0]` printed the text `Char`: `Object#to_s` answers with the
-# type's name, so a type that never defined `to_s` prints its own name instead
-# of its value and nothing says a method is missing. `samples/iyi/calc` scans
-# with `String#[]` and compares the result, which is why nothing caught it —
-# comparison was defined and printing was not.
-#
-# UTF-8, in one to four bytes. It wrote the low byte and nothing else, which
-# is right for the ASCII a byte-indexed `[]` hands back and wrong for every
-# other character a program can write: `puts 'é'` printed one invalid byte,
-# and `each_char` above now yields code points that would print the same way.
-# `0x10FFFF` is the last one there is; past it a `'?'` goes out rather than a
-# sequence no reader can decode.
+# `Char`'s own, here rather than in `primitives.iyi` because the string it
+# builds needs `String.new`. Without `to_s`, `puts s[0]` printed `Char`, the
+# type's name; UTF-8 in one to four bytes, where it wrote the low byte
+# alone and `puts 'é'` printed one invalid byte.
 struct Char
   def to_s : String
-    point = ord
-    if point < 0x80
-      String.new(1) do |buffer|
-        buffer[0] = point.to_u8
+    at = 0
+    String.new(bytesize) do |buffer|
+      each_byte do |byte|
+        buffer[at] = byte
+        at = at + 1
       end
-    elsif point < 0x800
-      String.new(2) do |buffer|
-        buffer[0] = (0xC0 | (point >> 6)).to_u8
-        buffer[1] = (0x80 | (point & 0x3F)).to_u8
-      end
-    elsif point < 0x10000
-      String.new(3) do |buffer|
-        buffer[0] = (0xE0 | (point >> 12)).to_u8
-        buffer[1] = (0x80 | ((point >> 6) & 0x3F)).to_u8
-        buffer[2] = (0x80 | (point & 0x3F)).to_u8
-      end
-    elsif point <= 0x10FFFF
-      String.new(4) do |buffer|
-        buffer[0] = (0xF0 | (point >> 18)).to_u8
-        buffer[1] = (0x80 | ((point >> 12) & 0x3F)).to_u8
-        buffer[2] = (0x80 | ((point >> 6) & 0x3F)).to_u8
-        buffer[3] = (0x80 | (point & 0x3F)).to_u8
-      end
-    else
-      String.new(1) { |buffer| buffer[0] = '?'.ord.to_u8 }
     end
   end
 
+  # `0x10FFFF` is the last code point there is; past it a `'?'` goes out
+  # rather than a sequence no reader can decode. `String::Builder` writes
+  # these too, which had its own copy of the four arms.
+  def each_byte(& : UInt8 -> Nil) : Nil
+    point = ord
+    if point < 0x80 || point > 0x10FFFF
+      yield point < 0x80 ? point.to_u8 : 63_u8
+    elsif point < 0x800
+      yield (0xC0 | (point >> 6)).to_u8
+      yield (0x80 | (point & 0x3F)).to_u8
+    elsif point < 0x10000
+      yield (0xE0 | (point >> 12)).to_u8
+      yield (0x80 | ((point >> 6) & 0x3F)).to_u8
+      yield (0x80 | (point & 0x3F)).to_u8
+    else
+      yield (0xF0 | (point >> 18)).to_u8
+      yield (0x80 | ((point >> 12) & 0x3F)).to_u8
+      yield (0x80 | ((point >> 6) & 0x3F)).to_u8
+      yield (0x80 | (point & 0x3F)).to_u8
+    end
+  end
+
+  def bytesize : Int32
+    point = ord
+    point < 0x80 || point > 0x10FFFF ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4
+  end
+
   def inspect : String
-    "'" + to_s + "'"
+    String.build(12) { |io| inspect_into(io << '\'', '\'') << '\'' }
+  end
+
+  # Itself as `inspect` writes it between *quote*s, the other library's
+  # escapes; not `printable?`, as `\u` and hex. `'\''` was `'''`.
+  def inspect_into(io : String::Builder, quote : Char) : String::Builder
+    o = ord
+    return io << '\\' << self if self == quote || self == '\\'
+    return io << '\\' << "abtnvfr"[o - 7] if o >= 7 && o <= 13
+    return io << (o == 27 ? "\\e" : "\\0") if o == 27 || (o == 0 && quote == '\'')
+    return io << self if printable?
+    hex = o.to_s(16).upcase
+    io << (o > 0xFFFF ? "\\u{" + hex + "}" : "\\u" + hex.rjust(4, '0'))
+  end
+
+  # Not a control (Cc), format (Cf) or private-use (Co) character of
+  # Unicode 15, nor whitespace but the space: the other library's.
+  def printable? : Bool
+    o = ord
+    return o >= 0x20 && o != 0x7F if o < 0x80
+    !(o <= 0xA0 || whitespace? || o.in?(0xAD, 0x61C, 0x6DD, 0x70F, 0x8E2, 0x180E, 0xFEFF, 0x110BD, 0x110CD, 0xE0001) ||
+      (o >= 0x600 && o <= 0x605) || (o >= 0x890 && o <= 0x891) || (o >= 0x200B && o <= 0x200F) || (o >= 0x202A && o <= 0x202E) ||
+      (o >= 0x2060 && o <= 0x2064) || (o >= 0x2066 && o <= 0x206F) || (o >= 0xFFF9 && o <= 0xFFFB) || (o >= 0x13430 && o <= 0x1343F) ||
+      (o >= 0x1BCA0 && o <= 0x1BCA3) || (o >= 0x1D173 && o <= 0x1D17A) || (o >= 0xE0020 && o <= 0xE007F) ||
+      (o >= 0xE000 && o <= 0xF8FF) || (o >= 0xF0000 && (o & 0xFFFF) < 0xFFFE))
   end
 
   # The classes a word counter asks about, ASCII's: a letter is one of the
-  # fifty-two, a digit one of the ten, whitespace the space, tab and the
-  # line breaks.
+  # fifty-two, a digit one of the ten. Whitespace is the other library's:
+  # the space and `\t` to `\r`, and above ASCII Unicode's Zs, Zl and Zp, so
+  # U+00A0 and U+3000 are and U+0085, a control, is not. It was ASCII's.
   def letter? : Bool
     (self >= 'a' && self <= 'z') || (self >= 'A' && self <= 'Z')
   end
@@ -574,6 +644,90 @@ struct Char
   end
 
   def whitespace? : Bool
-    self == ' ' || self == '\t' || self == '\n' || self == '\r'
+    return ord.in?(0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000) || (ord >= 0x2000 && ord <= 0x200A) if ord > 0x7F
+    self == ' ' || (self >= '\t' && self <= '\r')
+  end
+end
+
+# Text built a piece at a time, as the other library's `String.build`: one
+# buffer that doubles when it fills, copied into the string once, at the
+# end. `result = result + piece` copies all written so far on every piece:
+# `Array#join` and `String#tr` built that way did not finish on 130 MB.
+class String::Builder
+  @buffer : Pointer(UInt8)
+  @bytesize : Int32
+  @capacity : Int32
+
+  def initialize(capacity : Int32 = 64)
+    @capacity = capacity < 16 ? 16 : capacity
+    @buffer = Pointer(UInt8).malloc(@capacity.to_u64)
+    @bytesize = 0
+  end
+
+  def bytesize : Int32
+    @bytesize
+  end
+
+  def empty? : Bool
+    @bytesize == 0
+  end
+
+  def <<(text : String) : self
+    write(text.to_unsafe, text.bytesize)
+    self
+  end
+
+  # A character's UTF-8 bytes, written in place rather than through a
+  # string of its own.
+  def <<(char : Char) : self
+    char.each_byte { |byte| write_byte(byte) }
+    self
+  end
+
+  # Anything else as its `to_s`.
+  def <<(value) : self
+    self << value.to_s
+  end
+
+  def write_byte(byte : UInt8) : Nil
+    reserve(1)
+    @buffer[@bytesize] = byte
+    @bytesize = @bytesize + 1
+  end
+
+  def write(bytes : Pointer(UInt8), count : Int32) : Nil
+    return if count <= 0
+    reserve(count)
+    (@buffer + @bytesize.to_i64).copy_from(bytes, count)
+    @bytesize = @bytesize + count
+  end
+
+  def to_s : String
+    String.new(@bytesize) { |buffer| buffer.copy_from(@buffer, @bytesize) }
+  end
+
+  # In Int64, so a build doubles past 1 GiB up to the 2147483647 bytes a
+  # string holds and is refused past them as `*` is: in Int32, doubling
+  # 1 GiB panicked a 1.2 GB build with "arithmetic overflow".
+  private def reserve(extra : Int32) : Nil
+    needed = @bytesize.to_i64 + extra.to_i64
+    return if needed <= @capacity.to_i64
+    raise "a string of #{@bytesize} bytes and #{extra} more is past the " \
+          "2147483647 bytes a string holds" if needed > 2147483647_i64
+    capacity = @capacity.to_i64
+    while capacity < needed
+      capacity = capacity * 2
+    end
+    capacity = 2147483647_i64 if capacity > 2147483647_i64
+    @buffer = @buffer.realloc(capacity.to_u64)
+    @capacity = capacity.to_i32
+  end
+end
+
+class String
+  def self.build(capacity : Int32 = 64, & : String::Builder -> _) : String
+    builder = String::Builder.new(capacity)
+    yield builder
+    builder.to_s
   end
 end

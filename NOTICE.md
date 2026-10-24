@@ -43,6 +43,35 @@ Crystal standard library uses the following libraries, which have their own lice
 - [readline][] - [GPLv3][]
 - [GMP][] - [LGPLv3][]
 
+iyi's own standard library includes code derived from, and its benches a
+port of:
+
+- [Arm optimized-routines][] (`Math.exp`, `exp2`, `log`, `log2` and `pow` in `src/std/math.iyi`, and
+  `bench/libm_oracle/`) - [MIT][]
+- fdlibm, as glibc carries it (`Math.log10`, `expm1`, `log1p`, `sinh`, `cosh`,
+  `tanh` and the Bessel functions, and their
+  copies in `bench/libm_oracle/`) -
+  Sun Microsystems' notice: "Permission to use, copy, modify, and
+  distribute this software is freely granted, provided that this notice is
+  preserved."
+- [musl][] (`Math.fma`'s software arm in `src/std/math.iyi`) - [MIT][]
+- [CORE-MATH][], as glibc 2.43 carries it and as published (`Math.erf`,
+  `erfc`, `asinh`, `acosh`, `atanh`, `lgamma`, `tgamma`, `atan`, `asin`,
+  `acos`, `sin`, `cos`, `tan`, `cbrt`, `hypot` and `atan2` in
+  `src/std/math.iyi`, and `bench/libm_oracle/core_math/`) - [MIT][]
+- [crystal-metric][] (`bench/metric/`) - [MIT][]
+
+Its benches vendor test vectors:
+
+- [NIST's ACVP-Server][] (`bench/std_mlkem_fixture/`, ML-KEM-768 vectors,
+  a subset) - NIST's notice for NIST-developed software, kept whole with
+  the source and what was changed in `bench/std_mlkem_fixture/NOTICE`
+- [the CFRG's HPKE draft repository][] (`bench/std_hpke_fixture/`, RFC
+  9180's test vectors, a subset) - Contributions to the IETF Standards
+  Process under BCP 78 and the IETF Trust Legal Provisions, code
+  components under the Simplified BSD License; the source, its terms and
+  what was changed are in `bench/std_hpke_fixture/NOTICE`
+
 <!-- licenses -->
 [Apache-2.0]: https://www.openssl.org/source/apache-license-2.0.txt
 [Apache-2.0 with LLVM exceptions]: https://raw.githubusercontent.com/llvm/llvm-project/main/llvm/LICENSE.TXT
@@ -52,6 +81,12 @@ Crystal standard library uses the following libraries, which have their own lice
 [MIT]: https://opensource.org/licenses/MIT
 [Zlib-license]: https://opensource.org/licenses/Zlib
 <!-- libraries -->
+[Arm optimized-routines]: https://github.com/ARM-software/optimized-routines
+[crystal-metric]: https://github.com/kostya/crystal-metric
+[NIST's ACVP-Server]: https://github.com/usnistgov/ACVP-Server
+[the CFRG's HPKE draft repository]: https://github.com/cfrg/draft-irtf-cfrg-hpke
+[musl]: https://musl.libc.org/
+[CORE-MATH]: https://core-math.gitlabpages.inria.fr/
 [bdwgc]: http://www.hboehm.info/gc/
 [GMP]: https://gmplib.org/
 [libevent2]: http://libevent.org/

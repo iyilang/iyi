@@ -89,9 +89,9 @@ describe Iyi::Mod::Resolver do
     fetched = [] of String
     graph = {
       {"dep/a", "1.0.0"} => "module dep/a",
-      {"dep/a", "2.0.0"} => "module dep/a",
+      {"dep/a", "1.2.0"} => "module dep/a",
       {"dep/b", "1.0.0"} => "module dep/b\nrequire dep/a v1.0.0",
-      {"dep/c", "1.0.0"} => "module dep/c\nrequire dep/a v2.0.0\nrequire dep/b v1.0.0",
+      {"dep/c", "1.0.0"} => "module dep/c\nrequire dep/a v1.2.0\nrequire dep/b v1.0.0",
     }
 
     root = manifest <<-MOD
@@ -105,8 +105,8 @@ describe Iyi::Mod::Resolver do
       Iyi::Mod::ModFile.parse(graph[{path, ver.to_s}], "#{path}/iyi.mod")
     end
 
-    selections.map(&.to_s).should eq ["dep/a v2.0.0", "dep/b v1.0.0", "dep/c v1.0.0"]
-    fetched.sort.should eq ["dep/a@1.0.0", "dep/a@2.0.0", "dep/b@1.0.0", "dep/c@1.0.0"]
+    selections.map(&.to_s).should eq ["dep/a v1.2.0", "dep/b v1.0.0", "dep/c v1.0.0"]
+    fetched.sort.should eq ["dep/a@1.0.0", "dep/a@1.2.0", "dep/b@1.0.0", "dep/c@1.0.0"]
   end
 
   it "refuses a checkout that says it is someone else" do

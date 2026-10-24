@@ -13,8 +13,84 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/csv
-using std/csv::{CSV}
+# What `CSV.parse` panicked with, or "parsed" and the rows.
+def csv_refusal(doc : String) : String
+  said = "parsed"
+  group do |g|
+    attempt = g.spawn { CSV.parse(doc).inspect }
+    outcome = attempt.value
+    said = outcome.is_a?(Panicked) ? outcome.message.to_s : "parsed #{outcome}"
+    0
+  end
+  said
+end
+
+import std/csv::{CSV, CSVReader, CSVWriter, CSVError, CSVRow}
+import std/io::{Memory}
+import std/file::{File}
+import std/gc::{GC}
+
+# Every row a reader gives, or the error's message, as one string.
+def read_all(r : CSVReader) : String
+  rows = [] of Array(String)
+  while true
+    got = r.next_row
+    return "#{rows.inspect} then #{got.message}" if got.is_a?(CSVError)
+    break unless got
+    rows << got
+  end
+  rows.inspect
+end
+
+# The first error a reader answers, "none" if it reads to the end.
+def first_error(r : CSVReader) : CSVError | Nil
+  while true
+    got = r.next_row
+    return got if got.is_a?(CSVError)
+    return nil unless got
+  end
+end
+
+def error_of(doc : String, same_size : Bool = false) : String
+  e = first_error(CSVReader.new(doc, same_size: same_size))
+  e ? "#{e.message} [#{e.line}:#{e.column}]" : "none"
+end
+
+def written(rows : Array(Array(String)), quote_all : Bool = false, line_end : String = "\n", separator : Char = ',', quote : Char = '"') : String
+  m = Memory.new
+  w = CSVWriter.new(m, separator: separator, quote: quote, quote_all: quote_all, line_end: line_end)
+  rows.each { |row| w.row(row) }
+  m.to_s
+end
+
+# A seeded generator, so a run's corpus is the next run's.
+class Lcg
+  @state : UInt64
+
+  def initialize(@state : UInt64)
+  end
+
+  def below(n : Int32) : Int32
+    @state = @state &* 6364136223846793005_u64 &+ 1442695040888963407_u64
+    ((@state >> 33) % n.to_u64).to_i32
+  end
+end
+
+PIECES = ["a", "b", "Z", "0", " ", ",", ";", "\"", "'", "\n", "\r\n", "\r", "ğ", "€", "😀", "\t", "x y"]
+
+def random_rows(rng : Lcg, count : Int32) : Array(Array(String))
+  rows = [] of Array(String)
+  count.times do
+    row = [] of String
+    (rng.below(6) + 1).times do
+      f = ""
+      rng.below(7).times { f = f + PIECES[rng.below(PIECES.size)] }
+      row << f
+    end
+    rows << row
+  end
+  rows
+end
 
 puts "== parse"
 rows = CSV.parse("a,b\n1,2\n")
@@ -27,5 +103,198 @@ assert_str "c", quoted[0][1], "after quoted"
 built = CSV.build(quoted)
 assert_true built.includes?("a,b"), "build keeps comma field"
 puts "  rows, quotes, build"
+
+# A byte order mark, which Excel writes into every "CSV UTF-8" file, is not
+# the first field's: `row[0] == "id"` was false.
+assert_str "id", CSV.parse("\uFEFFid,name\r\n1,a\r\n")[0][0], "a header behind a byte order mark"
+# A first field that opens with U+FEFF is the field's, not a mark: written
+# bare it was read past, and `[["\uFEFFid"]]` came back `[["id"]]`.
+marked = [["\uFEFFid", "x"], ["\uFEFFb"]]
+assert_str marked.inspect, CSV.parse(CSV.build(marked)).inspect, "a first field opening with U+FEFF round trips"
+assert_str "\"\uFEFFid\",x\n\uFEFFb", CSV.build(marked), "only the first field is quoted for its U+FEFF"
+puts "  a byte order mark, read past and written as a field's"
+
+# A UTF-16 document (Windows PowerShell 5.1's `Out-File` and `>`) is
+# refused by its byte order mark; it read as fields with a NUL between
+# every two letters, and no error.
+said = "parsed"
+group do |g|
+  attempt = g.spawn { CSV.parse("\xFF\xFE\"\0N\0\"\0\r\0\n\0") }
+  outcome = attempt.value
+  said = outcome.message.to_s if outcome.is_a?(Panicked)
+  0
+end
+assert_true said.includes?("UTF-16"), "a UTF-16 document is refused, not #{said.inspect}"
+puts "  a UTF-16 document is refused"
+
+puts "\n== line ends and empty fields"
+# A lone CR ends a line, as in the other library: it was dropped, and the
+# text either side of it ran into one field (`a"b"`).
+assert_str "[[\"a\"], [\"b\"]]", CSV.parse("a\rb").inspect, "a lone CR ends the line"
+assert_str "[[\"a\"], [\"b\"]]", CSV.parse("a\r\"b\"").inspect, "a lone CR ends the line before a quoted field"
+# A blank line is a row of no fields there, not a row of one empty field.
+assert_str "[[\"a\"], [], [\"b\"]]", CSV.parse("a\n\nb\n").inspect, "a blank line is a row of no fields"
+# `""` is a field with nothing in it, last line or not: it was dropped.
+assert_str "[[\"a\"], [\"\"]]", CSV.parse("a\n\"\"").inspect, "a last line of one quoted empty field"
+# Written bare, a row of one empty field was a blank line, and the last
+# one vanished on the way back.
+lone = [[""], ["a"], [""]]
+assert_str "\"\"\na\n\"\"", CSV.build(lone), "a row of one empty field is written quoted"
+assert_str lone.inspect, CSV.parse(CSV.build(lone)).inspect, "a row of one empty field round trips"
+# A last row of no fields was the empty text after the last line break,
+# which reads back as nothing: `[["a"], []]` came back `[["a"]]`, and
+# `[[]]` came back `[]`.
+[[["a"], [] of String], [[] of String], [["a"], [] of String, [] of String], [[] of String, ["b"]]].each do |empty_last|
+  assert_str empty_last.inspect, CSV.parse(CSV.build(empty_last)).inspect, "a last row of no fields round trips: #{empty_last.inspect}"
+end
+assert_str "a\n\n", CSV.build([["a"], [] of String]), "a last row of no fields is ended"
+assert_str "", CSV.build([] of Array(String)), "no rows are no text"
+puts "  lone CR, blank line, quoted empty field, last row of no fields, both ways"
+
+# Text after a closing quote, and a quote in a field that did not open
+# with one, are refused at their line and column, as the other library
+# refuses them: `"a"b,c` read as the field `ab` and `a"b,c` as `a"b`. A
+# line ends at CRLF once (the other library counts it twice: line 3).
+assert_str "expecting comma, newline or end, not 'b' at line 1, column 4", csv_refusal("\"a\"b,c"), "text after a closing quote"
+assert_str "expecting comma, newline or end, not 'c' at line 1, column 8", csv_refusal("x,\"b\"\"\"c\""), "text after a doubled quote and the closing one"
+assert_str "unexpected quote at line 1, column 2", csv_refusal("a\"b,c"), "a quote inside an unquoted field"
+assert_str "unexpected quote at line 2, column 5", csv_refusal("h1,h2\r\nv1,v\"2"), "a quote on the second line"
+assert_str "parsed [[\"\", \"x\"], [\"a\"]]", csv_refusal("\"\",x\n\"a\"\r\n"), "a closing quote before a comma or a line end"
+puts "  text after a closing quote and a quote in an unquoted field are refused, with line and column"
+
+puts "\n== reader over a string"
+assert_str "[[\"a b\", \"c\"]]", read_all(CSVReader.new("a b,c")), "a separator ends a bare field, a space does not"
+assert_str "[[\"a\", \"b\"], [\"1\", \"2\"]]", read_all(CSVReader.new("a,b\n1,2\n")), "rows a line at a time"
+assert_str "[[\"a\"], [\"b\"], [\"c\"], [], [\"d\"]]", read_all(CSVReader.new("a\r\nb\rc\n\r\nd")), "a CRLF is one line end, a lone CR and an LF one each"
+assert_str "[[\"x\\r\\ny\", \"q\\\"q\"], [\"\"]]", read_all(CSVReader.new("\"x\r\ny\",\"q\"\"q\"\n\"\"\n")), "a line break inside quotes, a doubled quote, a quoted empty field"
+assert_str "[[\"a\", \"\", \"\"], [\"\", \"b\"]]", read_all(CSVReader.new("a,,\n,b")), "empty fields at either end"
+assert_str "[]", read_all(CSVReader.new("")), "no text, no rows"
+assert_str "[[\"id\", \"x\"]]", read_all(CSVReader.new("\uFEFFid,x")), "a byte order mark read past"
+assert_str "[[\"a,b\", \"it's\"], [\"c\"]]", read_all(CSVReader.new("a,b;'it''s'\nc", separator: ';', quote: '\'')), "a separator and a quote of the caller's"
+assert_str "[[\"a\", \"b c\", \" d \", \"\"], [\"\"]]", read_all(CSVReader.new("  a\t, b c , \" d \" ,\t\n  ", strip: true)), "strip drops trailing spaces and leading ones, not a quoted field's"
+assert_str "[[\"a\", \"b\"], [\" c \"]]", read_all(CSVReader.new("a\tb\n c \n", separator: '\t', strip: false)), "a tab separator"
+assert_str "[[\"a\", \"b\"]]", read_all(CSVReader.new("a\t b", separator: '\t', strip: true)), "a tab separator under strip stays a separator"
+puts "  line ends, quotes, empty fields, a mark, a separator and a quote of the caller's, strip"
+
+puts "\n== reader errors are values, with line and column"
+assert_str "csv: unexpected quote at line 1, column 2 [1:2]", error_of("a\"b,c"), "a quote inside an unquoted field is an error value"
+assert_str "csv: unexpected quote at line 1, column 6 [1:6]", error_of("ab,çğ\"x"), "the column in characters, not bytes"
+assert_str "csv: expecting ',', newline or end, not 'b' at line 1, column 4 [1:4]", error_of("\"a\"b,c"), "text after a closing quote is an error value"
+assert_str "csv: expecting ',', newline or end, not 'x' at line 3, column 3 [3:3]", error_of("\"a\r\nb\",\"c\r\nd\"x"), "lines inside quotes are counted, a CRLF once"
+assert_str "csv: unterminated quoted field, opened at line 2, column 3 [2:3]", error_of("a\nb,\"open\n\n"), "a quote still open at the end, named where it opened"
+assert_str "csv: the row at line 3 has 1 fields, and the first row has 2 [3:1]", error_of("a,b\nc,d\ne\n", same_size: true), "same_size refuses a short row"
+assert_str "none", error_of("a,b\nc\n"), "rows of unequal length allowed by default"
+assert_str "csv: the document is UTF-16, by its byte order mark, and is read as UTF-8 [1:1]", error_of("\xFF\xFEa\0"), "a UTF-16 document is an error"
+sticky = CSVReader.new("a\n\"b\"c\nd\n")
+sticky.next_row
+once = sticky.next_row
+twice = sticky.next_row
+assert_true once.is_a?(CSVError) && twice.is_a?(CSVError) && once.message == twice.message, "after an error the reader answers it again"
+puts "  every malformed document an error value, at its line and column"
+
+puts "\n== header access"
+people = CSVReader.new("name,age,name2\r\n\r\nAda,36,x\nBob\n\nCy,7,y,extra\n", headers: true)
+head = people.headers
+assert_str "[\"name\", \"age\", \"name2\"]", head.is_a?(CSVError) ? head.message : head.inspect, "the header row"
+seen = [] of String
+failed = people.each do |row|
+  seen << "#{row.line}:#{row["name"]}/#{row["age"]}/#{row["age"]?.inspect}/#{row["missing"]?.inspect}/#{row.size}"
+end
+assert_true failed.nil?, "each reads to the end"
+assert_str "[\"3:Ada/36/\\\"36\\\"/nil/3\", \"4:Bob//nil/nil/1\", \"6:Cy/7/\\\"7\\\"/nil/4\"]", seen.inspect, "rows by header name, blank lines passed over"
+dup = CSVReader.new("k,k\n1,2\n", headers: true).next
+assert_true !dup.is_a?(CSVError) && !dup.nil? && dup["k"] == "2", "a repeated header name answers its last column, as Python's DictReader"
+strict = CSVReader.new("a,b\n1,2,3\n", headers: true, same_size: true)
+bad = strict.next
+assert_true bad.is_a?(CSVError) && bad.message == "csv: the row at line 2 has 3 fields, and the header has 2", "same_size holds a row to the header"
+no_head = CSVReader.new("1,2").next
+assert_true !no_head.is_a?(CSVError) && !no_head.nil? && no_head[1] == "2" && no_head[5]?.nil?, "a row by position"
+puts "  by name, by position, missing names nil, a repeated name, same_size against the header"
+
+puts "\n== writer"
+assert_str "a,b\n\"c,d\",\"g\nh\",\"\r\"\n", written([["a", "b"], ["c,d", "g\nh", "\r"]]), "a field holding the separator or a line break is quoted"
+assert_str "\"e\"\"f\",\"\"\"\"\"\"\n", written([["e\"f", "\"\""]]), "a quote is doubled inside quotes"
+assert_str "\"\"\n\n,\n", written([[""], [] of String, ["", ""]]), "the writer quotes a row of one empty field"
+assert_str "\" a\",\"b\t\"\r\n", written([[" a", "b\t"]], line_end: "\r\n"), "a field with spaces at its ends is quoted"
+assert_str "\"a\";\"b\"\n", written([["a", "b"]], quote_all: true, separator: ';'), "quote_all quotes every field"
+assert_str "'it''s';a,b\n", written([["it's", "a,b"]], separator: ';', quote: '\''), "a quote of the caller's doubled"
+assert_str "\"\uFEFFid\",x\n\uFEFFb\n", written([["\uFEFFid", "x"], ["\uFEFFb"]]), "the writer quotes only the first field for its U+FEFF"
+puts "  quoted only where needed, or always; line ends; a caller's separator and quote"
+
+puts "\n== written and read back"
+rng = Lcg.new(20261015_u64)
+[{',', '"', false}, {';', '\'', false}, {'\t', '"', true}].each do |dialect|
+  sep, q, all = dialect
+  rows = random_rows(rng, 2000)
+  text = written(rows, quote_all: all, separator: sep, quote: q, line_end: "\r\n")
+  assert_str rows.inspect, read_all(CSVReader.new(text, separator: sep, quote: q)), "random rows round trip through a string (#{sep.inspect})"
+  assert_str rows.inspect, read_all(CSVReader.new(Memory.new(text), separator: sep, quote: q)), "random rows round trip through a stream (#{sep.inspect})"
+  assert_str rows.inspect, read_all(CSVReader.new(text, separator: sep, quote: q, strip: true)), "written fields survive a strip reader (#{sep.inspect})"
+end
+# A CRLF, a doubled quote and a character, each split across the
+# stream's 64 KiB chunks.
+split_crlf = "x" * 65535 + "\r\nb\n"
+assert_str "[#{["x" * 65535].inspect}, [\"b\"]]", read_all(CSVReader.new(Memory.new(split_crlf))), "a CRLF split across chunks is one line end"
+split_quote = "\"" + "y" * 65534 + "\"\"z\"\n"
+assert_str "[#{["y" * 65534 + "\"z"].inspect}]", read_all(CSVReader.new(Memory.new(split_quote))), "a doubled quote split across chunks"
+split_char = "a" * 65535 + "ğ\"\n"
+split_error = first_error(CSVReader.new(Memory.new(split_char)))
+assert_str "csv: unexpected quote at line 1, column 65537", (split_error ? split_error.message : "none"), "a column counted across chunks in characters"
+puts "  three dialects of random rows both ways, through a string and a stream; fields split across chunks"
+
+# A stream is read through a 64 KiB window and one field buffer, both
+# reused, so what stays alive is a row, not the file: written here and
+# read back, 51 MB of rows kept 90 KB alive at the most between
+# collections, and a row of six fields allocated 464 bytes - its strings,
+# its array and its share of the windows. Held whole, the file is 51 MB
+# kept, and the bound below is 1 MiB.
+puts "\n== a 50 MB file, read with bounded memory"
+big = File.tempfile("std_csv_big", ".csv")
+sink = File.open(big, "w")
+w = CSVWriter.new(sink)
+line = 0
+expected = 0_i64
+while line < 650_000
+  name = "Name \"#{line % 97}\", Jr."
+  w.row([line.to_s, name, "çay ğ 😀", "multi\nline #{line % 13}", (line * 7).to_s, "plain field text"])
+  expected = expected + line.to_i64 + name.bytesize.to_i64
+  line = line + 1
+end
+sink.close
+size = File.size(big)
+assert_true size > 50_000_000_i64, "the file is past 50 MB (#{size} bytes)"
+GC.collect
+base = GC.stats.bytes_kept_by_last_sweep
+most = 0_u64
+input = File.open(big)
+reader = CSVReader.new(input)
+count = 0
+checksum = 0_i64
+per_row_before = 0_u64
+while got = reader.next_row.or_panic
+  count = count + 1
+  checksum = checksum + got[0].to_i.to_i64 + got[1].bytesize.to_i64
+  if count % 50_000 == 0
+    GC.collect
+    kept = GC.stats.bytes_kept_by_last_sweep
+    most = kept - base if kept > base && kept - base > most
+  end
+  # Rows read with the collector held back, well into the file: what a
+  # row costs, the window and the field buffer long since allocated.
+  if count == 100_000
+    GC.disable
+    per_row_before = GC.stats.bytes_since_collection
+  elsif count == 110_000
+    per_row = (GC.stats.bytes_since_collection - per_row_before) // 10_000_u64
+    GC.enable
+    assert_true per_row < 1024_u64, "a row of six fields allocates #{per_row} bytes, under 1 KiB"
+  end
+end
+input.close
+File.delete(big)
+assert_true count == 650_000, "every row read back (#{count})"
+assert_true checksum == expected, "the rows' fields read back"
+assert_true most < 1_048_576_u64, "reading #{size} bytes keeps #{most} bytes alive, under 1 MiB"
+puts "  650000 rows, #{size // 1_000_000} MB, kept under 1 MiB while read, under 1 KiB allocated a row"
 
 puts "\nALL CHECKS PASSED"

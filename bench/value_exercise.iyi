@@ -107,6 +107,11 @@ assert_str({1, 2}.to_s, "{1, 2}", "tuple: to_s")
 assert_str({1, "two"}.to_s, "{1, \"two\"}", "tuple: to_s inspects its members")
 assert_str({1, 2}.inspect, "{1, 2}", "tuple: inspect")
 assert_str([{1, 2}].to_s, "[{1, 2}]", "tuple: inside an array")
+# A tuple whose first member is itself a tuple is set off by a space, as the
+# other library prints it: `{{1, 2}, 3}` opened with `{{`, a macro.
+assert_str({ {1, 2}, 3 }.to_s, "{ {1, 2}, 3 }", "tuple: a tuple first is padded")
+assert_str({ {1, 2}, {3, 4} }.inspect, "{ {1, 2}, {3, 4} }", "tuple: inspect pads the same way")
+assert_str({1, {2, 3}}.to_s, "{1, {2, 3}}", "tuple: a tuple later is not padded")
 
 # ---- 6. The other value type, which had the same defect
 assert_true((1..3) == (1..3), "range: == same bounds")
@@ -117,6 +122,37 @@ assert_true(((1..3) != (1...3)), "range: != follows ==")
 assert_int((1..3).hash, (1..3).hash, "range: equal ranges hash the same")
 assert_true((1..3).hash != (1...3).hash, "range: the flag changes the hash")
 assert_true((1..3).hash != (1..4).hash, "range: a bound changes the hash")
+# A range prints as it is written, each end inspected, as the other
+# library's does: `Object#to_s` printed the type, `Range(Int32, Int32)`.
+assert_str((1..5).to_s, "1..5", "range: to_s is the literal")
+assert_str("#{1...3} #{[-2..-1]} #{("a".."b").inspect} #{(1..nil).inspect}", "1...3 [-2..-1] \"a\"..\"b\" 1..", "range: exclusive, inside an array, ends inspected, an open end left out")
+
+# A `when` is `===`, which was `==` everywhere: a range arm, a tuple of
+# types and a union of types matched nothing and fell to `else`.
+assert_true((1..3) === 3 && !((1...3) === 3) && !((1..3) === 0), "range: === is inclusion")
+range_arm = case 5
+            when 1..4 then "low"
+            when 5..9 then "high"
+            else           "none"
+            end
+assert_str(range_arm, "high", "range: a when arm matches by inclusion")
+either = 1 > 0 ? "s" : 1
+assert_true(String === either && !(Int32 === either), "class: === is membership")
+# A variable: a tuple literal after `case` is split member by member before
+# `===` is asked.
+typed_pair = {either, false}
+typed_arm = case typed_pair
+            when {Int32, Bool}  then "int"
+            when {String, Bool} then "str"
+            else                     "none"
+            end
+assert_str(typed_arm, "str", "tuple: a tuple of types matches member by member")
+union_arm = case either
+            when Int32 | Nil   then "int-or-nil"
+            when String | Char then "str-or-char"
+            else                    "none"
+            end
+assert_str(union_arm, "str-or-char", "class: a union of types matches")
 
 spans = {} of Range(Int32, Int32) => String
 spans[1..3] = "low"
@@ -133,4 +169,98 @@ counted = 0
 assert_int(counted, 4, "range: each still counts")
 assert_int((1...4).size, 3, "range: exclusive size")
 
+# A range of characters walks their code points, as `'a'..'z'` is written
+# to: a character plus a count is the one that far on. It did not compile,
+# because nothing added to a `Char`.
+letters = ""
+('a'..'e').each { |c| letters = letters + c.to_s }
+assert_str(letters, "abcde", "range: characters walk by one")
+assert_int(('a'...'e').size, 4, "range: an exclusive run of characters")
+assert_str(('x'..'z').map { |c| c.to_s }.join, "xyz", "range: characters map")
+assert_str(('é'..'ê').to_a.map { |c| c.to_s }.join, "éê", "range: past ASCII")
+
+# A `record` is a value too, and a block given to it is the struct's own
+# body, as in Crystal: the methods are there. The block used to be dropped
+# without a word, and the first call said the method did not exist.
+record Span, low : Int32, high : Int32 do
+  def record_width : Int32
+    high - low
+  end
+
+  def record_shifted(by : Int32) : Span
+    Span.new(low + by, high + by)
+  end
+end
+
+assert_int(Span.new(3, 8).record_width, 5, "record: a block's method is the struct's")
+assert_int(Span.new(3, 8).record_shifted(2).low, 5, "record: and returns the struct")
+assert_true(Span.new(1, 2).high == 2, "record: the fields still read")
+
+# A block that names a constant written further down the file: the first
+# read initialises it, once, through the prelude's `__iyi_once` - which
+# the prelude did not define, and the program did not compile.
+def yielded_twice(&) : Int32
+  first = yield
+  first + yield
+end
+
+assert_int(yielded_twice { LATER_WORDS.size }, 6, "constant: read in a block before its line")
+LATER_WORDS << "d"
+assert_int(LATER_WORDS.size, 4, "constant: initialised once, the same array at every read")
+
+# A field's default, written on its `getter` or `property`, is the
+# field's: the macros declared `@port : Int32` and dropped the `= 8080`, so
+# a constructor that left the field alone did not compile ("doesn't
+# explicitly initialize @port") and the default never existed.
+class Served
+  getter port : Int32 = 8080
+  property host : String = "localhost"
+  getter name : String
+
+  def initialize(@name : String)
+  end
+end
+
+served = Served.new("api")
+assert_int(served.port, 8080, "getter: a field's default is its value")
+assert_str(served.host, "localhost", "property: a field's default is its value")
+served.host = "example"
+assert_str(served.host, "example", "property: and is written over")
+
+# The untyped spelling, a default the field's type is read from: `getter
+# retries = 3` expanded to `def retries = 3` and failed to parse inside the
+# prelude's macro ("unexpected token: \"=\""). It is the field's
+# initialiser now, and `property` writes the setter beside it.
+class Retried
+  getter retries = 3
+  getter names = [] of String
+  property label = "first"
+
+  def initialize
+  end
+end
+
+retried = Retried.new
+retried.names << "a"
+retried.label = "second"
+assert_int(retried.retries, 3, "getter: an untyped default is the field's value")
+assert_int(retried.names.size, 1, "getter: an untyped default is the field's own object")
+assert_str(retried.label, "second", "property: an untyped default is written over")
+
+# ---- 7. A struct of the program's own, which is its fields as the other
+# library's is. `Object#==` answered false, so a struct was not equal to
+# itself, `includes?` missed it and a struct key was never found again.
+struct Point
+  def initialize(@x : Int32, @label : String)
+  end
+end
+
+point = Point.new(1, "a")
+assert_true(point == point && point == Point.new(1, "a"), "struct: equal to itself and to its copy")
+assert_true(point != Point.new(2, "a") && point != Point.new(1, "b"), "struct: a field changes it")
+assert_true([point].includes?(Point.new(1, "a")), "struct: includes? finds its copy")
+assert_str({point => "found"}[Point.new(1, "a")]? || "missing", "found", "struct: a hash key found")
+
 puts "all value checks passed"
+
+LATER_WORDS = ["a", "b", "c"]

@@ -1,0 +1,909 @@
+# An ACME client (RFC 8555), written in iyi: the protocol Let's Encrypt
+# and the other automated CAs speak, so that a server here gets its own
+# certificate.
+#
+#     import std/acme::{AcmeClient, AcmeError, AcmeHttp01}
+#     import std/x509::{SigningKey}
+#
+#     account = SigningKey.p256         # the account is this key: keep it
+#     acme = AcmeClient.new("https://acme-v02.api.letsencrypt.org/directory", account).or_panic
+#     acme.register(["mailto:admin@example.com"], terms_agreed: true).or_panic
+#     order = acme.new_order(["example.com"]).or_panic
+#     order.authorizations.each do |url|
+#       challenge = acme.authorization(url).or_panic.challenge("http-01").or_panic
+#       responder.add(challenge.token, acme.key_authorization(challenge.token))
+#       acme.respond(challenge).or_panic
+#       acme.wait_authorization(url).or_panic
+#     end
+#     order = acme.finalize(order, SigningKey.p256).or_panic  # the CSR, then polled
+#     pem = acme.certificate(order).or_panic                  # the chain, leaf first
+#
+# **Requests.** `AcmeClient.new` reads the directory (section 7.1.1). Every
+# request after it is a POST whose body is a JWS in the flattened JSON
+# serialization (RFC 7515 section 7.2.2, RFC 8555 section 6.2): its
+# protected header carries `alg`, `nonce`, `url` and either `jwk` - for
+# newAccount alone, and keyChange's inner JWS - or `kid`, the account's
+# URL, for everything else. A read is POST-as-GET (section 6.3), the
+# payload empty. A nonce is used once: each answer's Replay-Nonce is kept
+# for the next request and the one sent is dropped, and newNonce is asked
+# (a HEAD) when none is held. An answer of `badNonce` is sent again with
+# the nonce that answer carried, `MAX_BAD_NONCE` times at most
+# (section 6.5); `bad_nonce_retries` counts them.
+#
+# **HTTPS only.** Section 6.1: "Use of HTTPS is REQUIRED". Every URL is
+# `https://` or refused, by an error naming it, before anything is sent
+# to it: the directory's, each the directory names (termsOfService, a
+# page for people, aside), the account's and the order's from Location,
+# and every URL an object carries, as each is asked. Over plaintext an
+# attacker on the path would be the CA: it would read the account and
+# the requests, and answer a certificate of its own CA for the key.
+#
+# **Keys** are std/x509's `SigningKey`: ES256 on P-256 and ES384 on P-384
+# through std/p256 and std/p384, the signature R || S at the curve's
+# width as RFC 7518 section 3.4 has it and not the DER X.509 carries;
+# RS256, RSA PKCS #1 v1.5 under SHA-256, through std/rsa; and EdDSA
+# (RFC 8037) on Ed25519 through std/curve25519 for a server that takes
+# it - Let's Encrypt's Pebble refuses it (badSignatureAlgorithm), taking
+# RS256, ES256, ES384 and ES512 only. The account's `jwk` is RFC 7638's
+# canonical form - the required members alone, in order, no space - and
+# its thumbprint the SHA-256 of that, base64url without padding
+# (`thumbprint`), which every key authorization ends with:
+# `token.thumbprint` (section 8.1).
+#
+# **Challenges.** http-01 (section 8.3): `AcmeHttp01` holds the key
+# authorizations by token and answers GET
+# `/.well-known/acme-challenge/<token>` from a std/http `Server.serve`
+# block (`responder.answer(request) || ...`). dns-01 (section 8.4):
+# `dns_txt(token)` is the TXT record's value, base64url of the key
+# authorization's SHA-256, for `AcmeClient.dns_name(domain)`; putting it
+# in the zone is the caller's. tls-alpn-01 (RFC 8737): `AcmeTlsAlpn01`
+# writes the self-signed certificate - its one dNSName the domain, and the
+# critical id-pe-acmeIdentifier extension holding the key authorization's
+# SHA-256 - and a std/tls `TlsServerConfig` that shows it, under a P-256
+# key made for it, to a client whose ALPN offers `acme-tls/1` (and refuses
+# one that offers only other protocols). That config is for a listener
+# of its own on port 443 while the CA validates; a server already on 443
+# shows the certificate beside its own through its config's
+# `identity_source`, which sees the client's ALPN, as std/autocert does.
+# A domain past 64 characters has no tls-alpn-01 certificate: std/x509
+# refuses a self-signed one whose common name is that long (RFC 5280's
+# ub-common-name), so such a name is proved by http-01 or dns-01.
+#
+# **Waiting.** An authorization or an order is polled until it leaves
+# `pending` (or `processing`, or `ready`), waiting what each answer's
+# Retry-After says - seconds or an HTTP-date (section 8.2 asks it be
+# honoured) - and `poll_ms` when there is none. Every wait is bounded: at
+# most `max_polls` polls and `wait_ms` in all, and a Retry-After that
+# reaches past what is left ends the wait at once, by name; every HTTP
+# exchange is bounded by `timeout_ms` per read and write, and every answer
+# by `MAX_BODY` bytes. `finalize` sends a PKCS #10 request std/x509 writes
+# and signs with the certificate's key (`X509.request`), its names the
+# order's, and polls the order to `valid`; `certificate` reads the chain
+# as PEM, each block parsed by std/x509 before it is answered.
+#
+# **Errors are values.** An answer of 400 or more is read as a problem
+# document (RFC 7807, section 6.7): an `AcmeError` whose `problem_type` is
+# its `type` URN and `detail` its detail, with its subproblems (section
+# 6.7.1) each naming the identifier it is about. An authorization or an
+# order that ends `invalid` is the error its challenge or order carries.
+# Below ACME - the socket, TLS, a body past `MAX_BODY` - the error has an
+# empty `problem_type` and says what failed.
+#
+# Not here: external account binding (section 7.3.4) - a directory that
+# requires it is refused by name at `register`; renewal - when to order
+# again is the caller's (std/autocert's manager is one such caller), and
+# ACME Renewal Information (RFC 9773) is not read; revocation (section
+# 7.6), account deactivation and updates past `register`,
+# pre-authorization (newAuthz), IP identifiers (RFC 8738), alternate
+# chains (the `Link: rel="alternate"` answers), and the
+# `profiles` extension. Keys are not written out: a `SigningKey` is made
+# from a PEM or its bytes and keeping it is the caller's.
+#
+# bench/std_acme_exercise.sh holds it to RFC 7515's, 7638's and 8037's
+# examples, to OpenSSL and Python's cryptography for the request and the
+# tls-alpn-01 certificate, to a server in the exercise that breaks the
+# protocol one rule at a time, and to Let's Encrypt's Pebble for whole
+# orders by all three challenges where Go is there to build it.
+
+module std/acme
+
+import std/x509::{X509, X509Error, X509Extension, Certificate, SigningKey}
+import std/rsa::{RsaPublicKey}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve}
+import std/curve25519::{Ed25519PublicKey}
+import std/asn1::{Der, Asn1Error}
+import std/http::{HTTP, HTTPError, Request, Response}
+import std/socket::{SocketError}
+import std/tls::{TlsServerConfig, TlsError}
+import std/json::{JSON, Any}
+import std/base64::{Base64}
+import std/digest::{SHA256}
+import std/time::{Time, Span}
+import std/uri::{URI}
+
+# What a request answered that it should not have, or could not do: a
+# problem document's `type` and `detail` (RFC 7807), or, with
+# `problem_type` empty, what failed beneath ACME.
+pub struct AcmeError
+  getter problem_type : String
+  getter detail : String
+  # The HTTP status the problem came with; 0 when there was no answer.
+  getter status : Int32
+  # The identifier a subproblem is about (section 6.7.1), "" otherwise.
+  getter identifier : String
+  getter subproblems : Array(AcmeError)
+
+  BAD_NONCE = "urn:ietf:params:acme:error:badNonce"
+
+  def initialize(@detail : String, @problem_type : String = "", @status : Int32 = 0, @identifier : String = "",
+                 @subproblems : Array(AcmeError) = [] of AcmeError)
+  end
+
+  # Whether this came from a problem document.
+  def problem? : Bool
+    !@problem_type.empty?
+  end
+
+  def to_s : String
+    message
+  end
+end
+
+impl Error for AcmeError
+  def message : String
+    text = problem? ? "acme: #{@problem_type}: #{@detail}" : "acme: #{@detail}"
+    @subproblems.each do |sub|
+      text = text + "; #{sub.identifier}: #{sub.problem_type}: #{sub.detail}"
+    end
+    text
+  end
+end
+
+# The directory's URLs (section 7.1.1).
+pub struct AcmeDirectory
+  getter new_nonce : String
+  getter new_account : String
+  getter new_order : String
+  getter key_change : String?
+  getter revoke_cert : String?
+  getter terms_of_service : String?
+  getter external_account_required : Bool
+
+  def initialize(@new_nonce : String, @new_account : String, @new_order : String, @key_change : String?,
+                 @revoke_cert : String?, @terms_of_service : String?, @external_account_required : Bool)
+  end
+
+  def self.parse(text : String) : AcmeDirectory | AcmeError
+    object = AcmeJson.object(text, "the directory")!
+    nonce = AcmeJson.text(object, "newNonce")
+    account = AcmeJson.text(object, "newAccount")
+    order = AcmeJson.text(object, "newOrder")
+    return AcmeError.new("the directory names no newNonce, newAccount or newOrder") unless nonce && account && order
+    key_change = AcmeJson.text(object, "keyChange")
+    revoke = AcmeJson.text(object, "revokeCert")
+    {"newNonce" => nonce, "newAccount" => account, "newOrder" => order, "keyChange" => key_change, "revokeCert" => revoke}.each do |field, url|
+      if url
+        refused = AcmeClient.https(url, "the directory's #{field}")
+        return refused if refused
+      end
+    end
+    terms = nil
+    required = false
+    if (meta = object["meta"]?) && (fields = meta.as_h?)
+      terms = AcmeJson.text(fields, "termsOfService")
+      required = AcmeJson.flag(fields, "externalAccountRequired")
+    end
+    AcmeDirectory.new(nonce, account, order, key_change, revoke, terms, required)
+  end
+end
+
+# A challenge (section 8): its type (`http-01`, `dns-01`, `tls-alpn-01`),
+# where to answer it, its token, and its status, with the problem that
+# made it invalid.
+pub struct AcmeChallenge
+  getter kind : String
+  getter url : String
+  getter token : String
+  getter status : String
+  getter error : AcmeError?
+
+  def initialize(@kind : String, @url : String, @token : String, @status : String, @error : AcmeError?)
+  end
+
+  def self.from(object : Hash(String, Any)) : AcmeChallenge | AcmeError
+    kind = AcmeJson.text(object, "type")
+    url = AcmeJson.text(object, "url")
+    status = AcmeJson.text(object, "status")
+    return AcmeError.new("a challenge without its type, url or status") unless kind && url && status
+    problem = nil
+    if (error = object["error"]?) && (fields = error.as_h?)
+      problem = AcmeJson.problem(fields, 0)
+    end
+    AcmeChallenge.new(kind, url, AcmeJson.text(object, "token") || "", status, problem)
+  end
+end
+
+# An authorization (section 7.1.4): the identifier, its status, and the
+# challenges by which it can be proved.
+pub struct AcmeAuthorization
+  getter url : String
+  getter identifier : String
+  getter status : String
+  getter wildcard : Bool
+  getter challenges : Array(AcmeChallenge)
+
+  def initialize(@url : String, @identifier : String, @status : String, @wildcard : Bool, @challenges : Array(AcmeChallenge))
+  end
+
+  def self.from(url : String, object : Hash(String, Any)) : AcmeAuthorization | AcmeError
+    status = AcmeJson.text(object, "status")
+    return AcmeError.new("the authorization #{url} has no status") unless status
+    identifier = ""
+    if (id = object["identifier"]?) && (fields = id.as_h?)
+      identifier = AcmeJson.text(fields, "value") || ""
+    end
+    challenges = [] of AcmeChallenge
+    AcmeJson.objects(object, "challenges").each { |c| challenges << AcmeChallenge.from(c)! }
+    wildcard = AcmeJson.flag(object, "wildcard")
+    AcmeAuthorization.new(url, identifier, status, wildcard, challenges)
+  end
+
+  # The challenge of *kind* offered, or why there is none.
+  def challenge(kind : String) : AcmeChallenge | AcmeError
+    found = @challenges.find { |c| c.kind == kind }
+    return found if found
+    AcmeError.new("#{@identifier} is offered #{@challenges.map(&.kind).join(", ")}, not #{kind}")
+  end
+end
+
+# An order (section 7.1.3): its URL, status, names, the authorizations to
+# prove, where to finalize it, and, once it is valid, its certificate.
+pub struct AcmeOrder
+  getter url : String
+  getter status : String
+  getter identifiers : Array(String)
+  getter authorizations : Array(String)
+  getter finalize_url : String
+  getter certificate_url : String?
+  getter error : AcmeError?
+
+  def initialize(@url : String, @status : String, @identifiers : Array(String), @authorizations : Array(String),
+                 @finalize_url : String, @certificate_url : String?, @error : AcmeError?)
+  end
+
+  def self.from(url : String, object : Hash(String, Any)) : AcmeOrder | AcmeError
+    status = AcmeJson.text(object, "status")
+    finalize = AcmeJson.text(object, "finalize")
+    return AcmeError.new("the order #{url} has no status or finalize URL") unless status && finalize
+    names = AcmeJson.objects(object, "identifiers").map { |id| AcmeJson.text(id, "value") || "" }
+    problem = nil
+    if (error = object["error"]?) && (fields = error.as_h?)
+      problem = AcmeJson.problem(fields, 0)
+    end
+    AcmeOrder.new(url, status, names, AcmeJson.texts(object, "authorizations"), finalize, AcmeJson.text(object, "certificate"), problem)
+  end
+end
+
+# A session with an ACME server under one account key.
+pub class AcmeClient
+  # A `badNonce` answer is sent again this many times at most in a row.
+  MAX_BAD_NONCE = 10
+  # The most bytes of an answer read: Pebble's chains of two were 1,275
+  # and 1,279 bytes of PEM when measured, and Let's Encrypt's run to a few
+  # certificates, so a megabyte is room for any chain and no more.
+  MAX_BODY   = 1048576_i64
+  USER_AGENT = "iyi-acme"
+
+  getter directory : AcmeDirectory
+  getter key : SigningKey
+  # The account's URL, the `kid` every request after newAccount carries.
+  getter account_url : String? = nil
+  # `badNonce` answers sent again, over this session.
+  getter bad_nonce_retries : Int32 = 0
+  # How long to wait between polls when an answer has no Retry-After.
+  property poll_ms : Int32 = 1000
+  # The most polls one wait makes, and the most milliseconds it takes.
+  property max_polls : Int32 = 60
+  property wait_ms : Int32 = 300000
+  # Each HTTP exchange's connect, and each read and write in it.
+  property timeout_ms : Int32
+  @directory_url : String
+  @nonce : String? = nil
+  @thumbprint : String
+
+  def initialize(@directory_url : String, @key : SigningKey, @directory : AcmeDirectory, @timeout_ms : Int32)
+    @thumbprint = AcmeJws.thumbprint(@key.public_key)
+  end
+
+  # A session with the server whose directory is at *url*, signing with
+  # *key*: the directory read, or why it could not be. *account_url*, an
+  # account `register` answered before, is the `kid` from the start, so a
+  # session that kept it need not register again. Both are `https://`.
+  def self.new(url : String, key : SigningKey, timeout_ms : Int32 = 30000, account_url : String? = nil) : AcmeClient | AcmeError
+    raise "acme: a timeout is a count of milliseconds, at least 1, not #{timeout_ms}" if timeout_ms < 1
+    if account_url
+      refused = https(account_url, "the account")
+      return refused if refused
+    end
+    response = AcmeClient.exchange("GET", url, "", nil, timeout_ms)!
+    problem = response.problem("the directory")
+    return problem if problem
+    client = AcmeClient.new(url, key, AcmeDirectory.parse(response.body)!, timeout_ms)
+    client.account = account_url
+    client
+  end
+
+  # Nil when *url* is an `https://` URL with a host, else the error that
+  # refuses it as *what*: RFC 8555 section 6.1 requires HTTPS of every
+  # ACME request, and anything else is plaintext an attacker on the path
+  # can answer as the CA.
+  def self.https(url : String, what : String) : AcmeError?
+    uri = URI.parse?(url)
+    scheme = uri ? uri.scheme : nil
+    host = uri ? uri.hostname : nil
+    return nil if scheme && scheme.downcase == "https" && host && !host.empty?
+    AcmeError.new("#{what} #{url.inspect} is not https://, which RFC 8555 section 6.1 requires of ACME")
+  end
+
+  protected def account=(url : String?) : String?
+    @account_url = url
+  end
+
+  # The account key's JWK thumbprint (RFC 7638), SHA-256 and base64url.
+  def thumbprint : String
+    @thumbprint
+  end
+
+  # *token*'s key authorization (section 8.1): `token.thumbprint`.
+  def key_authorization(token : String) : String
+    "#{token}.#{@thumbprint}"
+  end
+
+  # The dns-01 TXT record's value for *token* (section 8.4).
+  def dns_txt(token : String) : String
+    AcmeJws.b64u(SHA256.hash_bytes(key_authorization(token)))
+  end
+
+  # The name dns-01's TXT record is put under for *domain*: a wildcard's
+  # base domain, with `_acme-challenge.` before it.
+  def self.dns_name(domain : String) : String
+    "_acme-challenge." + (domain.starts_with?("*.") ? domain[2, domain.bytesize - 2] : domain)
+  end
+
+  # The account for this key, made if there is none (section 7.3) - with
+  # *contact*'s URLs (`mailto:`), the terms agreed to when
+  # *terms_agreed* - or only found when *only_existing*: its URL, which
+  # every request after this carries as `kid`.
+  def register(contact : Array(String) = [] of String, terms_agreed : Bool = false, only_existing : Bool = false) : String | AcmeError
+    if @directory.external_account_required
+      return AcmeError.new("the server requires external account binding (RFC 8555 section 7.3.4), which this does not do")
+    end
+    payload = JSON.build do |json|
+      json.object do
+        json.field("termsOfServiceAgreed", true) if terms_agreed
+        json.field("onlyReturnExisting", true) if only_existing
+        unless contact.empty?
+          json.field("contact") do
+            json.array { contact.each { |c| json.string(c) } }
+          end
+        end
+      end
+    end
+    response = post(@directory.new_account, payload)!
+    url = response.location
+    return AcmeError.new("newAccount answered #{response.status} without the account's Location") unless url
+    refused = AcmeClient.https(url, "newAccount's Location")
+    return refused if refused
+    object = AcmeJson.object(response.body, "the account")!
+    status = AcmeJson.text(object, "status")
+    return AcmeError.new("the account #{url} is #{status || "without a status"}, not valid") unless status == "valid"
+    @account_url = url
+    url
+  end
+
+  # The account moved to *new_key* (section 7.3.5): keyChange's inner JWS
+  # signed by the new key, carrying its `jwk`, inside one the old key
+  # signs as the account.
+  def roll_key(new_key : SigningKey) : Nil | AcmeError
+    url = @directory.key_change
+    return AcmeError.new("the directory names no keyChange") unless url
+    account = @account_url
+    return AcmeError.new("a key is rolled over for an account: register first") unless account
+    inner_header = AcmeJws.header(new_key, nil, url, nil)
+    inner_payload = JSON.build do |json|
+      json.object do
+        json.field("account", account)
+        json.field("oldKey") { json.raw(AcmeJws.jwk(@key.public_key)) }
+      end
+    end
+    post(url, AcmeJws.sign(new_key, inner_header, inner_payload))!
+    @key = new_key
+    @thumbprint = AcmeJws.thumbprint(new_key.public_key)
+    nil
+  end
+
+  # A new order for *names*, DNS identifiers (section 7.4).
+  def new_order(names : Array(String)) : AcmeOrder | AcmeError
+    raise "acme: an order for no names" if names.empty?
+    payload = JSON.build do |json|
+      json.object do
+        json.field("identifiers") do
+          json.array do
+            names.each do |name|
+              json.object do
+                json.field("type", "dns")
+                json.field("value", name)
+              end
+            end
+          end
+        end
+      end
+    end
+    response = post(@directory.new_order, payload)!
+    url = response.location
+    return AcmeError.new("newOrder answered #{response.status} without the order's Location") unless url
+    refused = AcmeClient.https(url, "newOrder's Location")
+    return refused if refused
+    AcmeOrder.from(url, AcmeJson.object(response.body, "the order")!)
+  end
+
+  # The order at *url*, read (POST-as-GET).
+  def order(url : String) : AcmeOrder | AcmeError
+    AcmeOrder.from(url, AcmeJson.object(post(url, nil)!.body, "the order")!)
+  end
+
+  # The authorization at *url*, read (POST-as-GET).
+  def authorization(url : String) : AcmeAuthorization | AcmeError
+    AcmeAuthorization.from(url, AcmeJson.object(post(url, nil)!.body, "the authorization")!)
+  end
+
+  # Tells the server *challenge* is ready to be checked (section 7.5.1):
+  # its URL posted `{}`. Put the answer in place first.
+  def respond(challenge : AcmeChallenge) : AcmeChallenge | AcmeError
+    AcmeChallenge.from(AcmeJson.object(post(challenge.url, "{}")!.body, "the challenge")!)
+  end
+
+  # The authorization at *url* polled until it is no longer pending: the
+  # valid authorization, or the error that made it something else.
+  def wait_authorization(url : String) : AcmeAuthorization | AcmeError
+    object = poll(url, post(url, nil)!, ["pending"], "the authorization #{url}")!
+    authorization = AcmeAuthorization.from(url, object)!
+    return authorization if authorization.status == "valid"
+    authorization.challenges.each do |c|
+      if problem = c.error
+        return problem
+      end
+    end
+    AcmeError.new("the authorization for #{authorization.identifier} is #{authorization.status}")
+  end
+
+  # The order finalized with a certificate request for its names that
+  # *key* signs (section 7.4): polled until its authorizations make it
+  # ready, finalized, and polled until it is valid, with the certificate's
+  # URL; or the error that made it invalid.
+  def finalize(order : AcmeOrder, key : SigningKey) : AcmeOrder | AcmeError
+    current = order
+    if current.status == "pending"
+      current = AcmeOrder.from(order.url, poll(order.url, post(order.url, nil)!, ["pending"], "the order #{order.url}")!)!
+    end
+    return current if current.status == "valid"
+    return order_failure(current) unless current.status == "ready"
+    request = X509.request(key, current.identifiers)
+    return AcmeError.new("the certificate request: #{request.message}") if request.is_a?(X509Error)
+    payload = JSON.build do |json|
+      json.object { json.field("csr", AcmeJws.b64u(request)) }
+    end
+    answered = post(current.finalize_url, payload)!
+    finished = AcmeOrder.from(order.url, poll(order.url, answered, ["ready", "processing"], "the order #{order.url}")!)!
+    return finished if finished.status == "valid" && finished.certificate_url
+    order_failure(finished)
+  end
+
+  private def order_failure(order : AcmeOrder) : AcmeError
+    if problem = order.error
+      return problem
+    end
+    AcmeError.new("the order #{order.url} is #{order.status}")
+  end
+
+  # The certificate chain of a valid *order*, PEM, leaf first (section
+  # 7.4.2): every block std/x509 reads, or why one does not read.
+  def certificate(order : AcmeOrder) : String | AcmeError
+    url = order.certificate_url
+    return AcmeError.new("the order #{order.url} is #{order.status}, with no certificate") unless url
+    response = post(url, nil, "application/pem-certificate-chain")!
+    chain = Certificate.from_pem(response.body)
+    return AcmeError.new("the certificate at #{url}: #{chain.message}") if chain.is_a?(X509Error)
+    return AcmeError.new("the certificate at #{url} holds no certificate") if chain.empty?
+    response.body
+  end
+
+  # *payload* - nil for POST-as-GET - signed and posted to *url*, a
+  # `badNonce` answer sent again with the nonce it carried. An answer of
+  # 400 or more is its problem, as an error.
+  private def post(url : String, payload : String?, accept : String? = nil) : AcmeResponse | AcmeError
+    retries = 0
+    while true
+      nonce = take_nonce!
+      use_jwk = url == @directory.new_account
+      kid = use_jwk ? nil : @account_url
+      return AcmeError.new("a request to #{url} before the account is known: register first") unless use_jwk || kid
+      body = AcmeJws.sign(@key, AcmeJws.header(@key, nonce, url, kid), payload)
+      response = AcmeClient.exchange("POST", url, body, accept, @timeout_ms)!
+      @nonce = response.nonce
+      problem = response.problem("POST #{url}")
+      if problem && problem.problem_type == AcmeError::BAD_NONCE && retries < MAX_BAD_NONCE
+        retries = retries + 1
+        @bad_nonce_retries = @bad_nonce_retries + 1
+        next
+      end
+      return problem if problem
+      return response
+    end
+    raise "unreachable"
+  end
+
+  # The nonce the last answer carried, dropped as it is taken, or a new
+  # one from newNonce.
+  private def take_nonce : String | AcmeError
+    if held = @nonce
+      @nonce = nil
+      return held
+    end
+    response = AcmeClient.exchange("HEAD", @directory.new_nonce, "", nil, @timeout_ms)!
+    problem = response.problem("newNonce")
+    return problem if problem
+    nonce = response.nonce
+    return AcmeError.new("newNonce answered #{response.status} without a Replay-Nonce") unless nonce
+    nonce
+  end
+
+  # *response*'s object, and the objects polling *url* answers after it,
+  # until its status is not one of *waiting*: each poll after the time its
+  # answer's Retry-After asks, or `poll_ms`; `max_polls` polls and
+  # `wait_ms` at most.
+  private def poll(url : String, response : AcmeResponse, waiting : Array(String), what : String) : Hash(String, Any) | AcmeError
+    started = AcmeClock.ms
+    polls = 0
+    while true
+      object = AcmeJson.object(response.body, what)!
+      status = AcmeJson.text(object, "status") || ""
+      return object unless waiting.includes?(status)
+      return AcmeError.new("#{what} is still #{status} after #{polls} polls") if polls >= @max_polls
+      wait = AcmeClient.delay(response.retry_after, @poll_ms, Time.utc)
+      left = started + @wait_ms - AcmeClock.ms
+      if wait > left
+        return AcmeError.new("#{what} is still #{status}, and the next poll would come #{wait} ms from now, past the #{@wait_ms} ms the wait has")
+      end
+      return AcmeError.new("the wait for #{what} was cancelled") if sleep(wait.to_i32).is_a?(Cancelled)
+      polls = polls + 1
+      response = post(url, nil)!
+    end
+    raise "unreachable"
+  end
+
+  # How long to wait, in milliseconds, before polling again, as
+  # *retry_after* - a Retry-After value - says (RFC 9110 section 10.2.3:
+  # seconds, or an HTTP-date, judged against *now*), or *fallback_ms*
+  # when there is none or it is neither. A date already past is no wait.
+  def self.delay(retry_after : String?, fallback_ms : Int32, now : Time) : Int64
+    return fallback_ms.to_i64 unless retry_after
+    value = retry_after.strip
+    if AcmeJson.digits?(value) && value.bytesize <= 9
+      return value.to_i.to_i64 * 1000_i64
+    end
+    date = Time.parse_rfc1123(value)
+    return fallback_ms.to_i64 unless date.is_a?(Time)
+    ms = (date - now).total_milliseconds.to_i64
+    ms < 0 ? 0_i64 : ms
+  end
+
+  # One HTTP exchange, its answer read whole up to `MAX_BODY`; nothing
+  # sent to a URL that is not `https://`.
+  protected def self.exchange(method : String, url : String, body : String, accept : String?, timeout_ms : Int32) : AcmeResponse | AcmeError
+    refused = https(url, method)
+    return refused if refused
+    headers = {"User-Agent" => USER_AGENT}
+    headers["Content-Type"] = "application/jose+json" if method == "POST"
+    headers["Accept"] = accept if accept
+    answer = HTTP.open(method, url, headers, body, redirects: 0, decompress: false, timeout_ms: timeout_ms) do |r|
+      text = r.body_io.read_all(MAX_BODY)
+      if text.is_a?(String)
+        AcmeResponse.new(r.status, r.header("Replay-Nonce"), r.header("Location"), r.header("Retry-After"), r.header("Content-Type") || "", text)
+      else
+        AcmeError.new("#{method} #{url}: the answer: #{text.message}")
+      end
+    end
+    return AcmeError.new("#{method} #{url}: #{answer.message}") if answer.is_a?(SocketError) || answer.is_a?(HTTPError) || answer.is_a?(Cancelled)
+    answer
+  end
+end
+
+# An answer: its status, the headers ACME reads, and its body.
+struct AcmeResponse
+  getter status : Int32
+  getter nonce : String?
+  getter location : String?
+  getter retry_after : String?
+  getter content_type : String
+  getter body : String
+
+  def initialize(@status : Int32, @nonce : String?, @location : String?, @retry_after : String?, @content_type : String, @body : String)
+  end
+
+  # The problem this answer is (RFC 7807), or nil for a success.
+  def problem(what : String) : AcmeError?
+    return nil if @status < 400
+    object = AcmeJson.object(@body, "#{what}'s answer of #{@status}")
+    if object.is_a?(AcmeError)
+      return AcmeError.new("#{what} answered #{@status}: #{AcmeJson.excerpt(@body)}", status: @status)
+    end
+    AcmeJson.problem(object, @status)
+  end
+end
+
+# JSON read from an answer, where every field may be missing or of
+# another type and that is an answer, not a panic.
+struct AcmeJson
+  def self.object(text : String, what : String) : Hash(String, Any) | AcmeError
+    doc = JSON.parse?(text)
+    return AcmeError.new("#{what} is not JSON: #{excerpt(text)}") unless doc
+    object = doc.as_h?
+    return AcmeError.new("#{what} is JSON, and not an object") unless object
+    object
+  end
+
+  def self.text(object : Hash(String, Any), key : String) : String?
+    value = object[key]?
+    value ? value.as_s? : nil
+  end
+
+  def self.flag(object : Hash(String, Any), key : String) : Bool
+    value = object[key]?
+    return false unless value
+    value.as_bool? || false
+  end
+
+  # Whether *text* is one or more ASCII digits and nothing else.
+  def self.digits?(text : String) : Bool
+    return false if text.empty?
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return false unless p[i] >= 48_u8 && p[i] <= 57_u8
+      i = i + 1
+    end
+    true
+  end
+
+  def self.texts(object : Hash(String, Any), key : String) : Array(String)
+    out = [] of String
+    if (value = object[key]?) && (list = value.as_a?)
+      list.each do |item|
+        text = item.as_s?
+        out << text if text
+      end
+    end
+    out
+  end
+
+  def self.objects(object : Hash(String, Any), key : String) : Array(Hash(String, Any))
+    out = [] of Hash(String, Any)
+    if (value = object[key]?) && (list = value.as_a?)
+      list.each do |item|
+        fields = item.as_h?
+        out << fields if fields
+      end
+    end
+    out
+  end
+
+  # A problem document's fields as an error (RFC 7807, section 6.7).
+  def self.problem(object : Hash(String, Any), status : Int32) : AcmeError
+    kind = text(object, "type") || "about:blank"
+    detail = text(object, "detail") || "(no detail)"
+    identifier = ""
+    if (id = object["identifier"]?) && (fields = id.as_h?)
+      identifier = text(fields, "value") || ""
+    end
+    subproblems = objects(object, "subproblems").map { |sub| problem(sub, status) }
+    AcmeError.new(detail, kind, status, identifier, subproblems)
+  end
+
+  # The start of *text*, for an error to quote.
+  def self.excerpt(text : String) : String
+    text.bytesize > 200 ? text[0, 200].inspect + "..." : text.inspect
+  end
+end
+
+# JWS (RFC 7515) as ACME signs it: the flattened JSON serialization, the
+# account's key as RFC 7638's canonical JWK, and the signature in the
+# form JWA (RFC 7518) gives each algorithm.
+pub struct AcmeJws
+  # *data* in base64url without padding (RFC 7515 section 2).
+  def self.b64u(data : String | Array(UInt8)) : String
+    text = data.is_a?(String) ? data : String.new(data.size) { |buf| buf.copy_from(data.to_unsafe, data.size) }
+    encoded = Base64.urlsafe_encode(text)
+    cut = encoded.bytesize
+    while cut > 0 && encoded.to_unsafe[cut - 1] == 61_u8
+      cut = cut - 1
+    end
+    encoded[0, cut]
+  end
+
+  # The JWS algorithm *key* signs under: ES256, ES384, RS256 or EdDSA.
+  def self.alg(key : SigningKey) : String
+    public = key.public_key
+    case public
+    when EcdsaPublicKey
+      public.curve == EcdsaCurve::P256 ? "ES256" : "ES384"
+    when RsaPublicKey
+      "RS256"
+    else
+      "EdDSA"
+    end
+  end
+
+  # *key* as a JWK holding its required members alone, sorted, without
+  # whitespace (RFC 7638 section 3): the text its thumbprint is taken of,
+  # and the `jwk` a request carries.
+  def self.jwk(key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey) : String
+    case key
+    when EcdsaPublicKey
+      size = key.curve.size
+      crv = key.curve == EcdsaCurve::P256 ? "P-256" : (key.curve == EcdsaCurve::P384 ? "P-384" : "P-521")
+      x = key.x.to_bytes(size) || [] of UInt8
+      y = key.y.to_bytes(size) || [] of UInt8
+      "{\"crv\":\"#{crv}\",\"kty\":\"EC\",\"x\":\"#{b64u(x)}\",\"y\":\"#{b64u(y)}\"}"
+    when RsaPublicKey
+      n = key.modulus.to_bytes(key.size) || [] of UInt8
+      "{\"e\":\"#{b64u(AcmeJws.minimal(key.exponent.to_bytes(4) || [] of UInt8))}\",\"kty\":\"RSA\",\"n\":\"#{b64u(n)}\"}"
+    else
+      "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"#{b64u(key.bytes)}\"}"
+    end
+  end
+
+  # *key*'s JWK thumbprint (RFC 7638): base64url of the SHA-256 of `jwk`.
+  def self.thumbprint(key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey) : String
+    b64u(SHA256.hash_bytes(jwk(key)))
+  end
+
+  # A big-endian number without its leading zero bytes, as JWA writes
+  # one (RFC 7518 section 6.3.1).
+  def self.minimal(bytes : Array(UInt8)) : Array(UInt8)
+    at = 0
+    while at < bytes.size - 1 && bytes[at] == 0_u8
+      at = at + 1
+    end
+    bytes[at, bytes.size - at]
+  end
+
+  # The protected header: `alg`, then `jwk` when *kid* is nil and `kid`
+  # when it is not, `nonce` when there is one, and `url`.
+  def self.header(key : SigningKey, nonce : String?, url : String, kid : String?) : String
+    JSON.build do |json|
+      json.object do
+        json.field("alg", alg(key))
+        if kid
+          json.field("kid", kid)
+        else
+          json.field("jwk") { json.raw(jwk(key.public_key)) }
+        end
+        json.field("nonce", nonce) if nonce
+        json.field("url", url)
+      end
+    end
+  end
+
+  # The flattened JSON serialization (RFC 7515 section 7.2.2) of *payload*
+  # - nil for the empty payload of POST-as-GET - under *header*.
+  def self.sign(key : SigningKey, header : String, payload : String?) : String
+    head = b64u(header)
+    body = payload ? b64u(payload) : ""
+    signed = signature(key, AcmeJws.bytes("#{head}.#{body}"))
+    "{\"protected\":\"#{head}\",\"payload\":\"#{body}\",\"signature\":\"#{b64u(signed)}\"}"
+  end
+
+  # *key*'s JWS signature of *input*: R || S for ECDSA, each at the
+  # curve's width (RFC 7518 section 3.4), where std/p256 and std/p384 sign
+  # in X.509's DER; RSA's and Ed25519's as they are.
+  def self.signature(key : SigningKey, input : Array(UInt8)) : Array(UInt8)
+    signed = key.sign(input)
+    public = key.public_key
+    return signed unless public.is_a?(EcdsaPublicKey)
+    raw(signed, public.curve.size)
+  end
+
+  # An Ecdsa-Sig-Value's DER as R || S, each *size* bytes.
+  def self.raw(der : Array(UInt8), size : Int32) : Array(UInt8)
+    fields = Der.parse(der).or_panic.sequence.or_panic
+    out = [] of UInt8
+    fields.each do |field|
+      number = minimal(field.unsigned_integer.or_panic)
+      raise "acme: a signature number of #{number.size} bytes, past #{size}" if number.size > size
+      out.concat(Array(UInt8).new(size - number.size, 0_u8))
+      out.concat(number)
+    end
+    out
+  end
+
+  def self.bytes(text : String) : Array(UInt8)
+    Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] }
+  end
+end
+
+# http-01's answers (section 8.3), by token, for a std/http server: GET
+# `/.well-known/acme-challenge/<token>` is answered with the token's key
+# authorization, a token not held with 404, any other path with nil - the
+# server's own to answer.
+#
+#     responder = AcmeHttp01.new
+#     Server.serve(listener) { |request| responder.answer(request) || app(request) }
+pub class AcmeHttp01
+  PATH = "/.well-known/acme-challenge/"
+  @answers : Hash(String, String) = {} of String => String
+
+  def initialize
+  end
+
+  def add(token : String, key_authorization : String) : Nil
+    @answers[token] = key_authorization
+  end
+
+  def remove(token : String) : Nil
+    @answers.delete(token)
+  end
+
+  def answer(request : Request) : Response?
+    path = request.path
+    return nil unless path.starts_with?(PATH)
+    return Response.new(405, "", {"Allow" => "GET, HEAD"}) unless request.method == "GET" || request.method == "HEAD"
+    found = @answers[path[PATH.bytesize, path.bytesize - PATH.bytesize]]?
+    return Response.new(404, "") unless found
+    Response.new(200, found, {"Content-Type" => "application/octet-stream"})
+  end
+end
+
+# tls-alpn-01 (RFC 8737): the certificate a TLS server shows to a client
+# whose ALPN offers `acme-tls/1`, and a std/tls config that shows it.
+pub struct AcmeTlsAlpn01
+  PROTOCOL = "acme-tls/1"
+  # id-pe-acmeIdentifier (RFC 8737 section 6.1).
+  ACME_IDENTIFIER = "1.3.6.1.5.5.7.1.31"
+
+  # The self-signed certificate for *domain* (section 3): its one dNSName
+  # *domain*, and the critical acmeIdentifier extension, an OCTET STRING
+  # of the SHA-256 of *key_authorization*; signed by *key*, valid from a
+  # day before *now* to a week after. A *domain* past 64 characters is
+  # refused, as std/x509 refuses its common name.
+  def self.certificate(domain : String, key_authorization : String, key : SigningKey, now : Time = Time.utc) : Array(UInt8) | AcmeError
+    digest = SHA256.hash_bytes(key_authorization)
+    value = [4_u8, digest.size.to_u8] + digest
+    extension = X509Extension.new(ACME_IDENTIFIER, true, value)
+    der = X509.self_signed(key, [domain], now - Span.days(1), now + Span.days(7), nil, [extension])
+    return AcmeError.new("the tls-alpn-01 certificate for #{domain}: #{der.message}") if der.is_a?(X509Error)
+    der
+  end
+
+  # A std/tls server config that shows `certificate` for *domain*, under a
+  # P-256 key made for it, and speaks `acme-tls/1` alone by ALPN.
+  def self.config(domain : String, key_authorization : String) : TlsServerConfig | AcmeError
+    key = SigningKey.p256
+    der = certificate(domain, key_authorization, key)!
+    private_key = key.p256
+    raise "acme: a P-256 SigningKey without its key" unless private_key
+    config = TlsServerConfig.from_der([der], private_key)
+    return AcmeError.new("the tls-alpn-01 config for #{domain}: #{config.message}") if config.is_a?(TlsError)
+    config.alpn = [PROTOCOL]
+    config.tickets = 0
+    config
+  end
+end
+
+# The monotonic clock in milliseconds, which a wait's deadline is counted
+# on: a change to the wall clock does not move it.
+struct AcmeClock
+  def self.ms : Int64
+    Time.monotonic.total_milliseconds.to_i64
+  end
+end

@@ -8,9 +8,16 @@ pub enum RoundingMode
   ToNegative
 end
 
+# A number's zero and one are its literals, `0_i8` and `1_f32`: the
+# suffix is the type's first letter and its width, the digits after the
+# `t` of `Int` or `Float`. They were `new(0)` and `new(1)`, and no number
+# has a `new`, so `Float32.zero`, `[1.5_f32, 2.25_f32].sum` with std/float
+# alone and `Int64.multiplicative_identity` failed to compile, in this
+# file. The prelude's zeros (src/iyi/number.iyi) and std/traits' are the
+# type's own and come first.
 struct ::Number
   def self.zero : self
-    new(0)
+    {{ ("0_" + @type.name.stringify[0..0].downcase + @type.name.stringify.split("t").last).id }}
   end
 
   def self.additive_identity : self
@@ -18,7 +25,7 @@ struct ::Number
   end
 
   def self.multiplicative_identity : self
-    new(1)
+    {{ ("1_" + @type.name.stringify[0..0].downcase + @type.name.stringify.split("t").last).id }}
   end
 
   def + : self
@@ -56,8 +63,8 @@ struct ::Number
   end
 
   # An integer is already whole: every mode answers self. `Float64` names
-  # the mode below; `round` with no arguments stays the prelude's (ties
-  # away from zero).
+  # the mode below; `round` with no arguments is the prelude's, a tie to
+  # the even one, which is `TiesEven`.
   def round(mode : Std::Number::RoundingMode = Std::Number::RoundingMode.new(0)) : self
     self
   end
@@ -66,6 +73,10 @@ end
 struct ::Float64
   def round(mode : Std::Number::RoundingMode) : Float64
     return self if self != self || abs >= 9007199254740992.0
+    # A zero is its own answer in every mode, sign and all: `-0.0 < 0.0`
+    # is false, and the sign test below answered `(-0.0).round(TiesAway)`
+    # as 0.0.
+    return self if self == 0.0
     if mode == Std::Number::RoundingMode::ToZero
       self < 0.0 ? ceil : floor
     elsif mode == Std::Number::RoundingMode::ToPositive
@@ -77,9 +88,9 @@ struct ::Float64
       # the magnitude less its floor, exact for every double under 2^53
       # (under 1 the floor is zero; above it the two are within a factor of
       # two), and the fraction decides: under a half the floor, over it the
-      # next integer, and at a half the mode. Adding 0.5 first rounded the
+      # next integer, and at a half the mode. Adding 0.5 first rounds the
       # sum itself: 0.49999999999999994 + 0.5 is 1.0, and 4503599627370497.0
-      # + 0.5 is 4503599627370498.0, so the prelude's `round` moves both.
+      # + 0.5 is 4503599627370498.0; the prelude's `round` did, once.
       a = abs
       f = a.floor
       d = a - f
@@ -93,7 +104,32 @@ struct ::Float64
             even = (f / 2.0).floor * 2.0
             even == f ? f : f + 1.0
           end
-      self < 0.0 ? 0.0 - r : r
+      self < 0.0 ? r * -1.0 : r
+    end
+  end
+
+  # To `digits` places in the mode asked for — Crystal's
+  # `round(digits, mode: ...)`: `2.675.round(2, :ties_away)` spelled
+  # `2.675.round(2, RoundingMode::TiesAway)`. A negative `digits` rounds to
+  # tens, hundreds, ..., dividing by the scale first as the prelude's
+  # `round(digits)` does.
+  # Past a double's range the answer is at hand, as for the prelude's.
+  def round(digits : Int32, mode : Std::Number::RoundingMode) : Float64
+    return round(mode) if digits == 0
+    if digits < 0
+      scale = 10.0 ** (0 - digits)
+      if scale * 0.0 != 0.0 && self * 0.0 == 0.0
+        whole = LibIyiRounding.copysign(0.0, self)
+        return whole if mode == Std::Number::RoundingMode::ToZero || self == 0.0
+        return mode == Std::Number::RoundingMode::ToPositive && self > 0.0 ? 1.0 / 0.0 : (mode == Std::Number::RoundingMode::ToNegative && self < 0.0 ? -1.0 / 0.0 : whole)
+      end
+      (self / scale).round(mode) * scale
+    else
+      return self if self != self || abs >= 4503599627370496.0
+      scale = 10.0 ** digits
+      scaled = self * scale
+      return self if scaled * 0.0 != 0.0
+      scaled.round(mode) / scale
     end
   end
 end

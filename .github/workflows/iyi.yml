@@ -29,7 +29,9 @@ name: iyi
 #                    by cross-compiling: an edit to `src/lib_c` or
 #                    `src/crystal/system` is invisible here until somebody
 #   binary           the thing a person downloads, unpacked somewhere else
-#   std              the native standard library (src/std/) and its module exercises
+#   std              the native standard library (src/std/): its foundation here,
+#                    its modules' exercises in the std-siblings shards (and the
+#                    windows- and darwin- shards beside their own jobs)
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -37,6 +39,28 @@ name: iyi
 # and report nothing. The number is the job's own worst honest case, not a
 # guess at its average.
 on: [push, pull_request]
+
+# Git refuses a checkout that another user owns, and in a container job the
+# workspace is not the container user's: `actions/checkout` marks it safe in
+# a git config of its own, for the checkout step. After it the container
+# builds named no commit, and SOURCE_DATE_EPOCH was not the commit's time -
+# 1790467191 in one job and 1790467280 in another, for one commit, each
+# the moment of that job's checkout: the Makefile's mtime, its fallback
+# when git answers nothing. A run that crossed midnight UTC then built a
+# compiler that said 2026-09-26 and a daemon beside it that said
+# 2026-09-27, and `check_daemon_matches` stopped the CLI specs, the two
+# being one commit. Safe for every step here, so git answers in them.
+env:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: safe.directory
+  GIT_CONFIG_VALUE_0: "*"
+# Python's UTF-8 mode, for every gate written in it: on Windows `open()`
+# without an encoding reads and writes cp1252, and a gate died the first
+# time a file it read or wrote held a character cp1252 has no byte for -
+# a compiler comment's arrow in `build_tool_scan.py`, an emoji in an
+# `lsp_session.py` step. A hundred-odd such opens in `bench/` read the
+# same on every runner this way.
+  PYTHONUTF8: "1"
 
 permissions: {}
 
@@ -106,6 +130,23 @@ jobs:
       - name: Formatted
         run: make format check=1
 
+      # A gate nothing runs passes on the machine that wrote it. Three did
+      # exactly that in one release — `format_exercise`, `io_exercise` and
+      # `socket_exercise`, nine seconds between them — and `panics.sh` was
+      # a fourth in a narrower form: it ran on Linux and darwin and the
+      # sentence it asserts is Windows' own. This is that lesson as a
+      # check, and it needs no compiler, which is why it is here.
+      - name: Every gate is reached by something that runs it
+        run: python3 bench/gates_reachable.py
+
+      # Which language a source is in is the one thing the lexer cannot read
+      # out of its text, and a parse built without a name reads by the other
+      # language's rules. That was a defect four separate times in one
+      # release — stdin, the token scanner, macro expansions and a macro
+      # body's formatter — so the seam is checked rather than remembered.
+      - name: Every parse names the language it reads
+        run: python3 bench/language_is_named.py
+
       - name: iyi's own specs
         run: |
           ./bin/crystal spec \
@@ -114,22 +155,6 @@ jobs:
             spec/compiler/semantic/iyi_spec.cr \
             spec/compiler/iyi_derive_spec.cr \
             spec/compiler/compiler_spec.cr
-
-      # What `iyi mod diff` answers, against what a rebuild would show. It
-      # is the one question a build system branches on, and it was wrong
-      # for the edit that matters most: a block-taking def's body is
-      # compiled by the *consumer*, and the verdict read the interface
-      # hash alone and said nobody had to rebuild.
-      - name: mod diff answers what a rebuild would show
-        run: bash bench/mod_diff.sh
-
-      # And that the grounding a model reads is there at all. `mod
-      # context` resolved the requirement table and the entry file's
-      # directory and never looked at `IYI_PATH`, so every import of a
-      # library module — nine across the samples — was reported as a
-      # module that does not exist.
-      - name: Every import in the samples is grounded
-        run: bash bench/mod_context.sh
 
       # The command surface and the build daemon, which is iyi's own (SPEC.md
       # IV.1d) and which nothing else here runs. It caught two things the day
@@ -187,10 +212,50 @@ jobs:
         env:
           CRYSTAL_WORKERS: 1
 
+  # And the question from a position nobody chose. The samples job's
+  # soak asks one hover after each abuse; this asks every cursor question
+  # at thousands of positions across `src/std`, including the two shapes
+  # the answers were wrong on — a macro directive line and a local
+  # assignment, where a variable an arm this target does not take has no
+  # type and a visitor read it anyway. Eighteen internal errors were found
+  # that way and nothing had asked. A job of its own: it grows with the
+  # library, and took 22 to 41 of the samples job's 90 minutes.
+  lsp-positions:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "Every cursor question, everywhere in the library"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi` and its daemon
+        run: make -o .build/crystal iyi iyi-daemon
+      - name: Every cursor question, everywhere in the library
+        run: python3 bench/lsp_positions.py
+
   samples:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Measured: 43 and 44 minutes on master's runs of 2026-09-29, 38 and a
+    # cancellation at 45 on the next branch's - a budget the job had grown
+    # into, so a slow runner ended it in whatever step it had reached. At 60
+    # it happened again: master's runs of 2026-09-30 and 10-01 were cancelled
+    # at 60 in five of six, the sixth took 37, and windows-0.17.0's took 37
+    # and 51. `lsp_positions.py`, which asks a cursor question every 200
+    # lines of every module in `src/std` and grows with it, took 15, 16 and
+    # 23 minutes in those that finished and 28 to 31 in those cancelled.
+    # At 90 the job took 87 on most runs and was cancelled at 90 on
+    # 2026-10-16, `lsp_positions.py` 22 to 41 minutes of it: that step is
+    # now the `lsp-positions` job's, run beside this one.
+    timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Samples, from source and from artifacts"
@@ -272,7 +337,7 @@ jobs:
           work="$(mktemp -d)"
           mkdir -p "$work/app"
           printf 'module app/pure\n\npub def hello : String\n  "hi"\nend\n' > "$work/app/pure.iyi"
-          printf 'module main\n\nimport app/pure\nusing app/pure\n\nputs hello\n' > "$work/main.iyi"
+          printf 'module main\n\nimport app/pure::*\n\nputs hello\n' > "$work/main.iyi"
           ./bin/iyi build --emit-iyimod "$work/mods" -o "$work/out" "$work/main.iyi"
           if ./bin/iyi build --crystal --use-iyimod "$work/mods" -o "$work/out" \
                "$work/main.iyi" 2>"$work/err"; then
@@ -304,6 +369,16 @@ jobs:
 
       - name: The runtime exercise holds III.4's properties
         run: bash bench/runtime_exercise.sh
+
+      # III.4.13: tasks across cores. Parallel tasks on the pool, each kept
+      # by the worker that started it, values through channels across
+      # threads, cancels delivered to the thread a task is on, the
+      # speedup held to a floor of 0.6 per worker, `Share` refusing what a
+      # parallel block may not capture, and broken copies of the runtime -
+      # a lost wakeup, a task handed out twice, a cancel never delivered -
+      # each caught by name.
+      - name: Tasks across cores (III.4.13)
+        run: bash bench/parallel_exercise.sh
 
       # The shape those primitives are actually used in: a fiber per
       # connection, both halves parked on the poller, and a collection
@@ -370,6 +445,13 @@ jobs:
       - name: Arrays, hashes and sets at their edges
         run: bash bench/collections_exercise.sh
 
+      # The assertions a test is written in, with no import: each one held
+      # and failed, its message naming the values and the caller's line,
+      # named cases running past a failure to an exit of 1, and every check
+      # proved able to fail against a patched copy of the prelude.
+      - name: The prelude's assertions
+        run: bash bench/assertions_exercise.sh
+
       # And what the commands say when they refuse. Every case is a mistake
       # a person makes at the command line, and the claim is one sentence
       # rather than a stack trace: `iyi daemon start --socket <a path past
@@ -379,6 +461,14 @@ jobs:
       # a recording of that crash.
       - name: What the verbs say when they refuse
         run: bash bench/verbs_exercise.sh
+
+      # And the first verb a person types. `iyi init` was refused with a
+      # sentence about a checkout the zip does not carry; it writes a
+      # project now, and the claim is that all four files are right the
+      # moment they land — the entry runs, the test passes, the pack grounds
+      # the import, and a second `init` changes not one byte.
+      - name: A project, from nothing
+        run: bash bench/init_project.sh
 
       # And what it does when the client is not a client. Every frame in
       # this gate used to kill the daemon outright, the analysed prelude
@@ -392,6 +482,17 @@ jobs:
       # running behind a socket with no name.
       - name: One client's mistake is one client's mistake
         run: python3 bench/daemon_protocol.py
+
+      # And whether the program it built is the same program. The daemon
+      # forks a child per build, so the child starts from a prelude this
+      # build's command line never configured: every switch that matters
+      # is re-applied to it, and the compiler can force somebody to *name*
+      # the list a new switch belongs to without telling them they named
+      # the right one. Delete the line that re-applies `use_iyimod` and
+      # this is what notices — the plain build answers and the daemon's
+      # fail.
+      - name: The daemon builds the same program a plain build does
+        run: python3 bench/daemon_agrees.py
 
       # Three gates that existed, passed on the machine that wrote them, and
       # were named in this file by nothing: `format_exercise` (seven proofs
@@ -422,12 +523,13 @@ jobs:
       # Windows — a host run, a cross-compile to `x86_64-windows-msvc` that
       # stops at the object, and three patched-prelude proofs — so it runs
       # here, in under two seconds.
-      - name: The collector holds, all six gates
+      - name: The collector holds, all seven gates
         run: |
           bash bench/arena_exercise.sh
           bash bench/root_exercise.sh
           bash bench/mark_exercise.sh
           bash bench/sweep_exercise.sh
+          bash bench/reuse_integrity.sh
           bash bench/collect_trigger.sh
           bash bench/windows_exercise.sh
 
@@ -435,6 +537,13 @@ jobs:
       # read inside its band — the corrected prediction is in SPEC.md.
       - name: The edit-rebuild loop stays cheap
         run: python3 bench/rebuild_speed.py
+
+      # R-2c types every written def at its definition, and the probes that
+      # do it merged their variables into the program's, one probe after
+      # another: the front end grew with the square of the defs. Held as a
+      # ratio, 4,000 defs against 500, so the machine's speed is not in it.
+      - name: Typing a def at its definition costs that def
+        run: python3 bench/definition_typing_scale.py
 
       # `iyi migrate`: a Crystal project written out as iyi modules, on a
       # fixture that plants every case the rewrite has to answer — a
@@ -468,6 +577,9 @@ jobs:
       - name: Packages resolve by minimal version selection
         run: bash bench/packages_resolve.sh
 
+      - name: iyi get writes a requirement
+        run: bash bench/packages_get.sh
+
       # AI_FIRST.md §5's token arm: the context pack must be smaller than
       # the sources it replaces, and must carry no body. The rounds arm
       # needs a model and runs by hand: --agent 'claude -p'.
@@ -488,6 +600,28 @@ jobs:
       # through an import while the disk stays untouched.
       - name: The language server holds its session
         run: python3 bench/lsp_session.py
+
+      # And the same session in the workspace R-1 exists for: the
+      # dependency is a `.iyimod` and its source is gone. The build has
+      # been gated on that since `samples_roundtrip.sh`; the editor had
+      # never been asked, and answered `can't find module` about a module
+      # the build compiles against.
+      - name: The language server answers from an artifact
+        run: python3 bench/lsp_artifacts.py
+
+      # What the commands that read an import without building answer,
+      # against what a build does. Here rather than with the specs
+      # because both need the binary this job builds: `mod diff`'s
+      # verdict was wrong for the edit that matters most — a block-taking
+      # def's body is compiled by the *consumer*, and the verdict read
+      # the interface hash alone — and `mod context` never looked at
+      # `IYI_PATH`, so every import of a library module was reported as a
+      # module that does not exist.
+      - name: mod diff answers what a rebuild would show
+        run: bash bench/mod_diff.sh
+
+      - name: Every import is grounded, in every workspace shape
+        run: bash bench/mod_context.sh
 
       # The agent's loop, scripted and asserted: ground (context pack,
       # budget ladder), check (verdict as data, suggested_edit), fix
@@ -515,15 +649,8 @@ jobs:
       - name: The language server does not flinch
         run: python3 bench/lsp_soak.py
 
-      # And the question from a position nobody chose. The soak above asks
-      # one hover after each abuse; this asks every cursor question at
-      # thousands of positions across `src/std`, including the two shapes
-      # the answers were wrong on — a macro directive line and a local
-      # assignment, where a variable an arm this target does not take has
-      # no type and a visitor read it anyway. Eighteen internal errors
-      # were found that way and nothing here had asked.
-      - name: Every cursor question, everywhere in the library
-        run: python3 bench/lsp_positions.py
+      # Every cursor question at every 200th line of the library is the
+      # `lsp-positions` job's, beside this one.
 
       # The server is two processes because `iyi` carries no collector: a
       # proxy that keeps the protocol and the buffers, and a worker that
@@ -648,7 +775,7 @@ jobs:
       - name: A YAML document, through a boundary built from the library
         run: bash bench/yaml_reads.sh
 
-      # And twelve of the library's own namespaces, because what a boundary
+      # And eleven of the library's own namespaces, because what a boundary
       # breaks on depends on what the namespace holds. `Log` is the one that
       # found the most: global state written by macros — a private constant, a
       # class variable with a live initialiser, and two `{% for %}` loops that
@@ -657,7 +784,10 @@ jobs:
       # carry both; `Random` found that a module is a mixin on the other side
       # of one. The other six found nothing, which is why they are here: a gate
       # that holds only what once broke says nothing about what never did.
-      - name: Twelve library namespaces, bound and consumed
+      # It was twelve until libxml2 left the tree: `XML` was the case that
+      # made a boundary carry a `@[Link]` flag the consumer never wrote, and
+      # the YAML step above asks that same question now.
+      - name: Eleven library namespaces, bound and consumed
         run: bash bench/library_boundaries.sh
 
       # A library arriving with a feature is a decision, and this is where it
@@ -739,10 +869,13 @@ jobs:
       - name: The numbers the docs quote from a measurement
         run: python3 bench/measured_numbers.py
 
+  # Ninety minutes: it took 50 and 52 on master, 59 on integration/0.20
+  # with its new modules, and was cut off at sixty there (job
+  # 119218729131).
   std:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The native standard library and its module exercises"
@@ -757,8 +890,94 @@ jobs:
       - run: chmod +x .build/crystal
       - name: Build iyi binary
         run: make -o .build/crystal iyi
-      - name: The standard library foundation and discovered exercises
+      # The foundation's own sections; the modules' exercises are the
+      # std-siblings shards below, side by side.
+      - name: The standard library foundation
+        env:
+          STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
+      # crystal-metric's port: twenty-six benchmarks that check their own
+      # answers against the Crystal program's, over one program that uses
+      # the library together; four broken modules prove it can fail.
+      - name: crystal-metric's port answers as Crystal does
+        run: bash bench/metric_port.sh
+
+  # Every module's own exercise, in four shards (bench/std_siblings.sh).
+  # One after another they ran past the std job's hour: 39 of 91 had run at
+  # sixty minutes, std/http's proofs alone thirteen of them, on top of the
+  # foundation's twenty-five. Interleaved, each shard carries a quarter:
+  # in three, the shard with std/http - 21 minutes of HTTPS under two
+  # certificates and its proofs - ran past 45. And at 45 a shard was cut
+  # off with three runs of this workflow at once (a tag's, master's and the
+  # branch's): the same shard took 29 to 45 minutes in four runs, so it
+  # has the hour Windows' shards have. And ninety, as Windows' now do: on
+  # tls/mlkem shard 3 reached std/tls after forty minutes, and std/tls's
+  # broken copies, grown with the hybrid's, ran it past sixty. Interleaved
+  # by sorted place, shard 2 then held std/http, std/big, std/websocket and
+  # std/autocert: 4,641 s of siblings on Linux in run 39840302846, where
+  # shard 4 held 838. The shards are dealt by weight now, the seconds each
+  # sibling took in that run (bench/std_siblings.sh's WEIGHTS): added up
+  # from the same logs, the heaviest shard holds 2,580 s on Linux, 2,875
+  # on darwin and 2,936 on Windows, where it held 4,641, 4,509 and 4,019.
+  # The limits stay until a run dealt so has been measured.
+  std-siblings:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: crystallang/crystal:1.21.0-build
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build iyi binary
+        run: make -o .build/crystal iyi
+      # The crypto modules' gates hold them to OpenSSL through Python's
+      # cryptography - signatures, chains, a TLS server - and skip that
+      # half, saying so, where it is missing. It was missing here. And the
+      # gates hold their modules to Python 3.14: `compression.zstd` and
+      # zipfile's Zstandard are 3.14's, `ipaddress`'s registries and
+      # `shlex`, `email` and liblzma answer otherwise in 3.12, which is the
+      # container's, and std/png's oracle is Pillow. uv brings 3.14 into a
+      # container that has no setup-python. std/secure_dns's gate asks dig
+      # (`+tls`, `+https`) the questions its scripted servers answer, and
+      # its HTTP/2 server is the `h2` package's; without either it skips
+      # that part, saying so, so a dnsutils the mirror lacks is not fatal.
+      - name: Python 3.14 with cryptography, Pillow and h2, and dig, for the oracles
+        run: |
+          apt-get update -qq && apt-get install -y -qq python3 python3-pip > /dev/null
+          apt-get install -y -qq dnsutils > /dev/null || echo "no dnsutils here: dig goes unasked"
+          python3 -m pip install -q --break-system-packages uv
+          uv python install 3.14
+          uv venv --python 3.14 /opt/oracle
+          uv pip install --python /opt/oracle/bin/python -q cryptography pillow h2
+          echo /opt/oracle/bin >> "$GITHUB_PATH"
+      # std/acme's gate places whole orders with Let's Encrypt's test CA,
+      # Pebble, which it builds with `go install` - and skips, saying so,
+      # where there is no Go, as there was none in this container. No
+      # `go.sum` here to key a cache on, so none is asked for.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: The module exercises of this shard
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+      # std/tls's reads and writes against OpenSSL, each set against its
+      # cipher's own rate on the same machine (bench/tls_speed.sh): a share
+      # needs no shard but one.
+      - name: std/tls's throughput, against its cipher's
+        if: matrix.shard == 4
+        run: bash bench/tls_speed.sh
 
   targets:
     needs: build
@@ -914,6 +1133,26 @@ jobs:
           # arm64 kernel under emulation in cross-run.
           ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
             -o cross/threads-aarch64 bench/thread_exercise.iyi
+          # Tasks across cores, the aarch64 arm: the doorbell's eventfd2 by
+          # aarch64's number, the scheduler's lock and its atomics in
+          # ldaxr/stlxr, workers by the runtime's own `clone`.
+          ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
+            -o cross/parallel-aarch64 bench/parallel_exercise.iyi
+          # std/process's Linux arm on the other instruction set and the
+          # other libc: `clone`, `execve`, `pipe2`, `pidfd_open` and `wait4`
+          # by syscall, with aarch64's numbers, which the native Linux job
+          # never reaches. The exercise runs itself as its children.
+          ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
+            -o cross/process-aarch64 bench/std_process_exercise.iyi
+          ./bin/iyi build --cross-compile --target x86_64-linux-musl \
+            -o cross/process-musl bench/std_process_exercise.iyi
+          # std/debug's own stack walk on the other instruction set - its
+          # register numbers and its capture are aarch64's - and linked
+          # against the other libc's start files.
+          ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
+            -o cross/debug-aarch64 bench/std_debug_cross.iyi
+          ./bin/iyi build --cross-compile --target x86_64-linux-musl \
+            -o cross/debug-musl bench/std_debug_cross.iyi
 
           # The Windows probe: the two shapes whose output has been seen wrong,
           # a case conversion and a number rendered into a string — then the
@@ -988,10 +1227,26 @@ jobs:
             cc hello-musl.o -o hello-musl -lgc -lpthread &&
             ./hello-musl > got.txt &&
             cc conc-musl.o -o conc-musl &&
-            ./conc-musl > conc.txt
-          '
+            ./conc-musl > conc.txt &&
+            cc process-musl.o -o process-musl &&
+            timeout 300 ./process-musl > process.txt 2>&1 &&
+            cc debug-musl.o -o debug-musl &&
+            { ./debug-musl > debug-musl.txt 2>&1; true; }
+          ' || status=$?
+          for out in process debug-musl; do
+            echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
+          done
+          [ "${status:-0}" -eq 0 ]
           diff cross/expected.txt cross/got.txt && echo "musl: same output"
           grep -q "every property held" cross/conc.txt && echo "musl: III.4 held"
+          # A failed `&&` list stops a `bash -e` step only when it is the
+          # last command, so these two say so themselves.
+          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "musl: std/process held" || exit 1
+          # The panic is the program's exit; the trace is what is checked.
+          { grep -qE "^0 +[^ ]*gamma[^ ]* at .*std_debug_cross\.iyi:15:" cross/debug-musl.txt &&
+            grep -qE "^1 +[^ ]*beta[^ ]* at .*std_debug_cross\.iyi:20:" cross/debug-musl.txt &&
+            grep -qE "^2 +[^ ]*alpha[^ ]* at .*std_debug_cross\.iyi:24:" cross/debug-musl.txt &&
+            echo "musl: std/debug named every frame"; } || exit 1
 
       # Every program's output goes to a file and the chain stops at the
       # first failure, which is why a red run here used to say nothing but
@@ -1011,9 +1266,15 @@ jobs:
               gcc floor-aarch64.o -o floor-aarch64 &&
               timeout 120 ./floor-aarch64 2 20 > floor.txt 2>&1 &&
               gcc threads-aarch64.o -o threads-aarch64 &&
-              timeout 300 ./threads-aarch64 4 > threads.txt 2>&1
+              timeout 300 ./threads-aarch64 4 > threads.txt 2>&1 &&
+              gcc parallel-aarch64.o -o parallel-aarch64 &&
+              timeout 900 ./parallel-aarch64 --watch=300000 > parallel.txt 2>&1 &&
+              gcc process-aarch64.o -o process-aarch64 &&
+              timeout 300 ./process-aarch64 > process.txt 2>&1 &&
+              gcc debug-aarch64.o -o debug-aarch64 &&
+              { timeout 120 ./debug-aarch64 > debug-aarch64.txt 2>&1; true; }
             ' || status=$?
-          for out in got conc floor threads; do
+          for out in got conc floor threads parallel process debug-aarch64; do
             echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
           done
           [ "${status:-0}" -eq 0 ]
@@ -1023,6 +1284,12 @@ jobs:
           # kernel's ABI and the asm, which is what this arm is for.
           grep -q "every property held" cross/floor.txt && echo "aarch64: the thread floor held"
           grep -q "every property held" cross/threads.txt && echo "aarch64: threads under the collector held"
+          grep -q "every property held" cross/parallel.txt && echo "aarch64: tasks across cores held"
+          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "aarch64: std/process held" || exit 1
+          { grep -qE "^0 +[^ ]*gamma[^ ]* at .*std_debug_cross\.iyi:15:" cross/debug-aarch64.txt &&
+            grep -qE "^1 +[^ ]*beta[^ ]* at .*std_debug_cross\.iyi:20:" cross/debug-aarch64.txt &&
+            grep -qE "^2 +[^ ]*alpha[^ ]* at .*std_debug_cross\.iyi:24:" cross/debug-aarch64.txt &&
+            echo "aarch64: std/debug named every frame"; } || exit 1
 
   # darwin arm64 is a run target now (SPEC.md III.4.8): the concurrency
   # runtime's kqueue arm, the panic registry and every sample run natively on
@@ -1046,8 +1313,11 @@ jobs:
     # the compiler, its daemon and the tarball (22m07s) and walking the
     # collector-free floor (11m32s). Five minutes of headroom is a red
     # build for the next step anybody adds, and the step that found this
-    # was measured at 2m20s.
-    timeout-minutes: 90
+    # was measured at 2m20s. A hundred and twenty since: the three runs
+    # that finished before it took 77, 83 and 83 minutes, and two were
+    # cancelled at ninety in their last steps (the test verb, then
+    # `daemon_protocol.py`), the gates they had run all green.
+    timeout-minutes: 120
     name: "An iyi program, run on darwin arm64"
     steps:
       - uses: actions/checkout@v7
@@ -1105,6 +1375,11 @@ jobs:
 
       - name: The concurrency gate (III.4)
         run: bash bench/concurrency_exercise.sh
+
+      # III.4.13 on kqueue: the doorbell a worker rings another with is an
+      # EVFILT_USER event there, and the workers are libSystem's pthreads.
+      - name: Tasks across cores (III.4.13)
+        run: bash bench/parallel_exercise.sh
 
       # The same shape on kqueue, where the event entry is 32 bytes
       # rather than 12 and the buffer the collector could not see is
@@ -1186,12 +1461,13 @@ jobs:
       # because its global was written and never read, so the scavenge
       # measured nothing and no machine had noticed. The same defect the
       # samples job's comment records, on the other platform.
-      - name: The collector holds, all five gates
+      - name: The collector holds, all six gates
         run: |
           bash bench/arena_exercise.sh
           bash bench/root_exercise.sh
           bash bench/mark_exercise.sh
           bash bench/sweep_exercise.sh
+          bash bench/reuse_integrity.sh
           bash bench/collect_trigger.sh
 
       # The standard library's own gates, on the platform the darwin tarball
@@ -1205,8 +1481,20 @@ jobs:
       # patched a branch this platform never compiles). Every one had been
       # green on Linux for a release. `std_exercise.sh` drives the whole
       # set and fails on any of them, and the gate-per-module rule with it.
-      - name: The native standard library and its module exercises
+      # The foundation's own sections; the modules' exercises are the
+      # darwin-std-siblings shards below, which ran this job past its two
+      # hours when they were a step here.
+      - name: The native standard library's foundation
+        env:
+          STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
+
+      # `std/socket`'s gate is named from before the `std_` prefix, so the
+      # sweep above never ran it, and its darwin arm - libSystem's calls,
+      # kqueue's two filters, a `sockaddr` with a length byte - was
+      # measured by nothing but the programs that happened to use it.
+      - name: Sockets, on darwin
+        run: bash bench/socket_exercise.sh
 
       # Budgeted, unlike the pauses above: the budget is generous by design
       # and a defer that blew it on a shared runner would be a finding.
@@ -1224,7 +1512,9 @@ jobs:
       # `packages_resolve` is here by lesson: its BSD-sed breakage was
       # found by running it on a Mac, and only a Mac can keep it fixed.
       - name: The packages story (III.7)
-        run: bash bench/packages_resolve.sh
+        run: |
+          bash bench/packages_resolve.sh
+          bash bench/packages_get.sh
 
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
@@ -1315,6 +1605,48 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+  # Every module's own exercise on darwin, in four shards
+  # (bench/std_siblings.sh), each building its own compiler from the same
+  # cached static LLVM: as one step of the job above they ran it past its
+  # hundred and twenty minutes, seventy of them in that step alone. A
+  # shard has a hundred and five: on integration/0.19 shard 4 was cut off
+  # at seventy-five, std/http alone 27 minutes of it and std/big 14.
+  darwin-std-siblings:
+    runs-on: macos-14
+    timeout-minutes: 105
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises on darwin, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: Build `iyi`
+        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Python's cryptography and Pillow, for the oracles
+        run: python3 -m pip install -q cryptography pillow
+      - name: The module exercises of this shard, on darwin
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
   # A Windows binary, run twenty times, and every run held to the right
   # answer. Three things used to happen: it printed the right answer, it
@@ -1500,9 +1832,12 @@ jobs:
   # Windows package, whose `lib` carries `LLVM-C.dll` and the
   # `llvm_VERSION` beside it — this fork needs no `llvm-config` on the
   # msvc path and the package ships none.
+  # Two hours: it took 64 to 88 minutes in green runs, the release build at
+  # its end the longest step, and was cut off at ninety inside that build
+  # (job 118116750685 on lsp/shutdown).
   windows-native:
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 120
     name: "iyi, built and run on Windows"
     steps:
       - uses: actions/checkout@v7
@@ -1546,6 +1881,13 @@ jobs:
       - name: Build `iyi`
         shell: cmd
         run: make -f Makefile.win iyi
+
+      # A rebuild with an editor open: `iyi lsp` holds `.build\iyi.exe`, and
+      # Windows will not move a file onto a running program, so Makefile.win
+      # renames the running one aside first.
+      - name: A running iyi is replaced, not refused
+        shell: bash
+        run: bash bench/replace_running.sh
 
       - name: Every rule this fork adds, on Windows
         shell: cmd
@@ -1614,6 +1956,9 @@ jobs:
       #                      bench/arena_exercise.sh asserts and a tally
       #                      cannot
       #   wasm32_exercise    a wasm32 program
+      #   std_debug_cross    its pass is a panic, whose trace cross-run
+      #                      reads on aarch64 and musl; Windows' own trace
+      #                      is bench/panics.sh's
       #
       # The sockets came off this list when `std/socket` and `std/udp` got
       # their Winsock arms, and `std_file_exercise` came off it when the
@@ -1624,8 +1969,11 @@ jobs:
       - name: Every exercise the runtime can hold
         shell: pwsh
         run: |
+          # stdin_park.iyi reads the pipe bench/concurrency_exercise.sh feeds
+          # it - a line two seconds in - and an empty stdin is its failure.
           $skip = @(
-            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi"
+            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
+            "stdin_park.iyi", "std_debug_cross.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
@@ -1658,6 +2006,119 @@ jobs:
             Write-Host "failed: $($failed -join ', ')"
             exit 1
           }
+
+      # The sentence a stack overflow prints is Windows' own: POSIX gets it
+      # from `IyiStackGuard` on an alternate signal stack, which is compiled
+      # out here, and Windows gets it from the vectored handler in
+      # `src/iyi/prelude.iyi` — from the room `SetThreadStackGuarantee`
+      # reserves on a thread's stack and the committed slack under the armed
+      # guard page a fiber stack carries. `bench/panics.sh` asserts that
+      # sentence, byte for byte, on the main stack, a fiber's and a thread's,
+      # and that a wild `Pointer` is called a memory fault instead — and it
+      # ran in the Linux and darwin jobs only, so the one platform the
+      # sentence is about was the one platform nothing checked it on.
+      - name: Panics, on the platform the sentence is about
+        shell: bash
+        run: bash bench/panics.sh
+
+      # And the floor, for the same reason. The script has read a PE's import
+      # table since Windows was a target — `dumpbin -imports`, located through
+      # the installer the linker is found with — and the two jobs that ran it
+      # were Linux and darwin, so what a Windows program asks of the machine
+      # was a claim nothing measured. Missing `dumpbin` is a failure here
+      # rather than a sentence and exit 0: a machine that built these binaries
+      # has the toolchain that wrote them.
+      - name: The dependency floor, on Windows (III.9)
+        shell: bash
+        run: bash bench/dependency_floor.sh
+
+      # The module contract, on the platform whose paths are the reason to
+      # ask. `mod context` resolves imports through `IYI_PATH` and a
+      # workspace's `mods`, and `mod diff` hashes what a consumer compiles —
+      # both of them path-shaped work that `cygpath` and a `;` separator are
+      # the whole difference in. They ran on Linux and darwin only, so the
+      # separator the gates carry code for was never exercised.
+      - name: What a module contract says, on Windows
+        shell: bash
+        run: |
+          bash bench/mod_context.sh
+          bash bench/mod_diff.sh
+
+      # The first verb a Windows person types, on the platform where the
+      # old refusal was most wrong: it named a `crystal` binary in a
+      # checkout, and the zip carries neither.
+      - name: A project, from nothing, on Windows
+        shell: bash
+        run: bash bench/init_project.sh
+
+      # The language server, on the platform whose file URIs are not the
+      # path with a scheme in front: an editor sends
+      # `file:///c%3A/Users/x/a.iyi`, and chopping the scheme off left
+      # `/c:/Users/x/a.iyi`, a path with a root it does not have. Every
+      # buffer the server opened on Windows was read from a file it could
+      # not find, and nothing here had ever asked. The exe rather than
+      # `bin/iyi`, which is a shell script, and its path spelled the way
+      # the Windows python the runner carries can start it. And the
+      # session's workers: killed mid-compile, retired, and started again
+      # from a binary that has been renamed away - which is what a rebuild
+      # does, and what killed the proxy here with a stack overflow in the
+      # first exception it built afterwards.
+      - name: The language server holds its session, on Windows
+        shell: bash
+        run: |
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_artifacts.py
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_memory.py
+
+      # Four gates that carry Windows code — `cygpath`, the `;` separator,
+      # the read-only directory Windows has no `chmod` for — and had never
+      # run on Windows, so the code they carry for it was written blind.
+      # What the verbs refuse, what the test verb answers, what a package
+      # resolves to through `iyi.mod` and `iyi.sum`, and what `migrate`
+      # writes: each is path-shaped work, and this is the platform whose
+      # paths are the reason to ask. And the collector's reuse check
+      # optimised: the exercise loop above runs `iyi run`, and the double
+      # hand-out it catches showed in `--release` builds. And the
+      # concurrency runtime's own gate, whose release arm is the one that
+      # keeps a double in xmm6-xmm15 across a fiber switch, and whose
+      # proof takes the switch's restore of them out. And Crystal's library
+      # bound as boundaries: `JSON`, `INI` and `XML` read Windows'
+      # file-private `ConsoleUtils` in object code that travels, which the
+      # consumer could not name and so never emitted.
+      - name: The gates that carry Windows code, on Windows
+        shell: bash
+        run: |
+          bash bench/verbs_exercise.sh
+          bash bench/test_verb.sh
+          bash bench/packages_resolve.sh
+          bash bench/packages_get.sh
+          bash bench/migrate_gate.sh
+          bash bench/reuse_integrity.sh
+          bash bench/concurrency_exercise.sh
+          bash bench/parallel_exercise.sh
+          bash bench/library_boundaries.sh
+
+      # And the rest of what an editor and an agent are handed. Every
+      # sample again from its modules' artifacts alone (R-1), the agent
+      # loop and its MCP server, every cursor position in the repository's
+      # own `.iyi` files, and every semantic token's boundary — the four
+      # surfaces whose answers are paths and positions, which is what the
+      # last three Windows fixes to the language server were about.
+      #
+      # The sweep at stride 600, not Linux's 200: at 200 it took 36 of this
+      # job's 90 minutes, and what Windows adds to a cursor question is the
+      # transport and the path under it, which every module still gets
+      # asked about. Unbuffered, so a gate that stops says where it was.
+      - name: The editor and agent surfaces, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          bash bench/samples_roundtrip.sh
+          python bench/agent_loop.py
+          python bench/lsp_token_boundaries.py
+          python bench/lsp_positions.py 600
 
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
@@ -1739,6 +2200,34 @@ jobs:
           & (Join-Path $seven 'bin\iyi.exe') version
           if ($LASTEXITCODE -ne 0) { throw 'the copy PowerShell 7 installed does not start' }
 
+          # And over an install. `bench/install_upgrade.sh` holds this for
+          # the tarball — a file an older release shipped and this one does
+          # not survived the upgrade and was still *required* by a glob in
+          # the library — and nothing held it for the zip, whose installer
+          # takes a different route: it replaces `share\iyi` whole. Two
+          # things are planted first, a stale file and a poisoned prelude,
+          # and the poison is what proves the check can fail: `check` has
+          # to break before the upgrade for its passing after to mean
+          # anything.
+          $installedExe = Join-Path $seven 'bin\iyi.exe'
+          $stale = Join-Path $seven 'share\iyi\crystal\crystal\dwarf\gone_in_the_next_release.cr'
+          New-Item -ItemType Directory -Force -Path (Split-Path $stale) | Out-Null
+          [IO.File]::WriteAllText($stale, "module Crystal::DWARF`n  record LeftBehind, format : A_CONSTANT_THAT_IS_NOT_THERE`nend`n")
+          $prelude = Join-Path $seven 'share\iyi\src\iyi\prelude.iyi'
+          if (-not (Test-Path -LiteralPath $prelude)) { throw "the installed library has no prelude at $prelude" }
+          [IO.File]::AppendAllText($prelude, "`nthis is not iyi`n")
+          $probe = Join-Path $env:RUNNER_TEMP 'upgrade-probe'
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          [IO.File]::WriteAllText((Join-Path $probe 'main.iyi'), "puts 1`n")
+          & $installedExe check (Join-Path $probe 'main.iyi') 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'a poisoned prelude still checked a program, so the upgrade check is watching nothing' }
+          pwsh -NoProfile -File .\install.ps1 -ReleaseUrl $dist -Version $version -Prefix $seven -NoPath
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 over an install failed with $LASTEXITCODE" }
+          if (Test-Path -LiteralPath $stale) { throw 'a file the release does not ship survived the upgrade' }
+          & $installedExe check (Join-Path $probe 'main.iyi')
+          if ($LASTEXITCODE -ne 0) { throw 'the upgraded library does not check a program' }
+          Write-Host 'an install over an install leaves one install: the stale file is gone and the prelude is whole'
+
           # One hex digit wrong. `-RedirectStandardError`, because the
           # refusal is written to the process's own stderr and a `2>` inside
           # PowerShell only redirects PowerShell's error stream, which is how
@@ -1780,6 +2269,329 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The standard library's gates and the collector's, on Windows, in a job
+  # of their own: `bench/std_exercise.sh` runs every module's exercise from
+  # source and from its artifacts, each with its oracle and its failure
+  # proofs, and took 34 minutes on a Windows machine - more than the job
+  # above has left. The same build, then the gates. They ran on Linux and
+  # darwin only, and on Windows seven of them failed: python oracles that
+  # wrote CRLF, proofs that edited another platform's arm, a floor read
+  # with tools this platform does not have, and the collector's own
+  # exercises refusing a platform whose collector they had never been
+  # asked about.
+  # Two and a half hours: it took 56, 74 and 89 minutes on master and
+  # integration/0.20, and was cut off at ninety on a branch (job
+  # 119640679755) while its socket exercise was still going.
+  windows-std:
+    runs-on: windows-2025
+    timeout-minutes: 150
+    name: "The standard library and the collector, gated on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      # And the parallel mark and the mark beside the program: Windows'
+      # helpers park on a kernel32 semaphore between collections, and the
+      # second stop is a helper's, suspending every registered thread.
+      # Each gate under a bound of its own (bench/bounded_gate.sh): job
+      # 120284584748 sat in bench/sweep_exercise.sh from its first line to
+      # the job's cancel at 150 minutes, and its log could not say what
+      # was still running. Fifteen minutes is over three times the longest
+      # gate's 4 min 33 s in master's green job 120284541992; a gate past
+      # it is ended with its processes and their threads printed, and the
+      # gates after it still run.
+      - name: The collector's gates, on Windows
+        shell: bash
+        run: |
+          failed=""
+          for gate in bench/arena_exercise.sh bench/root_exercise.sh \
+                      bench/mark_exercise.sh bench/sweep_exercise.sh \
+                      bench/collect_trigger.sh bench/thread_exercise.sh \
+                      bench/parallel_mark.sh bench/concurrent_mark.sh; do
+            bash bench/bounded_gate.sh 15 "$gate" || failed="$failed $gate"
+          done
+          [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
+
+      # The foundation's own sections; the modules' exercises are the
+      # windows-std-siblings shards below.
+      - name: The standard library's foundation, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          STD_SIBLINGS: "0"
+        run: bash bench/std_exercise.sh
+
+      # The socket gate, which the sweep above does not reach (its name is
+      # older than the `std_` prefix): Winsock's arm - AcceptEx, ConnectEx,
+      # a posted send - for both address families.
+      - name: Sockets, on Windows
+        shell: bash
+        run: bash bench/socket_exercise.sh
+
+  # Every module's own exercise on Windows, in four shards
+  # (bench/std_siblings.sh): one after another, with the collector's gates
+  # and the foundation before them, they ran past this job's ninety minutes.
+  # A shard has ninety too: shard 3 took 49 to 58 minutes in green runs and
+  # was cut off at sixty on master, and a branch whose std/tls gate grew
+  # took shard 2 past sixty-five. Two hours, and fifty minutes a sibling:
+  # with two broken copies at a time on Windows (below), std/http's broken
+  # copies alone took 1,479 s there (integration/0.20, job 119078192918),
+  # past the thirty-five a sibling had.
+  # On windows-2022, as the collector and runtime jobs are. On windows-2025
+  # these shards, and once the job above, lost their runner ("lost
+  # communication with the server") eleven times, in no particular sibling:
+  # jobs 118492675680, 118598972995, 118855592816, 119293164185,
+  # 119406415714, 119550880710, 119648405209, 119673160400, 119732732855,
+  # 119732732924 and 119825970801. The shards that finished
+  # (bench/std_siblings.sh traces them) kept 7,623 MB of 16,378 free and
+  # 30 GB of disk at their worst, and the most connections in TIME_WAIT
+  # were 6,028, in a shard that did not lose its runner. A heavy job losing
+  # its runner on windows-2025 and not on windows-2022 is reported in
+  # github.com/orgs/community/discussions/173431. The job above stays on
+  # windows-2025: on 2022 its proof that helpers woken with Windows' wake
+  # boost hold the program's thread did not fire in ten runs (job
+  # 119973055363).
+  windows-std-siblings:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises on Windows, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      # Python 3.14, as on Linux: a gate asks for `python3` first, which
+      # setup-python's Windows build has beside `python`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Python's cryptography and Pillow, for the oracles
+        shell: bash
+        run: |
+          python -m pip install -q cryptography pillow
+          python3 --version
+      # Two broken copies at a time, not four: three Windows shards lost
+      # their runner ("lost communication with the server") deep into a
+      # shard holding std/tls or std/http, whose copies build and serve four
+      # at once on a 4-core runner (jobs 118492675680, 118598972995,
+      # 118855592816); none of the Linux or darwin shards did.
+      - name: The module exercises of this shard, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          MUT_JOBS: "2"
+          SIBLING_MINUTES: "50"
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+
+  # The gates the Linux job runs that no Windows job did: the runtime's
+  # own exercises, the boundaries bound from Crystal's library, the floors,
+  # and what the editor and the numbers say. A job of their own because
+  # the two above are each well into their ninety minutes. Each passed on
+  # a Windows machine before it came here; the two python gates that could
+  # not start there ran `bin/iyi`, a shell script, or named a module by
+  # its Windows path, and take the exe and a `/` now.
+  windows-gates:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    name: "The language's gates, on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      # The command surface, which the Linux job's `cli_spec` holds and no
+      # Windows job ran. The daemon's examples are pending here (its server
+      # is `fork`). The bind pipeline is the one example that needs
+      # the fork's compiler and `iyi.exe` from one commit, and it said pending on
+      # Windows for want of one; asked again by name, a pending answer is a
+      # failure.
+      - name: The commands, on Windows
+        shell: cmd
+        run: |
+          make -f Makefile.win cli_spec || exit /b 1
+          .build\cli_spec.exe -e "bound shard" > bind.txt
+          type bind.txt
+          findstr /C:" 0 failures, 0 errors, 0 pending" bind.txt
+
+      # Crystal's library, under the compiler that is built from it: the
+      # Linux job runs these and no Windows job did. They did not compile
+      # here (the DWARF reader named an `Error` it had not loaded), and a
+      # Windows checkout gave their data files CRLF, which two dozen of
+      # them compare byte for byte. A spec that builds a program runs the
+      # compiler by the name below; `bin/crystal` is a shell script.
+      - name: Crystal's primitives and standard library specs, on Windows
+        shell: cmd
+        env:
+          CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
+        run: |
+          make -f Makefile.win primitives_spec || exit /b 1
+          make -f Makefile.win std_spec
+
+      - name: The runtime's exercises, on Windows
+        shell: bash
+        run: |
+          bash bench/format_exercise.sh
+          bash bench/io_exercise.sh
+          bash bench/number_exercise.sh
+          bash bench/value_exercise.sh
+          bash bench/enum_exercise.sh
+          bash bench/float_text.sh
+          bash bench/collections_exercise.sh
+          bash bench/assertions_exercise.sh
+          bash bench/runtime_exercise.sh
+          bash bench/server_load.sh
+          bash bench/defer_cost.sh
+          bash bench/windows_exercise.sh
+
+      - name: Boundaries and floors, on Windows
+        shell: bash
+        run: |
+          bash bench/bind_roundtrip.sh
+          bash bench/bind_regex_identity.sh
+          bash bench/open_dispatch.sh
+          bash bench/yaml_reads.sh
+          bash bench/std_dependency_floor.sh
+          bash bench/build_tool_floor.sh
+
+      - name: What the editor and the numbers say, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          python bench/debug_info.py
+          python bench/measured_numbers.py
+          python bench/lsp_latency.py
+          python bench/lsp_soak.py
+          python bench/context_pack.py
+          python bench/generic_boundary.py
+          python bench/rebuild_speed.py
+
+      # The race, for the record, as darwin's job runs it: the same three
+      # programs under iyi's collector, Boehm and Go on this runner. It
+      # asserts no number, and refuses a row whose three arms answer
+      # differently, which is a question Windows had never been asked.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: The race, for the record (bench/gc_race.py)
+        shell: bash
+        run: IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/gc_race.py
+
+      # The image has no SQLite, and Linux installs libsqlite3-dev for the
+      # driver gate below: here it is sqlite.org's own x64 DLL, pinned by
+      # hash (the SHA3-256 sqlite.org publishes for it matched when the
+      # SHA-256 below was taken), and its import library made from the
+      # `.def` beside it with MSVC's `lib`. The library goes on `LIB`,
+      # which is where the compiler looks for a `.lib`, and the DLL on
+      # `PATH`, which is where the program looks for it.
+      - name: SQLite, for the driver the gates bind
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'sqlite-dll-win-x64-3530400.zip'
+          Invoke-WebRequest -Uri 'https://www.sqlite.org/2026/sqlite-dll-win-x64-3530400.zip' -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($hash -ne '8b959b7eff4a81f6a62fc3468f9273e5cfe78d4a927e62215aed231b654fb104') {
+            throw "sqlite.org's zip is not the one pinned here: $hash"
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'sqlite'
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          lib /nologo /def:"$dir\sqlite3.def" /machine:x64 /out:"$dir\sqlite3.lib"
+          if ($LASTEXITCODE -ne 0) { throw "lib could not make sqlite3.lib from sqlite3.def" }
+          "LIB=$env:LIB;$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # Five gates that bind shards as boundaries, fetched with `shards install`,
+      # which needs symbolic links: a Windows machine without Developer
+      # Mode refuses them and a runner, an administrator, makes them. The
+      # first four held on a runner (Kemal served, the JWT signed, the chain
+      # bound in order) before they came here, and the SQLite driver on a
+      # Windows machine with its shards fetched by hand and the library
+      # made as above: the same four rows from source and from artifacts.
+      - name: Shards bound as boundaries, on Windows
+        shell: bash
+        run: |
+          bash bench/jwt_signs.sh
+          bash bench/bind_chain.sh
+          bash bench/kemal_serves.sh
+          bash bench/shard_serves.sh
+          bash bench/sqlite3_queries.sh
+
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a
   # program a host can start is wasi-libc's entry stub — which calls
@@ -1791,6 +2603,51 @@ jobs:
   # Linked with the command `--cross-compile` prints, run as-is, with wasi-sdk's
   # clang as the `cc` it names — so the command a person is told to type is the
   # command that is tested.
+  # Crystal's compiler specs, which the Linux job runs and no Windows job
+  # did: five of iyi's own spec files ran here, and the rest never
+  # compiled - the loader the interpreter's specs load named
+  # `System.to_wstr` and `System::LibraryArchive`, which resolved to
+  # `Crystal::System` while it was `Crystal::Loader` and to nothing once
+  # it was `Iyi::Loader`. A job of its own because a codegen example is a
+  # program built and run, and there are fourteen thousand.
+  windows-compiler-specs:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    name: "Crystal's compiler specs, on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler
+        shell: cmd
+        run: make -f Makefile.win crystal
+
+      # A spec that builds a program runs the compiler by the name below;
+      # `bin/crystal` is a shell script.
+      - name: Compiler specs, on Windows
+        shell: cmd
+        env:
+          CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
+        run: make -f Makefile.win compiler_spec
+
   wasi-run:
     needs: [cross-objects, binary]
     runs-on: ubuntu-24.04
@@ -1932,22 +2789,56 @@ jobs:
           mkdir -p room && tar -xzf dist/*.tar.gz -C room
           IYI="$PWD/room/bin/iyi" bash bench/wasm32_exercise.sh
 
+  # Built on the oldest glibc it promises, not on the image the other jobs
+  # use. A binary asks the loader for the newest symbol version its build
+  # machine's headers and libraries handed it, and 0.18.0's came out of
+  # `crystallang/crystal:1.21.0-build`, which is Ubuntu 24.04: `fmod` at
+  # GLIBC_2.38, `__isoc23_strtol` (24.04's headers rename `strtol` to it),
+  # `arc4random` at 2.36, and a bundled libstdc++ asking for the same. It
+  # died on Ubuntu 22.04 before `main`, with `GLIBC_2.38' not found`, and
+  # every gate passed it because each one ran on 24.04. glibc is backward
+  # compatible only: what links on 20.04 (2.31) runs on 20.04, Debian 11,
+  # RHEL 9 and everything newer, so 20.04 is the floor and `clean-room`
+  # runs the tarball there.
+  #
+  # Nothing from the `build` job crosses over: its `.build/crystal` is a
+  # 24.04 binary and cannot start here. The bootstrap is Crystal's own
+  # static Linux release, the one that image unpacks into `/usr`, and the
+  # fork's compiler is built from it here before `iyi` is.
   binary:
-    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     container:
-      image: crystallang/crystal:1.21.0-build
+      image: ubuntu:20.04
     name: "The iyi binary and its tarball"
+    # The gates below build `--crystal` programs out of the tarball, and
+    # Crystal's library links `-lgc`: 20.04's libgc-dev is bdwgc 7.6, which
+    # lacks `GC_get_my_stackbottom` and `GC_set_stackbottom`, so `-lgc`
+    # resolves to the 8.x `libgc.a` Crystal's bootstrap put in
+    # `/usr/lib/crystal`, as the 24.04 image's libgc-dev answered it before.
+    env:
+      LIBRARY_PATH: /usr/lib/crystal
     steps:
+      # Before the checkout, so it is a git checkout: without git on the
+      # PATH `actions/checkout` downloads a snapshot, and the Makefile reads
+      # the commit and SOURCE_DATE_EPOCH out of git. `lld` because the
+      # Makefile links with `ld.lld` when there is one, as the 24.04 image
+      # did: GNU ld drops the `-lstdc++` Crystal names before LLVM's
+      # archives (`--as-needed`, nothing needs it yet) and then cannot
+      # resolve `operator new` for them. `pkg-config` and `libyaml-dev` are
+      # for the `--crystal` sample's `require "yaml"`.
+      - name: The floor's toolchain and Crystal's bootstrap
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential lld git curl ca-certificates xz-utils \
+            pkg-config libyaml-dev > /dev/null
+          curl -fsSL https://github.com/crystal-lang/crystal/releases/download/1.21.0/crystal-1.21.0-1-linux-x86_64.tar.gz \
+            | tar -xz -C /usr --strip-components=1
+          crystal --version
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v5
-        with:
-          name: crystal
-          path: .build
-      - run: chmod +x .build/crystal
 
       # The tarball's LLVM is the static minimal one, built by
       # `scripts/build-static-llvm.sh` — Crystal's own recipe, measured
@@ -1956,26 +2847,38 @@ jobs:
       # reaches, every optional dependency OFF — so the 179 MB closure the
       # package used to carry (libLLVM and its libedit, libxml2, libicu,
       # libncursesw, libzstd) never comes into existence, and `lib/` is
-      # libgc and libstdc++ at 3.4 MB. Built here, in this container,
+      # libstdc++ alone. Built here, in this container,
       # because a static archive must be linked by the glibc it was compiled
       # against — an archive built on a newer machine is a link error or a
       # silent binary-for-newer-glibc on this one. Cached on the recipe
-      # file's own hash and the runner's platform: editing the recipe is
-      # what invalidates the cache, the platform token keeps a darwin
-      # archive from ever being restored here (keys are repository-wide,
-      # not per runner), and the roughly-an-hour build is paid once per
-      # recipe change, not per push.
+      # file's own hash, the runner's platform and this job's image: editing
+      # the recipe is what invalidates the cache, the platform token keeps a
+      # darwin archive from ever being restored here (keys are
+      # repository-wide, not per runner), and the image token keeps the
+      # archive 24.04 built — GLIBC_2.38 in every object — from being
+      # restored onto the floor. The image is written twice, here and in
+      # `container:`, because a container's image cannot read `env`. The
+      # roughly-an-hour build is paid once per recipe change, not per push.
       - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@v4
         with:
           path: /tmp/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-ubuntu20.04-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      # 20.04's cmake is 3.16 and LLVM 20 asks for 3.20: Kitware's own
+      # build, which runs on any glibc this old, and only on a miss. LLVM's
+      # cmake also wants python3, which the bare image does not have.
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
-          apt-get update -qq && apt-get install -y -qq cmake curl xz-utils > /dev/null
-          bash scripts/build-static-llvm.sh /tmp/llvm-static
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 > /dev/null
+          mkdir -p /opt/cmake
+          curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-linux-x86_64.tar.gz \
+            | tar -xz -C /opt/cmake --strip-components=1
+          PATH="/opt/cmake/bin:$PATH" bash scripts/build-static-llvm.sh /tmp/llvm-static
+
+      - name: Build the compiler on the floor
+        run: make crystal LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
 
       # `iyi-tarball` alone, and the missing word is the whole of it. The target
       # carries `release := 1` and make applies that to what it builds *for this
@@ -1983,7 +2886,7 @@ jobs:
       # found it up to date by file times and refused to package it. Which is
       # the guard working: an unoptimised release is what it was added to stop.
       - name: Build `iyi` and package it
-        run: make -o .build/crystal iyi-tarball LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
+        run: make iyi-tarball LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
 
       # What a person who downloads it does: unpack it somewhere else and run a
       # program. Nothing here may need this checkout, a IYI_PATH, or a
@@ -2082,9 +2985,11 @@ jobs:
   # in the environment that built it — where the libLLVM it linked against
   # is exactly the one it needs, so "unpack somewhere else and run" proved
   # the library path and nothing about the loader. This unpacks it in a
-  # bare `ubuntu:24.04` with a C toolchain and nothing else: no LLVM, no
+  # bare `ubuntu:20.04` with a C toolchain and nothing else: no LLVM, no
   # no bootstrap compiler, no iyi. If the package lacks what the loader wants,
-  # this is where it says so.
+  # this is where it says so. 20.04 because it is the glibc the `binary` job
+  # promises (2.31): 0.18.0 passed this room on 24.04 and could not start
+  # on 22.04, every symbol it asked for being one 24.04 has.
   #
   # `gcc` is installed on purpose and it is the honest prerequisite: iyi
   # links through `cc`, so a machine that cannot compile C cannot finish
@@ -2116,7 +3021,7 @@ jobs:
         run: |
           printf 'module hi\n\nputs "hello from a machine with nothing on it"\n' \
             > room/hi.iyi
-          docker run --rm -v "$PWD/room:/iyi" ubuntu:24.04 sh -c '
+          docker run --rm -v "$PWD/room:/iyi" ubuntu:20.04 sh -c '
             set -e
             apt-get update -qq && apt-get install -y -qq gcc > /dev/null
             /iyi/bin/iyi version
@@ -2182,9 +3087,10 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs,
-            samples, std, targets, cross-objects, cross-run, wasi-run,
-            windows-probe, windows-collector, windows-runtime, windows-native,
+    needs: [binary, darwin, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
+            samples, lsp-positions, std, std-siblings, targets, cross-objects, cross-run, wasi-run,
+            windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
+            windows-std-siblings, windows-gates, windows-compiler-specs,
             wasm32-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -2222,3 +3128,82 @@ jobs:
           (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS)
           gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
+
+  # The editor client is the only artifact here that is published somewhere
+  # else, so it is proven the same way as the rest: every push packages it,
+  # which is the one check that the manifest parses, the files it names
+  # exist, and a `.vsix` comes out. It needs no compiler — the extension is
+  # thirty lines that spawn `iyi lsp` — so it does not wait on `build`.
+  #
+  # One package, two registries. VS Code reads Microsoft's Marketplace;
+  # Cursor, Windsurf, VSCodium, Gitpod and Theia read Open VSX, because
+  # Microsoft's terms scope its marketplace to Microsoft's own products and
+  # a fork may not use it. Publishing to one of them is publishing to some
+  # of the editors that can run this client.
+  #
+  # The release is its own tag, `editor-v<version>`, and not the compiler's
+  # `v*`: the extension's version moves on its own, and both registries
+  # refuse a version they already carry, so riding every `v*` tag would fail
+  # the second time a release shipped an unchanged client. The name cannot
+  # start with `v` either, or the `release` job above would take a client
+  # tag for a compiler one and cut a GitHub release from it.
+  vscode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    name: "The VS Code client packages, and a tag publishes it"
+    # A step's `if` cannot read the `secrets` context, and the job's `env`
+    # can: that is what lets a registry whose token is not set yet be
+    # skipped instead of failing the tag that publishes to the other one.
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Package the extension
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npx --yes @vscode/vsce package
+
+      # A tag that disagrees with the manifest publishes the wrong version
+      # under the right name, and the Marketplace keeps what it is given.
+      - name: The tag names the version the manifest carries
+        if: startsWith(github.ref, 'refs/tags/editor-v')
+        working-directory: editors/vscode
+        run: |
+          manifest=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#editor-v}"
+          [ "$manifest" = "$tag" ] || {
+            echo "package.json says $manifest, the tag says $tag"
+            exit 1
+          }
+
+      # `--packagePath` publishes the file the step above built and CI
+      # already looked at, rather than packaging a second time.
+      - name: Publish to the Visual Studio Marketplace
+        if: startsWith(github.ref, 'refs/tags/editor-v') && env.VSCE_PAT != ''
+        working-directory: editors/vscode
+        run: |
+          npx --yes @vscode/vsce publish \
+            --packagePath "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
+
+      # The same file, to the registry every VS Code fork reads. `ovsx`
+      # takes the token from OVSX_PAT, and the namespace must exist first:
+      # `npx ovsx create-namespace iyilang`, once.
+      - name: Publish to Open VSX
+        if: startsWith(github.ref, 'refs/tags/editor-v') && env.OVSX_PAT != ''
+        working-directory: editors/vscode
+        run: npx --yes ovsx publish "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: iyi-vscode
+          path: editors/vscode/*.vsix
+          retention-days: 7

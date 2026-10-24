@@ -13,14 +13,18 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/http
-import std/socket
-using std/http::{HTTP, Response, Request, Server}
-using std/socket::{IyiSocket}
+import std/http::{HTTP, HTTPClient, Response, Request, Server, HTTPError, MultipartBuilder, Part}
+import std/socket::{IyiSocket, SocketError}
+import std/gc::{GC}
+import std/compress::{Gzip, Zlib, Deflate}
+import std/zstd::{Zstd}
+import std/file::{File}
+import std/dir::{Dir}
+import std/random::{Random}
 
 # The server side of one connection: the request text, headers and the
 # body `Content-Length` promises, read until both have arrived.
-def read_request(conn : IyiSocket) : String | Cancelled
+def read_request(conn : IyiSocket) : String | Cancelled | SocketError
   buf = ""
   while true
     if split = HTTP.find_headers_end(buf)
@@ -64,6 +68,17 @@ def read_response(c : IyiSocket) : String
   end
 end
 
+# Everything the server writes until it closes.
+def read_to_close(c : IyiSocket) : String
+  buf = ""
+  while true
+    chunk = c.read(4096).or_panic
+    return buf if chunk.bytesize == 0
+    buf = buf + chunk
+  end
+  buf
+end
+
 # The request line: what comes before the first CRLF.
 def first_line(req : String) : String
   p = req.to_unsafe
@@ -86,6 +101,49 @@ def chunked(text : String) : String
     i = i + n
   end
   out + "0\r\n\r\n"
+end
+
+# What `work` answers, or "refused: <why>" when it raises: run as a task,
+# whose value catches the panic.
+def answer(&work : -> String) : String
+  said = "no answer"
+  group do |g|
+    task = g.spawn { work.call }
+    case got = task.value
+    in Panicked
+      said = "refused: " + got.message
+    in String
+      said = got
+    end
+    0
+  end
+  said
+end
+
+# What the server makes of `text`: "<status> <why>" for a refusal, "more"
+# while a request is still arriving, or the request its block would be
+# handed.
+def server_reads(text : String) : String
+  answer do
+    parsed = Server.parse_request(text)
+    if req = parsed.request
+      heads = String.build { |io| req.headers.each { |k, v| io << k << "=" << v << ";" } }
+      "#{req.method} #{req.path} ?#{req.query || "-"} #{heads} #{req.body.inspect} #{parsed.close ? "close" : "keep"}"
+    elsif why = parsed.error
+      "#{parsed.status} #{why}"
+    else
+      "more"
+    end
+  end
+end
+
+# What the client makes of an answer: "<status> <reason> <headers> <body>".
+def client_reads(text : String) : String
+  answer do
+    r = HTTP.parse_response(text)
+    heads = String.build { |io| r.headers.each { |k, v| io << k << "=" << v << ";" } }
+    "#{r.status} #{r.reason} #{heads} #{r.body.inspect}"
+  end
 end
 
 puts "== request"
@@ -111,6 +169,18 @@ req = HTTP.format_request("DELETE", "/items/1", "127.0.0.1")
 assert_true !req.includes?("Content-Length"), "a DELETE with no body has no length"
 puts "  Content-Length follows the method and the body"
 
+# A request's body goes with its length, so a caller's Transfer-Encoding
+# is not sent: written beside `Content-Length: 3` over "abc", unchunked,
+# it hung against the module's own server, which read "abc" as a chunk
+# size and waited for the rest of it.
+assert_str "refused: HTTP: Transfer-Encoding is not sent; a request's body goes with its length", answer { HTTP.format_request("POST", "/", "127.0.0.1", "abc", {"Transfer-Encoding" => "chunked"}) }, "a caller's Transfer-Encoding is not sent"
+puts "  a caller's Transfer-Encoding is refused, the body going with its length"
+
+# A request target is ASCII (RFC 9112 §3.2): a byte past 127 goes as `%`
+# and two hex digits, as Go's client sends it. `/ü/ç?ş=1` went out raw.
+assert_true HTTP.format_request("GET", "/\u00fc/\u00e7?\u015f=1", "127.0.0.1").starts_with?("GET /%C3%BC/%C3%A7?%C5%9F=1 HTTP/1.1\r\n"), "a byte past 127 in the target is percent-encoded"
+puts "  a byte past 127 in the path or the query goes percent-encoded"
+
 puts "\n== response"
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhi!\n")
 assert_true resp.status == 200, "status"
@@ -127,9 +197,27 @@ assert_str "lower", resp.header("X-KIND") || "", "a header asked for in another 
 assert_true resp.header("X-Missing").nil?, "a header that is not there is nil"
 puts "  header names are read without regard to case, and trimmed"
 
+# `header` joins a repeated field with ", " (RFC 9110 §5.3), and a
+# `Set-Cookie` cannot be split back out of that join: the comma in an
+# `Expires` date is one too. `header_values` keeps the lines apart.
+cookies = HTTP.parse_response("HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT\r\nset-cookie: b=2; Path=/\r\nContent-Length: 2\r\n\r\nhi")
+assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT|b=2; Path=/", cookies.header_values("SET-COOKIE").join("|"), "each Set-Cookie line apart"
+assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT, b=2; Path=/", cookies.header("Set-Cookie") || "", "header still joins them"
+assert_str "2", cookies.header_values("content-length").join("|"), "a field on one line is one value"
+assert_true cookies.header_values("X-Missing").empty?, "a field that is not there has no values"
+puts "  header_values keeps a repeated field's lines apart"
+
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n4;ext=1\r\ndefg\r\n0\r\nX-Trailer: t\r\n\r\n")
 assert_str "abcdefg", resp.body, "a chunked body arrives joined"
 puts "  a chunked body is joined, extensions and trailers dropped"
+
+# Chunked, once and last, is the coding this client decodes (RFC 9112
+# §6.3), and any other is refused: `gzip, chunked` and two `chunked`
+# lines were taken for no coding, and the chunks came back as the body.
+assert_str "refused: HTTP: transfer coding \"gzip\" is not one this client decodes", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "a coding the client cannot undo is refused"
+assert_str "refused: HTTP: Transfer-Encoding \"chunked, chunked\" is chunked twice", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "and so is a body chunked twice"
+assert_str "200 OK Transfer-Encoding=Chunked,; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked,\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "chunked in any case, beside an empty element, is chunked"
+puts "  chunked alone is decoded, and a coding this client cannot undo is refused"
 
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n", true)
 assert_str "", resp.body, "a HEAD answer has the headers of a body it does not carry"
@@ -142,6 +230,143 @@ assert_str "Not Found", resp.reason, "reason with a space"
 resp = HTTP.parse_response("HTTP/1.0 500\r\n\r\n")
 assert_true resp.status == 500 && resp.reason == "", "a status line with no reason"
 puts "  HEAD, 204 and a status with no reason"
+
+# A line that begins with a blank continues the field above it (obs-fold,
+# RFC 9112 §5.2), and the client unfolds it with one space; the server
+# refuses one, as it may. Read as a field of its own, `HTTP.get` panicked.
+assert_str "200 OK X-A=a b c;Content-Length=2; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nX-A: a\r\n b\r\n\tc\r\nContent-Length: 2\r\n\r\nhi"), "a folded answer is unfolded"
+assert_str "refused: HTTP: header without a colon: \" b\"", client_reads("HTTP/1.1 200 OK\r\n b\r\nContent-Length: 2\r\n\r\nhi"), "a fold under the status line continues no field"
+assert_str "400 header without a colon: \" b\"", server_reads("GET / HTTP/1.1\r\nHost: x\r\nX-A: a\r\n b\r\n\r\n"), "and a folded request is refused"
+puts "  a folded field is unfolded in an answer and refused in a request"
+
+# A body short of its Content-Length is a connection that ended early, as
+# a chunked body cut inside a chunk is: it was a whole 200 with the part
+# that came, a cut-off download read as a good one.
+short = "answered"
+group do |g|
+  cut = g.spawn { HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial"); 0 }
+  outcome = cut.value
+  short = outcome.is_a?(Panicked) ? outcome.message.to_s : "answered"
+  0
+end
+assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body is refused"
+puts "  a body short of its Content-Length is refused"
+
+# A length past Int32's is a length too large, not "not a number".
+assert_str "413 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
+assert_str "413 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
+# A request too large is a 413 (RFC 9110 §15.5.14) and a head too large a
+# 431 (RFC 6585 §5): both were answered 400, as if they were not HTTP.
+assert_str "431 request headers past 1048576 bytes", server_reads("GET / HTTP/1.1\r\nHost: a\r\nX-Long: " + "a" * 1048576), "a head past a megabyte is a 431"
+assert_str "refused: HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nabc"), "a 3 GB answer is too large"
+assert_str "refused: HTTP: the body ended after 3 of its 2147483647 bytes", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 2147483647\r\n\r\nabc"), "Int32's last is a length"
+puts "  a Content-Length past Int32's is refused as too large on both sides"
+puts "\n== messages at the edges"
+# Each refusal below is a raise, caught as its task's value: the panic
+# lines it prints are those refusals.
+# A chunked body that is not one is a request that is not HTTP: a 400.
+# `chunked_end` raised, the connection's task panicked with no answer
+# written, and `serve` panicked with it when its listener closed.
+assert_str "400 chunked body: not a chunk size: \"zz\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"), "a chunk size that is not hexadecimal is a 400"
+assert_str "400 chunked body: a chunk is not followed by CRLF", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcXY"), "a chunk without its CRLF is a 400"
+# A chunk size near 2^31: where it ends passed Int32's, and the sum panicked.
+assert_str "more", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nab"), "a 2 GB chunk not here yet is waited for"
+assert_str "refused: HTTP: chunked body ends inside a chunk", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nab"), "a 2 GB chunk cut short is refused as cut"
+puts "  a chunked body that is not one is a 400, and a 2 GB chunk size is a size"
+
+# A control character in a field value or the target (RFC 9110 §5.5, RFC
+# 9112 §2.2) is refused on the way in and on the way out: a server block
+# that echoed a header with a bare LF in it panicked writing its answer.
+assert_str "400 not a request target: \"/?a\\nb\"", server_reads("GET /?a\nb HTTP/1.1\r\n\r\n"), "a target with a line feed is a 400"
+assert_str "400 header User-Agent contains a control character", server_reads("GET / HTTP/1.1\r\nUser-Agent: a\rb\r\n\r\n"), "a value with a bare CR is a 400"
+assert_str "refused: HTTP: header X-A contains a control character", client_reads("HTTP/1.1 200 OK\r\nX-A: a\u0000b\r\n\r\n"), "an answer's value with a NUL is refused"
+assert_str "refused: HTTP: header X-A contains a control character", answer { HTTP.format_request("GET", "/", "127.0.0.1", "", {"X-A" => "a\u0000b"}) }, "a value with a NUL is not written"
+assert_str "refused: HTTP: header X-A contains a control character", answer { Server.format_response(Response.new(200, "", {"X-A" => "a\u0000b"}), false, false) }, "an answer's value with a NUL is not written"
+assert_str "refused: HTTP: not a status line: HTTP/1.1 200 O\rK", client_reads("HTTP/1.1 200 O\rK\r\n\r\n"), "a reason with a bare CR is refused"
+puts "  control characters in values, targets and reasons are refused"
+
+# A caller's length is the body's, or a HEAD's or a 304's own: "2" on
+# "hello" was read as "he", and "llo" began the next answer on the
+# connection. The body goes with its length, so a caller's chunked framing
+# went out beside `Content-Length: 5` and was refused by the client.
+assert_str "refused: HTTP: Content-Length \"2\" is not the body's 5 bytes", answer { Server.format_response(Response.new(200, "hello", {"Content-Length" => "2"}), false, false) }, "a length short of the body is not written"
+assert_str "refused: HTTP: content-length \"100\" is not the body's 5 bytes", answer { Server.format_response(Response.new(200, "hello", {"content-length" => "100"}), false, false) }, "a length past the body is not written"
+assert_str "refused: HTTP: Transfer-Encoding is not written; the body goes with its length", answer { Server.format_response(Response.new(200, "hello", {"Transfer-Encoding" => "chunked"}), false, false) }, "a caller's chunked framing is not written"
+assert_str "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello", Server.format_response(Response.new(200, "hello", {"Content-Length" => "5"}), false, false), "the body's own length is written once"
+assert_str "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nConnection: keep-alive\r\n\r\n", Server.format_response(Response.new(200, "", {"Content-Length" => "99"}), true, false), "a HEAD's length is the caller's"
+assert_str "HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\nConnection: keep-alive\r\n\r\n", Server.format_response(Response.new(304, "", {"Content-Length" => "99"}), false, false), "and a 304's"
+puts "  a caller's Content-Length is the body's except on a HEAD or a 304, and its Transfer-Encoding is refused"
+
+# A field on several lines is one field, its values in order (RFC 9110
+# §5.3). The Hash kept the last line of a name spelled the same and the
+# first of one spelled otherwise: two different lengths were read as
+# whichever came first, and `Accept: a`, `accept: b`, `Accept: c` as "c".
+assert_str "400 Content-Length is not a number: \"3, 10\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\ncontent-length: 10\r\n\r\nabcdefghij"), "two different lengths are a 400"
+assert_str "POST / ?- Host=a;Content-Length=3, 3; \"abc\" keep", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc"), "one length said twice is that length"
+assert_str "GET / ?- Host=a;Accept=a, b, c; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost: a\r\nAccept: a\r\naccept: b\r\nAccept: c\r\n\r\n"), "a repeated field is its values joined"
+assert_str "200 OK X-A=1, 2;Content-Length=2; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nX-A: 1\r\nx-a: 2\r\nContent-Length: 2\r\n\r\nhi"), "and so in an answer"
+# A length is digits and nothing else (RFC 9110 §8.6): `+3` was 3.
+assert_str "400 Content-Length is not a number: \"+3\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: +3\r\n\r\nabc"), "a signed length is a 400"
+puts "  a repeated field is one field, and two lengths that differ, or a signed one, are refused"
+
+# Chunks with a length beside them, or in HTTP/1.0, are read by the chunks
+# and the connection closed after (RFC 9112 §6.1, §6.3): a reader ahead of
+# this one may have taken the length.
+assert_str "POST / ?- Host=a;Content-Length=5;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks and a length close the connection"
+assert_str "POST / ?- Connection=keep-alive;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.0\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks in HTTP/1.0 close the connection"
+puts "  chunks beside a length, or in HTTP/1.0, close the connection"
+
+# `Connection` is a list of options (RFC 9110 §7.6.1), read by `has_token?`:
+# `close, TE` and two `close` lines kept the connection open, answered
+# `keep-alive`.
+assert_str "GET / ?- Host=a;Connection=close, TE; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: close, TE\r\n\r\n"), "close first in the list closes"
+assert_str "GET / ?- Host=a;Connection=TE, Close; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: TE, Close\r\n\r\n"), "close last in the list closes"
+assert_str "GET / ?- Host=a;Connection=close, close; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\nConnection: close\r\n\r\n"), "close said twice closes"
+assert_str "GET / ?- Connection=TE, keep-alive; \"\" keep", server_reads("GET / HTTP/1.0\r\nConnection: TE, keep-alive\r\n\r\n"), "an HTTP/1.0 keep-alive in a list keeps"
+assert_str "GET / ?- Host=a;Connection=TE; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: TE\r\n\r\n"), "a list without close keeps"
+puts "  Connection is read as a list of options: close anywhere closes"
+
+# A status line is `HTTP/` DIGIT "." DIGIT and three digits from 100.
+assert_str "refused: HTTP: not a status line: HTTP/1.1 +20 OK", client_reads("HTTP/1.1 +20 OK\r\n\r\n"), "a signed status is refused"
+assert_str "refused: HTTP: not a status line: HTTP/1.1 099 OK", client_reads("HTTP/1.1 099 OK\r\n\r\n"), "a status under 100 is refused"
+assert_str "refused: HTTP: not a status line: HTTP/x 200 OK", client_reads("HTTP/x 200 OK\r\n\r\n"), "a version that is not one is refused"
+# Interim answers are read past to the final one (RFC 9110 §15.2).
+assert_str "200 OK Content-Length=2; \"hi\"", client_reads("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </s.css>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"), "a 100 and a 103 before the answer"
+puts "  status lines are three digits under an HTTP version, and interim answers are read past"
+
+# A 1xx, 204 or 304 carries no content and writes no length of its own
+# (RFC 9110 §8.6, §15): the body was the next answer's first bytes.
+assert_str "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n", Server.format_response(Response.new(204, "x"), false, false), "a 204 writes no body and no length"
+assert_str "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n", Server.format_response(Response.new(304, "x"), false, true), "a 304 writes no body and no length"
+# The absolute form a server must accept (RFC 9112 §3.2.2) is read for
+# its path, as the other library reads it.
+assert_str "GET /a/b ?x=1 Host=example.com; \"\" keep", server_reads("GET http://example.com/a/b?x=1 HTTP/1.1\r\nHost: example.com\r\n\r\n"), "an absolute-form target's path"
+assert_str "OPTIONS / ?- Host=example.com; \"\" keep", server_reads("OPTIONS HTTP://example.com HTTP/1.1\r\nHost: a\r\n\r\n"), "an absolute-form target with no path is /"
+puts "  a 204 and a 304 carry nothing, and an absolute-form target is read for its path"
+
+# Host (RFC 9112 §3.2): an HTTP/1.1 request names one, no request names
+# two, and what it names is a host, or the answer is 400. The server
+# served a request with none, and handed the block `Host: a` and `Host:
+# b` as "a, b". An absolute-form target's authority is the host (§3.2.2):
+# the block was handed the Host line's.
+assert_str "400 an HTTP/1.1 request without Host", server_reads("GET / HTTP/1.1\r\n\r\n"), "an HTTP/1.1 request names its host"
+assert_str "GET / ?-  \"\" close", server_reads("GET / HTTP/1.0\r\n\r\n"), "an HTTP/1.0 one need not"
+assert_str "400 Host on 2 lines", server_reads("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"), "a request names one host"
+assert_str "400 not a host: \"a/b\"", server_reads("GET / HTTP/1.1\r\nHost: a/b\r\n\r\n"), "and what it names is a host"
+assert_str "GET / ?- Host=; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost:\r\n\r\n"), "an empty Host is one, for a target with no authority"
+assert_str "GET /echo ?q Host=other:8080; \"\" keep", server_reads("GET http://other:8080/echo?q HTTP/1.1\r\nHost: a\r\n\r\n"), "an absolute-form target's authority is the host"
+assert_str "400 not a host: \"u@h\"", server_reads("GET http://u@h/ HTTP/1.1\r\nHost: a\r\n\r\n"), "and an authority with a user in it is none"
+puts "  a request names one host, an HTTP/1.1 one must, and an absolute-form target's authority is it"
+
+# A status line is written only as the client half reads it: a reason
+# with a CRLF went out as a header of its own, `Set-Cookie: admin=1`, and
+# 2000 as `HTTP/1.1 2000 Server Error`, which `parse_response` refuses.
+assert_str "refused: HTTP: the reason contains a line break", answer { Server.format_response(Response.new(200, "OK\r\nSet-Cookie: admin=1", {} of String => String, "hi"), false, false) }, "a reason with a CRLF is not written"
+assert_str "refused: HTTP: the reason contains a control character", answer { Server.format_response(Response.new(200, "O\u0000K", {} of String => String, ""), false, false) }, "a reason with a NUL is not written"
+assert_str "refused: HTTP: not a status: 2000", answer { Server.format_response(Response.new(2000, "x"), false, false) }, "a four-digit status is not written"
+assert_str "refused: HTTP: not a status: 99", answer { Server.format_response(Response.new(99, "x"), false, false) }, "a status under 100 is not written"
+assert_str "999 Server Error Content-Length=1;Connection=close; \"x\"", client_reads(Server.format_response(Response.new(999, "x"), false, true)), "999 is a status, and read back as written"
+puts "  a status outside 100 to 999, or a reason with a line break, is not written"
 
 puts "\n== over a socket"
 # The server runs on a thread, and a thread's block may capture only what
@@ -208,6 +433,160 @@ server.join
 listener.close
 puts "  get, post, head, put, delete: five verbs, five connections, and what the server read is what each wrote"
 
+# An answer is read as far as its framing says, and no further: read to
+# the server's close, one from a server that held the connection open was
+# waited on until it closed - here the three seconds it waits, each. (A
+# whole answer the server resets after is `bench/std_http_exercise.sh`'s.)
+whole = IyiSocket.listen("127.0.0.1", 0)
+whole_port = whole.local_port
+whole_fd = whole.to_unsafe
+whole_server = IyiThread.start do
+  l = IyiSocket.new(whole_fd)
+  2.times do |i|
+    conn = l.accept.or_panic
+    read_request(conn).or_panic
+    conn.write(i == 0 ? "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi" : "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n").or_panic
+    conn.read_timeout_ms = 3000
+    conn.read(16)
+    conn.close
+  end
+  nil
+end
+whole_started = __iyi_monotonic_ns
+r = HTTP.get("http://127.0.0.1:#{whole_port}/held").or_panic
+held_chunks = HTTP.get("http://127.0.0.1:#{whole_port}/held-chunks").or_panic
+whole_ms = (__iyi_monotonic_ns - whole_started) // 1000000_i64
+assert_true r.body == "hi" && held_chunks.body == "hi", "the answers on held connections: #{r.body.inspect}, #{held_chunks.body.inspect}"
+assert_true whole_ms < 1500, "an answer is read to its length or its last chunk, not to a close three seconds later: #{whole_ms} ms"
+whole_server.join
+whole.close
+puts "  an answer is read to its length or its last chunk, under 1.5 s from a server that holds the connection 3 s"
+
+# An IPv6 literal's Host line keeps the URL's brackets: without them it
+# was `Host: ::1:<port>`, which no server can split into host and port.
+v6 = IyiSocket.listen("::1", 0)
+v6_port = v6.local_port
+v6_fd = v6.to_unsafe
+v6_server = IyiThread.start do
+  l = IyiSocket.new(v6_fd)
+  conn = l.accept.or_panic
+  saw = read_request(conn).or_panic
+  conn.write("HTTP/1.1 200 OK\r\nContent-Length: #{saw.bytesize}\r\n\r\n" + saw)
+  conn.close
+  nil
+end
+# Written in capitals, as RFC 3986 lets a scheme be: it was "only http://".
+r = HTTP.get("HTTP://[::1]:#{v6_port}/six").or_panic
+assert_true r.body.includes?("Host: [::1]:#{v6_port}\r\n"), "an IPv6 Host keeps its brackets: #{r.body.inspect}"
+v6_server.join
+v6.close
+puts "  an IPv6 literal's Host line keeps its brackets, under a scheme in capitals"
+
+# Two `Set-Cookie` lines over a socket stay two, under a chunked body and
+# under one with a length: the client keeps the head it parsed for both.
+cookie_listener = IyiSocket.listen("127.0.0.1", 0)
+cookie_port = cookie_listener.local_port
+cookie_fd = cookie_listener.to_unsafe
+cookie_server = IyiThread.start do
+  l = IyiSocket.new(cookie_fd)
+  2.times do |i|
+    conn = l.accept.or_panic
+    read_request(conn).or_panic
+    framed = i == 0 ? "Transfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n" : "Content-Length: 2\r\n\r\nhi"
+    conn.write("HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT\r\nSet-Cookie: b=2\r\n" + framed).or_panic
+    conn.close
+  end
+  nil
+end
+["chunked", "length"].each do |framing|
+  r = HTTP.get("http://localhost:#{cookie_port}/#{framing}").or_panic
+  assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT|b=2", r.header_values("Set-Cookie").join("|"), "two Set-Cookie lines over a socket, #{framing}"
+end
+cookie_server.join
+cookie_listener.close
+puts "  two Set-Cookie lines arrive apart under a chunked body and a length"
+
+# A head is read as far as the megabyte the server takes of a request's,
+# and refused past it: one that did not end was read for as long as it
+# came, and 256 MB of one field cost the client 824 MB. The server here
+# writes one field until the client stops taking it, 64 MB at most, and
+# counts the 64 KB pieces that went.
+endless = IyiSocket.listen("127.0.0.1", 0)
+endless_port = endless.local_port
+endless_fd = endless.to_unsafe
+endless_sent = Atomic(Int32).new(0)
+endless_server = IyiThread.start do
+  l = IyiSocket.new(endless_fd)
+  conn = l.accept.or_panic
+  read_request(conn).or_panic
+  conn.write("HTTP/1.1 200 OK\r\nX-Long: ")
+  field = "a" * 65536
+  while endless_sent.get < 1024 && conn.write(field).is_a?(Int32)
+    endless_sent.add(1)
+  end
+  conn.close
+  nil
+end
+endless_said = answer { HTTP.get("http://127.0.0.1:#{endless_port}/long").or_panic.status.to_s }
+endless_server.join
+endless.close
+assert_str "refused: HTTP: response headers past 1048576 bytes", endless_said, "a head past a megabyte is refused"
+assert_true endless_sent.get < 256, "the client stopped taking an endless head: #{endless_sent.get} pieces of 64 KB went"
+puts "  a head past a megabyte is refused, not read for as long as it comes"
+
+# A client partway through a request: it sends *part*, and leaves three
+# seconds later.
+def partway(port : Int32, part : String) : Int32
+  c = IyiSocket.connect("127.0.0.1", port).or_panic
+  c.write(part).or_panic
+  sleep(3000)
+  c.close
+  0
+end
+
+# The listener's close ends `serve`, and every connection waiting on its
+# client with it: one idle between requests, and one partway through a
+# request - one byte of it, part of its head, part of a body of a stated
+# length, part of a chunked one. A keep-alive client that sat idle kept
+# `serve` from returning for as long as it stayed, and so did one that
+# had sent what has arrived of a request so far: here the three seconds
+# each sleeps.
+idle_listener = IyiSocket.listen("127.0.0.1", 0)
+idle_port = idle_listener.local_port
+idle_closed = 0_i64
+idle_returned = 0_i64
+group do |g|
+  g.spawn do
+    Server.serve(idle_listener) do |req|
+      idle_listener.close if req.path == "/stop"
+      Response.new(200, "ok")
+    end
+    idle_returned = __iyi_monotonic_ns
+    0
+  end
+  g.spawn { partway(idle_port, "G") }
+  g.spawn { partway(idle_port, "GET /a HTTP/1.1\r\nHost: x\r\n") }
+  g.spawn { partway(idle_port, "POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc") }
+  g.spawn { partway(idle_port, "POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n") }
+  g.spawn do
+    keeper = IyiSocket.connect("127.0.0.1", idle_port).or_panic
+    keeper.write("GET /a HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    keeper.read(256)
+    # The four are in, and what has arrived of each is read.
+    sleep(200)
+    idle_closed = __iyi_monotonic_ns
+    HTTP.get("http://127.0.0.1:#{idle_port}/stop").or_panic
+    sleep(3000)
+    keeper.close
+    0
+  end
+end
+idle_ms = (idle_returned - idle_closed) // 1000000_i64
+# The idle one and the four closed with the listener, what has arrived of
+# their requests unanswered.
+assert_true idle_ms < 2000, "serve returns when its listener closes beside an idle client and four partway through a request, not #{idle_ms} ms later"
+puts "  the listener's close ends serve beside an idle keep-alive client, and beside clients partway through a request"
+
 puts "\n== the server, from a raw socket"
 # What the server does with the wire: keep-alive across requests, a
 # chunked request body, HEAD, a request that is not HTTP, and `Connection:
@@ -223,9 +602,13 @@ group do |g|
         Response.new(200, req.body, {"X-Query" => req.query || "-", "X-Agent" => req.header("user-agent") || "-"})
       elsif req.path == "/nothing"
         Response.new(204)
+      elsif req.path == "/size"
+        Response.new(200, req.body.bytesize.to_s)
       elsif req.path == "/stop"
         listener.close
         Response.new(200, "bye")
+      elsif req.path == "/fail"
+        raise "the block failed on /fail"
       else
         Response.new(404, "no #{req.path}\n")
       end
@@ -248,8 +631,10 @@ group do |g|
     r3 = HTTP.parse_response(read_response(c), true)
     assert_true r3.status == 200 && r3.body == "", "HEAD carries no body"
     c.write("GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
-    r4 = HTTP.parse_response(read_response(c))
+    r4_text = read_response(c)
+    r4 = HTTP.parse_response(r4_text)
     assert_true r4.status == 204 && r4.reason == "No Content", "a 204 with the status's own reason"
+    assert_true !r4_text.includes?("Content-Length"), "a 204 says no length (RFC 9110 §8.6): #{r4_text.inspect}"
     c.write("GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").or_panic
     r5 = HTTP.parse_response(read_response(c))
     assert_true r5.status == 404 && r5.body == "no /missing\n", "a 404 from the block"
@@ -264,6 +649,15 @@ group do |g|
     assert_true r6.body.starts_with?("not an HTTP/1 request"), "and says why: #{r6.body.inspect}"
     assert_str "", bad.read(16).or_panic, "and the connection is closed"
     bad.close
+    # A body past the limit is a 413 (RFC 9110 §15.5.14), declared or in a
+    # chunk size not sent yet: both were a 400, as if they were not HTTP.
+    ["Content-Length: 99999999999\r\n\r\n", "Transfer-Encoding: chunked\r\n\r\n4000001\r\n"].each do |framing|
+      large = IyiSocket.connect("127.0.0.1", sport).or_panic
+      large.write("POST /size HTTP/1.1\r\nHost: x\r\n" + framing).or_panic
+      r_large = HTTP.parse_response(read_response(large))
+      assert_true r_large.status == 413 && r_large.reason == "Content Too Large", "a body past the limit is a 413: #{r_large.status} #{r_large.body.inspect}"
+      large.close
+    end
     # HTTP/1.0 closes by default.
     old = IyiSocket.connect("127.0.0.1", sport).or_panic
     old.write("GET /nothing HTTP/1.0\r\n\r\n").or_panic
@@ -271,17 +665,1183 @@ group do |g|
     assert_true r7.status == 204, "HTTP/1.0 is served"
     assert_str "", old.read(16).or_panic, "and closed after one request"
     old.close
+    # A chunked body that is not one is answered 400 and closed, as any
+    # request that is not HTTP. Its task panicked, and the client read no
+    # answer, only the close.
+    lump = IyiSocket.connect("127.0.0.1", sport).or_panic
+    lump.write("POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcXY").or_panic
+    lump_answer = read_to_close(lump)
+    assert_true lump_answer.starts_with?("HTTP/1.1 400 ") && lump_answer.ends_with?("chunked body: a chunk is not followed by CRLF\n"), "a broken chunked body is a 400: #{lump_answer.inspect}"
+    lump.close
+    # The block echoes User-Agent into an answer's header: a bare LF in the
+    # request's was carried to it, and the task panicked writing the answer.
+    echo = IyiSocket.connect("127.0.0.1", sport).or_panic
+    echo.write("GET /echo HTTP/1.1\r\nHost: x\r\nUser-Agent: a\nb\r\n\r\n").or_panic
+    echo_answer = read_to_close(echo)
+    assert_true echo_answer.starts_with?("HTTP/1.1 400 ") && echo_answer.ends_with?("header User-Agent contains a control character\n"), "a header with a bare LF is a 400: #{echo_answer.inspect}"
+    echo.close
+    # A block that panics ends its own connection, which reads only the
+    # close, and nothing else: the panic reached `serve`'s group, which
+    # cancelled the other connections - this kept one's next request read
+    # "the connection was aborted" - and panicked "a task panicked" when
+    # `serve` returned.
+    steady = IyiSocket.connect("127.0.0.1", sport).or_panic
+    steady.write("GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(steady)).status == 204, "a kept connection, before a block panics"
+    failing = IyiSocket.connect("127.0.0.1", sport).or_panic
+    failing.write("GET /fail HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_str "", read_to_close(failing), "a panicking block's connection reads only its close"
+    failing.close
+    steady.write("GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(steady)).status == 204, "the kept connection is served after another's block panicked"
+    steady.close
     # The client half of this module against the server half.
     r8 = HTTP.post("http://127.0.0.1:#{sport}/echo?z=9", "via client", {"User-Agent" => "iyi"}).or_panic
     assert_true r8.status == 200 && r8.body == "via client" && r8.header("X-Query") == "z=9", "HTTP.post against Server.serve"
+    # A small request on a kept-alive connection costs the server what it
+    # reads, not the size of the read it asks for: the socket's read took
+    # a heap buffer of the whole 64 KB per call, and the server a 64 KB
+    # builder per request, 130 KB of garbage per request and a collection
+    # every few dozen of them.
+    lean = IyiSocket.connect("127.0.0.1", sport).or_panic
+    ask = "GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n"
+    lean.write(ask).or_panic
+    answer_size = read_response(lean).bytesize
+    scratch = Pointer(UInt8).malloc(4096_u64)
+    GC.disable
+    lean_before = GC.stats.bytes_since_collection
+    200.times do
+      lean.write(ask).or_panic
+      got = 0
+      while got < answer_size
+        got = got + lean.read(scratch, 4096).or_panic.as(Int32)
+      end
+    end
+    lean_bytes = (GC.stats.bytes_since_collection - lean_before) // 200_u64
+    GC.enable
+    lean.close
+    assert_true lean_bytes < 8192_u64, "a kept-alive request allocates #{lean_bytes} bytes, under 8 KB"
+    # Requests written together are parsed where they lie in what has
+    # arrived: each was cut off the front of the read, the rest of the read
+    # copied twice per request - 34 KB a request, on average, here.
+    piped = IyiSocket.connect("127.0.0.1", sport).or_panic
+    batch = ask * 1000
+    GC.disable
+    piped_before = GC.stats.bytes_since_collection
+    piped.write(batch).or_panic
+    piped_got = 0
+    while piped_got < answer_size * 1000
+      piped_got = piped_got + piped.read(scratch, 4096).or_panic.as(Int32)
+    end
+    piped_bytes = (GC.stats.bytes_since_collection - piped_before) // 1000_u64
+    GC.enable
+    piped.close
+    assert_true piped_bytes < 8192_u64, "a request among a thousand written at once allocates #{piped_bytes} bytes, under 8 KB"
+    # A head that comes a piece at a time is searched as it arrives and
+    # kept in one builder: each read was added to the head so far, and all
+    # of what has arrived searched again from its start, per read.
+    slow = IyiSocket.connect("127.0.0.1", sport).or_panic
+    pad = "X-Pad: " + "p" * 1017 + "\r\n"
+    slow.write("GET /nothing HTTP/1.1\r\nHost: x\r\n").or_panic
+    sleep(5)
+    GC.disable
+    slow_before = GC.stats.bytes_since_collection
+    256.times do
+      slow.write(pad).or_panic
+      sleep(1)
+    end
+    slow.write("\r\n").or_panic
+    slow_answer = read_response(slow)
+    slow_bytes = GC.stats.bytes_since_collection - slow_before
+    GC.enable
+    slow.close
+    assert_true slow_answer.starts_with?("HTTP/1.1 204 "), "a head in 256 pieces is answered: #{slow_answer.inspect}"
+    assert_true slow_bytes < 8388608_u64, "a 256 KB head in 1 KB pieces costs the server #{slow_bytes} bytes, under 8 MB"
+    # A body is held at what has arrived of it, not at the length its head
+    # declares: a builder of that length was made at the second read, and a
+    # head that declared 64 MB and two bytes after it cost the server 64 MB.
+    big = IyiSocket.connect("127.0.0.1", sport).or_panic
+    big.write("POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 67108864\r\n\r\nx").or_panic
+    sleep(20)
+    GC.disable
+    big_before = GC.stats.bytes_since_collection
+    big.write("y").or_panic
+    sleep(20)
+    big_bytes = GC.stats.bytes_since_collection - big_before
+    GC.enable
+    big.close
+    assert_true big_bytes < 1048576_u64, "a head that declares 64 MB and sends two bytes costs the server #{big_bytes} bytes, under 1 MB"
+    # A client that asks to be told before it sends its body is told:
+    # without the `100 Continue`, curl waits a second before every upload
+    # past a megabyte.
+    ex = IyiSocket.connect("127.0.0.1", sport).or_panic
+    ex.write("POST /echo HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n").or_panic
+    told = ex.read(64).or_panic
+    assert_str "HTTP/1.1 100 Continue\r\n\r\n", told, "Expect: 100-continue is answered before the body"
+    ex.write("body").or_panic
+    r11 = HTTP.parse_response(read_response(ex))
+    assert_true r11.status == 200 && r11.body == "body", "and the body sent after it arrives"
+    ex.close
+    # `HTTP.post` that says `Expect: 100-continue` itself is told 100 before
+    # the server has its body, and reads past it: it answered the 100.
+    r14 = HTTP.post("http://127.0.0.1:#{sport}/echo", "e" * 300000, {"Expect" => "100-continue"}).or_panic
+    assert_true r14.status == 200 && r14.body.bytesize == 300000, "HTTP.post reads past 100 Continue: #{r14.status} #{r14.reason}, #{r14.body.bytesize} bytes"
+    # A body of many reads. The server added each read to what came before
+    # and parsed it all again - a copy of the body so far per read - and a
+    # 20 MB upload took 1.9 s where Go's server takes 30 ms. It reads until
+    # the Content-Length is here and parses once.
+    upload = "u" * 24000000
+    upload_started = __iyi_monotonic_ns
+    r10 = HTTP.post("http://127.0.0.1:#{sport}/echo", upload).or_panic
+    upload_ms = (__iyi_monotonic_ns - upload_started) // 1000000_i64
+    assert_true r10.status == 200 && r10.body == upload, "a 24 MB upload echoed whole (#{r10.body.bytesize} bytes)"
+    assert_true upload_ms < 4000, "a 24 MB upload is read, not re-read: it took #{upload_ms} ms"
+    # The same for a chunked body, which is decoded as it arrives: it was
+    # added to what came before and parsed again after every read, and
+    # 16 MB in 64 KB chunks took 8.8 s where this takes a tenth of one.
+    framed = String::Builder.new(16900000)
+    framed << "POST /size HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+    piece = "c" * 65536
+    256.times { framed << "10000\r\n" << piece << "\r\n" }
+    framed << "0\r\n\r\n"
+    chunked_started = __iyi_monotonic_ns
+    up = IyiSocket.connect("127.0.0.1", sport).or_panic
+    up.write(framed.to_s).or_panic
+    r12 = HTTP.parse_response(read_response(up))
+    chunked_ms = (__iyi_monotonic_ns - chunked_started) // 1000000_i64
+    up.close
+    assert_true r12.status == 200 && r12.body == "16777216", "a 16 MB chunked upload arrived whole (#{r12.body} bytes)"
+    assert_true chunked_ms < 4000, "a 16 MB chunked upload is decoded as it arrives: it took #{chunked_ms} ms"
     r9 = HTTP.get("http://127.0.0.1:#{sport}/stop").or_panic
     assert_str "bye", r9.body, "the block closed the listener"
     0
   end
 end
-assert_true seen_paths.size == 8, "the block ran eight times (the 400 never reached it), not #{seen_paths.size}"
+# The thousand written together and the head in pieces reached the block;
+# the 400s did not, nor the body that was declared and never came: only
+# what has arrived whole is answered. The block that panicked ran.
+assert_true seen_paths.size == 1217, "the block ran 1217 times, not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, a block that panicked, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
+
+puts "\n== the block's own close"
+# An answer whose `Connection` says `close` closes the connection after
+# it, as Go's server and Python's do: the line was dropped, `keep-alive`
+# written in its place, and the next request on the connection served.
+closer = IyiSocket.listen(0)
+closer_port = closer.local_port
+group do |g|
+  g.spawn do
+    Server.serve(closer) do |req|
+      if req.path == "/bye"
+        Response.new(200, "bye", {"Connection" => "close"})
+      else
+        closer.close
+        Response.new(200, "stopped")
+      end
+    end
+    0
+  end
+  g.spawn do
+    bye = IyiSocket.connect("127.0.0.1", closer_port).or_panic
+    bye.write("GET /bye HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    bye_answer = HTTP.parse_response(read_response(bye))
+    assert_str "close", bye_answer.header("Connection") || "", "a block's Connection: close is the answer's"
+    assert_str "", bye.read(16).or_panic, "and the connection closes after it"
+    bye.close
+    assert_str "stopped", HTTP.get("http://127.0.0.1:#{closer_port}/stop").or_panic.body, "the listener closed"
+    0
+  end
+end
+puts "  a block's Connection: close closes the connection after its answer"
+
+puts "\n== a burst of connections"
+# Twenty connections waiting, each with its request written, when the
+# server starts: its accept loop takes them one after another without
+# waiting, and each must get a task of its own. The tasks held the loop's
+# variable and not its value, which the next accept overwrote before they
+# ran: connections that came together were read by several tasks - "two
+# fibers reading one fd" - and the rest by none, their clients waiting for
+# an answer that never came.
+burst_listener = IyiSocket.listen(0)
+burst_port = burst_listener.local_port
+burst = [] of IyiSocket
+20.times do |i|
+  b = IyiSocket.connect("127.0.0.1", burst_port).or_panic
+  b.write("GET /burst?n=#{i} HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+  b.read_timeout_ms = 10000
+  burst << b
+end
+group do |g|
+  g.spawn do
+    Server.serve(burst_listener) { |req| Response.new(200, req.query || "-") }
+    0
+  end
+  g.spawn do
+    burst.each_with_index do |b, i|
+      rb = HTTP.parse_response(read_response(b))
+      assert_str "n=#{i}", rb.body, "connection #{i} of a burst answered its own request"
+      b.close
+    end
+    burst_listener.close
+    0
+  end
+end
+puts "  twenty connections that arrived together, each answered its own request"
+
+puts "\n== empty lines before a request"
+# An empty line before a request is skipped (RFC 9112 §2.2): a client that
+# ended its body with one more CRLF had its next request answered 400.
+blank = IyiSocket.listen(0)
+blank_port = blank.local_port
+group do |g|
+  g.spawn do
+    Server.serve(blank) do |req|
+      blank.close if req.path == "/stop"
+      Response.new(200, "#{req.method} #{req.path} #{req.body}")
+    end
+    0
+  end
+  g.spawn do
+    lines = IyiSocket.connect("127.0.0.1", blank_port).or_panic
+    lines.write("POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi\r\n").or_panic
+    assert_str "POST /a hi", HTTP.parse_response(read_response(lines)).body, "a body with a CRLF after it"
+    lines.write("\r\nGET /b HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    after = HTTP.parse_response(read_response(lines))
+    assert_true after.status == 200 && after.body == "GET /b ", "the request after empty lines is served: #{after.status} #{after.body.inspect}"
+    lines.close
+    assert_true !Server.parse_request("\r\nGET /c HTTP/1.1\r\nHost: x\r\n\r\n").request.nil?, "parse_request reads past an empty line"
+    HTTP.get("http://127.0.0.1:#{blank_port}/stop").or_panic
+    0
+  end
+end
+puts "  empty lines before a request are skipped"
+
+puts "\n== bodies as streams"
+# A body is read as it arrives and written as it is made, both ways: the
+# block of a streaming server is handed a request whose body is still on
+# the wire, a client is handed an answer whose body is, and a block that
+# writes a piece a while is read a piece a while.
+stream_dir = Dir.tempdir + "/iyi_http_exercise_" + Random::Secure.hex(6)
+Dir.mkdir_p(stream_dir)
+File.write(stream_dir + "/up.bin", "U" * 300000)
+stream_l = IyiSocket.listen("127.0.0.1", 0)
+stream_port = stream_l.local_port
+stream_base = "http://127.0.0.1:#{stream_port}"
+first_piece_seen = false
+group do |g|
+  g.spawn do
+    Server.serve(stream_l, stream_bodies: true) do |req|
+      if req.path == "/stop"
+        stream_l.close
+        Response.new(200, "bye")
+      elsif req.path == "/count"
+        total = 0_i64
+        pieces = 0
+        io = req.body_io
+        while true
+          piece = io.read(65536).or_panic
+          break if piece.bytesize == 0
+          first_piece_seen = true
+          total = total + piece.bytesize.to_i64
+          pieces = pieces + 1
+        end
+        Response.new(200, "#{total}")
+      elsif req.path == "/whole"
+        Response.new(200, req.body)
+      elsif req.path == "/ignore"
+        Response.new(200, "ignored")
+      elsif req.path == "/slow"
+        Response.stream(200, {"Content-Type" => "text/plain"}) do |w|
+          w.write("first,")
+          sleep(400)
+          w.write("second")
+          nil
+        end
+      elsif req.path == "/file"
+        Response.new(200, File.open(stream_dir + "/up.bin"), {"Content-Type" => "application/octet-stream"})
+      elsif req.path == "/file-sized"
+        Response.new(200, File.open(stream_dir + "/up.bin"), {"Content-Length" => "300000"})
+      else
+        Response.new(404, "no")
+      end
+    end
+    0
+  end
+  g.spawn do
+    # An upload from a stream goes chunked, as it is read.
+    counted = HTTP.post(stream_base + "/count", File.open(stream_dir + "/up.bin")).or_panic
+    assert_str "300000", counted.body, "a 300 KB upload from an IyiIO, read by the block a piece at a time"
+    assert_str "abc", HTTP.post(stream_base + "/whole", "abc").or_panic.body, "a streaming server's `body` reads the rest whole"
+    # The block reads its body while the client is still sending it: half
+    # is written, and the rest only once the block has seen a piece.
+    half = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+    half.write("POST /count HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n").or_panic
+    waited = 0
+    while !first_piece_seen && waited < 300
+      sleep(10)
+      waited = waited + 1
+    end
+    assert_true first_piece_seen, "the block read the first piece of a body whose end had not been sent"
+    half.write("6\r\n world\r\n0\r\n\r\n").or_panic
+    assert_str "11", HTTP.parse_response(read_response(half)).body, "and the rest after it"
+    # What a block leaves unread is read past, so the next request on the
+    # connection is where it should be.
+    left = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+    left.write("POST /ignore HTTP/1.1\r\nHost: x\r\nContent-Length: 70000\r\n\r\n" + "z" * 70000 + "GET /whole HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").or_panic
+    both_left = read_to_close(left)
+    left.close
+    assert_str "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\nignoredHTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", both_left, "a body the block did not read is read past, and the request after it read as one"
+    # More than a megabyte unread is not read for as long as it comes: the
+    # connection closes after the answer.
+    # The body is sent after the answer, and the connection ends once a
+    # megabyte of it has been read past, where the whole 4 MB was waited for.
+    much = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+    much.write("POST /ignore HTTP/1.1\r\nHost: x\r\nContent-Length: 4000000\r\n\r\n").or_panic
+    assert_str "ignored", HTTP.parse_response(read_response(much)).body, "a block that leaves 4 MB unread is answered"
+    much.read_timeout_ms = 8000
+    much_started = __iyi_monotonic_ns
+    # What the server leaves unread when it closes may reset the
+    # connection under the write; either way the write ends.
+    much.write("z" * 1200000)
+    while true
+      drained = much.read(65536)
+      break unless drained.is_a?(String)
+      break if drained.bytesize == 0
+    end
+    much_ms = (__iyi_monotonic_ns - much_started) // 1000000_i64
+    much.close
+    assert_true much_ms < 5000, "and its connection ends a megabyte into the rest, not waiting for all of it: #{much_ms} ms"
+    # A block that writes a piece, waits, and writes another is read a
+    # piece at a time: the first is in hand before the second is written.
+    started = __iyi_monotonic_ns
+    first_at = 0_i64
+    pieces = [] of String
+    HTTP.open("GET", stream_base + "/slow") do |resp|
+      assert_true resp.header("Transfer-Encoding") == "chunked", "a streamed answer goes chunked"
+      io = resp.body_io
+      while true
+        piece = io.read(100).or_panic
+        break if piece.bytesize == 0
+        first_at = __iyi_monotonic_ns if pieces.empty?
+        pieces << piece
+      end
+      0
+    end.or_panic
+    first_ms = (first_at - started) // 1000000_i64
+    assert_str "first,second", pieces.join, "the streamed answer"
+    assert_true first_ms < 300, "its first piece came before the block wrote its second: #{first_ms} ms"
+    # A file goes out as it is read: chunked without a length, with the
+    # block's length when it gives one; a HEAD reads none of it.
+    assert_true HTTP.get(stream_base + "/file").or_panic.body.bytesize == 300000, "a file answered from an IyiIO"
+    sized = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+    sized.write("GET /file-sized HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    sized_answer = read_response(sized)
+    assert_true sized_answer.includes?("Content-Length: 300000\r\n") && !sized_answer.includes?("chunked"), "the block's Content-Length is the framing"
+    sized.write("HEAD /file HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    head_answer = sized.read(4096).or_panic
+    assert_true head_answer.includes?("200") && !head_answer.includes?("UUU"), "a HEAD of a stream writes no body"
+    sized.close
+    # An HTTP/1.0 client reads no chunks: the body ends at the close.
+    old = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+    old.write("GET /slow HTTP/1.0\r\n\r\n").or_panic
+    old_answer = read_to_close(old)
+    old.close
+    assert_true old_answer.ends_with?("\r\n\r\nfirst,second") && !old_answer.includes?("chunked") && old_answer.includes?("Connection: close"), "a stream to an HTTP/1.0 client ends at the close: #{old_answer.inspect}"
+    # A body cut short is an HTTPError the reader is handed, not a panic.
+    cut_l = IyiSocket.listen("127.0.0.1", 0)
+    cut_said = "none"
+    group do |cg|
+      cg.spawn do
+        peer = cut_l.accept.or_panic
+        read_request(peer)
+        peer.write("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc").or_panic
+        peer.close
+        0
+      end
+      cg.spawn do
+        HTTP.open("GET", "http://127.0.0.1:#{cut_l.local_port}/") do |resp|
+          got = resp.body_io.read_all
+          cut_said = got.is_a?(HTTPError) ? got.message : "read #{got.inspect}"
+          0
+        end.or_panic
+        0
+      end
+    end
+    cut_l.close
+    assert_str "HTTP: the body ended after 3 of its 10 bytes", cut_said, "a body cut short"
+    HTTP.get(stream_base + "/stop").or_panic
+    0
+  end
+end
+puts "  an upload from a stream, a body read while it is sent, one left unread, a block that writes as it goes, a file, HTTP/1.0, a body cut short"
+
+puts "\n== content codings"
+
+# The client asks for gzip, deflate and zstd and undoes them as they
+# arrive; the server under `compress` sends zstd or gzip to a client that
+# takes one - zstd for a whole body at a q at least gzip's, gzip for a
+# stream - for types worth compressing, past a kilobyte.
+
+# A zstd frame by hand (RFC 8878 §3.1.1): no checksum, no content size,
+# the window *descriptor* asks for, and "hello" in one raw block.
+def zstd_hello(descriptor : Int32) : String
+  head = [0x28, 0xb5, 0x2f, 0xfd, 0x00, descriptor, 0x29, 0x00, 0x00]
+  framed = String.new(head.size) do |dst|
+    head.each_with_index { |b, i| dst[i] = b.to_u8 }
+    nil
+  end
+  framed + "hello"
+end
+
+coding_l = IyiSocket.listen("127.0.0.1", 0)
+coding_port = coding_l.local_port
+coding_base = "http://127.0.0.1:#{coding_port}"
+long_text = "the quick brown fox jumps over the lazy dog. " * 400
+group do |g|
+  g.spawn do
+    Server.serve(coding_l, compress: true) do |req|
+      if req.path == "/stop"
+        coding_l.close
+        Response.new(200, "bye")
+      elsif req.path == "/text"
+        Response.new(200, long_text, {"Content-Type" => "text/plain"})
+      elsif req.path == "/short"
+        Response.new(200, "short", {"Content-Type" => "text/plain"})
+      elsif req.path == "/png"
+        Response.new(200, long_text, {"Content-Type" => "image/png"})
+      elsif req.path == "/own"
+        Response.new(200, Gzip.compress("mine"), {"Content-Type" => "text/plain", "Content-Encoding" => "gzip"})
+      elsif req.path == "/zstd-own"
+        Response.new(200, Zstd.compress("mine"), {"Content-Type" => "text/plain", "Content-Encoding" => "zstd"})
+      elsif req.path == "/accept"
+        Response.new(200, req.header("Accept-Encoding") || "-")
+      elsif req.path == "/zstd-corrupt"
+        bad = Zstd.compress(long_text)
+        Response.new(200, bad[0, 40] + "garbage" + bad[47, bad.bytesize - 47], {"Content-Encoding" => "zstd"})
+      elsif req.path == "/zstd-16mib"
+        Response.new(200, zstd_hello(0x70), {"Content-Encoding" => "zstd"})
+      elsif req.path == "/zstd-8mib"
+        Response.new(200, zstd_hello(0x68), {"Content-Encoding" => "zstd"})
+      elsif req.path == "/zstd-frames"
+        # Two frames, a hundred bytes a chunk: the frames' ends and the
+        # chunks' fall where they fall.
+        zframes = Zstd.compress(long_text[0, 9000]) + Zstd.compress(long_text[9000, long_text.bytesize - 9000])
+        Response.stream(200, {"Content-Type" => "text/plain", "Content-Encoding" => "zstd"}) do |w|
+          at = 0
+          while at < zframes.bytesize
+            n = zframes.bytesize - at < 100 ? zframes.bytesize - at : 100
+            w.write(zframes[at, n])
+            at = at + n
+          end
+          nil
+        end
+      elsif req.path == "/vary"
+        Response.new(200, long_text, {"Content-Type" => "text/html", "Vary" => "Cookie"})
+      elsif req.path == "/stream"
+        Response.stream(200, {"Content-Type" => "application/json"}) do |w|
+          5.times { |i| w.write("{\"n\":#{i}}\n") }
+          nil
+        end
+      elsif req.path == "/zlib"
+        Response.new(200, Zlib.compress(long_text), {"Content-Encoding" => "deflate"})
+      elsif req.path == "/raw-deflate"
+        Response.new(200, Deflate.compress(long_text), {"Content-Encoding" => "deflate"})
+      elsif req.path == "/corrupt"
+        bad = Gzip.compress(long_text)
+        Response.new(200, bad[0, 40] + "garbage" + bad[47, bad.bytesize - 47], {"Content-Encoding" => "gzip"})
+      elsif req.path == "/br"
+        Response.new(200, "pretend", {"Content-Encoding" => "br"})
+      else
+        Response.new(404, "no")
+      end
+    end
+    0
+  end
+  g.spawn do
+    said = HTTP.get(coding_base + "/accept").or_panic
+    assert_str "gzip, deflate, zstd", said.body, "the client asks for gzip, deflate and zstd"
+    plain = HTTP.get(coding_base + "/text").or_panic
+    assert_true plain.decoded? && plain.body == long_text, "a zstd answer is undone"
+    assert_true plain.header("Content-Encoding").nil? && plain.header("Content-Length").nil?, "and the fields that described the coded body go"
+    asked = IyiSocket.connect("127.0.0.1", coding_port).or_panic
+    asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip, deflate, zstd\r\n\r\n").or_panic
+    zcoded = HTTP.parse_response(read_response(asked))
+    assert_true zcoded.header("Content-Encoding") == "zstd" && zcoded.header("Vary") == "Accept-Encoding", "the server's zstd says so, and varies"
+    assert_true zcoded.body.bytesize < long_text.bytesize // 4 && Zstd.decompress(zcoded.body) == long_text, "and is zstd: #{zcoded.body.bytesize} bytes for #{long_text.bytesize}"
+    asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
+    coded = HTTP.parse_response(read_response(asked))
+    assert_true coded.header("Content-Encoding") == "gzip" && coded.header("Vary") == "Accept-Encoding", "the server's gzip says so, and varies"
+    assert_true coded.body.bytesize < long_text.bytesize // 4 && Gzip.decompress(coded.body) == long_text, "and is gzip: #{coded.body.bytesize} bytes for #{long_text.bytesize}"
+    asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip;q=0, deflate\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(asked)).header("Content-Encoding").nil?, "a q of 0 refuses gzip"
+    asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: *\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(asked)).header("Content-Encoding") == "zstd", "* takes zstd, at gzip's weight"
+    # Which coding, by the client's weights (RFC 9110 §12.5.3).
+    {
+      "gzip;q=0.5, zstd;q=0.4"   => "gzip",
+      "gzip;q=0.4, zstd;q=0.5"   => "zstd",
+      "zstd;q=0.5, gzip;q=0.500" => "zstd",
+      "gzip, zstd;q=0.999"       => "gzip",
+      "gzip;q=0, zstd;q=0"       => "-",
+      "zstd, gzip;q=0"           => "zstd",
+      "deflate, *;q=0.1, gzip"   => "gzip",
+      "zstd;q=0.001"             => "zstd",
+    }.each do |list, want|
+      asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: #{list}\r\n\r\n").or_panic
+      assert_str want, HTTP.parse_response(read_response(asked)).header("Content-Encoding") || "-", "the coding for Accept-Encoding: #{list}"
+    end
+    asked.write("GET /short HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(asked)).header("Content-Encoding").nil?, "a body under a kilobyte goes as it is"
+    asked.write("GET /png HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(asked)).header("Content-Encoding").nil?, "an image goes as it is"
+    asked.write("GET /vary HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
+    assert_str "Cookie, Accept-Encoding", HTTP.parse_response(read_response(asked)).header("Vary") || "", "a block's Vary is added to"
+    asked.write("HEAD /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
+    head_coded = asked.read(4096).or_panic
+    assert_true head_coded.includes?("Content-Encoding: gzip") && head_coded.ends_with?("\r\n\r\n"), "a HEAD names the coding its GET would have, and writes no body"
+    asked.write("HEAD /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: zstd\r\n\r\n").or_panic
+    head_zstd = asked.read(4096).or_panic
+    assert_true head_zstd.includes?("Content-Encoding: zstd") && head_zstd.ends_with?("\r\n\r\n"), "a HEAD names zstd when its GET would have it"
+    asked.close
+    own = HTTP.get(coding_base + "/own").or_panic
+    assert_true own.decoded? && own.body == "mine", "a block's own gzip is left alone by the server and undone by the client"
+    streamed = HTTP.get(coding_base + "/stream").or_panic
+    assert_true streamed.decoded? && streamed.body == "{\"n\":0}\n{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n", "a stream goes gzip a write at a time: #{streamed.body.inspect}"
+    # A stream is gzip's or as it is: std/zstd compresses whole inputs.
+    zstd_only = HTTP.request("GET", coding_base + "/stream", {"Accept-Encoding" => "zstd"}).or_panic
+    assert_true zstd_only.header("Content-Encoding").nil? && zstd_only.body == streamed.body, "a stream to a client that takes zstd alone goes as it is: #{zstd_only.header("Content-Encoding").inspect}"
+    both = HTTP.request("GET", coding_base + "/stream", {"Accept-Encoding" => "zstd, gzip"}).or_panic
+    assert_true both.header("Content-Encoding") == "gzip" && Gzip.decompress(both.body) == streamed.body, "a stream to a client that takes zstd and gzip goes gzip: #{both.header("Content-Encoding").inspect}"
+    assert_true HTTP.get(coding_base + "/zlib").or_panic.body == long_text, "deflate in zlib's envelope"
+    assert_true HTTP.get(coding_base + "/raw-deflate").or_panic.body == long_text, "deflate as the bare stream"
+    corrupt = HTTP.get(coding_base + "/corrupt")
+    assert_true corrupt.is_a?(HTTPError) && corrupt.message.starts_with?("HTTP: the body's coding: "), "a corrupt gzip body is an HTTPError: #{corrupt.is_a?(HTTPError) ? corrupt.message : "answered"}"
+    br = HTTP.get(coding_base + "/br").or_panic
+    assert_true !br.decoded? && br.header("Content-Encoding") == "br" && br.body == "pretend", "a coding the client did not ask for is left as it came"
+    kept = HTTP.request("GET", coding_base + "/text", decompress: false).or_panic
+    assert_true kept.body == long_text && !kept.decoded?, "decompress: false asks for none"
+    zown = HTTP.get(coding_base + "/zstd-own").or_panic
+    assert_true zown.decoded? && zown.body == "mine", "a block's own zstd is left alone by the server and undone by the client"
+    frames = HTTP.get(coding_base + "/zstd-frames").or_panic
+    assert_true frames.decoded? && frames.body == long_text, "two zstd frames, a hundred bytes a chunk, undone as they arrive: #{frames.body.bytesize} bytes"
+    zcorrupt = HTTP.get(coding_base + "/zstd-corrupt")
+    assert_true zcorrupt.is_a?(HTTPError) && zcorrupt.message.starts_with?("HTTP: the body's coding: zstd: "), "a corrupt zstd body is an HTTPError: #{zcorrupt.is_a?(HTTPError) ? zcorrupt.message : "answered"}"
+    # RFC 9659 §3: a window of 8 MB at most, and one past it refused.
+    wide = HTTP.get(coding_base + "/zstd-16mib")
+    assert_str "HTTP: the body's coding: zstd: the frame needs a window of 16777216 bytes, past the limit of 8388608", wide.is_a?(HTTPError) ? wide.message : "answered", "a zstd window of 16 MiB is refused"
+    assert_str "hello", HTTP.get(coding_base + "/zstd-8mib").or_panic.body, "a zstd window of 8 MiB is taken"
+    # HTTP/2 (h2c with prior knowledge on the same listener): the answer
+    # in zstd, and undone.
+    h2 = HTTPClient.new(prior_knowledge: true)
+    over_h2 = h2.get(coding_base + "/text").or_panic
+    assert_true over_h2.decoded? && over_h2.body == long_text, "a zstd answer undone over HTTP/2"
+    h2_coded = h2.request("GET", coding_base + "/text", {"Accept-Encoding" => "zstd"}).or_panic
+    assert_true h2_coded.header("Content-Encoding") == "zstd" && Zstd.decompress(h2_coded.body) == long_text, "the server's HTTP/2 answer in zstd: #{h2_coded.header("Content-Encoding").inspect}"
+    h2.close
+    HTTP.get(coding_base + "/stop").or_panic
+    0
+  end
+end
+puts "  zstd, gzip and deflate both ways, q weights, q=0 and *, short and image bodies, Vary, HEAD, a block's own coding, a stream, zstd's frames and windows, corrupt bodies, br, decompress: false, HTTP/2"
+
+puts "\n== redirects"
+# RFC 9110 §15.4: 301 and 302 make a POST a GET, 303 makes anything but a
+# HEAD a GET, 307 and 308 keep the method and the body; credentials do
+# not cross to another host; a loop stops.
+hop_l = IyiSocket.listen("127.0.0.1", 0)
+hop_port = hop_l.local_port
+hop_base = "http://127.0.0.1:#{hop_port}"
+other_l = IyiSocket.listen("127.0.0.1", 0)
+other_base = "http://127.0.0.1:#{other_l.local_port}"
+group do |g|
+  g.spawn do
+    Server.serve(hop_l) do |req|
+      case req.path
+      when "/stop"
+        hop_l.close
+        Response.new(200, "bye")
+      when "/301", "/302", "/303", "/307", "/308"
+        Response.new(req.path[1, 3].to_i, "", {"Location" => "/echo?from=#{req.path[1, 3]}"})
+      when "/away"
+        Response.new(302, "", {"Location" => other_base + "/echo"})
+      when "/relative"
+        Response.new(302, "", {"Location" => "sub/../echo"})
+      when "/loop"
+        Response.new(302, "", {"Location" => "/loop"})
+      when "/ftp"
+        Response.new(302, "", {"Location" => "ftp://127.0.0.1/"})
+      when "/echo"
+        Response.new(200, "#{req.method} #{req.query || "-"} #{req.body} auth=#{req.header("Authorization") || "-"} type=#{req.header("Content-Type") || "-"}")
+      else
+        Response.new(404, "no")
+      end
+    end
+    0
+  end
+  g.spawn do
+    Server.serve(other_l) do |req|
+      other_l.close if req.path == "/stop"
+      Response.new(200, "other auth=#{req.header("Authorization") || "-"} cookie=#{req.header("Cookie") || "-"}")
+    end
+    0
+  end
+  g.spawn do
+    form = {"Content-Type" => "text/plain", "Authorization" => "Bearer t"}
+    assert_str "GET from=301  auth=Bearer t type=-", HTTP.post(hop_base + "/301", "data", form).or_panic.body, "301 makes a POST a GET"
+    assert_str "GET from=302  auth=Bearer t type=-", HTTP.post(hop_base + "/302", "data", form).or_panic.body, "302 makes a POST a GET"
+    assert_str "PUT from=302 data auth=Bearer t type=text/plain", HTTP.put(hop_base + "/302", "data", form).or_panic.body, "302 keeps a PUT"
+    assert_str "GET from=303  auth=Bearer t type=-", HTTP.put(hop_base + "/303", "data", form).or_panic.body, "303 makes a PUT a GET"
+    assert_true HTTP.head(hop_base + "/303").or_panic.status == 200, "303 keeps a HEAD"
+    assert_str "POST from=307 data auth=Bearer t type=text/plain", HTTP.post(hop_base + "/307", "data", form).or_panic.body, "307 keeps the method and the body"
+    assert_str "POST from=308 data auth=Bearer t type=text/plain", HTTP.post(hop_base + "/308", "data", form).or_panic.body, "308 keeps them"
+    away = HTTP.get(hop_base + "/away", {"Authorization" => "Bearer t", "Cookie" => "a=1"}).or_panic
+    assert_str "other auth=- cookie=-", away.body, "Authorization and Cookie do not go to another port"
+    assert_str other_base + "/echo", away.url || "", "the answer names where it came from"
+    assert_str "GET -  auth=- type=-", HTTP.get(hop_base + "/relative").or_panic.body, "a relative Location is read against the URL"
+    loop = HTTP.get(hop_base + "/loop")
+    assert_true loop.is_a?(HTTPError) && loop.message == "HTTP: stopped after 10 redirects, at #{hop_base}/loop", "a loop stops after ten"
+    away_scheme = HTTP.get(hop_base + "/ftp")
+    assert_true away_scheme.is_a?(HTTPError) && away_scheme.message.includes?("which is not http:// or https://"), "a redirect to ftp:// is refused"
+    unfollowed = HTTP.request("GET", hop_base + "/302", redirects: 0).or_panic
+    assert_true unfollowed.status == 302 && unfollowed.header("Location") == "/echo?from=302", "redirects: 0 hands back the 302"
+    streamed = HTTP.post(hop_base + "/307", File.open(stream_dir + "/up.bin")).or_panic
+    assert_true streamed.status == 307, "a 307 for a body that was a stream is handed back, the stream spent"
+    HTTP.get(other_base + "/stop").or_panic
+    HTTP.get(hop_base + "/stop").or_panic
+    0
+  end
+end
+puts "  301, 302, 303, 307, 308, another host, relative, a loop, https, redirects: 0, a stream's 307"
+
+puts "\n== forms"
+# A urlencoded body is the query's fields after; a multipart one is read
+# a part at a time as it arrives, its boundary found across reads.
+form_l = IyiSocket.listen("127.0.0.1", 0)
+form_port = form_l.local_port
+form_base = "http://127.0.0.1:#{form_port}"
+group do |g|
+  g.spawn do
+    Server.serve(form_l, stream_bodies: true) do |req|
+      if req.path == "/stop"
+        form_l.close
+        Response.new(200, "bye")
+      elsif req.path == "/form"
+        Response.new(200, req.form.to_s)
+      elsif req.path == "/parts"
+        said = ""
+        if parts = req.multipart
+          while true
+            part = parts.next_part
+            break if part.nil?
+            if part.is_a?(Part)
+              data = part.read_all
+              said = said + "#{part.name || "-"}|#{part.filename || "-"}|#{part.content_type || "-"}|#{data.is_a?(String) ? data : data.message};"
+            else
+              said = said + "error: #{part.message}"
+              break
+            end
+          end
+        else
+          said = "not multipart"
+        end
+        Response.new(200, said)
+      else
+        Response.new(404, "no")
+      end
+    end
+    0
+  end
+  g.spawn do
+    urlenc = {"Content-Type" => "application/x-www-form-urlencoded"}
+    assert_str "q=1&a=x+y&b=%26", HTTP.post(form_base + "/form?q=1", "a=x+y&b=%26", urlenc).or_panic.body, "query fields, then the body's"
+    assert_str "q=1", HTTP.post(form_base + "/form?q=1", "a=1", {"Content-Type" => "text/plain"}).or_panic.body, "a body of another type is not a form"
+    built = MultipartBuilder.new("XyZ")
+    built.field("title", "a \"quoted\" title")
+    built.file("upload", "notes.txt", "line one\r\n-XyZ--XyZ is not the boundary\r\nline three")
+    built.file("bin", "d.bin", "\u0000\u0001\r\n\u00ff")
+    body = built.finish
+    assert_true body.starts_with?("--XyZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\n"), "a field's part"
+    assert_true body.includes?("Content-Disposition: form-data; name=\"upload\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\n"), "a file's part with its type"
+    assert_true body.ends_with?("\r\n--XyZ--\r\n"), "the closing boundary"
+    expect = "title|-|-|a \"quoted\" title;upload|notes.txt|text/plain|line one\r\n-XyZ--XyZ is not the boundary\r\nline three;bin|d.bin|application/octet-stream|\u0000\u0001\r\n\u00ff;"
+    assert_str expect, HTTP.post(form_base + "/parts", body, {"Content-Type" => built.content_type}).or_panic.body, "three parts read back"
+    # The same body in seven-byte pieces: every boundary falls across reads.
+    trickle = IyiSocket.connect("127.0.0.1", form_port).or_panic
+    trickle.write("POST /parts HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=\"XyZ\"\r\nContent-Length: #{body.bytesize}\r\n\r\n").or_panic
+    at = 0
+    while at < body.bytesize
+      n = body.bytesize - at < 7 ? body.bytesize - at : 7
+      trickle.write(body[at, n]).or_panic
+      at = at + n
+      sleep(1) if at % 70 == 0
+    end
+    assert_str expect, HTTP.parse_response(read_response(trickle)).body, "read in seven-byte pieces, a quoted boundary"
+    trickle.close
+    preamble = "ignored preamble\r\n--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--b  \r\nContent-Disposition: form-data; name=\"c\"\r\n\r\n\r\n--b--\r\nepilogue"
+    assert_str "a|-|-|1;c|-|-|;", HTTP.post(form_base + "/parts", preamble, {"Content-Type" => "multipart/form-data; boundary=b"}).or_panic.body, "a preamble, padding after a boundary, an empty part, an epilogue"
+    cut = "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nno end"
+    assert_str "a|-|-|HTTP: multipart body ends inside a part;error: HTTP: multipart body ends inside a part", HTTP.post(form_base + "/parts", cut, {"Content-Type" => "multipart/form-data; boundary=b"}).or_panic.body, "a body cut inside a part is an HTTPError"
+    assert_str "not multipart", HTTP.post(form_base + "/parts", "x", {"Content-Type" => "multipart/form-data"}).or_panic.body, "multipart with no boundary is none"
+    assert_str "not multipart", HTTP.post(form_base + "/parts", "x", {"Content-Type" => "multipart/form-data; boundary=" + "b" * 71}).or_panic.body, "a boundary past RFC 2046's 70 characters is none, not a panic"
+    HTTP.get(form_base + "/stop").or_panic
+    0
+  end
+end
+assert_str "refused: HTTP: a multipart part's data holds its boundary", answer { MultipartBuilder.new("b").field("a", "x\r\n--b\r\n").finish }, "data that holds the boundary refused"
+auto = MultipartBuilder.new.field("a", "1").file("f", "f.txt", "data")
+same = MultipartBuilder.new.field("a", "1").file("f", "f.txt", "data")
+other = MultipartBuilder.new.field("a", "2").file("f", "f.txt", "data")
+assert_true auto.boundary.starts_with?("iyi-") && auto.boundary.bytesize == 36, "a boundary made from the parts: #{auto.boundary}"
+assert_true auto.finish == same.finish && auto.boundary != other.boundary, "the same parts make the same body, other parts another boundary"
+held = MultipartBuilder.new.field("a", "x")
+trap = MultipartBuilder.new.field("a", "x").field("b", "\r\n--" + held.boundary + "\r\n")
+assert_true trap.boundary != held.boundary && !trap.finish.includes?("\r\n--" + trap.boundary + "\r\n\r\n"), "a part that holds the boundary the parts would make moves it"
+assert_str "refused: HTTP: a multipart part's data holds its boundary", answer { auto.field("late", "\r\n--" + auto.boundary).finish }, "a part added after the boundary is chosen may not hold it"
+puts "  urlencoded, three parts, seven-byte pieces, preamble and padding, a part cut short, no boundary, refusals"
+
+puts "\n== kept connections"
+# An `HTTPClient` sends its requests to a server over the connection the
+# last answer left open, and opens another only when it must: the answer
+# said `close`, or left more than 64 KiB unread, or the server closed the
+# connection while it waited - a GET then goes again on a new one, a POST
+# does not.
+kept_l = IyiSocket.listen("127.0.0.1", 0)
+kept_base = "http://127.0.0.1:#{kept_l.local_port}"
+group do |g|
+  g.spawn do
+    Server.serve(kept_l, compress: true) do |req|
+      if req.path == "/stop"
+        kept_l.close
+        Response.new(200, "bye")
+      elsif req.path == "/close"
+        Response.new(200, "closing", {"Connection" => "close"})
+      elsif req.path == "/who"
+        Response.new(200, req.remote_address || "-")
+      elsif req.path == "/mid"
+        Response.new(200, "m" * 30000, {"Content-Type" => "image/png"})
+      elsif req.path == "/big"
+        Response.new(200, "b" * 200000, {"Content-Type" => "image/png"})
+      elsif req.path == "/text"
+        Response.new(200, "t" * 200000, {"Content-Type" => "text/plain"})
+      else
+        Response.new(200, req.method + " " + req.path + " " + req.body)
+      end
+    end
+    0
+  end
+  g.spawn do
+    kc = HTTPClient.new
+    10.times { |i| assert_str "GET /n#{i} ", kc.get(kept_base + "/n#{i}").or_panic.body, "request #{i} on a kept connection" }
+    assert_true kc.connections_made == 1 && kc.connections_reused == 9, "ten requests, one connection: #{kc.connections_made} made, #{kc.connections_reused} reused"
+    assert_str "POST /p data", kc.post(kept_base + "/p", "data").or_panic.body, "a POST on it"
+    assert_str "127.0.0.1", kc.get(kept_base + "/who").or_panic.body, "the request names the client's address"
+    assert_str "closing", kc.get(kept_base + "/close").or_panic.body, "an answer that says close"
+    assert_str "GET /after ", kc.get(kept_base + "/after").or_panic.body, "the request after it"
+    assert_true kc.connections_made == 2 && kc.connections_reused == 12, "goes on a new connection, the closed one not tried: #{kc.connections_made} made, #{kc.connections_reused} reused"
+    zipped = kc.get(kept_base + "/text").or_panic
+    assert_true zipped.decoded? && zipped.body.bytesize == 200000, "a gzip answer on a kept connection"
+    kc.open("GET", kept_base + "/mid") { |r| r.body_io.read(10).or_panic.bytesize }.or_panic
+    kc.get(kept_base + "/x").or_panic
+    assert_true kc.connections_made == 2, "30 KB left unread is read past and the connection kept: #{kc.connections_made} made"
+    kc.open("GET", kept_base + "/big") { |r| r.body_io.read(10).or_panic.bytesize }.or_panic
+    assert_str "GET /y ", kc.get(kept_base + "/y").or_panic.body, "the request after 200 KB left unread"
+    assert_true kc.connections_made == 3, "goes on a new connection, the old one closed rather than read: #{kc.connections_made} made"
+    kc.get(kept_base + "/stop")
+    kc.close
+    0
+  end
+end
+# A server that closes each connection a moment after its answer, without
+# saying so: what a kept-alive server's idle timeout does.
+rude = IyiSocket.listen("127.0.0.1", 0)
+rude_base = "http://127.0.0.1:#{rude.local_port}"
+rude_served = 0
+group do |g|
+  g.spawn do
+    while true
+      peer = rude.accept
+      break unless peer.is_a?(IyiSocket)
+      got = ""
+      while !got.includes?("\r\n\r\n")
+        piece = peer.read(4096)
+        break unless piece.is_a?(String) && piece.bytesize > 0
+        got = got + piece
+      end
+      rude_served = rude_served + 1
+      peer.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+      sleep(50)
+      peer.close
+    end
+    0
+  end
+  g.spawn do
+    rc = HTTPClient.new
+    assert_str "ok", rc.get(rude_base + "/a").or_panic.body, "the first answer"
+    sleep(150)
+    assert_str "ok", rc.get(rude_base + "/b").or_panic.body, "a GET whose kept connection the server closed goes again on a new one"
+    sleep(150)
+    refused = rc.post(rude_base + "/c", "x")
+    assert_true !refused.is_a?(Response), "a POST whose kept connection the server closed is not sent again"
+    rc.close
+    rude.close
+    0
+  end
+end
+assert_true rude_served == 2, "the server answered twice, not #{rude_served} times"
+puts "  ten requests on one connection, a close, 30 KB left unread and kept, 200 KB left and closed, a GET sent again, a POST not"
+
+puts "\n== timeouts"
+
+# `timeout_ms`: a request's head must have arrived within it, from when
+# the server starts waiting - idle time on a kept connection included -
+# however its bytes are spread; a connection handed over by an upgrade is
+# not held to it. Each client here measures whether the server closed on
+# it (the read ends) or kept it (the client's own 3 s read limit runs out).
+def closed_on?(c : IyiSocket) : Bool
+  c.read_timeout_ms = 3000
+  while true
+    got = c.read(4096)
+    return false if got.is_a?(SocketError) && got.timed_out?
+    return true unless got.is_a?(String)
+    return true if got.bytesize == 0
+  end
+  false
+end
+
+slow_l = IyiSocket.listen("127.0.0.1", 0)
+slow_port = slow_l.local_port
+group do |g|
+  g.spawn do
+    Server.serve(slow_l, timeout_ms: 1000) do |req|
+      if req.path == "/stop"
+        slow_l.close
+        Response.new(200, "bye")
+      elsif req.header("Upgrade") == "echo"
+        Response.upgrade({"Upgrade" => "echo", "Connection" => "Upgrade"}) do |sock, _|
+          got = sock.read(100)
+          sock.write("echo:" + got) if got.is_a?(String)
+          nil
+        end
+      else
+        Response.new(200, "ok")
+      end
+    end
+    0
+  end
+  g.spawn do
+    silent = IyiSocket.connect("127.0.0.1", slow_port).or_panic
+    started = __iyi_monotonic_ns
+    assert_true closed_on?(silent), "a client that sends nothing is closed"
+    silent_ms = (__iyi_monotonic_ns - started) // 1000000_i64
+    silent.close
+    assert_true silent_ms >= 900 && silent_ms < 2800, "after the timeout: #{silent_ms} ms"
+    # A byte every 100 ms: every pause a tenth of the limit, the head never
+    # done within it. At a limit of 400 a runner that stalled one pause
+    # past it closed the connection by the gap alone, and a server with no
+    # deadline on the head passed.
+    loris = IyiSocket.connect("127.0.0.1", slow_port).or_panic
+    "GET / HTTP/1.1\r\nHost: x\r\nX-Slow: abcdefghijklmn".each_char do |ch|
+      loris.write(ch.to_s)
+      sleep(100)
+    end
+    # Its end, nearly five seconds after its start: answered only by a
+    # server that waited for it.
+    loris.write("\r\n\r\n")
+    loris.read_timeout_ms = 3000
+    loris_heard = ""
+    while true
+      got = loris.read(4096)
+      break unless got.is_a?(String) && got.bytesize > 0
+      loris_heard = loris_heard + got
+    end
+    loris.close
+    assert_str "", loris_heard, "a head sent a byte every 100 ms is closed, not answered"
+    # In pieces, but inside the limit, it is answered.
+    quick = IyiSocket.connect("127.0.0.1", slow_port).or_panic
+    quick.write("GET /a HTTP/1.1\r\n").or_panic
+    sleep(100)
+    quick.write("Host: x\r\n").or_panic
+    sleep(100)
+    quick.write("\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(quick)).body == "ok", "a head in pieces inside the limit is answered"
+    # And the kept connection, idle past the limit, is closed.
+    sleep(1300)
+    assert_true closed_on?(quick), "a kept connection idle past the limit is closed"
+    quick.close
+    # A connection handed over waits as its protocol likes.
+    up = HTTP.upgrade("http://127.0.0.1:#{slow_port}/chat", "echo").or_panic
+    sleep(1300)
+    up.socket.write("late").or_panic
+    heard = up.leftover
+    while heard.bytesize < 9
+      got = up.socket.read(100)
+      break unless got.is_a?(String) && got.bytesize > 0
+      heard = heard + got
+    end
+    up.socket.close
+    assert_str "echo:late", heard, "an upgraded connection idle past the limit"
+    HTTP.get("http://127.0.0.1:#{slow_port}/stop").or_panic
+    0
+  end
+end
+# With none, an idle connection is kept.
+none_l = IyiSocket.listen("127.0.0.1", 0)
+group do |g|
+  g.spawn do
+    Server.serve(none_l, timeout_ms: 0) do |req|
+      none_l.close if req.path == "/stop"
+      Response.new(200, "ok")
+    end
+    0
+  end
+  g.spawn do
+    waiting = IyiSocket.connect("127.0.0.1", none_l.local_port).or_panic
+    sleep(700)
+    waiting.write("GET /stop HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(waiting)).body == "ok", "timeout_ms: 0 keeps an idle connection"
+    waiting.close
+    0
+  end
+end
+# The client's: a server that takes the request and never answers.
+mute = IyiSocket.listen("127.0.0.1", 0)
+mute_base = "http://127.0.0.1:#{mute.local_port}"
+group do |g|
+  g.spawn do
+    muted = [] of IyiSocket
+    while true
+      peer = mute.accept
+      break unless peer.is_a?(IyiSocket)
+      muted << peer
+    end
+    muted.each { |peer| peer.close }
+    0
+  end
+  g.spawn do
+    started = __iyi_monotonic_ns
+    hung = HTTP.request("GET", mute_base + "/", timeout_ms: 300)
+    hung_ms = (__iyi_monotonic_ns - started) // 1000000_i64
+    assert_true hung.is_a?(SocketError) && hung.timed_out?, "a request no answer comes to is a timeout"
+    assert_true hung_ms >= 250 && hung_ms < 2000, "after the timeout: #{hung_ms} ms"
+    kept_hung = HTTPClient.new(timeout_ms: 300).get(mute_base + "/")
+    assert_true kept_hung.is_a?(SocketError) && kept_hung.timed_out?, "and through an HTTPClient"
+    mute.close
+    0
+  end
+end
+puts "  nothing sent, a byte every 100 ms, a head in pieces in time, an idle kept connection, an upgrade, no timeout, a client's"
+
+puts "\n== upgrades"
+# A 101 hands the connection to the block, with the bytes the client sent
+# after its request; the client is handed it the same way.
+up_l = IyiSocket.listen("127.0.0.1", 0)
+up_base = "http://127.0.0.1:#{up_l.local_port}"
+up_stopped = 0_i64
+up_returned = 0_i64
+group do |g|
+  g.spawn do
+    Server.serve(up_l) do |req|
+      if req.path == "/stop"
+        up_l.close
+        Response.new(200, "bye")
+      elsif req.header("Upgrade") == "echo"
+        Response.upgrade({"Upgrade" => "echo", "Connection" => "Upgrade"}) do |sock, leftover|
+          said = leftover
+          while said.bytesize < 4
+            got = sock.read(100)
+            break unless got.is_a?(String) && got.bytesize > 0
+            said = said + got
+          end
+          sock.write("echo:" + said) if said.bytesize >= 4
+          nil
+        end
+      else
+        Response.new(426, "upgrade to echo\n", {"Upgrade" => "echo"})
+      end
+    end
+    up_returned = __iyi_monotonic_ns
+    0
+  end
+  g.spawn do
+    raw = IyiSocket.connect("127.0.0.1", up_l.local_port).or_panic
+    raw.write("GET /chat HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\nping").or_panic
+    switched = read_to_close(raw)
+    raw.close
+    assert_true switched.starts_with?("HTTP/1.1 101 Switching Protocols\r\n") && switched.includes?("Connection: Upgrade\r\n") && !switched.includes?("keep-alive") && switched.ends_with?("\r\n\r\necho:ping"), "the 101, and the bytes sent after the request handed over: #{switched.inspect}"
+    up = HTTP.upgrade(up_base + "/chat", "echo").or_panic
+    up.socket.write("pong").or_panic
+    heard = up.leftover
+    while heard.bytesize < 9
+      got = up.socket.read(100).or_panic
+      break if got.bytesize == 0
+      heard = heard + got
+    end
+    up.socket.close
+    assert_true up.response.status == 101 && heard == "echo:pong", "HTTP.upgrade hands the socket over: #{heard.inspect}"
+    refused = HTTP.upgrade(up_base + "/chat", "other")
+    assert_true refused.is_a?(HTTPError) && refused.message == "HTTP: the server answered 426 Upgrade Required to an upgrade to other, not 101 Switching Protocols", "an answer that is not 101 is an HTTPError"
+    # A connection handed over and still open when the listener closes is
+    # closed with it: `serve` waited for its client, three seconds here.
+    stays = HTTP.upgrade(up_base + "/chat", "echo").or_panic
+    up_stopped = __iyi_monotonic_ns
+    HTTP.get(up_base + "/stop").or_panic
+    sleep(3000)
+    stays.socket.close
+    0
+  end
+end
+up_ms = (up_returned - up_stopped) // 1000000_i64
+assert_true up_ms < 2000, "serve returns when its listener closes beside a connection it handed over, not #{up_ms} ms later"
+puts "  a 101 from a raw socket, HTTP.upgrade, a refusal, a handed-over connection closed with the listener"
+
+puts "\n== proxies"
+# Which requests go through a proxy: Go's own tables, from
+# golang.org/x/net/http/httpproxy's proxy_test.go - `TestUseProxy`'s
+# NO_PROXY and hosts, and `proxyForURLTests`' choices of variable. The
+# gate runs Go's net/http over the same and more, where Go is installed.
+go_no_proxy = "foobar.com, .barbaz.net, *.wildcard.io, 192.168.1.1, 192.168.1.2:81, 192.168.1.3:80, 10.0.0.0/30, 2001:db8::52:0:1, [2001:db8::52:0:2]:443, [2001:db8::52:0:3]:80, 2002:db8:a::45/64"
+go_use_proxy = {
+  "localhost" => false, "127.0.0.1" => false, "127.0.0.2" => false, "[::1]" => false, "[::2]" => true,
+  "192.168.1.1" => false, "192.168.1.2" => true, "192.168.1.3" => false, "10.0.0.2" => false,
+  "[2001:db8::52:0:1]" => false, "[2001:db8::52:0:2]" => true, "[2001:db8::52:0:3]" => false,
+  "[2002:db8:a::123]" => false, "[fe80::424b:c8be:1643:a1b6]" => true,
+  "barbaz.net" => true, "www.barbaz.net" => false, "foobar.com" => false, "www.foobar.com" => false,
+  "foofoobar.com" => true, "baz.com" => true, "localhost.net" => true, "local.localhost" => true,
+  "barbarbaz.net" => true, "wildcard.io" => true, "nested.wildcard.io" => false, "awildcard.io" => true,
+}
+go_use_proxy.each do |host, proxied|
+  got = HTTP.proxy_for("http://" + host, "proxy", nil, go_no_proxy) || "direct"
+  assert_str proxied ? "http://proxy" : "direct", got, "NO_PROXY as Go reads it, for #{host}"
+end
+# {HTTP_PROXY, HTTPS_PROXY, NO_PROXY, the URL, the proxy}, "" for none.
+go_choices = [
+  {"127.0.0.1:8080", "", "", "http://example.com/", "http://127.0.0.1:8080"},
+  {"cache.corp.example.com:1234", "", "", "http://example.com/", "http://cache.corp.example.com:1234"},
+  {"cache.corp.example.com", "", "", "http://example.com/", "http://cache.corp.example.com"},
+  {"https://cache.corp.example.com", "", "", "http://example.com/", "https://cache.corp.example.com"},
+  {"socks5://127.0.0.1", "", "", "http://example.com/", "socks5://127.0.0.1"},
+  {"http.proxy.tld", "secure.proxy.tld", "", "http://insecure.tld/", "http://http.proxy.tld"},
+  {"http.proxy.tld", "secure.proxy.tld", "", "https://secure.tld/", "http://secure.proxy.tld"},
+  {"http.proxy.tld", "https://secure.proxy.tld", "", "https://secure.tld/", "https://secure.proxy.tld"},
+  {"http.proxy.tld", "", "", "https://secure.tld/", ""},
+  {"", "", "", "http://example.com/", ""},
+  {"proxy", "", "example.com", "http://example.com/", ""},
+  {"proxy", "", ".example.com", "http://example.com/", "http://proxy"},
+  {"proxy", "", "ample.com", "http://example.com/", "http://proxy"},
+  {"proxy", "", "example.com", "http://foo.example.com/", ""},
+  {"proxy", "", ".foo.com", "http://example.com/", "http://proxy"},
+  {"proxy", "", "*", "http://example.com/", ""},
+  {"proxy", "", "example.com:8080", "http://example.com:8080/", ""},
+  {"proxy", "", "example.com:8080", "http://example.com/", "http://proxy"},
+  {"proxy", "proxy", "example.com:443", "https://example.com/", ""},
+  {"proxy", "", "::ffff:10.0.0.0/104", "http://10.1.2.3/", ""},
+  {"proxy", "", "10.0.0.0/8", "http://[::ffff:10.1.2.3]/", ""},
+  {"proxy", "", "::/0", "http://10.1.2.3/", "http://proxy"},
+  {"proxy", "", ":80, [::1, ::1]:80", "http://example.com/", "http://proxy"},
+  {"proxy", "", "", "ftp://example.com/", ""},
+]
+go_choices.each do |c|
+  got = HTTP.proxy_for(c[3], c[0].empty? ? nil : c[0], c[1].empty? ? nil : c[1], c[2])
+  assert_str c[4], got || "", "the proxy for #{c[3]} under HTTP_PROXY=#{c[0]} HTTPS_PROXY=#{c[1]} NO_PROXY=#{c[2]}"
+end
+puts "  NO_PROXY and the choice of variable as Go's httpproxy has them: #{go_use_proxy.size} hosts, #{go_choices.size} configurations"
+
+# A proxy refused by name before anything is sent: TLS to the proxy and
+# SOCKS are not spoken here, and must not be spoken in the clear.
+["https://p.test:3128", "socks5://127.0.0.1:1080"].each do |written|
+  refused = HTTP.request("GET", "http://example.com/", proxy: written)
+  scheme = written[0, written.index(':') || 0]
+  assert_true refused.is_a?(HTTPError) && refused.message == "HTTP: a proxy over #{scheme}://, which this client does not speak; only http:// proxies", "a proxy over #{scheme}:// is refused: #{refused.inspect}"
+end
+
+# A proxy on a raw socket that answers what it read: an http:// request in
+# absolute form with the URL's credential (the caller's own replaced),
+# two origins over one kept connection to the proxy, CONNECTs refused
+# 407 and 403, and one answered 200 with bytes after it; then an upgrade
+# to a ws:// origin, which goes through a CONNECT too, and one whose 200
+# has bytes after it. The whole tunnel, TLS inside it and a WebSocket
+# through it, is bench/std_http_exercise.sh's, against a proxy in Python
+# and curl.
+proxy_l = IyiSocket.listen("127.0.0.1", 0)
+proxy_port = proxy_l.local_port
+proxy_fd = proxy_l.to_unsafe
+proxy_server = IyiThread.start do
+  l = IyiSocket.new(proxy_fd)
+  7.times do |i|
+    conn = l.accept.or_panic
+    rounds = i == 1 || i == 5 ? 2 : 1
+    rounds.times do |round|
+      saw = read_request(conn).or_panic
+      # A CONNECT not as the check below expects it is answered with what
+      # the proxy saw, for the client's error to name.
+      reply = if i == 0 || i == 1
+                "HTTP/1.1 200 OK\r\nContent-Length: #{saw.bytesize}\r\n\r\n" + saw
+              elsif i == 2
+                fine = saw == "CONNECT secure.test:443 HTTP/1.1\r\nHost: secure.test:443\r\nProxy-Authorization: Basic dXNlcjpwQHNz\r\n\r\n"
+                "HTTP/1.1 407 #{fine ? "Proxy Authentication Required" : saw.inspect}\r\nProxy-Authenticate: Basic realm=\"gate\"\r\nContent-Length: 0\r\n\r\n"
+              elsif i == 3
+                fine = saw == "CONNECT [::1]:8443 HTTP/1.1\r\nHost: [::1]:8443\r\nProxy-Authorization: Basic Z2F0ZTpzM2NyZXQ=\r\n\r\n"
+                "HTTP/1.1 403 #{fine ? "Forbidden" : saw.inspect}\r\nContent-Length: 0\r\n\r\n"
+              elsif i == 5 && round == 0
+                fine = saw == "CONNECT up.test:80 HTTP/1.1\r\nHost: up.test:80\r\nProxy-Authorization: Basic dXNlcjpwQHNz\r\n\r\n"
+                fine ? "HTTP/1.1 200 Connection established\r\n\r\n" : "HTTP/1.1 407 #{saw.inspect}\r\nContent-Length: 0\r\n\r\n"
+              elsif i == 5
+                # Inside the tunnel, the origin's 101 and what it was sent.
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n" + saw
+              else
+                "HTTP/1.1 200 Connection established\r\n\r\njunk"
+              end
+      conn.write(reply).or_panic
+    end
+    conn.close
+  end
+  nil
+end
+proxy_url = "http://user:p%40ss@127.0.0.1:#{proxy_port}"
+through = HTTP.request("GET", "http://origin.test:8080/a?b=1", {"Proxy-Authorization" => "Basic other"}, proxy: proxy_url).or_panic
+assert_true through.body.starts_with?("GET http://origin.test:8080/a?b=1 HTTP/1.1\r\nHost: origin.test:8080\r\n"), "an http:// request through a proxy names the whole URL: #{first_line(through.body).inspect}"
+assert_true through.body.includes?("\r\nProxy-Authorization: Basic dXNlcjpwQHNz\r\n") && !through.body.includes?("Basic other"), "an http:// request through a proxy carries the URL's credential, and the caller's no more: #{through.body.inspect}"
+# With prior knowledge, which a proxy's absolute form does not take: the
+# requests go as HTTP/1.1. A second origin that waits for a connection of
+# its own is a timeout, named below, not a hang.
+kept = HTTPClient.new(proxy: "127.0.0.1:#{proxy_port}", prior_knowledge: true, timeout_ms: 10000)
+one = kept.get("http://a.test/one").or_panic
+second = kept.get("http://b.test:81/two")
+assert_true second.is_a?(Response), "two origins over one kept connection to the proxy: the second answered #{second.inspect}"
+two = second.or_panic
+assert_str "GET http://a.test/one HTTP/1.1|GET http://b.test:81/two HTTP/1.1", first_line(one.body) + "|" + first_line(two.body), "two origins through a proxy URL written without a scheme"
+assert_true one.body.includes?("\r\nHost: a.test\r\n") && two.body.includes?("\r\nHost: b.test:81\r\n") && !two.body.includes?("Proxy-Authorization"), "each request through a proxy keeps its own Host, and no credential the proxy URL did not give: #{two.body.inspect}"
+assert_true kept.connections_made == 1 && kept.connections_reused == 1, "two origins over one kept connection to the proxy: #{kept.connections_made} made, #{kept.connections_reused} reused"
+kept.close
+refused = HTTP.request("GET", "https://secure.test/x", proxy: proxy_url)
+assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} answered 407 Proxy Authentication Required to CONNECT secure.test:443", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "a CONNECT with the URL's credential, refused 407"
+refused = HTTP.request("GET", "https://[::1]:8443/x", {"Proxy-Authorization" => "Basic Z2F0ZTpzM2NyZXQ="}, proxy: "http://127.0.0.1:#{proxy_port}")
+assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} answered 403 Forbidden to CONNECT [::1]:8443", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "a CONNECT to an IPv6 origin with the caller's credential, refused 403"
+refused = HTTP.request("GET", "https://secure.test/x", proxy: "127.0.0.1:#{proxy_port}")
+assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} sent 4 bytes after its 200 to CONNECT secure.test:443, before TLS began", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "bytes after a CONNECT's 200 are refused"
+# An upgrade to a ws:// origin through the proxy: a CONNECT with the URL's
+# credential, then the handshake in origin form inside, with no
+# credential in it.
+inside = HTTP.upgrade("http://up.test/chat", "echo", {"Proxy-Authorization" => "Basic other"}, timeout_ms: 10000, proxy: proxy_url).or_panic
+heard = inside.leftover
+while !heard.ends_with?("\r\n\r\n")
+  got = inside.socket.read(4096).or_panic
+  break if got.bytesize == 0
+  heard = heard + got
+end
+inside.socket.close
+assert_true heard.starts_with?("GET /chat HTTP/1.1\r\nHost: up.test\r\n") && heard.includes?("\r\nUpgrade: echo\r\n") && heard.includes?("\r\nConnection: Upgrade\r\n"), "an upgrade to http:// through a proxy goes in origin form inside its CONNECT tunnel: #{heard.inspect}"
+assert_true !heard.includes?("Proxy-Authorization"), "and no credential inside the tunnel: #{heard.inspect}"
+refused = HTTP.upgrade("http://up.test/chat", "echo", timeout_ms: 10000, proxy: "127.0.0.1:#{proxy_port}")
+assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} sent 4 bytes after its 200 to CONNECT up.test:80, before the request began", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "bytes after an upgrade's CONNECT 200 are refused"
+proxy_server.join
+proxy_l.close
+puts "  an absolute-form request with the URL's credential, two origins on one kept proxy connection, CONNECT refused 407 and 403, bytes after a 200 refused, an upgrade to http:// through a tunnel"
+
+# The files the sections above wrote.
+File.delete(stream_dir + "/up.bin")
+Dir.delete(stream_dir)
 
 puts "\nALL CHECKS PASSED"

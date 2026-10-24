@@ -6,8 +6,10 @@
 # Proves the exercise holds plain and --release, that all sections report,
 # and proves the checks can fail when the module is broken:
 # a broken step calculation, an ignored exclusive boundary, an unchecked
-# step direction, a broken block-iterator trait default, and an add-first
-# overflow at Int32 MAX.
+# step direction, a broken block-iterator trait default, an add-first
+# overflow at Int32 MAX, a double that adds first below zero, a NaN
+# compared as a number, a zero step let through, and the NaN room an
+# infinite step leaves read as a number.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -136,7 +138,13 @@ PY
     status=1
     return
   fi
-  if IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_steppable_exercise.iyi" >"$WORK/$dir.out" 2>&1; then
+  # Build first, then run: a patch that does not compile would also "fail",
+  # and that proves nothing about whether the exercise catches the break.
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$dir.bin" "$REPO/bench/std_steppable_exercise.iyi" >"$WORK/$dir.out" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/$dir.out"
+    status=1
+  elif "$WORK/$dir.bin" >"$WORK/$dir.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else
@@ -148,8 +156,19 @@ prove_fails "step arithmetic" mut1 "if gap == step_sign" "if gap != step_sign"
 prove_fails "exclusive boundary check" mut2 "elsif gap == 0 && !@exclusive" "elsif gap == 0"
 prove_fails "step direction validation" mut3 "if sign != step_sign" "if false"
 prove_fails "trait block iteration default" mut4 "yield item" "nil"
+# Deleting the impl only fails to compile; a step that yields nothing still
+# builds, so the exercise has to notice doubles no longer step.
+prove_fails "doubles do not step" mut6 "impl Steppable for Float64
+end" "impl Steppable for Float64
+  def step(*, to limit : self? = nil, by step_val : self, exclusive : ::Bool = false, & : self -> ::Nil) : ::Nil
+  end
+end"
 prove_fails "overflow-safe gap compare" mut5 "gap = ((limit - @step) <=> @current)" "tmp = @current + @step
     gap = ((limit - @step) <=> @current)"
+prove_fails "doubles subtract below zero" mut7 "use_sub = @current.is_a?(::Float) || " "use_sub = "
+prove_fails "NaN orders against nothing" mut8 "if unordered?(limit) || unordered?(@current) || unordered?(@step)" "if false"
+prove_fails "zero step refused" mut9 "if !at_limit && !(@step > 0)" "if false && !(@step > 0)"
+prove_fails "NaN room read as a number" mut10 "if @current.is_a?(::Float) && (unordered?(limit - @step)" "if false && (unordered?(limit - @step)"
 
 echo
 if [ "$status" -ne 0 ]; then

@@ -19,7 +19,7 @@
 #     A key the mapping spells itself wins over a merged one, wherever it is
 #     spelled; among merged mappings the first wins.
 #   * The core-schema tags `!!str`, `!!int`, `!!float`, `!!bool`, `!!null`,
-#     `!!seq` and `!!map`; any other tag is refused.
+#     `!!seq` and `!!map`, on a value or a key; any other tag is refused.
 #   * Streams: `%YAML` and `%TAG` directives are skipped, `---` opens a
 #     document and `...` ends one. `parse_all` answers every document;
 #     `parse` answers the first (nil for an empty stream) after checking the
@@ -30,22 +30,27 @@
 #     `Int64`; `1.5`, `.5`, `7.`, `1e3`, `1.0e+20`, `.inf`, `-.inf`, `.nan`
 #     are `Float64`; a decimal integer past the `Int64` range is read as a
 #     `Float64`; everything else is a `String`. So `yes`, `no`, `on`,
-#     `off`, `0777`, `1_000`, `1.2.3`, `22:30` and `2001-12-14` are strings
-#     here, where a 1.1 reader would make some of them booleans, octal
-#     numbers, or a timestamp. Keys resolve the same way: `1: one` has the
-#     `Int64` key 1, `true: x` the `Bool` key true.
+#     `off`, `1_000`, `1.2.3`, `22:30` and `2001-12-14` are strings here,
+#     and `0777` is the decimal 777, where a 1.1 reader would make some of
+#     them booleans, octal numbers, or a timestamp. Keys resolve the same
+#     way: `1: one` has the `Int64` key 1, `true: x` the `Bool` key true.
 #
 # What it refuses, each with a sentence that says where:
-#   a tab in indentation, a control character, a quoted string that does
+#   a UTF-16 stream (named by its byte order mark), a tab in indentation,
+#   a control character (C0, DEL or C1, but tab and U+0085) or the
+#   noncharacter U+FFFE or U+FFFF, anywhere, a quoted string that does
 #   not close, a flow collection that does not close, an unknown escape or
 #   an escape that names a surrogate, a mapping entry or sequence entry at
 #   an indentation that belongs to nothing, text after a value on its
-#   line, a value whose text is not a node, a duplicate key (the second
-#   spelling of a key is a mistake, not an override), an alias to an
-#   anchor that is not defined or is still being built (a cycle), aliases
-#   that together expand to more than ALIAS_NODE_LIMIT nodes (the
-#   "billion laughs" stream), a merge whose value is not a mapping or a
-#   sequence of mappings, an explicit `?` key, an anchor on a key, a tag it
+#   line, a value whose text is not a node, a duplicate key, a second `<<`
+#   among them (the second spelling of a key is a mistake, not an
+#   override; `<<: [*a, *b]` merges two), an alias to an anchor that is
+#   not defined or is still being built (a cycle), aliases that together
+#   expand to more than ALIAS_NODE_LIMIT nodes (the "billion laughs"
+#   stream), a merge whose value is not a mapping or a sequence of
+#   mappings, an explicit `?` key, an anchor or an alias on a block
+#   mapping's key (a flow mapping's key may carry either), a collection
+#   as a key, a second tag or a second anchor on one node, a tag it
 #   does not know (the verbatim `!<tag:yaml.org,2002:str>` spellings of
 #   the core tags are known), a directive not followed by `---`, and
 #   nesting past DEPTH_LIMIT levels.
@@ -53,8 +58,17 @@
 # `YAML.parse?` answers nil for any of these; `YAML.parse` panics with the
 # sentence. `YAML.dump` writes a value back as block YAML that this parser
 # reads to an equal value: numbers, booleans and nil stay what they are as
-# values and as keys, and a string that would read as something else is
-# quoted. A collection cannot be written as a key.
+# values and as keys, a string that would read as something else is
+# quoted, and a character a reader would not take raw (a control, a byte
+# order mark, a 1.1 line break) is escaped. "Something else" includes what
+# a YAML 1.1 reader makes of it, since PyYAML is what reads most of these
+# files on the other end: `yes`, `off`, `=` and anything starting with a
+# digit are quoted too. A collection cannot be written as a key.
+#
+# `derive yaml_serializable` makes a type read and write itself as a
+# mapping, a key per field, as std/json's `derive serializable` does for
+# JSON; `YAML.to_yaml`, `YAML.from_yaml`, `YAML.to_any` and
+# `YAML.read_value` are what it writes with.
 #
 # `Any` holds a document: `raw` is the union, `as_x`/`as_x?` are the
 # pairs, `[]`/`[]?`/`dig`/`dig?` walk it, `==` is structural and `hash`
@@ -234,11 +248,16 @@ pub struct Any
     self[Any.new(key)]?
   end
 
+  # An Int32 indexes a sequence and reaches an integer key of a mapping:
+  # `1: one` has the `Int64` key 1, and `doc[1]` panicked "expected a
+  # sequence, not a mapping" while `[]?` and `dig?` answered nil.
   def [](index : Int32) : Any
+    return self[Any.new(index)] if kind == KIND_HASH
     as_a[index]
   end
 
   def []?(index : Int32) : Any?
+    return self[Any.new(index)]? if kind == KIND_HASH
     a = as_a?
     return nil if a.nil?
     a[index]?
@@ -313,22 +332,26 @@ pub struct Any
   end
 
   # Agrees with `==`: the same kind and value hash the same, a mapping's
-  # hash does not depend on its order, and `0.0`/`-0.0` share one.
+  # hash does not depend on its order, and `0.0`/`-0.0` share one. A
+  # sequence mixes its items as an `Array` does, a mapping sums one mixed
+  # tuple hash per pair, and an integer hashes as an `Int64`. `31 * h +
+  # item`, a sum of `31 * key + value` and the integer's own low bits
+  # gave a 150 by 150 grid of `[i, j]` 4,769 hashes and of `{x: i, y: j}`
+  # 299, `{a: 1, b: 2}` the hash of `{a: 2, b: 1}` and -1 that of 0, and
+  # 40,000 such mappings took 987 ms to insert as keys; they take 19 ms.
   def hash : Int32
     k = kind
     if k == KIND_ARRAY
-      value = 7
-      @raw.as(Array(Any)).each { |item| value = (value &* 31) &+ item.hash }
-      value
+      @raw.as(Array(Any)).hash
     elsif k == KIND_HASH
-      value = 11
-      @raw.as(Hash(Any, Any)).each { |key, item| value = value &+ ((key.hash &* 31) &+ item.hash) }
-      value
+      pairs = @raw.as(Hash(Any, Any))
+      value = 0
+      pairs.each { |key, item| value = value &+ {key, item}.hash }
+      {value, pairs.size}.hash
     elsif k == KIND_STRING
       @raw.as(String).hash
     elsif k == KIND_INT
-      v = @raw.as(Int64)
-      ((v ^ (v >> 32)) & 0x7FFFFFFF_i64).to_i32
+      @raw.as(Int64).hash
     elsif k == KIND_FLOAT
       f = @raw.as(Float64)
       return 3 if f == 0.0
@@ -418,6 +441,16 @@ class ByteBuffer
     room(@size + count)
     (@bytes + @size).copy_from(source, count)
     @size = @size + count
+  end
+
+  # The byte at `index`, which is below `size`.
+  def [](index : Int32) : UInt8
+    @bytes[index]
+  end
+
+  # Keeps the first `count` bytes, in place.
+  def truncate(count : Int32) : Nil
+    @size = count if count < @size
   end
 
   def spaces(count : Int32) : Nil
@@ -574,7 +607,13 @@ end
 # Reads one stream. Every failure is recorded once in `@error` and every
 # loop returns as soon as one is recorded; nothing is raised inside.
 pub class Parser
-  DEPTH_LIMIT = 256
+  # Deep enough for any document a person wrote, and shallow enough for a
+  # task's 256 KB stack: at 256 a task parsing a 256-deep flow sequence,
+  # or comparing two 128 deep, died of a stack overflow that took the
+  # whole process - a config a server reads in a handler, say. At 100 a
+  # plain build parses, compares, prints, hashes and dumps the deepest in
+  # a task with room to spare.
+  DEPTH_LIMIT = 100
   # How many nodes aliases may add to a stream, counted as they are
   # expanded; the sentence below spells the same number.
   ALIAS_NODE_LIMIT = 1_000_000_i64
@@ -600,7 +639,18 @@ pub class Parser
   @expanded : Int64
   @anchor_sizes : Hash(String, Int64)
   @open_sizes : Array(Int64)
+  # Collections open now, and per anchor how deep its value nests: the
+  # deepest `@peak` reached while it was open, past the depth it opened
+  # at. An alias counts as its anchor's value written out in its place,
+  # as a merge written out is counted, so `@depth` plus that is what
+  # DEPTH_LIMIT bounds. Counting only the text, `aN: &aN [*aN-1]` was
+  # two levels a line and N as built: 110 such lines parsed in a task,
+  # and `==` on the last value then took the process down with a stack
+  # overflow.
   @depth : Int32
+  @peak : Int32
+  @anchor_depths : Hash(String, Int32)
+  @open_peaks : Array(Int32)
   @buffer : ByteBuffer
 
   def initialize(text : String)
@@ -619,6 +669,9 @@ pub class Parser
     @anchor_sizes = Hash(String, Int64).new
     @open_sizes = [] of Int64
     @depth = 0
+    @peak = 0
+    @anchor_depths = Hash(String, Int32).new
+    @open_peaks = [] of Int32
     @buffer = ByteBuffer.new
     split_lines
   end
@@ -662,15 +715,22 @@ pub class Parser
       # document starts here or on a later blank-free line.
       @anchors = Hash(String, Any).new
       @anchor_sizes = Hash(String, Int64).new
+      @anchor_depths = Hash(String, Int32).new
       docs << node
       implicit_allowed = false
       skip_blank_lines
       break if @line >= @starts.size
       if marker?(@line, 46_u8)
-        pos = skip_blank(@starts[@line] + 3)
-        expect_line_end(pos)
-        return nil if @error
-        @line = @line + 1
+        # A document's end may be marked more than once, as libyaml reads
+        # it: the second `...` was refused as "a document end marker with
+        # no document".
+        while @line < @starts.size && marker?(@line, 46_u8)
+          pos = skip_blank(@starts[@line] + 3)
+          expect_line_end(pos)
+          return nil if @error
+          @line = @line + 1
+          skip_blank_lines
+        end
         implicit_allowed = true
       elsif !marker?(@line, 45_u8)
         refuse_stray(@line)
@@ -683,18 +743,21 @@ pub class Parser
   # ------------------------------------------------------------------
   # Lines
 
-  # The first control character is remembered and refused once every
+  # The first character the stream may not hold raw (a control or a
+  # noncharacter: see `unprintable`) is remembered and refused once every
   # line is known, since the sentence needs the line table to say where.
   private def split_lines : Nil
     at = 0
     at = 3 if @size >= 3 && @bytes[0] == 0xEF_u8 && @bytes[1] == 0xBB_u8 && @bytes[2] == 0xBF_u8
     control = -1
+    point = 0
     while at <= @size
       start = at
       while at < @size && @bytes[at] != 10_u8 && @bytes[at] != 13_u8
         b = @bytes[at]
-        if control < 0 && ((b < 32_u8 && b != 9_u8) || b == 127_u8)
-          control = at
+        if control < 0 && (b < 32_u8 || b == 127_u8 || b == 0xC2_u8 || b == 0xEF_u8)
+          point = unprintable(at)
+          control = at if point >= 0
         end
         at = at + 1
       end
@@ -719,17 +782,40 @@ pub class Parser
         break
       end
     end
-    if control >= 0
-      b = @bytes[control].to_i32
+    # A UTF-16 stream opens with its byte order mark, FF FE or FE FF -
+    # what Windows PowerShell 5.1's `Out-File` and `>` write - and was
+    # refused as "control character U+0000" at its first ASCII character.
+    if @size >= 2 && ((@bytes[0] == 0xFF_u8 && @bytes[1] == 0xFE_u8) || (@bytes[0] == 0xFE_u8 && @bytes[1] == 0xFF_u8))
+      fail("encoding 'UTF-16' is not supported: the input is read as UTF-8", 0)
+    elsif control >= 0
       digits = "0123456789ABCDEF"
       name = String.new(4) do |t|
-        t[0] = 48_u8
-        t[1] = 48_u8
-        t[2] = digits.to_unsafe[b >> 4]
-        t[3] = digits.to_unsafe[b & 15]
+        t[0] = digits.to_unsafe[(point >> 12) & 15]
+        t[1] = digits.to_unsafe[(point >> 8) & 15]
+        t[2] = digits.to_unsafe[(point >> 4) & 15]
+        t[3] = digits.to_unsafe[point & 15]
       end
-      fail("control character U+#{name} is not allowed", control)
+      what = point >= 0xFFFE ? "noncharacter" : "control character"
+      fail("#{what} U+#{name} is not allowed", control)
     end
+  end
+
+  # The code point at `pos` if it is one a stream may not hold raw, or -1:
+  # a C0 control but tab, DEL, a C1 control but U+0085 (a line break to a
+  # 1.1 reader, text to 1.2), and the noncharacters U+FFFE and U+FFFF, as
+  # libyaml refuses them. The C1 controls and U+FFFE were read as text, so
+  # `a: b\u009B31mc` held a terminal escape the header said was refused.
+  private def unprintable(pos : Int32) : Int32
+    b = @bytes[pos]
+    return b.to_i32 if (b < 32_u8 && b != 9_u8) || b == 127_u8
+    if b == 0xC2_u8 && pos + 1 < @size
+      c = @bytes[pos + 1]
+      return c.to_i32 if c >= 0x80_u8 && c <= 0x9F_u8 && c != 0x85_u8
+    elsif b == 0xEF_u8 && pos + 2 < @size && @bytes[pos + 1] == 0xBF_u8
+      d = @bytes[pos + 2]
+      return d.to_i32 - 0xBE + 0xFFFE if d == 0xBE_u8 || d == 0xBF_u8
+    end
+    -1
   end
 
   private def indent_of(line : Int32) : Int32
@@ -960,10 +1046,10 @@ pub class Parser
   # then an alias, a quoted or plain scalar, a flow collection, a block
   # scalar, or (after properties alone) the block node on the lines below.
   # Requires the rest of the value's last line to be empty and steps past
-  # it.
-  private def parse_inline_node(pos : Int32, parent : Int32, sequence_at_parent : Bool) : Any
+  # it. `outer_tag` is a tag that stood alone on the line above.
+  private def parse_inline_node(pos : Int32, parent : Int32, sequence_at_parent : Bool, outer_tag : String? = nil) : Any
     anchor = nil.as(String?)
-    tag = nil.as(String?)
+    tag = outer_tag
     anchor_pos = pos
     while true
       b = pos < @ends[@line] ? @bytes[pos] : 0_u8
@@ -977,6 +1063,10 @@ pub class Parser
         return Any.new(nil) if @error
         pos = skip_blank(finish)
       elsif b == 33_u8 # !
+        # A node has one tag, as it has one anchor: `!!str !!int 1` read
+        # as the integer, the first tag dropped.
+        fail("a second tag", pos) unless tag.nil?
+        return Any.new(nil) if @error
         finish = tag_end(pos, @ends[@line])
         tag = tag_text(pos, finish)
         fail("unknown tag #{tag}", pos) unless tag.nil? || known_tag?(tag)
@@ -991,18 +1081,41 @@ pub class Parser
     if line_end?(pos)
       # Properties alone on the line: the node is below.
       @line = @line + 1
-      value = parse_block_node(parent, sequence_at_parent)
-      value = apply_tag(tag, value, anchor_pos)
+      if tag.nil? || tag == "!!seq" || tag == "!!map"
+        value = parse_block_node(parent, sequence_at_parent)
+        value = apply_tag(tag, value, anchor_pos)
+      else
+        # A scalar tag is checked against the text below as written, and
+        # with nothing below it tags the empty scalar. Both went through
+        # the node below once resolved: `a: !!str` was refused as "!!str
+        # on null" and `!!str` over a `1` on the next line as "on an
+        # integer".
+        skip_blank_lines
+        empty = @line >= @starts.size || document_marker?(@line)
+        if !empty && indent_of(@line) <= parent
+          empty = !(sequence_at_parent && indent_of(@line) == parent && sequence_entry?(@line))
+        end
+        if empty
+          value = apply_tag(tag, Any.new(""), anchor_pos)
+        elsif sequence_entry?(@line) || key_colon(@line) >= 0
+          value = apply_tag(tag, parse_block_node(parent, sequence_at_parent), anchor_pos)
+        else
+          refuse_tab(@line)
+          value = parse_inline_node(@heads[@line], parent, sequence_at_parent, tag) if @error.nil?
+        end
+      end
     else
-      if pos != anchor_pos
-        # Properties in front of what would otherwise be a key: `&a k: v`.
+      unless anchor.nil?
+        # An anchor in front of what would otherwise be a key: `&a k: v`.
         # key_colon looks from the line's head; look from the properties.
+        # A tag alone goes on, as tags on keys are read: `k: !!str x: y`
+        # is a mapping value where none may be, below.
         saved = @heads[@line]
         @heads[@line] = anchor_pos
         is_key = key_colon(@line) >= 0
         @heads[@line] = saved
         if is_key
-          fail("an anchor or tag on a mapping key is not supported", anchor_pos)
+          fail("an anchor on a mapping key is not supported", anchor_pos)
           return Any.new(nil)
         end
       end
@@ -1011,6 +1124,13 @@ pub class Parser
     end
     close_anchor(anchor, value)
     value
+  end
+
+  # `@` and `` ` `` are reserved, `%` starts a directive, and `]`, `}` and
+  # `,` end or part flow entries: a scalar cannot start with one, a value
+  # or a key.
+  private def plain_first_refused?(b : UInt8) : Bool
+    b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8
   end
 
   private def parse_inline_value(pos : Int32, parent : Int32, tag : String?) : Any
@@ -1045,8 +1165,23 @@ pub class Parser
       expect_line_end(@flow_end)
       return apply_tag(tag, Any.new(text), pos)
     end
-    if b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8 || b == 63_u8
+    # `?` and `-` start a plain scalar unless a blank follows them: `?a`
+    # is text (it was refused, and the emitter writes it plain), while
+    # `- b` after a key is a sequence entry where none may start (it was
+    # read as the text "- b").
+    lone = pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1])
+    if plain_first_refused?(b)
       fail("a scalar cannot start with '#{b.unsafe_chr}'", pos)
+      return Any.new(nil)
+    end
+    # `? a` is an explicit key, as on a mapping's later lines; on the
+    # first it was refused as "a scalar cannot start with '?'".
+    if b == 63_u8 && lone
+      fail("an explicit '?' key is not supported", pos)
+      return Any.new(nil)
+    end
+    if b == 45_u8 && lone
+      fail("a sequence entry is not allowed here", pos)
       return Any.new(nil)
     end
     text = parse_plain_block(pos, parent)
@@ -1098,6 +1233,7 @@ pub class Parser
     @nodes = @nodes + 1
     pairs = Hash(Any, Any).new
     spelled = Hash(Any, Bool).new
+    merged = false
     result = Any.new(pairs)
     enter(@heads[@line])
     return result if @error
@@ -1119,8 +1255,8 @@ pub class Parser
       end
       colon = key_colon(@line)
       if colon < 0
-        if @bytes[key_pos] == 38_u8 || @bytes[key_pos] == 33_u8
-          fail("an anchor or tag on a mapping key is not supported", key_pos)
+        if @bytes[key_pos] == 38_u8
+          fail("an anchor on a mapping key is not supported", key_pos)
         else
           fail("expected a mapping key", key_pos)
         end
@@ -1128,21 +1264,49 @@ pub class Parser
       end
       merge = false
       key = Any.new(nil)
-      b = @bytes[key_pos]
-      if b == 34_u8 || b == 39_u8
-        key = Any.new(parse_quoted(key_pos, indent, false))
-      elsif b == 42_u8 || b == 38_u8 || b == 33_u8
-        fail("an alias, anchor or tag as a mapping key is not supported", key_pos)
-      else
-        finish = colon
-        while finish > key_pos && blank_byte?(@bytes[finish - 1])
-          finish = finish - 1
-        end
-        text = String.new(finish - key_pos) { |t| t.copy_from(@bytes + key_pos, finish - key_pos) }
-        merge = text == "<<"
-        key = Scalar.resolve(text)
+      # A core tag on a key is read as on a value: `!!str a: b` was
+      # refused as "an alias, anchor or tag as a mapping key", where the
+      # header refused only an anchor; PyYAML and ruamel read {a: b}.
+      tag = nil.as(String?)
+      text_pos = key_pos
+      while @error.nil? && @bytes[text_pos] == 33_u8
+        # One tag, as on any node: `!!str !!int a: b` kept the later.
+        fail("a second tag", text_pos) unless tag.nil?
+        break if @error
+        finish = tag_end(text_pos, @ends[@line])
+        tag = tag_text(text_pos, finish)
+        fail("unknown tag #{tag}", text_pos) unless known_tag?(tag)
+        text_pos = skip_blank(finish)
       end
       break if @error
+      b = @bytes[text_pos]
+      if b == 34_u8 || b == 39_u8
+        key = Any.new(parse_quoted(text_pos, indent, false))
+      elsif b == 42_u8
+        fail("an alias as a mapping key is not supported", text_pos)
+      elsif b == 38_u8
+        fail("an anchor on a mapping key is not supported", text_pos)
+      elsif plain_first_refused?(b)
+        # `]: 1`, `}: 1` and `,: 1` were read as the keys "]", "}" and ",".
+        fail("a scalar cannot start with '#{b.unsafe_chr}'", text_pos)
+      else
+        finish = colon
+        while finish > text_pos && blank_byte?(@bytes[finish - 1])
+          finish = finish - 1
+        end
+        text = String.new(finish - text_pos) { |t| t.copy_from(@bytes + text_pos, finish - text_pos) }
+        merge = tag.nil? && text == "<<"
+        key = tag.nil? ? Scalar.resolve(text) : Any.new(text)
+      end
+      key = apply_tag(tag, key, key_pos)
+      break if @error
+      # `<<` is spelled once, as any key is: a second merged as well,
+      # where ruamel refuses it, and `<<: [*a, *b]` merges two.
+      if merge && merged
+        fail("duplicate key #{key.inspect}", key_pos)
+        break
+      end
+      merged = merged || merge
       if !merge && spelled.has_key?(key)
         fail("duplicate key #{key.inspect}", key_pos)
         break
@@ -1190,6 +1354,13 @@ pub class Parser
     else
       fail("a merge value must be a mapping or a sequence of mappings", pos)
     end
+  end
+
+  # A flow key at `pos` that read to `key` is a merge when it is the plain
+  # scalar `<<`: not quoted, no properties in front (`!!str <<` starts
+  # with `!`).
+  private def merge_key?(pos : Int32, key : Any) : Bool
+    @bytes[pos] == 60_u8 && key.kind == Any::KIND_STRING && key.as_s == "<<"
   end
 
   # ------------------------------------------------------------------
@@ -1288,6 +1459,9 @@ pub class Parser
     blanks = 0
     look = @line + 1
     while look < @starts.size
+      # A comment after the text ends the scalar: `a: b # c` over an
+      # indented `d` read as "b d", the comment dropped from its middle.
+      break if skip_blank(@flow_end) < @ends[@line]
       break if document_marker?(look)
       if blank_line?(look)
         # A comment line ends the scalar; whitespace-only lines fold.
@@ -1298,20 +1472,16 @@ pub class Parser
         next
       end
       break if indent_of(look) <= parent
-      if @tabbed[look]
-        fail("tab used for indentation", @heads[look])
-        break
-      end
-      if sequence_entry?(look)
-        fail("bad indentation of a sequence entry", @heads[look])
-        break
-      end
+      # Past the indentation, a continuation line is text even when it
+      # opens with a tab or with `- `: `a: b\n  - c` is "b - c" and
+      # `a: b\n  \tc` is "b c". Both were refused, as a sequence entry
+      # and as a tab in the indentation.
       if key_colon(look) >= 0
         fail("bad indentation of a mapping entry", @heads[look])
         break
       end
       @line = look
-      start = @heads[look]
+      start = skip_blank(@heads[look])
       stop = plain_piece_end(start, false)
       if stop < @ends[look] && @bytes[stop] == 58_u8
         fail("a mapping value is not allowed here", stop)
@@ -1359,38 +1529,24 @@ pub class Parser
     opener = pos
     @buffer.clear
     at = pos + 1
-    blanks = 0
-    pending_space = false
+    # The buffer's length up to its last byte that folding must keep: a
+    # non-blank, an escape (`\t`, `\ `, `\x20` are text, not trailing
+    # blanks), or what a line break folded to.
+    hard = 0
     while true
       if at >= @ends[@line]
         # The line ended inside the string: fold onto the next line.
-        trim_trailing_blanks
-        look = @line + 1
-        while look < @starts.size && !document_marker?(look) && skip_blank(@starts[look]) >= @ends[look]
-          blanks = blanks + 1
-          look = look + 1
-        end
-        if look >= @starts.size || document_marker?(look) || (!flow && indent_of(look) <= parent)
-          fail("unterminated quoted string", opener)
-          return ""
-        end
-        if blanks == 0
-          @buffer << 32_u8 unless pending_space == false && false
-        else
-          while blanks > 0
-            @buffer << 10_u8
-            blanks = blanks - 1
-          end
-        end
-        pending_space = false
-        @line = look
-        at = skip_blank(@starts[look])
+        trim_trailing_blanks(hard)
+        at = next_quoted_line(opener, parent, flow, false)
+        return "" if @error
+        hard = @buffer.size
         next
       end
       b = @bytes[at]
       if b == quote
         if quote == 39_u8 && at + 1 < @ends[@line] && @bytes[at + 1] == 39_u8
           @buffer << 39_u8
+          hard = @buffer.size
           at = at + 2
           next
         end
@@ -1399,37 +1555,63 @@ pub class Parser
       end
       if quote == 34_u8 && b == 92_u8
         if at + 1 >= @ends[@line]
-          # Escaped line break: join with nothing.
-          trim_trailing_blanks
-          look = @line + 1
-          if look >= @starts.size || document_marker?(look) || (!flow && indent_of(look) <= parent)
-            fail("unterminated quoted string", opener)
-            return ""
-          end
-          @line = look
-          at = skip_blank(@starts[look])
+          # Escaped line break: the break is dropped and the blanks before
+          # the backslash stay (they were trimmed), and an empty line
+          # below is still a line feed (it was a refusal or a space).
+          at = next_quoted_line(opener, parent, flow, true)
+          return "" if @error
+          hard = @buffer.size
           next
         end
         at = escape(at)
         return "" if @error
+        hard = @buffer.size
         next
       end
       @buffer << b
+      hard = @buffer.size unless blank_byte?(b)
       at = at + 1
     end
     ""
   end
 
-  private def trim_trailing_blanks : Nil
-    # The buffer has no pop; rebuild without trailing blanks.
-    text = @buffer.to_s
-    count = text.bytesize
-    while count > 0 && blank_byte?(text.to_unsafe[count - 1])
+  # Past the line break a quoted scalar did not close before: writes what
+  # it folds to (a space, nothing after an escaped break, a line feed per
+  # empty line either way), moves to the next line with text and answers
+  # where that text starts.
+  private def next_quoted_line(opener : Int32, parent : Int32, flow : Bool, escaped : Bool) : Int32
+    blanks = 0
+    look = @line + 1
+    while look < @starts.size && !document_marker?(look) && skip_blank(@starts[look]) >= @ends[look]
+      blanks = blanks + 1
+      look = look + 1
+    end
+    if look >= @starts.size || document_marker?(look) || (!flow && indent_of(look) <= parent)
+      fail("unterminated quoted string", opener)
+      return 0
+    end
+    if blanks == 0
+      @buffer << 32_u8 unless escaped
+    else
+      while blanks > 0
+        @buffer << 10_u8
+        blanks = blanks - 1
+      end
+    end
+    @line = look
+    skip_blank(@starts[look])
+  end
+
+  # Drops the blanks the buffer ends with, back to `floor` at most, and
+  # in place: it was rebuilt through `to_s` at every line end, a copy of
+  # the whole scalar so far, and a quoted scalar of 20,000 lines took 4.9
+  # seconds to read where the same bytes on one line took 5 ms.
+  private def trim_trailing_blanks(floor : Int32) : Nil
+    count = @buffer.size
+    while count > floor && blank_byte?(@buffer[count - 1])
       count = count - 1
     end
-    return if count == text.bytesize
-    @buffer.clear
-    @buffer.append(text.to_unsafe, count)
+    @buffer.truncate(count)
   end
 
   # `at` is the backslash; appends the escape and answers where it ends.
@@ -1488,17 +1670,20 @@ pub class Parser
       fail("unknown escape '\\#{e.unsafe_chr}'", at)
       return at + 2
     end
+    # Short of its digits, the escape says what it wants: `"C:\Users\bob"`
+    # - a Windows path - was "unknown escape '\U'", which `\U` is not.
+    wants = "escape '\\#{e.unsafe_chr}' wants #{digits} hexadecimal digits: a backslash in double quotes is '\\\\', or single-quote the scalar"
     point = 0
     i = 0
     while i < digits
       p = at + 2 + i
       if p >= @ends[@line]
-        fail("unknown escape '\\#{e.unsafe_chr}'", at)
+        fail(wants, at)
         return at + 2
       end
       d = @bytes[p].unsafe_chr.to_i?(16)
       if d.nil?
-        fail("unknown escape '\\#{e.unsafe_chr}'", at)
+        fail(wants, at)
         return at + 2
       end
       point = point * 16 + d
@@ -1543,30 +1728,51 @@ pub class Parser
     if explicit > 0
       indent = parent < 0 ? explicit : parent + explicit
     else
+      # The first line with text sets the indentation, or an empty line
+      # before it with more spaces: the text line is then less indented
+      # and ends the scalar (a comment there is a trailing comment). Only
+      # the text line counted, and the empty lines' extra spaces went
+      # missing (see below). Indentation is spaces alone, as `@heads`
+      # has it, and a tab after them is text: counted, it made a first
+      # line ` \tbar` two columns deep, so the line ended its own scalar
+      # and was refused as "tab used for indentation".
       look = @line + 1
       while look < @starts.size
-        content = skip_blank(@starts[look])
+        content = @heads[look]
         if content < @ends[look]
-          indent = content - @starts[look]
+          indent = content - @starts[look] if content - @starts[look] > indent
           break
         end
+        spaces = 0
+        while @starts[look] + spaces < @ends[look] && @bytes[@starts[look] + spaces] == 32_u8
+          spaces = spaces + 1
+        end
+        indent = spaces if spaces > indent
         look = look + 1
       end
+      # At the root (`parent` -1) the text may start at the first column,
+      # where a document marker ends it (below). A floor of 1 there
+      # refused `--- |\nfoo` as "unexpected content" and read `|\n#x` as
+      # "", the line taken for a comment after an empty scalar.
       floor = parent + 1
-      floor = 1 if floor < 1
       indent = floor if indent < floor
     end
     lines = [] of String
     look = @line + 1
     last_content = @line
     while look < @starts.size
+      break if document_marker?(look)
       start = @starts[look]
       finish = @ends[look]
       spaces = 0
       while start + spaces < finish && @bytes[start + spaces] == 32_u8
         spaces = spaces + 1
       end
-      if start + spaces >= finish
+      # A line of spaces past the indentation is text (those spaces); it
+      # was read as an empty line. The line after a final line break is
+      # no line at all; read as one, it added a line feed under `+`.
+      if start + spaces >= finish && spaces <= indent
+        break if finish >= @size
         lines << ""
         look = look + 1
         next
@@ -1607,7 +1813,13 @@ pub class Parser
         end
         more = blank_byte?(text.to_unsafe[0])
         if first
+          # Empty lines before the first text are line feeds; they were
+          # dropped.
           first = false
+          while blanks > 0
+            @buffer << 10_u8
+            blanks = blanks - 1
+          end
         elsif previous_more || more
           @buffer << 10_u8
           while blanks > 0
@@ -1627,14 +1839,18 @@ pub class Parser
         @buffer << text
       end
     end
+    # The final line break is the one after the last text line: a stream
+    # that ends on that line has none to keep or clip, and `|` over `x`
+    # with no line break after it is "x", not "x\n".
+    final = lines.size > 0 && @ends[last_content] < @size
     if chomp == 1
-      @buffer << 10_u8 if lines.size > 0
+      @buffer << 10_u8 if final
       while trailing > 0
         @buffer << 10_u8
         trailing = trailing - 1
       end
     elsif chomp == 0
-      @buffer << 10_u8 if lines.size > 0
+      @buffer << 10_u8 if final
     end
     Any.new(@buffer.to_s)
   end
@@ -1686,20 +1902,36 @@ pub class Parser
       item = parse_flow_node(pos)
       break if @error
       pos = skip_flow_space(@flow_end)
-      if pos >= 0 && @bytes[pos] == 58_u8 && value_indicator?(pos, true, @ends[@line])
+      # After a quoted key the `:` needs no blank, as in a flow mapping:
+      # `["a":b]` was refused.
+      quoted_key = @bytes[item_pos] == 34_u8 || @bytes[item_pos] == 39_u8
+      if pos >= 0 && @bytes[pos] == 58_u8 && (quoted_key || value_indicator?(pos, true, @ends[@line]))
         # `[key: value]`: a one-pair mapping.
+        # As in a flow mapping: `[[a]: b]` read to a mapping with a
+        # sequence key, which `dump` then panicked on.
+        if item.kind == Any::KIND_ARRAY || item.kind == Any::KIND_HASH
+          fail("a collection cannot be a mapping key", item_pos)
+          break
+        end
         pair = Hash(Any, Any).new
         pos = skip_flow_space(pos + 1)
         if pos < 0
           fail("unterminated flow sequence", opener)
           break
         end
-        if @bytes[pos] == 44_u8 || @bytes[pos] == 93_u8
-          pair[item] = Any.new(nil)
-        else
-          pair[item] = parse_flow_node(pos)
+        value = Any.new(nil)
+        unless @bytes[pos] == 44_u8 || @bytes[pos] == 93_u8
+          value = parse_flow_node(pos)
           break if @error
           pos = skip_flow_space(@flow_end)
+        end
+        # `[<<: {a: 1}]` merges like any mapping's `<<`; it was the
+        # string key "<<".
+        if merge_key?(item_pos, item)
+          merge_into(pair, value, item_pos)
+          break if @error
+        else
+          pair[item] = value
         end
         item = Any.new(pair)
       end
@@ -1726,6 +1958,7 @@ pub class Parser
   private def parse_flow_mapping(opener : Int32) : Any
     pairs = Hash(Any, Any).new
     spelled = Hash(Any, Bool).new
+    merged = false
     result = Any.new(pairs)
     enter(opener)
     return result if @error
@@ -1750,7 +1983,6 @@ pub class Parser
         fail("an explicit '?' key is not supported", pos)
         break
       end
-      merge = b == 60_u8 && pos + 2 < @ends[@line] && @bytes[pos + 1] == 60_u8 && value_indicator?(pos + 2, true, @ends[@line])
       key = parse_flow_node(pos)
       break if @error
       kk = key.kind
@@ -1758,6 +1990,15 @@ pub class Parser
         fail("a collection cannot be a mapping key", key_pos)
         break
       end
+      # The key is the plain scalar `<<` however it is followed: `{<< : x}`
+      # and `{<<}` were the string key "<<", where `{<<: x}` merged.
+      merge = merge_key?(key_pos, key)
+      # `<<` is spelled once here too, as in a block mapping.
+      if merge && merged
+        fail("duplicate key #{key.inspect}", key_pos)
+        break
+      end
+      merged = merged || merge
       if !merge && spelled.has_key?(key)
         fail("duplicate key #{key.inspect}", key_pos)
         break
@@ -1814,6 +2055,10 @@ pub class Parser
     while true
       b = @bytes[pos]
       if b == 38_u8
+        # One anchor and one tag, as in block context: `[&a &b 1]`
+        # dropped `&a` and `[!!int !!str 1]` the `!!int`.
+        fail("a second anchor", pos) unless anchor.nil?
+        return Any.new(nil) if @error
         anchor_pos = pos
         finish = name_end(pos + 1, @ends[@line])
         anchor = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
@@ -1821,6 +2066,8 @@ pub class Parser
         return Any.new(nil) if @error
         pos = skip_flow_space(finish)
       elsif b == 33_u8
+        fail("a second tag", pos) unless tag.nil?
+        return Any.new(nil) if @error
         finish = tag_end(pos, @ends[@line])
         tag = tag_text(pos, finish)
         fail("unknown tag #{tag}", pos) unless tag.nil? || known_tag?(tag)
@@ -1849,22 +2096,74 @@ pub class Parser
       name = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
       value = resolve_alias(name, pos)
       @flow_end = finish
-    elsif b == 44_u8 || b == 93_u8 || b == 125_u8 || b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 124_u8 || b == 62_u8
+    elsif (b == 44_u8 || b == 93_u8 || b == 125_u8) && !(anchor.nil? && tag.nil?)
+      # Properties over nothing are the empty scalar: `[!!str ]` is [""]
+      # and `[&a ]` is [nil]. They were refused as a missing value.
+      value = tag.nil? ? Any.new(nil) : Any.new("")
+      @flow_end = pos
+    elsif (b == 63_u8 || b == 45_u8) && (pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1]) ||
+          (b == 63_u8 && (@bytes[pos + 1] == 44_u8 || @bytes[pos + 1] == 93_u8 || @bytes[pos + 1] == 125_u8)))
+      # `[? a]` is an explicit key and `[- a]` a block entry where none
+      # may be; both were read as the strings "? a" and "- a".
+      if b == 63_u8
+        fail("an explicit '?' key is not supported", pos)
+      else
+        fail("a sequence entry is not allowed here", pos)
+      end
+    elsif b == 44_u8 || b == 93_u8 || b == 125_u8 || b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 124_u8 || b == 62_u8 || b == 35_u8
+      # A `#` with no blank before it is no comment, and no scalar starts
+      # with it either: `[1,#c` read the string "#c".
       fail("a value was expected", pos)
     else
-      stop = plain_piece_end(pos, true)
-      if stop == pos
+      if plain_piece_end(pos, true) == pos
         fail("a value was expected", pos)
       else
-        text = String.new(stop - pos) { |t| t.copy_from(@bytes + pos, stop - pos) }
+        text = parse_plain_flow(pos)
         value = tag.nil? ? Scalar.resolve(text) : Any.new(text)
-        @flow_end = stop
       end
     end
     return Any.new(nil) if @error
     value = apply_tag(tag, value, anchor_pos)
     close_anchor(anchor, value)
     value
+  end
+
+  # A plain scalar in a flow collection, folded across the lines below
+  # while each line it is on ends with it: a space, or a line feed per
+  # empty line, as in block context. A comment, a flow indicator or a
+  # value indicator ends it. It stopped at the line end, so `[a\n b]`
+  # was refused for want of a `,`. Leaves `@flow_end` after it.
+  private def parse_plain_flow(pos : Int32) : String
+    @buffer.clear
+    stop = plain_piece_end(pos, true)
+    @buffer.append(@bytes + pos, stop - pos)
+    @flow_end = stop
+    while skip_blank(stop) >= @ends[@line]
+      blanks = 0
+      look = @line + 1
+      while look < @starts.size && !document_marker?(look) && skip_blank(@starts[look]) >= @ends[look]
+        blanks = blanks + 1
+        look = look + 1
+      end
+      break if look >= @starts.size || document_marker?(look)
+      start = skip_blank(@starts[look])
+      b = @bytes[start]
+      break if b == 35_u8 || b == 44_u8 || b == 91_u8 || b == 93_u8 || b == 123_u8 || b == 125_u8
+      break if b == 58_u8 && value_indicator?(start, true, @ends[look])
+      @line = look
+      stop = plain_piece_end(start, true)
+      if blanks == 0
+        @buffer << 32_u8
+      else
+        while blanks > 0
+          @buffer << 10_u8
+          blanks = blanks - 1
+        end
+      end
+      @buffer.append(@bytes + start, stop - start)
+      @flow_end = stop
+    end
+    @buffer.to_s
   end
 
   # ------------------------------------------------------------------
@@ -1874,23 +2173,29 @@ pub class Parser
     return if name.nil?
     @open_anchors << name
     @open_sizes << @nodes
+    @open_peaks << @peak
+    @peak = @depth
   end
 
   private def close_anchor(name : String?, value : Any) : Nil
     return if name.nil?
     started = @nodes
+    peak = @peak
     if @open_anchors.size > 0
       @open_anchors.pop
       started = @open_sizes.pop
+      outer = @open_peaks.pop
+      @peak = outer if outer > @peak
     end
     return if @error
     @anchors[name] = value
     @anchor_sizes[name] = @nodes - started
+    @anchor_depths[name] = peak - @depth
   end
 
   # The anchored value, shared; the nodes it holds count as read again,
   # and once aliases have added ALIAS_NODE_LIMIT nodes the stream is
-  # refused rather than built.
+  # refused rather than built. Its levels count from where it is read.
   private def resolve_alias(name : String, pos : Int32) : Any
     if name.empty?
       fail("an alias with no name", pos)
@@ -1905,6 +2210,12 @@ pub class Parser
       fail("unknown anchor *#{name}", pos)
       return Any.new(nil)
     end
+    deepest = @depth + @anchor_depths[name]
+    if deepest > DEPTH_LIMIT
+      fail("nesting deeper than #{DEPTH_LIMIT} levels", pos)
+      return Any.new(nil)
+    end
+    @peak = deepest if deepest > @peak
     size = @anchor_sizes[name]
     @nodes = @nodes + size
     @expanded = @expanded + size
@@ -1917,6 +2228,7 @@ pub class Parser
 
   private def enter(pos : Int32) : Nil
     @depth = @depth + 1
+    @peak = @depth if @depth > @peak
     fail("nesting deeper than #{DEPTH_LIMIT} levels", pos) if @depth > DEPTH_LIMIT
   end
 
@@ -2036,7 +2348,12 @@ class Emitter
     bytes = text.to_unsafe
     first = bytes[0]
     return false if blank_byte?(first) || blank_byte?(bytes[size - 1])
-    if first == 45_u8 || first == 63_u8 || first == 58_u8
+    # `?` is quoted whatever follows it: the reader refuses a plain scalar
+    # that starts with one, so `?x` dumped bare did not read back. And a
+    # byte order mark first, which the reader skips at a stream's start.
+    return false if first == 63_u8
+    return false if size >= 3 && first == 0xEF_u8 && bytes[1] == 0xBB_u8 && bytes[2] == 0xBF_u8
+    if first == 45_u8 || first == 58_u8
       return false if size == 1 || blank_byte?(bytes[1])
     elsif indicator?(first)
       return false
@@ -2047,13 +2364,36 @@ class Emitter
     while i < size
       b = bytes[i]
       return false if b < 32_u8 || b == 127_u8
+      return false if b >= 0x80_u8 && escaped_point(bytes, i, size) >= 0
       if b == 58_u8 && (i + 1 == size || blank_byte?(bytes[i + 1]))
         return false
       end
       return false if b == 35_u8 && i > 0 && blank_byte?(bytes[i - 1])
       i = i + 1
     end
+    return false if other_in_1_1?(text, bytes, size)
     Scalar.resolve(text).kind == Any::KIND_STRING
+  end
+
+  # Whether a YAML 1.1 reader takes the text for something other than a
+  # string. PyYAML 6.0.3, the reader most programs on the other end use,
+  # reads `yes`, `No`, `on` and `OFF` as booleans, `1_000`, `0b101`,
+  # `0777` (as 511) and `22:30` (as 1350) as integers, `1:30.5` as a
+  # float, `2001-12-14` as a date, and refuses `=` (its "value" tag has no
+  # constructor); written plain, each was a string here and something
+  # else there. A string whose first character after an optional sign is
+  # a digit is quoted whatever follows: every 1.1 number and timestamp
+  # starts so, and `1st` quoted reads back as the same string anywhere,
+  # where telling it from `1_000` would be a second number reader. `y` and
+  # `n` are booleans in the 1.1 type repository though PyYAML reads them
+  # as strings, so they are quoted too.
+  private def other_in_1_1?(text : String, bytes : Pointer(UInt8), size : Int32) : Bool
+    case text
+    when "y", "Y", "n", "N", "yes", "Yes", "YES", "no", "No", "NO", "on", "On", "ON", "off", "Off", "OFF", "="
+      return true
+    end
+    i = bytes[0] == 43_u8 || bytes[0] == 45_u8 ? 1 : 0
+    i < size && bytes[i] >= 48_u8 && bytes[i] <= 57_u8
   end
 
   private def indicator?(b : UInt8) : Bool
@@ -2087,6 +2427,19 @@ class Emitter
         buffer << "\\x"
         buffer << hex_digit(b.to_i32 >> 4)
         buffer << hex_digit(b.to_i32 & 15)
+      elsif b >= 0x80_u8 && escaped_point(bytes, i, text.bytesize) >= 0
+        point = escaped_point(bytes, i, text.bytesize)
+        if point < 0x100
+          buffer << "\\x"
+          i = i + 1
+        else
+          buffer << "\\u"
+          buffer << hex_digit(point >> 12)
+          buffer << hex_digit((point >> 8) & 15)
+          i = i + 2
+        end
+        buffer << hex_digit((point >> 4) & 15)
+        buffer << hex_digit(point & 15)
       else
         buffer << b
       end
@@ -2096,8 +2449,116 @@ class Emitter
     buffer.to_s
   end
 
+  # The character at `i`, when it is one written as an escape though it
+  # is not ASCII: a C1 control U+0080 to U+009F and the non-characters
+  # U+FFFE and U+FFFF (not printable, so a reader refuses them raw),
+  # U+FEFF (a byte order mark, dropped at the start of a stream: the
+  # string "\uFEFF" read back as null), and U+0085, U+2028 and U+2029
+  # (line breaks to a YAML 1.1 reader). Its code point, or -1.
+  private def escaped_point(bytes : Pointer(UInt8), i : Int32, size : Int32) : Int32
+    b = bytes[i]
+    if b == 0xC2_u8 && i + 1 < size && bytes[i + 1] >= 0x80_u8 && bytes[i + 1] <= 0x9F_u8
+      return bytes[i + 1].to_i32
+    end
+    return -1 unless i + 2 < size
+    c = bytes[i + 1]
+    d = bytes[i + 2]
+    return d.to_i32 - 0xA8 + 0x2028 if b == 0xE2_u8 && c == 0x80_u8 && (d == 0xA8_u8 || d == 0xA9_u8)
+    return 0xFEFF if b == 0xEF_u8 && c == 0xBB_u8 && d == 0xBF_u8
+    return d.to_i32 - 0xBE + 0xFFFE if b == 0xEF_u8 && c == 0xBF_u8 && (d == 0xBE_u8 || d == 0xBF_u8)
+    -1
+  end
+
   private def hex_digit(value : Int32) : UInt8
     value < 10 ? (48 + value).to_u8 : (87 + value).to_u8
+  end
+end
+
+# A type that can write itself as an `Any`. `YAML.to_yaml` and
+# `YAML.to_any` accept any value whose type implements it, as a `derive
+# yaml_serializable` type does.
+pub trait ToYAML
+  abstract def to_yaml_any : Any
+end
+
+# `derive yaml_serializable`, in a struct or class whose fields are written
+# with their types: the type reads and writes itself as a YAML mapping, a
+# key per field, named as the field is, in the order the fields are
+# written.
+#
+#     pub struct Coord
+#       getter x : Float64
+#       getter name : String
+#       derive yaml_serializable
+#     end
+#
+#     Coord.from_yaml("x: 1.5\nname: a\n").x   # => 1.5
+#     coord.to_yaml                            # => "x: 1.5\nname: a\n"
+#
+# It is std/json's `derive serializable` over YAML, field for field: a
+# value is read and written as `YAML.read_value` and `YAML.to_any` read and
+# write its type (the built-in scalars, an `Array` or `Hash` of them, an
+# `Any`, another serializable type, each of them or nil), and `to_yaml`
+# writes through `YAML.dump`, so a string that would read as something
+# else is quoted. A key the type has no field for is passed over; a field
+# with no key keeps its default when it is written with one, as does a
+# field with a default whose key holds null where its type does not admit
+# nil; a field with neither is refused by name unless its type admits nil,
+# which it then holds. Anchors, aliases and `<<` merges are the parser's,
+# so a mapping merged into another fills its fields.
+#
+# The macro is named for its format because a derive names a macro bare:
+# with std/json's `serializable` imported as well, a second `serializable`
+# was refused as "'serializable' is ambiguous here", and `derive` takes no
+# qualified name. A type that is both writes `derive serializable,
+# yaml_serializable`; what the two generate shares no method (`to_json`,
+# `from_json` and `initialize(pull)` against `to_yaml`, `from_yaml`,
+# `to_yaml_any` and `initialize(yaml)`).
+pub macro yaml_serializable(declaration)
+  impl ::Std::Yaml::ToYAML for {{ declaration[:name].id }}
+    def to_yaml_any : ::Std::Yaml::Any
+      yaml_pairs = Hash(::Std::Yaml::Any, ::Std::Yaml::Any).new
+      {% for field in declaration[:fields] %}
+        yaml_pairs[::Std::Yaml::Any.new({{ field[:name][1..] }})] = ::Std::Yaml::YAML.to_any({{ field[:name].id }})
+      {% end %}
+      ::Std::Yaml::Any.new(yaml_pairs)
+    end
+  end
+
+  def to_yaml : String
+    ::Std::Yaml::YAML.dump(to_yaml_any)
+  end
+
+  def self.from_yaml(text : String) : self
+    ::Std::Yaml::YAML.from_yaml(text, self)
+  end
+
+  def initialize(yaml : ::Std::Yaml::Any)
+    yaml_pairs = yaml.as_h? || raise "expected a mapping for #{ {{ declaration[:name] }} }, not #{yaml.kind_name}"
+    # A key that is not there is nil from `[]?`; a key holding null is an
+    # `Any` that is `null?`. Each field's type is asked of the field
+    # (`typeof`), as std/json's derive asks it, and whether it has a
+    # default is asked of the type when this method is compiled, since the
+    # declaration carries names and types only.
+    {% for field in declaration[:fields] %}
+      yaml_found_{{ field[:name][1..].id }} = yaml_pairs[::Std::Yaml::Any.new({{ field[:name][1..] }})]?
+      \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
+        {% if field[:type].nilable? %}
+          unless yaml_found_{{ field[:name][1..].id }}.nil?
+            {{ field[:name].id }} = yaml_found_{{ field[:name][1..].id }}.null? ? nil : ::Std::Yaml::YAML.read_value(yaml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }} || raise("")))
+          end
+        {% else %}
+          if !yaml_found_{{ field[:name][1..].id }}.nil? && !yaml_found_{{ field[:name][1..].id }}.null?
+            {{ field[:name].id }} = ::Std::Yaml::YAML.read_value(yaml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }}))
+          end
+        {% end %}
+      \{% elsif {{ field[:type].nilable? }} %}
+        {{ field[:name].id }} = yaml_found_{{ field[:name][1..].id }}.nil? || yaml_found_{{ field[:name][1..].id }}.null? ? nil : ::Std::Yaml::YAML.read_value(yaml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }} || raise("")))
+      \{% else %}
+        raise "YAML for #{ {{ declaration[:name] }} } has no key #{ {{ field[:name][1..] }}.inspect }" if yaml_found_{{ field[:name][1..].id }}.nil?
+        {{ field[:name].id }} = ::Std::Yaml::YAML.read_value(yaml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }}))
+      \{% end %}
+    {% end %}
   end
 end
 
@@ -2136,5 +2597,153 @@ pub struct YAML
   # Block YAML for `value`, ending in a line break.
   def self.dump(value : Any) : String
     Emitter.new.dump(value)
+  end
+
+  # Block YAML for any value `to_any` knows, written as `dump` writes it.
+  def self.to_yaml(obj : T) : String forall T
+    dump(to_any(obj))
+  end
+
+  # The document `text` holds, read into `type`: `Nil`, `Bool`, `Int32`,
+  # `Int64`, `UInt8`, `UInt64`, `Float64`, `String`, `Any`, a type with
+  # `derive yaml_serializable`, one of those or `nil`, or an `Array` or a
+  # `Hash` of those. Text that is not YAML panics as `parse` does; a value
+  # of another kind, or an integer outside the type, is refused.
+  def self.from_yaml(text : String, type : T.class) : T forall T
+    read_value(parse(text), type)
+  end
+
+  # The `Any` a value is written as: the value or `nil`, the way
+  # `JSON.to_json` takes it. A nil is taken out here, before the rest
+  # dispatches, for the reason std/json's `write_or_null` gives: handed to
+  # `write_value` whole, `Int32 | Nil` matches the `ToYAML` overload as
+  # one type and does not build.
+  def self.to_any(val : T) : Any forall T
+    if val.nil?
+      Any.new(nil)
+    else
+      write_value(val)
+    end
+  end
+
+  def self.write_value(val : Nil) : Any
+    Any.new(nil)
+  end
+
+  def self.write_value(val : Bool) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Int32) : Any
+    Any.new(val.to_i64)
+  end
+
+  def self.write_value(val : Int64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : UInt8) : Any
+    Any.new(val.to_i64)
+  end
+
+  # A YAML integer is read as an `Int64`, and one past it as a float, so a
+  # `UInt64` above 9223372036854775807 would read back as a different
+  # number: it is refused rather than written.
+  def self.write_value(val : UInt64) : Any
+    raise "the UInt64 #{val} is past 9223372036854775807, the largest integer YAML reads back" if val > 9223372036854775807_u64
+    Any.new(val.to_i64)
+  end
+
+  def self.write_value(val : Float64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : String) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Any) : Any
+    val
+  end
+
+  def self.write_value(val : Array(T)) : Any forall T
+    Any.new(val.map { |item| to_any(item) })
+  end
+
+  # A key of any type `to_any` writes as a scalar: YAML keys are typed,
+  # so `Hash(Int32, String)` is written with integer keys and reads back
+  # as itself. A collection key is refused by `dump`.
+  def self.write_value(val : Hash(K, V)) : Any forall K, V
+    pairs = Hash(Any, Any).new
+    val.each { |key, item| pairs[to_any(key)] = to_any(item) }
+    Any.new(pairs)
+  end
+
+  def self.write_value(val : T) : Any forall T : ToYAML
+    val.to_yaml_any
+  end
+
+  def self.read_value(value : Any, type : Nil.class) : Nil
+    value.as_nil
+  end
+
+  def self.read_value(value : Any, type : Bool.class) : Bool
+    value.as_bool
+  end
+
+  def self.read_value(value : Any, type : Int32.class) : Int32
+    v = value.as_i
+    raise "integer #{v} out of Int32 range" if v < -2147483648_i64 || v > 2147483647_i64
+    v.to_i32
+  end
+
+  def self.read_value(value : Any, type : Int64.class) : Int64
+    value.as_i
+  end
+
+  def self.read_value(value : Any, type : UInt8.class) : UInt8
+    v = value.as_i
+    raise "integer #{v} out of UInt8 range" if v < 0_i64 || v > 255_i64
+    v.to_u8
+  end
+
+  def self.read_value(value : Any, type : UInt64.class) : UInt64
+    v = value.as_i
+    raise "integer #{v} out of UInt64 range" if v < 0_i64
+    v.to_u64
+  end
+
+  # A float, or an integer widened to one: `y: 2` is the Float64 2.0.
+  def self.read_value(value : Any, type : Float64.class) : Float64
+    value.as_f
+  end
+
+  def self.read_value(value : Any, type : String.class) : String
+    value.as_s
+  end
+
+  def self.read_value(value : Any, type : Any.class) : Any
+    value
+  end
+
+  def self.read_value(value : Any, type : Array(T).class) : Array(T) forall T
+    value.as_a.map { |item| read_value(item, T) }
+  end
+
+  def self.read_value(value : Any, type : Hash(K, V).class) : Hash(K, V) forall K, V
+    h = Hash(K, V).new
+    value.as_h.each { |key, item| h[read_value(key, K)] = read_value(item, V) }
+    h
+  end
+
+  # A type that reads itself, the `initialize(yaml)` a `derive
+  # yaml_serializable` wrote; a type that admits nil reads null as the nil
+  # and anything else as the other type, as std/json's `read_value` does.
+  def self.read_value(value : Any, type : T.class) : T forall T
+    {% if T.nilable? %}
+      value.null? ? nil : read_value(value, typeof(nil.as(T) || raise("")))
+    {% else %}
+      T.new(value)
+    {% end %}
   end
 end

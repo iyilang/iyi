@@ -7,7 +7,10 @@
 #
 # A check that cannot fail is not a check. This script proves failure across
 # each capability: infinite sequence consumption, pipeline laziness, map,
-# select, skip, zip, chain, and flat_map.
+# select, skip, zip, chain, flat_map, a source shared with its adaptor, a
+# zip that pulls past its first source, a counting adaptor copied into the
+# adaptor built on it, a take that leaves an empty pull uncounted, and a
+# nil element read as the end.
 #
 # Exits non-zero if any check fails.
 
@@ -127,6 +130,48 @@ if ! grep -q "all iterator checks passed" "$WORK/iterator-release.out" 2>/dev/nu
 fi
 
 echo
+echo "== zip and chain take an iterator, and say so at the call"
+# `zip` and `chain` are bounded `forall O : Iterator`, as `Enumerable#zip`
+# is (SPEC.md II.6 finding 6). Unbounded, a zip with an array was refused
+# from inside std/iterator.iyi, "undefined constant O::Elem" and "Did you
+# mean 'IO'?", and a chain with one, or with another element type, from
+# `ChainIterator#next`. The refusal names the caller's line, `O` and the
+# method now, and a chain of two element types yields either, as the other
+# library's does.
+refused_at_call() { # refused_at_call <label> <name> <method> <expression>
+  local label="$1" name="$2" method="$3" expression="$4"
+  printf 'module main\n\nimport std/iterator::{Iterator, ArrayIterator}\n\nputs (%s).to_a\n' \
+    "$expression" > "$WORK/$name.iyi"
+  if IYI_PATH="$BASE_IYI_PATH" "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" \
+       > "$WORK/$name.build" 2>&1; then
+    echo "  $label: it built"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "required by \`O\` in \`$method\`" "$WORK/$name.build" ||
+     ! grep -qF -- "$name.iyi:5" "$WORK/$name.build"; then
+    echo "  $label: refused, but not at the call"
+    sed -n '1,8p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  echo "  $label: refused at the call, naming \`O\` in \`$method\`"
+}
+refused_at_call "a zip with an array" zip_array zip 'Iterator.of([1, 2]).zip([10, 20])'
+refused_at_call "a chain with an array" chain_array chain 'Iterator.of([1, 2]).chain([10, 20])'
+printf 'module main\n\nimport std/iterator::{Iterator, ArrayIterator}\n\nputs Iterator.of([1, 2]).chain(Iterator.of(["a"])).to_a\n' \
+  > "$WORK/chain_mixed.iyi"
+if IYI_PATH="$BASE_IYI_PATH" "$IYI" build -o "$WORK/chain_mixed" "$WORK/chain_mixed.iyi" \
+     > "$WORK/chain_mixed.build" 2>&1 &&
+   [ "$("$WORK/chain_mixed" | tr -d '\r')" = '[1, 2, "a"]' ]; then
+  echo '  a chain of Int32 and String yields both: [1, 2, "a"]'
+else
+  echo "  a chain of two element types did not yield both"
+  sed -n '1,8p' "$WORK/chain_mixed.build"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when an iterator mechanism is broken"
 
 prove_fails() {
@@ -165,20 +210,21 @@ prove_fails() {
 prove_fails "take limit broken" broken_take "assertion failed for infinite take" \
   's/@count < @n/@count < (@n + 1)/'
 
-# 2. Pipeline mapping broken (map iterator returns nil prematurely)
+# 2. Pipeline mapping broken (map iterator answers the end prematurely)
 prove_fails "map transform broken" broken_map "assertion failed for pipeline result" \
-  's/def next : U?/def next : U?; return nil/g'
+  's/def next : U | Stop/def next : U | Stop; return Stop.new/g'
 
 # 3. Select filtering broken (fails to loop over elements)
 prove_fails "select predicate broken" broken_select "assertion failed for pipeline result" \
-  's/while !(item = @iter\.next)\.nil?/item = @iter.next; if !item.nil?/'
+  's/until (item = @iter\.next)\.is_a?(Stop)/item = @iter.next; unless item.is_a?(Stop)/'
 # 4. Skip broken (fails to advance past requested count)
 prove_fails "skip count broken" broken_skip "assertion failed for skip" \
   's/while @skipped < @n/while @skipped < 0/'
 
-# 5. Zip broken (prematurely halts pairing)
+# 5. Zip broken (prematurely halts pairing: every pull answers as though a
+#    source had run out)
 prove_fails "zip pairing broken" broken_zip "assertion failed for zip" \
-  's/item1 = @iter1\.next/item1 = nil/'
+  's/{item1, item2}/Stop.new/'
 
 # 6. Chain broken (skips first iterator directly to second)
 prove_fails "chain sequence broken" broken_chain "assertion failed for chain" \
@@ -191,6 +237,35 @@ prove_fails "flat_map flattening broken" broken_flat_map "assertion failed for f
 # 8. Range iterator broken (yields the exclusive end)
 prove_fails "range end broken" broken_range "assertion failed for range exclusive" \
   's/elsif !@range\.exclusive? \&\& val == @range\.end/elsif val == @range.end/'
+
+# 9. Array source copied into its adaptor (a struct again)
+prove_fails "array source copied" copied_source "assertion failed for adaptor shares its array source" \
+  's/^pub class ArrayIterator(T)/pub struct ArrayIterator(T)/'
+
+# 10. Zip pulls its second source after the first ran out
+prove_fails "zip over-pulls" zip_overpull "assertion failed for zip pulls the longer source once per pair" \
+  's/^    return Stop.new if item1\.is_a?(Stop)$/    item2 = @iter2.next if item1.is_a?(Stop)\n    return Stop.new if item1.is_a?(Stop)/'
+
+# 11-15. A counting adaptor copied into the adaptor built on it (a struct
+#        again, as every stateful adaptor was)
+prove_fails "skip copied" copied_skip "assertion failed for skip keeps its count" \
+  's/^pub class SkipIterator(I, T)/pub struct SkipIterator(I, T)/'
+prove_fails "take copied" copied_take "assertion failed for take keeps its count" \
+  's/^pub class TakeIterator(I, T)/pub struct TakeIterator(I, T)/'
+prove_fails "with_index copied" copied_with_index "assertion failed for with_index keeps its count" \
+  's/^pub class WithIndexIterator(I, T)/pub struct WithIndexIterator(I, T)/'
+prove_fails "step copied" copied_step "assertion failed for step keeps its stride" \
+  's/^pub class StepIterator(I, T)/pub struct StepIterator(I, T)/'
+prove_fails "each_cons copied" copied_cons "assertion failed for each_cons keeps its window" \
+  's/^pub class ConsIterator(I, T)/pub struct ConsIterator(I, T)/'
+
+# 16. Take counts only the pulls that answered
+prove_fails "take leaves an empty pull uncounted" take_uncounted "assertion failed for a take counts an empty pull" \
+  '/^pub class TakeIterator/,/^pub class TakeWhileIterator/s/^      @iter\.next$/      took = @iter.next; @count = @count - 1 if took.is_a?(Stop); took/'
+
+# 17. A nil element read as the end, as it was when the end was nil
+prove_fails "a nil element read as the end" nil_as_end "assertion failed for a nil element is an element" \
+  's/^    until (item = self\.next)\.is_a?(Stop)$/    until (item = self.next).is_a?(Stop) || item.nil?/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "Iterator: all 27 sections pass plain and release, and each check is"

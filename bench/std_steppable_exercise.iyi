@@ -5,11 +5,9 @@
 
 module bench/std_steppable_exercise
 
-import std/steppable
-using std/steppable::{Steppable, NumericStepIterator}
+import std/steppable::{Steppable, NumericStepIterator}
 
-import std/iterator
-using std/iterator::{Iterator}
+import std/iterator::{Iterator, Stop}
 
 # User-defined type implementing Steppable trait.
 # Requires +, -, <=>, >, < for NumericStepIterator's contract.
@@ -65,10 +63,22 @@ end
 
 def collect_vals(iter : NumericStepIterator(StepInt)) : Array(Int32)
   res = [] of Int32
-  while !(x = iter.next).nil?
+  until (x = iter.next).is_a?(Stop)
     res << x.val
   end
   res
+end
+
+# What the block panicked with, or what it answered when it did not.
+def refusal(&block : -> String) : String
+  said = "nothing"
+  group do |g|
+    attempt = g.spawn { block.call }
+    outcome = attempt.value
+    said = outcome.is_a?(Panicked) ? outcome.message.to_s : "answered #{outcome}"
+    0
+  end
+  said
 end
 
 puts "== forward stepping and step of one"
@@ -128,37 +138,35 @@ assert_equal("same start and limit negative step exclusive", "[]", collect_vals(
 puts "  single-element and empty spans hold"
 
 puts "\n== zero step and direction mismatches"
-s17 = StepInt.new(1).step(to: StepInt.new(5), by: StepInt.new(0))
-assert_equal("zero step with limit", "[]", collect_vals(s17).to_s)
-
-s18 = StepInt.new(5).step(to: StepInt.new(1), by: StepInt.new(0))
-assert_equal("zero step with backward limit", "[]", collect_vals(s18).to_s)
+# A zero step is refused, as the other library refuses it ("Zero step
+# size"): it never reaches a limit and never leaves the start, and the old
+# iterator quietly yielded nothing here and the start forever below.
+assert_equal("zero step with limit", "zero step size", refusal { collect_vals(StepInt.new(1).step(to: StepInt.new(5), by: StepInt.new(0))).to_s })
+assert_equal("zero step with backward limit", "zero step size", refusal { collect_vals(StepInt.new(5).step(to: StepInt.new(1), by: StepInt.new(0))).to_s })
+assert_equal("zero Int32 step in a block", "zero step size", refusal { n = 0; 0.step(to: 10, by: 0) { |i| n = n + 1 }; n.to_s })
+assert_equal("zero Float64 step", "zero step size", refusal { 0.0.step(to: 1.0, by: 0.0).take(3).to_a.to_s })
+# Already at its limit, the walk is the start alone whatever the step.
+assert_equal("zero step at its limit", "[4]", collect_vals(StepInt.new(4).step(to: StepInt.new(4), by: StepInt.new(0))).to_s)
+assert_equal("zero step at an exclusive limit", "[]", collect_vals(StepInt.new(4).step(to: StepInt.new(4), by: StepInt.new(0), exclusive: true)).to_s)
 
 s19 = StepInt.new(1).step(to: StepInt.new(5), by: StepInt.new(-1))
 assert_equal("negative step on forward range", "[]", collect_vals(s19).to_s)
 
 s20 = StepInt.new(5).step(to: StepInt.new(1), by: StepInt.new(1))
 assert_equal("positive step on backward range", "[]", collect_vals(s20).to_s)
-puts "  zero step and mismatched directions return empty"
+puts "  a zero step is refused, mismatched directions return empty"
 
 puts "\n== open-ended stepping without limit"
 s21 = StepInt.new(10).step(by: StepInt.new(5))
 inf1 = [] of Int32
 cnt = 0
-while cnt < 4 && !(x = s21.next).nil?
+while cnt < 4 && !(x = s21.next).is_a?(Stop)
   inf1 << x.val
   cnt = cnt + 1
 end
 assert_equal("infinite step sequence", "[10, 15, 20, 25]", inf1.to_s)
 
-s22 = StepInt.new(7).step(by: StepInt.new(0))
-inf2 = [] of Int32
-cnt = 0
-while cnt < 3 && !(x = s22.next).nil?
-  inf2 << x.val
-  cnt = cnt + 1
-end
-assert_equal("infinite zero step sequence", "[7, 7, 7]", inf2.to_s)
+assert_equal("infinite zero step refused", "zero step size", refusal { 1.step(by: 0).take(3).to_a.to_s })
 puts "  open-ended stepping without limit holds"
 
 puts "\n== block iteration from trait default"
@@ -185,7 +193,7 @@ assert_int("sum of 10, 7, 4", 21, sum2.val)
 inf_iter = StepInt.new(100).step(by: StepInt.new(25))
 taken = inf_iter.take(3)
 taken_vals = [] of Int32
-while !(x = taken.next).nil?
+until (x = taken.next).is_a?(Stop)
   taken_vals << x.val
 end
 assert_equal("take on NumericStepIterator", "[100, 125, 150]", taken_vals.to_s)
@@ -195,7 +203,7 @@ puts "\n== Int32 overflow near the type's edges"
 MAX = 2147483647
 s_max = StepInt.new(MAX - 2).step(to: StepInt.new(MAX), by: StepInt.new(1))
 assert_equal("inclusive step to Int32 MAX", "[2147483645, 2147483646, 2147483647]", collect_vals(s_max).to_s)
-assert_true("next after MAX is nil", s_max.next.nil?)
+assert_true("next after MAX is the end", s_max.next.is_a?(Stop))
 
 s_max2 = StepInt.new(MAX - 1).step(to: StepInt.new(MAX), by: StepInt.new(2))
 assert_equal("step 2 near Int32 MAX", "[2147483646]", collect_vals(s_max2).to_s)
@@ -206,7 +214,7 @@ assert_equal("exclusive step near Int32 MAX", "[2147483645, 2147483646]", collec
 MIN = -2147483648
 s_min = StepInt.new(MIN + 2).step(to: StepInt.new(MIN), by: StepInt.new(-1))
 assert_equal("inclusive step to Int32 MIN", "[-2147483646, -2147483647, -2147483648]", collect_vals(s_min).to_s)
-assert_true("next after MIN is nil", s_min.next.nil?)
+assert_true("next after MIN is the end", s_min.next.is_a?(Stop))
 
 s_min2 = StepInt.new(MIN + 1).step(to: StepInt.new(MIN), by: StepInt.new(-2))
 assert_equal("step -2 near Int32 MIN", "[-2147483647]", collect_vals(s_min2).to_s)
@@ -214,5 +222,45 @@ assert_equal("step -2 near Int32 MIN", "[-2147483647]", collect_vals(s_min2).to_
 sum_empty = StepInt.new(1).step(to: StepInt.new(5), by: StepInt.new(-1)).sum(StepInt.new(99))
 assert_int("sum of empty iterator", 99, sum_empty.val)
 puts "  draining inclusive step to Int32 MAX and MIN holds, empty sum holds"
+
+# The prelude's numbers, stepped as the other library steps them: each
+# count and last value below is what Crystal 1.21 answers for the same
+# loop, the double one reached by the same additions.
+ints = 0
+0.step(to: 100, by: 7) { |i| ints = ints + 1 }
+assert_int("Int32 steps to a limit", 15, ints)
+fives = 0
+0.step(to: 10, by: 3, exclusive: true) { |i| fives = fives + 1 }
+assert_int("Int32 steps short of an exclusive limit", 4, fives)
+longs = 0
+10_i64.step(to: 0_i64, by: -2_i64) { |i| longs = longs + 1 }
+assert_int("Int64 steps down", 6, longs)
+count = 0
+last = 0.0
+1.5.step(to: -1.5, by: -0.05) { |x| count = count + 1; last = x }
+assert_int("Float64 steps down by additions", 60, count)
+assert_equal("Float64's last step is the accumulated one", "-1.4500000000000015", last.to_s)
+tenths = 0
+0.1.step(to: 1.0, by: 0.1) { |x| tenths = tenths + 1 }
+assert_int("Float64 steps up to a limit", 10, tenths)
+# A double tests the room left as the other library does, `(limit - step)
+# <=> current`, from either side of zero: below it the old iterator added
+# first, rounded -2.3 + 0.5 past -1.8 and dropped the last value, and kept
+# one value past an exclusive limit.
+assert_equal("Float64 from below zero reaches its limit", "[-2.8, -2.3, -1.7999999999999998]", (-2.8).step(to: -1.8, by: 0.5).to_a.to_s)
+assert_equal("Float64 from below zero by 0.7", "[-3.0, -2.3, -1.5999999999999999]", (-3.0).step(to: -1.6, by: 0.7).to_a.to_s)
+assert_equal("Float64 from below zero short of an exclusive limit", "[-2.9, -2.2]", (-2.9).step(to: -1.5, by: 0.7, exclusive: true).to_a.to_s)
+# A NaN orders against nothing, so a walk to or from one is empty. To one,
+# it ran on forever: every comparison with the NaN said "not there yet".
+nan = 0.0 / 0.0
+assert_equal("Float64 to a NaN limit", "[]", 0.0.step(to: nan, by: 1.0).take(5).to_a.to_s)
+assert_equal("Float64 from a NaN", "[]", nan.step(to: 5.0, by: 1.0).take(5).to_a.to_s)
+# An infinite step against an infinite end leaves NaN room, or a NaN next
+# value. Read as a number, the first walk stepped inf forever and the
+# second yielded a NaN, which lies between no two ends.
+inf = 1.0 / 0.0
+assert_equal("Float64 by inf to inf", "[0.0]", 0.0.step(to: inf, by: inf).take(5).to_a.to_s)
+assert_equal("Float64 from inf down by -inf", "[Infinity]", inf.step(to: 0.0, by: 0.0 - inf).take(5).to_a.to_s)
+puts "  Int32, Int64 and Float64 step, as the other library counts"
 
 puts "\nALL CHECKS PASSED"

@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every float section reported"
-for phrase in "== arithmetic" "== constants" "== narrowing" "== conversions to integers" "== comparison with integers" "== modulo and floored division" "== traits"; do
+for phrase in "== arithmetic" "== constants" "== narrowing" "== conversions to integers" "== comparison with integers" "== modulo and floored division" "== traits" "== signed zeros and the smallest exponent"; do
   if ! grep -q "$phrase" "$WORK/float-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -133,6 +133,30 @@ refuses "a double // zero" f64_div0 "division by zero" '1.0 // 0.0'
 refuses "a single // zero" f32_div0 "division by zero" '1.0_f32 // 0.0_f32'
 
 echo
+echo "== what a program without the import is told"
+# The error names the import: `-x` on a Float64 was "wrong number of
+# arguments for 'Float64#-' (given 0, expected 1)" and nothing more, and
+# `1.5_f32.to_f64` was sent to `iyi build --crystal`.
+told() { # told <label> <name> <phrase> <program>
+  local label="$1" name="$2" phrase="$3" program="$4"
+  printf '%s\n' "$program" > "$WORK/$name.iyi"
+  if "$IYI" check "$WORK/$name.iyi" > "$WORK/$name.check" 2>&1; then
+    echo "  $label: it type-checked without the import"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.check"; then
+    echo "  $label: refused, but not naming the import:"
+    sed -n '1,12p' "$WORK/$name.check"
+    status=1
+    return
+  fi
+  printf '  %s: "%s"\n' "$label" "$phrase"
+}
+told "-x on a Float64" told_neg '`-` with no arguments on Float64 is in `std/float`' $'x = 1.5\nputs -x'
+told "to_f64 on a Float32" told_to_f64 '`to_f64` on Float32 is in `std/float`' $'x = 1.5_f32\nputs x.to_f64'
+
+echo
 echo "== proving the checks can fail when the module is broken"
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
@@ -154,6 +178,66 @@ elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run
 else
   echo "  a broken float is caught"
 fi
+
+# Each repair to the signed zeros and to `** Int32::MIN`, undone in a copy
+# that still builds: the exercise has to stop at that repair's own check.
+# The message proves the broken copy compiled and ran up to it; a copy
+# that did not build fails too, and would prove nothing.
+breaks() { # breaks <label> <name> <file under src/> <old> <new> <check>
+  local label="$1" name="$2" file="$3" old="$4" new="$5" check="$6"
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 on this machine, unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/$name/$(dirname "$file")"
+  # A prelude file is found beside `prelude.iyi`, so the whole prelude is
+  # copied for one of its files to be replaced.
+  case "$file" in
+    iyi/*) cp -r "$REPO/src/iyi" "$WORK/$name/" ;;
+  esac
+  if ! SRC="$REPO/src/$file" DST="$WORK/$name/$file" OLD="$old" NEW="$new" "$PY" - <<'PY'
+import os
+from pathlib import Path
+src = Path(os.environ["SRC"]).read_text()
+old = os.environ["OLD"]
+if old not in src:
+    raise SystemExit("patch site missing")
+Path(os.environ["DST"]).write_text(src.replace(old, os.environ["NEW"], 1))
+PY
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+    return
+  fi
+  IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_float_exercise.iyi" >"$WORK/$name.out" 2>&1
+  if grep -q "ALL CHECKS PASSED" "$WORK/$name.out"; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -qF -- "ASSERTION FAILED: $check" "$WORK/$name.out"; then
+    echo "  $label: it failed, but not at '$check'"
+    sed -n '1,5p' "$WORK/$name.out"
+    status=1
+  else
+    echo "  $label: caught at \"$check\""
+  fi
+}
+breaks "trunc through an integer again" trunc std/float.iyi \
+  'whole == 0.0{{ sfx.id }} ? self * 0.0{{ sfx.id }} : whole' 'whole' \
+  '(-0.5).trunc is -0.0'
+breaks "remainder of a zero by the sign test" remainder std/float.iyi \
+  'return self if self == 0.0{{ sfx.id }}' '# return self if self == 0.0{{ sfx.id }}' \
+  '(-0.0).remainder(2.0) is -0.0'
+breaks "the prelude's round without its zero" round iyi/float.iyi \
+  'return self if self == 0.0' '# return self if self == 0.0' \
+  '(-0.0).round is -0.0'
+breaks "round(mode) without its zero" round_mode std/number.iyi \
+  'return self if self == 0.0' '# return self if self == 0.0' \
+  '(-0.0).round(TiesAway) is -0.0'
+# `**` squares its base in double-double and rounds once; with the base
+# squared in plain doubles, `1.0000001 ** Int32::MIN` is 5.444710059167897e-94.
+breaks "** Int32::MIN squared in plain doubles" pow_min iyi/float.iyi \
+  'base, low = IyiFloatText.product(base, low, base, low) if count > 0' 'base, low = base * base, 0.0 if count > 0' \
+  '1.0000001 ** Int32::MIN'
 
 echo
 if [ "$status" -eq 0 ]; then

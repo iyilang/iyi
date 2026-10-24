@@ -14,14 +14,37 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/unicode
-using std/unicode::{Unicode}
+import std/unicode::{Unicode}
+
+# The gate's oracle: a line of decimal code points in, its grapheme
+# clusters out, the clusters split by `|` and their code points by spaces.
+if Program.args.size > 0 && Program.args[0] == "graphemes"
+  while line = STDIN.read_line(chomp: true)
+    text = String.build { |io| line.split(' ').each { |number| io << number.to_i.chr } }
+    clusters = text.graphemes.map do |cluster|
+      points = [] of String
+      cluster.each_char { |char| points << char.ord.to_s }
+      points.join(" ")
+    end
+    puts clusters.join("|")
+  end
+  exit 0
+end
+
+# The byte sizes of *text*'s clusters, joined by commas.
+def clusters_of(text : String) : String
+  text.graphemes.map { |cluster| cluster.bytesize.to_s }.join(",")
+end
 
 puts "== letter"
 assert_true Unicode.letter?('A'), "A"
 assert_true Unicode.letter?('é'), "é"
 assert_true !Unicode.letter?('1'), "digit"
 assert_true Unicode.number?('3'), "3 is a number"
+# Tangut: a `First>`..`Last>` range the table generator joined to the stride
+# before it, so only its two ends were letters.
+assert_true Unicode.letter?('\u{17001}'), "a Tangut ideograph inside its range"
+assert_true Unicode.letter?('\u{18D01}'), "a Tangut supplement ideograph inside its range"
 puts "  letter? and number?"
 
 puts "\n== valid"
@@ -35,6 +58,17 @@ puts "\n== case"
 turkic = Unicode::CaseOptions::Turkic
 assert_str "İ", Unicode.upcase("i", turkic), "turkic upcase of an ascii string"
 assert_str "ı", Unicode.downcase("I", turkic), "turkic downcase of an ascii string"
+# The Turkic `I` with a combining dot above is the dotted `i`, the dot
+# taken in; one character at a time it was `ı` with the dot over it.
+assert_str "i", Unicode.downcase("I\u0307", turkic), "turkic downcase of I with a combining dot"
+assert_str "ix", Unicode.downcase("I\u0307X", turkic), "and what follows it is lowered as before"
+# Marks of a class other than 0 and 230 may sit between the `I` and the dot
+# (After_I and Before_Dot): the NFD of `İ` with a dot below lowers like its
+# NFC form. Looking only at the next code point it was `ı`, U+0323, U+0307.
+assert_str "i\u0323", Unicode.downcase("I\u0323\u0307", turkic), "turkic downcase of I, a dot below, then a dot above"
+assert_str "i\u0323", Unicode.downcase("\u0130\u0323", turkic), "turkic downcase of the NFC form, İ and a dot below"
+assert_str "ı\u0301\u0307", Unicode.downcase("I\u0301\u0307", turkic), "a mark of class 230 between keeps the I dotless"
+puts "  turkic I takes in a dot above past marks of other classes"
 assert_str "İÜ", Unicode.upcase("iü", turkic), "turkic upcase beside a non-ascii letter"
 assert_str "I", Unicode.upcase("i"), "plain upcase of i"
 # The titlecase digraphs have no row in the upcase table; their uppercase
@@ -45,5 +79,71 @@ assert_true Unicode.upcase('ǅ') == 'Ǆ', "char upcase of the Dž digraph"
 assert_true Unicode.titlecase('ǅ') == 'ǅ', "titlecase of the Dž digraph is itself"
 assert_str "ǆ", Unicode.downcase("ǅ"), "downcase of the Dž digraph"
 puts "  turkic i on ascii, and the titlecase digraphs"
+# The iota-subscript letters titlecase to one code point, which is not
+# their two-letter uppercase: `ᾀ` upcases to `ἈΙ` and titlecases to `ᾈ`.
+assert_str "ᾈ", Unicode.capitalize("ᾀ"), "titlecase of alpha with psili and ypogegrammeni"
+assert_str "ᾼ", Unicode.capitalize("ᾳ"), "titlecase of alpha with ypogegrammeni"
+# The first letter is still before the rest when the final sigma is decided.
+assert_str "Ας", Unicode.capitalize("ΑΣ"), "final sigma after the capitalized letter"
+# And a letter whose titlecase is its multi-point uppercase keeps it.
+assert_str "\u02BCN", Unicode.capitalize("\u0149"), "capitalize of n preceded by apostrophe is its uppercase"
+assert_str "\u0399\u0308\u0301", Unicode.capitalize("\u0390"), "capitalize of iota with dialytika and tonos is its uppercase"
+puts "  one-code-point titlecase and the final sigma after the first letter"
+# Cased and Case_Ignorable are the Unicode properties, not general
+# categories: a format character (Cf), a modifier symbol (Sk) and a
+# modifier letter (Lm) are looked through, a spacing mark (Mc) is not, and
+# the Roman numeral `Ⅻ` (Nl, Other_Uppercase) is cased. The answers are
+# Python's str.lower; the approximation gave ς, ς, σ, σ and σ.
+assert_str "ασ\u200Bα", Unicode.downcase("ΑΣ\u200BΑ"), "a zero width space inside a word is case-ignorable"
+assert_str "ασ\u0384α", Unicode.downcase("ΑΣ\u0384Α"), "the Greek tonos inside a word is case-ignorable"
+assert_str "α\u02BCς", Unicode.downcase("Α\u02BCΣ"), "a modifier apostrophe before the final sigma is looked through"
+assert_str "\u217Bς", Unicode.downcase("\u216BΣ"), "a sigma after the cased Roman numeral twelve is final"
+assert_str "ας\u0903α", Unicode.downcase("ΑΣ\u0903Α"), "a spacing mark ends the word before it"
+assert_str "\u216Bς", Unicode.capitalize("\u216BΣ"), "capitalize judges the final sigma by the same properties"
+puts "  the final sigma by the Cased and Case_Ignorable properties"
+
+# What `std/regex` builds `\p{..}` and case-insensitive classes from. The
+# categories and scripts are read from UnicodeData.txt and Scripts.txt, and
+# an orbit is the C and S rows of CaseFolding.txt read backwards.
+puts "\n== categories, scripts and case orbits"
+assert_str "Lu", Unicode.general_category('A'), "A is Lu"
+assert_str "Po", Unicode.general_category('!'), "! is Po"
+assert_str "Sc", Unicode.general_category('€'), "€ is Sc"
+assert_str "Pi", Unicode.general_category('«'), "« is Pi"
+assert_str "Cn", Unicode.general_category('\u0378'), "an unassigned code point is Cn"
+assert_str "Greek", Unicode.script('λ'), "λ is Greek"
+assert_str "Han", Unicode.script('中'), "中 is Han"
+assert_str "Common", Unicode.script('1'), "1 is Common"
+assert_str "Unknown", Unicode.script('\u0378'), "an unassigned code point is Unknown"
+punct = Unicode.property_ranges("P") || [] of Int32
+assert_true punct[0] == 33 && punct[1] == 35 && punct.size % 2 == 0, "P starts at ! to #"
+greek = Unicode.property_ranges("Greek") || [] of Int32
+assert_true greek[0] == 0x370 && greek[1] == 0x373, "Greek starts at U+0370"
+assert_true (Unicode.property_ranges("Lu") || [] of Int32)[0, 2] == [65, 90], "Lu starts at A to Z"
+assert_true Unicode.property_ranges("Klingon").nil?, "a name the UCD does not have is nil"
+assert_true Unicode.case_orbit('k') == ['K', 'k', '\u212A'], "k, K and the Kelvin sign"
+assert_true Unicode.case_orbit('ẞ') == ['ß', 'ẞ'], "ß and ẞ, by CaseFolding's S row"
+assert_true Unicode.case_orbit('1') == ['1'], "a character without case is alone"
+orbits = 0
+Unicode.each_case_orbit { |orbit| orbits = orbits + 1 if orbit.size > 1 }
+assert_true orbits > 1000, "every orbit of more than one, #{orbits} of them"
+puts "  general_category, script, property_ranges, case_orbit and each_case_orbit"
+
+puts "\n== grapheme clusters"
+assert_true "e\u0301x".graphemes == ["e\u0301", "x"], "a combining mark belongs to its letter"
+assert_str "8,8", clusters_of("🇹🇷🇩🇪"), "two flags, regional indicators paired"
+assert_str "8,4", clusters_of("🇹🇷🇩"), "an odd regional indicator alone"
+assert_true "👨‍👩‍👧‍👦".grapheme_size == 1, "a family emoji joined by ZWJs is one"
+assert_true "क्षि".grapheme_size == 1, "a Devanagari conjunct is one (GB9c)"
+assert_true "\u1100\u1161\u11A8".grapheme_size == 1 && "\uAC00\u11A8".grapheme_size == 1, "Hangul jamo and a syllable with a final are one"
+assert_true "\r\n".grapheme_size == 1 && "\n\r".grapheme_size == 2, "CR LF is one, LF CR two"
+assert_true "\u0600a".grapheme_size == 1 && "\u0915\u093F".grapheme_size == 1, "a prepended sign and a spacing mark join"
+ill = String.new(3) { |buffer| buffer[0] = 97_u8; buffer[1] = 255_u8; buffer[2] = 98_u8; 3 }
+assert_true Unicode.graphemes(ill).map(&.bytesize) == [1, 1, 1], "a piece of ill-formed UTF-8 is a cluster of its own"
+assert_true "".graphemes.empty? && "".grapheme_size == 0, "the empty string has none"
+seen = [] of String
+"ab\u0301c".each_grapheme { |cluster| seen << cluster }
+assert_true seen == ["a", "b\u0301", "c"], "each_grapheme in order"
+puts "  combining marks, flags, emoji sequences, conjuncts, Hangul, CR LF, prepends and spacing marks, ill-formed bytes"
 
 puts "\nALL CHECKS PASSED"

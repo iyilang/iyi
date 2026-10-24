@@ -22,10 +22,19 @@ pub class Box(T)
 
   # Unboxes a Void* into an object of type T.
   #
-  # Specifying T is required: `Box(T).unbox(data)`.
+  # Specifying T is required: `Box(T).unbox(data)`. A null pointer is nil
+  # when T admits nil, as the other library answers it for `String?` and
+  # every other union of references and nil, and is refused otherwise. It
+  # was refused for every T, so `Box(String?).unbox` of the null a C
+  # callback is handed when there is no data panicked "Unboxing null
+  # pointer" where nil is the answer the type has room for.
   def self.unbox(pointer : Void*) : T
     if pointer.address == 0
-      raise "Unboxing null pointer"
+      {% if T.nilable? %}
+        return nil
+      {% else %}
+        raise "Unboxing null pointer"
+      {% end %}
     end
     pointer.as(self).object
   end

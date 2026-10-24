@@ -21,6 +21,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lsp_session import process_binary  # noqa: E402
+
 IYI = os.path.abspath(os.environ.get("IYI", "./bin/iyi"))
 
 passed = 0
@@ -67,11 +70,11 @@ def main():
     # A test asserts by exiting non-zero, and `assert` is the one word the
     # prelude gives it: a false condition is a panic naming the site.
     write("add_test.iyi", (
-        "import calc/add\nusing calc/add::{add}\n\n"
+        "import calc/add::{add}\n\n"
         "assert add(2, 2) == 4, \"add broke\"\n"
     ))
     write("mul_test.iyi", (
-        "import calc/mul\nusing calc/mul::{mul}\n\n"
+        "import calc/mul::{mul}\n\n"
         "assert mul(2, 3) == 6, \"mul broke\"\n"
     ))
 
@@ -114,6 +117,35 @@ def main():
          and all(isinstance(errors[0][k], int) for k in ("line", "column", "size")),
          f"{ {k: errors[0].get(k) for k in ('line', 'column', 'size')} }")
     os.remove(os.path.join(work, "cut.iyi"))  # unparseable files are always "affected"
+    # And an error inside an imported module names that module's file the
+    # way the platform spells it, as `test --json` does: on Windows it was
+    # `C:\\work\\calc/deep.iyi`, the module path's `/` inside a
+    # backslashed root, which no tool matching paths matches to the file.
+    os.makedirs(os.path.join(work, "calc", "deep"), exist_ok=True)
+    write("calc/deep/wrong.iyi", "module calc/deep/wrong\n\npub def answer : Int32\n  \"no\"\nend\n")
+    write("deep_user.iyi", "module deep_user\n\nimport calc/deep/wrong::{answer}\n\nputs answer\n")
+    proc = run("check", "-f", "json", "deep_user.iyi", cwd=work)
+    files = sorted({e["file"] for e in json.loads(proc.stderr) if "wrong" in e.get("file", "")})
+    native = os.path.join("calc", "deep", "wrong.iyi")
+    step("an imported module's error names its file natively",
+         proc.returncode == 1 and files != [] and all(f.endswith(native) and (os.sep == "/" or "/" not in f) for f in files),
+         f"files {files}")
+    os.remove(os.path.join(work, "deep_user.iyi"))
+    os.remove(os.path.join(work, "calc", "deep", "wrong.iyi"))
+    # And no colour in a message. The program's colour reached the text of
+    # its messages, so a nil receiver's error carried `\x1b[33;1m` into
+    # "message" down a pipe, and into fix's "remaining".
+    cx = tempfile.mkdtemp(prefix="iyi-agent-colour")
+    os.makedirs(os.path.join(cx, "app"))
+    with open(os.path.join(cx, "app", "nilsize.iyi"), "w", newline="\n") as f:
+        f.write('module app/nilsize\n\nx = Program.args.size > 0 ? "a" : nil\nputs x.size\n')
+    proc = run("check", "-f", "json", "app/nilsize.iyi", cwd=cx)
+    frames = json.loads(proc.stderr)
+    fixed = json.loads(run("fix", "--json", "app/nilsize.iyi", cwd=cx).stdout)
+    step("an error's message carries no colour, in check -f json or in fix --json",
+         "\x1b" not in proc.stderr and "\x1b" not in fixed.get("remaining", "\x1b")
+         and any("for Nil (compile-time type is (String | Nil))" in f["message"] for f in frames),
+         f"{[f['message'][:70] for f in frames]}, remaining {fixed.get('remaining', '')[:70]!r}")
 
     # 4. fix: applies exactly that edit and converges
     proc = run("fix", "--json", "app.iyi", cwd=work)
@@ -159,7 +191,7 @@ def main():
     ))
     write("bumps.iyi", (
         "module bumps\n\n"
-        "import calc/typo\nusing calc/typo::{bump}\n\n"
+        "import calc/typo::{bump}\n\n"
         "puts bump(1)\n"
     ))
     proc = run("fix", "--json", "bumps.iyi", cwd=work)
@@ -167,11 +199,11 @@ def main():
     cause = fixed.get("cause", {})
     step("fix names the file the remaining error is in",
          not fixed["clean"] and fixed["applied"] == []
-         and cause.get("file", "").endswith("calc/typo.iyi") and cause.get("line") == 8,
+         and cause.get("file", "").endswith(os.path.join("calc", "typo.iyi")) and cause.get("line") == 8,
          f"cause {cause}")
     proc = run("fix", "bumps.iyi", cwd=work)
     step("and says so in prose",
-         "the cause is in calc/typo.iyi:8:3" in proc.stderr and "iyi fix calc/typo.iyi" in proc.stderr,
+         f"the cause is in {os.path.join('calc', 'typo.iyi')}:8:3" in proc.stderr and f"iyi fix {os.path.join('calc', 'typo.iyi')}" in proc.stderr,
          proc.stderr.strip().splitlines()[-1])
     proc = run("fix", "--json", "calc/typo.iyi", cwd=work)
     fixed = json.loads(proc.stdout)
@@ -179,6 +211,23 @@ def main():
          fixed["clean"] and [(a["from"], a["to"]) for a in fixed["applied"]] == [("helperr", "helper")]
          and run("check", "bumps.iyi", cwd=work).returncode == 0,
          f"applied {fixed['applied']}")
+    # 4a''. and the remaining error is said. A chain whose last frame is a
+    # type's trace - `Int32 trace:` under `undefined method 'abss' for
+    # Int32` - carries no message there, and fix took the empty one:
+    # `remaining` was "\n(in ...abss.iyi:4)", and for `[Foo.new].sorted`
+    # the `instantiating` frame and nothing under it, while check printed
+    # the error each time.
+    write("calc/abss.iyi", "module calc/abss\n\npub def answer : Int32\n  42.abss\nend\n")
+    write("answers.iyi", "module answers\n\nimport calc/abss::{answer}\n\nputs answer\n")
+    write("sorts.iyi", "module sorts\n\nclass Foo\nend\n\nputs [Foo.new, Foo.new].sorted.size\n")
+    far = json.loads(run("fix", "--json", "answers.iyi", cwd=work).stdout).get("remaining", "")
+    near = json.loads(run("fix", "--json", "sorts.iyi", cwd=work).stdout).get("remaining", "")
+    step("fix says the remaining error, not the frame above it",
+         far.startswith("undefined method 'abss' for Int32")
+         and "\nundefined method '<' for Sorts::Foo" in near,
+         f"{far[:40]!r} {near[-40:]!r}")
+    for rel in ("calc/abss.iyi", "answers.iyi", "sorts.iyi"):
+        os.remove(os.path.join(work, rel))
 
     # 4a-3. three typos `fix` had nothing for, found by injecting typos
     # into every sample: a prelude method with an optional parameter
@@ -204,6 +253,104 @@ def main():
          and sorted(a["to"] for a in fixed["applied"]) == ["is_a?", "ljust", "shout"]
          and run("check", "typos.iyi", cwd=work).returncode == 0,
          f"applied {[a['to'] for a in fixed.get('applied', [])]}")
+
+    # 4a'. An edit the language would refuse is not an edit. `!` is not
+    # part of a name in iyi (III.1.7), and the nearest name to `not_nil` in
+    # Crystal's library is `not_nil!` — so the suggester proposed it, the
+    # edit travelled in `check -f json` as `suggested_edit`, and `fix`
+    # applies those: the answer to an undefined method was a file that no
+    # longer parses. The message says what the library calls it and why no
+    # call here can spell it, and carries no edit.
+    write("unspellable.iyi", "x = [3, 1, 2]\nputs x.not_nil.to_s\n")
+    proc = run("check", "--crystal", "-f", "json", "unspellable.iyi", cwd=work)
+    answers = json.loads(proc.stderr)
+    first = answers[0] if answers else {}
+    step("a name iyi cannot write is explained rather than suggested",
+         proc.returncode != 0 and len(answers) == 1
+         and "suggested_edit" not in first
+         and "not_nil!" in first["message"]
+         and "cannot end a name in iyi" in first["message"]
+         and first.get("spec") == ["III.1.7"],
+         f"edit {first.get('suggested_edit')}, spec {first.get('spec')}")
+
+    # 4a''. Advice an agent follows has to compile. For a nilable argument
+    # to a trait parameter the message said "Write `impl Show for (Int32 |
+    # Nil)`", which is refused as a union impl (SPEC.md II.1).
+    write("advice.iyi", (
+        "trait Show\n  abstract def show : String\nend\n\n"
+        "impl Show for Int32\n  def show : String\n    \"i\"\n  end\nend\n\n"
+        "def f(x : Show) : String\n  x.show\nend\n\n"
+        "v = Program.args.size > 10 ? 1 : nil\nputs f(v)\n"
+    ))
+    said = run("check", "advice.iyi", cwd=work).stderr
+    step("a nilable argument to a trait is told to narrow, not to write a union impl",
+         "`Nil` does not (SPEC.md II.1). v can be nil here: narrow it first (`if v`)" in said
+         and "impl Show for (Int32 | Nil)" not in said, "")
+    os.remove(os.path.join(work, "advice.iyi"))  # later steps walk the directory
+
+    # 4a'''. An error inside a macro's expansion is placed at the call, the
+    # expansion is named, and nothing offers an edit there. The frame kept
+    # the line and column it had in the expansion under the calling file's
+    # name, so `{{x}}.upcse` expanded from `puts m("abc")` on line 6 was
+    # main.iyi:1:9 with a `suggested_edit`, and `fix` applied it: 32 edits,
+    # each one into the `module` header, until the cap. With the macro in
+    # an imported module, `module app/main` became `moduleupcasemain`.
+    mx = tempfile.mkdtemp(prefix="iyi-agent-macro")
+    os.makedirs(os.path.join(mx, "app"))
+
+    def mx_write(rel, text):
+        with open(os.path.join(mx, rel), "w", newline="\n") as f:
+            f.write(text)
+
+    def mx_read(rel):
+        with open(os.path.join(mx, rel), newline="") as f:
+            return f.read()
+
+    local_macro = 'module app/local\n\nmacro m(x)\n  {{x}}.upcse\nend\nputs m("abc")\n'
+    mx_write("app/local.iyi", local_macro)
+    proc = run("check", "-f", "json", "app/local.iyi", cwd=mx)
+    frames = json.loads(proc.stderr)
+    cause = frames[-1] if frames else {}
+    step("an error in a macro's expansion is at the call, and names the expansion",
+         proc.returncode == 1 and (cause.get("line"), cause.get("column")) == (6, 6)
+         and cause.get("expansion") == {"macro": "m", "line": 1, "column": 9, "size": 5}
+         and "upcse" in cause.get("message", "")
+         and not any("suggested_edit" in frame for frame in frames),
+         f"at {cause.get('line')}:{cause.get('column')}, expansion {cause.get('expansion')}, "
+         f"edits {[frame['suggested_edit'] for frame in frames if 'suggested_edit' in frame]}")
+    proc = run("fix", "--json", "app/local.iyi", cwd=mx)
+    fixed = json.loads(proc.stdout)
+    step("and fix leaves the file alone",
+         proc.returncode == 1 and fixed["applied"] == [] and not fixed["clean"]
+         and mx_read("app/local.iyi") == local_macro,
+         f"applied {len(fixed['applied'])}, line 1 now {mx_read('app/local.iyi').splitlines()[0]!r}")
+    mx_write("app/lib.iyi", "module app/lib\n\npub macro bad(x)\n  {{x}}.upcse\nend\n")
+    lib_user = 'module app/main\n\nimport app/lib::*\nputs bad("a")\n'
+    mx_write("app/main.iyi", lib_user)
+    proc = run("fix", "--json", "app/main.iyi", cwd=mx)
+    fixed = json.loads(proc.stdout)
+    step("an imported macro's typo leaves the calling file alone too",
+         proc.returncode == 1 and fixed["applied"] == [] and mx_read("app/main.iyi") == lib_user,
+         f"applied {fixed['applied']}, line 1 now {mx_read('app/main.iyi').splitlines()[0]!r}")
+    # A parse error in an expansion: line 2 of the calling file, the line
+    # the error had in the expansion, with no frame saying so.
+    mx_write("app/cut.iyi", "module app/cut\n\nmacro m\n  1 +\nend\nm\n")
+    proc = run("check", "-f", "json", "app/cut.iyi", cwd=mx)
+    frames = json.loads(proc.stderr)
+    cause = frames[-1] if frames else {}
+    step("a parse error in an expansion is at the call too",
+         proc.returncode == 1 and (cause.get("line"), cause.get("column")) == (6, 1)
+         and (cause.get("expansion") or {}).get("macro") == "m",
+         f"at {cause.get('line')}:{cause.get('column')}, expansion {cause.get('expansion')}")
+
+    # 4a'''-nil. Under a nilable `x + 1` the error went on to say the
+    # prelude is small by rule and `iyi build --crystal` gives the other
+    # library, whose `Nil` has no `+` either; the narrowing is the answer.
+    write("advice_nil.iyi", "x = Program.args.size > 10 ? 1 : nil\nputs x + 1\n")
+    said = run("check", "advice_nil.iyi", cwd=work).stderr
+    step("a nilable receiver is not sent to the other library",
+         "x can be nil here" in said and "small by rule" not in said, "")
+    os.remove(os.path.join(work, "advice_nil.iyi"))
 
     # 4a''. the cap, and the verdict after it. `fix` applies at most
     # thirty-two edits in a run, and the verdict used to be read from a
@@ -234,6 +381,18 @@ def main():
          and run("check", "capped.iyi", cwd=work).returncode == 0,
          f"applied {len(fixed['applied'])}, clean {fixed['clean']}")
     os.remove(os.path.join(work, "capped.iyi"))
+
+    # 4a-enum. `impl Enumerable` without its import was "can't implement
+    # Enumerable(T), it's a generic module" - the compiler declares that
+    # module - where `impl Comparable` is told the import.
+    write("advice_enum.iyi", (
+        "struct Nums\nend\n\n"
+        "impl Enumerable for Nums\n  def each(& : Int32 -> Nil) : Nil\n  end\nend\n"
+    ))
+    said = run("check", "advice_enum.iyi", cwd=work).stderr
+    step("`impl Enumerable` without its import names the import",
+         "`Enumerable` comes with `import std/enumerable::{Enumerable}`" in said, "")
+    os.remove(os.path.join(work, "advice_enum.iyi"))
 
     # 4b. the blind spot, closed as a language rule: an uncalled body is
     # typed against its declared signature (definition-site typing,
@@ -273,6 +432,121 @@ def main():
     step("and the honest unexported def is clean",
          run("check", "unexported.iyi", cwd=work).returncode == 0, "")
 
+    # And a script, which has no module header: its top-level defs are
+    # the program's, and the program is a module to the compiler, so the
+    # rule took it for a mixin and typed none of them. `def g(x : Int32) :
+    # String` with `x` for a body passed `check` while nothing called it,
+    # and the same def below a `module` header was refused.
+    write("script.iyi", "def g(x : Int32) : String\n  x\nend\n")
+    proc = run("check", "script.iyi", cwd=work)
+    step("a script's uncalled top-level def is typed at its definition",
+         proc.returncode == 1 and "must return String but it is returning Int32" in (proc.stdout + proc.stderr),
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+    write("script.iyi", "def g(x : Int32) : String\n  x.to_s\nend\n")
+    step("and the honest script is clean",
+         run("check", "script.iyi", cwd=work).returncode == 0, "")
+
+    # And the shapes the probe used to leave to callers: a class method, a
+    # parameter with a default, one with an external name, a splat, a
+    # named-only parameter and an abstract class's. Each def below answers
+    # a String for an Int32, and each compiled and ran; every one is
+    # reported now, each at its own line.
+    shapes = (
+        "module app7\n\n"
+        "abstract class Animal\n  abstract def name : String\nend\n\n"
+        "class Dog < Animal\n  def name : String\n    \"d\"\n  end\nend\n\n"
+        "class C\n  def self.make : Int32\n    \"not an int\"\n  end\nend\n\n"
+        "def a(x : Animal) : Int32\n  x.name\nend\n\n"
+        "def b(x : Int32 = 1) : Int32\n  \"default\"\nend\n\n"
+        "def c(to x : Int32) : Int32\n  \"external\"\nend\n\n"
+        "def d(*xs : Int32) : Int32\n  \"splat\"\nend\n\n"
+        "def e(x : Int32, *, y : Int32) : Int32\n  \"named only\"\nend\n"
+    )
+    write("shapes.iyi", shapes)
+    proc = run("check", "-f", "json", "shapes.iyi", cwd=work)
+    lines = sorted({frame["line"] for frame in json.loads(proc.stderr or proc.stdout or "[]")
+                    if "instantiating" not in frame["message"]})
+    step("a class method, a default, an external name, a splat, a named-only and an abstract parameter are typed",
+         proc.returncode == 1 and lines == [14, 19, 23, 27, 31, 35], f"lines {lines}")
+    write("shapes.iyi", shapes.replace("\"not an int\"", "1").replace("x.name", "x.name.size")
+          .replace("\"default\"", "x").replace("\"external\"", "x").replace("\"splat\"", "xs.size")
+          .replace("\"named only\"", "x + y"))
+    proc = run("check", "shapes.iyi", cwd=work)
+    step("and the honest shapes are clean", proc.returncode == 0,
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+
+    # And a def a macro wrote, typed where its module's other defs are.
+    # `module kit/bool` is the namespace `Kit::Bool`, and `kit/flag` does
+    # not import it, so its bare `Bool` means the type - except that code
+    # expanded from `{% if %}` was asked about as if no file had written
+    # it, and met `Kit::Bool` on the climb. Imported beside `kit/bool`,
+    # `Flag.on` was "expected argument #1 to 'Kit::Flag::Flag.on' to be
+    # Kit::Bool, not Bool"; R-2c typing every def put the same refusal on
+    # std/dir's `remove_directory`, so a program importing every std
+    # module did not compile.
+    os.makedirs(os.path.join(work, "kit"), exist_ok=True)
+    write("kit/bool.iyi", "module kit/bool\n\npub def yes : ::Bool\n  true\nend\n")
+    write("kit/flag.iyi", (
+        "module kit/flag\n\n"
+        "pub class Flag\n"
+        "  {% if true %}\n    def self.on(given : Bool) : Bool\n      given\n    end\n  {% end %}\n\n"
+        "  {% if true %}\n    def self.off : Bool\n      false\n    end\n  {% end %}\n"
+        "end\n"
+    ))
+    write("flags.iyi", "import kit/bool\nimport kit/flag::{Flag}\n\nputs Flag.on(true)\n")
+    proc = run("run", "flags.iyi", cwd=work)
+    step("a def a macro expanded names the types its own file sees, beside a module named for one",
+         proc.returncode == 0 and proc.stdout.strip() == "true",
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+
+    # And a type nobody exports, and a method an `impl` block gives it:
+    # both were caller-typed, so with nothing constructing the type a
+    # String returned as an Int32 and a call to a method that exists
+    # nowhere passed `check`. Each def is typed on its own, so both are
+    # named in one run rather than the first.
+    write("unbuilt.iyi", (
+        "module app4\n\n"
+        "trait B\n  abstract def name : String\nend\n\n"
+        "class X\n  def initialize\n  end\n\n"
+        "  def helper : Int32\n    \"nope\"\n  end\nend\n\n"
+        "impl B for X\n  def name : String\n    bogus_method_call(1)\n  end\nend\n"
+    ))
+    proc = run("check", "unbuilt.iyi", cwd=work)
+    said = proc.stdout + proc.stderr
+    step("an unexported type's and an impl's bodies are typed with nothing built",
+         proc.returncode == 1
+         and "X#helper must return Int32 but it is returning String" in said
+         and "undefined method 'bogus_method_call'" in said,
+         said.strip().splitlines()[-1] if said.strip() else "")
+    proc = run("check", "-f", "json", "unbuilt.iyi", cwd=work)
+    lines = sorted({frame["line"] for frame in json.loads(proc.stderr or proc.stdout)
+                    if "instantiating" not in frame["message"]})
+    step("and -f json carries both, each at its own line", lines == [11, 18], f"lines {lines}")
+    write("unbuilt.iyi", (
+        "module app4\n\n"
+        "trait B\n  abstract def name : String\nend\n\n"
+        "class X\n  def initialize\n  end\n\n"
+        "  def helper : Int32\n    1\n  end\nend\n\n"
+        "impl B for X\n  def name : String\n    \"x\"\n  end\nend\n"
+    ))
+    step("and the honest ones are clean",
+         run("check", "unbuilt.iyi", cwd=work).returncode == 0, "")
+
+    # A module-private type behind a generic argument is as private as it
+    # is bare: `def g : Array(P)` was refused with "does not export P" while
+    # `def f(p : P) : P` beside it was fine — the probe wrote the first and
+    # skipped the second, and neither said anything about the program.
+    write("private_generic.iyi", (
+        "module app5\n\n"
+        "struct P\n  def initialize\n  end\nend\n\n"
+        "def f(p : P) : P\n  p\nend\n\n"
+        "def g(n : Int32) : Array(P)\n  [] of P\nend\n"
+    ))
+    proc = run("check", "private_generic.iyi", cwd=work)
+    step("a private type is private the same way bare and as a type argument",
+         proc.returncode == 0,
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+
     # 4b'. the generic half: a trait bound is written, and a bound is
     # enough — the body is typed against a synthesized witness, so a
     # generic def calling anything outside its bound dies at the
@@ -296,25 +570,20 @@ def main():
 
     # 4b''. the import wall is per-file, and `pub import` is the one
     # door through it: a module in the program because *somebody else*
-    # imported it is not reachable by `using` — the phantom-dependency
-    # disease R-1 exists to refuse
+    # imported it is not reachable unless this file says so - the
+    # phantom-dependency disease R-1 exists to refuse. `import lib/inner::*`
+    # says so: the dependency is written in the file that has it. A
+    # qualified name says nothing, and is refused.
     os.makedirs(os.path.join(work, "lib"), exist_ok=True)
     write("lib/inner.iyi", "module lib/inner\n\npub def shine() : Int32\n  7\nend\n")
     write("lib/facade.iyi", (
         "module lib/facade\nimport lib/inner\n\n"
         "pub def front() : Int32\n  1\nend\n"
     ))
-    write("phantom.iyi", "import lib/facade\nusing lib/inner\n\nputs shine()\n")
-    proc = run("check", "phantom.iyi", cwd=work)
-    step("a phantom dependency is refused by name",
-         proc.returncode == 1 and "pub import" in (proc.stdout + proc.stderr),
-         "the error teaches both fixes")
-    write("lib/facade.iyi", (
-        "module lib/facade\npub import lib/inner\n\n"
-        "pub def front() : Int32\n  1\nend\n"
-    ))
-    step("pub import is the door",
-         run("check", "phantom.iyi", cwd=work).returncode == 0, "")
+    write("declared.iyi", "import lib/facade\nimport lib/inner::*\n\nputs shine()\n")
+    step("an import declares the dependency it reaches",
+         run("check", "declared.iyi", cwd=work).returncode == 0,
+         "import lib/inner::* is this file's own edge")
     write("qualified.iyi", "import lib/facade\n\nputs Lib::Inner.shine()\n")
     write("lib/facade.iyi", (
         "module lib/facade\nimport lib/inner\n\n"
@@ -328,7 +597,7 @@ def main():
         "module lib/facade\npub import lib/inner\n\n"
         "pub def front() : Int32\n  1\nend\n"
     ))
-    step("and pub import opens both doors",
+    step("and pub import opens it",
          run("check", "qualified.iyi", cwd=work).returncode == 0, "")
     proc = run("fix", "--json", "uncalled.iyi", cwd=work)
     fixed = json.loads(proc.stdout)
@@ -337,31 +606,82 @@ def main():
          f"applied {fixed['applied']}")
     step("and check agrees", run("check", "uncalled.iyi", cwd=work).returncode == 0, "")
 
-    # 4c. the suggestion pool includes `using`-imported names — the miss
-    # that motivated it: `addd` went unsuggested while `add` sat one
-    # edit away in the file's own using line
+    # 4c. the suggestion pool includes names an import brought into scope —
+    # the miss that motivated it: `addd` went unsuggested while `add` sat
+    # one edit away in the file's own `import calc/add::{add}`
     write("uses.iyi", (
-        "import calc/add\nusing calc/add::{add}\n\n"
+        "import calc/add::{add}\n\n"
         "if addd(2, 2) != 4\n    puts \"broke\"\nend\n"
     ))
     proc = run("fix", "--json", "uses.iyi", cwd=work)
     fixed = json.loads(proc.stdout)
-    step("a using-imported name is suggested and fixed",
+    step("a name an import brought into scope is suggested and fixed",
          fixed["clean"] and [(a["from"], a["to"]) for a in fixed["applied"]] == [("addd", "add")],
          f"applied {fixed['applied']}")
+
+    # 4c'. a suggestion names only what the call can reach. `App::Lib.helpr`
+    # was told "Did you mean 'helper'?" about a def app/lib never marked
+    # `pub`, `fix` wrote it, and the next check answered "App::Lib does not
+    # export 'helper'"; so were a private method and a type a module left
+    # unmarked, reached by a qualified name.
+    rx = tempfile.mkdtemp(prefix="iyi-agent-reach")
+    os.makedirs(os.path.join(rx, "app"))
+
+    def rx_write(rel, text):
+        with open(os.path.join(rx, rel), "w", newline="\n") as f:
+            f.write(text)
+
+    def rx_read(rel):
+        with open(os.path.join(rx, rel), newline="") as f:
+            return f.read()
+
+    rx_write("app/lib.iyi", 'module app/lib\n\ndef helper : String\n  "a"\nend\n\npub def hi : String\n  helper\nend\n')
+    unreachable = {
+        "nonpub.iyi": "module nonpub\n\nimport app/lib\n\nputs App::Lib.helpr\n",
+        "privy.iyi": "module privy\n\nclass A\n  private def helper : Int32\n    1\n  end\nend\n\nputs A.new.helpr\n",
+        "app/qualified.iyi": "module app/qualified\n\nstruct Point\nend\n\nputs App::Qualified::Pont.new\n",
+    }
+    offered = {}
+    for rel, text in unreachable.items():
+        rx_write(rel, text)
+        frames = json.loads(run("check", "-f", "json", rel, cwd=rx).stderr)
+        proc = run("fix", "--json", rel, cwd=rx)
+        offered[rel] = ([f["suggested_edit"]["replacement"] for f in frames if "suggested_edit" in f],
+                        json.loads(proc.stdout)["applied"], rx_read(rel) == text)
+    step("nothing out of the call's reach is suggested, and fix leaves the file",
+         all(edits == [] and applied == [] and kept for edits, applied, kept in offered.values()),
+         f"{offered}")
+    # And the refusal says where the code is: `App::Main::Point` written in
+    # app/main itself was told "Only what a module marks `pub` is reachable
+    # from outside it", about code that is inside it.
+    rx_write("app/inside.iyi", 'module app/inside\n\nstruct Point\nend\n\ndef hi : String\n  "x"\nend\n\nputs App::Inside::Point.new\nputs App::Inside.hi\n')
+    inside = [f["message"] for f in json.loads(run("check", "-f", "json", "app/inside.iyi", cwd=rx).stderr)]
+    rx_write("outside.iyi", "module outside\n\nimport app/lib\n\nputs App::Lib.helper\n")
+    outside = [f["message"] for f in json.loads(run("check", "-f", "json", "outside.iyi", cwd=rx).stderr)]
+    step("a qualified name to the module's own unexported name is refused for what it is",
+         any("from inside it too: write `Point` here" in m for m in inside)
+         and not any("reachable from outside it" in m for m in inside)
+         and any("App::Lib does not export 'helper'. Only what a module marks `pub` is reachable from outside it" in m
+                 for m in outside),
+         f"inside {[m[:90] for m in inside]}, outside {[m[:60] for m in outside]}")
+    rx_write("app/inside.iyi", 'module app/inside\n\ndef hi : String\n  "x"\nend\n\nputs App::Inside.hi\n')
+    inside = [f["message"] for f in json.loads(run("check", "-f", "json", "app/inside.iyi", cwd=rx).stderr)]
+    step("and so is a call",
+         any("App::Inside does not export 'hi'" in m and "write `hi` here" in m for m in inside),
+         f"{[m[:120] for m in inside]}")
 
     # 5. test --affected: the exact selection, both directions
     proc = run("test", "--json", "--affected", "calc/add.iyi", cwd=work)
     report = json.loads(proc.stdout)
     files = sorted(t["file"] for t in report["tests"])
     step("an edit to add runs only add's test",
-         files == ["./add_test.iyi"] and report["skipped"] == 1,
+         files == [os.path.join(".", "add_test.iyi")] and report["skipped"] == 1,
          f"ran {files}, skipped {report['skipped']}")
     step("and the test passed by its assert", report["passed"] == 1, "")
     # The other direction: a test that asserts something false fails, by
     # exit code, with the site in what it printed.
     write("broken_test.iyi", (
-        "import calc/add\nusing calc/add::{add}\n\n"
+        "import calc/add::{add}\n\n"
         "assert add(2, 2) == 5, \"arithmetic\"\n"
     ))
     proc = run("test", "--json", "broken_test.iyi", cwd=work)
@@ -369,7 +689,7 @@ def main():
     step("a false assert fails its test and names the line",
          proc.returncode != 0 and report["failed"] == 1
          and "assertion failed: arithmetic" in report["tests"][0]["output"]
-         and "broken_test.iyi:4" in report["tests"][0]["output"],
+         and "broken_test.iyi:3" in report["tests"][0]["output"],
          report["tests"][0]["output"].strip())
     os.remove(os.path.join(work, "broken_test.iyi"))
     proc = run("test", "--json", "--affected", "app.iyi", cwd=work)
@@ -381,7 +701,7 @@ def main():
     # 5b. check --affected: the ripple — a surface break names exactly
     # the consumer it reaches, and a clean tree answers "all compile"
     write("consumer.iyi", (
-        "import calc/add\nusing calc/add::{add}\n\n"
+        "import calc/add::{add}\n\n"
         "puts add(1, 1)\n"
     ))
     proc = run("check", "--affected", "calc/add.iyi", cwd=work)
@@ -395,6 +715,22 @@ def main():
     proc = run("check", "--affected", "calc/add.iyi", cwd=work)
     step("a surface break names its consumers",
          proc.returncode == 1 and "broke" in proc.stdout, proc.stdout.splitlines()[-1])
+    # And each with its reason: the line was `consumer.iyi: ` and nothing,
+    # or the `instantiating ...` frame above the error.
+    named = [line for line in proc.stdout.splitlines() if ": " in line and "consumer(s)" not in line]
+    # One whose break is in the module's own body, reached through a call:
+    # the error sits under an `instantiating` frame, which is what was
+    # printed, or nothing.
+    write("calc/sub.iyi", "module calc/sub\n\npub def sub : Int32\n  1.nope\nend\n")
+    write("sub_user.iyi", "module sub_user\n\nimport calc/sub::{sub}\n\nputs sub\n")
+    deep = run("check", "--affected", "calc/sub.iyi", cwd=work)
+    named += [line for line in deep.stdout.splitlines() if line.startswith("sub_user.iyi:")]
+    os.remove(os.path.join(work, "calc", "sub.iyi"))
+    os.remove(os.path.join(work, "sub_user.iyi"))
+    step("each broken consumer says why",
+         any("undefined method 'nope'" in line for line in named)
+         and all(line.split(": ", 1)[1].strip() and "instantiating" not in line for line in named),
+         f"{named[:3]}")
     write("calc/add.iyi", (
         "module calc/add\n\n"
         "# Adds two integers.\n"
@@ -419,6 +755,56 @@ def main():
          and any(f["file"] == "consumer.iyi" for f in report["failed"]),
          f"affected_not_found {report.get('affected_not_found')}")
     os.rename(os.path.join(work, "calc/add.gone"), os.path.join(work, "calc/add.iyi"))
+
+    # 5b'. -f json is data whatever ends the run (`Command#json_report`).
+    # Four refusals were text: a module with a byte that is not UTF-8 past
+    # its first ("Error: while importing", no file or line), an entry file
+    # of such bytes, a file that is not there, and a warning, which a
+    # caller parsing standard error as JSON could not read.
+    jx = tempfile.mkdtemp(prefix="iyi-agent-json")
+    os.makedirs(os.path.join(jx, "app"))
+
+    def jx_write(rel, data):
+        with open(os.path.join(jx, rel), "wb") as f:
+            f.write(data)
+
+    jx_write("app/lib.iyi", b'module app/lib\n\npub def hi : String\n  "\xff"\nend\n')
+    jx_write("app/main.iyi", b"module app/main\n\nimport app/lib::*\nputs hi\n")
+    jx_write("bytes.iyi", b"module bytes\n\nputs \"\xff\"\n")
+    refusals = {}
+    for name in ("app/main.iyi", "bytes.iyi", "missing.iyi"):
+        proc = run("check", "-f", "json", name, cwd=jx)
+        try:
+            frames = json.loads(proc.stderr)
+        except json.JSONDecodeError:
+            frames = proc.stderr[:60]
+        refusals[name] = (proc.returncode, frames)
+    imported = refusals["app/main.iyi"][1]
+    step("a byte that is not UTF-8 anywhere in a module is refused at its import, as JSON",
+         refusals["app/main.iyi"][0] == 1 and isinstance(imported, list) and len(imported) == 1
+         and (imported[0]["line"], imported[0]["column"]) == (3, 1)
+         and imported[0]["file"].endswith("main.iyi")
+         and f"file '{os.path.join('app', 'lib.iyi')}' is not a valid iyi source file" in imported[0]["message"],
+         f"{imported}")
+    step("and an entry file of such bytes, and a file that is not there, are JSON too",
+         all(code == 1 and isinstance(frames, list) for code, frames in refusals.values())
+         and "is not a valid iyi source file" in refusals["bytes.iyi"][1][0]["message"]
+         and refusals["missing.iyi"][1][0]["message"] == "no such file: missing.iyi",
+         f"{ {k: v[1] if isinstance(v[1], str) else [f['message'][:50] for f in v[1]] for k, v in refusals.items()} }")
+    jx_write("colon.iyi", b"module colon\n\ndef f(x : Int32): Int32\n  x\nend\n\nputs f(1)\n")
+    proc = run("check", "-f", "json", "colon.iyi", cwd=jx)
+    warned = json.loads(proc.stderr) if proc.stderr.startswith("[") else proc.stderr[:60]
+    jx_write("colonbad.iyi", b"module colonbad\n\ndef f(x : Int32): Int32\n  x\nend\n\nputs f(1).nope\n")
+    proc_bad = run("check", "-f", "json", "colonbad.iyi", cwd=jx)
+    both = json.loads(proc_bad.stderr) if proc_bad.stderr.startswith("[") else proc_bad.stderr[:60]
+    step("a warning is a frame marked as one, beside an error in the same array",
+         proc.returncode == 0 and isinstance(warned, list)
+         and [(w["line"], w["column"], w.get("severity")) for w in warned] == [(3, 17, "warning")]
+         and "space required before colon" in warned[0]["message"]
+         and proc_bad.returncode == 1 and isinstance(both, list)
+         and [f.get("severity") for f in both] == [None, "warning"]
+         and "undefined method 'nope'" in both[0]["message"],
+         f"warned {warned}, both {both}")
 
     # 5c. the loop is around a language that can do work now: a pure-iyi
     # tool reads its args, its environment, and the disk — no --crystal
@@ -456,7 +842,9 @@ def main():
         server.stdin.write(json.dumps(msg) + "\n")
         server.stdin.flush()
         if id is not None:
-            return json.loads(server.stdout.readline())
+            # Nothing at all is a server that died, which a step says.
+            line = server.stdout.readline()
+            return json.loads(line) if line else None
 
     reply = rpc("initialize", {"protocolVersion": "2025-06-18"}, 1)
     step("mcp initialize names the server",
@@ -472,7 +860,7 @@ def main():
                                "arguments": {"affected": ["calc/mul.iyi"]}}, 4)
     report = json.loads(reply["result"]["content"][0]["text"])
     step("mcp test honours affected",
-         [t["file"] for t in report["tests"]] == ["./mul_test.iyi"], "")
+         [t["file"] for t in report["tests"]] == [os.path.join(".", "mul_test.iyi")], "")
     reply = rpc("tools/call", {"name": "doc", "arguments": {"target": "String"}}, 5)
     text = reply["result"]["content"][0]["text"]
     step("mcp doc answers a prelude type's surface",
@@ -541,7 +929,59 @@ def main():
     step("mcp tells a non-request from an unknown method",
          methodless.get("error", {}).get("code") == -32600,
          repr(methodless)[:90])
-    rpc("exit")
+    # A line that parses and is not an object. Every field was read with
+    # `[]?`, which raises on what is not an object, so a batch array, `42`,
+    # or `params` and `arguments` that are not objects killed the server
+    # with "you've found a bug in the iyi compiler". Each is answered now,
+    # and the server goes on.
+    def raw(message):
+        # A server that died on the line before has closed its stdin, and
+        # that is a step that fails, not a gate that throws.
+        try:
+            server.stdin.write(message + "\n")
+            server.stdin.flush()
+        except OSError:
+            return None
+        line = server.stdout.readline()
+        return json.loads(line) if line else None
+    answers = [
+        raw(json.dumps([{"jsonrpc": "2.0", "id": 14, "method": "ping"}])),
+        raw("42"),
+        raw(json.dumps({"jsonrpc": "2.0", "id": 15, "method": "tools/call", "params": [1]})),
+        raw(json.dumps({"jsonrpc": "2.0", "id": 16, "method": "tools/call",
+                        "params": {"name": "check", "arguments": [1]}})),
+        raw(json.dumps({"jsonrpc": "2.0", "id": 17, "method": "ping"})),
+    ]
+    codes = [answer and (answer.get("error", {}).get("code"), answer.get("id")) for answer in answers]
+    step("mcp refuses what is not a request object, and keeps serving",
+         codes == [(-32600, None), (-32600, None), (-32602, 15), (-32602, 16), (None, 17)],
+         repr(codes))
+
+    # The binary renamed under the running server, which is what rebuilding
+    # it does on Windows: a running program cannot be replaced there, so
+    # Makefile.win's REPLACE renames it aside. Every tool call runs the
+    # server's own binary again, found by `Process.executable_path`, and on
+    # Windows that answered the name it was loaded from; after the rename
+    # it was nil, and the next call died of "Nil assertion failed", told as
+    # a bug in the compiler. Linux's `/proc/self/exe` follows a rename, and
+    # Windows answers the image's name now too. darwin answers the path it
+    # was launched from (`_NSGetExecutablePath`), so it is not asked here.
+    if sys.platform == "darwin":
+        print("  ---- a renamed binary: darwin answers the path a program was launched from, not asked")
+    else:
+        binary = process_binary(server.pid)
+        aside = binary + ".gate-aside"
+        os.rename(binary, aside)
+        try:
+            reply = rpc("tools/call", {"name": "check", "arguments": {"file": "app.iyi"}}, 13)
+        finally:
+            os.rename(aside, binary)
+        answered = reply is not None and "result" in reply and reply["result"]["isError"] is False
+        step("mcp answers after its binary is renamed, as a rebuild on Windows does",
+             answered and json.loads(reply["result"]["content"][0]["text"]) == [],
+             repr(reply)[:90])
+    if server.poll() is None:
+        rpc("exit")
     server.wait(timeout=10)
     step("mcp exits on exit", server.returncode == 0, "")
 

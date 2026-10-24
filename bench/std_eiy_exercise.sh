@@ -5,15 +5,21 @@
 #
 # Proves:
 #   * `Eiy.render`, `Eiy.embed` and `Eiy.def_to_s` of bench/std_eiy_exercise.eiy
-#     (output tags, `if`, a block, `<%-`/`-%>` trimming, a comment, an escaped
-#     tag, quotes, backslashes, `#{` and UTF-8 text) print the expected text
-#     byte for byte, plain and with --release.
+#     (output tags, `if`, a block, `<%-`/`-%>` trimming, a two-line comment,
+#     an escaped tag, quotes, backslashes, `#{`, UTF-8 text, and
+#     bench/std_eiy_exercise_part.eiy rendered from inside it) print the
+#     expected text byte for byte, plain and with --release.
+#   * Two builds of it at once, the template helper the macros run made
+#     stale before each of four rounds, all build.
 #   * `Eiy::Lexer` token types, values, flags and positions; the generated
 #     source of `process_string`, exactly; `process_file`, `locate`, and the
 #     nil-answering pair.
 #   * Negative proofs: a copy of the module with `-%>` trimming broken, with
-#     columns counted in bytes, and with `#` left unescaped in template text is
-#     caught, each at its named check.
+#     columns counted in bytes, with `#` left unescaped in template text, with
+#     bytes that are not UTF-8 left unescaped, with a comment tag spliced in
+#     as code, with `render`'s buffer under a fixed name, with `def_to_s`'s
+#     parameter named `io`, and with a Buffer that needs `write` of its target
+#     is caught, each at its named check.
 #   * Refusals: a template with an open tag and a template that is not there
 #     are refused at build time with their sentences; the runtime API panics
 #     with the same sentences.
@@ -121,7 +127,7 @@ build_and_run "std_eiy" exercise-eiy "$REPO/bench/std_eiy_exercise.iyi"
 
 echo
 echo "== every eiy check reported"
-for check in "render:" "embed: into a Buffer" "embed: into stdout" "def_to_s:" "lexer:" "generated source exact" "ALL CHECKS PASSED"; do
+for check in "render:" "embed: into a Buffer" "embed: a Buffer printed into another Buffer" "embed: into stdout" "def_to_s:" "a template's own" "lexer:" "generated source exact" "ALL CHECKS PASSED"; do
   if ! grep -qF -- "$check" "$WORK/exercise-eiy.out" 2>/dev/null; then
     echo "  missing: $check"
     status=1
@@ -137,6 +143,39 @@ if grep -qF "ALL CHECKS PASSED" "$WORK/exercise-eiy-release.out" 2>/dev/null; th
 else
   echo "  the release build did not report ALL CHECKS PASSED"
   sed -n '1,12p' "$WORK/release.log"
+  status=1
+fi
+
+echo
+echo "== two builds of it at once, the template helper stale before each"
+# Every compiler on the machine links the helper the macros `run`
+# (std/eiy/process) into one cache directory, and it was linked straight to
+# its final name: Windows will not write over a program that is running, so
+# two builds of this exercise at once, the helper stale, failed one of the
+# two in each of 4 rounds with "LNK1104: cannot open file ...\macro_run".
+# The module is copied so that its helper can be made stale here.
+mkdir -p "$WORK/twice/std/eiy"
+cp "$REPO/src/std/eiy.iyi" "$WORK/twice/std/eiy.iyi"
+cp "$REPO/src/std/eiy/process.iyi" "$WORK/twice/std/eiy/process.iyi"
+twice_failed=0
+for round in 1 2 3 4; do
+  # A modification time the helper was not built from.
+  touch -t "2020010100${round}0" "$WORK/twice/std/eiy/process.iyi"
+  pids=""
+  for side in a b; do
+    IYI_PATH="$WORK/twice${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/twice/$side" \
+      "$REPO/bench/std_eiy_exercise.iyi" >"$WORK/twice/$round$side.log" 2>&1 &
+    pids="$pids $!"
+  done
+  for pid in $pids; do
+    wait "$pid" || twice_failed=$((twice_failed + 1))
+  done
+done
+if [ "$twice_failed" -eq 0 ]; then
+  echo "  8 builds, two at a time, all built"
+else
+  echo "  $twice_failed of 8 builds, two at a time, failed:"
+  grep -h -m1 "rror" "$WORK"/twice/*.log | head -3 | sed 's/^/    /'
   status=1
 fi
 
@@ -195,6 +234,24 @@ prove_fails "a column counted in bytes" patched_column "token 2 at 2:7" \
 # generated program, and the build refuses the name the template never meant.
 prove_fails "template text spliced in unescaped" patched_quote "undefined local variable or method 'raw'" \
   "content.replace(\"elsif b == 35 # '#'\", \"elsif b == 36 # '#'\")"
+# The compiler reads a string literal as UTF-8 and stops with an internal
+# error at a byte that is not, so such a byte in template text has to be
+# written out.
+prove_fails "text that is not UTF-8 spliced in as itself" patched_utf8 "text that is not UTF-8 is written as \\x escapes" \
+  "content.replace('elsif b < 32 || b >= 127', 'elsif b < 32 || b == 127')"
+# Spliced in as code, the comment's second line runs and drops an item.
+prove_fails "a comment tag spliced in as code" patched_comment "render of the template" \
+  "content.replace(\"unless str_val.starts_with?('#')\", \"unless false && str_val.starts_with?('#')\")"
+# Under a fixed name the template's inner `render` replaces the outer buffer,
+# and what the outer printed before it is lost.
+prove_fails "render's buffer under a fixed name" patched_nested "render of the template" \
+  "content.replace('%buf', '__buf__')"
+# Named `io`, the parameter is what the part template's own `|io|` hides, and
+# the template prints to its string.
+prove_fails "def_to_s's parameter named io" patched_io "undefined method 'print' for String" \
+  "content.replace('def to_s(__io__) : Nil\n      ::Std::Eiy::Eiy.embed({{filename}}, __io__)', 'def to_s(io) : Nil\n      ::Std::Eiy::Eiy.embed({{filename}}, io)')"
+prove_fails "a Buffer that writes to its target" patched_buffer "undefined method 'write' for Std::Eiy::Eiy::Buffer" \
+  "content.replace('io.print(to_s)', 'io.write(to_s)')"
 
 # ---------------------------------------------------------------------------
 # What the template compiler refuses
@@ -204,7 +261,7 @@ echo
 echo "== what the macros refuse at build time"
 eiy_build_refuses() { # eiy_build_refuses <label> <name> <phrase>
   local label="$1" name="$2" phrase="$3"
-  printf 'module main\n\nimport std/eiy\nusing std/eiy::{Eiy}\n\nputs Eiy.render("%s.eiy")\n' "$name" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/eiy::{Eiy}\n\nputs Eiy.render("%s.eiy")\n' "$name" > "$WORK/$name.iyi"
   if "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: it built instead of refusing"
     status=1
@@ -229,12 +286,16 @@ eiy_build_refuses "a template that is not there" no_such_template "cannot read $
 # line and column, not in the generated source.
 printf 'ok\n  x <%%= nonexistent_thing %%>\n' > "$WORK/bad_name.eiy"
 eiy_build_refuses "a name the template does not have" bad_name "bad_name.eiy:2:9"
+# A control tag's code that opens straight after `<%` too: it was reported
+# a column right, at 2:6.
+printf 'ok\n  <%%nonexistent_thing%%>\n' > "$WORK/bad_control.eiy"
+eiy_build_refuses "a name in a control tag with no space before it" bad_control "bad_control.eiy:2:5"
 
 echo
 echo "== what the runtime API refuses"
 eiy_panics_with() { # eiy_panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/eiy\nusing std/eiy::{Eiy}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/eiy::{Eiy}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"
@@ -282,7 +343,9 @@ case "$(uname -s)" in
     # and file names beside it are what this exercise's binary asks for on
     # top, each libSystem's, which the `allowed_libs` check below proves
     # independently: this binary still links libSystem and nothing else.
-    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen open recv send setsockopt socket unlink"
+    # `fstat64` is the runtime's read asking whether standard input is a
+    # regular file, which a socket's read shares the code of.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect fstat64 getsockname listen open recv send setsockopt socket unlink"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"

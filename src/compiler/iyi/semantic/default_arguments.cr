@@ -154,6 +154,7 @@ class Iyi::Def
     expansion.free_vars = free_vars
     expansion.annotations = annotations
     expansion.special_vars = special_vars
+    expansion.iyi_from_derive = iyi_from_derive?
     if owner = self.owner?
       expansion.owner = owner
     end

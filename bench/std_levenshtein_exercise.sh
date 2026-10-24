@@ -86,7 +86,8 @@ for phrase in \
   "== multibyte and unicode" \
   "== symmetry" \
   "== finder and candidate search" \
-  "== finder transposition (OSA)"; do
+  "== finder transposition (OSA)" \
+  "== bytes that are not UTF-8"; do
   if ! grep -q "$phrase" "$WORK/levenshtein-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -200,6 +201,11 @@ PY
     echo "  a method the prelude does not have is caught"
   fi
 fi
+
+# (A fifth proof bounded the loops by `size` again, which counted bytes
+# that are not UTF-8 differently from `chars`. The prelude's `size` counts
+# one character per such byte now, as `chars` does, so the two bounds are
+# one and there is nothing left for that break to break.)
 
 echo
 if [ "$status" -eq 0 ]; then

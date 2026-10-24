@@ -1,0 +1,1221 @@
+# ZIP archives (PKWARE's APPNOTE.TXT 6.3.10), read and written in iyi,
+# with the DEFLATE of `std/compress`, the bzip2 of `std/bzip2`, the
+# Zstandard of `std/zstd`, the LZMA and xz of `std/xz`, and the CRC-32 of
+# `std/digest`.
+#
+# `ZipReader` reads an archive the way the format means it to be read:
+# from its end. The end of central directory record is found by scanning
+# back over the comment that may follow it (APPNOTE 4.3.16; at most
+# 65,535 bytes, so the scan is bounded), and the central directory it
+# points at is the list of entries - the local headers in front of each
+# entry's data are read only when that entry is opened, and only to find
+# where its data begins. A record whose comment length reaches exactly
+# to the end of the archive is taken over one that does not, so a
+# comment that happens to hold the record's four signature bytes does
+# not fool the scan; failing that, the last record that fits, as Go's
+# `archive/zip` reads an archive with bytes after it. Each entry carries
+# its name, both sizes, its CRC-32, its method, its modification time
+# (MS-DOS date and time, two-second steps, no zone - answered as a
+# `Time` whose UTC wall clock is what was written, as Go answers it), and
+# its flags. A name is UTF-8 when general purpose bit 11 says so
+# (APPNOTE appendix D), else code page 437, which is what the format
+# says and what Python's `zipfile` decodes; Info-ZIP's Unicode Path
+# extra field (0x7075), a UTF-8 name carried beside one written in
+# another code page, is taken when its CRC-32 matches the name it stands
+# for, and passed over when it is stale, as Python and `unzip` take it.
+# The ZIP64 extended information field (0x0001) and the ZIP64 end
+# records (4.3.14, 4.3.15) carry the sizes, counts and offsets that do
+# not fit in 16 or 32 bits.
+#
+# An entry is read as a stream: `ZipReader#open` answers a
+# `ZipEntryReader` whose `read` gives the content a piece at a time
+# through its method's decoder - `Inflater` for deflate (8),
+# `Bzip2Reader` for bzip2 (12), `XzReader` for LZMA (14) and xz (95),
+# `ZstdReader` for Zstandard (93) - or straight from the archive for
+# stored (0), and checks the CRC-32 and the size against the central
+# directory before it hands out the last piece. An LZMA entry carries
+# a header of its own before its data (APPNOTE 5.8.8): the LZMA SDK's
+# version, which is passed over, and the five bytes of properties, which
+# are given to std/xz with the size as the 13-byte header of a .lzma
+# file, the size "unknown" when general purpose bit 1 says an end marker
+# ends the data (5.8.9), as Python's `zipfile` writes it. An entry
+# written with a data descriptor (bit 3) has its sizes in the central
+# directory, which is what is read by; the descriptor after the data is
+# read only for the CRC-32 it repeats, which must agree, as Go checks
+# it. `ZipReader.open` takes the archive as a `String` or as an `IyiIO`
+# that can seek - a file - which is read only where it is needed, never
+# whole.
+#
+# Bytes from outside are not trusted, and what is wrong with them is a
+# `ZipError`, a value: no end record; a central directory that lies past
+# where the archive ends; a split (multi-disk) archive; an encrypted
+# entry (bit 0) or one compressed with a method this module does not
+# read (deflate64, PPMd, implode and the rest), named; a decoder's own
+# refusal, its sentence after the entry's name; a local header that is
+# missing or names another file; entries whose data overlaps the next
+# entry's header, which is how the overlapping-file zip bomb (Fifield,
+# 2019) gets a kernel inflated once per entry - every entry's span is
+# checked against the next before anything is read, and Python's
+# `zipfile` has refused them since CVE-2024-0450; a total uncompressed
+# size past the limit the caller gives `open`; and content that does not
+# match its CRC-32 or size, or inflates past the size the directory
+# declares, which is refused the moment it does, not after the memory is
+# spent. `ZipReader#extract(dir)` writes the entries under a directory
+# and refuses, before it writes anything, a name that is absolute, climbs
+# out with `..`, or uses `\` or a drive (`:`) - the "zip slip" (Snyk,
+# 2018) - and so never writes outside *dir*.
+#
+# `ZipWriter` writes to any `IyiIO`, and needs no seeking: an entry from
+# a `String` is compressed first - deflated, stored, bzip2 or Zstandard,
+# with the version needed to extract each asks for, 4.6 and 6.3 - and
+# its header written knowing the sizes and CRC-32; one streamed from an
+# `IyiIO` is written with a data descriptor (bit 3) after its data, as
+# Python's `zipfile` writes to a stream it cannot seek, deflated or
+# stored, as std/bzip2 and std/zstd compress a whole input and not a
+# stream. Directories are entries named with a trailing `/`. A name that
+# is not ASCII is written as UTF-8 with bit 11 set, as Python writes it.
+# ZIP64 is written where a value needs it: an offset or a size past
+# 0xFFFFFFFF gets the extended field in the central directory, and more
+# than 65,535 entries or a directory past 4 GiB gets the ZIP64 end
+# records, the 32-bit fields left at their maximum where they overflow.
+# `ZipWriter.new(io, zip64: true)` writes every entry and the end that
+# way, which is how ZIP64 is exercised without writing four gigabytes. A
+# streamed entry that turns out past 4 GiB without it has 8-byte sizes
+# in its descriptor and the extended field in the central directory,
+# which every reader that reads by the directory reads, as Go's
+# `archive/zip` writes one. `finish` writes the central directory and the
+# end; the stream is flushed, not closed.
+#
+# Measured on the machine this was written on, a release build: 50 MB of
+# text written deflated as one entry in 145 ms (to 3.2 MB) and read back,
+# CRC-32 checked, in 65 to 70 ms; Python's `zipfile`, over C zlib, reads
+# the same archive in 35 ms and writes it at level 1 in 56 ms. 50 MB of
+# numbered lines Python 3.14 wrote as one entry are read in 300 ms from
+# bzip2 (Python 297), 85 ms from LZMA (57) and 64 ms from Zstandard (32);
+# written, they take 1.40 s as bzip2 (an archive of 1,690,084 bytes;
+# Python 2.93 s, 1,690,195) and 72 ms as Zstandard (455,939 bytes;
+# Python at its default level 29 ms, 667,026).
+#
+# Left out: encryption (traditional and AES), the methods other than
+# these six, writing LZMA and xz (std/xz only reads), split archives, the
+# extended timestamp fields, Unix permissions on extraction, symbolic
+# links (an entry is written as a file holding its bytes), and appending
+# to an existing archive. Archives with bytes in front of them
+# (self-extracting) are read only if their offsets count from the start
+# of the file.
+
+module std/zip
+
+import std/compress::{Deflate, Deflater, Inflater, Envelope}
+import std/bzip2::{Bzip2, Bzip2Reader}
+import std/zstd::{Zstd, ZstdReader}
+import std/xz::{XzReader, XzFormat}
+import std/digest::{CRC32}
+import std/time::{Time}
+import std/file::{File}
+import std/dir::{Dir}
+
+# What is wrong with an archive or an entry: `message` is the sentence,
+# which says which entry where there is one.
+pub struct ZipError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for ZipError
+  def message : String
+    @message
+  end
+end
+
+# The methods this module writes, by their number in the format.
+pub enum ZipMethod
+  Stored    =  0
+  Deflated  =  8
+  Bzip2     = 12
+  Zstandard = 93
+end
+
+# One entry of the central directory.
+pub class ZipEntry
+  # The name as the archive's directory holds it, decoded to UTF-8.
+  getter name : String
+  # The name's bytes as written, before decoding.
+  getter raw_name : String
+  # The uncompressed size.
+  getter size : Int64
+  getter compressed_size : Int64
+  getter crc32 : UInt32
+  # The method number: 0 stored, 8 deflate, 12 bzip2, 14 LZMA, 93
+  # Zstandard, 95 xz; any other is listed and refused when the entry is
+  # opened.
+  getter method : Int32
+  # The general purpose bit flags.
+  getter flags : Int32
+  getter modified : Time
+  # Where the entry's local header is, from the start of the archive.
+  getter offset : Int64
+  getter comment : String
+  @zip64 : Bool
+
+  def initialize(@name : String, @raw_name : String, @size : Int64, @compressed_size : Int64, @crc32 : UInt32, @method : Int32,
+                 @flags : Int32, @modified : Time, @offset : Int64, @comment : String, @zip64 : Bool)
+  end
+
+  def directory? : Bool
+    @name.ends_with?("/")
+  end
+
+  # Bit 0: the data is encrypted, which this module does not read.
+  def encrypted? : Bool
+    @flags & 1 != 0
+  end
+
+  # Bit 3: the CRC-32 and sizes follow the data, in a data descriptor.
+  def descriptor? : Bool
+    @flags & 8 != 0
+  end
+
+  # Bit 11: the name is UTF-8 rather than code page 437.
+  def utf8? : Bool
+    @flags & 0x800 != 0
+  end
+
+  # Whether the central directory carried this entry's sizes or offset
+  # in a ZIP64 extended information field.
+  def zip64? : Bool
+    @zip64
+  end
+
+  # The method's name, for a sentence about it.
+  def method_name : String
+    ZipBytes.method_name(@method)
+  end
+end
+
+# Little-endian fields in and out of byte buffers, and the format's
+# signatures.
+struct ZipBytes
+  LOCAL      = 0x04034b50_u32
+  CENTRAL    = 0x02014b50_u32
+  END        = 0x06054b50_u32
+  END64      = 0x06064b50_u32
+  LOCATOR64  = 0x07064b50_u32
+  DESCRIPTOR = 0x08074b50_u32
+  MAX32      = 0xffffffff_i64
+
+  # Code page 437's upper half, 0x80 to 0xFF, as Unicode code points: the
+  # table Python's `cp437` codec decodes with.
+  CP437 = [
+    0xc7, 0xfc, 0xe9, 0xe2, 0xe4, 0xe0, 0xe5, 0xe7, 0xea, 0xeb, 0xe8, 0xef, 0xee, 0xec, 0xc4, 0xc5,
+    0xc9, 0xe6, 0xc6, 0xf4, 0xf6, 0xf2, 0xfb, 0xf9, 0xff, 0xd6, 0xdc, 0xa2, 0xa3, 0xa5, 0x20a7, 0x192,
+    0xe1, 0xed, 0xf3, 0xfa, 0xf1, 0xd1, 0xaa, 0xba, 0xbf, 0x2310, 0xac, 0xbd, 0xbc, 0xa1, 0xab, 0xbb,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556, 0x2555, 0x2563, 0x2551, 0x2557, 0x255d, 0x255c, 0x255b, 0x2510,
+    0x2514, 0x2534, 0x252c, 0x251c, 0x2500, 0x253c, 0x255e, 0x255f, 0x255a, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256c, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256b, 0x256a, 0x2518, 0x250c, 0x2588, 0x2584, 0x258c, 0x2590, 0x2580,
+    0x3b1, 0xdf, 0x393, 0x3c0, 0x3a3, 0x3c3, 0xb5, 0x3c4, 0x3a6, 0x398, 0x3a9, 0x3b4, 0x221e, 0x3c6, 0x3b5, 0x2229,
+    0x2261, 0xb1, 0x2265, 0x2264, 0x2320, 0x2321, 0xf7, 0x2248, 0xb0, 0x2219, 0xb7, 0x221a, 0x207f, 0xb2, 0x25a0, 0xa0,
+  ]
+
+  def self.u16(p : Pointer(UInt8), at : Int32) : Int32
+    p[at].to_i32 | (p[at + 1].to_i32 << 8)
+  end
+
+  def self.u32(p : Pointer(UInt8), at : Int32) : UInt32
+    p[at].to_u32 | (p[at + 1].to_u32 << 8) | (p[at + 2].to_u32 << 16) | (p[at + 3].to_u32 << 24)
+  end
+
+  def self.u64(p : Pointer(UInt8), at : Int32) : UInt64
+    u32(p, at).to_u64 | (u32(p, at + 4).to_u64 << 32)
+  end
+
+  def self.put16(dst : Pointer(UInt8), at : Int32, v : Int32) : Nil
+    dst[at] = (v & 0xff).to_u8
+    dst[at + 1] = ((v >> 8) & 0xff).to_u8
+  end
+
+  def self.put32(dst : Pointer(UInt8), at : Int32, v : UInt32) : Nil
+    dst[at] = (v & 0xff_u32).to_u8
+    dst[at + 1] = ((v >> 8) & 0xff_u32).to_u8
+    dst[at + 2] = ((v >> 16) & 0xff_u32).to_u8
+    dst[at + 3] = ((v >> 24) & 0xff_u32).to_u8
+  end
+
+  def self.put64(dst : Pointer(UInt8), at : Int32, v : UInt64) : Nil
+    put32(dst, at, (v & 0xffffffff_u64).to_u32)
+    put32(dst, at + 4, (v >> 32).to_u32)
+  end
+
+  # A 32-bit field of a size or offset: the value, or the maximum that
+  # sends the reader to the ZIP64 field.
+  def self.field32(v : Int64, wide : Bool) : UInt32
+    wide || v >= MAX32 ? 0xffffffff_u32 : v.to_u32
+  end
+
+  def self.hex(v : UInt32) : String
+    v.to_u64.to_s(16).rjust(8, '0')
+  end
+
+  # The names APPNOTE 4.4.5 gives the methods a reader meets.
+  def self.method_name(m : Int32) : String
+    case m
+    when  0 then "stored"
+    when  1 then "shrink"
+    when  6 then "implode"
+    when  8 then "deflate"
+    when  9 then "deflate64"
+    when 12 then "bzip2"
+    when 14 then "LZMA"
+    when 93 then "Zstandard"
+    when 95 then "xz"
+    when 98 then "PPMd"
+    when 99 then "AES encryption"
+    else         "method #{m}"
+    end
+  end
+
+  # Whether `ZipEntryReader` reads method *m*.
+  def self.readable?(m : Int32) : Bool
+    m == 0 || m == 8 || m == 12 || m == 14 || m == 93 || m == 95
+  end
+
+  # Code page 437 to UTF-8: ASCII as it is, the upper half through the
+  # table. A name that is ASCII is itself.
+  def self.cp437(raw : String) : String
+    p = raw.to_unsafe
+    n = raw.bytesize
+    high = false
+    i = 0
+    while i < n
+      high = true if p[i] >= 0x80_u8
+      i = i + 1
+    end
+    return raw unless high
+    out = String::Builder.new(n * 2)
+    i = 0
+    while i < n
+      b = p[i]
+      if b < 0x80_u8
+        out.write_byte(b)
+      else
+        out << CP437[b.to_i32 - 0x80].unsafe_chr
+      end
+      i = i + 1
+    end
+    out.to_s
+  end
+
+  # An MS-DOS date and time (APPNOTE 4.4.6) read as a `Time` whose UTC
+  # wall clock is what was written. Fields no calendar has - month 0, a
+  # 30th of February, second 60 - are 1980-01-01 00:00:00, the format's
+  # first moment, rather than a panic over bytes from outside.
+  def self.dos_time(date : Int32, time : Int32) : Time
+    year = 1980 + (date >> 9)
+    month = (date >> 5) & 15
+    day = date & 31
+    hour = time >> 11
+    minute = (time >> 5) & 63
+    second = (time & 31) * 2
+    if month >= 1 && month <= 12 && day >= 1 && day <= Time.days_in_month(year, month) && hour < 24 && minute < 60 && second < 60
+      Time.utc(year, month, day, hour, minute, second)
+    else
+      Time.utc(1980, 1, 1)
+    end
+  end
+
+  # *t*'s wall clock in its own location as {date, time}. The format
+  # holds 1980 to 2107 in two-second steps: an earlier time is written as
+  # 1980-01-01 00:00:00 and a later one as the last moment there is, as
+  # Go writes them; an odd second is the one before.
+  def self.dos_stamp(t : Time) : {Int32, Int32}
+    y = t.year
+    return {(1 << 5) | 1, 0} if y < 1980
+    return {(127 << 9) | (12 << 5) | 31, (23 << 11) | (59 << 5) | 29} if y > 2107
+    {((y - 1980) << 9) | (t.month << 5) | t.day, (t.hour << 11) | (t.minute << 5) | (t.second // 2)}
+  end
+end
+
+# Where an archive's bytes are: a string, or a file read where asked.
+class ZipSource
+  @data : String
+  @io : IyiIO | Nil
+  getter size : Int64
+
+  def initialize(@data : String)
+    @io = nil
+    @size = @data.bytesize.to_i64
+  end
+
+  def initialize(io : IyiIO)
+    @data = ""
+    @io = io
+    @size = io.seek(0_i64, IyiIO::Seek::End)
+  end
+
+  # *count* bytes at *offset*. A range past the end is the archive's
+  # fault, not the caller's: an offset in it said so.
+  def read_at(offset : Int64, count : Int32) : String | ZipError
+    if offset < 0_i64 || count < 0 || offset > @size - count.to_i64
+      return ZipError.new("zip: the archive is cut short: #{count} bytes wanted at offset #{offset}, and it ends at #{@size}")
+    end
+    if io = @io
+      io.pos = offset
+      got = io.read_bytes(count)
+      return ZipError.new("zip: the file ended at #{offset + got.bytesize.to_i64} while #{count} bytes were read at offset #{offset}") unless got.bytesize == count
+      got
+    else
+      @data[offset.to_i32, count]
+    end
+  end
+end
+
+# An archive's entries, read from its central directory.
+#
+# ```
+# zip = ZipReader.open(File.read("a.zip"))!
+# zip.entries.each { |e| puts "#{e.name} #{e.size}" }
+# if readme = zip.find("README")
+#   text = zip.read(readme)!
+# end
+# ```
+pub class ZipReader
+  # `open` without a limit.
+  NO_LIMIT = 9223372036854775807_i64
+
+  getter entries : Array(ZipEntry)
+  # The archive's comment, its bytes as written.
+  getter comment : String
+  @source : ZipSource
+  # Each entry's local header offset, to where its data must end: the
+  # next entry's header, or the central directory.
+  @slots : Hash(Int64, Int64)
+
+  private def initialize(@source : ZipSource, @entries : Array(ZipEntry), @comment : String, @slots : Hash(Int64, Int64))
+  end
+
+  # The archive in *data*. *limit* is the most the entries may hold
+  # uncompressed, all together: an archive whose directory says more is
+  # refused here, and an entry that inflates past what the directory says
+  # it holds is refused as it reads.
+  def self.open(data : String, limit : Int64 = NO_LIMIT) : ZipReader | ZipError
+    load(ZipSource.new(data), limit)
+  end
+
+  # The archive in a file open for reading, which is read where the
+  # directory and the entries are and not whole. It is moved about with
+  # `seek`; the reader and its entry readers own its position.
+  def self.open(io : IyiIO, limit : Int64 = NO_LIMIT) : ZipReader | ZipError
+    load(ZipSource.new(io), limit)
+  end
+
+  # The entry named *name*, or nil.
+  def find(name : String) : ZipEntry?
+    @entries.each { |e| return e if e.name == name }
+    nil
+  end
+
+  # *entry*'s content as a stream; see `ZipEntryReader`. An encrypted
+  # entry, one in a method this module does not read, and one whose
+  # local header is not where and what the directory says are refused,
+  # and so is an LZMA entry whose own header is not LZMA's.
+  def open(entry : ZipEntry) : ZipEntryReader | ZipError
+    slot_end = @slots[entry.offset]?
+    raise "ZipReader: the entry #{entry.name.inspect} is not from this archive" unless slot_end
+    return ZipError.new("zip: #{entry.name.inspect} is encrypted, which this reader does not decrypt") if entry.encrypted?
+    unless ZipBytes.readable?(entry.method)
+      return ZipError.new("zip: #{entry.name.inspect} is compressed with #{entry.method_name} (method #{entry.method}); this reader reads stored (0), deflate (8), bzip2 (12), LZMA (14), Zstandard (93) and xz (95)")
+    end
+    head = @source.read_at(entry.offset, 30)!
+    p = head.to_unsafe
+    return ZipError.new("zip: there is no local header for #{entry.name.inspect} at offset #{entry.offset}") unless ZipBytes.u32(p, 0) == ZipBytes::LOCAL
+    name_len = ZipBytes.u16(p, 26)
+    extra_len = ZipBytes.u16(p, 28)
+    data_start = entry.offset + 30_i64 + name_len.to_i64 + extra_len.to_i64
+    if data_start > slot_end || entry.compressed_size > slot_end - data_start
+      return ZipError.new("zip: #{entry.name.inspect}'s data runs past where the next entry begins (overlapping entries)")
+    end
+    local_name = @source.read_at(entry.offset + 30_i64, name_len)!
+    unless local_name == entry.raw_name
+      return ZipError.new("zip: the local header at offset #{entry.offset} names #{local_name.inspect}, and the central directory #{entry.raw_name.inspect}")
+    end
+    if entry.method == 0 && entry.compressed_size != entry.size
+      return ZipError.new("zip: #{entry.name.inspect} is stored, but its sizes differ (#{entry.compressed_size} compressed, #{entry.size} not)")
+    end
+    lzma_head = ""
+    lzma_head = lzma_header(entry, data_start)! if entry.method == 14
+    ZipEntryReader.new(@source, entry, data_start, slot_end, lzma_head)
+  end
+
+  # An LZMA entry (APPNOTE 5.8.8) starts with its own header: the LZMA
+  # SDK's version (two bytes, which say nothing a reader needs and are
+  # passed over, as Python passes them), the properties' size, and the
+  # properties - the lc/lp/pb byte and the dictionary size, five bytes
+  # in all. What follows is the LZMA data with neither its size nor a
+  # header of its own, which std/xz reads as a .lzma file: these are the
+  # 13 bytes of a .lzma header for it, the properties and the size.
+  # The size is the directory's, the data ending there, unless general
+  # purpose bit 1 says an end marker ends it; then it is "unknown" and
+  # the marker must be there, and the size is held to as it is for
+  # every method, by what `read` hands out.
+  private def lzma_header(entry : ZipEntry, data_start : Int64) : String | ZipError
+    name = entry.name.inspect
+    return ZipError.new("zip: #{name}'s LZMA data is #{entry.compressed_size} bytes, shorter than its 9-byte header") if entry.compressed_size < 9_i64
+    head = @source.read_at(data_start, 9)!
+    p = head.to_unsafe
+    props = ZipBytes.u16(p, 2)
+    return ZipError.new("zip: #{name}'s LZMA header gives #{props} bytes of properties, where LZMA has 5") unless props == 5
+    size = entry.flags & 2 != 0 ? 0xffffffffffffffff_u64 : entry.size.to_u64
+    String.new(13) do |dst|
+      dst.copy_from(p + 4, 5)
+      ZipBytes.put64(dst, 5, size)
+    end
+  end
+
+  # *entry*'s whole content, checked as `open`'s stream checks it.
+  def read(entry : ZipEntry) : String | ZipError
+    if entry.size > 2147483647_i64
+      return ZipError.new("zip: #{entry.name.inspect} holds #{entry.size} bytes, more than a string holds; read it with open")
+    end
+    stream = open(entry)!
+    out = String::Builder.new(entry.size.to_i32 + 1)
+    while true
+      piece = stream.read(65536)!
+      break if piece.empty?
+      out << piece
+    end
+    out.to_s
+  end
+
+  # Every entry written under *dir*, directories made as needed, files
+  # that are there already written over. Every name is checked before
+  # anything is written: one that is absolute, has a `..` part, or holds
+  # a `\` or a `:` (a separator and a drive on Windows) would land outside
+  # *dir*, and the archive is refused whole. A file whose content fails
+  # its check is deleted and the error answered.
+  def extract(dir : String) : Nil | ZipError
+    @entries.each do |e|
+      reason = ZipReader.unsafe_name(e.name)
+      return ZipError.new("zip: #{e.name.inspect} would be extracted outside the directory (zip slip): #{reason}") if reason
+    end
+    @entries.each do |e|
+      path = dir + "/" + e.name
+      if e.directory?
+        Dir.mkdir_p(path)
+        next
+      end
+      cut = e.name.bytesize - 1
+      while cut >= 0 && e.name.to_unsafe[cut] != 47_u8
+        cut = cut - 1
+      end
+      Dir.mkdir_p(cut > 0 ? dir + "/" + e.name[0, cut] : dir)
+      stream = open(e)!
+      io = File.open(path, "w")
+      failed = nil.as(ZipError | Nil)
+      while true
+        piece = stream.read(65536)
+        if piece.is_a?(ZipError)
+          failed = piece
+          break
+        end
+        break if piece.empty?
+        io.write(piece)
+      end
+      io.close
+      if fault = failed
+        File.delete(path)
+        return fault
+      end
+    end
+    nil
+  end
+
+  # Why *name* may not be written under a directory, or nil when it may.
+  def self.unsafe_name(name : String) : String?
+    return "the name is empty" if name.empty?
+    return "the name is absolute" if name.starts_with?("/")
+    return "the name holds a \\, a separator on Windows" if name.includes?("\\")
+    return "the name holds a :, a drive or a stream on Windows" if name.includes?(":")
+    return "the name holds a NUL byte" if name.includes?("\u0000")
+    return "the name climbs out with .." if name.split('/').includes?("..")
+    nil
+  end
+
+  private def self.load(source : ZipSource, limit : Int64) : ZipReader | ZipError
+    size = source.size
+    tail_len = size < 65557_i64 ? size : 65557_i64
+    tail_start = size - tail_len
+    tail = source.read_at(tail_start, tail_len.to_i32)!
+    p = tail.to_unsafe
+    at = find_end(p, tail_len.to_i32)
+    return ZipError.new("zip: there is no end of central directory record: not a zip archive, or one cut short") if at < 0
+    end_at = tail_start + at.to_i64
+    comment_len = ZipBytes.u16(p, at + 20)
+    room = tail_len.to_i32 - at - 22
+    comment = tail[at + 22, comment_len < room ? comment_len : room]
+    disk = ZipBytes.u16(p, at + 4)
+    cd_disk = ZipBytes.u16(p, at + 6)
+    count = ZipBytes.u16(p, at + 10).to_i64
+    disk_count = ZipBytes.u16(p, at + 8).to_i64
+    cd_size = ZipBytes.u32(p, at + 12).to_i64
+    cd_offset = ZipBytes.u32(p, at + 16).to_i64
+    dir_end = end_at
+    zip64 = false
+
+    # The ZIP64 locator sits right before the end record when there is a
+    # ZIP64 end record; when it is there, the ZIP64 record's counts and
+    # offsets are the archive's, as Python reads them.
+    if end_at >= 20_i64
+      loc = source.read_at(end_at - 20_i64, 20)!
+      lp = loc.to_unsafe
+      if ZipBytes.u32(lp, 0) == ZipBytes::LOCATOR64
+        zip64 = true
+        return ZipError.new("zip: a split (multi-disk) archive is not supported") unless ZipBytes.u32(lp, 4) == 0_u32 && ZipBytes.u32(lp, 16) <= 1_u32
+        rec_offset = ZipBytes.u64(lp, 8)
+        if rec_offset > (end_at - 20_i64 - 56_i64).to_u64 || end_at < 76_i64
+          return ZipError.new("zip: the ZIP64 end of central directory record lies past its locator (offset #{rec_offset})")
+        end
+        rec = source.read_at(rec_offset.to_i64, 56)!
+        rp = rec.to_unsafe
+        return ZipError.new("zip: there is no ZIP64 end of central directory record at offset #{rec_offset}, where its locator says") unless ZipBytes.u32(rp, 0) == ZipBytes::END64
+        disk = ZipBytes.u32(rp, 16).to_i32
+        cd_disk = ZipBytes.u32(rp, 20).to_i32
+        disk_count = ZipBytes.u64(rp, 24).to_i64
+        count = ZipBytes.u64(rp, 32).to_i64
+        cd_size = ZipBytes.u64(rp, 40).to_i64
+        cd_offset = ZipBytes.u64(rp, 48).to_i64
+        dir_end = rec_offset.to_i64
+      end
+    end
+    return ZipError.new("zip: a split (multi-disk) archive is not supported") unless disk == 0 && cd_disk == 0 && disk_count == count
+    if cd_size < 0_i64 || cd_offset < 0_i64 || cd_offset > dir_end || cd_size > dir_end - cd_offset
+      return ZipError.new("zip: the central directory lies past the end of the archive: #{cd_size} bytes at offset #{cd_offset}, and the directory must end by #{dir_end}")
+    end
+    return ZipError.new("zip: the central directory is #{cd_size} bytes, more than this reader holds") if cd_size > 2147483647_i64
+    cd = source.read_at(cd_offset, cd_size.to_i32)!
+    entries = parse_directory(cd, limit)!
+    unless entries.size.to_i64 == count || (!zip64 && entries.size.to_i64 & 0xffff_i64 == count)
+      return ZipError.new("zip: the end record says #{count} entries, and the central directory holds #{entries.size}")
+    end
+    slots = check_spans(entries, cd_offset)!
+    new(source, entries, comment, slots)
+  end
+
+  # The end record's place in *p*: the last whose comment reaches the end
+  # exactly, else the last that fits, else -1.
+  private def self.find_end(p : Pointer(UInt8), n : Int32) : Int32
+    fits = -1
+    at = n - 22
+    while at >= 0
+      if ZipBytes.u32(p, at) == ZipBytes::END
+        reach = at + 22 + ZipBytes.u16(p, at + 20)
+        return at if reach == n
+        fits = at if fits < 0 && reach <= n
+      end
+      at = at - 1
+    end
+    fits
+  end
+
+  private def self.parse_directory(cd : String, limit : Int64) : Array(ZipEntry) | ZipError
+    entries = [] of ZipEntry
+    p = cd.to_unsafe
+    n = cd.bytesize
+    at = 0
+    total = 0_i64
+    while at < n
+      if at > n - 46 || ZipBytes.u32(p, at) != ZipBytes::CENTRAL
+        return ZipError.new("zip: central directory entry #{entries.size + 1} is not one (no signature at offset #{at} of the directory)")
+      end
+      flags = ZipBytes.u16(p, at + 8)
+      method = ZipBytes.u16(p, at + 10)
+      time = ZipBytes.u16(p, at + 12)
+      date = ZipBytes.u16(p, at + 14)
+      crc = ZipBytes.u32(p, at + 16)
+      csize = ZipBytes.u32(p, at + 20).to_u64
+      usize = ZipBytes.u32(p, at + 24).to_u64
+      name_len = ZipBytes.u16(p, at + 28)
+      extra_len = ZipBytes.u16(p, at + 30)
+      comment_len = ZipBytes.u16(p, at + 32)
+      disk = ZipBytes.u16(p, at + 34).to_u64
+      offset = ZipBytes.u32(p, at + 42).to_u64
+      record = 46 + name_len + extra_len + comment_len
+      if record > n - at
+        return ZipError.new("zip: central directory entry #{entries.size + 1} runs past the directory's end")
+      end
+      raw = cd[at + 46, name_len]
+      comment = cd[at + 46 + name_len + extra_len, comment_len]
+      label = raw.inspect
+
+      # The extra fields: ZIP64 (0x0001) holds, in this order, each of
+      # the four values whose fixed field is at its maximum (APPNOTE
+      # 4.5.3); Info-ZIP's Unicode Path (0x7075) a UTF-8 name.
+      unicode = nil.as(String | Nil)
+      zip64 = false
+      x = at + 46 + name_len
+      x_end = x + extra_len
+      while x + 4 <= x_end
+        tag = ZipBytes.u16(p, x)
+        len = ZipBytes.u16(p, x + 2)
+        body = x + 4
+        break if len > x_end - body
+        if tag == 1
+          zip64 = true
+          f = body
+          if usize == 0xffffffff_u64
+            return ZipError.new("zip: #{label}'s ZIP64 field is too short for its size") if f + 8 > body + len
+            usize = ZipBytes.u64(p, f)
+            f = f + 8
+          end
+          if csize == 0xffffffff_u64
+            return ZipError.new("zip: #{label}'s ZIP64 field is too short for its compressed size") if f + 8 > body + len
+            csize = ZipBytes.u64(p, f)
+            f = f + 8
+          end
+          if offset == 0xffffffff_u64
+            return ZipError.new("zip: #{label}'s ZIP64 field is too short for its offset") if f + 8 > body + len
+            offset = ZipBytes.u64(p, f)
+            f = f + 8
+          end
+          if disk == 0xffff_u64
+            return ZipError.new("zip: #{label}'s ZIP64 field is too short for its disk") if f + 4 > body + len
+            disk = ZipBytes.u32(p, f).to_u64
+          end
+        elsif tag == 0x7075 && len >= 5 && p[body] == 1_u8
+          if ZipBytes.u32(p, body + 1) == CRC32.checksum(raw)
+            unicode = cd[body + 5, len - 5]
+          end
+        end
+        x = body + len
+      end
+      return ZipError.new("zip: a split (multi-disk) archive is not supported (#{label} is on disk #{disk})") unless disk == 0_u64
+      top = 9223372036854775807_u64
+      if usize > top || csize > top || offset > top
+        return ZipError.new("zip: #{label}'s sizes or offset are past what a 64-bit signed number holds")
+      end
+      size = usize.to_i64
+      if size > limit - total
+        return ZipError.new("zip: the entries hold more than the limit of #{limit} bytes uncompressed (#{label} is #{size} bytes, after #{total} before it)")
+      end
+      total = total + size
+
+      name = if flags & 0x800 != 0
+               raw
+             elsif u = unicode
+               u
+             else
+               ZipBytes.cp437(raw)
+             end
+      entries << ZipEntry.new(name, raw, size, csize.to_i64, crc, method, flags, ZipBytes.dos_time(date, time), offset.to_i64, comment, zip64)
+      at = at + record
+    end
+    entries
+  end
+
+  # Where each entry's data must end: its local header, its name and its
+  # data (the extra field is counted when the entry is opened) must be
+  # before the next entry's header, and the last entry's before the
+  # central directory. Two entries at one offset, or one whose data runs
+  # over the next one's header, overlap.
+  private def self.check_spans(entries : Array(ZipEntry), cd_offset : Int64) : Hash(Int64, Int64) | ZipError
+    slots = {} of Int64 => Int64
+    order = entries.sorted_by { |e| e.offset }
+    i = 0
+    while i < order.size
+      e = order[i]
+      stop = i + 1 < order.size ? order[i + 1].offset : cd_offset
+      if e.offset > cd_offset - 30_i64
+        return ZipError.new("zip: #{e.name.inspect}'s local header at offset #{e.offset} lies past the central directory at #{cd_offset}")
+      end
+      span = 30_i64 + e.raw_name.bytesize.to_i64
+      if e.compressed_size > stop - e.offset - span
+        if i + 1 < order.size
+          return ZipError.new("zip: #{e.name.inspect} and #{order[i + 1].name.inspect} overlap: the first's data runs past where the second begins (overlapping entries, as a zip bomb has them)")
+        end
+        return ZipError.new("zip: #{e.name.inspect}'s data runs into the central directory")
+      end
+      slots[e.offset] = stop
+      i = i + 1
+    end
+    slots
+  end
+end
+
+# The compressed bytes of one entry, handed to its decoder a piece at a
+# time. An archive that cannot be read is kept as the error and ends the
+# stream; the entry reader answers it in place of the decoder's.
+class ZipFeed
+  getter error : ZipError | Nil
+
+  def initialize(@source : ZipSource, @at : Int64, @left : Int64)
+    @error = nil
+  end
+
+  def next : String?
+    return nil if @left <= 0_i64 || @error
+    n = @left < 65536_i64 ? @left.to_i32 : 65536
+    got = @source.read_at(@at, n)
+    if got.is_a?(ZipError)
+      @error = got
+      return nil
+    end
+    @at = @at + n.to_i64
+    @left = @left - n.to_i64
+    got
+  end
+end
+
+# One entry's content, read a piece at a time; `ZipReader#open` makes
+# them. The CRC-32 and the size are checked against the central
+# directory before the last piece is handed out, so a caller that stops
+# at the size it was told has still had every byte checked; and content
+# that inflates past the size the directory declares is refused at the
+# read that would pass it.
+#
+# Each method's decoder is the module's that has it: `Inflater` from
+# std/compress, `Bzip2Reader` from std/bzip2, `ZstdReader` from std/zstd,
+# and `XzReader` from std/xz for xz and, as a .lzma file, for LZMA. The
+# window a Zstandard frame names may be up to 512 MiB, the most
+# `ZstdReader` takes, and the dictionary an LZMA or xz stream names up
+# to `XzReader::DICT_MAX`, rather than their own defaults: both readers
+# grow their buffers with the output, not to the window, and the output
+# is held to the size the directory declares - which `ZipReader.open`'s
+# limit bounds - so the memory an entry costs is its own size at most,
+# and an entry another tool wrote with a large window is read.
+pub class ZipEntryReader
+  # The largest window `ZstdReader` agrees to.
+  ZSTD_WINDOW = 536870912
+
+  @source : ZipSource
+  @entry : ZipEntry
+  @at : Int64
+  @left : Int64
+  @data_end : Int64
+  @slot_end : Int64
+  @crc : UInt32
+  @got : Int64
+  @feed : ZipFeed | Nil
+  @decoder : Inflater | Bzip2Reader | ZstdReader | XzReader | Nil
+  @failed : ZipError | Nil
+  @done : Bool
+
+  # *lzma_head* is the .lzma header `ZipReader#open` made of an LZMA
+  # entry's own, which the decoder is given before the data after it.
+  def initialize(@source : ZipSource, @entry : ZipEntry, data_start : Int64, @slot_end : Int64, lzma_head : String)
+    @at = data_start
+    @left = @entry.compressed_size
+    @data_end = data_start + @entry.compressed_size
+    @crc = 0_u32
+    @got = 0_i64
+    @failed = nil
+    @done = false
+    method = @entry.method
+    if method == 0
+      @feed = nil
+      @decoder = nil
+    else
+      skip = method == 14 ? 9_i64 : 0_i64
+      feed = ZipFeed.new(@source, data_start + skip, @entry.compressed_size - skip)
+      @feed = feed
+      @decoder = case method
+                 when  8 then Inflater.new(Envelope::Raw) { feed.next }
+                 when 12 then Bzip2Reader.new { feed.next }
+                 when 93 then ZstdReader.new(ZSTD_WINDOW) { feed.next }
+                 else
+                   head = lzma_head
+                   XzReader.new(method == 14 ? XzFormat::Lzma : XzFormat::Xz, XzReader::DICT_MAX) do
+                     if head.empty?
+                       feed.next
+                     else
+                       first = head
+                       head = ""
+                       first
+                     end
+                   end
+                 end
+    end
+  end
+
+  # Up to *max* bytes of the content, "" at its end; or what is wrong
+  # with it, after which every read answers the same. A *max* below 1 is
+  # a panic.
+  def read(max : Int32 = 65536) : String | ZipError
+    raise "ZipEntryReader: read wants at least one byte, not #{max}" if max < 1
+    if failed = @failed
+      return failed
+    end
+    return "" if @done
+    piece = next_piece(max)
+    if piece.is_a?(ZipError)
+      @failed = piece
+      return piece
+    end
+    name = @entry.name.inspect
+    if piece.bytesize.to_i64 > @entry.size - @got
+      return fail("zip: #{name} inflates past the #{@entry.size} bytes the central directory declares")
+    end
+    @crc = CRC32.update(@crc, piece.to_unsafe, piece.bytesize)
+    @got = @got + piece.bytesize.to_i64
+    if piece.empty? || ended?
+      fault = check_end
+      if fault
+        @failed = fault
+        return fault
+      end
+      @done = true
+    end
+    piece
+  end
+
+  # Whether every byte has been read and checked.
+  def finished? : Bool
+    @done
+  end
+
+  private def ended? : Bool
+    if decoder = @decoder
+      decoder.finished?
+    else
+      @left == 0_i64
+    end
+  end
+
+  private def next_piece(max : Int32) : String | ZipError
+    if decoder = @decoder
+      got = decoder.read(max)
+      return got if got.is_a?(String)
+      if (feed = @feed) && (fault = feed.error)
+        return fault
+      end
+      ZipError.new("zip: #{@entry.name.inspect}: #{got.message}")
+    else
+      return "" if @left == 0_i64
+      n = @left < max.to_i64 ? @left.to_i32 : max
+      got = @source.read_at(@at, n)!
+      @at = @at + n.to_i64
+      @left = @left - n.to_i64
+      got
+    end
+  end
+
+  private def fail(message : String) : ZipError
+    fault = ZipError.new(message)
+    @failed = fault
+    fault
+  end
+
+  private def check_end : ZipError | Nil
+    name = @entry.name.inspect
+    return ZipError.new("zip: #{name} holds #{@got} bytes, and the central directory says #{@entry.size}") unless @got == @entry.size
+    unless @crc == @entry.crc32
+      return ZipError.new("zip: #{name}'s CRC-32 is #{ZipBytes.hex(@crc)}, and the central directory says #{ZipBytes.hex(@entry.crc32)}")
+    end
+    return nil unless @entry.descriptor?
+    # The descriptor's signature is optional (APPNOTE 4.3.9.3); the
+    # CRC-32 is the first field after it either way.
+    head = @source.read_at(@data_end, @slot_end - @data_end >= 8_i64 ? 8 : 4)
+    return ZipError.new("zip: #{name}'s data descriptor is cut short") if head.is_a?(ZipError) || head.bytesize < 4
+    p = head.to_unsafe
+    said = ZipBytes.u32(p, 0)
+    if said == ZipBytes::DESCRIPTOR
+      return ZipError.new("zip: #{name}'s data descriptor is cut short") if head.bytesize < 8
+      said = ZipBytes.u32(p, 4)
+    end
+    unless said == @entry.crc32
+      return ZipError.new("zip: #{name}'s data descriptor says CRC-32 #{ZipBytes.hex(said)}, and the central directory #{ZipBytes.hex(@entry.crc32)}")
+    end
+    nil
+  end
+end
+
+# An archive written to an `IyiIO`, an entry at a time, the central
+# directory at `finish`.
+#
+# ```
+# File.open("out.zip", "w") do |io|
+#   zip = ZipWriter.new(io)
+#   zip.add("README", text)
+#   zip.add("photo.jpg", jpeg, ZipMethod::Stored)
+#   zip.add_directory("empty")
+#   zip.finish
+# end
+# ```
+#
+# What is wrong with the calls is a panic: a name that is empty, longer
+# than 65,535 bytes, absolute or holding a `\` (APPNOTE 4.4.17), or
+# already in the archive; an `add` after `finish`, and `finish` twice; a
+# comment longer than 65,535 bytes; bzip2 or Zstandard asked of an entry
+# streamed from an `IyiIO`, which those two compress only whole.
+pub class ZipWriter
+  # Version made by: Unix (3), APPNOTE 4.5, as the external attributes
+  # below are Unix modes.
+  MADE_BY = (3 << 8) | 45
+  # Regular file 0644, directory 0755 with MS-DOS's directory bit.
+  FILE_MODE = 0o100644_u32 << 16
+  DIR_MODE  = (0o40755_u32 << 16) | 0x10_u32
+
+  @io : IyiIO
+  @at : Int64
+  @central : Array(String)
+  @names : Hash(String, Bool)
+  @zip64 : Bool
+  @finished : Bool
+
+  # *zip64* writes every entry with the ZIP64 extended field and the end
+  # with the ZIP64 records, needed or not. Offsets count from where *io*
+  # is when the writer starts.
+  def initialize(@io : IyiIO, zip64 : Bool = false)
+    @zip64 = zip64
+    @at = 0_i64
+    @central = [] of String
+    @names = {} of String => Bool
+    @finished = false
+  end
+
+  # *data* as the entry *name*, compressed with *method* - deflate,
+  # bzip2 (blocks of 900,000 bytes, bzip2's -9, as Python's `zipfile`
+  # writes it), Zstandard, or stored as it is - and modified at
+  # *modified*'s wall clock.
+  def add(name : String, data : String, method : ZipMethod = ZipMethod::Deflated, modified : Time = Time.local) : Nil
+    check(name)
+    body = case method
+           when ZipMethod::Deflated  then Deflate.compress(data)
+           when ZipMethod::Bzip2     then Bzip2.compress(data)
+           when ZipMethod::Zstandard then Zstd.compress(data)
+           else                           data
+           end
+    crc = CRC32.checksum(data)
+    date, time = ZipBytes.dos_stamp(modified)
+    offset = @at
+    flags = name_flags(name)
+    size = data.bytesize.to_i64
+    csize = body.bytesize.to_i64
+    emit(local_header(name, flags, method.value, date, time, crc, csize, size, @zip64))
+    emit(body)
+    @central << central(name, flags, method.value, date, time, crc, csize, size, offset, FILE_MODE)
+  end
+
+  # What *source* holds until its end as the entry *name*, written as it
+  # is read: the local header first, without the sizes and CRC-32, and a
+  # data descriptor after the data with them. *source* is not closed.
+  # Deflated or stored only: the bzip2 and Zstandard compressors take
+  # their input whole, and an entry for them is added from a `String`.
+  def add(name : String, source : IyiIO, method : ZipMethod = ZipMethod::Deflated, modified : Time = Time.local) : Nil
+    unless method == ZipMethod::Deflated || method == ZipMethod::Stored
+      raise "ZipWriter: #{name.inspect} is streamed, and #{ZipBytes.method_name(method.value)} is written from a String, whole"
+    end
+    check(name)
+    date, time = ZipBytes.dos_stamp(modified)
+    offset = @at
+    flags = name_flags(name) | 8
+    emit(local_header(name, flags, method.value, date, time, 0_u32, 0_i64, 0_i64, @zip64))
+    deflater = method == ZipMethod::Deflated ? Deflater.new(Envelope::Raw) : nil
+    crc = 0_u32
+    size = 0_i64
+    csize = 0_i64
+    while true
+      piece = source.read_bytes(65536)
+      break if piece.empty?
+      crc = CRC32.update(crc, piece.to_unsafe, piece.bytesize)
+      size = size + piece.bytesize.to_i64
+      body = deflater ? deflater.compress(piece) : piece
+      csize = csize + body.bytesize.to_i64
+      emit(body)
+    end
+    if deflater
+      tail = deflater.finish
+      csize = csize + tail.bytesize.to_i64
+      emit(tail)
+    end
+    wide = @zip64 || size >= ZipBytes::MAX32 || csize >= ZipBytes::MAX32
+    emit(String.new(wide ? 24 : 16) do |dst|
+      ZipBytes.put32(dst, 0, ZipBytes::DESCRIPTOR)
+      ZipBytes.put32(dst, 4, crc)
+      if wide
+        ZipBytes.put64(dst, 8, csize.to_u64)
+        ZipBytes.put64(dst, 16, size.to_u64)
+      else
+        ZipBytes.put32(dst, 8, csize.to_u32)
+        ZipBytes.put32(dst, 12, size.to_u32)
+      end
+    end)
+    @central << central(name, flags, method.value, date, time, crc, csize, size, offset, FILE_MODE)
+  end
+
+  # A directory entry: *name* with a `/` after it if it has none, stored
+  # and empty.
+  def add_directory(name : String, modified : Time = Time.local) : Nil
+    name = name + "/" unless name.ends_with?("/")
+    check(name)
+    date, time = ZipBytes.dos_stamp(modified)
+    offset = @at
+    flags = name_flags(name)
+    emit(local_header(name, flags, 0, date, time, 0_u32, 0_i64, 0_i64, @zip64))
+    @central << central(name, flags, 0, date, time, 0_u32, 0_i64, 0_i64, offset, DIR_MODE)
+  end
+
+  # The central directory and the end, with *comment*; then *io* is
+  # flushed. Once only.
+  def finish(comment : String = "") : Nil
+    raise "ZipWriter: finish was called twice" if @finished
+    raise "ZipWriter: the comment is #{comment.bytesize} bytes, and the format holds 65535" if comment.bytesize > 65535
+    @finished = true
+    cd_offset = @at
+    @central.each { |record| emit(record) }
+    cd_size = @at - cd_offset
+    count = @central.size.to_i64
+    if @zip64 || count > 0xffff_i64 || cd_offset >= ZipBytes::MAX32 || cd_size >= ZipBytes::MAX32
+      record_at = @at
+      emit(String.new(56) do |dst|
+        ZipBytes.put32(dst, 0, ZipBytes::END64)
+        ZipBytes.put64(dst, 4, 44_u64)
+        ZipBytes.put16(dst, 12, MADE_BY)
+        ZipBytes.put16(dst, 14, 45)
+        ZipBytes.put32(dst, 16, 0_u32)
+        ZipBytes.put32(dst, 20, 0_u32)
+        ZipBytes.put64(dst, 24, count.to_u64)
+        ZipBytes.put64(dst, 32, count.to_u64)
+        ZipBytes.put64(dst, 40, cd_size.to_u64)
+        ZipBytes.put64(dst, 48, cd_offset.to_u64)
+      end)
+      emit(String.new(20) do |dst|
+        ZipBytes.put32(dst, 0, ZipBytes::LOCATOR64)
+        ZipBytes.put32(dst, 4, 0_u32)
+        ZipBytes.put64(dst, 8, record_at.to_u64)
+        ZipBytes.put32(dst, 16, 1_u32)
+      end)
+    end
+    short = count > 0xffff_i64 ? 0xffff : count.to_i32
+    emit(String.new(22) do |dst|
+      ZipBytes.put32(dst, 0, ZipBytes::END)
+      ZipBytes.put16(dst, 4, 0)
+      ZipBytes.put16(dst, 6, 0)
+      ZipBytes.put16(dst, 8, short)
+      ZipBytes.put16(dst, 10, short)
+      ZipBytes.put32(dst, 12, ZipBytes.field32(cd_size, false))
+      ZipBytes.put32(dst, 16, ZipBytes.field32(cd_offset, false))
+      ZipBytes.put16(dst, 20, comment.bytesize)
+    end)
+    emit(comment)
+    @io.flush
+  end
+
+  # Bit 11 for a name that is not ASCII, which is then UTF-8.
+  private def name_flags(name : String) : Int32
+    p = name.to_unsafe
+    i = 0
+    while i < name.bytesize
+      return 0x800 if p[i] >= 0x80_u8
+      i = i + 1
+    end
+    0
+  end
+
+  private def check(name : String) : Nil
+    raise "ZipWriter: add after finish" if @finished
+    raise "ZipWriter: an entry needs a name" if name.empty?
+    raise "ZipWriter: the name is #{name.bytesize} bytes, and the format holds 65535" if name.bytesize > 65535
+    raise "ZipWriter: #{name.inspect} is absolute; a name in an archive is relative" if name.starts_with?("/")
+    raise "ZipWriter: #{name.inspect} holds a \\; a name in an archive separates with /" if name.includes?("\\")
+    raise "ZipWriter: #{name.inspect} is already in the archive" if @names.has_key?(name)
+    @names[name] = true
+  end
+
+  private def emit(bytes : String) : Nil
+    @io.write(bytes)
+    @at = @at + bytes.bytesize.to_i64
+  end
+
+  # Version needed to extract: 4.6 for bzip2 (APPNOTE 4.4.3.2), 6.3 for
+  # Zstandard (which 4.4.3.2 does not list; 6.3 is what Python writes),
+  # 4.5 for ZIP64, 2.0 for deflate and directories, 1.0 for the rest;
+  # the highest that applies, as Python writes it.
+  private def needed(method : Int32, name : String, wide : Bool) : Int32
+    return 63 if method == 93
+    return 46 if method == 12
+    return 45 if wide
+    method == 8 || name.ends_with?("/") ? 20 : 10
+  end
+
+  # The local header. Sizes known first are in it; a streamed entry's are
+  # zero, its data descriptor after the data has them. With *wide* both
+  # sizes are in the ZIP64 field (APPNOTE 4.5.3 asks for both there), the
+  # fixed fields at their maximum, as Python writes a forced ZIP64 entry.
+  private def local_header(name : String, flags : Int32, method : Int32, date : Int32, time : Int32, crc : UInt32, csize : Int64, size : Int64, wide : Bool) : String
+    n = name.bytesize
+    version = needed(method, name, wide)
+    String.new(30 + n + (wide ? 20 : 0)) do |dst|
+      ZipBytes.put32(dst, 0, ZipBytes::LOCAL)
+      ZipBytes.put16(dst, 4, version)
+      ZipBytes.put16(dst, 6, flags)
+      ZipBytes.put16(dst, 8, method)
+      ZipBytes.put16(dst, 10, time)
+      ZipBytes.put16(dst, 12, date)
+      ZipBytes.put32(dst, 14, crc)
+      ZipBytes.put32(dst, 18, ZipBytes.field32(csize, wide))
+      ZipBytes.put32(dst, 22, ZipBytes.field32(size, wide))
+      ZipBytes.put16(dst, 26, n)
+      ZipBytes.put16(dst, 28, wide ? 20 : 0)
+      (dst + 30).copy_from(name.to_unsafe, n)
+      if wide
+        ZipBytes.put16(dst, 30 + n, 1)
+        ZipBytes.put16(dst, 32 + n, 16)
+        ZipBytes.put64(dst, 34 + n, size.to_u64)
+        ZipBytes.put64(dst, 42 + n, csize.to_u64)
+      end
+    end
+  end
+
+  # The central directory record. The ZIP64 field holds the values whose
+  # fixed field is at its maximum, in the format's order - size,
+  # compressed size, offset - and only those.
+  private def central(name : String, flags : Int32, method : Int32, date : Int32, time : Int32, crc : UInt32, csize : Int64, size : Int64, offset : Int64, mode : UInt32) : String
+    n = name.bytesize
+    wide_size = @zip64 || size >= ZipBytes::MAX32
+    wide_csize = @zip64 || csize >= ZipBytes::MAX32
+    wide_offset = @zip64 || offset >= ZipBytes::MAX32
+    extra = (wide_size ? 8 : 0) + (wide_csize ? 8 : 0) + (wide_offset ? 8 : 0)
+    extra = extra + 4 if extra > 0
+    version = needed(method, name, extra > 0)
+    String.new(46 + n + extra) do |dst|
+      ZipBytes.put32(dst, 0, ZipBytes::CENTRAL)
+      ZipBytes.put16(dst, 4, MADE_BY)
+      ZipBytes.put16(dst, 6, version)
+      ZipBytes.put16(dst, 8, flags)
+      ZipBytes.put16(dst, 10, method)
+      ZipBytes.put16(dst, 12, time)
+      ZipBytes.put16(dst, 14, date)
+      ZipBytes.put32(dst, 16, crc)
+      ZipBytes.put32(dst, 20, ZipBytes.field32(csize, wide_csize))
+      ZipBytes.put32(dst, 24, ZipBytes.field32(size, wide_size))
+      ZipBytes.put16(dst, 28, n)
+      ZipBytes.put16(dst, 30, extra)
+      ZipBytes.put16(dst, 32, 0)
+      ZipBytes.put16(dst, 34, 0)
+      ZipBytes.put16(dst, 36, 0)
+      ZipBytes.put32(dst, 38, mode)
+      ZipBytes.put32(dst, 42, ZipBytes.field32(offset, wide_offset))
+      (dst + 46).copy_from(name.to_unsafe, n)
+      if extra > 0
+        x = 46 + n
+        ZipBytes.put16(dst, x, 1)
+        ZipBytes.put16(dst, x + 2, extra - 4)
+        x = x + 4
+        if wide_size
+          ZipBytes.put64(dst, x, size.to_u64)
+          x = x + 8
+        end
+        if wide_csize
+          ZipBytes.put64(dst, x, csize.to_u64)
+          x = x + 8
+        end
+        ZipBytes.put64(dst, x, offset.to_u64) if wide_offset
+      end
+    end
+  end
+end

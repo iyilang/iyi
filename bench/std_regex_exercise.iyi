@@ -13,8 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/regex
-using std/regex::{Regex}
+import std/regex::{Regex}
 
 # The pieces of `line` between bytes equal to `sep`; an empty line is one
 # empty piece, which is what a one-element list reads as.
@@ -80,7 +79,13 @@ assert_str "aaa", Regex.compile("a*").find("aaa") || "", "greedy takes all"
 assert_str "", Regex.compile("a*?").find("aaa") || "", "lazy takes none"
 assert_str "aaab", Regex.compile("a+?b").find("aaab") || "", "lazy still reaches the b"
 assert_str "aa", Regex.compile("a{2,3}?").find("aaa") || "", "a lazy count takes the minimum"
-puts "  a|ab answers a; greedy and lazy quantifiers"
+# A loop whose body matched empty ends there, the empty branch keeping its
+# place: pcre2, Python and Go all answer the empty match.
+assert_str "", Regex.compile("(|a)*").find("aa") || "nil", "a star whose body matched empty stops"
+assert_str "ab", Regex.compile("(?:\\S*|\\s){2,}").find("ab\ncd") || "", "and so does a count's loop"
+# RE2's `x{n,}` is n - 1 copies and `x+`, so `x{1,}` answers as `x+` does.
+assert_str Regex.compile("(?:\\S*|\\s)+").find("ab\ncd") || "", Regex.compile("(?:\\S*|\\s){1,}").find("ab\ncd") || "", "x{1,} is x+"
+puts "  a|ab answers a; greedy and lazy quantifiers; a loop around an empty match"
 
 puts "\n== an empty match costs no text"
 assert_true Regex.compile("x*").split("abc") == ["", "a", "b", "c", ""], "split on x* keeps every byte"
@@ -114,8 +119,12 @@ assert_true Regex.compile("()").split("ab") == ["", "a", "b", ""], "an empty gro
 assert_str "", Regex.compile("a|").find("b") || "", "an empty alternative"
 assert_str "a", Regex.compile("a\\z").find("ba") || "", "\\z"
 assert_str "a", Regex.compile("\\Aa").find("ab") || "", "\\A"
-assert_str "é", Regex.compile("é").find("café") || "", "a literal past ASCII matches its own bytes"
-puts "  \\b \\B \\A \\z \\xHH, counts, classes with \\d \\w \\s, groups, empties"
+assert_str "é", Regex.compile("é").find("café") || "", "a literal past ASCII is its character"
+assert_true Regex.compile("[0-\\x34]").find("x").nil?, "a range ending in an escape, on the fast path"
+assert_true !Regex.compile("[0-\\x34]").match?("A"), "and it stops at its end"
+assert_str "\n", Regex.compile("\\012").find("a\nb") || "", "\\0 takes up to two more octal digits"
+assert_str "a_b", Regex.compile("a\\_b").find("xa_b") || "", "\\_ is the underscore"
+puts "  \\b \\B \\A \\z \\xHH \\0oo \\_, counts, classes with \\d \\w \\s, groups, empties"
 
 puts "\n== linear time"
 long = "a" * 1000000
@@ -123,7 +132,50 @@ assert_true Regex.compile("(a|b)*c").find(long).nil?, "a million bytes with no c
 assert_true Regex.compile("a*c").find(long).nil?, "and again with a*c"
 assert_str long, Regex.compile("\\w+").find(long) || "", "a million-byte word"
 assert_true Regex.compile("(a*)*b").scan(long + "b").size == 1, "nested stars over a million bytes"
-puts "  a million bytes, four patterns, one pass each"
+# The pattern a backtracker takes 2^n steps on: every `a` can be either
+# alternative, and with no `b` every way of choosing is tried. The machine
+# carries one thread per state, so it costs the text times the pattern -
+# with the groups recorded, which is the slower path.
+pathological = "a" * 30000
+assert_true Regex.compile("(a|a)*b").match(pathological).nil?, "(a|a)*b against 30,000 a's, with its group"
+assert_true Regex.compile("(a|aa)*b").find(pathological).nil?, "(a|aa)*b likewise"
+assert_true Regex.compile("(?:(a+)+)+c").match(pathological).nil?, "(?:(a+)+)+c likewise"
+caught = Regex.compile("(a|a)*(a)").match(pathological)
+assert_true (caught ? caught.byte_begin(2) : -1) == 29999, "and when it matches, the last group is the last a"
+puts "  a million bytes, four patterns, one pass each; (a|a)*b over 30,000 a's"
+
+# The closure of a state was walked by recursion, a frame per split, and
+# an alternation chains a split per word: searched in a task, whose stack
+# is 256 KiB, 890 words overflowed it in a plain build (1,700 with
+# --release) and the panic ended the process; on the main stack, 35,000
+# did (66,000).
+puts "\n== a long alternation, in a task and on the main stack"
+
+def words(n : Int32) : String
+  String.build do |io|
+    i = 0
+    while i < n
+      io << "|" if i > 0
+      io << "w" << i
+      i = i + 1
+    end
+  end
+end
+
+in_task = ""
+group do |g|
+  attempt = g.spawn do
+    first = Regex.compile("(?:#{words(5000)})").find("x w71 y") || "nil"
+    bounded = Regex.compile("\\b(?:#{words(5000)})\\b").find("x w71 y") || "nil"
+    "#{first} #{bounded}"
+  end
+  outcome = attempt.value
+  in_task = outcome.is_a?(Panicked) ? outcome.message.to_s : outcome
+  0
+end
+assert_str "w7 w71", in_task, "5,000 words in a task: the first written wins, and \\b holds it to a word"
+assert_str "w69999", Regex.compile("\\b(?:#{words(70000)})\\b").find("x w69999 y") || "", "70,000 words on the main stack"
+puts "  5,000 words in a task, leftmost-first, and 70,000 on the main stack"
 
 args = Program.args
 if args.size > 0
@@ -159,5 +211,407 @@ if args.size > 0
   assert_true cases > 2000, "the fixture had #{cases} cases"
   puts "  #{cases} pattern/subject pairs: find, scan, split and replace agree"
 end
+
+# Group spans as the fixture writes them: `from,to` per group, -1 for a
+# group that took no part, `;` between.
+def spans(match : Regex::MatchData) : String
+  parts = [] of String
+  n = 0
+  while n < match.size
+    parts << (match[n]? ? "#{match.byte_begin(n)},#{match.byte_end(n)}" : "-1,-1")
+    n = n + 1
+  end
+  parts.join(";")
+end
+
+def options_of(flags : String) : Regex::Options
+  options = Regex::Options::None
+  options = options | Regex::Options::IGNORE_CASE if flags.includes?("i")
+  options = options | Regex::Options::MULTILINE_ONLY if flags.includes?("m")
+  options = options | Regex::Options::DOTALL if flags.includes?("s")
+  options = options | Regex::Options::EXTENDED if flags.includes?("x")
+  options
+end
+
+# Every group of the first match, the span of every match `String#scan`
+# answers, and `String#gsub` with a replacement naming the groups, on
+# patterns with groups and flags and on text past ASCII, against Python's
+# `re` - leftmost-first as RE2 is, so the groups are the ones RE2 reports.
+if args.size > 1
+  puts "\n== groups and flags against Python's re"
+  text = File.read(args[1])
+  cases = 0
+  start = 0
+  i = 0
+  p = text.to_unsafe
+  while i < text.bytesize
+    if p[i] == 10_u8
+      f = fields(text[start, i - start], 30_u8)
+      start = i + 1
+      if f.size == 7
+        rx = Regex.compile(unescape(f[0]), options_of(f[1]))
+        subject = unescape(f[2])
+        label = "/#{f[0]}/#{f[1]} on #{subject.inspect}"
+        match = subject.match(rx)
+        assert_str f[3], match ? spans(match) : "<nil>", "#{label}: groups"
+        found = [] of String
+        subject.scan(rx) { |each| found << "#{each.byte_begin(0)},#{each.byte_end(0)}" }
+        assert_str f[4], found.empty? ? "<none>" : found.join(";"), "#{label}: scan"
+        assert_str unescape(f[6]), subject.gsub(rx, unescape(f[5])), "#{label}: gsub with #{f[5].inspect}"
+        cases = cases + 1
+      end
+    end
+    i = i + 1
+  end
+  assert_true cases > 500, "the fixture had #{cases} cases"
+  puts "  #{cases} pattern/flags/subject triples: every group, scan and gsub with \\0-\\9 and \\k<name> agree"
+end
+
+# What compiling *pattern* in a task is refused with, or "compiled".
+def refusal(pattern : String) : String
+  said = "compiled"
+  group do |g|
+    attempt = g.spawn { Regex.compile(pattern).find("") || "" }
+    outcome = attempt.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+# A group is five frames of the parser, and a task's stack is 256 KiB:
+# under a cap of 1000, a task compiling 213 nested groups in a plain build
+# overflowed it and the panic ended the process. The deepest nesting the
+# cap allows, alternatives and counts among it, compiles in a task.
+puts "\n== the deepest nesting, compiled in a task"
+deepest = ""
+group do |g|
+  attempt = g.spawn { Regex.compile("(?:b|" * 100 + "a" + "){1}" * 10 + ")" * 90).find("xay") || "nil" }
+  outcome = attempt.value
+  deepest = outcome.is_a?(Panicked) ? outcome.message.to_s : outcome
+  0
+end
+assert_str "a", deepest, "100 nested groups compile in a task"
+too_deep = refusal("(" * 101 + "a" + ")" * 101)
+assert_true too_deep.includes?("regex: groups nested past 100"), "101 are refused, not #{too_deep.inspect}"
+puts "  100 nested groups compile in a task, and 101 are refused"
+
+puts "\n== the text side"
+bd = Regex.compile("B|D")
+assert_str("a(x)c(x)e", "aBcDe".gsub(bd, "(x)"), "String#gsub with a pattern")
+assert_str("abcde", "aBcDe".gsub(bd) { |m| m.downcase }, "String#gsub with a block")
+assert_str("a(c|g)ce", "aBcDe".gsub(bd, {"B" => "(c|g)"}), "String#gsub with a table drops a match it has no entry for")
+assert_str("x-yb-z", Regex.compile("a+").replace("xaaybaz", "-"), "replace")
+assert_str("x2yb1z", Regex.compile("a+").replace("xaaybaz") { |m| m.size.to_s }, "replace with a block")
+assert_true "aBc".matches?(bd), "matches? finds a pattern inside the text"
+assert_true !"abc".matches?(bd), "matches? without one"
+puts "  gsub, replace with a block and matches? hold"
+
+# The literal is `Regex.compile` of its text, compiled once for the program:
+# `/x/` in a loop is one constant, not a compile per pass.
+puts "\n== a regex literal"
+assert_true /a+b/.match?("aab"), "a literal matches as Regex.compile does"
+assert_true !/a+b/.match?("aabc"), "and refuses as it does"
+assert_true /b[0-9]+/.scan("ab1 ab22 x") == ["b1", "b22"], "scan through a literal"
+assert_str "a/b", /a\/b/.find("xa/by") || "", "an escaped slash is the slash"
+assert_str "1.25", /\d+\.\d+/.find("v 1.25 x") || "", "an escape reaches the engine as written"
+assert_true /\n/.scan("a\nb\n").size == 2, "a line break"
+seen = 0
+3.times { seen = seen + /x/.scan("xx").size }
+assert_true seen == 6, "a literal in a loop"
+pat = "c+"
+assert_str "ccd", /#{pat}d/.find("xccd") || "", "an interpolated literal"
+assert_str "[cgt]gggtaaa|tttaccc[acg]", /[cgt]gggtaaa|tttaccc[acg]/.source, "a literal answers its source"
+assert_str "c+d", /#{pat}d/.source, "and an interpolated one the text it was compiled from"
+puts "  match, scan, escapes, a loop, an interpolation and the source"
+
+# Refused for what they are: `(?P=n)` was "not a group name", `\k<n>` an
+# "unknown escape", and `(?1)` and `(?#..)` "inline flags".
+puts "\n== a refusal names its reason"
+["(?P=n)", "(?<n>a)\\k<n>", "(?<n>a)\\k{n}", "(?<n>a)\\k'n'", "(a)\\g<1>", "(a)\\g{1}", "(a)\\g1"].each do |pattern|
+  said = refusal(pattern)
+  assert_true said.includes?("regex: backreferences are refused"), "/#{pattern}/ is a backreference, not #{said.inspect}"
+end
+["(?1)", "(?+1)", "(?-1)", "(?&n)", "(?P>n)", "(?R)"].each do |pattern|
+  said = refusal(pattern)
+  assert_true said.includes?("regex: recursion is refused"), "/#{pattern}/ is recursion, not #{said.inspect}"
+end
+comment = refusal("a(?#note)")
+assert_true comment.includes?("regex: comments are refused"), "(?#note) is a comment, not #{comment.inspect}"
+unknown_flag = refusal("(?z)a")
+assert_true unknown_flag.includes?("regex: unknown inline flag 'z'"), "(?z) is not a flag RE2 has, not #{unknown_flag.inspect}"
+assert_true refusal("\\kx").includes?("regex: unknown escape '\\k'"), "and \\k alone an unknown escape"
+puts "  backreferences, recursion and comments, each by name"
+
+# RE2's ASCII classes, by name inside a class. Read as bytes,
+# `[[:digit:]]+` found ":]]" in "[[:digit:]]x 5".
+puts "\n== POSIX classes"
+
+def bytes(lo : Int32, hi : Int32) : String
+  String.new(hi - lo + 1) do |dst|
+    c = lo
+    while c <= hi
+      dst[c - lo] = c.to_u8
+      c = c + 1
+    end
+  end
+end
+
+ascii = bytes(0, 127)
+upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+lower = "abcdefghijklmnopqrstuvwxyz"
+{
+  "alnum" => "0123456789" + upper + lower, "alpha" => upper + lower, "ascii" => ascii,
+  "blank" => "\t ", "cntrl" => bytes(0, 31) + bytes(127, 127), "digit" => "0123456789",
+  "graph" => bytes(33, 126), "lower" => lower, "print" => bytes(32, 126),
+  "punct" => "!\"\#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", "space" => bytes(9, 13) + " ",
+  "upper" => upper, "word" => "0123456789" + upper + "_" + lower,
+  "xdigit" => "0123456789ABCDEFabcdef",
+}.each do |name, members|
+  assert_str members, Regex.compile("[[:#{name}:]]").scan(ascii).join, "[:#{name}:] over ASCII"
+  assert_true Regex.compile("[[:^#{name}:]]").scan(ascii).join.bytesize == 128 - members.bytesize, "[:^#{name}:] is the rest"
+end
+assert_str "5", Regex.compile("[[:digit:]]+").find("[[:digit:]]x 5") || "", "[[:digit:]] is a digit"
+assert_str "12-3", Regex.compile("[[:digit:]-]+").find("ab12-3c") || "", "a class beside a byte"
+assert_str "é", Regex.compile("[[:^ascii:]]+").find("café") || "", "a negation takes the characters past ASCII, as \\D does"
+assert_str "[:a", Regex.compile("[[:a]+").find("x[:a") || "", "a [: with no :] is the byte ["
+unknown = refusal("[[:foo:]]")
+assert_true unknown.includes?("regex: unknown class '[:foo:]'"), "a name RE2 does not have is refused, not #{unknown.inspect}"
+puts "  the 14 classes RE2 names and their negations"
+
+# What *block* panics with, run as a task of its own, or "answered".
+def panic_of(&block : -> _) : String
+  said = "answered"
+  group do |g|
+    task = g.spawn do
+      block.call
+      0
+    end
+    outcome = task.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+def must(match : Regex::MatchData?) : Regex::MatchData
+  raise "ASSERTION FAILED: expected a match" unless match
+  match
+end
+
+puts "\n== captures"
+m = must(Regex.compile("(a)(b)?(?<c>c)").match("xxacd"))
+assert_true m.size == 4 && m.group_size == 3, "three groups and the whole"
+assert_str "ac", m[0], "the whole match"
+assert_str "a", m[1], "a numbered group"
+assert_true m[2]?.nil?, "an optional group that took no part is nil"
+assert_str "c", m["c"], "a named group by name"
+assert_str "c", m[3], "and by number"
+assert_str "c", m[-1], "a negative number counts from the last"
+assert_true m[4]?.nil? && m["nope"]?.nil?, "a group the pattern does not have is nil"
+assert_true m.byte_begin(0) == 2 && m.byte_end(0) == 4 && m.byte_begin(3) == 3, "byte positions"
+assert_str "xx", m.pre_match, "pre_match"
+assert_str "d", m.post_match, "post_match"
+assert_true m.captures == ["a", nil], "captures are the unnamed groups"
+assert_true m.named_captures == {"c" => "c"}, "named_captures the named ones"
+assert_true m.to_a == ["ac", "a", nil, "c"], "to_a every group"
+assert_str "ac", m.to_s, "to_s the whole match"
+assert_str "Regex::MatchData(\"ac\" 1:\"a\" 2:nil c:\"c\")", m.inspect, "inspect as the other library writes it"
+alt = must(Regex.compile("(a)|(b)").match("b"))
+assert_true alt[1]?.nil? && alt[2]? == "b", "the alternative not taken is nil, the other set"
+nested = must(Regex.compile("((a)(b(c)))").match("abc"))
+assert_true nested.to_a == ["abc", "abc", "a", "bc", "c"], "nested groups, numbered by their opening parenthesis"
+last = must(Regex.compile("(?:(a)|b)+").match("ab"))
+assert_str "a", last[1], "a group inside a loop keeps what its last pass through it took"
+repeated = must(Regex.compile("(\\w){3}").match("xyz"))
+assert_true repeated.size == 2 && repeated[1] == "z", "a counted group is one group, set by the last copy"
+named = must(Regex.compile("(?P<year>\\d{4})-(?<month>\\d\\d)").match("on 2024-06"))
+assert_true named["year"] == "2024" && named["month"] == "06" && named.regex.name_table == {1 => "year", 2 => "month"}, "both spellings of a named group"
+assert_true Regex.compile("(a)(?:b)(?<c>c)").capture_count == 2, "a non-capturing group is not counted"
+wide = must(Regex.compile("リ(ス)").match("クリスタル"))
+assert_true wide.begin(0) == 1 && wide.end(0) == 3 && wide.begin(1) == 2, "begin and end count characters"
+assert_true wide.byte_begin(0) == 3 && wide.byte_end(0) == 9 && wide.byte_begin(1) == 6, "byte_begin and byte_end count bytes"
+assert_str "ク", wide.pre_match, "pre_match on multi-byte text"
+assert_str "タル", wide.post_match, "post_match on multi-byte text"
+from = must(Regex.compile("a(.)").match("ab ac", 1))
+assert_str "c", from[1], "match from a byte position"
+assert_true Regex.compile("^a").match("ba", 1).nil?, "^ is still the start of the text"
+assert_str "c", must(Regex.compile("a(.)").match("ab ac", -2))[1], "a negative position counts from the end"
+assert_true Regex.compile("a").match("a", 2).nil?, "a position past the end finds nothing"
+lazy = must(Regex.compile("(a+?)(a*)").match("aaa"))
+assert_true lazy[1] == "a" && lazy[2] == "aa", "a lazy group takes the least"
+empty = must(Regex.compile("(a*)*").match("b"))
+assert_true empty[1]? == "", "a loop around an empty-matching group sets it empty"
+# The loop is `(x+)?`, as Go builds it: once the body has taken the `a`,
+# going round again on nothing reaches a state this step already holds, so
+# the group keeps the `a`. Python and Perl run the body once more and
+# answer the empty string after it.
+assert_str "a", must(Regex.compile("(a*)*").match("a"))[1], "a loop around an empty-matching group keeps the text it took"
+assert_str "a", must(Regex.compile("(a*)+").match("a"))[1], "and so does a plus"
+assert_true panic_of { must(Regex.compile("(a)|b").match("b"))[1] }.includes?("regex: group 1 took no part"), "[] on a group that took no part panics"
+assert_true panic_of { must(Regex.compile("(a)").match("a"))[2] }.includes?("regex: no group 2"), "[] on a group the pattern does not have panics"
+assert_true panic_of { must(Regex.compile("(?<x>a)").match("a"))["y"] }.includes?("regex: no group named 'y'"), "and so does a name it does not have"
+dup = refusal("(?<a>x)(?<a>y)")
+assert_true dup.includes?("regex: duplicate group name 'a'"), "a name used twice is refused, as RE2 refuses it, not #{dup.inspect}"
+puts "  numbered, named, nested, optional and alternative groups; positions in characters and bytes"
+
+puts "\n== flags"
+ic = Regex::Options::IGNORE_CASE
+assert_true Regex.compile("abc", ic).match?("AbC"), "IGNORE_CASE"
+assert_true Regex.compile("[a-c]+", ic).match?("CaB"), "IGNORE_CASE folds a class"
+assert_true Regex.compile("k", ic).match?("\u212A") && Regex.compile("\u212A", ic).match?("K"), "k, K and the Kelvin sign are one letter"
+assert_true Regex.compile("σ+", ic).match?("ΣσΣς"), "σ, ς and Σ are one letter"
+assert_true Regex.compile("ß", ic).match?("ẞ"), "ß and ẞ are one letter, by the simple folding"
+assert_true Regex.compile("straße", ic).find("STRASSE").nil?, "but ß is not ss: the folding is the simple one, as RE2's"
+assert_true Regex.compile("привет", ic).match?("ПРИВЕТ"), "Cyrillic folds"
+assert_true !Regex.compile("[^k]", ic).match?("K") && !Regex.compile("[^k]", ic).match?("\u212A"), "a negated class is folded before it is negated"
+assert_true !Regex.compile("abc").match?("ABC"), "and without the flag case matters"
+ml = Regex::Options::MULTILINE
+assert_true Regex.compile("a.b", ml).match?("a\nb"), "MULTILINE is the other library's: . takes a newline"
+assert_true Regex.compile("^b$", ml).scan("a\nb\nc") == ["b"], "and ^ $ hold at every line"
+mo = Regex::Options::MULTILINE_ONLY
+assert_true Regex.compile("^\\w$", mo).scan("a\nb\nc") == ["a", "b", "c"], "MULTILINE_ONLY: ^ and $ at every line"
+assert_true !Regex.compile("a.b", mo).match?("a\nb"), "and . unchanged"
+assert_true Regex.compile("^b").find("a\nb").nil? && Regex.compile("a$").find("a\nb").nil?, "without it ^ and $ are the text's ends"
+da = Regex::Options::DOTALL
+assert_true Regex.compile("a.b", da).match?("a\nb") && !Regex.compile("a.b").match?("a\nb"), "DOTALL: . takes a newline"
+assert_true Regex.compile("^b", da).find("a\nb").nil?, "and ^ unchanged"
+ex = Regex::Options::EXTENDED
+assert_true Regex.compile("a b  c # a comment\n d", ex).match?("abcd"), "EXTENDED drops whitespace and comments"
+assert_true Regex.compile("a\\ b\\#c", ex).match?("a b#c"), "an escaped space and # are themselves"
+assert_true Regex.compile("[ ]a", ex).match?(" a"), "and a space in a class is a space"
+assert_true Regex.compile("a +", ex).match?("aaa"), "a quantifier after whitespace still applies"
+assert_true Regex.compile("ABC", ic | ex).match?("a b c".gsub(Regex.compile(" "), "")), "flags combine with |"
+assert_true Regex.compile("a(?i)b").match?("aB") && !Regex.compile("a(?i)b").match?("AB"), "(?i) from where it stands"
+assert_true Regex.compile("a(?i:b)c").match?("aBc") && !Regex.compile("a(?i:b)c").match?("aBC"), "(?i:..) inside its group only"
+assert_true Regex.compile("((?i)a)a").match?("Aa") && !Regex.compile("((?i)a)a").match?("AA"), "(?i) ends with the group around it"
+assert_true Regex.compile("((?i)a)+").match?("AaA"), "and a group holding one may be repeated"
+assert_true Regex.compile("(?i)a(?-i)b").match?("Ab") && !Regex.compile("(?i)a(?-i)b").match?("AB"), "(?-i) turns it off"
+assert_true Regex.compile("a(?i)b|c").match?("C"), "an inline flag reaches the alternatives after it"
+assert_true Regex.compile("(?s).+").match?("a\nb") && Regex.compile("(?m)^b").find("a\nb") == "b", "(?s) and (?m)"
+assert_true !Regex.compile("(?m).+").match?("a\nb"), "(?m) is ^ and $ alone, as in RE2"
+assert_true Regex.compile("(?x) a b # c\n").match?("ab"), "(?x)"
+assert_true Regex.compile("(?is-m:A.B)").match?("a\nb"), "several flags at once, some turned off"
+assert_str "a", Regex.compile("(?U)a+").find("aaa") || "", "(?U) makes a greedy quantifier lazy"
+assert_str "aaa", Regex.compile("(?U)a+?").find("aaa") || "", "and a lazy one greedy"
+assert_true Regex.compile("a+", ic).options == ic && Regex.compile("a+").options == Regex::Options::None, "options"
+assert_str "MULTILINE", Regex::Options::MULTILINE.to_s, "MULTILINE's name"
+assert_str "IGNORE_CASE | MULTILINE", (ic | ml).to_s, "and a pair"
+assert_str "(?ims-x:a)", Regex.compile("a", ic | ml).to_s, "to_s carries the flags"
+assert_str "/a\\/b/ix", Regex.compile("a/b", ic | ex).inspect, "inspect writes the literal"
+["(?)a", "(?-)a", "(?i-)a"].each do |pattern|
+  said = refusal(pattern)
+  assert_true said.includes?("regex: an inline flag group names no flag"), "/#{pattern}/ names no flag, not #{said.inspect}"
+end
+assert_true refusal("(?i)*").includes?("regex: nothing to repeat"), "a flag group is nothing to repeat"
+puts "  IGNORE_CASE, MULTILINE, MULTILINE_ONLY, DOTALL and EXTENDED; (?i) (?m) (?s) (?x) (?U), scoped and turned off"
+
+puts "\n== Unicode"
+assert_true Regex.compile(".").scan("aé中😀") == ["a", "é", "中", "😀"], ". takes a character of one to four bytes"
+assert_true Regex.compile("[^a]").scan("aé") == ["é"], "so does a negated class"
+assert_str "αβγ", Regex.compile("[α-ω]+").find("Ωαβγ") || "", "a range over Greek"
+assert_str "é", Regex.compile("[é]").find("café") || "", "a class holding a character past ASCII"
+assert_str "中文", Regex.compile("[\\x{4E00}-\\x{9FFF}]+").find("abc中文def") || "", "\\x{..} in a range"
+assert_str "é", Regex.compile("\\xE9").find("café") || "", "\\xE9 is U+00E9, not the byte"
+assert_true Regex.compile("a.c").match?("aéc") && !Regex.compile("a..c").match?("aéc"), "one character is one ."
+assert_str "Ωμέγα", Regex.compile("\\p{L}+").find("1 Ωμέγα 2") || "", "\\p{L}"
+assert_str "Ω", Regex.compile("\\p{Lu}").find("aΩ") || "", "\\p{Lu}"
+assert_str "μ", Regex.compile("\\p{Ll}").find("Ωμ") || "", "\\p{Ll}"
+assert_str "٣4", Regex.compile("\\p{N}+").find("x٣4y") || "", "\\p{N} takes digits of every script"
+assert_str "«!»", Regex.compile("\\p{P}+").find("a«!»b") || "", "\\p{P}"
+assert_str "+€", Regex.compile("\\p{S}+").find("1+€2") || "", "\\p{S}"
+assert_str "\u00A0\u2003", Regex.compile("\\p{Z}+").find("a\u00A0\u2003b") || "", "\\p{Z}"
+assert_true Regex.compile("\\P{L}").find("Ωab").nil?, "\\P{L} takes no letter"
+assert_str "12", Regex.compile("\\P{L}+").find("ΩΩ12") || "", "\\P{L} takes what is not a letter"
+assert_str "αβ", Regex.compile("\\p{Greek}+").find("abc αβ") || "", "\\p{Greek}"
+assert_str "abc", Regex.compile("\\p{Latin}+").find("αβ abc") || "", "\\p{Latin}"
+assert_str "мир", Regex.compile("\\p{Cyrillic}+").find("world мир") || "", "\\p{Cyrillic}"
+assert_str "中文", Regex.compile("\\p{Han}+").find("abc中文") || "", "\\p{Han}"
+assert_str "ab", Regex.compile("\\p{^Greek}+").find("αab") || "", "\\p{^Greek}"
+assert_str "1", Regex.compile("\\PL").find("Ω1x") || "", "\\PL in one letter"
+assert_str "Ω", Regex.compile("\\pL").find("1Ω") || "", "\\pL"
+assert_str "α1", Regex.compile("[\\p{Greek}\\d]+").find("xα1") || "", "\\p inside a class"
+assert_str "a", Regex.compile("\\p{Lu}", ic).find("1a") || "", "a category folds under IGNORE_CASE, as in RE2"
+assert_str "a\u{10FFFF}", Regex.compile("\\p{Any}+").find("a\u{10FFFF}") || "", "\\p{Any}"
+assert_true Regex.compile("\\w").find("é").nil? && Regex.compile("\\d").find("٣").nil?, "\\w and \\d are ASCII, as in RE2"
+assert_true Regex.compile("\\s").find("\u00A0").nil?, "and so is \\s"
+assert_str "café", Regex.compile("\\bcafé").find("a café") || "", "\\b before an ASCII word"
+assert_str "é", Regex.compile("é\\b").find("éa") || "", "é is no word character, so a boundary lies between it and a"
+invalid = String.new(3) { |p| p[0] = 97_u8; p[1] = 0xFF_u8; p[2] = 98_u8 }
+assert_true Regex.compile("a.b").match?(invalid), "a byte that begins no character is one character"
+assert_true Regex.compile("a\u{FFFD}b").match?(invalid), "and it is U+FFFD, as each_char reads it"
+assert_str "a.b*", Regex.compile("\\Qa.b*\\E").find("xa.b*y") || "", "\\Q..\\E is the text itself"
+assert_str "a.bb", Regex.compile("\\Qa.b\\E+").find("a.bb") || "", "and a quantifier after \\E repeats its last character"
+assert_str "a b", Regex.compile("\\Qa b\\E", ex).find("xa by") || "", "\\Q keeps spaces under EXTENDED"
+unknown_class = refusal("\\p{Klingon}")
+assert_true unknown_class.includes?("regex: unknown Unicode class 'Klingon'"), "a class the UCD does not name is refused, not #{unknown_class.inspect}"
+byte_class = refusal("a\\Cb")
+assert_true byte_class.includes?("regex: \\C is refused"), "\\C, one byte, is refused, not #{byte_class.inspect}"
+bad_pattern = String.new(1) { |p| p[0] = 0xFF_u8 }
+assert_true panic_of { Regex.compile(bad_pattern) }.includes?("is not valid UTF-8"), "a pattern that is not UTF-8 is refused"
+puts "  code points, classes past ASCII, \\p categories and scripts, ASCII \\w \\d \\s \\b, \\Q..\\E"
+
+puts "\n== escape and union"
+tricky = "a.b*c?(d)[e]{f}|g^h$i\\j k#l/m+n-o"
+assert_true Regex.compile(Regex.escape(tricky)).match?(tricky), "an escaped text matches itself"
+assert_true Regex.compile(Regex.escape(tricky), ex).match?(tricky), "under EXTENDED too"
+assert_true !Regex.compile(Regex.escape("a.c")).match?("abc"), "and nothing else"
+assert_str "a\\.b\\*", Regex.escape("a.b*"), "escape"
+u = Regex.union(["a.b", "c+"])
+assert_true u.match?("a.b") && u.match?("c+") && !u.match?("axb") && !u.match?("cc"), "union of strings escapes them"
+v = Regex.union(Regex.compile("ab", ic), "c")
+assert_str "(?i-msx:ab)|c", v.source, "union of a pattern keeps its flags to itself"
+assert_true v.match?("AB") && !v.match?("C"), "the flagged one folds, the other does not"
+w = Regex.union([Regex.compile("(a)"), Regex.compile("(b)")])
+assert_true must(w.match("b"))[2]? == "b", "groups after the first pattern's are numbered after them"
+assert_true Regex.compile("a+") == Regex.compile("a+") && Regex.compile("a+") != Regex.compile("a+", ic), "=="
+puts "  Regex.escape, Regex.union of strings, patterns and both"
+
+puts "\n== the text side with groups"
+assert_str "h<e>ll<o>", "hello".gsub(Regex.compile("[aeiou]"), "<\\0>"), "gsub \\0"
+assert_str "Smith, John", "John Smith".sub(Regex.compile("(\\w+) (\\w+)"), "\\2, \\1"), "sub \\1 \\2"
+assert_str "Smith, John", "John Smith".sub(Regex.compile("(?<f>\\w+) (?<l>\\w+)"), "\\k<l>, \\k<f>"), "sub \\k<name>"
+assert_str "a\\b", "ab".sub(Regex.compile("a"), "a\\\\"), "\\\\ is one backslash"
+assert_str "[]x", "x".sub(Regex.compile("(a)?"), "[\\1]"), "a group that took no part is empty"
+assert_str "\\qx", "x".sub(Regex.compile("^"), "\\q"), "any other \\ is itself"
+assert_true panic_of { "a".sub(Regex.compile("(a)"), "\\k<b>") }.includes?("names a group"), "\\k<name> of a name the pattern does not have panics"
+assert_str "1-2-3", "a1b2c3".gsub(Regex.compile("[a-z](\\d)"), "\\1-").sub(Regex.compile("-$"), ""), "gsub with a group"
+assert_str "a[1@1]b[22@3]", "a1b22".gsub(Regex.compile("\\d+")) { |text, match| "[#{text}@#{match.byte_begin(0)}]" }, "gsub's block gets the text and the match"
+assert_str "aXbc", "abc".sub(Regex.compile("(b)")) { |text, match| "X" + match[1] }, "sub's block too"
+assert_str "xbc", "abc".sub(Regex.compile("a")) { |text| "x" }, "a block may take the text alone"
+all = "a1 b22".scan(Regex.compile("([a-z])(\\d+)"))
+assert_true all.size == 2 && all[1][1] == "b" && all[1][2] == "22" && all[1].byte_begin(0) == 3, "String#scan answers each match with its groups"
+seen_scan = [] of String
+"xay".scan(Regex.compile("(a)|(y)")) { |each| seen_scan << (each[2]? || "-") }
+assert_true seen_scan == ["-", "y"], "and with a block"
+assert_true Regex.compile("b+").scan("abbcb") == ["bb", "b"], "Regex#scan still answers the texts"
+assert_true ("héllo" =~ Regex.compile("l+")) == 3, "=~ answers a byte offset, as index does"
+assert_true (Regex.compile("l+") =~ "héllo") == 3 && (Regex.compile("z") =~ "héllo").nil?, "Regex#=~ too"
+assert_true "abab".index(Regex.compile("b")) == 1 && "abab".index(Regex.compile("b"), 2) == 3, "index with an offset"
+assert_true must("héllo".match(Regex.compile("l"))).byte_begin(0) == 3, "String#match"
+kind = case "2024-06"
+       when Regex.compile("^\\d{4}-\\d\\d$") then "date"
+       when Regex.compile("\\d")             then "digits"
+       else                                       "other"
+       end
+assert_str "date", kind, "Regex#=== in a case"
+assert_true Regex.compile("b") === "abc" && !(Regex.compile("z") === "abc"), "=== finds the pattern anywhere"
+puts "  sub and gsub with \\0-\\9, \\k<name> and blocks; scan with groups; =~, index, match, case"
+
+puts "\n== anchored at an offset"
+anchored = Regex.compile("(\\d+)-(?<tail>[a-z]+)")
+at = must(anchored.match_at("ab12-xy 3-z", 2))
+assert_true at.byte_begin(0) == 2 && at[1] == "12" && at["tail"] == "xy", "match_at answers the match at its byte, with groups"
+assert_true anchored.match_at("ab12-xy 3-z", 1).nil?, "match_at does not search ahead"
+assert_true must(anchored.match_at("ab12-xy 3-z", 8))[0] == "3-z", "and finds the later one where it begins"
+assert_true must(anchored.match_at("ab12-xy", 3))[1] == "2", "it begins wherever it is put"
+assert_true Regex.compile("^b").match_at("ab", 1).nil? && !Regex.compile("^a").match_at("ab", 0).nil?, "^ is the text's start, not the offset"
+assert_true Regex.compile("\\bb").match_at("ab", 1).nil? && !Regex.compile("\\Bb").match_at("ab", 1).nil?, "\\b sees the byte before the offset"
+assert_true must(Regex.compile("a|ab").match_at("xab", 1))[0] == "a", "leftmost-first at the offset too"
+assert_true must(Regex.compile("x*").match_at("abc", 3))[0] == "", "an empty match at the end"
+assert_true Regex.compile("a").match_at("abc", 4).nil?, "an offset past the end matches nothing"
+assert_true must(Regex.compile("é+").match_at("xéé", 1))[0] == "éé" && must(Regex.compile("c").match_at("abc", -1))[0] == "c", "bytes, and a negative offset counts from the end"
+assert_true must(Regex.compile("b+").match_at("abbb", 1)).byte_end(0) == 4 && Regex.compile("b").match_at("abbb", 0).nil?, "a literal pattern anchors too"
+puts "  match_at: groups, no search ahead, ^ and \\b see the whole text"
 
 puts "\nALL CHECKS PASSED"

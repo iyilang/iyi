@@ -38,11 +38,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lsp_session import Client, children, rss_mb, tree_mb  # noqa: E402
+from lsp_session import LAST, Client, children, process_binary, rss_mb, tree_mb, watchdog  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 # A module with imports and traits, so a compile is a real compile: this
@@ -75,7 +76,12 @@ FAILURES = []
 
 
 def step(name, ok, detail=""):
-    print(f"memory {'ok' if ok else 'FAIL'} {name}  {detail}")
+    # Flushed, and counted for the watchdog: on Windows the output is a
+    # pipe's buffer, and a session that stopped answering sat silent for
+    # seventy minutes until the runner cancelled the job, the steps that
+    # had passed still in the buffer.
+    print(f"memory {'ok' if ok else 'FAIL'} {name}  {detail}", flush=True)
+    LAST["step"], LAST["at"] = LAST["step"] + 1, time.monotonic()
     if not ok:
         FAILURES.append(name)
 
@@ -290,7 +296,8 @@ def killed_mid_compile(argv, direct, work):
                                     {"command": "iyi.run",
                                      "arguments": [slow_uri]})
     time.sleep(1.0)
-    victims = [client.proc.pid] if direct else children(client.proc.pid)
+    own = {os.path.normcase(process_binary(client.proc.pid))}
+    victims = [client.proc.pid] if direct else workers(client.proc.pid, own)
     if not victims:
         step("whoever was waiting is told the compile died", False,
              "no worker process to kill")
@@ -317,8 +324,78 @@ def killed_mid_compile(argv, direct, work):
                          "position": {"line": line, "character": character}})
     step("the next question is answered by a new worker",
          "error" not in reply and bool(reply.get("result")),
-         f"worker(s) now {children(client.proc.pid)}")
+         f"worker(s) now {workers(client.proc.pid, own)}")
     return client
+
+
+def workers(proxy, images):
+    """The proxy's children that run one of *images* - its workers, which
+    it starts from its own binary. Not every child: a proxy with no
+    console of its own, which is how a CI step starts it on Windows, has
+    `conhost.exe` among its children too, and the gate took that for a
+    worker - renamed Windows' console host "aside", which Windows refuses,
+    or killed it and took the proxy's console with it. A child that exits
+    between the listing and the question is no longer one."""
+    found = []
+    for pid in children(proxy):
+        try:
+            if os.path.normcase(process_binary(pid)) in images:
+                found.append(pid)
+        except OSError:
+            continue
+    return found
+
+
+def unheld(path):
+    """Whether nothing holds *path*: it opens with no sharing at all. On
+    Windows a process keeps its image open for its whole life, and so does
+    a `CreateProcess` still loading it - a start the process list does not
+    show yet. A freshly written binary's first start took 1.4 to 1.6 s on a
+    Windows machine, its virus scan, against 19 ms after. Elsewhere this
+    answers yes: an exec there happens inside a child the listing already
+    names."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    # GENERIC_READ, no sharing, OPEN_EXISTING
+    handle = kernel32.CreateFileW(path, 0x80000000, 0, None, 3, 0, None)
+    if handle == wintypes.HANDLE(-1).value:
+        return False
+    kernel32.CloseHandle(handle)
+    return True
+
+
+def kill_every_worker(proxy, images, moved):
+    """Kill the proxy's workers until it has none, twice seen, and nothing
+    holds the binary that was moved. More than one can be alive: a
+    retirement starts the successor before it stops the worker it
+    replaces, right after the answer that made that one spent - on Windows
+    the 24th request, which on a slow machine was one of
+    `hovering_position`'s. And on Windows one can be on its way, the start
+    of it holding the file the list does not show yet (`unheld`). Answers
+    whether the proxy was left with no worker and nothing starting one."""
+    empty = 0
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        found = workers(proxy, images)
+        empty = 0 if found else empty + 1
+        for pid in found:
+            try:
+                os.kill(pid, 9)
+            except (ProcessLookupError, PermissionError):
+                # Gone already, or Windows' answer for a process that is
+                # already exiting: the retirement is stopping it.
+                pass
+        if empty >= 2 and unheld(moved):
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def binary_gone():
@@ -332,34 +409,44 @@ def binary_gone():
     client = Client(("lsp",))
     uri = open_module(client, MODULE, text)
     line, character, _ = hovering_position(client, uri, text)
-    workers = children(client.proc.pid)
-    if not workers:
-        step("a session outlives the binary it was started from", False,
-             "no worker process to look at")
-        return
-    try:
-        binary = os.readlink(f"/proc/{workers[0]}/exe")
-    except OSError:
+    if os.name != "nt" and not os.path.isdir("/proc"):
         print("memory ---- no /proc/<pid>/exe here, so which binary the "
               "worker runs is not knowable; step skipped")
         client.proc.kill()
         return
-
+    # The proxy's own binary, which is the one it starts its workers from.
+    binary = process_binary(client.proc.pid)
     aside = binary + ".gate-aside"
+    if not workers(client.proc.pid, {os.path.normcase(binary)}):
+        step("a session outlives the binary it was started from", False,
+             "no worker process to look at")
+        client.proc.kill()
+        return
+
     os.rename(binary, aside)
     try:
-        os.kill(workers[0], 9)
-        time.sleep(0.4)
+        # A worker's image reads as the new name once the file is renamed.
+        if not kill_every_worker(client.proc.pid,
+                                 {os.path.normcase(binary), os.path.normcase(aside)}, aside):
+            step("a session outlives the binary it was started from", False,
+                 "a worker, or a start of one, still held the moved binary after 30 s")
+            client.proc.kill()
+            return
         reply = client.send("textDocument/hover",
                             {"textDocument": {"uri": uri},
                              "position": {"line": line,
                                           "character": character}})
         error = reply.get("error", {})
+        held = error.get("code") == -32603 and "could not be started" in error.get("message", "")
+        detail = json.dumps(error)[:100]
+        if not held:
+            # What answered, and from which file, so that a run that fails
+            # here says what it saw.
+            alive = [(pid, process_binary(pid)) for pid in
+                     workers(client.proc.pid, {os.path.normcase(binary), os.path.normcase(aside)})]
+            detail = f"answered {json.dumps(reply)[:80]}; workers after it {alive}"
         step("a session outlives the binary it was started from",
-             error.get("code") == -32603
-             and "could not be started" in error.get("message", "")
-             and client.proc.poll() is None,
-             json.dumps(error)[:100] or "no error, and no binary either")
+             held and client.proc.poll() is None, detail)
     finally:
         os.rename(aside, binary)
 
@@ -368,10 +455,55 @@ def binary_gone():
                          "position": {"line": line, "character": character}})
     step("and answers again the moment it is back",
          "error" not in reply and bool(reply.get("result")),
-         f"worker(s) now {children(client.proc.pid)}")
+         f"worker(s) now {workers(client.proc.pid, {os.path.normcase(binary)})}")
     client.proc.kill()
 
+
+def workspace_pull(argv):
+    """`workspace/diagnostic` over `samples/iyi`, cold, and the peak tree
+    megabytes while it runs; then the same pull with the ids it handed
+    out, which is every file `unchanged` only if the first answer judged
+    every file. Returns the peak, the files judged, and whether the
+    second answer said nothing new.
+
+    One pull compiled every file in one worker and gave nothing back until
+    it answered: 1,443 MB for these 36 files, 5.4 GB for 145, against the
+    512 MB a worker is retired at - and retirement waited for the pull to
+    end. A worker stops at that bound now, and the proxy carries the rest
+    of the pull in a fresh one; the client still gets one answer."""
+    root = REPO / "samples" / "iyi"
+    client = Client(argv)
+    client.send("initialize", {"processId": None, "rootUri": root.as_uri(),
+                               "capabilities": {}})
+    client.send("initialized", {}, wait=False)
+    # Sampled while the pull runs, not after it: what a pull cost is gone
+    # the moment its worker is retired.
+    peak, pulling = [0], [True]
+
+    def sample():
+        while pulling[0]:
+            peak[0] = max(peak[0], tree_mb(client.proc.pid))
+            time.sleep(0.25)
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
+    reply = client.send("workspace/diagnostic", {"previousResultIds": []})
+    pulling[0] = False
+    sampler.join()
+    items = (reply.get("result") or {}).get("items", [])
+    previous = [{"uri": item["uri"], "value": item["resultId"]} for item in items]
+    again = client.send("workspace/diagnostic", {"previousResultIds": previous})
+    kinds = [item["kind"] for item in (again.get("result") or {}).get("items", [])]
+    client.send("shutdown", {})
+    client.send("exit", {}, wait=False)
+    client.proc.wait(timeout=30)
+    whole = bool(items) and len(kinds) == len(items) and all(kind == "unchanged" for kind in kinds)
+    return peak[0], len(items), whole
+
+
 def main():
+    # A step takes seconds; five minutes with none finished is a server
+    # that stopped answering, named and killed rather than waited on.
+    watchdog(300)
     direct = "--direct" in sys.argv
     argv = ("lsp", "--worker") if direct else ("lsp",)
     if direct:
@@ -415,6 +547,17 @@ def main():
          bool(first) and first == last,
          f"{len(first)} item(s) for `s.up`, identical" if first == last
          else f"{first} -> {last}")
+
+    peak, judged, whole = workspace_pull(argv)
+    detail = (f"{judged} files of samples/iyi in one answer"
+              f"{', every one' if whole else ', not every one'}, peak {peak} MB")
+    if not measured:
+        step("a workspace pull is bounded too", whole,
+             detail + " (no /proc here; unmeasured)")
+    else:
+        step("a workspace pull is bounded too",
+             whole and peak <= TYPING_CEILING_MB,
+             detail + f", bound {TYPING_CEILING_MB} MB")
 
     # A rebuild unlinks the binary under a running session, which
     # `lsp_session.py` step 46 holds for the process the editor talks to.

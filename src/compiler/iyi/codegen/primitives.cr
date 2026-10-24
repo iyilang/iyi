@@ -324,6 +324,8 @@ class Iyi::CodeGenVisitor
   end
 
   private def codegen_out_of_range(target_type : IntegerType, arg_type : FloatType, arg)
+    return iyi_truncation_out_of_range(target_type, arg_type, arg) if @program.iyi_prelude?
+
     min_value, max_value = target_type.range
     max_value = case arg_type.kind
                 when .f32?
@@ -368,6 +370,48 @@ class Iyi::CodeGenVisitor
     else
       int_max_value
     end
+  end
+
+  # iyi: under iyi's prelude a float converts to an integer by truncating
+  # first, and what is refused is a truncation the type does not hold
+  # (std/int.iyi's rule), so the bounds are exclusive and one past the
+  # type's: `min - 1 < arg < max + 1`. The range was checked on the
+  # untruncated value, as the other library checks it - and as it still is
+  # under `--crystal`, whose library is that one - which made one name
+  # answer two ways here: `255.5.to_u8` and `(-0.5).to_u8` panicked while
+  # std/int's `255.5.to_u16` was 255 and `(-0.5).to_u16` 0.
+  #
+  # Both bounds have to be floats, and the comparison against each is
+  # chosen so that it says the same thing when the integer bound is not one.
+  # `min - 1` is -1 for an unsigned type and a float for a signed one whose
+  # `2^(bits-1)` needs fewer bits than the float's precision; past that it
+  # is not a float, and the first float above it is `min` itself. `max + 1`
+  # is a power of two and a float, but for a single against `UInt128`:
+  # 2^128 is past the single's largest finite value, so only the infinity
+  # is at or above it. The lower comparison is unordered so that NaN is
+  # refused too.
+  private def iyi_truncation_out_of_range(target_type : IntegerType, arg_type : FloatType, arg)
+    bits = target_type.bytes * 8
+    precision = arg_type.kind.f32? ? 24 : 53
+
+    below =
+      if target_type.unsigned?
+        builder.fcmp(LLVM::RealPredicate::ULE, arg, float(-1.0, arg_type))
+      elsif bits - 1 < precision
+        builder.fcmp(LLVM::RealPredicate::ULE, arg, float(-(2.0 ** (bits - 1)) - 1.0, arg_type))
+      else
+        builder.fcmp(LLVM::RealPredicate::ULT, arg, float(-(2.0 ** (bits - 1)), arg_type))
+      end
+
+    past = target_type.unsigned? ? bits : bits - 1
+    above =
+      if arg_type.kind.f32? && past >= 128
+        builder.fcmp(LLVM::RealPredicate::OGT, arg, float(Float32::MAX, arg_type))
+      else
+        builder.fcmp(LLVM::RealPredicate::OGE, arg, float(2.0 ** past, arg_type))
+      end
+
+    or(below, above)
   end
 
   private def codegen_out_of_range(target_type : FloatType, arg_type : IntegerType, arg)
@@ -769,8 +813,26 @@ class Iyi::CodeGenVisitor
     if checked
       overflow = codegen_out_of_range(to_type, from_type, arg)
       codegen_raise_overflow_cond(overflow)
+      return float_to_int from_type, to_type, arg
     end
-    float_to_int from_type, to_type, arg
+
+    # iyi: the unchecked form saturates: past the range it is the nearest
+    # bound, and NaN is 0. Plain `fptosi`/`fptoui` is poison there, and the
+    # optimiser folds a known operand to it: `1e10.unsafe_to_i32` printed
+    # -2147483648 in a debug build and 140697949809896 under --release, a
+    # different number on each run and not an Int32 at all. The instruction
+    # x86 runs is no answer either (300.0 to UInt8 was 44, -1.0 to UInt64
+    # 18446744073709551615 in debug and 0 in release). Saturating is the one
+    # defined answer, the same in every build mode and on every target, and
+    # what aarch64's own conversion does.
+    signed = to_type.signed? ? "si" : "ui"
+    int_type = llvm_type(to_type)
+    float_type = llvm_type(from_type)
+    fun_name = "llvm.fpto#{signed}.sat.i#{to_type.bytes * 8}.f#{from_type.bytes * 8}"
+    llvm_fun = fetch_typed_fun(@llvm_mod, fun_name) do
+      LLVM::Type.function([float_type], int_type)
+    end
+    builder.call(llvm_fun.type, llvm_fun.func, [arg])
   end
 
   def codegen_convert(from_type : FloatType, to_type : FloatType, arg, *, checked : Bool)
@@ -940,10 +1002,9 @@ class Iyi::CodeGenVisitor
       call_arg = check_proc_is_not_closure(call_arg, field_type)
     end
 
-    value = to_rhs call_arg, field_type
     field_pointer = yield(field_type)
     iyi_with_write_barrier(field_pointer, field_type) do
-      store value, field_pointer
+      store_value call_arg, field_type, field_pointer
     end
 
     original_call_arg
@@ -1062,6 +1123,19 @@ class Iyi::CodeGenVisitor
     type_id(type.metaclass)
   end
 
+  # iyi: `~metaclass` is defined in the main module the first time code
+  # in this build asks a virtual type for its class. An artifact's object
+  # code that asks declares the function and leaves it to the program's
+  # main module, which defined it only when the program's own code had
+  # asked too: `import std/password::{Scrypt}` and one call to it linked
+  # with "undefined reference to `~metaclass'" from std/digest's own
+  # `#{self.class}`, under `--use-iyimod` alone. A build that links
+  # artifacts defines it whatever its own code asked.
+  def iyi_define_metaclass_fun : Nil
+    name = "~metaclass"
+    create_metaclass_fun(name) unless typed_fun?(@main_mod, name)
+  end
+
   def codegen_primitive_proc_call(node, target_def, call_args)
     location = @call_location
     set_current_debug_location(location) if location && @debug.line_numbers?
@@ -1081,7 +1155,7 @@ class Iyi::CodeGenVisitor
       proc_arg_type = proc_type.arg_types[i]
       target_def_arg_type = target_def.args[i].type
       args[i] = arg = upcast args[i], proc_arg_type, target_def_arg_type
-      closure_args << to_rhs(arg, proc_arg_type)
+      closure_args << (passed_indirectly?(proc_arg_type) ? arg : to_rhs(arg, proc_arg_type))
     end
 
     fun_ptr = builder.extract_value closure_ptr, 0
@@ -1348,7 +1422,9 @@ class Iyi::CodeGenVisitor
   end
 
   def atomic_ordering_get_const(node, llvm_arg)
-    node.raise "atomic ordering must be a constant" unless llvm_arg.constant?
+    # iyi: a symbol is decided by its name, and in a unit its value is a load
+    # (`iyi_symbol_value`), which is no less constant for being one.
+    node.raise "atomic ordering must be a constant" unless llvm_arg.constant? || node.is_a?(SymbolLiteral)
 
     if node.type.implements?(@program.enum) && llvm_arg.type.kind.integer? && llvm_arg.type.int_width == 32
       # any `Int32` enum will do, it is up to `Atomic::Ops` to use appropriate
@@ -1367,7 +1443,7 @@ class Iyi::CodeGenVisitor
   end
 
   def atomicrwm_bin_op_get_const(node, llvm_arg)
-    node.raise "atomic rwm bin op must be a constant" unless llvm_arg.constant?
+    node.raise "atomic rwm bin op must be a constant" unless llvm_arg.constant? || node.is_a?(SymbolLiteral)
 
     if node.type.implements?(@program.enum) && llvm_arg.type.kind.integer? && llvm_arg.type.int_width == 32
       LLVM::AtomicRMWBinOp.new(llvm_arg.const_int_get_sext_value.to_i32!)
@@ -1414,6 +1490,14 @@ class Iyi::CodeGenVisitor
   # LLVM's verifier refuse a Windows build of any program whose imported
   # module raises — "Referencing global in another module!", on the default
   # multi-module path, where `--single-module` was fine.
+  #
+  # And defined in the main module's *context*, which is not the one being
+  # emitted into when a module's unit asks first. That happens when `raise`
+  # is copied into a unit before `_main` has raised anything: `--iyi-keep
+  # String` copies it into String's, and the main module's `_TI1PEAX` was
+  # then typed in String's context, so every `_CxxThrowException` call in
+  # `_main` failed the verifier ("Call parameter type does not match
+  # function signature!") and the build ended on "you've found a bug".
   def void_ptr_type_descriptor(mod = @llvm_mod)
     void_ptr_type_descriptor_name = "\u{1}??_R0PEAX@8"
 
@@ -1428,7 +1512,7 @@ class Iyi::CodeGenVisitor
     ])
 
     unless mod == @main_mod
-      void_ptr_type_descriptor(@main_mod)
+      in_main { void_ptr_type_descriptor(@main_mod) }
       return external_constant(type_descriptor, void_ptr_type_descriptor_name, mod)
     end
 
@@ -1456,7 +1540,7 @@ class Iyi::CodeGenVisitor
     eh_throwinfo = llvm_context.struct([llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32])
 
     unless mod == @main_mod
-      void_ptr_throwinfo(@main_mod)
+      in_main { void_ptr_throwinfo(@main_mod) }
       return external_constant(eh_throwinfo, void_ptr_throwinfo_name, mod)
     end
 
@@ -1492,6 +1576,21 @@ class Iyi::CodeGenVisitor
     void_ptr_throwinfo
   end
 
+  # iyi: both of the above, defined whether this build's own code asked or
+  # not, for an artifact's object code (SPEC.md IV.1g). They are made when
+  # first asked for, and an artifact's unit asked in the build that wrote it:
+  # a `defer` or a `group` is a catch pad over `void*`, which names
+  # `??_R0PEAX@8` in the main module. A consumer with no `defer`, `rescue`
+  # or `raise` of its own never asked, and `--use-iyimod` of a module whose
+  # one def was `defer log << "lib-defer"` ended on `LNK2001: unresolved
+  # external symbol "void * `RTTI Type Descriptor'" (??_R0PEAX@8)`.
+  def iyi_define_msvc_catch_globals : Nil
+    in_main do
+      void_ptr_type_descriptor
+      void_ptr_throwinfo
+    end
+  end
+
   def external_constant(type, name, mod = @llvm_mod)
     mod.globals[name]? || begin
       c = mod.globals.add(type, name)
@@ -1500,13 +1599,21 @@ class Iyi::CodeGenVisitor
     end
   end
 
+  # A builder of its own, because nothing here is emitted: every operand is
+  # a constant and the builder only folds them. The main module's builder
+  # can have ended its block when a unit asks for these globals, and
+  # `IyiLLVMBuilder` answers anything asked after that with a nil value -
+  # an initializer field of the wrong type, which the verifier refused
+  # ("Global variable initializer type does not match global variable
+  # type!") for `_CT??_R0PEAX@88` and `_TI1PEAX` under `--iyi-keep String`.
   def sub_image_base(value, mod = @llvm_mod)
     image_base = external_constant(llvm_context.int8, "__ImageBase", mod)
 
-    @builder.trunc(
-      @builder.sub(
-        @builder.ptr2int(value, llvm_context.int64),
-        @builder.ptr2int(image_base, llvm_context.int64)),
+    folder = llvm_context.new_builder
+    folder.trunc(
+      folder.sub(
+        folder.ptr2int(value, llvm_context.int64),
+        folder.ptr2int(image_base, llvm_context.int64)),
       llvm_context.int32)
   end
 end

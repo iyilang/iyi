@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every option_parser section reported"
-for phrase in "== flags"; do
+for phrase in "== flags" "== short bundles and the value spellings" "== pairs, a banner and commands"; do
   if ! grep -q "$phrase" "$WORK/option_parser-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -113,6 +113,110 @@ PY
   else
     echo "  a broken option_parser is caught"
   fi
+
+  # The handler set and not called: the mistake panics anyway.
+  mkdir -p "$WORK/unheard/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/option_parser.iyi").read_text()
+old = '    raise sentence unless handler\n    handler.call(flag)'
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/unheard/std/option_parser.iyi").write_text(src.replace(old, '    raise sentence', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the unheard-handler patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/unheard${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_option_parser_exercise.iyi" >"$WORK/unheard.out" 2>&1; then
+    echo "  the exercise PASSED with invalid_option never called"
+    status=1
+  elif grep -q "unknown flag: --nope" "$WORK/unheard.out"; then
+    echo "  a handler that is never called is caught"
+  else
+    echo "  the unheard handler failed, but not at the first mistake"
+    tail -3 "$WORK/unheard.out" | sed 's/^/    /'
+    status=1
+  fi
+
+  # Each reading of a short bundle and of a value spelling, undone one at a
+  # time: the copy must still build, and the exercise must stop at the check
+  # written for that reading, not somewhere else.
+  caught_at() {
+    local dir="$1" label="$2" old="$3" new="$4" message="$5"
+    mkdir -p "$WORK/$dir/std"
+    OLD="$old" NEW="$new" DEST="$WORK/$dir/std/option_parser.iyi" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/option_parser.iyi").read_text()
+old, new = os.environ["OLD"], os.environ["NEW"]
+if old not in src:
+    raise SystemExit("patch site missing")
+Path(os.environ["DEST"]).write_text(src.replace(old, new, 1))
+PY
+    if [ $? -ne 0 ]; then
+      echo "  the $label patch did not apply"
+      status=1
+    elif IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_option_parser_exercise.iyi" >"$WORK/$dir.out" 2>&1; then
+      echo "  the exercise PASSED with $label"
+      status=1
+    elif grep -q "ASSERTION FAILED: $message" "$WORK/$dir.out"; then
+      echo "  $label is caught"
+    else
+      echo "  $label failed, but not at \"$message\""
+      tail -3 "$WORK/$dir.out" | sed 's/^/    /'
+      status=1
+    fi
+  }
+  caught_at first-only "a bundle read as its first flag" \
+    $'        elsif bundle?(a)\n          run_bundle(a)\n' \
+    $'        elsif bundle?(a)\n          spec[1].call("")\n' \
+    "a bundle runs every flag in it"
+  # `-q=1` in the section above is the first bundle with a character that is
+  # no flag, so that is the check a bundle skipping it reaches first.
+  caught_at skip-unknown "a bundle that skips what is no flag" \
+    $'      return false unless spec\n' \
+    $'      return true unless spec\n' \
+    "each mistake reaches its handler, in order"
+  caught_at long-eq "--out=FILE kept whole" \
+    $'      if eq\n        takes = Value::Required\n        name = name[0, eq]\n      end\n' \
+    '' \
+    "--out=FILE takes a value"
+  caught_at short-glued "-oFILE kept whole" \
+    $'      if at < name.bytesize\n        takes = bracketed?(name[at, name.bytesize - at]) ? Value::Optional : Value::Required\n        name = name[0, at]\n      end\n' \
+    '' \
+    "-oFILE takes a value"
+  caught_at one-byte "a short flag cut at one byte" \
+    '    width = b < 0xC0_u8 ? 1 : (b < 0xE0_u8 ? 2 : (b < 0xF0_u8 ? 3 : 4))' \
+    '    width = b < 0xC0_u8 ? 1 : 1' \
+    "a short flag is one character"
+  caught_at optional "a bracketed value read as a required one" \
+    $'    takes = Value::Optional if bracketed?' \
+    $'    takes = Value::Required if bracketed?' \
+    "a bracketed value may be left out"
+  caught_at one-spelling "a pair stored under its first spelling alone" \
+    $'    store(first, takes, block)\n    store(second, takes, block)\n' \
+    $'    store(first, takes, block)\n' \
+    "the long spelling of a pair runs the same block"
+  caught_at unshared "a pair whose spellings keep their own values" \
+    '    takes = first_takes.none? ? second_takes : first_takes' \
+    '    takes = first_takes' \
+    "the long spelling of a pair runs the same block"
+  caught_at anywhere "a command matched after an operand" \
+    'command = rest.empty? ? @commands[a]? : nil' \
+    'command = @commands[a]?' \
+    "a command after an operand is an operand"
+  caught_at uncleared "a command that leaves the commands beside it" \
+    $'          @commands.clear\n' \
+    '' \
+    "a command's own commands replace the ones beside it"
+  caught_at stale-help "a help that keeps the commands left behind" \
+    $'          @help = @help.reject { |entry| entry[1] }\n' \
+    '' \
+    "the help after a command is its level's"
+  caught_at no-banner "a banner the help never shows" \
+    'lines = [@banner || "options:"]' \
+    'lines = ["options:"]' \
+    "the banner, the pairs and the commands in the help"
 fi
 
 echo

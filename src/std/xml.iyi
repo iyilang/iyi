@@ -1,13 +1,17 @@
-# XML for iyi: a well-formedness parser, a document tree, and a serializer.
+# XML for iyi: a well-formedness parser, a document tree, a serializer, and
+# XPath 1.0.
 #
 # `parse` reads an XML 1.0 document - declaration, comments, processing
-# instructions, an internal DTD subset with entity declarations, elements,
-# attributes, namespaces, text, CDATA, character and entity references - into a
+# instructions, an internal DTD subset with its entity, element,
+# attribute-list and notation declarations, elements, attributes,
+# namespaces, text, CDATA, character and entity references - into a
 # `Document` of `Node`s. `parse?` answers nil where `parse` panics. A node can
-# be walked (`children`, `parent`, `root`), searched (`find`, `find_all`),
-# located (`path`), edited (`add_child`, `set_attribute`, `text=`) and written
-# back out (`to_xml`, `inner_xml`). `escape`, `escape_attribute` and `unescape`
-# are the character-reference rules on their own.
+# be walked (`children`, `parent`, `root`), searched (`find`, `find_all`, and
+# `xpath`, `xpath_nodes`, `xpath_node`, `xpath_string`, `xpath_float`,
+# `xpath_bool` with all of XPath 1.0 - see `XPath`), located (`path`), edited
+# (`add_child`, `set_attribute`, `text=`) and written back out (`to_xml`,
+# `inner_xml`). `escape`, `escape_attribute` and `unescape` are the
+# character-reference rules on their own.
 #
 # Bytes are UTF-8 and stay as they are: text is copied by the run, never
 # decoded and re-encoded, so a document with "café" or an emoji reads and
@@ -16,30 +20,54 @@
 # spaces, as XML 1.0 says. The serializer writes what a document reads back
 # as: `&amp; &lt; &gt;` and `&#13;` in text, `&quot;` and `&#9; &#10; &#13;` in
 # attribute values as well, `]]>` inside CDATA as the end of one section and
-# the start of the next, namespace declarations before attributes, an empty
-# element as `<a/>`, and a newline after the declaration and after every
-# top-level node. A comment or a processing instruction has no such escape,
-# so `--` in a comment, a comment ending in `-`, and `?>` in a processing
-# instruction are refused when the node is made or its text set.
+# the start of the next (and a carriage return in it as `&#13;` between two),
+# namespace declarations before attributes, an empty element as `<a/>`, and a
+# newline after the declaration and after every top-level node; a document
+# declared US-ASCII (or `ascii`) has every other character in its text,
+# attribute values and CDATA written as a decimal reference. A comment or a
+# processing instruction has no such escape, so `--` in a comment, a comment
+# ending in `-`, and `?>` in a processing instruction are refused when the
+# node is made or its text set; in a document declared US-ASCII, `to_xml`
+# refuses a character past U+007F in one of them or in a name. `to_xml`
+# refuses a name that is not an XML name (and a processing instruction
+# target `xml`, or one holding a colon) and a character XML cannot hold at
+# all (a C0 control but tab, newline and carriage return; U+FFFE; U+FFFF):
+# written as they were, they made a document no parser reads. A parsed
+# document holds none of them.
 #
 # What it refuses, each with the line and column:
 #   * an undeclared entity (`&bogus;`), an unterminated one (`&amp` without
 #     the `;`), and a character reference that is not an XML character
 #     (surrogates, U+0000 and the other C0 controls, anything past U+10FFFF);
 #   * `--` inside a comment and `]]>` in text; a control character (other than
-#     tab, newline and carriage return) anywhere;
+#     tab, newline and carriage return) anywhere; a byte that is not UTF-8, a
+#     character that is not an XML character (U+FFFE, U+FFFF, an encoded
+#     surrogate), and in a document declared US-ASCII any byte past 0x7F;
+#   * an XML declaration without its version first, or with `version`,
+#     `encoding`, `standalone` out of that order or twice, or a version that
+#     is not digits, a dot and digits;
 #   * a raw `<` in an attribute value, an attribute given twice - by one
 #     spelling or through two prefixes bound to the same uri - a namespace
-#     prefix nobody declared, a name with a colon first, last or twice, a
-#     declaration of the `xmlns` prefix or of `xml` to another uri, an
-#     unquoted value, a second root element, a closing tag that does not
-#     match, an unclosed anything;
+#     prefix nobody declared, a code point a name cannot hold (XML 1.0, fifth
+#     edition: `<a×b/>`, `<·a/>`), a name with a colon first, last or twice
+#     or a local part that cannot start a name, a colon in an entity name or a
+#     processing instruction target, a declaration of the `xmlns` prefix or
+#     of `xml` to another uri, the `xml` or `xmlns` uri bound to any other
+#     prefix or to the default namespace, an unquoted value, a second root
+#     element, a closing tag that does not match, an unclosed anything;
 #   * an external DTD subset or entity (`SYSTEM`/`PUBLIC`) - there is no
 #     file or network access here, so there is no XXE;
-#   * more than `max_entity_expansions` entity expansions (1,000 by default)
-#     or an entity that expands more than ten levels deep, which is what a
-#     "billion laughs" document is;
+#   * more than `max_entity_expansions` entity expansions (1,000 by default),
+#     an entity that expands more than ten levels deep, or expansions that
+#     copy more than 100 times the document's size (8 MiB at least), which
+#     is what a "billion laughs" or a quadratic-blowup document is;
 #   * elements nested deeper than `max_depth` (256 by default);
+#   * an entity whose replacement text holds a `<` - markup where the
+#     reference is in content, an error where it is in an attribute value -
+#     or, in content, `]]>`;
+#   * an `<!ELEMENT>`, `<!ATTLIST>` or `<!NOTATION>` declaration that is not
+#     its production in XML 1.0 (`<!ELEMENT>`, `(a,|b)`, an attribute with
+#     no default), and an attribute default a written value could not be;
 #   * markup inside an entity's replacement text, a parameter entity
 #     reference, and an encoding other than UTF-8 or US-ASCII: each is named
 #     as unsupported rather than read as something else.
@@ -47,8 +75,13 @@
 # `unescape` follows the same reference rules as the parser: the five
 # predefined entities and valid character references are decoded, everything
 # else is refused with the same sentence. The DTD is read for its entities and
-# not kept: `to_xml` writes no DOCTYPE, and entity references come out as the
-# text they stood for.
+# its attribute-list declarations: an attribute given a default is added to
+# an element written without it, and a value whose declared type is not CDATA
+# has its spaces trimmed and collapsed. Element and notation declarations are
+# checked and not used, as nothing is validated. The DTD is not kept but for
+# which attributes it declares of type ID (`Document#id_attributes`, what
+# XPath's `id()` reads): `to_xml` writes no DOCTYPE, and entity references
+# come out as the text they stood for.
 
 module std/xml
 
@@ -71,6 +104,8 @@ end
 
 # The namespace the `xml:` prefix is bound to without a declaration.
 XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+# The namespace the `xmlns` prefix is bound to; nothing may be bound to it.
+XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/"
 
 pub struct Namespace
   getter prefix : String
@@ -83,11 +118,13 @@ pub struct Namespace
     @prefix.empty?
   end
 
-  def to_s : String
+  # With *ascii*, a character past U+007F in the uri is written as a
+  # character reference, for a document declared US-ASCII.
+  def to_s(ascii : Bool = false) : String
     if @prefix.empty?
-      "xmlns=\"#{Std::Xml.escape_attribute(@uri)}\""
+      "xmlns=\"#{Std::Xml.escape_attribute(@uri, ascii)}\""
     else
-      "xmlns:#{@prefix}=\"#{Std::Xml.escape_attribute(@uri)}\""
+      "xmlns:#{@prefix}=\"#{Std::Xml.escape_attribute(@uri, ascii)}\""
     end
   end
 end
@@ -111,8 +148,9 @@ pub struct Attribute
     end
   end
 
-  def to_s : String
-    "#{@name}=\"#{Std::Xml.escape_attribute(@value)}\""
+  # With *ascii*, as `Namespace#to_s`.
+  def to_s(ascii : Bool = false) : String
+    "#{@name}=\"#{Std::Xml.escape_attribute(@value, ascii)}\""
   end
 end
 
@@ -129,8 +167,12 @@ pub class Node
   property namespaces : Array(Namespace)
   @content : String
 
+  # The same node, by identity. It compared `id`s, and a `Document` counts
+  # its own: the first `Document.new` and the first `Node.new_element`
+  # were both 1, so the two were `==`, and `add_child`'s question "is this
+  # node one of my ancestors" would answer yes for a stranger.
   def ==(other : Node) : Bool
-    @id == other.id
+    object_id == other.object_id
   end
 
   def initialize(@node_type : NodeType, @name : String = "", @content : String = "")
@@ -280,7 +322,29 @@ pub class Node
     curr
   end
 
+  # Moves *child* here, as the last child: a node is in one place in a
+  # tree. It stayed among its old parent's children as well, so a node
+  # moved from `<a>` to `<b>` was written under both and an attribute set
+  # on it showed in both places; and a node added under itself or under one
+  # of its own descendants made a loop that `to_xml` followed until the
+  # stack ran out. That is refused, and so is a document as a child.
   def add_child(child : Node) : Node
+    raise "a document cannot be the child of a node" if child.node_type.document?
+    n = self
+    while true
+      raise "a node cannot be added under itself or one of its own descendants" if n == child
+      up = n.parent
+      break if up.nil?
+      n = up
+    end
+    old = child.parent
+    old.children = old.children.reject { |c| c == child } unless old.nil?
+    append_parsed(child)
+  end
+
+  # The parser's own append: the child was just made, under this node, and
+  # is in no list yet.
+  protected def append_parsed(child : Node) : Node
     child.parent = self
     @children << child
     child
@@ -419,6 +483,41 @@ pub class Node
     end
   end
 
+  # XPath 1.0 (see `XPath`) with this node as the context node: the value
+  # the expression is, of whichever type. *namespaces* binds the prefixes
+  # the expression uses (a prefix not in it is looked up where it is
+  # declared at this node); *variables* gives `$name` its value. Each call
+  # compiles *expression*; `XPath.parse` once and `evaluate` many times
+  # for a loop.
+  def xpath(expression : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : XPathValue
+    XPath.parse(expression).evaluate(self, namespaces, variables)
+  end
+
+  # The node-set *expression* is, in document order; panics when it is a
+  # number, a string or a boolean.
+  def xpath_nodes(expression : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : Array(XPathNode)
+    XPath.parse(expression).nodes(self, namespaces, variables)
+  end
+
+  # The first node of that node-set in document order, or nil.
+  def xpath_node(expression : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : XPathNode?
+    found = xpath_nodes(expression, namespaces, variables)
+    found.empty? ? nil : found[0]
+  end
+
+  # The value converted as `string()`, `number()` and `boolean()` convert.
+  def xpath_string(expression : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : String
+    XPath.parse(expression).string(self, namespaces, variables)
+  end
+
+  def xpath_float(expression : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : Float64
+    XPath.parse(expression).number(self, namespaces, variables)
+  end
+
+  def xpath_bool(expression : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : Bool
+    XPath.parse(expression).bool(self, namespaces, variables)
+  end
+
   def to_s : String
     to_xml
   end
@@ -439,20 +538,53 @@ pub class Node
     buf.join("")
   end
 
-  protected def serialize_node(buf : Array(String)) : Nil
+  # With *ascii* (a document declared US-ASCII), a character past U+007F in
+  # text or an attribute value is written as a character reference: written
+  # as its UTF-8 bytes, it made a document no other parser reads. A name, a
+  # comment and a processing instruction have no references, so one holding
+  # such a character is refused; it was written as UTF-8, and this module's
+  # own parser refused the result ("byte 0xC3 is not US-ASCII, the declared
+  # encoding").
+  #
+  # A name that is not an XML name, and a character XML cannot hold at all
+  # (a C0 control but tab, newline and carriage return; U+FFFE, U+FFFF; a
+  # byte that is not UTF-8), are refused here: both were written as they
+  # were, so `set_attribute("k=\"1\" j", "2")` wrote two attributes and a
+  # "\u0001" in text a document no parser reads. A parsed tree holds
+  # neither.
+  protected def serialize_node(buf : Array(String), ascii : Bool = false) : Nil
     if @node_type.element?
+      Node.check_writable_name(@name, "element")
+      check_namespaced_name(@name, "element")
+      refuse_non_ascii_name(@name) if ascii
       buf << "<"
       buf << @name
       ns_i = 0
       while ns_i < @namespaces.size
+        Node.check_writable_text(@namespaces[ns_i].uri)
+        Node.check_writable_name(@namespaces[ns_i].prefix, "namespace prefix") unless @namespaces[ns_i].default?
+        refuse_non_ascii_name("xmlns:#{@namespaces[ns_i].prefix}") if ascii
         buf << " "
-        buf << @namespaces[ns_i].to_s
+        buf << @namespaces[ns_i].to_s(ascii)
         ns_i = ns_i + 1
       end
+      expanded = Hash(String, String).new
       attr_i = 0
       while attr_i < @attributes.size
+        attr = @attributes[attr_i]
+        Node.check_writable_name(attr.name, "attribute")
+        Node.check_writable_text(attr.value)
+        if attr.name != "xmlns" && attr.prefix != "xmlns"
+          uri = check_namespaced_name(attr.name, "attribute")
+          if !attr.prefix.empty?
+            first = expanded["#{uri}\n#{attr.local_name}"]?
+            raise "attribute '#{attr.local_name}' in namespace '#{uri}' is given twice on <#{@name}>, as '#{first}' and '#{attr.name}', so it cannot be written" unless first.nil?
+            expanded["#{uri}\n#{attr.local_name}"] = attr.name
+          end
+        end
+        refuse_non_ascii_name(attr.name) if ascii
         buf << " "
-        buf << @attributes[attr_i].to_s
+        buf << attr.to_s(ascii)
         attr_i = attr_i + 1
       end
       if @children.empty?
@@ -461,7 +593,7 @@ pub class Node
         buf << ">"
         c_i = 0
         while c_i < @children.size
-          @children[c_i].serialize_node(buf)
+          @children[c_i].serialize_node(buf, ascii)
           c_i = c_i + 1
         end
         buf << "</"
@@ -469,16 +601,29 @@ pub class Node
         buf << ">"
       end
     elsif @node_type.text?
-      buf << Std::Xml.escape(@content)
+      Node.check_writable_text(@content)
+      buf << Std::Xml.escape(@content, ascii)
     elsif @node_type.cdata?
+      Node.check_writable_text(@content)
       buf << "<![CDATA["
-      serialize_cdata_body(buf)
+      serialize_cdata_body(buf, ascii)
       buf << "]]>"
     elsif @node_type.comment?
+      Node.check_writable_text(@content)
+      refuse_non_ascii_content("a comment") if ascii
       buf << "<!--"
       buf << @content
       buf << "-->"
     elsif @node_type.pi?
+      Node.check_writable_name(@name, "processing instruction target")
+      if @name.downcase == "xml" || @name.includes?(":")
+        raise "'#{@name}' is reserved or holds a colon, so the processing instruction target cannot be written"
+      end
+      Node.check_writable_text(@content)
+      if ascii
+        refuse_non_ascii_name(@name)
+        refuse_non_ascii_content("a processing instruction")
+      end
       buf << "<?"
       buf << @name
       if !@content.empty?
@@ -489,17 +634,89 @@ pub class Node
     else
       c_i = 0
       while c_i < @children.size
-        @children[c_i].serialize_node(buf)
+        @children[c_i].serialize_node(buf, ascii)
         buf << "\n"
         c_i = c_i + 1
       end
     end
   end
 
+  # A name a namespace-aware reader takes: `local` or `prefix:local`, its
+  # prefix bound here, by a declaration this tree holds or by an `xmlns:`
+  # attribute set on this element or one around it. Answers the uri the
+  # prefix is bound to, "" for no prefix. A name was checked only against
+  # XML 1.0's `Name`, which takes any colon, so `:a`, `a:`, `p:x:y` and a
+  # `p:a` whose `p` nobody declared were written, and this module's parser
+  # refused each document ("is not a qualified name", "is not declared").
+  private def check_namespaced_name(name : String, what : String) : String
+    ptr = name.to_unsafe
+    len = name.bytesize
+    colon = -1
+    colons = 0
+    i = 0
+    while i < len
+      if ptr[i] == 58_u8
+        colon = i if colons == 0
+        colons = colons + 1
+      end
+      i = i + 1
+    end
+    return "" if colons == 0
+    if colons > 1 || colon == 0 || colon == len - 1 || !Parser.name_shaped?(name[colon + 1, len - colon - 1])
+      raise "'#{name}' is not a qualified name: a name is 'local' or 'prefix:local', so the #{what} cannot be written"
+    end
+    prefix = name[0, colon]
+    ns = resolve_namespace_prefix(prefix)
+    return ns.uri unless ns.nil?
+    node = self
+    while true
+      declared = node.attribute("xmlns:#{prefix}")
+      return declared unless declared.nil?
+      up = node.parent
+      break if up.nil?
+      node = up
+    end
+    raise "namespace prefix '#{prefix}' of '#{name}' is not declared, so the #{what} cannot be written"
+  end
+
+  private def refuse_non_ascii_name(name : String) : Nil
+    raise "the name '#{name}' cannot be written in a document declared US-ASCII" if Node.first_non_ascii(name) >= 0
+  end
+
+  private def refuse_non_ascii_content(what : String) : Nil
+    cp = Node.first_non_ascii(@content)
+    raise "U+#{cp.to_s(16).upcase.rjust(4, '0')} cannot be written in #{what} of a document declared US-ASCII" if cp >= 0
+  end
+
+  # The first character past U+007F in *text*, decoded, or -1.
+  protected def self.first_non_ascii(text : String) : Int32
+    ptr = text.to_unsafe
+    len = text.bytesize
+    i = 0
+    while i < len && ptr[i] < 0x80_u8
+      i = i + 1
+    end
+    return -1 if i == len
+    b = ptr[i]
+    n = b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : (b >= 0xC0_u8 ? 2 : 1))
+    return b.to_i32 if n == 1 || i + n > len
+    cp = (b & (n == 2 ? 0x1F_u8 : (n == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+    k = 1
+    while k < n
+      cp = (cp << 6) | (ptr[i + k] & 0x3F_u8).to_i32
+      k = k + 1
+    end
+    cp
+  end
+
   # A CDATA section has no escape either, so `]]>` in its content is written
-  # as two sections, `...]]` and `>...`, which read back as the one run.
-  private def serialize_cdata_body(buf : Array(String)) : Nil
-    if !@content.includes?("]]>")
+  # as two sections, `...]]` and `>...`, which read back as the one run. A
+  # carriage return is written between two sections as `&#13;`: kept raw in
+  # the section, it read back as a newline. With *ascii*, so is a character
+  # past U+007F, as `&#N;`: it was written raw, as UTF-8 bytes, in a
+  # document declared US-ASCII.
+  private def serialize_cdata_body(buf : Array(String), ascii : Bool) : Nil
+    if !@content.includes?("]]>") && !@content.includes?("\r") && (!ascii || Node.first_non_ascii(@content) < 0)
       buf << @content
       return
     end
@@ -507,17 +724,64 @@ pub class Node
     len = @content.bytesize
     run_start = 0
     i = 0
-    while i + 2 < len
-      if ptr[i] == 93_u8 && ptr[i + 1] == 93_u8 && ptr[i + 2] == 62_u8
+    while i < len
+      if i + 2 < len && ptr[i] == 93_u8 && ptr[i + 1] == 93_u8 && ptr[i + 2] == 62_u8
         buf << @content[run_start, i + 2 - run_start]
         buf << "]]><![CDATA["
         run_start = i + 2
         i = i + 2
+      elsif ptr[i] == 13_u8
+        buf << @content[run_start, i - run_start]
+        buf << "]]>&#13;<![CDATA["
+        run_start = i + 1
+        i = i + 1
+      elsif ascii && ptr[i] >= 0x80_u8
+        buf << @content[run_start, i - run_start]
+        run_start = i
+        while i < len && ptr[i] >= 0x80_u8
+          i = i + 1
+        end
+        buf << "]]>"
+        buf << Std::Xml.escape(@content[run_start, i - run_start], true)
+        buf << "<![CDATA["
+        run_start = i
       else
         i = i + 1
       end
     end
     buf << @content[run_start, len - run_start]
+  end
+
+  # What `to_xml` refuses to write (see `serialize_node`): a name that is
+  # not an XML name, and a character XML cannot hold raw or as a reference.
+  protected def self.check_writable_name(name : String, what : String) : Nil
+    raise "'#{name}' is not an XML name, so the #{what} cannot be written" unless Parser.name_shaped?(name)
+  end
+
+  protected def self.check_writable_text(text : String) : Nil
+    ptr = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = ptr[i]
+      if b < 32_u8 && b != 9_u8 && b != 10_u8 && b != 13_u8
+        raise "control character U+#{Parser.hex4(b.to_i32)} cannot be written: XML has no way to hold it"
+      end
+      i = i + 1
+    end
+    bad = Parser.first_bad_character(text, 0, false)
+    raise "#{bad[1]}, so it cannot be written" if bad[0] >= 0
+  end
+
+  # Nothing but XML's white space: space, tab, newline, carriage return.
+  protected def self.xml_blank?(text : String) : Bool
+    ptr = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = ptr[i]
+      return false unless b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8
+      i = i + 1
+    end
+    true
   end
 end
 
@@ -525,6 +789,10 @@ pub class Document < Node
   property version : String
   property encoding : String
   property standalone : Bool?
+  # The attributes the internal DTD subset declares of type ID, by element
+  # name: what XPath's `id()` finds an element by, beside `xml:id`. The
+  # rest of the DTD is not kept.
+  property id_attributes : Hash(String, Array(String)) = Hash(String, Array(String)).new
 
   def initialize(@version : String = "1.0", @encoding : String = "UTF-8", @standalone : Bool? = nil)
     super(NodeType::Document, name: "#document")
@@ -540,7 +808,23 @@ pub class Document < Node
     first_element_child
   end
 
+  # The declaration and the document's own children are checked as the
+  # reader checks them: the declaration first, the shape after each node's
+  # own refusals. `version` and `encoding` were written between quotes as
+  # they were, so an encoding holding a `"` closed the declaration and wrote
+  # markup of its own (`Document.new(encoding: "x\" standalone=\"maybe")`),
+  # and a version that is not `1.` and digits or an encoding this module
+  # does not read (`ISO-8859-1`) made a document its parser refuses. So did
+  # a second root element, none, text that is not white space, or a CDATA
+  # section beside the root.
   def to_xml : String
+    if !Parser.version_number?(@version)
+      raise "version '#{@version}' is not a version number, so the document cannot be written"
+    end
+    lowered = @encoding.downcase
+    if !@encoding.empty? && lowered != "utf-8" && lowered != "utf8" && lowered != "us-ascii" && lowered != "ascii"
+      raise "encoding '#{@encoding}' is not one this module reads (UTF-8 or US-ASCII), so the document cannot be written"
+    end
     buf = [] of String
     buf << "<?xml version=\""
     buf << @version
@@ -556,7 +840,16 @@ pub class Document < Node
       buf << "\""
     end
     buf << "?>\n"
-    serialize_node(buf)
+    serialize_node(buf, lowered == "us-ascii" || lowered == "ascii")
+    roots = 0
+    @children.each do |child|
+      if child.node_type.element?
+        roots = roots + 1
+      elsif child.node_type.cdata? || (child.node_type.text? && !Node.xml_blank?(child.text))
+        raise "#{child.node_type.cdata? ? "a CDATA section" : "text"} outside the root element cannot be written"
+      end
+    end
+    raise "a document with #{roots == 0 ? "no root element" : "#{roots} root elements"} cannot be written" if roots != 1
     buf.join("")
   end
 end
@@ -573,9 +866,22 @@ pub class Parser
   @max_depth : Int32
   @depth : Int32
   @entities : Hash(String, String)
+  # What the internal subset's attribute-list declarations say, by element
+  # name: whether each declared attribute's type is other than CDATA, and
+  # the defaults, in the order they were declared.
+  @attribute_tokenized : Hash(String, Hash(String, Bool))
+  @attribute_defaults : Hash(String, Array(Tuple(String, String)))
+  # The attributes declared of type ID, by element name, for the document.
+  @attribute_ids : Hash(String, Array(String))
   @expansions : Int32
   @max_expansions : Int32
+  # Bytes of replacement text copied so far, and how many a document may
+  # have: 100 times its own size, and never less than 8 MiB.
+  @expanded_bytes : Int64
+  @max_expanded_bytes : Int64
   @error : String
+  @bad_at : Int32
+  @bad_message : String
 
   def initialize(input : String, @max_depth : Int32 = 256, @max_expansions : Int32 = 1000)
     @input = Parser.normalize_line_ends(input)
@@ -585,8 +891,17 @@ pub class Parser
     @col = 1
     @depth = 0
     @entities = Hash(String, String).new
+    @attribute_tokenized = Hash(String, Hash(String, Bool)).new
+    @attribute_defaults = Hash(String, Array(Tuple(String, String))).new
+    @attribute_ids = Hash(String, Array(String)).new
     @expansions = 0
+    @expanded_bytes = 0_i64
+    @max_expanded_bytes = @len.to_i64 * 100
+    @max_expanded_bytes = 8_i64 * 1024 * 1024 if @max_expanded_bytes < 8_i64 * 1024 * 1024
     @error = ""
+    bad = Parser.first_bad_character(@input, 0, false)
+    @bad_at = bad[0]
+    @bad_message = bad[1]
   end
 
   # The sentence the last parse failed with, or "" when it did not.
@@ -646,7 +961,13 @@ pub class Parser
   end
 
   # One byte on; a column is a character, so a continuation byte is not one.
+  # Every byte the parser reads passes here, so the first one that is not
+  # part of an XML character is refused where it stands, in document order.
   private def step : Nil
+    if @pos == @bad_at
+      fail(@bad_message)
+      return
+    end
     b = @input.to_unsafe[@pos]
     @pos = @pos + 1
     if b == 10_u8
@@ -655,6 +976,42 @@ pub class Parser
     elsif (b & 192_u8) != 128_u8
       @col = @col + 1
     end
+  end
+
+  # Where the first byte at or after *from* that does not begin an XML
+  # character is, with the sentence it is refused with; -1 and "" when there
+  # is none. Only a C0 control is caught where the text is read, so without
+  # this a byte that is not UTF-8, an encoded surrogate, U+FFFE and U+FFFF
+  # were read and written back, while their character references were
+  # refused. With *ascii*, any byte past 0x7F is one.
+  protected def self.first_bad_character(input : String, from : Int32, ascii : Bool) : Tuple(Int32, String)
+    ptr = input.to_unsafe
+    len = input.bytesize
+    i = from
+    while i < len
+      b = ptr[i]
+      if b < 128_u8
+        i = i + 1
+        next
+      end
+      byte = "0x" + Parser.hex4(b.to_i32)[2, 2]
+      return {i, "byte #{byte} is not US-ASCII, the declared encoding"} if ascii
+      n = b >= 0xF5_u8 ? 0 : (b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : (b >= 0xC2_u8 ? 2 : 0)))
+      return {i, "byte #{byte} is not UTF-8"} if n == 0 || i + n > len
+      cp = (b & (n == 2 ? 0x1F_u8 : (n == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+      k = 1
+      while k < n
+        c = ptr[i + k]
+        return {i, "byte #{byte} is not UTF-8"} if (c & 0xC0_u8) != 0x80_u8
+        cp = (cp << 6) | (c & 0x3F_u8).to_i32
+        k = k + 1
+      end
+      overlong = (n == 3 && cp < 0x800) || (n == 4 && cp < 0x10000)
+      return {i, "byte #{byte} is not UTF-8"} if overlong || cp > 0x10FFFF
+      return {i, "character U+#{Parser.hex4(cp)} is not an XML character"} unless xml_char?(cp)
+      i = i + n
+    end
+    {-1, ""}
   end
 
   private def skip_whitespace : Bool
@@ -703,6 +1060,23 @@ pub class Parser
     fail("control character U+#{Parser.hex4(b.to_i32)} is not allowed")
   end
 
+  # One or more digits, a dot, then digits: the version numbers the other
+  # library reads (`1.0`, `1.1`, `1.`).
+  protected def self.version_number?(value : String) : Bool
+    ptr = value.to_unsafe
+    len = value.bytesize
+    i = 0
+    while i < len && ptr[i] >= 48_u8 && ptr[i] <= 57_u8
+      i = i + 1
+    end
+    return false if i == 0 || i >= len || ptr[i] != 46_u8
+    i = i + 1
+    while i < len && ptr[i] >= 48_u8 && ptr[i] <= 57_u8
+      i = i + 1
+    end
+    i == len
+  end
+
   protected def self.hex4(value : Int32) : String
     digits = value.to_s(16).upcase
     while digits.bytesize < 4
@@ -715,6 +1089,14 @@ pub class Parser
 
   private def parse_document : Document
     doc = Document.new
+    # A UTF-16 file opens with its byte order mark, FF FE or FE FF - what
+    # Windows PowerShell 5.1's `Out-File`, `>` and `Export-Clixml` write -
+    # and was read as UTF-8 until the first `<`: "text outside the root
+    # element at line 1, column 1", about a document that has none.
+    if @len >= 2 && ((byte_at(0) == 0xFF_u8 && byte_at(1) == 0xFE_u8) || (byte_at(0) == 0xFE_u8 && byte_at(1) == 0xFF_u8))
+      fail_at(1, 1, "encoding 'UTF-16' is not supported: the input is read as UTF-8")
+      return doc
+    end
     @pos = 3 if match?("\u{FEFF}")
     if match?("<?xml") && @pos + 5 < @len && whitespace_byte?(byte_at(@pos + 5))
       parse_xml_declaration(doc)
@@ -726,9 +1108,9 @@ pub class Parser
       skip_whitespace
       break if @pos >= @len
       if match?("<!--")
-        doc.add_child(parse_comment)
+        doc.append_parsed(parse_comment)
       elsif match?("<?")
-        doc.add_child(parse_pi)
+        doc.append_parsed(parse_pi)
       elsif match?("<!DOCTYPE")
         if has_root
           fail("DOCTYPE must come before the root element")
@@ -746,7 +1128,7 @@ pub class Parser
         if has_root
           fail("a second root element")
         else
-          doc.add_child(parse_element(doc))
+          doc.append_parsed(parse_element(doc))
           has_root = true
         end
       else
@@ -755,6 +1137,7 @@ pub class Parser
     end
 
     fail("document has no root element") if !has_root && !failed?
+    doc.id_attributes = @attribute_ids
     doc
   end
 
@@ -762,18 +1145,28 @@ pub class Parser
     b == 32_u8 || b == 9_u8 || b == 10_u8
   end
 
+  # The declaration is `version`, then `encoding`, then `standalone`, the
+  # first required and each at most once (XML 1.0, production [23]): taking
+  # any of them in any order, or none, read `<?xml ?>` and
+  # `<?xml standalone="yes" version="1.0"?>` as declarations.
   private def parse_xml_declaration(doc : Document) : Nil
     start_line = @line
     start_col = @col
     consume("<?xml")
     doc.encoding = ""
+    stage = 0 # 1 after version, 2 after encoding, 3 after standalone
     while @pos < @len
       had_space = skip_whitespace
-      return if consume("?>")
+      if consume("?>")
+        fail_at(start_line, start_col, "the XML declaration has no version") if stage == 0
+        return
+      end
       if !had_space
         fail("expected whitespace in the XML declaration")
         return
       end
+      attr_line = @line
+      attr_col = @col
       attr_name = parse_name
       return if failed?
       skip_whitespace
@@ -784,8 +1177,21 @@ pub class Parser
       skip_whitespace
       attr_val = parse_quoted_literal
       return if failed?
+      in_place = (attr_name == "version" && stage == 0) || (attr_name == "encoding" && stage == 1) ||
+                 (attr_name == "standalone" && (stage == 1 || stage == 2))
+      if !in_place && (attr_name == "version" || attr_name == "encoding" || attr_name == "standalone")
+        fail_at(attr_line, attr_col, "'#{attr_name}' is out of place in the XML declaration: it is version, encoding, standalone, each once")
+        return
+      end
       if attr_name == "version"
+        # Digits, a dot, digits: `1.0`, `1.1`; any text was taken, a control
+        # character or a `<` included.
+        if !Parser.version_number?(attr_val)
+          fail_at(attr_line, attr_col, "version '#{attr_val}' is not a version number")
+          return
+        end
         doc.version = attr_val
+        stage = 1
       elsif attr_name == "encoding"
         lowered = attr_val.downcase
         if lowered != "utf-8" && lowered != "utf8" && lowered != "us-ascii" && lowered != "ascii"
@@ -793,6 +1199,16 @@ pub class Parser
           return
         end
         doc.encoding = attr_val
+        stage = 2
+        # A US-ASCII document has no byte past 0x7F: one is refused where it
+        # stands rather than read as UTF-8.
+        if lowered == "us-ascii" || lowered == "ascii"
+          bad = Parser.first_bad_character(@input, @pos, true)
+          if bad[0] >= 0 && (@bad_at < 0 || bad[0] < @bad_at)
+            @bad_at = bad[0]
+            @bad_message = bad[1]
+          end
+        end
       elsif attr_name == "standalone"
         if attr_val == "yes"
           doc.standalone = true
@@ -802,6 +1218,7 @@ pub class Parser
           fail("standalone must be 'yes' or 'no', not '#{attr_val}'")
           return
         end
+        stage = 3
       else
         fail("'#{attr_name}' is not an XML declaration attribute")
         return
@@ -816,7 +1233,11 @@ pub class Parser
     start_line = @line
     start_col = @col
     consume("<!DOCTYPE")
-    skip_whitespace
+    # `<!DOCTYPEa>` is no DOCTYPE: the name follows whitespace.
+    if !skip_whitespace
+      fail("expected whitespace after <!DOCTYPE")
+      return
+    end
     parse_name
     return if failed?
     skip_whitespace
@@ -846,8 +1267,12 @@ pub class Parser
         parse_comment
       elsif match?("<?")
         parse_pi
-      elsif match?("<!ELEMENT") || match?("<!ATTLIST") || match?("<!NOTATION")
-        skip_declaration
+      elsif match?("<!ELEMENT")
+        parse_element_decl
+      elsif match?("<!ATTLIST")
+        parse_attlist_decl
+      elsif match?("<!NOTATION")
+        parse_notation_decl
       elsif match?("%")
         fail("parameter entity references are not supported")
       else
@@ -857,26 +1282,368 @@ pub class Parser
     end
   end
 
-  # A declaration that is not used: skipped to its `>`, quotes respected.
-  private def skip_declaration : Nil
+  # The three declarations below were skipped to their `>` unread, so
+  # `<!ELEMENT>`, `(a,|b)`, `<!NOTATION n>` and `<!ATTLIST garbage !!!>`
+  # were taken, an attribute-list declaration's default was never given to
+  # an element, and `xmlns:p` declared with one left `<p:x/>` unbound. Each
+  # is now read by its production in XML 1.0.
+
+  # Whitespace inside a markup declaration. A `%` after it starts a
+  # parameter entity reference, which the internal subset does not allow
+  # there: it is named as unsupported rather than as an unexpected byte.
+  private def declaration_space : Bool
+    skipped = skip_whitespace
+    fail("parameter entity references are not supported") if match?("%")
+    skipped
+  end
+
+  # The `>` that ends a declaration: at the end of the input the
+  # declaration is unclosed, and anything else is refused where it stands.
+  private def end_declaration(what : String, line : Int32, col : Int32) : Nil
+    declaration_space
+    return if consume(">")
+    if @pos >= @len
+      fail_at(line, col, "unclosed #{what}")
+    else
+      fail("expected '>' to end the #{what}")
+    end
+  end
+
+  # An element or attribute name in a declaration, held to the same shape
+  # as one in the document.
+  private def declared_name : String
+    line = @line
+    col = @col
+    name = parse_name
+    return "" if failed? || !qualified_name?(name, line, col)
+    name
+  end
+
+  # `<!ELEMENT name EMPTY|ANY|(...)>` ([45]-[51]): checked, and not kept,
+  # as nothing is validated.
+  private def parse_element_decl : Nil
     start_line = @line
     start_col = @col
-    while @pos < @len
-      b = byte_at(@pos)
-      if b == 62_u8
-        step
+    consume("<!ELEMENT")
+    if !declaration_space
+      fail("expected whitespace after <!ELEMENT")
+      return
+    end
+    name = declared_name
+    return if failed?
+    what = "<!ELEMENT #{name}> declaration"
+    if !declaration_space
+      fail("expected whitespace after the element name '#{name}'")
+      return
+    end
+    if match?("(")
+      parse_content_model(name)
+      return if failed?
+    else
+      word_line = @line
+      word_col = @col
+      word = parse_name?
+      if word.nil? || (word != "EMPTY" && word != "ANY")
+        fail_at(word_line, word_col, "expected EMPTY, ANY or '(' in the #{what}")
         return
-      elsif b == 34_u8 || b == 39_u8
-        step
-        while @pos < @len && byte_at(@pos) != b
-          step
-        end
-        step if @pos < @len
-      else
-        step
       end
     end
-    fail_at(start_line, start_col, "unclosed declaration in the DOCTYPE internal subset")
+    end_declaration(what, start_line, start_col)
+  end
+
+  # From its `(`: `(#PCDATA)`, `(#PCDATA|a|b)*`, or names and groups joined
+  # by `,` or by `|` - never both in one group - each with an optional `?`,
+  # `*` or `+`. Each open group's separator is kept on a list rather than
+  # the call stack, so no depth of nesting runs the stack out.
+  private def parse_content_model(element : String) : Nil
+    what = "content model of element '#{element}'"
+    consume("(")
+    declaration_space
+    if consume("#PCDATA")
+      names = false
+      while !failed?
+        declaration_space
+        close_line = @line
+        close_col = @col
+        if consume(")")
+          if !consume("*") && names
+            fail_at(close_line, close_col, "expected ')*' to end the #{what}, which mixes #PCDATA and elements")
+          end
+          return
+        end
+        if !consume("|")
+          fail("expected '|' or ')' in the #{what}")
+          return
+        end
+        declaration_space
+        declared_name
+        names = true
+      end
+      return
+    end
+    groups = [0_u8] # each open group's separator, 0 before its first
+    want_particle = true
+    while !failed?
+      if want_particle
+        if consume("(")
+          groups << 0_u8
+          declaration_space
+        else
+          name_line = @line
+          name_col = @col
+          name = parse_name?
+          if name.nil?
+            fail("expected a name or '(' in the #{what}")
+            return
+          end
+          return unless qualified_name?(name, name_line, name_col)
+          skip_occurrence
+          want_particle = false
+        end
+      else
+        declaration_space
+        if consume(")")
+          skip_occurrence
+          groups.pop
+          return if groups.empty?
+        else
+          b = @pos < @len ? byte_at(@pos) : 0_u8
+          if b != 44_u8 && b != 124_u8
+            fail("expected ',', '|' or ')' in the #{what}")
+            return
+          end
+          if groups.last != 0_u8 && groups.last != b
+            fail("',' and '|' cannot join one group in the #{what}")
+            return
+          end
+          groups[groups.size - 1] = b
+          step
+          declaration_space
+          want_particle = true
+        end
+      end
+    end
+  end
+
+  # The `?`, `*` or `+` after a content particle, if there is one.
+  private def skip_occurrence : Nil
+    return if @pos >= @len
+    b = byte_at(@pos)
+    step if b == 63_u8 || b == 42_u8 || b == 43_u8
+  end
+
+  # `<!ATTLIST element (name type default)*>` ([52]-[60]). What it says is
+  # kept: whether an attribute's type is other than CDATA, so its values
+  # are trimmed and their spaces collapsed, and its default, which an
+  # element without the attribute is given (3.3.2, 3.3.3). The first
+  # declaration of an attribute is the one that counts (3.3).
+  private def parse_attlist_decl : Nil
+    start_line = @line
+    start_col = @col
+    consume("<!ATTLIST")
+    if !declaration_space
+      fail("expected whitespace after <!ATTLIST")
+      return
+    end
+    element = declared_name
+    return if failed?
+    what = "<!ATTLIST #{element}> declaration"
+    while !failed?
+      # Another attribute follows whitespace; where none does, or at a `>`
+      # or a `<`, the declaration should end.
+      if !declaration_space || @pos >= @len || byte_at(@pos) == 62_u8 || byte_at(@pos) == 60_u8
+        end_declaration(what, start_line, start_col)
+        return
+      end
+      parse_attribute_definition(element, what)
+    end
+  end
+
+  private def parse_attribute_definition(element : String, what : String) : Nil
+    name = declared_name
+    return if failed?
+    if !declaration_space
+      fail("expected whitespace after the attribute name '#{name}' in the #{what}")
+      return
+    end
+    tokenized = true
+    id_type = false
+    if match?("(")
+      parse_value_list(name, false, what)
+    else
+      type_line = @line
+      type_col = @col
+      word = parse_name?
+      type = word.nil? ? "" : word
+      id_type = type == "ID"
+      if type == "CDATA"
+        tokenized = false
+      elsif type == "NOTATION"
+        if !declaration_space
+          fail("expected whitespace after NOTATION in the #{what}")
+          return
+        end
+        if !match?("(")
+          fail("expected '(' after NOTATION in the #{what}")
+          return
+        end
+        parse_value_list(name, true, what)
+      elsif type != "ID" && type != "IDREF" && type != "IDREFS" && type != "ENTITY" && type != "ENTITIES" && type != "NMTOKEN" && type != "NMTOKENS"
+        fail_at(type_line, type_col, "expected the type of attribute '#{name}' in the #{what}: CDATA, ID, IDREF, IDREFS, ENTITY, ENTITIES, NMTOKEN, NMTOKENS, NOTATION or a list in parentheses")
+        return
+      end
+    end
+    return if failed?
+
+    had_space = declaration_space
+    default_line = @line
+    default_col = @col
+    b = @pos < @len ? byte_at(@pos) : 0_u8
+    if b != 35_u8 && b != 34_u8 && b != 39_u8
+      fail("expected #REQUIRED, #IMPLIED, #FIXED or a quoted default for attribute '#{name}' in the #{what}")
+      return
+    end
+    if !had_space
+      fail("expected whitespace before the default of attribute '#{name}' in the #{what}")
+      return
+    end
+    has_value = true
+    if b == 35_u8
+      step
+      word = parse_name?
+      keyword = word.nil? ? "" : word
+      if keyword == "REQUIRED" || keyword == "IMPLIED"
+        has_value = false
+      elsif keyword != "FIXED"
+        fail_at(default_line, default_col, "expected #REQUIRED, #IMPLIED, #FIXED or a quoted default for attribute '#{name}' in the #{what}")
+        return
+      elsif !declaration_space
+        fail("expected whitespace after #FIXED in the #{what}")
+        return
+      end
+    end
+    # The default is read as a value written on the element would be: its
+    # references expanded with the entities declared so far, a `<` refused.
+    value = has_value ? parse_attribute_value : ""
+    return if failed?
+
+    types = @attribute_tokenized[element]? || Hash(String, Bool).new
+    return if types.has_key?(name)
+    types[name] = tokenized
+    @attribute_tokenized[element] = types
+    if id_type
+      ids = @attribute_ids[element]? || [] of String
+      ids << name
+      @attribute_ids[element] = ids
+    end
+    return unless has_value
+    defaults = @attribute_defaults[element]? || [] of Tuple(String, String)
+    defaults << {name, tokenized ? Parser.collapse_spaces(value) : value}
+    @attribute_defaults[element] = defaults
+  end
+
+  # The `(a|b)` of an enumerated type, name tokens, or of a NOTATION type,
+  # names.
+  private def parse_value_list(attribute : String, notation : Bool, what : String) : Nil
+    consume("(")
+    while !failed?
+      declaration_space
+      if parse_name?(!notation).nil?
+        fail("expected a #{notation ? "name" : "name token"} in the values of attribute '#{attribute}' in the #{what}")
+        return
+      end
+      declaration_space
+      return if consume(")")
+      if !consume("|")
+        fail("expected '|' or ')' in the values of attribute '#{attribute}' in the #{what}")
+        return
+      end
+    end
+  end
+
+  # `<!NOTATION name SYSTEM "..."|PUBLIC "..." ["..."]>` ([82], [75], [83]):
+  # checked, and not kept. Its identifiers name nothing that is read.
+  private def parse_notation_decl : Nil
+    start_line = @line
+    start_col = @col
+    consume("<!NOTATION")
+    if !declaration_space
+      fail("expected whitespace after <!NOTATION")
+      return
+    end
+    name_line = @line
+    name_col = @col
+    notation = parse_name
+    return if failed?
+    # Namespaces in XML, section 7: no notation name holds a colon.
+    if notation.includes?(":")
+      fail_at(name_line, name_col, "notation name '#{notation}' cannot hold a colon")
+      return
+    end
+    what = "<!NOTATION #{notation}> declaration"
+    if !declaration_space
+      fail("expected whitespace after the notation name '#{notation}'")
+      return
+    end
+    if consume("SYSTEM")
+      if !declaration_space
+        fail("expected whitespace after SYSTEM in the #{what}")
+        return
+      end
+      parse_identifier_literal(false)
+    elsif consume("PUBLIC")
+      if !declaration_space
+        fail("expected whitespace after PUBLIC in the #{what}")
+        return
+      end
+      parse_identifier_literal(true)
+      if declaration_space && @pos < @len && (byte_at(@pos) == 34_u8 || byte_at(@pos) == 39_u8)
+        parse_identifier_literal(false)
+      end
+    else
+      fail("expected SYSTEM or PUBLIC in the #{what}")
+      return
+    end
+    return if failed?
+    end_declaration(what, start_line, start_col)
+  end
+
+  # A system literal, any characters in quotes, or with *public_id* a
+  # public identifier, which holds only the characters production [13]
+  # lists.
+  private def parse_identifier_literal(public_id : Bool) : Nil
+    kind = public_id ? "public" : "system"
+    start_line = @line
+    start_col = @col
+    quote = @pos < @len ? byte_at(@pos) : 0_u8
+    if quote != 34_u8 && quote != 39_u8
+      fail("expected a quoted #{kind} identifier")
+      return
+    end
+    step
+    while @pos < @len
+      b = byte_at(@pos)
+      if b == quote
+        step
+        return
+      elsif public_id && @pos != @bad_at && !Parser.public_id_byte?(b)
+        fail("#{found_here} is not allowed in a public identifier")
+        return
+      elsif control?(b)
+        fail_control(b)
+        return
+      end
+      step
+    end
+    fail_at(start_line, start_col, "unclosed #{kind} identifier")
+  end
+
+  # Production [13]: space, newline, ASCII letters and digits, and
+  # -'()+,./:=?;!*#@$_%
+  protected def self.public_id_byte?(b : UInt8) : Bool
+    return true if (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8)
+    b == 32_u8 || b == 10_u8 || (b >= 39_u8 && b <= 47_u8) || b == 33_u8 || (b >= 35_u8 && b <= 37_u8) ||
+      b == 58_u8 || b == 59_u8 || b == 61_u8 || b == 63_u8 || b == 64_u8 || b == 95_u8
   end
 
   private def parse_entity_decl : Nil
@@ -888,9 +1655,20 @@ pub class Parser
       return
     end
     parameter = consume("%")
-    skip_whitespace if parameter
+    # `<!ENTITY % p ...>`: the space after the `%` is not optional.
+    if parameter && !skip_whitespace
+      fail("expected whitespace after '%' in <!ENTITY")
+      return
+    end
+    name_line = @line
+    name_col = @col
     name = parse_name
     return if failed?
+    # Namespaces in XML, section 7: no entity name holds a colon.
+    if name.includes?(":")
+      fail_at(name_line, name_col, "entity name '#{name}' cannot hold a colon")
+      return
+    end
     if !skip_whitespace
       fail("expected whitespace after the entity name '#{name}'")
       return
@@ -927,6 +1705,11 @@ pub class Parser
         return parts.join("")
       elsif b == 60_u8
         fail("markup inside the value of entity '#{entity}' is not supported")
+        return ""
+      elsif b == 37_u8
+        # A `%` here starts a parameter entity reference, which the internal
+        # subset does not allow inside a declaration; it was kept as text.
+        fail("parameter entity references are not supported")
         return ""
       elsif b == 38_u8
         parts << slice_from(run_start)
@@ -979,6 +1762,12 @@ pub class Parser
     return Node.new_pi("", "") if failed?
     if target.downcase == "xml"
       fail_at(start_line, start_col, "processing instruction target '#{target}' is reserved")
+      return Node.new_pi("", "")
+    end
+    # Namespaces in XML, section 7: no processing instruction target holds
+    # a colon.
+    if target.includes?(":")
+      fail_at(start_line, start_col, "processing instruction target '#{target}' cannot hold a colon")
       return Node.new_pi("", "")
     end
     return Node.new_pi(target, "") if consume("?>")
@@ -1084,7 +1873,50 @@ pub class Parser
       skip_whitespace
       attr_val = parse_attribute_value
       return elem if failed?
+      attr_val = Parser.collapse_spaces(attr_val) if tokenized?(name, attr_name)
+      raw_names << attr_name
+      raw_values << attr_val
+      raw_lines << attr_line
+      raw_cols << attr_col
+    end
+    if !closed
+      fail_at(start_line, start_col, "unclosed start tag <#{name}>")
+      return elem
+    end
+    # An attribute the internal subset gives a default and the element was
+    # not written with is taken as if it had been, at the element's `<`.
+    defaults = @attribute_defaults[name]?
+    if !defaults.nil?
+      d = 0
+      while d < defaults.size
+        if !seen.has_key?(defaults[d][0])
+          raw_names << defaults[d][0]
+          raw_values << defaults[d][1]
+          raw_lines << start_line
+          raw_cols << start_col
+        end
+        d = d + 1
+      end
+    end
+
+    # With the tag read, its namespace declarations, written or defaulted,
+    # are taken first, so a defaulted `xmlns:p` binds `p` as a written one
+    # does; one the tag does not allow is refused now, as an undeclared
+    # prefix is (and as the other library does).
+    i = 0
+    while i < raw_names.size
+      attr_name = raw_names[i]
+      attr_val = raw_values[i]
+      attr_line = raw_lines[i]
+      attr_col = raw_cols[i]
+      # The uris of the `xml` and `xmlns` prefixes are theirs alone: no other
+      # prefix and not the default namespace may be bound to either
+      # (Namespaces in XML, 3). Only the `xml` uri on a prefix was refused.
       if attr_name == "xmlns"
+        if attr_val == XML_NAMESPACE || attr_val == XMLNS_NAMESPACE
+          fail_at(attr_line, attr_col, "the default namespace cannot be bound to the uri of the '#{attr_val == XML_NAMESPACE ? "xml" : "xmlns"}' prefix")
+          return elem
+        end
         elem.namespaces << Namespace.new("", attr_val)
       elsif attr_name.starts_with?("xmlns:")
         ns_prefix = attr_name[6, attr_name.bytesize - 6]
@@ -1100,18 +1932,13 @@ pub class Parser
         elsif ns_prefix != "xml" && attr_val == XML_NAMESPACE
           fail_at(attr_line, attr_col, "namespace prefix '#{ns_prefix}' cannot be bound to the uri of the 'xml' prefix")
           return elem
+        elsif attr_val == XMLNS_NAMESPACE
+          fail_at(attr_line, attr_col, "namespace prefix '#{ns_prefix}' cannot be bound to the uri of the 'xmlns' prefix")
+          return elem
         end
         elem.namespaces << Namespace.new(ns_prefix, attr_val)
-      else
-        raw_names << attr_name
-        raw_values << attr_val
-        raw_lines << attr_line
-        raw_cols << attr_col
       end
-    end
-    if !closed
-      fail_at(start_line, start_col, "unclosed start tag <#{name}>")
-      return elem
+      i = i + 1
     end
 
     if !elem.prefix.empty? && elem.resolve_namespace_prefix(elem.prefix).nil?
@@ -1124,6 +1951,10 @@ pub class Parser
     expanded = Hash(String, String).new
     i = 0
     while i < raw_names.size
+      if raw_names[i] == "xmlns" || raw_names[i].starts_with?("xmlns:")
+        i = i + 1
+        next
+      end
       attr = Attribute.new(raw_names[i], raw_values[i])
       if !attr.prefix.empty?
         ns = elem.resolve_namespace_prefix(attr.prefix)
@@ -1175,13 +2006,13 @@ pub class Parser
           @depth = @depth - 1
           return elem
         elsif match?("<!--")
-          elem.add_child(parse_comment)
+          elem.append_parsed(parse_comment)
         elsif match?("<![CDATA[")
-          elem.add_child(parse_cdata)
+          elem.append_parsed(parse_cdata)
         elsif match?("<?")
-          elem.add_child(parse_pi)
+          elem.append_parsed(parse_pi)
         else
-          elem.add_child(parse_element(elem))
+          elem.append_parsed(parse_element(elem))
         end
         return elem if failed?
         run_start = @pos
@@ -1204,10 +2035,52 @@ pub class Parser
     elem
   end
 
+  # Whether the internal subset declares *attribute* of *element* with a
+  # type other than CDATA.
+  private def tokenized?(element : String, attribute : String) : Bool
+    return false if @attribute_tokenized.empty?
+    types = @attribute_tokenized[element]?
+    !types.nil? && types[attribute]? == true
+  end
+
+  # A value whose declared type is not CDATA, normalised further (XML 1.0,
+  # 3.3.3): the spaces at either end dropped and each run of them made one.
+  # Only U+0020 counts; a tab a character reference wrote stays. Values
+  # were kept as written: `x="  p   q  "` of an NMTOKENS `x` read as is.
+  protected def self.collapse_spaces(value : String) : String
+    ptr = value.to_unsafe
+    start = 0
+    stop = value.bytesize
+    while start < stop && ptr[start] == 32_u8
+      start = start + 1
+    end
+    while stop > start && ptr[stop - 1] == 32_u8
+      stop = stop - 1
+    end
+    kept = 0
+    i = start
+    while i < stop
+      kept = kept + 1 unless ptr[i] == 32_u8 && ptr[i - 1] == 32_u8
+      i = i + 1
+    end
+    return value if kept == value.bytesize
+    String.new(kept) do |buffer|
+      n = 0
+      i = start
+      while i < stop
+        if ptr[i] != 32_u8 || ptr[i - 1] != 32_u8
+          buffer[n] = ptr[i]
+          n = n + 1
+        end
+        i = i + 1
+      end
+    end
+  end
+
   private def flush_text(elem : Node, parts : Array(String)) : Nil
     return if parts.empty?
     text = parts.join("")
-    elem.add_child(Node.new_text(text)) unless text.empty?
+    elem.append_parsed(Node.new_text(text)) unless text.empty?
   end
 
   # A quoted value with references decoded and a literal tab or newline
@@ -1234,7 +2107,7 @@ pub class Parser
         return ""
       elsif b == 38_u8
         parts << slice_from(run_start)
-        parts << parse_reference(0)
+        parts << parse_reference(0, false, true)
         return "" if failed?
         run_start = @pos
       elsif b == 9_u8 || b == 10_u8
@@ -1280,8 +2153,9 @@ pub class Parser
 
   # At an `&`: the text the reference stands for. With *keep_names*, an
   # entity reference is checked for shape and answered as written (`&name;`),
-  # which is what an entity's own value keeps until it is used.
-  private def parse_reference(depth : Int32, keep_names : Bool = false) : String
+  # which is what an entity's own value keeps until it is used. With
+  # *in_attribute*, the reference stands in an attribute value.
+  private def parse_reference(depth : Int32, keep_names : Bool = false, in_attribute : Bool = false) : String
     ref_line = @line
     ref_col = @col
     ref_start = @pos
@@ -1311,11 +2185,17 @@ pub class Parser
       end
       return cp.unsafe_chr.to_s
     end
+    # `&a]b;` and `&0;` are no references: kept as written in an entity's
+    # value, they were accepted wherever that entity went unused.
+    if !Parser.name_shaped?(ref)
+      fail_at(ref_line, ref_col, "'&#{ref};' is not a reference: '#{ref}' is not a name")
+      return ""
+    end
     return slice_from(ref_start) if keep_names
-    expand_entity(ref, ref_line, ref_col, depth)
+    expand_entity(ref, ref_line, ref_col, depth, in_attribute)
   end
 
-  private def expand_entity(name : String, line : Int32, col : Int32, depth : Int32) : String
+  private def expand_entity(name : String, line : Int32, col : Int32, depth : Int32, in_attribute : Bool) : String
     return "<" if name == "lt"
     return ">" if name == "gt"
     return "&" if name == "amp"
@@ -1335,7 +2215,31 @@ pub class Parser
       fail_at(line, col, "entity expansion limit of #{@max_expansions} exceeded at &#{name};")
       return ""
     end
-    return value unless value.includes?("&")
+    # Counting expansions alone let one large entity used a thousand times
+    # make a thousand times the document: 1 MB of input read as 1 GB of text.
+    @expanded_bytes = @expanded_bytes + value.bytesize
+    if @expanded_bytes > @max_expanded_bytes
+      fail_at(line, col, "entity expansion past #{@max_expanded_bytes} bytes at &#{name};")
+      return ""
+    end
+    # The replacement text is read where the reference stands, and it was
+    # read as plain text everywhere. In an attribute value a `<` in it is an
+    # error (XML 1.0, "No < in Attribute Values") and its tabs and line ends
+    # are spaces (3.3.3); in content a `<` is markup, which is not supported,
+    # and `]]>` is refused as it is in text.
+    if value.includes?("<")
+      if in_attribute
+        fail_at(line, col, "entity &#{name}; holds a '<', which an attribute value cannot")
+      else
+        fail_at(line, col, "markup inside the value of entity '#{name}' is not supported")
+      end
+      return ""
+    end
+    if !in_attribute && value.includes?("]]>")
+      fail_at(line, col, "']]>' is not allowed in text, nor in the value of entity '#{name}'")
+      return ""
+    end
+    return (in_attribute ? Parser.attribute_spaces(value) : value) unless value.includes?("&")
 
     # The replacement text is read as content: a character reference is
     # decoded, an entity reference expanded a level deeper.
@@ -1346,7 +2250,8 @@ pub class Parser
     i = 0
     while i < len
       if ptr[i] == 38_u8
-        parts << value[run_start, i - run_start]
+        literal = value[run_start, i - run_start]
+        parts << (in_attribute ? Parser.attribute_spaces(literal) : literal)
         semi = i + 1
         while semi < len && ptr[semi] != 59_u8 && !reference_stop?(ptr[semi])
           semi = semi + 1
@@ -1370,7 +2275,7 @@ pub class Parser
           end
           parts << cp.unsafe_chr.to_s
         else
-          parts << expand_entity(ref, line, col, depth + 1)
+          parts << expand_entity(ref, line, col, depth + 1, in_attribute)
           return "" if failed?
         end
         i = semi + 1
@@ -1379,8 +2284,30 @@ pub class Parser
         i = i + 1
       end
     end
-    parts << value[run_start, len - run_start]
+    literal = value[run_start, len - run_start]
+    parts << (in_attribute ? Parser.attribute_spaces(literal) : literal)
     parts.join("")
+  end
+
+  # An entity's replacement text in an attribute value: a tab, newline or
+  # carriage return in it is a space, as one written in the value is. One
+  # that a character reference in the replacement text names is not.
+  protected def self.attribute_spaces(text : String) : String
+    ptr = text.to_unsafe
+    len = text.bytesize
+    i = 0
+    while i < len && ptr[i] != 9_u8 && ptr[i] != 10_u8 && ptr[i] != 13_u8
+      i = i + 1
+    end
+    return text if i == len
+    String.new(len) do |buffer|
+      buffer.copy_from(ptr, len)
+      while i < len
+        b = ptr[i]
+        buffer[i] = 32_u8 if b == 9_u8 || b == 10_u8 || b == 13_u8
+        i = i + 1
+      end
+    end
   end
 
   # -- names ---------------------------------------------------------------
@@ -1391,48 +2318,101 @@ pub class Parser
     if @pos >= @len
       fail("expected a name, found the end of the input")
     else
-      b = byte_at(@pos)
-      found = b >= 32_u8 && b < 127_u8 ? "'#{b.unsafe_chr}'" : "U+#{Parser.hex4(b.to_i32)}"
-      fail("expected a name, found #{found}")
+      fail("expected a name, found #{found_here}")
     end
     ""
   end
 
+  # The character at the cursor, for a sentence: `'x'`, or its code point
+  # (`U+00B7`) where it does not print as itself.
+  private def found_here : String
+    cp = code_point_at(@input.to_unsafe, @len, @pos)
+    cp = byte_at(@pos).to_i32 if cp < 0
+    cp >= 32 && cp < 127 ? "'#{cp.unsafe_chr}'" : "U+#{Parser.hex4(cp)}"
+  end
+
   # An element or attribute name is `local` or `prefix:local`, with neither
   # part empty (Namespaces in XML, productions [7] and [8]): a colon first,
-  # last, or twice is refused with the name's line and column.
+  # last, or twice is refused with the name's line and column, and so is a
+  # local part that does not start as a name does (`p:-a`, `p:1`), which was
+  # taken.
   private def qualified_name?(name : String, line : Int32, col : Int32) : Bool
     ptr = name.to_unsafe
     len = name.bytesize
     colons = 0
+    colon_at = 0
     i = 0
     while i < len
-      colons = colons + 1 if ptr[i] == 58_u8
+      if ptr[i] == 58_u8
+        colons = colons + 1
+        colon_at = i
+      end
       i = i + 1
     end
     return true if colons == 0
-    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8
+    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8 && Parser.name_start?(code_point_at(ptr, len, colon_at + 1))
       return true
     end
     fail_at(line, col, "'#{name}' is not a qualified name: a name is 'local' or 'prefix:local'")
     false
   end
 
-  # ASCII letters, `_` and `:` start a name; digits, `-` and `.` continue
-  # one; any byte of a non-ASCII character does both.
-  private def parse_name? : String?
-    return nil if @pos >= @len
-    b = byte_at(@pos)
-    is_start = (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || b == 95_u8 || b == 58_u8 || b >= 128_u8
-    return nil unless is_start
+  # XML 1.0 (fifth edition), production [4]: the characters that start a
+  # name, by code point. Any byte past 0x7F was taken as starting and
+  # continuing one, so `<a×b/>` read as an element named "a×b", a no-break
+  # space after a name became part of it, and `<·a/>` was an element.
+  protected def self.name_start?(cp : Int32) : Bool
+    return (cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp == 95 || cp == 58 if cp < 0xC0
+    return cp != 0xD7 && cp != 0xF7 if cp <= 0x2FF
+    return cp != 0x37E if cp >= 0x370 && cp <= 0x1FFF
+    (cp >= 0x200C && cp <= 0x200D) || (cp >= 0x2070 && cp <= 0x218F) || (cp >= 0x2C00 && cp <= 0x2FEF) ||
+      (cp >= 0x3001 && cp <= 0xD7FF) || (cp >= 0xF900 && cp <= 0xFDCF) || (cp >= 0xFDF0 && cp <= 0xFFFD) ||
+      (cp >= 0x10000 && cp <= 0xEFFFF)
+  end
+
+  # Production [4a]: digits, `-`, `.`, U+00B7, the combining marks
+  # U+0300-036F and U+203F-2040 continue a name without starting one.
+  protected def self.name_char?(cp : Int32) : Bool
+    return true if name_start?(cp)
+    (cp >= 48 && cp <= 57) || cp == 45 || cp == 46 || cp == 0xB7 || (cp >= 0x300 && cp <= 0x36F) || cp == 0x203F || cp == 0x2040
+  end
+
+  # Whether all of *text* is one name.
+  protected def self.name_shaped?(text : String) : Bool
+    ptr = text.to_unsafe
+    len = text.bytesize
+    return false if len == 0
+    i = 0
+    while i < len
+      cp = code_point_at(ptr, len, i)
+      return false unless i == 0 ? name_start?(cp) : name_char?(cp)
+      i = i + utf8_width(ptr[i])
+    end
+    true
+  end
+
+  # A name, or with *token* a name token (production [7]), which any
+  # character that continues a name may start.
+  private def parse_name?(token : Bool = false) : String?
+    ptr = @input.to_unsafe
     start = @pos
     while @pos < @len
-      b = byte_at(@pos)
-      is_char = (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8) ||
-                b == 95_u8 || b == 58_u8 || b == 45_u8 || b == 46_u8 || b >= 128_u8
-      break unless is_char
-      step
+      cp = code_point_at(ptr, @len, @pos)
+      break unless @pos == start && !token ? Parser.name_start?(cp) : Parser.name_char?(cp)
+      width = utf8_width(ptr[@pos])
+      while width > 0 && !failed?
+        step
+        width = width - 1
+      end
     end
+    # A byte that is not part of a character ends the name where it stands
+    # and is refused there for what it is, as it was when it was read as
+    # part of the name.
+    if @pos == @bad_at
+      step
+      return nil
+    end
+    return nil if failed? || @pos == start
     slice_from(start)
   end
 end
@@ -1455,19 +2435,47 @@ pub def xml_char?(cp : Int32) : Bool
   cp >= 0x10000 && cp <= 0x10FFFF
 end
 
+# The code point the UTF-8 character at byte *i* of *ptr* (*len* bytes)
+# encodes, or -1 where the bytes there are not one (an overlong form and
+# one past U+10FFFF included); the parser refuses those where its cursor
+# reaches them, and `name_shaped?` does not take them for a name.
+def code_point_at(ptr : Pointer(UInt8), len : Int32, i : Int32) : Int32
+  b = ptr[i]
+  return b.to_i32 if b < 0x80_u8
+  n = utf8_width(b)
+  return -1 if b < 0xC2_u8 || b >= 0xF5_u8 || i + n > len
+  cp = (b & (n == 2 ? 0x1F_u8 : (n == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+  k = 1
+  while k < n
+    c = ptr[i + k]
+    return -1 if (c & 0xC0_u8) != 0x80_u8
+    cp = (cp << 6) | (c & 0x3F_u8).to_i32
+    k = k + 1
+  end
+  return -1 if (n == 3 && cp < 0x800) || (n == 4 && (cp < 0x10000 || cp > 0x10FFFF))
+  cp
+end
+
+# How many bytes the UTF-8 character that starts with *b* takes.
+def utf8_width(b : UInt8) : Int32
+  b < 0x80_u8 ? 1 : (b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : 2))
+end
+
 # *text* as character data: `&`, `<`, `>` and `\r` become references,
-# every other byte is copied as it is.
-pub def escape(text : String) : String
-  escape_bytes(text, false)
+# every other byte is copied as it is. With *ascii*, a character past U+007F
+# becomes a decimal reference as well, for a document declared US-ASCII.
+pub def escape(text : String, ascii : Bool = false) : String
+  escape_bytes(text, false, ascii)
 end
 
 # *text* for inside a double-quoted attribute value: `"` and a literal tab
 # or newline become references as well, so the value reads back unchanged.
-pub def escape_attribute(text : String) : String
-  escape_bytes(text, true)
+# *ascii* is as for `escape`.
+pub def escape_attribute(text : String, ascii : Bool = false) : String
+  escape_bytes(text, true, ascii)
 end
 
-def escape_bytes(text : String, attribute : Bool) : String
+def escape_bytes(text : String, attribute : Bool, ascii : Bool) : String
   ptr = text.to_unsafe
   len = text.bytesize
   parts = [] of String
@@ -1475,6 +2483,21 @@ def escape_bytes(text : String, attribute : Bool) : String
   i = 0
   while i < len
     b = ptr[i]
+    if ascii && b >= 128_u8
+      width = b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : (b >= 0xC0_u8 ? 2 : 1))
+      width = len - i if i + width > len
+      cp = width == 1 ? b.to_i32 : (b & (width == 2 ? 0x1F_u8 : (width == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+      k = 1
+      while k < width
+        cp = (cp << 6) | (ptr[i + k] & 0x3F_u8).to_i32
+        k = k + 1
+      end
+      parts << text[run_start, i - run_start] if i > run_start
+      parts << "&##{cp};"
+      i = i + width
+      run_start = i
+      next
+    end
     replacement = if b == 38_u8
                     "&amp;"
                   elsif b == 60_u8
@@ -1610,4 +2633,1754 @@ def digit_value(b : UInt8, hex : Bool) : Int32
   return (b - 65_u8).to_i32 + 10 if b >= 65_u8 && b <= 70_u8
   return (b - 97_u8).to_i32 + 10 if b >= 97_u8 && b <= 102_u8
   -1
+end
+
+# -- XPath 1.0 ---------------------------------------------------------------
+
+# The seven kinds of node in XPath 1.0's data model (section 5): the
+# document is the root node, and a CDATA section is a text node.
+pub enum XPathKind
+  Root
+  Element
+  Attribute
+  Namespace
+  ProcessingInstruction
+  Comment
+  Text
+end
+
+# A node as an XPath expression sees it. A tree node is itself. An
+# attribute or a namespace node is not a `Node` here - an element keeps its
+# attributes and its declarations as values - so it is the element it
+# belongs to and which of them it is. Two are `==` when they are the same
+# node, which is what a node-set's union and `xpath_node` compare.
+pub struct XPathNode
+  # The node itself, or the element an attribute or namespace node is on.
+  getter node : Node
+  getter kind : XPathKind
+  # An attribute node's place in its element's `attributes`, a namespace
+  # node's in the element's namespaces in scope ordered by prefix, a text
+  # node's among its parent's children where it is known; else -1.
+  getter index : Int32
+  # A namespace node's prefix ("" for the default namespace) and uri.
+  getter namespace_prefix : String
+  getter namespace_target : String
+
+  def initialize(@node : Node, @kind : XPathKind, @index : Int32 = -1, @namespace_prefix : String = "", @namespace_target : String = "")
+  end
+
+  # *node* as the tree node it is: a document is the root node, a CDATA
+  # section a text node - with the text and CDATA after it, up to the next
+  # node of another kind, one text node (section 5.7). *place* is a text
+  # node's index among its parent's children, when the caller knows it.
+  def self.of(node : Node, place : Int32 = -1) : XPathNode
+    type = node.node_type
+    kind = if type.document?
+             XPathKind::Root
+           elsif type.element?
+             XPathKind::Element
+           elsif type.comment?
+             XPathKind::Comment
+           elsif type.pi?
+             XPathKind::ProcessingInstruction
+           else
+             XPathKind::Text
+           end
+    XPathNode.new(node, kind, kind == XPathKind::Text ? place : -1)
+  end
+
+  def ==(other : XPathNode) : Bool
+    return false unless @node == other.node && @kind == other.kind
+    @kind == XPathKind::Attribute || @kind == XPathKind::Namespace ? @index == other.index : true
+  end
+
+  # The attribute an attribute node is, or nil.
+  def attribute : Attribute?
+    @kind == XPathKind::Attribute ? @node.attributes[@index] : nil
+  end
+
+  # `name()`: an element's or attribute's name as written, a processing
+  # instruction's target, a namespace node's prefix; "" for the rest.
+  def name : String
+    case @kind
+    when XPathKind::Element, XPathKind::ProcessingInstruction then @node.name
+    when XPathKind::Attribute                                 then @node.attributes[@index].name
+    when XPathKind::Namespace                                 then @namespace_prefix
+    else                                                           ""
+    end
+  end
+
+  # `local-name()`: the name without its prefix.
+  def local_name : String
+    case @kind
+    when XPathKind::Element               then @node.local_name
+    when XPathKind::ProcessingInstruction then @node.name
+    when XPathKind::Attribute             then @node.attributes[@index].local_name
+    when XPathKind::Namespace             then @namespace_prefix
+    else                                       ""
+    end
+  end
+
+  # `namespace-uri()`: an element's or attribute's namespace, else "".
+  def namespace_uri : String
+    case @kind
+    when XPathKind::Element   then @node.namespace_uri
+    when XPathKind::Attribute then @node.attributes[@index].namespace_uri
+    else                           ""
+    end
+  end
+
+  # The string-value (XPath 1.0, section 5): every descendant text node's
+  # text joined for the root and an element, an attribute's value, a
+  # namespace node's uri, a text node's run of text and CDATA, and the
+  # text of the rest.
+  def text : String
+    case @kind
+    when XPathKind::Root, XPathKind::Element then @node.content
+    when XPathKind::Attribute                then @node.attributes[@index].value
+    when XPathKind::Namespace                then @namespace_target
+    when XPathKind::Text                     then XPathRun.run_text(@node, @index)
+    else                                          @node.text
+    end
+  end
+
+  # A tree node as XML; an attribute as `name="value"`; a namespace node as
+  # its declaration.
+  def to_s : String
+    case @kind
+    when XPathKind::Attribute then @node.attributes[@index].to_s
+    when XPathKind::Namespace then Namespace.new(@namespace_prefix, @namespace_target).to_s
+    else                           @node.to_xml
+    end
+  end
+end
+
+# What an XPath expression evaluates to: a node-set in document order, a
+# number, a string or a boolean.
+pub alias XPathValue = Array(XPathNode) | Float64 | String | Bool
+
+# An XPath 1.0 expression, compiled once and evaluated against any node.
+#
+# All of XPath 1.0 (W3C, 1999): the thirteen axes and the abbreviations
+# (`//`, `.`, `..`, `@`), name tests with prefixes, the node-type tests,
+# predicates by position and by value, filter expressions, `|`, the
+# operators with their conversions (section 3.4's comparisons of node-sets
+# included), variables, and the 27 functions of the core library.
+#
+# A prefix in a name test is looked up in *namespaces*, and when it is not
+# there, in the declarations in scope at the node the expression is
+# evaluated against; `xml` is always bound. An unprefixed name is in no
+# namespace even where a default namespace is declared, as section 2.3
+# says: `<feed xmlns="urn:a">` is `a:feed` with `{"a" => "urn:a"}`, never
+# `feed`.
+#
+# Where libxml2 - the engine under the other library's XPath - departs
+# from the recommendation, this follows the recommendation:
+#   * a number becomes the fewest digits that read back as it, written
+#     out in full: `string(1 div 3)` is `0.3333333333333333` and
+#     `string(-0.0000001)` is `-0.0000001`, where libxml2 writes fifteen
+#     digits and `-1e-07`;
+#   * a number in an expression is digits and one point: `1e0` is refused;
+#   * an attribute's following axis holds its element's descendants,
+#     which come after the attribute in document order;
+#   * `xmlns=""` leaves no namespace node for the default namespace;
+#   * an empty CDATA section is no text node (section 5.7);
+#   * `id()` splits its argument on white space wherever it is: libxml2
+#     finds nothing for `id(' a')`;
+#   * `.//.` (or `/.//.`) as the whole expression holds the context node
+#     itself; libxml2 2.9, which darwin carries, leaves it out.
+#
+# `parse` panics on a malformed expression with what was expected and the
+# column; `parse?` answers nil. Evaluation panics on what only a value can
+# show: a function given a number where it takes a node-set, a variable
+# not given, a prefix bound nowhere.
+pub class XPath
+  getter source : String
+  @expression : XPathExpression
+  # The prefixes the expression's name tests use, each resolved before
+  # it runs: a prefix bound nowhere is an error (section 2.3) even where no
+  # node reaches the step that names it.
+  @prefixes : Array(String)
+
+  def initialize(@source : String, @expression : XPathExpression, @prefixes : Array(String))
+  end
+
+  def self.parse(source : String) : XPath
+    parser = XPathParser.new(source)
+    expression = parser.parse
+    raise "XPath #{source.inspect}: #{parser.error}" if expression.nil?
+    XPath.new(source, expression, parser.prefixes)
+  end
+
+  def self.parse?(source : String) : XPath?
+    parser = XPathParser.new(source)
+    expression = parser.parse
+    expression.nil? ? nil : XPath.new(source, expression, parser.prefixes)
+  end
+
+  # The value at *node*, which is the context node, at position 1 of 1.
+  def evaluate(node : Node, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : XPathValue
+    evaluate(XPathNode.of(node), namespaces, variables)
+  end
+
+  def evaluate(node : XPathNode, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : XPathValue
+    XPathRun.new(node.node, namespaces, variables, @prefixes).evaluate(@expression, node, 1, 1)
+  end
+
+  # The node-set the expression is; panics when it is another type.
+  def nodes(node : Node | XPathNode, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : Array(XPathNode)
+    value = evaluate(node, namespaces, variables)
+    return value if value.is_a?(Array(XPathNode))
+    raise "XPath #{@source.inspect} is a #{XPath.type_name(value)}, not a node-set"
+  end
+
+  def string(node : Node | XPathNode, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : String
+    XPath.to_s(evaluate(node, namespaces, variables))
+  end
+
+  def number(node : Node | XPathNode, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : Float64
+    XPath.to_number(evaluate(node, namespaces, variables))
+  end
+
+  def bool(node : Node | XPathNode, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPathValue)? = nil) : Bool
+    XPath.to_bool(evaluate(node, namespaces, variables))
+  end
+
+  # `string()` of a value.
+  def self.to_s(value : XPathValue) : String
+    case value
+    when String  then value
+    when Float64 then number_string(value)
+    when Bool    then value ? "true" : "false"
+    else              value.empty? ? "" : value[0].text
+    end
+  end
+
+  # `number()` of a value.
+  def self.to_number(value : XPathValue) : Float64
+    case value
+    when Float64 then value
+    when String  then string_number(value)
+    when Bool    then value ? 1.0 : 0.0
+    else              string_number(value.empty? ? "" : value[0].text)
+    end
+  end
+
+  # `boolean()` of a value.
+  def self.to_bool(value : XPathValue) : Bool
+    case value
+    when Bool    then value
+    when Float64 then value != 0.0 && value == value
+    when String  then !value.empty?
+    else              !value.empty?
+    end
+  end
+
+  protected def self.type_name(value : XPathValue) : String
+    case value
+    when Bool    then "boolean"
+    when Float64 then "number"
+    when String  then "string"
+    else              "node-set"
+    end
+  end
+
+  # A string as a number (section 4.4): white space, an optional minus,
+  # digits with at most one point, white space; anything else is NaN.
+  def self.string_number(text : String) : Float64
+    ptr = text.to_unsafe
+    stop = text.bytesize
+    at = 0
+    while at < stop && XPath.space?(ptr[at])
+      at = at + 1
+    end
+    while stop > at && XPath.space?(ptr[stop - 1])
+      stop = stop - 1
+    end
+    negative = at < stop && ptr[at] == 45_u8
+    at = at + 1 if negative
+    whole = at
+    while at < stop && ptr[at] >= 48_u8 && ptr[at] <= 57_u8
+      at = at + 1
+    end
+    whole_digits = at - whole
+    fraction = at
+    fraction_digits = 0
+    if at < stop && ptr[at] == 46_u8
+      at = at + 1
+      fraction = at
+      while at < stop && ptr[at] >= 48_u8 && ptr[at] <= 57_u8
+        at = at + 1
+      end
+      fraction_digits = at - fraction
+    end
+    return 0.0 / 0.0 if at != stop || whole_digits + fraction_digits == 0
+    value = IyiFloatText.parse("#{whole_digits == 0 ? "0" : text[whole, whole_digits]}.#{fraction_digits == 0 ? "0" : text[fraction, fraction_digits]}")
+    negative ? value * -1.0 : value
+  end
+
+  # A number as a string (section 4.2): NaN, Infinity, an integer without a
+  # point, and otherwise the fewest digits that read back as the number,
+  # never with an exponent; both zeros are `0`.
+  def self.number_string(value : Float64) : String
+    return "NaN" if value != value
+    return "0" if value == 0.0
+    return value > 0.0 ? "Infinity" : "-Infinity" if value * 0.0 != 0.0
+    text = (value < 0.0 ? value * -1.0 : value).to_s
+    e_at = text.index('e')
+    mantissa = e_at.nil? ? text : text[0, e_at]
+    exponent = 0
+    if !e_at.nil?
+      at = e_at + 1
+      minus = text.to_unsafe[at] == 45_u8
+      at = at + 1 if minus || text.to_unsafe[at] == 43_u8
+      while at < text.bytesize
+        exponent = exponent * 10 + (text.to_unsafe[at] - 48_u8).to_i32
+        at = at + 1
+      end
+      exponent = 0 - exponent if minus
+    end
+    point = mantissa.index('.')
+    digits = point.nil? ? mantissa : mantissa[0, point] + mantissa[point + 1, mantissa.bytesize - point - 1]
+    place = (point.nil? ? mantissa.bytesize : point) + exponent
+    first = 0
+    while first < digits.bytesize - 1 && digits.to_unsafe[first] == 48_u8
+      first = first + 1
+      place = place - 1
+    end
+    last = digits.bytesize
+    while last > first + 1 && digits.to_unsafe[last - 1] == 48_u8
+      last = last - 1
+    end
+    digits = digits[first, last - first]
+    body = if place <= 0
+             "0." + "0" * (0 - place) + digits
+           elsif place >= digits.bytesize
+             digits + "0" * (place - digits.bytesize)
+           else
+             digits[0, place] + "." + digits[place, digits.bytesize - place]
+           end
+    value < 0.0 ? "-" + body : body
+  end
+
+  # XPath's white space: space, tab, carriage return, line feed.
+  protected def self.space?(b : UInt8) : Bool
+    b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8
+  end
+
+  # `round()` (section 4.4): the nearest integer, a tie to the one toward
+  # positive infinity, with the sign of a zero kept: `round(-0.5)` is -0.
+  def self.round(value : Float64) : Float64
+    return value if value != value || value * 0.0 != 0.0
+    return value * 0.0 if value >= -0.5 && value < 0.5
+    rounded = value.floor
+    value - rounded >= 0.5 ? rounded + 1.0 : rounded
+  end
+
+  # The minimum and maximum argument count of each core function; nil for
+  # a name that is not one.
+  protected def self.arity(name : String) : Tuple(Int32, Int32)?
+    case name
+    when "last", "position", "true", "false"                                         then {0, 0}
+    when "count", "id", "boolean", "not", "lang", "sum", "floor", "ceiling", "round" then {1, 1}
+    when "local-name", "namespace-uri", "name", "string", "string-length", "normalize-space", "number"
+      {0, 1}
+    when "concat"                                                         then {2, 0x7FFFFFFF}
+    when "starts-with", "contains", "substring-before", "substring-after" then {2, 2}
+    when "substring"                                                      then {2, 3}
+    when "translate"                                                      then {3, 3}
+    else                                                                       nil
+    end
+  end
+end
+
+enum XPathAxis
+  Ancestor
+  AncestorOrSelf
+  Attribute
+  Child
+  Descendant
+  DescendantOrSelf
+  Following
+  FollowingSibling
+  Namespace
+  Parent
+  Preceding
+  PrecedingSibling
+  Itself
+end
+
+enum XPathTest
+  Name
+  AnyName
+  PrefixAnyName
+  AnyNode
+  Text
+  Comment
+  Instruction
+  InstructionTarget
+end
+
+enum XPathOp
+  Or
+  And
+  Equal
+  NotEqual
+  Less
+  LessEqual
+  Greater
+  GreaterEqual
+  Add
+  Subtract
+  Multiply
+  Divide
+  Modulo
+  Negate
+  Union
+  Literal
+  Number
+  Variable
+  Call
+  Path
+end
+
+# One step of a location path: an axis, a node test, predicates.
+class XPathStep
+  getter axis : XPathAxis
+  getter test : XPathTest
+  getter prefix : String
+  getter local : String
+  getter predicates : Array(XPathExpression)
+
+  def initialize(@axis : XPathAxis, @test : XPathTest, @prefix : String = "", @local : String = "")
+    @predicates = [] of XPathExpression
+  end
+
+  # The kind a `*` or a name matches on this step's axis.
+  def principal : XPathKind
+    case @axis
+    when XPathAxis::Attribute then XPathKind::Attribute
+    when XPathAxis::Namespace then XPathKind::Namespace
+    else                           XPathKind::Element
+    end
+  end
+
+  def reverse? : Bool
+    @axis == XPathAxis::Ancestor || @axis == XPathAxis::AncestorOrSelf || @axis == XPathAxis::Preceding || @axis == XPathAxis::PrecedingSibling
+  end
+end
+
+# A parsed expression. One shape for every operator: a binary one has
+# `left` and `right`, a call its `args`, a literal or a variable its
+# `text`, a number its `number`. A path starts at `left` - a filter
+# expression's primary, filtered by `predicates` - or at the root when
+# `absolute`, or at the context node, and goes through `steps`.
+class XPathExpression
+  getter op : XPathOp
+  property left : XPathExpression? = nil
+  property right : XPathExpression? = nil
+  property args : Array(XPathExpression) = [] of XPathExpression
+  property text : String = ""
+  property number : Float64 = 0.0
+  property absolute : Bool = false
+  property steps : Array(XPathStep) = [] of XPathStep
+  property predicates : Array(XPathExpression) = [] of XPathExpression
+
+  def initialize(@op : XPathOp)
+  end
+
+  def self.binary(op : XPathOp, left : XPathExpression, right : XPathExpression) : XPathExpression
+    e = XPathExpression.new(op)
+    e.left = left
+    e.right = right
+    e
+  end
+
+  def lhs : XPathExpression
+    l = @left
+    raise "XPath: an operator without its operand" if l.nil?
+    l
+  end
+
+  def rhs : XPathExpression
+    r = @right
+    raise "XPath: an operator without its operand" if r.nil?
+    r
+  end
+end
+
+enum XPathTokenKind
+  Slash
+  DoubleSlash
+  LeftParen
+  RightParen
+  LeftBracket
+  RightBracket
+  Dot
+  DotDot
+  At
+  Comma
+  ColonColon
+  Pipe
+  Plus
+  Minus
+  Equal
+  NotEqual
+  Less
+  LessEqual
+  Greater
+  GreaterEqual
+  Star
+  Multiply
+  OperatorName
+  Literal
+  Number
+  Variable
+  FunctionName
+  AxisName
+  NameTest
+  End
+end
+
+struct XPathToken
+  getter kind : XPathTokenKind
+  getter text : String
+  getter column : Int32
+
+  def initialize(@kind : XPathTokenKind, @text : String, @column : Int32)
+  end
+end
+
+# The expression's tokens (section 3.7, with its rules for telling `*`
+# and `div` the operators from `*` and `div` the names), then a
+# recursive descent of the grammar. The first error is kept with its
+# column and stops the descent: every loop sees the end token.
+class XPathParser
+  getter error : String
+  # Every prefix a name test uses, once each.
+  getter prefixes : Array(String)
+  @source : String
+  @tokens : Array(XPathToken)
+  @at : Int32
+
+  def initialize(@source : String)
+    @tokens = [] of XPathToken
+    @at = 0
+    @error = ""
+    @prefixes = [] of String
+  end
+
+  def parse : XPathExpression?
+    lex
+    return nil unless @error.empty?
+    expression = parse_or
+    if @error.empty? && peek.kind != XPathTokenKind::End
+      fail("unexpected #{describe(peek)}", peek.column)
+    end
+    @error.empty? ? expression : nil
+  end
+
+  private def failed? : Bool
+    !@error.empty?
+  end
+
+  private def fail(message : String, column : Int32) : Nil
+    @error = "#{message} at column #{column}" if @error.empty?
+    @at = @tokens.size - 1 unless @tokens.empty?
+  end
+
+  private def peek : XPathToken
+    @tokens[@at]
+  end
+
+  private def advance : XPathToken
+    token = @tokens[@at]
+    @at = @at + 1 if @at < @tokens.size - 1
+    token
+  end
+
+  private def at?(kind : XPathTokenKind) : Bool
+    @tokens[@at].kind == kind
+  end
+
+  private def operator_name?(word : String) : Bool
+    at?(XPathTokenKind::OperatorName) && peek.text == word
+  end
+
+  private def expect(kind : XPathTokenKind, what : String) : Nil
+    if at?(kind)
+      advance
+    else
+      fail("expected #{what}, found #{describe(peek)}", peek.column)
+    end
+  end
+
+  private def describe(token : XPathToken) : String
+    token.kind == XPathTokenKind::End ? "the end" : "'#{token.text}'"
+  end
+
+  # -- tokens
+
+  private def lex : Nil
+    ptr = @source.to_unsafe
+    len = @source.bytesize
+    pos = 0
+    column = 1
+    while true
+      while pos < len && XPath.space?(ptr[pos])
+        pos = pos + 1
+        column = column + 1
+      end
+      if pos >= len
+        @tokens << XPathToken.new(XPathTokenKind::End, "", column)
+        return
+      end
+      start = pos
+      start_column = column
+      b = ptr[pos]
+      operator_next = operator_next?
+      kind = XPathTokenKind::End
+      if b == 40_u8
+        kind = XPathTokenKind::LeftParen
+        pos = pos + 1
+      elsif b == 41_u8
+        kind = XPathTokenKind::RightParen
+        pos = pos + 1
+      elsif b == 91_u8
+        kind = XPathTokenKind::LeftBracket
+        pos = pos + 1
+      elsif b == 93_u8
+        kind = XPathTokenKind::RightBracket
+        pos = pos + 1
+      elsif b == 44_u8
+        kind = XPathTokenKind::Comma
+        pos = pos + 1
+      elsif b == 64_u8
+        kind = XPathTokenKind::At
+        pos = pos + 1
+      elsif b == 124_u8
+        kind = XPathTokenKind::Pipe
+        pos = pos + 1
+      elsif b == 43_u8
+        kind = XPathTokenKind::Plus
+        pos = pos + 1
+      elsif b == 45_u8
+        kind = XPathTokenKind::Minus
+        pos = pos + 1
+      elsif b == 61_u8
+        kind = XPathTokenKind::Equal
+        pos = pos + 1
+      elsif b == 33_u8
+        if pos + 1 < len && ptr[pos + 1] == 61_u8
+          kind = XPathTokenKind::NotEqual
+          pos = pos + 2
+        else
+          fail("expected '!=', found '!'", column)
+          return
+        end
+      elsif b == 60_u8 || b == 62_u8
+        equal = pos + 1 < len && ptr[pos + 1] == 61_u8
+        kind = b == 60_u8 ? (equal ? XPathTokenKind::LessEqual : XPathTokenKind::Less) : (equal ? XPathTokenKind::GreaterEqual : XPathTokenKind::Greater)
+        pos = pos + (equal ? 2 : 1)
+      elsif b == 47_u8
+        double = pos + 1 < len && ptr[pos + 1] == 47_u8
+        kind = double ? XPathTokenKind::DoubleSlash : XPathTokenKind::Slash
+        pos = pos + (double ? 2 : 1)
+      elsif b == 58_u8
+        if pos + 1 < len && ptr[pos + 1] == 58_u8
+          kind = XPathTokenKind::ColonColon
+          pos = pos + 2
+        else
+          fail("unexpected ':' outside a name", column)
+          return
+        end
+      elsif b == 42_u8
+        kind = operator_next ? XPathTokenKind::Multiply : XPathTokenKind::Star
+        pos = pos + 1
+      elsif b == 34_u8 || b == 39_u8
+        close = pos + 1
+        while close < len && ptr[close] != b
+          close = close + 1
+        end
+        if close >= len
+          fail("unterminated string literal", column)
+          return
+        end
+        @tokens << XPathToken.new(XPathTokenKind::Literal, @source[pos + 1, close - pos - 1], column)
+        column = column + @source[pos, close + 1 - pos].size
+        pos = close + 1
+        next
+      elsif (b >= 48_u8 && b <= 57_u8) || (b == 46_u8 && pos + 1 < len && ptr[pos + 1] >= 48_u8 && ptr[pos + 1] <= 57_u8)
+        while pos < len && ptr[pos] >= 48_u8 && ptr[pos] <= 57_u8
+          pos = pos + 1
+        end
+        if pos < len && ptr[pos] == 46_u8
+          pos = pos + 1
+          while pos < len && ptr[pos] >= 48_u8 && ptr[pos] <= 57_u8
+            pos = pos + 1
+          end
+        end
+        kind = XPathTokenKind::Number
+      elsif b == 46_u8
+        double = pos + 1 < len && ptr[pos + 1] == 46_u8
+        kind = double ? XPathTokenKind::DotDot : XPathTokenKind::Dot
+        pos = pos + (double ? 2 : 1)
+      elsif b == 36_u8
+        stop = qname_end(pos + 1)
+        if stop == pos + 1
+          fail("expected a variable name after '$'", column)
+          return
+        end
+        @tokens << XPathToken.new(XPathTokenKind::Variable, @source[pos + 1, stop - pos - 1], column)
+        column = column + @source[pos, stop - pos].size
+        pos = stop
+        next
+      elsif ncname_start?(pos)
+        stop = ncname_end(pos)
+        if stop + 1 < len && ptr[stop] == 58_u8 && ptr[stop + 1] == 42_u8 && !operator_next
+          stop = stop + 2
+        else
+          stop = qname_end(pos)
+        end
+        word = @source[pos, stop - pos]
+        if operator_next
+          if word != "and" && word != "or" && word != "mod" && word != "div"
+            fail("expected an operator, found '#{word}'", column)
+            return
+          end
+          kind = XPathTokenKind::OperatorName
+        else
+          after = stop
+          while after < len && XPath.space?(ptr[after])
+            after = after + 1
+          end
+          if after < len && ptr[after] == 40_u8
+            kind = XPathTokenKind::FunctionName
+          elsif after + 1 < len && ptr[after] == 58_u8 && ptr[after + 1] == 58_u8
+            kind = XPathTokenKind::AxisName
+          else
+            kind = XPathTokenKind::NameTest
+          end
+        end
+        pos = stop
+      else
+        shown = @source[pos, utf8_width(b) <= len - pos ? utf8_width(b) : 1]
+        fail("unexpected '#{shown}'", column)
+        return
+      end
+      text = @source[start, pos - start]
+      @tokens << XPathToken.new(kind, text, start_column)
+      column = column + text.size
+    end
+  end
+
+  # Section 3.7: after a token that ends an operand, `*` multiplies and a
+  # name must be an operator.
+  private def operator_next? : Bool
+    return false if @tokens.empty?
+    case @tokens[@tokens.size - 1].kind
+    when XPathTokenKind::At, XPathTokenKind::ColonColon, XPathTokenKind::LeftParen, XPathTokenKind::LeftBracket,
+         XPathTokenKind::Comma, XPathTokenKind::OperatorName, XPathTokenKind::Multiply, XPathTokenKind::Slash,
+         XPathTokenKind::DoubleSlash, XPathTokenKind::Pipe, XPathTokenKind::Plus, XPathTokenKind::Minus,
+         XPathTokenKind::Equal, XPathTokenKind::NotEqual, XPathTokenKind::Less, XPathTokenKind::LessEqual,
+         XPathTokenKind::Greater, XPathTokenKind::GreaterEqual, XPathTokenKind::FunctionName, XPathTokenKind::AxisName
+      false
+    else
+      true
+    end
+  end
+
+  private def ncname_start?(pos : Int32) : Bool
+    cp = code_point_at(@source.to_unsafe, @source.bytesize, pos)
+    cp != 58 && Parser.name_start?(cp)
+  end
+
+  private def ncname_end(pos : Int32) : Int32
+    ptr = @source.to_unsafe
+    len = @source.bytesize
+    return pos unless pos < len && ncname_start?(pos)
+    while pos < len
+      cp = code_point_at(ptr, len, pos)
+      break if cp == 58 || !Parser.name_char?(cp)
+      pos = pos + utf8_width(ptr[pos])
+    end
+    pos
+  end
+
+  # An NCName, or two joined by one colon.
+  private def qname_end(pos : Int32) : Int32
+    stop = ncname_end(pos)
+    return stop if stop == pos
+    if stop + 1 < @source.bytesize && @source.to_unsafe[stop] == 58_u8
+      local = ncname_end(stop + 1)
+      return local if local > stop + 1
+    end
+    stop
+  end
+
+  # -- the grammar
+
+  private def parse_or : XPathExpression
+    left = parse_and
+    while operator_name?("or")
+      advance
+      left = XPathExpression.binary(XPathOp::Or, left, parse_and)
+    end
+    left
+  end
+
+  private def parse_and : XPathExpression
+    left = parse_equality
+    while operator_name?("and")
+      advance
+      left = XPathExpression.binary(XPathOp::And, left, parse_equality)
+    end
+    left
+  end
+
+  private def parse_equality : XPathExpression
+    left = parse_relational
+    while at?(XPathTokenKind::Equal) || at?(XPathTokenKind::NotEqual)
+      op = advance.kind == XPathTokenKind::Equal ? XPathOp::Equal : XPathOp::NotEqual
+      left = XPathExpression.binary(op, left, parse_relational)
+    end
+    left
+  end
+
+  private def parse_relational : XPathExpression
+    left = parse_additive
+    while true
+      op = case peek.kind
+           when XPathTokenKind::Less         then XPathOp::Less
+           when XPathTokenKind::LessEqual    then XPathOp::LessEqual
+           when XPathTokenKind::Greater      then XPathOp::Greater
+           when XPathTokenKind::GreaterEqual then XPathOp::GreaterEqual
+           else                                   nil
+           end
+      break if op.nil?
+      advance
+      left = XPathExpression.binary(op, left, parse_additive)
+    end
+    left
+  end
+
+  private def parse_additive : XPathExpression
+    left = parse_multiplicative
+    while at?(XPathTokenKind::Plus) || at?(XPathTokenKind::Minus)
+      op = advance.kind == XPathTokenKind::Plus ? XPathOp::Add : XPathOp::Subtract
+      left = XPathExpression.binary(op, left, parse_multiplicative)
+    end
+    left
+  end
+
+  private def parse_multiplicative : XPathExpression
+    left = parse_unary
+    while at?(XPathTokenKind::Multiply) || operator_name?("div") || operator_name?("mod")
+      token = advance
+      op = token.kind == XPathTokenKind::Multiply ? XPathOp::Multiply : (token.text == "div" ? XPathOp::Divide : XPathOp::Modulo)
+      left = XPathExpression.binary(op, left, parse_unary)
+    end
+    left
+  end
+
+  private def parse_unary : XPathExpression
+    if at?(XPathTokenKind::Minus)
+      advance
+      e = XPathExpression.new(XPathOp::Negate)
+      e.left = parse_unary
+      return e
+    end
+    parse_union
+  end
+
+  private def parse_union : XPathExpression
+    left = parse_path
+    while at?(XPathTokenKind::Pipe)
+      advance
+      left = XPathExpression.binary(XPathOp::Union, left, parse_path)
+    end
+    left
+  end
+
+  private def node_type?(token : XPathToken) : Bool
+    token.kind == XPathTokenKind::FunctionName &&
+      (token.text == "node" || token.text == "text" || token.text == "comment" || token.text == "processing-instruction")
+  end
+
+  private def step_start?(token : XPathToken) : Bool
+    case token.kind
+    when XPathTokenKind::NameTest, XPathTokenKind::Star, XPathTokenKind::AxisName, XPathTokenKind::At,
+         XPathTokenKind::Dot, XPathTokenKind::DotDot
+      true
+    else
+      node_type?(token)
+    end
+  end
+
+  private def parse_path : XPathExpression
+    token = peek
+    kind = token.kind
+    if kind == XPathTokenKind::Variable || kind == XPathTokenKind::LeftParen || kind == XPathTokenKind::Literal ||
+       kind == XPathTokenKind::Number || (kind == XPathTokenKind::FunctionName && !node_type?(token))
+      primary = parse_primary
+      predicates = parse_predicates
+      if at?(XPathTokenKind::Slash) || at?(XPathTokenKind::DoubleSlash)
+        path = XPathExpression.new(XPathOp::Path)
+        path.left = primary
+        path.predicates = predicates
+        parse_relative(path.steps, true)
+        return path
+      end
+      return primary if predicates.empty?
+      path = XPathExpression.new(XPathOp::Path)
+      path.left = primary
+      path.predicates = predicates
+      return path
+    end
+    path = XPathExpression.new(XPathOp::Path)
+    if kind == XPathTokenKind::Slash
+      advance
+      path.absolute = true
+      parse_relative(path.steps, false) if step_start?(peek)
+    elsif kind == XPathTokenKind::DoubleSlash
+      path.absolute = true
+      parse_relative(path.steps, true)
+    elsif step_start?(token)
+      parse_relative(path.steps, false)
+    else
+      fail("expected an expression, found #{describe(token)}", token.column)
+    end
+    path
+  end
+
+  # Steps joined by `/` and `//`; with *joined*, the first is after one.
+  private def parse_relative(steps : Array(XPathStep), joined : Bool) : Nil
+    steps << parse_step unless joined
+    while !failed? && (joined || at?(XPathTokenKind::Slash) || at?(XPathTokenKind::DoubleSlash))
+      joined = false
+      separator = advance
+      if separator.kind == XPathTokenKind::DoubleSlash
+        steps << XPathStep.new(XPathAxis::DescendantOrSelf, XPathTest::AnyNode)
+      end
+      if !step_start?(peek)
+        fail("expected a step after '#{separator.text}', found #{describe(peek)}", peek.column)
+        return
+      end
+      steps << parse_step
+    end
+  end
+
+  private def parse_step : XPathStep
+    token = advance
+    return XPathStep.new(XPathAxis::Itself, XPathTest::AnyNode) if token.kind == XPathTokenKind::Dot
+    return XPathStep.new(XPathAxis::Parent, XPathTest::AnyNode) if token.kind == XPathTokenKind::DotDot
+    axis = XPathAxis::Child
+    if token.kind == XPathTokenKind::At
+      axis = XPathAxis::Attribute
+      token = advance
+    elsif token.kind == XPathTokenKind::AxisName
+      named = XPathParser.axis_named(token.text)
+      if named.nil?
+        fail("unknown axis '#{token.text}'", token.column)
+        return XPathStep.new(axis, XPathTest::AnyNode)
+      end
+      axis = named
+      advance
+      token = advance
+    end
+    step = case token.kind
+           when XPathTokenKind::Star
+             XPathStep.new(axis, XPathTest::AnyName)
+           when XPathTokenKind::NameTest
+             colon = token.text.index(':')
+             if colon.nil?
+               XPathStep.new(axis, XPathTest::Name, "", token.text)
+             else
+               prefix = token.text[0, colon]
+               @prefixes << prefix unless @prefixes.includes?(prefix)
+               if token.text.ends_with?(":*")
+                 XPathStep.new(axis, XPathTest::PrefixAnyName, prefix)
+               else
+                 XPathStep.new(axis, XPathTest::Name, prefix, token.text[colon + 1, token.text.bytesize - colon - 1])
+               end
+             end
+           else
+             parse_node_type(axis, token)
+           end
+    step.predicates.concat(parse_predicates)
+    step
+  end
+
+  private def parse_node_type(axis : XPathAxis, token : XPathToken) : XPathStep
+    if !node_type?(token)
+      fail("expected a node test, found #{describe(token)}", token.column)
+      return XPathStep.new(axis, XPathTest::AnyNode)
+    end
+    expect(XPathTokenKind::LeftParen, "'('")
+    step = case token.text
+           when "node"    then XPathStep.new(axis, XPathTest::AnyNode)
+           when "text"    then XPathStep.new(axis, XPathTest::Text)
+           when "comment" then XPathStep.new(axis, XPathTest::Comment)
+           else
+             if at?(XPathTokenKind::Literal)
+               XPathStep.new(axis, XPathTest::InstructionTarget, "", advance.text)
+             else
+               XPathStep.new(axis, XPathTest::Instruction)
+             end
+           end
+    expect(XPathTokenKind::RightParen, "')' to close #{token.text}(")
+    step
+  end
+
+  protected def self.axis_named(name : String) : XPathAxis?
+    case name
+    when "ancestor"           then XPathAxis::Ancestor
+    when "ancestor-or-self"   then XPathAxis::AncestorOrSelf
+    when "attribute"          then XPathAxis::Attribute
+    when "child"              then XPathAxis::Child
+    when "descendant"         then XPathAxis::Descendant
+    when "descendant-or-self" then XPathAxis::DescendantOrSelf
+    when "following"          then XPathAxis::Following
+    when "following-sibling"  then XPathAxis::FollowingSibling
+    when "namespace"          then XPathAxis::Namespace
+    when "parent"             then XPathAxis::Parent
+    when "preceding"          then XPathAxis::Preceding
+    when "preceding-sibling"  then XPathAxis::PrecedingSibling
+    when "self"               then XPathAxis::Itself
+    else                           nil
+    end
+  end
+
+  private def parse_predicates : Array(XPathExpression)
+    predicates = [] of XPathExpression
+    while !failed? && at?(XPathTokenKind::LeftBracket)
+      advance
+      predicates << parse_or
+      expect(XPathTokenKind::RightBracket, "']'")
+    end
+    predicates
+  end
+
+  private def parse_primary : XPathExpression
+    token = advance
+    case token.kind
+    when XPathTokenKind::Variable
+      e = XPathExpression.new(XPathOp::Variable)
+      e.text = token.text
+      e
+    when XPathTokenKind::Literal
+      e = XPathExpression.new(XPathOp::Literal)
+      e.text = token.text
+      e
+    when XPathTokenKind::Number
+      e = XPathExpression.new(XPathOp::Number)
+      e.number = XPath.string_number(token.text)
+      e
+    when XPathTokenKind::LeftParen
+      e = parse_or
+      expect(XPathTokenKind::RightParen, "')'")
+      e
+    else
+      e = XPathExpression.new(XPathOp::Call)
+      e.text = token.text
+      expect(XPathTokenKind::LeftParen, "'('")
+      if !at?(XPathTokenKind::RightParen)
+        e.args << parse_or
+        while !failed? && at?(XPathTokenKind::Comma)
+          advance
+          e.args << parse_or
+        end
+      end
+      expect(XPathTokenKind::RightParen, "')' to close #{token.text}(")
+      return e if failed?
+      arity = XPath.arity(token.text)
+      if arity.nil?
+        fail("unknown function #{token.text}()", token.column)
+      elsif e.args.size < arity[0] || e.args.size > arity[1]
+        fail("#{token.text}() takes #{XPathParser.arity_words(arity)}, not #{e.args.size}", token.column)
+      end
+      e
+    end
+  end
+
+  protected def self.arity_words(arity : Tuple(Int32, Int32)) : String
+    return "at least #{arity[0]} arguments" if arity[1] == 0x7FFFFFFF
+    return "#{arity[0]} or #{arity[1]} arguments" if arity[0] != arity[1]
+    arity[0] == 1 ? "1 argument" : "#{arity[0]} arguments"
+  end
+end
+
+# One evaluation: the namespaces and variables given, where a prefix not
+# given is looked up, and each tree node's place in document order,
+# counted the first time an answer needs sorting.
+class XPathRun
+  @start : Node
+  @namespaces : Hash(String, String)?
+  @variables : Hash(String, XPathValue)?
+  @order : Hash(UInt64, Int32)
+  @counted : Int32
+  @ids : Hash(String, Node)? = nil
+  @resolved : Hash(String, String)
+
+  def initialize(@start : Node, @namespaces : Hash(String, String)?, @variables : Hash(String, XPathValue)?, prefixes : Array(String))
+    @order = Hash(UInt64, Int32).new
+    @counted = 0
+    @resolved = Hash(String, String).new
+    prefixes.each { |prefix| @resolved[prefix] = resolve(prefix) }
+  end
+
+  def evaluate(e : XPathExpression, node : XPathNode, position : Int32, size : Int32) : XPathValue
+    case e.op
+    when XPathOp::Or
+      XPath.to_bool(evaluate(e.lhs, node, position, size)) || XPath.to_bool(evaluate(e.rhs, node, position, size))
+    when XPathOp::And
+      XPath.to_bool(evaluate(e.lhs, node, position, size)) && XPath.to_bool(evaluate(e.rhs, node, position, size))
+    when XPathOp::Equal, XPathOp::NotEqual, XPathOp::Less, XPathOp::LessEqual, XPathOp::Greater, XPathOp::GreaterEqual
+      compare(e.op, evaluate(e.lhs, node, position, size), evaluate(e.rhs, node, position, size))
+    when XPathOp::Add, XPathOp::Subtract, XPathOp::Multiply, XPathOp::Divide, XPathOp::Modulo
+      a = XPath.to_number(evaluate(e.lhs, node, position, size))
+      b = XPath.to_number(evaluate(e.rhs, node, position, size))
+      arithmetic(e.op, a, b)
+    when XPathOp::Negate
+      XPath.to_number(evaluate(e.lhs, node, position, size)) * -1.0
+    when XPathOp::Union
+      a = node_set(evaluate(e.lhs, node, position, size), "'|'")
+      b = node_set(evaluate(e.rhs, node, position, size), "'|'")
+      in_order(a + b)
+    when XPathOp::Literal
+      e.text
+    when XPathOp::Number
+      e.number
+    when XPathOp::Variable
+      variables = @variables
+      value = variables.nil? ? nil : variables[e.text]?
+      raise "XPath: no value was given for the variable $#{e.text}" if value.nil?
+      value
+    when XPathOp::Call
+      call(e, node, position, size)
+    else
+      path(e, node, position, size)
+    end
+  end
+
+  private def arithmetic(op : XPathOp, a : Float64, b : Float64) : Float64
+    case op
+    when XPathOp::Add      then a + b
+    when XPathOp::Subtract then a - b
+    when XPathOp::Multiply then a * b
+    when XPathOp::Divide   then a / b
+    else                        XPathRun.truncated_remainder(a, b)
+    end
+  end
+
+  # `mod` (section 3.5): the remainder of a truncating division, its sign
+  # the dividend's, as C's `fmod` and Java's `%`, exactly: the divisor is
+  # taken away scaled by powers of two, each subtraction exact.
+  protected def self.truncated_remainder(a : Float64, b : Float64) : Float64
+    return 0.0 / 0.0 if a != a || b != b || b == 0.0 || a * 0.0 != 0.0
+    return a if b * 0.0 != 0.0
+    x = a < 0.0 ? a * -1.0 : a
+    y = b < 0.0 ? b * -1.0 : b
+    return a if x < y
+    while x >= y
+      scaled = y
+      while scaled <= x / 2.0
+        scaled = scaled * 2.0
+      end
+      x = x - scaled
+    end
+    a < 0.0 ? x * -1.0 : x
+  end
+
+  private def node_set(value : XPathValue, what : String) : Array(XPathNode)
+    return value if value.is_a?(Array(XPathNode))
+    raise "XPath: #{what} takes a node-set, not a #{XPath.type_name(value)}"
+  end
+
+  # -- comparisons (section 3.4)
+
+  private def compare(op : XPathOp, a : XPathValue, b : XPathValue) : Bool
+    if a.is_a?(Array(XPathNode))
+      if b.is_a?(Array(XPathNode))
+        if op == XPathOp::Equal || op == XPathOp::NotEqual
+          right = b.map { |n| n.text }
+          return a.any? { |n| t = n.text; right.any? { |r| op == XPathOp::Equal ? t == r : t != r } }
+        end
+        right_numbers = b.map { |n| XPath.string_number(n.text) }
+        return a.any? { |n| x = XPath.string_number(n.text); right_numbers.any? { |r| XPathRun.relate(op, x, r) } }
+      end
+      return compare_set(op, a, b, false)
+    end
+    return compare_set(op, b, a, true) if b.is_a?(Array(XPathNode))
+    compare_values(op, a, b)
+  end
+
+  # A node-set against a value: true when one node's string-value,
+  # converted as the value's type asks, compares so. *flipped* when the
+  # node-set is the right operand.
+  private def compare_set(op : XPathOp, set : Array(XPathNode), other : XPathValue, flipped : Bool) : Bool
+    if other.is_a?(Bool)
+      found = !set.empty?
+      return flipped ? compare_values(op, other, found) : compare_values(op, found, other)
+    end
+    if other.is_a?(String) && (op == XPathOp::Equal || op == XPathOp::NotEqual)
+      return set.any? { |n| op == XPathOp::Equal ? n.text == other : n.text != other }
+    end
+    target = XPath.to_number(other)
+    set.any? do |n|
+      x = XPath.string_number(n.text)
+      flipped ? XPathRun.relate(op, target, x) : XPathRun.relate(op, x, target)
+    end
+  end
+
+  private def compare_values(op : XPathOp, a : XPathValue, b : XPathValue) : Bool
+    if op == XPathOp::Equal || op == XPathOp::NotEqual
+      same = if a.is_a?(Bool) || b.is_a?(Bool)
+               XPath.to_bool(a) == XPath.to_bool(b)
+             elsif a.is_a?(Float64) || b.is_a?(Float64)
+               XPath.to_number(a) == XPath.to_number(b)
+             else
+               XPath.to_s(a) == XPath.to_s(b)
+             end
+      return op == XPathOp::Equal ? same : !same
+    end
+    XPathRun.relate(op, XPath.to_number(a), XPath.to_number(b))
+  end
+
+  # Two numbers by *op*; NaN compares false except by `!=`.
+  protected def self.relate(op : XPathOp, a : Float64, b : Float64) : Bool
+    case op
+    when XPathOp::Equal     then a == b
+    when XPathOp::NotEqual  then a != b
+    when XPathOp::Less      then a < b
+    when XPathOp::LessEqual then a <= b
+    when XPathOp::Greater   then a > b
+    else                         a >= b
+    end
+  end
+
+  # -- location paths
+
+  private def path(e : XPathExpression, node : XPathNode, position : Int32, size : Int32) : Array(XPathNode)
+    current = if !(primary = e.left).nil?
+                start = node_set(evaluate(primary, node, position, size), e.steps.empty? ? "a predicate" : "'/'")
+                filter(in_order(start), e.predicates)
+              elsif e.absolute
+                [XPathNode.of(XPathRun.top(node.node))]
+              else
+                [node]
+              end
+    e.steps.each do |step|
+      found = [] of XPathNode
+      current.each do |context|
+        candidates = axis(step, context)
+        found.concat(filter(candidates, step.predicates))
+      end
+      if current.size > 1
+        current = in_order(found)
+      elsif step.reverse?
+        current = found.reversed
+      else
+        current = found
+      end
+    end
+    current
+  end
+
+  # Each predicate in turn keeps the nodes it holds for, counting
+  # positions in the order *nodes* are in: the axis's, or document order.
+  private def filter(nodes : Array(XPathNode), predicates : Array(XPathExpression)) : Array(XPathNode)
+    predicates.each do |predicate|
+      kept = [] of XPathNode
+      total = nodes.size
+      nodes.each_with_index do |n, i|
+        value = evaluate(predicate, n, i + 1, total)
+        keep = value.is_a?(Float64) ? value == (i + 1).to_f64 : XPath.to_bool(value)
+        kept << n if keep
+      end
+      nodes = kept
+    end
+    nodes
+  end
+
+  # The node at the top of *node*'s tree: the document, or the outermost
+  # element of a tree not in one.
+  protected def self.top(node : Node) : Node
+    n = node
+    while !(p = n.parent).nil?
+      n = p
+    end
+    n
+  end
+
+  # Whether the child at *i* of *parent* is a node XPath sees. Text beside
+  # the root element is none (section 5.1); a run of adjacent text and
+  # CDATA is one text node, seen at its first member, and a run with no
+  # text in it none (section 5.7).
+  protected def self.visible?(parent : Node, i : Int32) : Bool
+    return true unless XPathRun.text_like?(parent.children[i])
+    return false if parent.node_type.document?
+    return false if i > 0 && XPathRun.text_like?(parent.children[i - 1])
+    j = i
+    while j < parent.children.size && XPathRun.text_like?(parent.children[j])
+      return true unless parent.children[j].text.empty?
+      j = j + 1
+    end
+    false
+  end
+
+  protected def self.text_like?(node : Node) : Bool
+    node.node_type.text? || node.node_type.cdata?
+  end
+
+  # The text of the run *node* starts, *place* its index among its
+  # parent's children or -1 to look it up.
+  protected def self.run_text(node : Node, place : Int32) : String
+    p = node.parent
+    return node.text if p.nil?
+    i = place >= 0 ? place : XPathRun.sibling_index(p, node)
+    return node.text if i < 0 || i + 1 >= p.children.size || !XPathRun.text_like?(p.children[i + 1])
+    parts = [] of String
+    while i < p.children.size && XPathRun.text_like?(p.children[i])
+      parts << p.children[i].text
+      i = i + 1
+    end
+    parts.join("")
+  end
+
+  # What *step*'s axis reaches from *context* and its node test keeps, in
+  # the axis's order: document order, or the reverse for a reverse axis.
+  private def axis(step : XPathStep, context : XPathNode) : Array(XPathNode)
+    into = [] of XPathNode
+    node = context.node
+    tree = context.kind != XPathKind::Attribute && context.kind != XPathKind::Namespace
+    case step.axis
+    when XPathAxis::Itself
+      keep(step, context, into)
+    when XPathAxis::Child
+      children(step, node, into) if tree
+    when XPathAxis::Descendant
+      descendants(step, node, into) if tree
+    when XPathAxis::DescendantOrSelf
+      keep(step, context, into)
+      descendants(step, node, into) if tree
+    when XPathAxis::Parent
+      if !tree
+        keep(step, XPathNode.of(node), into)
+      elsif !(p = node.parent).nil?
+        keep(step, XPathNode.of(p), into)
+      end
+    when XPathAxis::Ancestor, XPathAxis::AncestorOrSelf
+      keep(step, context, into) if step.axis == XPathAxis::AncestorOrSelf
+      n = tree ? node.parent : node
+      while !n.nil?
+        keep(step, XPathNode.of(n), into)
+        n = n.parent
+      end
+    when XPathAxis::FollowingSibling, XPathAxis::PrecedingSibling
+      p = node.parent
+      if tree && !p.nil?
+        at = XPathRun.sibling_index(p, node)
+        if step.axis == XPathAxis::FollowingSibling
+          i = at + 1
+          while i < p.children.size
+            keep(step, XPathNode.of(p.children[i], i), into) if XPathRun.visible?(p, i)
+            i = i + 1
+          end
+        else
+          i = at - 1
+          while i >= 0
+            keep(step, XPathNode.of(p.children[i], i), into) if XPathRun.visible?(p, i)
+            i = i - 1
+          end
+        end
+      end
+    when XPathAxis::Following
+      # An attribute or a namespace node comes before its element's
+      # children, which are then all after it.
+      descendants(step, node, into) unless tree
+      n = node
+      while !(p = n.parent).nil?
+        i = XPathRun.sibling_index(p, n) + 1
+        while i < p.children.size
+          if XPathRun.visible?(p, i)
+            keep(step, XPathNode.of(p.children[i], i), into)
+            descendants(step, p.children[i], into)
+          end
+          i = i + 1
+        end
+        n = p
+      end
+    when XPathAxis::Preceding
+      n = node
+      while !(p = n.parent).nil?
+        i = XPathRun.sibling_index(p, n) - 1
+        while i >= 0
+          reversed_subtree(step, p.children[i], i, into) if XPathRun.visible?(p, i)
+          i = i - 1
+        end
+        n = p
+      end
+    when XPathAxis::Attribute
+      if context.kind == XPathKind::Element
+        i = 0
+        while i < node.attributes.size
+          keep(step, XPathNode.new(node, XPathKind::Attribute, i), into)
+          i = i + 1
+        end
+      end
+    when XPathAxis::Namespace
+      if context.kind == XPathKind::Element
+        scope = XPathRun.in_scope(node)
+        i = 0
+        while i < scope.size
+          keep(step, XPathNode.new(node, XPathKind::Namespace, i, scope[i].prefix, scope[i].uri), into)
+          i = i + 1
+        end
+      end
+    end
+    into
+  end
+
+  protected def self.sibling_index(parent : Node, child : Node) : Int32
+    i = 0
+    while i < parent.children.size
+      return i if parent.children[i] == child
+      i = i + 1
+    end
+    -1
+  end
+
+  private def children(step : XPathStep, node : Node, into : Array(XPathNode)) : Nil
+    i = 0
+    while i < node.children.size
+      keep(step, XPathNode.of(node.children[i], i), into) if XPathRun.visible?(node, i)
+      i = i + 1
+    end
+  end
+
+  private def descendants(step : XPathStep, node : Node, into : Array(XPathNode)) : Nil
+    i = 0
+    while i < node.children.size
+      if XPathRun.visible?(node, i)
+        keep(step, XPathNode.of(node.children[i], i), into)
+        descendants(step, node.children[i], into)
+      end
+      i = i + 1
+    end
+  end
+
+  # *node*'s subtree in reverse document order: its last child's subtree
+  # reversed first, and itself last. *place* is its index in its parent.
+  private def reversed_subtree(step : XPathStep, node : Node, place : Int32, into : Array(XPathNode)) : Nil
+    i = node.children.size - 1
+    while i >= 0
+      reversed_subtree(step, node.children[i], i, into) if XPathRun.visible?(node, i)
+      i = i - 1
+    end
+    keep(step, XPathNode.of(node, place), into)
+  end
+
+  # The namespaces in scope at *element*, the nearest declaration of each
+  # prefix, `xml` always, a default undeclared by `xmlns=""` not; ordered
+  # by prefix, which is the document order this module gives them.
+  protected def self.in_scope(element : Node) : Array(Namespace)
+    seen = Hash(String, String).new
+    n = element
+    while !n.nil? && n.node_type.element?
+      n.namespaces.each do |ns|
+        seen[ns.prefix] = ns.uri unless seen.has_key?(ns.prefix)
+      end
+      n = n.parent
+    end
+    seen["xml"] = XML_NAMESPACE unless seen.has_key?("xml")
+    scope = [] of Namespace
+    seen.each do |prefix, uri|
+      scope << Namespace.new(prefix, uri) unless uri.empty?
+    end
+    scope.sorted_by { |ns| ns.prefix }
+  end
+
+  private def keep(step : XPathStep, n : XPathNode, into : Array(XPathNode)) : Nil
+    into << n if test?(step, n)
+  end
+
+  private def test?(step : XPathStep, n : XPathNode) : Bool
+    case step.test
+    when XPathTest::AnyNode     then true
+    when XPathTest::Text        then n.kind == XPathKind::Text
+    when XPathTest::Comment     then n.kind == XPathKind::Comment
+    when XPathTest::Instruction then n.kind == XPathKind::ProcessingInstruction
+    when XPathTest::InstructionTarget
+      n.kind == XPathKind::ProcessingInstruction && n.node.name == step.local
+    when XPathTest::AnyName
+      n.kind == step.principal
+    when XPathTest::PrefixAnyName
+      n.kind == step.principal && n.namespace_uri == @resolved[step.prefix]
+    else
+      n.kind == step.principal && n.local_name == step.local &&
+        n.namespace_uri == (step.prefix.empty? ? "" : @resolved[step.prefix])
+    end
+  end
+
+  # The uri *prefix* stands for: as given, else as declared where the
+  # evaluation started.
+  private def resolve(prefix : String) : String
+    given = @namespaces
+    if !given.nil?
+      uri = given[prefix]?
+      return uri unless uri.nil?
+    end
+    from = @start.node_type.document? ? @start.first_element_child : @start
+    ns = from.nil? ? (prefix == "xml" ? Namespace.new("xml", XML_NAMESPACE) : nil) : from.resolve_namespace_prefix(prefix)
+    raise "XPath: the prefix '#{prefix}' is bound to no namespace: give it in namespaces" if ns.nil?
+    ns.uri
+  end
+
+  # -- document order
+
+  # *nodes* in document order, each once. Every tree node is numbered the
+  # first time one of its tree is sorted; an attribute or namespace node
+  # sorts after its element and before the element's children, namespace
+  # nodes first.
+  private def in_order(nodes : Array(XPathNode)) : Array(XPathNode)
+    return nodes if nodes.size < 2
+    sorted = nodes.sorted_by { |n| order_key(n) }
+    into = [] of XPathNode
+    last = -1_i64
+    sorted.each do |n|
+      key = order_key(n)
+      into << n if key != last
+      last = key
+    end
+    into
+  end
+
+  private def order_key(n : XPathNode) : Int64
+    place = @order[n.node.object_id]?
+    if place.nil?
+      number(XPathRun.top(n.node))
+      place = @order[n.node.object_id]
+    end
+    sub = case n.kind
+          when XPathKind::Namespace then 1_i64 + n.index
+          when XPathKind::Attribute then 0x40000000_i64 + n.index
+          else                           0_i64
+          end
+    (place.to_i64 << 32) | sub
+  end
+
+  private def number(node : Node) : Nil
+    @order[node.object_id] = @counted
+    @counted = @counted + 1
+    node.children.each { |child| number(child) }
+  end
+
+  # -- the core function library (section 4)
+
+  private def call(e : XPathExpression, node : XPathNode, position : Int32, size : Int32) : XPathValue
+    args = e.args
+    name = e.text
+    case name
+    when "last"     then size.to_f64
+    when "position" then position.to_f64
+    when "count"    then node_set(evaluate(args[0], node, position, size), "count()").size.to_f64
+    when "id"       then id(evaluate(args[0], node, position, size), node)
+    when "local-name", "namespace-uri", "name"
+      target = node
+      if args.size == 1
+        set = in_order(node_set(evaluate(args[0], node, position, size), "#{name}()"))
+        return "" if set.empty?
+        target = set[0]
+      end
+      name == "name" ? target.name : (name == "local-name" ? target.local_name : target.namespace_uri)
+    when "string"
+      args.empty? ? node.text : XPath.to_s(first_of(evaluate(args[0], node, position, size)))
+    when "concat"
+      args.map { |a| XPath.to_s(first_of(evaluate(a, node, position, size))) }.join("")
+    when "starts-with", "contains", "substring-before", "substring-after"
+      s = XPath.to_s(first_of(evaluate(args[0], node, position, size)))
+      t = XPath.to_s(first_of(evaluate(args[1], node, position, size)))
+      return s.starts_with?(t) if name == "starts-with"
+      at = s.byte_index(t)
+      return !at.nil? if name == "contains"
+      return "" if at.nil?
+      name == "substring-before" ? s[0, at] : s[at + t.bytesize, s.bytesize - at - t.bytesize]
+    when "substring"
+      s = XPath.to_s(first_of(evaluate(args[0], node, position, size)))
+      start = XPath.round(XPath.to_number(first_of(evaluate(args[1], node, position, size))))
+      stop = args.size == 3 ? start + XPath.round(XPath.to_number(first_of(evaluate(args[2], node, position, size)))) : 1.0 / 0.0
+      XPathRun.substring(s, start, stop)
+    when "string-length"
+      (args.empty? ? node.text : XPath.to_s(first_of(evaluate(args[0], node, position, size)))).size.to_f64
+    when "normalize-space"
+      XPathRun.normalize_space(args.empty? ? node.text : XPath.to_s(first_of(evaluate(args[0], node, position, size))))
+    when "translate"
+      XPathRun.translate(XPath.to_s(first_of(evaluate(args[0], node, position, size))),
+        XPath.to_s(first_of(evaluate(args[1], node, position, size))),
+        XPath.to_s(first_of(evaluate(args[2], node, position, size))))
+    when "boolean" then XPath.to_bool(evaluate(args[0], node, position, size))
+    when "not"     then !XPath.to_bool(evaluate(args[0], node, position, size))
+    when "true"    then true
+    when "false"   then false
+    when "lang"    then lang?(XPath.to_s(first_of(evaluate(args[0], node, position, size))), node)
+    when "number"
+      args.empty? ? XPath.string_number(node.text) : XPath.to_number(first_of(evaluate(args[0], node, position, size)))
+    when "sum"
+      total = 0.0
+      node_set(evaluate(args[0], node, position, size), "sum()").each { |n| total = total + XPath.string_number(n.text) }
+      total
+    when "floor"   then XPath.to_number(first_of(evaluate(args[0], node, position, size))).floor
+    when "ceiling" then XPath.to_number(first_of(evaluate(args[0], node, position, size))).ceil
+    else                XPath.round(XPath.to_number(first_of(evaluate(args[0], node, position, size))))
+    end
+  end
+
+  # A node-set argument converted by a function is its first node in
+  # document order, which a variable's node-set need not be in.
+  private def first_of(value : XPathValue) : XPathValue
+    return value unless value.is_a?(Array(XPathNode)) && value.size > 1
+    in_order(value)
+  end
+
+  # Characters at positions *start* <= p < *stop*, counted from 1, as
+  # section 4.2 compares them: NaN anywhere keeps nothing.
+  protected def self.substring(s : String, start : Float64, stop : Float64) : String
+    ptr = s.to_unsafe
+    len = s.bytesize
+    first = -1
+    last = -1
+    at = 0
+    p = 1
+    while at < len
+      place = p.to_f64
+      if place >= start && place < stop
+        first = at if first < 0
+        last = at + utf8_width(ptr[at])
+      end
+      at = at + utf8_width(ptr[at])
+      p = p + 1
+    end
+    first < 0 ? "" : s[first, last - first]
+  end
+
+  protected def self.normalize_space(s : String) : String
+    words = [] of String
+    ptr = s.to_unsafe
+    at = 0
+    while at < s.bytesize
+      while at < s.bytesize && XPath.space?(ptr[at])
+        at = at + 1
+      end
+      start = at
+      while at < s.bytesize && !XPath.space?(ptr[at])
+        at = at + 1
+      end
+      words << s[start, at - start] if at > start
+    end
+    words.join(" ")
+  end
+
+  # Each character of *s* found in *from* becomes the character at the
+  # same place in *to*, or goes where *to* is shorter; the first place a
+  # character has in *from* is the one that counts.
+  protected def self.translate(s : String, from : String, to : String) : String
+    replacement = Hash(Int32, String).new
+    to_chars = XPathRun.characters(to)
+    from_chars = XPathRun.characters(from)
+    from_chars.each_with_index do |c, i|
+      cp = code_point_at(c.to_unsafe, c.bytesize, 0)
+      replacement[cp] = i < to_chars.size ? to_chars[i] : "" unless replacement.has_key?(cp)
+    end
+    parts = [] of String
+    XPathRun.characters(s).each do |c|
+      found = replacement[code_point_at(c.to_unsafe, c.bytesize, 0)]?
+      parts << (found.nil? ? c : found)
+    end
+    parts.join("")
+  end
+
+  protected def self.characters(s : String) : Array(String)
+    into = [] of String
+    at = 0
+    while at < s.bytesize
+      width = utf8_width(s.to_unsafe[at])
+      width = s.bytesize - at if at + width > s.bytesize
+      into << s[at, width]
+      at = at + width
+    end
+    into
+  end
+
+  # `lang()` (section 4.3): the nearest `xml:lang` on the context node or
+  # an ancestor is *wanted*, or starts with it and a `-`, in any case.
+  private def lang?(wanted : String, context : XPathNode) : Bool
+    # An attribute's or a namespace node's language is its element's.
+    current = context.node
+    while !current.nil?
+      if current.node_type.element?
+        current.attributes.each do |a|
+          if a.local_name == "lang" && a.namespace_uri == XML_NAMESPACE
+            have = XPathRun.ascii_lower(a.value)
+            want = XPathRun.ascii_lower(wanted)
+            return have == want || (have.starts_with?(want) && have.bytesize > want.bytesize && have.to_unsafe[want.bytesize] == 45_u8)
+          end
+        end
+      end
+      current = current.parent
+    end
+    false
+  end
+
+  protected def self.ascii_lower(s : String) : String
+    String.new(s.bytesize) do |buffer|
+      i = 0
+      while i < s.bytesize
+        b = s.to_unsafe[i]
+        buffer[i] = b >= 65_u8 && b <= 90_u8 ? b + 32_u8 : b
+        i = i + 1
+      end
+    end
+  end
+
+  # `id()` (section 4.1): the elements whose ID is one of the words of the
+  # argument - each node's string-value for a node-set. An ID is an
+  # `xml:id` attribute or one the document's DTD declares of type ID; the
+  # first element to carry a value has it.
+  private def id(value : XPathValue, context : XPathNode) : Array(XPathNode)
+    words = [] of String
+    if value.is_a?(Array(XPathNode))
+      value.each { |n| XPathRun.normalize_space(n.text).split(' ').each { |w| words << w unless w.empty? } }
+    else
+      XPathRun.normalize_space(XPath.to_s(value)).split(' ').each { |w| words << w unless w.empty? }
+    end
+    ids = @ids
+    if ids.nil?
+      ids = Hash(String, Node).new
+      top = XPathRun.top(context.node)
+      declared = top.is_a?(Document) ? top.id_attributes : Hash(String, Array(String)).new
+      collect_ids(top, declared, ids)
+      @ids = ids
+    end
+    found = [] of XPathNode
+    words.each do |w|
+      element = ids[w]?
+      found << XPathNode.of(element) unless element.nil?
+    end
+    in_order(found)
+  end
+
+  private def collect_ids(node : Node, declared : Hash(String, Array(String)), ids : Hash(String, Node)) : Nil
+    if node.node_type.element?
+      names = declared[node.name]?
+      node.attributes.each do |a|
+        is_id = (a.local_name == "id" && a.namespace_uri == XML_NAMESPACE) || (!names.nil? && names.includes?(a.name))
+        if is_id
+          value = XPathRun.normalize_space(a.value)
+          ids[value] = node unless ids.has_key?(value)
+        end
+      end
+    end
+    node.children.each { |child| collect_ids(child, declared, ids) }
+  end
 end

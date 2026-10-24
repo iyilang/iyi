@@ -1,0 +1,52 @@
+# Weak references: a `WeakRef(T)` names an object without keeping it alive.
+#
+#     cache = WeakRef.new(expensive)
+#     if value = cache.value
+#       use(value)          # still there: something else holds it
+#     end
+#
+# `value` is the object while anything else holds it, and nil from the
+# first collection that finds nothing does - so a cache, an observer list or
+# an interning table can point at what it does not own. The reference is
+# never kept alive by being read: a value read is an ordinary reference
+# from then on, and the object lives as long as that does.
+#
+# The mechanism is the collector's (`IyiWeak` in the prelude): the target's
+# address sits in eight bytes of memory the collector does not scan, and
+# the end of every mark zeroes it when the mark left the target unreached,
+# before the sweep can reuse the memory. Under `-Dgc_boehm` libgc does the
+# same through a disappearing link; under `-Dgc_none` nothing is collected,
+# so nothing is ever cleared. An object the collector did not allocate - a
+# string literal - is never cleared either, because nothing frees it.
+#
+# `T` is a class: a struct or a number is copied rather than referred to,
+# and has no lifetime of its own to watch, so `WeakRef(Int32)` is refused
+# when it is compiled.
+
+module std/weak_ref
+
+pub class WeakRef(T)
+  @cell : Pointer(UInt64)
+
+  def initialize(target : T)
+    {% unless T < Reference %}
+      {% raise "WeakRef(#{T}): a weak reference watches an object's lifetime, and #{T} is copied, not referred to: use a class" %}
+    {% end %}
+    @cell = IyiWeak.cell(target.object_id)
+  end
+
+  # The target, or nil once a collection has found nothing else holding it.
+  def value : T?
+    address = @cell.value
+    return nil if address == 0_u64
+    Pointer(Void).new(address).as(T)
+  end
+
+  def to_s : String
+    value.nil? ? "#<WeakRef(#{T}) cleared>" : "#<WeakRef(#{T})>"
+  end
+
+  def inspect : String
+    to_s
+  end
+end

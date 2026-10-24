@@ -95,7 +95,7 @@ class Iyi::Loader
 
     return false unless File.file?(path)
 
-    System::LibraryArchive.imported_dlls(path).all? do |dll|
+    Crystal::System::LibraryArchive.imported_dlls(path).all? do |dll|
       load_dll?(dll)
     end
   end
@@ -132,7 +132,7 @@ class Iyi::Loader
   end
 
   private def open_library(path : String)
-    LibC.LoadLibraryExW(System.to_wstr(path), nil, 0)
+    LibC.LoadLibraryExW(Crystal::System.to_wstr(path), nil, 0)
   end
 
   def load_current_program_handle

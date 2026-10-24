@@ -301,9 +301,19 @@ class Dir
     path = Path.new path
 
     path.each_parent do |parent|
-      mkdir(parent, mode) unless Dir.exists?(parent)
+      mkdir_absent(parent, mode)
     end
+    mkdir_absent(path, mode)
+  end
+
+  # iyi: a directory another process made between the look and the make is
+  # made, which is all `mkdir_p` promises. Eight builds starting at once
+  # raced to make the cache's directories, and the losers failed "Cannot
+  # create a file when that file already exists".
+  private def self.mkdir_absent(path : Path, mode : Int32) : Nil
     mkdir(path, mode) unless Dir.exists?(path)
+  rescue ex : File::Error
+    raise ex unless Dir.exists?(path)
   end
 
   # Removes the directory at *path*. Raises `File::Error` on failure.

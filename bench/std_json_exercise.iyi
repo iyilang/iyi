@@ -13,6 +13,8 @@
 #     object's key order does not matter), `dig` and `dig?` walk paths.
 #   * Every prelude scalar, arrays, hashes and a `ToJSON` type write through
 #     `JSON.to_json`; `from_json` reads them back and refuses what does not fit.
+#   * A union is written as the member it holds, alone or in an array, a
+#     hash or a derived type's field, and read by the kind of value there.
 #   * Every malformed input is refused with its exact sentence and location.
 #   * A corpus, re-emitted compact and pretty, for the shell gate to compare
 #     against another implementation byte for byte.
@@ -22,8 +24,8 @@
 
 module bench/std_json_exercise
 
-import std/json
-using std/json::{JSON, Any, Parser, PullParser, Builder, ToJSON}
+import std/json::{JSON, Any, Parser, PullParser, Builder, ToJSON, serializable}
+import std/gc::{GC}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
@@ -85,6 +87,11 @@ assert_true(JSON.parse("-9223372036854775808").as_i64 == -9223372036854775808_i6
 assert_true(JSON.parse("9223372036854775808").kind == "float", "one past Int64 max is a float")
 assert_true(JSON.parse("0.1").as_f == 0.1 && JSON.parse("1.7976931348623157e308").as_f == 1.7976931348623157e308, "doubles read exactly")
 assert_true(JSON.parse?("[1, 2]").as(Any).size == 2, "parse? answers the value for a document")
+# A seven-digit exponent is read whole: the zeros before the 1 bring it
+# back into range, and a reader that stopped at 100000 answered 0.0.
+long_zeros = "0" * 999999
+assert_true(JSON.parse("0." + long_zeros + "1e1000000").as_f == 1.0, "a seven-digit exponent brought back by a million zeros")
+assert_true(JSON.parse("1" + long_zeros + "0e-1000000").as_f == 1.0, "a seven-digit negative exponent")
 puts "  name, items, nested, unicode: every value as the header promises"
 
 # ---------------------------------------------------------------------------
@@ -103,15 +110,36 @@ assert_true(again.hash == doc.hash, "and hashes the same")
 assert_text(compact, again.to_json, "and writes the same text")
 assert_text(compact, doc.to_s, "to_s is to_json")
 assert_text(compact, doc.inspect, "inspect is to_json")
+# A string is itself and null nothing, as `YAML::Any#to_s` and the other
+# library answer them: a string was its JSON text, quotes and all, so an
+# interpolated name printed `hello "Ada"`.
+assert_text("hello Ada", "hello #{JSON.parse("{\"name\": \"Ada\"}")["name"]}", "a string interpolates as itself")
+assert_text("", JSON.parse("null").to_s, "null is nothing as text")
+assert_text("2.5 true", "#{JSON.parse("2.5")} #{JSON.parse("true")}", "a number and a boolean as their text")
+puts "  to_s: a string as itself, null as nothing, anything else as its JSON text"
 pretty = JSON.parse("{\"a\":[1,{\"b\":null},[]],\"c\":{}}").to_pretty_json
 assert_text("{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    },\n    []\n  ],\n  \"c\": {}\n}", pretty, "pretty text")
 assert_text("[\n\t1,\n\t[\n\t\t2\n\t]\n]", JSON.parse("[1,[2]]").to_pretty_json("\t"), "pretty with a tab")
 assert_text("[\"\\u00e9\\ud83d\\ude00\\u20ac\"]", JSON.parse("[\"\u00e9\u{1F600}\u20ac\"]").to_ascii_json, "ascii-only escapes")
 assert_text("[\"\\ufffd\\ufffd\",\"a\\ufffd\",\"\\ufffd\\u00e9\\ufffd\\ufffd\\ud83d\\ude00\"]", Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any).to_ascii_json, "ascii-only writes bytes that are not a code point as \\ufffd, one per ill-formed subpart")
+# And `to_json` writes them as U+FFFD too: written through, `"a\xffb"`
+# was a document that is not UTF-8, which this reader refused ("invalid
+# UTF-8 byte 255 in string at line 1, column 3"). Both writers write one
+# value.
+not_utf8 = Any.new([Any.new("a\xffb"), Any.new("\xf0\x9f\x80\xe9")] of Any)
+assert_text("[\"a\u{FFFD}b\",\"\u{FFFD}\u{FFFD}\"]", not_utf8.to_json, "to_json writes bytes that are not a code point as U+FFFD, one per ill-formed subpart")
+assert_true(JSON.parse(not_utf8.to_pretty_json) == JSON.parse(not_utf8.to_json), "and what it writes is read back")
+ill_formed = Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any)
+assert_text("[\"\u{FFFD}\u{FFFD}\",\"a\u{FFFD}\",\"\u{FFFD}\u00e9\u{FFFD}\u{FFFD}\u{1F600}\"]", ill_formed.to_json, "the plain writer writes bytes that are not a code point as U+FFFD and copies the rest")
+assert_true(JSON.parse(ill_formed.to_json) == JSON.parse(ill_formed.to_ascii_json), "both writers' text reads back as one value")
+assert_text("a\uFFFDb", JSON.parse(JSON.to_json("a\xffb")).as_s, "JSON.to_json of a byte 0xff reads back as U+FFFD")
+assert_text("{\"a\u{FFFD}b\":1}", JSON.to_json({"a\xffb" => 1}), "and in a key")
+assert_text("\"\u{FFFD}\u{FFFD}\u{FFFD}\"", JSON.to_json("\xed\xa0\x80"), "an encoded surrogate is three ill-formed subparts")
 assert_text("\"\\u0000\\u001f\\u007f\\b\\f\\n\\r\\t\\\"\\\\\"", Any.new("\u0000\u001f\u007f\b\f\n\r\t\"\\").to_json, "control bytes and DEL escaped")
 assert_text("-0.0", Any.new(-0.0).to_json, "negative zero float keeps its sign")
 assert_text("[0.1,1.0e-7,100.0,5.0e-324]", JSON.parse("[0.1, 1e-7, 100.0, 5e-324]").to_json, "float text is the shortest round trip")
 puts "  compact, pretty (two spaces and a tab), ascii-only and every escape written back"
+puts "  bytes that are not a code point written as U+FFFD by both writers (\\ufffd in ascii-only), so the text reads back"
 
 # ---------------------------------------------------------------------------
 # Pull parser
@@ -175,7 +203,83 @@ pull.skip
 assert_true(pull.kind.eof?, "skip over objects whose keys repeat only across objects")
 assert_text("{\"x\":[1],\"y\":{\"x\":2}}", JSON.from_json("{\"x\": [1], \"y\": {\"x\": 2}}", Any).to_json, "read_any with a key repeated in a nested object")
 assert_text("[1,{\"a\":[]}]", JSON.build { |b| PullParser.new("[1, {\"a\": []}]").read_raw(b) }, "read_raw into a builder")
+# A number goes through read_raw as the text it was read from. Rebuilt from
+# the Int64 or Float64 it parsed to, `1E+2` came back as `100.0` and a
+# UInt64 id past Int64 as `1.8446744073709552e+19`, which did not read
+# back as a UInt64.
+assert_text("[12345678901234567890,1E+2,0.1,-0,1.50]", PullParser.new("[12345678901234567890, 1E+2, 0.1, -0, 1.50]").read_raw, "read_raw writes a number as its own text")
+id_text = PullParser.new("{\"id\": 18446744073709551615}").read_raw
+assert_true(JSON.from_json(id_text, Hash(String, UInt64))["id"] == 18446744073709551615_u64, "a UInt64 id read back through read_raw: #{id_text}")
 puts "  read_object/read_array/read_x, skip, on_key, read_raw, read_any and locations"
+
+# An object with more keys than the pull parser scans (32) keeps its keys
+# in a hash from there, and a repeat past that point is still refused.
+wide_keys = String.build do |io|
+  io << "{"
+  40.times { |i| io << (i > 0 ? "," : "") << "\"k" << i << "\":" << i }
+  io << "}"
+end
+wide_total = 0_i64
+wide = PullParser.new(wide_keys)
+wide.read_object { |key| wide_total = wide_total + wide.read_int }
+assert_true wide_total == 780_i64, "forty keys read, their values summed: #{wide_total}"
+wide_repeat = wide_keys[0, wide_keys.bytesize - 1] + ",\"k3\":0}"
+wide_refusal = "accepted"
+group do |g|
+  reader = g.spawn do
+    rp = PullParser.new(wide_repeat)
+    rp.read_object { |key| rp.read_int }
+    0
+  end
+  answer = reader.value
+  wide_refusal = answer.message if answer.is_a?(Panicked)
+end
+assert_true wide_refusal.includes?("duplicate key 'k3'"), "a repeat past the scanned keys: #{wide_refusal}"
+
+# Numbers read without their text: the digits and the scale are the value
+# when a double holds both exactly, and the text is read otherwise - the
+# same double either way.
+spelled = "[0.1, -0.0, 1e22, 1e23, 5e-324, 0.30000000000000004, 123456789012345678, 1.7976931348623157e308, 2.2250738585072014e-308, 9007199254740993, 1E+2, 12.5e-1]"
+number_texts = [] of String
+numbers = PullParser.new(spelled)
+numbers.read_array do
+  if numbers.kind.int?
+    number_texts << numbers.read_int.to_s
+  else
+    number_texts << numbers.read_float.to_s
+  end
+end
+assert_text "0.1 -0.0 1.0e+22 1.0e+23 5.0e-324 0.30000000000000004 123456789012345678 1.7976931348623157e+308 2.2250738585072014e-308 9007199254740993 100.0 1.25", number_texts.join(" "), "numbers read without their text"
+
+# What reading costs: a document of ten thousand objects walked with the
+# pull parser allocates nothing for them. Each object took a hash to find
+# a repeated key in, each key and each number a substring of the input,
+# 288 bytes an object, and crystal-metric's JsonParsePull ran at one and a
+# half times Crystal's time.
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  walked = String.build do |io|
+    io << "["
+    10000.times { |i| io << (i > 0 ? "," : "") << "{\"x\":" << i << ".25,\"y\":-" << i << ".5e-3,\"name\":\"n\",\"ok\":true}" }
+    io << "]"
+  end
+  GC.disable
+  walk_before = GC.stats.bytes_since_collection
+  walk_total = 0.0
+  walker = PullParser.new(walked)
+  walker.read_array do
+    walker.read_object do |key|
+      if key == "x" || key == "y"
+        walk_total = walk_total + walker.read_float
+      else
+        walker.skip
+      end
+    end
+  end
+  walk_bytes = (GC.stats.bytes_since_collection - walk_before) // 10000_u64
+  GC.enable
+  assert_true walk_bytes < 8_u64, "walking an object allocates #{walk_bytes} bytes, where it allocates nothing (#{walk_total})"
+  puts "  ten thousand objects walked without an allocation for them"
+{% end %}
 
 # ---------------------------------------------------------------------------
 # Builder
@@ -285,6 +389,38 @@ assert_true(counts.size == 4, "Any as a hash key: four distinct values")
 assert_true(counts[JSON.parse("1")] == 2 && counts[JSON.parse("[1]")] == 2 && counts[JSON.parse("{\"a\":[1]}")] == 2, "each equal pair counted twice")
 puts "  #{same.size} equal pairs hash alike, #{different.size} unequal pairs differ, Any keys a Hash"
 
+# And a key that spreads. An array hashed as `31 * h + e` and an object as
+# the sum of `31 * k.hash + v.hash`, an integer hashing as itself: `[1,0]`
+# and `[0,31]` were one hash, `{"a":1,"b":2}` and `{"a":2,"b":1}` another,
+# a 150 by 150 grid had 4,769 hashes as arrays and 299 as objects for its
+# 22,500 values, and 160,000 objects took 26 s to go into a Hash.
+assert_true(JSON.parse("[1,0]").hash != JSON.parse("[0,31]").hash, "[1,0] and [0,31] hash apart")
+assert_true(JSON.parse("{\"a\":1,\"b\":2}").hash != JSON.parse("{\"a\":2,\"b\":1}").hash, "values swapped between keys hash apart")
+grid_arrays = {} of Int32 => Bool
+grid_objects = {} of Int32 => Bool
+objects = Array(Any).new(160000)
+400.times do |i|
+  400.times do |j|
+    fields = {} of String => Any
+    fields["x"] = Any.new(i)
+    fields["y"] = Any.new(j)
+    object = Any.new(fields)
+    objects << object
+    if i < 150 && j < 150
+      grid_arrays[Any.new([Any.new(i), Any.new(j)] of Any).hash] = true
+      grid_objects[object.hash] = true
+    end
+  end
+end
+assert_true(grid_arrays.size >= 22400 && grid_objects.size >= 22400, "a 150 by 150 grid has #{grid_arrays.size} array and #{grid_objects.size} object hashes for 22,500 values")
+keyed_started = __iyi_monotonic_ns
+keyed = {} of Any => Bool
+objects.each { |o| keyed[o] = true }
+keyed_ms = (__iyi_monotonic_ns - keyed_started) // 1000000
+assert_true(keyed.size == 160000, "160,000 distinct objects are 160,000 keys")
+assert_true(keyed_ms < 2000, "160,000 objects took #{keyed_ms} ms to go into a Hash, not under 2,000")
+puts "  arrays and objects hash apart: 22,400 hashes of a 150 by 150 grid at least, 160,000 objects keyed under 2,000 ms"
+
 # ---------------------------------------------------------------------------
 # to_json and from_json over prelude values and a ToJSON type
 # ---------------------------------------------------------------------------
@@ -320,6 +456,56 @@ assert_text("[[1],[]]", JSON.to_json([[1_i64], [] of Int64]), "Array(Array(Int64
 assert_text("{\"k\":[1.5],\"m\":[]}", JSON.to_json({"k" => [1.5], "m" => [] of Float64}), "Hash(String, Array(Float64))")
 assert_text("{\"1\":true}", JSON.to_json({1 => true}), "Hash with an integer key is written by to_s")
 assert_text("{\"null\":1}", JSON.to_json({nil => 1}), "Hash with a nil key is written as \"null\"")
+# Two keys that are one text were written twice, `{"null":1,"null":2}`,
+# which `JSON.parse` refused ("duplicate key 'null' at line 1, column
+# 11"). The writer refuses them, naming both; keys whose text differs are
+# written as before.
+nil_beside_text = {} of String? => Int32
+nil_beside_text[nil] = 1
+nil_beside_text["nil"] = 2
+assert_text("{\"null\":1,\"nil\":2}", JSON.to_json(nil_beside_text), "a nil key beside a String key")
+nil_and_null = "accepted"
+group do |g|
+  writer = g.spawn do
+    keys = {} of String? => Int32
+    keys[nil] = 1
+    keys["null"] = 2
+    JSON.to_json(keys).bytesize
+  end
+  answer = writer.value
+  nil_and_null = answer.message if answer.is_a?(Panicked)
+end
+assert_text("the keys nil and \"null\" are both written as \"null\"", nil_and_null, "nil and \"null\" as keys of one Hash refused")
+one_and_text = "accepted"
+group do |g|
+  writer = g.spawn do
+    keys = {} of Int32 | String => Bool
+    keys[1] = true
+    keys["1"] = false
+    JSON.to_json(keys).bytesize
+  end
+  answer = writer.value
+  one_and_text = answer.message if answer.is_a?(Panicked)
+end
+assert_text("the keys 1 and \"1\" are both written as \"1\"", one_and_text, "1 and \"1\" as keys of one Hash refused")
+# A key the object already holds is refused where it is written: the
+# builder wrote `{"x":1,"x":2}`, and two String keys whose bytes are not
+# UTF-8 were both written as U+FFFD - documents `JSON.parse` refuses.
+written_twice = "accepted"
+group do |g|
+  writer = g.spawn { JSON.build { |b| b.object { b.field("x", 1); b.field("x", 2) } } }
+  answer = writer.value
+  written_twice = answer.message if answer.is_a?(Panicked)
+end
+assert_text("the key \"x\" is written twice in one object", written_twice, "a key written twice by the builder refused")
+replaced_twice = "accepted"
+group do |g|
+  writer = g.spawn { JSON.to_json({"a\xFF" => 1, "a\xFE" => 2}) }
+  answer = writer.value
+  replaced_twice = answer.message if answer.is_a?(Panicked)
+end
+assert_true(replaced_twice.includes?("are both written as \"a\u{FFFD}\""), "two keys written as one U+FFFD text refused, not #{replaced_twice.inspect}")
+assert_text("{\"x\":{\"x\":1},\"y\":[{\"x\":2}]}", JSON.build { |b| b.object { b.field("x") { b.object { b.field("x", 1) } }; b.field("y") { b.array { b.object { b.field("x", 2) } } } } }, "one key in nested objects is no repeat")
 assert_text("{\"x\":3,\"y\":0.5}", JSON.to_json(Point.new(3, 0.5)), "a ToJSON type")
 assert_text("[{\"x\":1,\"y\":1.0},{\"x\":2,\"y\":2.0}]", JSON.to_json([Point.new(1, 1.0), Point.new(2, 2.0)]), "an array of ToJSON values")
 assert_text("[1,\"s\",null]", JSON.to_json(JSON.parse("[1, \"s\", null]")), "an Any")
@@ -345,7 +531,234 @@ floats = JSON.from_json("{\"a\": 1.5, \"b\": 2}", Hash(String, Float64))
 assert_true(floats["a"] == 1.5 && floats["b"] == 2.0, "Hash(String, Float64)")
 strings = JSON.from_json("{\"k\": [\"v\", \"w\"]}", Hash(String, Array(String)))
 assert_true(strings["k"][1] == "w", "Hash(String, Array(String))")
-puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes and a ToJSON struct"
+
+# A type that admits nil: alone, in an array, as a hash's values and in a
+# derived field. Each was refused at compile time: `(Int32 | Nil).new` on
+# the way in, and on the way out the union matched against `ToJSON` as one
+# type, where `write_or_null` now takes the nil out first.
+struct Tagged
+  getter tags : Array(String?)
+
+  derive serializable
+end
+
+assert_true(JSON.from_json("null", Int32?).nil? && JSON.from_json("5", Int32?) == 5, "Int32? from null and from 5")
+maybe_ints = JSON.from_json("[1, null]", Array(Int32?))
+assert_true(maybe_ints.size == 2 && maybe_ints[0] == 1 && maybe_ints[1].nil?, "Array(Int32?)")
+assert_text("[1,null]", JSON.to_json(maybe_ints), "Array(Int32?) written")
+maybe_strings = JSON.from_json("{\"a\": null, \"b\": \"x\"}", Hash(String, String?))
+assert_text("{\"a\":null,\"b\":\"x\"}", JSON.to_json(maybe_strings), "Hash(String, String?) read and written")
+assert_text("1", JSON.to_json(1.as(Int32?)), "an Int32? holding 1")
+assert_text("null", JSON.to_json(nil.as(Int32?)), "an Int32? holding nil")
+assert_text("{\"tags\":[\"a\",null]}", Tagged.from_json("{\"tags\": [\"a\", null]}").to_json, "a derived Array(String?) field")
+puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes, a ToJSON struct and each of them or nil"
+puts "  two keys of a Hash written as one text (nil and \"null\", 1 and \"1\") refused, naming both"
+
+puts "\n== derive serializable"
+
+# A type that reads and writes itself as an object, a key per field: the
+# derive writes `to_json`, `from_json` and `initialize(pull)`, and a field
+# of another such type, an array of them, a hash, a nil and a value the
+# type has no field for are each what the other library's
+# `JSON::Serializable` makes of them.
+struct Place
+  getter x : Float64
+  getter y : Float64
+  getter name : String
+  getter note : String?
+
+  def initialize(@x : Float64, @y : Float64, @name : String, @note : String?)
+  end
+
+  derive serializable
+end
+
+struct Places
+  getter places : Array(Place)
+  getter counts : Hash(String, Int32)
+  getter best : Place?
+
+  derive serializable
+end
+
+# Fields written with defaults, as `JSON::Serializable` reads them: on a
+# missing key a field keeps its default, and a key that is there wins,
+# `null` included where the type admits nil; a `null` the type does not
+# admit leaves the default. The port was refused by name, the host
+# overwritten with nil, and a `null` port refused as not an Int32.
+struct Listener
+  @port : Int32 = 8080
+  @host : String? = "localhost"
+  getter port
+  getter host
+  getter name : String
+
+  derive serializable
+end
+
+place = Place.from_json("{\"x\": 1.5, \"extra\": [1, {\"deep\": null}], \"name\": \"a\", \"y\": -2}")
+assert_true place.x == 1.5 && place.y == -2.0 && place.name == "a" && place.note.nil?, "a derived type read, an unknown key passed over"
+assert_text "{\"x\":1.5,\"y\":-2.0,\"name\":\"a\",\"note\":null}", place.to_json, "a derived type written, a nil field as null"
+assert_text place.to_json, Place.from_json(place.to_json).to_json, "a derived type round-trips"
+noted = Place.new(0.25, 3.0, "b", "seen")
+assert_text "{\"x\":0.25,\"y\":3.0,\"name\":\"b\",\"note\":\"seen\"}", JSON.to_json(noted), "JSON.to_json of a derived type"
+places = Places.from_json("{\"counts\": {\"a\": 1}, \"places\": [{\"x\": 1, \"y\": 2, \"name\": \"p\", \"note\": \"n\"}, {\"x\": 3, \"y\": 4, \"name\": \"q\", \"note\": null}], \"best\": null}")
+assert_true places.places.size == 2 && places.places[0].note == "n" && places.places[1].note.nil?, "an array of a derived type"
+assert_true places.counts["a"] == 1 && places.best.nil?, "a hash field and a nil derived field"
+assert_text "{\"places\":[{\"x\":1.0,\"y\":2.0,\"name\":\"p\",\"note\":\"n\"},{\"x\":3.0,\"y\":4.0,\"name\":\"q\",\"note\":null}],\"counts\":{\"a\":1},\"best\":null}", places.to_json, "a derived type of derived types written"
+assert_true JSON.from_json("[{\"x\": 0, \"y\": 0, \"name\": \"z\"}]", Array(Place))[0].name == "z", "JSON.from_json into an array of a derived type"
+refusal = "accepted"
+group do |g|
+  reader = g.spawn do
+    Place.from_json("{\"x\": 1, \"y\": 2}")
+    0
+  end
+  answer = reader.value
+  refusal = answer.message if answer.is_a?(Panicked)
+end
+assert_true refusal.includes?("JSON for Place has no key \"name\""), "a missing field refused by name: #{refusal}"
+assert_text "{\"port\":1,\"host\":\"localhost\",\"name\":\"x\"}", Listener.from_json("{\"name\": \"x\", \"port\": 1}").to_json, "a nilable field keeps its default for a missing key"
+assert_text "{\"port\":8080,\"host\":\"localhost\",\"name\":\"x\"}", Listener.from_json("{\"name\": \"x\"}").to_json, "a field keeps its default for a missing key"
+assert_text "{\"port\":2,\"host\":null,\"name\":\"x\"}", Listener.from_json("{\"host\": null, \"name\": \"x\", \"port\": 2}").to_json, "a key that is there wins over the default, null included"
+null_port = "unread"
+group do |g|
+  reader = g.spawn do
+    Listener.from_json("{\"port\": null, \"name\": \"x\"}").to_json
+  end
+  answer = reader.value
+  null_port = answer.is_a?(Panicked) ? "refused: #{answer.message}" : answer.to_s
+end
+assert_text "{\"port\":8080,\"host\":\"localhost\",\"name\":\"x\"}", null_port, "a null for a field with a default its type does not admit keeps the default"
+puts "  read, written and round-tripped: nested, arrays, hashes, nil, unknown keys, defaults, a missing key refused"
+
+# `@[JSON::Field(...)]` on each field, the other library's options: a key
+# of its own, left out either way, a nil left out, and a converter; and
+# enums, written by their underscored names, a flags enum as the array of
+# its members.
+enum Shade
+  Light
+  DarkRed
+  HTTPBlue
+end
+
+@[Flags]
+enum Access
+  Read
+  Write
+  Exec
+end
+
+# Money kept as cents, written as a decimal string.
+struct Cents
+  def self.to_json(value : Int64, json : Builder) : Nil
+    json.string("#{value // 100}.#{(value % 100).to_s.rjust(2, '0')}")
+  end
+
+  def self.from_json(pull : PullParser) : Int64
+    parts = pull.read_string.split('.')
+    parts[0].to_i.to_i64 * 100 + parts[1].to_i.to_i64
+  end
+end
+
+struct Account
+  @[JSON::Field(key: "userName")]
+  getter user_name : String
+  @[JSON::Field(ignore: true)]
+  getter secret : String = "kept"
+  @[JSON::Field(emit_null: false)]
+  getter nick : String?
+  @[JSON::Field(ignore_serialize: true)]
+  getter password : String = ""
+  @[JSON::Field(ignore_deserialize: true)]
+  getter version : Int32 = 3
+  @[JSON::Field(converter: Cents)]
+  getter balance : Int64
+  getter shade : Shade
+  getter access : Access
+
+  derive serializable
+end
+
+account = Account.from_json(%({"userName": "ada", "secret": "sent", "nick": null, "password": "pw", "version": 9, "balance": "12.05", "shade": "dark_red", "access": ["read", "exec"]}))
+assert_true account.user_name == "ada", "a field read under its key: #{account.user_name}"
+assert_true account.secret == "kept", "an ignored field keeps its default, its key there or not"
+assert_true account.password == "pw" && account.version == 3, "ignore_serialize is read, ignore_deserialize is not"
+assert_true account.balance == 1205_i64, "a converter reads the field: #{account.balance}"
+assert_true account.shade == Shade::DarkRed && account.access == (Access::Read | Access::Exec), "an enum read by its underscored name, a flags enum by its members"
+assert_text "{\"userName\":\"ada\",\"version\":3,\"balance\":\"12.05\",\"shade\":\"dark_red\",\"access\":[\"read\",\"exec\"]}", account.to_json, "renamed, ignored, emit_null: false, converted and enums written"
+nicked = Account.from_json(%({"userName": "b", "nick": "n", "balance": "0.07", "shade": "HTTP_BLUE", "access": []}))
+assert_text "{\"userName\":\"b\",\"nick\":\"n\",\"version\":3,\"balance\":\"0.07\",\"shade\":\"http_blue\",\"access\":[]}", nicked.to_json, "a nick there is written, a name matched in any case, no flags as []"
+assert_text nicked.to_json, Account.from_json(nicked.to_json).to_json, "an account round-trips"
+assert_true JSON.from_json("2", Shade) == Shade::HTTPBlue && JSON.from_json(%("light"), Shade) == Shade::Light, "an enum read by its value and by its name"
+assert_text "\"http_blue\"", JSON.to_json(Shade::HTTPBlue), "an enum written alone"
+assert_text "[\"dark_red\",\"light\"]", JSON.to_json([Shade::DarkRed, Shade::Light]), "an array of an enum"
+not_a_shade = "accepted"
+group do |g|
+  reader = g.spawn do
+    JSON.from_json(%("purple"), Shade)
+    0
+  end
+  answer = reader.value
+  not_a_shade = answer.message if answer.is_a?(Panicked)
+end
+assert_true not_a_shade.includes?("\"purple\" is no ") && not_a_shade.includes?("member (light, dark_red, http_blue)"), "a name no member has, refused naming them: #{not_a_shade}"
+puts "  JSON::Field: a key, ignored either way, a nil left out, a converter; enums by name and value, flags as arrays, a name refused"
+
+# ---------------------------------------------------------------------------
+# Unions
+# ---------------------------------------------------------------------------
+
+# A union is written by the member it holds, through that member's own
+# writer, and read by the kind of value there. `JSON.to_json` of a union
+# did not build (issue #135): the union reached the `ToJSON` overload
+# whole, and `to_json` was asked of an `Int32`.
+struct Grant
+  getter sub : String | Int64
+  getter scope : Array(String) | String | Nil
+  getter level : Shade | Int32
+
+  derive serializable
+end
+
+puts "\n== unions"
+assert_text "[1,\"x\"]", JSON.to_json([1, "x"] of Int32 | String), "an Array(Int32 | String)"
+assert_text "1", JSON.to_json(1.as(Int32 | String)), "an Int32 | String holding 1"
+assert_text "\"x\"", JSON.to_json("x".as(Int32 | String)), "an Int32 | String holding \"x\""
+assert_text "{\"a\":1,\"b\":\"x\"}", JSON.to_json({"a" => 1, "b" => "x"} of String => Int32 | String), "a Hash(String, Int32 | String)"
+assert_text "[1,null]", JSON.to_json([1, nil] of Int32 | Nil), "an Array(Int32 | Nil), as before"
+claims = {"sub" => "1", "sv" => 0, "exp" => 1792618239_i64} of String => String | Int32 | Int64
+claims_text = JSON.to_json(claims)
+assert_text "{\"sub\":\"1\",\"sv\":0,\"exp\":1792618239}", claims_text, "JWT claims, a Hash(String, String | Int32 | Int64)"
+read_claims = JSON.from_json(claims_text, Hash(String, String | Int32 | Int64))
+assert_true read_claims["sub"] == "1" && read_claims["sv"].is_a?(Int64) && read_claims["sv"] == 0 && read_claims["exp"] == 1792618239_i64, "JWT claims read back, an integer into Int64, the member the other library tries first"
+assert_text claims_text, JSON.to_json(read_claims), "and written as they were"
+
+# Every kind of member, each written as it is written alone.
+mixed = [Shade::DarkRed, Access::Read | Access::Exec, 2.5, true, nil, "s", 200_u8, 18446744073709551615_u64, -9_i64, 7,
+         Point.new(1, 0.5), Place.new(0.5, 1.0, "u", nil), [1, 2], {"k" => [true]}, JSON.parse("[null]")] of Shade | Access | Float64 | Bool | Nil | String | UInt8 | UInt64 | Int64 | Int32 | Point | Place | Array(Int32) | Hash(String, Array(Bool)) | Any
+alone = [JSON.to_json(Shade::DarkRed), JSON.to_json(Access::Read | Access::Exec), JSON.to_json(2.5), JSON.to_json(true), JSON.to_json(nil), JSON.to_json("s"),
+         JSON.to_json(200_u8), JSON.to_json(18446744073709551615_u64), JSON.to_json(-9_i64), JSON.to_json(7), JSON.to_json(Point.new(1, 0.5)),
+         JSON.to_json(Place.new(0.5, 1.0, "u", nil)), JSON.to_json([1, 2]), JSON.to_json({"k" => [true]}), JSON.to_json(JSON.parse("[null]"))]
+assert_text "[\"dark_red\",[\"read\",\"exec\"],2.5,true,null,\"s\",200,18446744073709551615,-9,7,{\"x\":1,\"y\":0.5},{\"x\":0.5,\"y\":1.0,\"name\":\"u\",\"note\":null},[1,2],{\"k\":[true]},[null]]", JSON.to_json(mixed), "enums, a float, a bool, nil, a string, integers, a ToJSON type, a derived type, an array, a hash and an Any as members"
+assert_text "[#{alone.join(",")}]", JSON.to_json(mixed), "each member written as it is alone"
+
+# Read by the kind of value there, the integers in the other library's
+# order: Int64, UInt64, Int32, UInt8, then Float64.
+mixed_read = JSON.from_json(%([true, 7, -7, 5000000000, 18446744073709551615, 2.5, "s", [1], {"k": [false]}, null]), Array(Bool | Int32 | UInt64 | Float64 | String | Array(Int32) | Hash(String, Array(Bool)) | Nil))
+assert_text "[true,7,-7,5000000000,18446744073709551615,2.5,\"s\",[1],{\"k\":[false]},null]", JSON.to_json(mixed_read), "every member read by the kind of value there, an integer into the first integer member that holds it"
+assert_true mixed_read[1].is_a?(UInt64) && mixed_read[2].is_a?(Int32) && mixed_read[3].is_a?(UInt64) && mixed_read[4].is_a?(UInt64) && mixed_read[5].is_a?(Float64), "7 into UInt64, -7 into Int32, past Int64 into UInt64, 2.5 into Float64"
+widened = JSON.from_json("[1, 5000000000]", Array(Int32 | Float64))
+assert_true widened[0].is_a?(Int32) && widened[1].is_a?(Float64), "an integer past Int32 into Float64"
+assert_text "[1,5000000000.0]", JSON.to_json(widened), "and written as the Float64 it is"
+shades = JSON.from_json(%(["http_blue", 2]), Array(Int32 | Shade))
+assert_true shades[0] == Shade::HTTPBlue && shades[1].is_a?(Int32), "a string into the enum, an integer into Int32"
+grant = Grant.from_json(%({"sub": 42, "scope": ["read", "write"], "level": "dark_red"}))
+assert_true grant.sub == 42_i64 && grant.scope.is_a?(Array(String)) && grant.level == Shade::DarkRed, "a derived type's union fields read by the kind of value there"
+assert_text "{\"sub\":42,\"scope\":[\"read\",\"write\"],\"level\":\"dark_red\"}", grant.to_json, "and written by the member each holds"
+assert_text "{\"sub\":\"ada\",\"scope\":\"all\",\"level\":3}", Grant.from_json(%({"sub": "ada", "scope": "all", "level": 3})).to_json, "the other members of each"
+assert_text "{\"sub\":\"b\",\"scope\":null,\"level\":1}", Grant.from_json(%({"sub": "b", "scope": null, "level": 1})).to_json, "and a nil"
+puts "  written as the member held: scalars, enums, ToJSON and derived types, arrays, hashes, an Any; JWT claims both ways"
+puts "  read by the kind of value there, integers in the other library's order, into fields of a derived type"
 
 # ---------------------------------------------------------------------------
 # Refusals
@@ -402,9 +815,29 @@ refused_with("{\"a\":", "unexpected end of input at line 1, column 6")
 refused_with("]", "unexpected ']' at line 1, column 1")
 refused_with(":", "unexpected ':' at line 1, column 1")
 refused_with("[\"\u00e9\u00e9\", 1 x]", "bare identifier 'x' at line 1, column 10")
-deep_text = "[" * 513 + "]" * 513
-refused_with(deep_text, "nesting depth of 513 exceeds maximum depth 512 at line 1, column 513")
-assert_true(JSON.parse("[" * 512 + "]" * 512).size == 1, "512 levels are read")
+deep_text = "[" * 257 + "]" * 257
+refused_with(deep_text, "nesting depth of 257 exceeds maximum depth 256 at line 1, column 257")
+assert_true(JSON.parse("[" * 256 + "]" * 256).size == 1, "256 levels are read")
+# And in a task, whose stack is 256 KB: the deepest document read is one a
+# task can parse, compare and print. At 512 a task died of a stack
+# overflow at 480 levels, and `==` at 334, and the whole process with it.
+deepest_array = "[" * 256 + "]" * 256
+deepest_object = "{\"a\":" * 256 + "1" + "}" * 256
+in_task = false
+group do |g|
+  g.spawn do
+    [deepest_array, deepest_object].each do |deepest|
+      one = JSON.parse(deepest)
+      raise "ASSERTION FAILED: the deepest document does not equal itself in a task" unless one == JSON.parse(deepest)
+      raise "ASSERTION FAILED: the deepest document does not print back in a task" unless one.to_json == deepest
+      one.hash
+      one.inspect
+    end
+    in_task = true
+    0
+  end
+end
+assert_true(in_task, "the deepest document is parsed, compared, printed and hashed in a task")
 puts "  #{52} malformed inputs, each refused with its sentence and location"
 
 # ---------------------------------------------------------------------------

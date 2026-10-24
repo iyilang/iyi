@@ -135,7 +135,12 @@ module Iyi
 
       if format
         begin
-          @program.stdout.puts Iyi::Formatter.format(@str.to_s)
+          # iyi: in the language of the file the macro is expanding in. The
+          # generated code is that file's, and `!` is one token there and
+          # another in the other language, so without the name the rescue
+          # below caught a syntax error and printed the code unformatted.
+          @program.stdout.puts Iyi::Formatter.format(
+            @str.to_s, filename: node.location.try(&.original_filename))
         rescue
           @program.stdout.puts @str
         end
@@ -312,6 +317,9 @@ module Iyi
     end
 
     def interpret_run(node)
+      # iyi: what another program prints is not a fact of the declaration, and
+      # II.10 measured `run` at +7.4 s per distinct script on a cold build.
+      TypeNode.refuse_in_derive(self, "run", "runs another program")
       if node.args.size == 0
         node.wrong_number_of_arguments "macro '::run'", 0, "1+"
       end
@@ -536,11 +544,17 @@ module Iyi
       when "/"
         num_bin_op(method, args, named_args, block) { |me, other| me / other }
       when "//"
-        num_bin_op(method, args, named_args, block) { |me, other| me // other }
+        # iyi: `{{ -7 // 2 }}` written in an iyi source is -3, as the line
+        # that computes it at run time; it was -4 (`MathInterpreter.iyi_rules?`).
+        iyi = MathInterpreter.iyi_rules?(interpreter.program, name_loc)
+        num_bin_op(method, args, named_args, block) do |me, other|
+          iyi && me.is_a?(Int) && other.is_a?(Int) ? me.tdiv(other) : me // other
+        end
       when "**"
         num_bin_op(method, args, named_args, block) { |me, other| me ** other }
       when "%"
-        int_bin_op(method, args, named_args, block) { |me, other| me % other }
+        iyi = MathInterpreter.iyi_rules?(interpreter.program, name_loc)
+        int_bin_op(method, args, named_args, block) { |me, other| iyi ? me.remainder(other) : me % other }
       when "&"
         int_bin_op(method, args, named_args, block) { |me, other| me & other }
       when "|"
@@ -548,9 +562,11 @@ module Iyi
       when "^"
         int_bin_op(method, args, named_args, block) { |me, other| me ^ other }
       when "<<"
-        int_bin_op(method, args, named_args, block) { |me, other| me << other }
+        iyi = MathInterpreter.iyi_rules?(interpreter.program, name_loc)
+        int_bin_op(method, args, named_args, block) { |me, other| iyi ? MathInterpreter.iyi_shl(me, other) : me << other }
       when ">>"
-        int_bin_op(method, args, named_args, block) { |me, other| me >> other }
+        iyi = MathInterpreter.iyi_rules?(interpreter.program, name_loc)
+        int_bin_op(method, args, named_args, block) { |me, other| iyi ? MathInterpreter.iyi_shr(me, other) : me >> other }
       when "~"
         interpret_check_args do
           num = to_number
@@ -624,6 +640,26 @@ module Iyi
       in .f32?  then @value.to_f32
       in .f64?  then @value.to_f64
       end
+    end
+
+    # iyi: this integer literal as one of *kind*, or nil when either kind is
+    # not an integer one or the value does not fit *kind*.
+    def integer_in?(kind : NumberKind) : NumberLiteral?
+      return nil unless self.kind.signed_int? || self.kind.unsigned_int?
+      value = case kind
+              in .i8?         then @value.to_i8?
+              in .i16?        then @value.to_i16?
+              in .i32?        then @value.to_i32?
+              in .i64?        then @value.to_i64?
+              in .i128?       then @value.to_i128?
+              in .u8?         then @value.to_u8?
+              in .u16?        then @value.to_u16?
+              in .u32?        then @value.to_u32?
+              in .u64?        then @value.to_u64?
+              in .u128?       then @value.to_u128?
+              in .f32?, .f64? then nil
+              end
+      value && NumberLiteral.new(value)
     end
   end
 
@@ -1438,6 +1474,25 @@ module Iyi
     end
 
     def interpret_to_range(from : NumberLiteral, to : NumberLiteral)
+      # iyi: the elements take the begin's kind, and the stdlib's Range reaches
+      # an inclusive end by `==`, which compares kinds, so `(0_i8..0).to_a` was
+      # `[]` and `(-1..4_u8).to_a` stopped at 3. An integer end that fits the
+      # begin's kind is read in that kind.
+      # A begin too small for the end is read in the end's kind instead:
+      # `(0_i8..300)` stepped an `Int8` and stopped on "Arithmetic overflow".
+      if to.kind != from.kind
+        if in_kind = to.integer_in?(from.kind)
+          to = in_kind
+        elsif in_kind = from.integer_in?(to.kind)
+          from = in_kind
+        end
+      end
+      # iyi: the walk steps from the begin, and a float has no next value:
+      # `(0.0..2).to_a` said "BUG: called 'succ' for non-integer literal". A
+      # float end only bounds the walk, `(1..3.5)` being `[1, 2, 3]`.
+      unless from.kind.signed_int? || from.kind.unsigned_int?
+        raise "a macro range steps from an integer, and #{from} is a float"
+      end
       Range.new(from, to, self.exclusive?)
     end
 
@@ -2430,12 +2485,16 @@ module Iyi
     # type is not a fact the type's own module can carry, so a derive that read
     # one would generate different code depending on what else was compiled, and
     # could not be cached against the declaration. R-5 forbids them.
-    def self.refuse_in_derive(interpreter : MacroInterpreter, method : String) : Nil
-      return unless interpreter.program.expanding_derive?
+    #
+    # A def the derive generated is its code as well. Its macros expand when
+    # it is typed, after the derive has returned: `\{{ Base.all_subclasses }}`
+    # in one answered `A,B` beside a `B` declared after the derived struct.
+    def self.refuse_in_derive(interpreter : MacroInterpreter, method : String, what : String = "answers with the whole program") : Nil
+      return unless interpreter.program.expanding_derive? || interpreter.iyi_derive_def?
 
       raise Iyi::TypeException.new(
-        "`#{method}` is not available to a derive: it answers with the whole " \
-        "program, and a derive may only read the declaration it is attached to " \
+        "`#{method}` is not available to a derive: it #{what}, " \
+        "and a derive may only read the declaration it is attached to " \
         "and what that declaration's types implement — see SPEC.md II.4")
     end
 

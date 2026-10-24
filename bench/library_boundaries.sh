@@ -169,8 +169,13 @@ puts t.day_of_week'
 # module functions over `IO`, `UUID` is a struct wrapping a `StaticArray` and
 # an enum read back by name, `INI` returns a hash of hashes, `CSV` is a parser
 # and a builder that takes a block, `Colorize` is macro-written methods on
-# `Object` — a type the *library* owns — and `XML` calls libxml2, so its
-# boundary has to carry a `@[Link]` flag the consumer never wrote.
+# `Object` — a type the *library* owns.
+#
+# `XML` used to be the twelfth, chosen because it calls libxml2 and so its
+# boundary has to carry a `@[Link]` flag the consumer never wrote. libxml2 is
+# an ancestor dependency and the module is gone, so that property is proven
+# by `bench/yaml_reads.sh` instead, which binds `YAML` the same way and for
+# the same reason. Eleven here, and the link-flag question still asked.
 check Base64 base64 base64 'e = Base64.strict_encode("iyi, encoded")
 puts e
 puts String.new(Base64.decode(e))'
@@ -191,12 +196,6 @@ puts CSV.build { |b| b.row "x", "y" }.strip'
 
 check Colorize colorize colorize 'puts "x".colorize(:red).to_s.inspect
 puts Colorize.enabled?'
-
-check XML xml x_m_l 'doc = XML.parse("<a><b id=\"1\">t</b></a>")
-puts doc.root.try(&.name)
-n = doc.first_element_child.try(&.first_element_child)
-puts n.try(&.content)
-puts n.try(&.[]("id"))'
 
 # And the one that took a change to the format. `Random` is a *mixin* module
 # with `abstract def next_u` for its includers to answer, and iyi's own module

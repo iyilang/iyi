@@ -1,4 +1,4 @@
-# Arbitrary precision numbers: BigInt, BigDecimal and BigRational.
+# Arbitrary precision numbers: BigInt, BigDecimal, BigRational and BigFloat.
 #
 # Everything here is iyi all the way down: no GMP, no libc, no `lib` (SPEC.md
 # III.9, III.10). The module refuses what it cannot answer with a sentence and
@@ -15,11 +15,36 @@
 # limbs) makes equality a limb-by-limb comparison.
 #
 # Algorithms: schoolbook add/sub; schoolbook multiply below 64 limbs and
-# Karatsuba above; single-limb short division or Knuth's Algorithm D (TAOCP
-# 4.3.1); binary square-and-multiply for `**` and `pow_mod`; two's complement
-# over infinite sign extension for `& | ^ ~ << >>`. `//` truncates toward zero
-# and `%` takes the dividend's sign, the prelude's Int32 rule. `hash` mixes
-# every limb with wrapping arithmetic, so any size hashes.
+# Karatsuba above; single-limb short division, one pass for a quotient of
+# one limb, or Knuth's Algorithm D (TAOCP 4.3.1); binary square-and-multiply
+# for `**`; Montgomery multiplication on 64-bit words with a sliding window
+# for `pow_mod` modulo an odd number, a fixed window that reads its whole
+# table for `pow_mod_secret`, square-and-multiply modulo an even one; two's
+# complement over infinite sign extension for `& | ^ ~ << >>`. `//`
+# truncates toward zero and `%` takes the dividend's sign, the prelude's
+# Int32 rule. `hash` mixes every limb with wrapping arithmetic, so any size
+# hashes.
+#
+# `inverse_mod_secret`'s constant time, read off the assembly of a
+# --release x86_64 build (the whole of `BigInt#inverse_mod_secret`, into
+# which `Montgomery#inverse`, `negate`, `borrow_of`, `equal_mask` and
+# `bits_of` are inlined, and `Montgomery#into_range`, which is not).
+# Before the rounds: the modulus' checks, `%`, `Montgomery.new` and
+# `Montgomery.words`, whose branches and loops follow the sizes of x and
+# m - x's length shows there, as with `pow_mod_secret`'s base. In the
+# rounds every conditional jump compares a counter (the round, j against
+# n, the 31 steps, the vector loops' trip counts against n, n against 0
+# and 2) or is an overflow check on one; every load and store indexes by
+# such a counter or by n - 1, the word at the longer length being taken
+# by a masked read of every word, not by an index; each choice is an and,
+# an or or an xor of a mask, no cmov. `into_range`'s 21 jumps compare its
+# counters and n alone. After the rounds: the test that b is 1 branches,
+# which is the answer's nil and public, and `BigInt.new` trims the
+# answer's leading zero limbs, which shows how many it has.
+# bench/ct_timing.sh, x = (m - 1) / 2 against random x modulo 2048 bits:
+# |t| = 2.4 to 3.4 over 50,000 to 100,000 inversions (under 10 is no
+# leak seen), where the extended Euclid's algorithm std/rsa had reached
+# |t| = 317 to 403 on 2,000 to 5,000.
 #
 # BigDecimal is `value * 10^-scale` with an exact BigInt value. `+ - *` are
 # exact. `/` is the one operation that can be inexact: `div(other, precision)`
@@ -31,11 +56,15 @@
 #
 # BigRational is a reduced numerator/denominator pair with a positive
 # denominator; every operation reduces, so `==` and `hash` are structural.
+#
+# BigFloat is a binary float of any precision, `±mantissa · 2^exponent`
+# with the mantissa exactly `precision` bits, each result rounded once to
+# the nearest, ties to even, from its exact value (see `BigFloat`).
 
 module std/big
 
-import std/traits
-using std/traits::{Comparable, Num, Hashable}
+import std/int
+import std/traits::{Comparable, Num, Hashable}
 
 pub struct BigInt
   getter sign : Int32
@@ -95,6 +124,46 @@ pub struct BigInt
     parse(str, 16)
   end
 
+  # The big-endian *bytes* as a non-negative BigInt: a key, a signature, a
+  # coordinate as cryptography writes them. Four bytes a limb, the low
+  # limb from the last four.
+  def self.from_bytes(bytes : Array(UInt8)) : BigInt
+    limbs = Array(UInt64).new((bytes.size + 3) // 4, 0_u64)
+    n = bytes.size
+    i = 0
+    while i < n
+      limbs[i // 4] = limbs[i // 4] | (bytes[n - 1 - i].to_u64 << ((i % 4) * 8))
+      i = i + 1
+    end
+    BigInt.new(1, limbs)
+  end
+
+  # The value big-endian in exactly *size* bytes, zeros in front: the
+  # inverse of `from_bytes` at a fixed width, which is how a signature or a
+  # coordinate is written. Nil for a negative value or one that does not
+  # fit, never a value cut short.
+  def to_bytes(size : Int32) : Array(UInt8)?
+    return nil if negative? || size < 0
+    bytes = Array(UInt8).new(size, 0_u8)
+    i = 0
+    while i < @limbs.size
+      limb = @limbs[i]
+      k = 0
+      while k < 4
+        byte = ((limb >> (k * 8)) & 0xFF_u64).to_u8
+        at = i * 4 + k
+        if at >= size
+          return nil unless byte == 0_u8
+        else
+          bytes[size - 1 - at] = byte
+        end
+        k = k + 1
+      end
+      i = i + 1
+    end
+    bytes
+  end
+
   # Parses a string with full error checking.
   def self.parse(str : String, base : Int32 = 10) : BigInt
     raise "invalid base: #{base} (must be 2..36)" if base < 2 || base > 36
@@ -140,102 +209,128 @@ pub struct BigInt
 
     raise "invalid BigInt: empty digits after prefix" if start_idx > end_idx
 
-    # Parse digits
-    result = BigInt.zero
-    radix_big = BigInt.new(actual_base.to_i64)
+    # The digits' values, most significant first. Each base keeps its own
+    # sentence for a byte that is not one of its digits.
+    digits = Array(UInt8).new(end_idx - start_idx + 1)
+    idx = start_idx
+    while idx <= end_idx
+      byte = bytes[idx]
+      idx = idx + 1
+      next if byte == 95_u8 # '_'
+      digit = BigInt.digit_value(byte)
+      if digit >= actual_base
+        char = byte.unsafe_chr
+        raise "invalid BigInt digit: #{char}" if actual_base == 10
+        raise "invalid BigInt hex digit: #{char}" if actual_base == 16
+        raise "invalid BigInt binary digit: #{char}" if actual_base == 2
+        raise "invalid BigInt digit: #{char} for base #{actual_base}"
+      end
+      digits << digit.to_u8
+    end
+    # Underscores are skipped, so `_`, `-_` and `0x_` get here with none.
+    raise "invalid BigInt: no digits in \"#{str}\"" if digits.empty?
 
-    # For base 10, parse in chunks of 9 digits to accelerate parsing
-    if actual_base == 10
-      chunk_val = 0_u64
-      chunk_len = 0
-      idx = start_idx
-      while idx <= end_idx
-        byte = bytes[idx]
-        if byte == 95_u8 # '_'
-          idx = idx + 1
-          next
-        end
-        raise "invalid BigInt digit: #{byte.unsafe_chr}" if byte < 48_u8 || byte > 57_u8
-        digit = (byte - 48_u8).to_u64
-        chunk_val = chunk_val * 10_u64 + digit
-        chunk_len = chunk_len + 1
-        if chunk_len == 9
-          result = result * 1000000000_i64 + chunk_val.to_i64
-          chunk_val = 0_u64
-          chunk_len = 0
-        end
-        idx = idx + 1
-      end
-      if chunk_len > 0
-        multiplier = 1_i64
-        c = 0
-        while c < chunk_len
-          multiplier = multiplier * 10_i64
-          c = c + 1
-        end
-        result = result * multiplier + chunk_val.to_i64
-      end
-    elsif actual_base == 16
-      # Parse hex in chunks of 8 characters (32 bits per limb)
-      chunk_val = 0_u64
-      chunk_len = 0
-      idx = start_idx
-      while idx <= end_idx
-        byte = bytes[idx]
-        if byte == 95_u8
-          idx = idx + 1
-          next
-        end
-        digit = -1
-        if byte >= 48_u8 && byte <= 57_u8
-          digit = (byte - 48_u8).to_i32
-        elsif byte >= 97_u8 && byte <= 102_u8
-          digit = (byte - 97_u8 + 10_u8).to_i32
-        elsif byte >= 65_u8 && byte <= 70_u8
-          digit = (byte - 65_u8 + 10_u8).to_i32
-        end
-        raise "invalid BigInt hex digit: #{byte.unsafe_chr}" if digit < 0
-        result = (result << 4) | BigInt.new(digit.to_i64)
-        idx = idx + 1
-      end
-    elsif actual_base == 2
-      # Parse binary in bits
-      idx = start_idx
-      while idx <= end_idx
-        byte = bytes[idx]
-        if byte == 95_u8
-          idx = idx + 1
-          next
-        end
-        raise "invalid BigInt binary digit: #{byte.unsafe_chr}" if byte != 48_u8 && byte != 49_u8
-        bit = (byte - 48_u8).to_i64
-        result = (result << 1) | BigInt.new(bit)
-        idx = idx + 1
-      end
+    result = BigInt.from_digits(digits, actual_base)
+    sign < 0 ? result.negate : result
+  end
+
+  # A digit byte's value in any base up to 36, or 36 for a byte that is a
+  # digit in none.
+  protected def self.digit_value(byte : UInt8) : Int32
+    if byte >= 48_u8 && byte <= 57_u8
+      (byte - 48_u8).to_i32
+    elsif byte >= 97_u8 && byte <= 122_u8
+      (byte - 87_u8).to_i32
+    elsif byte >= 65_u8 && byte <= 90_u8
+      (byte - 55_u8).to_i32
     else
-      # General base parsing
-      idx = start_idx
-      while idx <= end_idx
-        byte = bytes[idx]
-        if byte == 95_u8
-          idx = idx + 1
-          next
+      36
+    end
+  end
+
+  # The value of `digits`, most significant first, in `base`: the inverse
+  # of `to_s(base)`, and built the same way. A power-of-two base packs the
+  # digits' bits into limbs directly. Any other splits the digits at a
+  # power of the chunk (`append_digits`), so that the halves meet in one
+  # Karatsuba product each, and runs the short pieces at the bottom through
+  # one multiply-add per chunk in place. This had shifted or multiplied a
+  # whole new BigInt per digit - per nine digits in decimal - and 80,000
+  # hex digits took more than a second.
+  protected def self.from_digits(digits : Array(UInt8), base : Int32) : BigInt
+    count = digits.size
+    return BigInt.zero if count == 0
+    if base & (base - 1) == 0
+      width = BigInt.bits_per_digit(base).to_u64
+      limbs = Array(UInt64).new(count * width.to_i32 // 32 + 1)
+      acc = 0_u64
+      held = 0_u64
+      i = count - 1
+      while i >= 0
+        acc = acc | digits[i].to_u64.unsafe_shl(held)
+        held = held + width
+        if held >= 32_u64
+          limbs << (acc & 0xFFFFFFFF_u64)
+          acc = acc.unsafe_shr(32_u64)
+          held = held - 32_u64
         end
-        digit = -1
-        if byte >= 48_u8 && byte <= 57_u8
-          digit = (byte - 48_u8).to_i32
-        elsif byte >= 97_u8 && byte <= 122_u8
-          digit = (byte - 97_u8 + 10_u8).to_i32
-        elsif byte >= 65_u8 && byte <= 90_u8
-          digit = (byte - 65_u8 + 10_u8).to_i32
-        end
-        raise "invalid BigInt digit: #{byte.unsafe_chr} for base #{actual_base}" if digit < 0 || digit >= actual_base
-        result = result * radix_big + BigInt.new(digit.to_i64)
-        idx = idx + 1
+        i = i - 1
       end
+      limbs << acc if acc > 0_u64
+      return BigInt.new(1, limbs)
     end
 
-    sign < 0 ? result.negate : result
+    chunk = base.to_u64
+    per = 1
+    while chunk * base.to_u64 <= 0xFFFFFFFF_u64
+      chunk = chunk * base.to_u64
+      per = per + 1
+    end
+    powers = [BigInt.new(chunk.to_i64)]
+    while per.unsafe_shl(powers.size) < count
+      powers << powers.last * powers.last
+    end
+    value_of_digits(digits, 0, count, base.to_u64, per, powers)
+  end
+
+  # The value of `count` digits from `from`: the high part times the power
+  # of the chunk that the low part's digits stand for, plus the low part.
+  protected def self.value_of_digits(digits : Array(UInt8), from : Int32, count : Int32, base : UInt64, per : Int32, powers : Array(BigInt)) : BigInt
+    if count > per * DIGITS_SPLIT_LIMBS
+      level = powers.size - 1
+      while level > 0 && per.unsafe_shl(level) >= count
+        level = level - 1
+      end
+      low = per.unsafe_shl(level)
+      high = value_of_digits(digits, from, count - low, base, per, powers)
+      return high * powers[level] + value_of_digits(digits, from + count - low, low, base, per, powers)
+    end
+
+    limbs = Array(UInt64).new(count // per + 2)
+    i = from
+    stop = from + count
+    while i < stop
+      value = 0_u64
+      scale = 1_u64
+      taken = 0
+      while taken < per && i < stop
+        value = value * base + digits[i].to_u64
+        scale = scale * base
+        taken = taken + 1
+        i = i + 1
+      end
+      carry = value
+      w = limbs.to_unsafe
+      j = 0
+      size = limbs.size
+      while j < size
+        product = w[j] &* scale &+ carry
+        w[j] = product & 0xFFFFFFFF_u64
+        carry = product.unsafe_shr(32_u64)
+        j = j + 1
+      end
+      limbs << carry if carry > 0_u64
+    end
+    BigInt.new(1, limbs)
   end
 
   # Number of limbs currently allocated.
@@ -293,11 +388,11 @@ pub struct BigInt
     if @limbs.size != other.limbs.size
       return @limbs.size < other.limbs.size ? -1 : 1
     end
+    a = @limbs.to_unsafe
+    b = other.limbs.to_unsafe
     i = @limbs.size - 1
     while i >= 0
-      if @limbs[i] != other.limbs[i]
-        return @limbs[i] < other.limbs[i] ? -1 : 1
-      end
+      return a[i] < b[i] ? -1 : 1 if a[i] != b[i]
       i = i - 1
     end
     0
@@ -394,9 +489,22 @@ pub struct BigInt
     self + BigInt.new(other.to_i64)
   end
 
-  # Subtraction
+  # Subtraction: the sum with the other's sign turned, without copying it.
   def -(other : BigInt) : BigInt
-    self + other.negate
+    return self if other.zero?
+    return other.negate if zero?
+    if @sign != other.sign
+      BigInt.new(@sign, add_abs_limbs(@limbs, other.limbs))
+    else
+      c = cmp_abs(other)
+      if c == 0
+        BigInt.zero
+      elsif c > 0
+        BigInt.new(@sign, sub_abs_limbs(@limbs, other.limbs))
+      else
+        BigInt.new(-@sign, sub_abs_limbs(other.limbs, @limbs))
+      end
+    end
   end
 
   def -(other : Int64) : BigInt
@@ -407,36 +515,55 @@ pub struct BigInt
     self - BigInt.new(other.to_i64)
   end
 
+  # The limb loops below go through the arrays' pointers: every index is
+  # inside the sizes they are given, and a bounds check and a growth check
+  # per limb were most of what adding, multiplying and dividing cost.
   private def add_abs_limbs(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
-    n = a.size > b.size ? a.size : b.size
-    res = Array(UInt64).new(n + 1)
+    long = a.size >= b.size ? a : b
+    short = a.size >= b.size ? b : a
+    n = long.size
+    m = short.size
+    res = Array(UInt64).unsafe_build(n + 1)
+    r = res.to_unsafe
+    x = long.to_unsafe
+    y = short.to_unsafe
     carry = 0_u64
     i = 0
-    while i < n
-      va = i < a.size ? a[i] : 0_u64
-      vb = i < b.size ? b[i] : 0_u64
-      sum = va + vb + carry
-      res << (sum & 0xFFFFFFFF_u64)
+    while i < m
+      sum = x[i] &+ y[i] &+ carry
+      r[i] = sum & 0xFFFFFFFF_u64
       carry = sum.unsafe_shr(32_u64)
       i = i + 1
     end
-    res << carry if carry > 0_u64
+    while i < n
+      sum = x[i] &+ carry
+      r[i] = sum & 0xFFFFFFFF_u64
+      carry = sum.unsafe_shr(32_u64)
+      i = i + 1
+    end
+    r[n] = carry
+    res.unsafe_set_size(carry > 0_u64 ? n + 1 : n)
     res
   end
 
+  # |a| - |b|, |a| at least |b|.
   private def sub_abs_limbs(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
-    res = Array(UInt64).new(a.size)
+    n = a.size
+    m = b.size
+    res = Array(UInt64).unsafe_build(n)
+    r = res.to_unsafe
+    x = a.to_unsafe
+    y = b.to_unsafe
     borrow = 0_u64
     i = 0
-    while i < a.size
-      va = a[i]
-      vb = i < b.size ? b[i] : 0_u64
-      sub = vb + borrow
+    while i < n
+      sub = (i < m ? y[i] : 0_u64) &+ borrow
+      va = x[i]
       if va >= sub
-        res << (va - sub)
+        r[i] = va &- sub
         borrow = 0_u64
       else
-        res << (va + 0x100000000_u64 - sub)
+        r[i] = va &+ 0x100000000_u64 &- sub
         borrow = 1_u64
       end
       i = i + 1
@@ -458,43 +585,65 @@ pub struct BigInt
   end
 
   def *(other : Int64) : BigInt
-    self * BigInt.new(other)
+    return BigInt.zero if zero? || other == 0_i64
+    magnitude = other == -9223372036854775808_i64 ? 0x8000000000000000_u64 : (other < 0_i64 ? -other : other).to_u64
+    return self * BigInt.new(other) if magnitude > 0xFFFFFFFF_u64
+    BigInt.new(other < 0_i64 ? -@sign : @sign, mul_limb(@limbs, magnitude))
   end
 
   def *(other : Int32) : BigInt
-    self * BigInt.new(other.to_i64)
+    self * other.to_i64
   end
 
+  # |a| times one limb, in one pass.
+  private def mul_limb(a : Array(UInt64), limb : UInt64) : Array(UInt64)
+    n = a.size
+    res = Array(UInt64).unsafe_build(n + 1)
+    r = res.to_unsafe
+    x = a.to_unsafe
+    carry = 0_u64
+    i = 0
+    while i < n
+      product = x[i] &* limb &+ carry
+      r[i] = product & 0xFFFFFFFF_u64
+      carry = product.unsafe_shr(32_u64)
+      i = i + 1
+    end
+    r[n] = carry
+    res.unsafe_set_size(carry > 0_u64 ? n + 1 : n)
+    res
+  end
+
+  # The result starts at zero: `Pointer.malloc` clears what it hands out.
   private def mul_schoolbook(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
     n = a.size
     m = b.size
-    res_size = n + m
-    res = Array(UInt64).new(res_size) { 0_u64 }
+    res = Array(UInt64).unsafe_build(n + m)
+    r = res.to_unsafe
+    x = a.to_unsafe
+    y = b.to_unsafe
     i = 0
     while i < n
-      a_limb = a[i]
+      a_limb = x[i]
       if a_limb != 0_u64
         carry = 0_u64
         j = 0
         while j < m
-          prod = a_limb * b[j] + res[i + j] + carry
-          res[i + j] = prod & 0xFFFFFFFF_u64
+          # At most (2^32 - 1)^2 + 2 * (2^32 - 1), which is 2^64 - 1.
+          prod = a_limb &* y[j] &+ r[i + j] &+ carry
+          r[i + j] = prod & 0xFFFFFFFF_u64
           carry = prod.unsafe_shr(32_u64)
           j = j + 1
         end
-        k = i + m
-        while carry > 0_u64
-          sum = res[k] + carry
-          res[k] = sum & 0xFFFFFFFF_u64
-          carry = sum.unsafe_shr(32_u64)
-          k = k + 1
-        end
+        r[i + m] = carry
       end
       i = i + 1
     end
-    while res.size > 0 && res.last == 0_u64
-      res.pop
+    size = n + m
+    while size > 0 && r[size - 1] == 0_u64
+      size = size - 1
     end
+    res.unsafe_set_size(size)
     res
   end
 
@@ -531,6 +680,15 @@ pub struct BigInt
     n = a.size > b.size ? a.size : b.size
     k = (n + 1) // 2
 
+    # The split below takes k limbs off each side for the low halves and
+    # the rest for the high ones, which is a negative count for a side
+    # shorter than k: `3 ** 10000` multiplies a squared base by a result
+    # a fraction of its size, and panicked "negative capacity". A side that
+    # short is multiplied against the other in pieces of its own size.
+    if a.size < k || b.size < k
+      return mul_unbalanced(a.size < b.size ? a : b, a.size < b.size ? b : a, threshold)
+    end
+
     x0 = slice_limbs(a, 0, k)
     x1 = slice_limbs(a, k, a.size - k)
     y0 = slice_limbs(b, 0, k)
@@ -549,10 +707,66 @@ pub struct BigInt
     add_abs_limbs(add_abs_limbs(z2_shifted, z1_shifted), z0)
   end
 
-  # Division and Modulo: Knuth Algorithm D
-  # Returns {quotient, remainder}.
+  # |short| times |long|, where `long` is more than twice as long: `long` in
+  # pieces of `short`'s size, each piece's product added in at its offset.
+  # The result starts at zero (`mul_schoolbook`), and a carry out of a
+  # piece's product stops before n + m, because the whole product fits.
+  private def mul_unbalanced(short : Array(UInt64), long : Array(UInt64), threshold : Int32) : Array(UInt64)
+    m = short.size
+    n = long.size
+    res = Array(UInt64).unsafe_build(n + m)
+    r = res.to_unsafe
+    offset = 0
+    while offset < n
+      count = n - offset < m ? n - offset : m
+      piece = mul_karatsuba(short, slice_limbs(long, offset, count), threshold)
+      p = piece.to_unsafe
+      carry = 0_u64
+      i = 0
+      while i < piece.size
+        sum = r[offset + i] &+ p[i] &+ carry
+        r[offset + i] = sum & 0xFFFFFFFF_u64
+        carry = sum.unsafe_shr(32_u64)
+        i = i + 1
+      end
+      while carry > 0_u64
+        sum = r[offset + i] &+ carry
+        r[offset + i] = sum & 0xFFFFFFFF_u64
+        carry = sum.unsafe_shr(32_u64)
+        i = i + 1
+      end
+      offset = offset + m
+    end
+    size = n + m
+    while size > 0 && r[size - 1] == 0_u64
+      size = size - 1
+    end
+    res.unsafe_set_size(size)
+    res
+  end
+
+  # Division and Modulo. Returns {quotient, remainder}.
   # Division truncates towards zero; remainder follows the sign of the dividend (self).
+  #
+  # A long divisor and a long quotient go to `divmod_recursive`, the
+  # recursive division `to_s` splits its digits with, on the magnitudes,
+  # and take their signs after. Long division costs the product of the
+  # quotient's length and the divisor's, and every division went to it: a
+  # value twice a divisor of 524,288 bits took 282 ms in a release build
+  # and one of 2,097,152 bits 4,929 ms, four times over per doubling,
+  # where these take 179 and 1,964.
   def divmod(other : BigInt) : Tuple(BigInt, BigInt)
+    raise "division by zero" if other.zero?
+    divisor_bits = BigInt.bit_length(other)
+    if divisor_bits > DIVIDE_RECURSIVE_BITS && BigInt.bit_length(self) - divisor_bits > DIVIDE_SPLIT_BITS
+      q, r = abs.divmod_recursive(other.abs)
+      return {@sign == other.sign ? q : q.negate, @sign < 0 ? r.negate : r}
+    end
+    divmod_long(other)
+  end
+
+  # Knuth's Algorithm D, with the signs `divmod` gives.
+  protected def divmod_long(other : BigInt) : Tuple(BigInt, BigInt)
     raise "division by zero" if other.zero?
     return {BigInt.zero, BigInt.zero} if zero?
 
@@ -571,23 +785,16 @@ pub struct BigInt
     # Single-limb divisor optimization: O(m) division
     if other.limbs.size == 1
       v0 = other.limbs[0]
-      q_limbs = Array(UInt64).new(@limbs.size)
+      q_limbs = Array(UInt64).unsafe_build(@limbs.size)
+      q = q_limbs.to_unsafe
+      u = @limbs.to_unsafe
       rem = 0_u64
       i = @limbs.size - 1
       while i >= 0
-        cur = rem.unsafe_shl(32_u64) | @limbs[i]
-        q_limbs << cur.unsafe_div(v0)
+        cur = rem.unsafe_shl(32_u64) | u[i]
+        q[i] = cur.unsafe_div(v0)
         rem = cur.unsafe_mod(v0)
         i = i - 1
-      end
-      left = 0
-      right = q_limbs.size - 1
-      while left < right
-        tmp_swap = q_limbs[left]
-        q_limbs[left] = q_limbs[right]
-        q_limbs[right] = tmp_swap
-        left = left + 1
-        right = right - 1
       end
       r_limbs = Array(UInt64).new(1)
       r_limbs << rem if rem > 0_u64
@@ -595,6 +802,16 @@ pub struct BigInt
       r = BigInt.new(r_sign, r_limbs)
       return {q, r}
     end
+
+    # A quotient under 2^32, which is what each step of Euclid's algorithm
+    # divides by: `divmod_one_limb`, one pass and one array where Algorithm
+    # D below copies both operands to normalise them and the remainder
+    # twice more to give it back. A 2048-bit value over a 2046-bit one took
+    # 0.60 us and takes 0.15 in a --release build, and the extended Euclid
+    # that inverted a 2048-bit RSA signature's blinding factor went from
+    # 592 us to 281 with it (std/rsa now takes `inverse_mod_secret`).
+    shift = BigInt.bit_length(other) - 32
+    return divmod_one_limb(other, shift, q_sign, r_sign) if BigInt.bit_length(self) - shift <= 63
 
     # Knuth Algorithm D for n >= 2 limbs
     n = other.limbs.size
@@ -616,16 +833,19 @@ pub struct BigInt
       u_prime << 0_u64
     end
 
-    q_limbs = Array(UInt64).new(m + 1) { 0_u64 }
-    vn1 = v_prime[n - 1]
-    vn2 = v_prime[n - 2]
+    q_limbs = Array(UInt64).unsafe_build(m + 1)
+    qp = q_limbs.to_unsafe
+    up = u_prime.to_unsafe
+    vp = v_prime.to_unsafe
+    vn1 = vp[n - 1]
+    vn2 = vp[n - 2]
 
     # Steps D2 through D7: Loop on j from m down to 0
     j = m
     while j >= 0
-      ujn = u_prime[j + n]
-      ujn1 = u_prime[j + n - 1]
-      ujn2 = u_prime[j + n - 2]
+      ujn = up[j + n]
+      ujn1 = up[j + n - 1]
+      ujn2 = up[j + n - 2]
 
       # Step D3: Calculate quotient estimate q_hat
       numerator = ujn.unsafe_shl(32_u64) | ujn1
@@ -648,26 +868,26 @@ pub struct BigInt
       borrow = 0_u64
       k = 0
       while k < n
-        p = q_hat * v_prime[k] + borrow
+        p = q_hat &* vp[k] &+ borrow
         p_low = p & 0xFFFFFFFF_u64
         borrow = p.unsafe_shr(32_u64)
 
-        u_val = u_prime[j + k]
+        u_val = up[j + k]
         if u_val >= p_low
-          u_prime[j + k] = u_val - p_low
+          up[j + k] = u_val &- p_low
         else
-          u_prime[j + k] = u_val + 0x100000000_u64 - p_low
-          borrow = borrow + 1_u64
+          up[j + k] = u_val &+ 0x100000000_u64 &- p_low
+          borrow = borrow &+ 1_u64
         end
         k = k + 1
       end
 
-      u_val = u_prime[j + n]
+      u_val = up[j + n]
       if u_val >= borrow
-        u_prime[j + n] = u_val - borrow
+        up[j + n] = u_val &- borrow
         negative = false
       else
-        u_prime[j + n] = u_val + 0x100000000_u64 - borrow
+        up[j + n] = u_val &+ 0x100000000_u64 &- borrow
         negative = true
       end
 
@@ -677,15 +897,15 @@ pub struct BigInt
         carry = 0_u64
         k = 0
         while k < n
-          sum = u_prime[j + k] + v_prime[k] + carry
-          u_prime[j + k] = sum & 0xFFFFFFFF_u64
+          sum = up[j + k] &+ vp[k] &+ carry
+          up[j + k] = sum & 0xFFFFFFFF_u64
           carry = sum.unsafe_shr(32_u64)
           k = k + 1
         end
-        u_prime[j + n] = (u_prime[j + n] + carry) & 0xFFFFFFFF_u64
+        up[j + n] = (up[j + n] &+ carry) & 0xFFFFFFFF_u64
       end
 
-      q_limbs[j] = q_hat
+      qp[j] = q_hat
       j = j - 1
     end
 
@@ -701,6 +921,85 @@ pub struct BigInt
     q = BigInt.new(q_sign, q_limbs)
     r = BigInt.new(r_sign, unnorm_rem)
     {q, r}
+  end
+
+  # |self| divided by |other|, two limbs or more, for a quotient under
+  # 2^32: *shift* is the divisor's bit length less 32, and |self| over
+  # 2^shift, A, fits 63 bits. With B the divisor's top 32 bits, the
+  # quotient is estimated as A / (B + 1), which is never more than the
+  # quotient and short of it by less than A / B^2 + 1, at most three; a - q
+  # b is taken in one pass and the divisor taken off what is left while it
+  # is not below it.
+  protected def divmod_one_limb(other : BigInt, shift : Int32, q_sign : Int32, r_sign : Int32) : Tuple(BigInt, BigInt)
+    q = BigInt.window(@limbs, shift) // (BigInt.window(other.limbs, shift) + 1_u64)
+    n = @limbs.size
+    m = other.limbs.size
+    res = Array(UInt64).unsafe_build(n)
+    r = res.to_unsafe
+    u = @limbs.to_unsafe
+    v = other.limbs.to_unsafe
+    carry = 0_u64
+    borrow = 0_u64
+    i = 0
+    while i < n
+      # At most (2^32 - 1)^2 + 2^32 - 1: q is under 2^32.
+      p = (i < m ? q &* v[i] : 0_u64) &+ carry
+      carry = p.unsafe_shr(32_u64)
+      sub = (p & 0xFFFFFFFF_u64) &+ borrow
+      if u[i] >= sub
+        r[i] = u[i] &- sub
+        borrow = 0_u64
+      else
+        r[i] = u[i] &+ 0x100000000_u64 &- sub
+        borrow = 1_u64
+      end
+      i = i + 1
+    end
+    res.unsafe_set_size(n)
+    while BigInt.limbs_at_least(r, n, v, m)
+      borrow = 0_u64
+      i = 0
+      while i < n
+        sub = (i < m ? v[i] : 0_u64) &+ borrow
+        if r[i] >= sub
+          r[i] = r[i] &- sub
+          borrow = 0_u64
+        else
+          r[i] = r[i] &+ 0x100000000_u64 &- sub
+          borrow = 1_u64
+        end
+        i = i + 1
+      end
+      q = q + 1_u64
+    end
+    q_limbs = Array(UInt64).new(2, 0_u64)
+    q_limbs[0] = q & 0xFFFFFFFF_u64
+    q_limbs[1] = q.unsafe_shr(32_u64)
+    {BigInt.new(q_sign, q_limbs), BigInt.new(r_sign, res)}
+  end
+
+  # |value| over 2^shift, for one under 2^64: the limbs from bit *shift*.
+  protected def self.window(limbs : Array(UInt64), shift : Int32) : UInt64
+    i = shift >> 5
+    s = (shift & 31).to_u64
+    w = limbs[i].unsafe_shr(s)
+    w = w | limbs[i + 1].unsafe_shl(32_u64 - s) if i + 1 < limbs.size
+    w = w | limbs[i + 2].unsafe_shl(64_u64 - s) if s > 0_u64 && i + 2 < limbs.size
+    w
+  end
+
+  # Whether the *n* limbs at *r* are at least the *m* at *v*.
+  protected def self.limbs_at_least(r : Pointer(UInt64), n : Int32, v : Pointer(UInt64), m : Int32) : Bool
+    i = n - 1
+    while i >= m
+      return true if r[i] != 0_u64
+      i = i - 1
+    end
+    while i >= 0
+      return r[i] > v[i] if r[i] != v[i]
+      i = i - 1
+    end
+    true
   end
 
   def //(other : BigInt) : BigInt
@@ -730,37 +1029,44 @@ pub struct BigInt
 
   private def shift_left_limbs(limbs : Array(UInt64), bits : UInt64) : Array(UInt64)
     return limbs.dup if bits == 0_u64
-    res = Array(UInt64).new(limbs.size + 1)
+    n = limbs.size
+    res = Array(UInt64).unsafe_build(n + 1)
+    r = res.to_unsafe
+    x = limbs.to_unsafe
     carry = 0_u64
     rshift = 32_u64 - bits
     i = 0
-    while i < limbs.size
-      val = limbs[i]
-      new_val = ((val.unsafe_shl(bits)) | carry) & 0xFFFFFFFF_u64
+    while i < n
+      val = x[i]
+      r[i] = (val.unsafe_shl(bits) | carry) & 0xFFFFFFFF_u64
       carry = val.unsafe_shr(rshift)
-      res << new_val
       i = i + 1
     end
-    res << carry if carry > 0_u64
+    r[n] = carry
+    res.unsafe_set_size(carry > 0_u64 ? n + 1 : n)
     res
   end
 
   private def shift_right_limbs(limbs : Array(UInt64), bits : UInt64) : Array(UInt64)
     return limbs.dup if bits == 0_u64
-    res = Array(UInt64).new(limbs.size) { 0_u64 }
+    n = limbs.size
+    res = Array(UInt64).unsafe_build(n)
+    r = res.to_unsafe
+    x = limbs.to_unsafe
     carry = 0_u64
     lshift = 32_u64 - bits
-    i = limbs.size - 1
+    i = n - 1
     while i >= 0
-      val = limbs[i]
-      new_val = (val.unsafe_shr(bits)) | carry
-      carry = (val.unsafe_shl(lshift)) & 0xFFFFFFFF_u64
-      res[i] = new_val
+      val = x[i]
+      r[i] = val.unsafe_shr(bits) | carry
+      carry = val.unsafe_shl(lshift) & 0xFFFFFFFF_u64
       i = i - 1
     end
-    while res.size > 0 && res.last == 0_u64
-      res.pop
+    size = n
+    while size > 0 && r[size - 1] == 0_u64
+      size = size - 1
     end
+    res.unsafe_set_size(size)
     res
   end
 
@@ -848,8 +1154,17 @@ pub struct BigInt
     self
   end
 
-  # Modular exponentiation: (self ** exp) % mod
-  # Essential for RSA/DH and cryptography.
+  # Modular exponentiation: (self ** exp) % mod, in 0...mod whatever the
+  # base's sign. An odd modulus, which is every modulus RSA, Diffie-Hellman
+  # and DSA work in, goes to `Montgomery` with a sliding window; an even one
+  # keeps square-and-multiply with a division per step.
+  #
+  # Each step here was a product and a long division of twice the
+  # modulus' length, and a 2048-bit modulus with a 2048-bit exponent took
+  # 19.0 ms in a --release build where Python 3.14's `pow` took 13.3 (3072
+  # bits: 63.2 and 42.3, 4096: 168.7 and 100.3). Montgomery's takes 2.5 ms,
+  # 8.5 and 20.6 in the run of bench/std_big_exercise.sh that measured
+  # Python at 13.7, 45.4 and 102.1, which prints these each run.
   def pow_mod(exp : BigInt, mod : BigInt) : BigInt
     raise "modulo by zero" if mod.zero?
     raise "modulus must be positive" if mod.negative?
@@ -859,17 +1174,63 @@ pub struct BigInt
     # Ensure base is non-negative modulo mod
     base = self % mod
     base = base + mod if base.negative?
+    return Montgomery.new(mod, false).pow(base, exp) if mod.odd?
 
-    result = BigInt.one % mod
-    e = exp
-    while !e.zero?
-      if e.odd?
+    # The exponent's bits read where they lie: shifting it right a bit at
+    # a time made a copy of it per bit.
+    result = BigInt.one
+    bits = BigInt.bit_length(exp)
+    i = 0
+    while i < bits
+      if (exp.limbs[i >> 5].unsafe_shr((i & 31).to_u64) & 1_u64) == 1_u64
         result = (result * base) % mod
       end
-      e = e >> 1
-      base = (base * base) % mod if !e.zero?
+      i = i + 1
+      base = (base * base) % mod if i < bits
     end
     result
+  end
+
+  # `pow_mod` for an exponent that is a secret, a private key's: a fixed
+  # window, every entry of its table read for each window and the one
+  # wanted kept by a mask, so neither a branch nor a memory address depends
+  # on the exponent's bits, and as many windows as the longer of the
+  # exponent and the modulus takes, so the exponent's length does not show
+  # either. The modulus has to be odd (a Montgomery modulus): an even one
+  # is a misuse, refused.
+  #
+  # What it does not hide: the base is reduced by `%`, whose time depends
+  # on the base and the modulus, so a caller with a secret base (RSA's
+  # CRT halves of a message) blinds it first, as std/rsa's signing does.
+  def pow_mod_secret(exp : BigInt, mod : BigInt) : BigInt
+    raise "modulo by zero" if mod.zero?
+    raise "modulus must be positive" if mod.negative?
+    raise "negative exponent in pow_mod_secret: #{exp}" if exp.negative?
+    raise "pow_mod_secret needs an odd modulus, not #{mod}" if mod.even?
+    return BigInt.zero if mod == 1_i64
+    base = self % mod
+    base = base + mod if base.negative?
+    exp_bits = BigInt.bit_length(exp)
+    mod_bits = BigInt.bit_length(mod)
+    Montgomery.new(mod, true).pow_fixed(base, exp, exp_bits > mod_bits ? exp_bits : mod_bits)
+  end
+
+  # The inverse of self modulo an odd *mod*, in 0...mod, or nil when the
+  # two share a factor (Python's `pow(self, -1, mod)`, which raises
+  # there): for a value that is a secret, such as RSA's blinding factor.
+  # The steps taken, their branches and the words they read depend on the
+  # modulus' length alone (`Montgomery#inverse`); an even modulus is a
+  # misuse, refused. As with `pow_mod_secret`, self is reduced by `%`
+  # first, whose time depends on it: a caller hands in a value below the
+  # modulus.
+  def inverse_mod_secret(mod : BigInt) : BigInt?
+    raise "modulo by zero" if mod.zero?
+    raise "modulus must be positive" if mod.negative?
+    raise "inverse_mod_secret needs an odd modulus, not #{mod}" if mod.even?
+    return BigInt.zero if mod == 1_i64
+    x = self % mod
+    x = x + mod if x.negative?
+    Montgomery.new(mod, false).inverse(x)
   end
 
   def pow_mod(exp : Int64, mod : Int64) : BigInt
@@ -888,34 +1249,22 @@ pub struct BigInt
     limb_shift = count // 32
     bit_shift = (count % 32).to_u64
 
-    res_limbs = Array(UInt64).new(@limbs.size + limb_shift + 1)
-    # Prepend zero limbs
+    # Zero limbs below, from `Pointer.malloc`, and the shifted ones above.
+    n = @limbs.size
+    res_limbs = Array(UInt64).unsafe_build(n + limb_shift + 1)
+    r = res_limbs.to_unsafe + limb_shift.to_i64
+    x = @limbs.to_unsafe
+    carry = 0_u64
+    rshift = 32_u64 - bit_shift
     i = 0
-    while i < limb_shift
-      res_limbs << 0_u64
+    while i < n
+      val = x[i]
+      r[i] = (val.unsafe_shl(bit_shift) | carry) & 0xFFFFFFFF_u64
+      carry = val.unsafe_shr(rshift)
       i = i + 1
     end
-
-    if bit_shift == 0_u64
-      i = 0
-      while i < @limbs.size
-        res_limbs << @limbs[i]
-        i = i + 1
-      end
-    else
-      carry = 0_u64
-      rshift = 32_u64 - bit_shift
-      i = 0
-      while i < @limbs.size
-        val = @limbs[i]
-        new_val = ((val.unsafe_shl(bit_shift)) | carry) & 0xFFFFFFFF_u64
-        carry = val.unsafe_shr(rshift)
-        res_limbs << new_val
-        i = i + 1
-      end
-      res_limbs << carry if carry > 0_u64
-    end
-
+    r[n] = carry
+    res_limbs.unsafe_set_size(carry > 0_u64 ? n + limb_shift + 1 : n + limb_shift)
     BigInt.new(@sign, res_limbs)
   end
 
@@ -1128,114 +1477,240 @@ pub struct BigInt
 
   # Converts this BigInt to a string in the given base (default 10).
   # Bases 2..36 supported. Digits above 9 are lowercase 'a'..'z'.
+  #
+  # The digits are gathered least significant first and written into the
+  # string once. A base that is a power of two reads them straight off the
+  # limbs' bits; any other divides a copy of the limbs in place by the
+  # largest power of the base a limb holds - 10^9 for decimal - and takes
+  # that many digits from each remainder. This had built the text with
+  # `res = res + s`, a copy of everything so far per chunk, and divided by
+  # a fresh one-limb BigInt per chunk, or per digit outside bases 2, 10
+  # and 16: 3 ** 400000 took a second in decimal and in binary, and nine
+  # and a half in base 7.
   def to_s(base : Int32) : String
     raise "invalid base: #{base} (must be 2..36)" if base < 2 || base > 36
     return "0" if zero?
 
-    prefix = @sign < 0 ? "-" : ""
-
-    if base == 16
-      # Hex conversion: 8 hex characters per 32-bit limb
-      res = prefix
-      i = @limbs.size - 1
-      first = true
-      while i >= 0
-        limb = @limbs[i]
-        s = limb.to_s(16)
-        if first
-          res = res + s
-          first = false
-        else
-          pad = 8 - s.size
-          p = 0
-          while p < pad
-            res = res + "0"
-            p = p + 1
-          end
-          res = res + s
+    digits = Array(UInt8).new(@limbs.size * 32 // BigInt.bits_per_digit(base) + 2)
+    if base & (base - 1) == 0
+      width = BigInt.bits_per_digit(base).to_u64
+      mask = (base - 1).to_u64
+      acc = 0_u64
+      held = 0_u64
+      @limbs.each do |limb|
+        acc = acc | limb.unsafe_shl(held)
+        held = held + 32_u64
+        while held >= width
+          digits << BigInt.digit_byte(acc & mask)
+          acc = acc.unsafe_shr(width)
+          held = held - width
         end
-        i = i - 1
       end
-      return res
-    elsif base == 2
-      # Binary conversion
-      res = prefix
-      i = @limbs.size - 1
-      first = true
-      while i >= 0
-        limb = @limbs[i]
-        s = limb.to_s(2)
-        if first
-          res = res + s
-          first = false
-        else
-          pad = 32 - s.size
-          p = 0
-          while p < pad
-            res = res + "0"
-            p = p + 1
-          end
-          res = res + s
-        end
-        i = i - 1
+      while acc > 0_u64
+        digits << BigInt.digit_byte(acc & mask)
+        acc = acc.unsafe_shr(width)
       end
-      return res
-    elsif base == 10
-      # Chunked division by 10^9 (9 decimal digits per chunk)
-      chunks = Array(UInt64).new
-      cur = abs
-      ten_to_nine = BigInt.new(1000000000_i64)
-
-      while !cur.zero?
-        qr = cur.divmod(ten_to_nine)
-        cur = qr[0]
-        rem_big = qr[1]
-        rem_val = rem_big.limbs.empty? ? 0_u64 : rem_big.limbs[0]
-        chunks << rem_val
-      end
-
-      res = prefix
-      i = chunks.size - 1
-      first = true
-      while i >= 0
-        chunk = chunks[i]
-        s = chunk.to_s
-        if first
-          res = res + s
-          first = false
-        else
-          pad = 9 - s.size
-          p = 0
-          while p < pad
-            res = res + "0"
-            p = p + 1
-          end
-          res = res + s
-        end
-        i = i - 1
-      end
-      return res
     else
-      # General base conversion: repeated single-limb division
-      radix_u64 = base.to_u64
-      digits = Array(Char).new
-      cur = abs
-      while !cur.zero?
-        qr = cur.divmod(BigInt.new(base.to_i64))
-        cur = qr[0]
-        rem_big = qr[1]
-        rem_val = rem_big.limbs.empty? ? 0 : rem_big.limbs[0].to_i32
-        char = rem_val < 10 ? (48 + rem_val).chr : (97 + (rem_val - 10)).chr
-        digits << char
+      chunk = base.to_u64
+      per = 1
+      while chunk * base.to_u64 <= 0xFFFFFFFF_u64
+        chunk = chunk * base.to_u64
+        per = per + 1
       end
-      res = prefix
-      i = digits.size - 1
+      # chunk, chunk ** 2, chunk ** 4, ... up to about half this value.
+      powers = [BigInt.new(chunk.to_i64)]
+      while powers.last.limbs.size * 2 <= @limbs.size
+        powers << powers.last * powers.last
+      end
+      abs.append_digits(base.to_u64, chunk, per, powers, powers.size - 1, 0, digits)
+    end
+    while digits.size > 1 && digits.last == 48_u8
+      digits.pop
+    end
+
+    negative = @sign < 0
+    lead = negative ? 1 : 0
+    count = digits.size
+    String.new(count + lead) do |bytes|
+      bytes[0] = 45_u8 if negative
+      i = 0
+      while i < count
+        bytes[lead + i] = digits[count - 1 - i]
+        i = i + 1
+      end
+    end
+  end
+
+  # The bits one digit of a power-of-two base takes; for any other base,
+  # the fewest bits a digit can carry, so that a limb's worth of bits
+  # bounds how many digits it makes.
+  protected def self.bits_per_digit(base : Int32) : Int32
+    bits = 1
+    while (1 << (bits + 1)) <= base
+      bits = bits + 1
+    end
+    bits
+  end
+
+  protected def self.digit_byte(value : UInt64) : UInt8
+    value < 10_u64 ? (48_u64 + value).to_u8 : (87_u64 + value).to_u8
+  end
+
+  # Below this many limbs a value's digits come one chunk at a time.
+  DIGITS_SPLIT_LIMBS = 48
+
+  # The digits of this value's magnitude, least significant first, onto
+  # `sink`: exactly `width` of them when `width` is positive, zeros above.
+  #
+  # A long value is split by `powers[level]`, a power of the chunk about
+  # half its size, and each half is written by the level below - the low
+  # half to exactly the digits that power stands for, so its leading zeros
+  # are kept. Dividing by one chunk at a time is a hardware division per
+  # limb per nine digits, n^2 / 9 of them; the split does that only for the
+  # short pieces at the bottom and multiplies its way through the rest,
+  # dividing by `divmod_recursive`.
+  protected def append_digits(radix : UInt64, chunk : UInt64, per : Int32, powers : Array(BigInt), level : Int32, width : Int32, sink : Array(UInt8)) : Nil
+    if level >= 0 && @limbs.size >= DIGITS_SPLIT_LIMBS
+      if cmp_abs(powers[level]) < 0
+        append_digits(radix, chunk, per, powers, level - 1, width, sink)
+      else
+        split = per.unsafe_shl(level)
+        halves = divmod_recursive(powers[level])
+        halves[1].append_digits(radix, chunk, per, powers, level - 1, split, sink)
+        halves[0].append_digits(radix, chunk, per, powers, level - 1, width > 0 ? width - split : 0, sink)
+      end
+      return
+    end
+
+    start = sink.size
+    work = Array(UInt64).new(@limbs.size)
+    work.concat(@limbs)
+    w = work.to_unsafe
+    size = work.size
+    while size > 0
+      rem = 0_u64
+      i = size - 1
       while i >= 0
-        res = res + digits[i].to_s
+        current = rem.unsafe_shl(32_u64) | w[i]
+        w[i] = current.unsafe_div(chunk)
+        rem = current.unsafe_mod(chunk)
         i = i - 1
       end
-      return res
+      while size > 0 && w[size - 1] == 0_u64
+        size = size - 1
+      end
+      taken = 0
+      while taken < per && (size > 0 || rem > 0_u64)
+        sink << BigInt.digit_byte(rem.unsafe_mod(radix))
+        rem = rem.unsafe_div(radix)
+        taken = taken + 1
+      end
     end
+    while sink.size < start + width
+      sink << 48_u8
+    end
+  end
+
+  # Below this many bits of quotient `divmod`'s long division answers. It
+  # is as fast as the recursion below up to a divisor of 65,536 bits and
+  # slower past it: 53 ms to 45 at 262,144 bits.
+  DIVIDE_SPLIT_BITS = 16384
+
+  # And below this many bits of divisor `divmod` itself divides long:
+  # the recursion is the faster only past it, and it divides a value many
+  # times the divisor's length one divisor's length at a time.
+  DIVIDE_RECURSIVE_BITS = 65536
+
+  # The quotient and remainder of this value, not negative, by `divisor`,
+  # positive, for the time a few products of half the length take: long
+  # division costs the product of the two lengths, and the split print
+  # divides by a power half as long as the value, so `to_s` was quadratic -
+  # 787 ms for 381,698 digits and 3,107 ms for twice as many. Burnikel and
+  # Ziegler's recursive division, in the form Python's `_pylong` writes it,
+  # by bits. A value past twice the divisor's length has its top divided
+  # first, as long division takes a digit at a time; the rest is shifted so
+  # that the divisor's length halves evenly down to where long division is
+  # the faster, and the remainder shifted back.
+  protected def divmod_recursive(divisor : BigInt) : Tuple(BigInt, BigInt)
+    n = BigInt.bit_length(divisor)
+    high = self >> n
+    if high.cmp_abs(divisor) >= 0
+      q, r = high.divmod_recursive(divisor)
+      low, r = ((r << n) + bits(0, n)).divmod_recursive(divisor)
+      return {(q << n) + low, r}
+    end
+    m = n
+    k = 0
+    while m > DIVIDE_SPLIT_BITS
+      m = (m + 1) >> 1
+      k = k + 1
+    end
+    pad = (m << k) - n
+    q, r = (self << pad).div_two_by_one(divisor << pad, m << k)
+    {q, r >> pad}
+  end
+
+  # This value, under `divisor * 2^n`, by `divisor`, exactly `n` bits long
+  # and `n` even until it is short enough for long division: the top
+  # `n + n/2` bits by the divisor, then the remainder and the next `n/2`.
+  # Each is a division by the divisor's top half, a product by its bottom
+  # half, and at most two corrections, the divisor's top bit being set.
+  protected def div_two_by_one(divisor : BigInt, n : Int32) : Tuple(BigInt, BigInt)
+    return divmod_long(divisor) if BigInt.bit_length(self) - n <= DIVIDE_SPLIT_BITS
+    half = n >> 1
+    top = divisor >> half
+    bottom = divisor.bits(0, half)
+    high, r = (self >> n).div_three_by_two(bits(half, half), divisor, top, bottom, half)
+    low, r = r.div_three_by_two(bits(0, half), divisor, top, bottom, half)
+    {(high << half) + low, r}
+  end
+
+  # This value's `2n` bits and `low`'s `n` by `b`, `top` and `bottom` its
+  # halves of `n` bits each.
+  protected def div_three_by_two(low : BigInt, b : BigInt, top : BigInt, bottom : BigInt, n : Int32) : Tuple(BigInt, BigInt)
+    if (self >> n).cmp_abs(top) == 0
+      q = (BigInt.one << n) - BigInt.one
+      r = self - (top << n) + top
+    else
+      q, r = div_two_by_one(top, n)
+    end
+    r = (r << n) + low - q * bottom
+    while r.negative?
+      q = q - BigInt.one
+      r = r + b
+    end
+    {q, r}
+  end
+
+  # `count` bits of this value, not negative, from bit `from` up, in one
+  # copy.
+  protected def bits(from : Int32, count : Int32) : BigInt
+    size = (count + 31) >> 5
+    res = Array(UInt64).new(size)
+    start = from >> 5
+    shift = (from & 31).to_u64
+    i = 0
+    while i < size
+      j = start + i
+      lo = j < @limbs.size ? @limbs[j] : 0_u64
+      hi = j + 1 < @limbs.size ? @limbs[j + 1] : 0_u64
+      res << ((lo.unsafe_shr(shift) | hi.unsafe_shl(32_u64 - shift)) & 0xFFFFFFFF_u64)
+      i = i + 1
+    end
+    res[size - 1] = res[size - 1] & (1_u64.unsafe_shl((count & 31).to_u64) - 1_u64) if count & 31 != 0
+    BigInt.new(1, res)
+  end
+
+  # The bits |value| takes to write.
+  protected def self.bit_length(value : BigInt) : Int32
+    return 0 if value.zero?
+    top = value.limbs.last
+    bits = (value.limbs.size - 1) * 32
+    while top > 0_u64
+      top = top.unsafe_shr(1_u64)
+      bits = bits + 1
+    end
+    bits
   end
 
   def to_s : String
@@ -1364,6 +1839,779 @@ impl Hashable for BigInt
   end
 end
 
+# Arithmetic modulo an odd *m* in Montgomery form, for `pow_mod` and
+# `pow_mod_secret`: a value x is held as x R mod m, R = 2^(64 n) for the n
+# 64-bit words m takes, and a product's division by m becomes a division by
+# R, which is a shift, after adding the multiple of m that clears the low
+# words (q = t n' mod 2^64 a word, n' = -1/m mod 2^64). Words here are 64
+# bits, not BigInt's 32-bit limbs: products are taken in `UInt128`, and a
+# quarter as many of them make a product as 32-bit limbs would.
+#
+# Every value held is reduced, below m, and every operation answers one
+# that is: what a product leaves is under 2m, and m is taken off by a mask,
+# not a branch, so nothing here branches or indexes on a value. For
+# `pow_mod_secret` the conversion constants are made the same way, by
+# doubling and squaring; `pow_mod`, whose numbers are public, takes its
+# base into Montgomery form by one division instead, (base << 64n) mod m,
+# 4 us for a 2048-bit modulus. Making R^2 by squaring was over a third of
+# checking an RSA signature: e = 65537 modulo 2048 bits took 36 us with it
+# and takes 22 without, in a --release build.
+#
+# A mask is not enough on its own: LLVM saw that `0 - keep` is 0 or all
+# ones, made the selection a branch and took it out of the loop, so the
+# release build of the first version here copied t only when it kept t,
+# and the table scan read only the entry it wanted. Every mask is xored
+# with `@zero`, a zero read through an atomic load, which the optimiser
+# cannot see the value of; the assembly of a --release build shows the and
+# and the or in both loops, every time.
+struct Montgomery
+  @m : Array(UInt64)
+  @n : Int32
+  @inv : UInt64
+  # n + 2 words: a product before its final subtraction, or a square's q
+  # words
+  @t : Array(UInt64)
+  # 2n words: a product's q words, or a square while it is reduced
+  @p : Array(UInt64)
+  # R mod m, which is 1 in Montgomery form, and R^2 mod m, which takes a
+  # value into it (made only for a secret exponent)
+  @one : Array(UInt64)
+  @r2 : Array(UInt64)
+  # 0, read where it is needed by an atomic load (see above)
+  @zero : Atomic(UInt64)
+  @mod : BigInt
+  @secret : Bool
+
+  def initialize(@mod : BigInt, @secret : Bool)
+    mod = @mod
+    @m = Montgomery.words(mod.limbs, (mod.limbs.size + 1) >> 1)
+    @n = @m.size
+    @inv = Montgomery.negated_inverse(@m[0])
+    @t = Array(UInt64).new(@n + 2, 0_u64)
+    @p = Array(UInt64).new(2 * @n, 0_u64)
+    @one = Array(UInt64).new(@n, 0_u64)
+    @r2 = Array(UInt64).new(@n, 0_u64)
+    @zero = Atomic(UInt64).new(0_u64)
+    constants(Montgomery.bit_length(mod.limbs))
+  end
+
+  # BigInt's 32-bit limbs two to a word, *n* words.
+  def self.words(limbs : Array(UInt64), n : Int32) : Array(UInt64)
+    res = Array(UInt64).new(n, 0_u64)
+    i = 0
+    while i < limbs.size
+      res[i >> 1] = res[i >> 1] | limbs[i].unsafe_shl(((i & 1) * 32).to_u64)
+      i = i + 1
+    end
+    res
+  end
+
+  # The bits a BigInt's limbs take to write.
+  def self.bit_length(limbs : Array(UInt64)) : Int32
+    return 0 if limbs.empty?
+    top = limbs.last
+    bits = (limbs.size - 1) * 32
+    while top > 0_u64
+      top = top.unsafe_shr(1_u64)
+      bits = bits + 1
+    end
+    bits
+  end
+
+  # Bit *i* of a BigInt's limbs, 0 past the top.
+  def self.bit(limbs : Array(UInt64), i : Int32) : Int32
+    return 0 if (i >> 5) >= limbs.size
+    (limbs[i >> 5].unsafe_shr((i & 31).to_u64) & 1_u64).to_i32
+  end
+
+  # -1/m0 mod 2^64 by Newton's iteration: an odd m0 is its own inverse to
+  # three bits, and each step doubles the bits that are right, so five
+  # steps make 96.
+  def self.negated_inverse(m0 : UInt64) : UInt64
+    x = m0
+    5.times { x = x &* (2_u64 &- m0 &* x) }
+    0_u64 &- x
+  end
+
+  # The window for an exponent of *bits* bits: the sizes OpenSSL takes,
+  # where one more bit of window costs more products to fill the table
+  # than it saves in the exponent.
+  def self.window(bits : Int32) : Int32
+    return 6 if bits > 671
+    return 5 if bits > 239
+    return 4 if bits > 79
+    return 3 if bits > 23
+    1
+  end
+
+  # R mod m, and for a secret exponent R^2 mod m, for an m of *bits* bits.
+  # 2^(bits - 1) is under m (an odd m is not a power of two), and doubling
+  # it with a reduction each time reaches R = 2^(64 n). That is 2^0 in
+  # Montgomery form; doubling on to 2^h R and squaring s times makes
+  # 2^(h 2^s) R, which is R^2 when h 2^s = 64 n: s the trailing zero bits
+  # of 64 n, h its odd part.
+  private def constants(bits : Int32) : Nil
+    n = @n
+    x = @one.to_unsafe
+    x[(bits - 1) >> 6] = 1_u64.unsafe_shl(((bits - 1) & 63).to_u64)
+    (64 * n - bits + 1).times { double(x) }
+    return unless @secret
+    s = 6
+    h = n
+    while (h & 1) == 0
+      h = h >> 1
+      s = s + 1
+    end
+    r = @r2.to_unsafe
+    i = 0
+    while i < n
+      r[i] = x[i]
+      i = i + 1
+    end
+    h.times { double(r) }
+    s.times { sqr(r, r) }
+  end
+
+  # x = 2x mod m, in place.
+  private def double(x : Pointer(UInt64)) : Nil
+    n = @n
+    t = @t.to_unsafe
+    carry = 0_u64
+    i = 0
+    while i < n
+      t[i] = x[i].unsafe_shl(1_u64) | carry
+      carry = x[i].unsafe_shr(63_u64)
+      i = i + 1
+    end
+    reduce(t, carry, x)
+  end
+
+  # r = t - m if t, with *top* the word over its n, is at least m, else t:
+  # the difference is always taken and one of the two kept by a mask. t is
+  # under 2m, so top - borrow is 0 (keep the difference) or -1 (keep t),
+  # and its high word is the mask. r is not t.
+  private def reduce(t : Pointer(UInt64), top : UInt64, r : Pointer(UInt64)) : Nil
+    n = @n
+    m = @m.to_unsafe
+    borrow = 0_u64
+    j = 0
+    while j < n
+      w = t[j].to_u128 &- m[j].to_u128 &- borrow.to_u128
+      r[j] = w.unsafe_to_u64
+      borrow = w.unsafe_shr(127).unsafe_to_u64
+      j = j + 1
+    end
+    below = (top.to_u128 &- borrow.to_u128).unsafe_shr(64).unsafe_to_u64 ^ @zero.get
+    j = 0
+    while j < n
+      r[j] = (t[j] & below) | (r[j] & ~below)
+      j = j + 1
+    end
+  end
+
+  # r = a b / R mod m by finely integrated product scanning (FIPS): the
+  # words of a b + q m are summed a column at a time, low column first,
+  # and column k's low word either fixes q_k, the multiple of m that
+  # clears it, or is word k - n of the result. Nothing is stored per
+  # product: a column's products go into three words held in registers,
+  # a `UInt128` and the carries out of it, which LLVM writes as one add
+  # and two adds with carry, no branch (the assembly of a --release build
+  # branches on counters alone). Word k - n of a and b is not read again
+  # once column k is reached, so r may be a or b. A 1024-bit product, the
+  # size of a 2048-bit RSA key's CRT halves, took 237 ns by operand
+  # scanning (CIOS), which loaded and stored a word of t for every
+  # product, and takes 220 (best of seven runs of 20,000, --release, a
+  # machine other jobs shared). That is 0.43 ns for each of its 512
+  # products, where a loop of nothing but one column's products ran at
+  # 0.36 to 0.47 ns a product here, so what is left to save is products.
+  # Tried and dropped: the column
+  # fully unrolled for 16 words by a macro, 622 ns (LLVM spilled and
+  # shuffled the products through vector registers); the sums split into
+  # one of low words and one of high, no faster.
+  def mul(a : Pointer(UInt64), b : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    n = @n
+    m = @m.to_unsafe
+    t = @t.to_unsafe
+    q = @p.to_unsafe
+    inv = @inv
+    acc = 0_u128
+    top = 0_u64
+    k = 0
+    while k < n
+      i = 0
+      while i < k
+        w = a[i].to_u128 &* b[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        w = q[i].to_u128 &* m[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        i = i &+ 1
+      end
+      w = a[k].to_u128 &* b[0].to_u128
+      acc = acc &+ w
+      top = top &+ (acc < w ? 1_u64 : 0_u64)
+      qk = acc.unsafe_to_u64 &* inv
+      q[k] = qk
+      w = qk.to_u128 &* m[0].to_u128
+      acc = acc &+ w
+      top = top &+ (acc < w ? 1_u64 : 0_u64)
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
+    end
+    while k < 2 * n - 1
+      i = k &- n &+ 1
+      while i < n
+        w = a[i].to_u128 &* b[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        w = q[i].to_u128 &* m[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        i = i &+ 1
+      end
+      t[k &- n] = acc.unsafe_to_u64
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
+    end
+    t[n - 1] = acc.unsafe_to_u64
+    t[n] = acc.unsafe_shr(64).unsafe_to_u64
+    reduce(t, t[n], r)
+  end
+
+  # r = a^2 / R mod m in three passes: the products off the diagonal by
+  # columns, each once, n(n - 1)/2 of them; that doubled with the
+  # squares on the diagonal added, n more; then the reduction by columns
+  # as `mul` takes it, n^2. Column k of the reduction's first half sums
+  # its products that do not need q_(k - 1) apart from the running total
+  # and adds q_(k - 1) m_1 last, so the next column's products are not
+  # held up behind the multiply that made q_(k - 1). r may be a. A
+  # 1024-bit square took 241 ns with the off-diagonal products in rows
+  # and the reduction in rows (separated operand scanning), and takes 222
+  # (measured as `mul` is); the products and the reduction interleaved in
+  # one set of columns took 235.
+  def sqr(a : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    n = @n
+    m = @m.to_unsafe
+    q = @t.to_unsafe
+    p = @p.to_unsafe
+    inv = @inv
+    acc = 0_u128
+    top = 0_u64
+    p[0] = 0_u64
+    k = 1
+    while k < 2 * n - 2
+      i = k < n ? 0 : k &- n &+ 1
+      while i < k &- i
+        w = a[i].to_u128 &* a[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        i = i &+ 1
+      end
+      p[k] = acc.unsafe_to_u64
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
+    end
+    p[2 * n - 2] = acc.unsafe_to_u64
+    p[2 * n - 1] = acc.unsafe_shr(64).unsafe_to_u64
+    shifted = 0_u64
+    c = 0_u128
+    i = 0
+    while i < n
+      low = p[2 * i]
+      high = p[2 * i + 1]
+      square = a[i].to_u128 &* a[i].to_u128
+      w = (low.unsafe_shl(1_u64) | shifted).to_u128 &+ square.unsafe_to_u64.to_u128 &+ c
+      p[2 * i] = w.unsafe_to_u64
+      c = w.unsafe_shr(64)
+      w = (high.unsafe_shl(1_u64) | low.unsafe_shr(63_u64)).to_u128 &+ square.unsafe_shr(64) &+ c
+      p[2 * i + 1] = w.unsafe_to_u64
+      c = w.unsafe_shr(64)
+      shifted = high.unsafe_shr(63_u64)
+      i = i &+ 1
+    end
+    acc = 0_u128
+    k = 0
+    while k < n
+      s = p[k].to_u128
+      s_top = 0_u64
+      i = 0
+      while i &+ 1 < k
+        w = q[i].to_u128 &* m[k &- i].to_u128
+        s = s &+ w
+        s_top = s_top &+ (s < w ? 1_u64 : 0_u64)
+        i = i &+ 1
+      end
+      acc = acc &+ s
+      top = s_top &+ (acc < s ? 1_u64 : 0_u64)
+      if k > 0
+        w = q[k &- 1].to_u128 &* m[1].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+      end
+      qk = acc.unsafe_to_u64 &* inv
+      q[k] = qk
+      w = qk.to_u128 &* m[0].to_u128
+      acc = acc &+ w
+      top = top &+ (acc < w ? 1_u64 : 0_u64)
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
+    end
+    while k < 2 * n
+      acc = acc &+ p[k].to_u128
+      i = k &- n &+ 1
+      while i < n
+        w = q[i].to_u128 &* m[k &- i].to_u128
+        acc = acc &+ w
+        top = top &+ (acc < w ? 1_u64 : 0_u64)
+        i = i &+ 1
+      end
+      p[k &- n] = acc.unsafe_to_u64
+      acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
+      top = 0_u64
+      k = k &+ 1
+    end
+    reduce(p, acc.unsafe_to_u64, r)
+  end
+
+  # *base*, below m, into Montgomery form at *r*.
+  private def enter(base : BigInt, r : Pointer(UInt64)) : Nil
+    if @secret
+      x = Montgomery.words(base.limbs, @n)
+      mul(x.to_unsafe, @r2.to_unsafe, r)
+    else
+      x = Montgomery.words(((base << (64 * @n)) % @mod).limbs, @n)
+      i = 0
+      while i < @n
+        r[i] = x[i]
+        i = i + 1
+      end
+    end
+  end
+
+  # The value at *a* out of Montgomery form, as a BigInt: a times 1 / R.
+  private def leave(a : Pointer(UInt64)) : BigInt
+    n = @n
+    one = Array(UInt64).new(n, 0_u64)
+    one[0] = 1_u64
+    out = Array(UInt64).new(n, 0_u64)
+    o = out.to_unsafe
+    mul(a, one.to_unsafe, o)
+    limbs = Array(UInt64).new(2 * n, 0_u64)
+    i = 0
+    while i < n
+      limbs[2 * i] = o[i] & 0xFFFFFFFF_u64
+      limbs[2 * i + 1] = o[i].unsafe_shr(32_u64)
+      i = i + 1
+    end
+    BigInt.new(1, limbs)
+  end
+
+  # base^exp mod m, base below m, by a sliding window, left to right: the
+  # table holds the odd powers g, g^3, ... g^(2^k - 1), a run of zero bits
+  # costs a square each, and a window of up to k bits that starts and ends
+  # on a one costs its squares and one product.
+  def pow(base : BigInt, exp : BigInt) : BigInt
+    n = @n
+    bits = Montgomery.bit_length(exp.limbs)
+    return leave(@one.to_unsafe) if bits == 0
+    k = Montgomery.window(bits)
+    size = 1 << (k - 1)
+    table = Array(UInt64).new(size * n, 0_u64)
+    tp = table.to_unsafe
+    enter(base, tp)
+    if size > 1
+      g2 = Array(UInt64).new(n, 0_u64)
+      sqr(tp, g2.to_unsafe)
+      i = 1
+      while i < size
+        mul(tp + ((i - 1) * n).to_i64, g2.to_unsafe, tp + (i * n).to_i64)
+        i = i + 1
+      end
+    end
+    acc = Array(UInt64).new(n, 0_u64)
+    ap = acc.to_unsafe
+    limbs = exp.limbs
+    started = false
+    i = bits - 1
+    while i >= 0
+      if Montgomery.bit(limbs, i) == 0
+        sqr(ap, ap)
+        i = i - 1
+      else
+        low = i - k + 1
+        low = 0 if low < 0
+        while Montgomery.bit(limbs, low) == 0
+          low = low + 1
+        end
+        value = 0
+        j = i
+        while j >= low
+          value = value * 2 + Montgomery.bit(limbs, j)
+          j = j - 1
+        end
+        entry = tp + ((value >> 1) * n).to_i64
+        if started
+          (i - low + 1).times { sqr(ap, ap) }
+          mul(ap, entry, ap)
+        else
+          j = 0
+          while j < n
+            ap[j] = entry[j]
+            j = j + 1
+          end
+          started = true
+        end
+        i = low - 1
+      end
+    end
+    leave(ap)
+  end
+
+  # base^exp mod m, base below m, by a fixed window of k bits over *width*
+  # bits of exponent, with nothing taken from the exponent's bits but a
+  # mask: the table holds g^0 (R mod m) through g^(2^k - 1), every window
+  # costs k squares and one product, the product with g^0 included, and
+  # every entry of the table is read for every window. The window is at
+  # most 5 bits, not `window`'s 6: every entry is read for every window,
+  # so a 64-entry table costs more scanning than the products it saves.
+  # With the one-pass product, a 2048-bit PSS signature went from 1,077 to
+  # 1,013 us (best of eight, --release, a machine other jobs shared).
+  def pow_fixed(base : BigInt, exp : BigInt, width : Int32) : BigInt
+    n = @n
+    k = Montgomery.window(width)
+    k = 5 if k > 5
+    size = 1 << k
+    table = Array(UInt64).new(size * n, 0_u64)
+    tp = table.to_unsafe
+    one = @one.to_unsafe
+    j = 0
+    while j < n
+      tp[j] = one[j]
+      j = j + 1
+    end
+    enter(base, tp + n.to_i64)
+    i = 2
+    while i < size
+      mul(tp + ((i - 1) * n).to_i64, tp + n.to_i64, tp + (i * n).to_i64)
+      i = i + 1
+    end
+    acc = Array(UInt64).new(n, 0_u64)
+    ap = acc.to_unsafe
+    j = 0
+    while j < n
+      ap[j] = one[j]
+      j = j + 1
+    end
+    chosen = Array(UInt64).new(n, 0_u64)
+    cp = chosen.to_unsafe
+    limbs = exp.limbs
+    zero = @zero.get
+    w = (width + k - 1) // k - 1
+    while w >= 0
+      k.times { sqr(ap, ap) }
+      value = 0_u64
+      b = k - 1
+      while b >= 0
+        value = value.unsafe_shl(1_u64) | Montgomery.bit(limbs, w * k + b).to_u64
+        b = b - 1
+      end
+      j = 0
+      while j < n
+        cp[j] = 0_u64
+        j = j + 1
+      end
+      e = 0
+      while e < size
+        d = e.to_u64 ^ value
+        mask = ((d | (0_u64 &- d)).unsafe_shr(63_u64) &- 1_u64) ^ zero
+        entry = tp + (e * n).to_i64
+        j = 0
+        while j < n
+          cp[j] = cp[j] | (entry[j] & mask)
+          j = j + 1
+        end
+        e = e + 1
+      end
+      mul(ap, cp, ap)
+      w = w - 1
+    end
+    leave(ap)
+  end
+
+  # 1 / x mod m for x below m, or nil when they share a factor: Pornin's
+  # optimised binary GCD ("Optimized Binary GCD for Modular Inversion",
+  # IACR ePrint 2020/972, algorithm 2 with k = 32), which runs the same
+  # steps for every x. The classic extended binary GCD keeps a = u x and
+  # b = v x mod m from a = x, b = m, halves a while it is even and takes
+  # the smaller of two odd values from the larger, and is done in at most
+  # 2 len(m) - 1 steps, when a is 0 and b is the GCD. Here 31 steps at a
+  # time are taken on 64-bit stand-ins for a and b - their low 31 bits
+  # and their top 33 at the length of the longer - and what those steps
+  # did is kept as four factors, f0 g0 f1 g1, each under 2^31, which are
+  # then applied to a, b, u and v with one product a word. The paper
+  # proves that the 31 steps shrink len(a) + len(b) by at least 31 even
+  # when the stand-ins mislead them, so ceil((2 len(m) - 1) / 31) rounds
+  # are enough for every x; a value they leave negative is negated with
+  # its factors. The factors also stand for a division by 2^31, which u
+  # and v take as a Montgomery reduction (q m added to clear their low
+  # 31 bits), so no correction is left at the end. Every choice is a
+  # mask, and the word at the length of the longer is found by reading
+  # every word. std/rsa inverts its blinding factor with this, and
+  # std/ecdsa a signature's s: the extended Euclid's algorithm std/rsa had
+  # took 249 us for a 2048-bit modulus, its time following the factor's
+  # quotients, and this takes 64 in the same run (best of five runs of
+  # 100, --release, a machine other jobs shared); s mod P-256's n takes
+  # 2.5, where Fermat's x^(n - 2) on std/ecdsa's words took 10.
+  def inverse(x : BigInt) : BigInt?
+    n = @n
+    m = @m.to_unsafe
+    zero = @zero.get
+    a = Montgomery.words(x.limbs, n)
+    b = @m.dup
+    u = Array(UInt64).new(n, 0_u64)
+    u[0] = 1_u64
+    v = Array(UInt64).new(n, 0_u64)
+    ap = a.to_unsafe
+    bp = b.to_unsafe
+    up = u.to_unsafe
+    vp = v.to_unsafe
+    rounds = (2 * Montgomery.bit_length(@mod.limbs) - 1 + 30) // 31
+    rounds.times do
+      # The length of the longer of a and b, at least 64, and the 33 bits
+      # of each below it.
+      top = 0_u64
+      word = 0_u64
+      j = 0
+      while j < n
+        c = ap[j] | bp[j]
+        keep = (0_u64 &- (c | (0_u64 &- c)).unsafe_shr(63)) ^ zero
+        top = (j.to_u64 & keep) | (top & ~keep)
+        word = (c & keep) | (word & ~keep)
+        j = j &+ 1
+      end
+      length = top.unsafe_shl(6) &+ Montgomery.bits_of(word, zero)
+      short = (0_u64 &- Montgomery.borrow_of(length, 64_u64, 0_u64)) ^ zero
+      length = (64_u64 & short) | (length & ~short)
+      at = length &- 33_u64
+      shift = at & 63_u64
+      w = at.unsafe_shr(6)
+      a_low = 0_u64
+      a_high = 0_u64
+      b_low = 0_u64
+      b_high = 0_u64
+      j = 0
+      while j < n
+        here = Montgomery.equal_mask(j.to_u64, w, zero)
+        above = Montgomery.equal_mask(j.to_u64, w &+ 1_u64, zero)
+        a_low = a_low | (ap[j] & here)
+        a_high = a_high | (ap[j] & above)
+        b_low = b_low | (bp[j] & here)
+        b_high = b_high | (bp[j] & above)
+        j = j &+ 1
+      end
+      xa = (ap[0] & 0x7FFFFFFF_u64) | (((a_low.unsafe_shr(shift) | a_high.unsafe_shl(1_u64).unsafe_shl(63_u64 &- shift)) & 0x1FFFFFFFF_u64).unsafe_shl(31_u64))
+      xb = (bp[0] & 0x7FFFFFFF_u64) | (((b_low.unsafe_shr(shift) | b_high.unsafe_shl(1_u64).unsafe_shl(63_u64 &- shift)) & 0x1FFFFFFFF_u64).unsafe_shl(31_u64))
+      # 31 steps of the binary GCD on the stand-ins.
+      f0 = 1_u64
+      g0 = 0_u64
+      f1 = 0_u64
+      g1 = 1_u64
+      31.times do
+        odd = (0_u64 &- (xa & 1_u64)) ^ zero
+        swap = odd & (0_u64 &- Montgomery.borrow_of(xa, xb, 0_u64))
+        d = (xa ^ xb) & swap
+        xa = xa ^ d
+        xb = xb ^ d
+        d = (f0 ^ f1) & swap
+        f0 = f0 ^ d
+        f1 = f1 ^ d
+        d = (g0 ^ g1) & swap
+        g0 = g0 ^ d
+        g1 = g1 ^ d
+        xa = xa &- (xb & odd)
+        f0 = f0 &- (f1 & odd)
+        g0 = g0 &- (g1 & odd)
+        xa = xa.unsafe_shr(1_u64)
+        f1 = f1 &+ f1
+        g1 = g1 &+ g1
+      end
+      # (a f0 + b g0) / 2^31 and (a f1 + b g1) / 2^31, exact, each turned
+      # positive with its factors when it is not.
+      sf0 = f0.unsafe_to_i64.to_i128
+      sg0 = g0.unsafe_to_i64.to_i128
+      sf1 = f1.unsafe_to_i64.to_i128
+      sg1 = g1.unsafe_to_i64.to_i128
+      ca = 0_i128
+      cb = 0_i128
+      before_a = 0_u64
+      before_b = 0_u64
+      j = 0
+      while j < n
+        aj = ap[j].unsafe_to_i128
+        bj = bp[j].unsafe_to_i128
+        ca = ca &+ aj &* sf0 &+ bj &* sg0
+        cb = cb &+ aj &* sf1 &+ bj &* sg1
+        low_a = ca.unsafe_to_u64
+        low_b = cb.unsafe_to_u64
+        ca = ca.unsafe_shr(64)
+        cb = cb.unsafe_shr(64)
+        if j > 0
+          ap[j &- 1] = before_a.unsafe_shr(31_u64) | low_a.unsafe_shl(33_u64)
+          bp[j &- 1] = before_b.unsafe_shr(31_u64) | low_b.unsafe_shl(33_u64)
+        end
+        before_a = low_a
+        before_b = low_b
+        j = j &+ 1
+      end
+      ap[n - 1] = before_a.unsafe_shr(31_u64) | ca.unsafe_to_u64.unsafe_shl(33_u64)
+      bp[n - 1] = before_b.unsafe_shr(31_u64) | cb.unsafe_to_u64.unsafe_shl(33_u64)
+      negative_a = ca.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      negative_b = cb.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      Montgomery.negate(ap, n, negative_a)
+      Montgomery.negate(bp, n, negative_b)
+      f0 = (f0 ^ negative_a) &- negative_a
+      g0 = (g0 ^ negative_a) &- negative_a
+      f1 = (f1 ^ negative_b) &- negative_b
+      g1 = (g1 ^ negative_b) &- negative_b
+      # (u f0 + v g0) / 2^31 mod m and (u f1 + v g1) / 2^31 mod m.
+      sf0 = f0.unsafe_to_i64.to_i128
+      sg0 = g0.unsafe_to_i64.to_i128
+      sf1 = f1.unsafe_to_i64.to_i128
+      sg1 = g1.unsafe_to_i64.to_i128
+      u0 = up[0].unsafe_to_i128
+      v0 = vp[0].unsafe_to_i128
+      qu = ((u0 &* sf0 &+ v0 &* sg0).unsafe_to_u64 &* @inv & 0x7FFFFFFF_u64).unsafe_to_i128
+      qv = ((u0 &* sf1 &+ v0 &* sg1).unsafe_to_u64 &* @inv & 0x7FFFFFFF_u64).unsafe_to_i128
+      cu = 0_i128
+      cv = 0_i128
+      before_u = 0_u64
+      before_v = 0_u64
+      j = 0
+      while j < n
+        uj = up[j].unsafe_to_i128
+        vj = vp[j].unsafe_to_i128
+        mj = m[j].unsafe_to_i128
+        cu = cu &+ uj &* sf0 &+ vj &* sg0 &+ mj &* qu
+        cv = cv &+ uj &* sf1 &+ vj &* sg1 &+ mj &* qv
+        low_u = cu.unsafe_to_u64
+        low_v = cv.unsafe_to_u64
+        cu = cu.unsafe_shr(64)
+        cv = cv.unsafe_shr(64)
+        if j > 0
+          up[j &- 1] = before_u.unsafe_shr(31_u64) | low_u.unsafe_shl(33_u64)
+          vp[j &- 1] = before_v.unsafe_shr(31_u64) | low_v.unsafe_shl(33_u64)
+        end
+        before_u = low_u
+        before_v = low_v
+        j = j &+ 1
+      end
+      up[n - 1] = before_u.unsafe_shr(31_u64) | cu.unsafe_to_u64.unsafe_shl(33_u64)
+      vp[n - 1] = before_v.unsafe_shr(31_u64) | cv.unsafe_to_u64.unsafe_shl(33_u64)
+      into_range(up, cu.unsafe_shr(31).unsafe_to_u64)
+      into_range(vp, cv.unsafe_shr(31).unsafe_to_u64)
+    end
+    # b is the GCD: 1 when x has an inverse, and v is it.
+    rest = bp[0] ^ 1_u64
+    j = 1
+    while j < n
+      rest = rest | bp[j]
+      j = j &+ 1
+    end
+    return nil unless rest == 0_u64
+    limbs = Array(UInt64).new(2 * n, 0_u64)
+    j = 0
+    while j < n
+      limbs[2 * j] = vp[j] & 0xFFFFFFFF_u64
+      limbs[2 * j + 1] = vp[j].unsafe_shr(32_u64)
+      j = j &+ 1
+    end
+    BigInt.new(1, limbs)
+  end
+
+  # The n words at *r* and the signed word *top* above them, a value in
+  # (-2m, 3m), taken into [0, m): m added twice where the value is
+  # negative, then taken off twice where what is left is at least m.
+  private def into_range(r : Pointer(UInt64), top : UInt64) : Nil
+    n = @n
+    m = @m.to_unsafe
+    zero = @zero.get
+    2.times do
+      negative = top.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      carry = 0_u64
+      j = 0
+      while j < n
+        w = r[j].to_u128 &+ (m[j] & negative).to_u128 &+ carry.to_u128
+        r[j] = w.unsafe_to_u64
+        carry = w.unsafe_shr(64).unsafe_to_u64
+        j = j &+ 1
+      end
+      top = top &+ carry
+    end
+    t = @t.to_unsafe
+    2.times do
+      borrow = 0_u64
+      j = 0
+      while j < n
+        t[j] = r[j] &- m[j] &- borrow
+        borrow = Montgomery.borrow_of(r[j], m[j], borrow)
+        j = j &+ 1
+      end
+      top_less = top &- borrow
+      keep = top_less.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      j = 0
+      while j < n
+        r[j] = (r[j] & keep) | (t[j] & ~keep)
+        j = j &+ 1
+      end
+      top = (top & keep) | (top_less & ~keep)
+    end
+  end
+
+  # The n words at *r* negated, two's complement, where *mask* is all ones.
+  def self.negate(r : Pointer(UInt64), n : Int32, mask : UInt64) : Nil
+    carry = mask & 1_u64
+    j = 0
+    while j < n
+      w = (r[j] ^ mask).to_u128 &+ carry.to_u128
+      r[j] = w.unsafe_to_u64
+      carry = w.unsafe_shr(64).unsafe_to_u64
+      j = j &+ 1
+    end
+  end
+
+  # The borrow out of x - y - c, 0 or 1, without a comparison (Hacker's
+  # Delight 2-13), as std/p256 takes it.
+  def self.borrow_of(x : UInt64, y : UInt64, c : UInt64) : UInt64
+    d = x &- y &- c
+    ((~x & y) | (~(x ^ y) & d)).unsafe_shr(63_u64)
+  end
+
+  # All ones where x is y, else 0.
+  def self.equal_mask(x : UInt64, y : UInt64, zero : UInt64) : UInt64
+    d = x ^ y
+    ((d | (0_u64 &- d)).unsafe_shr(63_u64) &- 1_u64) ^ zero
+  end
+
+  # The bits *x* takes to write, by a search of six masked halvings.
+  def self.bits_of(x : UInt64, zero : UInt64) : UInt64
+    bits = 0_u64
+    step = 32_u64
+    while step > 0_u64
+      high = x.unsafe_shr(step)
+      moved = (0_u64 &- (high | (0_u64 &- high)).unsafe_shr(63_u64)) ^ zero
+      bits = bits &+ (step & moved)
+      x = (high & moved) | (x & ~moved)
+      step = step.unsafe_shr(1_u64)
+    end
+    bits &+ x
+  end
+end
+
 pub struct BigDecimal
   getter value : BigInt
   getter scale : Int32
@@ -1421,6 +2669,9 @@ pub struct BigDecimal
         while idx < len
           eb = ptr[idx]
           if eb >= 48_u8 && eb <= 57_u8
+            # The scale is an Int32: an exponent of ten digits had panicked
+            # "arithmetic overflow" here or in the scale below.
+            raise "decimal exponent out of range: \"#{str}\"" if exp_digits >= 100_000_000
             exp_digits = exp_digits * 10 + (eb - 48_u8).to_i32
           else
             raise "not a decimal: \"#{str}\""
@@ -1575,16 +2826,26 @@ pub struct BigDecimal
     if @scale < 0
       return BigDecimal.new(@value * (BigInt.new(10_i64) ** (-@scale)), 0)
     end
-    v = @value
-    s = @scale
-    ten = BigInt.new(10_i64)
-    while s > 0
-      qr = v.divmod(ten)
-      break unless qr[1].zero?
-      v = qr[0]
-      s = s - 1
+    stripped = strip_zeros(@scale)
+    BigDecimal.new(stripped[0], @scale - stripped[1])
+  end
+
+  # The value without its trailing zeros, at most `limit` of them, and how
+  # many went. Counted once in the digits and divided out once: one divmod
+  # by ten per zero was quadratic, and the hash of `1.` and 40,000 zeros, or
+  # `3.div(3, 40000)`, took 725 ms. A value that does not end in zero is
+  # answered by one division by ten, without printing it.
+  protected def strip_zeros(limit : Int32) : Tuple(BigInt, Int32)
+    return {@value, 0} if limit <= 0 || !(@value % BigInt.new(10_i64)).zero?
+    digits = @value.abs.to_s
+    bytes = digits.to_unsafe
+    last = digits.bytesize - 1
+    count = 0
+    while count < limit && count < last && bytes[last - count] == 48_u8
+      count = count + 1
     end
-    BigDecimal.new(v, s)
+    return {@value, 0} if count == 0
+    {@value // (BigInt.new(10_i64) ** count), count}
   end
 
   def !=(other : BigDecimal) : Bool
@@ -1598,21 +2859,14 @@ pub struct BigDecimal
     v_str = @value.abs.to_s
     prefix = negative? ? "-" : ""
 
+    # The zeros in one string each: a string grown by one per zero copied
+    # it per zero, and `1e50000` took 2.9 s to print where the same value
+    # as a BigInt took 57 ms.
     if @scale <= 0
-      zeros = ""
-      i = 0
-      while i < -@scale
-        zeros = zeros + "0"
-        i = i + 1
-      end
+      zeros = "0" * -@scale
       prefix + v_str + zeros
     elsif v_str.size <= @scale
-      leading_zeros = ""
-      i = 0
-      while i < (@scale - v_str.size)
-        leading_zeros = leading_zeros + "0"
-        i = i + 1
-      end
+      leading_zeros = "0" * (@scale - v_str.size)
       prefix + "0." + leading_zeros + v_str
     else
       split_pos = v_str.size - @scale
@@ -1650,11 +2904,24 @@ pub struct BigDecimal
     to_big_i.to_i32
   end
 
-  # The same value at another scale is the same key: `1.10` and `1.1` hash
-  # alike because `==` says they are equal.
+  # Bounds on the place of the leading digit, from the limb count alone:
+  # 10^(lo - 1) <= |self| < 10^hi. 30102 and 30103 in 100,000 bracket
+  # log10(2) for each 32-bit limb.
+  protected def magnitude_bounds : Tuple(Int64, Int64)
+    limbs = @value.limbs.size.to_i64
+    lo = (32_i64 * (limbs - 1_i64) * 30102_i64) // 100000_i64 + 1_i64 - @scale.to_i64
+    hi = (32_i64 * limbs * 30103_i64) // 100000_i64 + 1_i64 - @scale.to_i64
+    {lo, hi}
+  end
+
+  # The same value at another scale is the same key: `1.10`, `1.1` and
+  # `11e-1` hash alike because `==` says they are equal. The digits without
+  # their trailing zeros and the exponent that goes with them name the value;
+  # multiplying a negative scale out made `1e1000000.hash` take 2.6 s.
   def hash : Int32
-    n = normalized
-    n.value.hash &* 31 &+ n.scale
+    return BigInt.zero.hash if zero?
+    stripped = strip_zeros(2147483647)
+    stripped[0].hash &* 31 &+ (@scale &- stripped[1])
   end
 end
 
@@ -1663,6 +2930,15 @@ impl Comparable for BigDecimal
     if @value.sign != other.value.sign
       return @value.sign < other.value.sign ? -1 : 1
     end
+    return 0 if zero?
+    # Values whose leading digits sit apart are ordered before aligning:
+    # aligning first built 10^1000000, and `1e-1000000 < 1` and
+    # `1e1000000 == 1` took 2.4 s each. Bounds that overlap keep the scales
+    # within the digit counts.
+    mine = magnitude_bounds
+    theirs = other.magnitude_bounds
+    return -@value.sign if mine[1] < theirs[0]
+    return @value.sign if theirs[1] < mine[0]
     tup = BigDecimal.align(self, other)
     (tup[0] <=> tup[1])
   end
@@ -1831,8 +3107,41 @@ pub struct BigRational
     BigDecimal.new(@numerator) / BigDecimal.new(@denominator)
   end
 
+  # The Float64 nearest this value, ties to even, as python's
+  # `float(Fraction)` answers. This had gone through `to_big_d`, twenty
+  # fractional digits: every value under 5e-21 was 0.0 and every one under
+  # 1e-3 lost significant digits. The quotient is taken to 55 or 56 bits -
+  # 55 at the smallest exponent, where the subnormals start - with a sticky
+  # low bit for a nonzero remainder, rounded to the bits a Float64 keeps (53,
+  # fewer as a subnormal), and scaled by the power of two it was shifted by,
+  # which is exact: a value past the largest Float64 is Infinity.
   def to_f64 : Float64
-    to_big_d.to_f64
+    return 0.0 if zero?
+    a = @numerator.abs
+    b = @denominator
+    diff = BigInt.bit_length(a) - BigInt.bit_length(b)
+    shift = (diff > -1021 ? diff : -1021) - 55
+    qr = shift >= 0 ? a.divmod(b << shift) : (a << (0 - shift)).divmod(b)
+    q = qr[0].to_i64
+    q = q | 1_i64 unless qr[1].zero?
+    bits = 0
+    while (q >> bits) > 0_i64
+      bits = bits + 1
+    end
+    # The bits below the kept ones: 2 or 3 for a normal value, 2 for a
+    # subnormal, whose last bit stands for 2^-1074 where q's stands for 2^-1076.
+    extra = (bits > -1021 - shift ? bits : -1021 - shift) - 53
+    half = 1_i64 << (extra - 1)
+    q = q + half if (q & half) != 0_i64 && (q & (3_i64 * half - 1_i64)) != 0_i64
+    q = q - (q & (2_i64 * half - 1_i64))
+    f = q.to_f64
+    e = shift
+    while e != 0
+      step = e > 1000 ? 1000 : (e < -1000 ? -1000 : e)
+      f = f * (2.0 ** step)
+      e = e - step
+    end
+    negative? ? f * -1.0 : f
   end
 
   # A rational is stored reduced, so equal values have equal parts.
@@ -1866,6 +3175,537 @@ impl Num for BigRational
 end
 
 impl Hashable for BigRational
+  def hash_key : Int32
+    hash
+  end
+end
+
+# A binary floating-point number of any precision: `±mantissa · 2^exponent`,
+# the mantissa exactly *precision* bits long (128 unless asked), every
+# result rounded once, to the nearest value of that many bits, ties to even
+# - the rounding IEEE 754 gives a double, at any width. The other library's
+# BigFloat is GMP's `mpf`, which truncates and keeps more bits than it was
+# asked for; this one answers what MPFR does.
+#
+#     a = BigFloat.new(2, 256)
+#     a.sqrt.to_s
+#     # => "1.4142135623730950488016887242096980785696718753769480731766797379907324784621"
+#     BigFloat.new("0.1", 24).to_f64   # => 0.10000000149011612
+#
+# An operation between two answers at the larger precision; with an
+# integer, at the BigFloat's. `to_s` writes the fewest decimal digits that
+# read back to the same value at its precision, positional from 1e-4 to
+# below 1e15 and with an exponent outside, as `Float64#to_s` writes. There
+# is no NaN or infinity: dividing by zero, the square root of a negative
+# number, a NaN or an infinite double, a precision under 1 and a string
+# that is no number are refused.
+pub struct BigFloat
+  DEFAULT_PRECISION = 128
+
+  getter precision : Int32
+  @negative : Bool
+  # 0, or exactly *precision* bits.
+  @mantissa : BigInt
+  @exponent : Int64
+
+  protected def initialize(@negative : Bool, @mantissa : BigInt, @exponent : Int64, @precision : Int32)
+  end
+
+  def self.new(value : Int32, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    new(BigInt.new(value.to_i64), precision)
+  end
+
+  def self.new(value : Int64, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    new(BigInt.new(value), precision)
+  end
+
+  def self.new(value : BigInt, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    rounded(value.negative?, value.abs, BigInt.one, 0_i64, precision)
+  end
+
+  # The double's exact value, rounded to *precision* bits.
+  def self.new(value : Float64, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    holder = Pointer(Float64).malloc(1_u64)
+    holder.value = value
+    bits = Pointer(UInt64).new(holder.address).value
+    exponent_bits = bits.unsafe_shr(52_u64) & 2047_u64
+    fraction = bits & 4503599627370495_u64
+    raise "BigFloat: #{value} is not a finite number" if exponent_bits == 2047_u64
+    f = exponent_bits == 0_u64 ? fraction : fraction | 4503599627370496_u64
+    e = exponent_bits == 0_u64 ? -1074_i64 : exponent_bits.to_i64 - 1075_i64
+    rounded(bits.unsafe_shr(63_u64) != 0_u64, BigInt.new(f.to_i64), BigInt.one, e, precision)
+  end
+
+  def self.new(value : BigRational, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    rounded(value.numerator.negative?, value.numerator.abs, value.denominator, 0_i64, precision)
+  end
+
+  def self.new(value : BigDecimal, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    if value.scale >= 0
+      rounded(value.value.negative?, value.value.abs, BigInt.new(10_i64) ** value.scale, 0_i64, precision)
+    else
+      rounded(value.value.negative?, value.value.abs * (BigInt.new(10_i64) ** (0 - value.scale)), BigInt.one, 0_i64, precision)
+    end
+  end
+
+  # A decimal - `-12.5`, `1e-30`, `6.02214076E23` - rounded to *precision*
+  # bits; anything else is refused.
+  def self.new(text : String, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    parse?(text, precision) || raise "BigFloat: not a number: #{text.inspect}"
+  end
+
+  # As `new`, nil for a string that is no number.
+  def self.parse?(text : String, precision : Int32 = DEFAULT_PRECISION) : BigFloat?
+    check(precision)
+    bytes = text.to_unsafe
+    size = text.bytesize
+    at = 0
+    negative = false
+    if at < size && (bytes[at] == 45_u8 || bytes[at] == 43_u8)
+      negative = bytes[at] == 45_u8
+      at = at + 1
+    end
+    digits = BigInt.zero
+    seen = 0
+    scale = 0_i64
+    while at < size && bytes[at] >= 48_u8 && bytes[at] <= 57_u8
+      digits = digits * 10 + (bytes[at] - 48_u8).to_i32
+      seen = seen + 1
+      at = at + 1
+    end
+    if at < size && bytes[at] == 46_u8
+      at = at + 1
+      while at < size && bytes[at] >= 48_u8 && bytes[at] <= 57_u8
+        digits = digits * 10 + (bytes[at] - 48_u8).to_i32
+        scale = scale - 1_i64
+        seen = seen + 1
+        at = at + 1
+      end
+    end
+    return nil if seen == 0
+    if at < size && (bytes[at] == 101_u8 || bytes[at] == 69_u8)
+      at = at + 1
+      down = false
+      if at < size && (bytes[at] == 45_u8 || bytes[at] == 43_u8)
+        down = bytes[at] == 45_u8
+        at = at + 1
+      end
+      power = 0_i64
+      exponent_digits = 0
+      while at < size && bytes[at] >= 48_u8 && bytes[at] <= 57_u8
+        power = power * 10_i64 + (bytes[at] - 48_u8).to_i64
+        return nil if power > 100_000_000_i64
+        exponent_digits = exponent_digits + 1
+        at = at + 1
+      end
+      return nil if exponent_digits == 0
+      scale = scale + (down ? 0_i64 - power : power)
+    end
+    return nil if at != size
+    if scale >= 0_i64
+      rounded(negative, digits * (BigInt.new(10_i64) ** scale.to_i32), BigInt.one, 0_i64, precision)
+    else
+      rounded(negative, digits, BigInt.new(10_i64) ** (0_i64 - scale).to_i32, 0_i64, precision)
+    end
+  end
+
+  # *num*/*den* · 2^*shift* (both non-negative, *den* not zero), rounded to
+  # *precision* bits, ties to even: every value here is made by this, from
+  # an exact one.
+  protected def self.rounded(negative : Bool, num : BigInt, den : BigInt, shift : Int64, precision : Int32) : BigFloat
+    check(precision)
+    return new(false, BigInt.zero, 0_i64, precision) if num.zero?
+    # num/den lies in [2^(gap - 1), 2^(gap + 1)), so its quotient by 2^k
+    # has precision or precision + 1 bits; one too many moves k up.
+    k = (BigInt.bit_length(num) - BigInt.bit_length(den) - precision).to_i64
+    while true
+      # The remainder is of the divisor actually used, which is den
+      # scaled up when k is not negative.
+      divisor = k >= 0_i64 ? den << k.to_i32 : den
+      q, r = k >= 0_i64 ? num.divmod(divisor) : (num << (0_i64 - k).to_i32).divmod(divisor)
+      if BigInt.bit_length(q) > precision
+        k = k + 1_i64
+        next
+      end
+      twice = (r << 1) <=> divisor
+      q = q + BigInt.one if twice > 0 || (twice == 0 && q.odd?)
+      if BigInt.bit_length(q) > precision
+        q = q >> 1
+        k = k + 1_i64
+      end
+      return new(negative, q, k + shift, precision)
+    end
+  end
+
+  protected def self.check(precision : Int32) : Nil
+    raise "BigFloat: a precision of #{precision} bits; it is at least 1" if precision < 1
+  end
+
+  def zero? : Bool
+    @mantissa.zero?
+  end
+
+  def negative? : Bool
+    @negative
+  end
+
+  def positive? : Bool
+    !@negative && !zero?
+  end
+
+  protected def mantissa : BigInt
+    @mantissa
+  end
+
+  protected def exponent : Int64
+    @exponent
+  end
+
+  # The place above the leading bit: 2^(top - 1) <= |self| < 2^top.
+  protected def top : Int64
+    @exponent + BigInt.bit_length(@mantissa).to_i64
+  end
+
+  # This value at another precision, rounded if it is fewer bits.
+  def with_precision(bits : Int32) : BigFloat
+    BigFloat.rounded(@negative, @mantissa, BigInt.one, @exponent, bits)
+  end
+
+  def - : BigFloat
+    BigFloat.new(zero? ? false : !@negative, @mantissa, @exponent, @precision)
+  end
+
+  def + : BigFloat
+    self
+  end
+
+  def abs : BigFloat
+    @negative ? -self : self
+  end
+
+  def +(other : BigFloat) : BigFloat
+    sum(other, @precision > other.precision ? @precision : other.precision)
+  end
+
+  def -(other : BigFloat) : BigFloat
+    sum(-other, @precision > other.precision ? @precision : other.precision)
+  end
+
+  def *(other : BigFloat) : BigFloat
+    BigFloat.rounded(@negative != other.negative?, @mantissa * other.mantissa, BigInt.one, @exponent + other.exponent, @precision > other.precision ? @precision : other.precision)
+  end
+
+  def /(other : BigFloat) : BigFloat
+    raise "BigFloat: division by zero" if other.zero?
+    BigFloat.rounded(@negative != other.negative?, @mantissa, other.mantissa, @exponent - other.exponent, @precision > other.precision ? @precision : other.precision)
+  end
+
+  def +(other : Int32 | Int64 | BigInt) : BigFloat
+    sum(BigFloat.exactly(other), @precision)
+  end
+
+  def -(other : Int32 | Int64 | BigInt) : BigFloat
+    sum(-BigFloat.exactly(other), @precision)
+  end
+
+  def *(other : Int32 | Int64 | BigInt) : BigFloat
+    exact = BigFloat.exactly(other)
+    BigFloat.rounded(@negative != exact.negative?, @mantissa * exact.mantissa, BigInt.one, @exponent + exact.exponent, @precision)
+  end
+
+  def /(other : Int32 | Int64 | BigInt) : BigFloat
+    exact = BigFloat.exactly(other)
+    raise "BigFloat: division by zero" if exact.zero?
+    BigFloat.rounded(@negative != exact.negative?, @mantissa, exact.mantissa, @exponent - exact.exponent, @precision)
+  end
+
+  # An integer at exactly the bits it has.
+  protected def self.exactly(value : Int32 | Int64 | BigInt) : BigFloat
+    whole = value.is_a?(BigInt) ? value : BigInt.new(value.to_i64)
+    bits = BigInt.bit_length(whole.abs)
+    rounded(whole.negative?, whole.abs, BigInt.one, 0_i64, bits < 1 ? 1 : bits)
+  end
+
+  # The exact sum, rounded once. An addend more than *precision* + 2 bits
+  # below the other cannot move it - it is under a quarter of the larger's
+  # last place, even where that place halves below a power of two - and
+  # is not shifted out to a size it would only be rounded away from.
+  protected def sum(other : BigFloat, precision : Int32) : BigFloat
+    return other.with_precision(precision) if zero?
+    return with_precision(precision) if other.zero?
+    gap = top - other.top
+    return with_precision(precision) if gap > precision.to_i64 + 2_i64
+    return other.with_precision(precision) if 0_i64 - gap > precision.to_i64 + 2_i64
+    low = @exponent < other.exponent ? @exponent : other.exponent
+    mine = @mantissa << (@exponent - low).to_i32
+    theirs = other.mantissa << (other.exponent - low).to_i32
+    total = (@negative ? -mine : mine) + (other.negative? ? -theirs : theirs)
+    BigFloat.rounded(total.negative?, total.abs, BigInt.one, low, precision)
+  end
+
+  # The square root, rounded once. The mantissa is widened to at least
+  # 2·precision + 4 bits over an even power of two, so the integer root
+  # has two bits past the ones kept, and a root that is not exact carries a
+  # half below its last bit into the rounding, which no tie can be.
+  def sqrt : BigFloat
+    raise "BigFloat: the square root of a negative number" if @negative
+    return self if zero?
+    widen = 2 * @precision + 4 - BigInt.bit_length(@mantissa)
+    widen = 0 if widen < 0
+    widen = widen + 1 if (@exponent - widen.to_i64) % 2_i64 != 0_i64
+    square = @mantissa << widen
+    root = BigFloat.isqrt(square)
+    sticky = root * root == square ? BigInt.zero : BigInt.one
+    BigFloat.rounded(false, (root << 1) + sticky, BigInt.new(2_i64), (@exponent - widen.to_i64) // 2_i64, @precision)
+  end
+
+  # The largest integer whose square is at most *value*, by Newton's
+  # method from above.
+  protected def self.isqrt(value : BigInt) : BigInt
+    return value if value < BigInt.new(2_i64)
+    x = BigInt.one << ((BigInt.bit_length(value) + 1) // 2)
+    while true
+      y = (x + value // x) >> 1
+      return x if y >= x
+      x = y
+    end
+  end
+
+  # The power, its exact value rounded once; a negative exponent is the
+  # reciprocal of the power, rounded once.
+  def **(exponent : Int32) : BigFloat
+    odd = exponent % 2 != 0
+    if exponent < 0
+      raise "BigFloat: division by zero" if zero?
+      power = @mantissa ** (0 - exponent)
+      return BigFloat.rounded(@negative && odd, BigInt.one, power, 0_i64 - @exponent * (0 - exponent).to_i64, @precision)
+    end
+    BigFloat.rounded(@negative && odd, @mantissa ** exponent, BigInt.one, @exponent * exponent.to_i64, @precision)
+  end
+
+  # The exact value as a fraction.
+  def to_big_r : BigRational
+    if @exponent >= 0_i64
+      BigRational.new(signed(@mantissa << @exponent.to_i32), BigInt.one)
+    else
+      BigRational.new(signed(@mantissa), BigInt.one << (0_i64 - @exponent).to_i32)
+    end
+  end
+
+  private def signed(value : BigInt) : BigInt
+    @negative ? -value : value
+  end
+
+  # The double nearest, ties to even; past the largest double, infinite,
+  # and below the smallest, zero.
+  def to_f64 : Float64
+    return 0.0 if @mantissa.zero?
+    if top > 1025_i64
+      infinity = Pointer(UInt64).malloc(1_u64)
+      infinity.value = @negative ? 0xFFF0000000000000_u64 : 0x7FF0000000000000_u64
+      return Pointer(Float64).new(infinity.address).value
+    end
+    return @negative ? -0.0 : 0.0 if top < -1080_i64
+    to_big_r.to_f64
+  end
+
+  # Toward zero, floor, ceiling, and to the nearest integer, ties to even.
+  def to_big_i : BigInt
+    trunc_whole
+  end
+
+  def trunc : BigFloat
+    whole = trunc_whole
+    BigFloat.rounded(whole.negative?, whole.abs, BigInt.one, 0_i64, @precision)
+  end
+
+  def floor : BigFloat
+    whole = trunc_whole
+    whole = whole - BigInt.one if @negative && !exact_whole?
+    BigFloat.rounded(whole.negative?, whole.abs, BigInt.one, 0_i64, @precision)
+  end
+
+  def ceil : BigFloat
+    whole = trunc_whole
+    whole = whole + BigInt.one if !@negative && !zero? && !exact_whole?
+    BigFloat.rounded(whole.negative?, whole.abs, BigInt.one, 0_i64, @precision)
+  end
+
+  # Under one half is zero; from there the fraction is at most
+  # *precision* bits, compared with one half exactly.
+  def round : BigFloat
+    return self if exact_whole?
+    return BigFloat.rounded(false, BigInt.zero, BigInt.one, 0_i64, @precision) if top < 0_i64
+    drop = (0_i64 - @exponent).to_i32
+    whole = @mantissa >> drop
+    rest = @mantissa - (whole << drop)
+    against = rest <=> (BigInt.one << (drop - 1))
+    whole = whole + BigInt.one if against > 0 || (against == 0 && whole.odd?)
+    BigFloat.rounded(@negative && !whole.zero?, whole, BigInt.one, 0_i64, @precision)
+  end
+
+  protected def trunc_whole : BigInt
+    return signed(@mantissa << @exponent.to_i32) if @exponent >= 0_i64
+    return BigInt.zero if top <= 0_i64
+    signed(@mantissa >> (0_i64 - @exponent).to_i32)
+  end
+
+  private def exact_whole? : Bool
+    return true if @exponent >= 0_i64 || zero?
+    return false if top <= 0_i64
+    drop = (0_i64 - @exponent).to_i32
+    (@mantissa >> drop) << drop == @mantissa
+  end
+
+  # The fewest decimal digits that read back as this value at its
+  # precision, the nearest such when there are two; written as
+  # `Float64#to_s` writes a double.
+  def to_s : String
+    return "0.0" if zero?
+    lead = decimal_lead
+    # Enough digits always read back: ceil(precision · log10 2) + 1.
+    low = 1
+    high = (@precision.to_i64 * 30103_i64 // 100000_i64 + 2_i64).to_i32
+    while low < high
+      middle = (low + high) // 2
+      candidate = decimal_digits(middle, lead)
+      if reads_back?(candidate[0], candidate[1])
+        high = middle
+      else
+        low = middle + 1
+      end
+    end
+    best = decimal_digits(low, lead)
+    text = best[0].to_s
+    # Trailing zeros are the place's, not digits: 100 is one digit.
+    stop = text.bytesize
+    while stop > 1 && text.to_unsafe[stop - 1] == 48_u8
+      stop = stop - 1
+    end
+    point = best[1] + text.bytesize.to_i64 - 1_i64
+    (@negative ? "-" : "") + BigFloat.place(text[0, stop], point)
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  # *digits* with its first digit at 10^*point*, as `Float64#to_s` puts
+  # a point: positional from 10^-4 to 10^14, an exponent outside.
+  protected def self.place(digits : String, point : Int64) : String
+    if point >= -4_i64 && point < 15_i64
+      if point >= 0_i64
+        whole_size = point.to_i32 + 1
+        if digits.bytesize <= whole_size
+          return digits + "0" * (whole_size - digits.bytesize) + ".0"
+        end
+        return digits[0, whole_size] + "." + digits[whole_size, digits.bytesize - whole_size]
+      end
+      return "0." + "0" * (-1_i64 - point).to_i32 + digits
+    end
+    fraction = digits.bytesize > 1 ? digits[1, digits.bytesize - 1] : "0"
+    digits[0, 1] + "." + fraction + "e" + (point < 0_i64 ? "-" : "+") + point.abs.to_s
+  end
+
+  # The power of ten of the leading decimal digit: 10^lead <= |self| <
+  # 10^(lead + 1), exactly.
+  private def decimal_lead : Int64
+    lead = ((top - 1_i64) * 30103_i64) // 100000_i64
+    lead = lead - 1_i64 if top - 1_i64 < 0_i64
+    while compare_power(lead) < 0
+      lead = lead - 1_i64
+    end
+    while compare_power(lead + 1_i64) >= 0
+      lead = lead + 1_i64
+    end
+    lead
+  end
+
+  # |self| against 10^*power*, exactly.
+  private def compare_power(power : Int64) : Int32
+    left = @mantissa
+    right = BigInt.one
+    if @exponent >= 0_i64
+      left = left << @exponent.to_i32
+    else
+      right = right << (0_i64 - @exponent).to_i32
+    end
+    if power >= 0_i64
+      right = right * (BigInt.new(10_i64) ** power.to_i32)
+    else
+      left = left * (BigInt.new(10_i64) ** (0_i64 - power).to_i32)
+    end
+    left <=> right
+  end
+
+  # |self| to *count* significant digits, ties to even: the digits as an
+  # integer and the power of ten of the last one. A carry to one more digit
+  # is the next power's first.
+  private def decimal_digits(count : Int32, lead : Int64) : {BigInt, Int64}
+    last = lead - count.to_i64 + 1_i64
+    num = @mantissa
+    den = BigInt.one
+    if @exponent >= 0_i64
+      num = num << @exponent.to_i32
+    else
+      den = den << (0_i64 - @exponent).to_i32
+    end
+    if last >= 0_i64
+      den = den * (BigInt.new(10_i64) ** last.to_i32)
+    else
+      num = num * (BigInt.new(10_i64) ** (0_i64 - last).to_i32)
+    end
+    q, r = num.divmod(den)
+    twice = (r << 1) <=> den
+    q = q + BigInt.one if twice > 0 || (twice == 0 && q.odd?)
+    {q, last}
+  end
+
+  # Whether *digits* · 10^*last* rounds back to this value.
+  private def reads_back?(digits : BigInt, last : Int64) : Bool
+    back = if last >= 0_i64
+             BigFloat.rounded(@negative, digits * (BigInt.new(10_i64) ** last.to_i32), BigInt.one, 0_i64, @precision)
+           else
+             BigFloat.rounded(@negative, digits, BigInt.new(10_i64) ** (0_i64 - last).to_i32, 0_i64, @precision)
+           end
+    back.mantissa == @mantissa && back.exponent == @exponent
+  end
+
+  # Equal values hash alike whatever their precision: the mantissa without
+  # its trailing zero bits.
+  def hash : Int32
+    return 0 if zero?
+    m = @mantissa
+    e = @exponent
+    while !m.odd?
+      m = m >> 1
+      e = e + 1_i64
+    end
+    (m.hash &* 31 &+ e.to_i32) &* (@negative ? -1 : 1)
+  end
+
+  def ==(other : BigFloat) : Bool
+    (self <=> other) == 0
+  end
+end
+
+impl Comparable for BigFloat
+  def <=>(other : self) : Int32
+    return 0 if zero? && other.zero?
+    return (other.negative? ? 1 : -1) if zero?
+    return (negative? ? -1 : 1) if other.zero?
+    return (negative? ? -1 : 1) if negative? != other.negative?
+    magnitude = if top != other.top
+                  top > other.top ? 1 : -1
+                else
+                  low = exponent < other.exponent ? exponent : other.exponent
+                  (mantissa << (exponent - low).to_i32) <=> (other.mantissa << (other.exponent - low).to_i32)
+                end
+    negative? ? 0 - magnitude : magnitude
+  end
+end
+
+impl Hashable for BigFloat
   def hash_key : Int32
     hash
   end

@@ -1,3 +1,5 @@
+require "../syntax/transformer"
+
 # Checks that abstract methods are implemented.
 #
 # We traverse all abstract types in the program (abstract classes/structs
@@ -153,6 +155,16 @@ class Iyi::AbstractDefChecker
       m2 = replace_method_arg_paths_with_type_vars(t2, m2, generic_base)
     end
 
+    # iyi: `self` in a trait's requirement is the type implementing it, so an
+    # impl may write that type where the trait wrote `self`. Read as the
+    # trait — the one type nothing implements — `impl Comparable for X` with
+    # `def <=>(other : X)` was refused as "abstract `def
+    # Comparable#<=>(other : self)` must be implemented by X", at X's
+    # declaration and not the impl.
+    if t2.trait? && !t2.is_a?(GenericType) && (implementer = iyi_implementer(target_type))
+      m2 = replace_trait_self(m2, implementer)
+    end
+
     # First check positional arguments
     # The following algorithm walk through the arguments in the abstract
     # method and the implementation at the same time, until a splat argument is found
@@ -242,6 +254,60 @@ class Iyi::AbstractDefChecker
     true
   end
 
+  # iyi: whether *type* answers the trait *base*'s requirement *method*: the
+  # question `implements_with_ancestors?` asks, without the return-type and
+  # parameter-name reports it makes on the way. Asked where the impl is
+  # written (`TopLevelVisitor#check_impl_requirements`), so that a method of
+  # the right name and the wrong parameters is refused there, naming the
+  # impl; this pass, which runs later, reports at the type.
+  def answers?(type : Type, method : Def, base : Type) : Bool
+    free_vars = free_var_nodes(method)
+    ([type] + type.ancestors).any? do |ancestor|
+      answered = ancestor.defs.try &.[method.name]?.try &.any? do |item|
+        implements?(type, ancestor, item.def, free_var_nodes(item.def), base, method, free_vars)
+      end
+      next false unless answered
+      next true if ancestor == type
+
+      ancestor = ancestor.generic_type.as(Type) if ancestor.is_a?(GenericInstanceType)
+      !base.implements?(ancestor)
+    end
+  end
+
+  # The type `self` stands for in a requirement *type* answers: the type
+  # itself, or a generic one instantiated at its own parameters, which is
+  # what `self` names inside it. Nil for a splat generic, whose parameter
+  # is not one type to instantiate at; `self` is read as written there.
+  private def iyi_implementer(type : Type) : Type?
+    return type unless type.is_a?(GenericType)
+    return nil if type.splat_index || type.double_variadic?
+
+    type.instantiate(type.type_vars.map { |name| type.type_parameter(name).as(TypeVar) })
+  end
+
+  private def replace_trait_self(method : Def, implementer : Type) : Def
+    replacer = ReplaceTraitSelf.new(implementer)
+    method = method.clone
+    method.args.each do |arg|
+      arg.restriction = arg.restriction.try &.transform(replacer)
+    end
+    method
+  end
+
+  # `self` as a path that already holds its type, which `TypeLookup` answers
+  # without looking the name up — the way `ReplacePathWithTypeVar` hands a
+  # generic base's parameters over.
+  class ReplaceTraitSelf < Transformer
+    def initialize(@implementer : Type)
+    end
+
+    def transform(node : Self) : ASTNode
+      path = Path.new(@implementer.to_s).at(node)
+      path.type = @implementer
+      path
+    end
+  end
+
   private def def_arg_ranges(method : Def)
     if splat = method.splat_index
       if method.args[splat].name.size == 0
@@ -322,7 +388,9 @@ class Iyi::AbstractDefChecker
     base_return_type_node = base_method.return_type
     return unless base_return_type_node
 
-    original_base_return_type = base_type.lookup_type?(base_return_type_node)
+    base_free_vars, free_vars = iyi_free_var_stand_ins(base_method, method)
+
+    original_base_return_type = base_type.lookup_type?(base_return_type_node, free_vars: base_free_vars.try(&.dup))
     unless original_base_return_type
       report_error(base_return_type_node, "can't resolve return type #{base_return_type_node}")
       return
@@ -340,7 +408,7 @@ class Iyi::AbstractDefChecker
       base_return_type_node.accept(replacer)
     end
 
-    base_return_type = base_type.lookup_type?(base_return_type_node)
+    base_return_type = base_type.lookup_type?(base_return_type_node, free_vars: base_free_vars.try(&.dup))
     unless base_return_type
       report_error(base_return_type_node, "can't resolve return type #{base_return_type_node}")
       return
@@ -352,7 +420,7 @@ class Iyi::AbstractDefChecker
       return
     end
 
-    return_type = type.lookup_type?(return_type_node)
+    return_type = type.lookup_type?(return_type_node, free_vars: free_vars)
     unless return_type
       report_error(return_type_node, "can't resolve return type #{return_type_node}")
       return
@@ -361,6 +429,64 @@ class Iyi::AbstractDefChecker
     unless return_type.implements?(base_return_type)
       report_error(return_type_node, "this method must return #{base_return_type}, which is the return type of the overridden method #{Call.def_full_name(base_type, base_method)}, or a subtype of it, not #{return_type}")
       return
+    end
+  end
+
+  # iyi: `abstract def ident(x : U) : U forall U` (SPEC.md II.6 §2).
+  #
+  # A requirement's own type parameter belongs to the method, not to the
+  # trait, so its return type looked up in the trait found no `U`: every such
+  # requirement, and the same in an abstract class, was "can't resolve return
+  # type U", however the impl answered it. Each free variable stands in as a
+  # type parameter of its own, and an impl's is the requirement's where the
+  # two sit at the same place in a parameter: `ident(x : V) : V forall V`
+  # answers it because its `V` is where the requirement's `U` is (II.7 rule
+  # 2, the names are the impl's own), and `: Int32` does not.
+  private def iyi_free_var_stand_ins(base_method : Def, method : Def) : {Hash(String, TypeVar)?, Hash(String, TypeVar)?}
+    base_names = base_method.free_vars || [] of String
+    names = method.free_vars || [] of String
+    return {nil, nil} if base_names.empty? && names.empty?
+
+    owner = GenericModuleType.new(@program, @program, "forall", base_names + names)
+    base_vars = base_names.to_h { |name| {name, TypeParameter.new(@program, owner, name).as(TypeVar)} }
+    vars = {} of String => TypeVar
+    restrictions = base_method.args.map_with_index { |arg, i| {arg.restriction, method.args[i]?.try(&.restriction)} }
+    restrictions << {base_method.block_arg.try(&.restriction), method.block_arg.try(&.restriction)}
+    restrictions.each do |base_restriction, restriction|
+      base_paths = iyi_single_names(base_restriction)
+      paths = iyi_single_names(restriction)
+      next unless base_paths.size == paths.size
+
+      base_paths.zip(paths) do |base_name, name|
+        next unless base_name && name && names.includes?(name)
+        if base_var = base_vars[base_name]?
+          vars[name] ||= base_var
+        end
+      end
+    end
+    names.each { |name| vars[name] ||= TypeParameter.new(@program, owner, name) }
+    {base_vars, vars}
+  end
+
+  # The paths of a restriction in the order they are written, each as its
+  # single name or nil.
+  private def iyi_single_names(node : ASTNode?) : Array(String?)
+    names = [] of String?
+    node.try &.accept(CollectSingleNames.new(names))
+    names
+  end
+
+  class CollectSingleNames < Visitor
+    def initialize(@names : Array(String?))
+    end
+
+    def visit(node : Path)
+      @names << node.single_name?
+      false
+    end
+
+    def visit(node : ASTNode)
+      true
     end
   end
 

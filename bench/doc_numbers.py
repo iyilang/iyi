@@ -44,7 +44,10 @@ def bang_names() -> int:
     """
     names: set[str] = set()
     for p in (REPO / "src").rglob("*.cr"):
-        if "/compiler/" in str(p):
+        # By the path's parts, not its text: on Windows `str(p)` is spelled
+        # with `\`, `"/compiler/"` matched nothing, and the compiler's own
+        # names were counted - 60 there against 50 on Linux.
+        if "compiler" in p.relative_to(REPO / "src").parts:
             continue
         try:
             text = p.read_text()
@@ -141,15 +144,17 @@ def measured() -> dict[str, int]:
     }
 
 
-# The other language's 0.1.0 core library: 3,551 lines of core files plus 183
-# of fibers over pthreads, remeasured from that tree (SPEC.md I.4). The number
-# iyi's own library is held under, and a check rather than a habit since the
-# night Windows' floor walked 508 lines over it and nothing failed.
-CEILING = 3_734
+# The number iyi's own library is held under (SPEC.md I.4). It was the other
+# language's 0.1.0 core library - 3,551 lines of core files plus 183 of fibers
+# over pthreads - until the 0.18 collections and assertions took the library
+# past it and the owner raised it to 4,650 rather than move them behind an
+# import. A check rather than a habit since the night Windows' floor walked
+# 508 lines over it and nothing failed.
+CEILING = 4_650
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 3,734-line ceiling: the library
+    """The figure SPEC.md holds to the 4,650-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's
@@ -210,7 +215,7 @@ def platform_floor_lines(only: str | None = None) -> int:
     the same reason. Measured over exactly what `prelude_library_lines`
     counts, so the two subtract.
 
-    SPEC.md I.4 holds the library to 3,734 lines and records that Windows
+    SPEC.md I.4 held the library to 3,734 lines and records that Windows
     breached it. This is the number that says what closing the breach by
     rule rather than by rewrite would cost, and it is measured rather than
     counted by hand: the two figures the breach was first written with

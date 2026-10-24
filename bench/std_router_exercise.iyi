@@ -1,0 +1,447 @@
+# Exercises `std/router`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_router_exercise.iyi
+
+module bench/std_router_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/router::{Router, Pattern, RouterError}
+import std/http::{HTTP, Request, Response, Server}
+import std/socket::{IyiSocket}
+
+# What `work` answers, or "refused: <why>" when it panics: run as a task,
+# whose value catches the panic.
+def answer(&work : -> String) : String
+  said = "no answer"
+  group do |g|
+    task = g.spawn { work.call }
+    case got = task.value
+    in Panicked
+      said = "refused: " + got.message
+    in String
+      said = got
+    end
+    0
+  end
+  said
+end
+
+# A handler that answers with its pattern and the wildcards it was handed,
+# sorted by name: `GET /users/{id}|id=42`.
+def add(router : Router, pattern : String) : Nil
+  router.handle(pattern) do |_, params|
+    names = params.keys.sorted
+    Response.new(200, pattern + "|" + names.map { |name| name + "=" + params[name] }.join(","))
+  end
+end
+
+def router_of(patterns : Array(String)) : Router
+  router = Router.new
+  patterns.each { |pattern| add(router, pattern) }
+  router
+end
+
+# A router's answer in one line: the handler's body for a 200, a
+# redirect's status and `Location`, the `Allow` of a 405, the status
+# otherwise. The gate's Go program writes Go's `ServeMux`'s answers the
+# same way.
+def describe(router : Router, method : String, host : String, target : String) : String
+  path = target
+  query = nil.as(String?)
+  if q = target.index('?')
+    path = target[0, q]
+    query = target[q + 1, target.bytesize - q - 1]
+  end
+  got = router.call(Request.new(method, path, query, {"Host" => host}, ""))
+  case got.status
+  when 200                     then got.body
+  when 301, 302, 303, 307, 308 then got.status.to_s + " " + (got.header("Location") || "")
+  when 405                     then "405 " + (got.header("Allow") || "")
+  else                              got.status.to_s
+  end
+end
+
+# The routing tables. Each request is method, host, target, and the
+# answer expected. The first is the patterns Go's `ServeMux` documentation
+# uses as its examples, together, with `/` under them all.
+MAIN = [
+  "/index.html",
+  "GET /static/",
+  "example.com/",
+  "example.com/{$}",
+  "/b/{bucket}/o/{objectname...}",
+  "/images/thumbnails/",
+  "/images/",
+  "/{$}",
+  "/",
+  "/a%2fb/",
+  "/a/b/",
+  "/%61",
+  "GET /users/{id}",
+  "PUT /users/{id}",
+  "GET /users/new",
+  "GET /users/{id}/avatar",
+  "HEAD /users/{id}/avatar",
+  "/docs/",
+  "/docs",
+  "/files/{path...}",
+  "/u/{x}",
+]
+
+MAIN_REQUESTS = [
+  {"GET", "any.example", "/index.html", "/index.html|"},
+  {"POST", "any.example", "/index.html", "/index.html|"},
+  {"GET", "any.example", "/static/app.js", "GET /static/|"},
+  {"HEAD", "any.example", "/static/app.js", "GET /static/|"},
+  {"POST", "any.example", "/static/app.js", "/|"},
+  {"GET", "any.example", "/static", "307 /static/"},
+  {"POST", "any.example", "/static", "/|"},
+  {"GET", "example.com", "/anything", "example.com/|"},
+  {"GET", "example.com", "/", "example.com/{$}|"},
+  {"GET", "example.com:8080", "/", "example.com/{$}|"},
+  {"GET", "example.com", "/index.html", "example.com/|"},
+  {"GET", "any.example", "/b/mybucket/o/a/b/c.txt", "/b/{bucket}/o/{objectname...}|bucket=mybucket,objectname=a/b/c.txt"},
+  {"GET", "any.example", "/b/x/o/", "/b/{bucket}/o/{objectname...}|bucket=x,objectname="},
+  {"GET", "any.example", "/b/x/o", "307 /b/x/o/"},
+  {"GET", "any.example", "/images/thumbnails/a.png", "/images/thumbnails/|"},
+  {"GET", "any.example", "/images/a.png", "/images/|"},
+  {"GET", "any.example", "/images", "307 /images/"},
+  {"GET", "any.example", "/images?size=2", "307 /images/?size=2"},
+  {"GET", "any.example", "/images/thumbnails", "307 /images/thumbnails/"},
+  {"GET", "any.example", "/docs", "/docs|"},
+  {"GET", "any.example", "/docs/x", "/docs/|"},
+  {"GET", "any.example", "/", "/{$}|"},
+  {"GET", "any.example", "/nothing/here", "/|"},
+  {"GET", "any.example", "/a%2Fb/100%25", "/a%2fb/|"},
+  {"GET", "any.example", "/a/b/100", "/a/b/|"},
+  {"GET", "any.example", "/a", "/%61|"},
+  {"GET", "any.example", "/%61", "/%61|"},
+  {"GET", "any.example", "/users/42", "GET /users/{id}|id=42"},
+  {"HEAD", "any.example", "/users/42", "GET /users/{id}|id=42"},
+  {"GET", "any.example", "/users/new", "GET /users/new|"},
+  {"PUT", "any.example", "/users/new", "PUT /users/{id}|id=new"},
+  {"GET", "any.example", "/users/J%C3%BCrgen%20M", "GET /users/{id}|id=Jürgen M"},
+  {"GET", "any.example", "/users/a%2Fb", "GET /users/{id}|id=a/b"},
+  {"PATCH", "any.example", "/users/42", "/|"},
+  {"GET", "any.example", "/users/42/avatar", "GET /users/{id}/avatar|id=42"},
+  {"HEAD", "any.example", "/users/42/avatar", "HEAD /users/{id}/avatar|id=42"},
+  {"GET", "any.example", "/u/x", "/u/{x}|x=x"},
+  {"GET", "any.example", "/u/", "/|"},
+  {"GET", "any.example", "/u", "/|"},
+  {"GET", "any.example", "/files", "307 /files/"},
+  {"GET", "any.example", "/files/", "/files/{path...}|path="},
+  {"GET", "any.example", "/files/a/b%20c/d", "/files/{path...}|path=a/b c/d"},
+  {"GET", "any.example", "/files/%2e%2e/x", "/files/{path...}|path=../x"},
+  {"GET", "any.example", "/a/../index.html", "307 /index.html"},
+  {"GET", "any.example", "//index.html", "307 /index.html"},
+  {"GET", "any.example", "/images/./x", "307 /images/x"},
+  {"GET", "any.example", "/images/..", "307 /"},
+  {"GET", "any.example", "/x/..?q=1", "307 /?q=1"},
+  {"GET", "any.example", "/../../index.html", "307 /index.html"},
+  {"GET", "any.example", "/%zz", "400"},
+]
+
+# No `/` under these, so a path that matches only other methods is 405.
+API = [
+  "GET /items/{id}",
+  "PUT /items/{id}",
+  "DELETE /items/{id}",
+  "POST /items",
+  "GET /only/",
+  "POST /form",
+  "GET /a/b",
+  "POST /a/{x}",
+]
+
+API_REQUESTS = [
+  {"GET", "any.example", "/items/7", "GET /items/{id}|id=7"},
+  {"HEAD", "any.example", "/items/7", "GET /items/{id}|id=7"},
+  {"PATCH", "any.example", "/items/7", "405 DELETE, GET, HEAD, PUT"},
+  {"GET", "any.example", "/items", "405 POST"},
+  {"GET", "any.example", "/items/", "404"},
+  {"GET", "any.example", "/form", "405 POST"},
+  {"POST", "any.example", "/a/b", "POST /a/{x}|x=b"},
+  {"PUT", "any.example", "/a/b", "405 GET, HEAD, POST"},
+  {"GET", "any.example", "/only", "307 /only/"},
+  {"POST", "any.example", "/only", "405 GET, HEAD"},
+  {"DELETE", "any.example", "/nope/", "404"},
+  {"POST", "any.example", "/only/x", "405 GET, HEAD"},
+  {"GET", "any.example", "/nope", "404"},
+]
+
+# A pattern with a host beats one without whatever their paths are.
+HOSTS = [
+  "example.com/",
+  "/x",
+  "GET api.example.com/v1/{rest...}",
+  "/v1/{version}",
+]
+
+HOSTS_REQUESTS = [
+  {"GET", "example.com", "/x", "example.com/|"},
+  {"GET", "other.example", "/x", "/x|"},
+  {"GET", "api.example.com", "/v1/a/b", "GET api.example.com/v1/{rest...}|rest=a/b"},
+  {"GET", "api.example.com", "/x", "/x|"},
+  {"POST", "api.example.com", "/v1/a", "/v1/{version}|version=a"},
+  {"POST", "api.example.com", "/v1/a/b", "405 GET, HEAD"},
+  {"GET", "other.example", "/v1/a/b", "404"},
+]
+
+# Pairs registered in turn - the first after the second - and whether the
+# second registration is refused, with the request named as both match.
+CONFLICTS = [
+  {"/index.html", "GET /", "it matches more methods but a more specific path, and both match GET \"/index.html\""},
+  {"GET /", "/index.html", "it matches fewer methods but a more general path, and both match GET \"/index.html\""},
+  {"/a/{x}", "/{y}/b", "both match \"/a/b\", and neither is more specific than the other"},
+  {"/a/{x}/c", "/a/b/{y}", "both match \"/a/b/c\", and neither is more specific than the other"},
+  {"/{x}/{y}", "/a/{z...}", "both match \"/a/y\", and neither is more specific than the other"},
+  {"/a/b/{x...}", "/a/{y}/c", "both match \"/a/b/c\", and neither is more specific than the other"},
+  {"/a", "/a", "both match the same requests"},
+  {"/{x}", "/{y}", "both match the same requests"},
+  {"/a/{x...}", "/a/", "both match the same requests"},
+  {"/%61", "/a", "both match the same requests"},
+  {"HEAD /a/{x}", "GET /a/b", "it matches fewer methods but a more general path, and both match HEAD \"/a/b\""},
+  {"GET /a/{x}", "/a/b", "it matches fewer methods but a more general path, and both match GET \"/a/b\""},
+  {"GET /a", "POST /a", ""},
+  {"GET /a", "HEAD /a", ""},
+  {"example.com/a/{x}", "/{y}/b", ""},
+  {"example.com/", "/", ""},
+  {"/{x}", "/{$}", ""},
+  {"/images/thumbnails/", "/images/", ""},
+  {"/a/{x}", "/a/", ""},
+  {"/a/{$}", "/a/{x}", ""},
+  {"/a/{$}", "/a/", ""},
+  {"example.com/{x}", "example.com/a/", ""},
+  {"a.example/x", "b.example/{y}", ""},
+]
+
+# Patterns read: "" for one that is a pattern, the reason for one that is
+# not. The last four are where this router departs from Go 1.25, which
+# takes them: no request reaches them, cleaned or with its escapes valid.
+PARSES = [
+  {"/", ""},
+  {"GET /", ""},
+  {"GET \t /a", ""},
+  {"example.com/", ""},
+  {"/{$}", ""},
+  {"/a/{x...}", ""},
+  {"/{x}/", ""},
+  {"/{_x1}/{Y}", ""},
+  {"/a%2fb/", ""},
+  {"/{", "a wildcard is a whole segment, {name}, and \"{\" is not one"},
+  {"/a{x}", "a wildcard is a whole segment, {name}, and \"a{x}\" is not one"},
+  {"/b_{bucket}", "a wildcard is a whole segment, {name}, and \"b_{bucket}\" is not one"},
+  {"/{x}y", "a wildcard is a whole segment, {name}, and \"{x}y\" is not one"},
+  {"/{x...}/a", "{x...} is not at the end"},
+  {"/{x...}/", "{x...} is not at the end"},
+  {"/{$}/a", "{$} is not at the end"},
+  {"/{id}/{id}", "two wildcards are named \"id\""},
+  {"/{id}/x/{id...}", "two wildcards are named \"id\""},
+  {"/{}", "a wildcard has no name"},
+  {"/{...}", "a wildcard has no name"},
+  {"/{1x}", "\"1x\" is not a wildcard name (a letter or _, then letters, digits and _)"},
+  {"/{x}}", "\"x}\" is not a wildcard name (a letter or _, then letters, digits and _)"},
+  {"/{a-b}", "\"a-b\" is not a wildcard name (a letter or _, then letters, digits and _)"},
+  {"G@T /", "\"G@T\" is not a method"},
+  {"example.com", "it has no path, which starts with /"},
+  {"GET", "it has no path, which starts with /"},
+  {"x{y}/", "its host \"x{y}\" holds a { (is the / before it missing?)"},
+  {"", "it is empty"},
+  {"/a/../b", "its path is not clean: a request for it is sent to \"/b\""},
+  {"//a", "its path is not clean: a request for it is sent to \"/a\""},
+  {"/a/./b", "its path is not clean: a request for it is sent to \"/a/b\""},
+  {"/a%zz", "\"a%zz\" holds a malformed percent escape"},
+]
+DEPARTURES = 4
+
+def run_table(router : Router, requests : Array({String, String, String, String})) : Int32
+  requests.each do |row|
+    got = describe(router, row[0], row[1], row[2])
+    assert_str row[3], got, "routed #{row[0]} #{row[1]} #{row[2]}"
+  end
+  requests.size
+end
+
+def show_table(name : String, patterns : Array(String), requests : Array({String, String, String, String})) : Nil
+  puts "T #{name}"
+  patterns.each { |pattern| puts "P #{pattern}" }
+  router = router_of(patterns)
+  requests.each do |row|
+    puts "R #{row[0]} #{row[1]} #{row[2]}"
+    puts "A #{name} #{row[0]} #{row[1]} #{row[2]} => #{describe(router, row[0], row[1], row[2])}"
+  end
+end
+
+# Modes the gate script runs: `table` prints every table with this
+# router's answers for the gate's Go program to answer too; `serve`
+# prints a port and serves a small router until `/stop`.
+args = Program.args
+if args.size > 0 && args[0] == "table"
+  show_table("main", MAIN, MAIN_REQUESTS)
+  show_table("api", API, API_REQUESTS)
+  show_table("hosts", HOSTS, HOSTS_REQUESTS)
+  CONFLICTS.each do |pair|
+    puts "C #{pair[0]}\t#{pair[1]}"
+    first = Pattern.parse(pair[0]).or_panic
+    second = Pattern.parse(pair[1]).or_panic
+    puts "A C #{pair[0]}\t#{pair[1]} => #{first.conflict(second) ? "conflict" : "ok"}"
+  end
+  PARSES[0, PARSES.size - DEPARTURES].each do |row|
+    puts "V #{row[0]}"
+    puts "A V #{row[0]} => #{Pattern.parse(row[0]).is_a?(RouterError) ? "invalid" : "ok"}"
+  end
+  __iyi_exit(0)
+end
+if args.size > 0 && args[0] == "serve"
+  serving = IyiSocket.listen("127.0.0.1", 0)
+  puts serving.local_port
+  router = Router.new
+  router.handle("GET /users/{id}") { |_, params| Response.new(200, "user " + params["id"]) }
+  router.handle("POST /users/{id}") { |req, params| Response.new(201, "posted " + params["id"] + ": " + req.body) }
+  router.handle("/static/") { |req, _| Response.new(200, "static " + req.path) }
+  router.handle("GET /{$}") { |_, _| Response.new(200, "home") }
+  router.handle("GET /stop") do |_, _|
+    serving.close
+    Response.new(200, "bye")
+  end
+  Server.serve(serving) { |req| router.call(req) }
+  __iyi_exit(0)
+end
+
+puts "== patterns"
+# Go's grammar: a method and a space, a host, a path of segments; what a
+# pattern that is not one is refused with.
+PARSES.each do |row|
+  parsed = Pattern.parse(row[0])
+  if parsed.is_a?(RouterError)
+    assert_str "Router: #{row[0].inspect} is not a pattern: #{row[1]}", parsed.message, "the pattern #{row[0].inspect} is refused"
+  else
+    assert_str "", row[1], "the pattern #{row[0].inspect} is read"
+    assert_str row[0], parsed.to_s, "a pattern is what was written"
+  end
+end
+spaced = Pattern.parse("GET \t /a").or_panic
+assert_true spaced.method == "GET" && spaced.host == "" && !spaced.match("/a").nil?, "a method and spaces and a tab"
+hosted = Pattern.parse("PUT example.com/b/{bucket}/o/{objectname...}").or_panic
+assert_true hosted.method == "PUT" && hosted.host == "example.com", "a method and a host"
+assert_str "{\"bucket\" => \"b 1\", \"objectname\" => \"a/b/\"}", (hosted.match("/b/b%201/o/a/b/") || {} of String => String).inspect, "a pattern's wildcards"
+assert_true hosted.match("/b/x/o").nil? && hosted.match("/b//o/x").nil?, "no rest past the end, no empty segment"
+puts "  #{PARSES.size} patterns: #{PARSES.count { |row| row[1].empty? }} read, #{PARSES.count { |row| !row[1].empty? }} refused by their sentence"
+
+puts "\n== precedence and conflicts"
+# Go's comparison: a pattern is more specific than another when its
+# requests are a strict subset; neither, with requests in common, is a
+# conflict, refused when the second is registered.
+CONFLICTS.each do |pair|
+  first = Pattern.parse(pair[0]).or_panic
+  second = Pattern.parse(pair[1]).or_panic
+  sentence = first.conflict(second)
+  if pair[2].empty?
+    assert_true sentence.nil?, "#{pair[0]} beside #{pair[1]} is no conflict: #{sentence}"
+  else
+    assert_str "Router: #{pair[0].inspect} conflicts with #{pair[1].inspect}: #{pair[2]}", sentence || "", "#{pair[0]} beside #{pair[1]} conflicts"
+    assert_true !second.conflict(first).nil?, "#{pair[1]} beside #{pair[0]} conflicts too"
+  end
+end
+pairs = [
+  {"/images/thumbnails/", "/images/", Pattern::MORE_SPECIFIC},
+  {"/", "/a", Pattern::MORE_GENERAL},
+  {"/", "/{$}", Pattern::MORE_GENERAL},
+  {"/a/b", "/a/{x}", Pattern::MORE_SPECIFIC},
+  {"/a/{x}", "/a/", Pattern::MORE_SPECIFIC},
+  {"GET /a", "/a", Pattern::MORE_SPECIFIC},
+  {"GET /a", "HEAD /a", Pattern::MORE_GENERAL},
+  {"/a/{x...}", "/a/b/{y...}", Pattern::MORE_GENERAL},
+  {"/{x}", "/{$}", Pattern::DISJOINT},
+  {"/a/{x}", "/a/{x}/b", Pattern::DISJOINT},
+  {"GET /a", "POST /a", Pattern::DISJOINT},
+  {"/a/{x}/c", "/a/b/{y}", Pattern::OVERLAPS},
+  {"/x/{a}", "/x/{b}", Pattern::EQUIVALENT},
+]
+pairs.each do |pair|
+  got = Pattern.parse(pair[0]).or_panic.relation(Pattern.parse(pair[1]).or_panic)
+  assert_true got == pair[2], "#{pair[0]} beside #{pair[1]}: relation #{got}, not #{pair[2]}"
+end
+# `handle` refuses the second of a conflicting pair with the sentence,
+# and takes them registered the other way round only if that is not one.
+refused = answer do
+  router = Router.new
+  add(router, "GET /")
+  add(router, "/index.html")
+  "registered"
+end
+assert_str "refused: Router: \"/index.html\" conflicts with \"GET /\": it matches more methods but a more specific path, and both match GET \"/index.html\"", refused, "handle refuses a conflict"
+assert_str "registered", answer { router_of(["/images/", "/images/thumbnails/", "example.com/", "/"]); "registered" }, "patterns that do not conflict are taken"
+late = answer do
+  router = router_of(["/"])
+  router.call(Request.new("GET", "/", nil, {"Host" => "x"}, ""))
+  add(router, "/late")
+  "registered"
+end
+assert_str "refused: Router: \"/late\" is registered after the router answered a request; patterns are registered before it serves", late, "a pattern after the first request is refused"
+assert_str "refused: Router: \"/{\" is not a pattern: a wildcard is a whole segment, {name}, and \"{\" is not one", answer { router_of(["/{"]); "registered" }, "handle refuses what is not a pattern"
+puts "  #{CONFLICTS.count { |pair| !pair[2].empty? }} conflicting pairs refused by their sentence, #{CONFLICTS.count { |pair| pair[2].empty? }} pairs taken, #{pairs.size} relations; handle refuses a conflict, a bad pattern, a late pattern"
+
+puts "\n== Go's documented examples, routed"
+# Every pattern the documentation names, one router: precedence, GET
+# taking HEAD, hosts, subtrees and their redirect, {$}, escapes decoded a
+# segment at a time, cleaned paths redirected.
+order_main = run_table(router_of(MAIN), MAIN_REQUESTS)
+# Precedence is the patterns' and not their order: the table reversed
+# routes the same.
+run_table(router_of(MAIN.reversed), MAIN_REQUESTS)
+puts "  #{MAIN.size} patterns, #{order_main} requests, the same registered in reverse"
+
+puts "\n== 405 and 404"
+api = run_table(router_of(API), API_REQUESTS)
+puts "  #{API.size} patterns, #{api} requests: Allow sorted with HEAD beside GET, 404 where no method's pattern matches"
+
+puts "\n== hosts"
+hosts = run_table(router_of(HOSTS), HOSTS_REQUESTS)
+run_table(router_of(HOSTS.reversed), HOSTS_REQUESTS)
+puts "  #{HOSTS.size} patterns, #{hosts} requests: a host's pattern first, its port dropped, the rest after"
+
+puts "\n== a real server"
+# Through std/http both ways: a HEAD of a GET pattern, a 405's Allow and
+# a redirect as they go over the wire.
+listener = IyiSocket.listen("127.0.0.1", 0)
+base = "http://127.0.0.1:#{listener.local_port}"
+group do |g|
+  g.spawn do
+    router = Router.new
+    router.handle("GET /users/{id}") { |_, params| Response.new(200, "user " + params["id"]) }
+    router.handle("/static/") { |req, _| Response.new(200, "static " + req.path) }
+    router.handle("GET /stop") do |_, _|
+      listener.close
+      Response.new(200, "bye")
+    end
+    Server.serve(listener) { |req| router.call(req) }
+    0
+  end
+  g.spawn do
+    user = HTTP.get(base + "/users/J%C3%BCrgen").or_panic
+    assert_true user.status == 200 && user.body == "user Jürgen", "a wildcard over the wire: #{user.status} #{user.body}"
+    head = HTTP.head(base + "/users/1").or_panic
+    assert_true head.status == 200 && head.body == "" && head.header("Content-Length") == "6", "a HEAD of a GET pattern: #{head.status} #{head.header("Content-Length")}"
+    wrong = HTTP.delete(base + "/users/1").or_panic
+    assert_true wrong.status == 405 && wrong.header("Allow") == "GET, HEAD", "a DELETE is 405 with Allow: #{wrong.status} #{wrong.header("Allow")}"
+    moved = HTTP.request("GET", base + "/static?v=1", redirects: 0).or_panic
+    assert_true moved.status == 307 && moved.header("Location") == "/static/?v=1", "a subtree's root redirected: #{moved.status} #{moved.header("Location")}"
+    followed = HTTP.get(base + "/static").or_panic
+    assert_true followed.status == 200 && followed.body == "static /static/", "and followed: #{followed.body}"
+    assert_true HTTP.get(base + "/missing").or_panic.status == 404, "no pattern is 404"
+    HTTP.get(base + "/stop").or_panic
+    0
+  end
+end
+puts "  a wildcard, a HEAD, a 405 with Allow, a 307 read and followed, a 404"
+
+puts "\nALL CHECKS PASSED"

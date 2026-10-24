@@ -30,10 +30,8 @@
 
 module std/deque
 
-import std/indexable
-using std/indexable::{Indexable, IndexableMutable}
-import std/enumerable
-using std/enumerable::{Enumerable}
+import std/indexable::{Indexable, IndexableMutable}
+import std/enumerable::{Enumerable}
 
 pub class Deque(T)
   @buffer : Pointer(T)
@@ -308,10 +306,13 @@ pub class Deque(T)
     value
   end
 
-  # Appends every element of other; answers the deque.
+  # Appends every element of other; answers the deque. The count is read
+  # once: walking `other.size` while pushing grew it along with this deque
+  # when the two were one, so `d.concat(d)` never ended.
   def concat(other : Deque(T)) : Deque(T)
+    count = other.size
     i = 0
-    while i < other.size
+    while i < count
       push(other.unsafe_fetch(i))
       i = i + 1
     end
@@ -350,9 +351,12 @@ pub class Deque(T)
     copy
   end
 
-  # The same elements in the same order.
-  def ==(other : Deque(T)) : Bool
-    return false unless @size == other.size
+  # The same elements in the same order, where one element type holds the
+  # other, as tuples compare (src/iyi/object.iyi). Restricted to
+  # `Deque(T)`, a `Deque(Int32)` was taken for a `Deque(Int32?)` and not
+  # back: the one equality answered true one way and false the other.
+  def ==(other : Deque(U)) : Bool forall U
+    return false unless {{ T <= U || U <= T }} && @size == other.size
     i = 0
     while i < @size
       return false unless unsafe_fetch(i) == other.unsafe_fetch(i)

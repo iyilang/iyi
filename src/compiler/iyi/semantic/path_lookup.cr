@@ -33,9 +33,20 @@ module Iyi
     #
     # If the path is global (for example ::Foo::Bar), the search starts at
     # the top level.
+    #
+    # iyi: a path that reaches the root for a module of the program's own
+    # package by the name it had before it lived under the package's name
+    # is answered from there, and warned about here, where the path's
+    # location is (`Program#iyi_moved_package_item`).
     def lookup_path(path : Path, lookup_in_namespace = true, include_private = false, location = path.location) : Type | ASTNode | Nil
       location = nil if path.global?
-      (path.global? ? program : self).lookup_path(path.names, lookup_in_namespace, include_private, location)
+      program.iyi_moved_package_hit = false
+      found = (path.global? ? program : self).lookup_path(path.names, lookup_in_namespace, include_private, location)
+      if found && program.iyi_moved_package_hit
+        program.iyi_moved_package_hit = false
+        program.iyi_warn_moved_package_path(path)
+      end
+      found
     end
 
     # :ditto:
@@ -114,6 +125,22 @@ module Iyi
           return nil
         end
 
+        # iyi: a type the compiler declares before any source is read, and
+        # that no source has written since, is a name and not a definition:
+        # `Regex` is one, kept for the other library's regex literals, which
+        # iyi refuses. An imported name beats it. A script without a module
+        # header wrote `import std/regex::{Regex}` and `Regex.compile(...)`
+        # met "undefined method 'compile' for Regex.class", the empty shell
+        # answering where the import should have. Only where the import
+        # reaches: a headerless script's imports are the program's, and the
+        # prelude asking for `GC` must not get `std/gc`'s because a script
+        # imported it.
+        if location && type.is_a?(NamedType) && type.locations.nil? && (used = using_modules?)
+          if (imported = lookup_using_path_item(used, name, location)) && !program.iyi_walled_unit?(location, imported)
+            return imported
+          end
+        end
+
         if lookup_in_namespace && program.iyi_walled_unit?(location, type)
           walled = type
         else
@@ -134,10 +161,10 @@ module Iyi
         return match if match
       end
 
-      # iyi: then the modules brought into this scope with `using` (SPEC.md
+      # iyi: then the modules whose names this scope imports (SPEC.md
       # II.3). Placed after our own types and our parents, because a local
-      # definition beats a used one; and before the namespace, so that a
-      # `using` shadows an enclosing scope exactly the way a nested type does.
+      # definition beats a used one; and before the namespace, so that an
+      # imported name shadows an enclosing scope the way a nested type does.
       if used = using_modules?
         match = lookup_using_path_item(used, name, location)
         return match if match
@@ -152,16 +179,16 @@ module Iyi
       walled
     end
 
-    # iyi: resolves *name* against the modules `using` brought into this scope.
+    # iyi: resolves *name* against the modules whose names this scope imports.
     #
     # Only each module's OWN types are considered — not what it inherits, and
-    # not what it itself brought in with `using`. `using` grants access to a
+    # not the names it itself imports. Importing names grants access to a
     # module's exports, not to everything reachable from it, which is what
     # keeps a module's public surface something you can read off its own
     # source.
     #
     # Two used modules exporting the same name is not an error where the
-    # `using` lines are written; it is an error here, at the point of use, and
+    # imports are written; it is an error here, at the point of use, and
     # only for the name actually used. That is SPEC.md II.3's rule, and it is
     # the reason this cannot be an `include`: ancestor order would silently
     # pick one.
@@ -180,7 +207,7 @@ module Iyi
           message = String.build do |io|
             io << '\'' << name << "' is ambiguous here: it is exported by both "
             io << found_in << " and " << using_module.type
-            io << ". Qualify it, or narrow one of the `using` directives."
+            io << ". Qualify it, or narrow one of the imports' name lists."
           end
           if location
             ::raise TypeException.new(message, location.line_number, location.column_number, location.filename, name.size)
@@ -206,8 +233,57 @@ module Iyi
         return item
       end
 
-      super
+      super || iyi_moved_package_item(name)
     end
+
+    # iyi: *name* at the root, where a module of the program's own package
+    # was before the package's own build named it as a consumer's does
+    # (`iyi_root_package`, SPEC.md III.7): `Codec` of `codec.iyi` in
+    # `iyi-web` is `IyiWeb::Codec` in both builds now. The old spelling
+    # compiled, in this build only, so it still resolves - here, at the
+    # root, where a lookup that would have found it then arrives - and
+    # `Type#lookup_path` warns where it is written. Nil for every other
+    # name, at one set lookup.
+    private def iyi_moved_package_item(name : String) : Type?
+      return nil unless @iyi_moved_package_heads.includes?(name)
+      return nil unless package = iyi_root_package_name
+      found = types[package.camelcase]?.try(&.types?.try(&.[name]?))
+      @iyi_moved_package_hit = true if found
+      found
+    end
+
+    # Whether a lookup since the flag was cleared answered from
+    # `iyi_moved_package_item`.
+    property iyi_moved_package_hit = false
+
+    # The warning for *path*, which reached a module of the program's own
+    # package by its old name: once where it is written, with the edit `iyi
+    # fix` makes - a `pub macro` that writes it fails in every consumer,
+    # and its author hears it from their own build first.
+    def iyi_warn_moved_package_path(path : Path) : Nil
+      return unless (location = path.location) && (package = iyi_root_package_name)
+      return unless @iyi_moved_package_warned.add?({location.filename.to_s, location.line_number, location.column_number})
+
+      prefix = package.camelcase
+      first = path.names.first
+      lead = path.global? ? "::" : ""
+      written = "#{lead}#{path.names.join("::")}"
+      named = "#{lead}#{prefix}::#{path.names.join("::")}"
+      message = "`#{written}` is `#{named}`: the package's own modules live under its name in its own " \
+                "build, as they do in a consumer's (SPEC.md III.7). The old spelling still resolves here " \
+                "and nowhere else - a build that requires this package has no `#{lead}#{first}` - so write `#{named}`"
+      if (file = location.filename).is_a?(VirtualFile) && (defined = file.macro.location)
+        message += ". It is written in macro `#{file.macro.name}`, defined at " \
+                   "#{Iyi.relative_filename(defined.filename.to_s)}:#{defined.line_number}, which is where the edit goes"
+      else
+        message += "; `iyi fix` makes the edit"
+      end
+      report = TypeException.for_node(path, message, suggestion: "#{lead}#{prefix}::#{first}", size: lead.size + first.size)
+      report.warning = true
+      warnings.add_report(report, location)
+    end
+
+    @iyi_moved_package_warned = Set({String, Int32, Int32}).new
   end
 
   module GenericType

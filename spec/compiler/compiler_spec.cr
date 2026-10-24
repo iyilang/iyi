@@ -82,22 +82,25 @@ describe "Compiler" do
   # third of a warm build spent looking for linkers nobody had installed
   # (SPEC.md 0.1.0 item 2). This is the file that keeps the answer.
   it "remembers which linker it found rather than searching PATH per build" do
-    # The probe caches a `PATH` search, and the msvc path performs none: its
-    # linker is the one the Visual C++ installation names, found through
-    # `vswhere` and the registry. There is nothing to remember, so there is
-    # no file — and a spec that asserted one passed here only where `lld-link`
-    # happened to be on `PATH`.
-    {% if flag?(:msvc) %}
-      pending! "the msvc link takes its linker from the VC++ installation, not from PATH"
-    {% end %}
+    # The msvc link searches no `PATH`: its linker is the one the Visual C++
+    # installation names, and what is remembered is where that is - `vswhere`
+    # is a process of its own, 35 ms of every build before.
+    probe = Iyi::CacheDir.instance.join({{ flag?(:msvc) ? "msvc-probe" : "linker-probe" }})
+    # Gone first, so that the file below is this build's and not one an
+    # earlier build left: with it standing, the check passed against a
+    # compiler that never wrote it.
+    File.delete?(probe)
 
     with_temp_executable "compiler_spec_output" do |path|
       Iyi::Command.run ["build"].concat(program_flags_options).concat([compiler_datapath("compiler_sample"), "-o", path])
 
-      probe = Iyi::CacheDir.instance.join("linker-probe")
       File.exists?(probe).should be_true
-      # The `PATH` it was found under, so that changing `PATH` asks again.
-      File.read(probe).lines.first.size.should eq 32
+      {% if flag?(:msvc) %}
+        Dir.exists?(File.join(File.read(probe).chomp, "bin")).should be_true
+      {% else %}
+        # The `PATH` it was found under, so that changing `PATH` asks again.
+        File.read(probe).lines.first.size.should eq 32
+      {% end %}
     end
   end
 

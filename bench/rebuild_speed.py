@@ -36,16 +36,14 @@ ROUNDS = 5
 
 ENTRY = """module main
 
-import calc/lexer
+import calc/lexer::{scan}
 import calc/parser
 import calc/ast
 import kemal/dsl
 import kemal/router
-import app/greeter
+import app/greeter::{polite}
 import app/formal
 import std/list
-using app/greeter::{polite}
-using calc/lexer::{scan}
 
 pub def check(source : String) : String
   tokens = scan(source)

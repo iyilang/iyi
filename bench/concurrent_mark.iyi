@@ -23,7 +23,10 @@
 #     must be the pattern written into them.
 #
 # Every round that made its move under a mark counts; the program asks for
-# at least one, and reports how many. The pauses are printed beside the
+# at least one, and reports how many. Twenty-four rounds, and on past them
+# until one has, up to ninety-six: whether the program reaches the tail
+# before the marker does is a race it wins most rounds and, on a loaded
+# machine, can lose twenty-four times running. The pauses are printed beside the
 # stop-the-world mark's over the same chain: a concurrent collection's two
 # stops, the longest of each, against the one stop that marked it all —
 # and how many second stops found a white root or a full pool and retreated
@@ -32,7 +35,7 @@
 # bench/concurrent_mark.sh drives it and proves the check fails when the
 # barrier shades nothing.
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64))) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
     __iyi_exit(1)
@@ -142,6 +145,18 @@
     end
   end
 
+  # Two hundred collections beside the program, each woken by its thread,
+  # and the kept chain whole after them.
+  def wake_rounds(kept : Cell) : Nil
+    round = 0
+    while round < 200
+      churn(IyiMark.budget)
+      IyiMark.settle
+      round = round + 1
+    end
+    fail("the kept chain lost its payload under the wake rounds") unless tail(kept).payload.is_a?(Payload)
+  end
+
   # Allocate until a mark is running beside this thread, or the budget has
   # gone by twice, which means no mark will be concurrent here.
   def allocate_until_marking : Bool
@@ -218,8 +233,56 @@
     end
   end
 
+  # A holder and the payload only it holds, made where no local of the
+  # caller's keeps the payload.
+  @[NoInline]
+  def stray_holder(seed : UInt64) : Holder
+    holder = Holder.new
+    holder.payload = Payload.new(seed)
+    holder
+  end
+
+  # The stack under the caller's frame zeroed, where `stray_holder` and the
+  # barrier ran: the next collection's frames reuse it, and a word of theirs
+  # not yet written is scanned as it stands. A payload pointer `stray_holder`
+  # left there kept the payload alive through that scan, and the stray
+  # check's failure proof stopped failing, three runs of three, when the
+  # runtime's lock and its helpers' start changed the collector's frames.
+  @[NoInline]
+  def scrub_stack : Nil
+    pad = uninitialized UInt64[2048]
+    base = pointerof(pad).as(UInt64*)
+    index = 0
+    while index < 2048
+      base[index] = 0_u64
+      index = index + 1
+    end
+    asm("" :: "r"(base) : "memory" : "volatile")
+  end
+
   def note_stops : Nil
     Stops.note
+  end
+
+  # Threads of the program's own, allocating until told to stop: the
+  # cores they hold are not the helpers' to take.
+  class Busy
+    @@page : UInt64 = 0_u64
+
+    def self.setup : Nil
+      @@page = __iyi_mmap(4096_u64).address
+    end
+
+    def self.stop : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(@@page)
+    end
+  end
+
+  def busy_until_stopped : Nil
+    while Busy.stop.value.get == 0_u64
+      block = Pointer(UInt8).malloc(64_u64)
+      block.value = 1_u8
+    end
   end
 
   index = 0
@@ -229,29 +292,91 @@
   end
 
   # ── The stop-the-world mark over the same chain, for the pause ────────
+  # In a frame of its own, so the chain dies with it. Held by a top-level
+  # local until the moves below assigned it again, the chain's head sat
+  # in a slot the Windows build kept, and the small live set's check
+  # found 200,000 cells alive beside it.
+  @[NoInline]
+  def stw_pause_over_chain : UInt64
+    chain = build_chain(1_u64)
+    IyiMark.collect
+    IyiMark.collect
+    stw_pauses = 0_u64
+    round = 0
+    while round < 5
+      started = IyiMark.pause_total_ns
+      IyiMark.collect
+      stw_pauses = stw_pauses + (IyiMark.pause_total_ns - started)
+      round = round + 1
+    end
+    fail("the chain's tail lost its payload under a stop-the-world mark") unless tail(chain).payload.is_a?(Payload)
+    stw_pauses.unsafe_div(5_u64)
+  end
+
   IyiMark.auto = false
   IyiMark.workers = 0_u64
-  chain = build_chain(1_u64)
+  stw_mean = stw_pause_over_chain
+
+  # ── A barrier that runs after its mark has ended ──────────────────────
+  # A store reads the marking flag and its barrier runs after it, and a
+  # thread stopped between the two finds the mark over when it goes on.
+  # The barrier has nothing to shade then, and must shade nothing: a
+  # holder grayed after its arena's sweep went into the next mark gray,
+  # which that mark never queues, and the payload only it held was swept.
+  # Every arena is swept by the collection first, so nothing turns the
+  # holder white again before the next mark.
   IyiMark.collect
+  stray = stray_holder(77_u64)
+  cell = Pointer(UInt64).malloc(1_u64)
+  cell.value = stray.object_id.to_u64
+  IyiHeap.enter_barrier
+  IyiMark.barrier(cell.address, 1_u64)
+  IyiHeap.leave_barrier
+  scrub_stack
   IyiMark.collect
-  stw_pauses = 0_u64
-  round = 0
-  while round < 5
-    started = IyiMark.pause_total_ns
-    IyiMark.collect
-    stw_pauses = stw_pauses + (IyiMark.pause_total_ns - started)
-    round = round + 1
+  strayed = stray.payload
+  fail("stray: the holder lost its payload") unless strayed.is_a?(Payload)
+  if IyiMark.flags(strayed.object_id.to_u64) & IyiHeap::FREE_FLAG != 0 || strayed.seed != 77_u64 || !strayed.intact?
+    fail("stray: a barrier run after its mark had ended left the holder gray, and the next mark swept the payload it held")
   end
-  stw_mean = stw_pauses.unsafe_div(5_u64)
-  fail("the chain's tail lost its payload under a stop-the-world mark") unless tail(chain).payload.is_a?(Payload)
+  puts "stray: a barrier run after its mark had ended shaded nothing, and the next mark kept what the holder held"
+
+  # ── A small live set, marked in the stop ──────────────────────────────
+  # Four thousand live objects, over the thousand every first stop marks:
+  # a mark whose last one kept fewer than STW_MARK_SMALL is given that
+  # bound and finishes stopped, where waking a helper for each of these
+  # collections cost an allocation loop three times its time and 8 ms
+  # pauses. With helpers to wake, not one goes beside the program.
+  IyiMark.workers = 15_u64
+  IyiMark.auto = false
+  small = Array(Payload).new(2000) { |index| Payload.new(index.to_u64) }
+  IyiMark.collect
+  small_live = IyiMark.bytes_marked
+  # What the mark found is the premise: anything else still alive makes
+  # the live set large, and a mark over it goes beside the program as it
+  # should.
+  fail("small: the live set is #{small_live.to_i64} bytes, not two thousand payloads: something else is still alive") if small_live > 2097152_u64
+  IyiMark.auto = true
+  small_collections = IyiMark.collections
+  small_beside = IyiMark.concurrent_collections
+  8.times do
+    churn(IyiMark.budget)
+    IyiMark.settle
+  end
+  IyiMark.auto = false
+  small_collections = IyiMark.collections - small_collections
+  small_beside = IyiMark.concurrent_collections - small_beside
+  fail("small: eight budgets of churn triggered no collection") if small_collections == 0_u64
+  fail("small: #{small_beside.to_i64} of #{small_collections.to_i64} collections over #{small_live.to_i64} live bytes ran beside the program") if small_beside != 0_u64
+  fail("small: a payload of the live set came back wrong") unless small[1999].seed == 1999_u64 && small[1999].intact?
+  puts "small: #{small_collections.to_i64} collections over #{small_live.to_i64} live bytes, every one finished in its stop"
 
   # ── The moves, under marks beside the program ─────────────────────────
   IyiMark.workers = 15_u64
   under_mark = 0
-  rounds = 24
   round = 0
   concurrent_before = IyiMark.concurrent_collections
-  while round < rounds
+  while round < 24 || (under_mark == 0 && round < 96)
     IyiMark.auto = false
     seed = 1000_u64 + round.to_u64
     chain = build_chain(seed)
@@ -278,12 +403,145 @@
     round = round + 1
   end
   IyiMark.auto = false
+  rounds = round
   concurrent = IyiMark.concurrent_collections - concurrent_before
   fail("no round made its move under a mark: nothing here was concurrent") if under_mark == 0
   fail("no collection ran beside the program across #{rounds} rounds") if concurrent == 0_u64
 
   puts "moves: #{under_mark} of #{rounds} rounds moved a payload into a black holder under a running mark, #{concurrent.to_i64} collections ran beside the program, every payload intact"
   puts "pause: #{stw_mean.unsafe_div(1000_u64).to_i64} us to mark the chain stopped; beside the program the longest first stop was #{Stops.first.unsafe_div(1000_u64).to_i64} us, the longest second #{Stops.second.unsafe_div(1000_u64).to_i64} us, and #{IyiMark.finish_retries.to_i64} second stops retreated to mark what they found"
+
+  # ── A large block outgrown under a mark ───────────────────────────────
+  # `realloc` past 1 MiB frees the large chunk it outgrew. Under a mark
+  # the helpers walk the large list without the lock, for every word no
+  # arena holds, and may have that chunk queued: it stays mapped and
+  # listed until the sweep after the mark. Unmapped at once, a helper
+  # read the freed node's link and faulted - one run in four of a
+  # program joining a 4 MB string. The outgrown addresses are kept
+  # masked, so no word of this program's holds them, and they are gone
+  # after the collections that follow: kept, not leaked. Not every one -
+  # a stale word in a register or a dead slot keeps one on Windows,
+  # where Linux kept none - but a leak keeps all of them.
+  outgrown = Pointer(UInt64).malloc(64_u64)
+  large_under_mark = 0
+  large_round = 0
+  while large_round < 8 || (large_under_mark < 2 && large_round < 48)
+    IyiMark.auto = false
+    # Four chains, so the assist the grown block's allocation pays does
+    # not finish the mark before the old block is freed.
+    chains = [build_chain(3_u64), build_chain(4_u64), build_chain(5_u64), build_chain(6_u64)]
+    block = Pointer(UInt8).malloc(1_100_000_u64)
+    block.value = 5_u8
+    IyiMark.auto = true
+    marking = allocate_until_marking
+    grown = block.realloc(2_200_000_u64)
+    if marking && IyiMark.marking?
+      large_under_mark = large_under_mark + 1
+      fail("large: a block outgrown under a mark was unmapped beside the helpers") if IyiHeap.containing_large(block.as(Void*)) == 0_u64
+    end
+    fail("large: the grown block lost its first byte") unless grown.value == 5_u8
+    outgrown[large_round] = block.address ^ 0x5a5a5a5a5a5a5a5a_u64
+    block = Pointer(UInt8).new(0_u64)
+    grown = Pointer(UInt8).new(0_u64)
+    chains = [] of Cell
+    IyiMark.settle
+    large_round = large_round + 1
+  end
+  IyiMark.auto = false
+  # Where the grown block's assist or the helpers finish the mark before
+  # the old block is freed - darwin arm64 did, every round - the race is
+  # not this machine's to arrange, and it says so; the shell's proof is
+  # then not run either. Linux and Windows arrange it.
+  if large_under_mark < 2
+    puts "large: #{large_under_mark} of #{large_round} blocks were outgrown under a running mark here, too few to check"
+  else
+  # One more outgrown outside any mark and not counted, so the last
+  # counted block's address is in no register or slot a stale word could
+  # keep it by.
+  spare = Pointer(UInt8).malloc(1_100_000_u64).realloc(2_200_000_u64)
+  spare.value = 1_u8
+  spare = Pointer(UInt8).new(0_u64)
+  IyiMark.collect
+  IyiMark.collect
+  kept_large = 0
+  index = 0
+  while index < large_round
+    kept_large = kept_large + 1 if IyiHeap.containing_large(Pointer(Void).new(outgrown[index] ^ 0x5a5a5a5a5a5a5a5a_u64)) != 0_u64
+    index = index + 1
+  end
+  fail("large: #{kept_large} of #{large_round} outgrown blocks were never freed, #{large_under_mark} of them outgrown under a mark") if kept_large >= large_under_mark
+  puts "large: #{large_under_mark} of #{large_round} blocks outgrown under a running mark stayed mapped beside the helpers, and #{large_round - kept_large} were freed after"
+  end
+  # The helpers for each mark beside the program are woken by the
+  # program's own thread, and the wake is the program's time. On Linux it
+  # is one futex call; on Windows a woken helper ran above the thread that
+  # woke it and took its core, 3.7 to 40 ms at the longest. The longest
+  # wake was the check, and it caught the machine instead once: a runner
+  # took the thread away for 3.7 ms in one wake of 49, which it does
+  # without any help. So the wakes are counted, over two hundred more
+  # collections beside a kept chain, and the check is how many were slow.
+  # On a four-core Windows runner, 40 runs each: the shipped helpers made
+  # no wake past a millisecond in 10,000, and helpers with the boost made
+  # 5 to 88 in every run of 250. Asserted where it was measured; printed
+  # everywhere. A CI runner still took the thread for 4 wakes of 256 once,
+  # with the shipped helpers: so a round past the bound is run again, and
+  # the check is the second round. The boost is slow in every round, the
+  # machine's stalls are not.
+  IyiMark.auto = true
+  kept = build_chain(1_u64)
+  wake_rounds(kept)
+  wake = IyiMark.wake_longest_ns
+  wakes = IyiMark.wakes
+  slow = IyiMark.wakes_slow
+  {% if flag?(:win32) %}
+    if slow > 3_u64
+      puts "wake: #{slow.to_i64} of #{wakes.to_i64} wakes past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in the first round, the longest #{(wake // 1000_u64).to_i64} us; a second round decides"
+      wakes_before = wakes
+      wake_rounds(kept)
+      wakes = IyiMark.wakes - wakes_before
+      slow = IyiMark.wakes_slow - slow
+    end
+    fail("wake: waking the helpers held the program's thread past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in #{slow.to_i64} wakes of #{wakes.to_i64}, the longest #{(wake // 1000_u64).to_i64} us") if slow > 3_u64
+  {% end %}
+  IyiMark.auto = false
+  puts "wake: the program's thread woke the helpers #{wakes.to_i64} times, #{slow.to_i64} of them past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us, the longest #{(wake // 1000_u64).to_i64} us"
+
+  # ── The helpers' share beside a busy program ──────────────────────────
+  # The program runs a thread for every core but one, and a mark starts
+  # beside them: on Windows it asks for one helper, where it asked for
+  # every helper there was and the threads' stalls doubled (the prelude's
+  # `start_concurrent` has the numbers). Asserted where it was measured;
+  # printed everywhere.
+  cores = IyiThread.core_count
+  if cores >= 3_u64
+    Busy.setup
+    busy = [] of IyiThread
+    while busy.size.to_u64 < cores - 2_u64
+      busy << IyiThread.start { busy_until_stopped; nil }
+    end
+    threads = IyiThread.program_threads
+    IyiMark.auto = false
+    chain = build_chain(7_u64)
+    IyiMark.auto = true
+    asked = 0_u64
+    marked = false
+    attempt = 0
+    while !marked && attempt < 8
+      marked = allocate_until_marking
+      asked = IyiMark.beside_helpers if marked
+      IyiMark.settle
+      attempt = attempt + 1
+    end
+    Busy.stop.value.set(1_u64)
+    busy.each(&.join)
+    IyiMark.auto = false
+    fail("share: no mark ran beside the busy threads in 8 tries") unless marked
+    {% if flag?(:win32) %}
+      fail("share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers rather than 1") if asked != 1_u64
+    {% end %}
+    puts "share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers"
+    fail("the chain's tail lost its payload beside the busy threads") unless tail(chain).payload.is_a?(Payload)
+  end
   puts "concurrent mark: every property held"
 {% else %}
   puts "concurrent mark: needs the collector and a thread target; nothing to exercise here"

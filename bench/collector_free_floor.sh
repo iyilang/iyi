@@ -27,6 +27,20 @@
 # line still carries a collector, or if any sample fails to compile with it.
 set -u
 
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # Not here, and not because nothing is measured: `Makefile.win` builds
+    # `iyi` with `-Dgc_none` unless `collector=1` is asked for
+    # (IYI_COMPILER_FLAGS), so the compiler every Windows step uses *is*
+    # the collector-free one, and the Windows job compiles every sample
+    # with it. What this gate adds is the POSIX `make` with the flag, which
+    # is not how the compiler is built here - and which began by deleting
+    # `.build/iyi`, so a run on Windows left the checkout without one.
+    echo "not here: the Windows compiler is built with -Dgc_none by default (Makefile.win), and the Windows job compiles every sample with it"
+    exit 0
+    ;;
+esac
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 

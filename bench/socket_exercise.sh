@@ -34,6 +34,13 @@ esac
 
 trap 'rm -rf "$WORK"' EXIT
 
+# The unix sockets the exercise makes live in the sandbox, so a proof whose
+# broken close leaves its file leaves it where the trap above removes it.
+export TMPDIR="$WORK"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) export TEMP="$(cygpath -w "$WORK")" ;;
+esac
+
 status=0
 
 run_case() {
@@ -54,6 +61,13 @@ run_case() {
     status=1
     return 1
   fi
+  # A fiber that panics after its group has joined prints and is not
+  # propagated: the exit status alone does not see it.
+  if grep -q "iyi: panic" "$WORK/$name.out"; then
+    echo "$label: a panic the program outlived"
+    status=1
+    return 1
+  fi
   return 0
 }
 
@@ -66,13 +80,18 @@ fi
 
 echo
 echo "== every socket check reported"
-for phrase in connect_accept message_exchange short_read closed_peer; do
+phrases="connect_accept message_exchange short_read nodelay connect_bound closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
+  Linux) phrases="$phrases reset_after_chunk" ;;
+esac
+for phrase in $phrases; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read and closed_peer all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, connect_bound, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -101,7 +120,7 @@ fi
 echo "== a negative count is refused by name"
 # `recv(-1)` died of "arithmetic overflow" on a `to_u64`, a sentence about
 # neither the count nor the call.
-printf 'module main\n\nimport std/socket\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nputs l.accept.or_panic.recv(-1).inspect\n' > "$WORK/negative.iyi"
+printf 'module main\n\nimport std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nputs l.accept.or_panic.recv(-1).inspect\n' > "$WORK/negative.iyi"
 if "$IYI" run "$WORK/negative.iyi" > "$WORK/negative.out" 2>&1; then
   echo "  a negative count was taken"; status=1
 elif ! grep -q "negative count: -1" "$WORK/negative.out"; then
@@ -110,17 +129,46 @@ else
   echo "  recv(-1): exits 1 at \"$(grep -m1 'negative count' "$WORK/negative.out" | sed 's/^iyi: panic: //')\""
 fi
 
+echo "== two fibers reading one socket are refused"
+# On every platform: the readiness one of them is woken for is not the
+# other's. Windows posted both reads and let them take the bytes in turns,
+# so a program written there panicked everywhere else.
+cat > "$WORK/readers.iyi" <<'IYI'
+module main
+
+import std/socket::{IyiSocket}
+
+l = IyiSocket.listen("127.0.0.1", 0)
+c = IyiSocket.connect("127.0.0.1", l.local_port).or_panic
+a = l.accept.or_panic
+group do |g|
+  g.spawn { a.read(16); 0 }
+  g.spawn { a.read(16); 0 }
+  0
+end
+puts "two readers were let in"
+IYI
+if timeout -k 5 60 "$IYI" run "$WORK/readers.iyi" > "$WORK/readers.out" 2>&1; then
+  echo "  two readers were let in"; status=1
+elif ! grep -q "two fibers reading one fd" "$WORK/readers.out"; then
+  echo "  two readers were refused, but not by name:"; sed 's/^/    /' "$WORK/readers.out"; status=1
+else
+  echo "  two readers: exits 1 at \"$(grep -m1 'two fibers' "$WORK/readers.out" | sed 's/^iyi: panic: //')\""
+fi
+
 echo
 echo "== the checks fail when the socket mechanism is broken"
 prove_fails() {
-  local label="$1" dir="$2" phrase="$3" script="$4"
+  # $5, when given, is a build flag: a proof about what an optimised build
+  # inlines has to be built with `--release`.
+  local label="$1" dir="$2" phrase="$3" script="$4" flag="${5:-}"
   # The library the program imports, not the prelude: `std/socket` is a
   # module now, so the patched copy is `std/` beside an untouched `iyi/`
   # and `IYI_PATH` finds this one first.
   mkdir -p "$WORK/$dir/std"
   cp -R "$REPO/src/std/." "$WORK/$dir/std/"
   awk "$script" "$REPO/src/std/socket.iyi" > "$WORK/$dir/std/socket.iyi"
-  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build $flag \
        -o "$WORK/$dir/program" "$REPO/bench/socket_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched library did not build"
@@ -147,18 +195,213 @@ prove_fails() {
 
 # 1. Broken payload reception
 prove_fails "message payload mismatch" badpayload "message_exchange:" \
-  '{ sub(/target\.copy_from\(buffer, count\)/, "target[0] = 63_u8"); print }'
+  '{ sub(/target\.copy_from\(pointerof\(small\)\.as\(UInt8\*\), count\)/, "target[0] = 63_u8"); print }'
 
 # 2. Broken short read (clamping buffer size below 16 bytes alters chunk size)
 prove_fails "short read size mismatch" badshort "short_read:" \
-  '{ sub(/buffer = Pointer\(UInt8\)\.malloc\(max_bytes\.to_u64\)/, "if max_bytes < 16; max_bytes = 1; end; buffer = Pointer(UInt8).malloc(max_bytes.to_u64)"); print }'
+  '{ sub(/first = max_bytes < 4096 \? max_bytes : 4096/, "if max_bytes < 16; max_bytes = 1; end; first = max_bytes < 4096 ? max_bytes : 4096"); print }'
 # 3. Broken closed peer detection (does not answer empty string on EOF)
 prove_fails "closed peer EOF missed" badoff "closed_peer:" \
   '{ sub(/return "" if count == 0$/, "return \"eof_missed\" if count == 0"); print }'
+# 4. A small read that takes the whole room it was given from the heap
+prove_fails "a socket read that takes all it may read from the heap" heapread "small_read:" \
+  '{ sub(/if count < first \|\| max_bytes == first$/, "if false"); print }'
+
+# The peer's name asked of this end: `getsockname` for `getpeername`.
+prove_fails "the peer's address read from this end" peername "remote_port:" \
+  '{ sub(/return nil if IyiSocket.__sys_getpeername\(@fd, addr, pointerof\(len\)\) < 0$/, "return nil if IyiSocket.__sys_getsockname(@fd, addr, pointerof(len)) < 0"); print }'
+
+# Nagle left on: at the connected end, at the accepted end, and a
+# `nodelay = false` that sets nothing.
+prove_fails "a connected socket left with Nagle on" nagleconnect "nodelay: the connected end" \
+  '{ sub(/^    __send_at_once\(fd, family\)$/, ""); print }'
+prove_fails "an accepted socket left with Nagle on" nagleaccept "nodelay: the accepted end" \
+  '{ sub(/^        IyiSocket.__send_at_once\(client_fd, @family\)$/, ""); print }'
+prove_fails "nodelay = false that sets nothing" naglesetter "nodelay: TCP_NODELAY still set" \
+  '{ sub(/^    IyiSocket.__sys_set_nodelay\(@fd, on\) unless @family == AF_UNIX$/, ""); print }'
+
+# 5. A write to a gone peer panicking, as it did
+prove_fails "a gone peer is a panic" panicwrite "cannot write to socket" \
+  '{ sub(/return SocketError.new\("write to socket", n < 0_i64 \? IyiSocket.__sys_code\(n\) : 0\) if n <= 0_i64/, "raise \"cannot write to socket\" if n <= 0_i64"); print }'
+
+# 5b. `localhost` raced ::1 first, as a name with a route to ::1 is: the
+#     refusal names the two the other way round.
+prove_fails "localhost raced ::1 first" localhostorder "localhost_race:" \
+  '{ sub(/return race\(host, port, loopback, timeout_ms\) if localhost\?\(host\)/, "return race(host, port, loopback.reversed, timeout_ms) if localhost?(host)"); print }'
+# 5c. The attempt delay an hour: ::1 starts only once 127.0.0.1 has been
+#     refused, which Windows takes 2 s to do. Elsewhere the refusal is at
+#     once and the delay is never waited; std_dns_exercise.sh proves it
+#     with a listener that drops SYNs.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "localhost's ::1 waiting for 127.0.0.1's refusal" localhostserial "localhost_v6:" \
+      '{ sub(/ATTEMPT_DELAY_MS = 250/, "ATTEMPT_DELAY_MS = 3600000"); print }' ;;
+  *)
+    echo "  localhost's ::1 waiting for 127.0.0.1's refusal: Windows' 2 s refusal shows it, proved there" ;;
+esac
+
+# 5d. A connect whose handshake wait has no deadline, as Windows' had:
+#     `ConnectEx` parked until the kernel gave up, 2 s for a loopback port
+#     nobody holds against a 500 ms bound and 21 s for 10.255.255.1
+#     against 2000 ms. The POSIX arms' call answers "in progress" at once
+#     and never reads the bound it is handed, so on Linux and darwin this
+#     copy is the same program and nothing can catch it there.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "a ConnectEx parked without the connect's bound" connectunbound "connect_bound:" \
+      '{ sub(/res = __sys_connect\(fd, addr, family, ms\)/, "res = __sys_connect(fd, addr, family, -1)"); print }' ;;
+  *)
+    echo "  a ConnectEx parked without the connect's bound: the POSIX arms' connect never waits, proved on Windows" ;;
+esac
+
+# 6. The write without MSG_NOSIGNAL: on Linux the kernel's SIGPIPE ends the
+#    process at the first write to the gone peer, with nothing printed.
+case "$(uname -s)" in
+  Linux)
+    mkdir -p "$WORK/sigpipe/std"
+    cp -R "$REPO/src/std/." "$WORK/sigpipe/std/"
+    awk '{ sub(/len.to_i64, 0x4000_i64, 0_i64, 0_i64\)/, "len.to_i64, 0_i64, 0_i64, 0_i64)"); print }' \
+      "$REPO/src/std/socket.iyi" > "$WORK/sigpipe/std/socket.iyi"
+    if cmp -s "$REPO/src/std/socket.iyi" "$WORK/sigpipe/std/socket.iyi"; then
+      echo "  SIGPIPE on a gone peer: the patch changed nothing"
+      status=1
+    elif ! IYI_PATH="$WORK/sigpipe${PSEP}$REPO/src" "$IYI" build -o "$WORK/sigpipe/program" \
+         "$REPO/bench/socket_exercise.iyi" >"$WORK/sigpipe/build.log" 2>&1; then
+      echo "  SIGPIPE on a gone peer: the patched library did not build"
+      status=1
+    else
+      "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
+      code=$?
+      if [ "$code" -eq 141 ] && ! grep -q "disconnect: ok" "$WORK/sigpipe/out"; then
+        echo "  SIGPIPE on a gone peer: killed by the signal at the disconnect (exit 141)"
+      else
+        echo "  SIGPIPE on a gone peer: exited $code, so the check does not see it"
+        status=1
+      fi
+    fi ;;
+  *)
+    echo "  SIGPIPE on a gone peer: Linux's MSG_NOSIGNAL, proved there" ;;
+esac
+
+# 7. The poller keeping one waiter per fd, as it did: the reading fiber
+#    and the writing fiber cannot both wait on the socket. The registry is
+#    the readiness pollers'; Windows' completion port parks each posted
+#    operation on its own OVERLAPPED and has no such rule to break.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  one waiter per fd: epoll's and kqueue's rule, proved there" ;;
+  *)
+mkdir -p "$WORK/onewaiter/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/onewaiter/iyi/"
+awk '{ sub(/raise "two fibers #\{direction == 1 \? "reading" : "writing"\} one fd" if others & direction != 0/, "raise \"two fibers waiting on one fd\" if others != 0"); print }' \
+  "$REPO/src/iyi/concurrency.iyi" > "$WORK/onewaiter/iyi/concurrency.iyi"
+if cmp -s "$REPO/src/iyi/concurrency.iyi" "$WORK/onewaiter/iyi/concurrency.iyi"; then
+  echo "  one waiter per fd: the patch changed nothing"
+  status=1
+elif ! IYI_PATH="$WORK/onewaiter${PSEP}$REPO/src" "$IYI" build -o "$WORK/onewaiter/program" \
+     "$REPO/bench/socket_exercise.iyi" >"$WORK/onewaiter/build.log" 2>&1; then
+  echo "  one waiter per fd: the patched prelude did not build"
+  status=1
+elif timeout 60 "$WORK/onewaiter/program" >"$WORK/onewaiter/out" 2>&1; then
+  echo "  one waiter per fd: the exercise still passed, so it does not test this"
+  status=1
+elif grep -q "two fibers waiting on one fd" "$WORK/onewaiter/out"; then
+  echo "  one waiter per fd: exits at \"two fibers waiting on one fd\""
+else
+  echo "  one waiter per fd: failed, but not at the second waiter"
+  tail -2 "$WORK/onewaiter/out" | sed 's/^/    /'
+  status=1
+fi ;;
+esac
+
+# 11. An io wait that ends before its deadline and stays in the sleep heap:
+#     the deadline comes later and ends whatever the fiber waits on then.
+#     A read with no deadline of its own is where that shows, on every
+#     poller: epoll and kqueue wake it, Windows cancels its operation, and
+#     it answers "timed out". The sleep after the early read stopped
+#     showing it - a sleep writes its own deadline over the old one, and a
+#     fiber already woken is not queued twice - and on Linux this proof
+#     reported the exercise passing with the deadline left behind.
+mkdir -p "$WORK/stale/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/stale/iyi/"
+awk '{ sub(/return unless fiber\.io_timed$/, "return"); print }' \
+  "$REPO/src/iyi/concurrency.iyi" > "$WORK/stale/iyi/concurrency.iyi"
+if cmp -s "$REPO/src/iyi/concurrency.iyi" "$WORK/stale/iyi/concurrency.iyi"; then
+  echo "  a deadline left behind: the patch changed nothing"
+  status=1
+elif ! IYI_PATH="$WORK/stale${PSEP}$REPO/src" "$IYI" build -o "$WORK/stale/program" \
+     "$REPO/bench/socket_exercise.iyi" >"$WORK/stale/build.log" 2>&1; then
+  echo "  a deadline left behind: the patched prelude did not build"
+  status=1
+else
+  timeout 60 "$WORK/stale/program" >"$WORK/stale/out" 2>&1
+  code=$?
+  if [ "$code" -eq 0 ] && ! grep -q "iyi: panic" "$WORK/stale/out"; then
+    echo "  a deadline left behind: the exercise still passed, so it does not test this"
+    status=1
+  elif ! grep -q -E "timeout: (a read with no deadline|the read's old deadline)" "$WORK/stale/out"; then
+    echo "  a deadline left behind: failed (exit $code), but not at a deadline's check"
+    tail -2 "$WORK/stale/out" | sed 's/^/    /'
+    status=1
+  else
+    echo "  a deadline left behind: caught (exit $code: $(grep -m1 -E "timeout: (a read with no deadline|the read's old deadline)" "$WORK/stale/out" | sed 's/^iyi: panic: //'))"
+  fi
+fi
+
+# 8. An IPv6 address written without its `::`, or a family forgotten.
+prove_fails "ipv6 written uncompressed" badsix "ipv6:" \
+  '{ sub(/best_size = 1$/, "best_size = 8"); print }'
+prove_fails "an IPv6 socket made as IPv4" badfamily "cannot bind socket to \[::1\]:0" \
+  '{ sub(/return \{make_sockaddr_in6\(parse_ipv6\(host\), port\), AF_INET6\}/, "return {make_sockaddr_in6(parse_ipv6(host), port), AF_INET}"); print }'
+
+# 9. A unix listener whose close leaves its file: the path cannot be bound
+#    again.
+prove_fails "a unix listener's file left behind" unixleft "cannot bind socket to .*the address is in use" \
+  '{ sub(/__iyi_unlink\(IyiSocket.c_path\(path\)\)/, "IyiSocket.c_path(path)"); print }'
+# A unix socket that says it is not one, which std/tls would then ask the
+# port of.
+prove_fails "a unix socket taken for TCP" unixtcp "unix?: the unix ends say false" \
+  '{ sub(/^    @family == AF_UNIX$/, "    false"); print }'
+
+# 10. A read whose deadline passes and which waits on regardless.
+prove_fails "a read timeout not kept" untimed "timeout: the read answered" \
+  '{ sub(/return SocketError.timed_out\("read from socket"\) unless waited/, ""); print }'
 
 # 4. Broken local port (answers 0 instead of assigned ephemeral port)
 prove_fails "local port returns 0" badport "local_port failed:" \
   '{ sub(/\(high << 8\) \| low/, "0"); print }'
+
+# The read's buffer inlined into the frame that waits: an optimised build
+# then parks every reader on its last 4 KB.
+prove_fails "a read whose buffer waits with it" inlined_read "retain: a reader parked" \
+  '{ sub(/^  @\[NoInline\]$/, "  @[AlwaysInline]"); print }' --release
+
+# A socket's stream made anew at each `to_io`: the second line, already in
+# the first stream's read-ahead, is never read, and the read times out.
+prove_fails "a socket's stream made anew each time" fresh_io "stream: two lines in one write" \
+  '{ sub(/^      @io = made$/, ""); print }'
+
+# A read the socket refuses taken for a clean end: `read_failed?` says no.
+prove_fails "a refused socket read taken for the end" quiet_end "stream: a timed-out read" \
+  '{ sub(/return -1_i64 if got.is_a\?\(SocketError\)/, "return 0_i64 if got.is_a?(SocketError)"); print }'
+
+# 12. A read whose second receive met the peer's reset and dropped it: the
+#     next read answered an end of file, and the aborted transfer read as
+#     a complete one. The exercise measures it on Linux.
+case "$(uname -s)" in
+  Linux)
+    prove_fails "a reset dropped after a full chunk" reset_dropped "reset_after_chunk:" \
+      '{ sub(/^    @pending_error = SocketError.new\("read from socket".*$/, ""); print }'
+    # 13. A half-close that ends nothing: the peer waits for an end that
+    #     never comes. And one that ends both halves: the answer sent
+    #     after it is lost. Each patches the Linux arm, so it is measured
+    #     there.
+    prove_fails "a half-close that ends nothing" shutdown_none "close_write: the peer's read waited" \
+      '{ sub(/__sys3\(SYS_SHUTDOWN, fd.to_i64, 1_i64, 0_i64\)/, "0_i64"); print }'
+    prove_fails "a half-close that ends both halves" shutdown_both "close_write: the answer after the end" \
+      '{ sub(/__sys3\(SYS_SHUTDOWN, fd.to_i64, 1_i64, 0_i64\)/, "__sys3(SYS_SHUTDOWN, fd.to_i64, 2_i64, 0_i64)"); print }'
+    ;;
+esac
 
 echo
 echo "== what is not a port, and what is not an address"
@@ -172,7 +415,7 @@ echo "== what is not a port, and what is not an address"
 # sentence did not inspect the host, so `" 1.2.3.4"` looked valid.
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/socket\n\nusing std/socket::{IyiSocket}\n\nputs (%s).to_s\n' \
+  printf 'module main\n\nimport std/socket::{IyiSocket}\n\n\nputs (%s).to_s\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
@@ -213,8 +456,54 @@ refuses "a host with a leading space, shown inspected" addr_space "cannot resolv
   "IyiSocket.parse_ip(\" 1.2.3.4\").b0"
 refuses "a host with a trailing space, shown inspected" addr_tspace "cannot resolve address: \"1.2.3.4 \"" \
   "IyiSocket.parse_ip(\"1.2.3.4 \").b0"
-refuses "an IPv6 address, named as such" addr_v6 "cannot resolve address: \"::1\": IPv6 is not supported" \
+refuses "an IPv6 address given to the IPv4 parser, named as such" addr_v6 "cannot resolve address: \"::1\": an IPv6 address, which \`parse_ipv6\` reads" \
   "IyiSocket.parse_ip(\"::1\").b0"
+# `localhost` is matched without regard to case and with one trailing
+# dot, the way a name written fully qualified has it; two are not a name.
+refuses "localhost with two trailing dots" addr_two_dots "cannot resolve address: \"localhost..\"" \
+  "IyiSocket.parse_ip(\"localhost..\").b0"
+refuses "an IPv6 zone" addr_zone "cannot resolve address: \"fe80::1%eth0\": a zone" \
+  "IyiSocket.parse_ipv6(\"fe80::1%eth0\")"
+refuses "seven IPv6 groups and no gap" addr_seven "7 groups, not eight" \
+  "IyiSocket.parse_ipv6(\"1:2:3:4:5:6:7\")"
+refuses "a gap with eight groups beside it" addr_nine "stands for nothing" \
+  "IyiSocket.parse_ipv6(\"1:2:3:4::5:6:7:8\")"
+refuses "a trailing colon" addr_trailing "a trailing colon" \
+  "IyiSocket.parse_ipv6(\"1::2:\")"
+refuses "a unix socket path past the platform's room" unix_long "is 300 bytes, and the platform's limit is" \
+  "IyiSocket.listen_unix(\"/\" * 300).local_address"
+refuses "a negative timeout" timeout_negative "negative timeout: -1" \
+  "IyiSocket.new(0).read_timeout_ms = -1"
+refuses "an empty unix socket path" unix_empty "a unix socket path is empty" \
+  "IyiSocket.connect_unix(\"\").or_panic.to_unsafe"
+# A port somebody listens on is theirs, whichever address either side
+# names. On Windows a bind to 127.0.0.1:P went through while 0.0.0.0:P
+# listened, and the other way round, and the more specific listener took
+# the connections - from another process as readily as from this one.
+# Not darwin's: BSD's SO_REUSEADDR is what lets a bind name an address
+# more specific than a listener's wildcard, by design, and the listener
+# asks for it there as on Linux, which refuses it anyway.
+case "$(uname -s)" in
+  Darwin) echo "  a port held on another address: darwin lets a more specific bind through, by BSD's design; not asked" ;;
+  *)
+    refuses "a port held on every address, bound on one" port_held_any "cannot bind socket to 127.0.0.1:[0-9]*: [a-z]" \
+      "IyiSocket.listen(\"127.0.0.1\", IyiSocket.listen(\"0.0.0.0\", 0).local_port).local_port"
+    refuses "a port held on one address, bound on every one" port_held_one "cannot bind socket to 0.0.0.0:[0-9]*: [a-z]" \
+      "IyiSocket.listen(\"0.0.0.0\", IyiSocket.listen(\"127.0.0.1\", 0).local_port).local_port"
+    ;;
+esac
+# The wildcard a server prints is not an address Windows connects to,
+# and the refusal was "error 10049", a number with no sentence.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "a connect to the wildcard address" connect_any "not an address this host can use" \
+      "IyiSocket.connect(\"0.0.0.0\", IyiSocket.listen(\"0.0.0.0\", 0).local_port).or_panic.to_unsafe"
+    ;;
+esac
+refuses "a port asked of a unix socket" unix_port "a unix socket has no port" \
+  "IyiSocket.new(0, 1).local_port"
+refuses "a dotted tail past six groups" addr_tail "a dotted tail after more than six groups" \
+  "IyiSocket.parse_ipv6(\"1:2:3:4:5:6:7:1.2.3.4\")"
 
 echo
 echo "== a closed socket says so"
@@ -224,7 +513,7 @@ echo "== a closed socket says so"
 # `write("")` had nothing to send and answered 0.
 refuses_after_close() { # refuses_after_close <label> <name> <statements on a closed connection c and listener l>
   local label="$1" name="$2" body="$3"
-  printf 'module main\n\nimport std/socket\n\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nc.close\nl.close\n%s\n' \
+  printf 'module main\n\nimport std/socket::{IyiSocket}\n\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nc.close\nl.close\n%s\n' \
     "$body" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
@@ -255,8 +544,8 @@ refuses_after_close "accept after close" closed_accept 'puts l.accept.or_panic.c
 
 echo
 if [ "$status" -eq 0 ]; then
-  echo "Sockets: connect, accept, message exchange, short reads, closed peer, and"
-  echo "refused connections all verified, a port and an address are checked before"
+  echo "Sockets: connect, accept, message exchange, short reads, closed peer,"
+  echo "refused connections, IPv6, unix sockets and timeouts all verified, a port and an address are checked before"
   echo "they are packed, a closed socket says so, and every check is proved to fail"
   echo "when broken."
 else

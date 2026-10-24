@@ -64,7 +64,7 @@ module Iyi
     end
 
     def output_name(node)
-      if !node.name.starts_with?('#') && !@vars.includes?(node.name)
+      if !Iyi.compiler_variable?(node.name) && !@vars.includes?(node.name)
         puts "#{node.name} : #{node.type?}"
         @vars.add node.name
       end

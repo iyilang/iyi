@@ -5,8 +5,7 @@
 
 module bench/std_errno_exercise
 
-import std/errno
-using std/errno::{Errno}
+import std/errno::{Errno}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

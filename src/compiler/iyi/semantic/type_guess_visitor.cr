@@ -552,6 +552,10 @@ module Iyi
     end
 
     def guess_type(node : RegexLiteral)
+      # iyi: an iyi program's literal is `std/regex`'s (`LiteralExpander`).
+      if program.iyi_prelude? && node.location.try(&.filename.to_s.ends_with?(".iyi")) && (std_regex = Program.iyi_std_regex_type(program))
+        return std_regex
+      end
       program.regex
     end
 
@@ -1247,8 +1251,13 @@ module Iyi
 
       @inside_class_method = false
 
+      # iyi: the list is opened as a `class`, `struct` or `module` is
+      # visited, and a `def` also has a trait, or an impl's target - a lib
+      # struct, a metaclass - for its type, which opened none: `pub trait Wt`
+      # with a `def initialize` in it ended `check`, `build` and `vet` in
+      # "Missing hash key: Wt (KeyError)" and a stack trace.
       if initialize_info
-        @initialize_infos[current_type] << initialize_info
+        (@initialize_infos[current_type] ||= [] of InitializeInfo) << initialize_info
       end
 
       @initialize_info = nil

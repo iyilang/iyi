@@ -12,10 +12,8 @@
 
 module bench/std_deque_exercise
 
-import std/deque
-using std/deque::{Deque}
-import std/enumerable
-using std/enumerable::{Enumerable}
+import std/deque::{Deque}
+import std/enumerable::{Enumerable}
 
 def assert_true(label : String, condition : Bool) : Nil
   raise "assertion failed for #{label}: expected true, got false" unless condition
@@ -141,6 +139,14 @@ t.fill(7, 1, 2)
 assert_equal("fill", t.to_s, "Deque{3, 7, 7}")
 assert_true("== same", t == Deque(Int32).new([3, 7, 7]))
 assert_true("== different", !(t == Deque(Int32).new([3, 7])))
+# A deque of another element type, either way round. Restricted to
+# `Deque(T)`, a `Deque(Int32)` was taken for a `Deque(Int32?)` and not
+# back, so the one equality answered true one way and false the other.
+nilable = Deque(Int32?).new([3, 7, 7] of Int32?)
+assert_true("== of a wider element type", t == nilable)
+assert_true("== of a narrower element type", nilable == t)
+assert_true("== of another type sees a difference", !(t == Deque(Int32?).new([3, nil, 7] of Int32?)))
+assert_true("hash follows == across element types", t.hash == nilable.hash)
 u = t.dup
 u.push(8)
 assert_equal("dup is a copy", t.size.to_s + " " + u.size.to_s, "3 4")
@@ -149,6 +155,11 @@ t.clear
 assert_true("clear", t.empty? && t.size == 0)
 t.push(1)
 assert_equal("usable after clear", t.to_s, "Deque{1}")
+# A deque concatenated onto itself doubles: `concat` walked `other.size`
+# while pushing, and when the two were one deque it never reached the end.
+w = Deque(Int32).new([1, 2, 3])
+w.concat(w)
+assert_equal("concat onto itself", w.to_s, "Deque{1, 2, 3, 1, 2, 3}")
 
 puts "deque: vacated slots"
 # `unsafe_fetch` reads past the size without checking, which is the one

@@ -1,0 +1,759 @@
+# ECDSA signatures made on P-384 (FIPS 186-5, SEC 1, RFC 6979), and its
+# Diffie-Hellman (ECDH, SEC 1 section 3.3.1), written in iyi, in constant
+# time.
+#
+#     import std/p384::{P384PrivateKey}
+#     import std/ecdsa::{EcdsaHash, EcdsaError}
+#
+#     key = P384PrivateKey.from_pkcs8(der).or_panic     # or from_sec1, from_bytes
+#     signature = key.sign(EcdsaHash::SHA384, message)  # DER Ecdsa-Sig-Value
+#     key.public_key.verify(EcdsaHash::SHA384, message, signature)  # true
+#     key.public_point                    # 0x04, x, y: what a key share sends
+#     key.shared_secret(peer_point).or_panic  # x of [d]Q, 48 bytes
+#
+# std/p256's sibling for the next NIST curve, which TLS 1.3 names
+# secp384r1 and ecdsa_secp384r1_sha384, and the curve most roots that are
+# not RSA sit on. std/ecdsa checks P-384 signatures in std/big's
+# variable-time arithmetic, fine for public values; a private key needs
+# this.
+#
+# A module of its own, not std/p256 made general. std/p256's numbers are
+# four limbs held in a struct's fields, which live in registers and on the
+# stack; a limb count chosen at run time would put them in an `Array`,
+# allocated on the heap for every product - and the 4-limb code, unrolled
+# by hand, is what makes P-256 as fast as it is. So this is the same
+# design at six limbs, step for step: what one module does, the other
+# does, and a reader of one has read both.
+#
+# Constant time, as std/p256 is: nothing branches on a secret and no
+# memory index depends on one. Numbers modulo p (the field) and modulo n
+# (the group's order) are six 64-bit limbs in Montgomery form (R =
+# 2^384), products by CIOS in `UInt128`, the final subtraction chosen by a
+# mask. Points are projective, added and doubled by the complete formulas
+# of Renes, Costello and Batina (2016, algorithms 4 and 6, a = -3, which
+# P-384 is), with no case to branch on. [k]P runs 96 windows of four bits
+# from the top, each four doublings and one addition of a table entry
+# read whole: all sixteen entries are read and the one wanted kept by
+# masks. Inversion is Fermat's, x^(m - 2), whose exponent is public.
+#
+# The nonce is RFC 6979's, HMAC under the hash the signature names. P-384
+# is wider than SHA-256: the candidate k is two HMAC blocks' worth, cut to
+# 384 bits (section 3.2, step h), and a SHA-512 digest is cut to its
+# leftmost 384 bits before anything else (bits2int). `sign_digest` signs a
+# digest already taken, as Python's `Prehashed` does - which is also how
+# the reduction of a digest of n or more is held to an oracle, a digest no
+# message reaches but about once in 2^194.
+#
+# ECDH takes the peer's point uncompressed (0x04, x, y) and refuses one
+# whose coordinates are not below p or that is not on the curve, before
+# any arithmetic with the private key; and an answer that is the point at
+# infinity, which SEC 1 section 3.3.1 step 2 refuses, though no point
+# that passes the first checks reaches it (P-384's cofactor is 1): it is
+# the second wall, which bench/std_p384_exercise.sh shows holding (0, 0)
+# off with the curve check taken out.
+#
+# Measured (--release, medians of 1,001, bench/std_p384_exercise.sh): a
+# key made from d in 0.348 ms, std/ecdsa's check of its point included;
+# ECDH in 0.341 ms; a SHA-384 signature in 0.377 ms. OpenSSL 3.5.5 on the
+# same machine: a new key in 0.091 ms (`generate_private_key` through
+# Python's cryptography, the call included), ECDH in 0.212 ms and a
+# signature in 0.124 ms (`openssl speed`) - this is 1.6 to 3.8 times
+# slower. The same work for every d: ECDH took 0.341, 0.342 and 0.344 ms
+# for RFC 6979's d, 1 and n - 1, and signing 0.377, 0.376 and 0.376.
+#
+# A private key is 48 bytes, d in [1, n - 1]: `from_bytes`, or read from
+# what OpenSSL writes - PKCS #8 (RFC 5958, id-ecPublicKey with
+# secp384r1) or SEC 1's ECPrivateKey (RFC 5915), whose public key, when it
+# carries one, must be d's.
+#
+# Pure computation: std/digest, std/crypto's HMAC, std/asn1, and std/ecdsa
+# for the public key and its checking.
+
+# bench/ct_timing.sh, `sign` with one key, a fixed message against random
+# ones: |t| = 0.75 to 1.7 over 50,000 signatures (under 10 is no leak
+# seen). The --release assembly of `P384Point.base_mult`, its table
+# selection inlined, branches on counters alone (a jump table on the digit
+# loop's counter picks the limb) and the allocator's slow path.
+
+module std/p384
+
+import std/int
+import std/digest::{SHA256, SHA384, SHA512}
+import std/crypto::{HMAC}
+import std/asn1::{Der, DerValue, DerTag, Asn1Error}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+
+# A P-384 private key, and the public key that goes with it.
+pub struct P384PrivateKey
+  getter public_key : EcdsaPublicKey
+  # The public key's point, uncompressed: 0x04, then x and y, 48 bytes each.
+  getter public_point : Array(UInt8)
+  @d : P384Num
+
+  def initialize(@d : P384Num, @public_key : EcdsaPublicKey, @public_point : Array(UInt8))
+  end
+
+  # The key whose d is *bytes*, 48 big-endian, or why it is not one: not
+  # 48 bytes, or not in [1, n - 1].
+  def self.from_bytes(bytes : String | Array(UInt8)) : P384PrivateKey | EcdsaError
+    raw = bytes.is_a?(String) ? Array(UInt8).new(bytes.bytesize) { |i| bytes.to_unsafe[i] } : bytes
+    return EcdsaError.new("a P-384 private key is 48 bytes, not #{raw.size}") unless raw.size == 48
+    d = P384Num.from_bytes(raw, 0)
+    unless P384Num.below?(d, P384Num.n) && !d.zero?
+      return EcdsaError.new("a P-384 private key is a number from 1 to n - 1")
+    end
+    point = P384Point.base_mult(d).encoded
+    public = EcdsaPublicKey.from_point(EcdsaCurve::P384, point)
+    return public if public.is_a?(EcdsaError)
+    P384PrivateKey.new(d, public, point)
+  end
+
+  # ECDH: x of [d]Q for the peer's point Q, 48 bytes big-endian - or why
+  # *peer* is not a point of P-384 (checked before d is used), or why the
+  # answer is no secret.
+  def shared_secret(peer : Array(UInt8)) : Array(UInt8) | EcdsaError
+    q = P384Point.decode(peer)
+    return q if q.is_a?(EcdsaError)
+    product = P384Point.mult(q, @d)
+    return EcdsaError.new("the shared point is the point at infinity") if product.z.zero?
+    product.affine_x.to_bytes
+  end
+
+  # A PKCS #8 OneAsymmetricKey (RFC 5958) holding a P-384 key: version 0 or
+  # 1, the algorithm id-ecPublicKey with secp384r1, and an ECPrivateKey
+  # inside the privateKey OCTET STRING.
+  def self.from_pkcs8(der : Array(UInt8)) : P384PrivateKey | EcdsaError
+    top = Der.parse(der)
+    return EcdsaError.new("the private key: #{top.message}") if top.is_a?(Asn1Error)
+    fields = top.sequence
+    return EcdsaError.new("the private key: #{fields.message}") if fields.is_a?(Asn1Error)
+    return EcdsaError.new("the private key: a OneAsymmetricKey of #{fields.size} values") if fields.size < 3
+    version = fields[0].integer
+    return EcdsaError.new("the private key: version #{version}, not 0 or 1") unless version == 0_i64 || version == 1_i64
+    algorithm = fields[1].sequence
+    return EcdsaError.new("the private key: an AlgorithmIdentifier that is not a SEQUENCE") if algorithm.is_a?(Asn1Error) || algorithm.empty?
+    kind = algorithm[0].oid
+    return EcdsaError.new("the private key is for #{kind.is_a?(String) ? kind : "no OID"}, not id-ecPublicKey (1.2.840.10045.2.1)") unless kind == "1.2.840.10045.2.1"
+    return EcdsaError.new("the private key: an id-ecPublicKey with no named curve") unless algorithm.size == 2
+    curve = algorithm[1].oid
+    return EcdsaError.new("the private key is on #{curve.is_a?(String) ? curve : "no named curve"}, not secp384r1 (1.3.132.0.34)") unless curve == P384Point::CURVE_OID
+    inner = fields[2].octet_string
+    return EcdsaError.new("the private key: #{inner.message}") if inner.is_a?(Asn1Error)
+    from_sec1(inner)
+  end
+
+  # SEC 1's ECPrivateKey (RFC 5915): version 1, the 48-byte private key,
+  # then optionally the curve ([0], which must be secp384r1) and the
+  # public key ([1], which must be the private key's).
+  def self.from_sec1(der : Array(UInt8)) : P384PrivateKey | EcdsaError
+    top = Der.parse(der)
+    return EcdsaError.new("the private key: #{top.message}") if top.is_a?(Asn1Error)
+    fields = top.sequence
+    return EcdsaError.new("the private key: #{fields.message}") if fields.is_a?(Asn1Error)
+    return EcdsaError.new("the private key: an ECPrivateKey of #{fields.size} values") if fields.size < 2
+    return EcdsaError.new("the private key: an ECPrivateKey whose version is not 1") unless fields[0].integer == 1_i64
+    secret = fields[1].octet_string
+    return EcdsaError.new("the private key: #{secret.message}") if secret.is_a?(Asn1Error)
+    key = from_bytes(secret)
+    return key if key.is_a?(EcdsaError)
+    i = 2
+    while i < fields.size
+      field = fields[i]
+      if field.context?(0)
+        named = field.explicit(0)
+        oid = named.is_a?(Asn1Error) ? named : named.oid
+        return EcdsaError.new("the private key names a curve that is not secp384r1") unless oid == P384Point::CURVE_OID
+      elsif field.context?(1)
+        bits = field.explicit(1)
+        return EcdsaError.new("the private key: its public key is not a BIT STRING") if bits.is_a?(Asn1Error)
+        point = bits.bit_string
+        return EcdsaError.new("the private key: its public key is not a BIT STRING") if point.is_a?(Asn1Error)
+        carried = EcdsaPublicKey.from_point(EcdsaCurve::P384, point)
+        return EcdsaError.new("the private key: its public key is not the private key's") unless carried.is_a?(EcdsaPublicKey) && carried.x == key.public_key.x && carried.y == key.public_key.y
+      else
+        return EcdsaError.new("the private key: #{field.describe} where a curve or a public key belongs")
+      end
+      i = i + 1
+    end
+    key
+  end
+
+  # The signature of *message* under *hash*: the DER of Ecdsa-Sig-Value,
+  # SEQUENCE { r INTEGER, s INTEGER }, as X.509 and TLS 1.3 carry it. The
+  # nonce is RFC 6979's, so the same key and message sign alike.
+  def sign(hash : EcdsaHash, message : String | Array(UInt8)) : Array(UInt8)
+    bytes = message.is_a?(String) ? Array(UInt8).new(message.bytesize) { |i| message.to_unsafe[i] } : message
+    r, s = sign_hashed(hash, hash.digest(bytes))
+    P384Der.signature(r.to_bytes, s.to_bytes)
+  end
+
+  # The signature of a message whose digest under *hash* is *digest*, as
+  # `sign` makes it - or why *digest* is not one of *hash*'s.
+  def sign_digest(hash : EcdsaHash, digest : Array(UInt8)) : Array(UInt8) | EcdsaError
+    size = hash == EcdsaHash::SHA256 ? 32 : (hash == EcdsaHash::SHA384 ? 48 : 64)
+    return EcdsaError.new("a #{hash} digest is #{size} bytes, not #{digest.size}") unless digest.size == size
+    r, s = sign_hashed(hash, digest)
+    P384Der.signature(r.to_bytes, s.to_bytes)
+  end
+
+  # r and s for the digest *h1* of a message, RFC 6979 section 3.2 for the
+  # nonce and SEC 1 section 4.1.3 for the rest.
+  private def sign_hashed(hash : EcdsaHash, h1 : Array(UInt8)) : {P384Num, P384Num}
+    # bits2int: the hash's leftmost 384 bits, or all of a shorter one;
+    # bits2octets: that mod n.
+    e = P384Num.reduce_once(P384Num.bits2int(h1), P384Num.n)
+    x = @d.to_bytes
+    h = e.to_bytes
+    size = h1.size
+    v = Array(UInt8).new(size, 1_u8)
+    k = Array(UInt8).new(size, 0_u8)
+    k = P384Hmac.mac(hash, k, v + [0_u8] + x + h)
+    v = P384Hmac.mac(hash, k, v)
+    k = P384Hmac.mac(hash, k, v + [1_u8] + x + h)
+    v = P384Hmac.mac(hash, k, v)
+    while true
+      # Step h: HMAC blocks until there are 384 bits of them.
+      t = [] of UInt8
+      while t.size < 48
+        v = P384Hmac.mac(hash, k, v)
+        t = t + v
+      end
+      candidate = P384Num.from_bytes(t, 0)
+      if P384Num.below?(candidate, P384Num.n) && !candidate.zero?
+        r = P384Num.reduce_once(P384Point.base_mult(candidate).affine_x, P384Num.n)
+        unless r.zero?
+          # s = k^-1 (e + r d) mod n, in Montgomery form throughout.
+          m = P384Modulus.order
+          km = m.to_mont(candidate)
+          rd = m.mul(m.to_mont(r), m.to_mont(@d))
+          s = m.from_mont(m.mul(m.inverse(km), m.add(m.to_mont(e), rd)))
+          return {r, s} unless s.zero?
+        end
+      end
+      k = P384Hmac.mac(hash, k, v + [0_u8])
+      v = P384Hmac.mac(hash, k, v)
+    end
+    {P384Num.zero, P384Num.zero}
+  end
+end
+
+# HMAC under the hash a signature names.
+struct P384Hmac
+  def self.mac(hash : EcdsaHash, key : Array(UInt8), data : Array(UInt8)) : Array(UInt8)
+    case hash
+    when EcdsaHash::SHA256 then HMAC.digest(SHA256, key, data)
+    when EcdsaHash::SHA384 then HMAC.digest(SHA384, key, data)
+    else                        HMAC.digest(SHA512, key, data)
+    end
+  end
+end
+
+# DER's Ecdsa-Sig-Value from two 48-byte big-endian numbers.
+struct P384Der
+  def self.signature(r : Array(UInt8), s : Array(UInt8)) : Array(UInt8)
+    body = integer(r) + integer(s)
+    [0x30_u8] + length(body.size) + body
+  end
+
+  # A positive INTEGER: leading zeros dropped, one put back when the top
+  # bit is set.
+  private def self.integer(bytes : Array(UInt8)) : Array(UInt8)
+    at = 0
+    while at < bytes.size - 1 && bytes[at] == 0_u8
+      at = at + 1
+    end
+    value = bytes[at, bytes.size - at]
+    value = [0_u8] + value if value[0] >= 0x80_u8
+    [0x02_u8] + length(value.size) + value
+  end
+
+  private def self.length(size : Int32) : Array(UInt8)
+    size < 128 ? [size.to_u8] : [0x81_u8, size.to_u8]
+  end
+end
+
+# A number below 2^384 as six 64-bit limbs, least significant first.
+struct P384Num
+  getter l0 : UInt64
+  getter l1 : UInt64
+  getter l2 : UInt64
+  getter l3 : UInt64
+  getter l4 : UInt64
+  getter l5 : UInt64
+
+  def initialize(@l0 : UInt64, @l1 : UInt64, @l2 : UInt64, @l3 : UInt64, @l4 : UInt64, @l5 : UInt64)
+  end
+
+  def self.zero : P384Num
+    new(0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64)
+  end
+
+  # The field's prime p = 2^384 - 2^128 - 2^96 + 2^32 - 1.
+  def self.p : P384Num
+    new(0x00000000ffffffff_u64, 0xffffffff00000000_u64, 0xfffffffffffffffe_u64,
+      0xffffffffffffffff_u64, 0xffffffffffffffff_u64, 0xffffffffffffffff_u64)
+  end
+
+  # The group's order n.
+  def self.n : P384Num
+    new(0xecec196accc52973_u64, 0x581a0db248b0a77a_u64, 0xc7634d81f4372ddf_u64,
+      0xffffffffffffffff_u64, 0xffffffffffffffff_u64, 0xffffffffffffffff_u64)
+  end
+
+  # 48 big-endian bytes of *bytes* from *at*.
+  def self.from_bytes(bytes : Array(UInt8), at : Int32) : P384Num
+    new(word(bytes, at + 40), word(bytes, at + 32), word(bytes, at + 24),
+      word(bytes, at + 16), word(bytes, at + 8), word(bytes, at))
+  end
+
+  # RFC 6979's bits2int at qlen = 384: a digest's leftmost 384 bits, or a
+  # shorter digest (SHA-256's) whole, as the number it is.
+  def self.bits2int(digest : Array(UInt8)) : P384Num
+    return from_bytes(digest, 0) if digest.size >= 48
+    from_bytes(Array(UInt8).new(48 - digest.size, 0_u8) + digest, 0)
+  end
+
+  private def self.word(bytes : Array(UInt8), at : Int32) : UInt64
+    w = 0_u64
+    i = 0
+    while i < 8
+      w = w.unsafe_shl(8) | bytes[at + i].to_u64
+      i = i + 1
+    end
+    w
+  end
+
+  def to_bytes : Array(UInt8)
+    bytes = Array(UInt8).new(48, 0_u8)
+    put(bytes, 0, @l5)
+    put(bytes, 8, @l4)
+    put(bytes, 16, @l3)
+    put(bytes, 24, @l2)
+    put(bytes, 32, @l1)
+    put(bytes, 40, @l0)
+    bytes
+  end
+
+  private def put(bytes : Array(UInt8), at : Int32, w : UInt64) : Nil
+    i = 0
+    while i < 8
+      bytes[at + i] = (w.unsafe_shr(56 - 8 * i) & 0xff_u64).to_u8
+      i = i + 1
+    end
+  end
+
+  # Limb *index*, 0 the least significant; the index is public (a bit's
+  # place in a public exponent, a window's in a scalar).
+  def limb(index : Int32) : UInt64
+    case index
+    when 0 then @l0
+    when 1 then @l1
+    when 2 then @l2
+    when 3 then @l3
+    when 4 then @l4
+    else        @l5
+    end
+  end
+
+  # Whether every limb is zero, read without a branch per limb.
+  def zero? : Bool
+    (@l0 | @l1 | @l2 | @l3 | @l4 | @l5) == 0_u64
+  end
+
+  # Whether *a* < *m*: the borrow out of a - m.
+  def self.below?(a : P384Num, m : P384Num) : Bool
+    _, borrow = sub_raw(a, m)
+    borrow == 1_u64
+  end
+
+  # *a* minus *m* when *a* is not below it: a number below 2m taken below m.
+  def self.reduce_once(a : P384Num, m : P384Num) : P384Num
+    d, borrow = sub_raw(a, m)
+    choose(borrow, a, d)
+  end
+
+  # *a* when *bit* is 1, *b* when it is 0, by a mask.
+  def self.choose(bit : UInt64, a : P384Num, b : P384Num) : P384Num
+    mask = 0_u64 &- bit
+    new((a.l0 & mask) | (b.l0 & ~mask), (a.l1 & mask) | (b.l1 & ~mask),
+      (a.l2 & mask) | (b.l2 & ~mask), (a.l3 & mask) | (b.l3 & ~mask),
+      (a.l4 & mask) | (b.l4 & ~mask), (a.l5 & mask) | (b.l5 & ~mask))
+  end
+
+  # a - b and the borrow out of it, 0 or 1.
+  def self.sub_raw(a : P384Num, b : P384Num) : {P384Num, UInt64}
+    d0 = a.l0 &- b.l0
+    c = borrow_of(a.l0, b.l0, 0_u64)
+    d1 = a.l1 &- b.l1 &- c
+    c = borrow_of(a.l1, b.l1, c)
+    d2 = a.l2 &- b.l2 &- c
+    c = borrow_of(a.l2, b.l2, c)
+    d3 = a.l3 &- b.l3 &- c
+    c = borrow_of(a.l3, b.l3, c)
+    d4 = a.l4 &- b.l4 &- c
+    c = borrow_of(a.l4, b.l4, c)
+    d5 = a.l5 &- b.l5 &- c
+    c = borrow_of(a.l5, b.l5, c)
+    {new(d0, d1, d2, d3, d4, d5), c}
+  end
+
+  # The borrow out of x - y - c, computed without a comparison: the top
+  # bit of (~x & y) | (~(x ^ y) & (x - y - c)) (Hacker's Delight 2-13).
+  def self.borrow_of(x : UInt64, y : UInt64, c : UInt64) : UInt64
+    d = x &- y &- c
+    ((~x & y) | (~(x ^ y) & d)).unsafe_shr(63)
+  end
+end
+
+# Arithmetic modulo p or n in Montgomery form (R = 2^384): a number a is
+# held as a R mod m. Every operation runs the same steps whatever its
+# operands.
+struct P384Modulus
+  getter m : P384Num
+  # -m^-1 mod 2^64, R mod m and R^2 mod m.
+  getter inv : UInt64
+  getter one : P384Num
+  getter r2 : P384Num
+
+  def initialize(@m : P384Num, @inv : UInt64, @one : P384Num, @r2 : P384Num)
+  end
+
+  def self.field : P384Modulus
+    new(P384Num.p, 0x0000000100000001_u64,
+      P384Num.new(0xffffffff00000001_u64, 0x00000000ffffffff_u64, 0x0000000000000001_u64,
+        0x0000000000000000_u64, 0x0000000000000000_u64, 0x0000000000000000_u64),
+      P384Num.new(0xfffffffe00000001_u64, 0x0000000200000000_u64, 0xfffffffe00000000_u64,
+        0x0000000200000000_u64, 0x0000000000000001_u64, 0x0000000000000000_u64))
+  end
+
+  def self.order : P384Modulus
+    new(P384Num.n, 0x6ed46089e88fdc45_u64,
+      P384Num.new(0x1313e695333ad68d_u64, 0xa7e5f24db74f5885_u64, 0x389cb27e0bc8d220_u64,
+        0x0000000000000000_u64, 0x0000000000000000_u64, 0x0000000000000000_u64),
+      P384Num.new(0x2d319b2419b409a9_u64, 0xff3d81e5df1aa419_u64, 0xbc3e483afcb82947_u64,
+        0xd40d49174aab1cc5_u64, 0x3fb05b7a28266895_u64, 0x0c84ee012b39bf21_u64))
+  end
+
+  # a b R^-1 mod m, by coarsely integrated operand scanning (CIOS): six
+  # rounds of a times one limb of b, each followed by one limb's reduction.
+  def mul(a : P384Num, b : P384Num) : P384Num
+    t0 = 0_u64
+    t1 = 0_u64
+    t2 = 0_u64
+    t3 = 0_u64
+    t4 = 0_u64
+    t5 = 0_u64
+    t6 = 0_u64
+    t0, t1, t2, t3, t4, t5, t6 = round(a, b.l0, t0, t1, t2, t3, t4, t5, t6)
+    t0, t1, t2, t3, t4, t5, t6 = round(a, b.l1, t0, t1, t2, t3, t4, t5, t6)
+    t0, t1, t2, t3, t4, t5, t6 = round(a, b.l2, t0, t1, t2, t3, t4, t5, t6)
+    t0, t1, t2, t3, t4, t5, t6 = round(a, b.l3, t0, t1, t2, t3, t4, t5, t6)
+    t0, t1, t2, t3, t4, t5, t6 = round(a, b.l4, t0, t1, t2, t3, t4, t5, t6)
+    t0, t1, t2, t3, t4, t5, t6 = round(a, b.l5, t0, t1, t2, t3, t4, t5, t6)
+    # t < 2m: m once more, taken when t6 carries or t - m does not borrow.
+    t = P384Num.new(t0, t1, t2, t3, t4, t5)
+    d, borrow = P384Num.sub_raw(t, @m)
+    keep = t6 | (borrow ^ 1_u64)
+    P384Num.choose(keep & 1_u64, d, t)
+  end
+
+  private def round(a : P384Num, bi : UInt64, t0 : UInt64, t1 : UInt64, t2 : UInt64, t3 : UInt64, t4 : UInt64, t5 : UInt64, t6 : UInt64) : {UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64}
+    w = a.l0.to_u128 &* bi.to_u128 &+ t0.to_u128
+    t0 = w.unsafe_to_u64
+    w = a.l1.to_u128 &* bi.to_u128 &+ t1.to_u128 &+ w.unsafe_shr(64)
+    t1 = w.unsafe_to_u64
+    w = a.l2.to_u128 &* bi.to_u128 &+ t2.to_u128 &+ w.unsafe_shr(64)
+    t2 = w.unsafe_to_u64
+    w = a.l3.to_u128 &* bi.to_u128 &+ t3.to_u128 &+ w.unsafe_shr(64)
+    t3 = w.unsafe_to_u64
+    w = a.l4.to_u128 &* bi.to_u128 &+ t4.to_u128 &+ w.unsafe_shr(64)
+    t4 = w.unsafe_to_u64
+    w = a.l5.to_u128 &* bi.to_u128 &+ t5.to_u128 &+ w.unsafe_shr(64)
+    t5 = w.unsafe_to_u64
+    w = t6.to_u128 &+ w.unsafe_shr(64)
+    t6 = w.unsafe_to_u64
+    t7 = w.unsafe_shr(64).unsafe_to_u64
+    q = t0 &* @inv
+    w = q.to_u128 &* @m.l0.to_u128 &+ t0.to_u128
+    w = q.to_u128 &* @m.l1.to_u128 &+ t1.to_u128 &+ w.unsafe_shr(64)
+    r0 = w.unsafe_to_u64
+    w = q.to_u128 &* @m.l2.to_u128 &+ t2.to_u128 &+ w.unsafe_shr(64)
+    r1 = w.unsafe_to_u64
+    w = q.to_u128 &* @m.l3.to_u128 &+ t3.to_u128 &+ w.unsafe_shr(64)
+    r2 = w.unsafe_to_u64
+    w = q.to_u128 &* @m.l4.to_u128 &+ t4.to_u128 &+ w.unsafe_shr(64)
+    r3 = w.unsafe_to_u64
+    w = q.to_u128 &* @m.l5.to_u128 &+ t5.to_u128 &+ w.unsafe_shr(64)
+    r4 = w.unsafe_to_u64
+    w = t6.to_u128 &+ w.unsafe_shr(64)
+    r5 = w.unsafe_to_u64
+    r6 = t7 &+ w.unsafe_shr(64).unsafe_to_u64
+    {r0, r1, r2, r3, r4, r5, r6}
+  end
+
+  def square(a : P384Num) : P384Num
+    mul(a, a)
+  end
+
+  # (a + b) mod m.
+  def add(a : P384Num, b : P384Num) : P384Num
+    w = a.l0.to_u128 &+ b.l0.to_u128
+    s0 = w.unsafe_to_u64
+    w = a.l1.to_u128 &+ b.l1.to_u128 &+ w.unsafe_shr(64)
+    s1 = w.unsafe_to_u64
+    w = a.l2.to_u128 &+ b.l2.to_u128 &+ w.unsafe_shr(64)
+    s2 = w.unsafe_to_u64
+    w = a.l3.to_u128 &+ b.l3.to_u128 &+ w.unsafe_shr(64)
+    s3 = w.unsafe_to_u64
+    w = a.l4.to_u128 &+ b.l4.to_u128 &+ w.unsafe_shr(64)
+    s4 = w.unsafe_to_u64
+    w = a.l5.to_u128 &+ b.l5.to_u128 &+ w.unsafe_shr(64)
+    s5 = w.unsafe_to_u64
+    carry = w.unsafe_shr(64).unsafe_to_u64
+    sum = P384Num.new(s0, s1, s2, s3, s4, s5)
+    d, borrow = P384Num.sub_raw(sum, @m)
+    P384Num.choose((carry | (borrow ^ 1_u64)) & 1_u64, d, sum)
+  end
+
+  # (a - b) mod m: m added back by a mask when a - b borrows.
+  def sub(a : P384Num, b : P384Num) : P384Num
+    d, borrow = P384Num.sub_raw(a, b)
+    mask = 0_u64 &- borrow
+    w = d.l0.to_u128 &+ (@m.l0 & mask).to_u128
+    r0 = w.unsafe_to_u64
+    w = d.l1.to_u128 &+ (@m.l1 & mask).to_u128 &+ w.unsafe_shr(64)
+    r1 = w.unsafe_to_u64
+    w = d.l2.to_u128 &+ (@m.l2 & mask).to_u128 &+ w.unsafe_shr(64)
+    r2 = w.unsafe_to_u64
+    w = d.l3.to_u128 &+ (@m.l3 & mask).to_u128 &+ w.unsafe_shr(64)
+    r3 = w.unsafe_to_u64
+    w = d.l4.to_u128 &+ (@m.l4 & mask).to_u128 &+ w.unsafe_shr(64)
+    r4 = w.unsafe_to_u64
+    w = d.l5.to_u128 &+ (@m.l5 & mask).to_u128 &+ w.unsafe_shr(64)
+    r5 = w.unsafe_to_u64
+    P384Num.new(r0, r1, r2, r3, r4, r5)
+  end
+
+  def to_mont(a : P384Num) : P384Num
+    mul(a, @r2)
+  end
+
+  def from_mont(a : P384Num) : P384Num
+    mul(a, P384Num.new(1_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64))
+  end
+
+  # a^-1 for *a* in Montgomery form, as a^(m - 2): the exponent's bits are
+  # m's, public, so the squarings and multiplications run in one order for
+  # every a.
+  def inverse(a : P384Num) : P384Num
+    e = P384Num.sub_raw(@m, P384Num.new(2_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64))[0]
+    result = @one
+    i = 383
+    while i >= 0
+      result = square(result)
+      result = mul(result, a) if e.limb(i // 64).unsafe_shr(i & 63) & 1_u64 == 1_u64
+      i = i - 1
+    end
+    result
+  end
+end
+
+# A point of P-384, y^2 = x^3 - 3x + b, in projective coordinates
+# (X : Y : Z), x = X/Z and y = Y/Z, each in the field's Montgomery form.
+# The identity is (0 : 1 : 0).
+struct P384Point
+  CURVE_OID = "1.3.132.0.34"
+
+  getter x : P384Num
+  getter y : P384Num
+  getter z : P384Num
+
+  def initialize(@x : P384Num, @y : P384Num, @z : P384Num)
+  end
+
+  def self.identity : P384Point
+    new(P384Num.zero, P384Modulus.field.one, P384Num.zero)
+  end
+
+  # The base point G.
+  def self.base : P384Point
+    new(P384Num.new(0x3dd0756649c0b528_u64, 0x20e378e2a0d6ce38_u64, 0x879c3afc541b4d6e_u64,
+      0x6454868459a30eff_u64, 0x812ff723614ede2b_u64, 0x4d3aadc2299e1513_u64),
+      P384Num.new(0x23043dad4b03a4fe_u64, 0xa1bfa8bf7bb4a9ac_u64, 0x8bade7562e83b050_u64,
+        0xc6c3521968f4ffd9_u64, 0xdd8002263969a840_u64, 0x2b78abc25a15c5e9_u64),
+      P384Modulus.field.one)
+  end
+
+  # b, in Montgomery form.
+  def self.b : P384Num
+    P384Num.new(0x081188719d412dcc_u64, 0xf729add87a4c32ec_u64, 0x77f2209b1920022e_u64,
+      0xe3374bee94938ae2_u64, 0xb62b21f41f022094_u64, 0xcd08114b604fbff9_u64)
+  end
+
+  # P + Q, algorithm 4 of Renes, Costello and Batina: complete, so the
+  # identity and P + P need no case of their own.
+  def +(q : P384Point) : P384Point
+    f = P384Modulus.field
+    b = P384Point.b
+    t0 = f.mul(@x, q.x)
+    t1 = f.mul(@y, q.y)
+    t2 = f.mul(@z, q.z)
+    t3 = f.add(@x, @y)
+    t4 = f.add(q.x, q.y)
+    t3 = f.mul(t3, t4)
+    t4 = f.add(t0, t1)
+    t3 = f.sub(t3, t4)
+    t4 = f.add(@y, @z)
+    x3 = f.add(q.y, q.z)
+    t4 = f.mul(t4, x3)
+    x3 = f.add(t1, t2)
+    t4 = f.sub(t4, x3)
+    x3 = f.add(@x, @z)
+    y3 = f.add(q.x, q.z)
+    x3 = f.mul(x3, y3)
+    y3 = f.add(t0, t2)
+    y3 = f.sub(x3, y3)
+    z3 = f.mul(b, t2)
+    x3 = f.sub(y3, z3)
+    z3 = f.add(x3, x3)
+    x3 = f.add(x3, z3)
+    z3 = f.sub(t1, x3)
+    x3 = f.add(t1, x3)
+    y3 = f.mul(b, y3)
+    t1 = f.add(t2, t2)
+    t2 = f.add(t1, t2)
+    y3 = f.sub(y3, t2)
+    y3 = f.sub(y3, t0)
+    t1 = f.add(y3, y3)
+    y3 = f.add(t1, y3)
+    t1 = f.add(t0, t0)
+    t0 = f.add(t1, t0)
+    t0 = f.sub(t0, t2)
+    t1 = f.mul(t4, y3)
+    t2 = f.mul(t0, y3)
+    y3 = f.mul(x3, z3)
+    y3 = f.add(y3, t2)
+    x3 = f.mul(t3, x3)
+    x3 = f.sub(x3, t1)
+    z3 = f.mul(t4, z3)
+    t1 = f.mul(t3, t0)
+    z3 = f.add(z3, t1)
+    P384Point.new(x3, y3, z3)
+  end
+
+  # 2P, algorithm 6 of Renes, Costello and Batina.
+  def double : P384Point
+    f = P384Modulus.field
+    b = P384Point.b
+    t0 = f.square(@x)
+    t1 = f.square(@y)
+    t2 = f.square(@z)
+    t3 = f.mul(@x, @y)
+    t3 = f.add(t3, t3)
+    z3 = f.mul(@x, @z)
+    z3 = f.add(z3, z3)
+    y3 = f.mul(b, t2)
+    y3 = f.sub(y3, z3)
+    x3 = f.add(y3, y3)
+    y3 = f.add(x3, y3)
+    x3 = f.sub(t1, y3)
+    y3 = f.add(t1, y3)
+    y3 = f.mul(x3, y3)
+    x3 = f.mul(x3, t3)
+    t3 = f.add(t2, t2)
+    t2 = f.add(t2, t3)
+    z3 = f.mul(b, z3)
+    z3 = f.sub(z3, t2)
+    z3 = f.sub(z3, t0)
+    t3 = f.add(z3, z3)
+    z3 = f.add(z3, t3)
+    t3 = f.add(t0, t0)
+    t0 = f.add(t3, t0)
+    t0 = f.sub(t0, t2)
+    t0 = f.mul(t0, z3)
+    y3 = f.add(y3, t0)
+    t0 = f.mul(@y, @z)
+    t0 = f.add(t0, t0)
+    z3 = f.mul(t0, z3)
+    x3 = f.sub(x3, z3)
+    z3 = f.mul(t0, t1)
+    z3 = f.add(z3, z3)
+    z3 = f.add(z3, z3)
+    P384Point.new(x3, y3, z3)
+  end
+
+  # [k]G for a secret k below n.
+  def self.base_mult(k : P384Num) : P384Point
+    mult(P384Point.base, k)
+  end
+
+  # [k]P for a secret k below n: 96 windows of four bits from the top,
+  # each four doublings and one addition of a table entry read whole.
+  def self.mult(point : P384Point, k : P384Num) : P384Point
+    table = Array(P384Point).new(16, P384Point.identity)
+    i = 1
+    while i < 16
+      table[i] = table[i - 1] + point
+      i = i + 1
+    end
+    acc = P384Point.identity
+    w = 95
+    while w >= 0
+      acc = acc.double.double.double.double
+      digit = k.limb(w // 16).unsafe_shr((w & 15) * 4) & 15_u64
+      acc = acc + lookup(table, digit)
+      w = w - 1
+    end
+    acc
+  end
+
+  # table[digit], every entry read and the one wanted kept by masks.
+  private def self.lookup(table : Array(P384Point), digit : UInt64) : P384Point
+    x = P384Num.zero
+    y = P384Num.zero
+    z = P384Num.zero
+    i = 0
+    while i < 16
+      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)
+      entry = table[i]
+      x = P384Num.choose(bit, entry.x, x)
+      y = P384Num.choose(bit, entry.y, y)
+      z = P384Num.choose(bit, entry.z, z)
+      i = i + 1
+    end
+    P384Point.new(x, y, z)
+  end
+
+  # The point *bytes* encodes uncompressed (0x04, x, y), checked: each
+  # coordinate below p, and y^2 = x^3 - 3x + b. Public input, so the checks
+  # may branch.
+  def self.decode(bytes : Array(UInt8)) : P384Point | EcdsaError
+    unless bytes.size == 97 && bytes[0] == 4_u8
+      return EcdsaError.new("a P-384 point is 97 bytes, 0x04 and then x and y, not #{bytes.size} bytes starting #{bytes.empty? ? "-" : bytes[0].to_s}")
+    end
+    x = P384Num.from_bytes(bytes, 1)
+    y = P384Num.from_bytes(bytes, 49)
+    unless P384Num.below?(x, P384Num.p) && P384Num.below?(y, P384Num.p)
+      return EcdsaError.new("a P-384 point with a coordinate of p or more")
+    end
+    f = P384Modulus.field
+    xm = f.to_mont(x)
+    ym = f.to_mont(y)
+    right = f.add(f.sub(f.mul(f.square(xm), xm), f.add(f.add(xm, xm), xm)), P384Point.b)
+    return EcdsaError.new("a point that is not on P-384") unless f.square(ym).to_bytes == right.to_bytes
+    new(xm, ym, f.one)
+  end
+
+  # x / Z, out of Montgomery form.
+  def affine_x : P384Num
+    f = P384Modulus.field
+    f.from_mont(f.mul(@x, f.inverse(@z)))
+  end
+
+  # The uncompressed encoding: 0x04, then x and y, 48 bytes each.
+  def encoded : Array(UInt8)
+    f = P384Modulus.field
+    zinv = f.inverse(@z)
+    [4_u8] + f.from_mont(f.mul(@x, zinv)).to_bytes + f.from_mont(f.mul(@y, zinv)).to_bytes
+  end
+end

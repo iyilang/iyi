@@ -5,8 +5,7 @@
 
 module samples/std_time
 
-import std/time
-using std/time::{Time, Span}
+import std/time::{Time, Span}
 
 # 1. Fixed reference date demonstration
 ref_time = Time.utc(2024, 2, 29, 12, 30, 45, 123)

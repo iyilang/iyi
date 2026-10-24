@@ -107,7 +107,7 @@ describe "Normalize: multi assign" do
   it "normalizes m to n, with splat on left-hand side, splat is non-empty" do
     assert_expand "a = 1; b = 2; a[0], *b.foo, c = 3, 4, 5, 6, 7", <<-CODE
       __temp_1 = 3
-      __temp_2 = ::Tuple.new(4, 5, 6)
+      __temp_2 = {4, 5, 6}
       __temp_3 = 7
       a[0] = __temp_1
       b.foo = __temp_2
@@ -221,7 +221,7 @@ describe "Normalize: multi assign" do
 
   it "normalizes n to splat on left-hand side" do
     assert_expand "*a = 1, 2, 3, 4", <<-CODE
-      __temp_1 = ::Tuple.new(1, 2, 3, 4)
+      __temp_1 = {1, 2, 3, 4}
       a = __temp_1
       CODE
   end

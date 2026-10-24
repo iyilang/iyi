@@ -1,0 +1,320 @@
+# Cookies (RFC 6265), for both ends of std/http: `Cookie` reads a
+# `Set-Cookie` line as a user agent reads one and writes one as a server
+# writes one, and `CookieJar` is the client's store, handed to
+# `HTTP.request(..., jar: jar)` (it is std/http's `CookieStore`).
+#
+# A line is read as §5.2 has it: a name and value, then attributes in
+# any case, an unknown one passed over, `Expires` in any of RFC 9110's
+# three date forms, `Max-Age` before `Expires` (§5.3, step 3), a
+# `Domain`'s leading dot dropped. A line without a name-value pair is no
+# cookie. A server's line is refused, with the byte that would break it,
+# when its name is not a token or its value holds what a cookie-octet
+# cannot (§4.1.1): a space, a comma, a semicolon, a backslash, a quote.
+#
+# The jar matches a request as §5.4 does - domain, path at a slash, not
+# lapsed - sends the longer paths first, and sends a `Secure` cookie over
+# `https://` alone, taking one only from an answer that came over it
+# (RFC 6265bis: an http page cannot overwrite a secure cookie). There is
+# no public-suffix list: a `Domain` of one label is refused, and one like
+# `co.uk` is taken, which a browser would refuse. This module is apart
+# from std/http because it reads the clock: std/time is what knows what
+# an `Expires` date means, and std/http reaches the network alone.
+
+module std/cookie
+
+import std/http::{HTTP, Response, CookieStore}
+import std/uri::{URI}
+import std/time::{Time, Span}
+
+# A cookie (RFC 6265): what a `Set-Cookie` line says, and what a jar
+# keeps. `Cookie.parse(line)` reads a `Set-Cookie` value as RFC 6265 §5.2
+# has a user agent read one - a name and value, then attributes in any
+# case, an unknown attribute ignored - and answers nil for a line that
+# has no name-value pair. `to_set_cookie` writes one, refusing a name or
+# value that would break the line. `expires` is the instant it lapses,
+# from `Max-Age` before `Expires` (§5.3, step 3); nil is a session cookie.
+pub class Cookie
+  getter name : String
+  getter value : String
+  getter path : String?
+  getter domain : String?
+  getter expires : Time?
+  getter max_age : Int64?
+  getter secure : Bool
+  getter http_only : Bool
+  getter same_site : String?
+
+  def initialize(@name : String, @value : String, @path : String? = nil, @domain : String? = nil, @expires : Time? = nil, @max_age : Int64? = nil, @secure : Bool = false, @http_only : Bool = false, @same_site : String? = nil)
+  end
+
+  def self.parse(line : String) : Cookie?
+    parts = line.split(';')
+    return nil if parts.empty?
+    pair = parts[0]
+    eq = pair.index('=')
+    return nil unless eq
+    name = HTTP.trim(pair[0, eq])
+    value = HTTP.trim(pair[eq + 1, pair.bytesize - eq - 1])
+    return nil if name.bytesize == 0
+    value = value[1, value.bytesize - 2] if value.bytesize >= 2 && value.starts_with?("\"") && value.ends_with?("\"")
+    path = nil.as(String?)
+    domain = nil.as(String?)
+    expires = nil.as(Time?)
+    max_age = nil.as(Int64?)
+    secure = false
+    http_only = false
+    same_site = nil.as(String?)
+    i = 1
+    while i < parts.size
+      attribute = parts[i]
+      i = i + 1
+      key = attribute
+      text = ""
+      if at = attribute.index('=')
+        key = attribute[0, at]
+        text = HTTP.trim(attribute[at + 1, attribute.bytesize - at - 1])
+      end
+      key = HTTP.trim(key).downcase
+      case key
+      when "expires"
+        read = Time::Format::HTTP_DATE.parse(text)
+        expires = read if read.is_a?(Time)
+      when "max-age"
+        if seconds = Cookie.seconds(text)
+          max_age = seconds
+        end
+      when "domain"
+        name_of = text.starts_with?(".") ? text[1, text.bytesize - 1] : text
+        domain = name_of.downcase if name_of.bytesize > 0
+      when "path"
+        path = text if text.starts_with?("/")
+      when "secure"
+        secure = true
+      when "httponly"
+        http_only = true
+      when "samesite"
+        same_site = text if text.bytesize > 0
+      end
+    end
+    if age = max_age
+      expires = age <= 0_i64 ? Time.unix(0_i64) : Time.utc + Span.seconds(age)
+    end
+    Cookie.new(name, value, path, domain, expires, max_age, secure, http_only, same_site)
+  end
+
+  # `Max-Age`'s digits, with a sign (§5.2.2); nil for anything else.
+  protected def self.seconds(text : String) : Int64?
+    return nil if text.bytesize == 0
+    p = text.to_unsafe
+    negative = p[0] == 45_u8
+    i = negative ? 1 : 0
+    return nil if i == text.bytesize
+    value = 0_i64
+    while i < text.bytesize
+      return nil unless p[i] >= 48_u8 && p[i] <= 57_u8
+      value = value * 10_i64 + (p[i] - 48_u8).to_i64 if value < 100000000000_i64
+      i = i + 1
+    end
+    negative ? 0_i64 - value : value
+  end
+
+  # The cookies an answer's `Set-Cookie` lines set, a line each.
+  def self.from_response(response : Response) : Array(Cookie)
+    found = [] of Cookie
+    response.header_values("Set-Cookie").each do |line|
+      if cookie = Cookie.parse(line)
+        found << cookie
+      end
+    end
+    found
+  end
+
+  # The pairs of a request's `Cookie` header: `a=1; b=2`.
+  def self.parse_header(value : String) : Hash(String, String)
+    HTTP.cookie_pairs(value)
+  end
+
+  # The `Set-Cookie` value a server writes (§4.1). A name is a token, and a
+  # value the cookie-octets: a space, a comma, a semicolon, a backslash or
+  # a quote inside one would end it or another field early.
+  def to_set_cookie : String
+    raise "Cookie: not a cookie name: #{@name.inspect}" unless HTTP.token?(@name)
+    p = @value.to_unsafe
+    i = 0
+    while i < @value.bytesize
+      c = p[i]
+      unless c == 0x21_u8 || (c >= 0x23_u8 && c <= 0x2B_u8) || (c >= 0x2D_u8 && c <= 0x3A_u8) || (c >= 0x3C_u8 && c <= 0x5B_u8) || (c >= 0x5D_u8 && c <= 0x7E_u8)
+        raise "Cookie: #{@name} has a byte a cookie value cannot hold: #{@value.inspect}"
+      end
+      i = i + 1
+    end
+    text = String::Builder.new
+    text << @name << "=" << @value
+    if path = @path
+      text << "; Path=" << path
+    end
+    if domain = @domain
+      text << "; Domain=" << domain
+    end
+    if age = @max_age
+      text << "; Max-Age=" << age
+    elsif expires = @expires
+      text << "; Expires=" << expires.to_rfc1123
+    end
+    text << "; Secure" if @secure
+    text << "; HttpOnly" if @http_only
+    if same = @same_site
+      text << "; SameSite=" << same
+    end
+    text.to_s
+  end
+
+  # Whether the cookie has lapsed at *now*.
+  def expired?(now : Time) : Bool
+    if lapse = @expires
+      return lapse <= now
+    end
+    false
+  end
+end
+
+# The cookies a client keeps between requests (RFC 6265 §5.3, §5.4): what
+# each answer's `Set-Cookie` lines set, by domain and path, and what a
+# request to a URL sends back. A cookie without `Domain` goes back to its
+# own host alone; one with a `Domain` the host is not within is refused,
+# and so is a `Domain` of one label, `com` - there is no public-suffix
+# list here, so a cookie for `co.uk` would be taken, which a browser would
+# refuse. A cookie that has lapsed, or is set lapsed, is gone. A `Secure`
+# cookie is taken from an `https://` answer only, and goes back over
+# `https://` only (§5.4 step 1). A jar may be shared by tasks on one
+# thread, not across threads.
+pub class CookieJar
+  # Each cookie, the host it was set by (what one without a `Domain` goes
+  # back to), and the order it was made in.
+  @kept : Array({Cookie, String, Int64})
+  @made : Int64
+
+  def initialize
+    @kept = [] of {Cookie, String, Int64}
+    @made = 0_i64
+  end
+
+  def size : Int32
+    @kept.size
+  end
+
+  # The `Set-Cookie` lines of *response*, from *url*, taken in.
+  def update(url : String, response : Response) : Nil
+    response.header_values("Set-Cookie").each do |line|
+      if cookie = Cookie.parse(line)
+        add(url, cookie)
+      end
+    end
+  end
+
+  # *cookie*, as set by an answer from *url*: it replaces one of the same
+  # name, domain and path, and one set already lapsed removes it.
+  def add(url : String, cookie : Cookie) : Nil
+    uri = URI.parse?(url)
+    return unless uri
+    host = (uri.hostname || "").downcase
+    return if host.bytesize == 0
+    return if cookie.secure && !CookieJar.secure?(uri)
+    if domain = cookie.domain
+      return unless domain.includes?(".") && CookieJar.domain_match?(host, domain)
+    end
+    path = cookie.path || CookieJar.default_path(uri.path)
+    stored = Cookie.new(cookie.name, cookie.value, path, cookie.domain, cookie.expires, cookie.max_age, cookie.secure, cookie.http_only, cookie.same_site)
+    scope = cookie.domain || host
+    @kept = @kept.reject do |entry|
+      other = entry[0]
+      other.name == stored.name && (other.domain || entry[1]) == scope && other.path == stored.path
+    end
+    return if stored.expired?(Time.utc)
+    @made = @made + 1_i64
+    @kept << {stored, host, @made}
+  end
+
+  # The cookies a request to *url* carries: domain and path matching,
+  # unexpired, `Secure` only over `https://`; longer paths first, then
+  # older (§5.4, step 2).
+  def cookies_for(url : String) : Array(Cookie)
+    uri = URI.parse?(url)
+    return [] of Cookie unless uri
+    secure = CookieJar.secure?(uri)
+    host = (uri.hostname || "").downcase
+    path = uri.path
+    path = "/" if path.bytesize == 0
+    now = Time.utc
+    @kept = @kept.reject { |entry| entry[0].expired?(now) }
+    found = [] of {Cookie, Int64}
+    @kept.each do |entry|
+      cookie = entry[0]
+      next if cookie.secure && !secure
+      if domain = cookie.domain
+        next unless CookieJar.domain_match?(host, domain)
+      else
+        next unless host == entry[1]
+      end
+      next unless CookieJar.path_match?(path, cookie.path || "/")
+      found << {cookie, entry[2]}
+    end
+    found = found.sorted do |a, b|
+      long_a = (a[0].path || "/").bytesize
+      long_b = (b[0].path || "/").bytesize
+      long_a == long_b ? (a[1] < b[1] ? -1 : (a[1] > b[1] ? 1 : 0)) : (long_a > long_b ? -1 : 1)
+    end
+    found.map { |pair| pair[0] }
+  end
+
+  # The `Cookie` header for a request to *url*, nil when nothing goes.
+  def header_for(url : String) : String?
+    cookies = cookies_for(url)
+    return nil if cookies.empty?
+    cookies.map { |cookie| cookie.name + "=" + cookie.value }.join("; ")
+  end
+
+  # Whether *uri* is over a secure protocol: `https://` (and `wss://`).
+  protected def self.secure?(uri : URI) : Bool
+    scheme = (uri.scheme || "").downcase
+    scheme == "https" || scheme == "wss"
+  end
+
+  # §5.1.3: the host is the domain, or ends with it after a dot, and is
+  # not an IP address.
+  protected def self.domain_match?(host : String, domain : String) : Bool
+    return true if host == domain
+    return false unless host.ends_with?("." + domain)
+    return false if host.includes?(":")
+    p = host.to_unsafe
+    i = 0
+    while i < host.bytesize
+      return true unless p[i] == 46_u8 || (p[i] >= 48_u8 && p[i] <= 57_u8)
+      i = i + 1
+    end
+    false
+  end
+
+  # §5.1.4.
+  protected def self.path_match?(request : String, cookie : String) : Bool
+    return true if request == cookie
+    return false unless request.starts_with?(cookie)
+    cookie.ends_with?("/") || request.to_unsafe[cookie.bytesize] == 47_u8
+  end
+
+  # §5.1.4: the request path up to its last `/`, or `/`.
+  protected def self.default_path(path : String) : String
+    return "/" unless path.starts_with?("/")
+    last = 0
+    p = path.to_unsafe
+    i = 0
+    while i < path.bytesize
+      last = i if p[i] == 47_u8
+      i = i + 1
+    end
+    last == 0 ? "/" : path[0, last]
+  end
+end
+
+impl CookieStore for CookieJar
+end

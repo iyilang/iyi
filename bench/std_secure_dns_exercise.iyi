@@ -1,0 +1,429 @@
+# Exercises std/secure_dns: a `Resolver` asking DNS over TLS and DNS over
+# HTTPS upstreams, against bench/std_secure_dns_server.py.
+#
+#     ./bin/iyi run bench/std_secure_dns_exercise.iyi -- WORKDIR
+#
+# WORKDIR is the scripted servers': their ports and the test root they
+# chain to (see the server's header for the zone and the names that
+# misbehave). Each section prints "<name>: ok", or "<name>: skipped: why"
+# where the server has no HTTP/2; each answer the zone gives is printed as
+# "answer <via> <type> <name> <values>", which the gate asks dig for too.
+#
+# Without WORKDIR only the wire section runs, which needs no server: that
+# is how bench/std_exercise.sh runs every exercise, from source and from
+# artifacts, and compares what the two print - so nothing printed before
+# the stop names a port or a time.
+
+module bench/std_secure_dns_exercise
+
+import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, SvcbAnswer}
+import std/socket::{DnsUpstream, IPAddress, IPv4Address, IPv6Address, IyiSocket, Resolver, SocketError}
+import std/secure_dns::{DnsOverHttps, DnsOverTls}
+import std/tls::{TlsConfig}
+import std/x509::{Certificate}
+import std/file::{File}
+import std/slice::{Bytes}
+
+def check(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def same(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def show(got : Array(IPAddress) | DnsError | Cancelled) : String
+  case got
+  in Array(IPAddress)
+    got.map(&.to_s).join(" ")
+  in DnsError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+def show_txt(got : Array(String) | DnsError | Cancelled) : String
+  case got
+  in Array(String)
+    got.join(" | ")
+  in DnsError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+def error_of(got : Array(IPAddress) | Array(String) | DnsError | Cancelled, label : String) : DnsError
+  unless got.is_a?(DnsError)
+    shown = got.is_a?(Array(String)) ? got.join(" | ") : (got.is_a?(Array(IPAddress)) ? got.map(&.to_s).join(" ") : "cancelled")
+    raise "ASSERTION FAILED: #{label}: expected a refusal, got #{shown}"
+  end
+  got
+end
+
+# The addresses of one family: what dig asks for with one type.
+def family(got : Array(IPAddress) | DnsError | Cancelled, type : String) : String
+  return show(got) unless got.is_a?(Array(IPAddress))
+  kept = [] of String
+  got.each do |address|
+    kept << address.to_s if (type == "A") == address.is_a?(IPv4Address)
+  end
+  kept.join(" ")
+end
+
+# The zone's HTTPS record at svc.zone.test, as `SvcbRecord#to_s` and dig
+# print it: alpn h2 and http/1.1, and RFC 9848 3's example ECHConfigList.
+SVC_HTTPS = "1 . alpn=\"h2,http/1.1\" ech=AEj+DQBEAQAgACAdd+scUi0IYFsXnUIU7ko2Nd9+F8M26pAGZVpz/KrWPgAEAAEAAWQVZWNoLXNpdGVzLmV4YW1wbGUubmV0AAA="
+
+# What SVCB resolution came to: the name, the aliases followed and the
+# ServiceMode records, or the failure.
+def show_https(got : SvcbAnswer | DnsError | Cancelled) : String
+  case got
+  in SvcbAnswer
+    "#{got.name} after #{got.aliases} aliases: #{got.records.map(&.to_s).join(" | ")}"
+  in DnsError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# The zone's answers through *resolver*, printed for the gate and held to
+# the zone as the server's script writes it. Its HTTPS records first, to
+# the same text the plaintext path reads them as (`https_plaintext`).
+def answers(via : String, resolver : Resolver) : Nil
+  same "svc.zone.test after 0 aliases: #{SVC_HTTPS}", show_https(resolver.https_records("svc.zone.test")), "#{via}: a ServiceMode HTTPS record, its alpn and ech"
+  puts "answer #{via} HTTPS svc.zone.test #{SVC_HTTPS}"
+  same "svc.zone.test after 1 aliases: #{SVC_HTTPS}", show_https(resolver.https_records("https.zone.test")), "#{via}: an AliasMode HTTPS record followed"
+  same "192.0.2.1", show(resolver.resolve("a.zone.test")), "#{via}: an A record"
+  puts "answer #{via} A a.zone.test 192.0.2.1"
+  same "2001:db8::6", show(resolver.resolve("six.zone.test")), "#{via}: an AAAA record"
+  puts "answer #{via} AAAA six.zone.test 2001:db8::6"
+  dual = resolver.resolve("dual.zone.test")
+  same "192.0.2.2 2001:db8::2", show(dual), "#{via}: A and AAAA together"
+  puts "answer #{via} A dual.zone.test #{family(dual, "A")}"
+  puts "answer #{via} AAAA dual.zone.test #{family(dual, "AAAA")}"
+  alias_of = resolver.resolve("alias.zone.test")
+  same "192.0.2.1", show(alias_of), "#{via}: a CNAME followed"
+  puts "answer #{via} A alias.zone.test #{family(alias_of, "A")}"
+  text = resolver.txt("txt.zone.test")
+  same "hello, encrypted worldand a second string | v=spf1 -all", show_txt(text), "#{via}: TXT records, each one's strings joined"
+  puts "answer #{via} TXT txt.zone.test #{show_txt(text)}"
+  missing = error_of(resolver.resolve("nx.zone.test"), "#{via}: NXDOMAIN")
+  check missing.not_found?, "#{via}: NXDOMAIN is not_found?: #{missing.message}"
+end
+
+def stats(resolver : Resolver) : Hash(String, Int32)
+  got = resolver.txt("stats.zone.test")
+  raise "ASSERTION FAILED: the server's stats: #{show_txt(got)}" unless got.is_a?(Array(String)) && got.size == 1
+  read = {} of String => Int32
+  got[0].split(' ').each do |pair|
+    parts = pair.split('=')
+    read[parts[0]] = parts[1].to_i
+  end
+  read
+end
+
+# The server's count of the queries one transport brought it since it was
+# last asked, this one included - how many, how many with an OPT record,
+# how many not padded as RFC 7830 and RFC 8467 4.1 have a client pad - and
+# the sentence it said them in, which names the first fault.
+def padding(resolver : Resolver) : Tuple(Int32, Int32, Int32, String)
+  got = resolver.txt("padding.zone.test")
+  raise "ASSERTION FAILED: the server's padding counts: #{show_txt(got)}" unless got.is_a?(Array(String)) && got.size == 1
+  words = got[0].split(' ')
+  {words[0].split('=')[1].to_i, words[1].split('=')[1].to_i, words[2].split('=')[1].to_i, got[0]}
+end
+
+# The server's counts for a transport started again, whatever an earlier
+# run left in them. What it answers is not read: a transport that cannot
+# ask is the next check's to report, in that check's words.
+def restart_counts(resolver : Resolver) : Nil
+  resolver.txt("padding.zone.test")
+end
+
+# Why *query*, asked about a name of *chars* characters, is not padded as
+# RFC 7830 and RFC 8467 4.1 have a client pad it; nil when it is. The
+# length wanted is found by counting up in blocks, not by the module's
+# arithmetic.
+def padding_fault(query : Bytes, chars : Int32) : String?
+  opt = 12 + chars + 2 + 4
+  wanted = 128
+  while wanted < opt + 15
+    wanted = wanted + 128
+  end
+  return "#{query.size} bytes, not a multiple of 128" unless query.size % 128 == 0
+  return "#{query.size} bytes, not #{wanted}, the first multiple of 128 to hold #{opt + 15}" unless query.size == wanted
+  return "ARCOUNT #{query[10]} #{query[11]}, not one record" unless query[10] == 0_u8 && query[11] == 1_u8
+  return "an OPT record not owned by the root" unless query[opt] == 0_u8
+  return "a record of type #{query[opt + 1]} #{query[opt + 2]}, not OPT (41)" unless query[opt + 1] == 0_u8 && query[opt + 2] == 41_u8
+  payload = (query[opt + 3].to_i32 << 8) | query[opt + 4].to_i32
+  return "a payload size of #{payload}, below the #{query.size} bytes sent (RFC 7830 4)" if payload < 512 || payload < query.size
+  index = opt + 5
+  while index < opt + 9
+    return "byte #{index} of the TTL is #{query[index]}: RCODE, version and flags are 0" unless query[index] == 0_u8
+    index = index + 1
+  end
+  data = (query[opt + 9].to_i32 << 8) | query[opt + 10].to_i32
+  return "OPT data of #{data} bytes where #{query.size - opt - 11} follow" unless data == query.size - opt - 11
+  code = (query[opt + 11].to_i32 << 8) | query[opt + 12].to_i32
+  return "option #{code}, not Padding (12)" unless code == 12
+  length = (query[opt + 13].to_i32 << 8) | query[opt + 14].to_i32
+  return "a Padding option of #{length} bytes where #{query.size - opt - 15} follow" unless length == query.size - opt - 15
+  index = opt + 15
+  while index < query.size
+    return "padding byte #{index} is #{query[index]}, not 0 (RFC 7830 3)" unless query[index] == 0_u8
+    index = index + 1
+  end
+  return "it ends at #{DnsMessage.ends_at(query)}" unless DnsMessage.ends_at(query) == query.size
+  nil
+end
+
+# --- The wire, with no network ---
+
+strings = DnsRecord.character_strings(Bytes.new(8) { |i| [5_u8, 104_u8, 101_u8, 108_u8, 108_u8, 111_u8, 1_u8, 33_u8][i] })
+check strings == ["hello", "!"], "a TXT record's character-strings: #{strings.inspect}"
+check DnsRecord.character_strings(Bytes.new(3) { |i| [5_u8, 104_u8, 101_u8][i] }).nil?, "a character-string running past the data is refused"
+query = DnsMessage.query(0_u16, "a.zone.test", DnsRecord::A)
+check query[11] == 0_u8, "a query for the clear has no OPT record (RFC 7830 6)"
+check DnsMessage.ends_at(query) == query.size, "a query ends where its question does: #{DnsMessage.ends_at(query)} of #{query.size}"
+longer = Bytes.new(query.size + 3) { |i| i < query.size ? query[i] : 0_u8 }
+check DnsMessage.ends_at(longer) == query.size, "bytes after a message are not the message's: #{DnsMessage.ends_at(longer)}"
+check DnsMessage.ends_at(query[0, query.size - 1]) == -1, "a question cut short runs past the bytes"
+# The oracle is Python's base64.urlsafe_b64encode of the same 29 bytes,
+# "AAABAAABAAAAAAAAAWEEem9uZQR0ZXN0AAABAAE=", without its "=".
+parameter = DnsOverHttps.base64url(String.new(query.size) { |into| into.copy_from(query.to_unsafe, query.size) })
+same "AAABAAABAAAAAAAAAWEEem9uZQR0ZXN0AAABAAE", parameter, "the dns parameter is base64url without padding (RFC 8484 4.1)"
+puts "wire: ok"
+
+# Every name length a host name can have, 1 to 253 characters, so each
+# block's last length and the next block's first are both padded: labels
+# of 49 characters, a dot after each.
+chars = 1
+while chars <= 253
+  built = String::Builder.new
+  index = 0
+  while index < chars
+    built << (index % 50 == 49 && index != chars - 1 ? '.' : 'a')
+    index = index + 1
+  end
+  name = built.to_s
+  check DnsName.valid?(name), "#{chars} characters make a host name"
+  padded = DnsMessage.query(0x2A2A_u16, name, DnsRecord::AAAA, DnsMessage::PADDING_BLOCK)
+  fault = padding_fault(padded, chars)
+  raise "ASSERTION FAILED: a padded query for a name of #{chars} characters: #{fault}" if fault
+  read = DnsMessage.parse(padded)
+  check read.is_a?(DnsMessage) && read.question_name == name && read.rcode == 0, "a padded query parses back: #{read.is_a?(DnsError) ? read.message : read.question_name}"
+  chars = chars + 1
+end
+puts "wire_padding: ok"
+
+if Program.args.empty?
+  puts "no server directory given: the sections over the network are bench/std_secure_dns_exercise.sh's"
+  exit 0
+end
+
+dir = Program.args[0]
+dot_port = File.read(dir + "/dot.port").to_i
+doh_port = File.read(dir + "/doh.port").to_i
+udp_port = File.read(dir + "/udp.port").to_i
+roots = Certificate.from_pem(File.read(dir + "/ca.pem")).or_panic
+
+config = TlsConfig.new
+config.roots = roots
+https = TlsConfig.new
+https.roots = roots
+https.alpn = ["h2", "http/1.1"]
+
+# A resolver that would answer anything over plaintext: its server is the
+# scripted UDP one, so an answer that came that way says "udp". The
+# sections that expect a refusal ask through `bare`, which has no
+# plaintext server at all, so that a resolver falling back where it should
+# not is caught by the section about falling back, not by the first
+# refusal it turns into an answer.
+plain = Resolver.new(["127.0.0.1:#{udp_port}"], timeout_ms: 3000, attempts: 1)
+bare = Resolver.new([] of String, timeout_ms: 3000, attempts: 1)
+
+# --- DNS over TLS ---
+
+dot = DnsOverTls.new("dns.test", "127.0.0.1", dot_port, config)
+over_tls = bare.encrypted(dot)
+restart_counts(over_tls)
+same "tls", show_txt(plain.encrypted(dot).txt("transport.zone.test")), "the encrypted resolver asks over TLS, not its plaintext server"
+first = stats(over_tls)
+answers("dot", over_tls)
+puts "dot_answers: ok"
+
+last = stats(over_tls)
+check dot.connections_made == 1, "every query over one TLS connection: #{dot.connections_made} made"
+same first["connections"].to_s, last["connections"].to_s, "the server accepted no second connection for them"
+check last["queries"] > first["queries"] + 10, "the server read every query on the one connection: #{first["queries"]} then #{last["queries"]}"
+puts "dot_reuse: ok"
+
+check last["batch"] == 2, "A and AAAA were read by the server before it answered either (pipelined): the most at once was #{last["batch"]}"
+puts "dot_pipelined: ok"
+
+idle = DnsOverTls.new("dns.test", "127.0.0.1", dot_port, config, idle_ms: 200)
+idling = bare.encrypted(idle)
+same "192.0.2.1", show(idling.resolve("a.zone.test")), "an answer before the idle timeout"
+check idle.connections_made == 1, "one connection for the first lookup"
+sleep 600
+same "192.0.2.1", show(idling.resolve("a.zone.test")), "an answer after it"
+check idle.connections_made == 2, "a connection idle past its timeout is closed and another opened: #{idle.connections_made} made"
+idling.close
+puts "dot_idle: ok"
+
+wrong = DnsOverTls.new("wrong.test", "127.0.0.1", dot_port, config)
+refused = error_of(bare.encrypted(wrong).resolve("a.zone.test"), "a server whose certificate does not name wrong.test")
+check refused.unreachable? && refused.message.includes?("wrong.test"), "the certificate is checked for the configured name (RFC 8310): #{refused.message}"
+untrusted = DnsOverTls.new("dns.test", "127.0.0.1", dot_port, TlsConfig.new)
+distrusted = error_of(bare.encrypted(untrusted).resolve("a.zone.test"), "a server whose root is not trusted")
+check distrusted.unreachable?, "a chain to a root the configuration lacks is refused: #{distrusted.message}"
+puts "dot_wrong_name: ok"
+
+mismatched = dot.exchange([DnsMessage.query(0x1234_u16, "wrong-id.zone.test", DnsRecord::A, DnsMessage::PADDING_BLOCK)], 3000)
+check mismatched.is_a?(DnsError) && mismatched.malformed? && mismatched.message.includes?("ID"), "an answer with an ID no query has is refused over TLS: #{mismatched.is_a?(DnsError) ? mismatched.message : "accepted"}"
+forged = error_of(over_tls.resolve("wrong-id.zone.test"), "a lookup answered with another ID")
+check forged.malformed?, "and through the resolver: #{forged.message}"
+puts "dot_id_mismatch: ok"
+
+cut = error_of(over_tls.resolve("cut.zone.test"), "an answer cut short by the connection's end")
+check cut.malformed? && cut.message.includes?("truncated"), "a frame that ends early is truncated: #{cut.message}"
+tc = error_of(over_tls.resolve("tc.zone.test"), "an answer with TC over TLS")
+check tc.malformed? && tc.message.includes?("TC"), "TC over a stream is refused: #{tc.message}"
+puts "dot_truncated: ok"
+
+long = error_of(over_tls.resolve("long.zone.test"), "a frame longer than its message")
+check long.malformed? && long.message.includes?("oversized"), "bytes past the message in its frame are refused: #{long.message}"
+puts "dot_oversized: ok"
+
+same "192.0.2.1", show(over_tls.resolve("a.zone.test")), "the upstream answers again after the failures, on a new connection"
+puts "dot_recovers: ok"
+
+queries, edns, unpadded, said = padding(over_tls)
+check queries > 10 && edns == queries && unpadded == 0, "every DoT query is padded to a multiple of 128 with zero bytes (RFC 7830, RFC 8467 4.1): #{said}"
+puts "dot_padding: ok"
+
+# An answer as a server that speaks EDNS(0) writes it: an OPT record in
+# the additional section, padded to 468 octets (RFC 8467 4.1), and an
+# NXDOMAIN with the zone's SOA in its authority section, which every
+# `answers` above read through already (nx.zone.test).
+exchanged = dot.exchange([DnsMessage.query(0x4242_u16, "a.zone.test", DnsRecord::A, DnsMessage::PADDING_BLOCK)], 3000)
+raise "ASSERTION FAILED: a padded query over TLS: #{exchanged.is_a?(DnsError) ? exchanged.message : "cancelled"}" unless exchanged.is_a?(Array(Bytes))
+opt_answer = exchanged[0]
+check opt_answer[11] == 1_u8 && opt_answer.size % 468 == 0, "the server answers with an OPT record and pads to 468: #{opt_answer.size} bytes, ARCOUNT #{opt_answer[11]}"
+parsed = DnsMessage.parse(opt_answer)
+check parsed.is_a?(DnsMessage) && parsed.rcode == DnsMessage::RCODE_NOERROR && parsed.answers.size == 1, "an answer with an OPT record parses: #{parsed.is_a?(DnsError) ? parsed.message : parsed.rcode}"
+check DnsMessage.ends_at(opt_answer) == opt_answer.size, "and ends where its OPT record does: #{DnsMessage.ends_at(opt_answer)} of #{opt_answer.size}"
+badvers = error_of(over_tls.resolve("badvers.zone.test"), "an answer of BADVERS")
+check badvers.refused? && badvers.message.includes?("BADVERS"), "the OPT record's extended RCODE is read: BADVERS (16) is not NOERROR: #{badvers.message}"
+puts "edns_answers: ok"
+
+# --- DNS over HTTPS, HTTP/1.1 ---
+
+doh = DnsOverHttps.new("https://127.0.0.1:#{doh_port}/dns-query", config: https)
+over_https = bare.encrypted(doh)
+restart_counts(over_https)
+same "https/1.1", show_txt(over_https.txt("transport.zone.test")), "over HTTPS from a server without h2, HTTP/1.1"
+answers("doh", over_https)
+puts "doh_post: ok"
+
+doh_get = DnsOverHttps.new("https://127.0.0.1:#{doh_port}/dns-query", config: https, method: "GET")
+answers("doh-get", bare.encrypted(doh_get))
+puts "doh_get: ok"
+
+same "id=0", show_txt(over_https.txt("id.zone.test")), "a POST's query has the ID 0 (RFC 8484 4.1)"
+same "id=0", show_txt(bare.encrypted(doh_get).txt("id.zone.test")), "and a GET's"
+puts "doh_zero_id: ok"
+
+check doh.connections_made == 1 && doh.connections_reused > 5, "one connection kept for every request: #{doh.connections_made} made, #{doh.connections_reused} reused"
+puts "doh_reuse: ok"
+
+status = error_of(bare.encrypted(DnsOverHttps.new("https://127.0.0.1:#{doh_port}/status-500", config: https)).resolve("a.zone.test"), "a 500")
+check status.refused? && status.message.includes?("HTTP 500"), "a status other than 200 is refused: #{status.message}"
+puts "doh_status: ok"
+
+typed = error_of(bare.encrypted(DnsOverHttps.new("https://127.0.0.1:#{doh_port}/wrong-type", config: https)).resolve("a.zone.test"), "an answer as text/plain")
+check typed.malformed? && typed.message.includes?("text/plain"), "a Content-Type other than application/dns-message is refused: #{typed.message}"
+puts "doh_content_type: ok"
+
+huge = error_of(over_https.resolve("long.zone.test"), "a body past 65535 bytes")
+check huge.malformed? && huge.message.includes?("oversized"), "a body longer than any DNS message is refused: #{huge.message}"
+puts "doh_oversized: ok"
+
+short = error_of(over_https.resolve("cut.zone.test"), "a body cut short")
+check !short.not_found?, "a body that ends before its length is refused: #{short.message}"
+flagged = error_of(over_https.resolve("tc.zone.test"), "TC over HTTPS")
+check flagged.malformed? && flagged.message.includes?("TC"), "TC over HTTPS is refused: #{flagged.message}"
+puts "doh_truncated: ok"
+
+misnamed = DnsOverHttps.new("https://wrong.test:#{doh_port}/dns-query", "127.0.0.1", https)
+mistaken = error_of(bare.encrypted(misnamed).resolve("a.zone.test"), "an HTTPS server whose certificate does not name wrong.test")
+check mistaken.unreachable? && mistaken.message.includes?("wrong.test"), "the certificate is checked for the URL's host: #{mistaken.message}"
+pinned = DnsOverHttps.new("https://dns.test:#{doh_port}/dns-query", "127.0.0.1", https)
+same "192.0.2.1", show(bare.encrypted(pinned).resolve("a.zone.test")), "a URL's host pinned to an address, checked by name"
+puts "doh_wrong_name: ok"
+
+queries, edns, unpadded, said = padding(over_https)
+check queries > 10 && edns == queries && unpadded == 0, "every DoH query, POST and GET, is padded to a multiple of 128 with zero bytes: #{said}"
+puts "doh_padding: ok"
+
+# --- DNS over HTTPS, HTTP/2 ---
+
+if File.file?(dir + "/h2.port")
+  h2_port = File.read(dir + "/h2.port").to_i
+  over_h2 = bare.encrypted(DnsOverHttps.new("https://127.0.0.1:#{h2_port}/dns-query", config: https))
+  restart_counts(over_h2)
+  same "h2", show_txt(over_h2.txt("transport.zone.test")), "h2 is preferred where the server speaks it"
+  answers("h2", over_h2)
+  answers("h2-get", bare.encrypted(DnsOverHttps.new("https://127.0.0.1:#{h2_port}/dns-query", config: https, method: "GET")))
+  queries, edns, unpadded, said = padding(over_h2)
+  check queries > 10 && edns == queries && unpadded == 0, "every DoH query over HTTP/2 is padded: #{said}"
+  puts "doh_h2: ok"
+else
+  puts "doh_h2: skipped: #{File.read(dir + "/h2.missing").strip}"
+end
+
+# --- Plaintext, unpadded ---
+
+restart_counts(plain)
+same "192.0.2.1", show(plain.resolve("a.zone.test")), "a lookup over plaintext UDP"
+queries, edns, unpadded, said = padding(plain)
+check queries >= 3 && edns == 0, "a plaintext query carries no OPT record, so no padding (RFC 7830 6): #{said}"
+puts "plaintext_unpadded: ok"
+
+# The same HTTPS records asked in the clear, of the same zone's UDP server:
+# the text `answers` holds every encrypted upstream to.
+same "svc.zone.test after 0 aliases: #{SVC_HTTPS}", show_https(plain.https_records("svc.zone.test")), "plaintext: a ServiceMode HTTPS record, its alpn and ech"
+same "svc.zone.test after 1 aliases: #{SVC_HTTPS}", show_https(plain.https_records("https.zone.test")), "plaintext: an AliasMode HTTPS record followed"
+puts "answer udp HTTPS svc.zone.test #{SVC_HTTPS}"
+puts "https_plaintext: ok"
+
+# --- Plaintext only when asked ---
+
+dead = DnsOverTls.new("wrong.test", "127.0.0.1", dot_port, config)
+strict = error_of(plain.encrypted(dead).txt("transport.zone.test"), "a dead upstream, no fallback asked for")
+check strict.unreachable? && strict.server == dead.label, "no plaintext server is asked unless the caller says so: #{strict.message}"
+puts "no_plaintext_fallback: ok"
+
+same "udp", show_txt(plain.encrypted(dead, plaintext_fallback: true).txt("transport.zone.test")), "with plaintext_fallback the plaintext server answers when no upstream can"
+same "tls", show_txt(plain.encrypted(dot, plaintext_fallback: true).txt("transport.zone.test")), "and an upstream that can is still the one asked"
+puts "plaintext_fallback: ok"
+
+# --- What a program connects with ---
+
+listener = IyiSocket.listen("127.0.0.1", 0)
+port = listener.local_port
+[over_tls, over_https].each do |resolver|
+  conn = IyiSocket.connect("svc.zone.test", port, resolver)
+  raise "ASSERTION FAILED: connect by name over #{resolver.upstreams[0].label}: #{conn.is_a?(SocketError) ? conn.message : "cancelled"}" unless conn.is_a?(IyiSocket)
+  check conn.remote_port == port && conn.remote_address == "127.0.0.1", "connected to svc.zone.test's address: #{conn.remote_address}:#{conn.remote_port}"
+  conn.close
+end
+listener.close
+puts "connect_by_name: ok"
+
+over_tls.close
+over_https.close
+puts "all checks passed"

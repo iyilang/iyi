@@ -1,0 +1,18 @@
+.vscode/**
+.gitignore
+package-lock.json
+*.vsix
+
+# The client is not bundled — four runtime dependencies, no build step — so
+# node_modules ships, minus what only a developer of those packages reads.
+node_modules/**/*.ts
+node_modules/**/*.map
+node_modules/**/{test,tests,example,examples,docs}/**
+node_modules/**/{.github,.vscode,.bin}/**
+node_modules/**/*.md
+node_modules/**/.editorconfig
+node_modules/**/.eslintrc*
+node_modules/**/.npmignore
+node_modules/**/.travis.yml
+node_modules/**/tsconfig*.json
+!node_modules/**/LICENSE*

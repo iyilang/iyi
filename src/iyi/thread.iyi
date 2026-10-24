@@ -15,13 +15,16 @@
 #   t.join                          # Nil; the thread has exited
 #
 # What a thread is not, said here rather than found: it is not a task. No
-# group owns it, nothing cancels it, no channel crosses it — `Channel` is
-# one thread's, and `Share` (SPEC.md III.4.4) is what will say so at
-# compile time. What crosses threads today is `Atomic(T)` and memory the
-# program keeps straight itself. A thread gets a scheduler state and a heap
-# cache of its own on first touch, so it may spawn fibers and it allocates
-# without a lock; the world it shares is the centre behind the runtime's
-# one lock, and the collector, which stops it.
+# group owns it and nothing cancels it. What crosses threads is what
+# `Share` (SPEC.md III.4.4) lets the block capture: `Atomic(T)`, state
+# behind a `Mutex(T)` (std/mutex), immutable values, a `Channel(T)` of
+# `Share` values (III.4.13), and memory the program keeps straight
+# itself. A thread gets a scheduler state when it starts and a heap cache
+# on first touch, so it may spawn fibers and it allocates without a lock;
+# the world it shares is the centre behind the runtime's one lock, the
+# scheduler's lock its wakes cross threads under, and the collector,
+# which stops it. The pool parallel tasks run on (III.4.13) is threads of
+# this kind, started by the runtime.
 #
 # **The stop, and what is not stopped.** A collection takes the runtime
 # lock, signals every other registered thread, and waits for each to count
@@ -336,7 +339,12 @@
     IYI_MC_PC    = 272_u64
 
   {% elsif flag?(:win32) %}
-    # Windows: uses kernel32 APIs already declared in prelude.iyi
+    # The rest of kernel32 is declared in prelude.iyi; these are asked by
+    # `core_count` and `first_written` alone.
+    lib LibC
+      fun GetProcessAffinityMask(process : Void*, process_mask : UInt64*, system_mask : UInt64*) : Int32
+      fun VirtualQuery(address : Void*, buffer : Void*, length : UInt64) : UInt64
+    end
   {% end %}
 
   class IyiThread
@@ -357,8 +365,9 @@
       # waits to see leave.
       @@deferred : Int64 = 0_i64
     {% end %}
-    # Every thread object ever started, so a body's closure is rooted from
-    # `start` until the thread that runs it holds it on its own stack.
+    # Every thread object started and not yet running, so a body's closure
+    # is rooted from `start` until the thread that runs it holds it on its
+    # own stack, and no longer (`run`).
     @@head : IyiThread?
 
     @line : UInt64
@@ -457,6 +466,13 @@
       @@stop_ns
     end
 
+    # The program's own threads: every registered one, and the main
+    # thread before anything registered it. What the mark beside the
+    # program leaves the cores to on Windows.
+    def self.program_threads : UInt64
+      @@count > 1_i64 ? @@count.to_u64 : 1_u64
+    end
+
     def self.new_line : UInt64
       __iyi_mmap(IYI_THREAD_LINE).address
     end
@@ -530,6 +546,11 @@
     def self.start(proc : Proc(Nil)) : IyiThread
       register_current
       install_handler
+      # A second scheduler thread is coming: from here fibers on two
+      # threads may wake each other, and the scheduler's lock is taken
+      # (SPEC.md III.4.13). Said before the thread exists, so it never
+      # runs a fiber the lock does not cover.
+      IyiScheduler.expect_thread
       line = new_line
       thread = IyiThread.new(line, proc)
       IyiHeap.write64(line + IYI_TL_OBJECT, thread.object_id)
@@ -564,14 +585,21 @@
         IyiRuntimeLock.unlock
         raise "pthread_create failed: #{result}" if result != 0
       {% elsif flag?(:win32) %}
+        # Created suspended (CREATE_SUSPENDED, 4) and its handle written
+        # under the lock, so no stop can name the line before it can
+        # suspend the thread. The handle was written after the unlock while
+        # the thread already ran: a stop between the two suspended NULL,
+        # read sp 0, and scanned from address 0, and with 2 ms of busy-wait
+        # there five runs in five died of a memory fault inside a second.
         IyiRuntimeLock.lock
         IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
         @@lines = line
         @@count = @@count + 1_i64
-        h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(thread_entry), Pointer(Void).new(line), 0_i32, nil)
+        h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(thread_entry), Pointer(Void).new(line), 4_i32, nil)
+        IyiHeap.write64(line + IYI_TL_HANDLE, h.address)
         IyiRuntimeLock.unlock
         raise "CreateThread failed" if h.address == 0_u64
-        IyiHeap.write64(line + IYI_TL_HANDLE, h.address)
+        LibC.ResumeThread(h)
       {% end %}
       thread
     end
@@ -598,6 +626,15 @@
       {% elsif flag?(:win32) %}
         h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(entry), Pointer(Void).new(argument), 0_i32, nil)
         raise "CreateThread failed" if h.address == 0_u64
+        # Without the boost Windows gives a thread whose wait is satisfied.
+        # The program's own thread wakes the helpers for a mark beside it
+        # (`IyiMark.wake_helpers`), and with the boost each woken helper
+        # ran above it and took its core: measured on a twelve-core
+        # machine with eleven helpers, the wake held the program's thread
+        # 3.7 to 40 ms, while the thread did no work in that time, where
+        # without it the wake takes 12 to 20 us. Binary trees' median went
+        # from 0.171 s to 0.147 and its total pause from 8.8 ms to 3.5.
+        LibC.SetThreadPriorityBoost(h, 1_i32)
       {% end %}
     end
 
@@ -611,6 +648,21 @@
       {% unless flag?(:win32) %}
         IyiStackGuard.install
       {% end %}
+      # Windows' equivalent, and just as much a thread's own:
+      # `SetThreadStackGuarantee` keeps room under the guard page for the
+      # handler that names the overflow, and the 16 KB were set on the main
+      # thread alone. Measured, a thread without it came into
+      # `__iyi_win_fault` with 6,736 to 9,472 bytes committed under it, the
+      # dispatcher having taken 2,672 of what the overflow left; with it,
+      # 14,864 to 17,760. On the Windows runners the thread's overflow was
+      # now and then reported as a memory fault, and the main thread's and
+      # a fiber's, each with 16 KB, never were (`bench/panics.sh`). Set
+      # before anything else runs here, on the thread's own stack, before
+      # any fiber rewrites the bounds the TEB holds.
+      {% if flag?(:win32) %}
+        guarantee = 16384_i32
+        LibC.SetThreadStackGuarantee(pointerof(guarantee))
+      {% end %}
       {% if flag?(:darwin) %}
         here = uninitialized UInt64
         IyiHeap.write64(line + IYI_TL_TOP, pointerof(here).address)
@@ -620,13 +672,36 @@
         # reads a cache and not a zero (see `suspend_others`).
         IyiHeap.write64(line + IYI_TL_CACHE, IyiHeap.cache_page)
       {% end %}
+      # Its scheduler state, made before the body runs: a deadlock's walk
+      # of the states counts this thread as coming until it has one, and
+      # as busy from then until it waits in its own poller (III.4.13).
+      IyiScheduler.adopt_thread
+      # Found and taken off the list under the lock, which every writer of
+      # the list holds; from here this frame roots the body. Left on it,
+      # every thread ever started kept its block's captures: 2,000 threads
+      # each capturing 64 KiB, every one joined, kept 156 MiB.
+      IyiRuntimeLock.lock
+      previous = nil.as(IyiThread?)
       thread = @@head
       while thread.is_a?(IyiThread)
         break if thread.line == line
+        previous = thread
         thread = thread.next_thread
       end
+      if thread.is_a?(IyiThread)
+        if previous.is_a?(IyiThread)
+          previous.next_thread = thread.next_thread
+        else
+          @@head = thread.next_thread
+        end
+        thread.next_thread = nil
+      end
+      IyiRuntimeLock.unlock
       raise "a thread started with no body" unless thread.is_a?(IyiThread)
       thread.proc.call
+      # The fibers go first, while the stack they name is still this
+      # thread's (`IyiScheduler.retire_thread`).
+      IyiScheduler.retire_thread
       # The cache goes before it is unmapped: a stop that read this line
       # after the retire would follow a pointer into a freed mapping.
       {% if flag?(:win32) %}
@@ -636,20 +711,31 @@
       unlink(line)
     end
 
+    # Waits for the thread to end, then unmaps its line; a thread joined
+    # already answers at once. A second join on Windows waited on, and
+    # closed, whatever handle had the first one's value by then: with a
+    # thread started after the first join and sleeping 2 s, it took 2,000
+    # ms, and that thread's own join then returned on the closed handle.
     def join : Nil
+      line = @line
+      return if line == 0
       {% if flag?(:linux) %}
-        while (tid = IyiThread.word(@line + IYI_TL_HANDLE).value.get) != 0_u64
-          __iyi_conc_syscall6(IYI_SYS_FUTEX, (@line + IYI_TL_HANDLE).to_i64, IYI_FUTEX_WAIT, tid.to_i64, 0_i64, 0_i64, 0_i64)
+        while (tid = IyiThread.word(line + IYI_TL_HANDLE).value.get) != 0_u64
+          __iyi_conc_syscall6(IYI_SYS_FUTEX, (line + IYI_TL_HANDLE).to_i64, IYI_FUTEX_WAIT, tid.to_i64, 0_i64, 0_i64, 0_i64)
         end
       {% elsif flag?(:darwin) %}
-        handle = Pointer(Void).new(IyiHeap.read64(@line + IYI_TL_HANDLE))
+        handle = Pointer(Void).new(IyiHeap.read64(line + IYI_TL_HANDLE))
         result = LibC.pthread_join(handle, Pointer(Void).new(0_u64))
         raise "pthread_join failed: #{result}" if result != 0
       {% elsif flag?(:win32) %}
-        handle = Pointer(Void).new(IyiHeap.read64(@line + IYI_TL_HANDLE))
+        handle = Pointer(Void).new(IyiHeap.read64(line + IYI_TL_HANDLE))
         LibC.WaitForSingleObject(handle, -1_i32)
         LibC.CloseHandle(handle)
       {% end %}
+      # The thread has left the stop's list and ended, so nothing reads
+      # the line again: each thread's stayed mapped for good.
+      @line = 0_u64
+      __iyi_munmap(line, IYI_THREAD_LINE)
     end
 
     # The deferred stop, paid where a thread holds nothing: `take`'s exit,
@@ -731,21 +817,37 @@
       end
 
       # Answers how many threads were left running with a request to park,
-      # which is how many the stop then waits to hear from.
+      # which is how many the stop then waits to hear from. The allocator's
+      # word is read after `GetThreadContext`, which waits for the suspend
+      # `SuspendThread` only asks for. Read between the two, it let a thread
+      # run on into `take` and be stopped there: thread_exercise's switching
+      # program died of a memory fault once in the 54 runs CI made of it, and
+      # 15 times in 20 here with 20 us of that run-on made certain.
+      #
+      # Every suspend is asked for before any is waited for. A thread that
+      # is not running takes its suspend when the scheduler next runs it,
+      # and `GetThreadContext` waits for that: one suspend and one wait at a
+      # time made a stop the sum of those waits. Beside 48 threads computing
+      # on twelve cores a stop took 85 to 275 ms that way, and 0 to 13 asked
+      # all at once (bench/thread_exercise.sh).
       private def self.suspend_others(line : UInt64) : Int64
+        cursor = @@lines
+        while cursor != 0
+          LibC.SuspendThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))) if cursor != line
+          cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+        end
         deferred = 0_i64
         cursor = @@lines
         while cursor != 0
           if cursor != line
             handle = Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))
-            LibC.SuspendThread(handle)
+            sp = IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)
             cache = IyiHeap.read64(cursor + IYI_TL_CACHE)
             if IyiHeap.cache_inside?(cache)
               IyiHeap.request_stop_at(cache)
               LibC.ResumeThread(handle)
               deferred = deferred + 1_i64
             else
-              sp = IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)
               IyiHeap.write64(cursor + IYI_TL_SP, sp)
             end
           end
@@ -851,8 +953,22 @@
     # allocation here would refill against that lock and never return.
     def self.core_count : UInt64
       {% if flag?(:win32) %}
-        count = LibC.GetActiveProcessorCount(0xFFFF_u16)
-        count <= 0 ? 1_u64 : count.to_u64
+        # The process's affinity mask, counted, as Linux counts its own:
+        # the machine's count started eleven helpers for a process held to
+        # one core (`start /affinity 1`), and eight allocating threads ran
+        # 3,077 ms against 178 with none. A process across processor
+        # groups has no single mask (both read 0), and gets the machine's.
+        mask = 0_u64
+        system = 0_u64
+        count = 0_u64
+        if LibC.GetProcessAffinityMask(LibC.GetCurrentProcess, pointerof(mask), pointerof(system)) != 0
+          while mask != 0_u64
+            count = count + (mask & 1_u64)
+            mask = mask.unsafe_shr(1_u64)
+          end
+        end
+        count = LibC.GetActiveProcessorCount(0xFFFF_u16).to_u64 if count == 0_u64
+        count == 0_u64 ? 1_u64 : count
       {% elsif flag?(:linux) %}
         mask = Pointer(UInt64).new(__iyi_mmap(4096_u64).address)
         got = __iyi_conc_syscall3(IYI_SYS_GETAFFINITY, 0_i64, 128_i64, mask.address.to_i64)
@@ -900,6 +1016,57 @@
         # answer; this remains for the short spins.
         asm("yield" :::: "volatile")
       {% end %}
+    end
+
+    # The core, given away once a collection has released the threads it
+    # stopped and the runtime lock: a collector looping `GC.collect` on one
+    # core stopped every other thread for nearly all its time, and one ran
+    # only when a timeslice ended in the instants between two stops. The
+    # lock's turn needs the waiter to run at all.
+    def self.yield_to_stopped : Nil
+      yield_cpu if @@count > 1_i64
+    end
+
+    # One turn of the runtime lock's spin past its first look
+    # (`IyiRuntimeLock.lock`): answers the turns so far, negative once this
+    # spinner is counted on the lock's word, and the generation - the
+    # word's count of releases - its last 128 turns began at. A spinner
+    # holds nothing, so this is also where a thread asked to stop parks.
+    #
+    # Every 128th turn gives the core away: a holder preempted with the
+    # lock held otherwise waited out the spinners' timeslices, and 48
+    # threads taking it on twelve cores took 30 times what one thread took
+    # for all their turns. That is not fairness. A holder on one core runs
+    # its unlock and its next lock back to back, and a spinner runs only
+    # while the holder is preempted, so with the lock held: under `start
+    # /affinity 1` a thread taking the lock in a loop kept ten threads
+    # started beside it waiting 22 s in all, and with 2,000 increments held
+    # per turn for more than a minute. So a spinner that saw no release in
+    # its 128 turns counts itself, and a free lock with one counted is not
+    # taken at a first look: the newcomer gives the core away once, and
+    # the counted spinner takes it, uncounting itself in the same CAS. The
+    # ten threads: 0.7 to 1 s. Counted on 128 turns of a held word alone,
+    # a spinner merely beaten to a moving lock counted too, and the 48
+    # threads took 2.5 to 5 times one; and a take by CAS of the whole word
+    # failed on every release between its read and it, past 5 times. An OR
+    # of bit 0 takes any free lock: 1.6 to 1.9 times, the plain lock 1.4 to
+    # 1.7 on the same machine, and alone a take and release cost the same.
+    def self.lock_turn(word : Pointer(Atomic(UInt64)), seen : UInt64, spins : Int64, since : UInt64) : Tuple(Int64, UInt64)
+      counted = spins < 0
+      turn = (counted ? 0_i64 &- spins : spins) &+ 1
+      released = seen.unsafe_shr(16_u64)
+      if turn == 1
+        since = released
+        yield_cpu if (seen & 0xFFFE_u64) != 0_u64
+      elsif turn & 127 == 0
+        if !counted && released == since
+          word.value.add(2_u64)
+          counted = true
+        end
+        since = released
+        yield_cpu
+      end
+      {counted ? 0_i64 &- turn : turn, since}
     end
 
 
@@ -957,12 +1124,28 @@
     # callee-saved registers are the ones that may hold a value across
     # this call, spilled onto the line the way `IyiRoots` spills the
     # collector's; the caller-saved ones are on the stack by convention.
+    #
+    # Which registers those are is the platform's ABI, and Windows x64
+    # adds rsi and rdi to System V's six. This spilled System V's set on
+    # Windows too, so a value held across the deferred stop in rsi or rdi
+    # - its only reference - was no root, and the mark could miss it.
+    # `IyiRoots.spill_registers` already had the Windows set; this has
+    # it now.
     @[NoInline]
     def self.stop_here : Nil
       line = @@line
       return if line == 0
       spill = line + IYI_TL_SPILL
-      {% if flag?(:x86_64) %}
+      {% if flag?(:win32) && flag?(:x86_64) %}
+        asm("movq %rbx, 0($0)
+             movq %rbp, 8($0)
+             movq %rdi, 16($0)
+             movq %rsi, 24($0)
+             movq %r12, 32($0)
+             movq %r13, 40($0)
+             movq %r14, 48($0)
+             movq %r15, 56($0)" :: "{rcx}"(spill) : "memory" : "volatile")
+      {% elsif flag?(:x86_64) %}
         asm("movq %rbx, 0($0)
              movq %rbp, 8($0)
              movq %r12, 16($0)
@@ -1017,10 +1200,41 @@
           sp = IyiHeap.read64(cursor + IYI_TL_SP)
           top = IyiScheduler.fiber_top_holding(sp)
           top = IyiHeap.read64(cursor + IYI_TL_TOP) if top == 0
+          {% if flag?(:win32) %}
+            sp = first_written(sp, top)
+          {% end %}
           IyiRoots.scan_range(sp, top, visit)
         end
         cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
       end
     end
+
+    {% if flag?(:win32) %}
+      # Where a stopped thread's stack starts holding anything: *sp*, or the
+      # first committed page above it that is not a guard page. A thread, or
+      # a task on a fiber stack, stopped after its `sub rsp` or push moved
+      # sp below StackLimit and before its first touch of the new page has
+      # sp in that stack's PAGE_GUARD page. Only the owner's touch grows a
+      # stack; the collector's raised STATUS_GUARD_PAGE_VIOLATION in the
+      # collector and cleared the guard. On a thread's stack nothing claims
+      # that, and the process died with 0x80000001 and nothing printed: ten
+      # runs in ten of one thread collecting while new threads recursed
+      # 2,000 frames, inside 0.65 s. On a fiber's the overflow handler named
+      # it, and a task 1,500 frames into its 256 KiB was reported a "stack
+      # overflow" (6 runs in 20). Nothing below a guard page was ever
+      # written, so the scan begins above it.
+      def self.first_written(sp : UInt64, top : UInt64) : UInt64
+        buffer = uninitialized UInt64[6]
+        info = pointerof(buffer).as(Pointer(UInt64))
+        while sp < top && LibC.VirtualQuery(Pointer(Void).new(sp), info.as(Void*), 48_u64) != 0_u64
+          # MEMORY_BASIC_INFORMATION: the base, the size at 24, the state
+          # at 32 (MEM_COMMIT 0x1000) and the protection at 36 (PAGE_GUARD
+          # 0x100).
+          return sp if (info[4] & 0xFFFFFFFF_u64) == 0x1000_u64 && (info[4].unsafe_shr(32_u64) & 0x100_u64) == 0_u64
+          sp = info[0] + info[3]
+        end
+        sp
+      end
+    {% end %}
   end
 {% end %}

@@ -128,6 +128,15 @@ describe "Code gen: multi assign" do
       CODE
   end
 
+  # iyi: the splat's tuple is a literal, so it needs no `Tuple.new`, which
+  # iyi's prelude does not have.
+  it "supports m to n assignment with a splat where nothing defines Tuple.new" do
+    run(<<-CODE).to_b.should be_true
+      a, *b, c = 1, 2, 3, 4
+      b.is_a?(Tuple(Int32, Int32))
+      CODE
+  end
+
   it "supports 1 to n assignment, with splat on left-hand side (1)" do
     run(<<-CODE).to_i.should eq(12345)
       require "prelude"

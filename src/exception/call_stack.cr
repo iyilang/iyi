@@ -20,15 +20,42 @@ struct Exception::CallStack
 
   @@loaded = false
 
+  # iyi: the fiber loading the debug information, while it loads. Loading
+  # it again from inside - an exception built there and unwound on
+  # Windows, where `unwind` loads first, or the failure's own backtrace
+  # decoded to be printed - met `Crystal.once`'s reentrancy check, whose
+  # raise unwound and loaded again: the process died of a stack overflow
+  # where the failure was meant to be printed and passed over. On Windows
+  # the load raises (and rescues) as soon as the running binary has been
+  # renamed, which is what rebuilding it does, so the language server's
+  # proxy died the first time it raised anything after a rebuild
+  # (`bench/lsp_memory.py`, "a session outlives the binary it was started
+  # from"). From inside, the load answers with what it has so far.
+  @@loading : Fiber? = nil
+
+  # iyi: why loading the debug information failed, until a backtrace is
+  # decoded and the failure is printed with it. On Windows every exception
+  # loads it as it is raised (`unwind` cannot walk the stack without it),
+  # so the failure was printed at the first `raise` - one the program
+  # rescues as well - into an error stream the program writes for itself:
+  # under load `check -f json` put "Unable to load debug information:
+  # SymInitializeW: (RuntimeError)" in front of its JSON, about 8 times
+  # in 50,000 runs. The load is only for a backtrace, and so is the line.
+  @@load_error : Exception? = nil
+
   # :nodoc:
   def self.load_debug_info : Nil
+    return if @@loading.same?(Fiber.current)
     Crystal.once(pointerof(@@loaded)) do
       return if ENV["CRYSTAL_LOAD_DEBUG_INFO"]? == "0"
 
+      @@loading = Fiber.current
       begin
         load_debug_info_impl
       rescue ex
-        Crystal::System.print_exception "Unable to load debug information", ex
+        @@load_error = ex
+      ensure
+        @@loading = nil
       end
     end
   end
@@ -42,7 +69,16 @@ struct Exception::CallStack
   class_getter empty = new([] of Void*)
 
   def printable_backtrace : Array(String)
-    @backtrace ||= decode_backtrace
+    @backtrace ||= begin
+      backtrace = decode_backtrace
+      # Here rather than in `decode_backtrace`, which holds a lock on
+      # Windows that decoding the failure's own backtrace takes again.
+      if load_error = @@load_error
+        @@load_error = nil
+        Crystal::System.print_exception "Unable to load debug information", load_error
+      end
+      backtrace
+    end
   end
 
   private def decode_backtrace

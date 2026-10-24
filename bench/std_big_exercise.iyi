@@ -9,7 +9,8 @@
 # 4. Bitwise logic (& | ^ << >>) with two's complement semantics over mixed and negative operands.
 # 5. Known large values: 100! (158 digits), powers of two, Fibonacci numbers, Mersenne primes.
 # 6. Round-trip serialization: 200-digit decimal and 100-digit hex byte-for-byte fidelity.
-# 7. Modular exponentiation (pow_mod) via binary square-and-multiply.
+# 7. Modular exponentiation: pow_mod (Montgomery for an odd modulus) and pow_mod_secret against the
+#    square-and-multiply pow_mod was, 3000 `powmod:` lines for python's pow, and timings.
 # 8. Algebraic identities sweep: distributive, division theorem, anti-commutativity over 5000 random pairs.
 # 9. Karatsuba crossover measurement and correctness.
 # 10. Hashing: values of any size hash, hash agrees with == (scales, unreduced fractions), Hash lookups.
@@ -21,8 +22,19 @@
 #
 # Every section prints a progress line and raises on mismatch.
 
-import std/big
-using std/big::{BigInt, BigDecimal, BigRational}
+import std/big::{BigInt, BigDecimal, BigRational, BigFloat}
+import std/gc::{GC}
+
+# The bytes one call allocates, with the collector held back so that the
+# word the trigger reads counts every one of them.
+def bytes_for(& : -> _) : UInt64
+  GC.disable
+  before = GC.stats.bytes_since_collection
+  yield
+  after = GC.stats.bytes_since_collection
+  GC.enable
+  after - before
+end
 
 # 1. Construction and Integer Conversions
 raise "construct: zero" unless BigInt.zero.zero?
@@ -60,6 +72,24 @@ raise "overflow: i32 max fits" unless max_i32.to_i32? == 2147483647
 raise "overflow: i32 min fits" unless min_i32.to_i32? == -2147483648
 raise "overflow: i32 pos nil" unless (max_i32 + 1).to_i32?.nil?
 raise "overflow: i32 neg nil" unless (min_i32 - 1).to_i32?.nil?
+
+# Bytes both ways, big-endian at a fixed width, as keys and signatures are.
+bytes = [0x01_u8, 0x02_u8, 0x03_u8, 0x04_u8, 0x05_u8, 0x06_u8, 0x07_u8, 0x08_u8, 0x09_u8]
+raise "bytes: from_bytes" unless BigInt.from_bytes(bytes) == BigInt.from_hex("010203040506070809")
+raise "bytes: round trip" unless BigInt.from_bytes(bytes).to_bytes(9) == bytes
+raise "bytes: zeros in front" unless BigInt.from_bytes([0xAB_u8]).to_bytes(4) == [0_u8, 0_u8, 0_u8, 0xAB_u8]
+raise "bytes: leading zeros read" unless BigInt.from_bytes([0_u8, 0_u8, 0x7F_u8]) == BigInt.new(127)
+raise "bytes: zero" unless BigInt.from_bytes([] of UInt8).zero? && BigInt.zero.to_bytes(2) == [0_u8, 0_u8]
+raise "bytes: too wide refused" unless BigInt.from_hex("10000").to_bytes(2).nil?
+raise "bytes: negative refused" unless BigInt.new(-1).to_bytes(8).nil?
+# Built from bytes, not from `**`: this section runs before the arithmetic
+# ones, and a broken multiply is to be caught there, by its own name.
+wide_bytes = Array(UInt8).new(256, 0_u8)
+wide_bytes[0] = 0x80_u8
+wide_bytes[254] = 0x30_u8
+wide_bytes[255] = 0x39_u8
+wide = BigInt.from_bytes(wide_bytes)
+raise "bytes: a 2048-bit value" unless wide.to_bytes(256) == wide_bytes && wide.to_bytes(255).nil?
 
 puts "    construction and conversions: integers, strings, prefixes, and overflow detection verified"
 
@@ -148,7 +178,49 @@ while qa_idx < 2
   qa_idx = qa_idx + 1
 end
 
-puts "    division corner cases: divisor > dividend, exact division, div by 1, and 4-quadrant signs verified"
+# A quotient of one limb, which is what each step of Euclid's algorithm
+# divides by, and which `divmod` takes in one pass of its own: held to a
+# division by shifts and subtraction alone, every sign, divisors of 33 to
+# 2232 bits and dividends from just under them to 32 bits over, a divisor
+# whose top limb is 2^31 or 2^32 - 1, and the largest quotient,
+# b 2^32 - 1 over b.
+def shift_divmod(a : BigInt, b : BigInt) : {BigInt, BigInt}
+  q = 0_i64
+  r = a
+  k = 32
+  while k >= 0
+    if r >= (b << k)
+      r = r - (b << k)
+      q = q | (1_i64 << k)
+    end
+    k = k - 1
+  end
+  {BigInt.new(q), r}
+end
+
+quotient_cases = PowCases.new(0x2545F4914F6CDD1D_u64)
+one_limb = 0
+300.times do |i|
+  b = quotient_cases.bits(33 + quotient_cases.below(2200))
+  size = b.to_s(2).size
+  b = (BigInt.new(2147483648_i64) << (size - 32)) | quotient_cases.bits(size - 33) if i % 10 == 1
+  b = (BigInt.new(4294967295_i64) << (size - 32)) | quotient_cases.bits(size - 33) if i % 10 == 2
+  a = quotient_cases.bits(size - 2 + quotient_cases.below(35))
+  a = (b << 32) - 1 if i % 10 == 3
+  a = b << quotient_cases.below(32) if i % 10 == 4
+  [{1, 1}, {-1, 1}, {1, -1}, {-1, -1}].each do |signs|
+    sa, sb = signs
+    q, r = shift_divmod(a, b)
+    q = -q if sa != sb
+    r = -r if sa < 0
+    dividend = sa < 0 ? -a : a
+    divisor = sb < 0 ? -b : b
+    raise "div: a one-limb quotient, #{a.to_s(2).size} bits over #{size}, signs #{sa} and #{sb}" unless dividend.divmod(divisor) == {q, r}
+  end
+  one_limb = one_limb + 1
+end
+
+puts "    division corner cases: divisor > dividend, exact division, div by 1, 4-quadrant signs and #{one_limb} one-limb quotients verified"
 
 # 5. Bitwise Operations (Two's Complement)
 b12 = 12.to_big # 0b1100
@@ -239,6 +311,114 @@ raise "roundtrip: hex 100 byte-for-byte" unless parsed_hex.to_s(16) == hex100
 puts "    round trips: 200-digit decimal and 100-digit hex verified byte for byte"
 
 # 8. Modular Exponentiation (pow_mod)
+#
+# An odd modulus goes to Montgomery multiplication with a sliding window,
+# an even one to square-and-multiply with a division per step, and
+# `pow_mod_secret` to a fixed window that reads its whole table. The
+# checks run from the narrowest to the widest, so that each mechanism
+# broken is caught where it is named: short exponents (a window of one
+# bit, no table) modulo moduli with room over them in their top word see
+# only the reduction, its n' included; the same modulo moduli that fill
+# their top word see the final subtraction too; long exponents see the
+# window's table. The section's first checks, 3^100 mod 1000 and Fermat
+# modulo M31, come after these, the second having a 31-bit exponent.
+
+# The square-and-multiply with a division per step that `pow_mod` was
+# for every modulus: the reference the Montgomery path is held to, and the
+# "before" of the timings below.
+def square_and_multiply(base : BigInt, exp : BigInt, mod : BigInt) : BigInt
+  return BigInt.zero if mod == 1
+  b = base % mod
+  b = b + mod if b.negative?
+  result = BigInt.one
+  e = exp
+  while !e.zero?
+    result = (result * b) % mod if e.odd?
+    e = e >> 1
+    b = (b * b) % mod if !e.zero?
+  end
+  result
+end
+
+class PowCases
+  @state : UInt64
+
+  def initialize(@state : UInt64)
+  end
+
+  def next : UInt64
+    x = @state
+    x = x ^ x.unsafe_shr(12_u64)
+    x = x ^ x.unsafe_shl(25_u64)
+    x = x ^ x.unsafe_shr(27_u64)
+    @state = x
+    x &* 0x2545F4914F6CDD1D_u64
+  end
+
+  def below(n : Int32) : Int32
+    (self.next % n.to_u64).to_i64.to_i32
+  end
+
+  # A value of exactly *count* bits, its top bit set; zero for none.
+  def bits(count : Int32) : BigInt
+    return BigInt.zero if count <= 0
+    limbs = Array(UInt64).new((count + 31) // 32, 0_u64)
+    i = 0
+    while i < limbs.size
+      limbs[i] = self.next & 0xFFFFFFFF_u64
+      i = i + 1
+    end
+    top = ((count - 1) & 31).to_u64
+    last = limbs.size - 1
+    limbs[last] = (limbs[last] & (1_u64.unsafe_shl(top + 1_u64) &- 1_u64)) | 1_u64.unsafe_shl(top)
+    BigInt.new(1, limbs)
+  end
+
+  # An odd modulus of *count* bits, at least 3.
+  def odd(count : Int32) : BigInt
+    m = bits(count < 2 ? 2 : count)
+    m.even? ? m + 1 : m
+  end
+end
+
+pow_cases = PowCases.new(0x5DEECE66D2B7E151_u64)
+mersenne = [31, 61, 89, 107, 127, 521, 607, 1279]
+short_exponents = [0, 1, 2, 3, 17, 65537, 8388607]
+# A Mersenne prime's low word is all ones, its own inverse, so n' is
+# right before Newton's first step; the random moduli are what hold n'.
+roomy = mersenne.map { |p| (BigInt.one << p) - 1 }
+8.times { |w| 4.times { roomy << pow_cases.odd(64 * (w + 1) - 3 - pow_cases.below(58)) } }
+roomy.each do |m|
+  bases = [BigInt.zero, BigInt.one, 2.to_big, 3.to_big, m - 1, m, m + 2, -(7.to_big), pow_cases.bits(m.to_s(2).size + 40)]
+  bases.each do |b|
+    exponents = short_exponents.map { |e| e.to_big } + [pow_cases.bits(1 + pow_cases.below(23))]
+    exponents.each do |e|
+      raise "pow_mod: short exponents modulo a modulus with room in its top word, #{m.to_s(2).size} bits: #{b} ^ #{e}" unless b.pow_mod(e, m) == square_and_multiply(b, e, m)
+    end
+  end
+end
+
+full_word = [BigInt.new("18446744073709551557"), BigInt.new("340282366920938463463374607431768211297")]
+8.times { |w| 6.times { full_word << pow_cases.odd(64 * (w + 1)) } }
+full_word.each do |m|
+  12.times do
+    b = pow_cases.bits(1 + pow_cases.below(m.to_s(2).size))
+    e = pow_cases.below(3) == 0 ? 65537.to_big : pow_cases.bits(1 + pow_cases.below(23))
+    raise "pow_mod: short exponents modulo a modulus that fills its top word: #{m.to_s(2).size} bits" unless b.pow_mod(e, m) == square_and_multiply(b, e, m)
+  end
+end
+
+windowed = 0
+[24, 80, 240, 672, 1024, 2048, 4096].each do |exp_bits|
+  10.times do
+    m = pow_cases.odd(1 + pow_cases.below(1024))
+    b = pow_cases.bits(1 + pow_cases.below(1100))
+    e = pow_cases.bits(exp_bits + pow_cases.below(40))
+    raise "pow_mod: a #{e.to_s(2).size}-bit exponent through the window table, modulo #{m.to_s(2).size} bits" unless b.pow_mod(e, m) == square_and_multiply(b, e, m)
+    windowed = windowed + 1
+  end
+end
+
 raise "pow_mod: 3^100 % 1000" unless 3.to_big.pow_mod(100.to_big, 1000.to_big) == 1
 # Fermat's Little Theorem test: 3^(p-1) % p == 1 for prime p = M_31
 raise "pow_mod: fermat M31" unless 3.to_big.pow_mod(m31 - 1, m31) == 1
@@ -246,7 +426,165 @@ raise "pow_mod: fermat M31" unless 3.to_big.pow_mod(m31 - 1, m31) == 1
 mod_res = 5.to_big.pow_mod(BigInt.new("1234567890123456789"), m127)
 raise "pow_mod: large range" unless mod_res > 0 && mod_res < m127
 
-puts "    modular exponentiation: pow_mod verified against small and cryptographic prime moduli"
+mersenne.each do |p|
+  m = (BigInt.one << p) - 1
+  raise "pow_mod: Fermat's little theorem modulo the Mersenne prime 2^#{p} - 1" unless 3.to_big.pow_mod(m - 1, m) == 1
+end
+
+40.times do
+  m = pow_cases.bits(2 + pow_cases.below(700))
+  m = m + 1 if m.odd?
+  b = pow_cases.bits(pow_cases.below(800))
+  b = -b if pow_cases.below(4) == 0
+  e = pow_cases.bits(pow_cases.below(300))
+  raise "pow_mod: an even modulus of #{m.to_s(2).size} bits" unless b.pow_mod(e, m) == square_and_multiply(b, e, m)
+end
+
+raise "pow_mod: modulo 1" unless 5.to_big.pow_mod(3.to_big, BigInt.one).zero? && 5.to_big.pow_mod(0.to_big, BigInt.one).zero?
+raise "pow_mod: exponent 0" unless m127.pow_mod(BigInt.zero, m31) == 1 && 0.to_big.pow_mod(BigInt.zero, m127) == 1
+raise "pow_mod: base 0" unless 0.to_big.pow_mod(m31, m127).zero?
+raise "pow_mod: base the modulus" unless m127.pow_mod(5.to_big, m127).zero?
+raise "pow_mod: a negative base" unless (-(2.to_big)).pow_mod(3.to_big, m31) == m31 - 8
+raise "pow_mod: exponent 1, base past the modulus" unless (m127 + 5).pow_mod(BigInt.one, m127) == 5
+raise "pow_mod: modulus 3" unless 2.to_big.pow_mod(BigInt.new("1000000000000000000001"), 3.to_big) == 2
+
+# pow_mod_secret: as many windows as the longer of the exponent and the
+# modulus, exponent 0 and an exponent past the modulus included.
+secret_cases = 0
+60.times do |i|
+  m = pow_cases.odd(1 + pow_cases.below(i < 50 ? 1100 : 4096))
+  b = pow_cases.bits(pow_cases.below(1200))
+  e = i % 10 == 0 ? BigInt.zero : pow_cases.bits(1 + pow_cases.below(i % 10 == 1 ? 3000 : 1100))
+  e = BigInt.one if i % 10 == 2
+  raise "pow_mod_secret: agrees with pow_mod, #{e.to_s(2).size}-bit exponent modulo #{m.to_s(2).size} bits" unless b.pow_mod_secret(e, m) == b.pow_mod(e, m)
+  secret_cases = secret_cases + 1
+end
+raise "pow_mod_secret: modulo 1" unless 5.to_big.pow_mod_secret(3.to_big, BigInt.one).zero?
+raise "pow_mod_secret: a negative base" unless (-(2.to_big)).pow_mod_secret(3.to_big, m31) == m31 - 8
+
+# inverse_mod_secret: 2^(len - 1), the value the binary GCD takes every
+# one of its 2 len - 1 steps on, at every length from 2 to 700 bits; the
+# rounds that leave a negative; x times the answer is 1 modulo m, and nil
+# exactly where x and m share a factor; then a thousand cases for
+# python's pow(x, -1, m).
+(2..700).each do |length|
+  m = pow_cases.odd(length)
+  x = BigInt.one << (length - 1)
+  inverse = x.inverse_mod_secret(m)
+  raise "inverse_mod_secret: 2^(len - 1), which takes every step, modulo #{length} bits" unless inverse && (x * inverse) % m == 1
+end
+# The stand-ins mislead when x and m agree in their top 33 bits and differ
+# below them: alike in their low 31 bits too, a round takes m from x and
+# leaves a negative; x's low bits past m's, the negative is swapped into b.
+# 3000 random inversions up to 700 bits left neither.
+[96, 128, 200, 1024, 2048].each do |length|
+  high = ((BigInt.one << 32) + 0x12345.to_big) << (length - 33)
+  m = high + (0x5555.to_big << 31) + 0x10000001.to_big
+  [high + (0x1111.to_big << 31) + 0x10000001.to_big, high + (0x1111.to_big << 31) + 0x7FFFFFF1.to_big].each do |x|
+    inverse = x.inverse_mod_secret(m)
+    raise "inverse_mod_secret: a round that leaves a negative, modulo #{length} bits" unless inverse && (x * inverse) % m == 1
+    puts "inverse: #{x.to_s(16)} #{m.to_s(16)} = #{inverse.to_s(16)}"
+  end
+end
+inverse_cases = 0
+refused_inverses = 0
+300.times do |i|
+  m = pow_cases.odd(1 + pow_cases.below(i < 250 ? 700 : 4100))
+  m = m * 3.to_big if i % 7 == 3
+  x = pow_cases.bits(pow_cases.below(m.to_s(2).size + 1)) % m
+  x = x // 3.to_big * 3.to_big if i % 7 == 3
+  inverse = x.inverse_mod_secret(m)
+  if x.gcd(m) != 1
+    raise "inverse_mod_secret: nil exactly when x shares a factor with the modulus, #{m.to_s(2).size} bits" unless inverse.nil?
+    refused_inverses = refused_inverses + 1
+  else
+    raise "inverse_mod_secret: x times its inverse is 1, modulo #{m.to_s(2).size} bits" unless inverse && (x * inverse) % m == 1 && !inverse.negative? && inverse < m
+  end
+  inverse_cases = inverse_cases + 1
+end
+raise "inverse_mod_secret: modulo 1" unless 5.to_big.inverse_mod_secret(BigInt.one) == BigInt.zero
+raise "inverse_mod_secret: a negative x" unless (-(2.to_big)).inverse_mod_secret(m31) == (m31 - 1) // 2
+raise "inverse_mod_secret: 0 has none" unless BigInt.zero.inverse_mod_secret(m127).nil?
+1000.times do |i|
+  bits = i % 10 == 0 ? 1 + pow_cases.below(4096) : 1 + pow_cases.below(1100)
+  m = pow_cases.odd(bits)
+  m = m * 5.to_big if i % 9 == 2
+  x = pow_cases.bits(pow_cases.below(m.to_s(2).size + 1)) % m
+  x = x // 5.to_big * 5.to_big if i % 9 == 2
+  x = BigInt.zero if i % 50 == 7
+  x = BigInt.one if i % 50 == 8
+  x = m - 1 if i % 50 == 9
+  x = BigInt.one << (m.to_s(2).size - 1) if i % 50 == 10
+  x = x + m if i % 40 == 11
+  x = -x if i % 13 == 4
+  inverse = x.inverse_mod_secret(m)
+  puts "inverse: #{x.to_s(16)} #{m.to_s(16)} = #{inverse ? inverse.to_s(16) : "none"}"
+end
+puts "    modular inverses: inverse_mod_secret #{inverse_cases} times against its own product (#{refused_inverses} sharing a factor), 2^(len - 1) modulo every length from 2 to 700 bits, 1000 cases for python"
+
+# Thousands of cases for python's `pow(b, e, m)`, printed in hex: moduli of
+# 1 to 4096 bits, odd and even, exponents 0, 1 and up to 4096 bits, bases
+# of 0, past the modulus and negative. Most are under 1024 bits, where the
+# cases are cheap; one in sixteen is drawn from all 4096 bits, and an even
+# modulus, which takes the division per step, has an eighth of the
+# exponent.
+3000.times do |i|
+  large = i % 16 == 0 || i % 64 == 3
+  mod_bits = large ? 1 + pow_cases.below(4096) : 1 + pow_cases.below(1024)
+  m = pow_cases.bits(mod_bits)
+  if i % 4 == 3
+    m = m + 1 if m.odd?
+  else
+    m = m + 1 if m.even?
+  end
+  exp_bits = large ? pow_cases.below(mod_bits + 1) : pow_cases.below(i % 16 == 5 ? 4097 : mod_bits + 1)
+  exp_bits = exp_bits // 8 if i % 4 == 3
+  e = pow_cases.bits(exp_bits)
+  e = BigInt.zero if i % 50 == 7
+  e = BigInt.one if i % 50 == 8
+  b = pow_cases.bits(pow_cases.below(mod_bits + 64))
+  b = BigInt.zero if i % 40 == 9
+  b = b + m if i % 40 == 10
+  b = -b if i % 9 == 4
+  puts "powmod: #{b.to_s(16)} #{e.to_s(16)} #{m.to_s(16)} = #{b.pow_mod(e, m).to_s(16)}"
+end
+
+# Timings, against the square-and-multiply above, for the driver to set
+# beside python's: a modulus and an exponent of full length each.
+[2048, 3072, 4096].each do |bits|
+  m = pow_cases.odd(bits)
+  b = pow_cases.bits(bits - 1)
+  e = pow_cases.bits(bits)
+  started = __iyi_monotonic_ns
+  fast = b.pow_mod(e, m)
+  montgomery = __iyi_monotonic_ns
+  secret = b.pow_mod_secret(e, m)
+  fixed = __iyi_monotonic_ns
+  slow = square_and_multiply(b, e, m)
+  finished = __iyi_monotonic_ns
+  raise "pow_mod: the #{bits}-bit timing case disagrees with square-and-multiply" unless fast == slow && secret == slow
+  new_us = (montgomery - started) // 1000
+  secret_us = (fixed - montgomery) // 1000
+  old_us = (finished - fixed) // 1000
+  puts "powtime: #{bits} #{b.to_s(16)} #{e.to_s(16)} #{m.to_s(16)} = #{fast.to_s(16)} #{new_us} #{secret_us} #{old_us}"
+  # Measured at 12 times faster in a plain build at every size, and 9 to
+  # 11 in a --release one. One timing of each is one sample of a shared
+  # runner, and a held-up fast case fails the bound by itself: a darwin
+  # runner's broken copy of this file panicked before its own check
+  # (integration/0.20, job 119211068359), plausibly here - the log kept
+  # only the backtrace's last line. So the fast case is timed again, up to
+  # twice, and the best of its times held to the bound.
+  2.times do
+    break if new_us * 3 < old_us
+    again = __iyi_monotonic_ns
+    b.pow_mod(e, m)
+    took = (__iyi_monotonic_ns - again) // 1000
+    new_us = took if took < new_us
+  end
+  raise "pow_mod: a #{bits}-bit exponentiation took #{new_us} us, square-and-multiply #{old_us} us" unless new_us * 3 < old_us
+end
+
+puts "    modular exponentiation: pow_mod against square-and-multiply modulo #{roomy.size} moduli with room in their top word, #{full_word.size} full-word moduli, #{windowed} windowed exponents and 40 even moduli, Fermat modulo #{mersenne.size} Mersenne primes; pow_mod_secret against pow_mod #{secret_cases} times; 3000 cases for python"
 
 # 9. Algebraic Identities Sweep Over 5000 Random Pairs
 class TestPrng
@@ -318,6 +656,17 @@ k_test_b = prng.random_big(70)
 k_prod = k_test_a * k_test_b
 raise "karatsuba: product non-zero" if k_prod.zero?
 raise "karatsuba: exact division" unless (k_prod // k_test_a) == k_test_b
+
+# Both past the crossover and one more than twice the other: the halves the
+# split takes off the shorter side had a negative length, and
+# `3 ** 10000` panicked "negative capacity" on its way there.
+[{70, 500}, {65, 1000}, {100, 2100}, {64, 129}].each do |sizes|
+  short_side = prng.random_big(sizes[0])
+  long_side = prng.random_big(sizes[1])
+  product = short_side * long_side
+  raise "karatsuba: unbalanced #{sizes}" unless product // short_side == long_side && (product % short_side).zero? && product == long_side * short_side
+end
+raise "karatsuba: unbalanced power" unless (BigInt.new(3_i64) ** 10000) // (BigInt.new(3_i64) ** 9999) == 3
 
 puts "    karatsuba: crossover threshold 64 limbs (2048 bits) verified"
 
@@ -426,6 +775,40 @@ raise "rational: negative power" unless (BigRational.new(2, 3) ** -2).to_s == "9
 raise "rational: int overloads" unless (BigRational.new(1, 2) + 1).to_s == "3/2" && (BigRational.new(1, 2) * 4_i64).to_s == "2" && (BigRational.new(1, 2) / 2.to_big).to_s == "1/4"
 raise "rational: to_big_i truncates" unless BigRational.new(-7, 2).to_big_i == -3
 raise "rational: to_f64" unless BigRational.new(1, 4).to_f64 == 0.25
+# The nearest Float64 at any size, ties to even, as python's float(Fraction):
+# through twenty decimal places 1/10^25 had been 0.0, 1/(3*10^12) had kept
+# eight digits, and every subnormal had been 0.0.
+raise "rational: to_f64 tiny" unless BigRational.new(1.to_big, 10.to_big ** 25).to_f64 == 1.0e-25
+raise "rational: to_f64 negative tiny" unless BigRational.new(0.to_big - 1, 10.to_big ** 25).to_f64 == 1.0e-25 * -1.0
+raise "rational: to_f64 keeps every digit" unless BigRational.new(1.to_big, 3.to_big * 10.to_big ** 12).to_f64 == 1.0 / 3.0e12
+raise "rational: to_f64 least subnormal" unless BigRational.new(1.to_big, 2.to_big ** 1074).to_f64 == 5.0e-324
+raise "rational: to_f64 subnormal ties to even" unless BigRational.new(1.to_big, 2.to_big ** 1075).to_f64 == 0.0 && BigRational.new(3.to_big, 2.to_big ** 1075).to_f64 == 1.0e-323
+raise "rational: to_f64 normal ties to even" unless BigRational.new(2.to_big ** 53 + 1, 1.to_big).to_f64 == 2.0 ** 53 && BigRational.new(2.to_big ** 53 + 3, 2.to_big ** 60).to_f64 == (2.0 ** 53 + 4.0) / 2.0 ** 60
+raise "rational: to_f64 near and past the largest Float64" unless BigRational.new(2.to_big ** 1024, 3.to_big).to_f64 == 5.992310449541053e+307 && BigRational.new(2.to_big ** 1024, 1.to_big).to_f64 > 1.7976931348623157e308
+# A decimal's zeros are one string each: grown by a zero at a time, the
+# string was copied per zero and 1e50000 took 2.9 s to print.
+zeros_started = __iyi_monotonic_ns
+wide = BigDecimal.new(BigInt.new(1), -50000).to_s
+narrow = BigDecimal.new(BigInt.new(1), 50000).to_s
+zeros_ms = (__iyi_monotonic_ns - zeros_started) // 1000000
+raise "decimal: 1e50000 printed #{wide.bytesize} characters" unless wide.bytesize == 50001 && wide.ends_with?("00")
+raise "decimal: 1e-50000 printed #{narrow.bytesize} characters" unless narrow.bytesize == 50002 && narrow.starts_with?("0.00")
+raise "decimal: 1e50000 and 1e-50000 took #{zeros_ms} ms to print" unless zeros_ms < 1000
+# Comparing and hashing look at where the leading digit sits before they
+# align or multiply out a scale: aligning built 10^1000000, and
+# `1e-1000000 < 1`, `1e1000000 == 1` and `1e1000000.hash` took 2.4 s each.
+far_small = BigDecimal.new("1e-1000000")
+far_large = BigDecimal.new("1e1000000")
+far_one = BigDecimal.new("1")
+far_started = __iyi_monotonic_ns
+far_answers = [far_small < far_one, far_large == far_one, far_large > far_one, -far_large < -far_one, far_small > -far_large]
+far_hash = far_large.hash
+far_ms = (__iyi_monotonic_ns - far_started) // 1000000
+raise "decimal: far exponents ordered #{far_answers}" unless far_answers == [true, false, true, true, true]
+raise "decimal: far exponents took #{far_ms} ms to compare and hash" unless far_ms < 50
+raise "decimal: hash with an exponent" unless BigDecimal.new("25e3").hash == BigDecimal.new("25000.00").hash && far_hash != far_one.hash
+raise "decimal: close magnitudes" unless BigDecimal.new("9.99") < BigDecimal.new("10") && BigDecimal.new("4294967296") > BigDecimal.new("4294967295.999") && BigDecimal.new("1e9") == BigDecimal.new("1000000000.0")
+puts "    decimal magnitudes: 1e-1000000 < 1, 1e1000000 == 1 and its hash under 50 ms"
 
 rat_pairs = [
   ["6/4", "1/6"], ["-3/-9", "2/3"], ["3/-9", "1/2"], ["1/3", "1/6"], ["2/3", "4/9"],
@@ -467,6 +850,222 @@ raise "base: 2 digits" unless 5.to_big.to_s(2) == "101" && (-5).to_big.to_s(2) =
 raise "base: 16 pads limbs" unless two64.to_s(16) == "ffffffffffffffff" && (two64 + 1).to_s(16) == "10000000000000000"
 raise "base: 10 pads chunks" unless BigInt.new("1000000000000000000").to_s == "1000000000000000000"
 
+# Values long enough that printing splits them at a power of the chunk and
+# parsing joins them the same way, in every base: the oracle recomputes
+# each from its digits, and the round trip has to give the value back.
+long = BigInt.new(3_i64) ** 9000
+long_values = [long, -(BigInt.new(7_i64) ** 3500 + BigInt.one), BigInt.new(10_i64) ** 2000]
+base = 2
+while base <= 36
+  long_values.each do |v|
+    raise "base: long round trip #{base}" unless BigInt.new(v.to_s(base), base) == v
+  end
+  base = base + 1
+end
+[2, 3, 7, 10, 16, 36].each do |b|
+  long_values.each { |v| puts "oracle base: #{b} #{v.to_s(b)} = #{v}" }
+end
+
+# And they cost what the digits do. Printing appended each chunk's digits
+# to everything printed so far, and parsing shifted or multiplied a whole
+# new BigInt per digit: 3 ** 9000 in base 7 allocated 22 MB to print and
+# 17 MB to parse, where its text is 5 KB. Sixty-four bytes per digit is
+# room for the halves a split makes, and a copy per chunk is not.
+[2, 7, 10, 16, 36].each do |b|
+  text = long.to_s(b)
+  printed = bytes_for { long.to_s(b) }
+  parsed = bytes_for { BigInt.new(text, b) }
+  raise "base: printing #{b} costs its digits (#{printed} bytes for #{text.bytesize})" unless printed < 64_u64 * text.bytesize.to_u64
+  raise "base: parsing #{b} costs its digits (#{parsed} bytes for #{text.bytesize})" unless parsed < 64_u64 * text.bytesize.to_u64
+end
+
 puts "    base round trips: every base 2..36 parses what it printed, digits oracle-checked"
 
+# And in time. The split divides by a power of the chunk half the value's
+# length, and long division costs the product of the lengths: printing
+# was quadratic, and 3 ** 600000's 286,273 digits took 3.1 s to print in
+# a plain build where parsing them back took 0.5, a ratio that grows with
+# the length. The recursive division keeps a print within a small
+# multiple of the parse, which multiplies its way up through the same
+# powers: about two in a plain build, under one and a half in a release.
+#
+# Each the best of three: one of each, timed once, failed on a loaded
+# Windows runner where print and parse share it with whatever else runs -
+# a collection or another job in either measurement moved the ratio, not
+# the algorithm (integration/0.19, job 118456861467).
+huge = BigInt.new(3_i64) ** 600000
+print_ms = 9223372036854775807_i64
+parse_ms = 9223372036854775807_i64
+3.times do
+  huge_started = __iyi_monotonic_ns
+  huge_text = huge.to_s
+  huge_printed = __iyi_monotonic_ns
+  raise "base: a long value parses back" unless BigInt.new(huge_text) == huge
+  huge_parsed = __iyi_monotonic_ns
+  took = (huge_printed - huge_started) // 1000000
+  print_ms = took if took < print_ms
+  took = (huge_parsed - huge_printed) // 1000000
+  parse_ms = took if took < parse_ms
+end
+raise "base: printing a long value costs what parsing it does (#{print_ms} ms against #{parse_ms})" unless print_ms < parse_ms * 4
+puts "    long print: 3 ** 600000 prints in under four times its parse"
+
+# A long divisor and a long quotient divide by the recursion `to_s` splits
+# with, on the magnitudes, the signs given after; everything else by long
+# division, which costs the product of the two lengths, as `//`, `%` and
+# `divmod` all did. Each answer is checked as what truncating division is
+# - `a == q * b + r`, `r` shorter than `b` and of `a`'s sign - for every
+# pair of signs, either side of the divisor's 65,536 bits and the
+# quotient's 16,384 where it switches, a divisor of all ones and a power of
+# two, and a value many times its divisor's length.
+def exact_bits(bits : Int32, seed : UInt64) : BigInt
+  s = seed
+  low = String.build do |io|
+    io << "0"
+    ((bits - 1) // 4).times do
+      s = s &* 6364136223846793005_u64 &+ 1442695040888963407_u64
+      io << "0123456789abcdef"[(s >> 60).to_i32]
+    end
+  end
+  (BigInt.one << (bits - 1)) + BigInt.new(low, 16)
+end
+
+divisions = [
+  {exact_bits(65536 + 16384, 1_u64), exact_bits(65536, 2_u64)},
+  {exact_bits(65536 + 16385, 3_u64), exact_bits(65536, 4_u64)},
+  {exact_bits(65537 + 16384, 5_u64), exact_bits(65537, 6_u64)},
+  {exact_bits(65537 + 16386, 7_u64), exact_bits(65537, 8_u64)},
+  {exact_bits(98304 + 40000, 9_u64), exact_bits(98304, 10_u64)},
+  {exact_bits(70000 * 5, 11_u64), exact_bits(70000, 12_u64)},
+  {(BigInt.one << 180000) - BigInt.one, (BigInt.one << 70001) - BigInt.one},
+  {exact_bits(180000, 13_u64), BigInt.one << 70000},
+]
+divisions.each do |pair|
+  [{1, 1}, {1, -1}, {-1, 1}, {-1, -1}].each do |signs|
+    a = signs[0] < 0 ? -pair[0] : pair[0]
+    b = signs[1] < 0 ? -pair[1] : pair[1]
+    q, r = a.divmod(b)
+    raise "div: long a == q * b + r" unless q * b + r == a
+    raise "div: long remainder shorter than the divisor" unless r.cmp_abs(b) < 0
+    raise "div: long remainder of the dividend's sign" unless r.zero? || r.negative? == a.negative?
+    raise "div: long // and % agree with divmod" unless a // b == q && a % b == r
+  end
+end
+
+# And in time: a value twice its divisor's 262,144 bits divides in under
+# four times the product that checks it, the best of three each. Long
+# division took seven times the product in a plain build, a ratio that
+# grows with the length; the recursion takes about two.
+wide_b = exact_bits(262144, 14_u64)
+wide_a = exact_bits(524288, 15_u64)
+divide_ns = 9223372036854775807_i64
+product_ns = 9223372036854775807_i64
+3.times do
+  started = __iyi_monotonic_ns
+  wide_q, wide_r = wide_a.divmod(wide_b)
+  divided = __iyi_monotonic_ns
+  raise "div: long a == q * b + r" unless wide_q * wide_b + wide_r == wide_a
+  multiplied = __iyi_monotonic_ns
+  divide_ns = divided - started if divided - started < divide_ns
+  product_ns = multiplied - divided if multiplied - divided < product_ns
+end
+raise "div: a long division took #{divide_ns // 1000000} ms, the product #{product_ns // 1000000} ms" unless divide_ns < product_ns * 4
+puts "    long division: every sign either side of both switches, and a long divisor in under four products"
+
+# Trailing zeros are counted once and divided out once: one divmod by ten
+# per zero made the hash of `1.` and 40,000 zeros, and `3.div(3, 40000)`,
+# take 725 ms each. Counting prints the digits, so this runs after printing
+# is checked.
+strip_started = __iyi_monotonic_ns
+strip_hash = BigDecimal.new("1." + "0" * 40000).hash
+strip_quotient = BigDecimal.new("3").div(BigDecimal.new("3"), 40000)
+strip_ms = (__iyi_monotonic_ns - strip_started) // 1000000
+raise "decimal: zeros stripped #{strip_quotient.scale}" unless strip_hash == BigDecimal.new("1").hash && strip_quotient.to_s == "1" && strip_quotient.scale == 0
+raise "decimal: 40,000 trailing zeros took #{strip_ms} ms to strip" unless strip_ms < 500
+puts "    decimal zeros: 40,000 trailing zeros stripped under 500 ms"
+
+# Binary floats: named answers, the refusals, and random cases printed for
+# the gate to round exactly in python: arithmetic, square roots, parsing,
+# the shortest decimal, the nearest double and the integer roundings, at
+# precisions from one bit to 256.
+puts "binary floats:"
+raise "flt: the square root of two to 256 bits" unless BigFloat.new(2, 256).sqrt.to_s == "1.4142135623730950488016887242096980785696718753769480731766797379907324784621"
+raise "flt: 0.1 at 24 bits read back as a double" unless BigFloat.new("0.1", 24).to_f64 == 0.10000000149011612
+raise "flt: ties to even" unless BigFloat.new(BigInt.new(5_i64), 2).to_s == "4.0" && BigFloat.new(BigInt.new(7_i64), 2).to_s == "8.0"
+raise "flt: an addend under the last place" unless (BigFloat.new(1) + BigFloat.new("1e-50")).to_s == "1.0" && (BigFloat.new(1, 300) + BigFloat.new("1e-50", 300)).to_s == "1.00000000000000000000000000000000000000000000000001"
+raise "flt: equal at two precisions" unless BigFloat.new(1.5) == BigFloat.new(1.5, 300) && BigFloat.new(1.5).hash == BigFloat.new(1.5, 300).hash
+raise "flt: round, floor, ceil" unless BigFloat.new("2.5").round.to_s == "2.0" && BigFloat.new("-2.5").round.to_s == "-2.0" && BigFloat.new("-1.25").floor.to_s == "-2.0" && BigFloat.new("1.25").ceil.to_s == "2.0"
+raise "flt: the largest value a double holds and past it" unless BigFloat.new("1e400").to_f64 == 1.0 / 0.0 && BigFloat.new("1e-400").to_f64 == 0.0
+assert_panics("BigFloat: division by zero") { BigFloat.new(1) / BigFloat.new(0) }
+assert_panics("BigFloat: the square root of a negative number") { BigFloat.new(-4).sqrt }
+assert_panics("BigFloat: not a number: \"1.5x\"") { BigFloat.new("1.5x") }
+assert_panics("BigFloat: a precision of 0 bits; it is at least 1") { BigFloat.new(1, 0) }
+assert_panics("is not a finite number") { BigFloat.new(0.0 / 0.0) }
+
+class FloatCases
+  @state = 0x2545F4914F6CDD1D_u64
+
+  def next : UInt64
+    x = @state
+    x = x ^ x.unsafe_shr(12_u64)
+    x = x ^ x.unsafe_shl(25_u64)
+    x = x ^ x.unsafe_shr(27_u64)
+    @state = x
+    x &* 0x2545F4914F6CDD1D_u64
+  end
+
+  def below(n : Int32) : Int32
+    (self.next % n.to_u64).to_i64.to_i32
+  end
+
+  # A value of up to ten bits more than *precision*, rounded to it, times
+  # a power of two, now and then zero or negative.
+  def float(precision : Int32) : BigFloat
+    return BigFloat.new(0, precision) if below(20) == 0
+    m = BigInt.zero
+    ((precision + 72) // 63).times { m = (m << 63) + BigInt.new(self.next.unsafe_shr(1_u64).to_i64) }
+    m = m >> below(precision + 10) if m > BigInt.one
+    m = BigInt.one if m.zero?
+    # A power of two is exact at any precision, so the value keeps its own.
+    x = BigFloat.new(m, precision) * (BigFloat.new(2, precision) ** (below(600) - 300))
+    below(2) == 0 ? -x : x
+  end
+
+  def decimal : String
+    String.build do |io|
+      io << "-" if below(2) == 0
+      io << (self.next % 1000000_u64).to_s
+      io << "." << (self.next % 100000000000_u64).to_s if below(2) == 0
+      io << "e" << (below(120) - 60).to_s if below(2) == 0
+    end
+  end
+end
+
+float_cases = FloatCases.new
+precisions = [1, 2, 24, 53, 64, 100, 128, 256]
+400.times do
+  p = precisions[float_cases.below(8)]
+  a = float_cases.float(p)
+  b = float_cases.float(float_cases.below(4) == 0 ? precisions[float_cases.below(8)] : p)
+  raise "flt: a case made at #{a.precision} bits, not #{p}" unless a.precision == p
+  q = p > b.precision ? p : b.precision
+  puts "oracle flt: #{q} add #{a.to_big_r} #{b.to_big_r} = #{(a + b).to_big_r}"
+  puts "oracle flt: #{q} sub #{a.to_big_r} #{b.to_big_r} = #{(a - b).to_big_r}"
+  puts "oracle flt: #{q} mul #{a.to_big_r} #{b.to_big_r} = #{(a * b).to_big_r}"
+  puts "oracle flt: #{q} div #{a.to_big_r} #{b.to_big_r} = #{(a / b).to_big_r}" unless b.zero?
+  puts "oracle flt: #{p} sqrt #{a.abs.to_big_r} _ = #{a.abs.sqrt.to_big_r}"
+  puts "oracle flt: #{p} str #{a.to_big_r} _ = #{a}"
+  puts "oracle flt: #{p} f64 #{a.to_big_r} _ = #{a.to_f64}"
+  puts "oracle flt: #{p} round #{a.to_big_r} _ = #{a.round.to_big_r}"
+  puts "oracle flt: #{p} floor #{a.to_big_r} _ = #{a.floor.to_big_r}"
+  puts "oracle flt: #{p} ceil #{a.to_big_r} _ = #{a.ceil.to_big_r}"
+  puts "oracle flt: #{p} trunc #{a.to_big_r} _ = #{a.trunc.to_big_r}"
+  text = float_cases.decimal
+  puts "oracle flt: #{p} parse #{text} _ = #{BigFloat.new(text, p).to_big_r}"
+  power = float_cases.below(9) - 4
+  puts "oracle flt: #{p} pow #{a.to_big_r} #{power} = #{(a ** power).to_big_r}" unless a.zero? && power < 0
+end
+puts "    binary floats: named answers, the refusals, and #{400} random cases of each operation for the oracle"
+
 puts "all std/big checks passed"
+puts "ALL CHECKS PASSED"

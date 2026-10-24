@@ -1,0 +1,2383 @@
+# Internet mail messages (RFC 5322) with MIME (RFC 2045 to 2047, RFC
+# 2231): a message built from its parts, and a message read back into its
+# headers, its tree of parts and their decoded bodies, written in iyi.
+# Nothing here reaches the network, the clock or the disk: std/smtp sends
+# what this builds.
+#
+#     import std/mail::{Mail, MailError}
+#
+#     msg = Mail::Message.new
+#     msg.from = Mail::Address.new("jorg@example.com", "Jörg Müller")
+#     msg.to << Mail::Address.new("ann@example.org")
+#     msg.subject = "Grüße aus Köln"
+#     msg.date = Mail.date(1792224000_i64, 120)
+#     msg.message_id = "<20261017.1@example.com>"
+#     msg.text = "Hallo Ann,\n..."
+#     msg.html = "<p>Hallo Ann,</p>"
+#     msg.attach("bericht.pdf", pdf_bytes)
+#     wire = msg.to_s
+#
+#     part = Mail.parse(wire).or_panic
+#     part.header("Subject")                  # "Grüße aus Köln"
+#     part.addresses("From").or_panic[0].name # "Jörg Müller"
+#     part.find("text/plain").not_nil         # the text, decoded
+#
+# **Building.** `Mail::Message` takes From, To, Cc, Bcc, Reply-To, Subject,
+# the Date and the Message-ID from the caller - `Mail.date` writes a Date
+# from Unix seconds and an offset, and no identifier is made up here, since
+# both would need the clock or a source of randomness - and a text body, an
+# HTML body, and attachments. A From and a Date are required, as RFC 5322
+# section 3.6 requires them: set the Date with `msg.date = Mail.date(...)`,
+# as the example does, since a message without one panics when it is
+# written (`mail: a message has no Date`), and so does `SmtpClient#send`,
+# which writes it. The Message-ID is optional and is left out when unset. Text alone is one `text/plain` part; text
+# and HTML are `multipart/alternative`, plain first as RFC 2046 section
+# 5.1.4 orders them; attachments put that body and themselves in a
+# `multipart/mixed`. A text part's line breaks are written as CRLF, the
+# canonical form of RFC 2046 section 4.1.1, whichever of CRLF, CR or LF
+# the caller used; it goes as `7bit` when it is ASCII in lines of 78 or
+# fewer, and otherwise as whichever of quoted-printable and base64 is the
+# shorter, as Python's `email` chooses. Attachments go as base64. Bcc is
+# not written into the message: its addresses are among `recipients`,
+# where std/smtp sends to them, and no other recipient learns them.
+#
+# A boundary is `iyi-` and 32 hex digits of the SHA-1 of the parts it
+# separates, made again from itself while a part holds it - as std/http's
+# `MultipartBuilder` makes one - so it cannot be in a part by construction,
+# the same message builds to the same bytes, and std/mail reaches no
+# source of randomness for it.
+#
+# **Headers** are folded at whitespace so that every line is 78 columns or
+# fewer (RFC 5322 section 2.1.1), save an address longer than that, which
+# has nowhere to fold. A Subject or other unstructured value that is not
+# printable ASCII in words of single spaces - non-ASCII text, a tab, space
+# at either end or two together, a word too long for a line, or `=?`,
+# which a reader would take for the start of an encoded-word - goes as RFC
+# 2047 encoded-words: UTF-8, each word 75 characters or fewer and holding
+# whole characters, in Q or B, whichever is the shorter. A display name of
+# atoms goes as it is, one with other printable ASCII as a quoted string,
+# and any other as encoded-words - one word when it fits one, and its
+# atoms between words when it does not, since Python's `email` reads a
+# space into the gap between two encoded-words of a name, where RFC 2047
+# section 6.2 drops it (its own long names come back so); an attachment's
+# file name that is not
+# short printable ASCII goes as RFC 2231 `filename*`, in continuations
+# when it is long. A header value or a display name that holds a line
+# break is a panic, as it would be a header of the caller's making.
+#
+# **Reading.** `Mail.parse` reads a message whose lines end in CRLF or LF
+# into a `Mail::Part`: its fields unfolded, in order, and its body; a
+# multipart's parts, and a `message/rfc822`'s message, are parts of their
+# own. `header` answers a field with its encoded-words decoded; `body` the
+# bytes the transfer encoding stands for; `text` those bytes in UTF-8 from
+# the part's charset - UTF-8, US-ASCII, ISO-8859-1, ISO-8859-15 and
+# windows-1252, under their usual names - and an error that names any
+# other. `addresses` reads an address list: RFC 5322's mailboxes and
+# groups (whose members it answers, the group's name set aside), quoted
+# local parts, domain literals, and RFC 6532's UTF-8. Comments are passed
+# over wherever whitespace may be, and are never taken for a name: the
+# old `addr (Name)` form is an address without one. A route in an angle
+# address (obs-route) is passed over too.
+#
+# Where RFC 2045 asks a reader to be forgiving, it is: a base64 body's
+# characters outside the alphabet are passed over and it ends at its
+# padding (section 6.8), and an `=` in quoted-printable that starts no
+# escape is kept (section 6.7, note 2); an encoded-word that does not
+# decode is left as it was written (RFC 2047 section 6.3), and a
+# Content-Type that cannot be read is `text/plain` (RFC 2045 section 5.2).
+# What is refused, as a `MailError`, is what leaves the structure in doubt:
+# a header line that is not a field, a header section that begins with a
+# folded line, a multipart that names no boundary, has no boundary line or
+# ends before its closing one, parts nested deeper than 32, and an address
+# list that is not one. A body in a transfer encoding that is not one of
+# RFC 2045's is an error when it is asked for, and so is text not in its
+# charset.
+#
+# Quoted-printable is written as Python's `email.quoprimime.body_encode`
+# writes it, line for line, and read as RFC 2045 says; base64 in lines of
+# 76. `bench/std_mail_exercise.sh` has Python's `email` read what this
+# builds and this read what Python's `EmailMessage` builds, under
+# `policy.default` and `policy.SMTP`, holds the encodings to `quopri`,
+# `base64` and `email.quoprimime`, and dates to `email.utils`.
+#
+# Not here: S/MIME and PGP, DKIM, `format=flowed`, charsets beyond the
+# five, and writing 8-bit bodies: everything this writes is 7-bit but for
+# an RFC 6532 address, which `Message#utf8?` names for SMTPUTF8.
+
+module std/mail
+
+import std/digest::{SHA1}
+import std/base64::{Base64}
+import std/mime::{MIME}
+import std/text
+
+# What a message, a header or an address is that it should not be, as a
+# value: `reason` says what; `message` says it is mail's.
+pub struct MailError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    "mail: " + @reason
+  end
+end
+
+impl Error for MailError
+  def message : String
+    "mail: " + @reason
+  end
+end
+
+# Bytes, characters and charsets: what the rest is written over.
+struct MailText
+  HEX = "0123456789ABCDEF"
+
+  # windows-1252's 0x80 to 0x9F, -1 where it defines nothing.
+  CP1252 = [0x20AC, -1, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+            0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, -1, 0x017D, -1,
+            -1, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+            0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, -1, 0x017E, 0x0178]
+
+  def self.hex_value(b : UInt8) : Int32
+    return b.to_i32 - 48 if b >= 48_u8 && b <= 57_u8
+    return b.to_i32 - 55 if b >= 65_u8 && b <= 70_u8
+    return b.to_i32 - 87 if b >= 97_u8 && b <= 102_u8
+    -1
+  end
+
+  def self.wsp?(b : UInt8) : Bool
+    b == 32_u8 || b == 9_u8
+  end
+
+  def self.cut(text : String, start : Int32, stop : Int32) : String
+    stop > start ? text[start, stop - start] : ""
+  end
+
+  # `=` and the byte in two upper-case hex digits.
+  def self.escape(io : String::Builder, b : UInt8, mark : UInt8 = 61_u8) : Nil
+    io.write_byte(mark)
+    io.write_byte(HEX.to_unsafe[b.to_i32 >> 4])
+    io.write_byte(HEX.to_unsafe[b.to_i32 & 15])
+  end
+
+  def self.ascii?(text : String) : Bool
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return false if p[i] >= 128_u8
+      i = i + 1
+    end
+    true
+  end
+
+  def self.line_break?(text : String) : Bool
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return true if p[i] == 13_u8 || p[i] == 10_u8 || p[i] == 0_u8
+      i = i + 1
+    end
+    false
+  end
+
+  # Whether *text* is well-formed UTF-8: no overlong form, no surrogate,
+  # nothing past U+10FFFF.
+  def self.utf8?(text : String) : Bool
+    p = text.to_unsafe
+    n = text.bytesize
+    i = 0
+    while i < n
+      b = p[i].to_i32
+      if b < 128
+        i = i + 1
+      else
+        need = 0
+        cp = 0
+        least = 0
+        if b >= 0xC2 && b <= 0xDF
+          need = 1
+          cp = b & 0x1F
+          least = 0x80
+        elsif b >= 0xE0 && b <= 0xEF
+          need = 2
+          cp = b & 0x0F
+          least = 0x800
+        elsif b >= 0xF0 && b <= 0xF4
+          need = 3
+          cp = b & 0x07
+          least = 0x10000
+        else
+          return false
+        end
+        return false if i + need >= n
+        k = 1
+        while k <= need
+          c = p[i + k].to_i32
+          return false unless (c & 0xC0) == 0x80
+          cp = (cp << 6) | (c & 0x3F)
+          k = k + 1
+        end
+        return false if cp < least || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)
+        i = i + need + 1
+      end
+    end
+    true
+  end
+
+  # The bytes of the character at *i*: its lead byte's count, one for a
+  # byte that leads none, never past the end.
+  def self.char_size(p : Pointer(UInt8), i : Int32, n : Int32) : Int32
+    b = p[i]
+    size = 1
+    if b >= 0xF0_u8 && b <= 0xF7_u8
+      size = 4
+    elsif b >= 0xE0_u8
+      size = 3
+    elsif b >= 0xC0_u8
+      size = 2
+    end
+    size = 1 if b >= 0xF8_u8
+    size > n - i ? n - i : size
+  end
+
+  def self.append_utf8(io : String::Builder, cp : Int32) : Nil
+    if cp < 0x80
+      io.write_byte(cp.to_u8)
+    elsif cp < 0x800
+      io.write_byte((0xC0 | (cp >> 6)).to_u8)
+      io.write_byte((0x80 | (cp & 0x3F)).to_u8)
+    elsif cp < 0x10000
+      io.write_byte((0xE0 | (cp >> 12)).to_u8)
+      io.write_byte((0x80 | ((cp >> 6) & 0x3F)).to_u8)
+      io.write_byte((0x80 | (cp & 0x3F)).to_u8)
+    else
+      io.write_byte((0xF0 | (cp >> 18)).to_u8)
+      io.write_byte((0x80 | ((cp >> 12) & 0x3F)).to_u8)
+      io.write_byte((0x80 | ((cp >> 6) & 0x3F)).to_u8)
+      io.write_byte((0x80 | (cp & 0x3F)).to_u8)
+    end
+  end
+
+  # The charset *name* stands for, by IANA's names and their aliases in
+  # use, or nil for one this does not read.
+  def self.charset(name : String) : String?
+    case name.strip.downcase
+    when "utf-8", "utf8"
+      "utf-8"
+    when "us-ascii", "ascii", "us", "ansi_x3.4-1968", "iso646-us"
+      "us-ascii"
+    when "iso-8859-1", "iso8859-1", "iso_8859-1", "latin1", "latin-1", "l1", "cp819", "iso-ir-100"
+      "iso-8859-1"
+    when "iso-8859-15", "iso8859-15", "iso_8859-15", "latin-9", "latin9"
+      "iso-8859-15"
+    when "windows-1252", "cp1252"
+      "windows-1252"
+    else
+      nil
+    end
+  end
+
+  # *data*, in *name*'s charset, as UTF-8.
+  def self.decode(data : String, name : String) : String | MailError
+    kind = MailText.charset(name)
+    return MailError.new("the charset #{name.inspect} is not one std/mail reads (UTF-8, US-ASCII, ISO-8859-1, ISO-8859-15, windows-1252)") unless kind
+    p = data.to_unsafe
+    n = data.bytesize
+    if kind == "utf-8"
+      return data if MailText.utf8?(data)
+      return MailError.new("text said to be UTF-8 is not UTF-8")
+    end
+    i = 0
+    if kind == "us-ascii"
+      while i < n
+        return MailError.new("text said to be US-ASCII holds the byte 0x#{p[i].to_i32.to_s(16)}") if p[i] >= 128_u8
+        i = i + 1
+      end
+      return data
+    end
+    io = String::Builder.new(n + n // 4 + 1)
+    while i < n
+      b = p[i].to_i32
+      if b < 128
+        io.write_byte(p[i])
+      else
+        cp = b
+        if kind == "windows-1252" && b < 0xA0
+          cp = CP1252[b - 128]
+          return MailError.new("text said to be windows-1252 holds the byte 0x#{b.to_s(16)}, which it leaves undefined") if cp < 0
+        elsif kind == "iso-8859-15"
+          cp = MailText.latin9(b)
+        end
+        MailText.append_utf8(io, cp)
+      end
+      i = i + 1
+    end
+    io.to_s
+  end
+
+  # ISO-8859-15's eight differences from ISO-8859-1.
+  def self.latin9(b : Int32) : Int32
+    case b
+    when 0xA4 then 0x20AC
+    when 0xA6 then 0x0160
+    when 0xA8 then 0x0161
+    when 0xB4 then 0x017D
+    when 0xB8 then 0x017E
+    when 0xBC then 0x0152
+    when 0xBD then 0x0153
+    when 0xBE then 0x0178
+    else           b
+    end
+  end
+
+  # *text* with CRLF, CR and LF each a CRLF.
+  def self.crlf(text : String) : String
+    p = text.to_unsafe
+    n = text.bytesize
+    io = String::Builder.new(n + n // 16 + 2)
+    i = 0
+    while i < n
+      b = p[i]
+      if b == 13_u8
+        io.write_byte(13_u8)
+        io.write_byte(10_u8)
+        i = i + 1 if i + 1 < n && p[i + 1] == 10_u8
+      elsif b == 10_u8
+        io.write_byte(13_u8)
+        io.write_byte(10_u8)
+      else
+        io.write_byte(b)
+      end
+      i = i + 1
+    end
+    io.to_s
+  end
+
+  # *text* with each CRLF an LF.
+  def self.lf(text : String) : String
+    return text unless text.includes?("\r\n")
+    p = text.to_unsafe
+    n = text.bytesize
+    io = String::Builder.new(n)
+    i = 0
+    while i < n
+      io.write_byte(p[i]) unless p[i] == 13_u8 && i + 1 < n && p[i + 1] == 10_u8
+      i = i + 1
+    end
+    io.to_s
+  end
+
+  # --- Base64 (RFC 2045 section 6.8) ---
+
+  def self.b64_value(b : UInt8) : Int32
+    return b.to_i32 - 65 if b >= 65_u8 && b <= 90_u8
+    return b.to_i32 - 71 if b >= 97_u8 && b <= 122_u8
+    return b.to_i32 + 4 if b >= 48_u8 && b <= 57_u8
+    return 62 if b == 43_u8
+    return 63 if b == 47_u8
+    -1
+  end
+
+  def self.base64_encode(data : String) : String
+    flat = Base64.encode(data)
+    n = flat.bytesize
+    io = String::Builder.new(n + (n // 76 + 1) * 2)
+    p = flat.to_unsafe
+    i = 0
+    while i < n
+      take = n - i < 76 ? n - i : 76
+      io.write(p + i, take)
+      io << "\r\n"
+      i = i + take
+    end
+    io.to_s
+  end
+
+  # Characters outside the alphabet are passed over, as section 6.8 has
+  # it, and the first `=` ends the data; bits short of a byte at the end
+  # are dropped.
+  def self.base64_decode(text : String) : String
+    p = text.to_unsafe
+    n = text.bytesize
+    io = String::Builder.new(n * 3 // 4 + 4)
+    acc = 0
+    bits = 0
+    i = 0
+    while i < n
+      b = p[i]
+      break if b == 61_u8
+      v = MailText.b64_value(b)
+      if v >= 0
+        acc = ((acc << 6) | v) & 0xFFFFFF
+        bits = bits + 6
+        if bits >= 8
+          bits = bits - 8
+          io.write_byte(((acc >> bits) & 0xFF).to_u8)
+        end
+      end
+      i = i + 1
+    end
+    io.to_s
+  end
+
+  # --- Quoted-printable (RFC 2045 section 6.7) ---
+
+  # Line breaks of *data* (CRLF, CR or LF) are hard breaks written as
+  # CRLF, unless *binary*, when CR and LF are bytes like any other and
+  # escaped. The wrapping is `email.quoprimime.body_encode`'s: a line of
+  # more than 76 is cut at 75 and a soft break, never inside an escape;
+  # a space or tab at a line's end is escaped, or kept before a soft
+  # break where there is no room for its escape.
+  def self.qp_encode(data : String, binary : Bool) : String
+    p = data.to_unsafe
+    n = data.bytesize
+    io = String::Builder.new(n + n // 8 + 8)
+    line = String::Builder.new(128)
+    i = 0
+    while i < n
+      line = String::Builder.new(128)
+      while i < n
+        b = p[i]
+        break if !binary && (b == 13_u8 || b == 10_u8)
+        if (b >= 32_u8 && b <= 126_u8 && b != 61_u8) || b == 9_u8
+          line.write_byte(b)
+        else
+          MailText.escape(line, b)
+        end
+        i = i + 1
+      end
+      MailText.qp_wrap(io, line.to_s)
+      if i < n
+        i = i + 1 if p[i] == 13_u8 && i + 1 < n && p[i + 1] == 10_u8
+        i = i + 1
+        io << "\r\n"
+      end
+    end
+    io.to_s
+  end
+
+  # One encoded line, cut into lines of 76 or fewer.
+  def self.qp_wrap(io : String::Builder, e : String) : Nil
+    p = e.to_unsafe
+    size = e.bytesize
+    start = 0
+    last_start = size - 1 - 76
+    while start <= last_start
+      stop = start + 75
+      if p[stop - 2] == 61_u8
+        io.write(p + start, stop - 1 - start)
+        start = stop - 2
+      elsif p[stop - 1] == 61_u8
+        io.write(p + start, stop - start)
+        start = stop - 1
+      else
+        io.write(p + start, stop - start)
+        io.write_byte(61_u8)
+        start = stop
+      end
+      io << "\r\n"
+    end
+    if size > 0 && MailText.wsp?(p[size - 1])
+      room = start - last_start
+      io.write(p + start, size - 1 - start)
+      if room >= 3
+        MailText.escape(io, p[size - 1])
+      elsif room == 2
+        io.write_byte(p[size - 1])
+        io << "=\r\n"
+      else
+        io << "=\r\n"
+        MailText.escape(io, p[size - 1])
+      end
+    else
+      io.write(p + start, size - start)
+    end
+  end
+
+  # Hard breaks come out as CRLF. Space and tab at a line's end are
+  # dropped first (rule 3: a gateway may have added them), a line's last
+  # `=` is a soft break, `=` and two hex digits - either case - a byte,
+  # and any other `=` is itself.
+  def self.qp_decode(text : String) : String
+    p = text.to_unsafe
+    n = text.bytesize
+    io = String::Builder.new(n)
+    i = 0
+    while i < n
+      j = i
+      while j < n && p[j] != 10_u8
+        j = j + 1
+      end
+      e = j
+      e = e - 1 if j < n && e > i && p[e - 1] == 13_u8
+      while e > i && MailText.wsp?(p[e - 1])
+        e = e - 1
+      end
+      soft = false
+      k = i
+      while k < e
+        b = p[k]
+        if b != 61_u8
+          io.write_byte(b)
+          k = k + 1
+        elsif k + 1 == e
+          soft = true
+          k = k + 1
+        elsif k + 2 < e && MailText.hex_value(p[k + 1]) >= 0 && MailText.hex_value(p[k + 2]) >= 0
+          io.write_byte((MailText.hex_value(p[k + 1]) * 16 + MailText.hex_value(p[k + 2])).to_u8)
+          k = k + 3
+        else
+          io.write_byte(b)
+          k = k + 1
+        end
+      end
+      io << "\r\n" if j < n && !soft
+      i = j + 1
+    end
+    io.to_s
+  end
+
+  # --- Encoded-words (RFC 2047) ---
+
+  # Bytes a Q encoded-word may carry as they are, in any of the places
+  # one may stand (section 5, rule 3); a space is `_`.
+  def self.q_safe?(b : UInt8) : Bool
+    (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8) ||
+      b == 33_u8 || b == 42_u8 || b == 43_u8 || b == 45_u8 || b == 47_u8 || b == 32_u8
+  end
+
+  def self.q_size(p : Pointer(UInt8), start : Int32, stop : Int32) : Int32
+    size = 0
+    i = start
+    while i < stop
+      size = size + (MailText.q_safe?(p[i]) ? 1 : 3)
+      i = i + 1
+    end
+    size
+  end
+
+  # Where the characters from *i* that fit in an encoded-word's *room*
+  # bytes of text end: *i* when not even the first does.
+  def self.word_end(p : Pointer(UInt8), i : Int32, n : Int32, room : Int32, q : Bool) : Int32
+    j = i
+    size = 0
+    while j < n
+      c = MailText.char_size(p, j, n)
+      grown = q ? size + MailText.q_size(p, j, j + c) : ((j + c - i) + 2) // 3 * 4
+      break if grown > room
+      size = grown
+      j = j + c
+    end
+    j
+  end
+
+  def self.word(text : String, start : Int32, stop : Int32, q : Bool) : String
+    io = String::Builder.new(80)
+    io << (q ? "=?utf-8?q?" : "=?utf-8?b?")
+    if q
+      p = text.to_unsafe
+      i = start
+      while i < stop
+        b = p[i]
+        if b == 32_u8
+          io.write_byte(95_u8)
+        elsif MailText.q_safe?(b)
+          io.write_byte(b)
+        else
+          MailText.escape(io, b)
+        end
+        i = i + 1
+      end
+    else
+      io << Base64.encode(MailText.cut(text, start, stop))
+    end
+    io << "?="
+    io.to_s
+  end
+
+  # *text* with its encoded-words decoded and the whitespace between two
+  # of them dropped (section 6.2). A word is decoded where whitespace or
+  # the ends set it apart, several written together among them; one that
+  # does not decode is left as written.
+  def self.decode_words(text : String) : String
+    return text unless text.includes?("=?")
+    p = text.to_unsafe
+    n = text.bytesize
+    io = String::Builder.new(n)
+    i = 0
+    after_word = false
+    while i < n
+      j = i
+      while j < n && (MailText.wsp?(p[j]) || p[j] == 13_u8 || p[j] == 10_u8)
+        j = j + 1
+      end
+      k = j
+      while k < n && !(MailText.wsp?(p[k]) || p[k] == 13_u8 || p[k] == 10_u8)
+        k = k + 1
+      end
+      if k == j
+        io.write(p + i, j - i)
+        i = k
+      else
+        decoded = MailText.words_in(text, j, k)
+        if decoded
+          io.write(p + i, j - i) unless after_word
+          io << decoded
+          after_word = true
+        else
+          io.write(p + i, k - i)
+          after_word = false
+        end
+        i = k
+      end
+    end
+    io.to_s
+  end
+
+  # The encoded-words that are the whole of `text[start, stop)`, decoded,
+  # or nil when it is anything else.
+  def self.words_in(text : String, start : Int32, stop : Int32) : String?
+    io = String::Builder.new(stop - start)
+    at = start
+    while at < stop
+      one = MailText.word_at(text, at, stop)
+      return nil unless one
+      io << one[0]
+      at = one[1]
+    end
+    at == start ? nil : io.to_s
+  end
+
+  def self.word_at(text : String, at : Int32, stop : Int32) : {String, Int32}?
+    p = text.to_unsafe
+    return nil unless at + 1 < stop && p[at] == 61_u8 && p[at + 1] == 63_u8
+    c0 = at + 2
+    c1 = c0
+    while c1 < stop && p[c1] != 63_u8
+      c1 = c1 + 1
+    end
+    return nil if c1 == c0 || c1 + 2 >= stop || p[c1 + 2] != 63_u8
+    enc = p[c1 + 1]
+    t0 = c1 + 3
+    t1 = t0
+    while t1 < stop && p[t1] != 63_u8
+      t1 = t1 + 1
+    end
+    return nil unless t1 + 1 < stop && p[t1 + 1] == 61_u8
+    charset = MailText.cut(text, c0, c1)
+    star = charset.index('*')
+    charset = charset[0, star] if star
+    raw = nil.as(String?)
+    if enc == 81_u8 || enc == 113_u8
+      raw = MailText.q_decode(text, t0, t1)
+    elsif enc == 66_u8 || enc == 98_u8
+      raw = MailText.b_decode(text, t0, t1)
+    end
+    return nil unless raw
+    decoded = MailText.decode(raw, charset)
+    return nil if decoded.is_a?(MailError)
+    {decoded, t1 + 2}
+  end
+
+  def self.q_decode(text : String, start : Int32, stop : Int32) : String?
+    p = text.to_unsafe
+    io = String::Builder.new(stop - start)
+    i = start
+    while i < stop
+      b = p[i]
+      if b == 95_u8
+        io.write_byte(32_u8)
+        i = i + 1
+      elsif b == 61_u8
+        return nil unless i + 2 < stop
+        hi = MailText.hex_value(p[i + 1])
+        lo = MailText.hex_value(p[i + 2])
+        return nil if hi < 0 || lo < 0
+        io.write_byte((hi * 16 + lo).to_u8)
+        i = i + 3
+      else
+        io.write_byte(b)
+        i = i + 1
+      end
+    end
+    io.to_s
+  end
+
+  # The alphabet, then at most two `=` at the end: missing padding is
+  # taken, as readers take it.
+  def self.b_decode(text : String, start : Int32, stop : Int32) : String?
+    p = text.to_unsafe
+    e = stop
+    pads = 0
+    while e > start && p[e - 1] == 61_u8 && pads < 2
+      e = e - 1
+      pads = pads + 1
+    end
+    i = start
+    while i < e
+      return nil if MailText.b64_value(p[i]) < 0
+      i = i + 1
+    end
+    return nil if (e - start) % 4 == 1
+    MailText.base64_decode(MailText.cut(text, start, e))
+  end
+
+  # --- RFC 5322's lexical tokens ---
+
+  def self.atext?(b : UInt8) : Bool
+    return true if (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8)
+    return true if b >= 128_u8
+    case b
+    when 33_u8, 35_u8, 36_u8, 37_u8, 38_u8, 39_u8, 42_u8, 43_u8, 45_u8, 47_u8, 61_u8, 63_u8, 94_u8, 95_u8, 96_u8, 123_u8, 124_u8, 125_u8, 126_u8
+      true
+    else
+      false
+    end
+  end
+
+  # RFC 2045's token: printable ASCII but tspecials.
+  def self.token?(b : UInt8) : Bool
+    return false if b <= 32_u8 || b >= 127_u8
+    case b
+    when 40_u8, 41_u8, 60_u8, 62_u8, 64_u8, 44_u8, 59_u8, 58_u8, 92_u8, 34_u8, 47_u8, 91_u8, 93_u8, 63_u8, 61_u8
+      false
+    else
+      true
+    end
+  end
+
+  # *local* as an addr-spec writes it: as it is when it is a dot-atom,
+  # quoted otherwise.
+  def self.quote_local(local : String) : String
+    p = local.to_unsafe
+    n = local.bytesize
+    plain = n > 0 && p[0] != 46_u8 && p[n - 1] != 46_u8
+    i = 0
+    while plain && i < n
+      b = p[i]
+      plain = false unless MailText.atext?(b) || (b == 46_u8 && p[i + 1] != 46_u8)
+      i = i + 1
+    end
+    plain ? local : MailText.quoted(local)
+  end
+
+  def self.quoted(text : String) : String
+    io = String::Builder.new(text.bytesize + 2)
+    io.write_byte(34_u8)
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      io.write_byte(92_u8) if p[i] == 34_u8 || p[i] == 92_u8
+      io.write_byte(p[i])
+      i = i + 1
+    end
+    io.write_byte(34_u8)
+    io.to_s
+  end
+
+  # --- MIME parameters (RFC 2045 section 5.1, RFC 2231) ---
+
+  # A Content-Type's `type/subtype` in lower case, and its parameters;
+  # nil when it is not one.
+  def self.content_type(value : String) : {String, Hash(String, String)}?
+    scan = MailScan.new(value)
+    return nil if scan.skip_cfws
+    major = scan.token
+    return nil if major.empty? || scan.skip_cfws || scan.peek != 47_u8
+    scan.advance
+    return nil if scan.skip_cfws
+    minor = scan.token
+    return nil if minor.empty?
+    {major.downcase + "/" + minor.downcase, MailText.params(scan)}
+  end
+
+  # A Content-Disposition's kind in lower case, and its parameters.
+  def self.disposition(value : String) : {String, Hash(String, String)}?
+    scan = MailScan.new(value)
+    return nil if scan.skip_cfws
+    kind = scan.token
+    return nil if kind.empty?
+    {kind.downcase, MailText.params(scan)}
+  end
+
+  # `; name=value` after `scan`, names in lower case, RFC 2231's extended
+  # values and continuations put together. A parameter that cannot be read
+  # ends the list; what came before it is kept.
+  def self.params(scan : MailScan) : Hash(String, String)
+    raw = [] of {String, String}
+    while true
+      break if scan.skip_cfws
+      break if scan.done? || scan.peek != 59_u8
+      scan.advance
+      break if scan.skip_cfws
+      name = scan.token.downcase
+      break if name.empty? || scan.skip_cfws || scan.peek != 61_u8
+      scan.advance
+      break if scan.skip_cfws
+      if scan.peek == 34_u8
+        value = scan.quoted
+        break if value.is_a?(MailError)
+        raw << {name, value}
+      else
+        # Unquoted values with tspecials in them - `boundary=----=_Part`
+        # - are what mailers send; up to `;` or whitespace is the value.
+        raw << {name, scan.bare_value}
+      end
+    end
+    MailText.assemble(raw)
+  end
+
+  def self.assemble(raw : Array({String, String})) : Hash(String, String)
+    result = {} of String => String
+    plain = {} of String => String
+    pieces = {} of String => Array({Int32, String, Bool})
+    raw.each do |pair|
+      name = pair[0]
+      value = pair[1]
+      star = name.index('*')
+      if star.nil?
+        plain[name] = value if plain[name]?.nil?
+      else
+        base = name[0, star]
+        rest = MailText.cut(name, star + 1, name.bytesize)
+        list = pieces[base]? || [] of {Int32, String, Bool}
+        if rest.empty?
+          list << {-1, value, true}
+        else
+          extended = rest.ends_with?("*")
+          digits = extended ? rest[0, rest.bytesize - 1] : rest
+          index = digits.to_i?
+          if index && index >= 0 && (digits == "0" || !digits.starts_with?("0"))
+            list << {index, value, extended}
+          end
+        end
+        pieces[base] = list
+      end
+    end
+    pieces.each do |base, list|
+      joined = MailText.continued(list)
+      result[base] = joined if joined
+    end
+    plain.each do |name, value|
+      result[name] = MailText.whole_words(value) if result[name]?.nil?
+    end
+    result
+  end
+
+  # A value that is encoded-words and nothing else - how some mailers
+  # write a file name - decoded; any other as it is.
+  def self.whole_words(value : String) : String
+    return value unless value.starts_with?("=?") && value.ends_with?("?=")
+    decoded = MailText.decode_words(value)
+    decoded
+  end
+
+  def self.continued(list : Array({Int32, String, Bool})) : String?
+    list.each do |piece|
+      return MailText.extended(piece[1], true) if piece[0] == -1
+    end
+    sorted = list.sorted_by { |piece| piece[0] }
+    bytes = String::Builder.new(64)
+    charset = ""
+    expect = 0
+    sorted.each do |piece|
+      if piece[0] == expect
+        if piece[2]
+          value = piece[1]
+          if expect == 0
+            first = value.index('\'')
+            second = first ? value.index('\'', first + 1) : nil
+            if first && second
+              charset = value[0, first]
+              value = MailText.cut(value, second + 1, value.bytesize)
+            end
+          end
+          bytes << MailText.percent_decode(value)
+        else
+          bytes << piece[1]
+        end
+        expect = expect + 1
+      end
+    end
+    return nil if expect == 0
+    MailText.in_charset(bytes.to_s, charset)
+  end
+
+  # `charset'language'%XX...`, or with *prefixed* false just the
+  # percent-encoded bytes.
+  def self.extended(value : String, prefixed : Bool) : String
+    charset = ""
+    text = value
+    first = value.index('\'')
+    second = first ? value.index('\'', first + 1) : nil
+    if prefixed && first && second
+      charset = value[0, first]
+      text = MailText.cut(value, second + 1, value.bytesize)
+    end
+    MailText.in_charset(MailText.percent_decode(text), charset)
+  end
+
+  # Bytes from RFC 2231's charset in UTF-8; as they are when the charset
+  # is none or not one this reads.
+  def self.in_charset(bytes : String, charset : String) : String
+    return bytes if charset.empty?
+    decoded = MailText.decode(bytes, charset)
+    decoded.is_a?(MailError) ? bytes : decoded
+  end
+
+  def self.percent_decode(text : String) : String
+    return text unless text.includes?("%")
+    p = text.to_unsafe
+    n = text.bytesize
+    io = String::Builder.new(n)
+    i = 0
+    while i < n
+      if p[i] == 37_u8 && i + 2 < n && MailText.hex_value(p[i + 1]) >= 0 && MailText.hex_value(p[i + 2]) >= 0
+        io.write_byte((MailText.hex_value(p[i + 1]) * 16 + MailText.hex_value(p[i + 2])).to_u8)
+        i = i + 3
+      else
+        io.write_byte(p[i])
+        i = i + 1
+      end
+    end
+    io.to_s
+  end
+
+  # RFC 2231's attribute-char: what goes unescaped in an extended value.
+  def self.attr_char?(b : UInt8) : Bool
+    return true if (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8)
+    case b
+    when 33_u8, 35_u8, 36_u8, 38_u8, 43_u8, 45_u8, 46_u8, 94_u8, 95_u8, 96_u8, 124_u8, 126_u8
+      true
+    else
+      false
+    end
+  end
+
+  # --- Dates (RFC 5322 section 3.3) ---
+
+  WEEKDAYS  = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+  MONTHS    = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+  # The obsolete zones of RFC 5322 section 4.3, in minutes.
+  ZONES = {"ut" => 0, "gmt" => 0, "z" => 0, "edt" => -240, "est" => -300, "cdt" => -300, "cst" => -360,
+           "mdt" => -360, "mst" => -420, "pdt" => -420, "pst" => -480}
+
+  def self.two(n : Int32) : String
+    n < 10 ? "0" + n.to_s : n.to_s
+  end
+
+  # Year, month and day of *days* since 1970-01-01: Howard Hinnant's
+  # civil_from_days, which is written for division that truncates, as
+  # iyi's does.
+  def self.civil(days : Int64) : {Int32, Int32, Int32}
+    z = days + 719468_i64
+    era = (z >= 0 ? z : z - 146096_i64) // 146097_i64
+    doe = z - era * 146097_i64
+    yoe = (doe - doe // 1460_i64 + doe // 36524_i64 - doe // 146096_i64) // 365_i64
+    doy = doe - (365_i64 * yoe + yoe // 4_i64 - yoe // 100_i64)
+    mp = (5_i64 * doy + 2_i64) // 153_i64
+    d = doy - (153_i64 * mp + 2_i64) // 5_i64 + 1_i64
+    m = mp < 10 ? mp + 3 : mp - 9
+    y = yoe + era * 400_i64 + (m <= 2 ? 1_i64 : 0_i64)
+    {y.to_i32, m.to_i32, d.to_i32}
+  end
+
+  def self.days_from_civil(year : Int32, month : Int32, day : Int32) : Int64
+    y = (month <= 2 ? year - 1 : year).to_i64
+    era = (y >= 0 ? y : y - 399_i64) // 400_i64
+    yoe = y - era * 400_i64
+    mp = (month > 2 ? month - 3 : month + 9).to_i64
+    doy = (153_i64 * mp + 2_i64) // 5_i64 + day.to_i64 - 1_i64
+    doe = yoe * 365_i64 + yoe // 4_i64 - yoe // 100_i64 + doy
+    era * 146097_i64 + doe - 719468_i64
+  end
+
+  def self.month_days(year : Int32, month : Int32) : Int32
+    return 29 if month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+  end
+
+  def self.check_field(name : String, value : String) : Nil
+    raise "mail: a header name is printable ASCII without a colon, not #{name.inspect}" unless MailText.field_name?(name)
+    raise "mail: the #{name} header holds a line break" if MailText.line_break?(value)
+    raise "mail: the #{name} header is not UTF-8" unless MailText.utf8?(value)
+  end
+
+  def self.field_name?(name : String) : Bool
+    return false if name.empty?
+    p = name.to_unsafe
+    i = 0
+    while i < name.bytesize
+      return false if p[i] < 33_u8 || p[i] > 126_u8 || p[i] == 58_u8
+      i = i + 1
+    end
+    true
+  end
+end
+
+# A cursor over a structured header value: whitespace and comments
+# passed over, tokens and quoted strings read.
+class MailScan
+  getter at : Int32
+  @text : String
+  @p : Pointer(UInt8)
+  @n : Int32
+
+  def initialize(@text : String, @at : Int32 = 0)
+    @p = @text.to_unsafe
+    @n = @text.bytesize
+  end
+
+  def done? : Bool
+    @at >= @n
+  end
+
+  def peek : UInt8
+    @at < @n ? @p[@at] : 0_u8
+  end
+
+  def advance : Nil
+    @at = @at + 1
+  end
+
+  # Whether anything - whitespace or a comment - was passed over: an error
+  # for a comment never closed.
+  def skip_cfws : MailError?
+    while @at < @n
+      b = @p[@at]
+      if b == 32_u8 || b == 9_u8 || b == 13_u8 || b == 10_u8
+        @at = @at + 1
+      elsif b == 40_u8
+        depth = 0
+        while true
+          return MailError.new("a comment is not closed in #{@text.inspect}") if @at >= @n
+          c = @p[@at]
+          if c == 92_u8
+            @at = @at + 1
+          elsif c == 40_u8
+            depth = depth + 1
+          elsif c == 41_u8
+            depth = depth - 1
+          end
+          @at = @at + 1
+          break if depth == 0
+        end
+      else
+        break
+      end
+    end
+    nil
+  end
+
+  def token : String
+    start = @at
+    while @at < @n && MailText.token?(@p[@at])
+      @at = @at + 1
+    end
+    MailText.cut(@text, start, @at)
+  end
+
+  def atom : String
+    start = @at
+    while @at < @n && MailText.atext?(@p[@at])
+      @at = @at + 1
+    end
+    MailText.cut(@text, start, @at)
+  end
+
+  def digits : String
+    start = @at
+    while @at < @n && @p[@at] >= 48_u8 && @p[@at] <= 57_u8
+      @at = @at + 1
+    end
+    MailText.cut(@text, start, @at)
+  end
+
+  def letters : String
+    start = @at
+    while @at < @n && ((@p[@at] >= 65_u8 && @p[@at] <= 90_u8) || (@p[@at] >= 97_u8 && @p[@at] <= 122_u8))
+      @at = @at + 1
+    end
+    MailText.cut(@text, start, @at)
+  end
+
+  def bare_value : String
+    start = @at
+    while @at < @n && @p[@at] != 59_u8 && @p[@at] > 32_u8 && @p[@at] != 40_u8
+      @at = @at + 1
+    end
+    MailText.cut(@text, start, @at)
+  end
+
+  # The quoted string at `"`, its quoted-pairs resolved.
+  def quoted : String | MailError
+    @at = @at + 1
+    io = String::Builder.new(32)
+    while @at < @n
+      b = @p[@at]
+      if b == 34_u8
+        @at = @at + 1
+        return io.to_s
+      elsif b == 92_u8
+        @at = @at + 1
+        break if @at >= @n
+        io.write_byte(@p[@at])
+      elsif b != 13_u8 && b != 10_u8
+        io.write_byte(b)
+      end
+      @at = @at + 1
+    end
+    MailError.new("a quoted string is not closed in #{@text.inspect}")
+  end
+
+  # A domain literal at `[`, brackets kept.
+  def literal : String | MailError
+    start = @at
+    @at = @at + 1
+    while @at < @n
+      b = @p[@at]
+      if b == 93_u8
+        @at = @at + 1
+        return MailText.cut(@text, start, @at)
+      elsif b == 92_u8
+        @at = @at + 1
+      elsif b == 91_u8
+        break
+      end
+      @at = @at + 1
+    end
+    MailError.new("a domain literal is not closed in #{@text.inspect}")
+  end
+end
+
+# One word of a phrase or a local part as it was read: an atom, a quoted
+# string or a dot, and whether whitespace came before it.
+struct MailWord
+  getter text : String
+  getter kind : Int32
+  getter spaced : Bool
+
+  ATOM   = 0
+  QUOTED = 1
+  DOT    = 2
+
+  def initialize(@text : String, @kind : Int32, @spaced : Bool)
+  end
+end
+
+# RFC 5322 section 3.4's address lists, read.
+class MailAddresses
+  @scan : MailScan
+  @text : String
+
+  def initialize(@text : String)
+    @scan = MailScan.new(@text)
+  end
+
+  def fail(why : String) : MailError
+    MailError.new("#{why} in #{@text.inspect}")
+  end
+
+  # The mailboxes of an address list, a group's members among them.
+  def list : Array(Std::Mail::Mail::Address) | MailError
+    found = [] of Std::Mail::Mail::Address
+    while true
+      problem = @scan.skip_cfws
+      return problem if problem
+      break if @scan.done?
+      if @scan.peek == 44_u8
+        @scan.advance
+      else
+        item = entry(found, false)
+        return item if item
+        problem = @scan.skip_cfws
+        return problem if problem
+        break if @scan.done?
+        return fail("an address is followed by #{@scan.peek.unsafe_chr.inspect}, not a comma") unless @scan.peek == 44_u8
+        @scan.advance
+      end
+    end
+    found
+  end
+
+  # One mailbox, or a group of them, added to *found*.
+  def entry(found : Array(Std::Mail::Mail::Address), grouped : Bool) : MailError?
+    words = phrase
+    return words if words.is_a?(MailError)
+    problem = @scan.skip_cfws
+    return problem if problem
+    case @scan.peek
+    when 60_u8
+      @scan.advance
+      problem = @scan.skip_cfws
+      return problem if problem
+      if @scan.peek == 64_u8
+        # obs-route: `<@a.example,@b.example:user@c.example>`, passed over.
+        while !@scan.done? && @scan.peek != 58_u8
+          @scan.advance
+        end
+        return fail("a route in an angle address does not end in a colon") if @scan.done?
+        @scan.advance
+      end
+      spec = addr_spec(phrase_words: nil)
+      return spec if spec.is_a?(MailError)
+      problem = @scan.skip_cfws
+      return problem if problem
+      return fail("an angle address is not closed with >") unless @scan.peek == 62_u8
+      @scan.advance
+      found << Std::Mail::Mail::Address.new(spec[0], spec[1], MailAddresses.display(words), true)
+    when 58_u8
+      return fail("a group is inside a group") if grouped
+      return fail("a group has no name") if words.empty?
+      @scan.advance
+      while true
+        problem = @scan.skip_cfws
+        return problem if problem
+        return fail("a group is not closed with a semicolon") if @scan.done?
+        c = @scan.peek
+        if c == 59_u8
+          @scan.advance
+          break
+        elsif c == 44_u8
+          @scan.advance
+        else
+          item = entry(found, true)
+          return item if item
+          problem = @scan.skip_cfws
+          return problem if problem
+          c = @scan.peek
+          return fail("a group's member is followed by neither a comma nor a semicolon") unless c == 44_u8 || c == 59_u8
+        end
+      end
+    when 64_u8
+      spec = addr_spec(phrase_words: words)
+      return spec if spec.is_a?(MailError)
+      found << Std::Mail::Mail::Address.new(spec[0], spec[1], "", true)
+    else
+      return fail("a name with no address") unless words.empty?
+      return fail("#{@scan.done? ? "nothing" : @scan.peek.unsafe_chr.inspect} where an address should be")
+    end
+    nil
+  end
+
+  # Atoms, quoted strings and dots up to the next special.
+  def phrase : Array(MailWord) | MailError
+    words = [] of MailWord
+    while true
+      before = @scan.at
+      problem = @scan.skip_cfws
+      return problem if problem
+      spaced = @scan.at > before && !words.empty?
+      c = @scan.peek
+      if c == 34_u8
+        text = @scan.quoted
+        return text if text.is_a?(MailError)
+        words << MailWord.new(text, MailWord::QUOTED, spaced)
+      elsif c == 46_u8
+        @scan.advance
+        words << MailWord.new(".", MailWord::DOT, spaced)
+      elsif !@scan.done? && MailText.atext?(c)
+        words << MailWord.new(@scan.atom, MailWord::ATOM, spaced)
+      else
+        break
+      end
+    end
+    words
+  end
+
+  # The display name *words* spell: one space where whitespace was, none
+  # between two encoded-words, each decoded.
+  def self.display(words : Array(MailWord)) : String
+    io = String::Builder.new(32)
+    last_word = false
+    words.each do |w|
+      decoded = w.kind == MailWord::ATOM ? MailText.words_in(w.text, 0, w.text.bytesize) : nil
+      io << " " if w.spaced && !(decoded && last_word)
+      io << (decoded || w.text)
+      last_word = !decoded.nil?
+    end
+    io.to_s
+  end
+
+  # `local@domain` at the cursor, or after the local part *phrase_words*
+  # already read: the local part unquoted, and the domain.
+  def addr_spec(phrase_words : Array(MailWord)?) : {String, String} | MailError
+    words = phrase_words
+    unless words
+      read = phrase
+      return read if read.is_a?(MailError)
+      words = read
+    end
+    return fail("an address has no local part") if words.empty?
+    local = String::Builder.new(32)
+    want_word = true
+    words.each do |w|
+      if want_word
+        return fail("a local part has a dot where a word should be") if w.kind == MailWord::DOT
+        local << w.text
+      else
+        return fail("a local part has two words with no dot between them") unless w.kind == MailWord::DOT
+        local << "."
+      end
+      want_word = !want_word
+    end
+    return fail("a local part ends in a dot") if want_word
+    problem = @scan.skip_cfws
+    return problem if problem
+    return fail("an address has no @") unless @scan.peek == 64_u8
+    @scan.advance
+    problem = @scan.skip_cfws
+    return problem if problem
+    if @scan.peek == 91_u8
+      lit = @scan.literal
+      return lit if lit.is_a?(MailError)
+      return {local.to_s, lit}
+    end
+    domain = String::Builder.new(32)
+    while true
+      label = @scan.atom
+      return fail("a domain has an empty label") if label.empty?
+      domain << label
+      problem = @scan.skip_cfws
+      return problem if problem
+      if @scan.peek == 46_u8
+        @scan.advance
+        domain << "."
+        problem = @scan.skip_cfws
+        return problem if problem
+      else
+        break
+      end
+    end
+    {local.to_s, domain.to_s}
+  end
+end
+
+# One header line being written, folded at the spaces between its tokens.
+class MailFolder
+  LIMIT = 78
+
+  @io : String::Builder
+  @col : Int32
+  @content : Bool
+
+  def initialize(name : String)
+    @io = String::Builder.new(128)
+    @io << name << ":"
+    @col = name.bytesize + 1
+    @content = false
+  end
+
+  # *text*, never broken, after a space when *spaced*: on a line of its
+  # own when it would carry this one past the limit. Nothing is folded
+  # before the first token, which stays beside the name.
+  def token(text : String, spaced : Bool = true) : Nil
+    if spaced
+      if @content && !text.empty? && @col + 1 + text.bytesize > LIMIT
+        @io << "\r\n "
+        @col = 1
+      else
+        @io << " "
+        @col = @col + 1
+      end
+    end
+    @io << text
+    @col = @col + text.bytesize
+    @content = true
+  end
+
+  # What an encoded-word after a space may take of this line: the rest
+  # of it, and never more than section 2's 75.
+  private def room : Int32
+    left = LIMIT - @col - 1
+    left > 75 ? 75 : left
+  end
+
+  # *text* as encoded-words, each after a space, filling the line before
+  # folding to the next.
+  def words(text : String) : Nil
+    p = text.to_unsafe
+    n = text.bytesize
+    q = MailText.q_size(p, 0, n) <= (n + 2) // 3 * 4
+    i = 0
+    while i < n
+      j = MailText.word_end(p, i, n, room - 12, q)
+      if j == i && @content
+        @io << "\r\n"
+        @col = 0
+        j = MailText.word_end(p, i, n, room - 12, q)
+      end
+      j = i + MailText.char_size(p, i, n) if j == i
+      word = MailText.word(text, i, j, q)
+      @io << " " << word
+      @col = @col + 1 + word.bytesize
+      @content = true
+      i = j
+    end
+  end
+
+  # An unstructured value: as its words when they are printable ASCII
+  # set apart by single spaces and each fits a line, encoded-words
+  # otherwise.
+  def unstructured(value : String) : Nil
+    if MailFolder.plain?(value, @col)
+      value.split(' ').each { |w| token(w) }
+    else
+      words(value)
+    end
+  end
+
+  def self.plain?(value : String, col : Int32) : Bool
+    return true if value.empty?
+    return false if value.includes?("=?")
+    p = value.to_unsafe
+    n = value.bytesize
+    return false if p[0] == 32_u8 || p[n - 1] == 32_u8
+    word = 0
+    first = true
+    i = 0
+    while i < n
+      b = p[i]
+      if b == 32_u8
+        return false if word == 0
+        first = false
+        word = 0
+      else
+        return false if b < 33_u8 || b > 126_u8
+        word = word + 1
+        return false if word > LIMIT - 1 - (first ? col : 0)
+      end
+      i = i + 1
+    end
+    true
+  end
+
+  # A display name: atoms, a quoted string, or encoded-words.
+  def phrase(name : String) : Nil
+    p = name.to_unsafe
+    n = name.bytesize
+    atoms = !name.includes?("=?") && p[0] != 32_u8 && p[n - 1] != 32_u8
+    printable = !name.includes?("=?") && n <= 70
+    i = 0
+    while i < n
+      b = p[i]
+      atoms = false unless (b < 128_u8 && MailText.atext?(b)) || (b == 32_u8 && i > 0 && p[i - 1] != 32_u8)
+      printable = false unless b >= 32_u8 && b <= 126_u8
+      i = i + 1
+    end
+    if atoms
+      name.split(' ').each { |w| token(w) }
+    elsif printable
+      token(MailText.quoted(name))
+    else
+      # Python's `email` reads a space into the gap between two
+      # encoded-words of a phrase, where RFC 2047 section 6.2 drops it,
+      # so two are put side by side only where nothing else will do: a
+      # name that fits one encoded-word goes as one, on a line of its own
+      # if need be, and a longer one of single-spaced words as atoms where
+      # its words are atoms and encoded-words for the runs between them.
+      if MailFolder.whole_word?(name)
+        encoded(name)
+      elsif atoms_apart?(name)
+        run = [] of String
+        name.split(' ').each do |w|
+          if MailFolder.atom?(w)
+            encoded(run.join(' ')) unless run.empty?
+            run = [] of String
+            token(w)
+          else
+            run << w
+          end
+        end
+        encoded(run.join(' ')) unless run.empty?
+      else
+        words(name)
+      end
+    end
+  end
+
+  # *text* as one encoded-word when it fits one, as many as it needs
+  # otherwise.
+  private def encoded(text : String) : Nil
+    if MailFolder.whole_word?(text)
+      p = text.to_unsafe
+      n = text.bytesize
+      token(MailText.word(text, 0, n, MailText.q_size(p, 0, n) <= (n + 2) // 3 * 4))
+    else
+      words(text)
+    end
+  end
+
+  def self.whole_word?(text : String) : Bool
+    p = text.to_unsafe
+    n = text.bytesize
+    q = MailText.q_size(p, 0, n) <= (n + 2) // 3 * 4
+    MailText.word_end(p, 0, n, 63, q) == n
+  end
+
+  def self.atom?(word : String) : Bool
+    return false if word.empty? || word.includes?("=?")
+    p = word.to_unsafe
+    i = 0
+    while i < word.bytesize
+      return false unless p[i] < 128_u8 && MailText.atext?(p[i])
+      i = i + 1
+    end
+    true
+  end
+
+  # Whether *name* is words set apart by single spaces.
+  private def atoms_apart?(name : String) : Bool
+    !name.empty? && !name.starts_with?(" ") && !name.ends_with?(" ") && !name.includes?("  ") && !name.includes?("\t")
+  end
+
+  def finish : String
+    @io << "\r\n"
+    @io.to_s
+  end
+end
+
+# A part as it is written: its header lines, and its body.
+struct MailEntity
+  getter head : String
+  getter body : String
+
+  def initialize(@head : String, @body : String)
+  end
+
+  def to_s : String
+    @head + "\r\n" + @body
+  end
+end
+
+pub struct Mail
+  # How deep parts may nest before a message is refused.
+  MAX_DEPTH = 32
+
+  # A message read from *text*: its header section, then its body.
+  def self.parse(text : String) : Part | MailError
+    Part.parse(text)
+  end
+
+  # RFC 5322's date-time for *unix* seconds, at *offset* minutes east of
+  # UTC: `Sat, 17 Oct 2026 14:00:00 +0200`, as `email.utils.format_datetime`
+  # writes it.
+  def self.date(unix : Int64, offset : Int32 = 0) : String
+    raise "mail: a Date's offset is within a day of UTC, -1439 to 1439 minutes, not #{offset}" if offset < -1439 || offset > 1439
+    local = unix + offset.to_i64 * 60_i64
+    # `//` and `%` truncate toward zero: a day before 1970 is floored here.
+    days = local // 86400_i64
+    days = days - 1_i64 if local % 86400_i64 < 0
+    secs = (local - days * 86400_i64).to_i32
+    civil = MailText.civil(days)
+    raise "mail: a Date is in the years 1900 to 9999, not #{civil[0]}" if civil[0] < 1900 || civil[0] > 9999
+    zone = offset < 0 ? -offset : offset
+    "#{MailText::WEEKDAYS[((days % 7_i64 + 7_i64) % 7_i64).to_i32]}, #{MailText.two(civil[2])} #{MailText::MONTHS[civil[1] - 1]} #{civil[0]} " +
+      "#{MailText.two(secs // 3600)}:#{MailText.two(secs // 60 % 60)}:#{MailText.two(secs % 60)} " +
+      "#{offset < 0 ? "-" : "+"}#{MailText.two(zone // 60)}#{MailText.two(zone % 60)}"
+  end
+
+  # A date-time (RFC 5322 section 3.3, with section 4.3's obsolete years
+  # and zones) as Unix seconds and the offset it was written at, in
+  # minutes. The day of the week is not held to the date, as readers do
+  # not hold it. A military zone is -0000, as section 4.3 says.
+  def self.parse_date(text : String) : {Int64, Int32} | MailError
+    bad = MailError.new("#{text.inspect} is not an RFC 5322 date")
+    scan = MailScan.new(text)
+    return bad if scan.skip_cfws
+    name = scan.letters
+    unless name.empty?
+      return bad unless MailText::DAY_NAMES.includes?(name.downcase)
+      return bad if scan.skip_cfws || scan.peek != 44_u8
+      scan.advance
+      return bad if scan.skip_cfws
+    end
+    day = scan.digits
+    return bad if day.empty? || day.bytesize > 2 || scan.skip_cfws
+    month = MailText::MONTHS.index(scan.letters.capitalize)
+    return bad unless month
+    return bad if scan.skip_cfws
+    year_text = scan.digits
+    return bad if year_text.bytesize < 2 || scan.skip_cfws
+    year = year_text.to_i
+    year = year + (year < 50 ? 2000 : 1900) if year_text.bytesize == 2
+    year = year + 1900 if year_text.bytesize == 3
+    hour = scan.digits
+    return bad if hour.empty? || hour.bytesize > 2 || scan.skip_cfws || scan.peek != 58_u8
+    scan.advance
+    return bad if scan.skip_cfws
+    minute = scan.digits
+    return bad if minute.bytesize != 2 || scan.skip_cfws
+    second = "0"
+    if scan.peek == 58_u8
+      scan.advance
+      return bad if scan.skip_cfws
+      second = scan.digits
+      return bad if second.bytesize != 2 || scan.skip_cfws
+    end
+    offset = 0
+    c = scan.peek
+    if c == 43_u8 || c == 45_u8
+      scan.advance
+      zone = scan.digits
+      return bad unless zone.bytesize == 4
+      hh = zone[0, 2].to_i
+      mm = zone[2, 2].to_i
+      return bad if hh > 23 || mm > 59
+      offset = (hh * 60 + mm) * (c == 45_u8 ? -1 : 1)
+    else
+      zone = scan.letters.downcase
+      return MailError.new("#{text.inspect} has no zone") if zone.empty?
+      known = MailText::ZONES[zone]?
+      if known
+        offset = known
+      elsif zone.bytesize != 1 || zone == "j"
+        return bad
+      end
+    end
+    return bad if scan.skip_cfws || !scan.done?
+    d = day.to_i
+    h = hour.to_i
+    mi = minute.to_i
+    s = second.to_i
+    return bad if year > 9999 || d < 1 || d > MailText.month_days(year, month + 1) || h > 23 || mi > 59 || s > 60
+    days = MailText.days_from_civil(year, month + 1, d)
+    {days * 86400_i64 + (h * 3600 + mi * 60 + s).to_i64 - offset.to_i64 * 60_i64, offset}
+  end
+
+  # An unstructured header line, `name: value` folded and encoded as the
+  # builder writes it, CRLF and all.
+  def self.fold(name : String, value : String) : String
+    MailText.check_field(name, value)
+    f = MailFolder.new(name)
+    f.unstructured(value)
+    f.finish
+  end
+
+  # *text* with its RFC 2047 encoded-words decoded.
+  def self.decode_words(text : String) : String
+    MailText.decode_words(text)
+  end
+
+  # *data* in base64, lines of 76 and a CRLF after each.
+  def self.encode_base64(data : String) : String
+    MailText.base64_encode(data)
+  end
+
+  # What base64 *text* stands for, characters outside the alphabet passed
+  # over.
+  def self.decode_base64(text : String) : String
+    MailText.base64_decode(text)
+  end
+
+  # *data* in quoted-printable, lines of 76 or fewer; its line breaks
+  # hard ones written as CRLF, or with *binary* escaped like any byte.
+  def self.encode_quoted_printable(data : String, binary : Bool = false) : String
+    MailText.qp_encode(data, binary)
+  end
+
+  # What quoted-printable *text* stands for, hard breaks as CRLF.
+  def self.decode_quoted_printable(text : String) : String
+    MailText.qp_decode(text)
+  end
+
+  # *text* from *charset* in UTF-8.
+  def self.decode_charset(text : String, charset : String) : String | MailError
+    MailText.decode(text, charset)
+  end
+
+  # A mailbox: an address and the name shown with it.
+  class Address
+    # The display name, decoded; "" when there is none.
+    getter name : String
+    # The local part, unquoted, and the domain as written.
+    getter local : String
+    getter domain : String
+
+    # *address* is an addr-spec: `user@example.com`, or
+    # `"john doe"@example.com` with its local part quoted. Anything else
+    # is a panic, as is a name with a line break in it.
+    def initialize(address : String, @name : String = "")
+      raise "mail: a display name holds a line break" if MailText.line_break?(@name)
+      raise "mail: a display name is not UTF-8" unless MailText.utf8?(@name)
+      reader = MailAddresses.new(address)
+      spec = reader.addr_spec(phrase_words: nil)
+      raise "mail: #{address.inspect} is not an address: #{spec.reason}" if spec.is_a?(MailError)
+      @local = spec[0]
+      @domain = spec[1]
+    end
+
+    # What `parse` makes, already read.
+    def initialize(@local : String, @domain : String, @name : String, read : Bool)
+    end
+
+    # The addr-spec: the local part quoted where it is not a dot-atom.
+    def address : String
+      MailText.quote_local(@local) + "@" + @domain
+    end
+
+    # As a person reads it: `Name <user@example.com>`, the name quoted
+    # when it is not atoms, nothing encoded.
+    def to_s : String
+      return address if @name.empty?
+      plain = true
+      p = @name.to_unsafe
+      i = 0
+      while i < @name.bytesize
+        plain = false unless MailText.atext?(p[i]) || p[i] == 32_u8
+        i = i + 1
+      end
+      (plain ? @name : MailText.quoted(@name)) + " <" + address + ">"
+    end
+
+    # Whether the address is more than ASCII (RFC 6532), which only a
+    # server that offers SMTPUTF8 takes.
+    def utf8? : Bool
+      !MailText.ascii?(@local) || !MailText.ascii?(@domain)
+    end
+
+    def ==(other : Address) : Bool
+      @name == other.name && @local == other.local && @domain == other.domain
+    end
+
+    # The one mailbox *text* holds.
+    def self.parse(text : String) : Address | MailError
+      list = Address.parse_list(text)
+      return list if list.is_a?(MailError)
+      return MailError.new("#{text.inspect} holds #{list.size} addresses, not one") unless list.size == 1
+      list[0]
+    end
+
+    # The mailboxes of an address list, a group's members in its place.
+    def self.parse_list(text : String) : Array(Address) | MailError
+      MailAddresses.new(text).list
+    end
+  end
+
+  # A message to be written: its addresses, subject, date and identifier,
+  # its text and HTML, and its attachments.
+  class Message
+    property from : Address? = nil
+    getter to : Array(Address) = [] of Address
+    getter cc : Array(Address) = [] of Address
+    getter bcc : Array(Address) = [] of Address
+    getter reply_to : Array(Address) = [] of Address
+    @subject : String? = nil
+    @date : String? = nil
+    @message_id : String? = nil
+    @text : String? = nil
+    @html : String? = nil
+    # File name, media type, bytes.
+    @attachments : Array({String, String, String}) = [] of {String, String, String}
+    @extra : Array({String, String}) = [] of {String, String}
+
+    OWN = ["from", "to", "cc", "bcc", "reply-to", "subject", "date", "message-id", "mime-version"]
+
+    def initialize
+    end
+
+    def subject : String?
+      @subject
+    end
+
+    def subject=(value : String) : String
+      MailText.check_field("Subject", value)
+      @subject = value
+    end
+
+    def date : String?
+      @date
+    end
+
+    # An RFC 5322 date-time - `Mail.date` writes one - refused when it is
+    # not one.
+    def date=(value : String) : String
+      MailText.check_field("Date", value)
+      raise "mail: the Date #{value.inspect} is not an RFC 5322 date" if Mail.parse_date(value).is_a?(MailError)
+      @date = value
+    end
+
+    def message_id : String?
+      @message_id
+    end
+
+    # `<left@right>`, the brackets added when they are not there.
+    def message_id=(value : String) : String
+      MailText.check_field("Message-ID", value)
+      id = value.starts_with?("<") && value.ends_with?(">") ? value[1, value.bytesize - 2] : value
+      at = id.index('@')
+      ok = !at.nil? && at > 0 && at < id.bytesize - 1
+      p = id.to_unsafe
+      i = 0
+      while ok && i < id.bytesize
+        b = p[i]
+        ok = false if b <= 32_u8 || b >= 127_u8 || b == 60_u8 || b == 62_u8 || b == 34_u8 || b == 92_u8
+        i = i + 1
+      end
+      raise "mail: the Message-ID #{value.inspect} is not <left@right>" unless ok
+      @message_id = "<" + id + ">"
+    end
+
+    def text : String?
+      @text
+    end
+
+    def text=(value : String) : String
+      raise "mail: the text is not UTF-8" unless MailText.utf8?(value)
+      @text = value
+    end
+
+    def html : String?
+      @html
+    end
+
+    def html=(value : String) : String
+      raise "mail: the HTML is not UTF-8" unless MailText.utf8?(value)
+      @html = value
+    end
+
+    # A file sent with the message, under *filename*, as *content_type*:
+    # the type its extension names (std/mime) when nil.
+    def attach(filename : String, data : String, content_type : String? = nil) : self
+      raise "mail: an attachment's file name holds a line break" if MailText.line_break?(filename)
+      raise "mail: an attachment's file name is not UTF-8" unless MailText.utf8?(filename)
+      raise "mail: an attachment's file name is empty" if filename.empty?
+      kind = content_type || MIME.from_extension(filename)
+      raise "mail: #{kind.inspect} is not a media type" if MailText.line_break?(kind) || MailText.content_type(kind).nil? || !MailText.ascii?(kind)
+      @attachments << {filename, kind, data}
+      self
+    end
+
+    # A header of the caller's own, written as unstructured text. The
+    # headers the message writes itself are refused here.
+    def header(name : String, value : String) : self
+      MailText.check_field(name, value)
+      lower = name.downcase
+      raise "mail: #{name} is set through the message's own property" if OWN.includes?(lower) || lower.starts_with?("content-")
+      @extra << {name, value}
+      self
+    end
+
+    # Every address the message goes to - To, Cc and Bcc - once each.
+    def recipients : Array(String)
+      seen = [] of String
+      (@to + @cc + @bcc).each do |a|
+        seen << a.address unless seen.includes?(a.address)
+      end
+      seen
+    end
+
+    # Whether an address in the message is RFC 6532's UTF-8.
+    def utf8? : Bool
+      sender = @from
+      return true if sender && sender.utf8?
+      (@to + @cc + @bcc + @reply_to).any? { |a| a.utf8? }
+    end
+
+    # The message, CRLF line breaks and all. A From and a Date are
+    # required - set the Date with `msg.date = Mail.date(...)` - and the
+    # Message-ID is optional. Writing a message the caller left incomplete
+    # is a mistake, so it panics, with one of:
+    #
+    # - `mail: a message has no From` when no From was set;
+    # - `mail: a message has no Date` when no Date was set.
+    #
+    # Those are the only panics here: every other value - a header, an
+    # address, a Date, a Message-ID, a body, an attachment - is checked,
+    # and refused with a panic, by the setter or method that takes it.
+    def to_s : String
+      sender = @from
+      raise "mail: a message has no From" unless sender
+      date = @date
+      raise "mail: a message has no Date" unless date
+      head = String::Builder.new(1024)
+      head << Mail.fold("Date", date)
+      head << Message.addresses("From", [sender])
+      head << Message.addresses("Reply-To", @reply_to) unless @reply_to.empty?
+      head << Message.addresses("To", @to) unless @to.empty?
+      head << Message.addresses("Cc", @cc) unless @cc.empty?
+      if subject = @subject
+        head << Mail.fold("Subject", subject)
+      end
+      if id = @message_id
+        head << "Message-ID: " << id << "\r\n"
+      end
+      @extra.each { |pair| head << Mail.fold(pair[0], pair[1]) }
+      head << "MIME-Version: 1.0\r\n"
+      entity = content
+      head << entity.head << "\r\n" << entity.body
+      head.to_s
+    end
+
+    protected def self.addresses(name : String, list : Array(Address)) : String
+      f = MailFolder.new(name)
+      list.each_with_index do |a, i|
+        tail = i == list.size - 1 ? "" : ","
+        if a.name.empty?
+          f.token(a.address + tail)
+        else
+          f.phrase(a.name)
+          f.token("<" + a.address + ">" + tail)
+        end
+      end
+      f.finish
+    end
+
+    private def content : MailEntity
+      body = nil.as(MailEntity?)
+      text = @text
+      html = @html
+      if text && html
+        body = Message.multipart("alternative", [Message.text_part("plain", text), Message.text_part("html", html)])
+      elsif html
+        body = Message.text_part("html", html)
+      elsif text || @attachments.empty?
+        body = Message.text_part("plain", text || "")
+      end
+      return body if body && @attachments.empty?
+      children = [] of MailEntity
+      children << body if body
+      @attachments.each { |item| children << Message.attachment(item[0], item[1], item[2]) }
+      Message.multipart("mixed", children)
+    end
+
+    protected def self.text_part(subtype : String, text : String) : MailEntity
+      canonical = MailText.crlf(text)
+      encoding = "7bit"
+      body = canonical
+      unless Message.seven_bit?(canonical)
+        qp = MailText.qp_encode(canonical, false)
+        b64 = MailText.base64_encode(canonical)
+        encoding = qp.bytesize <= b64.bytesize ? "quoted-printable" : "base64"
+        body = qp.bytesize <= b64.bytesize ? qp : b64
+      end
+      head = "Content-Type: text/#{subtype}; charset=\"utf-8\"\r\nContent-Transfer-Encoding: #{encoding}\r\n"
+      MailEntity.new(head, body)
+    end
+
+    # ASCII without NUL, in lines of 78 or fewer.
+    protected def self.seven_bit?(text : String) : Bool
+      p = text.to_unsafe
+      col = 0
+      i = 0
+      while i < text.bytesize
+        b = p[i]
+        return false if b == 0_u8 || b >= 128_u8
+        if b == 13_u8
+          col = 0
+        elsif b != 10_u8
+          col = col + 1
+          return false if col > MailFolder::LIMIT
+        end
+        i = i + 1
+      end
+      true
+    end
+
+    protected def self.attachment(filename : String, kind : String, data : String) : MailEntity
+      type = MailFolder.new("Content-Type")
+      kind.split(' ').each { |w| type.token(w) }
+      disposition = MailFolder.new("Content-Disposition")
+      disposition.token("attachment;")
+      Message.filename_params(filename).each { |param| disposition.token(param) }
+      head = type.finish + disposition.finish + "Content-Transfer-Encoding: base64\r\n"
+      MailEntity.new(head, MailText.base64_encode(data))
+    end
+
+    # `filename="..."` for a short name of printable ASCII; RFC 2231's
+    # `filename*=utf-8''...` for any other, in continuations of whole
+    # characters when it is longer - 50 encoded bytes in the first, after
+    # its charset, and 60 in the rest, so each fits a line. All but the
+    # last end in `;`.
+    protected def self.filename_params(filename : String) : Array(String)
+      p = filename.to_unsafe
+      n = filename.bytesize
+      simple = n <= 60 && !filename.includes?("=?")
+      i = 0
+      while simple && i < n
+        b = p[i]
+        simple = false if b < 32_u8 || b > 126_u8 || b == 34_u8 || b == 92_u8
+        i = i + 1
+      end
+      return ["filename=" + MailText.quoted(filename)] if simple
+      chunks = [] of String
+      chunk = String::Builder.new(64)
+      size = 0
+      i = 0
+      while i < n
+        c = MailText.char_size(p, i, n)
+        piece = String::Builder.new(12)
+        k = i
+        while k < i + c
+          if MailText.attr_char?(p[k])
+            piece.write_byte(p[k])
+          else
+            MailText.escape(piece, p[k], 37_u8)
+          end
+          k = k + 1
+        end
+        text = piece.to_s
+        if size + text.bytesize > (chunks.empty? ? 50 : 60) && size > 0
+          chunks << chunk.to_s
+          chunk = String::Builder.new(64)
+          size = 0
+        end
+        chunk << text
+        size = size + text.bytesize
+        i = i + c
+      end
+      chunks << chunk.to_s
+      if chunks.size == 1 && chunks[0].bytesize <= 52
+        return ["filename*=utf-8''" + chunks[0]]
+      end
+      params = [] of String
+      chunks.each_with_index do |text, k|
+        prefix = k == 0 ? "utf-8''" : ""
+        params << "filename*#{k}*=" + prefix + text + (k == chunks.size - 1 ? "" : ";")
+      end
+      params
+    end
+
+    # The parts under one boundary, made from their own hash.
+    protected def self.multipart(subtype : String, children : Array(MailEntity)) : MailEntity
+      rendered = children.map { |c| c.to_s }
+      digest = SHA1.new
+      rendered.each { |r| digest.update(r) }
+      mark = "iyi-" + digest.hexfinal[0, 32]
+      while rendered.any? { |r| ("\r\n" + r).includes?("\r\n--" + mark) }
+        mark = "iyi-" + SHA1.hexdigest(mark)[0, 32]
+      end
+      body = String::Builder.new(1024)
+      rendered.each_with_index do |r, i|
+        body << (i == 0 ? "--" : "\r\n--") << mark << "\r\n" << r
+      end
+      body << "\r\n--" << mark << "--\r\n"
+      head = "Content-Type: multipart/#{subtype};\r\n boundary=\"#{mark}\"\r\n"
+      MailEntity.new(head, body.to_s)
+    end
+  end
+
+  # A message or one of its parts, as read: its header fields unfolded and
+  # in order, and its body - a multipart's parts, a `message/rfc822`'s
+  # message, or bytes in a transfer encoding.
+  class Part
+    # Each field's name as written and its value unfolded, whitespace at
+    # either end dropped, nothing decoded.
+    getter headers : Array({String, String})
+    # The parts of a multipart, or the message a `message/rfc822` holds.
+    getter parts : Array(Part)
+    # `type/subtype` in lower case: `text/plain` when the part names none,
+    # or names one that cannot be read (RFC 2045 section 5.2).
+    getter media_type : String
+    @params : Hash(String, String)
+    @source : String
+    @body_at : Int32
+    @body_end : Int32
+
+    def initialize(@source : String, @headers : Array({String, String}), @media_type : String, @params : Hash(String, String), @body_at : Int32, @body_end : Int32, @parts : Array(Part))
+    end
+
+    def self.parse(text : String) : Part | MailError
+      Part.read(text, 0, text.bytesize, 0, "text/plain")
+    end
+
+    protected def self.read(source : String, start : Int32, stop : Int32, depth : Int32, default_type : String) : Part | MailError
+      return MailError.new("parts are nested deeper than #{MAX_DEPTH}") if depth > MAX_DEPTH
+      p = source.to_unsafe
+      headers = [] of {String, String}
+      name = nil.as(String?)
+      value = String::Builder.new(64)
+      body_at = stop
+      line = 0
+      i = start
+      while i < stop
+        j = i
+        while j < stop && p[j] != 10_u8
+          j = j + 1
+        end
+        e = j
+        e = e - 1 if e > i && p[e - 1] == 13_u8
+        after = j < stop ? j + 1 : stop
+        line = line + 1
+        if e == i
+          body_at = after
+          break
+        end
+        if MailText.wsp?(p[i])
+          return MailError.new("the header section begins with a folded line") unless name
+          value.write(p + i, e - i)
+        else
+          if field = name
+            headers << {field, Part.trim(value.to_s)}
+          end
+          colon = i
+          while colon < e && p[colon] != 58_u8
+            colon = colon + 1
+          end
+          stem = colon
+          while stem > i && MailText.wsp?(p[stem - 1])
+            stem = stem - 1
+          end
+          field = MailText.cut(source, i, stem)
+          unless colon < e && MailText.field_name?(field)
+            shown = MailText.cut(source, i, e)
+            shown = shown[0, 60] + "..." if shown.bytesize > 64
+            return MailError.new("line #{line} of a header section is not a field: #{shown.inspect}")
+          end
+          name = field
+          value = String::Builder.new(64)
+          value.write(p + colon + 1, e - colon - 1)
+        end
+        body_at = after
+        i = after
+      end
+      if field = name
+        headers << {field, Part.trim(value.to_s)}
+      end
+      media = default_type
+      params = {} of String => String
+      if type = Part.first(headers, "content-type")
+        parsed = MailText.content_type(type)
+        if parsed
+          media = parsed[0]
+          params = parsed[1]
+        else
+          media = "text/plain"
+        end
+      end
+      parts = [] of Part
+      if media.starts_with?("multipart/")
+        boundary = params["boundary"]?
+        return MailError.new("a #{media} part names no boundary") unless boundary && !boundary.empty?
+        ranges = Part.split(source, body_at, stop, boundary, media)
+        return ranges if ranges.is_a?(MailError)
+        child_type = media == "multipart/digest" ? "message/rfc822" : "text/plain"
+        ranges.each do |range|
+          child = Part.read(source, range[0], range[1], depth + 1, child_type)
+          return child if child.is_a?(MailError)
+          parts << child
+        end
+      elsif media == "message/rfc822"
+        cte = (Part.first(headers, "content-transfer-encoding") || "7bit").strip.downcase
+        if cte == "7bit" || cte == "8bit" || cte == "binary"
+          inner = Part.read(source, body_at, stop, depth + 1, "text/plain")
+          return inner if inner.is_a?(MailError)
+          parts << inner
+        end
+      end
+      Part.new(source, headers, media, params, body_at, stop, parts)
+    end
+
+    protected def self.trim(value : String) : String
+      p = value.to_unsafe
+      a = 0
+      b = value.bytesize
+      while a < b && MailText.wsp?(p[a])
+        a = a + 1
+      end
+      while b > a && MailText.wsp?(p[b - 1])
+        b = b - 1
+      end
+      a == 0 && b == value.bytesize ? value : MailText.cut(value, a, b)
+    end
+
+    protected def self.first(headers : Array({String, String}), lower : String) : String?
+      headers.each do |pair|
+        return pair[1] if pair[0].downcase == lower
+      end
+      nil
+    end
+
+    # The parts of a multipart body: between `--boundary` lines, the line
+    # break before each line its own; to the `--boundary--` line. The
+    # preamble and the epilogue are passed over.
+    protected def self.split(source : String, start : Int32, stop : Int32, boundary : String, media : String) : Array({Int32, Int32}) | MailError
+      p = source.to_unsafe
+      mark = "--" + boundary
+      m = mark.to_unsafe
+      size = mark.bytesize
+      ranges = [] of {Int32, Int32}
+      open_at = -1
+      i = start
+      while i < stop
+        j = i
+        while j < stop && p[j] != 10_u8
+          j = j + 1
+        end
+        e = j
+        e = e - 1 if e > i && p[e - 1] == 13_u8
+        if e - i >= size && p[i] == 45_u8 && p[i + 1] == 45_u8 && (i + size <= stop) && Part.prefix?(p + i, m, size)
+          k = i + size
+          closing = k + 2 <= e && p[k] == 45_u8 && p[k + 1] == 45_u8
+          rest = closing ? k + 2 : k
+          blank = true
+          while rest < e
+            blank = false unless MailText.wsp?(p[rest])
+            rest = rest + 1
+          end
+          if blank
+            if open_at >= 0
+              stop_at = i
+              if stop_at > open_at
+                stop_at = stop_at - 1
+                stop_at = stop_at - 1 if stop_at > open_at && p[stop_at - 1] == 13_u8
+              end
+              ranges << {open_at, stop_at}
+            end
+            return ranges if closing && open_at >= 0
+            return MailError.new("a #{media} body closes before its first part") if closing
+            open_at = j < stop ? j + 1 : stop
+          end
+        end
+        i = j + 1
+      end
+      return MailError.new("a #{media} body holds no line --#{boundary}") if open_at < 0
+      MailError.new("a #{media} body ends before its closing line --#{boundary}--")
+    end
+
+    protected def self.prefix?(a : Pointer(UInt8), b : Pointer(UInt8), size : Int32) : Bool
+      k = 0
+      while k < size
+        return false unless a[k] == b[k]
+        k = k + 1
+      end
+      true
+    end
+
+    # The first field named *name*, any case, its encoded-words decoded.
+    def header(name : String) : String?
+      raw = raw_header(name)
+      raw ? MailText.decode_words(raw) : nil
+    end
+
+    # Every field named *name*, in order, decoded.
+    def header_values(name : String) : Array(String)
+      lower = name.downcase
+      found = [] of String
+      @headers.each do |pair|
+        found << MailText.decode_words(pair[1]) if pair[0].downcase == lower
+      end
+      found
+    end
+
+    # The first field named *name*, as written.
+    def raw_header(name : String) : String?
+      Part.first(@headers, name.downcase)
+    end
+
+    def subject : String?
+      header("Subject")
+    end
+
+    # The mailboxes of every field named *name* - `From`, `To`, `Cc` -
+    # none when there is no such field.
+    def addresses(name : String) : Array(Address) | MailError
+      lower = name.downcase
+      found = [] of Address
+      @headers.each do |pair|
+        if pair[0].downcase == lower
+          list = Address.parse_list(pair[1])
+          return list if list.is_a?(MailError)
+          found = found + list
+        end
+      end
+      found
+    end
+
+    # A Content-Type parameter, RFC 2231's decoded.
+    def param(name : String) : String?
+      @params[name.downcase]?
+    end
+
+    # The charset text is in: `us-ascii` when none is named (RFC 2045
+    # section 5.2), in lower case.
+    def charset : String
+      (@params["charset"]? || "us-ascii").downcase
+    end
+
+    # The disposition in lower case - `attachment`, `inline` - or nil.
+    def disposition : String?
+      raw = raw_header("Content-Disposition")
+      return nil unless raw
+      parsed = MailText.disposition(raw)
+      parsed ? parsed[0] : nil
+    end
+
+    # The file name of Content-Disposition, or else Content-Type's `name`.
+    def filename : String?
+      if raw = raw_header("Content-Disposition")
+        parsed = MailText.disposition(raw)
+        if parsed
+          name = parsed[1]["filename"]?
+          return name if name
+        end
+      end
+      @params["name"]?
+    end
+
+    def attachment? : Bool
+      disposition == "attachment"
+    end
+
+    def multipart? : Bool
+      @media_type.starts_with?("multipart/")
+    end
+
+    # The transfer encoding in lower case: `7bit` when none is named.
+    def transfer_encoding : String
+      (raw_header("Content-Transfer-Encoding") || "7bit").strip.downcase
+    end
+
+    # The bytes the body stands for, its transfer encoding undone.
+    def body : String | MailError
+      raw = MailText.cut(@source, @body_at, @body_end)
+      case encoding = transfer_encoding
+      when "7bit", "8bit", "binary"
+        raw
+      when "base64"
+        MailText.base64_decode(raw)
+      when "quoted-printable"
+        MailText.qp_decode(raw)
+      else
+        MailError.new("the Content-Transfer-Encoding #{encoding.inspect} is not one std/mail reads")
+      end
+    end
+
+    # The body as text in UTF-8, from the part's charset, each CRLF an LF.
+    def text : String | MailError
+      bytes = body
+      return bytes if bytes.is_a?(MailError)
+      decoded = MailText.decode(bytes, charset)
+      return decoded if decoded.is_a?(MailError)
+      MailText.lf(decoded)
+    end
+
+    # This part, then each under it, depth first.
+    def walk(&block : Part -> Nil) : Nil
+      block.call(self)
+      @parts.each { |child| child.walk(&block) }
+    end
+
+    # The first part of *media_type* that is not an attachment, depth
+    # first: `find("text/plain")` is the text a reader shows.
+    def find(media_type : String) : Part?
+      wanted = media_type.downcase
+      found = nil.as(Part?)
+      walk do |part|
+        found = part if found.nil? && part.media_type == wanted && !part.attachment?
+      end
+      found
+    end
+
+    # The parts whose disposition is `attachment`, in order.
+    def attachments : Array(Part)
+      found = [] of Part
+      walk { |part| found << part if part.attachment? }
+      found
+    end
+  end
+end

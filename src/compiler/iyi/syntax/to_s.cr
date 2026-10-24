@@ -139,7 +139,20 @@ module Iyi
         else
           exps.each do |exp|
             @str << "\#{"
-            exp.accept(self)
+            # iyi: a lowering can leave several expressions where one was
+            # written: `#{half(x).or(-1)}` is a temporary and an `if` once
+            # normalized, and that is the text a body travelling in a
+            # `.iyimod` is (IV.1g). An interpolation reads one expression, so
+            # unwrapped the consumer stopped on "Unterminated string
+            # interpolation" in a module that had compiled; parenthesized
+            # it is one again.
+            if exp.is_a?(Expressions) && !exp.keyword.paren? && exp.expressions.size > 1
+              @str << '('
+              exp.accept(self)
+              @str << ')'
+            else
+              exp.accept(self)
+            end
             @str << '}'
           end
         end
@@ -155,7 +168,7 @@ module Iyi
         @str << '['
       end
 
-      node.elements.join(@str, ", ", &.accept self)
+      node.elements.join(@str, ", ") { |element| accept_as_expression element }
 
       if name
         @str << '}'
@@ -185,9 +198,9 @@ module Iyi
         space = i == 0 && entry.key.is_a?(TupleLiteral) || entry.key.is_a?(NamedTupleLiteral) || entry.key.is_a?(HashLiteral)
         @str << ' ' if space
 
-        entry.key.accept self
+        accept_as_expression entry.key
         @str << " => "
-        entry.value.accept self
+        accept_as_expression entry.value
       end
 
       @str << ' ' if space
@@ -243,7 +256,7 @@ module Iyi
 
         visit_named_arg_name(entry.key)
         @str << ": "
-        entry.value.accept self
+        accept_as_expression entry.value
 
         last_entry = entry
 
@@ -331,11 +344,11 @@ module Iyi
 
     def visit(node : If)
       if node.ternary?
-        node.cond.accept self
+        accept_as_expression node.cond
         @str << " ? "
-        node.then.accept self
+        accept_as_expression node.then
         @str << " : "
-        node.else.accept self
+        accept_as_expression node.else
         return false
       end
 
@@ -343,7 +356,7 @@ module Iyi
 
       while true
         @str << "if "
-        node.cond.accept self
+        accept_as_expression node.cond
         newline
 
         self.emit_loc_pragma node.then.location
@@ -380,7 +393,7 @@ module Iyi
       self.emit_loc_pragma node.location
 
       @str << "unless "
-      node.cond.accept self
+      accept_as_expression node.cond
       newline
 
       self.emit_loc_pragma node.then.location
@@ -438,15 +451,19 @@ module Iyi
     end
 
     def visit(node : ImportDecl)
+      @str << "pub " if node.exported
       @str << "import " << node.path.join('/')
+      if node.glob?
+        @str << "::*"
+      elsif names = node.names
+        @str << "::{" << names.join(", ") << '}'
+      end
       false
     end
 
+    # The scope an `import x::{a}` makes beside it: the import says it, and
+    # there is no source of its own to write.
     def visit(node : UsingDecl)
-      @str << "using " << node.path.join("::")
-      if names = node.names
-        @str << "::{" << names.join(", ") << '}'
-      end
       false
     end
 
@@ -619,7 +636,7 @@ module Iyi
         end
 
         @str << "] = "
-        node.args.last.accept self
+        accept_as_expression node.args.last
       elsif node_obj && node.name.in?(UNARY_OPERATORS) && node.args.empty? && !node.named_args && !node.block_arg && !block && !short_block_call
         @str << node.name
         in_parenthesis(need_parens, node_obj)
@@ -649,7 +666,7 @@ module Iyi
         if Lexer.setter?(node.name)
           @str << node.name.rchop
           @str << " = "
-          node.args.join(@str, ", ", &.accept self)
+          node.args.join(@str, ", ") { |arg| accept_as_expression arg }
         else
           @str << node.name
           in_parenthesis(node.has_parentheses? || !node.args.empty? || node.block_arg || node.named_args || short_block_call) do
@@ -680,7 +697,7 @@ module Iyi
         break if exclude_last && i == node.args.size - 1
 
         @str << ", " if printed_arg
-        drop_parens_for_proc_notation(arg, &.accept(self))
+        drop_parens_for_proc_notation(arg) { |each| accept_as_expression(each) }
         printed_arg = true
       end
       if named_args = node.named_args
@@ -693,7 +710,7 @@ module Iyi
       if block_arg = node.block_arg
         @str << ", " if printed_arg
         @str << '&'
-        drop_parens_for_proc_notation(block_arg, &.accept(self))
+        drop_parens_for_proc_notation(block_arg) { |each| accept_as_expression(each) }
       end
     end
 
@@ -755,16 +772,70 @@ module Iyi
       in_parenthesis(need_parens, is_multiline) do
         if node.is_a?(Expressions) && node.expressions.size == 1
           node.expressions.first.accept self
+        elsif need_parens && node.is_a?(Expressions) && node.keyword.none?
+          # The statements one after another inside the parentheses, the way
+          # a `(a = 1; a)` the parser kept prints, rather than through the
+          # `Expressions` visitor, which ends every statement with a newline
+          # and would leave the `)` alone on a line of its own.
+          node.expressions.reject(&.nop?).each_with_index do |exp, i|
+            if i > 0
+              newline
+              append_indent
+            end
+            exp.accept self
+          end
         else
           node.accept self
         end
       end
     end
 
+    # iyi: a node printed where the parser reads an expression — an argument,
+    # a literal's element, a condition, an assigned value — rather than a
+    # statement. The text is source a later build parses again: a travelling
+    # body crosses an `.iyimod` as `Def#body.to_s` (SPEC.md IV.1g), printed
+    # after the normalizer has expanded it. `twice(parse(text).or_panic, t)`
+    # crossed as `twice(__temp_6 = parse(text)` and an `if` on the next line,
+    # because `.or_panic` expands to an assignment and an `if` held in one
+    # bare `Expressions`, and the consumer stopped at "expecting token ')',
+    # not 'if'". Those positions are parsed by `parse_op_assign_no_control`,
+    # which takes one expression — `if`, `case`, `begin`, `while` and an
+    # assignment are all expressions and stand bare there — but neither a
+    # sequence of statements, nor `return`/`break`/`next`, nor `a, b = 1, 2`,
+    # whose commas would be read as the list's own. Those are parenthesized —
+    # unless one of the statements is `a, b = 1, 2`, which a parenthesized
+    # expression does not read either ("unterminated parenthesized
+    # expression"); `begin` reads statements, that one included.
+    private def accept_as_expression(node : ASTNode) : Nil
+      unless (node.is_a?(Expressions) && node.keyword.none?) || node.is_a?(MultiAssign | Return | Break | Next)
+        node.accept self
+        return
+      end
+
+      statements = statements_of(node)
+      if statements.any?(MultiAssign)
+        Expressions.new(statements).tap { |exps| exps.keyword = :begin }.accept self
+      elsif statements.size > 1 || statements.first?.is_a?(Return | Break | Next)
+        in_parenthesis(true, Expressions.new(statements))
+      elsif first = statements.first?
+        first.accept self
+      else
+        # Nothing but `Nop`s: `()`, which is `nil` wherever it is read.
+        @str << "()"
+      end
+    end
+
+    # The statements a keyword-less `Expressions` holds, nested ones
+    # flattened and `Nop`s left out; anything else is its own one statement.
+    private def statements_of(node : ASTNode) : Array(ASTNode)
+      return [node] of ASTNode unless node.is_a?(Expressions) && node.keyword.none?
+      node.expressions.flat_map { |exp| exp.nop? ? [] of ASTNode : statements_of(exp) }
+    end
+
     def visit(node : NamedArgument)
       visit_named_arg_name(node.name)
       @str << ": "
-      node.value.accept self
+      accept_as_expression node.value
       false
     end
 
@@ -796,8 +867,7 @@ module Iyi
       node.target.accept self
       @str << " = "
 
-      need_parens = node.value.is_a?(Expressions)
-      in_parenthesis(need_parens, node.value)
+      accept_as_expression node.value
 
       false
     end
@@ -805,14 +875,14 @@ module Iyi
     def visit(node : OpAssign)
       node.target.accept self
       @str << ' ' << node.op << '=' << ' '
-      node.value.accept self
+      accept_as_expression node.value
       false
     end
 
     def visit(node : MultiAssign)
       node.targets.join(@str, ", ", &.accept self)
       @str << " = "
-      node.values.join(@str, ", ", &.accept self)
+      node.values.join(@str, ", ") { |value| accept_as_expression value }
       false
     end
 
@@ -827,7 +897,7 @@ module Iyi
     def visit_while_or_until(node, name)
       @str << name
       @str << ' '
-      node.cond.accept self
+      accept_as_expression node.cond
       newline
       accept_with_indent(node.body)
       append_indent
@@ -1228,13 +1298,13 @@ module Iyi
 
     def visit(node : Splat)
       @str << '*'
-      node.exp.accept self
+      accept_as_expression node.exp
       false
     end
 
     def visit(node : DoubleSplat)
       @str << "**"
-      node.exp.accept self
+      accept_as_expression node.exp
       false
     end
 
@@ -1251,8 +1321,14 @@ module Iyi
       false
     end
 
+    # iyi: `Int32?.class` is a `Union` without parens; written bare it reads
+    # back as `Int32 | Nil.class`.
     def visit(node : Metaclass)
-      node.name.accept self
+      name = node.name
+      needs_parens = name.is_a?(Union) && !name.parens?
+      @str << "(" if needs_parens
+      name.accept self
+      @str << ")" if needs_parens
       @str << ".class"
       false
     end
@@ -1284,7 +1360,7 @@ module Iyi
       in_parenthesis(node.has_parentheses?) do
         if node.exps.size > 0
           @str << ' ' unless node.has_parentheses?
-          node.exps.join(@str, ", ", &.accept self)
+          node.exps.join(@str, ", ") { |exp| accept_as_expression exp }
         end
       end
       false
@@ -1306,7 +1382,7 @@ module Iyi
       @str << keyword
       if exp = node.exp
         @str << ' '
-        exp.accept self
+        accept_as_expression exp
       end
       false
     end
@@ -1368,7 +1444,7 @@ module Iyi
 
       space = first.is_a?(TupleLiteral) || first.is_a?(NamedTupleLiteral) || first.is_a?(HashLiteral)
       @str << ' ' if space
-      node.elements.join(@str, ", ", &.accept self)
+      node.elements.join(@str, ", ") { |element| accept_as_expression element }
       @str << ' ' if space
       @str << '}'
       false
@@ -1713,7 +1789,7 @@ module Iyi
       @str << "case"
       if cond = node.cond
         @str << ' '
-        cond.accept self
+        accept_as_expression cond
       end
       newline
 
@@ -1736,7 +1812,7 @@ module Iyi
       append_indent
       @str << (node.exhaustive? ? "in" : "when")
       @str << ' '
-      node.conds.join(@str, ", ", &.accept self)
+      node.conds.join(@str, ", ") { |cond| accept_as_expression cond }
       newline
       accept_with_indent node.body
       false

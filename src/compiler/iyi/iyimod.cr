@@ -56,7 +56,23 @@ module Iyi::IyiMod
   # v52: a signature carries the annotations written above it, because
   # `@[Primitive]` is a declaration a module makes and not one the compiler
   # made — see `Signature#annotations`.
-  FORMAT_VERSION = 53_u32
+  # v55: the header says whether the build that wrote the artifact generated
+  # code, because one from `--no-codegen` carries no object code and a build
+  # that links against it is refused by name (`Artifact#declarations_only`).
+  # v56: a signature carries its `forall` and `where` bounds, because a bound
+  # is checked where a call matches and a consumer reading the names alone
+  # accepted calls the source build refused (`Signature#where_bounds`).
+  # v57: the header carries the package name the module's types live under,
+  # because a package's own build names its modules the way a consumer's
+  # does and `module codec` alone no longer says `IyiWeb::Codec`
+  # (`Artifact#package_name`).
+  # v58: nothing in the file's own layout changed, but its object code
+  # passes and returns a value over 128 bytes through memory
+  # (`LLVMTyper::INDIRECT_ABOVE`), and a v57 artifact's object code takes
+  # and returns it as a first-class aggregate. Linked together the two
+  # disagreed on every such call without a word, so a v57 artifact is
+  # refused here as any other stale format is.
+  FORMAT_VERSION = 58_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -174,6 +190,12 @@ module Iyi::IyiMod
     # digest and is not seen. What is recorded is what was read.
     Inputs = 20
 
+    # iyi: the symbols this module's object code reads the value of, by name.
+    # `TypeIds` asked of a symbol: two programs number their symbols in the
+    # order each met them, so a unit reads the number from a global the
+    # consumer defines, and the consumer can number only a name it has.
+    SymbolLiterals = 21
+
     # iyi: the pointer maps of the types this module owns, one `TypeLayout`
     # per type, keyed in the file by the type's name. Same reason as
     # `TypeIds` for keying by name rather than by the number: two programs
@@ -232,10 +254,7 @@ module Iyi::IyiMod
   MACRO_HOOKS = {"included", "extended", "inherited", "method_added", "finished"}
 
   def self.exported_macro(source : String) : String
-    first = source.lines.first?
-    return source unless first
-
-    written = first.lstrip
+    written = macro_line(source)
     # An iyi module's macros are written `pub macro` and travel as their own
     # text, so this is only about the other language's: `pub pub macro
     # described(declaration)` is `can't apply \`pub\` to pub`, and
@@ -243,18 +262,60 @@ module Iyi::IyiMod
     return source if written.starts_with?("pub ")
     return source unless written.starts_with?("macro ")
 
-    rest = written.lchop("macro ").lstrip
-    name = String.build do |io|
+    name = macro_name(source)
+    return source if name.empty? || MACRO_HOOKS.includes?(name)
+    doc = source.size - undocumented_macro(source).size
+    "#{source[0, doc]}pub #{source[doc..]}"
+  end
+
+  # A macro as the artifact carries it: its source, with the doc comment
+  # written above it as comment lines, which is where a reader of the
+  # declarations finds it and how `mod context` shows it. `Macro#to_s` is
+  # the macro alone, so `iyi doc std/derives` showed `pub macro
+  # described(declaration)` without the two lines that say what it does.
+  # The hashes are taken without them (`undocumented_macro`): a doc edit
+  # moves neither, as it moves neither for a def.
+  def self.macro_source(a_macro : Macro) : String
+    source = a_macro.to_s
+    doc = a_macro.doc
+    return source if doc.nil? || doc.empty?
+    String.build do |io|
+      write_doc io, doc, ""
+      io << source
+    end
+  end
+
+  # A carried macro's first line, `pub macro twice(x)`, past its doc.
+  def self.macro_line(source : String) : String
+    source.each_line do |line|
+      text = line.strip
+      return text unless text.starts_with?('#')
+    end
+    ""
+  end
+
+  # The name a call writes: `twice` for `pub macro twice(x)`.
+  def self.macro_name(source : String) : String
+    rest = macro_line(source).lchop("pub ").lchop("macro ").lstrip
+    String.build do |io|
       rest.each_char do |char|
         break if char.whitespace? || char == '('
         io << char
       end
     end
-    return source if name.empty? || MACRO_HOOKS.includes?(name)
-    "pub #{source}"
   end
 
-  # `using` directives that resolve their annotations, and which modules this
+  # A carried macro's doc comment, as `Signature#doc` holds a def's.
+  def self.macro_doc(source : String) : String
+    source.lines.take_while(&.starts_with?('#')).map(&.lchop('#').lchop(' ')).join('\n')
+  end
+
+  # A carried macro without its doc comment.
+  def self.undocumented_macro(source : String) : String
+    source.lines(chomp: false).skip_while(&.starts_with?('#')).join
+  end
+
+  # Imports' names that resolve their annotations, and which modules this
   # one imports. A body is not in it, so editing one leaves every dependent's
   # own artifact valid.
   #
@@ -358,7 +419,8 @@ module Iyi::IyiMod
     implementation.write encode_mono_bodies(artifact)
     # With the bodies rather than with the exports: a macro is not reachable
     # from another module, and editing one changes what a consumer compiles.
-    implementation.write encode_macro_bodies(artifact)
+    # Without their doc comments, as the exports are hashed without theirs.
+    implementation.write encode_macro_bodies(artifact, docs: false)
     write_string implementation, artifact.initialiser
     implementation.write_byte(artifact.has_initialiser ? 1_u8 : 0_u8)
 
@@ -458,7 +520,16 @@ module Iyi::IyiMod
     # Text, like `TypeDecl#annotations` beside it and for the same reason: an
     # annotation is source a reader parses back, and translating it through a
     # record would be a second spelling of something that already has one.
-    annotations : Array(String) = [] of String
+    annotations : Array(String) = [] of String,
+    # iyi: `forall T : Show`'s bounds, as `{name, trait}` pairs, and `where
+    # Elem : Show`'s, both as written. A bound is part of the signature (II.7
+    # rule 3), checked where a call matches (II.6 §3), and the artifact
+    # carried the names alone: `def render(x : T) : String forall T` and
+    # `def shown : String`, so a consumer reading the artifact accepted
+    # `Pair.new(Dog.new, Dog.new).shown` for a `Dog` that never implemented
+    # `Show` and printed `dog,dog`, where the source build refused it.
+    free_variable_bounds : Array({String, String}) = [] of {String, String},
+    where_bounds : Array({String, String}) = [] of {String, String}
 
   # A type the module declares: `pub struct`, `pub class`, `pub trait` — and,
   # since the object code started travelling, the ones it does not export.
@@ -631,7 +702,11 @@ module Iyi::IyiMod
     # of a `lib` the library declares, and false of one only the shard has,
     # where there is no other copy. `sqlite3` writes `@[Link("sqlite3")] lib
     # LibSQLite3`, the consumer's copy of that lib arrived bare, nothing asked
-    # for `-lsqlite3`, and the link ended on `sqlite3_value_text`.
+    # for `-lsqlite3`, and the link ended on `sqlite3_value_text`. And the
+    # ones only a macro reads, because a def using `{{@type}}` is expanded
+    # again on the far side: `@[Shop::Priced] class Report` arrived bare and
+    # its `{{ @type.annotation(Shop::Priced) }}` answered false there (see
+    # `Iyi::Compiler#iyi_read_annotations`).
     #
     # Text, like `macros` and `funs` beside it: an annotation is source a
     # reader parses back, and translating it through a record would be a second
@@ -654,17 +729,18 @@ module Iyi::IyiMod
     # `extend self` is what the shard wrote, one line says it, and the compiler
     # on the far side does with it what the compiler here did.
     extends_self : Bool = false,
-    # iyi: the `using` directives written inside this type's body, as
+    # iyi: the imports' names written inside this type's body, as
     # written (R-2b).
     #
     # `Artifact#usings` carries the module unit's own, and those are the
     # only ones that used to travel because they were the only ones thought
     # to reach a consumer. A type reopened under a foreign name is the
     # exception: `class ::File` is not lexically inside the unit, so the
-    # unit's `using` does not reach it and the file writes a second one
+    # unit's imports do not reach it and the file writes a second one
     # inside the class. Without it the consumer reads `def self.size(path :
     # String | Path)` and answers "undefined constant Path... this file has
-    # not written `using`", about a directive eleven lines above.
+    # not written `using`" (the keyword `import X::{...}` replaced), about
+    # a directive eleven lines above.
     usings : Array(String) = [] of String
 
   # How a body is found again on the far side.
@@ -915,12 +991,12 @@ module Iyi::IyiMod
     # With it, the build is refused and says so.
     getter has_initialiser : Bool
 
-    # The `using` directives the module writes, as written (II.3).
+    # The imports' names the module writes, as written (II.3).
     #
     # Not part of the module's surface — nothing here is reachable through it —
     # but part of what its surface *means*. A signature is stored as the
     # annotation the author wrote, and `pub def handle(ctx : Context)` resolves
-    # `Context` through a `using` further up the file. The annotation travels;
+    # `Context` through an import further up the file. The annotation travels;
     # so must what resolves it.
     getter usings : Array(String)
 
@@ -1090,6 +1166,10 @@ module Iyi::IyiMod
     # Settable alongside `object_code`, and for the same reason.
     property match_types : Array(String)
 
+    # The symbols this module's object code reads the value of, by name. See
+    # `Section::SymbolLiterals`. Settable alongside `object_code`.
+    property symbol_literals : Array(String)
+
     # The symbols this module's object code defines.
     #
     # A consumer compiles what an artifact does not define, and this is the
@@ -1182,6 +1262,25 @@ module Iyi::IyiMod
     # is as finished as it was ever going to be.
     property filled : Bool
 
+    # Whether the build that wrote this artifact generated no code at all -
+    # `--emit-iyimod` on a `--no-codegen` build.
+    #
+    # Not `filled`: that says a step of `iyi tool bind` died, and this says
+    # nothing was ever going to put machine code here. Without it the two
+    # artifacts a consumer could not link looked like a complete one, and
+    # `iyi run --use-iyimod mods main.iyi` against a module written with
+    # `--no-codegen` ended in 19 `LNK2019: unresolved external symbol`
+    # lines about `Kit::Api`, naming the file nowhere. A front-end build
+    # reads it as it reads any other: its declarations are all it wants.
+    property declarations_only : Bool
+
+    # The package name the module's types live under, empty for a module of
+    # no package: `iyi_web` for `codec.iyi` of `github.com/x/iyi-web`, whose
+    # types are `IyiWeb::Codec` in every build (SPEC.md III.7). The header
+    # below writes `module codec`, and the reader puts it under this name,
+    # which the object code's symbols already spell.
+    property package_name : String
+
     # Whether this artifact's root is a *class* rather than a module.
     #
     # It decides one thing and it is structural: a module's declarations are
@@ -1264,7 +1363,8 @@ module Iyi::IyiMod
                    @top_level = [] of Signature, @top_level_funs = [] of String,
                    @reopened = [] of TypeDecl, @libs = [] of String,
                    @layouts = [] of {String, TypeLayout},
-                   @inputs = [] of String)
+                   @inputs = [] of String, @symbol_literals = [] of String,
+                   @declarations_only = false, @package_name = "")
     end
   end
 
@@ -1346,6 +1446,10 @@ module Iyi::IyiMod
 
     unless artifact.match_types.empty?
       sections << {Section::MatchTypes, encode_match_types(artifact)}
+    end
+
+    unless artifact.symbol_literals.empty?
+      sections << {Section::SymbolLiterals, encode_strings(artifact.symbol_literals)}
     end
 
     unless artifact.symbols.empty?
@@ -1450,7 +1554,10 @@ module Iyi::IyiMod
     # Which library the artifact was built under, so a refusal can name the
     # verb that rebuilds it: `iyi bind` for a boundary, `--emit-iyimod` for a
     # module of one's own.
-    crystal_library : Bool = false
+    crystal_library : Bool = false,
+    # The package name its types live under (`Artifact#package_name`), so a
+    # manifest that renames the package makes the artifact stale.
+    package_name : String = ""
 
   def self.read_summary(path : String) : Summary
     File.open(path, "rb") do |file|
@@ -1486,7 +1593,7 @@ module Iyi::IyiMod
 
       Summary.new(header[:module_name], header[:source_path],
         header[:compiler_version], header[:target_triple], header[:flags],
-        hashes, imports, inputs, header[:crystal_library])
+        hashes, imports, inputs, header[:crystal_library], header[:package_name])
     end
   rescue ex : Error
     raise ex
@@ -1536,6 +1643,7 @@ module Iyi::IyiMod
       regexes = [] of RegexConst
       class_vars = [] of ClassVarRef
       match_types = [] of String
+      symbol_literals = [] of String
       symbols = [] of String
       libs = [] of String
       top_level = [] of Signature
@@ -1561,27 +1669,28 @@ module Iyi::IyiMod
         file.read_fully?(payload) || raise Error.new("#{path} ends inside a section")
         verify(path, section, payload, sum)
         case section
-        when Section::Header       then header = decode_header(payload)
-        when Section::Imports      then imports = decode_imports(payload)
-        when Section::Exports      then exports = decode_exports(payload)
-        when Section::ObjectCode   then object_code = decode_object_code(payload)
-        when Section::MonoBodies   then mono_bodies = decode_mono_bodies(payload)
-        when Section::MacroBodies  then macro_bodies = decode_macro_bodies(payload)
-        when Section::Initialiser  then initialiser = String.new(payload)
-        when Section::TypeIds      then type_ids = decode_type_ids(payload)
-        when Section::Constants    then constants = decode_constants(payload)
-        when Section::Regexes      then regexes = decode_regexes(payload)
-        when Section::ClassVars    then class_vars = decode_class_vars(payload)
-        when Section::MatchTypes   then match_types = decode_match_types(payload)
-        when Section::Symbols      then symbols = decode_symbols(payload)
-        when Section::Libs         then libs = decode_libs(payload)
-        when Section::TopLevel     then top_level = decode_top_level(payload)
-        when Section::TopLevelFuns then top_level_funs = decode_strings(payload)
-        when Section::Reopened     then reopened = decode_reopened(payload)
-        when Section::Requires     then requires = decode_requires(payload)
-        when Section::Hashes       then hashes = decode_hashes(payload)
-        when Section::Layouts      then layouts = decode_layouts(payload)
-        when Section::Inputs       then inputs = decode_strings(payload)
+        when Section::Header         then header = decode_header(payload)
+        when Section::Imports        then imports = decode_imports(payload)
+        when Section::Exports        then exports = decode_exports(payload)
+        when Section::ObjectCode     then object_code = decode_object_code(payload)
+        when Section::MonoBodies     then mono_bodies = decode_mono_bodies(payload)
+        when Section::MacroBodies    then macro_bodies = decode_macro_bodies(payload)
+        when Section::Initialiser    then initialiser = String.new(payload)
+        when Section::TypeIds        then type_ids = decode_type_ids(payload)
+        when Section::Constants      then constants = decode_constants(payload)
+        when Section::Regexes        then regexes = decode_regexes(payload)
+        when Section::ClassVars      then class_vars = decode_class_vars(payload)
+        when Section::MatchTypes     then match_types = decode_match_types(payload)
+        when Section::Symbols        then symbols = decode_symbols(payload)
+        when Section::Libs           then libs = decode_libs(payload)
+        when Section::TopLevel       then top_level = decode_top_level(payload)
+        when Section::TopLevelFuns   then top_level_funs = decode_strings(payload)
+        when Section::Reopened       then reopened = decode_reopened(payload)
+        when Section::Requires       then requires = decode_requires(payload)
+        when Section::Hashes         then hashes = decode_hashes(payload)
+        when Section::Layouts        then layouts = decode_layouts(payload)
+        when Section::Inputs         then inputs = decode_strings(payload)
+        when Section::SymbolLiterals then symbol_literals = decode_strings(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -1598,7 +1707,8 @@ module Iyi::IyiMod
         hashes, constants, macro_bodies, requires, header[:crystal_library],
         header[:class_root], header[:filled], header[:module_extends_self],
         regexes, class_vars, match_types, symbols,
-        top_level, top_level_funs, reopened, libs, layouts, inputs)
+        top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals,
+        declarations_only: header[:declarations_only], package_name: header[:package_name])
     end
   rescue ex : Error
     raise ex
@@ -1624,6 +1734,7 @@ module Iyi::IyiMod
   # format nobody can read is a cache format nobody can debug.
   def self.dump(artifact : Artifact, io : IO) : Nil
     io.puts "module        #{artifact.module_name}"
+    io.puts "package       #{artifact.package_name}" unless artifact.package_name.empty?
     io.puts "source        #{artifact.source_path}"
     io.puts "compiler      #{artifact.compiler_version}"
     io.puts "target        #{artifact.target_triple}"
@@ -1670,8 +1781,8 @@ module Iyi::IyiMod
     end
 
     unless artifact.usings.empty?
-      io.puts "usings"
-      artifact.usings.each { |directive| io.puts "  #{directive}" }
+      io.puts "names imported"
+      artifact.usings.each { |directive| io.puts "  #{scoped_import(directive)}" }
     end
 
     exports = artifact.exports
@@ -1704,7 +1815,7 @@ module Iyi::IyiMod
       io.puts "macros        (none)"
     else
       io.puts "macros"
-      macros.each { |source| io.puts "  #{source.lines.first? || ""}" }
+      macros.each { |source| io.puts "  #{macro_line(source)}" }
     end
 
     bodies = artifact.mono_bodies
@@ -1741,6 +1852,7 @@ module Iyi::IyiMod
     # With the pattern, because the name is a digest: a reader looking at
     # `$Regex:5f2b…` in the list above has no way to tell which literal it is.
     io.puts "object code   never filled: the fill step did not finish" unless artifact.filled
+    io.puts "object code   none: written by a --no-codegen build" if artifact.declarations_only
 
     symbols = artifact.symbols
     unless symbols.empty?
@@ -1782,6 +1894,12 @@ module Iyi::IyiMod
       match_types.each { |name| io.puts "  #{name}" }
     end
 
+    symbol_literals = artifact.symbol_literals
+    unless symbol_literals.empty?
+      io.puts "symbol literals"
+      symbol_literals.each { |name| io.puts "  :#{name}" }
+    end
+
     class_vars = artifact.class_vars
     unless class_vars.empty?
       io.puts "class variables"
@@ -1809,7 +1927,7 @@ module Iyi::IyiMod
     io.puts
     io.puts "note          format v#{FORMAT_VERSION} carries declarations,"
     io.puts "              signatures, field lists in declaration order, the"
-    io.puts "              the constants and class variables this module's"
+    io.puts "              constants and class variables this module's"
     io.puts "              own code reads, the macros and"
     io.puts "              bodies a consumer has to compile for itself, the"
     io.puts "              object code of this module's own non-generic"
@@ -1858,6 +1976,12 @@ module Iyi::IyiMod
     end
   end
 
+  # A recorded scope directive - `std/path::{Path}`, or `std/path` for
+  # every name - as the import line that makes it.
+  def self.scoped_import(directive : String) : String
+    directive.includes?("::") ? "import #{directive}" : "import #{directive}::*"
+  end
+
   def self.declarations(artifact : Artifact, io : IO) : Nil
     # A class root writes no header, and the class below is the namespace. With
     # one, iyi wraps the whole file in a module of the header's name — which
@@ -1890,11 +2014,13 @@ module Iyi::IyiMod
       artifact.requires.each { |name| io << "require " << name.inspect << '\n' }
     end
 
-    # Inside the module, where the parser keeps a `using` — it resolves names
-    # for this module's declarations and must not reach whoever reads them.
+    # The names the module brought into scope, as the import that brings
+    # them: the parser keeps that scope inside the module, where it resolves
+    # names for these declarations and does not reach whoever reads them.
+    # The module is loaded once, however many lines import it.
     unless artifact.usings.empty?
       io << '\n'
-      artifact.usings.each { |directive| io << "using " << directive << '\n' }
+      artifact.usings.each { |directive| io << scoped_import(directive) << '\n' }
     end
 
     # Where the module has it, and *after* the directives above: the parser
@@ -1911,8 +2037,13 @@ module Iyi::IyiMod
 
     # First, because a macro has to be defined before the code that calls it is
     # read, and the bodies below are full of code that calls them.
+    # Marked `pub` here only when they are a shard's, which arrive unmarked
+    # and are its surface (see `exported_macro`). An iyi module marked the
+    # ones it exports, and the rest are its own: marked here, `macro inner`
+    # was callable as `App::Lib.inner` through the artifact while the source
+    # said `App::Lib does not export 'inner'`.
     artifact.macro_bodies.each do |source|
-      io << '\n' << exported_macro(source) << '\n'
+      io << '\n' << (artifact.crystal_library ? exported_macro(source) : source) << '\n'
     end
 
     # Before the functions, because one of them reads it: `Backtracer.configure`
@@ -2004,10 +2135,22 @@ module Iyi::IyiMod
   # declined to carry and left empty. Stable, so two identical builds write the
   # same file (IV.3).
   #
-  # Recursive, because a nested list has the same question. A cycle in these
-  # edges cannot happen — a type cannot inherit from or include something
-  # written in terms of itself — and `placed` would stop one anyway; a name
+  # Recursive, because a nested list has the same question. A cycle in the
+  # inheritance edges cannot happen — a type cannot inherit from or include
+  # something written in terms of itself — and one through an alias's names
+  # is stopped by `placed`, leaving that pair in its arriving order; a name
   # that matches nothing here simply keeps its place.
+  #
+  # And the types an alias names, the alias's own and those of every alias
+  # written inside the declaration, because overloads resolve one at the
+  # top level. `std/toml`'s `Any` declared `alias Type = ... | TOMLDateTime
+  # | ...` beside `def initialize(raw : Type)` and `def initialize(value :
+  # Int32)`. Adding the second `initialize` orders it against the first,
+  # and the comparison resolves `Type` there and then
+  # (`AliasType#process_value`, from `Type#restriction_of?`). In the source
+  # `TOMLDateTime` was written above `Any` and existed by then; in the
+  # artifact `Any` sorts first, and the consumer stopped at "undefined
+  # constant TOMLDateTime", qualified or not. See `aliased_in`.
   # The names in a piece of declaration text, `Foo::Bar` counted whole.
   private def self.iyi_names_in(text : String) : Array(String)
     names = [] of String
@@ -2027,7 +2170,7 @@ module Iyi::IyiMod
   end
 
   private def self.inheritance_order(types : Array(TypeDecl)) : Array(TypeDecl)
-    return types if types.all? { |declaration| declaration.superclass.empty? && declaration.includes.empty? }
+    return types if types.all? { |declaration| declaration.superclass.empty? && declaration.includes.empty? && declaration.annotations.empty? && aliased_in(declaration).empty? }
 
     by_name = types.to_h { |declaration| {declaration.name, declaration} }
     ordered = [] of TypeDecl
@@ -2045,7 +2188,10 @@ module Iyi::IyiMod
       # whole text found nothing (`undefined constant SessionMethods`), and
       # matching only the head left the arguments behind it (`undefined
       # constant Statement`).
-      needed = [declaration.superclass].concat(declaration.includes)
+      # And the annotations above it, which are resolved where they stand
+      # too: an `@[Priced]` read back above `annotation Priced` names
+      # nothing yet (`TypeDecl#annotations`).
+      needed = [declaration.superclass].concat(declaration.includes).concat(declaration.annotations)
       needed.each do |written|
         # Split by hand rather than with a literal: a regex in the compiler's
         # own source is a link against PCRE2, and `bench/dependency_floor.sh`
@@ -2057,12 +2203,37 @@ module Iyi::IyiMod
         end
       end
 
+      # Every segment of an alias's names, not only a sibling's whole name:
+      # an alias is written as its author wrote it, so `TOMLDateTime` may as
+      # well be `::Std::Toml::TOMLDateTime`, whose sibling is its last
+      # segment, or `Outer::Inner`, whose sibling is its first. A segment
+      # that merely shares a sibling's name moves that sibling up, which is
+      # harmless: it is declared earlier than it had to be.
+      aliased_in(declaration).each do |written|
+        iyi_names_in(written).each do |name|
+          name.lchop("::").split("::").each do |segment|
+            first = by_name[segment]?
+            place.call(first) if first && first.name != declaration.name
+          end
+        end
+      end
+
       ordered << declaration
       nil
     end
 
     types.each { |declaration| place.call declaration }
     ordered
+  end
+
+  # What every alias in *declaration* is equal to, as written: its own if it
+  # is one, and those of the aliases declared inside it. See
+  # `inheritance_order`.
+  private def self.aliased_in(declaration : TypeDecl) : Array(String)
+    values = [] of String
+    values << declaration.value if declaration.kind == "alias" || declaration.kind == "type"
+    declaration.types.each { |nested| values.concat aliased_in(nested) }
+    values
   end
 
   # One `def`'s header, as the artifact carries it.
@@ -2105,10 +2276,36 @@ module Iyi::IyiMod
       free_variables: a_def.free_vars || [] of String,
       required: a_def.abstract?,
       doc: a_def.doc || "",
-      visibility: a_def.visibility.private? ? "private" : "",
+      visibility: signature_visibility(a_def),
       # As the module wrote them. See `Signature#annotations`.
       annotations: a_def.all_annotations.try(&.map(&.to_s)) || [] of String,
+      free_variable_bounds: bound_pairs(a_def.free_var_bounds),
+      where_bounds: bound_pairs(a_def.where_bounds),
     )
+  end
+
+  # A def's bounds as the `{name, trait}` pairs `Signature` carries, in the
+  # order they were written.
+  private def self.bound_pairs(bounds : Hash(String, ASTNode)?) : Array({String, String})
+    return [] of {String, String} unless bounds
+    bounds.map { |name, bound| {name, bound.to_s} }
+  end
+
+  # iyi: what a signature carries of a def's visibility - `private`,
+  # `protected`, or nothing.
+  #
+  # `protected` was dropped: from source `Box.new(4).secret` is `protected
+  # method 'secret' called for App::Vis::Box`, through the artifact it typed
+  # and the link failed on `Box#secret`, a symbol the module never meant
+  # anyone outside to ask for. Not an `initialize`'s: the compiler marks
+  # every one `protected` once it has made its `new`, and the consumer's
+  # compiler does the same with the one it reads.
+  private def self.signature_visibility(a_def : Def) : String
+    case
+    when a_def.visibility.private?                                 then "private"
+    when a_def.visibility.protected? && a_def.name != "initialize" then "protected"
+    else                                                                ""
+    end
   end
 
   # iyi: R-2 reaches the block parameter (SPEC.md IV.2).
@@ -2238,6 +2435,108 @@ module Iyi::IyiMod
       MSG
   end
 
+  # iyi: whether a def's answer is written nowhere a consumer reads, so its
+  # body has to travel for the consumer to have one: a setter, which R-2
+  # lets go without a return type (`check_types_written`) because it answers
+  # what it was handed. That is the argument's type at each call, not the
+  # parameter's restriction, so no header can say it. Carried as a header,
+  # `def n=(v : Int32)` was typed `Nil` on the far side, and the link asked
+  # for `n=<Int32>:Nil` where this module had emitted `n=<Int32>:Int32`.
+  #
+  # And a def whose answer is the receiver's own storage: a body that is one
+  # instance variable, or `self`. Codegen answers that call with the field's
+  # address rather than a copy (`try_inline_call`), so `h.counter.bump` bumps
+  # the counter `h` holds, and a return type says `Counter` and nothing about
+  # where it lives. Carried as a header, the consumer called the symbol and
+  # bumped a copy: `h.counter.bump -> 1`, where the source build says 2.
+  def self.answer_travels?(a_def : Def) : Bool
+    return true if a_def.return_type.nil? && a_def.name.ends_with?('=')
+    case body = a_def.body
+    when InstanceVar then true
+    when Var         then body.name == "self"
+    else                  false
+    end
+  end
+
+  # iyi: whether a def is instantiated per call site, so its machine code is
+  # the caller's and its body has to travel (SPEC.md IV.1g): it takes a block
+  # (`&block : …` or a bare `yield`), which is inlined into it, or it has
+  # `forall` parameters, which the caller binds. A forall def was neither, so
+  # its body stayed behind: `count(x : T) : Int32 forall T` called as
+  # `count(1)` by the producing build carried `count<Int32>` alone, and a
+  # consumer's `count("s")` was refused because the artifact's object code
+  # "has no symbol for it".
+  #
+  # Or a parameter written with no type at all (`untyped_parameter?`).
+  def self.caller_instantiated?(a_def : Def) : Bool
+    caller_bound?(a_def) || untyped_parameter?(a_def)
+  end
+
+  # The block and `forall` half of `caller_instantiated?`: the two shapes
+  # whose instantiation is the caller's however the declaration is written.
+  def self.caller_bound?(a_def : Def) : Bool
+    return true if a_def.block_arg || a_def.block_arity
+    !!a_def.free_vars.try { |vars| !vars.empty? }
+  end
+
+  # iyi: whether a parameter has no written type, which is a free variable
+  # nobody named: the def is instantiated at whatever each call passes, so
+  # an instantiation is the caller's for the reason a `forall` one is.
+  #
+  # Left behind as a header, its instantiations went into the module's own
+  # unit at the producing build's types, and the artifact served exactly
+  # those (issue #134). `std/json`'s `write_or_null(val, b : Builder)` is
+  # the case: written from a program whose `lib/thing` serialised an
+  # `Item`, `std/json`'s `JSON` unit defined
+  # `write_or_null<Lib::Thing::Item, Builder>` and called
+  # `*Lib::Thing::Item#to_json<Std::Json::Builder>:Nil` from it. `std/json`
+  # does not import `lib/thing`, so nothing ties that call to a unit that
+  # defines it: the next build compiled `lib/thing` from source, which never
+  # instantiated `to_json` because the only caller was machine code it did
+  # not compile, and the link ended on the undefined symbol. A program that
+  # serialised a type the producing build never saw was refused at the call
+  # instead ("its object code has no symbol for it").
+  def self.untyped_parameter?(a_def : Def) : Bool
+    a_def.args.any? { |arg| arg.restriction.nil? || arg.restriction.is_a?(Underscore) } ||
+      !!a_def.double_splat.try { |arg| arg.restriction.nil? || arg.restriction.is_a?(Underscore) }
+  end
+
+  # iyi: whether a parameter's written type admits types it does not name,
+  # which makes it a bounded free variable: a trait or module (`x : Shape`
+  # is `forall T : Shape` with nothing written), a class something inherits
+  # from or its `.class`, or a union holding one. Each call instantiates the
+  # def at the type it passes, so that instantiation is the caller's for the
+  # reason an untyped one is. `kit/lib`'s `area_of(x : Shape)` called with
+  # `lib/thing`'s `Tri` put `area_of<Lib::Thing::Tri>` in `kit/lib`'s unit,
+  # calling `*Lib::Thing::Tri#area:Int32`; a later build that compiled
+  # `lib/thing` from source and no longer called `area_of` ended its link on
+  # that symbol.
+  #
+  # The body travels already (`Iyi::Compiler#iyi_widened_parameters?`, a
+  # superset of this), so a consumer compiles its own; what this decides is
+  # where the producer's instantiation lives. A union of types it names
+  # admits nothing else and keeps its symbols where they were.
+  #
+  # Only the written forms that name a type are looked up: `self` is the
+  # receiver, and a `typeof` is not this question's to evaluate.
+  def self.open_parameter?(owner : Type, a_def : Def) : Bool
+    a_def.args.any? do |arg|
+      case restriction = arg.restriction
+      when Path, Generic, Union, Metaclass
+        open_type?(owner.lookup_type?(restriction, allow_typeof: false))
+      else
+        false
+      end
+    end
+  end
+
+  private def self.open_type?(declared : Type?) : Bool
+    return false unless declared
+    return false if declared.is_a?(TypeParameter)
+    return declared.union_types.any? { |member| open_type?(member) } if declared.is_a?(UnionType)
+    declared.module? || declared.is_a?(VirtualMetaclassType) || declared.virtual_type != declared
+  end
+
   # Marks a parsed reconstruction as what it is.
   #
   # A `def` from an artifact is a header: a call to it is typed from its return
@@ -2321,7 +2620,6 @@ module Iyi::IyiMod
     signature.annotations.each { |source| io << indent << source << '\n' }
     io << indent
     io << "pub " if exported
-    io << "private " if signature.visibility == "private"
     io << render_signature(signature) << '\n'
     # An `abstract def` ends at its signature. Anything else needs the `end`
     # its absent body would have carried.
@@ -2330,6 +2628,15 @@ module Iyi::IyiMod
     # A body only where one travelled (`MonoBodies`). Indented back under this
     # declaration, because what is stored is the body the author wrote and the
     # indentation it was written at is not a fact about it.
+    #
+    # An empty one is written `nil`, which is what an empty body answers.
+    # Whether a body travelled is the key's question, and the reader cannot
+    # ask it: `DeclarationMarker` tells a header from a body by whether there
+    # is one, so `def noop : Nil` with nothing in it came back as a header and
+    # the consumer's link ended on `G(Int32)@G(T)#noop:Nil` — and on every
+    # generic struct's `initialize`, every empty trait default and every
+    # empty block-taking def, each listed in `MonoBodies`.
+    body = "nil" if body && body.blank?
     body.try &.each_line do |line|
       io << indent << "  " << line << '\n'
     end
@@ -2347,7 +2654,7 @@ module Iyi::IyiMod
     return if declaration.kind == "alias"
 
     inner = indent + "  "
-    declaration.macros.each { |source| io.puts "#{inner}#{source.lines.first? || ""}" }
+    declaration.macros.each { |source| io.puts "#{inner}#{macro_line(source)}" }
     declaration.assoc_types.each { |name| io.puts "#{inner}type #{name}" }
     declaration.fields.each { |(name, type, _)| io.puts "#{inner}#{name} : #{type}" }
     declaration.class_vars.each { |class_var| io.puts "#{inner}#{dump_class_var(class_var)}" }
@@ -2412,7 +2719,7 @@ module Iyi::IyiMod
 
     # Before anything written in terms of the names they bring, which is
     # everything below. See `TypeDecl#usings`.
-    declaration.usings.each { |directive| io << inner << "using " << directive << '\n' }
+    declaration.usings.each { |directive| io << inner << scoped_import(directive) << '\n' }
 
     # First inside the module, because that is where the shard wrote it and
     # because everything below is reached through it: `extend self` is what
@@ -2485,41 +2792,85 @@ module Iyi::IyiMod
   # `declarations` above is the compile-against text and carries everything
   # a consumer's build needs, travelling bodies included (R-4); grounding a
   # reader needs less and pays per byte, so this renders only what a caller
-  # can name: exported functions and types, their methods, their docs, the
-  # impls — no bodies, no fields, no macros, no carried private types. The
+  # can name: exported functions, macros, constants and types, the members,
+  # associated types and nested types of those types, their methods, their
+  # docs, the impls — no bodies, no fields, no carried private types. The
   # measurement that forced the split is `bench/context_pack.py`: on the
   # kemal sample the compile-against text was within 4% of the sources it
   # replaces, because the bodies *are* most of a macro-heavy module.
+  #
+  # A type was its methods and nothing else, and every name a caller writes
+  # *through* a type went missing with that: `std/log`'s `Severity` showed
+  # `<` and `to_s` and none of `Trace` .. `None`, `Outer::Inner` was not
+  # there although `Outer::Inner.new.val` runs, and a trait's `type Elem`
+  # was absent under the `abstract def first_elem : Elem` that names it.
+  # `pub LIMIT` and `pub macro twice` were not listed at all, and an alias
+  # was followed by an `end` it does not have.
   def self.surface(artifact : Artifact, io : IO, docs : Bool = true) : Nil
     io << "module " << artifact.module_name << '\n'
 
     artifact.exports.functions.each do |signature|
       io << '\n'
-      if docs && !signature.doc.empty?
-        signature.doc.each_line { |line| io << "# " << line << '\n' }
-      end
+      write_doc io, signature.doc, "" if docs
       io << "pub " << render_signature(signature) << '\n'
     end
+
+    # The macro's line and not its body, as a function is its signature,
+    # and its doc comment above it as a function's is.
+    exported_macros(artifact).each do |source|
+      io << '\n'
+      write_doc io, macro_doc(source), "" if docs
+      io << macro_line(source) << '\n'
+    end
+
+    # A type's constants go under the type, where a caller reaches them;
+    # the module's own are listed here.
+    constants = Hash(String, Array(String)).new { |hash, key| hash[key] = [] of String }
+    exported_constants(artifact).each { |(container, line)| constants[container] << line }
+    constants[""]?.try &.each { |line| io << "\npub " << line << '\n' }
 
     artifact.exports.types.each do |declaration|
       next unless declaration.visibility == "pub"
       io << '\n'
-      if docs && !declaration.doc.empty?
-        declaration.doc.each_line { |line| io << "# " << line << '\n' }
+      surface_type io, declaration, "", declaration.name, constants, docs
+    end
+
+    # An impl is where a caller's methods come from, so it is rendered like
+    # the types above rather than as a bare line. `impl Shape for Box` with
+    # nothing under it said Box implements a trait and left `box.area`
+    # unnameable in the one answer written to be named from: the type's own
+    # block carries `initialize` and `side`, the trait's carries an
+    # `abstract def`, and the method that exists on the type was in
+    # neither. The artifact has always carried them — `mod dump` prints
+    # them — this view dropped them.
+    #
+    # `render_impl_header` for the same reason: trait arguments and
+    # `forall` are part of which impl this is, and the line here was
+    # rebuilding a poorer version of that sentence by hand.
+    #
+    # Names relative to this module's own root, which is how every
+    # declaration above is already written: `Geo::Shape::Shape` for a trait
+    # declared right there reads as another language's, in an answer whose
+    # header line is `module geo/shape` and whose `import` line the caller
+    # is told to write. Only this module's prefix, because that is the one
+    # mapping that is certain — a camelcased segment does not invert.
+    root =
+      if artifact.class_root
+        ""
+      else
+        artifact.module_name.split('/').map(&.camelcase).join("::")
       end
-      io << "pub " << render_type_header(declaration) << '\n'
-      declaration.methods.each do |method|
+    artifact.exports.impls.each do |record|
+      io << '\n'
+      header = render_impl_header(record, absolute: false)
+      header = header.gsub("#{root}::", "") unless root.empty?
+      io << header << '\n'
+      record.methods.each do |method|
         next if method.visibility == "private"
-        if docs && !method.doc.empty?
-          method.doc.each_line { |line| io << "  # " << line << '\n' }
-        end
+        write_doc io, method.doc, "  " if docs
         io << "  " << render_signature(method) << '\n'
       end
       io << "end\n"
-    end
-
-    artifact.exports.impls.each do |record|
-      io << "impl " << record.trait_name << " for " << record.type_name << '\n'
     end
 
     # What the module added to types it does not own - the whole of
@@ -2529,21 +2880,129 @@ module Iyi::IyiMod
       io << '\n' << render_type_header(declaration) << '\n'
       declaration.methods.each do |method|
         next if method.visibility == "private"
-        if docs && !method.doc.empty?
-          method.doc.each_line { |line| io << "  # " << line << '\n' }
-        end
+        write_doc io, method.doc, "  " if docs
         io << "  " << render_signature(method) << '\n'
       end
+      surface_macros io, declaration, "  ", docs
       io << "end\n"
+    end
+  end
+
+  # One type of the surface and the types declared inside it, which a
+  # caller reaches as `Outer::Inner`. A nested type is carried with the
+  # visibility it was written with, and one written `private` is nobody's
+  # to name.
+  private def self.surface_type(io : IO, declaration : TypeDecl, indent : String, path : String,
+                                constants : Hash(String, Array(String)), docs : Bool) : Nil
+    write_doc io, declaration.doc, indent if docs
+    io << indent
+    io << "pub " if indent.empty?
+    io << render_type_header(declaration) << '\n'
+    # The whole declaration, as in `render_type_declaration`.
+    return if declaration.kind == "alias" || declaration.kind == "type"
+
+    inner = indent + "  "
+    declaration.assoc_types.each { |name| io << inner << "type " << name << '\n' }
+    declaration.members.each { |(name, value)| io << inner << name << " = " << value << '\n' }
+    constants[path]?.try &.each { |line| io << inner << line << '\n' }
+    declaration.types.each do |nested|
+      next if nested.visibility == "private"
+      surface_type io, nested, inner, "#{path}::#{nested.name}", constants, docs
+    end
+    declaration.methods.each do |method|
+      next if method.visibility == "private"
+      write_doc io, method.doc, inner if docs
+      io << inner << render_signature(method) << '\n'
+    end
+    surface_macros io, declaration, inner, docs
+    io << indent << "end\n"
+  end
+
+  # A type's macros, each its line under its doc. They are called through
+  # the type as its methods are, and were not in the surface: `iyi doc
+  # std/eiy` listed `Eiy`'s methods and none of `embed`, `render` and
+  # `def_to_s`, which are how the module is used.
+  private def self.surface_macros(io : IO, declaration : TypeDecl, indent : String, docs : Bool) : Nil
+    declaration.macros.each do |source|
+      write_doc io, macro_doc(source), indent if docs
+      io << indent << macro_line(source) << '\n'
+    end
+  end
+
+  # A doc comment as comment lines. A blank line of it is `#`: written
+  # `# ` it ended every paragraph break of `iyi doc` and `mod context` in a
+  # trailing space.
+  def self.write_doc(io : IO, doc : String, indent : String) : Nil
+    doc.each_line do |line|
+      io << indent << (line.empty? ? "#" : "# ") << line << '\n'
+    end
+  end
+
+  # The names a caller writes in `import x::{...}`: the module's functions,
+  # macros, constants and types, each once, in the order the surface
+  # lists them.
+  def self.surface_names(artifact : Artifact) : Array(String)
+    names = artifact.exports.functions.map(&.name)
+    exported_macros(artifact).each { |source| names << macro_name(source) }
+    exported_constants(artifact).each do |(container, line)|
+      names << line.partition(" = ")[0] if container.empty?
+    end
+    artifact.exports.types.each do |declaration|
+      names << declaration.name if declaration.visibility == "pub"
+    end
+    names.uniq!
+  end
+
+  # Each macro the module wrote `pub`, as it is carried. A shard's arrive
+  # unmarked (see `exported_macro`), and their text is no caller's surface.
+  def self.exported_macros(artifact : Artifact) : Array(String)
+    artifact.macro_bodies.select { |source| macro_line(source).starts_with?("pub macro ") }
+  end
+
+  # The constants the module exports, as `{container, "NAME = value"}`, the
+  # container empty for the module's own. They travel in the initialiser,
+  # which is the module's source (see `Artifact#initialiser`), so they are
+  # read from it: `pub LIMIT = 5` and `pub VarInt::MAX = ...` are what it
+  # says. A shard's initialiser is the other language's, which has no `pub`.
+  def self.exported_constants(artifact : Artifact) : Array({String, String})
+    constants = [] of {String, String}
+    return constants if artifact.initialiser.empty? || artifact.crystal_library
+    parser = Parser.new("module #{artifact.module_name}\n#{artifact.initialiser}")
+    parser.filename = "#{artifact.module_name}.iyi"
+    collect_exported_constants parser.parse, constants
+    constants
+  rescue CodeError
+    [] of {String, String}
+  end
+
+  private def self.collect_exported_constants(node : ASTNode, into : Array({String, String})) : Nil
+    case node
+    when Expressions
+      node.expressions.each { |child| collect_exported_constants child, into }
+    when ModuleDef
+      collect_exported_constants node.body, into
+    when Assign
+      target = node.target
+      if target.is_a?(Path) && target.exported?
+        into << {target.names[0...-1].join("::"), "#{target.names.last} = #{node.value}"}
+      end
+    else
+      # Nothing else at the top level declares a constant.
     end
   end
 
   # How a type declaration's first line is written back. The kind already
   # describes itself and not how anybody declares one: what makes `List`
   # generic is the `(T)` this line already carries.
+  #
+  # iyi: wherever the word sits. An abstract generic class's kind is
+  # `abstract generic class`, so taking `generic ` off the front left it in
+  # the middle, and the consumer read `pub abstract generic class Src(T)` -
+  # "`pub abstract` takes a class, a struct or a def" - for a module that
+  # had compiled from its source.
   def self.render_type_header(declaration : TypeDecl) : String
     String.build do |io|
-      io << declaration.kind.lchop("generic ") << ' ' << declaration.name
+      io << declaration.kind.sub("generic ", "") << ' ' << declaration.name
 
       parameters = declaration.type_parameters
       unless parameters.empty?
@@ -2589,19 +3048,83 @@ module Iyi::IyiMod
     end
   end
 
-  # An impl's declaration line — `impl Enumerable for List(T) forall T`.
-  def self.render_impl_header(record : ImplRecord) : String
-    String.build do |io|
-      io << "impl " << record.trait_name
+  # A resolved type's name, written so that it names that type wherever it
+  # is read.
+  #
+  # A type prints relative to the top level - `Tuple(Int32, Int32)`,
+  # `Std::Traits::Hashable` - and the declarations a consumer compiles
+  # against are read inside the module, where a name resolves from the
+  # module outwards. So a module beside it took the name for its own:
+  # `std/traits` writes `impl Hashable for ::Tuple(*T)` and imports
+  # `std/tuple`, its artifact said `impl ... for Tuple(*T)`, and the
+  # consumer answered "Std::Tuple is not a generic type" about a module the
+  # source had compiled. A field `@pair : ::Tuple(Int32, Int32)` beside an
+  # `app/tuple` came back the same way, and a supertrait
+  # `Std::Traits::Hashable` beside an `app/std` was "undefined constant".
+  #
+  # Every path in the name is made global, the arguments' as well.
+  # *parameters* are the type parameters in scope - the `T` of `List(T)`,
+  # an impl's `forall T` - which name no type and stay as they are.
+  #
+  # Text that does not parse as a type comes back as it went in. A virtual
+  # type inside an argument prints as `Array(IyiIO+)`, which no reader
+  # takes either way (`Iyi::Compiler#iyi_type_name`).
+  def self.absolute_type(text : String, parameters : Array(String) = [] of String) : String
+    return text if text.empty? || text == "?"
+    parser = Parser.new(text)
+    parser.filename = "type.iyi"
+    parser.next_token
+    type = parser.parse_bare_proc_type
+    parser.check :EOF
+    type.accept AbsolutePaths.new(parameters)
+    type.to_s
+  rescue SyntaxException
+    text
+  end
 
+  # The visitor half of `absolute_type`.
+  private class AbsolutePaths < Visitor
+    def initialize(@parameters : Array(String))
+    end
+
+    def visit(node : Path)
+      node.global = true unless node.names.size == 1 && @parameters.includes?(node.names.first)
+      false
+    end
+
+    def visit(node : ASTNode)
+      true
+    end
+  end
+
+  # An impl's declaration line — `impl Enumerable for List(T) forall T`.
+  #
+  # The trait and the target are the resolved pair (`ImplRecord`), and by
+  # default they are written `absolute_type`, which is how the consumer
+  # reads them back. Not in the record itself: the pair keys the impl's
+  # travelling bodies (`mono_body_container`) the same on both sides.
+  # *absolute* is false for the caller's view, which shortens names to the
+  # module's own root (`surface`).
+  def self.render_impl_header(record : ImplRecord, absolute : Bool = true) : String
+    String.build do |io|
+      parameters = record.free_variables.map(&.lchop('*'))
       arguments = record.trait_arguments
+
+      # A parameterised trait resolves to the generic, which prints with its
+      # own parameters, and the arguments this impl gives it follow. Written
+      # whole, `impl Into(String) for User` came back from its artifact as
+      # `impl App::Lib::Into(T)(String) for App::Lib::User`, and the consumer
+      # stopped on "expecting identifier 'for', not '('".
+      named = arguments.empty? ? record.trait_name : record.trait_name.partition('(')[0]
+      io << "impl " << (absolute ? absolute_type(named, parameters) : named)
+
       unless arguments.empty?
         io << '('
         arguments.join(io, ", ")
         io << ')'
       end
 
-      io << " for " << record.type_name
+      io << " for " << (absolute ? absolute_type(record.type_name, parameters) : record.type_name)
 
       free_variables = record.free_variables
       unless free_variables.empty?
@@ -2625,6 +3148,9 @@ module Iyi::IyiMod
   # tool that lies at exactly the moment it is needed.
   def self.render_signature(signature : Signature) : String
     String.build do |io|
+      # Written as the module wrote it: `mod dump` printed `def hidden` for
+      # a `private def hidden`, and `protected` was nowhere.
+      io << signature.visibility << ' ' unless signature.visibility.empty?
       io << "abstract " if signature.required
       io << "def "
       io << signature.receiver << '.' unless signature.receiver.empty?
@@ -2644,8 +3170,20 @@ module Iyi::IyiMod
 
       free_variables = signature.free_variables
       unless free_variables.empty?
+        bounds = signature.free_variable_bounds.to_h
         io << " forall "
-        free_variables.join(io, ", ")
+        free_variables.join(io, ", ") do |name, inner|
+          inner << name
+          if bound = bounds[name]?
+            inner << " : " << bound
+          end
+        end
+      end
+
+      where_bounds = signature.where_bounds
+      unless where_bounds.empty?
+        io << " where "
+        where_bounds.join(io, ", ") { |(name, bound), inner| inner << name << " : " << bound }
       end
     end
   end
@@ -2663,6 +3201,8 @@ module Iyi::IyiMod
     io.write_byte(artifact.class_root ? 1_u8 : 0_u8)
     io.write_byte(artifact.filled ? 1_u8 : 0_u8)
     io.write_byte(artifact.module_extends_self ? 1_u8 : 0_u8)
+    io.write_byte(artifact.declarations_only ? 1_u8 : 0_u8)
+    write_string io, artifact.package_name
     io.to_slice
   end
 
@@ -2678,11 +3218,16 @@ module Iyi::IyiMod
     class_root = io.read_byte == 1_u8
     filled = io.read_byte == 1_u8
     module_extends_self = io.read_byte == 1_u8
+    declarations_only = io.read_byte == 1_u8
+    # Last, and read the way the flag bytes above are: a header that ends
+    # before it - a hand-written one - names no package.
+    package_name = io.pos < io.size ? read_string(io) : ""
     {module_name: module_name, source_path: source_path,
      compiler_version: compiler_version, target_triple: target_triple, flags: flags,
      has_initialiser: has_initialiser, crystal_library: crystal_library,
      class_root: class_root, filled: filled,
-     module_extends_self: module_extends_self}
+     module_extends_self: module_extends_self, declarations_only: declarations_only,
+     package_name: package_name}
   end
 
   private def self.encode_requires(artifact : Artifact) : Bytes
@@ -2737,9 +3282,9 @@ module Iyi::IyiMod
     io.to_slice
   end
 
-  private def self.encode_macro_bodies(artifact : Artifact) : Bytes
+  private def self.encode_macro_bodies(artifact : Artifact, docs : Bool = true) : Bytes
     io = IO::Memory.new
-    write_strings io, artifact.macro_bodies
+    write_strings io, docs ? artifact.macro_bodies : artifact.macro_bodies.map { |source| undocumented_macro(source) }
     io.to_slice
   end
 
@@ -2989,7 +3534,7 @@ module Iyi::IyiMod
       write_class_vars io, declaration.class_vars
       write_string io, declaration.superclass
       write_strings io, declaration.includes
-      write_strings io, declaration.macros
+      write_strings io, (docs ? declaration.macros : declaration.macros.map { |source| undocumented_macro(source) })
       write_strings io, declaration.funs
       write_strings io, declaration.annotations
       write_string io, (docs ? declaration.doc : "")
@@ -3040,6 +3585,8 @@ module Iyi::IyiMod
       write_string io, (docs ? signature.doc : "")
       write_string io, signature.visibility
       write_strings io, signature.annotations
+      write_pairs io, signature.free_variable_bounds
+      write_pairs io, signature.where_bounds
     end
   end
 
@@ -3056,7 +3603,7 @@ module Iyi::IyiMod
       visibility = read_string(io)
       annotations = read_strings(io)
       Signature.new(name, receiver, parameters, block_parameter, return_type,
-        free_variables, required, visibility, doc, annotations)
+        free_variables, required, visibility, doc, annotations, read_pairs(io), read_pairs(io))
     end
   end
 

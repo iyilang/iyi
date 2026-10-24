@@ -12,7 +12,9 @@
 #   * What is refused: pop/shift/first/last of an empty deque, an index past
 #     the end, a negative count, each with the prelude's sentence.
 #   * Negative proofs: a growth that drops the wrapped run, a rotation that
-#     goes the wrong way, and an insert that overwrites are each caught.
+#     goes the wrong way, an insert that overwrites, and an equality
+#     restricted to its own element type or taken one way only are each
+#     caught.
 #
 # Exits non-zero if any check fails.
 set -u
@@ -78,9 +80,15 @@ build_and_run() {
 
 # python3 makes the same 3,000 choices on its own deque. Its `rotate(n)`
 # turns the other way, so it is handed `-n`; its `insert` and `del` take
-# the same non-negative indices the exercise draws.
+# the same non-negative indices the exercise draws. Python's text-mode stdout
+# on windows ends every line with "\r\n" while the iyi program writes "\n", so
+# all 30 snapshots differed there with identical text; the oracle is told to
+# write "\n" like the program it is diffed against, which is what it already
+# did on linux and darwin.
 oracle() {
   "$PY" - <<'PY'
+import sys
+sys.stdout.reconfigure(newline="\n")
 from collections import deque
 seed = 7
 def draw(bound):
@@ -157,7 +165,7 @@ echo
 echo "== what the deque refuses"
 deque_panics_with() { # deque_panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/deque\nusing std/deque::{Deque}\n\nd = Deque(Int32).new([1, 2, 3])\ne = Deque(Int32).new\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/deque::{Deque}\n\nd = Deque(Int32).new([1, 2, 3])\ne = Deque(Int32).new\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"
@@ -246,6 +254,18 @@ prove_fails "vacated slot left as it was" broken_clear "assertion failed for pop
   "src.replace('    clear_slot(slot)\n    value', '    value')"
 prove_fails "delete that closes the gap from the wrong side" broken_delete "assertion failed for delete_at near the front" \
   "src.replace('return pop if index == @size - 1\n', 'return pop if index == @size - 1\n    index = @size - 1 - index\n')"
+# A concatenation onto itself read short. Putting back the walk over the
+# growing `other.size` is the bug itself, and a program that never ends
+# cannot be waited for here, so the proof shortens the snapshot instead,
+# and only for a deque handed itself: `+` concatenates another one first.
+prove_fails "concat onto itself that stops short" broken_concat_self "assertion failed for concat onto itself" \
+  "src.replace('    count = other.size\n', '    count = other.size\n    count = count - 1 if other.@buffer.address == @buffer.address\n', 1)"
+# Equality as it was, restricted to `Deque(T)`: a deque of a wider element
+# type is not taken, and `Object#==` answers false for the same elements.
+prove_fails "equality restricted to its own element type again" broken_eq_type "assertion failed for == of a wider element type" \
+  "src.replace('def ==(other : Deque(U)) : Bool forall U\n    return false unless {{ T <= U || U <= T }} && ', 'def ==(other : Deque(T)) : Bool\n    return false unless ', 1)"
+prove_fails "equality across element types one way only" broken_eq_one_way "assertion failed for == of a narrower element type" \
+  "src.replace('{{ T <= U || U <= T }}', '{{ T <= U }}', 1)"
 
 echo
 if [ "$status" -eq 0 ]; then

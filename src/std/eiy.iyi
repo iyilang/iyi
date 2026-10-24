@@ -68,8 +68,9 @@ pub struct Eiy
       @parts.join("")
     end
 
+    # `print`, the one verb a template's target has, so a Buffer can be one.
     def to_s(io) : Nil
-      io.write(to_s)
+      io.print(to_s)
     end
   end
 
@@ -369,10 +370,11 @@ pub struct Eiy
     while true
       if token.string?
         str_val = token.value
+        opens_line = token.column_number == 1
         token = lexer.next_token?
         return nil unless token
 
-        str_val = suppress_leading_indentation(token, str_val)
+        str_val = suppress_leading_indentation(token, str_val, opens_line)
 
         unless str_val.empty?
           parts << io_name
@@ -408,11 +410,18 @@ pub struct Eiy
 
         suppress_trailing_whitespace(token, suppress_trailing)
 
-        parts << "#<loc:push>"
-        append_loc(parts, filename, line_number, column_number)
-        parts << " " unless str_val.starts_with?(' ')
-        parts << str_val
-        parts << "\n#<loc:pop>\n"
+        # A comment tag prints and runs nothing, however many lines it has:
+        # spliced in as code, every line after its first would run.
+        unless str_val.starts_with?('#')
+          parts << "#<loc:push>"
+          append_loc(parts, filename, line_number, column_number)
+          # The code straight after its location, as an output tag's is: a
+          # space put before code that did not open with one moved its first
+          # line a column right, and `<%nonexistent%>` was refused at
+          # column 4, where the name starts at 3.
+          parts << str_val
+          parts << "\n#<loc:pop>\n"
+        end
       elsif token.eof?
         break
       end
@@ -422,7 +431,7 @@ pub struct Eiy
   end
 
   # *text* as an iyi string literal: quotes, backslashes and `#` escaped,
-  # control bytes written out, everything else — UTF-8 included — as itself.
+  # control bytes and bytes that are not UTF-8 written out, UTF-8 as itself.
   private def self.quote(text : String) : String
     parts = [] of String
     parts << "\""
@@ -432,6 +441,13 @@ pub struct Eiy
     i = 0
     while i < len
       b = raw[i].to_i32
+      if b >= 128
+        size = utf8_size(raw, i, len)
+        if size > 0
+          i += size
+          next
+        end
+      end
       escape =
         if b == 34 # '"'
           "\\\""
@@ -445,7 +461,7 @@ pub struct Eiy
           "\\r"
         elsif b == 9
           "\\t"
-        elsif b < 32 || b == 127
+        elsif b < 32 || b >= 127
           "\\x#{HEX[b // 16]}#{HEX[b % 16]}"
         else
           nil
@@ -464,7 +480,40 @@ pub struct Eiy
 
   HEX = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"]
 
-  private def self.suppress_leading_indentation(token : Lexer::Token, string : String) : String
+  # How many bytes the UTF-8 character starting at *i* takes, or 0 when the
+  # bytes there are not one. The compiler reads a literal as UTF-8 and stops
+  # at a byte that is not, so such a byte has to be written as `\x`.
+  private def self.utf8_size(raw : Pointer(UInt8), i : Int32, len : Int32) : Int32
+    b = raw[i].to_i32
+    lo = 0x80
+    hi = 0xBF
+    size = 0
+    if b >= 0xC2 && b <= 0xDF
+      size = 2
+    elsif b >= 0xE0 && b <= 0xEF
+      size = 3
+      lo = 0xA0 if b == 0xE0 # overlong
+      hi = 0x9F if b == 0xED # surrogate
+    elsif b >= 0xF0 && b <= 0xF4
+      size = 4
+      lo = 0x90 if b == 0xF0 # overlong
+      hi = 0x8F if b == 0xF4 # past U+10FFFF
+    else
+      return 0
+    end
+    return 0 if i + size > len
+    c = raw[i + 1].to_i32
+    return 0 if c < lo || c > hi
+    k = 2
+    while k < size
+      c = raw[i + k].to_i32
+      return 0 if c < 0x80 || c > 0xBF
+      k += 1
+    end
+    size
+  end
+
+  private def self.suppress_leading_indentation(token : Lexer::Token, string : String, opens_line : Bool) : String
     if (token.output? || token.control?) && token.suppress_leading?
       raw = string.to_unsafe
       len = string.bytesize
@@ -477,6 +526,11 @@ pub struct Eiy
         end
         i -= 1
       end
+      # Blanks with no line break before them are a line's indentation only
+      # when the text opens the line. After a tag on the same line the `<%-`
+      # is not the first thing there, and `<%= a %>  <%- b %>` lost the two
+      # spaces between its tags.
+      return string if start_idx == 0 && !opens_line
       all_ws = true
       i = start_idx
       while i < len
@@ -499,7 +553,12 @@ pub struct Eiy
       idx = token.value.index('\n')
       if idx
         token.value = token.value[idx + 1, token.value.bytesize - idx - 1]
+        token.line_number = token.line_number + 1
       end
+      # What `-%>` leaves stands where the rest of its line was taken, so it
+      # opens a line (`generate`'s opens_line) and a `<%-` after it takes
+      # its blanks.
+      token.column_number = 1
     end
   end
 
@@ -518,19 +577,23 @@ pub struct Eiy
     {{ run("./eiy/process", @caller.first.filename || "", filename, io_name.id.stringify) }}
   end
 
-  # The template at *filename*, rendered to a `String`.
+  # The template at *filename*, rendered to a `String`. The buffer's name is
+  # the macro's own, so a template that renders another one inside it does
+  # not replace the buffer it is printing to.
   macro render(filename)
     begin
-      __buf__ = ::Std::Eiy::Eiy::Buffer.new
-      ::Std::Eiy::Eiy.embed({{filename}}, __buf__)
-      __buf__.to_s
+      %buf = ::Std::Eiy::Eiy::Buffer.new
+      ::Std::Eiy::Eiy.embed({{filename}}, %buf)
+      %buf.to_s
     end
   end
 
-  # Defines `to_s(io)` and `to_s` from the template at *filename*.
+  # Defines `to_s(io)` and `to_s` from the template at *filename*. The
+  # parameter is `__io__`, a name no template means, so a template's own
+  # `io` stays its own.
   macro def_to_s(filename)
-    def to_s(io) : Nil
-      ::Std::Eiy::Eiy.embed({{filename}}, io)
+    def to_s(__io__) : Nil
+      ::Std::Eiy::Eiy.embed({{filename}}, __io__)
     end
 
     def to_s : String

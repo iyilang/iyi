@@ -26,6 +26,9 @@ class Iyi::Command
         and `-f json` makes each one data — file, line, column, size,
         message, the SPEC sections it cites, and, when the compiler
         knows the fix, a `suggested_edit` with the exact replacement.
+        An error inside a macro's expansion is placed at the call, with
+        no edit, and its `expansion` names the macro and the place in
+        the text the macro wrote.
 
         Every def with a fully written signature is typed even if
         nothing calls it — definition-site typing is the language's
@@ -35,6 +38,12 @@ class Iyi::Command
         one file: every .iyi under the current directory whose imports
         reach a changed file is compiled alone, and every failure is
         named.
+
+        Under `-f json` standard error holds one JSON array whatever
+        ends the run: a warning is a frame marked `"severity":
+        "warning"`, after the error's frames when there is one, and a
+        refusal with no place in a file - no such file, bytes that are
+        not text - is a frame whose `line` is null.
         USAGE
       exit
     end
@@ -68,6 +77,11 @@ class Iyi::Command
   private def check_affected : Nil
     as_json = false
     changed = [] of String
+    # What was typed, beside the expanded path the closures are matched
+    # against: the verdict names a file the way the caller did, as `test
+    # --affected` does. Chopped back from the expanded path, it came out
+    # `calc\add.iyi` on Windows for a caller who wrote `calc/add.iyi`.
+    typed = [] of String
     while option = options.shift?
       case option
       when "--affected"
@@ -78,11 +92,16 @@ class Iyi::Command
         if Dir.exists?(value)
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
         end
-        changed << File.expand_path(value)
+        changed << Iyi.file_key(File.expand_path(value))
+        typed << value
       when "-f"
         as_json = options.shift? == "json"
       when "--json"
         as_json = true
+      when "--no-color"
+        # Nothing to turn off: the compilers below are made without colour
+        # (`Compiler#color?`). Refused as "takes only changed files", it
+        # broke a script that passes `--no-color` to every verb it runs.
       else
         abort! "check --affected takes only changed files; unexpected '#{option}'", :USAGE_ERROR
       end
@@ -94,12 +113,34 @@ class Iyi::Command
     # closure keeps an import's path after its file is gone - and the
     # verdict says which file it was, because "0 consumer(s) checked, all
     # compile" on a typo is a clean verdict about nothing.
-    missing = changed.reject { |path| File.file?(path) }.map { |path| Iyi.relative_filename(path) }
+    missing = typed.reject { |path| File.file?(path) }
+
+    # The manifest is not a module, so no closure holds it — and a change
+    # to it moves the code under every module at once: `import
+    # example.test/user/liba` resolves through the requirement it names.
+    # `--affected iyi.mod` answered "0 consumer(s) checked, all compile",
+    # which is a clean verdict about nothing.
+    manifest_changed = typed.select do |path|
+      File.basename(path).in?(Iyi::Mod::Installer::MANIFEST, Iyi::Mod::Sum::FILE)
+    end
+
+    # A changed file no import can name: the prelude, which every module
+    # compiles, and a file that is not a module, which one reaches through
+    # a macro (`Eiy.embed`, `read_file`). No closure holds either, and a
+    # syntax error in `page.eiy` was answered "0 consumer(s) checked, all
+    # compile" while `iyi check page_test.iyi` failed in page.eiy.
+    unimported = typed.select do |path|
+      File.file?(path) && !manifest_changed.includes?(path) && outside_every_closure?(path)
+    end
 
     consumers = [] of String
-    Dir.glob("**/*.iyi") do |candidate|
+    # The extension in any case, so that `UP.IYI` is refused by name rather
+    # than left out of the ripple in silence (`Lexer.iyi_miscased?`).
+    Dir.glob("**/*.[iI][yY][iI]") do |candidate|
+      abort! Lexer.iyi_miscased_sentence(candidate), :USAGE_ERROR if Lexer.iyi_miscased?(candidate)
       closure = test_import_closure(candidate)
-      consumers << candidate if closure.nil? || changed.any? { |path| closure.includes?(path) }
+      consumers << candidate if closure.nil? || !manifest_changed.empty? || !unimported.empty? ||
+                                closure.any? { |path| changed.includes?(Iyi.file_key(path)) }
     end
     consumers.sort!
 
@@ -131,16 +172,44 @@ class Iyi::Command
               json.array { missing.each { |path| json.string path } }
             end
           end
+          unless manifest_changed.empty?
+            json.field "affected_manifest" do
+              json.array { manifest_changed.each { |path| json.string path } }
+            end
+          end
+          unless unimported.empty?
+            json.field "affected_not_imported" do
+              json.array { unimported.each { |path| json.string path } }
+            end
+          end
         end
       end
       STDOUT.puts
     else
       failures.each do |(consumer, error)|
-        deepest = error.is_a?(TypeException) ? error.deepest_error_message.to_s : error.message.to_s
-        puts "#{consumer}: #{deepest.lines.first?}"
+        # The first line that says something: a trace's deepest message is
+        # empty, and every broken consumer was named with a blank reason.
+        # The chain's last message that says something, which is the error
+        # itself under the `instantiating ...` frames above it.
+        sentence = nil
+        link = error.as(Exception?)
+        while link
+          line = link.message.to_s.lines.find { |text| !text.strip.empty? }
+          sentence = line.strip if line
+          link = link.responds_to?(:inner) ? link.inner : nil
+        end
+        puts "#{consumer}: #{sentence || "does not compile"}"
       end
       unless missing.empty?
         puts "#{missing.join(", ")} is not there, so the consumers are whoever imports that path"
+      end
+      unless manifest_changed.empty?
+        puts "#{manifest_changed.join(", ")} changed, so every module is a consumer: " \
+             "the requirements are what every package import resolves through"
+      end
+      unless unimported.empty?
+        puts "#{unimported.join(", ")} is not a module an import can name, so every module is a " \
+             "consumer: the prelude and a file a macro reads reach a module without an import"
       end
       verdict = failures.empty? ? "all compile" : "#{failures.size} broke"
       puts "#{consumers.size} consumer(s) checked, #{verdict}"
@@ -158,10 +227,21 @@ class Iyi::Command
     compiler.no_codegen = true
     compiler.stdout = IO::Memory.new
     compiler.stderr = IO::Memory.new
-    compiler.iyi_project_root = closure_root_of(expanded)
-    compiler.iyi_mod_table = Mod::Installer.table_for(File.dirname(expanded))
+    code = File.read(expanded)
+    root = Compiler.entry_root_of(expanded, code)
+    compiler.iyi_project_root = root
+    compiler.iyi_mod_table = Mod::Installer.table_for(root)
+    # iyi: the artifacts a workspace keeps, for a module whose source is not
+    # there — the same reading the language server does, and for the same
+    # reason. A library arrives as `.iyimod` files (III.7), and `check` on a
+    # file importing one answered `can't find module` about a module `build
+    # --use-iyimod` compiles against. See `Compiler.workspace_artifacts`.
+    if artifacts = Compiler.workspace_artifacts(root)
+      compiler.use_iyimod = artifacts
+      compiler.iyi_prefers_source = true
+    end
     compiler.compile(
-      Compiler::Source.new(expanded, File.read(expanded)),
+      Compiler::Source.new(expanded, code),
       File.tempname("iyi-check", nil))
     nil
   rescue ex : CodeError

@@ -87,7 +87,7 @@ fi
 
 echo
 echo "== every env section reported"
-for phrase in "== set and get" "== absent key and defaults" "== delete and presence" "== iteration and hash" "== nil assignment, empty value, positions, and Program.env"; do
+for phrase in "== set and get" "== absent key and defaults" "== delete and presence" "== iteration and hash" "== nil assignment, empty value, positions, and Program.env" "== what was set outlives a collection" "== a name the environment holds twice"; do
   if ! grep -q "$phrase" "$WORK/env-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -126,14 +126,122 @@ else
   echo "  a broken env is caught"
 fi
 
+# `delete` stopped at the first entry of the name, and a name the table
+# held twice came back with the second value. Put back, it must be caught
+# where the exercise holds a name twice, and nowhere earlier.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    mkdir -p "$WORK/firstonly/std"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the first-entry-only proof is unmeasured"
+    elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/env.iyi").read_text()
+old = '        unless offset == k_len && entry[k_len] == 61_u8\n          ptr[kept] = entry\n'
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+new = old.replace('== 61_u8', '== 61_u8 && kept == index', 1)
+Path("$WORK/firstonly/std/env.iyi").write_text(src.replace(old, new, 1))
+PY
+    then
+      echo "  the first-entry-only patch did not apply"
+      status=1
+    elif IYI_PATH="$WORK/firstonly${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_env_exercise.iyi" >"$WORK/firstonly.out" 2>&1; then
+      echo "  the exercise PASSED with delete removing the first entry only"
+      status=1
+    elif ! grep -q "ASSERTION FAILED: no entry of a deleted name is left" "$WORK/firstonly.out"; then
+      echo "  a delete of the first entry only failed somewhere else:"
+      sed 's/^/    /' "$WORK/firstonly.out"
+      status=1
+    else
+      echo "  a delete that leaves a second entry of the name is caught"
+    fi
+    ;;
+esac
+
+# `each` yielded from the live table, so a block that deleted the name it
+# was handed moved the next entry into the slot just read. Put back, it
+# must be caught where the exercise deletes inside `each`.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    mkdir -p "$WORK/liveeach/std"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the live-table each proof is unmeasured"
+    elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/env.iyi").read_text()
+old = '''          names << String.new(eq_pos) { |t| t.copy_from(entry, eq_pos) }
+          v_len = len - eq_pos - 1
+          values << String.new(v_len) { |t| t.copy_from(entry + (eq_pos + 1), v_len) }
+'''
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+new = '''          v_len = len - eq_pos - 1
+          yield String.new(eq_pos) { |t| t.copy_from(entry, eq_pos) }, String.new(v_len) { |t| t.copy_from(entry + (eq_pos + 1), v_len) }
+'''
+Path("$WORK/liveeach/std/env.iyi").write_text(src.replace(old, new, 1))
+PY
+    then
+      echo "  the live-table each patch did not apply"
+      status=1
+    elif IYI_PATH="$WORK/liveeach${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_env_exercise.iyi" >"$WORK/liveeach.out" 2>&1; then
+      echo "  the exercise PASSED with each yielding from the live table"
+      status=1
+    elif ! grep -q "ASSERTION FAILED: each visits every variable while its block deletes" "$WORK/liveeach.out"; then
+      echo "  an each over the live table failed somewhere else:"
+      sed 's/^/    /' "$WORK/liveeach.out"
+      status=1
+    else
+      echo "  an each that skips past what its block deleted is caught"
+    fi
+    ;;
+esac
+
+# On Linux and darwin a table `ENV[]=` builds is installed into the C
+# runtime's `environ`, which the collector does not scan, so the prelude
+# holds it in a class variable too. Taken out, the table is garbage at the
+# next collection and the churn after it reuses its memory: measured on
+# Linux, the exercise ends in a segmentation fault. Windows keeps no table.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    mkdir -p "$WORK/unheld/iyi"
+    cp "$REPO"/src/iyi/*.iyi "$WORK/unheld/iyi/"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the unheld-table proof is unmeasured"
+    elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/iyi/prelude.iyi").read_text()
+old = '    IyiEnvironTable.hold(entries)\n'
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+Path("$WORK/unheld/iyi/prelude.iyi").write_text(src.replace(old, '', 1))
+PY
+    then
+      echo "  the unheld-table patch did not apply"
+      status=1
+    else
+      IYI_PATH="$WORK/unheld${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_env_exercise.iyi" >"$WORK/unheld.out" 2>&1
+      code=$?
+      if grep -q "ALL CHECKS PASSED" "$WORK/unheld.out"; then
+        echo "  the exercise PASSED with the table held nowhere"
+        status=1
+      else
+        echo "  a table held nowhere is caught (exit $code): $(grep -v '^\s*$' "$WORK/unheld.out" | tail -1 | cut -c1-120)"
+      fi
+    fi
+    ;;
+esac
+
 echo
 echo "== what env refuses"
 refuses() { # refuses <label> <name> <phrase> <snippet>
   local label="$1" name="$2" phrase="$3" snippet="$4"
   cat <<IYI >"$WORK/$name.iyi"
 module bench/refusal_$name
-import std/env
-using std/env::{ENV}
+import std/env::{ENV}
 
 $snippet
 IYI

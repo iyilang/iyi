@@ -69,6 +69,33 @@ describe "Backtrace" do
     end
   {% end %}
 
+  {% if flag?(:win32) %}
+    # iyi: on Windows every exception loads the debug information as it is
+    # raised, and a failed load was printed there, into the program's own
+    # error stream, though nothing had asked for a backtrace: under load
+    # `iyi check -f json` put "Unable to load debug information:
+    # SymInitializeW:" in front of its JSON. DbgHelp initialised beforehand
+    # makes the load fail every time.
+    it "keeps a failed debug information load off stderr until a backtrace is printed", tags: %w[slow] do
+      _, output, error = compile_and_run_source <<-CRYSTAL
+        require "c/dbghelp"
+
+        LibC.SymInitializeW(LibC.GetCurrentProcess, nil, 1)
+        rescued = begin
+          raise "rescued"
+        rescue ex
+          ex
+        end
+        STDERR.print "quiet\n"
+        STDERR.flush
+        puts rescued.backtrace.size
+        CRYSTAL
+
+      output.to_s.to_i.should be > 0
+      error.to_s.should start_with("quiet\nUnable to load debug information: SymInitializeW")
+    end
+  {% end %}
+
   # Do not test this on platforms that cannot remove the current working
   # directory of the process:
   #

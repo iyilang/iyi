@@ -1,0 +1,202 @@
+# Shell-style words, read and written the way Python's `shlex` reads and
+# writes them in POSIX mode: `Shlex.split` is `shlex.split(s, comments)`,
+# `Shlex.quote` is `shlex.quote` and `Shlex.join` is `shlex.join`, rule
+# for rule, so a command line a program builds here is the one a Python
+# tool beside it would build, and the one `/bin/sh` reads back. It is a
+# reader of words, not a shell: there is no expansion of `$`, `~`, `*` or
+# backquotes, no operators (`;`, `|`, `&&` and `>` are letters of a word,
+# as in `shlex.split`), and nothing is run.
+#
+# Splitting. Words are separated by runs of space, tab, carriage return
+# and line feed - those four, as Python's `shlex.whitespace` - and a word
+# is any run of the following, joined with no space between:
+#
+# - a byte that is not one of those, a quote or a backslash, kept;
+# - a backslash and the byte after it, the byte kept and the backslash
+#   dropped (POSIX 2.2.1). A backslash before a line feed keeps the line
+#   feed, as Python keeps it, where `sh` would drop both: `shlex.split`
+#   reads one line of words, not a script's continuation lines;
+# - `'...'`, everything up to the next `'` kept as it stands (POSIX
+#   2.2.2): no backslash means anything inside single quotes;
+# - `"..."`, where a backslash before `"` or `\` stands for that byte and
+#   a backslash before anything else is kept with it. POSIX 2.2.3 also
+#   lets a backslash take `$`, `` ` `` and a line feed inside double
+#   quotes; Python's `shlex` does not (its `escapedquotes` is `"` and its
+#   escape is `\` alone), and this follows Python, the oracle the gate
+#   holds it to.
+#
+# A word that is all quotes is still a word: `''` and `""` are one empty
+# word each, `a''` is `a`. With `comments: true` a `#` that starts a word
+# or falls inside an unquoted one ends the word and everything up to the
+# next line feed is skipped, as Python skips it (Python ends `a#b` at `a`
+# where `sh` would read `a#b` - again Python is followed). Without it,
+# `#` is a letter. Bytes are read one at a time; every byte with meaning
+# is ASCII, so UTF-8 text passes through whole and splits as Python's
+# characters do.
+#
+# What is wrong with the text is a `ShlexError` value naming the byte
+# where the trouble starts: a quote with no closing quote ("No closing
+# quotation" in Python), or a backslash with nothing after it, outside or
+# inside double quotes ("No escaped character"). There is no misuse to
+# panic over - every string is a text to read or an argument to quote.
+#
+# Quoting. An argument made only of ASCII letters, digits and
+# `%+,-./:=@_` is written as it is, an empty one as `''`, and any other
+# in single quotes with each `'` inside written `'"'"'` - Python 3.14's
+# `quote` byte for byte, which `sh` reads back as the argument whatever
+# it holds but a NUL, which no argument can hold. `join` is the quoted
+# arguments with one space between, and `split(join(args)) == args` for
+# every array of arguments; the gate checks that on a generated corpus,
+# and checks `/bin/sh` reading `join`'s output as `printf` arguments
+# gives the arguments back.
+
+module std/shlex
+
+# Why a text does not split: an unclosed quote or a final backslash.
+# `offset` is the byte where the quote or the backslash stands.
+pub struct ShlexError
+  getter message : String
+  getter offset : Int32
+
+  def initialize(@message : String, @offset : Int32)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for ShlexError
+  def message : String
+    @message
+  end
+end
+
+# POSIX shell words: `split`, `quote` and `join`, as Python's `shlex`.
+pub struct Shlex
+  # The words of *text*, quotes and backslashes taken off as `sh` takes
+  # them; with *comments*, `#` to the end of the line is skipped.
+  def self.split(text : String, comments : ::Bool = false) : Array(String) | ShlexError
+    raw = text.to_unsafe
+    n = text.bytesize
+    words = [] of String
+    i = 0
+    while i < n
+      c = raw[i]
+      if blank?(c)
+        i += 1
+      elsif comments && c == 35_u8
+        i = past_line(raw, n, i)
+      else
+        word = String::Builder.new
+        quoted = false
+        while i < n
+          c = raw[i]
+          break if blank?(c)
+          if comments && c == 35_u8
+            i = past_line(raw, n, i)
+            break
+          elsif c == 39_u8
+            quoted = true
+            close = i + 1
+            while close < n && raw[close] != 39_u8
+              close += 1
+            end
+            return unclosed(text, i) if close >= n
+            word.write(raw + i + 1, close - i - 1)
+            i = close + 1
+          elsif c == 34_u8
+            quoted = true
+            open = i
+            i += 1
+            while true
+              return unclosed(text, open) if i >= n
+              c = raw[i]
+              if c == 34_u8
+                i += 1
+                break
+              elsif c == 92_u8
+                return dangling(text, i) if i + 1 >= n
+                after = raw[i + 1]
+                word.write_byte(92_u8) unless after == 34_u8 || after == 92_u8
+                word.write_byte(after)
+                i += 2
+              else
+                word.write_byte(c)
+                i += 1
+              end
+            end
+          elsif c == 92_u8
+            return dangling(text, i) if i + 1 >= n
+            word.write_byte(raw[i + 1])
+            i += 2
+          else
+            word.write_byte(c)
+            i += 1
+          end
+        end
+        words << word.to_s if quoted || !word.empty?
+      end
+    end
+    words
+  end
+
+  # *arg* as one shell word: as it is when every byte is a letter, a
+  # digit or one of `%+,-./:=@_`, `''` when empty, else single-quoted.
+  def self.quote(arg : String) : String
+    return "''" if arg.empty?
+    raw = arg.to_unsafe
+    n = arg.bytesize
+    i = 0
+    while i < n && safe?(raw[i])
+      i += 1
+    end
+    return arg if i == n
+    String.build(n + 8) do |io|
+      io.write_byte(39_u8)
+      j = 0
+      while j < n
+        if raw[j] == 39_u8
+          io << "'\"'\"'"
+        else
+          io.write_byte(raw[j])
+        end
+        j += 1
+      end
+      io.write_byte(39_u8)
+    end
+  end
+
+  # The arguments quoted and joined with spaces: a command line that
+  # `split` and `sh` read back as *args*.
+  def self.join(args : Array(String)) : String
+    args.map { |a| quote(a) }.join(" ")
+  end
+
+  private def self.blank?(c : UInt8) : ::Bool
+    c == 32_u8 || c == 9_u8 || c == 10_u8 || c == 13_u8
+  end
+
+  private def self.safe?(c : UInt8) : ::Bool
+    (c >= 97_u8 && c <= 122_u8) || (c >= 65_u8 && c <= 90_u8) || (c >= 48_u8 && c <= 58_u8) ||
+      c == 37_u8 || c == 43_u8 || c == 44_u8 || c == 45_u8 || c == 46_u8 || c == 47_u8 ||
+      c == 61_u8 || c == 64_u8 || c == 95_u8
+  end
+
+  # The index after the line feed that ends the line holding *i*, or *n*.
+  private def self.past_line(raw : Pointer(UInt8), n : Int32, i : Int32) : Int32
+    while i < n && raw[i] != 10_u8
+      i += 1
+    end
+    i < n ? i + 1 : n
+  end
+
+  private def self.unclosed(text : String, at : Int32) : ShlexError
+    quote = text.to_unsafe[at] == 39_u8 ? "'" : "\""
+    ShlexError.new("shlex: no closing quotation: the #{quote} at byte #{at} is never closed", at)
+  end
+
+  private def self.dangling(text : String, at : Int32) : ShlexError
+    ShlexError.new("shlex: no escaped character: the backslash at byte #{at} ends the text", at)
+  end
+end

@@ -1,0 +1,141 @@
+# A fiber reading standard input parks: SPEC.md III.4.8 named that call as
+# the one that had to stop being a blocking syscall. bench/concurrency_exercise.sh
+# feeds this a pipe - a line a second after the program has started, and
+# one two seconds later, twice - and asks four things of it:
+#
+#   0. A wait for readiness keeps its deadline. With nothing in the pipe,
+#      `wait_readable(0, 200)` answers false when the 200 ms are up; on
+#      Windows it answered true at once.
+#   1. The reader parks. A sibling ticking every 100 ms ticks while the
+#      first line is on its way; a read that held the thread let it tick
+#      none.
+#   2. Cancellation reaches it (III.4.2). A sibling's failure ends the group
+#      at once, and the line sent after is read whole by the next read.
+#   3. The stream survives it: a line read withdrawn the same way leaves
+#      the next line to the next read, and that read is another thread's:
+#      on Windows the line was posted to the first reader's port, and the
+#      read had not answered 10 s on.
+module stdin_park
+
+import std/file::{File}
+
+pub struct TaskFailed
+  def initialize
+  end
+end
+
+impl Error for TaskFailed
+  def message : String
+    "the failing task's error"
+  end
+end
+
+def fail(message : String) : Nil
+  print "FAIL: #{message}\n"
+  __iyi_exit(1)
+end
+
+def elapsed_ms(started : Int64) : Int64
+  (__iyi_monotonic_ns - started) // 1000000_i64
+end
+
+# The feeder writes only once this file exists: a line already in the pipe
+# when the read begins is answered at once, and says nothing about parking.
+# A freshly built binary's first start is its virus scan too - 1.4 to 1.6 s
+# measured on a Windows machine - so a feeder that only slept two seconds
+# first could have its line there before the reader asked.
+if ready = Program.env("STDIN_PARK_READY")
+  File.write(ready, "")
+end
+
+# ── 0. A readiness wait keeps its deadline ──────────────────────────────
+waited_from = __iyi_monotonic_ns
+early = wait_readable(0, 200)
+waited = elapsed_ms(waited_from)
+fail("a wait on standard input with nothing in it answered #{early} after #{waited} ms, against a 200 ms deadline") unless early == false && waited >= 190
+puts "a wait on stdin with nothing in it kept its 200 ms deadline"
+
+# ── 1. The reader parks ──────────────────────────────────────────────────
+ticks = 0
+ticks_at_read = -1
+first = ""
+group do |g|
+  g.spawn do
+    line = stdin.gets
+    ticks_at_read = ticks
+    first = line || ""
+    0
+  end
+  g.spawn do
+    n = 0
+    while n < 5
+      sleep(100)
+      ticks = ticks + 1
+      n = n + 1
+    end
+    0
+  end
+end
+fail("a fiber reading standard input held the thread: its sibling ticked #{ticks_at_read} times while it waited") if ticks_at_read <= 0
+fail("the first line read #{first.inspect}, not the line sent") unless first == "first\n"
+puts "a fiber reading stdin parked: its sibling ticked #{ticks_at_read} times before the line came"
+
+# ── 2. Cancellation reaches it ───────────────────────────────────────────
+started = __iyi_monotonic_ns
+saw = ""
+group do |g|
+  g.spawn do
+    buffer = Pointer(UInt8).malloc(64_u64)
+    got = iyi_read(0, buffer.as(Void*), 64_u64)
+    saw = got.is_a?(Cancelled) ? "cancelled" : "read #{got}"
+    got
+  end
+  g.spawn do
+    sleep(200)
+    TaskFailed.new
+  end
+end
+ended = elapsed_ms(started)
+fail("cancellation never reached the fiber reading stdin: it #{saw}") unless saw == "cancelled"
+fail("cancelling the fiber reading stdin took #{ended} ms, against a line two seconds away") if ended >= 1000
+second = stdin.gets
+fail("after the cancelled read the next line read #{second.inspect}, not the line sent") unless second == "second\n"
+puts "a fiber reading stdin was cancelled in #{ended} ms, and the next line came whole"
+
+# ── 3. A withdrawn line read leaves the stream open ─────────────────────
+# The same cancellation, through the stream rather than beneath it. The
+# stream took the withdrawn read for the end of its input and kept that
+# for good: every read after it answered nil, and the third line was
+# never read.
+withdrawn = "not asked"
+group do |g|
+  g.spawn do
+    line = stdin.gets
+    withdrawn = line.nil? ? "nil" : line
+    0
+  end
+  g.spawn do
+    sleep(200)
+    TaskFailed.new
+  end
+end
+fail("a line read cancelled before its line came answered #{withdrawn.inspect}") unless withdrawn == "nil"
+# The next line is read by another `IyiThread` while this one's scheduler
+# keeps polling, sleeping in steps until it is done.
+# The thread may not assign a local of this code (III.4.11), so it answers 1
+# for the line sent and 2 for anything else, through a cell both may touch.
+third_read = Atomic(Int32).new(0)
+reader = IyiThread.start do
+  third_read.set(stdin.gets == "third\n" ? 1 : 2)
+  nil
+end
+polls = 0
+while third_read.get == 0 && polls < 100
+  sleep(100)
+  polls = polls + 1
+end
+fail("another thread's read of standard input had not answered in 10 s") if third_read.get == 0
+reader.join
+fail("after a withdrawn line read another thread's read did not answer the line sent") unless third_read.get == 1
+puts "a withdrawn line read left the stream open, and another thread read the next line whole"
+puts "every property held"

@@ -35,32 +35,40 @@
 
 module std/atomic
 
-struct ::Atomic(T)
-  # The one instruction the prelude's `IyiAtomic` does not declare: a
-  # fence. `ordering` must be a symbol literal at the call site; the
-  # public verbs below are the only callers.
+# The one instruction the prelude's `IyiAtomic` does not declare: a
+# fence. It goes on that holder beside the other four, not on
+# `Atomic(T)`, for the reason the prelude gives there: a call on a generic
+# instance's class passes the class as its first argument, and the code
+# generator reads the fence's ordering from the front. Declared on
+# `Atomic(T)`, `Atomic.fence` built and `Atomic(Int64).fence` stopped the
+# compiler ("Multiple assignment count mismatch", "you've found a bug in
+# the iyi compiler"). `ordering` must be a symbol literal at the call
+# site; the fence verbs below are the only callers.
+struct ::IyiAtomic
   @[Primitive(:fence)]
-  private def self.fence_with(ordering : Symbol, singlethread : Bool) : Nil
+  def self.fence(ordering : Symbol, singlethread : Bool) : Nil
   end
+end
 
+struct ::Atomic(T)
   # A full fence: nothing crosses it in either direction.
   def self.fence : Nil
-    fence_with(:sequentially_consistent, false)
+    IyiAtomic.fence(:sequentially_consistent, false)
   end
 
   # Nothing after this fence moves before it.
   def self.fence_acquire : Nil
-    fence_with(:acquire, false)
+    IyiAtomic.fence(:acquire, false)
   end
 
   # Nothing before this fence moves after it.
   def self.fence_release : Nil
-    fence_with(:release, false)
+    IyiAtomic.fence(:release, false)
   end
 
   # Both halves, without the total order of `fence`.
   def self.fence_acq_rel : Nil
-    fence_with(:acquire_release, false)
+    IyiAtomic.fence(:acquire_release, false)
   end
 
   # The word, read once, atomic and nothing more.

@@ -49,8 +49,15 @@ cd "$WORK" || exit 1
 
 status=0
 
+# Each sample writes and reads its own directory of artifacts. An emitting
+# build writes every module it imports, from what that build compiled, so
+# one shared directory let a later sample rewrite an earlier one's: once
+# `std/time` imported `std/list`, `std_time` wrote `std/iterator`'s artifact
+# from a build that never made a `Stop`, and `std_iterator` read that one.
+# The claim here is per program - its own modules' artifacts, their source
+# gone - so the directory is too.
 for sample in $SAMPLES; do
-  if ! "$IYI" build --emit-iyimod mods -o "from-source-$sample" "$sample.iyi" >"emit-$sample.log" 2>&1; then
+  if ! "$IYI" build --emit-iyimod "mods-$sample" -o "from-source-$sample" "$sample.iyi" >"emit-$sample.log" 2>&1; then
     echo "$sample: writing artifacts failed"
     tail -5 "emit-$sample.log"
     status=1
@@ -65,7 +72,7 @@ rm -rf app std boot kemal
 
 for sample in $SAMPLES; do
   [ -f "from-source-$sample" ] || continue
-  if ! "$IYI" build --use-iyimod mods -o "from-artifact-$sample" "$sample.iyi" >"use-$sample.log" 2>&1; then
+  if ! "$IYI" build --use-iyimod "mods-$sample" -o "from-artifact-$sample" "$sample.iyi" >"use-$sample.log" 2>&1; then
     echo "$sample: building from artifacts failed"
     tail -12 "use-$sample.log"
     status=1
@@ -80,6 +87,830 @@ for sample in $SAMPLES; do
     status=1
   fi
 done
+
+# `calc` on what Windows pipes, and on input with an error. cmd's `echo`
+# ends the line in CRLF and the lexer had no case for `\r`: `echo 2 + 3 *
+# 4| iyi run samples\iyi\calc.iyi` answered "error: unexpected character at
+# 9". And every error went to standard output at exit 0, so a script could
+# not tell. The from-source build of it is the one run.
+if [ -f from-source-calc ]; then
+  crlf="$(printf 'x = 2 + 3 * 4\r\nx * 10\r\n' | ./from-source-calc 2>&1 | tr -d '\r')"
+  printf '1 / 0\n' | ./from-source-calc > calc-err.out 2> calc-err.err
+  err_code=$?
+  if [ "$crlf" = "140" ] && [ "$err_code" -eq 1 ] && [ ! -s calc-err.out ] &&
+     [ "$(tr -d '\r' < calc-err.err)" = "error: divided by zero" ]; then
+    echo "calc: CRLF input answers 140; 1 / 0 is said on standard error, exit 1"
+  else
+    echo "calc: CRLF input answered '$crlf'; 1 / 0 exited $err_code with '$(cat calc-err.out)' on standard output"
+    status=1
+  fi
+fi
+
+# Symbols, numbered by the program that links. A symbol is its index in the
+# program's table, and each build numbers its symbols in the order it meets
+# them: the producer below meets `:apple` and `:carrot` first, the consumer
+# meets four others before them. A unit that baked the producer's numbers in
+# compared the consumer's `:apple` against the producer's number for it, so
+# `webapp` above counted no before-filter once the prelude met one symbol
+# more. The module decides by `case`, autocasts a symbol to an enum member,
+# prints one, and answers `:carrot`, a symbol the consumer never writes - so
+# only the artifact can tell the consumer it exists.
+SYM="$WORK/symbols"
+mkdir -p "$SYM/tags"
+cat > "$SYM/tags/kind.iyi" <<'IYI'
+module tags/kind
+
+pub enum Colour
+  Red
+  Green
+end
+
+pub def kind_of(tag : Symbol) : String
+  case tag
+  when :apple  then "fruit"
+  when :carrot then "vegetable"
+  else              "unknown"
+  end
+end
+
+pub def favourite : Symbol
+  :carrot
+end
+
+pub def colour_name(colour : Colour) : String
+  colour == Colour::Green ? "green" : "red"
+end
+
+pub def green_by_symbol : String
+  colour_name(:green)
+end
+
+pub def tag_text(tag : Symbol) : String
+  tag.to_s
+end
+IYI
+cat > "$SYM/producer.iyi" <<'IYI'
+module producer
+
+import tags/kind::*
+
+puts kind_of(:apple)
+puts favourite
+puts tag_text(:apple)
+puts green_by_symbol
+IYI
+cat > "$SYM/consumer.iyi" <<'IYI'
+module consumer
+
+import tags/kind::*
+
+others = [:zebra, :yak, :walrus, :vole]
+puts others.size
+puts kind_of(:apple)
+puts kind_of(:zebra)
+puts kind_of(favourite)
+puts favourite.to_s
+puts favourite == favourite
+puts tag_text(:vole)
+puts green_by_symbol
+IYI
+printf '4\nfruit\nunknown\nvegetable\ncarrot\ntrue\nvole\ngreen\n' > "$SYM/expected.txt"
+if ! (cd "$SYM" && "$IYI" build --emit-iyimod mods -o producer producer.iyi) > "$SYM/emit.log" 2>&1; then
+  echo "symbols: writing artifacts failed"
+  tail -5 "$SYM/emit.log"
+  status=1
+else
+  rm -rf "$SYM/tags"
+  if ! (cd "$SYM" && "$IYI" build --use-iyimod mods -o consumer consumer.iyi) > "$SYM/use.log" 2>&1; then
+    echo "symbols: building the consumer from artifacts failed"
+    tail -12 "$SYM/use.log"
+    status=1
+  elif ! "$SYM/consumer" > "$SYM/consumer.txt" 2>&1 || ! cmp -s "$SYM/expected.txt" "$SYM/consumer.txt"; then
+    echo "symbols: the consumer, numbering its own, read the module's symbols wrong"
+    diff "$SYM/expected.txt" "$SYM/consumer.txt" | head -12
+    status=1
+  else
+    echo "symbols: numbered by the consumer, read right by the module's units"
+  fi
+fi
+
+# What a module's object code reaches in the program that links it, built
+# both ways and with `--release` both ways - the samples above never write
+# a release artifact. A struct changed through a getter and through `self`
+# changes the original: inlined from source, the call answers the field
+# itself, and an artifact's body-less header was a call that answered a
+# copy, so `h.counter.bump` left the counter at 1 in the build writing the
+# artifact and in the one reading it. Checked `+`, a class, a `defer` and a
+# `group`, whose code refers by name to what the consumer defines: its
+# runtime `fun`s, type ids, `:headed` bytes and class variables, which a
+# `--release` consumer made private and the linker could not find
+# (`__iyi_raise_overflow`), and on Windows the `void*` type descriptor a
+# catch pad names, which a consumer with no `defer` or `raise` of its own
+# never defined (`??_R0PEAX@8`).
+REACH="$WORK/reach"
+mkdir -p "$REACH/shelf"
+cat > "$REACH/shelf/box.iyi" <<'IYI'
+module shelf/box
+
+pub struct Counter
+  property n : Int32
+
+  def initialize(@n : Int32)
+  end
+
+  def me : self
+    self
+  end
+
+  def bump : Nil
+    @n += 1
+  end
+end
+
+pub class Holder
+  property counter : Counter
+
+  def initialize(@counter : Counter)
+  end
+end
+
+pub def add1(x : Int32) : Int32
+  x + 1
+end
+
+pub def with_defer(log : Array(String)) : Int32
+  defer log << "defer"
+  log << "body"
+  7
+end
+
+pub def twice_in_task(n : Int32) : Int32
+  out = 0
+  group do |g|
+    t = g.spawn { n * 2 }
+    v = t.value
+    out = v.is_a?(Int32) ? v : -1
+  end
+  out
+end
+IYI
+cat > "$REACH/main.iyi" <<'IYI'
+module main
+
+import shelf/box::*
+
+h = Holder.new(Counter.new(1))
+h.counter.bump
+puts "through a getter: #{h.counter.n}"
+c = Counter.new(1)
+c.me.bump
+puts "through self: #{c.n}"
+puts add1(41)
+log = [] of String
+puts "#{with_defer(log)} #{log.join(",")}"
+puts twice_in_task(21)
+IYI
+printf 'through a getter: 2\nthrough self: 2\n42\n7 body,defer\n42\n' > "$REACH/expected.txt"
+reach() { # reach <label> <name> [build flags...]
+  local label="$1" name="$2"
+  shift 2
+  if ! (cd "$REACH" && "$IYI" build "$@" -o "$name" main.iyi) > "$REACH/$name.log" 2>&1; then
+    echo "reach: $label failed to build"
+    grep -m3 -E "error|Error" "$REACH/$name.log"
+    status=1
+  elif ! "$REACH/$name" > "$REACH/$name.txt" 2>&1 || ! cmp -s "$REACH/expected.txt" "$REACH/$name.txt"; then
+    echo "reach: $label answered differently from the source"
+    diff "$REACH/expected.txt" "$REACH/$name.txt" | head -8
+    status=1
+  else
+    echo "reach: $label answers as the source does"
+  fi
+}
+reach "writing the artifact" emit --emit-iyimod mods
+reach "writing it --release" emit-release --release --emit-iyimod modsr
+rm -rf "$REACH/shelf"
+reach "reading the artifact" use --use-iyimod mods
+reach "reading it --release" use-release --release --use-iyimod modsr
+
+# Shapes of module whose artifact read back as something other than its
+# source, each built from source while writing the artifact and then from the
+# artifact alone. Each was measured failing on the build that read it:
+# `impl_block` linked no further than `Kit::Lib::B#walk<&Proc(Int32, Nil)>`
+# and Enumerable's `map` said "can't use yield inside a proc literal";
+# `abstract_generic` came back as `pub abstract generic class GA(T)`;
+# `empty_body` ended on `G(Int32)@G(T)#noop:Nil`; `field_default` was refused
+# for "code inside a type body that has to run"; `hooks` said `undefined
+# method 'kind' for Main::Mine`; `macro_def` put `class ::Main::User` in
+# the library's artifact - `superclass mismatch for class Main::User`; and
+# `annotated`, whose bodies `macro_def` made travel, read `@type` on a
+# declaration that arrived without its annotations: `price` answered 0 for
+# the library's own `@[Priced(3)] class Basket`, and the module-private
+# `Zone` was `undefined constant Zone`.
+TRAVEL="$WORK/travel"
+travel() { # travel <case> <expected output>, with $TRAVEL/<case>/{kit/lib.iyi,main.iyi}
+  local name="$1" dir="$TRAVEL/$1"
+  printf '%s\n' "$2" > "$dir/expected.txt"
+  if ! (cd "$dir" && "$IYI" build --emit-iyimod mods -o emit main.iyi) > "$dir/emit.log" 2>&1; then
+    echo "travel: $name failed to build from source"
+    grep -m3 -E "error|Error" "$dir/emit.log"
+    status=1
+    return
+  fi
+  rm -rf "$dir/kit"
+  if ! (cd "$dir" && "$IYI" build --use-iyimod mods -o use main.iyi) > "$dir/use.log" 2>&1; then
+    echo "travel: $name failed to build from its artifact"
+    grep -m3 -E "error|Error" "$dir/use.log"
+    status=1
+  elif ! "$dir/emit" > "$dir/emit.txt" 2>&1 || ! cmp -s "$dir/expected.txt" "$dir/emit.txt" ||
+    ! "$dir/use" > "$dir/use.txt" 2>&1 || ! cmp -s "$dir/expected.txt" "$dir/use.txt"; then
+    echo "travel: $name answered differently from the source"
+    diff "$dir/expected.txt" "$dir/use.txt" | head -8
+    status=1
+  else
+    echo "travel: $name answers from its artifact as from source"
+  fi
+}
+mkdir -p "$TRAVEL"/{impl_block,abstract_generic,empty_body,field_default,virtual_class_var,hooks,macro_def,annotated,unreached}/kit
+cat > "$TRAVEL/impl_block/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+import std/enumerable::{Enumerable}
+
+pub trait Walk
+  abstract def walk(& : Int32 -> Nil) : Nil
+end
+
+pub struct B
+  def initialize(@n : Int32)
+  end
+end
+
+impl Walk for B
+  def walk(& : Int32 -> Nil) : Nil
+    yield 3
+    yield 4
+  end
+end
+
+impl Enumerable for B
+  type Elem = Int32
+
+  def each(& : Int32 -> Nil) : Nil
+    i = 0
+    while i < @n
+      yield i
+      i += 1
+    end
+  end
+end
+IYI
+cat > "$TRAVEL/impl_block/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+import std/enumerable
+
+B.new(0).walk { |x| puts x }
+puts B.new(3).map { |x| x * 2 }
+IYI
+travel impl_block "$(printf '3\n4\n[0, 2, 4]')"
+cat > "$TRAVEL/abstract_generic/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub abstract class GA(T)
+  abstract def get : T
+end
+
+pub class GC(T) < GA(T)
+  def initialize(@v : T)
+  end
+
+  def get : T
+    @v
+  end
+end
+IYI
+cat > "$TRAVEL/abstract_generic/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+puts GC.new(3).get
+IYI
+travel abstract_generic 3
+cat > "$TRAVEL/empty_body/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class G(T)
+  def initialize(@v : T)
+  end
+
+  def noop : Nil
+  end
+
+  def get : T
+    @v
+  end
+end
+
+pub struct S(T)
+  def one : Int32
+    1
+  end
+end
+
+pub def each_none(& : Int32 -> Nil) : Nil
+end
+IYI
+cat > "$TRAVEL/empty_body/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+g = G.new(5)
+g.noop
+each_none { |x| puts x }
+puts "#{g.get} #{S(String).new.one}"
+IYI
+travel empty_body "5 1"
+cat > "$TRAVEL/field_default/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class A
+  @id = 7
+  @items = [] of String
+
+  def describe : String
+    "#{@id} #{@items.size}"
+  end
+end
+IYI
+cat > "$TRAVEL/field_default/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+puts A.new.describe
+IYI
+travel field_default "7 0"
+# A class variable read through a virtual owner: `look` and `count` are
+# called on `Base+` and `Base+.class` because `Sub < Base`, so the module's
+# object code calls `~Kit::Lib::Base+::table:read` and its metaclass twin,
+# which are main-module functions. `main` reads no class variable itself,
+# so nothing but the artifact's record can tell it to define them.
+cat > "$TRAVEL/virtual_class_var/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class Base
+  @@table = [3, 4]
+
+  def look : Int32
+    @@table[0]
+  end
+
+  def self.count : Int32
+    @@table.size
+  end
+end
+
+pub class Sub < Base
+end
+
+pub def answer : String
+  items = [Base.new, Sub.new] of Base
+  "#{items.map(&.look)} #{items.map { |item| item.class.count }}"
+end
+IYI
+cat > "$TRAVEL/virtual_class_var/main.iyi" <<'IYI'
+module main
+
+import kit/lib::{answer}
+
+puts answer
+IYI
+travel virtual_class_var "[3, 3] [2, 2]"
+cat > "$TRAVEL/hooks/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub abstract class P
+  @@names = [] of String
+
+  macro inherited
+    P.add({{@type.name.stringify}})
+
+    def kind : String
+      {{@type.name.stringify}}
+    end
+  end
+
+  def self.add(name : String) : Nil
+    @@names << name
+  end
+
+  def self.names : Array(String)
+    @@names
+  end
+end
+
+pub class One < P
+end
+IYI
+cat > "$TRAVEL/hooks/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+class Mine < P
+end
+
+puts "#{One.new.kind} #{Mine.new.kind} #{P.names}"
+IYI
+travel hooks 'Kit::Lib::One Main::Mine ["Kit::Lib::One", "Main::Mine"]'
+cat > "$TRAVEL/macro_def/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class Model
+  def type_name : String
+    {{ @type.name.stringify }}
+  end
+end
+IYI
+cat > "$TRAVEL/macro_def/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+class User < Model
+end
+
+puts "#{User.new.type_name} #{Model.new.type_name}"
+IYI
+travel macro_def "Main::User Kit::Lib::Model"
+# `Basket` sorts above `Priced`, so the annotation is only declared before
+# the type it is written over if the reader orders it there.
+cat > "$TRAVEL/annotated/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub annotation Priced
+end
+
+annotation Zone
+end
+
+@[Priced(3)]
+@[Zone]
+pub class Basket
+  def price : Int32
+    {{ (found = @type.annotation(Priced)) ? found[0] : 0 }}
+  end
+
+  def zoned? : Bool
+    {{ @type.annotation(Zone) ? true : false }}
+  end
+end
+IYI
+cat > "$TRAVEL/annotated/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+class Bag < Basket
+end
+
+@[Priced(5)]
+class Box < Basket
+end
+
+puts "#{Basket.new.price} #{Bag.new.price} #{Box.new.price} #{Basket.new.zoned?} #{Bag.new.zoned?}"
+IYI
+travel annotated "3 0 5 true false"
+
+# And a parameterised supertrait, written into the artifact with the trait's
+# own parameter qualified: `pub trait Ord(T) : ::Kit::Lib::Cmp(::T)`, and
+# the consumer stopped on "undefined constant ::T".
+mkdir -p "$TRAVEL/supertrait/kit"
+cat > "$TRAVEL/supertrait/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub trait Cmp(T)
+  abstract def cmp(other : T) : Int32
+end
+
+pub trait Ord(T) : Cmp(T)
+  def gt(other : T) : Bool
+    cmp(other) > 0
+  end
+end
+IYI
+cat > "$TRAVEL/supertrait/main.iyi" <<'IYI'
+module main
+
+import kit/lib::{Cmp, Ord}
+
+struct N
+  getter n : Int32
+
+  def initialize(@n : Int32)
+  end
+end
+
+impl Cmp(N) for N
+  def cmp(other : N) : Int32
+    @n - other.n
+  end
+end
+
+impl Ord(N) for N
+end
+
+puts N.new(2).gt(N.new(1))
+IYI
+travel supertrait true
+
+# And a method the build writing the artifact never called, which the
+# artifact declares and has no machine code for (SPEC.md IV.1g). It is
+# refused naming the module; it was a link error naming a mangled symbol,
+# `.2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`.
+cat > "$TRAVEL/unreached/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub def fb_public(x : Int32) : Int32
+  x * 7
+end
+IYI
+printf 'module producer\n\nimport kit/lib\n' > "$TRAVEL/unreached/producer.iyi"
+printf 'module main\n\nimport kit/lib::*\n\nputs fb_public(3)\n' > "$TRAVEL/unreached/main.iyi"
+if ! (cd "$TRAVEL/unreached" && "$IYI" build --emit-iyimod mods -o producer producer.iyi) > "$TRAVEL/unreached/emit.log" 2>&1; then
+  echo "travel: unreached failed to write its artifact"
+  status=1
+else
+  rm -rf "$TRAVEL/unreached/kit"
+  (cd "$TRAVEL/unreached" && "$IYI" build --use-iyimod mods -o use main.iyi) > "$TRAVEL/unreached/use.log" 2>&1
+  if grep -q "kit/lib's artifact declares .Kit::Lib.fb_public" "$TRAVEL/unreached/use.log" &&
+    grep -q "never reached it" "$TRAVEL/unreached/use.log"; then
+    echo "travel: a method the artifact's build never reached is refused naming the module"
+  else
+    echo "travel: a method the artifact's build never reached was not refused by name"
+    grep -m3 -E "error|Error" "$TRAVEL/unreached/use.log"
+    status=1
+  fi
+fi
+
+# And a `forall` def, which is the caller's to compile like a block-taking
+# one (SPEC.md IV.1g), with its bounds the caller's to check (II.6 §3,
+# II.7 rule 3). The artifact is written by a program that calls `wrap` at
+# its own `Meters`, and read by one that calls everything at types the
+# producer never used. The forall bodies stayed behind and their
+# instantiations went into the library's object code: the consumer was
+# refused at the import because `kit/lib` "numbers
+# `Kit::Lib::Box(Producer::Meters)`, and this build cannot name it", and
+# without that call `wrap("s")` was "has no symbol for it". The signatures
+# carried `forall T` and no `where` at all, so `render(2.5)` and a `shown`
+# over `Float64`, both refused from source, built from the artifact.
+mkdir -p "$TRAVEL/forall/kit"
+cat > "$TRAVEL/forall/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub trait Show
+  abstract def show : String
+end
+
+impl Show for Int32
+  def show : String
+    "i#{self}"
+  end
+end
+
+pub trait Bag
+  type Elem
+  abstract def items : Array(Elem)
+
+  def shown : String where Elem : Show
+    items.map { |x| x.show }.join(",")
+  end
+end
+
+pub struct Box(T)
+  getter value : T
+
+  def initialize(@value : T)
+  end
+end
+
+pub struct Two(T)
+  def initialize(@a : T, @b : T)
+  end
+end
+
+impl Bag for Two(T) forall T
+  type Elem = T
+
+  def items : Array(T)
+    [@a, @b]
+  end
+end
+
+pub def wrap(x : T) : Box(T) forall T
+  Box.new(x)
+end
+
+pub def render(x : T) : String forall T : Show
+  x.show
+end
+
+pub struct Conv
+  def initialize
+  end
+
+  def pair(x : T) : Array(T) forall T
+    [x, x]
+  end
+
+  def self.one(x : T) : Array(T) forall T
+    [x]
+  end
+end
+IYI
+cat > "$TRAVEL/forall/producer.iyi" <<'IYI'
+module producer
+
+import kit/lib::*
+
+pub struct Meters
+  def initialize
+  end
+end
+
+puts wrap(Meters.new).value.class
+puts render(1)
+puts Conv.new.pair(1).size
+puts Two.new(1, 2).shown
+IYI
+cat > "$TRAVEL/forall/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+puts wrap("s").value
+puts Conv.new.pair("s").size
+puts Conv.one('c').size
+puts render(7)
+puts Two.new(3, 4).shown
+IYI
+printf 'module main\n\nimport kit/lib::*\n\nputs render(2.5)\n' > "$TRAVEL/forall/free.iyi"
+printf 'module main\n\nimport kit/lib::*\n\nputs Two.new(1.5, 2.5).shown\n' > "$TRAVEL/forall/where.iyi"
+printf 's\n2\n1\ni7\ni3,i4\n' > "$TRAVEL/forall/expected.txt"
+if ! (cd "$TRAVEL/forall" && "$IYI" build --emit-iyimod mods -o producer producer.iyi) > "$TRAVEL/forall/emit.log" 2>&1; then
+  echo "travel: forall failed to write its artifact"
+  grep -m3 -E "error|Error" "$TRAVEL/forall/emit.log"
+  status=1
+else
+  rm -rf "$TRAVEL/forall/kit"
+  if ! (cd "$TRAVEL/forall" && "$IYI" build --use-iyimod mods -o use main.iyi) > "$TRAVEL/forall/use.log" 2>&1; then
+    echo "travel: forall defs at the consumer's types failed to build from another program's artifact"
+    grep -m3 -E "error|Error" "$TRAVEL/forall/use.log"
+    status=1
+  elif ! "$TRAVEL/forall/use" > "$TRAVEL/forall/use.txt" 2>&1 || ! cmp -s "$TRAVEL/forall/expected.txt" "$TRAVEL/forall/use.txt"; then
+    echo "travel: forall defs answered differently from the source"
+    diff "$TRAVEL/forall/expected.txt" "$TRAVEL/forall/use.txt" | head -8
+    status=1
+  else
+    echo "travel: forall defs compile at the consumer's types from another program's artifact"
+  fi
+  for bound in free where; do
+    (cd "$TRAVEL/forall" && "$IYI" build --use-iyimod mods -o "$bound" "$bound.iyi") > "$TRAVEL/forall/$bound.log" 2>&1
+    if grep -q "Float64 does not implement Kit::Lib::Show, required by" "$TRAVEL/forall/$bound.log"; then
+      echo "travel: a $bound bound read from the artifact is checked as from source"
+    else
+      echo "travel: a $bound bound read from the artifact was not checked"
+      grep -m3 -E "error|Error" "$TRAVEL/forall/$bound.log"
+      status=1
+    fi
+  done
+fi
+
+# And a def with an untyped parameter, which is a `forall` nobody named:
+# its instantiations are the caller's (SPEC.md IV.1g, issue #134). The
+# layout is the issue's: `lib/thing` derives `serializable` and imports a
+# package, so it has no artifact to be read from and every build compiles
+# it from source, while `std/json` beside it is read from its artifact.
+# Built twice, each build writing and reading the same directory, the way
+# an incremental loop runs. `std/json`'s `write_or_null(val, b : Builder)`
+# stayed behind as a header and its instantiation at `Item` went into
+# `std/json`'s `JSON` unit, which called `Item#to_json`: the second build
+# linked that unit, compiled `lib/thing` from source with nothing of its
+# own calling `to_json`, and the link ended on
+# `*Lib::Thing::Item#to_json<Std::Json::Builder>:Nil`.
+PKG="$WORK/untyped"
+mkdir -p "$PKG/pkg" "$PKG/lib"
+printf 'module art2\n\nrequire example.com/pkg v0.1.0\n\nreplace example.com/pkg => ./pkg\n' > "$PKG/iyi.mod"
+printf 'module example.com/pkg\n' > "$PKG/pkg/iyi.mod"
+printf 'module pkg\n\npub def label : String\n  "item"\nend\n' > "$PKG/pkg/pkg.iyi"
+cat > "$PKG/lib/thing.iyi" <<'IYI'
+module lib/thing
+
+import std/json::{JSON, serializable}
+import example.com/pkg
+
+pub struct Item
+  getter name : String
+
+  derive serializable
+
+  def initialize
+    @name = Pkg.label
+  end
+end
+IYI
+cat > "$PKG/lib/render.iyi" <<'IYI'
+module lib/render
+
+import std/json::{JSON}
+import lib/thing::{Item}
+
+pub def render : String
+  JSON.to_json([Item.new])
+end
+IYI
+printf 'module main\n\nimport lib/render::{render}\n\nputs render\n' > "$PKG/main.iyi"
+untyped_ok=1
+for build in first second; do
+  if ! (cd "$PKG" && "$IYI" build --emit-iyimod mods --use-iyimod mods -o "$build" main.iyi) > "$PKG/$build.log" 2>&1; then
+    echo "untyped: the $build build writing and reading artifacts failed"
+    grep -m3 -E "error|Error|undefined" "$PKG/$build.log"
+    untyped_ok=0
+  elif [ "$("$PKG/$build" 2>&1 | tr -d '\r')" != '[{"name":"item"}]' ]; then
+    echo "untyped: the $build build printed '$("$PKG/$build" 2>&1)'"
+    untyped_ok=0
+  fi
+done
+if [ "$untyped_ok" = 1 ]; then
+  echo "untyped: a serializable type in a module importing a package builds twice from std/json's artifact"
+else
+  status=1
+fi
+
+# And a parameter written as a trait, which is a bounded `forall` nobody
+# named. `kit/lib`'s `area_of(x : Shape)` called at `lib/thing`'s `Tri`
+# put `area_of<Lib::Thing::Tri>` in `kit/lib`'s unit, calling `Tri#area`.
+# The next program, in the same directory, imports both and no longer calls
+# `area_of`: `kit/lib` is read from its artifact, `lib/thing` is compiled
+# from source, nothing compiles `Tri#area`, and the link ended on
+# `*Lib::Thing::Tri#area:Int32`.
+BOUND="$WORK/bounded"
+mkdir -p "$BOUND/kit" "$BOUND/lib"
+cp -r "$PKG/iyi.mod" "$PKG/pkg" "$BOUND/"
+cat > "$BOUND/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub trait Shape
+  abstract def area : Int32
+end
+
+pub def area_of(x : Shape) : Int32
+  x.area + 1
+end
+IYI
+cat > "$BOUND/lib/thing.iyi" <<'IYI'
+module lib/thing
+
+import kit/lib::{Shape}
+import example.com/pkg
+
+pub struct Tri
+  getter name : String
+
+  def initialize
+    @name = Pkg.label
+  end
+end
+
+impl Shape for Tri
+  def area : Int32
+    @name.size
+  end
+end
+IYI
+printf 'module main\n\nimport kit/lib::{area_of}\nimport lib/thing::{Tri}\n\nputs area_of(Tri.new)\n' > "$BOUND/first.iyi"
+printf 'module main\n\nimport kit/lib::{area_of}\nimport lib/thing::{Tri}\n\nputs Tri.new.name\n' > "$BOUND/second.iyi"
+bounded_ok=1
+for build in first second; do
+  expected=5
+  [ "$build" = second ] && expected=item
+  if ! (cd "$BOUND" && "$IYI" build --emit-iyimod mods --use-iyimod mods -o "$build" "$build.iyi") > "$BOUND/$build.log" 2>&1; then
+    echo "bounded: the $build program writing and reading artifacts failed"
+    grep -m3 -E "error|Error|undefined" "$BOUND/$build.log"
+    bounded_ok=0
+  elif [ "$("$BOUND/$build" 2>&1 | tr -d '\r')" != "$expected" ]; then
+    echo "bounded: the $build program printed '$("$BOUND/$build" 2>&1)'"
+    bounded_ok=0
+  fi
+done
+if [ "$bounded_ok" = 1 ]; then
+  echo "bounded: a trait-typed parameter's instantiation at another module's type stays out of kit/lib's artifact"
+else
+  status=1
+fi
 
 echo "workdir $WORK"
 exit $status

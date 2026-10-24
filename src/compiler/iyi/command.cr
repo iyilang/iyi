@@ -38,11 +38,19 @@ class Iyi::Command
   # says `crystal`.
   class_property program_name : String = "crystal"
 
+  # `git`-style: the executable on PATH that `<program> <name>` runs, if
+  # there is one. Both dispatches ask this - `iyi`'s own, which decides
+  # whether a word is a command at all, and this one's, which runs it.
+  def self.external_command(name : String) : String?
+    Process.find_executable("#{program_name}-#{name}")
+  end
+
   USAGE = <<-USAGE
     Usage: crystal [command] [switches] [program file] [--] [arguments]
 
     Command:
         init                     generate a new project
+        get                      add a requirement to iyi.mod, or move one; -u brings all up to date
         doc                      print a module's exported surface, docs included
         build                    build an executable
         clear_cache              clear the compiler cache
@@ -101,6 +109,8 @@ class Iyi::Command
   def initialize(@options : Array(String))
     @color = Colorize.default_enabled?(STDOUT, STDERR)
     @error_trace = false
+    # iyi: `-f json` was asked for, so every refusal is data (`json_report`).
+    @json_output = false
     @progress_tracker = ProgressTracker.new
   end
 
@@ -113,6 +123,11 @@ class Iyi::Command
     when command == "init"
       options.shift
       init
+    when command == "get"
+      # Exact: it writes the manifest and fetches; not something to reach
+      # by prefix.
+      options.shift
+      get
     when "build".starts_with?(command)
       options.shift
       # A daemon named by the environment serves ordinary builds too, so the
@@ -228,7 +243,7 @@ class Iyi::Command
         # iyi: `git`-style subcommand extension, keyed on the name a person
         # typed. Hardcoded to `crystal-`, `iyi foo` could never find `iyi-foo`,
         # so the extension point existed for one of the two binaries only.
-      elsif external_command = Process.find_executable("#{Command.program_name}-#{command}")
+      elsif external_command = Command.external_command(command)
         options.shift
 
         iyi_exec_path = Iyi::Config.exec_path
@@ -261,17 +276,30 @@ class Iyi::Command
       end
     end
   rescue ex : Iyi::CodeError
-    report_warnings
-
     ex.color = @color
     ex.error_trace = @error_trace
-    if @config.try(&.output_format) == "json"
-      STDERR.puts ex.to_json
+    if @json_output
+      json_report { |json| ex.to_json_single(json) }
     else
+      report_warnings
       STDERR.puts ex
     end
     exit 1
   rescue ex : Iyi::Error
+    # Under `-f json` the chain is one array, outermost first. Printed a line
+    # at a time, `check -f json` on a module with a byte that is not UTF-8
+    # answered `Error: while importing "app/lib"` as text.
+    if @json_output
+      json_report do |json|
+        link = ex.as(Exception?)
+        while link
+          json_message_frame(json, link.message.to_s)
+          link = link.cause
+        end
+      end
+      exit Exit::CODE_ERROR.to_i
+    end
+
     report_warnings
 
     # This unwraps nested errors which could be caused by `require` which wraps
@@ -366,7 +394,13 @@ class Iyi::Command
   end
 
   private def init
-    Init.run(options)
+    # iyi: the `iyi` binary's `init` writes an iyi project (command/init.cr);
+    # `crystal init` underneath is still Crystal's shard scaffold.
+    if Command.program_name == "iyi"
+      iyi_init
+    else
+      Init.run(options)
+    end
   end
 
   # iyi: `iyi vet` — SPEC.md III.8 #3's row, closed the way the table
@@ -436,6 +470,7 @@ class Iyi::Command
       return
     end
 
+    Iyi.sweep_run_leftovers
     output_filename = Iyi.temp_executable(config.output_filename)
 
     config.compile output_filename
@@ -482,6 +517,11 @@ class Iyi::Command
       "it does not own: if the program uses `Pointer`, that is the place to look, and on a target " \
       "without iyi's runtime it can also be the stack running out. If neither, it is a bug in " \
       "#{program_name}'s own runtime, and ours to fix: https://github.com/iyilang/iyi/issues"
+    when .unknown?
+      # The code is the one fact left, and without it an intermittent
+      # Windows exit crash could not be told from another: a stack cookie
+      # (0xc0000409), a heap corruption (0xc0000374), a fast-fail.
+      "#{status.description} (status 0x#{status.system_exit_status.to_s(16)})"
     else
       if signal = status.exit_signal?
         "the program was killed by signal #{signal} (#{status.description.lchop("Process ")})"
@@ -489,6 +529,21 @@ class Iyi::Command
         status.description
       end
     end
+  end
+
+  # iyi: a Windows exit code the program chose, where `Process::Status`
+  # sees an abnormal end. Every code with the top two bits set reads as an
+  # NTSTATUS error to it, and a program's `exit(-1)` is 0xFFFFFFFF: `iyi
+  # run` said "terminated abnormally, the cause is unknown" and exited 1
+  # where the program itself exits -1. A status the system raises has the
+  # customer bit (29) clear; one with it set is an application's - a
+  # program's small negative code, or a runtime's own exception code - and
+  # is passed on as the exit code it is.
+  def self.application_code?(status : Process::Status) : Int32?
+    {% if flag?(:win32) %}
+      code = status.system_exit_status
+      code.to_i32! if code & 0x20000000_u32 != 0
+    {% end %}
   end
 
   private def execute(output_filename, run_args, compiler, *, error_on_exit = false)
@@ -555,7 +610,7 @@ class Iyi::Command
       puts "Execute: #{elapsed_time}"
     end
 
-    if (exit_code = status.exit_code?) && !error_on_exit
+    if (exit_code = status.exit_code? || Command.application_code?(status)) && !error_on_exit
       exit exit_code
     end
 
@@ -585,11 +640,17 @@ class Iyi::Command
     # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which winnt.cr does not spell.
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000_u32
 
+    # JOB_OBJECT_LIMIT_BREAKAWAY_OK: a child the program starts with
+    # CREATE_BREAKAWAY_FROM_JOB leaves the job, as it does when the program
+    # is run from a shell. Without it that start was refused with "Access is
+    # denied" under `iyi run` alone.
+    JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800_u32
+
     private def kill_child_with_runner(process)
       job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
       return if job.null?
       limits = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
-      limits.basicLimitInformation.limitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      limits.basicLimitInformation.limitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
       if LibC.SetInformationJobObject(job, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
            pointerof(limits).as(Void*),
            sizeof(LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION).to_u32) == 0
@@ -707,7 +768,9 @@ class Iyi::Command
         end
 
         opts.on("--x86-asm-syntax att|intel", "X86 dialect for --emit=asm: AT&T (default), Intel") do |value|
-          case value = LLVM::InlineAsmDialect.parse?(value)
+          # `dialect`, not `value`: the parse wrote over the word it read,
+          # and the refusal said "Invalid value `` for x86-asm-syntax".
+          case dialect = LLVM::InlineAsmDialect.parse?(value)
           in Nil
             abort! "Invalid value `#{value}` for x86-asm-syntax", :USAGE_ERROR
           in .att?
@@ -746,6 +809,9 @@ class Iyi::Command
 
       opts.on("-f #{allowed_formats.join("|")}", "--format #{allowed_formats.join("|")}", "Output format: #{allowed_formats[0]} (default), #{allowed_formats[1..].join(", ")}") do |f|
         output_format = f
+        # iyi: as soon as it is known, so a refusal before the compile (`no
+        # such file`) is data too (`json_report`).
+        @json_output = true if f == "json" && allowed_formats.includes?(f)
       end
 
       if unreachable_command
@@ -850,7 +916,7 @@ class Iyi::Command
         compiler.emit_bind = dir
       end
 
-      opts.on("--emit-iyimod DIR", "iyi: write a .iyimod per imported module into DIR") do |dir|
+      opts.on("--emit-iyimod DIR", "iyi: write a .iyimod per imported module this build reads from source into DIR (a package's is III.7 step 5's, and is not one of these)") do |dir|
         # iyi: answered here rather than by `Dir.mkdir_p` half an hour into a
         # build. A path that names a file, or a directory nobody may write to,
         # used to arrive as `Unable to create directory` and a stack trace.
@@ -877,7 +943,12 @@ class Iyi::Command
       # that, and what is missing shows up as an undefined symbol at link —
       # which is the honest failure for this stage, and a great deal more
       # useful than refusing to try.
-      opts.on("--use-iyimod DIR", "iyi: compile imported modules from DIR's .iyimod files") do |dir|
+      # And the line says "first", because the workspace's own `mods` is
+      # read without being asked for — after its sources, for a module whose
+      # file is not there (`Compiler.workspace_artifacts`, SPEC.md IV.1f).
+      # A reader who has seen a build use an artifact it was never told
+      # about is owed the difference between the two.
+      opts.on("--use-iyimod DIR", "iyi: compile imported modules from DIR's .iyimod files first; `mods` beside the project root is read for a module with no source either way") do |dir|
         # iyi: a module with no artifact is ordinary — the first build of the
         # loop has none at all, and compiles from source. A *directory* that is
         # not there is a typo, and it used to be ignored: the build compiled
@@ -985,6 +1056,14 @@ class Iyi::Command
     # compiler knows before it reads anything. `--prelude` still wins, and a
     # `.cr` file is untouched — the two languages share this compiler and do
     # not share a standard library.
+    # The extension is the stored name's (`gather_sources`), compared as it
+    # is stored. The case was folded here instead, so on Windows a file
+    # stored as `UP.IYI` got iyi's prelude and the other language's lexer
+    # (`Lexer.iyi_source?`), and valid iyi answered `unexpected token:
+    # "!"`; such a name is refused now (`Lexer.iyi_miscased?`).
+    if (entry = sources.first?) && Lexer.iyi_miscased?(entry.filename)
+      abort! Lexer.iyi_miscased_sentence(entry.filename), :USAGE_ERROR
+    end
     if !specified_prelude && sources.first?.try(&.filename.ends_with?(".iyi"))
       compiler.prelude = "iyi/prelude"
     end
@@ -999,7 +1078,7 @@ class Iyi::Command
       output_filename = (output_path / "#{::Path[first_filename].stem}#{output_extension}").normalize.to_s
 
       # Check if we'll overwrite the main source file
-      if !compiler.no_codegen? && !run && first_filename == File.expand_path(output_filename)
+      if !compiler.no_codegen? && !run && Iyi.same_file?(first_filename, output_filename)
         abort! "compilation will overwrite source file '#{Iyi.relative_filename(first_filename)}', either change its extension to '.cr' or specify an output file with '-o'", :USAGE_ERROR
       end
     else
@@ -1016,8 +1095,7 @@ class Iyi::Command
       # same mistake one step removed, and is refused once it is known
       # (`Compiler#codegen`), before anything is written.
       if !compiler.no_codegen? && !run
-        expanded = File.expand_path(output_filename)
-        if source = sources.find { |candidate| candidate.filename == expanded }
+        if source = sources.find { |candidate| Iyi.same_file?(candidate.filename, output_filename) }
           abort! "-o #{output_filename} names #{Iyi.relative_filename(source.filename)}, the source it would build from, " \
                  "and linking there would replace it. Name the program something else", :USAGE_ERROR
         end
@@ -1028,8 +1106,13 @@ class Iyi::Command
     unless output_format.in?(allowed_formats)
       abort! "You have input an invalid format: #{output_format}. Supported formats: #{allowed_formats.join(", ")}", :USAGE_ERROR
     end
+    # iyi: data has no colour. The program's colour reaches the text of its
+    # messages, and `check -f json` on a terminal carried `\u001b[33;1m
+    # (compile-time type is (String | Nil))\u001b[39;22m` in "message".
+    compiler.color = false if output_format == "json"
 
     abort! "maximum number of threads cannot be lower than 1", :USAGE_ERROR if compiler.n_threads < 1
+    validate_mcpu(compiler)
 
     if !compiler.no_codegen? && !run && Dir.exists?(output_filename)
       abort! "can't use `#{output_filename}` as output filename because it's a directory", :USAGE_ERROR
@@ -1050,13 +1133,67 @@ class Iyi::Command
       # the file. `-o ro/prog` under a mode-500 directory was three lines
       # of `ld.lld: error: cannot open output file`, once per link
       # attempt, for a permission bit.
-      unless File.writable?(directory)
+      unless Iyi.writable_directory?(directory)
         abort! "#{directory} will not take #{File.basename(output_filename)}: no permission to write there", :USAGE_ERROR
       end
+
+      # Windows will not write over a program that is running, nor over a
+      # read-only file, and the linker said so only after the whole
+      # compile: "LNK1104: cannot open file", exit status 1104, and the
+      # linker's command line on stderr. It does let the file be renamed,
+      # which is how `make -f Makefile.win` replaces a running `iyi.exe`,
+      # so the old program is moved aside - it goes on running - and the
+      # new one written where it was.
+      {% if flag?(:win32) %}
+        unless compiler.cross_compile?
+          # And the program database the MSVC linker writes beside it,
+          # first, so a refusal leaves the program as it was. A `.pdb` a
+          # debugger holds open, or a read-only one from an extracted tree,
+          # failed the link after the whole compile - "LNK1201: error writing
+          # to program database", exit status 1201, the linker's command line
+          # - and the linker deleted the program on its way out.
+          {% if flag?(:msvc) %}
+            unless compiler.debug.none?
+              pdb = "#{output_filename.rchop(::Path[output_filename].extension)}.pdb"
+              unless Iyi.move_aside_if_busy(pdb)
+                abort! "#{pdb} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+              end
+            end
+          {% end %}
+          unless Iyi.move_aside_if_busy(output_filename)
+            abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+          end
+        end
+      {% end %}
     end
 
     if run
       emit_base_filename = ::Path[sources.first.filename].stem
+    end
+
+    # iyi: the artifacts a workspace keeps, where nobody said otherwise.
+    #
+    # A library arrives as `.iyimod` files and no source (III.7). Told
+    # `--use-iyimod DIR` a build reads them first and does not open a
+    # source at all — that is the flag's contract and it is untouched here.
+    # Told nothing, a build used to have no way to reach one, so a
+    # workspace that `build --use-iyimod mods` compiles was `can't find
+    # module 'app/base'` under `iyi build`, `iyi run` and `iyi test`: the
+    # library was there, as the thing it ships as.
+    #
+    # Source first, so a workspace with its sources present compiles
+    # exactly as it did — the artifact is reached for a module whose file
+    # is not there, which is the case that used to be an error. The same
+    # reading the language server, `check` and `doc` do; the name is
+    # `Compiler.workspace_artifacts`.
+    if compiler.use_iyimod.nil?
+      if entry = sources.first?
+        root = Compiler.header_root_of(entry.filename, entry.code) || File.dirname(entry.filename)
+        if artifacts = Compiler.workspace_artifacts(root)
+          compiler.use_iyimod = artifacts
+          compiler.iyi_prefers_source = true
+        end
+      end
     end
 
     @config = CompilerConfig.new compiler, sources, output_filename, emit_base_filename,
@@ -1084,6 +1221,9 @@ class Iyi::Command
         abort! "#{filename} is a directory, not a source file", :USAGE_ERROR if Dir.exists?(expanded)
         abort! "no such file: #{filename}", :USAGE_ERROR
       end
+      # The name as stored, which the language and `Lexer.iyi_miscased?`
+      # are read off.
+      expanded = Lexer.stored_name(expanded)
       Compiler::Source.new(expanded, File.read(expanded))
     end
   rescue exc : IO::Error
@@ -1140,6 +1280,40 @@ class Iyi::Command
     target_specific_opts(opts, compiler)
     setup_compiler_warning_options(opts, compiler)
     opts.invalid_option { }
+  end
+
+  # iyi: whether LLVM knows the `--mcpu` it was given, asked before anything
+  # is compiled. It was handed over unchecked, and an unknown name reached
+  # each codegen thread: `iyi build --mcpu nonesuch` printed "'nonesuch' is
+  # not a recognized processor for this target" once per thread, the lines
+  # running into each other, then "LLVM ERROR: 64-bit code requested on a
+  # subtarget that doesn't support it!", and died in `abort()`, exit
+  # 0xC0000409 on Windows. LLVM's C interface has no question for this, and
+  # its one list of the names is what `--mcpu help` prints to stderr as a
+  # target machine is made; so a child of this binary is asked for that list,
+  # for this target. When it cannot answer, LLVM is left to answer as before.
+  private def validate_mcpu(compiler) : Nil
+    cpu = compiler.mcpu
+    return if cpu.nil? || cpu.empty? || cpu == LLVM.host_cpu_name
+    return unless exe = Process.executable_path
+    listing = IO::Memory.new
+    Process.run(exe, ["build", "--target", compiler.codegen_target.to_s, "--mcpu", "help"],
+      env: {"IYI_OPTS" => nil, "CRYSTAL_OPTS" => nil}, error: listing)
+    # "Available CPUs for this target:", a blank line, one `  name - what`
+    # a line, and "Available features for this target:" after them.
+    known = [] of String
+    listed = false
+    listing.to_s.each_line do |line|
+      if line.starts_with?("Available")
+        break if listed
+        listed = true
+      elsif listed && !line.blank?
+        known << line.strip.split(' ', 2).first
+      end
+    end
+    return if known.empty? || known.includes?(cpu)
+    abort! "--mcpu #{cpu} is not a CPU LLVM knows for #{compiler.codegen_target}; `--mcpu help` lists the ones it does", :USAGE_ERROR
+  rescue IO::Error
   end
 
   private def target_specific_opts(opts, compiler)
@@ -1223,9 +1397,26 @@ class Iyi::Command
   end
 
   private def print_error(msg)
+    if @json_output
+      json_report { |json| json_message_frame(json, msg.to_s) }
+      return
+    end
     # This is for the case where the main command is wrong
     @color = false if ARGV.includes?("--no-color") || !Colorize.default_enabled?(STDOUT, STDERR)
     Iyi.print_error(msg, @color)
+  end
+
+  # iyi: a refusal with no place in a source file, as a `-f json` frame: the
+  # shape every frame has, with the place left empty as an error from a
+  # macro's virtual file leaves it. `no such file: x.iyi` was text there.
+  private def json_message_frame(json : JSON::Builder, message : String) : Nil
+    json.object do
+      json.field "file", ""
+      json.field "line", nil
+      json.field "column", nil
+      json.field "size", 0
+      json.field "message", message
+    end
   end
 
   private def self.iyi_opts
@@ -1276,7 +1467,10 @@ class Iyi::Command
     Command.parse_with_iyi_opts(@options) { |opts| yield opts }
   end
 
+  # iyi: with the colour this command has, which is none unless the output
+  # is a terminal. `Compiler#color?` defaulted to true and nothing here set
+  # it, so a message's colour reached a file `iyi check` was redirected to.
   private def new_compiler
-    @compiler = Compiler.new
+    @compiler = Compiler.new.tap(&.color = @color)
   end
 end

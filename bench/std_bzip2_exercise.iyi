@@ -1,0 +1,663 @@
+# Exercises `std/bzip2`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_bzip2_exercise.iyi
+#     ./bin/iyi run bench/std_bzip2_exercise.iyi <fixtures>
+#
+# Without a directory: round trips, the format's own numbers, streaming
+# through small pieces and tiny reads, and the corrupt streams refused by
+# name - everything that prints the same from any build. With one, the
+# streams Python's `bz2` wrote there are read back whole and a piece at a
+# time, this module's streams are written beside them for Python to read,
+# the corrupt ones for Python to refuse, a 64 MiB stream is read in
+# bounded memory, and the timings are printed;
+# `bench/std_bzip2_exercise.sh` is the other half of that conversation.
+
+module bench/std_bzip2_exercise
+
+import std/bzip2::{Bzip2, Bzip2Reader, Bzip2Error}
+import std/digest::{CRC32}
+import std/random::{Random}
+import std/file::{File}
+import std/gc::{GC}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+# A source that gives *stream* a piece at a time - the sizes in *sizes*,
+# round and round - and counts what it has been asked for.
+class Feed
+  getter calls : Int32
+  getter at : Int32
+
+  def initialize(@stream : String, @sizes : Array(Int32))
+    @at = 0
+    @calls = 0
+  end
+
+  # What the source has not given yet.
+  def rest : String
+    n = @stream.bytesize - @at
+    src = @stream.to_unsafe + @at.to_i64
+    String.new(n) { |dst| dst.copy_from(src, n) }
+  end
+
+  def next : String?
+    @calls = @calls + 1
+    return nil if @at >= @stream.bytesize
+    n = @sizes[(@calls - 1) % @sizes.size]
+    n = @stream.bytesize - @at if n > @stream.bytesize - @at
+    src = @stream.to_unsafe + @at.to_i64
+    @at = @at + n
+    String.new(n) { |dst| dst.copy_from(src, n) }
+  end
+end
+
+# Every byte a reader gives, *max* at most a read, or its error.
+def drain(r : Bzip2Reader, max : Int32) : String | Bzip2Error
+  all = String::Builder.new
+  while true
+    piece = r.read(max)
+    case piece
+    when Bzip2Error
+      return piece
+    else
+      assert_true piece.bytesize <= max, "a read of #{max} answered #{piece.bytesize} bytes"
+      break if piece.bytesize == 0
+      all << piece
+    end
+  end
+  assert_true r.finished?, "a reader that answered \"\" is finished"
+  all.to_s
+end
+
+def stream_through(stream : String, sizes : Array(Int32), max : Int32) : String | Bzip2Error
+  feed = Feed.new(stream, sizes)
+  r = Bzip2Reader.new { feed.next }
+  drain(r, max)
+end
+
+def whole(stream : String, label : String) : String
+  got = Bzip2.decompress(stream)
+  case got
+  when Bzip2Error
+    raise "ASSERTION FAILED: #{label}: refused with #{got.message.inspect}"
+  else
+    got
+  end
+end
+
+def streamed(stream : String, sizes : Array(Int32), max : Int32, label : String) : String
+  got = stream_through(stream, sizes, max)
+  case got
+  when Bzip2Error
+    raise "ASSERTION FAILED: #{label}, pieces #{sizes} and reads of #{max}: refused with #{got.message.inspect}"
+  else
+    got
+  end
+end
+
+# Whole, then fed one to seven bytes a piece (the sizes in turn), one
+# byte a piece, seven bytes a piece and all at once - each the same.
+def every_feed(stream : String, plain : String, label : String) : Nil
+  assert_true whole(stream, label) == plain, "#{label}, whole"
+  all = stream.bytesize > 0 ? stream.bytesize : 1
+  [[1, 2, 3, 4, 5, 6, 7], [1], [7], [all]].each do |sizes|
+    assert_true streamed(stream, sizes, 65536, label) == plain, "#{label}, pieces of #{sizes}"
+  end
+end
+
+# The error, where the stream must not read, whole and streamed; its
+# sentence must say *phrase*.
+def refused(stream : String, phrase : String, label : String) : Nil
+  got = Bzip2.decompress(stream)
+  case got
+  when Bzip2Error
+    assert_true got.message.includes?(phrase), "#{label}: refused with #{got.message.inspect}, which does not say #{phrase.inspect}"
+  else
+    raise "ASSERTION FAILED: #{label}: read #{got.bytesize} bytes instead of refusing"
+  end
+  [[1, 2, 3, 4, 5, 6, 7], [4096]].each do |sizes|
+    feed = Feed.new(stream, sizes)
+    r = Bzip2Reader.new { feed.next }
+    again = drain(r, 65536)
+    case again
+    when Bzip2Error
+      assert_true again.message == got.message, "#{label}, streamed: refused with #{again.message.inspect}, whole with #{got.message.inspect}"
+      # and every read after it answers the same error.
+      later = r.read(10)
+      assert_true later.is_a?(Bzip2Error) && later.message == got.message, "#{label}: the read after the error answers it again"
+    else
+      raise "ASSERTION FAILED: #{label}, streamed: read #{again.bytesize} bytes instead of refusing"
+    end
+  end
+  puts "  #{label}: #{got.message}"
+end
+
+def bytes(values : Array(Int32)) : String
+  String.new(values.size) do |dst|
+    i = 0
+    while i < values.size
+      dst[i] = values[i].to_u8
+      i = i + 1
+    end
+  end
+end
+
+def run_of(byte : Int32, n : Int32) : String
+  String.new(n) do |dst|
+    i = 0
+    while i < n
+      dst[i] = byte.to_u8
+      i = i + 1
+    end
+  end
+end
+
+def random_bytes(n : Int32, seed : UInt64) : String
+  rng = Random.new(seed)
+  String.new(n) do |dst|
+    i = 0
+    while i < n
+      dst[i] = (rng.next_u & 0xff_u32).to_u8
+      i = i + 1
+    end
+  end
+end
+
+# Runs of every length around the code's edges - 1 to 6, 250 to 260, 510
+# to 520 - of bytes that change each run.
+def runs : String
+  b = String::Builder.new
+  lengths = [1, 2, 3, 4, 5, 6, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 510, 511, 512, 513, 514, 515, 516, 517, 518, 519, 520]
+  k = 0
+  3.times do
+    lengths.each do |n|
+      b << run_of((k * 37) & 0xff, n)
+      k = k + 1
+    end
+  end
+  b.to_s
+end
+
+def text(lines : Int32) : String
+  b = String::Builder.new
+  i = 0
+  while i < lines
+    b << "line " << i.to_s << ": the quick brown fox jumps over the lazy dog " << (i % 7).to_s << "\n"
+    i = i + 1
+  end
+  b.to_s
+end
+
+# How many bytes *s* is after bzip2's first run-length code: a run of four
+# to 255 is five, the rest themselves - the block an origin pointer is in.
+def rle1_size(s : String) : Int32
+  n = 0
+  i = 0
+  while i < s.bytesize
+    r = 1
+    while r < 255 && i + r < s.bytesize && s.to_unsafe[i + r] == s.to_unsafe[i]
+      r = r + 1
+    end
+    n = n + (r < 4 ? r : 5)
+    i = i + r
+  end
+  n
+end
+
+def hex(s : String) : String
+  digits = "0123456789abcdef"
+  b = String::Builder.new
+  i = 0
+  while i < s.bytesize
+    v = s.to_unsafe[i].to_i32
+    b << digits[v >> 4] << digits[v & 15]
+    i = i + 1
+  end
+  b.to_s
+end
+
+# A stream as bits, most significant first, to be broken where a field is.
+class Bits
+  getter bits : Array(Int32)
+
+  def initialize(s : String)
+    @bits = [] of Int32
+    i = 0
+    while i < s.bytesize
+      v = s.to_unsafe[i].to_i32
+      k = 7
+      while k >= 0
+        @bits << ((v >> k) & 1)
+        k = k - 1
+      end
+      i = i + 1
+    end
+  end
+
+  def get(pos : Int32, n : Int32) : Int32
+    v = 0
+    i = 0
+    while i < n
+      v = (v << 1) | @bits[pos + i]
+      i = i + 1
+    end
+    v
+  end
+
+  def set(pos : Int32, n : Int32, v : Int32) : Bits
+    i = 0
+    while i < n
+      @bits[pos + i] = (v >> (n - 1 - i)) & 1
+      i = i + 1
+    end
+    self
+  end
+
+  # The bits from *from* to *to* replaced by *n*-bit fields.
+  def splice(from : Int32, to : Int32, fields : Array({Int32, Int32})) : Bits
+    mid = [] of Int32
+    fields.each do |f|
+      i = f[1] - 1
+      while i >= 0
+        mid << ((f[0] >> i) & 1)
+        i = i - 1
+      end
+    end
+    @bits = @bits[0, from] + mid + @bits[to, @bits.size - to]
+    self
+  end
+
+  # Where the last end-of-stream magic starts.
+  def last_end : Int32
+    pos = @bits.size - 48
+    while pos >= 0
+      return pos if get(pos, 24) == 0x177245 && get(pos + 24, 24) == 0x385090
+      pos = pos - 1
+    end
+    -1
+  end
+
+  def to_s : String
+    n = (@bits.size + 7) // 8
+    bits = @bits
+    String.new(n) do |dst|
+      i = 0
+      while i < n
+        v = 0
+        k = 0
+        while k < 8
+          at = i * 8 + k
+          v = (v << 1) | (at < bits.size ? bits[at] : 0)
+          k = k + 1
+        end
+        dst[i] = v.to_u8
+        i = i + 1
+      end
+    end
+  end
+end
+
+# The first block's fields, by bit offset: where the table count, the
+# selector count, the selectors (and the last of them), and the first
+# table's lengths start and end, where the symbols start, and the
+# alphabet's size.
+class Layout
+  getter groups_at : Int32
+  getter nsel_at : Int32
+  getter selectors_at : Int32
+  getter tables_at : Int32
+  getter table0_end : Int32
+  getter alpha : Int32
+  getter nsel : Int32
+  getter data_at : Int32
+  getter last_selector_at : Int32
+
+  def initialize(b : Bits)
+    pos = 32 + 48 + 32 + 1 + 24
+    ranges = b.get(pos, 16)
+    pos = pos + 16
+    used = 0
+    i = 0
+    while i < 16
+      if (ranges >> (15 - i)) & 1 == 1
+        m = b.get(pos, 16)
+        pos = pos + 16
+        k = 0
+        while k < 16
+          used = used + ((m >> k) & 1)
+          k = k + 1
+        end
+      end
+      i = i + 1
+    end
+    @alpha = used + 2
+    @groups_at = pos
+    nsel = b.get(pos + 3, 15)
+    @nsel_at = pos + 3
+    pos = pos + 18
+    @selectors_at = pos
+    @last_selector_at = pos
+    i = 0
+    while i < nsel
+      @last_selector_at = pos
+      while b.get(pos, 1) == 1
+        pos = pos + 1
+      end
+      pos = pos + 1
+      i = i + 1
+    end
+    @tables_at = pos
+    pos = pos + 5
+    i = 0
+    while i < @alpha
+      while b.get(pos, 1) == 1
+        pos = pos + 2
+      end
+      pos = pos + 1
+      i = i + 1
+    end
+    @table0_end = pos
+    @nsel = nsel
+    t = 1
+    groups = b.get(@groups_at, 3)
+    while t < groups
+      pos = pos + 5
+      i = 0
+      while i < @alpha
+        while b.get(pos, 1) == 1
+          pos = pos + 2
+        end
+        pos = pos + 1
+        i = i + 1
+      end
+      t = t + 1
+    end
+    @data_at = pos
+  end
+end
+
+alias Corpus = {String, String}
+
+empty_stream = bytes([0x42, 0x5a, 0x68, 0x39, 0x17, 0x72, 0x45, 0x38, 0x50, 0x90, 0, 0, 0, 0])
+big_text = text(12000)
+corpora = [
+  {"empty", ""},
+  {"one byte", "x"},
+  {"three equal", "aaa"},
+  {"four equal", "aaaa"},
+  {"five equal", "aaaaa"},
+  {"runs", runs},
+  {"a byte 300000 times", run_of(0x41, 300000)},
+  {"ab repeated", "ab" * 150000},
+  {"every byte", bytes((0..255).to_a) * 64},
+  {"text", big_text},
+  {"random", random_bytes(200000, 20261017_u64)},
+] of Corpus
+
+puts "== round trips"
+corpora.each do |c|
+  [1, 9].each do |level|
+    s = Bzip2.compress(c[1], level)
+    every_feed(s, c[1], "#{c[0]} at level #{level}")
+  end
+  puts "  #{c[0]}: #{c[1].bytesize} bytes, levels 1 and 9, whole and in pieces"
+end
+# A level-1 block is 100,000 bytes less 19 before the first run-length
+# code: text crosses into five blocks, and a long run lands on the edge.
+edge = big_text + run_of(0x7a, 1000) + random_bytes(5000, 7_u64)
+multi = Bzip2.compress(edge, 1)
+blocks = 0
+mb = Bits.new(multi)
+pos = 0
+while pos + 48 <= mb.bits.size
+  blocks = blocks + 1 if mb.get(pos, 24) == 0x314159 && mb.get(pos + 24, 24) == 0x265359
+  pos = pos + 1
+end
+assert_true blocks >= 7, "#{edge.bytesize} bytes at level 1 are #{blocks} blocks, past six"
+every_feed(multi, edge, "#{edge.bytesize} bytes at level 1")
+(2..8).each do |level|
+  assert_true whole(Bzip2.compress(edge, level), "level #{level}") == edge, "level #{level} reads back"
+end
+puts "  #{edge.bytesize} bytes at level 1: #{blocks} blocks; and levels 2 to 8"
+
+puts "\n== the format's own words"
+# The empty stream: "BZh9", the end-of-stream magic and a combined CRC of
+# zero, the fourteen bytes bzip2 1.0.8 and Python's bz2 write.
+assert_true Bzip2.compress("") == empty_stream, "the empty stream is BZh9, sqrt(pi) and a zero CRC: #{hex(Bzip2.compress(""))}"
+assert_true whole(empty_stream, "the empty stream") == "", "the empty stream holds nothing"
+assert_true Bzip2.compress("", 1) == "BZh1" + empty_stream[4, 10], "and at level 1 says BZh1"
+# CRC-32/BZIP2's check value from the CRC catalogue (Greg Cook's RevEng):
+# "123456789" sums to fc891918, which is the block's CRC in its header,
+# after "BZh9" and pi's 48 bits; with one block, the combined CRC is it.
+nine = Bzip2.compress("123456789")
+assert_true hex(nine[0, 10]) == "425a6839314159265359", "a block starts with BZh9 and pi's BCD digits: #{hex(nine[0, 10])}"
+assert_true hex(nine[10, 4]) == "fc891918", "the block CRC of \"123456789\" is CRC-32/BZIP2's check value fc891918, not #{hex(nine[10, 4])}"
+nb = Bits.new(nine)
+at = nb.last_end
+assert_true at > 0 && nb.get(at + 48, 16) == 0xfc89 && nb.get(at + 64, 16) == 0x1918, "one block's combined CRC is its own CRC"
+assert_true (nb.bits.size - (at + 80)) < 8, "the stream ends at the byte after its combined CRC"
+puts "  the empty stream is bzip2's fourteen bytes; \"123456789\"'s block CRC is fc891918"
+
+puts "\n== streaming"
+# A reader never asks for a byte past the end: fed exactly, it asks once
+# more and is told there is none; what a source gives past the last
+# stream is leftover, untouched.
+plain = text(800)
+stream = Bzip2.compress(plain)
+feed = Feed.new(stream, [stream.bytesize])
+r = Bzip2Reader.new { feed.next }
+assert_true !r.finished?, "a reader is not finished before it has read"
+first_read = r.read(100)
+assert_true first_read.is_a?(String) && first_read == plain[0, 100], "the first read answered the first 100 bytes"
+rest = drain(r, 65536)
+assert_true rest.is_a?(String) && first_read.is_a?(String) && first_read + rest == plain, "and the rest followed"
+assert_true r.leftover == "", "nothing is left over of a stream fed exactly"
+["trailing junk", "BZ", "BZh", "BZh0 not a stream", "\0\0\0\0"].each do |junk|
+  feed = Feed.new(stream + junk, [3, 5])
+  r = Bzip2Reader.new { feed.next }
+  got = drain(r, 65536)
+  assert_true got.is_a?(String) && got == plain, "a stream with #{junk.inspect} after it reads"
+  assert_true r.leftover + feed.rest == junk, "what is left over is what was fed past the stream: #{r.leftover.inspect} and #{feed.rest.inspect} not given, not #{junk.inspect}"
+  assert_true whole(stream + junk, "with #{junk.inspect} after it") == plain, "and whole, the bytes after the stream are ignored"
+end
+# Tiny reads: a byte, three and seventeen at a time from pieces of other
+# sizes, across the runs the first run-length code leaves.
+rs = Bzip2.compress(runs + plain, 1)
+[{1, 1}, {5, 3}, {7, 17}, {4096, 1}].each do |shape|
+  assert_true streamed(rs, [shape[0]], shape[1], "tiny reads") == runs + plain, "tiny reads: #{shape[0]} bytes a piece, #{shape[1]} a read"
+end
+# Reads cap at 64 KiB, and one that has bytes when a block ends answers
+# them rather than reading the next block.
+two = Bzip2.compress(edge, 1)
+r = Bzip2Reader.new { s = two; two = ""; s }
+sizes = [] of Int32
+while true
+  piece = r.read(1000000)
+  case piece
+  when Bzip2Error then raise "ASSERTION FAILED: big reads: #{piece.message}"
+  else
+    break if piece.bytesize == 0
+    sizes << piece.bytesize
+  end
+end
+assert_true sizes.all? { |n| n <= 65536 }, "no read answers past 64 KiB"
+assert_true sizes.sum == edge.bytesize, "and they add up to the input"
+assert_true sizes.count { |n| n < 65536 } >= 7, "a read stops where a block ends (#{sizes.count { |n| n < 65536 }} short reads)"
+puts "  pieces of 1 to 7 bytes, reads of 1 to 64 KiB, nothing asked past the end, the rest left over"
+
+puts "\n== concatenated streams"
+# As `cat a.bz2 b.bz2` and pbzip2 make them: what they hold one after
+# another, each stream's combined CRC its own, empty ones among them.
+parts = [] of String
+joined = String::Builder.new
+together = String::Builder.new
+20.times do |i|
+  part = i % 5 == 0 ? "" : text(i * 30) + run_of(i, i * 11)
+  parts << part
+  joined << part
+  together << Bzip2.compress(part, i % 9 + 1)
+end
+every_feed(together.to_s, joined.to_s, "twenty streams one after another")
+puts "  twenty streams, four of them empty, levels 1 to 9, read as one"
+
+puts "\n== refused as a value"
+good = Bzip2.compress(big_text, 9)
+lay = Layout.new(Bits.new(good))
+refused("", "the stream is empty", "nothing at all")
+refused("BZ", "ends inside its header", "a header cut short")
+refused("BZx9" + good[4, 100], "not a bzip2 stream", "a magic that is not BZh")
+refused("BZh0" + good[4, good.bytesize - 4], "not a digit 1 to 9", "a block size of 0")
+refused(Bits.new(good).set(32, 1, 1).to_s, "starts with neither a block's magic nor the end of the stream", "a block magic one bit off")
+refused(Bits.new(good).set(80, 1, Bits.new(good).get(80, 1) ^ 1).to_s, "block 1's CRC does not match", "a block CRC one bit off")
+cb = Bits.new(good)
+ce = cb.last_end + 48
+refused(cb.set(ce + 31, 1, cb.get(ce + 31, 1) ^ 1).to_s, "combined CRC does not match", "a combined CRC one bit off")
+refused(good[0, good.bytesize // 2], "the stream ends inside a block", "a stream cut in half")
+refused(good[0, good.bytesize - 3], "ends inside its combined CRC", "a stream cut inside its combined CRC")
+refused(Bits.new(good).set(112, 1, 1).to_s, "is randomised", "a randomised block")
+refused(Bits.new(good).set(113, 24, 0xffffff).to_s, "origin pointer 16777215 is outside its #{rle1_size(big_text)} bytes", "an origin pointer past the block")
+refused(Bits.new(good).set(113, 24, rle1_size(big_text)).to_s, "origin pointer #{rle1_size(big_text)} is outside", "an origin pointer one past the block")
+refused(Bits.new(good).set(lay.groups_at, 3, 7).to_s, "has 7 Huffman tables, not 2 to 6", "seven tables")
+refused(Bits.new(good).set(lay.groups_at, 3, 1).to_s, "has 1 Huffman tables, not 2 to 6", "one table")
+refused(Bits.new(good).splice(lay.nsel_at, lay.tables_at, [{0, 15}]).to_s, "has no selectors", "no selectors")
+tables = Bits.new(good).get(lay.groups_at, 3)
+past = [{(1 << tables) - 1, tables}, {0, 1}]
+refused(Bits.new(good).splice(lay.selectors_at, lay.selectors_at + 1, past).to_s, "is past its #{tables} Huffman tables", "a selector past the tables")
+short = Bits.new(good).splice(lay.last_selector_at, lay.tables_at, [] of {Int32, Int32})
+refused(short.set(lay.nsel_at, 15, lay.nsel - 1).to_s, "more symbols than its #{lay.nsel - 1} selectors cover", "a block with one selector too few")
+refused(Bits.new(good).set(lay.tables_at, 5, 0).to_s, "a code length of block 1 is not 1 to 20", "a code length of 0")
+walked = [{20, 5}, {2, 2}, {0, 1}]
+(lay.alpha - 1).times { walked << {0, 1} }
+refused(Bits.new(good).splice(lay.tables_at, lay.table0_end, walked).to_s, "a code length of block 1 is not 1 to 20", "a code length walked to 21")
+ones = [{1, 5}]
+lay.alpha.times { ones << {0, 1} }
+refused(Bits.new(good).splice(lay.tables_at, lay.table0_end, ones).to_s, "is over-subscribed", "every code one bit long")
+# Every code 9 bits but the first symbol's 1, every group on that table,
+# and nine 1s where the symbols start: a 9-bit pattern past the codes
+# the lengths make, which is no code. Spliced from the back so the
+# offsets before each splice still hold.
+nine_bits = [{1, 5}, {0, 1}] of {Int32, Int32}
+(lay.alpha - 1).times do |i|
+  nine_bits << {0xaaaa, 16} if i == 0
+  nine_bits << {0, 1}
+end
+all_first = [] of {Int32, Int32}
+lay.nsel.times { all_first << {0, 1} }
+missing = Bits.new(good).splice(lay.data_at, lay.data_at, [{0x1ff, 9}])
+missing.splice(lay.tables_at, lay.table0_end, nine_bits)
+missing.splice(lay.selectors_at, lay.tables_at, all_first)
+refused(missing.to_s, "no code in its table", "a bit pattern no code has")
+# bzip2 -1's block is 100,000 bytes: the text's one block, near 700,000
+# of them, said to be one is too big.
+refused("BZh1" + good[4, good.bytesize - 4], "holds more than its 100000 bytes", "a 900k block in a 100k stream")
+# and "ab" 150,000 times is a block whose last column is two runs of
+# 150,000: one RUNA/RUNB run already past the 100,000.
+abab = Bzip2.compress("ab" * 150000)
+refused("BZh1" + abab[4, abab.bytesize - 4], "holds more than its 100000 bytes", "a run past a 100k block")
+second = Bzip2.compress("second") + "BZh9" + Bits.new(Bzip2.compress("third")).set(32, 1, 1).to_s[4, 30]
+refused(second, "block 2 starts with neither", "a second stream whose block is broken")
+puts "  every corrupt stream above refused whole, a piece at a time, and on every read after"
+
+args = Program.args
+if args.size > 0
+  dir = args[0]
+  # The corrupt streams, for Python to refuse as well (the .sh).
+  File.write("#{dir}/bad_block_crc.bz2", Bits.new(good).set(80, 1, Bits.new(good).get(80, 1) ^ 1).to_s)
+  cb2 = Bits.new(good)
+  File.write("#{dir}/bad_combined_crc.bz2", cb2.set(ce + 31, 1, cb2.get(ce + 31, 1) ^ 1).to_s)
+  File.write("#{dir}/bad_selector.bz2", Bits.new(good).splice(lay.selectors_at, lay.selectors_at + 1, past).to_s)
+  File.write("#{dir}/bad_no_selectors.bz2", Bits.new(good).splice(lay.nsel_at, lay.tables_at, [{0, 15}]).to_s)
+  File.write("#{dir}/bad_origin.bz2", Bits.new(good).set(113, 24, rle1_size(big_text)).to_s)
+  File.write("#{dir}/bad_groups.bz2", Bits.new(good).set(lay.groups_at, 3, 7).to_s)
+  File.write("#{dir}/bad_length.bz2", Bits.new(good).splice(lay.tables_at, lay.table0_end, walked).to_s)
+  File.write("#{dir}/bad_cut.bz2", good[0, good.bytesize // 2])
+  File.write("#{dir}/bad_block_size.bz2", "BZh1" + good[4, good.bytesize - 4])
+  File.write("#{dir}/bad_run.bz2", "BZh1" + abab[4, abab.bytesize - 4])
+  File.write("#{dir}/bad_few_selectors.bz2", short.to_s)
+  File.write("#{dir}/bad_over_subscribed.bz2", Bits.new(good).splice(lay.tables_at, lay.table0_end, ones).to_s)
+  File.write("#{dir}/bad_no_code.bz2", missing.to_s)
+
+  puts "\n== against python"
+  names = ["empty", "byte", "text", "repeat", "ab", "runs", "random", "every", "multi"]
+  names.each do |name|
+    plain = File.read("#{dir}/#{name}.bin")
+    ["1", "9"].each do |level|
+      py = File.read("#{dir}/#{name}.#{level}.bz2")
+      every_feed(py, plain, "python's #{name} at level #{level}")
+      mine = Bzip2.compress(plain, level.to_i)
+      File.write("#{dir}/#{name}.iyi#{level}.bz2", mine)
+      # As small as libbzip2's, give or take: the same tables chosen the
+      # same way, a different sort.
+      assert_true mine.bytesize <= py.bytesize + py.bytesize // 50 + 16, "#{name} at level #{level}: #{mine.bytesize} bytes against libbzip2's #{py.bytesize}"
+    end
+    puts "  #{name}: #{plain.bytesize} bytes; python's two streams read every way, two written for python"
+  end
+  plain = File.read("#{dir}/many.bin")
+  every_feed(File.read("#{dir}/many.bz2"), plain, "python's 40 concatenated streams")
+  File.write("#{dir}/many.iyi.bz2", Bzip2.compress(plain, 3))
+  puts "  python's 40 streams one after another, #{plain.bytesize} bytes"
+
+  puts "\n== 64 MiB in bounded memory"
+  # Python's one stream of 64 MiB (73 blocks), read 64 KiB at a time from
+  # the file: what the collector keeps stays near one block's links, and
+  # the bytes are the ones Python compressed, by size and CRC-32.
+  expect = File.read("#{dir}/big.expect").strip.split(' ')
+  io = File.open("#{dir}/big.bz2")
+  r = Bzip2Reader.new { io.read_bytes(65536) }
+  GC.collect
+  base = GC.stats.bytes_kept_by_last_sweep
+  most = 0_u64
+  total = 0_i64
+  crc = 0_u32
+  reads = 0
+  started = __iyi_monotonic_ns
+  while true
+    piece = r.read(65536)
+    case piece
+    when Bzip2Error then raise "ASSERTION FAILED: 64 MiB: #{piece.message}"
+    else
+      break if piece.bytesize == 0
+      crc = CRC32.update(crc, piece.to_unsafe, piece.bytesize)
+      total = total + piece.bytesize
+      reads = reads + 1
+      if reads % 64 == 0
+        GC.collect
+        kept = GC.stats.bytes_kept_by_last_sweep
+        most = kept - base if kept > base && kept - base > most
+      end
+    end
+  end
+  big_ms = (__iyi_monotonic_ns - started) // 1000000
+  io.close
+  assert_true total.to_s == expect[0], "64 MiB: #{total} bytes, Python wrote #{expect[0]}"
+  assert_true crc.to_s(16).rjust(8, '0') == expect[1], "64 MiB: CRC-32 #{crc.to_s(16)}, Python's #{expect[1]}"
+  assert_true most < 8_000_000_u64, "64 MiB read keeping #{most} bytes past the start, under 8 MB"
+  puts "  #{total} bytes, the CRC-32 Python's; at most #{most} bytes kept past the start, in #{big_ms} ms"
+
+  puts "\n== timings"
+  # The sort's guard: one byte a megabyte, which the first run-length
+  # code shrinks to 20 KB of five-byte runs; two bytes a megabyte, which
+  # it leaves alone and whose rotations agree for the whole block; noise;
+  # and text.
+  {
+    {"1 MiB of one byte", run_of(0x61, 1048576)},
+    {"1 MiB of \"ab\"", "ab" * 524288},
+    {"1 MiB of random bytes", random_bytes(1048576, 99_u64)},
+    {"1 MiB of text", text(15000)[0, 1048576]},
+  }.each do |c|
+    t0 = __iyi_monotonic_ns
+    s = Bzip2.compress(c[1])
+    t1 = __iyi_monotonic_ns
+    back = whole(s, c[0])
+    t2 = __iyi_monotonic_ns
+    assert_true back == c[1], "#{c[0]} reads back"
+    compress_ms = (t1 - t0) // 1000000
+    assert_true compress_ms < 20000, "#{c[0]}: compressed in #{compress_ms} ms, under 20 s"
+    puts "  #{c[0]}: #{s.bytesize} bytes, compressed in #{compress_ms} ms, decompressed in #{(t2 - t1) // 1000000} ms"
+  end
+end
+
+puts "\nALL CHECKS PASSED"

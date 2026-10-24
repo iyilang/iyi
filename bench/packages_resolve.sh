@@ -47,7 +47,10 @@ mkrepo() { git init -q "$1" && git -C "$1" config user.email t@t && git -C "$1" 
 mkrepo work/liba
 printf 'module example.test/user/liba\n' > work/liba/iyi.mod
 printf 'module liba\n\npub def greeting : String\n  "hello from liba v1.0.0"\nend\n' > work/liba/liba.iyi
-printf 'module colors\n\npub def favourite : String\n  "green"\nend\n' > work/liba/colors.iyi
+# A package module that uses the standard library: `std/file` is iyi's,
+# found where every program finds it, and never the consuming project's
+# module of the same name (the app below has one that panics).
+printf 'module colors\n\nimport std/file\n\npub def favourite : String\n  File.basename("/paint/green.txt", ".txt")\nend\n' > work/liba/colors.iyi
 git -C work/liba add -A && git -C work/liba commit -qm one && git -C work/liba tag v1.0.0
 # `-i.bak` + rm: BSD sed demands the suffix GNU makes optional, and the bare
 # form silently mangled this edit on darwin — no tag, and the gate lied red.
@@ -56,22 +59,20 @@ git -C work/liba commit -qam two && git -C work/liba tag v1.1.0
 
 mkrepo work/libb
 printf 'module example.test/user/libb\nrequire example.test/user/liba v1.1.0\n' > work/libb/iyi.mod
-printf 'module libb\n\nimport example.test/user/liba\nusing example.test/user/liba::{greeting}\n\npub def doubled : String\n  greeting + " / " + greeting\nend\n' > work/libb/libb.iyi
+printf 'module libb\n\nimport example.test/user/liba::{greeting}\n\npub def doubled : String\n  greeting + " / " + greeting\nend\n' > work/libb/libb.iyi
 git -C work/libb add -A && git -C work/libb commit -qm one && git -C work/libb tag v1.0.0
 
 mkdir -p mirror/example.test/user
 git clone -q --bare work/liba mirror/example.test/user/liba
 git clone -q --bare work/libb mirror/example.test/user/libb
 
-mkdir -p app
+mkdir -p app/std
+printf 'module std/file\n\nraise "the consuming project'"'"'s std/file was loaded for a package"\n' > app/std/file.iyi
 printf 'module example.test/user/app\nrequire example.test/user/liba v1.0.0\nrequire example.test/user/libb v1.0.0\n' > app/iyi.mod
 cat > app/main.iyi <<'IYI'
-import example.test/user/liba
-import example.test/user/liba/colors
-import example.test/user/libb
-using example.test/user/liba::{greeting}
-using example.test/user/liba/colors::{favourite}
-using example.test/user/libb::{doubled}
+import example.test/user/liba::{greeting}
+import example.test/user/liba/colors::{favourite}
+import example.test/user/libb::{doubled}
 
 puts greeting
 puts favourite
@@ -101,12 +102,20 @@ fi
 ./app/app | grep -q 'v1.1.0' || { echo "cache-built program answered differently"; exit 1; }
 
 # ── 3. Failure proof: a package import needs a manifest ──────────────────
+# The require line it names is the repository's: the whole path first, for
+# the package's root module. It used to drop the last segment and answer
+# `require example.test/user v1.2.3`, the organisation.
 step "failure proof: a dotted import without iyi.mod names the manifest"
 mkdir -p bare
 printf 'import example.test/user/liba\nputs 1\n' > bare/main.iyi
 (cd bare && "$IYI" build main.iyi -o bare) > bare.log 2>&1
 if [ $? -eq 0 ] || ! grep -q 'iyi.mod' bare.log; then
   echo "the refusal did not name the manifest:"
+  tail -6 bare.log
+  exit 1
+fi
+if ! grep -qF 'as `require example.test/user/liba v1.2.3`' bare.log; then
+  echo "the refusal did not name the repository's require line:"
   tail -6 bare.log
   exit 1
 fi
@@ -140,6 +149,256 @@ if [ $? -eq 0 ] || ! grep -q 'is not what it was' tamper.log; then
 fi
 mv app/iyi.sum.good app/iyi.sum
 
+# And the direction that is the threat rather than the typo: the sum file
+# is honest and the *checkout* is not. That is what a compromised cache, a
+# moved tag or a backup restored from the wrong day looks like, and it is
+# the one thing III.7 says this file exists to notice. The step above
+# proves the comparison happens; this one proves what it compares — the
+# hash is recomputed from the tree on every build, so a dependency that
+# changed under the program is a refusal naming both hashes.
+step "a mutated checkout is refused while iyi.sum is honest"
+# The checkout `iyi.sum` pins, read out of the sum file rather than
+# searched for or written down twice. The cache holds v1.0.0 as well, and
+# `find | head -1` picked whichever the directory happened to list first —
+# v1.1.0 on Linux and v1.0.0 on darwin, where mutating a checkout no entry
+# pins proved nothing and the step failed with the program printing its
+# ordinary answer. Asking the sum file ties the tree this mutates to the
+# entry this expects the refusal about, whatever MVS chose. The layout is
+# the fetcher's: `<cache>/mod/<path>@v<version>`.
+pinned="$(awk '$1 == "example.test/user/liba" { print $2 }' app/iyi.sum)"
+[ -n "$pinned" ] || { echo "iyi.sum pins no version for liba:"; cat app/iyi.sum; exit 1; }
+checkout="$(find "$IYI_CACHE_DIR" -path "*liba@$pinned*" -name liba.iyi | head -1)"
+[ -n "$checkout" ] || { echo "no liba@$pinned checkout under $IYI_CACHE_DIR"; exit 1; }
+grep -q 'hello from liba' "$checkout" || {
+  echo "$checkout does not contain the string this step mutates:"
+  cat "$checkout"
+  exit 1
+}
+cp "$checkout" "$WORK/liba.iyi.good"
+# A change a program would notice, in the one file it calls into.
+sed -i.bak 's/hello from liba/hello from somebody else/' "$checkout" && rm -f "$checkout.bak"
+# And the mutation is asserted rather than assumed: a `sed` that edited
+# nothing would leave this step proving that an unchanged tree builds.
+grep -q 'hello from somebody else' "$checkout" || {
+  echo "the mutation did not take in $checkout"
+  exit 1
+}
+rm -f app/app
+(cd app && "$IYI" build main.iyi -o app) > mutated.log 2>&1
+mutated_status=$?
+cp "$WORK/liba.iyi.good" "$checkout"
+if [ "$mutated_status" -eq 0 ]; then
+  echo "a mutated checkout built anyway:"
+  ./app/app 2>&1 | sed 's/^/  /'
+  exit 1
+fi
+grep -q 'is not what it was' mutated.log || {
+  echo "a mutated checkout was refused for some other reason:"
+  tail -6 mutated.log
+  exit 1
+}
+grep -q 'the checkout hashes to' mutated.log || {
+  echo "the refusal did not name what the tree hashes to now:"
+  tail -6 mutated.log
+  exit 1
+}
+
+# ── 5b. A package's tree may contain a symbolic link ─────────────────────
+# The hash is over the checkout's files, and a walk that asks the *target*
+# whether it is a directory walks through a link — into the package's own
+# parent, or around a cycle. `inner/loop -> ..` ended a build with the
+# walker's accident: `Too many levels of symbolic links`, about a path
+# forty levels deep, in place of any sentence about the dependency. A link
+# is hashed as the link now, which is git's own model — the target text is
+# what a repository stores for one — so the cycle is an entry rather than a
+# descent, and retargeting the link is a change the sum notices.
+# Not on Windows: Git Bash's `ln -s` needs Developer Mode or an
+# administrator to make a real link, and without one it copies or fails —
+# so the fixture this step needs cannot be built there, and a step that
+# cannot build its fixture proves nothing. Said, not skipped in silence.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) symlinks=no ;;
+  *) symlinks=yes ;;
+esac
+if [ "$symlinks" = no ]; then
+  step "a package with a symbolic link: not on this platform (ln -s cannot make one here)"
+else
+step "a package with a symbolic link is hashed, cycle and all"
+mkrepo work/linked
+printf 'module example.test/user/linked
+' > work/linked/iyi.mod
+printf 'module linked
+
+pub def linked_greeting : String
+  "hello from linked"
+end
+' > work/linked/linked.iyi
+mkdir -p work/linked/inner
+ln -s .. work/linked/inner/loop
+ln -s ../linked.iyi work/linked/inner/alias.iyi
+git -C work/linked add -A && git -C work/linked commit -qm one && git -C work/linked tag v1.0.0
+git -C work/linked ls-files -s | grep -q '^120000' || { echo "git did not store a symlink, so this step proves nothing:"; git -C work/linked ls-files -s; exit 1; }
+git clone -q --bare work/linked mirror/example.test/user/linked
+mkdir -p linked_app
+printf 'module example.test/user/linked_app
+require example.test/user/linked v1.0.0
+' > linked_app/iyi.mod
+cat > linked_app/main.iyi <<'IYI'
+import example.test/user/linked::{linked_greeting}
+
+puts linked_greeting
+IYI
+if ! (cd linked_app && "$IYI" build main.iyi -o app) > linked.log 2>&1; then
+  echo "a package with a symbolic link did not build:"
+  tail -4 linked.log
+  exit 1
+fi
+./linked_app/app | grep -q 'hello from linked' || { echo "the linked package answered:"; ./linked_app/app; exit 1; }
+grep -q 'example.test/user/linked v1.0.0 s1:' linked_app/iyi.sum || { echo "no sum entry for linked:"; cat linked_app/iyi.sum; exit 1; }
+
+step "retargeting a link inside the checkout is a change"
+linked_checkout="$(find "$IYI_CACHE_DIR" -type d -name 'linked@v1.0.0' | head -1)"
+[ -n "$linked_checkout" ] || { echo "no linked@v1.0.0 checkout under $IYI_CACHE_DIR"; exit 1; }
+ln -sfn ../iyi.mod "$linked_checkout/inner/alias.iyi"
+rm -f linked_app/app
+(cd linked_app && "$IYI" build main.iyi -o app) > retarget.log 2>&1
+retarget_status=$?
+ln -sfn ../linked.iyi "$linked_checkout/inner/alias.iyi"
+if [ "$retarget_status" -eq 0 ]; then
+  echo "a retargeted link went unnoticed, so the link's target is not in the hash"
+  exit 1
+fi
+grep -q 'is not what it was' retarget.log || {
+  echo "the retargeted link was refused for some other reason:"
+  tail -5 retarget.log
+  exit 1
+}
+fi
+
+# ── 5c. What `--emit-iyimod` writes, and what it leaves to the sum ────────
+# An artifact carries what the consuming build reached, so the one this
+# would write for a *package* is hollow: the exports collector keys on the
+# in-package type name and a canonical dotted path reaches nothing. A
+# package's artifact is III.7 step 5's story — signatures, signing, a
+# registry — so a build writes artifacts for the modules it reads from
+# source and leaves the packages to `iyi.sum` and the cache, which is where
+# the next build finds them. The help line used to promise one per imported
+# module, which is every module either way.
+step "--emit-iyimod writes this workspace's modules, not its packages'"
+printf 'module helper
+
+pub def shout(s : String) : String
+  s + "!"
+end
+' > app/helper.iyi
+cat > app/emitted.iyi <<'IYI'
+import example.test/user/liba::{greeting}
+import helper::{shout}
+
+puts shout(greeting)
+IYI
+rm -rf app/emitted_mods
+(cd app && "$IYI" build --emit-iyimod emitted_mods emitted.iyi -o emitted) > emit.log 2>&1 || {
+  echo "the emitting build failed:"; tail -4 emit.log; exit 1;
+}
+[ -f app/emitted_mods/helper.iyimod ] || {
+  echo "no artifact for the workspace's own module:"; find app/emitted_mods -type f; exit 1;
+}
+dotted="$(find app/emitted_mods -name '*.iyimod' | grep '\.' | grep -v '^app/emitted_mods/helper.iyimod$' | head -1)"
+if [ -n "$dotted" ]; then
+  echo "a package module was written as an artifact, which this build cannot fill: $dotted"
+  exit 1
+fi
+# And the consumer still builds from those artifacts: the package comes from
+# the cache the sum pins, the workspace's module from the file just written.
+(cd app && "$IYI" build --use-iyimod emitted_mods emitted.iyi -o emitted_from_mods) > emit_use.log 2>&1 || {
+  echo "building against the emitted artifacts failed:"; tail -4 emit_use.log; exit 1;
+}
+./app/emitted_from_mods | grep -q 'hello from liba' || {
+  echo "the artifact build answered:"; ./app/emitted_from_mods; exit 1;
+}
+
+# ── 5d. A requirement that moved is a change to every module ─────────────
+# `--affected` selects by import closure, and a manifest is not a module:
+# no closure holds `iyi.mod`, so bumping a dependency — the largest change
+# a workspace can make, since every `import example.test/user/liba`
+# resolves through the requirement it names — selected nothing. `iyi test
+# --affected iyi.mod` answered "0 to run, 1 skipped: no test's imports
+# reach the change", which is an agent bumping a version and being told
+# there is nothing to run.
+step "a changed requirement reaches every test and every consumer"
+cat > app/pkg_test.iyi <<'IYI'
+import example.test/user/liba::{greeting}
+
+raise "greeting" unless greeting.starts_with?("hello from liba")
+puts "ok"
+IYI
+(cd app && "$IYI" test --affected iyi.mod .) > affected_mod.log 2>&1 || {
+  echo "the tests did not run for a changed manifest:"; tail -4 affected_mod.log; exit 1;
+}
+grep -q 'iyi.mod changed, so every test ran' affected_mod.log || {
+  echo "a changed manifest did not turn the discount off:"; tail -3 affected_mod.log; exit 1;
+}
+grep -q '1 passed' affected_mod.log || {
+  echo "the manifest run did not run the test:"; tail -3 affected_mod.log; exit 1;
+}
+(cd app && "$IYI" check --affected iyi.mod) > affected_check.log 2>&1 || {
+  echo "check --affected iyi.mod failed:"; tail -4 affected_check.log; exit 1;
+}
+grep -q 'every module is a consumer' affected_check.log || {
+  echo "a changed manifest named no consumers:"; tail -3 affected_check.log; exit 1;
+}
+# And the discount is still a discount: an ordinary file that exists and
+# that no test imports selects nothing.
+printf 'module untouched\n\npub def unused : Int32\n  1\nend\n' > app/untouched.iyi
+(cd app && "$IYI" test --affected untouched.iyi .) > affected_file.log 2>&1
+grep -q "no test's imports reach the change" affected_file.log || {
+  echo "an ordinary changed file no longer narrows the run:"; tail -3 affected_file.log; exit 1;
+}
+rm -f app/pkg_test.iyi app/untouched.iyi
+
+# ── 5e. A package's module has one name in its own build and a consumer's ─
+# A consumer's build puts a package's modules under the package's name;
+# the package's own build put them at the root, so `codec.iyi` of
+# `iyi-web` was `::Codec` there and `::IyiWeb::Codec` here, and a `pub
+# macro` - which expands in the caller's file and so names the module
+# absolutely - had no spelling that built in both (#132). Both builds name
+# it `::IyiWeb::Codec` now, from source and from an artifact. The old
+# spelling still builds the package, with a warning that names the new
+# one, and `iyi fix` makes the edit where the source writes it.
+step "a package's module is one name in its own build and a consumer's"
+mkdir -p onename/lib onename/app
+printf 'module example.test/user/iyi-web\n' > onename/lib/iyi.mod
+printf 'module codec\n\npub def shout(s : String) : String\n  s.upcase\nend\n' > onename/lib/codec.iyi
+loud() { printf 'module dsl\n\npub import codec\n\npub macro loud(x)\n  %s.shout({{ x }})\nend\n' "$1" > onename/lib/dsl.iyi; }
+loud ::IyiWeb::Codec
+printf 'module inside\n\nimport dsl::*\n\nputs loud("inside")\n' > onename/lib/inside.iyi
+printf 'module app\n\nrequire example.test/user/iyi-web v0.1.0 as web\n\nreplace example.test/user/iyi-web => ../lib\n' > onename/app/iyi.mod
+printf 'module app\n\nimport web/dsl::*\n\nputs loud("consumer")\n' > onename/app/app.iyi
+(cd onename/lib && "$IYI" run inside.iyi) > onename_inside.log 2>&1
+grep -qx INSIDE onename_inside.log || { echo "::IyiWeb::Codec did not build in the package's own file:"; cat onename_inside.log; exit 1; }
+(cd onename/app && "$IYI" run app.iyi) > onename_app.log 2>&1
+grep -qx CONSUMER onename_app.log || { echo "::IyiWeb::Codec did not build in the consumer:"; cat onename_app.log; exit 1; }
+(cd onename/lib && "$IYI" build --emit-iyimod mods inside.iyi -o inside) > onename_emit.log 2>&1 || {
+  echo "the package's own emitting build failed:"; tail -4 onename_emit.log; exit 1;
+}
+"$IYI" mod dump onename/lib/mods/codec.iyimod | grep -q '^package *iyi_web$' || {
+  echo "codec's artifact does not say the package name it was written under:"; "$IYI" mod dump onename/lib/mods/codec.iyimod | head -4; exit 1;
+}
+(cd onename/lib && "$IYI" run --use-iyimod mods inside.iyi) > onename_mods.log 2>&1
+grep -qx INSIDE onename_mods.log || { echo "::IyiWeb::Codec did not build from the artifacts:"; cat onename_mods.log; exit 1; }
+# The name the package's own build had: it still builds there, and warns.
+loud ::Codec
+(cd onename/lib && "$IYI" run inside.iyi) > onename_old.log 2>&1
+grep -qx INSIDE onename_old.log || { echo "::Codec no longer builds the package:"; cat onename_old.log; exit 1; }
+grep -q 'Warning: `::Codec` is `::IyiWeb::Codec`' onename_old.log || { echo "::Codec built without a warning:"; cat onename_old.log; exit 1; }
+(cd onename/app && "$IYI" run app.iyi) > onename_old_app.log 2>&1 && { echo "::Codec built in a consumer"; exit 1; }
+grep -q "Did you mean '::IyiWeb::Codec'" onename_old_app.log || { echo "the consumer's refusal does not name ::IyiWeb::Codec:"; cat onename_old_app.log; exit 1; }
+printf 'import codec\n\nputs ::Codec.shout("fixed")\n' > onename/lib/direct.iyi
+(cd onename/lib && "$IYI" fix direct.iyi) > onename_fix.log 2>&1 || { echo "iyi fix did not end clean:"; cat onename_fix.log; exit 1; }
+grep -q '^puts ::IyiWeb::Codec.shout("fixed")$' onename/lib/direct.iyi || { echo "iyi fix did not write ::IyiWeb::Codec:"; cat onename/lib/direct.iyi; exit 1; }
+echo "  ::IyiWeb::Codec in both builds and from artifacts; ::Codec warns in the package, is refused in the consumer, and iyi fix rewrites it"
+
 # ── 6. The context pack: surfaces, no bodies ──────────────────────────────
 step "mod context prints every import's exact surface"
 (cd app && "$IYI" mod context main.iyi) > context.txt 2>&1 || { cat context.txt; exit 1; }
@@ -168,7 +427,7 @@ grep -q '"spec":\["III.1"\]' refs.log || { echo "no spec reference in the json e
 step "a doc comment reaches the context pack"
 mkdir -p docs
 printf 'module docd\n\n# Answers the one question.\npub def answer : Int32\n  42\nend\n' > docs/docd.iyi
-printf 'import docd\nusing docd::{answer}\nputs answer\n' > docs/main.iyi
+printf 'import docd::{answer}\nputs answer\n' > docs/main.iyi
 (cd docs && "$IYI" mod context --json main.iyi) > docs.json 2>&1 || { cat docs.json; exit 1; }
 grep -Eq '"doc": ?"Answers the one question."' docs.json || { echo "the doc did not travel:"; cat docs.json; exit 1; }
 
@@ -208,7 +467,17 @@ step "iyi doc prints a prelude type's surface"
 grep -q '^class String' prelude-doc.txt || { echo "the type header is missing:"; head -5 prelude-doc.txt; exit 1; }
 grep -q '  def to_i : Int32' prelude-doc.txt || { echo "a method is missing:"; cat prelude-doc.txt; exit 1; }
 grep -q '  def size : Int32' prelude-doc.txt || { echo "size is missing"; exit 1; }
-grep -q 'allocate' prelude-doc.txt && { echo "the compiler's own method leaked into the doc"; exit 1; }
+# A generic type's header carries its parameters once, as it is declared:
+# the list was printed after a name that already held it, `class
+# Array(T)(T)` and `tuple Tuple(*T)(T) < Value`.
+"$IYI" doc Array > array-doc.txt 2>&1 || { cat array-doc.txt; exit 1; }
+grep -qx 'class Array(T)' array-doc.txt || { echo "Array's header is not \`class Array(T)\`:"; grep -m1 '^class' array-doc.txt; exit 1; }
+"$IYI" doc Tuple > tuple-doc.txt 2>&1 || { cat tuple-doc.txt; exit 1; }
+grep -qx 'tuple Tuple(\*T) < Value' tuple-doc.txt || { echo "Tuple's header is not \`tuple Tuple(*T) < Value\`:"; grep -m1 '^tuple' tuple-doc.txt; exit 1; }
+# A method, as the Int32 check below reads it: the doc carries the type's
+# comments too, and the word in `String.new`'s ("the byte was allocated
+# for that") failed the old `grep allocate` with no method in sight.
+grep -q '^  def \(allocate\|crystal_type_id\|crystal_instance_type_id\)' prelude-doc.txt && { echo "the compiler's own method leaked into the doc"; exit 1; }
 # The primitives the prelude declares are the type's own surface: `iyi doc
 # Int32` answered with `abs` and `times` and no `+`, no `<`, no `to_i64`,
 # because every primitive was filtered as if it were `allocate`.
@@ -217,6 +486,10 @@ grep -q '  def +(other : Int32) : self' int-doc.txt || { echo "Int32's + is miss
 grep -q '  def <(other : Int32) : Bool' int-doc.txt || { echo "Int32's < is missing"; exit 1; }
 grep -q '  def to_i64 : Int64' int-doc.txt || { echo "Int32's to_i64 is missing"; exit 1; }
 grep -q '^  def \(allocate\|crystal_type_id\|crystal_instance_type_id\)' int-doc.txt && { echo "the compiler's own method leaked into Int32's doc"; exit 1; }
+# An integer the prelude lists little of names the module that gives it the
+# rest: `iyi doc UInt32` was an empty struct, read as "no arithmetic".
+"$IYI" doc UInt32 > u32-doc.txt 2>&1 || { cat u32-doc.txt; exit 1; }
+grep -q 'import std/int. gives UInt32' u32-doc.txt || { echo "UInt32's doc does not name std/int:"; cat u32-doc.txt; exit 1; }
 "$IYI" doc Proc > proc-doc.txt 2>&1 || { cat proc-doc.txt; exit 1; }
 grep -q '  def call(\*args : \*T) : R' proc-doc.txt || { echo "Proc's call is missing:"; cat proc-doc.txt; exit 1; }
 "$IYI" doc Nope > nope.txt 2>&1 && { echo "an unknown type was documented"; exit 1; }
@@ -225,6 +498,51 @@ grep -q 'the prelude has no type Nope' nope.txt || { echo "the unknown type was 
 grep -q '^class String' index.txt || { echo "the index lacks String:"; cat index.txt; exit 1; }
 grep -q '^class Hash(K, V)' index.txt || { echo "the index lacks Hash(K, V):"; cat index.txt; exit 1; }
 grep -q 'Regex\|Int128\|IyiHeap' index.txt && { echo "the index lists what the prelude does not offer:"; cat index.txt; exit 1; }
+# An alias is its target's other name, and documents as the target does:
+# `iyi doc IO` printed `alias IO` and `end`, with neither `IyiIO` nor one
+# thing an IO can do.
+"$IYI" doc IO > io-doc.txt 2>&1 || { cat io-doc.txt; exit 1; }
+grep -qx 'alias IO = IyiIO' io-doc.txt || { echo "IO's target is not named:"; cat io-doc.txt; exit 1; }
+grep -q '^  def flush' io-doc.txt || { echo "IO's surface is missing:"; cat io-doc.txt; exit 1; }
+
+# ── 10b. `iyi doc app/greeter`: the spelling the language is built on ─────
+# A module's path *is* its file's path (R-1, IV.6), and it is what
+# `import` takes, what `mod context` prints as a header and what every
+# error about a module names — but `iyi doc` took only a file path, so
+# `iyi doc docs/docd` was a usage error about a module this same binary
+# will ground an edit against.
+step "iyi doc takes a module path, not only a file"
+"$IYI" doc docs/docd > modpath-doc.txt 2>&1 || { cat modpath-doc.txt; exit 1; }
+diff -u doc.txt modpath-doc.txt > modpath-diff.txt 2>&1 || {
+  echo "the module path and the file answered differently:"
+  head -10 modpath-diff.txt
+  exit 1
+}
+# A subject spelled as a module path and found nowhere is a missing module,
+# named, with where it was looked for: it was told to give "a module path
+# (`iyi doc app/greeter`)", which is what it had given.
+"$IYI" doc docs/nosuch > missing-mod.txt 2>&1 && { echo "a module that is not there was documented"; exit 1; }
+grep -q "can't find module 'docs/nosuch'. .*docs/nosuch.iyi.* looked for under" missing-mod.txt || {
+  echo "the refusal does not name the missing module:"; cat missing-mod.txt; exit 1; }
+# And one subject a run: `iyi doc docs/docd extra junk` printed docd's
+# surface at exit 0 and dropped the rest without a word.
+"$IYI" doc docs/docd extra junk > extra-doc.txt 2>&1 && { echo "a second subject was dropped, exit 0"; exit 1; }
+grep -q "'extra' is a second" extra-doc.txt || {
+  echo "the second subject is not named:"; cat extra-doc.txt; exit 1; }
+# A module whose source is not there and whose artifact is, in the
+# workspace's `mods`, documents from the artifact, as every other verb
+# reads it: with only `mods/app/twice.iyimod`, `iyi doc app/twice` was told
+# to give "a module path".
+mkdir -p docmods/app
+printf 'module app/twice\n\n# Doubles it.\npub def twice(n : Int32) : Int32\n  n * 2\nend\n' > docmods/app/twice.iyi
+printf 'import app/twice\n' > docmods/main.iyi
+(cd docmods && "$IYI" doc app/twice) > twice-doc.txt 2>&1 || { cat twice-doc.txt; exit 1; }
+(cd docmods && "$IYI" build --no-codegen --emit-iyimod mods main.iyi) > emit-mods.txt 2>&1 || { cat emit-mods.txt; exit 1; }
+rm docmods/app/twice.iyi
+(cd docmods && "$IYI" doc app/twice) > mods-doc.txt 2>&1 || {
+  echo "the module in mods was not documented:"; cat mods-doc.txt; exit 1; }
+diff -u twice-doc.txt mods-doc.txt > mods-diff.txt 2>&1 || {
+  echo "the artifact in mods and the source answered differently:"; head -10 mods-diff.txt; exit 1; }
 
 echo "workdir $WORK"
 echo "packages gate: every step held"

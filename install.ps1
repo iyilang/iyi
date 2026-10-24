@@ -16,7 +16,7 @@
 
       IYI_PREFIX       where to unpack, default %LOCALAPPDATA%\Programs\iyi;
                        the zip is relocatable, so any writable directory works
-      IYI_VERSION      a release to pin, e.g. 0.13.0; default is the latest
+      IYI_VERSION      a release to pin, e.g. 0.19.1; default is the latest
       IYI_RELEASE_URL  where the release's files are, default the GitHub
                        release. A local directory or a file:// URL also works,
                        which is how CI gates this script against a zip the run
@@ -214,14 +214,28 @@ try {
     $bin = Join-Path $Prefix 'bin'
     $existing = Join-Path $bin 'iyi.exe'
     if (Test-Path -LiteralPath $existing -PathType Leaf) {
-        $installed = (& $existing version 2>$null | Select-Object -First 1)
+        # The whole output is read, not its first line: a pipeline that stops
+        # at one line may hand back before the program has exited, and the
+        # delete below then meets its image still open.
+        $installed = @(& $existing version 2>$null)[0]
         Say "replacing what is already at ${Prefix}: $installed"
         foreach ($name in @('iyi.exe', 'LLVM-C.dll')) {
             $path = Join-Path $bin $name
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-            try {
-                Remove-Item -LiteralPath $path -Force
-            } catch {
+            # The `version` above has just ended, and Windows can hold its
+            # image a moment longer - a CI runner refused this delete right
+            # after it (job 120143817085) - so a lock is waited on for up to
+            # five seconds before it is reported as a program still running.
+            $removed = $false
+            for ($attempt = 0; $attempt -lt 10 -and -not $removed; $attempt++) {
+                try {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                    $removed = $true
+                } catch {
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+            if (-not $removed) {
                 Die ("$path is in use, so it cannot be replaced. Close anything running iyi, " +
                      "including a compile in another window, and run this again.")
             }

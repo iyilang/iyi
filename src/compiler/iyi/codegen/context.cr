@@ -8,10 +8,17 @@ class Iyi::CodeGenVisitor
     property type : Type
     property vars : Hash(String, LLVMVar)
     property return_type : Type?
+    # iyi: where the function writes its result when the result is passed
+    # indirectly (`LLVMTyper#passed_indirectly?`): its last parameter.
+    property indirect_return : LLVM::Value?
     property return_phi : Phi?
     property break_phi : Phi?
     property next_phi : Phi?
     property while_block : LLVM::BasicBlock?
+    # iyi: whether code emitted here may run more than once per entry to
+    # the function — inside a `while` or a block — which is what
+    # `keep_call_out_of_main` asks before it keeps a call out of line.
+    property? repeats = false
     property! block : Block
     property! block_context : Context
     property closure_vars : Array(MetaVar)?
@@ -40,10 +47,12 @@ class Iyi::CodeGenVisitor
     def clone
       context = Context.new @fun, @fun_type, @type, @vars
       context.return_type = @return_type
+      context.indirect_return = @indirect_return
       context.return_phi = @return_phi
       context.break_phi = @break_phi
       context.next_phi = @next_phi
       context.while_block = @while_block
+      context.repeats = @repeats
       if block = @block
         context.block = block
       end

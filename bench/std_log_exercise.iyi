@@ -13,8 +13,32 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/log
-using std/log::{Log, MemoryBackend, Severity}
+import std/log::{Log, MemoryBackend, Severity, DefaultFormatter, Entry, AsyncBackend, Formatter}
+import std/env::{ENV}
+import std/time::{Time}
+import std/file::{File}
+import std/dir::{Dir}
+
+# The message alone, so a file of them reads back exactly.
+class MessageOnly < Formatter
+  def format(entry : Entry) : String
+    entry.message
+  end
+end
+
+# An entry's data as `key=value` pairs in order.
+def pairs(entry : Entry) : String
+  found = [] of String
+  entry.data.each { |key, value| found << "#{key}=#{value}" }
+  found.join(",")
+end
+
+# The last entry *backend* holds with *message*.
+def entry_for(backend : MemoryBackend, message : String) : Entry
+  found = backend.entries.select { |e| e.message == message }
+  raise "ASSERTION FAILED: no entry says #{message}" if found.empty?
+  found.last
+end
 
 puts "== info"
 mem = MemoryBackend.new
@@ -28,5 +52,125 @@ puts "\n== child"
 child = Log.for("db.pool")
 assert_str "db.pool", child.source, "source"
 puts "  Log.for keeps the dotted source"
+
+puts "\n== empty segments"
+# A leading dot is a child named "" under the root, and its source is
+# still the whole name: ".db" is not "db", which is another logger.
+assert_str ".db", Log.for(".db").source, "leading dot"
+assert_str ".", Log.for(".").source, "a lone dot"
+assert_str "..db", Log.for("..db").source, "two leading dots"
+assert_str "db..pool", Log.for("db..pool").source, "a doubled dot"
+assert_str "db.", Log.for("db.").source, "a trailing dot"
+assert_true Log.for(".db").object_id != Log.for("db").object_id, ".db and db are two loggers"
+puts "  Log.for keeps leading, doubled and trailing dots in the source"
+
+puts "\n== none"
+# None silences: a logger set to it wrote an entry logged at None, and a
+# logger at any level wrote one. And the root's line keeps its " - ".
+quiet = MemoryBackend.new
+Log.setup(Severity::None, quiet)
+hushed = Log.for("hushed")
+hushed.log(Severity::None, "hush")
+hushed.fatal "hush"
+Log.setup(Severity::Trace, quiet)
+hushed.log(Severity::None, "hush")
+assert_true quiet.entries.empty?, "nothing is written at None, nor to a logger set to it (#{quiet.entries.size} were)"
+root_line = DefaultFormatter.new.format(Entry.new("", Severity::Info, "up"))
+assert_true root_line.ends_with?(" INFO - up"), "the root's line: #{root_line}"
+puts "  None writes nothing"
+
+puts "\n== data and context"
+notes = MemoryBackend.new
+Log.setup(Severity::Info, notes)
+db = Log.for("db").bind(pool: "main", shard: 2)
+db.info("query", rows: 3)
+assert_str "pool=main,shard=2,rows=3", pairs(entry_for(notes, "query")), "a bound logger's data, then the call's"
+db.info("override", pool: "spare")
+assert_str "pool=spare,shard=2", pairs(entry_for(notes, "override")), "the call's value over the bound one"
+db.for("conn").info("open")
+assert_str "pool=main,shard=2", pairs(entry_for(notes, "open")), "a bound logger's children carry its data"
+Log.info("plain")
+assert_str "", pairs(entry_for(notes, "plain")), "an unbound logger's entry carries nothing"
+Log.with_context(request_id: 7) do
+  Log.with_context(user: "ada") do
+    db.info("inner")
+  end
+  Log.info("outer")
+end
+Log.info("after")
+assert_str "request_id=7,user=ada,pool=main,shard=2", pairs(entry_for(notes, "inner")), "a context's data on every entry in its block"
+assert_str "request_id=7", pairs(entry_for(notes, "outer")), "the inner context closes with its block"
+assert_true pairs(entry_for(notes, "after")).empty? && Log.context.empty?, "no context after the block"
+answered = Log.with_context(k: "v") { Log.context["k"] }
+assert_str "v", answered, "with_context answers its block's answer"
+Log.with_context(request_id: 9) do
+  group do |g|
+    g.spawn do
+      Log.info("in a task")
+      Log.with_context(step: "child") { Log.info("its own over its starter's") }
+      0
+    end
+    g.spawn do
+      Log.with_context(request_id: 10) do
+        sleep(10)
+        Log.info("its own over the same key")
+      end
+      0
+    end
+  end
+end
+assert_str "request_id=9", pairs(entry_for(notes, "in a task")), "a task finds its starter's context"
+assert_str "request_id=9,step=child", pairs(entry_for(notes, "its own over its starter's")), "a task's context over its starter's"
+assert_str "request_id=10", pairs(entry_for(notes, "its own over the same key")), "a task's value over its starter's for one key"
+group do |g|
+  g.spawn do
+    Log.with_context(secret: "a") { sleep(30) }
+    0
+  end
+  g.spawn do
+    sleep(10)
+    Log.info("a sibling")
+    0
+  end
+end
+assert_str "", pairs(entry_for(notes, "a sibling")), "a context stays out of the tasks beside it"
+line = DefaultFormatter.new.format(Entry.new("db", Severity::Info, "q", Time.utc, {"pool" => "main", "note" => "two words", "eq" => "a=b", "empty" => ""}))
+assert_true line.ends_with?(" INFO - db: q -- pool=main note=\"two words\" eq=\"a=b\" empty=\"\""), "a value with a space, a quote or = in it, or none, quoted: #{line}"
+puts "  a bound logger's data, the call's, a context in its block and in the tasks it starts, and none beside it"
+
+puts "\n== the level from LOG_LEVEL"
+ENV["LOG_LEVEL"] = "Debug"
+assert_true Log.setup_from_env(backend: notes).level == Severity::Debug, "LOG_LEVEL sets the level, in any case"
+ENV["LOG_LEVEL"] = " "
+assert_true Log.setup_from_env(Severity::Warn, notes).level == Severity::Warn, "an empty LOG_LEVEL leaves the default"
+ENV.delete("LOG_LEVEL")
+assert_true Log.setup_from_env(backend: notes).level == Severity::Info, "no LOG_LEVEL leaves the default"
+ENV["LOG_LEVEL"] = "loud"
+assert_panics("Log.setup_from_env: LOG_LEVEL=loud is no severity") { Log.setup_from_env(backend: notes) }
+ENV.delete("LOG_LEVEL")
+puts "  a severity's name in any case, the default when unset or empty, and a refusal naming the severities"
+
+puts "\n== written by a thread of its own"
+async_path = Dir.tempdir + "/std_log_exercise_async.log"
+async_file = File.open(async_path, "w")
+AsyncBackend.open(async_file, MessageOnly.new) do |backend|
+  Log.setup(Severity::Info, backend)
+  1000.times { |i| Log.info("line #{i}") }
+end
+async_file.close
+written = File.read(async_path)
+expected = String.build { |io| 1000.times { |i| io << "line " << i << "\n" } }
+assert_true written == expected, "every entry, in order, written by the thread: #{written.size} bytes of #{expected.size}"
+late_file = File.open(async_path, "w")
+late = AsyncBackend.new(late_file, MessageOnly.new)
+late.write(Entry.new("", Severity::Info, "one"))
+late.close
+late.close
+assert_panics("AsyncBackend: an entry written after close") { late.write(Entry.new("", Severity::Info, "two")) }
+late_file.close
+assert_true File.read(async_path) == "one\n", "close drained the queue, and a second close did nothing"
+File.delete(async_path)
+Log.setup(Severity::Info, MemoryBackend.new)
+puts "  a thousand entries in order from a writer thread, drained by close, and a write after it refused"
 
 puts "\nALL CHECKS PASSED"

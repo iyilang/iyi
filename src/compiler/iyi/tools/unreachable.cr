@@ -18,6 +18,15 @@ module Iyi
 
       unreachable.excludes.concat IyiPath.default_paths.map { |path| ::Path[path].expand.to_posix.to_s }
       unreachable.excludes.concat config.excludes.map { |path| ::Path[path].expand.to_posix.to_s }
+      # iyi: and every package the manifest builds from - its checkout in
+      # the cache, or the directory a `replace` names. A package is no more
+      # this program's than std is: `iyi vet app.iyi` in an app calling one
+      # of greet's two exports printed `..\cache\mod\example.com\me\greet@v0.1.0\
+      # greet.iyi:7:1  Greet#unused_here` and exited 1, a finding only the
+      # package's author can act on. Rows starting `@` are short names.
+      result.program.iyi_mod_table.each do |(prefix, dir)|
+        unreachable.excludes << ::Path[dir].expand.to_posix.to_s unless prefix.starts_with?('@')
+      end
 
       tallies = unreachable.process(result)
       tallies.sort_by! do |a_def, _|
@@ -59,7 +68,14 @@ module Iyi
         next unless print_tallies || count.zero?
 
         location = a_def.location.not_nil!
-        filename = ::Path[location.filename.as(String)].relative_to(current_dir).to_s
+        relative = ::Path[location.filename.as(String)].relative_to(current_dir)
+        # iyi: the formats a program reads name a file the way a repository
+        # does, `app/helpers.iyi`, on every system: codecov keys coverage by
+        # the repository's path, and json and csv are compared and joined
+        # across machines. On Windows all three said `app\helpers.iyi`
+        # (`app\\helpers.iyi` in JSON), which no such path matches. The text
+        # a person reads keeps the platform's spelling, as a diagnostic does.
+        filename = format.in?("json", "csv", "codecov") ? relative.to_posix.to_s : relative.to_s
         location = Location.new(filename, location.line_number, location.column_number)
         yield a_def, location, count
       end
@@ -184,6 +200,14 @@ module Iyi
       true
     end
 
+    # A definition-site probe (R-2c) calls every def of a module so each is
+    # typed where it is written, inside an `if false` that is never
+    # generated. Counted, it was a caller for every def: `iyi vet` found
+    # nothing unused in a file with a module header.
+    def visit(node : If)
+      !node.iyi_definition_probe?
+    end
+
     def visit(node : ExpandableNode)
       return false unless @visited.add?(node)
 
@@ -251,8 +275,14 @@ module Iyi
       end
     end
 
+    # The def's filename normalised first: a library found through a search
+    # path spelled `$ORIGIN/../src` is read as `.build/../src/std/math.iyi`,
+    # and the excluded `src` is not one of that spelling's parents, so `iyi
+    # vet` on a program that imports std reported every unused std method
+    # beside the program's own.
     def match_path?(path)
-      paths = ::Path[path].parents << ::Path[path]
+      path = ::Path[path].normalize
+      paths = path.parents << path
 
       match_any_pattern?(includes, paths) || !match_any_pattern?(excludes, paths)
     end

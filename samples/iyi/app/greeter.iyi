@@ -15,7 +15,7 @@ pub def polite(name : String) : String
 end
 
 # R-2: not exported, so this is the module's own business. `modules.iyi` can
-# neither `using app/greeter::{greeting}` nor reach it by any other route —
+# neither `import app/greeter::{greeting}` nor reach it by any other route —
 # `.iyimod` carries a module's exports and nothing else, so a name left
 # unmarked has to be unreachable or that metadata would not be enough to
 # compile against (SPEC.md IV.2).

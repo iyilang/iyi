@@ -4,10 +4,11 @@
 # A test is a plain iyi program named `*_test.iyi`: it asserts by exiting
 # non-zero, exactly the contract every gate in `bench/` already runs on,
 # because this repository's own culture is the framework. No DSL, no
-# matchers, no registry — a program that prints what failed and exits 1 is
-# a failing test, and one that exits 0 passed. The prelude's `assert` is
-# that in one word: a false condition panics with the message and the
-# site, which is a program printing what failed and exiting 1.
+# registry — a program that prints what failed and exits 1 is a failing
+# test, and one that exits 0 passed. The prelude's `assert` is that in one
+# word, and `assert_eq` and its family say more of it: a failed check
+# panics with the values and the site. `test "name" { }` runs named cases
+# to the same exit code, so this verb still reads nothing but that.
 #
 #     iyi test              # every *_test.iyi under the current directory
 #     iyi test dir file.iyi # these, recursing into directories
@@ -28,6 +29,14 @@
 # test that neither exits nor fails is killed at the deadline (`--timeout`,
 # 60 s default), because a harness that can hang is not a harness.
 class Iyi::Command
+  # The longest `--timeout`: what Windows' waitable timer can count, in
+  # 100 ns ticks held in an `Int64` - 922,337,203,684 s, some 29,000 years.
+  # Past what the event loops' arithmetic holds a wait went wrong: 1e300
+  # overflowed the span the wait becomes, and 9.3e14, 9.2e15 and 4.6e18
+  # each hung a test that ends at once past a minute in one run on
+  # Windows, and did not in the next.
+  private MAX_TEST_WAIT = (Int64::MAX // 10_000_000 - 1).to_f
+
   private def test
     as_json = false
     timeout = 60.0
@@ -44,9 +53,12 @@ class Iyi::Command
         timeout = value.to_f? || abort! "--timeout takes seconds, not '#{value}'", :USAGE_ERROR
         # `0` and `-1` were taken and every test came back "hung: killed
         # at -1.0s" - a verdict about the flag, printed as one about the
-        # tests. A wait is a positive number of seconds; `inf` overflows
-        # the span it becomes, and `nan` is not a number of anything.
-        unless timeout.finite? && timeout > 0
+        # tests. A wait is a positive number of seconds, and one the clock
+        # can count (`MAX_TEST_WAIT`): `1e300` overflowed the span it
+        # becomes after the test was built, "Arithmetic overflow
+        # (OverflowError)" and "you've found a bug in the iyi compiler", as
+        # `inf` once did; `nan` is not a number of anything.
+        unless timeout.finite? && timeout > 0 && timeout <= MAX_TEST_WAIT
           abort! "--timeout takes seconds to wait, and #{value} is not a wait", :USAGE_ERROR
         end
       when "--affected"
@@ -82,14 +94,24 @@ class Iyi::Command
         # The pattern is built in posix form because a backslash is an escape
         # character in a glob, not a separator: `C:\dir\**\*_test.iyi` matched
         # nothing, so `iyi test` in a directory of tests found no tests.
-        Dir.glob(::Path[path].to_posix.join("**", "*_test.iyi")) { |file| files << file }
+        # The extension in any case, so that `x_test.IYI` is refused below
+        # rather than walked past: "no *_test.iyi found" in a directory of
+        # one test (`Lexer.iyi_miscased?`).
+        Dir.glob(Iyi.glob_root(path).join("**", "*_test.[iI][yY][iI]")) { |file| files << file }
       elsif File.file?(path)
-        files << path
+        # As stored: `X_TEST.IYI` typed on Windows for `x_test.iyi` is it.
+        files << Lexer.stored_name(path)
       else
         abort! "no such file or directory: #{path}", :USAGE_ERROR
       end
     end
-    files.uniq!.sort!
+    # One run per file, however many ways it was spelled: the list was made
+    # unique as strings, so `iyi test . app\x_test.iyi app/x_test.iyi`
+    # built and ran one test three times and reported "passed":3.
+    files.uniq! { |file| Iyi.file_key(File.expand_path(file)) }.sort!
+    if miscased = files.find { |file| Lexer.iyi_miscased?(file) }
+      abort! Lexer.iyi_miscased_sentence(miscased), :USAGE_ERROR
+    end
 
     if files.empty?
       abort! "no *_test.iyi found. A test is a plain iyi program that exits non-zero to fail", :USAGE_ERROR
@@ -97,7 +119,26 @@ class Iyi::Command
 
     skipped = 0
     discount_off = [] of String
-    unless affected.empty?
+    # The manifest is not a module, so no test's import closure holds it —
+    # and a change to it is the largest change a workspace can make: every
+    # `import example.test/user/liba` resolves through the requirement it
+    # names, so bumping a version moves the code under every test at once.
+    # `--affected iyi.mod` answered "0 to run, 1 skipped: no test's imports
+    # reach the change", which is an agent bumping a dependency and being
+    # told there is nothing to run.
+    manifest_changed = affected.select do |changed|
+      File.basename(changed).in?(Iyi::Mod::Installer::MANIFEST, Iyi::Mod::Sum::FILE)
+    end
+    # A changed file no import can name is the same largest change: the
+    # prelude is compiled by every test and imported by none, and a file
+    # that is not a module reaches a test through a macro (`Eiy.embed`,
+    # `read_file`) or while it runs. An edit to `page.eiy` was answered "0
+    # to run, 1 skipped: no test's imports reach the change", and the test
+    # that renders it failed under a plain `iyi test`.
+    unimported = affected.select do |changed|
+      File.file?(changed) && !manifest_changed.includes?(changed) && outside_every_closure?(changed)
+    end
+    unless affected.empty? || !manifest_changed.empty? || !unimported.empty?
       # A changed file that no longer exists cannot be proven untouched by
       # anything. The closure does see a deleted *import* now — an import
       # names a path, and the path outlives the file — but a test also
@@ -111,10 +152,10 @@ class Iyi::Command
       # the other reason to say which file it was.
       discount_off = affected.reject { |changed| File.file?(changed) }
       if discount_off.empty?
-        changed = affected.map { |changed| File.expand_path(changed) }
+        changed = affected.map { |changed| Iyi.file_key(File.expand_path(changed)) }
         selected = files.select do |file|
           closure = test_import_closure(file)
-          closure.nil? || changed.any? { |path| closure.includes?(path) }
+          closure.nil? || closure.any? { |path| changed.includes?(Iyi.file_key(path)) }
         end
         skipped = files.size - selected.size
         files = selected
@@ -161,6 +202,16 @@ class Iyi::Command
               json.array { discount_off.each { |missing| json.scalar missing } }
             end
           end
+          unless manifest_changed.empty?
+            json.field "affected_manifest" do
+              json.array { manifest_changed.each { |name| json.scalar name } }
+            end
+          end
+          unless unimported.empty?
+            json.field "affected_not_imported" do
+              json.array { unimported.each { |name| json.scalar name } }
+            end
+          end
         end
       end
       STDOUT.puts
@@ -169,6 +220,14 @@ class Iyi::Command
         next if result[:status] == "pass"
         STDOUT << result[:file] << ": " << result[:status] << '\n'
         result[:output].each_line { |line| STDOUT << "  " << line << '\n' }
+      end
+      unless manifest_changed.empty?
+        puts "#{manifest_changed.join(", ")} changed, so every test ran: the " \
+             "requirements are what every package import resolves through"
+      end
+      unless unimported.empty?
+        puts "#{unimported.join(", ")} is not a module an import can name, so every test ran: " \
+             "the prelude, a file a macro reads and a fixture reach a test without an import"
       end
       unless discount_off.empty?
         puts "#{discount_off.join(", ")} is not there, so every test ran: " \
@@ -179,6 +238,22 @@ class Iyi::Command
     end
 
     exit 1 unless failed.zero?
+  end
+
+  # iyi: whether no import closure can hold *path*, so no selection by
+  # closure can discount anything for it: a file that is not a module
+  # (`page.eiy`, a fixture, a `.cr` file), or one of the prelude's, which
+  # every program compiles and no import names. `--affected
+  # src/iyi/prelude.iyi` answered "0 to run, 1 skipped".
+  private def outside_every_closure?(path : String) : Bool
+    return true unless File.extname(path).compare(".iyi", case_insensitive: true) == 0
+    key = Iyi.file_key(File.expand_path(path))
+    IyiPath.default_paths.each do |entry|
+      prelude = File.expand_path(File.join(entry, "iyi"))
+      next unless File.file?(File.join(prelude, "prelude.iyi"))
+      return !Iyi.path_under?(key, Iyi.file_key(prelude)).nil?
+    end
+    false
   end
 
   # The test's transitive import closure, as absolute paths, the test file
@@ -194,11 +269,12 @@ class Iyi::Command
   # the closure dropped what it could not open.
   private def test_import_closure(file : String) : Set(String)?
     entry = File.expand_path(file)
-    # IV.6 read backwards, the same rule the LSP applies: a file whose
-    # path ends with its own `module` header's path names the project
-    # root above both, and imports resolve from there — the way a build
-    # would. A header-less script keeps the entry-dir rule.
-    entry_dir = closure_root_of(entry) || File.dirname(entry)
+    # IV.6 read backwards, the rule a build applies
+    # (`Compiler.entry_root_of`): a file whose path ends with its own
+    # `module` header's path names the project root above both, and its
+    # imports and its manifest resolve from there. A header-less script
+    # keeps the entry-dir rule.
+    entry_dir = closure_root_of(entry)
     table = Mod::Installer.table_for(entry_dir)
     closure = Set(String).new
     entry_imports = test_imports_of(entry)
@@ -232,17 +308,21 @@ class Iyi::Command
   # IV.6 read backwards, which is the build's own rule: one reading of it,
   # because a selection that placed a test differently from the build that
   # compiles it would discount the wrong tests.
-  private def closure_root_of(path : String) : String?
-    Compiler.header_root_of(path, File.read(path))
+  private def closure_root_of(path : String) : String
+    Compiler.entry_root_of(path, File.read(path))
   rescue IO::Error
-    nil
+    File.dirname(path)
   end
 
   private def run_one_test(file : String, deadline : Float64) : {file: String, status: String, seconds: Float64, output: String}
     started = Time.instant
     output = IO::Memory.new
 
-    binary = File.tempname("iyi-test", nil)
+    # With the executable's extension, which `build -o` appends to a name
+    # that has none: without it the delete below asked for a name nothing
+    # had, and on Windows every test left its program and its `.pdb` in
+    # %TEMP%.
+    binary = File.tempname("iyi-test", {{ flag?(:win32) ? ".exe" : nil }})
     begin
       build_status = Process.run(
         Process.executable_path.not_nil!,
@@ -254,6 +334,8 @@ class Iyi::Command
       end
 
       process = Process.new(binary, output: output, error: output)
+      tree = TestTree.new(process)
+      running = tree
       done = ::Channel(Process::Status).new
       spawn { done.send(process.wait) }
       select
@@ -269,12 +351,77 @@ class Iyi::Command
         end
         {file: file, status: verdict, seconds: elapsed(started), output: status.success? ? "" : evidence}
       when timeout(deadline.seconds)
-        process.terminate(graceful: false)
+        # The test and whatever it started: its output is copied through
+        # a pipe, and `wait` waits for that pipe's end, which a child the
+        # test started holds open. Only the test was killed, so a test
+        # that ran `ping -n 25` answered "hung: killed at 3.0s" after 25
+        # seconds, with the pings printed after the kill, and one whose
+        # child never ends hung `iyi test` for good.
+        tree.terminate
         done.receive
         {file: file, status: "hung: killed at #{deadline}s", seconds: elapsed(started), output: output.to_s}
       end
     ensure
+      running.try &.close
       File.delete?(binary)
+      # And what the link wrote beside it: MSVC's `.pdb`, and on darwin the
+      # `.dwarf` dsymutil makes, which the new check found there too.
+      {% if flag?(:win32) %}
+        File.delete?(binary.rchop(".exe") + ".pdb")
+      {% elsif flag?(:darwin) %}
+        File.delete?("#{binary}.dwarf")
+      {% end %}
+    end
+  end
+
+  # A test's program and what it starts, ended together: on Windows a job
+  # object the program is put in as soon as it runs; elsewhere the program
+  # alone. [INFERENCE] A child a test starts on Linux or darwin outlives
+  # the kill and holds the pipe the same way; unmeasured there.
+  private class TestTree
+    @process : Process
+    {% if flag?(:win32) %}
+      @job : LibC::HANDLE = LibC::HANDLE.null
+    {% end %}
+
+    def initialize(@process : Process)
+      {% if flag?(:win32) %}
+        job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
+        return if job.null?
+        # PROCESS_TERMINATE | PROCESS_SET_QUOTA, what assigning asks for.
+        handle = LibC.OpenProcess(0x0001_u32 | 0x0100_u32, 0, @process.pid.to_u32)
+        if handle.null?
+          LibC.CloseHandle(job)
+          return
+        end
+        assigned = LibC.AssignProcessToJobObject(job, handle)
+        LibC.CloseHandle(handle)
+        if assigned == 0
+          LibC.CloseHandle(job)
+          return
+        end
+        @job = job
+      {% end %}
+    end
+
+    def terminate : Nil
+      {% if flag?(:win32) %}
+        unless @job.null?
+          LibC.TerminateJobObject(@job, 1)
+          LibC.CloseHandle(@job)
+          @job = LibC::HANDLE.null
+          return
+        end
+      {% end %}
+      @process.terminate(graceful: false)
+    end
+
+    # The job's handle, once the test is over; closing it ends nothing.
+    def close : Nil
+      {% if flag?(:win32) %}
+        LibC.CloseHandle(@job) unless @job.null?
+        @job = LibC::HANDLE.null
+      {% end %}
     end
   end
 

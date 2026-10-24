@@ -20,11 +20,11 @@
 #                          makes
 #
 # A worker is retired when the wire goes quiet (`RETIRE_IDLE`) or after
-# `RETIRE_AFTER` requests, never while a request of its own is in flight
-# — so the code lens that runs the person's program is not killed
-# half-way, and the replacement is warmed while nobody is typing. Its
-# successor is handed the buffers with `iyi/adopt` and asked for the
-# focused file's verdict, which is the state the dead one had.
+# `RETIRE_AFTER` requests, never while a request of its own or a change's
+# verdict is in flight — so the code lens that runs the person's program
+# is not killed half-way, and the replacement is warmed while nobody is
+# typing. Its successor is handed the buffers with `iyi/adopt` and asked
+# for the focused file's verdict, which is the state the dead one had.
 #
 # This is the shape `iyi daemon` already uses for builds — analyse once,
 # fork per build, let the child's exit do the freeing (IV.1d) — and the
@@ -43,6 +43,7 @@
 #     refusals still come from the one place that implements them.
 require "json"
 require "./text"
+require "./reader"
 
 module Iyi::Lsp
   class Proxy
@@ -57,9 +58,10 @@ module Iyi::Lsp
     # process was measured doing.
     RETIRE_FOOTPRINT = 512
 
-    # The bound where there is no `getrusage` to read (Windows): a count
-    # of requests, assuming the worst of each. Cruder on purpose — a
-    # bound that is always there beats a measure that sometimes is.
+    # The bound where the worker cannot say what it costs (`Lsp.footprint`
+    # answers 0): a count of requests, assuming the worst of each. Cruder
+    # on purpose — a bound that is always there beats a measure that
+    # sometimes is.
     RETIRE_AFTER = 24
 
     # Quiet on the wire before the successor is warmed. Long enough that
@@ -87,12 +89,22 @@ module Iyi::Lsp
       # Requests and buffer changes it has seen. A worker that has done
       # nothing is not worth replacing.
       property worked = 0
+      # The buffers it was handed a change to and has not published the
+      # verdict on, by the version that verdict will carry. A change is
+      # a notification and has no id, but it is owed an answer all the
+      # same: a worker killed between taking a change and publishing on
+      # it took the verdict with it, its successor adopted the buffer
+      # and said nothing, and a client waiting on the verdict waited for
+      # ever. Held to two cores beside a busy loop, a compile ran past
+      # `RETIRE_IDLE`, the quiet replaced the worker 2.06 s into it, and
+      # `bench/lsp_memory.py`'s paced session stopped at its 36th edit.
+      getter verdicts = {} of String => Int64
 
       def initialize(@process : Process)
       end
 
       def idle? : Bool
-        @outstanding.empty?
+        @outstanding.empty? && @verdicts.empty?
       end
 
       # Has it cost enough to be worth the fifth of a second its
@@ -112,6 +124,9 @@ module Iyi::Lsp
     # The document the person is in, so a fresh worker is warmed on the
     # file the next question will be about.
     @focus : String?
+    # A successor made on the memory bound whose warm-up waits for the
+    # wire to go quiet (`retire`).
+    @warm_pending = false
 
     # The version of each buffer as this proxy has applied it, and the
     # text of the last version a worker called clean.
@@ -126,14 +141,31 @@ module Iyi::Lsp
     # text that never compiled.
     @versions = {} of String => Int64
     @clean = {} of String => String
+    # The focused buffer and its text when the last worker died, which
+    # its successors are not warmed on (`warm`).
+    @fatal : {String, String}?
     @shut_down = false
+    # The client's `shutdown`, kept verbatim like the handshake and for
+    # the same reason: the refusal of every request after it but `exit`
+    # lives in the worker, and a successor never told of it answered as
+    # if none had come. Kept after the frame is forwarded, as the
+    # handshake is, so a worker this frame spawned is not also handed it.
+    @shutdown_frame : Bytes?
     @running = true
     @private_id = 0
     getter exit_code = 0
 
     def initialize(@input : IO = STDIN, @output : IO = STDOUT)
       @self_exe = Process.executable_path || "iyi"
+      @origin = IyiPath.origin
     end
+
+    # Where this binary started, pinned at startup and handed to every
+    # worker (`IyiPath::ORIGIN_VARIABLE`): a worker started a moment
+    # before a rebuild unlinked the binary asked for its own path after,
+    # found none, and every compile it ran answered "Missing executable
+    # path to expand $ORIGIN path".
+    @origin : String?
 
     # Editor → here. A fiber reads frames so the loop can also watch the
     # worker and the clock.
@@ -148,6 +180,9 @@ module Iyi::Lsp
     # their turn, and whether the client's side has ended.
     @pending = Deque(Bytes).new
     @eof = false
+    # A client's `workspace/diagnostic` in flight, by id: its params, and
+    # the items answered so far by the workers that carried it (`pulled`).
+    @pulls = {} of String => {JSON::Any?, Hash(String, JSON::Any)}
 
     def run : Nil
       spawn do
@@ -158,7 +193,7 @@ module Iyi::Lsp
         end
       end
       frames = @frames
-      spawn do
+      Lsp.read_loop("lsp-stdin") do
         loop do
           body = read_frame(@input)
           frames.send body
@@ -187,10 +222,37 @@ module Iyi::Lsp
             bury(worker)
           end
         when timeout(RETIRE_IDLE)
+          # A worker that owes something and has died without its pipe
+          # closing: a process it started still holds that pipe (on
+          # Windows every child inherits it), so no end of stream is
+          # coming, and whoever waits on it is told now rather than
+          # when that process ends (`dead?`).
+          if (worker = @worker) && !worker.idle? && dead?(worker)
+            bury(worker)
+            next
+          end
           # Nothing on either side for two seconds: the person is
           # reading. Spend it on a fresh worker rather than on their
-          # next keystroke.
-          retire if (worker = @worker) && worker.idle? && worker.worked > 0
+          # next keystroke - or, when the last one was replaced on the
+          # memory bound mid-traffic, on the warm-up that retirement
+          # left for the quiet. Past `shutdown` there is no next
+          # keystroke, and nothing is warmed or replaced (`retire`,
+          # `@shutdown_frame`).
+          if !@shut_down && (worker = @worker) && worker.idle?
+            if @warm_pending
+              @warm_pending = false
+              # A successor that has worked since the memory bound made
+              # it is replaced here too, rather than only warmed: warming
+              # it kept every edit it had taken since, so how much a
+              # pause handed back depended on where in the typing the
+              # bound had landed - one edit earlier, from a slightly
+              # larger prelude, and the session rested at 241 MB, then
+              # 283, then 326, where it had rested at 198.
+              worker.worked > 0 ? retire : warm(worker)
+            elsif worker.worked > 0
+              retire
+            end
+          end
         end
       end
     ensure
@@ -204,6 +266,13 @@ module Iyi::Lsp
 
     private def dispatch(body : Bytes) : Nil
       message = parse(body)
+      # A lone surrogate escape is valid JSON the JSON library refuses
+      # (`Text.mend`). The mended frame is the one kept and the one the
+      # worker is handed, so the buffer it opens is the buffer here.
+      if message.nil? && (mended = Text.mend(body))
+        body = mended
+        message = parse(body)
+      end
       table = message.try(&.as_h?)
       method = table.try(&.["method"]?).try(&.as_s?)
       params = table.try(&.["params"]?)
@@ -211,24 +280,33 @@ module Iyi::Lsp
 
       # The proxy reads what it has to keep and nothing else. Every
       # frame still reaches the worker below, so a method this case
-      # does not name is not a method this proxy has to know.
+      # does not name is not a method this proxy has to know — and a
+      # frame of the wrong shape is kept by nobody here and refused by
+      # the worker. These were read as the protocol spells them, and any
+      # other shape raised outside every rescue: a didOpen with no text
+      # ("Missing hash key"), a didSave whose params were a string
+      # ("Expected Hash"), a didChange with no contentChanges each ended
+      # the session with exit 1, where the worker alone had survived
+      # them all.
       case method
       when "initialize", "initialized"
         # Kept for a successor to be handed, and kept *after* the frame
         # is forwarded (below): a worker spawned by this very frame must
         # not also be handed a replay of it.
       when "textDocument/didOpen"
-        if params && (document = params["textDocument"]?)
-          uri = document["uri"].as_s
-          @documents[uri] = document["text"].as_s
+        document = params.try(&.as_h?).try(&.["textDocument"]?).try(&.as_h?)
+        if document && (uri = document["uri"]?.try(&.as_s?)) &&
+           (text = document["text"]?.try(&.as_s?))
+          @documents[uri] = text
           @versions[uri] = document["version"]?.try(&.as_i64?) || 0_i64
           @focus = uri
+          opened = uri
         end
       when "textDocument/didChange"
-        if params && (uri = params.dig?("textDocument", "uri").try(&.as_s?))
+        if params && (uri = uri_of(params)) && (first = changes_of(params))
           text = @documents[uri]? || ""
           changes = [] of JSON::Any
-          params["contentChanges"].as_a.each do |change|
+          first.each do |change|
             text = Text.apply(text, change)
             changes << change
           end
@@ -245,29 +323,54 @@ module Iyi::Lsp
             break unless queued = @pending.first?
             other = parse(queued).try(&.as_h?)
             break unless other && other["method"]?.try(&.as_s?) == "textDocument/didChange"
-            other_params = other["params"]
-            break unless other_params.dig?("textDocument", "uri").try(&.as_s?) == uri
+            # One of the wrong shape ends the burst, and reaches the
+            # worker on its own, as it came.
+            break unless (other_params = other["params"]?) && uri_of(other_params) == uri &&
+                         (more = changes_of(other_params))
             @pending.shift
             newest = other_params
-            other_params["contentChanges"].as_a.each do |change|
+            more.each do |change|
               text = Text.apply(text, change)
               changes << change
             end
           end
+          @focus = uri
+          # Posted before the buffer here takes the change. A frame that
+          # finds no worker spawns one and hands it `@documents` with
+          # `iyi/adopt`, and then the change itself: taken here first,
+          # the successor adopted a buffer that already held it and
+          # applied it again - after a worker's death, `ab` with one `c`
+          # typed after it was `abcc` to the worker and `abc` to the
+          # editor, and every later answer was about a text nobody had.
+          # A didOpen carries its whole text and can be applied twice; a
+          # didChange cannot.
+          post(one_change(newest, changes), nil)
           @documents[uri] = text
           @versions[uri] = newest.dig?("textDocument", "version").try(&.as_i64?) ||
                            (@versions[uri]? || 0_i64) + 1
-          @focus = uri
-          post(one_change(newest, changes), nil)
+          owe(uri, newest.dig?("textDocument", "version").try(&.as_i64?))
           return
         end
       when "textDocument/didSave"
-        @focus = params.try(&.dig?("textDocument", "uri")).try(&.as_s?) || @focus
+        # Params of the wrong shape name no file, and the focus stays.
+        @focus = uri_of(params) || @focus
       when "textDocument/didClose"
-        if uri = params.try(&.dig?("textDocument", "uri")).try(&.as_s?)
+        if uri = uri_of(params)
           @documents.delete(uri)
+          # iyi: the version and the last clean text go with the buffer.
+          # Kept, a session that opened and closed files held the clean
+          # text of every one it ever opened, and a reopened buffer that
+          # did not compile was handed to a successor seeded with the
+          # text from before it was closed.
+          @versions.delete(uri)
+          @clean.delete(uri)
           @focus = nil if @focus == uri
+          @worker.try &.verdicts.delete(uri)
         end
+      when "workspace/diagnostic"
+        # Kept to be carried on in a successor where this worker stops at
+        # its bound (`pulled`).
+        @pulls[id.to_json] = {params, {} of String => JSON::Any} if id && !id.raw.nil?
       when "shutdown"
         @shut_down = true
       when "exit"
@@ -287,12 +390,81 @@ module Iyi::Lsp
       # gets the protocol's refusal rather than silence. `result` or
       # `error` is what tells the two apart.
       answering = table ? (table.has_key?("result") || table.has_key?("error")) : false
+      # The client answering the proxy's own request (`watch_files`): the
+      # worker asked nothing, and is not told.
+      return if answering && id.try(&.as_s?).try(&.starts_with?(PRIVATE_ID))
       post(body, id, request: !answering)
+      # The worker publishes a didOpen's verdict at the version the frame
+      # said, or 0 where it said none, which is the number kept here.
+      owe(opened, @versions[opened]?) if opened
 
       case method
-      when "initialize"  then @initialize_frame = body
-      when "initialized" then @initialized_frame = body
+      when "initialize" then @initialize_frame = body
+      when "initialized"
+        @initialized_frame = body
+        watch_files
+      when "shutdown" then @shutdown_frame = body
       end
+    end
+
+    # The verdict a buffer's change is owed, on the worker that took it
+    # (`Worker#verdicts`). Only where the frame said its version: a
+    # successor was handed the buffers and not their versions, so a
+    # change that said none is published under a number this proxy
+    # cannot predict, and waiting on it would keep the worker for ever.
+    # Nor before `initialize`, when the worker drops the notification.
+    private def owe(uri : String, version : Int64?) : Nil
+      return unless @initialize_frame && (worker = @worker)
+      if version
+        worker.verdicts[uri] = version
+      else
+        worker.verdicts.delete(uri)
+      end
+    end
+
+    # iyi: asks the client to say when a file a verdict reads changes on
+    # disk, where it can be asked (dynamic registration, LSP 3.17). A
+    # module an open buffer imports changes under it - `git checkout`, a
+    # rename, another process's write - and without the notification an
+    # editor that only listens kept the verdict the buffer last had.
+    # Asked here and once: a worker is replaced mid-session and handed the
+    # handshake again, and each successor registering would leave the
+    # client a watcher per worker.
+    private def watch_files : Nil
+      frame = @initialize_frame
+      return unless frame
+      dynamic = parse(frame).try(&.dig?("params", "capabilities", "workspace", "didChangeWatchedFiles", "dynamicRegistration")).try(&.as_bool?)
+      return unless dynamic
+      @outbox.send(JSON.build do |json|
+        json.object do
+          json.field "jsonrpc", "2.0"
+          json.field "id", private_id
+          json.field "method", "client/registerCapability"
+          json.field "params" do
+            json.object do
+              json.field "registrations" do
+                json.array do
+                  json.object do
+                    json.field "id", "iyi/watched-files"
+                    json.field "method", "workspace/didChangeWatchedFiles"
+                    json.field "registerOptions" do
+                      json.object do
+                        json.field "watchers" do
+                          json.array do
+                            {"**/*.iyi", "**/iyi.mod", "**/iyi.sum"}.each do |glob|
+                              json.object { json.field "globPattern", glob }
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end.to_slice)
     end
 
     # Take whatever the client has already sent, so a burst can be seen
@@ -327,6 +499,17 @@ module Iyi::Lsp
       end
     end
 
+    # The `textDocument.uri` a notification names, or nil where its
+    # params are the wrong shape to have one.
+    private def uri_of(params : JSON::Any?) : String?
+      params.try(&.as_h?).try(&.["textDocument"]?).try(&.as_h?).try(&.["uri"]?).try(&.as_s?)
+    end
+
+    # A didChange's `contentChanges`, or nil where they are not a list.
+    private def changes_of(params : JSON::Any?) : Array(JSON::Any)?
+      params.try(&.as_h?).try(&.["contentChanges"]?).try(&.as_a?)
+    end
+
     # One `didChange` carrying a burst's changes in order, addressed to
     # the version the last of them named. The ranges stay ranges: the
     # worker applies them exactly as it would have applied the frames
@@ -357,12 +540,23 @@ module Iyi::Lsp
     # never retired.
     private def post(body : Bytes, id : JSON::Any?, request : Bool = true) : Nil
       worker = @worker
+      # Dead, and its pipe still open: the frame would be written into a
+      # pipe a process the worker started is holding, and nobody would
+      # ever read it. It goes to a successor instead, as a frame the
+      # pipe refused does (`dead?`).
+      if worker && dead?(worker)
+        bury(worker, retry: body, id: id, request: request)
+        return
+      end
       unless worker
         unless worker = spawn_worker
           # There is no compiler to run any more — the binary this
           # server started from is gone. Saying so is the honest answer;
           # dying is not, because the client is holding open buffers.
-          unstartable(id) if id && request
+          if id && request
+            @pulls.delete(id.to_json)
+            unstartable(id)
+          end
           return
         end
         @worker = worker
@@ -375,7 +569,7 @@ module Iyi::Lsp
       return if write_frame(worker, body)
       # The pipe is gone: the worker died before it read this. Bury it,
       # and give the frame to its successor — the client asked once.
-      bury(worker, retry: body, id: id)
+      bury(worker, retry: body, id: id, request: request)
     end
 
     # ── The worker's frames ──────────────────────────────────────────────
@@ -387,7 +581,7 @@ module Iyi::Lsp
       # business: it is the retirement signal, and it stops here.
       if table && table["method"]?.try(&.as_s?) == "iyi/footprint"
         worker.footprint = table["params"]["megabytes"].as_i
-        retire if worker.idle? && worker.spent?
+        retire(warm_now: false) if worker.idle? && worker.spent?
         return
       end
 
@@ -410,6 +604,17 @@ module Iyi::Lsp
            (held = @documents[uri]?)
           @clean[uri] = held
         end
+        # The verdict a change was owed (`Worker#verdicts`). The memory
+        # bound passes over a worker that owes one, and retires it once
+        # it has said it.
+        if table && table["method"]?.try(&.as_s?) == "textDocument/publishDiagnostics" &&
+           (uri = table["params"]?.try(&.["uri"]?).try(&.as_s?)) &&
+           (owed = worker.verdicts[uri]?) && table["params"]["version"]?.try(&.as_i64?) == owed
+          worker.verdicts.delete(uri)
+          @outbox.send body
+          retire(warm_now: false) if worker.idle? && worker.spent?
+          return
+        end
         @outbox.send body
         return
       end
@@ -426,6 +631,10 @@ module Iyi::Lsp
 
       key = id.to_json
       waited = worker.outstanding.delete(key)
+      if waited && (pull = @pulls.delete(key))
+        return unless merged = pulled(worker, key, pull, table, body)
+        body = merged
+      end
       # An answer to a question the client did not ask: the proxy's own
       # warm-up, or a replayed `initialize` whose answer the client
       # already has. Dropping it is the whole trick that lets a worker be
@@ -435,22 +644,124 @@ module Iyi::Lsp
         worker.answered += 1
         @outbox.send body
       end
-      retire if worker.idle? && worker.spent?
+      retire(warm_now: false) if worker.idle? && worker.spent?
     end
 
-    # A worker's stdout closed. Whoever was waiting is told by the code
-    # the protocol has for "the server broke", because the alternative is
-    # a client waiting forever for a process that no longer exists.
-    private def bury(worker : Worker, retry : Bytes? = nil, id : JSON::Any? = nil) : Nil
+    # The answer to a client's workspace pull, from every worker that
+    # carried it: the items this one judged added to the ones before it.
+    # Nil where the pull goes on in a successor - this worker stopped at
+    # its bound (`iyi/partial`) with nothing else in flight, and is
+    # retired here. Each successor is handed the ids judged so far, and
+    # answers those files `unchanged`, which the client has never had:
+    # the full item from the worker that judged them is the one kept.
+    private def pulled(worker : Worker, key : String, pull : {JSON::Any?, Hash(String, JSON::Any)},
+                       table : Hash(String, JSON::Any), body : Bytes) : Bytes?
+      params, judged = pull
+      result = table["result"]?.try(&.as_h?)
+      items = result.try(&.["items"]?).try(&.as_a?)
+      # A refusal, a cancel, a retrigger: as it came.
+      return body unless result && items
+      items.each do |item|
+        next unless (fields = item.as_h?) && (uri = fields["uri"]?.try(&.as_s?))
+        next if judged[uri]?.try(&.["kind"]?).try(&.as_s?) == "full"
+        judged[uri] = item
+      end
+      if result["iyi/partial"]?.try(&.as_bool?) && worker.idle?
+        retire(warm_now: false)
+        if (successor = @worker) && !successor.same?(worker)
+          @pulls[key] = pull
+          post(continued_pull(key, params, judged), JSON.parse(key))
+          return
+        end
+      end
+      JSON.build do |json|
+        json.object do
+          json.field "jsonrpc", "2.0"
+          json.field "id" { json.raw key }
+          json.field "result" do
+            json.object do
+              json.field "items" do
+                json.array { judged.each_value(&.to_json(json)) }
+              end
+            end
+          end
+        end
+      end.to_slice
+    end
+
+    # The client's pull again, as the client sent it, with the files
+    # judged so far among the ids it already holds.
+    private def continued_pull(key : String, params : JSON::Any?, judged : Hash(String, JSON::Any)) : Bytes
+      fields = params.try(&.as_h?)
+      JSON.build do |json|
+        json.object do
+          json.field "jsonrpc", "2.0"
+          json.field "id" { json.raw key }
+          json.field "method", "workspace/diagnostic"
+          json.field "params" do
+            json.object do
+              fields.try &.each do |name, value|
+                json.field(name) { value.to_json(json) } unless name == "previousResultIds"
+              end
+              json.field "previousResultIds" do
+                json.array do
+                  fields.try(&.["previousResultIds"]?).try(&.as_a?).try &.each(&.to_json(json))
+                  judged.each do |uri, item|
+                    next unless item["kind"]?.try(&.as_s?) == "full" && (value = item["resultId"]?)
+                    json.object do
+                      json.field "uri", uri
+                      json.field "value" { value.to_json(json) }
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end.to_slice
+    end
+
+    # A worker's stdout closed, or its process ended with the pipe still
+    # open (`dead?`). Whoever was waiting is told by the code the
+    # protocol has for "the server broke", because the alternative is a
+    # client waiting forever for a process that no longer exists. A frame
+    # the dead worker never read (*retry*) goes to its successor as it
+    # came, a client's answer to a server request still unregistered.
+    private def bury(worker : Worker, retry : Bytes? = nil, id : JSON::Any? = nil, request : Bool = true) : Nil
       return unless worker.same?(@worker)
       status = worker.process.wait rescue nil
       @worker = nil
+      # The text the person is in when a worker dies is the likeliest to
+      # have killed it, and `warm` would compile it again first thing in
+      # every successor: a buffer of 600 open parentheses (a stack
+      # overflow) took down the worker that answered each request after
+      # it, and every request in the session, about any file, answered
+      # -32603 "did not survive" for as long as it was focused.
+      if (focus = @focus) && (held = @documents[focus]?)
+        @fatal = {focus, held}
+      end
       worker.outstanding.each do |key|
         next if key.starts_with?(%("#{PRIVATE_ID}))
         next if retry && id && key == id.to_json
         refuse(key, status)
       end
-      post(retry, id) if retry
+      post(retry, id, request) if retry
+    end
+
+    # Whether the worker has exited, asked of the process rather than of
+    # its pipe. The end of the worker's stdout is how its death usually
+    # arrives, and it does not arrive while another process holds that
+    # pipe: a macro's `system` starts one, and on Windows every handle
+    # the worker could hand on is inherited by it, the worker's own stdin
+    # and stdout among them. A worker killed during a macro's `ping` left
+    # the proxy with no worker and a request written into the dead one's
+    # stdin, unanswered for the 180 s the session gate waited (Windows
+    # CI, step 73c); reproduced on Linux by a `sleep` that opens the
+    # worker's two pipes through `/proc`, it was unanswered until the
+    # `sleep` ended. One probe of the process a frame: `kill(pid, 0)`, or
+    # `GetExitCodeProcess` on Windows.
+    private def dead?(worker : Worker) : Bool
+      worker.process.terminated?
     end
 
     # ── Retirement ───────────────────────────────────────────────────────
@@ -467,12 +778,25 @@ module Iyi::Lsp
     # does on purpose, and a retirement a second later would otherwise
     # have taken the editor down with an exception where before there was
     # one warm process that needed nothing from the disk.
-    private def retire : Nil
+    #
+    # A retirement on the memory bound happens between two requests, with
+    # the next one likely already on the wire: its successor is handed the
+    # buffers now and warmed at the next quiet (`@warm_pending`), because
+    # a warm-up sent first is a compile the next request waits behind -
+    # 0.8 s for an unchanged workspace pull that compiles nothing.
+    #
+    # Past `shutdown` nothing is retired: there is no keystroke left to
+    # save a compile for. The refusal of every request but `exit` lives in
+    # the worker, and the successor was not told (`@shutdown_frame`): a
+    # hover right after `shutdown` was -32600, the same hover after a 3.5 s
+    # pause was answered in full by a fresh worker.
+    private def retire(warm_now : Bool = true) : Nil
+      return if @shut_down
       return unless old = @worker
       return unless successor = spawn_worker
       @worker = successor
       stop(old)
-      hand_over(successor)
+      hand_over(successor, warm_now)
     end
 
     # A worker, or nil if this binary can no longer be started.
@@ -480,6 +804,7 @@ module Iyi::Lsp
       process = Process.new(
         @self_exe,
         ["lsp", "--worker"],
+        env: @origin.try { |origin| {IyiPath::ORIGIN_VARIABLE => origin} },
         input: Process::Redirect::Pipe,
         output: Process::Redirect::Pipe,
         error: Process::Redirect::Inherit,
@@ -502,15 +827,27 @@ module Iyi::Lsp
     # The handshake, then the buffers, then the file the person is in.
     # The replayed frames are answered to nobody: their ids are not
     # outstanding, so `answer` drops them.
-    private def hand_over(worker : Worker) : Nil
+    private def hand_over(worker : Worker, warm_now : Bool = true) : Nil
       if frame = @initialize_frame
         write_frame(worker, frame)
       end
       if frame = @initialized_frame
         write_frame(worker, frame)
       end
+      # A successor started past `shutdown` - its predecessor died, and
+      # the next request needs someone to refuse it - is told the session
+      # is over, and that is all it is told. Without it a request after a
+      # dead worker's `shutdown` was answered as if none had come.
+      if frame = @shutdown_frame
+        write_frame(worker, frame)
+        return
+      end
       adopt(worker)
-      warm(worker)
+      if warm_now
+        warm(worker)
+      else
+        @warm_pending = true
+      end
     end
 
     # Hand over the open buffers without asking for a verdict. A replayed
@@ -552,6 +889,10 @@ module Iyi::Lsp
     # rather than on the next keystroke. Its answer is dropped.
     private def warm(worker : Worker) : Nil
       return unless uri = @focus
+      # Not the text a worker died holding (`bury`): the warm-up is an
+      # answer nobody asked for, and the request behind it was the one
+      # refused. An edit makes it a text no worker has died on.
+      return if (fatal = @fatal) && fatal[0] == uri && @documents[uri]? == fatal[1]
       key = private_id
       worker.outstanding << key.to_json
       frame = JSON.build do |json|
@@ -620,6 +961,7 @@ module Iyi::Lsp
     # the message because "the server broke" without a signal number is
     # a bug report nobody can act on.
     private def refuse(key : String, status : Process::Status?) : Nil
+      @pulls.delete(key)
       how =
         if status.nil?
           "it is gone"

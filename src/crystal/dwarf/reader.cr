@@ -1,3 +1,10 @@
+# iyi: the module this raises `Error` from, which a program that requires
+# the reader alone - its spec does - had not loaded: the name then resolved
+# to iyi's top-level `Error`, a module, and nothing compiled. On Linux and
+# darwin the call stack's DWARF reader loads it first; on Windows nothing
+# does.
+require "../dwarf"
+
 # Simpler alternative to IO::Memory, dedicated to parse DWARF sections:
 #
 # - always read-only

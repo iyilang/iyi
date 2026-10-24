@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every uri section reported"
-for phrase in "== parse" "== refuse"; do
+for phrase in "== parse" "== refuse" "== dot segments" "== hash" "== encode" "== ascii host"; do
   if ! grep -q "$phrase" "$WORK/uri-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -112,6 +112,81 @@ PY
     status=1
   else
     echo "  a broken uri is caught"
+  fi
+
+  # The form reading made strict again: the query panics at its first
+  # malformed escape.
+  mkdir -p "$WORK/strict/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/uri.iyi").read_text()
+old = '              params.add(URI.decode_form_lenient(raw_k), URI.decode_form_lenient(raw_v))'
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/strict/std/uri.iyi").write_text(src.replace(old, '              params.add(URI.decode_www_form(raw_k), URI.decode_www_form(raw_v))', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the strict-form patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/strict${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_uri_exercise.iyi" >"$WORK/strict.out" 2>&1; then
+    echo "  the exercise PASSED with a form reading that panics"
+    status=1
+  elif grep -q "malformed percent escape" "$WORK/strict.out"; then
+    echo "  a form reading that panics is caught"
+  else
+    echo "  the strict form failed, but not at its escape"
+    tail -3 "$WORK/strict.out" | sed 's/^/    /'
+    status=1
+  fi
+
+  # `encode` with space_to_plus keeping a literal '+': "a b" and "a+b"
+  # encode alike, and decode cannot undo it.
+  mkdir -p "$WORK/plus/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/uri.iyi").read_text()
+old = '      elsif keep?(b, level) && !(b == 43_u8 && space_to_plus)'
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/plus/std/uri.iyi").write_text(src.replace(old, '      elsif keep?(b, level)', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the plus patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/plus${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_uri_exercise.iyi" >"$WORK/plus.out" 2>&1; then
+    echo "  the exercise PASSED with a '+' kept where a space is '+'"
+    status=1
+  elif grep -q "is %2B once a space" "$WORK/plus.out"; then
+    echo "  a '+' kept where a space is '+' is caught"
+  else
+    echo "  the plus copy failed, but not at its check"
+    tail -3 "$WORK/plus.out" | sed 's/^/    /'
+    status=1
+  fi
+
+  # ascii_host handing IDNA the host with its escapes still in it:
+  # `b%C3%BCcher` is refused for its `%` rather than read as `bücher`.
+  mkdir -p "$WORK/escaped/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/uri.iyi").read_text(encoding="utf-8")
+old = "    name = host.index('%') ? URI.decode?(host) : host"
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/escaped/std/uri.iyi").write_text(src.replace(old, "    name = host", 1), encoding="utf-8")
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the escaped-host patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/escaped${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_uri_exercise.iyi" >"$WORK/escaped.out" 2>&1; then
+    echo "  the exercise PASSED with a host's escapes left in it"
+    status=1
+  elif grep -q "ascii host b%C3%BCcher.example" "$WORK/escaped.out"; then
+    echo "  a host's escapes left in it are caught"
+  else
+    echo "  the escaped-host copy failed, but not at its check"
+    tail -3 "$WORK/escaped.out" | sed 's/^/    /'
+    status=1
   fi
 fi
 

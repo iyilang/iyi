@@ -1,0 +1,1245 @@
+# WebSocket (RFC 6455) over std/http: the server's handshake, the
+# client's, and the frames after them, written in iyi.
+#
+# **The server.** Inside `Server.serve`'s block, `WebSocket.upgrade(req)
+# { |ws| ... }` answers the request. A request that is a version 13
+# handshake - a GET over HTTP/1.1 whose `Upgrade` names `websocket`, whose
+# `Connection` holds `upgrade`, and whose `Sec-WebSocket-Key` is 16 bytes
+# in base64 - is answered 101 with the key's `Sec-WebSocket-Accept`, and
+# the block runs with the connection. Any other request is answered 400
+# with why, and a handshake of another version 426 with
+# `Sec-WebSocket-Version: 13` (RFC 6455 §4.2.2, §4.4). With `protocols`
+# the server names the first of its own list the client offered in
+# `Sec-WebSocket-Protocol`, and none when it offered none of them: the
+# server's order is the preference, since it is the server that knows
+# which it serves best. The connection is closed when the block returns;
+# a block that did not close it is closed for, 1000. An `Origin` is not
+# checked here: the block reads `req.header("Origin")` before it calls
+# `upgrade` when it cares. Closing the listener does not end a connection
+# that has been upgraded, and `serve` returns once those have ended, so a
+# server that stops closes its WebSockets itself.
+#
+# **The client.** `WebSocket.connect("ws://host:port/path")` sends the
+# handshake through `HTTP.upgrade` with a key of 16 bytes from
+# `Random::Secure` and checks what comes back: a 101 whose `Upgrade` and
+# `Connection` say websocket, whose `Sec-WebSocket-Accept` is the key's,
+# that agrees to no extension but the permessage-deflate it offered, and
+# names no protocol the client did not offer. Each of these refused is a
+# `WebSocketError`; a server that does not answer 101 is the `HTTPError`
+# `HTTP.upgrade` names it with. `wss://` is the same over std/tls, its
+# certificate checked against `HTTP.tls_config` and ALPN offering
+# `http/1.1`; a server under `Server.serve(tls:)` hands `upgrade`'s block
+# the TLS stream in the same way. With `proxy:` the handshake goes through
+# an `http://` proxy's CONNECT tunnel, for `ws://` as for `wss://`, the
+# proxy's credential on the CONNECT alone (std/http's `HTTP.upgrade`).
+#
+# **The connection.** `send(text)`, `send_binary(bytes)` and `ping` write
+# one frame each: no message is split into fragments on the way out.
+# `receive` answers the next whole message, a `Message` whose `data` is
+# its bytes, and nil once the close handshake is done. On the way it
+# reassembles fragments, with pings and pongs between them; answers a
+# ping with its pong; and reads past pongs. `close(code, reason)` sends a
+# close and waits up to ten seconds for the peer's. A close the peer
+# starts is answered with its own code and ends `receive`; `close_code`
+# and `close_reason` say what it carried (1005 when it carried no code,
+# 1006 when the connection ended without one).
+#
+# **Compression.** permessage-deflate (RFC 7692) is on at both ends
+# unless `deflate: false` is given to `connect` or `upgrade`, since
+# browsers offer it. `connect` offers `permessage-deflate;
+# client_max_window_bits`. `upgrade` accepts the first permessage-deflate
+# offer in the list that it can keep and declines the others, as §7 has
+# it: one that names a parameter not among RFC 7692 §7.1's four, or one
+# twice, or with a value it may not have (`server_no_context_takeover`
+# and `client_no_context_takeover` take none, `server_max_window_bits`
+# takes 8 to 15 in decimal, `client_max_window_bits` that or none), is
+# declined, and a header that is not a list of extensions at all is a
+# 400 that says so. The 101 names `server_no_context_takeover`,
+# `client_no_context_takeover` and `server_max_window_bits` as the offer
+# did. The client refuses, as a `WebSocketError` that names it, an answer
+# with another extension, permessage-deflate twice, or a parameter
+# wrong in any of those ways. `deflate` is what was agreed, nil for
+# nothing.
+#
+# Once it is agreed every text and binary message goes compressed, RSV1
+# set on its frame: through a raw-DEFLATE `Deflater` (std/compress) at
+# `deflate_level`, 0 to 9 and 1 unless the caller says otherwise, whose
+# sync flush ends it, the flush's last four bytes, 00 00 ff ff, left off
+# (§7.2.1); an empty message is the one byte 00 (§7.2.3.6). A
+# message past 256 KiB is compressed 256 KiB at a time, a flush after
+# each, so the compressor's window does not grow to the largest message
+# and stay that size. The window carries over from one message to the
+# next unless this end's `no_context_takeover` was agreed, and a match
+# reaches no farther back than this end's `max_window_bits` allows: the
+# compressor holds itself to a smaller window exactly, so no offer is
+# declined for one. Pings, pongs and closes are never compressed. A
+# compressed message from the peer is inflated when its last frame is in,
+# 00 00 ff ff put back, by an `Inflater.flushed` whose window is the
+# whole 32 KiB, so whatever `max_window_bits` the peer writes with reads;
+# its window carries over unless the peer's `no_context_takeover` was
+# agreed. `max_message` holds on both sides of the decoder - on the
+# compressed bytes as their frames declare them, and on the inflated ones
+# as they come out - so a deflate bomb, kilobytes that would inflate to
+# gigabytes, is refused 1009 once it is 64 KiB past the limit, never
+# inflated whole. Compressed bytes that are not DEFLATE, or that do not
+# end between blocks, are 1007. A compressed message of no bytes at all,
+# which nothing built on zlib writes, is read as empty. Compression of
+# secrets beside text an attacker chooses, over TLS, can give the secrets
+# away by the sizes (CRIME; RFC 7692 §8): a server that sends both turns
+# it off.
+#
+# Measured here (`--release`, one machine, both ends in one process over
+# loopback): eight 16 MiB messages of this repository's CHANGELOG.md,
+# repeated, from a client to a server in 1.5 s at level 1 and 5.2 s at
+# level 6, where they took 74 ms uncompressed. Nearly all of it is the
+# compressor: one of those messages, 16.6 MB, goes to 7.2 MB in 121 ms at
+# level 1 and to 6.1 MB in 589 ms at level 6, and inflates in 60 to 67
+# ms either way - which is why the default is 1, as gorilla/websocket's
+# is. 64 MiB of zeros compressed at level 1, 292,849 bytes, are refused
+# by the decoder at a limit of 1 MiB in 0.13 ms.
+#
+# **What the other end does wrong** fails the connection as §7.1.7 has
+# it: a close frame with the code that names the fault is sent, the
+# socket is closed, and `receive` answers a `WebSocketError` with that
+# code. A frame with RSV2 or RSV3 set, or RSV1 when permessage-deflate
+# was not agreed, on a control frame or on a continuation (§6.1), or a
+# reserved opcode, a client's frame without a mask or a server's with one
+# (§5.1), a control frame that is fragmented or longer than 125 bytes
+# (§5.5), a continuation with no message to continue or a new message
+# before the last one's final frame (§5.4), a 64-bit length with its high
+# bit set (§5.2), a close of one byte or with a code no peer may send
+# (§7.4) are 1002. Text that is not UTF-8 - checked as the fragments
+# arrive, a character split between two of them being whole, and an
+# unfinished one at the end not - and a close reason that is not, are
+# 1007. A message past `max_message` bytes (16 MiB unless the caller says
+# otherwise) is 1009, refused on the length its frame declares, before
+# any of it is read or anything is made to hold it: a frame that claims
+# 2^62 bytes costs the 14 bytes of its head. A connection that fails
+# below the protocol - `SocketError`, `Cancelled`, or the peer gone
+# without a close frame (1006) - is closed too, since a frame read part
+# way leaves nothing after it that can be trusted to be a frame.
+#
+# **What a program does wrong** is a panic, before anything is written:
+# text that is not UTF-8 handed to `send`, a ping past 125 bytes or a
+# close reason past 123, a close code that is not one an endpoint sends
+# (1000 to 1003, 1007 to 1014, 3000 to 4999), a caller's header that is
+# the handshake's own, a protocol name that is not a token.
+#
+# Masks come from `Random::Secure`, four fresh bytes a frame (§5.3 asks
+# that they not be predictable), and are applied, like the UTF-8 check's
+# run over ASCII, eight bytes a time. A message in one frame is read
+# straight into the string `receive` answers; fragments into one buffer
+# that grows as they come and is let go after the message. Measured here
+# (`--release`, one machine, both ends in one process over loopback): 128
+# MiB as eight 16 MiB messages from a client to a server, masked and
+# unmasked, in 70 ms as binary and 85 ms as text.
+#
+# Frames are written whole, one at a time per connection: a task that
+# sends while another receives (whose pongs and close replies are writes
+# too) waits, a millisecond at a time, for the frame being written to
+# finish. The runtime refuses a second write to a socket another task's
+# write is parked on ("two fibers writing one fd"), and a frame let in
+# between would have split the first.
+#
+# Not here: extensions other than permessage-deflate, TLS, and sending a
+# message in fragments. `bench/std_websocket_exercise.sh` runs both
+# halves against each other, against hand-made frames, and against
+# Python and Node peers, compressed and not.
+
+module std/websocket
+
+import std/http::{HTTP, Request, Response, Upgraded, HTTPError, TlsStream}
+import std/socket::{IyiSocket, SocketError}
+import std/digest::{SHA1}
+import std/base64::{Base64}
+import std/random::{Random}
+import std/compress::{Deflater, Inflater, Envelope, CompressError}
+
+# What the other end did that RFC 6455 does not allow, or a handshake
+# that is not one, as a value: `reason` is the sentence, `code` the close
+# code it stands for (1002 a protocol error, 1007 bytes that are not
+# UTF-8, 1009 a message too large, 1006 a connection that ended without
+# a close). `message` says it is WebSocket's.
+pub struct WebSocketError
+  getter reason : String
+  getter code : Int32
+
+  def initialize(@reason : String, @code : Int32 = 1002)
+  end
+
+  def to_s : String
+    "WebSocket: " + @reason
+  end
+end
+
+impl Error for WebSocketError
+  def message : String
+    "WebSocket: " + @reason
+  end
+end
+
+# One whole message: its bytes, and whether it came as text (UTF-8,
+# checked) or binary.
+pub struct Message
+  getter data : String
+
+  def initialize(@data : String, @binary : Bool)
+  end
+
+  def text? : Bool
+    !@binary
+  end
+
+  def binary? : Bool
+    @binary
+  end
+end
+
+# The permessage-deflate (RFC 7692) a handshake agreed to: whether each
+# end starts every message it compresses with an empty window
+# (`*_no_context_takeover`), and how far back each end's matches may
+# reach, as a base-2 logarithm (`*_max_window_bits`, 15 where the answer
+# did not say). `server_` is what the server sends, `client_` what the
+# client sends. `level` is this end's own, not agreed: the DEFLATE level
+# its messages are compressed at, std/compress's 0 (stored) to 9, 1 by
+# default. A window outside 8 to 15, or a level outside 0 to 9, is a
+# panic.
+pub struct PerMessageDeflate
+  getter server_no_context_takeover : Bool
+  getter client_no_context_takeover : Bool
+  getter server_max_window_bits : Int32
+  getter client_max_window_bits : Int32
+  getter level : Int32
+
+  def initialize(@server_no_context_takeover : Bool = false, @client_no_context_takeover : Bool = false, @server_max_window_bits : Int32 = 15, @client_max_window_bits : Int32 = 15, @level : Int32 = 1)
+    [@server_max_window_bits, @client_max_window_bits].each do |bits|
+      raise "WebSocket: a max_window_bits is 8 to 15, not #{bits}" if bits < 8 || bits > 15
+    end
+    raise "WebSocket: a deflate level is 0 to 9, not #{@level}" if @level < 0 || @level > 9
+  end
+end
+
+# One element of a `Sec-WebSocket-Extensions` list: the extension's name,
+# and its parameters in order, nil for one without a value.
+struct Extension
+  getter name : String
+  getter params : Array({String, String?})
+
+  def initialize(@name : String, @params : Array({String, String?}))
+  end
+end
+
+# What one permessage-deflate offer or answer says: a window bits of 0
+# for one not named, and -1 for `client_max_window_bits` named without a
+# value, as an offer may.
+struct DeflateTerms
+  getter server_no_context_takeover : Bool
+  getter client_no_context_takeover : Bool
+  getter server_max_window_bits : Int32
+  getter client_max_window_bits : Int32
+
+  def initialize(@server_no_context_takeover : Bool, @client_no_context_takeover : Bool, @server_max_window_bits : Int32, @client_max_window_bits : Int32)
+  end
+end
+
+# One end of a connection whose handshake is done: what `upgrade` hands
+# its block and `connect` answers. `WebSocket.new(socket, leftover,
+# client)` takes over a socket some other code did the handshake on;
+# *leftover* is what arrived after the handshake's head, read first, and
+# *deflate* the permessage-deflate that handshake agreed to.
+pub class WebSocket
+  OP_CONTINUATION =  0
+  OP_TEXT         =  1
+  OP_BINARY       =  2
+  OP_CLOSE        =  8
+  OP_PING         =  9
+  OP_PONG         = 10
+
+  # §1.3's constant, appended to the key before it is hashed.
+  GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+  # The largest message `receive` takes by default: 16 MiB.
+  MAX_MESSAGE = 16777216
+
+  # How long `close` waits for the peer's close, and a client for the
+  # server to end the connection after it.
+  CLOSE_WAIT_MS = 10000
+
+  # The read buffer's size. A payload past it is read straight into the
+  # string it becomes.
+  ROOM = 16384
+
+  # The most of a message handed to the compressor at once: each piece
+  # ends in a flush, and the compressor's window grows to hold a piece.
+  DEFLATE_SLICE = 262144
+
+  getter protocol : String?
+  # The permessage-deflate agreed; nil for none.
+  getter deflate : PerMessageDeflate?
+  @socket : IyiSocket | TlsStream
+  @client : Bool
+  @max_message : Int32
+  @in : Pointer(UInt8)
+  @in_room : Int32
+  @in_start : Int32
+  @in_stop : Int32
+  # The fragments of a message so far: its bytes, how many, and its
+  # opcode (OP_TEXT or OP_BINARY; 0 between messages).
+  @parts : Pointer(UInt8)
+  @parts_room : Int32
+  @parts_size : Int32
+  @parts_op : Int32
+  # The UTF-8 check's state between a text message's fragments.
+  @utf8 : Int32
+  @sent_close : Bool
+  @close_code : Int32?
+  @close_reason : String
+  @writing : Bool
+  # This end's compressor, made for the first compressed message and
+  # made again for each one when its window is not to carry over; the
+  # peer's decoder the same way.
+  @deflater : Deflater?
+  @inflater : Inflater?
+  # Whether the message being reassembled came compressed (RSV1 on its
+  # first frame): its fragments are then compressed bytes.
+  @parts_compressed : Bool
+
+  def initialize(@socket : IyiSocket | TlsStream, leftover : String, @client : Bool, @protocol : String? = nil, @max_message : Int32 = MAX_MESSAGE, @deflate : PerMessageDeflate? = nil)
+    raise "WebSocket: max_message is a count of bytes, not #{@max_message}" if @max_message < 0
+    @in_room = leftover.bytesize > ROOM ? leftover.bytesize : ROOM
+    @in = Pointer(UInt8).malloc(@in_room.to_u64)
+    @in.copy_from(leftover.to_unsafe, leftover.bytesize)
+    @in_start = 0
+    @in_stop = leftover.bytesize
+    @parts = Pointer(UInt8).malloc(16_u64)
+    @parts_room = 0
+    @parts_size = 0
+    @parts_op = 0
+    @parts_compressed = false
+    @utf8 = 0
+    @sent_close = false
+    @close_code = nil
+    @close_reason = ""
+    @writing = false
+    @deflater = nil
+    @inflater = nil
+  end
+
+  # The server's half of the handshake, answering *req*: a 101 whose
+  # block is handed the connection, or the 400 or 426 that says why the
+  # request is not a handshake this server takes. *protocols* are the
+  # subprotocols the server speaks, in its order of preference. With
+  # *deflate* the first permessage-deflate offer this end can keep is
+  # accepted, and messages are compressed at *deflate_level*.
+  def self.upgrade(req : Request, protocols : Array(String) = [] of String, max_message : Int32 = MAX_MESSAGE, deflate : Bool = true, deflate_level : Int32 = 1, &handler : WebSocket -> Nil) : Response
+    raise "WebSocket: a deflate level is 0 to 9, not #{deflate_level}" if deflate_level < 0 || deflate_level > 9
+    protocols.each do |name|
+      raise "WebSocket: protocol #{name.inspect} is not a token" unless HTTP.token?(name)
+    end
+    if refused = WebSocket.refusal(req)
+      return refused
+    end
+    key = HTTP.trim(req.header("Sec-WebSocket-Key") || "")
+    chosen = nil.as(String?)
+    if offered = req.header("Sec-WebSocket-Protocol")
+      names = offered.split(',').map { |part| HTTP.trim(part) }
+      protocols.each do |name|
+        chosen = name if chosen.nil? && names.includes?(name)
+      end
+    end
+    agreed = nil.as(PerMessageDeflate?)
+    answer = ""
+    if deflate && (extensions = req.header("Sec-WebSocket-Extensions"))
+      list = WebSocket.extensions(extensions)
+      return Response.new(400, "Sec-WebSocket-Extensions is not a list of extensions: #{list}\n") if list.is_a?(String)
+      list.each do |offer|
+        next unless agreed.nil? && HTTP.same_name?(offer.name, "permessage-deflate")
+        # An offer this end cannot keep is declined (RFC 7692 §7), and
+        # the next one is looked at.
+        terms = WebSocket.deflate_terms(offer.params, false)
+        next if terms.is_a?(String)
+        bits = terms.server_max_window_bits
+        agreed = PerMessageDeflate.new(terms.server_no_context_takeover, terms.client_no_context_takeover, bits > 0 ? bits : 15, 15, deflate_level)
+        answer = "permessage-deflate"
+        answer = answer + "; server_no_context_takeover" if terms.server_no_context_takeover
+        answer = answer + "; client_no_context_takeover" if terms.client_no_context_takeover
+        answer = answer + "; server_max_window_bits=#{bits}" if bits > 0
+      end
+    end
+    headers = {"Upgrade" => "websocket", "Connection" => "Upgrade", "Sec-WebSocket-Accept" => WebSocket.accept(key)}
+    if name = chosen
+      headers["Sec-WebSocket-Protocol"] = name
+    end
+    headers["Sec-WebSocket-Extensions"] = answer unless answer.empty?
+    Response.upgrade(headers) do |socket, leftover|
+      ws = WebSocket.new(socket, leftover, false, chosen, max_message, agreed)
+      handler.call(ws)
+      ws.close unless ws.closed?
+      nil
+    end
+  end
+
+  # *value* as a list of extensions (RFC 6455 §9.1): each a token, with
+  # parameters after `;`, a parameter's value a token or a quoted string
+  # that is one once unescaped. Why it is not one, otherwise.
+  protected def self.extensions(value : String) : Array(Extension) | String
+    p = value.to_unsafe
+    n = value.bytesize
+    k = 0
+    while k < n
+      return "a byte that is not text" if p[k] >= 127_u8 || (p[k] < 32_u8 && p[k] != 9_u8)
+      k = k + 1
+    end
+    list = [] of Extension
+    i = 0
+    while true
+      i = WebSocket.blanks(p, n, i)
+      break if i >= n
+      if p[i] == 44_u8
+        # An empty element of the list (RFC 9110 §5.6.1).
+        i = i + 1
+        next
+      end
+      stop = WebSocket.word(p, n, i)
+      name = value[i, stop - i]
+      return "an extension's name #{name.inspect} is not a token" unless HTTP.token?(name)
+      i = stop
+      params = [] of {String, String?}
+      while true
+        i = WebSocket.blanks(p, n, i)
+        break if i >= n || p[i] == 44_u8
+        return "#{value[i, 1].inspect} after #{name}, where a ; or a , goes" unless p[i] == 59_u8
+        i = WebSocket.blanks(p, n, i + 1)
+        stop = WebSocket.word(p, n, i)
+        param = value[i, stop - i]
+        return "a parameter of #{name}, #{param.inspect}, is not a token" unless HTTP.token?(param)
+        i = WebSocket.blanks(p, n, stop)
+        given = nil.as(String?)
+        if i < n && p[i] == 61_u8
+          i = WebSocket.blanks(p, n, i + 1)
+          text = ""
+          if i < n && p[i] == 34_u8
+            # A quoted string, its backslashes taken off (RFC 9110 §5.6.4).
+            i = i + 1
+            closed = false
+            while i < n
+              if p[i] == 34_u8
+                closed = true
+                i = i + 1
+                break
+              end
+              i = i + 1 if p[i] == 92_u8 && i + 1 < n
+              text = text + value[i, 1]
+              i = i + 1
+            end
+            return "the quoted value of #{param} is not closed" unless closed
+          else
+            stop = WebSocket.word(p, n, i)
+            text = value[i, stop - i]
+            i = stop
+          end
+          return "the value of #{param}, #{text.inspect}, is not a token" unless HTTP.token?(text)
+          given = text
+        end
+        params << {param, given}
+      end
+      list << Extension.new(name, params)
+      # Past the comma.
+      i = i + 1
+    end
+    list
+  end
+
+  # Past the spaces and tabs from *i*.
+  protected def self.blanks(p : Pointer(UInt8), n : Int32, i : Int32) : Int32
+    while i < n && (p[i] == 32_u8 || p[i] == 9_u8)
+      i = i + 1
+    end
+    i
+  end
+
+  # The end of the word from *i*: up to a blank or one of `,;="`.
+  protected def self.word(p : Pointer(UInt8), n : Int32, i : Int32) : Int32
+    while i < n
+      c = p[i]
+      break if c == 32_u8 || c == 9_u8 || c == 44_u8 || c == 59_u8 || c == 61_u8 || c == 34_u8
+      i = i + 1
+    end
+    i
+  end
+
+  # What a permessage-deflate offer's or answer's *params* say (RFC 7692
+  # §7.1), or why they are not what one may say: each of the four at most
+  # once, the two `no_context_takeover`s without a value, the two
+  # `max_window_bits` with 8 to 15 in decimal - and `client_max_window_bits`
+  # without one in an offer, as a client says it can be held to one.
+  protected def self.deflate_terms(params : Array({String, String?}), answer : Bool) : DeflateTerms | String
+    server_reset = false
+    client_reset = false
+    server_bits = 0
+    client_bits = 0
+    seen = [] of String
+    params.each do |param|
+      name = param[0].downcase
+      given = param[1]
+      return "#{param[0]} is named twice" if seen.includes?(name)
+      seen << name
+      if name == "server_no_context_takeover" || name == "client_no_context_takeover"
+        if given
+          return "#{param[0]} takes no value, and was given #{given.inspect}"
+        end
+        if name == "server_no_context_takeover"
+          server_reset = true
+        else
+          client_reset = true
+        end
+      elsif name == "server_max_window_bits" || name == "client_max_window_bits"
+        bits = -1
+        if given
+          bits = WebSocket.window_bits(given)
+          return "#{param[0]}=#{given} is not 8 to 15" if bits == 0
+        elsif answer || name == "server_max_window_bits"
+          return "#{param[0]} has no value"
+        end
+        if name == "server_max_window_bits"
+          server_bits = bits
+        else
+          client_bits = bits
+        end
+      else
+        return "#{param[0]} is not a parameter of permessage-deflate"
+      end
+    end
+    DeflateTerms.new(server_reset, client_reset, server_bits, client_bits)
+  end
+
+  # 8 to 15 for those numbers written in decimal, without a leading zero;
+  # 0 for anything else.
+  protected def self.window_bits(value : String) : Int32
+    bits = 8
+    while bits <= 15
+      return bits if value == bits.to_s
+      bits = bits + 1
+    end
+    0
+  end
+
+  # Why *req* is not a handshake this server answers 101, as the answer;
+  # nil when it is one.
+  protected def self.refusal(req : Request) : Response?
+    return Response.new(400, "a WebSocket handshake is a GET, not #{req.method}\n") unless req.method == "GET"
+    return Response.new(400, "a WebSocket handshake is HTTP/1.1, not #{req.version}\n") unless req.version == "HTTP/1.1"
+    upgrade = req.header("Upgrade")
+    return Response.new(400, "Upgrade does not name websocket\n") unless upgrade && HTTP.has_token?(upgrade, "websocket")
+    connection = req.header("Connection")
+    return Response.new(400, "Connection does not hold upgrade\n") unless connection && HTTP.has_token?(connection, "upgrade")
+    version = req.header("Sec-WebSocket-Version")
+    return Response.new(400, "no Sec-WebSocket-Version\n") unless version
+    unless HTTP.trim(version) == "13"
+      return Response.new(426, "Sec-WebSocket-Version #{version} is not 13\n", {"Sec-WebSocket-Version" => "13"})
+    end
+    key = req.header("Sec-WebSocket-Key")
+    return Response.new(400, "no Sec-WebSocket-Key\n") unless key
+    return Response.new(400, "Sec-WebSocket-Key is not 16 bytes in base64\n") unless WebSocket.key?(HTTP.trim(key))
+    nil
+  end
+
+  # Whether *key* is what §4.1 has a client send: 16 bytes in base64,
+  # which is 22 characters of the alphabet and `==`.
+  protected def self.key?(key : String) : Bool
+    return false unless key.bytesize == 24
+    p = key.to_unsafe
+    return false unless p[22] == 61_u8 && p[23] == 61_u8
+    i = 0
+    while i < 22
+      c = p[i]
+      letter = (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8)
+      digit = c >= 48_u8 && c <= 57_u8
+      return false unless letter || digit || c == 43_u8 || c == 47_u8
+      i = i + 1
+    end
+    true
+  end
+
+  # The `Sec-WebSocket-Accept` that answers *key* (§4.2.2): the base64 of
+  # the SHA-1 of the key and the GUID.
+  def self.accept(key : String) : String
+    hash = SHA1.new.update(key).update(GUID).final
+    Base64.encode(String.new(20) { |dst| dst.copy_from(hash.to_unsafe, 20) })
+  end
+
+  # The client's half: the handshake to a `ws://` URL, and the connection
+  # it opens. *headers* go with the request (an `Origin`, a cookie); the
+  # handshake's own are refused. *protocols* are offered in their order.
+  # *proxy* is `HTTP.upgrade`'s: an `http://` proxy's URL, through whose
+  # CONNECT tunnel the handshake goes, `ws://` and `wss://` alike; the
+  # environment's is `HTTPProxy.from_env` of the URL with `http` for `ws`
+  # and `https` for `wss`, the schemes whose variables it reads. With
+  # *deflate* permessage-deflate is offered, and messages are compressed
+  # at *deflate_level*.
+  def self.connect(url : String, headers : Hash(String, String) = {} of String => String, protocols : Array(String) = [] of String, max_message : Int32 = MAX_MESSAGE, proxy : String? = nil, deflate : Bool = true, deflate_level : Int32 = 1) : WebSocket | Cancelled | SocketError | HTTPError | WebSocketError
+    raise "WebSocket: a deflate level is 0 to 9, not #{deflate_level}" if deflate_level < 0 || deflate_level > 9
+    headers.each do |name, _|
+      ["Upgrade", "Connection", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"].each do |own|
+        raise "WebSocket: #{name} is the handshake's own header" if HTTP.same_name?(name, own)
+      end
+    end
+    protocols.each do |name|
+      raise "WebSocket: protocol #{name.inspect} is not a token" unless HTTP.token?(name)
+    end
+    colon = url.index(':')
+    scheme = colon ? url[0, colon].downcase : ""
+    return WebSocketError.new("not a ws:// or wss:// URL: #{url.inspect}") unless (scheme == "ws" || scheme == "wss") && colon
+    target = (scheme == "wss" ? "https" : "http") + url[colon, url.bytesize - colon]
+    nonce = Pointer(UInt8).malloc(16_u64)
+    Random::Secure.fill(nonce, 16)
+    key = Base64.encode(String.new(16) { |dst| dst.copy_from(nonce, 16) })
+    sent = headers.dup
+    sent["Sec-WebSocket-Key"] = key
+    sent["Sec-WebSocket-Version"] = "13"
+    sent["Sec-WebSocket-Protocol"] = protocols.join(", ") unless protocols.empty?
+    # `client_max_window_bits` says the server may hold this end to a
+    # smaller window, which the compressor keeps to.
+    sent["Sec-WebSocket-Extensions"] = "permessage-deflate; client_max_window_bits" if deflate
+    up = HTTP.upgrade(target, "websocket", sent, proxy: proxy)!
+    agreed = WebSocket.agreed(up, key, protocols)
+    if agreed.is_a?(WebSocketError)
+      up.socket.close
+      return agreed
+    end
+    terms = WebSocket.answered(up.response.header("Sec-WebSocket-Extensions"), deflate, deflate_level)
+    if terms.is_a?(WebSocketError)
+      up.socket.close
+      return terms
+    end
+    WebSocket.new(up.socket, up.leftover, true, agreed, max_message, terms)
+  end
+
+  # The protocol a server's 101 agreed to (nil for none), or why the
+  # answer is not one to the handshake *key* offering *protocols* (§4.1).
+  protected def self.agreed(up : Upgraded, key : String, protocols : Array(String)) : String | Nil | WebSocketError
+    answer = up.response
+    upgrade = answer.header("Upgrade")
+    return WebSocketError.new("the server's 101 does not upgrade to websocket") unless upgrade && HTTP.has_token?(upgrade, "websocket")
+    connection = answer.header("Connection")
+    return WebSocketError.new("the server's 101 has no Connection: Upgrade") unless connection && HTTP.has_token?(connection, "upgrade")
+    accepted = answer.header("Sec-WebSocket-Accept")
+    return WebSocketError.new("the server's 101 has no Sec-WebSocket-Accept") unless accepted
+    return WebSocketError.new("the server's Sec-WebSocket-Accept #{accepted.inspect} does not answer the key sent") unless HTTP.trim(accepted) == accept(key)
+    if named = answer.header("Sec-WebSocket-Protocol")
+      name = HTTP.trim(named)
+      return WebSocketError.new("the server chose protocol #{name.inspect}, which was not offered") unless protocols.includes?(name)
+      return name
+    end
+    nil
+  end
+
+  # The permessage-deflate a server's `Sec-WebSocket-Extensions`
+  # (*value*) agreed to, nil for none, or why it is not an answer to an
+  # offer of `permessage-deflate; client_max_window_bits` - or, without
+  # *offered*, to no offer (RFC 7692 §5, §7). This end compresses at
+  # *level*.
+  protected def self.answered(value : String?, offered : Bool, level : Int32) : PerMessageDeflate | Nil | WebSocketError
+    return nil unless value
+    return WebSocketError.new("the server agreed to extensions #{value.inspect}, and none were offered") unless offered
+    list = WebSocket.extensions(value)
+    return WebSocketError.new("the server's Sec-WebSocket-Extensions #{value.inspect} is not a list of extensions: #{list}") if list.is_a?(String)
+    found = nil.as(PerMessageDeflate?)
+    list.each do |extension|
+      return WebSocketError.new("the server agreed to extension #{extension.name.inspect}, which was not offered") unless HTTP.same_name?(extension.name, "permessage-deflate")
+      return WebSocketError.new("the server agreed to permessage-deflate twice") if found
+      terms = WebSocket.deflate_terms(extension.params, true)
+      return WebSocketError.new("the server's permessage-deflate: #{terms}") if terms.is_a?(String)
+      server_bits = terms.server_max_window_bits
+      client_bits = terms.client_max_window_bits
+      found = PerMessageDeflate.new(terms.server_no_context_takeover, terms.client_no_context_takeover, server_bits > 0 ? server_bits : 15, client_bits > 0 ? client_bits : 15, level)
+    end
+    found
+  end
+
+  # Whether the connection is closed: after the close handshake, after a
+  # failure, and after `close`.
+  def closed? : Bool
+    @socket.closed?
+  end
+
+  # The code the connection closed with: the peer's close's (1005 when it
+  # had none), the one this end failed it with, or 1006 when it ended
+  # without a close. Nil while it is open.
+  def close_code : Int32?
+    @close_code
+  end
+
+  # The reason the peer's close carried; "" for none.
+  def close_reason : String
+    @close_reason
+  end
+
+  # *text* as one text message. It must be UTF-8.
+  def send(text : String) : Nil | Cancelled | SocketError | WebSocketError
+    raise "WebSocket: send's text is not UTF-8; send_binary sends bytes" unless WebSocket.utf8_scan(text.to_unsafe, text.bytesize, 0) == 0
+    write_frame(OP_TEXT, text)
+  end
+
+  # *data* as one binary message.
+  def send_binary(data : String) : Nil | Cancelled | SocketError | WebSocketError
+    write_frame(OP_BINARY, data)
+  end
+
+  # A ping, which the peer answers with a pong `receive` reads past.
+  def ping(data : String = "") : Nil | Cancelled | SocketError | WebSocketError
+    raise "WebSocket: a ping carries at most 125 bytes, not #{data.bytesize}" if data.bytesize > 125
+    write_frame(OP_PING, data)
+  end
+
+  # The next whole message, or nil when the connection is closed: the
+  # close handshake is done, or the connection was already closed.
+  def receive : Message | Nil | Cancelled | SocketError | WebSocketError
+    return nil if @socket.closed?
+    while true
+      got = read_frame
+      case got
+      in Message
+        return got
+      in Bool
+        return nil unless got
+      in Cancelled
+        abandon
+        return got
+      in SocketError
+        abandon
+        return got
+      in WebSocketError
+        return got
+      end
+    end
+    nil
+  end
+
+  # The close handshake from this end: a close with *code* and *reason*,
+  # then the peer's, read past whatever messages it sent first, for up
+  # to ten seconds. Nil once it is done, or when the connection was
+  # already closed.
+  def close(code : Int32 = 1000, reason : String = "") : Nil | Cancelled | SocketError | WebSocketError
+    raise "WebSocket: close code #{code} is not one an endpoint sends: 1000-1003, 1007-1014 or 3000-4999" unless WebSocket.close_code?(code)
+    raise "WebSocket: a close reason is at most 123 bytes, not #{reason.bytesize}" if reason.bytesize > 123
+    raise "WebSocket: the close reason is not UTF-8" unless WebSocket.utf8_scan(reason.to_unsafe, reason.bytesize, 0) == 0
+    return nil if @socket.closed?
+    unless @sent_close
+      @sent_close = true
+      wrote = write_frame(OP_CLOSE, WebSocket.close_payload(code, reason))
+      unless wrote.nil?
+        abandon
+        return wrote
+      end
+    end
+    @socket.read_timeout_ms = CLOSE_WAIT_MS
+    while true
+      got = read_frame
+      case got
+      in Message
+        next
+      in Bool
+        return nil unless got
+      in Cancelled
+        abandon
+        return got
+      in SocketError
+        abandon
+        return got
+      in WebSocketError
+        return got
+      end
+    end
+    nil
+  end
+
+  # Whether *code* is one a close frame may carry (§7.4): 1000 to 1003,
+  # 1007 to 1014 (1012 to 1014 as IANA's registry added them), and the
+  # ranges for libraries and applications. 1004 is reserved, and 1005,
+  # 1006 and 1015 are the codes an endpoint reports, never sends.
+  def self.close_code?(code : Int32) : Bool
+    (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999)
+  end
+
+  protected def self.close_payload(code : Int32, reason : String) : String
+    String.new(2 + reason.bytesize) do |dst|
+      dst[0] = (code >> 8).to_u8
+      dst[1] = (code & 255).to_u8
+      (dst + 2).copy_from(reason.to_unsafe, reason.bytesize)
+    end
+  end
+
+  # One frame of *data*, written whole: masked from a client, bare from a
+  # server (§5.1, §5.3), a text or binary compressed when permessage-
+  # deflate was agreed. Another task's frame being written is waited for.
+  private def write_frame(opcode : Int32, data : String) : Nil | Cancelled | SocketError | WebSocketError
+    return WebSocketError.new("the connection is closed", @close_code || 1006) if @socket.closed?
+    return WebSocketError.new("the connection is closing; a close has been sent", 1000) if @sent_close && opcode != OP_CLOSE
+    while @writing
+      sleep(1)!
+    end
+    @writing = true
+    # Compressed in this task's turn to write, so that the messages go
+    # out in the order the compressor's window took them in.
+    compressed = !@deflate.nil? && (opcode == OP_TEXT || opcode == OP_BINARY)
+    payload = compressed ? compress(data) : data
+    n = payload.bytesize
+    extra = n < 126 ? 0 : (n < 65536 ? 2 : 8)
+    head = 2 + extra + (@client ? 4 : 0)
+    if n > 2147483647 - head
+      @writing = false
+      raise "WebSocket: a message of #{n} bytes and its frame's head are past the 2147483647 bytes a string holds"
+    end
+    masked = @client ? 128 : 0
+    frame = String.new(head + n) do |dst|
+      # RSV1 on a compressed message's frame (RFC 7692 §6).
+      dst[0] = (128 | (compressed ? 64 : 0) | opcode).to_u8
+      if extra == 0
+        dst[1] = (masked | n).to_u8
+      elsif extra == 2
+        dst[1] = (masked | 126).to_u8
+        dst[2] = (n >> 8).to_u8
+        dst[3] = (n & 255).to_u8
+      else
+        dst[1] = (masked | 127).to_u8
+        dst[2] = 0_u8
+        dst[3] = 0_u8
+        dst[4] = 0_u8
+        dst[5] = 0_u8
+        dst[6] = (n >> 24).to_u8
+        dst[7] = ((n >> 16) & 255).to_u8
+        dst[8] = ((n >> 8) & 255).to_u8
+        dst[9] = (n & 255).to_u8
+      end
+      (dst + head).copy_from(payload.to_unsafe, n)
+      if @client
+        key = 0_u32
+        Random::Secure.fill(pointerof(key).as(UInt8*), 4)
+        (dst + (head - 4)).as(UInt32*).value = key
+        WebSocket.mask(dst + head, n, key)
+      end
+    end
+    wrote = @socket.write(frame)
+    @writing = false
+    return wrote unless wrote.is_a?(Int32)
+    nil
+  end
+
+  # *data* as a compressed message's payload (RFC 7692 §7.2.1): DEFLATE
+  # blocks ending in a sync flush, less the flush's last four bytes. The
+  # compressor is made again for each message when this end's
+  # `no_context_takeover` was agreed, and holds its matches to this end's
+  # `max_window_bits`.
+  private def compress(data : String) : String
+    terms = @deflate
+    # The empty message: the empty stored block's three bits, padded
+    # (§7.2.3.6).
+    return String.new(1) { |dst| dst[0] = 0_u8 } if terms.nil? || data.bytesize == 0
+    fresh = @client ? terms.client_no_context_takeover : terms.server_no_context_takeover
+    deflater = @deflater
+    if deflater.nil? || fresh
+      deflater = Deflater.new(Envelope::Raw, terms.level, @client ? terms.client_max_window_bits : terms.server_max_window_bits)
+      @deflater = deflater
+    end
+    pieces = [] of String
+    size = 0
+    at = 0
+    src = data.to_unsafe
+    while at < data.bytesize
+      k = data.bytesize - at
+      k = DEFLATE_SLICE if k > DEFLATE_SLICE
+      slice = k == data.bytesize ? data : String.new(k) { |dst| dst.copy_from(src + at, k) }
+      piece = deflater.compress(slice)
+      pieces << piece
+      size = size + piece.bytesize
+      at = at + k
+    end
+    # Every piece ends in 00 00 ff ff; the last one's is left off.
+    size = size - 4
+    String.new(size) do |dst|
+      done = 0
+      pieces.each do |piece|
+        k = piece.bytesize
+        k = size - done if k > size - done
+        (dst + done).copy_from(piece.to_unsafe, k)
+        done = done + k
+      end
+    end
+  end
+
+  # *count* bytes at *p* XORed with *key*'s four bytes in turn, from the
+  # first (§5.3): eight bytes a time, then one.
+  protected def self.mask(p : Pointer(UInt8), count : Int32, key : UInt32) : Nil
+    return if key == 0_u32
+    # The key's bytes twice over, in memory order either way round.
+    word = key.to_u64 | key.to_u64.unsafe_shl(32)
+    i = 0
+    while i + 8 <= count
+      (p + i).as(UInt64*).value = (p + i).as(UInt64*).value ^ word
+      i = i + 8
+    end
+    k32 = key
+    k = pointerof(k32).as(UInt8*)
+    while i < count
+      p[i] = p[i] ^ k[i & 3]
+      i = i + 1
+    end
+  end
+
+  # The UTF-8 check's state after the *count* bytes at *p*, from *state*:
+  # 0 between characters; the continuation bytes still owed and the range
+  # the next must fall in (§3 of RFC 3629: no overlong forms, no
+  # surrogates, nothing past U+10FFFF) packed into one number otherwise;
+  # -1 once a byte is wrong. A text message is whole when it ends at 0.
+  protected def self.utf8_scan(p : Pointer(UInt8), count : Int32, state : Int32) : Int32
+    return -1 if state < 0
+    need = state & 255
+    low = (state >> 8) & 255
+    high = state >> 16
+    i = 0
+    while i < count
+      if need == 0
+        # Eight ASCII bytes a time between characters.
+        while i + 8 <= count && ((p + i).as(UInt64*).value & 0x8080808080808080_u64) == 0_u64
+          i = i + 8
+        end
+        break if i >= count
+        b = p[i].to_i32
+        i = i + 1
+        if b < 0x80
+          next
+        elsif b >= 0xC2 && b <= 0xDF
+          need = 1
+          low = 0x80
+          high = 0xBF
+        elsif b == 0xE0
+          need = 2
+          low = 0xA0
+          high = 0xBF
+        elsif b == 0xED
+          need = 2
+          low = 0x80
+          high = 0x9F
+        elsif b >= 0xE1 && b <= 0xEF
+          need = 2
+          low = 0x80
+          high = 0xBF
+        elsif b == 0xF0
+          need = 3
+          low = 0x90
+          high = 0xBF
+        elsif b >= 0xF1 && b <= 0xF3
+          need = 3
+          low = 0x80
+          high = 0xBF
+        elsif b == 0xF4
+          need = 3
+          low = 0x80
+          high = 0x8F
+        else
+          return -1
+        end
+      else
+        b = p[i].to_i32
+        i = i + 1
+        return -1 if b < low || b > high
+        need = need - 1
+        low = 0x80
+        high = 0xBF
+      end
+    end
+    need == 0 ? 0 : need | (low << 8) | (high << 16)
+  end
+
+  # The next frame, handled: a whole message; true for a frame that is
+  # part of one, a ping answered or a pong; false for the close that ends
+  # the connection. A fault fails the connection and is answered.
+  private def read_frame : Message | Bool | Cancelled | SocketError | WebSocketError
+    want(2)!
+    b0 = @in[@in_start].to_i32
+    b1 = @in[@in_start + 1].to_i32
+    fin = (b0 & 128) != 0
+    opcode = b0 & 15
+    masked = (b1 & 128) != 0
+    short = b1 & 127
+    # RSV1 is permessage-deflate's, once that is agreed (RFC 7692 §6).
+    rsv1 = (b0 & 64) != 0
+    return fail(1002, "reserved bits set in a frame, and no extension was agreed that uses them") if (b0 & 112) != 0 && ((b0 & 48) != 0 || @deflate.nil?)
+    unless opcode <= OP_BINARY || (opcode >= OP_CLOSE && opcode <= OP_PONG)
+      return fail(1002, "opcode #{opcode} is reserved")
+    end
+    if @client
+      return fail(1002, "a server's frame is masked") if masked
+    else
+      return fail(1002, "a client's frame is not masked") unless masked
+    end
+    control = opcode >= OP_CLOSE
+    if control
+      return fail(1002, "a control frame is fragmented") unless fin
+      return fail(1002, "a control frame claims more than 125 bytes") if short > 125
+      return fail(1002, "RSV1 set on a control frame; permessage-deflate compresses messages alone") if rsv1
+    end
+    extra = short == 126 ? 2 : (short == 127 ? 8 : 0)
+    head = 2 + extra + (masked ? 4 : 0)
+    want(head)!
+    p = @in + @in_start
+    length = short.to_u64
+    if short == 126
+      length = (p[2].to_u64 << 8) | p[3].to_u64
+    elsif short == 127
+      return fail(1002, "a 64-bit length with its high bit set") if (p[2] & 128_u8) != 0_u8
+      length = 0_u64
+      j = 2
+      while j < 10
+        length = length.unsafe_shl(8) | p[j].to_u64
+        j = j + 1
+      end
+    end
+    key = masked ? (p + (head - 4)).as(UInt32*).value : 0_u32
+    @in_start = @in_start + head
+    return control_frame(opcode, length.to_i32, key) if control
+    if opcode == OP_CONTINUATION
+      return fail(1002, "a continuation frame with no message to continue") if @parts_op == 0
+      return fail(1002, "RSV1 set on a continuation frame; it marks a compressed message on its first frame alone") if rsv1
+    else
+      return fail(1002, "a new message before the last one's final frame") if @parts_op != 0
+    end
+    kind = opcode == OP_CONTINUATION ? @parts_op : opcode
+    compressed = opcode == OP_CONTINUATION ? @parts_compressed : rsv1
+    total = @parts_size.to_u64 + length
+    # Refused on the length the frame declares, before a byte of it is
+    # read or anything is made to hold it. A compressed message's bytes
+    # are held to the limit as they come, and again as they inflate.
+    return fail(1009, "a message past the #{@max_message} bytes this end takes") if total > @max_message.to_u64
+    n = length.to_i32
+    if opcode != OP_CONTINUATION && fin
+      # A message in one frame, read straight into the string it is.
+      failed = nil.as(Cancelled | SocketError | WebSocketError | Nil)
+      data = String.new(n) { |dst| failed = take_into(dst, n, key) }
+      if fault = failed
+        return fault
+      end
+      if compressed
+        got = inflated(data)
+        return got if got.is_a?(WebSocketError)
+        data = got
+      end
+      if kind == OP_TEXT && WebSocket.utf8_scan(data.to_unsafe, data.bytesize, 0) != 0
+        return fail(1007, "a text message that is not UTF-8")
+      end
+      return Message.new(data, kind == OP_BINARY)
+    end
+    make_room(total.to_i32)
+    take_into(@parts + @parts_size, n, key)!
+    # A compressed message's text is checked once it is inflated.
+    if kind == OP_TEXT && !compressed
+      @utf8 = WebSocket.utf8_scan(@parts + @parts_size, n, @utf8)
+      return fail(1007, "a text message that is not UTF-8") if @utf8 < 0
+    end
+    @parts_size = total.to_i32
+    @parts_op = kind
+    @parts_compressed = compressed
+    return true unless fin
+    return fail(1007, "a text message that ends inside a character") if kind == OP_TEXT && @utf8 != 0
+    size = @parts_size
+    parts = @parts
+    data = String.new(size) { |dst| dst.copy_from(parts, size) }
+    # The room a large message took is not kept past it.
+    @parts = Pointer(UInt8).malloc(16_u64)
+    @parts_room = 0
+    @parts_size = 0
+    @parts_op = 0
+    @parts_compressed = false
+    @utf8 = 0
+    if compressed
+      got = inflated(data)
+      return got if got.is_a?(WebSocketError)
+      data = got
+      return fail(1007, "a text message that is not UTF-8") if kind == OP_TEXT && WebSocket.utf8_scan(data.to_unsafe, data.bytesize, 0) != 0
+    end
+    Message.new(data, kind == OP_BINARY)
+  end
+
+  # A compressed message's payload (*wire*) inflated (RFC 7692 §7.2.2):
+  # 00 00 ff ff put back, and the whole decoded, in the window the
+  # messages before it left unless the peer's `no_context_takeover` was
+  # agreed. Past `max_message` as it inflates is 1009, and bytes that do
+  # not inflate 1007.
+  private def inflated(wire : String) : String | WebSocketError
+    terms = @deflate
+    # No bytes at all, which no DEFLATE writer ends a message with, is
+    # taken as no message bytes rather than read as a block.
+    return "" if terms.nil? || wire.bytesize == 0
+    fresh = @client ? terms.server_no_context_takeover : terms.client_no_context_takeover
+    inflater = @inflater
+    if inflater.nil? || fresh
+      inflater = Inflater.flushed
+      @inflater = inflater
+    end
+    tailed = String.new(wire.bytesize + 4) do |dst|
+      dst.copy_from(wire.to_unsafe, wire.bytesize)
+      dst[wire.bytesize] = 0_u8
+      dst[wire.bytesize + 1] = 0_u8
+      dst[wire.bytesize + 2] = 255_u8
+      dst[wire.bytesize + 3] = 255_u8
+    end
+    got = inflater.inflate(tailed, @max_message)
+    case got
+    in String
+      got
+    in Nil
+      fail(1009, "a compressed message that inflates past the #{@max_message} bytes this end takes")
+    in CompressError
+      fail(1007, "a compressed message that does not inflate: #{got.message}")
+    end
+  end
+
+  # Room in the fragments for *total* bytes, which is within the limit.
+  private def make_room(total : Int32) : Nil
+    return if total <= @parts_room
+    room = @parts_room.to_i64 * 2
+    room = total.to_i64 if room < total.to_i64
+    room = @max_message.to_i64 if room > @max_message.to_i64
+    if @parts_room == 0
+      @parts = Pointer(UInt8).malloc(room.to_u64)
+    else
+      @parts = @parts.realloc(room.to_u64)
+    end
+    @parts_room = room.to_i32
+  end
+
+  # A ping, pong or close of *count* bytes, which are 125 at most.
+  private def control_frame(opcode : Int32, count : Int32, key : UInt32) : Bool | Cancelled | SocketError | WebSocketError
+    want(count)!
+    start = @in + @in_start
+    payload = String.new(count) { |dst| dst.copy_from(start, count) }
+    @in_start = @in_start + count
+    WebSocket.mask(payload.to_unsafe, count, key)
+    if opcode == OP_PING
+      write_frame(OP_PONG, payload)! unless @sent_close
+      return true
+    end
+    return true if opcode == OP_PONG
+    code = 1005
+    reason = ""
+    return fail(1002, "a close frame of one byte; a code is two") if count == 1
+    if count >= 2
+      code = (payload.to_unsafe[0].to_i32 << 8) | payload.to_unsafe[1].to_i32
+      return fail(1002, "close code #{code} is not one a peer sends") unless WebSocket.close_code?(code)
+      reason = payload[2, count - 2]
+      return fail(1007, "a close reason that is not UTF-8") unless WebSocket.utf8_scan(reason.to_unsafe, reason.bytesize, 0) == 0
+    end
+    @close_code = code
+    @close_reason = reason
+    unless @sent_close
+      # Its code echoed (§5.5.1), and nothing more.
+      @sent_close = true
+      write_frame(OP_CLOSE, count >= 2 ? payload[0, 2] : "")
+    end
+    finish
+    false
+  end
+
+  # The end of the connection after the close handshake: a server closes
+  # it at once (§7.1.1); a client waits for the server to, so that the
+  # wait in TIME_WAIT is the server's, and closes it itself after
+  # CLOSE_WAIT_MS.
+  private def finish : Nil
+    linger(@client ? CLOSE_WAIT_MS : 0)
+    @socket.close
+  end
+
+  # Reads, and drops, until the peer closes, a read fails, or nothing
+  # comes for *ms*: a socket closed with unread bytes in it is reset
+  # rather than ended, and the reset can overtake the close frame written
+  # just before it, which the peer then never reads. With 0 only what has
+  # already arrived is read. A megabyte at most.
+  private def linger(ms : Int32) : Nil
+    return if @socket.closed?
+    @socket.read_timeout_ms = ms
+    drained = 0
+    while drained < 1048576
+      got = @socket.read(@in, @in_room)
+      return unless got.is_a?(Int32) && got > 0
+      drained = drained + got
+    end
+  end
+
+  # Fails the connection (§7.1.7): a close with *code* if none has been
+  # sent, and the socket closed. A client waits for the server to end the
+  # connection first, as a server answers a close by doing; a server
+  # reads past what has arrived and closes at once, since a client waits
+  # for the server to close and both would wait out CLOSE_WAIT_MS. The
+  # error says why.
+  private def fail(code : Int32, reason : String) : WebSocketError
+    unless @sent_close || @socket.closed?
+      @sent_close = true
+      wrote = write_frame(OP_CLOSE, WebSocket.close_payload(code, reason.bytesize <= 123 ? reason : ""))
+      linger(@client ? CLOSE_WAIT_MS : 0) if wrote.nil?
+    end
+    @close_code = code if @close_code.nil?
+    @socket.close
+    WebSocketError.new(reason, code)
+  end
+
+  # The connection given up on below the protocol: closed, 1006.
+  private def abandon : Nil
+    @close_code = 1006 if @close_code.nil?
+    @socket.close
+  end
+
+  # At least *count* bytes in the read buffer, which holds them.
+  private def want(count : Int32) : Nil | Cancelled | SocketError | WebSocketError
+    while @in_stop - @in_start < count
+      if @in_start > 0
+        # Down, front to back: no byte is written before it is read.
+        held = @in_stop - @in_start
+        @in.copy_from(@in + @in_start, held)
+        @in_start = 0
+        @in_stop = held
+      end
+      got = @socket.read(@in + @in_stop, @in_room - @in_stop)!
+      return ended if got == 0
+      @in_stop = @in_stop + got
+    end
+    nil
+  end
+
+  # *count* bytes of payload into *dst*, unmasked with *key*: what the
+  # buffer holds, then straight from the socket, a buffer at a time while
+  # what is left is smaller than one.
+  private def take_into(dst : Pointer(UInt8), count : Int32, key : UInt32) : Nil | Cancelled | SocketError | WebSocketError
+    have = @in_stop - @in_start
+    have = count if have > count
+    dst.copy_from(@in + @in_start, have)
+    @in_start = @in_start + have
+    done = have
+    while done < count
+      left = count - done
+      if left >= @in_room
+        got = @socket.read(dst + done, left)!
+        return ended if got == 0
+        done = done + got
+      else
+        @in_start = 0
+        @in_stop = 0
+        got = @socket.read(@in, @in_room)!
+        return ended if got == 0
+        @in_stop = got
+        piece = got < left ? got : left
+        (dst + done).copy_from(@in, piece)
+        @in_start = piece
+        done = done + piece
+      end
+    end
+    WebSocket.mask(dst, count, key)
+    nil
+  end
+
+  # The peer gone without a close frame (§7.1.5): 1006.
+  private def ended : WebSocketError
+    abandon
+    WebSocketError.new("the connection ended without a close frame", 1006)
+  end
+end

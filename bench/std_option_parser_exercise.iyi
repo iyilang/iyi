@@ -13,8 +13,18 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/option_parser
-using std/option_parser::{OptionParser}
+# What one parse added to a log the handlers write to.
+def added(log : Array(String), from : Int32) : String
+  parts = [] of String
+  i = from
+  while i < log.size
+    parts << log[i]
+    i = i + 1
+  end
+  parts.join(",")
+end
+
+import std/option_parser::{OptionParser}
 
 puts "== flags"
 op = OptionParser.new
@@ -28,5 +38,104 @@ assert_true verbose, "short flag"
 assert_str "x", rest[0], "operand"
 assert_true op.help.includes?("--name VALUE"), "help lists it"
 puts "  long, short, leftover"
+
+puts "\n== what the person typed wrong"
+handled = OptionParser.new
+seen = [] of String
+port = ""
+handled.on("--port PORT", "the port") { |v| port = v }
+handled.on("-q", "quiet") { |v| seen << "quiet" }
+handled.invalid_option { |flag| seen << "invalid " + flag }
+handled.missing_option { |flag| seen << "missing " + flag }
+left = handled.parse(["--nope", "-z", "-q=1", "--port=8080", "keep", "-q", "--port"])
+assert_str "8080", port, "a good flag after bad ones is still read"
+assert_str "invalid --nope,invalid -z,invalid -q,quiet,missing --port", seen.join(","), "each mistake reaches its handler, in order"
+assert_str "keep", left.join(","), "operands survive"
+bare = OptionParser.new
+bare.on("--flag", "a switch") { |v| }
+bare.invalid_option { |flag| seen << "no value for " + flag }
+bare.parse(["--flag=x"])
+assert_str "no value for --flag", seen.last, "a value for a switch is an invalid option"
+puts "  invalid_option and missing_option answer instead of a panic"
+
+puts "\n== short bundles and the value spellings"
+ran = [] of String
+bundles = OptionParser.new
+bundles.on("-v", "verbose") { |v| ran << "v" }
+bundles.on("-q", "quiet") { |v| ran << "q" }
+bundles.on("-p PORT", "port") { |v| ran << "p=" + v }
+bundles.invalid_option { |flag| ran << "invalid " + flag }
+bundles.parse(["-vq", "-qvp8080"])
+assert_str "v,q,q,v,p=8080", added(ran, 0), "a bundle runs every flag in it"
+mark = ran.size
+bundles.parse(["-vx", "-q=1"])
+assert_str "invalid -v,invalid -q", added(ran, mark), "a bundle with no such flag in it is an invalid option"
+long_eq = OptionParser.new
+long_eq.on("--out=FILE", "output") { |v| ran << "out=" + v }
+long_eq.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+long_eq.parse(["--out", "a", "--out=b"])
+assert_str "out=a,out=b", added(ran, mark), "--out=FILE takes a value"
+short_glued = OptionParser.new
+short_glued.on("-oFILE", "output") { |v| ran << "o=" + v }
+short_glued.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+short_glued.parse(["-o", "a", "-ob"])
+assert_str "o=a,o=b", added(ran, mark), "-oFILE takes a value"
+accent = OptionParser.new
+accent.on("-é", "accent") { |v| ran << "é=" + v }
+accent.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+accent.parse(["-é", "-ö"])
+assert_str "é=,invalid -ö", added(ran, mark), "a short flag is one character"
+puts "  -vqp8080 is -v -q -p 8080, and --out=FILE, -oFILE and -é are flags"
+
+puts "\n== an optional value"
+# `--color [WHEN]` may be given its value or not, as the other library
+# reads the brackets: it was a required value, so `--color -v` gave `-v`
+# to `--color` and `-l --color` gave it `--color`, never run.
+chosen = [] of String
+optional = OptionParser.new
+optional.on("--color [WHEN]", "colour") { |v| chosen << "color=" + v }
+optional.on("-l [LEVEL]", "level") { |v| chosen << "l=" + v }
+optional.on("-z[N]", "size") { |v| chosen << "z=" + v }
+optional.on("-v", "verbose") { |v| chosen << "v" }
+optional.missing_option { |flag| chosen << "missing " + flag }
+left_over = optional.parse(["--color", "-v", "--color=never", "--color", "always", "-l3", "-l", "--color", "x", "-z9", "-z", "--color"])
+assert_str "color=,v,color=never,color=always,l=3,l=,color=x,z=9,z=,color=", chosen.join(","), "a bracketed value may be left out"
+assert_true left_over.empty?, "an optional value took x, #{left_over.inspect}"
+puts "  --color [WHEN], -l [LEVEL] and -z[N] run with or without a value"
+
+puts "\n== pairs, a banner and commands"
+said = [] of String
+tool = OptionParser.new
+tool.banner = "usage: tool [options] COMMAND"
+tool.on("-v", "--verbose", "say more") { |v| said << "v" }
+tool.on("-n NAME", "--name=NAME", "who") { |v| said << "n=" + v }
+tool.on("-c", "--color [WHEN]", "colour") { |v| said << "c=" + v }
+tool.separator("commands:")
+tool.on("deploy", "ship it") do |command|
+  said << command
+  tool.banner = "usage: tool deploy [options]"
+  tool.on("-f", "--force", "even if dirty") { |v| said << "f" }
+  tool.on("now", "without waiting") { |c| said << c }
+end
+tool.on("status", "show the state") { |c| said << c }
+tool.invalid_option { |flag| said << "invalid " + flag }
+assert_str "usage: tool [options] COMMAND\n  -v, --verbose  say more\n  -n NAME, --name=NAME  who\n  -c, --color [WHEN]  colour\ncommands:\n  deploy  ship it\n  status  show the state", tool.to_s, "the banner, the pairs and the commands in the help"
+# `status` comes after `now`, where no command is registered any more.
+left_tool = tool.parse(["--verbose", "-v", "-n", "ada", "--name=bo", "-c", "-v", "--color=red", "deploy", "-f", "--force", "now", "status", "x"])
+assert_str "status,x", left_tool.join(","), "a command's own commands replace the ones beside it"
+assert_str "v,v,n=ada,n=bo,c=,v,c=red,deploy,f,f,now", said.join(","), "the long spelling of a pair runs the same block, with the value either spelling states"
+assert_str "usage: tool deploy [options]\n  -v, --verbose  say more\n  -n NAME, --name=NAME  who\n  -c, --color [WHEN]  colour\ncommands:\n  -f, --force  even if dirty", tool.help, "the help after a command is its level's"
+late = OptionParser.new
+late_ran = [] of String
+late.on("deploy", "ship it") { |c| late_ran << c }
+late_left = late.parse(["x", "deploy"])
+assert_true late_ran.empty? && late_left.join(",") == "x,deploy", "a command after an operand is an operand"
+assert_panics("option: -n NAME and --name [NAME] differ on the value: one needs it, the other may leave it out") { late.on("-n NAME", "--name [NAME]", "who") { |v| } }
+assert_panics("option: not a flag or a command: deploy now") { late.on("deploy now", "two words") { |v| } }
+assert_panics("option: not a flag: -") { late.on("-", "a dash") { |v| } }
+puts "  -v and --verbose are one flag, a command is the first operand, and its block registers the next level"
 
 puts "\nALL CHECKS PASSED"

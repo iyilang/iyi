@@ -1,10 +1,7 @@
 module calc/parser
 
-import calc/lexer
-import calc/ast
-
-using calc/lexer::{Token}
-using calc/ast::{Number, Name, Binary}
+import calc/lexer::{Token}
+import calc/ast::{Number, Name, Binary}
 
 pub struct SyntaxError
   getter at : Int32

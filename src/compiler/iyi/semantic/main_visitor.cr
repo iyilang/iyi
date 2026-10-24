@@ -93,6 +93,14 @@ module Iyi
     # ```
     property last_block_kind : BlockKind = :none
     property? inside_ensure : Bool = false
+    # iyi: inside the `ensure` a `defer` lowers to, where the cleanup runs
+    # inline on an ordinary exit (normalizer.cr's `apply_defers`).
+    property? inside_iyi_defer : Bool = false
+    # iyi: in `defer`'s panic-walk proc (`Def#iyi_defer?`) and the blocks
+    # inside it, the variables the cleanup narrowed or assigned itself;
+    # every other variable it reads is the scope's, as it stood at the
+    # `defer` (`check_mutably_closured`).
+    property iyi_defer_entries : Set(MetaVar)? = nil
     property? inside_constant = false
     property file_module : FileModule?
 
@@ -185,7 +193,8 @@ module Iyi
       type = lookup_scope.lookup_type_var(node,
         free_vars: free_vars,
         find_root_generic_type_parameters: find_root_generic_type_parameters,
-        remove_alias: false)
+        remove_alias: false,
+        self_type: (@scope || lookup_scope).instance_type)
 
       case type
       when Const
@@ -389,7 +398,7 @@ module Iyi
           node.bind_to(@program.nil_var)
         end
 
-        check_mutably_closured meta_var, var
+        check_mutably_closured meta_var, var, node
 
         node.bind_to(var)
 
@@ -562,10 +571,27 @@ module Iyi
     def check_exception_handler_vars(var_name, node)
       # If inside a begin part of an exception handler, bind this type to
       # the variable that will be used in the rescue/else blocks.
-      @all_exception_handler_vars.try &.each do |exception_handler_vars|
-        var = (exception_handler_vars[var_name] ||= MetaVar.new(var_name))
-        var.bind_to(node)
+      #
+      # iyi: the innermost handler's variable only. Each handler's variable
+      # is bound to the one of the handler inside it (`visit(ExceptionHandler)`),
+      # so an outer handler still has every type assigned anywhere in its
+      # body. The value bound into every handler on the stack made N nested
+      # handlers cost N^3 - N `defer`s in one scope nest N - and 2,000
+      # `defer x += 1` spent 14.5 s of a 20.7 s check here.
+      stack = @all_exception_handler_vars
+      iyi_exception_handler_var(stack, stack.size - 1, var_name).bind_to(node) if stack && !stack.empty?
+    end
+
+    # The variable *name* of the handler at *depth* in *stack*, made if it
+    # is missing and bound into the same variable of the handler outside.
+    private def iyi_exception_handler_var(stack : Array(MetaVars), depth : Int32, name : String) : MetaVar
+      vars = stack[depth]
+      if var = vars[name]?
+        return var
       end
+      var = vars[name] = MetaVar.new(name)
+      iyi_exception_handler_var(stack, depth - 1, name).bind_to(var) if depth > 0
+      var
     end
 
     def visit(node : Out)
@@ -695,15 +721,56 @@ module Iyi
       ivar
     end
 
+    # iyi: the statement being typed, as {list, index, node}, for a macro
+    # there whose expansion writes a `defer` (`iyi_splice_macro_defers`).
+    @iyi_statement : {Expressions, Int32, ASTNode}? = nil
+    # The statement-macro expansions being typed, as {list, index,
+    # expansion}: the expansion stands at list[index].
+    @iyi_expansions : Array({Expressions, Int32, Expressions})? = nil
+
     def visit(node : Expressions)
-      exp_count = node.expressions.size
-      node.expressions.each_with_index do |exp, i|
-        if i == exp_count - 1
+      # iyi: a `defer` a macro wrote, in an expansion that does not stand
+      # for a statement of a list (`iyi_splice_macro_defers`): an argument,
+      # say. What it covers is the rest of the expansion, which is a scope
+      # of its own there, as a `begin` is.
+      if node.expressions.any?(Defer)
+        node.expressions = Normalizer.new(@program).apply_defers(node.expressions)
+      end
+      # The probes stand at the front of the program's own list, and only
+      # there is what they found raised: a probe's own body is an
+      # `Expressions` too, and raising there put the first probe's error
+      # in the second probe's place.
+      probed = false
+      # The list can end early: a macro statement whose `defer` takes the
+      # rest of it into its expansion.
+      i = 0
+      while i < node.expressions.size
+        exp = node.expressions[i]
+        if exp.is_a?(If) && exp.iyi_definition_probe?
+          visit_definition_probe(exp)
+          probed = true
+          i += 1
+          next
+        end
+        if probed
+          forget_definition_probe_vars
+          raise_definition_errors
+        end
+        exp = iyi_expanded_with_defers(node, i, exp) || exp
+        statement, @iyi_statement = @iyi_statement, {node, i, exp}
+        if i == node.expressions.size - 1
           exp.accept self
           node.bind_to exp
         else
           ignoring_type_filters { exp.accept self }
+          node.bind_to node.expressions[i] if i == node.expressions.size - 1
         end
+        @iyi_statement = statement
+        i += 1
+      end
+      if probed
+        forget_definition_probe_vars
+        raise_definition_errors
       end
 
       if node.empty?
@@ -711,6 +778,127 @@ module Iyi
       end
 
       false
+    end
+
+    # iyi: a macro's expansion, typed where it stands. A macro that is a
+    # statement of a list stands for that statement: its expansion takes
+    # the statement's place when a `defer` in it needs the rest of the list
+    # (`iyi_splice_macro_defers`), and a macro it expands to in turn is
+    # that statement too.
+    def expand_macro(the_macro, node, mode = nil, *, visibility : Visibility, accept = true, &)
+      generated = super(the_macro, node, mode, visibility: visibility, accept: false) { yield }
+      return generated unless accept
+      statement = @iyi_statement
+      if statement && statement[2].same?(node)
+        list, index, _ = statement
+        if generated.is_a?(Expressions)
+          iyi_splice_macro_defers(list, index, generated)
+          expansions = @iyi_expansions ||= [] of {Expressions, Int32, Expressions}
+          expansions.push({list, index, generated})
+          generated.accept self
+          expansions.pop
+        else
+          @iyi_statement = {list, index, generated}
+          generated.accept self
+        end
+      else
+        generated.accept self
+      end
+      generated
+    end
+
+    # A `defer` a macro writes covers the rest of the scope the macro
+    # stands in, as the same line written there does (SPEC.md III.1.4).
+    # The normalizer leaves it standing in the expansion
+    # (`Normalizer#macro_expansion`); here the rest of the list moves into
+    # the expansion, the expansion takes the macro's place, and the defers
+    # are lowered over both. Lowered with the expansion alone, it covered
+    # nothing after the macro: `{% if true %} defer puts "a" {% end %}`
+    # printed "a" before the body that followed it.
+    private def iyi_splice_macro_defers(list : Expressions, index : Int32, expansion : Expressions) : Nil
+      return unless expansion.expressions.any?(Defer)
+      iyi_pull_rest(list)
+      rest = list.expressions[(index + 1)..]
+      list.expressions.pop(rest.size)
+      list.expressions[index] = expansion
+      expansion.expressions = Normalizer.new(@program).apply_defers(expansion.expressions + rest)
+    end
+
+    # When *list* is itself a macro statement's expansion, the rest of the
+    # list that statement stands in is *list*'s rest too.
+    private def iyi_pull_rest(list : Expressions) : Nil
+      frame = @iyi_expansions.try &.find { |entry| entry[2].same?(list) }
+      return unless frame
+      parent, index, _ = frame
+      iyi_pull_rest(parent)
+      rest = parent.expressions[(index + 1)..]
+      parent.expressions.pop(rest.size)
+      parent.expressions[index] = list
+      list.expressions.concat(rest)
+    end
+
+    # A macro statement the top-level pass already expanded, whose
+    # expansion writes a `defer`: the expansion takes the statement's
+    # place, and the rest of the list.
+    private def iyi_expanded_with_defers(list : Expressions, index : Int32, exp : ASTNode) : ASTNode?
+      expanded =
+        case exp
+        when Call, MacroIf, MacroFor, MacroExpression then exp.expanded
+        end
+      return nil unless expanded.is_a?(Expressions) && expanded.expressions.any?(Defer)
+      iyi_splice_macro_defers(list, index, expanded)
+      expanded
+    end
+
+    # iyi: one definition-site probe, typed on its own (R-2c). An error is
+    # kept and the next probe typed, so `check` names every def that does
+    # not type instead of the first; the probes stand before the program's
+    # own code, and what they found is raised before that code is looked
+    # at. Past a first error, anything but a code error stops the probing:
+    # a later probe can trip over a def an earlier one left half typed, and
+    # the error already found is the one worth reading.
+    #
+    # A probe's variables are its own. It is an `if false` at the top
+    # level, and the variables it assigns were merged into the program's
+    # after it like any branch's, so every probe's `if` copied and merged
+    # every probe variable before it: 2,400 probed defs took 0.35 s of
+    # semantic analysis against 0.09 for 1,200, and the generated pair's
+    # 900 took half of its semantic pass. The program's variables are put
+    # back as they stood before the probe - nothing after it can name one
+    # of its variables - and, once the probes are done, their names leave
+    # the program's cumulative variables too: the probe's branch is never
+    # generated, and `main` allocated a slot for each of them.
+    @definition_errors : Array(CodeError)?
+    @definition_probes_stopped = false
+    @definition_probe_vars_forgotten = false
+
+    private def visit_definition_probe(probe : If) : Nil
+      return if @definition_probes_stopped
+      vars = @vars
+      begin
+        ignoring_type_filters { probe.accept self }
+      rescue ex : CodeError
+        (@definition_errors ||= [] of CodeError) << ex
+      rescue ex
+        raise ex unless @definition_errors
+        @definition_probes_stopped = true
+      ensure
+        @vars = vars
+      end
+    end
+
+    private def forget_definition_probe_vars : Nil
+      return if @definition_probe_vars_forgotten
+      @definition_probe_vars_forgotten = true
+      @meta_vars.reject! { |name, _| name.starts_with?(DefinitionTyping::VAR_PREFIX) }
+    end
+
+    private def raise_definition_errors : Nil
+      errors = @definition_errors
+      return unless errors
+      @definition_errors = nil
+      raise errors.first if errors.size == 1
+      raise CodeErrors.new(errors)
     end
 
     def visit(node : Assign)
@@ -786,6 +974,7 @@ module Iyi
       else
         simple_var.bind_to(target)
 
+        @iyi_defer_entries.try &.add(simple_var)
         check_mutably_closured(meta_var, simple_var)
       end
 
@@ -912,6 +1101,8 @@ module Iyi
       var = lookup_class_var(target)
       target.var = var
       var.thread_local = true if thread_local
+      # iyi: a write after the initializer, for the thread gate.
+      var.iyi_written ||= {node.as(ASTNode), @typed_def}
 
       if casted_value = check_automatic_cast(value, var.type, node)
         value = casted_value
@@ -968,6 +1159,17 @@ module Iyi
       call = @call
       unless call
         node.raise "can't use `yield` outside a method"
+      end
+
+      # iyi: the `yield` in a `defer`'s cleanup. The panic walk runs the
+      # cleanup as a proc (normalizer.cr's `apply_defers`), and the
+      # sentence below was about a proc literal nobody wrote.
+      if @typed_def.try(&.iyi_defer?)
+        node.raise <<-MSG
+          `yield` can't run in a `defer`
+
+          A panic runs what was deferred from a proc the cleanup is registered as (SPEC.md III.1.4), and a proc has no block to yield to. Capture the block (`&block`) and write `defer block.call`.
+          MSG
       end
 
       if @fun_literal_context
@@ -1092,6 +1294,8 @@ module Iyi
 
       block_visitor.last_block_kind = :block
       block_visitor.inside_ensure = inside_ensure?
+      block_visitor.inside_iyi_defer = inside_iyi_defer?
+      block_visitor.iyi_defer_entries = @iyi_defer_entries
 
       node.body.accept block_visitor
 
@@ -1211,6 +1415,7 @@ module Iyi
       block_visitor.block_nest = @block_nest + 1
       block_visitor.parent = self
       block_visitor.is_initialize = @is_initialize
+      block_visitor.iyi_defer_entries = Set(MetaVar).new.compare_by_identity if node.def.iyi_defer?
 
       node.def.body.accept block_visitor
 
@@ -1831,6 +2036,10 @@ module Iyi
     end
 
     def visit(node : Return)
+      if inside_iyi_defer? || @typed_def.try(&.iyi_defer?)
+        iyi_defer_exit(node, node.from_propagate? ? "!" : "return")
+      end
+
       if inside_ensure?
         node.raise "can't return from ensure"
       end
@@ -1854,10 +2063,24 @@ module Iyi
       end
 
       if typed_def.captured_block?
+        # iyi: the same for a `!` in a block kept as a proc — a task's body,
+        # most often. It said "can't return from captured block, use next",
+        # about a `return` nobody wrote.
+        if node.from_propagate?
+          node.raise <<-MSG
+            `!` can't propagate out of a block that runs as a proc
+
+            `!` in a block returns from the method the block is written in (SPEC.md III.1.2), and this block is captured: it is kept and called later, maybe by a task, after that method may have returned. Answer the error as the block's value, `next` it, and read it where the value arrives, through `task.value` or the typed group; or handle it here.
+            MSG
+        end
         node.raise "can't return from captured block, use next"
       end
 
       node.exp.try &.accept self
+
+      if typed_def.name == "initialize" || typed_def.name.starts_with?("initialize:")
+        iyi_check_initialize_exit(node)
+      end
 
       node.target = typed_def
 
@@ -1868,6 +2091,41 @@ module Iyi
       node.type = @program.no_return
 
       false
+    end
+
+    # iyi: `new` answers the object whatever its `initialize` returns, so a
+    # `!` there dropped the error, and either a `!` or a `return` left every
+    # field it had not reached yet unassigned: `C.new("x")` with `@v =
+    # parse(s)!` answered a `C` whose `v` read 0 and whose `name.size` was a
+    # memory fault (SPEC.md III.1.2 has the error go to the caller, and here
+    # there is none). A `return` after every field is set is still an early
+    # exit, and `std/regex`'s `RxRuns` keeps one.
+    private def iyi_check_initialize_exit(node : Return)
+      if node.from_propagate?
+        error = node.exp.try(&.type?) || "E"
+        node.raise <<-MSG
+          `!` can't propagate out of `initialize`
+
+          `new` answers the object whatever `initialize` returns, so the #{error} would be dropped and the object built with the fields not assigned yet left uninitialized. Decide before building: write a constructor `def self.build(...) : #{scope} | #{error}` that propagates with `!` and then calls `new` with values that cannot fail — see SPEC.md III.1.2.
+          MSG
+      end
+
+      return unless node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
+
+      unassigned = scope.all_instance_vars.compact_map do |name, ivar|
+        next if scope.has_instance_var_initializer?(name)
+        next if (var = @vars[name]?) && !var.nil_if_read?
+        type = ivar.type?
+        next if !type || type.includes_type?(@program.nil)
+        name
+      end
+      return if unassigned.empty?
+
+      node.raise <<-MSG
+        `return` can't leave `initialize` before #{unassigned.join(", ")} #{unassigned.size == 1 ? "is" : "are"} assigned
+
+        `new` answers the object whatever `initialize` returns, so the object would be built with #{unassigned.size == 1 ? "that field" : "those fields"} uninitialized. Assign #{unassigned.size == 1 ? "it" : "them"} first, or decide before building with a constructor `def self.build(...) : #{scope} | E` that calls `new` only once it can — see SPEC.md III.1.2.
+        MSG
     end
 
     def end_visit(node : Splat)
@@ -1898,10 +2156,30 @@ module Iyi
       members = type.is_a?(UnionType) ? type.union_types : [type] of Type
       errors, values = members.partition &.error?
 
+      # `end!` is the `!` of a group that kept the general form
+      # (normalizer.cr's `expand_iyi_group`).
+      if construct == "end!"
+        if errors.empty?
+          node.raise "`end!` has no error to propagate: this group answers its block's last expression, #{type}, and no member of it implements `Error`. " \
+                     "Only a block that ends in a `spawn` answers its tasks' tuple and their errors — see SPEC.md III.4.9"
+        end
+        construct = "!"
+      end
+
       if errors.empty?
         verb = construct == "!" ? "propagate" : "recover"
         section = construct == "!" ? "III.1" : "III.1.3"
-        node.raise "`#{construct}` has no error to #{verb}: no member of #{type} implements `Error`. `#{construct}` is for a union with an error member — see SPEC.md #{section}"
+        message = "`#{construct}` has no error to #{verb}: no member of #{type} implements `Error`. `#{construct}` is for a union with an error member — see SPEC.md #{section}"
+        # `xs.uniq!`, `s.upcase!`: the other library's in-place spelling of
+        # a method whose plain name is here, so the `!` reached this rule
+        # and the naming rule `sort!` and `map!` are told was never said.
+        if construct == "!" && (bang = node.iyi_bang_call)
+          name, receiver = bang
+          in_place = "#{name}_in_place"
+          instead = type.has_def?(in_place) ? "call `#{receiver}.#{in_place}`, which changes it" : "reassign the copy, `#{receiver} = #{receiver}.#{name}`"
+          message += "\n`#{name}!` is the other library's in-place spelling, and `!` cannot end a name here (SPEC.md III.1.7a): #{instead}"
+        end
+        node.raise message
       end
 
       # iyi: `!` hands the error to the caller, so the enclosing signature has
@@ -1910,7 +2188,11 @@ module Iyi
       # which is true and says nothing about the operator that put it there or
       # about the two ways out.
       if construct == "!" && (enclosing = @typed_def) && (restriction = enclosing.return_type)
-        declared = begin
+        # The annotation as the call resolved it (`Call#check_return_type`).
+        # Looked up again from here, the one on a def inside `module
+        # wrongerr` never reached the check below, and the mistake still got
+        # the sentence this replaces.
+        declared = enclosing.freeze_type || begin
           current_type.lookup_type?(restriction, allow_typeof: false)
         rescue
           nil
@@ -1924,6 +2206,21 @@ module Iyi
                        "#{declared}, which has no error member. Give it one " \
                        "(`#{declared} | #{errors.first}`), or handle the error here " \
                        "with `case` — see SPEC.md III.1"
+          end
+
+          # iyi: and somewhere for *this* error. One the signature does not
+          # list was reported by the other library at the signature, "method
+          # ::g must return (Int32 | ParseErr) but it is returning IOErr", with
+          # nothing pointing at the `!`. The test is the one that sentence
+          # comes from, member by member.
+          missing = errors.reject(&.implements?(declared))
+          unless missing.empty?
+            node.raise "`!` propagates #{missing.map(&.to_s).join(" or ")} out of " \
+                       "`#{enclosing.name}`, and `#{enclosing.name}` returns " \
+                       "#{declared}, which does not include #{missing.size == 1 ? "it" : "them"}. " \
+                       "There is no implicit conversion: add #{missing.size == 1 ? "it" : "them"} " \
+                       "to the signature (an alias keeps a long one short), or handle " \
+                       "the error here with `case` — see SPEC.md III.1.2 and III.1.6"
           end
         end
       end
@@ -2430,7 +2727,17 @@ module Iyi
     def filter_vars(filters, &)
       filters.try &.each do |name, filter|
         existing_var = @vars[name]
+        # iyi: in `defer`'s proc, a variable the cleanup has not narrowed or
+        # assigned itself is narrowed from every type the scope assigns it,
+        # since the proc may run at any point of the scope; the scope's
+        # variable as it stood at the `defer` left out what was assigned
+        # after it.
+        if (entries = @iyi_defer_entries) && !entries.includes?(existing_var) &&
+           (meta_var = @meta_vars[name]?) && iyi_defer_read?(meta_var)
+          existing_var = meta_var
+        end
         filtered_var = MetaVar.new(name)
+        entries.try &.add(filtered_var)
         filtered_var.bind_to(existing_var.filtered_by(yield filter))
         @vars[name] = filtered_var
       end
@@ -2438,6 +2745,7 @@ module Iyi
 
     def end_visit(node : Break)
       if last_block_kind.ensure?
+        iyi_defer_exit(node, "break") if inside_iyi_defer?
         node.raise "can't use break inside ensure"
       end
 
@@ -2454,6 +2762,7 @@ module Iyi
         break_vars.push @vars.dup
         target_while.bind_to(node_exp_or_nil_literal(node))
       else
+        iyi_defer_exit(node, "break") if @typed_def.try &.iyi_defer?
         if @typed_def.try &.captured_block?
           node.raise "can't break from captured block, try using `next`."
         end
@@ -2468,6 +2777,7 @@ module Iyi
 
     def end_visit(node : Next)
       if last_block_kind.ensure?
+        iyi_defer_exit(node, "next") if inside_iyi_defer?
         node.raise "can't use next inside ensure"
       end
 
@@ -2484,6 +2794,7 @@ module Iyi
         bind_vars @vars, @while_vars
       else
         typed_def = @typed_def
+        iyi_defer_exit(node, "next") if typed_def.try &.iyi_defer?
         if typed_def && typed_def.captured_block?
           node.target = typed_def
           typed_def.bind_to(node_exp_or_nil_literal(node))
@@ -2495,6 +2806,18 @@ module Iyi
       node.type = @program.no_return
 
       @unreachable = true
+    end
+
+    # iyi: a `return`, `!`, `next` or `break` leaving a `defer`'s cleanup.
+    # Inside the panic walk's proc a `return` ended the cleanup and nothing
+    # said so (`defer return 7` answered 1); inline in the `ensure` it was
+    # the other library's sentence about an `ensure` nobody wrote.
+    private def iyi_defer_exit(node : ASTNode, keyword : String) : NoReturn
+      node.raise <<-MSG
+        `#{keyword}` can't leave a `defer`
+
+        A `defer` runs while its scope is already being left — by a return, by `!`, by a panic — so its cleanup has no answer of its own to give and nowhere to jump to. Let it run to its end, and answer from the scope. See SPEC.md III.1.4.
+        MSG
     end
 
     def with_block_kind(kind : BlockKind, &)
@@ -2612,7 +2935,18 @@ module Iyi
           else
             # If the type is not virtual then we know for sure that the type
             # can't be instantiated, and we can produce a compile-time error.
-            node.raise "can't instantiate abstract #{instance_type.type_desc} #{instance_type}"
+            #
+            # iyi: at the call that asked for the instance. The primitive has
+            # no location, and the `allocate` a generated `new` makes stands
+            # where that `new` was made - `class Reference` in the prelude for
+            # a class with no `initialize` - so `A.new` was reported at
+            # primitives.iyi:58 and `-f json`'s deepest frame had no file and
+            # no line. Past a generated `new`, the call is the one to it.
+            blame = call
+            if blame && (outer = blame.parent_visitor?) && outer.typed_def?.try(&.new?) && (asked = outer.call)
+              blame = asked
+            end
+            (blame || node).raise "can't instantiate abstract #{instance_type.type_desc} #{instance_type}"
           end
         end
 
@@ -2763,7 +3097,10 @@ module Iyi
       when InstanceVar
         lookup_instance_var exp
       when ClassVar
-        visit_class_var exp
+        # iyi: the pointer can write it, as an assignment does.
+        var = visit_class_var exp
+        var.iyi_written ||= {node.as(ASTNode), @typed_def}
+        var
       when Global
         node.raise "BUG: there should be no use of global variables other than $~ and $?"
       when Path
@@ -3017,14 +3354,18 @@ module Iyi
       # sentence rather than a silent nothing. `.cr` sources keep theirs,
       # and so does the handler `defer` itself lowers to, which is the
       # registry's pop and carries the flag that says so.
+      #
+      # Said at the keyword: a def's or a block's handler starts where its
+      # body does, and `def foo ... rescue` was reported at `raise "x"`.
       if @program.iyi_prelude? && !node.iyi_defer? && node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
         if node.rescues || node.else
-          node.raise "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), " \
-                     "and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. " \
-                     "Return the error, or read the task's `value`"
-        elsif node.ensure
-          node.raise "iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). " \
-                     "Write `defer`, which runs on return, on `!` and on a panic"
+          (node.rescues.try(&.first) || node).raise "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), " \
+                                                    "and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. " \
+                                                    "Return the error, or read the task's `value`"
+        elsif node.ensure && (at = node.ensure_location || node.location)
+          ::raise TypeException.new("iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). " \
+                                    "Write `defer`, which runs on return, on `!` and on a panic",
+            at.line_number, at.column_number, at.filename, "ensure".size)
         end
       end
 
@@ -3042,12 +3383,16 @@ module Iyi
       exception_handler_vars = @vars.dup
 
       all_exception_handler_vars.push exception_handler_vars
+      # iyi: and each is bound into the handler outside this one, which
+      # sees what this body assigns through it (`check_exception_handler_vars`).
+      outer_depth = all_exception_handler_vars.size - 2
 
       exception_handler_vars.each do |name, var|
         new_var = new_meta_var(name)
         new_var.nil_if_read = var.nil_if_read?
         new_var.bind_to(var)
         exception_handler_vars[name] = new_var
+        iyi_exception_handler_var(all_exception_handler_vars, outer_depth, name).bind_to(new_var) if outer_depth >= 0
       end
 
       node.body.accept self
@@ -3127,7 +3472,9 @@ module Iyi
           before_ensure_vars = @vars.dup
 
           with_block_kind :ensure do
+            old_inside_iyi_defer, @inside_iyi_defer = @inside_iyi_defer, @inside_iyi_defer || node.iyi_defer?
             node_ensure.accept self
+            @inside_iyi_defer = old_inside_iyi_defer
           end
 
           @vars = after_handler_vars
@@ -3489,17 +3836,28 @@ module Iyi
       # we detect a closure in an assignment. So that logic needs to be replicated here,
       # and it must happen before we actually mark is as closured.
       var.mutably_closured = true if mark_as_mutably_closured
-      var.mark_as_closured
 
       # Go up and mark proc literal defs as closured until we get
       # to the context where the variable is defined
+      # iyi: noting whether every proc on the way is a `defer`'s.
+      by_defer = true
       visitor = self
       while visitor
         visitor_context = visitor.closure_context
         break if visitor_context == var_context
 
+        by_defer = false unless visitor_context.is_a?(Def) && visitor_context.iyi_defer?
         visitor_context.closure = true if visitor_context.is_a?(Def)
         visitor = visitor.parent
+      end
+      var.mark_as_closured(by_defer)
+      # iyi: what that bound stays bound, and every read of a closured
+      # variable comes back here: bound again each time, a variable read
+      # 2,000 times bound one read 2,000 times over (`defer x += 1` written
+      # 2,000 times).
+      if var.mutably_closured?
+        var.iyi_defer_local_vars.clear
+        var.local_vars.clear unless var.iyi_defer_only?
       end
     end
 
@@ -3746,12 +4104,39 @@ module Iyi
     # to it (it gets all types assigned to meta_var).
     # Otherwise, add it to the local vars so that they could be
     # bond later on, if the meta_var stops being readonly.
-    def check_mutably_closured(meta_var, var)
-      if meta_var.closured? && meta_var.mutably_closured?
+    #
+    # iyi: a read inside `defer`'s proc of what the cleanup has not
+    # narrowed or assigned itself (`iyi_defer_entries`) gets every type the
+    # variable is assigned; what the cleanup narrowed reads as the scope's
+    # own variable does, so `defer puts(y.is_a?(Int32) ? y + 1 : y.size)`
+    # narrows as it does in an `ensure`. It was refused, "expected argument
+    # #1 to 'String#+' to be String, not Int32", once `y` was assigned
+    # after the `defer`. And it is the *read* that is bound, not the
+    # variable entry it read: that entry is the scope's own as it stood at
+    # the `defer`, shared with the scope's reads after it, and bound to
+    # every type it unbound their narrowing.
+    def check_mutably_closured(meta_var, var, read : ASTNode? = nil)
+      defer_read = iyi_defer_read?(meta_var) && !@iyi_defer_entries.try(&.includes?(var))
+      var = read if defer_read && read
+      if meta_var.closured? && meta_var.mutably_closured? && (defer_read || !meta_var.iyi_defer_only?)
         var.bind_to(meta_var)
+      elsif defer_read
+        meta_var.iyi_defer_local_vars << var
       else
         meta_var.local_vars << var
       end
+    end
+
+    # iyi: this read is inside `defer`'s panic-walk proc, of a variable from
+    # outside it. The proc may run at any point of the scope, so the read
+    # gets every type the variable is ever assigned; the scope's own reads
+    # keep their narrowing (`MetaVar#iyi_defer_only?`).
+    private def iyi_defer_read?(meta_var) : Bool
+      context = closure_context
+      return false unless context.is_a?(Def) && context.iyi_defer?
+      var_context = meta_var.context
+      var_context = var_context.context if var_context.is_a?(Block)
+      !context.same?(var_context)
     end
 
     def visit(node : When | Unless | Until | MacroLiteral | OpAssign)

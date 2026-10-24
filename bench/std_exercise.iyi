@@ -8,20 +8,15 @@
 
 module bench/std_exercise
 
-import std/traits
-import std/enumerable
-import std/list
-import std/derives
-import std/slice
-import std/iterator
+import std/traits::{Comparable, Num, Hashable}
+import std/enumerable::{Enumerable}
+import std/list::{List}
+import std/derives::{Show}
+import std/slice::{Slice, SliceIterator}
+import std/iterator::{Iterator}
 
-using std/traits::{Comparable, Num, Hashable}
-using std/enumerable::{Enumerable}
-using std/list::{List}
-using std/derives::{Show}
-using std/slice::{Slice, SliceIterator}
-using std/list::{ListIterator}
-using std/iterator::{Iterator}
+import std/list::{ListIterator}
+import std/gc::{GC}
 
 # ---- Test Types -------------------------------------------------------------
 
@@ -60,6 +55,27 @@ impl Enumerable for SimpleSeq
 
   def each(& : Int32 -> Nil) : Nil
     @items.each { |x| yield x }
+  end
+end
+
+# A source that can be walked once, as a pipe or a generator can: each
+# `each` drains what is left, and counts the walk.
+class OnceSeq
+  getter walks : Int32
+
+  def initialize(@items : Array(Int32))
+    @walks = 0
+  end
+end
+
+impl Enumerable for OnceSeq
+  type Elem = Int32
+
+  def each(& : Int32 -> Nil) : Nil
+    @walks = @walks + 1
+    while !@items.empty?
+      yield @items.shift
+    end
   end
 end
 
@@ -222,9 +238,14 @@ ewi_sum = 0
 seq.each_with_index { |x, i| ewi_sum = ewi_sum + i }
 assert_eq(ewi_sum, 28, "enum: each_with_index")
 
-# 30. each_with_object
-ewo = seq.each_with_object([] of Int32) { |arr, x| arr << (x * 10) }
+# 30. each_with_object, element first and memo second, as the other library
+#     yields them. Where the two types coincide, the reversed order compiled
+#     and mutated the elements instead of the memo.
+ewo = seq.each_with_object([] of Int32) { |x, arr| arr << (x * 10) }
 assert_eq(ewo.size, 8, "enum: each_with_object")
+ewo_same = [[3], [1, 4]].each_with_object([] of Int32) { |x, acc| acc.concat(x) }
+assert_str(ewo_same.to_s, "[3, 1, 4]", "enum: each_with_object yields the element, then the memo")
+puts "  each_with_object yields (element, memo): [[3], [1, 4]] collects [3, 1, 4]"
 
 # 31. join
 small_seq = SimpleSeq.new([3, 1, 4])
@@ -303,6 +324,17 @@ assert_true(!mm_q[0].nil? && mm_q[0] == 1, "enum: minmax? min")
 assert_true(!mm_q[1].nil? && mm_q[1] == 9, "enum: minmax? max")
 empty_mm_q = empty_seq.minmax?
 assert_true(empty_mm_q[0].nil? && empty_mm_q[1].nil?, "enum: minmax? empty")
+# One walk: `min?` and then `max?` walked twice, so a source that can be
+# read once answered {1, nil} and `minmax` refused it as empty.
+once = OnceSeq.new([3, 1, 4, 1, 5])
+once_mm = once.minmax?
+assert_str("#{once_mm} #{once.walks}", "{1, 5} 1", "enum: minmax? walks once")
+assert_str(OnceSeq.new([3, 1, 4, 1, 5]).minmax.to_s, "{1, 5}", "enum: minmax of a source read once")
+# And `take` stops at the nth element: it pulled one more than it kept,
+# so a second `take(2)` of a source read once began at 4 rather than 3,
+# and `take(0)` lost an element.
+drained = OnceSeq.new([1, 2, 3, 4, 5, 6])
+assert_str("#{drained.take(0)} #{drained.take(2)} #{drained.first(2)}", "[] [1, 2] [3, 4]", "enum: take pulls no element past the nth")
 
 # 51. minmax
 mm = seq.minmax
@@ -337,6 +369,17 @@ assert_eq(mm_of[1], -1, "enum: minmax_of max")
 gb = seq.group_by { |x| x % 2 }
 assert_eq(gb[0].size, 3, "enum: group_by 0")
 assert_eq(gb[1].size, 5, "enum: group_by 1")
+# By an array, nil, a symbol, a pair and a named tuple, each a key a `Hash`
+# takes: none was `Hashable`, so each of these was refused with
+# "Array(Int32) does not implement Std::Traits::Hashable" and its like.
+assert_eq(List.new([[1], [2], [1]]).tally[[1]], 2, "traits: tally of arrays")
+assert_eq(List.new([1, 2, 3]).group_by { |x| [x % 2] }[[1]].size, 2, "traits: group_by an array")
+assert_eq(List.new([1, nil, nil] of Int32?).tally[nil], 2, "traits: tally of nil")
+assert_eq(List.new([1, 2, 3]).index_by { |x| x.even? ? :even : :odd }[:odd], 3, "traits: index_by a symbol")
+by_pair = List.new([1, 2, 3, 4, 5, 6]).group_by { |x| {x % 2, x % 3} }
+assert_str("#{by_pair.size} #{by_pair[{1, 1}]}", "6 [1]", "traits: group_by a pair")
+by_name = List.new([1, 2, 3, 4, 5]).tally_by { |x| {parity: x % 2} }
+assert_str("#{by_name.size} #{by_name[{parity: 1}]}", "2 3", "traits: tally_by a named tuple")
 
 # 57. index_by
 ib = small_seq.index_by { |x| x.to_s }
@@ -389,6 +432,10 @@ assert_eq(comp.size, 3, "enum: compact_map")
 # 67. find_value
 fv = seq.find_value { |x| x > 5 ? "big-#{x}" : nil }
 assert_true(!fv.nil? && fv == "big-9", "enum: find_value")
+# The first truthy answer, as the other library's: `false` was an answer,
+# so a predicate block found false where the other library finds true.
+assert_str(seq.find_value { |x| x > 5 }.inspect, "true", "enum: find_value takes the first truthy answer")
+assert_str(seq.find_value { |x| x > 100 }.inspect, "nil", "enum: find_value of all falses is nil")
 
 # 68. accumulate
 acc = small_seq.accumulate(0) { |a, b| a + b }
@@ -407,6 +454,45 @@ assert_eq(zipped[0][0], 3, "enum: zip 0 0")
 assert_eq(zipped[0][1], 10, "enum: zip 0 1")
 # 71. sum_by
 assert_eq(seq.sum_by { |x| x * 2 }, 62, "enum: sum_by")
+
+# A nil element is an element. `each_cons_pair`, `chunk_while` and
+# `reduce?` read a nil "previous" as "no previous element", so every pair
+# after a nil was skipped, a nil glued its successor onto its chunk without
+# asking the block, and a fold that began at a nil restarted without the
+# block. What the other library answers for the same three.
+nil_pairs = [] of String
+([nil, 2, nil, 3] of Int32?).each_cons_pair { |a, b| nil_pairs << "#{a.inspect}-#{b.inspect}" }
+assert_str(nil_pairs.join(" "), "nil-2 2-nil nil-3", "enum: each_cons_pair after a nil element")
+nil_chunks = ([nil, nil, 1] of Int32?).chunk_while { |a, b| false }
+assert_eq(nil_chunks.size, 3, "enum: chunk_while after a nil element")
+nil_fold = ([nil, 2] of Int32?).reduce? { |acc, x| (acc || 0) + (x || 0) + 10 }
+assert_true(nil_fold == 12, "enum: reduce? from a nil element")
+# `max_by`, `min_by` and `minmax_by` read a nil answer as "no element" the
+# same way, and refused a list whose answer was a nil element as empty;
+# `Array#max_by` and the other library answer the nil.
+nilable = List(Int32?).new([nil, 1] of Int32?)
+assert_str(nilable.max_by { |x| x || 5 }.inspect, "nil", "enum: max_by of a nil element")
+assert_str(nilable.min_by { |x| x || -5 }.inspect, "nil", "enum: min_by of a nil element")
+assert_str(nilable.minmax_by { |x| x || -5 }[0].inspect, "nil", "enum: minmax_by of a nil element")
+# And `includes?` asks `==`, as `Array#includes?` does: `<=>` answering 0
+# found a NaN in a list of NaNs.
+nan_list = List(Float64).new([0.0 / 0.0])
+assert_true(!nan_list.includes?(0.0 / 0.0), "enum: includes? asks == (no NaN is equal)")
+assert_true(List(Float64).new([1.5, 2.5]).includes?(2.5), "enum: includes? finds an equal float")
+# Of any element type, since `==` is all it asks: bounded `where Elem :
+# Comparable`, a list of arrays or of nilable numbers did not compile.
+assert_true(List(Array(Int32)).new([[1], [2]]).includes?([2]), "enum: includes? in a list of arrays")
+assert_true(List(Int32?).new([1, nil] of Int32?).includes?(nil), "enum: includes? of nil in a list of nilable numbers")
+
+# And the plain `max_by`, `min_by` and `minmax_by`, which took the nil their
+# `?` forms answer for "nothing" as nothing: a nil element that won raised
+# "max_by of an empty collection". A `List`, because `Array` has a `max_by`
+# and a `min_by` of its own in the prelude.
+nil_list = List.new([nil, 4] of Int32?)
+assert_true(nil_list.max_by { |x| x.nil? ? 9 : x }.nil?, "enum: max_by of a nil element")
+assert_true(nil_list.min_by { |x| x.nil? ? 0 : x }.nil?, "enum: min_by of a nil element")
+nil_ends = nil_list.minmax_by { |x| x.nil? ? 0 : x }
+assert_true(nil_ends[0].nil? && nil_ends[1] == 4, "enum: minmax_by of a nil element")
 
 puts "== std/list: immutable sequence"
 list = List.new([10, 20, 30]).appended(40)
@@ -434,6 +520,26 @@ assert_str(List.new([10, 20]).to_s, "List[10, 20]", "list: prints its elements")
 assert_eq(list[0], 10, "list: [] indexes")
 assert_eq(list[-1], 40, "list: [] counts from the end")
 assert_true(list[9]?.nil?, "list: []? answers nil past the end")
+# A list copies the caller's array once, at the boundary, and an append
+# copies the list once. `appended` wrote 4n words for an n-element list:
+# `dup`, the copy grown to twice its size by `<<`, and the constructor's
+# copy of the result. Counted with the collector held back, so the word
+# the trigger reads is every byte the one call allocated.
+handed = [1, 2, 3]
+kept = List.new(handed)
+handed << 4
+assert_eq(kept.size, 3, "list: the caller's array is not the list's")
+joined = kept.concatenated(List.new([7, 8]))
+assert_eq(joined.size, 5, "list: concatenated size")
+assert_eq(joined[3], 7, "list: concatenated keeps order")
+wide = List(Int64).new(Array(Int64).new(100_000) { |i| i.to_i64 })
+GC.disable
+words_before = GC.stats.bytes_since_collection
+wider = wide.appended(7_i64)
+words_after = GC.stats.bytes_since_collection
+GC.enable
+assert_eq(wider[100_000].to_i32, 7, "list: appended lands last")
+assert_true(words_after - words_before < 1_200_000_u64, "list: an append copies the list once (#{words_after - words_before} bytes for 100000 Int64s)")
 # `Enumerable#join` made the separator mandatory where `Array#join` and
 # `Indexable#join` default it to nothing, so the same call was a compile
 # error on a Slice and a List.
@@ -471,6 +577,14 @@ assert_eq(ListIterator.new(List.new([5, 6, 7])).select { |x| x > 5 }.to_a.size, 
   "list: selected lazily")
 assert_eq(SliceIterator.new(Slice(Int32).new(0)).to_a.size, 0,
   "slice: an empty source ends at once")
+# Each is shared with the adaptor built on it, as an array's iterator is:
+# structs, they were copied into `first`, and the rest began again.
+list_shared = ListIterator.new(List.new([1, 2, 3, 4]))
+list_head = list_shared.first(2).to_a
+assert_str("#{list_head} #{list_shared.to_a}", "[1, 2] [3, 4]", "list: an adaptor shares its iterator")
+slice_shared = SliceIterator.new(Slice(Int32).new(4) { |i| i + 1 })
+slice_head = slice_shared.first(2).to_a
+assert_str("#{slice_head} #{slice_shared.to_a}", "[1, 2] [3, 4]", "slice: an adaptor shares its iterator")
 puts "== std/derives: Show trait"
 assert_str(s1.show, "Score(10)", "derives: show")
 

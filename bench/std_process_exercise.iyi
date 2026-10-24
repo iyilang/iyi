@@ -1,0 +1,826 @@
+# Exercises `std/process`.
+#
+#     ./bin/iyi run bench/std_process_exercise.iyi
+#
+# The children are this program itself, started again through
+# `Process.executable` with a word saying what to be: so every platform
+# runs the same child, and what it answers is known exactly. Everything
+# the parent checks is printed as a fact that is the same on every run,
+# and a watchdog beside the checks turns a hang - a pipe nobody drains, a
+# wait that never ends - into a failure with a sentence.
+
+module bench/std_process_exercise
+
+import std/process::{Process, ProcessResult, ProcessError, ProcessStatus, ChildProcess, Redirect, ChildInputClosed}
+import std/env::{ENV}
+import std/dir::{Dir}
+{% unless flag?(:win32) %}
+  import std/signal::{Signal}
+{% end %}
+
+pub struct TaskFailed
+  def initialize
+  end
+end
+
+impl Error for TaskFailed
+  def message : String
+    "a sibling failed on purpose"
+  end
+end
+
+def fail(message : String) : NoReturn
+  puts "FAIL: #{message}"
+  stdout.flush
+  __iyi_exit(1)
+end
+
+def elapsed_ms(started : Int64) : Int64
+  (__iyi_monotonic_ns - started) // 1000000_i64
+end
+
+def base_name(path : String) : String
+  bytes = path.to_unsafe
+  index = path.bytesize - 1
+  while index >= 0
+    break if bytes[index] == 47_u8 || bytes[index] == 92_u8
+    index = index - 1
+  end
+  path[index + 1, path.bytesize - index - 1]
+end
+
+def directory_of(path : String) : String
+  name = base_name(path)
+  path[0, path.bytesize - name.bytesize - 1]
+end
+
+# Starts this program again with CREATE_BREAKAWAY_FROM_JOB, as a launcher
+# that means to outlive its parent does, says whether Windows let it - a
+# process in a job that does not allow it is refused "Access is denied" -
+# and waits for that one to end.
+def breakaway_start : String
+  {% if flag?(:win32) %}
+    line = "\"#{Process.executable || ""}\" exit 0"
+    wide_line = __iyi_win_env_wide(line.to_unsafe, line.bytesize)
+    startup = Pointer(UInt64).malloc(13_u64)
+    13.times { |index| startup[index] = 0_u64 }
+    startup[0] = 104_u64
+    made = Pointer(UInt64).malloc(3_u64)
+    nothing = Pointer(Void).new(0_u64)
+    # CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW.
+    if Std::Process::LibKernel32.CreateProcessW(Pointer(UInt16).new(0_u64), wide_line, nothing, nothing, 0,
+         0x01000000 | 0x08000000, nothing, Pointer(UInt16).new(0_u64), startup.as(Void*), made.as(Void*)) == 0
+      return "refused: error #{::LibC.GetLastError}"
+    end
+    ::LibC.WaitForSingleObject(Pointer(Void).new(made[0]), 10000)
+    ::LibC.CloseHandle(Pointer(Void).new(made[0]))
+    ::LibC.CloseHandle(Pointer(Void).new(made[1]))
+  {% end %}
+  "started"
+end
+
+# ── The child ────────────────────────────────────────────────────────────
+args = Program.args
+if mode = args[0]?
+  case mode
+  when "lines"
+    # Answers each line as it comes, so its parent can talk to it while it
+    # runs, and says when its input has ended.
+    while line = stdin.gets(chomp: true)
+      stdout.write("got: #{line}\n")
+      stdout.flush
+    end
+    stdout.write("input ended\n")
+  when "pid"
+    stdout.write("#{Process.pid}\n")
+  when "trap"
+    {% unless flag?(:win32) %}
+      # "ready" once the wait has parked, which installs the handler: said
+      # before it, a TERM sent at once met the default action and ended the
+      # child, which a slow machine - aarch64 under qemu - showed.
+      group do |g|
+        g.spawn do
+          Signal.wait(Signal::TERM)
+          stdout.write("asked to stop\n")
+          stdout.flush
+          __iyi_exit(3)
+          0
+        end
+        g.spawn do
+          sleep(50)
+          stdout.write("ready\n")
+          stdout.flush
+          0
+        end
+      end
+    {% end %}
+  when "spawninherit"
+    # Writes, starts itself sharing this stream, writes again: the three
+    # land in order, because a spawn that shares a stream flushes it first.
+    stdout.write("before\n")
+    grandchild = started_child(Process.spawn(Process.executable || "", ["argv", "inherited"]), "spawninherit")
+    grandchild.wait
+    stdout.write("after\n")
+  when "exec"
+    # Writes, then becomes this program again in another directory, as
+    # `argv replaced`: the write lands first, and nothing after the call.
+    stdout.write("before the exec\n")
+    refused = Process.exec(Process.executable || "", ["argv", "replaced"], chdir: args[1])
+    fail("exec answered: #{refused.message}")
+  when "execexit"
+    Process.exec(Process.executable || "", ["exit", "5"])
+    fail("exec into exit 5 answered")
+  when "execenv"
+    Process.exec(Process.executable || "", ["env", "IYI_EXEC_VALUE"], env: {"IYI_EXEC_VALUE" => "carried"})
+    fail("exec with env: answered")
+  when "execpid"
+    stdout.write("#{Process.pid}\n")
+    Process.exec(Process.executable || "", ["pid"])
+    fail("exec into pid answered")
+  when "execmissing"
+    refused = Process.exec("no-such-program-iyi-exec")
+    stdout.write("#{refused.message}\n")
+    stdout.write("still here\n")
+  when "execnoexec"
+    # A program that is found and that the system cannot run, asked for in
+    # another directory: the exec answers, and this program is where it was.
+    before = Dir.current
+    refused = Process.exec(args[1], chdir: "/")
+    stdout.write("#{refused.reason}\n")
+    stdout.write(Dir.current == before ? "in the same directory\n" : "moved to #{Dir.current}\n")
+  when "execfds"
+    # An open file of this program's, then the exec: the program it
+    # becomes counts what it holds besides its three streams.
+    held = File.open(args[1], "w")
+    Process.exec(Process.executable || "", ["fds"])
+    held.close
+    fail("exec into fds answered")
+  when "argv"
+    index = 1
+    while index < args.size
+      stdout.write("[#{args[index]}]\n")
+      index = index + 1
+    end
+  when "cat"
+    data = stdin.read_all
+    stdout.write(data)
+    stderr.write("read #{data.bytesize} bytes\n")
+  when "stdin"
+    stdout.write("stdin had #{stdin.read_all.bytesize} bytes\n")
+  when "flood"
+    total = args[1].to_i
+    block = "x" * 4096
+    written = 0
+    while written < total
+      stdout.write(block)
+      stderr.write(block)
+      written = written + block.bytesize
+    end
+  when "exit"
+    stdout.write("exiting\n")
+    stdout.flush
+    __iyi_exit(args[1].to_i)
+  when "panic"
+    raise "the child panicked on purpose"
+  when "has"
+    stdout.write(File.exists?(args[1]) ? "found\n" : "missing\n")
+  when "env"
+    index = 1
+    while index < args.size
+      stdout.write("#{Program.env(args[index]) || "<unset>"}\n")
+      index = index + 1
+    end
+  when "envorder"
+    # The names that begin with *args[1]*, in the order the block holds:
+    # sorted by name, as `env:` lays it out.
+    stdout.write(ENV.keys.select { |name| name.upcase.starts_with?(args[1]) }.join(" ") + "\n")
+  when "sleep"
+    sleep(args[1].to_i)
+    stdout.write("woke\n")
+  when "deaf"
+    stdout.write("not reading\n")
+  when "fds"
+    # What this child holds besides its three streams and the listing's
+    # own descriptor (Linux).
+    stdout.write("#{Dir.new("/proc/self/fd").children.size - 4}\n")
+  when "emfile"
+    # Started with room for its three streams and one more: the run's
+    # pipe finds no descriptor left.
+    refused = Process.run("/bin/true")
+    stdout.write(refused.is_a?(ProcessError) ? "#{refused.code}\n" : "ran\n")
+  when "parent"
+    # Starts itself to write *args[1]* in 1.5 seconds, and waits for it.
+    Process.run(Process.executable || "", ["late", args[1]], capture: false)
+  when "late"
+    sleep(1500)
+    File.write(args[1], "the grandchild outlived the cancel\n")
+  when "breakaway"
+    stdout.write("#{breakaway_start}\n")
+  else
+    fail("no child mode #{mode}")
+  end
+  stdout.flush
+  __iyi_exit(0)
+end
+
+# ── The parent ───────────────────────────────────────────────────────────
+me = Process.executable || fail("Process.executable answered nil")
+fail("Process.executable answered #{me}, which is not there") unless File.exists?(me)
+
+def ran(answer : ProcessResult | ProcessError | Cancelled, what : String) : ProcessResult
+  case answer
+  when ProcessResult
+    answer
+  when ProcessError
+    fail("#{what}: #{answer.message}")
+  else
+    fail("#{what}: answered Cancelled")
+  end
+end
+
+def started_child(answer : ChildProcess | ProcessError, what : String) : ChildProcess
+  case answer
+  when ChildProcess
+    answer
+  else
+    fail("#{what}: #{answer.message}")
+  end
+end
+
+def waited(answer : ProcessStatus | Cancelled, what : String) : ProcessStatus
+  case answer
+  when ProcessStatus
+    answer
+  else
+    fail("#{what}: wait answered Cancelled")
+  end
+end
+
+def text_of(answer : String | Cancelled, what : String) : String
+  case answer
+  when String
+    answer
+  else
+    fail("#{what}: the read answered Cancelled")
+  end
+end
+
+# Asks `ended?` for up to five seconds: a child just ended is collected by
+# the next ask, without a wait.
+def noticed_end(child : ChildProcess, what : String) : Nil
+  started = __iyi_monotonic_ns
+  until child.ended?
+    fail("ended? never said #{what} had ended") if elapsed_ms(started) > 5000_i64
+    sleep(5)
+  end
+end
+
+done = false
+group do |g|
+  g.spawn do
+    # Long enough for the proof whose child sleeps twenty seconds out.
+    slept = sleep(45000)
+    fail("a check did not finish within 45 seconds") unless slept.is_a?(Cancelled) || done
+    0
+  end
+
+  puts "== arguments reach the child as they left"
+  sent = ["plain", "two words", "", "quote\"inside", "back\\slash", "trail\\", "\\\\server\\share",
+          "tab\there", "ünïcode-çğış-日本", "$HOME ; echo no", "%PATH%", "a\"b\\\"c", "\\\"", "end\\\\",
+          "'single'", "*.iyi"]
+  argv = ["argv"] + sent
+  heard = ran(Process.run(me, argv), "argv")
+  expected = String.build { |text| sent.each { |arg| text << "[" << arg << "]\n" } }
+  unless heard.stdout == expected
+    fail("the child heard\n#{heard.stdout}instead of\n#{expected}")
+  end
+  puts "  #{sent.size} arguments came back as they went, spaces, quotes and backslashes included"
+
+  puts "== input in, output out, both at once"
+  input = String.build { |text| 20000.times { |line| text << "line " << line << " of the input\n" } }
+  echoed = ran(Process.run(me, ["cat"], input: input), "cat")
+  fail("cat answered #{echoed.stdout.bytesize} bytes of #{input.bytesize}") unless echoed.stdout == input
+  fail("cat's stderr was #{echoed.stderr.inspect}") unless echoed.stderr == "read #{input.bytesize} bytes\n"
+  puts "  #{input.bytesize} bytes through the child and back, and its stderr apart"
+
+  puts "== a child's input is empty unless it is given one"
+  empty = ran(Process.run(me, ["stdin"]), "stdin")
+  fail("the child's stdin: #{empty.stdout.inspect}") unless empty.stdout == "stdin had 0 bytes\n"
+  puts "  #{empty.stdout.chomp('\n')}"
+
+  puts "== a megabyte on each stream, drained together"
+  flood = ran(Process.run(me, ["flood", "1048576"]), "flood")
+  unless flood.stdout.bytesize == 1048576 && flood.stderr.bytesize == 1048576
+    fail("flood answered #{flood.stdout.bytesize} and #{flood.stderr.bytesize} bytes")
+  end
+  puts "  1048576 bytes of stdout and 1048576 of stderr"
+
+  puts "== an exit code, and a panic"
+  three = ran(Process.run(me, ["exit", "3"]), "exit 3")
+  fail("exit 3 answered #{three.exit_code}, success #{three.success?}") unless three.exit_code == 3 && !three.success?
+  fail("exit 3 said #{three.stdout.inspect}") unless three.stdout == "exiting\n"
+  panicked = ran(Process.run(me, ["panic"]), "panic")
+  fail("a panicking child answered #{panicked.exit_code}") unless panicked.exit_code == 1
+  fail("the panic's sentence: #{panicked.stderr.inspect}") unless panicked.stderr.includes?("the child panicked on purpose")
+  puts "  exit 3 is 3, and a panic is 1 with its sentence on stderr"
+
+  puts "== what cannot be started is an error"
+  missing = Process.run("no-such-program-iyi-process", ["x"])
+  case missing
+  when ProcessError
+    fail("not_found? is false for #{missing.code}") unless missing.not_found?
+    puts "  #{missing.message}"
+  else
+    fail("a missing program was not refused")
+  end
+  nowhere = Process.run(me, ["has", "x"], chdir: "no-such-directory-iyi-process")
+  case nowhere
+  when ProcessError
+    fail("the directory is not named: #{nowhere.message}") unless nowhere.directory == "no-such-directory-iyi-process"
+    fail("a missing directory's message: #{nowhere.message}") unless nowhere.message.ends_with?(" in no-such-directory-iyi-process: no such directory")
+    puts "  a missing directory: #{nowhere.reason}"
+  else
+    fail("a missing directory was not refused")
+  end
+
+  puts "== chdir is where the child runs"
+  here = ran(Process.run(me, ["has", base_name(me)], chdir: directory_of(me)), "has")
+  fail("in its own directory the child found #{here.stdout.inspect}") unless here.stdout == "found\n"
+  puts "  the child found its own file in the directory it was given"
+
+  puts "== the environment is this program's"
+  ENV["IYI_PROCESS_PROBE"] = "değer-日本"
+  told = ran(Process.run(me, ["env", "IYI_PROCESS_PROBE"]), "env")
+  fail("the child read #{told.stdout.inspect}") unless told.stdout == "değer-日本\n"
+  puts "  a variable set here arrives there: #{told.stdout.chomp('\n')}"
+
+  puts "== the child's environment can be given"
+  given = ran(Process.run(me, ["env", "IYI_PROCESS_GIVEN", "IYI_PROCESS_PROBE"],
+    env: {"IYI_PROCESS_GIVEN" => "given-değer", "IYI_PROCESS_PROBE" => nil}), "env:")
+  fail("with env: the child read #{given.stdout.inspect}") unless given.stdout == "given-değer\n<unset>\n"
+  fail("env: changed this program's own IYI_PROCESS_GIVEN") unless Program.env("IYI_PROCESS_GIVEN").nil?
+  fail("env: removed this program's own IYI_PROCESS_PROBE") unless Program.env("IYI_PROCESS_PROBE") == "değer-日本"
+  puts "  one variable given and one removed, for the child alone"
+  {% if !flag?(:win32) %}
+    # A name the environment holds twice - `execve` hands a program
+    # whatever table it is given - is removed whole for the child: only
+    # its first entry went, and the child read the second.
+    was = __iyi_environ
+    entries = 0
+    if was.address != 0_u64
+      while was[entries].address != 0_u64
+        entries = entries + 1
+      end
+    end
+    doubled = Pointer(UInt8*).malloc((entries + 3).to_u64)
+    entries.times { |i| doubled[i] = was[i] }
+    ["IYI_PROCESS_TWICE=first", "IYI_PROCESS_TWICE=second"].each_with_index do |text, i|
+      entry = Pointer(UInt8).malloc((text.bytesize + 1).to_u64)
+      entry.copy_from(text.to_unsafe, text.bytesize)
+      entry[text.bytesize] = 0_u8
+      doubled[entries + i] = entry
+    end
+    doubled[entries + 2] = Pointer(UInt8).new(0_u64)
+    __iyi_set_environ(doubled)
+    gone = ran(Process.run(me, ["env", "IYI_PROCESS_TWICE"], env: {"IYI_PROCESS_TWICE" => nil}), "env: twice")
+    fail("a name held twice and removed: the child read #{gone.stdout.inspect}") unless gone.stdout == "<unset>\n"
+    ENV.delete("IYI_PROCESS_TWICE")
+    puts "  a name held twice is removed whole for the child"
+  {% end %}
+  # A child started elsewhere does not inherit a `PWD` naming here, which
+  # `Path#expand` reads first: the child expanded its relative paths in
+  # the parent's directory. Unless `env:` says what `PWD` is.
+  ENV["PWD"] = Program.cwd || "/somewhere"
+  moved = ran(Process.run(me, ["env", "PWD"], chdir: directory_of(me)), "env")
+  fail("a child started elsewhere read PWD #{moved.stdout.inspect}") unless moved.stdout == "<unset>\n"
+  told_pwd = ran(Process.run(me, ["env", "PWD"], chdir: directory_of(me), env: {"PWD" => "/given"}), "env")
+  fail("a PWD given to it read #{told_pwd.stdout.inspect}") unless told_pwd.stdout == "/given\n"
+  stayed = ran(Process.run(me, ["env", "PWD"]), "env")
+  fail("a child started here read PWD #{stayed.stdout.inspect}") unless stayed.stdout == "#{Program.env("PWD")}\n"
+  puts "  and does not read a PWD naming this program's directory"
+  {% if flag?(:win32) %}
+    # One variable, as Windows has it: a name given in another case
+    # replaces it rather than standing beside it.
+    cased = ran(Process.run(me, ["env", "IYI_PROCESS_PROBE"], env: {"iyi_process_probe" => "lower"}), "env: cased")
+    fail("a name in another case: the child read #{cased.stdout.inspect}") unless cased.stdout == "lower\n"
+    puts "  a name in another case is the same variable"
+    # Sorted by name, as Windows keeps its own block. The whole
+    # `NAME=VALUE` text was sorted, and the `=` with it: the child read
+    # IYI_ORDER(X) IYI_ORDER1 IYI_ORDER iyi_order_.
+    ordered = ran(Process.run(me, ["envorder", "IYI_ORDER"],
+      env: {"IYI_ORDER1" => "b", "iyi_order_" => "d", "IYI_ORDER" => "a", "IYI_ORDER(X)" => "c"}), "env: order")
+    fail("the child's block held #{ordered.stdout.inspect}") unless ordered.stdout == "IYI_ORDER IYI_ORDER(X) IYI_ORDER1 iyi_order_\n"
+    puts "  the block is sorted by name: #{ordered.stdout.chomp('\n')}"
+  {% end %}
+
+  puts "== a child that stops reading"
+  deaf = ran(Process.run(me, ["deaf"], input: "x" * 4194304), "deaf")
+  fail("the deaf child said #{deaf.stdout.inspect}") unless deaf.stdout == "not reading\n" && deaf.success?
+  puts "  four megabytes offered, none read, and this program carries on"
+
+  puts "== the child's streams can be this program's own"
+  stdout.flush
+  shared = ran(Process.run(me, ["argv", "written straight to the terminal"], capture: false), "capture: false")
+  fail("capture: false still captured #{shared.stdout.inspect}") unless shared.stdout.empty? && shared.success?
+  puts "  and nothing captured"
+
+  puts "== the wait parks"
+  # The child's output is this program's own, so the only wait is for its
+  # end: a wait that held the thread would let the sibling tick none of
+  # its ticks before the child had ended. One tick tells the two apart, and
+  # the bound asks no more: at five, a Windows runner busy with two other
+  # builds ticked three times in the 800 ms (the v0.19.0 tag's run, job
+  # 119825970286), and a broken copy that should have hung later failed
+  # here instead.
+  ticks = 0
+  ticks_at_end = -1
+  group do |h|
+    h.spawn do
+      stdout.flush
+      slept = ran(Process.run(me, ["sleep", "800"], capture: false), "sleep")
+      ticks_at_end = ticks
+      fail("the sleeping child answered #{slept.exit_code}") unless slept.success?
+      0
+    end
+    h.spawn do
+      10.times do
+        sleep(50)
+        ticks = ticks + 1
+      end
+      0
+    end
+  end
+  fail("a sibling ticked #{ticks_at_end} times of 10 while the child ran") unless ticks_at_end >= 1
+  puts "  a sibling ticked while the child slept"
+
+  puts "== a cancelled run ends its child"
+  outcome = ""
+  started = __iyi_monotonic_ns
+  group do |h|
+    h.spawn do
+      answer = Process.run(me, ["sleep", "20000"])
+      outcome = answer.is_a?(Cancelled) ? "cancelled" : "not cancelled"
+      answer.is_a?(Cancelled) ? answer : 0
+    end
+    h.spawn do
+      sleep(300)
+      TaskFailed.new
+    end
+  end
+  waited = elapsed_ms(started)
+  fail("the run answered #{outcome}") unless outcome == "cancelled"
+  fail("the cancelled run took #{waited} ms: its child was not ended") unless waited < 10000
+  puts "  answered Cancelled, with its child ended"
+  {% if flag?(:win32) %}
+    # And what the child started: only the child was ended, and its own
+    # child went on and wrote its file.
+    marker = "#{directory_of(me)}\\iyi-process-grandchild.txt"
+    File.delete(marker) if File.exists?(marker)
+    group do |h|
+      h.spawn { Process.run(me, ["parent", marker]); 0 }
+      h.spawn do
+        sleep(500)
+        TaskFailed.new
+      end
+    end
+    sleep(2500)
+    fail("a cancelled run's grandchild went on: #{File.read(marker)}") if File.exists?(marker)
+    puts "  and what the child had started"
+    # A program the child starts may leave the child's job, as it may
+    # under a shell: the job allowed no breakaway, and the child's start
+    # with CREATE_BREAKAWAY_FROM_JOB was refused "Access is denied" (error
+    # 5). Measured, that start leaves this job alone, so it is allowed
+    # under `iyi run` too, whose own job forbids this program the same.
+    away = ran(Process.run(me, ["breakaway"]), "breakaway")
+    fail("the child's breakaway start was #{away.stdout.chomp('\n')}") unless away.stdout == "started\n"
+    puts "  and a program it starts may break away from the job"
+  {% end %}
+
+  {% if flag?(:win32) %}
+    puts "== a batch file is refused"
+    batch = "#{directory_of(me)}\\iyi-process-probe.cmd"
+    File.write(batch, "@echo ran\r\n")
+    refused = Process.run(batch)
+    File.delete(batch)
+    batch_reason = ""
+    case refused
+    when ProcessError
+      batch_reason = refused.reason
+      puts "  #{refused.reason}"
+    else
+      fail("a batch file was not refused")
+    end
+    # And by its bare name on PATH, as npm's and code's `.cmd` shims are
+    # found: it was "no such program", about a program that is there.
+    File.write(batch, "@echo ran\r\n")
+    kept_for_shim = Program.env("PATH") || ""
+    ENV["PATH"] = "#{directory_of(me)};#{kept_for_shim}"
+    shimmed = Process.run("iyi-process-probe")
+    ENV["PATH"] = kept_for_shim
+    File.delete(batch)
+    case shimmed
+    when ProcessError
+      fail("a .cmd found by its name was #{shimmed.reason}") unless shimmed.reason == batch_reason
+      puts "  and found by its bare name on PATH, the same"
+    else
+      fail("a .cmd found by its name was run")
+    end
+
+    puts "== a variable's name is one name in any case, in any script"
+    # `ÇAY` and `çay` are one variable on Windows; ASCII folding left
+    # `env: {"çay" => ...}` beside the variable it meant to replace.
+    ENV["IYI_ÇAY"] = "old"
+    folded = ran(Process.run(me, ["env", "IYI_ÇAY"], env: {"IYI_çay" => "new"}), "env")
+    removed = ran(Process.run(me, ["env", "IYI_ÇAY"], env: {"IYI_çay" => nil}), "env")
+    ENV.delete("IYI_ÇAY")
+    fail("a name in another case, replaced: #{folded.stdout.inspect}") unless folded.stdout == "new\n"
+    fail("a name in another case, removed: #{removed.stdout.inspect}") unless removed.stdout == "<unset>\n"
+    puts "  IYI_çay replaced and removed IYI_ÇAY"
+
+    puts "== text a Windows command line cannot carry is refused"
+    # Not UTF-8, an argument has no UTF-16 spelling: the conversion was
+    # null, and a null command line is Windows' cue to run the program
+    # with no arguments at all - it ran, and the run said it went well. In
+    # `env:`, the block's length was read at address 0.
+    not_utf8 = "caf\xE9"
+    said = [] of String
+    group do |h|
+      told_arg = h.spawn { Process.run(me, ["argv", "one", not_utf8]); 0 }
+      told_env = h.spawn { Process.run(me, ["env", "IYI_NOT_UTF8"], env: {"IYI_NOT_UTF8" => not_utf8}); 0 }
+      [told_arg.value, told_env.value].each do |outcome|
+        said << (outcome.is_a?(Panicked) ? outcome.message.to_s : "ran")
+      end
+      0
+    end
+    fail("an argument that is not UTF-8: #{said[0]}") unless said[0].includes?("not valid UTF-8")
+    fail("an environment value that is not UTF-8: #{said[1]}") unless said[1].includes?("not valid UTF-8")
+    puts "  #{said[0]}"
+
+    puts "== a quoted PATH entry with a non-ASCII name is searched"
+    # Its quotes were cut off by a count of characters, and `[]` counts
+    # bytes: every `ü` cost the name a byte off its end.
+    quoted = "#{directory_of(me)}\\iyi ünï dir"
+    Dir.mkdir_p(quoted)
+    File.write("#{quoted}\\iyi-process-ünï.exe", File.read(me))
+    kept_path = Program.env("PATH") || ""
+    ENV["PATH"] = "\"#{quoted}\";#{kept_path}"
+    found = Process.run("iyi-process-ünï", ["env", "IYI_PROCESS_PROBE"])
+    ENV["PATH"] = kept_path
+    case found
+    when ProcessResult
+      fail("the program found on a quoted entry said #{found.stdout.inspect}") unless found.stdout == "değer-日本\n"
+      puts "  found and ran from #{quoted}"
+    when ProcessError
+      fail("a quoted PATH entry was not searched: #{found.message}")
+    else
+      fail("the quoted PATH run answered Cancelled")
+    end
+
+    puts "== a working directory Windows will not take is named for what it is"
+    # 270 characters, past the 254 a working directory may have while long
+    # paths are off. Refused there as "the directory name is invalid", and
+    # that was told as "no such directory" about one that is there; where
+    # long paths are on, the child runs in it.
+    base = directory_of(me)
+    long = "#{base}\\#{"w" * (270 - base.bytesize - 1)}"
+    Dir.mkdir_p(long)
+    deep = Process.run(me, ["has", "x"], chdir: long)
+    case deep
+    when ProcessResult
+      fail("in a long working directory the child said #{deep.stdout.inspect}") unless deep.stdout == "missing\n"
+      puts "  this machine runs a program in a 270-character directory"
+    when ProcessError
+      fail("a long working directory was told as #{deep.reason.inspect}") if deep.not_found?
+      fail("a long working directory's refusal: #{deep.reason}") unless deep.reason.includes?("refused it as a working directory")
+      puts "  refused, and said so: #{deep.reason}"
+    else
+      fail("a long working directory answered Cancelled")
+    end
+    Dir.delete(long)
+  {% else %}
+    puts "== a child ended by a signal"
+    killed = ran(Process.run("/bin/sh", ["-c", "kill -9 $$"]), "sh")
+    fail("signal #{killed.signal}, exit #{killed.exit_code}") unless killed.signal == 9 && killed.exit_code == 137 && !killed.success?
+    puts "  signal 9, exit code 137"
+    {% if flag?(:linux) %}
+      puts "== the child holds its three streams and nothing else of this program's"
+      # An open file, and the poller's epoll, are this program's alone.
+      held_path = "#{directory_of(me)}/iyi-process-held.txt"
+      held = File.open(held_path, "w")
+      holds = ran(Process.run(me, ["fds"]), "fds")
+      held.close
+      File.delete(held_path)
+      fail("the child held #{holds.stdout.chomp('\n')} of this program's descriptors") unless holds.stdout == "0\n"
+      puts "  none of this program's descriptors, an open file and the poller's included"
+
+      puts "== a program out of descriptors is told so"
+      starved = ran(Process.run("/bin/sh", ["-c", "ulimit -n 4 && exec \"$0\" emfile", me]), "emfile")
+      unless starved.stdout == "24\n"
+        fail("a run out of descriptors was not refused with EMFILE (24): #{starved.stdout.inspect}, #{starved.stderr.inspect}")
+      end
+      puts "  refused with EMFILE, not permission denied"
+
+      puts "== a TERM sent to a child as it starts is the child's"
+      # A sibling shell TERMs every child of this program, over and over,
+      # while this program waits for a TERM of its own and starts children
+      # one after another. One caught between its clone and its execve ran
+      # this program's handler, which told this program's Signal.wait.
+      killer = "while :; do for t in /proc/$PPID/task/*/children; do kids=; read -r kids < \"$t\"; " \
+               "for k in $kids; do [ \"$k\" = $$ ] || kill -TERM \"$k\" 2>/dev/null; done; done; done"
+      heard_term = false
+      spawned = 0
+      group do |h|
+        h.spawn do
+          got = Signal.wait(Signal::TERM)
+          heard_term = true unless got.is_a?(Cancelled)
+          0
+        end
+        h.spawn do
+          Process.run("/bin/sh", ["-c", killer])
+          0
+        end
+        sleep(100)
+        while spawned < 1000 && !heard_term
+          Process.run("/bin/true")
+          spawned = spawned + 1
+        end
+        h.cancel_children
+      end
+      fail("this program's Signal.wait heard a TERM sent to a child, after #{spawned} children") if heard_term
+      puts "  #{spawned} children started under a stream of TERMs, and none reached this program"
+    {% end %}
+  {% end %}
+
+  puts "== a spawned child, talked to line by line while it runs"
+  talker = started_child(Process.spawn(me, ["lines"], input: Redirect::Pipe, output: Redirect::Pipe), "lines")
+  fail("a spawned child's pid is #{talker.pid}") unless talker.pid > 0_i64 && talker.pid != Process.pid
+  ["first", "second, with spaces", "ünïcode-日本"].each do |text|
+    written = talker.stdin.write("#{text}\n")
+    fail("writing #{text} to a running child was refused") unless written.nil?
+    heard_line = talker.stdout.read_line
+    fail("the child answered #{heard_line.inspect} to #{text}") unless heard_line == "got: #{text}"
+  end
+  # Asked once it has answered, while it waits for more.
+  fail("a child that waits for its input has ended") if talker.ended?
+  fail("a child that waits for its input has a status") unless talker.status.nil?
+  talker.stdin.close
+  rest = text_of(talker.stdout.read_all, "lines")
+  fail("after its input closed the child said #{rest.inspect}") unless rest == "input ended\n"
+  talked = waited(talker.wait, "lines")
+  fail("the talker ended #{talked.exit_code}") unless talked.success?
+  fail("an ended child says it runs") unless talker.ended? && talker.status
+  fail("its stdout read past its end") unless talker.stdout.read_line.nil?
+  puts "  three lines answered one at a time while the child ran, then its input closed and it ended 0"
+
+  puts "== a spawned child's pid is its own"
+  teller = started_child(Process.spawn(me, ["pid"], output: Redirect::Pipe), "pid")
+  told = text_of(teller.stdout.read_all, "pid")
+  waited(teller.wait, "pid")
+  fail("the child said its pid is #{told.inspect}, and the handle says #{teller.pid}") unless told == "#{teller.pid}\n"
+  puts "  the child's Process.pid is the handle's pid"
+
+  puts "== a spawned child's input is closed by a wait"
+  # `cat` reads to the end of its input: a wait that left the pipe open
+  # would wait for a child that waits for this program.
+  catter = started_child(Process.spawn(me, ["cat"], input: Redirect::Pipe, output: Redirect::Null, error: Redirect::Null), "cat")
+  catter.stdin.write("for the cat\n")
+  fail("a cat whose input the wait closed did not end 0") unless waited(catter.wait, "cat").success?
+  closed_after = catter.stdin.write("more")
+  fail("a write after the wait was not refused") unless closed_after.is_a?(ChildInputClosed)
+  fail("the refusal said #{closed_after.message}") unless closed_after.message == "process #{catter.pid} closed its input"
+  puts "  the wait closed the child's input and the child ended; a write after it was refused, ChildInputClosed"
+
+  puts "== both streams of a spawned child, read at once"
+  flooder = started_child(Process.spawn(me, ["flood", "1048576"], output: Redirect::Pipe, error: Redirect::Pipe), "flood")
+  out_bytes = 0
+  err_bytes = 0
+  group do |f|
+    f.spawn do
+      got = flooder.stderr.read_all
+      err_bytes = got.bytesize if got.is_a?(String)
+      0
+    end
+    got = flooder.stdout.read_all
+    out_bytes = got.bytesize if got.is_a?(String)
+  end
+  fail("the flood ended badly") unless waited(flooder.wait, "flood").success?
+  fail("read #{out_bytes} of stdout and #{err_bytes} of stderr") unless out_bytes == 1048576 && err_bytes == 1048576
+  puts "  #{out_bytes} bytes of stdout and #{err_bytes} of stderr, read on two tasks while the child wrote both"
+
+  puts "== the null device, both ways"
+  nulled = started_child(Process.spawn(me, ["stdin"], input: Redirect::Null, output: Redirect::Pipe), "stdin")
+  nothing_read = text_of(nulled.stdout.read_all, "stdin")
+  waited(nulled.wait, "stdin")
+  fail("a child given the null device as input read #{nothing_read.inspect}") unless nothing_read == "stdin had 0 bytes\n"
+  quiet = started_child(Process.spawn(me, ["flood", "262144"], output: Redirect::Null, error: Redirect::Null), "flood")
+  fail("a child writing to the null device did not end 0") unless waited(quiet.wait, "flood").success?
+  puts "  read nothing from it, and wrote 256 KiB of each stream into it"
+
+  puts "== an inherited stream is this program's own"
+  relayed = ran(Process.run(me, ["spawninherit"]), "spawninherit")
+  fail("the shared stream read #{relayed.stdout.inspect}") unless relayed.stdout == "before\n[inherited]\nafter\n"
+  puts "  a grandchild wrote into its parent's own stdout, in order"
+
+  puts "== a write to a child that closed its input"
+  deaf = started_child(Process.spawn(me, ["deaf"], input: Redirect::Pipe, output: Redirect::Pipe), "deaf")
+  fail("the deaf child did not say it was not reading") unless deaf.stdout.read_line == "not reading"
+  noticed_end(deaf, "the deaf child")
+  refused_write = deaf.stdin.write("x" * 1048576)
+  fail("a write to a child that had ended was not refused") unless refused_write.is_a?(ChildInputClosed)
+  waited(deaf.wait, "deaf")
+  puts "  refused, ChildInputClosed: the child had ended, and this program carried on"
+
+  puts "== a spawned child ended from here"
+  sleeper = started_child(Process.spawn(me, ["sleep", "30000"], output: Redirect::Null), "sleep")
+  fail("a sleeping child has ended") if sleeper.ended?
+  sleeper.kill
+  noticed_end(sleeper, "the killed child")
+  killed_end = waited(sleeper.wait, "sleep")
+  sleeper.kill
+  {% if flag?(:win32) %}
+    fail("killed: exit #{killed_end.exit_code}") unless killed_end.exit_code == 1 && killed_end.signal == 0
+    puts "  killed: exit code 1, ended? said so without a wait, and a second kill did nothing"
+  {% else %}
+    fail("killed: signal #{killed_end.signal}, exit #{killed_end.exit_code}") unless killed_end.signal == 9 && killed_end.exit_code == 137
+    puts "  killed: signal 9, exit code 137, ended? said so without a wait, and a second kill did nothing"
+
+    asleep = started_child(Process.spawn(me, ["sleep", "30000"], output: Redirect::Null), "sleep")
+    asleep.terminate
+    terminated = waited(asleep.wait, "sleep")
+    fail("terminated: signal #{terminated.signal}, exit #{terminated.exit_code}") unless terminated.signal == 15 && terminated.exit_code == 143
+    puts "  terminated: signal 15, exit code 143"
+
+    trapper = started_child(Process.spawn(me, ["trap"], output: Redirect::Pipe), "trap")
+    fail("the trapping child did not say it was ready") unless trapper.stdout.read_line == "ready"
+    trapper.signal(15)
+    fail("the trapping child did not hear its TERM") unless trapper.stdout.read_line == "asked to stop"
+    trapped = waited(trapper.wait, "trap")
+    fail("the trapping child ended #{trapped.exit_code}, signal #{trapped.signal}") unless trapped.exit_code == 3 && trapped.signal == 0
+    puts "  a TERM a child waits for is its to answer: it said so and ended 3"
+  {% end %}
+
+  puts "== a cancelled read ends its child"
+  stuck = started_child(Process.spawn(me, ["sleep", "30000"], output: Redirect::Pipe), "sleep")
+  read_cancelled = false
+  group do |c|
+    c.spawn do
+      read_cancelled = stuck.stdout.read_all.is_a?(Cancelled)
+      0
+    end
+    sleep(200)
+    c.cancel_children
+  end
+  fail("the cancelled read did not answer Cancelled") unless read_cancelled
+  stuck_end = stuck.status
+  fail("the cancelled read's child was left running") unless stuck_end
+  # Ended by the cancellation, not by its own end thirty seconds on: a kill
+  # is signal 9, and on Windows the exit code 1 the job is ended with.
+  {% if flag?(:win32) %}
+    fail("the cancelled read's child ended with exit code #{stuck_end.exit_code}, not the kill's 1") unless stuck_end.exit_code == 1
+  {% else %}
+    fail("the cancelled read's child ended with signal #{stuck_end.signal}") unless stuck_end.signal == 9
+  {% end %}
+  puts "  the read answered Cancelled, with the child it read from ended and collected"
+
+  puts "== a program replaced by another"
+  replaced = ran(Process.run(me, ["exec", directory_of(me)]), "exec")
+  fail("the exec printed #{replaced.stdout.inspect}") unless replaced.stdout == "before the exec\n[replaced]\n" && replaced.success?
+  passed_on = ran(Process.run(me, ["execexit"]), "execexit")
+  fail("a program exec'd into exit 5 ended #{passed_on.exit_code}") unless passed_on.exit_code == 5 && passed_on.stdout == "exiting\n"
+  carried = ran(Process.run(me, ["execenv"]), "execenv")
+  fail("exec's env: arrived as #{carried.stdout.inspect}") unless carried.stdout == "carried\n"
+  stayed = ran(Process.run(me, ["execmissing"]), "execmissing")
+  unless stayed.stdout == "cannot run no-such-program-iyi-exec: no such program\nstill here\n"
+    fail("an exec that could not start a program answered #{stayed.stdout.inspect}")
+  end
+  {% unless flag?(:win32) %}
+    kept = ran(Process.run(me, ["execpid"]), "execpid")
+    pids = kept.stdout.split('\n')
+    fail("the pid before and after the exec: #{kept.stdout.inspect}") unless pids.size >= 2 && pids[0] == pids[1] && !pids[0].empty?
+    puts "  the program it became kept its pid"
+  {% end %}
+  {% if flag?(:linux) %}
+    exec_held_path = "#{directory_of(me)}/iyi-process-exec-held.txt"
+    exec_held = ran(Process.run(me, ["execfds", exec_held_path]), "execfds")
+    File.delete(exec_held_path) if File.exists?(exec_held_path)
+    fail("after an exec the program held #{exec_held.stdout.chomp('\n')} of the old one's descriptors") unless exec_held.stdout == "0\n"
+    puts "  and held none of the old program's descriptors, an open file and the poller's included"
+  {% end %}
+  {% unless flag?(:win32) %}
+    garbage = "#{directory_of(me)}/iyi-process-not-a-program"
+    File.write(garbage, "not a program, and no #! line\n")
+    ran(Process.run("/bin/chmod", ["755", garbage]), "chmod")
+    unrunnable = ran(Process.run(me, ["execnoexec", garbage]), "execnoexec")
+    File.delete(garbage)
+    unless unrunnable.stdout == "not a format this system can run\nin the same directory\n"
+      fail("an exec the system could not run answered #{unrunnable.stdout.inspect}")
+    end
+    puts "  an exec the system could not run, asked for in another directory, left this program where it was"
+  {% end %}
+  puts "  its output landed after this program's, its exit code and env: carried, and a refusal left it running"
+
+  done = true
+  g.cancel_children
+end
+
+puts "ALL CHECKS PASSED"

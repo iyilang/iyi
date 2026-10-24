@@ -10,16 +10,18 @@
 # 4. closed peer detection (read returns empty string on EOF)
 # 5. refused connection when target port has no listener
 
-import std/socket
-using std/socket::{IyiSocket}
+import std/socket::{IyiSocket, SocketError, IPv6Address}
+import std/env::{ENV}
+import std/gc::{GC}
 
 args = Program.args
 if args.size > 0 && args[0] == "refused"
   probe_server = IyiSocket.listen(0)
   refused_port = probe_server.local_port
   probe_server.close
-  # Attempt connection to closed port; must raise "cannot connect"
-  IyiSocket.connect("127.0.0.1", refused_port)
+  # Attempt connection to closed port: a `SocketError`, which `or_panic`
+  # turns into the panic "cannot connect to ...: connection refused"
+  IyiSocket.connect("127.0.0.1", refused_port).or_panic
   __iyi_exit(0)
 end
 
@@ -62,6 +64,108 @@ raise "short_read: chunk 3 size mismatch" if c3.bytesize != 4
 raise "short_read: chunk 3 content mismatch" if c3 != "CDEF"
 puts "short_read: ok"
 
+# A small read asked for with room for much more costs what arrived: a
+# heap buffer of the whole 64 KB per read was garbage the size of the
+# room for every answer - a server reading 64 KB at a time made 64 KB of
+# it per 30-byte request. std/http's buffer of its own measured it there
+# until the server stopped asking the socket for strings.
+GC.disable
+lean_before = GC.stats.bytes_since_collection
+100.times do
+  client.write("thirty bytes of one request..\n")
+  got = conn.read(65536).or_panic
+  raise "small_read: #{got.bytesize} bytes, not 30" unless got.bytesize == 30
+end
+lean_bytes = (GC.stats.bytes_since_collection - lean_before) // 100_u64
+GC.enable
+raise "small_read: a 30-byte read with room for 64 KB allocated #{lean_bytes} bytes" unless lean_bytes < 1024_u64
+puts "small_read: ok"
+
+# Each end names the other as the other names itself.
+raise "remote_address: #{conn.remote_address.inspect}, not #{client.local_address}" unless conn.remote_address == client.local_address
+raise "remote_port: #{conn.remote_port.inspect}, not #{client.local_port}" unless conn.remote_port == client.local_port
+raise "remote_address: the client's #{client.remote_address.inspect}" unless client.remote_address == "127.0.0.1" && client.remote_port == port
+puts "remote_address: ok"
+
+# Nagle's algorithm off at both ends of a TCP connection, as the socket's
+# own TCP_NODELAY option reads back (`getsockopt`): the connected end and
+# the accepted one, as Go's net package leaves its own. On, a write
+# behind an unacknowledged one waited out the peer's delayed ACK, 40 ms
+# on Linux, and every new https:// connection between std/http's ends
+# paid it twice. `nodelay = false` turns Nagle back on, and true off.
+raise "nodelay: the connected end has Nagle on (TCP_NODELAY reads 0)" unless client.nodelay?
+raise "nodelay: the accepted end has Nagle on (TCP_NODELAY reads 0)" unless conn.nodelay?
+client.nodelay = false
+raise "nodelay: TCP_NODELAY still set after nodelay = false" if client.nodelay?
+client.nodelay = true
+raise "nodelay: TCP_NODELAY not set again after nodelay = true" unless client.nodelay?
+puts "nodelay: ok"
+
+# A connect waits at most `timeout_ms` for its handshake. A listener whose
+# backlog of one is full and never accepted: Linux drops the SYNs past it,
+# and a connect without a limit waited the kernel's two minutes of
+# retries.
+{% if flag?(:linux) %}
+  full = IyiSocket.listen("127.0.0.1", 0, 1)
+  queued = [] of IyiSocket
+  timed_out = 0
+  4.times do
+    started = __iyi_monotonic_ns
+    tried = IyiSocket.connect("127.0.0.1", full.local_port, timeout_ms: 300)
+    took = (__iyi_monotonic_ns - started) // 1000000_i64
+    if tried.is_a?(IyiSocket)
+      queued << tried
+    elsif tried.is_a?(SocketError)
+      raise "connect_timeout: #{tried.message}, not a timeout" unless tried.timed_out?
+      raise "connect_timeout: a 300 ms limit took #{took} ms" unless took >= 250 && took < 1500
+      timed_out = timed_out + 1
+    end
+  end
+  raise "connect_timeout: no connect past the backlog timed out" if timed_out == 0
+  queued.each { |s| s.close }
+  full.close
+  puts "connect_timeout: ok"
+{% else %}
+  puts "connect_timeout: ok"
+{% end %}
+
+# The bound holds for the handshake on every platform, wherever the
+# connect waits for it. On Windows it waits inside `ConnectEx`, and that
+# park had no deadline: a connect to 10.255.255.1, which nothing answers,
+# with a 2000 ms bound answered "timed out" after the kernel's own 21 s
+# of SYN retries (#131). An answer that came well past its bound, or a
+# timeout that came before it, fails here; an answer before the bound
+# that is not a timeout is the network's, and leaves this endpoint
+# unable to show the bound.
+def connect_bound(host : String, port : Int32, bound : Int32) : Nil
+  started = __iyi_monotonic_ns
+  tried = IyiSocket.connect(host, port, timeout_ms: bound)
+  took = (__iyi_monotonic_ns - started) // 1000000_i64
+  raise "connect_bound: a connect to #{host} was cancelled" if tried.is_a?(Cancelled)
+  tried.close if tried.is_a?(IyiSocket)
+  timed_out = tried.is_a?(SocketError) && tried.timed_out?
+  answer = tried.is_a?(SocketError) ? tried.message : "connected"
+  raise "connect_bound: a #{bound} ms bound on a connect to #{host}:#{port} answered after #{took} ms: #{answer}" if took >= bound + 1000
+  raise "connect_bound: a #{bound} ms bound on a connect to #{host}:#{port} timed out early, after #{took} ms" if timed_out && took < bound
+end
+
+# The issue's own: 10.255.255.1 is private and routed nowhere, so its
+# SYNs are dropped wherever no network answers for it. On Linux
+# (x86-64), where `connect_to`'s wait already held the bound, it timed
+# out after 2002 ms on the machine this was written on.
+connect_bound("10.255.255.1", 5432, 2000)
+{% if flag?(:win32) %}
+  # And one this exercise controls: Windows retries a connect a port
+  # refuses for about 2 s before it gives up (8c, `localhost_v6`), so a
+  # 500 ms bound on a loopback port nobody holds runs out first, network
+  # or none.
+  unheld = IyiSocket.listen("127.0.0.1", 0)
+  unheld_port = unheld.local_port
+  unheld.close
+  connect_bound("127.0.0.1", unheld_port, 500)
+{% end %}
+puts "connect_bound: ok"
+
 # 4. Closed peer detection (EOF)
 client.close
 raise "closed_peer: client close failed" unless client.closed?
@@ -74,6 +178,122 @@ server.close
 raise "closed_peer: conn close failed" unless conn.closed?
 raise "closed_peer: server close failed" unless server.closed?
 puts "closed_peer: ok"
+
+# A half-close: `close_write` ends the sending half, the peer reads what
+# came and then its end, and this end still reads what the peer answers
+# after it. Once both ends have closed the connection there is nothing
+# to shut down, and Linux refuses it (ENOTCONN), a `SocketError`; a
+# listener it takes, so that is no refusal to hold it to, and darwin's
+# and Windows' answers here are unmeasured.
+half_server = IyiSocket.listen("127.0.0.1", 0)
+half_client = IyiSocket.connect("127.0.0.1", half_server.local_port).or_panic
+half_peer = half_server.accept.or_panic
+half_peer.read_timeout_ms = 2000
+half_client.read_timeout_ms = 2000
+half_client.write("last words").or_panic
+if refusal = half_client.close_write
+  raise "close_write: a connected socket refused: #{refusal.message}"
+end
+half_heard = ""
+while true
+  case peer_piece = half_peer.read(64)
+  in String
+    break if peer_piece.empty?
+    half_heard = half_heard + peer_piece
+  in Cancelled, SocketError
+    raise "close_write: the peer's read waited for an end that never came: #{peer_piece.message}"
+  end
+end
+raise "close_write: the peer heard #{half_heard.inspect} before the end" unless half_heard == "last words"
+half_peer.write("an answer after the end").or_panic
+half_peer.close
+half_answer = ""
+while true
+  case client_piece = half_client.read(64)
+  in String
+    break if client_piece.empty?
+    half_answer = half_answer + client_piece
+  in Cancelled, SocketError
+    raise "close_write: the answer after the end was not read: #{client_piece.message}"
+  end
+end
+raise "close_write: the answer after the end read as #{half_answer.inspect}" unless half_answer == "an answer after the end"
+{% if flag?(:linux) %}
+  raise "close_write: a connection both ends closed was not refused" unless half_client.close_write.is_a?(SocketError)
+{% end %}
+half_client.close
+half_server.close
+puts "close_write: ok"
+
+# 5. A peer that went away is an answer: writing to it ends in a
+#    `SocketError` that says so - not a panic, and not SIGPIPE killing the
+#    process. The first writes land in the kernel's buffers; the peer's
+#    reset comes back on a later one.
+gone_server = IyiSocket.listen(0)
+gone_client = IyiSocket.connect("127.0.0.1", gone_server.local_port).or_panic
+gone_conn = gone_server.accept.or_panic
+gone_client.close
+chunk = "x" * 65536
+tries = 0
+wrote = gone_conn.write(chunk)
+while wrote.is_a?(Int32)
+  tries = tries + 1
+  raise "disconnect: #{tries} writes to a closed peer all went through" if tries > 2000
+  wrote = gone_conn.write(chunk)
+end
+raise "disconnect: expected a SocketError, got #{wrote.inspect}" unless wrote.is_a?(SocketError)
+raise "disconnect: #{wrote.message} is not a disconnect" unless wrote.disconnected?
+gone_conn.close
+gone_server.close
+puts "disconnect: ok (#{wrote.message})"
+
+# 6. A connect nobody answers is refused as a value.
+refusing = IyiSocket.listen(0)
+refused_port = refusing.local_port
+refusing.close
+refused = IyiSocket.connect("127.0.0.1", refused_port)
+raise "refused: expected a SocketError, got #{refused.inspect}" unless refused.is_a?(SocketError)
+raise "refused: #{refused.message}" unless refused.message.includes?("connection refused")
+puts "refused: ok (#{refused.message})"
+
+# 7. One fiber reading and another writing the same socket, both parked
+#    at once: the write fills the kernel's buffers while nobody reads
+#    them, the read waits for bytes nobody has sent, and each is woken by
+#    its own half of the socket.
+duplex_server = IyiSocket.listen(0)
+duplex_client = IyiSocket.connect("127.0.0.1", duplex_server.local_port).or_panic
+duplex_conn = duplex_server.accept.or_panic
+payload = "y" * 8388608
+heard = ""
+sent = 0
+received = 0
+group do |g|
+  g.spawn do
+    heard = duplex_conn.read(16).or_panic
+    0
+  end
+  g.spawn do
+    sent = duplex_conn.write(payload).or_panic
+    0
+  end
+  g.spawn do
+    sleep(50)
+    duplex_client.write("ping").or_panic
+    while received < payload.bytesize
+      got = duplex_client.read(65536).or_panic
+      break if got.bytesize == 0
+      received = received + got.bytesize
+    end
+    0
+  end
+end
+raise "duplex: the reader heard #{heard.inspect}" unless heard == "ping"
+raise "duplex: the writer sent #{sent} of #{payload.bytesize}" unless sent == payload.bytesize
+raise "duplex: the peer received #{received}" unless received == payload.bytesize
+duplex_client.close
+duplex_conn.close
+duplex_server.close
+puts "duplex: ok"
 
 # 5. A read parks rather than blocks, and a cancelled task's read answers
 #    `Cancelled` (SPEC.md III.4.2). Three tasks on one thread: a reader
@@ -99,10 +319,14 @@ group do |g|
     case peer = IyiSocket.connect("127.0.0.1", quiet_port)
     in Cancelled
       parked_answer = "connect cancelled"
+    in SocketError
+      parked_answer = peer.message
     in IyiSocket
-      case peer.read(16)
+      case answer = peer.read(16)
       in Cancelled
         parked_answer = "cancelled"
+      in SocketError
+        parked_answer = answer.message
       in String
         parked_answer = "read"
       end
@@ -125,5 +349,515 @@ held.each { |h| h.close }
 listener.close
 raise "parked read: expected cancelled, got #{parked_answer.inspect}" unless parked_answer == "cancelled"
 puts "parked_read_cancelled: ok"
+
+# 8. IPv6: a listener on ::1, a connect through the literal a URL writes
+#    (`[::1]`), bytes each way, and both ends' addresses written back the
+#    RFC 5952 way. A listener on `::` takes IPv6 alone, on every platform.
+six = IyiSocket.listen("::1", 0)
+raise "ipv6: listening on #{six.local_address}" unless six.local_address == "::1"
+six_client = IyiSocket.connect("[::1]", six.local_port).or_panic
+six_conn = six.accept.or_panic
+six_client.write("over six")
+heard6 = six_conn.read(64).or_panic
+raise "ipv6: the server read #{heard6.inspect}" unless heard6 == "over six"
+six_conn.write("and back")
+back6 = six_client.read(64).or_panic
+raise "ipv6: the client read #{back6.inspect}" unless back6 == "and back"
+raise "ipv6: the accepted end is at #{six_conn.local_address}" unless six_conn.local_address == "::1"
+six_client.close
+six_conn.close
+six.close
+wide = IyiSocket.listen("::", 0)
+four = IyiSocket.connect("127.0.0.1", wide.local_port)
+raise "ipv6: an IPv4 connect reached a listener on ::" unless four.is_a?(SocketError)
+wide.close
+# A refusal names an IPv6 peer in its brackets: `::1:57456` was an address
+# with no port.
+gone = IyiSocket.listen("::1", 0)
+gone_port = gone.local_port
+gone.close
+refused6 = IyiSocket.connect("::1", gone_port)
+raise "ipv6: a refused connect answered #{refused6.inspect}" unless refused6.is_a?(SocketError) && refused6.operation.includes?("[::1]:#{gone_port}")
+{"2001:DB8:0:0:1:0:0:1" => "2001:db8::1:0:0:1",
+ "2001:db8:0:1:1:1:1:1" => "2001:db8:0:1:1:1:1:1",
+ "0:0:1:0:0:0:1:0"      => "0:0:1::1:0",
+ "::ffff:192.0.2.1"     => "::ffff:192.0.2.1",
+ "64:ff9b::1.2.3.4"     => "64:ff9b::102:304",
+ "1::"                  => "1::",
+ "::"                   => "::"}.each do |text, written|
+  parsed = IyiSocket.parse_ipv6(text).to_s
+  raise "ipv6: #{text} was written #{parsed}" unless parsed == written
+end
+puts "ipv6: ok"
+
+# 8b. `localhost` in any case, and with one trailing dot: a host name's
+#     case is not part of it (RFC 4343), and getaddrinfo, Python and curl
+#     all answer 127.0.0.1. Matched exactly, `LOCALHOST`, `Localhost` and
+#     `localhost.` were "cannot resolve address".
+["LOCALHOST", "Localhost", "localhost.", "LocalHost."].each do |name|
+  resolved = IyiSocket.parse_ip(name).to_s
+  raise "localhost: #{name} resolved to #{resolved}" unless resolved == "127.0.0.1"
+end
+named = IyiSocket.listen("LOCALHOST", 0)
+named_client = IyiSocket.connect("localhost.", named.local_port).or_panic
+named_conn = named.accept.or_panic
+named_client.write("by name")
+heard_named = named_conn.read(64).or_panic
+raise "localhost: the server read #{heard_named.inspect}" unless heard_named == "by name"
+named_client.close
+named_conn.close
+named.close
+puts "localhost: ok"
+
+# 8c. A connect to `localhost` reaches a listener on ::1 alone: Windows
+#     names both addresses and dev servers often bind ::1, where the
+#     connect went to 127.0.0.1 only and was "connection refused". The
+#     two are raced (RFC 8305), ::1 started 250 ms after 127.0.0.1 or at
+#     its refusal, so Windows' 2 s refusal of 127.0.0.1 is not waited
+#     for: ::1 was reached in 2017 ms there when it was tried only after.
+v6_only = IyiSocket.listen("::1", 0)
+v6_began = __iyi_monotonic_ns
+v6_client = IyiSocket.connect("localhost", v6_only.local_port)
+v6_took = (__iyi_monotonic_ns - v6_began) // 1000000_i64
+raise "localhost_v6: the connect answered #{v6_client.inspect}" unless v6_client.is_a?(IyiSocket)
+raise "localhost_v6: ::1 waited for 127.0.0.1's refusal, #{v6_took} ms" unless v6_took < 1500
+v6_conn = v6_only.accept.or_panic
+v6_client.write("over ::1")
+heard_v6 = v6_conn.read(64).or_panic
+raise "localhost_v6: the server read #{heard_v6.inspect}" unless heard_v6 == "over ::1"
+v6_client.close
+v6_conn.close
+v6_only.close
+puts "localhost_v6: ok (#{v6_took} ms)"
+
+# 8d. `localhost` refused at both addresses: one error naming both, in
+#     the order they were raced - 127.0.0.1 first, since a listener here
+#     binds `localhost` there. It answered 127.0.0.1's refusal alone.
+nobody = IyiSocket.listen("127.0.0.1", 0)
+nobody_port = nobody.local_port
+nobody.close
+both_refused = IyiSocket.connect("localhost", nobody_port)
+raise "localhost_race: the connect answered #{both_refused.inspect}" unless both_refused.is_a?(SocketError)
+expected_refusal = "cannot connect to localhost:#{nobody_port}: 127.0.0.1:#{nobody_port} connection refused; [::1]:#{nobody_port} connection refused"
+raise "localhost_race: #{both_refused.message}, not #{expected_refusal}" unless both_refused.message == expected_refusal
+raise "localhost_race: both refused is not refused?" unless both_refused.refused?
+puts "localhost_race: ok (#{both_refused.message})"
+
+# 9. A unix socket: a listener at a path, a connection to it, bytes each
+#    way, the path as the listener's address and no port. Closing the
+#    listener takes the path away - a connect to it is then a value, and
+#    the path can be listened on again.
+unix_dir = ENV.fetch("TMPDIR", "/tmp")
+unix_separator = "/"
+{% if flag?(:win32) %}
+  unix_dir = ENV.fetch("TEMP", ".")
+  unix_separator = "\\"
+{% end %}
+unix_dir = unix_dir[0, unix_dir.bytesize - 1] if unix_dir.ends_with?(unix_separator)
+unix_path = "#{unix_dir}#{unix_separator}iyi-socket-#{__iyi_monotonic_ns}.sock"
+unix = IyiSocket.listen_unix(unix_path)
+raise "unix: the listener is at #{unix.local_address.inspect}" unless unix.local_address == unix_path
+unix_client = IyiSocket.connect_unix(unix_path).or_panic
+unix_conn = unix.accept.or_panic
+# Both unix ends say so, and a TCP end does not: std/tls reads a port
+# only where there is one.
+unless unix_client.unix? && unix_conn.unix? && !client.unix? && !conn.unix?
+  raise "unix?: the unix ends say #{unix_client.unix?} and #{unix_conn.unix?}, the TCP ends #{client.unix?} and #{conn.unix?}"
+end
+unix_client.write("over a path")
+heard_unix = unix_conn.read(64).or_panic
+raise "unix: the server read #{heard_unix.inspect}" unless heard_unix == "over a path"
+unix_conn.write("and back")
+back_unix = unix_client.read(64).or_panic
+raise "unix: the client read #{back_unix.inspect}" unless back_unix == "and back"
+unix_client.close
+unix_conn.close
+# And an accept that parks before anybody connects - on Windows that is
+# `AcceptEx` on a unix socket, where the one above found its connection
+# already queued.
+parked_heard = ""
+group do |g|
+  g.spawn do
+    waiting = unix.accept.or_panic
+    parked_heard = waiting.read(64).or_panic
+    waiting.close
+    0
+  end
+  g.spawn do
+    sleep(20)
+    late = IyiSocket.connect_unix(unix_path).or_panic
+    late.write("after the park")
+    late.close
+    0
+  end
+end
+raise "unix: the parked accept read #{parked_heard.inspect}" unless parked_heard == "after the park"
+unix.close
+gone = IyiSocket.connect_unix(unix_path)
+raise "unix: a connect after the listener closed answered #{gone.inspect}" unless gone.is_a?(SocketError)
+again = IyiSocket.listen_unix(unix_path)
+again.close
+puts "unix: ok"
+
+# 10. Timeouts. A read that waits past `read_timeout_ms` answers a
+#     `SocketError` that says so, and the connection still works; a read
+#     answered before its deadline leaves no deadline behind - its fiber
+#     sleeps past it and lives, and its next read, with no deadline, waits
+#     for its bytes; a write into a peer that never reads times
+#     out the same way. A sibling ends each wait after two seconds if the
+#     timeout does not, so a broken one is a failure here and not a hang.
+t_server = IyiSocket.listen(0)
+t_client = IyiSocket.connect("127.0.0.1", t_server.local_port).or_panic
+t_conn = t_server.accept.or_panic
+t_conn.read_timeout_ms = 100
+timed_read = ""
+timed_ms = 0_i64
+read_done = false
+group do |g|
+  g.spawn do
+    t_started = __iyi_monotonic_ns
+    t_answer = t_conn.read(16)
+    timed_ms = (__iyi_monotonic_ns - t_started) // 1000000_i64
+    read_done = true
+    case t_answer
+    in SocketError
+      timed_read = t_answer.timed_out? ? "timed out" : t_answer.message
+    in String
+      timed_read = "read #{t_answer.inspect}"
+    in Cancelled
+      timed_read = "cancelled"
+    end
+    0
+  end
+  g.spawn do
+    200.times do
+      sleep(10) unless read_done
+    end
+    t_client.write("late") unless read_done
+    0
+  end
+end
+raise "timeout: the read answered #{timed_read}, the timeout is not kept" unless timed_read == "timed out"
+raise "timeout: the read gave up after #{timed_ms} ms of 100" if timed_ms < 90
+t_client.write("after")
+raise "timeout: the connection did not survive its timeout" unless t_conn.read(16).or_panic == "after"
+t_early = ""
+t_slept = 0_i64
+group do |g|
+  g.spawn do
+    t_conn.read_timeout_ms = 200
+    t_early = t_conn.read(16).or_panic
+    t_started = __iyi_monotonic_ns
+    sleep(400)
+    t_slept = (__iyi_monotonic_ns - t_started) // 1000000_i64
+    0
+  end
+  g.spawn do
+    sleep(20)
+    t_client.write("soon")
+    0
+  end
+end
+raise "timeout: the early read got #{t_early.inspect}" unless t_early == "soon"
+raise "timeout: the read's old deadline woke its fiber #{400 - t_slept} ms early" if t_slept < 390
+# And the next wait, a read with no deadline of its own, is not ended by
+# the one the read before it left behind. The sleep above no longer shows
+# that: a sleep writes its own deadline over the one left in the heap,
+# and a fiber already woken is not queued twice. A deadline left behind
+# under a read with none answered it "timed out" at the old deadline.
+t_conn.read_timeout_ms = 200
+t_next = ""
+group do |g|
+  g.spawn do
+    t_conn.read(16).or_panic
+    t_conn.read_timeout_ms = nil
+    t_answer = t_conn.read(16)
+    case t_answer
+    in SocketError
+      t_next = t_answer.timed_out? ? "timed out" : t_answer.message
+    in String
+      t_next = t_answer
+    in Cancelled
+      t_next = "cancelled"
+    end
+    0
+  end
+  g.spawn do
+    sleep(20)
+    t_client.write("soon")
+    sleep(380)
+    t_client.write("late")
+    0
+  end
+end
+raise "timeout: a read with no deadline, after one answered before its own, answered #{t_next}" unless t_next == "late"
+t_client.write_timeout_ms = 100
+t_chunk = "t" * 65536
+t_wrote = t_client.write(t_chunk)
+t_writes = 0
+group do |g|
+  g.spawn do
+    while t_wrote.is_a?(Int32) && t_writes < 5000
+      t_writes = t_writes + 1
+      t_wrote = t_client.write(t_chunk)
+    end
+    0
+  end
+  g.spawn do
+    200.times do
+      sleep(10) if t_wrote.is_a?(Int32)
+    end
+    t_conn.close if t_wrote.is_a?(Int32)
+    0
+  end
+end
+t_last = t_wrote
+raise "timeout: the write answered #{t_last.inspect}" unless t_last.is_a?(SocketError) && t_last.timed_out?
+t_client.close
+t_conn.close unless t_conn.closed?
+t_server.close
+# One write of 64 MB to a peer that never reads parks when the kernel's
+# buffer is full, as every other write does, and keeps its deadline: on
+# Windows the whole buffer went to one `send`, which took it, held the
+# thread while it copied and never consulted the deadline - a gigabyte
+# took 5.2 s with nothing else running.
+b_server = IyiSocket.listen("127.0.0.1", 0)
+b_client = IyiSocket.connect("127.0.0.1", b_server.local_port).or_panic
+b_conn = b_server.accept.or_panic
+b_client.write_timeout_ms = 300
+b_big = "b" * 67108864
+b_answer = "unwritten"
+b_sibling_ms = -1_i64
+b_started = __iyi_monotonic_ns
+group do |g|
+  g.spawn do
+    w = b_client.write(b_big)
+    b_answer = w.is_a?(SocketError) && w.timed_out? ? "timed out" : w.inspect
+    0
+  end
+  g.spawn do
+    sleep(50)
+    b_sibling_ms = (__iyi_monotonic_ns - b_started) // 1000000_i64
+    0
+  end
+end
+raise "timeout: a 64 MB write to a peer that never reads answered #{b_answer}" unless b_answer == "timed out"
+raise "timeout: a 64 MB write held its thread: a 50 ms sleep beside it woke at #{b_sibling_ms} ms" if b_sibling_ms > 1000
+b_client.close
+b_conn.close
+b_server.close
+puts "timeout: ok"
+
+# 11. A reader parked on a socket keeps nothing of what it last read. The
+# bytes land in a 4 KB buffer on the stack, and while that buffer's frame
+# was the one that waited, every parked connection held its last read
+# where the collector scans: a read of eight bytes that spelled an
+# object's address kept the object alive. The address is sent hidden
+# behind a key, and computed and checked in frames of their own, so only
+# the reader's stack could hold it bare.
+#
+# It is sent twice, sixteen bytes. A frame over a page probes it: the
+# function steps the stack pointer down a page and stores a zero word
+# there before using it (issue #130). With the buffer inlined into
+# `IyiSocket#read`, that frame is 4,408 bytes on Linux x86_64 and its one
+# probe store lands on the buffer's first eight bytes, so a reader that
+# came back for its next read zeroed the one copy of the address before
+# it parked, and the broken copy below passed. A store is one aligned
+# word, so it can wipe one copy and not both.
+class Victim
+  @a = 0_i64
+  @b = 0_i64
+  @c = 0_i64
+  @d = 0_i64
+  @e = 0_i64
+end
+
+VICTIM_KEY = 0x5A5A5A5A5A5A5A5A_u64
+
+@[NoInline]
+def victim_address : UInt64
+  Victim.new.object_id ^ VICTIM_KEY
+end
+
+@[NoInline]
+def victim_bytes(word : UInt64) : String
+  String.new(16) do |buffer|
+    16.times { |i| buffer[i] = ((word ^ VICTIM_KEY).unsafe_shr((8 * (i % 8)).to_u64) & 0xFF_u64).to_u8 }
+  end
+end
+
+# The key the check unhides the address with is read from memory after the
+# collection, so an optimised build cannot have the bare address ready in
+# a register the collection spills and scans.
+class VictimKey
+  @@key = VICTIM_KEY
+
+  def self.key : UInt64
+    @@key
+  end
+end
+
+@[NoInline]
+def victim_collected?(word : UInt64) : Bool
+  IyiMark.collect
+  IyiRoots.base_of(word ^ VictimKey.key) == 0_u64
+end
+
+k_server = IyiSocket.listen(0)
+k_port = k_server.local_port
+k_kept = false
+group do |g|
+  g.spawn do
+    reader = k_server.accept.or_panic
+    got = reader.read(64).or_panic
+    raise "retain: the reader got #{got.bytesize} bytes, not the 16 sent" unless got.bytesize == 16
+    reader.read(64).or_panic
+    reader.close
+    0
+  end
+  g.spawn do
+    writer = IyiSocket.connect("127.0.0.1", k_port).or_panic
+    hidden = victim_address
+    writer.write(victim_bytes(hidden)).or_panic
+    sleep(50)
+    k_kept = !victim_collected?(hidden)
+    writer.write("x").or_panic
+    writer.close
+    0
+  end
+end
+k_server.close
+raise "retain: a reader parked on its next read kept alive the object its last read's bytes pointed at" if k_kept
+puts "retain: ok"
+
+# A backlog is the number of connections the kernel holds for a listener
+# nobody has accepted from yet. Windows' own question: darwin's kernel
+# caps a backlog at 128 and leaves the connects past it retrying rather
+# than refused, so there the same 220 would wait out a SYN timeout each.
+{% if flag?(:win32) %}
+  # Windows capped every one at 200 unless it is asked through
+  # SOMAXCONN_HINT, and turned the 201st connect away, "connection
+  # refused", where Linux holds it: 220 connects to a backlog of 256 lost
+  # 20.
+  b_server = IyiSocket.listen("127.0.0.1", 0, 256)
+  b_port = b_server.local_port
+  b_held = [] of IyiSocket
+  b_refused = 0
+  220.times do
+    answer = IyiSocket.connect("127.0.0.1", b_port)
+    if answer.is_a?(IyiSocket)
+      b_held << answer
+    else
+      b_refused = b_refused + 1
+    end
+  end
+  b_held.each { |held| held.close }
+  b_server.close
+  raise "backlog: #{b_refused} of 220 connects to a backlog of 256 were refused" unless b_refused == 0
+  puts "backlog: ok"
+{% end %}
+
+# A connection closed by one task while another is parked reading it - a
+# server answering a request and closing while its next read waits. The
+# peer reads the answer, then the end. On Windows the close reset the
+# connection instead, the read posted beneath the parked one being still
+# the kernel's, and the peer's first read answered "reset by the peer":
+# the answer written before the close was lost.
+c_server = IyiSocket.listen("127.0.0.1", 0)
+c_client = IyiSocket.connect("127.0.0.1", c_server.local_port).or_panic
+c_conn = c_server.accept.or_panic
+c_parked = "not asked"
+group do |g|
+  g.spawn do
+    asked = c_conn.read(64).or_panic
+    c_conn.write("reply to #{asked}").or_panic
+    c_parked = c_conn.read(64).is_a?(Cancelled) ? "cancelled" : "answered"
+    0
+  end
+  g.spawn do
+    c_client.write("req").or_panic
+    sleep(50)
+    c_conn.close
+    0
+  end
+end
+c_heard = c_client.read(64)
+c_after = c_client.read(64)
+c_client.close
+c_server.close
+raise "closed_under_read: the peer read #{c_heard.inspect}, not the answer" unless c_heard == "reply to req"
+raise "closed_under_read: after the answer the peer read #{c_after.inspect}, not the end" unless c_after == ""
+raise "closed_under_read: the parked read #{c_parked}" unless c_parked == "cancelled"
+puts "closed_under_read: ok"
+
+# A peer that resets after exactly one 4096-byte chunk: a read asking for
+# more takes the chunk, and the next read answers the reset. The read's
+# second receive met the reset and dropped it, and Linux reports a reset
+# once - the receive after it answers an end of file - so a transfer the
+# peer aborted read as one that ended cleanly. A close with bytes unread
+# in its queue is the reset; Linux's, since that is the platform measured.
+{% if flag?(:linux) %}
+  r_server = IyiSocket.listen("127.0.0.1", 0)
+  r_client = IyiSocket.connect("127.0.0.1", r_server.local_port).or_panic
+  r_conn = r_server.accept.or_panic
+  r_conn.write("r" * 4096).or_panic
+  r_client.write("unread").or_panic
+  sleep(50)
+  r_conn.close
+  sleep(50)
+  r_first = r_client.read(65536).or_panic
+  r_second = r_client.read(65536)
+  r_client.close
+  r_server.close
+  raise "reset_after_chunk: the first read got #{r_first.bytesize} bytes, not 4096" unless r_first.bytesize == 4096
+  raise "reset_after_chunk: after the chunk the read answered #{r_second.inspect}, not the reset" unless r_second.is_a?(SocketError) && r_second.disconnected?
+  puts "reset_after_chunk: ok"
+{% end %}
+
+# A socket as a stream: lines through `to_io`, which is the same stream
+# every time - two lines sent in one write reach the second `read_line`
+# from the first one's read-ahead - a long line through the buffers, and a
+# read the socket refuses as the end, which `read_failed?` tells apart.
+stream_server = IyiSocket.listen("127.0.0.1", 0)
+stream_port = stream_server.local_port
+stream_heard = [] of String
+long_line = "x" * 100_000
+group do |g|
+  g.spawn do
+    peer = stream_server.accept.or_panic
+    peer.read_timeout_ms = 2000
+    while line = peer.to_io.read_line(chomp: true)
+      stream_heard << line
+      peer.to_io.puts "echo #{line.bytesize > 20 ? line.bytesize.to_s : line}"
+      peer.to_io.flush
+    end
+    peer.to_io.close
+    0
+  end
+  g.spawn do
+    talker = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+    io = talker.to_io
+    io.write("one\ntwo\n")
+    io.flush
+    replies = [io.read_line(chomp: true), io.read_line(chomp: true)]
+    raise "stream: two lines in one write answered #{replies}" unless replies == ["echo one", "echo two"]
+    io.puts long_line
+    io.flush
+    long_reply = io.read_line(chomp: true)
+    raise "stream: a 100,000-byte line answered #{long_reply}" unless long_reply == "echo 100000"
+    io.close
+    0
+  end
+end
+raise "stream: the server heard #{stream_heard.size} lines" unless stream_heard.size == 3 && stream_heard[2] == long_line
+quiet_talker = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+quiet_peer = stream_server.accept.or_panic
+quiet_peer.read_timeout_ms = 50
+quiet = quiet_peer.to_io
+raise "stream: a timed-out read is the end, and read_failed? says it failed" unless quiet.read_line.nil? && quiet.read_failed?
+quiet.close
+quiet_talker.close
+stream_server.close
+puts "stream: ok"
 
 puts "socket_exercise: all checks passed"

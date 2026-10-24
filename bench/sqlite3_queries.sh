@@ -15,7 +15,9 @@
 #
 #     bash bench/sqlite3_queries.sh
 #
-# Needs `make`, `shards`, the network and libsqlite3. Both shards are pinned.
+# Needs `make`, `shards`, the network and libsqlite3 - on Windows, sqlite3.lib
+# on `LIB` and sqlite3.dll on `PATH` (the Windows job makes both from
+# sqlite.org's DLL). Both shards are pinned.
 #
 # Exits non-zero if any bind or fill fails, if either arm fails to build, or if
 # the two answer differently. The rows are the measurement: a boundary that

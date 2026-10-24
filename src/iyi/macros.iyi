@@ -4,17 +4,19 @@
 # `getter` is here because every sample declares a field with it, and a field
 # reader written by hand five times in a row is what a macro is for. The
 # variants Crystal's `object.cr` carries — lazy, nilable, `?`, raise-on-nil —
-# are not here, because no sample writes one.
+# are not here, because no sample writes one. An untyped default, `getter n =
+# 3`, is the field's initialiser `@n = 3`; it expanded to `def n = 3`.
 class Object
   macro getter(*names)
     {% for name in names %}
       {% if name.is_a?(TypeDeclaration) %}
-        @{{ name.var.id }} : {{ name.type }}
+        @{{ name }}
 
         def {{ name.var.id }} : {{ name.type }}
           @{{ name.var.id }}
         end
       {% else %}
+        {% if name.is_a?(Assign) %} @{{ name }} {% name = name.target %} {% end %}
         def {{ name.id }}
           @{{ name.id }}
         end
@@ -24,8 +26,11 @@ class Object
 
   # `record Point, x : Int32, y : Int32` — a struct whose fields are its
   # constructor. Crystal's version also generates `copy_with` and `clone` and
-  # takes default values; this one takes what the Kemal port writes, which is
-  # a name and a list of typed fields.
+  # takes default values; this one takes a name, a list of typed fields, and
+  # — as Crystal's does — a block whose body is the struct's own:
+  # `record Vec, x : Float64 do def norm ... end end`. Without the `yield`
+  # the block compiled and its methods were nowhere, and the error landed
+  # at the first call instead of at the `record`.
   macro record(name, *fields)
     struct {{ name.id }}
       {% for field in fields %}
@@ -34,13 +39,15 @@ class Object
 
       def initialize({{ fields.map { |field| "@#{field}".id }.splat }})
       end
+
+      {{ yield }}
     end
   end
 
   macro property(*names)
     {% for name in names %}
       {% if name.is_a?(TypeDeclaration) %}
-        @{{ name.var.id }} : {{ name.type }}
+        @{{ name }}
 
         def {{ name.var.id }} : {{ name.type }}
           @{{ name.var.id }}
@@ -50,10 +57,8 @@ class Object
           @{{ name.var.id }} = value
         end
       {% else %}
-        def {{ name.id }}
-          @{{ name.id }}
-        end
-
+        getter {{ name }}
+        {% name = name.target if name.is_a?(Assign) %}
         def {{ name.id }}=(value)
           @{{ name.id }} = value
         end

@@ -148,6 +148,7 @@ lib LibLLVM
   fun get_linkage = LLVMGetLinkage(global : ValueRef) : LLVM::Linkage
   fun set_linkage = LLVMSetLinkage(global : ValueRef, linkage : LLVM::Linkage)
   fun set_dll_storage_class = LLVMSetDLLStorageClass(global : ValueRef, class : LLVM::DLLStorageClass)
+  fun set_visibility = LLVMSetVisibility(global : ValueRef, viz : LLVM::Visibility)
 
   fun set_alignment = LLVMSetAlignment(v : ValueRef, bytes : UInt)
 
@@ -212,6 +213,23 @@ lib LibLLVM
   fun is_a_alloca_inst = LLVMIsAAllocaInst(val : ValueRef) : ValueRef
   fun is_a_get_element_ptr_inst = LLVMIsAGetElementPtrInst(val : ValueRef) : ValueRef
   fun is_a_bit_cast_inst = LLVMIsABitCastInst(val : ValueRef) : ValueRef
+  # iyi: wasm32's roots (src/compiler/iyi/wasm_roots.cr) walk each value's
+  # uses and each call, and store what a call may outlive into a slot.
+  fun is_a_call_inst = LLVMIsACallInst(val : ValueRef) : ValueRef
+  fun is_a_invoke_inst = LLVMIsAInvokeInst(val : ValueRef) : ValueRef
+  fun is_a_intrinsic_inst = LLVMIsAIntrinsicInst(val : ValueRef) : ValueRef
+  fun is_a_phi_node = LLVMIsAPHINode(val : ValueRef) : ValueRef
+  fun is_a_landing_pad_inst = LLVMIsALandingPadInst(val : ValueRef) : ValueRef
+  fun is_a_argument = LLVMIsAArgument(val : ValueRef) : ValueRef
+  fun get_instruction_parent = LLVMGetInstructionParent(inst : ValueRef) : BasicBlockRef
+  fun get_first_use = LLVMGetFirstUse(val : ValueRef) : UseRef
+  fun get_next_use = LLVMGetNextUse(u : UseRef) : UseRef
+  fun get_user = LLVMGetUser(u : UseRef) : ValueRef
+  fun position_builder_before = LLVMPositionBuilderBefore(builder : BuilderRef, instr : ValueRef)
+  fun get_basic_block_terminator = LLVMGetBasicBlockTerminator(bb : BasicBlockRef) : ValueRef
+  fun get_normal_dest = LLVMGetNormalDest(invoke_inst : ValueRef) : BasicBlockRef
+  fun get_num_successors = LLVMGetNumSuccessors(term : ValueRef) : UInt
+  fun get_successor = LLVMGetSuccessor(term : ValueRef, i : UInt) : BasicBlockRef
   fun get_operand = LLVMGetOperand(val : ValueRef, index : UInt) : ValueRef
   fun set_instr_param_alignment = LLVMSetInstrParamAlignment(instr : ValueRef, idx : AttributeIndex, align : UInt)
   fun add_call_site_attribute = LLVMAddCallSiteAttribute(c : ValueRef, idx : AttributeIndex, a : AttributeRef)

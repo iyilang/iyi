@@ -15,8 +15,10 @@
 # exits non-zero with the failing section named.
 
 # 1. Field width: values narrower than width pad to the minimum width.
-import std/format
-using std/format::{sprintf, printf}
+import std/format::{sprintf, printf}
+import std/gc::{GC}
+import std/int
+import std/float
 
 w1 = sprintf("%10s", "hello")
 raise "format: width string failed" if w1 != "     hello"
@@ -75,6 +77,12 @@ raise "format: precision float round down failed" if p3 != "3.14"
 p4 = sprintf("%.4f", 3.14159)
 raise "format: precision float round up failed" if p4 != "3.1416"
 
+# Past nineteen places the digits come from the bignum rather than from two
+# words, and so do the rounding and the tie: 3 * 2^-22 rounds up at the
+# twentieth place, and 2^-21 ends in an exact half there.
+p4b = sprintf("%.20f", 7.152557373046875e-07)
+raise "format: precision float round up past nineteen places failed" if p4b != "0.00000071525573730469"
+
 p5 = sprintf("%.1f", 99.99)
 raise "format: precision float carry failed" if p5 != "100.0"
 
@@ -95,6 +103,21 @@ raise "format: precision float 0 round down failed" if p9 != "3"
 # even digit. The rounding block at the end of this file is the rest of it.
 p10 = sprintf("%.0f", 2.5)
 raise "format: precision float tie to even failed" if p10 != "2"
+p10b = sprintf("%.20f", 4.76837158203125e-07)
+raise "format: precision float tie to even past nineteen places failed" if p10b != "0.00000047683715820312"
+
+# A value and places that two words hold are formatted in them: through
+# the bignum, `%.2f` built three of them a call and took 400 ns, three
+# times Go's. The bytes, not the time, are the check: 590 a call then.
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  GC.disable
+  quick_before = GC.stats.bytes_since_collection
+  quick_total = 0
+  1000.times { |i| quick_total = quick_total + sprintf("%.2f", i * 0.37).bytesize }
+  quick_bytes = (GC.stats.bytes_since_collection - quick_before) // 1000_u64
+  GC.enable
+  raise "format: a %.2f costs #{quick_bytes} bytes, past 200 (#{quick_total})" if quick_bytes > 200_u64
+{% end %}
 
 # The value's digits, every one of them. These printed the shortest
 # digits - the ones that round-trip - padded with zeros: `%.0f` of 1e23
@@ -123,6 +146,30 @@ raise "format: precision string width failed" if p12 != "   cin"
 
 p13 = sprintf("%-6.3s", "cinnabar")
 raise "format: precision string left-aligned failed" if p13 != "cin   "
+
+# A precision counts characters and writes the ones it keeps into one
+# buffer, and `sprintf` writes its pieces into one buffer. A character
+# at a time onto a string of its own, `%.5000s` allocated 12,635,202
+# bytes, and `%%` five thousand times 12,564,999, the text copied once
+# per character or per piece: `%.100000s` took 13 s. The bytes are the
+# check.
+p18 = sprintf("[%.3s|%.2s|%4.1s]", "héllo", "😀😀😀", "éa")
+raise "format: precision string of several bytes failed: #{p18}" if p18 != "[hél|😀😀|   é]"
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  long_text = "x" * 10000
+  percents = "%%" * 5000
+  GC.disable
+  cut_before = GC.stats.bytes_since_collection
+  cut = sprintf("%.5000s", long_text)
+  cut_bytes = GC.stats.bytes_since_collection - cut_before
+  percents_before = GC.stats.bytes_since_collection
+  percents_out = sprintf(percents)
+  percents_bytes = GC.stats.bytes_since_collection - percents_before
+  GC.enable
+  raise "format: a %.5000s costs #{cut_bytes} bytes, past 1000000" if cut_bytes > 1000000_u64 || cut.bytesize != 5000
+  raise "format: %% five thousand times costs #{percents_bytes} bytes, past 1000000" if percents_bytes > 1000000_u64 || percents_out.bytesize != 5000
+  puts "    precision: %.5000s and %% five thousand times allocate under 1000000 bytes"
+{% end %}
 
 puts "    precision: integer minimum digits, string truncation, and float rounding verified"
 
@@ -193,7 +240,12 @@ raise "format: negative float plus sign failed" if n10 != "   -3.14"
 n11 = sprintf("%+8.2f", 3.14)
 raise "format: positive float plus sign failed" if n11 != "   +3.14"
 
-puts "    negative: signed values, explicit + and space signs, and negative non-decimal bases"
+# The sign flags hold in every base that writes a `-`: `%+x` of 255 printed
+# ff where -255 printed -ff, as did an Int128's. `%u` alone stays unsigned.
+n12 = sprintf("%+x|% o|%+#b|%+X|% x|%+u", 255, 8, 5, 255_i128, 0, 5)
+raise "format: sign flags in other bases failed" if n12 != "+ff| 10|+0b101|+FF| 0|5"
+
+puts "    negative: signed values, explicit + and space signs in every base, and negative non-decimal bases"
 
 # 7. Boundary cases: wider than field, precision 0, minimum and maximum integers.
 bd1 = sprintf("%3s", "abcdef")
@@ -272,6 +324,11 @@ raise "format: boundary max uint64 dec failed" if bd21 != "18446744073709551615"
 bd22 = sprintf("%x", max_u64)
 raise "format: boundary max uint64 hex failed" if bd22 != "ffffffffffffffff"
 
+# `%u` of a negative Int64 is its unsigned twin, as an Int32's already was:
+# it printed -5.
+bd23 = sprintf("%u", -5_i64)
+raise "format: boundary negative int64 unsigned failed" if bd23 != "18446744073709551611"
+
 puts "    boundary: wider than field, precision 0, and minimum/maximum 32-bit and 64-bit integers"
 
 # Rounding, which is where `%f` and `%e` disagreed with every reference
@@ -295,6 +352,132 @@ raise "round: exponent tie below" unless sprintf("%.2e", 9.995) == "9.99e+00"
 raise "round: exponent tie above" unless sprintf("%.2e", 1.005) == "1.00e+00"
 raise "round: an exact quarter is exact" unless sprintf("%.3f", 0.0625) == "0.062"
 raise "round: nothing else moved" unless sprintf("%.4f", 3.14159) == "3.1416"
+# The exponent of the value, not of its shortest digits: 1e23 is stored as
+# 99999999999999991611392, whose shortest spelling is one place up, and at
+# that exponent 15 places round to 1.000000000000000e+23.
+raise "round: the exponent is the value's" unless sprintf("%.15e", 1e23) == "9.999999999999999e+22" && sprintf("%.16e", 1e-6) == "9.9999999999999995e-07"
 puts "    rounding: half to even, and the value decides its own tie"
+
+# `%g`, the shorter notation, by C's rule: `%e` when the exponent is under
+# -4 or at least the precision, `%f` otherwise, trailing zeros trimmed
+# unless `#` keeps them. It was "unknown format specifier '%g'", a panic,
+# where C, Python, Go and the other language all answer. Checked against
+# the other language over 510 cases; C and Python agree with these.
+raise "general: default precision" unless sprintf("%g", 3.14159) == "3.14159"
+raise "general: trailing zeros trimmed" unless sprintf("%g", 100.0) == "100"
+raise "general: the point goes with them" unless sprintf("%g", 2.0) == "2"
+raise "general: large switches to exponent" unless sprintf("%g", 1e10) == "1e+10"
+raise "general: at the precision switches" unless sprintf("%g", 1234567.0) == "1.23457e+06"
+raise "general: under it stays fixed" unless sprintf("%g", 123456.0) == "123456"
+raise "general: small switches below 1e-4" unless sprintf("%g", 0.00001) == "1e-05"
+raise "general: 1e-4 stays fixed" unless sprintf("%g", 0.0001) == "0.0001"
+raise "general: rounding moves the exponent" unless sprintf("%g", 999999.5) == "1e+06"
+raise "general: precision is significant digits" unless sprintf("%.3g", 123456.789) == "1.23e+05"
+raise "general: precision 0 is 1" unless sprintf("%.0g", 2.5) == "2"
+raise "general: zero" unless sprintf("%g", 0.0) == "0" && sprintf("%g", -0.0) == "-0"
+raise "general: # keeps the zeros" unless sprintf("%#g", 1.5) == "1.50000" && sprintf("%#.3g", 1e10) == "1.00e+10"
+raise "general: uppercase" unless sprintf("%G", 1.23456789e-5) == "1.23457E-05"
+raise "general: width and flags" unless sprintf("%10g|", -2.25) == "     -2.25|" && sprintf("%-8g|", 0.5) == "0.5     |" && sprintf("%+g", 7) == "+7" && sprintf("%08g", 1.5) == "000001.5"
+raise "general: infinity" unless sprintf("%g", 1.0 / 0.0) == "Infinity"
+raise "general: the exponent is the value's" unless sprintf("%.16g", 1e23) == "9.999999999999999e+22" && sprintf("%.17g", 1e-19) == "9.9999999999999998e-20"
+raise "general: NaN takes the sign flags" unless sprintf("%+g|% f|%+e", 0.0 / 0.0, 0.0 / 0.0, 0.0 / 0.0) == "+NaN| NaN|+NaN"
+# 400 significant digits of 0.0001 are 403 places, which `%f` refuses:
+# `%g` took its fixed notation from `%f` and panicked inside the limit.
+raise "general: every precision up to the limit" unless sprintf("%.400g", 0.0001).bytesize == 68
+puts "    general: %g and %G choose the shorter notation and trim it"
+
+# The sentence a format is refused with, asked of a task of its own so
+# the panic is an outcome rather than the end of this program.
+def refusal(&block : -> String) : String
+  said = "formatted"
+  group do |g|
+    attempt = g.spawn { block.call }
+    outcome = attempt.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+# A verb of several bytes is named whole in the refusal: its lead byte
+# read as a character of its own was `%Ã` for `%é`.
+verb_said = refusal { sprintf("%é", 1) }
+raise "format: a verb of two bytes was refused as #{verb_said.inspect}" unless verb_said == "unknown format specifier '%é'"
+
+# Just under a power of ten that no double spells: `%.15e` of 1e23, which
+# is 99999999999999991611392, rounded its fifteen places up to the next
+# power and kept the exponent it had guessed from the shortest spelling,
+# 1.000000000000000e+23. C and Python answer 9.999999999999999e+22.
+e1 = sprintf("%.15e|%.16e|%.16g|%.16e|%.17g", 1e23, 1e-7, 1e23, 1e-75, 1e23)
+raise "format: an exponent under a power of ten failed: #{e1}" if e1 != "9.999999999999999e+22|9.9999999999999995e-08|9.999999999999999e+22|9.9999999999999996e-76|9.9999999999999992e+22"
+e2 = sprintf("%.2e|%.0e|%.2e|%.3e", 9.995, 9.5, 99.5, 5e-324)
+raise "format: an exponent a rounding carries failed: #{e2}" if e2 != "9.99e+00|1e+01|9.95e+01|4.941e-324"
+
+# 9. The rest of the tower, and a character by its code point. `%d` of an
+# `Int8`, `UInt32` or `Float32` panicked "wants a number"; an `Int128` is
+# written from its own digits, past 64 bits. `%c` of 233 panicked "233 is
+# out of char range", and `%c` of "é" answered its first byte.
+t1 = sprintf("[%d|%+05d|%x|%u]", -5_i8, 5_i16, 255_u16, 4000000000_u32)
+raise "format: tower int failed: #{t1}" if t1 != "[-5|+0005|ff|4000000000]"
+t2 = sprintf("[%.2f|%e]", 1.5_f32, 2.5_f32)
+raise "format: tower float failed: #{t2}" if t2 != "[1.50|2.500000e+00]"
+t3 = sprintf("[%d|%#x|%-6d|%08d|%.3d]", 170141183460469231731687303715884105727_i128, -255_i128, 7_i128, -7_i128, 0_i128)
+raise "format: Int128 failed: #{t3}" if t3 != "[170141183460469231731687303715884105727|-0xff|7     |-0000007|000]"
+t4 = sprintf("[%X|%b|%.0d]", 340282366920938463463374607431768211455_u128, 5_u128, 0_u128)
+raise "format: UInt128 failed: #{t4}" if t4 != "[FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF|101|]"
+c1 = sprintf("[%c|%c|%c|%3c]", 0xE9, "é", 0x1F600, 65)
+raise "format: %c of a code point failed: #{c1}" if c1 != "[é|é|😀|  A]"
+# `%c` of a `UInt16`, `UInt32` or `UInt64` is its code point too: all
+# three were the first character of their digits, `%c` of 65_u32 "6", and
+# past the last code point `%c` of 0x110000_u32 was "1".
+c2 = sprintf("[%c|%c|%c]", 65_u32, 233_u16, 0x1F600_u64)
+raise "format: %c of an unsigned code point failed: #{c2}" if c2 != "[A|é|😀]"
+c3 = refusal { sprintf("%c", 0x110000_u32) }
+raise "format: %c past the last code point was #{c3.inspect}" if c3 != "%c of 1114112: not a Unicode code point"
+# `%s` and `%p` of a `Float32` are its own text: widened first, 0.1_f32
+# was 0.10000000149011612.
+t5 = sprintf("[%s|%p|%-4s]", 0.1_f32, 0.1_f32, 1.5_f32)
+raise "format: Float32 text failed: #{t5}" if t5 != "[0.1|0.1|1.5 ]"
+# `%u` is the word's bits at the word's own width: `%u` of -5_i8 and of
+# -5_i16 printed 18446744073709551611, an `Int64`'s, and of -5_i128 -5.
+t6 = sprintf("[%u|%u|%u|%d]", -5_i8, -5_i16, -5_i128, -5_i16)
+raise "format: unsigned of a narrow or wide word failed: #{t6}" if t6 != "[251|65531|340282366920938463463374607431768211451|-5]"
+# `%p` and `%s` of an `Int128` are its own text, and `%c` its code point:
+# `%p` of 65_i128 was "65" in quotes, and `%c` of 65_u128 was refused.
+t8 = sprintf("[%p|%-4s|%c|%3c]", 65_i128, -7_i128, 65_u128, 233_i128)
+raise "format: Int128 text and code point failed: #{t8}" if t8 != "[65|-7  |A|  é]"
+# The float verbs of a `UInt8` are its double's, as of every other width:
+# it had a branch of its own under each integer verb and none under these,
+# so `%f` of 200_u8 panicked "wants a number" where `%d` printed 200.
+t9 = sprintf("[%f|%e|%E|%g|%G|%.1f|%d|%x|%c]", 200_u8, 200_u8, 0_u8, 255_u8, 7_u8, 7_u8, 200_u8, 200_u8, 65_u8)
+raise "format: the float verbs of a UInt8 failed: #{t9}" if t9 != "[200.000000|2.000000e+02|0.000000E+00|255|7|7.0|200|c8|A]"
+puts "    tower: Int8 to UInt128 and Float32 under every verb, and %c of any code point"
+
+# A float past an `Int64` under an integer verb is its own integer, every
+# digit, as Python writes it; NaN, a width or precision past an `Int32`
+# and a `%g` precision past its limit are refused by name. All four
+# panicked "arithmetic overflow", and `%.402g` was refused as "at most
+# 400, not 401", neither of which is `%g`'s.
+t7 = sprintf("[%d|%x|%.3d]", 1e30, -1e30, 9223372036854775808.0)
+raise "format: a float past Int64 failed: #{t7}" if t7 != "[1000000000000000019884624838656|-c9f2c9cd04675000000000000|9223372036854775808]"
+r1 = refusal { sprintf("%d", 0.0 / 0.0) }
+raise "format: %d of NaN was #{r1.inspect}" if r1 != "%d wants a finite number, and NaN is not one"
+r2 = refusal { sprintf("%99999999999d", 1) }
+raise "format: a width past Int32 was #{r2.inspect}" if r2 != "width must be at most 2147483647, not 99999999999"
+r3 = refusal { sprintf("%.99999999999s", "a") }
+raise "format: a precision past Int32 was #{r3.inspect}" if r3 != "precision must be at most 2147483647, not 99999999999"
+r4 = refusal { sprintf("%.402g", 0.1) }
+raise "format: %.402g was #{r4.inspect}" if r4 != "precision must be at most 401, not 402"
+puts "    integer verbs: a float past Int64 is its own integer; NaN, a field past Int32 and %g past 401 digits are refused by name"
+
+# The arguments may come as one array or tuple, as the other library takes
+# them: its own example, `"%s, %s, %s, D" % ['A', 'B', 'C']`, panicked "too
+# few arguments", and `"[%s]" % ["A"]` printed [["A"]].
+l1 = "%s, %s, %s, D" % ['A', 'B', 'C']
+l2 = "[%s]" % ["A"]
+l3 = sprintf("%d+%d=%s", [1, 2, 3])
+l4 = sprintf("%s=%.1f", {"pi", 3.14159})
+raise "format: list arguments failed: #{l1}|#{l2}|#{l3}|#{l4}" if "#{l1}|#{l2}|#{l3}|#{l4}" != "A, B, C, D|[A]|1+2=3|pi=3.1"
+puts "    list arguments: an array or a tuple is the argument list"
 
 puts "    all format checks passed"

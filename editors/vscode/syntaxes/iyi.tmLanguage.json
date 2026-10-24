@@ -46,7 +46,7 @@
     },
     "keyword": {
       "name": "keyword.control.iyi",
-      "match": "\\b(module|import|using|pub|def|end|if|elsif|else|unless|while|until|case|when|in|then|do|begin|rescue|ensure|return|break|next|yield|struct|class|trait|impl|for|forall|enum|lib|macro|abstract|getter|setter|property|type|alias|extend|include|require|group|spawn|defer|select|of|as|is_a\\?|responds_to\\?|sizeof|typeof|true|false|nil|self|super|not)\\b"
+      "match": "\\b(module|import|pub|def|end|if|elsif|else|unless|while|until|case|when|in|then|do|begin|rescue|ensure|return|break|next|yield|struct|class|trait|impl|for|forall|enum|lib|macro|abstract|getter|setter|property|type|alias|extend|include|require|group|spawn|defer|select|of|as|is_a\\?|responds_to\\?|sizeof|typeof|true|false|nil|self|super|not)\\b"
     },
     "type": {
       "name": "entity.name.type.iyi",

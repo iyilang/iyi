@@ -15,18 +15,21 @@
 # anything that is not a JSON document (bare words, leading zeros, a trailing
 # comma, a raw control character, invalid UTF-8 or a lone surrogate inside a
 # string, an invalid escape, a byte order mark, text after the root value,
-# nesting past 512 levels, a number too large for a Float64) and an object
+# nesting past 256 levels, a number too large for a Float64) and an object
 # that names the same key twice, in `JSON.parse` and in the `PullParser`
 # alike. `JSON.parse` panics with that sentence; `JSON.parse?` answers `nil`.
+# Nor does `JSON.to_json` write such an object: two keys of a Hash written
+# as one text (`nil` and `"null"`, `1` and `"1"`) are refused, naming both.
 #
 # What the writer refuses: `NaN` and `Infinity`, which are not JSON numbers;
 # a value where an object key is due, a field outside an object, a second
 # value at the document root, a container closed that was never opened, and
 # `to_s` of a document with a container still open or no value written.
 # Every control byte under 0x20 and the byte 0x7f are written as `\u00XX`;
-# `to_ascii_json` also writes every non-ASCII code point as `\uXXXX`, with a
-# surrogate pair past the basic plane, and bytes that are not a code point
-# as `\ufffd`.
+# bytes in a string that are not a code point are written as U+FFFD, one
+# per ill-formed subpart, so what is written is UTF-8 the reader takes
+# back; `to_ascii_json` also writes every non-ASCII code point as `\uXXXX`,
+# with a surrogate pair past the basic plane, and U+FFFD as `\ufffd`.
 #
 # `ToJSON` is the trait a type implements to be written by `JSON.to_json`;
 # `Any` implements it, and so do the prelude's scalars, arrays and hashes
@@ -101,6 +104,15 @@ class StringBuffer
       target.copy_from(ptr, len)
     end
   end
+
+  # The bytes appended since *start*, as a String.
+  def slice_from(start : Int32) : String
+    len = @size - start
+    ptr = @buffer + start
+    String.new(len) do |target|
+      target.copy_from(ptr, len)
+    end
+  end
 end
 
 # The length of the well-formed UTF-8 sequence that starts at *at*, or,
@@ -147,9 +159,234 @@ def utf8_sequence_at(bytes : Pointer(UInt8), size : Int32, at : Int32) : Int32
 end
 
 # A type that can write itself into a `Builder`. `JSON.to_json` accepts any
-# value whose type implements it.
+# value whose type implements it, as a `derive serializable` type does.
 pub trait ToJSON
   abstract def to_json(json : Builder) : Nil
+end
+
+# `derive serializable`, in a struct or class whose fields are written with
+# their types: the type reads and writes itself as a JSON object, a key per
+# field, named as the field is.
+#
+#     pub struct Coord
+#       getter x : Float64
+#       @[JSON::Field(key: "label")]
+#       getter name : String
+#       derive serializable
+#     end
+#
+#     Coord.from_json(%({"x": 1.5, "label": "a"})).x   # => 1.5
+#     coord.to_json                                    # => {"x":1.5,"label":"a"}
+#
+# A field's value is read and written as `JSON.read_value` and
+# `JSON.write_value` read and write its type: the built-in values, an enum,
+# an `Array` or `Hash(String, V)` of them, an `Any`, another serializable
+# type, a union of those (`String | Int64`). A key the type has no field
+# for is passed over; a field with no key keeps its default when it is
+# written with one, as does a field with a default whose key holds `null`
+# where its type does not admit nil; a field with neither is refused by
+# name unless its type admits `nil`, which it then holds.
+# `@[JSON::Field(...)]` renames a field, leaves it out either way, leaves
+# a nil one out, or reads and writes it through a converter (see
+# `JSON::Field`). It is what the other library's `include
+# JSON::Serializable` writes, and the derive runs once, in the type's own
+# module (SPEC.md II.4), so a consumer calls the methods without the macro.
+#
+# Each field's options are read off the type when its methods are compiled,
+# in one `begin` so what a field's annotation says is known to every line
+# after it; and refused there, with the field named, when they do not make
+# sense.
+pub macro serializable(declaration)
+  impl ::Std::Json::ToJSON for {{ declaration[:name].id }}
+    def to_json(json : ::Std::Json::Builder) : Nil
+      \{% begin %}
+        \{% json_seen = [] of StringLiteral %}
+        {% for field in declaration[:fields] %}
+          \{% json_ivar = @type.instance_vars.find { |ivar| ivar.name.stringify == {{ field[:name][1..] }} } %}
+          \{% json_ann = json_ivar ? json_ivar.annotation(::Std::Json::JSON::Field) : nil %}
+          \{% if json_ann %}
+            \{% unless json_ann.args.empty? %}
+              \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id } takes named options alone" %}
+            \{% end %}
+            \{% for json_option in json_ann.named_args.keys %}
+              \{% unless ["key", "ignore", "ignore_serialize", "ignore_deserialize", "emit_null", "converter"].includes?(json_option.stringify) %}
+                \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: #{json_option} is not an option (key, ignore, ignore_serialize, ignore_deserialize, emit_null, converter)" %}
+              \{% end %}
+            \{% end %}
+            \{% if json_ann[:key] && !json_ann[:key].is_a?(StringLiteral) %}
+              \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: key: is a string, not #{json_ann[:key]}" %}
+            \{% end %}
+          \{% end %}
+          \{% json_key = json_ann && json_ann[:key] ? json_ann[:key] : {{ field[:name][1..] }} %}
+          \{% json_converter = json_ann ? json_ann[:converter] : nil %}
+          \{% unless json_ann && (json_ann[:ignore] || json_ann[:ignore_serialize]) %}
+            \{% if json_seen.includes?(json_key) %}
+              \{% raise "#{@type} writes two fields as the key #{json_key}" %}
+            \{% end %}
+            \{% json_seen << json_key %}
+          \{% end %}
+          \{% json_write_{{ field[:name][1..].id }} = !(json_ann && (json_ann[:ignore] || json_ann[:ignore_serialize])) %}
+          \{% json_key_{{ field[:name][1..].id }} = json_key %}
+          \{% json_converter_{{ field[:name][1..].id }} = json_converter %}
+          \{% json_omit_null_{{ field[:name][1..].id }} = json_ann && json_ann[:emit_null] == false %}
+        {% end %}
+        json.object do
+          {% for field in declaration[:fields] %}
+            \{% if json_write_{{ field[:name][1..].id }} %}
+              {% if field[:type].nilable? %}
+                json_written = {{ field[:name].id }}
+                if json_written.nil?
+                  \{% unless json_omit_null_{{ field[:name][1..].id }} %}
+                    json.field(\{{ json_key_{{ field[:name][1..].id }} }})
+                    json.null
+                  \{% end %}
+                else
+                  json.field(\{{ json_key_{{ field[:name][1..].id }} }})
+                  \{% if json_converter_{{ field[:name][1..].id }} %}
+                    \{{ json_converter_{{ field[:name][1..].id }} }}.to_json(json_written, json)
+                  \{% else %}
+                    ::Std::Json::JSON.write_value(json_written, json)
+                  \{% end %}
+                end
+              {% else %}
+                json.field(\{{ json_key_{{ field[:name][1..].id }} }})
+                \{% if json_converter_{{ field[:name][1..].id }} %}
+                  \{{ json_converter_{{ field[:name][1..].id }} }}.to_json({{ field[:name].id }}, json)
+                \{% else %}
+                  ::Std::Json::JSON.write_value({{ field[:name].id }}, json)
+                \{% end %}
+              {% end %}
+            \{% end %}
+          {% end %}
+        end
+      \{% end %}
+    end
+  end
+
+  def to_json : String
+    ::Std::Json::JSON.build { |json| to_json(json) }
+  end
+
+  def self.from_json(text : String) : self
+    ::Std::Json::JSON.from_json(text, self)
+  end
+
+  def initialize(pull : ::Std::Json::PullParser)
+    # Each field's type is asked of the field itself (`typeof`): written
+    # out, a type from this module arrives fully qualified, and a qualified
+    # name reaches a type the way another module would. A field that may
+    # be nil reads `null` as the nil and anything else as the other type,
+    # which is the field's type with the nil taken out: `x || raise`.
+    \{% begin %}
+      \{% json_seen = [] of StringLiteral %}
+      \{% json_readable = 0 %}
+      {% for field in declaration[:fields] %}
+        \{% json_ivar = @type.instance_vars.find { |ivar| ivar.name.stringify == {{ field[:name][1..] }} } %}
+        \{% json_ann = json_ivar ? json_ivar.annotation(::Std::Json::JSON::Field) : nil %}
+        \{% if json_ann %}
+          \{% unless json_ann.args.empty? %}
+            \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id } takes named options alone" %}
+          \{% end %}
+          \{% for json_option in json_ann.named_args.keys %}
+            \{% unless ["key", "ignore", "ignore_serialize", "ignore_deserialize", "emit_null", "converter"].includes?(json_option.stringify) %}
+              \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: #{json_option} is not an option (key, ignore, ignore_serialize, ignore_deserialize, emit_null, converter)" %}
+            \{% end %}
+          \{% end %}
+          \{% if json_ann[:key] && !json_ann[:key].is_a?(StringLiteral) %}
+            \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: key: is a string, not #{json_ann[:key]}" %}
+          \{% end %}
+        \{% end %}
+        \{% json_key = json_ann && json_ann[:key] ? json_ann[:key] : {{ field[:name][1..] }} %}
+        \{% json_read = !(json_ann && (json_ann[:ignore] || json_ann[:ignore_deserialize])) %}
+        \{% if json_read %}
+          \{% if json_seen.includes?(json_key) %}
+            \{% raise "#{@type} reads two fields from the key #{json_key}" %}
+          \{% end %}
+          \{% json_seen << json_key %}
+          \{% json_readable = json_readable + 1 %}
+        \{% end %}
+        \{% json_read_{{ field[:name][1..].id }} = json_read %}
+        \{% json_key_{{ field[:name][1..].id }} = json_key %}
+        \{% json_converter_{{ field[:name][1..].id }} = json_ann ? json_ann[:converter] : nil %}
+        \{% json_default_{{ field[:name][1..].id }} = json_ivar && json_ivar.has_default_value? %}
+        json_value_{{ field[:name][1..].id }} = nil
+        json_found_{{ field[:name][1..].id }} = false
+      {% end %}
+      pull.read_object do |json_key|
+        \{% if json_readable == 0 %}
+          pull.skip
+        \{% else %}
+          # `json_found_` tells a key that was not there, where a field
+          # keeps its default, from a `null`.
+          case json_key
+          {% for field in declaration[:fields] %}
+            \{% if json_read_{{ field[:name][1..].id }} %}
+              when \{{ json_key_{{ field[:name][1..].id }} }}
+                json_found_{{ field[:name][1..].id }} = true
+                {% if field[:type].nilable? %}
+                  \{% if json_converter_{{ field[:name][1..].id }} %}
+                    json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : \{{ json_converter_{{ field[:name][1..].id }} }}.from_json(pull)
+                  \{% else %}
+                    json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }} || raise("")))
+                  \{% end %}
+                {% else %}
+                  # A `null` for a field with a default whose type does not
+                  # admit nil is no value, and the field keeps its default, as
+                  # the other library's derive reads it; it was refused as not
+                  # the type.
+                  \{% if json_default_{{ field[:name][1..].id }} %}
+                    \{% if json_converter_{{ field[:name][1..].id }} %}
+                      json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : \{{ json_converter_{{ field[:name][1..].id }} }}.from_json(pull)
+                    \{% else %}
+                      json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+                    \{% end %}
+                  \{% elsif json_converter_{{ field[:name][1..].id }} %}
+                    json_value_{{ field[:name][1..].id }} = \{{ json_converter_{{ field[:name][1..].id }} }}.from_json(pull)
+                  \{% else %}
+                    json_value_{{ field[:name][1..].id }} = ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+                  \{% end %}
+                {% end %}
+            \{% end %}
+          {% end %}
+          else
+            pull.skip
+          end
+        \{% end %}
+      end
+      # A field written with a default (`@port : Int32 = 8080`) holds it
+      # already, so on a missing key, or a `null` its type does not admit, it
+      # keeps its default; a key that is there wins, `null` included where the
+      # type admits nil. Whether there is a default is asked of the type when
+      # this method is compiled, not of the declaration, which carries names
+      # and types only: the port was refused by name, and
+      # `@host : String? = "localhost"` was overwritten with nil. A field that
+      # is not read keeps its default, or is nil; one with neither cannot be
+      # made, and is refused when the type is compiled.
+      {% for field in declaration[:fields] %}
+        \{% if !json_read_{{ field[:name][1..].id }} %}
+          \{% if json_default_{{ field[:name][1..].id }} %}
+          \{% elsif {{ field[:type].nilable? }} %}
+            {{ field[:name].id }} = nil
+          \{% else %}
+            \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: a field that is not read needs a default, or a type that admits nil" %}
+          \{% end %}
+        \{% elsif json_default_{{ field[:name][1..].id }} %}
+          {% if field[:type].nilable? %}
+            {{ field[:name].id }} = json_value_{{ field[:name][1..].id }} if json_found_{{ field[:name][1..].id }}
+          {% else %}
+            json_field_{{ field[:name][1..].id }} = json_value_{{ field[:name][1..].id }}
+            {{ field[:name].id }} = json_field_{{ field[:name][1..].id }} unless json_field_{{ field[:name][1..].id }}.nil?
+          {% end %}
+        \{% elsif {{ field[:type].nilable? }} %}
+          {{ field[:name].id }} = json_value_{{ field[:name][1..].id }}
+        \{% else %}
+          json_field_{{ field[:name][1..].id }} = json_value_{{ field[:name][1..].id }}
+          raise "JSON for #{ {{ declaration[:name] }} } has no key #{ \{{ json_key_{{ field[:name][1..].id }} }}.inspect }" if json_field_{{ field[:name][1..].id }}.nil?
+          {{ field[:name].id }} = json_field_{{ field[:name][1..].id }}
+        \{% end %}
+      {% end %}
+    \{% end %}
+  end
 end
 
 # One JSON value of any kind, the result of `JSON.parse`. The `as_x` methods
@@ -431,39 +668,36 @@ pub struct Any
     elsif s = as_s?
       s.hash
     elsif i = as_i64?
-      integer_hash(i)
+      i.hash
     elsif f = float_value?
       if f >= -9223372036854775808.0 && f < 9223372036854775808.0
         t = f.to_i64
-        return integer_hash(t) if t.to_f64 == f
+        return t.hash if t.to_f64 == f
       end
       bits = IyiFloatText.bits_of(f)
       ((bits ^ bits.unsafe_shr(32_u64)) & 0x7FFFFFFF_u64).to_i32
     elsif a = as_a?
-      value = 17
-      idx = 0
-      while idx < a.size
-        value = (value &* 31) &+ a[idx].hash
-        idx = idx + 1
-      end
-      value
+      # As an `Array` hashes. It was `31 * h + e`, an integer hashing as
+      # itself: `[1,0]` and `[0,31]` hashed alike, and a 150 by 150 grid of
+      # `[i, j]` had 4,769 hashes for its 22,500 values.
+      a.hash
     elsif h = as_h?
-      value = 0
-      keys = h.keys
-      idx = 0
-      while idx < keys.size
-        k = keys[idx]
-        value = value &+ ((k.hash &* 31) &+ h[k].hash)
-        idx = idx + 1
+      # A sum over the pairs, each pair's two hashes packed into one word and
+      # put through splitmix64's finaliser, so the terms share no structure
+      # the sum could cancel. It was the sum of `31 * k.hash + v.hash`:
+      # `{"a":1,"b":2}` and `{"a":2,"b":1}` hashed alike, and 160,000 objects
+      # `{"x":i,"y":j}` took 26 s to go into a `Hash(Any, Bool)`.
+      value = 0x9E3779B97F4A7C15_u64 ^ h.size.to_i64.unsafe_to_u64
+      h.each do |k, v|
+        pair = k.hash.to_i64.unsafe_to_u64.unsafe_shl(32_u64) | (v.hash.to_i64.unsafe_to_u64 & 0xFFFFFFFF_u64)
+        pair = (pair ^ pair.unsafe_shr(30_u64)) &* 0xBF58476D1CE4E5B9_u64
+        pair = (pair ^ pair.unsafe_shr(27_u64)) &* 0x94D049BB133111EB_u64
+        value = value &+ (pair ^ pair.unsafe_shr(31_u64))
       end
-      value
+      value.hash
     else
       0
     end
-  end
-
-  private def integer_hash(i : Int64) : Int32
-    ((i ^ (i >> 32)) & 0x7FFFFFFF_i64).to_i32
   end
 
   def to_json : String
@@ -486,8 +720,18 @@ pub struct Any
     b.to_s
   end
 
+  # A string as itself and null as nothing, as `YAML::Any#to_s` and the
+  # other library answer them; a number, a boolean or a collection as its
+  # JSON text. A string was its JSON text too, so `"hello #{doc["name"]}"`
+  # printed `hello "Ada"`, and null printed `null`.
   def to_s : String
-    to_json
+    if s = as_s?
+      s
+    elsif @raw.nil?
+      ""
+    else
+      to_json
+    end
   end
 
   def inspect : String
@@ -549,7 +793,12 @@ end
 
 class Token
   property kind : TokenKind
-  property raw_value : String
+  # A number's text, as the span of the input it was read from: made into
+  # a string only when asked, which a reader of the number's value never
+  # does - a substring a number was an allocation for every number read.
+  property raw_input : String
+  property raw_start : Int32
+  property raw_size : Int32
   property string_value : String
   property int_value : Int64
   property float_value : Float64
@@ -558,12 +807,18 @@ class Token
 
   def initialize
     @kind = TokenKind::EOF
-    @raw_value = ""
+    @raw_input = ""
+    @raw_start = 0
+    @raw_size = 0
     @string_value = ""
     @int_value = 0_i64
     @float_value = 0.0
     @line_number = 1
     @column_number = 1
+  end
+
+  def raw_value : String
+    @raw_input[@raw_start, @raw_size]
   end
 end
 
@@ -580,6 +835,11 @@ class Lexer
   @token : Token
   @string_buffer : StringBuffer
   @error : String?
+  # Short strings the lexer has already made, by a hash of their bytes: an
+  # object's keys are the same few strings in every object of an array,
+  # and each was a new substring. A slot holds the last string that hashed
+  # there, so a miss costs the substring it always did.
+  @short : Array(String)
 
   def initialize(@input : String)
     @bytes = @input.to_unsafe
@@ -590,6 +850,40 @@ class Lexer
     @token = Token.new
     @string_buffer = StringBuffer.new(64)
     @error = nil
+    @short = Array(String).new(SHORT_SLOTS) { "" }
+  end
+
+  SHORT_SLOTS = 256
+  SHORT_MAX   =  24
+
+  # The string the input spells from *start* for *size* bytes.
+  private def text_at(start : Int32, size : Int32) : String
+    return @input[start, size] if size > SHORT_MAX || size == 0
+    p = @bytes + start
+    h = 2166136261_u64
+    i = 0
+    while i < size
+      h = (h ^ p[i].to_u64) &* 16777619_u64
+      i = i + 1
+    end
+    slot = (h ^ h.unsafe_shr(8_u64)).unsafe_to_i32 & (SHORT_SLOTS - 1)
+    cached = @short[slot]
+    if cached.bytesize == size
+      q = cached.to_unsafe
+      same = true
+      i = 0
+      while i < size
+        if q[i] != p[i]
+          same = false
+          break
+        end
+        i = i + 1
+      end
+      return cached if same
+    end
+    made = @input[start, size]
+    @short[slot] = made
+    made
   end
 
   def token : Token
@@ -748,13 +1042,13 @@ class Lexer
       elsif b >= 128_u8
         return unless take_utf8_sequence
       else
-        advance
+        step_ascii
       end
     end
 
     if !has_escape && @pos < @bytesize && current_byte == 34_u8
       # No escape: the text is a substring of the input.
-      str_val = @input[start_pos, @pos - start_pos]
+      str_val = text_at(start_pos, @pos - start_pos)
       advance
       set_token(TokenKind::String, line, col)
       @token.string_value = str_val
@@ -927,8 +1221,16 @@ class Lexer
     start_pos = @pos
     has_fraction = false
     has_exponent = false
+    negative = false
+    # The significant digits as one integer while it fits nineteen of them,
+    # and the power of ten they are scaled by: what the fast conversion
+    # below reads instead of the number's text.
+    mantissa = 0_u64
+    digits = 0
+    scale = 0
 
     if current_byte == 45_u8 # '-'
+      negative = true
       advance
       if @pos >= @bytesize
         return fail("expected digit after minus sign in number", line, col)
@@ -939,20 +1241,25 @@ class Lexer
     end
 
     if current_byte == 48_u8 # '0'
-      advance
+      step_ascii
       if @pos < @bytesize && digit?(current_byte)
         return fail("leading zero not allowed in number", @line_number, @column_number)
       end
     else
-      advance
       while @pos < @bytesize && digit?(current_byte)
-        advance
+        if digits < 19
+          mantissa = mantissa &* 10_u64 &+ (current_byte &- 48_u8).to_u64
+          digits = digits + 1
+        else
+          scale = scale + 1
+        end
+        step_ascii
       end
     end
 
     if @pos < @bytesize && current_byte == 46_u8 # '.'
       has_fraction = true
-      advance
+      step_ascii
       if @pos >= @bytesize
         return fail("expected at least one digit after decimal point", line, col)
       end
@@ -960,15 +1267,26 @@ class Lexer
         return fail("expected at least one digit after decimal point", @line_number, @column_number)
       end
       while @pos < @bytesize && digit?(current_byte)
-        advance
+        if digits < 19
+          if digits > 0 || current_byte != 48_u8
+            mantissa = mantissa &* 10_u64 &+ (current_byte &- 48_u8).to_u64
+            digits = digits + 1
+          end
+          scale = scale - 1
+        end
+        step_ascii
       end
     end
 
+    exponent = 0
+    exponent_digits = 0
     if @pos < @bytesize && (current_byte == 101_u8 || current_byte == 69_u8) # 'e' or 'E'
       has_exponent = true
-      advance
+      step_ascii
+      exponent_negative = false
       if @pos < @bytesize && (current_byte == 43_u8 || current_byte == 45_u8) # '+' or '-'
-        advance
+        exponent_negative = current_byte == 45_u8
+        step_ascii
       end
       if @pos >= @bytesize
         return fail("expected at least one digit in exponent", line, col)
@@ -977,8 +1295,11 @@ class Lexer
         return fail("expected at least one digit in exponent", @line_number, @column_number)
       end
       while @pos < @bytesize && digit?(current_byte)
-        advance
+        exponent = exponent * 10 + (current_byte - 48_u8).to_i32 if exponent < 100000
+        exponent_digits = exponent_digits + 1
+        step_ascii
       end
+      exponent = 0 - exponent if exponent_negative
     end
 
     # `0x12`, `1a`, `1.2.3`: a number does not run into letters or a second point.
@@ -989,31 +1310,59 @@ class Lexer
       end
     end
 
-    raw_num = @input[start_pos, @pos - start_pos]
     set_token(TokenKind::Int, line, col)
-    @token.raw_value = raw_num
+    @token.raw_input = @input
+    @token.raw_start = start_pos
+    @token.raw_size = @pos - start_pos
 
     unless has_fraction || has_exponent
-      val = parse_int64?(raw_num)
+      val = parse_int64?(@bytes + start_pos, @pos - start_pos)
       unless val.nil?
         @token.int_value = val
         return
       end
     end
 
-    f = raw_num.to_f
-    if f.abs > 1.7976931348623157e308
-      return fail("number #{raw_num} out of range", line, col)
+    # Clinger's fast path: an integer under 2^53 and a power of ten a
+    # double holds exactly are both exact, so their product or quotient is
+    # rounded once, which is the correctly rounded value `to_f` answers.
+    # Anything else - more digits, a larger exponent - is read from the
+    # text as before.
+    f = 0.0
+    fast = false
+    if digits <= 15 && exponent_digits <= 3
+      power = scale + exponent
+      if power >= 0 && power <= 22
+        f = mantissa.to_f64 * POW10[power]
+        fast = true
+      elsif power < 0 && power >= -22
+        f = mantissa.to_f64 / POW10[0 - power]
+        fast = true
+      end
+    end
+    if fast
+      # The sign flipped, not subtracted from zero: `0.0 - 0.0` is `0.0`,
+      # and `-0.0` is what the text says.
+      f = f * -1.0 if negative
+    else
+      f = @input[start_pos, @pos - start_pos].to_f
+      if f.abs > 1.7976931348623157e308
+        return fail("number #{@input[start_pos, @pos - start_pos]} out of range", line, col)
+      end
     end
     @token.kind = TokenKind::Float
     @token.float_value = f
   end
 
+  # A byte known to be ASCII and not a line break: one column on.
+  private def step_ascii : Nil
+    @pos = @pos + 1
+    @column_number = @column_number + 1
+  end
+
   # The Int64 these digits spell, or nil when they do not fit. The negative
   # magnitude is accumulated so the smallest Int64 needs no negation.
-  private def parse_int64?(text : String) : Int64?
-    bytes = text.to_unsafe
-    len = text.bytesize
+  private def parse_int64?(bytes : Pointer(UInt8), len : Int32) : Int64?
     i = 0
     negative = false
     if bytes[0] == 45_u8
@@ -1040,7 +1389,19 @@ class Lexer
   end
 end
 
-MAX_NESTING = 512
+# The deepest document read: deep enough for any data a person wrote, and
+# shallow enough for a task's stack. It was 512, Crystal's, whose fibers
+# have megabytes; a task here has 256 KB (`IyiFiber::STACK_BYTES`), and a
+# task that parsed 480 nested arrays - a request body, in a server whose
+# handlers are tasks - died of a stack overflow that took the whole
+# process, and `==` on two such values died at 334. At 256 a plain build
+# parses, compares, prints and hashes the deepest document in a task with
+# a fifth of the stack to spare.
+MAX_NESTING = 256
+
+# The powers of ten a double holds exactly, for the lexer's fast path.
+POW10 = [1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+         1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22]
 
 # Reads a whole document into an `Any`. Like the lexer it records the first
 # failure instead of panicking; `JSON.parse` and `JSON.parse?` decide what to
@@ -1320,7 +1681,11 @@ pub class PullParser
   getter int_value : Int64
   getter float_value : Float64
   getter string_value : String
-  getter raw_value : String
+  @raw_input : String
+  @raw_start : Int32
+  @raw_size : Int32
+  # The keys of the objects open on the way down (`read_object_key`).
+  @keys : Array(String)
   property max_nesting : Int32
   @states : Array(Int32)
 
@@ -1331,10 +1696,24 @@ pub class PullParser
     @int_value = 0_i64
     @float_value = 0.0
     @string_value = ""
-    @raw_value = ""
+    @raw_input = ""
+    @raw_start = 0
+    @raw_size = 0
+    @keys = [] of String
     @max_nesting = MAX_NESTING
     @states = [ROOT]
     read_next
+  end
+
+  # The number the reader is on, as it was written.
+  def raw_value : String
+    @raw_input[@raw_start, @raw_size]
+  end
+
+  private def keep_raw(tok : Token) : Nil
+    @raw_input = tok.raw_input
+    @raw_start = tok.raw_start
+    @raw_size = tok.raw_size
   end
 
   def line_number : Int32
@@ -1421,14 +1800,14 @@ pub class PullParser
         after_value
         @kind = Kind::Int
         @int_value = tok.int_value
-        @raw_value = tok.raw_value
+        keep_raw(tok)
         return @kind
       when TokenKind::Float
         value_allowed
         after_value
         @kind = Kind::Float
         @float_value = tok.float_value
-        @raw_value = tok.raw_value
+        keep_raw(tok)
         return @kind
       when TokenKind::String
         st = state
@@ -1555,20 +1934,60 @@ pub class PullParser
   # value. A key named twice is refused, as `JSON.parse` refuses it.
   def read_object(& : String -> Nil) : Nil
     read_begin_object
-    seen = {} of String => Bool
+    mark = @keys.size
+    seen = nil.as(Hash(String, Bool)?)
     while @kind != Kind::EndObject
-      yield read_object_key(seen)
+      key, seen = read_object_key(mark, seen)
+      yield key
     end
+    drop_keys(mark)
     read_end_object
   end
 
-  # The key the reader is on, refused when `seen` already holds it, where
-  # the key is rather than where its value is.
-  private def read_object_key(seen : Hash(String, Bool)) : String
-    parse_error("duplicate key '#{@string_value}'") if @kind == Kind::String && seen.has_key?(@string_value)
+  # The key the reader is on, refused when this object already had it,
+  # where the key is rather than where its value is. The keys of every
+  # object open on the way down are one stack, each object's from its
+  # mark: a hash per object was an allocation for every object read, where
+  # an object has a few keys and a scan of them is cheaper than the hash.
+  #
+  # Past KEYS_SCANNED keys an object's are put in a hash, so an object
+  # with thousands of keys is not a scan of all of them per key.
+  KEYS_SCANNED = 32
+
+  private def read_object_key(mark : Int32, seen : Hash(String, Bool)?) : {String, Hash(String, Bool)?}
+    if @kind == Kind::String
+      candidate = @string_value
+      if seen
+        parse_error("duplicate key '#{candidate}'") if seen.has_key?(candidate)
+      else
+        i = mark
+        while i < @keys.size
+          parse_error("duplicate key '#{candidate}'") if @keys[i] == candidate
+          i = i + 1
+        end
+      end
+    end
     key = read_object_key
-    seen[key] = true
-    key
+    if seen
+      seen[key] = true
+    else
+      @keys << key
+      if @keys.size - mark > KEYS_SCANNED
+        seen = {} of String => Bool
+        i = mark
+        while i < @keys.size
+          seen[@keys[i]] = true
+          i = i + 1
+        end
+      end
+    end
+    {key, seen}
+  end
+
+  private def drop_keys(mark : Int32) : Nil
+    while @keys.size > mark
+      @keys.pop
+    end
   end
 
   # Passes over the value the reader is on, whole.
@@ -1601,9 +2020,10 @@ pub class PullParser
   def on_key(key : String, & : -> Nil) : Nil
     read_begin_object
     found = false
-    seen = {} of String => Bool
+    mark = @keys.size
+    seen = nil.as(Hash(String, Bool)?)
     while @kind != Kind::EndObject
-      current_key = read_object_key(seen)
+      current_key, seen = read_object_key(mark, seen)
       if current_key == key
         found = true
         yield
@@ -1611,6 +2031,7 @@ pub class PullParser
         skip
       end
     end
+    drop_keys(mark)
     read_end_object
     parse_error("missing key #{key.inspect}") unless found
   end
@@ -1645,17 +2066,21 @@ pub class PullParser
     end
   end
 
-  # The value the reader is on, written into `json` as it is read.
+  # The value the reader is on, written into `json` as it is read. A number
+  # is written as its own text, the text it was read from: rebuilt from the
+  # Int64 or Float64 it parsed to, `12345678901234567890` came back as
+  # `1.2345678901234567e+19` and `1E+2` as `100.0`, and a UInt64 id passed
+  # through here did not read back as itself.
   def read_raw(json : Builder) : Nil
     if @kind == Kind::Null
       read_next
       json.null
     elsif @kind == Kind::Bool
       json.bool(read_bool)
-    elsif @kind == Kind::Int
-      json.number(read_int)
-    elsif @kind == Kind::Float
-      json.number(read_float)
+    elsif @kind == Kind::Int || @kind == Kind::Float
+      number_text = raw_value
+      read_next
+      json.raw(number_text)
     elsif @kind == Kind::String
       json.string(read_string)
     elsif @kind == Kind::BeginArray
@@ -1700,6 +2125,9 @@ pub class Builder
   @indent_str : String?
   @level : Int32
   @states : Array(Int32)
+  # The key texts of every object still open, innermost last, each with the
+  # String it was written from.
+  @keys : Array(Hash(String, String))
 
   property max_nesting : Int32
   property ascii_only : Bool
@@ -1709,6 +2137,7 @@ pub class Builder
     @indent_str = nil
     @level = 0
     @states = [ROOT]
+    @keys = [] of Hash(String, String)
     @max_nesting = MAX_NESTING
     @ascii_only = false
   end
@@ -1845,15 +2274,32 @@ pub class Builder
       elsif b < 32_u8 || b == 127_u8
         write_hex_u4(b.to_i)
         i = i + 1
-      elsif @ascii_only && b >= 128_u8
-        # Decode the UTF-8 sequence and write the code point as \uXXXX, or as
-        # a surrogate pair past the basic plane. Bytes that are not a code
-        # point are written as U+FFFD, one per ill-formed subpart, so the
-        # output stays ASCII.
+      elsif b >= 128_u8
+        # Bytes that are not a code point are written as U+FFFD, one per
+        # ill-formed subpart, in either mode: written through as they
+        # were, `"a\xffb"` made a document that is not UTF-8 (RFC 8259
+        # §8.1), and this reader refused what this writer wrote ("invalid
+        # UTF-8 byte 255 in string at line 1, column 3"). Replaced rather
+        # than refused, as `to_ascii_json` already did: a String holds any
+        # bytes, a file name or a log line. A well-formed sequence is
+        # copied, or under `ascii_only` decoded and written as \uXXXX, a
+        # surrogate pair past the basic plane.
         length = utf8_sequence_at(bytes, len, i)
         if length < 0
-          write_hex_u4(0xFFFD)
+          if @ascii_only
+            write_hex_u4(0xFFFD)
+          else
+            @buffer.append(0xEF_u8)
+            @buffer.append(0xBF_u8)
+            @buffer.append(0xBD_u8)
+          end
           i = i - length
+        elsif !@ascii_only
+          while length > 0
+            @buffer.append(bytes[i])
+            i = i + 1
+            length = length - 1
+          end
         elsif length == 2
           write_hex_u4(((b.to_i & 0x1F) << 6) | (bytes[i + 1].to_i & 0x3F))
           i = i + 2
@@ -1914,6 +2360,7 @@ pub class Builder
     @level = @level + 1
     raise "nesting depth of #{@level} exceeds maximum depth #{@max_nesting}" if @level > @max_nesting
     @states << OBJECT_FIRST
+    @keys << Hash(String, String).new
   end
 
   def end_object : Nil
@@ -1921,6 +2368,7 @@ pub class Builder
     raise "end_object with a field's value still due" if st == OBJECT_VALUE
     raise "end_object without start_object" unless st == OBJECT_FIRST || st == OBJECT_NEXT
     @states.pop
+    @keys.pop
     @level = @level - 1
     write_indent if st == OBJECT_NEXT
     @buffer.append(125_u8) # '}'
@@ -1932,14 +2380,27 @@ pub class Builder
     end_object
   end
 
-  # A key; the value that follows it is written by the next call.
+  # A key; the value that follows it is written by the next call. A key
+  # whose text is one this object already holds is refused, naming both:
+  # the reader refuses a duplicate key, and the builder wrote one - a key
+  # given twice, or two Strings whose bytes are not UTF-8 and are both
+  # written as U+FFFD (`{"a\xFF" => 1, "a\xFE" => 2}` was written
+  # `{"a\uFFFD":1,"a\uFFFD":2}`, and `JSON.parse` refused it).
   def field(name : String) : Nil
     st = state
     raise "a field outside an object" unless st == OBJECT_FIRST || st == OBJECT_NEXT
     @buffer.append(44_u8) if st == OBJECT_NEXT # ','
     set_state(OBJECT_VALUE)
     write_indent
+    from = @buffer.size
     write_escaped_string(name)
+    text = @buffer.slice_from(from)
+    keys = @keys.last
+    if earlier = keys[text]?
+      raise "the key #{name.inspect} is written twice in one object" if earlier == name
+      raise "the keys #{earlier.inspect} and #{name.inspect} are both written as #{text}"
+    end
+    keys[text] = name
     @buffer.append(58_u8)                         # ':'
     @buffer.append(32_u8) unless @indent_str.nil? # ' '
   end
@@ -2001,6 +2462,27 @@ pub class Builder
 end
 
 pub struct JSON
+  # How `derive serializable` writes and reads one field, the other
+  # library's `JSON::Field`:
+  #
+  #     @[JSON::Field(key: "userName")]
+  #     getter user_name : String
+  #
+  # * `key:` the object key, where it is not the field's own name;
+  # * `ignore: true` neither written nor read, `ignore_serialize: true` not
+  #   written, `ignore_deserialize: true` not read - a field that is not
+  #   read keeps its default, or is nil, and needs one or the other;
+  # * `emit_null: false` a nil field left out of the object. A nil field is
+  #   written as `null` otherwise, where the other library leaves it out
+  #   unless asked;
+  # * `converter:` a type whose `self.to_json(value, json : Builder)` writes
+  #   the field and `self.from_json(pull : PullParser)` reads it.
+  #
+  # An option it does not know, a key that is not a string, and two fields
+  # written under one key are refused when the type is compiled.
+  annotation Field
+  end
+
   # The document as an `Any`; panics with the line and column of the first
   # thing it refuses.
   def self.parse(input : String) : Any
@@ -2034,11 +2516,25 @@ pub struct JSON
   end
 
   # Any value `write_value` knows: `nil`, a `Bool`, a prelude integer, a
-  # `Float64`, a `String`, an `Any`, an `Array` or `Hash` of those, or a type
-  # that implements `ToJSON`.
+  # `Float64`, a `String`, an `Any`, an enum, an `Array` or `Hash` of those,
+  # or a type that implements `ToJSON`; a union of them, written as the
+  # member it holds is.
   def self.to_json(obj : T) : String forall T
     build do |b|
-      write_value(obj, b)
+      write_or_null(obj, b)
+    end
+  end
+
+  # A value that may be nil, written as `null` or as what it holds. Handed
+  # to `write_value` whole, `Int32 | Nil` was matched against the `ToJSON`
+  # overload as one type and refused at compile time, so
+  # `JSON.to_json([1, nil] of Int32?)` and a `Hash(String, String?)` did not
+  # build; with the nil taken out here the rest dispatches as it would alone.
+  private def self.write_or_null(val, b : Builder) : Nil
+    if val.nil?
+      b.null
+    else
+      write_value(val, b)
     end
   end
 
@@ -2080,17 +2576,34 @@ pub struct JSON
 
   def self.write_value(val : Array(T), b : Builder) : Nil forall T
     b.array do
-      val.each { |e| write_value(e, b) }
+      val.each { |e| write_or_null(e, b) }
     end
   end
 
-  # A key that is not a string is written by its `to_s`; `nil` as `"null"`,
-  # the word a JSON null is.
-  def self.write_value(val : Hash(K, V), b : Builder) : Nil forall K, V
+  # A String key is written as it is, and two of them are never one text.
+  def self.write_value(val : Hash(String, V), b : Builder) : Nil forall V
     b.object do
       val.each do |k, v|
-        b.field(key_text(k))
-        write_value(v, b)
+        b.field(k)
+        write_or_null(v, b)
+      end
+    end
+  end
+
+  # Any other key is written by its `to_s`, `nil` as `"null"`, the word a
+  # JSON null is, so two keys can be one text: `{nil => 1, "null" => 2}`
+  # was written `{"null":1,"null":2}`, which `JSON.parse` refuses
+  # ("duplicate key 'null' at line 1, column 11"). The texts written are
+  # kept, and a repeat is refused, naming both keys.
+  def self.write_value(val : Hash(K, V), b : Builder) : Nil forall K, V
+    written = Hash(String, K).new
+    b.object do
+      val.each do |k, v|
+        text = key_text(k)
+        raise "the keys #{written[text].inspect} and #{k.inspect} are both written as #{text.inspect}" if written.has_key?(text)
+        written[text] = k
+        b.field(text)
+        write_or_null(v, b)
       end
     end
   end
@@ -2107,14 +2620,122 @@ pub struct JSON
     key.to_s
   end
 
-  def self.write_value(val : T, b : Builder) : Nil forall T : ToJSON
-    val.to_json(b)
+  # A `ToJSON` value writes itself. An enum member is written as the other
+  # library writes one: its name underscored (`Color::DarkRed` is
+  # `"dark_red"`), and a `@[Flags]` enum as the array of its members'
+  # names; a value no member has is written as its number. Told apart here
+  # and not by an overload restricted to `Enum`, which a program built
+  # from this module's artifact read as a class and could not pass an enum
+  # to.
+  #
+  # A union is matched here whole, `T` the union itself, so
+  # `JSON.to_json(1.as(Int32 | String))` called `to_json` on an `Int32`
+  # and did not build (issue #135). A member with an overload of its own,
+  # an `Int32` or an `Array`, is sent there when the program runs, yet this
+  # is still compiled for the whole union, and reached for the rest: an
+  # enum, a `ToJSON` type. Each is written as it is alone, by
+  # `Object#__json_write` below.
+  def self.write_value(val : T, b : Builder) : Nil forall T
+    {% if T.union? %}
+      val.__json_write(b)
+    {% elsif T < ::Enum %}
+      write_enum(val, T, b)
+    {% else %}
+      val.to_json(b)
+    {% end %}
+  end
+
+  # The enum's own type as a free variable, which a bound cannot give: an
+  # `Enum` is a struct, and a bound is a trait (SPEC.md II.7).
+  private def self.write_enum(val, type : T.class, b : Builder) : Nil forall T
+    {% if T.annotation(Flags) %}
+      b.array do
+        T.values.each { |member| b.string(underscore(member.to_s)) if val.includes?(member) }
+      end
+    {% else %}
+      if member = T.from_value?(val.value)
+        b.string(underscore(member.to_s))
+      else
+        b.number(val.value.to_i64)
+      end
+    {% end %}
+  end
+
+  # `DarkRed` as `dark_red`, and `HTTPCode` as `http_code`: a capital starts
+  # a word after a small letter or a digit, or before one.
+  private def self.underscore(name : String) : String
+    bytes = name.to_unsafe
+    String.build do |text|
+      index = 0
+      while index < name.bytesize
+        byte = bytes[index]
+        if byte >= 65_u8 && byte <= 90_u8
+          if index > 0
+            before = bytes[index - 1]
+            after_small = index + 1 < name.bytesize && bytes[index + 1] >= 97_u8 && bytes[index + 1] <= 122_u8
+            small_before = (before >= 97_u8 && before <= 122_u8) || (before >= 48_u8 && before <= 57_u8)
+            capital_before = before >= 65_u8 && before <= 90_u8
+            text << '_' if small_before || (capital_before && after_small)
+          end
+          text << (byte + 32_u8).unsafe_chr
+        else
+          text << byte.unsafe_chr
+        end
+        index = index + 1
+      end
+    end
+  end
+
+  # A member's name as it is matched: small letters, no underscores, so
+  # `"dark_red"`, `"DarkRed"` and `"DARK_RED"` are one name.
+  private def self.enum_key(name : String) : String
+    bytes = name.to_unsafe
+    String.build do |text|
+      index = 0
+      while index < name.bytesize
+        byte = bytes[index]
+        if byte >= 65_u8 && byte <= 90_u8
+          text << (byte + 32_u8).unsafe_chr
+        elsif byte != 95_u8
+          text << byte.unsafe_chr
+        end
+        index = index + 1
+      end
+    end
+  end
+
+  # A member by its name, or by its number; a `@[Flags]` enum from the
+  # array of its members' names. Anything else is refused, naming the
+  # members there are.
+  private def self.read_enum(pull : PullParser, type : T.class) : T forall T
+    {% if T.annotation(Flags) %}
+      found = T.from_value?(0) || raise "#{T} has no member for no flags"
+      pull.read_begin_array
+      while !pull.kind.end_array?
+        found = found | enum_member(pull.read_string, T)
+      end
+      pull.read_end_array
+      found
+    {% else %}
+      if pull.kind.int?
+        number = pull.read_int
+        return T.from_value?(number) || raise "#{number} is no #{T} member's value (#{T.names.map { |name| underscore(name) }.join(", ")})"
+      end
+      enum_member(pull.read_string, T)
+    {% end %}
+  end
+
+  private def self.enum_member(text : String, type : T.class) : T forall T
+    wanted = enum_key(text)
+    T.values.each { |member| return member if enum_key(member.to_s) == wanted }
+    raise "#{text.inspect} is no #{T} member (#{T.names.map { |name| underscore(name) }.join(", ")})"
   end
 
   # The document read into `type`: `Nil`, `Bool`, `Int32`, `Int64`, `UInt8`,
-  # `UInt64`, `Float64`, `String`, `Any`, or an `Array` or `Hash(String, V)`
-  # of those. An integer outside the type is refused, as is anything after
-  # the root value.
+  # `UInt64`, `Float64`, `String`, `Any`, an enum, a type with `derive
+  # serializable`, a union of them as `read_union` reads one, or an `Array`
+  # or `Hash(String, V)` of those. An integer outside the type is refused,
+  # as is anything after the root value.
   def self.from_json(str : String, type : T.class) : T forall T
     pull = PullParser.new(str)
     value = read_value(pull, type)
@@ -2219,5 +2840,144 @@ pub struct JSON
       h[k] = read_value(pull, V)
     end
     h
+  end
+
+  # A type that reads itself: the `initialize(pull)` a `derive
+  # serializable` wrote. A type that admits nil reads `null` as the nil and
+  # anything else as the other type (`x || raise`, as the derive asks it),
+  # the way `write_or_null` writes it. That was `T.new(pull)` too, and
+  # `Int32 | Nil` has no such `new`, so `JSON.from_json("5", Int32?)` and
+  # `Array(Int32?)` did not build. Any other union is `read_union`'s.
+  def self.read_value(pull : PullParser, type : T.class) : T forall T
+    {% if T.nilable? %}
+      pull.read_null? ? nil : read_value(pull, typeof(nil.as(T) || raise("")))
+    {% elsif T.union? %}
+      read_union(pull, T)
+    {% elsif T < ::Enum %}
+      read_enum(pull, T)
+    {% else %}
+      T.new(pull)
+    {% end %}
+  end
+
+  # A union read by the kind of value the reader is on, as the other
+  # library reads one: a boolean into `Bool`; an integer into the first of
+  # `Int64`, `UInt64`, `Int32`, `UInt8` that holds it, then `Float64`; a
+  # float into `UInt64` when its text is an integer that type holds (the
+  # reader hands one past Int64 over as a float), then `Float64`; a string
+  # into `String`; an array into the `Array` member and an object into the
+  # `Hash` member. What none of those takes is read by the one other
+  # member - an enum, an `Any`, a derived type - which refuses it in its
+  # own words when it is not its kind.
+  #
+  # The other library tries each member in turn and takes the first that
+  # reads without raising. There is no rescue to go back with here, so a
+  # union where that would choose - two other members, two arrays, two
+  # hashes - is refused when it is compiled instead of guessed at. Its nil
+  # was taken out by `read_value` first.
+  #
+  # A member is reached by narrowing the union, not by writing its name
+  # out: a name is looked up from here, where a type of a module this one
+  # does not import is refused (SPEC.md R-1) and a program's private type
+  # is not found.
+  private def self.read_union(pull : PullParser, type : T.class) : T forall T
+    {% begin %}
+      {% members = T.union_types %}
+      {% has_bool = members.any? { |m| m == ::Bool } %}
+      {% has_i64 = members.any? { |m| m == ::Int64 } %}
+      {% has_u64 = members.any? { |m| m == ::UInt64 } %}
+      {% has_i32 = members.any? { |m| m == ::Int32 } %}
+      {% has_u8 = members.any? { |m| m == ::UInt8 } %}
+      {% has_f64 = members.any? { |m| m == ::Float64 } %}
+      {% has_string = members.any? { |m| m == ::String } %}
+      {% rest = members.reject { |m| m == ::Bool || m == ::Int64 || m == ::UInt64 || m == ::Int32 || m == ::UInt8 || m == ::Float64 || m == ::String } %}
+      {% arrays = rest.select { |m| m < ::Array } %}
+      {% hashes = rest.select { |m| m < ::Hash } %}
+      {% others = rest.reject { |m| m < ::Array || m < ::Hash } %}
+      {% clash = nil %}
+      {% if others.size > 1 %}
+        {% clash = others %}
+      {% elsif arrays.size > 1 %}
+        {% clash = arrays %}
+      {% elsif hashes.size > 1 %}
+        {% clash = hashes %}
+      {% end %}
+      {% if clash %}
+        {% raise "JSON cannot read #{T}: which of #{clash.join(" and ").id} a value is read into would be a guess, as there is no rescue to try one and go back. A union read from JSON has one Array, one Hash and one other member at most besides Bool, Int64, UInt64, Int32, UInt8, Float64 and String." %}
+      {% end %}
+      kind = pull.kind
+      {% if has_bool %}
+        return pull.read_bool if kind.bool?
+      {% end %}
+      {% if has_i64 %}
+        return pull.read_int if kind.int?
+      {% elsif has_u64 || has_i32 || has_u8 %}
+        if kind.int?
+          int = pull.int_value
+          {% if has_u64 %}
+            return read_value(pull, ::UInt64) if int >= 0_i64
+          {% end %}
+          {% if has_i32 %}
+            return read_value(pull, ::Int32) if int >= -2147483648_i64 && int <= 2147483647_i64
+          {% end %}
+          {% if has_u8 %}
+            return read_value(pull, ::UInt8) if int >= 0_i64 && int <= 255_i64
+          {% end %}
+        end
+      {% end %}
+      {% if has_u64 %}
+        return read_value(pull, ::UInt64) if kind.float? && integer_digits?(pull.raw_value) && digits_to_u64?(pull.raw_value)
+      {% end %}
+      {% if has_f64 %}
+        return pull.read_float if kind.int? || kind.float?
+      {% end %}
+      {% if has_string %}
+        return pull.read_string if kind.string?
+      {% end %}
+      {% if arrays.size == 1 %}
+        if kind.begin_array?
+          return read_value(pull, typeof(begin
+            member = uninitialized T
+            member.is_a?(::Array) ? member : raise("")
+          end))
+        end
+      {% end %}
+      {% if hashes.size == 1 %}
+        if kind.begin_object?
+          return read_value(pull, typeof(begin
+            member = uninitialized T
+            member.is_a?(::Hash) ? member : raise("")
+          end))
+        end
+      {% end %}
+      {% if others.size == 1 %}
+        read_value(pull, typeof(begin
+          member = uninitialized T
+          member.is_a?(::Bool | ::Int64 | ::UInt64 | ::Int32 | ::UInt8 | ::Float64 | ::String) || member.is_a?(::Array) || member.is_a?(::Hash) ? raise("") : member
+        end))
+      {% else %}
+        {% if has_u64 || has_i32 || has_u8 %}
+          if kind.int? || (kind.float? && integer_digits?(pull.raw_value))
+            raise "integer #{pull.raw_value} out of #{T} range at line #{pull.line_number}, column #{pull.column_number}"
+          end
+        {% end %}
+        raise "expected #{T}, got #{kind} at line #{pull.line_number}, column #{pull.column_number}"
+      {% end %}
+    {% end %}
+  end
+end
+
+# A union's value written by the member it holds: called on a union, a
+# method runs as the member's own type, so `self` here is that member and
+# `JSON.write_value` picks its overload as it would for the member alone.
+# `JSON.write_value` hands a union here.
+#
+# The members are not told apart by name. `Union`'s `T` named in a macro
+# was tried first, and a name is looked up from where it is written: from
+# this module, `Std::Time::Time` was refused as not imported here
+# (SPEC.md R-1), and a program's private type was an undefined constant.
+class ::Object
+  def __json_write(json : ::Std::Json::Builder) : Nil
+    ::Std::Json::JSON.write_value(self, json)
   end
 end

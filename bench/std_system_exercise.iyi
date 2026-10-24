@@ -1,0 +1,75 @@
+# Exercises `std/system`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_system_exercise.iyi
+#
+# What another program answers for the same machine comes in through the
+# environment, set by bench/std_system_exercise.sh from Python (or the
+# system's own tools): SYSTEM_EXPECT_HOSTNAME, SYSTEM_EXPECT_CPUS and
+# SYSTEM_EXPECT_PAGE_SIZE. Each is checked when it is there; the gate runs
+# this program once more under `taskset` with the count Python saw under
+# the same mask.
+
+module bench/std_system_exercise
+
+import std/system::{System}
+import std/env::{ENV}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+puts "== hostname"
+name = System.hostname
+assert_true !name.empty?, "hostname is not empty"
+assert_true !name.includes?("\0"), "hostname holds no NUL"
+assert_true name.bytesize <= 255, "hostname fits a DNS name (#{name.bytesize} bytes)"
+assert_str name, System.hostname, "hostname answers the same twice"
+{% if flag?(:linux) %}
+  # The kernel's own copy of the node name, read another way.
+  assert_str File.read("/proc/sys/kernel/hostname").strip, name, "hostname is /proc/sys/kernel/hostname"
+{% end %}
+puts "  #{name}"
+
+puts "== cpu count"
+cpus = System.cpu_count
+assert_true cpus >= 1, "cpu_count is at least one (#{cpus})"
+assert_true cpus <= 65536, "cpu_count is a machine's (#{cpus})"
+assert_int cpus, System.cpu_count, "cpu_count answers the same twice"
+puts "  #{cpus}"
+
+puts "== page size"
+page = System.page_size
+assert_true page >= 4096, "page_size is at least 4 KiB (#{page})"
+assert_true page <= 1048576, "page_size is at most 1 MiB (#{page})"
+assert_true (page & (page - 1)) == 0, "page_size is a power of two (#{page})"
+assert_int page, System.page_size, "page_size answers the same twice"
+puts "  #{page}"
+
+puts "== another program agrees"
+expected_name = ENV["SYSTEM_EXPECT_HOSTNAME"]?
+expected_cpus = ENV["SYSTEM_EXPECT_CPUS"]?
+expected_page = ENV["SYSTEM_EXPECT_PAGE_SIZE"]?
+if expected_name
+  assert_str expected_name, name, "hostname is what Python's socket.gethostname() answers"
+  puts "  hostname #{name}"
+end
+if expected_cpus
+  assert_int expected_cpus.to_i, cpus, "cpu_count is what Python counts for this process"
+  puts "  cpu_count #{cpus}"
+end
+if expected_page
+  assert_int expected_page.to_i, page, "page_size is what Python's sysconf('SC_PAGE_SIZE') answers"
+  puts "  page_size #{page}"
+end
+puts "  nothing to compare against" if expected_name.nil? && expected_cpus.nil? && expected_page.nil?
+
+puts "ALL CHECKS PASSED"

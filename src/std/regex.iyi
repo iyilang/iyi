@@ -2,86 +2,880 @@
 #
 # Linear time: a Thompson NFA run as a Pike VM, one pass over the text
 # with a thread list in priority order, so a search costs the text's
-# length times the pattern's and never more. Lookaround, backreferences,
-# recursion, possessive quantifiers, inline flags and `\p{..}` classes
-# are refused with a sentence — the first four are not regular, and the
-# last two this engine does not have.
+# length times the pattern's and never more. Each thread carries its own
+# capture positions, copied as it splits, which is how RE2 reports groups
+# without ever backtracking. Lookaround, backreferences, recursion,
+# possessive quantifiers, atomic groups and `(?#..)` comments are refused
+# with a sentence: the first five are not regular, and RE2 has no comments.
 #
-# Matches are leftmost-first, as RE2's and Python's are: `a|ab` on `ab`
+# Matches are leftmost-first, as RE2's and Perl's are: `a|ab` on `ab`
 # answers `a`, a greedy `*` takes what it can and a lazy `*?` what it
-# must. The surface: `.` (any byte but newline), `^` `$` `\A` `\z`, `\b`
-# `\B`, `\d` `\w` `\s` and their negations (ASCII), classes `[a-z]`
-# `[^0-9\s]`, `\xHH`, `?` `*` `+` `{n}` `{n,}` `{n,m}` and their lazy
-# forms, groups `( )` `(?: )` `(?<name> )` (none capture: a match is the
-# whole of it). Bytes, not code points: a class holding a byte past
-# ASCII is refused, while a literal `é` outside one matches its own
-# bytes. `match?` is the whole string; `find` is the first match; `scan`
-# every non-overlapping one; `split` and `replace` read those, and an
-# empty match costs no text.
+# must, and a group reports what the winning thread passed through.
+#
+# Code points, not bytes: the text is read as UTF-8, one character a
+# step, so `.`, a negated class and a range like `[α-ω]` take a whole
+# `é` or `中`. A byte that begins no character is one U+FFFD, as
+# `String#each_char` reads it. Positions stay byte offsets, as everywhere
+# in iyi: `find`, `=~`, `index` and `MatchData#byte_begin` answer bytes,
+# and `MatchData#begin` the character index the other library answers.
+#
+# The surface is RE2's: `.`, `^` `$` `\A` `\z`, `\b` `\B`, `\d` `\w` `\s`
+# and their negations (ASCII, as in RE2: `\w` is `[0-9A-Za-z_]` and `\b`
+# sits between one of those and anything else), classes `[a-z]` `[^\s]`
+# over any code point, RE2's ASCII `[[:alpha:]]` `[[:^digit:]]`, Unicode's
+# `\p{L}` `\pN` `\p{Greek}` `\P{Lu}` `\p{^Han}` (every general category,
+# its one-letter class, `Any`, and every script), `\xHH` `\x{10FFFF}`
+# `\0oo`, `\Q..\E`, `?` `*` `+` `{n}` `{n,}` `{n,m}` and their lazy forms,
+# groups `( )` `(?: )` `(?<name> )` `(?P<name> )`, and the flags `i`
+# (Unicode simple case folding, `k` matching the Kelvin sign), `m` (`^`
+# and `$` at each line), `s` (`.` takes a newline), `U` (greedy and lazy
+# swap) and `x` (whitespace and `#` comments are not the pattern), inline
+# as `(?i)` and `(?i-s)` or scoped as `(?i:..)`. `Options` gives a whole
+# pattern its flags; `MULTILINE` is the other library's, `m` and `s` at
+# once, and `MULTILINE_ONLY` and `DOTALL` are each half.
+#
+# `match?` is the whole string; `find` the first match; `match` its
+# groups; `match_at` the match that begins at a given byte, which is what
+# std/string_scanner reads tokens with; `scan` every non-overlapping
+# match; `split` and `replace` read those, and an empty match costs no
+# text. A literal, `/a+b/i`, is
+# `Regex.compile("a+b", Options::IGNORE_CASE)` compiled once for the
+# program. There is no `$~`: a match is a value `match` answers, never a
+# variable a call sets behind the program's back.
 
 module std/regex
 
+import std/unicode::{Unicode}
+
+# A pattern that is alternatives of fixed-length runs of byte classes, and
+# nothing else: no quantifier, group, anchor or `\\` class escape. Each run
+# is a list of 256-byte tables, one per byte it matches, so a byte is tested
+# with one load; a position is tried only when its byte can start some run,
+# and the runs are tried in the order written, so the first that matches
+# wins - leftmost-first, as the machine answers. Every run matches at least
+# one byte, so no match is empty.
+#
+# A table is one byte and the machine reads characters, so only a pattern
+# whose atoms are bytes either way comes here: a literal `é` is its two
+# bytes in a row, but `.`, a negated class and a class holding a character
+# past ASCII each take a whole character of one to four bytes, and those
+# patterns are the machine's.
+#
+# When the runs are all one length and hold 64 bytes between them, they are
+# run as one Shift-And automaton instead: bit k of a word is "atom k matched
+# the byte before", each byte shifts the word, sets every run's first bit,
+# and keeps the bits whose atom takes the byte - one load, a shift and two
+# masks a byte for all the runs at once. The first run to end marks the
+# leftmost start, and since every run is as long, the span is the same
+# whichever of them it was.
+class RxRuns
+  @tables : Pointer(UInt8)
+  @starts : Array(Int32)
+  @lengths : Array(Int32)
+  @first : Pointer(UInt8)
+  # The automaton, when the shape allows it: a mask of atoms per byte, the
+  # runs' first atoms, their last atoms, and the common length; zero length
+  # when it does not.
+  @masks : Pointer(UInt64)
+  @heads : UInt64
+  @tails : UInt64
+  @width : Int32
+
+  def initialize(@tables : Pointer(UInt8), @starts : Array(Int32), @lengths : Array(Int32), @first : Pointer(UInt8))
+    @masks = Pointer(UInt64).new(0_u64)
+    @heads = 0_u64
+    @tails = 0_u64
+    @width = 0
+    width = @lengths[0]
+    return if @lengths.any? { |length| length != width }
+    atoms = width * @lengths.size
+    return if atoms > 64
+    masks = Pointer(UInt64).malloc(256_u64)
+    atom = 0
+    while atom < atoms
+      table = @tables + (atom * 256).to_i64
+      bit = 1_u64.unsafe_shl(atom.to_u64)
+      byte = 0
+      while byte < 256
+        masks[byte] = masks[byte] | bit if table[byte] != 0_u8
+        byte = byte + 1
+      end
+      atom = atom + 1
+    end
+    a = 0
+    while a < @lengths.size
+      @heads = @heads | 1_u64.unsafe_shl((a * width).to_u64)
+      @tails = @tails | 1_u64.unsafe_shl((a * width + width - 1).to_u64)
+      a = a + 1
+    end
+    @masks = masks
+    @width = width
+  end
+
+  # Nil for anything past the shape above; the machine takes those.
+  def self.parse(pattern : String) : RxRuns?
+    n = pattern.bytesize
+    return nil if n == 0
+    p = pattern.to_unsafe
+    atoms_bound = n
+    tables = Pointer(UInt8).malloc((atoms_bound * 256).to_u64)
+    first = Pointer(UInt8).malloc(256_u64)
+    starts = [] of Int32
+    lengths = [] of Int32
+    i = 0
+    atoms = 0
+    while true
+      start = atoms
+      while i < n && p[i] != 124_u8
+        b = p[i]
+        at = tables + (atoms * 256).to_i64
+        clear(at)
+        if b == 91_u8
+          i = i + 1
+          return nil if i < n && p[i] == 94_u8
+          return nil if i >= n || p[i] == 93_u8
+          while i < n && p[i] != 93_u8
+            c = p[i]
+            return nil if c == 92_u8 || c == 91_u8 || c >= 128_u8
+            if i + 2 < n && p[i + 1] == 45_u8 && p[i + 2] != 93_u8
+              high = p[i + 2]
+              # An escaped end, `[0-\x34]`, is the machine's to read: taken
+              # here as the byte `\` it made `[0-\x34]` match `x` and `A`.
+              return nil if high == 92_u8 || high < c
+              return nil if high >= 128_u8
+              x = c.to_i32
+              while x <= high.to_i32
+                at[x] = 1_u8
+                x = x + 1
+              end
+              i = i + 3
+            else
+              at[c.to_i32] = 1_u8
+              i = i + 1
+            end
+          end
+          return nil if i >= n
+          i = i + 1
+        elsif b == 92_u8
+          return nil if i + 1 >= n
+          c = p[i + 1]
+          return nil if (c >= 48_u8 && c <= 57_u8) || (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8) || c >= 128_u8
+          at[c.to_i32] = 1_u8
+          i = i + 2
+        elsif b == 94_u8 || b == 36_u8 || b == 63_u8 || b == 42_u8 || b == 43_u8 || b == 46_u8 ||
+              b == 40_u8 || b == 41_u8 || b == 123_u8 || b == 125_u8 || b == 93_u8
+          return nil
+        else
+          at[b.to_i32] = 1_u8
+          i = i + 1
+        end
+        atoms = atoms + 1
+      end
+      return nil if atoms == start
+      starts << start * 256
+      lengths << atoms - start
+      head = tables + (start * 256).to_i64
+      k = 0
+      while k < 256
+        first[k] = 1_u8 if head[k] != 0_u8
+        k = k + 1
+      end
+      break if i >= n
+      i = i + 1
+      return nil if i >= n
+    end
+    new(tables, starts, lengths, first)
+  end
+
+  private def self.clear(table : Pointer(UInt8)) : Nil
+    k = 0
+    while k < 256
+      table[k] = 0_u8
+      k = k + 1
+    end
+  end
+
+  # Whether run *a* matches *src* at *i*, the text being *n* bytes.
+  private def run_at?(src : Pointer(UInt8), n : Int32, i : Int32, a : Int32) : Bool
+    length = @lengths.to_unsafe[a]
+    return false if i + length > n
+    table = @tables + @starts.to_unsafe[a].to_i64
+    j = 0
+    while j < length
+      return false if table[src[i + j].to_i32] == 0_u8
+      table = table + 256_i64
+      j = j + 1
+    end
+    true
+  end
+
+  # The first match at or after *from*, as byte offsets.
+  def search(text : String, from : Int32) : {Int32, Int32}?
+    return shift_and(text, from) if @width > 0
+    n = text.bytesize
+    src = text.to_unsafe
+    first = @first
+    alts = @starts.size
+    i = from
+    while i < n
+      if first[src[i].to_i32] != 0_u8
+        a = 0
+        while a < alts
+          return {i, i + @lengths.to_unsafe[a]} if run_at?(src, n, i, a)
+          a = a + 1
+        end
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  private def shift_and(text : String, from : Int32) : {Int32, Int32}?
+    n = text.bytesize
+    src = text.to_unsafe
+    masks = @masks
+    heads = @heads
+    tails = @tails
+    state = 0_u64
+    i = from
+    while i < n
+      state = (state.unsafe_shl(1_u64) | heads) & masks[src[i].to_i32]
+      return {i - @width + 1, i + 1} if state & tails != 0_u64
+      i = i + 1
+    end
+    nil
+  end
+
+  # Whether some run spans the whole of *text*, as `match?` asks.
+  def whole?(text : String) : Bool
+    a = 0
+    while a < @starts.size
+      return true if @lengths[a] == text.bytesize && run_at?(text.to_unsafe, text.bytesize, 0, a)
+      a = a + 1
+    end
+    false
+  end
+end
+
 pub struct Regex
+  # The flags a whole pattern is compiled with, combined with `|`. The
+  # numbers are the other library's, which is what lets a literal's flags
+  # (`/a/i`, `/a/mx`) reach this type unchanged.
+  @[Flags]
+  pub enum Options
+    # `i`: letters match in either case, by Unicode simple case folding.
+    IGNORE_CASE = 1
+
+    # `m` as the other library means it: `^` and `$` at every line, and `.`
+    # takes a newline too. The pattern's own `(?m)` is only the first half,
+    # as in RE2 and PCRE; `(?ms)` is both.
+    MULTILINE = 6
+
+    # `s`: `.` takes a newline.
+    DOTALL = 2
+
+    # `^` and `$` at every line, `.` unchanged: the pattern's `(?m)`.
+    MULTILINE_ONLY = 4
+
+    # `x`: whitespace outside a class is not the pattern, and `#` starts a
+    # comment that runs to the end of the line. `\ ` and `\#` are the
+    # characters themselves.
+    EXTENDED = 8
+  end
+
+  # One match: the text it was found in and where each group began and
+  # ended, in bytes. A group that took no part in the match - the second
+  # of `(a)|(b)` when `a` matched, `(x)?` when `x` did not - has no span,
+  # and `[]?` answers nil for it.
+  pub class MatchData
+    @regex : Regex
+    @string : String
+    # Two per group, group 0 first: byte offsets, -1 for a group that did
+    # not take part.
+    @slots : Array(Int32)
+
+    def initialize(@regex : Regex, @string : String, @slots : Array(Int32))
+    end
+
+    # The pattern that matched.
+    def regex : Regex
+      @regex
+    end
+
+    # The text the match was found in.
+    def string : String
+      @string
+    end
+
+    # How many groups there are, the whole match counted: `(a)(b)` is 3.
+    def size : Int32
+      @slots.size // 2
+    end
+
+    # How many capture groups the pattern has, the whole match not counted.
+    def group_size : Int32
+      size - 1
+    end
+
+    # Where group *n* begins, in bytes: what `String#[]` and `index` count
+    # in. A negative *n* counts from the last group.
+    def byte_begin(n : Int32 = 0) : Int32
+      @slots[2 * matched_group(n)]
+    end
+
+    # Where group *n* ends, in bytes.
+    def byte_end(n : Int32 = 0) : Int32
+      @slots[2 * matched_group(n) + 1]
+    end
+
+    # Where group *n* begins, in characters, as the other library counts:
+    # `"クリスタル".match(/リ(ス)/).begin(0)` is 1 where `byte_begin` is 3.
+    def begin(n : Int32 = 0) : Int32
+      @string[0, byte_begin(n)].size
+    end
+
+    # Where group *n* ends, in characters.
+    def end(n : Int32 = 0) : Int32
+      @string[0, byte_end(n)].size
+    end
+
+    # The text group *n* matched, or nil for a group that took no part or
+    # that the pattern does not have.
+    def []?(n : Int32) : String?
+      return nil if n < -size || n >= size
+      n = n + size if n < 0
+      at = @slots[2 * n]
+      return nil if at < 0
+      @string[at, @slots[2 * n + 1] - at]
+    end
+
+    # The text group *n* matched. A group the pattern does not have, or one
+    # that took no part in this match, is a mistake the program made, and
+    # it panics with the reason.
+    def [](n : Int32) : String
+      at = @slots[2 * matched_group(n)]
+      @string[at, @slots[2 * matched_group(n) + 1] - at]
+    end
+
+    # The text the group called *name* matched, or nil for a group that
+    # took no part or a name the pattern does not have.
+    def []?(name : String) : String?
+      index = @regex.group_index(name)
+      index ? self[index]? : nil
+    end
+
+    # The text the group called *name* matched; a name the pattern does not
+    # have, or a group that took no part, panics with the reason.
+    def [](name : String) : String
+      index = @regex.group_index(name)
+      raise "regex: no group named '#{name}' in /#{@regex.source}/" unless index
+      raise "regex: group '#{name}' took no part in the match of /#{@regex.source}/" if @slots[2 * index] < 0
+      self[index]
+    end
+
+    # The text before the match.
+    def pre_match : String
+      @string[0, @slots[0]]
+    end
+
+    # The text after the match.
+    def post_match : String
+      @string[@slots[1], @string.bytesize - @slots[1]]
+    end
+
+    # What each unnamed group matched, in order, nil for one that took no
+    # part; the named ones are `named_captures`, as in the other library.
+    def captures : Array(String?)
+      found = [] of String?
+      n = 1
+      while n < size
+        found << self[n]? unless @regex.group_name(n)
+        n = n + 1
+      end
+      found
+    end
+
+    # What each named group matched, nil for one that took no part.
+    def named_captures : Hash(String, String?)
+      found = {} of String => String?
+      n = 1
+      while n < size
+        if name = @regex.group_name(n)
+          found[name] = self[n]?
+        end
+        n = n + 1
+      end
+      found
+    end
+
+    # Every group, the whole match first.
+    def to_a : Array(String?)
+      found = [] of String?
+      n = 0
+      while n < size
+        found << self[n]?
+        n = n + 1
+      end
+      found
+    end
+
+    # The text the whole pattern matched.
+    def to_s : String
+      self[0]
+    end
+
+    # `Regex::MatchData("ab" 1:"a" name:"b")`, as the other library writes it.
+    def inspect : String
+      String.build do |io|
+        io << "Regex::MatchData("
+        n = 0
+        while n < size
+          if n > 0
+            io << " "
+            if name = @regex.group_name(n)
+              io << name
+            else
+              io << n
+            end
+            io << ":"
+          end
+          if text = self[n]?
+            io << text.inspect
+          else
+            io << "nil"
+          end
+          n = n + 1
+        end
+        io << ")"
+      end
+    end
+
+    # *replacement* with its references filled from this match: `\0` to
+    # `\9` are groups, `\k<name>` a named one, `\\` one backslash, and any
+    # other `\` is itself - how the other library reads the replacement
+    # `String#sub` and `gsub` are given. A group that took no part is
+    # empty; a name the pattern does not have panics.
+    def expand(replacement : String) : String
+      src = replacement.to_unsafe
+      n = replacement.bytesize
+      String.build(n) do |io|
+        i = 0
+        while i < n
+          b = src[i]
+          if b == 92_u8 && i + 1 < n
+            c = src[i + 1]
+            if c == 92_u8
+              io.write_byte(92_u8)
+              i = i + 2
+              next
+            elsif c >= 48_u8 && c <= 57_u8
+              io << (self[(c - 48_u8).to_i32]? || "")
+              i = i + 2
+              next
+            elsif c == 107_u8 && i + 2 < n && src[i + 2] == 60_u8
+              close = i + 3
+              while close < n && src[close] != 62_u8
+                close = close + 1
+              end
+              raise "regex: '\\k<' with no '>' in the replacement #{replacement.inspect}" if close >= n
+              name = replacement[i + 3, close - i - 3]
+              raise "regex: the replacement #{replacement.inspect} names a group /#{@regex.source}/ does not have" unless @regex.group_index(name)
+              io << (self[name]? || "")
+              i = close + 1
+              next
+            end
+          end
+          io.write_byte(b)
+          i = i + 1
+        end
+      end
+    end
+
+    private def matched_group(n : Int32) : Int32
+      raise "regex: no group #{n} in /#{@regex.source}/ (it has #{size - 1})" if n < -size || n >= size
+      n = n + size if n < 0
+      raise "regex: group #{n} took no part in the match of /#{@regex.source}/" if @slots[2 * n] < 0
+      n
+    end
+  end
+
   @nfa : RxNfa
+  # The pattern's own text when it holds no operator at all - `B`, `ggt`,
+  # `tHa` - found by comparing bytes, the way a string is searched, rather
+  # than by stepping the machine a byte at a time. Eleven one-letter
+  # replacements over 60 MB took 8.5 s through the machine.
+  @literal : String?
+  # Alternatives of fixed-length runs of byte classes - `agggtaaa|tttaccct`,
+  # `[cgt]gggtaaa|tttaccc[acg]` - tried at each position in order behind a
+  # filter on the first byte, instead of stepping the machine. The nine
+  # patterns regexdna counts over 60 MB took 6 s through the machine.
+  @runs : RxRuns?
+  @source : String
+  @options : Options
+  # Each group's name, nil for an unnamed one; group 0, the whole match,
+  # is first and has none.
+  @names : Array(String?)
 
-  def initialize(@nfa : RxNfa)
+  def initialize(@nfa : RxNfa, @literal : String?, @runs : RxRuns?, @source : String, @options : Options, @names : Array(String?))
   end
 
-  def self.compile(pattern : String) : Regex
-    new(RxCompiler.new(pattern).compile)
+  # The machine is compiled first either way: it is what refuses a pattern
+  # this engine does not take, and the fast paths only ever see one it did.
+  # They read the pattern's text as written, so a pattern with flags, which
+  # change what that text means, is the machine's alone. So is one holding
+  # U+FFFD: the machine reads a byte that begins no character as that
+  # character, and comparing bytes would find only its three-byte spelling.
+  def self.compile(pattern : String, options : Options = Options::None) : Regex
+    compiler = RxCompiler.new(pattern, options)
+    nfa = compiler.compile
+    plain = options.value == 0 && !pattern.includes?("\u{FFFD}")
+    literal = plain ? literal_of(pattern) : nil
+    runs = plain && literal.nil? ? RxRuns.parse(pattern) : nil
+    new(nfa, literal, runs, pattern, options, compiler.names)
   end
 
+  # The other library's name for `compile`.
+  def self.new(pattern : String, options : Options = Options::None) : Regex
+    compile(pattern, options)
+  end
+
+  # *text* with every character a pattern would read as an operator
+  # escaped, so `Regex.compile(Regex.escape(text))` matches *text* and
+  # nothing else - with `x` too, whose whitespace and `#` are escaped.
+  def self.escape(text : String) : String
+    special = " .\\+*?[^]$(){}=!<>|:-#/\t\n\v\f\r"
+    String.build(text.bytesize) do |io|
+      i = 0
+      while i < text.bytesize
+        b = text.to_unsafe[i]
+        j = 0
+        while j < special.bytesize
+          if b == special.to_unsafe[j]
+            io.write_byte(92_u8)
+            break
+          end
+          j = j + 1
+        end
+        io.write_byte(b)
+        i = i + 1
+      end
+    end
+  end
+
+  # One pattern matching any of *patterns*: a string as its own text, a
+  # `Regex` with its flags kept to itself (`(?i-msx:...)`, its `to_s`).
+  # The groups of every pattern after the first are numbered after the
+  # groups before them.
+  def self.union(patterns : Array(T)) : Regex forall T
+    parts = [] of String
+    patterns.each { |pattern| parts << union_part(pattern) }
+    compile(parts.join("|"))
+  end
+
+  def self.union(*patterns : String | Regex) : Regex
+    parts = [] of String
+    i = 0
+    while i < patterns.size
+      parts << union_part(patterns[i])
+      i = i + 1
+    end
+    compile(parts.join("|"))
+  end
+
+  private def self.union_part(pattern : Regex) : String
+    pattern.to_s
+  end
+
+  private def self.union_part(pattern : String) : String
+    escape(pattern)
+  end
+
+  # The pattern as written, the other library's `Regex#source`: what a
+  # literal was compiled from, for a program that prints its patterns.
+  def source : String
+    @source
+  end
+
+  # The flags the pattern was compiled with; inline ones are the
+  # pattern's own text and are not here.
+  def options : Options
+    @options
+  end
+
+  # How many capture groups the pattern has.
+  def capture_count : Int32
+    @names.size - 1
+  end
+
+  # Each named group's number and name.
+  def name_table : Hash(Int32, String)
+    table = {} of Int32 => String
+    n = 1
+    while n < @names.size
+      if name = @names[n]
+        table[n] = name
+      end
+      n = n + 1
+    end
+    table
+  end
+
+  # The name of group *n*, or nil for an unnamed group or one the pattern
+  # does not have.
+  def group_name(n : Int32) : String?
+    n > 0 && n < @names.size ? @names[n] : nil
+  end
+
+  # The number of the group called *name*, or nil.
+  def group_index(name : String) : Int32?
+    n = 1
+    while n < @names.size
+      return n if @names[n] == name
+      n = n + 1
+    end
+    nil
+  end
+
+  # The pattern with its flags inside it, `(?i-msx:a+)`, which compiles to
+  # a pattern that matches as this one does: what `union` joins.
+  def to_s : String
+    on = String.build do |io|
+      io << "i" if @options.includes?(Options::IGNORE_CASE)
+      io << "m" if @options.includes?(Options::MULTILINE_ONLY)
+      io << "s" if @options.includes?(Options::DOTALL)
+      io << "x" if @options.includes?(Options::EXTENDED)
+    end
+    off = String.build do |io|
+      io << "i" unless @options.includes?(Options::IGNORE_CASE)
+      io << "m" unless @options.includes?(Options::MULTILINE_ONLY)
+      io << "s" unless @options.includes?(Options::DOTALL)
+      io << "x" unless @options.includes?(Options::EXTENDED)
+    end
+    "(?#{on}-#{off}:#{@source})"
+  end
+
+  # The pattern as a literal would write it, `/a\/b/ix`.
+  def inspect : String
+    String.build do |io|
+      io << "/"
+      i = 0
+      while i < @source.bytesize
+        b = @source.to_unsafe[i]
+        if b == 92_u8 && i + 1 < @source.bytesize
+          io.write_byte(b)
+          io.write_byte(@source.to_unsafe[i + 1])
+          i = i + 2
+          next
+        end
+        io << "\\" if b == 47_u8
+        io.write_byte(b)
+        i = i + 1
+      end
+      io << "/"
+      io << "i" if @options.includes?(Options::IGNORE_CASE)
+      io << "m" if @options.includes?(Options::MULTILINE)
+      io << "x" if @options.includes?(Options::EXTENDED)
+    end
+  end
+
+  # The same pattern with the same flags.
+  def ==(other : Regex) : Bool
+    @source == other.source && @options == other.options
+  end
+
+  # Nil for an empty pattern, which matches between every two bytes, and
+  # for any pattern with a byte the compiler reads as an operator.
+  private def self.literal_of(pattern : String) : String?
+    return nil if pattern.empty?
+    operators = "\\^$.|?*+()[]{}"
+    i = 0
+    while i < pattern.bytesize
+      b = pattern.to_unsafe[i]
+      j = 0
+      while j < operators.bytesize
+        return nil if b == operators.to_unsafe[j]
+        j = j + 1
+      end
+      i = i + 1
+    end
+    pattern
+  end
+
+  # Whether the pattern spans the whole of *text*. The other library's
+  # `match?` asks whether it occurs anywhere, which is `===` and
+  # `String#matches?` here.
   def match?(text : String) : Bool
+    if literal = @literal
+      return text == literal
+    end
+    if runs = @runs
+      return runs.whole?(text)
+    end
     !@nfa.full(text).nil?
   end
 
   def find(text : String) : String?
-    span = @nfa.search_from(text, 0)
+    span = search(text, 0)
     return nil unless span
     text[span[0], span[1] - span[0]]
   end
 
+  # The first match at or after byte *pos*, with its groups; a negative
+  # *pos* counts from the end. `^` and `\A` still mean the start of the
+  # text, not *pos*.
+  def match(text : String, pos : Int32 = 0) : MatchData?
+    pos = text.bytesize + pos if pos < 0
+    return nil if pos < 0 || pos > text.bytesize
+    if @names.size == 1
+      span = search(text, pos)
+      return span ? MatchData.new(self, text, [span[0], span[1]]) : nil
+    end
+    slots = @nfa.capture(text, pos, -1, @names.size * 2)
+    slots ? MatchData.new(self, text, slots) : nil
+  end
+
+  # Where the first match at or after byte *offset* begins, in bytes, as
+  # `String#byte_index` answers for a string.
+  def byte_index(text : String, offset : Int32 = 0) : Int32?
+    offset = text.bytesize + offset if offset < 0
+    return nil if offset < 0 || offset > text.bytesize
+    span = search(text, offset)
+    span ? span[0] : nil
+  end
+
+  # The match that begins exactly at byte *pos*, with its groups, or nil:
+  # the other library's `match_at_byte_index` with `MatchOptions::ANCHORED`,
+  # Python's `pattern.match(text, pos)`, what a scanner asks at its
+  # offset. As there, the text before *pos* is still the text: `^` and
+  # `\A` mean its start, not *pos*, and `\b` sees the byte before *pos*.
+  # A negative *pos* counts from the end, as `match`'s does.
+  def match_at(text : String, pos : Int32) : MatchData?
+    pos = text.bytesize + pos if pos < 0
+    return nil if pos < 0 || pos > text.bytesize
+    slots = @nfa.capture_at(text, pos, @names.size * 2)
+    slots ? MatchData.new(self, text, slots) : nil
+  end
+
+  # Where the first match begins, in bytes, or nil. It sets nothing: the
+  # other library's `=~` also fills `$~`, which iyi does not have, and a
+  # program that wants the groups asks `match`.
+  def =~(text : String) : Int32?
+    byte_index(text)
+  end
+
+  # Whether the pattern occurs anywhere in *text*: what `case text when
+  # /x/` asks.
+  def ===(text : String) : Bool
+    !search(text, 0).nil?
+  end
+
+  # The first match at or after *from*, as byte offsets.
+  private def search(text : String, from : Int32) : {Int32, Int32}?
+    if literal = @literal
+      found = literal_at(text, literal, from)
+      return found ? {found, found + literal.bytesize} : nil
+    end
+    if runs = @runs
+      return runs.search(text, from)
+    end
+    @nfa.search_from(text, from)
+  end
+
+  # Where *literal* next starts in *text* at or after *from*: the first byte
+  # found, then the rest compared.
+  # The literal's first place at or after *from*, by `String#byte_index`,
+  # which stays linear on a text that keeps almost matching it: compared
+  # from each position in turn, 1,000 `a` and a `b` against a megabyte of
+  # `a` took 454 ms.
+  private def literal_at(text : String, literal : String, from : Int32) : Int32?
+    text.byte_index(literal, from)
+  end
+
   def scan(text : String) : Array(String)
-    out = [] of String
-    each_match(text) { |a, b| out << text[a, b - a] }
-    out
+    found = [] of String
+    each_span(text) { |a, b| found << text[a, b - a] }
+    found
   end
 
   def split(text : String) : Array(String)
-    out = [] of String
+    pieces = [] of String
     last = 0
-    each_match(text) do |a, b|
-      out << text[last, a - last]
+    each_span(text) do |a, b|
+      pieces << text[last, a - last]
       last = b
     end
-    out << text[last, text.bytesize - last]
-    out
+    pieces << text[last, text.bytesize - last]
+    pieces
   end
 
+  # Every match replaced, into one buffer: `out = out + ...` copied all of
+  # the text so far at each match, and eleven substitutions over a 60 MB
+  # sequence with a million matches each did not finish. The replacement
+  # is taken as written; `String#gsub` is the one that reads `\1` in it.
   def replace(text : String, replacement : String) : String
-    out = ""
-    last = 0
-    each_match(text) do |a, b|
-      out = out + text[last, a - last] + replacement
-      last = b
-    end
-    out + text[last, text.bytesize - last]
+    replace(text) { |match| replacement }
   end
 
-  # Every non-overlapping match, leftmost first. After a full match the
+  # Every match replaced by what the block answers for it — the per-match
+  # substitution (`gsub(pattern, hash)` in the other library) that a fixed
+  # replacement cannot say.
+  def replace(text : String, & : String -> String) : String
+    last = 0
+    String.build(text.bytesize) do |io|
+      each_span(text) do |a, b|
+        io.write(text.to_unsafe + last, a - last)
+        io << yield text[a, b - a]
+        last = b
+      end
+      io.write(text.to_unsafe + last, text.bytesize - last)
+    end
+  end
+
+  # Every non-overlapping match with its groups, leftmost first, as `scan`
+  # finds them.
+  def each_match(text : String, & : MatchData -> Nil) : Nil
+    if @names.size == 1
+      each_span(text) { |a, b| yield MatchData.new(self, text, [a, b]) }
+    else
+      each_slots(text, @names.size * 2) { |slots| yield MatchData.new(self, text, slots) }
+    end
+  end
+
+  # Every non-overlapping match, leftmost first, as byte spans.
+  private def each_span(text : String, & : Int32, Int32 -> Nil) : Nil
+    if literal = @literal
+      at = 0
+      while (found = literal_at(text, literal, at))
+        yield found, found + literal.bytesize
+        at = found + literal.bytesize
+      end
+      return
+    end
+    if runs = @runs
+      at = 0
+      while (span = runs.search(text, at))
+        yield span[0], span[1]
+        at = span[1]
+      end
+      return
+    end
+    each_slots(text, 2) { |slots| yield slots[0], slots[1] }
+  end
+
+  # The machine's matches, *slots* positions each. After a full match the
   # search moves to its end; after an empty one it stays where it is but
-  # may not answer empty there again, so a lazy pattern still gets to
-  # take the byte — Python's rule, and the byte is never lost.
-  private def each_match(text : String, & : Int32, Int32 -> Nil) : Nil
+  # may not answer empty there again, so a lazy pattern still gets to take
+  # the character - Python's rule, and the character is never lost.
+  private def each_slots(text : String, slots : Int32, & : Array(Int32) -> Nil) : Nil
     pos = 0
     forbid = -1
     n = text.bytesize
     while pos <= n
-      span = @nfa.search_from(text, pos, forbid)
-      break unless span
-      a = span[0]
-      b = span[1]
-      yield a, b
+      found = @nfa.capture(text, pos, forbid, slots)
+      break unless found
+      a = found[0]
+      b = found[1]
+      yield found
       if b > a
         pos = b
         forbid = -1
@@ -93,53 +887,121 @@ pub struct Regex
   end
 end
 
-# States: 0 a byte, 1 any but newline, 2 a class, 3 a split (out1 before
-# out2), 4 the match, 5 `^`, 6 `$`, 7 `\b`, 8 `\B`.
+# The machine's states, as `kind`, `arg`, `out1` and `out2` side by side.
+# A class is an ASCII bitmap in two words and, for the characters past
+# ASCII, sorted ranges searched by halves.
 class RxNfa
+  # A character, `arg` its code point.
+  CHAR = 0
+  # Any character but a newline.
+  ANY_BUT_NEWLINE = 1
+  # A class, `arg` its index.
+  CLASS = 2
+  # A choice: `out1` before `out2`.
+  SPLIT = 3
+  MATCH = 4
+  # `^` and `\A`: the start of the text.
+  TEXT_START = 5
+  # `$`, `\z`: the end of the text.
+  TEXT_END          = 6
+  WORD_BOUNDARY     = 7
+  NOT_WORD_BOUNDARY = 8
+  # The position recorded into capture slot `arg`.
+  SAVE = 9
+  # Any character, a newline too: `.` under `s`.
+  ANY = 10
+  # `^` under `m`: the start of the text or just after a newline.
+  LINE_START = 11
+  # `$` under `m`: the end of the text or just before a newline.
+  LINE_END = 12
+
   getter kind : Array(Int32)
-  getter ch : Array(UInt8)
+  getter arg : Array(Int32)
   getter out1 : Array(Int32)
   getter out2 : Array(Int32)
-  getter mask : Array(UInt8)
   property start : Int32
   getter count : Int32
+  @low : Array(UInt64)
+  @high : Array(UInt64)
+  @ranges : Array(Array(Int32))
 
   def initialize
     @kind = [] of Int32
-    @ch = [] of UInt8
+    @arg = [] of Int32
     @out1 = [] of Int32
     @out2 = [] of Int32
-    @mask = [] of UInt8
     @start = 0
     @count = 0
+    @low = [] of UInt64
+    @high = [] of UInt64
+    @ranges = [] of Array(Int32)
   end
 
-  def add(kind : Int32, ch : UInt8 = 0_u8) : Int32
+  def add(kind : Int32, arg : Int32 = 0) : Int32
     id = @count
     @kind << kind
-    @ch << ch
+    @arg << arg
     @out1 << -1
     @out2 << -1
-    i = 0
-    while i < 32
-      @mask << 0_u8
-      i = i + 1
-    end
     @count = @count + 1
     id
   end
 
-  def set_class(id : Int32, bits : Array(UInt8)) : Nil
+  # A state matching any character of *set*.
+  def add_class(set : RxSet) : Int32
+    low = 0_u64
+    high = 0_u64
+    past = [] of Int32
+    pairs = set.pairs
     i = 0
-    while i < 32
-      @mask[id * 32 + i] = bits[i]
-      i = i + 1
+    while i < pairs.size
+      lo = pairs[i]
+      hi = pairs[i + 1]
+      c = lo
+      while c <= hi && c < 128
+        if c < 64
+          low = low | 1_u64.unsafe_shl(c.to_u64)
+        else
+          high = high | 1_u64.unsafe_shl((c - 64).to_u64)
+        end
+        c = c + 1
+      end
+      if hi >= 128
+        past << (lo < 128 ? 128 : lo)
+        past << hi
+      end
+      i = i + 2
     end
+    @low << low
+    @high << high
+    @ranges << past
+    add(CLASS, @low.size - 1)
   end
 
-  def class_has?(id : Int32, b : UInt8) : Bool
-    byte = @mask[id * 32 + (b.to_i32 >> 3)].to_i32
-    (byte & (1 << (b.to_i32 & 7))) != 0
+  def class_has?(id : Int32, cp : Int32) : Bool
+    if cp < 64
+      return @low.to_unsafe[id].unsafe_shr(cp.to_u64) & 1_u64 != 0_u64
+    end
+    if cp < 128
+      return @high.to_unsafe[id].unsafe_shr((cp - 64).to_u64) & 1_u64 != 0_u64
+    end
+    ranges = @ranges.to_unsafe[id]
+    data = ranges.to_unsafe
+    low = 0
+    high = ranges.size // 2
+    while low < high
+      middle = (low + high) // 2
+      if data[2 * middle + 1] < cp
+        low = middle + 1
+      else
+        high = middle
+      end
+    end
+    low < ranges.size // 2 && data[2 * low] <= cp
+  end
+
+  def self.consumes?(kind : Int32) : Bool
+    kind == CHAR || kind == ANY_BUT_NEWLINE || kind == CLASS || kind == ANY
   end
 
   def patch(id : Int32, out1 : Int32, out2 : Int32 = -1) : Nil
@@ -150,41 +1012,75 @@ class RxNfa
   # The leftmost-first match at or after `from`; an empty match at
   # `forbid` does not count.
   def search_from(text : String, from : Int32, forbid : Int32 = -1) : {Int32, Int32}?
-    RxRun.new(self, text).search(from, false, forbid)
+    run = RxRun.new(self, text, 2)
+    run.search(from, false, forbid) ? run.span : nil
   end
 
   # A match of the whole text, or nil.
   def full(text : String) : {Int32, Int32}?
-    RxRun.new(self, text).search(0, true, -1)
+    run = RxRun.new(self, text, 2)
+    run.search(0, true, -1) ? run.span : nil
+  end
+
+  # The leftmost-first match at or after `from` with the first *slots*
+  # capture positions, two a group.
+  def capture(text : String, from : Int32, forbid : Int32, slots : Int32) : Array(Int32)?
+    run = RxRun.new(self, text, slots)
+    run.search(from, false, forbid) ? run.slots : nil
+  end
+
+  # The leftmost-first match that begins at `from` and nowhere else, with
+  # the first *slots* capture positions. No thread starts after `from`, so
+  # the run ends as soon as the threads that did start have all died: the
+  # cost is the match's length, not the rest of the text's.
+  def capture_at(text : String, from : Int32, slots : Int32) : Array(Int32)?
+    run = RxRun.new(self, text, slots)
+    run.search(from, false, -1, true) ? run.slots : nil
   end
 end
 
 # One pass of the Pike VM over one text. Two thread lists, each a state
-# and the position its match began; a state joins a list once per step,
-# and the first to reach it is the higher-priority thread, which is what
-# makes the answer leftmost-first.
+# and the capture positions of the thread that reached it, the position
+# its match began first; a state joins a list once per step, and the
+# first to reach it is the higher-priority thread, which is what makes
+# the answer, groups included, leftmost-first. Each step reads one
+# character, so every thread moves by the same one to four bytes.
 class RxRun
   @nfa : RxNfa
   @src : Pointer(UInt8)
   @n : Int32
+  # Capture positions a thread carries: two per group the caller asked
+  # for, and only those - a search that wants the span alone carries two
+  # and passes over the other groups' saves.
+  @slots : Int32
   @cur_state : Pointer(Int32)
-  @cur_start : Pointer(Int32)
+  @cur_caps : Pointer(Int32)
   @cur_size : Int32
   @nxt_state : Pointer(Int32)
-  @nxt_start : Pointer(Int32)
+  @nxt_caps : Pointer(Int32)
   @nxt_size : Int32
   @seen : Pointer(Int32)
   @gen : Int32
+  # The closure's own stack of the states it has still to visit, and the
+  # capture positions to put back when it unwinds past a save.
+  @todo : Pointer(Int32)
+  @undo : Pointer(Int32)
+  # The positions of the thread the closure is following.
+  @work : Pointer(Int32)
+  # The positions of the best match so far.
+  @best : Pointer(Int32)
+  # How many bytes the character `decode` read last took.
+  @width : Int32
 
-  def initialize(@nfa : RxNfa, text : String)
+  def initialize(@nfa : RxNfa, text : String, @slots : Int32)
     @src = text.to_unsafe
     @n = text.bytesize
     count = @nfa.count.to_u64 + 1_u64
     @cur_state = Pointer(Int32).malloc(count)
-    @cur_start = Pointer(Int32).malloc(count)
+    @cur_caps = Pointer(Int32).malloc(count * @slots.to_u64)
     @cur_size = 0
     @nxt_state = Pointer(Int32).malloc(count)
-    @nxt_start = Pointer(Int32).malloc(count)
+    @nxt_caps = Pointer(Int32).malloc(count * @slots.to_u64)
     @nxt_size = 0
     @seen = Pointer(Int32).malloc(count)
     i = 0
@@ -193,91 +1089,208 @@ class RxRun
       i = i + 1
     end
     @gen = 0
+    # A closure takes each state once and pushes at most two entries for
+    # it - its two outs, or a save's out and the position to put back - so
+    # twice the states bound its stack.
+    @todo = Pointer(Int32).malloc(count * 2_u64)
+    @undo = Pointer(Int32).malloc(count * 2_u64)
+    @work = Pointer(Int32).malloc(@slots.to_u64)
+    @best = Pointer(Int32).malloc(@slots.to_u64)
+    @width = 1
+  end
+
+  def span : {Int32, Int32}
+    {@best[0], @best[1]}
+  end
+
+  def slots : Array(Int32)
+    found = Array(Int32).new(@slots)
+    i = 0
+    while i < @slots
+      found << @best[i]
+      i = i + 1
+    end
+    found
   end
 
   # `whole`: anchored at `from`, and only a match reaching the text's end
-  # counts. Otherwise a fresh thread starts at every position until some
-  # thread has matched, after which only the threads ahead of it in
-  # priority may still change the answer.
-  def search(from : Int32, whole : Bool, forbid : Int32) : {Int32, Int32}?
-    match_start = -1
-    match_end = -1
+  # counts. `anchored`: anchored at `from`, any match counts. Otherwise a
+  # fresh thread starts at every character until some thread has matched,
+  # after which only the threads ahead of it in priority may still change
+  # the answer.
+  def search(from : Int32, whole : Bool, forbid : Int32, anchored : Bool = false) : Bool
+    matched = false
     pos = from
     @gen = @gen + 1
     @cur_size = 0
-    add(false, @nfa.start, pos, pos)
+    fresh(pos)
+    add(false, @nfa.start, pos)
     while true
       @nxt_size = 0
       @gen = @gen + 1
+      cp = -1
+      width = 0
+      if pos < @n
+        cp = decode(pos)
+        width = @width
+      end
       i = 0
       while i < @cur_size
         s = @cur_state[i]
         k = @nfa.kind[s]
-        if k == 4
-          if whole ? pos == @n : !(pos == forbid && @cur_start[i] == forbid)
-            match_start = @cur_start[i]
-            match_end = pos
+        caps = @cur_caps + (i * @slots).to_i64
+        if k == RxNfa::MATCH
+          if whole ? pos == @n : !(pos == forbid && caps[0] == forbid)
+            keep(caps, pos)
+            matched = true
             break
           end
         elsif pos < @n
-          b = @src[pos]
-          ok = if k == 0
-                 @nfa.ch[s] == b
-               elsif k == 1
-                 b != 10_u8
-               elsif k == 2
-                 @nfa.class_has?(s, b)
+          ok = if k == RxNfa::CHAR
+                 @nfa.arg[s] == cp
+               elsif k == RxNfa::ANY_BUT_NEWLINE
+                 cp != 10
+               elsif k == RxNfa::CLASS
+                 @nfa.class_has?(@nfa.arg[s], cp)
                else
-                 false
+                 k == RxNfa::ANY
                end
-          add(true, @nfa.out1[s], @cur_start[i], pos + 1) if ok
+          if ok
+            @work.copy_from(caps, @slots)
+            add(true, @nfa.out1[s], pos + width)
+          end
         end
         i = i + 1
       end
       break if pos >= @n
-      pos = pos + 1
-      add(true, @nfa.start, pos, pos) if match_start < 0 && !whole
-      break if @nxt_size == 0 && (whole || match_start >= 0)
+      pos = pos + width
+      if !matched && !whole && !anchored
+        fresh(pos)
+        add(true, @nfa.start, pos)
+      end
+      break if @nxt_size == 0 && (whole || anchored || matched)
       tmp_state = @cur_state
       @cur_state = @nxt_state
       @nxt_state = tmp_state
-      tmp_start = @cur_start
-      @cur_start = @nxt_start
-      @nxt_start = tmp_start
+      tmp_caps = @cur_caps
+      @cur_caps = @nxt_caps
+      @nxt_caps = tmp_caps
       @cur_size = @nxt_size
     end
-    return nil if match_start < 0
-    {match_start, match_end}
+    matched
   end
 
-  # The epsilon closure of `s`, in priority order: out1 before out2. Into
-  # the next list when `nxt`, else the current one.
-  private def add(nxt : Bool, s : Int32, start : Int32, pos : Int32) : Nil
-    return if s < 0 || @seen[s] == @gen
-    @seen[s] = @gen
-    k = @nfa.kind[s]
-    if k == 3
-      add(nxt, @nfa.out1[s], start, pos)
-      add(nxt, @nfa.out2[s], start, pos)
-    elsif k == 5
-      add(nxt, @nfa.out1[s], start, pos) if pos == 0
-    elsif k == 6
-      add(nxt, @nfa.out1[s], start, pos) if pos == @n
-    elsif k == 7
-      add(nxt, @nfa.out1[s], start, pos) if boundary?(pos)
-    elsif k == 8
-      add(nxt, @nfa.out1[s], start, pos) unless boundary?(pos)
-    elsif nxt
-      @nxt_state[@nxt_size] = s
-      @nxt_start[@nxt_size] = start
-      @nxt_size = @nxt_size + 1
-    else
-      @cur_state[@cur_size] = s
-      @cur_start[@cur_size] = start
-      @cur_size = @cur_size + 1
+  # The match a thread with *caps* reached at *pos*.
+  private def keep(caps : Pointer(Int32), pos : Int32) : Nil
+    @best.copy_from(caps, @slots)
+    @best[1] = pos
+  end
+
+  # A new thread's positions: none set but where it begins.
+  private def fresh(pos : Int32) : Nil
+    i = 0
+    while i < @slots
+      @work[i] = -1
+      i = i + 1
+    end
+    @work[0] = pos
+  end
+
+  # The character at *pos* and, in `@width`, its length: the decoding
+  # `String#each_char` does, so a byte that begins no character - a lead
+  # without its continuations, an overlong form, a surrogate, past
+  # U+10FFFF - is one U+FFFD one byte long.
+  private def decode(pos : Int32) : Int32
+    lead = @src[pos].to_i32
+    @width = 1
+    return lead if lead < 0x80
+    width = lead < 0xC2 || lead > 0xF4 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
+    return 0xFFFD if width == 1
+    point = lead & (0x7F >> width)
+    k = 1
+    while k < width
+      return 0xFFFD unless pos + k < @n
+      byte = @src[pos + k].to_i32
+      return 0xFFFD unless (byte & 0xC0) == 0x80
+      point = (point << 6) | (byte & 0x3F)
+      k = k + 1
+    end
+    return 0xFFFD if point < (1 << (5 * width - 4)) || point > 0x10FFFF || (point >= 0xD800 && point < 0xE000)
+    @width = width
+    point
+  end
+
+  # The epsilon closure of `s` for the thread whose positions are in
+  # `@work`, in priority order: out1 before out2. Into the next list when
+  # `nxt`, else the current one. Walked on a stack of its own, out2 pushed
+  # under out1 so all of out1's closure comes first, as the recursion
+  # visited it: recursing one frame per split, an alternation of 890 words
+  # overflowed a task's 256 KiB stack in a plain build (1,700 with
+  # --release) and 35,000 the main one's 8 MiB (66,000), and the panic
+  # killed the process. A save writes the position into `@work` and pushes
+  # the old value under its out, so the branches after it see the thread
+  # as it was before the save.
+  private def add(nxt : Bool, s : Int32, pos : Int32) : Nil
+    todo = @todo
+    undo = @undo
+    work = @work
+    todo[0] = s
+    top = 1
+    while top > 0
+      top = top - 1
+      t = todo[top]
+      if t < -1
+        work[-t - 2] = undo[top]
+        next
+      end
+      next if t < 0 || @seen[t] == @gen
+      @seen[t] = @gen
+      k = @nfa.kind[t]
+      if k == RxNfa::SPLIT
+        todo[top] = @nfa.out2[t]
+        todo[top + 1] = @nfa.out1[t]
+        top = top + 2
+      elsif k == RxNfa::SAVE
+        slot = @nfa.arg[t]
+        if slot < @slots
+          todo[top] = -slot - 2
+          undo[top] = work[slot]
+          top = top + 1
+          work[slot] = pos
+        end
+        todo[top] = @nfa.out1[t]
+        top = top + 1
+      elsif k >= RxNfa::TEXT_START && k <= RxNfa::NOT_WORD_BOUNDARY || k >= RxNfa::LINE_START
+        holds = if k == RxNfa::TEXT_START
+                  pos == 0
+                elsif k == RxNfa::TEXT_END
+                  pos == @n
+                elsif k == RxNfa::WORD_BOUNDARY
+                  boundary?(pos)
+                elsif k == RxNfa::NOT_WORD_BOUNDARY
+                  !boundary?(pos)
+                elsif k == RxNfa::LINE_START
+                  pos == 0 || @src[pos - 1] == 10_u8
+                else
+                  pos == @n || @src[pos] == 10_u8
+                end
+        if holds
+          todo[top] = @nfa.out1[t]
+          top = top + 1
+        end
+      elsif nxt
+        @nxt_state[@nxt_size] = t
+        (@nxt_caps + (@nxt_size * @slots).to_i64).copy_from(work, @slots)
+        @nxt_size = @nxt_size + 1
+      else
+        @cur_state[@cur_size] = t
+        (@cur_caps + (@cur_size * @slots).to_i64).copy_from(work, @slots)
+        @cur_size = @cur_size + 1
+      end
     end
   end
 
+  # Between an ASCII word character and anything else, as RE2's `\b` is.
   private def boundary?(pos : Int32) : Bool
     before = pos > 0 && RxCompiler.word?(@src[pos - 1])
     after = pos < @n && RxCompiler.word?(@src[pos])
@@ -285,28 +1298,207 @@ class RxRun
   end
 end
 
+# A set of code points while a class is built: `{from, to}` pairs, sorted
+# and merged before anything reads them.
+class RxSet
+  MAX = 0x10FFFF
+
+  @pairs : Array(Int32)
+  @sorted : Bool
+
+  def initialize
+    @pairs = [] of Int32
+    @sorted = true
+  end
+
+  def add(lo : Int32, hi : Int32) : Nil
+    @pairs << lo
+    @pairs << hi
+    @sorted = false
+  end
+
+  def merge(other : RxSet) : Nil
+    theirs = other.pairs
+    i = 0
+    while i < theirs.size
+      add(theirs[i], theirs[i + 1])
+      i = i + 2
+    end
+  end
+
+  def pairs : Array(Int32)
+    normalize
+    @pairs
+  end
+
+  def includes?(cp : Int32) : Bool
+    data = pairs
+    low = 0
+    high = data.size // 2
+    while low < high
+      middle = (low + high) // 2
+      if data[2 * middle + 1] < cp
+        low = middle + 1
+      else
+        high = middle
+      end
+    end
+    low < data.size // 2 && data[2 * low] <= cp
+  end
+
+  # Every code point the set does not hold.
+  def negate : Nil
+    data = pairs
+    flipped = [] of Int32
+    next_lo = 0
+    i = 0
+    while i < data.size
+      if data[i] > next_lo
+        flipped << next_lo
+        flipped << data[i] - 1
+      end
+      next_lo = data[i + 1] + 1
+      i = i + 2
+    end
+    if next_lo <= MAX
+      flipped << next_lo
+      flipped << MAX
+    end
+    @pairs = flipped
+    @sorted = true
+  end
+
+  # Every character whose case orbit meets the set, added whole: `[a-c]`
+  # takes `A-C`, and `[k]` the Kelvin sign too.
+  def fold : Nil
+    normalize
+    added = [] of Int32
+    Unicode.each_case_orbit do |orbit|
+      meets = false
+      orbit.each { |cp| meets = true if includes?(cp) }
+      orbit.each { |cp| added << cp } if meets
+    end
+    added.each { |cp| add(cp, cp) }
+  end
+
+  private def normalize : Nil
+    return if @sorted
+    keys = [] of Int64
+    i = 0
+    while i < @pairs.size
+      keys << ((@pairs[i].to_i64 << 21) | @pairs[i + 1].to_i64)
+      i = i + 2
+    end
+    keys.sort_in_place
+    merged = [] of Int32
+    keys.each do |key|
+      lo = (key >> 21).to_i32
+      hi = (key & 0x1FFFFF_i64).to_i32
+      if merged.size > 0 && lo <= merged[merged.size - 1] + 1
+        merged[merged.size - 1] = hi if hi > merged[merged.size - 1]
+      else
+        merged << lo
+        merged << hi
+      end
+    end
+    @pairs = merged
+    @sorted = true
+  end
+end
+
 class RxCompiler
+  # The pattern as the program wrote it, for messages; `@pat` is what is
+  # parsed, the same text with each `\Q..\E` written out as escapes.
+  @shown : String
   @pat : String
   @src : Pointer(UInt8)
   @n : Int32
   @i : Int32
   @nfa : RxNfa
   @depth : Int32
+  # How many times the counts enclosing the cursor copy what it parses.
+  @copies : Int32
+  # Scratch for `nullable?`: the question a state was last walked for,
+  # and last marked an open end for.
+  @stamp : Array(Int32)
+  @open : Array(Int32)
+  @asked : Int32
+  # The flags in force at the cursor: `i`, `m`, `s`, `x` and `U`.
+  @fold : Bool
+  @lines : Bool
+  @dotall : Bool
+  @extended : Bool
+  @ungreedy : Bool
+  # Whether the atom just parsed was a bare `(?i)`, which nothing may
+  # repeat.
+  @bare : Bool
+  # Each group's name, group 0 first, and how many groups the cursor has
+  # opened: a count parses its atom once per copy, and each copy has to
+  # number the atom's groups as the first did.
+  getter names : Array(String?)
+  @groups : Int32
 
-  def initialize(pattern : String)
-    @pat = pattern
-    @src = pattern.to_unsafe
-    @n = pattern.bytesize
+  def initialize(pattern : String, options : Regex::Options)
+    @shown = pattern
+    @pat = RxCompiler.unquote(pattern)
+    @src = @pat.to_unsafe
+    @n = @pat.bytesize
     @i = 0
     @nfa = RxNfa.new
     @depth = 0
+    @copies = 1
+    @stamp = [] of Int32
+    @open = [] of Int32
+    @asked = 0
+    @fold = options.includes?(Regex::Options::IGNORE_CASE)
+    @lines = options.includes?(Regex::Options::MULTILINE_ONLY)
+    @dotall = options.includes?(Regex::Options::DOTALL)
+    @extended = options.includes?(Regex::Options::EXTENDED)
+    @ungreedy = false
+    @bare = false
+    @names = [nil] of String?
+    @groups = 0
+  end
+
+  # `\Q..\E` is the text between, each character taken as itself: written
+  # out here as the escapes that say so, before anything is parsed, so a
+  # quantifier after `\E` repeats the last character as in RE2, and `x`
+  # does not drop the quoted spaces. A `\Q` with no `\E` runs to the end.
+  def self.unquote(pattern : String) : String
+    return pattern unless pattern.includes?("\\Q")
+    src = pattern.to_unsafe
+    n = pattern.bytesize
+    String.build(n * 2) do |io|
+      i = 0
+      while i < n
+        b = src[i]
+        if b == 92_u8 && i + 1 < n && src[i + 1] == 81_u8
+          i = i + 2
+          while i < n && !(src[i] == 92_u8 && i + 1 < n && src[i + 1] == 69_u8)
+            c = src[i]
+            io.write_byte(92_u8) if c < 128_u8 && !word?(c)
+            io.write_byte(c)
+            i = i + 1
+          end
+          i = i + 2
+        elsif b == 92_u8 && i + 1 < n
+          io.write_byte(b)
+          io.write_byte(src[i + 1])
+          i = i + 2
+        else
+          io.write_byte(b)
+          i = i + 1
+        end
+      end
+    end
   end
 
   def compile : RxNfa
+    raise "regex: /#{@shown}/ is not valid UTF-8, and a pattern is characters" unless Unicode.valid?(@pat)
     frag = parse_alt
-    raise "regex: unmatched ')' in /#{@pat}/" if @i < @n && peek == 41_u8
-    raise "regex: unexpected byte in /#{@pat}/" if @i < @n
-    match = @nfa.add(4)
+    raise "regex: unmatched ')' in /#{@shown}/" if @i < @n && peek == 41_u8
+    raise "regex: unexpected byte in /#{@shown}/" if @i < @n
+    match = @nfa.add(RxNfa::MATCH)
     patch_outs(frag, match)
     @nfa.start = frag[0]
     @nfa
@@ -319,7 +1511,7 @@ class RxCompiler
     while @i < @n && peek == 124_u8 # |
       @i = @i + 1
       right = parse_concat
-      split = @nfa.add(3)
+      split = @nfa.add(RxNfa::SPLIT)
       @nfa.patch(split, left[0], right[0])
       outs = left[1]
       right[1].each { |o| outs << o }
@@ -329,28 +1521,58 @@ class RxCompiler
   end
 
   private def parse_concat : {Int32, Array(Int32)}
+    skip_space
     return empty_fragment if @i >= @n || peek == 124_u8 || peek == 41_u8
     left = parse_repeat
+    skip_space
     while @i < @n && peek != 124_u8 && peek != 41_u8
       right = parse_repeat
       patch_outs(left, right[0])
       left = {left[0], right[1]}
+      skip_space
     end
     left
   end
 
+  # Under `x`, whitespace and `#` to the end of the line are skipped
+  # wherever an atom or a quantifier may begin; inside a class they are
+  # characters, as in PCRE and Python.
+  private def skip_space : Nil
+    return unless @extended
+    while @i < @n
+      c = peek
+      if c == 32_u8 || (c >= 9_u8 && c <= 13_u8)
+        @i = @i + 1
+      elsif c == 35_u8 # #
+        while @i < @n && peek != 10_u8
+          @i = @i + 1
+        end
+      else
+        break
+      end
+    end
+  end
+
   # An empty alternative or group matches nothing at all, which is legal.
   private def empty_fragment : {Int32, Array(Int32)}
-    s = @nfa.add(3)
+    s = @nfa.add(RxNfa::SPLIT)
     {s, [s]}
   end
 
   private def parse_repeat : {Int32, Array(Int32)}
+    skip_space
     atom_at = @i
+    groups_at = @groups
+    @bare = false
     atom = parse_atom
+    bare = @bare
     atom_end = @i
+    skip_space
     return atom if @i >= @n
     q = peek
+    if q == 42_u8 || q == 43_u8 || q == 63_u8 || (q == 123_u8 && count_ahead?)
+      raise "regex: nothing to repeat in /#{@shown}/" if bare
+    end
     if q == 42_u8 || q == 43_u8 || q == 63_u8
       @i = @i + 1
       lazy = lazy_mark
@@ -362,27 +1584,34 @@ class RxCompiler
         optional(atom, lazy)
       end
     elsif q == 123_u8 # {
-      counted(atom, atom_at, atom_end)
+      counted(atom, atom_at, atom_end, groups_at)
     else
       atom
     end
   end
 
   # `?` after a quantifier makes it lazy; `+` would make it possessive,
-  # which is a backtracker's control and refused.
+  # which is a backtracker's control and refused. Under `U` the two swap.
   private def lazy_mark : Bool
     if @i < @n && peek == 63_u8
       @i = @i + 1
-      true
+      !@ungreedy
     elsif @i < @n && peek == 43_u8
-      raise "regex: possessive quantifiers are refused in /#{@pat}/"
+      raise "regex: possessive quantifiers are refused in /#{@shown}/"
     else
-      false
+      @ungreedy
     end
   end
 
+  # `x*` is one split that `x` loops back to, unless `x` can match empty:
+  # then it is `(x+)?`, as Go builds it. Looping back, an empty `x` came
+  # to the split this step had already visited and its thread was dropped,
+  # so the empty branch lost its priority: `(|a)*` on `aa` answered `aa`,
+  # where pcre2, Python and Go answer the empty match. Only then, since
+  # `(x+)?` of any `x` reorders the threads of a loop around it.
   private def star(atom : {Int32, Array(Int32)}, lazy : Bool) : {Int32, Array(Int32)}
-    split = @nfa.add(3)
+    return optional(plus(atom, lazy), lazy) if nullable?(atom)
+    split = @nfa.add(RxNfa::SPLIT)
     if lazy
       @nfa.patch(split, -1, atom[0])
     else
@@ -392,8 +1621,32 @@ class RxCompiler
     {split, [split]}
   end
 
+  # Whether *frag* can match empty: a path of splits, saves and assertions
+  # from its start reaches one of its open ends. Stamped per question, so
+  # each costs the states it walks, not the whole machine.
+  private def nullable?(frag : {Int32, Array(Int32)}) : Bool
+    @asked = @asked + 1
+    while @stamp.size < @nfa.count
+      @stamp << 0
+      @open << 0
+    end
+    frag[1].each { |s| @open[s] = @asked }
+    todo = [frag[0]]
+    while !todo.empty?
+      s = todo.pop
+      next if s < 0 || @stamp[s] == @asked
+      @stamp[s] = @asked
+      k = @nfa.kind[s]
+      next if RxNfa.consumes?(k) || k == RxNfa::MATCH
+      return true if @open[s] == @asked
+      todo << @nfa.out1[s]
+      todo << @nfa.out2[s] if k == RxNfa::SPLIT
+    end
+    false
+  end
+
   private def plus(atom : {Int32, Array(Int32)}, lazy : Bool) : {Int32, Array(Int32)}
-    split = @nfa.add(3)
+    split = @nfa.add(RxNfa::SPLIT)
     if lazy
       @nfa.patch(split, -1, atom[0])
     else
@@ -404,7 +1657,7 @@ class RxCompiler
   end
 
   private def optional(atom : {Int32, Array(Int32)}, lazy : Bool) : {Int32, Array(Int32)}
-    split = @nfa.add(3)
+    split = @nfa.add(RxNfa::SPLIT)
     if lazy
       @nfa.patch(split, -1, atom[0])
     else
@@ -416,48 +1669,74 @@ class RxCompiler
   end
 
   # `{n}`, `{n,}`, `{n,m}`: the atom is parsed again for every copy, so
-  # each copy has states of its own. A `{` that is not one of those three
-  # shapes is the literal byte, as RE2 and Python read it.
-  private def counted(atom : {Int32, Array(Int32)}, atom_at : Int32, atom_end : Int32) : {Int32, Array(Int32)}
-    save = @i
+  # each copy has states of its own, its groups numbered as the first
+  # copy's were - `(a){2}` has one group, which the last copy sets. A `{`
+  # that is not one of those three shapes is the literal character, as
+  # RE2 and Python read it.
+  private def counted(atom : {Int32, Array(Int32)}, atom_at : Int32, atom_end : Int32, groups_at : Int32) : {Int32, Array(Int32)}
+    return atom unless count_ahead?
     @i = @i + 1
     lo = digits
     hi = lo
     unbounded = false
-    if lo >= 0 && @i < @n && peek == 44_u8 # ,
+    if peek == 44_u8 # ,
       @i = @i + 1
       hi = digits
       unbounded = hi < 0
     end
-    unless lo >= 0 && @i < @n && peek == 125_u8 # }
-      @i = save
-      return atom
-    end
     @i = @i + 1
-    raise "regex: repeat range out of order in /#{@pat}/" if !unbounded && hi < lo
-    raise "regex: repeat count past 1000 in /#{@pat}/" if lo > 1000 || hi > 1000
+    raise "regex: repeat range out of order in /#{@shown}/" if !unbounded && hi < lo
+    raise "regex: repeat count past 1000 in /#{@shown}/" if lo > 1000 || hi > 1000
+    # Copies multiply through nesting, and RE2 caps the product rather
+    # than each count: `((a{1000}){1000}){1000}` is a billion states, and
+    # built here it ran out of memory instead of being refused.
+    times = unbounded ? lo : hi
+    times = 1 if times < 1
+    raise "regex: repeat count past 1000 in /#{@shown}/ (nested counts multiply)" if @copies * times > 1000
     lazy = lazy_mark
     after = @i
-    copies = unbounded ? lo + 1 : hi
+    groups_after = @groups
+    # `x{n,}` is n - 1 copies and `x+`, as RE2 expands it, so `x{1,}` is
+    # `x+`; n copies and `x*` differ from that where `x` can match empty.
+    copies = unbounded ? times : hi
+    outer = @copies
+    @copies = @copies * times
     frag = empty_fragment
     c = 0
     while c < copies
       @i = atom_at
+      @groups = groups_at
       piece = parse_atom
       @i = after
-      if c >= lo
-        if unbounded
-          piece = star(piece, lazy)
-        else
-          piece = optional(piece, lazy)
-        end
+      if unbounded && c == copies - 1
+        piece = lo > 0 ? plus(piece, lazy) : star(piece, lazy)
+      elsif c >= lo
+        piece = optional(piece, lazy)
       end
       patch_outs(frag, piece[0])
       frag = {frag[0], piece[1]}
       c = c + 1
     end
     @i = after
+    @groups = groups_after
+    @copies = outer
     frag
+  end
+
+  # Whether `{n}`, `{n,}` or `{n,m}` starts at the cursor, which stays
+  # where it is.
+  private def count_ahead? : Bool
+    return false unless @i < @n && peek == 123_u8
+    save = @i
+    @i = @i + 1
+    shaped = digits >= 0
+    if shaped && @i < @n && peek == 44_u8 # ,
+      @i = @i + 1
+      digits
+    end
+    shaped = shaped && @i < @n && peek == 125_u8 # }
+    @i = save
+    shaped
   end
 
   private def digits : Int32
@@ -472,251 +1751,451 @@ class RxCompiler
   end
 
   private def parse_atom : {Int32, Array(Int32)}
-    raise "regex: unexpected end of /#{@pat}/" if @i >= @n
+    raise "regex: unexpected end of /#{@shown}/" if @i >= @n
     b = peek
     if b == 46_u8 # .
       @i = @i + 1
-      single(@nfa.add(1))
+      single(@nfa.add(@dotall ? RxNfa::ANY : RxNfa::ANY_BUT_NEWLINE))
     elsif b == 94_u8 # ^
       @i = @i + 1
-      single(@nfa.add(5))
+      single(@nfa.add(@lines ? RxNfa::LINE_START : RxNfa::TEXT_START))
     elsif b == 36_u8 # $
       @i = @i + 1
-      single(@nfa.add(6))
+      single(@nfa.add(@lines ? RxNfa::LINE_END : RxNfa::TEXT_END))
     elsif b == 40_u8 # (
       parse_group
     elsif b == 41_u8
-      raise "regex: unmatched ')' in /#{@pat}/"
+      raise "regex: unmatched ')' in /#{@shown}/"
     elsif b == 91_u8 # [
       parse_class
     elsif b == 92_u8
       parse_escape
     elsif b == 42_u8 || b == 43_u8 || b == 63_u8
-      raise "regex: nothing to repeat in /#{@pat}/"
+      raise "regex: nothing to repeat in /#{@shown}/"
+    elsif b == 123_u8 && count_ahead?
+      # A count here, `{2}` or the second of `a*{2}`, was read as its own
+      # text; pcre2, Python and Go refuse it, as `*` here is refused.
+      raise "regex: nothing to repeat in /#{@shown}/"
     else
-      @i = @i + 1
-      single(@nfa.add(0, b))
+      literal(next_char)
     end
+  end
+
+  # One character, or under `i` a class of every character in its case
+  # orbit.
+  private def literal(cp : Int32) : {Int32, Array(Int32)}
+    if @fold
+      orbit = Unicode.case_orbit(cp.unsafe_chr)
+      if orbit.size > 1
+        set = RxSet.new
+        orbit.each { |c| set.add(c.ord, c.ord) }
+        return single(@nfa.add_class(set))
+      end
+    end
+    single(@nfa.add(RxNfa::CHAR, cp))
   end
 
   private def parse_group : {Int32, Array(Int32)}
     @i = @i + 1
-    raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
+    raise "regex: unmatched '(' in /#{@shown}/" if @i >= @n
+    capture = true
+    name = nil
+    fold = @fold
+    lines = @lines
+    dotall = @dotall
+    extended = @extended
+    ungreedy = @ungreedy
     if peek == 63_u8 # (?
       @i = @i + 1
-      raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
+      raise "regex: unmatched '(' in /#{@shown}/" if @i >= @n
       m = peek
       if m == 58_u8 # (?:
         @i = @i + 1
+        capture = false
       elsif m == 61_u8 || m == 33_u8 # (?= (?!
-        raise "regex: lookaround is refused in /#{@pat}/"
+        raise "regex: lookaround is refused in /#{@shown}/"
+      elsif m == 35_u8 # (?#
+        raise "regex: comments are refused in /#{@shown}/"
       elsif m == 60_u8 || m == 80_u8 # (?< (?P
         @i = @i + 1
         if m == 80_u8
-          raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
-          raise "regex: not a group name in /#{@pat}/" unless peek == 60_u8
+          raise "regex: unmatched '(' in /#{@shown}/" if @i >= @n
+          # `(?P=n)` is Python's backreference and `(?P>n)` its call of a
+          # group; both were "not a group name".
+          raise "regex: backreferences are refused in /#{@shown}/" if peek == 61_u8
+          raise "regex: recursion is refused in /#{@shown}/" if peek == 62_u8
+          raise "regex: not a group name in /#{@shown}/" unless peek == 60_u8
           @i = @i + 1
         end
-        raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
+        raise "regex: unmatched '(' in /#{@shown}/" if @i >= @n
         if peek == 61_u8 || peek == 33_u8
-          raise "regex: lookaround is refused in /#{@pat}/"
+          raise "regex: lookaround is refused in /#{@shown}/"
         end
+        raise "regex: not a group name in /#{@shown}/" if @i < @n && peek == 62_u8 # (?<>
+        start = @i
         while @i < @n && peek != 62_u8
-          raise "regex: not a group name in /#{@pat}/" unless RxCompiler.word?(peek)
+          raise "regex: not a group name in /#{@shown}/" unless RxCompiler.word?(peek)
           @i = @i + 1
         end
-        raise "regex: unterminated group name in /#{@pat}/" if @i >= @n
+        raise "regex: unterminated group name in /#{@shown}/" if @i >= @n
+        name = @pat[start, @i - start]
         @i = @i + 1
-      elsif m == 82_u8 || m == 40_u8 # (?R (?(
-        raise "regex: recursion is refused in /#{@pat}/"
+      elsif m == 82_u8 || m == 40_u8 || m == 38_u8 || RxCompiler.digit?(m) ||
+            ((m == 43_u8 || m == 45_u8) && @i + 1 < @n && RxCompiler.digit?(@src[@i + 1]))
+        # (?R (?( (?&n (?1 (?+1 (?-1: the last four were "inline flags".
+        raise "regex: recursion is refused in /#{@shown}/"
       elsif m == 62_u8 # (?>
-        raise "regex: atomic groups are refused in /#{@pat}/"
+        raise "regex: atomic groups are refused in /#{@shown}/"
       else
-        raise "regex: inline flags are refused in /#{@pat}/"
+        # `(?i)` holds to the end of the group around it, as in RE2 and
+        # Perl; `(?i:..)` only inside its own parentheses.
+        unless flags_scoped?
+          @bare = true
+          return empty_fragment
+        end
+        capture = false
       end
     end
     @depth = @depth + 1
-    raise "regex: groups nested past 1000 in /#{@pat}/" if @depth > 1000
+    # A level of nesting is five frames of this parser, and a task's stack
+    # is 256 KiB: at a cap of 1000, sized for the main stack, a task
+    # compiling `(` * 213 in a plain build overflowed it and the panic
+    # killed the process. 100 leaves that task half its stack.
+    raise "regex: groups nested past 100 in /#{@shown}/" if @depth > 100
+    index = 0
+    if capture
+      @groups = @groups + 1
+      index = @groups
+      if index >= @names.size
+        if name && @names.includes?(name)
+          raise "regex: duplicate group name '#{name}' in /#{@shown}/"
+        end
+        @names << name
+      end
+    end
     inner = parse_alt
+    @fold = fold
+    @lines = lines
+    @dotall = dotall
+    @extended = extended
+    @ungreedy = ungreedy
     @depth = @depth - 1
-    raise "regex: unmatched '(' in /#{@pat}/" unless @i < @n && peek == 41_u8
+    # A bare `(?i)` inside this group was the inner atom's; this group is
+    # an atom like any other, and may be repeated.
+    @bare = false
+    raise "regex: unmatched '(' in /#{@shown}/" unless @i < @n && peek == 41_u8
     @i = @i + 1
-    inner
+    return inner unless capture
+    open = @nfa.add(RxNfa::SAVE, 2 * index)
+    close = @nfa.add(RxNfa::SAVE, 2 * index + 1)
+    @nfa.patch(open, inner[0])
+    patch_outs(inner, close)
+    {open, [close]}
+  end
+
+  # The flags of `(?i-s)` or `(?i-s:`, the cursor on the first: set as the
+  # cursor passes them, and whether a `:` (a scoped group) or a `)` (the
+  # rest of the enclosing group) ended them. RE2's flags and `x`; a
+  # letter it does not have, an empty list or an empty negation is refused.
+  private def flags_scoped? : Bool
+    negated = false
+    any = false
+    after_minus = false
+    while true
+      raise "regex: unmatched '(' in /#{@shown}/" if @i >= @n
+      c = peek
+      @i = @i + 1
+      if c == 105_u8 || c == 109_u8 || c == 115_u8 || c == 120_u8 || c == 85_u8 # i m s x U
+        on = !negated
+        if c == 105_u8
+          @fold = on
+        elsif c == 109_u8
+          @lines = on
+        elsif c == 115_u8
+          @dotall = on
+        elsif c == 120_u8
+          @extended = on
+        else
+          @ungreedy = on
+        end
+        any = true
+        after_minus = true if negated
+      elsif c == 45_u8 && !negated # -
+        negated = true
+      elsif c == 58_u8 || c == 41_u8 # : )
+        raise "regex: an inline flag group names no flag in /#{@shown}/" if !any || (negated && !after_minus)
+        return c == 58_u8
+      else
+        raise "regex: unknown inline flag '#{c.unsafe_chr}' in /#{@shown}/ (iyi takes i, m, s, x and U)"
+      end
+    end
+    false
   end
 
   private def parse_escape : {Int32, Array(Int32)}
     @i = @i + 1
-    raise "regex: trailing '\\' in /#{@pat}/" if @i >= @n
+    raise "regex: trailing '\\' in /#{@shown}/" if @i >= @n
     b = peek
-    @i = @i + 1
     if b >= 49_u8 && b <= 57_u8
-      raise "regex: backreferences are refused in /#{@pat}/"
-    elsif b == 100_u8 # \d
-      class_from(false) { |c| RxCompiler.digit?(c) }
-    elsif b == 68_u8
-      class_from(true) { |c| RxCompiler.digit?(c) }
-    elsif b == 119_u8 # \w
-      class_from(false) { |c| RxCompiler.word?(c) }
-    elsif b == 87_u8
-      class_from(true) { |c| RxCompiler.word?(c) }
-    elsif b == 115_u8 # \s
-      class_from(false) { |c| RxCompiler.space?(c) }
-    elsif b == 83_u8
-      class_from(true) { |c| RxCompiler.space?(c) }
+      raise "regex: backreferences are refused in /#{@shown}/"
+    elsif (b == 107_u8 || b == 103_u8) && @i + 1 < @n &&
+          (@src[@i + 1] == 60_u8 || @src[@i + 1] == 123_u8 || @src[@i + 1] == 39_u8 || (b == 103_u8 && (@src[@i + 1] == 45_u8 || RxCompiler.digit?(@src[@i + 1]))))
+      # \k<n> \k{n} \k'n' \g<1> \g{1} \g1 \g-1, which were "unknown escape".
+      raise "regex: backreferences are refused in /#{@shown}/"
     elsif b == 98_u8 # \b
-      single(@nfa.add(7))
+      @i = @i + 1
+      single(@nfa.add(RxNfa::WORD_BOUNDARY))
     elsif b == 66_u8 # \B
-      single(@nfa.add(8))
+      @i = @i + 1
+      single(@nfa.add(RxNfa::NOT_WORD_BOUNDARY))
     elsif b == 65_u8 # \A
-      single(@nfa.add(5))
+      @i = @i + 1
+      single(@nfa.add(RxNfa::TEXT_START))
     elsif b == 122_u8 || b == 90_u8 # \z \Z
-      single(@nfa.add(6))
-    elsif b == 112_u8 || b == 80_u8 # \p \P
-      raise "regex: \\p classes are refused in /#{@pat}/ (this engine matches bytes)"
+      @i = @i + 1
+      single(@nfa.add(RxNfa::TEXT_END))
+    elsif b == 67_u8 # \C
+      raise "regex: \\C is refused in /#{@shown}/ (it matches one byte, and this engine matches characters)"
+    elsif set = class_escape
+      single(@nfa.add_class(set))
     else
-      single(@nfa.add(0, escaped_byte(b)))
+      @i = @i + 1
+      literal(escaped(b))
     end
   end
 
-  # The byte an escape stands for, outside `\d\w\s\b` and their kin: the
-  # C escapes, `\xHH`, and any punctuation as itself. A letter or digit
-  # with no meaning is refused rather than read as the letter.
-  private def escaped_byte(b : UInt8) : UInt8
-    return 10_u8 if b == 110_u8 # \n
-    return 9_u8 if b == 116_u8  # \t
-    return 13_u8 if b == 114_u8 # \r
-    return 12_u8 if b == 102_u8 # \f
-    return 11_u8 if b == 118_u8 # \v
-    return 0_u8 if b == 48_u8   # \0
-    return 27_u8 if b == 101_u8 # \e
-    return 7_u8 if b == 97_u8   # \a
-    if b == 120_u8              # \xHH
+  # `\d \D \w \W \s \S` and `\p{..} \P{..}` at the cursor, which is on the
+  # letter, as the set they stand for, folded under `i` before a negation
+  # is applied, as RE2 does (`(?i)\W` does not take `K`); nil, the cursor
+  # unmoved, for any other escape.
+  private def class_escape : RxSet?
+    b = peek
+    negated = b == 68_u8 || b == 87_u8 || b == 83_u8 || b == 80_u8
+    set = RxSet.new
+    if b == 100_u8 || b == 68_u8 # \d \D
+      set.add(48, 57)
+    elsif b == 119_u8 || b == 87_u8 # \w \W
+      set.add(48, 57)
+      set.add(65, 90)
+      set.add(95, 95)
+      set.add(97, 122)
+    elsif b == 115_u8 || b == 83_u8 # \s \S
+      set.add(9, 13)
+      set.add(32, 32)
+    elsif b == 112_u8 || b == 80_u8 # \p \P
+      @i = @i + 1
+      negated = property(set) != negated
+      set.fold if @fold
+      set.negate if negated
+      return set
+    else
+      return nil
+    end
+    @i = @i + 1
+    set.fold if @fold
+    set.negate if negated
+    set
+  end
+
+  # The name after `\p` - one letter, or braces - read into *set*, the
+  # cursor past it; whether it was negated inside, `\p{^Greek}`.
+  private def property(set : RxSet) : Bool
+    raise "regex: \\p needs a class name in /#{@shown}/" if @i >= @n
+    negated = false
+    if peek == 123_u8 # {
+      close = @i + 1
+      while close < @n && @src[close] != 125_u8
+        close = close + 1
+      end
+      raise "regex: \\p{ has no } in /#{@shown}/" if close >= @n
+      from = @i + 1
+      if from < close && @src[from] == 94_u8 # ^
+        negated = true
+        from = from + 1
+      end
+      name = @pat[from, close - from]
+      @i = close + 1
+    else
+      name = @pat[@i, 1]
+      @i = @i + 1
+    end
+    if name == "Any"
+      set.add(0, RxSet::MAX)
+    elsif ranges = Unicode.property_ranges(name)
+      k = 0
+      while k < ranges.size
+        set.add(ranges[k], ranges[k + 1])
+        k = k + 2
+      end
+    else
+      raise "regex: unknown Unicode class '#{name}' in /#{@shown}/ (a general category like Lu or L, Any, or a script like Greek)"
+    end
+    negated
+  end
+
+  # The character the escape at the cursor stands for, outside `\d\w\s\b`
+  # and their kin: the C escapes, `\0` with up to two more octal digits,
+  # `\xHH` and `\x{H..}`, and any ASCII punctuation, `_` included, as
+  # itself. A letter or digit with no meaning, or a character past ASCII,
+  # is refused rather than read as itself.
+  private def escaped(b : UInt8) : Int32
+    return 10 if b == 110_u8 # \n
+    return 9 if b == 116_u8  # \t
+    return 13 if b == 114_u8 # \r
+    return 12 if b == 102_u8 # \f
+    return 11 if b == 118_u8 # \v
+    # \0 alone made `\012` NUL then `12`; pcre2, Python and Go read a newline.
+    if b == 48_u8
+      value = 0
+      k = 0
+      while k < 2 && @i < @n && peek >= 48_u8 && peek <= 55_u8
+        value = value * 8 + (peek - 48_u8).to_i32
+        @i = @i + 1
+        k = k + 1
+      end
+      return value
+    end
+    return 27 if b == 101_u8 # \e
+    return 7 if b == 97_u8   # \a
+    if b == 120_u8           # \xHH \x{H..}
+      if @i < @n && peek == 123_u8
+        @i = @i + 1
+        value = 0
+        k = 0
+        while @i < @n && peek != 125_u8
+          value = value * 16 + hex_digit
+          k = k + 1
+          raise "regex: \\x{..} past U+10FFFF in /#{@shown}/" if value > 0x10FFFF
+        end
+        raise "regex: \\x{ needs hex digits and a } in /#{@shown}/" if @i >= @n || k == 0
+        @i = @i + 1
+        return value
+      end
       hi = hex_digit
       lo = hex_digit
-      return (hi * 16 + lo).to_u8
+      return hi * 16 + lo
     end
-    if RxCompiler.word?(b)
-      raise "regex: unknown escape '\\#{b.unsafe_chr}' in /#{@pat}/"
+    if b >= 128_u8 || (RxCompiler.word?(b) && b != 95_u8)
+      raise "regex: unknown escape '\\#{b.unsafe_chr}' in /#{@shown}/" if b < 128_u8
+      raise "regex: unknown escape in /#{@shown}/ (only ASCII punctuation is escaped to mean itself)"
     end
-    b
+    b.to_i32
   end
 
   private def hex_digit : Int32
-    raise "regex: \\x needs two hex digits in /#{@pat}/" if @i >= @n
+    raise "regex: \\x needs two hex digits in /#{@shown}/" if @i >= @n
     c = peek
     @i = @i + 1
     return (c - 48_u8).to_i32 if c >= 48_u8 && c <= 57_u8
     return (c - 87_u8).to_i32 if c >= 97_u8 && c <= 102_u8
     return (c - 55_u8).to_i32 if c >= 65_u8 && c <= 70_u8
-    raise "regex: \\x needs two hex digits in /#{@pat}/"
+    raise "regex: \\x needs two hex digits in /#{@shown}/"
   end
 
+  # Members, ranges and the named classes, then under `i` every case orbit
+  # the set meets, then the negation: folded first, as RE2 does, so
+  # `(?i)[^k]` refuses `K` as well as `k`.
   private def parse_class : {Int32, Array(Int32)}
     @i = @i + 1
-    raise "regex: unterminated class in /#{@pat}/" if @i >= @n
+    raise "regex: unterminated class in /#{@shown}/" if @i >= @n
     neg = false
     if peek == 94_u8
       neg = true
       @i = @i + 1
     end
-    bits = Array(UInt8).new(32) { 0_u8 }
+    set = RxSet.new
     first = true
     while @i < @n && (peek != 93_u8 || first)
       first = false
-      lo = class_atom(bits)
+      lo = class_atom(set)
       if lo >= 0 && @i + 1 < @n && peek == 45_u8 && @src[@i + 1] != 93_u8
         @i = @i + 1
-        hi = class_atom(bits)
-        raise "regex: a class cannot end a range in /#{@pat}/" if hi < 0
-        raise "regex: range out of order in /#{@pat}/" if hi < lo
-        c = lo
-        while c <= hi
-          set_bit(bits, c.to_u8)
-          c = c + 1
-        end
+        hi = class_atom(set)
+        raise "regex: a class cannot end a range in /#{@shown}/" if hi < 0
+        raise "regex: range out of order in /#{@shown}/" if hi < lo
+        set.add(lo, hi)
       elsif lo < 0 && @i + 1 < @n && peek == 45_u8 && @src[@i + 1] != 93_u8
-        raise "regex: a class cannot start a range in /#{@pat}/"
+        raise "regex: a class cannot start a range in /#{@shown}/"
       elsif lo >= 0
-        set_bit(bits, lo.to_u8)
+        set.add(lo, lo)
       end
     end
-    raise "regex: unterminated class in /#{@pat}/" unless @i < @n && peek == 93_u8
+    raise "regex: unterminated class in /#{@shown}/" unless @i < @n && peek == 93_u8
     @i = @i + 1
-    if neg
-      i = 0
-      while i < 32
-        bits[i] = bits[i] ^ 255_u8
-        i = i + 1
-      end
-    end
-    s = @nfa.add(2)
-    @nfa.set_class(s, bits)
-    single(s)
+    set.fold if @fold
+    set.negate if neg
+    single(@nfa.add_class(set))
   end
 
-  # One member of a class: a byte, answered; or `\d` `\w` `\s` and their
-  # negations, merged into `bits` and answered as -1, so a range cannot
-  # be made of them.
-  private def class_atom(bits : Array(UInt8)) : Int32
+  # One member of a class: a character, answered as its code point; or
+  # `\d` `\w` `\s`, their negations, `\p{..}` and the `[:alpha:]` kind,
+  # merged into *set* and answered as -1, so a range cannot be made of them.
+  private def class_atom(set : RxSet) : Int32
+    return -1 if posix_class(set)
     if peek == 92_u8
       @i = @i + 1
-      raise "regex: trailing '\\' in /#{@pat}/" if @i >= @n
-      b = peek
-      @i = @i + 1
-      if b == 100_u8 || b == 68_u8 || b == 119_u8 || b == 87_u8 || b == 115_u8 || b == 83_u8
-        neg = b == 68_u8 || b == 87_u8 || b == 83_u8
-        c = 0
-        while c < 256
-          u = c.to_u8
-          hit = if b == 100_u8 || b == 68_u8
-                  RxCompiler.digit?(u)
-                elsif b == 119_u8 || b == 87_u8
-                  RxCompiler.word?(u)
-                else
-                  RxCompiler.space?(u)
-                end
-          hit = !hit if neg
-          set_bit(bits, u) if hit
-          c = c + 1
-        end
+      raise "regex: trailing '\\' in /#{@shown}/" if @i >= @n
+      if named = class_escape
+        set.merge(named)
         return -1
       end
-      if b == 112_u8 || b == 80_u8
-        raise "regex: \\p classes are refused in /#{@pat}/ (this engine matches bytes)"
-      end
+      b = peek
+      @i = @i + 1
       if b == 98_u8
         return 8 # \b in a class is backspace, as in Python
       end
-      return escaped_byte(b).to_i32
+      return escaped(b)
     end
-    b = peek
-    @i = @i + 1
-    raise "regex: a class holding a byte past ASCII is refused in /#{@pat}/ (classes are bytes; a literal outside one matches its own)" if b >= 128_u8
-    b.to_i32
+    next_char
   end
 
-  private def class_from(neg : Bool, & : UInt8 -> Bool) : {Int32, Array(Int32)}
-    bits = Array(UInt8).new(32) { 0_u8 }
+  # `[:alpha:]` and the other ASCII classes RE2 names, `[:^alpha:]` every
+  # character outside one. Read as bytes, `[[:digit:]]+` found ":]]" in
+  # "[[:digit:]]x 5", where RE2 finds "5". As in RE2, a `[:` with no `:]`
+  # after it is the character `[`, and a name RE2 does not have is refused.
+  private def posix_class(set : RxSet) : Bool
+    return false unless @i + 1 < @n && peek == 91_u8 && @src[@i + 1] == 58_u8
+    close = @i + 2
+    while close + 1 < @n && !(@src[close] == 58_u8 && @src[close + 1] == 93_u8)
+      close = close + 1
+    end
+    return false if close + 1 >= @n
+    neg = @src[@i + 2] == 94_u8
+    from = neg ? @i + 3 : @i + 2
+    name = @pat[from, close - from]
+    if RxCompiler.posix?(name, 0_u8).nil?
+      raise "regex: unknown class '#{@pat[@i, close + 2 - @i]}' in /#{@shown}/"
+    end
+    named = RxSet.new
     c = 0
-    while c < 256
-      u = c.to_u8
-      hit = yield u
-      hit = !hit if neg
-      set_bit(bits, u) if hit
+    while c < 128
+      named.add(c, c) if RxCompiler.posix?(name, c.to_u8) == true
       c = c + 1
     end
-    s = @nfa.add(2)
-    @nfa.set_class(s, bits)
-    single(s)
+    named.fold if @fold
+    named.negate if neg
+    set.merge(named)
+    @i = close + 2
+    true
+  end
+
+  # The character at the cursor, which moves past its bytes; the pattern
+  # is already known to be well-formed UTF-8.
+  private def next_char : Int32
+    lead = peek.to_i32
+    width = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
+    point = width == 1 ? lead : lead & (0x7F >> width)
+    k = 1
+    while k < width
+      point = (point << 6) | (@src[@i + k].to_i32 & 0x3F)
+      k = k + 1
+    end
+    @i = @i + width
+    point
   end
 
   private def single(s : Int32) : {Int32, Array(Int32)}
     {s, [s]}
-  end
-
-  private def set_bit(bits : Array(UInt8), b : UInt8) : Nil
-    i = b.to_i32 >> 3
-    bits[i] = (bits[i].to_i32 | (1 << (b.to_i32 & 7))).to_u8
   end
 
   def self.digit?(c : UInt8) : Bool
@@ -731,6 +2210,32 @@ class RxCompiler
     c == 32_u8 || c == 9_u8 || c == 10_u8 || c == 13_u8 || c == 12_u8 || c == 11_u8
   end
 
+  # Whether *c* is in the ASCII class RE2 calls *name*; nil for a name it
+  # does not have.
+  def self.posix?(name : String, c : UInt8) : Bool?
+    case name
+    when "alnum"  then digit?(c) || alpha?(c)
+    when "alpha"  then alpha?(c)
+    when "ascii"  then c < 128_u8
+    when "blank"  then c == 32_u8 || c == 9_u8
+    when "cntrl"  then c < 32_u8 || c == 127_u8
+    when "digit"  then digit?(c)
+    when "graph"  then c > 32_u8 && c < 127_u8
+    when "lower"  then c >= 97_u8 && c <= 122_u8
+    when "print"  then c >= 32_u8 && c < 127_u8
+    when "punct"  then c > 32_u8 && c < 127_u8 && !digit?(c) && !alpha?(c)
+    when "space"  then space?(c)
+    when "upper"  then c >= 65_u8 && c <= 90_u8
+    when "word"   then word?(c)
+    when "xdigit" then digit?(c) || (c >= 65_u8 && c <= 70_u8) || (c >= 97_u8 && c <= 102_u8)
+    else               nil
+    end
+  end
+
+  def self.alpha?(c : UInt8) : Bool
+    (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8)
+  end
+
   private def peek : UInt8
     @src[@i]
   end
@@ -743,5 +2248,84 @@ class RxCompiler
         @nfa.out2[s] = target
       end
     end
+  end
+end
+
+# The other library's spellings on the text side. `text.match(pattern)`,
+# `text =~ pattern` and `text.index(pattern)` ask `Regex`; `sub` and `gsub`
+# replace the first and every match, a string replacement read for `\1`
+# and `\k<name>` and a block given the matched text and its groups;
+# `scan` answers each match with its groups, as the other library's does -
+# `Regex#scan` answers the matched texts alone, and which a program meant
+# is said by which side it starts from. `text.matches?(pattern)` asks
+# whether the pattern occurs anywhere, as the other library's `match?`
+# does - `Regex#match?` asks whether it spans the whole text, and is a
+# different question. Positions are bytes, as every iyi `index` is.
+class ::String
+  def match(pattern : Std::Regex::Regex, pos : Int32 = 0) : Std::Regex::Regex::MatchData?
+    pattern.match(self, pos)
+  end
+
+  def =~(pattern : Std::Regex::Regex) : Int32?
+    pattern.byte_index(self)
+  end
+
+  def index(pattern : Std::Regex::Regex, offset : Int32 = 0) : Int32?
+    pattern.byte_index(self, offset)
+  end
+
+  def sub(pattern : Std::Regex::Regex, replacement : String) : String
+    sub(pattern) { |text, match| match.expand(replacement) }
+  end
+
+  def sub(pattern : Std::Regex::Regex, & : String, Std::Regex::Regex::MatchData -> String) : String
+    match = pattern.match(self)
+    return self unless match
+    head = match.byte_begin(0)
+    tail = match.byte_end(0)
+    String.build(bytesize) do |io|
+      io.write(to_unsafe, head)
+      io << yield match[0], match
+      io.write(to_unsafe + tail, bytesize - tail)
+    end
+  end
+
+  def gsub(pattern : Std::Regex::Regex, replacement : String) : String
+    return pattern.replace(self, replacement) unless replacement.includes?("\\")
+    gsub(pattern) { |text, match| match.expand(replacement) }
+  end
+
+  def gsub(pattern : Std::Regex::Regex, & : String, Std::Regex::Regex::MatchData -> String) : String
+    last = 0
+    String.build(bytesize) do |io|
+      pattern.each_match(self) do |match|
+        head = match.byte_begin(0)
+        io.write(to_unsafe + last, head - last)
+        io << yield match[0], match
+        last = match.byte_end(0)
+      end
+      io.write(to_unsafe + last, bytesize - last)
+    end
+  end
+
+  # Each match replaced by its entry in *table*; a match the table has no
+  # entry for is dropped, as the other library drops it.
+  def gsub(pattern : Std::Regex::Regex, table : Hash(String, String)) : String
+    pattern.replace(self) { |match| table[match]? || "" }
+  end
+
+  def scan(pattern : Std::Regex::Regex) : Array(Std::Regex::Regex::MatchData)
+    found = [] of Std::Regex::Regex::MatchData
+    pattern.each_match(self) { |match| found << match }
+    found
+  end
+
+  def scan(pattern : Std::Regex::Regex, & : Std::Regex::Regex::MatchData -> Nil) : String
+    pattern.each_match(self) { |match| yield match }
+    self
+  end
+
+  def matches?(pattern : Std::Regex::Regex) : Bool
+    !pattern.find(self).nil?
   end
 end

@@ -310,14 +310,14 @@ class Iyi::Call
     # scopes. This is the step Crystal has no equivalent of, and both halves
     # of it exist for the same reason: in iyi a module is a compilation unit,
     # so the functions in scope for a type are the ones its module declares
-    # and the ones its module brought in with `using` — not, as in Crystal,
+    # and the ones its module brought in by `import X::{...}` — not, as in Crystal,
     # only what the type inherits plus the top level.
     #
     # At each scope, in order:
     #
     #   1. the scope's own functions, so a type nested in a module can call
     #      the module's helpers unqualified;
-    #   2. the modules that scope brought in with `using` (SPEC.md II.3).
+    #   2. the modules whose names that scope imported (SPEC.md II.3).
     #
     # That order is II.3's rule that a local definition beats a used one, and
     # the outward walk is what makes a nearer scope win over a farther one.
@@ -336,21 +336,30 @@ class Iyi::Call
     # `DefInstanceContainer` cast in `#instantiate`.
     #
     # Costs nothing for code that is not iyi: `iyi_unit?` is false and the
-    # `using` list is lazily allocated, so each scope is two loads and the
+    # `using_modules` list is lazily allocated, so each scope is two loads and the
     # walk ends at `program`.
     #
     # NOTE: the walk must stop at `program`, which is its own namespace
     # (`Program` is constructed with `super(self, self, "main")`). Walking past
-    # it loops forever. Stopping there is also correct: a `using` at file top
+    # it loops forever. Stopping there is also correct: an import at file top
     # level lands on `program` itself, and the existing top-level fallback
     # below already covers that case.
     using_owner = nil
     if matches.empty? && !obj && search_in_toplevel
-      # The walk starts at the owner itself, because a `using` written in a
+      # The walk starts at the owner itself, because an import written in a
       # type's own body belongs to that type. `instance_type` turns
       # `Main.class` — the owner of code in a module body — back into `Main`,
       # which is where the directive was recorded.
-      scope_type = owner.instance_type
+      #
+      # iyi: the owner *as written*, which is not always the receiver's type.
+      # A trait's default method runs on the implementing type, and the
+      # implementer may be another module's: walking out from it found that
+      # module's functions, so `helper` in a default method of `lib/core`
+      # called the consumer's own `helper` when it had one and was refused
+      # when it had none. The body is the trait's, and so are its names —
+      # which is what `path_lookup` already says for its *types*. The same
+      # holds for a superclass's method run on a subclass.
+      scope_type = iyi_lexical_scope(owner)
       enclosing = false
 
       while scope_type
@@ -374,6 +383,11 @@ class Iyi::Call
         end
 
         break if scope_type == program
+        # iyi: a generic instance sits where its generic type was declared.
+        # `Box(Int32)` is not a `NamedType`, so the walk ended at it and a
+        # generic type's methods - alone among a module's types - could not
+        # call the module's own functions.
+        scope_type = scope_type.generic_type if scope_type.is_a?(GenericInstanceType)
         scope_type = scope_type.is_a?(NamedType) ? scope_type.namespace : nil
         enclosing = true
       end
@@ -415,13 +429,21 @@ class Iyi::Call
     empty_match = matches.empty? &&
                   (def_name == "new" || owner.metaclass? || !owner.abstract_leaf?)
 
+    # iyi: a name an import brought in, called with arguments none of its
+    # defs takes, is that def's mismatch. It was "undefined method 'shout'
+    # for App:Module" and a hint to import the name the file had just
+    # imported: the walk above looks only for a match.
+    if matches.empty? && !obj && search_in_toplevel && (imported = iyi_imported_owner(owner, def_name))
+      raise_matches_not_found(imported.metaclass, def_name, arg_types, named_args_types, matches, with_autocast: with_autocast, number_autocast: !program.has_flag?("no_number_autocast"))
+    end
+
     if partial_match || empty_match
       raise_matches_not_found(matches.owner || owner, def_name, arg_types, named_args_types, matches, with_autocast: with_autocast, number_autocast: !program.has_flag?("no_number_autocast"))
     end
 
     # If this call is an implicit call to self
-    # (a call resolved through `using` is not: its receiver is a module, and
-    # codegen passes no receiver for it at all)
+    # (a call resolved through an import's names is not: its receiver is a
+    # module, and codegen passes no receiver for it at all)
     if !obj && !program_matches && !using_owner && !owner.is_a?(Program)
       parent_visitor.check_self_closured
     end
@@ -432,6 +454,31 @@ class Iyi::Call
     end
 
     instantiate signature, matches, using_owner || owner, self_type, with_autocast
+  end
+
+  # iyi: the module an import in one of *owner*'s scopes brought
+  # *def_name* in from, when that module declares it: the same walk as the
+  # lookup's, asked only once the lookup has failed.
+  private def iyi_imported_owner(owner, def_name) : Type?
+    scope_type = iyi_lexical_scope(owner)
+    while scope_type
+      scope_type.using_modules?.try &.each do |using_module|
+        return using_module.type if using_module.exports?(def_name) && using_module.type.defs.try(&.has_key?(def_name))
+      end
+      break if scope_type == program
+      scope_type = scope_type.generic_type if scope_type.is_a?(GenericInstanceType)
+      scope_type = scope_type.is_a?(NamedType) ? scope_type.namespace : nil
+    end
+    nil
+  end
+
+  # iyi: the scope a receiverless call is written in, where the walk above
+  # starts. The visitor's `path_lookup` is the type that *declared* the def
+  # being typed — the trait for a default method, the superclass for an
+  # inherited one — and the owner is the receiver's type; types already
+  # resolve from the first, and names now do too.
+  private def iyi_lexical_scope(owner : Type) : Type
+    (@parent_visitor.try(&.path_lookup) || owner).instance_type
   end
 
   def lookup_matches_checking_expansion(owner, signature, search_in_parents = true, with_autocast = false)
@@ -489,9 +536,9 @@ class Iyi::Call
     matches
   end
 
-  # iyi: resolves *def_name* against the modules `using` brought into a scope,
-  # returning the matches together with the owner they must be instantiated
-  # under, or nil if none of them provides it.
+  # iyi: resolves *def_name* against the modules an import brought into a
+  # scope's names, returning the matches together with the owner they must be
+  # instantiated under, or nil if none of them provides it.
   #
   # Two used modules providing the same name is an error here, at the call,
   # and only for the name actually called — SPEC.md II.3. The mirror of
@@ -506,7 +553,7 @@ class Iyi::Call
       next unless used_matches
 
       if found
-        raise "'#{def_name}' is ambiguous here: it is exported by both #{found[1].instance_type} and #{using_module.type}. Qualify the call, or narrow one of the `using` directives."
+        raise "'#{def_name}' is ambiguous here: it is exported by both #{found[1].instance_type} and #{using_module.type}. Qualify the call, or narrow one of the imports' name lists."
       end
 
       found = {used_matches, using_module.type.metaclass}
@@ -767,6 +814,11 @@ class Iyi::Call
     return nil unless type.is_a?(Type)
     # A free variable is bound per call and has no one symbol behind it.
     return nil if type.is_a?(TypeParameter)
+    # Nor has a generic written bare, `args : Tuple`: it matches each
+    # instantiation and the producer keyed the symbol on that one. Widened to
+    # the uninstantiated generic, a consumer's `fmt("a", {1})` ended codegen
+    # on "BUG: called create_llvm_type for K".
+    return nil if type.is_a?(GenericType)
 
     # `virtual_type` is what a value of a class with subclasses is held as,
     # and what the producing build's keep file gave the method. A leaf class
@@ -790,6 +842,40 @@ class Iyi::Call
     return_type = program.nil if return_type.void?
     typed_def.freeze_type = return_type
     typed_def.type = return_type if return_type.no_return? || return_type.nil_type?
+    # iyi: and a signature with an error member is the def's type, not just a
+    # bound on it (SPEC.md III.1.8, IV.2). The other library types a call from
+    # the body and only checks it against the annotation, so `def f : Int32 |
+    # IOErr` whose body answers `1` typed `f` as `Int32`: `f()!` was refused as
+    # having "no error to propagate", a `case` with no `IOErr` branch
+    # compiled, and a build reading the same def from its `.iyimod`, which
+    # types it from the annotation, refused `f() + 1` and failed to link
+    # against the symbol the source build had mangled with `Int32`.
+    # `Def#map_type` widens to it.
+    #
+    # Only there. Widened everywhere, `def stdout : IyiIO` answered `IyiIO+`,
+    # every `puts` dispatched over each subclass the program holds, and four
+    # std exercises read from their artifacts failed to link
+    # `Std::Io::Sized#write`, which `std/io`'s object code never needed.
+    #
+    # iyi: and a body that travelled in a `.iyimod` was written in iyi too. Its
+    # location is the artifact's path, which is no `.iyi`, so a default method
+    # declared `Int32 | Bad` whose body only answered `Int32` was typed
+    # `Int32` by the consumer that compiles it, and `o.twice(x).or(-1)` that
+    # built from source was refused there as having "no error to recover".
+    members = return_type.is_a?(UnionType) ? return_type.union_types : [return_type]
+    if members.any?(&.error?) && iyi_written?(match.def.location.try(&.filename))
+      typed_def.iyi_declared_return = true
+    end
+  end
+
+  # iyi: whether a def was written in iyi: in an `.iyi` file, or in an
+  # artifact built from one, whose declarations are parsed under the
+  # artifact's own path (`SemanticVisitor`, `iyi_artifact_source_paths`).
+  private def iyi_written?(filename) : Bool
+    return true if Lexer.iyi_source?(filename)
+    return false unless filename.is_a?(String)
+    source = program.iyi_artifact_source_paths[filename]?
+    !source.nil? && Lexer.iyi_source?(source)
   end
 
   def check_tuple_indexer(owner, def_name, args, arg_types)
@@ -1117,7 +1203,7 @@ class Iyi::Call
           next unless result.is_a?(Macro)
 
           if found && found_in != using_module.type
-            raise "'#{name}' is ambiguous here: it is exported as a macro by both #{found_in} and #{using_module.type}. Qualify the call, or narrow one of the `using` directives."
+            raise "'#{name}' is ambiguous here: it is exported as a macro by both #{found_in} and #{using_module.type}. Qualify the call, or narrow one of the imports' name lists."
           end
 
           found = result
@@ -1465,8 +1551,10 @@ class Iyi::Call
     type.is_a?(Type) && (type.void? || type.nil_type?)
   end
 
+  # iyi: the cast itself, not a link to the other language's reference,
+  # which is what an iyi user was sent to read.
   private def cant_infer_block_return_type
-    raise "can't infer block return type, try to cast the block body with `as`. See: https://crystal-lang.org/reference/syntax_and_semantics/as.html#usage-for-when-the-compiler-cant-infer-the-type-of-a-block"
+    raise "can't infer block return type, try to cast the block body with `as`: `{ value.as(Int32) }` writes down the type the block returns, which nothing else here says"
   end
 
   # iyi: `def add_route(&block : Ctx -> B) forall B : IntoBody` (SPEC.md II.7
@@ -1548,6 +1636,18 @@ class Iyi::Call
     # This will insert this node into the trace as the new first frame.
     self.raise ex.message, ex, exception_type: Iyi::MacroRaiseException
   rescue ex : Iyi::CodeError
+    # iyi: `Channel.new` with no type argument: the type parameter is
+    # inferred from `new`'s arguments, and a channel's has none that holds
+    # a `T`. The error was raised at the `T` inside the prelude
+    # (src/iyi/concurrency.iyi:3098), the one frame shown, in a file the
+    # reader did not write; it is said at the call that left it out.
+    if name == "new" && ex.message.try(&.starts_with?("can't infer the type parameter")) &&
+       (meta = @obj.try(&.type?)).is_a?(MetaclassType) && (generic = meta.instance_type).is_a?(GenericClassType) &&
+       Lexer.iyi_source?(location.try(&.filename))
+      written = "#{generic.name}(#{generic.type_vars.map { "Int32" }.join(", ")})"
+      self.raise "`#{generic.name}.new` can't infer #{generic.type_vars.map { |var| "`#{var}`" }.join(" and ")} from its arguments: " \
+                 "write #{generic.type_vars.size == 1 ? "it" : "them"}, `#{written}.new`"
+    end
     if @obj && name == "initialize"
       # Avoid putting 'initialize' in the error trace
       # because it's most likely that this is happening

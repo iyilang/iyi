@@ -1,0 +1,770 @@
+# Hybrid Public Key Encryption (RFC 9180), written in iyi over std/curve25519,
+# std/p256, std/p384, std/crypto's HMAC and std/aead: what TLS Encrypted
+# Client Hello and Oblivious HTTP seal their messages with.
+#
+#     import std/hpke::{HpkeSuite, HpkeKem, HpkeKdf, HpkeAead, HpkePrivateKey, HpkePublicKey, HpkeError}
+#
+#     suite = HpkeSuite.new(HpkeKem::X25519Sha256, HpkeKdf::HkdfSha256, HpkeAead::Aes128Gcm)
+#     key = HpkePrivateKey.derive(suite.kem, ikm)               # DeriveKeyPair, section 7.1.3
+#     key.public_key.bytes                                      # SerializePublicKey: 32 bytes, sent
+#     theirs = HpkePublicKey.from_bytes(suite.kem, bytes).or_panic  # read back, checked
+#     enc, sealed = suite.seal(theirs, info, aad, plaintext, randomness).or_panic
+#     suite.open(key, enc, info, aad, sealed)                   # the plaintext, or an HpkeError
+#
+#     sender = suite.sender(theirs, info, randomness).or_panic  # a context: enc, then messages
+#     sender.enc
+#     sender.seal(plaintext, aad)                               # sequence 0, 1, 2, ...
+#     recipient = suite.recipient(key, sender.enc, info).or_panic
+#     recipient.open(sealed, aad)
+#     sender.export(exporter_context, 32)                       # section 5.3, both ends alike
+#
+# All four modes: `psk:` and `psk_id:` given make it mode_psk, `sender_key:`
+# (the sender's static key, at the sender) and `sender_public:` (its public
+# half, at the recipient) mode_auth, and both mode_auth_psk; neither is
+# mode_base. The suites are any of three KEMs, DHKEM(X25519, HKDF-SHA256)
+# 0x0020, DHKEM(P-256, HKDF-SHA256) 0x0010 and DHKEM(P-384, HKDF-SHA384)
+# 0x0011; three KDFs, HKDF-SHA256, -SHA384 and -SHA512; and four AEADs,
+# AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 and the export-only 0xFFFF,
+# whose context exports secrets and seals nothing. `HpkeSuite.from_ids`
+# reads a suite named by its three code points, as ECH's configurations
+# and OHTTP's key configurations carry them, and answers an `HpkeError`
+# for one this module does not have. Single-shot `seal`, `open`,
+# `send_export` and `receive_export` are section 6's; the KEM itself is
+# there as `HpkeKem#encapsulate` and `#decapsulate` (section 4.1).
+#
+# Not here: DHKEM(P-521) and DHKEM(X448), for want of the curves in std;
+# and the post-quantum KEMs, ML-KEM-768 (0x0041) and X25519 with
+# ML-KEM-768 (X-Wing, 0x647A). IANA's registry lists both, but against
+# Internet-Drafts (draft-connolly-cfrg-hpke-mlkem and
+# draft-connolly-cfrg-xwing-kem), and draft-ietf-hpke-pq-05, in IESG
+# evaluation when this was written (2026-10-22), asks IANA to replace the
+# 0x647A entry and derives both KEMs' keys with a SHAKE256 LabeledDerive
+# that only the revision of RFC 9180 (draft-ietf-hpke-hpke), itself a
+# draft, defines: neither the code points' meaning nor their test vectors
+# had settled.
+#
+# Keys, randomness, info, aad, psk and messages are a `String`, whose bytes
+# are taken, or an `Array(UInt8)`. What is sealed and opened comes back a
+# `String`, as std/aead answers it, so a message is not copied again; keys,
+# encapsulations and exported secrets come back an `Array(UInt8)`. The
+# caller brings every random byte, as std/curve25519's and std/mlkem's do:
+# an encapsulation's ephemeral key is `DeriveKeyPair(randomness)`, which is
+# the RFC's GenerateKeyPair given at least Nsk random bytes (32, or 48 for
+# P-384) from `Random::Secure.random_bytes`. Nothing here draws a number
+# or reads a clock; but std/p256 and std/p384 import std/asn1 (for their
+# PKCS #8 and SEC 1 keys), which imports std/time, so `iyi mod reach`
+# counts std/time and std/env among what a package using this one
+# reaches, which std/aead and std/curve25519 alone do not.
+#
+# Serialisation is section 7.1.1's: an X25519 key is its 32 bytes, a P-256
+# or P-384 public key the uncompressed point, 0x04 then x and y, 65 or 97
+# bytes, and a private key the scalar, 32 or 48 bytes big-endian. An X25519
+# private key is clamped when it is serialised (section 7.1.2): it is the
+# same key, and RFC 9180's vectors print it unclamped, as DeriveKeyPair made
+# it. A P-256 or P-384 public key is validated when it is read, as section
+# 7.1.4 asks (on the curve, coordinates below p; the uncompressed form cannot
+# spell the point at infinity), and so is every encapsulation.
+#
+# Answered as an `HpkeError`, a value, because the bytes come from outside:
+# an encapsulation or a public key of the wrong length; a P-256 or P-384
+# point not on its curve; an X25519 shared secret of all zero bytes (the
+# peer's key is of small order, section 7.1.4, which std/curve25519 refuses
+# and this passes on); a ciphertext whose tag does not match, including one
+# opened at the wrong sequence number, under the wrong info, psk, psk_id or
+# sender key; a context sealing or opening past its last nonce (sequence
+# 2^96 - 1, which section 5.2's IncrementSeq refuses to step past, so the
+# last message is sequence 2^96 - 2); and a suite named by code points this
+# module does not have. A failed open leaves the sequence where it was, as
+# the RFC's ContextR.Open does.
+#
+# Refused with a sentence, as the caller's own misuse: a key of one KEM
+# given to a suite of another; input keying material or randomness shorter
+# than Nsk (section 7.1.3 says it SHOULD be at least that); a psk shorter
+# than 32 bytes (section 5.1.2: it MUST have 32 bytes of entropy); a psk
+# without a psk_id or a psk_id without a psk (section 5.1's
+# VerifyPSKInputs); an export longer than 255 hashes; and seal or open on
+# an export-only context. DeriveKeyPair failing, which for P-256 takes 256
+# candidates in a row at or above the group order, each a chance under
+# 2^-32, is a panic, as section 8.2 allows.
+#
+# Constant time on secrets. Nothing this module adds branches on a secret
+# or indexes memory by one: the labeled HKDF steps are std/crypto's HMAC,
+# the AEADs std/aead's bitsliced AES-GCM and ChaCha20-Poly1305 (tags
+# compared by OR-ing the differences), and the Diffie-Hellman steps
+# std/curve25519's ladder and std/p256's and std/p384's fixed-window
+# multiplications, each constant-time as its own header says and measures.
+# The nonce is the base nonce XORed with the sequence number, which is
+# public. What does branch on a secret is RFC 9180's own: DeriveKeyPair's
+# rejection of a P-256 or P-384 candidate at or above the order (the
+# branch says a candidate was refused, and nothing of the one kept), and
+# the all-zero check on an X25519 secret, which depends on the peer's key.
+#
+# Measured on one x86_64 Linux machine other jobs shared, --release, the
+# best of five runs of 200 (bench/std_hpke_exercise.sh), X25519,
+# HKDF-SHA256 and AES-128-GCM over a 1 KiB message: a single-shot `seal`
+# took 46 microseconds and a single-shot `open` 36; in an established
+# context, a `seal` took 3.8 and an `open` 5.0. The curve is most of the
+# single-shot time: `seal` makes the ephemeral key (a fixed-base
+# multiplication, 9 microseconds) and both do an X25519 ladder (21), and
+# the labeled HKDF steps, eight HMACs to open and ten to seal, take under
+# a microsecond each.
+#
+# Held by bench/std_hpke_exercise.sh to RFC 9180's test vectors (Appendix
+# A, from the CFRG's test-vectors.json) for every suite of them this module
+# has - DHKEM(X25519) and DHKEM(P-256), with HKDF-SHA256 and HKDF-SHA512,
+# each AEAD, each mode: the key pairs from their ikm, the encapsulation and
+# shared secret, every encryption of the 257 at the sender and the
+# recipient, the key and base nonce at sequence 2^96 - 2, and the exports -
+# and to an HPKE written in Python over the primitives of Python's
+# `cryptography` (its X25519, P-256, P-384, HMAC and AEADs), the same bytes
+# from the same randomness and each opening what the other sealed, in all
+# 36 suites and all four modes; and by broken copies of this module and of
+# std/curve25519, each caught at the check that names it. The RFC has no
+# vectors for DHKEM(P-384) or HKDF-SHA384; the Python HPKE is what holds
+# those, after it has passed the RFC's vectors itself.
+#
+# What this is not: a way to keep a key out of memory. Private keys, shared
+# secrets and context keys live in the collected heap, and nothing wipes
+# them.
+
+module std/hpke
+
+import std/int
+import std/digest::{SHA256, SHA384, SHA512}
+import std/crypto::{HMAC, HKDF}
+import std/aead::{AesGcm, ChaCha20Poly1305, AeadError}
+import std/curve25519::{X25519, CurveError}
+import std/p256::{P256PrivateKey}
+import std/p384::{P384PrivateKey}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaError}
+
+# What is wrong with an encapsulation, a key, a ciphertext or a suite from
+# outside, or a context out of nonces: `message` is the sentence.
+pub struct HpkeError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for HpkeError
+  def message : String
+    @message
+  end
+end
+
+# The four modes of section 5, by the byte the key schedule binds.
+pub enum HpkeMode
+  Base    = 0
+  Psk     = 1
+  Auth    = 2
+  AuthPsk = 3
+end
+
+# The KEMs, by their code points (section 7.1, table 2).
+pub enum HpkeKem
+  P256Sha256   = 0x0010
+  P384Sha384   = 0x0011
+  X25519Sha256 = 0x0020
+
+  # Nsecret: the bytes of a shared secret, the KEM's hash's.
+  def secret_size : Int32
+    self == HpkeKem::P384Sha384 ? 48 : 32
+  end
+
+  # Nenc and Npk, which are the same: a serialised public key.
+  def public_key_size : Int32
+    case self
+    when HpkeKem::P256Sha256 then 65
+    when HpkeKem::P384Sha384 then 97
+    else                          32
+    end
+  end
+
+  # Nsk: the bytes of a serialised private key.
+  def private_key_size : Int32
+    self == HpkeKem::P384Sha384 ? 48 : 32
+  end
+
+  # The KDF the KEM's own steps use (section 4.1), whatever the suite's.
+  def kdf : HpkeKdf
+    self == HpkeKem::P384Sha384 ? HpkeKdf::HkdfSha384 : HpkeKdf::HkdfSha256
+  end
+
+  # RFC 9180's name for it.
+  def name : String
+    case self
+    when HpkeKem::P256Sha256 then "DHKEM(P-256, HKDF-SHA256)"
+    when HpkeKem::P384Sha384 then "DHKEM(P-384, HKDF-SHA384)"
+    else                          "DHKEM(X25519, HKDF-SHA256)"
+    end
+  end
+
+  # Encap, or AuthEncap when *sender_key* is given (section 4.1): the
+  # encapsulation, enc, and the shared secret, from the ephemeral key
+  # DeriveKeyPair makes of *randomness* (at least Nsk bytes). An
+  # `HpkeError` when a Diffie-Hellman step is refused: *recipient* is an
+  # X25519 key of small order.
+  def encapsulate(recipient : HpkePublicKey, randomness : String | Array(UInt8), sender_key : HpkePrivateKey | Nil = nil) : {Array(UInt8), Array(UInt8)} | HpkeError
+    HpkeKeys.same_kem(self, recipient.kem, "the recipient's public key")
+    ephemeral = HpkePrivateKey.derive(self, randomness)
+    dh = ephemeral.agree(recipient.bytes)
+    return dh if dh.is_a?(HpkeError)
+    enc = ephemeral.public_key.bytes
+    kem_context = enc + recipient.bytes
+    if sender = sender_key
+      HpkeKeys.same_kem(self, sender.kem, "the sender's key")
+      dh2 = sender.agree(recipient.bytes)
+      return dh2 if dh2.is_a?(HpkeError)
+      dh = dh + dh2
+      kem_context = kem_context + sender.public_key.bytes
+    end
+    {enc, extract_and_expand(dh, kem_context)}
+  end
+
+  # Decap, or AuthDecap when *sender_public* is given (section 4.1): the
+  # shared secret *enc* carries to *key*, or an `HpkeError` for an *enc*
+  # of the wrong length, not a point of the curve, or of small order.
+  def decapsulate(key : HpkePrivateKey, enc : String | Array(UInt8), sender_public : HpkePublicKey | Nil = nil) : Array(UInt8) | HpkeError
+    HpkeKeys.same_kem(self, key.kem, "the recipient's key")
+    sent = HpkeBytes.array(enc)
+    unless sent.size == public_key_size
+      return HpkeError.new("HPKE: an encapsulation for #{name} is #{public_key_size} bytes, not #{sent.size}")
+    end
+    dh = key.agree(sent)
+    return dh if dh.is_a?(HpkeError)
+    kem_context = sent + key.public_key.bytes
+    if sender = sender_public
+      HpkeKeys.same_kem(self, sender.kem, "the sender's public key")
+      dh2 = key.agree(sender.bytes)
+      return dh2 if dh2.is_a?(HpkeError)
+      dh = dh + dh2
+      kem_context = kem_context + sender.bytes
+    end
+    extract_and_expand(dh, kem_context)
+  end
+
+  # ExtractAndExpand (section 4.1), under the KEM's suite_id.
+  private def extract_and_expand(dh : Array(UInt8), kem_context : Array(UInt8)) : Array(UInt8)
+    labels = HpkeLabels.kem(self)
+    eae_prk = labels.extract(Array(UInt8).new, "eae_prk", dh)
+    labels.expand(eae_prk, "shared_secret", kem_context, secret_size)
+  end
+end
+
+# The KDFs, by their code points (section 7.2, table 3).
+pub enum HpkeKdf
+  HkdfSha256 = 0x0001
+  HkdfSha384 = 0x0002
+  HkdfSha512 = 0x0003
+
+  # Nh: the bytes of the hash's output.
+  def hash_size : Int32
+    case self
+    when HpkeKdf::HkdfSha256 then 32
+    when HpkeKdf::HkdfSha384 then 48
+    else                          64
+    end
+  end
+
+  def name : String
+    case self
+    when HpkeKdf::HkdfSha256 then "HKDF-SHA256"
+    when HpkeKdf::HkdfSha384 then "HKDF-SHA384"
+    else                          "HKDF-SHA512"
+    end
+  end
+
+  # HMAC under the hash, keyed with *key*.
+  def mac(key : String | Array(UInt8)) : HMAC
+    case self
+    when HpkeKdf::HkdfSha256 then HMAC.new(SHA256, key)
+    when HpkeKdf::HkdfSha384 then HMAC.new(SHA384, key)
+    else                          HMAC.new(SHA512, key)
+    end
+  end
+
+  # HKDF-Expand (RFC 5869 section 2.3) of *prk* to *length* bytes.
+  def expand(prk : Array(UInt8), info : Array(UInt8), length : Int32) : Array(UInt8)
+    case self
+    when HpkeKdf::HkdfSha256 then HKDF.expand(SHA256, prk, info, length)
+    when HpkeKdf::HkdfSha384 then HKDF.expand(SHA384, prk, info, length)
+    else                          HKDF.expand(SHA512, prk, info, length)
+    end
+  end
+end
+
+# The AEADs, by their code points (section 7.3, table 5).
+pub enum HpkeAead
+  Aes128Gcm        = 0x0001
+  Aes256Gcm        = 0x0002
+  ChaCha20Poly1305 = 0x0003
+  ExportOnly       = 0xffff
+
+  # Nk: the bytes of a key; none for export-only.
+  def key_size : Int32
+    case self
+    when HpkeAead::Aes128Gcm  then 16
+    when HpkeAead::ExportOnly then 0
+    else                           32
+    end
+  end
+
+  # Nn: the bytes of a nonce; none for export-only.
+  def nonce_size : Int32
+    self == HpkeAead::ExportOnly ? 0 : 12
+  end
+
+  # Nt: the bytes of a tag; none for export-only.
+  def tag_size : Int32
+    self == HpkeAead::ExportOnly ? 0 : 16
+  end
+
+  def name : String
+    case self
+    when HpkeAead::Aes128Gcm        then "AES-128-GCM"
+    when HpkeAead::Aes256Gcm        then "AES-256-GCM"
+    when HpkeAead::ChaCha20Poly1305 then "ChaCha20Poly1305"
+    else                                 "Export-only"
+    end
+  end
+end
+
+# A KEM, a KDF and an AEAD: what the two ends agree on before anything is
+# sealed, and what every function of sections 5 and 6 runs under.
+pub struct HpkeSuite
+  getter kem : HpkeKem
+  getter kdf : HpkeKdf
+  getter aead : HpkeAead
+
+  def initialize(@kem : HpkeKem, @kdf : HpkeKdf, @aead : HpkeAead)
+  end
+
+  # The suite named by its three code points, or an `HpkeError` naming the
+  # one this module does not have.
+  def self.from_ids(kem_id : Int32, kdf_id : Int32, aead_id : Int32) : HpkeSuite | HpkeError
+    kem = HpkeKem.from_value?(kem_id)
+    return HpkeError.new("HPKE: no KEM 0x#{kem_id.to_s(16).rjust(4, '0')} here") if kem.nil?
+    kdf = HpkeKdf.from_value?(kdf_id)
+    return HpkeError.new("HPKE: no KDF 0x#{kdf_id.to_s(16).rjust(4, '0')} here") if kdf.nil?
+    aead = HpkeAead.from_value?(aead_id)
+    return HpkeError.new("HPKE: no AEAD 0x#{aead_id.to_s(16).rjust(4, '0')} here") if aead.nil?
+    HpkeSuite.new(kem, kdf, aead)
+  end
+
+  def to_s : String
+    "#{@kem.name}, #{@kdf.name}, #{@aead.name}"
+  end
+
+  # SetupBaseS, SetupPSKS, SetupAuthS or SetupAuthPSKS (section 5.1), by
+  # which of *psk* and *psk_id*, and *sender_key*, are given: the sender's
+  # context, whose `enc` goes to the recipient. An `HpkeError` when the
+  # encapsulation is refused (*recipient* is an X25519 key of small order).
+  def sender(recipient : HpkePublicKey, info : String | Array(UInt8), randomness : String | Array(UInt8),
+             psk : String | Array(UInt8) | Nil = nil, psk_id : String | Array(UInt8) | Nil = nil,
+             sender_key : HpkePrivateKey | Nil = nil) : HpkeSender | HpkeError
+    mode = HpkeKeys.mode(psk, psk_id, !sender_key.nil?)
+    sent = @kem.encapsulate(recipient, randomness, sender_key)
+    return sent if sent.is_a?(HpkeError)
+    HpkeSender.new(sent[0], HpkeCipher.new(self, mode, sent[1], info, psk, psk_id))
+  end
+
+  # SetupBaseR, SetupPSKR, SetupAuthR or SetupAuthPSKR (section 5.1): the
+  # recipient's context for *enc*, or an `HpkeError` when *enc* is refused.
+  # The mode is chosen as `sender`'s is, by *sender_public* in place of
+  # the sender's key.
+  def recipient(key : HpkePrivateKey, enc : String | Array(UInt8), info : String | Array(UInt8),
+                psk : String | Array(UInt8) | Nil = nil, psk_id : String | Array(UInt8) | Nil = nil,
+                sender_public : HpkePublicKey | Nil = nil) : HpkeRecipient | HpkeError
+    mode = HpkeKeys.mode(psk, psk_id, !sender_public.nil?)
+    secret = @kem.decapsulate(key, enc, sender_public)
+    return secret if secret.is_a?(HpkeError)
+    HpkeRecipient.new(HpkeCipher.new(self, mode, secret, info, psk, psk_id))
+  end
+
+  # Single-shot Seal<MODE> (section 6.1): enc and *plaintext* sealed, the
+  # context's first message.
+  def seal(recipient : HpkePublicKey, info : String | Array(UInt8), aad : String | Array(UInt8), plaintext : String | Array(UInt8),
+           randomness : String | Array(UInt8), psk : String | Array(UInt8) | Nil = nil, psk_id : String | Array(UInt8) | Nil = nil,
+           sender_key : HpkePrivateKey | Nil = nil) : {Array(UInt8), String} | HpkeError
+    context = sender(recipient, info, randomness, psk, psk_id, sender_key)
+    return context if context.is_a?(HpkeError)
+    sealed = context.seal(plaintext, aad)
+    return sealed if sealed.is_a?(HpkeError)
+    {context.enc, sealed}
+  end
+
+  # Single-shot Open<MODE> (section 6.1): the plaintext, or an `HpkeError`.
+  def open(key : HpkePrivateKey, enc : String | Array(UInt8), info : String | Array(UInt8), aad : String | Array(UInt8),
+           ciphertext : String | Array(UInt8), psk : String | Array(UInt8) | Nil = nil, psk_id : String | Array(UInt8) | Nil = nil,
+           sender_public : HpkePublicKey | Nil = nil) : String | HpkeError
+    context = recipient(key, enc, info, psk, psk_id, sender_public)
+    return context if context.is_a?(HpkeError)
+    context.open(ciphertext, aad)
+  end
+
+  # Single-shot SendExport<MODE> (section 6.2): enc and *length* bytes
+  # exported under *exporter_context*.
+  def send_export(recipient : HpkePublicKey, info : String | Array(UInt8), exporter_context : String | Array(UInt8), length : Int32,
+                  randomness : String | Array(UInt8), psk : String | Array(UInt8) | Nil = nil, psk_id : String | Array(UInt8) | Nil = nil,
+                  sender_key : HpkePrivateKey | Nil = nil) : {Array(UInt8), Array(UInt8)} | HpkeError
+    context = sender(recipient, info, randomness, psk, psk_id, sender_key)
+    return context if context.is_a?(HpkeError)
+    {context.enc, context.export(exporter_context, length)}
+  end
+
+  # Single-shot ReceiveExport<MODE> (section 6.2): what `send_export`
+  # exported, or an `HpkeError` when *enc* is refused.
+  def receive_export(key : HpkePrivateKey, enc : String | Array(UInt8), info : String | Array(UInt8), exporter_context : String | Array(UInt8),
+                     length : Int32, psk : String | Array(UInt8) | Nil = nil, psk_id : String | Array(UInt8) | Nil = nil,
+                     sender_public : HpkePublicKey | Nil = nil) : Array(UInt8) | HpkeError
+    context = recipient(key, enc, info, psk, psk_id, sender_public)
+    return context if context.is_a?(HpkeError)
+    context.export(exporter_context, length)
+  end
+end
+
+# A KEM's public key, serialised as section 7.1.1 has it.
+pub struct HpkePublicKey
+  getter kem : HpkeKem
+  # SerializePublicKey: 32 bytes for X25519, the uncompressed point for
+  # P-256 (65) and P-384 (97).
+  getter bytes : Array(UInt8)
+
+  def initialize(@kem : HpkeKem, @bytes : Array(UInt8))
+  end
+
+  # DeserializePublicKey, validated: the key *bytes* are, or an
+  # `HpkeError` for the wrong length or a point not on the curve.
+  def self.from_bytes(kem : HpkeKem, bytes : String | Array(UInt8)) : HpkePublicKey | HpkeError
+    raw = HpkeBytes.copy(bytes)
+    unless raw.size == kem.public_key_size
+      return HpkeError.new("HPKE: a #{kem.name} public key is #{kem.public_key_size} bytes, not #{raw.size}")
+    end
+    unless kem == HpkeKem::X25519Sha256
+      curve = kem == HpkeKem::P256Sha256 ? EcdsaCurve::P256 : EcdsaCurve::P384
+      point = EcdsaPublicKey.from_point(curve, raw)
+      return HpkeError.new("HPKE: the #{kem.name} public key is refused: #{point.message}") if point.is_a?(EcdsaError)
+    end
+    HpkePublicKey.new(kem, raw)
+  end
+end
+
+# A KEM's private key and the public key that goes with it.
+pub struct HpkePrivateKey
+  getter kem : HpkeKem
+  getter public_key : HpkePublicKey
+  @secret : Array(UInt8)
+  @curve : P256PrivateKey | P384PrivateKey | Nil
+
+  def initialize(@kem : HpkeKem, @public_key : HpkePublicKey, @secret : Array(UInt8), @curve : P256PrivateKey | P384PrivateKey | Nil)
+  end
+
+  # DeriveKeyPair (section 7.1.3): the key pair of *ikm*, at least Nsk
+  # bytes, under the KEM's own KDF. For P-256 and P-384, candidates are
+  # drawn until one is in [1, n - 1].
+  def self.derive(kem : HpkeKem, ikm : String | Array(UInt8)) : HpkePrivateKey
+    raw = HpkeBytes.array(ikm)
+    size = kem.private_key_size
+    raise "HPKE: a #{kem.name} key's input keying material is at least #{size} bytes, not #{raw.size}" if raw.size < size
+    labels = HpkeLabels.kem(kem)
+    dkp_prk = labels.extract(Array(UInt8).new, "dkp_prk", raw)
+    if kem == HpkeKem::X25519Sha256
+      return x25519(labels.expand(dkp_prk, "sk", Array(UInt8).new, size))
+    end
+    counter = 0
+    while counter < 256
+      candidate = labels.expand(dkp_prk, "candidate", [counter.to_u8], size)
+      # The bitmask is 0xFF for P-256 and P-384: every bit kept.
+      candidate[0] = candidate[0] & 0xff_u8
+      key = nist(kem, candidate)
+      return key if key.is_a?(HpkePrivateKey)
+      counter = counter + 1
+    end
+    raise "HPKE: DeriveKeyPair found no #{kem.name} key in 256 candidates (section 7.1.3's DeriveKeyPairError)"
+  end
+
+  # DeserializePrivateKey: the key *bytes* are, or an `HpkeError` for the
+  # wrong length or, on P-256 and P-384, a scalar not in [1, n - 1]. An
+  # X25519 key is clamped (section 7.1.2).
+  def self.from_bytes(kem : HpkeKem, bytes : String | Array(UInt8)) : HpkePrivateKey | HpkeError
+    raw = HpkeBytes.copy(bytes)
+    unless raw.size == kem.private_key_size
+      return HpkeError.new("HPKE: a #{kem.name} private key is #{kem.private_key_size} bytes, not #{raw.size}")
+    end
+    return x25519(raw) if kem == HpkeKem::X25519Sha256
+    key = nist(kem, raw)
+    return HpkeError.new("HPKE: the #{kem.name} private key is refused: #{key.message}") if key.is_a?(EcdsaError)
+    key
+  end
+
+  private def self.x25519(secret : Array(UInt8)) : HpkePrivateKey
+    clamped = secret.dup
+    clamped[0] = clamped[0] & 248_u8
+    clamped[31] = (clamped[31] & 127_u8) | 64_u8
+    public = HpkeBytes.array(X25519.public_key(clamped))
+    HpkePrivateKey.new(HpkeKem::X25519Sha256, HpkePublicKey.new(HpkeKem::X25519Sha256, public), clamped, nil)
+  end
+
+  private def self.nist(kem : HpkeKem, secret : Array(UInt8)) : HpkePrivateKey | EcdsaError
+    if kem == HpkeKem::P256Sha256
+      key = P256PrivateKey.from_bytes(secret)
+      return key if key.is_a?(EcdsaError)
+      HpkePrivateKey.new(kem, HpkePublicKey.new(kem, key.public_point), secret, key)
+    else
+      key = P384PrivateKey.from_bytes(secret)
+      return key if key.is_a?(EcdsaError)
+      HpkePrivateKey.new(kem, HpkePublicKey.new(kem, key.public_point), secret, key)
+    end
+  end
+
+  # SerializePrivateKey: the 32 bytes of an X25519 key, clamped; the
+  # scalar of a P-256 or P-384 key, 32 or 48 bytes big-endian.
+  def bytes : Array(UInt8)
+    @secret.dup
+  end
+
+  # DH(sk, pk) of section 4.1 with the serialised public key *peer*: the
+  # X25519 secret, or the x-coordinate of the product on P-256 and P-384.
+  # An `HpkeError` for a peer of the wrong length, a point not on the
+  # curve, or an all-zero X25519 secret (section 7.1.4).
+  def agree(peer : String | Array(UInt8)) : Array(UInt8) | HpkeError
+    curve = @curve
+    if curve.nil?
+      got = X25519.shared(@secret, peer)
+      return HpkeError.new("HPKE: #{got.message}") if got.is_a?(CurveError)
+      return HpkeBytes.array(got)
+    end
+    point = HpkeBytes.array(peer)
+    got = curve.shared_secret(point)
+    return HpkeError.new("HPKE: the #{@kem.name} peer key is refused: #{got.message}") if got.is_a?(EcdsaError)
+    got
+  end
+end
+
+# The sender's context (section 5.2): `enc` for the recipient, then
+# messages sealed at sequence 0, 1, 2 and on, and secrets exported.
+pub class HpkeSender
+  # The encapsulation the recipient sets its context up from.
+  getter enc : Array(UInt8)
+
+  def initialize(@enc : Array(UInt8), @cipher : HpkeCipher)
+  end
+
+  # ContextS.Seal: *plaintext* sealed under the next nonce, *aad*
+  # authenticated with it; or an `HpkeError` once the sequence is at
+  # 2^96 - 1, with nothing sealed.
+  def seal(plaintext : String | Array(UInt8), aad : String | Array(UInt8) = "") : String | HpkeError
+    @cipher.seal(plaintext, aad)
+  end
+
+  # Context.Export (section 5.3): *length* bytes, at most 255 hashes,
+  # bound to *exporter_context*.
+  def export(exporter_context : String | Array(UInt8), length : Int32) : Array(UInt8)
+    @cipher.export(exporter_context, length)
+  end
+
+  # The sequence number the next message is sealed at.
+  def sequence : UInt128
+    @cipher.sequence
+  end
+
+  # Skips the sequence forward to *sequence*, never back, so no nonce is
+  # used twice: for a protocol that numbers its messages itself.
+  def advance_to(sequence : UInt128) : Nil
+    @cipher.advance_to(sequence)
+  end
+
+  # The mode the context was set up in, by the inputs given.
+  def mode : HpkeMode
+    @cipher.mode
+  end
+end
+
+# The recipient's context (section 5.2): messages opened at sequence 0, 1,
+# 2 and on, and secrets exported, the same ones the sender's exports.
+pub class HpkeRecipient
+  def initialize(@cipher : HpkeCipher)
+  end
+
+  # ContextR.Open: the plaintext of *ciphertext* at the next nonce, or an
+  # `HpkeError` - its tag does not match, or the sequence is at 2^96 - 1 -
+  # with the sequence left where it was.
+  def open(ciphertext : String | Array(UInt8), aad : String | Array(UInt8) = "") : String | HpkeError
+    @cipher.open(ciphertext, aad)
+  end
+
+  # Context.Export (section 5.3).
+  def export(exporter_context : String | Array(UInt8), length : Int32) : Array(UInt8)
+    @cipher.export(exporter_context, length)
+  end
+
+  # The sequence number the next message is opened at.
+  def sequence : UInt128
+    @cipher.sequence
+  end
+
+  # Skips the sequence forward to *sequence*, never back: a message lost
+  # in between is not opened.
+  def advance_to(sequence : UInt128) : Nil
+    @cipher.advance_to(sequence)
+  end
+
+  # The mode the context was set up in, by the inputs given.
+  def mode : HpkeMode
+    @cipher.mode
+  end
+end
+
+# The key schedule's outputs and the sequence number: what both contexts
+# are made of (section 5.1's KeySchedule<ROLE>, 5.2 and 5.3).
+class HpkeCipher
+  # 2^96 - 1: the sequence IncrementSeq refuses to step past.
+  LAST = 1_u128.unsafe_shl(96) &- 1_u128
+
+  getter mode : HpkeMode
+  getter sequence : UInt128
+  @aead : HpkeAead
+  @kdf : HpkeKdf
+  @labels : HpkeLabels
+  @box : AesGcm | ChaCha20Poly1305 | Nil
+  @base_nonce : Array(UInt8)
+  @exporter_secret : Array(UInt8)
+
+  def initialize(suite : HpkeSuite, @mode : HpkeMode, shared_secret : Array(UInt8), info : String | Array(UInt8),
+                 psk : String | Array(UInt8) | Nil, psk_id : String | Array(UInt8) | Nil)
+    @aead = suite.aead
+    @kdf = suite.kdf
+    @sequence = 0_u128
+    @labels = HpkeLabels.suite(suite)
+    none = Array(UInt8).new
+    psk_id_hash = @labels.extract(none, "psk_id_hash", psk_id.nil? ? none : HpkeBytes.array(psk_id))
+    info_hash = @labels.extract(none, "info_hash", HpkeBytes.array(info))
+    key_schedule_context = [@mode.value.to_u8] + psk_id_hash + info_hash
+    secret = @labels.extract(shared_secret, "secret", psk.nil? ? none : HpkeBytes.array(psk))
+    key = @labels.expand(secret, "key", key_schedule_context, @aead.key_size)
+    @base_nonce = @labels.expand(secret, "base_nonce", key_schedule_context, @aead.nonce_size)
+    @exporter_secret = @labels.expand(secret, "exp", key_schedule_context, @kdf.hash_size)
+    @box = case @aead
+           when HpkeAead::Aes128Gcm, HpkeAead::Aes256Gcm then AesGcm.new(key)
+           when HpkeAead::ChaCha20Poly1305               then ChaCha20Poly1305.new(key)
+           else                                               nil
+           end
+  end
+
+  def seal(plaintext : String | Array(UInt8), aad : String | Array(UInt8)) : String | HpkeError
+    box = @box
+    raise "HPKE: an export-only context seals nothing" if box.nil?
+    return HpkeError.new("HPKE: the context's nonces are spent: sequence 2^96 - 1 is never sealed at") if @sequence >= LAST
+    sealed = box.seal(nonce, plaintext, aad)
+    @sequence = @sequence &+ 1_u128
+    sealed
+  end
+
+  def open(ciphertext : String | Array(UInt8), aad : String | Array(UInt8)) : String | HpkeError
+    box = @box
+    raise "HPKE: an export-only context opens nothing" if box.nil?
+    return HpkeError.new("HPKE: the context's nonces are spent: sequence 2^96 - 1 is never opened at") if @sequence >= LAST
+    opened = box.open(nonce, ciphertext, aad)
+    return HpkeError.new("HPKE: the ciphertext does not open: #{opened.message}") if opened.is_a?(AeadError)
+    @sequence = @sequence &+ 1_u128
+    opened
+  end
+
+  def export(exporter_context : String | Array(UInt8), length : Int32) : Array(UInt8)
+    most = 255 * @kdf.hash_size
+    raise "HPKE: an export is 0 to #{most} bytes under #{@kdf.name}, not #{length}" if length < 0 || length > most
+    @labels.expand(@exporter_secret, "sec", HpkeBytes.array(exporter_context), length)
+  end
+
+  def advance_to(sequence : UInt128) : Nil
+    raise "HPKE: a context's sequence goes forward only: it is at #{@sequence}, not back to #{sequence}" if sequence < @sequence
+    raise "HPKE: a context's sequence ends at 2^96 - 1, not #{sequence}" if sequence > LAST
+    @sequence = sequence
+  end
+
+  # ComputeNonce: the base nonce XORed with the sequence number, 12 bytes
+  # big-endian.
+  private def nonce : String
+    base = @base_nonce
+    seq = @sequence
+    String.new(12) do |buf|
+      i = 0
+      while i < 12
+        buf[i] = base[i] ^ seq.unsafe_shr((11 - i) * 8).unsafe_to_u8
+        i = i + 1
+      end
+    end
+  end
+end
+
+# LabeledExtract and LabeledExpand (section 4) under one suite_id: the
+# KEM's, "KEM" and its code point, or the whole suite's, "HPKE" and its
+# three.
+struct HpkeLabels
+  VERSION = "HPKE-v1"
+
+  def initialize(@kdf : HpkeKdf, @suite_id : Array(UInt8))
+  end
+
+  def self.kem(kem : HpkeKem) : HpkeLabels
+    HpkeLabels.new(kem.kdf, HpkeBytes.array("KEM") + HpkeBytes.two(kem.value))
+  end
+
+  def self.suite(suite : HpkeSuite) : HpkeLabels
+    id = HpkeBytes.array("HPKE") + HpkeBytes.two(suite.kem.value) + HpkeBytes.two(suite.kdf.value) + HpkeBytes.two(suite.aead.value)
+    HpkeLabels.new(suite.kdf, id)
+  end
+
+  # Extract(salt, "HPKE-v1" || suite_id || label || ikm).
+  def extract(salt : Array(UInt8), label : String, ikm : Array(UInt8)) : Array(UInt8)
+    @kdf.mac(salt).update(VERSION).update(@suite_id).update(label).update(ikm).final
+  end
+
+  # Expand(prk, I2OSP(L, 2) || "HPKE-v1" || suite_id || label || info, L).
+  def expand(prk : Array(UInt8), label : String, info : Array(UInt8), length : Int32) : Array(UInt8)
+    labeled = HpkeBytes.two(length) + HpkeBytes.array(VERSION) + @suite_id + HpkeBytes.array(label) + info
+    @kdf.expand(prk, labeled, length)
+  end
+end
+
+struct HpkeKeys
+  # Section 5.1's VerifyPSKInputs, and the mode the inputs make.
+  def self.mode(psk : String | Array(UInt8) | Nil, psk_id : String | Array(UInt8) | Nil, auth : Bool) : HpkeMode
+    raise "HPKE: a psk needs its psk_id, and a psk_id its psk (section 5.1)" if psk.nil? != psk_id.nil?
+    if psk && psk_id
+      size = HpkeBytes.array(psk).size
+      raise "HPKE: a psk is at least 32 bytes (section 5.1.2), not #{size}" if size < 32
+      raise "HPKE: a psk_id is not empty: the empty one means no psk (section 5.1)" if HpkeBytes.array(psk_id).empty?
+      return auth ? HpkeMode::AuthPsk : HpkeMode::Psk
+    end
+    auth ? HpkeMode::Auth : HpkeMode::Base
+  end
+
+  def self.same_kem(kem : HpkeKem, other : HpkeKem, what : String) : Nil
+    raise "HPKE: #{what} is a #{other.name} key, not #{kem.name}" unless kem == other
+  end
+end
+
+struct HpkeBytes
+  # The bytes of *data*: a String's copied out, an Array as it is.
+  def self.array(data : String | Array(UInt8)) : Array(UInt8)
+    return data unless data.is_a?(String)
+    p = data.to_unsafe
+    Array(UInt8).new(data.bytesize) { |i| p[i] }
+  end
+
+  # The bytes of *data*, always a copy: what a key keeps.
+  def self.copy(data : String | Array(UInt8)) : Array(UInt8)
+    data.is_a?(String) ? array(data) : data.dup
+  end
+
+  # I2OSP(n, 2).
+  def self.two(n : Int32) : Array(UInt8)
+    [(n.unsafe_shr(8) & 0xff).to_u8, (n & 0xff).to_u8]
+  end
+end

@@ -115,8 +115,13 @@ struct ::Symbol
     io << quote_for_named_argument(string)
   end
 
-  # Body of a double-quoted inspect/named-arg form: quotes, backslashes
-  # and the ASCII controls that would break the literal are escaped.
+  # Body of a double-quoted inspect/named-arg form, escaped the way the
+  # other library's `String#inspect` escapes it: quotes and backslashes,
+  # `#{` (which would interpolate), the named controls (`\a \b \e \f \n
+  # \r \t \v`) and every other ASCII control or DEL as `\u00XX`. Only
+  # `"`, `\`, `\n`, `\r`, `\t` and NUL were escaped, so `:"a\eb".inspect`
+  # carried a raw escape byte and NUL read `\0` where the other says
+  # `\u0000`.
   def self.escape_quoted_body(string : String) : String
     out = ""
     start = 0
@@ -124,25 +129,35 @@ struct ::Symbol
     while index < string.bytesize
       byte = string.to_unsafe[index]
       repl = ""
-      found = false
+      found = true
       if byte == 34_u8
         repl = "\\\""
-        found = true
       elsif byte == 92_u8
         repl = "\\\\"
-        found = true
+      elsif byte == 35_u8 && index + 1 < string.bytesize && string.to_unsafe[index + 1] == 123_u8
+        repl = "\\#"
+      elsif byte == 7_u8
+        repl = "\\a"
+      elsif byte == 8_u8
+        repl = "\\b"
+      elsif byte == 27_u8
+        repl = "\\e"
+      elsif byte == 12_u8
+        repl = "\\f"
       elsif byte == 10_u8
         repl = "\\n"
-        found = true
       elsif byte == 13_u8
         repl = "\\r"
-        found = true
       elsif byte == 9_u8
         repl = "\\t"
-        found = true
-      elsif byte == 0_u8
-        repl = "\\0"
-        found = true
+      elsif byte == 11_u8
+        repl = "\\v"
+      elsif byte < 32_u8 || byte == 127_u8
+        hex = "0123456789ABCDEF"
+        code = byte.to_i32
+        repl = "\\u00" + hex[code // 16, 1] + hex[code % 16, 1]
+      else
+        found = false
       end
       if found
         if index > start

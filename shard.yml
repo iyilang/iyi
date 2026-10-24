@@ -1,5 +1,5 @@
 name: iyi
-version: 0.13.0
+version: 0.19.1
 
 authors:
   - Serdar Dogruyol
@@ -16,6 +16,6 @@ crystal: ">= 1.13.0"
 
 license: Apache-2.0 WITH Swift-exception
 
-repository: https://github.com/jwaldrip/iyi
-homepage: https://github.com/jwaldrip/iyi
-documentation: https://github.com/jwaldrip/iyi/blob/master/SPEC.md
+repository: https://github.com/iyilang/iyi
+homepage: https://github.com/iyilang/iyi
+documentation: https://github.com/iyilang/iyi/blob/master/SPEC.md

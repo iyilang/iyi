@@ -13,7 +13,16 @@
 # compromise; it is the only ordering that is always right. The round
 # cap exists so two suggestions that undo each other cannot ping-pong
 # forever.
+#
+# One rewrite runs ahead of that loop, and it is the language's own
+# rather than an error's: `using`, the keyword one `import` replaced, is
+# written as that `import` - folded into a bare `import` of the same
+# module when there is one (`Iyi::UsingRewrite`). A file written before
+# the change stops parsing at its first `using`, so no compile could hand
+# the edits over one at a time; the rewrite reads the file with the old
+# keyword admitted and makes every one at once.
 require "../lsp/analysis"
+require "../tools/using_rewrite"
 
 class Iyi::Command
   private def fix
@@ -24,20 +33,28 @@ class Iyi::Command
     # about a flag, and a second path was dropped without a word: `fix
     # ok.iyi extra.iyi` fixed the first and exited 0.
     json_mode = false
-    file = nil
+    paths = [] of String
     while option = options.shift?
       case option
       when "--json"
         json_mode = true
       when "--help", "-h"
         puts <<-USAGE
-          Usage: #{Command.program_name} fix [--json] <file>
+          Usage: #{Command.program_name} fix [--json] <file or directory>...
 
           Apply the compiler's did-you-mean edits to <file>, recompiling
           after each one, until the file is clean or carries an error the
-          compiler has no edit for. Exit 0 when the file ends clean. When
+          compiler has no edit for. Every `using` is first written as the
+          `import` that replaced it: `using X` is `import X::*`, `using
+          X::{a}` is `import X::{a}`, folded into a bare `import X`. Exit 0 when the file ends clean. When
           the remaining error lives in another file of the program, the
           verb names it (`cause` in `--json`): that is the file to fix next.
+
+          Several files, or a directory - every .iyi under it, hidden
+          directories and lib/ aside - are one run: every `using` in all
+          of them is rewritten first, since one file's compile reads the
+          others, and then each is fixed in turn; `--json` prints one
+          object per file, a line each. Exit 0 when every file ends clean.
 
           To see the edits without applying them, use
           `#{Command.program_name} check -f json`: the same edits travel
@@ -47,30 +64,80 @@ class Iyi::Command
       when .starts_with?('-')
         abort! "fix: unknown flag #{option}", :USAGE_ERROR
       else
-        if file
-          abort! "unexpected '#{option}' after the file", :USAGE_ERROR
-        end
-        file = option
+        paths << option
       end
     end
 
     # `.presence`: `fix ""` is `"$FILE"` with `FILE` unset, and it answered
     # `no such file: ` - a sentence with a hole where the name goes.
-    file = file.presence
-    unless file
-      abort! "fix: which file? Usage: #{Command.program_name} fix [--json] <file>", :USAGE_ERROR
+    paths.reject!(&.empty?)
+    if paths.empty?
+      abort! "fix: which file? Usage: #{Command.program_name} fix [--json] <file or directory>...", :USAGE_ERROR
     end
-    unless File.file?(file)
-      # A directory is there, so "does not exist" was never true of it —
-      # and this verb was the one saying `fix: file 'X' does not exist`
-      # where every other says `no such file`, for the same mistake.
-      abort! "#{file} is a directory, not a source file", :USAGE_ERROR if Dir.exists?(file)
-      abort! "no such file: #{file}", :USAGE_ERROR
+    files = [] of String
+    paths.each do |given|
+      if File.file?(given)
+        files << given
+      elsif Dir.exists?(given)
+        # A directory is the migration's shape: `iyi fix .` over a project
+        # written before `import X::{...}` replaced `using`.
+        found = fix_sources(given)
+        abort! "#{given} is a directory with no .iyi file under it", :USAGE_ERROR if found.empty?
+        files.concat(found)
+      else
+        abort! "no such file: #{given}", :USAGE_ERROR
+      end
     end
-    path = File.expand_path(file)
+    files.uniq!
+
+    # Every `using` first, in every file: one file's compile reads the
+    # modules it imports, and `fix a.iyi` stopped at the `using` in the
+    # module `a` imported - a file this run did not name.
+    rewrites = {} of String => Array({Int32, Int32, String, String})
+    files.each do |file|
+      path = File.expand_path(file)
+      source = File.read(path)
+      next unless source.valid_encoding?
+      next unless rewritten = UsingRewrite.rewrite(source, path)
+      File.write(path, rewritten[0])
+      rewrites[file] = rewritten[1].map { |edit| {edit.line, edit.column, edit.from, edit.to} }
+    end
 
     analysis = Lsp::Analysis.new
-    applied = [] of {Int32, Int32, String, String}
+    single = files.size == 1
+    clean = files.map { |file| fix_file(file, json_mode, analysis, rewrites[file]? || [] of {Int32, Int32, String, String}, single) }
+    unless json_mode || single
+      broken = clean.count(false)
+      puts "#{files.size} files: #{rewrites.size} rewritten, #{broken == 0 ? "every one clean" : "#{broken} still reporting an error"}"
+    end
+    exit clean.all? ? 0 : 1
+  end
+
+  # The `.iyi` files under *dir*, hidden directories and `lib/` aside.
+  private def fix_sources(dir : String) : Array(String)
+    found = [] of String
+    Dir.each_child(dir) do |entry|
+      full = File.join(dir, entry)
+      # Asked of the entry and not of what it names: `File.directory?`
+      # follows a link, so a junction back to the project was walked
+      # through, and `fix proj` died on `proj\loop\loop\...` 38 levels down,
+      # "The system cannot find the path specified". A link is not walked,
+      # as `test` and `fmt --check` do not walk one.
+      if File.info?(full, follow_symlinks: false).try(&.directory?)
+        next if entry.starts_with?('.') || entry == "lib"
+        found.concat(fix_sources(full))
+      elsif entry.ends_with?(".iyi")
+        found << full
+      end
+    end
+    found.sort!
+  end
+
+  # One file's did-you-mean loop and its report; whether it ended clean.
+  # *applied* starts with the `using` rewrite's edits. *single* is a run of
+  # this one file, where a file with nothing to do says so.
+  private def fix_file(file : String, json_mode : Bool, analysis : Lsp::Analysis, applied : Array({Int32, Int32, String, String}), single : Bool) : Bool
+    path = File.expand_path(file)
     remaining = nil
     capped = false
 
@@ -105,13 +172,18 @@ class Iyi::Command
       # Definition-site typing is the compiler's own rule now, so this
       # plain compile already reaches uncalled bodies — fix and check
       # cannot disagree about what clean means.
-      _, diags = analysis.check(path, text, {} of String => String)
-      if diags.empty?
+      result, diags = analysis.check(path, text, {} of String => String)
+      diag = diags.first?
+      # A file that compiles can still carry an edit the compiler made a
+      # warning rather than an error - a name that compiles in this build
+      # alone (`Program#iyi_moved_package_path`). Only one written in this
+      # file: a warning inside a macro's expansion edits no file here.
+      diag ||= result.try { |compiled| fix_warning_edit(compiled.program, path) }
+      unless diag
         remaining = nil
         break
       end
 
-      diag = diags.first
       # Asked with a diagnostic in hand, so a capped run names what is left
       # rather than reporting nothing at all.
       if applied.size >= edit_cap
@@ -132,8 +204,13 @@ class Iyi::Command
         remaining = diag
         break
       end
+      # The column is the lexer's, and the lexer drops a byte order mark
+      # before it counts: on line 1 of a marked file every edit landed one
+      # character to the left, and `-5.abss` became `-5abss`, which does not
+      # parse. The mark is a character of `line_text`, so it is stepped over.
       chars = line_text.chars
-      from = chars[diag.column - 1, diag.size].join
+      at = diag.column - 1 + (diag.line == 1 && line_text.starts_with?('\uFEFF') ? 1 : 0)
+      from = chars[at, diag.size].join
       if from == replacement
         # The suggestion equals what is already written: applying it
         # would change nothing and loop forever. Report and stop.
@@ -141,8 +218,9 @@ class Iyi::Command
         break
       end
 
-      lines[diag.line - 1] = chars[0, diag.column - 1].join + replacement +
-                             ((chars[diag.column - 1 + diag.size..]? || [] of Char).join)
+      # Spliced at the same `at`, past the mark the lexer drops.
+      lines[diag.line - 1] = chars[0, at].join + replacement +
+                             ((chars[at + diag.size..]? || [] of Char).join)
       File.write(path, lines.join('\n'))
       applied << {diag.line, diag.column, from, replacement}
     end
@@ -200,8 +278,11 @@ class Iyi::Command
       end
       STDOUT.puts
     else
+      # In backticks, as the messages write code: in single quotes the Char
+      # an edit writes was quoted again, `'" "' -> '' ''`, which reads as
+      # two empty strings.
       applied.each do |(line, column, from, to)|
-        puts "fixed #{file}:#{line}:#{column}: '#{from}' -> '#{to}'"
+        puts "fixed #{file}:#{line}:#{column}: `#{from}` -> `#{to}`"
       end
       if remaining
         STDERR.puts "#{file}:#{remaining.line}:#{remaining.column}: #{remaining.message}"
@@ -213,11 +294,24 @@ class Iyi::Command
           STDERR.puts "#{applied.size} edits is this run's cap and the file still " \
                       "reports an error: run `#{Command.program_name} fix #{file}` again"
         end
-      elsif applied.empty?
+      elsif applied.empty? && single
         puts "#{file}: already clean"
       end
     end
 
-    exit remaining ? 1 : 0
+    remaining.nil?
+  end
+
+  # The first warning *program* carries with an edit in *path*, as the
+  # diagnostic the loop applies.
+  private def fix_warning_edit(program : Program, path : String) : Lsp::Diag?
+    program.warnings.reports.each do |report|
+      next unless report.is_a?(TypeException) && (replacement = report.suggestion) && report.size > 0
+      file, line, column, expansion = report.true_location(report.line_number, report.column_number)
+      next unless line && expansion.nil? && Iyi.same_file?(file, path)
+      return Lsp::Diag.new(line, column, report.size, report.message.to_s, nil,
+        [] of {String, Int32, Int32, String}, replacement)
+    end
+    nil
   end
 end

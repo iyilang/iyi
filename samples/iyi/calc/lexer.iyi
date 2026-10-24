@@ -32,7 +32,10 @@ pub def scan(source : String) : Array(Token) | BadCharacter
   while index < source.size
     c = source[index]
 
-    if c == ' ' || c == '\n' || c == '\t'
+    # A line ends in CRLF on Windows: `echo 2 + 3 * 4| iyi run
+    # samples\iyi\calc.iyi` in cmd answered "unexpected character at 9",
+    # the `\r`.
+    if c == ' ' || c == '\n' || c == '\t' || c == '\r'
       index = index + 1
     elsif digit?(c)
       start = index

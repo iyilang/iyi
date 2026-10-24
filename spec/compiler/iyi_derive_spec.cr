@@ -49,8 +49,7 @@ describe "Semantic: iyi derive" do
       File.write "app/point.iyi", <<-IYI
         module app/point
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Point
           @x : Int32
@@ -132,8 +131,7 @@ describe "Semantic: iyi derive" do
       File.write "app/order.iyi", <<-IYI
         module app/order
 
-        import app/kinds
-        using app/kinds
+        import app/kinds::*
 
         pub struct Order
           @customer : Customer
@@ -196,8 +194,7 @@ describe "Semantic: iyi derive" do
       File.write "app/boxed.iyi", <<-IYI
         module app/boxed
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Boxed
           getter n : Int32
@@ -250,8 +247,7 @@ describe "Semantic: iyi derive" do
       "main.iyi" => <<-IYI,
         module app/main
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Boxed
           derive shapes
@@ -286,8 +282,7 @@ describe "Semantic: iyi derive" do
       "main.iyi" => <<-IYI,
         module app/main
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Boxed
           @n : Int32
@@ -300,6 +295,117 @@ describe "Semantic: iyi derive" do
         IYI
     }) do
       expect_raises(Iyi::TypeException, /`all_subclasses` is not available to a derive/) do
+        semantic_iyi("main.iyi")
+      end
+    end
+  end
+
+  # The derive's expansion is not all of its code: a macro escaped into a
+  # method it generates expands when that method is typed, after the derive
+  # has returned. It answered `A,B` beside a `B` declared below the derived
+  # type, the program-wide answer the rule above refuses.
+  it "refuses the program-wide type questions in a method a derive generated" do
+    with_iyi_modules({
+      "app/derives.iyi" => <<-IYI,
+        module app/derives
+
+        pub macro kinds(declaration)
+          def kinds : Int32
+            \\{{ Base.all_subclasses.size }}
+          end
+        end
+        IYI
+      "main.iyi" => <<-IYI,
+        module app/main
+
+        import app/derives::*
+
+        class Base
+        end
+
+        pub struct Holder
+          def initialize
+          end
+
+          derive kinds
+        end
+
+        Holder.new.kinds
+        IYI
+    }) do
+      expect_raises(Iyi::TypeException, /`all_subclasses` is not available to a derive/) do
+        semantic_iyi("main.iyi")
+      end
+    end
+  end
+
+  # A hook a derive writes runs after the derive has returned, against the
+  # rest of the program. A `macro finished` holding an escaped
+  # `{{ Base.all_subclasses }}` answered `A,B` beside a `B` declared below
+  # the derived type, past both refusals above.
+  it "refuses a hook inside a derive" do
+    {"finished", "inherited"}.each do |hook|
+      with_iyi_modules({
+        "app/derives.iyi" => <<-IYI,
+          module app/derives
+
+          pub macro late(declaration)
+            macro #{hook}
+              def late : Int32
+                1
+              end
+            end
+          end
+          IYI
+        "main.iyi" => <<-IYI,
+          module app/main
+
+          import app/derives::*
+
+          pub class Holder
+            def initialize
+            end
+
+            derive late
+          end
+          IYI
+      }) do
+        expect_raises(Iyi::TypeException, /`macro #{hook}` is not available to a derive/) do
+          semantic_iyi("main.iyi")
+        end
+      end
+    end
+  end
+
+  # `run` compiles and runs another program, whose output is no fact of the
+  # declaration; inside a derive it ran, and the method answered its output.
+  it "refuses `run` inside a derive" do
+    with_iyi_modules({
+      "app/derives.iyi" => <<-IYI,
+        module app/derives
+
+        pub macro generated(declaration)
+          def generated : String
+            {{ run("./gen.cr").stringify }}
+          end
+        end
+        IYI
+      "main.iyi" => <<-IYI,
+        module app/main
+
+        import app/derives::*
+
+        pub struct Holder
+          def initialize
+          end
+
+          derive generated
+        end
+
+        Holder.new.generated
+        IYI
+    }) do
+      expect_raises(Iyi::TypeException, /`run` is not available to a derive: it runs another program/) do
         semantic_iyi("main.iyi")
       end
     end
@@ -348,8 +454,7 @@ describe "Semantic: iyi derive" do
       File.write "app/pair.iyi", <<-IYI
         module app/pair
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Pair
           @a : Int32
@@ -403,8 +508,7 @@ describe "Semantic: iyi derive" do
       "main.iyi" => <<-IYI,
         module app/main
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Boxed
           derive named, absent
@@ -412,6 +516,122 @@ describe "Semantic: iyi derive" do
         IYI
     }) do
       expect_raises(Iyi::TypeException, /`absent` is not an available derive macro/) do
+        semantic_iyi("main.iyi")
+      end
+    end
+  end
+
+  # A derive that implements a trait writes the `impl` in the body of the
+  # type it is attached to. The macro body ended at that impl's `end`, and a
+  # headerless program's type was held to be in no module at all.
+  it "implements a trait for the type it is attached to" do
+    shared = {
+      "lib/shown.iyi" => <<-IYI,
+        module lib/shown
+
+        pub trait Shown
+          abstract def shown : String
+        end
+
+        pub macro showable(declaration)
+          impl ::Lib::Shown::Shown for {{declaration[:name].id}}
+            def shown : String
+              {{declaration[:name]}}
+            end
+          end
+
+          def after_the_impl : Int32
+            1
+          end
+        end
+        IYI
+    }
+    headed = shared.merge({"main.iyi" => <<-IYI})
+      module main
+
+      import lib/shown::{Shown, showable}
+
+      struct Point
+        derive showable
+      end
+
+      def show(s : Shown) : String
+        s.shown
+      end
+
+      show(Point.new)
+      Point.new.after_the_impl
+      IYI
+    with_iyi_modules(headed) do
+      semantic_iyi("main.iyi")
+    end
+
+    headerless = shared.merge({"main.iyi" => <<-IYI})
+      import lib/shown::{Shown, showable}
+
+      struct Point
+        derive showable
+      end
+
+      def show(s : Shown) : String
+        s.shown
+      end
+
+      show(Point.new)
+      IYI
+    with_iyi_modules(headerless) do
+      semantic_iyi("main.iyi")
+    end
+
+    # And from the macro's artifact, whose declarations are iyi although
+    # `.iyimod` is no extension the lexer reads a language from.
+    with_iyi_modules(headed) do
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.no_codegen = true
+      producer.compile source, File.expand_path("unused")
+
+      File.delete "lib/shown.iyi"
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.no_codegen = true
+      consumer.compile source, File.expand_path("unused")
+    end
+  end
+
+  it "still refuses an impl written in another module's type from a script" do
+    files = {
+      "lib/shown.iyi" => <<-IYI,
+        module lib/shown
+
+        pub trait Shown
+          abstract def shown : String
+        end
+        IYI
+      "lib/point.iyi" => <<-IYI,
+        module lib/point
+
+        pub struct Point
+        end
+        IYI
+      "main.iyi" => <<-IYI,
+        import lib/shown::{Shown}
+        import lib/point::{Point}
+
+        struct ::Lib::Point::Point
+          impl ::Lib::Shown::Shown for ::Lib::Point::Point
+            def shown : String
+              "p"
+            end
+          end
+        end
+        IYI
+    }
+    with_iyi_modules(files) do
+      expect_raises(Iyi::TypeException, "R-3") do
         semantic_iyi("main.iyi")
       end
     end

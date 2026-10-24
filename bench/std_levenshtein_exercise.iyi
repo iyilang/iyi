@@ -140,4 +140,13 @@ found = Levenshtein.find("cuont", ["count", "cont", "mount"])
 assert_str "count", found || "", "finder prefers the transposed name over a deletion"
 puts "  finder treats an adjacent transposition as one edit"
 
+puts "\n== bytes that are not UTF-8"
+# `size` and `chars` count such bytes differently; the distance counts what
+# it compares.
+lone = String.new(1) { |b| b[0] = 0x80_u8 }
+assert_int 1, Levenshtein.distance(lone, ""), "a lone continuation byte is one character away from nothing"
+broken = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 } + "é"
+assert_int Levenshtein.osa_distance(broken, "éx"), Levenshtein.distance(broken, "éx"), "a lead byte with no continuation is read as osa_distance reads it"
+puts "  a string that is not UTF-8 has a distance, not a panic"
+
 puts "\nALL CHECKS PASSED"

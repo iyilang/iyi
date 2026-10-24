@@ -136,10 +136,18 @@ module Iyi
     end
   end
 
+  # iyi: `impl Show for Gen(T) forall T` registers the generic `Gen(T)` itself
+  # as an includer of `Show`, and walking the raw list handed that unbound
+  # type to the union's layout: a `Show?` field, `[nil, 1] of Show?` or
+  # `Box(Show?)` ended in "BUG: called create_llvm_type for T". The trait's
+  # members are what `add_to_including_types` gathers for every other use —
+  # each instantiation of a generic includer, and none when it has none.
   class NonGenericModuleType
     def append_to_expand_union_types(types)
-      if including_types = @including_types
-        including_types.each &.virtual_type.append_to_expand_union_types(types)
+      if @including_types
+        members = [] of Type
+        add_to_including_types(members)
+        members.each &.append_to_expand_union_types(types)
       else
         types << self
       end
@@ -148,8 +156,10 @@ module Iyi
 
   class GenericModuleInstanceType
     def append_to_expand_union_types(types)
-      if including_types = @including_types
-        including_types.each &.virtual_type.append_to_expand_union_types(types)
+      if @including_types
+        members = [] of Type
+        add_to_including_types(members)
+        members.each &.append_to_expand_union_types(types)
       else
         types << self
       end

@@ -20,22 +20,99 @@ document highlight, folding, workspace symbols, prepareRename,
 semantic tokens, inlay hints, type definition, and formatting.
 """
 
+import collections
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 IYI = os.environ.get("IYI", "./bin/iyi")
 
+# Every server this gate started, and the last step that finished: what the
+# watchdog kills and names when a session stops answering.
+LIVE = []
+LAST = {"step": 0, "at": time.monotonic()}
+
+
+def watchdog(seconds):
+    """A server that stops answering hangs `read_message` forever, and the
+    runner only kills the job at its own limit, with what the gate printed
+    still in a pipe's buffer — a Windows run sat at "the language server
+    holds its session" for most of an hour and said nothing. Past *seconds*
+    with no step finished, this names the last one that did, kills every
+    server, and exits 1. The whole session is under a minute everywhere."""
+    if LAST.get("watching"):
+        return
+    LAST["watching"], LAST["at"] = True, time.monotonic()
+
+    def watch():
+        while True:
+            time.sleep(5)
+            if time.monotonic() - LAST["at"] > seconds:
+                if "label" in LAST:
+                    print(f"the step after step {LAST['label']} never finished: no answer "
+                          f"in {seconds} s", flush=True)
+                else:
+                    print(f"step {LAST['step'] + 1} never finished: no answer in "
+                          f"{seconds} s after step {LAST['step']}", flush=True)
+                # What was asked and who was left to answer it: a hang on a
+                # Windows runner said nothing more than the line above.
+                print(f"  the last request sent: {LAST.get('sent', '(none)')}", flush=True)
+                for proc in LIVE:
+                    if proc.poll() is None:
+                        try:
+                            kids = children(proc.pid)
+                        except Exception as error:  # noqa: BLE001 - a report, not a check
+                            kids = f"unlisted ({error})"
+                        print(f"  server {proc.pid} running, its children {kids}", flush=True)
+                        # Where each one is waiting: darwin's `sample` reads
+                        # every thread's stack for a second, symbols and all.
+                        if sys.platform == "darwin" and isinstance(kids, list):
+                            for pid in [proc.pid, *kids]:
+                                sampled = subprocess.run(["sample", str(pid), "1", "-mayDie"],
+                                                         capture_output=True, text=True, timeout=30)
+                                stack = [line for line in sampled.stdout.splitlines()
+                                         if "+" in line and ("iyi" in line or "Lsp" in line or "Fiber" in line)]
+                                print(f"  {pid}'s busiest frames:", flush=True)
+                                for line in stack[:40]:
+                                    print(f"    {line.strip()[:160]}", flush=True)
+                for proc in LIVE:
+                    proc.kill()
+                os._exit(1)
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def uri_path(uri):
+    """The filesystem path a `file://` URI names, spelled and cased the
+    way this platform compares paths — the inverse of `file_uri`, for a
+    check that asks whether a target lies under a directory."""
+    from urllib.parse import unquote, urlparse
+    path = unquote(urlparse(uri).path)
+    if os.name == "nt" and len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return os.path.normcase(os.path.normpath(path))
+
+
+def file_uri(path):
+    """The URI an editor would send for *path*: `file:///tmp/x` on POSIX
+    and `file:///C:/Users/x` on Windows. `"file://" + path` was the
+    former by luck and `file://C:\\Users\\x` on Windows, a string no
+    editor sends and the server could not read back."""
+    return pathlib.Path(os.path.abspath(path)).as_uri()
+
 
 def rss_mb(pid):
     """Resident megabytes of one process, or 0 where the kernel does not
-    say. `/proc` is Linux's; on darwin and Windows this answers 0 and
-    whoever asked reports its bound unmeasured rather than
-    unasserted-and-claimed."""
+    say. `/proc` is Linux's, and Windows says it through the process's
+    working set; on darwin this answers 0 and whoever asked reports its
+    bound unmeasured rather than unasserted-and-claimed."""
+    if os.name == "nt":
+        return nt_working_set_mb(pid)
     try:
         with open(f"/proc/{pid}/status") as status:
             for line in status:
@@ -46,10 +123,123 @@ def rss_mb(pid):
     return 0
 
 
+def nt_working_set_mb(pid):
+    """The working set - the pages resident for the process, Windows'
+    VmRSS - through kernel32's `K32GetProcessMemoryInfo`. 0 for a process
+    that is gone or cannot be opened."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    # PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ
+    handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)
+    if not handle:
+        return 0
+    try:
+        counters = Counters()
+        counters.cb = ctypes.sizeof(Counters)
+        if not kernel32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return 0
+        return counters.WorkingSetSize // (1024 * 1024)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def children(pid):
+    """The pids *pid* started and that are still running. `ps --ppid` is
+    procps'; Windows has no `ps`, and the process snapshot kernel32 keeps
+    names every process's parent, which is the same question."""
+    if os.name == "nt":
+        return nt_children(pid)
+    if sys.platform == "darwin":
+        # BSD ps has no --ppid, and asked for it answered nothing at all:
+        # every darwin dump said "its children []", and a kill found none.
+        listed = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True)
+        pairs = [line.split() for line in listed.stdout.splitlines()]
+        return [int(p[0]) for p in pairs if len(p) == 2 and p[1] == str(pid)]
     listed = subprocess.run(["ps", "-o", "pid=", "--ppid", str(pid)],
                             capture_output=True, text=True)
     return [int(line) for line in listed.stdout.split() if line.isdigit()]
+
+
+def nt_children(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot")
+    found = []
+    try:
+        entry = Entry()
+        entry.dwSize = ctypes.sizeof(Entry)
+        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.th32ParentProcessID == pid:
+                found.append(entry.th32ProcessID)
+            more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return found
+
+
+def process_binary(pid):
+    """The file *pid* was started from. Linux's `/proc/<pid>/exe`; on
+    Windows the image name the kernel keeps for the process, which is the
+    same path, and a running `.exe` may be renamed there, not deleted."""
+    if os.name != "nt":
+        return os.readlink(f"/proc/{pid}/exe")
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "OpenProcess")
+    try:
+        size = wintypes.DWORD(32768)
+        path = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+            raise OSError(ctypes.get_last_error(), "QueryFullProcessImageNameW")
+        return path.value
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def tree_mb(pid):
@@ -67,9 +257,69 @@ class Client:
         that compiles. `("lsp", "--worker")` is that child alone, which
         is the single-process shape `lsp_memory.py --direct` measures to
         show what the split is worth."""
+        self.argv = argv
+        # The server's stderr is read here, echoed as it comes and its last
+        # lines kept, so that a server that closes its stdout is reported
+        # with what it said last (`closed`). Inherited, it went straight to
+        # the runner's log, where nothing tied it to the failure: Windows CI
+        # job 120203398014 ended on "server closed the pipe" alone.
         self.proc = subprocess.Popen(
-            [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+        self.started = time.monotonic()
+        self.stderr_tail = collections.deque(maxlen=40)
+        self.stderr_reader = threading.Thread(target=self.keep_stderr, daemon=True)
+        self.stderr_reader.start()
+        LIVE.append(self.proc)
         self.next_id = 0
+
+    def keep_stderr(self):
+        for line in iter(self.proc.stderr.readline, b""):
+            text = line.decode("utf-8", "replace").rstrip("\r\n")
+            self.stderr_tail.append(text)
+            print(text, file=sys.stderr, flush=True)
+
+    def closed(self):
+        """Why the server's stdout ended, as far as the gate can see: which
+        server, its exit status, how long it had run, the last request
+        sent, and the end of its stderr.
+
+        Windows CI job 120203398014 printed "server closed the pipe" and
+        nothing more, 60 ms after step 73k. The server that closed it was
+        not 73k's, which the gate was done with before it printed 73k, but
+        the fresh `iyi lsp` the next step had just started: in five passing
+        Windows runs that step (72a) printed 40 to 43 ms after 73k. Its
+        stderr, inherited, put nothing in the log, and its exit status,
+        which says whether the proxy ended its own session (0 or 1) or the
+        process was ended under it (a signal, or an NTSTATUS on Windows),
+        was never read."""
+        ended = time.monotonic() - self.started
+        try:
+            code = self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            code = None
+        # A worker or a process it started holds the same stderr and can
+        # outlive the server, so the tail is waited for briefly, not to
+        # its end.
+        self.stderr_reader.join(2)
+        if code is None:
+            status = "is still running 5 s later"
+        elif code < 0:
+            status = f"was killed by signal {-code}"
+        elif code > 0xFFFF:
+            status = f"exited 0x{code:08X}"
+        else:
+            status = f"exited {code}"
+        report = [f"server closed the pipe: `iyi {' '.join(self.argv)}` (pid {self.proc.pid}) {status}, "
+                  f"its stdout ended {ended:.2f} s after it started; the last request sent: "
+                  f"{LAST.get('sent', '(none)')}"]
+        tail = list(self.stderr_tail)
+        if tail:
+            report.append(f"  the last {len(tail)} line(s) of its stderr:")
+            report.extend(f"    {line}" for line in tail)
+        else:
+            report.append("  its stderr: nothing")
+        return "\n".join(report)
 
     def send(self, method, params, wait=True):
         self.next_id += 1
@@ -77,6 +327,7 @@ class Client:
         if wait:
             message["id"] = self.next_id
         body = json.dumps(message).encode()
+        LAST["sent"] = f"{method} #{self.next_id}" if wait else method
         self.proc.stdin.write(
             b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
         self.proc.stdin.flush()
@@ -100,11 +351,14 @@ class Client:
 
     def request_nowait(self, method, params):
         """A request whose answer is read later — how a cancel gets to
-        overtake it."""
+        overtake it. Named to the watchdog like any request: unnamed, a
+        darwin hang on step 74a's hover was reported as its `didChange`,
+        the frame before it."""
         self.next_id += 1
         message = {"jsonrpc": "2.0", "method": method, "params": params,
                    "id": self.next_id}
         body = json.dumps(message).encode()
+        LAST["sent"] = f"{method} #{self.next_id}"
         self.proc.stdin.write(
             b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
         self.proc.stdin.flush()
@@ -149,7 +403,7 @@ class Client:
         while True:
             line = self.proc.stdout.readline()
             if not line:
-                raise SystemExit("server closed the pipe")
+                raise SystemExit(self.closed())
             line = line.strip()
             if not line:
                 break
@@ -172,12 +426,962 @@ class Client:
 
 def step(n, name, ok, detail=""):
     mark = "ok" if ok else "FAIL"
-    print(f"step {n:2} {name}: {mark}  {detail}")
+    print(f"step {n:2} {name}: {mark}  {detail}", flush=True)
+    # Every step restarts the watchdog's clock and is the one it names,
+    # lettered ones too. Counted at numbered steps only, a hang right
+    # after 18m (a new session's first verdict) was reported as "step 19
+    # never finished ... after step 18", and read as foldingRange's.
+    LAST["label"], LAST["at"] = n, time.monotonic()
+    if isinstance(n, int):
+        LAST["step"] = n
     if not ok:
         sys.exit(1)
 
 
+def package_fixture(home):
+    """A package in a bare mirror, fetched into a cache, and a buffer that
+    imports it beside a sibling module.
+
+    Returns (path, text, cache) or None where git is not there to make one.
+    The cache is warmed here so the server resolves rather than fetches.
+    """
+    # The same binary the session runs, not `bin/iyi` by its path: that
+    # is a shell script, and Windows cannot start one.
+    iyi = os.path.abspath(IYI)
+    env = dict(os.environ)
+    lib = os.path.join(home, "work", "liba")
+    os.makedirs(lib, exist_ok=True)
+    steps = [["git", "init", "-q", lib],
+             ["git", "-C", lib, "config", "user.email", "t@t"],
+             ["git", "-C", lib, "config", "user.name", "t"]]
+    for command in steps:
+        if subprocess.run(command, capture_output=True).returncode != 0:
+            return None
+    with open(os.path.join(lib, "iyi.mod"), "w") as f:
+        f.write("module example.test/user/liba\n")
+    with open(os.path.join(lib, "liba.iyi"), "w") as f:
+        f.write('module liba\n\npub def greeting : String\n'
+                '  "hello from liba"\nend\n')
+    for command in [["git", "-C", lib, "add", "-A"],
+                    ["git", "-C", lib, "commit", "-qm", "one"],
+                    ["git", "-C", lib, "tag", "v1.0.0"]]:
+        if subprocess.run(command, capture_output=True).returncode != 0:
+            return None
+    mirror = os.path.join(home, "mirror", "example.test", "user")
+    os.makedirs(mirror, exist_ok=True)
+    if subprocess.run(["git", "clone", "-q", "--bare", lib,
+                       os.path.join(mirror, "liba")],
+                      capture_output=True).returncode != 0:
+        return None
+
+    app = os.path.join(home, "app")
+    os.makedirs(app, exist_ok=True)
+    with open(os.path.join(app, "iyi.mod"), "w") as f:
+        f.write("module example.test/user/app\n"
+                "require example.test/user/liba v1.0.0\n")
+    with open(os.path.join(app, "helper.iyi"), "w") as f:
+        f.write('module helper\n\npub def shout(s : String) : String\n'
+                '  s + "!"\nend\n')
+    text = ("import example.test/user/liba\n"
+            "import helper\n"
+            "import example.test/user/liba::{greeting}\n"
+            "import helper::{shout}\n"
+            "\n"
+            "puts shout(greeting)\n")
+    path = os.path.join(app, "main.iyi")
+    with open(path, "w") as f:
+        f.write(text)
+    warm = subprocess.run([iyi, "build", "main.iyi", "-o", "warm"],
+                          cwd=app, env=env, capture_output=True)
+    if warm.returncode != 0:
+        return None
+    return path, text, os.path.join(home, "cache")
+
+
+def opened(c, work, name, text):
+    """Write *name* under *work*, open it, and wait for its verdict."""
+    path = os.path.join(work, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    uri = file_uri(path)
+    c.send("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "iyi", "version": 1, "text": text}}, wait=False)
+    c.diagnostics(uri)
+    return uri
+
+
+def at(text, line, needle, nth=0):
+    """The UTF-16 character of the *nth* *needle* on *line* of *text*."""
+    row = text.split("\n")[line]
+    index = -1
+    for _ in range(nth + 1):
+        index = row.index(needle, index + 1)
+    return len(row[:index].encode("utf-16-le")) // 2
+
+
+def span_text(text, rng):
+    row = text.split("\n")[rng["start"]["line"]]
+    units = row.encode("utf-16-le")
+    return units[2 * rng["start"]["character"]:2 * rng["end"]["character"]].decode("utf-16-le")
+
+
+def applied(text, edits):
+    """*text* with LSP TextEdits (UTF-16 positions, one line each) applied."""
+    rows = text.split("\n")
+    for e in sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True):
+        line = e["range"]["start"]["line"]
+        units = rows[line].encode("utf-16-le")
+        start, end = 2 * e["range"]["start"]["character"], 2 * e["range"]["end"]["character"]
+        rows[line] = (units[:start].decode("utf-16-le") + e["newText"] + units[end:].decode("utf-16-le"))
+    return "\n".join(rows)
+
+
+def library_rename_step(c):
+    """73d. `puts` renamed from a buffer: the edit rewrote the compiler's
+    own `src/iyi/io.iyi`, after a walk of the workspace that took two
+    minutes over 145 files. Refused, before the walk."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-library")
+    sayer = opened(c, own, "sayer.iyi", "module sayer\n\nputs 1\n")
+    at_puts = {"textDocument": {"uri": sayer}, "position": {"line": 2, "character": 1}}
+    renamed = c.send("textDocument/rename", dict(at_puts, newName="say"))
+    prepared = c.send("textDocument/prepareRename", at_puts)
+    c.send("textDocument/didClose", {"textDocument": {"uri": sayer}}, wait=False)
+    shutil.rmtree(own, ignore_errors=True)
+    codes = [(r.get("error") or {}).get("code") for r in (renamed, prepared)]
+    message = (renamed.get("error") or {}).get("message", "")
+    step("73d", "a def in the compiler's library is refused a rename",
+         codes == [-32803, -32803] and "library" in message,
+         f"codes {codes}: {message[:70] or json.dumps(renamed.get('result'))[:70]}")
+
+
+def traits_disk_and_completion():
+    """A trait method renamed, a module changed on disk under an open
+    buffer, a module file moved, and the cursor questions that answered
+    null: each step failed before its fix."""
+    root = tempfile.mkdtemp(prefix="iyi-lsp-traits")
+    shapes = ("module app/shapes\n\n# Anything with an area.\npub trait Shape\n  abstract def area : Int32\nend\n\n"
+              "pub class Square\n  getter side : Int32\n\n  def initialize(@side : Int32)\n  end\nend\n\n"
+              "impl Shape for Square\n  def area : Int32\n    @side * @side\n  end\nend\n\n"
+              "pub class Box(T)\n  getter value : T\n\n  def initialize(@value : T)\n  end\nend\n\n"
+              "pub macro double(x)\n  {{x}} * 2\nend\n\n"
+              "pub def total(s : Shape) : Int32\n  s.area\nend\n")
+    main = ("import app/shapes::{Square, Box, total, double}\n\n"
+            "sq = Square.new(3)\nb = Box.new(\"hi\")\nputs sq.area + total(sq)\nputs b.value\nputs double(4)\n")
+    os.makedirs(os.path.join(root, "app"))
+    with open(os.path.join(root, "app", "shapes.iyi"), "w") as f:
+        f.write(shapes)
+    k = Client()
+    k.send("initialize", {"rootUri": file_uri(root), "capabilities": {
+        "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}}}})
+    k.send("initialized", {}, wait=False)
+    # 72a. A client that can be asked is asked to watch the files a
+    #      verdict reads, once, by the proxy. Read off what arrives before
+    #      the answer to a request sent after `initialized`, so a server
+    #      that never asks fails the step rather than hanging it.
+    arrived = []
+    probe = k.request_nowait("workspace/symbol", {"query": "Shape"})
+    k.wait_for(lambda m: arrived.append(m) is None and m.get("id") == probe)
+    asked = next((m for m in arrived if m.get("method") == "client/registerCapability"), None)
+    watchers = [w["globPattern"] for r in (asked or {}).get("params", {}).get("registrations", [])
+                for w in r["registerOptions"]["watchers"]]
+    if asked:
+        answer = json.dumps({"jsonrpc": "2.0", "id": asked["id"], "result": None}).encode()
+        k.raw(b"Content-Length: %d\r\n\r\n%s" % (len(answer), answer))
+    step("72a", "the server asks a client that can be asked to watch iyi files",
+         "**/*.iyi" in watchers, f"watchers {watchers}")
+
+    shapes_uri = opened(k, root, os.path.join("app", "shapes.iyi"), shapes)
+    main_uri = opened(k, root, "main.iyi", main)
+
+    # 72b. A rename of a method an impl gives a type renames the trait's
+    #      requirement too: it left `abstract def area`, and the program
+    #      said `impl Shape for Square is missing a method required by the
+    #      trait: area`.
+    reply = k.send("textDocument/rename", {"textDocument": {"uri": main_uri},
+                                           "position": {"line": 4, "character": at(main, 4, "area")},
+                                           "newName": "surface"})
+    changes = (reply.get("result") or {}).get("changes") or {}
+    moved = os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-renamed"))
+    os.makedirs(os.path.join(moved, "app"))
+    for rel, text, uri in ((os.path.join("app", "shapes.iyi"), shapes, shapes_uri), ("main.iyi", main, main_uri)):
+        with open(os.path.join(moved, rel), "w") as f:
+            f.write(applied(text, changes.get(uri, [])))
+    checked = subprocess.run([os.path.abspath(IYI), "check", "main.iyi"], cwd=moved, capture_output=True, text=True)
+    step("72b", "renaming an impl's method renames the trait's requirement, and the program compiles",
+         checked.returncode == 0 and "abstract def surface" in open(os.path.join(moved, "app", "shapes.iyi")).read(),
+         (checked.stdout + checked.stderr).strip()[:80] or "check passes")
+
+    # 72c. Implementation from the requirement is the impl's def, and its
+    #      references reach the calls: both answered the requirement alone.
+    reply = k.send("textDocument/implementation", {"textDocument": {"uri": shapes_uri},
+                                                   "position": {"line": 4, "character": at(shapes, 4, "area")}})
+    lines = [l["range"]["start"]["line"] for l in reply.get("result") or []]
+    reply = k.send("textDocument/references", {"textDocument": {"uri": shapes_uri},
+                                               "position": {"line": 4, "character": at(shapes, 4, "area")},
+                                               "context": {"includeDeclaration": False}})
+    callers = sorted((r["uri"].rsplit("/", 1)[-1], r["range"]["start"]["line"]) for r in reply.get("result") or [])
+    step("72c", "from `abstract def area`: implementation is the impl's def, references reach every call",
+         lines == [15] and ("main.iyi", 4) in callers and ("shapes.iyi", 32) in callers, f"impl {lines}, refs {callers}")
+
+    def labels(text, line, character):
+        k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 2},
+                                          "contentChanges": [{"text": text}]}, wait=False)
+        k.diagnostics(main_uri)
+        reply = k.send("textDocument/completion", {"textDocument": {"uri": main_uri},
+                                                   "position": {"line": line, "character": character}})
+        result = reply.get("result") or {}
+        return [i["label"] for i in (result.get("items", []) if isinstance(result, dict) else result)]
+
+    # 72d. Completion after an expression that is not a bare name: the
+    #      receiver was the run of name characters before the dot.
+    after_call = labels(main + "b.value.\n", 7, 8)
+    after_literal = labels(main + "\"x\".\n", 7, 4)
+    step("72d", "completion after `b.value.` and `\"x\".` lists String's methods",
+         "size" in after_call and "size" in after_literal, f"{after_call[:4]} / {after_literal[:4]}")
+
+    # 72e. After `App::Shapes::` the module's types, and in an import's
+    #      braces what it exports and the line has not selected yet; both
+    #      offered the scope's locals and the keywords.
+    members = labels(main + "x = App::Shapes::\n", 7, 17)
+    selectable = labels(main.replace("::{Square, Box, total, double}", "::{Square, }"), 0, 28)
+    step("72e", "`App::Shapes::` lists its types; `import app/shapes::{Square, |` its other exports",
+         {"Square", "Box", "Shape"} <= set(members) and "def" not in members and
+         {"Box", "total", "double"} <= set(selectable) and "Square" not in selectable and "def" not in selectable,
+         f"{sorted(members)[:5]} / {sorted(selectable)}")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 3},
+                                      "contentChanges": [{"text": main}]}, wait=False)
+    k.diagnostics(main_uri)
+
+    # 72f. A macro is a definition and an export like a def: definition on
+    #      `double(4)` and completion of `doub` with its import answered
+    #      null and nothing.
+    reply = k.send("textDocument/definition", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 6, "character": at(main, 6, "double")}})
+    found = [(d["uri"].rsplit("/", 1)[-1], d["range"]["start"]["line"]) for d in reply.get("result") or []]
+    unimported = main.replace("::{Square, Box, total, double}", "::{Square, Box, total}").replace("puts double(4)", "puts doub")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 4},
+                                      "contentChanges": [{"text": unimported}]}, wait=False)
+    k.diagnostics(main_uri)
+    reply = k.send("textDocument/completion", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 6, "character": 9}})
+    offered = [(i["label"], [e["newText"] for e in i.get("additionalTextEdits", [])])
+               for i in (reply.get("result") or {}).get("items", []) if i["label"] == "double"]
+    step("72f", "definition on a macro call is the macro; `doub` offers it with its import",
+         found == [("shapes.iyi", 27)] and offered == [("double", ["import app/shapes::{Square, Box, total, double}"])],
+         f"{found} / {offered}")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 5},
+                                      "contentChanges": [{"text": main}]}, wait=False)
+    k.diagnostics(main_uri)
+
+    # 72g. A type's name: hover on the trait in `impl Shape for Square`
+    #      answers its declaration, and references on `Square` say why there
+    #      is no list instead of null, which reads as "unused".
+    reply = k.send("textDocument/hover", {"textDocument": {"uri": shapes_uri},
+                                          "position": {"line": 14, "character": at(shapes, 14, "Shape")}})
+    hover = ((reply.get("result") or {}).get("contents") or {}).get("value", "")
+    reply = k.send("textDocument/references", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 2, "character": at(main, 2, "Square")},
+                                               "context": {"includeDeclaration": True}})
+    refused = reply.get("error") or {}
+    step("72g", "hover on a trait in an impl is its declaration; references on a type say it is a type",
+         "pub trait Shape" in hover and refused.get("code") == -32803 and "Square is a type" in refused.get("message", ""),
+         f"{hover[:30]!r} / {refused.get('message', '')[:40]}")
+
+    # 72h. A module an open buffer imports, changed on disk: the verdict is
+    #      compiled again. It was memoised on the buffers alone, so every
+    #      pull answered what the buffer last had.
+    os.makedirs(os.path.join(root, "geo"))
+    dog = os.path.join(root, "geo", "b.iyi")
+    original = "module geo/b\n\npub def name : String\n  \"dog\"\nend\n"
+    with open(dog, "w") as f:
+        f.write(original)
+    user = "import geo/b\n\nputs Geo::B.name\n"
+    user_uri = opened(k, root, "user.iyi", user)
+
+    def pulled():
+        reply = k.send("textDocument/diagnostic", {"textDocument": {"uri": user_uri}})
+        return [d["message"].split("\n")[0][:40] for d in (reply.get("result") or {}).get("items", [])]
+
+    with open(dog, "w") as f:
+        f.write(original.replace("def name", "def title"))
+    renamed = pulled()
+    os.remove(dog)
+    deleted = pulled()
+    with open(dog, "w") as f:
+        f.write(original)
+    restored = pulled()
+    step("72h", "a pull after an imported module is renamed, deleted and written back answers each",
+         any("undefined method 'name'" in m for m in renamed) and any("can't find module 'geo/b'" in m for m in deleted)
+         and restored == [], f"{renamed} / {deleted} / {restored}")
+
+    # 72i. And the push verdict, on `workspace/didChangeWatchedFiles`: the
+    #      open buffer that imports the changed module is published again.
+    with open(dog, "w") as f:
+        f.write(original.replace("def name", "def title"))
+    k.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": file_uri(dog), "type": 2}]}, wait=False)
+    # What is published before the answer to a request sent after it: the
+    # server works in order, so a server that publishes nothing fails the
+    # step rather than hanging it.
+    arrived = []
+    probe = k.request_nowait("workspace/symbol", {"query": "zz"})
+    k.wait_for(lambda m: arrived.append(m) is None and m.get("id") == probe)
+    pushed = [d for m in arrived if m.get("method") == "textDocument/publishDiagnostics"
+              and m["params"]["uri"] == user_uri for d in m["params"]["diagnostics"]]
+    step("72i", "a watched-file change republishes the open buffer that imports it",
+         any("undefined method 'name'" in d["message"] for d in pushed), f"{[d['message'][:40] for d in pushed]}")
+    with open(dog, "w") as f:
+        f.write(original)
+
+    # 72j. Moving a module's file renames the names that spell it: the edit
+    #      moved the import to `geo/c` and left `Geo::B.name`.
+    reply = k.send("workspace/willRenameFiles", {"files": [
+        {"oldUri": file_uri(dog), "newUri": file_uri(os.path.join(root, "geo", "c.iyi"))}]})
+    edits = ((reply.get("result") or {}).get("changes") or {}).get(user_uri, [])
+    step("72j", "moving geo/b.iyi to geo/c.iyi rewrites `Geo::B` in the importer",
+         applied(user, edits) == "import geo/c\n\nputs Geo::C.name\n", repr(applied(user, edits)))
+    k.send("shutdown", {})
+    k.send("exit", {}, wait=False)
+    k.proc.wait(timeout=10)
+
+
+def document_bound_steps(c):
+    """Answers outside the document, and answers past the JSON builder's
+    nesting: -32603 where the client was owed a range."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-bounds")
+    # 73e. Deep nesting against the JSON builder's 99 levels: a selection
+    #      inside 100 nested parentheses and the outline of 50 nested
+    #      classes answered -32603 "Nesting of 100 is too deep".
+    deep = opened(c, own, "deep.iyi", "x = " + "(" * 100 + "1" + ")" * 100 + "\nputs x\n")
+    chosen = c.send("textDocument/selectionRange", {"textDocument": {"uri": deep},
+                                                    "positions": [{"line": 0, "character": 104}]})
+    depth, node = 0, (chosen.get("result") or [None])[0]
+    while node:
+        depth, node = depth + 1, node.get("parent")
+    classes = "".join(f"class C{n}\n" for n in range(50)) + "end\n" * 50
+    nested = opened(c, own, "nested.iyi", classes)
+    outline = c.send("textDocument/documentSymbol", {"textDocument": {"uri": nested}})
+    listed = []
+    pending = list(outline.get("result") or [])
+    while pending:
+        symbol = pending.pop()
+        listed.append(symbol["name"])
+        pending.extend(symbol.get("children", []))
+    step("73e", "a deep selection and a deep outline are answered, every class listed",
+         "error" not in chosen and depth > 1 and "error" not in outline and
+         sorted(listed) == sorted(f"C{n}" for n in range(50)),
+         f"{depth} nested range(s), {len(listed)} of 50 classes")
+
+    # 73f. A question in a buffer that does not compile, below two lines
+    #      removed: the last good program could not be laid over the
+    #      buffer's lines, and was answered from as it was - a highlight
+    #      named the old text's lines, one past the end among them. The
+    #      edited lines are left out of it now, and every line it names
+    #      holds the name.
+    stale_text = ("module stale\n\ndef twice(n : Int32) : Int32\n  n * 2\nend\n\n"
+                  "a = 1\nb = 2\nc = 3\nputs twice(a)\nputs twice(a + 1)\nputs twice(a + 2)\n")
+    stale = opened(c, own, "stale.iyi", stale_text)
+    removed = {"start": {"line": 7, "character": 0}, "end": {"line": 8, "character": 5}}
+    c.send("textDocument/didChange", {"textDocument": {"uri": stale, "version": 2},
+                                      "contentChanges": [{"range": removed, "text": "b = ("}]}, wait=False)
+    c.diagnostics(stale)
+    now = "\n".join(stale_text.split("\n")[:7] + ["b = ("] + stale_text.split("\n")[9:])
+    marks = c.send("textDocument/documentHighlight", {"textDocument": {"uri": stale},
+                                                      "position": {"line": 10, "character": 6}})
+    rows = now.split("\n")
+    lines = [h["range"]["start"]["line"] for h in marks.get("result") or []]
+    named = [span_text(now, h["range"]) if h["range"]["start"]["line"] < len(rows) else None
+             for h in marks.get("result") or []]
+    step("73f", "below removed lines, a broken buffer's answers name its own lines",
+         bool(named) and all(t == "twice" for t in named),
+         f"highlights on lines {lines} of {len(rows)}: {named}")
+
+    # 73g. A codeAction range read its lines as `.as_i`: line 2^31 answered
+    #      -32603 "Arithmetic overflow", where every other position past
+    #      the protocol's uinteger is held at the bound.
+    far = {"line": 2 ** 31, "character": 0}
+    acted = c.send("textDocument/codeAction", {"textDocument": {"uri": stale}, "range": {"start": far, "end": far},
+                                               "context": {"diagnostics": []}})
+    step("73g", "a codeAction range past 2^31 - 1 is answered",
+         "error" not in acted, json.dumps(acted.get("error") or acted.get("result"))[:70])
+
+    # 73h. A selection asked past the document came back as asked: line 9
+    #      of a two-line buffer, and 2^30 for the protocol's largest
+    #      position. Held to the document now, as an edit is.
+    short = opened(c, own, "short.iyi", "module short\n\nputs 1\n")
+    edge = c.send("textDocument/selectionRange", {"textDocument": {"uri": short}, "positions": [
+        {"line": 9, "character": 2}, {"line": 2 ** 31 - 1, "character": 2 ** 31 - 1}]})
+    ends = [(r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in edge.get("result") or []]
+    step("73h", "a selection asked past the document is held to its end",
+         ends == [(3, 0), (3, 0)], f"ranges at {ends}")
+    for uri in (deep, nested, stale, short):
+        c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+    shutil.rmtree(own, ignore_errors=True)
+
+
+def fuzz_steps(c, work):
+    """What a fuzz over the library and the samples found: 441,870
+    requests from positions nobody chose. Each step failed before its fix."""
+
+    # 52j. Every `getter` was one method. A def a macro writes is keyed by
+    # its file, and the file of every expansion was "expanded macro:
+    # getter", at the same line and column: references to `p.x` listed
+    # `p.y` and `n.first`, and a rename rewrote all three.
+    getters = ("module getters\n\nstruct Point\n  getter x : Int32\n  getter y : Int32\n\n"
+               "  def initialize(@x : Int32, @y : Int32)\n  end\nend\n\n"
+               "struct Name\n  getter first : String\n\n  def initialize(@first : String)\n  end\nend\n\n"
+               "p = Point.new(1, 2)\nn = Name.new(\"a\")\nputs p.x\nputs p.y\nputs n.first\n")
+    uri = opened(c, work, "getters.iyi", getters)
+    reply = c.send("textDocument/references", {
+        "textDocument": {"uri": uri}, "position": {"line": 19, "character": 7},
+        "context": {"includeDeclaration": True}})
+    texts = {span_text(getters, loc["range"]) for loc in reply.get("result") or []}
+    step("52j", "references to one getter are that getter's alone", texts == {"x"}, str(sorted(texts)))
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": uri}, "position": {"line": 19, "character": 7}, "newName": "xx"})
+    step("52k", "a getter is not renamed from a call, which would leave the getter behind",
+         reply.get("error", {}).get("code") == -32803, json.dumps(reply)[:100])
+
+    # 52l. A `new` the compiler makes from `initialize` carries the
+    # initialize's location, so the two were one def: renaming
+    # `Point.new` wrote the new name over `def initialize`, keyword and
+    # name, and renaming `initialize` rewrote the `def` and the `.new`.
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": uri}, "position": {"line": 17, "character": 10}, "newName": "make"})
+    step("52l", "`new` made from initialize is refused a rename",
+         reply.get("error", {}).get("code") == -32803, json.dumps(reply)[:100])
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": uri}, "position": {"line": 6, "character": 8}, "newName": "setup"})
+    edits = [span_text(getters, e["range"])
+             for e in (reply.get("result") or {}).get("changes", {}).get(uri, [])]
+    step("52m", "renaming initialize touches its name and nothing else", edits == ["initialize"], str(edits))
+
+    # 52n. Signature help counted every `,` walking back to the `(`:
+    # inside a string, an array, a hash. `pair(1, "x, y"` was on the
+    # third parameter of a two-parameter method.
+    sig = ("module sig\n\nstruct Words\n  def initialize(@a : Array(String))\n  end\nend\n\n"
+           "struct Nums\n  def initialize(@a : Array(Int32))\n  end\nend\n\n"
+           "def pair(a : Int32, b : String) : String\n  \"#{a}#{b}\"\nend\n\n"
+           "w = Words.new([\"pear\", \"fig\", \"plum\"])\nn = Nums.new([3, 1, 4])\n"
+           "puts pair(1, \"x, y\")\nputs [1, 2].zip([\"a\", \"b\"])\n")
+    uri = opened(c, work, "sig.iyi", sig)
+
+    def helped(line, needle):
+        return c.send("textDocument/signatureHelp", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": at(sig, line, needle)}}).get("result") or {}
+    in_string = helped(18, ")").get("activeParameter")
+    in_array = helped(19, "\"b").get("activeParameter")
+    step("52n", "commas in a string or an array are not arguments",
+         in_string == 1 and in_array == 0, f"pair: {in_string}, zip: {in_array}")
+
+    # 52o. `Nums.new(` in a module file: the type was looked up at the top
+    # level only, where a module's types are not, and the fallback took
+    # every call named `new` in the file - `Words`' constructor first.
+    labels = [s["label"] for s in helped(17, "4").get("signatures", [])]
+    step("52o", "a constructor's signatures are its own type's", labels == ["new(a : Array(Int32))"], str(labels))
+
+    # 52p. The outline's selection is the name as written: it was the
+    # listed name's length from the name's start (`self.encode` covered
+    # `encode(v`) or from the keyword (`enum Level` covered `enum `).
+    outline = ("module outline\n\nenum Level\n  Low\n  High\nend\n\nstruct Box\n"
+               "  def self.make(v : Int32) : Box\n    Box.new\n  end\nend # 🎉\n")
+    uri = opened(c, work, "outline.iyi", outline)
+    reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+    found = {}
+
+    def walk(symbols):
+        for s in symbols or []:
+            found[s["name"]] = (span_text(outline, s["selectionRange"]), s["range"])
+            walk(s.get("children"))
+    walk(reply.get("result"))
+    named = {name: written for name, (written, _) in found.items()}
+    box_end = found.get("Box", (None, {"end": {}}))[1]["end"].get("character")
+    step("52p", "a symbol's selection is its written name, and its range ends in UTF-16",
+         named.get("self.make") == "make" and named.get("Level") == "Level" and box_end == 8,
+         f"{named} Box ends at {box_end}")
+
+    # 52q. A buffer that stops compiling is answered from the last program
+    # that did, and that program's lines were read as the buffer's: press
+    # Enter above a call, type half a call, and definition on `greet`
+    # landed on `def shout`, the line below's callee.
+    stale = ("module stale\n\ndef greet(name : String) : String\n  \"hi #{name}\"\nend\n\n"
+             "def shout(name : String) : String\n  name.upcase\nend\n\n"
+             "a = greet(\"x\")\nb = shout(\"y\")\nputs a\nputs b\n")
+    uri = opened(c, work, "stale.iyi", stale)
+    c.send("textDocument/didChange", {
+        "textDocument": {"uri": uri, "version": 2},
+        "contentChanges": [{"range": {"start": {"line": 10, "character": 0},
+                                      "end": {"line": 10, "character": 0}},
+                            "text": "c = greet(\n"}]}, wait=False)
+    c.diagnostics(uri)
+    lines = []
+    for line in (11, 12):
+        reply = c.send("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": {"line": line, "character": 4}})
+        lines.append([loc["range"]["start"]["line"] for loc in reply.get("result") or []])
+    step("52q", "below a line being typed, definition still names the callee written there",
+         lines == [[2], [6]], str(lines))
+
+    # 52r. The same, after the wire has been quiet past the worker's idle
+    # retirement: its successor adopts the buffer with the clean text as a
+    # seed, and the seed's program was answered as it was, a line off -
+    # Linux's runner was slow enough to retire between 52q's questions.
+    time.sleep(3)
+    lines = []
+    for line in (11, 12):
+        reply = c.send("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": {"line": line, "character": 4}})
+        lines.append([loc["range"]["start"]["line"] for loc in reply.get("result") or []])
+    step("52r", "after a quiet spell retires the worker, definition still names the callee written there",
+         lines == [[2], [6]], str(lines))
+
+    # 52s. A selection range asked where no node is - past a line's end,
+    # past the last line - echoed the position as given, a range outside
+    # the document.
+    short = "module short\n\nputs 1\n"
+    uri = opened(c, work, "short.iyi", short)
+    reply = c.send("textDocument/selectionRange", {
+        "textDocument": {"uri": uri},
+        "positions": [{"line": 2, "character": 40}, {"line": 90, "character": 7}]})
+    got = [(r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in reply.get("result") or []]
+    step("52s", "a selection range asked outside the text stays inside it",
+         len(got) == 2 and got[0][0] == 2 and got[0][1] <= 6 and got[1] == (3, 0), str(got))
+
+
+def workers_of(c):
+    """The proxy's workers: its children started from its own binary, not
+    a console host Windows may have given it. None where a binary cannot
+    be read from a pid (darwin has no /proc), and the step that asked
+    reports itself unmeasured."""
+    try:
+        own = os.path.normcase(process_binary(c.proc.pid))
+    except OSError:
+        return None
+    found = []
+    for pid in children(c.proc.pid):
+        try:
+            if os.path.normcase(process_binary(pid)) == own:
+                found.append(pid)
+        except OSError:
+            continue
+    return found
+
+
+def kill_workers(c):
+    """Kill the proxy's workers and whatever each of them started, and
+    wait for them to be gone. A process a compile started (a macro's
+    `system`) holds the worker's pipes on Windows, where handles are
+    inherited; the proxy asks the process whether its worker is alive
+    (steps 73j and 73k), and these are killed so that none outlives the
+    step that started it. Returns how many workers there were; none where
+    children cannot be listed, and the step that asked reports itself
+    unmeasured."""
+    import signal
+    found = workers_of(c)
+    if found is None:
+        return 0
+    # Killed a generation at a time, and the killed listed again: a worker
+    # that started a process after the list was taken and before its kill
+    # left that one running with its pipes (Windows CI: the proxy waited
+    # 180 s with no worker, a `ping` orphaned to the end of the job).
+    doomed, pending = [], list(found)
+    while pending:
+        for pid in pending:
+            try:
+                os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+            except OSError:
+                pass
+        doomed.extend(pending)
+        time.sleep(0.2)
+        pending = [k for pid in doomed for k in children(pid) if k not in doomed]
+    deadline = time.monotonic() + 10
+    while any(pid in children(c.proc.pid) for pid in found) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    # The proxy reads the worker's pipe closing on its own fiber.
+    time.sleep(0.5)
+    return len(found)
+
+
+def buffer_steps(c):
+    """A worker's death and a malformed burst: the proxy's buffers and the
+    worker's stopped being the editor's."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-buffers")
+    # 73a. A worker dies, and the next thing the person does is type one
+    #      character. The proxy took the change into its own buffer, then
+    #      spawned a successor, handed it that buffer (`iyi/adopt`) and
+    #      forwarded the change as well: `def ab` with a `c` typed after
+    #      it was `abcc` to the worker and `abc` to the editor, and every
+    #      answer after it was about a text nobody had.
+    twice_uri = opened(c, own, "twice.iyi", "def ab\nend\n")
+    killed = kill_workers(c)
+    c.send("textDocument/didChange", {"textDocument": {"uri": twice_uri, "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 6}, "end": {"line": 0, "character": 6}}, "text": "c"}]},
+        wait=False)
+    reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": twice_uri}})
+    names = [s["name"] for s in reply.get("result") or []]
+    step("73a", "after a worker dies, the change that follows is applied once",
+         (not killed and names) or names == ["abc"],
+         f"{killed or 'unmeasured'} worker(s) killed, then the outline is {names}")
+
+    # 73b. A readable change and, queued behind it, a change whose params
+    #      are null: the worker read the second while gathering the burst,
+    #      raised on its shape, and dropped both - the outline stayed
+    #      empty, where the proxy kept the edit and the two buffers parted.
+    #      Driven against the worker alone, behind a compile, so both are
+    #      queued when it gets to them.
+    w = Client(("lsp", "--worker"))
+    w.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    w.send("initialized", {}, wait=False)
+    burst = file_uri(os.path.join(own, "burst.iyi"))
+    w.send("textDocument/didOpen", {"textDocument": {"uri": burst, "languageId": "iyi", "version": 1,
+                                                     "text": ""}}, wait=False)
+    w.diagnostics(burst)
+    with open(os.path.join(own, "busy.iyi"), "w") as f:
+        f.write("module busy\n\nputs 1\n")
+    busy = w.write_batch([
+        ("textDocument/diagnostic", {"textDocument": {"uri": file_uri(os.path.join(own, "busy.iyi"))}}, True),
+        ("textDocument/didChange", {"textDocument": {"uri": burst, "version": 2},
+                                    "contentChanges": [{"text": "def added_by_edit\nend\n"}]}, False),
+        ("textDocument/didChange", None, False),
+    ])
+    w.wait_for(lambda m: m.get("id") == busy[0])
+    reply = w.send("textDocument/documentSymbol", {"textDocument": {"uri": burst}})
+    names = [s["name"] for s in reply.get("result") or []]
+    w.send("shutdown", {})
+    w.send("exit", {}, wait=False)
+    w.proc.wait(timeout=10)
+    step("73b", "a change of the wrong shape queued behind a readable one takes only itself",
+         names == ["added_by_edit"], f"outline {names}")
+
+    # 73c. and a worker that dies while the person is in a buffer is not
+    #      followed by one that compiles that buffer before anything else.
+    #      A buffer whose compile overflowed the stack killed every worker
+    #      the proxy started, because each was warmed on the focused file
+    #      first: every request about any file answered -32603 for as long
+    #      as it stayed focused. Here the death is a kill during a compile
+    #      that waits 30 s, and the outline of another file has to be
+    #      answered well inside that.
+    # Windows only: the workers are listed and killed there, and elsewhere
+    # the 30 s compile ran to its end on every recompile of the buffer and
+    # held the session past the watchdog (Linux CI, step 53 never answered).
+    if os.name == "nt":
+        pause = "ping -n 31 127.0.0.1" if os.name == "nt" else "sleep 30"
+        slow_text = f'module slow\n\n{{% system("{pause}") %}}\nputs 1\n'
+        slow_uri = file_uri(os.path.join(own, "slow.iyi"))
+        c.send("textDocument/didOpen", {"textDocument": {"uri": slow_uri, "languageId": "iyi", "version": 1,
+                                                         "text": slow_text}}, wait=False)
+        # Killed well inside the two quiet seconds the proxy retires a worker
+        # in: a retirement first would start a worker this kill did not list.
+        time.sleep(0.5)
+        killed = kill_workers(c)
+        started = time.monotonic()
+        reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": twice_uri}})
+        elapsed = time.monotonic() - started
+        for uri in (slow_uri, twice_uri):
+            c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+        shutil.rmtree(own, ignore_errors=True)
+        step("73c", "a successor is not warmed on the buffer its predecessor died in",
+             not killed or ("result" in reply and elapsed < 10),
+             f"{killed or 'unmeasured'} worker(s) killed, another file's outline answered "
+             f"{'within' if elapsed < 10 else 'past'} 10 s")
+    else:
+        shutil.rmtree(own, ignore_errors=True)
+        print("step 73c a successor is not warmed on the buffer its predecessor died in: "
+              "unmeasured here, the workers are killed on Windows only", flush=True)
+
+
+def descendants(pid):
+    """Every process *pid* started, and every one they started."""
+    found, pending = [], children(pid)
+    while pending:
+        kid = pending.pop()
+        found.append(kid)
+        pending.extend(children(kid))
+    return found
+
+
+def holders(worker):
+    """The processes *worker* started that hold its stdout: on Windows
+    every child of a worker, which inherits each handle the worker could
+    hand on (its own stdin and stdout among them) - the `cmd.exe` a
+    macro's `system` runs, and what that runs; on Linux the ones whose
+    stdout is the worker's pipe, read back through /proc."""
+    found = descendants(worker)
+    if os.name == "nt":
+        named = []
+        for pid in found:
+            try:
+                if os.path.basename(process_binary(pid)).lower() in ("cmd.exe", "ping.exe"):
+                    named.append(pid)
+            except OSError:
+                continue
+        return named
+    try:
+        pipe = os.readlink(f"/proc/{worker}/fd/1")
+    except OSError:
+        return []
+    held = []
+    for pid in found:
+        try:
+            if os.readlink(f"/proc/{pid}/fd/1") == pipe:
+                held.append(pid)
+        except OSError:
+            continue
+    return held
+
+
+def answer_within(client, request_id, seconds):
+    """The answer to *request_id*, or None where none came in *seconds*.
+    A wait that is the claim: a server that never answers fails the step
+    here, by name, instead of holding the session until the watchdog."""
+    got = {}
+
+    def read():
+        # A closed pipe raises `SystemExit` here, on a thread, where Python
+        # drops it without a word: the server's end went unreported, and
+        # the step saw no answer. The report is printed instead.
+        try:
+            got["message"] = client.wait_for(lambda m: m.get("id") == request_id)
+        except SystemExit as closed:
+            print(closed, flush=True)
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(seconds)
+    return got.get("message")
+
+
+def orphan_steps():
+    """73j and 73k. A worker that dies while a process it started holds its
+    pipes. The proxy learned of a worker's death only from its stdout
+    closing, and a process the worker started keeps it open: on Windows
+    every child inherits the worker's stdin and stdout, so a worker killed
+    during a macro's `ping` left the proxy with no worker and a request
+    written into the dead one's stdin, unanswered for the 180 s the
+    watchdog waited (Windows CI, the step after 73b).
+
+    The hold is a macro's `system` that writes a file the gate names and
+    then waits a minute: `cmd` and a `ping` on Windows, which hold the
+    pipes by inheritance from the start, and on Linux a shell that opens
+    the worker's two pipes through /proc before it writes the file. The
+    file is the gate's proof that the worker is inside that compile, and
+    nothing else compiles that text. The step used to take a `ping` or
+    `sleep` found under the worker as that proof, and hold an outline
+    queued behind a buffer's compile: a Windows run (39222552559) found
+    one, killed the worker, and had the outline answered before the kill,
+    so whatever was found, the worker was not inside the compile then.
+    The held request is now the compile itself, a pull. The worker alone
+    is killed, and the holders are left running until the step is over."""
+    if os.name != "nt" and not sys.platform.startswith("linux"):
+        for label, name in (("73j", "a request after a worker died with its pipes held is answered"),
+                            ("73k", "a request the worker died holding, its pipes held, is refused")):
+            print(f"step {label} {name}: unmeasured here, no process a worker starts holds its "
+                  "stdout but on Windows (inherited) and Linux (through /proc)", flush=True)
+        return
+    import signal
+    own = tempfile.mkdtemp(prefix="iyi-lsp-orphan")
+    o = Client()
+    o.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    o.send("initialized", {}, wait=False)
+    other_uri = opened(o, own, "other.iyi", "def other\nend\n")
+    left = []
+
+    def held_text(name):
+        """A module whose compile writes *name*.started under the gate's
+        directory, holding the worker's pipes by then, and waits a minute."""
+        mark = os.path.join(own, f"{name}.started")
+        if os.name == "nt":
+            hold = f'cmd /c type nul > "{mark}" & ping -n 61 127.0.0.1'
+        else:
+            hold = (f"exec </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null; "
+                    f"touch '{mark}'; sleep 60")
+        return mark, f"module {name}\n\n{{% system({json.dumps(hold)}) %}}\nputs 1\n"
+
+    def inside(mark):
+        """Wait for *mark*: the worker is then inside the compile that
+        writes it. The worker and the processes holding its stdout, or
+        None where the compile did not get there in 30 s."""
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not os.path.exists(mark):
+            time.sleep(0.05)
+        workers = workers_of(o) or []
+        if not os.path.exists(mark) or len(workers) != 1:
+            return None, []
+        held = holders(workers[0])
+        left.extend(descendants(workers[0]))
+        return workers[0], held
+
+    def kill_alone(worker):
+        os.kill(worker, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while worker in children(o.proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+    # 73j. The worker dies inside a buffer's compile, with no request in
+    #      flight, and the next request is about another file: written
+    #      into the dead worker's stdin, it was never read. It goes to a
+    #      successor now.
+    mark, text = held_text("slow")
+    slow_uri = file_uri(os.path.join(own, "slow.iyi"))
+    o.send("textDocument/didOpen", {"textDocument": {
+        "uri": slow_uri, "languageId": "iyi", "version": 1, "text": text}}, wait=False)
+    worker, held = inside(mark)
+    after = None
+    if worker:
+        kill_alone(worker)
+        started = time.monotonic()
+        after = answer_within(o, o.request_nowait("textDocument/documentSymbol",
+                                                  {"textDocument": {"uri": other_uri}}), 10)
+        after_took = time.monotonic() - started
+        o.send("textDocument/didClose", {"textDocument": {"uri": slow_uri}}, wait=False)
+    # 73k. The worker dies inside the request itself: a pull of a file no
+    #      buffer holds, whose compile is the hold. The request is refused
+    #      (-32603) as one a worker died holding is, where it waited for
+    #      the holder to end. Not asked after a 73j left unanswered: that
+    #      wait's reader still holds the pipe.
+    second, second_held, refused = None, [], None
+    if not worker or after is not None:
+        mark, text = held_text("slower")
+        slower = os.path.join(own, "slower.iyi")
+        with open(slower, "w", encoding="utf-8") as f:
+            f.write(text)
+        queued = o.request_nowait("textDocument/diagnostic", {"textDocument": {"uri": file_uri(slower)}})
+        second, second_held = inside(mark)
+    if second:
+        kill_alone(second)
+        started = time.monotonic()
+        refused = answer_within(o, queued, 10)
+        refused_took = time.monotonic() - started
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            pass
+    stuck = (worker and after is None) or (second and refused is None)
+    if not stuck and answer_within(o, o.request_nowait("shutdown", {}), 10):
+        o.send("exit", {}, wait=False)
+        o.proc.wait(timeout=10)
+    else:
+        o.proc.kill()
+    shutil.rmtree(own, ignore_errors=True)
+    step("73j", "a request after a worker died with its pipes held is answered",
+         bool(worker) and bool(held) and after is not None and "result" in after,
+         "the held compile did not start within 30 s" if not worker else
+         f"{len(held)} holder(s); "
+         f"{'no answer' if after is None else 'an outline' if 'result' in after else json.dumps(after.get('error'))[:70]} "
+         f"in {after_took:.1f} s")
+    step("73k", "a request the worker died holding, its pipes held, is refused",
+         bool(second) and bool(second_held) and refused is not None
+         and refused.get("error", {}).get("code") == -32603,
+         "the held request's compile did not start within 30 s" if not second else
+         f"{len(second_held)} holder(s); "
+         f"{'no answer' if refused is None else json.dumps(refused.get('error') or refused.get('result'))[:70]} "
+         f"in {refused_took:.1f} s")
+
+
+def restore_binary(backup, binary):
+    """Put the binary step 46 moved aside back. A Windows runner refused
+    the rename back once with "being used by another process", the
+    request already answered and no server started from the file since:
+    a scanner's handle on a freshly renamed executable [INFERENCE]. Ten
+    seconds of retries; a server that kept the file open still fails
+    here, with the error it got."""
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.replace(backup, binary)
+            return
+        except PermissionError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.2)
+
+
+def held_open(work, seconds):
+    """A path a macro's `read_file` waits on for *seconds*, then reads
+    as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
+    reads it lasts as long as the gate says, on any machine. Once let
+    go of, the path is gone, and a later compile of the same text
+    fails at once rather than waiting again."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+        kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
+        kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        path = r"\\.\pipe\iyi-lsp-held-%d" % os.getpid()
+        # Outbound, bytes, one instance. A reader connects to it before
+        # this side has asked for one, and reads until it is closed.
+        handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+
+        def release():
+            time.sleep(seconds)
+            kernel.ConnectNamedPipe(handle, None)
+            kernel.CloseHandle(handle)
+    else:
+        path = os.path.join(work, "held")
+        os.mkfifo(path)
+
+        def release():
+            time.sleep(seconds)
+            # Blocks until the reader has opened it, so the reader sees
+            # the end of the file rather than no file.
+            writer = os.open(path, os.O_WRONLY)
+            os.unlink(path)
+            os.close(writer)
+    threading.Thread(target=release, daemon=True).start()
+    return path
+
+
+def held_verdict_step():
+    """74a. A change whose compile outlasts the quiet the proxy replaces
+    a worker in (`Proxy::RETIRE_IDLE`, two seconds). A change is a
+    notification and has no id, so the proxy counted the worker idle,
+    replaced it two seconds into the compile, and the successor adopted
+    the buffer and published nothing: a client waiting on the verdict
+    waited for ever. `lsp_memory.py`'s paced session stopped that way
+    held to two cores beside a busy loop, where a compile ran past two
+    seconds. The compile here reads a pipe the gate holds for four, so
+    the timing is the gate's and not the machine's."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-held")
+    h = Client()
+    h.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    h.send("initialized", {}, wait=False)
+    held_uri = opened(h, own, "held.iyi", "module held\n\nputs 1\n")
+    spelled = held_open(own, 4).replace("\\", "\\\\")
+    h.send("textDocument/didChange", {"textDocument": {"uri": held_uri, "version": 2}, "contentChanges": [
+        {"text": f'module held\n\n{{{{ read_file("{spelled}") }}}}\nputs 1\n'}]}, wait=False)
+    # Past the hold, and past the quiet after it: a verdict still owed by
+    # then is one nobody is going to send. The hover asked now is the
+    # bound on the wait - whichever comes first says which happened.
+    time.sleep(7)
+    asked = h.request_nowait("textDocument/hover", {"textDocument": {"uri": held_uri},
+                                                    "position": {"line": 3, "character": 0}})
+    first = h.wait_for(lambda m: m.get("id") == asked or (
+        m.get("method") == "textDocument/publishDiagnostics" and m["params"]["uri"] == held_uri
+        and m["params"].get("version") == 2))
+    if first.get("id") != asked:
+        h.wait_for(lambda m: m.get("id") == asked)
+    h.send("shutdown", {})
+    h.send("exit", {}, wait=False)
+    h.proc.wait(timeout=10)
+    shutil.rmtree(own, ignore_errors=True)
+    step("74a", "a change whose compile outlasts the idle replacement still gets its verdict",
+         first.get("id") != asked,
+         "the verdict came before a hover asked after it" if first.get("id") != asked
+         else "the hover was answered and the verdict never came")
+
+
 def main():
+    watchdog(180)
+    # Set before the server starts, because a child inherits the environment
+    # it was spawned with: the package step below needs the server to find a
+    # checkout in this cache rather than fetch one.
+    pkg_home = tempfile.mkdtemp(prefix="iyi-lsp-pkg")
+    os.environ["IYI_CACHE_DIR"] = os.path.join(pkg_home, "cache")
+    os.environ["IYI_MOD_MIRROR"] = os.path.join(pkg_home, "mirror")
+
     work = tempfile.mkdtemp(prefix="iyi-lsp-gate")
     lib = os.path.join(work, "greet.iyi")
     app = os.path.join(work, "app.iyi")
@@ -186,12 +1390,12 @@ def main():
                 '  name.upcase\nend\n')
     with open(app, "w") as f:
         f.write("module app\n")
-    app_uri = "file://" + app
+    app_uri = file_uri(app)
 
     c = Client()
 
     # 1. initialize
-    reply = c.send("initialize", {"rootUri": "file://" + work,
+    reply = c.send("initialize", {"rootUri": file_uri(work),
                                   "capabilities": {"textDocument": {
                                       "completion": {"completionItem": {
                                           "snippetSupport": True}}}}})
@@ -225,7 +1429,7 @@ def main():
 
     # 2. didOpen a file whose call mis-types the argument. The def is only
     #    typed when called, so the fixture calls it.
-    broken = ("module app\n\nimport greet\nusing greet::{shout}\n\n"
+    broken = ("module app\n\nimport greet\nimport greet::{shout}\n\n"
               "def run : String\n  shout(42)\nend\n\nputs run\n")
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": app_uri, "languageId": "iyi",
@@ -238,7 +1442,7 @@ def main():
 
     # 3. didChange to a SPEC-citing error (`!` on a union with no error
     #    member is refused and the message names its section), then fixed.
-    speccy = ("module app\n\nimport greet\nusing greet::{shout}\n\n"
+    speccy = ("module app\n\nimport greet\nimport greet::{shout}\n\n"
               "def run : String\n  shout(\"iyi\")!\nend\n\nputs run\n")
     c.send("textDocument/didChange",
            {"textDocument": {"uri": app_uri, "version": 2},
@@ -249,7 +1453,7 @@ def main():
          f"code {diags[0].get('code')!r}, "
          f"link {'yes' if diags[0].get('codeDescription') else 'no'}")
 
-    fixed = ("module app\n\nimport greet\nusing greet::{shout}\n\n"
+    fixed = ("module app\n\nimport greet\nimport greet::{shout}\n\n"
              "def run : String\n  shout(\"iyi\")\nend\n\nputs run\n")
     started = time.monotonic()
     c.send("textDocument/didChange",
@@ -263,7 +1467,7 @@ def main():
         step(4, "keystroke latency bound", False, f"{elapsed:.2f}s > 5s")
 
     # 5. hover on a local whose type came through the import.
-    hovered = ("module app\n\nimport greet\nusing greet::{shout}\n\n"
+    hovered = ("module app\n\nimport greet\nimport greet::{shout}\n\n"
                "def run : String\n  loud = shout(\"iyi\")\n"
                "  loud\nend\n\nputs run\n")
     c.send("textDocument/didChange",
@@ -277,6 +1481,64 @@ def main():
     step(5, "hover names the type", "loud : String" in value,
          value.replace("\n", " "))
 
+    # 70i. A diagnostic's relatedInformation is in wire units like its
+    #      range: the "instantiating" note for an `f(1)` behind two emoji
+    #      went out at character 10, the codepoint column, where the
+    #      editor has the call at 12.
+    related_uri = file_uri(os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-related"), "related.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": related_uri, "languageId": "iyi", "version": 1,
+                             "text": 'module related\n\ndef f(x)\n  x.nope\nend\n\ns = "\U0001F600\U0001F600"; f(1)\n'}},
+           wait=False)
+    notes = [(r["location"]["range"]["start"]["line"], r["location"]["range"]["start"]["character"])
+             for d in c.diagnostics(related_uri)["diagnostics"] for r in d.get("relatedInformation", [])]
+    c.send("textDocument/didClose", {"textDocument": {"uri": related_uri}}, wait=False)
+    step("70i", "relatedInformation is in UTF-16 units", (6, 12) in notes, f"notes at {notes}")
+
+    # 70n. An error inside a macro's expansion is placed at the call. Its
+    #      line and column were the expansion's, read as the file's, so the
+    #      typo in `{{x}}.upcse`, expanded from line 6, was underlined on
+    #      the `module` header - line 0, characters 8 to 10 on the wire -
+    #      with a quick fix that wrote `upcase` into the header.
+    macro_uri = file_uri(os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-macro"), "mac.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": macro_uri, "languageId": "iyi", "version": 1,
+                             "text": 'module mac\n\nmacro m(x)\n  {{x}}.upcse\nend\nputs m("abc")\n'}},
+           wait=False)
+    macro_diags = c.diagnostics(macro_uri)["diagnostics"]
+    placed = [(d["range"]["start"]["line"], d["range"]["start"]["character"], d["range"]["end"]["character"])
+              for d in macro_diags]
+    reply = c.send("textDocument/codeAction",
+                   {"textDocument": {"uri": macro_uri},
+                    "range": macro_diags[0]["range"] if macro_diags else
+                    {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                    "context": {"diagnostics": macro_diags}})
+    macro_fixes = [a["title"] for a in reply.get("result") or []]
+    c.send("textDocument/didClose", {"textDocument": {"uri": macro_uri}}, wait=False)
+    step("70n", "an error in a macro's expansion is at the call, with no edit",
+         placed == [(5, 5, 6)] and "upcse" in macro_diags[0]["message"] and macro_fixes == [],
+         f"at {placed}, fixes {macro_fixes}")
+
+    # 71a. A diagnostic's message is text, not a terminal's. The server's
+    #      compiler kept the colour every compiler had unless `--no-color`
+    #      said otherwise, and messages carry it in their text: a nil
+    #      receiver's diagnostic, published and pulled, read
+    #      "for Nil\u001b[33;1m (compile-time type is (String | Nil))".
+    nil_uri = file_uri(os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-colour"), "nilsize.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": nil_uri, "languageId": "iyi", "version": 1,
+                             "text": 'module nilsize\n\nx = Program.args.size > 0 ? "a" : nil\nputs x.size\n'}},
+           wait=False)
+    published = [d["message"] for d in c.diagnostics(nil_uri)["diagnostics"]]
+    reply = c.send("textDocument/diagnostic", {"textDocument": {"uri": nil_uri}})
+    pulled = [d["message"] for d in (reply.get("result") or {}).get("items", [])]
+    c.send("textDocument/didClose", {"textDocument": {"uri": nil_uri}}, wait=False)
+    said = published + pulled
+    step("71a", "a diagnostic's message carries no colour, published or pulled",
+         len(published) == 1 and len(pulled) == 1
+         and all("for Nil (compile-time type is (String | Nil))" in m and "\x1b" not in m for m in said),
+         f"{[m[:60] for m in said]}")
+
     # 6. definition on the call jumps into the sibling module's def.
     reply = c.send("textDocument/definition",
                    {"textDocument": {"uri": app_uri},
@@ -286,6 +1548,19 @@ def main():
          any(l["uri"].endswith("greet.iyi") and
              l["range"]["start"]["line"] == 2 for l in locs),
          f"{len(locs)} location(s), first {locs and locs[0]['uri']}")
+
+    # 6b. definition on a call in the module's top-level code: `puts run`,
+    #     line 10, jumps to `def run` in the same file. The module a header
+    #     opens was marked as ending on the header's line, and the lookup
+    #     never looked inside it - the same call in a `def` found its target.
+    reply = c.send("textDocument/definition",
+                   {"textDocument": {"uri": app_uri},
+                    "position": {"line": 10, "character": 6}})
+    locs = reply["result"] or []
+    step("6b", "definition from top-level code jumps to the def",
+         any(l["uri"] == app_uri and l["range"]["start"]["line"] == 5
+             for l in locs),
+         f"{len(locs)} location(s), first {locs and (locs[0]['uri'], locs[0]['range']['start']['line'])}")
 
     # 7. documentSymbol: the outline — the header's module at the root,
     #    the def nested inside it.
@@ -299,7 +1574,27 @@ def main():
 
     names = list(flatten(reply["result"]))
     step(7, "documentSymbol lists the outline",
-         "App" in names and "run" in names, f"symbols {names}")
+         "app" in names and "run" in names, f"symbols {names}")
+
+    # 70l. and a symbol's selectionRange is its name. The file's module was
+    #      named `App`, the desugared spelling, and selected `mod` - the
+    #      `module` keyword's column for that name's length - and an enum
+    #      selected `enum`. The module is named as its header writes it.
+    unit_sel = ((reply["result"] or [{}])[0]).get("selectionRange", {})
+    renk_uri = file_uri(os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-outline"), "renk.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": renk_uri, "languageId": "iyi", "version": 1,
+                             "text": "module renk\n\nenum Renk\n  Kirmizi\n  Yesil\nend\n\nputs Renk::Yesil\n"}},
+           wait=False)
+    c.diagnostics(renk_uri)
+    renk = c.send("textDocument/documentSymbol", {"textDocument": {"uri": renk_uri}})["result"] or [{}]
+    c.send("textDocument/didClose", {"textDocument": {"uri": renk_uri}}, wait=False)
+    spans = [(s["name"], s["selectionRange"]["start"]["character"], s["selectionRange"]["end"]["character"])
+             for s in [renk[0]] + renk[0].get("children", [])]
+    step("70l", "a symbol's selectionRange is its name",
+         (unit_sel.get("start", {}).get("character"), unit_sel.get("end", {}).get("character")) == (7, 10)
+         and spans == [("renk", 7, 11), ("Renk", 5, 9)],
+         f"app selects {unit_sel}, renk {spans}")
 
     # 8. iyi/contextPack: the agent's question, answered from the buffer.
     reply = c.send("iyi/contextPack", {"textDocument": {"uri": app_uri}})
@@ -316,7 +1611,7 @@ def main():
     #    follow the rename in app. The verdict is clean because the
     #    import reads the buffer, not the disk — and the disk still says
     #    `shout`, which is the whole claim.
-    greet_uri = "file://" + lib
+    greet_uri = file_uri(lib)
     with open(lib) as f:
         greet_text = f.read()
     c.send("textDocument/didOpen",
@@ -353,11 +1648,11 @@ def main():
                 '  "NUM"\nend\n\npub def glyph : String\n  "+"\nend\n')
     parser_path = os.path.join(calc, "parser.iyi")
     parser_text = ("module calc/parser\n\nimport calc/lexer\n"
-                   "using calc/lexer::{token}\n\n"
+                   "import calc/lexer::{token}\n\n"
                    "pub def first : String\n  token\nend\n\nputs first\n")
     with open(parser_path, "w") as f:
         f.write(parser_text)
-    parser_uri = "file://" + parser_path
+    parser_uri = file_uri(parser_path)
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": parser_uri, "languageId": "iyi",
                              "version": 1, "text": parser_text}}, wait=False)
@@ -401,9 +1696,72 @@ def main():
          loud["detail"] == "String",
          f"loud : {loud and loud['detail']}")
 
+    # 12a. bare completion offers the module's own functions: `run` has no
+    #      `pub`, so it is the module's alone - callable anywhere in it
+    #      without a receiver, and left off the list because the list
+    #      dropped every private def; and top-level code had no `self` in
+    #      its scope to ask at all. Typed once inside a def, once at the top.
+    offered = []
+    for version, text, line, character in (
+            (70, holler_app.replace("\n  loud\n", "\n  ru\n"), 7, 4),
+            (71, holler_app.replace("\nputs run\n", "\nputs ru\n"), 10, 7)):
+        c.send("textDocument/didChange",
+               {"textDocument": {"uri": app_uri, "version": version},
+                "contentChanges": [{"text": text}]}, wait=False)
+        c.diagnostics(app_uri)
+        reply = c.send("textDocument/completion",
+                       {"textDocument": {"uri": app_uri},
+                        "position": {"line": line, "character": character}})
+        offered.append(any(i["label"] == "run" for i in reply["result"]["items"]))
+    step("12a", "bare completion offers the module's own functions",
+         offered == [True, True],
+         f"inside a def {offered[0]}, at the top level {offered[1]}")
+    # Back to the text step 12 left, for the steps that follow.
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": app_uri, "version": 72},
+            "contentChanges": [{"text": bare}]}, wait=False)
+    c.diagnostics(app_uri)
+
+    # 12b. the same question with nothing typed yet — Ctrl+Space, which is
+    #      how an editor asks for the whole scope rather than for what
+    #      starts with two letters. The scope is the compiler's, and the
+    #      compiler keeps its own variables in it: definition typing writes
+    #      `__iyi_dt_*` probes, `uninitialized` receivers and return values
+    #      in an `if false`, to check a def against its declaration. They
+    #      came back as the first two items, ahead of the author's own
+    #      name, each with kind 6 — "Variable" — on it.
+    #
+    #      Its own buffer, opened and never written: a struct with a typed
+    #      method is enough to produce a probe, and the session's other
+    #      steps assert over `app.iyi` and `greet.iyi` by name.
+    probe_uri = file_uri(os.path.join(work, "probe.iyi"))
+    probe_text = ("struct Point\n  getter x : Int32\n\n"
+                  "  def initialize(@x : Int32)\n  end\n\n"
+                  "  def double : Int32\n    x * 2\n  end\nend\n\n"
+                  "spot = Point.new(2)\nputs spot.double\n")
+    c.send("textDocument/didOpen", {"textDocument": {
+        "uri": probe_uri, "languageId": "iyi", "version": 1,
+        "text": probe_text}}, wait=False)
+    c.diagnostics(probe_uri)
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": probe_uri, "version": 2},
+            "contentChanges": [{"text": probe_text + "\n"}]}, wait=False)
+    c.diagnostics(probe_uri)
+    reply = c.send("textDocument/completion",
+                   {"textDocument": {"uri": probe_uri},
+                    "position": {"line": 13, "character": 0}})
+    labels = [i["label"] for i in reply["result"]["items"]]
+    invented = [l for l in labels if l.startswith(("__iyi_", "__temp_", "#"))]
+    step("12b", "an empty prefix offers the author's scope and nothing invented",
+         "spot" in labels and not invented,
+         f"{len(labels)} item(s)"
+         + (f", invented: {invented[:3]}" if invented else ""))
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": probe_uri}}, wait=False)
+
     # 13. references, asked at the *def*: under R-1 the callers live in
     #     the consumers' compiles, so the session answers from every open
-    #     document — the call in app.iyi, the `using` selection that
+    #     document — the call in app.iyi, the import's `{...}` selection that
     #     brings the name in (the gate's own find: miss it and a rename
     #     leaves a program that does not compile), and the declaration.
     c.send("textDocument/didChange",
@@ -418,10 +1776,12 @@ def main():
     names = sorted({l["uri"].rsplit("/", 1)[-1] for l in locs})
     app_lines = sorted(l["range"]["start"]["line"] for l in locs
                        if l["uri"].endswith("app.iyi"))
-    step(13, "references cross the module boundary, using line included",
+    step(13, "references cross the module boundary, import line included",
          names == ["app.iyi", "greet.iyi"] and len(locs) == 3 and
          app_lines == [3, 6],
-         f"{len(locs)} site(s): call, using selection, declaration")
+         f"{len(locs)} site(s): "
+         + ", ".join(f"{l['uri'].rsplit('/', 1)[-1]}:{l['range']['start']['line']}" for l in locs)
+         + " (wanted app.iyi:3 import, app.iyi:6 call, greet.iyi:2 declaration)")
 
     # 14. rename off the typed graph: one request, two files edited —
     #     then both buffers change to the edit and the verdicts are clean.
@@ -446,9 +1806,9 @@ def main():
                {"textDocument": {"uri": uri, "version": version},
                 "contentChanges": [{"text": texts[uri]}]}, wait=False)
         clean = clean and c.diagnostics(uri)["diagnostics"] == []
-    step(14, "rename edits both files, using line too, both stay clean",
+    step(14, "rename edits both files, import line too, both stay clean",
          len(changes) == 2 and edit_count == 3 and
-         "using greet::{yell}" in texts[app_uri] and
+         "import greet::{yell}" in texts[app_uri] and
          "def yell" in texts[greet_uri] and clean,
          f"{edit_count} edit(s) across {len(changes)} file(s)")
 
@@ -507,6 +1867,41 @@ def main():
          fix is not None and "loud.upcase" in applied and clean,
          f"{len(actions)} action(s), quickfix applied and clean")
 
+    # 70h. A quick fix is still offered after an idle replacement, for every
+    #      open file and not only the one last edited. The successor is
+    #      handed the buffers and compiles the focused one, and the other's
+    #      verdict, still on screen, had no fix behind it: "Change to
+    #      'upcase'" before a three-second pause, [] after it.
+    quick_root = tempfile.mkdtemp(prefix="iyi-lsp-quickfix")
+    quick = {"a.iyi": 'module a\n\nloud = "x"\nputs loud.upcsae\n',
+             "b.iyi": 'module b\n\nquiet = "y"\nputs quiet.downcsae\n'}
+    for name, body in quick.items():
+        with open(os.path.join(quick_root, name), "w", newline="") as f:
+            f.write(body)
+    q = Client()
+    q.send("initialize", {"rootUri": file_uri(quick_root), "capabilities": {}})
+    q.send("initialized", {}, wait=False)
+    quick_diags = {}
+    for name, body in quick.items():
+        uri = file_uri(os.path.join(quick_root, name))
+        q.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "iyi",
+                                                          "version": 1, "text": body}}, wait=False)
+        quick_diags[name] = (uri, q.diagnostics(uri)["diagnostics"])
+
+    def quick_fixes():
+        uri, diags = quick_diags["a.iyi"]
+        reply = q.send("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": diags[0]["range"],
+                                                   "context": {"diagnostics": diags}})
+        return [a["title"] for a in reply.get("result") or []]
+    before = quick_fixes()
+    time.sleep(3)  # the proxy replaces a worker after two quiet seconds
+    after = quick_fixes()
+    q.send("shutdown", {})
+    q.send("exit", {}, wait=False)
+    q.proc.wait(timeout=10)
+    step("70h", "a quick fix outlives an idle replacement in every open file",
+         before == after == ["Change to 'upcase'"], f"before {before}, after {after}")
+
     # 17. signatureHelp, asked right after the `(` lands — the buffer
     #     has no syntax there; the overload comes off the typed graph.
     c.send("textDocument/didChange",
@@ -536,6 +1931,497 @@ def main():
          kinds == [2, 3] and hl_lines == [5, 10],
          f"{len(highlights)} range(s) at lines {hl_lines}")
 
+    # 18b. documentHighlight on a local variable, which is neither a def
+    #      nor a call: it answered null. Its scope is the def, a block's
+    #      own parameter is another variable, and a same-named local in
+    #      another def is not this one. A document of its own, open in
+    #      the editor and never saved, so no other step sees it.
+    scoped = ("module locals\n\n"
+              "def one(count : Int32) : Int32\n"
+              "  total = count\n"
+              "  [1, 2].each do |count|\n"
+              "    total = total + count\n"
+              "  end\n"
+              "  total\n"
+              "end\n\n"
+              "def two : Int32\n"
+              "  total = 5\n"
+              "  total\n"
+              "end\n\n"
+              "puts one(1) + two\n")
+    locals_uri = file_uri(os.path.join(work, "locals.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": locals_uri, "languageId": "iyi",
+                             "version": 1, "text": scoped}}, wait=False)
+    c.diagnostics(locals_uri)
+
+    def sites(line, character):
+        reply = c.send("textDocument/documentHighlight",
+                       {"textDocument": {"uri": locals_uri},
+                        "position": {"line": line, "character": character}})
+        return sorted((h["range"]["start"]["line"],
+                       h["range"]["start"]["character"], h["kind"])
+                      for h in reply["result"] or [])
+
+    total = sites(7, 3)
+    param = sites(3, 10)
+    block = sites(5, 21)
+    step("18b", "documentHighlight marks a local in its own scope",
+         total == [(3, 2, 3), (5, 4, 3), (5, 12, 2), (7, 2, 2)] and
+         param == [(2, 8, 3), (3, 10, 2)] and
+         block == [(4, 18, 3), (5, 20, 2)],
+         f"total {total}, count {param}, the block's count {block}")
+
+    # 18c. The same sites answer references and rename, which refused a
+    #      local ("rename serves defs and their calls"): an editor could
+    #      not rename a variable at all. A new name already used in the
+    #      scope is refused, since the two would become one variable.
+    at_total = {"textDocument": {"uri": locals_uri},
+                "position": {"line": 7, "character": 3}}
+    refs = c.send("textDocument/references",
+                  dict(at_total, context={"includeDeclaration": False}))["result"] or []
+    ref_lines = sorted((r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in refs)
+    prepared = c.send("textDocument/prepareRename", at_total)["result"] or {}
+    renamed = c.send("textDocument/rename", dict(at_total, newName="sum"))
+    edits = (renamed.get("result") or {}).get("changes", {})
+    edit_sites = sorted((e["range"]["start"]["line"], e["range"]["start"]["character"], e["newText"])
+                        for e in edits.get(locals_uri, []))
+    clash = c.send("textDocument/rename", dict(at_total, newName="count"))
+    clash_error = (clash.get("error") or {}).get("message", "")
+    step("18c", "references and rename serve a local, and a clash is refused",
+         ref_lines == [(5, 4), (5, 12), (7, 2)] and
+         prepared.get("placeholder") == "total" and
+         list(edits) == [locals_uri] and
+         edit_sites == [(3, 2, "sum"), (5, 4, "sum"), (5, 12, "sum"), (7, 2, "sum")] and
+         "already a name" in clash_error,
+         f"references {ref_lines}, rename {edit_sites}, clash {clash_error[:60]!r}")
+
+    # 18d. Definition on a local is where it is first bound: a use of
+    #      `total` jumps to its first assignment, a use of the parameter
+    #      `count` to the parameter, a use of the block's `count` to the
+    #      block's. It answered null, `tool implementations` knowing calls.
+    def defined(line, character):
+        reply = c.send("textDocument/definition",
+                       {"textDocument": {"uri": locals_uri},
+                        "position": {"line": line, "character": character}})
+        return [(d["range"]["start"]["line"], d["range"]["start"]["character"])
+                for d in reply["result"] or []]
+    jumps = [defined(7, 3), defined(3, 10), defined(5, 21)]
+    step("18d", "definition on a local is where it is bound",
+         jumps == [[(3, 2)], [(2, 8)], [(4, 18)]], f"{jumps}")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": locals_uri}}, wait=False)
+
+    # 18e. An instance variable: every `@count` of its class, and the name
+    #      its accessor declares, which is the field's declaration. The
+    #      `@count` parameter is the field's too, not a local; a local
+    #      `count` beside it is its own variable; a nested class's
+    #      `@count` is another field. It answered null to all three
+    #      questions, and it is not renamed alone: its accessor carries the
+    #      name as a method.
+    fields = ("module fields\n\n"
+              "class Counter\n"
+              "  getter count : Int32\n"
+              "\n"
+              "  def initialize(@count : Int32)\n"
+              "  end\n"
+              "\n"
+              "  def bump : Nil\n"
+              "    count = 5\n"
+              "    @count = @count + count\n"
+              "  end\n"
+              "\n"
+              "  class Inner\n"
+              "    def initialize(@count : Int32)\n"
+              "    end\n"
+              "  end\n"
+              "end\n\n"
+              "puts Counter.new(1).count\n")
+    fields_uri = file_uri(os.path.join(work, "fields.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": fields_uri, "languageId": "iyi",
+                             "version": 1, "text": fields}}, wait=False)
+    c.diagnostics(fields_uri)
+    at_field = {"textDocument": {"uri": fields_uri},
+                "position": {"line": 10, "character": 14}}
+    lit = sorted((h["range"]["start"]["line"], h["range"]["start"]["character"],
+                  h["range"]["end"]["character"], h["kind"])
+                 for h in c.send("textDocument/documentHighlight", at_field)["result"] or [])
+    local_lit = sorted((h["range"]["start"]["line"], h["range"]["start"]["character"])
+                       for h in c.send("textDocument/documentHighlight",
+                                       {"textDocument": {"uri": fields_uri},
+                                        "position": {"line": 10, "character": 23}})["result"] or [])
+    field_refs = sorted((r["range"]["start"]["line"], r["range"]["start"]["character"])
+                        for r in c.send("textDocument/references",
+                                        dict(at_field, context={"includeDeclaration": False}))["result"] or [])
+    field_def = [(d["range"]["start"]["line"], d["range"]["start"]["character"])
+                 for d in c.send("textDocument/definition", at_field)["result"] or []]
+    refused = c.send("textDocument/rename", dict(at_field, newName="total")).get("error") or {}
+    step("18e", "an instance variable is its class's: highlight, references, definition",
+         lit == [(3, 9, 14, 3), (5, 17, 23, 3), (10, 4, 10, 3), (10, 13, 19, 2)] and
+         local_lit == [(9, 4), (10, 22)] and
+         field_refs == [(5, 17), (10, 4), (10, 13)] and
+         field_def == [(3, 9)] and
+         refused.get("code") == -32803 and "accessors" in refused.get("message", ""),
+         f"field {lit}, local {local_lit}, references {field_refs}, "
+         f"definition {field_def}, rename {refused.get('code')}")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": fields_uri}}, wait=False)
+
+    # 18f. A rename onto a name its owner already has is refused. It was
+    #      carried out: `shout` renamed to an existing `yell` left two
+    #      `def yell(name : String)`, the later replaced the earlier, and
+    #      `puts shout("a")` printed "a!" where it had printed "A". The top
+    #      level counts too - a def renamed `puts` would take the prelude's
+    #      bare calls - and a free name still renames.
+    clash = ("module clash\n\n"
+             "def shout(name : String) : String\n  name.upcase\nend\n\n"
+             "def yell(name : String) : String\n  name + \"!\"\nend\n\n"
+             "puts shout(\"a\")\nputs yell(\"b\")\n")
+    clash_uri = file_uri(os.path.join(work, "clash.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": clash_uri, "languageId": "iyi",
+                             "version": 1, "text": clash}}, wait=False)
+    c.diagnostics(clash_uri)
+    at_shout = {"textDocument": {"uri": clash_uri},
+                "position": {"line": 2, "character": 5}}
+    onto_yell = c.send("textDocument/rename", dict(at_shout, newName="yell")).get("error") or {}
+    onto_puts = c.send("textDocument/rename", dict(at_shout, newName="puts")).get("error") or {}
+    free = (c.send("textDocument/rename", dict(at_shout, newName="holler")).get("result") or {}).get("changes", {})
+    step("18f", "a rename onto a name already there is refused",
+         onto_yell.get("code") == -32803 and "already a method" in onto_yell.get("message", "") and
+         onto_puts.get("code") == -32803 and
+         len(free.get(clash_uri, [])) == 2,
+         f"onto yell {onto_yell.get('code')}, onto puts {onto_puts.get('code')}, "
+         f"onto holler {len(free.get(clash_uri, []))} edit(s)")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": clash_uri}}, wait=False)
+
+    # 18g. A local renamed onto a name a block inside its scope binds: the
+    #      block's uses of the local would read the block's parameter. It
+    #      was carried out, and `total = total + n` became `n = n + n`,
+    #      so the def returned 100 where it had returned 103.
+    shadow = ("module shadow\n\n"
+              "def sum : Int32\n"
+              "  total = 100\n"
+              "  [1, 2].each do |n|\n"
+              "    total = total + n\n"
+              "  end\n"
+              "  total\n"
+              "end\n\n"
+              "puts sum\n")
+    shadow_uri = file_uri(os.path.join(work, "shadow.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": shadow_uri, "languageId": "iyi",
+                             "version": 1, "text": shadow}}, wait=False)
+    c.diagnostics(shadow_uri)
+    at_total = {"textDocument": {"uri": shadow_uri},
+                "position": {"line": 3, "character": 3}}
+    onto_n = c.send("textDocument/rename", dict(at_total, newName="n")).get("error") or {}
+    onto_acc = (c.send("textDocument/rename", dict(at_total, newName="acc")).get("result") or {}).get("changes", {})
+    step("18g", "a local is not renamed onto a block parameter's name",
+         onto_n.get("code") == -32803 and "already a name" in onto_n.get("message", "") and
+         len(onto_acc.get(shadow_uri, [])) == 4,
+         f"onto n {onto_n.get('code')}, onto acc {len(onto_acc.get(shadow_uri, []))} edit(s)")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": shadow_uri}}, wait=False)
+
+    # 18h. A rename onto a name a module that imports the def has of its
+    #      own is refused too. A module's own def beats an imported one
+    #      (II.3 rule 2), so `shout` renamed to `yell` in `loud/lib` moved
+    #      `import loud/lib::{shout}` to `{yell}` in `loud/app`, and app's
+    #      `puts shout("a")` became `puts yell("a")` - app's own `yell` -
+    #      printing "a!" where it had printed "A", with nothing refused.
+    #      The importer is a file nobody opened; a free name still renames
+    #      both files.
+    loud = os.path.join(work, "loud")
+    os.makedirs(loud)
+    loud_lib = os.path.join(loud, "lib.iyi")
+    loud_lib_text = "module loud/lib\n\npub def shout(s : String) : String\n  s.upcase\nend\n"
+    with open(loud_lib, "w", newline="") as f:
+        f.write(loud_lib_text)
+    with open(os.path.join(loud, "app.iyi"), "w", newline="") as f:
+        f.write("module loud/app\n\nimport loud/lib::{shout}\n\n"
+                "def yell(s : String) : String\n  s + \"!\"\nend\n\n"
+                "puts shout(\"a\")\nputs yell(\"b\")\n")
+    loud_uri = file_uri(loud_lib)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": loud_uri, "languageId": "iyi",
+                             "version": 1, "text": loud_lib_text}}, wait=False)
+    c.diagnostics(loud_uri)
+    at_loud = {"textDocument": {"uri": loud_uri},
+               "position": {"line": 2, "character": 9}}
+    onto_app = c.send("textDocument/rename", dict(at_loud, newName="yell")).get("error") or {}
+    free = (c.send("textDocument/rename", dict(at_loud, newName="holler")).get("result") or {}).get("changes", {})
+    free_files = sorted(u.rsplit("/", 1)[-1] for u in free)
+    step("18h", "a rename onto a name an importer has is refused",
+         onto_app.get("code") == -32803 and "loud/app" in onto_app.get("message", "") and
+         free_files == ["app.iyi", "lib.iyi"] and sum(len(e) for e in free.values()) == 3,
+         f"onto yell {onto_app.get('code')} {onto_app.get('message', '')[:80]!r}, "
+         f"onto holler {sum(len(e) for e in free.values())} edit(s) in {free_files}")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": loud_uri}}, wait=False)
+
+    # 18i. An importer compiles against an unsaved buffer of a module
+    #      below the root. The resolver spells that file with the module
+    #      path's own `/` inside a native root, the buffer is keyed by the
+    #      path its URI names, and on Windows the two never met: a def
+    #      renamed in `nest/lib`'s buffer left `nest/use`'s verdict clean,
+    #      compiled against the disk.
+    nest = os.path.join(work, "nest")
+    os.makedirs(nest)
+    nest_lib = os.path.join(nest, "lib.iyi")
+    nest_use = os.path.join(nest, "use.iyi")
+    nest_lib_text = "module nest/lib\n\npub def token : String\n  \"NUM\"\nend\n"
+    nest_use_text = "module nest/use\n\nimport nest/lib::{token}\n\nputs token\n"
+    with open(nest_lib, "w", newline="") as f:
+        f.write(nest_lib_text)
+    with open(nest_use, "w", newline="") as f:
+        f.write(nest_use_text)
+    nest_lib_uri, nest_use_uri = file_uri(nest_lib), file_uri(nest_use)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": nest_use_uri, "languageId": "iyi",
+                             "version": 1, "text": nest_use_text}}, wait=False)
+    clean_first = c.diagnostics(nest_use_uri)["diagnostics"] == []
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": nest_lib_uri, "languageId": "iyi", "version": 1,
+                             "text": nest_lib_text.replace("def token", "def tok")}}, wait=False)
+    c.diagnostics(nest_lib_uri)
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": nest_use_uri, "version": 2},
+            "contentChanges": [{"text": nest_use_text + "\n"}]}, wait=False)
+    after = c.diagnostics(nest_use_uri)["diagnostics"]
+    step("18i", "an importer compiles against a nested module's unsaved buffer",
+         clean_first and any("token" in d["message"] for d in after),
+         f"clean first {clean_first}, after the buffer's rename: "
+         f"{[d['message'][:60] for d in after]}")
+    for uri in (nest_lib_uri, nest_use_uri):
+        c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+
+    # 18j. Where the project sits is not what it holds. The workspace walk
+    #      skipped a file whose absolute path had `/.` or `/lib/` in it -
+    #      meant for `.git` and a dependency's `lib` inside the root - so a
+    #      project under `~/.config` or any `lib` directory had no files:
+    #      a rename edited the def and left its importer calling a name
+    #      that no longer exists. A server of its own, rooted there.
+    for parent in (".outer", "lib"):
+        proj = os.path.join(work, "placed", parent, "proj")
+        os.makedirs(proj)
+        placed_lib = os.path.join(proj, "greet.iyi")
+        placed_text = "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n"
+        with open(placed_lib, "w", newline="") as f:
+            f.write(placed_text)
+        with open(os.path.join(proj, "app.iyi"), "w", newline="") as f:
+            f.write("module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n")
+        # And on Windows two junctions the walk has to step past: one back
+        # to the root, which it followed until the paths were too long to
+        # open, and one this user may not list, which failed every
+        # workspace question with -32602 "Access is denied".
+        denied = None
+        if os.name == "nt" and parent == "lib":
+            subprocess.run(["cmd", "/c", "mklink", "/J", os.path.join(proj, "loop"), proj], capture_output=True)
+            os.makedirs(os.path.join(work, "placed", "elsewhere"))
+            denied = os.path.join(proj, "legacy")
+            subprocess.run(["cmd", "/c", "mklink", "/J", denied, os.path.join(work, "placed", "elsewhere")], capture_output=True)
+            subprocess.run(["icacls", denied, "/deny", os.environ["USERNAME"] + ":(RD)", "/L"], capture_output=True)
+        e = Client()
+        e.send("initialize", {"rootUri": file_uri(proj), "capabilities": {}})
+        e.send("initialized", {}, wait=False)
+        placed_uri = file_uri(placed_lib)
+        e.send("textDocument/didOpen",
+               {"textDocument": {"uri": placed_uri, "languageId": "iyi",
+                                 "version": 1, "text": placed_text}}, wait=False)
+        e.diagnostics(placed_uri)
+        placed = (e.send("textDocument/rename",
+                         {"textDocument": {"uri": placed_uri},
+                          "position": {"line": 2, "character": 9},
+                          "newName": "holler"}).get("result") or {}).get("changes", {})
+        placed_files = sorted(u.rsplit("/", 1)[-1] for u in placed)
+        e.send("shutdown", {})
+        e.send("exit", {}, wait=False)
+        e.proc.wait(timeout=10)
+        if denied:
+            subprocess.run(["icacls", denied, "/remove:d", os.environ["USERNAME"], "/L"], capture_output=True)
+            for junction in (denied, os.path.join(proj, "loop")):
+                os.rmdir(junction)
+        step(f"18j{parent}", f"a project under a `{parent}` directory renames into its importer",
+             placed_files == ["app.iyi", "greet.iyi"],
+             f"rename edited {placed_files}")
+
+    # 18m. A multi-root workspace is every folder, not the first: a rename
+    #      in the second folder left its importer calling the old name, and
+    #      workspace/symbol knew nothing of it.
+    folders = [os.path.join(work, "roots", name) for name in ("first", "second")]
+    for folder in folders:
+        os.makedirs(folder)
+    with open(os.path.join(folders[0], "other.iyi"), "w", newline="") as f:
+        f.write("module other\n\nputs 1\n")
+    second_lib = os.path.join(folders[1], "greet.iyi")
+    second_text = "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n"
+    with open(second_lib, "w", newline="") as f:
+        f.write(second_text)
+    with open(os.path.join(folders[1], "app.iyi"), "w", newline="") as f:
+        f.write("module app\n\nimport greet::{shout}\n\ndef announce : String\n  shout(\"a\")\nend\n\nputs announce\n")
+    e = Client()
+    e.send("initialize", {"rootUri": file_uri(folders[0]), "capabilities": {},
+                          "workspaceFolders": [{"uri": file_uri(folder), "name": os.path.basename(folder)}
+                                               for folder in folders]})
+    e.send("initialized", {}, wait=False)
+    second_uri = file_uri(second_lib)
+    e.send("textDocument/didOpen",
+           {"textDocument": {"uri": second_uri, "languageId": "iyi",
+                             "version": 1, "text": second_text}}, wait=False)
+    e.diagnostics(second_uri)
+    multi = (e.send("textDocument/rename",
+                    {"textDocument": {"uri": second_uri},
+                     "position": {"line": 2, "character": 9},
+                     "newName": "holler"}).get("result") or {}).get("changes", {})
+    multi_files = sorted(u.rsplit("/", 1)[-1] for u in multi)
+    announced = [sym["name"] for sym in e.send("workspace/symbol", {"query": "announce"}).get("result") or []]
+    e.send("shutdown", {})
+    e.send("exit", {}, wait=False)
+    e.proc.wait(timeout=10)
+    step("18m", "a multi-root workspace is every folder, not the first",
+         multi_files == ["app.iyi", "greet.iyi"] and announced == ["announce"],
+         f"rename edited {multi_files}, workspace/symbol found {announced}")
+
+    # 70c. A workspace file the server may not read is skipped, as a directory
+    #      that will not list is. One held open by a process that shares
+    #      nothing failed workspace symbols, completion, references, rename
+    #      and workspace diagnostics with -32602 "locked.iyi: The process
+    #      cannot access the file because it is being used by another
+    #      process."; one whose ACL denies reading, with "Access is denied.".
+    locked_root = tempfile.mkdtemp(prefix="iyi-lsp-locked")
+    locked_files = {"greet.iyi": "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n",
+                    "app.iyi": "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n",
+                    "locked.iyi": "module locked\n\nputs 1\n"}
+    for name, body in locked_files.items():
+        with open(os.path.join(locked_root, name), "w", newline="") as f:
+            f.write(body)
+    locked = os.path.join(locked_root, "locked.iyi")
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                         ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        held = kernel32.CreateFileW(locked, 0x80000000, 0, None, 3, 0x80, None)  # read, share nothing
+        release = lambda: kernel32.CloseHandle(held)
+    else:
+        os.chmod(locked, 0)
+        release = lambda: os.chmod(locked, 0o644)
+    try:
+        open(locked).close()
+        unreadable = False  # root reads anything
+    except OSError:
+        unreadable = True
+    lk = Client()
+    lk.send("initialize", {"rootUri": file_uri(locked_root), "capabilities": {}})
+    lk.send("initialized", {}, wait=False)
+    locked_app = file_uri(os.path.join(locked_root, "app.iyi"))
+    lk.send("textDocument/didOpen", {"textDocument": {"uri": locked_app, "languageId": "iyi", "version": 1,
+                                                       "text": locked_files["app.iyi"]}}, wait=False)
+    lk.diagnostics(locked_app)
+    at_shout = {"textDocument": {"uri": locked_app}, "position": {"line": 4, "character": 6}}
+    asks = [("workspace/symbol", {"query": "sh"}),
+            ("textDocument/completion", {"textDocument": {"uri": locked_app}, "position": {"line": 4, "character": 7}}),
+            ("textDocument/references", dict(at_shout, context={"includeDeclaration": True})),
+            ("textDocument/rename", dict(at_shout, newName="yell")),
+            ("workspace/diagnostic", {"previousResultIds": []})]
+    failed = [method for method, params in asks if "error" in lk.send(method, params)]
+    lk.send("shutdown", {})
+    lk.send("exit", {}, wait=False)
+    lk.proc.wait(timeout=10)
+    release()
+    step("70c", "a workspace file the server may not read is skipped",
+         not failed, f"failed {failed}" if unreadable else "skipped: this user reads every file")
+
+    # 70d. and workspace/symbol lists the workspace in linear time. Each
+    #      file was checked against every path already listed: a query that
+    #      matched nothing took 344 ms over 500 files and 3,031 ms over
+    #      2,000, nine times as long for four times the files.
+    def symbol_seconds(count):
+        root = tempfile.mkdtemp(prefix=f"iyi-lsp-symbols{count}")
+        for i in range(count):
+            with open(os.path.join(root, f"m{i:04d}.iyi"), "w", newline="") as f:
+                f.write(f"module m{i:04d}\n\npub def f{i}(x : Int32) : Int32\n  x\nend\n")
+        s = Client()
+        s.send("initialize", {"rootUri": file_uri(root), "capabilities": {}})
+        s.send("initialized", {}, wait=False)
+        best = None
+        for query in ("zzqqzz", "zzqqzy", "zzqqzx"):
+            started = time.monotonic()
+            s.send("workspace/symbol", {"query": query})
+            took = time.monotonic() - started
+            best = took if best is None else min(best, took)
+        s.send("shutdown", {})
+        s.send("exit", {}, wait=False)
+        s.proc.wait(timeout=10)
+        return best
+    # One pair of timings is one sample of a shared machine: a Windows
+    # runner once took longer than six times over the 2,000 files on a
+    # build that changed nothing here (job 119640679891). So a pair over
+    # the bound is measured again, up to twice, before it counts; the
+    # quadratic listing above measured nine times, well clear of six.
+    for attempt in range(3):
+        small, large = symbol_seconds(500), symbol_seconds(2000)
+        if large < 6 * small:
+            break
+    step("70d", "workspace/symbol takes time linear in the workspace", large < 6 * small,
+         f"2,000 files held under six times 500's: {large * 1000:.0f} ms against {small * 1000:.0f} ms")
+
+    # 18k. The URIs an answer names are URIs: the client's own for a file
+    #      it has open, and for any other one a percent-encoded URI that
+    #      names that file. The path went behind `file:///` as it stood,
+    #      so `#` made the rest of the path a fragment, `%41` decoded to
+    #      another name, and a space never equalled the spelling an editor
+    #      sent - here VS Code's, `c%3A` and all.
+    from urllib.parse import quote
+    odd = os.path.join(work, "odd #1 50%41 \u011f")
+    os.makedirs(odd)
+    odd_lib = os.path.join(odd, "greet.iyi")
+    odd_app = os.path.join(odd, "app.iyi")
+    with open(odd_lib, "w", newline="") as f:
+        f.write("module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n")
+    odd_app_text = "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n"
+    with open(odd_app, "w", newline="") as f:
+        f.write(odd_app_text)
+    absolute = os.path.abspath(odd_app).replace("\\", "/")
+    if os.name == "nt":
+        vscode_uri = "file:///" + absolute[0].lower() + "%3A" + quote(absolute[2:])
+    else:
+        vscode_uri = "file://" + quote(absolute)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": vscode_uri, "languageId": "iyi",
+                             "version": 1, "text": odd_app_text}}, wait=False)
+    c.diagnostics(vscode_uri)
+    at_call = {"textDocument": {"uri": vscode_uri}, "position": {"line": 4, "character": 6}}
+    found = c.send("textDocument/definition", at_call).get("result") or []
+    found_uri = found[0]["uri"] if found else ""
+    renamed = (c.send("textDocument/rename", dict(at_call, newName="holler")).get("result") or {}).get("changes", {})
+    keys = sorted(renamed)
+    others = [k for k in keys if k != vscode_uri]
+    step("18k", "answers name files by the client's URI, or by an encoded one",
+         found_uri != "" and uri_path(found_uri) == uri_path(file_uri(odd_lib)) and os.path.exists(uri_path(found_uri)) and
+         vscode_uri in keys and len(keys) == 2 and
+         all(os.path.exists(uri_path(k)) for k in others),
+         f"definition {found_uri!r}, rename keys {keys}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": vscode_uri}}, wait=False)
+    # And a file on a share: `file://server/share/...` names a UNC path.
+    #  Its authority was read as the path's first segment, relative to the
+    #  server's own directory, and the module beside it was not found.
+    share = r"\\127.0.0.1\C$"
+    if os.name == "nt" and os.path.splitdrive(odd_app)[0].upper() == "C:" and os.path.exists(share):
+        unc_uri = pathlib.Path(share + odd_app[2:]).as_uri()
+        c.send("textDocument/didOpen",
+               {"textDocument": {"uri": unc_uri, "languageId": "iyi",
+                                 "version": 1, "text": odd_app_text}}, wait=False)
+        unc_diags = [d["message"][:60] for d in c.diagnostics(unc_uri)["diagnostics"]]
+        c.send("textDocument/didClose", {"textDocument": {"uri": unc_uri}}, wait=False)
+        step("18k-unc", "a file on a share finds the module beside it", unc_diags == [],
+             f"{unc_uri}: {unc_diags}")
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",
@@ -555,6 +2441,43 @@ def main():
                 and s["location"]["uri"].endswith("greet.iyi")), None)
     step(20, "workspace/symbol finds the def across the project",
          hit is not None, f"{len(syms)} symbol(s)")
+
+    # 70b. A module whose bytes are not UTF-8 - saved as Windows-1254 - is a
+    #      diagnostic, and only its own. The in-process compile exited on
+    #      it: its hover and diagnostic pull answered -32603 "did not
+    #      survive it", and workspace symbols and completion in every other
+    #      file -32603 "Unexpected byte 0xfe".
+    legacy_root = tempfile.mkdtemp(prefix="iyi-lsp-legacy")
+    legacy_app_text = "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\nputs sho\n"
+    with open(os.path.join(legacy_root, "greet.iyi"), "w", newline="") as f:
+        f.write("module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n")
+    with open(os.path.join(legacy_root, "app.iyi"), "w", newline="") as f:
+        f.write(legacy_app_text)
+    with open(os.path.join(legacy_root, "legacy.iyi"), "wb") as f:
+        f.write("module legacy\n\n# şarkı söyle\npub def şık : String\n  \"ğüş\"\nend\n".encode("cp1254"))
+    lg = Client()
+    lg.send("initialize", {"rootUri": file_uri(legacy_root), "capabilities": {}})
+    lg.send("initialized", {}, wait=False)
+    legacy_app = file_uri(os.path.join(legacy_root, "app.iyi"))
+    legacy_uri = file_uri(os.path.join(legacy_root, "legacy.iyi"))
+    lg.send("textDocument/didOpen", {"textDocument": {"uri": legacy_app, "languageId": "iyi", "version": 1,
+                                                       "text": legacy_app_text}}, wait=False)
+    lg.diagnostics(legacy_app)
+    pulled = lg.send("textDocument/diagnostic", {"textDocument": {"uri": legacy_uri}})
+    symbols = lg.send("workspace/symbol", {"query": "shout"})
+    offered = lg.send("textDocument/completion", {"textDocument": {"uri": legacy_app},
+                                                  "position": {"line": 5, "character": 8}})
+    outline = lg.send("textDocument/documentSymbol", {"textDocument": {"uri": legacy_uri}})
+    lg.send("shutdown", {})
+    lg.send("exit", {}, wait=False)
+    lg.proc.wait(timeout=10)
+    errors = [r["error"]["message"][:60] for r in (pulled, symbols, offered, outline) if "error" in r]
+    said = [d["message"] for d in (pulled.get("result") or {}).get("items", [])]
+    labels = [i["label"] for i in (offered.get("result") or {}).get("items", [])]
+    step("70b", "a module that is not UTF-8 is its own diagnostic, and nobody else's",
+         not errors and any("not a valid iyi source file" in m for m in said) and "shout" in labels
+         and [s["name"] for s in symbols.get("result") or []] == ["shout"],
+         f"errors {errors}, said {[m[:50] for m in said]}")
 
     # 21. prepareRename: the range and placeholder before the input box.
     reply = c.send("textDocument/prepareRename",
@@ -632,6 +2555,151 @@ def main():
          formatted.count("\n") == sloppy.count("\n"),
          "one whole-document edit, call tightened")
 
+    # 25c. A CRLF buffer formats in CRLF, as `iyi format` writes a file:
+    #      a formatted one needs no edit, and a sloppy one's edit keeps
+    #      every line's `\r\n`. The server answered both with LF, a
+    #      whole-document rewrite on every save. And an edit whose range
+    #      runs past a line's end stops before its `\r`, which the spec
+    #      says and the server's offsets did not: the buffer lost the `\r`
+    #      and stopped matching the editor's.
+    crlf_path = os.path.join(work, "crlf.iyi")
+    crlf_text = "module crlf\r\n\r\nputs 1\r\nputs 2\r\n"
+    crlf_uri = file_uri(crlf_path)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": crlf_uri, "languageId": "iyi",
+                             "version": 1, "text": crlf_text}}, wait=False)
+    c.diagnostics(crlf_uri)
+    fmt = {"textDocument": {"uri": crlf_uri}, "options": {"tabSize": 2, "insertSpaces": True}}
+    clean = c.send("textDocument/formatting", fmt)["result"]
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": crlf_uri, "version": 2},
+            "contentChanges": [{"range": {"start": {"line": 2, "character": 5},
+                                          "end": {"line": 2, "character": 100}},
+                                "text": "3"}]}, wait=False)
+    c.diagnostics(crlf_uri)
+    after_edit = c.send("textDocument/formatting", fmt)["result"]
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": crlf_uri, "version": 3},
+            "contentChanges": [{"text": "module crlf\r\n\r\nputs(  3 )\r\nputs 2\r\n"}]}, wait=False)
+    c.diagnostics(crlf_uri)
+    sloppy_edits = c.send("textDocument/formatting", fmt)["result"] or []
+    sloppy_text = sloppy_edits[0]["newText"] if sloppy_edits else ""
+    step("25c", "a CRLF buffer formats in CRLF, and an edit past a line's end keeps its \\r",
+         clean == [] and after_edit == [] and
+         sloppy_text.count("\r\n") == 4 and sloppy_text.count("\n") == 4,
+         f"formatted: {clean!r}, after the edit: {len(after_edit or [])} edit(s), "
+         f"sloppy: {sloppy_text!r}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": crlf_uri}}, wait=False)
+
+    # 25d. Rename takes the names the compiler takes: `şarkı` for a local,
+    #      `söyle` for a def, and back from one to ASCII. It refused every
+    #      non-ASCII name ("'şarkı' is not an iyi variable name"), where
+    #      `def söyle(şarkı : String)` compiles. A name the lexer reads as a
+    #      constant, `Şarkı`, is still refused for a local.
+    def applied(text, edits):
+        lines = text.split("\n")
+        for e in sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True):
+            r = e["range"]
+            line = lines[r["start"]["line"]]
+            lines[r["start"]["line"]] = line[:r["start"]["character"]] + e["newText"] + line[r["end"]["character"]:]
+        return "\n".join(lines)
+    uni_path = os.path.join(work, "uni.iyi")
+    uni_uri = file_uri(uni_path)
+    uni_text = 'module uni\n\ndef sing(song : String) : String\n  song + song\nend\n\nputs sing("la")\n'
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": uni_uri, "languageId": "iyi",
+                             "version": 1, "text": uni_text}}, wait=False)
+    c.diagnostics(uni_uri)
+    def renamed(line, character, name):
+        reply = c.send("textDocument/rename",
+                       {"textDocument": {"uri": uni_uri},
+                        "position": {"line": line, "character": character},
+                        "newName": name})
+        return reply.get("result"), reply.get("error")
+    to_local, _ = renamed(3, 3, "şarkı")
+    step_one = applied(uni_text, (to_local or {}).get("changes", {}).get(uni_uri, []))
+    to_def, _ = renamed(6, 6, "söyle")
+    step_two = applied(step_one, (to_def or {}).get("changes", {}).get(uni_uri, []))
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": uni_uri, "version": 2},
+            "contentChanges": [{"text": step_two}]}, wait=False)
+    uni_diags = c.diagnostics(uni_uri)["diagnostics"]
+    back, _ = renamed(3, 4, "tune")
+    step_three = applied(step_two, (back or {}).get("changes", {}).get(uni_uri, []))
+    _, constant = renamed(3, 4, "Şarkı")
+    step("25d", "rename takes the names the compiler takes, in any script",
+         step_two == 'module uni\n\ndef söyle(şarkı : String) : String\n  şarkı + şarkı\nend\n\nputs söyle("la")\n' and
+         not uni_diags and
+         step_three == step_two.replace("şarkı", "tune") and
+         constant is not None,
+         # ascii(): a runner's console may be cp1252, which has no `ş`.
+         f"after two renames {ascii(step_two)}, diagnostics {ascii(uni_diags)}, back {ascii(step_three)}, "
+         f"the constant-cased name refused: {constant is not None}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": uni_uri}}, wait=False)
+
+    # 70e. A rename onto a word the lexer does not read as a plain name is
+    #      refused, and a keyword is judged by the parser where it lands.
+    #      `end`, `nil`, `Hi` and `_` were taken for a def, and `do`,
+    #      `typeof`, `abstract`, `__LINE__` and `_` for a variable, each
+    #      applied and each leaving an error. The server asks the lexer
+    #      (`lexed_name`) and parses the result; `type` still renames.
+    names_path = os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-names"), "names.iyi")
+    names_text = "module names\n\ndef hi(n : Int32) : Int32\n  n + 1\nend\n\nputs hi(2)\nv = 3\nputs v\n"
+    with open(names_path, "w", newline="") as f:
+        f.write(names_text)
+    names_uri = file_uri(names_path)
+    c.send("textDocument/didOpen", {"textDocument": {"uri": names_uri, "languageId": "iyi", "version": 1,
+                                                      "text": names_text}}, wait=False)
+    c.diagnostics(names_uri)
+
+    def rename_code(line, name):
+        reply = c.send("textDocument/rename", {"textDocument": {"uri": names_uri},
+                                               "position": {"line": line, "character": 5}, "newName": name})
+        return (reply.get("error") or {}).get("code", "applied")
+    refusals = [rename_code(6, w) for w in ("end", "nil", "Hi", "_")] + \
+        [rename_code(8, w) for w in ("do", "typeof", "abstract", "__LINE__", "_")]
+    kept = [rename_code(8, "type"), rename_code(6, "hey")]
+    c.send("textDocument/didClose", {"textDocument": {"uri": names_uri}}, wait=False)
+    step("70e", "a rename onto a reserved word is refused, a name is not",
+         refusals == [-32803] * 9 and kept == ["applied", "applied"], f"refused {refusals}, kept {kept}")
+
+    # 25b. and formatting a buffer that imports a package. The host segment
+    #      is one segment to the parser and three tokens to the lexer, and
+    #      the formatter fell behind its own stream on it — raising a plain
+    #      exception, which this handler does not rescue: an editor asking
+    #      to format any file that imports a package got an error back
+    #      rather than an edit. The path has to survive the round trip.
+    # Outside the workspace on purpose: the import does not resolve — there
+    # is no such package — and step 31 judges every file the workspace
+    # holds. Formatting is a question about bytes, so the file needs no
+    # dependency to answer it.
+    outside = tempfile.mkdtemp(prefix="iyi-lsp-gate-outside")
+    pkg_path = os.path.join(outside, "pkg.iyi")
+    pkg_text = ("import example.test/user/lib\n"
+                "import example.test/user/lib::{value}\n\nx=value\n")
+    with open(pkg_path, "w") as f:
+        f.write(pkg_text)
+    pkg_uri = file_uri(pkg_path)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": pkg_uri, "languageId": "iyi",
+                             "version": 1, "text": pkg_text}}, wait=False)
+    c.diagnostics(pkg_uri)
+    reply = c.send("textDocument/formatting",
+                   {"textDocument": {"uri": pkg_uri},
+                    "options": {"tabSize": 2, "insertSpaces": True}})
+    edits = reply.get("result") or []
+    formatted = edits[0]["newText"] if edits else ""
+    step(25, "formatting a buffer that imports a package",
+         "error" not in reply and len(edits) == 1 and
+         "import example.test/user/lib\n" in formatted and
+         "import example.test/user/lib::{value}\n" in formatted and
+         "x = value" in formatted,
+         reply.get("error", {}).get("message", "the path survived, x = value"))
+    # Closed again, the way an editor closes a buffer: an open document is
+    # one the server judges, and step 31's verdict is about the workspace.
+    c.send("textDocument/didClose", {"textDocument": {"uri": pkg_uri}},
+           wait=False)
+
     # 26. a trait, its impl, and the call graph around them — one
     #     fixture serves implementation, call hierarchy, and selection.
     shapes_path = os.path.join(work, "shapes.iyi")
@@ -644,7 +2712,7 @@ def main():
                    "  thing.paint\nend\n\nputs render(Dot.new)\n")
     with open(shapes_path, "w") as f:
         f.write(shapes_text)
-    shapes_uri = "file://" + shapes_path
+    shapes_uri = file_uri(shapes_path)
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": shapes_uri, "languageId": "iyi",
                              "version": 1, "text": shapes_text}}, wait=False)
@@ -688,6 +2756,19 @@ def main():
          paint_item is not None and paint_item["name"] == "paint" and
          "render" in callers and "paint" in callees,
          f"paint <- {callers}, render -> {callees}")
+
+    # 28b. and a def's callers are the calls the person wrote: `render`
+    #      is called once, at the file's last line. Incoming calls to any
+    #      def also listed the def's own file as a caller at the def's own
+    #      line - a call the compiler made there.
+    render_callers = []
+    if render_items:
+        reply = c.send("callHierarchy/incomingCalls", {"item": render_items[0]})
+        render_callers = [(e["from"]["name"], [r["start"]["line"] for r in e["fromRanges"]])
+                          for e in reply["result"] or []]
+    step("28b", "a def's incoming calls are the calls written",
+         [lines for _, lines in render_callers] == [[19]],
+         f"render <- {render_callers}")
 
     # 29. selectionRange: expand from inside the string literal, out
     #     through the def, to the file — strictly nested.
@@ -762,7 +2843,47 @@ def main():
          len(again) == len(items) and
          all(i["kind"] == "unchanged" and i["resultId"] for i in again) and
          elapsed < 0.5,
-         f"{len(again)} unchanged in {elapsed * 1000:.0f} ms")
+         f"{sum(i['kind'] == 'unchanged' for i in again)} of {len(again)} "
+         f"unchanged in {elapsed * 1000:.0f} ms")
+
+    # 31b'. and still so after the worker is replaced. The proxy retires
+    #       it when the wire is quiet for two seconds, and the ids the
+    #       client holds are handed to the successor: an id seeded by the
+    #       process that made it read as changed there, and the first
+    #       pull after every replacement compiled the whole workspace.
+    #       A retirement on the memory bound may have come first, and
+    #       then the first quiet warms that successor and the next one
+    #       replaces it, so the wait is for the pid to move, bounded.
+    #       Where the workers cannot be listed (BSD `ps` has no `--ppid`)
+    #       the wait is the two quiet periods that cover it, and the pid
+    #       move is reported unmeasured rather than asserted. Windows lists
+    #       them from the process snapshot (`children`).
+    before = children(c.proc.pid)
+    if before:
+        deadline = time.monotonic() + 10
+        while children(c.proc.pid) == before and time.monotonic() < deadline:
+            time.sleep(0.25)
+        time.sleep(0.5)
+    else:
+        time.sleep(5)
+    after = children(c.proc.pid)
+    replaced = before != after if before else True
+    # The successor is warmed as it starts - the focused buffer's
+    # diagnostics, a compile - and a request behind that waits for it:
+    # on a Windows runner the pull once read 594 ms, the warm-up's tail,
+    # against 15 to 47 ms every other run. One cheap round trip first, so
+    # the time below is the pull's own.
+    c.send("textDocument/documentSymbol", {"textDocument": {"uri": app_uri}})
+    started = time.monotonic()
+    reply = c.send("workspace/diagnostic", {"previousResultIds": previous})
+    elapsed = time.monotonic() - started
+    kinds = [i["kind"] for i in reply["result"]["items"]]
+    step("31b'", "a replaced worker reads the same ids as unchanged",
+         replaced and len(kinds) == len(items) and
+         all(k == "unchanged" for k in kinds) and elapsed < 0.5,
+         f"worker {before or 'unmeasured'} -> {after or 'unmeasured'}, "
+         f"{kinds.count('unchanged')} of "
+         f"{len(kinds)} unchanged in {elapsed * 1000:.0f} ms")
 
     # 31c. one file on disk moves, and the next pull is full for that
     #      file and unchanged for every other: `broken.iyi` imports
@@ -836,11 +2957,11 @@ def main():
     #     without one.
     printer_path = os.path.join(calc, "printer.iyi")
     printer_text = ("module calc/printer\n\nimport calc/lexer\n"
-                    "using calc/lexer::{token}\n\n"
+                    "import calc/lexer::{token}\n\n"
                     "pub def show : String\n  token\nend\n\nputs show\n")
     with open(printer_path, "w") as f:
         f.write(printer_text)
-    lexer_uri = "file://" + os.path.join(calc, "lexer.iyi")
+    lexer_uri = file_uri(os.path.join(calc, "lexer.iyi"))
     reply = c.send("textDocument/references",
                    {"textDocument": {"uri": lexer_uri},
                     "position": {"line": 2, "character": 9},
@@ -863,6 +2984,39 @@ def main():
     step(33, "rename edits the unopened consumer too",
          changed == ["lexer.iyi", "parser.iyi", "printer.iyi"],
          f"{sum(len(e) for e in changes.values())} edit(s) across {changed}")
+
+    # 70a. And asked at a call: references and rename reach every importer
+    #      from either end. The cursor's place went to every entry's
+    #      compile, and only a compile holding the cursor's file matched it,
+    #      so `other.iyi` - an importer like `app.iyi` - was missed and the
+    #      rename left it calling a name that was gone. The defs the first
+    #      compile adopts are the seeds of the rest.
+    seeds_root = tempfile.mkdtemp(prefix="iyi-lsp-seeds")
+    seeds_files = {"greet.iyi": "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n",
+                   "app.iyi": "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n",
+                   "other.iyi": "module other\n\nimport greet::{shout}\n\nputs shout(\"b\")\n"}
+    for name, body in seeds_files.items():
+        with open(os.path.join(seeds_root, name), "w", newline="") as f:
+            f.write(body)
+    sd = Client()
+    sd.send("initialize", {"rootUri": file_uri(seeds_root), "capabilities": {}})
+    sd.send("initialized", {}, wait=False)
+    seeds_app = file_uri(os.path.join(seeds_root, "app.iyi"))
+    sd.send("textDocument/didOpen", {"textDocument": {"uri": seeds_app, "languageId": "iyi", "version": 1,
+                                                       "text": seeds_files["app.iyi"]}}, wait=False)
+    sd.diagnostics(seeds_app)
+    seeds_at = {"textDocument": {"uri": seeds_app}, "position": {"line": 4, "character": 6}}
+    found = sd.send("textDocument/references", dict(seeds_at, context={"includeDeclaration": True})).get("result") or []
+    found_sites = sorted((u["uri"].rsplit("/", 1)[-1], u["range"]["start"]["line"]) for u in found)
+    renamed = (sd.send("textDocument/rename", dict(seeds_at, newName="yell")).get("result") or {}).get("changes", {})
+    renamed_sites = sorted((u.rsplit("/", 1)[-1], len(edits)) for u, edits in renamed.items())
+    sd.send("shutdown", {})
+    sd.send("exit", {}, wait=False)
+    sd.proc.wait(timeout=10)
+    step("70a", "references and rename from a call reach every importer",
+         found_sites == [("app.iyi", 2), ("app.iyi", 4), ("greet.iyi", 2), ("other.iyi", 2), ("other.iyi", 4)]
+         and renamed_sites == [("app.iyi", 2), ("greet.iyi", 1), ("other.iyi", 2)],
+         f"references {found_sites}, rename {renamed_sites}")
 
     # 34. incoming calls cross the same boundary: the def in lexer.iyi
     #     is called by defs in both consumers, one of them never opened.
@@ -895,15 +3049,15 @@ def main():
         f.write("module shape/base\n\npub struct Box\n  def initialize\n  end\n\n"
                 "  def area : Int32\n    4\n  end\nend\n")
     with open(os.path.join(shape, "make.iyi"), "w") as f:
-        f.write("module shape/make\n\nimport shape/base\nusing shape/base::{Box}\n\n"
+        f.write("module shape/make\n\nimport shape/base::{Box}\n\n\n"
                 "pub def make : Box\n  Box.new\nend\n")
     with open(os.path.join(work, "use.iyi"), "w") as f:
-        f.write("module use\n\nimport shape/make\nusing shape/make::{make}\n\n"
+        f.write("module use\n\nimport shape/make::{make}\n\n\n"
                 "puts make.area\n")
     with open(os.path.join(work, "lone.iyi"), "w") as f:
         f.write("module lone\n\nstruct Other\n  def area : Int32\n    1\n  end\nend\n\n"
                 "puts Other.new.area\n")
-    base_uri = "file://" + os.path.join(shape, "base.iyi")
+    base_uri = file_uri(os.path.join(shape, "base.iyi"))
     reply = c.send("textDocument/references",
                    {"textDocument": {"uri": base_uri},
                     "position": {"line": 6, "character": 6},
@@ -917,11 +3071,14 @@ def main():
     # 35. auto-import completion: a fresh buffer that has never
     #     compiled types `tok`; the workspace's exports answer anyway
     #     (R-2 made `pub` a parse-time fact), and the item carries the
-    #     `import`/`using` pair as additionalTextEdits.
+    #     import line as an additionalTextEdit - one line, since
+    #     `import calc/lexer::{token}` loads the module and brings the name
+    #     into scope, and the buffer compiling clean after it is
+    #     the proof that the line is enough.
     scratch_path = os.path.join(work, "scratch.iyi")
     scratch_text = ("module scratch\n\ndef go : String\n  tok\nend\n\n"
                     "puts go\n")
-    scratch_uri = "file://" + scratch_path
+    scratch_uri = file_uri(scratch_path)
     with open(scratch_path, "w") as f:
         f.write(scratch_text)
     c.send("textDocument/didOpen",
@@ -954,11 +3111,11 @@ def main():
     step(35, "completion auto-imports across the workspace",
          token_item is not None and
          token_item["labelDetails"]["description"] == "calc/lexer" and
-         "import calc/lexer" in edited and
-         "using calc/lexer::{token}" in edited and clean,
-         "never-compiled buffer, item wrote the import/using pair")
+         "import calc/lexer" not in edited.split("\n") and
+         "import calc/lexer::{token}" in edited and clean,
+         "never-compiled buffer, item wrote the one import line")
 
-    # 36. the selective `using` grows instead of doubling: the buffer
+    # 36. the selective import grows instead of doubling: the buffer
     #     already selects {token}; completing glyph extends that line.
     broken2 = edited.replace("\nputs go\n", "\nputs go\nputs gly\n")
     c.send("textDocument/didChange",
@@ -973,10 +3130,52 @@ def main():
     glyph_item = next((i for i in items if i["label"] == "glyph"), None)
     extends = (glyph_item or {}).get("additionalTextEdits", [])
     new_using = extends[0]["newText"] if extends else ""
-    step(36, "completion extends the selective using line",
+    step(36, "completion extends the selective import line",
          glyph_item is not None and len(extends) == 1 and
-         new_using == "using calc/lexer::{token, glyph}",
+         new_using == "import calc/lexer::{token, glyph}",
          f"edit: {new_using!r}")
+
+    # 70k. The auto-import line is written in the buffer's own line ending:
+    #      a CRLF buffer was handed `import greet::{shout}\n`, and a client
+    #      that applies an edit as written makes the file mixed.
+    crlf_root = tempfile.mkdtemp(prefix="iyi-lsp-crlf")
+    crlf_app_text = "module app\r\n\r\nputs sho\r\n"
+    with open(os.path.join(crlf_root, "greet.iyi"), "w", newline="") as f:
+        f.write("module greet\r\n\r\npub def shout(s : String) : String\r\n  s.upcase\r\nend\r\n")
+    with open(os.path.join(crlf_root, "app.iyi"), "w", newline="") as f:
+        f.write(crlf_app_text)
+    cr = Client()
+    cr.send("initialize", {"rootUri": file_uri(crlf_root), "capabilities": {}})
+    cr.send("initialized", {}, wait=False)
+    crlf_app = file_uri(os.path.join(crlf_root, "app.iyi"))
+    cr.send("textDocument/didOpen", {"textDocument": {"uri": crlf_app, "languageId": "iyi", "version": 1,
+                                                       "text": crlf_app_text}}, wait=False)
+    cr.diagnostics(crlf_app)
+    reply = cr.send("textDocument/completion", {"textDocument": {"uri": crlf_app},
+                                                "position": {"line": 2, "character": 8}})
+    # 73i. and an import that is the last line, with no line ending after
+    #      it: the insert went to the line after it, which the document
+    #      does not have - `ch\nimport std/json` was handed an edit at 2:0.
+    #      It goes at the end of the last line, behind a line ending.
+    tail_text = "puts sho\nimport std/json"
+    tail = file_uri(os.path.join(crlf_root, "tail.iyi"))
+    cr.send("textDocument/didOpen", {"textDocument": {"uri": tail, "languageId": "iyi", "version": 1,
+                                                       "text": tail_text}}, wait=False)
+    cr.diagnostics(tail)
+    tailed = cr.send("textDocument/completion", {"textDocument": {"uri": tail},
+                                                 "position": {"line": 0, "character": 8}})
+    cr.send("shutdown", {})
+    cr.send("exit", {}, wait=False)
+    cr.proc.wait(timeout=10)
+    texts = [e["newText"] for i in (reply.get("result") or {}).get("items", []) if i["label"] == "shout"
+             for e in i.get("additionalTextEdits", [])]
+    step("70k", "an auto-import into a CRLF buffer ends its line in CRLF",
+         texts == ["import greet::{shout}\r\n"], f"edits {texts!r}")
+    at_end = [(e["range"]["start"]["line"], e["range"]["start"]["character"], e["newText"])
+              for i in (tailed.get("result") or {}).get("items", []) if i["label"] == "shout"
+              for e in i.get("additionalTextEdits", [])]
+    step("73i", "an auto-import after a last line with no line ending stays in the document",
+         at_end == [(1, 15, "\nimport greet::{shout}")], f"edits {at_end!r}")
 
     # 37. fuzzy ranks below prefix but still answers: `ucs` finds
     #     upcase on the receiver, tiered after any prefix match.
@@ -1014,6 +3213,19 @@ def main():
          ids == [rid] and reply.get("error", {}).get("code") == -32800,
          f"answer: {reply.get('error', reply.get('result'))!r}")
 
+    # 70g. A `$/cancelRequest` whose params are not an object names nothing
+    #      and is dropped. `["x"]`, `"x"` and `5` raised in the worker's own
+    #      loop, outside every rescue: the compiler-bug banner on stderr,
+    #      the worker gone, and the next request answered -32603.
+    survived = []
+    for odd in (["x"], "x", 5):
+        c.send("$/cancelRequest", odd, wait=False)
+        reply = c.send("textDocument/hover", {"textDocument": {"uri": app_uri},
+                                              "position": {"line": 0, "character": 0}})
+        survived.append("error" not in reply)
+    step("70g", "a cancel whose params are not an object is dropped",
+         survived == [True] * 3, f"answered after each: {survived}")
+
     # 39. a typing burst is one verdict: six didChanges drained
     #     together coalesce into one compile, and the verdict is the
     #     final text's. One write again, for the same reason.
@@ -1039,7 +3251,7 @@ def main():
          f"{published} publish(es) for 6 didChanges, final verdict clean")
 
     # 40. document links: the import block is clickable — `import
-    #     calc/lexer` and its `using` line both target lexer.iyi.
+    #     calc/lexer` and `import calc/lexer::{token}` both target lexer.iyi.
     reply = c.send("textDocument/documentLink",
                    {"textDocument": {"uri": parser_uri}})
     links = reply["result"] or []
@@ -1111,7 +3323,7 @@ def main():
     slow = os.path.join(work, "slow.iyi")
     with open(slow, "w") as f:
         f.write('module slow\n\nputs "started"\nsleep(2000)\nputs "done"\n')
-    slow_uri = "file://" + slow
+    slow_uri = file_uri(slow)
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": slow_uri, "languageId": "iyi",
                              "version": 1, "text": open(slow).read()}},
@@ -1129,6 +3341,30 @@ def main():
          "done" in ran.get("output", ""),
          f"answered in {waited * 1000:.0f} ms while the program slept, "
          f"then the run said {ran.get('output', '').split()[-1]!r}")
+
+    # 43c. and a buffer with no file behind it runs, and leaves nothing
+    #      behind. VS Code's `untitled:` buffer was run from a scratch
+    #      file beside the server's working directory whose name held the
+    #      scheme's `:`, which NTFS reads as a stream's name: the run
+    #      failed "The directory name is invalid" and left an empty
+    #      `.untitled` there.
+    untitled_uri = "untitled:Untitled-1"
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": untitled_uri, "languageId": "iyi",
+                             "version": 1,
+                             "text": 'module scratch\n\nputs "from nowhere"\n'}},
+           wait=False)
+    c.diagnostics(untitled_uri)
+    ran = c.send("workspace/executeCommand",
+                 {"command": "iyi.run", "arguments": [untitled_uri]})["result"] or {}
+    stray = [n for n in os.listdir(os.getcwd()) if n.startswith(".untitled")]
+    step("43c", "a buffer with no file behind it runs, and leaves nothing behind",
+         ran.get("ok") and ran.get("output", "").strip() == "from nowhere" and not stray,
+         f"ok {ran.get('ok')}, output {ran.get('output', '')!r}, "
+         f"error {ran.get('error', '')[:160]!r}, left {stray}")
+    for name in stray:
+        os.remove(os.path.join(os.getcwd(), name))
+    c.send("textDocument/didClose", {"textDocument": {"uri": untitled_uri}}, wait=False)
 
     # 44. snippet completion: a callable with parameters lands with the
     #     cursor inside its parentheses, because initialize said the
@@ -1153,18 +3389,27 @@ def main():
     # 45. semantic tokens delta: one appended line moves a few
     #     integers, not the file's whole stream, and the splice
     #     reconstructs exactly what a full answer says.
-    reply = c.send("textDocument/semanticTokens/full",
-                   {"textDocument": {"uri": shapes_uri}})
-    first = reply["result"]
-    c.send("textDocument/didChange",
-           {"textDocument": {"uri": shapes_uri, "version": 2},
-            "contentChanges": [{"text": shapes_text + "# renk\n"}]},
-           wait=False)
-    c.diagnostics(shapes_uri)
-    reply = c.send("textDocument/semanticTokens/full/delta",
-                   {"textDocument": {"uri": shapes_uri},
-                    "previousResultId": first["resultId"]})
-    delta = reply["result"]
+    #     The proxy retires a worker that has grown, between any two
+    #     requests, and a fresh worker knows no earlier resultId: its full
+    #     answer then is the protocol's fallback, not a failure. So a full
+    #     answer where a delta was asked is asked again, once.
+    retired = 0
+    for attempt in range(2):
+        reply = c.send("textDocument/semanticTokens/full",
+                       {"textDocument": {"uri": shapes_uri}})
+        first = reply["result"]
+        c.send("textDocument/didChange",
+               {"textDocument": {"uri": shapes_uri, "version": 2 + attempt},
+                "contentChanges": [{"text": shapes_text + "# renk\n" * (attempt + 1)}]},
+               wait=False)
+        c.diagnostics(shapes_uri)
+        reply = c.send("textDocument/semanticTokens/full/delta",
+                       {"textDocument": {"uri": shapes_uri},
+                        "previousResultId": first["resultId"]})
+        delta = reply["result"]
+        if "data" not in delta:
+            break
+        retired += 1
     rebuilt = list(first["data"])
     for e in delta.get("edits", []):
         rebuilt[e["start"]:e["start"] + e["deleteCount"]] = e["data"]
@@ -1174,17 +3419,22 @@ def main():
     step(45, "semantic token deltas splice to the full answer",
          "edits" in delta and "data" not in delta and rebuilt == fresh,
          f"{len(delta.get('edits', []))} edit(s) over "
-         f"{len(first['data'])} ints")
+         f"{len(first['data'])} ints, {retired} full answer(s) first")
 
     # 46. the binary is rebuilt under the running session, and the
     #     session holds: `make iyi` unlinks the executable, which makes
     #     Process.executable_path nil on Linux — the first Cursor
     #     screenshot's "$ORIGIN" failure. The server pinned its origin
-    #     at startup, so a fresh compile still finds the library.
-    binary = os.environ.get("IYI_BINARY", ".build/iyi")
+    #     at startup, so a fresh compile still finds the library. On
+    #     Windows a running binary cannot be unlinked, and Makefile.win
+    #     renames it aside instead (`REPLACE`), so that is what is done
+    #     to it here.
+    binary = os.environ.get("IYI_BINARY",
+                            ".build/iyi.exe" if os.name == "nt" else ".build/iyi")
     if os.path.exists(binary):
         backup = binary + ".gate-backup"
-        shutil.copy2(binary, backup)
+        if os.name != "nt":
+            shutil.copy2(binary, backup)
         # A didChange to app invalidates every sibling's overrides, so
         # the next question about greet is a fresh compile, not a memo.
         c.send("textDocument/didChange",
@@ -1192,31 +3442,37 @@ def main():
                 "contentChanges": [{"text": app_text + "# gone\n"}]},
                wait=False)
         c.diagnostics(app_uri)
-        os.remove(binary)
+        if os.name == "nt":
+            os.rename(binary, backup)
+        else:
+            os.remove(binary)
         try:
             reply = c.send("textDocument/diagnostic",
                            {"textDocument": {"uri": greet_uri}})
         finally:
-            shutil.move(backup, binary)
+            restore_binary(backup, binary)
         held = (reply.get("result") or {}).get("kind") == "full"
         step(46, "a rebuilt binary does not lobotomise the session",
              held and "error" not in reply,
-             "compiled with the executable unlinked; $ORIGIN was pinned")
+             ("compiled with the executable moved aside, as a rebuild does"
+              if os.name == "nt" else
+              "compiled with the executable unlinked; $ORIGIN was pinned") +
+             ("" if held and "error" not in reply else f"; answered {json.dumps(reply)[:400]}"))
     else:
         step(46, "a rebuilt binary does not lobotomise the session", True,
              f"skipped: {binary} not present under this runner")
 
     # 47. organize imports: duplicates merge, selections of one module
-    #     unify sorted, imports before usings — and the organized
-    #     buffer still compiles.
+    #     unify sorted, the bare import folds into the selection — and the
+    #     organized buffer still compiles.
     messy_path = os.path.join(work, "tidy.iyi")
     messy = ("module tidy\n\n"
-             "using calc/lexer::{token}\n"
+             "import calc/lexer::{token}\n"
              "import calc/lexer\n"
-             "using calc/lexer::{glyph}\n"
+             "import calc/lexer::{glyph}\n"
              "import calc/lexer\n\n"
              "puts token\nputs glyph\n")
-    messy_uri = "file://" + messy_path
+    messy_uri = file_uri(messy_path)
     with open(messy_path, "w") as f:
         f.write(messy)
     c.send("textDocument/didOpen",
@@ -1243,19 +3499,19 @@ def main():
     clean = c.diagnostics(messy_uri)["diagnostics"] == []
     step(47, "organize imports canonicalises the header",
          len(organizers) == 1 and clean and
-         "import calc/lexer\n\nusing calc/lexer::{glyph, token}" in tidied
+         "import calc/lexer::{glyph, token}\n\n" in tidied
          and tidied.count("import calc/lexer") == 1,
-         "two imports, three usings -> one of each, sorted, still clean")
+         "four imports of one module -> one selective line, sorted, still clean")
 
     # 48. willRenameFiles: moving the file is renaming the module
     #     (IV.6), so one request rewrites the header and every
-    #     consumer's import/using — buffers and never-opened disk files
+    #     consumer's imports — buffers and never-opened disk files
     #     alike — and the moved module still compiles.
     lexer_path = os.path.join(calc, "lexer.iyi")
     scanner_path = os.path.join(calc, "scanner.iyi")
     reply = c.send("workspace/willRenameFiles",
-                   {"files": [{"oldUri": "file://" + lexer_path,
-                               "newUri": "file://" + scanner_path}]})
+                   {"files": [{"oldUri": file_uri(lexer_path),
+                               "newUri": file_uri(scanner_path)}]})
     changes = (reply["result"] or {}).get("changes", {})
     touched = sorted(u.rsplit("/", 1)[-1] for u in changes)
 
@@ -1270,7 +3526,7 @@ def main():
 
     with open(lexer_path) as f:
         lexer_text = f.read()
-    moved = apply(lexer_text, changes.get("file://" + lexer_path, []))
+    moved = apply(lexer_text, changes.get(file_uri(lexer_path), []))
     with open(scanner_path, "w") as f:
         f.write(moved)
     os.remove(lexer_path)
@@ -1285,6 +3541,93 @@ def main():
          "module calc/scanner" in moved and
          "import calc/scanner" in parser_moved and clean,
          f"{sum(len(e) for e in changes.values())} edit(s) across {touched}")
+
+    # 70f. Moving a module saved with a byte order mark moves its header
+    #      too: `\uFEFFmodule calc/lexer` never started with `module `, so
+    #      the importer was edited and the header was not, and the moved
+    #      file named a path it no longer had.
+    bom_root = tempfile.mkdtemp(prefix="iyi-lsp-bom")
+    os.makedirs(os.path.join(bom_root, "calc"))
+    with open(os.path.join(bom_root, "calc", "lexer.iyi"), "w", encoding="utf-8-sig", newline="") as f:
+        f.write("module calc/lexer\n\npub def token(s : String) : String\n  s\nend\n")
+    with open(os.path.join(bom_root, "app.iyi"), "w", newline="") as f:
+        f.write("module app\n\nimport calc/lexer::{token}\n\nputs token(\"x\")\n")
+    bm = Client()
+    bm.send("initialize", {"rootUri": file_uri(bom_root), "capabilities": {}})
+    bm.send("initialized", {}, wait=False)
+    reply = bm.send("workspace/willRenameFiles", {"files": [
+        {"oldUri": file_uri(os.path.join(bom_root, "calc", "lexer.iyi")),
+         "newUri": file_uri(os.path.join(bom_root, "calc", "scanner.iyi"))}]})
+    bm.send("shutdown", {})
+    bm.send("exit", {}, wait=False)
+    bm.proc.wait(timeout=10)
+    bom_edits = sorted((u.rsplit("/", 1)[-1], e["range"]["start"]["line"], e["range"]["start"]["character"],
+                        e["range"]["end"]["character"], e["newText"])
+                       for u, edits in ((reply.get("result") or {}).get("changes") or {}).items() for e in edits)
+    step("70f", "a module saved with a byte order mark moves its header too",
+         bom_edits == [("app.iyi", 2, 7, 17, "calc/scanner"), ("lexer.iyi", 0, 7, 17, "calc/scanner")],
+         f"edits {bom_edits}")
+
+    # 48b. A document link on an import, including a package's. The links
+    #      were a filename guess — `<root>/<path>.iyi`, with the path taken
+    #      as the run of `[A-Za-z0-9_/]` after the keyword — so a dotted
+    #      package path stopped at the first `.` and the file it names is
+    #      not under the workspace at all: it is a checkout in the cache,
+    #      which `iyi.mod`, `iyi.sum` and the fetcher decide between them.
+    #      Every import of a dependency was a link that went nowhere, in an
+    #      editor where the same click works on a sibling module. The
+    #      fixture lives outside the workspace because its import does not
+    #      resolve without the cache this test warms, and step 31 judges
+    #      every file the workspace holds.
+    pkg = package_fixture(pkg_home)
+    if pkg:
+        pkg_path, pkg_text, pkg_cache = pkg
+        pkg_uri = file_uri(pkg_path)
+        c.send("textDocument/didOpen",
+               {"textDocument": {"uri": pkg_uri, "languageId": "iyi",
+                                 "version": 1, "text": pkg_text}}, wait=False)
+        c.diagnostics(pkg_uri)
+        reply = c.send("textDocument/documentLink", {"textDocument": {"uri": pkg_uri}})
+        links = reply.get("result") or []
+        by_line = {l["range"]["start"]["line"]: l["target"] for l in links}
+        # As paths, not strings: `pkg_cache` is a filesystem path and a
+        # target is a URI, which on Windows share no substring at all.
+        cache_dir = os.path.normcase(os.path.normpath(pkg_cache))
+        into_cache = [t for t in by_line.values()
+                      if uri_path(t).startswith(cache_dir + os.sep)]
+        beside = [t for t in by_line.values() if t.endswith("/helper.iyi")]
+        step(48, "a document link follows a package import into the cache",
+             len(links) == 4 and len(into_cache) == 2 and len(beside) == 2,
+             f"{len(links)} link(s): {sorted(os.path.basename(t) for t in by_line.values())}")
+        c.send("textDocument/didClose", {"textDocument": {"uri": pkg_uri}},
+               wait=False)
+
+        # 48a. A module in a subdirectory reads the manifest at the root its
+        #      header names. `greet/greeter.iyi`, declaring `module
+        #      greet/greeter`, was compiled with the manifest beside it -
+        #      there is none in `greet/` - and the editor showed "no
+        #      requirement covers 'example.test/user/liba'" on a module a
+        #      build of the app compiles.
+        greet_dir = os.path.join(os.path.dirname(pkg_path), "greet")
+        os.makedirs(greet_dir, exist_ok=True)
+        greeter = os.path.join(greet_dir, "greeter.iyi")
+        greeter_text = ("module greet/greeter\n\nimport example.test/user/liba\n\n"
+                        "pub def hello : String\n  \"greeter says \" + Liba.greeting\nend\n")
+        with open(greeter, "w") as f:
+            f.write(greeter_text)
+        greeter_uri = file_uri(greeter)
+        c.send("textDocument/didOpen",
+               {"textDocument": {"uri": greeter_uri, "languageId": "iyi",
+                                 "version": 1, "text": greeter_text}}, wait=False)
+        greeter_diags = c.diagnostics(greeter_uri)["diagnostics"]
+        step("48a", "a module in a subdirectory resolves a package through the root's iyi.mod",
+             greeter_diags == [],
+             greeter_diags[0]["message"].splitlines()[0][:70] if greeter_diags else "no diagnostics")
+        c.send("textDocument/didClose", {"textDocument": {"uri": greeter_uri}},
+               wait=False)
+    else:
+        step(48, "a document link follows a package import into the cache",
+             False, "the package fixture needs git, which this run has none of")
 
     # 49-52. What the server says when it cannot answer. Every one of
     # these used to be an empty result or an "internal error": an unknown
@@ -1308,8 +3651,41 @@ def main():
          parse_error["error"]["code"] == -32700 and parse_error["id"] is None,
          json.dumps(parse_error)[:80])
 
+    # 60a. A lone surrogate escape - `\ud83d`, half an emoji, which an
+    #      editor's buffer can hold and `JSON.stringify` writes as is - is
+    #      valid JSON the JSON library refuses, and it was answered as the
+    #      frame above is: a didOpen carrying one got -32700 and the buffer
+    #      never opened, so every answer after it read the disk. It opens
+    #      now with U+FFFD in the surrogate's place, one UTF-16 unit as the
+    #      surrogate was, so the columns after it still land: `nope` is at
+    #      character 10. The proxy mends the frame it hands on, and the
+    #      worker alone mends its own.
+    sur = os.path.join(work, "sur.iyi")
+    with open(sur, "w") as f:
+        f.write("module sur\n\nputs 1\n")
+    sur_uri = file_uri(sur)
+
+    def surrogate_verdict(client):
+        client.send("textDocument/didOpen",
+                    {"textDocument": {"uri": sur_uri, "languageId": "iyi", "version": 1,
+                                      "text": 'module sur\n\nputs "\ud83d", nope\n'}}, wait=False)
+        reply = client.send("textDocument/diagnostic", {"textDocument": {"uri": sur_uri}})
+        return [(d["range"]["start"]["line"], d["range"]["start"]["character"])
+                for d in (reply.get("result") or {}).get("items", []) if "nope" in d["message"]]
+    proxied = surrogate_verdict(c)
+    w = Client(("lsp", "--worker"))
+    w.send("initialize", {"rootUri": file_uri(work), "capabilities": {}})
+    w.send("initialized", {}, wait=False)
+    alone = surrogate_verdict(w)
+    w.send("shutdown", {})
+    w.send("exit", {}, wait=False)
+    w.proc.wait(timeout=10)
+    step("60a", "a lone surrogate in a buffer is U+FFFD, and the buffer opens",
+         proxied == [(2, 10)] and alone == [(2, 10)],
+         f"proxy {proxied}, worker alone {alone}")
+
     reply = c.send("textDocument/hover", {
-        "textDocument": {"uri": "file://" + os.path.join(work, "nope.iyi")},
+        "textDocument": {"uri": file_uri(os.path.join(work, "nope.iyi"))},
         "position": {"line": 0, "character": 0}})
     step(51, "a file the client named that is not there is invalid params",
          reply.get("error", {}).get("code") == -32602
@@ -1322,6 +3698,15 @@ def main():
          reply.get("error", {}).get("code") == -32602
          and "textDocument" in reply["error"]["message"]
          and "Missing hash key" not in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+
+    # 70m. A uri that names a directory is said to be one: Windows answered
+    #      "Access is denied.", the reason its CreateFile gives and not the
+    #      fact that holds.
+    reply = c.send("textDocument/hover", {"textDocument": {"uri": file_uri(work)},
+                                          "position": {"line": 0, "character": 0}})
+    step("70m", "a directory uri is said to be one",
+         reply.get("error", {}).get("code") == -32602 and "Is a directory" in reply["error"]["message"],
          json.dumps(reply.get("error"))[:80])
 
     # 52b. The client's other mistakes, each with the protocol's own code:
@@ -1357,6 +3742,140 @@ def main():
          "error" not in reply or reply["error"].get("code") not in (-32603,),
          json.dumps(reply)[:60])
 
+    # 52g. A request the server understood and will not carry out is
+    # RequestFailed with the reason: a rename with nothing renameable under
+    # the cursor left as -32603, the code for "this server is broken". And
+    # a command the server does not have is the client's mistake, -32602.
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0},
+        "newName": "renamed"})
+    step("52g", "a refused rename is request-failed, with its reason",
+         reply.get("error", {}).get("code") == -32803
+         and "nothing renameable" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+    library_rename_step(c)
+    reply = c.send("workspace/executeCommand", {"command": "iyi.nonesuch", "arguments": []})
+    step("52h", "an unknown command is invalid params",
+         reply.get("error", {}).get("code") == -32602
+         and "iyi.nonesuch" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+
+    # 70j. A position is read as the protocol's uinteger, and anything else
+    #      is the client's mistake. Hover, completion and nine more at line
+    #      2147483647 answered -32603 "Arithmetic overflow" where line 999
+    #      answers null, and a line that is "6", a uri that is 7 or a
+    #      newName that is 5 was -32603 "Cast from ... failed, at
+    #      C:\...\src\json\any.cr:178:5", the build machine's path included.
+    #      Positions go through the server's `position_of` now.
+    edge = {"line": 2 ** 31 - 1, "character": 0}
+    answers = [c.send(m, {"textDocument": {"uri": app_uri}, "position": edge})
+               for m in ("textDocument/hover", "textDocument/definition",
+                         "textDocument/documentHighlight", "textDocument/completion")]
+    answers.append(c.send("textDocument/references", {"textDocument": {"uri": app_uri}, "position": edge, "context": {"includeDeclaration": True}}))
+    overflowed = [a["error"]["message"] for a in answers if "error" in a]
+    misshapen = [c.send("textDocument/hover", {"textDocument": {"uri": app_uri},
+                                               "position": {"line": "6", "character": 0}}),
+                 c.send("textDocument/hover", {"textDocument": {"uri": 7},
+                                               "position": {"line": 0, "character": 0}}),
+                 c.send("textDocument/rename", {"textDocument": {"uri": app_uri},
+                                                "position": {"line": 0, "character": 0}, "newName": 5})]
+    codes = [(a.get("error") or {}).get("code") for a in misshapen]
+    leaked = [a["error"]["message"] for a in misshapen if "any.cr" in (a.get("error") or {}).get("message", "")]
+    step("70j", "a position past the end is answered, a misshapen one is invalid params",
+         not overflowed and codes == [-32602] * 3 and not leaked,
+         f"overflowed {overflowed[:1]}, codes {codes}, leaked {len(leaked)}")
+    document_bound_steps(c)
+
+    # 52i. A hover inside `x.or(0)`: the `or` tests a variable of the
+    # compiler's own, and the cursor context looked it up among the names
+    # it had recorded, which leave those out - a KeyError the server
+    # answered as the client's, "the request is missing \"__temp_3\"".
+    orer = os.path.join(work, "orer.iyi")
+    orer_text = ("module orer\n\npub struct Bad\nend\n\nimpl Error for Bad\n"
+                 "  def message : String\n    \"bad\"\n  end\nend\n\n"
+                 "def load(path : String) : Int32 | Bad\n"
+                 "  path == \"x\" ? 1 : Bad.new\nend\n\n"
+                 "[\"a\", \"x\"].each do |path|\n"
+                 "  puts \"or: #{load(path).or(0)}\"\nend\n")
+    with open(orer, "w") as f:
+        f.write(orer_text)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": file_uri(orer), "languageId": "iyi",
+                             "version": 1, "text": orer_text}}, wait=False)
+    c.diagnostics(file_uri(orer))
+    reply = c.send("textDocument/hover", {
+        "textDocument": {"uri": file_uri(orer)},
+        "position": {"line": 16, "character": 17}})
+    step("52i", "a hover inside an `or` is answered, not refused",
+         "error" not in reply,
+         json.dumps(reply.get("error") or reply.get("result"))[:80])
+
+    fuzz_steps(c, work)
+
+    # 60b. The proxy keeps a copy of every open buffer, and it read the
+    #      four notifications that carry one as the protocol spells them:
+    #      any other shape raised outside every rescue and the session
+    #      ended with exit 1 - a didOpen with no text ("Missing hash key"),
+    #      a change whose line is 0.5 or 2^40 ("Cast from Float64",
+    #      "Arithmetic overflow"), a didSave whose params are a string
+    #      ("Expected Hash"). The worker alone had survived every one. Each
+    #      is sent here, and the hover after it must be answered.
+    mal = os.path.join(work, "mal.iyi")
+    with open(mal, "w") as f:
+        f.write("module mal\n\nputs 1\n")
+    mal_uri = file_uri(mal)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": mal_uri, "languageId": "iyi",
+                             "version": 1, "text": "module mal\n\nputs 1\n"}}, wait=False)
+    c.diagnostics(mal_uri)
+    here = {"uri": mal_uri, "version": 2}
+    origin = {"line": 0, "character": 0}
+    far = {"line": 2 ** 40, "character": 0}
+    misshapen = [
+        ("textDocument/didOpen", {"textDocument": {"uri": mal_uri, "languageId": "iyi", "version": 1}}),
+        ("textDocument/didOpen", {"textDocument": {"uri": 5, "text": "x"}}),
+        ("textDocument/didOpen", None),
+        ("textDocument/didChange", {"textDocument": here}),
+        ("textDocument/didChange", {"textDocument": here, "contentChanges": [
+            {"range": {"start": origin, "end": origin}}]}),
+        ("textDocument/didChange", {"textDocument": here, "contentChanges": [
+            {"range": {"start": {"line": 0.5, "character": 0}, "end": origin}, "text": "x"}]}),
+        ("textDocument/didChange", {"textDocument": here, "contentChanges": [
+            {"range": {"start": far, "end": far}, "text": "x"}]}),
+        ("textDocument/didChange", "oops"),
+        ("textDocument/didClose", [1]),
+        ("textDocument/didSave", "x"),
+    ]
+    held = 0
+    for method, params in misshapen:
+        try:
+            c.send(method, params, wait=False)
+            reply = c.send("textDocument/hover", {
+                "textDocument": {"uri": mal_uri}, "position": {"line": 2, "character": 0}})
+        except (SystemExit, OSError):
+            break
+        if "error" in reply:
+            break
+        held += 1
+    step("60b", "a buffer notification of the wrong shape does not end the session",
+         held == len(misshapen), f"{held} of {len(misshapen)} answered after")
+
+    # 60c. and a change that cannot be read is skipped, not the frame it
+    #      came in: the worker raised on it and dropped the whole frame, so
+    #      the readable change after it was lost too.
+    span = {"start": {"line": 2, "character": 5}, "end": {"line": 2, "character": 6}}
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": mal_uri, "version": 30},
+            "contentChanges": [{"range": span}, {"range": span, "text": "nope"}]}, wait=False)
+    reply = c.send("textDocument/diagnostic", {"textDocument": {"uri": mal_uri}})
+    items = (reply.get("result") or {}).get("items", [])
+    step("60c", "a change that cannot be read is skipped, and the next one applies",
+         [d["range"]["start"]["line"] for d in items if "nope" in d["message"]] == [2],
+         f"{len(items)} item(s): {items and items[0]['message'][:50]}")
+    buffer_steps(c)
+    orphan_steps()
+    traits_disk_and_completion()
+    held_verdict_step()
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.
@@ -1366,6 +3885,34 @@ def main():
     step(53, "after shutdown, a request is refused rather than half answered",
          reply.get("error", {}).get("code") == -32600,
          json.dumps(reply.get("error"))[:80])
+
+    # 60d. and still after a pause. The proxy replaced a worker after two
+    #      quiet seconds, and the successor had not been told of the
+    #      shutdown: the same hover after a 3.5 s pause was answered in
+    #      full. 60e. A successor started because the worker died is handed
+    #      the client's `shutdown` (`Proxy@shutdown_frame`). Where the
+    #      workers cannot be listed, 60e is unmeasured.
+    time.sleep(3)
+    reply = c.send("textDocument/hover", {
+        "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0}})
+    step("60d", "after shutdown and a quiet pause, a request is still refused",
+         reply.get("error", {}).get("code") == -32600,
+         json.dumps(reply.get("error") or reply.get("result"))[:80])
+    import signal
+    workers = children(c.proc.pid)
+    for pid in workers:
+        os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+    # The request the dead worker held is told so (-32603); the one after
+    # it reaches the successor.
+    for _ in range(3):
+        reply = c.send("textDocument/hover", {
+            "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0}})
+        if reply.get("error", {}).get("code") != -32603:
+            break
+    step("60e", "and after the worker is gone, a request is still refused",
+         not workers or reply.get("error", {}).get("code") == -32600,
+         f"{len(workers) or 'unmeasured'} worker(s) killed, then "
+         + json.dumps(reply.get("error") or reply.get("result"))[:60])
     c.send("exit", {}, wait=False)
     step(54, "shutdown then exit", c.proc.wait(timeout=10) == 0)
 

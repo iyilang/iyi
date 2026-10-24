@@ -2,11 +2,8 @@
 # the library. This is the whole argument of SPEC.md II.3 in one file.
 module samples/webapp
 
-import kemal/dsl
-import kemal/router
-
-using kemal/dsl
-using kemal/router::{Router, Context}
+import kemal/dsl::*
+import kemal/router::{Router, Context}
 
 before_all do |env|
   nil

@@ -1,21 +1,47 @@
-# A PCG-32 generator, and a handful of random values from it.
+# A PCG-32 generator, and a handful of random values from it - the same
+# stream, draw for draw, as the other library's `Random.new(seed)`, so a
+# program seeded there and ported here prints the same numbers.
 #
-# `Random.new(seed)` is deterministic. `Random.new` seeds from eight
-# bytes of the platform's own entropy: `/dev/urandom` on unix,
-# `RtlGenRandom` on Windows, which has no such device. wasm32 has
-# neither and seeds from the clocks. Neither is a lock: this is
-# shuffle-the-deck randomness, not a secret.
+# `Random.new(seed, sequence = 0)` is deterministic: the seed is PCG's
+# initial state and the sequence picks one of 2^63 streams, as
+# `Random::PCG32.new(initstate, initseq)` does. `Random.new` seeds from
+# sixteen bytes of the platform's own entropy, the source `Random::Secure`
+# reads. wasm32 seeds from the clocks. PCG is not a lock either way: its
+# state is 128 bits a few outputs give away, so this is shuffle-the-deck
+# randomness, not a secret.
 #
-# `rand` is in `[0, 1)`. `rand(n)` is an `Int32` in `0...n`. A
-# non-positive bound is `empty range`. `Array#shuffle` and
-# `Array#sample` land here so a program that never asks for a
-# random number does not carry one.
+# `Random::Secure` is the secret kind. Every byte it answers comes from the
+# operating system's entropy source at the moment it is asked for, with no
+# state of its own in the process: `getrandom` on Linux, `arc4random_buf`
+# in libSystem on darwin, `RtlGenRandom` on Windows and WASI's `random_get`
+# on wasm32. Nothing is buffered, because a buffer a `fork` copied would
+# hand the child the parent's next secrets. It is a `Random`, so every
+# draw below works on it, and `Random::Secure.hex` and the rest answer from
+# it without an instance.
+#
+# `next_u` is the raw 32 bits. `rand`/`next_float` is in `[0, 1]`, 53
+# bits from two draws. `rand(n)` is in `0...n` for an `Int32`, `UInt32`,
+# `Int64` or `UInt64` *n*, a draw past the largest multiple of `n` thrown
+# away so that no value is likelier than another; a bound past 2^32 is
+# made of two draws, high first. `rand(range)` is the same over an `Int32`
+# or `Int64` range, and `rand(x)` and `rand(range)` take a `Float64` too.
+# A bound that holds no value is `empty range`. `random_bytes`, `hex`,
+# `base64` and `urlsafe_base64` are the other library's, byte for byte
+# from a seeded generator. `Random.rand(...)` and the rest at class level
+# draw from one generator seeded the first time it is asked. Every one of
+# these makes the other library's draws in the other library's order.
+#
+# `Array#shuffle`, `Array#sample` and `sample(n)` take a generator, and use
+# a fresh one when handed none; they land here so a program that never
+# asks for a random number does not carry one. `Indexable#sample` and
+# `sample(n)` in std/indexable make the same choices for a `Deque` or a
+# `Slice`.
 
 module std/random
 
 import std/int
-import std/time
-using std/time::{Time}
+import std/base64::{Base64}
+import std/time::{Time}
 
 {% if flag?(:win32) %}
   # The entropy source Windows offers a program that only wants bytes.
@@ -23,7 +49,7 @@ using std/time::{Time}
   # exported under its ordinal alias `SystemFunction036` — the name the import
   # library carries, so that is the name to bind. Upstream Crystal names the
   # same call in `src/crystal/system/win32/random.cr`, and naming a second
-  # source (a bcrypt/CNG provider, opened and closed for eight bytes) would
+  # source (a bcrypt/CNG provider, opened and closed for every draw) would
   # leave the repo with two answers to one question. advapi32 is not the
   # prelude's kernel32, so this `lib` has to ask for it.
   #
@@ -33,25 +59,53 @@ using std/time::{Time}
   lib LibAdvapi32
     fun RtlGenRandom = SystemFunction036(buffer : Void*, length : UInt32) : UInt8
   end
+{% elsif flag?(:darwin) %}
+  # libSystem's answer, the one std/file's temp-file names already read:
+  # Apple documents raw syscalls as no stable interface, and `arc4random_buf`
+  # is the call it offers for bytes nobody can guess. It cannot fail and
+  # takes any count, so there is no short read to go back for.
+  lib LibC
+    fun arc4random_buf(buffer : Void*, count : UInt64) : Void
+  end
+{% elsif flag?(:wasm32) %}
+  # The host's entropy, through the WASI import made for it, bound by its
+  # `__wasi_` name as the prelude binds `fd_write` and std/time binds the
+  # clocks. It answers an errno, zero when every byte was written.
+  lib LibWasi
+    fun random_get = __wasi_random_get(buffer : UInt8*, length : UInt32) : UInt16
+  end
 {% end %}
 
 pub class Random
   @state : UInt64
   @inc : UInt64
 
-  def initialize(seed : UInt64)
-    @inc = (seed << 1) | 1_u64
+  # The stream came from the seed, and one seed was one stream: the other
+  # library takes the stream apart from the seed, zero unless asked, and
+  # the same seed gave two different sequences in the two libraries.
+  def initialize(seed : UInt64, sequence : UInt64 = 0_u64)
+    @inc = (sequence << 1) | 1_u64
     @state = 0_u64
-    next_u32
+    next_u
     @state = @state &+ seed
-    next_u32
+    next_u
+  end
+
+  # Any integer seed and sequence, as the other library takes them. There
+  # were two overloads, an `Int32` and an `Int64` seed with a `UInt64`
+  # sequence, beside this class's own `UInt64` pair: `Random.new(7, 3)`,
+  # the form the comment above writes, cast its literals to all three and
+  # was an ambiguous call, and a `UInt32` seed matched none of them. A
+  # negative seed or sequence panics in the conversion, as it raises there.
+  def self.new(seed : ::Int, sequence : ::Int = 0_u64) : Random
+    new(seed.to_u64, sequence.to_u64)
   end
 
   def self.new : Random
-    new(entropy)
+    new(entropy, entropy)
   end
 
-  def next_u32 : UInt32
+  def next_u : UInt32
     old = @state
     @state = old &* 6364136223846793005_u64 &+ @inc
     mixed = ((old >> 18) ^ old) >> 27
@@ -64,56 +118,450 @@ pub class Random
     end
   end
 
+  # 2^53 values, the high draw first: two 32-bit draws make the integer,
+  # and it is divided by 2^53 - 1, so both ends can come out.
+  def next_float : Float64
+    high = next_u.to_u64
+    low = next_u.to_u64
+    ((high << 32) | low).unsafe_mod(9007199254740992_u64).to_f64 / 9007199254740991.0
+  end
+
   def rand : Float64
-    next_u32.to_f64 / 4294967296.0
+    next_float
   end
 
   def rand(n : Int32) : Int32
     raise "empty range: #{n}" if n <= 0
-    (next_u32.to_u64 % n.to_u64).to_i32
+    bound = n.to_u32
+    limit = 0_u32 &- (0_u32 &- bound).unsafe_mod(bound)
+    while true
+      result = next_u
+      return result.unsafe_mod(bound).to_i32 if result < limit || limit == 0_u32
+    end
   end
 
   def next_bool : Bool
-    (next_u32 & 1_u32) == 1_u32
+    (next_u & 1_u32) == 1_u32
   end
 
+  def rand(n : UInt32) : UInt32
+    raise "empty range: #{n}" if n == 0_u32
+    below(n.to_u64).to_u32
+  end
+
+  def rand(n : Int64) : Int64
+    raise "empty range: #{n}" if n <= 0_i64
+    below(n.to_u64).to_i64
+  end
+
+  def rand(n : UInt64) : UInt64
+    raise "empty range: #{n}" if n == 0_u64
+    below(n)
+  end
+
+  # In `[0, x)`: 2^53 evenly spaced values, scaled. Not `rand * x`, which
+  # divides by 2^53 - 1 and can answer *x* itself.
+  def rand(x : Float64) : Float64
+    raise "empty range: #{x}" unless x > 0.0
+    below(9007199254740992_u64).to_f64 / 9007199254740992.0 * x
+  end
+
+  # The span is taken as the unsigned difference, so a range across zero
+  # does not overflow on the way. The whole of `Int32` is one draw read as
+  # an `Int32`, as the other library reads it, rather than added to the
+  # bottom of the range, which would answer the same value with its top
+  # bit turned over.
+  def rand(range : Range(Int32, Int32)) : Int32
+    first = range.begin
+    last = range.end
+    if range.exclusive?
+      raise "empty range: #{range}" unless first < last
+      span = (last &- first).unsafe_to_u32.to_u64
+    else
+      raise "empty range: #{range}" unless first <= last
+      span = (last &- first).unsafe_to_u32.to_u64
+      return next_u.unsafe_to_i32 if span == 4294967295_u64
+      span = span + 1_u64
+    end
+    first &+ below(span).to_u32.unsafe_to_i32
+  end
+
+  # As the `Int32` range: the whole of `Int64` is 2^64 values, one more than
+  # a `UInt64` span can count, and is two draws, high first, read as one.
+  def rand(range : Range(Int64, Int64)) : Int64
+    first = range.begin
+    last = range.end
+    if range.exclusive?
+      raise "empty range: #{range}" unless first < last
+      span = (last &- first).unsafe_to_u64
+    else
+      raise "empty range: #{range}" unless first <= last
+      span = (last &- first).unsafe_to_u64
+      if span == 18446744073709551615_u64
+        high = next_u.to_u64
+        low = next_u.to_u64
+        return ((high << 32) | low).unsafe_to_i64
+      end
+      span = span + 1_u64
+    end
+    first &+ below(span).unsafe_to_i64
+  end
+
+  # An end left out is the other library's choice too: `rand(x)` cannot
+  # reach *x*, and an inclusive range scales `rand`, which can.
+  def rand(range : Range(Float64, Float64)) : Float64
+    first = range.begin
+    last = range.end
+    if range.exclusive?
+      raise "empty range: #{range}" unless first < last
+      first + rand(last - first)
+    else
+      raise "empty range: #{range}" unless first <= last
+      first + rand * (last - first)
+    end
+  end
+
+  # Four bytes a draw, low byte first, the last draw cut short: a seeded
+  # generator fills a buffer with the other library's bytes.
+  #
+  # The bytes are an `Array(UInt8)`, as `UUID#bytes` and std/digest's
+  # `hash_bytes` are, rather than the other library's `Bytes`: std/slice
+  # reaches this module through std/indexable's `sample`, and an import
+  # back would be a cycle.
+  def random_bytes(buffer : Array(UInt8)) : Nil
+    p = buffer.to_unsafe
+    n = buffer.size
+    i = 0
+    while i < n
+      word = next_u
+      k = 0
+      while k < 4 && i < n
+        p[i] = ((word >> (k * 8)) & 255_u32).to_u8
+        k = k + 1
+        i = i + 1
+      end
+    end
+  end
+
+  def random_bytes(n : Int32 = 16) : Array(UInt8)
+    raise "random_bytes of a negative size: #{n}" if n < 0
+    buffer = Array(UInt8).new(n) { 0_u8 }
+    random_bytes(buffer)
+    buffer
+  end
+
+  # *n* random bytes as two lowercase hex digits each.
+  def hex(n : Int32 = 16) : String
+    bytes = random_bytes(n)
+    digits = "0123456789abcdef".to_unsafe
+    String.new(n * 2) do |dst|
+      i = 0
+      while i < n
+        dst[i * 2] = digits[(bytes[i] >> 4).to_i32]
+        dst[i * 2 + 1] = digits[(bytes[i] & 15_u8).to_i32]
+        i = i + 1
+      end
+    end
+  end
+
+  # *n* random bytes in base64 with `+` `/` and `=` padding, no line breaks.
+  def base64(n : Int32 = 16) : String
+    Base64.encode(Random.text_of(random_bytes(n)))
+  end
+
+  # *n* random bytes in the URL-safe alphabet, `-` and `_`; unpadded unless
+  # asked, as the other library answers it, since a token in a URL or a
+  # file name has no use for the `=`.
+  def urlsafe_base64(n : Int32 = 16, padding : Bool = false) : String
+    text = Base64.urlsafe_encode(Random.text_of(random_bytes(n)))
+    return text if padding
+    size = text.bytesize
+    while size > 0 && text.to_unsafe[size - 1] == 61_u8
+      size = size - 1
+    end
+    text[0, size]
+  end
+
+  # A value in `0...n`, for any bound from 1 to 2^64 - 1, made as the other
+  # library's `rand_int` makes it: one 32-bit draw when `n - 1` fits in one,
+  # two, high first, when it does not. A draw at or past the largest
+  # multiple of `n` the draws can make is thrown away, so that no value is
+  # likelier than another; that multiple is `limit`, found by wrapping
+  # below zero, and a `limit` of zero is 2^32 (or 2^64) itself, past every
+  # draw, so nothing is thrown away.
+  private def below(n : UInt64) : UInt64
+    if n <= 4294967296_u64
+      return next_u.to_u64 if n == 4294967296_u64
+      bound = n.to_u32
+      limit32 = 0_u32 &- (0_u32 &- bound).unsafe_mod(bound)
+      while true
+        result32 = next_u
+        return result32.unsafe_mod(bound).to_u64 if result32 < limit32 || limit32 == 0_u32
+      end
+    end
+    limit = 0_u64 &- (0_u64 &- n).unsafe_mod(n)
+    while true
+      high = next_u.to_u64
+      low = next_u.to_u64
+      result = (high << 32) | low
+      return result.unsafe_mod(n) if result < limit || limit == 0_u64
+    end
+  end
+
+  # The bytes as a String, which is how std/base64 takes them.
+  protected def self.text_of(bytes : Array(UInt8)) : String
+    String.new(bytes.size) { |dst| dst.copy_from(bytes.to_unsafe, bytes.size) }
+  end
+
+  # The same draws without a generator in hand, from one seeded the first
+  # time it is asked, as the other library's `Random.rand` draws from its
+  # default. `Random::Secure.rand(...)` and the rest are these, answered by
+  # the operating system instead.
+  def self.next_u : UInt32
+    shared.next_u
+  end
+
+  def self.next_bool : Bool
+    shared.next_bool
+  end
+
+  def self.rand : Float64
+    shared.rand
+  end
+
+  def self.rand(n : Int32) : Int32
+    shared.rand(n)
+  end
+
+  def self.rand(n : UInt32) : UInt32
+    shared.rand(n)
+  end
+
+  def self.rand(n : Int64) : Int64
+    shared.rand(n)
+  end
+
+  def self.rand(n : UInt64) : UInt64
+    shared.rand(n)
+  end
+
+  def self.rand(x : Float64) : Float64
+    shared.rand(x)
+  end
+
+  def self.rand(range : Range(Int32, Int32)) : Int32
+    shared.rand(range)
+  end
+
+  def self.rand(range : Range(Int64, Int64)) : Int64
+    shared.rand(range)
+  end
+
+  def self.rand(range : Range(Float64, Float64)) : Float64
+    shared.rand(range)
+  end
+
+  def self.random_bytes(buffer : Array(UInt8)) : Nil
+    shared.random_bytes(buffer)
+  end
+
+  def self.random_bytes(n : Int32 = 16) : Array(UInt8)
+    shared.random_bytes(n)
+  end
+
+  def self.hex(n : Int32 = 16) : String
+    shared.hex(n)
+  end
+
+  def self.base64(n : Int32 = 16) : String
+    shared.base64(n)
+  end
+
+  def self.urlsafe_base64(n : Int32 = 16, padding : Bool = false) : String
+    shared.urlsafe_base64(n, padding)
+  end
+
+  @@shared : Random? = nil
+
+  private def self.shared : Random
+    if generator = @@shared
+      return generator
+    end
+    generator = Random.new
+    @@shared = generator
+    generator
+  end
+
+  # Sixteen bytes of the operating system's, through the same call
+  # `Random::Secure` makes. wasm32 seeds from the clocks, as it did before
+  # it had a `Random::Secure`.
   private def self.entropy : UInt64
     {% if flag?(:wasm32) %}
       Time.utc.to_unix.to_u64 ^ Time.monotonic.total_nanoseconds.to_u64
-    {% elsif flag?(:win32) %}
-      # Eight bytes into a heap cell, then out little-endian, the same shape
-      # the `/dev/urandom` arm reads: one call, no device to open or close.
-      p = Pointer(UInt8).malloc(8_u64)
-      if LibAdvapi32.RtlGenRandom(p.as(Void*), 8_u32) == 0_u8
-        raise "Random: RtlGenRandom answered no bytes"
-      end
-      v = 0_u64
-      i = 0
-      while i < 8
-        v = v | (p[i].to_u64 << (i * 8))
-        i = i + 1
-      end
-      v
     {% else %}
-      io = File.open("/dev/urandom")
-      bytes = io.read_bytes(8)
-      io.close
-      raise "Random: /dev/urandom answered #{bytes.bytesize} bytes, not 8" if bytes.bytesize != 8
-      p = bytes.to_unsafe
-      v = 0_u64
-      i = 0
-      while i < 8
-        v = v | (p[i].to_u64 << (i * 8))
-        i = i + 1
-      end
-      v
+      word = 0_u64
+      Secure.fill(pointerof(word).as(UInt8*), 8)
+      word
     {% end %}
   end
 end
 
+# The operating system's randomness, for anything a guess must not reach:
+# tokens, keys, nonces, query IDs. It is a `Random`, so `rand(n)`,
+# `rand(range)`, `hex` and every other draw take their values from it, and
+# `Random::Secure.rand(n)` answers without an instance. There is no state to
+# seed: each draw is a fresh request to the kernel (or libSystem, or the
+# Windows or WASI host), and nothing is held between draws, so a `fork`
+# cannot hand the child the parent's next value.
+class Random::Secure < Random
+  # The generator fields a `Random` carries, which nothing here reads.
+  def initialize
+    @state = 0_u64
+    @inc = 1_u64
+  end
+
+  def next_u : UInt32
+    word = 0_u32
+    Secure.fill(pointerof(word).as(UInt8*), 4)
+    word
+  end
+
+  # The whole buffer in one request rather than four bytes at a time.
+  def random_bytes(buffer : Array(UInt8)) : Nil
+    Secure.fill(buffer.to_unsafe, buffer.size)
+  end
+
+  private def self.shared : Random
+    Secure.new
+  end
+
+  # *count* bytes at *buffer*, every one from the platform's entropy source,
+  # or a panic that says why there are none: a byte that only looks random
+  # is never the answer.
+  def self.fill(buffer : Pointer(UInt8), count : Int32) : Nil
+    raise "Random::Secure: a negative count of bytes: #{count}" if count < 0
+    return if count == 0
+    {% if flag?(:linux) %}
+      # `getrandom` blocks only until the kernel's pool is first seeded, at
+      # boot, and then never again. It may answer fewer bytes than asked
+      # (past 32 MiB, or when a signal lands mid-call) and may be stopped by
+      # a signal before any (-EINTR), so the rest is asked for again. A
+      # kernel older than 3.17, or a sandbox that hides the call, answers
+      # -ENOSYS, and the device that came before it is read instead.
+      done = 0
+      while done < count
+        got = getrandom(buffer + done.to_i64, (count - done).to_i64)
+        if got > 0_i64
+          done = done + got.to_i32
+        elsif got == -38_i64
+          from_device(buffer + done.to_i64, count - done)
+          return
+        elsif got != -4_i64
+          raise "Random::Secure: getrandom answered #{got}"
+        end
+      end
+    {% elsif flag?(:darwin) %}
+      LibC.arc4random_buf(buffer.as(Void*), count.to_u64)
+    {% elsif flag?(:win32) %}
+      if LibAdvapi32.RtlGenRandom(buffer.as(Void*), count.to_u32) == 0_u8
+        raise "Random::Secure: RtlGenRandom answered no bytes"
+      end
+    {% elsif flag?(:wasm32) %}
+      error = LibWasi.random_get(buffer, count.to_u32)
+      raise "Random::Secure: random_get answered errno #{error}" if error != 0_u16
+    {% else %}
+      raise "Random::Secure: this platform has no entropy source iyi reads, and a guessable byte is not a secret"
+    {% end %}
+  end
+
+  {% if flag?(:linux) %}
+    # `getrandom` with no flags: 318 on x86_64, 278 on aarch64. The answer
+    # is the count written or a negative errno.
+    private def self.getrandom(buffer : Pointer(UInt8), count : Int64) : Int64
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(318_i64), "{rdi}"(buffer), "{rsi}"(count), "{rdx}"(0_i64)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(278_i64), "{x0}"(buffer), "{x1}"(count), "{x2}"(0_i64)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      result
+    end
+
+    # The device the fallback reads. A constant, and the only place the
+    # path is written, so `bench/std_random_exercise.sh` can build a copy
+    # that differs from this module in this one line and point the
+    # fallback at a regular file; the program itself has no way to name
+    # another source, by argument or by environment, since a way to name
+    # one is a way for whoever sets it to choose a program's keys.
+    URANDOM = "/dev/urandom"
+
+    # `/dev/urandom`, for a kernel without `getrandom`: read until every
+    # byte is in, a read a signal interrupted asked again. What was opened
+    # must be a character device, as the other library's `urandom.cr`
+    # checks: in a chroot or a container where `getrandom` is hidden and
+    # someone else wrote `/dev`, a regular file or a pipe there would
+    # otherwise be every key's source.
+    private def self.from_device(buffer : Pointer(UInt8), count : Int32) : Nil
+      fd = __iyi_open_read(URANDOM.to_unsafe)
+      raise "Random::Secure: #{URANDOM} could not be opened (#{fd})" if fd < 0_i64
+      unless character_device?(fd)
+        __iyi_close(fd)
+        raise "Random::Secure: #{URANDOM} is not a character device, and bytes from it are not the kernel's"
+      end
+      done = 0
+      while done < count
+        got = __iyi_file_read(fd, (buffer + done.to_i64).as(Void*), (count - done).to_u64)
+        if got > 0_i64
+          done = done + got.to_i32
+        elsif got != -4_i64
+          __iyi_close(fd)
+          raise "Random::Secure: #{URANDOM} answered #{got}"
+        end
+      end
+      __iyi_close(fd)
+    end
+
+    # Whether *fd* is a character device: `fstat` (5 on x86_64, 80 on
+    # aarch64) and S_IFCHR in st_mode's type bits (S_IFMT, 0o170000).
+    # st_mode is 24 bytes into x86_64's `struct stat`, after st_dev, st_ino
+    # and a 64-bit st_nlink, and 16 into aarch64's, whose st_nlink comes
+    # after it; the struct is 144 bytes on the one and 128 on the other.
+    # A failed `fstat` answers no.
+    private def self.character_device?(fd : Int64) : Bool
+      stat = uninitialized UInt8[144]
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(5_i64), "{rdi}"(fd), "{rsi}"(pointerof(stat).as(Void*))
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+        at = 24
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(80_i64), "{x0}"(fd), "{x1}"(pointerof(stat).as(Void*))
+                     : "memory"
+                     : "volatile")
+        at = 16
+      {% end %}
+      return false if result != 0_i64
+      bytes = pointerof(stat).as(UInt8*)
+      mode = bytes[at].to_u32 | (bytes[at + 1].to_u32 << 8) | (bytes[at + 2].to_u32 << 16) | (bytes[at + 3].to_u32 << 24)
+      mode & 0o170000_u32 == 0o020000_u32
+    end
+  {% end %}
+end
+
 class ::Array(T)
-  def shuffle_in_place : Array(T)
-    rng = Std::Random::Random.new
+  # Fisher-Yates from the back, `rand(i + 1)` a step: the other library's
+  # `shuffle!`, so a seeded generator puts the elements where it would.
+  def shuffle_in_place(random : Std::Random::Random? = nil) : Array(T)
+    rng = random || Std::Random::Random.new
     i = @size - 1
     while i > 0
       j = rng.rand(i + 1)
@@ -125,12 +573,58 @@ class ::Array(T)
     self
   end
 
-  def shuffle : Array(T)
-    dup.shuffle_in_place
+  def shuffle(random : Std::Random::Random? = nil) : Array(T)
+    dup.shuffle_in_place(random)
   end
 
-  def sample : T
+  def sample(random : Std::Random::Random? = nil) : T
     raise "sample of an empty array" if empty?
-    self[Std::Random::Random.new.rand(@size)]
+    rng = random || Std::Random::Random.new
+    self[rng.rand(@size)]
+  end
+
+  # *n* distinct elements. One is `sample` in a list; more are a reservoir
+  # (each element past the first *n* replaces a slot with probability
+  # n/(i+1)) shuffled at the end - both as the other library does it.
+  def sample(n : Int32, random : Std::Random::Random? = nil) : Array(T)
+    raise "sample of a negative count: #{n}" if n < 0
+    picked = Array(T).new(n)
+    return picked if n == 0
+    rng = random || Std::Random::Random.new
+    if n == 1
+      picked << sample(rng) unless empty?
+      return picked
+    end
+    i = 0
+    while i < @size
+      if i < n
+        picked << @buffer[i]
+      else
+        j = rng.rand(i + 1)
+        picked[j] = @buffer[i] if j < n
+      end
+      i = i + 1
+    end
+    picked.shuffle_in_place(rng)
+  end
+end
+
+struct ::StaticArray(T, N)
+  # `Array#shuffle_in_place` for the array that holds its elements inline:
+  # the other library's `StaticArray#shuffle!`, the same draws in the same
+  # order, so a seeded generator puts the elements where it would. Its
+  # sample of noise does exactly this to a 256-entry permutation table.
+  def shuffle_in_place(random : Std::Random::Random? = nil) : self
+    rng = random || Std::Random::Random.new
+    elements = pointerof(@buffer)
+    i = N - 1
+    while i > 0
+      j = rng.rand(i + 1)
+      tmp = elements[i]
+      elements[i] = elements[j]
+      elements[j] = tmp
+      i = i - 1
+    end
+    self
   end
 end

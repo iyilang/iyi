@@ -16,6 +16,16 @@ class IyiIO
   @write_buffer : Pointer(UInt8)
   @write_capacity : Int32
   @write_pos : Int32
+  {% if flag?(:win32) %}
+    # A console a file was opened on - `CON`, `CONIN$`, `CONOUT$` - is
+    # written and read wide, as the standard streams' consoles are, with a
+    # carry of its own (`IyiConsole.write_handle`). Through `WriteFile` and
+    # `ReadFile` it was the console's code page: `çay ğ` written to
+    # `CONOUT$` showed as `├ºay ─ƒ`, and `Türkçe ğ` typed at `CONIN$` read
+    # as eight bytes of code page 437, `ğ` folded to `g`.
+    @console : Bool = false
+    @console_carry : UInt64 = 0_u64
+  {% end %}
 
   def initialize(@fd : Int64, buffer_size : Int32 = 4096, @sync : Bool = false)
     @closed = false
@@ -29,6 +39,18 @@ class IyiIO
     @write_capacity = buffer_size
     @write_buffer = Pointer(UInt8).malloc(buffer_size.to_u64)
     @write_pos = 0
+    {% if flag?(:win32) %}
+      # A character device answers the console's own question if it was
+      # opened to be read; opened only to be written, `GetConsoleMode`
+      # refuses it (ERROR_ACCESS_DENIED), and a wide write of nothing,
+      # which `NUL` refuses, is the test.
+      mode = 0
+      handle = Pointer(Void).new(@fd > 2_i64 ? @fd.to_u64 : 0_u64)
+      if @fd > 2_i64 && LibC.GetFileType(handle) == 2
+        readable = LibC.GetConsoleMode(handle, pointerof(mode)) != 0
+        @console = readable || LibC.WriteConsoleW(handle, pointerof(mode).as(Void*), 0, pointerof(mode), Pointer(Void).new(0_u64)) != 0
+      end
+    {% end %}
   end
 
   def self.new(fd : Int32, buffer_size : Int32 = 4096, sync : Bool = false) : IyiIO
@@ -63,11 +85,11 @@ class IyiIO
     @eof && @read_pos >= @read_limit
   end
 
-  # A failed read is not an ended one: the kernel's error and its zero
-  # looked alike, and `File.read` of a directory answered "". Kept as a
-  # limit of -1, which no read leaves, so a stream keeps the size the
-  # sweep's proofs expect: they corrupt IO objects on purpose and pin
-  # a symptom a word more per stream moves.
+  # A failed read is not an ended one - `File.read` of a directory said ""
+  # - and is kept as a limit of -1, not a field the sweep's proofs would
+  # see the size of. Nor is a withdrawn one (-2, `low_level_read`): taken
+  # for the end, it ended for good a stream whose read a cancelled task
+  # had begun, and the next line was never read.
   def read_failed? : Bool
     @read_limit < 0
   end
@@ -79,26 +101,35 @@ class IyiIO
 
     count = low_level_read(@fd, @read_buffer.as(Void*), @read_capacity.to_u64)
     if count <= 0_i64
-      @read_limit = -1 if count < 0_i64
-      @eof = true
+      @read_limit = -1 if count < 0_i64 && count != -2_i64
+      @eof = true unless count == -2_i64
       return 0
     end
     @read_limit = count.to_i
     @read_limit
   end
 
+  # The buffer grows with what arrives, up to `count`, as std/io's
+  # `Reader#read_bytes` does: allocated whole first, 10 bytes read with a
+  # count of 1,500,000,000 took 1.6 GB. It starts at the stream's buffer,
+  # the most one piece is, so one doubling holds the next piece.
   def read_bytes(count : Int32) : String
     raise "cannot read from closed IO" if @closed
     return "" if count <= 0
 
-    result_buf = Pointer(UInt8).malloc(count.to_u64)
     total_read = 0
+    result_cap = count < @read_capacity ? count : @read_capacity
+    result_buf = Pointer(UInt8).malloc(result_cap.to_u64)
 
     while total_read < count
       avail = @read_limit - @read_pos
       if avail > 0
         needed = count - total_read
         to_copy = avail < needed ? avail : needed
+        if total_read + to_copy > result_cap
+          result_cap = count - result_cap < result_cap ? count : result_cap * 2
+          result_buf = result_buf.realloc(result_cap.to_u64)
+        end
         (result_buf + total_read).copy_from(@read_buffer + @read_pos, to_copy)
         total_read = total_read + to_copy
         @read_pos = @read_pos + to_copy
@@ -114,35 +145,70 @@ class IyiIO
     end
   end
 
-  def read_all : String
+  # What is buffered, then the rest straight into the growing result, as
+  # much as it has room for each time: through the stream's own buffer
+  # it was a read and a copy per 4 KB, and an 86 MB file took 150 ms to
+  # read where one read per doubling of the result takes a fraction. A
+  # failed read leaves the limit at -1 as `fill_buffer` does, which is
+  # what `read_failed?` reports. In Int64, up to one byte past what a
+  # string holds: in Int32, doubling 1 GiB panicked "arithmetic overflow",
+  # and `File.read` of any file over 1 GiB - 64 KiB with it. *size* is
+  # what the file says it holds, for `read_sized`.
+  def read_all(size : Int64 = 0_i64) : String
     raise "cannot read from closed IO" if @closed
+    return read_sized(size.to_i32) if size > 0_i64 && size < 2147483647_i64 && @read_pos >= @read_limit && !@eof
 
-    capacity = 8192
+    capacity = 8192_i64
     buffer = Pointer(UInt8).malloc(capacity.to_u64)
-    filled = 0
+    filled = 0_i64
 
-    while true
-      avail = @read_limit - @read_pos
-      if avail > 0
-        if (filled + avail) > capacity
-          while (filled + avail) > capacity
-            capacity = capacity * 2
-          end
-          buffer = buffer.realloc(capacity.to_u64)
-        end
-        (buffer + filled).copy_from(@read_buffer + @read_pos, avail)
-        filled = filled + avail
-        @read_pos = @read_limit
+    avail = @read_limit - @read_pos
+    if avail > 0
+      while avail > capacity
+        capacity = capacity * 2
+      end
+      buffer = buffer.realloc(capacity.to_u64) if capacity > 8192
+      buffer.copy_from(@read_buffer + @read_pos, avail)
+      filled = avail.to_i64
+      @read_pos = @read_limit
+    end
+
+    until @eof
+      if capacity - filled < 65536 && capacity < 2147483648_i64
+        capacity = capacity * 2
+        buffer = buffer.realloc(capacity.to_u64)
+      end
+      got = low_level_read(@fd, (buffer + filled).as(Void*), (capacity - filled).to_u64)
+      if got <= 0_i64
+        @read_pos = 0
+        @read_limit = got < 0_i64 ? -1 : 0
+        @eof = true
       else
-        break if @eof
-        got = fill_buffer
-        break if got <= 0
+        filled = filled + got
+        raise "the stream is past the 2147483647 bytes a string holds" if filled > 2147483647
       end
     end
 
-    String.new(filled) do |target|
-      target.copy_from(buffer, filled)
+    String.new(filled.to_i32) do |target|
+      target.copy_from(buffer, filled.to_i32)
     end
+  end
+
+  # Straight into the string: grown and then copied out, `File.read` of a
+  # 256 MB file peaked at 774 MB of working set, three times the file. A
+  # file that came up short is cut to what came; one that grew reads on.
+  private def read_sized(size : Int32) : String
+    filled = 0
+    got = 0_i64
+    text = String.new(size) do |buffer|
+      while filled < size && (got = low_level_read(@fd, (buffer + filled).as(Void*), (size - filled).to_u64)) > 0_i64
+        filled = filled + got.to_i32
+      end
+    end
+    return fill_buffer > 0 ? text + read_all : text if filled == size
+    @read_limit = got < 0_i64 ? -1 : 0
+    @eof = true
+    text[0, filled]
   end
 
   def read_line(chomp : Bool = false) : String?
@@ -154,77 +220,46 @@ class IyiIO
       return nil if filled <= 0
     end
 
-    # Fast path: scan current buffer for newline
-    found = -1
-    i = @read_pos
-    while i < @read_limit
-      if @read_buffer[i] == 10_u8
-        found = i
-        break
-      end
-      i = i + 1
+    # Fast path: the line is in the buffer, one copy.
+    found = @read_pos
+    while found < @read_limit && @read_buffer[found] != 10_u8
+      found = found + 1
     end
-
-    if found >= 0
-      take_count = found - @read_pos + 1
+    if found < @read_limit
       start_ptr = @read_buffer + @read_pos
+      len = found - @read_pos + 1
       @read_pos = found + 1
-
-      if chomp
-        len = take_count
-        len = len - 1 if len > 0 && start_ptr[len - 1] == 10_u8
-        len = len - 1 if len > 0 && start_ptr[len - 1] == 13_u8
-        return String.new(len) do |target|
-          target.copy_from(start_ptr, len)
-        end
-      else
-        return String.new(take_count) do |target|
-          target.copy_from(start_ptr, take_count)
-        end
-      end
+      len = len - (len > 1 && start_ptr[len - 2] == 13_u8 ? 2 : 1) if chomp
+      return String.new(len) { |target| target.copy_from(start_ptr, len) }
     end
 
-    # Multi-buffer path: accumulate until newline or EOF
-    line_cap = 256
+    # Multi-buffer path: accumulate until newline or EOF. The capacity is
+    # Int64: in Int32, a line over 1 GiB panicked "arithmetic overflow".
+    line_cap = 256_i64
     line_buf = Pointer(UInt8).malloc(line_cap.to_u64)
     line_len = 0
 
     while true
       avail = @read_limit - @read_pos
       if avail > 0
-        found_idx = -1
         j = @read_pos
-        while j < @read_limit
-          if @read_buffer[j] == 10_u8
-            found_idx = j
-            break
-          end
+        while j < @read_limit && @read_buffer[j] != 10_u8
           j = j + 1
         end
-
-        if found_idx >= 0
-          take = found_idx - @read_pos + 1
-          if (line_len + take) > line_cap
-            while (line_len + take) > line_cap
-              line_cap = line_cap * 2
-            end
-            line_buf = line_buf.realloc(line_cap.to_u64)
+        newline = j < @read_limit
+        take = newline ? j - @read_pos + 1 : avail
+        wanted = line_len.to_i64 + take
+        raise "a line is past the 2147483647 bytes a string holds" if wanted > 2147483647
+        if wanted > line_cap
+          while wanted > line_cap
+            line_cap = line_cap * 2
           end
-          (line_buf + line_len).copy_from(@read_buffer + @read_pos, take)
-          line_len = line_len + take
-          @read_pos = found_idx + 1
-          break
-        else
-          if (line_len + avail) > line_cap
-            while (line_len + avail) > line_cap
-              line_cap = line_cap * 2
-            end
-            line_buf = line_buf.realloc(line_cap.to_u64)
-          end
-          (line_buf + line_len).copy_from(@read_buffer + @read_pos, avail)
-          line_len = line_len + avail
-          @read_pos = @read_limit
+          line_buf = line_buf.realloc(line_cap.to_u64)
         end
+        (line_buf + line_len).copy_from(@read_buffer + @read_pos, take)
+        line_len = wanted.to_i32
+        @read_pos = @read_pos + take
+        break if newline
       end
 
       break if @eof
@@ -234,18 +269,10 @@ class IyiIO
 
     return nil if line_len == 0 && @eof
 
-    if chomp
-      len = line_len
-      len = len - 1 if len > 0 && line_buf[len - 1] == 10_u8
-      len = len - 1 if len > 0 && line_buf[len - 1] == 13_u8
-      String.new(len) do |target|
-        target.copy_from(line_buf, len)
-      end
-    else
-      String.new(line_len) do |target|
-        target.copy_from(line_buf, line_len)
-      end
-    end
+    # A `\r` ends a line only before a `\n`; a final lone one is kept.
+    len = line_len
+    len = len - (len > 1 && line_buf[len - 2] == 13_u8 ? 2 : 1) if chomp && len > 0 && line_buf[len - 1] == 10_u8
+    String.new(len) { |target| target.copy_from(line_buf, len) }
   end
 
   def gets(chomp : Bool = false) : String?
@@ -293,10 +320,11 @@ class IyiIO
     write(text.to_unsafe, text.bytesize)
   end
 
+  # One write of the line on a sync stream: the text and its newline as two
+  # let another thread's line in between - 750 of 80,000 lines from four.
   def write_line(text : String = "") : Nil
-    write(text)
-    write("\n")
-    flush if @sync
+    write(@sync ? text + "\n" : text)
+    write("\n") unless @sync
   end
 
   def print(text : String) : Nil
@@ -307,8 +335,11 @@ class IyiIO
     write(value.to_s)
   end
 
+  # A string that already ends its line is written as it is, as the other
+  # library's `puts` writes it: `puts File.read(path)` printed a blank line
+  # after the file, `--crystal` none. A value's `to_s` always gets a newline.
   def puts(text : String) : Nil
-    write_line(text)
+    text.bytesize > 0 && text.to_unsafe[text.bytesize - 1] == 10_u8 ? write(text) : write_line(text)
   end
 
   def puts : Nil
@@ -324,12 +355,12 @@ class IyiIO
     if @write_pos > 0
       written = 0_i64
       total = @write_pos.to_i64
+      @write_pos = 0 # before the write: a refused one flushed again from `close`, a second panic
       while written < total
         n = low_level_write(@fd, (@write_buffer + written).as(Void*), (total - written).to_u64)
         raise "write failed: the reader is gone, or the device refused it" if n <= 0_i64
         written = written + n
       end
-      @write_pos = 0
     end
   end
 
@@ -344,14 +375,22 @@ class IyiIO
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
       if target_fd == 0_i64
         outcome = iyi_read(0, buffer, count)
-        return 0_i64 if outcome.is_a?(Cancelled)
+        # -2: withdrawn, which `fill_buffer` does not take for the end.
+        # No read(2) answers it: ENOENT is not a read's error.
+        return -2_i64 if outcome.is_a?(Cancelled)
         outcome
       else
         __iyi_read(target_fd.to_i32, buffer, count)
       end
     {% elsif flag?(:win32) %}
       if target_fd == 0_i64
-        __iyi_read(0, buffer, count)
+        # Parked, as on Linux: a pipe or a console is read by a thread of
+        # its own (`IyiStdinReader`), a disk file where it is asked.
+        outcome = iyi_read(0, buffer, count)
+        return -2_i64 if outcome.is_a?(Cancelled)
+        outcome
+      elsif @console
+        IyiConsole.read(Pointer(Void).new(target_fd.to_u64), buffer, count)
       else
         __iyi_file_read(target_fd, buffer, count)
       end
@@ -364,6 +403,8 @@ class IyiIO
     {% if flag?(:win32) %}
       if target_fd == 1_i64 || target_fd == 2_i64
         __iyi_write(target_fd.to_i32, buffer, count)
+      elsif @console
+        IyiConsole.write_handle(Pointer(Void).new(target_fd.to_u64), buffer, count, pointerof(@console_carry))
       else
         __iyi_file_write(target_fd, buffer, count)
       end
@@ -404,7 +445,7 @@ def print(value) : Nil
 end
 
 def puts(text : String) : Nil
-  stdout.write_line(text)
+  stdout.puts(text)
 end
 
 def puts : Nil
@@ -420,7 +461,7 @@ def puts(first, second, *rest : *T) : Nil forall T
 end
 
 def puts(value) : Nil
-  puts value.to_s
+  stdout.puts(value)
 end
 
 def read_input : String

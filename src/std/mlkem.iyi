@@ -1,0 +1,699 @@
+# ML-KEM-768 (FIPS 203), the module-lattice key-encapsulation mechanism,
+# written in iyi.
+#
+#     import std/mlkem::{MlKem768, MlKem768PrivateKey, MlKemError}
+#
+#     key = MlKem768PrivateKey.from_seed(seed)       # 64 bytes: d, then z
+#     key.encapsulation_key                          # 1,184 bytes, sent
+#     ciphertext, secret = MlKem768.encapsulate(their_key, m).or_panic  # m: 32 random bytes
+#     secret = key.decapsulate(ciphertext).or_panic  # 32 bytes, the same
+#     key.decapsulation_key                          # 2,400 bytes
+#     MlKem768PrivateKey.from_bytes(dk).or_panic     # read back, checked
+#
+# Keys, ciphertexts and randomness are a `String`, whose bytes are taken,
+# or an `Array(UInt8)`; what comes back is an `Array(UInt8)`. The caller
+# brings every random byte, as std/curve25519's caller does: the 64-byte
+# seed of a key pair (FIPS 203's d and z, the "internal" key generation of
+# Algorithm 16) and the 32-byte m of an encapsulation (Algorithm 17).
+# `Random::Secure.random_bytes` from std/random is where they come from.
+# This module imports std/digest's SHA3-256, SHA3-512, SHAKE128 and
+# SHAKE256 and nothing else, so a package that uses it is not counted as
+# reaching the operating system (`iyi mod reach`).
+#
+# The arithmetic is FIPS 203's: polynomials of 256 coefficients modulo
+# q = 3329, multiplied in the NTT domain (Algorithms 9 to 12), the zetas
+# 17^BitRev7(i) and the base-case gammas 17^(2 BitRev7(i) + 1) tabled as
+# FIPS 203's appendix A lists them. A coefficient is a `UInt32` below q.
+# Reduction is Barrett's, as Go's crypto/internal/mlkem768 does it: a
+# product is multiplied by 5039 = floor(2^24 / q) and shifted, which leaves
+# a remainder below 2q for anything under 2q^2, and the last subtraction
+# of q is a mask made from the borrow's sign bit, never a branch. Compress
+# (FIPS 203 section 4.2.1) is the same Barrett division with the rounding
+# taken from two borrows, so no division instruction, whose time can
+# depend on its operands, is ever issued on a secret.
+#
+# Constant time on secrets. Nothing branches on a secret and no memory
+# index is one. The NTT, the products, the CBD sampling (sums of bits,
+# eta = 2) and the decoding of the secret vector run the same instructions
+# whatever the values; every loop bound is a size. Decapsulation decrypts,
+# encrypts again and compares the ciphertexts by OR-ing the XOR of every
+# byte, and the comparison's result picks between the real key and the
+# implicit-rejection key J(z || c) by masks over all 32 bytes of both:
+# FIPS 203 Algorithm 18 with no early exit. How that was checked: by
+# reading, every `if`, `while`, `? :`, `unless` and `[]` on the paths
+# from `decapsulate` and the key generation was listed, and each depends on
+# a size, a loop counter, the ciphertext (which is public) or the
+# encapsulation key (public too). The branches that do depend on data are
+# all on public data: SampleNTT's rejection of 12-bit values of q and up
+# reads the public seed rho, and the modulus check reads the public key.
+# The gate also times decapsulation of good ciphertexts against tampered
+# ones (the implicit-rejection path), and records it, measured, not
+# checked.
+#
+# Input checking (FIPS 203 section 7). `encapsulate` refuses, as an
+# `MlKemError`, an encapsulation key that is not 1,184 bytes and one that
+# fails section 7.2's modulus check (a 12-bit coefficient of q or more,
+# which ByteDecode would reduce, so ByteEncode of it would differ).
+# `from_bytes` refuses a decapsulation key that is not 2,400 bytes and one
+# whose stored H(ek) is not the hash of the encapsulation key inside it
+# (section 7.3's hash check). `decapsulate` refuses a ciphertext that is not
+# 1,088 bytes; any ciphertext of the right size is answered with a key, the
+# real one or the implicit rejection's, as FIPS 203 requires.
+#
+# Measured on one x86_64 Linux machine, --release, the best of five runs
+# of 200 (bench/std_mlkem_exercise.sh): a key pair took 41 microseconds
+# against OpenSSL 3.5.5's 25 (its own `speed`), an encapsulation 48
+# against 16, a decapsulation 36 against 24. Decapsulation is the cheaper
+# of the two here because a key keeps its matrix A and vector t, so its
+# encryption again samples nothing from rho; an encapsulation expands A
+# from the key it is given. Decapsulating a good ciphertext and a tampered
+# one, 2,000 of each interleaved, took a median of 34,590 and 34,591 ns.
+#
+# Held by bench/std_mlkem_exercise.sh to NIST's ACVP vectors for
+# ML-KEM-768 (key generation, encapsulation, decapsulation with implicit
+# rejection, and both key checks), to OpenSSL 3.5's ML-KEM-768 and to
+# Python's `cryptography`, each side encapsulating to the other's keys and
+# both answering a tampered ciphertext with the same key, and by broken
+# copies of this module, each caught at the check that names it. FIPS 203's
+# own intermediate values are not among the oracles: NIST's example-values
+# page listed none for ML-KEM when this was written (2026-10-19).
+#
+# Refused with a sentence, as the caller's own misuse: a seed that is not
+# 64 bytes and an m that is not 32.
+
+# bench/ct_timing.sh, `decapsulate`: one key's valid ciphertext against
+# ciphertexts with one bit flipped, which take the implicit rejection,
+# |t| = 2.1 to 2.4 over 50,000; one key and its ciphertext against 64
+# other keys and theirs, |t| = 5.2 to 6.3 over 50,000 (under 10 is no
+# leak seen, on a machine at load 8 to 11). The --release assembly of
+# `decapsulate` reads every ciphertext byte in the re-encryption compare
+# with no early exit and keeps K or K-bar by masks; its conditional jumps
+# compare loop counters, constants and pointer ranges.
+
+module std/mlkem
+
+import std/digest::{SHA3_256, SHA3_512, SHAKE128, SHAKE256}
+
+# What is wrong with a key or a ciphertext from outside: `message` is the
+# sentence.
+pub struct MlKemError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for MlKemError
+  def message : String
+    @message
+  end
+end
+
+# ML-KEM-768's encapsulation, and its sizes (FIPS 203 section 8, table 3).
+pub struct MlKem768
+  ENCAPSULATION_KEY_SIZE = 1184
+  DECAPSULATION_KEY_SIZE = 2400
+  CIPHERTEXT_SIZE        = 1088
+  SHARED_SECRET_SIZE     =   32
+  SEED_SIZE              =   64
+
+  # The ciphertext for *encapsulation_key* and the 32-byte shared secret it
+  # carries, FIPS 203 Algorithm 17 from the 32 random bytes *randomness*
+  # (m), or an `MlKemError`: a key that is not 1,184 bytes or fails the
+  # modulus check of section 7.2.
+  def self.encapsulate(encapsulation_key : String | Array(UInt8), randomness : String | Array(UInt8)) : {Array(UInt8), Array(UInt8)} | MlKemError
+    mp, mn = MlKemBytes.of(randomness)
+    raise "ML-KEM-768: the randomness of an encapsulation is 32 bytes, not #{mn}" unless mn == 32
+    ek, n = MlKemBytes.of(encapsulation_key)
+    return MlKemError.new("ML-KEM-768: an encapsulation key is 1184 bytes, not #{n}") unless n == ENCAPSULATION_KEY_SIZE
+    unless MlKemPke.modulus_ok?(ek)
+      return MlKemError.new("ML-KEM-768: the encapsulation key fails the modulus check (FIPS 203 section 7.2): a coefficient is q or more")
+    end
+    t = MlKemPke.decode_vector(ek)
+    a = MlKemPke.expand(ek + 1152)
+    h = SHA3_256.new.update(ek, ENCAPSULATION_KEY_SIZE).final
+    g = SHA3_512.new.update(mp, 32).update(h).final
+    ciphertext = MlKemPke.encrypt(t, a, mp, g.to_unsafe + 32)
+    {ciphertext, g[0, 32]}
+  end
+end
+
+# An ML-KEM-768 key pair: the decapsulation key and the encapsulation key
+# that goes with it. Holds the secret vector in the NTT domain, and the
+# public matrix and vector that decapsulation encrypts with again.
+pub struct MlKem768PrivateKey
+  # The 1,184 bytes a peer encapsulates to: ByteEncode12 of t, then rho.
+  getter encapsulation_key : Array(UInt8)
+  @s : Pointer(UInt32)
+  @t : Pointer(UInt32)
+  @a : Pointer(UInt32)
+  @h : Array(UInt8)
+  @z : Array(UInt8)
+
+  def initialize(@encapsulation_key : Array(UInt8), @s : Pointer(UInt32), @t : Pointer(UInt32), @a : Pointer(UInt32), @h : Array(UInt8), @z : Array(UInt8))
+  end
+
+  # The key pair of *seed*, d then z, 32 bytes each: FIPS 203 Algorithm 16
+  # (ML-KEM.KeyGen_internal) over Algorithm 13 (K-PKE.KeyGen).
+  def self.from_seed(seed : String | Array(UInt8)) : MlKem768PrivateKey
+    sp, n = MlKemBytes.of(seed)
+    raise "ML-KEM-768: a seed is 64 bytes (d, then z), not #{n}" unless n == 64
+    k = 3_u8
+    g = SHA3_512.new.update(sp, 32).update(pointerof(k), 1).final
+    rho = g.to_unsafe
+    sigma = g.to_unsafe + 32
+    a = MlKemPke.expand(rho)
+    s = MlKemPoly.vector
+    e = MlKemPoly.vector
+    i = 0
+    while i < 3
+      MlKemPoly.cbd(MlKemPke.prf(sigma, i.to_u8), s + i * 256)
+      MlKemPoly.cbd(MlKemPke.prf(sigma, (i + 3).to_u8), e + i * 256)
+      MlKemPoly.ntt(s + i * 256)
+      MlKemPoly.ntt(e + i * 256)
+      i = i + 1
+    end
+    # t = A s + e, in the NTT domain.
+    t = MlKemPoly.vector
+    i = 0
+    while i < 3
+      MlKemPoly.dot(a, i * 3, 1, s, t + i * 256)
+      MlKemPoly.add(t + i * 256, e + i * 256)
+      i = i + 1
+    end
+    ek = Array(UInt8).new(MlKem768::ENCAPSULATION_KEY_SIZE, 0_u8)
+    i = 0
+    while i < 3
+      MlKemPoly.encode(t + i * 256, 12, ek.to_unsafe + i * 384)
+      i = i + 1
+    end
+    (ek.to_unsafe + 1152).copy_from(rho, 32)
+    h = SHA3_256.new.update(ek).final
+    z = Array(UInt8).new(32) { |x| sp[32 + x] }
+    MlKem768PrivateKey.new(ek, s, t, a, h, z)
+  end
+
+  # The key whose 2,400-byte decapsulation key is *bytes* (ByteEncode12 of
+  # s, the encapsulation key, H of it, z), or an `MlKemError`: the wrong
+  # size, or a stored H(ek) that is not the encapsulation key's hash (FIPS
+  # 203 section 7.3).
+  def self.from_bytes(bytes : String | Array(UInt8)) : MlKem768PrivateKey | MlKemError
+    dk, n = MlKemBytes.of(bytes)
+    return MlKemError.new("ML-KEM-768: a decapsulation key is 2400 bytes, not #{n}") unless n == MlKem768::DECAPSULATION_KEY_SIZE
+    ek = Array(UInt8).new(MlKem768::ENCAPSULATION_KEY_SIZE) { |x| dk[1152 + x] }
+    h = SHA3_256.new.update(ek).final
+    seen = 0_u8
+    j = 0
+    while j < 32
+      seen = seen | (h[j] ^ dk[2336 + j])
+      j = j + 1
+    end
+    unless seen == 0_u8
+      return MlKemError.new("ML-KEM-768: the decapsulation key fails the hash check (FIPS 203 section 7.3): its H(ek) is not the hash of its encapsulation key")
+    end
+    s = MlKemPke.decode_vector(dk)
+    t = MlKemPke.decode_vector(ek.to_unsafe)
+    a = MlKemPke.expand(ek.to_unsafe + 1152)
+    z = Array(UInt8).new(32) { |x| dk[2368 + x] }
+    MlKem768PrivateKey.new(ek, s, t, a, h, z)
+  end
+
+  # The 2,400-byte decapsulation key, as `from_bytes` reads it.
+  def decapsulation_key : Array(UInt8)
+    dk = Array(UInt8).new(MlKem768::DECAPSULATION_KEY_SIZE, 0_u8)
+    p = dk.to_unsafe
+    i = 0
+    while i < 3
+      MlKemPoly.encode(@s + i * 256, 12, p + i * 384)
+      i = i + 1
+    end
+    (p + 1152).copy_from(@encapsulation_key.to_unsafe, MlKem768::ENCAPSULATION_KEY_SIZE)
+    (p + 2336).copy_from(@h.to_unsafe, 32)
+    (p + 2368).copy_from(@z.to_unsafe, 32)
+    dk
+  end
+
+  # The 32-byte shared secret *ciphertext* carries, FIPS 203 Algorithm 18,
+  # or an `MlKemError` for a ciphertext that is not 1,088 bytes. A
+  # ciphertext that does not re-encrypt to itself is answered with the
+  # implicit-rejection key J(z || c), chosen by masks: the caller cannot
+  # tell the two apart, and neither can the time taken.
+  def decapsulate(ciphertext : String | Array(UInt8)) : Array(UInt8) | MlKemError
+    c, n = MlKemBytes.of(ciphertext)
+    return MlKemError.new("ML-KEM-768: a ciphertext is 1088 bytes, not #{n}") unless n == MlKem768::CIPHERTEXT_SIZE
+    m = MlKemPke.decrypt(@s, c)
+    g = SHA3_512.new.update(m).update(@h).final
+    rejected = SHAKE256.new.update(@z).update(c, n).read(32)
+    again = MlKemPke.encrypt(@t, @a, m.to_unsafe, g.to_unsafe + 32)
+    diff = 0_u32
+    i = 0
+    while i < MlKem768::CIPHERTEXT_SIZE
+      diff = diff | (c[i] ^ again[i]).to_u32
+      i = i + 1
+    end
+    # 0xff when every byte matched (diff - 1 borrows only from zero), 0 if not.
+    keep = ((diff &- 1_u32) >> 31).to_u8
+    keep = 0_u8 &- keep
+    secret = Array(UInt8).new(32, 0_u8)
+    i = 0
+    while i < 32
+      secret[i] = (g[i] & keep) | (rejected[i] & ~keep)
+      i = i + 1
+    end
+    secret
+  end
+end
+
+# K-PKE, FIPS 203 section 5, for k = 3, eta1 = eta2 = 2, du = 10, dv = 4.
+struct MlKemPke
+  # Whether every 12-bit coefficient of the key's t is below q: section
+  # 7.2's ByteEncode12(ByteDecode12(ek)) == ek. The key is public, so this
+  # may stop at the first one that is not.
+  def self.modulus_ok?(ek : Pointer(UInt8)) : Bool
+    i = 0
+    while i < 1152
+      d1 = ek[i].to_u32 | (ek[i + 1].to_u32 & 15_u32) << 8
+      d2 = ek[i + 1].to_u32 >> 4 | ek[i + 2].to_u32 << 4
+      return false if d1 >= MlKemField::Q || d2 >= MlKemField::Q
+      i = i + 3
+    end
+    true
+  end
+
+  # Three polynomials, ByteDecode12 of 1,152 bytes, each coefficient
+  # reduced mod q as Algorithm 6 does for d = 12.
+  def self.decode_vector(bytes : Pointer(UInt8)) : Pointer(UInt32)
+    v = MlKemPoly.vector
+    i = 0
+    while i < 3
+      MlKemPoly.decode(bytes + i * 384, 12, v + i * 256)
+      j = 0
+      while j < 256
+        v[i * 256 + j] = MlKemField.reduce_once(v[i * 256 + j])
+        j = j + 1
+      end
+      i = i + 1
+    end
+    v
+  end
+
+  # A in the NTT domain, A[i, j] = SampleNTT(rho || j || i) (Algorithm 13,
+  # line 6), stored row by row.
+  def self.expand(rho : Pointer(UInt8)) : Pointer(UInt32)
+    a = Pointer(UInt32).malloc(9_u64 * 256_u64)
+    i = 0
+    while i < 3
+      j = 0
+      while j < 3
+        MlKemPoly.sample_ntt(rho, j.to_u8, i.to_u8, a + (i * 3 + j) * 256)
+        j = j + 1
+      end
+      i = i + 1
+    end
+    a
+  end
+
+  # PRF_eta(s, b) = SHAKE256(s || b), 64 eta bytes (section 4.1).
+  def self.prf(s : Pointer(UInt8), b : UInt8) : Array(UInt8)
+    nonce = b
+    SHAKE256.new.update(s, 32).update(pointerof(nonce), 1).read(64 * MlKemPoly::ETA)
+  end
+
+  # K-PKE.Encrypt (Algorithm 14): the 1,088-byte ciphertext of the 32 bytes
+  # at *m* under t and A, with the 32 bytes of randomness at *r*.
+  def self.encrypt(t : Pointer(UInt32), a : Pointer(UInt32), m : Pointer(UInt8), r : Pointer(UInt8)) : Array(UInt8)
+    y = MlKemPoly.vector
+    e1 = MlKemPoly.vector
+    i = 0
+    while i < 3
+      MlKemPoly.cbd(prf(r, i.to_u8), y + i * 256)
+      MlKemPoly.ntt(y + i * 256)
+      MlKemPoly.cbd(prf(r, (i + 3).to_u8), e1 + i * 256)
+      i = i + 1
+    end
+    e2 = MlKemPoly.poly
+    MlKemPoly.cbd(prf(r, 6_u8), e2)
+    c = Array(UInt8).new(MlKem768::CIPHERTEXT_SIZE, 0_u8)
+    cp = c.to_unsafe
+    # u = NTT^-1(A^T y) + e1: column i of A, so A[j, i] for j = 0, 1, 2.
+    u = MlKemPoly.poly
+    i = 0
+    while i < 3
+      MlKemPoly.dot(a, i, 3, y, u)
+      MlKemPoly.inverse_ntt(u)
+      MlKemPoly.add(u, e1 + i * 256)
+      MlKemPoly.compress(u, 10)
+      MlKemPoly.encode(u, 10, cp + i * 320)
+      i = i + 1
+    end
+    # v = NTT^-1(t^T y) + e2 + Decompress1(m).
+    v = MlKemPoly.poly
+    MlKemPoly.dot(t, 0, 1, y, v)
+    MlKemPoly.inverse_ntt(v)
+    MlKemPoly.add(v, e2)
+    mu = MlKemPoly.poly
+    MlKemPoly.decode(m, 1, mu)
+    MlKemPoly.decompress(mu, 1)
+    MlKemPoly.add(v, mu)
+    MlKemPoly.compress(v, 4)
+    MlKemPoly.encode(v, 4, cp + 960)
+    c
+  end
+
+  # K-PKE.Decrypt (Algorithm 15): the 32 bytes of m the ciphertext at *c*
+  # carries under the secret vector *s*.
+  def self.decrypt(s : Pointer(UInt32), c : Pointer(UInt8)) : Array(UInt8)
+    u = MlKemPoly.vector
+    i = 0
+    while i < 3
+      MlKemPoly.decode(c + i * 320, 10, u + i * 256)
+      MlKemPoly.decompress(u + i * 256, 10)
+      MlKemPoly.ntt(u + i * 256)
+      i = i + 1
+    end
+    w = MlKemPoly.poly
+    MlKemPoly.dot(s, 0, 1, u, w)
+    MlKemPoly.inverse_ntt(w)
+    v = MlKemPoly.poly
+    MlKemPoly.decode(c + 960, 4, v)
+    MlKemPoly.decompress(v, 4)
+    # w = v - NTT^-1(s^T u)
+    j = 0
+    while j < 256
+      w[j] = MlKemField.sub(v[j], w[j])
+      j = j + 1
+    end
+    MlKemPoly.compress(w, 1)
+    m = Array(UInt8).new(32, 0_u8)
+    MlKemPoly.encode(w, 1, m.to_unsafe)
+    m
+  end
+end
+
+# Arithmetic modulo q = 3329 on values below q, held in a `UInt32`.
+struct MlKemField
+  Q = 3329_u32
+
+  # a - q, plus q again where that borrowed: a below 2q comes out below q.
+  # A borrow sets the top bit, so the q added back is chosen by it.
+  def self.reduce_once(a : UInt32) : UInt32
+    x = a &- Q
+    x &+ (x >> 31) &* Q
+  end
+
+  # a mod q for a below 2q^2: Barrett's quotient, floor(a 5039 / 2^24),
+  # is the true one or one short, so the remainder is below 2q.
+  def self.reduce(a : UInt32) : UInt32
+    quotient = ((a.to_u64 &* 5039_u64) >> 24).to_u32
+    reduce_once(a &- quotient &* Q)
+  end
+
+  def self.add(a : UInt32, b : UInt32) : UInt32
+    reduce_once(a &+ b)
+  end
+
+  def self.sub(a : UInt32, b : UInt32) : UInt32
+    reduce_once(a &- b &+ Q)
+  end
+
+  def self.mul(a : UInt32, b : UInt32) : UInt32
+    reduce(a &* b)
+  end
+end
+
+# Polynomials of 256 coefficients at a pointer, and FIPS 203's operations
+# on them (sections 4.2 and 4.3).
+struct MlKemPoly
+  ETA = 2
+
+  @@tables = Pointer(UInt32).new(0_u64)
+
+  def self.poly : Pointer(UInt32)
+    Pointer(UInt32).malloc(256_u64)
+  end
+
+  def self.vector : Pointer(UInt32)
+    Pointer(UInt32).malloc(768_u64)
+  end
+
+  # The 128 zetas, 17^BitRev7(i) mod q, then the 128 gammas,
+  # 17^(2 BitRev7(i) + 1) mod q: FIPS 203 appendix A.
+  private def self.tables : Pointer(UInt32)
+    return @@tables if @@tables.address != 0_u64
+    words = [
+      1_u32, 1729_u32, 2580_u32, 3289_u32, 2642_u32, 630_u32, 1897_u32, 848_u32, 1062_u32, 1919_u32, 193_u32, 797_u32,
+      2786_u32, 3260_u32, 569_u32, 1746_u32, 296_u32, 2447_u32, 1339_u32, 1476_u32, 3046_u32, 56_u32, 2240_u32, 1333_u32,
+      1426_u32, 2094_u32, 535_u32, 2882_u32, 2393_u32, 2879_u32, 1974_u32, 821_u32, 289_u32, 331_u32, 3253_u32, 1756_u32,
+      1197_u32, 2304_u32, 2277_u32, 2055_u32, 650_u32, 1977_u32, 2513_u32, 632_u32, 2865_u32, 33_u32, 1320_u32, 1915_u32,
+      2319_u32, 1435_u32, 807_u32, 452_u32, 1438_u32, 2868_u32, 1534_u32, 2402_u32, 2647_u32, 2617_u32, 1481_u32, 648_u32,
+      2474_u32, 3110_u32, 1227_u32, 910_u32, 17_u32, 2761_u32, 583_u32, 2649_u32, 1637_u32, 723_u32, 2288_u32, 1100_u32,
+      1409_u32, 2662_u32, 3281_u32, 233_u32, 756_u32, 2156_u32, 3015_u32, 3050_u32, 1703_u32, 1651_u32, 2789_u32, 1789_u32,
+      1847_u32, 952_u32, 1461_u32, 2687_u32, 939_u32, 2308_u32, 2437_u32, 2388_u32, 733_u32, 2337_u32, 268_u32, 641_u32,
+      1584_u32, 2298_u32, 2037_u32, 3220_u32, 375_u32, 2549_u32, 2090_u32, 1645_u32, 1063_u32, 319_u32, 2773_u32, 757_u32,
+      2099_u32, 561_u32, 2466_u32, 2594_u32, 2804_u32, 1092_u32, 403_u32, 1026_u32, 1143_u32, 2150_u32, 2775_u32, 886_u32,
+      1722_u32, 1212_u32, 1874_u32, 1029_u32, 2110_u32, 2935_u32, 885_u32, 2154_u32,
+      17_u32, 3312_u32, 2761_u32, 568_u32, 583_u32, 2746_u32, 2649_u32, 680_u32, 1637_u32, 1692_u32, 723_u32, 2606_u32,
+      2288_u32, 1041_u32, 1100_u32, 2229_u32, 1409_u32, 1920_u32, 2662_u32, 667_u32, 3281_u32, 48_u32, 233_u32, 3096_u32,
+      756_u32, 2573_u32, 2156_u32, 1173_u32, 3015_u32, 314_u32, 3050_u32, 279_u32, 1703_u32, 1626_u32, 1651_u32, 1678_u32,
+      2789_u32, 540_u32, 1789_u32, 1540_u32, 1847_u32, 1482_u32, 952_u32, 2377_u32, 1461_u32, 1868_u32, 2687_u32, 642_u32,
+      939_u32, 2390_u32, 2308_u32, 1021_u32, 2437_u32, 892_u32, 2388_u32, 941_u32, 733_u32, 2596_u32, 2337_u32, 992_u32,
+      268_u32, 3061_u32, 641_u32, 2688_u32, 1584_u32, 1745_u32, 2298_u32, 1031_u32, 2037_u32, 1292_u32, 3220_u32, 109_u32,
+      375_u32, 2954_u32, 2549_u32, 780_u32, 2090_u32, 1239_u32, 1645_u32, 1684_u32, 1063_u32, 2266_u32, 319_u32, 3010_u32,
+      2773_u32, 556_u32, 757_u32, 2572_u32, 2099_u32, 1230_u32, 561_u32, 2768_u32, 2466_u32, 863_u32, 2594_u32, 735_u32,
+      2804_u32, 525_u32, 1092_u32, 2237_u32, 403_u32, 2926_u32, 1026_u32, 2303_u32, 1143_u32, 2186_u32, 2150_u32, 1179_u32,
+      2775_u32, 554_u32, 886_u32, 2443_u32, 1722_u32, 1607_u32, 1212_u32, 2117_u32, 1874_u32, 1455_u32, 1029_u32, 2300_u32,
+      2110_u32, 1219_u32, 2935_u32, 394_u32, 885_u32, 2444_u32, 2154_u32, 1175_u32,
+    ]
+    table = Pointer(UInt32).malloc(256_u64)
+    table.copy_from(words.to_unsafe, 256)
+    @@tables = table
+    table
+  end
+
+  # The NTT in place (Algorithm 9): seven layers of butterflies, the zeta of
+  # each block taken in order from the second.
+  def self.ntt(f : Pointer(UInt32)) : Nil
+    zetas = tables
+    k = 1
+    len = 128
+    while len >= 2
+      start = 0
+      while start < 256
+        zeta = zetas[k]
+        k = k + 1
+        j = start
+        while j < start + len
+          t = MlKemField.mul(zeta, f[j + len])
+          f[j + len] = MlKemField.sub(f[j], t)
+          f[j] = MlKemField.add(f[j], t)
+          j = j + 1
+        end
+        start = start + 2 * len
+      end
+      len = len // 2
+    end
+  end
+
+  # The inverse NTT in place (Algorithm 10), then the product by
+  # 128^-1 = 3303 mod q.
+  def self.inverse_ntt(f : Pointer(UInt32)) : Nil
+    zetas = tables
+    k = 127
+    len = 2
+    while len <= 128
+      start = 0
+      while start < 256
+        zeta = zetas[k]
+        k = k - 1
+        j = start
+        while j < start + len
+          t = f[j]
+          f[j] = MlKemField.add(t, f[j + len])
+          f[j + len] = MlKemField.mul(zeta, MlKemField.sub(f[j + len], t))
+          j = j + 1
+        end
+        start = start + 2 * len
+      end
+      len = len * 2
+    end
+    j = 0
+    while j < 256
+      f[j] = MlKemField.mul(f[j], 3303_u32)
+      j = j + 1
+    end
+  end
+
+  # *dst* = the sum over j of m[first + j step] times v[j], three products
+  # in the NTT domain (Algorithms 11 and 12): a row of A for step 1 from
+  # first = 3i, a column for step 3 from first = i.
+  def self.dot(m : Pointer(UInt32), first : Int32, step : Int32, v : Pointer(UInt32), dst : Pointer(UInt32)) : Nil
+    gammas = tables + 128
+    i = 0
+    while i < 256
+      dst[i] = 0_u32
+      i = i + 1
+    end
+    j = 0
+    while j < 3
+      f = m + (first + j * step) * 256
+      g = v + j * 256
+      i = 0
+      while i < 256
+        a0 = f[i]
+        a1 = f[i + 1]
+        b0 = g[i]
+        b1 = g[i + 1]
+        c0 = MlKemField.reduce(a0 &* b0 &+ MlKemField.mul(a1, b1) &* gammas[i >> 1])
+        c1 = MlKemField.reduce(a0 &* b1 &+ a1 &* b0)
+        dst[i] = MlKemField.add(dst[i], c0)
+        dst[i + 1] = MlKemField.add(dst[i + 1], c1)
+        i = i + 2
+      end
+      j = j + 1
+    end
+  end
+
+  def self.add(f : Pointer(UInt32), g : Pointer(UInt32)) : Nil
+    i = 0
+    while i < 256
+      f[i] = MlKemField.add(f[i], g[i])
+      i = i + 1
+    end
+  end
+
+  # SampleNTT (Algorithm 7): coefficients below q read three bytes to two
+  # from SHAKE128(rho || j || i), a block of 168 at a time. Rejection here
+  # branches on the stream, which is public: rho is in the encapsulation key.
+  def self.sample_ntt(rho : Pointer(UInt8), j : UInt8, i : UInt8, dst : Pointer(UInt32)) : Nil
+    index = uninitialized UInt8[2]
+    ip = pointerof(index).as(Pointer(UInt8))
+    ip[0] = j
+    ip[1] = i
+    xof = SHAKE128.new.update(rho, 32).update(ip, 2)
+    block = Array(UInt8).new(168, 0_u8)
+    n = 0
+    while n < 256
+      xof.read(block)
+      b = 0
+      while b < 168 && n < 256
+        d1 = block[b].to_u32 | (block[b + 1].to_u32 & 15_u32) << 8
+        d2 = block[b + 1].to_u32 >> 4 | block[b + 2].to_u32 << 4
+        if d1 < MlKemField::Q
+          dst[n] = d1
+          n = n + 1
+        end
+        if d2 < MlKemField::Q && n < 256
+          dst[n] = d2
+          n = n + 1
+        end
+        b = b + 3
+      end
+    end
+  end
+
+  # SamplePolyCBD_eta (Algorithm 8) from the 64 eta bytes of *bytes*: each
+  # coefficient the sum of eta bits less the sum of the next eta, mod q.
+  # Only bits are added; the subtraction's wrap is reduce_once's mask.
+  def self.cbd(bytes : Array(UInt8), dst : Pointer(UInt32)) : Nil
+    p = bytes.to_unsafe
+    i = 0
+    while i < 256
+      x = 0_u32
+      y = 0_u32
+      j = 0
+      while j < ETA
+        bx = 2 * i * ETA + j
+        by = 2 * i * ETA + ETA + j
+        x = x &+ ((p[bx >> 3].to_u32 >> (bx & 7)) & 1_u32)
+        y = y &+ ((p[by >> 3].to_u32 >> (by & 7)) & 1_u32)
+        j = j + 1
+      end
+      dst[i] = MlKemField.sub(x, y)
+      i = i + 1
+    end
+  end
+
+  # ByteEncode_d (Algorithm 5): the low *d* bits of each coefficient, least
+  # significant first, into 32 d bytes.
+  def self.encode(f : Pointer(UInt32), d : Int32, dst : Pointer(UInt8)) : Nil
+    acc = 0_u64
+    bits = 0
+    o = 0
+    i = 0
+    while i < 256
+      acc = acc | f[i].to_u64.unsafe_shl(bits)
+      bits = bits + d
+      while bits >= 8
+        dst[o] = (acc & 255_u64).to_u8
+        acc = acc.unsafe_shr(8)
+        bits = bits - 8
+        o = o + 1
+      end
+      i = i + 1
+    end
+  end
+
+  # ByteDecode_d (Algorithm 6), without the reduction mod q that d = 12
+  # asks: K-PKE's callers reduce, or check, for themselves.
+  def self.decode(bytes : Pointer(UInt8), d : Int32, dst : Pointer(UInt32)) : Nil
+    mask = (1_u64.unsafe_shl(d)) &- 1_u64
+    acc = 0_u64
+    bits = 0
+    p = 0
+    i = 0
+    while i < 256
+      while bits < d
+        acc = acc | bytes[p].to_u64.unsafe_shl(bits)
+        bits = bits + 8
+        p = p + 1
+      end
+      dst[i] = (acc & mask).to_u32
+      acc = acc.unsafe_shr(d)
+      bits = bits - d
+      i = i + 1
+    end
+  end
+
+  # Compress_d (section 4.2.1) in place: round(2^d x / q), a half rounded
+  # up, mod 2^d. Barrett's quotient leaves a remainder in [0, 2q), so one
+  # is added for a remainder past q/2 and one more past q + q/2, each
+  # taken from the sign of a subtraction.
+  def self.compress(f : Pointer(UInt32), d : Int32) : Nil
+    mask = (1_u32.unsafe_shl(d)) &- 1_u32
+    i = 0
+    while i < 256
+      dividend = f[i].unsafe_shl(d)
+      quotient = ((dividend.to_u64 &* 5039_u64) >> 24).to_u32
+      remainder = dividend &- quotient &* MlKemField::Q
+      quotient = quotient &+ (((1664_u32 &- remainder) >> 31) & 1_u32)
+      quotient = quotient &+ (((4993_u32 &- remainder) >> 31) & 1_u32)
+      f[i] = quotient & mask
+      i = i + 1
+    end
+  end
+
+  # Decompress_d in place: round(q y / 2^d), a half rounded up; the bit
+  # below the shift says whether to.
+  def self.decompress(f : Pointer(UInt32), d : Int32) : Nil
+    i = 0
+    while i < 256
+      dividend = f[i] &* MlKemField::Q
+      f[i] = dividend.unsafe_shr(d) &+ (dividend.unsafe_shr(d - 1) & 1_u32)
+      i = i + 1
+    end
+  end
+end
+
+struct MlKemBytes
+  def self.of(data : String | Array(UInt8)) : {Pointer(UInt8), Int32}
+    if data.is_a?(String)
+      {data.to_unsafe, data.bytesize}
+    else
+      {data.to_unsafe, data.size}
+    end
+  end
+end

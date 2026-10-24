@@ -110,9 +110,9 @@ import std/number
 
     # Against an integer, exact: on the double the single is exactly,
     # which holds every integer under 64 bits exactly too, and through
-    # std/int's exact `<=>` for the wider ones - the prelude's own `Int64 ==
-    # Float64` is not exact. `16777217 == 16777216.0_f32` was true, the
-    # integer rounded to a single first.
+    # std/int's exact `<=>` for the wider ones, which the prelude's
+    # `Int64 == Float64` agrees with. `16777217 == 16777216.0_f32` was true,
+    # the integer rounded to a single first.
     {% for int in ints %}
       {% if wide_ints.includes?(int) %}
         {% for pair in [{"==", "c == 0"}, {"!=", "c != 0"}, {"<", "c == 1"}, {"<=", "c == 1 || c == 0"}, {">", "c == -1"}, {">=", "c == -1 || c == 0"}] %}
@@ -197,6 +197,15 @@ import std/number
         def /(other : Float32) : Float32
           to_f32 / other
         end
+
+        # An integer over an integer is a double, as the other library
+        # divides one, and written out so that an integer divisor matches
+        # without a cast: beside `/(Float64)` and the `/(Float32)` above,
+        # the literal in `7 / 2` cast to both, and importing this module
+        # made that line "ambiguous call" where it had printed 3.5.
+        def /(other : ::Int) : Float64
+          to_f64 / other.to_f64
+        end
       {% end %}
     end
   {% end %}
@@ -264,6 +273,9 @@ import std/number
         raise "modulo by zero" if other == 0.0{{ sfx.id }}
         return NAN if nan? || other.nan? || !infinite?.nil?
         return self if !other.infinite?.nil?
+        # A zero is its own remainder, sign and all: `-0.0 < 0.0` is false,
+        # and the test below answered `(-0.0).remainder(2.0)` as 0.0.
+        return self if self == 0.0{{ sfx.id }}
         ax = abs
         ay = other.abs
         while ax >= ay
@@ -295,28 +307,41 @@ import std/number
       # so the division is of a multiple of the divisor; it can still round,
       # so the quotient is floored and nudged up past a half. A zero
       # quotient has the sign of the division.
+      #
+      # A single's is the double's, narrowed. Run in 24 bits, `self - r`
+      # can round once the quotient is past 2^23, and the division then
+      # floored to the next integer: `-170277296.0_f32 // -13.303335_f32`
+      # was 12799595.0 for 12799594.0, and `divmod`'s q * y + r missed x by
+      # 13.3.
       def //(other : {{ name.id }}) : {{ name.id }}
-        raise "division by zero" if other == 0.0{{ sfx.id }}
-        r = remainder(other)
-        q = (self - r) / other
-        if r != 0.0{{ sfx.id }} && (r < 0.0{{ sfx.id }}) != (other < 0.0{{ sfx.id }})
-          q = q - 1.0{{ sfx.id }}
-        end
-        return q if q != q
-        return self / other * 0.0{{ sfx.id }} if q == 0.0{{ sfx.id }}
-        f = q.floor
-        q - f > 0.5{{ sfx.id }} ? f + 1.0{{ sfx.id }} : f
+        {% if name == "Float32" %}
+          (to_f64 // other.to_f64).to_f32
+        {% else %}
+          raise "division by zero" if other == 0.0
+          r = remainder(other)
+          q = (self - r) / other
+          if r != 0.0 && (r < 0.0) != (other < 0.0)
+            q = q - 1.0
+          end
+          return q if q != q
+          return self / other * 0.0 if q == 0.0
+          f = q.floor
+          q - f > 0.5 ? f + 1.0 : f
+        {% end %}
       end
 
       # Toward zero. Past 2^{{ f[2] }} every value is an integer already and is
-      # answered as it is; NaN and the infinities likewise.
+      # answered as it is; NaN and the infinities likewise. A zero keeps the
+      # sign of what was truncated - `(-0.5).trunc` is -0.0, as `floor` and
+      # `ceil` answer - where the conversion through an integer lost it.
       def trunc : {{ name.id }}
         return self if self != self || abs >= {{ f[3].id }}
         {% if name == "Float32" %}
-          to_i64.to_f32
+          whole = to_i64.to_f32
         {% else %}
-          to_i64.to_f64
+          whole = to_i64.to_f64
         {% end %}
+        whole == 0.0{{ sfx.id }} ? self * 0.0{{ sfx.id }} : whole
       end
     end
   {% end %}
@@ -325,8 +350,10 @@ import std/number
 struct ::Float32
   # Every single is a double, and the integer nearest a single is a
   # single: the prelude's `Float64` roundings are exact for it.
+  # The sign cleared, by `Float64#abs`: a single widens to a double and
+  # back exactly, and a comparison left `(-0.0_f32).abs` at `-0.0`.
   def abs : Float32
-    self < 0.0_f32 ? -1.0_f32 * self : self
+    to_f64.abs.to_f32
   end
 
   def floor : Float32
@@ -356,15 +383,6 @@ struct ::Float32
   def hash : Int32
     bits = Std::Float::Float32Text.bits_of(self == 0.0_f32 ? 0.0_f32 : self)
     (bits & 2147483647_u32).to_i32 ^ (bits.unsafe_shr(31)).to_i32
-  end
-end
-
-struct ::Float64
-  def hash : Int32
-    # `-0.0 == 0.0`, so they hash alike.
-    bits = IyiFloatText.bits_of(self == 0.0 ? 0.0 : self)
-    mix = bits ^ bits.unsafe_shr(32_u64)
-    (mix & 2147483647_u64).to_i32 ^ (mix.unsafe_shr(31_u64) & 1_u64).to_i32
   end
 end
 
@@ -422,6 +440,7 @@ module Float32Text
       m_plus = IyiBig.new(unequal ? 2_u64 : 1_u64)
       m_minus = IyiBig.new(1_u64)
     end
+    scratch = IyiBig.new(0_u64)
 
     # An even significand owns its boundaries (round-half-even reads a
     # midpoint back as the even neighbour), an odd one does not.
@@ -445,7 +464,7 @@ module Float32Text
       m_plus.mul_pow10(-k)
       m_minus.mul_pow10(-k)
     end
-    while (c = r.compare_sum(m_plus, s)) > 0 || (c == 0 && even)
+    while (c = r.compare_sum(m_plus, s, scratch)) > 0 || (c == 0 && even)
       s.mul_small(10_u64)
       k = k + 1
     end
@@ -454,7 +473,7 @@ module Float32Text
       r_ten.mul_small(10_u64)
       m_ten = m_plus.copy
       m_ten.mul_small(10_u64)
-      c = r_ten.compare_sum(m_ten, s)
+      c = r_ten.compare_sum(m_ten, s, scratch)
       break if c > 0 || (c == 0 && even)
       r.mul_small(10_u64)
       m_plus.mul_small(10_u64)
@@ -462,7 +481,8 @@ module Float32Text
       k = k - 1
     end
 
-    digits = Pointer(UInt8).malloc(20_u64)
+    # The digits as one integer, nine at most for a single.
+    digits = 0_u64
     count = 0
     while true
       r.mul_small(10_u64)
@@ -471,10 +491,10 @@ module Float32Text
       digit = r.divide_digit(s)
       low_c = r.compare(m_minus)
       low = low_c < 0 || (low_c == 0 && even)
-      high_c = r.compare_sum(m_plus, s)
+      high_c = r.compare_sum(m_plus, s, scratch)
       high = high_c > 0 || (high_c == 0 && even)
       if !low && !high
-        digits[count] = digit.to_u8
+        digits = digits &* 10_u64 &+ digit.to_u64
         count = count + 1
         next
       end
@@ -486,7 +506,7 @@ module Float32Text
       elsif high
         digit = digit + 1
       end
-      digits[count] = digit.to_u8
+      digits = digits &* 10_u64 &+ digit.to_u64
       count = count + 1
       break
     end

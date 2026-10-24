@@ -31,6 +31,15 @@ module Iyi
     # for a type whose bodies it cannot see.
     property? iyi_share_trusted = false
 
+    # iyi: `@[Share(owns: true)]` (SPEC.md III.4.4): the synchronised type
+    # that owns its contents, shareable whatever its type arguments are,
+    # because nothing reaches what it holds except a block it runs - and
+    # every such block is checked where it is written (`CleanupTransformer
+    # #check_share_boundary`). `Mutex(T)` is the one; `Mutex(Array(T))` is
+    # Share although `Array(T)` is not. Implies `iyi_share_trusted`, and
+    # travels in an artifact as the same annotation.
+    property? iyi_share_owns = false
+
     def initialize(@program : Program)
     end
 
@@ -44,7 +53,7 @@ module Iyi
       nil
     end
 
-    # iyi: the `using` directives written in this type's body, or nil if there
+    # iyi: the imports' names written in this type's body, or nil if there
     # are none — which is every type in every program that does not use iyi.
     # Defined here, rather than only on `ModuleType`, so that name lookup can
     # ask any type without first checking what kind of type it is.
@@ -294,7 +303,7 @@ module Iyi
     # typed by it — so `module?` stays true and every restriction, dispatch
     # and codegen path keeps working unchanged. What this predicate adds is
     # the ability to refuse the things a trait is not: `include Greet`,
-    # `using Greet`, and `impl SomeModule for X`.
+    # importing names from it, and `impl SomeModule for X`.
     def trait?
       false
     end
@@ -475,6 +484,11 @@ module Iyi
 
     private def top_namespace(type)
       type = type.generic_type if type.is_a?(GenericInstanceType)
+      # iyi: a module unit is a namespace of its own, so the climb stops at
+      # one. Above it is only the path its siblings share: `mm/lib` and
+      # `mm/u3` are `Mm::Lib` and `Mm::U3`, both under `Mm`, and a top-level
+      # `Dog.new.prot` in `mm/u3` called `mm/lib`'s `protected def prot`.
+      return type if type.iyi_unit?
 
       namespace = case type
                   when NamedType
@@ -1033,15 +1047,15 @@ module Iyi
     end
   end
 
-  # iyi: one `using` directive in effect somewhere (SPEC.md II.3) — the module
+  # iyi: one import's scope half in effect somewhere (SPEC.md II.3) — the module
   # it names, plus the names taken from it when the selective form
-  # (`using app/greeter::{polite}`) was written. A nil `names` is the whole
+  # (`import app/greeter::{polite}`) was written. A nil `names` is the whole
   # form: every name the module exports.
   record UsingModule, type : Type, names : Array(String)? do
     def exports?(name : String) : Bool
       # R-2b: a module's *exported* names. Checked before the selective list,
-      # because `using app/greeter::{internal}` naming something unexported is
-      # already an error at the directive — this is the lookup, and by the time
+      # because `import app/greeter::{internal}` naming something unexported is
+      # already an error at the import — this is the lookup, and by the time
       # it runs there is nothing left to find.
       return false unless type.exported_name?(name)
 
@@ -1057,7 +1071,7 @@ module Iyi
     getter hooks : Array(Hook)?
     getter(parents) { [] of Type }
 
-    # iyi: modules brought into unqualified scope here by `using` (SPEC.md II.3).
+    # iyi: modules brought into unqualified scope here by an import (SPEC.md II.3).
     #
     # Kept out of `parents` on purpose. `include` is the obvious shortcut and
     # is wrong in four ways at once: it does not reach types nested inside
@@ -1066,11 +1080,20 @@ module Iyi
     # settles a clash between two used modules silently by ancestor order
     # instead of reporting it at the point of use. A separate list searched
     # explicitly gets all four right, and leaves lookup untouched for any code
-    # that never writes `using`.
+    # that never imports names.
     getter(using_modules) { [] of UsingModule }
 
+    # One module named on two import lines is one scope: the names of
+    # both, or every name when either line took `::*`. Two entries made
+    # the same name "ambiguous" between a module and itself.
     def add_using_module(type : Type, names : Array(String)?)
-      using_modules << UsingModule.new(type, names)
+      if index = using_modules.index { |used| used.type == type }
+        before = using_modules[index].names
+        merged = before && names ? before | names : nil
+        using_modules[index] = UsingModule.new(type, merged)
+      else
+        using_modules << UsingModule.new(type, names)
+      end
     end
 
     def using_modules? : Array(UsingModule)?
@@ -1079,6 +1102,12 @@ module Iyi
 
     # iyi: see `Type#iyi_unit?`.
     property? iyi_unit = false
+
+    # iyi: the file whose `module` header made this a unit. Not the type's
+    # first location: `module rel/util`, loaded first, makes `Rel` as its
+    # namespace, and the unit `rel` is `rel.iyi`'s - the wall asked of the
+    # first location refused everyone who imported `rel` a name of `Rel`.
+    property iyi_unit_file : String?
 
     # iyi: the names this module marked `pub` (R-2). Nil until something is
     # exported, which is every module in every program that does not use iyi.
@@ -1722,6 +1751,21 @@ module Iyi
     # All matches. It's nil if `@match` is an exact match.
     @all_matches : Set(Type)?
 
+    # iyi: the matches as they stood before an overload was tried, put back
+    # when that overload fails on another argument (`Type#lookup_matches_without_parents`).
+    @saved_match : Type?
+    @saved_all_matches : Set(Type)?
+
+    def save_matches : Nil
+      @saved_match = @match
+      @saved_all_matches = @all_matches.dup
+    end
+
+    def restore_matches : Nil
+      @match = @saved_match
+      @all_matches = @saved_all_matches
+    end
+
     def set_exact_match(type)
       @match = type
       @all_matches = nil
@@ -1877,6 +1921,22 @@ module Iyi
       end
 
       instance = self.new_generic_instance(program, self, instance_type_vars)
+
+      # iyi: an instance whose own instance variable - or associated type -
+      # holds the same generic one level deeper makes another such instance
+      # here, and that one another: `struct S(T)` with `@x : S(Array(T))?`
+      # made S(Array(Array(T))) and on, with nothing using S at all, until
+      # the stack overflowed in `unbound?` after 6 to 19 seconds. Refused at
+      # the bound `generic_type_too_nested?` sets for a type a call makes,
+      # at the generic's declaration, since no node is at hand here.
+      if instance.generic_nest > 300
+        message = "generic type too nested: #{instance}"
+        if location = locations.try(&.first?)
+          raise TypeException.new(message, location)
+        end
+        raise TypeException.new(message)
+      end
+
       generic_types[type_vars] = instance
 
       if instance.is_a?(GenericClassInstanceType) && !instance.superclass

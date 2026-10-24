@@ -22,28 +22,68 @@ class Iyi::Command
   private def doc
     filename = options.shift?
     case
-    when filename.nil? || filename == "--help" || filename == "-h"
+    when filename.nil? || filename.in?("--help", "-h") || options.any?(&.in?("--help", "-h"))
       puts doc_usage
       exit
+    when extra = options.first?
+      # One subject per run, as `version` and `init` hold theirs: `iyi doc
+      # std/set extra junk` printed std/set's surface at exit 0 and dropped
+      # the rest, so a reader who wrote two modules saw one and no word
+      # about the other.
+      abort! "doc reads one module, file or type at a time, and '#{extra}' is a second", :USAGE_ERROR
+    when filename.starts_with?('-')
+      abort! "doc: unknown flag #{filename}", :USAGE_ERROR
     when filename.ends_with?(".iyimod")
       doc_file! filename, ".iyimod"
-      artifact =
-        begin
-          IyiMod.read(filename)
-        rescue ex : IyiMod::Error
-          abort! ex.message.to_s, :USAGE_ERROR
-        end
-      IyiMod.surface artifact, STDOUT
-    when filename.ends_with?(".iyi")
+      doc_artifact(filename)
+    when Iyi.path_key(filename).ends_with?(".iyi")
       doc_file! filename, ".iyi module"
       doc_from_source(File.expand_path(filename))
     when filename == "prelude"
       doc_prelude_index
     when prelude_type_name?(filename)
       doc_prelude_type(filename)
+    when resolved = doc_module_path(filename)
+      resolved.ends_with?(".iyimod") ? doc_artifact(resolved) : doc_from_source(resolved)
+    when doc_module_spelling?(filename)
+      # The subject is written as a module path is, and found nowhere:
+      # `iyi doc std/sett` was told to give "a module path (`iyi doc
+      # app/greeter`)", which is what it had given, and not that the
+      # module was missing or where it had been looked for.
+      roots = [Dir.current] + IyiPath.new(iyi_path_entries).entries
+      roots << File.expand_path(Compiler::ARTIFACT_DIR) if Compiler.workspace_artifacts(Dir.current)
+      packages = File.file?(File.join(Dir.current, Mod::Installer::MANIFEST)) ? ", and through this project's #{Mod::Installer::MANIFEST}" : ""
+      abort! "can't find module '#{filename}'. A module's path is its file's path, so this one is " \
+             "`#{filename}.iyi` (or `#{filename}.iyimod` in #{Compiler::ARTIFACT_DIR}), looked for under #{roots.join(", ")}#{packages}", :USAGE_ERROR
     else
-      abort! "expected a .iyi module, a .iyimod artifact, or a type of the prelude (`iyi doc String`)", :USAGE_ERROR
+      abort! "expected a module path (`#{Command.program_name} doc app/greeter`), " \
+             "a .iyi file, a .iyimod artifact, or a type of the prelude " \
+             "(`#{Command.program_name} doc String`)", :USAGE_ERROR
     end
+  end
+
+  # An artifact's surface, the subject named as a `.iyimod` or found as
+  # one in the workspace's `mods`.
+  private def doc_artifact(path : String) : Nil
+    artifact =
+      begin
+        IyiMod.read(path)
+      rescue ex : IyiMod::Error
+        abort! ex.message.to_s, :USAGE_ERROR
+      end
+    IyiMod.surface artifact, STDOUT
+  end
+
+  # Whether the subject is spelled as a module path - lower-case segments
+  # between `/`, a package's dotted host included, the grammar `iyi.mod`
+  # holds a module path to - rather than as a file `doc` reads some other
+  # way.
+  private def doc_module_spelling?(name : String) : Bool
+    return false if name.ends_with?(".cr")
+    Mod::ModFile.check_module_path(name)
+    true
+  rescue Mod::ModError
+    false
   end
 
   # `String`, `Array`, `Hash::Entry`: a capital, then letters, digits,
@@ -52,6 +92,99 @@ class Iyi::Command
   private def prelude_type_name?(name : String) : Bool
     return false unless name[0]?.try(&.ascii_uppercase?)
     name.each_char.all? { |char| char.ascii_alphanumeric? || char == '_' || char == ':' }
+  end
+
+  # iyi: the file a module path names, found the way `import` finds it —
+  # the project root, then every `IYI_PATH` entry, `.iyi` before `.cr`
+  # (R-1, IV.6).
+  #
+  # `iyi doc app/greeter` answered "expected a .iyi module, a .iyimod
+  # artifact, or a type of the prelude" for the one spelling this language
+  # is built on: a module's path *is* its file's path, it is what `import`
+  # takes, what `mod context` prints as a header, and what every error
+  # about a module names. Asking the doc verb for `std/set` — a module the
+  # same binary will happily ground an edit against — was a usage error.
+  private def doc_module_path(path : String) : String?
+    return nil if path.empty? || path.starts_with?('-') || path.ends_with?(".cr")
+
+    # A package's module, through this project's iyi.mod - a short name
+    # included - the way a build resolves the import: `iyi doc
+    # github.com/sdogruyol/iyi-web/iyi_web/dsl`, or `iyi doc web/iyi_web/dsl`.
+    if File.file?(File.join(Dir.current, Mod::Installer::MANIFEST))
+      table =
+        begin
+          Mod::Installer.table_for(Dir.current)
+        rescue ex : Mod::ModError
+          abort! "doc: #{ex.message}", :USAGE_ERROR
+        end
+      expanded = Mod::Installer.expand(path, table)
+      table.each do |(prefix, checkout)|
+        next if prefix.starts_with?('@')
+        inner =
+          if expanded == prefix
+            Mod::ModFile.split_major(prefix)[0].rpartition('/')[2]
+          elsif expanded.starts_with?("#{prefix}/")
+            expanded[(prefix.size + 1)..]
+          else
+            next
+          end
+        file = File.join(checkout, "#{inner}.iyi")
+        return File.expand_path(file) if File.file?(file)
+      end
+    end
+
+    roots = [Dir.current] + IyiPath.new(iyi_path_entries).entries
+    roots.each do |root|
+      {".iyi", ".cr"}.each do |extension|
+        relative = "#{path}#{extension}"
+        candidate = File.join(root, relative)
+        next unless File.file?(candidate) && doc_spelled_as?(root, relative)
+        # Expanded, as the file branch expands what it is handed: `File.join`
+        # leaves the module path's own `/` inside a root spelled with `\` on
+        # Windows, and the header check that follows read the mixed spelling
+        # as a module in the wrong place.
+        return File.expand_path(candidate)
+      end
+    end
+
+    # And the workspace's own `mods`, after its sources, as every other
+    # verb reads it: a library that arrived as `.iyimod` files has no
+    # source to find, and `iyi doc app/twice` beside `mods/app/twice.iyimod`
+    # answered "expected a module path" about a module `iyi build` compiles
+    # against.
+    if mods = Compiler.workspace_artifacts(Dir.current)
+      relative = "#{path}.iyimod"
+      candidate = File.join(mods, relative)
+      return File.expand_path(candidate) if File.file?(candidate) && doc_spelled_as?(mods, relative)
+    end
+    nil
+  end
+
+  # Whether every `/` segment of *relative* is a name under *root* as it
+  # is written, case included. A module path is a name before it is a
+  # file, and a file system that ignores case answered for one the
+  # grammar refuses: `iyi doc app/Nest` printed `module app/nest` on
+  # Windows, where Linux has no such file and says so.
+  private def doc_spelled_as?(root : String, relative : String) : Bool
+    directory = root
+    relative.split('/').each do |segment|
+      next if segment.empty? || segment == "."
+      return false unless segment == ".." || Dir.children(directory).includes?(segment)
+      directory = File.join(directory, segment)
+    end
+    true
+  rescue File::Error
+    false
+  end
+
+  # The search path this process was given, or the default list when it
+  # was given none — `IyiPath`'s own answer to an unset variable.
+  private def iyi_path_entries : Array(String)
+    if text = Config.env("PATH").presence
+      IyiPath.expand_paths(text.split(Process::PATH_DELIMITER, remove_empty: true))
+    else
+      IyiPath.default_paths
+    end
   end
 
   # iyi: "no such file" about a path that is there sends the reader to `ls`,
@@ -104,8 +237,16 @@ class Iyi::Command
     # `original_filename`, because the number primitives are written by a
     # macro and a def's location is then the expansion's, a virtual file
     # whose real one is the prelude's.
+    #
+    # Asked of the posix reading: on Windows the expansion's real file is
+    # spelled with `\`, and `iyi doc Int32` there listed `%`, `**` and `-`
+    # — the three written by hand — and none of the operators the macro
+    # writes: no `+`, no `<`, no `to_i64`. `bench/packages_resolve.sh`
+    # said so the first time it ran on Windows.
     filename = location.original_filename
-    filename.is_a?(String) && (filename.includes?("/src/iyi/") || filename.starts_with?("src/iyi/"))
+    return false unless filename.is_a?(String)
+    posix = ::Path[filename].to_posix.to_s
+    posix.includes?("/src/iyi/") || posix.starts_with?("src/iyi/")
   end
 
   private def doc_prelude_program : Program
@@ -114,6 +255,13 @@ class Iyi::Command
     compiler.no_codegen = true
     compiler.wants_doc = true
     compiler.stdout = IO::Memory.new
+    # No packages: the prelude imports none, and the empty entry sits in the
+    # working directory, whose iyi.mod would otherwise be resolved for it.
+    # In a project with a requirement not in the cache and no network, `iyi
+    # doc String`, `doc prelude` and `init` (which asks this for the
+    # prelude's names) each answered "the prelude does not compile: cannot
+    # fetch example.com/me/greet v0.1.0".
+    compiler.iyi_mod_table = [] of {String, String}
     compiler.stderr = IO::Memory.new
     begin
       compiler.top_level_semantic(Compiler::Source.new("doc.iyi", "")).program
@@ -134,18 +282,30 @@ class Iyi::Command
   private def doc_prelude_type(name : String) : Nil
     program = doc_prelude_program
     type = program.lookup_path(name.split("::"))
+    # An alias is another name for its target, and what it can do is what
+    # the target can: `iyi doc IO` printed `alias IO` and `end`, naming
+    # neither `IyiIO` nor one thing an IO does. The alias line comes
+    # first, then the target's surface.
+    if type.is_a?(AliasType)
+      target = type.remove_alias
+      if doc = type.doc
+        IyiMod.write_doc STDOUT, doc, ""
+      end
+      STDOUT << "alias " << type << " = " << target << "\n\n"
+      type = target
+    end
     unless type.is_a?(Type)
       abort! "the prelude has no type #{name}", :USAGE_ERROR
     end
 
     io = STDOUT
     if doc = type.doc
-      doc.each_line { |line| io << "# " << line << '\n' }
+      IyiMod.write_doc io, doc, ""
     end
+    # A generic type prints its own parameters, the splat's `*` included;
+    # a second list after it printed them twice: `class Array(T)(T)`,
+    # `tuple Tuple(*T)(T)`.
     io << type.type_desc.lchop("generic ") << ' ' << type
-    if type.is_a?(GenericType) && !type.type_vars.empty?
-      io << '(' << type.type_vars.join(", ") << ')'
-    end
     if type.is_a?(ClassType) && (superclass = type.superclass) && superclass.to_s != "Reference" && superclass.to_s != "Struct" && superclass.to_s != "Object"
       io << " < " << superclass
     end
@@ -169,10 +329,18 @@ class Iyi::Command
     signatures.sort_by! { |signature| {signature.receiver, signature.name} }
     signatures.each do |signature|
       io << '\n'
-      signature.doc.each_line { |line| io << "  # " << line << '\n' } unless signature.doc.empty?
+      IyiMod.write_doc io, signature.doc, "  "
       io << "  " << IyiMod.render_signature(signature) << '\n'
     end
     io << "end\n"
+    # The rest of an integer is one import away, and the prelude's own
+    # listing cannot show it: `UInt32` printed as an empty struct, and a
+    # reader concluded it had no arithmetic at all.
+    if type.is_a?(IntegerType)
+      io << "\n# `import std/int` gives #{type} the rest of the integer tower's surface:\n" \
+            "# arithmetic and comparison with every integer type, `//`, `%`, `<<`, `>>`,\n" \
+            "# `<=>`, the bit counts and every `to_*` conversion (`iyi doc std/int`).\n"
+    end
   end
 
   # The module compiled alone — R-1's promise worn as a verb, the same way
@@ -203,7 +371,7 @@ class Iyi::Command
       abort! "#{filename} declares no module, and a module is what `doc` reads", :USAGE_ERROR
     end
     module_root = doc_module_root(filename, module_name)
-    unless File.expand_path(File.join(module_root, "#{module_name}.iyi")) == filename
+    unless Iyi.same_file?(File.join(module_root, "#{module_name}.iyi"), filename)
       abort! "#{filename} declares `module #{module_name}`, and a module's path " \
              "is its file's path (SPEC.md R-1, IV.6): a module by that name is " \
              "read from #{module_name}.iyi", :USAGE_ERROR
@@ -219,15 +387,24 @@ class Iyi::Command
       compiler.prelude = "iyi/prelude"
       compiler.no_codegen = true
       compiler.iyi_mod_table = Mod::Installer.table_for(module_root)
+      # The artifacts a workspace keeps, for an import whose source is not
+      # there — `check` and the language server read them the same way and
+      # for the same reason. This module's own surface still comes from its
+      # source, which is the file named on the command line.
+      if artifacts = Compiler.workspace_artifacts(module_root)
+        compiler.use_iyimod = artifacts
+        compiler.iyi_prefers_source = true
+      end
       compiler.emit_iyimod = emit_dir
       compiler.stdout = IO::Memory.new
       compiler.stderr = IO::Memory.new
-      previous_path = ENV["IYI_PATH"]?
+      # The module's root is where the entry's import is resolved first, as
+      # a project's root is. It travelled as the front of `IYI_PATH`, which
+      # is split on `;` on Windows (`:` elsewhere): a project in `a;b`
+      # arrived as two entries that are not directories, and `iyi doc`
+      # answered "can't find module" about a module `iyi run` builds.
+      compiler.iyi_project_root = module_root
       begin
-        # `IyiPath` splits this back apart on `Process::PATH_DELIMITER`,
-        # and on Windows that is `;`: a colon-joined list arrives as one
-        # entry with a drive letter in the middle of it.
-        ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(Process::PATH_DELIMITER)
         compiler.compile(
           Compiler::Source.new(entry, File.read(entry)),
           File.join(emit_dir, "unused"))
@@ -239,21 +416,15 @@ class Iyi::Command
         # `iyi doc twoheaders.iyi` answered `does not compile alone: while
         # importing "twoheaders"` where `iyi run` answered `a file declares
         # one module, and this one already declares 'main'`.
-        # A `TypeException` carries the error it wrapped in `inner` rather
-        # than in `cause`, which is why both are followed here.
-        deepest = ex
-        loop do
-          nested = deepest.responds_to?(:inner) ? deepest.inner : nil
-          nested ||= deepest.cause
-          break unless nested.is_a?(Iyi::Error | Iyi::CodeError)
-          deepest = nested
-        end
+        deepest = Iyi.deepest_error(ex)
+        # Removed here: `abort!` exits, and an exit runs no `ensure`, so
+        # every `iyi doc` of a module that does not compile left an
+        # `iyi-doc-*` directory in the temporary directory.
+        FileUtils.rm_rf(emit_dir)
         abort! "#{filename} does not compile alone: #{deepest.message.to_s.lines.first?}", :USAGE_ERROR
-      ensure
-        previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
       end
 
-      Dir.glob(::Path[emit_dir].to_posix.join("**", "*.iyimod")) do |candidate|
+      Dir.glob(Iyi.glob_root(emit_dir).join("**", "*.iyimod")) do |candidate|
         begin
           artifact = IyiMod.read(candidate)
           if artifact.module_name == module_name
@@ -264,6 +435,7 @@ class Iyi::Command
           next
         end
       end
+      FileUtils.rm_rf(emit_dir)
       abort! "compiled, but no artifact carries module '#{module_name}'", :USAGE_ERROR
     ensure
       FileUtils.rm_rf(emit_dir)
@@ -277,13 +449,7 @@ class Iyi::Command
   # empty surface at exit 0 — a documented module reported as exporting
   # nothing, which is the worst of the three answers a verb can give.
   private def doc_module_header(source : String) : String?
-    source.each_line do |line|
-      text = line.strip
-      next if text.empty? || text.starts_with?('#')
-      return text.lchop("module").strip if text.starts_with?("module ")
-      break
-    end
-    nil
+    Compiler.module_header_of(source)
   end
 
   # And the directory that name is read from: `deep/inner/thing` is found
@@ -297,14 +463,17 @@ class Iyi::Command
 
   private def doc_usage
     <<-USAGE
-    Usage: #{Command.program_name} doc FILE | TYPE
+    Usage: #{Command.program_name} doc MODULE | FILE | TYPE
 
     Prints a module's exported surface with its doc comments — functions,
-    types, methods, impls; no bodies, nothing private. FILE is a `.iyimod`
-    artifact (read directly, source not needed) or a `.iyi` module (compiled
-    alone, front end only). TYPE is a type of the prelude - `String`,
-    `Array`, `Hash`, `Program` - printed the same way: what it can do, with
-    the prelude's own comments; `prelude` lists them all, one line each.
+    types, methods, impls; no bodies, nothing private. MODULE is a module
+    path written the way `import` writes it — `app/greeter`, `std/set` —
+    found under the project root and `IYI_PATH`, then as an artifact in the
+    project's `mods`. FILE is a `.iyimod` artifact (read directly, source
+    not needed) or a `.iyi` module (compiled alone, front end only). TYPE
+    is a type of the prelude - `String`, `Array`, `Hash`, `Program` -
+    printed the same way: what it can do, with the prelude's own comments;
+    `prelude` lists them all, one line each.
     USAGE
   end
 end

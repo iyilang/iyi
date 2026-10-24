@@ -115,8 +115,22 @@ class Iyi::CodeGenVisitor
       next if @main_mod.globals[name]?
 
       global = @main_mod.globals.add(@main_llvm_context.int32, name)
-      global.linkage = LLVM::Linkage::Internal if @single_module
+      global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       global.initializer = @main_llvm_context.int32.const_int(@program.llvm_id.type_id(type))
+      global.global_constant = true
+    end
+
+    # iyi: a witness the producing build typed against and this one does not
+    # have (`Program#iyi_artifact_phantom_types`). Ids count up from 0, so -1
+    # is one no value carries, and a dispatch arm that tests for it is never
+    # taken - which is what it was in the build that compiled it.
+    @program.iyi_artifact_phantom_types.each do |witness|
+      name = "#{witness}:type_id"
+      next if @main_mod.globals[name]?
+
+      global = @main_mod.globals.add(@main_llvm_context.int32, name)
+      global.linkage = LLVM::Linkage::Internal if @single_module
+      global.initializer = @main_llvm_context.int32.const_int(-1)
       global.global_constant = true
     end
   end
@@ -157,7 +171,7 @@ class Iyi::CodeGenVisitor
     global = @main_mod.globals[type_id_name]?
     unless global
       global = @main_mod.globals.add(@main_llvm_context.int32, type_id_name)
-      global.linkage = LLVM::Linkage::Internal if @single_module
+      global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       global.initializer = @main_llvm_context.int32.const_int(@program.llvm_id.type_id(type))
       global.global_constant = true
     end

@@ -22,10 +22,11 @@
 # resolved type names are absolute, so it types anywhere — calling it
 # once with `uninitialized` values of the declared types, under
 # `if false` so nothing can ever run. Instance methods get an
-# `uninitialized Owner` receiver; module functions are called on the
-# module itself. Every node is stamped with the def's own location, so
-# a probe-found error anchors at the def it belongs to, and every
-# synthesized call is marked so reference answers never count it.
+# `uninitialized Owner` receiver; module functions and class methods
+# are called on the module or class itself. Every node is stamped with
+# the def's own location, so a probe-found error anchors at the def it
+# belongs to, and every synthesized call is marked so reference answers
+# never count it.
 #
 # **Trait-restricted parameters get a witness.** `def total(s : Sized)`
 # is generic, but the bound is written, and a bound is enough: the rule
@@ -37,20 +38,32 @@
 # always; here it costs one synthetic type per trait_type per compile.
 #
 # The probe is written at the top level and stamped with the def's own
-# location, and `Call#check_visibility` lets a synthetic call through R-2's
-# wall: it is the definition asking about itself, so a module's unmarked
-# function and a type's `private def` are typed like an exported one.
-# The fences that remain were each earned by a failure, kept on record:
-# a non-`pub` *type* is not nameable from the top level and stays
-# caller-typed (a spec's private `struct User`), impl-carried defs stay inside their
-# trait_type context (R-3, the collections sample's `<=>`), `Program` is its
-# own namespace so the nameable climb must stop there or hang, and
-# witnesses are only built for simple traits — supertraits, generic and
-# associated-type traits keep caller-typed bodies, stated rather than
-# guessed at.
+# location, and it is the definition asking about itself: `Call#check_visibility`
+# lets its call through R-2's wall, and its paths (`Path#iyi_synthetic`) name
+# a type the def's module keeps to itself the way the module's own code
+# can. So a module's unmarked function, a type's `private def`, a type the
+# module never marked `pub`, and a method an `impl` block gives a type are
+# all typed at their definition like an exported one. Before that,
+# `class X` without `pub`, or `impl B for X`, with nothing constructing an
+# `X`, passed `check` with `"nope"` returned as an `Int32` and a call to a
+# method nowhere in the program. The fences that remain were each earned by
+# a failure, kept on record: `Program` is its own namespace so the name
+# climb must stop there or hang, operator names are not called through a
+# probe (the collections sample's `<=>`), and witnesses are only built for
+# simple traits — supertraits, generic and associated-type traits keep
+# caller-typed bodies, stated rather than guessed at.
 require "../syntax/ast"
 
 module Iyi::DefinitionTyping
+  # Every variable a probe assigns begins with this; the main visitor
+  # drops them from the program's variables once the probes are typed.
+  VAR_PREFIX = "__iyi_dt_"
+
+  # Every witness type's name begins with this. An artifact's object code
+  # can number one, and a consumer reading it needs to tell (see
+  # `Program#iyi_artifact_phantom_types`).
+  WITNESS_PREFIX = "IyiDefTypeWitness_"
+
   def self.append_probes(program : Program, node : ASTNode) : Nil
     return unless node.is_a?(Expressions)
     runner = Runner.new(program)
@@ -124,7 +137,13 @@ module Iyi::DefinitionTyping
 
     # Every type that can own a probeable def: the program itself (a
     # script's top-level defs), non-generic modules that are not traits,
-    # and concrete classes and structs.
+    # classes, structs and enums, and the metaclass of each of those but
+    # the program, which owns its class methods (`def self.make`). An
+    # abstract class or struct is a receiver too: an `uninitialized`
+    # value of it has its virtual type, which dispatches the way a
+    # caller's value of it does. Class methods and an abstract type's
+    # methods were never visited, so `def self.make : Int32` answering
+    # `"not an int"` compiled and ran.
     private def each_owner(& : Type ->) : Nil
       yield @program
       queue = [] of Type
@@ -136,10 +155,15 @@ module Iyi::DefinitionTyping
         when TraitType
           # Requirements and default methods stay caller-typed; a trait_type
           # body only means something against an implementer.
-        when NonGenericModuleType
+        when NonGenericModuleType, EnumType
           yield type
+          yield type.metaclass
         when NonGenericClassType
-          yield type unless type.abstract?
+          # An abstract class's class methods are its subclasses' to call -
+          # `self` in one is the subclass - and the library's abstract roots
+          # (`Int`, `Number`) cannot even be a receiver's type.
+          yield type unless type.abstract? && !type.can_be_stored?
+          yield type.metaclass unless type.abstract?
         else
           # Not an owner the probe can stand a receiver up for.
         end
@@ -154,67 +178,77 @@ module Iyi::DefinitionTyping
       location = a_def.location
       return unless location
 
-      # R-3 keeps impl-carried defs inside their trait_type context. R-2's
-      # wall does not stop the probe: it is the def's own site asking, and
-      # `Call#check_visibility` lets a synthetic call through - so a module's
-      # unmarked function and a type's `private def` are typed at their
-      # definition like anything else. Before that, `def f : Int32` with a
-      # body answering `"s"` passed `check` and `build` whenever nothing
-      # called it, and `pub` was what decided whether the rule applied.
-      # The owner still has to be nameable from the top level: a spec's
-      # `private struct User` is not, and stays caller-typed.
-      return if a_def.iyi_from_impl?
-      return unless nameable?(owner)
+      # A def the probe calls is the def's own site asking. The owner's
+      # name, its parameters' and its return's resolve through the probe's
+      # synthetic paths, a type the module keeps to itself included.
+      # An `impl` block's method is the type's once the block lands, and
+      # is probed on the type like any other.
+      #
       # A plain `module` that is not a unit is a mixin: its instance defs
       # mean something on the type that includes it (`self` in
       # `Colorize::ObjectExtensions#colorize : Object(self)` is the includer),
       # and calling one on the module itself typed `self` as the module.
-      return if owner.is_a?(NonGenericModuleType) && !owner.iyi_unit?
+      # The program is a module too (`Program < NonGenericModuleType`) and
+      # no mixin: a header-less script's top-level defs are its own. This
+      # line returned for it, so `def g(x : Int32) : String` with `x` for a
+      # body passed `check` in a script whenever nothing called it, and the
+      # same def under `module tools/g5` was refused.
+      return if owner.is_a?(NonGenericModuleType) && !owner.is_a?(Program) && !owner.iyi_unit?
 
-      argument_texts = [] of String
-      a_def.args.each do |arg|
-        restriction = arg.restriction
-        return unless restriction
-        resolved = resolve(owner, restriction)
-        return unless resolved
-        if resolved.is_a?(TraitType)
-          # The bound is written, and a bound is enough: probe with a
-          # witness that implements exactly the trait_type and nothing more.
-          witness = witness_for(resolved)
-          return unless witness
-          argument_texts << witness
-        else
-          return unless instantiable?(resolved) && nameable?(resolved)
-          argument_texts << resolved.to_s
-        end
-      end
-
+      # A class method's names resolve where its class's do.
+      scope = owner.instance_type
       serial = (@serial += 1)
       lines = [] of String
-      names = argument_texts.map_with_index do |text, index|
-        name = "__iyi_dt_#{serial}_#{index}"
+      arguments = [] of String
+      splat_index = a_def.splat_index
+      a_def.args.each_with_index do |arg, index|
+        # A bare `*` only marks where the named-only parameters begin.
+        next if index == splat_index && arg.name.empty?
+        restriction = arg.restriction
+        return unless restriction
+        resolved = resolve(scope, restriction)
+        return unless resolved
+        text =
+          if resolved.is_a?(TraitType)
+            # The bound is written, and a bound is enough: probe with a
+            # witness that implements exactly the trait_type and nothing more.
+            witness_for(resolved) || return
+          else
+            return unless instantiable?(resolved) && nameable?(resolved)
+            resolved.to_s
+          end
+        name = "#{VAR_PREFIX}#{serial}_#{index}"
         lines << "#{name} = uninitialized #{text}"
-        name
+        # Every parameter gets a value, its default's place included, and
+        # a splat gets one element. A parameter after the splat is passed
+        # by its external name, as it has to be; before it, a value in its
+        # place binds it whatever its external name is. Each of these
+        # shapes was left to its callers: `def b(x : Int32 = 1) : Int32`,
+        # `def c(to x : Int32)`, `def d(*xs : Int32)` and `def e(x : Int32,
+        # *, y : Int32)`, each answering a String, compiled.
+        arguments << (splat_index && index > splat_index ? "#{arg.external_name}: #{name}" : name)
       end
 
       call =
         case owner
         when Program
-          "#{a_def.name}(#{names.join(", ")})"
+          "#{a_def.name}(#{arguments.join(", ")})"
         when NonGenericModuleType
-          "#{owner}.#{a_def.name}(#{names.join(", ")})"
+          "#{owner}.#{a_def.name}(#{arguments.join(", ")})"
+        when MetaclassType
+          "#{scope}.#{a_def.name}(#{arguments.join(", ")})"
         else
-          receiver = "__iyi_dt_#{serial}_r"
+          receiver = "#{VAR_PREFIX}#{serial}_r"
           lines << "#{receiver} = uninitialized #{owner}"
-          "#{receiver}.#{a_def.name}(#{names.join(", ")})"
+          "#{receiver}.#{a_def.name}(#{arguments.join(", ")})"
         end
 
       # The return is verified when the declared type can be a variable;
       # a def honestly declared to return a trait_type still gets its body
       # typed, just not the assignment check.
-      returned = a_def.return_type.try { |written| resolve(owner, written) }
+      returned = a_def.return_type.try { |written| resolve(scope, written) }
       if returned && instantiable?(returned) && nameable?(returned) && !returned.nil_type?
-        lines << "__iyi_dt_#{serial}_v : #{returned} = #{call}"
+        lines << "#{VAR_PREFIX}#{serial}_v : #{returned} = #{call}"
       else
         lines << call
       end
@@ -223,6 +257,7 @@ module Iyi::DefinitionTyping
       parser.filename = location.filename
       parsed = parser.parse
       parsed.accept(Stamper.new(location))
+      parsed.iyi_definition_probe = true if parsed.is_a?(If)
       @probes << parsed
     rescue Iyi::CodeError
       # A type whose printed name does not re-parse (rare, and its own
@@ -248,7 +283,7 @@ module Iyi::DefinitionTyping
       # The name leaks into error messages ("undefined method 'length'
       # for ..."), so it carries the trait's own name: a reader meets
       # the witness *for Sized*, not an anonymous serial.
-      witness = "IyiDefTypeWitness_#{trait_type.to_s.gsub("::", "_")}"
+      witness = "#{WITNESS_PREFIX}#{trait_type.to_s.gsub("::", "_")}"
       stubs = [] of String
 
       if defs = trait_type.defs
@@ -327,9 +362,13 @@ module Iyi::DefinitionTyping
       nil
     end
 
-    # A type an `uninitialized` variable can hold: concrete, this-world,
-    # every union member included. Virtual types devirtualize first so an
-    # abstract root answers as itself.
+    # A type an `uninitialized` variable can hold: this-world, every union
+    # member included. Virtual types devirtualize first so an abstract
+    # root answers as itself, and an abstract class or struct is held as
+    # its virtual type, the one a caller's value arrives as: `def a(x :
+    # Animal) : Int32` answering a String compiled while `Animal` was
+    # abstract. The library's own abstract roots (`Int`, `Number`,
+    # `Value`) cannot be a variable's type at all, and stay out.
     private def instantiable?(type : Type) : Bool
       type = type.devirtualize
       if type.is_a?(UnionType)
@@ -337,15 +376,14 @@ module Iyi::DefinitionTyping
       end
       return false if type.is_a?(GenericType)
       return false if type.module?
-      return false if type.abstract?
+      return false if type.abstract? && !type.can_be_stored?
       return false if type.is_a?(NoReturnType) || type.is_a?(VoidType)
       return false if type.metaclass?
       true
     end
 
-    # Whether the type's printed name resolves from the program's top
-    # level. The climb mirrors the R-2 check itself: crossing into an iyi
-    # unit requires the unit to export the name.
+    # Whether the type has a printed name at all, which the probe's
+    # synthetic paths can resolve whatever the name's visibility.
     private def nameable?(type : Type) : Bool
       type = type.devirtualize
       if type.is_a?(UnionType)
@@ -357,60 +395,56 @@ module Iyi::DefinitionTyping
           !var.is_a?(Type) || nameable?(var)
         end
       end
-      current = type
-      while current.is_a?(NamedType)
-        # A `private class` is file-private in the other language, and a
-        # probe stands outside: it cannot write the name at all. R-2's
-        # wall below stops it at an unexported one for the same reason —
-        # and this one was missing, so a private class nested in an
-        # exported one had its own defs probed by a name nobody can use
-        # ("private constant referenced", pointing at the def).
-        return false if current.private?
-        namespace = current.namespace
-        # `Program` is its own namespace (constructed `super(self, self,
-        # "main")`); walking past it loops forever — call.cr's using walk
-        # carries the same warning.
-        break if namespace == current
-        if namespace.iyi_unit? && !namespace.exported_name?(current.name)
-          return false
-        end
-        break unless namespace.is_a?(NamedType)
-        current = namespace
-      end
-      true
+      type.is_a?(NamedType) || type.is_a?(Program)
     end
 
     # A def the probe can honestly call: every parameter carries a
     # written type, the return is written, and there is no shape the
-    # probe cannot synthesise — no block, no splats, no free vars, no
-    # defaults, no receiver, a plainly callable name.
+    # probe cannot synthesise — no block, no double splat, no free vars,
+    # a named-only parameter whose external name can be written bare, a
+    # plainly callable name. A bare `*` is the one parameter without a
+    # type, since it only marks where the named-only ones begin.
     private def probable?(a_def : Def) : Bool
       return false if a_def.block_arity || a_def.block_arg
-      return false if a_def.splat_index || a_def.double_splat
+      return false if a_def.double_splat
       return false if (free_vars = a_def.free_vars) && !free_vars.empty?
       return false unless a_def.return_type
       return false if a_def.abstract?
-      return false if a_def.receiver
       return false if a_def.name == "initialize"
       return false unless a_def.name.each_char.all? { |ch| ch.alphanumeric? || ch == '_' || ch.in?('?', '!') }
       return false unless a_def.name[0].lowercase? || a_def.name[0] == '_'
-      a_def.args.all? do |arg|
-        arg.restriction && !arg.default_value && arg.external_name == arg.name
+      splat_index = a_def.splat_index
+      a_def.args.each_with_index do |arg, index|
+        next if index == splat_index && arg.name.empty?
+        return false unless arg.restriction
+        next unless splat_index && index > splat_index
+        external = arg.external_name
+        return false unless external[0]?.try { |first| first.lowercase? || first == '_' }
+        return false unless external.each_char.all? { |ch| ch.alphanumeric? || ch == '_' }
       end
+      true
     end
   end
 
   # Sets every node's location to the def the probe belongs to, so the
   # error a probe finds points at the definition rather than at a
-  # synthetic line no file contains — and marks every call as the
-  # compiler's own, so reference answers never count it.
+  # synthetic line no file contains — and marks every call and path as the
+  # compiler's own, so reference answers never count one and R-2 lets it
+  # through. A call's name has a location of its own, and an error at a
+  # call reads it: unstamped, "instantiating 'X#helper()'" pointed at line
+  # 3, column 37 of the def's file — the probe's own text.
   private class Stamper < Visitor
     def initialize(@location : Location)
     end
 
     def visit(node : ASTNode) : Bool
       node.at(@location)
-      node.iyi_synthetic = true if node.is_a?(Call)
+      if node.is_a?(Call)
+        node.iyi_synthetic = true
+        node.name_location = @location
+      elsif node.is_a?(Path)
+        node.iyi_synthetic = true
+      end
       true
     end
   end

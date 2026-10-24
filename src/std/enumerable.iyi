@@ -22,8 +22,8 @@
 #     `reduce`, `accumulate` and eight more. `U` belongs to the method, not to
 #     the trait.
 #   * `where Elem : Comparable` — about a quarter of `Enumerable` is valid
-#     only for some element types. `max`, `min`, `sum`, `product`, `tally`, `sorted`,
-#     `includes?` and `minmax` say so instead of duck-typing. `sum` and
+#     only for some element types. `max`, `min`, `sum`, `product`, `tally`, `sorted`
+#     and `minmax` say so instead of duck-typing. `sum` and
 #     `product` also need `Num` to require `self.zero` and `self.one`: an
 #     identity belongs to the type, since an empty collection has no element
 #     to ask.
@@ -44,8 +44,7 @@
 
 module std/enumerable
 
-import std/traits
-using std/traits::{Comparable, Num, Hashable}
+import std/traits::{Comparable, Num, Hashable}
 
 pub trait Enumerable
   type Elem
@@ -218,10 +217,16 @@ pub trait Enumerable
     # here, so this is the one place that has to say so. Zero still answers
     # `[]`: an empty prefix is a real answer to a real question.
     raise "negative count: #{n}" if n < 0
+    # And it stops at the nth element rather than at the one after it, as
+    # the other library's `first(n)` does: the check came before the
+    # append, so every call pulled one element more than it kept, and a
+    # source read once (a pipe, a generator) lost it - `take(2)` twice
+    # over 1..6 answered [1, 2] and then [4, 5], and `take(0)` pulled one.
     result = [] of Elem
+    return result if n == 0
     each do |e|
-      return result if result.size >= n
       result << e
+      return result if result.size >= n
     end
     result
   end
@@ -274,8 +279,12 @@ pub trait Enumerable
     end
   end
 
-  def each_with_object(obj : U, & : U, Elem -> Nil) : U forall U
-    each { |e| yield obj, e }
+  # The element first and the memo second, as the other library yields them.
+  # It was the reverse, so `[[1], [2]].each_with_object([] of Int32) { |x,
+  # acc| acc.concat(x) }` compiled under both and answered `[]` here: the
+  # element was the one mutated (SPEC.md III.1.7a's worst shape).
+  def each_with_object(obj : U, & : Elem, U -> Nil) : U forall U
+    each { |e| yield e, obj }
     obj
   end
 
@@ -284,15 +293,18 @@ pub trait Enumerable
   # (SPEC.md III.1.7a), and `slice.join` has to compile
   # where `array.join` does. A mandatory separator made the arity of one name
   # depend on which tower the receiver came from.
+  #
+  # Into one builder: adding each element to the text so far copied that
+  # text once per element, and a `List` of 100,000 took nine seconds.
   def join(separator : String = "") : String
-    result = ""
-    first = true
-    each do |e|
-      result = result + separator unless first
-      result = result + e.to_s
-      first = false
+    String.build do |io|
+      first = true
+      each do |e|
+        io << separator unless first
+        io << e.to_s
+        first = false
+      end
     end
-    result
   end
 
   # ---- needing something of the element type -------------------------------
@@ -302,8 +314,13 @@ pub trait Enumerable
   # and failing at instantiation with a message naming neither the bound nor
   # the element type.
 
-  def includes?(value : Elem) : Bool where Elem : Comparable
-    each { |e| return true if (e <=> value) == 0 }
+  # Equality, as `Array#includes?` asks it: `<=>` answering 0 is ordering,
+  # and for a float it said a NaN was present in a list of NaNs, which no
+  # `==` says and `[nan].includes?(nan)` does not. And so no bound: every
+  # type has `==`, and the `Comparable` one left from the `<=>` days
+  # refused a list of arrays, of nilable numbers or of any class.
+  def includes?(value : Elem) : Bool
+    each { |e| return true if e == value }
     false
   end
 
@@ -362,6 +379,23 @@ pub trait Enumerable
   # ---- needing something of the block's result type -------------------------
 
   def max_by?(& : Elem -> U) : Elem? forall U : Comparable
+    max_by_entry { |e| yield e }[0]
+  end
+
+  # Whether there was an element is the key's to say, not the element's: a
+  # nil element can be the largest, and `found.nil?` refused
+  # `List.new([nil, 1]).max_by { |x| x ? x : 5 }` as empty where
+  # `Array#max_by` and the other library answer nil. `min_by` and
+  # `minmax_by` read the key the same way.
+  def max_by(& : Elem -> U) : Elem forall U : Comparable
+    entry = max_by_entry { |e| yield e }
+    raise "max_by of an empty collection" if entry[1].nil?
+    entry[0].as(Elem)
+  end
+
+  # The first element with the largest key, and that key: nil only when
+  # there was no element.
+  private def max_by_entry(& : Elem -> U) : Tuple(Elem?, U?) forall U : Comparable
     best = nil
     best_key = nil
     each do |e|
@@ -372,13 +406,7 @@ pub trait Enumerable
         best_key = key
       end
     end
-    best
-  end
-
-  def max_by(& : Elem -> U) : Elem forall U : Comparable
-    found = max_by? { |e| yield e }
-    return found unless found.nil?
-    raise "max_by of an empty collection"
+    {best, best_key}
   end
 
   def group_by(& : Elem -> U) : Hash(U, Array(Elem)) forall U : Hashable
@@ -478,12 +506,16 @@ pub trait Enumerable
     result
   end
 
+  # Whether there is a previous element is a flag, not a nil: an element
+  # that is itself nil is still an element, and `[nil, 2]` has the pair
+  # `{nil, 2}`. The nil test skipped every pair whose first half was nil.
   def each_cons_pair(& : Elem, Elem -> Nil) : Nil
+    started = false
     previous = nil
     each do |e|
-      last = previous
-      yield last, e unless last.nil?
+      yield previous.as(Elem), e if started
       previous = e
+      started = true
     end
   end
 
@@ -496,19 +528,23 @@ pub trait Enumerable
     end
   end
 
+  # The same flag as `each_cons_pair`: with the nil test, a nil element
+  # read as "no previous element", so the block was never asked about the
+  # element after it and `[nil, nil, 1]` came back as one chunk.
   def chunk_while(& : Elem, Elem -> Bool) : Array(Array(Elem))
     chunks = [] of Array(Elem)
     current = [] of Elem
+    started = false
     previous = nil
     each do |e|
-      last = previous
-      if last.nil? || (yield last, e)
+      if !started || (yield previous.as(Elem), e)
         current << e
       else
         chunks << current
         current = [e]
       end
       previous = e
+      started = true
     end
     chunks << current unless current.empty?
     chunks
@@ -535,10 +571,14 @@ pub trait Enumerable
     result
   end
 
+  # The first truthy answer, as the other library's: this took the first
+  # non-nil one, `false` included, so `[1, 2, 3, 4].find_value { |i| i > 2 }`
+  # answered false where the other library documents true for that very
+  # call, and `{ |i| i > 8 }` answered false where it answers nil.
   def find_value(& : Elem -> U?) : U? forall U
     each do |e|
       value = yield e
-      return value unless value.nil?
+      return value if value
     end
     nil
   end
@@ -553,16 +593,23 @@ pub trait Enumerable
     result
   end
 
+  # A flag for "an element was seen", not a nil accumulator: a nil element
+  # reset the fold, so `[nil, 2]` answered 2 without calling the block.
   def reduce?(& : Elem, Elem -> Elem) : Elem?
+    found = false
     acc = nil
     each do |e|
-      current = acc
-      acc = current.nil? ? e : (yield current, e)
+      acc = found ? (yield acc.as(Elem), e) : e
+      found = true
     end
     acc
   end
 
+  # Refused under its own name, as `minmax` below is: delegated, a size of
+  # zero was refused with `each_slice`'s sentence, "slice size must be
+  # positive", from a call the reader never wrote.
   def in_groups_of(n : Int32, filler : Elem) : Array(Array(Elem))
+    raise "group size must be positive" if n <= 0
     groups = each_slice(n)
     last = groups.last?
     if last
@@ -581,14 +628,27 @@ pub trait Enumerable
     theirs = other.to_a
     result = [] of Tuple(Elem, O::Elem)
     i = 0
+    # As many pairs as this collection has elements, and a shorter *other*
+    # refused at its first missing index, as the other library refuses it:
+    # the pairs stopped at the shorter, and an element went without a word.
     each do |e|
-      result << {e, theirs[i]} if i < theirs.size
+      result << {e, theirs[i]}
       i = i + 1
     end
     result
   end
 
   def min_by?(& : Elem -> U) : Elem? forall U : Comparable
+    min_by_entry { |e| yield e }[0]
+  end
+
+  def min_by(& : Elem -> U) : Elem forall U : Comparable
+    entry = min_by_entry { |e| yield e }
+    raise "min_by of an empty collection" if entry[1].nil?
+    entry[0].as(Elem)
+  end
+
+  private def min_by_entry(& : Elem -> U) : Tuple(Elem?, U?) forall U : Comparable
     best = nil
     best_key = nil
     each do |e|
@@ -599,13 +659,7 @@ pub trait Enumerable
         best_key = key
       end
     end
-    best
-  end
-
-  def min_by(& : Elem -> U) : Elem forall U : Comparable
-    found = min_by? { |e| yield e }
-    return found unless found.nil?
-    raise "min_by of an empty collection"
+    {best, best_key}
   end
 
   def max_of?(& : Elem -> U) : U? forall U : Comparable
@@ -640,9 +694,19 @@ pub trait Enumerable
     raise "min_of of an empty collection"
   end
 
+  # One walk, as `minmax_of?` below takes: `min?` and then `max?` walked the
+  # collection twice, so a source that can be read once (a pipe, a
+  # generator) answered {1, nil} for [3, 1, 4, 1, 5] and `minmax` refused
+  # it as empty.
   def minmax? : Tuple(Elem?, Elem?) where Elem : Comparable
-    low = min?
-    high = max?
+    low = nil
+    high = nil
+    each do |e|
+      cur_low = low
+      low = e if cur_low.nil? || (e <=> cur_low) < 0
+      cur_high = high
+      high = e if cur_high.nil? || (e <=> cur_high) > 0
+    end
     {low, high}
   end
 
@@ -660,6 +724,19 @@ pub trait Enumerable
   end
 
   def minmax_by?(& : Elem -> U) : Tuple(Elem?, Elem?) forall U : Comparable
+    entry = minmax_by_entry { |e| yield e }
+    {entry[0], entry[1]}
+  end
+
+  def minmax_by(& : Elem -> U) : Tuple(Elem, Elem) forall U : Comparable
+    entry = minmax_by_entry { |e| yield e }
+    raise "minmax_by of an empty collection" if entry[2].nil?
+    {entry[0].as(Elem), entry[1].as(Elem)}
+  end
+
+  # The first smallest and first largest elements, and the smallest key,
+  # which is nil only when there was no element.
+  private def minmax_by_entry(& : Elem -> U) : Tuple(Elem?, Elem?, U?) forall U : Comparable
     min_elem = nil
     max_elem = nil
     min_key = nil
@@ -677,17 +754,7 @@ pub trait Enumerable
         max_key = key
       end
     end
-    {min_elem, max_elem}
-  end
-
-  def minmax_by(& : Elem -> U) : Tuple(Elem, Elem) forall U : Comparable
-    pair = minmax_by? { |e| yield e }
-    low = pair[0]
-    high = pair[1]
-    if low.nil? || high.nil?
-      raise "minmax_by of an empty collection"
-    end
-    {low, high}
+    {min_elem, max_elem, min_key}
   end
 
   def minmax_of?(& : Elem -> U) : Tuple(U?, U?) forall U : Comparable

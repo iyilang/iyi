@@ -19,8 +19,7 @@
 # requires arrived with it, which is why the types it names exist here at all.
 module samples/notes
 
-import notes/store
-using notes/store
+import notes/store::*
 
 add("Ilk not")
 add("Ikinci not")

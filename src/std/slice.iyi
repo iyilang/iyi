@@ -10,12 +10,9 @@
 
 module std/slice
 
-import std/enumerable
-using std/enumerable::{Enumerable}
-import std/indexable
-using std/indexable::{Indexable}
-import std/iterator
-using std/iterator::{Iterator}
+import std/enumerable::{Enumerable}
+import std/indexable::{Indexable}
+import std/iterator::{Iterator, Stop}
 
 # `pub`, because an alias is part of a module's surface like anything else: an
 # unexported one is unreachable from a consumer, which R-2 now says out loud.
@@ -33,20 +30,29 @@ pub struct Slice(T)
   end
 
   # Creates a slice wrapping *pointer* bounded by *size*.
-  def initialize(@pointer : Pointer(T), size : Int32, @read_only : Bool = false)
+  #
+  # `read_only` is named in this and every `Slice.new`, as in the other
+  # library. Positional, it took the value's place when `T` is `Bool`:
+  # `Slice(Bool).new(3, true)` was `Slice[false, false, false]`, read-only.
+  def initialize(@pointer : Pointer(T), size : Int32, *, @read_only : Bool = false)
     raise "negative size: #{size}" if size < 0
     @size = size
   end
 
   # Allocates a slice of *size* elements on the heap.
-  def self.new(size : Int32, read_only : Bool = false) : self
+  def self.new(size : Int32, *, read_only : Bool = false) : self
     raise "negative size: #{size}" if size < 0
     pointer = size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(size.to_u64)
     new(pointer, size, read_only: read_only)
   end
 
   # Allocates a slice of *size* elements initialized to *value*.
-  def self.new(size : Int32, value : T, read_only : Bool = false) : self
+  #
+  # These three answer `Slice(T)`, not `self`, as `Array.new` does: when the
+  # element type is left to the value or the block, `self` is still the
+  # unbound `Slice(T)` while the body builds `Slice(Int32)`, so
+  # `Slice.new(3) { |i| i + 1 }` and `Slice.new(3, 7)` did not compile.
+  def self.new(size : Int32, value : T, *, read_only : Bool = false) : Slice(T)
     raise "negative size: #{size}" if size < 0
     pointer = size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(size.to_u64)
     slice = new(pointer, size, read_only: false)
@@ -55,7 +61,7 @@ pub struct Slice(T)
   end
 
   # Allocates a slice of *size* elements initialized by yielding each index.
-  def self.new(size : Int32, & : Int32 -> T) : self
+  def self.new(size : Int32, & : Int32 -> T) : Slice(T)
     raise "negative size: #{size}" if size < 0
     pointer = size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(size.to_u64)
     i = 0
@@ -66,7 +72,7 @@ pub struct Slice(T)
     new(pointer, size, read_only: false)
   end
 
-  def self.new(size : Int32, read_only : Bool, & : Int32 -> T) : self
+  def self.new(size : Int32, *, read_only : Bool, & : Int32 -> T) : Slice(T)
     raise "negative size: #{size}" if size < 0
     pointer = size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(size.to_u64)
     i = 0
@@ -168,12 +174,23 @@ pub struct Slice(T)
   end
 
   # Returns a subslice covering *range*, or nil if out of bounds.
+  #
+  # A range that ends before it begins is empty, not out of bounds, as the
+  # other library counts it: `s[3..1]` is the empty slice at 3. The count is
+  # taken only once the end is known to be past the start, and the
+  # inclusive end is added only while the count can still fit, so an end
+  # near the top of `Int32` answers nil instead of overflowing.
   def []?(range : Range(Int32, Int32)) : Slice(T)?
     b = range.begin
     e = range.end
     b = b + @size if b < 0
+    return nil if b < 0
     e = e + @size if e < 0
-    count = range.exclusive? ? (e - b) : (e - b + 1)
+    count = 0
+    if e >= b
+      count = e - b
+      count = count + 1 unless range.exclusive? || count > @size
+    end
     self[b, count]?
   end
 
@@ -354,12 +371,13 @@ pub struct Slice(T)
     ary
   end
 
-  # Returns a new slice with copied contents.
+  # Returns a new slice with copied contents. The copy is filled before it
+  # takes this slice's read-only flag: `copy_from` into a read-only copy
+  # refused, so a read-only slice could not be duplicated at all.
   def dup : Slice(T)
     ptr = @size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(@size.to_u64)
-    copy = Slice(T).new(ptr, @size, read_only: @read_only)
-    copy.copy_from(self) if @size > 0
-    copy
+    ptr.copy_from(@pointer, @size) if @size > 0
+    Slice(T).new(ptr, @size, read_only: @read_only)
   end
 
   # Returns a copy of this slice.
@@ -413,7 +431,12 @@ pub struct Slice(T)
   end
 
   # Returns true if sizes match and all elements are equal.
-  def ==(other : Slice(U)) : Bool forall U
+  #
+  # A slice of its own element type, as `Array#==` takes an `Array(T)`. It
+  # took any `Slice(U)`, and numbers that compare equal across types hash
+  # apart: `Slice[-1, -2]` of `Int32` was `==` to the same of `Int64` with
+  # hashes 204952928 and -1576659145, so a table missed one by the other.
+  def ==(other : Slice(T)) : Bool
     return false if @size != other.size
     return true if @pointer.address == other.to_unsafe.address
     i = 0
@@ -430,21 +453,12 @@ pub struct Slice(T)
 
   # And hashing follows equality, or the `==` above buys nothing: a key is
   # found by its slot first and compared second, so two slices with equal
-  # contents have to land in one slot. `Object#hash` answered the type id,
-  # which put every `Slice(Int32)` in the same slot — correct and useless.
-  #
-  # Wrapping arithmetic, mixed the way `Indexable#hash` mixes: a hash is a
-  # number modulo the word, and written with the checked `*` this panics with
-  # "arithmetic overflow" as soon as `31 * h` leaves `Int32`.
-  def hash : Int32
-    h = @size
-    i = 0
-    while i < @size
-      h = (31 &* h) &+ @pointer[i].hash
-      i = i + 1
-    end
-    h
-  end
+  # contents have to land in one slot. That is `Indexable#hash`, from the
+  # impl below, which is `Array#hash` element for element. The copy this
+  # struct carried said it mixed as the trait does and was `31 * h + x`,
+  # under which `[a, b]` and `[a + 1, b - 31]` collide: a 150 by 150 grid of
+  # two-element slices had 4,769 distinct hashes for 22,500 slices, about
+  # five slices to a hash where every array had its own.
 end
 
 # The `unsafe_fetch` above has said "required for Indexable" since it was
@@ -479,13 +493,18 @@ end
 # type twice as one that should, and then the only route from a slice to a
 # lazy chain was `fs.to_a` — copying the whole sequence, which is the cost
 # the tower exists to avoid.
-pub struct SliceIterator(T)
+#
+# A class, as `ArrayIterator` is (std/iterator): an adaptor keeps its source
+# by value, and a struct source was copied into it, so `it.first(2).to_a`
+# and then `it.to_a` gave [1, 2] and [1, 2, 3, 4] where an array's iterator
+# gives [1, 2] and [3, 4].
+pub class SliceIterator(T)
   def initialize(@slice : Slice(T))
     @index = 0
   end
 
-  def next : T?
-    return nil if @index >= @slice.size
+  def next : T | Stop
+    return Stop.new if @index >= @slice.size
     item = @slice[@index]
     @index = @index + 1
     item
@@ -494,11 +513,4 @@ end
 
 impl Iterator for SliceIterator(T) forall T
   type Elem = T
-
-  def next : T?
-    return nil if @index >= @slice.size
-    item = @slice[@index]
-    @index = @index + 1
-    item
-  end
 end

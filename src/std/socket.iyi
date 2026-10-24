@@ -1,15 +1,33 @@
 # Sockets: TCP networking for iyi
 #
-# A blocking TCP socket with numeric IP resolution (IPv4 dotted-decimal and localhost).
+# A TCP socket over IPv4 or IPv6, to an address - dotted decimal, an IPv6
+# literal (`::1`, or `[::1]` as a URL writes it), `localhost` - or to a
+# host name, which `connect` resolves; or a stream socket at a path on
+# this machine (`listen_unix`, `connect_unix`), which is what a reverse
+# proxy in front of a server usually talks to.
 #
 # Address resolution:
 # getaddrinfo is the standard route in libc, but on Linux it pulls in libc.so,
 # dynamic NSS modules (libnss_dns, libnss_files), and resolver state, which destroys
 # the zero-undefined-symbol dependency floor (SPEC.md III.9).
-# By parsing numeric IPv4 dotted-decimal strings (and mapping "localhost" to 127.0.0.1)
-# in pure iyi arithmetic without libc, Linux programs retain raw syscall purity
-# (zero undefined symbols) and Darwin programs only link standard socket symbols
-# provided by libSystem.
+# So an address is parsed in pure iyi arithmetic ("localhost" is
+# 127.0.0.1 and ::1, raced as a name's addresses are), and a host name
+# is iyi's own stub resolver's (`Resolver`, below): the hosts file first,
+# then the name servers the machine is configured with, over UDP and, for
+# an answer too long for a datagram, TCP - the same sockets this file
+# already makes, so Linux programs retain raw syscall purity (zero
+# undefined symbols) and Darwin programs only link standard socket
+# symbols provided by libSystem. The wire format and the configuration
+# files are `std/dns`'s; a resolver can ask DNS over TLS or over HTTPS
+# instead (`Resolver#encrypted`, std/secure_dns's upstreams), which
+# `connect` with that resolver then uses. `listen` and `std/udp` still
+# take addresses only: a listener names its own interface, and a
+# datagram's peer is whoever the program already heard from. A socket
+# listening on `::` takes IPv6 alone on every platform (IPV6_V6ONLY):
+# Linux's default is both families and Windows' is IPv6 alone, and a
+# program should not change meaning with the machine it runs on. A name
+# with more than one address is connected to by Happy Eyeballs (RFC
+# 8305): see `connect`.
 #
 # Concurrency:
 # On the targets that have the runtime (SPEC.md III.4), every socket is
@@ -21,7 +39,37 @@
 # another fiber under a parked call answers the same; so on those targets
 # these methods answer `T | Cancelled` on every target — where there is no
 # runtime to park in they block and never answer it, but the type is the
-# same, so a program reads the same everywhere. One fiber may wait on one fd.
+# same, so a program reads the same everywhere. One fiber may read a
+# socket while another writes it - a WebSocket's two halves - but two
+# fibers reading one socket, or two writing it, are refused.
+#
+# Timeouts:
+# `read_timeout_ms` and `write_timeout_ms` bound how long a read or a write
+# waits for the peer; a wait that runs out answers a `SocketError` whose
+# `timed_out?` is true, and the connection stays open. Unset, a wait takes
+# as long as the peer does. The bound is per wait, not per call: a write
+# that parks three times may wait three times as long, and a write that
+# times out may have sent part of its bytes.
+#
+# Nagle:
+# A connected or accepted TCP socket has TCP_NODELAY set, as Go's net
+# package sets its own: a small write goes at once rather than waiting for
+# an earlier one's acknowledgement, which a peer delays - 40 ms at least
+# on Linux. A writer that would rather have its pieces joined turns Nagle
+# back on with `nodelay = false`, and joins what it can before writing
+# either way: std/tls writes a flight of records in one write, std/http a
+# head with a body it has whole.
+#
+# Errors:
+# What the other end or the network does is a value, not a panic: a
+# connection reset, a peer that has gone (a broken pipe), a refused or
+# timed-out connect, an accept whose client left first - `SocketError`,
+# beside `Cancelled` in the answer. A server whose client disconnected
+# mid-response panicked with "cannot write to socket"; it reads a
+# `SocketError` now, and `disconnected?` says the client is gone. What a
+# program does wrong itself - reading a socket it closed, a negative
+# count - still panics. Writing to a connection the peer closed does not
+# raise SIGPIPE: `MSG_NOSIGNAL` on Linux, `SO_NOSIGPIPE` on darwin.
 #
 # Where it lives:
 # Outside the prelude, because a program that opens no socket should not
@@ -32,6 +80,15 @@
 # (SPEC.md III.9).
 
 module std/socket
+
+import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf, SvcbAnswer, SvcbRecord}
+import std/random::{Random}
+import std/slice::{Bytes, Slice}
+
+# What a resolver answers and is built from, under the names a program
+# that connects by name already imports from here.
+pub alias DnsError = Std::Dns::DnsError
+pub alias ResolvConf = Std::Dns::ResolvConf
 
 pub struct IPv4Address
   getter b0 : UInt8
@@ -47,10 +104,346 @@ pub struct IPv4Address
   end
 end
 
+# Sixteen bytes in network order, held as two words: `high` is bytes 0 to
+# 7. Written the RFC 5952 way - lowercase, no leading zeros, the longest
+# run of two or more zero groups as `::`, the first of two equal runs -
+# and an IPv4-mapped address with its dotted tail, `::ffff:192.0.2.1`.
+pub struct IPv6Address
+  getter high : UInt64
+  getter low : UInt64
+
+  def initialize(@high : UInt64, @low : UInt64)
+  end
+
+  # The sixteen bytes at *bytes*, network order.
+  def self.new(bytes : Pointer(UInt8)) : IPv6Address
+    high = 0_u64
+    low = 0_u64
+    index = 0
+    while index < 8
+      high = high.unsafe_shl(8_u64) | bytes[index].to_u64
+      low = low.unsafe_shl(8_u64) | bytes[index + 8].to_u64
+      index = index + 1
+    end
+    IPv6Address.new(high, low)
+  end
+
+  # Byte *index*, 0 to 15.
+  def [](index : Int32) : UInt8
+    word = index < 8 ? @high : @low
+    word.unsafe_shr(((7 - (index & 7)) * 8).to_u64).unsafe_to_u8
+  end
+
+  # The 16-bit group *index*, 0 to 7. Not `group`: that name is the task
+  # group's in iyi (SPEC.md III.4.9).
+  def hextet(index : Int32) : Int32
+    (self[index * 2].to_i32 << 8) | self[index * 2 + 1].to_i32
+  end
+
+  def to_s : String
+    if @high == 0_u64 && @low.unsafe_shr(32_u64) == 0xFFFF_u64
+      return "::ffff:#{self[12]}.#{self[13]}.#{self[14]}.#{self[15]}"
+    end
+    best = -1
+    best_size = 1
+    start = -1
+    index = 0
+    while index < 8
+      if hextet(index) == 0
+        start = index if start < 0
+        if index - start + 1 > best_size
+          best = start
+          best_size = index - start + 1
+        end
+      else
+        start = -1
+      end
+      index = index + 1
+    end
+    head = [] of String
+    tail = [] of String
+    index = 0
+    while index < 8
+      if best < 0 || index < best
+        head << hextet(index).to_s(16)
+      elsif index >= best + best_size
+        tail << hextet(index).to_s(16)
+      end
+      index = index + 1
+    end
+    return head.join(":") if best < 0
+    "#{head.join(":")}::#{tail.join(":")}"
+  end
+end
+
+# Either family's address: what a resolver answers for a name.
+pub alias IPAddress = IPv4Address | IPv6Address
+
+# A connection's own failure: which operation, and the platform's error
+# number for why - or, for a host name that could not be turned into an
+# address, the resolver's `DnsError`, and no number (`code` 0); or, for a
+# protocol layered on the connection (TLS), that protocol's own sentence,
+# and no number either; or, for a name whose addresses were all tried and
+# none connected, every one of them with how its attempt ended.
+pub struct SocketError
+  getter operation : String
+  getter code : Int32
+  # Why the host's name did not resolve; nil for every other failure.
+  getter dns_error : DnsError? = nil
+  # What the protocol over the connection said went wrong; nil otherwise.
+  getter layer_reason : String? = nil
+  # For a connect to a name that stood for more than one address: each
+  # address in the order it was tried and how its attempt ended -
+  # `[2001:db8::1]:443 timed out; 192.0.2.1:443 connection refused` - which
+  # `reason` answers. Nil for every other failure.
+  getter tried : String? = nil
+
+  def initialize(@operation : String, @code : Int32)
+  end
+
+  def initialize(@operation : String, @code : Int32, @dns_error : DnsError?)
+  end
+
+  # A failure of the protocol over the connection, in its words: `cannot
+  # read from example.com: tls: a record that does not decrypt`.
+  def self.layered(operation : String, reason : String) : SocketError
+    SocketError.new(operation, 0, nil, reason)
+  end
+
+  def initialize(@operation : String, @code : Int32, @dns_error : DnsError?, @layer_reason : String?)
+  end
+
+  # A connect to a name none of whose addresses took the connection:
+  # *code* is what `refused?` and `timed_out?` read, and *tried* the
+  # sentence naming every address.
+  def self.every_address(operation : String, code : Int32, tried : String) : SocketError
+    SocketError.new(operation, code, nil, nil, tried)
+  end
+
+  def initialize(@operation : String, @code : Int32, @dns_error : DnsError?, @layer_reason : String?, @tried : String?)
+  end
+
+  # The host was a name, and no address came of it: `dns_error` says why
+  # (`not_found?` for NXDOMAIN, `server_failure?` for SERVFAIL, ...).
+  def unresolved? : ::Bool
+    !@dns_error.nil?
+  end
+
+  # A wait for the peer that ran past its socket's timeout, carrying the
+  # platform's own number for it so `reason` and `timed_out?` read it as
+  # they read the kernel's.
+  def self.timed_out(operation : String) : SocketError
+    {% if flag?(:win32) %}
+      SocketError.new(operation, 10060)
+    {% elsif flag?(:darwin) %}
+      SocketError.new(operation, 60)
+    {% else %}
+      SocketError.new(operation, 110)
+    {% end %}
+  end
+
+  # The peer is gone: it reset the connection, or closed it and the write
+  # found the pipe broken, or the connection was aborted.
+  def disconnected? : ::Bool
+    {% if flag?(:win32) %}
+      @code == 10054 || @code == 10053 || @code == 10058
+    {% elsif flag?(:darwin) %}
+      @code == 54 || @code == 32 || @code == 53
+    {% else %}
+      @code == 104 || @code == 32 || @code == 103
+    {% end %}
+  end
+
+  def reason : String
+    if (layered = @layer_reason).is_a?(String)
+      return layered
+    end
+    if (sentence = @tried).is_a?(String)
+      return sentence
+    end
+    if (dns = @dns_error).is_a?(DnsError)
+      return dns.reason
+    end
+    return "the connection was reset by the peer" if reset?
+    return "the peer closed the connection" if broken_pipe?
+    return "the connection was aborted" if aborted?
+    return "connection refused" if refused?
+    return "the address is in use" if in_use?
+    return "nothing is at that path" if missing?
+    return "timed out" if timed_out?
+    return "no route to the host" if unreachable?
+    if denied?
+      # Windows answers WSAEACCES for a port another socket holds
+      # exclusively - every listener here does - as well as for one it
+      # reserves, so the sentence names both.
+      {% if flag?(:win32) %}
+        return "access denied: another socket holds the port, or the system reserves it"
+      {% else %}
+        return "permission denied"
+      {% end %}
+    end
+    return "not an address this host can use" if unusable?
+    "error #{@code}"
+  end
+
+  # EACCES: a port the system keeps from this user.
+  private def denied? : ::Bool
+    {% if flag?(:win32) %} @code == 10013 {% else %} @code == 13 {% end %}
+  end
+
+  # EADDRNOTAVAIL: an address that is not this host's, or the wildcard a
+  # server prints, which Windows will not connect to.
+  private def unusable? : ::Bool
+    {% if flag?(:win32) %} @code == 10049 {% elsif flag?(:darwin) %} @code == 49 {% else %} @code == 99 {% end %}
+  end
+
+  private def reset? : ::Bool
+    {% if flag?(:win32) %} @code == 10054 {% elsif flag?(:darwin) %} @code == 54 {% else %} @code == 104 {% end %}
+  end
+
+  private def broken_pipe? : ::Bool
+    {% if flag?(:win32) %} @code == 10058 {% else %} @code == 32 {% end %}
+  end
+
+  private def aborted? : ::Bool
+    {% if flag?(:win32) %} @code == 10053 {% elsif flag?(:darwin) %} @code == 53 {% else %} @code == 103 {% end %}
+  end
+
+  def refused? : ::Bool
+    {% if flag?(:win32) %} @code == 10061 {% elsif flag?(:darwin) %} @code == 61 {% else %} @code == 111 {% end %}
+  end
+
+  # ENOENT: a unix socket's path that is not there. Winsock answers a
+  # missing path with a refusal, which says the same.
+  private def missing? : ::Bool
+    {% if flag?(:win32) %} false {% else %} @code == 2 {% end %}
+  end
+
+  private def in_use? : ::Bool
+    {% if flag?(:win32) %} @code == 10048 {% elsif flag?(:darwin) %} @code == 48 {% else %} @code == 98 {% end %}
+  end
+
+  # The peer did not answer in time: a connect the network timed out, or a
+  # read or write past its socket's timeout.
+  def timed_out? : ::Bool
+    {% if flag?(:win32) %} @code == 10060 {% elsif flag?(:darwin) %} @code == 60 {% else %} @code == 110 {% end %}
+  end
+
+  def unreachable? : ::Bool
+    {% if flag?(:win32) %}
+      @code == 10065 || @code == 10051
+    {% elsif flag?(:darwin) %}
+      @code == 65 || @code == 51
+    {% else %}
+      @code == 113 || @code == 101
+    {% end %}
+  end
+end
+
+impl Error for SocketError
+  def message : String
+    "cannot #{operation}: #{reason}"
+  end
+end
+
+{% if @top_level.has_constant?("IyiIO") %}
+  # A socket as a stream, for what is written against streams: `read_line`,
+  # `puts`, `IyiIO.copy` between it and a file or a pipe. Its reads and
+  # writes are the socket's own, which park the task and keep its
+  # timeouts. A stream has no error to answer, so a read the socket refuses
+  # ends the stream, `read_failed?` true, and a write it refuses panics,
+  # naming the reason; a program that answers those reads the socket.
+  # Writes are buffered: `flush`, or `IyiIO.copy`, which flushes, sends
+  # them. Closing it closes the socket.
+  pub class SocketIO < IyiIO
+    getter socket : IyiSocket
+
+    def initialize(@socket : IyiSocket, buffer_size : Int32 = 4096)
+      super(-1_i64, buffer_size, false)
+    end
+
+    # A cancelled read is withdrawn (-2), not the end.
+    private def low_level_read(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+      got = @socket.read(buffer.as(Pointer(UInt8)), count > 1073741824_u64 ? 1073741824 : count.to_i64.to_i32)
+      return -2_i64 if got.is_a?(Cancelled)
+      return -1_i64 if got.is_a?(SocketError)
+      got.to_i64
+    end
+
+    private def low_level_write(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+      put = @socket.write(buffer.as(Pointer(UInt8)), count > 1073741824_u64 ? 1073741824 : count.to_i64.to_i32)
+      raise "a write to a socket, its task cancelled while it waited" if put.is_a?(Cancelled)
+      raise put.message if put.is_a?(SocketError)
+      put.to_i64
+    end
+
+    private def low_level_close(target_fd : Int64) : Nil
+      @socket.close
+    end
+  end
+{% end %}
+
 pub class IyiSocket
   getter fd : Int32
 
-  def initialize(@fd : Int32)
+  # The address family, the platform's number for it: an accepted
+  # connection is its listener's, and on Windows the socket `AcceptEx`
+  # fills in has to be made in it.
+  def initialize(@fd : Int32, @family : Int32 = AF_INET)
+  end
+
+  # The path a unix listener bound, which its `close` removes: nobody else
+  # can bind it while the file is there, and the file outlives the socket.
+  @path : String? = nil
+
+  # The bounds on a read's and a write's wait, in milliseconds; nil waits
+  # as long as it takes.
+  getter read_timeout_ms : Int32? = nil
+  getter write_timeout_ms : Int32? = nil
+
+  # An error a read met after it already had bytes to answer, which the
+  # next read answers: the kernel reports a reset once and an end of file
+  # after it, so one that was dropped read as a clean end.
+  @pending_error : SocketError? = nil
+
+  def read_timeout_ms=(ms : Int32?) : Int32?
+    raise "negative timeout: #{ms}" if ms.is_a?(Int32) && ms < 0
+    @read_timeout_ms = ms
+  end
+
+  def write_timeout_ms=(ms : Int32?) : Int32?
+    raise "negative timeout: #{ms}" if ms.is_a?(Int32) && ms < 0
+    @write_timeout_ms = ms
+  end
+
+  # Whether a small write goes at once (TCP_NODELAY) rather than waiting
+  # for an earlier one's acknowledgement, as Nagle's algorithm (RFC 896)
+  # has it wait. A connected or accepted TCP socket here sends at once, as
+  # Go's net package sets its own; `nodelay = false` turns Nagle back on
+  # for a program that writes in pieces it would rather have joined. With
+  # Nagle on, a write behind an unacknowledged one waited out the peer's
+  # delayed ACK, 40 ms on Linux: measured on loopback, --release, medians
+  # of 200, a GET on a new https:// connection took 82.89 ms between
+  # std/http's ends and 42.00 to OpenSSL's s_server, and takes 1.07 and
+  # 1.10 now; wrk against a server answering a streamed body went from
+  # 1,211 to 10,702 requests a second. A unix socket has no Nagle to turn
+  # off: it answers false and is left alone.
+  def nodelay=(on : ::Bool) : ::Bool
+    raise "socket is closed" if @fd < 0
+    IyiSocket.__sys_set_nodelay(@fd, on) unless @family == AF_UNIX
+    on
+  end
+
+  # Whether TCP_NODELAY is on, as the socket's option reads.
+  def nodelay? : ::Bool
+    raise "socket is closed" if @fd < 0
+    @family != AF_UNIX && IyiSocket.__sys_nodelay?(@fd)
+  end
+
+  # What every connected and accepted socket starts with: TCP_NODELAY, on
+  # TCP; a unix socket has no Nagle.
+  def self.__send_at_once(fd : Int32, family : Int32) : Nil
+    __sys_set_nodelay(fd, true) unless family == AF_UNIX
   end
 
   def to_unsafe : Int32
@@ -58,8 +451,18 @@ pub class IyiSocket
   end
 
   {% if @top_level.has_constant?("IyiIO") %}
-    def to_io : IyiIO
-      IyiIO.new(@fd)
+    @io : Std::Socket::SocketIO? = nil
+
+    # This socket as a stream (`SocketIO`), the same one every time, so
+    # what one read took ahead the next reads. It was a stream over the
+    # descriptor that read a socket with nothing yet to read as failed.
+    def to_io : Std::Socket::SocketIO
+      if made = @io
+        return made
+      end
+      made = Std::Socket::SocketIO.new(self)
+      @io = made
+      made
     end
   {% end %}
 
@@ -70,45 +473,394 @@ pub class IyiSocket
   # blocking `poll` on the descriptor and never do, but the type is the
   # same, so a program reads the same everywhere.
 
-  def self.connect(host : String, port : Int32) : IyiSocket | Cancelled
-    fd = __sys_socket
-    raise "cannot create socket" if fd < 0
+  # A host name is resolved by the machine's resolver (`Resolver.system`);
+  # a name that does not resolve is a `SocketError` whose `unresolved?` is
+  # true and whose sentence names the host. It panicked, "cannot resolve
+  # address: \"example.com\"", for every name but `localhost`, so
+  # `HTTP.get("http://example.com/")` could not run.
+  #
+  # A name with more than one address is raced, Happy Eyeballs v2 (RFC
+  # 8305): the first address is tried, the next `ATTEMPT_DELAY_MS` later
+  # without waiting for the first to fail, or at once when an attempt
+  # fails, and so on down the list (`attempt_order`'s: IPv6 first when
+  # this machine has a route to it, the families alternating). The first
+  # handshake to finish wins, and every other attempt is cancelled and its
+  # socket closed before `connect` answers. The addresses were tried one
+  # after another, IPv4 first, each with the whole timeout: a name whose
+  # first address dropped SYNs cost all of *timeout_ms* - or the kernel's
+  # two minutes of retries, unbounded - before the second was tried. Now
+  # it costs the delay: 250 ms to a name whose first address is a full
+  # listen queue and whose second listens (`bench/std_dns_exercise.sh`,
+  # under a 5,000 ms bound).
+  #
+  # `localhost` is raced the same way, 127.0.0.1 and then ::1, without
+  # asking the routing table: a listener here binds `localhost` at
+  # 127.0.0.1, so it goes first, and Windows, which names ::1 first, has
+  # dev servers that bind ::1 alone. This replaces the rule that tried
+  # ::1 only after 127.0.0.1 refused: Windows takes 2 s to refuse a
+  # connect, so a ::1-only listener was reached in 2017 ms and a port
+  # nobody holds refused in 4059 ms, where now ::1 starts 250 ms after
+  # 127.0.0.1 whatever 127.0.0.1 is still doing.
+  #
+  # *timeout_ms* bounds the whole connect, every attempt together (-1: as
+  # long as the kernel waits, which on Linux is about two minutes of SYN
+  # retries for a host that drops them). It bounded each address's
+  # handshake, which a race has no use for: an attempt started 500 ms in
+  # would have run 500 ms past the caller's bound. A connect that runs out
+  # is a `SocketError` whose `timed_out?` is true. The name's lookup is
+  # outside it, held by the resolver's own `timeout_ms` and `attempts`.
+  #
+  # A name none of whose addresses connects is one `SocketError` that
+  # names each address in the order tried and how its attempt ended,
+  # `tried`: `cannot connect to example.com:443: [2001:db8::1]:443 timed
+  # out; 192.0.2.1:443 connection refused`. It answered the first
+  # address's failure alone. Its `code` is the first attempt's, or a
+  # timeout's when the time ran out first. A name with one address is
+  # connected to as an address is, and fails with that address's error.
+  def self.connect(host : String, port : Int32, timeout_ms : Int32 = -1) : IyiSocket | Cancelled | SocketError
+    raise "negative timeout: #{timeout_ms}" if timeout_ms < -1
+    return connect_named(host, port, Resolver.system, timeout_ms) if named?(host)
+    return race(host, port, loopback, timeout_ms) if localhost?(host)
+    addr, family = sockaddr(host, port)
+    connect_to(addr, family, endpoint(host, port), timeout_ms)
+  end
 
-    ip = parse_ip(host)
-    addr = make_sockaddr_in(ip, port)
-    __sys_set_nonblock(fd)
-    res = __sys_connect(fd, addr)
-    if res < 0 && !__sys_in_progress?(res)
-      __sys_close(fd)
-      raise "cannot connect to #{host}:#{port}"
+  # The same, with a host name resolved by *resolver*: name servers, a
+  # hosts file and search list of the program's choosing, rather than the
+  # machine's. An address and `localhost` are what they are either way.
+  def self.connect(host : String, port : Int32, resolver : Resolver, timeout_ms : Int32 = -1) : IyiSocket | Cancelled | SocketError
+    return connect_named(host, port, resolver, timeout_ms) if named?(host)
+    connect(host, port, timeout_ms)
+  end
+
+  # A host that is a name to look up rather than an address to read: a
+  # host name by `DnsName.valid?`, which no dotted quad is (its last label
+  # is all digits), and not `localhost`, which never leaves the machine
+  # (RFC 6761 6.3). Everything else goes to the numeric parsers, whose
+  # refusals are what they were.
+  private def self.named?(host : String) : ::Bool
+    !localhost?(host) && DnsName.valid?(host)
+  end
+
+  private def self.connect_named(host : String, port : Int32, resolver : Resolver, timeout_ms : Int32) : IyiSocket | Cancelled | SocketError
+    # The port is refused before the name is asked about, as it is for an
+    # address: a port that is not one is the program's mistake whatever
+    # the name turns out to be.
+    raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+    found = resolver.resolve(host)
+    return found if found.is_a?(Cancelled)
+    return SocketError.new("resolve #{host}", 0, found) if found.is_a?(DnsError)
+    race(host, port, attempt_order(found), timeout_ms)
+  end
+
+  # What `localhost` stands for, in the order `connect` tries it.
+  def self.loopback : Array(IPAddress)
+    [IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8).as(IPAddress), IPv6Address.new(0_u64, 1_u64).as(IPAddress)]
+  end
+
+  # RFC 8305's Connection Attempt Delay, the value its section 5
+  # recommends; it bounds the delay to 100 ms - 2 s, and the round-trip
+  # history that would move it within them is not kept here.
+  ATTEMPT_DELAY_MS = 250
+
+  # The order `connect` tries a name's addresses in (RFC 8305 section 4):
+  # one family's first address, then the other's, alternating, each family
+  # in the resolver's order, and the longer family's rest at the end.
+  # IPv6 goes first when this machine has a route to the first IPv6
+  # address - RFC 6724's first rule, asked the way glibc's getaddrinfo
+  # asks it, by connecting a UDP socket, which sends nothing - and IPv4
+  # first when it has none, so a machine without IPv6 does not start every
+  # connect with an attempt that cannot leave it. A name of one family is
+  # left in the resolver's order, and asks nothing.
+  def self.attempt_order(addresses : Array(IPAddress)) : Array(IPAddress)
+    four = [] of IPAddress
+    six = [] of IPAddress
+    addresses.each do |address|
+      if address.is_a?(IPv6Address)
+        six << address
+      else
+        four << address
+      end
     end
+    return addresses if four.empty? || six.empty?
+    first = four
+    second = six
+    if routed?(six[0].as(IPv6Address))
+      first = six
+      second = four
+    end
+    ordered = [] of IPAddress
+    index = 0
+    while index < first.size || index < second.size
+      ordered << first[index] if index < first.size
+      ordered << second[index] if index < second.size
+      index = index + 1
+    end
+    ordered
+  end
+
+  # Whether this machine has a route to *address*: a UDP connect only
+  # looks the destination up and records it, and fails at once without a
+  # route (ENETUNREACH).
+  private def self.routed?(address : IPv6Address) : ::Bool
+    fd = __sys_dgram_socket(AF_INET6)
+    return false if fd < 0
+    connected = __sys_dgram_connect(fd, make_sockaddr_in6(address, 9), AF_INET6)
+    __sys_close(fd)
+    connected >= 0
+  end
+
+  # One address of *host*'s, connected to: a failure names the host and
+  # the address, `cannot connect to example.com:443 (192.0.2.1): ...`.
+  private def self.attempt(host : String, port : Int32, address : IPAddress, ms : Int32) : IyiSocket | Cancelled | SocketError
+    peer = "#{endpoint(host, port)} (#{address})"
+    if address.is_a?(IPv4Address)
+      connect_to(make_sockaddr_in(address, port), AF_INET, peer, ms)
+    else
+      connect_to(make_sockaddr_in6(address, port), AF_INET6, peer, ms)
+    end
+  end
+
+  {% if @top_level.has_constant?("IyiScheduler") %}
+    # *addresses*, in order, raced (see `connect`). The caller is the race:
+    # each attempt is a task of a group opened here, the caller waits on a
+    # channel for the next one to be in, with the time until the next
+    # attempt is due, or the deadline, as the bound on the wait, and it
+    # starts attempts as that time comes or a failure frees it. Tasks,
+    # not sockets polled from here, because a connect parks its caller
+    # until the handshake is over - on Windows inside `ConnectEx` itself,
+    # with no descriptor to poll - and the race must go on meanwhile.
+    #
+    # The deadline is kept here, not by each attempt: an attempt waits as
+    # long as the kernel does, and the ones still under way when the time
+    # runs out are cancelled with the rest. A cancelled attempt closes its
+    # own socket (`connect_to`); one that connected after the winner, in
+    # the same turn of the scheduler, is closed here, once the group has
+    # ended and no task can still write its answer. A cancelled caller
+    # cancels the group's tasks too (SPEC.md III.4.2), and answers
+    # `Cancelled` once they have ended.
+    #
+    # What the tasks cost: a connect, accept and close over the loopback
+    # took 19.3 us through `localhost`, raced, and 16.2 us to 127.0.0.1,
+    # not (best of eight rounds of 1,000, release). A name with one
+    # address is not raced, and pays nothing.
+    private def self.race(host : String, port : Int32, addresses : Array(IPAddress), timeout_ms : Int32) : IyiSocket | Cancelled | SocketError
+      raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+      return attempt(host, port, addresses[0], timeout_ms) if addresses.size == 1
+      count = addresses.size
+      outcomes = Array(IyiSocket | Cancelled | SocketError | Nil).new(count, nil)
+      done = Channel(Int32).new(count)
+      deadline = timeout_ms < 0 ? -1_i64 : Resolver.now_ms + timeout_ms.to_i64
+      winner = -1
+      started = 0
+      cancelled = false
+      out_of_time = false
+      group do |g|
+        running = 0
+        next_at = 0_i64
+        while true
+          now = Resolver.now_ms
+          if deadline >= 0_i64 && now >= deadline
+            out_of_time = true
+            break
+          end
+          if started < count && now >= next_at
+            start_attempt(g, outcomes, done, started, host, port, addresses[started])
+            started = started + 1
+            running = running + 1
+            next_at = now + ATTEMPT_DELAY_MS.to_i64
+            next
+          end
+          # Every address started, and every attempt failed.
+          break if running == 0 && started == count
+          wake = started < count ? next_at : -1_i64
+          wake = deadline if deadline >= 0_i64 && (wake < 0_i64 || deadline < wake)
+          finished = next_finished(done, wake < 0_i64 ? -1 : (wake - now).to_i32)
+          if finished.is_a?(Cancelled)
+            cancelled = true
+            break
+          end
+          next if finished.nil?
+          running = running - 1
+          if outcomes[finished].is_a?(IyiSocket)
+            winner = finished
+            break
+          end
+          # A failure starts the next attempt now, not when it was due.
+          next_at = 0_i64
+        end
+        g.cancel_children
+        0
+      end
+      index = 0
+      while index < count
+        outcome = outcomes[index]
+        outcome.close if index != winner && outcome.is_a?(IyiSocket)
+        index = index + 1
+      end
+      if winner >= 0
+        won = outcomes[winner]
+        return won if won.is_a?(IyiSocket)
+      end
+      return Cancelled.new if cancelled
+      every_address_failed(host, port, addresses, outcomes, started, out_of_time ? timeout_ms : -1)
+    end
+
+    # One attempt, a task of the race's group: its answer kept at *index*,
+    # and *index* sent once it is in. The task answers 0, not the outcome: a
+    # `SocketError` answered is a failure under the group's policy (SPEC.md
+    # III.4.3), and it would cancel the attempts still racing.
+    private def self.start_attempt(g : IyiGroup, outcomes : Array(IyiSocket | Cancelled | SocketError | Nil), done : Channel(Int32), index : Int32, host : String, port : Int32, address : IPAddress) : Nil
+      g.spawn do
+        outcomes[index] = attempt(host, port, address, -1)
+        done.send(index)
+        0
+      end
+    end
+
+    # The index of the next attempt that is in, nil when *ms* ran out
+    # first (-1: no bound), `Cancelled` when the caller was.
+    private def self.next_finished(done : Channel(Int32), ms : Int32) : Int32 | Cancelled | Nil
+      if ms < 0
+        got = done.receive
+        return got.is_a?(Int32) ? got : Cancelled.new
+      end
+      answer = nil.as(Int32 | Cancelled | Nil)
+      select
+      when got = done.receive
+        answer = got.is_a?(Int32) ? got : Cancelled.new
+      when timeout(ms)
+        answer = nil
+      end
+      answer
+    end
+  {% else %}
+    # Without the runtime there is no task to race in: the addresses are
+    # tried one after another in the same order, each with the whole
+    # *timeout_ms*, and fail the same way.
+    private def self.race(host : String, port : Int32, addresses : Array(IPAddress), timeout_ms : Int32) : IyiSocket | Cancelled | SocketError
+      raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+      return attempt(host, port, addresses[0], timeout_ms) if addresses.size == 1
+      outcomes = Array(IyiSocket | Cancelled | SocketError | Nil).new(addresses.size, nil)
+      index = 0
+      while index < addresses.size
+        got = attempt(host, port, addresses[index], timeout_ms)
+        return got unless got.is_a?(SocketError)
+        outcomes[index] = got
+        index = index + 1
+      end
+      every_address_failed(host, port, addresses, outcomes, addresses.size, -1)
+    end
+  {% end %}
+
+  # The one error for a race nobody won: each address and how its attempt
+  # ended, in the order tried - its own failure, `timed out` for one still
+  # under way when the time ran out, `not tried` for one whose turn never
+  # came. *ran_out* is the timeout that ended the race, -1 when every
+  # attempt failed on its own; the code is then a timeout's, and the first
+  # attempt's otherwise, the most preferred address's failure.
+  private def self.every_address_failed(host : String, port : Int32, addresses : Array(IPAddress), outcomes : Array(IyiSocket | Cancelled | SocketError | Nil), started : Int32, ran_out : Int32) : SocketError
+    parts = [] of String
+    code = 0
+    index = 0
+    while index < addresses.size
+      outcome = outcomes[index]
+      said = if index >= started
+               "not tried"
+             elsif outcome.is_a?(SocketError)
+               outcome.reason
+             else
+               "timed out"
+             end
+      code = outcome.code if index == 0 && outcome.is_a?(SocketError)
+      parts << "#{endpoint(addresses[index].to_s, port)} #{said}"
+      index = index + 1
+    end
+    operation = "connect to #{endpoint(host, port)}"
+    return SocketError.every_address(operation, code, parts.join("; ")) if ran_out < 0
+    SocketError.every_address(operation, SocketError.timed_out(operation).code, "timed out after #{ran_out} ms: #{parts.join("; ")}")
+  end
+
+  # Every address *host* stands for, by the machine's resolver, in the
+  # resolver's order (see `Resolver#resolve`); `connect` tries them in
+  # `attempt_order`'s.
+  def self.resolve(host : String) : Array(IPAddress) | DnsError | Cancelled
+    Resolver.system.resolve(host)
+  end
+
+  # *host* and *port* as a message names them: an IPv6 literal in its
+  # brackets, as a URL writes it. Bare, `::1:57456` was an address with
+  # no port, and `ff02::1:80` another address altogether.
+  def self.endpoint(host : String, port : Int32) : String
+    host.includes?(":") && !host.starts_with?("[") ? "[#{host}]:#{port}" : "#{host}:#{port}"
+  end
+
+  # The stream socket listening at *path*.
+  def self.connect_unix(path : String) : IyiSocket | Cancelled | SocketError
+    connect_to(make_sockaddr_un(path), AF_UNIX, path)
+  end
+
+  # A connect to *addr*, waiting at most *ms* milliseconds for the
+  # handshake (-1: as long as the kernel does). The resolver's TCP query
+  # and `connect` to an address are its callers with a bound; a race's
+  # attempts wait as the kernel does, and the race keeps the bound. The
+  # bound reaches `__sys_connect` as well as the wait after it, because
+  # on Windows that call is the wait: it parks in `ConnectEx` until the
+  # handshake is over.
+  def self.connect_to(addr : Pointer(UInt8), family : Int32, peer : String, ms : Int32 = -1) : IyiSocket | Cancelled | SocketError
+    fd = __sys_socket(family)
+    return SocketError.new("create a socket", __sys_code(fd.to_i64)) if fd < 0
+    __sys_no_sigpipe(fd)
+    __send_at_once(fd, family)
+    blocking = __sys_connects_blocking?(family)
+    __sys_set_nonblock(fd) unless blocking
+    res = __sys_connect(fd, addr, family, ms)
+    if res < 0 && !__sys_in_progress?(res)
+      code = __sys_code(res.to_i64)
+      __sys_close(fd)
+      return SocketError.new("connect to #{peer}", code)
+    end
+    __sys_set_nonblock(fd) if blocking
     if res < 0
       # The handshake is under way; the socket turns writable when it is
       # done, and SO_ERROR says how it went.
-      waited = IyiSocket.await_writable(fd)
+      waited = IyiSocket.await_writable(fd, ms)
       if waited.is_a?(Cancelled)
         __sys_close(fd)
         return waited
       end
-      if __sys_sock_error(fd) != 0
+      unless waited
         __sys_close(fd)
-        raise "cannot connect to #{host}:#{port}"
+        return SocketError.timed_out("connect to #{peer}")
+      end
+      if (code = __sys_sock_error(fd)) != 0
+        __sys_close(fd)
+        return SocketError.new("connect to #{peer}", code)
       end
     end
-    IyiSocket.new(fd)
+    IyiSocket.new(fd, family)
   end
 
-  def accept : IyiSocket | Cancelled
+  def accept : IyiSocket | Cancelled | SocketError
     raise "socket is closed" if @fd < 0
-    addr = Pointer(UInt8).malloc(16_u64)
-    len = 16_u32
+    # A `sockaddr_storage`'s room: the peer's address in whichever family.
+    addr = Pointer(UInt8).malloc(128_u64)
+    len = 128_u32
     while true
-      client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len))
+      client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len), @family)
       if client_fd >= 0
+        IyiSocket.__sys_no_sigpipe(client_fd)
+        IyiSocket.__send_at_once(client_fd, @family)
         IyiSocket.__sys_set_nonblock(client_fd)
-        return IyiSocket.new(client_fd)
+        return IyiSocket.new(client_fd, @family)
       end
-      raise "cannot accept socket" unless IyiSocket.__sys_would_block?(client_fd.to_i64)
+      unless IyiSocket.__sys_would_block?(client_fd.to_i64)
+        error = SocketError.new("accept a connection", IyiSocket.__sys_code(client_fd.to_i64))
+        # A client that left between its handshake and this accept is no
+        # failure of the listener's: the next one is taken.
+        next if error.disconnected?
+        return error
+      end
       # Closed by another fiber, which is the same answer whether it
       # happened under the accept or under the wait: the wait is over and
       # nothing is coming, which is what `Cancelled` says. Asked before the
@@ -125,108 +877,169 @@ pub class IyiSocket
 
   # --- Reading and Writing ---
 
-  def read(max_bytes : Int32 = 4096) : String | Cancelled
+  def read(max_bytes : Int32 = 4096) : String | Cancelled | SocketError
     # `recv(-1)` died of "arithmetic overflow" on the `to_u64`, which names
     # neither the count nor the call; the enumerable's sentence for it.
     raise "negative count: #{max_bytes}" if max_bytes < 0
     raise "socket is closed" if @fd < 0
-    buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
-    count = read(buffer, max_bytes)
-    return count if count.is_a?(Cancelled)
-    return "" if count == 0
-    String.new(count) do |target|
-      target.copy_from(buffer, count)
+    if (kept = @pending_error).is_a?(SocketError)
+      @pending_error = nil
+      return kept
+    end
+    while true
+      got = read_ready(max_bytes)
+      return got unless got.nil?
+      waited = IyiSocket.await_readable(@fd, IyiSocket.bound(@read_timeout_ms))
+      return waited if waited.is_a?(Cancelled)
+      return Cancelled.new if @fd < 0
+      return SocketError.timed_out("read from socket") unless waited
     end
   end
 
-  def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+  # What is here now, nil when nothing is. Received into the stack first:
+  # a buffer of `max_bytes` on the heap per read was garbage the size of
+  # the request for every answer - a server reading 64 KB at a time made
+  # 64 KB of it per 30-byte request, and collected every few dozen
+  # requests. Past what the stack held, what else is already here is taken
+  # without waiting. Its own frame, never inlined, and it never parks: the
+  # wait is the caller's, so a fiber parked on a read keeps no 4 KB of the
+  # last bytes it read where the collector scans it - it would scan them on
+  # every parked connection, and hold whatever they happened to point at.
+  @[NoInline]
+  private def read_ready(max_bytes : Int32) : String | SocketError | Nil
+    small = uninitialized UInt8[4096]
+    first = max_bytes < 4096 ? max_bytes : 4096
+    n = IyiSocket.__sys_recv(@fd, pointerof(small).as(UInt8*), first.to_u64)
+    if n < 0_i64
+      return nil if IyiSocket.__sys_would_block?(n)
+      return SocketError.new("read from socket", IyiSocket.__sys_code(n))
+    end
+    count = n.to_i32
+    return "" if count == 0
+    if count < first || max_bytes == first
+      return String.new(count) do |target|
+        target.copy_from(pointerof(small).as(UInt8*), count)
+      end
+    end
+    buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
+    buffer.copy_from(pointerof(small).as(UInt8*), count)
+    more = IyiSocket.__sys_recv(@fd, buffer + count, (max_bytes - count).to_u64)
+    # Nothing more yet: this read ends with what came. An error is the
+    # next read's to answer, and is kept for it.
+    @pending_error = SocketError.new("read from socket", IyiSocket.__sys_code(more)) if more < 0_i64 && !IyiSocket.__sys_would_block?(more)
+    total = more > 0_i64 ? count + more.to_i32 : count
+    String.new(total) do |target|
+      target.copy_from(buffer, total)
+    end
+  end
+
+  def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     raise "negative count: #{count}" if count < 0
     raise "socket is closed" if @fd < 0
+    if (kept = @pending_error).is_a?(SocketError)
+      @pending_error = nil
+      return kept
+    end
     while true
       n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
       return n.to_i32 if n >= 0_i64
-      raise "cannot read from socket" unless IyiSocket.__sys_would_block?(n)
-      waited = IyiSocket.await_readable(@fd)
+      return SocketError.new("read from socket", IyiSocket.__sys_code(n)) unless IyiSocket.__sys_would_block?(n)
+      waited = IyiSocket.await_readable(@fd, IyiSocket.bound(@read_timeout_ms))
       return waited if waited.is_a?(Cancelled)
       return Cancelled.new if @fd < 0
+      return SocketError.timed_out("read from socket") unless waited
     end
   end
 
-  def recv(max_bytes : Int32 = 4096) : String | Cancelled
+  def recv(max_bytes : Int32 = 4096) : String | Cancelled | SocketError
     read(max_bytes)
   end
 
-  def recv(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+  def recv(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     read(buffer, count)
   end
 
-  def write(contents : String) : Int32 | Cancelled
+  def write(contents : String) : Int32 | Cancelled | SocketError
     # Checked before the loop: `write("")` on a closed socket has nothing
     # to send and answered 0 where `write("x")` refused.
     raise "socket is closed" if @fd < 0
     write(contents.to_unsafe, contents.bytesize)
   end
 
-  def write(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+  def write(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     raise "socket is closed" if @fd < 0
     written = 0
     while written < count
-      n = IyiSocket.__sys_send(@fd, buffer + written, (count - written).to_u64)
+      n = IyiSocket.__sys_send(@fd, buffer + written, (count - written).to_u64, IyiSocket.bound(@write_timeout_ms))
       if n < 0_i64 && IyiSocket.__sys_would_block?(n)
-        waited = IyiSocket.await_writable(@fd)
+        waited = IyiSocket.await_writable(@fd, IyiSocket.bound(@write_timeout_ms))
         return waited if waited.is_a?(Cancelled)
         return Cancelled.new if @fd < 0
+        return SocketError.timed_out("write to socket") unless waited
         next
       end
-      raise "cannot write to socket" if n <= 0_i64
+      return SocketError.new("write to socket", n < 0_i64 ? IyiSocket.__sys_code(n) : 0) if n <= 0_i64
       written = written + n.to_i32
     end
     written
   end
 
-  def send(contents : String) : Int32 | Cancelled
+  def send(contents : String) : Int32 | Cancelled | SocketError
     write(contents)
   end
 
-  def send(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+  def send(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     write(buffer, count)
   end
 
+  # A timeout as the waits take it: milliseconds, -1 for none.
+  def self.bound(ms : Int32?) : Int32
+    ms.is_a?(Int32) ? ms : -1
+  end
+
   # The waits: the runtime's poller where there is one, a blocking `poll`
-  # on the one descriptor where there is not.
+  # on the one descriptor where there is not. True when the descriptor is
+  # ready, false when *ms* ran out first.
   {% if @top_level.has_constant?("IyiScheduler") %}
-    def self.await_readable(fd : Int32) : Nil | Cancelled
-      wait_readable(fd)
+    def self.await_readable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
+      wait_readable(fd, ms)
     end
 
-    def self.await_writable(fd : Int32) : Nil | Cancelled
-      wait_writable(fd)
+    def self.await_writable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
+      wait_writable(fd, ms)
     end
   {% else %}
     # A wait the kernel cut short (a signal, EINTR) answers `Cancelled`:
     # the one way a wait ends here without the descriptor being ready.
-    def self.await_readable(fd : Int32) : Nil | Cancelled
-      return Cancelled.new if __sys_poll(fd, 1) < 0
-      nil
+    def self.await_readable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
+      ready = __sys_poll(fd, 1, ms)
+      return Cancelled.new if ready < 0
+      ready > 0
     end
 
-    def self.await_writable(fd : Int32) : Nil | Cancelled
-      return Cancelled.new if __sys_poll(fd, 4) < 0
-      nil
+    def self.await_writable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
+      ready = __sys_poll(fd, 4, ms)
+      return Cancelled.new if ready < 0
+      ready > 0
     end
   {% end %}
 
   def self.listen(host : String, port : Int32, backlog : Int32 = 128) : IyiSocket
-    fd = __sys_socket
+    addr, family = sockaddr(host, port)
+    fd = __sys_socket(family)
     raise "cannot create socket" if fd < 0
 
     __sys_set_reuseaddr(fd)
+    __sys_set_v6only(fd) if family == AF_INET6
 
-    ip = parse_ip(host)
-    addr = make_sockaddr_in(ip, port)
-    if __sys_bind(fd, addr) < 0
+    # With the reason, which the refusal dropped: a port somebody holds
+    # and one the system forbids - on Windows, a range Hyper-V or WSL
+    # reserved - read alike.
+    bound = __sys_bind(fd, addr, family)
+    if bound < 0
+      code = __sys_code(bound.to_i64)
       __sys_close(fd)
-      raise "cannot bind socket to #{host}:#{port}"
+      raise "cannot bind socket to #{endpoint(host, port)}: #{SocketError.new("bind", code).reason}"
     end
 
     if __sys_listen(fd, backlog) < 0
@@ -235,14 +1048,53 @@ pub class IyiSocket
     end
 
     __sys_set_nonblock(fd)
-    IyiSocket.new(fd)
+    IyiSocket.new(fd, family)
   end
 
   def self.listen(port : Int32, backlog : Int32 = 128) : IyiSocket
     listen("0.0.0.0", port, backlog)
   end
 
+  # A stream socket at *path*. The path must not exist: a socket file an
+  # earlier run left behind is refused rather than taken over, since
+  # which program owns it is not something a bind can know. `close`
+  # removes the file.
+  def self.listen_unix(path : String, backlog : Int32 = 128) : IyiSocket
+    addr = make_sockaddr_un(path)
+    fd = __sys_socket(AF_UNIX)
+    raise "cannot create socket" if fd < 0
+    if (bound = __sys_bind(fd, addr, AF_UNIX)) < 0
+      __sys_close(fd)
+      raise "cannot bind socket to #{path.inspect}: #{SocketError.new("bind", __sys_code(bound.to_i64)).reason}"
+    end
+    socket = IyiSocket.new(fd, AF_UNIX)
+    socket.bound_path(path)
+    if __sys_listen(fd, backlog) < 0
+      socket.close
+      raise "cannot listen on socket"
+    end
+    __sys_set_nonblock(fd)
+    socket
+  end
+
+  protected def bound_path(path : String) : Nil
+    @path = path
+  end
+
   # --- Lifecycle and Metadata ---
+
+  # The sending half ended, the receiving half kept: the peer reads the
+  # end of the stream after what was written, and this end goes on reading
+  # what the peer still sends until its own end. `shutdown(SHUT_WR)` on
+  # POSIX, `shutdown(SD_SEND)` on Windows. A socket that is not connected
+  # answers the platform's refusal as a `SocketError`; `close` is still
+  # what gives the socket back.
+  def close_write : SocketError?
+    raise "socket is closed" if @fd < 0
+    got = IyiSocket.__sys_shutdown_write(@fd)
+    return SocketError.new("shut down sending", IyiSocket.__sys_code(got)) if got < 0_i64
+    nil
+  end
 
   def close : Nil
     if @fd >= 0
@@ -254,17 +1106,25 @@ pub class IyiSocket
         wake_closed(fd)
       {% end %}
       IyiSocket.__sys_close(fd)
+      path = @path
+      if path.is_a?(String)
+        @path = nil
+        __iyi_unlink(IyiSocket.c_path(path))
+      end
     end
   end
 
-  def closed? : Bool
+  def closed? : ::Bool
     @fd < 0
   end
 
+  # The port sits at the same two bytes of a `sockaddr_in` and a
+  # `sockaddr_in6`.
   def local_port : Int32
     raise "socket is closed" if @fd < 0
-    addr = Pointer(UInt8).malloc(16_u64)
-    len = 16_u32
+    raise "a unix socket has no port" if @family == AF_UNIX
+    addr = Pointer(UInt8).malloc(128_u64)
+    len = 128_u32
     res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
     raise "cannot get local port" if res < 0
 
@@ -275,11 +1135,68 @@ pub class IyiSocket
 
   def local_address : String
     raise "socket is closed" if @fd < 0
-    addr = Pointer(UInt8).malloc(16_u64)
-    len = 16_u32
+    addr = IyiSocket.__address_room
+    len = 128_u32
     res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
     raise "cannot get local address" if res < 0
+    IyiSocket.__address_text(addr, @family)
+  end
 
+  # The other end's address and port, as `local_address` and
+  # `local_port` give this end's: what a server logs a client by. A unix
+  # socket's peer has a path at most, often none (""), and no port. Nil
+  # when the other end is gone - the connection was reset or never made -
+  # which is the peer's doing and no fault of the program's.
+  def remote_address : String?
+    raise "socket is closed" if @fd < 0
+    addr = IyiSocket.__address_room
+    len = 128_u32
+    return nil if IyiSocket.__sys_getpeername(@fd, addr, pointerof(len)) < 0
+    IyiSocket.__address_text(addr, @family)
+  end
+
+  def remote_port : Int32?
+    raise "socket is closed" if @fd < 0
+    raise "a unix socket has no port" if @family == AF_UNIX
+    addr = Pointer(UInt8).malloc(128_u64)
+    len = 128_u32
+    return nil if IyiSocket.__sys_getpeername(@fd, addr, pointerof(len)) < 0
+    (addr[2].to_i32 << 8) | addr[3].to_i32
+  end
+
+  # Whether this is a unix socket, which has a path where TCP has a port:
+  # `remote_port` and `local_port` refuse it. std/tls asks before it keys
+  # a session's tickets by the port they came from.
+  def unix? : ::Bool
+    @family == AF_UNIX
+  end
+
+  # Room for any family's `sockaddr`, zeroed, so a unix path the kernel
+  # did not end with a NUL still ends.
+  def self.__address_room : Pointer(UInt8)
+    addr = Pointer(UInt8).malloc(128_u64)
+    index = 0
+    while index < 128
+      addr[index] = 0_u8
+      index = index + 1
+    end
+    addr
+  end
+
+  # A `sockaddr` the kernel filled, as text: dotted IPv4, IPv6 written as
+  # RFC 5952 has it, or a unix socket's path.
+  def self.__address_text(addr : Pointer(UInt8), family : Int32) : String
+    return IPv6Address.new(addr + 8_u64).to_s if family == AF_INET6
+    if family == AF_UNIX
+      # The path after the family, to its NUL: the listener's, and for an
+      # accepted end whatever the platform reports (Linux: the listener's
+      # path; an empty one answers "").
+      ends = 2
+      while ends < 128 && addr[ends] != 0_u8
+        ends = ends + 1
+      end
+      return String.new(ends - 2) { |target| target.copy_from(addr + 2_u64, ends - 2) }
+    end
     "#{addr[4]}.#{addr[5]}.#{addr[6]}.#{addr[7]}"
   end
 
@@ -290,9 +1207,18 @@ pub class IyiSocket
   # CVE-2021-29921, so it must not quietly be 10 here), plus `localhost`.
   # The refusal inspects the host so a stray space shows.
   def self.parse_ip(host : String) : IPv4Address
-    return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"
+    return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if localhost?(host)
     return IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8) if host == "0.0.0.0" || host == ""
+    read = read_ipv4(host)
+    raise read if read.is_a?(String)
+    read
+  end
 
+  # The dotted-decimal reading alone, with the refusal's sentence as the
+  # answer instead of a panic: the resolver reads the addresses a hosts
+  # file and a resolv.conf write, and a line it cannot read is skipped
+  # there, not the end of the program.
+  def self.read_ipv4(host : String) : IPv4Address | String
     parts = 0
     curr = 0
     has_digit = false
@@ -303,8 +1229,8 @@ pub class IyiSocket
     while index < len
       ch = host[index]
       if ch == '.'
-        raise "cannot resolve address: #{host.inspect}" unless has_digit
-        raise "cannot resolve address: #{host.inspect}" if curr > 255 || parts >= 4
+        return "cannot resolve address: #{host.inspect}" unless has_digit
+        return "cannot resolve address: #{host.inspect}" if curr > 255 || parts >= 4
         bytes[parts] = curr.to_u8
         parts = parts + 1
         curr = 0
@@ -313,24 +1239,226 @@ pub class IyiSocket
         # Bounded while it accumulates: `"999999999999.1.1.1"` left `Int32`
         # on the checked `*` and died of "arithmetic overflow" instead of
         # saying which address it could not resolve.
-        raise "cannot resolve address: #{host.inspect}" if curr > 255
-        raise "cannot resolve address: #{host.inspect}: an octet with a leading zero is not decimal" if has_digit && curr == 0
+        return "cannot resolve address: #{host.inspect}" if curr > 255
+        return "cannot resolve address: #{host.inspect}: an octet with a leading zero is not decimal" if has_digit && curr == 0
         curr = curr * 10 + (ch.ord - 48)
         has_digit = true
       elsif ch == ':'
-        raise "cannot resolve address: #{host.inspect}: IPv6 is not supported, and a port is a separate argument"
+        return "cannot resolve address: #{host.inspect}: an IPv6 address, which `parse_ipv6` reads, and a port is a separate argument"
       else
-        raise "cannot resolve address: #{host.inspect}"
+        return "cannot resolve address: #{host.inspect}"
       end
       index = index + 1
     end
 
-    raise "cannot resolve address: #{host.inspect}" unless has_digit
-    raise "cannot resolve address: #{host.inspect}" if curr > 255
-    raise "cannot resolve address: #{host.inspect}" unless parts == 3
+    return "cannot resolve address: #{host.inspect}" unless has_digit
+    return "cannot resolve address: #{host.inspect}" if curr > 255
+    return "cannot resolve address: #{host.inspect}" unless parts == 3
     bytes[3] = curr.to_u8
 
     IPv4Address.new(bytes[0], bytes[1], bytes[2], bytes[3])
+  end
+
+  # `localhost` in any case, and with the one trailing dot of a name
+  # written fully qualified: a host name's case is not part of it (RFC
+  # 4343), and getaddrinfo, Python and curl all answer 127.0.0.1 for
+  # `LOCALHOST` and `localhost.`. Matched exactly, these were "cannot
+  # resolve address: \"LOCALHOST\"", and so were `Localhost` and
+  # `localhost.`.
+  def self.localhost?(host : String) : ::Bool
+    size = host.bytesize
+    size = size - 1 if size == 10 && host.to_unsafe[9] == 46_u8
+    return false unless size == 9
+    name = "localhost".to_unsafe
+    raw = host.to_unsafe
+    index = 0
+    while index < 9
+      # ASCII only: setting bit 5 lowers an upper-case letter and leaves
+      # a lower-case one, and no other byte lands on a lower-case letter.
+      return false unless (raw[index] | 32_u8) == name[index]
+      index = index + 1
+    end
+    true
+  end
+
+  # Eight groups of up to four hex digits, `::` once for a run of zero
+  # groups, and a dotted IPv4 tail for the last two (`::ffff:1.2.3.4`). A
+  # zone (`fe80::1%eth0`) is refused by name: it names an interface, and
+  # this parser has no way to ask the platform which.
+  def self.parse_ipv6(host : String) : IPv6Address
+    read = read_ipv6(host)
+    raise read if read.is_a?(String)
+    read
+  end
+
+  # The reading alone, the refusal's sentence as the answer: see
+  # `read_ipv4`.
+  def self.read_ipv6(host : String) : IPv6Address | String
+    groups = Pointer(Int32).malloc(8_u64)
+    count = 0
+    gap = -1
+    len = host.bytesize
+    index = 0
+    return ipv6_refused(host, "empty") if len == 0
+    if host[0] == ':'
+      return ipv6_refused(host, "a single leading colon") unless len > 1 && host[1] == ':'
+      gap = 0
+      index = 2
+    end
+    while index < len
+      return ipv6_refused(host, "more than eight groups") if count == 8
+      start = index
+      value = 0
+      digits = 0
+      while index < len && hex_digit(host[index]) >= 0
+        return ipv6_refused(host, "a group of more than four hex digits") if digits == 4
+        value = value * 16 + hex_digit(host[index])
+        digits = digits + 1
+        index = index + 1
+      end
+      if index < len && host[index] == '.'
+        return ipv6_refused(host, "a dotted tail after more than six groups") if count > 6
+        v4 = read_ipv4(host[start, len - start])
+        return v4 if v4.is_a?(String)
+        groups[count] = (v4.b0.to_i32 << 8) | v4.b1.to_i32
+        groups[count + 1] = (v4.b2.to_i32 << 8) | v4.b3.to_i32
+        count = count + 2
+        index = len
+        break
+      end
+      if digits == 0
+        return ipv6_refused(host, "a zone (`%`) names an interface, which is not supported") if host[index] == '%'
+        return ipv6_refused(host, "#{host[index].inspect} is not a hex digit") if host[index] != ':'
+        return ipv6_refused(host, "an empty group")
+      end
+      groups[count] = value
+      count = count + 1
+      break if index == len
+      return ipv6_refused(host, "a zone (`%`) names an interface, which is not supported") if host[index] == '%'
+      return ipv6_refused(host, "#{host[index].inspect} is not a hex digit") if host[index] != ':'
+      index = index + 1
+      if index < len && host[index] == ':'
+        return ipv6_refused(host, "a second `::`") if gap >= 0
+        gap = count
+        index = index + 1
+      elsif index == len
+        return ipv6_refused(host, "a trailing colon")
+      end
+    end
+    if gap < 0
+      return ipv6_refused(host, "#{count} groups, not eight") if count != 8
+    elsif count > 7
+      return ipv6_refused(host, "`::` with eight groups beside it stands for nothing")
+    end
+    high = 0_u64
+    low = 0_u64
+    fill = gap < 0 ? 0 : 8 - count
+    slot = 0
+    while slot < 8
+      value = 0
+      if gap < 0 || slot < gap
+        value = groups[slot]
+      elsif slot >= gap + fill
+        value = groups[slot - fill]
+      end
+      if slot < 4
+        high = high.unsafe_shl(16_u64) | value.to_u64
+      else
+        low = low.unsafe_shl(16_u64) | value.to_u64
+      end
+      slot = slot + 1
+    end
+    IPv6Address.new(high, low)
+  end
+
+  private def self.ipv6_refused(host : String, why : String) : String
+    "cannot resolve address: #{host.inspect}: #{why}"
+  end
+
+  private def self.hex_digit(ch : Char) : Int32
+    return ch.ord - 48 if ch >= '0' && ch <= '9'
+    return ch.ord - 87 if ch >= 'a' && ch <= 'f'
+    return ch.ord - 55 if ch >= 'A' && ch <= 'F'
+    -1
+  end
+
+  # A host and port as the address a call takes, and its family: an IPv6
+  # literal bare or in brackets, anything else IPv4.
+  def self.sockaddr(host : String, port : Int32) : Tuple(Pointer(UInt8), Int32)
+    size = host.bytesize
+    if size >= 2 && host[0] == '[' && host[size - 1] == ']'
+      return {make_sockaddr_in6(parse_ipv6(host[1, size - 2]), port), AF_INET6}
+    end
+    return {make_sockaddr_in6(parse_ipv6(host), port), AF_INET6} if host.includes?(":")
+    {make_sockaddr_in(parse_ip(host), port), AF_INET}
+  end
+
+  # A `sockaddr_in6`: family, port, a zero flow label, the address, a zero
+  # scope. The family's number and where it sits are the platform's.
+  def self.make_sockaddr_in6(ip : IPv6Address, port : Int32) : Pointer(UInt8)
+    raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+    buffer = Pointer(UInt8).malloc(28_u64)
+    index = 0
+    while index < 28
+      buffer[index] = 0_u8
+      index = index + 1
+    end
+    {% if flag?(:darwin) %}
+      buffer[0] = 28_u8 # sin6_len
+      buffer[1] = AF_INET6.to_u8
+    {% else %}
+      buffer[0] = AF_INET6.to_u8
+    {% end %}
+    buffer[2] = ((port >> 8) & 255).to_u8
+    buffer[3] = (port & 255).to_u8
+    index = 0
+    while index < 16
+      buffer[8 + index] = ip[index]
+      index = index + 1
+    end
+    buffer
+  end
+
+  # A `sockaddr_un`: the family, then the path and its NUL. The room for
+  # the path is the platform's - 104 bytes on darwin, 108 elsewhere - and a
+  # longer one is refused rather than cut, since a cut path is another
+  # path.
+  def self.make_sockaddr_un(path : String) : Pointer(UInt8)
+    size = path.bytesize
+    raise "a unix socket path is empty" if size == 0
+    room = 108
+    {% if flag?(:darwin) %}
+      room = 104
+    {% end %}
+    raise "unix socket path #{path.inspect} is #{size} bytes, and the platform's limit is #{room - 1}" if size >= room
+    buffer = Pointer(UInt8).malloc(112_u64)
+    index = 0
+    while index < 112
+      buffer[index] = 0_u8
+      index = index + 1
+    end
+    {% if flag?(:darwin) %}
+      buffer[0] = 106_u8 # sun_len
+      buffer[1] = AF_UNIX.to_u8
+    {% else %}
+      buffer[0] = AF_UNIX.to_u8
+    {% end %}
+    source = path.to_unsafe
+    index = 0
+    while index < size
+      raise "unix socket path #{path.inspect} has a NUL byte" if source[index] == 0_u8
+      buffer[2 + index] = source[index]
+      index = index + 1
+    end
+    buffer
+  end
+
+  # *path* with the NUL a system call reads to.
+  def self.c_path(path : String) : Pointer(UInt8)
+    buffer = Pointer(UInt8).malloc((path.bytesize + 1).to_u64)
+    buffer.copy_from(path.to_unsafe, path.bytesize)
+    buffer[path.bytesize] = 0_u8
+    buffer
   end
 
   def self.make_sockaddr_in(ip : IPv4Address, port : Int32) : Pointer(UInt8)
@@ -372,6 +1500,14 @@ pub class IyiSocket
   # answer EOF rather than a reset is `closesocket`'s.
   def self.__sys_close(fd : Int32) : Nil
     {% if flag?(:win32) %}
+      # The send side ends first (SD_SEND, 1): a FIN behind whatever was
+      # written. `closesocket` with a read still posted beneath a parked
+      # task - the kernel's until its completion is dequeued - reset the
+      # connection instead, and the peer lost what had been written before
+      # the close: "reset by the peer" where it should have read the answer
+      # and then the end. On a listener, or a socket never connected, the
+      # shutdown refuses and changes nothing.
+      LibWs2_32.shutdown(__sys_handle(fd), 1)
       LibWs2_32.closesocket(__sys_handle(fd))
     {% else %}
       __iyi_close(fd.to_i64)
@@ -390,43 +1526,79 @@ pub class IyiSocket
       fun send(fd : Int32, buf : Void*, len : UInt64, flags : Int32) : Int64
       fun recv(fd : Int32, buf : Void*, len : UInt64, flags : Int32) : Int64
       fun getsockname(fd : Int32, addr : Void*, addrlen : UInt32*) : Int32
+      fun getpeername(fd : Int32, addr : Void*, addrlen : UInt32*) : Int32
       fun setsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32) : Int32
       fun getsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32*) : Int32
       fun fcntl(fd : Int32, cmd : Int32, ...) : Int32
       fun poll(fds : Void*, nfds : UInt32, timeout : Int32) : Int32
+      fun shutdown(fd : Int32, how : Int32) : Int32
       fun error_location = __error : Int32*
     end
 
-    # The length of a `sockaddr_in`, in the type each branch's call wants. It
-    # is a property of the address family rather than of the caller, so the
-    # callers do not pass it: `UInt32` here for libSystem's `socklen_t`, and
-    # `Int64` on the syscall branch, because the prelude has no conversion
-    # between the two. `UInt32` has neither `to_i64` nor `to_u64`, and `Int32`
-    # has no `to_u32`, which is what made a shared parameter type impossible.
-    SOCKADDR_IN_SIZE = 16_u32
+    AF_UNIX  =  1
+    AF_INET  =  2
+    AF_INET6 = 30
 
-    def self.__sys_socket : Int32
-      LibC.socket(2, 1, 0)
+    # The length of an address, in the type each branch's call wants. It is
+    # a property of the address family rather than of the caller, so the
+    # callers pass the family: `UInt32` here for libSystem's `socklen_t`,
+    # and `Int64` on the syscall branch, because the prelude has no
+    # conversion between the two. `UInt32` has neither `to_i64` nor
+    # `to_u64`, and `Int32` has no `to_u32`, which is what made a shared
+    # parameter type impossible.
+    SOCKADDR_IN_SIZE  =  16_u32
+    SOCKADDR_IN6_SIZE =  28_u32
+    SOCKADDR_UN_SIZE  = 106_u32
+
+    def self.__sys_addr_size(family : Int32) : UInt32
+      return SOCKADDR_UN_SIZE if family == AF_UNIX
+      family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
-      LibC.bind(fd, addr.as(Void*), SOCKADDR_IN_SIZE)
+    def self.__sys_socket(family : Int32) : Int32
+      LibC.socket(family, 1, 0)
+    end
+
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      LibC.bind(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       LibC.listen(fd, backlog)
     end
 
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_shutdown_write(fd : Int32) : Int64
+      LibC.shutdown(fd, 1).to_i64
+    end
+
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       LibC.accept(fd, addr.as(Void*), addrlen)
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
-      LibC.connect(fd, addr.as(Void*), SOCKADDR_IN_SIZE)
+    # *ms* is `connect_to`'s wait's: the call answers EINPROGRESS at once.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
+      LibC.connect(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       LibC.send(fd, buf.as(Void*), len, 0)
+    end
+
+    # Every connect here parks; see the Windows arm for the one that does not.
+    def self.__sys_connects_blocking?(family : Int32) : ::Bool
+      false
+    end
+
+    # SO_NOSIGPIPE (0x1022) at SOL_SOCKET: a write to a connection the peer
+    # closed answers EPIPE instead of killing the process.
+    def self.__sys_no_sigpipe(fd : Int32) : Nil
+      val = 1_i32
+      LibC.setsockopt(fd, 0xffff, 0x1022, pointerof(val).as(Void*), 4_u32)
+    end
+
+    # The failure a call answered -1 for, from errno.
+    def self.__sys_code(result : Int64) : Int32
+      LibC.error_location.value
     end
 
     def self.__sys_recv(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
@@ -437,21 +1609,44 @@ pub class IyiSocket
       LibC.getsockname(fd, addr.as(Void*), addrlen)
     end
 
+    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      LibC.getpeername(fd, addr.as(Void*), addrlen)
+    end
+
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       val = 1_i32
       LibC.setsockopt(fd, 0xffff, 0x0004, pointerof(val).as(Void*), 4_u32)
     end
 
-    # One `pollfd` (fd, events, revents), no timeout: the blocking wait a
-    # program without the runtime does.
-    def self.__sys_poll(fd : Int32, events : Int32) : Int32
+    # IPV6_V6ONLY (27) at IPPROTO_IPV6 (41).
+    def self.__sys_set_v6only(fd : Int32) : Int32
+      val = 1_i32
+      LibC.setsockopt(fd, 41, 27, pointerof(val).as(Void*), 4_u32)
+    end
+
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      LibC.setsockopt(fd, 6, 1, pointerof(val).as(Void*), 4_u32)
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4_u32
+      LibC.getsockopt(fd, 6, 1, pointerof(val).as(Void*), pointerof(len)) == 0 && val != 0
+    end
+
+    # One `pollfd` (fd, events, revents) for *ms* milliseconds, -1 for as
+    # long as it takes: the blocking wait a program without the runtime
+    # does. 0 when the time ran out.
+    def self.__sys_poll(fd : Int32, events : Int32, ms : Int32) : Int32
       pfd = Pointer(UInt8).malloc(8_u64)
       pfd.as(Pointer(Int32)).value = fd
       pfd[4] = events.to_u8
       pfd[5] = 0_u8
       pfd[6] = 0_u8
       pfd[7] = 0_u8
-      LibC.poll(pfd.as(Void*), 1_u32, -1)
+      LibC.poll(pfd.as(Void*), 1_u32, ms)
     end
 
     # F_SETFL with O_NONBLOCK; the flags already set are read first.
@@ -462,11 +1657,11 @@ pub class IyiSocket
 
     # libSystem answers -1 and leaves the reason in errno: EAGAIN is 35,
     # EINPROGRESS 36.
-    def self.__sys_would_block?(result : Int64) : Bool
+    def self.__sys_would_block?(result : Int64) : ::Bool
       result < 0_i64 && LibC.error_location.value == 35
     end
 
-    def self.__sys_in_progress?(result : Int32) : Bool
+    def self.__sys_in_progress?(result : Int32) : ::Bool
       result < 0 && LibC.error_location.value == 36
     end
 
@@ -478,6 +1673,29 @@ pub class IyiSocket
       LibC.getsockopt(fd, 0xffff, 0x1007, pointerof(err).as(Void*), pointerof(len))
       err
     end
+
+    # The resolver's datagram socket (SOCK_DGRAM, 2), non-blocking like
+    # every socket here. A UDP `connect` records the peer and returns: it
+    # is what makes the kernel drop a datagram from any other address, and
+    # report a port nobody listens on as a refusal at the next receive.
+    def self.__sys_dgram_socket(family : Int32) : Int32
+      fd = LibC.socket(family, 2, 0)
+      __sys_set_nonblock(fd) if fd >= 0
+      fd
+    end
+
+    def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      __sys_connect(fd, addr, family, -1)
+    end
+
+    def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      LibC.send(fd, buf.as(Void*), len, 0)
+    end
+
+    # A readiness wait consumes nothing here, so it is the stream's.
+    def self.__sys_dgram_wait(fd : Int32, ms : Int32) : ::Bool | Cancelled
+      IyiSocket.await_readable(fd, ms)
+    end
   {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
     {% if flag?(:x86_64) %}
       SYS_SOCKET      =  41_i64
@@ -485,9 +1703,11 @@ pub class IyiSocket
       SYS_ACCEPT      =  43_i64
       SYS_SENDTO      =  44_i64
       SYS_RECVFROM    =  45_i64
+      SYS_SHUTDOWN    =  48_i64
       SYS_BIND        =  49_i64
       SYS_LISTEN      =  50_i64
       SYS_GETSOCKNAME =  51_i64
+      SYS_GETPEERNAME =  52_i64
       SYS_SETSOCKOPT  =  54_i64
       SYS_GETSOCKOPT  =  55_i64
       SYS_FCNTL       =  72_i64
@@ -499,18 +1719,31 @@ pub class IyiSocket
       SYS_ACCEPT      = 202_i64
       SYS_CONNECT     = 203_i64
       SYS_GETSOCKNAME = 204_i64
+      SYS_GETPEERNAME = 205_i64
       SYS_SENDTO      = 206_i64
       SYS_RECVFROM    = 207_i64
       SYS_SETSOCKOPT  = 208_i64
       SYS_GETSOCKOPT  = 209_i64
+      SYS_SHUTDOWN    = 210_i64
       SYS_FCNTL       =  25_i64
       SYS_PPOLL       =  73_i64
     {% end %}
 
+    AF_UNIX  =  1
+    AF_INET  =  2
+    AF_INET6 = 10
+
     # Sized as the syscall takes it, a full register. See the darwin branch's
-    # note: this is a separate constant rather than a converted one because
+    # note: these are separate constants rather than converted ones because
     # the prelude has no conversion between `UInt32` and the 64-bit types.
-    SOCKADDR_IN_SIZE = 16_i64
+    SOCKADDR_IN_SIZE  =  16_i64
+    SOCKADDR_IN6_SIZE =  28_i64
+    SOCKADDR_UN_SIZE  = 110_i64
+
+    def self.__sys_addr_size(family : Int32) : Int64
+      return SOCKADDR_UN_SIZE if family == AF_UNIX
+      family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
+    end
 
     def self.__sys3(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
@@ -560,28 +1793,47 @@ pub class IyiSocket
       result
     end
 
-    def self.__sys_socket : Int32
-      __sys3(SYS_SOCKET, 2_i64, 1_i64, 0_i64).to_i32
+    def self.__sys_socket(family : Int32) : Int32
+      __sys3(SYS_SOCKET, family.to_i64, 1_i64, 0_i64).to_i32
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
-      __sys3(SYS_BIND, fd.to_i64, addr.address.to_i64, SOCKADDR_IN_SIZE).to_i32
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      __sys3(SYS_BIND, fd.to_i64, addr.address.to_i64, __sys_addr_size(family)).to_i32
     end
 
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       __sys3(SYS_LISTEN, fd.to_i64, backlog.to_i64, 0_i64).to_i32
     end
 
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_shutdown_write(fd : Int32) : Int64
+      __sys3(SYS_SHUTDOWN, fd.to_i64, 1_i64, 0_i64)
+    end
+
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       __sys3(SYS_ACCEPT, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
-      __sys3(SYS_CONNECT, fd.to_i64, addr.address.to_i64, SOCKADDR_IN_SIZE).to_i32
+    # *ms* is `connect_to`'s wait's: the call answers EINPROGRESS at once.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
+      __sys3(SYS_CONNECT, fd.to_i64, addr.address.to_i64, __sys_addr_size(family)).to_i32
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
-      __sys6(SYS_SENDTO, fd.to_i64, buf.address.to_i64, len.to_i64, 0_i64, 0_i64, 0_i64)
+    # MSG_NOSIGNAL (0x4000): a write to a connection the peer closed answers
+    # EPIPE instead of killing the process with SIGPIPE.
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
+      __sys6(SYS_SENDTO, fd.to_i64, buf.address.to_i64, len.to_i64, 0x4000_i64, 0_i64, 0_i64)
+    end
+
+    def self.__sys_no_sigpipe(fd : Int32) : Nil
+    end
+
+    def self.__sys_connects_blocking?(family : Int32) : ::Bool
+      false
+    end
+
+    # A raw syscall's negative errno, as the number.
+    def self.__sys_code(result : Int64) : Int32
+      (0_i64 - result).to_i32
     end
 
     def self.__sys_recv(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
@@ -592,20 +1844,50 @@ pub class IyiSocket
       __sys3(SYS_GETSOCKNAME, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
     end
 
+    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      __sys3(SYS_GETPEERNAME, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
+    end
+
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       val = 1_i32
       __sys5(SYS_SETSOCKOPT, fd.to_i64, 1_i64, 2_i64, pointerof(val).address.to_i64, 4_i64).to_i32
     end
 
-    # `ppoll` on one descriptor with no timeout and no signal mask.
-    def self.__sys_poll(fd : Int32, events : Int32) : Int32
+    # IPV6_V6ONLY (26) at IPPROTO_IPV6 (41).
+    def self.__sys_set_v6only(fd : Int32) : Int32
+      val = 1_i32
+      __sys5(SYS_SETSOCKOPT, fd.to_i64, 41_i64, 26_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      __sys5(SYS_SETSOCKOPT, fd.to_i64, 6_i64, 1_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4_i32
+      __sys5(SYS_GETSOCKOPT, fd.to_i64, 6_i64, 1_i64, pointerof(val).address.to_i64, pointerof(len).address.to_i64) == 0_i64 && val != 0
+    end
+
+    # `ppoll` on one descriptor for *ms* milliseconds - a timespec, or none
+    # for -1 - and no signal mask. 0 when the time ran out.
+    def self.__sys_poll(fd : Int32, events : Int32, ms : Int32) : Int32
       pfd = Pointer(UInt8).malloc(8_u64)
       pfd.as(Pointer(Int32)).value = fd
       pfd[4] = events.to_u8
       pfd[5] = 0_u8
       pfd[6] = 0_u8
       pfd[7] = 0_u8
-      __sys5(SYS_PPOLL, pfd.address.to_i64, 1_i64, 0_i64, 0_i64, 0_i64).to_i32
+      spec = 0_i64
+      if ms >= 0
+        timespec = Pointer(Int64).malloc(2_u64)
+        timespec[0] = (ms // 1000).to_i64
+        timespec[1] = (ms % 1000).to_i64 * 1000000_i64
+        spec = timespec.address.to_i64
+      end
+      __sys5(SYS_PPOLL, pfd.address.to_i64, 1_i64, spec, 0_i64, 0_i64).to_i32
     end
 
     # F_GETFL (3), then F_SETFL (4) with O_NONBLOCK (0x800) added.
@@ -615,11 +1897,11 @@ pub class IyiSocket
     end
 
     # A raw syscall answers the negative errno: EAGAIN is 11, EINPROGRESS 115.
-    def self.__sys_would_block?(result : Int64) : Bool
+    def self.__sys_would_block?(result : Int64) : ::Bool
       result == -11_i64
     end
 
-    def self.__sys_in_progress?(result : Int32) : Bool
+    def self.__sys_in_progress?(result : Int32) : ::Bool
       result == -115
     end
 
@@ -630,6 +1912,26 @@ pub class IyiSocket
       len = 4_i32
       __sys5(SYS_GETSOCKOPT, fd.to_i64, 1_i64, 4_i64, pointerof(err).address.to_i64, pointerof(len).address.to_i64)
       err
+    end
+
+    # The resolver's datagram socket: see the darwin arm. The raw call
+    # answers the negative errno, which `__sys_code` reads.
+    def self.__sys_dgram_socket(family : Int32) : Int32
+      fd = __sys3(SYS_SOCKET, family.to_i64, 2_i64, 0_i64).to_i32
+      __sys_set_nonblock(fd) if fd >= 0
+      fd
+    end
+
+    def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      __sys_connect(fd, addr, family, -1)
+    end
+
+    def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      __sys_send(fd, buf, len, -1)
+    end
+
+    def self.__sys_dgram_wait(fd : Int32, ms : Int32) : ::Bool | Cancelled
+      IyiSocket.await_readable(fd, ms)
     end
   {% elsif flag?(:win32) %}
     # Windows' sockets are Winsock's, not a descriptor table's: `socket`
@@ -662,12 +1964,15 @@ pub class IyiSocket
       fun WSAGetLastError : Int32
       fun socket(af : Int32, type : Int32, protocol : Int32) : UInt64
       fun bind(s : UInt64, addr : Void*, namelen : Int32) : Int32
+      fun connect(s : UInt64, addr : Void*, namelen : Int32) : Int32
       fun listen(s : UInt64, backlog : Int32) : Int32
       fun accept(s : UInt64, addr : Void*, addrlen : Int32*) : UInt64
       fun recv(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
       fun send(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
+      fun shutdown(s : UInt64, how : Int32) : Int32
       fun closesocket(s : UInt64) : Int32
       fun getsockname(s : UInt64, addr : Void*, addrlen : Int32*) : Int32
+      fun getpeername(s : UInt64, addr : Void*, addrlen : Int32*) : Int32
       fun setsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*, optlen : Int32) : Int32
       fun getsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*, optlen : Int32*) : Int32
       fun ioctlsocket(s : UInt64, cmd : Int32, argp : Int32*) : Int32
@@ -677,6 +1982,17 @@ pub class IyiSocket
                    outlen : Int32, returned : Int32*, overlapped : Void*, routine : Void*) : Int32
       fun WSAGetOverlappedResult(s : UInt64, overlapped : Void*, transferred : Int32*,
                                  wait : Int32, flags : Int32*) : Int32
+      # The resolver's wait on its datagram socket; see `__sys_dgram_wait`.
+      # The array is `Void*`, and `std/udp` declares it so too: a `fun` is
+      # one symbol for the whole program, so both declarations must say the
+      # same thing, and each module's `PollFd` is a type of its own.
+      fun WSAPoll(fdarray : Void*, nfds : Int32, timeout : Int32) : Int32
+
+      struct PollFd
+        fd : UInt64
+        events : Int16
+        revents : Int16
+      end
 
       # A WSABUF, and the two address slots AcceptEx fills in - each a
       # `sockaddr_in` and the sixteen bytes it insists on after one. They are
@@ -691,27 +2007,55 @@ pub class IyiSocket
         buf : UInt8*
       end
 
-      struct AddressSlot
-        address_low : UInt64
-        address_high : UInt64
-        slack_low : UInt64
-        slack_high : UInt64
-      end
-
+      # Two slots of an address and the sixteen bytes after it, room for
+      # the widest family this file makes.
       struct AcceptAddresses
-        local : AddressSlot
-        remote : AddressSlot
+        words : UInt64[32]
       end
     end
 
-    # The length of a `sockaddr_in` in the type Winsock's calls want, which
-    # is a plain `int`. See the darwin branch's note for why each branch
-    # spells its own rather than converting one.
-    SOCKADDR_IN_SIZE = 16
+    # Where Windows keeps the name servers it was configured with. The
+    # call for them is `GetAdaptersAddresses` or `DnsQueryConfig`, and they
+    # are iphlpapi's and dnsapi's: two DLLs no iyi program links, which
+    # SPEC.md III.10 would have to justify. The same configuration is in
+    # the registry, under the TCP/IP service's parameters - the keys
+    # `ipconfig /all` and the DHCP client write - and the registry is
+    # advapi32's, which a program already links for `RtlGenRandom`
+    # (std/random). So these four calls are the whole cost of finding the
+    # servers: no new DLL. See `__sys_dns_config` for what is read.
+    @[Link("advapi32")]
+    lib LibAdvapi32
+      fun RegOpenKeyExW(key : Void*, subkey : UInt16*, options : UInt32, desired : UInt32,
+                        result : Void**) : Int32
+      fun RegEnumKeyExW(key : Void*, index : UInt32, name : UInt16*, name_size : UInt32*,
+                        reserved : Void*, klass : UInt16*, class_size : UInt32*, written : Void*) : Int32
+      fun RegQueryValueExW(key : Void*, name : UInt16*, reserved : Void*, type : UInt32*,
+                           data : UInt8*, size : UInt32*) : Int32
+      fun RegCloseKey(key : Void*) : Int32
+    end
 
-    AF_INET     = 2
-    SOCK_STREAM = 1
-    IPPROTO_TCP = 6
+    # The length of an address in the type Winsock's calls want, which is a
+    # plain `int`. See the darwin branch's note for why each branch spells
+    # its own rather than converting one.
+    SOCKADDR_IN_SIZE  =  16
+    SOCKADDR_IN6_SIZE =  28
+    SOCKADDR_UN_SIZE  = 110
+
+    AF_UNIX     =  1
+    AF_INET     =  2
+    AF_INET6    = 23
+    SOCK_STREAM =  1
+    IPPROTO_TCP =  6
+
+    def self.__sys_addr_size(family : Int32) : Int32
+      return SOCKADDR_UN_SIZE if family == AF_UNIX
+      family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
+    end
+
+    # TCP names its protocol; a unix socket has only the one, and says 0.
+    def self.__sys_protocol(family : Int32) : Int32
+      family == AF_UNIX ? 0 : IPPROTO_TCP
+    end
 
     SOL_SOCKET = 0xffff
     SO_ERROR   = 0x1007
@@ -730,6 +2074,7 @@ pub class IyiSocket
     # nothing to do says, what a posted operation says, and what an
     # operation that is not over yet says when it is asked how it went.
     WSAEWOULDBLOCK    = 10035
+    WSAETIMEDOUT      = 10060
     ERROR_IO_PENDING  =   997
     WSA_IO_INCOMPLETE =   996
 
@@ -758,7 +2103,7 @@ pub class IyiSocket
     # close, a library that guessed wrong would answer WSANOTINITIALISED to
     # the next socket the program opened, and process exit releases it
     # anyway — the same answer Go and Rust give.
-    @@winsock : Bool = false
+    @@winsock : ::Bool = false
 
     def self.__sys_winsock : Nil
       return if @@winsock
@@ -772,7 +2117,7 @@ pub class IyiSocket
     # A SOCKET from the `Int32` the class carries, and back: see the note
     # above the `lib` block for why that is lossless.
     def self.__sys_handle(fd : Int32) : UInt64
-      fd.to_i64.to_u64!
+      fd.to_i64.unsafe_to_u64
     end
 
     # The failure the last call left, negated. The POSIX arms answer the
@@ -785,40 +2130,50 @@ pub class IyiSocket
       -(LibWs2_32.WSAGetLastError.to_i64)
     end
 
-    def self.__sys_socket : Int32
+    def self.__sys_socket(family : Int32) : Int32
       __sys_winsock
-      s = LibWs2_32.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+      s = LibWs2_32.socket(family, SOCK_STREAM, __sys_protocol(family))
       return -1 if s == INVALID_SOCKET
-      s.to_i32!
+      s.unsafe_to_i32
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
-      return __sys_error.to_i32 if LibWs2_32.bind(__sys_handle(fd), addr.as(Void*), SOCKADDR_IN_SIZE) != 0
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      return __sys_error.to_i32 if LibWs2_32.bind(__sys_handle(fd), addr.as(Void*), __sys_addr_size(family)) != 0
       0
     end
 
+    # Winsock caps a backlog at SOMAXCONN, 200, and turns the next connect
+    # away as refused - where Linux holds it - unless the backlog is asked
+    # as SOMAXCONN_HINT(n), which is -n: 220 connects to a listener asked
+    # for 256 lost 20.
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
-      return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), backlog) != 0
+      hinted = backlog > 200 ? -backlog : backlog
+      return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), hinted) != 0
       0
+    end
+
+    def self.__sys_shutdown_write(fd : Int32) : Int64
+      return 0_i64 if LibWs2_32.shutdown(__sys_handle(fd), 1) == 0
+      __sys_error
     end
 
     # Winsock's address length is an `int*` where POSIX has a `socklen_t*`:
     # the same width and the same bytes, so the callers above keep one
     # signature.
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       s = __sys_handle(fd)
       client = LibWs2_32.accept(s, addr.as(Void*), addrlen.as(Pointer(Int32)))
-      return client.to_i32! if client != INVALID_SOCKET
+      return client.unsafe_to_i32 if client != INVALID_SOCKET
       err = LibWs2_32.WSAGetLastError
       return -err if err != WSAEWOULDBLOCK
       # Nothing was queued, and a listening socket has no readable state a
       # completion port can answer. `AcceptEx` is the accept it does answer,
       # and it takes the socket it will fill in, so here the wait and the
       # accept are one call.
-      __sys_accept_posted(s, addr, addrlen)
+      __sys_accept_posted(s, addr, addrlen, family)
     end
 
-    def self.__sys_accept_posted(s : UInt64, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_accept_posted(s : UInt64, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       # A cancelled task must not post: nothing would wake it but the
       # completion, and a listener nobody connects to never produces one.
       # Answering "would block" sends the caller into the wait it already
@@ -828,13 +2183,14 @@ pub class IyiSocket
       # cannot answer it, and a `client` created first is a socket nobody is
       # left to close. Nothing between the two depends on the order.
       post = __sys_extension(s, WSAID_ACCEPTEX_LOW, WSAID_ACCEPTEX_HIGH).as(Pointer(AcceptExFn)).value
-      client = LibWs2_32.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+      client = LibWs2_32.socket(family, SOCK_STREAM, __sys_protocol(family))
       return __sys_error.to_i32 if client == INVALID_SOCKET
       addresses = uninitialized LibWs2_32::AcceptAddresses
       received = 0_i32
-      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      size = __sys_addr_size(family)
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s), 1)
       answered = post.call(s, client, pointerof(addresses).as(Void*), 0,
-        SOCKADDR_IN_SIZE + 16, SOCKADDR_IN_SIZE + 16, pointerof(received), ov.as(Void*))
+        size + 16, size + 16, pointerof(received), ov.as(Void*))
       if answered == 0
         err = LibWs2_32.WSAGetLastError
         if err != ERROR_IO_PENDING
@@ -875,36 +2231,51 @@ pub class IyiSocket
       # The peer, where the POSIX `accept` leaves it: AcceptEx answers it in
       # its second slot instead, so the two arms agree on what the caller's
       # buffer holds when this returns.
-      peer = pointerof(addresses).as(Pointer(UInt8)) + (SOCKADDR_IN_SIZE + 16)
+      peer = pointerof(addresses).as(Pointer(UInt8)) + (size + 16)
       index = 0
-      while index < SOCKADDR_IN_SIZE
+      while index < size
         addr[index] = peer[index]
         index = index + 1
       end
-      addrlen.value = 16_u32
+      addrlen.value = size == SOCKADDR_UN_SIZE ? 110_u32 : size == SOCKADDR_IN6_SIZE ? 28_u32 : 16_u32
       owner = s
       LibWs2_32.setsockopt(client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, pointerof(owner).as(Void*), 8)
-      client.to_i32!
+      client.unsafe_to_i32
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
+    # The handshake is waited for here, inside `ConnectEx`, so *ms* bounds
+    # this park: the deadline cancels the operation (the poller's
+    # `wake_expired_sleepers`) and the cancellation's completion is what
+    # wakes this frame, so the OVERLAPPED and `sent` are no longer the
+    # kernel's when the park returns. Without the bound the park lasted as
+    # long as the kernel's own SYN retries, and `connect_to`'s wait, which
+    # holds *ms* on the POSIX arms, came after it was all over: issue #131
+    # measured 21043 ms for a 2000 ms bound to an address that drops SYNs.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       s = __sys_handle(fd)
       return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
+      # `ConnectEx` is TCP's alone: a unix socket connects with the plain
+      # call, on a socket still blocking (`__sys_connects_blocking?`).
+      if family == AF_UNIX
+        return 0 if LibWs2_32.connect(s, addr.as(Void*), SOCKADDR_UN_SIZE) == 0
+        return __sys_error.to_i32
+      end
       # `ConnectEx` is the connect a completion port can answer, and it
       # insists on a socket that is already bound; the POSIX `connect` binds
       # implicitly, so that is done here, to the wildcard address and the
       # ephemeral port the implicit bind would have picked anyway.
-      any = make_sockaddr_in(IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8), 0)
-      return __sys_error.to_i32 if LibWs2_32.bind(s, any.as(Void*), SOCKADDR_IN_SIZE) != 0
+      size = __sys_addr_size(family)
+      any = family == AF_INET6 ? make_sockaddr_in6(IPv6Address.new(0_u64, 0_u64), 0) : make_sockaddr_in(IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8), 0)
+      return __sys_error.to_i32 if LibWs2_32.bind(s, any.as(Void*), size) != 0
       post = __sys_extension(s, WSAID_CONNECTEX_LOW, WSAID_CONNECTEX_HIGH).as(Pointer(ConnectExFn)).value
       sent = 0_i32
       ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
-      answered = post.call(s, addr.as(Void*), SOCKADDR_IN_SIZE, Pointer(Void).new(0_u64), 0,
+      answered = post.call(s, addr.as(Void*), size, Pointer(Void).new(0_u64), 0,
         pointerof(sent), ov.as(Void*))
       if answered == 0
         err = LibWs2_32.WSAGetLastError
         return -err if err != ERROR_IO_PENDING
-        parked = IyiScheduler.park_overlapped_current
+        parked = IyiScheduler.park_overlapped_current(ms)
         # A cancelled task answers Winsock's "under way", which for a connect
         # is WSAEWOULDBLOCK: the shared `connect` above then waits, and
         # `wait_writable` answers `Cancelled` for a cancelled task, which is
@@ -922,15 +2293,28 @@ pub class IyiSocket
         # is 0 whether it succeeded or failed, so the operation's own result
         # is the only thing that knows: WSAECONNREFUSED comes back as -10061
         # and the shared `connect` refuses it by name.
+        #
+        # A handshake that finished before the deadline's cancel reached it
+        # is a connection whatever the clock says; one the cancel ended is
+        # the bound running out, and answers WSAETIMEDOUT, the code the
+        # POSIX arms' timed-out wait gives the same connect.
         result = __sys_overlapped_result(s, ov)
+        return -WSAETIMEDOUT if result < 0_i64 && IyiScheduler.current.timed_out
         return result.to_i32 if result < 0_i64
       end
       LibWs2_32.setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, Pointer(Void).new(0_u64), 0)
       0
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       s = __sys_handle(fd)
+      # A bounded piece at a time. Winsock takes a whole buffer of any size
+      # while what it holds is under the send buffer's size, so one send of
+      # a gigabyte to a peer that never reads was taken whole: 5.2 s with no
+      # other task running and the write's deadline never consulted. In
+      # pieces, the second finds the buffer full and the send parks, as
+      # the POSIX arms do.
+      len = SEND_PIECE if len > SEND_PIECE
       n = LibWs2_32.send(s, buf.as(Void*), len.to_i32, 0)
       return n.to_i64 if n >= 0
       err = LibWs2_32.WSAGetLastError
@@ -941,23 +2325,28 @@ pub class IyiSocket
       # written for, and a zero-byte overlapped send cannot stand in for it,
       # since one completes on its own within 50 ms on a socket with no room
       # at all. So the send is the wait.
-      __sys_send_posted(s, buf, len)
+      __sys_send_posted(s, buf, len, ms)
     end
 
-    def self.__sys_send_posted(s : UInt64, buf : Pointer(UInt8), len : UInt64) : Int64
+    SEND_PIECE = 262144_u64
+
+    # The send as the wait, with the write's deadline on it: a deadline
+    # that comes first cancels the send, and the cancellation's completion
+    # wakes this frame, so what the send did is known when it returns.
+    def self.__sys_send_posted(s : UInt64, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       return -(WSAEWOULDBLOCK.to_i64) if IyiScheduler.current.cancelled
       # The buffer descriptor stays on this frame for the whole operation:
       # the kernel reads it after the post, and the fiber is parked in
       # between.
       descriptor = LibWs2_32::WSABuf.new(len: len.to_i32, buf: buf)
-      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s), 4)
       sent = 0_i32
       answered = LibWs2_32.WSASend(s, pointerof(descriptor), 1, pointerof(sent), 0, ov.as(Void*),
         Pointer(Void).new(0_u64))
       return sent.to_i64 if answered == 0
       err = LibWs2_32.WSAGetLastError
       return -(err.to_i64) if err != ERROR_IO_PENDING
-      parked = IyiScheduler.park_overlapped_current
+      parked = IyiScheduler.park_overlapped_current(ms)
       if parked.is_a?(Cancelled)
         # What the send did is read before the flag is honoured: Windows may
         # have sent the bytes already — the port can deliver the completion
@@ -976,6 +2365,9 @@ pub class IyiSocket
       # has, which answers `Cancelled` for the first and comes back here for
       # the second, where a plain `send` names the error.
       result = __sys_overlapped_result(s, ov)
+      # Bytes that went are the answer whatever the clock says; nothing
+      # sent by a send the deadline cancelled is the timeout.
+      return -(WSAETIMEDOUT.to_i64) if result <= 0_i64 && IyiScheduler.current.timed_out
       return -(WSAEWOULDBLOCK.to_i64) if result <= 0_i64
       result
     end
@@ -990,15 +2382,42 @@ pub class IyiSocket
       LibWs2_32.getsockname(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
     end
 
-    # Nothing, and not for want of the option. SO_REUSEADDR on Windows lets a
-    # *different* socket bind a port this one is already bound to, and the
-    # last binder takes the packets; what the POSIX arms ask for with it is
-    # only the waiver of the TIME_WAIT wait on a port nobody holds. Setting
-    # it here would hand any program on the machine the port `listen` just
-    # took. Windows does not need the waiver either: a listening socket's
-    # port is free again as soon as it closes.
+    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      LibWs2_32.getpeername(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
+    end
+
+    # Not SO_REUSEADDR, which on Windows lets a *different* socket bind a
+    # port this one is already bound to, and the last binder takes the
+    # packets; what the POSIX arms ask for with it is only the waiver of
+    # the TIME_WAIT wait, which Windows does not impose on a listener's
+    # port. The opposite: SO_EXCLUSIVEADDRUSE (~SO_REUSEADDR, -5). Without
+    # it the port was not the listener's either - a bind to 127.0.0.1:P went
+    # through while 0.0.0.0:P listened, and the other way round, from any
+    # process, and the more specific listener took the connections.
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
-      0
+      val = 1_i32
+      LibWs2_32.setsockopt(__sys_handle(fd), SOL_SOCKET, -5, pointerof(val).as(Void*), 4)
+    end
+
+    # IPV6_V6ONLY (27) at IPPROTO_IPV6 (41). Windows' default already, and
+    # said anyway: the default is a registry's, and this is the program's.
+    def self.__sys_set_v6only(fd : Int32) : Int32
+      val = 1_i32
+      LibWs2_32.setsockopt(__sys_handle(fd), 41, 27, pointerof(val).as(Void*), 4)
+    end
+
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    # Winsock may answer the option in one byte (a BOOLEAN); the rest of
+    # the word is left 0, so any byte set reads as on.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      LibWs2_32.setsockopt(__sys_handle(fd), 6, 1, pointerof(val).as(Void*), 4)
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4
+      LibWs2_32.getsockopt(__sys_handle(fd), 6, 1, pointerof(val).as(Void*), pointerof(len)) == 0 && val != 0
     end
 
     def self.__sys_set_nonblock(fd : Int32) : Int32
@@ -1009,11 +2428,33 @@ pub class IyiSocket
     # WSAEWOULDBLOCK answers both questions here: it is what a non-blocking
     # call with nothing to do says, and it is what a connect that is under
     # way says, where POSIX has EAGAIN and EINPROGRESS for the two.
-    def self.__sys_would_block?(result : Int64) : Bool
+    def self.__sys_would_block?(result : Int64) : ::Bool
       result == -WSAEWOULDBLOCK
     end
 
-    def self.__sys_in_progress?(result : Int32) : Bool
+    # Windows raises no SIGPIPE; a write to a closed connection answers
+    # WSAECONNRESET or WSAESHUTDOWN.
+    def self.__sys_no_sigpipe(fd : Int32) : Nil
+    end
+
+    # A unix socket connects blocking, and is made non-blocking after:
+    # `ConnectEx` is TCP's alone, and the plain `connect` on a socket
+    # already non-blocking is not an answer here. Measured on the runner,
+    # it came back connected to a path whose listener had closed, and,
+    # waited for with `select`, refused a listener that was there. On a
+    # socket still blocking it is Go's `connect` on this platform, and
+    # its answer is the outcome: the listener is on this machine, and its
+    # kernel queues the connection or refuses it at once.
+    def self.__sys_connects_blocking?(family : Int32) : ::Bool
+      family == AF_UNIX
+    end
+
+    # The failures above arrive as the Winsock number negated.
+    def self.__sys_code(result : Int64) : Int32
+      (0_i64 - result).to_i32
+    end
+
+    def self.__sys_in_progress?(result : Int32) : ::Bool
       result == -WSAEWOULDBLOCK
     end
 
@@ -1089,12 +2530,189 @@ pub class IyiSocket
       IyiScheduler.park_overlapped_current
       __sys_overlapped_result(s, ov)
     end
+
+    # The resolver's datagram socket: UDP, non-blocking, and - unlike
+    # `std/udp`'s - with Windows' report of an ICMP port-unreachable left
+    # on. This one is connected to one name server, so the report says
+    # that server has nothing on its port, and the next server is asked at
+    # once instead of after the timeout.
+    def self.__sys_dgram_socket(family : Int32) : Int32
+      __sys_winsock
+      s = LibWs2_32.socket(family, 2, 17)
+      return __sys_error.to_i32 if s == INVALID_SOCKET
+      on = 1
+      LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))
+      s.unsafe_to_i32
+    end
+
+    # The plain call, not `__sys_connect`'s `ConnectEx`, which is TCP's: a
+    # datagram socket's connect records the peer and returns.
+    def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      return __sys_error.to_i32 if LibWs2_32.connect(__sys_handle(fd), addr.as(Void*), __sys_addr_size(family)) != 0
+      0
+    end
+
+    # The plain call, not `__sys_send`'s posted one: a datagram of a
+    # query's size goes out whole or not at all, and there is no room to
+    # wait for.
+    def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      n = LibWs2_32.send(__sys_handle(fd), buf.as(Void*), len.to_i32, 0)
+      return n.to_i64 if n >= 0
+      __sys_error
+    end
+
+    # Not `await_readable`: the scheduler's readable-wait is a zero-byte
+    # overlapped read, and on a datagram socket that read takes the
+    # datagram and leaves nothing for the receive after it (measured, and
+    # the reason `std/udp` posts its receive instead). `WSAPoll` asks
+    # without taking, but it blocks the thread for as long as it is told,
+    # and every other task on the thread with it; so it is asked with no
+    # wait at all, and the task sleeps on the scheduler between askings -
+    # at Windows' timer tick, 15.6 ms, which is nothing next to a name
+    # server's round trip.
+    def self.__sys_dgram_wait(fd : Int32, ms : Int32) : ::Bool | Cancelled
+      deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
+      while true
+        entry = LibWs2_32::PollFd.new(fd: __sys_handle(fd), events: 0x0100_i16, revents: 0_i16)
+        return true if LibWs2_32.WSAPoll(pointerof(entry).as(Void*), 1, 0) > 0
+        return false if __iyi_monotonic_ns >= deadline
+        slept = sleep(10)
+        return slept if slept.is_a?(Cancelled)
+      end
+    end
+
+    # HKEY_LOCAL_MACHINE is the LONG 0x80000002 widened to a pointer, so it
+    # is sign-extended; KEY_READ; and the three string types a value the
+    # resolver reads may have.
+    HKEY_LOCAL_MACHINE = 0xFFFFFFFF80000002_u64
+    KEY_READ           =            0x20019_u32
+    REG_SZ             =                  1_u32
+    REG_EXPAND_SZ      =                  2_u32
+    REG_MULTI_SZ       =                  7_u32
+
+    TCPIP_PARAMETERS  = "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters"
+    TCPIP6_PARAMETERS = "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
+
+    # The machine's resolver configuration, read from the registry:
+    #
+    # - name servers: the TCP/IP service's own `NameServer` (a policy's),
+    #   then each IPv4 interface that has an address - `NameServer` when
+    #   it was set by hand, else `DhcpNameServer` - then each IPv6
+    #   interface's `NameServer`, without repeats, at most
+    #   `ResolvConf::MAX_NAMESERVERS`;
+    # - search list: `SearchList`, else the primary DNS suffix (`Domain`,
+    #   else `DhcpDomain`).
+    #
+    # What it cannot see: which interface is up (a stale DHCP lease on an
+    # unplugged adapter still has an address in the registry), the order
+    # of the interfaces' metrics (they are read in the registry's order),
+    # IPv6 servers learned from router advertisements or DHCPv6 (stored as
+    # binary, not read), and per-connection suffixes. Those need
+    # iphlpapi; see the `lib` above for why it is not linked.
+    def self.__sys_dns_config : ResolvConf
+      servers = [] of String
+      search = [] of String
+      root = Pointer(Void).new(HKEY_LOCAL_MACHINE)
+      if (params = __sys_reg_open(root, TCPIP_PARAMETERS)).is_a?(Pointer(Void))
+        __sys_add_words(servers, __sys_reg_text(params, "NameServer"))
+        __sys_add_words(search, __sys_reg_text(params, "SearchList"))
+        if search.empty?
+          domain = __sys_reg_text(params, "Domain")
+          domain = __sys_reg_text(params, "DhcpDomain") if domain.strip.empty?
+          __sys_add_words(search, domain)
+        end
+        LibAdvapi32.RegCloseKey(params)
+      end
+      __sys_interface_servers(root, "#{TCPIP_PARAMETERS}\\Interfaces", servers, true)
+      __sys_interface_servers(root, "#{TCPIP6_PARAMETERS}\\Interfaces", servers, false)
+      servers = servers[0, ResolvConf::MAX_NAMESERVERS] if servers.size > ResolvConf::MAX_NAMESERVERS
+      ResolvConf.new(servers, search)
+    end
+
+    private def self.__sys_interface_servers(root : Void*, path : String, servers : Array(String), dhcp : ::Bool) : Nil
+      interfaces = __sys_reg_open(root, path)
+      return unless interfaces.is_a?(Pointer(Void))
+      name = Pointer(UInt16).malloc(256_u64)
+      index = 0_u32
+      while true
+        size = 256_u32
+        null = Pointer(Void).new(0_u64)
+        break if LibAdvapi32.RegEnumKeyExW(interfaces, index, name, pointerof(size), null,
+                   Pointer(UInt16).new(0_u64), Pointer(UInt32).new(0_u64), null) != 0
+        index = index + 1
+        child = __iyi_win_env_text(name, size.to_i32)
+        next unless child.is_a?(String)
+        key = __sys_reg_open(interfaces, child)
+        next unless key.is_a?(Pointer(Void))
+        set = __sys_reg_text(key, "NameServer")
+        if !set.strip.empty?
+          __sys_add_words(servers, set)
+        elsif dhcp && __sys_has_address?(key)
+          __sys_add_words(servers, __sys_reg_text(key, "DhcpNameServer"))
+        end
+        LibAdvapi32.RegCloseKey(key)
+      end
+      LibAdvapi32.RegCloseKey(interfaces)
+    end
+
+    # An interface DHCP gave an address, or one set by hand: the nearest
+    # the registry comes to saying the interface is in use.
+    private def self.__sys_has_address?(key : Void*) : ::Bool
+      leased = __sys_reg_text(key, "DhcpIPAddress").strip
+      return true unless leased.empty? || leased == "0.0.0.0"
+      fixed = __sys_reg_text(key, "IPAddress").strip
+      !fixed.empty? && !fixed.starts_with?("0.0.0.0")
+    end
+
+    # The words of a registry list - Windows separates them with spaces
+    # in one value and commas in another - added once each.
+    private def self.__sys_add_words(into : Array(String), text : String) : Nil
+      text.split(',').each do |part|
+        part.split(' ').each do |word|
+          into << word unless word.empty? || into.includes?(word)
+        end
+      end
+    end
+
+    private def self.__sys_reg_open(parent : Void*, path : String) : Void*?
+      handle = Pointer(Void).new(0_u64)
+      wide = __iyi_win_env_wide(path.to_unsafe, path.bytesize)
+      return nil if LibAdvapi32.RegOpenKeyExW(parent, wide, 0_u32, KEY_READ, pointerof(handle)) != 0
+      handle
+    end
+
+    # A string value as text, "" when it is absent or not a string. A
+    # REG_MULTI_SZ's NULs between its strings read as spaces, which is
+    # what separates the words the callers split on.
+    private def self.__sys_reg_text(key : Void*, value : String) : String
+      wide = __iyi_win_env_wide(value.to_unsafe, value.bytesize)
+      null = Pointer(Void).new(0_u64)
+      type = 0_u32
+      size = 0_u32
+      return "" if LibAdvapi32.RegQueryValueExW(key, wide, null, pointerof(type), Pointer(UInt8).new(0_u64), pointerof(size)) != 0
+      return "" unless type == REG_SZ || type == REG_EXPAND_SZ || type == REG_MULTI_SZ
+      return "" if size < 2_u32
+      data = Pointer(UInt8).malloc(size.to_u64 + 2_u64)
+      return "" if LibAdvapi32.RegQueryValueExW(key, wide, null, pointerof(type), data, pointerof(size)) != 0
+      chars = data.as(Pointer(UInt16))
+      count = (size // 2_u32).to_i32
+      index = 0
+      while index < count
+        chars[index] = 32_u16 if chars[index] == 0_u16
+        index = index + 1
+      end
+      __iyi_win_env_text(chars, count) || ""
+    end
   {% else %}
-    def self.__sys_socket : Int32
+    AF_UNIX  =  1
+    AF_INET  =  2
+    AF_INET6 = 10
+
+    def self.__sys_socket(family : Int32) : Int32
       raise "IyiSocket is not supported on this platform"
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       -1
     end
 
@@ -1102,15 +2720,19 @@ pub class IyiSocket
       -1
     end
 
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_shutdown_write(fd : Int32) : Int64
+      -1_i64
+    end
+
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       -1
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       -1
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       -1_i64
     end
 
@@ -1122,28 +2744,854 @@ pub class IyiSocket
       -1
     end
 
+    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      -1
+    end
+
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       -1
+    end
+
+    def self.__sys_set_v6only(fd : Int32) : Int32
+      -1
+    end
+
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      -1
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      false
     end
 
     def self.__sys_set_nonblock(fd : Int32) : Int32
       -1
     end
 
-    def self.__sys_poll(fd : Int32, events : Int32) : Int32
+    def self.__sys_poll(fd : Int32, events : Int32, ms : Int32) : Int32
       -1
     end
 
-    def self.__sys_would_block?(result : Int64) : Bool
+    def self.__sys_would_block?(result : Int64) : ::Bool
       false
     end
 
-    def self.__sys_in_progress?(result : Int32) : Bool
+    def self.__sys_in_progress?(result : Int32) : ::Bool
       false
     end
 
     def self.__sys_sock_error(fd : Int32) : Int32
       0
     end
+
+    def self.__sys_no_sigpipe(fd : Int32) : Nil
+    end
+
+    def self.__sys_connects_blocking?(family : Int32) : ::Bool
+      false
+    end
+
+    def self.__sys_code(result : Int64) : Int32
+      0
+    end
+
+    def self.__sys_dgram_socket(family : Int32) : Int32
+      raise "IyiSocket is not supported on this platform"
+    end
+
+    def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      -1
+    end
+
+    def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      -1_i64
+    end
+
+    def self.__sys_dgram_wait(fd : Int32, ms : Int32) : ::Bool | Cancelled
+      false
+    end
   {% end %}
+end
+
+# An encrypted way to a name server, asked by a resolver `Resolver#encrypted`
+# made instead of its plaintext servers: std/secure_dns's `DnsOverTls`
+# (RFC 7858) and `DnsOverHttps` (RFC 8484). The trait is here and they are
+# there because they speak std/tls and std/http, which import this module,
+# and R-1 refuses the cycle - as std/http's `CookieStore` is std/cookie's
+# to implement.
+pub trait DnsUpstream
+  # How a message names it: `dns.test (127.0.0.1:853) over TLS`.
+  abstract def label : String
+  # Whether its queries carry the ID 0: DNS over HTTPS's, which RFC 8484
+  # 4.1 asks for so that an HTTP cache sees one request for one question.
+  # The answer must carry the ID the query did all the same.
+  abstract def zero_id? : Bool
+  # The answer to each of *queries*, in their order, each one whole
+  # message as it came; or why there are none. *timeout_ms* bounds each
+  # wait on the server. An answer is matched to its query by the
+  # transport - by ID over one connection, by request over HTTP - and the
+  # resolver then reads it as it reads a datagram.
+  abstract def exchange(queries : Array(Bytes), timeout_ms : Int32) : Array(Bytes) | DnsError | Cancelled
+  # Its connections closed; the next exchange opens new ones.
+  abstract def close : Nil
+end
+
+# One name server: the address a call takes, its family, and how a
+# message names it (`192.0.2.1:53`).
+struct NameServer
+  getter address : Pointer(UInt8)
+  getter family : Int32
+  getter label : String
+
+  def initialize(@address : Pointer(UInt8), @family : Int32, @label : String)
+  end
+end
+
+# A stub resolver: a host name's addresses, from a hosts file and then
+# from name servers, as the C library's resolver finds them - but iyi's,
+# so asking costs no library (see the header of this file).
+#
+# `Resolver.system` is the machine's: `/etc/resolv.conf` and `/etc/hosts`
+# on Linux and darwin, the registry and
+# `%SystemRoot%\System32\drivers\etc\hosts` on Windows (see
+# `__sys_dns_config` for what the registry can and cannot say). A
+# resolver built with `new` or `from_config` asks exactly what it was
+# given, which is how a test asks a server it runs itself.
+#
+# `resolve` answers every address for a name, IPv4 first and then IPv6,
+# each family in the order the hosts file or the server gave it;
+# `connect` races them in `IyiSocket.attempt_order`'s order:
+#
+# 1. An address, or `localhost` (127.0.0.1 and ::1: RFC 6761 6.3 keeps it
+#    off the network), is itself. Anything that is not a host name is
+#    `invalid_name?`.
+# 2. The hosts file: every line naming the host, in any case. A name
+#    found there is not asked about.
+# 3. The names the search list and `ndots` make of it (`DnsName.candidates`),
+#    in order. Each is asked for A and then AAAA records; NXDOMAIN or no
+#    records moves on to the next, and any other failure ends the lookup
+#    with that failure - a server that timed out on `db.corp.example` must
+#    not turn the answer into `db.example`'s (musl's rule; glibc moves on).
+#
+# A and AAAA are asked one after the other, and `connect` starts its race
+# once both have answered. RFC 8305 section 3 asks both at once and
+# starts connecting on the A answer when AAAA is 50 ms behind it; that
+# makes a lookup answer in pieces, and saves the AAAA query's round trip
+# at most - 5 to 65 ms uncached for five names through systemd-resolved
+# on the machine this was written on, 0 to 1 ms cached (dig's query
+# times) - where the race saves what an address that drops SYNs costs,
+# the whole timeout. Asked in turn, an NXDOMAIN for A spares the AAAA
+# query, as it does for most of a search list's candidates.
+#
+# A query is one UDP datagram from a fresh socket (so a fresh source
+# port), with an ID from `Random::Secure`, to each server in turn, each
+# waited for `timeout_ms`, and the round repeated `attempts` times. A
+# datagram that does not carry the ID and the question is ignored and the
+# wait goes on; one from any other address never arrives, because the
+# socket is connected to the server. An answer with TC set is asked again
+# over TCP. SERVFAIL, REFUSED and a server that does not answer move on to
+# the next server; NXDOMAIN is the answer. An answer that cannot be read
+# is ignored like a forgery, and is the failure reported if nothing
+# better arrives before the timeout.
+#
+# Encrypted:
+# `encrypted(upstreams)` is the same resolver - hosts file, search list,
+# `ndots`, timeout and attempts - asking `DnsUpstream`s instead of its
+# plaintext servers: DNS over TLS or over HTTPS, std/secure_dns's
+# `DnsOverTls` and `DnsOverHttps`. Each upstream is asked in turn, the
+# round repeated `attempts` times, as the servers are; A and AAAA go in
+# one exchange. An answer over one is held to more than a datagram is:
+# the ID and the question as ever, and no TC and no byte past the message,
+# since a stream has room for any answer and its frame is the message.
+# The plaintext servers are not asked at all, not even when every
+# upstream is down, unless the caller passes *plaintext_fallback*: RFC
+# 8310 5's strict profile, where a lookup that cannot be private fails,
+# is the default, because falling back hands the very question the
+# program meant to keep private to anyone on the path, and a program
+# that would rather have an answer says so. With *plaintext_fallback*
+# (the opportunistic profile) the plaintext servers are asked only when
+# no upstream could be: one that answered, SERVFAIL included, has spoken.
+# One task at a time per resolver with upstreams: an upstream holds its
+# connection, as an `HTTPClient` does.
+pub class Resolver
+  RESOLV_CONF = "/etc/resolv.conf"
+  HOSTS       = "/etc/hosts"
+
+  getter nameservers : Array(String)
+  getter search : Array(String)
+  getter ndots : Int32
+  getter timeout_ms : Int32
+  getter attempts : Int32
+  # The hosts file's text, read before any server is asked.
+  getter hosts : String
+  # The encrypted upstreams asked instead of `nameservers`; none for a
+  # plaintext resolver.
+  getter upstreams : Array(DnsUpstream) = [] of DnsUpstream
+  # Whether `nameservers` are asked when no upstream could be (RFC 8310's
+  # opportunistic profile); false, the strict one, by default.
+  getter plaintext_fallback : Bool = false
+
+  @servers : Array(NameServer)
+
+  # *nameservers* are addresses, each with an optional port:
+  # `"192.0.2.1"`, `"192.0.2.1:5353"`, `"2001:db8::1"`,
+  # `"[2001:db8::1]:5353"`. One that is not is refused here, by name: it is
+  # the program's own mistake. None at all is a resolver that reads only
+  # *hosts*.
+  def initialize(nameservers : Array(String), @search : Array(String) = [] of String, @ndots : Int32 = 1,
+                 @timeout_ms : Int32 = 5000, @attempts : Int32 = 2, @hosts : String = "")
+    raise "a resolver's timeout is at least 1 ms, not #{timeout_ms}" if timeout_ms < 1
+    raise "a resolver asks at least once, not #{attempts} times" if attempts < 1
+    raise "a resolver's ndots is not negative: #{ndots}" if ndots < 0
+    @nameservers = nameservers
+    @servers = [] of NameServer
+    nameservers.each do |text|
+      server = Resolver.server(text)
+      raise server if server.is_a?(String)
+      @servers << server
+    end
+  end
+
+  # This resolver asking *upstreams* instead of its plaintext servers,
+  # which are asked only with *plaintext_fallback*, and then only when no
+  # upstream could be (see the class).
+  def encrypted(upstreams : Array(DnsUpstream), plaintext_fallback : Bool = false) : Resolver
+    raise "an encrypted resolver asks at least one upstream" if upstreams.empty?
+    made = Resolver.new(@nameservers, @search, @ndots, @timeout_ms, @attempts, @hosts)
+    made.ask_upstreams_instead(upstreams.dup, plaintext_fallback)
+    made
+  end
+
+  def encrypted(upstream : DnsUpstream, plaintext_fallback : Bool = false) : Resolver
+    encrypted([upstream] of DnsUpstream, plaintext_fallback)
+  end
+
+  # The machine's resolver - its hosts file and search list - asking
+  # *upstreams*; its name servers only with *plaintext_fallback*.
+  def self.encrypted(upstreams : Array(DnsUpstream), plaintext_fallback : Bool = false) : Resolver
+    system.encrypted(upstreams, plaintext_fallback)
+  end
+
+  def self.encrypted(upstream : DnsUpstream, plaintext_fallback : Bool = false) : Resolver
+    system.encrypted(upstream, plaintext_fallback)
+  end
+
+  protected def ask_upstreams_instead(upstreams : Array(DnsUpstream), plaintext_fallback : Bool) : Nil
+    @upstreams = upstreams
+    @plaintext_fallback = plaintext_fallback
+  end
+
+  # Every upstream's connections closed.
+  def close : Nil
+    @upstreams.each { |upstream| upstream.close }
+  end
+
+  # A resolver from a parsed resolv.conf and a hosts file's text. A
+  # `nameserver` line this resolver cannot use - an IPv6 address with a
+  # zone, a typo - is skipped as glibc skips one; with none left, the
+  # servers a machine without a configuration is assumed to run.
+  def self.from_config(config : ResolvConf, hosts : String = "") : Resolver
+    usable = [] of String
+    config.nameservers.each { |text| usable << text if Resolver.server(text).is_a?(NameServer) }
+    usable = fallback if usable.empty?
+    Resolver.new(usable, config.search, config.ndots, config.timeout_ms, config.attempts, hosts)
+  end
+
+  # A resolver from a resolv.conf and a hosts file at these paths. A file
+  # that is not there reads as empty, as it does to the C library.
+  def self.from_files(resolv_conf : String, hosts : String) : Resolver
+    from_config(ResolvConf.parse(read_text(resolv_conf) || ""), read_text(hosts) || "")
+  end
+
+  # The machine's resolver, read afresh each time: a configuration the
+  # network manager rewrote is the one the next lookup uses.
+  def self.system : Resolver
+    {% if flag?(:win32) %}
+      root = __iyi_win_env_get("SystemRoot".to_unsafe, 10) || "C:\\Windows"
+      from_config(IyiSocket.__sys_dns_config, read_text("#{root}\\System32\\drivers\\etc\\hosts") || "")
+    {% else %}
+      from_files(RESOLV_CONF, HOSTS)
+    {% end %}
+  end
+
+  # The servers asked when none is configured: glibc asks the loopback
+  # address; on Linux the stub systemd-resolved listens on, 127.0.0.53,
+  # goes first, since that is where a machine without a resolv.conf of its
+  # own most often has one.
+  private def self.fallback : Array(String)
+    {% if flag?(:linux) %}
+      ["127.0.0.53", "127.0.0.1"]
+    {% else %}
+      ["127.0.0.1"]
+    {% end %}
+  end
+
+  # *path*'s text, or nil when it cannot be opened. Not `File.read`, which
+  # panics on a missing file: a machine without a hosts file is a
+  # machine, not a mistake.
+  private def self.read_text(path : String) : String?
+    fd = __iyi_open_read(IyiSocket.c_path(path))
+    return nil if fd < 0_i64
+    io = IyiIO.new(fd, 4096, false)
+    defer io.close
+    text = io.read_all
+    io.read_failed? ? nil : text
+  end
+
+  # A name server written as an address with an optional port, or the
+  # sentence saying why it is not one.
+  def self.server(text : String) : NameServer | String
+    host = text
+    port = 53
+    size = text.bytesize
+    colons = 0
+    index = 0
+    while index < size
+      colons = colons + 1 if text.to_unsafe[index] == 58_u8
+      index = index + 1
+    end
+    if size > 0 && text.to_unsafe[0] == 91_u8 # [
+      close = text.index(']')
+      return "not a name server address: #{text.inspect}" if close.nil?
+      host = text[1, close - 1]
+      rest = text[close + 1, size - close - 1]
+      unless rest.empty?
+        return "not a name server address: #{text.inspect}" unless rest.starts_with?(":")
+        number = rest[1, rest.bytesize - 1].to_i?
+        return "not a name server port: #{text.inspect}" unless number.is_a?(Int32) && number > 0 && number < 65536
+        port = number
+      end
+    elsif colons == 1
+      split = text.index(':').as(Int32)
+      host = text[0, split]
+      number = text[split + 1, size - split - 1].to_i?
+      return "not a name server port: #{text.inspect}" unless number.is_a?(Int32) && number > 0 && number < 65536
+      port = number
+    end
+    if host.includes?(":")
+      six = IyiSocket.read_ipv6(host)
+      return "not a name server address: #{six}" if six.is_a?(String)
+      return NameServer.new(IyiSocket.make_sockaddr_in6(six, port), IyiSocket::AF_INET6, "[#{host}]:#{port}")
+    end
+    four = IyiSocket.read_ipv4(host)
+    return "not a name server address: #{four}" if four.is_a?(String)
+    NameServer.new(IyiSocket.make_sockaddr_in(four, port), IyiSocket::AF_INET, "#{host}:#{port}")
+  end
+
+  # Every address *host* stands for: see the class's comment for the
+  # order things are asked in.
+  def resolve(host : String) : Array(IPAddress) | DnsError | Cancelled
+    size = host.bytesize
+    literal = host
+    literal = host[1, size - 2] if size >= 2 && host.to_unsafe[0] == 91_u8 && host.to_unsafe[size - 1] == 93_u8
+    if literal.includes?(":")
+      six = IyiSocket.read_ipv6(literal)
+      return DnsError.new(DnsError::INVALID_NAME, host, "", six) if six.is_a?(String)
+      return [six.as(IPAddress)]
+    end
+    four = IyiSocket.read_ipv4(host)
+    return [four.as(IPAddress)] if four.is_a?(IPv4Address)
+    if IyiSocket.localhost?(host)
+      return IyiSocket.loopback
+    end
+    why = DnsName.why(host)
+    return DnsError.new(DnsError::INVALID_NAME, host, "", why) if why.is_a?(String)
+
+    listed = from_hosts(host)
+    return listed unless listed.empty?
+
+    candidates = DnsName.candidates(host, @search, @ndots)
+    nodata = nil.as(DnsError?)
+    missing = nil.as(DnsError?)
+    index = 0
+    while index < candidates.size
+      got = lookup(candidates[index])
+      return got if got.is_a?(Cancelled)
+      return got if got.is_a?(Array(IPAddress))
+      return got.about(host, got.server) unless got.not_found? || got.no_address?
+      if got.no_address?
+        nodata = got if nodata.nil?
+      else
+        missing = got if missing.nil?
+      end
+      index = index + 1
+    end
+    # The name exists somewhere the search led, without an address: that
+    # is the truer answer than "does not exist".
+    final = nodata || missing
+    return final.about(host, final.server) if final.is_a?(DnsError)
+    DnsError.new(DnsError::NOT_FOUND, host)
+  end
+
+  # The hosts file's addresses for *host*, IPv4 first; a line whose
+  # address cannot be read is skipped.
+  private def from_hosts(host : String) : Array(IPAddress)
+    four = [] of IPAddress
+    six = [] of IPAddress
+    HostsFile.lookup(@hosts, host).each do |text|
+      if text.includes?(":")
+        read = IyiSocket.read_ipv6(text)
+        six << read if read.is_a?(IPv6Address)
+      else
+        read = IyiSocket.read_ipv4(text)
+        four << read if read.is_a?(IPv4Address)
+      end
+    end
+    six.each { |address| four << address }
+    four
+  end
+
+  # One fully qualified name's A and then AAAA records. NXDOMAIN for A
+  # is NXDOMAIN for the name, and AAAA is not asked; an AAAA lookup that
+  # fails after A answered leaves the A records the answer. Over
+  # upstreams both questions go in one exchange - pipelined, over TLS -
+  # and the AAAA answer is read as if it had been asked second.
+  private def lookup(name : String) : Array(IPAddress) | DnsError | Cancelled
+    early = nil.as(Array(Tuple(DnsMessage, String) | DnsError)?)
+    unless @upstreams.empty?
+      asked = ask_upstreams(name, [DnsRecord::A, DnsRecord::AAAA])
+      return asked if asked.is_a?(Cancelled)
+      early = asked
+    end
+    four = addresses(name, DnsRecord::A, early ? early[0] : nil)
+    return four if four.is_a?(Cancelled)
+    if four.is_a?(DnsError)
+      return four unless four.no_address?
+    end
+    six = addresses(name, DnsRecord::AAAA, early ? early[1] : nil)
+    return six if six.is_a?(Cancelled)
+    found = four.is_a?(Array(IPAddress)) ? four : [] of IPAddress
+    if six.is_a?(DnsError)
+      return found unless found.empty?
+      return six
+    end
+    six.each { |address| found << address }
+    return found unless found.empty?
+    four.is_a?(DnsError) ? four : DnsError.new(DnsError::NO_ADDRESS, name)
+  end
+
+  private def addresses(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Array(IPAddress) | DnsError | Cancelled
+    got = records(name, type, first)
+    return got unless got.is_a?(Tuple(Array(Bytes), String, String))
+    addresses = [] of IPAddress
+    got[0].each do |data|
+      if data.size == 4
+        addresses << IPv4Address.new(data[0], data[1], data[2], data[3])
+      else
+        addresses << IPv6Address.new(data.to_unsafe)
+      end
+    end
+    addresses
+  end
+
+  # The TXT records of *name*, each one's character-strings joined
+  # (`DnsRecord.character_strings`), in the order the answer gave them,
+  # CNAMEs followed as `resolve` follows them. The name is asked as
+  # written - no hosts file, no search list - since a TXT name
+  # (`_acme-challenge.example.com`, a domain's SPF) is written in full.
+  def txt(name : String) : Array(String) | DnsError | Cancelled
+    why = DnsName.why(name)
+    return DnsError.new(DnsError::INVALID_NAME, name, "", why) if why.is_a?(String)
+    got = records(DnsName.relative(name), DnsRecord::TXT, nil)
+    return got unless got.is_a?(Tuple(Array(Bytes), String, String))
+    found, _, label = got
+    texts = [] of String
+    found.each do |data|
+      strings = DnsRecord.character_strings(data)
+      return DnsMessage.malformed("a TXT record's strings run past its data").about(name, label) if strings.nil?
+      texts << strings.join
+    end
+    texts
+  end
+
+  # The HTTPS records (RFC 9460 section 9) of the origin `https://host:port`,
+  # by SVCB resolution (section 3): the question is *host* for port 443
+  # and `_port._https.host` for any other (section 9.1); an AliasMode
+  # answer is followed to its target's HTTPS records, at most
+  # `SvcbAnswer::MAX_ALIASES` of them, and CNAMEs on the way as `txt`
+  # follows them; and the ServiceMode records found are answered by
+  # priority, those of one priority in a random order (section 2.4.1).
+  # The name is asked as written, as for `txt`, over the upstreams when
+  # the resolver has them.
+  #
+  # Of an AliasMode set one record is followed, at random where there are
+  # several (section 2.4.2), and any ServiceMode record beside it is
+  # passed over (section 2.4.1). A target that has no HTTPS records ends
+  # resolution there, with none: the answer's `name` is the target, which
+  # section 3 still has a client connect to. An answer with a record
+  # `SvcbRecord.parse` refuses is the whole set refused, `malformed?`, as
+  # section 2.2 has it; so is a chain longer than the bound. NXDOMAIN and
+  # NODATA for the origin's own name are `not_found?` and `no_address?`,
+  # as they are for an address.
+  def https_records(host : String, port : Int32 = 443) : SvcbAnswer | DnsError | Cancelled
+    raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+    why = DnsName.why(host)
+    return DnsError.new(DnsError::INVALID_NAME, host, "", why) if why.is_a?(String)
+    relative = DnsName.relative(host)
+    asked = port == 443 ? relative : "_#{port}._https.#{relative}"
+    return DnsError.new(DnsError::INVALID_NAME, host, "", "#{asked} is longer than #{DnsName::MAX_LENGTH} characters") if asked.bytesize > DnsName::MAX_LENGTH
+    name = asked
+    aliases = 0
+    while true
+      got = records(name, DnsRecord::HTTPS, nil)
+      return got if got.is_a?(Cancelled)
+      if got.is_a?(DnsError)
+        # An alias whose target holds no HTTPS records: resolution ends
+        # there, and the target is the endpoint left.
+        return SvcbAnswer.new(name, aliases, [] of SvcbRecord) if aliases > 0 && (got.not_found? || got.no_address?)
+        return got.about(host, got.server)
+      end
+      found, owner, label = got
+      parsed = [] of SvcbRecord
+      found.each do |data|
+        record = SvcbRecord.parse(data, owner)
+        return record.about(host, label) if record.is_a?(DnsError)
+        parsed << record
+      end
+      aliased = parsed.select(&.alias?)
+      if aliased.empty?
+        return SvcbAnswer.new(name, aliases, Resolver.by_priority(parsed))
+      end
+      aliases = aliases + 1
+      if aliases > SvcbAnswer::MAX_ALIASES
+        return DnsMessage.malformed("a chain of more than #{SvcbAnswer::MAX_ALIASES} AliasMode records, or a loop of them").about(host, label)
+      end
+      chosen = aliased[aliased.size == 1 ? 0 : Random::Secure.rand(aliased.size)]
+      return SvcbAnswer.new(".", aliases, [] of SvcbRecord) if chosen.target == "."
+      name = chosen.target
+    end
+  end
+
+  # *records* by ascending priority, those of one priority shuffled.
+  def self.by_priority(records : Array(SvcbRecord)) : Array(SvcbRecord)
+    shuffled = records.dup
+    index = shuffled.size - 1
+    while index > 0
+      other = Random::Secure.rand(index + 1)
+      held = shuffled[index]
+      shuffled[index] = shuffled[other]
+      shuffled[other] = held
+      index = index - 1
+    end
+    # Stable, so the shuffle stands within each priority.
+    ordered = [] of SvcbRecord
+    shuffled.each do |record|
+      ordered << record
+      at = ordered.size - 1
+      while at > 0 && ordered[at - 1].priority > record.priority
+        ordered[at] = ordered[at - 1]
+        at = at - 1
+      end
+      ordered[at] = record
+    end
+    ordered
+  end
+
+  # *name*'s records of *type*, following CNAMEs - within an answer, and
+  # by asking again when a chain leaves one - at most
+  # `DnsMessage::MAX_CNAMES` links in all; with the name they were found
+  # at, where the chain ended, and the label of the server that answered.
+  # *first* is the answer to the first question when it has been asked
+  # already.
+  private def records(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Tuple(Array(Bytes), String, String) | DnsError | Cancelled
+    target = name
+    budget = DnsMessage::MAX_CNAMES
+    answered = first
+    while true
+      answered = exchange(target, type) if answered.nil?
+      return answered unless answered.is_a?(Tuple(DnsMessage, String))
+      message, label = answered
+      answered = nil
+      read = message.addresses(target, type, budget)
+      return read.about(name, label) if read.is_a?(DnsError)
+      found, ends, links = read
+      return {found, ends, label} unless found.empty?
+      return DnsError.new(DnsError::NO_ADDRESS, name, label, Resolver.missing(type)) if links == 0
+      budget = budget - links
+      return DnsMessage.malformed("a chain of more than #{DnsMessage::MAX_CNAMES} CNAMEs").about(name, label) if budget <= 0
+      target = ends
+    end
+  end
+
+  # What NODATA for *type* says the name lacks: its records, by name, for
+  # the types asked other than as addresses.
+  def self.missing(type : Int32) : String
+    case type
+    when DnsRecord::TXT   then "no TXT record"
+    when DnsRecord::HTTPS then "no HTTPS record"
+    else                       ""
+    end
+  end
+
+  # The answer to one question, from the upstreams when there are any and
+  # from the plaintext servers otherwise.
+  private def exchange(name : String, type : Int32) : Tuple(DnsMessage, String) | DnsError | Cancelled
+    return plaintext(name, type) if @upstreams.empty?
+    asked = ask_upstreams(name, [type])
+    return asked if asked.is_a?(Cancelled)
+    asked[0]
+  end
+
+  # The answer to one question over plaintext: each server in turn, the
+  # round repeated `attempts` times, until one answers NOERROR or
+  # NXDOMAIN. The failure answered otherwise is the last server's.
+  protected def plaintext(name : String, type : Int32) : Tuple(DnsMessage, String) | DnsError | Cancelled
+    return DnsError.new(DnsError::UNREACHABLE, name, "", "no name server is configured") if @servers.empty?
+    failure = nil.as(DnsError?)
+    attempt = 0
+    while attempt < @attempts
+      index = 0
+      while index < @servers.size
+        server = @servers[index]
+        index = index + 1
+        got = ask(server, name, type)
+        return got if got.is_a?(Cancelled)
+        if got.is_a?(DnsError)
+          failure = got
+          next
+        end
+        read = Resolver.read_rcode(got, name, server.label)
+        return read if read.is_a?(Tuple(DnsMessage, String)) || read.not_found?
+        failure = read
+      end
+      attempt = attempt + 1
+    end
+    failure || DnsError.new(DnsError::TIMED_OUT, name)
+  end
+
+  # What an answer's RCODE makes of it: the message for NOERROR, and the
+  # failure it says otherwise.
+  def self.read_rcode(message : DnsMessage, name : String, label : String) : Tuple(DnsMessage, String) | DnsError
+    case message.rcode
+    when DnsMessage::RCODE_NOERROR
+      {message, label}
+    when DnsMessage::RCODE_NXDOMAIN
+      DnsError.new(DnsError::NOT_FOUND, name, label)
+    when DnsMessage::RCODE_SERVFAIL
+      DnsError.new(DnsError::SERVER_FAILURE, name, label)
+    else
+      DnsError.new(DnsError::REFUSED, name, label, Resolver.rcode_name(message.rcode))
+    end
+  end
+
+  # The answers to *types* of questions about *name*, from the upstreams:
+  # each in turn, the round repeated `attempts` times, until one answers
+  # every question NOERROR or NXDOMAIN. An upstream that answered at all
+  # - SERVFAIL included - is the last one's word when none does better.
+  # When no upstream could be asked, the plaintext servers are asked
+  # instead only when `plaintext_fallback` says so (see the class).
+  private def ask_upstreams(name : String, types : Array(Int32)) : Array(Tuple(DnsMessage, String) | DnsError) | Cancelled
+    failure = nil.as(DnsError?)
+    spoken = nil.as(Array(Tuple(DnsMessage, String) | DnsError)?)
+    attempt = 0
+    while attempt < @attempts
+      index = 0
+      while index < @upstreams.size
+        upstream = @upstreams[index]
+        index = index + 1
+        got = ask_upstream(upstream, name, types)
+        return got if got.is_a?(Cancelled)
+        if got.is_a?(DnsError)
+          failure = got
+          next
+        end
+        return got if got.all? { |one| one.is_a?(Tuple(DnsMessage, String)) || one.not_found? }
+        spoken = got
+      end
+      attempt = attempt + 1
+    end
+    if said = spoken
+      return said
+    end
+    lost = failure || DnsError.new(DnsError::TIMED_OUT, name)
+    answers = [] of Tuple(DnsMessage, String) | DnsError
+    types.each do |type|
+      if @plaintext_fallback && !@servers.empty?
+        asked = plaintext(name, type)
+        return asked if asked.is_a?(Cancelled)
+        answers << asked
+      else
+        answers << lost
+      end
+    end
+    answers
+  end
+
+  # One exchange with one upstream: a query per type, each with its own
+  # ID from `Random::Secure` (or 0, `zero_id?`), each padded to a multiple
+  # of `DnsMessage::PADDING_BLOCK` (RFC 8467 4.1) because every upstream
+  # is an encrypted transport, whose ciphertext would otherwise show the
+  # name's length; and each answer held to what a stream's answer must be
+  # - the ID and the question, no TC (a stream has room for any answer),
+  # and no byte past the message (the frame is the message: RFC 7858 3.3,
+  # RFC 8484 6). There is no retry without the OPT record when a server
+  # answers FORMERR to it, as RFC 6891 6.2.2 lets a client do: the retry
+  # would send the very length the padding hides, so the FORMERR is the
+  # answer, as any other refusal is.
+  private def ask_upstream(upstream : DnsUpstream, name : String, types : Array(Int32)) : Array(Tuple(DnsMessage, String) | DnsError) | DnsError | Cancelled
+    label = upstream.label
+    ids = [] of UInt16
+    queries = [] of Bytes
+    types.each do |type|
+      id = 0_u16
+      unless upstream.zero_id?
+        # Distinct within the exchange: over one connection the ID is what
+        # an answer is matched to its query by.
+        id = (Random::Secure.next_u & 0xFFFF_u32).to_u16
+        while ids.includes?(id)
+          id = (Random::Secure.next_u & 0xFFFF_u32).to_u16
+        end
+      end
+      ids << id
+      queries << DnsMessage.query(id, name, type, DnsMessage::PADDING_BLOCK)
+    end
+    got = upstream.exchange(queries, @timeout_ms)
+    return got if got.is_a?(Cancelled)
+    return got.about(name, label) if got.is_a?(DnsError)
+    return DnsMessage.malformed("#{got.size} answers to #{queries.size} queries").about(name, label) unless got.size == queries.size
+    answers = [] of Tuple(DnsMessage, String) | DnsError
+    index = 0
+    while index < got.size
+      answers << Resolver.read_streamed(got[index], ids[index], name, types[index], label)
+      index = index + 1
+    end
+    answers
+  end
+
+  # An answer that came over a stream, read: see `ask_upstream`.
+  def self.read_streamed(bytes : Bytes, id : UInt16, name : String, type : Int32, label : String) : Tuple(DnsMessage, String) | DnsError
+    message = DnsMessage.parse(bytes)
+    return message.about(name, label) if message.is_a?(DnsError)
+    return DnsMessage.malformed("the answer is not to the question asked").about(name, label) unless message.answers?(id, name, type)
+    return DnsMessage.malformed("the answer is truncated (TC), which an answer over a stream never is").about(name, label) if message.truncated?
+    ends = DnsMessage.ends_at(bytes)
+    return DnsMessage.malformed("its records run past the message").about(name, label) if ends < 0
+    return DnsMessage.malformed("oversized: #{bytes.size - ends} bytes past the end of the message").about(name, label) if ends < bytes.size
+    read_rcode(message, name, label)
+  end
+
+  def self.rcode_name(rcode : Int32) : String
+    case rcode
+    when DnsMessage::RCODE_FORMERR then "FORMERR"
+    when DnsMessage::RCODE_NOTIMP  then "NOTIMP"
+    when DnsMessage::RCODE_REFUSED then "REFUSED"
+    when DnsMessage::RCODE_BADVERS then "BADVERS"
+    else                                "RCODE #{rcode}"
+    end
+  end
+
+  # One query to one server over UDP, and the wait for its answer. The
+  # socket is closed here on every way out, rather than by a `defer`: a
+  # deferred close captured the descriptor in a closure the wasm32 code
+  # generator could not lay out ("GEP into unsized type", measured), and
+  # the one place to close is as plain.
+  private def ask(server : NameServer, name : String, type : Int32) : DnsMessage | DnsError | Cancelled
+    id = (Random::Secure.next_u & 0xFFFF_u32).to_u16
+    query = DnsMessage.query(id, name, type)
+    fd = IyiSocket.__sys_dgram_socket(server.family)
+    return failed(name, server, SocketError.new("create a socket", IyiSocket.__sys_code(fd.to_i64))) if fd < 0
+    answer = ask_on(fd, server, query, id, name, type)
+    IyiSocket.__sys_close(fd)
+    return ask_tcp(server, query, id, name, type) if answer.is_a?(DnsMessage) && answer.truncated?
+    answer
+  end
+
+  private def ask_on(fd : Int32, server : NameServer, query : Bytes, id : UInt16, name : String, type : Int32) : DnsMessage | DnsError | Cancelled
+    connected = IyiSocket.__sys_dgram_connect(fd, server.address, server.family)
+    return failed(name, server, SocketError.new("connect", IyiSocket.__sys_code(connected.to_i64))) if connected < 0
+    sent = IyiSocket.__sys_dgram_send(fd, query.to_unsafe, query.size.to_u64)
+    return failed(name, server, SocketError.new("send", IyiSocket.__sys_code(sent))) if sent < 0_i64
+    buffer = Pointer(UInt8).malloc(65536_u64)
+    unread = nil.as(DnsError?)
+    deadline = Resolver.now_ms + @timeout_ms.to_i64
+    while true
+      left = deadline - Resolver.now_ms
+      break if left <= 0_i64
+      ready = IyiSocket.__sys_dgram_wait(fd, left.to_i32)
+      return ready if ready.is_a?(Cancelled)
+      next unless ready
+      count = IyiSocket.__sys_recv(fd, buffer, 65536_u64)
+      if count < 0_i64
+        next if IyiSocket.__sys_would_block?(count)
+        return failed(name, server, SocketError.new("receive", IyiSocket.__sys_code(count)))
+      end
+      packet = Bytes.new(buffer, count.to_i32)
+      # Somebody else's datagram, or a forger's guess: not an answer.
+      next unless DnsMessage.id_of(packet) == id.to_i32
+      message = DnsMessage.parse(packet)
+      if message.is_a?(DnsError)
+        unread = message.about(name, server.label)
+        next
+      end
+      next unless message.answers?(id, name, type)
+      return message
+    end
+    unread || DnsError.new(DnsError::TIMED_OUT, name, server.label)
+  end
+
+  # The same query over TCP, to the same server and port, for an answer
+  # too large for a datagram: two bytes of length before the message,
+  # each way (RFC 1035 4.2.2), every wait bounded by `timeout_ms`.
+  private def ask_tcp(server : NameServer, query : Bytes, id : UInt16, name : String, type : Int32) : DnsMessage | DnsError | Cancelled
+    peer = IyiSocket.connect_to(server.address, server.family, "#{server.label} over TCP", @timeout_ms)
+    return peer if peer.is_a?(Cancelled)
+    return failed(name, server, peer) if peer.is_a?(SocketError)
+    answer = ask_tcp_on(peer, server, query, id, name, type)
+    peer.close
+    answer
+  end
+
+  private def ask_tcp_on(peer : IyiSocket, server : NameServer, query : Bytes, id : UInt16, name : String, type : Int32) : DnsMessage | DnsError | Cancelled
+    peer.read_timeout_ms = @timeout_ms
+    peer.write_timeout_ms = @timeout_ms
+    framed = Bytes.new(query.size + 2)
+    framed[0] = (query.size >> 8).to_u8
+    framed[1] = (query.size & 255).to_u8
+    (framed.to_unsafe + 2).copy_from(query.to_unsafe, query.size)
+    wrote = peer.write(framed.to_unsafe, framed.size)
+    return wrote if wrote.is_a?(Cancelled)
+    return failed(name, server, wrote) if wrote.is_a?(SocketError)
+    head = read_fully(peer, 2, name, server)
+    return head unless head.is_a?(Bytes)
+    body = read_fully(peer, (head[0].to_i32 << 8) | head[1].to_i32, name, server)
+    return body unless body.is_a?(Bytes)
+    message = DnsMessage.parse(body)
+    return message.about(name, server.label) if message.is_a?(DnsError)
+    unless message.answers?(id, name, type)
+      return DnsMessage.malformed("the answer over TCP is not to the question asked").about(name, server.label)
+    end
+    message
+  end
+
+  private def read_fully(peer : IyiSocket, count : Int32, name : String, server : NameServer) : Bytes | DnsError | Cancelled
+    into = Bytes.new(count)
+    got = 0
+    while got < count
+      read = peer.read(into.to_unsafe + got, count - got)
+      return read if read.is_a?(Cancelled)
+      return failed(name, server, read) if read.is_a?(SocketError)
+      return DnsMessage.malformed("the answer over TCP ended after #{got} of #{count} bytes").about(name, server.label) if read == 0
+      got = got + read
+    end
+    into
+  end
+
+  # A transport's failure as the resolver's: out of time, or unreachable
+  # with the socket's own sentence for why.
+  private def failed(name : String, server : NameServer, error : SocketError) : DnsError
+    return DnsError.new(DnsError::TIMED_OUT, name, server.label) if error.timed_out?
+    DnsError.new(DnsError::UNREACHABLE, name, server.label, error.reason)
+  end
+
+  # The monotonic clock in milliseconds: the runtime's, which its sleep
+  # queue keeps deadlines by. A target without the runtime has no socket
+  # to wait on either (`__sys_dgram_socket` refuses there), so nothing
+  # there reads a time.
+  def self.now_ms : Int64
+    {% if @top_level.has_constant?("IyiScheduler") %}
+      __iyi_monotonic_ns // 1000000_i64
+    {% else %}
+      0_i64
+    {% end %}
+  end
 end

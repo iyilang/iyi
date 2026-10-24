@@ -35,9 +35,24 @@ module Iyi
     # Heredocs pushed when found. Should be processed when encountering a newline
     getter heredocs = [] of {Token::DelimiterState, HeredocItem}
 
-    property macro_expansion_pragmas : Hash(Int32, Array(LocPragma))? = nil
+    # iyi: the location pragmas of the text a macro wrote, in the order of
+    # the positions they fire at, and the next one to fire. A cursor rather
+    # than a queue emptied as it fires, so `lookahead` can rewind it.
+    @location_pragmas : Array({Int32, Array(LocPragma)})? = nil
+    @location_pragma_index = 0
 
-    alias LocPragma = LocSetPragma | LocPushPragma | LocPopPragma
+    def macro_expansion_pragmas=(pragmas : Hash(Int32, Array(LocPragma))?)
+      @location_pragmas = pragmas.try(&.to_a)
+      @location_pragma_index = 0
+    end
+
+    # iyi: when set, the numbers of the lines whose line break lies inside a
+    # literal in macro text, a stretch the parser keeps as text. Only
+    # `Iyi.with_crlf` asks: a parse shows it the literals in code, and these
+    # are the ones it cannot see.
+    property macro_literal_breaks : Set(Int32)? = nil
+
+    alias LocPragma = LocSetPragma | LocPushPragma | LocPopPragma | LocOriginPragma
 
     record LocSetPragma,
       filename : String,
@@ -57,6 +72,14 @@ module Iyi
     record LocPopPragma do
       def run_pragma(lexer)
         lexer.pop_location
+      end
+    end
+
+    # iyi: the source line a stretch of an inline macro's output was written
+    # on. Nothing for the lexer to do: `Program#parse_macro_source` reads
+    # these into the `VirtualFile`'s line origins before the lexer runs.
+    record LocOriginPragma, line_number : Int32 do
+      def run_pragma(lexer)
       end
     end
 
@@ -107,9 +130,80 @@ module Iyi
       @stacked_column_number = 1
     end
 
+    # iyi: which language the source is written in is the one thing the lexer
+    # cannot read out of the source, so it comes off the name — `!` is not
+    # part of a name in a `.iyi` file (SPEC.md III.1.7) and is part of one in
+    # a `.cr` file.
+    #
+    # A macro expansion's name is a `VirtualFile`, which is no extension at
+    # all, so every expansion was reparsed by the other language's rules and
+    # no macro could generate the propagation operator: `v = risky!` became a
+    # call to a method named `risky!` — "undefined local variable or method
+    # 'risky!'", with "did you mean 'risky'?" underneath — and `v = risky(1)!`
+    # was "unexpected token: !". An expansion is in the language of the file
+    # it expands in, which is where its chain of locations ends.
     def filename=(filename)
       @filename = filename
-      @iyi = filename.is_a?(String) && filename.ends_with?(".iyi")
+      @iyi = Lexer.iyi_source?(filename)
+    end
+
+    def self.iyi_source?(filename) : Bool
+      case filename
+      when String
+        filename.ends_with?(".iyi")
+      when VirtualFile
+        iyi_source?(filename.expanded_location.try(&.filename))
+      else
+        false
+      end
+    end
+
+    # iyi: `UP.IYI`, `x.Iyi`: the extension `iyi_source?` answers for, in
+    # another case. The language is read off the name with `ends_with?`, so
+    # on every system such a file is not an iyi file - and Windows opens it
+    # under either spelling, so it was half of one there: `iyi run UP.IYI`
+    # got iyi's prelude (the entry check folded case) and the other
+    # language's lexer, and answered `unexpected token: "!"` about valid
+    # iyi, while `fmt DIR` and `test DIR` walked past it and exited 0. One
+    # rule on every system, so a project that builds on one builds on all:
+    # the verbs that are handed or walk to a file *stored* under such a name
+    # refuse it, by name (a name typed in another case is read as the one
+    # stored, `stored_name`).
+    def self.iyi_miscased?(filename : String) : Bool
+      return false if filename.ends_with?(".iyi")
+      tail = filename[-4..]?
+      !tail.nil? && tail.compare(".iyi", case_insensitive: true) == 0
+    end
+
+    # The sentence for a name `iyi_miscased?` answers yes for, shared by
+    # every verb that is handed one or walks to one, so they refuse it alike.
+    def self.iyi_miscased_sentence(filename : String) : String
+      "#{Iyi.relative_filename(filename)} ends in `#{filename[-4..]}`, and an iyi source file ends in " \
+      "`.iyi`: the language is read off the extension, in lower case, on " \
+      "every system. Rename it #{File.basename(filename).rchop(filename[-4..])}.iyi"
+    end
+
+    # iyi: a file's name as its directory stores it, for `iyi_miscased?`
+    # and `iyi_source?` to read. On Windows a name typed in another case
+    # opens the same file, so `iyi run HDR/APP/MAIN.IYI` of a stored
+    # `main.iyi` got iyi's prelude and the other language's lexer. The
+    # stored name is the file's on every system: typed in any case it is
+    # read as what it is, and a file stored as `UP.IYI` is refused as one.
+    def self.stored_name(path : String) : String
+      {% if flag?(:win32) %}
+        base = File.basename(path)
+        children =
+          begin
+            Dir.children(File.dirname(path))
+          rescue File::Error
+            return path
+          end
+        return path if children.includes?(base)
+        if stored = children.find { |child| child.compare(base, case_insensitive: true) == 0 }
+          return path.rchop(base) + stored
+        end
+      {% end %}
+      path
     end
 
     def next_token
@@ -147,16 +241,16 @@ module Iyi
       start = current_pos
 
       # Fix location by `macro_expansion_pragmas`.
-      if me_pragmas = macro_expansion_pragmas
+      if me_pragmas = @location_pragmas
         # It might happen that the current "start" already passed some
         # location pragmas, so we must consume all of those. For example
         # if one does `@{{...}}` inside a macro, "start" will be one less
         # number than the pragma, and after consuming "@..." if we don't
         # consume the pragmas generated by `{{...}}` we'll be in an
         # incorrect location.
-        while me_pragmas.first_key?.try &.<=(start)
-          _, pragmas = me_pragmas.shift
-          pragmas.each &.run_pragma self
+        while (entry = me_pragmas[@location_pragma_index]?) && entry[0] <= start
+          @location_pragma_index += 1
+          entry[1].each &.run_pragma self
         end
       end
 
@@ -164,6 +258,7 @@ module Iyi
 
       case current_char
       when '\0'
+        check_nul_byte
         @token.type = :EOF
       when ' ', '\t'
         consume_whitespace
@@ -210,6 +305,9 @@ module Iyi
           @token.type = :OP_EQ
         end
       when '!'
+        # iyi: the parser reads the byte before a `!` to tell `g(x)!` from
+        # `g(x) !`, since the argument list swallows the space after `)`.
+        @token.start = start
         case next_char
         when '='
           next_char :OP_BANG_EQ
@@ -307,10 +405,12 @@ module Iyi
         elsif @wants_def_or_macro_name
           @token.type = :OP_SLASH
         elsif @slash_is_regex
+          iyi_refuse_slash_comment(char)
           delimited_pair :regex, '/', '/', start
         elsif char.ascii_whitespace? || char == '\0'
           @token.type = :OP_SLASH
         elsif @wants_regex
+          iyi_refuse_slash_comment(char)
           delimited_pair :regex, '/', '/', start
         else
           @token.type = :OP_SLASH
@@ -375,6 +475,10 @@ module Iyi
       when ':'
         if next_char == ':'
           next_char :OP_COLON_COLON
+        elsif @iyi && current_char == '=' && !peek_next_char.in?('=', '~')
+          # iyi: Go's `x := 5`. `:=` is no symbol (`:==` and `:=~` are),
+          # and the report was "unknown token: ' '", one column past it.
+          raise "there is no `:=`: a variable is `x = 5`, and its type is the value's", @token.line_number, @token.column_number
         elsif @wants_symbol
           consume_symbol
         else
@@ -1119,7 +1223,14 @@ module Iyi
         @token.doc_buffer = doc_buffer = IO::Memory.new
       end
 
-      doc_buffer.write slice_range(start_pos)
+      # iyi: without the `\r` a CRLF line ends in, which the slice keeps
+      # because `skip_comment` stops at the `\n`: `iyi doc` and `mod context
+      # --json` of a CRLF file shipped `"Doubles *x*.\r\n\r\nSecond
+      # paragraph.\r"`, where the LF copy says `"Doubles *x*.\n\nSecond
+      # paragraph."`.
+      line = slice_range(start_pos)
+      line = line[0, line.size - 1] if line.size > 0 && line[line.size - 1] == '\r'.ord
+      doc_buffer.write line
     end
 
     def skip_comment
@@ -1693,6 +1804,20 @@ module Iyi
       false
     end
 
+    # iyi: a `/` where an operand starts, followed by `*` or by a second `/`
+    # and a space, is a C-family comment, not a regex: `/* say hi */` was
+    # told to `import std/regex`, and `// say hi` was "unexpected token:
+    # \"say\"". A regex cannot start with `*`, and an empty one followed by
+    # words is no expression.
+    private def iyi_refuse_slash_comment(char : Char) : Nil
+      return unless @iyi
+      if char == '*'
+        raise "`/*` opens no comment here: a comment starts with `#` and runs to the end of its line, one `#` per line (`# say hi`)", @token.line_number, @token.column_number
+      elsif char == '/' && ((after = peek_next_char).ascii_whitespace? || after == '\0')
+        raise "`//` opens no comment here: a comment starts with `#` and runs to the end of its line (`# say hi`)", @token.line_number, @token.column_number
+      end
+    end
+
     def raise_unterminated_quoted(delimiter_state)
       msg = case delimiter_state.kind
             when .command? then "Unterminated command literal"
@@ -1731,6 +1856,7 @@ module Iyi
       start = current_pos
 
       if current_char == '\0'
+        check_nul_byte
         @token.type = :EOF
         return @token
       end
@@ -1858,7 +1984,9 @@ module Iyi
           beginning_of_line = false
           case next_char
           when 'd'
-            if whitespace && !ident_part_or_end?(peek_next_char) && peek_next_char != ':'
+            # iyi: `end!` closes a block and propagates its error, so it
+            # counts as an `end` here, the way `next_token` reads it.
+            if whitespace && (!ident_part_or_end?(peek_next_char) || (@iyi && peek_next_char == '!')) && peek_next_char != ':'
               if nest == 0 && control_nest == 0
                 next_char :MACRO_END
                 @token.macro_state = Token::MacroState.default
@@ -1891,6 +2019,7 @@ module Iyi
             (whitespace && !delimiter_state && char == 'e')
         case char
         when '\n'
+          macro_literal_breaks.try &.add(@line_number) if delimiter_state
           incr_line_number 0
           whitespace = true
           beginning_of_line = true
@@ -2041,13 +2170,21 @@ module Iyi
       Token::DelimiterState.new(delimiter_kind, current_char, closing_char, allow_escapes: !char.in?('q', 'w', 'i'))
     end
 
+    # iyi: a lookahead that fails puts back the location pragmas it read too,
+    # with the place they had set. It put back the position, line and column
+    # only, so one that read into a `{{x}}` left the push it had fired in
+    # force and the pragmas spent: the text was lexed again with the stacked
+    # column still counting, and after `a = 1` the parser's look for a `.`
+    # on the next line - `  {{x}}.nope` - put `nope` at column 8, not 5.
     def lookahead(preserve_token_on_fail = false, &)
       old_pos, old_line, old_column = current_pos, @line_number, @column_number
+      old_place = {@filename, @stacked, @stacked_filename, @stacked_line_number, @stacked_column_number, @location_pragma_index}
       @temp_token.copy_from(@token) if preserve_token_on_fail
 
       result = yield
       unless result
         self.current_pos, @line_number, @column_number = old_pos, old_line, old_column
+        @filename, @stacked, @stacked_filename, @stacked_line_number, @stacked_column_number, @location_pragma_index = old_place
         @token.copy_from(@temp_token) if preserve_token_on_fail
       end
       result
@@ -2119,7 +2256,17 @@ module Iyi
       when 'f'
         MacroKeywordState::Other if char_sequence?('u', 'n') && peek_not_ident_part_or_end_next_char
       when 'i'
-        MacroKeywordState::Other if beginning_of_line && next_char == 'f' && peek_not_ident_part_or_end_next_char
+        case next_char
+        when 'f'
+          MacroKeywordState::Other if beginning_of_line && peek_not_ident_part_or_end_next_char
+        when 'm'
+          # iyi: `impl` opens a block that its `end` closes, and a macro
+          # body that wrote one - a derive implementing a trait for the
+          # type it is attached to - ended at that `end` instead: "unexpected
+          # 'end': nothing is open for it to close". Only in a `.iyi` file,
+          # where it is a keyword; in a `.cr` file it is a name.
+          MacroKeywordState::Other if @iyi && char_sequence?('p', 'l') && peek_not_ident_part_or_end_next_char
+        end
       when 'l'
         MacroKeywordState::Other if char_sequence?('i', 'b') && peek_not_ident_part_or_end_next_char
       when 'm'
@@ -2136,6 +2283,9 @@ module Iyi
         when 't'
           MacroKeywordState::Other if char_sequence?('r', 'u', 'c', 't') && !ident_part_or_end?(peek_next_char) && next_char
         end
+      when 't'
+        # iyi: `trait`, for the same reason as `impl` above.
+        MacroKeywordState::Other if @iyi && char_sequence?('r', 'a', 'i', 't') && peek_not_ident_part_or_end_next_char
       when 'u'
         if next_char == 'n'
           case next_char
@@ -2748,6 +2898,17 @@ module Iyi
       if error = @reader.error
         ::raise InvalidByteSequenceError.new("Unexpected byte 0x#{error.to_s(16)} at position #{@reader.pos}, malformed UTF-8")
       end
+    end
+
+    # iyi: the reader answers '\0' past the last byte, and every loop here
+    # takes a '\0' for the end, so a NUL byte inside a file ended it there
+    # without a word: `puts 1<NUL>` and the five lines after it compiled as
+    # `puts 1`, `iyi check` exited 0, and `fmt` wrote back the part before
+    # it - a UTF-16 file without its mark became `p`. A NUL short of the
+    # end is refused where it is.
+    private def check_nul_byte : Nil
+      return unless current_pos < @reader.string.bytesize
+      raise "unexpected NUL byte: source is UTF-8 text, which holds none (a UTF-16 file holds one in every ASCII character)"
     end
 
     def next_char

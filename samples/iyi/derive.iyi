@@ -16,8 +16,7 @@
 
 module samples/derive
 
-import std/derives
-using std/derives
+import std/derives::*
 
 pub struct Point
   @x : Int32

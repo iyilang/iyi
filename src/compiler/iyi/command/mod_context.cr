@@ -21,6 +21,60 @@ require "file_utils"
 require "../mod/installer"
 
 class Iyi::Command
+  # One import's block in the pack: what the file wrote, the surface it
+  # resolved to, why it did not, and — for a module handed on by a
+  # facade's `pub import` — the import that hands it on.
+  alias ContextBlock = {String, IyiMod::Artifact?, String, String?}
+
+  # `── import app/thing ──`, and for a re-export the facade it came
+  # through, because that is the line a reader has to write to reach it.
+  private def mod_context_header(written : String, via : String?) : String
+    return "── import #{written} ──" unless via
+    "── import #{via} → #{written} (re-exported) ──"
+  end
+
+  # iyi: the modules a facade hands on. `pub import` is a promise to the
+  # consumer — a file that imports the facade may import names from the module the
+  # facade re-exported, without an import of its own (R-2b) — and the pack
+  # showed only what the file's own import lines named. So a consumer
+  # reading its context saw a facade with two functions on it, wrote
+  # `import deep/core::{core_value}` anyway because the compiler accepts
+  # it, and had no way to learn what `deep/core` offered. Every module the
+  # consumer may name is in the pack now, marked with the facade that
+  # hands it on, and the budget ladder cuts them like any other block.
+  #
+  # Breadth-first and by module name, so a facade of a facade arrives once
+  # and a cycle cannot spin: the artifacts are the ones each block's own
+  # compile already emitted into the same directory.
+  private def mod_context_reexports(blocks : Array(ContextBlock), emit_dir : String, artifact_root : String) : Nil
+    seen = Set(String).new(blocks.map(&.[0]))
+    index = 0
+    while index < blocks.size
+      written, artifact, _, _ = blocks[index]
+      index += 1
+      next unless artifact
+      artifact.imports.each do |edge|
+        next unless edge.exported
+        next unless seen.add?(edge.module_name)
+        handed = mod_context_emitted(edge.module_name, emit_dir) ||
+                 mod_context_artifact(edge.module_name, artifact_root)
+        next unless handed
+        blocks << {edge.module_name, handed, "", written}
+      end
+    end
+  end
+
+  # An artifact this run's own compiles wrote: `--emit-iyimod DIR` names a
+  # file after the module path, so a re-exported module is already on disk
+  # by the time the facade's block is read back.
+  private def mod_context_emitted(name : String, emit_dir : String) : IyiMod::Artifact?
+    path = Iyi.native_path(File.join(emit_dir, "#{name}.iyimod"))
+    return nil unless File.file?(path)
+    IyiMod.read(path)
+  rescue IyiMod::Error
+    nil
+  end
+
   private def mod_context
     # Read from either side of the path, and refuse what is left over. The
     # loop used to stop at the first word that was not a flag, so
@@ -40,6 +94,9 @@ class Iyi::Command
         value = options.shift?
         budget = value.try(&.to_i?)
         abort! "--budget takes a token count", :USAGE_ERROR unless budget && budget > 0
+      when "--help", "-h"
+        puts mod_context_usage
+        exit
       when .starts_with?('-')
         abort! "mod context: unknown flag #{option}", :USAGE_ERROR
       else
@@ -67,11 +124,17 @@ class Iyi::Command
     end
     filename = File.expand_path(filename)
     entry_dir = File.dirname(filename)
+    # The workspace root rather than the entry's directory, for the
+    # manifest and the artifacts: IV.6 read backwards, the way a build, the
+    # server and `iyi test` read it. A file whose path ends with its own
+    # `module` header's path names the root above both, and that is where a
+    # workspace keeps `iyi.mod` and `mods`.
+    root = Compiler.entry_root_of(filename, File.read(filename))
 
     imports = mod_context_imports(filename)
     table =
       begin
-        Mod::Installer.table_for(entry_dir)
+        @mod_context_table = Mod::Installer.table_for(root)
       rescue ex : Mod::ModError
         abort! ex.message.to_s, :USAGE_ERROR
       end
@@ -79,9 +142,11 @@ class Iyi::Command
     emit_dir = File.tempname("iyi-context", nil)
     Dir.mkdir_p(emit_dir)
     begin
-      blocks = imports.map do |written|
-        mod_context_block(written, entry_dir, table, emit_dir)
+      blocks = [] of ContextBlock
+      imports.each do |written|
+        blocks << mod_context_block(written, entry_dir, table, emit_dir, root)
       end
+      mod_context_reexports(blocks, emit_dir, root)
 
       if as_json
         JSON.build(STDOUT) do |json|
@@ -89,9 +154,10 @@ class Iyi::Command
             json.field "file", filename
             json.field "imports" do
               json.array do
-                blocks.each do |(written, artifact, failure)|
+                blocks.each do |(written, artifact, failure, via)|
                   json.object do
                     json.field "import", written
+                    json.field "via", via if via
                     if artifact
                       json.field "api" { IyiMod.api_json(artifact, json) }
                     else
@@ -110,10 +176,10 @@ class Iyi::Command
         if blocks.empty?
           puts "#{filename} imports nothing; its context is the prelude."
         end
-        blocks.each do |(written, artifact, failure)|
-          puts "── import #{written} ──"
+        blocks.each do |(written, artifact, failure, via)|
+          puts mod_context_header(written, via)
           if artifact
-            print mod_context_consumer_lines(written, artifact)
+            print mod_context_consumer_lines(written, artifact, via)
             IyiMod.surface artifact, STDOUT
           else
             puts "  (#{failure})"
@@ -136,18 +202,18 @@ class Iyi::Command
   # the commentary), then whole surfaces collapse to a header that names
   # the module and what eliding it cost. Every import is always named:
   # a pack that silently dropped an import would ground a wrong edit.
-  private def mod_context_budgeted(blocks : Array({String, IyiMod::Artifact?, String}), budget : Int32) : Nil
+  private def mod_context_budgeted(blocks : Array(ContextBlock), budget : Int32) : Nil
     if blocks.empty?
       puts "(imports nothing; the context is the prelude)"
       return
     end
 
-    render = ->(block : {String, IyiMod::Artifact?, String}, docs : Bool) do
-      written, artifact, failure = block
+    render = ->(block : ContextBlock, docs : Bool) do
+      written, artifact, failure, via = block
       String.build do |io|
-        io << "── import " << written << " ──\n"
+        io << mod_context_header(written, via) << '\n'
         if artifact
-          io << mod_context_consumer_lines(written, artifact)
+          io << mod_context_consumer_lines(written, artifact, via)
           IyiMod.surface artifact, io, docs: docs
         else
           io << "  (" << failure << ")\n"
@@ -169,9 +235,9 @@ class Iyi::Command
 
     (blocks.size - 1).downto(0) do |index|
       break if total <= budget
-      written = blocks[index][0]
+      written, _, _, via = blocks[index]
       cost = tokens.call(texts[index])
-      header = "── import #{written} ── (surface elided: ~#{cost} tokens; raise --budget to see it)\n\n"
+      header = "#{mod_context_header(written, via)} (surface elided: ~#{cost} tokens; raise --budget to see it)\n\n"
       total -= cost - tokens.call(header)
       texts[index] = header
     end
@@ -183,27 +249,73 @@ class Iyi::Command
   # The two lines a consumer writes to reach what the block shows, spelled
   # out with every exported name in them. The surface says what a module
   # offers and nothing about how a file names it; the raw sources a pack
-  # replaces carry their *own* `import`/`using` lines and so show the
+  # replaces carry their *own* `import` lines and so show the
   # spelling by accident, and the rounds arm of `bench/context_pack.py`
   # lost a round to exactly that — a model that wrote `import kemal/dsl`,
   # called `before_all` bare, and was refused for the missing `using`
-  # (AI_FIRST.md §5, the third run). The language server's completion
-  # attaches the same pair to every export it offers.
-  private def mod_context_consumer_lines(written : String, artifact : IyiMod::Artifact) : String
-    names = artifact.exports.functions.map(&.name)
-    artifact.exports.types.each do |declaration|
-      names << declaration.name if declaration.visibility == "pub"
-    end
-    names.uniq!
+  # (the keyword `import X::{...}` replaced; AI_FIRST.md §5, the third
+  # run). The language server's completion attaches the same pair to
+  # every export it offers.
+  private def mod_context_consumer_lines(written : String, artifact : IyiMod::Artifact, via : String? = nil) : String
+    # Every name the surface below lists, constants and macros included:
+    # `import app/misc::{f, Marked}` was the line for a module that exports
+    # `LIMIT` and `twice` too, and `import app/misc::{LIMIT, twice, f}`
+    # checks.
+    names = IyiMod.surface_names(artifact)
     String.build do |io|
       io << "# A file that uses this writes, after its own `module` line:\n"
-      io << "#   import " << written << '\n'
-      unless names.empty?
-        io << "#   using " << written << "::{"
+      if names.empty?
+        # Nothing to bring into scope, so the import alone. A module handed
+        # on by a facade is reached by importing the facade: `pub import`
+        # is what makes it reachable without an edge of its own (R-2b).
+        io << "#   import " << (via || written) << '\n'
+      else
+        # One line loads the module and names what it brings into scope.
+        io << "#   import " << written << "::{"
         names.join(io, ", ")
-        io << "}   # or `using " << written << "` for every name\n"
+        io << "}   # or `import " << written << "::*` for every name\n"
+      end
+      # A package module's qualified name is under the package's name, and
+      # nothing in its own `module` line below says so - a dependency's,
+      # by the requirement, and the project's own package's, by the name
+      # its artifact was written under (`Artifact#package_name`).
+      if qualified = mod_context_package_type(written) || mod_context_own_package_type(artifact)
+        io << "# qualified, the module is " << qualified << ": " << qualified << ".name\n"
       end
     end
+  end
+
+  # `IyiWeb::Codec` for `codec` of the project's own `iyi-web`; nil for a
+  # module of no package, or one whose path already begins with the name.
+  private def mod_context_own_package_type(artifact : IyiMod::Artifact) : String?
+    package = artifact.package_name
+    segments = artifact.module_name.split('/')
+    return nil if package.empty? || segments.first? == package
+    Parser.iyi_package_segments(package, segments).map(&.camelcase).join("::")
+  end
+
+  @mod_context_table = [] of {String, String}
+
+  # `Liba::Colors` for `example.com/liba/colors`, when *written* is a
+  # package module the package's name is put in front of; nil otherwise.
+  private def mod_context_package_type(written : String) : String?
+    path = Mod::Installer.expand(written, @mod_context_table)
+    @mod_context_table.each do |(prefix, _)|
+      next if prefix.starts_with?('@')
+      inner =
+        if path == prefix
+          Mod::ModFile.split_major(prefix)[0].rpartition('/')[2]
+        elsif path.starts_with?("#{prefix}/")
+          path[(prefix.size + 1)..]
+        else
+          next
+        end
+      segments = inner.split('/')
+      package = Mod::ModFile.package_name(prefix)
+      return nil unless package && segments.first? != package
+      return ([package] + segments).map(&.camelcase).join("::")
+    end
+    nil
   end
 
   # The file's imports, in order, by parsing — never by compiling. A file
@@ -242,10 +354,19 @@ class Iyi::Command
   # in-package path, so a package's surface is produced without a manifest
   # — which is the point: the module compiles alone (R-1), and this is that
   # fact worn as a tool.
-  private def mod_context_block(written : String, entry_dir : String, table : Array({String, String}), emit_dir : String) : {String, IyiMod::Artifact?, String}
-    source_path, expected_name = mod_context_resolve(written, entry_dir, table)
+  private def mod_context_block(written : String, entry_dir : String, table : Array({String, String}), emit_dir : String, artifact_root : String) : ContextBlock
+    source_path, expected_name = mod_context_resolve(written, entry_dir, table, artifact_root)
     unless source_path
-      return {written, nil, "does not resolve: no file and no requirement covers it"}
+      # No source anywhere, which is how a library arrives (III.7): the
+      # artifact *is* the surface, and reading one costs nothing next to
+      # the compile this method does for a module that has a file. A
+      # workspace that builds with `--use-iyimod mods` was told its
+      # imports do not resolve — the same hole the language server had,
+      # in the answer a model reads.
+      if artifact = mod_context_artifact(written, artifact_root)
+        return {written, artifact, "", nil}
+      end
+      return {written, nil, "does not resolve: no file, no artifact and no requirement covers it", nil}
     end
     # The root the module path hangs under, reached by dropping a directory
     # per segment of it. Chomping the name off the end arrived there only by
@@ -264,41 +385,62 @@ class Iyi::Command
     compiler.prelude = "iyi/prelude"
     compiler.no_codegen = true
     compiler.iyi_mod_table = table
+    # And the workspace's artifacts, for what *this* module imports: a
+    # module with a file can depend on one without (III.7), and compiling
+    # it alone without them answered "does not compile alone" about a
+    # program that builds. See `Compiler.workspace_artifacts`.
+    if artifacts = Compiler.workspace_artifacts(artifact_root)
+      compiler.use_iyimod = artifacts
+      compiler.iyi_prefers_source = true
+    end
     compiler.emit_iyimod = emit_dir
     compiler.stdout = IO::Memory.new
     compiler.stderr = IO::Memory.new
-    previous_path = ENV["IYI_PATH"]?
+    # The module's root as the project's, where the import is resolved
+    # first - not as the front of `IYI_PATH`, which a `;` in the root's
+    # name split in two on Windows (see `iyi doc`).
+    compiler.iyi_project_root = module_root
     begin
-      # The delimiter is the platform's, because `IyiPath` splits on the
-      # platform's: a `:`-joined list is one unusable entry on Windows.
-      ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(Process::PATH_DELIMITER)
       compiler.compile(
         Compiler::Source.new(entry, File.read(entry)),
         File.join(emit_dir, "unused"))
     rescue ex : Iyi::Error | Iyi::CodeError
-      return {written, nil, "does not compile alone: #{ex.message.to_s.lines.first?}"}
-    ensure
-      previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
+      # The diagnostic rather than the wrapper `while importing "X"` it
+      # arrives in — the same unwrapping `iyi doc` does, and for the same
+      # reason: this answer is what a reader acts on.
+      deepest = Iyi.deepest_error(ex)
+      return {written, nil, "does not compile alone: #{deepest.message.to_s.lines.first?}", nil}
     end
 
-    Dir.glob(::Path[emit_dir].to_posix.join("**", "*.iyimod")) do |candidate|
+    Dir.glob(Iyi.glob_root(emit_dir).join("**", "*.iyimod")) do |candidate|
       begin
         artifact = IyiMod.read(candidate)
-        return {written, artifact, ""} if artifact.module_name == expected_name
+        return {written, artifact, "", nil} if artifact.module_name == expected_name
       rescue IyiMod::Error
         next
       end
     end
-    {written, nil, "compiled, but no artifact carries module '#{expected_name}'"}
+    {written, nil, "compiled, but no artifact carries module '#{expected_name}'", nil}
   end
 
   # The same resolution order the build uses: the requirement table by
   # longest prefix, then the entry file's directory, then `IYI_PATH`. The
   # name an artifact carries is the in-package path for a package, the
   # written path otherwise.
-  private def mod_context_resolve(written : String, entry_dir : String, table : Array({String, String})) : {String?, String}
-    candidate, name = mod_context_names(written, entry_dir, table)
+  private def mod_context_resolve(written : String, entry_dir : String, table : Array({String, String}), header_root : String? = nil) : {String?, String}
+    candidate, name = mod_context_names(written, entry_dir, table, header_root)
     {File.file?(candidate) ? candidate : nil, name}
+  end
+
+  # iyi: the artifact a workspace keeps for *written*, or nil. `mods`
+  # beside the root, which is the name the tree's every example uses and
+  # the one `Lsp::Analysis` looks under.
+  private def mod_context_artifact(written : String, artifact_root : String) : IyiMod::Artifact?
+    path = Iyi.native_path(File.join(artifact_root, Compiler::ARTIFACT_DIR, "#{written}.iyimod"))
+    return nil unless File.file?(path)
+    IyiMod.read(path)
+  rescue IyiMod::Error
+    nil
   end
 
   # The file an import names and the module name it means, whether or not
@@ -306,11 +448,14 @@ class Iyi::Command
   # `import app/lib` names `app/lib.iyi` after the file is deleted exactly
   # as it did before — which is what lets `check --affected app/lib.iyi`
   # find the importers a deletion breaks.
-  private def mod_context_names(written : String, entry_dir : String, table : Array({String, String})) : {String, String}
+  private def mod_context_names(written : String, entry_dir : String, table : Array({String, String}), header_root : String? = nil) : {String, String}
+    # A short name the manifest gives is the path it names, as in a build.
+    written = Mod::Installer.expand(written, table)
     table.each do |(prefix, checkout)|
       inner =
         if written == prefix
-          prefix.rpartition('/')[2]
+          # A `/vN` suffix is a major version, not the package's name.
+          Mod::ModFile.split_major(prefix)[0].rpartition('/')[2]
         elsif written.starts_with?("#{prefix}/")
           written[(prefix.size + 1)..]
         else
@@ -321,6 +466,16 @@ class Iyi::Command
 
     local = File.join(entry_dir, "#{written}.iyi")
     return {local, written} if File.file?(local)
+
+    # Then the root the entry's own header names, as a build asks it
+    # (`SemanticVisitor#resolve_import`): `app/main.iyi` declaring `module
+    # app/main` imports `app/util` from the directory above `app`, and this
+    # answered "does not resolve" - exit 0 - about the module the same
+    # file builds against.
+    if header_root && header_root != entry_dir
+      rooted = Iyi.native_path(File.join(header_root, "#{written}.iyi"))
+      return {rooted, written} if File.file?(rooted)
+    end
 
     # Then the search path, which is where the library lives: a build
     # resolves `import std/path` from `IYI_PATH` and this did not look

@@ -3,34 +3,56 @@
 # Two dense arrays in insertion order, keys and values, and an index over
 # them: open addressing with linear probing from the key's hash to the
 # position of its entry, `-1` where a slot is free. The compact layout
-# Python's dictionary and Crystal's `Hash` both settled on, because
-# iteration then follows the order things went in — the order a word count prints its words, and the
-# order a person expects — and because the index is one array of integers
-# rather than a copy of the keys. Deletion closes the gap in the dense
-# arrays and rebuilds the index, which is the boring answer and the right
-# one for a table that forgets an entry now and then; the sample that asked
-# for it (`samples/iyi/sessions.iyi`) signs people out one at a time.
+# Python's dictionary and the other library's `Hash` both settled on:
+# iteration follows the order things went in - the order a word count
+# prints its words - and the index is one array of integers rather than a
+# copy of the keys. Deletion marks the entry gone and its index slot a
+# tombstone, `-2`, which a probe steps over and an insert may take; the
+# dense arrays close their gaps when they next grow. Closing the gap at
+# once and rebuilding the index emptied a set of 20,000 in 0.95 s.
 #
-# Hashing is `key.hash`, defined per type in this prelude. It is deliberately
-# not iyi's `Hashable` trait: that trait lives in `src/std`, which is the
-# opt-in library, and a prelude that depended on it would have the dependency
-# backwards.
+# Hashing is `key.hash`, defined per type in this prelude, and not iyi's
+# `Hashable` trait: that lives in `src/std`, the opt-in library, and a
+# prelude that depended on it would have the dependency backwards.
 class Hash(K, V)
   @keys : Pointer(K)
   @values : Pointer(V)
   @index : Pointer(Int32)
+  # Live entries; `@used` counts the dense slots written, gone ones too,
+  # `@gone` marks which are gone - null until the first deletion - and
+  # every entry before `@first` is gone, as in the other library's `Hash`.
   @size : Int32
+  @used : Int32
+  @gone : Pointer(Bool)
+  @first : Int32 = 0
   # Entries the dense arrays can hold; the index holds twice as many slots,
-  # so it is never more than half full and a probe always stops.
+  # so it is at most half full and a probe always stops. Zero until the
+  # first entry: a table never written - a trie's leaves - costs nothing.
   @capacity : Int32
+  # What `[]` answers for a key that is not there, when the table was made
+  # with one: `Hash(String, Int32).new(0)`, or a block that is handed the
+  # table and the key and may store what it answers - the counter a
+  # k-nucleotide count keeps, written the other library's way.
+  @default : Proc(Hash(K, V), K, V)?
 
   def initialize
     @size = 0
-    @capacity = 8
-    @keys = Pointer(K).malloc(8_u64)
-    @values = Pointer(V).malloc(8_u64)
-    @index = Pointer(Int32).malloc(16_u64)
-    clear_index
+    @used = 0
+    @gone = Pointer(Bool).new(0_u64)
+    @capacity = 0
+    @keys = Pointer(K).new(0_u64)
+    @values = Pointer(V).new(0_u64)
+    @index = Pointer(Int32).new(0_u64)
+    @default = nil
+  end
+
+  def initialize(&block : Hash(K, V), K -> V)
+    initialize
+    @default = block
+  end
+
+  def self.new(default : V) : Hash(K, V)
+    new { |table, key| default }
   end
 
   def size : Int32
@@ -42,17 +64,20 @@ class Hash(K, V)
   end
 
   def []=(key : K, value : V) : V
+    grow if @capacity == 0
     slot = slot_for(key)
     entry = @index[slot]
     if entry < 0
-      if @size == @capacity
+      if @used == @capacity
         # The index is rebuilt by the growth, so the key's slot is asked again.
         grow
         slot = slot_for(key)
       end
-      entry = @size
+      entry = @used
       @index[slot] = entry
       @keys[entry] = key
+      @gone[entry] = false if @gone.address != 0_u64
+      @used = @used + 1
       @size = @size + 1
     end
     @values[entry] = value
@@ -60,46 +85,68 @@ class Hash(K, V)
   end
 
   def []?(key : K) : V?
-    entry = @index[slot_for(key)]
+    entry = entry_of(key)
     entry < 0 ? nil : @values[entry]
   end
 
   def [](key : K) : V
-    entry = @index[slot_for(key)]
-    raise "no such key #{key.inspect}" if entry < 0
+    entry = entry_of(key)
+    if entry < 0
+      if default = @default
+        return default.call(self, key)
+      end
+      raise "no such key #{key.inspect}"
+    end
     @values[entry]
   end
 
   def has_key?(key : K) : Bool
-    @index[slot_for(key)] >= 0
+    entry_of(key) >= 0
   end
 
-  # The value the key had, or nil. The entries after it move down one, so
-  # the order of what remains is the order it went in, and the index is
-  # built again over what is left — the whole table, once per deletion,
-  # rather than tombstones in the index that every probe would have to
-  # step over from then on.
+  # The value the key had, or nil. The entry is marked gone where it
+  # stands, so the order of what remains is the order it went in, and its
+  # index slot becomes a tombstone. `each` starts past the gone at the
+  # front: from entry 0, taking the oldest key and deleting it until none
+  # was left stepped over every one gone before, 197 ms for 40,000.
   def delete(key : K) : V?
-    entry = @index[slot_for(key)]
+    return nil if @capacity == 0
+    slot = slot_for(key)
+    entry = @index[slot]
     return nil if entry < 0
     value = @values[entry]
-    while entry + 1 < @size
-      @keys[entry] = @keys[entry + 1]
-      @values[entry] = @values[entry + 1]
-      entry = entry + 1
+    if @gone.address == 0_u64
+      @gone = Pointer(Bool).malloc(@capacity.to_u64)
+      index = 0
+      while index < @capacity
+        @gone[index] = false
+        index = index + 1
+      end
     end
+    @gone[entry] = true
+    while @first < @used && @gone[@first]
+      @first = @first + 1
+    end
+    @index[slot] = -2
     @size = @size - 1
-    rebuild_index
     value
   end
 
   # Every pair, in the order it went in.
   def each(& : K, V -> Nil) : Nil
-    entry = 0
-    while entry < @size
-      yield @keys[entry], @values[entry]
+    entry = @first
+    while entry < @used
+      yield @keys[entry], @values[entry] unless @gone.address != 0_u64 && @gone[entry]
       entry = entry + 1
     end
+  end
+
+  # Every pair as a tuple, in the order it went in - what a sort by value
+  # starts from.
+  def to_a : Array(Tuple(K, V))
+    pairs = Array(Tuple(K, V)).new(@size)
+    each { |key, value| pairs << {key, value} }
+    pairs
   end
 
   # The keys, and the values, each in the order they went in.
@@ -115,59 +162,453 @@ class Hash(K, V)
     result
   end
 
-  # `{"a" => 1, "b" => 2}`, in insertion order, both sides inspected.
+  # ---- what a program asks of a table beyond `[]` and `each`
+  #
+  # Written here rather than got from `std/enumerable`: that trait's `each`
+  # hands on one element, and this one hands on a key and a value. Being
+  # `Enumerable` would mean yielding a tuple, and a block that names one
+  # parameter, `table.each { |key| }`, would be handed the pair instead of
+  # the key; its `select`, `reject` and `map` would also answer arrays of
+  # pairs where the other library's answer tables. So every block below
+  # takes the key and the value, as `each` does, and the questions that
+  # answer a table answer one.
+
+  # The value, or *default* when the key has none: the call says what a
+  # missing key answers, so a default the table was made with is not asked.
+  def fetch(key : K, default : D) : V | D forall D
+    entry = entry_of(key)
+    entry < 0 ? default : @values[entry]
+  end
+
+  # The value, or what the block answers for the missing key.
+  def fetch(key : K, & : K -> U) : V | U forall U
+    entry = entry_of(key)
+    entry < 0 ? (yield key) : @values[entry]
+  end
+
+  # `table.dig("a", "b")`: the value at the first key, then the value at the
+  # next key inside that, for every key given. A value that cannot be dug
+  # into with the keys left is refused, naming the key that led to it, and
+  # a missing key is refused as `[]` refuses it; `dig?` answers nil for both.
+  def dig(key : K)
+    self[key]
+  end
+
+  def dig(key : K, *subkeys)
+    value = self[key]
+    return value.dig(*subkeys) if value.responds_to?(:dig)
+    raise "the value at #{key.inspect} is not a table to dig into"
+  end
+
+  def dig?(key : K)
+    self[key]?
+  end
+
+  def dig?(key : K, *subkeys)
+    value = self[key]?
+    value.responds_to?(:dig?) ? value.dig?(*subkeys) : nil
+  end
+
+  # A new table with this one's pairs and then *other*'s, the second value
+  # winning for a key both have; the key and value types are both tables'.
+  # Neither table changes, and the copy has no default: one made for these
+  # keys and values need not answer for the wider types.
+  def merge(other : Hash(L, W)) : Hash(K | L, V | W) forall L, W
+    result = Hash(K | L, V | W).new
+    result.merge_in_place(self)
+    result.merge_in_place(other)
+  end
+
+  # The same, with the block answering for a key both tables have: it is
+  # handed the key, this table's value and *other*'s.
+  def merge(other : Hash(L, W), & : L, V | W, W -> V | W) : Hash(K | L, V | W) forall L, W
+    result = Hash(K | L, V | W).new
+    result.merge_in_place(self)
+    result.merge_in_place(other) { |key, mine, theirs| yield key, mine, theirs }
+  end
+
+  # *other*'s pairs written into this table, which is answered: the other
+  # library's `merge!`, spelled as SPEC.md III.1.7a spells the mutating one.
+  def merge_in_place(other : Hash(L, W)) : Hash(K, V) forall L, W
+    other.each { |key, value| self[key] = value }
+    self
+  end
+
+  def merge_in_place(other : Hash(L, W), & : L, V, W -> V) : Hash(K, V) forall L, W
+    other.each do |key, value|
+      entry = entry_of(key)
+      if entry < 0
+        self[key] = value
+      else
+        @values[entry] = yield key, @values[entry], value
+      end
+    end
+    self
+  end
+
+  # The key's value replaced by what the block answers for it, and the old
+  # value answered, as the other library answers it. A missing key is handed
+  # to the table's default and the block answers for that; with no default
+  # it is refused as `[]` refuses it.
+  def update(key : K, & : V -> V) : V
+    entry = entry_of(key)
+    if entry >= 0
+      old = @values[entry]
+      @values[entry] = yield old
+      return old
+    end
+    fallback = @default
+    raise "no such key #{key.inspect}" unless fallback
+    old = fallback.call(self, key)
+    self[key] = yield old
+    old
+  end
+
+  # Every value through the block, the keys and their order kept; the block
+  # may take the key as well, after the value, as the other library's does.
+  def transform_values(& : V, K -> W) : Hash(K, W) forall W
+    result = Hash(K, W).new
+    each { |key, value| result[key] = yield value, key }
+    result
+  end
+
+  # The same in place, which is why the type cannot change.
+  def transform_values_in_place(& : V, K -> V) : Hash(K, V)
+    each_entry { |entry| @values[entry] = yield @values[entry], @keys[entry] }
+    self
+  end
+
+  # Every key through the block, in order; two keys that become one keep the
+  # later value, as two writes of one key do.
+  def transform_keys(& : K, V -> L) : Hash(L, V) forall L
+    result = Hash(L, V).new
+    each { |key, value| result[yield key, value] = value }
+    result
+  end
+
+  # The pairs the block answers true for, or false for, as a new table.
+  def select(& : K, V -> Bool) : Hash(K, V)
+    result = Hash(K, V).new
+    each { |key, value| result[key] = value if yield key, value }
+    result
+  end
+
+  def reject(& : K, V -> Bool) : Hash(K, V)
+    result = Hash(K, V).new
+    each { |key, value| result[key] = value unless yield key, value }
+    result
+  end
+
+  # The same, in place. A delete inside `each` is safe in this table: it
+  # marks the entry gone where it stands and nothing moves until a growth,
+  # which only a write of a new key starts.
+  def select_in_place(& : K, V -> Bool) : Hash(K, V)
+    reject_in_place { |key, value| !(yield key, value) }
+  end
+
+  def reject_in_place(& : K, V -> Bool) : Hash(K, V)
+    each { |key, value| delete(key) if yield key, value }
+    self
+  end
+
+  def each_key(& : K -> Nil) : Nil
+    each { |key, value| yield key }
+  end
+
+  def each_value(& : V -> Nil) : Nil
+    each { |key, value| yield value }
+  end
+
+  # Whether a value is in the table: a walk, since the index is of keys.
+  def has_value?(value : V) : Bool
+    each { |key, stored| return true if stored == value }
+    false
+  end
+
+  # The first key, in insertion order, whose value is *value*; `key_for`
+  # refuses a value no key has, and `key_for?` answers nil for it.
+  def key_for?(value : V) : K?
+    each { |key, stored| return key if stored == value }
+    nil
+  end
+
+  def key_for(value : V) : K
+    each { |key, stored| return key if stored == value }
+    raise "no key for the value #{value.inspect}"
+  end
+
+  # Values to keys; a value two keys share keeps the later key.
+  def invert : Hash(V, K)
+    result = Hash(V, K).new
+    each { |key, value| result[value] = key }
+    result
+  end
+
+  # The pairs whose value is not nil, in a table whose value type says so.
+  def compact
+    result = {} of K => typeof(compact_value)
+    each do |key, value|
+      result[key] = value unless value.nil?
+    end
+    result
+  end
+
+  # Every entry forgotten, and the room with them; a default stays.
+  def clear : Hash(K, V)
+    @size = 0
+    @used = 0
+    @first = 0
+    @capacity = 0
+    @gone = Pointer(Bool).new(0_u64)
+    @keys = Pointer(K).new(0_u64)
+    @values = Pointer(V).new(0_u64)
+    @index = Pointer(Int32).new(0_u64)
+    self
+  end
+
+  # A table of its own with the same pairs in the same order, and the same
+  # default; what is in the keys and values is shared, as an array's dup
+  # shares its elements.
+  def dup : Hash(K, V)
+    copy = Hash(K, V).new
+    each { |key, value| copy[key] = value }
+    copy.adopt_default(@default)
+    copy
+  end
+
+  # The oldest pair's key and value, nil when the table is empty; `first_key`
+  # and `first_value` refuse an empty table as `Array#first` refuses one.
+  def first_key? : K?
+    @size == 0 ? nil : @keys[@first]
+  end
+
+  def first_value? : V?
+    @size == 0 ? nil : @values[@first]
+  end
+
+  def first_key : K
+    raise "first_key of an empty hash" if @size == 0
+    @keys[@first]
+  end
+
+  def first_value : V
+    raise "first_value of an empty hash" if @size == 0
+    @values[@first]
+  end
+
+  # The oldest pair taken out and answered, the table drained as a queue in
+  # the order it was filled; `shift?` answers nil when it is empty.
+  def shift : Tuple(K, V)
+    raise "shift of an empty hash" if @size == 0
+    key = @keys[@first]
+    value = @values[@first]
+    delete(key)
+    {key, value}
+  end
+
+  def shift? : Tuple(K, V)?
+    @size == 0 ? nil : shift
+  end
+
+  # The values of the keys given, in that order, each answered as `[]`
+  # answers it - so a missing key is refused, or the default's.
+  def values_at(*keys : K) : Array(V)
+    result = Array(V).new(keys.size)
+    at = 0
+    while at < keys.size
+      result << self[keys[at]]
+      at = at + 1
+    end
+    result
+  end
+
+  # The key's value when it has one, and otherwise *value* written and
+  # answered: one probe for a key that is there.
+  def put_if_absent(key : K, value : V) : V
+    put_if_absent(key) { value }
+  end
+
+  # The same with the value computed only when the key is missing.
+  def put_if_absent(key : K, & : K -> V) : V
+    entry = entry_of(key)
+    return @values[entry] if entry >= 0
+    self[key] = yield key
+  end
+
+  # The value the key had, deleted, or what the block answers for a key
+  # that was not there.
+  def delete(key : K, & : K -> U) : V | U forall U
+    return yield key if entry_of(key) < 0
+    delete(key).as(V)
+  end
+
+  # The questions a table gets asked of its pairs, each block handed the key
+  # and the value.
+  def count(& : K, V -> Bool) : Int32
+    total = 0
+    each { |key, value| total = total + 1 if yield key, value }
+    total
+  end
+
+  def any?(& : K, V -> Bool) : Bool
+    each { |key, value| return true if yield key, value }
+    false
+  end
+
+  def all?(& : K, V -> Bool) : Bool
+    each { |key, value| return false unless yield key, value }
+    true
+  end
+
+  # The sum of what the block answers for each pair, and the block's own
+  # zero when there are none, as `Array#sum` answers.
+  def sum(& : K, V -> U) : U forall U
+    total = U.zero
+    each { |key, value| total = total + (yield key, value) }
+    total
+  end
+
+  # An array of what the block answers for each pair, in order.
+  def map(& : K, V -> U) : Array(U) forall U
+    result = Array(U).new(@size)
+    each { |key, value| result << yield key, value }
+    result
+  end
+
+  # The table itself, as the other library's `to_h` answers it.
+  def to_h : Hash(K, V)
+    self
+  end
+
+  # The pairs sorted on the key the block answers for each, ascending and
+  # stable: `to_a.sorted_by` with the pair taken apart for the block.
+  def sorted_by(& : K, V -> U) : Array(Tuple(K, V)) forall U
+    to_a.sorted_by { |pair| yield pair[0], pair[1] }
+  end
+
+  # `{"a" => 1}`, in insertion order, both sides inspected; a first key in
+  # braces is spaced off, `{ {1, 2} => 3 }`, as a tuple's: `{{` is a macro.
   def to_s : String
     parts = [] of String
     each { |key, value| parts << key.inspect + " => " + value.inspect }
-    "{" + parts.join(", ") + "}"
+    pad = @size > 0 && (@keys[@first].is_a?(Tuple) || @keys[@first].is_a?(NamedTuple) || @keys[@first].is_a?(Hash)) ? " " : ""
+    "{" + pad + parts.join(", ") + pad + "}"
   end
 
   def inspect : String
     to_s
   end
 
-  # The index slot this key belongs in: the one pointing at its entry, or
-  # the first free one after where it hashes to.
+  # Two tables are equal when they hold the same pairs, in any order, as the
+  # other library's are: `Reference#==` asked whether they were one object,
+  # so `{"a" => 1} == {"a" => 1}` was false and a table could not be found
+  # as a key by an equal one.
+  def ==(other : Hash(K, V)) : Bool
+    return true if other.object_id == object_id
+    return false unless @size == other.size
+    each do |key, value|
+      entry = other.entry_of(key)
+      return false unless entry >= 0 && other.@values[entry] == value
+    end
+    true
+  end
+
+  # Hashing follows `==`, so the order cannot count: each pair is hashed as
+  # a tuple is, mixed, and the pairs added up, which any order adds alike.
+  def hash : Int32
+    total = 0x9E3779B97F4A7C15_u64 ^ @size.to_i64.unsafe_to_u64
+    each do |key, value|
+      pair = {key, value}.hash.to_i64.unsafe_to_u64 &* 0x100000001B3_u64
+      total = total &+ (pair ^ pair.unsafe_shr(29_u64))
+    end
+    total.hash
+  end
+
+  # :nodoc:
+  # Hands `dup`'s copy the default, which only the table can reach.
+  protected def adopt_default(default : Proc(Hash(K, V), K, V)?) : Nil
+    @default = default
+  end
+
+  # Each live entry's place in the dense arrays, in order.
+  private def each_entry(& : Int32 -> Nil) : Nil
+    at = @first
+    while at < @used
+      yield at unless @gone.address != 0_u64 && @gone[at]
+      at = at + 1
+    end
+  end
+
+  # :nodoc:
+  # The value type without Nil, for `compact`'s table: never called, only
+  # typed.
+  private def compact_value
+    value = @values[0]
+    raise "" if value.nil?
+    value
+  end
+
+  # The key's entry in the dense arrays, -1 when it has none. Protected, so
+  # that `==` can ask the other table.
+  protected def entry_of(key : K) : Int32
+    return -1 if @capacity == 0
+    @index[slot_for(key)]
+  end
+
+  # The index slot this key belongs in: its entry's, or the first tombstone
+  # or free slot the probe met. The hash is mixed first: an Int's is itself,
+  # and multiples of 65536 shared low bits, 20,000 of them 9.5 s to insert.
   private def slot_for(key : K) : Int32
     mask = @capacity * 2 - 1
-    slot = key.hash & mask
-    while (entry = @index[slot]) >= 0 && !(@keys[entry] == key)
+    slot = ((h = key.hash &* -1640531535) ^ h.unsafe_shr(16)) & mask
+    tombstone = -1
+    while (entry = @index[slot]) != -1
+      if entry == -2
+        tombstone = slot if tombstone < 0
+      elsif @keys[entry] == key
+        return slot
+      end
       slot = (slot + 1) & mask
     end
-    slot
+    tombstone < 0 ? slot : tombstone
   end
 
-  private def clear_index : Nil
-    slot = 0
-    while slot < @capacity * 2
-      @index[slot] = -1
-      slot = slot + 1
-    end
-  end
-
-  # Twice the room, and the index rebuilt over the entries as they stand:
+  # Twice the room - or the same room, when half of what is written is gone
+  # - the gone entries left behind, and the index rebuilt over what is live:
   # the dense arrays keep their order, so nothing is re-inserted.
   private def grow : Nil
     old_keys = @keys
     old_values = @values
-    @capacity = @capacity * 2
+    old_gone = @gone
+    old_used = @used
+    @capacity = @capacity == 0 ? 8 : (@size * 2 <= @capacity ? @capacity : @capacity * 2)
     @keys = Pointer(K).malloc(@capacity.to_u64)
     @values = Pointer(V).malloc(@capacity.to_u64)
     @index = Pointer(Int32).malloc((@capacity * 2).to_u64)
+    @gone = Pointer(Bool).new(0_u64)
+    kept = @first = 0
     entry = 0
-    while entry < @size
-      @keys[entry] = old_keys[entry]
-      @values[entry] = old_values[entry]
+    while entry < old_used
+      unless old_gone.address != 0_u64 && old_gone[entry]
+        @keys[kept] = old_keys[entry]
+        @values[kept] = old_values[entry]
+        kept = kept + 1
+      end
       entry = entry + 1
     end
+    @used = kept
     rebuild_index
   end
 
   # The index over the dense arrays as they stand, from nothing.
   private def rebuild_index : Nil
-    clear_index
+    slot = 0
+    while slot < @capacity * 2
+      @index[slot] = -1
+      slot = slot + 1
+    end
     entry = 0
-    while entry < @size
+    while entry < @used
       @index[slot_for(@keys[entry])] = entry
       entry = entry + 1
     end

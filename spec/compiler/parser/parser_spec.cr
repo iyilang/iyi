@@ -434,6 +434,27 @@ module Iyi
     assert_syntax_error "if x == 1 and y\nend", %(unexpected token: "and": `&&` is the spelling here)
     assert_syntax_error "fn f(x : Int32) : Int32\n  x\nend", %(unexpected token: ":": `fn` is a call here, not a keyword - a function is `def name(args) : Type`)
     assert_syntax_error "func f(x : Int32)\n  x\nend", "unexpected 'end': nothing is open for it to close - `func` at line 1 is a call here, not a keyword"
+    # iyi: the word somebody brought with them, met where it introduces a
+    # constant everywhere else. `const LIMIT = 10` parsed as a call and
+    # ended on the semantic's "can't declare constant dynamically", which
+    # is about the shape and never about the word; `pub const LIMIT = 10`
+    # answered "can't apply `pub` to const", which reads as if `const`
+    # were a construct here.
+    assert_syntax_error "const LIMIT = 10\nputs LIMIT\n",
+      "there is no `const`: a constant is `LIMIT = ...`, uppercase is what makes it one"
+    assert_syntax_error "let LIMIT = 10\n", "there is no `let`: a constant is `LIMIT = ...`"
+    assert_syntax_error "module kit/all\n\npub const LIMIT = 10\n",
+      "there is no `const`: a constant is `LIMIT = ...`"
+    # And the loop everywhere else. `in` is a keyword `case` owns, so a
+    # `for` line ended on "unexpected 'in': no `case` is open for it",
+    # naming a construct nobody had typed.
+    assert_syntax_error "for i in 0..3\n  puts i\nend\n",
+      "`for` at line 1 is a call here, not a keyword - a range iterates with `(0..3).each do |i| ... end`"
+    # And Rust's, which is the spelling this fork is closest to: a bare
+    # `fn` has been met since the verbs gate, `pub fn` answered "can't
+    # apply `pub` to fn".
+    assert_syntax_error "module kit/all\n\npub fn greet() : String\n  \"hi\"\nend\n",
+      "there is no `fn`: a function is `pub def name(args) : Type`"
 
     # #5856
     assert_syntax_error "def foo=(a,b); end", "setter method 'foo=' cannot have more than one parameter"
@@ -1424,7 +1445,7 @@ module Iyi
 
     it_parses "::A::B", Path.global(["A", "B"])
 
-    assert_syntax_error "$foo", "$global_variables are not supported, use @@class_variables instead"
+    assert_syntax_error "$foo", "iyi has no global variables", 1, 1
 
     it_parses "macro foo;end", Macro.new("foo", [] of Arg, Expressions.new)
     it_parses "macro [];end", Macro.new("[]", [] of Arg, Expressions.new)
@@ -1839,8 +1860,8 @@ module Iyi
     it_parses "Foo::BAR : Int64 = 1", TypeDeclaration.new(Path.new(["Foo", "BAR"]), "Int64".path, 1.int32)
     it_parses "::FOO : Int64 = 1", TypeDeclaration.new("FOO".path(global: true), "Int64".path, 1.int32)
     it_parses "::Foo::BAR : Int64 = 1", TypeDeclaration.new(Path.new(["Foo", "BAR"], global: true), "Int64".path, 1.int32)
-    assert_syntax_warning "FOO: Int64 = 1", "space required before colon in type declaration (run `crystal tool format` to fix this)"
-    assert_syntax_warning "::FOO: Int64 = 1", "space required before colon in type declaration (run `crystal tool format` to fix this)"
+    assert_syntax_warning "FOO: Int64 = 1", "space required before colon in type declaration (run `iyi fmt` to fix this)"
+    assert_syntax_warning "::FOO: Int64 = 1", "space required before colon in type declaration (run `iyi fmt` to fix this)"
     assert_syntax_error "FOO : Int64", "expected '=' for constant type declaration"
     assert_syntax_error "::FOO : Int64", "expected '=' for constant type declaration"
 
@@ -2433,6 +2454,15 @@ module Iyi
       "can't change the value of self"
     assert_syntax_error "x, self = 1, 2",
       "can't change the value of self"
+    assert_syntax_error "::foo = 1",
+      "`::foo` is not a variable"
+    assert_syntax_error "foo = 1\n::\nfoo = 2",
+      "`::foo` is not a variable"
+    assert_syntax_error "foo = 1; ::foo += 1",
+      "`::foo` is not a variable"
+    assert_syntax_error "::foo, bar = 1, 2",
+      "`::foo` is not a variable"
+    it_parses "foo = 1; ::foo + 1", [Assign.new("foo".var, 1.int32), Call.new(Call.new("foo", global: true), "+", 1.int32)]
 
     assert_syntax_error "macro foo(x : Int32); end"
 
@@ -2867,6 +2897,18 @@ module Iyi
     assert_syntax_error %(case x; when 1..2; 2; when 1..2; end), "duplicate when 1..2 in case"
     assert_syntax_error %(case x; when /x/; 2; when /x/; end), "duplicate when /x/ in case"
     assert_syntax_error %(case x; when X; 2; when X; end), "duplicate when X in case"
+    # iyi: two integers a double cannot tell apart are two whens.
+    it "accepts whens on integers a double cannot tell apart" do
+      node = parse("case x; when 36028797018963967_u64; 1; when 36028797018963968_u64; 2; end").as(Case)
+      node.whens.size.should eq(2)
+    end
+    # iyi: a float literal past Float64's range is still a literal a set of
+    # whens can hold; its hash raised `ArgumentError` in the parser.
+    it "accepts a when on a float literal out of Float64's range" do
+      node = parse("case x; when 1e400; 1; when 2.0; 2; end").as(Case)
+      node.whens.size.should eq(2)
+    end
+    assert_syntax_error "case x; when 1e400; 2; when 1e400; end", "duplicate when 1e400 in case"
     assert_syntax_error "case x; when _; end", "'when _' is not supported, use 'else' block instead"
     assert_syntax_error "case x; when 1; when _; end", "'when _' is not supported, use 'else' block instead"
     assert_syntax_error "case x; when 1, _; end", "'when _' is not supported, use 'else' block instead"
@@ -4159,21 +4201,66 @@ module Iyi
     end
 
     describe "iyi" do
+      describe "nesting" do
+        # The parser and every pass after it recurse, on the compiler's
+        # stack: `iyi check` died of a stack overflow on 288 unclosed
+        # `f(x: `, 500 unclosed `(` and a chain of 3,750 `+`.
+        it "reads `(` nested to the limit, the literal inside a level of its own" do
+          source = "#{"(" * (Parser::NESTING_LIMIT - 1)}1#{")" * (Parser::NESTING_LIMIT - 1)}"
+          parse(source).to_s.should eq(source)
+        end
+
+        it "refuses one level more at the innermost token, naming the limit" do
+          ex = expect_raises(SyntaxException, "nesting deeper than #{Parser::NESTING_LIMIT} levels") do
+            parse("#{"(" * Parser::NESTING_LIMIT}1#{")" * Parser::NESTING_LIMIT}")
+          end
+          {ex.line_number, ex.column_number}.should eq({1, Parser::NESTING_LIMIT + 1})
+        end
+
+        it "refuses calls left open with a sentence where an error unwinds through each" do
+          expect_raises(SyntaxException, "nesting deeper than #{Parser::NESTING_LIMIT} levels") do
+            parse("def f(x)\n  x\nend\nputs #{"f(x: " * 300}")
+          end
+        end
+
+        it "reads a chain as deep as the tree limit" do
+          parse("x#{" + x" * (Parser::DEPTH_LIMIT - 1)}").as(Call).name.should eq("+")
+        end
+
+        it "refuses a chain one link deeper at its start, naming the limit" do
+          ex = expect_raises(SyntaxException, "nested deeper than #{Parser::DEPTH_LIMIT} levels") do
+            parse("puts 1\nx#{" + x" * Parser::DEPTH_LIMIT}")
+          end
+          {ex.line_number, ex.column_number}.should eq({2, 1})
+        end
+
+        it "counts chains through the parentheses around them" do
+          # Twenty levels of 60 links each: no chain is long and no `(` is
+          # deep, and the tree is 1,200 deep.
+          expect_raises(SyntaxException, "nested deeper than #{Parser::DEPTH_LIMIT} levels") do
+            parse("#{"(" * 20}x#{"#{" + x" * 59})" * 20}")
+          end
+        end
+      end
+
       it "scopes a module header's contents into a namespace" do
         # `module app/greeter` is rewritten to `ModuleDef(App::Greeter)` at
         # parse time, so the whole semantic phase needs no changes. `import`
         # stays outside it: an imported file carries its own header, and
         # processing it while scoped inside this one would nest the two.
-        nodes = parse("module app/greeter\nimport app/user\nusing app/other\ndef polite\nend").as(Expressions)
+        nodes = parse("module app/greeter\nimport app/user\nimport app/other::*\ndef polite\nend").as(Expressions)
         nodes.expressions[0].should be_a(ModuleHeader)
         nodes.expressions[1].should be_a(ImportDecl)
+        nodes.expressions[2].as(ImportDecl).glob?.should be_true
 
-        mod = nodes.expressions[2].as(ModuleDef)
+        mod = nodes.expressions[3].as(ModuleDef)
         mod.name.should eq(Path.new(["App", "Greeter"]))
         mod.iyi_unit?.should be_true
 
         body = mod.body.as(Expressions).expressions
-        # `extend self`, so a module-level `def` is a function of the module.
+        # `extend self`, so a module-level `def` is a function of the module;
+        # then the scope the glob import makes, inside the module and so no
+        # further than it.
         body[0].should be_a(Extend)
         body[1].should be_a(UsingDecl)
         body[2].should be_a(Def)
@@ -4185,14 +4272,50 @@ module Iyi
       end
 
       it_parses "import app/user", ImportDecl.new(["app", "user"])
-      it_parses "using app/greeter", UsingDecl.new(["app", "greeter"], nil)
-      it_parses "using app/greeter::{polite}", UsingDecl.new(["app", "greeter"], ["polite"])
-      it_parses "using app/greeter::{polite, Greet}", UsingDecl.new(["app", "greeter"], ["polite", "Greet"])
-      it_parses "using a/b/c", UsingDecl.new(["a", "b", "c"], nil)
+      # One keyword: an import that names anything carries the scope it
+      # makes beside it.
+      it_parses "import app/greeter::*", [ImportDecl.new(["app", "greeter"], glob: true), UsingDecl.new(["app", "greeter"], nil)]
+      it_parses "import app/greeter::{polite}", [ImportDecl.new(["app", "greeter"], ["polite"]), UsingDecl.new(["app", "greeter"], ["polite"])]
+      it_parses "import app/greeter::{polite, Greet}", [ImportDecl.new(["app", "greeter"], ["polite", "Greet"]), UsingDecl.new(["app", "greeter"], ["polite", "Greet"])]
+      it_parses "import a/b/c::*", [ImportDecl.new(["a", "b", "c"], glob: true), UsingDecl.new(["a", "b", "c"], nil)]
+      it_parses "pub import app/greeter", ImportDecl.new(["app", "greeter"]).tap(&.exported=(true))
 
-      assert_syntax_error "using app/greeter::polite", "expecting token '{'"
-      assert_syntax_error "using app/greeter::{}", "expected a name to bring into scope"
-      assert_syntax_error "using app/greeter::{polite,}", "expected a name to bring into scope"
+      it "puts an import's scope inside the type whose body it is written in" do
+        nodes = parse("class Box
+  import std/path::{Path}
+end").as(ClassDef)
+        body = nodes.body.as(Expressions).expressions
+        body[0].as(ImportDecl).names.should eq(["Path"])
+        body[1].as(UsingDecl).names.should eq(["Path"])
+      end
+
+      assert_syntax_error "import app/greeter::polite", "after `::` an import lists the names it brings into scope"
+      assert_syntax_error "import app/greeter::{}", "expected a name to bring into scope"
+      assert_syntax_error "import app/greeter::{polite,}", "expected a name to bring into scope"
+
+      # `pub import` hands a module on whole; names in scope are the module's
+      # own and never pass to its importers.
+      assert_syntax_error "pub import app/greeter::{polite}", "`pub import` re-exports app/greeter whole"
+      assert_syntax_error "pub import app/greeter::*", "`import app/greeter::*` beside it"
+
+      # `using` is gone, and the refusal is the line that replaces it.
+      assert_syntax_error "using app/greeter", "`using` is gone: one keyword loads a module and names what it brings into scope, so this line is `import app/greeter::*`"
+      assert_syntax_error "using app/greeter::{polite, Greet}", "so this line is `import app/greeter::{polite, Greet}`"
+
+      # And the line as an edit: the directive's span and its replacement,
+      # which `check -f json` hands an agent and the editor a quick fix.
+      it "carries the replacing line as a suggested edit" do
+        ex = expect_raises(SyntaxException) { parse("puts 1\nusing app/greeter::{polite} # kept\n") }
+        ex.line_number.should eq(2)
+        ex.column_number.should eq(1)
+        ex.size.should eq("using app/greeter::{polite}".size)
+        ex.suggestion.should eq("import app/greeter::{polite}")
+      end
+
+      it "offers no edit for a directive written over several lines" do
+        ex = expect_raises(SyntaxException) { parse("using app/greeter::{\n  polite\n}\n") }
+        ex.suggestion.should be_nil
+      end
 
       # iyi: a module path segment has to survive the round trip to the type
       # name it is reached by, `app/greeter` <-> `App::Greeter` (SPEC.md IV.6
@@ -4217,6 +4340,16 @@ module Iyi
       # the first, and the second had no artifact at all.
       assert_syntax_error "module app/one\nmodule app/two", "a file declares one module"
       assert_syntax_error "module app/one\n\nputs 1\n\nmodule app/two", "a file declares one module"
+      # A header after code is the file's only header in the wrong place; it
+      # was told the file "already declares `no module`".
+      assert_syntax_error "import app/lib\nmodule app/two", "the `module` header comes first in a file: `module app/two` goes above every `import`"
+      assert_syntax_error "puts 1\nmodule app/two", "the `module` header comes first in a file"
+      # iyi: and the header is the file's first line. Inside a body it was
+      # read as a header and dropped; inside a `begin` around the file it was
+      # taken for the file's and the `begin` went missing.
+      assert_syntax_error "class Foo\n  module bar\nend", "`module bar` is a module header"
+      assert_syntax_error "if x\n  module bar\nend", "`module bar` is a module header"
+      assert_syntax_error "begin\n  module bar\n  puts 1\nend", "`module bar` is a module header"
 
       # A segment that *starts* with a keyword leaves the lexer through an
       # early return which skips the reset of `@slash_is_regex`, so the `/`
@@ -4235,9 +4368,9 @@ module Iyi
           nodes.expressions[0].as(ModuleHeader).path.should eq(segments)
         end
 
-        nodes = parse("module app/x\nimport libs/parser\nusing endpoint/handler\ndef f\nend").as(Expressions)
+        nodes = parse("module app/x\nimport libs/parser\nimport endpoint/handler::*\ndef f\nend").as(Expressions)
         nodes.expressions[1].as(ImportDecl).path.should eq(["libs", "parser"])
-        body = nodes.expressions[2].as(ModuleDef).body.as(Expressions).expressions
+        body = nodes.expressions[3].as(ModuleDef).body.as(Expressions).expressions
         body[1].as(UsingDecl).path.should eq(["endpoint", "handler"])
       end
 
@@ -4250,7 +4383,7 @@ module Iyi
 
       # Checked at the one gate all three directives pass through.
       assert_syntax_error "import app/v_1", "not lower-case snake_case"
-      assert_syntax_error "using app/v_1", "not lower-case snake_case"
+      assert_syntax_error "import app/v_1::*", "not lower-case snake_case"
 
       it_parses "trait Greet\nend", TraitDef.new(Path.new(["Greet"]))
       it_parses "pub trait Greet\nend", TraitDef.new(Path.new(["Greet"]), exported: true)
@@ -4277,6 +4410,23 @@ end").as(ClassDef)
 
       assert_syntax_error "pub abstract module Sheet\nend",
         "`pub abstract` takes a class, a struct or a def"
+
+      it "keeps an impl or a trait written in a macro body inside the macro" do
+        node = parse("macro derived(declaration)\n  impl Greet for {{declaration[:name].id}}\n    def greet\n    end\n  end\n\n  def after\n  end\nend", filename: "x.iyi").as(Macro)
+        node.body.to_s.should contain("def after")
+        node = parse("macro traited\n  trait Greet\n    abstract def greet : String\n  end\n\n  def after\n  end\nend", filename: "x.iyi").as(Macro)
+        node.body.to_s.should contain("def after")
+      end
+
+      it "leaves impl a name in a Crystal file's macro body" do
+        node = parse("macro named\n  impl = 1\n  trait = 2\nend", filename: "x.cr").as(Macro)
+        node.body.to_s.should contain("trait = 2")
+      end
+
+      it "closes a block with end! inside a macro body" do
+        node = parse("macro define_sum\n  def sum : Int32 | Fail\n    each_item do |i|\n    end!\n    1\n  end\n\n  def after\n  end\nend", filename: "x.iyi").as(Macro)
+        node.body.to_s.should contain("def after")
+      end
 
       it "parses an impl" do
         node = parse("impl Greet for User\ndef greet\nend\nend").as(ImplDef)
@@ -4305,6 +4455,13 @@ end").as(ClassDef)
       it "parses a namespaced supertrait" do
         node = parse("trait Ord : App::Cmp::Eq\nend").as(TraitDef)
         node.supertraits.should eq([Path.new(["App", "Cmp", "Eq"])] of ASTNode)
+      end
+
+      # Read as a path, the supertrait stopped at `Cmp` and the `(` was
+      # "expecting any of these tokens: ;, NEWLINE, SPACE (not '(')".
+      it "parses a parameterised supertrait" do
+        node = parse("trait Ord(T) : Cmp(T)\nend").as(TraitDef)
+        node.supertraits.should eq([Generic.new(Path.new(["Cmp"]), [Path.new(["T"])] of ASTNode)] of ASTNode)
       end
 
       it "leaves a trait without supertraits alone" do
@@ -4415,6 +4572,18 @@ end").as(ClassDef)
         node.free_var_bounds.should be_nil
       end
 
+      # A bound read as a path stopped at `Into`, so any `Into` met it, and
+      # `(String)` was left to be the body's first statement.
+      it "parses a parameterised bound" do
+        into_string = Generic.new(Path.new(["Into"]), [Path.new(["String"])] of ASTNode)
+        node = parse("def f(x : T) forall T : Into(String)\nend").as(Def)
+        node.free_var_bounds.should eq({"T" => into_string} of String => ASTNode)
+        node.body.should eq(Nop.new)
+        node = parse("def go : Nil where Elem : Into(String)\nend").as(Def)
+        node.where_bounds.should eq({"Elem" => into_string} of String => ASTNode)
+        node.body.should eq(Nop.new)
+      end
+
       assert_syntax_error "def f(x : T) forall T :\nend", "expecting token 'CONST'"
 
       # iyi: `where Elem : Comparable` — a bound on a name the method did not
@@ -4473,6 +4642,31 @@ end").as(ClassDef)
         end
       end
 
+      # `.or` and `.or_panic` are the recovery the compiler knows by name at
+      # the call site, so a method of either name could never be called:
+      # `def or` compiled and every call to it was refused as a recovery.
+      it "rejects a def named or or or_panic" do
+        {"def or(x)\nend", "def self.or_panic\nend"}.each do |source|
+          expect_raises(SyntaxException, "is a reserved name in iyi") do
+            parse(source, filename: "x.iyi")
+          end
+        end
+        parse("def or(x)\nend", filename: "x.cr")
+      end
+
+      # A bare `group do ... end` is the compiler's task group (III.4.9), so
+      # a class's own `def group` compiled and its call was lowered as one:
+      # "undefined method 'join' for Spawner". The prelude's is the group.
+      it "rejects a def named group outside the prelude" do
+        {"def group(&)\nend", "def self.group\nend"}.each do |source|
+          expect_raises(SyntaxException, "`group` is a reserved name in iyi") do
+            parse(source, filename: "x.iyi")
+          end
+        end
+        parse("def group(&)\nend", filename: "x.cr")
+        parse("def group(&)\nend", filename: File.expand_path("../../../src/iyi/concurrency.iyi", __DIR__))
+      end
+
       # A bodiless `def` in a trait, with another `def` under it: the
       # requirement wanted `abstract`, and the nested-def report says so.
       it "explains a bodiless def in a trait" do
@@ -4489,6 +4683,10 @@ end").as(ClassDef)
           expect_raises(SyntaxException, "`sort_by!` is not a method here") do
             parse(source, filename: "x.iyi")
           end
+        end
+        # An argument list after the `!` was told it "takes no block".
+        expect_raises(SyntaxException, "`nomacro!` is not a method here: `!` propagates an error, and takes no arguments") do
+          parse("nomacro!(1)", filename: "x.iyi")
         end
       end
 
@@ -4513,6 +4711,93 @@ end").as(ClassDef)
         end
         expect_raises(SyntaxException, "a type name is capitalised here - `Bool`") do
           parse("def f : bool\n  true\nend", filename: "x.iyi")
+        end
+      end
+
+      # A constant compared with `<` is a comparison, spaced or not before a
+      # lowercase or a literal; only `Array<Int32>`'s touching shape is the
+      # other languages' type arguments.
+      it "reads a constant compared with < as a comparison" do
+        parse("Level::Info < Level::Error", filename: "x.iyi")
+        parse("Float32::MIN < 0.0_f32", filename: "x.iyi")
+        parse("A<b", filename: "x.iyi")
+      end
+
+      # Habits of other languages that were bare token errors, or errors
+      # far from what was written (HuntDiag3).
+      it "names the spelling of another language's syntax" do
+        {
+          "// say hi\nputs 1\n"                                    => "`//` opens no comment here: a comment starts with `#`",
+          "/* say hi */\nputs 1\n"                                 => "`/*` opens no comment here",
+          "trait G\n  def g : String\nend\nputs 1\n"               => "`def g : String` has no `end` of its own: it took the trait's `end`",
+          "impl G for U {\n  def g : String\n    \"\"\n  end\n}\n" => "`{` opens no body here",
+          "def f : Int32 | E\n  x = g()?\n  x\nend\n"              => "an error propagates with an attached `!`: `g()!`",
+          "fn main() {\n  puts 1\n}\n"                             => "there is no `fn`: a function is `def main(args) : Type`",
+          "package main\nputs 1\n"                                 => "there is no `package`",
+          "println!(\"{}\", 1)\n"                                  => "`println!` is Rust's macro",
+          "v = vec![1, 2]\n"                                       => "`vec!` is Rust's macro",
+          "assert_eq!(1, 2)\n"                                     => "`assert_eq!` is Rust's macro, and iyi has none of those: `assert_eq a, b, \"why\"` panics showing both values",
+          "def add(a, b):\n  a + b\nend\n"                         => "a block is not opened with `:` and indentation",
+          "x = 3\nif x > 1:\n  puts x\nend\n"                      => "a block is not opened with `:` and indentation",
+          "case 3\nin 1 then puts 1\nend\n"                        => "`in 1` matches a value, and `in` matches types: a value is matched with `when 1 then ...`",
+          "x = 3\nmatch x\nin 1 then puts 1\nend\n"                => "`match` at line 2 is a call here",
+          "x := 5\n"                                               => "there is no `:=`",
+          "interface Greet\n  abstract def g : String\nend\n"      => "there is no `interface`: a set of required methods is a `trait`",
+          "xs = Array<Int32>.new\n"                                => "type arguments are written in parentheses: `Array(Int32)`",
+          "def first<T>(xs : Array(T)) : T\n  xs[0]\nend\n"        => "`def first(xs : Array(T)) : T forall T`",
+          "x = Some(1)\n"                                          => "there is no `Some(...)`",
+          "x = 5\ny = x as Int64\n"                                => "`as` is a method call here, not an operator: `x.as(Int64)`",
+          "puts f\"hi {x}\"\n"                                     => "there is no `f\"...\"` prefix",
+          "Puts \"x\"\n"                                           => "`Puts` is a constant, and the name of a call is lower-case: `puts \"...\"`",
+          "export def f : Int32\n  1\nend\n"                       => "there is no `export`: `pub def f : Int32`",
+          "def f(a : i32) : Int32\n  a\nend\n"                     => "Rust's `i32` is `Int32` here",
+        }.each do |code, message|
+          expect_raises(SyntaxException, message) { parse(code, filename: "x.iyi") }
+        end
+        # A `.cr` file keeps the other library's reading.
+        parse("x = 7 // 2\n", filename: "x.cr")
+      end
+
+      # The rest of HuntDiag3's: import paths, braced bodies, type headers,
+      # impl lists, `where` on a function and Rust's `::` call.
+      it "names the iyi spelling of an import path, a header and an impl" do
+        {
+          "import app/util.iyi\n"                                           => "a module path has no extension: `import app/util`",
+          "import \"app/util\"\n"                                           => "an import path is not quoted: `import app/util`",
+          "import ./app/util\n"                                             => "has no `./` or `../`: `import app/util`",
+          "import App::Util\n"                                              => "is how the module is named after it: `import app/util`",
+          "import app\\util\n"                                              => "path segments are separated by `/`: `import app/util`",
+          "import app/util as u\n"                                          => "an import is not renamed",
+          "def f : Int32\n  if err != nil {\n    return 0\n  }\n  1\nend\n" => "a body is not braced: `if err != nil` ends its line",
+          "i = 0\nwhile i < 3 {\n  i += 1\n}\n"                             => "a body is not braced: `while i < 3`",
+          "module app/dash-name\n"                                          => "module path segment 'dash-name' has a `-`",
+          "module App::Upper\n\npub def hi : String\n  \"\"\nend\n"         => "a file's module header is its lower-case path, `module app/upper`",
+          "struct U : Greet\nend\n"                                         => "not in its header: `impl Greet for U`",
+          "struct U implements Greet\nend\n"                                => "not in its header: `impl Greet for U`",
+          "impl Greet, Loud for U\nend\n"                                   => "`impl Greet for U` and `impl Loud for U`",
+          "impl Greet for U, V\nend\n"                                      => "`impl Greet for U` and `impl Greet for V`",
+          "impl Point\nend\n"                                               => "`impl Point` has no trait",
+          "def f : (Int32, String)\n  return 1, \"a\"\nend\n"               => "a tuple, `Tuple(Int32, String)`",
+          "def hello(x : T) : String where T : Greet\n  \"\"\nend\n"        => "introduced by `forall`, which takes the same bounds: `forall T : Greet`",
+          "puts App::Util::helper(1)\n"                                     => "a module's function is called with `.`: `App::Util.helper`",
+        }.each do |code, message|
+          expect_raises(SyntaxException, message) { parse(code, filename: "x.iyi") }
+        end
+        # Each carries its edit, which `iyi fix` applies.
+        ex = expect_raises(SyntaxException) { parse("import \"app/util\"::{helper}\n", filename: "x.iyi") }
+        {ex.size, ex.suggestion}.should eq({17, "import app/util"})
+      end
+
+      # `where` that bounds nothing: beside a function's own `forall` it was
+      # let through, and on an `abstract def` it was dropped, so `Elem =
+      # Float64` met `where Elem : Show` and the call printed 1.5.
+      it "refuses `where` beside a function's forall and on a requirement" do
+        ex = expect_raises(SyntaxException, "introduced by `forall`, which takes the same bounds: `forall T : Greet`") do
+          parse("def hello(x : T) : String forall T where T : Greet\n  \"\"\nend\n", filename: "x.iyi")
+        end
+        ex.suggestion.should be_nil
+        expect_raises(SyntaxException, "`where` can't bound a requirement: every impl answers an `abstract def`") do
+          parse("trait Bag\n  type Elem\n  abstract def first : Elem where Elem : Show\nend\n", filename: "x.iyi")
         end
       end
 
@@ -4570,6 +4855,21 @@ end").as(ClassDef)
         node.args[0].should be_a(Not)
       end
 
+      # `v = g(-1) !` propagated: the argument list swallows the space after
+      # its `)`, so the `!` arrived looking attached. A detached `!` that
+      # negates nothing is refused, naming the attached form.
+      it "refuses a detached `!` with nothing after it" do
+        {"v = g(-1) !", "v = g(-1) !\nv", "(w) !", "w.itself !\n1", "[g(x) !]"}.each do |source|
+          expect_raises(SyntaxException, "a `!` with a space before it doesn't propagate: write it attached") do
+            parse(source, filename: "x.iyi")
+          end
+        end
+        expect_raises(SyntaxException, "write it attached, `g(-1)!`") do
+          parse("v = g(-1) !", filename: "x.iyi")
+        end
+        parse("v = g(-1)!", filename: "x.iyi").as(Assign).value.should be_a(Propagate)
+      end
+
       it "leaves a Crystal file's `!` alone" do
         parse("a.sort!", filename: "x.cr").as(Call).name.should eq("sort!")
       end
@@ -4603,6 +4903,13 @@ end").as(ClassDef)
 
       it "accepts empty parentheses after `.or_panic`" do
         parse("read(path).or_panic()", filename: "x.iyi").as(Recover).panic?.should be_true
+      end
+
+      # It was "expecting token ')', not 'DELIMITER_START'".
+      it "says `.or_panic` takes no argument" do
+        expect_raises(SyntaxException, "`.or_panic` takes no argument: it panics with the error's own `message`") do
+          parse(%(read(path).or_panic("msg")), filename: "x.iyi")
+        end
       end
 
       it "requires a default in parentheses after `.or`" do
@@ -4665,6 +4972,17 @@ end").as(ClassDef)
         # carrying an error of its own — Appendix B #7.
         expect_raises(SyntaxException, "`!` can't propagate out of a `defer`") do
           parse("defer close(f)!", filename: "x.iyi")
+        end
+      end
+
+      # `!` in a proc literal returns from the proc, as `return` there does,
+      # and leaves no cleanup; it was refused as leaving the `defer`. A block
+      # is the enclosing function's, so `!` in one still is.
+      it "propagates out of a proc literal inside a `defer`" do
+        node = parse(%(defer (->(s : String) { parse(s)! }).call("x")), filename: "x.iyi").as(Defer)
+        node.to_s.should contain("parse(s)!")
+        expect_raises(SyntaxException, "`!` can't propagate out of a `defer`") do
+          parse("defer items.each { |x| close(x)! }", filename: "x.iyi")
         end
       end
 

@@ -13,8 +13,32 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/uuid
-using std/uuid::{UUID}
+import std/uuid::{UUID}
+import std/time::{Time}
+
+# Byte by byte, as an index compares keys.
+def before?(a : UUID, b : UUID) : Bool
+  x = a.bytes
+  y = b.bytes
+  i = 0
+  while i < 16
+    return x[i] < y[i] if x[i] != y[i]
+    i = i + 1
+  end
+  false
+end
+
+# The 48-bit millisecond stamp a version 7 UUID begins with.
+def stamp(u : UUID) : Int64
+  b = u.bytes
+  ms = 0_i64
+  i = 0
+  while i < 6
+    ms = (ms << 8) | b[i].to_i64
+    i = i + 1
+  end
+  ms
+end
 
 puts "== parse"
 q = UUID.parse("550e8400-e29b-41d4-a716-446655440000")
@@ -24,5 +48,114 @@ u = UUID.v4
 assert_true u.version == 4, "v4 version"
 assert_true UUID.parse(u.to_s) == u, "v4 parses back"
 puts "  hyphenated form and version 4"
+# The 32 digits with no hyphens read too, in either case; the gate drives
+# the hyphens `parse` refuses.
+assert_str "550e8400-e29b-41d4-a716-446655440000", UUID.parse("550E8400E29B41D4A716446655440000").to_s, "32 digits, no hyphens"
+puts "  32 digits with no hyphens"
+
+puts "\n== hash"
+# UUIDs hash as they compare. Without a `hash` of its own a UUID hashed to
+# its type: these two hashed alike, and a table of 16,000 UUID keys took
+# 2.0 s to fill where the same UUIDs as strings took 5 ms. A bound, not a
+# benchmark: twenty times the strings' time and 200 ms over.
+zero = UUID.parse("00000000-0000-4000-8000-000000000000")
+ones = UUID.parse("ffffffff-ffff-4fff-bfff-ffffffffffff")
+assert_true zero.hash != ones.hash, "two UUIDs hash apart"
+assert_true UUID.parse(q.to_s).hash == q.hash, "equal UUIDs hash alike"
+ids = (0...16000).map { UUID.v4 }
+texts = ids.map { |id| id.to_s }
+started = __iyi_monotonic_ns
+by_id = {} of UUID => Int32
+ids.each_with_index { |id, i| by_id[id] = i }
+keyed_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+by_text = {} of String => Int32
+texts.each_with_index { |text, i| by_text[text] = i }
+texted_ns = __iyi_monotonic_ns - started
+assert_true by_id.size == by_text.size && by_id[UUID.parse(texts[4321])]? == by_text[texts[4321]]?, "a table of UUIDs fills and answers"
+assert_true keyed_ns <= texted_ns * 20 + 200_000_000_i64, "hash table: 16000 UUID keys took #{keyed_ns // 1000000} ms where String keys took #{texted_ns // 1000000} ms"
+puts "  UUIDs hash as they compare; 16,000 keys within twenty times their texts' time and 200 ms"
+
+puts "\n== a value"
+# The bytes are the UUID's own. Held as the caller's array, a buffer reused
+# for the next record turned the UUID made from it into the next one too,
+# and a change through the array `bytes` answered moved a UUID that was a
+# hash key out of its table's reach.
+buffer = Array(UInt8).new(16) { 0_u8 }
+first = UUID.new(buffer)
+buffer[0] = 255_u8
+second = UUID.new(buffer)
+assert_str "00000000-0000-0000-0000-000000000000", first.to_s, "a UUID keeps its bytes when the buffer it was made from is reused"
+assert_str "ff000000-0000-0000-0000-000000000000", second.to_s, "the next UUID from the buffer"
+keyed = {} of UUID => Int32
+keyed[first] = 1
+first.bytes[1] = 255_u8
+assert_str "00000000-0000-0000-0000-000000000000", first.to_s, "writing to the array `bytes` answered changes no UUID"
+assert_true keyed[first]? == 1, "a UUID key is found after its `bytes` were written to"
+puts "  a reused buffer and a write to `bytes` change no UUID"
+
+puts "\n== v4"
+# 10,000 of them: none twice, every one version 4 with the RFC variant,
+# and each of the 122 other bits set in about half: 5,000 with a deviation
+# of 50, so the bound of 400 either way is eight of them, and a bit stuck
+# either way, or a source that answers one value, stands far outside it.
+seen = {} of UUID => Bool
+ones = Array(Int32).new(128) { 0 }
+10000.times do
+  id = UUID.v4
+  seen[id] = true
+  b = id.bytes
+  assert_true id.version == 4 && (b[6] >> 4) == 4_u8, "v4 version: #{id}"
+  assert_true (b[8] & 0xc0_u8) == 0x80_u8, "v4 variant: #{id}"
+  bit = 0
+  while bit < 128
+    ones[bit] = ones[bit] + 1 if (b[bit // 8] >> (7 - bit % 8)) & 1_u8 == 1_u8
+    bit = bit + 1
+  end
+end
+assert_true seen.size == 10000, "v4 UUIDs repeat: #{seen.size} distinct of 10,000"
+bit = 0
+while bit < 128
+  fixed = (bit >= 48 && bit < 52) || bit == 64 || bit == 65
+  unless fixed
+    assert_true ones[bit] > 4600 && ones[bit] < 5400, "v4 bit #{bit} is set in #{ones[bit]} of 10,000"
+  end
+  bit = bit + 1
+end
+puts "  10,000 v4 UUIDs: distinct, version 4, RFC variant, every random bit even"
+
+puts "\n== v7"
+# Version 7, the RFC variant, the millisecond it was made in its first 48
+# bits, and each one after the one before it, as bytes and as text - in
+# the same millisecond too, which 10,000 in a row are made in many times.
+started_ms = Time.utc.to_unix_ms
+previous = UUID.v7
+distinct = {} of UUID => Bool
+distinct[previous] = true
+9999.times do
+  id = UUID.v7
+  b = id.bytes
+  assert_true id.version == 7, "v7 version: #{id}"
+  assert_true (b[8] & 0xc0_u8) == 0x80_u8, "v7 variant: #{id}"
+  assert_true before?(previous, id), "v7 sorts after the one before it: #{previous} then #{id}"
+  assert_true previous.to_s < id.to_s, "v7 sorts as text: #{previous} then #{id}"
+  distinct[id] = true
+  previous = id
+end
+finished_ms = Time.utc.to_unix_ms
+assert_true distinct.size == 10000, "v7 UUIDs repeat: #{distinct.size} distinct of 10,000"
+first_stamp = stamp(distinct.keys[0])
+assert_true first_stamp >= started_ms && first_stamp <= finished_ms, "v7 stamps the millisecond it is made: #{first_stamp} outside #{started_ms}..#{finished_ms}"
+# A counter that ran out moves the stamp on early, a few milliseconds at
+# most in a run this size.
+assert_true stamp(previous) <= finished_ms + 5_i64, "v7 stamps no later than the clock: #{stamp(previous)} after #{finished_ms}"
+# Made a millisecond apart, two v7 UUIDs carry the two stamps, in order.
+early = UUID.v7
+while Time.utc.to_unix_ms <= stamp(early) + 1_i64
+end
+late = UUID.v7
+assert_true stamp(late) > stamp(early) && before?(early, late), "v7 made later stamps later and sorts later"
+assert_true UUID.parse(late.to_s) == late && UUID.parse(late.to_s).version == 7, "v7 parses back"
+puts "  10,000 v7 UUIDs: version 7, RFC variant, stamped with the time, each sorting after the last"
 
 puts "\nALL CHECKS PASSED"

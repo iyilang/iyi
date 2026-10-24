@@ -50,7 +50,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lsp_session import Client, tree_mb  # noqa: E402
+from lsp_session import Client, file_uri, tree_mb  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 MODULES = sorted((REPO / "src/std").glob("*.iyi"))
@@ -94,6 +94,9 @@ RSS_CEILING_MB = 1024
 FAILURES: list[str] = []
 
 
+# The size past which a module is swept more thinly (`questions`).
+MODULE_LINES = 2400
+
 MACRO_LINE = re.compile(r"\{%")
 ASSIGNMENT = re.compile(r"^\s*[\w, ]+ = [^=]")
 
@@ -133,7 +136,7 @@ def positions(lines: list[str], stride: int) -> list[tuple[int, int]]:
 def questions(path: Path, stride: int) -> list[tuple[str, dict, str]]:
     """Every request this module is asked, in order, as method and params."""
     lines = path.read_text().split("\n")
-    uri = "file://" + str(path)
+    uri = file_uri(str(path))
     asks: list[tuple[str, dict, str]] = []
     for method in WHOLE_FILE:
         asks.append((method, {"textDocument": {"uri": uri}}, path.name))
@@ -141,7 +144,13 @@ def questions(path: Path, stride: int) -> list[tuple[str, dict, str]]:
                  {"textDocument": {"uri": uri},
                   "range": {"start": {"line": 0, "character": 0},
                             "end": {"line": len(lines), "character": 0}}}, path.name))
-    for index, (line_no, column) in enumerate(positions(lines, stride)):
+    # A question costs a compile of the module, so a module's sweep costs
+    # its positions times its size: square in its lines. `std/math`, 12,000
+    # lines once CORE-MATH's functions came in, cost 938 s alone here and
+    # put the CI job past its hour. A module is asked as often as one of
+    # MODULE_LINES lines would be, every shape still sampled across it.
+    module_stride = stride * max(1, len(lines) // MODULE_LINES)
+    for index, (line_no, column) in enumerate(positions(lines, module_stride)):
         params = {"textDocument": {"uri": uri},
                   "position": {"line": line_no, "character": column}}
         where = f"{path.name}:{line_no + 1}:{column + 1}"
@@ -160,14 +169,14 @@ def sweep(path: Path, stride: int) -> tuple[int, int]:
     resident megabytes of the session — the proxy and whichever worker was
     compiling when it was read."""
     text = path.read_text()
-    uri = "file://" + str(path)
+    uri = file_uri(str(path))
     asks = questions(path, stride)
     asked = 0
     peak = 0
 
     client = Client()
     try:
-        client.send("initialize", {"rootUri": "file://" + str(REPO), "capabilities": {}})
+        client.send("initialize", {"rootUri": file_uri(str(REPO)), "capabilities": {}})
         client.send("initialized", {}, wait=False)
         client.send("textDocument/didOpen",
                     {"textDocument": {"uri": uri, "languageId": "iyi",

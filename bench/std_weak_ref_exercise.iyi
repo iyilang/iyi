@@ -1,0 +1,322 @@
+# Exercises `std/weak_ref`: `WeakRef(T)` over the collector's weak cells
+# (`IyiWeak` in the prelude).
+#
+# Proves:
+#   * a reference to an object something else holds answers that object,
+#     its fields intact, through any number of collections;
+#   * a reference whose target nothing else holds answers nil after the
+#     next collection: of 1,000 targets, the 500 nothing held;
+#   * the cell is zeroed before the target's memory is reused: 200,000
+#     objects allocated where the dead ones were, some at their very
+#     addresses, and every cleared reference still answers nil;
+#   * the collector's table forgets a reference that is garbage itself;
+#   * a literal, which no collector frees, is never cleared;
+#   * where the program has threads: four of them reading references
+#     while collections run - stopped marks and marks beside the program -
+#     only ever see nil or the object itself, intact.
+#
+#     ./bin/iyi run bench/std_weak_ref_exercise.iyi
+
+module bench/std_weak_ref_exercise
+
+import std/weak_ref::{WeakRef}
+import std/gc::{GC}
+
+def check(condition : Bool, what : String) : Nil
+  raise "ASSERTION FAILED: #{what}" unless condition
+end
+
+class Thing
+  getter id : Int32
+  getter tag : UInt64
+
+  def initialize(@id : Int32)
+    @tag = Thing.tag_for(@id)
+  end
+
+  def self.tag_for(id : Int32) : UInt64
+    (id.to_u64 &* 0x9E3779B97F4A7C15_u64) ^ 0xA5A5A5A5A5A5A5A5_u64
+  end
+
+  # Whether this is still the object made with *id*: memory the sweep
+  # handed to anything else carries neither.
+  def intact?(id : Int32) : Bool
+    @id == id && @tag == Thing.tag_for(id)
+  end
+end
+
+# An address kept where no scan takes it for a pointer, so recording where
+# a target was does not keep it there.
+HIDE = 0xFFFFFFFFFFFFFFFF_u64
+
+# *count* objects from *first*, a reference to each, the even ones held:
+# made in a frame of their own, so no slot of the caller's holds a target.
+def make(first : Int32, count : Int32, held : Array(Thing), refs : Array(WeakRef(Thing)), places : Array(UInt64)) : Nil
+  i = 0
+  while i < count
+    thing = Thing.new(first + i)
+    held << thing if i.even?
+    places << (thing.object_id ^ HIDE) if i.odd?
+    refs << WeakRef.new(thing)
+    i = i + 1
+  end
+end
+
+def same(a : Thing, b : Thing) : Bool
+  a.object_id == b.object_id
+end
+
+puts "== a reference that is held"
+held = [] of Thing
+refs = [] of WeakRef(Thing)
+places = [] of UInt64
+make(0, 1000, held, refs, places)
+check(IyiWeak.registered >= 1000_u64, "every reference is in the collector's table (#{IyiWeak.registered})")
+check(refs[0].to_s == "#<WeakRef(#{Thing})>", "a live reference's to_s (#{refs[0].to_s})")
+3.times { GC.collect }
+wrong = 0
+i = 0
+while i < 1000
+  value = refs[i].value
+  wrong = wrong + 1 if i.even? && (value.nil? || !same(value, held[i // 2]) || !value.intact?(i))
+  i = i + 1
+end
+check(wrong == 0, "a held target answers itself, intact, through three collections (#{wrong} did not)")
+puts "  500 held targets answered themselves through three collections"
+
+puts "== a reference whose target is gone"
+cleared = 0
+reached = 0
+broken = 0
+i = 1
+while i < 1000
+  value = refs[i].value
+  if value.nil?
+    cleared = cleared + 1
+  else
+    reached = reached + 1
+    broken = broken + 1 unless value.intact?(i)
+  end
+  i = i + 2
+end
+check(broken == 0, "a target still answered is intact (#{broken} were not)")
+# A stack slot or a register the conservative root walk reads can still
+# reach an object the program has let go; a handful at most.
+check(cleared >= 490, "a target nothing holds is cleared by the next collection (#{cleared} of 500 were)")
+cleared_ref = refs[1]
+i = 1
+while i < 1000 && !refs[i].value.nil?
+  i = i + 2
+end
+cleared_ref = refs[i]
+check(cleared_ref.to_s == "#<WeakRef(#{Thing}) cleared>", "a cleared reference's to_s (#{cleared_ref.to_s})")
+puts "  #{cleared} of 500 targets nothing held were cleared; #{reached} a conservative root still reached, each intact"
+
+puts "== the memory reused"
+
+# The dead targets' chunks go back to the size class, and Things made now
+# land in them: a cell left set would answer one of these as its target.
+def churn(count : Int32, into : Array(Thing)) : Nil
+  i = 0
+  while i < count
+    into << Thing.new(1000000 + i)
+    i = i + 1
+  end
+end
+
+fresh = [] of Thing
+churn(200000, fresh)
+dead = Hash(UInt64, Bool).new
+i = 1
+while i < 1000
+  dead[places[i // 2]] = true if refs[i].value.nil?
+  i = i + 2
+end
+landed = 0
+fresh.each { |thing| landed = landed + 1 if dead.has_key?(thing.object_id ^ HIDE) }
+check(landed > 0, "new objects were made at the addresses of cleared targets (#{landed} were)")
+answered = 0
+i = 1
+while i < 1000
+  value = refs[i].value
+  if dead.has_key?(places[i // 2])
+    answered = answered + 1 unless value.nil?
+  elsif !value.nil?
+    broken = broken + 1 unless value.intact?(i)
+  end
+  i = i + 2
+end
+check(answered == 0, "a cleared reference stays cleared when its target's memory is reused (#{answered} answered)")
+check(broken == 0, "a target still reached is intact after the churn (#{broken} were not)")
+wrong = 0
+i = 0
+while i < 1000
+  value = refs[i].value
+  wrong = wrong + 1 if value.nil? || !same(value, held[i // 2]) || !value.intact?(i)
+  i = i + 2
+end
+check(wrong == 0, "a held target answers itself after the churn (#{wrong} did not)")
+puts "  200000 objects made, #{landed} at a cleared target's address; every cleared reference still nil"
+
+puts "== the table forgets dead references"
+
+def throwaway(count : Int32, target : Thing) : Nil
+  i = 0
+  while i < count
+    WeakRef.new(target)
+    i = i + 1
+  end
+end
+
+before = IyiWeak.registered
+throwaway(10000, held[0])
+check(IyiWeak.registered >= before + 10000_u64, "the throwaway references were registered (#{IyiWeak.registered})")
+GC.collect
+after = IyiWeak.registered
+check(after <= before + 16_u64, "a collection forgets the references nothing holds (#{before} before, #{after} after 10,000 more)")
+puts "  10000 references nobody held left the table: #{before} before, #{after} after"
+
+puts "== what nothing frees"
+literal = WeakRef.new("never freed")
+GC.collect
+check(literal.value == "never freed", "a literal is never cleared")
+puts "  a literal's reference answers it after a collection"
+
+{% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+  puts "== threads reading while collections run"
+
+  # Each reader's counts, in a page no thread owns: an array is not Share,
+  # and a reader writes only its own eight words.
+  class Results
+    @@page : UInt64 = 0_u64
+
+    def self.setup : Nil
+      @@page = __iyi_mmap(4096_u64).address
+    end
+
+    def self.slot(seat : Int32, field : Int32) : Pointer(Int64)
+      Pointer(Int64).new(@@page + (seat * 8 + field).to_u64 * 8_u64)
+    end
+
+    def self.sum(field : Int32) : Int64
+      slot(0, field).value + slot(1, field).value + slot(2, field).value + slot(3, field).value
+    end
+  end
+
+  class Stop
+    @@word : UInt64 = 0_u64
+
+    def self.flag : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(pointerof(@@word).address)
+    end
+  end
+
+  class Link
+    getter next : Link?
+
+    def initialize(@next : Link?)
+    end
+  end
+
+  # A live set large enough that a mark goes beside the program.
+  def chain(count : Int32) : Link
+    head = Link.new(nil)
+    i = 1
+    while i < count
+      head = Link.new(head)
+      i = i + 1
+    end
+    head
+  end
+
+  # Rounds of 400 objects, the even ones held, read over and over while
+  # the allocation beside it keeps the trigger firing, until two
+  # collections have ended since they were made - a mark already running
+  # when they were made treats them as live, the next one does not. A
+  # held target must answer itself, intact; any other, nil or itself,
+  # intact, and nil once the two have ended.
+  def reader(seat : Int32) : Nil
+    rounds = 0_i64
+    reads = 0_i64
+    failures = 0_i64
+    cleared = 0_i64
+    finished = 0_i64
+    while Stop.flag.value.get == 0_u64
+      held = [] of Thing
+      refs = [] of WeakRef(Thing)
+      places = [] of UInt64
+      first = seat * 1000000 + (rounds % 1000).to_i32 * 400
+      since = IyiMark.collections
+      make(first, 400, held, refs, places)
+      pass = 0
+      done = false
+      while !done && Stop.flag.value.get == 0_u64
+        junk = 0
+        while junk < 200
+          Pointer(UInt8).malloc(96_u64).value = 1_u8
+          junk = junk + 1
+        end
+        done = IyiMark.collections >= since + 2_u64
+        i = 0
+        while i < 400
+          value = refs[i].value
+          reads = reads + 1
+          if i.even?
+            failures = failures + 1 if value.nil? || !same(value, held[i // 2]) || !value.intact?(first + i)
+          elsif value.nil?
+            cleared = cleared + 1 if done
+          else
+            failures = failures + 1 unless value.intact?(first + i)
+          end
+          i = i + 1
+        end
+        pass = pass + 1
+      end
+      finished = finished + 1 if done
+      rounds = rounds + 1
+    end
+    Results.slot(seat, 0).value = rounds
+    Results.slot(seat, 1).value = reads
+    Results.slot(seat, 2).value = failures
+    Results.slot(seat, 3).value = cleared
+    Results.slot(seat, 4).value = finished
+  end
+
+  long_lived = chain(200000)
+  Results.setup
+  collections = GC.stats.collections
+  beside = IyiMark.concurrent_collections
+  threads = [] of IyiThread
+  4.times { |seat| threads << IyiThread.start { reader(seat); nil } }
+  started = __iyi_monotonic_ns
+  while true
+    elapsed = __iyi_monotonic_ns - started
+    break if elapsed > 30_000_000_000_i64
+    break if elapsed > 2_000_000_000_i64 && IyiMark.concurrent_collections - beside >= 3_u64
+    Pointer(UInt8).malloc(64_u64).value = 1_u8
+  end
+  Stop.flag.value.set(1_u64)
+  threads.each(&.join)
+  IyiMark.settle
+  rounds = Results.sum(0)
+  reads = Results.sum(1)
+  failures = Results.sum(2)
+  lost = Results.sum(3)
+  finished = Results.sum(4)
+  ran = GC.stats.collections - collections
+  went_beside = IyiMark.concurrent_collections - beside
+  check(failures == 0, "every read answered nil or the object itself, intact (#{failures} did not, of #{reads})")
+  check(went_beside >= 1_u64, "a mark ran beside the reading threads (#{ran} collections, #{went_beside} beside)")
+  check(finished > 0, "a round saw two collections end (#{rounds} rounds)")
+  # Each reader's registers and stack, and the other readers' when the
+  # world stops, can hold a target it let go: a conservative root keeps
+  # what it happens to point at, and promises no bound. Linux keeps about
+  # one a round; Windows' plain build kept 217 in 20 rounds, about eleven.
+  # Nine in ten cleared is what is asked: a collection that clears no cell,
+  # or one in two, still fails it by far.
+  check(lost >= finished * 180, "a round's targets nothing held are cleared once two collections end (#{lost} of #{finished * 200})")
+  check(long_lived.next.nil? == false, "the long-lived chain is still whole")
+  puts "  4 threads, #{rounds} rounds, #{reads} reads, #{ran} collections (#{went_beside} beside the program): every read nil or the object, intact; #{lost} of #{finished * 200} cleared in the #{finished} rounds that saw two collections end"
+{% end %}
+
+puts "\nALL CHECKS PASSED"

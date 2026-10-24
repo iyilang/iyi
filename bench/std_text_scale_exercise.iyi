@@ -1,0 +1,125 @@
+# The library's text building, at a size where the shape of the algorithm is
+# the whole answer: every method here writes megabytes, and each one checks
+# what it wrote. Linear, the run is a fraction of a second; built with
+# `result = result + piece` - which `Array#join`, `String#tr`, `gsub` with a
+# block, `delete`, `squeeze` and `Regex#replace` all were - it does not end,
+# and `bench/std_text_scale_exercise.sh` runs it under a clock.
+#
+#   ./bin/iyi run bench/std_text_scale_exercise.iyi
+#   bash bench/std_text_scale_exercise.sh
+module bench/std_text_scale_exercise
+
+import std/csv::{CSV}
+import std/http::{HTTP}
+import std/list::{List}
+import std/regex::{Regex}
+import std/text
+
+def check(ok : Bool, what : String) : Nil
+  raise "text scale: #{what}" unless ok
+end
+
+# A sequence of eight megabytes, the letters of a genome and a separator.
+unit = "acgtACGT-"
+count = (8 * 1024 * 1024 + unit.bytesize - 1) // unit.bytesize
+pieces = [] of String
+i = 0
+while i < count
+  pieces << unit
+  i = i + 1
+end
+
+seq = pieces.join
+check(seq.bytesize == count * unit.bytesize, "join wrote #{seq.bytesize} bytes")
+lined = pieces.join("\n")
+check(lined.bytesize == count * (unit.bytesize + 1) - 1, "join with a separator")
+
+complement = seq.reverse.tr("acgtACGT", "tgcaTGCA")
+check(complement.bytesize == seq.bytesize, "reverse and tr keep the size")
+check(complement.starts_with?("-ACGTacgt"), "reverse and tr: #{complement[0, 9]}")
+
+dashes = seq.gsub("-") { |dash| "--" }
+check(dashes.bytesize == seq.bytesize + count, "gsub with a block")
+check(seq.delete("-").bytesize == seq.bytesize - count, "delete")
+check(dashes.squeeze("-").bytesize == seq.bytesize, "squeeze")
+
+replaced = Regex.compile("[AC]+").replace(seq, "x")
+check(replaced.bytesize == seq.bytesize - count, "Regex#replace")
+counted = Regex.compile("G").replace(seq) { |match| "gg" }
+check(counted.bytesize == seq.bytesize + count, "Regex#replace with a block")
+
+lines = 0
+bytes = 0
+lined.each_line do |line|
+  lines = lines + 1
+  bytes = bytes + line.bytesize
+end
+check(lines == count && bytes == count * unit.bytesize, "each_line")
+
+built = String.build do |io|
+  i = 0
+  while i < count
+    io << unit << 'é'
+    i = i + 1
+  end
+end
+check(built.bytesize == count * (unit.bytesize + 2), "String.build")
+
+# The same text through the library's other builders, each of which added
+# every piece to the text so far: `Enumerable#join` (a `List` of the
+# pieces), `String.join` over what is not an `Array`, `CSV.build`,
+# `HTTP.decode_chunked` and `center`'s cycled padding.
+listed = List(String).new(pieces).join(",")
+check(listed.bytesize == count * (unit.bytesize + 1) - 1, "Enumerable#join")
+numbered = String.join(0...count, ",")
+check(numbered.starts_with?("0,1,2,") && numbered.ends_with?(",#{count - 1}"), "String.join over a range")
+rows = [] of Array(String)
+i = 0
+while i < count // 4
+  rows << [unit, "a,b", "c", "d"]
+  i = i + 1
+end
+table = CSV.build(rows)
+check(table.bytesize == (count // 4) * (unit.bytesize + 11) - 1, "CSV.build wrote #{table.bytesize} bytes")
+chunked = String.build do |io|
+  i = 0
+  while i < count
+    io << "9\r\n" << unit << "\r\n"
+    i = i + 1
+  end
+  io << "0\r\n\r\n"
+end
+check(HTTP.decode_chunked(chunked) == seq, "HTTP.decode_chunked")
+padded = "x".center(seq.bytesize, "-=")
+check(padded.bytesize == seq.bytesize && padded.starts_with?("-=-="), "center with a cycled pad")
+
+# A needle that almost matches everywhere: sixty-five thousand `a` and a
+# `b`, looked for in eight megabytes of `a`. Compared from each position
+# in turn that is half a trillion byte comparisons: at sixteen thousand,
+# a copy compared from each position took 40 s here and under the
+# gate's 20 on a darwin arm64 runner, so the clock proved nothing there.
+run = "a" * seq.bytesize
+near = "a" * 65536 + "b"
+check(run.index(near).nil?, "index of a near miss")
+check(!run.includes?(near), "includes? of a near miss")
+check(run.split(near).size == 1, "split on a near miss")
+check((run + near).index(near) == run.bytesize, "index finds it at the end")
+check(Regex.compile(near).find(run).nil?, "a literal pattern's near miss")
+check(run.rindex(near).nil?, "rindex of a near miss")
+check((near + run).rindex(near) == 0, "rindex finds it at the start")
+
+# Two equal megabytes compared a thousand times. A byte a step that took
+# 230 ms optimised, eleven times Python's `==`; thirty-two bytes a step it
+# is 22. The bound is the optimised build's, five times that.
+mega = "acgt" * 262144
+twin = "acgt" * 262144
+same = 0
+started = __iyi_monotonic_ns
+1000.times { same = same + 1 if mega == twin }
+check(same == 1000, "== of equal megabytes")
+{% if flag?(:release) %}
+  ms = (__iyi_monotonic_ns - started) // 1000000
+  check(ms < 120, "1,000 == of equal megabytes took #{ms} ms, past 120")
+{% end %}
+
+puts "text scale: #{seq.bytesize // (1024 * 1024)} MB through join, reverse, tr, gsub, delete, squeeze, replace, each_line, String.build, Enumerable#join, String.join, CSV.build, HTTP.decode_chunked, center, a near-miss search and pattern and ==, each checked"

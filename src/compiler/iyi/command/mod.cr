@@ -17,6 +17,15 @@ class Iyi::Command
     when "context"
       options.shift
       mod_context
+    when "tidy"
+      options.shift
+      mod_tidy
+    when "reach"
+      options.shift
+      mod_reach
+    when "release"
+      options.shift
+      mod_release
     when nil, "--help", "-h"
       puts mod_usage
       exit
@@ -30,6 +39,16 @@ class Iyi::Command
     Usage: #{Command.program_name} mod [subcommand]
 
     Subcommand:
+        tidy [--check]           make iyi.mod and iyi.sum say what the source
+                                 imports: add what is missing, remove what
+                                 nothing uses, drop sums nothing builds
+        reach                    say what every module the build selects
+                                 touches outside the language: std modules,
+                                 File, C libraries and functions
+        release [VERSION]        say what the next release of this package has
+                                 to be called, from what its exported surface
+                                 did since the last tag; exit 1 when VERSION
+                                 understates it
         context FILE.iyi         print what a change to this module is allowed
                                  to know: the exact exported surface of every
                                  module it imports, and nothing's body. This is
@@ -52,6 +71,61 @@ class Iyi::Command
     USAGE
   end
 
+  # iyi: what each subcommand takes, for a `--help` asked of the
+  # subcommand rather than of `mod`.
+  #
+  # `iyi mod context --help` answered "mod context: unknown flag --help",
+  # which is the one sentence that is certainly wrong: the flag list is
+  # how a harness discovers a verb, AI_FIRST.md §2b names `mod context
+  # --budget N` as one of the loop's seven, and every other verb in this
+  # binary — `check`, `fix`, `test`, `run`, `build`, `doc`, `bind` —
+  # answers `--help` with its usage.
+  private def mod_context_usage
+    <<-USAGE
+    Usage: #{Command.program_name} mod context [--json] [--budget N] FILE.iyi
+
+    Print what a change to this module is allowed to know: the exact
+    exported surface of every module FILE.iyi imports, and nothing's body.
+
+    Switches:
+        --json          the same pack as data, one object per import
+        --budget N      cut the text pack to about N tokens by a defined
+                        ladder — docs off from the last import backwards,
+                        then surfaces collapse to a header naming the
+                        module and what eliding it cost. Every import is
+                        named at every budget. A token is four bytes
+    USAGE
+  end
+
+  private def mod_diff_usage
+    <<-USAGE
+    Usage: #{Command.program_name} mod diff [--exit-code] OLD.iyimod NEW.iyimod
+
+    Say whether a change reaches this module's consumers, and what changed
+    if it does: interface, implementation, source, and the dependencies it
+    was compiled against.
+
+    Switches:
+        --exit-code     exit 1 when consumers have to be rebuilt, 0 when
+                        they do not — for a branch in a script
+    USAGE
+  end
+
+  private def mod_dump_usage
+    <<-USAGE
+    Usage: #{Command.program_name} mod dump [--declarations | --json] FILE.iyimod
+
+    Print a .iyimod as text: what a module offers a consumer, read back out
+    of the artifact itself.
+
+    Switches:
+        --declarations  the iyi declarations a consumer compiles against,
+                        which is what `import` reads instead of the source
+        --json          the module's exported surface as data: signatures,
+                        types, fields, impls, and the interface hash
+    USAGE
+  end
+
   private def mod_dump
     # Not a flag on the command, because it selects between two whole outputs:
     # the file as it is stored, and the file as the compiler reads it. The
@@ -71,6 +145,9 @@ class Iyi::Command
         declarations = true
       when "--json"
         as_json = true
+      when "--help", "-h"
+        puts mod_dump_usage
+        exit
       when .starts_with?('-')
         abort! "mod dump: unknown flag #{option}", :USAGE_ERROR
       else
@@ -144,6 +221,9 @@ class Iyi::Command
       case option
       when "--exit-code"
         exit_code = true
+      when "--help", "-h"
+        puts mod_diff_usage
+        exit
       when .starts_with?('-')
         abort! "mod diff: unknown flag #{option}", :USAGE_ERROR
       else
@@ -182,6 +262,32 @@ class Iyi::Command
     puts "implementation  #{moved.call(old_hashes.implementation, new_hashes.implementation)}  the bodies a consumer compiles: macros, generics, the initialiser"
     puts "source          #{moved.call(old_hashes.source, new_hashes.source)}  the file"
 
+    # The fourth thing an artifact records, and the one a source-shaped
+    # reading misses: what it was compiled *against*. A module whose own
+    # file, interface and bodies are identical is a different artifact when
+    # a dependency moved under it — `iyi.mod` bumped from `liba v1.0.0` to
+    # `v1.1.0` left every line above reading "unchanged" while the program
+    # printed something else. IV.3 keeps those hashes on the edge for
+    # exactly this, and the verdict has to read them.
+    old_edges = old_artifact.imports.to_h { |edge| {edge.module_name, edge} }
+    new_edges = new_artifact.imports.to_h { |edge| {edge.module_name, edge} }
+    dependencies_moved = [] of String
+    (old_edges.keys | new_edges.keys).sort!.each do |name|
+      before_edge = old_edges[name]?
+      after_edge = new_edges[name]?
+      case
+      when before_edge.nil?
+        dependencies_moved << "#{name} — new"
+      when after_edge.nil?
+        dependencies_moved << "#{name} — gone"
+      when before_edge.interface != after_edge.interface
+        dependencies_moved << "#{name} — interface"
+      when before_edge.implementation != after_edge.implementation
+        dependencies_moved << "#{name} — implementation"
+      end
+    end
+    puts "dependencies    #{dependencies_moved.empty? ? "unchanged" : "changed  "}  what this module was compiled against"
+
     # The verdict is over *both* of the first two lines, and the second one
     # is why: a body that travels is compiled by the consumer, so moving
     # one moves the consumer's own machine code. Read on the interface
@@ -213,23 +319,114 @@ class Iyi::Command
       puts
       puts "Consumers have to be rebuilt: what they compile against is the same, and a body they compile moved."
       exit 1 if exit_code
+    elsif !dependencies_moved.empty?
+      # This module's own three hashes agree and it is still another
+      # artifact: it was compiled against something that moved. Its
+      # consumers relink it, so what they need is this file rebuilt — and
+      # a build system reading "nothing to do" here would ship the old one.
+      puts
+      dependencies_moved.each { |line| puts "  moved  #{line}" }
+      puts
+      puts "This module has to be rebuilt: its own surface is the same, and what it was compiled against moved."
+      exit 1 if exit_code
     else
       puts
       puts "Consumers do not have to be rebuilt: what they compile against is the same."
     end
   end
 
+  # One line of a module's surface and what it is. *name* is what a consumer
+  # writes for it, nil for an impl; *owner* the type it is under, empty for
+  # the module's own; *declares* the type a type's own line declares;
+  # *signature* the def a def's line renders. A *requirement* is an
+  # `abstract def` or an associated type: what an implementer supplies
+  # rather than what a caller uses, so one new on a type that was already
+  # there breaks every impl of it, where any other new line breaks nothing.
+  record SurfaceLine, name : String?, owner : String = "", declares : String = "",
+    signature : IyiMod::Signature? = nil, requirement : Bool = false
+
   # What a consumer can name, as text, so that two of them can be compared.
+  # A module's surface, one line per thing a consumer can name - what
+  # `mod diff` lists as gone and new, and what `mod release` weighs: functions, `pub`
+  # types with their parameters, their methods and the types inside them,
+  # impls and macros.
   private def iyi_export_lines(artifact : IyiMod::Artifact) : Array(String)
-    lines = [] of String
-    artifact.exports.functions.each { |signature| lines << IyiMod.render_signature(signature) }
-    artifact.exports.types.each do |declaration|
-      lines << "#{declaration.kind} #{declaration.name}"
-      declaration.methods.each do |signature|
-        lines << "#{declaration.name}.#{IyiMod.render_signature(signature)}"
-      end
+    iyi_surface_lines(artifact).keys.sort!
+  end
+
+  # The same lines, each with what it is (`SurfaceLine`).
+  #
+  # Every name a consumer can write is a line, and it was not: the
+  # constants, an enum's members, what an alias names, a type's macros and
+  # every type nested in an exported one were left out, so `mod release`
+  # called deleting `pub LIMIT`, `Box::Inner`, `Color::Blue` or `macro
+  # def_twice` "the surface is as it was" - v1.0.1 - and a consumer of
+  # v1.0.0 stopped on `undefined constant Kit::LIMIT`. A constant is its
+  # name: its value travels as source and its type is not in the artifact.
+  # A value moved breaks no one who names it; one whose type moved is not
+  # seen here, which is the one gap left.
+  private def iyi_surface_lines(artifact : IyiMod::Artifact) : Hash(String, SurfaceLine)
+    lines = {} of String => SurfaceLine
+    exports = artifact.exports
+    # A private def travels with the generic bodies that call it, and is
+    # nobody's to call: not surface.
+    exports.functions.each do |signature|
+      next if signature.visibility == "private"
+      lines[IyiMod.render_signature(signature)] = SurfaceLine.new(signature.name, signature: signature)
     end
-    lines.sort!
+    exports.types.each { |declaration| iyi_surface_type(declaration, "", lines) }
+    exports.impls.each do |entry|
+      named = entry.trait_arguments.empty? ? entry.trait_name : "#{entry.trait_name}(#{entry.trait_arguments.join(", ")})"
+      lines["impl #{named} for #{entry.type_name}"] = SurfaceLine.new(nil)
+    end
+    # The `pub` ones: an unmarked macro is the module's own, as an
+    # unmarked def is.
+    IyiMod.exported_macros(artifact).each do |source|
+      lines[IyiMod.macro_line(source)] = SurfaceLine.new(IyiMod.macro_name(source))
+    end
+    IyiMod.exported_constants(artifact).each do |(container, text)|
+      name = text.partition(" = ")[0]
+      lines["const #{container.empty? ? "" : "#{container}::"}#{name}"] = SurfaceLine.new(name, owner: container)
+    end
+    lines
+  end
+
+  # A module's own type is surface when it says `pub`. One nested in it
+  # travels with the visibility it was written with, and is surface unless
+  # that is `private`: `Box::Inner` is named as `Box` is.
+  private def iyi_surface_type(declaration : IyiMod::TypeDecl, outer : String, lines : Hash(String, SurfaceLine)) : Nil
+    if outer.empty?
+      return unless declaration.visibility == "pub"
+    else
+      return if declaration.visibility == "private"
+    end
+    name = "#{outer}#{declaration.name}"
+    owner = outer.rchop("::")
+    header =
+      if declaration.kind == "alias"
+        # What it names is the whole of an alias: a consumer writing
+        # `Pair` writes the type on the right.
+        "alias #{name} = #{declaration.value}"
+      else
+        parameters = declaration.type_parameters.empty? ? "" : "(#{declaration.type_parameters.join(", ")})"
+        "#{declaration.kind} #{name}#{parameters}"
+      end
+    lines[header] = SurfaceLine.new(declaration.name, owner: owner, declares: name)
+    declaration.assoc_types.each do |assoc|
+      lines["#{name}.type #{assoc}"] = SurfaceLine.new(assoc, owner: name, requirement: true)
+    end
+    declaration.members.each do |(member, _)|
+      lines["member #{name}::#{member}"] = SurfaceLine.new(member, owner: name)
+    end
+    declaration.macros.each do |source|
+      lines["#{name}.#{IyiMod.macro_line(source)}"] = SurfaceLine.new(IyiMod.macro_name(source), owner: name)
+    end
+    declaration.methods.each do |signature|
+      next if signature.visibility == "private"
+      lines["#{name}.#{IyiMod.render_signature(signature)}"] =
+        SurfaceLine.new(signature.name, owner: name, signature: signature, requirement: signature.required)
+    end
+    declaration.types.each { |inner| iyi_surface_type(inner, "#{name}::", lines) }
   end
 
   private def read_iyimod(path : String) : IyiMod::Artifact

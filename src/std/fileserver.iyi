@@ -1,0 +1,176 @@
+# Files served from a directory: what a server's block answers with
+# `FileServer.serve(root, request)` for the requests it means to be
+# files. Go's `http.FileServer`, and the same RFC 9110 rules.
+#
+# The type is std/mime's for the extension, text and JSON with
+# `charset=utf-8`. Caching is `Last-Modified` and an `ETag` made of the
+# modification time and the size in hex: `If-None-Match` (weakly
+# compared) and, without it, `If-Modified-Since` answer 304 (§13.2.2
+# orders them so). One `Range: bytes=` range is a 206 with its
+# `Content-Range`, a suffix range included; one that starts past the end
+# is 416 with `bytes */size`; several ranges, another unit, or a range
+# under an `If-Range` that names another version is the whole file, which
+# §14.2 allows. The file is copied out by the server as it is read, never
+# whole, from where the range starts.
+#
+# The request path is percent-decoded and must stay below *root*: a `..`
+# segment, a NUL and a backslash are 404s, the same answer a file that is
+# not there gets, so what lies outside is not told apart from what does
+# not exist. Symbolic links inside *root* are followed, as Go's are. A
+# directory is its index file, and one asked for without its trailing
+# `/` is redirected to it (301), so the links in its index resolve.
+# Methods other than GET and HEAD are 405 with `Allow: GET, HEAD`.
+#
+# A module of its own beside std/http, since it reads files and the
+# clock and std/http reaches the network alone.
+
+module std/fileserver
+
+import std/http::{HTTP, Request, Response}
+import std/uri::{URI}
+import std/mime::{MIME}
+import std/file::{File}
+import std/time::{Time}
+
+pub struct FileServer
+  # The answer to *req* from the files under *root*: what a server's
+  # block returns to serve a directory. A GET or HEAD only, 405 otherwise.
+  # The path is percent-decoded and read below *root*: a `..` segment, a
+  # NUL or a backslash is a 404 rather than a way out of it. A directory
+  # is its *index* file, and one asked for without its trailing `/` is
+  # redirected there, so relative links inside resolve. The type comes
+  # from the extension (std/mime), text with `charset=utf-8`.
+  #
+  # Caching and ranges are RFC 9110's: `Last-Modified` and an `ETag` made
+  # from the modification time and size; `If-None-Match`, and without it
+  # `If-Modified-Since`, answer 304. One `Range: bytes=` range is a 206
+  # with its `Content-Range`, one past the end a 416; several are served
+  # as the whole file (§14.2 lets a server ignore a range), and so is a
+  # range whose `If-Range` names another version. The file is read as it
+  # is sent, never whole.
+  def self.serve(root : String, req : Request, index : String = "index.html") : Response
+    unless HTTP.same_name?(req.method, "GET") || HTTP.same_name?(req.method, "HEAD")
+      return Response.new(405, "method not allowed\n", {"Allow" => "GET, HEAD", "Content-Type" => "text/plain; charset=utf-8"})
+    end
+    decoded = URI.decode?(req.path)
+    return not_found unless decoded && decoded.starts_with?("/")
+    return not_found if decoded.includes?("\0") || decoded.includes?("\\")
+    decoded.split('/').each do |segment|
+      return not_found if segment == ".."
+    end
+    path = root + decoded
+    info = File.info?(path)
+    return not_found unless info
+    if info.directory?
+      unless decoded.ends_with?("/")
+        target = req.path + "/"
+        if q = req.query
+          target = target + "?" + q
+        end
+        return Response.new(301, "", {"Location" => target})
+      end
+      path = path + index
+      info = File.info?(path)
+      return not_found unless info
+    end
+    return not_found unless info.file?
+    size = info.size
+    modified = Time.unix(info.modification_time)
+    stamp = modified.to_rfc1123
+    tag = "\"" + HTTP.hex_text(info.modification_time) + "-" + HTTP.hex_text(size) + "\""
+    headers = {
+      "Content-Type"  => MIME.with_charset(MIME.from_extension(path)),
+      "Last-Modified" => stamp,
+      "ETag"          => tag,
+      "Accept-Ranges" => "bytes",
+    }
+    if none = req.header("If-None-Match")
+      return Response.new(304, "", headers) if none.strip == "*" || FileServer.tag_listed?(none, tag)
+    elsif since = req.header("If-Modified-Since")
+      asked = Time::Format::HTTP_DATE.parse(since)
+      if asked.is_a?(Time) && modified.to_unix <= asked.to_unix
+        return Response.new(304, "", headers)
+      end
+    end
+    start = 0_i64
+    length = size
+    status = 200
+    if (range = req.header("Range")) && FileServer.range_applies?(req, tag, stamp)
+      # Nil is not one range this server reads: the whole file.
+      span = FileServer.byte_range(range, size)
+      if span.is_a?(Bool)
+        headers["Content-Range"] = "bytes */#{size}"
+        headers["Content-Type"] = "text/plain; charset=utf-8"
+        return Response.new(416, "range not satisfiable\n", headers)
+      elsif span
+        start = span[0]
+        length = span[1] - span[0] + 1_i64
+        status = 206
+        headers["Content-Range"] = "bytes #{span[0]}-#{span[1]}/#{size}"
+      end
+    end
+    headers["Content-Length"] = length.to_s
+    return Response.new(status, "", headers) if HTTP.same_name?(req.method, "HEAD") || length == 0_i64
+    file = File.open(path)
+    file.seek(start) if start > 0_i64
+    Response.new(status, file, headers)
+  end
+
+  private def self.not_found : Response
+    Response.new(404, "not found\n", {"Content-Type" => "text/plain; charset=utf-8"})
+  end
+
+  # Whether an `If-None-Match` list names *tag*, weakly compared (§13.1.2).
+  protected def self.tag_listed?(list : String, tag : String) : Bool
+    list.split(',').each do |item|
+      named = item.strip
+      named = named[2, named.bytesize - 2] if named.starts_with?("W/")
+      return true if named == tag
+    end
+    false
+  end
+
+  # A `Range` is honoured on a GET, and under `If-Range` only when it
+  # names this version - its tag, or its date exactly (§13.1.5).
+  protected def self.range_applies?(req : Request, tag : String, stamp : String) : Bool
+    return false unless HTTP.same_name?(req.method, "GET")
+    if given = req.header("If-Range")
+      named = given.strip
+      return named == tag || named == stamp
+    end
+    true
+  end
+
+  # One `bytes=` range of a *size*-byte file: its first and last byte,
+  # `true` for one that starts past the end (416), nil for anything else
+  # - another unit, several ranges, a range that is not one - which is
+  # served as the whole file.
+  def self.byte_range(value : String, size : Int64) : {Int64, Int64} | Bool | Nil
+    text = value.strip
+    return nil unless text.starts_with?("bytes=")
+    spec = text[6, text.bytesize - 6].strip
+    return nil if spec.includes?(",")
+    dash = spec.index('-')
+    return nil unless dash
+    first_text = spec[0, dash].strip
+    last_text = spec[dash + 1, spec.bytesize - dash - 1].strip
+    if first_text.bytesize == 0
+      # The last N bytes.
+      count = HTTP.content_length(last_text)
+      return nil unless count
+      return true if count == 0_i64 || size == 0_i64
+      count = size if count > size
+      return {size - count, size - 1_i64}
+    end
+    first = HTTP.content_length(first_text)
+    return nil unless first
+    last = size - 1_i64
+    if last_text.bytesize > 0
+      given = HTTP.content_length(last_text)
+      return nil unless given && given >= first
+      last = given if given < last
+    end
+    return true if first >= size
+    {first, last}
+  end
+end

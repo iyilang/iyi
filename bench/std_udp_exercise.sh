@@ -6,7 +6,8 @@
 # Proves the exercise holds plain and --release, that a broken address
 # resolution is caught, and what address parsing refuses: an invalid IPv4
 # host, an out of range octet, an incomplete IPv4 address, and an invalid
-# hex character in an IPv6 address.
+# hex character in an IPv6 address; and that a bind or send that fails
+# says why.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -79,7 +80,7 @@ fi
 
 echo
 echo "== every udp section reported"
-for phrase in "== address parsing" "== bind to port 0 and loopback exchange" "== connected sockets" "== maximum datagram size" "== nothing queued: the ? variants answer nil, and a bounded wait ends" "== socket lifecycle and close"; do
+for phrase in "== address parsing" "== bind to port 0 and loopback exchange" "== connected sockets" "== maximum datagram size" "== nothing queued: the ? variants answer nil, and a bounded wait ends" "== a connected peer that refused" "== socket lifecycle and close"; do
   if ! grep -q "$phrase" "$WORK/udp-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -105,10 +106,10 @@ else
 from pathlib import Path
 # The parser is std/socket's now, so the module broken is that one.
 src = Path("$REPO/src/std/socket.iyi").read_text()
-old = 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"'
+old = 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if localhost?(host)'
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/socket.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if host == "localhost"', 1))
+Path("$WORK/patched/std/socket.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if localhost?(host)', 1))
 PY
   if [ $? -ne 0 ]; then
     echo "  the patch did not apply"
@@ -125,7 +126,7 @@ echo
 echo "== what address parsing refuses"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/udp\nimport std/socket\nusing std/udp::{UdpSocket}\nusing std/socket::{IyiSocket}\n\nputs (%s).to_s\n' \
+  printf 'module main\n\nimport std/udp::{UdpSocket}\nimport std/socket::{IyiSocket}\n\nputs (%s).to_s\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
@@ -155,18 +156,18 @@ refuses "an out-of-range octet" octet_range "cannot resolve address: \"999.1.1.1
   'IyiSocket.parse_ip("999.1.1.1")'
 refuses "an incomplete IPv4 address" incomplete_ip "cannot resolve address: \"1.2.3\"" \
   'IyiSocket.parse_ip("1.2.3")'
-refuses "an invalid hex character in IPv6" bad_hex "invalid hex character in IPv6 address: x" \
-  'UdpSocket.parse_ipv6("2001:xyz::1")'
+refuses "an invalid hex character in IPv6" bad_hex "cannot resolve address: \"2001:xyz::1\": 'x' is not a hex digit" \
+  'IyiSocket.parse_ipv6("2001:xyz::1")'
 refuses "a leading-zero octet" leading_zero "an octet with a leading zero is not decimal" \
   'IyiSocket.parse_ip("010.1.1.1")'
 refuses "an overflowing octet" overflow_octet "cannot resolve address: \"2147483648.1.1.1\"" \
   'IyiSocket.parse_ip("2147483648.1.1.1")'
-refuses "a second IPv6 compression" two_compressions "invalid IPv6 address: 1::2::3" \
-  'UdpSocket.parse_ipv6("1::2::3")'
-refuses "a five-digit IPv6 group" long_group "invalid IPv6 address group" \
-  'UdpSocket.parse_ipv6("00000::1")'
-refuses "a leading single colon" lead_colon "invalid IPv6 address group" \
-  'UdpSocket.parse_ipv6(":1:2:3:4:5:6:7")'
+refuses "a second IPv6 compression" two_compressions "cannot resolve address: \"1::2::3\": a second \`::\`" \
+  'IyiSocket.parse_ipv6("1::2::3")'
+refuses "a five-digit IPv6 group" long_group "a group of more than four hex digits" \
+  'IyiSocket.parse_ipv6("00000::1")'
+refuses "a leading single colon" lead_colon "a single leading colon" \
+  'IyiSocket.parse_ipv6(":1:2:3:4:5:6:7")'
 
 refuses_body() { # refuses_body <label> <name> <phrase>
   local label="$1" name="$2" phrase="$3"
@@ -195,24 +196,21 @@ refuses_body() { # refuses_body <label> <name> <phrase>
 
 refuses_body "a negative port" neg_port "port -1 is not a port: 0 to 65535" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", -1)
 puts s.local_port
 IYI
 
 refuses_body "a port above 65535" high_port "port 70000 is not a port: 0 to 65535" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 70000)
 puts s.local_port
 IYI
 
 refuses_body "a Datagram index that is not 0, 1, or 2" dg_index "Datagram index -1 is not 0, 1, or 2" <<'IYI'
 module main
-import std/udp
-using std/udp::{Datagram, Bytes}
+import std/udp::{Datagram, Bytes}
 buf = Bytes.new(1)
 buf[0] = 120_u8
 dg = Datagram.new(buf, "h", 7)
@@ -221,16 +219,14 @@ IYI
 
 refuses_body "a negative receive count" neg_recv "negative count: -1" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 0)
 s.receive_from(-1)
 IYI
 
 refuses_body "local_port after close" closed_port "socket is closed" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 0)
 s.close
 puts s.local_port
@@ -238,10 +234,56 @@ IYI
 
 refuses_body "a negative poll timeout" neg_poll "negative timeout: -1" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 0)
 puts s.poll_read(-1)
+IYI
+
+echo
+echo "== a refusal says why"
+# Each refusal was a fixed sentence that dropped the platform's number:
+# a port in use was "cannot bind UDP socket to 127.0.0.1:P" and nothing
+# more, a datagram past 65,507 bytes and an IPv6 address from an IPv4
+# socket were both "cannot send to H:P". A sentence that names a port the
+# system chose prints it as P, so this output is the same on every run.
+refuses_port() { # refuses_port <label> <name> <phrase>, the program on stdin
+  refuses_body "$@" > "$WORK/$2.said"
+  sed 's/:[0-9][0-9]*\([:"]\)/:P\1/g' "$WORK/$2.said"
+}
+
+# And a port is its first binder's: no SO_REUSEADDR, which on Linux let
+# this second bind through.
+refuses_port "a second bind of a held port" rebind ": the address is in use" <<'IYI'
+module main
+import std/udp::{UdpSocket}
+held = UdpSocket.bind("127.0.0.1", 0)
+again = UdpSocket.bind("127.0.0.1", held.local_port)
+puts again.local_port
+IYI
+
+refuses_body "a datagram past 65,507 bytes" too_big "cannot send to 127.0.0.1:9: the datagram is too large to send" <<'IYI'
+module main
+import std/udp::{UdpSocket}
+puts UdpSocket.client.send_to("x" * 65508, "127.0.0.1", 9)
+IYI
+
+refuses_body "an IPv6 address from an IPv4 socket" other_family "cannot send to [::1]:9: the address is not of the socket's family" <<'IYI'
+module main
+import std/udp::{UdpSocket}
+puts UdpSocket.client.send_to("x", "::1", 9)
+IYI
+
+# A broadcast needs SO_BROADCAST. Linux answers that only where it has a
+# route for the address, and ENETUNREACH on a machine with none, so the
+# sentence is asked for where it was measured and a reason elsewhere.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) broadcast_said="cannot send to 255.255.255.255:9: the destination is a broadcast address" ;;
+  *) broadcast_said="cannot send to 255.255.255.255:9: " ;;
+esac
+refuses_body "a broadcast without SO_BROADCAST" broadcast "$broadcast_said" <<'IYI'
+module main
+import std/udp::{UdpSocket}
+puts UdpSocket.client.send_to("x", "255.255.255.255", 9)
 IYI
 
 echo
@@ -254,8 +296,7 @@ echo "== a receive parks rather than blocking the thread (SPEC.md III.4.2)"
 cat > "$WORK/park.iyi" <<'IYI'
 module park
 
-import std/udp
-using std/udp::{UdpSocket, Datagram}
+import std/udp::{UdpSocket, Datagram}
 
 server = UdpSocket.bind("127.0.0.1", 0)
 port = server.local_port
@@ -351,7 +392,25 @@ fi
 
 # And the proof that this arm tests parking: a copy whose first receive is
 # a blocking `recvfrom` (no MSG_DONTWAIT) pins the one thread, the sender
-# never runs, and the program is killed at the bound.
+# never runs, and the program is killed at the bound. On Windows the flag
+# is not where blocking lives: Winsock has no MSG_DONTWAIT, the module's
+# win32 arm defines it as 0 and makes the socket itself non-blocking with
+# FIONBIO, so the flag edit left that copy exactly the program it copied -
+# measured: its sender ran and it exited inside the bound. There the copy
+# leaves the socket blocking instead, which is what makes its first
+# `recvfrom` block.
+#
+# The copy is killed on every run, and Git Bash loses a SIGTERM that lands
+# while it is still starting a native program: measured, a TERM sent 50 ms
+# into a fresh build's start left it pinned until something else ended
+# it, and one first start under load took nine seconds, so the gate hung
+# past its bound. A SIGKILL is not lost, and it takes the program with it,
+# so it follows the TERM; elsewhere the TERM ends the copy and the KILL
+# never goes.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) BLOCKING_SITE=win32 ;;
+  *) BLOCKING_SITE=posix ;;
+esac
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -359,10 +418,15 @@ else
   "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/udp.iyi").read_text()
-old = "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))"
+if "$BLOCKING_SITE" == "win32":
+    old = "on = 1\n      LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))"
+    new = "on = 0\n      LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))"
+else:
+    old = "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))"
+    new = "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, 0, addr, pointerof(len))"
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/blocking/std/udp.iyi").write_text(src.replace(old, "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, 0, addr, pointerof(len))", 1))
+Path("$WORK/blocking/std/udp.iyi").write_text(src.replace(old, new, 1))
 PY
   if [ $? -ne 0 ]; then
     echo "  the blocking patch did not apply"
@@ -371,7 +435,7 @@ PY
     echo "  the blocking copy did not build:"
     sed -n '1,8p' "$WORK/park_blocking.build"
     status=1
-  elif timeout 5 "$WORK/park_blocking" > "$WORK/park_blocking.out" 2>&1; then
+  elif timeout -k 5 5 "$WORK/park_blocking" > "$WORK/park_blocking.out" 2>&1; then
     echo "  a blocking receive still let the sibling run, so this arm does not test parking"
     status=1
   else
@@ -404,8 +468,7 @@ PY
   else
     cat > "$WORK/dg_idx.iyi" <<'IYI'
 module main
-import std/udp
-using std/udp::{Datagram, Bytes}
+import std/udp::{Datagram, Bytes}
 buf = Bytes.new(1)
 buf[0] = 120_u8
 dg = Datagram.new(buf, "h", 7)
@@ -419,6 +482,71 @@ IYI
       status=1
     fi
   fi
+fi
+
+echo
+echo "== proving the refusal checks can fail when the module is broken"
+# A connected socket's ICMP refusal is reported by the next call on Linux
+# (and darwin); Windows is told not to report it, so a copy that forgets
+# it there changes nothing. Measured on Linux.
+breaks_udp() { # breaks_udp <label> <dir> <phrase> <old> <new>
+  local label="$1" dir="$2" phrase="$3"
+  mkdir -p "$WORK/$dir/std"
+  OLD="$4" NEW="$5" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/udp.iyi").read_text()
+old, new = os.environ["OLD"], os.environ["NEW"]
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/$dir/std/udp.iyi").write_text(src.replace(old, new, 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_udp_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,8p' "$WORK/$dir/build.log"
+    status=1
+  elif timeout -k 5 60 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -qF -- "$phrase" "$WORK/$dir/out"; then
+    echo "  $label: failed, but not at '$phrase'"
+    sed -n '$p' "$WORK/$dir/out"
+    status=1
+  else
+    echo "  $label: caught at \"$(grep -m1 -F -- "$phrase" "$WORK/$dir/out" | sed 's/^iyi: panic: //')\""
+  fi
+}
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+elif [ "$(uname -s)" = Linux ]; then
+  breaks_udp "a send the refusal is reported to, not sent again" refused_send "cannot send on UDP socket" \
+    "    res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64) if UdpSocket.__is_refused(res)
+" ""
+  breaks_udp "a receive? the refusal is reported to" refused_now "cannot receive from UDP socket" \
+    "next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
+      return count.to_i32 if count >= 0_i64
+      return capacity" \
+    "next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      return count.to_i32 if count >= 0_i64
+      return capacity"
+  breaks_udp "a parked receive the refusal is reported to" refused_parked "cannot receive from UDP socket" \
+    "next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
+      return count.to_i32 if count >= 0_i64
+      # A datagram" \
+    "next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      return count.to_i32 if count >= 0_i64
+      # A datagram"
+  breaks_udp "a bind? that raises its refusal" bind_raises "panic: cannot bind UDP socket to 127.0.0.1" \
+    '      return SocketError.new("bind UDP socket to #{IyiSocket.endpoint(host, port)}", code, nil, why)' \
+    '      raise "cannot bind UDP socket to #{IyiSocket.endpoint(host, port)}: #{why}"'
+  breaks_udp "a bind? that answers a socket for a refused bind" bind_ignores "a held port's bind? answers a SocketError" \
+    "    bound = __sys_bind(fd, addr, addrlen)
+    if bound < 0" \
+    "    bound = __sys_bind(fd, addr, addrlen)
+    if false"
 fi
 
 echo

@@ -696,7 +696,33 @@ module Iyi
         end
       end
 
-      # `Array(T)` is always more strict than `Foo`
+      # iyi: `self` didn't resolve, which for a def restriction means it
+      # mentions a free variable (`Array(T) forall T`). This used to answer
+      # `true` outright, i.e. "`Array(T)` is stricter than anything", which is
+      # right when `other` is a free variable but wrong when it names an
+      # unrelated type: `Array(T)` was stricter than `Int32` while `Int32`
+      # wasn't stricter than `Array(T)`, and `Array(UInt8)` was stricter than
+      # `Array(T)` but not than `Int32`. That non-transitive answer broke
+      # `Type#add_def`, whose insertion (before the first less strict def) is
+      # a correct topological insertion only for a partial order: with
+      # `pick(Int32)`, `pick(Array(UInt8))`, `pick(Array(T))` declared in that
+      # order, `Array(T)` went in front of `Int32`, and so in front of the
+      # stricter `Array(UInt8)`, and `pick([1_u8])` chose `Array(T)`.
+      #
+      # Every instance of a generic type is an instance of the generic type's
+      # ancestors and of nothing else, so whatever the type arguments are,
+      # `Array(T)` is stricter than a type exactly when `Array` is: `Object`
+      # or `Indexable`, yes; `Int32` or `Bytes`, no.
+      unless other_free_vars && other.single_name?.try { |name| other_free_vars.includes?(name) }
+        generic_type = (base = name).is_a?(Path) ? owner.lookup_path(base) : nil
+        other_type = owner.lookup_path(other)
+        if generic_type.is_a?(GenericType) && other_type.is_a?(Type)
+          return generic_type.restriction_of?(other_type, owner, self_free_vars, other_free_vars)
+        end
+      end
+
+      # `Array(T)` is always more strict than `Foo` when `Foo` is a free
+      # variable (or doesn't resolve)
       #
       # Useful in cases where `Array(T)` overload must be checked before
       # `T` overload:
@@ -929,9 +955,17 @@ module Iyi
 
       if had_ident_type
         other.raise "undefined constant #{other}"
-      else
-        other.raise_undefined_constant(context.defining_type)
       end
+      # iyi: `def f(x : T)` with no `forall` was "undefined constant T" with
+      # "Did you mean 'U'?" carried as the edit: a type parameter replaced
+      # by whichever one-letter type the program had. A name shaped like a
+      # type parameter is told how one is introduced.
+      name = other.names.first
+      if other.names.size == 1 && !other.global? && name.size <= 2 && name[0].ascii_uppercase? && name[1..].each_char.all?(&.ascii_number?)
+        other.raise "undefined constant #{other}\n`#{name}` names no type here: a method's own type parameter is introduced " \
+                    "by `forall` after the return type, `def f(x : #{name}) : #{name} forall #{name}` (SPEC.md II.7)"
+      end
+      other.raise_undefined_constant(context.defining_type)
     end
 
     def restrict(other : Generic, context)

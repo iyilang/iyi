@@ -49,12 +49,8 @@ class Iyi::Command
     abort! "run --sandbox: which file?", :USAGE_ERROR unless file
     abort! "run --sandbox: file '#{file}' does not exist", :USAGE_ERROR unless File.file?(file)
 
-    cc = sandbox_wasi_cc ||
-         abort! "run --sandbox needs a wasi-sdk clang: set IYI_WASI_CC, or install wasi-sdk " \
-                "(https://github.com/WebAssembly/wasi-sdk) at /opt/wasi-sdk or ~/.local/opt/wasi-sdk", :USAGE_ERROR
-    wasmtime = sandbox_wasmtime ||
-               abort! "run --sandbox needs wasmtime: set IYI_WASMTIME or install it " \
-                      "(https://wasmtime.dev) on PATH", :USAGE_ERROR
+    cc = sandbox_wasi_cc
+    wasmtime = sandbox_wasmtime
 
     work = File.tempname("iyi-sandbox", nil)
     Dir.mkdir_p(work)
@@ -102,27 +98,43 @@ class Iyi::Command
     end
   end
 
-  private def sandbox_wasi_cc : String?
+  # iyi: a variable the author set is the answer or the refusal, and the
+  # refusal names it. Pointed at nothing, IYI_WASI_CC was skipped in
+  # silence and the sentence said to set it - which they had. And clang
+  # under `$WASI_SDK` is `clang.exe` on Windows: the bare `clang` this
+  # looked for is not there, so an installed wasi-sdk was "install
+  # wasi-sdk", and the help names `$WASI_SDK` while the refusal did not.
+  private def sandbox_wasi_cc : String
     if from_env = ENV["IYI_WASI_CC"]?
-      return File.file?(from_env) ? from_env : nil
+      return from_env if File.file?(from_env)
+      abort! "run --sandbox: IYI_WASI_CC is #{from_env}, and there is no file there. " \
+             "Point it at wasi-sdk's clang, or unset it", :USAGE_ERROR
     end
+    clang = {% if flag?(:win32) %} "clang.exe" {% else %} "clang" {% end %}
     candidates = [] of String
     if sdk = ENV["WASI_SDK"]?
-      candidates << File.join(sdk, "bin", "clang")
+      candidates << File.join(sdk, "bin", clang)
     end
     candidates << "/opt/wasi-sdk/bin/clang"
-    candidates << File.expand_path("~/.local/opt/wasi-sdk/bin/clang", home: true)
-    candidates.find { |candidate| File.file?(candidate) }
+    candidates << File.expand_path("~/.local/opt/wasi-sdk/bin/#{clang}", home: true)
+    candidates.find { |candidate| File.file?(candidate) } ||
+      abort! "run --sandbox needs a wasi-sdk clang, and there is none at " \
+             "#{candidates.join(", ")}. Set IYI_WASI_CC to one, or install wasi-sdk " \
+             "(https://github.com/WebAssembly/wasi-sdk) and set WASI_SDK", :USAGE_ERROR
   end
 
-  private def sandbox_wasmtime : String?
+  private def sandbox_wasmtime : String
     if from_env = ENV["IYI_WASMTIME"]?
-      return File.file?(from_env) ? from_env : nil
+      return from_env if File.file?(from_env)
+      abort! "run --sandbox: IYI_WASMTIME is #{from_env}, and there is no file there. " \
+             "Point it at wasmtime, or unset it", :USAGE_ERROR
     end
     Process.find_executable("wasmtime") ||
       begin
         fallback = File.expand_path("~/.wasmtime/bin/wasmtime", home: true)
         File.file?(fallback) ? fallback : nil
-      end
+      end ||
+      abort! "run --sandbox needs wasmtime: set IYI_WASMTIME or install it " \
+             "(https://wasmtime.dev) on PATH", :USAGE_ERROR
   end
 end

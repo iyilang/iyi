@@ -1,0 +1,563 @@
+# Tasks across cores, exercised: SPEC.md III.4.13, built.
+#
+#   ./bin/iyi run bench/parallel_exercise.iyi                  # every property
+#   ./bin/iyi run bench/parallel_exercise.iyi wake cancel      # some of them
+#   ./bin/iyi run bench/parallel_exercise.iyi speed W T N      # one timing
+#
+# Every claim the pool makes, run rather than asserted: parallel tasks
+# start on worker threads and not on the thread that spawned them, on more
+# than one of them, and each stays on the thread that started it across
+# every park; a thousand of them run exactly once each; workers that run
+# out steal what another worker's tasks spawned; values cross threads
+# through channels exactly once and in each sender's order; a cancel
+# reaches a task asleep or parked on a channel on another thread, and a
+# task still waiting in the pool starts cancelled; a panic stops at the
+# task's boundary on whatever thread it ran; collections stop workers
+# with live lists on their fibers' stacks and free nothing of them; and
+# the typed group answers a tuple of parallel tasks.
+#
+# Every step runs under a watchdog: a task on the main thread that sleeps
+# and fails the run by name if the step has not finished, so a wake that
+# never arrives is a named failure rather than a hung job.
+#
+# `speed W T N` runs T tasks of N rounds of integer arithmetic on W
+# workers and prints the wall time; bench/parallel_exercise.sh runs it at
+# one worker and at several and holds the ratio to a floor, and runs
+# broken copies of the runtime to prove each step above can fail.
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  def elapsed_ms(since : Int64) : Int64
+    (__iyi_monotonic_ns - since) // 1000000_i64
+  end
+
+  # The thread a task is on: its scheduler state, one per thread.
+  def thread_here : UInt64
+    IyiScheduler.state.object_id
+  end
+
+  # Integer work with nothing to allocate and nothing the optimiser can
+  # fold away: a xorshift walk whose end the caller prints.
+  def spin(rounds : Int64, seed : UInt64) : UInt64
+    x = seed | 1_u64
+    i = 0_i64
+    while i < rounds
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      i = i + 1
+    end
+    x
+  end
+
+  # Counts the tasks share, each an atomic: `Share` by its fields, so a
+  # parallel block may capture one (SPEC.md III.4.4).
+  class Tally
+    @count : Atomic(Int64)
+    @sum : Atomic(Int64)
+
+    def initialize
+      @count = Atomic(Int64).new(0_i64)
+      @sum = Atomic(Int64).new(0_i64)
+    end
+
+    def add(value : Int64) : Nil
+      @count.add(1_i64)
+      @sum.add(value)
+    end
+
+    def count : Int64
+      @count.get
+    end
+
+    def sum : Int64
+      @sum.get
+    end
+  end
+
+  # The count the race step adds to from every task at once. Under
+  # `-Dparallel_plain_add` the add is a load and a store: tasks that run
+  # at the same instant on two cores lose each other's adds, which no
+  # schedule of one thread can do - nothing parks between the two.
+  class Racer
+    @hits : Atomic(Int64)
+
+    def initialize
+      @hits = Atomic(Int64).new(0_i64)
+    end
+
+    def bump : Nil
+      {% if flag?(:parallel_plain_add) %}
+        @hits.set(@hits.get + 1_i64)
+      {% else %}
+        @hits.add(1_i64)
+      {% end %}
+    end
+
+    def hits : Int64
+      @hits.get
+    end
+  end
+
+  # A node a list is built of, for the collector's step.
+  class Node
+    getter value : Int64
+    getter next_node : Node?
+
+    def initialize(@value : Int64, @next_node : Node?)
+    end
+  end
+
+  struct Boom
+    def initialize
+    end
+  end
+
+  impl Error for Boom
+    def message : String
+      "boom"
+    end
+  end
+
+  # The step *name* run under a watchdog on the main thread: a task that
+  # sleeps *ms* and fails the run by name unless the step ends first.
+  def watched(name : String, ms : Int32, &block : -> Nil) : Nil
+    group do |w|
+      w.spawn do
+        waited = sleep(ms)
+        fail("#{name}: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
+        0
+      end
+      block.call
+      w.cancel_children
+    end
+  end
+
+  # ── speed ────────────────────────────────────────────────────────────
+  def speed(workers : Int32, tasks : Int32, rounds : Int64) : Nil
+    IyiWorkers.count = workers
+    started = __iyi_monotonic_ns
+    total = 0_u64
+    group do |g|
+      handles = [] of IyiTask(UInt64)
+      tasks.times do |i|
+        handles << g.spawn_parallel { spin(rounds, (i + 1).to_u64) }
+      end
+      handles.each do |handle|
+        value = handle.value
+        fail("a timed task answered #{value}") unless value.is_a?(UInt64)
+        total = total ^ value
+      end
+    end
+    puts "workers=#{workers} tasks=#{tasks} rounds=#{rounds} wall_ms=#{elapsed_ms(started)} checksum=#{total}"
+  end
+
+  # ── the properties ───────────────────────────────────────────────────
+
+  # Placement: parallel tasks run on the pool, not on the spawning thread,
+  # on more than one worker, and each stays on the thread that started it
+  # across every park - a sleep and a channel handoff from the main thread.
+  #
+  # Every task, as it starts, counts itself and then keeps its worker busy
+  # - spinning, never parking - until a second task has started. A worker
+  # takes from the pool only when it has nothing to run, so while the first
+  # task spins its worker takes no other, and the second can only start on
+  # another worker: nothing here depends on how fast a build drains the
+  # queue before the other workers wake, which an optimised build on a
+  # runner once did, all 16 on one worker. Waited for 10 s at most, and
+  # named if it never comes; one worker running all of them still fails.
+  def placement(watch : Int32) : Nil
+    watched("placement", watch) do
+      main_thread = thread_here
+      pings = Channel(Int32).new
+      arrived = Tally.new
+      seen = [] of UInt64
+      group do |g|
+        handles = [] of IyiTask(Tuple(UInt64, UInt64, UInt64))
+        16.times do |i|
+          task = g.spawn_parallel do
+            first = thread_here
+            arrived.add(1_i64)
+            held = __iyi_monotonic_ns
+            while arrived.count < 2_i64
+              fail("placement: a parallel task spun 10000 ms on its worker and no second task started on another") if elapsed_ms(held) >= 10000_i64
+              IyiThread.spin_pause
+            end
+            spin(2_000_000_i64, (i + 1).to_u64)
+            sleep(2)
+            second = thread_here
+            pings.receive
+            {first, second, thread_here}
+          end
+          handles << task
+        end
+        16.times { pings.send(1) }
+        handles.each do |handle|
+          ids = handle.value
+          fail("placement: a parallel task answered #{ids}") unless ids.is_a?(Tuple(UInt64, UInt64, UInt64))
+          fail("placement: a parallel task ran on the thread that spawned it") if ids[0] == main_thread
+          fail("placement: a started task changed threads across a park: #{ids[0]}, #{ids[1]}, #{ids[2]}") unless ids[0] == ids[1] && ids[1] == ids[2]
+          seen << ids[0] unless seen.includes?(ids[0])
+        end
+      end
+      fail("placement: 16 parallel tasks all ran on one worker of #{IyiWorkers.count}") if seen.size < 2
+      puts "placement: 16 parallel tasks on #{seen.size} of #{IyiWorkers.count} workers, none on the spawning thread, none moved across a sleep and a channel"
+    end
+  end
+
+  # Exactly once: a thousand tasks, each counted once, each answering its
+  # own index through `value`.
+  def exactly_once(watch : Int32) : Nil
+    watched("exactly once", watch) do
+      tally = Tally.new
+      answered = 0_i64
+      group do |g|
+        handles = [] of IyiTask(Int64)
+        1000.times do |i|
+          task = g.spawn_parallel do
+            tally.add(i.to_i64)
+            i.to_i64
+          end
+          handles << task
+        end
+        handles.each do |handle|
+          value = handle.value
+          fail("exactly once: a task answered #{value}") unless value.is_a?(Int64)
+          answered = answered + value
+        end
+      end
+      fail("exactly once: #{tally.count} runs of 1000 tasks") unless tally.count == 1000_i64
+      fail("exactly once: the tasks summed #{tally.sum}, not 499500") unless tally.sum == 499500_i64
+      fail("exactly once: the handles answered #{answered}, not 499500") unless answered == 499500_i64
+      puts "exactly once: 1000 parallel tasks ran 1000 times and answered 499500"
+    end
+  end
+
+  # The race: every task adds to one count at once. Atomic adds lose
+  # nothing; the plain copy (`-Dparallel_plain_add`) loses adds only if
+  # two tasks really ran at the same instant.
+  def race(watch : Int32) : Nil
+    watched("race", watch) do
+      racer = Racer.new
+      tasks = 8
+      rounds = 2_000_000
+      group do |g|
+        tasks.times do
+          g.spawn_parallel do
+            n = 0
+            while n < rounds
+              racer.bump
+              n = n + 1
+            end
+            0
+          end
+        end
+      end
+      want = tasks.to_i64 * rounds.to_i64
+      fail("race: increments lost: #{want - racer.hits} of #{want}, so tasks ran at the same instant and the add was not atomic") unless racer.hits == want
+      puts "race: #{tasks} tasks added #{want} times to one atomic and lost none"
+    end
+  end
+
+  # Values cross threads through channels exactly once and in each
+  # sender's order: producers on the pool, the consumer on the main
+  # thread; then a pipeline through a parallel stage, in order; then
+  # several parallel consumers of one channel, each value taken once.
+  def channels(watch : Int32) : Nil
+    watched("channels", watch) do
+      producers = 6
+      per = 20000
+      fan = Channel(Tuple(Int32, Int32)).new(64)
+      expected = Array(Int32).new(producers, 0)
+      group do |g|
+        producers.times do |p|
+          g.spawn_parallel do
+            i = 0
+            while i < per
+              fan.send({p, i})
+              i = i + 1
+            end
+            0
+          end
+        end
+        (producers * per).times do
+          got = fan.receive
+          fail("channels: a fan-in receive answered #{got}") unless got.is_a?(Tuple(Int32, Int32))
+          who = got[0]
+          fail("channels: producer #{who} sent #{got[1]} where #{expected[who]} was next") unless got[1] == expected[who]
+          expected[who] = expected[who] + 1
+        end
+      end
+      expected.each_with_index do |count, who|
+        fail("channels: producer #{who} delivered #{count} of #{per}") unless count == per
+      end
+
+      jobs = Channel(Int64).new
+      results = Channel(Int64).new
+      group do |g|
+        g.spawn_parallel do
+          while true
+            job = jobs.receive
+            break unless job.is_a?(Int64)
+            results.send(job * job)
+          end
+          0
+        end
+        n = 0_i64
+        while n < 5000_i64
+          jobs.send(n)
+          answer = results.receive
+          fail("channels: the stage answered #{answer} for #{n}") unless answer == n * n
+          n = n + 1_i64
+        end
+        jobs.close
+      end
+
+      work = Channel(Int64).new(32)
+      tally = Tally.new
+      group do |g|
+        4.times do
+          g.spawn_parallel do
+            while true
+              item = work.receive
+              break unless item.is_a?(Int64)
+              tally.add(item)
+            end
+            0
+          end
+        end
+        n = 0_i64
+        while n < 40000_i64
+          work.send(n)
+          n = n + 1_i64
+        end
+        work.close
+      end
+      fail("channels: 4 consumers took #{tally.count} of 40000 values") unless tally.count == 40000_i64
+      fail("channels: 4 consumers summed #{tally.sum}") unless tally.sum == 799980000_i64
+      puts "channels: #{producers * per} values from #{producers} parallel senders in each one's order, 5000 through a parallel stage in order, 40000 taken once each by 4 parallel receivers"
+    end
+  end
+
+  # A cancel reaches a task on another thread: asleep, parked on a
+  # channel, and still waiting in the pool to start.
+  def cancel(watch : Int32) : Nil
+    watched("cancel", watch) do
+      never = Channel(Int32).new
+      started = __iyi_monotonic_ns
+      slept = 0
+      parked = 0
+      pinned = 0
+      group do |g|
+        sleeper = g.spawn_parallel { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        waiter = g.spawn_parallel { never.receive.is_a?(Cancelled) ? 1 : 0 }
+        local = g.spawn { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        g.spawn_parallel do
+          sleep(100)
+          Boom.new
+        end
+        got = sleeper.value
+        slept = got.is_a?(Int32) ? got : -1
+        got = waiter.value
+        parked = got.is_a?(Int32) ? got : -1
+        got = local.value
+        pinned = got.is_a?(Int32) ? got : -1
+      end
+      took = elapsed_ms(started)
+      fail("cancel: a task asleep on another thread was not cancelled") unless slept == 1
+      fail("cancel: a task parked on a channel on another thread was not cancelled") unless parked == 1
+      fail("cancel: a task on the spawning thread was not cancelled by a parallel failure") unless pinned == 1
+      fail("cancel: a failure took #{took} ms to cancel its siblings across threads") if took >= 3000
+
+      # More tasks than workers, each sleeping a second, and the first
+      # task fails once every sibling has been spawned - so the cancel
+      # finds most of them still waiting in the pool rather than spawned
+      # after it, into a group already cancelled: those start cancelled,
+      # and the group does not wait a second per worker.
+      started = __iyi_monotonic_ns
+      waited = Tally.new
+      go = Channel(Int32).new
+      group do |g|
+        g.spawn_parallel do
+          go.receive
+          Boom.new
+        end
+        (IyiWorkers.count * 8).times do
+          g.spawn_parallel do
+            waited.add(1_i64) unless sleep(1000).is_a?(Cancelled)
+            0
+          end
+        end
+        go.send(1)
+      end
+      queued = elapsed_ms(started)
+      fail("cancel: #{waited.count} tasks waiting in the pool ran uncancelled, #{queued} ms") if waited.count > 0 || queued >= 3000
+      puts "cancel: a failure on the pool cancelled a sleeper and a channel waiter on other threads and a task on this one in #{took} ms, and #{IyiWorkers.count * 8} tasks waiting in the pool in #{queued} ms"
+    end
+  end
+
+  # A panic stops at the task's boundary, on whatever thread it ran: the
+  # handle answers `Panicked`, its siblings finish.
+  def panics(watch : Int32) : Nil
+    watched("panics", watch) do
+      fine = 0
+      text = ""
+      group do |g|
+        bad = g.spawn_parallel do
+          raise "parallel boom" unless thread_here == 0_u64
+          1
+        end
+        good = g.spawn_parallel { 2 }
+        answer = bad.value
+        text = answer.is_a?(Panicked) ? answer.text : "not a panic: #{answer}"
+        other = good.value
+        fine = other.is_a?(Int32) ? other : -1
+      end
+      fail("panics: a panicking parallel task answered #{text}") unless text == "parallel boom"
+      fail("panics: its sibling answered #{fine}") unless fine == 2
+      puts "panics: a parallel task's panic arrived as Panicked(\"#{text}\") and its sibling finished"
+    end
+  end
+
+  # The steal: one parallel task spawns 64 more, which go into its own
+  # worker's queue, and then keeps its worker busy - spinning, never
+  # parking - until a child has run on another worker. A worker takes from
+  # the pool only when it has nothing to run, so while the spawner spins
+  # its own worker takes none of them, and a child that runs anywhere else
+  # got there by a steal: nothing here depends on how fast a build drains
+  # its own queue. Waited for 10 s at most, and named if it never comes.
+  # Every child runs once.
+  def steal(watch : Int32) : Nil
+    watched("steal", watch) do
+      before = IyiWorkers.steals
+      tally = Tally.new
+      elsewhere = Tally.new
+      waited_ms = 0_i64
+      group do |g|
+        spawner = g.spawn_parallel do
+          home = thread_here
+          group do |inner|
+            64.times do |i|
+              inner.spawn_parallel do
+                spin(1_000_000_i64, (i + 7).to_u64)
+                elsewhere.add(1_i64) unless thread_here == home
+                tally.add(1_i64)
+                0
+              end
+            end
+            started = __iyi_monotonic_ns
+            while elsewhere.count == 0_i64 && elapsed_ms(started) < 10000_i64
+              IyiThread.spin_pause
+            end
+            elapsed_ms(started)
+          end
+        end
+        answer = spawner.value
+        waited_ms = answer.is_a?(Int64) ? answer : -1_i64
+      end
+      stolen = IyiWorkers.steals - before
+      fail("steal: #{tally.count} of 64 children ran") unless tally.count == 64_i64
+      if IyiWorkers.count > 1
+        fail("steal: no child ran on a worker other than its spawner's within 10000 ms, while the spawner kept its own worker busy") if elsewhere.count == 0_i64
+        fail("steal: no worker took a task another worker's task had spawned") if stolen == 0_u64
+      end
+      puts "steal: 64 tasks one parallel task spawned ran once each, #{elsewhere.count} on other workers, #{stolen} stolen, the first within #{waited_ms} ms"
+    end
+  end
+
+  # Collections stop the workers: tasks build lists that live only on
+  # their fibers' stacks while every worker allocates, and every node is
+  # still there by checksum.
+  def collector(watch : Int32) : Nil
+    watched("collector", watch) do
+      stops = IyiThread.stops
+      group do |g|
+        handles = [] of IyiTask(Int64)
+        8.times do |t|
+          task = g.spawn_parallel do
+            head = nil.as(Node?)
+            want = 0_i64
+            i = 0_i64
+            while i < 150000_i64
+              value = i &* (t.to_i64 + 3_i64)
+              head = Node.new(value, head)
+              want = want &+ value
+              i = i + 1_i64
+            end
+            sleep(1)
+            have = 0_i64
+            node = head
+            while node.is_a?(Node)
+              have = have &+ node.value
+              node = node.next_node
+            end
+            have == want ? 0_i64 : want - have
+          end
+          handles << task
+        end
+        handles.each_with_index do |handle, t|
+          lost = handle.value
+          fail("collector: task #{t}'s list lost #{lost} by checksum") unless lost == 0_i64
+        end
+      end
+      fail("collector: no collection stopped a thread while 8 parallel tasks allocated") if IyiThread.stops == stops
+      puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops"
+    end
+  end
+
+  # The typed group (III.4.9) answers parallel tasks' tuple.
+  def typed : Tuple(Int32, String) | Panicked
+    group do |g|
+      a = g.spawn_parallel { 6 * 7 }
+      b = g.spawn_parallel { "parallel" }
+    end!
+  end
+
+  def typed_step(watch : Int32) : Nil
+    watched("typed", watch) do
+      answer = typed
+      fail("typed: the group answered #{answer}") unless answer.is_a?(Tuple(Int32, String)) && answer[0] == 42 && answer[1] == "parallel"
+      puts "typed: group ... end! answered #{answer} from two parallel tasks"
+    end
+  end
+
+  STEPS = ["placement", "exactly_once", "race", "channels", "cancel", "panics", "steal", "collector", "typed"]
+
+  arguments = Program.args
+  if arguments.size == 4 && arguments[0] == "speed"
+    speed(arguments[1].to_i, arguments[2].to_i, arguments[3].to_i.to_i64)
+  else
+    watch = 60000
+    chosen = [] of String
+    arguments.each do |argument|
+      if argument.starts_with?("--watch=")
+        watch = argument[8, argument.size - 8].to_i
+      else
+        fail("no step named #{argument}") unless STEPS.includes?(argument)
+        chosen << argument
+      end
+    end
+    chosen = STEPS if chosen.empty?
+    IyiWorkers.count = 4
+    chosen.each do |name|
+      case name
+      when "placement"    then placement(watch)
+      when "exactly_once" then exactly_once(watch)
+      when "race"         then race(watch)
+      when "channels"     then channels(watch)
+      when "cancel"       then cancel(watch)
+      when "panics"       then panics(watch)
+      when "steal"        then steal(watch)
+      when "collector"    then collector(watch)
+      when "typed"        then typed_step(watch)
+      end
+    end
+    puts "parallel exercise: every property held on #{IyiWorkers.count} workers"
+  end
+{% else %}
+  puts "parallel exercise: no pool on this target, nothing to hold"
+{% end %}

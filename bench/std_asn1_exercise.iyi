@@ -1,0 +1,320 @@
+# Exercises std/asn1: DER's one encoding for each value, read and refused.
+#
+# With no argument: X.690's rules on hand-written values, each kind both
+# ways, and the walk's depth bound. The modes the gate script drives:
+#   dump FILE...    every value of each file, a line each, for
+#                   `openssl asn1parse` to be held against;
+#   fields FILE...  each certificate's serial, validity, signature
+#                   algorithm, subject and issuer, for Python's
+#                   `cryptography` to be held against;
+#   robust FILE     each line a value in hex: read and walked, every
+#                   primitive decoded by its tag, and never a panic.
+
+import std/asn1::{Der, DerValue, DerClass, DerTag, Asn1Error}
+import std/file::{File}
+import std/time::{Time}
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+def b(hex : String) : Array(UInt8)
+  clean = hex.split(' ').join("")
+  p = clean.to_unsafe
+  Array(UInt8).new(clean.bytesize // 2) do |i|
+    hi = p[i * 2].to_i32
+    lo = p[i * 2 + 1].to_i32
+    hi = hi >= 97 ? hi - 87 : hi - 48
+    lo = lo >= 97 ? lo - 87 : lo - 48
+    (hi * 16 + lo).to_u8
+  end
+end
+
+def hex(bytes : Array(UInt8)) : String
+  digits = "0123456789abcdef"
+  String.build do |io|
+    bytes.each do |x|
+      io << digits[x.to_i32 >> 4] << digits[x.to_i32 & 15]
+    end
+  end
+end
+
+def ascii(text : String) : String
+  hex(Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] })
+end
+
+# A value read from *hex*, which must be one.
+def one(hex : String) : DerValue
+  answer = Der.parse(b(hex))
+  raise "ASSERTION FAILED: #{hex} was refused: #{answer.message}" if answer.is_a?(Asn1Error)
+  answer
+end
+
+# *answer* must be an Asn1Error whose sentence holds *phrase*.
+def refused(answer : T, phrase : String, label : String) : Nil forall T
+  unless answer.is_a?(Asn1Error)
+    raise "ASSERTION FAILED: #{label}: accepted"
+  end
+  check answer.message.includes?(phrase), "#{label}: refused with #{answer.message.inspect}, not #{phrase.inspect}"
+end
+
+# DER's length octets for *size*.
+def length_of(size : Int32) : Array(UInt8)
+  return [size.to_u8] if size < 128
+  bytes = [] of UInt8
+  n = size
+  while n > 0
+    bytes.unshift((n & 0xFF).to_u8)
+    n = n >> 8
+  end
+  [(0x80 | bytes.size).to_u8] + bytes
+end
+
+# *depth* SEQUENCEs, one inside the next, the innermost empty.
+def nested(depth : Int32) : Array(UInt8)
+  sizes = Array(Int32).new(depth + 1) { 0 }
+  i = depth - 1
+  while i >= 0
+    sizes[i] = 1 + length_of(sizes[i + 1]).size + sizes[i + 1]
+    i = i - 1
+  end
+  out = [] of UInt8
+  k = 0
+  while k < depth
+    out << 0x30_u8
+    length_of(sizes[k + 1]).each { |x| out << x }
+    k = k + 1
+  end
+  out
+end
+
+def read_file(path : String) : Array(UInt8)
+  data = File.read(path)
+  Array(UInt8).new(data.bytesize) { |i| data.to_unsafe[i] }
+end
+
+def tag_line(v : DerValue) : String
+  kind = case v.tag_class
+         when DerClass::Universal       then "u"
+         when DerClass::ContextSpecific then "c"
+         when DerClass::Application     then "a"
+         else                                "p"
+         end
+  "#{v.offset} #{v.header_size} #{v.content_size} #{v.constructed? ? "cons" : "prim"} #{kind}#{v.tag}"
+end
+
+def names(value : DerValue) : String
+  parts = [] of String
+  value.sequence.or_panic.each do |rdn|
+    rdn.set.or_panic.each do |atv|
+      pair = atv.sequence.or_panic
+      text = pair[1].string
+      parts << "#{pair[0].oid.or_panic}=#{text.is_a?(Asn1Error) ? "?" : text}"
+    end
+  end
+  parts.join("|")
+end
+
+args = Program.args
+
+if args.size > 0 && args[0] == "dump"
+  args[1, args.size - 1].each do |path|
+    puts "file #{File.basename(path)}"
+    value = Der.parse(read_file(path))
+    if value.is_a?(Asn1Error)
+      puts "refused #{value.message}"
+      next
+    end
+    walked = Der.walk(value) { |v, depth| puts "#{depth} #{tag_line(v)}" }
+    puts "refused #{walked.message}" if walked.is_a?(Asn1Error)
+  end
+  exit 0
+end
+
+if args.size > 0 && args[0] == "fields"
+  args[1, args.size - 1].each do |path|
+    cert = Der.parse(read_file(path)).or_panic.sequence.or_panic
+    tbs = cert[0].sequence.or_panic
+    at = tbs[0].context?(0) ? 1 : 0
+    serial = tbs[at].unsigned_integer
+    serial_text = serial.is_a?(Asn1Error) ? "negative" : hex(serial)
+    while serial_text.size > 1 && serial_text.starts_with?("0")
+      serial_text = serial_text[1, serial_text.size - 1]
+    end
+    validity = tbs[at + 3].sequence.or_panic
+    puts [File.basename(path), serial_text, cert[1].sequence.or_panic[0].oid.or_panic,
+          validity[0].time.or_panic.to_unix, validity[1].time.or_panic.to_unix,
+          names(tbs[at + 2]), names(tbs[at + 4])].join("\t")
+  end
+  exit 0
+end
+
+if args.size > 0 && args[0] == "robust"
+  inputs = 0
+  accepted = 0
+  File.read(args[1]).lines.each do |line|
+    next if line.empty?
+    inputs += 1
+    value = Der.parse(b(line))
+    next if value.is_a?(Asn1Error)
+    walked = Der.walk(value) do |v, depth|
+      next if v.constructed? || v.tag_class != DerClass::Universal
+      case v.tag
+      when DerTag::BOOLEAN                            then v.boolean
+      when DerTag::INTEGER                            then v.integer_bytes
+      when DerTag::ENUMERATED                         then v.enumerated_bytes
+      when DerTag::BIT_STRING                         then v.bit_string_bits
+      when DerTag::NULL                               then v.null
+      when DerTag::OBJECT_IDENTIFIER                  then v.oid
+      when DerTag::UTC_TIME, DerTag::GENERALIZED_TIME then v.time
+      else                                                 v.string
+      end
+      nil
+    end
+    accepted += 1 unless walked.is_a?(Asn1Error)
+  end
+  puts "robust: #{inputs} inputs, #{accepted} read whole, #{inputs - accepted} refused, none panicked"
+  exit 0
+end
+
+puts "== headers and lengths"
+zero = one("020100")
+check zero.universal?(DerTag::INTEGER) && zero.header_size == 2 && zero.content_size == 1, "a short header"
+long = one("0481 80" + "00" * 128)
+check long.header_size == 3 && long.content_size == 128, "the long form for 128"
+longer = one("0482 0100" + "00" * 256)
+check longer.header_size == 4 && longer.content_size == 256, "two length bytes for 256"
+high = one("9f1f00")
+check high.context?(31) && !high.constructed?, "a tag number of 31 in the high form"
+higher = one("bf810000")
+check higher.context?(128) && higher.constructed?, "a tag number of 128 in two bytes"
+check one("6300").tag_class == DerClass::Application && one("c100").tag_class == DerClass::Private, "application and private classes"
+refused Der.parse(b("0480")), "indefinite length", "an indefinite length refused"
+refused Der.parse(b("0481 05 0102030405")), "which DER writes short", "a short length in the long form refused"
+refused Der.parse(b("0482 0080" + "00" * 128)), "leading zero byte", "a length with a leading zero refused"
+refused Der.parse(b("0485 0000000001 00")), "past the 4 this reader takes", "a five-byte length refused"
+refused Der.parse(b("0405 0102")), "where 2 bytes are left", "a length past the bytes refused"
+refused Der.parse(b("0201 00 00")), "1 bytes after the value", "bytes after the value refused"
+refused Der.parse(b("9f05 00")), "tag number of 5 written in the high form", "a low tag number in the high form refused"
+refused Der.parse(b("9f80 1f 00")), "leading 0x80", "a high tag number with a leading 0x80 refused"
+refused Der.parse(b("9fff")), "unterminated", "an unterminated tag number refused"
+refused Der.parse(b("1000")), "SEQUENCE written primitive", "a primitive SEQUENCE refused"
+refused Der.parse(b("2203 020100")), "INTEGER written constructed", "a constructed INTEGER refused"
+refused Der.parse([] of UInt8), "bytes ended", "nothing refused"
+refused Der.parse(b("02")), "length expected", "a header with no length refused"
+refused one("0201 00").children, "primitive and holds no values", "a primitive's children refused"
+
+puts "== integers"
+check one("020100").integer.or_panic == 0_i64, "0"
+check one("02017f").integer.or_panic == 127_i64, "127"
+check one("02020080").integer.or_panic == 128_i64, "128 with its 0x00"
+check one("0201ff").integer.or_panic == -1_i64, "-1"
+check one("02028000").integer.or_panic == -32768_i64, "-32768"
+check one("02087fffffffffffffff").integer.or_panic == 9223372036854775807_i64, "the largest Int64"
+check one("02088000000000000000").integer.or_panic == -9223372036854775807_i64 - 1, "the smallest Int64"
+refused one("020900ffffffffffffffff").integer, "past an Int64", "nine bytes refused as an Int64"
+check hex(one("020900ffffffffffffffff").unsigned_integer.or_panic) == "ffffffffffffffff", "unsigned drops the sign byte"
+check hex(one("02017f").unsigned_integer.or_panic) == "7f", "unsigned of a small one"
+refused one("0202 0001").integer, "redundant leading byte", "a redundant 0x00 refused"
+refused one("0202 ffff").integer, "redundant leading byte", "a redundant 0xff refused"
+refused one("0200").integer, "no bytes", "an empty INTEGER refused"
+refused one("0201ff").unsigned_integer, "negative", "a negative where unsigned is asked refused"
+refused one("0400").integer, "expected an INTEGER", "an OCTET STRING asked as an INTEGER refused"
+check one("0a0102").enumerated.or_panic == 2_i64, "an ENUMERATED reads as one"
+refused one("0a0102").integer, "expected an INTEGER, found ENUMERATED", "an ENUMERATED asked as an INTEGER refused"
+refused one("020102").enumerated, "expected an ENUMERATED, found INTEGER", "an INTEGER asked as an ENUMERATED refused"
+refused one("0a020001").enumerated, "an ENUMERATED with a redundant leading byte", "an ENUMERATED held to INTEGER's rules"
+
+puts "== object identifiers"
+check one("06092a864886f70d01010b").oid.or_panic == "1.2.840.113549.1.1.11", "sha256WithRSAEncryption"
+check one("0603550403").oid.or_panic == "2.5.4.3", "commonName"
+check one("0603883703").oid.or_panic == "2.999.3", "a first subidentifier past 80"
+check one("060100").oid.or_panic == "0.0" && one("060128").oid.or_panic == "1.0", "0.0 and 1.0"
+check one("06014f").oid.or_panic == "1.39" && one("060150").oid.or_panic == "2.0", "1.39 and 2.0"
+refused one("06028001").oid, "leading 0x80", "a subidentifier with a leading 0x80 refused"
+refused one("06022a86").oid, "unterminated", "an unterminated subidentifier refused"
+refused one("0600").oid, "no bytes", "an empty OBJECT IDENTIFIER refused"
+refused one("060b2a81ffffffffffffffff7f").oid, "past an Int64", "a subidentifier past an Int64 refused"
+
+puts "== bit strings, booleans, null and octets"
+check hex(one("03020000").bit_string.or_panic) == "00", "a whole byte"
+check one("030100").bit_string.or_panic.empty?, "an empty BIT STRING"
+flags = one("03020780").bit_string_bits.or_panic
+check hex(flags[0]) == "80" && flags[1] == 7, "seven unused bits"
+refused one("03020800").bit_string_bits, "past 7", "eight unused bits refused"
+refused one("030101").bit_string_bits, "empty BIT STRING with 1 unused", "unused bits on nothing refused"
+refused one("03020101").bit_string_bits, "unused bits are not zero", "an unused bit set refused"
+refused one("03020780").bit_string, "unused bits where whole bytes", "unused bits where bytes are asked refused"
+check one("0101ff").boolean.or_panic == true && one("010100").boolean.or_panic == false, "TRUE and FALSE"
+refused one("010101").boolean, "0x00 or 0xFF", "a BOOLEAN of 0x01 refused"
+refused one("01020000").boolean, "of 2 bytes", "a two-byte BOOLEAN refused"
+check one("0500").null.nil?, "NULL"
+refused one("050100").null, "with 1 bytes of content", "a NULL with content refused"
+check hex(one("0403010203").octet_string.or_panic) == "010203", "an OCTET STRING"
+inner = one("3006 020101 020102").sequence.or_panic
+check inner.size == 2 && inner[1].integer.or_panic == 2_i64, "a SEQUENCE's elements"
+check hex(inner[1].raw) == "020102", "an element's raw bytes"
+refused one("3100").sequence, "expected a SEQUENCE", "a SET asked as a SEQUENCE refused"
+check one("a003 020105").explicit(0).or_panic.integer.or_panic == 5_i64, "an explicit [0]"
+refused one("a006 020105 020106").explicit(0), "holds 2 values, not one", "an explicit tag of two refused"
+refused one("a103 020105").explicit(0), "expected an explicit [0]", "the wrong explicit tag refused"
+
+puts "== strings"
+check one("0c05c3a761c49f").string.or_panic == "çağ", "UTF8String"
+refused one("0c02c080").string, "not UTF-8", "an overlong form refused"
+refused one("0c03eda080").string, "not UTF-8", "a surrogate in UTF-8 refused"
+refused one("0c01ff").string, "not UTF-8", "0xff refused"
+refused one("0c01c3").string, "not UTF-8", "a sequence cut short refused"
+refused one("0c04f4908080").string, "not UTF-8", "past U+10FFFF refused"
+check one("1305" + ascii("Hello")).string.or_panic == "Hello", "PrintableString"
+check one("1309" + ascii("a'()+,-.?")).string.or_panic == "a'()+,-.?", "PrintableString's punctuation"
+refused one("13012a").string, "PrintableString holding 0x2a", "a * in a PrintableString refused"
+check one("1603" + ascii("a@b")).string.or_panic == "a@b", "IA5String"
+refused one("160180").string, "IA5String holding 0x80", "a byte past ASCII in an IA5String refused"
+check one("1e0400e700e9").string.or_panic == "çé", "BMPString"
+refused one("1e02d800").string, "U+d800", "a surrogate in a BMPString refused"
+refused one("1e03000000").string, "odd", "an odd BMPString refused"
+check one("1402e7e9").string.or_panic == "çé", "TeletexString as ISO-8859-1"
+check one("1c040001f600").string.or_panic == "😀", "UniversalString"
+refused one("1c0400110000").string, "U+110000", "a UniversalString past U+10FFFF refused"
+refused one("1c04ffffffff").string, "U+ffffffff", "a UniversalString with its top bit set refused, not a panic"
+check one("1204" + ascii("12 3")).string.or_panic == "12 3", "NumericString"
+refused one("120141").string, "NumericString holding 0x41", "a letter in a NumericString refused"
+refused one("1a017f").string, "VisibleString holding 0x7f", "DEL in a VisibleString refused"
+refused one("020100").string, "expected a string", "an INTEGER asked as a string refused"
+
+puts "== times"
+check one("170d" + ascii("491231235959Z")).time.or_panic == Time.utc(2049, 12, 31, 23, 59, 59), "UTCTime 49 is 2049"
+check one("170d" + ascii("500101000000Z")).time.or_panic == Time.utc(1950, 1, 1), "UTCTime 50 is 1950"
+check one("180f" + ascii("20240229120000Z")).time.or_panic == Time.utc(2024, 2, 29, 12), "GeneralizedTime on a leap day"
+check one("1811" + ascii("20240229120000.5Z")).time.or_panic == Time.utc(2024, 2, 29, 12, 0, 0, nanosecond: 500000000), "a fraction of a second"
+check one("1819" + ascii("20240229120000.123456789Z")).time.or_panic.nanosecond == 123456789, "nanoseconds"
+refused one("180f" + ascii("20230229120000Z")).time, "day 29 of a month of 28", "February 29 of 2023 refused"
+refused one("1812" + ascii("20240101120000.50Z")).time, "ends in 0", "a fraction ending in 0 refused"
+refused one("1810" + ascii("20240101120000.Z")).time, "a . and no fraction", "a . with no fraction refused"
+refused one("181a" + ascii("20240101120000.1234567891Z")).time, "past nanoseconds", "ten fraction digits refused"
+refused one("180d" + ascii("202401011200Z")).time, "shorter than", "a GeneralizedTime without seconds refused"
+refused one("170b" + ascii("4912312359Z")).time, "where DER writes YYMMDDHHMMSSZ", "a UTCTime without seconds refused"
+refused one("1711" + ascii("491231235959+0000")).time, "where DER writes", "a UTCTime with an offset refused"
+refused one("170d" + ascii("491231245959Z")).time, "hour 24", "hour 24 refused"
+refused one("170d" + ascii("49123123595aZ")).time, "where a digit goes", "a letter in a time refused"
+refused one("170d" + ascii("491301000000Z")).time, "month 13", "month 13 refused"
+
+puts "== the walk"
+order = [] of String
+Der.walk(one("3008 020101 3003 020102")) { |v, depth| order << "#{depth}:#{v.describe}" }.or_panic
+check order.join(" ") == "0:SEQUENCE constructed 1:INTEGER 1:SEQUENCE constructed 2:INTEGER", "the walk in written order: #{order.join(" ")}"
+fine = Der.parse(nested(Der::MAX_DEPTH + 1)).or_panic
+seen = 0
+Der.walk(fine) { |v, depth| seen += 1 }.or_panic
+check seen == Der::MAX_DEPTH + 1, "a value #{Der::MAX_DEPTH} deep walked"
+refused Der.walk(Der.parse(nested(Der::MAX_DEPTH + 2)).or_panic) { |v, depth| nil }, "nested deeper than 64", "a value 65 deep refused"
+deep = Der.parse(nested(3000)).or_panic
+refused Der.walk(deep) { |v, depth| nil }, "nested deeper than 64", "a value 3000 deep refused, not an overflow"
+refused one("3003 020500").children, "where 1 bytes are left", "a child longer than its parent refused"
+# The walk checks headers and lengths, and leaves what a value holds to
+# the reader asked for it: a redundant INTEGER walks, and is refused when read.
+Der.walk(one("3004 0202 0001")) { |v, d| nil }.or_panic
+refused one("3004 0202 0001").sequence.or_panic[0].integer, "redundant leading byte", "the walk leaves contents to the readers"
+
+puts "\nALL CHECKS PASSED"

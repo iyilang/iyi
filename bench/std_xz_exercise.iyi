@@ -1,0 +1,423 @@
+# Exercises `std/xz`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_xz_exercise.iyi
+#     ./bin/iyi run bench/std_xz_exercise.iyi <fixtures>
+#
+# Alone, it reads XZ Utils' own test files that are small enough to carry
+# here (the `tests/files` of XZ Utils 5.8.1, 0BSD): the four check types,
+# every kind of LZMA2 chunk, three delta filters, empty streams joined and
+# padded, the three ways a .lzma file may end; whole, a byte to seven
+# bytes a piece and a read; and the bad ones refused by name. With a
+# directory, the streams Python's `lzma` and `xz` wrote there are read
+# back and compared, every file of XZ Utils' suite is read or refused,
+# and 64 MiB is streamed in bounded memory;
+# `bench/std_xz_exercise.sh` is the other half of that conversation.
+
+module bench/std_xz_exercise
+
+import std/xz::{Xz, XzReader, XzFormat, XzError}
+import std/digest::{CRC32}
+import std/gc::{GC}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def unhex(s : String) : String
+  digits = s.to_unsafe
+  String.new(s.bytesize // 2) do |dst|
+    i = 0
+    while i < s.bytesize // 2
+      dst[i] = (nibble(digits[2 * i]) * 16 + nibble(digits[2 * i + 1])).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def nibble(c : UInt8) : Int32
+  c <= 57_u8 ? c.to_i32 - 48 : c.to_i32 - 87
+end
+
+# A source that gives *stream* in pieces whose sizes go round *sizes*,
+# and counts what it has been asked for.
+class Feed
+  getter calls : Int32
+  getter at : Int32
+
+  def initialize(@stream : String, @sizes : Array(Int32))
+    @at = 0
+    @calls = 0
+  end
+
+  def next : String?
+    n = @sizes[@calls % @sizes.size]
+    @calls = @calls + 1
+    return nil if @at >= @stream.bytesize
+    n = @stream.bytesize - @at if n > @stream.bytesize - @at
+    src = @stream.to_unsafe + @at.to_i64
+    @at = @at + n
+    String.new(n) { |dst| dst.copy_from(src, n) }
+  end
+end
+
+# Every byte a reader gives, reads of a size that goes round *reads*, or
+# the error it answers instead.
+def drain(z : XzReader, reads : Array(Int32)) : String | XzError
+  all = String::Builder.new
+  k = 0
+  while true
+    max = reads[k % reads.size]
+    k = k + 1
+    piece = z.read(max)
+    case piece
+    when XzError
+      return piece
+    else
+      assert_true piece.bytesize <= max, "a read of #{max} answered #{piece.bytesize} bytes"
+      break if piece.bytesize == 0
+      all << piece
+    end
+  end
+  assert_true z.finished?, "a reader that answered \"\" is finished"
+  all.to_s
+end
+
+def stream_through(format : XzFormat, stream : String, pieces : Array(Int32), reads : Array(Int32), limit : Int64 = XzReader::DICT_LIMIT) : String | XzError
+  feed = Feed.new(stream, pieces)
+  z = XzReader.new(format, limit) { feed.next }
+  drain(z, reads)
+end
+
+def streamed(format : XzFormat, stream : String, pieces : Array(Int32), reads : Array(Int32), label : String) : String
+  got = stream_through(format, stream, pieces, reads)
+  case got
+  when XzError
+    raise "ASSERTION FAILED: #{label}, pieces of #{pieces} and reads of #{reads}: refused with #{got.message.inspect}"
+  else
+    got
+  end
+end
+
+def refused(format : XzFormat, stream : String, pieces : Array(Int32), phrase : String, label : String, limit : Int64 = XzReader::DICT_LIMIT) : XzError
+  got = stream_through(format, stream, pieces, [65536], limit)
+  case got
+  when XzError
+    assert_true got.message.includes?(phrase), "#{label}: refused with #{got.message.inspect}, which does not say #{phrase.inspect}"
+    got
+  else
+    raise "ASSERTION FAILED: #{label}: read #{got.bytesize} bytes instead of refusing"
+  end
+end
+
+def whole(format : XzFormat, stream : String, label : String) : String
+  got = Xz.decompress(stream, format)
+  case got
+  when XzError
+    raise "ASSERTION FAILED: #{label}, whole: refused with #{got.message.inspect}"
+  else
+    got
+  end
+end
+
+ONE_TO_SEVEN = [1, 2, 3, 4, 5, 6, 7]
+
+# The stream whole, then fed a byte, seven bytes, one to seven bytes and
+# all at once, each read back 64 KiB and one to seven bytes at a time.
+def every_feed(format : XzFormat, stream : String, plain : String, label : String) : Nil
+  assert_true whole(format, stream, label) == plain, "#{label}, whole"
+  all = stream.bytesize > 0 ? stream.bytesize : 1
+  [[1], [7], ONE_TO_SEVEN, [all]].each do |pieces|
+    [[65536], ONE_TO_SEVEN].each do |reads|
+      assert_true streamed(format, stream, pieces, reads, label) == plain, "#{label}, pieces of #{pieces} and reads of #{reads}"
+    end
+  end
+end
+
+def flip(s : String, at : Int32, mask : UInt8) : String
+  String.new(s.bytesize) do |dst|
+    dst.copy_from(s.to_unsafe, s.bytesize)
+    dst[at] = dst[at] ^ mask
+  end
+end
+
+def piece_of(s : String, from : Int32, n : Int32) : String
+  src = s.to_unsafe + from.to_i64
+  String.new(n) { |dst| dst.copy_from(src, n) }
+end
+
+hello = "Hello\nWorld!\n"
+# Each line of it ends in a space, as the file's own text does.
+lorem = "Lorem ipsum dolor sit amet, consectetur adipisicing \nelit, sed do eiusmod tempor incididunt ut \nlabore et dolore magna aliqua. Ut enim \n" +
+        "ad minim veniam, quis nostrud exercitation ullamco \nlaboris nisi ut aliquip ex ea commodo \nconsequat. Duis aute irure dolor in reprehenderit \n" +
+        "in voluptate velit esse cillum dolore eu \nfugiat nulla pariatur. Excepteur sint occaecat cupidatat \nnon proident, sunt in culpa qui officia \n" +
+        "deserunt mollit anim id est laborum. \n"
+
+# XZ Utils' `tests/files`, the ones under 600 bytes: what each holds is
+# in that directory's README.
+good = [
+  {"good-1-check-none.xz", XzFormat::Xz, "fd377a585a000000ff12d9410200210108000000d80f231301000548656c6c6f0a020006576f726c64210a000001200d34edb3cb06729e7a010000000000595a", hello},
+  {"good-1-check-crc32.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a020006576f726c64210a0043a3a2150001240d3028dfaf9042990d010000000001595a", hello},
+  {"good-1-check-crc64.xz", XzFormat::Xz, "fd377a585a000004e6d6b4460200210108000000d80f231301000548656c6c6f0a020006576f726c64210a00ef2e88119d3f96ca0001280d3c676a031fb6f37d010000000004595a", hello},
+  {"good-1-check-sha256.xz", XzFormat::Xz, "fd377a585a00000ae1fb0ca10200210108000000d80f231301000548656c6c6f0a020006576f726c64210a008e5935e7e13368cd9688fe8f48a0955293676a021562582c7e848dafe13fb0460001400d93864eae189b4b9a01000000000a595a", hello},
+  {"good-0-empty.xz", XzFormat::Xz, "fd377a585a0000016922de36000000001cdf44219042990d010000000001595a", ""},
+  {"good-0cat-empty.xz", XzFormat::Xz, "fd377a585a0000016922de36000000001cdf44219042990d010000000001595afd377a585a0000016922de36000000001cdf44219042990d010000000001595a", ""},
+  {"good-0catpad-empty.xz", XzFormat::Xz, "fd377a585a0000016922de36000000001cdf44219042990d010000000001595a00000000fd377a585a0000016922de36000000001cdf44219042990d010000000001595a", ""},
+  {"good-2-lzma2.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a000000163596310200210108000000d80f2313010006576f726c64210a0000ddd1ca5300021a061b07000006dce75d3e300d8b020000000001595a", hello},
+  {"good-1-block_header-1.xz", XzFormat::Xz, "fd377a585a0000016922de3603c0110d21010800000000007fde39eb01000c48656c6c6f0a576f726c64210a0000000043a3a2150001250d7119c4b69042990d010000000001595a", hello},
+  {"good-1-block_header-2.xz", XzFormat::Xz, "fd377a585a0000016922de3602401121010800003a4c88e101000c48656c6c6f0a576f726c64210a0000000043a3a2150001210d75dca8d29042990d010000000001595a", hello},
+  {"good-1-block_header-3.xz", XzFormat::Xz, "fd377a585a0000016922de3602800d21010800005111815901000c48656c6c6f0a576f726c64210a0000000043a3a2150001210d75dca8d29042990d010000000001595a", hello},
+  {"good-1-lzma2-1.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f2313e000e200b65d00261bca46675af277b87d86d841db0535cd83a57c12a505db90bd2f14d3717296a88a7d8456718d6a2298ab9e3d90802dc75e0c1252d33f07087b1ca477f313b817c0ee918139b387f0ff00b36a5241ed2eb0f26497a49a9e63a1ae19740da9d55b6ceeb1e02cdc61dccb9d86cfe1dc0a7a81145fd040c87e0d9744ceb5c2fc2c5908bf0380dcd7448eb3d42ddee516216e4782ac0859d8e4662961d5d1fa496390113e20d0a9e2d51481d923d08f43ae45553669aa00c000e500ad0b008cf19d402bd07d1d99eee4dc63746446a4a04a6465b2f64ec1c8689f2754adbba6343c77ec0f2e1b8e4227e568bf60f40b3af09b31ebdf3fd8afa5559246055822098fa860080ba3e93ebcb416dbc7a3a2c016d514a722e82fe8b4d07717c58be4f2bb6bd6ef9a81344e1ddcec36e64472bf29b53c05316066ba2c030fd647c67d85d4c55e4e5773c34169be0d8c9cb515a9e7d278514bd529d0f9351ac55df48c7a70d55ea8315780c8a5d8e0000000fb4748db00018203c90300000b048ede3e300d8b020000000001595a", lorem},
+  {"good-1-lzma2-2.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f2313e000e200b65d00261bca46675af277b87d86d841db0535cd83a57c12a505db90bd2f14d3717296a88a7d8456718d6a2298ab9e3d90802dc75e0c1252d33f07087b1ca477f313b817c0ee918139b387f0ff00b36a5241ed2eb0f26497a49a9e63a1ae19740da9d55b6ceeb1e02cdc61dccb9d86cfe1dc0a7a81145fd040c87e0d9744ceb5c2fc2c5908bf0380dcd7448eb3d42ddee516216e4782ac0859d8e4662961d5d1fa496390113e20d0a9e2d51481d923d08f43ae45553669aa00a000e500af008cf19d407d824f247214f19d84cb5a326c976a40838bf0af31c2b4656f89fdfbd88b544182165412d14dd586c5c05afa49639111fefff58f1402856179384a4b4f4163f8872f2ce6e2e9318f8b14d3a17e81e85502ef2131a27b05cc1fa460e781aaa7d97882e618b2ab1caa192fc28714c5d9cb3fd018a6cd2a4b5da8c75f0167284c2ce4ccd5529e93027e105df503b1982f26ed867b567f1379588f4410d9d90f96e93bbfb5b8da2be1d681f1c90000fb4748db00018303c9030000aed7d2153e300d8b020000000001595a", lorem},
+  {"good-1-lzma2-3.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f23130100344c6f72656d20697073756d20646f6c6f722073697420616d65742c20636f6e7365637465747572206164697069736963696e67200ac0019301245d00329b096c54d72e956cf9f737d51ce246028275fb49768d7353b6fd6ddbcadbd9440bb12ebe13b6baa8e2f3ed7554dc4120ccbf365b20995d0f21a106a3962db7979cf07bfee2128c2d51f0db76777da47bd395e9fb05e6f5978f62e9db30bbb4703d167803773a8b7ad5b8f84a2725f58eaa2414a629286b2f73e0a171b47ba4805040caefdbb495fdbbc18c8e6097dbcb7f21edc010711a7dcbcd09d0d9ff6d80c0677d3fc694cf5bdd5111d1cbd420d72b844ea845bb42781a68405f245e893a367ddb9828ccf983ec32063147473b6c1cf4623440b328bb5436dd7a0e1c3625385806f815a3ce18c8fd961e692903c3bd27f3e78fdb73b42b4f385824bf8314397e73eefecfcabdf3216a2880c88e5d81c7bc17d02c93b50895ba0e928266aeffb80300fb4748db0001f402c903000067c3953e3e300d8b020000000001595a", lorem},
+  {"good-1-lzma2-4.xz", XzFormat::Xz, "fd377a585a000004e6d6b4460200210108000000d80f2313e000bb00a15d00261bca46675af277b87d86d841db0535cd83a57c12a505db90bd2f14d3717296a88a7d8456718d6a2298ab9e3d90802dc75e0c1252d33f07087b1ca477f313b817c0ee9173cabccfeb3466ac489b69d99307aece50af68092f5b881fc208a22c5845b0ff6209ebeedb634f6fe0f31fcf123798964ef6f2b2fb6eaf4402e222ded5e6349739a3452fae992f79698fe9378948fecc7eeaa928adc3e6dcb9daaa167e0100266c61626f726973206e69736920757420616c697175697020657820656120636f6d6d6f646f200ac000e500bd5d00319bca19c554ecb654e7b17dc4579e6c89ad4a6d16d83c05941016993821a3b9c580fffceed4d53fdd8cd73d8f76ec88aa32ab65d438eff7f98abff7f8a556d76dd73f850b9e3fe2476822080535b84172f9dbbeb78e86bf434b8e0d432f4169df610cc4e837084adec27616b8484e9eb953501f3383e829a067c8663a7f221262fb47e4bcf4510f158849d8ca0b258b5ee8dafd38c0ce4c731bffd09be84cb713f83799e2da9c2fb5eab8a58dea57829b25cafbf6880a9bdf41036e000000b20744e917334b840001ab03c9030000f5502dfeb1c467fb020000000004595a", lorem},
+  {"good-1-lzma2-5.xz", XzFormat::Xz, "fd377a585a0000016922de360200210110000000a8708e860000000000000000000111003b965f739042990d010000000001595a", ""},
+  {"good-1-3delta-lzma2.xz", XzFormat::Xz, "fd377a585a000004e6d6b44604030301000301010301022101080000bc1565c60101c84c23b784e209714ffabaa1f7516308acaef258420d66eea801cd602e8858d76edb3d260005f1fbaf346717c09f3ff9fc0d0e03a4e6af69b1629e479743c32f47a3a3f5045ac09b3d01cc5b3afab3c24c9d4f57fdbbaf53ff06fff5a7515ea49c63b4b462f747a0506eafe30b52c3a737c0544901b9b4ff3b5f04afbb28ccff846471be303fd55b30a9617fa62753b5bf00533dfbbab35ebbf98149bb74a9a14efdbca64cf1bf5466efa4ad5120e30fee0c02a4633bffa8c75602afddb150c167f74befb45a4706b75fa34daae31765bba83006b55260a7f4f11715f941adb73a15b8ea9f66c751d16119ed08bcff5b71f16f7a678e05a6559a71fe9ca2045d60fba7b6f24e51be07ea50c2a748fb1ef8ee11fd069ee9b566749e2c54bfb754e21109b6563009a9d0fe2c5e0caa59966705a9bb38b046600facae37c04c65ae885cbfbc42e17bc1354af5bea316623402abb55b03039fec7f86d166df3c17ec0ab84a3c14ba5f97380ac1bc4ff011ae36510ab79a4c31f0fca7e7b858c4f93ab5fca7ae5a1607a8e0965fb869a59d55b6fb074bb49a076e4be853169dfeb1ba52f2bfef9d5ec256e85dfb04a25b53fdb7aa5bb136560bc1578b51bb050a4954f98d17cdb941ddbc043400000000b20744e917334b840001e903c903000092fbbdbcb1c467fb020000000004595a", lorem},
+  {"good-known_size-with_eopm.lzma", XzFormat::Lzma, "5d001000000d0000000000000000241949986f051527270d7678d02a681715ffff75f80000", hello},
+  {"good-known_size-without_eopm.lzma", XzFormat::Lzma, "5d001000000d0000000000000000241949986f051527270d7678d0291d2000", hello},
+  {"good-unknown_size-with_eopm.lzma", XzFormat::Lzma, "5d00100000ffffffffffffffff00241949986f051527270d7678d02a681715ffff75f80000", hello},
+]
+
+bad = [
+  {"bad-0-backward_size.xz", XzFormat::Xz, "fd377a585a0000016922de36000000001cdf44213591c5c6000000000001595a", "xz: the stream footer's index size does not match the index"},
+  {"bad-0-footer_magic.xz", XzFormat::Xz, "fd377a585a0000016922de36000000001cdf44219042990d0100000000015958", "xz: the stream footer's magic bytes are not YZ"},
+  {"bad-0-header_magic.xz", XzFormat::Xz, "fd377a58590000016922de36000000001cdf44219042990d010000000001595a", "xz: not an xz stream (the magic bytes are not FD 37 7A 58 5A 00)"},
+  {"bad-0-nonempty_index.xz", XzFormat::Xz, "fd377a585a0000016922de36000100002bb586209042990d010000000001595a", "xz: the index lists 1 blocks where the stream has 0"},
+  {"bad-0-empty-truncated.xz", XzFormat::Xz, "fd377a585a0000016922de36000000001cdf44219042990d01000000000159", "xz: the stream ends inside its footer"},
+  {"bad-0pad-empty.xz", XzFormat::Xz, "fd377a585a0000016922de36000000001cdf44219042990d010000000001595a0000000000", "xz: the stream padding is not a multiple of four bytes"},
+  {"bad-0cat-alone.xz", XzFormat::Xz, "fd377a585a0000016922de36000000001cdf44219042990d010000000001595a5d00000100ffffffffffffffff0083fffbffffc0000000", "xz: what follows the stream is neither padding nor another stream"},
+  {"bad-1-block_header-3.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f233301000548656c6c6f0a020006576f726c64210a0043a3a2150001240d3028dfaf9042990d010000000001595a", "xz: a block header's CRC32 does not match"},
+  {"bad-1-block_header-5.xz", XzFormat::Xz, "fd377a585a0000016922de3603c0000d2101080000000000a934552301000c48656c6c6f0a576f726c64210a0000000043a3a2150001250d7119c4b69042990d010000000001595a", "xz: a block header gives a compressed size of zero"},
+  {"bad-1-check-crc32.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a020006576f726c64210a0043a3a2140001240d3028dfaf9042990d010000000001595a", "xz: a block's CRC32 does not match (15a2a343, stream says 14a2a343)"},
+  {"bad-1-check-crc64.xz", XzFormat::Xz, "fd377a585a000004e6d6b4460200210108000000d80f231301000548656c6c6f0a020006576f726c64210a00ef2e88119d3f96cb0001280d3c676a031fb6f37d010000000004595a", "xz: a block's CRC64 does not match (ca963f9d11882eef, stream says cb963f9d11882eef)"},
+  {"bad-1-check-sha256.xz", XzFormat::Xz, "fd377a585a00000ae1fb0ca10200210108000000d80f231301000548656c6c6f0a020006576f726c64210a008e5935e7e13368cd9688fe8f48a0955293676a021562582c7e848dafe13fb0470001400d93864eae189b4b9a01000000000a595a", "xz: a block's SHA-256 does not match"},
+  {"bad-1-lzma2-1.xz", XzFormat::Xz, "fd377a585a000000ff12d9410200210108000000d80f231302000548656c6c6f0a020006576f726c64210a000001200d34edb3cb06729e7a010000000000595a", "LZMA2: the first chunk does not reset the dictionary"},
+  {"bad-1-lzma2-2.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f2313e000e200b65d00261bca46675af277b87d86d841db0535cd83a57c12a505db90bd2f14d3717296a88a7d8456718d6a2298ab9e3d90802dc75e0c1252d33f07087b1ca477f313b817c0ee918139b387f0ff00b36a5241ed2eb0f26497a49a9e63a1ae19740da9d55b6ceeb1e02cdc61dccb9d86cfe1dc0a7a81145fd040c87e0d9744ceb5c2fc2c5908bf0380dcd7448eb3d42ddee516216e4782ac0859d8e4662961d5d1fa496390113e20d0a9e2d51481d923d08f43ae45553669aa00e000e500ad0b008cf19d402bd07d1d99eee4dc63746446a4a04a6465b2f64ec1c8689f2754adbba6343c77ec0f2e1b8e4227e568bf60f40b3af09b31ebdf3fd8afa5559246055822098fa860080ba3e93ebcb416dbc7a3a2c016d514a722e82fe8b4d07717c58be4f2bb6bd6ef9a81344e1ddcec36e64472bf29b53c05316066ba2c030fd647c67d85d4c55e4e5773c34169be0d8c9cb515a9e7d278514bd529d0f9351ac55df48c7a70d55ea8315780c8a5d8e0000000fb4748db00018203c90300000b048ede3e300d8b020000000001595a", "LZMA2: a distance reaches before the output began"},
+  {"bad-1-lzma2-6.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a030006576f726c64210a0043a3a2150001240d3028dfaf9042990d010000000001595a", "LZMA2: control byte 0x03 is not one LZMA2 defines"},
+  {"bad-1-lzma2-7.xz", XzFormat::Xz, "fd377a585a000004e6d6b4460200210108000000d80f2313e001c801575d00261bca46675af277b87d86d841db0535cd83a57c12a505db90bd2f14d371127c4dcd11a9e365012e86498692423252942e105fb78e8ffdf51bc62601f0b3bbbb6ec57a96e1dfc834c3f54f830628518164f9806a7147d0e2a6d60d6431cf8a3062fb73354a1005c4ceefb4fed38536e0e967c0f0b5a11e525854dd4056f89bf359f1d6e07a06563c3dbd1581bb3aeb850e12aab160596cbe408e8dae0196287a13713c53873593bae225eab535ae504ebee0dd0cba8ac3f02417f6f0e4ccdbbd272bb7abc19562b0bf8095a808027fd1d62b778d1c6ecea5d9da5dd3e68bb5e77941a6d39e7d27bc4999850bf10e451efb2af7d70e7ccff0f45248187b114bf1b9a981e9270a37c355bdb455dbadb7df799f46b5954b797b11d92d13e308d5a184a0413b6e11d336f97a555410df06e14cd75749bd66697d1ba0e18368081da0fd34869e0dc1201b6575dd3b5f73cac283ffffe86a51d80000b20744e917334b840001f302c9030000dff39023b1c467fb020000000004595a", "LZMA2: a chunk's data ends before its compressed size"},
+  {"bad-1-stream_flags-1.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a020006576f726c64210a0043a3a2150001240d3028dfaf2a139094010000000002595a", "xz: the stream footer's flags do not match its header"},
+  {"bad-1-stream_flags-2.xz", XzFormat::Xz, "fd377a585a0000016922de760200210108000000d80f231301000548656c6c6f0a020006576f726c64210a0043a3a2150001240d3028dfaf9042990d010000000001595a", "xz: the stream header's CRC32 does not match"},
+  {"bad-2-compressed_data_padding.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a000001163596310200210108000000d80f2313010006576f726c64210a0000ddd1ca5300021a061b07000006dce75d3e300d8b020000000001595a", "xz: a block's padding is not zero"},
+  {"bad-2-index-1.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a000000163596310200210108000000d80f2313010006576f726c64210a0000ddd1ca5300021b061a070000c668072e3e300d8b020000000001595a", "xz: the index does not match the blocks"},
+  {"bad-2-index-3.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a000000163596310200210108000000d80f2313010006576f726c64210a0000ddd1ca5300021a061b07000190ece02a3e300d8b020000000001595a", "xz: the index's padding is not zero"},
+  {"bad-2-index-4.xz", XzFormat::Xz, "fd377a585a0000016922de360200210108000000d80f231301000548656c6c6f0a000000163596310200210108000000d80f2313010006576f726c64210a0000ddd1ca5300021a061b07000006dce75c3e300d8b020000000001595a", "xz: the index's CRC32 does not match"},
+  {"unsupported-check.xz", XzFormat::Xz, "fd377a585a000002d373d7af0200210108000000d80f231301000548656c6c6f0a020006576f726c64210a0043a3a2150001240d3028dfaf2a139094010000000002595a", "xz: check type 2 is not one this reader verifies (none, CRC32, CRC64 or SHA-256)"},
+  {"unsupported-filter_flags-1.xz", XzFormat::Xz, "fd377a585a0000016922de3602007f0000000000006773dd01000548656c6c6f0a020006576f726c64210a0043a3a2150001240d3028dfaf9042990d010000000001595a", "xz: the last filter is not LZMA2"},
+  {"bad-too_big_size-with_eopm.lzma", XzFormat::Lzma, "5d001000000e0000000000000000241949986f051527270d7678d02a681715ffff75f80000", "lzma: the end marker comes before the uncompressed size its header gives"},
+  {"bad-too_small_size-without_eopm-1.lzma", XzFormat::Lzma, "5d001000000c0000000000000000241949986f051527270d7678d0291d2000", "lzma: the data goes on past the uncompressed size its header gives"},
+  {"bad-unknown_size-without_eopm.lzma", XzFormat::Lzma, "5d00100000ffffffffffffffff00241949986f051527270d7678d0291d2000", "lzma: the stream ends inside the LZMA data"},
+]
+
+puts "== the format's own words"
+good.each do |v|
+  assert_true whole(v[1], unhex(v[2]), v[0]) == v[3], "#{v[0]} reads back"
+end
+puts "  #{good.size} of XZ Utils' good files: every check type, every LZMA2 chunk kind, three delta filters, joined and padded empty streams, three .lzma endings"
+nothing = Xz.decompress("")
+assert_true nothing.is_a?(XzError) && nothing.message == "xz: the stream is shorter than its header", "nothing at all is not an xz stream"
+# Python's `lzma.compress(b"hello")`: one uncompressed chunk, an 8 MiB
+# dictionary, CRC64.
+py_hello = unhex("fd377a585a000004e6d6b4460200210116000000742fe5a301000468656c6c6f00000000b137b9dbe5da1e9b00011d05b82d80af1fb6f37d010000000004595a")
+assert_true whole(XzFormat::Xz, py_hello, "python's hello") == "hello", "python's hello"
+py_alone = unhex("5d00008000ffffffffffffffff00341949ee8e6821ffffffb9e00000")
+assert_true whole(XzFormat::Lzma, py_alone, "python's .lzma hello") == "hello", "python's .lzma hello"
+puts "  and Python's hello, in .xz and in .lzma"
+
+puts "\n== streaming"
+good.each do |v|
+  every_feed(v[1], unhex(v[2]), v[3], v[0])
+end
+every_feed(XzFormat::Xz, py_hello, "hello", "python's hello")
+every_feed(XzFormat::Lzma, py_alone, "hello", "python's .lzma hello")
+puts "  each fed a byte, seven bytes, one to seven bytes and whole, read 64 KiB and one to seven bytes at a time"
+# A read answers as soon as it has bytes and going on would ask the
+# source for more: the first bytes of a stream come out long before the
+# stream has all been fed.
+kilobyte = unhex("fd377a585a000004e6d6b446020021011c00000010cf58cce00425006c5d00180e8025f1c081ecdf746677c8df88c4ae51f9d172dd97404c541bbec8d08cca3bc6ffccc88a625d8cf640d31a7abc5edca6f41994a3cf3588a407aba4979b0da81a73f89547354c0583a8fe21202b023b24f1efc014f3ecdcf2431e00391095ba8110c2aefe23dd703717230060406e1d0515599d00018801a6080000b97cc56ab1c467fb020000000004595a")
+feed = Feed.new(kilobyte, [1])
+early = XzReader.new { feed.next }
+first = early.read
+case first
+when XzError
+  raise "ASSERTION FAILED: the first read refused with #{first.message}"
+else
+  assert_true first.bytesize > 0 && feed.at < kilobyte.bytesize // 2, "the first read answered #{first.bytesize} bytes after #{feed.at} of #{kilobyte.bytesize} fed"
+end
+assert_true !early.finished?, "a reader part way is not finished"
+puts "  the first read answers after #{feed.at} of #{kilobyte.bytesize} bytes fed a byte at a time"
+
+puts "\n== refused as a value"
+bad.each do |v|
+  stream = unhex(v[2])
+  got = Xz.decompress(stream, v[1])
+  case got
+  when XzError
+    assert_true got.message == v[3], "#{v[0]} refused with #{got.message.inspect}, not #{v[3].inspect}"
+  else
+    raise "ASSERTION FAILED: #{v[0]} read #{got.bytesize} bytes instead of refusing"
+  end
+  [[1], ONE_TO_SEVEN, [stream.bytesize]].each do |pieces|
+    refused(v[1], stream, pieces, v[3], "#{v[0]}, pieces of #{pieces}")
+  end
+end
+puts "  #{bad.size} of XZ Utils' bad and unsupported files, each by the sentence for what is wrong, whole and a piece at a time"
+# Every proper prefix of a stream ends early, and every byte of one whose
+# block carries a CRC64 changed is refused: the header CRCs, the check,
+# the index's CRC32 and the footer's leave nothing that can change
+# unseen.
+[{"good-1-check-crc64.xz", XzFormat::Xz}, {"good-1-lzma2-4.xz", XzFormat::Xz}, {"good-1-3delta-lzma2.xz", XzFormat::Xz},
+ {"good-unknown_size-with_eopm.lzma", XzFormat::Lzma}].each do |pair|
+  v = good.find { |g| g[0] == pair[0] }
+  next unless v
+  stream = unhex(v[2])
+  cut = 0
+  while cut < stream.bytesize
+    got = Xz.decompress(piece_of(stream, 0, cut), pair[1])
+    assert_true got.is_a?(XzError), "#{pair[0]} cut at #{cut} read back"
+    if got.is_a?(XzError)
+      said = got.message
+      assert_true said.includes?(" ends ") || said.includes?(" shorter "),
+        "#{pair[0]} cut at #{cut}: #{said.inspect} does not say the stream ended"
+    end
+    cut = cut + 1
+  end
+  next if pair[1] == XzFormat::Lzma
+  at = 0
+  while at < stream.bytesize
+    got = stream_through(pair[1], flip(stream, at, 0x55_u8), [5], [65536])
+    assert_true got.is_a?(XzError), "#{pair[0]} with byte #{at} flipped read back"
+    at = at + 1
+  end
+end
+# A .lzma file has no check: its range coder ending at zero after the end
+# marker is what says the last bytes are the ones written, as liblzma has
+# it.
+[py_alone, unhex(good[good.size - 1][2])].each do |stream|
+  k = 1
+  while k <= 4
+    got = Xz.decompress(flip(stream, stream.bytesize - k, 1_u8), XzFormat::Lzma)
+    assert_true got.is_a?(XzError), "a .lzma whose last byte but #{k - 1} changed is refused"
+    k = k + 1
+  end
+end
+puts "  every prefix of four streams ends early, and every byte of three changed is refused"
+# Once refused, refused for good.
+crc_bad = bad.find { |b| b[0] == "bad-1-check-crc64.xz" }
+if crc_bad
+  feed = Feed.new(unhex(crc_bad[2]), [64])
+  broken = XzReader.new { feed.next }
+  said = drain(broken, [65536])
+  again = broken.read
+  assert_true said.is_a?(XzError) && again.is_a?(XzError) && again.message == said.message, "a second read after the error answers it again"
+  assert_true !broken.finished?, "a refused stream is not finished"
+end
+# The dictionary limit: Python's hello names 8 MiB, its .lzma header the
+# same; under a limit of 4 MiB both are refused before anything else.
+refused(XzFormat::Xz, py_hello, [1], "xz: the block's dictionary is 8 MiB, past the limit of 4 MiB", "an 8 MiB dictionary under a 4 MiB limit", 4194304_i64)
+limited = Xz.decompress(py_alone, XzFormat::Lzma, 4194304_i64)
+assert_true limited.is_a?(XzError) && limited.message == "lzma: the dictionary is 8 MiB, past the limit of 4 MiB", "a .lzma 8 MiB dictionary under a 4 MiB limit"
+assert_true Xz.decompress(py_hello, XzFormat::Xz, 8388608_i64) == "hello", "an 8 MiB dictionary under a limit of exactly 8 MiB"
+assert_true Xz.decompress(kilobyte).is_a?(String) && Xz.decompress(kilobyte, XzFormat::Xz, 33554432_i64).is_a?(XzError), "xz -9e's 64 MiB, read under the default and refused under 32 MiB"
+puts "  a refused stream stays refused, and a dictionary past the limit is refused by its size"
+
+puts "\n== memory"
+# The dictionary grows with the output: a kilobyte written with xz -9e's
+# 64 MiB dictionary costs what a kilobyte does, not 64 MiB.
+GC.collect
+GC.disable
+before = GC.stats.bytes_since_collection
+small = Xz.decompress(kilobyte)
+spent = GC.stats.bytes_since_collection - before
+GC.enable
+assert_true small.is_a?(String) && small.bytesize == 1062, "the kilobyte reads back"
+assert_true spent < 524288_u64, "a kilobyte with a 64 MiB dictionary allocated #{spent} bytes, under 512 KiB"
+puts "  a kilobyte written with a 64 MiB dictionary allocates under 512 KiB"
+
+args = Program.args
+if args.size > 0
+  dir = args[0]
+
+  puts "\n== against python's lzma"
+  File.read("#{dir}/manifest.txt").split('\n').each do |line|
+    next if line.empty?
+    parts = line.split(' ')
+    name = parts[0]
+    format = parts[1] == "lzma" ? XzFormat::Lzma : XzFormat::Xz
+    plain = File.read("#{dir}/#{parts[2]}")
+    stream = File.read("#{dir}/#{name}")
+    assert_true whole(format, stream, name) == plain, "#{name}, whole"
+    if parts[3] == "pieces"
+      assert_true streamed(format, stream, ONE_TO_SEVEN, ONE_TO_SEVEN, name) == plain, "#{name}, one to seven bytes a piece and a read"
+      assert_true streamed(format, stream, [1], [65536], name) == plain, "#{name}, a byte a piece"
+    else
+      assert_true streamed(format, stream, ONE_TO_SEVEN, [65536], name) == plain, "#{name}, one to seven bytes a piece"
+    end
+    puts "  #{name}: #{plain.bytesize} bytes"
+  end
+
+  puts "\n== xz utils' own files"
+  File.read("#{dir}/suite.txt").split('\n').each do |line|
+    next if line.empty?
+    tab = line.index('\t') || line.bytesize
+    name = line[0, tab]
+    phrase = tab < line.bytesize ? line[tab + 1, line.bytesize - tab - 1] : ""
+    format = name.ends_with?(".lzma") ? XzFormat::Lzma : XzFormat::Xz
+    stream = File.read("#{dir}/suite/#{name}")
+    got = Xz.decompress(stream, format)
+    if phrase.empty?
+      want = File.read("#{dir}/suite/#{name}.out")
+      assert_true got == want, "#{name} reads back what xz reads (#{got.is_a?(XzError) ? got.message : "different bytes"})"
+      assert_true streamed(format, stream, ONE_TO_SEVEN, ONE_TO_SEVEN, name) == want, "#{name}, a piece at a time"
+    else
+      assert_true got.is_a?(XzError) && got.message.includes?(phrase), "#{name} refused with #{got.is_a?(XzError) ? got.message.inspect : "nothing"}, not #{phrase.inspect}"
+      refused(format, stream, ONE_TO_SEVEN, phrase, "#{name}, a piece at a time")
+    end
+  end
+  puts "  every file of XZ Utils' suite read as xz reads it or refused by name"
+
+  puts "\n== 64 MiB in bounded memory"
+  # A 64 MiB stream with an 8 MiB dictionary, read 64 KiB at a time and
+  # each piece dropped: what the collector keeps is the dictionary and
+  # the input buffer, measured across the read, not the output.
+  big = File.read("#{dir}/big.xz")
+  want_crc = File.read("#{dir}/big.crc").strip
+  feed = Feed.new(big, [65536])
+  GC.collect
+  base = GC.stats.bytes_kept_by_last_sweep
+  most = 0_u64
+  reader = XzReader.new { feed.next }
+  total = 0_i64
+  crc = 0_u32
+  reads = 0
+  t0 = IyiMark.now_ns
+  while true
+    piece = reader.read(65536)
+    case piece
+    when XzError
+      raise "ASSERTION FAILED: 64 MiB refused with #{piece.message}"
+    else
+      break if piece.empty?
+      total = total + piece.bytesize.to_i64
+      crc = CRC32.update(crc, piece.to_unsafe, piece.bytesize)
+    end
+    reads = reads + 1
+    if reads % 128 == 0
+      GC.collect
+      kept = GC.stats.bytes_kept_by_last_sweep
+      most = kept - base if kept > base && kept - base > most
+    end
+  end
+  t1 = IyiMark.now_ns
+  assert_true total == 67108864_i64 && crc.to_s == want_crc, "64 MiB read back (#{total} bytes, CRC-32 #{crc} against #{want_crc})"
+  assert_true most < 12582912_u64, "streaming 64 MiB through an 8 MiB dictionary kept #{most} bytes, under 12 MiB"
+  puts "  64 MiB read 64 KiB at a time, the collector keeping under 12 MiB"
+  STDERR.puts "  iyi: 64 MiB streamed in #{(t1 - t0) // 1000000} ms"
+  prose = File.read("#{dir}/prose.p6.xz")
+  t2 = IyiMark.now_ns
+  inflated = Xz.decompress(prose)
+  t3 = IyiMark.now_ns
+  assert_true inflated.is_a?(String), "the prose reads back"
+  STDERR.puts "  iyi: Xz.decompress of #{prose.bytesize} bytes to #{inflated.is_a?(String) ? inflated.bytesize : 0} in #{(t3 - t2) // 1000000} ms"
+end
+
+puts "\nALL CHECKS PASSED"

@@ -3,8 +3,7 @@
 
 module std/string_pool
 
-import std/slice
-using std/slice::{Bytes}
+import std/slice::{Bytes}
 pub alias Bytes = Std::Slice::Bytes
 
 pub class StringPool

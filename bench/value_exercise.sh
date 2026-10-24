@@ -145,6 +145,41 @@ prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
 }
 
 # The same, for the file the other value type lives in.
+prove_fails_primitives() { # prove_fails_primitives <label> <dir> <phrase> <sed script>
+  local label="$1" dir="$2" phrase="$3" script="$4"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  sed -e "$script" "$REPO/src/iyi/primitives.iyi" > "$WORK/$dir/iyi/primitives.iyi"
+  if cmp -s "$REPO/src/iyi/primitives.iyi" "$WORK/$dir/iyi/primitives.iyi"; then
+    echo "  $label: the patch changed nothing, so this proves nothing"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
+       -o "$WORK/$dir/program" "$REPO/bench/value_exercise.iyi" \
+       > "$WORK/$dir/build" 2>&1; then
+    echo "  $label: the patched prelude did not build"
+    sed -n '1,10p' "$WORK/$dir/build"
+    status=1
+    return
+  fi
+  "$WORK/$dir/program" > "$WORK/$dir/out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: the exercise still passed, so it does not test this"
+    status=1
+    return
+  fi
+  if ! grep -q "$phrase" "$WORK/$dir/out"; then
+    echo "  $label: failed, but not at the expected check (wanted '$phrase')"
+    tail -2 "$WORK/$dir/out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" \
+    "$(grep -m1 -o "$phrase.*" "$WORK/$dir/out" | sed 's/^assert failed: //')"
+}
+
 prove_fails_range() { # prove_fails_range <label> <dir> <phrase> <sed script>
   local label="$1" dir="$2" phrase="$3" script="$4"
   mkdir -p "$WORK/$dir/iyi"
@@ -181,23 +216,51 @@ prove_fails_range() { # prove_fails_range <label> <dir> <phrase> <sed script>
 }
 
 # 1. Equality by identity again, which is what `Object#==` gave it.
+# The once-guard a constant read before its line is initialised through,
+# taken out of the prelude: the program does not compile.
+mkdir -p "$WORK/no_once/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/no_once/iyi/"
+sed -e 's/^fun __iyi_once(flag : Bool\*, initializer : Void\*) : Nil$/fun __iyi_once_gone(flag : Bool*, initializer : Void*) : Nil/' \
+  "$REPO/src/iyi/prelude.iyi" > "$WORK/no_once/iyi/prelude.iyi"
+if cmp -s "$REPO/src/iyi/prelude.iyi" "$WORK/no_once/iyi/prelude.iyi"; then
+  echo "  the once-guard removed: the patch changed nothing, so this proves nothing"
+  status=1
+elif IYI_PATH="$WORK/no_once${PSEP}$REPO/src" "$IYI" build -o "$WORK/no_once/program" \
+     "$REPO/bench/value_exercise.iyi" > "$WORK/no_once/build" 2>&1; then
+  echo "  the once-guard removed: the exercise still built, so it does not test this"
+  status=1
+elif grep -q "__iyi_once is not defined" "$WORK/no_once/build"; then
+  echo "  the once-guard removed: refused at compile time"
+else
+  echo "  the once-guard removed: did not build, and not for this"
+  sed -n '1,5p' "$WORK/no_once/build"
+  status=1
+fi
+
 prove_fails "== by identity" no_eq "tuple: == same members" \
-  's/^      return false unless self\[{{i}}\] == other\[{{i}}\]$/      return false/'
+  's/^      return false unless {{ T\[i\] <= U\[i\] || U\[i\] <= T\[i\] }} \&\& self\[{{i}}\] == other\[{{i}}\]$/      return false/'
 
 # 2. Equality that ignores the members, the other direction: everything equal.
 prove_fails "== always true" all_eq "tuple: == different members" \
-  's/^      return false unless self\[{{i}}\] == other\[{{i}}\]$/      # broken/'
+  's/^      return false unless {{ T\[i\] <= U\[i\] || U\[i\] <= T\[i\] }} \&\& self\[{{i}}\] == other\[{{i}}\]$/      # broken/'
+
+# 2b. A struct's `==` taken away, so `Object#==` answers false again, and
+#     one that reads no field, so every struct of a type is equal.
+prove_fails "struct == gone" no_struct_eq "struct: equal to itself" \
+  '/^struct Struct$/,/^end$/d'
+prove_fails "struct == reads no field" struct_eq_blind "struct: a field changes it" \
+  's/^      return false unless @{{ ivar.id }} == other.@{{ ivar.id }}$/      # broken/'
 
 # 3. One slot for every tuple, which is `Object#hash`. Equality still holds,
 #    so this is the check that a key is found rather than merely compared.
 prove_fails "hash collapsed" no_hash "tuple: order changes the hash" \
-  's/^      value = (value &\* 31) &+ self\[{{i}}\].hash$/      value = 17/'
+  's/^      value = (value ^ self\[{{i}}\]\.hash\.to_i64\.unsafe_to_u64) &\* 0x100000001B3_u64$/      value = 17_u64/'
 
 # 4. A hash that reads only the first member, so `{1, 2}` and `{1, 3}` share
 #    a slot. The table still answers - this is why the hash's own check is
 #    about which tuples differ rather than about lookups.
 prove_fails "hash ignores the tail" head_hash "tuple: a member changes the hash" \
-  's/^      value = (value &\* 31) &+ self\[{{i}}\].hash$/      value = value \&+ self[0].hash/'
+  's/^      value = (value ^ self\[{{i}}\]\.hash\.to_i64\.unsafe_to_u64) &\* 0x100000001B3_u64$/      value = (value ^ self[0].hash.to_i64.unsafe_to_u64) \&* 0x100000001B3_u64/'
 
 # 5. `size`, which the walk and every macro loop above read.
 prove_fails "size wrong" bad_size "tuple: size of a pair" \
@@ -211,7 +274,42 @@ prove_fails "index by value" bad_index "tuple: index by value" \
 prove_fails "to_s without members" bad_to_s "tuple: to_s" \
   's/^      result = result + self\[{{i}}\].inspect$/      result = result + "?"/'
 
+# 7b. A tuple first, printed flush against the brace again: `{{1, 2}, 3}`.
+prove_fails "to_s without the padding" bad_to_s_pad "tuple: a tuple first is padded" \
+  's/ ? " " : "" {% else %}/ ? "" : "" {% else %}/'
+
 # 8. And the range's own pair, in the file it lives in.
+# The macro file, for `record`: a block it drops is a method the program
+# names and the compiler cannot find, so this one is refused at compile time.
+prove_fails_macro() { # prove_fails_macro <label> <dir> <phrase> <sed script>
+  local label="$1" dir="$2" phrase="$3" script="$4"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  sed -e "$script" "$REPO/src/iyi/macros.iyi" > "$WORK/$dir/iyi/macros.iyi"
+  if cmp -s "$REPO/src/iyi/macros.iyi" "$WORK/$dir/iyi/macros.iyi"; then
+    echo "  $label: the patch changed nothing, so this proves nothing"
+    status=1
+    return
+  fi
+  if IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
+       -o "$WORK/$dir/program" "$REPO/bench/value_exercise.iyi" \
+       > "$WORK/$dir/build" 2>&1; then
+    echo "  $label: the patched prelude still built, so this proves nothing"
+    status=1
+    return
+  fi
+  if grep -q "$phrase" "$WORK/$dir/build"; then
+    printf '  %s: refused at compile time, at %s\n' "$label" "$phrase"
+  else
+    echo "  $label: the patched prelude did not build, and not for this check"
+    sed -n '1,10p' "$WORK/$dir/build"
+    status=1
+  fi
+}
+
+prove_fails_macro "record drops its block" record_block "undefined method 'record_width'" \
+  's/^      {{ yield }}$//'
+
 prove_fails_range "range == ignores its bounds" range_eq "range: == different end" \
   's/^    @begin == other.begin \&\& @end == other.end \&\& @exclusive == other.exclusive?$/    true/'
 
@@ -222,6 +320,20 @@ prove_fails_range "range == ignores exclusive" range_flag "range: inclusive is n
 # 10. And its hash, which is what puts an equal range in the same slot.
 prove_fails_range "range hash collapsed" range_hash "range: the flag changes the hash" \
   's/^    @exclusive ? (value &\* 31) &+ 1 : value &\* 31$/    0/'
+
+# 11. Case equality back to `==`: a range arm, a type in a tuple of types.
+prove_fails_range "range === is equality" range_case "range: === is inclusion" \
+  's/^    @begin <= value \&\& (@exclusive ? value < @end : value <= @end)$/    self == value/'
+
+prove_fails_primitives "class === is equality" class_case "class: === is membership" \
+  's/^    other.is_a?(self)$/    self == other/'
+
+prove_fails "tuple === is equality" tuple_case "tuple: a tuple of types matches member by member" \
+  's/^  def ===(other : Tuple(\*U)) : Bool forall U$/  def unused_case_equality(other : Tuple(*U)) : Bool forall U/'
+
+# A character that steps by two: the walk skips every other letter.
+prove_fails_primitives "a character plus one is two on" char_step "range: characters walk by one" \
+  's/^    (ord + other).chr$/    (ord + other * 2).chr/'
 
 echo
 if [ "$status" -eq 0 ]; then

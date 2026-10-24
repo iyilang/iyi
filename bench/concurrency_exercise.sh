@@ -4,23 +4,31 @@
 #
 #     bash bench/concurrency_exercise.sh
 #
-# Four steps, and the last two are failure proofs, because a gate that
+# Five steps, and the last three are failure proofs, because a gate that
 # cannot fail is not a gate:
 #
 #   1. The exercise holds every asserted property, plain and --release —
 #      the release arm is not decoration: the context switch is naked asm,
 #      and the optimiser is the thing that corrupted it until @[NoInline]
-#      said not to.
+#      said not to. And a fiber reading stdin parks, and is cancelled
+#      there (bench/stdin_park.iyi, fed by a pipe), which a read made the
+#      blocking call it was is refused for.
 #   2. The binary keeps the dependency floor (III.9): on Linux the runtime
 #      is raw syscalls and must add zero undefined symbols; on darwin the
-#      floor is libSystem and nothing else, held as the exact symbol list.
+#      floor is libSystem and nothing else, held as the exact symbol list;
+#      on Windows it is kernel32 and the C runtime's DLLs, read off the
+#      import table with dumpbin.
 #   3. A deadlocked program — every fiber blocked, nothing to wake one —
-#      exits 1 with the deadlock named, rather than hanging.
+#      exits 1 with the deadlock named, rather than hanging; and one found
+#      in a task's park is named once, with every cleanup run.
 #   4. A group whose spelling would compile sequentially still interleaves:
 #      step 1's first property, called out because III.4.8 refused the
 #      sequential imitation by name; this step proves the check *can* fail
 #      by asserting the exercise's own assert is reachable (a wrong
 #      expected order exits 1).
+#   5. On Windows, the switch's xmm6-xmm15 restore taken out of a copy of
+#      the runtime fails the exercise's doubles check by name, in the
+#      --release build that keeps doubles in those registers.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -40,6 +48,15 @@ case "$(uname -s)" in
     ;;
 esac
 
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+. "$REPO/bench/floor_base.sh"
+
 cd "$WORK" || exit 1
 
 step() { echo "== $1"; }
@@ -57,6 +74,13 @@ if ! timeout 60 ./exercise > answers.txt 2>&1; then
   exit 1
 fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
+# A panic on a task's stack is printed and the program goes on, so the
+# scheduler's own complaint is looked for here (step 16a's select race).
+if grep -q 'a done fiber was scheduled' answers.txt; then
+  echo "the exercise scheduled a finished fiber:"
+  grep -m3 'a done fiber' answers.txt
+  exit 1
+fi
 
 step "exercise, release build"
 if ! "$IYI" build --release "$REPO/bench/concurrency_exercise.iyi" -o exercise-release > build-release.log 2>&1; then
@@ -70,6 +94,60 @@ if ! timeout 60 ./exercise-release > answers-release.txt 2>&1; then
   exit 1
 fi
 grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
+if grep -q 'a done fiber was scheduled' answers-release.txt; then
+  echo "the release exercise scheduled a finished fiber:"
+  grep -m3 'a done fiber' answers-release.txt
+  exit 1
+fi
+
+# ── 1b. A fiber reading stdin parks, and is cancelled there ───────────────
+# bench/stdin_park.iyi, fed by a pipe that answers a second after the
+# program has started and again two seconds later. On Windows the read is a
+# thread's of its own (`IyiStdinReader`); here, it was the program's
+# thread's, and the proof below puts that back.
+step "a fiber reading stdin parks, and is cancelled there"
+if ! "$IYI" build "$REPO/bench/stdin_park.iyi" -o stdin_park > build-stdin.log 2>&1; then
+  echo "stdin exercise failed to build:"
+  tail -5 build-stdin.log
+  exit 1
+fi
+feed() { # the lines, once the program has said it runs
+  local tries=0
+  while [ ! -e "$1" ] && [ "$tries" -lt 600 ]; do sleep 0.05; tries=$((tries + 1)); done
+  sleep 1; echo first; sleep 2; echo second; sleep 2; echo third
+}
+rm -f stdin.ready
+feed stdin.ready | STDIN_PARK_READY=stdin.ready timeout -k 5 60 ./stdin_park > stdin.txt 2>&1
+if ! grep -q 'every property held' stdin.txt; then
+  echo "stdin exercise failed:"
+  cat stdin.txt
+  exit 1
+fi
+sed 's/^/  /' stdin.txt | grep -v 'every property held'
+
+step "failure proof: a stdin read that holds the thread is refused"
+mkdir -p blocking/iyi
+cp "$REPO"/src/iyi/*.iyi blocking/iyi/
+sed 's/^        outcome = iyi_read(0, buffer, count)$/        outcome = __iyi_read(0, buffer, count)/' \
+  "$REPO/src/iyi/io.iyi" > blocking/iyi/io.iyi
+if [ "$(diff "$REPO/src/iyi/io.iyi" blocking/iyi/io.iyi | grep -c '^>')" -lt 1 ]; then
+  echo "the sed found no stdin read to make blocking"
+  exit 1
+fi
+if ! IYI_PATH="$WORK/blocking${PSEP}$REPO/src" "$IYI" build "$REPO/bench/stdin_park.iyi" -o stdin_blocking > build-blocking.log 2>&1; then
+  echo "the blocking copy failed to build:"
+  tail -5 build-blocking.log
+  exit 1
+fi
+rm -f blocking.ready
+feed blocking.ready | STDIN_PARK_READY=blocking.ready timeout -k 5 60 ./stdin_blocking > stdin-blocking.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'held the thread' stdin-blocking.txt; then
+  echo "a stdin read that holds the thread was not refused (exit $code):"
+  cat stdin-blocking.txt
+  exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 'held the thread' stdin-blocking.txt | sed 's/^FAIL: //')"
 
 # ── 2. The dependency floor ───────────────────────────────────────────────
 # On Linux the five allowed names are the C runtime template's, not the
@@ -87,13 +165,47 @@ step "dependency floor: the runtime stays on the platform's own doorway"
 NM=""
 command -v nm >/dev/null 2>&1 && NM=nm
 unmeasured=0
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # A PE leaves nothing undefined: what the runtime asks of Windows is the
+    # DLLs the exercise imports, read with the toolchain's own `dumpbin`
+    # (bench/floor_base.sh). The runtime's doorway is kernel32 and the C
+    # runtime's DLLs; a socket or entropy DLL here would be a module the
+    # exercise does not import taking one on.
+    DUMPBIN="$(find_dumpbin || true)"
+    if [ -z "$DUMPBIN" ]; then
+      echo "no dumpbin here, so the import floor is not measured"
+      unmeasured=$((unmeasured + 1))
+    else
+      dlls="$(pe_dlls exercise.exe)"
+      if [ -z "$dlls" ]; then
+        echo "dumpbin read no import table out of the exercise, so the floor was not measured"
+        exit 1
+      fi
+      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
+      if [ -n "$extra" ]; then
+        echo "the runtime moved the Windows floor: the exercise imports $(echo $extra)"
+        exit 1
+      fi
+      echo "  imports: $(echo $dlls)"
+    fi
+    NM=""
+    ;;
+esac
 if [ -z "$NM" ]; then
-  echo "no nm here, so the symbol floor is not measured"
-  unmeasured=$((unmeasured + 1))
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+    *)
+      echo "no nm here, so the symbol floor is not measured"
+      unmeasured=$((unmeasured + 1))
+      ;;
+  esac
 else
   case "$(uname -s)" in
     Darwin)
-      allowed='___error|__tlv_bootstrap|_backtrace|_backtrace_symbols_fd|_madvise|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_exit|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
+      # `_fstat64` is the runtime's read asking whether standard input is a
+      # regular file, which kqueue never says has reached its end.
+      allowed='___error|__tlv_bootstrap|_backtrace|_backtrace_symbols_fd|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_exit|_fstat64|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
       added="$("$NM" -u exercise | sed -e 's/^ *//' | awk '{ print $NF }' |
         grep -E -cv "^($allowed)\$")"
       extra_libs="$(otool -L exercise | sed -n '2,$p' | awk '{ print $1 }' |
@@ -140,6 +252,306 @@ if [ "$status" -ne 1 ]; then
 fi
 grep -q 'deadlock' deadlock.txt || { echo "died without naming the deadlock:"; cat deadlock.txt; exit 1; }
 
+# ── 3a. A deadlock found in a task's park is named once ───────────────────
+# The deadlock was raised on the stack of whichever fiber's park found it,
+# mostly a task's, and that task went through its boundary a second time:
+# a worker that panicked, or finished without sending, while its owner
+# waited on the channel printed the deadlock 182 times and then "stack
+# overflow"; two tasks waiting on each other ended the process without
+# the owner's cleanups. It is the root fiber's panic now, on its own stack.
+step "a deadlock found in a task's park is named once, and every cleanup runs"
+cat > taskdeadlock.iyi <<'IYI'
+module taskdeadlock
+
+def compute(n : Int32) : Int32
+  [1, 2, 3][n]
+end
+
+# The owner waits on a channel (`panicked`, `finished`) or on the
+# worker's value (`value`) when the deadlock is found.
+def waits(how : String) : Nil
+  defer STDERR.puts("cleanup: owner")
+  result = Channel(Int32).new
+  group do |g|
+    worker = g.spawn do
+      defer STDERR.puts("cleanup: worker")
+      result.send(compute(7)) if how == "panicked"
+      result.receive if how == "value"
+      0
+    end
+    if how == "value"
+      worker.value
+    else
+      result.receive
+    end
+  end
+end
+
+# Two tasks wait on each other while the owner waits in the group's join.
+def crossed : Nil
+  defer STDERR.puts("cleanup: owner")
+  a = Channel(Int32).new
+  b = Channel(Int32).new
+  group do |g|
+    g.spawn do
+      defer STDERR.puts("cleanup: task a")
+      a.receive
+      b.send(1)
+      0
+    end
+    g.spawn do
+      defer STDERR.puts("cleanup: task b")
+      b.receive
+      a.send(1)
+      0
+    end
+  end
+end
+
+if Program.args[0] == "crossed"
+  crossed
+else
+  waits(Program.args[0])
+end
+IYI
+if ! "$IYI" build taskdeadlock.iyi -o taskdeadlock > build-taskdeadlock.log 2>&1; then
+  echo "task deadlock probe failed to build:"
+  tail -5 build-taskdeadlock.log
+  exit 1
+fi
+for shape in panicked finished value crossed; do
+  timeout 30 ./taskdeadlock "$shape" > "taskdeadlock-$shape.txt" 2>&1
+  code=$?
+  want=2; [ "$shape" = crossed ] && want=3
+  # The panic lines alone: darwin's backtrace names frames such as
+  # `IyiScheduler::deadlock`, and counting every line that says the word
+  # read seven reports where the program made one.
+  reports=$(grep -c 'panic: .*deadlock' "taskdeadlock-$shape.txt")
+  cleanups=$(grep -c '^cleanup: ' "taskdeadlock-$shape.txt")
+  if [ "$code" -ne 1 ] || [ "$reports" -ne 1 ] || [ "$cleanups" -ne "$want" ] ||
+     grep -q 'stack overflow' "taskdeadlock-$shape.txt"; then
+    echo "a deadlock beside a $shape task exited $code, named $reports times, with $cleanups of $want cleanups run:"
+    sort "taskdeadlock-$shape.txt" | uniq -c | head -8
+    exit 1
+  fi
+  echo "  $shape: named once, exit 1, all $want cleanups run"
+done
+
+# ── 3b. An owner that exits or panics does not wait out its tasks ─────────
+# `exit` ends the process and its tasks with it, and a panicking owner
+# stops what it started: both ran the group's join as a cleanup, and it
+# waited for a sibling's minute-long sleep - a minute each, and forever
+# beside a parked accept loop.
+step "an owner that exits or panics does not wait out a sleeping task"
+cat > ending.iyi <<'IYI'
+module ending
+
+group do |g|
+  g.spawn do
+    sleep(60000)
+    0
+  end
+  sleep(50)
+  exit(4) if Program.args[0] == "exit"
+  raise "the owner panicked"
+end
+IYI
+if ! "$IYI" build ending.iyi -o ending > build-ending.log 2>&1; then
+  echo "ending probe failed to build:"
+  tail -5 build-ending.log
+  exit 1
+fi
+for how in exit panic; do
+  started=$(date +%s)
+  timeout 30 ./ending "$how" > "ending-$how.txt" 2>&1
+  code=$?
+  took=$(( $(date +%s) - started ))
+  want=4; [ "$how" = panic ] && want=1
+  if [ "$code" -ne "$want" ] || [ "$took" -gt 10 ]; then
+    echo "an owner that ends by $how took ${took}s and exited $code (124 is the harness's timeout):"
+    cat "ending-$how.txt"
+    exit 1
+  fi
+done
+
+# ── 3c. `sleep(0)` yields ─────────────────────────────────────────────────
+# The runtime's one way for a task to let another run without waiting on
+# anything: it returned at once, and a task polling a flag with it spun
+# fifty million times while the task that would set the flag never ran.
+step "sleep(0) lets a runnable task run"
+cat > yielding.iyi <<'IYI'
+module yielding
+
+flag = false
+spins = 0
+group do |g|
+  g.spawn do
+    while !flag
+      spins = spins + 1
+      sleep(0)
+      if spins > 1000000
+        puts "sleep(0) never let the setter run: #{spins} spins"
+        exit(2)
+      end
+    end
+    puts "saw the flag after #{spins} spins"
+    0
+  end
+  g.spawn do
+    flag = true
+    0
+  end
+  0
+end
+IYI
+if ! "$IYI" build yielding.iyi -o yielding > build-yielding.log 2>&1; then
+  echo "yielding probe failed to build:"
+  tail -5 build-yielding.log
+  exit 1
+fi
+timeout 60 ./yielding > yielding.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q '^saw the flag after 1 spins' yielding.txt; then
+  echo "a task yielding with sleep(0) exited $code:"
+  cat yielding.txt
+  exit 1
+fi
+
+# ── 3d. A `!` in a task's body is refused as itself ───────────────────────
+# A task's block runs as a proc, so there is no method frame for its `!` to
+# return from. The refusal said "can't return from captured block, use
+# next", about a `return` nobody wrote; it names `!` and the way out now.
+step "a \`!\` in a task's body is refused with its own sentence"
+cat > bang_task.iyi <<'IYI'
+module bang_task
+
+struct Missing
+  def initialize
+  end
+end
+
+impl Error for Missing
+  def message : String
+    "missing"
+  end
+end
+
+def lookup(k : String) : Int32 | Missing
+  k.size > 1 ? k.size : Missing.new
+end
+
+group do |g|
+  t = g.spawn { lookup("ab")! }
+end
+IYI
+if "$IYI" build bang_task.iyi -o bang_task > build-bang.log 2>&1; then
+  echo "a \`!\` in a task's body compiled"
+  exit 1
+fi
+if ! grep -q "can't propagate out of a block that runs as a proc" build-bang.log; then
+  echo "a \`!\` in a task's body was refused, but not as itself:"
+  tail -8 build-bang.log
+  exit 1
+fi
+
+# ── 3e. An `end!` on a block that answers its own expression says so ──────
+# A group answers its block's last expression unless the block ends in a
+# spawn. The typed expansion used to append the tuple after any such
+# expression and throw it away (`puts "spawned"` after two spawns answered
+# {1, 2}); the general form answers Nil there, and the `!` with nothing to
+# propagate names the group's rule instead of only the type.
+step "an \`end!\` on a group that answers its own expression is refused as itself"
+cat > bang_tail.iyi <<'IYI'
+module bang_tail
+
+def pair : Tuple(Int32, Int32) | Cancelled | Panicked
+  group do |g|
+    x = g.spawn { 1 }
+    y = g.spawn { 2 }
+    puts "spawned"
+  end!
+end
+
+puts pair
+IYI
+if "$IYI" build bang_tail.iyi -o bang_tail > build-bang-tail.log 2>&1; then
+  echo "an \`end!\` on a group whose block ends in its own expression compiled"
+  exit 1
+fi
+if ! grep -q "this group answers its block's last expression" build-bang-tail.log; then
+  echo "an \`end!\` on a group whose block ends in its own expression was refused, but not as itself:"
+  tail -8 build-bang-tail.log
+  exit 1
+fi
+
+# ── 3f. A task spawned on a group whose block has ended is a panic ────────
+# A handle can be kept past its block (`saved = g`), and a task spawned on
+# it there had no scope left to join it: the program printed "leak
+# returning", exited 0, and the task never ran. III.4.1 says a task cannot
+# outlive the scope that started it, so the spawn is the bug, said there.
+step "a task spawned on a group whose block has ended is refused at run time"
+cat > late_spawn.iyi <<'IYI'
+module late_spawn
+
+saved = nil.as(IyiGroup?)
+group do |g|
+  saved = g
+  g.spawn { 0 }
+end
+if late = saved
+  late.spawn do
+    puts "the late task ran"
+    0
+  end
+end
+puts "the late spawn returned"
+IYI
+if ! "$IYI" build late_spawn.iyi -o late_spawn > build-late-spawn.log 2>&1; then
+  echo "late spawn probe failed to build:"
+  tail -5 build-late-spawn.log
+  exit 1
+fi
+timeout 30 ./late_spawn > late_spawn.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'panic: a task spawned on a group whose block has ended' late_spawn.txt ||
+   grep -q '^the late' late_spawn.txt; then
+  echo "a task spawned on an ended group exited $code:"
+  cat late_spawn.txt
+  exit 1
+fi
+
+# ── 3g. The join names the first failure, not the last spawned ───────────
+# Two tasks that panic: both are printed where they happen, first then
+# second, and the join owes one re-raise for the pair. It walked its
+# children newest first and named "a task panicked: second", where III.4.3
+# says the first failing task is the one that leaves the group.
+step "a group's join re-raises the first task that panicked"
+cat > two_panics.iyi <<'IYI'
+module two_panics
+
+def bomb(m : String) : Int32
+  raise m
+end
+
+group do |g|
+  g.spawn { bomb("first") }
+  g.spawn { bomb("second") }
+end
+IYI
+if ! "$IYI" build two_panics.iyi -o two_panics > build-two-panics.log 2>&1; then
+  echo "two panics probe failed to build:"
+  tail -5 build-two-panics.log
+  exit 1
+fi
+timeout 30 ./two_panics > two_panics.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'panic: a task panicked: first' two_panics.txt ||
+   grep -q 'a task panicked: second' two_panics.txt; then
+  echo "two panicking tasks joined with exit $code and not the first named:"
+  cat two_panics.txt
+  exit 1
+fi
+
 # ── 4. Failure proof: the interleaving assert is reachable ────────────────
 step "failure proof: a wrong order is refused"
 sed 's/== "bababa"/== "aaabbb"/' "$REPO/bench/concurrency_exercise.iyi" > misordered.iyi
@@ -154,6 +566,132 @@ if [ $? -ne 1 ] || ! grep -q 'FAIL: interleaving' misordered.txt; then
   cat misordered.txt
   exit 1
 fi
+
+# ── 5. Failure proof: the switch keeps xmm6-xmm15, on Windows ────────────
+# Only Windows x64 keeps vector registers across a call among the
+# platforms this runs on - the SysV convention keeps none, and aarch64's
+# d8-d15 are a different arm of the switch - so only there is there a
+# restore to take out. The frame keeps its size, so a fresh fiber still
+# starts; the registers simply come back as whatever the other fiber left.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "failure proof: a switch that drops xmm6-xmm15 is caught"
+    mkdir -p dropped/iyi
+    cp -R "$REPO/src/iyi/." dropped/iyi/
+    awk '/^         movups [0-9]+\(%rsp\), %xmm[0-9]+$/ { found = found + 1; next } { print }
+         END { if (found != 10) exit 3 }' \
+      "$REPO/src/iyi/concurrency.iyi" > dropped/iyi/concurrency.iyi
+    if [ $? -ne 0 ]; then
+      echo "the ten restores this proof removes are not in the switch any more; update the proof"
+      exit 1
+    fi
+    if ! IYI_PATH="$WORK/dropped;$REPO/src" "$IYI" build --release "$REPO/bench/concurrency_exercise.iyi" \
+         -o dropped-exercise > build-dropped.log 2>&1; then
+      echo "the patched runtime did not build:"
+      tail -5 build-dropped.log
+      exit 1
+    fi
+    timeout 60 ./dropped-exercise > dropped.txt 2>&1
+    if [ $? -ne 1 ] || ! grep -q 'FAIL: switch' dropped.txt; then
+      echo "a switch without its xmm restores passed the doubles check, so it checks nothing:"
+      tail -5 dropped.txt
+      exit 1
+    fi
+    echo "  caught: $(grep -m1 'FAIL: switch' dropped.txt)"
+    ;;
+  *)
+    step "failure proof: a switch that drops xmm6-xmm15 is caught: not here, because this platform's calling convention keeps no xmm register across a call"
+    ;;
+esac
+
+# ── 6. Failure proof: a stack mapped at spawn is caught ─────────────────
+step "failure proof: a stack mapped when a task is spawned is caught"
+mkdir -p eager/iyi
+cp -R "$REPO/src/iyi/." eager/iyi/
+# The stack made at spawn again: a fiber that has one is not given another
+# at its first switch, so this alone puts every spawn back on a mapping.
+awk '/^    IyiScheduler.register\(fiber\)$/ { print "    fiber.prepare_stack"; found = found + 1 }
+     { print }
+     END { if (found != 1) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > eager/iyi/concurrency.iyi
+if [ $? -ne 0 ]; then
+  echo "the line this proof adds to is not where it was; update the proof"
+  exit 1
+fi
+if ! IYI_PATH="$WORK/eager${PSEP}$REPO/src" "$IYI" build "$REPO/bench/concurrency_exercise.iyi" \
+     -o eager-exercise > build-eager.log 2>&1; then
+  echo "the patched runtime did not build:"
+  tail -5 build-eager.log
+  exit 1
+fi
+timeout 120 ./eager-exercise > eager.txt 2>&1
+if [ $? -ne 1 ] || ! grep -q 'FAIL: burst' eager.txt; then
+  echo "stacks mapped at spawn passed the burst check, so it checks nothing:"
+  tail -5 eager.txt
+  exit 1
+fi
+echo "  caught: $(grep -m1 'FAIL: burst' eager.txt)"
+
+# ── 7. Failure proofs: a walked sleep queue, and one out of order ────────
+sleep_proof() { # sleep_proof <label> <dir> <awk program> <phrase>
+  step "failure proof: $1 is caught"
+  mkdir -p "$2/iyi"
+  cp -R "$REPO/src/iyi/." "$2/iyi/"
+  awk "$3" "$REPO/src/iyi/concurrency.iyi" > "$2/iyi/concurrency.iyi"
+  if [ $? -ne 0 ]; then
+    echo "the line this proof changes is not where it was; update the proof"
+    exit 1
+  fi
+  if ! IYI_PATH="$WORK/$2${PSEP}$REPO/src" "$IYI" build "$REPO/bench/concurrency_exercise.iyi" \
+       -o "$2-exercise" > "build-$2.log" 2>&1; then
+    echo "the patched runtime did not build:"
+    tail -5 "build-$2.log"
+    exit 1
+  fi
+  timeout 300 "./$2-exercise" > "$2.txt" 2>&1
+  if [ $? -ne 1 ] || ! grep -q "$4" "$2.txt"; then
+    echo "$1 passed the sleep check, so it checks nothing:"
+    tail -5 "$2.txt"
+    exit 1
+  fi
+  echo "  caught: $(grep -m1 "$4" "$2.txt")"
+}
+sleep_proof "a sleep queue walked on every insertion" walked \
+  '/^    fiber.sleep_seq = st.sleep_seq$/ { print; print "    walk = st.sleep_head"; print "    walk = walk.sleep_child if walk.is_a?(IyiFiber)"; print "    while walk.is_a?(IyiFiber)"; print "      @@sleep_steps = @@sleep_steps &+ 1_u64"; print "      walk = walk.next_sleep"; print "    end"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: sleep: 32000 sleepers took'
+sleep_proof "a sleep queue that puts the latest first" latest \
+  '/^    a.deadline < b.deadline \|\| \(a.deadline == b.deadline && a.sleep_seq < b.sleep_seq\)$/ { print "    a.deadline > b.deadline || (a.deadline == b.deadline && a.sleep_seq < b.sleep_seq)"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: sleep: a sleeper woke before'
+
+# ── 7b. Failure proofs: a node taken from the heap for every park, and a
+#      send node handed out while its sender has yet to read it ───────────
+sleep_proof "a receive node allocated for every park" fresh_waiter \
+  '/^    if waiter.is_a\?\(IyiWaiter\) && !waiter.linked$/ { print "    if waiter.is_a?(IyiWaiter) && false"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: ring:'
+sleep_proof "a send node allocated for every park" fresh_sender \
+  '/^    if node.is_a\?\(IyiSendNode\(T\)\) && node.read && !node.linked$/ { print "    if node.is_a?(IyiSendNode(T)) && false"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: ring:'
+sleep_proof "a send node handed out before its sender read it" unread_sender \
+  '/^    if node.is_a\?\(IyiSendNode\(T\)\) && node.read && !node.linked$/ { print "    if node.is_a?(IyiSendNode(T)) && !node.linked"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: receipt:'
+
+# ── 8. Failure proof: an io list walked for every event ─────────────────
+case "$(uname -s)" in
+  Linux)
+    sleep_proof "an io waiter found by walking every waiter" walked_io \
+      '/^    index < slots.size \? slots\[index\] : nil$/ { print "    found_waiter = nil"; print "    walk = state.io_head"; print "    while walk.is_a?(IyiFiber)"; print "      found_waiter = walk if walk.wait_fd == fd && walk.wait_dir == direction"; print "      walk = walk.next_io"; print "    end"; print "    found_waiter"; found = 1; next }
+       { print } END { if (!found) exit 3 }' \
+      'FAIL: io: 5000 round trips'
+    ;;
+  *)
+    step "failure proof: an io waiter found by walking every waiter: not here, because the check runs on Linux's poller only"
+    ;;
+esac
 
 echo "workdir $WORK"
 # A summary may not claim more than was measured, so a step whose reader was

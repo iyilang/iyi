@@ -17,6 +17,7 @@
 # 14. Select taking ready arm, parked send arm winning, select with else.
 # 15. Typed group returning tuple on success and error on failure.
 # 16. Dynamic group keeping general form.
+# 17. A task and a proc capturing a `case` branch's `it` at the branch's type.
 
 def read_teb_tls_slot : UInt64
   slot = uninitialized UInt64
@@ -529,5 +530,43 @@ while round < 3
   round = round + 1
 end
 log_msg("dynamic group kept the general form\n")
+
+# 17. A task and a proc capturing a `case` branch's `it`. `it` was one
+# variable for the whole scope, and a captured variable is not narrowed, so
+# `in Int32 then g.spawn { total += it }` was refused over `(Int32 |
+# String)`, a proc's `->{ it + 1 }` over `String#+`, and so was every later
+# `case` in the scope that read `it` without capturing it.
+log_msg("step 17: a captured it\n")
+
+def int_or_text(n : Int32) : Int32 | String
+  n.odd? ? "s#{n}" : n
+end
+
+def captured_total(n : Int32) : Int32
+  total = 0
+  group do |g|
+    case int_or_text(n)
+    in Int32  then g.spawn { total += it }
+    in String then g.spawn { total += it.size }
+    end
+  end
+  case int_or_text(n + 1)
+  in Int32  then total + it
+  in String then total + it.size
+  end
+end
+
+fail("captured it: a task answered #{captured_total(10)} for 10 and s11") unless captured_total(10) == 13
+fail("captured it: a task answered #{captured_total(11)} for s11 and 12") unless captured_total(11) == 15
+bump = case int_or_text(6)
+       in Int32  then -> { it + 1 }
+       in String then -> { it.size }
+       end
+after = case int_or_text(7)
+        in Int32  then it + 1
+        in String then it.size
+        end
+fail("captured it: a proc answered #{bump.call}, the case after it #{after}") unless bump.call == 7 && after == 2
+log_msg("a task and a proc captured a branch's it at its type\n")
 
 log_msg("runtime exercise: every property held\n")

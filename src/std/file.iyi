@@ -5,8 +5,7 @@
 
 module std/file
 
-import std/path
-using std/path::{Path}
+import std/path::{Path}
 
 {% if flag?(:darwin) %}
   lib LibC
@@ -37,9 +36,11 @@ using std/path::{Path}
       st_qspare1 : Int64
     end
 
-    fun stat = stat64(path : UInt8*, buf : Stat*) : Int32
+    # `Void*`, as std/process binds the same symbol: one C symbol bound
+    # with two signatures is refused, and a program importing both did not
+    # compile on darwin.
+    fun stat = stat64(path : UInt8*, buf : Void*) : Int32
     fun lstat = lstat64(path : UInt8*, buf : Stat*) : Int32
-    fun fstat = fstat64(fd : Int32, buf : Stat*) : Int32
     fun rename(oldpath : UInt8*, newpath : UInt8*) : Int32
     fun link(oldpath : UInt8*, newpath : UInt8*) : Int32
     fun symlink(target : UInt8*, linkpath : UInt8*) : Int32
@@ -51,6 +52,11 @@ using std/path::{Path}
     fun ftruncate(fd : Int32, length : Int64) : Int32
     fun access(path : UInt8*, mode : Int32) : Int32
     fun utimes(path : UInt8*, times : Void*) : Int32
+    fun arc4random_buf(buffer : Void*, count : UInt64) : Void
+    fun lseek(fd : Int32, offset : Int64, whence : Int32) : Int64
+    fun flock(fd : Int32, operation : Int32) : Int32
+    # Where this thread's errno is, as std/udp binds it.
+    fun __error : Int32*
   end
 {% elsif flag?(:win32) %}
   # The calls below name this `Std::File::LibKernel32` in full, the way the
@@ -121,11 +127,21 @@ using std/path::{Path}
     fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun GetFileInformationByHandle(handle : Void*, info : BY_HANDLE_FILE_INFORMATION*) : Int32
+    fun GetFileInformationByHandleEx(handle : Void*, info_class : Int32, info : Void*, size : UInt32) : Int32
+    fun FindFirstFileW(name : UInt16*, data : Void*) : Void*
+    fun SetFileInformationByHandle(handle : Void*, info_class : Int32, info : Void*, size : UInt32) : Int32
+    fun FindClose(handle : Void*) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun SetFileTime(handle : Void*, creation : Int64*, access : Int64*, write : Int64*) : Int32
     fun GetSystemTimeAsFileTime(time : Int64*) : Void
     fun SetFilePointerEx(handle : Void*, distance : Int64, new_pointer : Int64*, method : Int32) : Int32
     fun SetEndOfFile(handle : Void*) : Int32
+    # `IyiIO#flock_*`: a lock over every byte, its offset in the zeroed
+    # OVERLAPPED.
+    fun LockFileEx(handle : Void*, flags : UInt32, reserved : UInt32, low : UInt32, high : UInt32, overlapped : Void*) : Int32
+    fun UnlockFileEx(handle : Void*, reserved : UInt32, low : UInt32, high : UInt32, overlapped : Void*) : Int32
+    # Where Windows says scratch files go, which `Dir.tempdir` asks too.
+    fun GetTempPathW(buffer_count : Int32, buffer : UInt16*) : Int32
     # What a link points at, and where a path really goes. Both were
     # missing, and both answers were made up rather than asked for:
     # `readlink` returned the empty string for every link on this
@@ -282,6 +298,9 @@ using std/path::{Path}
       SYS_GETCWD     =  79_i64
       SYS_GETPID     =  39_i64
       SYS_UTIMENSAT  = 280_i64
+      SYS_GETRANDOM  = 318_i64
+      SYS_LSEEK      =   8_i64
+      SYS_FLOCK      =  73_i64
     {% else %}
       SYS_NEWFSTATAT =  79_i64
       SYS_FSTAT      =  80_i64
@@ -297,6 +316,9 @@ using std/path::{Path}
       SYS_GETCWD     =  17_i64
       SYS_GETPID     = 172_i64
       SYS_UTIMENSAT  =  88_i64
+      SYS_GETRANDOM  = 278_i64
+      SYS_LSEEK      =  62_i64
+      SYS_FLOCK      =  32_i64
     {% end %}
 
     def self.stat(path : UInt8*, buf : Stat*) : Int32
@@ -411,6 +433,9 @@ using std/path::{Path}
         end
         st = uninitialized Stat
         return Pointer(UInt8).new(0_u64) if lstat(c_bytes(candidate), pointerof(st)) != 0
+        # Anything but a directory ends the path: `f/`, `f/.` and `f/..`
+        # of a file are ENOTDIR, as libc answers, not `f` and its parent.
+        return Pointer(UInt8).new(0_u64) if rest.bytesize > 0 && (st.st_mode & 0o170000) != 0o040000
         done = candidate
       end
       done = "/" if done.bytesize == 0
@@ -451,7 +476,7 @@ class ::File
     SEPARATOR        = '/'
     SEPARATOR_STRING = "/"
   {% end %}
-  using std/path::{Path}
+  import std/path::{Path}
 
   private def self.sys_path(path : String) : UInt8*
     n = path.bytesize
@@ -480,8 +505,8 @@ class ::File
     # 0x200: without the second, a message with an insert in it fails rather
     # than printing the placeholder. Windows ends these sentences with CRLF
     # and sometimes a trailing space, which is a line break in the middle of
-    # a panic, so the tail comes off.
-    private def self.win_error : String
+    # a panic, so the tail comes off. `std/dir`'s refusals say it too.
+    def self.win_error : String
       code = Std::File::LibKernel32.GetLastError
       room = 1024
       wide = Pointer(UInt16).malloc(room.to_u64)
@@ -676,8 +701,11 @@ class ::File
       @permissions.owner_execute?
     end
 
+    # An identity of 0 is none: Windows answers a path it could not open
+    # with the attributes alone (`info?`), and two such files - different
+    # sizes, different contents - were the same file.
     def same_file?(other : Info) : Bool
-      @dev == other.dev && @ino == other.ino
+      @ino != 0_u64 && @dev == other.dev && @ino == other.ino
     end
   end
 
@@ -770,7 +798,26 @@ class ::File
       data = uninitialized Std::File::LibKernel32::WIN32_FILE_ATTRIBUTE_DATA
       # 0 is GetFileExInfoStandard, the one level this call answers.
       if Std::File::LibKernel32.GetFileAttributesExW(wpath, 0, pointerof(data)) == 0
-        return nil
+        refused = Std::File::LibKernel32.GetLastError
+        # A DOS device - `NUL`, `CON`, a port that is there - refuses it as
+        # a parameter (ERROR_INVALID_PARAMETER, 87), and `info?` answered
+        # nil about the `NUL` `exists?` said was there. The prelude's
+        # attributes open the device to see, and what is there is a
+        # character device: no size, time or identity, mode 0o666 as
+        # `/dev/null`.
+        if refused == 87 && __iyi_path_attributes(sys_path(p)) != -1
+          return Info.new(0_i64, Permissions.new(0o666), Type::CharacterDevice, Flags.new(0), 0_i64, "0", "0")
+        end
+        # A file another process holds without sharing refuses the call
+        # (ERROR_SHARING_VIOLATION, 32), and `info` said "File not found"
+        # about `pagefile.sys`. Its directory entry carries the same
+        # fields, in the same order, for its first 36 bytes.
+        return nil unless refused == 32
+        entry = Pointer(UInt8).malloc(592_u64) # WIN32_FIND_DATAW
+        found = Std::File::LibKernel32.FindFirstFileW(wpath, entry.as(Void*))
+        return nil if found.address == 0xFFFFFFFFFFFFFFFF_u64
+        Std::File::LibKernel32.FindClose(found)
+        pointerof(data).as(Pointer(UInt8)).copy_from(entry, 36)
       end
 
       attrs = data.dwFileAttributes
@@ -783,28 +830,61 @@ class ::File
       # FILE_FLAG_OPEN_REPARSE_POINT (0x200000) off resolves a symlink to its
       # target, which is the whole difference between `stat` and `lstat` here.
       # A path another process holds exclusively opens for neither, and then
-      # the attributes above are the whole answer and the identity stays 0 —
-      # `same_file?` reads two of those as the same file, which is as far as
-      # attribute data can go.
+      # the attributes above are the whole answer and the identity stays 0,
+      # which `same_file?` reads as no identity at all.
       dev = 0_i64
       ino = 0_u64
+      opened = false
+      tag = 0_u32
       open_flags = follow_symlinks ? 0x2000000 : 0x2200000
       handle = Std::File::LibKernel32.CreateFileW(wpath, 0, 0x7, Pointer(Void).new(0_u64), 3, open_flags, Pointer(Void).new(0_u64))
       if handle.address != 0xFFFFFFFFFFFFFFFF_u64
         by_handle = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
         if Std::File::LibKernel32.GetFileInformationByHandle(handle, pointerof(by_handle)) != 0
+          opened = true
           attrs = by_handle.dwFileAttributes
           size = ((by_handle.nFileSizeHigh.to_u64 << 32) | by_handle.nFileSizeLow.to_u64).to_i64
           write_ticks = ((by_handle.ftLastWriteTimeHigh.to_u64 << 32) | by_handle.ftLastWriteTimeLow.to_u64).to_i64
           dev = by_handle.dwVolumeSerialNumber.to_i64
           ino = (by_handle.nFileIndexHigh.to_u64 << 32) | by_handle.nFileIndexLow.to_u64
+          # FileAttributeTagInfo (9): the attributes, then the tag.
+          if !follow_symlinks && (attrs & 0x400_u32) != 0_u32
+            tag_info = Pointer(UInt32).malloc(2_u64)
+            if Std::File::LibKernel32.GetFileInformationByHandleEx(handle, 9, tag_info.as(Void*), 8_u32) != 0
+              tag = tag_info[1]
+            end
+          end
         end
         Std::File::LibKernel32.CloseHandle(handle)
       end
 
-      # A reparse point is read first: a directory symlink carries the
-      # directory attribute too.
-      file_type = if (attrs & 0x400_u32) != 0_u32
+      # A reparse point is a link only by its tag. Every one used to be
+      # `Symlink`: an app execution alias - `WindowsApps\*.exe` - and a
+      # cloud placeholder, which OneDrive makes of every file it has not
+      # downloaded, answered `file? false`, and `readlink` then refused
+      # them as "not a link". A followed open that succeeded has resolved
+      # every link, so a reparse bit left on its answer is not one; an
+      # unfollowed open, or none, asks the tag: IO_REPARSE_TAG_SYMLINK,
+      # _MOUNT_POINT (a junction) and _LX_SYMLINK (WSL's) are links.
+      link = false
+      if (attrs & 0x400_u32) != 0_u32 && !(follow_symlinks && opened)
+        if !opened
+          entry = Pointer(UInt8).malloc(592_u64) # WIN32_FIND_DATAW
+          found = Std::File::LibKernel32.FindFirstFileW(wpath, entry.as(Void*))
+          if found.address != 0xFFFFFFFFFFFFFFFF_u64
+            Std::File::LibKernel32.FindClose(found)
+            tag = (entry + 36).as(Pointer(UInt32)).value # dwReserved0
+          end
+        end
+        link = tag == 0xA000000C_u32 || tag == 0xA0000003_u32 || tag == 0xA000001D_u32
+      end
+      # A followed link whose target would not open is a link to nothing
+      # this process can stat, which POSIX `stat` answers with an error.
+      return nil if link && follow_symlinks
+
+      # The link is read first: a directory symlink carries the directory
+      # attribute too.
+      file_type = if link
                     Type::Symlink
                   elsif (attrs & 0x10_u32) != 0_u32
                     Type::Directory
@@ -857,9 +937,51 @@ class ::File
     inf ? inf.symlink? : false
   end
 
+  {% if flag?(:win32) %}
+    # Windows' answer to POSIX `access`: open the path for *access* and see.
+    # The mode `info` reports is made up from the attributes - 0o644 or
+    # 0o755 and the read-only bit - and an ACL is not in it, so a file
+    # this user was denied answered `readable? true` and the read then
+    # panicked. A path another process holds without sharing refuses every
+    # open (ERROR_SHARING_VIOLATION, 32), which says nothing about the
+    # permission, and is answered from the attributes as before.
+    private def self.win_opens?(path : String, access : Int32) : Bool?
+      wide = __iyi_wide_path(sys_path(path))
+      return false if wide.address == 0_u64
+      # Every share right and OPEN_EXISTING, opened the way `File.read`
+      # and `File.write` open it: BACKUP_SEMANTICS only for a directory,
+      # which opens no other way. On a file it would let a process holding
+      # the backup and restore privileges - an elevated administrator's,
+      # a CI runner's - past the ACL, and answer yes about a file the
+      # program's own read is then refused.
+      attributes = Std::File::LibKernel32.GetFileAttributesW(wide)
+      flags = attributes != -1 && (attributes & 0x10) != 0 ? 0x2000000 : 0x80
+      handle = Std::File::LibKernel32.CreateFileW(wide, access, 0x7, Pointer(Void).new(0_u64), 3, flags, Pointer(Void).new(0_u64))
+      if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+        error = Std::File::LibKernel32.GetLastError
+        return nil if error == 32
+        return false unless error == 1920
+        # ERROR_CANT_ACCESS_FILE: an app execution alias - `winget.exe`,
+        # `python.exe` under WindowsApps - which the file system will not
+        # open as data and `CreateProcess` runs. It answered not readable
+        # and not executable of a program `Process.run` ran. The alias
+        # itself is opened instead (FILE_FLAG_OPEN_REPARSE_POINT).
+        handle = Std::File::LibKernel32.CreateFileW(wide, access, 0x7, Pointer(Void).new(0_u64), 3, flags | 0x200000, Pointer(Void).new(0_u64))
+        return false if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+      end
+      Std::File::LibKernel32.CloseHandle(handle)
+      true
+    end
+  {% end %}
+
   def self.readable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 4) == 0
+    {% elsif flag?(:win32) %}
+      opened = win_opens?(path.to_s, -2147483648) # GENERIC_READ
+      return opened unless opened.nil?
+      inf = info?(path)
+      inf ? inf.readable? : false
     {% else %}
       inf = info?(path)
       inf ? inf.readable? : false
@@ -869,15 +991,32 @@ class ::File
   def self.writable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 2) == 0
+    {% elsif flag?(:win32) %}
+      opened = win_opens?(path.to_s, 0x40000000) # GENERIC_WRITE
+      return opened unless opened.nil?
+      inf = info?(path)
+      inf ? inf.writable? : false
     {% else %}
       inf = info?(path)
       inf ? inf.writable? : false
     {% end %}
   end
 
+  # On Windows a file runs by its extension, one of PATHEXT's - what cmd
+  # and `CreateProcess`'s search go by - and a directory is searchable
+  # when it can be read. `cmd.exe` answered false: the made-up mode gave
+  # the execute bit to directories alone.
   def self.executable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 1) == 0
+    {% elsif flag?(:win32) %}
+      inf = info?(path)
+      return false unless inf
+      return readable?(path) if inf.directory?
+      extension = extname(path).upcase
+      return false if extension.empty?
+      pathext = Program.env("PATHEXT") || ".COM;.EXE;.BAT;.CMD"
+      pathext.upcase.split(';').includes?(extension) && readable?(path)
     {% else %}
       inf = info?(path)
       inf ? inf.executable? : false
@@ -919,7 +1058,21 @@ class ::File
   # microseconds, zero.
   def self.touch(path : String | Path, time : Int64 = 0_i64) : Nil
     p = path.to_s
-    File.write(p, "") unless File.exists?(p)
+    {% if flag?(:win32) %}
+      # A FILETIME counts 100-nanosecond ticks from 1601 up to 2^63, the
+      # year 30828, and a tick count of 0 is "leave the time as it is".
+      # A second past that range overflowed the count below: measured,
+      # `touch(path, 1_000_000_000_000)` panicked "arithmetic overflow",
+      # after the file was made. Refused first, and by name.
+      if time < -11644473599_i64 || time > 910692730085_i64
+        raise "Cannot touch #{p}: #{time} is not a second a Windows file time holds, " \
+              "which runs from -11644473599 (1601) to 910692730085 (30828)"
+      end
+    {% end %}
+    # Made only when `info?` finds nothing there. `exists?` opened the
+    # file to read, so a file this user may write but not read was
+    # "missing", and the write that made it emptied it.
+    File.write(p, "") if info?(p).nil?
     {% if flag?(:linux) %}
       if Std::File::LibC.utimensat(sys_path(p), time) != 0
         raise "Cannot touch #{p}"
@@ -970,6 +1123,51 @@ class ::File
     true
   end
 
+  {% if flag?(:win32) %}
+    # A destination some process has open refuses `MoveFileExW` with
+    # ERROR_ACCESS_DENIED - one this program opened too - where POSIX
+    # `rename` replaces it and the open handle keeps the old file. So the
+    # pattern every config writer uses, write a temporary file and rename
+    # it over the real one, panicked on Windows whenever a reader had the
+    # file. FileRenameInfoEx (22) with FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+    # and _POSIX_SEMANTICS (0x1 | 0x2) is POSIX's rename, on NTFS since
+    # Windows 10 1709; a volume that does not have it refuses, and the
+    # refusal stands. The name is the full path, `\\?\` form past MAX_PATH:
+    # FILE_RENAME_INFO is { UInt32 flags, 4 bytes padding, HANDLE root,
+    # UInt32 length in bytes, UInt16 name[] } on x64.
+    private def self.rename_posix(old_wide : UInt16*, new_path : String) : Bool
+      target = __iyi_wide_path(sys_path(expand_path(new_path)))
+      return false if target.address == 0_u64
+      chars = 0
+      while target[chars] != 0_u16
+        chars = chars + 1
+      end
+      # DELETE (0x10000), every share right, OPEN_EXISTING, a directory or a
+      # link opened as itself (BACKUP_SEMANTICS | OPEN_REPARSE_POINT).
+      handle = Std::File::LibKernel32.CreateFileW(old_wide, 0x10000, 0x7, Pointer(Void).new(0_u64), 3, 0x2200000, Pointer(Void).new(0_u64))
+      return false if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+      # And FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE (0x40), Windows 10
+      # 1809's: a destination read-only and open refused this too, and
+      # the attribute's retry in `rename` cannot help while it is open -
+      # measured, "Access is denied" where either alone was replaced. A
+      # system without the flag refuses it as a parameter
+      # (ERROR_INVALID_PARAMETER, 87) and is asked without it.
+      size = 20 + chars * 2 + 2
+      info = Pointer(UInt8).malloc(size.to_u64)
+      info.as(Pointer(UInt32)).value = 0x43_u32
+      (info + 8).as(Pointer(UInt64)).value = 0_u64
+      (info + 16).as(Pointer(UInt32)).value = (chars * 2).to_u32
+      (info + 20).as(Pointer(UInt16)).copy_from(target, chars + 1)
+      done = Std::File::LibKernel32.SetFileInformationByHandle(handle, 22, info.as(Void*), size.to_u32) != 0
+      if !done && Std::File::LibKernel32.GetLastError == 87
+        info.as(Pointer(UInt32)).value = 0x3_u32
+        done = Std::File::LibKernel32.SetFileInformationByHandle(handle, 22, info.as(Void*), size.to_u32) != 0
+      end
+      Std::File::LibKernel32.CloseHandle(handle)
+      done
+    end
+  {% end %}
+
   def self.rename(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
     n = new_path.to_s
@@ -987,11 +1185,86 @@ class ::File
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
         raise "Cannot rename #{o} to #{n}: a path is not valid UTF-8"
       end
+      # A directory onto a name that is no directory is refused, as POSIX
+      # `rename` refuses it (ENOTDIR): MoveFileExW replaced the file with
+      # the directory - measured, `File.rename("d", "f.txt")` left `f.txt`
+      # a directory and the file's contents gone, where Linux said "Cannot
+      # rename". Only a directory itself is asked about; a link to one, a
+      # reparse point, is left to the rename.
+      moving = Std::File::LibKernel32.GetFileAttributesW(old_wide)
+      if moving != -1 && (moving & 0x10) != 0 && (moving & 0x400) == 0
+        onto = Std::File::LibKernel32.GetFileAttributesW(new_wide)
+        raise "Cannot rename #{o} to #{n}: #{n} is not a directory" if onto != -1 && (onto & 0x10) == 0
+      end
+      # MoveFileExW replaced the second link with the first, and the first
+      # name was gone: measured, renaming `a` onto its own hard link `b`
+      # left `b` alone, where POSIX leaves both.
+      return if two_links?(old_wide, new_wide)
       if Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) == 0
-        raise "Cannot rename #{o} to #{n}: #{win_error}"
+        # A destination that exists *and* is read-only refuses the
+        # replacement with ERROR_ACCESS_DENIED, where posix `rename`
+        # asks the directory and overwrites whatever mode the target
+        # had — measured, renaming onto a name `File.chmod 0o444` had
+        # marked died here. The attribute comes off for one retry and
+        # goes back when that still refuses, the same shape
+        # `__iyi_unlink` and `Dir.delete` have.
+        replaced = false
+        code = Std::File::LibKernel32.GetLastError
+        refusal = win_error
+        if code == 5
+          attributes = Std::File::LibKernel32.GetFileAttributesW(new_wide)
+          if attributes != -1 && (attributes & 1) != 0 &&
+             Std::File::LibKernel32.SetFileAttributesW(new_wide, attributes - 1) != 0
+            replaced = Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) != 0
+            Std::File::LibKernel32.SetFileAttributesW(new_wide, attributes) unless replaced
+          end
+          replaced = replaced || rename_posix(old_wide, n)
+        end
+        raise "Cannot rename #{o} to #{n}: #{refusal}" unless replaced
       end
     {% end %}
   end
+
+  {% if flag?(:win32) %}
+    # Whether *new_wide* is its file's own hard link beside *old_wide*:
+    # two directory entries of one file, which POSIX `rename` leaves as
+    # they are. Opened as themselves, they answer one volume and file
+    # index; and a handle's final path is the name it was opened by, in
+    # the case the directory keeps, so two links answer two paths where a
+    # name and its spelling in another case answer one.
+    private def self.two_links?(old_wide : UInt16*, new_wide : UInt16*) : Bool
+      nothing = Pointer(Void).new(0_u64)
+      one = Std::File::LibKernel32.CreateFileW(old_wide, 0, 0x7, nothing, 3, 0x2200000, nothing)
+      return false if one.address == 0xFFFFFFFFFFFFFFFF_u64
+      other = Std::File::LibKernel32.CreateFileW(new_wide, 0, 0x7, nothing, 3, 0x2200000, nothing)
+      links = false
+      if other.address != 0xFFFFFFFFFFFFFFFF_u64
+        mine = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
+        theirs = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
+        if Std::File::LibKernel32.GetFileInformationByHandle(one, pointerof(mine)) != 0 &&
+           Std::File::LibKernel32.GetFileInformationByHandle(other, pointerof(theirs)) != 0 &&
+           mine.nNumberOfLinks > 1_u32 && mine.dwVolumeSerialNumber == theirs.dwVolumeSerialNumber &&
+           mine.nFileIndexHigh == theirs.nFileIndexHigh && mine.nFileIndexLow == theirs.nFileIndexLow
+          room = 32768
+          one_name = Pointer(UInt16).malloc(room.to_u64)
+          other_name = Pointer(UInt16).malloc(room.to_u64)
+          one_size = Std::File::LibKernel32.GetFinalPathNameByHandleW(one, one_name, room, 0)
+          other_size = Std::File::LibKernel32.GetFinalPathNameByHandleW(other, other_name, room, 0)
+          if one_size > 0 && one_size < room && other_size > 0 && other_size < room
+            links = one_size != other_size
+            index = 0
+            while !links && index < one_size
+              links = one_name[index] != other_name[index]
+              index = index + 1
+            end
+          end
+        end
+        Std::File::LibKernel32.CloseHandle(other)
+      end
+      Std::File::LibKernel32.CloseHandle(one)
+      links
+    end
+  {% end %}
 
   def self.link(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
@@ -1026,16 +1299,29 @@ class ::File
       # target is a directory, which Windows decides when the link is made
       # rather than reading it off the target the way posix does.
       # INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF, which is what that DWORD
-      # spells as the Int32 it is declared as. The target's attributes are
-      # read off the wide path already in hand rather than through the
-      # prelude's `__iyi_path_attributes`, which would convert the same string
-      # a second time to arrive at the same pointer.
-      old_wide = __iyi_wide_path(sys_path(o))
+      # spells as the Int32 it is declared as. A relative target is the
+      # link's directory's name for it, and it is read from there: read
+      # from the working directory, a link made in another directory took
+      # the kind of whatever this one held under that name, and a file
+      # link to a directory cannot be listed through. (Found by reading;
+      # no symlink could be made where this was written to measure it.)
+      # A `/` in the target is written `\`: the link keeps the target as
+      # given, and Go's `os.Symlink` converts it the same way because "'/'
+      # does not work in link's content". Passed as written, a link to
+      # `sub/t.txt` would point at nothing. (Not measured either, for the
+      # same reason.)
+      target = sys_path(o)
+      i = 0
+      while i < o.bytesize
+        target[i] = 92_u8 if target[i] == 47_u8
+        i = i + 1
+      end
+      old_wide = __iyi_wide_path(target)
       new_wide = __iyi_wide_path(sys_path(n))
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
         raise "Cannot symlink #{o} to #{n}: the path is not valid UTF-8"
       end
-      target_attrs = Std::File::LibKernel32.GetFileAttributesW(old_wide)
+      target_attrs = __iyi_path_attributes(sys_path(join(dirname(n), o)))
       link_flags = 0x2_u32
       if target_attrs != -1 && (target_attrs & 0x10) != 0
         link_flags = link_flags | 0x1_u32
@@ -1096,8 +1382,21 @@ class ::File
       target = Pointer(UInt16).malloc((chars + 1).to_u64)
       target.copy_from((buffer + (names_at + name_offset).to_i64).as(UInt16*), chars)
       target[chars] = 0_u16
+      # The NT prefix `\??\` off: a drive after it is a drive (`C:\x`), a
+      # share after it `\??\UNC\server\share` is `\\server\share`, and
+      # anything else - a volume's GUID path - keeps the prefix in its
+      # Win32 spelling, `\\?\Volume{...}\`. It came off whatever followed,
+      # and a junction to a volume GUID read as the relative, unusable
+      # `Volume{...}\x`.
       if chars >= 4 && target[0] == 92_u16 && target[1] == 63_u16 && target[2] == 63_u16 && target[3] == 92_u16
-        target = target + 4
+        if chars >= 6 && target[5] == 58_u16
+          target = target + 4
+        elsif chars >= 8 && target[4] == 85_u16 && target[5] == 78_u16 && target[6] == 67_u16 && target[7] == 92_u16
+          target = target + 6
+          target[0] = 92_u16
+        else
+          target[1] = 92_u16
+        end
       end
       size = __iyi_utf8_size_from_wide(target)
       raise "Cannot readlink: #{p}: the target Windows stored is not convertible to UTF-8" if size <= 0
@@ -1137,6 +1436,12 @@ class ::File
       raise "Cannot resolve realpath for #{p}: the path is not valid UTF-8" if wide.address == 0_u64
       handle = Std::File::LibKernel32.CreateFileW(wide, 0, 0x7, Pointer(Void).new(0_u64),
         3, 0x2000000, Pointer(Void).new(0_u64))
+      if handle.address &+ 1_u64 == 0_u64 && Std::File::LibKernel32.GetLastError == 1920
+        # An app execution alias, which does not open through: its own
+        # path is the one there is (see `win_opens?`).
+        handle = Std::File::LibKernel32.CreateFileW(wide, 0, 0x7, Pointer(Void).new(0_u64),
+          3, 0x2000000 | 0x200000, Pointer(Void).new(0_u64))
+      end
       raise "Cannot resolve realpath for #{p}: #{win_error}" if handle.address &+ 1_u64 == 0_u64
       room = 32768
       full = Pointer(UInt16).malloc(room.to_u64)
@@ -1145,8 +1450,10 @@ class ::File
       raise "Cannot resolve realpath for #{p}: #{win_error}" if written <= 0
       raise "Cannot resolve realpath for #{p}: the resolved path is #{written} characters, past the #{room} this asks for" if written >= room
       resolved = full
-      if written > 8 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16 && full[3] == 92_u16
-        if full[4] == 85_u16 && full[5] == 78_u16 && full[6] == 67_u16 && full[7] == 92_u16
+      # From four characters on: a drive's root is `\\?\C:\`, seven, and it
+      # kept the prefix, which `Path` then read as a share named `?`.
+      if written >= 4 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16 && full[3] == 92_u16
+        if written > 8 && full[4] == 85_u16 && full[5] == 78_u16 && full[6] == 67_u16 && full[7] == 92_u16
           resolved = full + 6
           resolved[0] = 92_u16
           resolved[1] = 92_u16
@@ -1179,6 +1486,13 @@ class ::File
       # `File.chmod(path, 0o444)` left `File.writable?` answering true and
       # the next `File.write` succeeded, so a program that asked for a
       # file to be unwritable was told it had been.
+      #
+      # On a directory the bit is not a write bit, and Windows has none:
+      # measured, a directory carrying it still took a new file, gave one
+      # up and was renamed, and refused only its own removal (which
+      # `Dir.delete` clears it for). It is set all the same, for the
+      # scripts that call this on any path; `info` then reports 0o555 for
+      # a directory that `writable?` rightly calls writable.
       attrs = __iyi_path_attributes(sys_path(p))
       raise "Cannot chmod #{p}: #{win_error}" if attrs == -1
       wanted = mode & 0o200 == 0 ? attrs | 0x1 : attrs & ~0x1
@@ -1288,57 +1602,312 @@ class ::File
       end
       i = i + 1
     end
+    # A last line keeps a `\r` no `\n` follows, as `each_line` keeps it.
     if line_start < len
       rem_len = len - line_start
-      rem_len = rem_len - 1 if rem_len > 0 && ptr[line_start + rem_len - 1] == 13_u8
       res << String.new(rem_len) { |t| t.copy_from(ptr + line_start, rem_len) }
     end
     res
   end
 
+  # A line at a time, off the file as it is read: it read the whole file
+  # into an array of its lines first, so a log of any size was the
+  # program's memory twice over before the first line was seen. Lines as
+  # `read_lines` gives them, without their `\n` or a `\r` before it.
   def self.each_line(path : String | Path, &block : String -> Nil) : Nil
-    lines = read_lines(path)
-    lines.each do |l|
-      yield l
+    raise "cannot read #{path}" unless File.exists?(path.to_s)
+    # Asked before the open: Windows refuses to open a directory at all,
+    # with the open's own sentence, where Linux opens it and fails the read.
+    raise "cannot read #{path}: it is a directory, or the read failed" if File.directory?(path.to_s)
+    io = File.open(path.to_s, "r", 65536)
+    defer io.close
+    while line = io.read_line(chomp: true)
+      yield line
     end
+    raise "cannot read #{path}: it is a directory, or the read failed" if io.read_failed?
   end
 
+  # Whether *path* matches the shell-style *pattern*: `*` any run of
+  # characters within a segment, `**` any run of segments (a whole
+  # segment of the pattern), `?` one character but a separator, `[abc]`,
+  # `[a-z]` and `[^...]` one character of a set, `{a,b}` one of the
+  # branches (nested to ten), and `\` the next character literally. Only
+  # `/` in the pattern matches a separator. On Windows a name's `\` is a
+  # separator as well, and a pattern's `\` is one too rather than an
+  # escape: `Dir.glob` answers with either.
+  #
+  # The other library's algorithm (a port of the glob-match crate, after
+  # research.swtch.com/glob), linear in the name but for braces. This
+  # had `*` and `?` alone, byte by byte: `*` crossed separators, `?` took
+  # half of a two-byte character, `[a]` and `{a,b}` were literal text,
+  # and `*a*a*a*a*a*a*a*a*a*a*b` against forty `a`s did not finish.
   def self.match?(path : String | Path, pattern : String) : Bool
-    glob_match_at(path.to_s, 0, pattern, 0)
+    stack = Pointer(Int32).malloc(20_u64)
+    glob_from(pattern, path.to_s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, stack, 0)
   end
 
-  private def self.glob_match_at(name : String, ni : Int32, pattern : String, pi : Int32) : Bool
-    nlen = name.bytesize
-    plen = pattern.bytesize
-    nptr = name.to_unsafe
-    pptr = pattern.to_unsafe
-    while pi < plen
-      pc = pptr[pi]
-      if pc == 42_u8
-        while pi < plen && pptr[pi] == 42_u8
-          pi = pi + 1
-        end
-        return true if pi == plen
-        while ni <= nlen
-          return true if glob_match_at(name, ni, pattern, pi)
-          ni = ni + 1
-        end
-        return false
-      elsif pc == 63_u8
-        return false if ni >= nlen
-        ni = ni + 1
-        pi = pi + 1
-      else
-        return false if ni >= nlen || nptr[ni] != pc
-        ni = ni + 1
-        pi = pi + 1
-      end
+  private def self.glob_sep?(b : UInt8) : Bool
+    {% if flag?(:win32) %}
+      b == 47_u8 || b == 92_u8
+    {% else %}
+      b == 47_u8
+    {% end %}
+  end
+
+  # The character at *at* and where the next begins; a byte that does not
+  # start one is U+FFFD and one byte wide.
+  private def self.glob_char(s : UInt8*, n : Int32, at : Int32) : {Int32, Int32}
+    b = s[at].to_i32
+    return {b, at + 1} if b < 0x80
+    width = b >= 0xF0 ? 4 : (b >= 0xE0 ? 3 : (b >= 0xC0 ? 2 : 0))
+    return {0xFFFD, at + 1} if width == 0 || at + width > n
+    value = width == 2 ? b & 0x1F : (width == 3 ? b & 0x0F : b & 0x07)
+    k = 1
+    while k < width
+      c = s[at + k].to_i32
+      return {0xFFFD, at + 1} if c & 0xC0 != 0x80
+      value = value * 64 + (c & 0x3F)
+      k = k + 1
     end
-    ni == nlen
+    {value, at + width}
   end
 
-  @@temp_counter = 1000_u64
+  # The pattern's byte at *at*, an escape read: the byte it stands for and
+  # the index of its last byte.
+  private def self.glob_unescape(g : UInt8*, n : Int32, at : Int32) : {UInt8, Int32}
+    c = g[at]
+    {% if !flag?(:win32) %}
+      if c == 92_u8
+        raise "File.match?: a pattern ends in an escape with nothing to escape" if at + 1 >= n
+        e = g[at + 1]
+        e = e == 97_u8 ? 97_u8 : (e == 98_u8 ? 8_u8 : (e == 110_u8 ? 10_u8 : (e == 114_u8 ? 13_u8 : (e == 116_u8 ? 9_u8 : e))))
+        return {e, at + 1}
+      end
+    {% end %}
+    {c, at}
+  end
 
+  # One character of a class: its code point and the index after it.
+  private def self.glob_class_char(g : UInt8*, n : Int32, at : Int32) : {Int32, Int32}
+    c, last = glob_unescape(g, n, at)
+    return {c.to_i32, last + 1} if c < 0x80_u8
+    glob_char(g, n, last)
+  end
+
+  # Skips the rest of the brace branch being matched, to past its `}`.
+  private def self.glob_skip_branch(g : UInt8*, n : Int32, gi : Int32, depth : Int32) : {Int32, Int32}
+    in_brackets = false
+    end_depth = depth - 1
+    while gi < n
+      c = g[gi]
+      if c == 123_u8 && !in_brackets
+        depth = depth + 1
+      elsif c == 125_u8 && !in_brackets
+        depth = depth - 1
+        return {gi + 1, depth} if depth == end_depth
+      elsif c == 91_u8 && !in_brackets
+        in_brackets = true
+      elsif c == 93_u8
+        in_brackets = false
+      elsif c == 92_u8
+        gi = gi + 1
+      end
+      gi = gi + 1
+    end
+    {gi, depth}
+  end
+
+  # The match from glob index *gi* and path index *pi*, the brace stack's
+  # first *size* entries (an opening brace's index, then its branch's) the
+  # braces being matched. A star's resumption point is `w_*`, the last
+  # globstar's `s_*`; a path index of zero there means none.
+  private def self.glob_from(pattern : String, path : String, match_start : Int32, gi : Int32, pi : Int32, depth : Int32, w_gi : Int32, w_pi : Int32, w_depth : Int32, s_gi : Int32, s_pi : Int32, s_depth : Int32, stack : Pointer(Int32), size : Int32) : Bool
+    g = pattern.to_unsafe
+    gn = pattern.bytesize
+    s = path.to_unsafe
+    sn = path.bytesize
+    while gi < gn || pi < sn
+      if gi < gn
+        c = g[gi]
+        if c == 42_u8
+          globstar = gi + 1 < gn && g[gi + 1] == 42_u8
+          if globstar
+            # `/**/**/` is one globstar.
+            k = gi + 2
+            while k + 4 <= gn && g[k] == 47_u8 && g[k + 1] == 42_u8 && g[k + 2] == 42_u8 && g[k + 3] == 47_u8
+              k = k + 3
+            end
+            k = k + 3 if k + 3 == gn && g[k] == 47_u8 && g[k + 1] == 42_u8 && g[k + 2] == 42_u8
+            gi = k - 2
+          end
+          w_gi = gi
+          w_pi = pi + 1
+          w_depth = depth
+          in_globstar = false
+          if globstar
+            gi = gi + 2
+            end_invalid = gi != gn
+            if (gi - match_start < 3 || g[gi - 3] == 47_u8) && (!end_invalid || g[gi] == 47_u8)
+              gi = gi + 1 if end_invalid
+              if pi == sn
+                w_pi = w_pi + 1
+              else
+                k = pi
+                while k < sn && !glob_sep?(s[k])
+                  k = k + 1
+                end
+                k = k + 1 if end_invalid || k != sn
+                w_pi = k
+                s_gi = w_gi
+                s_pi = w_pi
+                s_depth = w_depth
+              end
+              in_globstar = true
+            end
+          else
+            gi = gi + 1
+          end
+          if !in_globstar && pi < sn && glob_sep?(s[pi])
+            w_gi = s_gi
+            w_pi = s_pi
+            w_depth = s_depth
+          end
+          next
+        elsif c == 63_u8 && pi < sn
+          if !glob_sep?(s[pi])
+            gi = gi + 1
+            pi = glob_char(s, sn, pi)[1]
+            next
+          end
+        elsif c == 91_u8 && pi < sn
+          gi = gi + 1
+          negated = false
+          if gi < gn && g[gi] == 94_u8
+            negated = true
+            gi = gi + 1
+          end
+          first = true
+          hit = false
+          ch, next_pi = glob_char(s, sn, pi)
+          while gi < gn && (first || g[gi] != 93_u8)
+            low, gi = glob_class_char(g, gn, gi)
+            high = low
+            if gi + 1 < gn && g[gi] == 45_u8 && g[gi + 1] != 93_u8
+              high, gi = glob_class_char(g, gn, gi + 1)
+            end
+            hit = true if low <= ch && ch <= high
+            first = false
+          end
+          raise "File.match?: unterminated character set in #{pattern.inspect}" if gi >= gn
+          gi = gi + 1
+          if hit != negated
+            pi = next_pi
+            next
+          end
+        elsif c == 123_u8
+          # Back at a brace this match is inside: its branch continues.
+          at = 0
+          found = -1
+          while at < size
+            found = stack[at * 2 + 1] if stack[at * 2] == gi
+            at = at + 1
+          end
+          if found >= 0
+            gi = found
+            depth = depth + 1
+            next
+          end
+          return glob_brace(pattern, path, gi, pi, w_gi, w_pi, w_depth, s_gi, s_pi, s_depth, stack, size)
+        elsif (c == 125_u8 || c == 44_u8) && depth > 0
+          gi, depth = glob_skip_branch(g, gn, gi, depth)
+          next
+        elsif pi < sn
+          lit, last = glob_unescape(g, gn, gi)
+          hit = lit == 47_u8 ? glob_sep?(s[pi]) : s[pi] == lit
+          {% if flag?(:win32) %}
+            hit = glob_sep?(s[pi]) if lit == 92_u8
+          {% end %}
+          if hit
+            gi = last + 1
+            pi = pi + 1
+            if glob_sep?(lit)
+              w_gi = s_gi
+              w_pi = s_pi
+              w_depth = s_depth
+            end
+            next
+          end
+        end
+      end
+      # No match here: back to the last star, one character further on.
+      if w_pi > 0 && w_pi <= sn
+        gi = w_gi
+        pi = w_pi
+        depth = w_depth
+        next
+      end
+      return false
+    end
+    true
+  end
+
+  # Each branch of the brace at *open*, tried in turn with the state as it
+  # stands, the brace pushed so the branch's end finds its way back.
+  private def self.glob_brace(pattern : String, path : String, open : Int32, pi : Int32, w_gi : Int32, w_pi : Int32, w_depth : Int32, s_gi : Int32, s_pi : Int32, s_depth : Int32, stack : Pointer(Int32), size : Int32) : Bool
+    g = pattern.to_unsafe
+    gn = pattern.bytesize
+    depth = 0
+    in_brackets = false
+    branch = 0
+    gi = open
+    while gi < gn
+      c = g[gi]
+      if c == 123_u8 && !in_brackets
+        depth = depth + 1
+        branch = gi + 1 if depth == 1
+      elsif c == 125_u8 && !in_brackets
+        depth = depth - 1
+        if depth == 0
+          return true if glob_branch(pattern, path, open, branch, pi, w_gi, w_pi, w_depth, s_gi, s_pi, s_depth, stack, size)
+          break
+        end
+      elsif c == 44_u8 && depth == 1
+        return true if glob_branch(pattern, path, open, branch, pi, w_gi, w_pi, w_depth, s_gi, s_pi, s_depth, stack, size)
+        branch = gi + 1
+      elsif c == 91_u8 && !in_brackets
+        in_brackets = true
+      elsif c == 93_u8
+        in_brackets = false
+      elsif c == 92_u8
+        gi = gi + 1
+      end
+      gi = gi + 1
+    end
+    false
+  end
+
+  private def self.glob_branch(pattern : String, path : String, open : Int32, branch : Int32, pi : Int32, w_gi : Int32, w_pi : Int32, w_depth : Int32, s_gi : Int32, s_pi : Int32, s_depth : Int32, stack : Pointer(Int32), size : Int32) : Bool
+    raise "File.match?: braces nested past ten in #{pattern.inspect}" if size >= 10
+    stack[size * 2] = open
+    stack[size * 2 + 1] = branch
+    glob_from(pattern, path, branch, branch, pi, size + 1, w_gi, w_pi, w_depth, s_gi, s_pi, s_depth, stack, size + 1)
+  end
+
+  @@temp_counter = 0_u64
+
+  # A new, empty file in the temporary directory, and its path.
+  #
+  # Made with an exclusive create - `O_CREAT | O_EXCL`, `CREATE_NEW` on
+  # Windows - which fails when anything is at the path, a symlink
+  # included, rather than asked whether something is there and written
+  # after. The name was the process id and a counter, and the file was
+  # written wherever the path led if nothing was there when asked: a
+  # symlink planted at the next name in a shared `/tmp` between the
+  # question and the write sent an upload wherever its owner pointed it.
+  # The name is sixteen hex digits of the system's randomness now, so it
+  # cannot be planted in advance either; Windows' `%TEMP%` belongs to the
+  # user, and there the create's refusal is the guarantee and the name
+  # needs only to be new. The file is the owner's alone, mode 0600.
   def self.tempfile(prefix : String = "tmp", suffix : String = "") : String
     # Where the environment says, and the platform's own default only when
     # it says nothing — the same order `Dir.tempdir` reads, because the two
@@ -1362,32 +1931,296 @@ class ::File
     end
     if tmpdir.empty?
       {% if flag?(:win32) %}
-        tmpdir = "C:\\Windows\\Temp"
+        # Windows' own answer, as `Dir.tempdir` asks it. This alone kept the
+        # literal: with TMPDIR, TEMP and TMP unset, the file was made in
+        # `C:\Windows\Temp` while `Dir.tempdir` answered `C:\Users\dogru`.
+        wide = Pointer(UInt16).malloc(4096_u64)
+        chars = Std::File::LibKernel32.GetTempPathW(4096, wide)
+        size = chars > 0 && chars <= 4096 ? __iyi_utf8_size_from_wide(wide) : 0
+        tmpdir = size > 1 ? String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) } : "C:\\Windows\\Temp"
       {% else %}
         tmpdir = "/tmp"
       {% end %}
     end
-    pid = 0_i64
-    {% if flag?(:linux) %}
-      pid = Std::File::LibC.sys(Std::File::LibC::SYS_GETPID, 0_i64, 0_i64, 0_i64)
-    {% end %}
-    i = 0
-    while i < 1000
-      @@temp_counter = @@temp_counter + 1_u64
-      path = tmpdir + File::SEPARATOR_STRING + prefix + "_" + pid.to_s + "_" + @@temp_counter.to_s + suffix
-      unless File.exists?(path)
-        File.write(path, "")
-        return path
-      end
-      i = i + 1
+    # One trailing separator off, as `Dir.tempdir` does: darwin's TMPDIR
+    # ends with one, and the name below adds its own.
+    last = tmpdir[tmpdir.bytesize - 1]
+    if tmpdir.bytesize > 1 && (last == '/' || last == File::SEPARATOR)
+      tmpdir = tmpdir[0, tmpdir.bytesize - 1]
     end
-    raise "Cannot create tempfile"
+    attempt = 0
+    while attempt < 100
+      path = tmpdir + File::SEPARATOR_STRING + prefix + "_" + temp_token + suffix
+      return path if create_new(path)
+      attempt = attempt + 1
+    end
+    raise "Cannot create tempfile in #{tmpdir}: a hundred fresh names were all taken"
   end
 
+  # Sixteen hex digits nobody could have guessed: the kernel's randomness
+  # where a call reaches it without another library, the clock and a
+  # counter where the create alone is the guarantee.
+  private def self.temp_token : String
+    word = 0_u64
+    {% if flag?(:linux) %}
+      got = Std::File::LibC.sys(Std::File::LibC::SYS_GETRANDOM, pointerof(word).address.to_i64, 8_i64, 0_i64)
+      raise "Cannot create tempfile: getrandom failed (#{got})" if got != 8_i64
+    {% elsif flag?(:darwin) %}
+      Std::File::LibC.arc4random_buf(pointerof(word).as(Void*), 8_u64)
+    {% elsif flag?(:win32) %}
+      @@temp_counter = @@temp_counter &+ 1_u64
+      now = 0_i64
+      Std::File::LibKernel32.GetSystemTimeAsFileTime(pointerof(now))
+      word = (now.unsafe_to_u64 ^ @@temp_counter.unsafe_shl(40_u64)) &* 0x9E3779B97F4A7C15_u64
+    {% else %}
+      @@temp_counter = @@temp_counter &+ 1_u64
+      word = @@temp_counter &* 0x9E3779B97F4A7C15_u64
+    {% end %}
+    digits = "0123456789abcdef"
+    String.new(16) do |buffer|
+      index = 15
+      while index >= 0
+        buffer[index] = digits.to_unsafe[(word & 15_u64).to_i32]
+        word = word.unsafe_shr(4_u64)
+        index = index - 1
+      end
+    end
+  end
+
+  # True when the file was made here and now; false when something was
+  # already at the path, whatever it is; a panic for any other refusal.
+  private def self.create_new(path : String) : Bool
+    {% if flag?(:linux) %}
+      # O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode 0600. EEXIST is 17.
+      fd = __iyi_openat(sys_path(path), 1 | 64 | 128 | 0x80000, 384)
+      return false if fd == -17_i64
+      raise "Cannot create tempfile #{path}: error #{-fd}" if fd < 0
+      __iyi_close(fd)
+      true
+    {% elsif flag?(:darwin) %}
+      # O_WRONLY | O_CREAT | O_EXCL, mode 0600.
+      fd = ::LibC.open(sys_path(path), 1 | 0x200 | 0x800, 384)
+      if fd < 0
+        return false if symlink?(path) || exists?(path)
+        raise "Cannot create tempfile #{path}"
+      end
+      ::LibC.close(fd)
+      true
+    {% elsif flag?(:win32) %}
+      # GENERIC_WRITE, CREATE_NEW (1), FILE_ATTRIBUTE_NORMAL.
+      # ERROR_FILE_EXISTS is 80, ERROR_ALREADY_EXISTS 183.
+      # A tempfile name that is not UTF-8 converts to null, and the create
+      # was refused "Windows error 3: The system cannot find the path
+      # specified".
+      wide = __iyi_wide_path(sys_path(path))
+      raise "Cannot create tempfile #{path}: the path is not valid UTF-8" if wide.address == 0_u64
+      handle = Std::File::LibKernel32.CreateFileW(wide, 0x40000000, 0x7,
+        Pointer(Void).new(0_u64), 1, 0x80, Pointer(Void).new(0_u64))
+      if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+        code = Std::File::LibKernel32.GetLastError
+        return false if code == 80 || code == 183
+        raise "Cannot create tempfile #{path}: #{win_error}"
+      end
+      Std::File::LibKernel32.CloseHandle(handle)
+      true
+    {% else %}
+      return false if exists?(path)
+      File.write(path, "")
+      true
+    {% end %}
+  end
+
+  # The file is deleted after the block if it is still there: the block
+  # may have renamed it into place - write to a temporary name, then
+  # rename, is what the name is for - and `delete` of a path that is gone
+  # panicked after the block had done its work.
   def self.tempfile(prefix : String = "tmp", suffix : String = "", &block : String -> Nil) : Nil
     p = tempfile(prefix, suffix)
-    defer File.delete(p)
+    defer File.delete(p) if File.exists?(p)
     yield p
+  end
+end
+
+# Where in an open file the next read or write happens, and moving it:
+# Crystal's `IO#seek`, `#pos` and `#pos=`. A large file, or a range of
+# one, is sent from where it lies rather than read whole into memory
+# first. What is buffered goes first: the writes are flushed before the
+# move, and read-ahead the move skips is dropped, so the next read is
+# from the new place.
+class ::IyiIO
+  enum Seek
+    Set     = 0
+    Current = 1
+    End     = 2
+  end
+
+  # Moves to *offset* from the start, from here, or from the end, and
+  # answers the new position.
+  def seek(offset : Int64, whence : Seek = Seek::Set) : Int64
+    raise "cannot seek a closed IO" if closed?
+    # The kernel's position is past what was read ahead, so "from here"
+    # is from where the program has read to.
+    offset = offset - (@read_limit - @read_pos).to_i64 if whence == Seek::Current && @read_limit > @read_pos
+    flush
+    moved = IyiIO.lseek(handle, offset, whence.value.to_i32)
+    raise "cannot seek to #{offset} (#{whence}): error #{-moved}" if moved < 0_i64
+    @read_pos = 0
+    @read_limit = 0
+    @eof = false
+    moved
+  end
+
+  def seek(offset : Int32, whence : Seek = Seek::Set) : Int64
+    seek(offset.to_i64, whence)
+  end
+
+  # Bytes from the start to where the next read or write happens.
+  def pos : Int64
+    raise "cannot ask a closed IO its position" if closed?
+    here = IyiIO.lseek(handle, 0_i64, 1)
+    raise "cannot ask the position: error #{-here}" if here < 0_i64
+    unread = @read_limit > @read_pos ? (@read_limit - @read_pos).to_i64 : 0_i64
+    here - unread + @write_pos.to_i64
+  end
+
+  def pos=(position : Int64) : Int64
+    seek(position, Seek::Set)
+  end
+
+  # Advisory locks on the whole file, the other library's `flock_*`: a
+  # shared one many holders may have at once, an exclusive one a single
+  # holder. The holder is this open file - another `File.open` of the same
+  # path, in this process or another, is another holder - until
+  # `flock_unlock`, or until the file is closed.
+  #
+  #     File.open("app.lock", "w") do |f|
+  #       f.flock_exclusive { run_alone }.or_panic
+  #     end
+  #
+  # A lock another holder has is waited for a task at a time: tried again
+  # after 1, 2, 4 ... 64 ms, the thread's other tasks running meanwhile,
+  # and cancellable. `try_flock_*` answers at once whether it took it.
+  #
+  # Linux and darwin lock with `flock(2)`, which only other locks heed, and
+  # turn a shared lock this file holds into an exclusive one in place.
+  # Windows locks every byte with `LockFileEx`, which is mandatory - while
+  # one handle holds it exclusively, another handle's reads and writes of
+  # the file fail - and counts each lock a handle takes: unlock a shared
+  # lock before taking the exclusive one.
+  def flock_exclusive : Nil | Cancelled
+    flock_wait(true)
+  end
+
+  def flock_shared : Nil | Cancelled
+    flock_wait(false)
+  end
+
+  # The block's answer, run with the lock held and unlocked after it, even
+  # when the block panics.
+  def flock_exclusive(&block : -> R) : R | Cancelled forall R
+    waited = flock_wait(true)
+    return waited if waited.is_a?(Cancelled)
+    defer flock_unlock
+    block.call
+  end
+
+  def flock_shared(&block : -> R) : R | Cancelled forall R
+    waited = flock_wait(false)
+    return waited if waited.is_a?(Cancelled)
+    defer flock_unlock
+    block.call
+  end
+
+  def try_flock_exclusive : Bool
+    flock_try(true)
+  end
+
+  def try_flock_shared : Bool
+    flock_try(false)
+  end
+
+  # Gives the lock back; one this file does not hold is no error.
+  def flock_unlock : Nil
+    raise "cannot unlock a closed IO" if closed?
+    {% if flag?(:win32) %}
+      overlapped = Pointer(UInt64).malloc(4_u64)
+      Std::File::LibKernel32.UnlockFileEx(Pointer(Void).new(handle.to_u64), 0_u32, 0xFFFFFFFF_u32, 0xFFFFFFFF_u32, overlapped.as(Void*))
+    {% elsif flag?(:darwin) %}
+      Std::File::LibC.flock(fd, 8)
+    {% elsif flag?(:wasm32) %}
+      raise "flock is not available on wasm32-wasi"
+    {% else %}
+      Std::File::LibC.sys(Std::File::LibC::SYS_FLOCK, handle, 8_i64, 0_i64)
+    {% end %}
+    nil
+  end
+
+  private def flock_wait(exclusive : Bool) : Nil | Cancelled
+    delay = 1
+    while true
+      return nil if flock_try(exclusive)
+      slept = ::sleep(delay)
+      return slept if slept.is_a?(Cancelled)
+      delay = delay * 2 if delay < 64
+    end
+  end
+
+  # Whether the lock was taken; contention is false, any other failure a
+  # panic naming it.
+  private def flock_try(exclusive : Bool) : Bool
+    raise "cannot lock a closed IO" if closed?
+    {% if flag?(:win32) %}
+      # LOCKFILE_FAIL_IMMEDIATELY (1), and LOCKFILE_EXCLUSIVE_LOCK (2).
+      overlapped = Pointer(UInt64).malloc(4_u64)
+      flags = exclusive ? 3_u32 : 1_u32
+      return true if Std::File::LibKernel32.LockFileEx(Pointer(Void).new(handle.to_u64), flags, 0_u32, 0xFFFFFFFF_u32, 0xFFFFFFFF_u32, overlapped.as(Void*)) != 0
+      error = Std::File::LibKernel32.GetLastError
+      return false if error == 33 # ERROR_LOCK_VIOLATION
+      raise "flock: LockFileEx failed (error #{error})"
+    {% elsif flag?(:darwin) %}
+      # LOCK_SH (1) or LOCK_EX (2), with LOCK_NB (4).
+      operation = exclusive ? 6 : 5
+      while true
+        return true if Std::File::LibC.flock(fd, operation) == 0
+        errno = Std::File::LibC.__error.value
+        # EWOULDBLOCK is another holder's lock; EINTR, a signal: again.
+        return false if errno == 35
+        raise "flock failed (errno #{errno})" unless errno == 4
+      end
+    {% elsif flag?(:wasm32) %}
+      raise "flock is not available on wasm32-wasi"
+    {% else %}
+      operation = exclusive ? 6_i64 : 5_i64
+      while true
+        done = Std::File::LibC.sys(Std::File::LibC::SYS_FLOCK, handle, operation, 0_i64)
+        return true if done == 0_i64
+        # EWOULDBLOCK is another holder's lock; EINTR, a signal: again.
+        return false if done == -11_i64
+        raise "flock failed (errno #{-done})" unless done == -4_i64
+      end
+    {% end %}
+  end
+
+  # The kernel's move: the new offset, or a negative error. A stream with
+  # no descriptor - a `Memory` - is -1, which Windows' `to_u64` of it
+  # panicked "arithmetic overflow" on; it is EBADF everywhere, as Linux's
+  # kernel answers it.
+  protected def self.lseek(fd : Int64, offset : Int64, whence : Int32) : Int64
+    return -9_i64 if fd < 0_i64
+    {% if flag?(:win32) %}
+      moved = 0_i64
+      if Std::File::LibKernel32.SetFilePointerEx(Pointer(Void).new(fd.to_u64), offset, pointerof(moved), whence) == 0
+        return -Std::File::LibKernel32.GetLastError.to_i64
+      end
+      moved
+    {% elsif flag?(:darwin) %}
+      moved = Std::File::LibC.lseek(fd.to_i32, offset, whence)
+      moved < 0_i64 ? -1_i64 : moved
+    {% elsif flag?(:wasm32) %}
+      raise "seek is not available on wasm32-wasi"
+    {% else %}
+      Std::File::LibC.sys(Std::File::LibC::SYS_LSEEK, fd, offset, whence.to_i64)
+    {% end %}
   end
 end
 

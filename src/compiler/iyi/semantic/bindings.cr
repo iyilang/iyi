@@ -361,12 +361,24 @@ module Iyi
   end
 
   class Def
+    # iyi: an iyi def whose return annotation has an error member, set where
+    # the annotation is resolved (`Call#check_return_type`).
+    property? iyi_declared_return = false
+
     def map_type(type)
+      freeze_type = self.freeze_type
       # When we have Nil forced as a return type, NoReturn still
       # wins, so we must account for this case.
       # Otherwise we simply keep having the Nil type.
       if freeze_type.try &.nil_type? && !type.no_return?
         freeze_type
+      elsif freeze_type && iyi_declared_return? && (type.no_return? || type.implements?(freeze_type))
+        # iyi: such a def's type is its error union whatever its body answers,
+        # virtual the way the `.iyimod` path reads it back (`Call#lookup_matches`),
+        # so a source build and an artifact build type, check and mangle a
+        # call alike. A body outside the annotation is left as it is, and
+        # `set_type` reports it.
+        freeze_type.virtual_type
       else
         type
       end

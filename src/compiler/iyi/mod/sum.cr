@@ -50,7 +50,7 @@ module Iyi::Mod
       # cache — a tool compiling a dependency in place — verifies but never
       # writes, or the write would change the very tree a *user's* sum pins,
       # which is the mutation this file exists to notice, self-inflicted.
-      return if dir.starts_with?(Iyi::CacheDir.instance.join("mod"))
+      return if in_cache?(dir)
 
       return unless added
       File.write(sum_path, String.build do |io|
@@ -58,6 +58,51 @@ module Iyi::Mod
           io << key << ' ' << hash << '\n'
         end
       end)
+    end
+
+    # Drops every entry that is not one of *keep*, the selections a build
+    # of the manifest in *dir* now uses, and answers how many went: a sum
+    # line for a version nothing builds is a fact about another program.
+    def self.prune(dir : String, keep : Array(Selection)) : Int32
+      sum_path = File.join(dir, FILE)
+      return 0 unless File.file?(sum_path)
+      known = parse(File.read(sum_path), sum_path)
+      wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
+      kept = known.select { |key, _| wanted.includes?(key) }
+      dropped = known.size - kept.size
+      return 0 if dropped == 0 || in_cache?(dir)
+      File.write(sum_path, String.build do |io|
+        kept.to_a.sort_by!(&.first).each do |(key, hash)|
+          io << key << ' ' << hash << '\n'
+        end
+      end)
+      dropped
+    end
+
+    # Which entries of the sum in *dir* are not one of *keep*, without
+    # writing anything.
+    def self.stale(dir : String, keep : Array(Selection)) : Array(String)
+      sum_path = File.join(dir, FILE)
+      return [] of String unless File.file?(sum_path)
+      wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
+      parse(File.read(sum_path), sum_path).keys.reject { |key| wanted.includes?(key) }.sort!
+    end
+
+    # Whether *dir* is inside the module cache, asked the way the file
+    # system names files (`Iyi.file_key`). A string prefix was case- and
+    # separator-sensitive: a check run from the checkout entered as `c:\`,
+    # as editors and language clients spell the drive, was not "inside"
+    # `C:\...\cache\mod`, so it wrote an `iyi.sum` into the cached package,
+    # and every project using that version was refused as tampered with
+    # until the cache was cleared. Folding the case was not the whole
+    # answer: on a CI runner `IYI_CACHE_DIR` is spelled `C:\Users\RUNNER~1\`
+    # the way `mktemp` hands it out, and the checkout's directory is
+    # `C:\Users\runneradmin\` the way the shell enters it, so the same write
+    # happened with every letter folded. Only the file system knows an 8.3
+    # name's long one.
+    private def self.in_cache?(dir : String) : Bool
+      cache = Iyi.file_key(File.expand_path(Iyi::CacheDir.instance.join("mod")))
+      !Iyi.path_under?(Iyi.file_key(File.expand_path(dir)), cache).nil?
     end
 
     # The checkout's content, as one line-friendly token: files only,
@@ -69,9 +114,22 @@ module Iyi::Mod
       collect_files(dir, "", files)
       files.sort!
       files.each do |relative|
+        full = File.join(dir, relative)
         digest.update(relative)
         digest.update("\0")
-        digest.update(File.read(File.join(dir, relative)))
+        # A symbolic link is hashed as the link, which is git's own model:
+        # what a repository stores for one is the target *text*, so that is
+        # the content, and retargeting it is a change this notices. Reading
+        # through it would hash something the package does not contain —
+        # and following one that points at its own parent never ends. A
+        # package with `inner/loop -> ..` died with the walker's accident:
+        # `Too many levels of symbolic links`, about a path forty levels
+        # deep, in place of a sentence about the dependency.
+        if File.symlink?(full)
+          digest.update(File.readlink(full))
+        else
+          digest.update(File.read(full))
+        end
         digest.update("\0")
       end
       "s1:#{digest.final.hexstring}"
@@ -79,9 +137,16 @@ module Iyi::Mod
 
     private def self.collect_files(root : String, prefix : String, into : Array(String)) : Nil
       Dir.each_child(File.join(root, prefix)) do |entry|
-        relative = prefix.empty? ? entry : File.join(prefix, entry)
+        # With `/` on every platform: the path is hashed, and `File.join`
+        # spelled it with `\` on Windows, so a package with a directory in
+        # it hashed one way there and another everywhere else.
+        relative = prefix.empty? ? entry : "#{prefix}/#{entry}"
         full = File.join(root, relative)
-        if File.directory?(full)
+        # Asked of the name and not of what it points at: `File.directory?`
+        # follows a link, so a directory link was walked *through* — into
+        # the package's own parent, or into a cycle. A link is an entry
+        # here and its target text is what `tree_hash` digests.
+        if File.info(full, follow_symlinks: false).directory?
           collect_files(root, relative, into)
         else
           into << relative

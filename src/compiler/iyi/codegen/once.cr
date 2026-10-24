@@ -10,7 +10,7 @@ class Iyi::CodeGenVisitor
       once_init_fun = check_main_fun once_init_name, once_init_fun
 
       once_state_global = @main_mod.globals.add(once_init_fun.type.return_type, ONCE_STATE)
-      once_state_global.linkage = LLVM::Linkage::Internal if @single_module
+      once_state_global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       once_state_global.initializer = once_init_fun.type.return_type.null
 
       state = call once_init_fun

@@ -3,8 +3,10 @@
 #
 #   bash bench/windows_exercise.sh
 #
-# Verifies clean cross-compilation for Windows x86_64, runs the exercise
-# on the host, and proves the exercise checks can fail when the collector is broken.
+# Verifies clean cross-compilation for Windows x86_64, reads the stopped
+# thread's register spill out of the object, runs the exercise on the host,
+# and proves the checks can fail when the collector is broken, or a
+# fiber stack back from the pool is settled with a stale StackLimit.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,6 +33,24 @@ case "$(uname -s)" in
 esac
 trap 'rm -rf "$WORK"' EXIT
 
+# The disassembler for the cross-compiled object: GNU objdump reads COFF
+# x86-64 on a Linux host, llvm-objdump anywhere LLVM is.
+DISASM=""
+for tool in objdump llvm-objdump; do
+  if command -v "$tool" > /dev/null 2>&1; then DISASM="$tool"; break; fi
+done
+
+# Whether a Windows object's `IyiThread.stop_here` stores rdi and rsi into
+# the stopped thread's spill: Windows x64 preserves both across a call, so
+# a value held there across a stop deferred to the allocator's exit is a
+# root only if the spill has it. The destination is pinned to rcx, the
+# first slot after rbx and rbp.
+stop_here_spills() {
+  local body
+  body="$("$DISASM" -d "$1" | awk '/<[^>]*stop_here[^>]*>:$/{f=1; next} f && /^$/{exit} f' | tr -d ' \t')"
+  [ -n "$body" ] && grep -q '%rdi,0x10(%rcx)' <<< "$body" && grep -q '%rsi,0x18(%rcx)' <<< "$body"
+}
+
 status=0
 
 echo "== Stage 10: Windows x86_64 Collector Verification =="
@@ -46,7 +66,7 @@ else
   status=1
 fi
 
-for check in "allocation:" "strings:" "stack:" "globals:" "registers:" "survival:" "sweep:" "reuse:" "windows exercise: every check passed"; do
+for check in "allocation:" "strings:" "stack:" "globals:" "registers:" "survival:" "sweep:" "reuse:" "fibers:" "windows exercise: every check passed"; do
   if grep -q "$check" "$WORK/host.out"; then
     echo "  verified: $check"
   else
@@ -64,6 +84,42 @@ if "$IYI" build --cross-compile --target x86_64-windows-msvc "$REPO/bench/window
 else
   echo "  cross-compilation to x86_64-windows-msvc failed"
   cat "$WORK/win_build.log"
+  status=1
+fi
+
+# 2, continued. A thread stopped where the allocator defers it spills Windows'
+# callee-saved set, rsi and rdi included, and a copy of the runtime whose
+# spill leaves rsi out is refused by the same check.
+echo
+echo "== A stopped thread spills Windows' callee-saved registers =="
+if [ -z "$DISASM" ]; then
+  echo "  no objdump or llvm-objdump here to read the object with"
+  status=1
+elif [ ! -f "$WORK/windows_exercise.obj" ]; then
+  echo "  no object to read: the cross-compilation above failed"
+  status=1
+elif stop_here_spills "$WORK/windows_exercise.obj"; then
+  echo "  stop_here stores rdi and rsi into the spill"
+  mkdir -p "$WORK/norsi/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/norsi/iyi/"
+  awk '{ if ($0 ~ /^ +movq %rsi, 24\(\$0\)$/ && !done) { done = 1; next } print }' \
+    "$REPO/src/iyi/thread.iyi" > "$WORK/norsi/iyi/thread.iyi"
+  if cmp -s "$WORK/norsi/iyi/thread.iyi" "$REPO/src/iyi/thread.iyi"; then
+    echo "  the proof's awk found no rsi store to remove"
+    status=1
+  elif ! IYI_PATH="$WORK/norsi${PSEP}$REPO/src" "$IYI" build --cross-compile --target x86_64-windows-msvc \
+       "$REPO/bench/windows_exercise.iyi" -o "$WORK/norsi/program.obj" > "$WORK/norsi/build.log" 2>&1; then
+    echo "  the copy without the rsi store did not build"
+    sed -n '1,12p' "$WORK/norsi/build.log"
+    status=1
+  elif stop_here_spills "$WORK/norsi/program.obj"; then
+    echo "  a stop_here without the rsi store still passed, so the check does not test it"
+    status=1
+  else
+    echo "  failure proof: a stop_here that leaves rsi out is refused"
+  fi
+else
+  echo "  stop_here does not store both rdi and rsi into the spill"
   status=1
 fi
 
@@ -115,6 +171,211 @@ EOF
         grep "^env:" "$WORK/told.out" || true
         status=1
       fi
+      # And the splitting, on command lines no shell writes, handed over
+      # as they are by Python: a line that starts with a space has an
+      # empty program name, as the C runtime reads it, and `first` was
+      # taken for the name and lost; after an even run of backslashes the
+      # doubled quote inside quotes is a quote, and it was dropped.
+      PY=""
+      for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+          PY="$candidate"
+          break
+        fi
+      done
+      if [ -z "$PY" ]; then
+        echo "  the raw command lines: skipped, no python to hand them over"
+      else
+        raw() {
+          "$PY" -c 'import subprocess, sys; sys.stdout.write(subprocess.run(sys.argv[2], executable=sys.argv[1], capture_output=True, text=True, encoding="utf-8").stdout)' "$(cygpath -w "$WORK/told.exe")" "$1" | tr -d '\r' | grep '^arg' | tr '\n' '|'
+        }
+        spaced="$(raw ' first second')"
+        doubled="$(raw 'told "a\\""b" c')"
+        if [ "$spaced" = "arg 0: first 5|arg 1: second 6|" ] && [ "$doubled" = 'arg 0: a\"b 4|arg 1: c 1|' ]; then
+          echo "  a leading space and a doubled quote after backslashes split as the C runtime splits them"
+        else
+          echo "  the raw command lines split otherwise: [$spaced] [$doubled]"
+          status=1
+        fi
+        # A program started without standard streams - detached, as a
+        # service or a GUI program starts one - writes into nothing and
+        # goes on: its first `puts` panicked "write failed" and ended it.
+        cat > "$WORK/detached.iyi" <<'EOF'
+module detached
+
+import std/file::{File}
+
+puts "into nothing"
+STDERR.puts "and nothing"
+File.write(Program.args[0], "went on\n")
+EOF
+        if ! "$IYI" build -o "$WORK/detached.exe" "$WORK/detached.iyi" > "$WORK/detached.log" 2>&1; then
+          echo "  the detached probe did not build"; tail -5 "$WORK/detached.log"; status=1
+        else
+          code="$("$PY" -c 'import subprocess, sys; print(subprocess.run([sys.argv[1], sys.argv[2]], creationflags=subprocess.DETACHED_PROCESS).returncode)' "$(cygpath -w "$WORK/detached.exe")" "$(cygpath -w "$WORK/detached.txt")")"
+          if [ "$code" = "0" ] && [ "$(tr -d '\r' < "$WORK/detached.txt" 2>/dev/null)" = "went on" ]; then
+            echo "  a program started detached writes into nothing and goes on"
+          else
+            echo "  a program started detached exited $code, and wrote '$(cat "$WORK/detached.txt" 2>/dev/null)'"
+            status=1
+          fi
+        fi
+      fi
+    fi
+
+    # 2a'. What a parked task costs. Windows charges committed memory to the
+    # commit limit whether it is touched or not, and every task's 256 KiB
+    # stack was committed whole: ten thousand parked tasks held 2,627 MB,
+    # and at forty thousand the commit ran out and each new task panicked.
+    # A stack is committed from the top as the fiber reaches it now, as a
+    # thread's is. Ten thousand tasks, measured from outside by PowerShell,
+    # must stay under 1,200 MB; the committed-whole stacks were over twice
+    # that.
+    echo
+    echo "== Ten thousand parked tasks =="
+    cat > "$WORK/parked.iyi" <<'EOF'
+module parked
+
+group do |g|
+  10000.times do
+    g.spawn do
+      sleep(2500)
+      0
+    end
+  end
+end
+puts "parked and done"
+EOF
+    if ! "$IYI" build -o "$WORK/parked.exe" "$WORK/parked.iyi" > "$WORK/parked.log" 2>&1; then
+      echo "  the parked-task probe did not build"
+      tail -5 "$WORK/parked.log"
+      status=1
+    else
+      peak="$(powershell -NoProfile -Command "\$p = Start-Process -FilePath '$(cygpath -w "$WORK/parked.exe")' -PassThru -NoNewWindow -RedirectStandardOutput '$(cygpath -w "$WORK/parked.out")'; \$max = 0; while (-not \$p.HasExited) { try { \$p.Refresh(); if (\$p.PrivateMemorySize64 -gt \$max) { \$max = \$p.PrivateMemorySize64 } } catch {}; Start-Sleep -Milliseconds 100 }; [int](\$max / 1MB)" | tr -d '\r')"
+      if [ -n "$peak" ] && [ "$peak" -lt 1200 ] && grep -q "parked and done" "$WORK/parked.out"; then
+        echo "  ten thousand parked tasks committed ${peak} MB"
+      else
+        echo "  ten thousand parked tasks committed ${peak:-?} MB, over the 1,200 MB bar, or did not finish:"
+        sed -n '1,3p' "$WORK/parked.out"
+        status=1
+      fi
+    fi
+
+    # 2a''. A program past its job's memory limit ends. A failed arena
+    # commit was retried whatever its error, and the reservation before it
+    # still succeeds once the commit charge is spent: under a 300 MB job
+    # limit, a program filling arenas spun at 100% CPU and never ended. It
+    # says "iyi: out of memory" and exits 1 now; only ERROR_INVALID_ADDRESS,
+    # another thread taking the freed range first, is retried. Python makes
+    # the job and starts the program suspended in it, so nothing is
+    # allocated before the limit holds, and kills it after 60 seconds.
+    echo
+    echo "== A program past its job's memory limit ends =="
+    JOBPY=""
+    for candidate in python3 python; do
+      if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+        JOBPY="$candidate"
+        break
+      fi
+    done
+    cat > "$WORK/job.py" <<'PY'
+import ctypes, subprocess, sys
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+ntdll = ctypes.WinDLL("ntdll")
+k32.CreateJobObjectW.restype = wintypes.HANDLE
+k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+class BASIC(ctypes.Structure):
+    _fields_ = [("user", ctypes.c_int64), ("job_user", ctypes.c_int64), ("flags", wintypes.DWORD),
+                ("ws_min", ctypes.c_size_t), ("ws_max", ctypes.c_size_t), ("processes", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD)]
+class EXTENDED(ctypes.Structure):
+    _fields_ = [("basic", BASIC), ("io", ctypes.c_uint64 * 6), ("process_memory", ctypes.c_size_t),
+                ("job_memory", ctypes.c_size_t), ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
+job = k32.CreateJobObjectW(None, None)
+info = EXTENDED()
+# JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+info.basic.flags = 0x100 | 0x2000
+info.process_memory = int(sys.argv[1]) << 20
+k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+child = subprocess.Popen(sys.argv[2:], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=0x4)
+k32.AssignProcessToJobObject(job, int(child._handle))
+ntdll.NtResumeProcess(int(child._handle))
+try:
+    out, err = child.communicate(timeout=60)
+    print(f"exit {child.returncode}")
+except subprocess.TimeoutExpired:
+    child.kill()
+    out, err = child.communicate()
+    print("TIMEOUT")
+print("stdout: " + out.decode("utf-8", "replace").replace("\r", "").replace("\n", "|"))
+print("stderr: " + err.decode("utf-8", "replace").replace("\r", "").replace("\n", "|"))
+PY
+    cat > "$WORK/filler.iyi" <<'EOF'
+module filler
+
+puts "filling"
+keep = [] of Array(Int32)
+while true
+  keep << Array(Int32).new(64) { |k| k }
+end
+EOF
+    if [ -z "$JOBPY" ]; then
+      echo "  no python to make a job with, so the limit is unmeasured"
+    elif ! "$IYI" build -o "$WORK/filler.exe" "$WORK/filler.iyi" > "$WORK/filler.log" 2>&1; then
+      echo "  the filling probe did not build"
+      tail -5 "$WORK/filler.log"
+      status=1
+    else
+      "$JOBPY" "$WORK/job.py" 300 "$(cygpath -w "$WORK/filler.exe")" > "$WORK/filler.out" 2>&1 || true
+      if grep -qx "exit 1" "$WORK/filler.out" && grep -q "iyi: out of memory" "$WORK/filler.out"; then
+        echo "  filling arenas past a 300 MB job limit exits 1 with 'iyi: out of memory'"
+      else
+        echo "  filling arenas past a 300 MB job limit did not end with 'iyi: out of memory':"
+        sed -n '1,3p' "$WORK/filler.out"
+        status=1
+      fi
+    fi
+
+    # 2a'''. A small program fits a small job. An arena was committed whole,
+    # 16 MiB of charge from its first object, one per size class per
+    # thread: eight threads keeping thirty strings each, one per class,
+    # committed 995 MB with a few kilobytes live, and under a 200 MB job
+    # limit died "iyi: out of memory". An arena is committed as it is
+    # carved now, its tables and a slab at a time; the program finishes
+    # under the same limit.
+    echo
+    echo "== A small program fits a 200 MB job =="
+    cat > "$WORK/classes.iyi" <<'EOF'
+module classes
+
+threads = [] of IyiThread
+8.times do
+  threads << IyiThread.start do
+    keep = [] of String
+    30.times { |i| keep << "x" * (8 + i * 24) }
+    nil
+  end
+end
+threads.each(&.join)
+puts "eight threads, thirty classes each"
+EOF
+    if [ -z "$JOBPY" ]; then
+      echo "  no python to make a job with, so the limit is unmeasured"
+    elif ! "$IYI" build -o "$WORK/classes.exe" "$WORK/classes.iyi" > "$WORK/classes.log" 2>&1; then
+      echo "  the size-class probe did not build"
+      tail -5 "$WORK/classes.log"
+      status=1
+    else
+      "$JOBPY" "$WORK/job.py" 200 "$(cygpath -w "$WORK/classes.exe")" > "$WORK/classes.out" 2>&1 || true
+      if grep -qx "exit 0" "$WORK/classes.out" && grep -q "eight threads, thirty classes each" "$WORK/classes.out"; then
+        echo "  eight threads in thirty size classes each finish under a 200 MB job limit"
+      else
+        echo "  eight threads in thirty size classes each did not finish under a 200 MB job limit:"
+        sed -n '1,3p' "$WORK/classes.out"
+        status=1
+      fi
     fi
 
     # 2b. What a short sleep costs. Windows rounds a millisecond timeout
@@ -164,8 +425,7 @@ EOF
     cat > "$WORK/late.iyi" <<'EOF'
 module late
 
-import std/socket
-using std/socket::{IyiSocket}
+import std/socket::{IyiSocket}
 
 server = IyiSocket.listen(0)
 port = server.local_port
@@ -223,12 +483,9 @@ EOF
     cat > "$WORK/bare.iyi" <<'EOF'
 module bare
 
-import std/dir
-import std/file
-import std/path
-using std/dir::{Dir}
-using std/file::{File}
-using std/path::{Path}
+import std/dir::{Dir}
+import std/file::{File}
+import std/path::{Path}
 
 puts "expanded " + Path["relative.txt"].expand.to_s
 scratch = Dir.tempdir + "\\iyi_windows_exercise_scratch"
@@ -271,8 +528,7 @@ EOF
     cat > "$WORK/holds.iyi" <<'EOF'
 module holds
 
-import std/socket
-using std/socket::{IyiSocket}
+import std/socket::{IyiSocket}
 
 server = IyiSocket.listen(0)
 puts "listening on " + server.local_port.to_s
@@ -308,6 +564,60 @@ EOF
         echo "  the runner was killed and port $held came back"
       fi
     fi
+
+    # 2f. A DOS device that is not there does not exist. Windows answers
+    # the attributes of every DOS device name with 0x20, whether the
+    # device is there or not, and `File.exists?` said true for `COM9` and
+    # `LPT7` on a machine with neither, where Python's `os.path.exists`
+    # says False. Such a name is opened now: an absent device is not
+    # found, and `NUL`, which opens, exists. No gate machine has a ninth
+    # serial port or a seventh printer port.
+    echo
+    echo "== A DOS device that is not there does not exist =="
+    printf 'module devices\n\nputs "COM9 " + File.exists?("COM9").to_s\nputs "LPT7 " + File.exists?("LPT7").to_s\nputs "NUL " + File.exists?("NUL").to_s\n' > "$WORK/devices.iyi"
+    if ! "$IYI" build -o "$WORK/devices.exe" "$WORK/devices.iyi" > "$WORK/devices.log" 2>&1; then
+      echo "  the device probe did not build"
+      tail -5 "$WORK/devices.log"
+      status=1
+    else
+      "$WORK/devices.exe" > "$WORK/devices.out" 2>&1 || true
+      if [ "$(tr -d '\r' < "$WORK/devices.out" | tr '\n' '|')" = "COM9 false|LPT7 false|NUL true|" ]; then
+        echo "  COM9 and LPT7 do not exist, NUL does"
+      else
+        echo "  the device names answered otherwise:"
+        sed -n '1,4p' "$WORK/devices.out"
+        status=1
+      fi
+    fi
+
+    # 2g. Where the runtime's fatal sentences go: standard error, as a
+    # panic's do. They were `__iyi_write(1, ...)`, and are
+    # `__iyi_write(2, ...)` now: `prog > out` past a memory limit left "iyi:
+    # out of memory" in `out` among the program's own lines, and standard
+    # error empty. Both ways a program runs out under the 300 MB job of
+    # 2a'': a mapping larger than the limit, and arenas filled to it.
+    echo
+    echo "== The runtime's fatal sentences go to standard error =="
+    printf 'module bigmap\n\nputs "mapping"\nbig = Array(UInt8).new(400_000_000, 1_u8)\nputs big.size\n' > "$WORK/bigmap.iyi"
+    if [ -z "$JOBPY" ]; then
+      echo "  no python to make a job with, so the streams are unmeasured"
+    elif ! "$IYI" build -o "$WORK/bigmap.exe" "$WORK/bigmap.iyi" > "$WORK/bigmap.log" 2>&1; then
+      echo "  the mapping probe did not build"
+      tail -5 "$WORK/bigmap.log"
+      status=1
+    else
+      for probe in bigmap filler; do
+        "$JOBPY" "$WORK/job.py" 300 "$(cygpath -w "$WORK/$probe.exe")" > "$WORK/$probe.streams" 2>&1 || true
+        if grep -qx "exit 1" "$WORK/$probe.streams" && grep -qx "stderr: iyi: out of memory|" "$WORK/$probe.streams" &&
+           ! grep -q "^stdout: .*out of memory" "$WORK/$probe.streams"; then
+          echo "  $probe: 'iyi: out of memory' on standard error, and none of it on standard output"
+        else
+          echo "  $probe: the sentence is not on standard error alone:"
+          sed -n '1,3p' "$WORK/$probe.streams"
+          status=1
+        fi
+      done
+    fi
     ;;
 esac
 
@@ -315,15 +625,23 @@ esac
 echo
 echo "== Proving Checks Can Fail =="
 
+# $5, when given, is the runtime file the script patches; the prelude
+# otherwise.
 prove_fails_host() {
   local label="$1"
   local dir="$2"
   local phrase="$3"
   local script="$4"
+  local file="${5:-prelude.iyi}"
 
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
-  awk "$script" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
+  awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"
+  if cmp -s "$REPO/src/iyi/$file" "$WORK/$dir/iyi/$file"; then
+    echo "  $label: the patch changed nothing"
+    status=1
+    return
+  fi
   if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/windows_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
@@ -373,6 +691,18 @@ prove_fails_host "global root check" noglobals "survival: global root" \
 # Failure test 3: Break register spill
 prove_fails_host "register spill check" nospill "registers: hidden value not found in register spill" \
   '{ if ($0 ~ /def self\.spill_registers/) { print; print "  return"; getline; next } print }'
+
+# Failure test 4: a stack back from the pool settled with a fresh stack's
+# StackLimit, as every one was. Only Windows has the TEB word and the
+# `__chkstk` that writes under it, so elsewhere the patch changes nothing
+# the exercise can see.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails_host "a pooled stack's StackLimit" stalelimit "fibers: a stack back from the pool lost" \
+      '{ sub(/Pointer\(UInt64\)\.new\(saved \+ 8_u64\)\.value = Pointer\(UInt64\)\.new\(top - 16_u64\)\.value/, "Pointer(UInt64).new(saved + 8_u64).value = top - INITIAL_COMMIT"); print }' \
+      concurrency.iyi ;;
+  *) echo "  a pooled stack's StackLimit: Windows' TEB and its __chkstk, proved there" ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then

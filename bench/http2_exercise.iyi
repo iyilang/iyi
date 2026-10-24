@@ -1,0 +1,411 @@
+# HTTP/2 in std/http (RFC 9113), exercised.
+#
+#   ./bin/iyi run bench/http2_exercise.iyi                  # iyi to iyi
+#   ./bin/iyi run bench/http2_exercise.iyi serve PORTFILE   # a server for others
+#   ./bin/iyi run bench/http2_exercise.iyi serve-tls PORTFILE CHAIN.pem KEY.pem [CLIENT_ROOTS.pem]
+#   ./bin/iyi run bench/http2_exercise.iyi serve-guarded PORTFILE CHAIN.pem KEY.pem MAX HEAD_MS REQUEST_MS
+#   ./bin/iyi run bench/http2_exercise.iyi serve-close PORTFILE [CHAIN.pem KEY.pem]
+#   ./bin/iyi run bench/http2_exercise.iyi close-client BASE [ROOTS.pem]
+#   ./bin/iyi run bench/http2_exercise.iyi fetch BASE [ROOTS.pem]
+#   ./bin/iyi run bench/http2_exercise.iyi tls-get BASE ROOTS.pem [ALPN,...]
+#   ./bin/iyi run bench/http2_exercise.iyi whoami BASE ROOTS.pem [CHAIN.pem KEY.pem]
+#
+# The first runs an h2c server and a client with prior knowledge in one
+# program: requests and answers of every shape - string, stream and pipe
+# bodies, a megabyte each way through the windows, HEAD, gzip and zstd,
+# cookies on fields of their own, a redirect, 200 requests on one
+# connection - and what HTTP/2 refuses: an upgrade (HTTP_1_1_REQUIRED),
+# and a body past the server's limit (413). `serve` is the same server
+# for curl, Node and raw frames from bench/std_http_exercise.sh, and
+# `serve-tls` the same over std/tls's server, ALPN offering h2 and
+# http/1.1; `fetch` is the client against Node's server, and prints what
+# it read for the gate to compare;
+# `tls-get` is the client against `serve-tls`, offering *ALPN* (h2 and
+# http/1.1 unless named). With CLIENT_ROOTS `serve-tls` asks each client
+# for its certificate, and `/whoami` answers the one it presented;
+# `whoami` asks that over h2, over http/1.1 and through an upgrade,
+# presenting CHAIN and KEY when given. `serve-guarded` is `serve-tls`
+# with `Server.serve`'s *max_connections*, *timeout_ms* and
+# *request_timeout_ms* given, for slow clients to be cut off by.
+# `serve-close` answers without reading a request's body and closes, for
+# a client still sending to read the whole answer; `close-client` times
+# `HTTPClient#close` against a server that waits before it closes.
+
+module bench/http2_exercise
+
+import std/http::{HTTP, HTTPClient, Response, Request, Server, HTTPError, Upgraded}
+import std/socket::{IyiSocket, SocketError}
+import std/io
+import std/tls::{TlsConfig, TlsIdentity, TlsServerConfig}
+import std/x509::{Certificate}
+import std/file::{File}
+import std/compress::{Gzip}
+import std/zstd::{Zstd}
+import std/time::{Time}
+
+def check(condition : Bool, what : String) : Nil
+  raise "ASSERTION FAILED: #{what}" unless condition
+end
+
+# An answer, or the check named *what* failing with why there was none.
+def fetched(got : Response | HTTPError | SocketError | Cancelled, what : String) : Response
+  return got if got.is_a?(Response)
+  raise "ASSERTION FAILED: #{what}: #{got.is_a?(Cancelled) ? "cancelled" : got.message}"
+end
+
+# Byte i of every test body: a pattern any peer can make and check.
+def pattern(n : Int32) : String
+  String.new(n) do |b|
+    i = 0
+    while i < n
+      b[i] = ((i * 31 + 7) & 0xFF).to_u8
+      i = i + 1
+    end
+    nil
+  end
+end
+
+# FNV-1a, 64 bits, as hex: a body's identity in one line.
+def fnv(text : String) : String
+  h = 0xcbf29ce484222325_u64
+  text.each_byte do |b|
+    h = h ^ b.to_u64
+    h = h &* 0x100000001b3_u64
+  end
+  h.to_s(16)
+end
+
+def param(req : Request, name : String) : Int32
+  query = req.query || ""
+  query.split('&').each do |pair|
+    kv = pair.split('=')
+    return kv[1].to_i if kv.size == 2 && kv[0] == name
+  end
+  0
+end
+
+# The server every mode runs.
+def answer(req : Request) : Response
+  case req.path
+  when "/echo"
+    body = req.body
+    Response.new(200, "#{req.method} #{req.path} #{req.query} #{req.version} host=#{req.header("Host")} length=#{body.bytesize} fnv=#{fnv(body)} x=#{req.header("X-Test")}")
+  when "/big"
+    Response.new(200, pattern(param(req, "n")))
+  when "/stream"
+    n = param(req, "n")
+    Response.stream(200) do |w|
+      whole = pattern(n)
+      at = 0
+      while at < n
+        take = n - at < 7001 ? n - at : 7001
+        w.write(whole[at, take])
+        at = at + take
+      end
+    end
+  when "/pipe"
+    reader, writer = IyiIO.pipe(16)
+    whole = pattern(param(req, "n"))
+    at = 0
+    while at < whole.bytesize
+      take = whole.bytesize - at < 4096 ? whole.bytesize - at : 4096
+      writer.write(whole[at, take])
+      at = at + take
+    end
+    writer.close
+    Response.new(200, reader)
+  when "/text"
+    r = Response.new(200, "hello, compressible world. " * 400)
+    r.headers["Content-Type"] = "text/plain"
+    r
+  when "/text-gzip"
+    # The block's own gzip, which the server leaves as it is: a gzip
+    # answer whatever the client takes.
+    r = Response.new(200, Gzip.compress("hello, compressible world. " * 400))
+    r.headers["Content-Type"] = "text/plain"
+    r.headers["Content-Encoding"] = "gzip"
+    r
+  when "/cookie"
+    r = Response.new(200, "two cookies")
+    r.add_header("Set-Cookie", "a=1")
+    r.add_header("Set-Cookie", "b=2; Path=/")
+    r
+  when "/redirect"
+    r = Response.new(302, "")
+    r.headers["Location"] = "/echo?from=redirect"
+    r
+  when "/upgrade"
+    Response.upgrade({"Upgrade" => "x"}) { |_socket, _left| nil }
+  when "/whoami"
+    Response.new(200, req.peer_certificates.empty? ? "peer=-" : "peer=#{req.peer_certificates[0].subject_name} #{req.version}")
+  when "/whoami-upgrade"
+    peer = req.peer_certificates.empty? ? "-" : req.peer_certificates[0].subject_name
+    Response.upgrade({"Upgrade" => "x", "X-Peer" => peer}) { |_socket, _left| nil }
+  when "/empty"
+    Response.new(204, "")
+  else
+    Response.new(404, "no #{req.path}\n")
+  end
+end
+
+def serve_on(listener : IyiSocket, compress : Bool, tls : TlsServerConfig? = nil) : Nil
+  Server.serve(listener, compress: compress, tls: tls) do |req|
+    if req.path == "/quit"
+      listener.close
+      Response.new(200, "bye")
+    else
+      answer(req)
+    end
+  end
+end
+
+args = Program.args
+mode = args.size > 0 ? args[0] : "self"
+
+if mode == "serve"
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  serve_on(listener, true)
+  exit 0
+end
+
+if mode == "serve-tls"
+  config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
+  config.alpn = ["h2", "http/1.1"]
+  config.client_roots = Certificate.from_pem(File.read(args[4])).or_panic if args.size > 4
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  serve_on(listener, true, config)
+  exit 0
+end
+
+# The same server over TLS, its limits named: at most MAX connections at
+# once, a head within HEAD_MS and a whole request within REQUEST_MS.
+if mode == "serve-guarded"
+  config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
+  config.alpn = ["h2", "http/1.1"]
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  Server.serve(listener, tls: config, max_connections: args[4].to_i, timeout_ms: args[5].to_i, request_timeout_ms: args[6].to_i) do |req|
+    if req.path == "/quit"
+      listener.close
+      Response.new(200, "bye")
+    else
+      answer(req)
+    end
+  end
+  exit 0
+end
+
+# A server that answers and closes while the client is still sending:
+# bodies are left to the block (*stream_bodies*), and `/ignore?n=N` answers
+# N bytes of the pattern without reading its request's body. With
+# `close=1` it says `Connection: close`; without it, a body past what the
+# server reads past for the next request (`Server::MAX_DRAIN`) closes the
+# connection all the same. Over TLS when CHAIN and KEY are given.
+if mode == "serve-close"
+  closing_tls = nil.as(TlsServerConfig?)
+  closing_tls = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic if args.size > 3
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  Server.serve(listener, stream_bodies: true, tls: closing_tls) do |req|
+    if req.path == "/quit"
+      listener.close
+      Response.new(200, "bye")
+    elsif req.path == "/ignore"
+      r = Response.new(200, pattern(param(req, "n")))
+      r.headers["Connection"] = "close" if param(req, "close") == 1
+      r
+    else
+      answer(req)
+    end
+  end
+  exit 0
+end
+
+# The client's own close: one GET on a kept connection to BASE (https://
+# under ROOTS.pem), then `HTTPClient#close`, and how long the close took
+# in milliseconds - a lingering close waits for the server's end.
+if mode == "close-client"
+  if args.size > 2
+    roots = TlsConfig.new
+    roots.roots = Certificate.from_pem(File.read(args[2])).or_panic
+    roots.alpn = ["http/1.1"]
+    HTTP.tls_config = roots
+  end
+  client = HTTPClient.new
+  got = fetched(client.get(args[1] + "/x"), "a GET to the closing server")
+  started = Time.monotonic_nanoseconds
+  client.close
+  puts "#{got.status} #{got.body} closed in #{(Time.monotonic_nanoseconds - started) // 1000000} ms"
+  exit 0
+end
+
+if mode == "tls-get"
+  base = args[1]
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  config.alpn = args.size > 3 ? args[3].split(',') : ["h2", "http/1.1"]
+  HTTP.tls_config = config
+  client = HTTPClient.new
+  echo = fetched(client.get(base + "/echo?x=1", {"X-Test" => "iyi"}), "GET over TLS")
+  puts "echo #{echo.status} #{echo.body}"
+  big = fetched(client.get(base + "/big?n=1000000"), "a megabyte over TLS")
+  puts "big #{big.status} #{big.body.bytesize} #{big.body == pattern(1000000)}"
+  sent = pattern(500000)
+  posted = fetched(client.post(base + "/echo", sent), "half a megabyte up over TLS")
+  puts "post #{posted.status} #{posted.body.includes?("length=500000 fnv=#{fnv(sent)}")}"
+  puts "connections #{client.connections_made}"
+  client.close
+  exit 0
+end
+
+if mode == "whoami"
+  base = args[1]
+  ["h2,http/1.1", "http/1.1"].each do |alpn|
+    config = TlsConfig.new
+    config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+    config.alpn = alpn.split(',')
+    config.identity = TlsIdentity.from_pem(File.read(args[3]), File.read(args[4])).or_panic if args.size > 4
+    HTTP.tls_config = config
+    client = HTTPClient.new
+    got = client.get(base + "/whoami")
+    case got
+    in Response
+      puts "#{alpn}: #{got.status} #{got.body}"
+    in HTTPError
+      puts "#{alpn}: #{got.message}"
+    in SocketError
+      puts "#{alpn}: #{got.message}"
+    in Cancelled
+      puts "#{alpn}: cancelled"
+    end
+    client.close
+  end
+  upgraded = HTTP.upgrade(base + "/whoami-upgrade", "x")
+  case upgraded
+  in Upgraded
+    puts "upgrade: #{upgraded.response.status} #{upgraded.response.header("x-peer") || "?"}"
+    upgraded.socket.close
+  in HTTPError
+    puts "upgrade: #{upgraded.message}"
+  in SocketError
+    puts "upgrade: #{upgraded.message}"
+  in Cancelled
+    puts "upgrade: cancelled"
+  end
+  exit 0
+end
+
+if mode == "fetch"
+  base = args[1]
+  if args.size > 2
+    config = TlsConfig.new
+    config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+    config.alpn = ["h2", "http/1.1"]
+    HTTP.tls_config = config
+  end
+  client = HTTPClient.new(prior_knowledge: base.starts_with?("http://"))
+  ["/echo?x=1", "/big?n=1000000", "/trailers", "/early", "/headers", "/padded?n=50000", "/gzip", "/cookies"].each do |path|
+    got = client.get(base + path, {"X-Test" => "fetch"})
+    case got
+    in Response
+      cookies = got.header_values("set-cookie").join("|")
+      puts "#{path} #{got.status} #{got.body.bytesize} #{fnv(got.body)} big=#{(got.header("x-big") || "").bytesize} cookies=#{cookies}"
+    in HTTPError
+      puts "#{path} error #{got.message}"
+    in SocketError
+      puts "#{path} error #{got.message}"
+    in Cancelled
+      puts "#{path} cancelled"
+    end
+  end
+  upload = pattern(3000000)
+  posted = client.post(base + "/upload", upload).or_panic
+  puts "/upload #{posted.status} #{posted.body}"
+  puts "connections #{client.connections_made}"
+  client.close
+  exit 0
+end
+
+# -- iyi to iyi
+
+listener = IyiSocket.listen("127.0.0.1", 0)
+port = listener.local_port
+fd = listener.to_unsafe
+server = IyiThread.start do
+  serve_on(IyiSocket.new(fd), true)
+  nil
+end
+base = "http://127.0.0.1:#{port}"
+# A window that never opens again is a request that times out, by name.
+client = HTTPClient.new(timeout_ms: 20000, prior_knowledge: true)
+
+puts "== requests and answers"
+r = fetched(client.get("#{base}/echo?x=1", {"X-Test" => "one"}), "GET over HTTP/2")
+check(r.status == 200, "GET status (#{r.status})")
+check(r.body == "GET /echo x=1 HTTP/2 host=127.0.0.1:#{port} length=0 fnv=cbf29ce484222325 x=one", "GET over HTTP/2 (#{r.body})")
+check(r.reason == "OK", "an HTTP/2 answer is given its status's reason (#{r.reason})")
+upload = pattern(1048576)
+r = fetched(client.post("#{base}/echo", upload), "a megabyte up through the windows")
+check(r.body == "POST /echo  HTTP/2 host=127.0.0.1:#{port} length=1048576 fnv=#{fnv(upload)} x=", "a megabyte up through the windows (#{r.body})")
+r = fetched(client.get("#{base}/big?n=5000000"), "five megabytes down through the windows")
+check(r.body.bytesize == 5000000 && r.body == pattern(5000000), "five megabytes down through the windows (#{r.body.bytesize})")
+check(r.header("Content-Length") == "5000000", "a string body goes with its length")
+r = fetched(client.get("#{base}/stream?n=1000001"), "a streamed answer")
+check(r.body == pattern(1000001), "a streamed answer, 7001 bytes a write (#{r.body.bytesize})")
+check(r.header("Content-Length").nil?, "a streamed answer has no length")
+r = fetched(client.get("#{base}/pipe?n=60000"), "an answer copied from a pipe")
+check(r.body == pattern(60000), "an answer copied from a pipe (#{r.body.bytesize})")
+r = fetched(client.head("#{base}/big?n=12345"), "HEAD")
+check(r.status == 200 && r.body.empty? && r.header("Content-Length") == "12345", "HEAD: the length, and no body")
+r = fetched(client.get("#{base}/empty"), "204")
+check(r.status == 204 && r.body.empty?, "204 with nothing")
+r = fetched(client.get("#{base}/nothing"), "404")
+check(r.status == 404 && r.body == "no /nothing\n", "404")
+puts "  GET, POST of 1 MiB, 5 MB down, a stream, a pipe, HEAD, 204, 404"
+
+puts "== what HTTP/1.1 did, done over HTTP/2"
+text = "hello, compressible world. " * 400
+r = fetched(client.get("#{base}/text-gzip"), "a gzip answer")
+check(r.decoded? && r.body == text, "a gzip answer decoded as it is read")
+check(r.header("Content-Encoding").nil?, "the coding is gone once undone")
+# The server's own choice: zstd for the client's `gzip, deflate, zstd`,
+# gzip for a client that takes gzip alone - whose own Accept-Encoding
+# leaves the body as it came.
+r = fetched(client.get("#{base}/text"), "a zstd answer")
+check(r.decoded? && r.body == text, "a zstd answer decoded as it is read")
+r = fetched(client.request("GET", "#{base}/text", {"Accept-Encoding" => "zstd"}), "zstd asked for alone")
+check(r.header("Content-Encoding") == "zstd" && Zstd.decompress(r.body) == text, "the server's zstd over HTTP/2 (#{r.header("Content-Encoding").inspect})")
+r = fetched(client.request("GET", "#{base}/text", {"Accept-Encoding" => "gzip"}), "gzip asked for alone")
+check(r.header("Content-Encoding") == "gzip" && Gzip.decompress(r.body) == text, "the server's gzip over HTTP/2 (#{r.header("Content-Encoding").inspect})")
+r = fetched(client.get("#{base}/cookie"), "Set-Cookie on fields of their own")
+check(r.header_values("Set-Cookie") == ["a=1", "b=2; Path=/"], "Set-Cookie on fields of their own (#{r.header_values("Set-Cookie")})")
+r = fetched(client.get("#{base}/redirect"), "a redirect followed")
+check(r.status == 200 && r.body.starts_with?("GET /echo from=redirect HTTP/2"), "a redirect followed over the same connection (#{r.body})")
+puts "  gzip and zstd, each decoded and each the server's, cookies, a redirect"
+
+puts "== one connection"
+made = client.connections_made
+200.times do |i|
+  r = fetched(client.get("#{base}/echo?i=#{i}"), "request #{i} of 200")
+  check(r.body.starts_with?("GET /echo i=#{i} HTTP/2"), "request #{i} of 200")
+end
+check(client.connections_made == made, "200 requests and no new connection (#{client.connections_made - made} made)")
+puts "  200 requests, each its own stream, over the connection the first made"
+
+puts "== what HTTP/2 refuses"
+made = client.connections_made
+got = client.get("#{base}/upgrade")
+check(got.is_a?(HTTPError) && got.message.includes?("HTTP_1_1_REQUIRED"), "an upgrade is reset with HTTP_1_1_REQUIRED (#{got})")
+r = fetched(client.get("#{base}/echo?after=reset"), "the connection goes on after one stream's reset")
+check(r.status == 200, "the connection goes on after one stream's reset")
+check(client.connections_made == made, "a stream's reset leaves its connection (#{client.connections_made - made} made after it)")
+plain = fetched(HTTP.get("#{base}/echo?over=h1"), "the same listener serves HTTP/1.1")
+check(plain.body.starts_with?("GET /echo over=h1 HTTP/1.1"), "the same listener serves HTTP/1.1 (#{plain.body})")
+puts "  an upgrade reset on its stream alone; HTTP/1.1 on the same port"
+
+client.close
+check(HTTP.get("#{base}/quit").or_panic.status == 200, "the server quits")
+server.join
+puts "\nALL CHECKS PASSED"

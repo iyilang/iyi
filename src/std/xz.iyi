@@ -1,0 +1,1652 @@
+# LZMA and LZMA2 decompression, and the two files they travel in: the
+# .xz container (The .xz File Format, version 1.0.4, Tukaani project,
+# 2009-08-27, which 1.2.1 restates) and the legacy .lzma file that LZMA
+# Utils and the LZMA SDK write (liblzma calls it LZMA_Alone). Written in
+# iyi; no liblzma is linked. The decoder follows the shape of XZ
+# Embedded's `xz_dec_lzma2.c` (Lasse Collin and Igor Pavlov, public
+# domain): the range coder, the twelve-state machine, the probability
+# tables and their layout are that file's, and so is the rule for the
+# input - at least 21 bytes in hand before a symbol, the most one can
+# take, or the rest of what there is - so a symbol is never begun and
+# then left half-read when a piece of the stream runs out.
+#
+# `XzReader` reads a stream a piece at a time: the compressed bytes come
+# from a block, the decompressed ones go out through `read`, as
+# std/compress's `Inflater` does for DEFLATE. `Xz.decompress` is the same
+# reader run over one string. A stream that is not what it says - a
+# check, an index, a header CRC that does not match, a size the data does
+# not have, LZMA data that is not LZMA, a stream that ends early - is an
+# `XzError`, a value, the first sentence that saw it, and every read
+# after it answers the same.
+#
+# What a .xz file holds is read and checked whole. Every block header's
+# CRC32, its flags and its padding; its compressed and uncompressed sizes
+# when it gives them, against what the block turned out to be; the
+# block's padding, and its check - none, CRC32, CRC64 (std/digest's
+# `CRC64`) or SHA-256, the four xz writes - over what was decompressed;
+# the index, its record count, each record against the block it names
+# (kept as liblzma keeps them, as counts and sums and a CRC-64 of the
+# records, so a stream of a million blocks costs nothing per block), its
+# padding and CRC32; and the stream footer against the header and the
+# index. Streams may follow one another, with stream padding (zero bytes,
+# a multiple of four) between and after them, as `xz` reads them; the
+# check types the format reserves (2, 3, 5 to 9, 11 to 15) are refused by
+# name rather than read unchecked. Bytes after the last stream that are
+# neither padding nor another stream are refused too: `xz` refuses them,
+# where Python's `lzma.decompress` drops them.
+#
+# The filters a block may name are LZMA2, which must be last, and before
+# it the delta filter and the x86 branch-call-jump filter (BCJ, with or
+# without its start offset), the two Python's `lzma` and `xz --delta`,
+# `--x86` write for data that wants them; the other BCJ filters (PowerPC,
+# IA-64, ARM, ARM-Thumb, SPARC, ARM64, RISC-V) are refused by name. A
+# .lzma file is a 13-byte header - lc, lp and pb, the dictionary size and
+# the uncompressed size or "unknown" - and one LZMA stream, ended by its
+# size, by the end-of-payload marker, or by the size and then a marker,
+# which XZ Utils' own test files hold good too; bytes after it are
+# refused. A block header's sizes are held to as the block is read: a
+# chunk that would take it past either is refused before it is decoded.
+#
+# Memory is the dictionary and what waits to be read, and the dictionary
+# is the stream's own word for how far back it reaches: an LZMA2 filter's
+# dictionary property, a .lzma header's size. One past the reader's
+# `dict_limit` - 64 MiB unless the caller says otherwise, what `xz -9`
+# writes - is refused before anything is allocated for it, so a stream
+# cannot ask for more memory than the caller agreed to. Under it, the
+# ring the dictionary lives in starts at 64 KiB and doubles as the output
+# reaches it, so a kilobyte written with `xz -9e`'s 64 MiB dictionary
+# allocated under 512 KiB in all (the gate measures it). The input is a
+# buffer of 128 KiB that the pieces are copied through. Streamed 64 KiB
+# a read, 64 MiB with an 8 MiB dictionary kept the collector under
+# 12 MiB. Measured on one x86_64 machine, release build: 2.3 MB of prose
+# from a 0.8 MB stream took 50 ms where liblzma through Python took 18,
+# and 64 MiB of word-salad text 1.15 s where it took 0.47.
+#
+# Left out: compression, the BCJ filters but x86, reading a multi-block
+# file's blocks in parallel (one from `xz -T` is read one block after
+# another), and random access through the index.
+#
+# Strings are the byte type here, as everywhere in `src/std`: a
+# compressed stream is a `String` whose bytes are the stream.
+
+module std/xz
+
+import std/int
+import std/digest::{CRC32, CRC64, SHA256}
+
+# What `XzReader#read` and `Xz.decompress` answer for a stream they cannot
+# read: one that is corrupt, whose check or index or sizes do not match,
+# that ends early, or whose dictionary is past the caller's limit.
+pub struct XzError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for XzError
+  def message : String
+    @message
+  end
+end
+
+# The two files LZMA travels in: the .xz container, and the .lzma file
+# of LZMA Utils and the LZMA SDK.
+pub enum XzFormat
+  Xz
+  Lzma
+end
+
+# The decoder: the containers' state machine around one LZMA decoder, the
+# compressed bytes pulled into a buffer as they are needed and the
+# decompressed ones written into the dictionary they are read from.
+#
+# The input is a buffer of IN_CAP bytes with SLACK zero bytes after what
+# it holds. A piece the source gives is copied into it as room allows,
+# so one piece the size of a whole file is taken 128 KiB at a time. The
+# range coder reads it directly: before each symbol there are 21 bytes in
+# hand, the most a symbol takes, or else everything there is (the rest
+# of an LZMA2 chunk, or of the input once the source is done), and the
+# zeros after it stand in for what a corrupt stream would read past its
+# end, which the check after the symbol then refuses.
+#
+# The output is the dictionary, a ring: a match copies from behind the
+# write position, `read` takes the oldest bytes not yet read, and what
+# waits to be read is held under the ring's size, so a byte is never
+# written over before it is read. The ring starts at 64 KiB, or the
+# dictionary if that is smaller, and doubles each time the output fills
+# it until it is the dictionary's size; only then does it wrap.
+#
+# A filter before LZMA2 (delta, x86) runs on the bytes as `read` takes
+# them out of the ring, through a staging buffer where the x86 filter
+# keeps the up to four bytes it cannot decide until more arrive. The
+# block's check and size are taken over what `read` hands out.
+class XzCore
+  IN_CAP = 131072
+  SLACK  =     64
+  # The most input one LZMA symbol takes: XZ Embedded's LZMA_IN_REQUIRED.
+  SYMBOL_BYTES =    21
+  DICT_MIN     =  4096
+  FIRST_RING   = 65536
+
+  # Where each probability table starts (XZ Embedded's `struct lzma_dec`):
+  # is_match[12][16], is_rep[12], is_rep0..2[12], is_rep0_long[12][16],
+  # dist_slot[4][64], dist_special[114], dist_align[16], then the two
+  # length coders (choice, choice2, low[16][8], mid[16][8], high[256]),
+  # then the literal coders, 0x300 each.
+  IS_MATCH     =    0
+  IS_REP       =  192
+  IS_REP0      =  204
+  IS_REP1      =  216
+  IS_REP2      =  228
+  IS_REP0_LONG =  240
+  DIST_SLOT    =  432
+  DIST_SPECIAL =  688
+  DIST_ALIGN   =  802
+  MATCH_LEN    =  818
+  REP_LEN      = 1332
+  LITERAL      = 1846
+
+  STREAM_HEAD =  0
+  BLOCK_HEAD  =  1
+  CHUNK       =  2
+  LZMA        =  3
+  COPY        =  4
+  BLOCK_END   =  5
+  PADDING     =  6
+  ALONE_HEAD  =  7
+  ALONE       =  8
+  ALONE_END   =  9
+  DONE        = 10
+
+  FILTER_DELTA = 3
+  FILTER_X86   = 4
+
+  @format : XzFormat
+  @dict_limit : Int64
+  @source : Proc(String | Nil)
+  # The source's piece being copied in, and how far.
+  @piece : String
+  @piece_pos : Int32
+  @exhausted : Bool
+  @buf : Pointer(UInt8)
+  @in_pos : Int32
+  @in_end : Int32
+  # Where in the whole input `@buf[0]` is.
+  @in_base : Int64
+  @state : Int32
+  @failed : Bool
+  @error : XzError
+  # Set when a step stops for input it would have to wait for while
+  # there are bytes to hand out.
+  @waiting : Bool
+  @scratch : Pointer(UInt8)
+
+  # The dictionary ring.
+  @dict : Pointer(UInt8)
+  @dcap : Int32
+  @dsize : Int32
+  @dpos : Int32
+  @written : Int64
+  @pending : Int32
+
+  # The LZMA decoder.
+  @probs : Pointer(UInt16)
+  @probs_cap : Int32
+  @lc : Int32
+  @lp : Int32
+  @pb : Int32
+  @lstate : Int32
+  @rep0 : UInt32
+  @rep1 : UInt32
+  @rep2 : UInt32
+  @rep3 : UInt32
+  @len : Int32
+  @rem : Int32
+  @range : UInt32
+  @code : UInt32
+  # Where the range coder's input ends (an LZMA2 chunk's compressed size)
+  # and how many bytes the LZMA data has left to give (-1: unknown).
+  @lz_stop : Int64
+  @lz_left : Int64
+  @marker_next : Bool
+
+  # LZMA2.
+  @need_dict_reset : Bool
+  @need_props : Bool
+  @copy_left : Int32
+
+  # The stream and the block.
+  @check_id : Int32
+  @stream_flags : Int32
+  @crc32 : UInt32
+  @crc64 : UInt64
+  @sha : SHA256
+  @header_size : Int32
+  @data_start : Int64
+  @data_end : Int64
+  @declared_comp : Int64
+  @declared_uncomp : Int64
+  @block_out : Int64
+  # What the block's LZMA2 chunks say they decode to, so far.
+  @block_lz : Int64
+  @blocks : Int64
+  @sum_unpadded : Int64
+  @sum_uncomp : Int64
+  @records : UInt64
+
+  # The filters before LZMA2, in the order they are undone.
+  @nfilters : Int32
+  @fkind : Pointer(Int32)
+  @fdist : Pointer(Int32)
+  @fhist : Pointer(UInt8)
+  @fhpos : Pointer(Int32)
+  @fx86pos : Pointer(UInt32)
+  @fx86mask : Pointer(UInt32)
+  # Where each filter's bytes not yet filtered start in the stage.
+  @fu : Pointer(Int32)
+  @stage : Pointer(UInt8)
+  @stage_cap : Int32
+  @sbeg : Int32
+  @slen : Int32
+  @ready : Int32
+
+  def initialize(@format : XzFormat, @dict_limit : Int64, @source : Proc(String | Nil))
+    @piece = ""
+    @piece_pos = 0
+    @exhausted = false
+    @buf = Pointer(UInt8).malloc((IN_CAP + SLACK).to_u64)
+    @in_pos = 0
+    @in_end = 0
+    @in_base = 0_i64
+    @state = @format == XzFormat::Xz ? STREAM_HEAD : ALONE_HEAD
+    @failed = false
+    @error = XzError.new("")
+    @waiting = false
+    @scratch = Pointer(UInt8).malloc(64_u64)
+    @dict = Pointer(UInt8).malloc(1_u64)
+    @dcap = 0
+    @dsize = DICT_MIN
+    @dpos = 0
+    @written = 0_i64
+    @pending = 0
+    @probs = Pointer(UInt16).malloc(1_u64)
+    @probs_cap = 0
+    @lc = 0
+    @lp = 0
+    @pb = 0
+    @lstate = 0
+    @rep0 = 0_u32
+    @rep1 = 0_u32
+    @rep2 = 0_u32
+    @rep3 = 0_u32
+    @len = 0
+    @rem = 0
+    @range = 0xffffffff_u32
+    @code = 0_u32
+    @lz_stop = 0_i64
+    @lz_left = 0_i64
+    @marker_next = false
+    @need_dict_reset = true
+    @need_props = true
+    @copy_left = 0
+    @check_id = 0
+    @stream_flags = 0
+    @crc32 = 0_u32
+    @crc64 = 0_u64
+    @sha = SHA256.new
+    @header_size = 0
+    @data_start = 0_i64
+    @data_end = 0_i64
+    @declared_comp = -1_i64
+    @declared_uncomp = -1_i64
+    @block_out = 0_i64
+    @block_lz = 0_i64
+    @blocks = 0_i64
+    @sum_unpadded = 0_i64
+    @sum_uncomp = 0_i64
+    @records = 0_u64
+    @nfilters = 0
+    @fkind = Pointer(Int32).malloc(4_u64)
+    @fdist = Pointer(Int32).malloc(4_u64)
+    @fhist = Pointer(UInt8).malloc(1024_u64)
+    @fhpos = Pointer(Int32).malloc(4_u64)
+    @fx86pos = Pointer(UInt32).malloc(4_u64)
+    @fx86mask = Pointer(UInt32).malloc(4_u64)
+    @fu = Pointer(Int32).malloc(4_u64)
+    @stage = Pointer(UInt8).malloc(1_u64)
+    @stage_cap = 0
+    @sbeg = 0
+    @slen = 0
+    @ready = 0
+  end
+
+  def failed? : Bool
+    @failed
+  end
+
+  def error : XzError
+    @error
+  end
+
+  def finished? : Bool
+    @state == DONE && @pending == 0 && @slen == @sbeg && !@failed
+  end
+
+  # Up to *max* bytes, "" at the end; see `XzReader#read`.
+  def read(max : Int32) : String | XzError
+    raise "XzReader: read wants at least one byte, not #{max}" if max < 1
+    return @error if @failed
+    want = max < @dsize ? max : @dsize
+    while true
+      return take_ready(max) if @ready > @sbeg
+      run(want) if @pending < want
+      return @error if @failed
+      return take(max) if @nfilters == 0 && @slen == @sbeg
+      pump(@state == BLOCK_END)
+      return take_ready(max) if @ready > @sbeg
+      return "" if @state == DONE && @pending == 0
+    end
+    ""
+  end
+
+  # Every byte there is, into *sink*: `Xz.decompress`, without a string
+  # for each piece.
+  def drain(sink : String::Builder) : Nil
+    while !@failed
+      if @ready > @sbeg
+        n = @ready - @sbeg
+        account(@stage + @sbeg.to_i64, n)
+        sink.write(@stage + @sbeg.to_i64, n)
+        @sbeg = @ready
+        next
+      end
+      run(@dsize) if @pending < @dsize
+      return if @failed
+      if @nfilters == 0 && @slen == @sbeg
+        return if @pending == 0
+        start = @dpos - @pending
+        start = start + @dcap if start < 0
+        first = @pending < @dcap - start ? @pending : @dcap - start
+        account(@dict + start.to_i64, first)
+        sink.write(@dict + start.to_i64, first)
+        rest = @pending - first
+        if rest > 0
+          account(@dict, rest)
+          sink.write(@dict, rest)
+        end
+        @pending = 0
+        next
+      end
+      pump(@state == BLOCK_END)
+      return if @ready == @sbeg && @state == DONE && @pending == 0
+    end
+  end
+
+  # The oldest *max* bytes of the ring not yet read.
+  private def take(max : Int32) : String
+    n = @pending < max ? @pending : max
+    return "" if n == 0
+    start = @dpos - @pending
+    start = start + @dcap if start < 0
+    first = n < @dcap - start ? n : @dcap - start
+    src = @dict + start.to_i64
+    ring = @dict
+    @pending = @pending - n
+    account(src, first)
+    account(ring, n - first) if n > first
+    String.new(n) do |dst|
+      dst.copy_from(src, first)
+      (dst + first.to_i64).copy_from(ring, n - first) if n > first
+    end
+  end
+
+  # Up to *max* of the filtered bytes waiting in the stage.
+  private def take_ready(max : Int32) : String
+    n = @ready - @sbeg
+    n = max if n > max
+    src = @stage + @sbeg.to_i64
+    @sbeg = @sbeg + n
+    account(src, n)
+    String.new(n) { |dst| dst.copy_from(src, n) }
+  end
+
+  # The block's check and size over bytes handed out.
+  private def account(p : Pointer(UInt8), n : Int32) : Nil
+    return if n == 0
+    @block_out = @block_out + n.to_i64
+    case @check_id
+    when  1 then @crc32 = CRC32.update(@crc32, p, n)
+    when  4 then @crc64 = CRC64.update(@crc64, p, n)
+    when 10 then @sha.update(p, n)
+    end
+  end
+
+  # What waits in the ring into the stage, after what the filters held
+  # back, and through the filters in the order they are undone: each
+  # filters what the one before it let through, and keeps back what it
+  # cannot decide yet. *final* is the block's end, where nothing more is
+  # coming and what a filter kept back goes out as it is.
+  private def pump(final : Bool) : Nil
+    if @sbeg > 0
+      live = @slen - @sbeg
+      @stage.copy_from(@stage + @sbeg.to_i64, live)
+      k = 0
+      while k < @nfilters
+        @fu[k] = @fu[k] - @sbeg
+        k = k + 1
+      end
+      @ready = @ready - @sbeg
+      @slen = live
+      @sbeg = 0
+    end
+    if @slen + @pending > @stage_cap
+      cap = @slen + @pending + 64
+      @stage = @stage.realloc(cap.to_u64)
+      @stage_cap = cap
+    end
+    if @pending > 0
+      start = @dpos - @pending
+      start = start + @dcap if start < 0
+      first = @pending < @dcap - start ? @pending : @dcap - start
+      (@stage + @slen.to_i64).copy_from(@dict + start.to_i64, first)
+      (@stage + (@slen + first).to_i64).copy_from(@dict, @pending - first) if @pending > first
+      @slen = @slen + @pending
+      @pending = 0
+    end
+    limit = @slen
+    k = 0
+    while k < @nfilters
+      start = @fu[k]
+      done = filter(k, @stage + start.to_i64, limit - start)
+      done = limit - start if final
+      @fu[k] = start + done
+      limit = start + done
+      k = k + 1
+    end
+    @ready = limit
+  end
+
+  # Filter *k* undone over *n* bytes at *p*, in place: how many of them
+  # it has decided.
+  private def filter(k : Int32, p : Pointer(UInt8), n : Int32) : Int32
+    if @fkind[k] == FILTER_DELTA
+      delta(k, p, n)
+      n
+    else
+      x86(k, p, n)
+    end
+  end
+
+  # liblzma's `delta_decode`: each byte plus the byte *distance* before
+  # it, from a history of 256 that runs downward.
+  private def delta(k : Int32, p : Pointer(UInt8), n : Int32) : Nil
+    hist = @fhist + (k * 256).to_i64
+    distance = @fdist[k]
+    pos = @fhpos[k]
+    i = 0
+    while i < n
+      b = p[i] &+ hist[(distance + pos) & 255]
+      p[i] = b
+      hist[pos & 255] = b
+      pos = (pos - 1) & 255
+      i = i + 1
+    end
+    @fhpos[k] = pos
+  end
+
+  # XZ Embedded's `bcj_x86`: a CALL (E8) or JMP (E9) whose 32-bit operand
+  # looks like an address near the code (its top byte 00 or FF) had that
+  # address made absolute by the encoder, which compresses better; it is
+  # made relative again here. Whether a byte that looks like E8 is one
+  # depends on the three before it (`prev_mask`), and the last four
+  # bytes cannot be decided until what follows them arrives.
+  private def x86(k : Int32, p : Pointer(UInt8), n : Int32) : Int32
+    return 0 if n <= 4
+    size = n - 4
+    prev_pos = -1
+    prev_mask = @fx86mask[k]
+    pos = @fx86pos[k]
+    i = 0
+    while i < size
+      if (p[i] & 0xfe_u8) != 0xe8_u8
+        i = i + 1
+        next
+      end
+      gap = i - prev_pos
+      if gap > 3
+        prev_mask = 0_u32
+      else
+        prev_mask = (prev_mask.unsafe_shl(gap - 1)) & 7_u32
+        if prev_mask != 0_u32
+          b = p[i + 4 - X86_BIT_NUM[prev_mask.to_i32]]
+          if !X86_ALLOWED[prev_mask.to_i32] || b == 0_u8 || b == 0xff_u8
+            prev_pos = i
+            prev_mask = prev_mask.unsafe_shl(1) | 1_u32
+            i = i + 1
+            next
+          end
+        end
+      end
+      prev_pos = i
+      top = p[i + 4]
+      if top == 0_u8 || top == 0xff_u8
+        src = p[i + 1].to_u32 | p[i + 2].to_u32.unsafe_shl(8) | p[i + 3].to_u32.unsafe_shl(16) | top.to_u32.unsafe_shl(24)
+        dest = 0_u32
+        while true
+          dest = src &- (pos &+ i.to_u32 &+ 5_u32)
+          break if prev_mask == 0_u32
+          j = X86_BIT_NUM[prev_mask.to_i32] * 8
+          b = dest.unsafe_shr(24 - j) & 255_u32
+          break unless b == 0_u32 || b == 255_u32
+          src = dest ^ (1_u32.unsafe_shl(32 - j) &- 1_u32)
+        end
+        dest = dest & 0x01ffffff_u32
+        dest = dest | (0_u32 &- (dest & 0x01000000_u32))
+        p[i + 1] = (dest & 255_u32).to_u8
+        p[i + 2] = (dest.unsafe_shr(8) & 255_u32).to_u8
+        p[i + 3] = (dest.unsafe_shr(16) & 255_u32).to_u8
+        p[i + 4] = dest.unsafe_shr(24).to_u8
+        i = i + 5
+      else
+        prev_mask = prev_mask.unsafe_shl(1) | 1_u32
+        i = i + 1
+      end
+    end
+    gap = i - prev_pos
+    @fx86mask[k] = gap > 3 ? 0_u32 : prev_mask.unsafe_shl(gap - 1)
+    @fx86pos[k] = pos &+ i.to_u32
+    i
+  end
+
+  X86_ALLOWED = [true, true, true, false, true, false, false, false]
+  X86_BIT_NUM = [0, 1, 2, 2, 3, 3, 3, 3]
+
+  # Steps until *want* bytes wait in the ring, the stream has ended, or
+  # it has failed; or there are bytes to hand out and going on would call
+  # the source, which might be a socket that holds back the next piece.
+  def run(want : Int32) : Nil
+    while !@failed && @state != DONE
+      break if @pending >= want
+      case @state
+      when STREAM_HEAD then stream_head
+      when BLOCK_HEAD  then block_head
+      when CHUNK       then chunk
+      when LZMA, ALONE then lzma(want)
+      when COPY        then copy(want)
+      when BLOCK_END
+        break if @pending > 0 || @slen > @sbeg
+        block_end
+      when PADDING    then padding
+      when ALONE_HEAD then alone_head
+      else
+        break if @pending > 0
+        alone_end
+      end
+      if @waiting
+        @waiting = false
+        break
+      end
+    end
+  end
+
+  private def fail(message : String) : Nil
+    return if @failed
+    @failed = true
+    @error = XzError.new(message)
+  end
+
+  # More of the source's bytes after the ones in hand, or false when it
+  # has none.
+  private def fill : Bool
+    if @piece_pos >= @piece.bytesize
+      return false if @exhausted
+      got = @source.call
+      if got.nil? || got.empty?
+        @exhausted = true
+        return false
+      end
+      @piece = got
+      @piece_pos = 0
+    end
+    if @in_pos > 0
+      rest = @in_end - @in_pos
+      @buf.copy_from(@buf + @in_pos.to_i64, rest)
+      @in_base = @in_base + @in_pos.to_i64
+      @in_end = rest
+      @in_pos = 0
+    end
+    n = @piece.bytesize - @piece_pos
+    n = IN_CAP - @in_end if n > IN_CAP - @in_end
+    (@buf + @in_end.to_i64).copy_from(@piece.to_unsafe + @piece_pos.to_i64, n)
+    @piece_pos = @piece_pos + n
+    @in_end = @in_end + n
+    i = 0
+    while i < SLACK
+      @buf[@in_end + i] = 0_u8
+      i = i + 1
+    end
+    true
+  end
+
+  # Whether getting more input would mean calling the source.
+  private def dry? : Bool
+    @piece_pos >= @piece.bytesize && !@exhausted
+  end
+
+  # Whether *n* bytes are in hand, after taking what the source has.
+  private def ahead?(n : Int32) : Bool
+    while @in_end - @in_pos < n
+      return false unless fill
+    end
+    true
+  end
+
+  # The next byte, or -1 at the end of the input.
+  private def byte : Int32
+    if @in_pos >= @in_end
+      return -1 unless fill
+    end
+    b = @buf[@in_pos]
+    @in_pos = @in_pos + 1
+    b.to_i32
+  end
+
+  private def at : Int64
+    @in_base + @in_pos.to_i64
+  end
+
+  private def le32(p : Pointer(UInt8)) : UInt32
+    p[0].to_u32 | p[1].to_u32.unsafe_shl(8) | p[2].to_u32.unsafe_shl(16) | p[3].to_u32.unsafe_shl(24)
+  end
+
+  private def le64(p : Pointer(UInt8)) : UInt64
+    le32(p).to_u64 | le32(p + 4_i64).to_u64.unsafe_shl(32)
+  end
+
+  # A size as people say it: "64 MiB", "12 KiB", "1000 bytes".
+  def self.size_name(n : Int64) : String
+    return "#{n.unsafe_shr(20)} MiB" if n >= 1048576_i64 && (n & 1048575_i64) == 0_i64
+    return "#{n.unsafe_shr(10)} KiB" if n >= 1024_i64 && (n & 1023_i64) == 0_i64
+    "#{n} bytes"
+  end
+
+  def self.hex(v : UInt64, digits : Int32) : String
+    chars = "0123456789abcdef"
+    String.new(digits) do |dst|
+      i = 0
+      while i < digits
+        dst[i] = chars.to_unsafe[(v.unsafe_shr((digits - 1 - i) * 4) & 15_u64).to_i32]
+        i = i + 1
+      end
+    end
+  end
+
+  # ---- the dictionary ----
+
+  # A dictionary of *size* bytes for the block or stream that starts: the
+  # ring keeps its memory, and grows toward *size* as it fills.
+  private def dict_setup(size : Int64) : Nil
+    @dsize = size < DICT_MIN.to_i64 ? DICT_MIN : size.to_i32
+    if @dcap == 0
+      @dcap = @dsize < FIRST_RING ? @dsize : FIRST_RING
+      @dict = Pointer(UInt8).malloc(@dcap.to_u64)
+      @dpos = 0
+    end
+    @written = 0_i64
+  end
+
+  # The write position at the end of the ring: grow it if it is smaller
+  # than the dictionary, else wrap.
+  private def wrap : Nil
+    if @dcap < @dsize
+      cap = @dcap.to_i64 * 2_i64
+      cap = @dsize.to_i64 if cap > @dsize.to_i64
+      @dict = @dict.realloc(cap.to_u64)
+      @dcap = cap.to_i32
+    else
+      @dpos = 0
+    end
+  end
+
+  private def put(b : UInt8) : Nil
+    wrap if @dpos == @dcap
+    @dict[@dpos] = b
+    @dpos = @dpos + 1
+    @written = @written + 1_i64
+    @pending = @pending + 1
+  end
+
+  # *n* bytes from *src* (the input), as an uncompressed chunk has them.
+  private def put_bytes(src : Pointer(UInt8), n : Int32) : Nil
+    done = 0
+    while done < n
+      wrap if @dpos == @dcap
+      k = n - done
+      k = @dcap - @dpos if k > @dcap - @dpos
+      (@dict + @dpos.to_i64).copy_from(src + done.to_i64, k)
+      @dpos = @dpos + k
+      done = done + k
+    end
+    @written = @written + n.to_i64
+    @pending = @pending + n
+  end
+
+  # The byte *distance* + 1 back from the write position.
+  private def back(distance : Int32) : Int32
+    i = @dpos - distance - 1
+    i = i + @dcap if i < 0
+    @dict[i].to_i32
+  end
+
+  # *n* bytes from *distance* back, which may overlap what they write;
+  # eight at a time where the source is eight or more behind or wrapped
+  # ahead, so no word reads what the same copy has not written yet.
+  private def copy_match(distance : Int32, n : Int32) : Nil
+    left = n
+    while left > 0
+      wrap if @dpos == @dcap
+      src = @dpos - distance
+      src = src + @dcap if src < 0
+      k = left
+      k = @dcap - @dpos if k > @dcap - @dpos
+      k = @dcap - src if k > @dcap - src
+      dst = @dict + @dpos.to_i64
+      from = @dict + src.to_i64
+      i = 0
+      gap = @dpos - src
+      if gap >= 8 || gap < 0
+        while i + 8 <= k
+          (dst + i.to_i64).as(Pointer(UInt64)).value = (from + i.to_i64).as(Pointer(UInt64)).value
+          i = i + 8
+        end
+      end
+      while i < k
+        dst[i] = from[i]
+        i = i + 1
+      end
+      @dpos = @dpos + k
+      left = left - k
+    end
+    @written = @written + n.to_i64
+    @pending = @pending + n
+  end
+
+  # ---- the range coder and the LZMA decoder ----
+
+  # The range coder's start: five bytes, the first always zero (liblzma
+  # refuses one that is not), the other four the code.
+  private def rc_init(who : String) : Bool
+    unless ahead?(5)
+      fail("#{who}: the stream ends inside the range coder's first bytes")
+      return false
+    end
+    unless @buf[@in_pos] == 0_u8
+      fail("#{who}: the range coder's first byte is not zero")
+      return false
+    end
+    @code = @buf[@in_pos + 1].to_u32.unsafe_shl(24) | @buf[@in_pos + 2].to_u32.unsafe_shl(16) |
+            @buf[@in_pos + 3].to_u32.unsafe_shl(8) | @buf[@in_pos + 4].to_u32
+    @range = 0xffffffff_u32
+    @in_pos = @in_pos + 5
+    true
+  end
+
+  private def normalize : Nil
+    if @range < 0x1000000_u32
+      @range = @range.unsafe_shl(8)
+      @code = @code.unsafe_shl(8) | @buf[@in_pos].to_u32
+      @in_pos = @in_pos + 1
+    end
+  end
+
+  # One bit by the probability at *i*, which learns from it.
+  private def bit(i : Int32) : Int32
+    normalize
+    prob = @probs[i].to_u32
+    bound = @range.unsafe_shr(11) &* prob
+    if @code < bound
+      @range = bound
+      @probs[i] = (prob + (2048_u32 - prob).unsafe_shr(5)).unsafe_to_u16
+      0
+    else
+      @range = @range - bound
+      @code = @code - bound
+      @probs[i] = (prob - prob.unsafe_shr(5)).unsafe_to_u16
+      1
+    end
+  end
+
+  # A symbol of a bit tree whose leaves start at *limit*, most significant
+  # bit first; the answer is the leaf, *limit* to 2 * *limit* - 1.
+  private def tree(base : Int32, limit : Int32) : Int32
+    symbol = 1
+    while symbol < limit
+      symbol = (symbol << 1) + bit(base + symbol)
+    end
+    symbol
+  end
+
+  # *bits* bits of a bit tree, least significant first.
+  private def reverse(base : Int32, bits : Int32) : UInt32
+    symbol = 1
+    result = 0_u32
+    i = 0
+    while i < bits
+      b = bit(base + symbol)
+      symbol = (symbol << 1) + b
+      result = result | b.to_u32.unsafe_shl(i)
+      i = i + 1
+    end
+    result
+  end
+
+  # *bits* bits at even odds, most significant first.
+  private def direct(bits : Int32) : UInt32
+    result = 0_u32
+    i = 0
+    while i < bits
+      normalize
+      @range = @range.unsafe_shr(1)
+      if @code >= @range
+        @code = @code - @range
+        result = result.unsafe_shl(1) | 1_u32
+      else
+        result = result.unsafe_shl(1)
+      end
+      i = i + 1
+    end
+    result
+  end
+
+  # lc, lp and pb from the properties byte (pb * 5 + lp) * 9 + lc.
+  private def lzma_props(props : Int32) : Nil
+    @lc = props % 9
+    @lp = (props // 9) % 5
+    @pb = props // 45
+    count = LITERAL + (0x300 << (@lc + @lp))
+    if count > @probs_cap
+      @probs = Pointer(UInt16).malloc(count.to_u64)
+      @probs_cap = count
+    end
+  end
+
+  # The state reset: every probability at one half, the state and the
+  # repeated distances to their start.
+  private def lzma_reset : Nil
+    count = LITERAL + (0x300 << (@lc + @lp))
+    i = 0
+    while i < count
+      @probs[i] = 1024_u16
+      i = i + 1
+    end
+    @lstate = 0
+    @rep0 = 0_u32
+    @rep1 = 0_u32
+    @rep2 = 0_u32
+    @rep3 = 0_u32
+    @rem = 0
+  end
+
+  private def match_len(base : Int32, pos_state : Int32) : Int32
+    if bit(base) == 0
+      2 + tree(base + 2 + pos_state * 8, 8) - 8
+    elsif bit(base + 1) == 0
+      10 + tree(base + 130 + pos_state * 8, 8) - 8
+    else
+      18 + tree(base + 258, 256) - 256
+    end
+  end
+
+  # The bytes the LZMA data decodes to, until *want* wait in the ring or
+  # the data's uncompressed size is reached.
+  private def lzma(want : Int32) : Nil
+    who = @state == LZMA ? "LZMA2" : "lzma"
+    pos_mask = (1 << @pb) - 1
+    lit_mask = (1 << @lp) - 1
+    while @pending < want
+      if @rem > 0
+        n = want - @pending
+        n = @rem if n > @rem
+        copy_match(@rep0.to_i32 + 1, n)
+        @rem = @rem - n
+        @lz_left = @lz_left - n.to_i64 if @lz_left > 0_i64
+        next
+      end
+      # The input for the next symbol: 21 bytes, or the rest of the
+      # chunk, or the rest of everything.
+      if @in_end - @in_pos < SYMBOL_BYTES
+        left = @lz_stop - at
+        need = left < SYMBOL_BYTES.to_i64 ? left.to_i32 : SYMBOL_BYTES
+        while @in_end - @in_pos < need
+          if @pending > 0 && dry?
+            @waiting = true
+            return
+          end
+          break unless fill
+        end
+      end
+      if @lz_left == 0_i64 && !@marker_next
+        lzma_end(who)
+        return
+      end
+      pos_state = (@written & pos_mask.to_i64).to_i32
+      st = @lstate
+      if bit(IS_MATCH + (st << 4) + pos_state) == 0
+        return corrupt(who, "lzma: the data goes on past the uncompressed size its header gives") if @lz_left == 0_i64
+        prev = @written > 0_i64 ? back(0) : 0
+        base = LITERAL + 0x300 * ((((@written & lit_mask.to_i64).to_i32) << @lc) + (prev >> (8 - @lc)))
+        symbol = 1
+        if st < 7
+          symbol = tree(base, 0x100)
+        else
+          match_byte = back(@rep0.to_i32) << 1
+          offset = 0x100
+          while symbol < 0x100
+            match_bit = match_byte & offset
+            match_byte = match_byte << 1
+            if bit(base + offset + match_bit + symbol) == 1
+              symbol = (symbol << 1) + 1
+              offset = match_bit
+            else
+              symbol = symbol << 1
+              offset = offset ^ match_bit
+            end
+          end
+        end
+        put((symbol & 0xff).to_u8)
+        @lstate = st <= 3 ? 0 : (st <= 9 ? st - 3 : st - 6)
+        @lz_left = @lz_left - 1_i64 if @lz_left > 0_i64
+      else
+        if bit(IS_REP + st) == 1
+          return corrupt(who, "#{who}: a repeated match before any byte") if @written == 0_i64
+          rep_match(st, pos_state)
+        else
+          new_match(st, pos_state)
+          if @rep0 == 0xffffffff_u32
+            end_marker(who)
+            return
+          end
+        end
+        return corrupt(who, "#{who}: a distance reaches before the output began") if @rep0.to_i64 >= @written
+        return corrupt(who, "#{who}: a distance reaches past the dictionary") if @rep0.to_i64 >= @dsize.to_i64
+        if @lz_left >= 0_i64 && @len.to_i64 > @lz_left
+          return corrupt(who, @state == LZMA ? "LZMA2: a match runs past the end of its chunk" : "lzma: the data goes on past the uncompressed size its header gives")
+        end
+        @rem = @len
+      end
+      return if overrun(who)
+    end
+  end
+
+  # What a symbol found wrong, unless it read past the input it had, which
+  # is what went wrong first: the zeros after the input are not a stream.
+  private def corrupt(who : String, message : String) : Nil
+    fail(message) unless overrun(who)
+  end
+
+  # Whether the last symbol read past the input it had: past the end of
+  # everything, or past its chunk.
+  private def overrun(who : String) : Bool
+    if @in_pos > @in_end
+      fail(@state == LZMA ? "xz: the stream ends inside a block" : "lzma: the stream ends inside the LZMA data")
+      return true
+    end
+    if at > @lz_stop
+      fail("LZMA2: a chunk's data runs past its compressed size")
+      return true
+    end
+    false
+  end
+
+  private def rep_match(st : Int32, pos_state : Int32) : Nil
+    if bit(IS_REP0 + st) == 0
+      if bit(IS_REP0_LONG + (st << 4) + pos_state) == 0
+        @lstate = st < 7 ? 9 : 11
+        @len = 1
+        return
+      end
+    else
+      tmp = 0_u32
+      if bit(IS_REP1 + st) == 0
+        tmp = @rep1
+      else
+        if bit(IS_REP2 + st) == 0
+          tmp = @rep2
+        else
+          tmp = @rep3
+          @rep3 = @rep2
+        end
+        @rep2 = @rep1
+      end
+      @rep1 = @rep0
+      @rep0 = tmp
+    end
+    @lstate = st < 7 ? 8 : 11
+    @len = match_len(REP_LEN, pos_state)
+  end
+
+  private def new_match(st : Int32, pos_state : Int32) : Nil
+    @lstate = st < 7 ? 7 : 10
+    @rep3 = @rep2
+    @rep2 = @rep1
+    @rep1 = @rep0
+    @len = match_len(MATCH_LEN, pos_state)
+    dist_state = @len < 6 ? @len - 2 : 3
+    slot = tree(DIST_SLOT + dist_state * 64, 64) - 64
+    if slot < 4
+      @rep0 = slot.to_u32
+      return
+    end
+    limit = (slot >> 1) - 1
+    r = (2 | (slot & 1)).to_u32
+    if slot < 14
+      r = r.unsafe_shl(limit)
+      r = r + reverse(DIST_SPECIAL + r.to_i32 - slot - 1, limit)
+    else
+      r = r.unsafe_shl(limit - 4) | direct(limit - 4)
+      r = r.unsafe_shl(4) | reverse(DIST_ALIGN, 4)
+    end
+    @rep0 = r
+  end
+
+  # The LZMA data's uncompressed size reached: an LZMA2 chunk must end
+  # there, its range coder at zero; a .lzma stream may, or may go on to
+  # an end marker.
+  private def lzma_end(who : String) : Nil
+    normalize
+    return if overrun(who)
+    if @state == LZMA
+      return fail("LZMA2: a chunk's data ends before its compressed size") unless at == @lz_stop
+      return fail("LZMA2: the range coder does not end at zero") unless @code == 0_u32
+      @state = CHUNK
+    elsif @code == 0_u32
+      @state = ALONE_END
+    else
+      @marker_next = true
+    end
+  end
+
+  private def end_marker(who : String) : Nil
+    return fail("LZMA2: an end marker inside a chunk") if @state == LZMA
+    normalize
+    return if overrun(who)
+    return fail("lzma: the range coder does not end at zero after the end marker") unless @code == 0_u32
+    return fail("lzma: the end marker comes before the uncompressed size its header gives") if @lz_left > 0_i64
+    @state = ALONE_END
+  end
+
+  # ---- the .xz container ----
+
+  # The stream header (§2.1.1): the magic, the flags - the check type -
+  # and their CRC32.
+  private def stream_head : Nil
+    return fail("xz: the stream is shorter than its header") unless ahead?(12)
+    h = @buf + @in_pos.to_i64
+    unless h[0] == 0xfd_u8 && h[1] == 0x37_u8 && h[2] == 0x7a_u8 && h[3] == 0x58_u8 && h[4] == 0x5a_u8 && h[5] == 0_u8
+      return fail("xz: not an xz stream (the magic bytes are not FD 37 7A 58 5A 00)")
+    end
+    return fail("xz: the stream header's CRC32 does not match") unless CRC32.update(0_u32, h + 6_i64, 2) == le32(h + 8_i64)
+    return fail("xz: the stream flags have reserved bits set") unless h[6] == 0_u8 && (h[7] & 0xf0_u8) == 0_u8
+    id = h[7].to_i32
+    unless id == 0 || id == 1 || id == 4 || id == 10
+      return fail("xz: check type #{id} is not one this reader verifies (none, CRC32, CRC64 or SHA-256)")
+    end
+    @in_pos = @in_pos + 12
+    @check_id = id
+    @stream_flags = id
+    @blocks = 0_i64
+    @sum_unpadded = 0_i64
+    @sum_uncomp = 0_i64
+    @records = 0_u64
+    @state = BLOCK_HEAD
+  end
+
+  # A variable-length integer of the format (§1.2) at *p*[*i*], below
+  # *stop*: seven bits a byte, the least significant first, nine bytes at
+  # most and no zero byte at the end of a longer one. -1 for one that is
+  # not; `@vat` is where it ended.
+  @vat = 0
+
+  private def vli(p : Pointer(UInt8), i : Int32, stop : Int32) : Int64
+    v = 0_i64
+    k = 0
+    j = i
+    while true
+      return -1_i64 if j >= stop || k >= 9
+      b = p[j]
+      j = j + 1
+      v = v | (b & 0x7f_u8).to_i64.unsafe_shl(k * 7)
+      if (b & 0x80_u8) == 0_u8
+        return -1_i64 if b == 0_u8 && k > 0
+        break
+      end
+      k = k + 1
+    end
+    @vat = j
+    v
+  end
+
+  # A block header (§3.1), or the index where a block would start.
+  private def block_head : Nil
+    return fail("xz: the stream ends before its index") unless ahead?(1)
+    first = @buf[@in_pos].to_i32
+    if first == 0
+      index
+      return
+    end
+    size = (first + 1) * 4
+    return fail("xz: the stream ends inside a block header") unless ahead?(size)
+    h = @buf + @in_pos.to_i64
+    return fail("xz: a block header's CRC32 does not match") unless CRC32.update(0_u32, h, size - 4) == le32(h + (size - 4).to_i64)
+    flags = h[1].to_i32
+    return fail("xz: a block header has reserved flags set") unless (flags & 0x3c) == 0
+    stop = size - 4
+    i = 2
+    @declared_comp = -1_i64
+    @declared_uncomp = -1_i64
+    if (flags & 0x40) != 0
+      @declared_comp = vli(h, i, stop)
+      return fail("xz: a block header's compressed size is not a number") if @declared_comp < 0_i64
+      return fail("xz: a block header gives a compressed size of zero") if @declared_comp == 0_i64
+      # The block's unpadded size - header, data, check - must stay under
+      # 2^63 (§3.1.3), so a size past that is refused here, before any of
+      # the data it would describe is decoded.
+      if @declared_comp > 0x7ffffffffffffffc_i64 - size.to_i64 - XzCore.check_size(@check_id).to_i64
+        return fail("xz: a block header's compressed size is past what a block can hold")
+      end
+      i = @vat
+    end
+    if (flags & 0x80) != 0
+      @declared_uncomp = vli(h, i, stop)
+      return fail("xz: a block header's uncompressed size is not a number") if @declared_uncomp < 0_i64
+      i = @vat
+    end
+    count = (flags & 3) + 1
+    dict = 0_i64
+    @nfilters = 0
+    k = 0
+    while k < count
+      id = vli(h, i, stop)
+      return fail("xz: a block header's filter is not a number") if id < 0_i64
+      i = @vat
+      psize = vli(h, i, stop)
+      return fail("xz: a block header's filter properties are not a number") if psize < 0_i64
+      i = @vat
+      return fail("xz: a filter's properties run past its block header") if psize > (stop - i).to_i64
+      props = h + i.to_i64
+      plen = psize.to_i32
+      i = i + plen
+      last = k == count - 1
+      if id == 0x21_i64
+        return fail("xz: LZMA2 is not the last filter") unless last
+        return fail("xz: LZMA2's properties are not one byte") unless plen == 1
+        d = props[0].to_i32
+        return fail("xz: LZMA2's dictionary property has reserved bits set") unless (d & 0xc0) == 0
+        return fail("xz: LZMA2's dictionary property is past 40") if d > 40
+        dict = d == 40 ? 0xffffffff_i64 : (2_i64 | (d & 1).to_i64).unsafe_shl(d // 2 + 11)
+      elsif last
+        return fail("xz: the last filter is not LZMA2")
+      elsif id == 0x03_i64
+        return fail("xz: the delta filter's properties are not one byte") unless plen == 1
+        slot = count - 2 - k
+        @fkind[slot] = FILTER_DELTA
+        @fdist[slot] = props[0].to_i32 + 1
+        @fhpos[slot] = 0
+        z = 0
+        while z < 256
+          @fhist[slot * 256 + z] = 0_u8
+          z = z + 1
+        end
+        @nfilters = @nfilters + 1
+      elsif id == 0x04_i64
+        return fail("xz: the x86 filter's properties are not zero or four bytes") unless plen == 0 || plen == 4
+        slot = count - 2 - k
+        @fkind[slot] = FILTER_X86
+        @fx86pos[slot] = plen == 4 ? le32(props) : 0_u32
+        @fx86mask[slot] = 0_u32
+        @nfilters = @nfilters + 1
+      else
+        return fail("xz: filter #{XzCore.filter_name(id)} is not supported")
+      end
+      k = k + 1
+    end
+    while i < stop
+      return fail("xz: a block header's padding is not zero") unless h[i] == 0_u8
+      i = i + 1
+    end
+    if dict > @dict_limit
+      return fail("xz: the block's dictionary is #{XzCore.size_name(dict)}, past the limit of #{XzCore.size_name(@dict_limit)}")
+    end
+    @in_pos = @in_pos + size
+    @header_size = size
+    @data_start = at
+    dict_setup(dict)
+    k = 0
+    while k < @nfilters
+      @fu[k] = 0
+      k = k + 1
+    end
+    @sbeg = 0
+    @slen = 0
+    @ready = 0
+    @crc32 = 0_u32
+    @crc64 = 0_u64
+    @sha.reset
+    @block_out = 0_i64
+    @block_lz = 0_i64
+    @need_dict_reset = true
+    @need_props = true
+    @state = CHUNK
+  end
+
+  def self.filter_name(id : Int64) : String
+    case id
+    when 0x05_i64 then "0x05 (PowerPC BCJ)"
+    when 0x06_i64 then "0x06 (IA-64 BCJ)"
+    when 0x07_i64 then "0x07 (ARM BCJ)"
+    when 0x08_i64 then "0x08 (ARM-Thumb BCJ)"
+    when 0x09_i64 then "0x09 (SPARC BCJ)"
+    when 0x0a_i64 then "0x0a (ARM64 BCJ)"
+    when 0x0b_i64 then "0x0b (RISC-V BCJ)"
+    else               "0x#{XzCore.hex(id.to_u64, 2)}"
+    end
+  end
+
+  # An LZMA2 chunk's header (the control byte and the sizes and
+  # properties it says follow), or the end of the LZMA2 data.
+  private def chunk : Nil
+    return fail("xz: the stream ends inside a block") unless ahead?(1)
+    c = @buf[@in_pos].to_i32
+    if c == 0
+      @in_pos = @in_pos + 1
+      @data_end = at
+      @state = BLOCK_END
+      return
+    end
+    if c >= 0xe0 || c == 1
+      @need_props = true
+      @need_dict_reset = false
+      @written = 0_i64
+    elsif @need_dict_reset
+      return fail("LZMA2: the first chunk does not reset the dictionary")
+    end
+    if c >= 0x80
+      return fail("xz: the stream ends inside a block") unless ahead?(c >= 0xc0 ? 6 : 5)
+      h = @buf + @in_pos.to_i64
+      return unless within(c >= 0xc0 ? 6 : 5, (h[3].to_i32 << 8) + h[4].to_i32 + 1, ((c & 0x1f) << 16) + (h[1].to_i32 << 8) + h[2].to_i32 + 1)
+    elsif c <= 2
+      return fail("xz: the stream ends inside a block") unless ahead?(3)
+      size = (@buf[@in_pos + 1].to_i32 << 8) + @buf[@in_pos + 2].to_i32 + 1
+      return unless within(3, size, size)
+    end
+    if c >= 0x80
+      head = c >= 0xc0 ? 6 : 5
+      return fail("xz: the stream ends inside a block") unless ahead?(head)
+      h = @buf + @in_pos.to_i64
+      unpacked = ((c & 0x1f) << 16) + (h[1].to_i32 << 8) + h[2].to_i32 + 1
+      packed = (h[3].to_i32 << 8) + h[4].to_i32 + 1
+      if c >= 0xc0
+        props = h[5].to_i32
+        return fail("LZMA2: a properties byte past 224") if props > 224
+        return fail("LZMA2: lc + lp is past 4") if props % 9 + (props // 9) % 5 > 4
+        lzma_props(props)
+        @need_props = false
+        lzma_reset
+      elsif @need_props
+        return fail("LZMA2: a chunk without properties where they are needed")
+      elsif c >= 0xa0
+        lzma_reset
+      end
+      @in_pos = @in_pos + head
+      return fail("LZMA2: a chunk shorter than its range coder's first bytes") if packed < 5
+      @lz_stop = at + packed.to_i64
+      return unless rc_init("LZMA2")
+      @lz_left = unpacked.to_i64
+      @marker_next = false
+      @state = LZMA
+    else
+      return fail("LZMA2: control byte 0x#{XzCore.hex(c.to_u64, 2)} is not one LZMA2 defines") if c > 2
+      return fail("xz: the stream ends inside a block") unless ahead?(3)
+      @copy_left = (@buf[@in_pos + 1].to_i32 << 8) + @buf[@in_pos + 2].to_i32 + 1
+      @in_pos = @in_pos + 3
+      @state = COPY
+    end
+  end
+
+  # Whether a chunk of *head* + *packed* bytes that decodes to *unpacked*
+  # stays inside the sizes the block header gave, as liblzma holds a
+  # block to them: a block that would go past either is refused before
+  # the chunk is decoded, rather than after what it held was handed out.
+  private def within(head : Int32, packed : Int32, unpacked : Int32) : Bool
+    if @declared_comp >= 0_i64 && at + head.to_i64 + packed.to_i64 - @data_start >= @declared_comp
+      fail("xz: a block's data runs past the compressed size its header gives")
+      return false
+    end
+    @block_lz = @block_lz + unpacked.to_i64
+    if @declared_uncomp >= 0_i64 && @block_lz > @declared_uncomp
+      fail("xz: a block's data goes past the uncompressed size its header gives")
+      return false
+    end
+    true
+  end
+
+  # An uncompressed chunk's bytes, into the dictionary as they are.
+  private def copy(want : Int32) : Nil
+    while @copy_left > 0
+      return if @pending >= want
+      if @in_pos >= @in_end
+        if @pending > 0 && dry?
+          @waiting = true
+          return
+        end
+        return fail("xz: the stream ends inside a block") unless fill
+      end
+      n = @copy_left
+      n = @in_end - @in_pos if n > @in_end - @in_pos
+      n = want - @pending if n > want - @pending
+      put_bytes(@buf + @in_pos.to_i64, n)
+      @in_pos = @in_pos + n
+      @copy_left = @copy_left - n
+    end
+    @state = CHUNK
+  end
+
+  # After the block's data, once every byte of it has been handed out:
+  # its sizes against its header, its padding, its check.
+  private def block_end : Nil
+    comp = @data_end - @data_start
+    if @declared_comp >= 0_i64 && @declared_comp != comp
+      return fail("xz: a block's compressed size does not match its header (#{comp}, header says #{@declared_comp})")
+    end
+    if @declared_uncomp >= 0_i64 && @declared_uncomp != @block_out
+      return fail("xz: a block's uncompressed size does not match its header (#{@block_out}, header says #{@declared_uncomp})")
+    end
+    pad = ((4_i64 - (comp & 3_i64)) & 3_i64).to_i32
+    size = XzCore.check_size(@check_id)
+    return fail("xz: the stream ends inside a block's padding or check") unless ahead?(pad + size)
+    i = 0
+    while i < pad
+      return fail("xz: a block's padding is not zero") unless @buf[@in_pos + i] == 0_u8
+      i = i + 1
+    end
+    c = @buf + (@in_pos + pad).to_i64
+    case @check_id
+    when 1
+      want = le32(c)
+      return fail("xz: a block's CRC32 does not match (#{XzCore.hex(@crc32.to_u64, 8)}, stream says #{XzCore.hex(want.to_u64, 8)})") unless want == @crc32
+    when 4
+      want = le64(c)
+      return fail("xz: a block's CRC64 does not match (#{XzCore.hex(@crc64, 16)}, stream says #{XzCore.hex(want, 16)})") unless want == @crc64
+    when 10
+      digest = @sha.final
+      i = 0
+      while i < 32
+        return fail("xz: a block's SHA-256 does not match") unless digest[i] == c[i]
+        i = i + 1
+      end
+    end
+    @in_pos = @in_pos + pad + size
+    record(@header_size.to_i64 + comp + size.to_i64, @block_out)
+    @state = BLOCK_HEAD
+  end
+
+  def self.check_size(id : Int32) : Int32
+    case id
+    when  1 then 4
+    when  4 then 8
+    when 10 then 32
+    else         0
+    end
+  end
+
+  # One block as the index will list it: counted, summed, and folded into
+  # a CRC-64 of the records, which the index's records must reproduce.
+  private def record(unpadded : Int64, uncomp : Int64) : Nil
+    @blocks = @blocks + 1_i64
+    @sum_unpadded = @sum_unpadded &+ unpadded
+    @sum_uncomp = @sum_uncomp &+ uncomp
+    p = @scratch
+    i = 0
+    while i < 8
+      p[i] = (unpadded.unsafe_shr(i * 8) & 255_i64).to_u8
+      p[8 + i] = (uncomp.unsafe_shr(i * 8) & 255_i64).to_u8
+      i = i + 1
+    end
+    @records = CRC64.update(@records, p, 16)
+  end
+
+  # A variable-length integer read from the stream, each byte into the
+  # index's CRC32; -1 for one that is not, -2 for the stream ending.
+  @icrc = 0_u32
+  @isize = 0_i64
+
+  private def index_byte : Int32
+    b = byte
+    if b >= 0
+      @scratch[32] = b.to_u8
+      @icrc = CRC32.update(@icrc, @scratch + 32_i64, 1)
+      @isize = @isize + 1_i64
+    end
+    b
+  end
+
+  private def index_vli : Int64
+    v = 0_i64
+    k = 0
+    while true
+      return -1_i64 if k >= 9
+      b = index_byte
+      return -2_i64 if b < 0
+      v = v | (b & 0x7f).to_i64.unsafe_shl(k * 7)
+      if (b & 0x80) == 0
+        return -1_i64 if b == 0 && k > 0
+        break
+      end
+      k = k + 1
+    end
+    v
+  end
+
+  # The index (§4) and the stream footer (§2.1.2), checked against the
+  # blocks the stream had.
+  private def index : Nil
+    @icrc = 0_u32
+    @isize = 0_i64
+    index_byte
+    count = index_vli
+    return fail("xz: the stream ends inside its index") if count == -2_i64
+    return fail("xz: the index's record count is not a number") if count < 0_i64
+    return fail("xz: the index lists #{count} blocks where the stream has #{@blocks}") unless count == @blocks
+    sum_unpadded = 0_i64
+    sum_uncomp = 0_i64
+    records = 0_u64
+    n = 0_i64
+    while n < count
+      unpadded = index_vli
+      uncomp = unpadded < 0_i64 ? unpadded : index_vli
+      return fail("xz: the stream ends inside its index") if unpadded == -2_i64 || uncomp == -2_i64
+      return fail("xz: an index record is not a number") if unpadded < 0_i64 || uncomp < 0_i64
+      # The smallest block is a header, a byte of data and no check, and
+      # none reaches 2^63; nor do all of a stream's put together.
+      if unpadded < 5_i64 || unpadded > 0x7ffffffffffffffc_i64
+        return fail("xz: an index record's unpadded size is not one a block can have")
+      end
+      return fail("xz: the index's uncompressed sizes add up past 2^63") if uncomp > 0x7fffffffffffffff_i64 - sum_uncomp
+      sum_unpadded = sum_unpadded &+ unpadded
+      sum_uncomp = sum_uncomp &+ uncomp
+      p = @scratch
+      i = 0
+      while i < 8
+        p[i] = (unpadded.unsafe_shr(i * 8) & 255_i64).to_u8
+        p[8 + i] = (uncomp.unsafe_shr(i * 8) & 255_i64).to_u8
+        i = i + 1
+      end
+      records = CRC64.update(records, p, 16)
+      n = n + 1_i64
+    end
+    unless sum_unpadded == @sum_unpadded && sum_uncomp == @sum_uncomp && records == @records
+      return fail("xz: the index does not match the blocks")
+    end
+    while (@isize & 3_i64) != 0_i64
+      b = index_byte
+      return fail("xz: the stream ends inside its index") if b < 0
+      return fail("xz: the index's padding is not zero") unless b == 0
+    end
+    want = @icrc
+    return fail("xz: the stream ends inside its index") unless ahead?(4)
+    return fail("xz: the index's CRC32 does not match") unless le32(@buf + @in_pos.to_i64) == want
+    @in_pos = @in_pos + 4
+    index_size = @isize + 4_i64
+    return fail("xz: the stream ends inside its footer") unless ahead?(12)
+    f = @buf + @in_pos.to_i64
+    return fail("xz: the stream footer's CRC32 does not match") unless CRC32.update(0_u32, f + 4_i64, 6) == le32(f)
+    return fail("xz: the stream footer's magic bytes are not YZ") unless f[10] == 0x59_u8 && f[11] == 0x5a_u8
+    return fail("xz: the stream footer's flags do not match its header") unless f[8] == 0_u8 && f[9].to_i32 == @stream_flags
+    backward = (le32(f + 4_i64).to_i64 + 1_i64) * 4_i64
+    return fail("xz: the stream footer's index size does not match the index") unless backward == index_size
+    @in_pos = @in_pos + 12
+    @state = PADDING
+  end
+
+  # Stream padding (§2.2): zero bytes, four at a time, then the end or
+  # another stream.
+  private def padding : Nil
+    zeros = 0
+    while true
+      unless ahead?(1)
+        return fail("xz: the stream padding is not a multiple of four bytes") unless (zeros & 3) == 0
+        @state = DONE
+        return
+      end
+      b = @buf[@in_pos]
+      if b == 0_u8
+        @in_pos = @in_pos + 1
+        zeros = zeros + 1
+        next
+      end
+      return fail("xz: the stream padding is not a multiple of four bytes") unless (zeros & 3) == 0
+      return fail("xz: what follows the stream is neither padding nor another stream") unless b == 0xfd_u8
+      @state = STREAM_HEAD
+      return
+    end
+  end
+
+  # ---- the .lzma file ----
+
+  # The 13-byte header: the properties byte, the dictionary size, and the
+  # uncompressed size, all ones for "unknown, ended by a marker".
+  private def alone_head : Nil
+    return fail("lzma: the stream is shorter than its 13-byte header") unless ahead?(13)
+    h = @buf + @in_pos.to_i64
+    props = h[0].to_i32
+    return fail("lzma: the properties byte is past 224 (#{props})") if props > 224
+    dict = le32(h + 1_i64).to_i64
+    size = le64(h + 5_i64)
+    if dict > @dict_limit
+      return fail("lzma: the dictionary is #{XzCore.size_name(dict)}, past the limit of #{XzCore.size_name(@dict_limit)}")
+    end
+    return fail("lzma: the uncompressed size is past 2^63") if size != 0xffffffffffffffff_u64 && size >= 0x8000000000000000_u64
+    @in_pos = @in_pos + 13
+    lzma_props(props)
+    lzma_reset
+    dict_setup(dict)
+    @lz_left = size == 0xffffffffffffffff_u64 ? -1_i64 : size.to_i64
+    @lz_stop = 0x7fffffffffffffff_i64
+    @marker_next = false
+    @state = ALONE
+    rc_init("lzma")
+  end
+
+  # The end of the .lzma data, once it has all been handed out: nothing
+  # may follow.
+  private def alone_end : Nil
+    return fail("lzma: bytes follow the end of the stream") if ahead?(1)
+    @state = DONE
+  end
+end
+
+# A .xz or .lzma stream read a piece at a time: the compressed bytes come
+# from the block, the decompressed ones go out through `read`, and memory
+# stays at the stream's dictionary and what is waiting to be read.
+#
+# ```
+# xz = XzReader.new { file.read_bytes(65536) }
+# while (piece = xz.read(65536)!) != ""
+#   ...
+# end
+# ```
+pub class XzReader
+  # The largest dictionary a stream may name unless the caller says
+  # otherwise: 64 MiB, what `xz -9` and `xz -9e` write.
+  DICT_LIMIT = 67108864_i64
+  # The largest a caller may agree to: 1.5 GiB, the most xz's encoder
+  # takes, and a ring an Int32 still indexes.
+  DICT_MAX = 1610612736_i64
+
+  @core : XzCore
+
+  # *source* answers the next bytes of the compressed stream, nil (or "")
+  # when there are no more. *dict_limit* is the largest dictionary a
+  # stream may name, 4 KiB to 1.5 GiB; a stream that names more is an
+  # `XzError` before anything is allocated for it. A .xz file is read to
+  # the end of its source - streams and the padding between them - so the
+  # source is asked until it says there is no more.
+  def initialize(format : XzFormat = XzFormat::Xz, dict_limit : Int64 = DICT_LIMIT, &source : -> String?)
+    unless dict_limit >= 4096_i64 && dict_limit <= DICT_MAX
+      raise "XzReader: a dictionary limit is 4 KiB to 1.5 GiB, not #{dict_limit} bytes"
+    end
+    @core = XzCore.new(format, dict_limit, source)
+  end
+
+  # Up to *max* decompressed bytes; "" once the stream has ended and
+  # everything about it been checked. A read answers as soon as it has
+  # bytes and going on would call the source, so it can answer fewer than
+  # *max* before the end; and never more than the dictionary at once.
+  #
+  # A corrupt stream, a check, index or size that does not match, input
+  # that ends early, or a dictionary past the limit is an `XzError`, after
+  # which every read answers the same error. A block's check is compared
+  # after its last byte has been handed out, so the bytes before a bad
+  # check have been read by then, as they are from a gzip stream. A *max*
+  # below 1 is a panic.
+  def read(max : Int32 = 65536) : String | XzError
+    @core.read(max)
+  end
+
+  # Whether the stream has ended, everything about it been checked, and
+  # every byte been read: the next `read` answers "".
+  def finished? : Bool
+    @core.finished?
+  end
+
+  # For `Xz.decompress`.
+  protected def core : XzCore
+    @core
+  end
+end
+
+pub struct Xz
+  # The bytes *data* decompresses to - every stream of a .xz file, or the
+  # one of a .lzma file - or the `XzError` `XzReader` would answer.
+  def self.decompress(data : String, format : XzFormat = XzFormat::Xz, dict_limit : Int64 = XzReader::DICT_LIMIT) : String | XzError
+    given = false
+    reader = XzReader.new(format, dict_limit) do
+      if given
+        nil
+      else
+        given = true
+        data
+      end
+    end
+    core = reader.core
+    sink = String::Builder.new(data.bytesize < 67108864 ? data.bytesize * 4 + 64 : 268435456)
+    core.drain(sink)
+    return core.error if core.failed?
+    sink.to_s
+  end
+end

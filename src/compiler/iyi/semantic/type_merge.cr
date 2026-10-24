@@ -30,8 +30,30 @@ module Iyi
           return type_merge(first.type?, second.type?)
         end
       else
-        combined_union_of compact_types(nodes, &.type?)
+        single_type_of(nodes) || combined_union_of compact_types(nodes, &.type?)
       end
+    end
+
+    # iyi: the one type every typed node has, when they have one - which
+    # is what a variable assigned many times usually is, and every
+    # assignment merges all of the variable's values again. Answered by
+    # comparing, where the general path built an array as long as the
+    # node list each time: 16,000 lines of `x = x + 1` took 3 s and 1.1 GB
+    # to type. Only a type that `add_type` keeps as itself; a union, an
+    # alias or `Void` goes the general way.
+    private def single_type_of(nodes : Enumerable(ASTNode)) : Type?
+      found = nil
+      nodes.each do |node|
+        type = node.type?
+        next unless type
+        if found
+          return nil unless type.same?(found)
+        else
+          return nil if type.is_a?(UnionType) || type.is_a?(AliasType) || type.is_a?(VoidType)
+          found = type
+        end
+      end
+      found
     end
 
     def type_merge(first : Type?, second : Type?) : Type?
@@ -69,10 +91,44 @@ module Iyi
     end
 
     def compact_types(objects, &) : Array(Type)
-      all_types = Array(Type).new(objects.size)
-      objects.each { |obj| add_type all_types, yield(obj) }
+      # A few distinct types, however many objects: the capacity was the
+      # object count, an allocation per merge as long as the node list.
+      distinct = DistinctTypes.new(Math.min(objects.size, 8))
+      objects.each { |obj| add_type distinct, yield(obj) }
+      all_types = distinct.list
       all_types.reject! &.no_return? if all_types.size > 1
       all_types
+    end
+
+    # iyi: the distinct types of a merge, in the order they came. Whether a
+    # type is already in was a scan of the list, and a union grows by a
+    # merge of itself with one more type: a union of k members took k
+    # squared comparisons to extend. Past a few members, a set answers.
+    class DistinctTypes
+      getter list : Array(Type)
+      @seen : Set(Type)?
+
+      def initialize(capacity : Int32)
+        @list = Array(Type).new(capacity)
+      end
+
+      def includes?(type : Type) : Bool
+        if seen = @seen
+          seen.includes?(type)
+        else
+          @list.includes?(type)
+        end
+      end
+
+      def <<(type : Type) : self
+        @list << type
+        if seen = @seen
+          seen << type
+        elsif @list.size > 16
+          @seen = @list.to_set
+        end
+        self
+      end
     end
 
     def add_type(types, type : UnionType)
@@ -118,24 +174,103 @@ module Iyi
 
     def type_combine(types)
       all_types = [types.shift] of Type
+      # iyi: two plain classes combine exactly when they share their
+      # topmost virtual root - their common ancestor is a root when it lies
+      # at or below that one, since no type that cannot be a root sits
+      # below one that can. So the plain members are found by root in a
+      # hash, and only the others - modules, metaclasses, generics, tuples -
+      # are asked for a common ancestor one by one. Every member was asked,
+      # a dispatched walk up both chains for every pair, and a union of 400
+      # unrelated classes built a member at a time took 2.5 s to type.
+      roots = [combine_root(all_types[0])] of Type | Bool
+      by_root = {} of Type => Int32
+      others = [] of Int32
+      index_roots(roots, by_root, others)
 
       types.each do |t2|
-        not_found = all_types.all? do |t1|
-          ancestor = Type.least_common_ancestor(t1.devirtualize, t2.devirtualize)
-          if ancestor && virtual_root?(ancestor)
-            all_types.delete t1
-            all_types << ancestor.virtual_type
-            false
-          else
-            true
+        d2 = t2.devirtualize
+        root2 = combine_root(t2)
+        merged = nil
+        if root2.is_a?(Type)
+          candidate = by_root[root2]?
+          others.each do |index|
+            break if candidate && index > candidate
+            t1 = all_types[index]
+            ancestor = Type.least_common_ancestor(t1.devirtualize, d2)
+            if ancestor && virtual_root?(ancestor)
+              merged = {t1, ancestor}
+              break
+            end
+          end
+          if !merged && candidate
+            t1 = all_types[candidate]
+            ancestor = Type.least_common_ancestor(t1.devirtualize, d2)
+            merged = {t1, ancestor} if ancestor && virtual_root?(ancestor)
+          end
+        else
+          all_types.each do |t1|
+            ancestor = Type.least_common_ancestor(t1.devirtualize, d2)
+            if ancestor && virtual_root?(ancestor)
+              merged = {t1, ancestor}
+              break
+            end
           end
         end
-        if not_found
+
+        if merged
+          t1, ancestor = merged
+          index = all_types.size - 1
+          while index >= 0
+            if all_types[index] == t1
+              all_types.delete_at(index)
+              roots.delete_at(index)
+            end
+            index -= 1
+          end
+          all_types << ancestor.virtual_type
+          roots << combine_root(ancestor)
+          by_root.clear
+          others.clear
+          index_roots(roots, by_root, others)
+        else
           all_types << t2
+          roots << root2
+          if root2.is_a?(Type)
+            by_root[root2] = roots.size - 1 unless by_root.has_key?(root2)
+          else
+            others << roots.size - 1
+          end
         end
       end
 
       all_types
+    end
+
+    private def index_roots(roots : Array(Type | Bool), by_root : Hash(Type, Int32), others : Array(Int32)) : Nil
+      roots.each_with_index do |root, index|
+        if root.is_a?(Type)
+          by_root[root] = index unless by_root.has_key?(root)
+        else
+          others << index
+        end
+      end
+    end
+
+    # What `type_combine` compares a member by: false for a type whose
+    # common ancestors are found by other rules - a metaclass, a generic
+    # class itself, a module, a tuple, a pointer, a proc - and for a plain
+    # class or a plain generic instance (`Box(Int32)`), whose ancestors are
+    # its superclasses, its topmost virtual root, or itself when it cannot
+    # be one (Reference, Int), which then matches no other class.
+    private def combine_root(type : Type) : Type | Bool
+      type = type.devirtualize
+      return false unless type.is_a?(NonGenericClassType) || type.is_a?(PrimitiveType) || type.class == GenericClassInstanceType
+      return type unless virtual_root?(type)
+      root = type
+      while (parent = root.superclass) && virtual_root?(parent)
+        root = parent
+      end
+      root
     end
 
     # Returns true if *type* can be used as a virtual root; that is, it must not

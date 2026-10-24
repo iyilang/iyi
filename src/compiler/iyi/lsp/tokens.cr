@@ -34,17 +34,23 @@ module Iyi::Lsp
     # 1-based codepoint column. The server converts to UTF-16 deltas.
     record Tok, line : Int32, column : Int32, size : Int32, type : Int32
 
-    def self.scan(text : String) : Array(Tok)
-      scanner = Scanner.new(text)
+    def self.scan(text : String, path : String? = nil) : Array(Tok)
+      scanner = Scanner.new(text, path)
       scanner.scan
       scanner.toks
+    rescue InvalidByteSequenceError
+      # The lexer refuses a first byte that is not UTF-8 as it starts.
+      [] of Tok
     end
 
     private class Scanner
       getter toks = [] of Tok
 
-      def initialize(text : String)
+      def initialize(text : String, path : String? = nil)
         @lexer = Lexer.new(text)
+        # The one thing about a file the lexer cannot read out of the
+        # source: which language it is in, which it takes off the name.
+        @lexer.filename = path if path
         @lexer.comments_enabled = true
         @lexer.count_whitespace = true
         @lexer.wants_raw = true
@@ -52,10 +58,11 @@ module Iyi::Lsp
 
       def scan : Nil
         scan_normal(break_on_rcurly: false)
-      rescue CodeError
+      rescue CodeError | InvalidByteSequenceError
         # The lexer has no recovery: an unterminated literal raises and
         # the spans collected so far are the honest answer. The
-        # diagnostics channel already names the break.
+        # diagnostics channel already names the break. A byte that is
+        # not UTF-8 raises the same way, and the request failed with -32603.
       end
 
       private def scan_normal(break_on_rcurly : Bool) : Nil

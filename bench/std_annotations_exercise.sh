@@ -4,11 +4,12 @@
 #     bash bench/std_annotations_exercise.sh
 #
 # Proves the exercise holds plain and --release, that an unexported annotation
-# is caught by using, that dummy annotation types (not the compiler's) fail
-# the identity checks, and what the annotations refuse after `using`:
-# non-string messages for Deprecated and Experimental, unrecognized named
-# arguments for TargetFeature, empty Link, a missing library name actually
-# passed to the linker, and a deprecation warning on a call.
+# is caught by the import that names it, that dummy annotation types (not
+# the compiler's) fail the identity checks, and what the annotations refuse
+# once an import brings them into scope: non-string messages for Deprecated
+# and Experimental, unrecognized named arguments for TargetFeature, empty
+# Link, a missing library name actually passed to the linker, and a
+# deprecation warning on a call.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -148,7 +149,7 @@ echo
 echo "== what annotations refuse"
 refuses() { # refuses <label> <name> <phrase> <code_snippet>
   local label="$1" name="$2" phrase="$3" snippet="$4"
-  printf 'module %s\nimport std/annotations\nusing std/annotations::{Deprecated, Experimental, TargetFeature, Link}\n%s\n' "$name" "$snippet" > "$WORK/$name.iyi"
+  printf 'module %s\nimport std/annotations::{Deprecated, Experimental, TargetFeature, Link}\n%s\n' "$name" "$snippet" > "$WORK/$name.iyi"
   if "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build.log" 2>&1; then
     echo "  $label: unexpectedly succeeded"
     status=1
@@ -185,11 +186,11 @@ refuses "bogus Link library" bad_lib "$missing_library" \
   $'@[Link("nosuchlib_annotations_probe")]\nlib LibMissing\n  fun nosuch_annotations_probe_sym : Int32\nend\nputs LibMissing.nosuch_annotations_probe_sym'
 
 echo
-echo "== deprecation warning after using"
+echo "== deprecation warning after import"
 printf '%s\n' \
   'module dep_warn' \
   'import std/annotations' \
-  'using std/annotations::{Deprecated}' \
+  'import std/annotations::{Deprecated}' \
   'class G' \
   '  @[Deprecated("use hi")]' \
   '  def old_hi : String' \

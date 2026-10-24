@@ -1,5 +1,7 @@
-# `Time` and `Time::Span`: the wall clock, the monotonic clock, civil-calendar
-# arithmetic, and ISO 8601 (RFC 3339) representation.
+# `Time`, `Time::Span` and `Time::Location`: the wall clock, the monotonic
+# clock, time zones, civil-calendar arithmetic, strftime-style formatting
+# and parsing (`Time::Format`), and the named formats: RFC 3339, ISO 8601,
+# RFC 2822 and the HTTP date of RFC 9110.
 #
 # A language with no clock cannot log, measure, or expire anything.
 # This module ports Crystal's core time types while adhering to the dependency
@@ -9,24 +11,36 @@
 #     monotonic readings with zero new symbols beyond what concurrency already links.
 #   * On Linux, raw `clock_gettime` syscalls (228 on x86_64, 113 on aarch64)
 #     issue direct kernel requests with zero libc symbols.
-#   * On Windows, kernel32's `GetSystemTimeAsFileTime` and `QueryPerformanceCounter`
+#   * On Windows, kernel32's `GetSystemTimePreciseAsFileTime` and `QueryPerformanceCounter`
 #     provide nanosecond-scale wall and monotonic time.
 #   * On wasm32-wasi, WASI import `__wasi_clock_time_get` provides both clocks.
 #
+# A `Time` is an instant and the `Location` it is read in, UTC unless it was
+# made in another: `Time.utc` and `Time.unix` are UTC, `Time.local` the
+# machine's zone, `time.in(location)` the same instant elsewhere. Its date,
+# clock, `to_s`, `to_rfc3339` and `%Z` are read in its location; `==`,
+# `<=>` and `hash` are the instant's. A `Location` is read from the
+# system's own IANA database (TZif files, RFC 8536), so no zone data ships
+# in the binary; see `Location` for where it looks. An offset passed by
+# hand (`to_s(format, offset)`, `Format.new(pattern, offset)`) still writes
+# and reads at that offset, as before locations existed.
+#
 # What was left out from Crystal's 1,626-line `src/time.cr`:
-#   * Time zones (`Time::Location` and zoneinfo database): reading tzdata from disk
-#     requires hundreds of lines of filesystem parsing and external data files.
-#     All timestamps here are UTC, with fixed timezone offsets supported in
-#     RFC 3339 parsing.
-#   * Complex strftime-like format strings (`Time::Format`): RFC 3339 covers
-#     standard serialization without a heavy regex or pattern compiler.
-#   * MonthSpan: civil month additions vary by calendar rules and are rarely
-#     used compared to duration-based Spans.
+#   * `Time::MonthSpan`: `shift(years:, months:)` is the month arithmetic, with
+#     Crystal's rule for a day the month does not have.
+#   * Localised names: month and day names are English, as Crystal's are.
+#   * A zone read from a `%Z` name: an abbreviation names no single zone,
+#     so `%Z` reads UTC and offsets, and a text in a known zone is parsed
+#     at its `Location`.
+#   * Windows' own zone names: the database is not there to read, so a
+#     Windows machine's local zone is its rule from the system, its zones
+#     named by their offsets (`+03`), and `Location.load` reads `$ZONEINFO`.
 
 module std/time
 
-import std/traits
-using std/traits::{Comparable}
+import std/traits::{Comparable}
+import std/env::{ENV}
+import std/list::{List}
 
 pub struct DayOfWeek
   getter value : Int32
@@ -54,6 +68,13 @@ pub struct DayOfWeek
 
   def ===(other : DayOfWeek) : Bool
     @value == other.value
+  end
+
+  # Hashing follows `==`. Without it a day hashed to its type, `Object#hash`'s
+  # default: `Monday.hash == Sunday.hash`, and every day a table held went to
+  # one slot.
+  def hash : Int32
+    @value
   end
 
   def monday? : Bool
@@ -94,6 +115,30 @@ pub struct DayOfWeek
     when 6 then "Saturday"
     else        "Sunday"
     end
+  end
+end
+
+# What `Time::Format#parse` and the named parsers answer when the text is not
+# a time the pattern describes. Bad input is the caller's to handle, not a
+# panic: a header or a log line from somewhere else is not a bug in the
+# program reading it. `message` is the sentence, naming the byte the parser
+# stood at and the text; `position` is that byte, counted from 0.
+pub struct TimeParseError
+  getter message : String
+  getter input : String
+  getter position : Int32
+
+  def initialize(@message : String, @input : String, @position : Int32)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for TimeParseError
+  def message : String
+    @message
   end
 end
 
@@ -300,14 +345,29 @@ pub struct Span
     @seconds == other.@seconds && @nanoseconds == other.@nanoseconds
   end
 
-  def to_s : String
-    sec_abs = @seconds < 0 ? -@seconds : @seconds
-    ns_abs = @nanoseconds < 0 ? -@nanoseconds : @nanoseconds
+  # Hashing follows `==`, the two parts mixed as a tuple's members are. Without
+  # it every span hashed to its type: `Span.seconds(1).hash ==
+  # Span.days(9).hash`, and a table of 16,000 spans took 0.95 s to fill where
+  # the same pairs as tuples took 1 ms.
+  def hash : Int32
+    {@seconds, @nanoseconds}.hash
+  end
 
-    d = sec_abs // 86400_i64
-    h = ((sec_abs % 86400_i64) // 3600_i64).to_i32
-    m = ((sec_abs % 3600_i64) // 60_i64).to_i32
-    s = (sec_abs % 60_i64).to_i32
+  def to_s : String
+    # The parts are taken signed, as the accessors take them, and each is
+    # made positive: negating the seconds first overflowed for the
+    # smallest span, and `Span.seconds(Int64::MIN).to_s` panicked
+    # "arithmetic overflow" where it prints `-106751991167300.15:30:08`.
+    # No part of it is that large.
+    ns_abs = @nanoseconds < 0 ? -@nanoseconds : @nanoseconds
+    d = days
+    d = 0_i64 - d if d < 0_i64
+    h = hours
+    h = 0 - h if h < 0
+    m = minutes
+    m = 0 - m if m < 0
+    s = seconds
+    s = 0 - s if s < 0
 
     prefix = (@seconds < 0 || @nanoseconds < 0) ? "-" : ""
 
@@ -331,12 +391,808 @@ impl Comparable for Span
   end
 end
 
+# What `Location.load` and `Location.read_zoneinfo` answer when there is no
+# zone by that name, or the bytes are not a zone: a name the program was
+# handed or a file on the machine is not a bug in the program, so it is a
+# value and not a panic.
+pub struct LocationError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for LocationError
+  def message : String
+    @message
+  end
+end
+
+# A day a POSIX TZ rule names: `Mm.w.d` (kind 0), the dth day of the week,
+# Sunday 0, in the wth week of month m, 5 being the last; `Jn` (kind 1), day
+# n of 1 to 365 with February 29th never counted; `n` (kind 2), day n of 0
+# to 365 with it counted. *time* is the local time of day the change is
+# made at, in seconds, which RFC 8536 lets run from -167 to 167 hours.
+struct TzDate
+  getter kind : Int32
+  getter month : Int32
+  getter week : Int32
+  getter day : Int32
+  getter time : Int32
+
+  def initialize(@kind : Int32, @month : Int32, @week : Int32, @day : Int32, @time : Int32)
+  end
+
+  def ==(other : TzDate) : Bool
+    @kind == other.kind && @month == other.month && @week == other.week && @day == other.day && @time == other.time
+  end
+
+  # The day this names in *year*, in days since 1970-01-01.
+  def days_in(year : Int64) : Int64
+    jan1 = Time.days_from_civil(year, 1, 1)
+    leap = (year % 4_i64 == 0_i64 && year % 100_i64 != 0_i64) || year % 400_i64 == 0_i64
+    case @kind
+    when 1
+      jan1 + (@day - 1).to_i64 + (leap && @day >= 60 ? 1_i64 : 0_i64)
+    when 2
+      jan1 + @day.to_i64
+    else
+      first = Time.days_from_civil(year, @month, 1)
+      # 1970-01-01 was a Thursday, day 4 counting Sunday as 0.
+      weekday = Time.floor_mod(first + 4_i64, 7_i64)
+      day = first + Time.floor_mod(@day.to_i64 - weekday, 7_i64) + (@week - 1).to_i64 * 7_i64
+      length = case @month
+               when 4, 6, 9, 11 then 30_i64
+               when 2           then leap ? 29_i64 : 28_i64
+               else                  31_i64
+               end
+      while day >= first + length
+        day = day - 7_i64
+      end
+      day
+    end
+  end
+end
+
+# A POSIX TZ string, as the `TZ` variable and the footer of a TZif file
+# write one: `CET-1CEST,M3.5.0,M10.5.0/3` is an hour east of UTC, two in
+# summer, from 02:00 on the last Sunday of March to 03:00 on the last Sunday
+# of October. A zone without a summer is just its name and offset, `<+03>-3`.
+# The offsets are written west of UTC and kept here east of it.
+struct TzRule
+  MIN_SECOND = -9223372036854775807_i64 - 1_i64
+  MAX_SECOND = 9223372036854775807_i64
+
+  getter std_name : String
+  getter std_offset : Int32
+  getter dst_name : String
+  getter dst_offset : Int32
+  getter start : TzDate
+  getter finish : TzDate
+  @summer : Bool
+
+  def initialize(@std_name : String, @std_offset : Int32, @dst_name : String, @dst_offset : Int32, @start : TzDate, @finish : TzDate, @summer : Bool)
+  end
+
+  def self.fixed(name : String, offset : Int32) : TzRule
+    none = TzDate.new(0, 1, 1, 0, 0)
+    TzRule.new(name, offset, "", offset, none, none, false)
+  end
+
+  def summer? : Bool
+    @summer
+  end
+
+  # The rule *text* writes, or nil when it is not one.
+  def self.parse(text : String) : TzRule?
+    t = TzText.new(text)
+    std = t.name
+    return nil unless std
+    west = t.clock(24)
+    return nil unless west
+    return TzRule.fixed(std, -west) if t.at_end?
+    dst = t.name
+    return nil unless dst
+    dst_offset = 3600 - west
+    unless t.at_end? || t.peek == 44_u8
+      dst_west = t.clock(24)
+      return nil unless dst_west
+      dst_offset = -dst_west
+    end
+    if t.at_end?
+      # A summer with no dates is the United States' since 2007, as glibc
+      # and Go read it.
+      return TzRule.new(std, -west, dst, dst_offset, TzDate.new(0, 3, 2, 0, 7200), TzDate.new(0, 11, 1, 0, 7200), true)
+    end
+    return nil unless t.accept(44_u8)
+    start = t.date
+    return nil unless start && t.accept(44_u8)
+    finish = t.date
+    return nil unless finish && t.at_end?
+    TzRule.new(std, -west, dst, dst_offset, start, finish, true)
+  end
+
+  # The zone *unix* is in, and the instants it began and ends: `{offset,
+  # name, summer?, from, until}`. The changes of the year before, the year
+  # and the year after are each worked out, so a zone whose summer spans
+  # New Year, as the southern hemisphere's does, reads the same.
+  def lookup(unix : Int64) : {Int32, String, Bool, Int64, Int64}
+    return {@std_offset, @std_name, false, MIN_SECOND, MAX_SECOND} unless @summer
+    year = Time.civil_from_days(Time.floor_div(unix + @std_offset.to_i64, 86400_i64))[0].to_i64
+    before = MIN_SECOND
+    before_summer = false
+    after = MAX_SECOND
+    after_summer = false
+    y = year - 1_i64
+    while y <= year + 1_i64
+      # Summer begins at a time read on the standard clock and ends at one
+      # read on the summer clock.
+      begins = @start.days_in(y) * 86400_i64 + @start.time.to_i64 - @std_offset.to_i64
+      ends = @finish.days_in(y) * 86400_i64 + @finish.time.to_i64 - @dst_offset.to_i64
+      if begins <= unix && begins >= before
+        before = begins
+        before_summer = true
+      end
+      if ends <= unix && ends >= before
+        before = ends
+        before_summer = false
+      end
+      if begins > unix && begins < after
+        after = begins
+        after_summer = true
+      end
+      if ends > unix && ends < after
+        after = ends
+        after_summer = false
+      end
+      y = y + 1_i64
+    end
+    summer = before == MIN_SECOND ? !after_summer : before_summer
+    summer ? {@dst_offset, @dst_name, true, before, after} : {@std_offset, @std_name, false, before, after}
+  end
+
+  def ==(other : TzRule) : Bool
+    @std_name == other.std_name && @std_offset == other.std_offset && @dst_name == other.dst_name &&
+      @dst_offset == other.dst_offset && @summer == other.summer? && @start == other.start && @finish == other.finish
+  end
+
+  # The name tzdata gives a zone it has no letters for: `+03`, `-0330`.
+  def self.offset_name(offset : Int32) : String
+    text = Time::Format.offset_text(offset, false, 1)
+    text.ends_with?("00") && text.bytesize == 5 ? text[0, 3] : text
+  end
+end
+
+# Reads a TZ string a byte at a time; every step answers nil, or false,
+# when the text is not what it asks for.
+class TzText
+  @bytes : Pointer(UInt8)
+  @len : Int32
+  @pos : Int32
+
+  def initialize(text : String)
+    @bytes = text.to_unsafe
+    @len = text.bytesize
+    @pos = 0
+  end
+
+  def at_end? : Bool
+    @pos >= @len
+  end
+
+  def peek : UInt8
+    @pos < @len ? @bytes[@pos] : 0_u8
+  end
+
+  def accept(byte : UInt8) : Bool
+    return false unless peek == byte && !at_end?
+    @pos = @pos + 1
+    true
+  end
+
+  # Three or more letters, or anything between `<` and `>`.
+  def name : String?
+    if accept(60_u8)
+      start = @pos
+      while !at_end? && peek != 62_u8
+        @pos = @pos + 1
+      end
+      return nil if at_end? || @pos == start
+      text = slice(start, @pos)
+      @pos = @pos + 1
+      return text
+    end
+    start = @pos
+    while !at_end? && ((peek >= 65_u8 && peek <= 90_u8) || (peek >= 97_u8 && peek <= 122_u8))
+      @pos = @pos + 1
+    end
+    @pos - start >= 3 ? slice(start, @pos) : nil
+  end
+
+  # `[+-]h[h][h][:mm[:ss]]`, in seconds, the hours at most *max_hours*.
+  def clock(max_hours : Int32) : Int32?
+    sign = 1
+    if accept(45_u8)
+      sign = -1
+    else
+      accept(43_u8)
+    end
+    hours = number(3)
+    return nil unless hours && hours <= max_hours
+    total = hours * 3600
+    if accept(58_u8)
+      minutes = number(2)
+      return nil unless minutes && minutes < 60
+      total = total + minutes * 60
+      if accept(58_u8)
+        seconds = number(2)
+        return nil unless seconds && seconds < 60
+        total = total + seconds
+      end
+    end
+    sign * total
+  end
+
+  # `Mm.w.d`, `Jn` or `n`, then `/time`, 02:00 when there is none.
+  def date : TzDate?
+    kind = 2
+    month = 0
+    week = 0
+    day = 0
+    if accept(77_u8)
+      kind = 0
+      m = number(2)
+      return nil unless m && m >= 1 && m <= 12 && accept(46_u8)
+      w = number(1)
+      return nil unless w && w >= 1 && w <= 5 && accept(46_u8)
+      d = number(1)
+      return nil unless d && d <= 6
+      month = m
+      week = w
+      day = d
+    elsif accept(74_u8)
+      kind = 1
+      n = number(3)
+      return nil unless n && n >= 1 && n <= 365
+      day = n
+    else
+      n = number(3)
+      return nil unless n && n <= 365
+      day = n
+    end
+    time = 7200
+    if accept(47_u8)
+      at = clock(167)
+      return nil unless at
+      time = at
+    end
+    TzDate.new(kind, month, week, day, time)
+  end
+
+  private def number(max_digits : Int32) : Int32?
+    start = @pos
+    value = 0
+    while !at_end? && peek >= 48_u8 && peek <= 57_u8 && @pos - start < max_digits
+      value = value * 10 + (peek - 48_u8).to_i32
+      @pos = @pos + 1
+    end
+    @pos > start ? value : nil
+  end
+
+  private def slice(start : Int32, stop : Int32) : String
+    String.new(stop - start) do |buf|
+      buf.copy_from(@bytes + start.to_i64, stop - start)
+    end
+  end
+end
+
+# A time zone: the offsets from UTC a place has kept, and when it changed
+# from one to the next. `Location.load("Europe/Istanbul")` reads the IANA
+# database the machine has; `Location.local` is the machine's own zone;
+# `Location.fixed(19800)` is an offset and nothing else; `Location::UTC` is
+# UTC. A `Time` carries one, and its date and clock are read in it.
+#
+# The database is the system's TZif files, RFC 8536: `$ZONEINFO` when it
+# names a directory, then `/usr/share/zoneinfo`, `/usr/share/lib/zoneinfo`
+# and `/etc/zoneinfo`. Versions 1 to 4 are read. A time before the first
+# change has the file's first offset, and one after the last has its POSIX
+# footer's rule, so a slim file answers for the year 2100 as a fat one does.
+# Leap seconds are not counted, as no clock this module reads counts them.
+#
+# `Location.local` is the `TZ` variable when it is set — the empty string
+# is UTC, a leading `:` is dropped, an absolute path is a TZif file, a name
+# is looked up in the database, and anything else is read as a POSIX TZ
+# string such as `EST5EDT,M3.2.0,M11.1.0` — and `/etc/localtime` when it is
+# not. Windows has no database to read: there `local` is the system's zone,
+# its rule from `GetTimeZoneInformation`, its zones named by their offsets,
+# and `load` reads `$ZONEINFO` alone. Where nothing answers, local is UTC.
+# The local zone is read once, the first time it is asked for.
+#
+# A location is built once and never changed, so a `Time` that holds one
+# can cross to another task.
+pub class Location
+  MIN_SECOND = -9223372036854775807_i64 - 1_i64
+  MAX_SECOND = 9223372036854775807_i64
+
+  # One offset a location keeps: its abbreviation (`CEST`, `+03`), its
+  # seconds east of UTC, and whether it is summer time.
+  struct Zone
+    getter name : String
+    getter offset : Int32
+    @dst : Bool
+
+    def initialize(@name : String, @offset : Int32, @dst : Bool)
+    end
+
+    def dst? : Bool
+      @dst
+    end
+
+    def ==(other : Zone) : Bool
+      @name == other.name && @offset == other.offset && @dst == other.dst?
+    end
+
+    def to_s : String
+      @name
+    end
+  end
+
+  getter name : String
+  @zones : List(Zone)
+  @transitions : List(Int64)
+  @transition_zones : List(Int32)
+  @rule : TzRule?
+
+  protected def initialize(@name : String, zones : Array(Zone), transitions : Array(Int64), transition_zones : Array(Int32), @rule : TzRule?)
+    @zones = List(Zone).new(zones)
+    @transitions = List(Int64).new(transitions)
+    @transition_zones = List(Int32).new(transition_zones)
+  end
+
+  UTC = Location.new("UTC", [Zone.new("UTC", 0, false)], [] of Int64, [] of Int32, nil)
+
+  @@local : Location? = nil
+
+  # An offset of *offset* seconds east of UTC and nothing else, named as
+  # the offset is written: `+05:30`. Less than a day either way.
+  def self.fixed(offset : Int32) : Location
+    fixed(Time::Format.offset_text(offset, true, 1), offset)
+  end
+
+  def self.fixed(name : String, offset : Int32) : Location
+    Time::Format.check_offset(offset)
+    Location.new(name, [Zone.new(name, offset, false)], [] of Int64, [] of Int32, nil)
+  end
+
+  # The zone the IANA database names *name*: `Europe/Istanbul`,
+  # `America/New_York`. `UTC` and the empty name are UTC and `Local` is
+  # `Location.local`, without a file. A name that climbs out of the database
+  # (`..`, a leading `/`, a `\`) is refused, and so is one no directory has.
+  def self.load(name : String) : Location | LocationError
+    return UTC if name == "UTC" || name.empty?
+    return local if name == "Local"
+    if name.starts_with?("/") || name.includes?("\\") || name.includes?("\u0000") || name.split('/').includes?("..")
+      return LocationError.new("invalid location name: #{name.inspect} is not a name in the time zone database")
+    end
+    looked = [] of String
+    zone_directories.each do |directory|
+      looked << directory
+      if data = read_file(directory + "/" + name)
+        return read_zoneinfo(name, data)
+      end
+    end
+    where = looked.empty? ? "there is no time zone database on this machine; set ZONEINFO to a directory of TZif files" : "looked in #{looked.join(", ")}"
+    LocationError.new("no time zone named #{name.inspect}: #{where}")
+  end
+
+  # A location from the bytes of a TZif file, RFC 8536, named *name*.
+  # Anything that is not one is refused with what was wrong and where.
+  def self.read_zoneinfo(name : String, data : String) : Location | LocationError
+    p = data.to_unsafe
+    size = data.bytesize
+    return LocationError.new("#{name}: not a TZif file: #{size} bytes is shorter than its header") if size < 44
+    return LocationError.new("#{name}: not a TZif file: it does not begin with TZif") unless tzif_magic?(p)
+    at = 0
+    width = 4
+    if p[4] >= 50_u8
+      # Version 2 and later repeat the data with 64-bit times after the
+      # version 1 block, which is skipped whole.
+      first = block_size(p, 0, 4)
+      return LocationError.new("#{name}: the TZif file's header counts more than any zone holds") unless first
+      return LocationError.new("#{name}: the TZif file ends inside its first data block") if 44 + first + 44 > size
+      at = 44 + first
+      return LocationError.new("#{name}: the TZif file's second header does not begin with TZif") unless tzif_magic?(p + at.to_i64)
+      width = 8
+    end
+    data_size = block_size(p, at, width)
+    return LocationError.new("#{name}: the TZif file's header counts more than any zone holds") unless data_size
+    count = u32(p, at + 32).to_i32
+    types = u32(p, at + 36).to_i32
+    chars = u32(p, at + 40).to_i32
+    return LocationError.new("#{name}: the TZif file has no local time types") if types == 0
+    body = at + 44
+    stop = body + data_size
+    return LocationError.new("#{name}: the TZif file is #{size} bytes, and its data block runs to byte #{stop}") if stop > size
+
+    transitions = Array(Int64).new(count)
+    i = 0
+    while i < count
+      at_time = body + i * width
+      instant = width == 8 ? s32(p, at_time) * 4294967296_i64 + u32(p, at_time + 4) : s32(p, at_time)
+      if i > 0 && instant <= transitions[i - 1]
+        return LocationError.new("#{name}: the TZif file's transitions are out of order at #{i}")
+      end
+      transitions << instant
+      i = i + 1
+    end
+    indexes = body + count * width
+    transition_zones = Array(Int32).new(count)
+    i = 0
+    while i < count
+      index = p[indexes + i].to_i32
+      return LocationError.new("#{name}: transition #{i} names local time type #{index} of #{types}") if index >= types
+      transition_zones << index
+      i = i + 1
+    end
+    infos = indexes + count
+    designations = infos + types * 6
+    zones = Array(Zone).new(types)
+    i = 0
+    while i < types
+      info = infos + i * 6
+      offset = s32(p, info)
+      if offset <= -86400_i64 || offset >= 86400_i64
+        return LocationError.new("#{name}: local time type #{i} is #{offset} seconds from UTC, a day or more")
+      end
+      letter = p[info + 5].to_i32
+      return LocationError.new("#{name}: local time type #{i} names abbreviation byte #{letter} of #{chars}") if letter >= chars
+      finish = letter
+      while finish < chars && p[designations + finish] != 0_u8
+        finish = finish + 1
+      end
+      zones << Zone.new(bytes_at(p, designations + letter, finish - letter), offset.to_i32, p[info + 4] != 0_u8)
+      i = i + 1
+    end
+    rule = nil
+    if width == 8 && stop < size && p[stop] == 10_u8
+      close = stop + 1
+      while close < size && p[close] != 10_u8
+        close = close + 1
+      end
+      if close < size && close > stop + 1
+        # A footer that is not a rule is passed over, as Go does: the
+        # transitions still answer, the last of them for every time after.
+        rule = TzRule.parse(bytes_at(p, stop + 1, close - stop - 1))
+      end
+    end
+    Location.new(name, zones, transitions, transition_zones, rule)
+  end
+
+  # The machine's zone; see the type's comment for where it comes from.
+  def self.local : Location
+    if cached = @@local
+      return cached
+    end
+    found = read_local
+    @@local = found
+    found
+  end
+
+  private def self.read_local : Location
+    if tz = ENV["TZ"]?
+      return UTC if tz.empty?
+      tz = tz[1, tz.bytesize - 1] if tz.starts_with?(":")
+      return UTC if tz.empty?
+      if tz.starts_with?("/")
+        if data = read_file(tz)
+          loaded = read_zoneinfo("Local", data)
+          return loaded if loaded.is_a?(Location)
+        end
+        return UTC
+      end
+      loaded = load(tz)
+      return loaded if loaded.is_a?(Location)
+      if rule = TzRule.parse(tz)
+        return Location.new(tz, [Zone.new(rule.std_name, rule.std_offset, false)], [] of Int64, [] of Int32, rule)
+      end
+      return UTC
+    end
+    {% if flag?(:win32) %}
+      windows_local
+    {% else %}
+      if data = read_file("/etc/localtime")
+        loaded = read_zoneinfo("Local", data)
+        return loaded if loaded.is_a?(Location)
+      end
+      UTC
+    {% end %}
+  end
+
+  {% if flag?(:win32) %}
+    lib LibKernel32
+      fun GetTimeZoneInformation(information : UInt8*) : UInt32
+    end
+
+    private def self.windows_local : Location
+      info = Pointer(UInt8).malloc(172_u64)
+      return UTC if LibKernel32.GetTimeZoneInformation(info) == 0xFFFFFFFF_u32
+      read = read_windows_zone("Local", String.new(172) { |buf| buf.copy_from(info, 172) })
+      read.is_a?(Location) ? read : UTC
+    end
+  {% end %}
+
+  # A location from the 172 bytes of a Windows TIME_ZONE_INFORMATION, which
+  # is what `Location.local` reads on Windows; it is pure so that every
+  # platform can check the decoding with bytes made by hand. The struct is
+  # the bias in minutes west of UTC (UTC = local + bias), then the standard
+  # name, date and bias, then the daylight ones, all little-endian. The
+  # three biases are signed LONGs: a zone east of UTC has a negative Bias
+  # (Turkey's is -180) and a summer usually a DaylightBias of -60, so each
+  # is read as the 32 bits' two's complement. Read as unsigned and then
+  # converted, as it once was, -180 was 4294967116 and the conversion
+  # panicked with an arithmetic overflow, issue #133.
+  #
+  # A date with a year of 0 is a rule - the wDay'th wDayOfWeek of wMonth,
+  # 5 the last, at the wall time then in force - which is a POSIX
+  # `Mm.w.d/time`; one with a month of 0 is no summer. A date with a year
+  # is a single year's, which is not a rule at all, and it is read as no
+  # summer rather than as every year's. The names are the offset's, `+03`
+  # or `-05`, as tzdata writes a zone it has no letters for: the struct's
+  # own are Windows' long names, "Turkey Standard Time", which are not
+  # abbreviations and are localised.
+  def self.read_windows_zone(name : String, data : String) : Location | LocationError
+    size = data.bytesize
+    return LocationError.new("#{name}: not a TIME_ZONE_INFORMATION: #{size} bytes, not 172") if size != 172
+    info = data.to_unsafe
+    bias = s32_le(info, 0)
+    std_offset = -(bias + s32_le(info, 84)) * 60
+    dst_offset = -(bias + s32_le(info, 168)) * 60
+    begins = windows_date(info, 152)
+    ends = windows_date(info, 68)
+    return LocationError.new("#{name}: the daylight date is not a date") if begins.is_a?(LocationError)
+    return LocationError.new("#{name}: the standard date is not a date") if ends.is_a?(LocationError)
+    summer = !begins.nil? && !ends.nil?
+    # A day or more from UTC is no zone; refusing it also keeps the
+    # offsets within an Int32 for any bytes at all. DaylightBias is only
+    # looked at when there is a summer to use it.
+    if std_offset.abs >= 86400_i64 || (summer && dst_offset.abs >= 86400_i64)
+      return LocationError.new("#{name}: a bias of #{bias} minutes is a day or more from UTC")
+    end
+    std_name = TzRule.offset_name(std_offset.to_i32)
+    rule = if begins && ends
+             TzRule.new(std_name, std_offset.to_i32, TzRule.offset_name(dst_offset.to_i32), dst_offset.to_i32, begins, ends, true)
+           else
+             TzRule.fixed(std_name, std_offset.to_i32)
+           end
+    Location.new(name, [Zone.new(std_name, std_offset.to_i32, false)], [] of Int64, [] of Int32, rule)
+  end
+
+  # The SYSTEMTIME at *at*: wYear, wMonth, wDayOfWeek, wDay, wHour,
+  # wMinute, wSecond, wMilliseconds, each an unsigned WORD. Nil is no rule;
+  # an error is fields no day has.
+  private def self.windows_date(info : Pointer(UInt8), at : Int32) : TzDate | LocationError | Nil
+    year = u16_le(info, at)
+    month = u16_le(info, at + 2)
+    return nil if year != 0 || month == 0
+    weekday = u16_le(info, at + 4)
+    week = u16_le(info, at + 6)
+    hour = u16_le(info, at + 8)
+    minute = u16_le(info, at + 10)
+    second = u16_le(info, at + 12)
+    if month > 12 || weekday > 6 || week < 1 || week > 5 || hour > 23 || minute > 59 || second > 59
+      return LocationError.new("not a date")
+    end
+    TzDate.new(0, month, week, weekday, hour * 3600 + minute * 60 + second)
+  end
+
+  private def self.u16_le(p : Pointer(UInt8), at : Int32) : Int32
+    p[at].to_i32 | (p[at + 1].to_i32 << 8)
+  end
+
+  # A signed little-endian LONG, from the 32 bits' two's complement.
+  private def self.s32_le(p : Pointer(UInt8), at : Int32) : Int64
+    value = p[at].to_i64 | (p[at + 1].to_i64 << 8) | (p[at + 2].to_i64 << 16) | (p[at + 3].to_i64 << 24)
+    value >= 2147483648_i64 ? value - 4294967296_i64 : value
+  end
+
+  private def self.zone_directories : Array(String)
+    directories = [] of String
+    if own = ENV["ZONEINFO"]?
+      directories << own unless own.empty?
+    end
+    {% unless flag?(:win32) %}
+      directories << "/usr/share/zoneinfo"
+      directories << "/usr/share/lib/zoneinfo"
+      directories << "/etc/zoneinfo"
+    {% end %}
+    directories
+  end
+
+  # The bytes of the file at *path*, or nil when there is none to read: no
+  # such file, a directory, or a read that failed. Nothing here panics,
+  # because the answer to a name the database lacks is an error value.
+  private def self.read_file(path : String) : String?
+    {% if flag?(:wasm32) %}
+      nil
+    {% else %}
+      return nil if path.byte_index("\u0000")
+      c_path = Pointer(UInt8).malloc((path.bytesize + 1).to_u64)
+      c_path.copy_from(path.to_unsafe, path.bytesize)
+      c_path[path.bytesize] = 0_u8
+      {% if flag?(:win32) %}
+        # Windows refuses to open a directory at all, where POSIX opens it
+        # and fails the read; FILE_ATTRIBUTE_DIRECTORY is 0x10.
+        attributes = __iyi_path_attributes(c_path)
+        return nil if attributes == -1 || attributes & 0x10 != 0
+      {% end %}
+      fd = __iyi_open_read(c_path)
+      return nil if fd < 0_i64
+      io = IyiIO.new(fd, 4096, false)
+      defer io.close
+      text = io.read_all
+      io.read_failed? ? nil : text
+    {% end %}
+  end
+
+  private def self.tzif_magic?(p : Pointer(UInt8)) : Bool
+    p[0] == 84_u8 && p[1] == 90_u8 && p[2] == 105_u8 && p[3] == 102_u8
+  end
+
+  # The bytes of the data block after the header at *at*, with times of
+  # *width* bytes, or nil when a count is past what any zone holds: a
+  # header is not trusted into an allocation or an overflow.
+  private def self.block_size(p : Pointer(UInt8), at : Int32, width : Int32) : Int32?
+    isut = u32(p, at + 20)
+    isstd = u32(p, at + 24)
+    leap = u32(p, at + 28)
+    count = u32(p, at + 32)
+    types = u32(p, at + 36)
+    chars = u32(p, at + 40)
+    return nil if count > 1000000_i64 || types > 256_i64 || chars > 65536_i64 || leap > 100000_i64 || isstd > 256_i64 || isut > 256_i64
+    (count * width.to_i64 + count + types * 6_i64 + chars + leap * (width + 4).to_i64 + isstd + isut).to_i32
+  end
+
+  # A 32-bit big-endian word, unsigned and signed.
+  private def self.u32(p : Pointer(UInt8), at : Int32) : Int64
+    (p[at].to_i64 << 24) | (p[at + 1].to_i64 << 16) | (p[at + 2].to_i64 << 8) | p[at + 3].to_i64
+  end
+
+  private def self.s32(p : Pointer(UInt8), at : Int32) : Int64
+    value = u32(p, at)
+    value >= 2147483648_i64 ? value - 4294967296_i64 : value
+  end
+
+  private def self.bytes_at(p : Pointer(UInt8), at : Int32, count : Int32) : String
+    String.new(count) do |buf|
+      buf.copy_from(p + at.to_i64, count)
+    end
+  end
+
+  def utc? : Bool
+    @name == "UTC" && fixed? && @zones[0].offset == 0
+  end
+
+  # The machine's own zone, the one `Location.local` answers.
+  def local? : Bool
+    object_id == Location.local.object_id
+  end
+
+  # One offset, never changing.
+  def fixed? : Bool
+    @transitions.empty? && @rule.nil? && @zones.size == 1
+  end
+
+  # The zone *time* is in here.
+  def lookup(time : Time) : Zone
+    lookup(time.seconds)
+  end
+
+  def lookup(unix_seconds : Int64) : Zone
+    lookup_range(unix_seconds)[0]
+  end
+
+  # The zone at *unix*, and the instants it holds from and until.
+  private def lookup_range(unix : Int64) : {Zone, Int64, Int64}
+    count = @transitions.size
+    if count == 0
+      if rule = @rule
+        return rule_zone(rule, unix)
+      end
+      return {@zones[0], MIN_SECOND, MAX_SECOND}
+    end
+    first = @transitions[0]
+    return {@zones[0], MIN_SECOND, first} if unix < first
+    low = 0
+    high = count
+    while high - low > 1
+      middle = (low + high) // 2
+      if @transitions[middle] <= unix
+        low = middle
+      else
+        high = middle
+      end
+    end
+    zone = @zones[@transition_zones[low]]
+    from = @transitions[low]
+    return {zone, from, @transitions[low + 1]} if low + 1 < count
+    if rule = @rule
+      ruled, begins, ends = rule_zone(rule, unix)
+      return {ruled, begins < from ? from : begins, ends}
+    end
+    {zone, from, MAX_SECOND}
+  end
+
+  private def rule_zone(rule : TzRule, unix : Int64) : {Zone, Int64, Int64}
+    offset, abbreviation, summer, begins, ends = rule.lookup(unix)
+    {Zone.new(abbreviation, offset, summer), begins, ends}
+  end
+
+  # The instant a wall clock here reads *wall* (seconds since 1970 as a
+  # UTC clock would count them). A wall time a change repeats is the
+  # earlier of the two instants; one a change skips is read on the clock
+  # from before the change, which lands it past the gap: 02:30 on the
+  # morning summer starts in Berlin is 03:30 CEST. Python's `fold=0` and
+  # Go read them the same way. `Time.local` and a parse at a location ask
+  # this.
+  def resolve(wall : Int64) : Int64
+    return wall - @zones[0].offset.to_i64 if fixed?
+    best = MAX_SECOND
+    latest = MIN_SECOND
+    # An offset is less than a day, so the instant is within a day of the
+    # wall time, and the offsets kept a day either side are the candidates.
+    shift = -86400_i64
+    while shift <= 86400_i64
+      offset = lookup_range(wall + shift)[0].offset
+      candidate = wall - offset.to_i64
+      best = candidate if lookup_range(candidate)[0].offset == offset && candidate < best
+      latest = candidate if candidate > latest
+      shift = shift + 86400_i64
+    end
+    best == MAX_SECOND ? latest : best
+  end
+
+  def ==(other : Location) : Bool
+    return true if object_id == other.object_id
+    return false unless @name == other.name && @zones == other.@zones && @transitions == other.@transitions && @transition_zones == other.@transition_zones
+    mine = @rule
+    theirs = other.@rule
+    if mine && theirs
+      mine == theirs
+    else
+      mine.nil? && theirs.nil?
+    end
+  end
+
+  def hash : Int32
+    @name.hash
+  end
+
+  def to_s : String
+    @name
+  end
+
+  def inspect : String
+    "#<Time::Location #{@name}>"
+  end
+end
+
 pub struct Time
   getter seconds : Int64
   getter nanoseconds : Int32
+  # The zone the date and clock are read in, and its offset from UTC at
+  # this instant in seconds east. `==`, `<=>` and `hash` are the instant's
+  # and do not look at either: noon in London and 13:00 in Paris are the
+  # same time.
+  getter location : Location
+  getter offset : Int32
 
   alias Span = Std::Time::Span
   alias DayOfWeek = Std::Time::DayOfWeek
+  alias Location = Std::Time::Location
 
   # The first and last second whose year an Int32 names: -2147483648-01-01
   # and 2147483647-12-31T23:59:59. `year` and `to_rfc3339` answer for every
@@ -348,18 +1204,40 @@ pub struct Time
   MIN_SECONDS = -67768100567971200_i64
   MAX_SECONDS =  67767976233532799_i64
 
-  def initialize(@seconds : Int64, nanoseconds : Int32 = 0)
-    sec = @seconds &+ (nanoseconds.to_i64 // 1000000000_i64)
+  def initialize(@seconds : Int64, nanoseconds : Int32 = 0, location : Location = Location::UTC)
+    carry = nanoseconds.to_i64 // 1000000000_i64
     nsec = (nanoseconds.to_i64 % 1000000000_i64).to_i32
     if nsec < 0
-      sec = sec &- 1_i64
+      carry = carry - 1_i64
       nsec = nsec + 1000000000
     end
+    sec = @seconds &+ carry
     if sec < MIN_SECONDS || sec > MAX_SECONDS
-      raise "year out of range: #{@seconds} seconds from the epoch is past the years an Int32 holds"
+      # The count after the carry is the one refused, so it is the one named.
+      # The message named the count before it, and `Time.unix(MAX_SECONDS,
+      # 999999999) + 1ns` was refused naming 67767976233532799, a second the
+      # module had just accepted. A sum that wrapped is named as the sum.
+      wrapped = (carry > 0_i64 && sec < @seconds) || (carry < 0_i64 && sec > @seconds)
+      count = wrapped ? "#{@seconds} #{carry > 0_i64 ? "+" : "-"} #{carry.abs}" : sec.to_s
+      raise "year out of range: #{count} seconds from the epoch is past the years an Int32 holds"
+    end
+    offset = location.lookup(sec).offset
+    local = sec + offset.to_i64
+    # An offset can carry the first or last second past the years an Int32
+    # names, and the clock is read at the offset.
+    if local < MIN_SECONDS || local > MAX_SECONDS
+      raise "year out of range: #{sec} seconds from the epoch at an offset of #{offset} seconds is past the years an Int32 holds"
     end
     @seconds = sec
     @nanoseconds = nsec
+    @location = location
+    @offset = offset
+  end
+
+  # The seconds since 1970 a UTC clock would show for this time's wall
+  # clock: what the date and the time of day are read from.
+  private def wall : Int64
+    @seconds + @offset.to_i64
   end
 
   # ---------------------------------------------------------------------------
@@ -419,14 +1297,18 @@ pub struct Time
 
   {% elsif flag?(:windows) %}
     lib LibKernel32
-      fun GetSystemTimeAsFileTime(time : Int64*) : Void
+      fun GetSystemTimePreciseAsFileTime(time : Int64*) : Void
       fun QueryPerformanceCounter(count : Int64*) : Int32
       fun QueryPerformanceFrequency(freq : Int64*) : Int32
     end
 
     def self.wall_clock_nanoseconds : UInt64
       filetime = uninitialized Int64
-      LibKernel32.GetSystemTimeAsFileTime(pointerof(filetime))
+      # The precise one, as Crystal reads: `GetSystemTimeAsFileTime` moves
+      # once per timer tick, measured at 0.7 ms to 15.6 ms, so two readings
+      # a few hundred microseconds apart were the same instant and a span
+      # between them was zero.
+      LibKernel32.GetSystemTimePreciseAsFileTime(pointerof(filetime))
       epoch_diff = 116444736000000000_i64
       unix_100ns = filetime - epoch_diff
       unix_100ns.to_u64 * 100_u64
@@ -484,6 +1366,16 @@ pub struct Time
     new(sec, nano)
   end
 
+  # Now, in the machine's own zone (`Location.local`).
+  def self.local : Time
+    utc.in(Location.local)
+  end
+
+  # Now, read in *location*.
+  def self.local(location : Location) : Time
+    utc.in(location)
+  end
+
   def self.monotonic : Span
     total_ns = monotonic_nanoseconds
     sec = (total_ns // 1000000000_u64).to_i64
@@ -492,6 +1384,23 @@ pub struct Time
   end
 
   def self.utc(year : Int32, month : Int32, day : Int32, hour : Int32 = 0, minute : Int32 = 0, second : Int32 = 0, millisecond : Int32 = 0, nanosecond : Int32 = 0) : Time
+    wall, fraction = wall_clock(year, month, day, hour, minute, second, millisecond, nanosecond)
+    new(wall, fraction)
+  end
+
+  # The time a clock in *location* shows as the date and time given, the
+  # machine's own zone when none is. Its fields are checked as `utc` checks
+  # them. A wall time a change of offset repeats, the hour after summer
+  # ends, is the earlier of the two; one a change skips, the hour summer
+  # begins with, is read past the gap (see `Location#resolve`).
+  def self.local(year : Int32, month : Int32, day : Int32, hour : Int32 = 0, minute : Int32 = 0, second : Int32 = 0, millisecond : Int32 = 0, nanosecond : Int32 = 0, location : Location = Location.local) : Time
+    wall, fraction = wall_clock(year, month, day, hour, minute, second, millisecond, nanosecond)
+    new(location.resolve(wall), fraction, location)
+  end
+
+  # The fields checked, as the seconds a UTC clock showing them counts
+  # since 1970, and the fraction of the second.
+  private def self.wall_clock(year : Int32, month : Int32, day : Int32, hour : Int32, minute : Int32, second : Int32, millisecond : Int32, nanosecond : Int32) : {Int64, Int32}
     if month < 1 || month > 12
       raise "invalid month: #{month}"
     end
@@ -514,14 +1423,17 @@ pub struct Time
     if nanosecond < 0 || nanosecond > 999999999
       raise "invalid nanosecond: #{nanosecond}"
     end
-
+    # The two are one fraction of the second written: past it they carried
+    # into the next second in silence, and `Time.utc(2024, 12, 31, 23, 59, 59,
+    # 999, 999999999)` answered 2025-01-01T00:00:00.998999999Z, a date nobody
+    # wrote, where the same constructor refuses a 60th second.
     total_ns = millisecond.to_i64 * 1000000_i64 + nanosecond.to_i64
-    extra_sec = total_ns // 1000000000_i64
-    nano_rem = (total_ns % 1000000000_i64).to_i32
+    if total_ns > 999999999_i64
+      raise "invalid millisecond + nanosecond: #{millisecond} ms and #{nanosecond} ns are past one second"
+    end
 
     days = days_from_civil(year.to_i64, month, day)
-    sec = days * 86400_i64 + hour.to_i64 * 3600_i64 + minute.to_i64 * 60_i64 + second.to_i64 + extra_sec
-    new(sec, nano_rem)
+    {days * 86400_i64 + hour.to_i64 * 3600_i64 + minute.to_i64 * 60_i64 + second.to_i64, total_ns.to_i32}
   end
 
   def self.new(year : Int32, month : Int32, day : Int32, hour : Int32 = 0, minute : Int32 = 0, second : Int32 = 0, millisecond : Int32 = 0, nanosecond : Int32 = 0) : Time
@@ -571,6 +1483,67 @@ pub struct Time
     end
   end
 
+  def self.days_in_year(year : Int32) : Int32
+    leap_year?(year) ? 366 : 365
+  end
+
+  # A year has 53 ISO 8601 weeks when it starts on a Thursday, or on a
+  # Wednesday in a leap year: either way it has 53 Thursdays, and a week
+  # belongs to the year that holds its Thursday.
+  def self.weeks_in_year(year : Int32) : Int32
+    jan1 = floor_mod(days_from_civil(year.to_i64, 1, 1) + 3_i64, 7_i64) + 1_i64
+    (jan1 == 4_i64 || (jan1 == 3_i64 && leap_year?(year))) ? 53 : 52
+  end
+
+  # The ISO 8601 week-numbering year and week of a date, from its year, day
+  # of the month, day of the year and day of the week (Monday is 1). This is
+  # Crystal's computation: the week is the count of Mondays up to the day,
+  # and the first days of January or the last of December can belong to a
+  # week of the year next to it. The year is an Int64 because the first days
+  # of the smallest Int32 year belong to the year before it.
+  def self.iso_week(year : Int64, day : Int32, day_of_year : Int32, day_of_week : Int32) : {Int64, Int32}
+    week = (day_of_year - day_of_week + 10) // 7
+    if week == 0
+      year = year - 1_i64
+      jan1 = floor_mod((day_of_week - day_of_year + 1).to_i64, 7_i64)
+      week = (jan1 == 5_i64 || (jan1 == 6_i64 && year % 4_i64 == 0_i64 && (year % 100_i64 != 0_i64 || year % 400_i64 == 0_i64))) ? 53 : 52
+    elsif week == 53
+      dec31 = floor_mod((day_of_week + 31 - day).to_i64, 7_i64)
+      if dec31 <= 3_i64
+        year = year + 1_i64
+        week = 1
+      end
+    end
+    {year, week}
+  end
+
+  # Days since 1970-01-01 of a day of an ISO 8601 week. Week 1 is the week
+  # holding January 4th, so its Monday is the Monday on or before that day.
+  def self.week_date_days(year : Int32, week : Int32, day_of_week : Int32) : Int64
+    jan4 = days_from_civil(year.to_i64, 1, 4)
+    jan4_day_of_week = floor_mod(jan4 + 3_i64, 7_i64) + 1_i64
+    jan4 - (jan4_day_of_week - 1_i64) + (week - 1).to_i64 * 7_i64 + (day_of_week - 1).to_i64
+  end
+
+  # The instant of a day of an ISO 8601 week, as Crystal's `week_date` makes
+  # it: `Time.week_date(2016, 1, 1)` is Monday 2016-01-04. A week the year
+  # does not have and a day past Sunday are refused, where the other library answered
+  # a day of some other week.
+  def self.week_date(year : Int32, week : Int32, day_of_week : Int32, hour : Int32 = 0, minute : Int32 = 0, second : Int32 = 0, nanosecond : Int32 = 0) : Time
+    weeks = weeks_in_year(year)
+    if week < 1 || week > weeks
+      raise "invalid week: #{year} has weeks 1 to #{weeks}, not #{week}"
+    end
+    if day_of_week < 1 || day_of_week > 7
+      raise "invalid day of week: #{day_of_week}; Monday is 1 and Sunday is 7"
+    end
+    # The clock is checked the way `Time.utc` checks it, on a day that has
+    # every hour; the date is added as days, so a week date in the year
+    # past the last one an Int32 holds is refused by the constructor.
+    clock = Time.utc(1970, 1, 1, hour, minute, second, 0, nanosecond)
+    Time.new(week_date_days(year, week, day_of_week) * 86400_i64 + clock.seconds, nanosecond)
+  end
+
   # Number of days between 1970-01-01 and the given civil date.
   # Follows Howard Hinnant's Gregorian calendar algorithm.
   def self.floor_div(a : Int64, b : Int64) : Int64
@@ -617,8 +1590,9 @@ pub struct Time
   # Accessors
   # ---------------------------------------------------------------------------
 
+  # The date and clock are the wall clock's, read in the time's location.
   private def civil_parts : {Int32, Int32, Int32}
-    days = Time.floor_div(@seconds, 86400_i64)
+    days = Time.floor_div(wall, 86400_i64)
     Time.civil_from_days(days)
   end
 
@@ -635,17 +1609,17 @@ pub struct Time
   end
 
   def hour : Int32
-    sec_in_day = Time.floor_mod(@seconds, 86400_i64)
+    sec_in_day = Time.floor_mod(wall, 86400_i64)
     (sec_in_day // 3600_i64).to_i32
   end
 
   def minute : Int32
-    sec_in_day = Time.floor_mod(@seconds, 86400_i64)
+    sec_in_day = Time.floor_mod(wall, 86400_i64)
     ((sec_in_day % 3600_i64) // 60_i64).to_i32
   end
 
   def second : Int32
-    sec_in_day = Time.floor_mod(@seconds, 86400_i64)
+    sec_in_day = Time.floor_mod(wall, 86400_i64)
     (sec_in_day % 60_i64).to_i32
   end
 
@@ -666,7 +1640,7 @@ pub struct Time
   end
 
   def day_of_week : DayOfWeek
-    days = Time.floor_div(@seconds, 86400_i64)
+    days = Time.floor_div(wall, 86400_i64)
     # 1970-01-01 was Thursday (day 4). Monday is 1, Sunday is 7.
     w = Time.floor_mod(days + 3_i64, 7_i64) + 1_i64
     case w
@@ -687,12 +1661,63 @@ pub struct Time
     (d_today - d_jan1 + 1_i64).to_i32
   end
 
+  # The ISO 8601 week-numbering year and week this day falls in, as
+  # Crystal's `calendar_week` answers: 2021-01-01 is in week 53 of 2020.
+  def calendar_week : {Int32, Int32}
+    parts = civil_parts
+    week_year, week = Time.iso_week(parts[0].to_i64, parts[2], day_of_year, day_of_week.value)
+    if week_year < -2147483648_i64 || week_year > 2147483647_i64
+      raise "year out of range: the ISO week year of #{to_rfc3339} is #{week_year}, past the years an Int32 holds"
+    end
+    {week_year.to_i32, week}
+  end
+
   def to_unix : Int64
     @seconds
   end
 
+  # The same instant read in *location*: `Time.utc(2024, 7, 1, 12).in(berlin)`
+  # is 14:00 CEST.
+  def in(location : Location) : Time
+    Time.new(@seconds, @nanoseconds, location)
+  end
+
+  def to_utc : Time
+    self.in(Location::UTC)
+  end
+
+  def to_local : Time
+    self.in(Location.local)
+  end
+
+  def utc? : Bool
+    @location.utc?
+  end
+
+  def local? : Bool
+    @location.local?
+  end
+
+  # The zone this instant is in at its location: its abbreviation, offset
+  # and whether it is summer time.
+  def zone : Location::Zone
+    @location.lookup(@seconds)
+  end
+
+  # Refused with the module's sentence past the milliseconds an Int64
+  # holds, some 292 million years either side of 1970, where the multiply
+  # was the prelude's bare "arithmetic overflow" for a year `Time.utc`
+  # accepts, 300,000,000. Both edges answer to the last millisecond that
+  # fits: the lowest 808 an Int64 holds were refused, so
+  # `Time.unix_ms(Int64::MIN).to_unix_ms` panicked. A negative second is
+  # taken one up and its milliseconds from 1000 down, so the product fits
+  # too.
   def to_unix_ms : Int64
-    @seconds * 1000_i64 + (@nanoseconds // 1000000).to_i64
+    ms = (@nanoseconds // 1000000).to_i64
+    if @seconds > 9223372036854775_i64 || @seconds < -9223372036854776_i64 || (@seconds == 9223372036854775_i64 && ms > 807_i64) || (@seconds == -9223372036854776_i64 && ms < 192_i64)
+      raise "time out of range: #{@seconds} seconds from the epoch is past the milliseconds an Int64 holds"
+    end
+    @seconds < 0_i64 ? (@seconds + 1_i64) * 1000_i64 + (ms - 1000_i64) : @seconds * 1000_i64 + ms
   end
 
   def to_unix_f : Float64
@@ -705,17 +1730,51 @@ pub struct Time
 
   # The sum is checked before it is taken, so a span too long for the
   # seconds is refused as one; a sum that fits but leaves the years an
-  # Int32 names is refused by the constructor.
+  # Int32 names is refused by the constructor. A span is exact: a day
+  # added across the night summer begins is 24 hours, and the clock reads
+  # an hour later than it did.
   def +(span : Span) : Time
-    Time.new(Span.add_seconds(@seconds, span.total_seconds_i64), @nanoseconds + span.nanoseconds)
+    Time.new(Span.add_seconds(@seconds, span.total_seconds_i64), @nanoseconds + span.nanoseconds, @location)
   end
 
   def -(span : Span) : Time
-    Time.new(Span.sub_seconds(@seconds, span.total_seconds_i64), @nanoseconds - span.nanoseconds)
+    Time.new(Span.sub_seconds(@seconds, span.total_seconds_i64), @nanoseconds - span.nanoseconds, @location)
   end
 
   def -(other : Time) : Span
     Span.new(@seconds - other.seconds, @nanoseconds - other.nanoseconds)
+  end
+
+  # Moves the date by calendar years and months, then by weeks and days,
+  # then by the smaller units, in that order, as Crystal's `shift` does. A
+  # day the month does not have becomes its last: `Time.utc(2024, 1,
+  # 31).shift(months: 1)` is 2024-02-29. The date moves on the wall clock
+  # of the time's location, so the time of day is kept across a change of
+  # offset - a day after 12:00 on the Saturday summer begins is 12:00 on
+  # Sunday, 23 hours later - and the hours, minutes, seconds and
+  # nanoseconds are exact. A year past an Int32 is refused with the
+  # constructor's sentence, and a span the Int64 seconds do not hold with
+  # `Span`'s.
+  def shift(*, years : Int32 = 0, months : Int32 = 0, weeks : Int64 = 0_i64, days : Int64 = 0_i64, hours : Int64 = 0_i64, minutes : Int64 = 0_i64, seconds : Int64 = 0_i64, nanoseconds : Int64 = 0_i64) : Time
+    moved = self
+    if years != 0 || months != 0 || weeks != 0_i64 || days != 0_i64
+      date = wall
+      if years != 0 || months != 0
+        y, m, d = civil_parts
+        count = y.to_i64 * 12_i64 + (m - 1).to_i64 + years.to_i64 * 12_i64 + months.to_i64
+        new_year = Time.floor_div(count, 12_i64)
+        new_month = (Time.floor_mod(count, 12_i64) + 1_i64).to_i32
+        if new_year < -2147483648_i64 || new_year > 2147483647_i64
+          raise "year out of range: #{to_rfc3339} shifted by #{years} years and #{months} months is in year #{new_year}, past the years an Int32 holds"
+        end
+        last = Time.days_in_month(new_year.to_i32, new_month)
+        new_day = d > last ? last : d
+        date = Time.days_from_civil(new_year, new_month, new_day) * 86400_i64 + Time.floor_mod(wall, 86400_i64)
+      end
+      date = Span.add_seconds(date, Span.add_seconds(Span.mul_seconds(weeks, 604800_i64), Span.mul_seconds(days, 86400_i64)))
+      moved = Time.new(@location.resolve(date), @nanoseconds, @location)
+    end
+    moved + Span.new(hours: hours, minutes: minutes, seconds: seconds, nanoseconds: nanoseconds)
   end
 
   # ---------------------------------------------------------------------------
@@ -752,15 +1811,29 @@ pub struct Time
     @seconds == other.seconds && @nanoseconds == other.nanoseconds
   end
 
+  # Hashing follows `==`, as `Span`'s does. Without it every time hashed to its
+  # type: `Time.unix(1).hash == Time.unix(1000000, 5).hash`, and a table of
+  # 16,000 times took 1.2 s to fill where the same pairs as tuples took 1 ms.
+  def hash : Int32
+    {@seconds, @nanoseconds}.hash
+  end
+
   # ---------------------------------------------------------------------------
   # Formatting and Parsing (RFC 3339)
   # ---------------------------------------------------------------------------
 
+  # RFC 3339 at the time's own offset: `Z` at UTC, `+02:00` in CEST. An
+  # offset RFC 3339 cannot write, one with seconds in it as local mean time
+  # before standard time had, is written as the same instant in UTC.
   def to_rfc3339(fraction_digits : Int32 = 0) : String
-    y, m, d = civil_parts
-    h = hour
-    mi = minute
-    s = second
+    if @offset != 0 && @offset % 60 == 0
+      return Format::RFC_3339.format(self, fraction_digits, @offset)
+    end
+    y, m, d = Time.civil_from_days(Time.floor_div(@seconds, 86400_i64))
+    clock = Time.floor_mod(@seconds, 86400_i64).to_i32
+    h = clock // 3600
+    mi = (clock % 3600) // 60
+    s = clock % 60
 
     base = "#{Time.pad4(y)}-#{Time.pad2(m)}-#{Time.pad2(d)}T#{Time.pad2(h)}:#{Time.pad2(mi)}:#{Time.pad2(s)}"
     if fraction_digits == 3
@@ -778,16 +1851,57 @@ pub struct Time
     end
   end
 
-  def to_s : String
-    y, m, d = civil_parts
-    h = hour
-    mi = minute
-    s = second
-    "#{Time.pad4(y)}-#{Time.pad2(m)}-#{Time.pad2(d)} #{Time.pad2(h)}:#{Time.pad2(mi)}:#{Time.pad2(s)} UTC"
+  # The time written by *format*'s directives (see `Time::Format`) as its
+  # own location reads it; `%Z` is the zone's abbreviation, `CEST`.
+  def to_s(format : String) : String
+    Format.new(format).format(self)
   end
 
-  # Parses an RFC 3339 / ISO 8601 string into a UTC Time.
-  # Handles forms like:
+  # The instant written as it reads at *offset* seconds east of UTC:
+  # `to_s("%F %T %:z", 19800)` is the wall clock in India.
+  def to_s(format : String, offset : Int32) : String
+    Format.new(format).format(self, offset)
+  end
+
+  # RFC 2822's date, `Mon, 15 Feb 2016 04:35:50 +0000`, at *offset*, or at
+  # the time's own offset when none is given.
+  def to_rfc2822(offset : Int32? = nil) : String
+    Format::RFC_2822.format(self, offset)
+  end
+
+  # RFC 1123's date as HTTP writes it, RFC 9110's IMF-fixdate, always in GMT:
+  # `Sun, 06 Nov 1994 08:49:37 GMT`.
+  def to_rfc1123 : String
+    Format::HTTP_DATE.format(self)
+  end
+
+  # `2016-02-15 10:20:30 UTC`, and in any other location the offset in
+  # place of `UTC`: `2016-02-15 11:20:30 +01:00`.
+  def to_s : String
+    utc? ? "#{date_and_clock} UTC" : "#{date_and_clock} #{Format.offset_text(@offset, true, 1)}"
+  end
+
+  # As the other library writes it: the date and time, the nanoseconds
+  # when there are any, and `Z`. There was no `inspect`, so it was `to_s`,
+  # and `Time.utc(2024, 1, 1, 0, 0, 0, nanosecond: 5)` inspected as
+  # `2024-01-01 00:00:00 UTC`, the same as `Time.utc(2024, 1, 1)`, which
+  # `==` tells apart from it. Out of UTC the offset follows, and the
+  # location's name when it is more than an offset:
+  # `2016-02-15 11:20:30 +01:00 Europe/Berlin`.
+  def inspect : String
+    base = @nanoseconds == 0 ? date_and_clock : "#{date_and_clock}.#{Time.pad9(@nanoseconds)}"
+    return "#{base}Z" if utc?
+    zoned = "#{base} #{Format.offset_text(@offset, true, 1)}"
+    @location.fixed? ? zoned : "#{zoned} #{@location.name}"
+  end
+
+  private def date_and_clock : String
+    y, m, d = civil_parts
+    "#{Time.pad4(y)}-#{Time.pad2(m)}-#{Time.pad2(d)} #{Time.pad2(hour)}:#{Time.pad2(minute)}:#{Time.pad2(second)}"
+  end
+
+  # Parses an RFC 3339 / ISO 8601 string into a UTC Time, and panics with the
+  # parser's sentence when it is not one. Handles forms like:
   #   2024-02-29T12:30:45Z
   #   2024-02-29T12:30:45.123Z
   #   2024-02-29T12:30:45.123456789Z
@@ -795,174 +1909,49 @@ pub struct Time
   #   2024-02-29T12:30:45+05:00
   #   2024-02-29T12:30:45-08:00
   #   -0001-01-01T00:00:00Z and 12345-06-07T08:09:10Z, as `to_rfc3339` writes them
+  # `Time::Format::RFC_3339.parse` reads the same grammar and answers a
+  # `TimeParseError` instead, for text the program did not write itself.
   def self.parse_rfc3339(str : String) : Time
-    len = str.bytesize
-    if len < 20
-      raise "RFC 3339 string too short: #{str}"
-    end
+    Format::RFC_3339.parse(str).or_panic
+  end
 
-    # The year is what `to_rfc3339` writes: an optional `-`, then four or
-    # more digits up to the `-` that ends them. RFC 3339 itself stops at
-    # four, and the formatter did not, so `-0001-01-01T00:00:00Z` was a
-    # string the module wrote and refused to read. Ten digits are the most
-    # an Int32 year needs; an eleventh is out of range whatever it is.
-    idx = 0
-    negative_year = false
-    if str[0] == '-'
-      negative_year = true
-      idx = 1
-    end
-    year_start = idx
-    year_val = 0_i64
-    while idx < len
-      code = str.to_unsafe[idx].to_i32
-      break if code < 48 || code > 57
-      if idx - year_start >= 10
-        raise "year out of range in RFC 3339 string: #{str}"
-      end
-      year_val = year_val * 10_i64 + (code - 48).to_i64
-      idx = idx + 1
-    end
-    if idx - year_start < 4
-      raise "invalid year in RFC 3339 string: fewer than four digits in #{str}"
-    end
-    year_val = 0_i64 - year_val if negative_year
-    if year_val < -2147483648_i64 || year_val > 2147483647_i64
-      raise "year out of range in RFC 3339 string: #{str}"
-    end
-    y = year_val.to_i32
+  # Reads *string* by *pattern*'s directives (see `Time::Format`). A text
+  # that names no zone is read at *offset* seconds east of UTC, as Crystal's
+  # `Time.parse` reads one at the location it is given.
+  def self.parse(string : String, pattern : String, offset : Int32) : Time | TimeParseError
+    Format.new(pattern, offset).parse(string)
+  end
 
-    # `p` is the `-` after the year; the rest of the date and the time are
-    # at fixed offsets from it.
-    p = idx
-    if len < p + 16
-      raise "RFC 3339 string too short: #{str}"
-    end
+  # `parse` at UTC when the text names no zone.
+  def self.parse_utc(string : String, pattern : String) : Time | TimeParseError
+    Format.new(pattern, 0).parse(string)
+  end
 
-    if str[p] != '-' || str[p + 3] != '-' || str[p + 9] != ':' || str[p + 12] != ':'
-      raise "invalid RFC 3339 format delimiters: #{str}"
-    end
+  # Reads *string* by *pattern* in *location*: a text that names no zone is
+  # the wall clock there, its offset the one the location kept at that date
+  # (a wall time a change repeats or skips is read as `Time.local` reads
+  # it), and the time answered is in *location* whether the text named a
+  # zone or not.
+  def self.parse(string : String, pattern : String, location : Location) : Time | TimeParseError
+    Format.new(pattern, location).parse(string)
+  end
 
-    sep = str[p + 6]
-    if sep != 'T' && sep != 't' && sep != ' '
-      raise "invalid RFC 3339 date/time separator: #{sep}"
-    end
+  # `parse` in the machine's own zone.
+  def self.parse_local(string : String, pattern : String) : Time | TimeParseError
+    Format.new(pattern, Location.local).parse(string)
+  end
 
-    m = parse_int(str, p + 1, 2)
-    d = parse_int(str, p + 4, 2)
-    h = parse_int(str, p + 7, 2)
-    mi = parse_int(str, p + 10, 2)
-    s = parse_int(str, p + 13, 2)
+  def self.parse_rfc2822(string : String) : Time | TimeParseError
+    Format::RFC_2822.parse(string)
+  end
 
-    idx = p + 15
-    nanos = 0
+  # Any of RFC 9110's three HTTP date forms; see `Time::Format::HTTP_DATE`.
+  def self.parse_rfc1123(string : String) : Time | TimeParseError
+    Format::HTTP_DATE.parse(string)
+  end
 
-    # Optional fractional seconds
-    if idx < len && str[idx] == '.'
-      idx = idx + 1
-      start_frac = idx
-      while idx < len
-        code = str.to_unsafe[idx].to_i32
-        break if code < 48 || code > 57
-        idx = idx + 1
-      end
-      frac_len = idx - start_frac
-      if frac_len == 0
-        raise "empty fractional seconds in RFC 3339: #{str}"
-      end
-
-      # Parse up to 9 digits into nanoseconds
-      frac_val = 0
-      pos = 0
-      while pos < 9
-        if pos < frac_len
-          code = str.to_unsafe[start_frac + pos].to_i32
-          frac_val = frac_val * 10 + (code - 48)
-        else
-          frac_val = frac_val * 10
-        end
-        pos = pos + 1
-      end
-      nanos = frac_val
-    end
-
-    # Time zone offset
-    if idx >= len
-      raise "missing timezone in RFC 3339 string: #{str}"
-    end
-
-    tz_char = str[idx]
-    offset_sec = 0_i64
-
-    if tz_char == 'Z' || tz_char == 'z'
-      offset_sec = 0_i64
-      idx = idx + 1
-    elsif tz_char == '+' || tz_char == '-'
-      sign = tz_char == '+' ? 1_i64 : -1_i64
-      rem_len = len - idx - 1
-      oh = 0
-      om = 0
-      if rem_len >= 5 && str[idx + 3] == ':'
-        # +HH:MM
-        oh = parse_int(str, idx + 1, 2)
-        om = parse_int(str, idx + 4, 2)
-        idx = idx + 6
-      elsif rem_len >= 4 && str[idx + 1].ord >= 48 && str[idx + 1].ord <= 57
-        # +HHMM
-        oh = parse_int(str, idx + 1, 2)
-        om = parse_int(str, idx + 3, 2)
-        idx = idx + 5
-      elsif rem_len >= 2
-        # +HH
-        oh = parse_int(str, idx + 1, 2)
-        idx = idx + 3
-      else
-        raise "invalid timezone offset in RFC 3339: #{str}"
-      end
-      # An offset is an hour of 00..23 and a minute of 00..59, as the
-      # grammar has it: `+99:99` was read as four days and change, and
-      # `+24:00` as a day, and the instant moved by that much in silence.
-      if oh > 23 || om > 59
-        raise "invalid timezone offset in RFC 3339 string: #{Time.pad2(oh)}:#{Time.pad2(om)} in #{str}"
-      end
-      offset_sec = sign * (oh.to_i64 * 3600_i64 + om.to_i64 * 60_i64)
-    else
-      raise "invalid timezone designator in RFC 3339: #{tz_char}"
-    end
-
-    # The offset ends the string. `...Zjunk` and `...+05:30:00` both parsed,
-    # the text after the offset never looked at.
-    if idx != len
-      raise "trailing text after the timezone in RFC 3339 string: #{str}"
-    end
-
-    # The fields are checked the way `Time.utc` checks them, because they
-    # were not: `2024-02-30T00:00:00Z` parsed, and came back as March 1st -
-    # a date nobody wrote, from a parser that said nothing. One allowance,
-    # RFC 3339's own: `:60` is a leap second, and it is read as the second
-    # after 59, which is the instant it names on every clock that has no
-    # leap seconds.
-    if m < 1 || m > 12
-      raise "invalid month in RFC 3339 string: #{m} in #{str}"
-    end
-    if d < 1 || d > days_in_month(y, m)
-      raise "invalid day in RFC 3339 string: #{d} for year #{y} month #{m} in #{str}"
-    end
-    if h < 0 || h > 23
-      raise "invalid hour in RFC 3339 string: #{h} in #{str}"
-    end
-    if mi < 0 || mi > 59
-      raise "invalid minute in RFC 3339 string: #{mi} in #{str}"
-    end
-    if s < 0 || s > 60
-      raise "invalid second in RFC 3339 string: #{s} in #{str}"
-    end
-
-    # Convert to UTC by subtracting the offset from local time
-    days = days_from_civil(y.to_i64, m, d)
-    local_sec = days * 86400_i64 + h.to_i64 * 3600_i64 + mi.to_i64 * 60_i64 + s.to_i64
-    utc_sec = local_sec - offset_sec
-    Time.new(utc_sec, nanos)
+  def self.parse_iso8601(string : String) : Time | TimeParseError
+    Format::ISO_8601_DATE_TIME.parse(string)
   end
 
   # ---------------------------------------------------------------------------
@@ -1053,18 +2042,1562 @@ pub struct Time
     end
   end
 
-  private def self.parse_int(str : String, start : Int32, count : Int32) : Int32
-    val = 0
-    i = 0
-    while i < count
-      code = str.to_unsafe[start + i].to_i32
-      if code < 48 || code > 57
-        raise "invalid digit in RFC 3339 string: #{str}"
+  # ---------------------------------------------------------------------------
+  # Time::Format: strftime-style patterns and the named formats
+  # ---------------------------------------------------------------------------
+
+  # A pattern of Crystal's directives, for writing a `Time` and reading one
+  # back. Text that is not a directive is written as it is and must be
+  # there, byte for byte, when reading; ASCII whitespace in the pattern is
+  # written as it is and reads any run of whitespace, none included.
+  #
+  #   %Y year, four digits or more, year -1 as -0001   %C year // 100
+  #   %y year % 100   %G %g %V the ISO 8601 week year, its last two digits,
+  #   and the week 01..53   %m month 01..12   %B January   %b %h Jan
+  #   %d day 01..31   %e day " 1".."31"   %j day of the year 001..366
+  #   %H hour 00..23  %k " 0".."23"  %I 01..12  %l " 1".."12"  %p am  %P AM
+  #   %M minute   %S second   %L milliseconds   %3N %6N %9N the fraction to
+  #   3, 6 and 9 digits   %N nanoseconds, any number of digits when read
+  #   %A Sunday   %a Sun   %u day of the week, Monday 1..7   %w Sunday 0..6
+  #   %s seconds since the epoch   %z +0530   %:z +05:30   %::z +05:30:00
+  #   %Z and %^Z: UTC at offset 0 and the offset, +05:30, at any other
+  #   %F %Y-%m-%d   %T %X %H:%M:%S   %R %H:%M   %D %x %m/%d/%y
+  #   %r %I:%M:%S %P   %c %a %b %e %H:%M:%S %Y   %n newline   %t tab   %% %
+  #
+  # A number takes a flag between the `%` and its letter: `-` for no
+  # padding (`%-d` is 5), `_` for spaces (`%_m` is " 5") and `0` for zeros
+  # (`%0e` is 05); `^` upcases a name (`%^a` is SUN). The other library knows
+  # `%-d`, `%-m`, `%_m` and the `^` names. The same flags on its other numbers
+  # are this module's, where that library wrote the `%-` back out as text; a `%`
+  # that starts no directive is text here as it is there.
+  #
+  # Reading takes up to a number's width in digits, fewer when the next byte
+  # is not a digit, and a name in any case. `%Y` takes four digits when a
+  # directive follows it (`%Y%m%d`), and when text or the end of the
+  # pattern does (`%F`), an optional `-` and up to ten, so the years `to_s`
+  # writes are the years it reads. A field outside its range, a day the
+  # month does not have, a name that is not one and text after the pattern
+  # are each a `TimeParseError`, never a panic. A day name is checked to be
+  # one and not checked against the date, as Crystal, Go and Python read it.
+  struct Format
+    MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    DAY_NAMES   = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+    getter pattern : String
+    getter offset : Int32?
+    getter location : Location?
+
+    # *offset*, seconds east of UTC, is the one a parse reads a text at when
+    # the text names no zone, and the one `format` writes at. Nil, as for
+    # Crystal's `Format.new(pattern)`, makes a text without a zone an error,
+    # and `format` writes a time in its own location.
+    def initialize(@pattern : String, @offset : Int32? = nil)
+      @location = nil
+      if offset = @offset
+        Format.check_offset(offset)
       end
-      val = val * 10 + (code - 48)
-      i = i + 1
     end
-    val
+
+    # A text that names no zone is read on *location*'s wall clock, and
+    # every time is read and written in *location*.
+    def initialize(@pattern : String, location : Location)
+      @offset = nil
+      @location = location
+    end
+
+    def format(time : Time) : String
+      if offset = @offset
+        return format(time, offset)
+      end
+      if location = @location
+        time = time.in(location)
+      end
+      write(Fields.new(time, time.offset, time.zone.name))
+    end
+
+    def format(time : Time, offset : Int32) : String
+      write(Fields.new(time, offset, nil))
+    end
+
+    private def write(fields : Fields) : String
+      String.build(@pattern.bytesize + 16) do |io|
+        Format.write(io, @pattern, fields)
+      end
+    end
+
+    def parse(string : String) : Time | TimeParseError
+      parser = Parser.new(string)
+      parser.pattern(@pattern) && parser.at_end
+      parser.finish(@offset, @location)
+    end
+
+    def parse(string : String, offset : Int32?) : Time | TimeParseError
+      parser = Parser.new(string)
+      parser.pattern(@pattern) && parser.at_end
+      parser.finish(offset)
+    end
+
+    # An offset is less than a day either side of UTC: the widest RFC 3339
+    # and RFC 2822 write is 23:59, and a day or more is a date, not a zone.
+    # An offset is the program's own, so a wrong one is a panic.
+    def self.check_offset(offset : Int32) : Nil
+      if offset <= -86400 || offset >= 86400
+        raise "offset out of range: #{offset} seconds is a day or more from UTC"
+      end
+    end
+
+    # The parts of an instant as they read at an offset, worked out once
+    # per `format` rather than once per directive. *zone* is what `%Z`
+    # writes, the location's abbreviation; with none it writes `UTC` at
+    # offset 0 and the offset at any other.
+    struct Fields
+      getter year : Int32
+      getter month : Int32
+      getter day : Int32
+      getter hour : Int32
+      getter minute : Int32
+      getter second : Int32
+      getter nanosecond : Int32
+      getter day_of_week : Int32
+      getter day_of_year : Int32
+      getter offset : Int32
+      getter unix : Int64
+      getter zone : String?
+
+      def initialize(time : Time, @offset : Int32, @zone : String?)
+        Format.check_offset(@offset)
+        @unix = time.seconds
+        local = time.seconds + @offset.to_i64
+        # The first and last seconds are as far as a year goes, and an offset
+        # can carry them past it; the sentence is the constructor's.
+        if local < Time::MIN_SECONDS || local > Time::MAX_SECONDS
+          raise "year out of range: #{time.seconds} seconds from the epoch at an offset of #{@offset} seconds is past the years an Int32 holds"
+        end
+        days = Time.floor_div(local, 86400_i64)
+        y, m, d = Time.civil_from_days(days)
+        @year = y
+        @month = m
+        @day = d
+        clock = Time.floor_mod(local, 86400_i64).to_i32
+        @hour = clock // 3600
+        @minute = (clock % 3600) // 60
+        @second = clock % 60
+        @nanosecond = time.nanoseconds
+        @day_of_week = (Time.floor_mod(days + 3_i64, 7_i64) + 1_i64).to_i32
+        @day_of_year = (days - Time.days_from_civil(y.to_i64, 1, 1) + 1_i64).to_i32
+      end
+
+      def week : {Int64, Int32}
+        Time.iso_week(@year.to_i64, @day, @day_of_year, @day_of_week)
+      end
+    end
+
+    def self.numeric?(letter : Char) : Bool
+      case letter
+      when 'Y', 'C', 'y', 'G', 'g', 'V', 'm', 'd', 'e', 'j', 'H', 'k', 'I', 'l', 'M', 'S', 'u', 'w', 's'
+        true
+      else
+        false
+      end
+    end
+
+    def self.textual?(letter : Char) : Bool
+      case letter
+      when 'a', 'A', 'b', 'h', 'B', 'p', 'P', 'Z'
+        true
+      else
+        false
+      end
+    end
+
+    def self.plain?(letter : Char) : Bool
+      case letter
+      when 'L', 'N', 'z', 'F', 'T', 'X', 'R', 'D', 'x', 'r', 'c', 'n', 't', '%'
+        true
+      else
+        false
+      end
+    end
+
+    # The directive at the `%` at byte *i* of *pattern*: the byte after it,
+    # its letter, its flag, the colons of `%:z` and `%::z`, and the digits of
+    # `%3N`. A `%` that starts no directive answers the letter '\0' and the
+    # byte after the `%`: it is text, and so is what follows it, as Crystal
+    # writes `%Q` back out as `%Q`.
+    def self.lex(pattern : String, i : Int32) : {Int32, Char, Char, Int32, Int32}
+      bytes = pattern.to_unsafe
+      len = pattern.bytesize
+      j = i + 1
+      flag = '\0'
+      if j < len
+        candidate = bytes[j].unsafe_chr
+        if candidate == '-' || candidate == '_' || candidate == '0' || candidate == '^'
+          flag = candidate
+          j += 1
+        end
+      end
+      colons = 0
+      while j < len && colons < 2 && bytes[j].unsafe_chr == ':'
+        colons += 1
+        j += 1
+      end
+      digits = 0
+      if j + 1 < len && bytes[j + 1].unsafe_chr == 'N'
+        candidate = bytes[j].unsafe_chr
+        if candidate == '3' || candidate == '6' || candidate == '9'
+          digits = candidate.ord - 48
+          j += 1
+        end
+      end
+      return {i + 1, '\0', '\0', 0, 0} if j >= len
+      letter = bytes[j].unsafe_chr
+      known = if colons > 0
+                letter == 'z' && flag == '\0' && digits == 0
+              elsif digits > 0
+                flag == '\0'
+              elsif flag == '^'
+                textual?(letter)
+              elsif flag != '\0'
+                numeric?(letter)
+              else
+                numeric?(letter) || textual?(letter) || plain?(letter)
+              end
+      known ? {j + 1, letter, flag, colons, digits} : {i + 1, '\0', '\0', 0, 0}
+    end
+
+    def self.write(io : String::Builder, pattern : String, f : Fields) : Nil
+      bytes = pattern.to_unsafe
+      len = pattern.bytesize
+      i = 0
+      while i < len
+        if bytes[i].unsafe_chr != '%'
+          io.write_byte(bytes[i])
+          i += 1
+          next
+        end
+        stop, letter, flag, colons, digits = lex(pattern, i)
+        if letter == '\0'
+          io.write_byte(bytes[i])
+        else
+          write_directive(io, letter, flag, colons, digits, f)
+        end
+        i = stop
+      end
+    end
+
+    def self.write_directive(io : String::Builder, letter : Char, flag : Char, colons : Int32, digits : Int32, f : Fields) : Nil
+      case letter
+      when 'Y'      then number(io, f.year.to_i64, 4, '0', flag)
+      when 'C'      then number(io, Time.floor_div(f.year.to_i64, 100_i64), 2, '\0', flag)
+      when 'y'      then number(io, Time.floor_mod(f.year.to_i64, 100_i64), 2, '0', flag)
+      when 'G'      then number(io, f.week[0], 4, '0', flag)
+      when 'g'      then number(io, Time.floor_mod(f.week[0], 100_i64), 2, '0', flag)
+      when 'V'      then number(io, f.week[1].to_i64, 2, '0', flag)
+      when 'm'      then number(io, f.month.to_i64, 2, '0', flag)
+      when 'd'      then number(io, f.day.to_i64, 2, '0', flag)
+      when 'e'      then number(io, f.day.to_i64, 2, ' ', flag)
+      when 'j'      then number(io, f.day_of_year.to_i64, 3, '0', flag)
+      when 'H'      then number(io, f.hour.to_i64, 2, '0', flag)
+      when 'k'      then number(io, f.hour.to_i64, 2, ' ', flag)
+      when 'I'      then number(io, twelve(f.hour), 2, '0', flag)
+      when 'l'      then number(io, twelve(f.hour), 2, ' ', flag)
+      when 'M'      then number(io, f.minute.to_i64, 2, '0', flag)
+      when 'S'      then number(io, f.second.to_i64, 2, '0', flag)
+      when 'u'      then number(io, f.day_of_week.to_i64, 1, '\0', flag)
+      when 'w'      then number(io, (f.day_of_week % 7).to_i64, 1, '\0', flag)
+      when 's'      then number(io, f.unix, 1, '\0', flag)
+      when 'a'      then name(io, DAY_NAMES[f.day_of_week % 7][0, 3], flag)
+      when 'A'      then name(io, DAY_NAMES[f.day_of_week % 7], flag)
+      when 'b', 'h' then name(io, MONTH_NAMES[f.month - 1][0, 3], flag)
+      when 'B'      then name(io, MONTH_NAMES[f.month - 1], flag)
+      when 'p'      then name(io, f.hour < 12 ? "am" : "pm", flag)
+      when 'P'      then name(io, f.hour < 12 ? "AM" : "PM", flag)
+      when 'Z'      then name(io, f.zone || (f.offset == 0 ? "UTC" : offset_text(f.offset, true, 1)), flag)
+      when 'z'      then io << offset_text(f.offset, colons > 0, colons == 2 ? 2 : 0)
+      when 'L'      then io << Time.pad3(f.nanosecond // 1000000)
+      when 'N'
+        if digits == 3
+          io << Time.pad3(f.nanosecond // 1000000)
+        elsif digits == 6
+          io << Time.pad6(f.nanosecond // 1000)
+        else
+          io << Time.pad9(f.nanosecond)
+        end
+      when 'F'      then write(io, "%Y-%m-%d", f)
+      when 'T', 'X' then write(io, "%H:%M:%S", f)
+      when 'R'      then write(io, "%H:%M", f)
+      when 'D', 'x' then write(io, "%m/%d/%y", f)
+      when 'r'      then write(io, "%I:%M:%S %P", f)
+      when 'c'      then write(io, "%a %b %e %H:%M:%S %Y", f)
+      when 'n'      then io << '\n'
+      when 't'      then io << '\t'
+      else               io << '%'
+      end
+    end
+
+    # A number padded to *width* with *pad*, '\0' for none, unless a flag
+    # says otherwise. The sign of a negative year goes in front of the
+    # padding, as `-0001`, the way `to_rfc3339` writes it.
+    def self.number(io : String::Builder, value : Int64, width : Int32, pad : Char, flag : Char) : Nil
+      fill = case flag
+             when '-' then '\0'
+             when '_' then ' '
+             when '0' then '0'
+             else          pad
+             end
+      if value < 0_i64
+        io << '-'
+        value = 0_i64 - value
+      end
+      text = value.to_s
+      if fill != '\0'
+        count = width - text.bytesize
+        while count > 0
+          io << fill
+          count -= 1
+        end
+      end
+      io << text
+    end
+
+    def self.name(io : String::Builder, text : String, flag : Char) : Nil
+      io << (flag == '^' ? text.upcase : text)
+    end
+
+    def self.twelve(hour : Int32) : Int64
+      h = hour % 12
+      h == 0 ? 12_i64 : h.to_i64
+    end
+
+    # `+hh:mm` or `+hhmm`, and the seconds never (0), when there are any (1)
+    # or always (2), the way Crystal's `Zone#format` writes an offset.
+    def self.offset_text(offset : Int32, colon : Bool, seconds : Int32) : String
+      magnitude = offset < 0 ? -offset : offset
+      String.build(9) do |io|
+        io << (offset < 0 ? '-' : '+')
+        io << Time.pad2(magnitude // 3600)
+        io << ':' if colon
+        io << Time.pad2((magnitude % 3600) // 60)
+        if seconds == 2 || (seconds == 1 && magnitude % 60 != 0)
+          io << ':' if colon
+          io << Time.pad2(magnitude % 60)
+        end
+      end
+    end
+
+    # Reads a text by a pattern or by one of the named grammars. Every step
+    # answers whether it matched; the first that did not leaves its sentence
+    # in `@error`, and `finish` answers that, so no text a program is handed
+    # ends it in a panic.
+    class Parser
+      @bytes : Pointer(UInt8)
+      @len : Int32
+      @pos : Int32 = 0
+      @error : TimeParseError? = nil
+      @year : Int64 = 1_i64
+      @century : Int32? = nil
+      @year_in_century : Int32? = nil
+      @month : Int32 = 1
+      @day : Int32 = 1
+      @day_of_year : Int32? = nil
+      @hour : Int32 = 0
+      @minute : Int32 = 0
+      @second : Int32 = 0
+      @nanosecond : Int32 = 0
+      @nanosecond_offset : Int64 = 0_i64
+      @pm : Bool = false
+      @hour_is_12 : Bool = false
+      @unix : Int64? = nil
+      @offset : Int32? = nil
+      @week_year : Int64? = nil
+      @week_year_in_century : Int32? = nil
+      @week : Int32? = nil
+      @day_of_week : Int32? = nil
+
+      def initialize(@input : String)
+        @bytes = @input.to_unsafe
+        @len = @input.bytesize
+      end
+
+      def self.digit?(b : UInt8) : Bool
+        b >= 48_u8 && b <= 57_u8
+      end
+
+      def self.letter?(b : UInt8) : Bool
+        lower = b | 0x20_u8
+        lower >= 97_u8 && lower <= 122_u8
+      end
+
+      def self.space?(b : UInt8) : Bool
+        b == 32_u8 || (b >= 9_u8 && b <= 13_u8)
+      end
+
+      # The byte *ahead* of the current one, or 0 past the end, as Crystal's
+      # reader answers '\0' there.
+      def peek(ahead : Int32 = 0) : UInt8
+        @pos + ahead < @len ? @bytes[@pos + ahead] : 0_u8
+      end
+
+      def fail(what : String) : Bool
+        if @error.nil?
+          @error = TimeParseError.new("#{what} at byte #{@pos} of #{@input.inspect}", @input, @pos)
+        end
+        false
+      end
+
+      # A sentence about fields that were all read, where no one byte is to
+      # blame.
+      def refuse(what : String) : TimeParseError
+        TimeParseError.new("#{what} in #{@input.inspect}", @input, @pos)
+      end
+
+      def text(start : Int32, stop : Int32) : String
+        String.build(stop - start) do |io|
+          k = start
+          while k < stop
+            io.write_byte(@bytes[k])
+            k += 1
+          end
+        end
+      end
+
+      def skip_spaces : Bool
+        start = @pos
+        while @pos < @len && Parser.space?(@bytes[@pos])
+          @pos += 1
+        end
+        @pos > start
+      end
+
+      # One whitespace byte, as the HTTP grammars put between their parts.
+      def whitespace : Bool
+        return fail("expected a space") unless @pos < @len && Parser.space?(@bytes[@pos])
+        @pos += 1
+        true
+      end
+
+      def accept(char : Char) : Bool
+        if @pos < @len && @bytes[@pos] == char.ord
+          @pos += 1
+          true
+        else
+          false
+        end
+      end
+
+      def expect(char : Char) : Bool
+        return true if accept(char)
+        fail(@pos < @len ? "expected #{char.inspect}" : "expected #{char.inspect} but the text ended")
+      end
+
+      def literal(b : UInt8) : Bool
+        if @pos < @len && @bytes[@pos] == b
+          @pos += 1
+          return true
+        end
+        expected = b < 128_u8 ? b.unsafe_chr.inspect : "the pattern's text"
+        fail(@pos < @len ? "expected #{expected}" : "expected #{expected} but the text ended")
+      end
+
+      def at_end : Bool
+        return true if @pos >= @len
+        fail("unexpected text after the time")
+      end
+
+      # Up to *max* digits and at least one. Nil, with the sentence, when
+      # there are none, or when they are past what an Int64 holds.
+      def digits(max : Int32, what : String) : Int64?
+        start = @pos
+        value = 0_i64
+        while @pos - start < max && @pos < @len && Parser.digit?(@bytes[@pos])
+          digit = (@bytes[@pos] - 48_u8).to_i64
+          if value > (9223372036854775807_i64 - digit) // 10_i64
+            @pos = start
+            fail("#{what} is past what an Int64 holds")
+            return nil
+          end
+          value = value * 10_i64 + digit
+          @pos += 1
+        end
+        if @pos == start
+          fail("expected #{what}")
+          return nil
+        end
+        value
+      end
+
+      def number(max : Int32, what : String) : Int32?
+        value = digits(max, what)
+        value ? value.to_i32 : nil
+      end
+
+      # A number blank padded, as `%e` writes " 5": one space stands for a
+      # digit.
+      def padded_number(max : Int32, what : String) : Int32?
+        if @pos < @len && @bytes[@pos] == 32_u8
+          @pos += 1
+          max -= 1
+        end
+        number(max, what)
+      end
+
+      # A numeric directive's field, read as its flag and its padding say.
+      def field(width : Int32, pad : Char, flag : Char, what : String) : Int32?
+        if flag == '_' || (pad == ' ' && flag != '-' && flag != '0')
+          padded_number(width, what)
+        else
+          number(width, what)
+        end
+      end
+
+      # Exactly *count* digits, or nil, reading nothing and saying nothing:
+      # the caller names what was missing.
+      def exact(count : Int32) : Int32?
+        value = 0
+        k = 0
+        while k < count
+          b = peek(k)
+          return nil unless Parser.digit?(b)
+          value = value * 10 + (b - 48_u8).to_i32
+          k += 1
+        end
+        @pos += count
+        value
+      end
+
+      # `%Y`: four digits when a directive follows it, and an optional `-`
+      # and up to ten when text does, which is every year an Int32 holds.
+      def year(wide : Bool) : Int64?
+        negative = accept('-')
+        value = digits(wide ? 10 : 4, "a year")
+        return nil unless value
+        negative ? 0_i64 - value : value
+      end
+
+      # Exactly four digits, as the HTTP and ISO 8601 grammars write a year.
+      def year4 : Bool
+        value = exact(4)
+        return fail("expected a year of four digits") unless value
+        @year = value.to_i64
+        true
+      end
+
+      def same_letters?(start : Int32, name : String, size : Int32) : Bool
+        k = 0
+        while k < size
+          return false if (@bytes[start + k] | 0x20_u8) != (name.to_unsafe[k] | 0x20_u8)
+          k += 1
+        end
+        true
+      end
+
+      # A run of ASCII letters and the index in *names* of the name it
+      # spells, in any case: for *short*, the first three letters of a name
+      # and no more; otherwise the start of a name, three letters or longer,
+      # as Crystal reads `%B` and `%A`.
+      def name(names : Array(String), short : Bool, what : String) : Int32?
+        start = @pos
+        while @pos < @len && Parser.letter?(@bytes[@pos])
+          @pos += 1
+        end
+        size = @pos - start
+        if size == 0
+          fail("expected #{what}")
+          return nil
+        end
+        if short ? size == 3 : size >= 3
+          index = 0
+          while index < names.size
+            return index if size <= names[index].bytesize && same_letters?(start, names[index], size)
+            index += 1
+          end
+        end
+        found = text(start, @pos)
+        @pos = start
+        fail("#{found.inspect} is not #{what}")
+        nil
+      end
+
+      def month_name(short : Bool) : Bool
+        index = name(MONTH_NAMES, short, short ? "a month's three-letter name" : "a month name")
+        return false unless index
+        @month = index + 1
+        true
+      end
+
+      def day_name : Bool
+        index = name(DAY_NAMES, false, "a day name")
+        return false unless index
+        @day_of_week = index == 0 ? 7 : index
+        true
+      end
+
+      def am_pm : Bool
+        start = @pos
+        while @pos < @len && Parser.letter?(@bytes[@pos])
+          @pos += 1
+        end
+        if @pos - start == 2 && (@bytes[start + 1] | 0x20_u8) == 109_u8
+          first = @bytes[start] | 0x20_u8
+          if first == 97_u8 || first == 112_u8
+            @pm = first == 112_u8
+            return true
+          end
+        end
+        @pos = start
+        fail("expected am or pm")
+      end
+
+      # `%z`, `%:z` and `%::z` alike, as Crystal reads them: `Z`, `UTC`, or
+      # an offset with or without its colons.
+      def zone : Bool
+        b = peek
+        if b == 'Z'.ord || b == 'z'.ord
+          @pos += 1
+          @offset = 0
+          true
+        elsif b == 'U'.ord && peek(1) == 'T'.ord && peek(2) == 'C'.ord
+          @pos += 3
+          @offset = 0
+          true
+        elsif b == '+'.ord || b == '-'.ord
+          offset_number(true, false, true)
+        else
+          fail("expected a time zone: Z, UTC or an offset such as +05:30")
+        end
+      end
+
+      # ISO 8601's zone: `Z` or an offset.
+      def zone_z_or_offset : Bool
+        b = peek
+        if b == 'Z'.ord || b == 'z'.ord
+          @pos += 1
+          @offset = 0
+          true
+        elsif b == '+'.ord || b == '-'.ord
+          offset_number(true, false, true)
+        else
+          fail("expected Z or an offset such as +05:30")
+        end
+      end
+
+      # `%Z`: an offset, or a name read up to the next whitespace. Only the
+      # names of UTC itself are read: an abbreviation names no single zone
+      # (CST is three of them), so any other is refused by name rather than
+      # read as UTC or guessed at. A text whose zone is known is read at
+      # that `Location` instead.
+      def zone_name : Bool
+        b = peek
+        return offset_number(true, false, true) if b == '+'.ord || b == '-'.ord
+        start = @pos
+        while @pos < @len && !Parser.space?(@bytes[@pos])
+          @pos += 1
+        end
+        found = text(start, @pos)
+        if found == "UTC" || found == "Z" || found == "GMT" || found == "UT"
+          @offset = 0
+          return true
+        end
+        @pos = start
+        return fail("expected a time zone") if found.empty?
+        fail("the time zone #{found.inspect} is not one %Z reads: it reads UTC, GMT, UT, Z and offsets, since an abbreviation names no single zone; a text in a known zone is read at its Location")
+      end
+
+      # RFC 5322's zone (section 3.3, and 4.3 for the obsolete names): an
+      # offset of four digits, or a name. A military letter is read as
+      # `-0000`, the offset of a time whose zone is not known, as section
+      # 4.3 says to; a name the RFC does not give is refused, where Crystal
+      # read it as UTC in silence. `UTC` is not the RFC's, and is read as
+      # Crystal reads it.
+      def zone_rfc2822 : Bool
+        b = peek
+        return offset_number(false, false, false) if b == '+'.ord || b == '-'.ord
+        start = @pos
+        while @pos < @len && Parser.letter?(@bytes[@pos])
+          @pos += 1
+        end
+        found = text(start, @pos).upcase
+        offset = case found
+                 when "UT", "UTC", "GMT" then 0
+                 when "EST"              then -18000
+                 when "EDT"              then -14400
+                 when "CST"              then -21600
+                 when "CDT"              then -18000
+                 when "MST"              then -25200
+                 when "MDT"              then -21600
+                 when "PST"              then -28800
+                 when "PDT"              then -25200
+                 else                         nil
+                 end
+        offset = 0 if offset.nil? && found.bytesize == 1 && found != "J"
+        if offset.nil?
+          @pos = start
+          return fail(found.empty? ? "expected a time zone such as +0000 or GMT" : "#{text(start, start + found.bytesize).inspect} is not a time zone RFC 2822 names")
+        end
+        @offset = offset
+        true
+      end
+
+      def offset_number(allow_colon : Bool, force_colon : Bool, allow_seconds : Bool) : Bool
+        start = @pos
+        negative = peek == '-'.ord
+        @pos += 1
+        hours = exact(2)
+        return fail("expected the offset's hours as two digits") unless hours
+        colon = accept(':')
+        if colon && !allow_colon
+          @pos -= 1
+          return fail("expected an offset without a colon, such as +0530")
+        end
+        return fail("expected ':' between the offset's hours and minutes") if force_colon && !colon
+        minutes = exact(2)
+        return fail("expected the offset's minutes as two digits") unless minutes
+        seconds = 0
+        if allow_seconds && ((colon && peek == ':'.ord && Parser.digit?(peek(1))) || (!colon && Parser.digit?(peek)))
+          @pos += 1 if colon
+          more = exact(2)
+          return fail("expected the offset's seconds as two digits") unless more
+          seconds = more
+        end
+        # An offset is an hour of 00..23 and a minute and second of 00..59:
+        # `+99:99` is not four days and change.
+        if hours > 23 || minutes > 59 || seconds > 59
+          @pos = start
+          return fail("an offset runs to 23:59:59, and #{Time.pad2(hours)}:#{Time.pad2(minutes)}:#{Time.pad2(seconds)} is past it")
+        end
+        total = hours * 3600 + minutes * 60 + seconds
+        @offset = negative ? -total : total
+        true
+      end
+
+      # A fraction of a second: up to *max* digits, scaled to nanoseconds,
+      # and for `%N` any digits past the ninth read and dropped.
+      def fraction(max : Int32, rest : Bool) : Bool
+        start = @pos
+        value = 0
+        while @pos - start < max && @pos < @len && Parser.digit?(@bytes[@pos])
+          value = value * 10 + (@bytes[@pos] - 48_u8).to_i32
+          @pos += 1
+        end
+        count = @pos - start
+        return fail("expected the digits of a fraction of a second") if count == 0
+        while rest && @pos < @len && Parser.digit?(@bytes[@pos])
+          @pos += 1
+        end
+        while count < 9
+          value = value * 10
+          count += 1
+        end
+        @nanosecond = value
+        true
+      end
+
+      def pattern(pattern : String) : Bool
+        bytes = pattern.to_unsafe
+        len = pattern.bytesize
+        i = 0
+        while i < len
+          b = bytes[i]
+          if Parser.space?(b)
+            skip_spaces
+            i += 1
+          elsif b.unsafe_chr != '%'
+            return false unless literal(b)
+            i += 1
+          else
+            stop, letter, flag, _, digits = Format.lex(pattern, i)
+            if letter == '\0'
+              return false unless literal(b)
+            else
+              # A directive next reads `%Y` as four digits (`%Y%m%d`); text
+              # or the pattern's end lets it read the wide years.
+              wide = !(stop + 1 < len && bytes[stop].unsafe_chr == '%' && bytes[stop + 1].unsafe_chr != '%')
+              return false unless directive(letter, flag, digits, wide)
+            end
+            i = stop
+          end
+        end
+        true
+      end
+
+      def directive(letter : Char, flag : Char, digits : Int32, wide : Bool) : Bool
+        case letter
+        when 'Y', 'G'
+          value = year(wide)
+          return false unless value
+          if letter == 'Y'
+            @year = value
+          else
+            @week_year = value
+          end
+          true
+        when 'C'
+          value = field(2, '\0', flag, "a century")
+          return false unless value
+          @century = value
+          true
+        when 'y', 'g'
+          value = field(2, '0', flag, "a year's last two digits")
+          return false unless value
+          if letter == 'y'
+            @year_in_century = value
+          else
+            @week_year_in_century = value
+          end
+          true
+        when 'V'
+          value = field(2, '0', flag, "a week")
+          return false unless value
+          @week = value
+          true
+        when 'm'
+          value = field(2, '0', flag, "a month")
+          return false unless value
+          @month = value
+          true
+        when 'd', 'e'
+          value = field(2, letter == 'e' ? ' ' : '0', flag, "a day of the month")
+          return false unless value
+          @day = value
+          true
+        when 'j'
+          value = field(3, '0', flag, "a day of the year")
+          return false unless value
+          @day_of_year = value
+          true
+        when 'H', 'k', 'I', 'l'
+          value = field(2, letter == 'k' || letter == 'l' ? ' ' : '0', flag, "an hour")
+          return false unless value
+          @hour = value
+          @hour_is_12 = letter == 'I' || letter == 'l'
+          true
+        when 'M'
+          value = field(2, '0', flag, "a minute")
+          return false unless value
+          @minute = value
+          true
+        when 'S'
+          value = field(2, '0', flag, "a second")
+          return false unless value
+          @second = value
+          true
+        when 'u', 'w'
+          start = @pos
+          value = number(1, "a day of the week")
+          return false unless value
+          low = letter == 'u' ? 1 : 0
+          if value < low || value > low + 6
+            @pos = start
+            return fail(letter == 'u' ? "a day of the week runs 1 (Monday) to 7 (Sunday), not #{value}" : "a day of the week runs 0 (Sunday) to 6 (Saturday), not #{value}")
+          end
+          @day_of_week = value == 0 ? 7 : value
+          true
+        when 's'
+          negative = peek == '-'.ord
+          @pos += 1 if negative || peek == '+'.ord
+          value = digits(19, "seconds since the epoch")
+          return false unless value
+          @unix = negative ? 0_i64 - value : value
+          true
+        when 'a', 'A' then day_name
+        when 'b', 'h' then month_name(true)
+        when 'B'      then month_name(false)
+        when 'p', 'P' then am_pm
+        when 'Z'      then zone_name
+        when 'z'      then zone
+        when 'L'      then fraction(3, false)
+        when 'N'      then digits == 0 ? fraction(9, true) : fraction(digits, false)
+        when 'F'      then pattern("%Y-%m-%d")
+        when 'T', 'X' then pattern("%H:%M:%S")
+        when 'R'      then pattern("%H:%M")
+        when 'D', 'x' then pattern("%m/%d/%y")
+        when 'r'      then pattern("%I:%M:%S %P")
+        when 'c'      then pattern("%a %b %e %H:%M:%S %Y")
+        when 'n', 't'
+          skip_spaces
+          true
+        else
+          expect('%')
+        end
+      end
+
+      # HH:MM:SS, as both HTTP and RFC 850 write the time of day.
+      def time_of_day : Bool
+        hour = number(2, "an hour")
+        return false unless hour
+        @hour = hour
+        return false unless expect(':')
+        minute = number(2, "a minute")
+        return false unless minute
+        @minute = minute
+        return false unless expect(':')
+        second = number(2, "a second")
+        return false unless second
+        @second = second
+        true
+      end
+
+      # RFC 9110's rule for a two-digit year (section 5.6.7): a year that
+      # appears to be more than 50 years in the future is the most recent
+      # past year with those last two digits. The candidate is taken in this
+      # century and moved a century to land in the 100 years ending 50 years
+      # from now, so the rule holds in 2090 too. The other library read 00..49 as 20xx
+      # and the rest as 19xx, whatever the year it was read in.
+      def self.recent_year(two_digits : Int64) : Int64
+        now = Time.utc.year.to_i64
+        year = now - Time.floor_mod(now, 100_i64) + two_digits
+        year = year + 100_i64 if year + 100_i64 <= now + 50_i64
+        year > now + 50_i64 ? year - 100_i64 : year
+      end
+
+      # RFC 9110 section 5.6.7's three forms of an HTTP date: the
+      # IMF-fixdate `Sun, 06 Nov 1994 08:49:37 GMT`, the obsolete RFC 850
+      # `Sunday, 06-Nov-94 08:49:37 GMT`, and asctime's `Sun Nov  6 08:49:37
+      # 1994`, which has no zone and is GMT. Crystal's reading: a day name,
+      # short or long, in any of the three; the four-digit year IIS writes
+      # in the RFC 850 shape; and the zones RFC 2822 names where RFC 9110
+      # writes GMT.
+      def http_date : Bool
+        return false unless day_name
+        if accept(',')
+          return false unless whitespace
+          day = number(2, "a day of the month")
+          return false unless day
+          @day = day
+          if accept('-')
+            return false unless month_name(true) && expect('-')
+            start = @pos
+            year = digits(4, "a year")
+            return false unless year
+            if @pos - start == 2
+              @year = Parser.recent_year(year)
+            elsif @pos - start == 4
+              @year = year
+            else
+              @pos = start
+              return fail("expected a year of two or four digits")
+            end
+          else
+            return false unless whitespace && month_name(true) && whitespace && year4
+          end
+          whitespace && time_of_day && whitespace && zone_rfc2822 && at_end
+        else
+          return false unless whitespace && month_name(true) && whitespace
+          day = padded_number(2, "a day of the month")
+          return false unless day
+          @day = day
+          @offset = 0
+          whitespace && time_of_day && whitespace && year4 && at_end
+        end
+      end
+
+      # RFC 5322's CFWS: whitespace and parenthesised comments, which nest
+      # and in which `\` quotes the next byte. Answers whether there was any;
+      # a comment left open is the error, and the parse fails on it.
+      def cfws : Bool
+        start = @pos
+        while @pos < @len
+          b = @bytes[@pos]
+          if Parser.space?(b)
+            @pos += 1
+          elsif b == '('.ord
+            opened = @pos
+            depth = 0
+            while @pos < @len
+              c = @bytes[@pos]
+              if c == '\\'.ord
+                @pos += 2
+                next
+              end
+              depth += 1 if c == '('.ord
+              depth -= 1 if c == ')'.ord
+              @pos += 1
+              break if depth == 0
+            end
+            if depth > 0
+              @pos = opened
+              fail("a comment is not closed")
+              @pos = @len
+            end
+          else
+            break
+          end
+        end
+        @pos = @len if @pos > @len
+        @pos > start
+      end
+
+      def need_cfws : Bool
+        cfws || fail("expected a space")
+      end
+
+      # RFC 5322 section 3.3's date-time, with section 4.3's obsolete
+      # two- and three-digit years and zone names, as Crystal's `RFC_2822`
+      # reads it: `Mon, 15 Feb 2016 04:35:50 +0000`, the day name and the
+      # seconds optional, comments anywhere whitespace goes.
+      def rfc_2822 : Bool
+        cfws
+        if @pos < @len && Parser.letter?(@bytes[@pos])
+          return false unless day_name
+          cfws
+          return false unless expect(',')
+          cfws
+        end
+        day = number(2, "a day of the month")
+        return false unless day
+        @day = day
+        return false unless need_cfws && month_name(true) && need_cfws
+        start = @pos
+        year = digits(4, "a year")
+        return false unless year
+        # Section 4.3: two digits are 2000 to 2049 below 50 and 1950 to 1999
+        # from it, and three digits are added to 1900. The other library read 0049 as
+        # 2049 by its value; four digits are the year they write.
+        case @pos - start
+        when 2
+          @year = year < 50_i64 ? 2000_i64 + year : 1900_i64 + year
+        when 3
+          @year = 1900_i64 + year
+        when 4
+          @year = year
+        else
+          @pos = start
+          return fail("expected a year of two to four digits")
+        end
+        return false unless need_cfws
+        hour = number(2, "an hour")
+        return false unless hour
+        @hour = hour
+        cfws
+        return false unless expect(':')
+        cfws
+        minute = number(2, "a minute")
+        return false unless minute
+        @minute = minute
+        spaced = cfws
+        if accept(':')
+          cfws
+          second = number(2, "a second")
+          return false unless second
+          @second = second
+          spaced = cfws
+        end
+        return fail("expected a space") unless spaced
+        return false unless zone_rfc2822
+        cfws
+        at_end
+      end
+
+      # ISO 8601's dates, extended or basic: 2016-02-15 and 20160215, the
+      # ordinal 2016-046 and 2016046, and the week date 2016-W07-1 and
+      # 2016W071.
+      def iso_date : Bool
+        return false unless year4
+        extended = accept('-')
+        if accept('W')
+          week = exact(2)
+          return fail("expected a week of two digits") unless week
+          return false unless extended ? expect('-') : (accept('-') || true)
+          day = exact(1)
+          return fail("expected a day of the week") unless day
+          if day < 1 || day > 7
+            @pos -= 1
+            return fail("a day of the week runs 1 (Monday) to 7 (Sunday), not #{day}")
+          end
+          @week_year = @year
+          @week = week
+          @day_of_week = day
+          return true
+        end
+        run = 0
+        while Parser.digit?(peek(run))
+          run += 1
+        end
+        if run == 3
+          @day_of_year = exact(3)
+        elsif extended && run == 2
+          month = exact(2)
+          return false unless month && expect('-')
+          @month = month
+          day = exact(2)
+          return fail("expected a day of the month of two digits") unless day
+          @day = day
+        elsif !extended && run == 4
+          month = exact(2)
+          day = exact(2)
+          return false unless month && day
+          @month = month
+          @day = day
+        else
+          return fail("expected a month and day, or a day of the year")
+        end
+        true
+      end
+
+      # ISO 8601's time of day, extended or basic: 04:35:50 and 043550, a
+      # fraction of the second after `.` or `,`, or the minutes or the hour
+      # alone with a fraction of their own (04:35.5 is 04:35:30).
+      def iso_time : Bool
+        hour = exact(2)
+        return fail("expected an hour of two digits") unless hour
+        @hour = hour
+        extended = accept(':')
+        unit = 3600_i64
+        if Parser.digit?(peek)
+          minute = exact(2)
+          return fail("expected a minute of two digits") unless minute
+          @minute = minute
+          unit = 60_i64
+          colon = accept(':')
+          if Parser.digit?(peek)
+            return fail("expected ':' between the minutes and the seconds") if extended && !colon
+            second = exact(2)
+            return fail("expected a second of two digits") unless second
+            @second = second
+            return fraction(9, true) if accept('.') || accept(',')
+            return true
+          end
+          return fail("expected the seconds") if colon
+        elsif extended
+          return fail("expected a minute of two digits")
+        end
+        if accept('.') || accept(',')
+          start = @pos
+          value = digits(12, "the digits of a fraction")
+          return false unless value
+          count = @pos - start
+          # Six digits are a microsecond of an hour, finer than the
+          # nanoseconds kept, and keep the product inside an Int64.
+          while count > 6
+            value = value // 10_i64
+            count -= 1
+          end
+          scale = 1_i64
+          count.times { scale = scale * 10_i64 }
+          @nanosecond_offset = value * 1000000000_i64 // scale * unit
+        end
+        true
+      end
+
+      def iso_date_time : Bool
+        return false unless iso_date
+        accept('T') || accept('t')
+        iso_time && zone_z_or_offset && at_end
+      end
+
+      # The instant the fields name, or the first sentence a step left. The
+      # fields are checked the way `Time.utc` checks them, with RFC 3339's
+      # allowance: `:60` is a leap second, read as the second after `:59`,
+      # the instant it names on every clock that has none. A text that
+      # names no zone is read at *default_offset*, or failing that on
+      # *location*'s wall clock; with a location the time answered is in it.
+      def finish(default_offset : Int32?, location : Location? = nil) : Time | TimeParseError
+        if error = @error
+          return error
+        end
+        hour = @hour
+        if @hour_is_12
+          return refuse("a 12-hour clock runs 1 to 12, not #{hour}") if hour < 1 || hour > 12
+          if @pm
+            hour += 12 unless hour == 12
+          elsif hour == 12
+            hour = 0
+          end
+        end
+        if unix = @unix
+          if unix < Time::MIN_SECONDS || unix > Time::MAX_SECONDS
+            return refuse("year out of range: #{unix} seconds from the epoch is past the years an Int32 holds")
+          end
+          return located(unix, @nanosecond, location)
+        end
+        offset = @offset || default_offset
+        if offset
+          Format.check_offset(offset)
+        elsif location.nil?
+          return refuse("the text names no time zone, and no offset was given to read it at")
+        end
+
+        year = @year
+        century = @century
+        if two = @year_in_century
+          year = (century ? century.to_i64 * 100_i64 : (two < 69 ? 2000_i64 : 1900_i64)) + two.to_i64
+        elsif century
+          year = century.to_i64 * 100_i64
+        end
+        week_year = @week_year
+        if two = @week_year_in_century
+          week_year = (two < 69 ? 2000_i64 : 1900_i64) + two.to_i64
+        end
+        week = @week
+        day_of_week = @day_of_week
+        day_of_year = @day_of_year
+        if week_year && week && day_of_week
+          if week_year < -2147483648_i64 || week_year > 2147483647_i64
+            return refuse("year out of range: #{week_year} is past the years an Int32 holds")
+          end
+          weeks = Time.weeks_in_year(week_year.to_i32)
+          return refuse("#{week_year} has weeks 1 to #{weeks}, not week #{week}") if week < 1 || week > weeks
+          days = Time.week_date_days(week_year.to_i32, week, day_of_week)
+        else
+          if year < -2147483648_i64 || year > 2147483647_i64
+            return refuse("year out of range: #{year} is past the years an Int32 holds")
+          end
+          if day_of_year
+            count = Time.days_in_year(year.to_i32)
+            return refuse("#{year} has days 1 to #{count} of the year, not day #{day_of_year}") if day_of_year < 1 || day_of_year > count
+            days = Time.days_from_civil(year, 1, 1) + (day_of_year - 1).to_i64
+          else
+            return refuse("a month runs 1 to 12, not #{@month}") if @month < 1 || @month > 12
+            last = Time.days_in_month(year.to_i32, @month)
+            if @day < 1 || @day > last
+              return refuse("#{Time.pad4(year.to_i32)}-#{Time.pad2(@month)} has days 1 to #{last}, not day #{@day}")
+            end
+            days = Time.days_from_civil(year, @month, @day)
+          end
+        end
+        return refuse("an hour runs 0 to 23, not #{hour}") if hour > 23
+        return refuse("a minute runs 0 to 59, not #{@minute}") if @minute > 59
+        return refuse("a second runs 0 to 60, the 60th a leap second, not #{@second}") if @second > 60
+        local = days * 86400_i64 + hour.to_i64 * 3600_i64 + @minute.to_i64 * 60_i64 + @second.to_i64
+        total = @nanosecond.to_i64 + @nanosecond_offset
+        wall = local + Time.floor_div(total, 1000000000_i64)
+        seconds = if offset
+                    wall - offset.to_i64
+                  elsif location
+                    location.resolve(wall)
+                  else
+                    wall
+                  end
+        if seconds < Time::MIN_SECONDS || seconds > Time::MAX_SECONDS
+          return refuse("year out of range: #{seconds} seconds from the epoch is past the years an Int32 holds")
+        end
+        located(seconds, Time.floor_mod(total, 1000000000_i64).to_i32, location)
+      end
+
+      # The time, in *location* when there is one. A location's offset can
+      # carry the first or last second past the years an Int32 holds, and
+      # that is a sentence here, not the constructor's panic.
+      private def located(seconds : Int64, nanosecond : Int32, location : Location?) : Time | TimeParseError
+        return Time.new(seconds, nanosecond) unless location
+        wall = seconds + location.lookup(seconds).offset.to_i64
+        if wall < Time::MIN_SECONDS || wall > Time::MAX_SECONDS
+          return refuse("year out of range: #{seconds} seconds from the epoch is past the years an Int32 holds in #{location.name}")
+        end
+        Time.new(seconds, nanosecond, location)
+      end
+    end
+
+    # The HTTP date of RFC 9110 section 5.6.7. It is written as the
+    # IMF-fixdate, always in GMT, `Sun, 06 Nov 1994 08:49:37 GMT`; it is
+    # read in all three of the forms a recipient must accept: that one, the
+    # obsolete RFC 850 `Sunday, 06-Nov-94 08:49:37 GMT`, and asctime's
+    # `Sun Nov  6 08:49:37 1994`.
+    module HTTP_DATE
+      def self.format(time : Time) : String
+        Format.new("%a, %d %b %Y %H:%M:%S GMT").format(time, 0)
+      end
+
+      def self.parse(string : String) : Time | TimeParseError
+        parser = Parser.new(string)
+        parser.http_date
+        parser.finish(0)
+      end
+    end
+
+    # RFC 2822's date and time, `Mon, 15 Feb 2016 04:35:50 +0000`, as
+    # Crystal writes it: the day of the month unpadded, the offset at the
+    # end, the time's own unless another is given. RFC 2822 writes an offset
+    # in whole minutes, so an offset with seconds is refused rather than
+    # written as some other instant.
+    module RFC_2822
+      def self.format(time : Time, offset : Int32? = nil) : String
+        at = offset || time.offset
+        if at % 60 != 0
+          raise "an RFC 2822 offset is whole minutes, not #{at} seconds"
+        end
+        Format.new("%a, %-d %b %Y %H:%M:%S %z").format(time, at)
+      end
+
+      def self.parse(string : String) : Time | TimeParseError
+        parser = Parser.new(string)
+        parser.rfc_2822
+        parser.finish(0)
+      end
+    end
+
+    # ISO 8601's calendar date, written `2016-02-15` as the date reads at
+    # *offset* or in the time's own location; read extended or basic, and
+    # as an ordinal or a week date, at *offset* since a date names no zone.
+    module ISO_8601_DATE
+      def self.format(time : Time, offset : Int32? = nil) : String
+        Format.new("%F").format(time, offset || time.offset)
+      end
+
+      def self.parse(string : String, offset : Int32 = 0) : Time | TimeParseError
+        parser = Parser.new(string)
+        parser.iso_date && parser.at_end
+        parser.finish(offset)
+      end
+    end
+
+    # ISO 8601's date and time, written as RFC 3339 writes it and read with
+    # every form of `ISO_8601_DATE` and `ISO_8601_TIME` joined by an
+    # optional `T`. The zone is required, as Crystal requires it.
+    module ISO_8601_DATE_TIME
+      def self.format(time : Time, offset : Int32? = nil) : String
+        RFC_3339.format(time, 0, offset)
+      end
+
+      def self.parse(string : String) : Time | TimeParseError
+        parser = Parser.new(string)
+        parser.iso_date_time
+        parser.finish(nil)
+      end
+    end
+
+    # ISO 8601's time of day and its zone, `04:35:50Z`; read as on
+    # 0001-01-01, the day Crystal reads it on.
+    module ISO_8601_TIME
+      def self.format(time : Time, offset : Int32? = nil) : String
+        at = offset || time.offset
+        Format.new(at == 0 ? "%TZ" : "%T%:z").format(time, at)
+      end
+
+      def self.parse(string : String) : Time | TimeParseError
+        parser = Parser.new(string)
+        parser.iso_time && parser.zone_z_or_offset && parser.at_end
+        parser.finish(nil)
+      end
+    end
+
+    # RFC 3339, the module's own serialisation: `to_rfc3339` and
+    # `parse_rfc3339` are this module's `format` and `parse`, and
+    # `parse_rfc3339` panics with the sentence `parse` answers. Written at
+    # *offset*, or at the time's own when it is whole minutes and in UTC
+    # when it is not.
+    module RFC_3339
+      def self.format(time : Time, fraction_digits : Int32 = 0, offset : Int32? = nil) : String
+        at = offset || (time.offset % 60 == 0 ? time.offset : 0)
+        return time.to_utc.to_rfc3339(fraction_digits) if at == 0
+        # RFC 3339's offset is hours and minutes; one with seconds would be
+        # written as some other instant, or not read back at all.
+        if at % 60 != 0
+          raise "an RFC 3339 offset is whole minutes, not #{at} seconds"
+        end
+        fraction = case fraction_digits
+                   when 0 then ""
+                   when 3 then ".%3N"
+                   when 6 then ".%6N"
+                   when 9 then ".%9N"
+                   else
+                     raise "fraction_digits must be 0, 3, 6 or 9, not #{fraction_digits}"
+                   end
+        Format.new("%FT%T#{fraction}%:z").format(time, at)
+      end
+
+      def self.parse(str : String) : Time | TimeParseError
+        len = str.bytesize
+        if len < 20
+          return TimeParseError.new("RFC 3339 string too short: #{str}", str, len)
+        end
+
+        # The year is what `to_rfc3339` writes: an optional `-`, then four or
+        # more digits up to the `-` that ends them. RFC 3339 itself stops at
+        # four, and the formatter did not, so `-0001-01-01T00:00:00Z` was a
+        # string the module wrote and refused to read. Ten digits are the most
+        # an Int32 year needs; an eleventh is out of range whatever it is.
+        idx = 0
+        negative_year = false
+        if str[0] == '-'
+          negative_year = true
+          idx = 1
+        end
+        year_start = idx
+        year_val = 0_i64
+        while idx < len
+          code = str.to_unsafe[idx].to_i32
+          break if code < 48 || code > 57
+          if idx - year_start >= 10
+            return TimeParseError.new("year out of range in RFC 3339 string: #{str}", str, idx)
+          end
+          year_val = year_val * 10_i64 + (code - 48).to_i64
+          idx = idx + 1
+        end
+        if idx - year_start < 4
+          return TimeParseError.new("invalid year in RFC 3339 string: fewer than four digits in #{str}", str, year_start)
+        end
+        year_val = 0_i64 - year_val if negative_year
+        if year_val < -2147483648_i64 || year_val > 2147483647_i64
+          return TimeParseError.new("year out of range in RFC 3339 string: #{str}", str, 0)
+        end
+        y = year_val.to_i32
+
+        # `p` is the `-` after the year; the rest of the date and the time are
+        # at fixed offsets from it.
+        p = idx
+        if len < p + 16
+          return TimeParseError.new("RFC 3339 string too short: #{str}", str, len)
+        end
+
+        if str[p] != '-' || str[p + 3] != '-' || str[p + 9] != ':' || str[p + 12] != ':'
+          return TimeParseError.new("invalid RFC 3339 format delimiters: #{str}", str, p)
+        end
+
+        sep = str[p + 6]
+        if sep != 'T' && sep != 't' && sep != ' '
+          return TimeParseError.new("invalid RFC 3339 date/time separator: #{sep}", str, p + 6)
+        end
+
+        m = parse_int(str, p + 1, 2)
+        d = parse_int(str, p + 4, 2)
+        h = parse_int(str, p + 7, 2)
+        mi = parse_int(str, p + 10, 2)
+        s = parse_int(str, p + 13, 2)
+        if m < 0 || d < 0 || h < 0 || mi < 0 || s < 0
+          return TimeParseError.new("invalid digit in RFC 3339 string: #{str}", str, p)
+        end
+
+        idx = p + 15
+        nanos = 0
+
+        # Optional fractional seconds
+        if idx < len && str[idx] == '.'
+          idx = idx + 1
+          start_frac = idx
+          while idx < len
+            code = str.to_unsafe[idx].to_i32
+            break if code < 48 || code > 57
+            idx = idx + 1
+          end
+          frac_len = idx - start_frac
+          if frac_len == 0
+            return TimeParseError.new("empty fractional seconds in RFC 3339: #{str}", str, idx)
+          end
+
+          # Parse up to 9 digits into nanoseconds
+          frac_val = 0
+          pos = 0
+          while pos < 9
+            if pos < frac_len
+              code = str.to_unsafe[start_frac + pos].to_i32
+              frac_val = frac_val * 10 + (code - 48)
+            else
+              frac_val = frac_val * 10
+            end
+            pos = pos + 1
+          end
+          nanos = frac_val
+        end
+
+        # Time zone offset
+        if idx >= len
+          return TimeParseError.new("missing timezone in RFC 3339 string: #{str}", str, idx)
+        end
+
+        tz_char = str[idx]
+        offset_sec = 0_i64
+
+        if tz_char == 'Z' || tz_char == 'z'
+          offset_sec = 0_i64
+          idx = idx + 1
+        elsif tz_char == '+' || tz_char == '-'
+          sign = tz_char == '+' ? 1_i64 : -1_i64
+          tz_start = idx
+          rem_len = len - idx - 1
+          oh = 0
+          om = 0
+          if rem_len >= 5 && str[idx + 3] == ':'
+            # +HH:MM
+            oh = parse_int(str, idx + 1, 2)
+            om = parse_int(str, idx + 4, 2)
+            idx = idx + 6
+          elsif rem_len >= 4 && str[idx + 1].ord >= 48 && str[idx + 1].ord <= 57
+            # +HHMM
+            oh = parse_int(str, idx + 1, 2)
+            om = parse_int(str, idx + 3, 2)
+            idx = idx + 5
+          elsif rem_len >= 2
+            # +HH
+            oh = parse_int(str, idx + 1, 2)
+            idx = idx + 3
+          else
+            return TimeParseError.new("invalid timezone offset in RFC 3339: #{str}", str, idx)
+          end
+          if oh < 0 || om < 0
+            return TimeParseError.new("invalid digit in RFC 3339 string: #{str}", str, tz_start)
+          end
+          # An offset is an hour of 00..23 and a minute of 00..59, as the
+          # grammar has it: `+99:99` was read as four days and change, and
+          # `+24:00` as a day, and the instant moved by that much in silence.
+          if oh > 23 || om > 59
+            return TimeParseError.new("invalid timezone offset in RFC 3339 string: #{Time.pad2(oh)}:#{Time.pad2(om)} in #{str}", str, tz_start)
+          end
+          offset_sec = sign * (oh.to_i64 * 3600_i64 + om.to_i64 * 60_i64)
+        else
+          # The character whole: its lead byte on its own was `Â` for `²`.
+          designator = tz_char
+          first = true
+          str[idx, len - idx].each_char do |char|
+            designator = char if first
+            first = false
+          end
+          return TimeParseError.new("invalid timezone designator in RFC 3339: #{designator}", str, idx)
+        end
+
+        # The offset ends the string. `...Zjunk` and `...+05:30:00` both parsed,
+        # the text after the offset never looked at.
+        if idx != len
+          return TimeParseError.new("trailing text after the timezone in RFC 3339 string: #{str}", str, idx)
+        end
+
+        # The fields are checked the way `Time.utc` checks them, because they
+        # were not: `2024-02-30T00:00:00Z` parsed, and came back as March 1st -
+        # a date nobody wrote, from a parser that said nothing. One allowance,
+        # RFC 3339's own: `:60` is a leap second, and it is read as the second
+        # after 59, which is the instant it names on every clock that has no
+        # leap seconds.
+        if m < 1 || m > 12
+          return TimeParseError.new("invalid month in RFC 3339 string: #{m} in #{str}", str, p + 1)
+        end
+        if d < 1 || d > Time.days_in_month(y, m)
+          return TimeParseError.new("invalid day in RFC 3339 string: #{d} for year #{y} month #{m} in #{str}", str, p + 4)
+        end
+        if h > 23
+          return TimeParseError.new("invalid hour in RFC 3339 string: #{h} in #{str}", str, p + 7)
+        end
+        if mi > 59
+          return TimeParseError.new("invalid minute in RFC 3339 string: #{mi} in #{str}", str, p + 10)
+        end
+        if s > 60
+          return TimeParseError.new("invalid second in RFC 3339 string: #{s} in #{str}", str, p + 13)
+        end
+
+        # Convert to UTC by subtracting the offset from local time
+        days = Time.days_from_civil(y.to_i64, m, d)
+        local_sec = days * 86400_i64 + h.to_i64 * 3600_i64 + mi.to_i64 * 60_i64 + s.to_i64
+        utc_sec = local_sec - offset_sec
+        # The offset can carry the first or last second past the years an
+        # Int32 holds; the sentence is the constructor's, which used to be
+        # the panic here.
+        if utc_sec < Time::MIN_SECONDS || utc_sec > Time::MAX_SECONDS
+          return TimeParseError.new("year out of range: #{utc_sec} seconds from the epoch is past the years an Int32 holds", str, len)
+        end
+        Time.new(utc_sec, nanos)
+      end
+
+      # Two digits at *start*, or -1 when either is not a digit.
+      private def self.parse_int(str : String, start : Int32, count : Int32) : Int32
+        val = 0
+        i = 0
+        while i < count
+          code = str.to_unsafe[start + i].to_i32
+          return -1 if code < 48 || code > 57
+          val = val * 10 + (code - 48)
+          i = i + 1
+        end
+        val
+      end
+    end
   end
 end
 

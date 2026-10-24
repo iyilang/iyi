@@ -2,8 +2,9 @@
 # The allocation-pressure trigger, driven. Runs the trigger exercise plain
 # and optimised, checks it reached its last line, and proves the checks fail
 # in the directions that matter: a heap where nothing triggers, a budget
-# that never grows with the live set, mappings that never go back, and a
-# scheduler state left off the list that roots it.
+# that never grows with the live set, mappings that never go back, a
+# scheduler state left off the list that roots it, and an ended thread's
+# allocation left uncounted.
 #
 #   bash bench/collect_trigger.sh
 #
@@ -70,13 +71,13 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in quiet trigger bounded_or_budget fiber scavenge pauses; do
+for phrase in quiet trigger bounded_or_budget fiber scavenge pauses threads; do
   case "$phrase" in
     bounded_or_budget) grep -q "budget:" "$WORK/trigger.out" || { echo "  MISSING: budget"; status=1; } ;;
     *) grep -q "$phrase:" "$WORK/trigger.out" || { echo "  MISSING: $phrase"; status=1; } ;;
   esac
 done
-[ "$status" -eq 0 ] && echo "  quiet, trigger, budget, fiber, scavenge and pauses all reported"
+[ "$status" -eq 0 ] && echo "  quiet, trigger, budget, fiber, scavenge, pauses and threads all reported"
 
 echo
 echo "== the same program with optimisation on"
@@ -153,7 +154,12 @@ prove_fails "budget never grows" nogrow "budget:" \
 # The scavenge disabled: sweeps keep reclaiming chunks, mappings never go
 # back, and the heap is high-water — the check names it.
 prove_fails "mappings never return" noscavenge "scavenge:" \
-  '{ sub(/IyiHeap\.arena_live\(arena\) == 0 && IyiHeap\.release_arena\(previous, arena\)/, "false"); print }'
+  '{ sub(/elsif empty && IyiHeap\.release_arena\(previous, arena\)/, "elsif false"); print }'
+
+# Every empty arena handed back whatever the budget: the next epoch maps
+# the ones it needs afresh, and the spare check counts them.
+prove_fails "empty arenas never spared" nospare "spare:" \
+  '{ sub(/if empty && spared \+ IyiHeap::MAP \+ SPARE_BELOW <= budget/, "if false"); print }'
 
 # The allocator's slices and the helpers' round removed: every arena is
 # debt until a pause pays it, which is the eager sweep back inside the
@@ -161,16 +167,28 @@ prove_fails "mappings never return" noscavenge "scavenge:" \
 prove_fails "sweep never lazy" nolazy "lazy:" \
   '{ sub(/answer = IyiMark\.sweep_one\(chunk\)/, "answer = 0_u64"); sub(/return if @@helpers == 0_u64 \|\| @@sweep_left == 0_u64/, "return"); print }'
 
-# The scheduler's state left off the global list: the thread-local still
-# names it, nothing the walk scans does, the churn's own size class takes
-# the chunk back, and the check names what came back in its place.
+# The scheduler's state left off every root: the thread-local still names
+# it, nothing the walk scans does, the churn's own size class takes the
+# chunk back, and the check names what came back in its place. It has two
+# roots since tasks crossed cores (SPEC.md III.4.13): the global list of
+# states, and the main fiber's `home` - the thread a fiber is woken into -
+# which the fiber registry reaches. Cut only the list, the state lived
+# through the home and the check passed, on every platform. The link
+# alone, not the unlink a retiring thread does (`state.next_state`).
 prove_fails "scheduler state unrooted" unrooted "scheduler state:" \
-  '{ sub(/@@states_head = state/, "@@states_head = nil"); print }' concurrency.iyi
+  '{ sub(/@@states_head = state$/, "@@states_head = nil"); sub(/^    main\.home = state$/, "    main.home = nil"); print }' concurrency.iyi
+
+# A thread's unreported slice dropped with its cache again: five hundred
+# threads under a slice each count for nothing, and the threads check
+# names the collection that did not run.
+prove_fails "an ended thread's slice uncounted" noretire "threads:" \
+  '{ sub(/allocated_word\.value\.add\(read64\(page \+ CACHE_SLICE\)\)/, "# removed"); print }'
 
 echo
 if [ "$status" -eq 0 ]; then
   echo "Trigger: collections come from allocation pressure alone, the heap"
-  echo "stays bounded, empty arenas go back to the kernel, the pauses have"
+  echo "stays bounded, empty arenas go back to the kernel past what a deep"
+  echo "budget will fill again, the pauses have"
   echo "measured numbers, the budget grows with what survives, a parked"
   echo "fiber's reference lives through it, and the checks fail when any"
   echo "of it is broken."

@@ -12,7 +12,7 @@
 #   2. **A type's qualified name changes with it.** Every constant path
 #      the tree declares is resolved the way Crystal resolves one —
 #      innermost namespace outwards, through `include` — and rewritten to
-#      the bare name the declaring module exports, under a `using` line.
+#      the bare name the declaring module exports, named on its `import` line.
 #      Two modules offering one name: the second stays qualified, and the
 #      note says which.
 #   3. **What other files reach is `pub`.** A Crystal file cannot say
@@ -72,7 +72,7 @@ class Iyi::Command
           Write every .cr under SRC as an iyi module under DIR: the
           namespace as the path, the wrapper off, `pub` on the top level,
           relative requires as imports, and every constant path this tree
-          declares as the bare name its module exports, under a `using`
+          declares as the bare name its module exports, named on its `import`
           line. Import cycles are written as one module; a reopening of a
           type the tree does not own is kept as Crystal in a `.cr` file
           beside its module.
@@ -95,6 +95,11 @@ class Iyi::Command
               cd iyi && #{Command.program_name} build --crystal -o app <entry>.iyi
           USAGE
         exit
+      when .starts_with?('-')
+        # A flag this verb does not have, not a tree: `iyi migrate --bogus`
+        # answered "no such directory: --bogus", which sends the reader
+        # looking for a directory they did not name.
+        abort! "migrate: unknown flag #{option}", :USAGE_ERROR
       else
         if src
           abort! "migrate: one tree at a time; unexpected '#{option}'", :USAGE_ERROR
@@ -121,6 +126,11 @@ class Iyi::Command
     abort! "migrate: no such directory: #{src}", :USAGE_ERROR unless Dir.exists?(src)
     out_dir ||= abort!("migrate: --out DIR is where the modules go", :USAGE_ERROR)
     src = File.expand_path(src)
+    # The spelling the author typed, kept for the sentences that name it:
+    # `File.expand_path` on Windows also expands an 8.3 short name and
+    # swaps every separator, so `--out C:/Users/RUNNER~1/x` was refused
+    # about `C:\Users\runneradmin\x`, a path nobody had typed.
+    out_written = out_dir
     out_dir = File.expand_path(out_dir)
     # Writing the modules into the tree being read mixes the two languages
     # in one directory and hands the *next* run its own output as source.
@@ -138,10 +148,10 @@ class Iyi::Command
     # names no flag; and a directory that will not take a file died of
     # the first module's "Permission denied".
     if File.exists?(out_dir) && !Dir.exists?(out_dir)
-      abort! "migrate: --out needs a directory for the modules, and #{out_dir} is a file", :USAGE_ERROR
+      abort! "migrate: --out needs a directory for the modules, and #{out_written} is a file", :USAGE_ERROR
     end
-    if Dir.exists?(out_dir) && !File.writable?(out_dir)
-      abort! "migrate: --out #{out_dir} will not take the modules: no permission to write there", :USAGE_ERROR
+    if Dir.exists?(out_dir) && !Iyi.writable_directory?(out_dir)
+      abort! "migrate: --out #{out_written} will not take the modules: no permission to write there", :USAGE_ERROR
     end
 
     # A project root is not a source tree. A shards project keeps its
@@ -186,7 +196,7 @@ class Iyi::Command
       walking = up
     end
 
-    files = single ? [single] : Dir.glob(::Path[src].to_posix.join("**", "*.cr")).sort
+    files = single ? [single] : Dir.glob(Iyi.glob_root(src).join("**", "*.cr")).sort
 
     # One file at a time only works from the *top*: a `.cr` file cannot
     # require an iyi module, and a `require` that finds one gets a
@@ -196,11 +206,12 @@ class Iyi::Command
     # a script.
     still_crystal = nil
     if single
-      requirers = Dir.glob(::Path[project_root].to_posix.join("**", "*.{cr,iyi}")).sort.reject do |file|
+      requirers = Dir.glob(Iyi.glob_root(project_root).join("**", "*.{cr,iyi}")).sort.reject do |file|
         file == single || shards_install?(file, project_root)
       end.select do |file|
         here = File.dirname(file)
-        File.read_lines(file).any? do |line|
+        # Without the mark, which hid a `require` on line 1 from `^`.
+        File.read(file).lchop('\uFEFF').lines.any? do |line|
           next false unless (match = MigrateUnit::REQUIRE.match(line))
           target = match[1] || ""
           next false unless target.starts_with?('.')
@@ -272,7 +283,7 @@ class Iyi::Command
     # unit and has to require what it uses, and what one file uses was
     # required by another - `base_log_handler.cr` names `HTTP::Handler`
     # and requires nothing.
-    (single ? Dir.glob(::Path[src].to_posix.join("**", "*.cr")).sort.reject { |file| shards_install?(file, src) } : files).each do |file|
+    (single ? Dir.glob(Iyi.glob_root(src).join("**", "*.cr")).sort.reject { |file| shards_install?(file, src) } : files).each do |file|
       migrate_source(file).each_line do |line|
         next unless (match = MigrateUnit::REQUIRE.match(line))
         target = match[1] || ""
@@ -380,7 +391,7 @@ class Iyi::Command
     # and its `lib` are where they were, and the module is written beside
     # them. Copying them onto themselves is all that would happen.
     assets = 0
-    Dir.glob(single ? [] of String : ::Path[src].to_posix.join("**", "*").to_s).sort.each do |file|
+    Dir.glob(single ? [] of String : Iyi.glob_root(src).join("**", "*").to_s).sort.each do |file|
       next unless File.file?(file)
       next if file.ends_with?(".cr")
       next if shards_install?(file, src)
@@ -468,7 +479,7 @@ class Iyi::Command
     # instantiates nowhere and a helper nobody outside calls, and the
     # types for those cannot be read off a program that never ran them.
     # What the rewrite already knows is exactly which names cross, since
-    # it wrote every `using` line and every qualified spelling.
+    # it wrote every import's names and every qualified spelling.
     needed = {} of String => Set(String)
     units.each do |unit|
       unit.usings.each do |target, names|
@@ -555,11 +566,14 @@ class Iyi::Command
     end
 
     written = {} of String => String
+    # The modules whose first source file's lines end CRLF, written so.
+    crlf_modules = Set(String).new
     written_paths = {} of String => String
     modules = {} of String => Array(MigrateUnit)
     units.each { |unit| (modules[remap[unit.path]? || unit.path] ||= [] of MigrateUnit) << unit }
     modules.each do |module_path, members|
       members = required_first(members, by_source) if members.size > 1
+      crlf_modules << module_path if migrate_crlf?(members.first.source)
       imports = Set(String).new
       usings = {} of String => Set(String)
       members.each do |member|
@@ -576,15 +590,19 @@ class Iyi::Command
 
       sidecars = members.reject(&.sidecar.empty?)
       sidecars.each do |member|
-        sidecar_path = File.join(out_dir, File.dirname(module_path), "#{File.basename(member.path)}_crystal.cr")
+        # Beside the module, wherever that is written: one file at a time
+        # put `src/shop/counter.cr`'s module beside it and the sidecar under
+        # a second `shop/`, at `src/shop/shop/counter_crystal.cr`, so the
+        # module's `require "./counter_crystal.cr"` found nothing.
+        sidecar_path = File.join(File.dirname(migrate_target(module_path, single, out_named, out_dir)), "#{File.basename(member.path)}_crystal.cr")
         Dir.mkdir_p(File.dirname(sidecar_path))
         # `""` for the module path, because a sidecar is outside every
         # module: no name collapses to the bare spelling, all of them are
         # written in full.
-        File.write(sidecar_path,
-          "# Reopenings of types this tree does not own, kept as Crystal: R-3 closes\n" \
-          "# a type where it is written, and these are somebody else's (SPEC.md III.6).\n" +
-          MigrateUnit.resolve_marks(member.sidecar_text, remap, "").strip + "\n")
+        sidecar = "# Reopenings of types this tree does not own, kept as Crystal: R-3 closes\n" \
+                  "# a type where it is written, and these are somebody else's (SPEC.md III.6).\n" +
+                  MigrateUnit.resolve_marks(member.sidecar_text, remap, "").strip + "\n"
+        File.write(sidecar_path, migrate_crlf?(member.source) ? sidecar.gsub('\n', "\r\n") : sidecar)
       end
 
       written[module_path] = String.build do |io|
@@ -612,9 +630,17 @@ class Iyi::Command
         end
         sidecars.each { |member| io << "require \"./" << File.basename(member.path) << "_crystal.cr\"\n" }
         io << '\n' unless shard_requires.empty? && sidecars.empty?
-        imports.to_a.sort.each { |imported| io << "import " << imported << '\n' }
+        # One line per module: the names it brings, when it brings any.
+        imports.to_a.sort.each do |imported|
+          io << "import " << imported
+          if names = usings[imported]?
+            io << "::{" << names.to_a.sort.join(", ") << '}'
+          end
+          io << '\n'
+        end
         usings.to_a.sort_by(&.[0]).each do |(imported, names)|
-          io << "using " << imported << "::{" << names.to_a.sort.join(", ") << "}\n"
+          next if imports.includes?(imported)
+          io << "import " << imported << "::{" << names.to_a.sort.join(", ") << "}\n"
         end
         io << '\n' unless imports.empty?
         members.each do |member|
@@ -635,22 +661,14 @@ class Iyi::Command
         io << "module " << SHARDS_MODULE << "\n\n"
         shard_requires.each { |name| io << "require \"" << name << "\"\n" }
       end
+      # Nobody's file: it follows the tree's first.
+      crlf_modules << SHARDS_MODULE if migrate_crlf?(units.first.source)
     end
 
     written.each do |module_path, text|
-      # One file at a time goes *beside* its source, under its own name.
-      # The header still says `module kemal/base_log_handler`, which is
-      # what an importer writes and where the file already sits under the
-      # tree's source root - `out_dir/kemal/base_log_handler.iyi` from a
-      # run inside that directory made a second `kemal/` under it.
-      target =
-        if single && out_named.nil?
-          File.join(File.dirname(single), "#{File.basename(module_path)}.iyi")
-        else
-          File.join(out_dir, "#{module_path}.iyi")
-        end
+      target = migrate_target(module_path, single, out_named, out_dir)
       Dir.mkdir_p(File.dirname(target))
-      File.write(target, text)
+      File.write(target, crlf_modules.includes?(module_path) ? text.gsub('\n', "\r\n") : text)
       written_paths[module_path] = target
     end
 
@@ -830,6 +848,21 @@ class Iyi::Command
     end
   {% end %}
 
+  # Where a module is written. One file at a time goes *beside* its source,
+  # under its own name, unless `--out` said otherwise. The header still
+  # says `module kemal/base_log_handler`, which is what an importer writes
+  # and where the file already sits under the tree's source root -
+  # `out_dir/kemal/base_log_handler.iyi` from a run inside that directory
+  # made a second `kemal/` under it. A tree goes under `--out` at the
+  # module's path.
+  private def migrate_target(module_path : String, single : String?, out_named : String?, out_dir : String) : String
+    if single && out_named.nil?
+      File.join(File.dirname(single), "#{File.basename(module_path)}.iyi")
+    else
+      File.join(out_dir, "#{module_path}.iyi")
+    end
+  end
+
   # A flag's value, which is not the flag written after it. `--out` only
   # tested for the end of argv, so `migrate tree --out --check` took
   # `--check` for the directory, made one by that name and exited 0.
@@ -857,7 +890,21 @@ class Iyi::Command
       abort! "migrate: file '#{Iyi.relative_filename(file)}' is not a valid Crystal source file: " \
              "it holds bytes that are not UTF-8 text, and a migration copies the bytes it reads", :USAGE_ERROR
     end
-    text
+    # Read as the same lines a Linux checkout has: every rule below matches
+    # a line with `$`, and splits on `\n`, so a CRLF tree's `module Shop\r`
+    # was never peeled as a wrapper - the bench fixture went from "8 of 8
+    # modules compile" to "2 of 4" - and a byte order mark hid line 1's
+    # `require` and was copied into the middle of a module, "0 of 8". The
+    # modules are written back with the line ending read here
+    # (`migrate_crlf?`); the mark, an editor's, is not.
+    text = text.lchop('\uFEFF')
+    Iyi.crlf?(text) ? text.gsub("\r\n", "\n") : text
+  end
+
+  # Whether *file*'s lines end CRLF, which is how the module made from it is
+  # written: the first line ending decides, as it does for `iyi fmt`.
+  private def migrate_crlf?(file : String) : Bool
+    Iyi.crlf?(File.read(file))
   end
 
   # One name a module exports, and the module.
@@ -888,7 +935,7 @@ class Iyi::Command
       "reopen"     => "reopenings of types this tree does not own, kept as Crystal",
       "collide"    => "one name offered by two modules, the second left qualified",
       "bang"       => "`!` is III.1.7a's: rewritten, and worth reading",
-      "include"    => "`include` of a namespace, which is a `using` line here",
+      "include"    => "`include` of a namespace, which is an import's names here",
       "nested"     => "modules left nested, which nothing outside can reach",
       "mixin"      => "a module mixed into a type, which is a trait here and needs a person",
       "untyped"    => "exports whose types the compiler still has to be told",
@@ -931,7 +978,7 @@ class Iyi::Command
     # compiled the way it runs, as one program, because a front end per
     # file would cost a minute on a project with fifty of them.
     spec_dir = File.join(File.dirname(src), "spec")
-    specs = Dir.glob(::Path[spec_dir].to_posix.join("**", "*_spec.cr")).sort
+    specs = Dir.glob(Iyi.glob_root(spec_dir).join("**", "*_spec.cr")).sort
     unless specs.empty?
       # Named one by one rather than as `spec/**`, because the requires are
       # resolved from this source's own directory and a glob of them is
@@ -1359,7 +1406,7 @@ class Iyi::Command
       # What follows the `end`. Nothing is the ordinary case; the `validator`
       # shard is the other one - `module Validator` with `alias Valid =
       # Validator` under it, where refusing to peel left the module nested
-      # and every consumer's `using validator::{Validator}` refused.
+      # and every consumer's `import validator::{Validator}` refused.
       #
       # Only a name for a type may trail it. Anything else is code that ran
       # *outside* the module and may name it: `halite/error.cr` closes
@@ -1673,10 +1720,10 @@ class Iyi::Command
 
         # Rule: `include Logging` at the namespace's own level is Crystal's
         # way of saying "and these names are mine too"; here the names come
-        # through `using`, which the rewrite below writes.
+        # through `import X::{...}`, which the rewrite below writes.
         if (match = INCLUDE.match(line)) && (match[1] || "").empty?
           if target = Command.resolve_namespace_for(match[3] || "", self, by_namespace)
-            notes.add "include", "#{path}: `include #{match[3]}` is #{target.path}'s names; they arrive by `using`"
+            notes.add "include", "#{path}: `include #{match[3]}` is #{target.path}'s names; they arrive by `import #{target.path}::{...}`"
             next
           end
         end
@@ -1782,7 +1829,7 @@ class Iyi::Command
       # A bare name resolves outwards, the way Crystal resolves one: this
       # file's namespace first, then the one above it, to the top. So
       # `ENVIRONMENT` inside `AcikTurkiye::Logging` is `AcikTurkiye`'s and
-      # arrives by `using` rather than by having been in scope.
+      # arrives by an import's names rather than by having been in scope.
       bare_lookup = {} of String => Export
       namespace.size.downto(0) do |depth|
         prefix = namespace[0, depth].join("::")
@@ -1981,7 +2028,7 @@ class Iyi::Command
       posix = ::Path[base].to_posix.to_s
       if posix.ends_with?("/**") || posix.ends_with?("/*")
         dir = posix.rchop("*").rchop("*").rchop("/")
-        pattern = posix.ends_with?("/**") ? ::Path[dir].to_posix.join("**", "*.cr") : ::Path[dir].to_posix.join("*.cr")
+        pattern = posix.ends_with?("/**") ? Iyi.glob_root(dir).join("**", "*.cr") : Iyi.glob_root(dir).join("*.cr")
         Dir.glob(pattern).sort.compact_map { |file| by_source[file]? }
       else
         file = base.ends_with?(".cr") ? base : base + ".cr"
@@ -2164,7 +2211,7 @@ class Iyi::Command
     # its module exports. Resolved outwards from this file's namespace,
     # the way Crystal resolves a constant; string contents are skipped.
     # A sidecar is Crystal, not an iyi module: it reopens somebody else's
-    # type and is `require`d by the module beside it. It has no `using`
+    # type and is `require`d by the module beside it. It has no `import X::{...}`
     # line to reach a name through, so every path it names that the tree
     # declares is written in full - `Radix::Result(Kemal::Route)` becomes
     # `Radix::Result(CliAndOthers::Route)`, because that is where `Route`
@@ -2251,7 +2298,7 @@ class Iyi::Command
                              claimed : Hash(String, String), notes : Notes,
                              qualify : Bool = false) : String
       # `Shop::Names.title` is a namespace and a method: the method is one
-      # module's export, and naming it bare under a `using` is what R-2b
+      # module's export, and naming it bare under `import X::{...}` is what R-2b
       # says a consumer writes.
       if at = token.index('.')
         head = token[0, at]
@@ -2273,7 +2320,7 @@ class Iyi::Command
           return "#{MARK}#{path}#{MARK}#{MARK}.#{method}"
         end
         if unit = (qualify ? @by_namespace[head.lchop("::")]? : Command.resolve_namespace_for(head, self, @by_namespace))
-          # Qualified rather than bare under a `using`: a module function
+          # Qualified rather than bare under `import X::{...}`: a module function
           # called from inside a type's body does not resolve as a bare
           # name, and `Module::Path.method` is what R-2b names as the
           # other spelling. It reads the same as the Crystal it came from.

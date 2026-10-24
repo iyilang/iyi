@@ -1,0 +1,373 @@
+# Exercises `std/file_utils`.
+#
+# Run via:
+#     IYI_PATH=src:samples/iyi ./bin/iyi run bench/std_file_utils_exercise.iyi
+#
+# The trees are made under TEST_SANDBOX when it is set (the gate sets it),
+# otherwise under the temporary directory; a second device is /dev/shm,
+# or FILE_UTILS_OTHER_DEVICE when that names a directory, and the
+# cross-device moves are skipped with a sentence when neither is on a
+# device of its own.
+
+module bench/std_file_utils_exercise
+
+import std/file_utils::{FileUtils}
+import std/file::{File}
+import std/dir::{Dir}
+import std/gc::{GC}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# A link's target as `File.readlink` answers it: Windows keeps a `/` in
+# the target as `\`, because `File.symlink` writes it so (a `/` there
+# points at nothing), and readlink reads back what was kept.
+def as_stored(target : String) : String
+  {% if flag?(:win32) %}
+    target.split('/').join("\\")
+  {% else %}
+    target
+  {% end %}
+end
+
+# What *work* panicked with, or "done" when it did not: run as a task,
+# whose value catches the panic.
+def refusal_of(&work : -> Nil) : String
+  said = "done"
+  group do |g|
+    task = g.spawn { work.call; 0 }
+    outcome = task.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+def mode_of(path : String) : Int32
+  File.info(path).permissions.value
+end
+
+# A file of *size* bytes, each `(i * 7 + seed) % 251`, written a MiB at a
+# time so the exercise never holds the file whole either.
+def write_pattern(path : String, size : Int32, seed : Int32) : Nil
+  piece = 1048576
+  File.open(path, "w") do |io|
+    done = 0
+    while done < size
+      n = size - done < piece ? size - done : piece
+      text = String.new(n) do |p|
+        i = 0
+        while i < n
+          p[i] = (((done + i) * 7 + seed) % 251).to_u8
+          i = i + 1
+        end
+      end
+      io.write(text)
+      done = done + n
+    end
+  end
+end
+
+saved = Dir.current
+sandbox_env = Program.env("TEST_SANDBOX")
+sandbox = if sandbox_env && !sandbox_env.empty?
+            sandbox_env
+          else
+            Dir.cd(Dir.tempdir)
+            s = Dir.current + "/iyi_std_file_utils_exercise"
+            Dir.cd(saved)
+            s
+          end
+FileUtils.rm_rf(sandbox)
+Dir.mkdir_p(sandbox)
+
+# Whether this machine lets the program make a symbolic link: Windows
+# without Developer Mode or the privilege does not, and every check that
+# needs one says so instead of failing.
+probe = sandbox + "/link_probe"
+links = refusal_of { File.symlink("nowhere", probe) } == "done"
+FileUtils.rm_rf(probe)
+
+puts "== cp: bytes, permission bits, into a directory"
+a = sandbox + "/a.txt"
+File.write(a, "alpha\n")
+File.chmod(a, 0o751)
+FileUtils.cp(a, sandbox + "/b.txt")
+assert_str "alpha\n", File.read(sandbox + "/b.txt"), "cp copies the bytes"
+{% unless flag?(:win32) %}
+  assert_true mode_of(sandbox + "/b.txt") == 0o751, "cp keeps the permission bits: #{mode_of(sandbox + "/b.txt").to_s(8)}"
+  # Onto a file that is there, with a mode of its own: the source's wins,
+  # as `cp` gives it.
+  File.write(sandbox + "/c.txt", "an older and longer text")
+  File.chmod(sandbox + "/c.txt", 0o600)
+  FileUtils.cp(a, sandbox + "/c.txt")
+  assert_str "alpha\n", File.read(sandbox + "/c.txt"), "cp onto a longer file leaves none of it"
+  assert_true mode_of(sandbox + "/c.txt") == 0o751, "cp onto a file gives it the source's bits"
+{% end %}
+Dir.mkdir(sandbox + "/into")
+FileUtils.cp(a, sandbox + "/into")
+assert_str "alpha\n", File.read(sandbox + "/into/a.txt"), "cp into a directory keeps the name"
+FileUtils.cp(a, sandbox + "/into/")
+assert_str "alpha\n", File.read(sandbox + "/into/a.txt"), "cp into a directory spelled with its separator"
+empty = sandbox + "/empty.bin"
+File.write(empty, "")
+FileUtils.cp(empty, sandbox + "/empty_copy.bin")
+assert_true File.exists?(sandbox + "/empty_copy.bin") && File.size(sandbox + "/empty_copy.bin") == 0_i64, "cp of an empty file"
+said = refusal_of { FileUtils.cp(a, a) }
+assert_str "Cannot copy #{a} to #{a}: they are the same file", said, "cp of a file onto itself is refused"
+assert_str "alpha\n", File.read(a), "cp onto itself leaves the file"
+said = refusal_of { FileUtils.cp(a, sandbox) }
+assert_true said.ends_with?(": they are the same file"), "cp of a file into its own directory is refused: #{said}"
+assert_str "alpha\n", File.read(a), "cp into its own directory leaves the file"
+said = refusal_of { FileUtils.cp(sandbox + "/into", sandbox + "/x") }
+assert_str "Cannot copy #{sandbox}/into to #{sandbox}/x: #{sandbox}/into is a directory, which cp_r copies", said, "cp of a directory is refused"
+said = refusal_of { FileUtils.cp(sandbox + "/missing", sandbox + "/x") }
+assert_str "Cannot copy #{sandbox}/missing to #{sandbox}/x: #{sandbox}/missing does not exist", said, "cp of nothing is refused"
+said = refusal_of { FileUtils.cp(a, sandbox + "/no/such/dir/x") }
+assert_true said.starts_with?("Cannot copy #{a} to #{sandbox}/no/such/dir/x: ") && said.includes?("could not be opened for writing"), "cp into a missing directory: #{said}"
+puts "  bytes and bits copied, into a directory by name, onto itself refused"
+
+puts "\n== a 64 MiB copy in pieces"
+big = sandbox + "/big.bin"
+size = 64 * 1048576
+write_pattern(big, size, 3)
+GC.collect
+GC.disable
+before = GC.stats.bytes_since_collection
+FileUtils.cp(big, sandbox + "/big_copy.bin")
+copy_bytes = GC.stats.bytes_since_collection - before
+GC.enable
+assert_true File.size(sandbox + "/big_copy.bin") == size.to_i64, "the copy is 64 MiB"
+assert_true copy_bytes < 262144_u64, "a 64 MiB copy allocates #{copy_bytes} bytes, under 256 KiB"
+GC.disable
+before = GC.stats.bytes_since_collection
+same = FileUtils.compare_file(big, sandbox + "/big_copy.bin")
+compare_bytes = GC.stats.bytes_since_collection - before
+GC.enable
+assert_true same, "compare_file: a 64 MiB copy is equal to its source"
+assert_true compare_bytes < 262144_u64, "comparing 64 MiB allocates #{compare_bytes} bytes, under 256 KiB"
+puts "  64 MiB copied with #{copy_bytes // 1024} KiB allocated, compared with #{compare_bytes // 1024} KiB"
+
+puts "\n== compare_file"
+# One byte changed at a time, in the first piece, across the boundary of
+# two, in the last word and the last byte: each must be a difference.
+mid = sandbox + "/mid.bin"
+one = 65536 * 3 + 5
+write_pattern(mid, one, 1)
+[0, 65535, 65536, 65539, one - 8, one - 1].each do |at|
+  other = sandbox + "/mid_#{at}.bin"
+  FileUtils.cp(mid, other)
+  assert_true FileUtils.compare_file(mid, other), "compare_file: the copy of #{one} bytes is equal before byte #{at} changes"
+  File.open(other, "r+") do |io|
+    io.seek(at.to_i64)
+    io.write((at * 7 + 1) % 251 == 122 ? "y" : "z")
+  end
+  assert_true File.size(other) >= one.to_i64, "the change at #{at} kept the size"
+  if File.size(other) == one.to_i64
+    assert_true !FileUtils.compare_file(mid, other), "compare_file sees a difference at byte #{at}"
+  end
+end
+File.write(sandbox + "/short.bin", "alpha")
+assert_true !FileUtils.compare_file(a, sandbox + "/short.bin"), "compare_file: different sizes differ"
+assert_true FileUtils.compare_file(a, a), "compare_file: a file is equal to itself"
+assert_true FileUtils.compare_file(empty, sandbox + "/empty_copy.bin"), "compare_file: two empty files are equal"
+said = refusal_of { FileUtils.compare_file(a, sandbox + "/into") }
+assert_str "Cannot compare #{a} with #{sandbox}/into: #{sandbox}/into is not a file", said, "compare_file of a directory is refused"
+puts "  differences found at each edge of a piece, sizes and identities short-cut"
+
+puts "\n== cp_r: a tree, its links, its modes"
+tree = sandbox + "/tree"
+outside = sandbox + "/outside"
+Dir.mkdir_p(tree + "/sub/deeper")
+Dir.mkdir_p(tree + "/void")
+Dir.mkdir_p(outside)
+File.write(outside + "/keep.txt", "not yours")
+File.write(tree + "/top.txt", "top")
+File.write(tree + "/.hidden", "dot")
+File.write(tree + "/sub/çay ğ.txt", "unicode")
+write_pattern(tree + "/sub/deeper/big.bin", 200000, 9)
+File.chmod(tree + "/top.txt", 0o640)
+if links
+  File.symlink("../top.txt", tree + "/sub/up")
+  File.symlink(outside, tree + "/out")
+  File.symlink("dangling-target", tree + "/dangling")
+end
+{% unless flag?(:win32) %}
+  File.chmod(tree + "/sub/deeper", 0o750)
+{% end %}
+copy = sandbox + "/tree_copy"
+FileUtils.cp_r(tree, copy)
+assert_str "top", File.read(copy + "/top.txt"), "cp_r copies a file at the top"
+assert_str "dot", File.read(copy + "/.hidden"), "cp_r copies a hidden file"
+assert_str "unicode", File.read(copy + "/sub/çay ğ.txt"), "cp_r copies a name that is not ASCII"
+assert_true FileUtils.compare_file(tree + "/sub/deeper/big.bin", copy + "/sub/deeper/big.bin"), "cp_r copies a file of several pieces"
+assert_true Dir.exists?(copy + "/void") && Dir.empty?(copy + "/void"), "cp_r copies an empty directory"
+{% unless flag?(:win32) %}
+  assert_true mode_of(copy + "/top.txt") == 0o640, "cp_r keeps a file's bits"
+  assert_true mode_of(copy + "/sub/deeper") == 0o750, "cp_r keeps a directory's bits"
+{% end %}
+if links
+  assert_true File.symlink?(copy + "/sub/up") && File.readlink(copy + "/sub/up") == as_stored("../top.txt"), "cp_r copies a link as a link"
+  assert_true File.symlink?(copy + "/out") && File.readlink(copy + "/out") == as_stored(outside), "cp_r copies a link out of the tree as a link"
+  assert_true File.symlink?(copy + "/dangling") && File.readlink(copy + "/dangling") == "dangling-target", "cp_r copies a dangling link"
+  assert_str "top", File.read(copy + "/sub/up"), "the copied link resolves inside the copy"
+  FileUtils.cp_r(tree + "/out/", sandbox + "/through")
+  assert_true !File.symlink?(sandbox + "/through") && File.read(sandbox + "/through/keep.txt") == "not yours", "cp_r of link/ copies the directory the link names"
+end
+# Into a directory that is there: under its own name, as `cp -R`.
+Dir.mkdir(sandbox + "/shelf")
+FileUtils.cp_r(tree, sandbox + "/shelf")
+assert_str "top", File.read(sandbox + "/shelf/tree/top.txt"), "cp_r into a directory keeps the name"
+FileUtils.cp_r(a, sandbox + "/shelf")
+assert_str "alpha\n", File.read(sandbox + "/shelf/a.txt"), "cp_r of a file is cp"
+said = refusal_of { FileUtils.cp_r(tree, tree + "/sub") }
+# The landing is `File.join`ed, as cp_r names it: `\` before the name on Windows.
+landing = File.join(tree + "/sub", "tree")
+assert_str "Cannot copy #{tree} to #{landing}: #{landing} is inside the tree being copied", said, "cp_r refuses a tree into itself"
+assert_true !Dir.exists?(tree + "/sub/tree"), "a refused copy into itself made nothing"
+said = refusal_of { FileUtils.cp_r(tree, tree) }
+landing = File.join(tree, "tree")
+assert_str "Cannot copy #{tree} to #{landing}: #{landing} is inside the tree being copied", said, "cp_r refuses a tree into its own directory"
+said = refusal_of { FileUtils.cp_r(sandbox + "/missing", sandbox + "/x") }
+assert_str "Cannot copy #{sandbox}/missing to #{sandbox}/x: #{sandbox}/missing does not exist", said, "cp_r of nothing is refused"
+puts "  files, modes, hidden and unicode names, empty directories#{links ? ", links as links" : ""}; into itself refused"
+
+puts "\n== rm_r never follows a link"
+if links
+  victim = sandbox + "/victim"
+  FileUtils.cp_r(tree, victim)
+  said = refusal_of { FileUtils.rm_r(victim) }
+  # The target first: a removal that followed the link empties the
+  # directory and then fails on the link, and the loss is the finding.
+  assert_true File.exists?(outside + "/keep.txt"), "a link's target survives rm_r: the directory outside the tree (#{said})"
+  assert_str "not yours", File.read(outside + "/keep.txt"), "a link's target survives rm_r with its contents"
+  assert_str "done", said, "rm_r of a tree with links in it"
+  assert_true !File.exists?(victim) && !File.symlink?(victim), "rm_r removes the tree"
+  # The link itself, given as the path: the link goes, its directory stays.
+  File.symlink(outside, sandbox + "/door")
+  said = refusal_of { FileUtils.rm_r(sandbox + "/door") }
+  assert_true File.exists?(outside + "/keep.txt"), "a link's target survives rm_r of the link (#{said})"
+  assert_true said == "done" && !File.symlink?(sandbox + "/door"), "rm_r of a link removes the link: #{said}"
+  # And spelled with a separator after it, which POSIX resolves to the
+  # directory the link names.
+  File.symlink(outside, sandbox + "/door")
+  said = refusal_of { FileUtils.rm_r(sandbox + "/door/") }
+  assert_true File.exists?(outside + "/keep.txt"), "a link's target survives rm_r of link/ (#{said})"
+  assert_true said == "done" && !File.symlink?(sandbox + "/door"), "rm_r of link/ removes the link: #{said}"
+  puts "  a tree with a link out of it removed, a link removed as a link, link/ too"
+else
+  puts "  this machine makes no symbolic links, so a link in rm_r's way is unmeasured"
+end
+plain = sandbox + "/plain"
+FileUtils.cp_r(tree, plain)
+FileUtils.rm_r(plain + "/sub/deeper/big.bin")
+assert_true !File.exists?(plain + "/sub/deeper/big.bin"), "rm_r of a file"
+FileUtils.rm_r(plain)
+assert_true !Dir.exists?(plain), "rm_r of a tree"
+said = refusal_of { FileUtils.rm_r(plain) }
+assert_str "Cannot remove #{plain}: it does not exist", said, "rm_r of nothing is refused"
+assert_str "done", refusal_of { FileUtils.rm_rf(plain) }, "rm_rf of nothing is fine"
+FileUtils.cp_r(tree, plain)
+FileUtils.rm_rf(plain)
+assert_true !Dir.exists?(plain), "rm_rf of a tree"
+puts "  files and trees removed; absent refused by rm_r, accepted by rm_rf"
+
+puts "\n== mv: rename, into a directory, across devices"
+m = sandbox + "/m.txt"
+File.write(m, "moving")
+FileUtils.mv(m, sandbox + "/n.txt")
+assert_true !File.exists?(m) && File.read(sandbox + "/n.txt") == "moving", "mv renames a file"
+FileUtils.mv(sandbox + "/n.txt", sandbox + "/into")
+assert_str "moving", File.read(sandbox + "/into/n.txt"), "mv into a directory keeps the name"
+FileUtils.cp_r(tree, sandbox + "/mt")
+FileUtils.mv(sandbox + "/mt", sandbox + "/mt2")
+assert_true !Dir.exists?(sandbox + "/mt") && File.read(sandbox + "/mt2/top.txt") == "top", "mv renames a tree"
+said = refusal_of { FileUtils.mv(sandbox + "/missing", sandbox + "/x") }
+assert_str "Cannot move #{sandbox}/missing to #{sandbox}/x: #{sandbox}/missing does not exist", said, "mv of nothing is refused"
+
+other_env = Program.env("FILE_UTILS_OTHER_DEVICE")
+other_root = other_env && !other_env.empty? ? other_env : "/dev/shm"
+here = File.info(sandbox)
+there = Dir.exists?(other_root) ? File.info?(other_root) : nil
+if there && there.dev != here.dev && there.dev != 0_i64 && here.dev != 0_i64
+  away = other_root + "/iyi_std_file_utils_exercise"
+  FileUtils.rm_rf(away)
+  Dir.mkdir(away)
+  # A file across: its bytes and bits there, its name gone here.
+  f = sandbox + "/travels.bin"
+  write_pattern(f, 300000, 5)
+  File.chmod(f, 0o604)
+  FileUtils.cp(f, sandbox + "/travels.reference")
+  said = refusal_of { FileUtils.mv(f, away) }
+  assert_str "done", said, "mv across devices moves a file"
+  assert_true !File.exists?(f), "mv across devices removes the file it moved"
+  assert_true FileUtils.compare_file(sandbox + "/travels.reference", away + "/travels.bin"), "mv across devices keeps a file's bytes"
+  {% unless flag?(:win32) %}
+    assert_true mode_of(away + "/travels.bin") == 0o604, "mv across devices keeps a file's bits"
+  {% end %}
+  # A tree across, links and all.
+  FileUtils.cp_r(tree, sandbox + "/voyage")
+  said = refusal_of { FileUtils.mv(sandbox + "/voyage", away + "/voyage") }
+  assert_str "done", said, "mv across devices moves a tree"
+  assert_true !Dir.exists?(sandbox + "/voyage"), "mv across devices removes the tree it moved"
+  assert_true FileUtils.compare_file(tree + "/sub/deeper/big.bin", away + "/voyage/sub/deeper/big.bin"), "mv across devices keeps a tree's files"
+  if links
+    assert_true File.readlink(away + "/voyage/out") == as_stored(outside), "mv across devices keeps a link as a link"
+    assert_str "not yours", File.read(outside + "/keep.txt"), "mv across devices leaves a link's target where it was"
+  end
+  # Onto what rename would refuse, refused the same way and nothing lost.
+  # A tree onto a full directory of the same name there.
+  FileUtils.cp_r(tree, sandbox + "/again")
+  FileUtils.cp_r(tree, away + "/again")
+  said = refusal_of { FileUtils.mv(sandbox + "/again", away) }
+  assert_str "Cannot move #{sandbox}/again to #{away}/again: #{away}/again is a directory that is not empty", said, "mv across devices onto a full directory is refused"
+  assert_true File.exists?(sandbox + "/again/top.txt"), "a refused move leaves its source"
+  # A file onto a directory of its name, and a directory onto a file.
+  File.write(sandbox + "/flat", "f")
+  Dir.mkdir(away + "/flat")
+  said = refusal_of { FileUtils.mv(sandbox + "/flat", away) }
+  assert_str "Cannot move #{sandbox}/flat to #{away}/flat: #{away}/flat is a directory", said, "mv across devices of a file onto a directory is refused"
+  File.write(away + "/deep", "a file")
+  Dir.mkdir(sandbox + "/deep")
+  said = refusal_of { FileUtils.mv(sandbox + "/deep", away) }
+  assert_str "Cannot move #{sandbox}/deep to #{away}/deep: #{away}/deep is not a directory", said, "mv across devices of a directory onto a file is refused"
+  assert_true File.exists?(sandbox + "/flat") && Dir.exists?(sandbox + "/deep"), "refused moves leave their sources"
+  # A directory onto an empty one: replaced, as rename replaces it.
+  Dir.mkdir(away + "/hollow")
+  FileUtils.cp_r(tree, sandbox + "/hollow")
+  FileUtils.mv(sandbox + "/hollow", away)
+  assert_true !Dir.exists?(sandbox + "/hollow") && File.read(away + "/hollow/top.txt") == "top", "mv across devices onto an empty directory"
+  # A file onto a file: replaced, as rename replaces it.
+  File.write(away + "/replace.txt", "old")
+  File.write(sandbox + "/replace.txt", "new")
+  FileUtils.mv(sandbox + "/replace.txt", away + "/replace.txt")
+  assert_str "new", File.read(away + "/replace.txt"), "mv across devices replaces a file"
+  # A tree with a read-only directory holding entries: the copy could
+  # not remove it afterwards, so nothing is copied. Root writes anywhere,
+  # and there the check has nothing to ask.
+  {% unless flag?(:win32) %}
+    Dir.mkdir_p(sandbox + "/sealed/shut/in")
+    File.chmod(sandbox + "/sealed/shut", 0o555)
+    if !File.writable?(sandbox + "/sealed/shut")
+      said = refusal_of { FileUtils.mv(sandbox + "/sealed", away) }
+      assert_str "Cannot move #{sandbox}/sealed to #{away}/sealed: #{sandbox}/sealed/shut is read-only, so the source could not be removed after the copy",
+        said, "mv across devices refuses a source it could not remove"
+      assert_true !File.exists?(away + "/sealed") && Dir.exists?(sandbox + "/sealed/shut/in"), "the refused move copied nothing and removed nothing"
+    end
+    File.chmod(sandbox + "/sealed/shut", 0o755)
+  {% end %}
+  FileUtils.rm_r(away)
+  puts "  a file and a tree moved from #{here.dev} to #{there.dev}, sources gone, a full directory refused"
+else
+  puts "  #{other_root} is not on a device of its own here, so a move across devices is unmeasured"
+end
+
+FileUtils.rm_r(sandbox)
+assert_true !Dir.exists?(sandbox), "the sandbox is gone"
+
+puts "\nALL CHECKS PASSED"

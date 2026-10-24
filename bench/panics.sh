@@ -5,9 +5,12 @@
 # by registry, pending defers run innermost-first, a
 # panicking task dies at its boundary while its group cancels the
 # siblings, the boundary re-raises in the owner exactly once, a panic
-# with no boundary above it exits 1 after its defers ran, and `.or_panic`
-# is a real panic. The no-panic path rides the same registry and is
-# asserted unchanged.
+# with no boundary above it exits 1 after its defers ran, `exit` ends
+# with the status it is given after the calling task's defers, and
+# `.or_panic` is a real panic. The no-panic path rides the same registry and is
+# asserted unchanged, and on it a cleanup is the scope's own code: it reads
+# a struct method's `self` live, keeps a variable's narrowing (the panic
+# walk's `iyi_defer` proc reads it live too), and cannot leave its `defer`.
 set -euo pipefail
 
 IYI=${IYI:-./bin/iyi}
@@ -93,6 +96,87 @@ site "main.iyi:6" "main panic missing site"
 echo "$out" | grep -q "second defer" || fail "second defer did not run: $out"
 echo "$out" | grep -q "first defer" || fail "first defer did not run: $out"
 step "an unbounded panic exits 1 after its defers, innermost first"
+
+# ── 2b. `exit` is the other ending: the status the program chose, after
+#      the cleanups the calling task deferred, innermost first, and
+#      nothing after it runs - not the rest of the function, not the line
+#      that called it. No panic is printed, because nothing went wrong ──
+cat > "$work/leave.iyi" <<'EOF'
+module leave
+
+pub def go : Int32
+  defer puts "first defer"
+  defer puts "second defer"
+  puts "before exit"
+  exit 3 if true
+  puts "after exit"
+  0
+end
+
+puts go
+puts "caller went on"
+EOF
+run "$work/leave.iyi"
+[ "$code" = 3 ] || fail "exit 3 exited $code: $out"
+[ "$out" = "$(printf 'before exit\nsecond defer\nfirst defer')" ] || fail "exit did not end after its task's defers, innermost first: $out"
+step "exit ends with its status after the task's defers, innermost first"
+
+# ── 2c. `exit` from a task ends the process: that task's cleanups run,
+#      the group's sibling does not get to print, and a plain `exit` is 0 ─
+cat > "$work/leave_task.iyi" <<'EOF'
+module leave_task
+
+pub def run_all : Int32
+  group do |g|
+    g.spawn {
+      defer puts "task defer"
+      exit
+      1
+    }
+    g.spawn {
+      sleep(2000)
+      puts "sibling finished"
+      2
+    }
+  end
+  puts "after group"
+  0
+end
+
+puts run_all
+EOF
+run "$work/leave_task.iyi"
+[ "$code" = 0 ] || fail "a bare exit from a task exited $code: $out"
+[ "$out" = "task defer" ] || fail "exit from a task: wanted only its own defer, got: $out"
+step "exit from a task ends the process, after that task's defers"
+
+# ── 2d. what a stream set to `sync = false` still holds is written as the
+#      program ends: at its last line, at `exit` and at a panic's exit
+#      (`__iyi_flush_std`). Nothing wrote it, and standard output came
+#      back empty all three ways while standard error's line arrived ────
+cat > "$work/unsynced.iyi" <<'EOF'
+module unsynced
+
+STDOUT.sync = false
+print "buffered-a "
+puts "buffered-b"
+STDERR.puts "unbuffered"
+case Program.args[0]?
+when "exit"
+  exit 0
+when "raise"
+  raise "boom"
+end
+EOF
+"$IYI" build -o "$work/unsynced" "$work/unsynced.iyi" > "$work/unsynced.build" 2>&1 ||
+  fail "the unsynced program did not build: $(cat "$work/unsynced.build")"
+for ending in end exit raise; do
+  set +e
+  said=$("$work/unsynced" "$ending" 2>/dev/null)
+  set -e
+  [ "$said" = "buffered-a buffered-b" ] || fail "at its $ending, standard output held '$said', not the buffered line"
+done
+step "a stream set to sync = false is written at the end, at exit and at a panic"
 
 # ── 3. `.or_panic` is a real panic now: through the task boundary,
 #      carrying the error's message ────────────────────────────────────
@@ -209,6 +293,212 @@ expected=$(printf 'body ran\nclose b\nclose a\n2\nclose b\nclose a\n1')
 $out"
 step "the no-panic path is unchanged: LIFO on fall-through and on return"
 
+# ── 6b. on an ordinary exit the cleanup is the scope's own code: in a
+#      struct method it reads and writes the live struct, and a variable
+#      it names still narrows. Run only as a proc, it read a copy of
+#      `self` made at entry (`defer saw 0`), its write was lost (3, not
+#      100), and a later `x = x.size` stopped compiling. The panic walk's
+#      copy, the proc the compiler marks `iyi_defer`, still reads the
+#      variable as it is when the task dies ──────────────────────────────
+cat > "$work/live.iyi" <<'EOF'
+module live
+
+struct Counter
+  getter n : Int32
+
+  def initialize
+    @n = 0
+  end
+
+  def run : Int32
+    @n = 1
+    defer puts "defer saw #{@n}"
+    @n = 2
+    @n
+  end
+
+  def close : Nil
+    defer @n = 100
+    @n = 3
+  end
+end
+
+def grow(v : Int32 | String, fail : Bool) : Int32
+  x = v
+  defer puts "x was #{x}"
+  if x.is_a?(String)
+    x = x.size
+  end
+  raise "grew" if fail
+  x + 1
+end
+
+# One cleanup per iteration, run as each iteration ends, so it reads the
+# counter after that iteration's increment.
+def rounds : Nil
+  k = 0
+  while k < 2
+    defer puts "round #{k}"
+    k += 1
+  end
+end
+
+c = Counter.new
+puts c.run
+c.close
+puts c.n
+puts grow("hello", false)
+puts grow(4, false)
+rounds
+group do |g|
+  t = g.spawn { grow("hello", true) }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/live.iyi" 2>"$work/live.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "live-struct exit was $code, wanted 0: $out $(cat "$work/live.err")"
+expected=$(printf 'defer saw 2\n2\n100\nx was 5\n6\nx was 4\n5\nround 1\nround 2\nx was 5\npanicked')
+[ "$out" = "$expected" ] || fail "a defer did not see the live scope:
+$out"
+step "a defer sees the live struct and keeps its narrowing; the panic walk reads it live"
+
+# ── 6c. a cleanup cannot leave its `defer`: inside the proc a `return`
+#      ended the cleanup and nothing said so (`defer return 7` answered 1)
+cat > "$work/leave_defer.iyi" <<'EOF'
+module leave_defer
+
+def answer : Int32
+  defer return 7
+  1
+end
+
+puts answer
+EOF
+run "$work/leave_defer.iyi"
+[ "$code" != 0 ] || fail "\`defer return 7\` compiled and answered: $out"
+echo "$out" | grep -q "\`return\` can't leave a \`defer\`" || fail "\`defer return\` was refused, but not as leaving the defer: $out"
+step "a return out of a defer is refused as leaving it"
+
+# ── 6d. a `defer` a macro writes covers the rest of the scope the macro
+#      stands in, as the same line written there does. Lowered with the
+#      expansion alone, it had nothing after it and ran at once, before
+#      the code it guards ("if cleanup" before "if body") ─────────────────
+cat > "$work/macro_defer.iyi" <<'EOF'
+module macro_defer
+
+macro cleanup(msg)
+  defer puts {{msg}}
+end
+
+def written_by_if : Nil
+  {% if true %}
+    defer puts "if cleanup"
+  {% end %}
+  puts "if body"
+end
+
+def written_by_for : Nil
+  {% for n in [1, 2] %}
+    defer puts "for cleanup {{n}}"
+  {% end %}
+  puts "for body"
+end
+
+def written_by_call(early : Bool) : Int32
+  defer puts "written cleanup"
+  cleanup "call cleanup"
+  return 3 if early
+  puts "call body"
+  4
+end
+
+def dies : Int32
+  cleanup "panic-path cleanup"
+  raise "after the macro's defer" if true
+  0
+end
+
+written_by_if
+written_by_for
+puts written_by_call(true)
+puts written_by_call(false)
+group do |g|
+  t = g.spawn { dies }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/macro_defer.iyi" 2>"$work/macro_defer.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "macro-defer exit was $code, wanted 0: $out $(cat "$work/macro_defer.err")"
+expected=$(printf 'if body\nif cleanup\nfor body\nfor cleanup 2\nfor cleanup 1\ncall cleanup\nwritten cleanup\n3\ncall body\ncall cleanup\nwritten cleanup\n4\npanic-path cleanup\npanicked')
+[ "$out" = "$expected" ] || fail "a macro's defer did not cover the rest of its scope:
+$out"
+step "a defer a macro writes covers the rest of the scope it stands in"
+
+# ── 6e. inside a cleanup `is_a?` narrows as it does in an `ensure`, for a
+#      variable assigned after the `defer` too, and the panic walk's run
+#      of the cleanup reads what was assigned last. It was refused
+#      ("expected argument #1 to 'String#+' to be String, not Int32"), and
+#      the scope's own read between the two assignments lost its
+#      narrowing to the cleanup's ──────────────────────────────────────────
+cat > "$work/narrow_defer.iyi" <<'EOF'
+module narrow_defer
+
+def later(flag : Bool, fail : Bool) : Int32
+  y = flag ? "s" : 1
+  defer puts(y.is_a?(Int32) ? y + 1 : y.bytesize)
+  y = 5
+  raise "later" if fail
+  0
+end
+
+def kept : Nil
+  y = 1
+  defer puts y
+  puts y + 1
+  y = "s"
+end
+
+puts later(true, false)
+kept
+group do |g|
+  t = g.spawn { later(true, true) }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/narrow_defer.iyi" 2>"$work/narrow_defer.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "narrowing-defer exit was $code, wanted 0: $out $(cat "$work/narrow_defer.err")"
+expected=$(printf '6\n0\n2\ns\n6\npanicked')
+[ "$out" = "$expected" ] || fail "a cleanup did not narrow as an ensure does:
+$out"
+step "is_a? narrows inside a cleanup, on the ordinary exit and on the panic walk"
+
+# ── 6f. a `yield` in a cleanup is refused as itself: the panic walk runs
+#      the cleanup as a proc, and the refusal was about a proc literal
+#      nobody wrote ──────────────────────────────────────────────────────
+cat > "$work/yield_defer.iyi" <<'EOF'
+module yield_defer
+
+def around(&) : Nil
+  defer yield
+  puts "body"
+end
+
+around { puts "cleanup" }
+EOF
+run "$work/yield_defer.iyi"
+[ "$code" != 0 ] || fail "\`defer yield\` compiled: $out"
+echo "$out" | grep -q "\`yield\` can't run in a \`defer\`" || fail "\`defer yield\` was refused, but not as a defer: $out"
+step "a yield in a defer is refused as a defer"
+
 # ── 7. an arithmetic overflow is a panic like any other: the trap
 #      routes through the registry, so a task's overflow dies at the
 #      task boundary instead of taking the process bare-handed ────────
@@ -283,10 +573,8 @@ step "a panic with nowhere to print says so once, on the error stream"
 cat > "$work/site.iyi" <<'EOF'
 module site
 
-import std/enumerable
-import std/list
-using std/enumerable::{Enumerable}
-using std/list::{List}
+import std/enumerable::{Enumerable}
+import std/list::{List}
 
 three = List(Int32).new([1, 2, 3])
 puts three.each_slice(0).size
@@ -294,7 +582,9 @@ EOF
 run "$work/site.iyi"
 [ "$code" = 1 ] || fail "std panic exit was $code, wanted 1"
 echo "$out" | grep -q "^iyi: panic: slice size must be positive" || fail "std panic missing message: $out"
-echo "$out" | grep -q "at.*src/std" && fail "a std panic named a library line: $out"
+# Either separator: a Windows build names the file `...\src\std/x.iyi`,
+# and a pattern with `/` alone let a library line through there unseen.
+echo "$out" | grep -qE 'at.*src[/\\]std' && fail "a std panic named a library line: $out"
 cat > "$work/index.iyi" <<'EOF'
 module index
 
@@ -310,7 +600,7 @@ EOF
 run "$work/index.iyi"
 [ "$code" = 1 ] || fail "prelude panic exit was $code, wanted 1"
 echo "$out" | grep -q "^iyi: panic: index 5 out of range for 3 elements" || fail "prelude panic missing message: $out"
-echo "$out" | grep -q "at.*src/iyi" && fail "a prelude panic named a library line: $out"
+echo "$out" | grep -qE 'at.*src[/\\]iyi' && fail "a prelude panic named a library line: $out"
 # On Darwin, the panic raises a backtrace through libSystem's backtrace and
 # points at the program rather than the library. Windows captures its
 # callers too (`RtlCaptureStackBackTrace`) but prints none without a
@@ -322,13 +612,39 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 step "a panic the library raises names no library line, prelude or std"
 
+# ── 9b. and the program's own line inside a macro written in place: a
+#      `{% if %}` is expanded where it stands, and a `raise` inside one
+#      named the `{% if` line - where the expansion was put, not where the
+#      `raise` is. `__LINE__` is what `raise` reads, and it reads the
+#      line the text was written on now. ───────────────────────────────
+cat > "$work/inplace.iyi" <<'EOF'
+module inplace
+
+def boom(x : Int32) : Nil
+  {% if 1 == 2 %}
+    puts "never"
+  {% else %}
+    y = x + 1
+    raise "boom #{y}"
+  {% end %}
+end
+
+boom(1)
+EOF
+run "$work/inplace.iyi"
+[ "$code" = 1 ] || fail "the in-place panic exit was $code, wanted 1"
+echo "$out" | grep -q "at .*inplace\.iyi:8$" || fail "a raise inside {% if %} did not name its own line, 8: $out"
+step "a raise inside a macro written in place names its own line"
+
 # ── 9a. a program that imports `std/debug` gets its callers named: the
 #      resolver reads the program's own debug information — DWARF beside a
-#      Mach-O, the CodeView PDB the linker wrote beside a PE — and a frame
-#      is a function and a source line rather than an address. This is the
-#      whole of what `std/debug` is for, and it was never gated. ────────
-case "$(uname -s)" in
-  Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT)
+#      Mach-O, the CodeView PDB the linker wrote beside a PE, the ELF's
+#      own `.symtab` and `.debug_line` after the module's own walk of
+#      `.eh_frame` — and a frame is a function and a source line rather
+#      than an address. This is the whole of what `std/debug` is for, and
+#      it was never gated. ────────
+case "$(uname -s)-$(uname -m)" in
+  Darwin-* | MINGW* | MSYS* | CYGWIN* | Windows_NT-* | Linux-x86_64 | Linux-aarch64)
     cat > "$work/named.iyi" <<'EOF'
 module named
 
@@ -357,6 +673,21 @@ $out"
     frames="$(echo "$out" | grep -cE "inner[^ ]* at .*named\.iyi:")"
     [ "$frames" -ge 2 ] || fail "the trace named $frames frames of the recursion, wanted at least 2:
 $out"
+    # And the first frame is the function that raised, at the raise's own
+    # line. Windows skipped two frames where only `raise` is above it, and
+    # dropped this one: the trace began at the caller, line 7.
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN* | Windows_NT)
+        echo "$out" | grep -qE "^0 +inner at .*named\.iyi:6$" ||
+          fail "the trace does not start at the function that raised, named.iyi:6:
+$out"
+        ;;
+      Linux)
+        echo "$out" | grep -qE "^0 +[^ ]*inner[^ ]* at .*named\.iyi:6:" ||
+          fail "the trace does not start at the function that raised, named.iyi:6:
+$out"
+        ;;
+    esac
     step "a panic names its callers where the program imported a resolver"
     ;;
   *)
@@ -393,6 +724,182 @@ t.join' ;;
     fail "stack overflow on the $where stack said:
 $out"
 done
+# The same overflow, eight more times from one binary. On Windows the
+# handler used to end with `ExitProcess`, which runs every DLL's detach
+# on the thread that faulted — the stack that had just run out — and a
+# second overflow past a guard page already consumed is an access
+# violation, which the same handler then named a memory fault under the
+# stack-overflow sentence. Whether the 16 KB guarantee covered the
+# detaches depended on where the first fault landed, so one run in three
+# showed it and two did not. Repeated runs make a flake a failure.
+# And on a fiber's stack and a thread's the same way. A thread's needed
+# a guarantee of its own: `SetThreadStackGuarantee` is per thread, and
+# with it set on the main thread alone a thread's handler came in with
+# 6.7 to 9.5 KB committed under it, which on the Windows runners was now
+# and then not enough, and the overflow was called a memory fault. Every
+# `IyiThread` sets its own now (14.8 to 17.8 KB measured).
+for where in main fiber thread; do
+  set +e
+  "$IYI" build -o "$work/deep_${where}_bin" "$work/deep_$where.iyi" > /dev/null 2>&1
+  set -e
+  for again in 1 2 3 4 5 6 7 8; do
+    set +e
+    out=$("$work/deep_${where}_bin" 2>&1)
+    code=$?
+    set -e
+    [ "$code" = 1 ] || fail "stack overflow on the $where stack, run $again, exited $code, wanted 1"
+    [ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
+      fail "stack overflow on the $where stack, run $again, said more than the sentence:
+$out"
+  done
+done
+# A frame larger than the guard page, on a fiber's stack, with writable
+# memory under the guard: the overrun is the same sentence, never a quiet
+# write into whatever lies below (issue #130). A frame is carved with one
+# `sub`, and this one is written first at its low end, 64 KiB below the
+# frame above it - over a 4 KiB guard page in one step. Without stack
+# probes on Linux it landed in the memory under the stack, and the
+# program finished as if nothing had happened: this check printed "the
+# dive came back" there. The compiler now has every frame touch its pages
+# top down (`iyi_probe_stack`), and Windows' `__chkstk` always did, so
+# the guard is the first page past the end anything touches.
+#
+# The writable memory comes from no free address space under a stack:
+# a floor mapped by address under the runtime's own stack was refused in
+# ten runs of ten on the Windows and darwin runners, where something else
+# is always mapped there. On Linux and darwin the program makes the stack
+# itself - one mapping of 128 KiB of floor, the guard page and 256 KiB of
+# stack, the guard `mprotect`ed as `IyiFiber#map_stack` does (16 KiB of
+# it on darwin arm64, whose pages are that size) - and hands it to the
+# scheduler's pool, so the task it spawns next runs on it; the task
+# checks that it did. On Windows a fiber stack carries its own writable
+# memory under the guard: the 16 KB of committed slack at
+# the bottom of the reservation, the fault handler's room
+# (`IyiFiber#map_stack`), which the kernel's growth never reaches. So
+# there the task walks down in frames under a page, which grow the stack
+# through the guard page as any thread's grows, until one 64 KiB frame
+# from where it stands would end in the middle of that room, and then
+# takes that frame. `__chkstk` probes it from StackLimit down, the guard
+# page is the first page touched past the committed stack, and the
+# kernel answers STATUS_STACK_OVERFLOW; a frame that skipped the probes
+# would have written only committed memory and come back.
+cat > "$work/overrun.iyi" <<'EOF'
+module overrun
+
+# 64 KiB of frame, written first at its lowest byte, the one farthest
+# from the frame above.
+def plunge(n : Int32) : Int32
+  room = uninitialized StaticArray(UInt8, 65536)
+  low = pointerof(room).as(Pointer(UInt8))
+  low.value = 1_u8
+  return 1 if n == 0
+  plunge(n - 1) + low.value.to_i32
+end
+
+{% if flag?(:win32) %}
+  # Down in frames under a page, each touched, until a 64 KiB frame from
+  # here would end at *target*; then that frame.
+  def descend(target : UInt64) : Int32
+    pad = uninitialized StaticArray(UInt8, 512)
+    here = pointerof(pad).as(Pointer(UInt8))
+    here.value = 1_u8
+    return plunge(0) if here.address - 65536_u64 <= target
+    descend(target) + here.value.to_i32
+  end
+{% else %}
+  # A fiber stack of the runtime's shape with 128 KiB of writable floor
+  # under its guard page, all one mapping: its base, as the pool holds it.
+  def floored_stack : UInt64
+    floor = 131072_u64
+    size = floor + IyiFiber::STACK_BYTES
+    base = 0_u64
+    {% if flag?(:darwin) %}
+      region = LibC.mmap(Pointer(Void).new(0_u64), size, 3, 4098, -1, 0_i64).address
+      raise "the floored stack's mmap failed" if region &+ 1_u64 == 0_u64
+      base = region + floor
+      raise "the floored stack's guard failed" if LibC.mprotect(Pointer(Void).new(base), IyiFiber::PAGE, 0) != 0
+    {% else %}
+      mapped = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, size.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+      raise "the floored stack's mmap failed" if mapped < 0 && mapped >= -4095
+      base = mapped.to_u64 + floor
+      raise "the floored stack's guard failed" if __iyi_conc_syscall3(IYI_SYS_MPROTECT, base.to_i64, IyiFiber::PAGE.to_i64, 0_i64) != 0
+    {% end %}
+    base
+  end
+{% end %}
+
+{% if flag?(:win32) %}
+  group do |g|
+    g.spawn do
+      base = IyiScheduler.current_stack_top - IyiFiber::STACK_BYTES
+      # The middle of the committed room: the uncommitted wall page is at
+      # `base`, and the room is GUARD_SLACK and a page above it.
+      room = base + IyiFiber::PAGE + (IyiFiber::GUARD_SLACK + IyiFiber::PAGE) // 2_u64
+      puts "the dive came back: #{descend(room)}"
+    end
+  end
+{% else %}
+  base = floored_stack
+  IyiScheduler.give_stack(base)
+  group do |g|
+    g.spawn do
+      if IyiScheduler.current_stack_top != base + IyiFiber::STACK_BYTES
+        puts "the task ran on a stack other than the floored one"
+      else
+        # Five such frames are about 64 KiB past a 256 KiB stack: inside
+        # the floor.
+        puts "the dive came back: #{plunge(4)}"
+      end
+    end
+  end
+{% end %}
+EOF
+"$IYI" build -o "$work/overrun_bin" "$work/overrun.iyi" > "$work/overrun.log" 2>&1 ||
+  fail "the overrun program did not build: $(cat "$work/overrun.log")"
+set +e
+out=$("$work/overrun_bin" 2>&1)
+code=$?
+set -e
+[ "$code" = 1 ] || fail "a frame larger than the guard page exited $code, wanted 1: $out"
+[ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
+  fail "a frame larger than the guard page said:
+$out"
+step "a frame larger than the guard page is a stack overflow, not a write under the stack"
+# The repeats catch a thread's missing guarantee only now and then: the
+# room it leaves was enough on this machine's CPUs and not always on the
+# runners'. What the guarantee is can be asked, though - a call with 0
+# changes nothing and hands back the current size - so a thread asks, and
+# a runtime with the thread's own call taken out is the proof that the
+# asking sees the difference.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    cat > "$work/guarantee.iyi" <<'EOF'
+module guarantee
+
+t = IyiThread.start do
+  size = 0_i32
+  LibC.SetThreadStackGuarantee(pointerof(size))
+  puts "thread guarantee #{size}"
+  nil
+end
+t.join
+EOF
+    "$IYI" build -o "$work/guarantee" "$work/guarantee.iyi" > "$work/guarantee.log" 2>&1 || fail "the guarantee probe did not build: $(cat "$work/guarantee.log")"
+    out=$("$work/guarantee" 2>&1) || fail "the guarantee probe exited $?: $out"
+    [ "$out" = "thread guarantee 16384" ] || fail "a thread's own stack guarantee: $out, wanted 16384"
+    mkdir -p "$work/unguaranteed/iyi"
+    cp src/iyi/*.iyi "$work/unguaranteed/iyi/"
+    awk '/^        LibC.SetThreadStackGuarantee\(pointerof\(guarantee\)\)$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+      src/iyi/thread.iyi > "$work/unguaranteed/iyi/thread.iyi" ||
+      fail "the thread's guarantee this proof removes is not in thread.iyi any more"
+    IYI_PATH="$(cygpath -m "$work/unguaranteed");$(cygpath -m "$PWD/src")" \
+      "$IYI" build -o "$work/unguaranteed.exe" "$work/guarantee.iyi" > "$work/guarantee.log" 2>&1 ||
+      fail "the unguaranteed probe did not build: $(cat "$work/guarantee.log")"
+    out=$("$work/unguaranteed.exe" 2>&1)
+    [ "$out" != "thread guarantee 16384" ] || fail "the guarantee check passed with the thread's own call taken out"
+    step "a thread sets its own stack guarantee, and the check sees it gone ($out without it)"
+    ;;
+esac
 cat > "$work/wild.iyi" <<'EOF'
 module wild
 

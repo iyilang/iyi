@@ -51,11 +51,11 @@ class Iyi::CodeGenVisitor
       # https://bugs.llvm.org/show_bug.cgi?id=42932
       # so we just use global in that case.
       {% if compare_versions(Crystal::LLVM_VERSION, "9.0.0") < 0 %}
-        if @single_module && !(type.is_a?(IntegerType) && (type.kind.i128? || type.kind.u128?))
+        if iyi_internalise? && !(type.is_a?(IntegerType) && (type.kind.i128? || type.kind.u128?))
           global.linkage = LLVM::Linkage::Internal
         end
       {% else %}
-        global.linkage = LLVM::Linkage::Internal if @single_module
+        global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       {% end %}
 
       declare_const_debug_info(global, const) if @debug.variables?
@@ -94,7 +94,7 @@ class Iyi::CodeGenVisitor
     unless initialized_flag
       initialized_flag = @main_mod.globals.add(@main_llvm_context.int1, initialized_flag_name)
       initialized_flag.initializer = @main_llvm_context.int1.const_int(0)
-      initialized_flag.linkage = LLVM::Linkage::Internal if @single_module
+      initialized_flag.linkage = LLVM::Linkage::Internal if iyi_internalise?
     end
     initialized_flag
   end
@@ -139,13 +139,18 @@ class Iyi::CodeGenVisitor
     end
 
     const_type = const.value.type
-    if const_type.passed_by_value?
-      @last = load llvm_type(const_type), @last
+    if passed_indirectly?(const_type)
+      copy_value global, @last, const_type
+      global.initializer = llvm_type(const_type).null
+    else
+      if const_type.passed_by_value?
+        @last = load llvm_type(const_type), @last
+      end
+
+      store @last, global
+
+      global.initializer = @last.type.null
     end
-
-    store @last, global
-
-    global.initializer = @last.type.null
 
     global
   end
@@ -192,21 +197,26 @@ class Iyi::CodeGenVisitor
           request_value(const.value)
 
           const_type = const.value.type
-          if const_type.passed_by_value?
-            @last = load llvm_type(const_type), @last
-          end
-
-          if @last.constant?
-            global.initializer = @last
-            global.global_constant = true
-
-            if const_type.is_a?(PrimitiveType) || const_type.is_a?(EnumType)
-              const.initializer = @last
-            end
-          else
+          if passed_indirectly?(const_type)
             global.initializer = llvm_type(const_type).null
-            unless const_type.nil_type? || const_type.void?
-              store @last, global
+            copy_value global, @last, const_type
+          else
+            if const_type.passed_by_value?
+              @last = load llvm_type(const_type), @last
+            end
+
+            if @last.constant?
+              global.initializer = @last
+              global.global_constant = true
+
+              if const_type.is_a?(PrimitiveType) || const_type.is_a?(EnumType)
+                const.initializer = @last
+              end
+            else
+              global.initializer = llvm_type(const_type).null
+              unless const_type.nil_type? || const_type.void?
+                store @last, global
+              end
             end
           end
 

@@ -26,14 +26,13 @@ nothing references, collect, 300 more allocations, and 299 of them come back
 from addresses the sweep reclaimed. A rooted object keeps every byte, comes out
 white, and its chunk is not handed out again.
 
-Finalizers and weak references are not built, and not for lack of time.
-Nothing in this language defines a finalizer, there is no `def finalize`
-anywhere in `src/iyi` or `samples/iyi`, so a finalizer queue would be a
-mechanism no program could put an entry in. Weak references are registration
-based and the standard library's `WeakRef` is on the `--crystal` side, so there
-is no table here to walk and null out. Both wait on the language having the
-feature. Statistics are the honest subset, counted as the walk goes: chunks
-swept, chunks kept, bytes freed, collections run.
+Finalizers are not built, and not for lack of time. Nothing in this language
+defines a finalizer, there is no `def finalize` anywhere in `src/iyi` or
+`samples/iyi`, so a finalizer queue would be a mechanism no program could put
+an entry in. Weak references waited on the same answer until `std/weak_ref`
+gave them a user, and are built now (Stage 6's third item, below). Statistics
+are the honest subset, counted as the walk goes: chunks swept, chunks kept,
+bytes freed, collections run.
 
 Stage 5: the mark phase. Roots go gray through Stage 3's walker, a queue in its
 own mapping drains, each object's payload is scanned to the bound its size
@@ -55,6 +54,26 @@ conservatively, which is what Boehm does in production and errs in the
 safe direction: a false positive retains a dead object, only a false
 negative frees a live one. `bench/mark_exercise.sh` proves the precision
 differentially and proves the check fails when the lookup is disabled.
+
+The stack is conservative too, and an optimised build decides what is on
+it. Two ways a dead structure stayed marked were measured and closed. A
+helper the top level called once was inlined into `__iyi_main`, whose
+frame lives as long as the program, and its array spilled to a slot of
+that frame nothing wrote again: 312 MB stayed marked through three
+`GC.collect` under --release, where a debug build freed it all. The
+compiler keeps a call the top level makes once out of line
+(`keep_call_out_of_main`, codegen/call.cr). And the collector's own
+frames are built over what earlier, deeper calls left on the stack, so a
+slot one of them never wrote held a returned helper's 32 MB array:
+`IyiMark.collect` zeroes 2 KiB of dead stack under itself first, as
+Boehm's `GC_clear_a_few_frames` does. Two cases stay open, both
+measured. A helper inlined into a top-level *loop* can leave its last
+pass's structure in that frame (156 MB after a two-pass loop of the same
+helper), because keeping calls in a loop out of line cost a loop of a
+small function 2.6 times its time (613 ms against 240). And a debug
+build's own `collect` frame sits above the zeroed stretch, where a
+stale word kept the 32 MB. `bench/root_exercise.sh` checks both closed
+cases in its --release run.
 
 Stage 6 sweeps what this stage decided, and the collector runs *itself*: an
 allocation-pressure trigger in the allocator's one funnel runs a collection
@@ -323,9 +342,12 @@ page and a TLS block laid out from PT_TLS on Linux, `pthread_create`
 on darwin — and `join` is the futex on the tid word the kernel clears,
 or `pthread_join`. A thread gets a scheduler state and a heap cache on
 first touch, so it spawns fibers and allocates without a lock, and it
-is not a task: no group owns it, nothing cancels it, no channel
-crosses it, and what crosses threads today is `Atomic(T)` — which is
-`Share`'s obligation, now with a second thread to refuse things for.
+is not a task: no group owns it and nothing cancels it, and what
+crosses threads is what `Share` lets a thread's block capture -
+`Atomic(T)`, a `Mutex(T)`, immutable values, and since SPEC.md III.4.13
+a `Channel(T)` of `Share` values. III.4.13's pool is threads of this
+kind: the workers parallel tasks run on are `IyiThread`s the runtime
+starts, so the stop below takes them as it takes any thread.
 
 A collection takes the runtime lock first, so no thread it stops can
 be holding it; then signals every other registered thread and waits
@@ -450,6 +472,19 @@ its first touch: 2 MB resident per worker for 4 KB used, 34 MB across
 sixteen, so the stacks refused huge pages by `madvise` - and begin at
 64 KB now and grow, the footprint section says.
 
+And one thing a fuzz of `std/semantic_version` found after. The program
+frees a large chunk itself when `realloc` outgrows it, under the lock,
+and that unlinked the node and unmapped it at once. The helpers walk
+the large list without the lock - `containing_large`, for every scanned
+word no arena holds - and may have the chunk grayed and queued: a helper
+read the unmapped node's link and faulted, in one run of four of a
+program joining a 4 MB string beside a mark over 200,000 versions. Under
+a mark the chunk stays mapped and listed now, and the sweep after the
+mark frees it; the look at the flag is under the lock the mark raises
+and lowers it under. `bench/concurrent_mark.sh` outgrows blocks under
+marks, requires each still listed while the mark runs and each freed
+after, and its proof removes the look.
+
 The budget is twice what survived, and what was allocated under the
 mark did not survive anything: born gray, so counted marked, but not
 live in the sense the budget wants, and counted the other way a program
@@ -515,8 +550,8 @@ and the waste is capped at eight bytes below 128 and a fifth above. A
 
 Then the pages. A collector that frees chunks but never pages has a
 resident size that is its high-water mark. The sweep hands runs of dead
-pages back to the kernel with `madvise(MADV_DONTNEED)` (darwin:
-`MADV_FREE_REUSABLE`), a bit per page in the arena's first page saying
+pages back to the kernel with `madvise(MADV_DONTNEED)` (darwin: a fresh
+`mmap(MAP_FIXED)` laid over the run; Windows: decommit and commit), a bit per page in the arena's first page saying
 so, and the carve takes a run up again as its bump region before it
 touches the frontier - which it now carves a slab at a time, 64 KB, so
 that the heap fills from its low addresses and the frontier stays cold.
@@ -662,7 +697,17 @@ run is split at the budget now. And the budget was counted in pages
 against bytes the program asks for; a 64-byte class's page holds an
 eighth less payload than its bytes, so the warm pages held an eighth
 less than the epoch's demand and the carve took the difference from the
-frontier every epoch. The count is of payload.
+frontier every epoch. The count is of payload. And the payload was
+counted at the chunk, where past 128 bytes a request rounds up by as
+much as a quarter of it: crystal-metric's Pidigits asked 40 KB of
+48 KB chunks, a fifth of every epoch's pages went back to the kernel and
+came back by a fault a page, and the loop took 680 ms against 500. A
+quarter-step class's page is counted at the least a request in it asks,
+one byte past the class below; the sweep exercise's `rounding` check
+churns 32,769-byte requests a budget at a time and requires no page of
+theirs to go back cold, which the chunk count failed with 1,928. Peak
+resident set: the probe's the same (median 119 MB against 118), Pidigits'
+14.2 MB against 13.1.
 
 The scavenge unmapped a churning class's arenas every pause - every
 one of them is dead at every mark - and every epoch mapped fresh ones
@@ -677,6 +722,22 @@ resident garbage until the sweep reaches it, and the kernel should have
 it back. Sparing only arenas holding warm pages spared nothing a churn
 leaves, since a churn consumes its kept pages. Both were built,
 measured and taken out.
+
+What those measured was a budget two arenas deep. A deep one pays the
+faults in proportion: crystal-metric's Base64Encode, run after Revcomp
+left 133 MB alive, allocated its 400 KB strings under a 266 MB budget,
+and every epoch's arenas were dead at the next mark, unmapped, mapped
+again and faulted in - 740,000 faults where it took 18,000 alone, 1.25 s
+against 0.73. So the scavenge keeps empty arenas up to the part of the
+budget past `SPARE_BELOW` = 64 MB, and hands back the rest. The floor
+is why the probe does not move: its budget is 38 MB and nothing is
+spared, where sparing every empty arena a budget covers read 148 MB
+median against 112 on it, the same verdict as before. Base64Encode after
+Revcomp takes 0.9 s, its peak 56 MB higher on 842. A kept arena is debt
+like any other, and its sweep keeps a budget's worth of pages warm and
+hands the rest back cold. The trigger exercise holds 48 MB live and
+requires the second of two epochs of garbage to map at most one arena
+afresh; handing every empty arena back maps two.
 
 Three more things were built on the way and measured out. Warm runs as
 bump regions the carve took up first, no fault and no slice: the carve
@@ -697,6 +758,32 @@ parity is a live list's and the sweep leaves it where it is, which is
 also what makes a hand-freed chunk safe from the sweep of its own
 epoch; and the sweep's own loop tests the parity first, two tests for
 a dead chunk where it was three.
+
+That covers a chunk freed in its own epoch, and not one the last mark
+kept and the program freed before the lazy sweep of its arena reached
+it: such a chunk wears the last epoch's parity, and a slice walking past
+it reads its entry, then its colour, and writes the entry back. A free
+between the two reads left it looking allocated before the mark and
+white, dead, and the slice linked it into its batch while it sat on the
+freeing thread's list, handed out twice; a free between the read and
+the write lost its free flag to the survivor's restamp. Windows' CI
+printed a kept chunk lost and then a memory fault. `free` reads the
+entry's parity now, without the lock - a slice restamping it beside the
+read has passed the chunk - and a chunk of the last parity is listed
+under the lock with no slice of its arena in flight, a claim standing
+waited out off the lock (`IyiHeap.free_unswept`); a chunk of the
+current parity takes the cache's path as before, an alloc+free pair 3.4
+ns before the look and 3.5 after, release. Under a mark there is none of
+the last parity: the debt is paid before the first stop and the epoch
+turns at the last. `bench/concurrent_mark.sh`'s bursts of frees free 64
+chunks the mark kept as soon as a slice of their arena is in flight: on
+four cores beside two busy loops the plain build faulted in 4 runs of
+1,000 and the release build in 108, and none of either after. The window
+is a few instructions, so the gate also runs the program on a copy of
+the prelude whose slice waits up to 100 us at each kept chunk of a
+kilobyte or more and exits by name if the entry changes under it; with
+the old free put back that copy failed by name in 200 runs of 200, plain
+and release alike.
 
 Two more levers on that garbage were tried in the second cycle and
 are not in the tree. A prefetch of a shaded object's line at its push:
@@ -1094,6 +1181,21 @@ of its stack to the pool in batches, raises the marking flag, releases
 the threads and wakes the helpers, and helper 0 finishes with the
 second stop as before. The bound is a thousand objects because that is
 about ten microseconds of scanning, which is the price of finding out.
+
+A mark whose last one kept fewer than `STW_MARK_SMALL` = 8192 objects
+is given that bound instead. A small live set above a thousand went
+beside the program at every collection: after crystal-metric's ring of
+503 tasks a conservative slot held its channels, 5,043 objects and
+278 KB, and Base64Encode, which ran next, woke a helper at each of its
+collections. On a loaded machine a third of those wakes were past a
+millisecond and the second stop waited on them: an allocation loop ran
+587 ms against 194, its longest pause 8 ms against 0.1. Marked in the
+stop, its 181 collections paused 110 µs each and 244 at the longest.
+The larger bound for every mark was 7,000 objects of scanning that a
+large live set pays in each first stop before going beside the program
+anyway, and binary trees' pauses summed a third more. The last mark's
+count is a guess, like the estimate before it, but a wrong guess costs
+the bound's scanning once rather than a whole mark.
 
 Both platforms measure, and darwin came to it late. It kept the
 estimate for most of this cycle on a measurement of a rule without its
@@ -1652,10 +1754,21 @@ Each stage is independently verifiable; the tree is never left broken between th
    - Then free the object.
    - Finalizers must not allocate or spawn tasks (enforce in design docs; runtime check deferred).
 
-3. **Weak References:**
-   - A weak reference is a pointer that does not prevent marking.
-   - At the end of the mark phase, before sweep, walk weak-reference tables and null out pointers to white objects.
-   - A weak reference returning `nil` after a collection is expected behavior; no finalizer or error.
+3. **Weak References:** built, as `IyiWeak` under `std/weak_ref`.
+   - A weak reference is a *cell*: eight bytes of atomic memory, which the mark
+     blackens and never scans, holding the target's address. Reading it is one
+     load into a register, where the next stop's root walk finds it, so a read
+     never races the clearing.
+   - The cells are registered in a table under the runtime lock. At the end of
+     every mark, before the epoch turns and the sweep can reuse anything
+     (`scavenge`), a cell left white is forgotten (its `WeakRef` is garbage) and
+     a live cell whose target is white is zeroed. A concurrent mark clears in its
+     second stop, after the last drain. wasm32's collector clears between its
+     mark and its sweep, and libgc does the same through
+     `GC_general_register_disappearing_link`.
+   - A weak reference returning `nil` after a collection is expected behavior;
+     no finalizer or error. `bench/std_weak_ref_exercise.sh` holds it, with
+     four threads reading beside marks that run beside the program.
 
 4. **Heap Statistics:**
    - Track: bytes allocated, bytes freed, pause time, number of collections, objects finalized.
@@ -1753,15 +1866,41 @@ Each stage is independently verifiable; the tree is never left broken between th
 
 1. **Windows Integration:** (Completed for x86_64)
    - STW: `SuspendThread()` and `GetThreadContext()` for register capture.
-   - Allocator: `VirtualAlloc()` / `VirtualFree()` arenas, MAP-aligned via reserve/release/commit loop; `PAGE_READWRITE` and `MEM_RESET` page release.
+   - Allocator: `VirtualAlloc()` / `VirtualFree()` arenas, MAP-aligned via reserve/release/commit loop; `PAGE_READWRITE`, and a page release that decommits and commits again, so a released page reads zero the way `MADV_DONTNEED` leaves one (`MEM_RESET` did not: `bench/reuse_integrity.sh`).
    - Root discovery: PE header parsing for `.data` and `.bss` ranges (omitting `.rdata` to avoid scanning read-only constants); TEB stack bounds (`StackBase` at `gs:0x08`, `StackLimit` at `gs:0x10`); callee-saved registers (rbx, rbp, rdi, rsi, r12-r15) via `spill_registers` (64 bytes).
    - Test: `bench/windows_exercise.iyi` and `bench/windows_exercise.sh`, executed in CI on `windows-2022` (`windows-collector` job).
 
 2. **wasm32 Integration:** (Completed for wasm32-wasi)
    - Allocator: linear memory watermark with 64 KiB size-classed arenas, chunk headers, and free list reuse.
-   - Root discovery: linear memory scan from stacksave to __heap_base, and globals from 0 to __data_end.
+   - Root discovery: linear memory scan from stacksave to __heap_base, and globals from 0 to __data_end; the compiler keeps in a stack slot every value a call may outlive (`src/compiler/iyi/wasm_roots.cr`), so a value held only in a wasm local is in linear memory too.
    - Mark and sweep: mark-queue with layout table traversal; sweep into free lists and large object tracking.
    - Verified: bench/wasm32_exercise.sh passes under wasmtime in default and release modes.
+   - **Locals are roots (closed).** The walk reads linear memory, and a wasm
+     local is not in it: an object held only by a value the backend kept in
+     a local was freed by a collection that came while it was held. Under
+     `--release` a top-level array of 200 objects read back empty after a
+     collection and the same in a function ended the program; a plain build
+     lost a temporary - `pair(Box.new(40), Box.new(2))` added to 1848, the
+     first box freed while the second was made. The fix is a pass the
+     compiler runs on wasm32 after optimisation, plain or not
+     (`src/compiler/iyi/wasm_roots.cr`): every parameter and instruction
+     whose type can carry an address (a pointer, an integer of 32 bits or
+     more, an aggregate) that is used past a call - in another block, by a
+     phi, or in its block with a call between - is stored to an alloca of
+     its own where it is defined, with a volatile store. SSA values do not
+     change, so one store keeps the value reachable while its frame lives.
+     LLVM's `llvm.gcroot` covers allocas only, and Binaryen's
+     `--spill-pointers` i32 locals only and is another tool to ship; this
+     covers temporaries and integers and is part of the compiler.
+     `bench/wasm32_exercise.sh` section 7 holds objects in locals alone -
+     an array at the top level and in a function, a call's arguments, a
+     chain, a union made in place - across a collection with the stack
+     scrubbed beneath it, and the weak section holds its arrays in locals
+     with the trigger on; the compiler without the pass fails both, plain
+     and `--release`, and each of four rules removed (parameters, a call in
+     the block, a use elsewhere, integers) fails one. The cost under
+     `--release`: an allocation-heavy tree build 0.14 s to 0.19 s, an
+     arithmetic loop unchanged, the binary 5% larger.
 
 3. **Platform-Specific Pointer Maps:** (Measured and verified)
    - Codegen emits target-specific TypeLayout entries for each build target based on LLVM target data.
@@ -1809,6 +1948,23 @@ III.4 defines structured concurrency: tasks are spawned inside a `group`, and th
 - A task can be cancelled by its group. Cancellation is a control-flow event (not an exception, not a signal).
 - Write barriers do not need to know about cancellation; barriers run before the write happens.
 - If a task is cancelled, it unwinds (or stops gracefully); any objects it allocated are reclaimed by the next collection.
+
+**Tasks across cores (SPEC.md III.4.13), built: nothing new in the
+collector.** Parallel tasks run on a pool of worker threads, each an
+`IyiThread` with a registered line, so a collection stops a worker with
+the same signal (a suspend on Windows) wherever it stands - running a
+task, or waiting in its poller, whose `EINTR` is a wakeup with no news -
+and scans its spill and its stack from the stopped sp to the top of the
+mapping that holds it, a fiber's or the worker's own. Parked fibers on
+every worker are on the one fiber registry the root walk already reads;
+a parallel task waiting in the pool to start has no stack yet, and is
+rooted through the registry by its proc. What made this free is the
+rule the scheduler keeps: a started task never changes threads, so a
+fiber's stack is only ever live on the thread its registry entry was
+made for, and a worker allocates from its own cache like any thread.
+`bench/parallel_exercise.sh` holds it: eight parallel tasks each keep a
+list of 150,000 nodes on their own stacks through the collections the
+others trigger, and find it whole by checksum.
 
 ---
 

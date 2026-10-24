@@ -13,9 +13,29 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/file
-using std/file::{File}
+# How a task fails the group that a task waiting for a lock is in.
+pub struct LockStop
+  def initialize
+  end
+end
 
+impl Error for LockStop
+  def message : String
+    "the waiting task's sibling failed"
+  end
+end
+
+import std/file::{File}
+import std/dir::{Dir}
+import std/gc::{GC}
+# For TMPDIR, TEMP and TMP unset around `File.tempfile`'s GetTempPathW.
+import std/env::{ENV}
+
+# The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
+# own temporary directory. It was `/tmp` last, which is not a directory on
+# Windows: every write panicked there unless a gate set the variable, and
+# `bench/std_exercise.sh`, which runs every exercise from source and from
+# artifacts without it, compared two panics whose locations differed.
 args = Program.args
 env_sandbox = Program.env("IYI_FILE_SANDBOX")
 sandbox = if args.size > 0
@@ -23,7 +43,7 @@ sandbox = if args.size > 0
           elsif !env_sandbox.nil?
             env_sandbox
           else
-            "/tmp"
+            Dir.tempdir
           end
 
 puts "== write, read, and append"
@@ -50,6 +70,12 @@ f_nonexistent = sandbox + "/std_file_ex_nonexistent_xyz.txt"
 assert_true !File.exists?(f_nonexistent), "nonexistent file does not exist"
 assert_true File.info?(f_nonexistent).nil?, "info? on nonexistent returns nil"
 assert_true !File.empty?(f_nonexistent), "empty? on a missing path is false"
+{% if flag?(:win32) %}
+  # A DOS device is a character device, there to `info?` as it is to
+  # `exists?`: `info?("NUL")` was nil.
+  device = File.info?("NUL")
+  assert_true device ? device.type.character_device? && device.size == 0_i64 : false, "info? of NUL is a character device"
+{% end %}
 puts "  exists, size, and empty verified"
 
 puts "\n== line-wise reading"
@@ -63,6 +89,39 @@ File.each_line(f1) do |l|
   count = count + 1
 end
 assert_true count == 2, "each_line visited 2 lines"
+
+# A line at a time, off the file as it is read: `each_line` read the
+# whole file into an array of its lines first. Counted with the
+# collector held back, a pass over two megabytes may allocate the lines
+# and little else - under one and a half times the file - where reading
+# it whole first allocated the text, its doublings and the lines, past
+# three times.
+big_path = sandbox + "/std_file_each_line_big.txt"
+File.write(big_path, ("0123456789abcdefghijklmnopqrstuvwxyz" * 3 + "\r\n") * 18000)
+GC.disable
+walk_before = GC.stats.bytes_since_collection
+walked = 0
+walked_bytes = 0
+File.each_line(big_path) do |l|
+  walked = walked + 1
+  walked_bytes = walked_bytes + l.bytesize
+end
+walk_after = GC.stats.bytes_since_collection
+GC.enable
+assert_true walked == 18000 && walked_bytes == 18000 * 108, "each_line gave 18000 lines of 108 bytes, without their \\r\\n"
+file_bytes = File.size(big_path).to_u64
+assert_true walk_after - walk_before < file_bytes * 3_u64 // 2_u64, "each_line streams: #{walk_after - walk_before} bytes allocated for a #{file_bytes}-byte file"
+File.delete(big_path)
+# A `\r` that ends the file ends no line, and is kept as `each_line` and
+# the other library keep it: `read_lines` took it off the last line.
+cr_path = sandbox + "/std_file_ex_lone_cr.txt"
+File.write(cr_path, "one\r\ntwo\r")
+lone = File.read_lines(cr_path)
+assert_true lone.size == 2 && lone[0] == "one" && lone[1] == "two\r", "read_lines keeps a last line's lone \\r: #{lone.inspect}"
+streamed = [] of String
+File.each_line(cr_path) { |l| streamed << l }
+assert_true streamed == lone, "each_line and read_lines agree: #{streamed.inspect}"
+File.delete(cr_path)
 puts "  read_lines and each_line verified"
 
 puts "\n== truncation and overwrite"
@@ -77,7 +136,35 @@ File.touch(f1)
 assert_str "overwritten content", File.read(f1), "touch does not truncate"
 File.touch(f1, 1_i64)
 assert_true File.info(f1).modification_time == 1_i64, "touch sets the given unix time"
+{% if flag?(:win32) %}
+  # The first and last seconds a Windows file time holds are set and read
+  # back; one past either is refused (bench/std_file_exercise.sh).
+  File.touch(f1, 910692730085_i64)
+  assert_true File.info(f1).modification_time == 910692730085_i64, "touch sets the last second a FILETIME holds"
+  File.touch(f1, -11644473599_i64)
+  assert_true File.info(f1).modification_time == -11644473599_i64, "touch sets the first second a FILETIME holds"
+{% end %}
 File.touch(f1)
+{% if !flag?(:win32) && !flag?(:wasm32) %}
+  # A file this user may write but not read is there all the same:
+  # `exists?` opened it to read and said no, and `touch` then wrote it
+  # empty as a file it had to make. Linux's `exists?` asks for no read
+  # right (O_PATH); darwin's still opens to read.
+  write_only = sandbox + "/std_file_ex_write_only.txt"
+  File.write(write_only, "kept")
+  File.chmod(write_only, 0o200)
+  if File.readable?(write_only)
+    puts "  a file its owner may not read: not measured, this user reads it all the same"
+  else
+    File.touch(write_only, 1000000000_i64)
+    assert_true File.size(write_only) == 4_i64, "touch keeps the content of a file it may not read"
+    {% if flag?(:linux) %}
+      assert_true File.exists?(write_only), "exists? of a file this user may not read"
+    {% end %}
+  end
+  File.chmod(write_only, 0o600)
+  File.delete(write_only)
+{% end %}
 puts "  truncation and overwrite verified"
 
 puts "\n== metadata and permissions"
@@ -96,6 +183,93 @@ assert_true perms.owner_read?, "owner read"
 assert_true perms.owner_write?, "owner write"
 assert_str "rw-r--r--", perms.to_s, "permissions string"
 puts "  metadata, permissions, and chmod verified"
+
+# A read-only file is still the directory's to remove. POSIX asks the
+# directory for permission to unlink and Windows asks the file, which
+# refuses with ERROR_ACCESS_DENIED while it carries
+# FILE_ATTRIBUTE_READONLY — the attribute `File.chmod(path, 0o444)`
+# sets. Measured before the retry: write a file, make it read-only,
+# delete it, and the program died with "cannot delete" on Windows and
+# nowhere else.
+locked = sandbox + "/readonly.txt"
+File.write(locked, "locked")
+File.chmod(locked, 0o444)
+# Not "and it is unwritable": CI's Linux container runs as root, where
+# `access(W_OK)` answers true for a 0o444 file and the assertion said so.
+# What is being tested is the removal, which the mode never governed.
+File.delete(locked)
+assert_true !File.exists?(locked), "a read-only file is still the directory's to delete"
+puts "  a read-only file is deleted by its directory's leave"
+
+# And a read-only *destination* is still replaceable: posix `rename`
+# asks the directory, Windows asks the target and refuses with
+# ERROR_ACCESS_DENIED. Measured before the retry: renaming onto a name
+# `File.chmod(path, 0o444)` had marked died with "Access is denied" on
+# Windows and replaced the file everywhere else.
+from_name = sandbox + "/rename_source.txt"
+onto_name = sandbox + "/rename_target.txt"
+File.write(from_name, "source")
+File.write(onto_name, "target")
+File.chmod(onto_name, 0o444)
+File.rename(from_name, onto_name)
+assert_str "source", File.read(onto_name), "a read-only destination is replaced"
+assert_true !File.exists?(from_name), "the source is gone after the rename"
+File.chmod(onto_name, 0o644)
+File.delete(onto_name)
+puts "  a read-only destination is replaced by a rename"
+
+# And a destination somebody has open: the reader keeps the file it
+# opened, and the name is the new one. Windows refused `MoveFileExW` with
+# "Access is denied" while any handle was open - this program's own -
+# so writing a temporary file and renaming it over a file a reader held
+# panicked there alone.
+held_name = sandbox + "/rename_held.txt"
+fresh_name = sandbox + "/rename_fresh.txt"
+File.write(held_name, "old contents")
+File.write(fresh_name, "new contents")
+reader = File.open(held_name, "r")
+File.rename(fresh_name, held_name)
+assert_str "old contents", reader.read_all, "the open reader keeps the file it opened"
+reader.close
+assert_str "new contents", File.read(held_name), "the name is the renamed file's"
+assert_true !File.exists?(fresh_name), "the renamed file's old name is gone"
+File.delete(held_name)
+puts "  a destination somebody has open is replaced by a rename"
+
+# And a destination that is both: read-only, and open. Windows refused it
+# "Access is denied" where either alone was replaced - the attribute's
+# retry cannot replace a file that is open, and the replacement that can
+# did not ignore the attribute.
+both_name = sandbox + "/rename_both.txt"
+File.write(both_name, "old contents")
+File.write(fresh_name, "new contents")
+File.chmod(both_name, 0o444)
+holder = File.open(both_name, "r")
+File.rename(fresh_name, both_name)
+holder.close
+assert_str "new contents", File.read(both_name), "a read-only destination somebody has open is replaced"
+File.chmod(both_name, 0o644)
+File.delete(both_name)
+puts "  and one that is read-only and open at once"
+
+# A directory renamed onto a file is refused, as POSIX `rename` refuses it
+# (ENOTDIR), and the file stays: Windows' MoveFileExW replaced the file
+# with the directory, and its contents were gone.
+moved_dir = sandbox + "/rename_dir_source"
+kept_file = sandbox + "/rename_dir_onto.txt"
+Dir.mkdir(moved_dir) unless Dir.exists?(moved_dir)
+File.write(kept_file, "kept")
+dir_onto_file = "renamed"
+group do |g|
+  outcome = g.spawn { File.rename(moved_dir, kept_file); 0 }.value
+  dir_onto_file = outcome.is_a?(Panicked) ? "refused" : "renamed"
+  0
+end
+assert_str "refused", dir_onto_file, "a directory renamed onto a file"
+assert_true File.file?(kept_file) && File.read(kept_file) == "kept", "the file a directory was renamed onto is still the file"
+Dir.delete(moved_dir)
+File.delete(kept_file)
+puts "  a directory is not renamed onto a file"
 
 puts "\n== directory and file queries"
 assert_true File.exists?(sandbox), "sandbox directory exists"
@@ -119,6 +293,19 @@ File.link(f1, flink)
 assert_true File.exists?(flink), "link exists"
 assert_true File.same?(f1, flink), "hard link same? is true"
 assert_str "overwritten content", File.read(flink), "link content"
+# A name renamed onto another link of its own file: POSIX `rename` does
+# nothing, and Windows replaced the second link with the first, so the
+# first name was gone.
+File.rename(f1, flink)
+assert_true File.exists?(f1) && File.exists?(flink), "a rename onto its own hard link leaves both names"
+{% if flag?(:win32) %}
+  # A name in another case is the same directory entry, and is renamed -
+  # a file with a second link too.
+  File.rename(f1, sandbox + "/STD_FILE_EX_1.txt")
+  assert_true Dir.children(sandbox).includes?("STD_FILE_EX_1.txt"), "a rename into another case renames a linked file"
+  File.rename(sandbox + "/STD_FILE_EX_1.txt", f1)
+  assert_true Dir.children(sandbox).includes?("std_file_ex_1.txt"), "and back"
+{% end %}
 
 fsym = sandbox + "/std_file_ex_sym.txt"
 # Making a symbolic link on Windows takes a privilege
@@ -167,12 +354,212 @@ assert_str "a" + sep + "b", File.join("a", "b"), "join two strings"
 assert_true File.match?("foo.txt", "*.txt"), "match * suffix"
 assert_true !File.match?("foo.txt", "*.md"), "match rejects a different suffix"
 assert_true File.match?("a.txt", "?.txt"), "match ?"
+# The pattern language the other library documents: `*` inside a segment,
+# `**` across them, `?` one character, classes, braces and escapes - this
+# had `*` and `?` alone, byte by byte, and an exponential search.
+assert_true !File.match?("a/b.txt", "*.txt") && File.match?("a/b.txt", "*/*.txt"), "match: a star stays inside a segment"
+assert_true File.match?("x/y/z.cr", "**/*.cr") && File.match?("z.cr", "**/*.cr"), "match: a globstar crosses segments"
+assert_true File.match?("\u00e9a", "?a"), "match: ? is one character, not one byte"
+assert_true File.match?("b.txt", "{a,b}.txt") && File.match?("ab.txt", "a{x,{y,b}}.txt") && !File.match?("c.txt", "{a,b}.txt"), "match: braces choose a branch"
+assert_true File.match?("b", "[a-c]") && !File.match?("b", "[^a-c]") && File.match?("d", "[^a-c]"), "match: a class and its negation"
+assert_true !File.match?("a" * 40, "*a*a*a*a*a*a*a*a*a*a*b"), "match: many stars are linear"
+{% if !flag?(:win32) %}
+  assert_true File.match?("*", "\\*") && !File.match?("a", "\\*"), "match: a backslash escapes"
+{% end %}
+{% if flag?(:win32) %}
+  # Either separator matches either: a path is spelled with both on
+  # Windows, and a name and its pattern need not agree on which.
+  assert_true File.match?("a\\b.txt", "a/*.txt"), "a backslash in the name matches a slash in the pattern"
+  assert_true File.match?("a/b.txt", "a\\*.txt"), "a slash in the name matches a backslash in the pattern"
+{% end %}
 ta = File.tempfile("std_file_ex")
 tb = File.tempfile("std_file_ex")
 assert_true ta != tb, "tempfile names differ"
+# The block form deletes the file after the block only if it is still
+# there: a block that renamed it into place - the reason to write to a
+# temporary name - panicked in the delete after it.
+kept_at = "#{ta}.kept"
+File.tempfile("std_file_ex") do |scratch|
+  File.write(scratch, "whole")
+  File.rename(scratch, kept_at)
+end
+assert_true File.read(kept_at) == "whole", "a tempfile renamed in its block is kept"
+File.delete(kept_at)
+{% if flag?(:win32) %}
+  # A drive's root is its own real path, not `\\?\C:\`: the prefix came
+  # off only past eight characters, and `Path` read what was left as a
+  # share named `?`.
+  drive_root = (Program.cwd || "C:\\")[0, 3]
+  assert_true File.real_path(drive_root) == drive_root, "the real path of #{drive_root} is #{File.real_path(drive_root)}"
+  # With TMPDIR, TEMP and TMP all unset, both ask Windows (GetTempPathW):
+  # `tempfile` alone kept the literal `C:\Windows\Temp`, beside a
+  # `Dir.tempdir` in the user's profile.
+  unset = ["TMPDIR", "TEMP", "TMP"]
+  kept_values = unset.map { |name| ENV[name]? }
+  unset.each { |name| ENV[name] = nil }
+  bare = File.tempfile("std_file_ex")
+  bare_dir = Dir.tempdir
+  unset.each_with_index { |name, index| ENV[name] = kept_values[index] }
+  File.delete(bare)
+  assert_str bare_dir, File.dirname(bare), "with no TMPDIR, TEMP or TMP, tempfile makes its file in Dir.tempdir"
+  puts "  tempfile asks Windows where Dir.tempdir does"
+{% end %}
 File.delete(ta)
 File.delete(tb)
+# A symlink planted where the next temporary file would go, pointing at a
+# file of someone else's: the temporary file is made somewhere else, alone,
+# and the target is left as it was - wherever a symlink can be made at all
+# (`symlinks_allowed`, above).
+if symlinks_allowed
+  # Where `File.tempfile` makes its file: TMPDIR, TEMP, TMP, in that
+  # order, as `Dir.tempdir` reads them. `/tmp` is not a directory on
+  # Windows, and a run without TMPDIR there planted nothing anywhere.
+  tmp = Dir.tempdir
+  victim = sandbox + "/std_file_ex_victim.txt"
+  File.write(victim, "kept")
+  planted = tmp + "/plant_0000000000000000"
+  File.delete(planted) if File.symlink?(planted) || File.exists?(planted)
+  File.symlink(victim, planted)
+  made = File.tempfile("plant")
+  assert_true !File.symlink?(made), "tempfile never answers a planted symlink"
+  File.write(made, "upload")
+  assert_str "kept", File.read(victim), "a planted symlink's target is left alone"
+  # Mode bits are POSIX's: a Windows file's reach is its ACL, inherited
+  # from the directory it is made in.
+  {% unless flag?(:win32) %}
+    assert_true (File.info(made).permissions.value & 0o777) == 0o600, "a temporary file is its owner's alone"
+  {% end %}
+  File.delete(made)
+  File.delete(planted)
+  File.delete(victim)
+end
 puts "  links, rename, and path helpers verified"
+
+puts "\n== seek"
+fseek = sandbox + "/std_file_ex_seek.bin"
+File.write(fseek, String.build { |io| 1000.times { |i| io << (i % 10).to_s } })
+sio = File.open(fseek)
+assert_str "012", sio.read_bytes(3), "seek: a first read"
+assert_true sio.pos == 3_i64, "seek: pos counts what was read, not what was read ahead"
+sio.seek(500)
+assert_str "0123", sio.read_bytes(4), "seek: from the start, past the read-ahead"
+sio.seek(-2, IyiIO::Seek::Current)
+assert_str "234", sio.read_bytes(3), "seek: from here"
+sio.seek(-3, IyiIO::Seek::End)
+assert_str "789", sio.read_bytes(10), "seek: from the end, to the end"
+assert_true sio.pos == 1000_i64, "seek: pos at the end"
+sio.pos = 7
+assert_str "78", sio.read_bytes(2), "seek: pos="
+sio.close
+File.delete(fseek)
+puts "  seek and pos read a file from where they say"
+
+# Two opens of one file are two holders, in one process as in two.
+puts "\n== locks"
+flock_path = sandbox + "/std_file_ex_lock"
+File.write(flock_path, "")
+holder = File.open(flock_path, "r+")
+other = File.open(flock_path, "r+")
+holder.flock_exclusive.or_panic
+assert_true !other.try_flock_exclusive && !other.try_flock_shared, "locks: an exclusive lock keeps another open file out"
+holder.flock_unlock
+assert_true other.try_flock_shared, "locks: unlocked, another file takes it"
+assert_true holder.try_flock_shared, "locks: shared locks are held together"
+assert_true !holder.try_flock_exclusive, "locks: an exclusive lock is refused while another file shares"
+holder.flock_unlock
+other.flock_unlock
+lock_order = [] of String
+group do |g|
+  g.spawn do
+    holder.flock_exclusive.or_panic
+    lock_order << "held"
+    sleep(100)
+    lock_order << "released"
+    holder.flock_unlock
+    0
+  end
+  g.spawn do
+    sleep(10)
+    other.flock_exclusive.or_panic
+    lock_order << "taken"
+    other.flock_unlock
+    0
+  end
+end
+assert_true lock_order == ["held", "released", "taken"], "locks: a lock another task holds is waited for, #{lock_order}"
+holder.flock_exclusive.or_panic
+lock_outcome = ""
+group do |g|
+  g.spawn do
+    got = other.flock_exclusive
+    lock_outcome = got.is_a?(Cancelled) ? "cancelled" : "taken"
+    0
+  end
+  g.spawn do
+    sleep(30)
+    LockStop.new
+  end
+end
+assert_true lock_outcome == "cancelled", "locks: a wait whose task is cancelled answers Cancelled, not #{lock_outcome}"
+holder.close
+assert_true other.try_flock_exclusive, "locks: closing the file gave the lock back"
+other.flock_unlock
+assert_panics("inside the lock") { other.flock_exclusive { raise "inside the lock" } }
+File.open(flock_path, "r+") { |probe| assert_true probe.try_flock_exclusive, "locks: a block that panics unlocks" }
+other.close
+File.delete(flock_path)
+puts "  exclusive and shared locks between two opens, a wait, a cancelled wait, and a lock given back on close"
+
+puts "\n== open modes"
+fmode = sandbox + "/std_file_ex_modes.txt"
+File.delete(fmode) if File.exists?(fmode)
+File.open(fmode, "a") { |io| io.print "one" }
+File.open(fmode, "ab") { |io| io.print "two" }
+assert_str "onetwo", File.read(fmode), "append twice keeps both writes"
+aio = File.open(fmode, "a")
+aio.seek(0)
+aio.print "three"
+aio.close
+assert_str "onetwothree", File.read(fmode), "append after a seek still appends"
+File.write(fmode, "abcdef")
+rio = File.open(fmode, "r+")
+rio.print "XY"
+rio.seek(4)
+rio.print "Z"
+rio.close
+assert_str "XYcdZf", File.read(fmode), "r+ overwrites in place without truncating"
+rio = File.open(fmode, "rb+")
+assert_str "XYc", rio.read_bytes(3), "r+ reads from the start"
+rio.close
+wio = File.open(fmode, "w+")
+assert_true wio.read_bytes(10) == "", "w+ truncates"
+wio.print "fresh"
+wio.seek(0)
+assert_str "fresh", wio.read_bytes(10), "w+ reads back what it wrote"
+wio.close
+aio = File.open(fmode, "a+")
+assert_str "fre", aio.read_bytes(3), "a+ reads from the start"
+aio.print "!"
+aio.seek(0)
+assert_str "fresh!", aio.read_bytes(10), "a+ appends at the end"
+assert_true aio.pos == 6_i64, "a+ pos after reading to the end"
+aio.close
+File.delete(fmode)
+{% if flag?(:win32) %}
+  # Windows keeps the owner's write bit alone, as FILE_ATTRIBUTE_READONLY.
+  File.open(fmode, "w", 4096, 0o444) { |io| io.print "x" }
+  assert_true (File.info(fmode).permissions.value & 0o200) == 0, "perm honoured on creation"
+  File.chmod(fmode, 0o644)
+{% else %}
+  File.open(fmode, "w", 4096, 0o600) { |io| io.print "x" }
+  assert_true (File.info(fmode).permissions.value & 0o777) == 0o600, "perm honoured on creation"
+  File.chmod(fmode, 0o644)
+  File.open(fmode, "a", 4096, 0o600) { |io| io.print "y" }
+  assert_true (File.info(fmode).permissions.value & 0o777) == 0o644, "perm leaves a file already there alone"
+{% end %}
+assert_true File.read(fmode).starts_with?("x"), "a file created with perm holds its write"
+File.delete(fmode)
+puts "  every open mode reads and writes where Crystal's does"
 
 puts "\n== delete"
 File.delete(f1)

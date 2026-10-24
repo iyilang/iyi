@@ -1,0 +1,483 @@
+# Server-sent events (the WHATWG HTML Living Standard, §9.2): a stream of
+# text events over one long HTTP response, `text/event-stream`, for both
+# ends of std/http.
+#
+# **The server.** Inside `Server.serve`'s block, `SSE.stream { |events|
+# ... }` answers the request: a 200 with `Content-Type:
+# text/event-stream` and `Cache-Control: no-cache` (a caller's own
+# `Cache-Control` replaces it; its own `Content-Type` is refused), whose
+# body the block writes as it goes through `Response.stream`.
+# `events.send(data, event: nil, id: nil, retry: nil)` writes one event -
+# its `event:`, `id:` and `retry:` lines, then its data a `data:` line per
+# line, then the blank line that dispatches it - as one chunk, sent at
+# once; `events.comment(text)` writes `:` lines, which a client reads
+# past, and which are what keeps a quiet stream's proxies from dropping
+# it (§9.2.7). A line break in data is three things on the way in (CRLF,
+# CR, LF) and arrives as LF, since the format has no way to say which it
+# was. What would break the stream is refused before it is written: a
+# line break in an event type, a line break or a NUL in an id (a client
+# ignores an id with a NUL, §9.2.6), a negative retry, and text that is
+# not UTF-8, which is the only encoding the format has (§9.2.5). A client
+# that went is not a panic: the write that finds it answers the
+# `SocketError`, every write after it answers the same, and `gone?` says
+# so, so the block's loop ends on a value. A client is only found gone
+# when something is written to it; a comment is the cheapest thing that
+# can be.
+#
+# **The client.** `SSE.open(url) { |event| ... }` is `EventSource`
+# without a browser: a GET through `HTTP.open` with `Accept:
+# text/event-stream` and `Cache-Control: no-cache` (the request's
+# `no-store` cache mode, as Fetch writes it), and `Last-Event-ID` when
+# the last event ID is not empty. The block gets each `Event` - its type
+# (`message` when the stream named none), its data, and the last event
+# ID - and answers true to go on or false to stop, which closes the
+# connection and answers nil. An answer that is not a 200, or whose
+# `Content-Type` is not `text/event-stream` (parameters allowed), fails
+# the connection as the standard has it: no reconnection, and an
+# `SSEError` naming what came. A connection that drops or ends is
+# reconnected after the reconnection time - *retry* milliseconds, 3000
+# unless the caller says, until the stream's own `retry:` field sets it -
+# with the last event ID in `Last-Event-ID`, as a browser does. A browser
+# goes on for ever; here, once *reconnects* + 1 connections in a row (5
+# by default, so six) - the first or a reconnection - have brought no
+# event, `open` answers the last one's failure (`SocketError`,
+# `HTTPError`, or an `SSEError` for a stream that ended cleanly); a
+# connection that brings one starts the count again. There is no backoff
+# past the reconnection time, which §9.2.3 leaves to the user agent.
+#
+# Two decisions where the standard's text and a browser differ or are
+# silent. The last event ID buffer of a new connection's stream starts
+# from the last event ID, not empty: §9.2.6 initializes each stream's
+# buffers to the empty string, which would make the first event of a
+# resumed stream that carries no `id:` reset the ID and lose the place,
+# and Chromium's `EventSource` hands the ID to the new parser ("The new
+# parser takes over the event ID", `event_source.cc`). And an ID that
+# holds a control character other than a tab is kept and handed to the
+# block but not sent: std/http refuses such a byte in any header value,
+# and a server that sent one should not make its client panic.
+#
+# **The parser.** `EventParser` is §9.2.6's interpretation, fed bytes as
+# they arrive in pieces of any size: UTF-8 decoded with ill-formed bytes
+# as U+FFFD (std/unicode's `clean`, the maximal-subpart rule the Encoding
+# Standard's decoder follows), one leading BOM dropped, lines ended by
+# CRLF, LF or CR - a CR at the end of one piece and an LF at the start of
+# the next being one CRLF -, a line that starts with `:` read past, a
+# line without a colon a field with an empty value, one space after the
+# colon dropped, field names compared exactly. `data` lines are joined
+# with LF, the last LF removed; an `id` with a NUL is ignored; a `retry`
+# of ASCII digits alone sets the reconnection time (saturating at
+# 2147483647 ms, about 24 days, past what `sleep` takes); a blank line
+# sets the last event ID and dispatches the event when its data is not
+# empty, and what a stream ends with before its blank line is discarded.
+# `bench/std_sse_exercise.sh` holds it to the standard's own examples and
+# to a Python transcription of the algorithm over a generated corpus fed
+# in pieces of one to seven bytes, and runs the client against a Python
+# server that drops the connection mid-stream, and the server under
+# Python's and curl's reading.
+#
+# Not here: a limit on a line or an event's size (a browser has none
+# either; a stream is as long as the server makes it), `withCredentials`
+# and CORS, which are a browser's, and a client that reconnects with
+# backoff.
+
+module std/sse
+
+import std/http::{HTTP, Response, BodyWriter, HTTPError}
+import std/socket::{SocketError}
+import std/mime::{MIME}
+import std/unicode::{Unicode}
+
+# What the other end did that fails an event stream (§9.2.3), as a value:
+# an answer that is not a 200, one that is not `text/event-stream`, or a
+# stream that kept ending with no event until the client gave up.
+# `status` is the answer's. `message` says it is SSE's.
+pub struct SSEError
+  getter reason : String
+  getter status : Int32
+
+  def initialize(@reason : String, @status : Int32 = 200)
+  end
+
+  def to_s : String
+    "SSE: " + @reason
+  end
+end
+
+impl Error for SSEError
+  def message : String
+    "SSE: " + @reason
+  end
+end
+
+# One dispatched event: its type (`message` unless the stream named one
+# with `event:`), its data, and the last event ID as it stood when it was
+# dispatched, which an event without an `id:` field inherits.
+pub struct Event
+  getter event : String
+  getter data : String
+  getter id : String
+
+  def initialize(@event : String, @data : String, @id : String)
+  end
+end
+
+# §9.2.6's interpretation of an event stream, fed its bytes as they come:
+# `feed(bytes) { |event| ... }` yields each event a blank line
+# dispatches, and keeps what a piece ended inside - a line, an event, the
+# CR of a CRLF - for the next. `finish` discards it, as the end of a
+# stream does. `last_event_id` is the source's last event ID string,
+# set at each blank line; `retry` the reconnection time the stream set,
+# nil until it sets one; `dispatched` the events yielded so far.
+pub class EventParser
+  # The largest reconnection time kept, in milliseconds: what `sleep`
+  # takes.
+  MAX_RETRY = 2147483647
+
+  getter last_event_id : String
+  getter retry : Int32?
+  getter dispatched : Int64
+  @id_buffer : String
+  @type : String
+  @data : String::Builder
+  @line : String::Builder
+  @after_cr : Bool
+  @first : Bool
+
+  # A parser for a stream whose last event ID is *last_event_id* so far:
+  # a reconnection's, which carries the one before it (see the module's
+  # header for why).
+  def initialize(@last_event_id : String = "")
+    @id_buffer = @last_event_id
+    @type = ""
+    @data = String::Builder.new
+    @line = String::Builder.new
+    @after_cr = false
+    @first = true
+    @retry = nil
+    @dispatched = 0_i64
+  end
+
+  def feed(text : String, & : Event -> Nil) : Nil
+    p = text.to_unsafe
+    n = text.bytesize
+    i = 0
+    # A CR that ended the last piece was a line's end already; an LF that
+    # starts this one is the rest of that CRLF, not a blank line.
+    if @after_cr && n > 0
+      @after_cr = false
+      i = 1 if p[0] == 10_u8
+    end
+    start = i
+    while i < n
+      c = p[i]
+      if c == 10_u8 || c == 13_u8
+        line = text[start, i - start]
+        if @line.bytesize > 0
+          @line << line
+          line = @line.to_s
+          @line = String::Builder.new
+        end
+        i = i + 1
+        if c == 13_u8
+          if i < n
+            i = i + 1 if p[i] == 10_u8
+          else
+            @after_cr = true
+          end
+        end
+        start = i
+        if event = take(line)
+          yield event
+        end
+      else
+        i = i + 1
+      end
+    end
+    @line.write(p + start, n - start) if start < n
+  end
+
+  # The end of the stream: a line or an event not yet ended is discarded,
+  # not dispatched. The last event ID and the reconnection time stay.
+  def finish : Nil
+    @line = String::Builder.new
+    @data = String::Builder.new
+    @type = ""
+    @after_cr = false
+  end
+
+  # One line, its end taken off: the event it dispatches, if it does.
+  private def take(bytes : String) : Event?
+    line = Unicode.clean(bytes)
+    if @first
+      @first = false
+      # The decoder's one BOM (the Encoding Standard's UTF-8 decode); a
+      # second is the first character of the line.
+      if line.bytesize >= 3 && line.to_unsafe[0] == 0xEF_u8 && line.to_unsafe[1] == 0xBB_u8 && line.to_unsafe[2] == 0xBF_u8
+        line = line[3, line.bytesize - 3]
+      end
+    end
+    return dispatch if line.bytesize == 0
+    return nil if line.to_unsafe[0] == 58_u8
+    field = line
+    value = ""
+    if colon = line.index(':')
+      field = line[0, colon]
+      value = line[colon + 1, line.bytesize - colon - 1]
+      value = value[1, value.bytesize - 1] if value.bytesize > 0 && value.to_unsafe[0] == 32_u8
+    end
+    case field
+    when "event"
+      @type = value
+    when "data"
+      @data << value << '\n'
+    when "id"
+      @id_buffer = value unless value.includes?("\0")
+    when "retry"
+      if ms = EventParser.digits(value)
+        @retry = ms
+      end
+    end
+    nil
+  end
+
+  # A blank line: the last event ID is the buffer's whether or not an
+  # event goes, and an event goes when it has data.
+  private def dispatch : Event?
+    @last_event_id = @id_buffer
+    if @data.bytesize == 0
+      @type = ""
+      return nil
+    end
+    data = @data.to_s
+    data = data[0, data.bytesize - 1] if data.ends_with?("\n")
+    @data = String::Builder.new
+    event = Event.new(@type.bytesize == 0 ? "message" : @type, data, @last_event_id)
+    @type = ""
+    @dispatched = @dispatched + 1_i64
+    event
+  end
+
+  # A `retry` value: ASCII digits and nothing else, base ten, saturating
+  # at `MAX_RETRY`; nil for anything else, the empty value included.
+  protected def self.digits(text : String) : Int32?
+    return nil if text.bytesize == 0
+    p = text.to_unsafe
+    value = 0_i64
+    i = 0
+    while i < text.bytesize
+      c = p[i]
+      return nil unless c >= 48_u8 && c <= 57_u8
+      value = value * 10_i64 + (c - 48_u8).to_i64
+      value = MAX_RETRY.to_i64 if value > MAX_RETRY.to_i64
+      i = i + 1
+    end
+    value.to_i32
+  end
+end
+
+# What `SSE.stream`'s block writes with: an event a `send`, a comment a
+# `comment`, each one chunk sent at once. The first write that fails -
+# the client went - is kept, and it and every write after it answer it;
+# `gone?` says whether one has.
+pub class EventWriter
+  @writer : BodyWriter
+  @fault : Cancelled | SocketError | Nil
+
+  def initialize(@writer : BodyWriter)
+    @fault = nil
+  end
+
+  # Whether a write found the client gone.
+  def gone? : Bool
+    !@fault.nil?
+  end
+
+  # One event: `event:`, `id:` and `retry:` when given, *data* a `data:`
+  # line per line (CRLF, CR and LF each end one, and each arrives as LF),
+  # then the blank line that dispatches it. An empty *data* is an event
+  # whose data is empty; an empty *id* resets the client's last event ID.
+  def send(data : String, event : String? = nil, id : String? = nil, retry : Int32? = nil) : Nil | Cancelled | SocketError
+    text = String::Builder.new
+    if kind = event
+      raise "SSE: an event type cannot hold a line break: #{kind.inspect}" if HTTP.has_break?(kind)
+      EventWriter.utf8(kind, "an event type")
+      text << "event: " << kind << '\n'
+    end
+    if mark = id
+      raise "SSE: an id cannot hold a line break or a NUL: #{mark.inspect}" if HTTP.has_break?(mark) || mark.includes?("\0")
+      EventWriter.utf8(mark, "an id")
+      text << "id: " << mark << '\n'
+    end
+    if ms = retry
+      raise "SSE: a retry is 0 or more milliseconds, not #{ms}" if ms < 0
+      text << "retry: " << ms << '\n'
+    end
+    EventWriter.utf8(data, "the data")
+    EventWriter.lines(data).each do |line|
+      text << "data:"
+      text << ' ' << line if line.bytesize > 0
+      text << '\n'
+    end
+    text << '\n'
+    put(text.to_s)
+  end
+
+  # A comment, a `:` line per line of *text*: read past by every client,
+  # and a write that finds a client gone.
+  def comment(text : String = "") : Nil | Cancelled | SocketError
+    EventWriter.utf8(text, "a comment")
+    out_text = String::Builder.new
+    EventWriter.lines(text).each do |line|
+      out_text << ':'
+      out_text << ' ' << line if line.bytesize > 0
+      out_text << '\n'
+    end
+    put(out_text.to_s)
+  end
+
+  private def put(text : String) : Nil | Cancelled | SocketError
+    if fault = @fault
+      return fault
+    end
+    got = @writer.write(text)
+    @fault = got
+    got
+  end
+
+  protected def self.utf8(text : String, what : String) : Nil
+    raise "SSE: #{what} is not UTF-8: #{text.inspect}" unless Unicode.valid?(text)
+  end
+
+  # *text* cut at each CRLF, CR and LF: one line for a text without one,
+  # an empty last line for a text that ends with one.
+  protected def self.lines(text : String) : Array(String)
+    lines = [] of String
+    p = text.to_unsafe
+    n = text.bytesize
+    start = 0
+    i = 0
+    while i < n
+      c = p[i]
+      if c == 10_u8 || c == 13_u8
+        lines << text[start, i - start]
+        i = i + 1
+        i = i + 1 if c == 13_u8 && i < n && p[i] == 10_u8
+        start = i
+      else
+        i = i + 1
+      end
+    end
+    lines << text[start, n - start]
+    lines
+  end
+end
+
+pub struct SSE
+  # The reconnection time a client starts with, in milliseconds.
+  RETRY = 3000
+  # How many reconnections a client makes after a connection that brought
+  # no event, while each brings none.
+  RECONNECTS = 5
+
+  # The answer to a request for an event stream: a 200, `text/event-stream`,
+  # `Cache-Control: no-cache` unless *headers* names its own, whose body
+  # *block* writes through an `EventWriter` as it goes. The stream ends
+  # when the block returns. A `Content-Type` in *headers* is refused.
+  def self.stream(headers : Hash(String, String) = {} of String => String, &block : EventWriter -> Nil) : Response
+    sent = {"Content-Type" => "text/event-stream"}
+    cached = false
+    headers.each do |name, value|
+      raise "SSE: Content-Type is the stream's own, text/event-stream" if HTTP.same_name?(name, "Content-Type")
+      cached = true if HTTP.same_name?(name, "Cache-Control")
+      sent[name] = value
+    end
+    sent["Cache-Control"] = "no-cache" unless cached
+    Response.stream(200, sent) { |writer| block.call(EventWriter.new(writer)) }
+  end
+
+  # The event stream at *url*, each event handed to *block*, which answers
+  # true to go on and false to stop (nil, the connection closed). A
+  # connection that drops or ends is made again after the reconnection
+  # time - *retry* ms until the stream sets its own - with the last event
+  # ID (*last_event_id* to start with, to resume a stream) in
+  # `Last-Event-ID`. Once *reconnects* + 1 connections in a row have
+  # brought no event, the last one's failure is the answer. An answer
+  # that is not a 200 `text/event-stream` is an `SSEError` at once.
+  # *headers* go with every request; `Accept` and `Last-Event-ID` are the
+  # stream's own and are refused there.
+  def self.open(url : String, headers : Hash(String, String) = {} of String => String, last_event_id : String? = nil, reconnects : Int32 = RECONNECTS, retry : Int32 = RETRY, &block : Event -> Bool) : Nil | Cancelled | SocketError | HTTPError | SSEError
+    raise "SSE: reconnects is 0 or more, not #{reconnects}" if reconnects < 0
+    raise "SSE: a retry is 0 or more milliseconds, not #{retry}" if retry < 0
+    cached = false
+    headers.each do |name, _|
+      if HTTP.same_name?(name, "Accept") || HTTP.same_name?(name, "Last-Event-ID")
+        raise "SSE: #{name} is the stream's own header; the last event ID is last_event_id:"
+      end
+      cached = true if HTTP.same_name?(name, "Cache-Control")
+    end
+    last = last_event_id || ""
+    raise "SSE: an id cannot hold a line break or a NUL: #{last.inspect}" if HTTP.has_break?(last) || last.includes?("\0")
+    delay = retry
+    misses = 0
+    while true
+      sent = headers.dup
+      sent["Accept"] = "text/event-stream"
+      sent["Cache-Control"] = "no-cache" unless cached
+      sent["Last-Event-ID"] = last if last.bytesize > 0 && !HTTP.control?(last)
+      parser = EventParser.new(last)
+      outcome = HTTP.open("GET", url, sent) { |response| SSE.follow(response, parser, block) }
+      last = parser.last_event_id
+      if ms = parser.retry
+        delay = ms
+      end
+      misses = parser.dispatched > 0_i64 ? 0 : misses + 1
+      case outcome
+      in Bool
+        return nil if outcome
+        failure = SSEError.new("the stream ended with no event, #{misses} times in a row")
+      in SSEError
+        return outcome
+      in Cancelled
+        return outcome
+      in SocketError
+        failure = outcome
+      in HTTPError
+        failure = outcome
+      end
+      return failure if misses > reconnects
+      slept = sleep(delay)
+      return slept if slept.is_a?(Cancelled)
+    end
+  end
+
+  # One connection's answer read: true when the block stopped, false when
+  # the stream ended, or why it could not be read.
+  protected def self.follow(response : Response, parser : EventParser, block : Proc(Event, Bool)) : Bool | SSEError | Cancelled | SocketError | HTTPError
+    status = response.status
+    return SSEError.new("the server answered #{status}, not 200", status) unless status == 200
+    type = response.header("Content-Type")
+    unless type && SSE.event_stream?(type)
+      return SSEError.new("the answer is #{type ? type.inspect : "untyped"}, not text/event-stream", status)
+    end
+    reader = response.body_io
+    while true
+      got = reader.read(65536)
+      return got unless got.is_a?(String)
+      if got.bytesize == 0
+        parser.finish
+        return false
+      end
+      parser.feed(got) do |event|
+        return true unless block.call(event)
+      end
+    end
+  end
+
+  # Whether a `Content-Type` is `text/event-stream`, in any case, with any
+  # parameters.
+  def self.event_stream?(type : String) : Bool
+    parsed = MIME.parse?(type)
+    return false unless parsed
+    parsed[0] == "text/event-stream"
+  end
+end

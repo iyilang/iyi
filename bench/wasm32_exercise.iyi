@@ -6,6 +6,11 @@
 # 3. Rooted object survival from both globals and the shadow stack.
 # 4. Precision of layout scanning (pointer fields followed, integer fields ignored).
 # 5. Realloc memory preservation.
+# 6. Weak references: a held target answered, one nothing holds cleared by
+#    the collection, before its memory is reused.
+# 7. Objects held by locals alone survive, in plain and optimised builds.
+
+import std/weak_ref::{WeakRef}
 
 def count(value : UInt64) : String
   value.to_i64.to_s
@@ -287,5 +292,173 @@ while bidx < 64
   bidx = bidx + 1
 end
 puts "realloc: data preserved across buffer growth"
+
+# === 6. Weak References ===
+puts "== weak references =="
+
+# Made in a frame of their own: no slot of the caller's holds a target.
+# The arrays are held by locals alone, and the collector runs whenever it
+# is due while they are made: a local is a root, optimised or not.
+def make_weak(held : Array(Node), refs : Array(WeakRef(Node))) : Nil
+  widx = 0
+  while widx < 200
+    node = Node.new(widx)
+    held << node if widx.even?
+    refs << WeakRef.new(node)
+    widx = widx + 1
+  end
+end
+
+weak_held = [] of Node
+weak_refs = [] of WeakRef(Node)
+make_weak(weak_held, weak_refs)
+wipe_stack_frame
+IyiMark.collect
+weak_kept = 0
+weak_cleared = 0
+widx = 0
+while widx < 200
+  target = weak_refs[widx].value
+  if widx.even?
+    weak_kept = weak_kept + 1 if !target.nil? && target.object_id == weak_held[widx // 2].object_id && target.value == widx
+  elsif target.nil?
+    weak_cleared = weak_cleared + 1
+  elsif target.value != widx
+    raise "weak: reference #{widx} answered memory that is no longer its target"
+  end
+  widx = widx + 1
+end
+raise "weak: #{weak_kept} of 100 held targets answered themselves" if weak_kept != 100
+raise "weak: #{weak_cleared} of 100 targets nothing held were cleared" if weak_cleared < 95
+puts "weak: 100 held targets answered, #{weak_cleared} of 100 others cleared by the collection"
+
+# === 7. Objects held by locals alone ===
+puts "== objects held by locals alone =="
+
+# A WebAssembly local is not in linear memory, where the collector looks:
+# the compiler keeps every value a call may outlive in a stack slot too
+# (src/compiler/iyi/wasm_roots.cr). Each case below holds its objects in
+# locals and nothing else, across a collection and enough allocation to
+# reuse whatever it freed: an array at the top level and in a function, a
+# call's first argument while its second is made, a chain held by its
+# head, a union whose payload is a word, and a parameter across a
+# collection in the callee.
+# Zeroes the stack below the caller, frame by frame, before a collection:
+# the frames of calls that returned still hold the addresses they made,
+# the scan reads them, and a case would hold by a stale copy instead of by
+# the slot it is about. After the recursive call, so it stays recursion.
+@[NoInline]
+def scrub_stack(depth : Int32) : Nil
+  a = 0_u64; b = 0_u64; c = 0_u64; d = 0_u64; e = 0_u64; f = 0_u64; g = 0_u64; h = 0_u64
+  i = 0_u64; j = 0_u64; k = 0_u64; l = 0_u64; m = 0_u64; n = 0_u64; o = 0_u64; p = 0_u64
+  scrub_stack(depth - 1) if depth > 0
+  asm("" :: "r"(pointerof(a)), "r"(pointerof(b)), "r"(pointerof(c)), "r"(pointerof(d)) : "memory")
+  asm("" :: "r"(pointerof(e)), "r"(pointerof(f)), "r"(pointerof(g)), "r"(pointerof(h)) : "memory")
+  asm("" :: "r"(pointerof(i)), "r"(pointerof(j)), "r"(pointerof(k)), "r"(pointerof(l)) : "memory")
+  asm("" :: "r"(pointerof(m)), "r"(pointerof(n)), "r"(pointerof(o)), "r"(pointerof(p)) : "memory")
+end
+
+# A collection with nothing stale beneath it.
+def collect_clean : Nil
+  scrub_stack(48)
+  IyiMark.collect
+end
+
+def churn(n : Int32) : Int32
+  sum = 0
+  n.times do |i|
+    b = Node.new(i)
+    sum = sum &+ b.value
+  end
+  sum
+end
+
+def pair(a : Node, b : Node) : Int32
+  collect_clean
+  churn(2000)
+  a.value &+ b.value
+end
+
+def held_in_function : Int32
+  kept = [] of Node
+  200.times { |i| kept << Node.new(i) }
+  collect_clean
+  churn(2000)
+  total = 0
+  kept.each { |b| total = total &+ b.value }
+  total
+end
+
+def either(i : Int32) : Node | Int32
+  i > 0 ? Node.new(i) : i
+end
+
+# The same, made after a collection and enough allocation to reuse what it
+# freed: whatever the caller holds meanwhile must be held in memory.
+def either_after_collection(i : Int32) : Node | Int32
+  collect_clean
+  churn(2000)
+  either(i)
+end
+
+def value_of(u : Node | Int32) : Int32
+  u.is_a?(Node) ? u.value : u
+end
+
+def sum_either(a : Node | Int32, b : Node | Int32) : Int32
+  value_of(a) &+ value_of(b)
+end
+
+locals_kept = [] of Node
+200.times { |i| locals_kept << Node.new(i) }
+collect_clean
+churn(2000)
+locals_total = 0
+locals_kept.each { |b| locals_total = locals_total &+ b.value }
+raise "locals: a top-level array held #{locals_kept.size} nodes summing to #{locals_total}, not 200 and 19900" unless locals_kept.size == 200 && locals_total == 19900
+
+in_function = held_in_function
+raise "locals: an array in a function summed to #{in_function}, not 19900" unless in_function == 19900
+
+paired = pair(Node.new(40), Node.new(2))
+raise "locals: a call's arguments added to #{paired}, not 42" unless paired == 42
+
+locals_head = Node.new(0)
+locals_node = locals_head
+100.times do |i|
+  locals_next = Node.new(i + 1)
+  locals_node.next = locals_next
+  locals_node = locals_next
+end
+collect_clean
+churn(3000)
+locals_length = 0
+locals_cursor = locals_head.next
+while c = locals_cursor
+  locals_length = locals_length + 1
+  raise "locals: link #{locals_length} of a chain holds #{c.value}" unless c.value == locals_length
+  locals_cursor = c.next
+end
+raise "locals: a chain held by its head is #{locals_length} long, not 100" unless locals_length == 100
+
+# Made here, not returned by a call: a union a call returns comes back in
+# the caller's memory (wasm32 returns a struct that way), where the scan
+# finds it anyway, while one made in place keeps its payload - the node's
+# address - as a 32-bit integer and nothing else. Not a constant, or it
+# folds away into a plain pointer.
+locals_union = Program.args.size == 0 ? Node.new(Program.args.size + 77) : Program.args.size
+collect_clean
+churn(2000)
+case locals_union
+when Node
+  raise "locals: a union's node holds #{locals_union.value}, not 77" unless locals_union.value == 77
+else
+  raise "locals: a union's node read back as #{locals_union}"
+end
+# A union returned by value, waiting as a call's first argument while the
+# second is made.
+unions = sum_either(either(Program.args.size + 30), either_after_collection(Program.args.size + 12))
+raise "locals: two unions as a call's arguments added to #{unions}, not 42" unless unions == 42
+puts "locals: a top-level array, an array in a function, a call's arguments, a chain, a union and unions as arguments held across a collection"
 
 puts "all wasm32 collector checks passed"

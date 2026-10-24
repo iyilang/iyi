@@ -371,6 +371,54 @@ describe "Restrictions" do
       end
     end
 
+    # iyi: `Array(T) forall T` used to count as stricter than any path it
+    # couldn't relate to, `Int32` included, which made the order
+    # non-transitive: an unrelated `Int32` overload declared first dragged
+    # `Array(T)` in front of the stricter `Array(UInt8)`. The answer must not
+    # depend on declaration order or on unrelated overloads.
+    describe "Generic with free variables vs unrelated Path" do
+      [
+        {"flat", "Array(UInt8)", "Array(T)", "Array(UInt8).new"},
+        {"nested", "Array(Array(UInt8))", "Array(Array(T))", "Array(Array(UInt8)).new"},
+        {"nested in a user generic", "Foo(Array(UInt8))", "Foo(Array(T))", "Foo(Array(UInt8)).new"},
+      ].each do |desc, specific, generic, arg|
+        defs = {
+          "def foo(a : Int32); 'x'; end",
+          "def foo(a : #{specific}); true; end",
+          "def foo(a : #{generic}) forall T; 1; end",
+        }
+
+        [nil, "preview_overload_order"].each do |flags|
+          defs.to_a.each_permutation do |order|
+            it "prefers #{specific} over #{generic} (#{desc}) in order #{order.map { |d| defs.index(d) }.join(", ")}#{flags ? " under -D#{flags}" : ""}" do
+              assert_type(<<-CODE, flags: flags) { bool }
+                class Foo(T)
+                end
+
+                #{order.join("\n")}
+
+                foo(#{arg})
+                CODE
+            end
+          end
+        end
+      end
+
+      it "keeps Generic with free variables before an ancestor Path in any order" do
+        {
+          "def foo(a : Int32); 'x'; end",
+          "def foo(a : Reference); 1; end",
+          "def foo(a : Array(T)) forall T; true; end",
+        }.to_a.each_permutation do |order|
+          assert_type(<<-CODE) { bool }
+            #{order.join("\n")}
+
+            foo(Array(Int32).new)
+            CODE
+        end
+      end
+    end
+
     describe "Generic vs Generic" do
       it "inserts typed Generic before untyped Generic" do
         assert_type(<<-CODE) { bool }

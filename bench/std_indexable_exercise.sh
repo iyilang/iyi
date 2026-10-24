@@ -110,10 +110,11 @@ fi
 
 echo
 echo "== failure proofs: out-of-range and boundary raises"
-# Run probe modes built into bench/std_indexable_exercise.iyi
+# Run probe modes built into bench/std_indexable_exercise.iyi; a fourth
+# argument names another build of it, which the broken-library proofs use.
 run_probe() {
-  local label="$1" mode="$2" expected_phrase="$3"
-  "$WORK/exercise" "$mode" >"$WORK/probe-$mode.out" 2>&1
+  local label="$1" mode="$2" expected_phrase="$3" program="${4:-$WORK/exercise}"
+  "$program" "$mode" >"$WORK/probe-$mode.out" 2>&1
   local code=$?
   if [ "$code" -eq 0 ]; then
     echo "  $label: probe unexpectedly succeeded"
@@ -141,6 +142,13 @@ run_probe "update out of range" probe_update_out_of_range "index 5 out of range 
 run_probe "swap out of range" probe_swap_out_of_range "index -6 out of range for 5 elements"
 run_probe "fill negative count" probe_fill_negative_count "negative count: -1"
 run_probe "fill past the end" probe_fill_past_end "index 6 out of range for 5 elements"
+# A count near the top of Int32 is refused in the same sentence, not as an
+# "arithmetic overflow" of `offset + count`.
+run_probe "fill past the end with a huge count" probe_fill_huge_count "index 2147483648 out of range for 5 elements"
+# From a negative offset the end is counted from where the offset lands:
+# counted from the offset as written, `fill(0, -2, 5)` named index 3,
+# which is one of the five.
+run_probe "fill past the end from a negative offset" probe_fill_past_end_from_negative "index 8 out of range for 5 elements"
 run_probe "insert out of range" probe_insert_out_of_range "index 2 out of range for 1 elements"
 run_probe "delete_at out of range" probe_delete_at_out_of_range "index -2 out of range for 1 elements"
 
@@ -170,6 +178,10 @@ prove_fails() {
   fi
 }
 
+# 0. The pairs of each_cartesian with the inner loop dropped.
+prove_fails "each_cartesian yields every pair" broken_cartesian "each_cartesian: every pair" \
+  's/^      other.each { |b| yield a, b }$/      yield a, other[0]/'
+
 # 1. Break negative index resolution: without wrap, a[-1] fails out of bounds
 prove_fails "negative index resolution" broken_neg "assertion failed: fetch negative in bounds" \
   's/index = size + index if index < 0/# negative wrap removed/'
@@ -193,6 +205,52 @@ prove_fails "rotate_in_place reversal" broken_rotate "expected .3,2,10,101,4., g
 # 6. Break delete_if: keep everything
 prove_fails "delete_if compaction" broken_delete_if "expected .1,3,5,99., got" \
   's/unsafe_set_size(kept)/unsafe_set_size(size)/'
+
+# 7. Break the sample of a count: an element past the first n never takes
+#    a slot, so the three are always the first three, shuffled.
+prove_fails "sample of a count" broken_sample "a collection samples three as an array does" \
+  's/picked\[j\] = unsafe_fetch(i) if j < n/picked[j] = unsafe_fetch(i) if j < 0/'
+
+# 8. Put join back on `result = result + ...`, which copies the text so far
+#    once per element: the linear-time bound beside `Array#join` catches it.
+prove_fails "join grown by + again" broken_join "indexable join in linear time" \
+  '/^  def join(separator : String = "") : String$/,/^  end$/c\
+  def join(separator : String = "") : String\
+    result = ""\
+    first = true\
+    i = 0\
+    while i < size\
+      result = result + separator unless first\
+      result = result + unsafe_fetch(i).to_s\
+      first = false\
+      i = i + 1\
+    end\
+    result\
+  end'
+
+# 9. Put the fill refusal back on `offset + count`: the probe for a huge
+#    count then reads "arithmetic overflow", not its sentence. A probe mode
+#    is not reached by `prove_fails`, so the broken copy is built here and
+#    the probe run against it must fail.
+mkdir -p "$WORK/broken_fill_end/std"
+sed 's/if count > size - offset$/if offset + count > size/' "$REPO/src/std/indexable.iyi" > "$WORK/broken_fill_end/std/indexable.iyi"
+if ! IYI_PATH="$WORK/broken_fill_end${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build \
+     -o "$WORK/broken_fill_end/exercise" "$REPO/bench/std_indexable_exercise.iyi" >"$WORK/broken_fill_end.build" 2>&1; then
+  echo "  fill refusal from an end: the patched library did not build"
+  sed -n '1,6p' "$WORK/broken_fill_end.build"
+  status=1
+else
+  held_status=$status
+  if run_probe "fill refusal from an end" probe_fill_huge_count "index 2147483648 out of range for 5 elements" \
+       "$WORK/broken_fill_end/exercise" >/dev/null; then
+    echo "  fill refusal from an end: the probe still passed, so it does not test this"
+    held_status=1
+  else
+    printf '  fill refusal from an end: caught, the probe read "%s"\n' \
+      "$(grep -m1 'panic' "$WORK/probe-probe_fill_huge_count.out" | sed 's/^iyi: panic: //')"
+  fi
+  status=$held_status
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

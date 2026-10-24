@@ -42,11 +42,11 @@ case "$(uname -s)" in
 esac
 
 # Marking needs the collector's allocator, which is the default on
-# linux-x86_64, linux-aarch64 and darwin; where a build deselects it the
-# exercise itself refuses every section, and a gate that then reports those
-# sections as MISSING claims more than it measured.
+# linux-x86_64, linux-aarch64, darwin and windows-x86_64; where a build
+# deselects it the exercise itself refuses every section, and a gate that
+# then reports those sections as MISSING claims more than it measured.
 case "$(uname -s)" in
-  Linux | Darwin) ;;
+  Linux | Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
   *) echo "mark exercise: marking needs the collector's allocator, which this platform's build deselects; nothing to measure here"; exit 0 ;;
 esac
 
@@ -143,7 +143,7 @@ if [ -f "$WORK/mark" ]; then
   # and bench/dependency_floor.sh's, not marking's.
   extra="$(undefined_symbols "$WORK/mark" | grep -vxF -e clock_gettime -e exit -e mmap -e munmap -e write \
     -e pthread_self -e pthread_get_stackaddr_np -e _dyld_get_image_header -e _dyld_get_image_vmaddr_slide \
-    -e kqueue -e kevent -e clock_gettime_nsec_np -e __error -e _tlv_bootstrap -e pthread_kill -e pthread_create -e sysctlbyname -e pipe -e sigaction -e sigaltstack -e madvise \
+    -e kqueue -e kevent -e clock_gettime_nsec_np -e __error -e _tlv_bootstrap -e pthread_kill -e pthread_create -e sysctlbyname -e pipe -e sigaction -e sigaltstack \
     -e backtrace -e backtrace_symbols_fd \
     -e open -e openat -e close -e read -e unlink -e chmod \
     -e ITM_deregisterTMCloneTable -e ITM_registerTMCloneTable -e _cxa_finalize -e _gmon_start__ -e _libc_start_main || true)"
@@ -195,7 +195,13 @@ prove_fails() {
 # Never blacken. The queue drains and every object stays gray, which is the
 # shape of a mark phase that loses track of what it has already scanned.
 prove_fails "no black shading" noblack "should be black" \
-  '{ if ($0 ~ /IyiHeap\.write8\(IyiHeap\.mark_byte\(arena, base\), BLACK\)/) next; print }'
+  '{ if ($0 ~ /IyiHeap\.write8\(IyiHeap\.read64\(arena &\+ IyiHeap::OFF_MARKS\) &\+ slot, BLACK\)/) next; print }'
+
+# The chunk's index is worked out once and serves its entry and its mark
+# byte both; blacken the chunk after it instead, and the object scanned
+# stays gray.
+prove_fails "the neighbour blackened" wrongslot "should be black" \
+  '{ sub(/IyiHeap::OFF_MARKS\) &\+ slot, BLACK\)/, "IyiHeap::OFF_MARKS) \\&+ slot \\&+ 1_u64, BLACK)"); print }'
 
 # Stop following pointers. Roots are marked and nothing they reach is, which is
 # the defect that frees a live object.

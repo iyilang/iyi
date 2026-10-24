@@ -1,0 +1,1135 @@
+# Exercises `std/dns` and the resolver `std/socket` builds on it.
+#
+# Run via:
+#     ./bin/iyi run bench/std_dns_exercise.iyi
+#     ./bin/iyi run bench/std_dns_exercise.iyi zone DIR
+#
+# Hermetic: the name server is this program. A UDP responder and a TCP
+# responder on 127.0.0.1 answer packets built here byte by byte - A, AAAA,
+# CNAME chains, NXDOMAIN, SERVFAIL, an answer with the wrong ID, one from
+# the wrong address, a truncated one, a compression loop, silence, HTTPS
+# records and AliasMode chains - and a `Resolver` pointed at them is held
+# to what each should come to. RFC 9460's own HTTPS record vectors are
+# read without a network. The race `connect` runs over a name's addresses
+# (Happy Eyeballs, RFC 8305) is held against a resolver that reads only a
+# hosts file, and listeners on the loopback. Nothing leaves the machine.
+# Each section prints "<name>: ok", or "<name>: skipped" and why. `zone
+# DIR` is the name server bench/std_dns_exercise.sh holds the records to
+# BIND's tools through (`serve_zone`).
+
+module bench/std_dns_exercise
+
+import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf, SvcbAnswer, SvcbRecord}
+import std/socket::{IPAddress, IPv4Address, IPv6Address, IyiSocket, Resolver, SocketError}
+import std/udp::{UdpSocket}
+import std/slice::{Bytes}
+import std/dir::{Dir}
+
+def check(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def same(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def bytes_of(values : Array(UInt8)) : Bytes
+  copy = Bytes.new(values.size)
+  index = 0
+  while index < values.size
+    copy[index] = values[index]
+    index = index + 1
+  end
+  copy
+end
+
+# A name as the wire writes it: length-prefixed labels and a zero.
+def wire_name(name : String) : Array(UInt8)
+  buf = [] of UInt8
+  name.split('.').each do |label|
+    next if label.empty?
+    buf << label.bytesize.to_u8
+    index = 0
+    while index < label.bytesize
+      buf << label.to_unsafe[index]
+      index = index + 1
+    end
+  end
+  buf << 0_u8
+  buf
+end
+
+def push16(buf : Array(UInt8), value : Int32) : Nil
+  buf << ((value >> 8) & 255).to_u8
+  buf << (value & 255).to_u8
+end
+
+# An answer to *query*: its header with QR, RD and RA set, *rcode*, TC
+# when *truncated*, *count* answers to come, and the question as asked.
+def answer_head(query : Bytes, rcode : Int32, count : Int32, truncated : Bool = false) : Array(UInt8)
+  buf = [] of UInt8
+  index = 0
+  while index < query.size
+    buf << query[index]
+    index = index + 1
+  end
+  flags = 0x8180 | rcode | (truncated ? 0x0200 : 0)
+  buf[2] = ((flags >> 8) & 255).to_u8
+  buf[3] = (flags & 255).to_u8
+  buf[6] = 0_u8
+  buf[7] = count.to_u8
+  buf
+end
+
+# One resource record, class IN, TTL 60.
+def add_record(buf : Array(UInt8), owner : Array(UInt8), type : Int32, data : Array(UInt8)) : Nil
+  owner.each { |byte| buf << byte }
+  push16(buf, type)
+  push16(buf, 1)
+  push16(buf, 0)
+  push16(buf, 60)
+  push16(buf, data.size)
+  data.each { |byte| buf << byte }
+end
+
+# A pointer to the question's name, which sits at offset 12.
+QUESTION = [0xC0_u8, 12_u8]
+
+def a_data(a : Int32, b : Int32, c : Int32, d : Int32) : Array(UInt8)
+  [a.to_u8, b.to_u8, c.to_u8, d.to_u8]
+end
+
+def aaaa_data(last : Int32) : Array(UInt8)
+  data = [0x20_u8, 0x01_u8, 0x0d_u8, 0xb8_u8] of UInt8
+  index = 4
+  while index < 15
+    data << 0_u8
+    index = index + 1
+  end
+  data << last.to_u8
+  data
+end
+
+# An OPT record (RFC 6891 6.1.2) at the end of *buf*, owned by *owner*:
+# payload size 1232, *extended* as the extended RCODE, and a Padding
+# option (RFC 7830) of *padding* zero bytes - an answer's OPT record as a
+# server that pads (RFC 8467 4.1) writes it.
+def add_opt(buf : Array(UInt8), owner : Array(UInt8), extended : Int32, padding : Int32) : Nil
+  owner.each { |byte| buf << byte }
+  push16(buf, 41)
+  push16(buf, 1232)
+  buf << extended.to_u8
+  buf << 0_u8
+  push16(buf, 0)
+  push16(buf, 4 + padding)
+  push16(buf, 12)
+  push16(buf, padding)
+  index = 0
+  while index < padding
+    buf << 0_u8
+    index = index + 1
+  end
+end
+
+# The zone's SOA record's data: two names and five numbers.
+def soa_data : Array(UInt8)
+  data = wire_name("ns.test")
+  wire_name("hostmaster.test").each { |byte| data << byte }
+  [1, 3600, 600, 86400, 300].each do |value|
+    push16(data, value >> 16)
+    push16(data, value & 0xFFFF)
+  end
+  data
+end
+
+# An AAAA answer to *query* with an SOA in its authority section and an
+# OPT record in its additional section: header RCODE *rcode*, the OPT
+# record's *extended*, and *opts* OPT records owned by *owner*.
+def edns_answer(query : Bytes, rcode : Int32, extended : Int32, opts : Int32, owner : Array(UInt8)) : Bytes
+  buf = answer_head(query, rcode, 1)
+  buf[9] = 1_u8
+  buf[11] = opts.to_u8
+  add_record(buf, QUESTION, DnsRecord::AAAA, aaaa_data(1))
+  add_record(buf, wire_name("Test"), 6, soa_data)
+  index = 0
+  while index < opts
+    add_opt(buf, owner, extended, 300)
+    index = index + 1
+  end
+  bytes_of(buf)
+end
+
+def show(got : Array(IPAddress) | DnsError | Cancelled) : String
+  case got
+  in Array(IPAddress)
+    got.map(&.to_s).join(" ")
+  in DnsError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+def error_of(got : Array(IPAddress) | DnsError | Cancelled, label : String) : DnsError
+  raise "ASSERTION FAILED: #{label}: expected a failure, got #{show(got)}" unless got.is_a?(DnsError)
+  got
+end
+
+# Bytes from hex digits, anything else between them passed over: RFC 9460
+# appendix D's vectors as the RFC prints them.
+def hex_bytes(text : String) : Bytes
+  digits = [] of Int32
+  raw = text.to_unsafe
+  index = 0
+  while index < text.bytesize
+    byte = raw[index] | 32_u8
+    if byte >= 48_u8 && byte <= 57_u8
+      digits << byte.to_i32 - 48
+    elsif byte >= 97_u8 && byte <= 102_u8
+      digits << byte.to_i32 - 87
+    end
+    index = index + 1
+  end
+  out = Bytes.new(digits.size // 2)
+  index = 0
+  while index < out.size
+    out[index] = ((digits[index * 2] << 4) | digits[index * 2 + 1]).to_u8
+    index = index + 1
+  end
+  out
+end
+
+# The SVCB record in *text*'s hex, read as one owned by example.com, which
+# must read.
+def svcb_ok(text : String, label : String) : SvcbRecord
+  got = SvcbRecord.parse(hex_bytes(text), "example.com")
+  raise "ASSERTION FAILED: #{label}: #{got.message}" if got.is_a?(DnsError)
+  got
+end
+
+# Why the record in *text*'s hex is malformed, or "taken as" and what was
+# read when it is not.
+def svcb_refused(text : String) : String
+  got = SvcbRecord.parse(hex_bytes(text), "example.com")
+  got.is_a?(DnsError) && got.malformed? ? got.detail : "taken as #{got}"
+end
+
+def answer_of(got : SvcbAnswer | DnsError | Cancelled) : String
+  case got
+  in SvcbAnswer
+    "#{got.name} after #{got.aliases} aliases: #{got.records.map(&.to_s).join(" | ")}"
+  in DnsError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# The HTTPS records of an UPDATE (RFC 2136 2.5.1): its zone, its
+# prerequisites passed over, and from its update section each record of
+# type HTTPS's owner and data; nil when it does not read.
+def update_records(packet : Bytes) : Array(Tuple(String, Bytes))?
+  raw = packet.to_unsafe
+  zones = (raw[4].to_i32 << 8) | raw[5].to_i32
+  prerequisites = (raw[6].to_i32 << 8) | raw[7].to_i32
+  updates = (raw[8].to_i32 << 8) | raw[9].to_i32
+  at = 12
+  index = 0
+  while index < zones
+    read = DnsMessage.read_name(packet, at)
+    return nil if read.nil?
+    at = read[1] + 4
+    index = index + 1
+  end
+  found = [] of Tuple(String, Bytes)
+  index = 0
+  while index < prerequisites + updates
+    read = DnsMessage.read_name(packet, at)
+    return nil if read.nil?
+    owner, at = read
+    return nil if at + 10 > packet.size
+    type = (raw[at].to_i32 << 8) | raw[at + 1].to_i32
+    length = (raw[at + 8].to_i32 << 8) | raw[at + 9].to_i32
+    return nil if at + 10 + length > packet.size
+    if index >= prerequisites && type == DnsRecord::HTTPS
+      data = Bytes.new(length)
+      data.to_unsafe.copy_from(raw + at + 10, length)
+      found << {owner.downcase, data}
+    end
+    at = at + 10 + length
+    index = index + 1
+  end
+  found
+end
+
+# zone DIR: a name server for bench/std_dns_exercise.sh to hold this
+# module to BIND's: it takes the HTTPS records nsupdate sends it in an
+# UPDATE and answers dig's questions for them with the bytes it was sent.
+# DIR/port is its port, written once it listens; DIR/seen a line for each
+# record taken - its owner, its data in hex, and what `SvcbRecord` makes
+# of it, its presentation or "refused: " and why - rewritten whole after
+# each UPDATE. A question for stop.test ends it.
+def serve_zone(dir : String) : Nil
+  server = UdpSocket.bind("127.0.0.1", 0)
+  File.write("#{dir}/port", server.local_port.to_s)
+  held = [] of Tuple(String, Bytes)
+  while true
+    got = server.receive_from(65536)
+    break if got.is_a?(Cancelled)
+    packet, host, peer = got
+    next if packet.size < 12
+    if ((packet[2].to_i32 >> 3) & 15) == 5
+      taken = update_records(packet)
+      next if taken.nil?
+      taken.each { |record| held << record }
+      seen = held.map do |record|
+        parsed = SvcbRecord.parse(record[1], record[0])
+        "#{record[0]}\t#{record[1].hexstring}\t#{parsed.is_a?(DnsError) ? "refused: #{parsed.detail}" : parsed.to_s}"
+      end
+      File.write("#{dir}/seen", seen.join("\n") + "\n")
+      # NOERROR, the header and the zone section as they came.
+      zone_ends = DnsMessage.read_name(packet, 12)
+      next if zone_ends.nil?
+      reply = Bytes.new(zone_ends[1] + 4)
+      reply.to_unsafe.copy_from(packet.to_unsafe, reply.size)
+      reply[2] = reply[2] | 0x80_u8
+      reply[3] = 0_u8
+      index = 6
+      while index < 12
+        reply[index] = 0_u8
+        index = index + 1
+      end
+      server.send_to(reply, host, peer)
+      next
+    end
+    asked = DnsMessage.read_name(packet, 12)
+    next if asked.nil?
+    name, ends = asked
+    name = name.downcase
+    # The header and the question, then the records: no OPT record, though
+    # dig sends one.
+    question = [] of UInt8
+    index = 0
+    while index < ends + 4
+      question << packet[index]
+      index = index + 1
+    end
+    records = held.select { |record| record[0] == name }
+    buf = answer_head(bytes_of(question), name == "stop.test" ? 3 : 0, records.size)
+    buf[10] = 0_u8
+    buf[11] = 0_u8
+    records.each { |record| add_record(buf, QUESTION, DnsRecord::HTTPS, Array(UInt8).new(record[1].size) { |at| record[1][at] }) }
+    server.send_to(bytes_of(buf), host, peer)
+    break if name == "stop.test"
+  end
+  server.close
+end
+
+if Program.args.size == 2 && Program.args[0] == "zone"
+  serve_zone(Program.args[1])
+  exit 0
+end
+
+# --- The wire format, with no network ---
+
+query = DnsMessage.query(0xBEEF_u16, "a.Test.", DnsRecord::AAAA)
+expected = [0xBE, 0xEF, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 97, 4, 84, 101, 115, 116, 0, 0, 28, 0, 1]
+same expected.size.to_s, query.size.to_s, "query size"
+index = 0
+while index < expected.size
+  check query[index] == expected[index].to_u8, "query byte #{index}: #{query[index]} where #{expected[index]}"
+  index = index + 1
+end
+parsed = DnsMessage.parse(query)
+check parsed.is_a?(DnsMessage), "a query parses"
+check !parsed.as(DnsMessage).response?, "a query is not a response"
+puts "query_bytes: ok"
+
+# Names with compression: a name at 12, a second pointing into it, a
+# third pointing at the second - each pointer earlier than the last.
+packet = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] of UInt8
+wire_name("example.test").each { |byte| packet << byte }             # 12..25
+packet << 3_u8; packet << 119_u8; packet << 119_u8; packet << 119_u8 # 26: "www"
+packet << 0xC0_u8; packet << 12_u8                                   # -> example.test
+packet << 1_u8; packet << 120_u8                                     # 32: "x"
+packet << 0xC0_u8; packet << 26_u8                                   # -> www.example.test
+read = DnsMessage.read_name(bytes_of(packet), 32)
+check !read.nil?, "a chain of backward pointers reads"
+same "x.www.example.test", read.as(Tuple(String, Int32))[0], "decompressed name"
+same "36", read.as(Tuple(String, Int32))[1].to_s, "the name ends after its first pointer"
+
+itself = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 12] of UInt8
+check DnsMessage.read_name(bytes_of(itself), 12).nil?, "a pointer to itself is refused"
+pair = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 97, 0xC0, 16, 1, 98, 0xC0, 12] of UInt8
+check DnsMessage.read_name(bytes_of(pair), 16).nil?, "two names pointing at each other are refused"
+forward = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 16, 0, 0, 1, 97, 0] of UInt8
+check DnsMessage.read_name(bytes_of(forward), 12).nil?, "a forward pointer is refused"
+past = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF] of UInt8
+check DnsMessage.read_name(bytes_of(past), 12).nil?, "a pointer past the end is refused"
+short = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 97, 98] of UInt8
+check DnsMessage.read_name(bytes_of(short), 12).nil?, "a label past the end is refused"
+dotted = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 97, 46, 98, 0] of UInt8
+check DnsMessage.read_name(bytes_of(dotted), 12).nil?, "a label holding a dot is refused"
+puts "compression: ok"
+
+check DnsName.valid?("example.com"), "a host name"
+check DnsName.valid?("_srv.example.com."), "an underscore and a trailing dot"
+check !DnsName.valid?("1.2.3.4"), "a dotted quad is not a host name"
+check !DnsName.valid?("999.1.1.1"), "nor a bad one"
+check !DnsName.valid?("localhost.."), "an empty label"
+check !DnsName.valid?("-a.example"), "a label starting with a hyphen"
+check !DnsName.valid?("a b.example"), "a space"
+check !DnsName.valid?("#{"x" * 64}.example"), "a 64-byte label"
+same "db.corp.test db.test db", DnsName.candidates("db", ["corp.test", "test."], 1).join(" "), "a short name tries the search list first"
+same "a.b a.b.corp.test", DnsName.candidates("a.b", ["corp.test"], 1).join(" "), "a name with ndots tries itself first"
+same "a.b.corp.test a.b", DnsName.candidates("a.b", ["corp.test"], 2).join(" "), "ndots:2"
+same "a.b", DnsName.candidates("a.b.", ["corp.test"], 5).join(" "), "an absolute name is only itself"
+conf = ResolvConf.parse("# comment\n; another\nnameserver 192.0.2.53\nnameserver 2001:db8::53 # trailing\ndomain old.test\nsearch corp.test test\noptions rotate ndots:3 timeout:2 attempts:4\nnameserver 192.0.2.54\nnameserver 192.0.2.55\n")
+same "192.0.2.53 2001:db8::53 192.0.2.54", conf.nameservers.join(" "), "three name servers, as glibc keeps"
+same "corp.test test", conf.search.join(" "), "the later of domain and search"
+check conf.ndots == 3 && conf.timeout_ms == 2000 && conf.attempts == 4, "options"
+bounded = ResolvConf.parse("options ndots:40 timeout:0 attempts:9\n")
+check bounded.ndots == 15 && bounded.timeout_ms == 1000 && bounded.attempts == 5, "options held to glibc's bounds"
+same "10.0.0.7 ::7", HostsFile.lookup("127.0.0.1 localhost\n10.0.0.7 Box box.lan # c\n#10.0.0.8 box\n::7\tbox.\n", "BOX").join(" "), "hosts lines, in order, any case"
+puts "codec: ok"
+
+# EDNS(0): a padded query's bytes, written out by hand from RFC 6891
+# 6.1.2 and RFC 7830 3 - the 24 bytes above with ARCOUNT 1, then the OPT
+# record (root, type 41, payload 1232, TTL 0, 93 bytes of data) holding
+# Padding (12) of 89 zero bytes, 128 in all (RFC 8467 4.1).
+padded = DnsMessage.query(0xBEEF_u16, "a.Test.", DnsRecord::AAAA, DnsMessage::PADDING_BLOCK)
+same "128", padded.size.to_s, "a padded query's size"
+expected = [0xBE, 0xEF, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 97, 4, 84, 101, 115, 116, 0, 0, 28, 0, 1,
+            0, 0, 41, 0x04, 0xD0, 0, 0, 0, 0, 0, 93, 0, 12, 0, 89]
+index = 0
+while index < padded.size
+  wanted = index < expected.size ? expected[index] : 0
+  check padded[index] == wanted.to_u8, "padded query byte #{index}: #{padded[index]} where #{wanted}"
+  index = index + 1
+end
+check DnsMessage.ends_at(padded) == 128, "a padded query ends where its padding does"
+# Answers as a server that speaks EDNS(0) writes them.
+answered = DnsMessage.parse(edns_answer(query, 0, 0, 1, [0_u8]))
+check answered.is_a?(DnsMessage) && answered.rcode == 0 && answered.answers.size == 1, "an answer with an SOA and an OPT record reads: #{answered.is_a?(DnsError) ? answered.message : answered.rcode}"
+badvers = DnsMessage.parse(edns_answer(query, 0, 1, 1, [0_u8]))
+check badvers.is_a?(DnsMessage) && badvers.rcode == DnsMessage::RCODE_BADVERS, "the OPT record's extended RCODE over the header's: BADVERS (16), not NOERROR: #{badvers.is_a?(DnsError) ? badvers.message : badvers.rcode}"
+if badvers.is_a?(DnsMessage)
+  said = Resolver.read_rcode(badvers, "a.test", "here")
+  check said.is_a?(DnsError) && said.refused? && said.detail == "BADVERS", "BADVERS is the server's refusal, named"
+end
+twice = DnsMessage.parse(edns_answer(query, 0, 0, 2, [0_u8]))
+check twice.is_a?(DnsError) && twice.malformed?, "two OPT records are refused (RFC 6891 6.1.1)"
+owned = DnsMessage.parse(edns_answer(query, 0, 0, 1, wire_name("Test")))
+check owned.is_a?(DnsError) && owned.malformed?, "an OPT record owned by a name, not the root, is refused (RFC 6891 6.1.2)"
+claimed = edns_answer(query, 0, 0, 1, [0_u8])
+claimed[11] = 2_u8
+short_of = DnsMessage.parse(claimed)
+check short_of.is_a?(DnsError) && short_of.malformed?, "an additional section shorter than its count is refused"
+puts "edns: ok"
+
+# Service bindings (RFC 9460): appendix D's vectors, the RFC's own bytes,
+# read and printed as dig 9.20.24 prints them. The gate holds the same
+# text to BIND's through nsupdate and dig (`zone` above).
+FOO_COM = "03666f6f076578616d706c6503636f6d00"
+FOO_ORG = "03666f6f076578616d706c65036f726700"
+aliased = svcb_ok("0000 #{FOO_COM}", "D.1, AliasMode")
+check aliased.alias? && aliased.target == "foo.example.com" && aliased.keys.empty?, "AliasMode: priority 0 and the target"
+same "0 foo.example.com.", aliased.to_s, "AliasMode's presentation"
+rooted = svcb_ok("0001 00", "D.2, the target \".\"")
+check !rooted.alias? && rooted.target == "." && rooted.endpoint == "example.com", "ServiceMode to \".\": the owner is the endpoint (section 2.5.2), not #{rooted.endpoint}"
+same "1 .", rooted.to_s, "the root's presentation"
+ported = svcb_ok("0010 #{FOO_COM} 0003 0002 0035", "D.2, a port")
+check ported.priority == 16 && ported.port == 53 && ported.endpoint == "foo.example.com" && rooted.port.nil?, "port 53, and none without the key"
+same "16 foo.example.com. port=53", ported.to_s, "a port's presentation"
+generic = svcb_ok("0001 #{FOO_COM} 029b 0005 68656c6c6f", "D.2, a generic key")
+check generic.keys == [667] && generic.values[0].hexstring == "68656c6c6f", "key 667 kept as its bytes"
+same "1 foo.example.com. key667=\"hello\"", generic.to_s, "a generic key's presentation"
+same "1 foo.example.com. key667=\"hello\\210qoo\"", svcb_ok("0001 #{FOO_COM} 029b 0009 68656c6c6fd2716f6f", "D.2, a byte past ASCII").to_s, "a byte past ASCII as \\DDD"
+hinted = svcb_ok("0001 #{FOO_COM} 0006 0020 20010db8000000000000000000000001 20010db8000000000000000000530001", "D.2, two IPv6 hints")
+check hinted.ipv6hint.size == 2 && hinted.ipv6hint[1].hexstring == "20010db8000000000000000000530001", "two IPv6 hints"
+same "1 foo.example.com. ipv6hint=2001:db8::1,2001:db8::53:1", hinted.to_s, "IPv6 hints' presentation"
+same "1 example.com. ipv6hint=2001:db8:122:344::c000:221", svcb_ok("0001 076578616d706c6503636f6d00 0006 0010 20010db80122034400000000c0000221", "D.2, an embedded IPv4 hint").to_s,
+  "an IPv6 hint the RFC writes with an embedded IPv4 address, as BIND writes it"
+sorted = svcb_ok("0010 #{FOO_ORG} 0000 0004 0001 0004 0001 0009 02 6832 05 68332d3139 0004 0004 c0000201", "D.2, mandatory, alpn and ipv4hint")
+check sorted.mandatory == [1, 4] && sorted.alpn == ["h2", "h3-19"] && sorted.ipv4hint.map(&.hexstring) == ["c0000201"], "mandatory, alpn and ipv4hint read"
+same "16 foo.example.org. mandatory=alpn,ipv4hint alpn=\"h2,h3-19\" ipv4hint=192.0.2.1", sorted.to_s, "the keys in their wire order"
+escaped = svcb_ok("0010 #{FOO_ORG} 0001 000c 08 665c6f6f2c626172 02 6832", "D.2, an escaped comma and backslash")
+check escaped.alpn == ["f\\oo,bar", "h2"], "an alpn-id holding a comma and a backslash: #{escaped.alpn}"
+same "16 foo.example.org. alpn=\"f\\\\\\\\oo\\\\,bar,h2\"", escaped.to_s, "a comma and a backslash escaped twice inside alpn's quotes"
+# All seven keys, ech RFC 9848 3's example ECHConfigList.
+ech = "0048fe0d004401002000201d77eb1c522d08605b179d4214ee4a3635df7e17c336ea9006655a73fcaad63e00040001000164156563682d73697465732e6578616d706c652e6e65740000"
+every = svcb_ok("0001 00 0000 0002 0003 0001 000c 02 6832 08 687474702f312e31 0002 0000 0003 0002 01bb 0004 0004 c0000201 0005 004a #{ech} 0006 0010 20010db8000000000000000000000001", "all seven keys")
+check every.keys == [0, 1, 2, 3, 4, 5, 6] && every.mandatory == [3] && every.alpn == ["h2", "http/1.1"] && every.no_default_alpn? && every.port == 443, "mandatory, alpn, no-default-alpn and port read"
+check (every.ech || Bytes.new(0)).hexstring == ech && every.ipv4hint.size == 1 && every.ipv6hint.size == 1, "ech and the hints read"
+same "1 . mandatory=port alpn=\"h2,http/1.1\" no-default-alpn port=443 ipv4hint=192.0.2.1 ech=AEj+DQBEAQAgACAdd+scUi0IYFsXnUIU7ko2Nd9+F8M26pAGZVpz/KrWPgAEAAEAAWQVZWNoLXNpdGVzLmV4YW1wbGUubmV0AAA= ipv6hint=2001:db8::1",
+  every.to_s, "all seven keys' presentation"
+puts "svcb_wire: ok"
+
+# Section 2.2's refusals, and the values of each key's form: a key twice
+# and keys out of order, a param cut short, a key mandatory lists and the
+# record does not carry; appendix D.3's failure cases written as bytes;
+# and a target compressed, or with a dot in a label.
+said = svcb_refused("0001 00 0002 0000 0001 0003 026832")
+check said.includes?("not in increasing order"), "keys out of order are refused: #{said}"
+said = svcb_refused("0001 00 0001 0003 026832 0001 0003 026833")
+check said.includes?("twice"), "a key twice is refused: #{said}"
+said = svcb_refused("0001 00 0000 0002 0003")
+check said.includes?("does not carry"), "a mandatory key the record does not carry is refused: #{said}"
+said = svcb_refused("0001 #{FOO_COM} 0000 0002 007b")
+check said.includes?("mandatory lists key123"), "a mandatory key the record does not carry is refused, by its generic name (D.3): #{said}"
+said = svcb_refused("0001 00 0003 0002 01")
+check said.includes?("runs past the record"), "a value cut short by the end of the record is refused: #{said}"
+said = svcb_refused("0001 00 0003 00")
+check said.includes?("cut short"), "a key and length cut short are refused: #{said}"
+said = svcb_refused("00")
+check said.includes?("shorter than"), "a record shorter than a priority and a target is refused: #{said}"
+["0000", "0001", "0003", "0004", "0006"].each do |key|
+  said = svcb_refused("0001 #{FOO_COM} #{key} 0000")
+  check said.includes?("bytes, where") || said.includes?("empty, where"), "key #{key} without a value is refused (D.3): #{said}"
+end
+said = svcb_refused("0001 #{FOO_COM} 0001 0003 026832 0002 0003 616263")
+check said.includes?("where it is empty"), "no-default-alpn with a value is refused (D.3): #{said}"
+said = svcb_refused("0001 #{FOO_COM} 0000 0002 0000")
+check said.includes?("lists itself"), "mandatory listing itself is refused (D.3): #{said}"
+said = svcb_refused("0001 #{FOO_COM} 0000 0004 007b007b 007b 0003 616263")
+check said.includes?("not in increasing order"), "mandatory listing a key twice is refused (D.3): #{said}"
+said = svcb_refused("0001 00 0002 0000")
+check said.includes?("without alpn"), "no-default-alpn without alpn is refused: #{said}"
+{"0001 00 0001 0003 05 6832"                      => "an alpn-id past the value",
+ "0001 00 0001 0001 00"                           => "an empty alpn-id",
+ "0001 00 0004 0005 c000020100"                   => "five bytes of ipv4hint",
+ "0001 00 0006 000f 20010db800000000000000000000" => "fifteen bytes of ipv6hint",
+ "0001 00 0005 0006 0005 01020304"                => "an ECHConfigList whose length is not its own"}.each do |text, what|
+  said = svcb_refused(text)
+  check said.starts_with?("SvcParamKey "), "#{what} is refused: #{said}"
+end
+said = svcb_refused("0001 c00c")
+check said.includes?("compressed"), "a compressed target is refused: #{said}"
+said = svcb_refused("0001 03 612e62 00")
+check said.includes?("dot"), "a target with a dot in a label is refused: #{said}"
+puts "svcb_malformed: ok"
+
+# --- A name server in this process ---
+
+# TCP's port first, and UDP on the same number, tried again on a refusal:
+# Windows holds port ranges back (its excluded ranges) and answers a bind
+# in one "access denied". An ephemeral UDP port fell in one on a CI runner,
+# and then a UDP bind on the port an ephemeral TCP listener had taken.
+#
+# A refused port's listener is kept open until one is found: Windows hands
+# out ephemeral TCP ports one after another, and an excluded UDP range is
+# wider than twenty of them - twenty tries closed and reopened, a CI run
+# panicked at 127.0.0.1:51853 and its artifact run at 51873, twenty on. Held,
+# each try is a port the last did not cover, and two hundred step past a
+# range.
+tcp = IyiSocket.listen("127.0.0.1", 0)
+port = tcp.local_port
+bound = UdpSocket.bind?("127.0.0.1", port)
+refused = [] of IyiSocket
+while bound.is_a?(SocketError) && refused.size < 200
+  refused << tcp
+  tcp = IyiSocket.listen("127.0.0.1", 0)
+  port = tcp.local_port
+  bound = UdpSocket.bind?("127.0.0.1", port)
+end
+refused.each(&.close)
+raise bound.message if bound.is_a?(SocketError)
+server = bound
+forger = UdpSocket.bind("127.0.0.1", 0)
+log = [] of String
+slow_seen = 0
+
+# An SVCB record's data: *priority*, *target* ("." for the root), and the
+# params as hex.
+def svcb_data(priority : Int32, target : String, params : String = "") : Array(UInt8)
+  data = [] of UInt8
+  push16(data, priority)
+  (target == "." ? [0_u8] : wire_name(target)).each { |byte| data << byte }
+  hex_bytes(params).each { |byte| data << byte }
+  data
+end
+
+# The HTTPS answers the resolver's `https_records` is held to: ServiceMode
+# records out of order, AliasMode chains of one, two and three links and
+# one that never ends, an alias to "." and to a name with no HTTPS
+# records, ServiceMode beside AliasMode, a port-prefixed name, a CNAME, and
+# a set with a malformed record in it.
+def https_answer(query : Bytes, name : String) : Array(UInt8)
+  ported = "0003 0002"
+  if name.starts_with?("chain") && name.ends_with?(".test")
+    link = name[5, name.bytesize - 10].to_i
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(0, "chain#{link + 1}.test"))
+    return buf
+  end
+  case name
+  when "svc.test"
+    buf = answer_head(query, 0, 3)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(3, ".", "#{ported} 1f43"))
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(1, ".", "#{ported} 1f41"))
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(2, ".", "#{ported} 1f42"))
+  when "apex.test", "hop.test", "far.test", "gone.test", "bare.test"
+    target = {"apex.test" => "svc.test", "hop.test" => "apex.test", "far.test" => "hop.test", "gone.test" => ".", "bare.test" => "a.test"}[name]
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(0, target))
+  when "mixed.test"
+    buf = answer_head(query, 0, 2)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(1, ".", "#{ported} 0001"))
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(0, "svc.test"))
+  when "_8443._https.web.test"
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(1, ".", "0001 0003 026832"))
+  when "cn.test"
+    # cn.test CNAME svc2.test, and svc2.test's record: its target "." is
+    # svc2.test, the owner, not the name asked.
+    buf = answer_head(query, 0, 2)
+    alias_at = buf.size + 12
+    add_record(buf, QUESTION, DnsRecord::CNAME, wire_name("svc2.test"))
+    add_record(buf, [0xC0_u8, alias_at.to_u8], DnsRecord::HTTPS, svcb_data(1, ".", "#{ported} 24c3"))
+  when "bad.test"
+    buf = answer_head(query, 0, 2)
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(1, ".", "#{ported} 01bb"))
+    add_record(buf, QUESTION, DnsRecord::HTTPS, svcb_data(2, ".", "0003 0002 01bb 0001 0003 026832"))
+  when "nx.test"
+    buf = answer_head(query, 3, 0)
+  else
+    buf = answer_head(query, 0, 0)
+  end
+  buf
+end
+
+# The answer to one query, by name: what each section below asks about.
+def respond(server : UdpSocket, forger : UdpSocket, query : Bytes, host : String, peer_port : Int32, log : Array(String), slow_seen : Int32) : Int32
+  parsed = DnsMessage.parse(query)
+  return slow_seen unless parsed.is_a?(DnsMessage)
+  name = parsed.question_name.downcase
+  type = parsed.question_type
+  log << "#{name}/#{type == DnsRecord::A ? "A" : (type == DnsRecord::AAAA ? "AAAA" : "HTTPS")}"
+  if type == DnsRecord::HTTPS
+    server.send_to(bytes_of(https_answer(query, name)), host, peer_port)
+    return slow_seen
+  end
+  buf = [] of UInt8
+  if type == DnsRecord::AAAA
+    case name
+    when "a.test", "alias.test", "dangling.test"
+      buf = answer_head(query, 0, 1)
+      add_record(buf, QUESTION, DnsRecord::AAAA, aaaa_data(1))
+    when "nx.test", "db.corp.test"
+      buf = answer_head(query, 3, 0)
+    when "multi.test"
+      buf = answer_head(query, 0, 1)
+      v6 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] of UInt8
+      add_record(buf, QUESTION, DnsRecord::AAAA, v6)
+    when "silent.test"
+      return slow_seen
+    else
+      buf = answer_head(query, 0, 0)
+    end
+    server.send_to(bytes_of(buf), host, peer_port)
+    return slow_seen
+  end
+  case name
+  when "a.test", "db.test"
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, name == "a.test" ? a_data(192, 0, 2, 1) : a_data(192, 0, 2, 10))
+  when "web.test"
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(127, 0, 0, 1))
+  when "multi.test"
+    # Raced, ::1 goes first and holds nothing on the port asked; 127.0.0.1
+    # does.
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(127, 0, 0, 1))
+  when "alias.test"
+    # alias.test CNAME mid.test, mid.test CNAME a.test, a.test A: the
+    # second and third owners are pointers into the record before.
+    buf = answer_head(query, 0, 3)
+    first_target = buf.size + 12
+    add_record(buf, QUESTION, DnsRecord::CNAME, wire_name("mid.test"))
+    second_target = buf.size + 12
+    add_record(buf, [0xC0_u8, first_target.to_u8], DnsRecord::CNAME, wire_name("a.test"))
+    add_record(buf, [0xC0_u8, second_target.to_u8], DnsRecord::A, a_data(192, 0, 2, 1))
+  when "dangling.test"
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::CNAME, wire_name("a.test"))
+  when "loop.test"
+    buf = answer_head(query, 0, 2)
+    add_record(buf, QUESTION, DnsRecord::CNAME, wire_name("other.test"))
+    add_record(buf, wire_name("other.test"), DnsRecord::CNAME, wire_name("loop.test"))
+  when "nx.test", "db.corp.test"
+    buf = answer_head(query, 3, 0)
+  when "fail.test"
+    buf = answer_head(query, 2, 0)
+  when "nodata.test"
+    buf = answer_head(query, 0, 0)
+  when "badid.test"
+    # The wrong ID first, then the right ID with another question, then
+    # the answer: only the last is the resolver's.
+    wrong = answer_head(query, 0, 1)
+    wrong[1] = wrong[1] ^ 1_u8
+    add_record(wrong, QUESTION, DnsRecord::A, a_data(6, 6, 6, 6))
+    server.send_to(bytes_of(wrong), host, peer_port)
+    other = answer_head(query, 0, 1)
+    other = other[0, 12]
+    wire_name("other.test").each { |byte| other << byte }
+    push16(other, 1)
+    push16(other, 1)
+    add_record(other, QUESTION, DnsRecord::A, a_data(6, 6, 6, 7))
+    server.send_to(bytes_of(other), host, peer_port)
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(192, 0, 2, 7))
+  when "forged.test"
+    # A perfect answer from the wrong port, sent first: the socket is
+    # connected to the server, so the kernel never hands it over.
+    fake = answer_head(query, 0, 1)
+    add_record(fake, QUESTION, DnsRecord::A, a_data(6, 6, 6, 8))
+    forger.send_to(bytes_of(fake), host, peer_port)
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(192, 0, 2, 8))
+  when "big.test"
+    buf = answer_head(query, 0, 0, true)
+  when "ptrloop.test"
+    buf = answer_head(query, 0, 1)
+    at = buf.size
+    add_record(buf, [0xC0_u8, at.to_u8], DnsRecord::A, a_data(6, 6, 6, 9))
+  when "slow.test"
+    slow_seen = slow_seen + 1
+    return slow_seen if slow_seen == 1
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(192, 0, 2, 11))
+  when "silent.test"
+    return slow_seen
+  else
+    buf = answer_head(query, 3, 0)
+  end
+  server.send_to(bytes_of(buf), host, peer_port)
+  slow_seen
+end
+
+# The TCP side: big.test's whole answer, framed.
+def respond_tcp(conn : IyiSocket) : Nil
+  head = Bytes.new(2)
+  got = 0
+  while got < 2
+    n = conn.read(head.to_unsafe + got, 2 - got)
+    return unless n.is_a?(Int32) && n > 0
+    got = got + n
+  end
+  size = (head[0].to_i32 << 8) | head[1].to_i32
+  query = Bytes.new(size)
+  got = 0
+  while got < size
+    n = conn.read(query.to_unsafe + got, size - got)
+    return unless n.is_a?(Int32) && n > 0
+    got = got + n
+  end
+  buf = answer_head(query, 0, 40)
+  index = 0
+  while index < 40
+    add_record(buf, QUESTION, DnsRecord::A, a_data(192, 0, 3, index + 1))
+    index = index + 1
+  end
+  framed = [] of UInt8
+  push16(framed, buf.size)
+  buf.each { |byte| framed << byte }
+  conn.write(bytes_of(framed).to_unsafe, framed.size)
+end
+
+# --- Happy Eyeballs (RFC 8305): a name's addresses raced ---
+
+# The descriptors this process holds: /proc/self/fd's entries, on Linux;
+# -1 elsewhere, where they are not counted.
+def open_descriptors : Int32
+  {% if flag?(:linux) %}
+    Dir.children("/proc/self/fd").size
+  {% else %}
+    -1
+  {% end %}
+end
+
+def connected_to(got : IyiSocket | Cancelled | SocketError) : String
+  case got
+  in IyiSocket
+    got.remote_address || "?"
+  in SocketError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# The race, against a resolver that reads only a hosts file, so each name
+# stands for exactly the addresses written for it, in that order. The
+# first address of most of them is `hole`: a listener whose backlog is
+# full and never accepted from, on the port 127.0.0.1 listens on too.
+# Linux and darwin drop the SYNs past a full backlog, so a connect there
+# waits until it is given up on; Windows refuses it after about 2 s.
+# `hole` is ::1 where this machine has IPv6, 127.0.0.2 on a Linux machine
+# without (all of 127/8 is the loopback there), and nothing elsewhere,
+# where the sections that need it say they were skipped.
+def happy_eyeballs : Nil
+  probe = UdpSocket.bind?("::1", 0)
+  has_six = probe.is_a?(UdpSocket)
+  probe.close if probe.is_a?(UdpSocket)
+
+  one = IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8).as(IPAddress)
+  two = IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8).as(IPAddress)
+  three = IPv4Address.new(127_u8, 0_u8, 0_u8, 3_u8).as(IPAddress)
+  loop_six = IPv6Address.new(0_u64, 1_u64).as(IPAddress)
+  two_six = IPv6Address.new(0_u64, 2_u64).as(IPAddress)
+  ordered = IyiSocket.attempt_order([one, two, three, loop_six, two_six]).map(&.to_s).join(" ")
+  if has_six
+    same "::1 127.0.0.1 ::2 127.0.0.2 127.0.0.3", ordered, "IPv6 first when this machine has a route to it, then the families in turn"
+  else
+    same "127.0.0.1 ::1 127.0.0.2 ::2 127.0.0.3", ordered, "IPv4 first when this machine has no route to IPv6, then the families in turn"
+  end
+  same "127.0.0.2 127.0.0.1", IyiSocket.attempt_order([two, one]).map(&.to_s).join(" "), "one family keeps the resolver's order"
+  puts has_six ? "he_order: ok (IPv6 first: this machine has a route to ::1)" : "he_order: ok (IPv4 first: no route to ::1 on this machine)"
+
+  hole = has_six ? "::1" : ""
+  {% if flag?(:linux) %}
+    hole = "127.0.0.2" unless has_six
+  {% end %}
+  if hole.empty?
+    ["he_refused", "he_blackhole", "he_family", "he_fds", "he_deadline", "he_cancel"].each do |section|
+      puts "#{section}: skipped, no IPv6 loopback on this machine and no second loopback address to stand in for it"
+    end
+    return
+  end
+  he = Resolver.new([] of String, hosts: "#{hole} slow.he.test\n127.0.0.1 slow.he.test\n" \
+                                         "127.0.0.1 both.he.test\n::1 both.he.test\n" \
+                                         "127.0.0.1 gone.he.test\n#{hole} gone.he.test\n" \
+                                         "#{hole} hang.he.test\n#{hole} hang.he.test\n#{hole} hang.he.test\n")
+
+  # Every address refused: one error, naming each in the order tried.
+  nobody = IyiSocket.listen("127.0.0.1", 0)
+  gone_port = nobody.local_port
+  nobody.close
+  refusal = IyiSocket.connect("gone.he.test", gone_port, he, 10000)
+  check refusal.is_a?(SocketError), "a name whose every address refuses is a SocketError: #{connected_to(refusal)}"
+  refused = refusal.as(SocketError)
+  first, second = has_six ? {IyiSocket.endpoint("::1", gone_port), "127.0.0.1:#{gone_port}"} : {"127.0.0.1:#{gone_port}", IyiSocket.endpoint(hole, gone_port)}
+  tried = "#{first} connection refused; #{second} connection refused"
+  same "cannot connect to gone.he.test:#{gone_port}: #{tried}", refused.message, "one error naming every address, in the order tried"
+  check refused.tried == tried, "tried names them: #{refused.tried.inspect}"
+  check refused.refused? && !refused.timed_out?, "every address refused is refused?: #{refused.message}"
+  # Printed with the port as PORT and no measured time on any line below:
+  # std_exercise.sh compares this program's output built from source with
+  # its output built from artifacts, and an ephemeral port or a
+  # millisecond count differs between two runs. The values are asserted
+  # above each line instead.
+  shown = has_six ? "[::1]:PORT connection refused; 127.0.0.1:PORT connection refused" : "127.0.0.1:PORT connection refused; #{hole}:PORT connection refused"
+  puts "he_refused: ok (cannot connect to gone.he.test:PORT: #{shown})"
+
+  live = IyiSocket.listen("127.0.0.1", 0)
+  he_port = live.local_port
+  full = IyiSocket.listen(hole, he_port, 1)
+  stuffed = [] of IyiSocket
+  while stuffed.size < 300
+    filler = IyiSocket.connect(hole, he_port, timeout_ms: 300)
+    break unless filler.is_a?(IyiSocket)
+    stuffed << filler
+  end
+  if stuffed.size == 300
+    ["he_blackhole", "he_family", "he_fds", "he_deadline", "he_cancel"].each do |section|
+      puts "#{section}: skipped, #{hole}'s listener took 300 connections with a backlog of one and never stopped taking them"
+    end
+  else
+    he_races(he, has_six, hole, live, he_port)
+  end
+  stuffed.each(&.close)
+  full.close
+  live.close
+end
+
+def he_races(he : Resolver, has_six : Bool, hole : String, live : IyiSocket, he_port : Int32) : Nil
+  at_hole = IyiSocket.endpoint(hole, he_port)
+
+  # The first address drops SYNs: the second starts after the attempt
+  # delay, without waiting for the first to fail, and wins.
+  began = Resolver.now_ms
+  raced = IyiSocket.connect("slow.he.test", he_port, he, 5000)
+  took = Resolver.now_ms - began
+  check took < 1500, "the second address does not wait for the first to fail: #{took} ms, #{connected_to(raced)}"
+  check took >= 240, "the second address waits the attempt delay: #{took} ms"
+  same "127.0.0.1", connected_to(raced), "the connection is the second address's"
+  accepted = live.accept
+  check accepted.is_a?(IyiSocket), "127.0.0.1 accepts the raced connection"
+  accepted.as(IyiSocket).close
+  raced.as(IyiSocket).close
+  puts "he_blackhole: ok (connected through 127.0.0.1 after the 250 ms attempt delay and within 1500 ms, #{hole} dropping SYNs)"
+
+  # Both families listening: the one `attempt_order` puts first answers.
+  if has_six
+    four_end = IyiSocket.listen("127.0.0.1", 0)
+    both_port = four_end.local_port
+    six_end = IyiSocket.listen("::1", both_port)
+    picked = IyiSocket.connect("both.he.test", both_port, he, 5000)
+    same "::1", connected_to(picked), "IPv6 first: both.he.test is 127.0.0.1 and then ::1, and ::1 has a route"
+    taken = six_end.accept
+    taken.as(IyiSocket).close if taken.is_a?(IyiSocket)
+    picked.as(IyiSocket).close
+    six_end.close
+    four_end.close
+    puts "he_family: ok (::1 taken before 127.0.0.1)"
+  else
+    puts "he_family: skipped, no IPv6 loopback on this machine to put first"
+  end
+
+  # Twenty races at once, each with a losing attempt still under way when
+  # it is won: every loser's socket is closed.
+  before = open_descriptors
+  won = [] of IyiSocket
+  group do |r|
+    20.times do
+      r.spawn do
+        got = IyiSocket.connect("slow.he.test", he_port, he, 5000)
+        won << got if got.is_a?(IyiSocket)
+        0
+      end
+    end
+  end
+  check won.size == 20, "twenty connects raced at once all connect: #{won.size} did"
+  won.each(&.close)
+  index = 0
+  while index < 20
+    peer = live.accept
+    peer.as(IyiSocket).close if peer.is_a?(IyiSocket)
+    index = index + 1
+  end
+  after = open_descriptors
+  check after == before, "every losing attempt's socket is closed: #{before} descriptors before twenty raced connects, #{after} after"
+  {% if flag?(:linux) %}
+    puts "he_fds: ok (twenty raced connects, the same count of descriptors before and after)"
+  {% else %}
+    puts "he_fds: ok (twenty raced connects; descriptors are counted on Linux alone, in /proc/self/fd)"
+  {% end %}
+
+  # The bound is the whole connect's: attempts at 0 and 250 ms are cut at
+  # 400, and the third address's turn never comes.
+  began = Resolver.now_ms
+  late = IyiSocket.connect("hang.he.test", he_port, he, 400)
+  took = Resolver.now_ms - began
+  check late.is_a?(SocketError) && late.timed_out?, "a connect past its bound is timed_out?: #{connected_to(late)}"
+  check took >= 380 && took < 1500, "the bound is the whole connect's: 400 ms took #{took}"
+  same "cannot connect to hang.he.test:#{he_port}: timed out after 400 ms: #{at_hole} timed out; #{at_hole} timed out; #{at_hole} not tried",
+    late.as(SocketError).message, "the addresses tried, how each ended, and the one never tried"
+  puts "he_deadline: ok (a 400 ms bound ended within 380 to 1500 ms: two attempts timed out, the third address never tried)"
+
+  # The caller's task cancelled 600 ms in, three attempts under way.
+  before = open_descriptors
+  answer = ""
+  spent = 0_i64
+  group do |c|
+    c.spawn do
+      started = Resolver.now_ms
+      got = IyiSocket.connect("hang.he.test", he_port, he, 10000)
+      spent = Resolver.now_ms - started
+      answer = connected_to(got)
+      0
+    end
+    sleep(600)
+    c.cancel_children
+  end
+  same "cancelled", answer, "a connect whose task is cancelled answers Cancelled"
+  check spent < 1500, "cancelling the caller cancels every attempt: the connect took #{spent} ms of its 10000"
+  after = open_descriptors
+  check after == before, "every attempt's socket is closed when the caller is cancelled: #{before} descriptors before, #{after} after"
+  puts "he_cancel: ok (cancelled at 600 ms, answered Cancelled within 1500 ms, every attempt's socket closed)"
+end
+
+hosts_file = "192.0.2.50 pinned.test\n2001:db8::50 pinned.test\n"
+resolver = Resolver.new(["127.0.0.1:#{port}"], search: ["corp.test", "test"], ndots: 1,
+  timeout_ms: 300, attempts: 2, hosts: hosts_file)
+
+group do |g|
+  g.spawn do
+    while true
+      got = server.receive_from(1500)
+      break if got.is_a?(Cancelled)
+      slow_seen = respond(server, forger, got[0], got[1], got[2], log, slow_seen)
+    end
+    0
+  end
+  g.spawn do
+    while true
+      conn = tcp.accept
+      break if conn.is_a?(Cancelled)
+      if conn.is_a?(IyiSocket)
+        respond_tcp(conn)
+        conn.close
+      end
+    end
+    0
+  end
+  g.spawn do
+    same "192.0.2.1 2001:db8::1", show(resolver.resolve("a.test")), "A and then AAAA"
+    puts "a_record: ok"
+    puts "aaaa_record: ok"
+
+    same "192.0.2.1 2001:db8::1", show(resolver.resolve("alias.test.")), "a CNAME chain in one answer"
+    puts "cname_chain: ok"
+
+    log.clear
+    same "192.0.2.1 2001:db8::1", show(resolver.resolve("dangling.test")), "a chain that leaves the answer"
+    check log.includes?("a.test/A"), "the chain's end is asked about: #{log.join(" ")}"
+    puts "cname_dangling: ok"
+
+    looped = error_of(resolver.resolve("loop.test"), "a CNAME loop")
+    check looped.malformed?, "a CNAME loop is malformed: #{looped.message}"
+    puts "cname_loop: ok"
+
+    missing = error_of(resolver.resolve("nx.test."), "NXDOMAIN")
+    check missing.not_found? && !missing.server_failure?, "NXDOMAIN is not_found?: #{missing.message}"
+    same "cannot resolve nx.test.: the name does not exist (NXDOMAIN); asked 127.0.0.1:#{port}", missing.message, "NXDOMAIN's sentence"
+    puts "nxdomain: ok"
+
+    failing = error_of(resolver.resolve("fail.test."), "SERVFAIL")
+    check failing.server_failure? && !failing.not_found?, "SERVFAIL is server_failure?: #{failing.message}"
+    puts "servfail: ok"
+
+    empty = error_of(resolver.resolve("nodata.test."), "NODATA")
+    check empty.no_address? && !empty.not_found?, "a name with no records is no_address?: #{empty.message}"
+    puts "nodata: ok"
+
+    same "192.0.2.7", show(resolver.resolve("badid.test.")), "a wrong ID and a wrong question are ignored"
+    puts "mismatched_id: ok"
+
+    same "192.0.2.8", show(resolver.resolve("forged.test.")), "a datagram from another port is not read"
+    puts "forged_source: ok"
+
+    big = resolver.resolve("big.test.")
+    check big.is_a?(Array(IPAddress)) && big.size == 40, "a truncated answer is asked again over TCP: #{show(big)}"
+    same "192.0.3.40", big.as(Array(IPAddress))[39].to_s, "the TCP answer's last record"
+    puts "truncated_tcp: ok"
+
+    pointer = error_of(resolver.resolve("ptrloop.test."), "a compression loop")
+    check pointer.malformed?, "a compression loop is malformed: #{pointer.message}"
+    puts "pointer_loop: ok"
+
+    slow_seen = 0
+    log.clear
+    same "192.0.2.11", show(resolver.resolve("slow.test.")), "the second attempt is answered"
+    check log.count { |entry| entry == "slow.test/A" } == 2, "asked twice: #{log.join(" ")}"
+    puts "retry: ok"
+
+    started = Resolver.now_ms
+    quiet = error_of(resolver.resolve("silent.test."), "silence")
+    took = Resolver.now_ms - started
+    check quiet.timed_out?, "silence is timed_out?: #{quiet.message}"
+    check took >= 550 && took < 3000, "two attempts of 300 ms each took #{took} ms"
+    puts "timeout: ok"
+
+    log.clear
+    same "192.0.2.50 2001:db8::50", show(resolver.resolve("PINNED.test")), "the hosts file answers"
+    check log.empty?, "and no server was asked: #{log.join(" ")}"
+    puts "hosts_override: ok"
+
+    log.clear
+    same "192.0.2.10", show(resolver.resolve("db")), "db under the search list"
+    same "db.corp.test/A db.test/A db.test/AAAA", log.join(" "), "the search list in order"
+    puts "search_list: ok"
+
+    same "127.0.0.1 ::1", show(resolver.resolve("localhost")), "localhost never leaves the machine"
+    same "192.0.2.1", show(resolver.resolve("192.0.2.1")), "an address is itself"
+    check error_of(resolver.resolve("a b"), "a space").invalid_name?, "not a host name"
+    puts "literals: ok"
+
+    # `Dir.tempdir`, not `/tmp`: Windows has no such directory, and the
+    # files are read back by path, so they must land where this user writes.
+    dir = Dir.tempdir
+    conf_path = "#{dir}/iyi-dns-exercise-resolv.conf"
+    hosts_path = "#{dir}/iyi-dns-exercise-hosts"
+    File.write(conf_path, "nameserver 127.0.0.1:#{port}\nsearch test\noptions ndots:1 timeout:1 attempts:1\n")
+    File.write(hosts_path, "192.0.2.60 filed.test\n")
+    filed = Resolver.from_files(conf_path, hosts_path)
+    same "127.0.0.1:#{port}", filed.nameservers.join(" "), "the configured server"
+    same "192.0.2.60", show(filed.resolve("filed.test")), "the configured hosts file"
+    same "192.0.2.10", show(filed.resolve("db")), "the configured search list"
+    nowhere = Resolver.from_files("#{dir}/no-such-resolv.conf", "#{dir}/no-such-hosts")
+    check nowhere.nameservers.size > 0, "a missing resolv.conf falls back to the loopback server"
+    File.delete(conf_path)
+    File.delete(hosts_path)
+    puts "from_files: ok"
+
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    connected = IyiSocket.connect("web.test", listener.local_port, resolver)
+    check connected.is_a?(IyiSocket), "connect by name: #{connected.is_a?(SocketError) ? connected.message : "cancelled"}"
+    peer = listener.accept
+    check peer.is_a?(IyiSocket), "the listener accepts the connection made by name"
+    connected.as(IyiSocket).write("by name")
+    same "by name", peer.as(IyiSocket).read(16).as(String), "bytes over a connection made by name"
+    connected.as(IyiSocket).close
+    peer.as(IyiSocket).close
+    listener.close
+    puts "connect_by_name: ok"
+
+    # A failure starts the next attempt at once (RFC 8305 section 5), not
+    # when the attempt delay would have: multi.test is 127.0.0.1 and ::1,
+    # raced ::1 first, and only 127.0.0.1 listens. Windows takes 2 s to
+    # refuse a connect, so there the delay starts 127.0.0.1 first and the
+    # time says nothing.
+    four = IyiSocket.listen("127.0.0.1", 0)
+    began = Resolver.now_ms
+    fallback = IyiSocket.connect("multi.test", four.local_port, resolver)
+    took = Resolver.now_ms - began
+    check fallback.is_a?(IyiSocket), "a refused address falls back to the next: #{fallback.is_a?(SocketError) ? fallback.message : "cancelled"}"
+    {% if !flag?(:win32) %}
+      check took < 200, "a refused first address starts the next at once: #{took} ms"
+    {% end %}
+    fallback.as(IyiSocket).close
+    four.close
+    puts "connect_fallback: ok"
+
+    unresolved = IyiSocket.connect("nx.test.", 80, resolver)
+    check unresolved.is_a?(SocketError), "an unresolved name is a SocketError"
+    failure = unresolved.as(SocketError)
+    check failure.unresolved? && failure.dns_error.as(DnsError).not_found?, "unresolved? and not_found?"
+    check failure.message.starts_with?("cannot resolve nx.test.: the name does not exist"), "the sentence names the host: #{failure.message}"
+    puts "unresolved_connect: ok"
+
+    # HTTPS records (RFC 9460 section 3), over the server above.
+    by_priority = "1 . port=8001 | 2 . port=8002 | 3 . port=8003"
+    same "svc.test after 0 aliases: #{by_priority}", answer_of(resolver.https_records("svc.test")), "ServiceMode records by priority"
+    cnamed = resolver.https_records("cn.test")
+    check cnamed.is_a?(SvcbAnswer) && cnamed.records.size == 1 && cnamed.records[0].endpoint == "svc2.test", "a CNAME followed, \".\" the owner it ended at: #{answer_of(cnamed)}"
+    log.clear
+    same "_8443._https.web.test after 0 aliases: 1 . alpn=\"h2\"", answer_of(resolver.https_records("web.test", 8443)), "another port asks _port._https.host (section 9.1)"
+    same "_8443._https.web.test/HTTPS", log.join(" "), "the port-prefixed name alone"
+    nodata = resolver.https_records("web.test")
+    check nodata.is_a?(DnsError) && nodata.no_address? && nodata.message.includes?("web.test: the name has no HTTPS record"), "NODATA: no HTTPS record: #{answer_of(nodata)}"
+    missing = resolver.https_records("nx.test")
+    check missing.is_a?(DnsError) && missing.not_found?, "NXDOMAIN: #{answer_of(missing)}"
+    bad = resolver.https_records("bad.test")
+    check bad.is_a?(DnsError) && bad.malformed? && bad.message.includes?("not in increasing order"), "one malformed record refuses the set (section 2.2): #{answer_of(bad)}"
+    puts "https_records: ok"
+
+    same "svc.test after 1 aliases: #{by_priority}", answer_of(resolver.https_records("apex.test")), "an AliasMode record followed to its target's records"
+    same "svc.test after 2 aliases: #{by_priority}", answer_of(resolver.https_records("hop.test")), "two AliasMode records followed"
+    same "svc.test after 1 aliases: #{by_priority}", answer_of(resolver.https_records("mixed.test")), "ServiceMode beside AliasMode passed over (section 2.4.1)"
+    gone = resolver.https_records("gone.test")
+    check gone.is_a?(SvcbAnswer) && gone.unavailable? && gone.records.empty?, "AliasMode to \".\": the service says it is not there: #{answer_of(gone)}"
+    same "a.test after 1 aliases: ", answer_of(resolver.https_records("bare.test")), "an alias to a name with no HTTPS records ends there, the target the endpoint left"
+    puts "https_alias: ok"
+
+    # The chain that never ends first: without the bound the lookup would
+    # ask until it was killed.
+    log.clear
+    endless = resolver.https_records("chain1.test")
+    check endless.is_a?(DnsError) && endless.malformed?, "a chain of AliasMode records that never ends is malformed: #{answer_of(endless)}"
+    same "chain1.test/HTTPS chain2.test/HTTPS chain3.test/HTTPS", log.join(" "), "and asked about #{SvcbAnswer::MAX_ALIASES + 1} times"
+    far = resolver.https_records("far.test")
+    check far.is_a?(DnsError) && far.malformed? && far.message.includes?("AliasMode"), "three AliasMode records are past the bound: #{answer_of(far)}"
+    puts "https_alias_bound: ok"
+
+    happy_eyeballs
+
+    server.close
+    forger.close
+    tcp.close
+    0
+  end
+end
+
+puts "all checks passed"

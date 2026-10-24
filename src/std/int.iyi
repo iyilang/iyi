@@ -15,19 +15,20 @@
 #
 # What it refuses: arithmetic that leaves the type panics with "arithmetic
 # overflow" (the `&+` family wraps instead); a conversion that does not fit
-# panics the same way, and the `to_i8?` family answers nil instead; a double
+# panics the same way, the `to_i8?` family answers nil instead, and the
+# `unsafe_to_i8` family keeps the low bits; a double
 # converts by truncating first, so `127.9.to_i8` is 127 and `(-0.5).to_u16`
 # is 0, and what is refused is a truncation the type does not hold; `//` and
 # `%` by zero panic "division by zero" / "modulo by zero"; `digits` of a
-# negative number, a base under 2, a `chr` outside 0..127, and a `to_s` base
-# outside 2..36 are refused with a sentence. There is no `Int32::MAX`: the
-# edges of a type are its literals, and that holds for every type here.
+# negative number, a base under 2, a `chr` of a surrogate or past
+# 0x10FFFF, and a `to_s` base outside 2..36 are refused with a sentence.
+# There is no `Int32::MAX`: the edges of a type are its literals, and that
+# holds for every type here.
 #
 # Against a double every integer compares exactly, `<=>` included:
 # `9007199254740993_i128 == 9007199254740992.0` is false. The prelude's own
 # four (`Int32`, `Int64`, `UInt8`, `UInt64`) keep the prelude's `==` family,
-# which rounds `Int64` and `UInt64` to the double first; their `<=>` here
-# is exact.
+# which is exact as well and agrees with their `<=>` here.
 module std/int
 
 {% begin %}
@@ -104,7 +105,9 @@ module std/int
   {% for from in types %}
     struct ::{{ from[0].id }}
       # Conversions: the checked form panics "arithmetic overflow" when the
-      # value does not fit; the `?` form answers nil instead. A pair the
+      # value does not fit; the `?` form answers nil instead; the unchecked
+      # form is the instruction - truncated, or extended by the sign of the
+      # type it leaves - as the prelude's `unsafe_to_u8` is. A pair the
       # prelude already declares is not declared twice.
       {% for conv in convs %}
         {% to_name = conv[1] %}
@@ -113,6 +116,10 @@ module std/int
           @[::Primitive(:convert)]
           @[Raises]
           def {{ conv[0].id }} : {{ to_name.id }}
+          end
+
+          @[::Primitive(:unchecked_convert)]
+          def unsafe_{{ conv[0].id }} : {{ to_name.id }}
           end
         {% end %}
 
@@ -229,9 +236,14 @@ module std/int
           def {{ op.id }}(other : Float64) : Float64
           end
         {% end %}
+      {% end %}
 
-        # An integer divided by a float is a float, as the prelude has it
-        # for `Int32` and `Int64`.
+      # An integer divided by a float is a float, as the prelude has it for
+      # `Int32` and `Int64` - and for `UInt8` and `UInt64` too, which the
+      # prelude does not write: `x / 3.0` did not type for them, and with a
+      # literal divisor the `Float32` overload took it, so `1_u8 / 3.0` was a
+      # single, 0.33333334.
+      {% unless from[0] == "Int32" || from[0] == "Int64" %}
         def /(other : Float64) : Float64
           to_f64 / other
         end
@@ -241,7 +253,7 @@ module std/int
       # edges, then its floor - one of the type, once inside them - against
       # the value, then its fraction decides a tie. NaN is after every
       # number, as `Float64#<=>` places it. The prelude's `Int64 == Float64`
-      # is not exact, and is the prelude's to mend; this one is.
+      # is exact too, and agrees with this on every number.
       def <=>(other : Float64) : Int32
         return -1 if other != other
         return -1 if other >= {{ float_limits[from[0]].id }}
@@ -279,12 +291,14 @@ module std/int
     {% end %}
 
     # The conversions to the integers the prelude does not reach. The
-    # unchecked form is the instruction, for every target; the checked
-    # form truncates first and refuses what the truncation does not hold:
+    # unchecked form saturates, as the prelude's does - past the range it is
+    # the nearest bound and NaN is 0, in every build and on every target -
+    # but for the two 128-bit ones below; the checked form truncates first
+    # and refuses what the truncation does not hold:
     # `127.9.to_i8` is 127 and `(-0.5).to_u16` is 0, where the range was
     # once checked on the untruncated value and both were refused. NaN and
     # the infinities are refused. The prelude's own five (`to_i`, `to_i32`,
-    # `to_i64`, `to_u8`, `to_u64`) still check before truncating.
+    # `to_i64`, `to_u8`, `to_u64`) are the compiler's and say the same.
     {% for conv in convs %}
       {% if conv[1] == "Int128" || conv[1] == "UInt128" %}
         # Not the instruction: a double to a 128-bit integer is a call
@@ -310,7 +324,10 @@ module std/int
             magnitude
           {% end %}
         end
-      {% else %}
+      {% elsif !prelude_convs.includes?(conv[0]) %}
+        # The prelude declares the unchecked form for its own five, as it
+        # declares the checked one, so declaring it here too would be R-3's
+        # duplicate.
         @[::Primitive(:unchecked_convert)]
         def unsafe_{{ conv[0].id }} : {{ conv[1].id }}
         end
@@ -359,16 +376,17 @@ module std/int
 
       {% unless name == "Int32" || name == "Int64" %}
         # A shift by the width or more answers zero (or the sign, shifting a
-        # negative value right), which the processor does not promise.
+        # negative value right), which the processor does not promise, and a
+        # negative count shifts the other way, as the prelude's `Int32` does.
         def <<(count : Int32) : {{ name.id }}
-          count >= {{ bits }} || count < 0 ? 0_{{ suffix.id }} : unsafe_shl(count)
+          count < 0 ? self >> (0 - count) : (count >= {{ bits }} ? 0_{{ suffix.id }} : unsafe_shl(count))
         end
 
         def >>(count : Int32) : {{ name.id }}
           {% if signed %}
-            count >= {{ bits }} || count < 0 ? (self < 0 ? -1_{{ suffix.id }} : 0_{{ suffix.id }}) : unsafe_shr(count)
+            count < 0 ? self << (0 - count) : (count >= {{ bits }} ? (self < 0 ? -1_{{ suffix.id }} : 0_{{ suffix.id }}) : unsafe_shr(count))
           {% else %}
-            count >= {{ bits }} || count < 0 ? 0_{{ suffix.id }} : unsafe_shr(count)
+            count < 0 ? self << (0 - count) : (count >= {{ bits }} ? 0_{{ suffix.id }} : unsafe_shr(count))
           {% end %}
         end
 
@@ -506,7 +524,12 @@ module std/int
 {% end %}
 
 struct ::Int
-  def <=>(other : self) : Int32
+  # Against any integer, as the other library's `Int#<=>` is, the widths
+  # compared exactly by the primitives above. Against `self` only, an
+  # `Int64` beside an `Int32` did not type, and once `std/traits` added
+  # `Int32#<=>(Int32)` the literal in `1 <=> 1_i64` cast to that and to
+  # `Float64` both: "ambiguous call" where the other library answers 0.
+  def <=>(other : ::Int) : Int32
     self < other ? -1 : (self > other ? 1 : 0)
   end
 
@@ -519,15 +542,22 @@ struct ::Int
     (self & mask) == mask
   end
 
+  # Euclid on the side of zero where every magnitude fits, as `Math.gcd`
+  # works: the non-positive side for a signed type, its minimum included.
+  # Taking `abs` first refused the minimum, and `(-2147483648).gcd(6)`
+  # panicked "arithmetic overflow" where `Math.gcd` answered 2. Only
+  # gcd(minimum, 0), whose answer does not fit, overflows.
   def gcd(other : self) : self
-    a = abs
-    b = other.abs
+    zero = self - self
+    signed = zero &- 1 < zero
+    a = signed && self > 0 ? zero - self : self
+    b = signed && other > 0 ? zero - other : other
     while b != 0
       t = b
       b = a % b
       a = t
     end
-    a
+    signed ? zero - a : a
   end
 
   def lcm(other : self) : self
@@ -550,10 +580,12 @@ struct ::Int
     result
   end
 
-  # The character with this code, ASCII: the prelude's `Int32#chr`
-  # contract for every integer type.
+  # The character with this code point: the prelude's `Int32#chr` contract
+  # for every integer type, every code point but the surrogates. It stopped
+  # at ASCII after the prelude's had moved on, so `233.chr` was 'é' and
+  # `233_i64.chr` panicked "233 is out of char range".
   def chr : Char
-    raise "#{self} is out of char range" if self < 0 || self > 127
-    to_u8.unsafe_chr
+    raise "#{self} is out of char range" if self < 0 || self > 0x10FFFF || (self >= 0xD800 && self <= 0xDFFF)
+    to_i32.unsafe_chr
   end
 end

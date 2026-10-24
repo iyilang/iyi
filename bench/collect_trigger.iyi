@@ -19,7 +19,7 @@
 # Not under `samples/`: the sample count is a gated number, and samples are
 # explanations rather than torture tests.
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin)) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   def count(value : UInt64) : String
     value.to_i64.to_s
   end
@@ -56,6 +56,16 @@
     end
   end
 
+  # Garbage of the spike's class, a node at a time and nothing kept.
+  def churn_nodes(nodes : UInt64) : Nil
+    made = 0_u64
+    while made < nodes
+      node = Pointer(UInt64).malloc(2048_u64)
+      node.value = made
+      made = made + 1_u64
+    end
+  end
+
   def arena_count : UInt64
     arenas = 0_u64
     arena = IyiHeap.first_arena
@@ -84,6 +94,25 @@
     Held.keep = head
   end
 
+  # Builds the spike, collects with it rooted, reads the root back and the
+  # arena count, and drops the root: `[peak, arenas_released before]`.
+  # Read the root back, for the reason the sweep exercise gives: a global
+  # written and never read is a store the back end may legally drop, and
+  # it did - the release build on darwin collected the whole chain here, so
+  # the spike's arenas were gone before `peak` was read and the scavenge
+  # measured nothing.
+  @[NoInline]
+  def spike_peak : Tuple(UInt64, UInt64)
+    build_spike(4096_u64)
+    IyiMark.collect
+    raise "scavenge: the spike's root was lost" if Held.keep == 0_u64
+    peak = arena_count
+    raise "scavenge: 64 MiB live built only #{count(peak)} arenas" if peak < 4_u64
+    released_before = IyiMark.arenas_released
+    Held.keep = 0_u64
+    {peak, released_before}
+  end
+
   puts "== the trigger, the default allocator"
 
   # 1. Below the budget, nothing runs. A quarter MiB of garbage is a quarter
@@ -94,6 +123,40 @@
     raise "quiet: #{count(IyiMark.collections)} collections ran under a #{count(IyiMark.budget)}-byte budget"
   end
   puts "    quiet: a quarter MiB of churn ran no collection under the #{count(IyiMark.budget)}-byte budget"
+
+  # 1b. The scheduler's own state survives the program's first collection.
+  # The run queue, the lists and the poller sit on one object a
+  # `@[ThreadLocal]` names, and a TLS block is not in the image's data the
+  # root walk scans; what roots the object is the global list every state
+  # is linked on when it is made. Both addresses are kept XOR'd with a key,
+  # in a frame of their own, so nothing on this stack roots the object and
+  # the check measures the list.
+  #
+  # Asked of a mark, before anything is swept: the colour the mark from
+  # the roots gives the state says whether the next collection keeps it.
+  # A collection that freed it answered only as far as the program could
+  # still run afterwards - its stack walk asks the state for the running
+  # fiber - and the proof that unlinks the list faulted on Windows before
+  # it named anything, wherever the check stood. A mark frees nothing, and
+  # the colours go back to white after it.
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    first_marks = scheduler_marks(0x5A5A5A5A5A5A5A5A_u64)
+    # Calls deep enough to write over what `scheduler_marks` left below
+    # this frame: the mark scans the stack word by word, and the state's
+    # address, dead in a slot nothing wrote since, roots it.
+    churn(65536_u64)
+    IyiMark.mark
+    state_colour = IyiMark.colour(first_marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64)
+    IyiMark.unmark
+    if state_colour != IyiMark::BLACK
+      unrooted = "iyi: panic: scheduler state: a mark from the roots leaves the object the thread-local names white, so the first collection frees it out from under it\n"
+      __iyi_write(1, unrooted.to_unsafe.as(Void*), unrooted.bytesize.to_u64)
+      __iyi_exit(1)
+    end
+    IyiMark.collect
+    raise "scheduler state: marked black, and still not a live chunk after the first collection" if IyiRoots.base_of(first_marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64) == 0_u64
+    puts "    scheduler's state: the object its thread-local names lived through the first collection"
+  {% end %}
 
   # 2. Churn, and nobody calls collect. A rooted object with a pattern in it,
   # then 64 MiB of garbage: the collections have to come from the trigger,
@@ -116,9 +179,11 @@
     (survivor + index.to_i64).value = 0x3C_u8
     index = index + 1_u64
   end
+  # Counted from here: 1b's collection is the caller's, not the trigger's.
+  collections_before = IyiMark.collections
   churn(67108864_u64)
   IyiMark.settle
-  first_wave = IyiMark.collections
+  first_wave = IyiMark.collections - collections_before
   raise "trigger: 64 MiB of churn ran no collection, so nothing triggers" if first_wave == 0
   arenas = arena_count
   if arenas > before_churn + 2_u64
@@ -151,33 +216,11 @@
   (ballast + 4194303_i64).value = 9_u8
   puts "    budget: the same churn ran #{count(second_wave)} collections with 4 MiB live where it ran #{count(first_wave)} with none, budget now #{count(IyiMark.budget)} bytes"
 
-  # 3b. The scheduler's own state lives through the churn. The run queue,
-  # the lists and the poller sit on one object a `@[ThreadLocal]` names,
-  # and a TLS block is not in the image's data the root walk scans; what
-  # roots the object is the global list every state is linked on when it
-  # is made. Both addresses are kept XOR'd with a key, in a frame of their
-  # own, so nothing on this stack roots the object and the check measures
-  # the list: a state the sweep reclaimed carries the free flag, and the
-  # driver's proof unlinks the list and reads exactly that.
-  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+  # 3b. The scheduler's own state lives through the churn, rooted by the
+  # global list (1b); the thread-local names the same object after it, and
+  # that object still names the main fiber.
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     marks = scheduler_marks(0x5A5A5A5A5A5A5A5A_u64)
-    # One collection, then the sweep's own word before anything allocates:
-    # a chunk it reclaimed carries FREE_FLAG until the allocator hands it
-    # out again, and nothing between the sweep and this read can — so the
-    # flag, not the contents, says whether the state was collected out
-    # from under its thread-local, on every platform's allocation pattern
-    # alike (read after a churn, the chunk was somebody else's on darwin
-    # and the read was a fault instead of a name).
-    IyiMark.collect
-    state_word = IyiMark.flags(marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64)
-    if state_word & IyiHeap::FREE_FLAG != 0
-      # Named and left by the exit syscall, not raised: a panic's own path
-      # reaches for the scheduler's state, which is the object just found
-      # freed, and would fault before or after the name depending on the
-      # platform's allocation pattern.
-      puts "iyi: panic: scheduler state: after a collection the object the thread-local names is on a free list, collected out from under it"
-      __iyi_exit(1)
-    end
     before_state = IyiMark.collections
     churn(67108864_u64)
     IyiMark.settle
@@ -186,7 +229,7 @@
     raise "scheduler state: the churn beside it triggered nothing" if state_wave == 0
     raise "scheduler state: the thread-local names a different object after #{count(state_wave)} collections" if after[0] != marks[0]
     raise "scheduler state: the running fiber it names is not the main fiber it held before the churn" if after[1] != marks[1]
-    puts "    scheduler's state: the object its thread-local names lived through #{count(state_wave + 1_u64)} collections, rooted by the global list"
+    puts "    scheduler's state: the object its thread-local names lived through #{count(state_wave)} collections, rooted by the global list"
   {% end %}
 
   # 3c. The sweep is the allocator's and the helpers', not the pause's.
@@ -210,7 +253,7 @@
   # triggers collections; the object has to live through them, which is the
   # fiber-stack root walk carrying its weight under the trigger rather than
   # under the root exercise's hand-run walk.
-  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     ready = Channel(Int32).new
     release = Channel(Int32).new
     verdict = Channel(Int32).new
@@ -260,18 +303,17 @@
   # the defect this step exists to refuse. The pause line is reported
   # rather than asserted: a budget would be a number this file made up,
   # and the honest claim today is that the numbers exist and are measured.
-  build_spike(4096_u64)
-  IyiMark.collect
-  # Read the root back, for the reason the sweep exercise gives: a global
-  # written and never read is a store the back end may legally drop, and
-  # it did — the release build on darwin collected the whole chain here,
-  # so the spike's arenas were gone before `peak` was read and the
-  # scavenge measured nothing.
-  raise "scavenge: the spike's root was lost" if Held.keep == 0_u64
-  peak = arena_count
-  raise "scavenge: 64 MiB live built only #{count(peak)} arenas" if peak < 4_u64
-  released_before = IyiMark.arenas_released
-  Held.keep = 0_u64
+  #
+  # The peak is read and the root dropped inside a frame of its own, for
+  # the reason `build_spike` is one: reading the root back loads the head
+  # into a register, and the scan is conservative. Read here, in this
+  # frame, a --release build on Windows - whose convention has the callee
+  # keep more registers than SysV's, rsi and rdi among them - found none
+  # of the spike's arenas dead, five runs of five; read in a frame that
+  # returns, it releases them every time.
+  peak_and_before = spike_peak
+  peak = peak_and_before[0]
+  released_before = peak_and_before[1]
   # A small churn between the drop and the collections scrubs whatever
   # register or stack slot still names a spike node, the same laundering
   # the mark exercise's garbage step relies on.
@@ -288,6 +330,51 @@
   end
   puts "    scavenge: #{count(peak)} arenas at the peak, #{count(released)} released to the kernel, #{count(settled)} still mapped"
   puts "    pauses: last #{count(IyiMark.pause_last_ns)} ns, max #{count(IyiMark.pause_max_ns)} ns, #{count(IyiMark.pause_total_ns)} ns across #{count(IyiMark.collections)} collections"
+
+  # 6. A budget many arenas deep keeps the empty ones above four arenas'
+  # worth: the next epoch allocates that much again, and an arena handed
+  # back is one it maps and faults in afresh. 48 MiB live is a 96 MiB
+  # budget, two arenas above the floor; two epochs of 48 MiB of garbage
+  # in the spike's class, and the second maps at most one arena - the
+  # first's empty ones are there to take. Handed back instead, a program
+  # allocating 400 KB strings beside 133 MB it kept took 740,000 faults
+  # where it took 18,000 alone.
+  build_spike(3072_u64)
+  IyiMark.collect
+  raise "spare: the spike's root was lost" if Held.keep == 0_u64
+  raise "spare: 48 MiB live left a #{count(IyiMark.budget)}-byte budget, not two arenas above the floor" if IyiMark.budget < IyiMark::SPARE_BELOW + 2_u64 * IyiHeap::MAP
+  churn_nodes(3072_u64)
+  IyiMark.collect
+  spare_mapped = IyiHeap.arenas_mapped
+  churn_nodes(3072_u64)
+  spare_mapped = IyiHeap.arenas_mapped - spare_mapped
+  raise "spare: the second epoch's garbage mapped #{count(spare_mapped)} arenas afresh, so the first's empty ones went back to the kernel" if spare_mapped > 1_u64
+  Held.keep = 0_u64
+  puts "    spare: under a #{count(IyiMark.budget)}-byte budget the second epoch's 48 MiB of garbage mapped #{count(spare_mapped)} arenas afresh"
+
+  # 7. A thread's allocation counts when the thread ends. A cache reports
+  # its allocation a slice (64 KiB) at a time, and the slice a thread had
+  # not filled when it ended went with its cache, uncounted: ten thousand
+  # threads of a thousand short strings each ran no collection and mapped
+  # a gigabyte. Five hundred such threads end here - 40 KB each, 20 MB in
+  # all against a budget of twice the few MB live - this thread fills one
+  # slice, and that slice finds the budget crossed.
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    IyiMark.collect
+    before = IyiMark.collections
+    500.times do
+      IyiThread.start do
+        kept = [] of String
+        1000.times { |i| kept << "t#{i}" }
+        nil
+      end.join
+    end
+    churn(65536_u64)
+    if IyiMark.collections == before && !IyiMark.marking?
+      raise "threads: five hundred threads of a thousand strings each, then a slice here, ran no collection under a #{count(IyiMark.budget)}-byte budget"
+    end
+    puts "    threads: five hundred short-lived threads' allocation counted, and the next slice ran a collection"
+  {% end %}
 
   puts "    all trigger checks passed"
 {% else %}

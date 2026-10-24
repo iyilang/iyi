@@ -3,8 +3,11 @@
 #
 #     bash bench/std_dir_exercise.sh
 #
-# Proves the exercise holds plain and --release, that broken dot-entry filtering
-# and a dead glob matcher are caught, and what directory operations refuse:
+# Proves the exercise holds plain and --release, that broken dot-entry
+# filtering, a dead glob matcher, braces left unexpanded, a trailing
+# separator ignored, hidden names walked and - on Linux - a directory buffer
+# the collector does not scan are caught, that `**` does not walk through a
+# link back up the tree, and what directory operations refuse:
 # opening non-existent paths or files, deleting non-empty or non-existent
 # directories, creating existing directories, mkdir_p through a file, and
 # operating on closed directory handles.
@@ -84,14 +87,24 @@ echo "== every dir section reported"
 for phrase in "== create, exists and file paths" \
               "== nested creation with mkdir_p" \
               "== list entries and dot entries policy" \
+              "== entries read across a collection" \
               "== glob star, recursive, hidden, and no-match" \
               "== current working directory and cd" \
-              "== delete empty and non-empty directories"; do
+              "== delete empty and non-empty directories" \
+              "== a directory read across a collection"; do
   if ! grep -q "$phrase" "$WORK/dir-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
   fi
 done
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    if ! grep -q "== windows roots, drives" "$WORK/dir-plain.out" 2>/dev/null; then
+      echo "  missing section: == windows roots, drives"
+      status=1
+    fi
+    ;;
+esac
 [ "$status" -eq 0 ] && echo "  sections reported"
 
 echo
@@ -133,10 +146,10 @@ if [ -z "$PY" ]; then
 elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/dir.iyi").read_text()
-old = "glob_match(pattern.to_unsafe, 0, pattern.bytesize, name.to_unsafe, 0, name.bytesize)"
+old = "next unless File.match?(name, seg)"
 if old not in src:
     raise SystemExit("glob patch site missing")
-Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "false", 1))
+Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "next", 1))
 PY
 then
   echo "  the glob patch did not apply"
@@ -149,13 +162,126 @@ else
 fi
 
 echo
+echo "== a ** walk does not go through a link"
+# A link back to its own directory: `**` walked it again at every level,
+# so the one file under it came back 64 times - and two such links
+# branched past any finish - until a cap of 64 levels stopped the walk.
+# A junction on Windows, which any user may make; a symlink elsewhere.
+mkdir -p "$WORK/looped/d"
+printf 'x' > "$WORK/looped/d/x.txt"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/looped/d/loop")" "$(cygpath -w "$WORK/looped/d")" > /dev/null
+    ;;
+  *) ln -s "$WORK/looped/d" "$WORK/looped/d/loop" ;;
+esac
+printf 'module main\n\nimport std/dir::{Dir}\n\nputs Dir.glob(Program.args[0] + "/**/*.txt").size\n' > "$WORK/looped.iyi"
+if [ ! -d "$WORK/looped/d/loop" ]; then
+  echo "  no link was made, so a walk past one is unmeasured"
+else
+  answer="$("$IYI" run "$WORK/looped.iyi" -- "$WORK/looped" 2>&1)"
+  if [ "$answer" = "1" ]; then
+    echo "  ** answers the file once, past a link back to its directory"
+  else
+    echo "  ** past a link back to its directory answered: $answer"
+    status=1
+  fi
+fi
+# The link goes before the trap's `rm -rf`, which was seen to refuse a
+# junction with "Permission denied" and leave the scratch directory.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    [ -d "$WORK/looped/d/loop" ] && MSYS_NO_PATHCONV=1 cmd /c rmdir "$(cygpath -w "$WORK/looped/d/loop")"
+    ;;
+  *) rm -f "$WORK/looped/d/loop" ;;
+esac
+
+echo
+echo "== proving the other glob and walk checks can fail"
+# dir_broken <label> <name> <old> <new> <phrase>: the exercise built against
+# a copy with one change, under a clock - a freed directory buffer is a
+# walk that never ends - and it must fail at the check that names it, or,
+# for the walk, not finish.
+dir_broken() {
+  if [ -z "$PY" ]; then
+    echo "  $1: no python3 on this machine, so the proof is unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/$2/std"
+  if ! OLD="$3" NEW="$4" "$PY" - "$REPO/src/std/dir.iyi" "$WORK/$2/std/dir.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1]).read()
+assert src.count(os.environ["OLD"]) == 1
+open(sys.argv[2], "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+  then
+    echo "  $1: the patch did not apply"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$2${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$2/program" "$REPO/bench/std_dir_exercise.iyi" >"$WORK/$2/build.log" 2>&1; then
+    echo "  $1: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/$2/build.log" | sed 's/^/    /'
+    status=1
+    return
+  fi
+  timeout 120 "$WORK/$2/program" >"$WORK/$2/out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $1: the exercise PASSED on a broken module"
+    status=1
+  elif [ "$code" -eq 124 ] || grep -q "$5" "$WORK/$2/out"; then
+    echo "  $1: caught"
+  else
+    echo "  $1: failed, but not at its check"
+    tail -3 "$WORK/$2/out" | sed 's/^/    /'
+    status=1
+  fi
+}
+dir_broken "braces left unexpanded" no_braces '      elsif c == 123_u8' '      elsif c == 0_u8' "glob: braces choose among names"
+dir_broken "a trailing separator ignored" no_tail '      tail = glob_sep?(bytes[n - 1]) ? sep : nil' '      tail = nil' "glob: a trailing separator answers directories"
+dir_broken "** into hidden directories" hidden_walk '      yield name unless name.starts_with?('"'"'.'"'"')' '      yield name' "glob \* skips hidden names"
+# Linux only. On Windows a freed find buffer is rewritten by FindNextFileW
+# right before every name is read out of it, so the names stay right and
+# the damage lands on whatever the block was handed to next: the walk check
+# passed on a broken copy there. The broken copy is the old stream: the
+# records in a block of their own, its address kept as an integer in the
+# stream's block, which the collector does not scan. The first check a
+# freed buffer trips is the earlier section's - entries read, a glob
+# walked, strings written over - or the walk's own, or the walk never ends.
+case "$(uname -s)" in
+  Linux)
+    dir_broken "a directory buffer the collector does not scan" stream_atomic '      stream = Pointer(UInt8).malloc((HEAD + BUFFER).to_u64)
+      words = stream.as(Int64*)
+      words[0] = fd
+      words[1] = 0_i64
+      words[2] = 0_i64
+      stream.as(Void*)
+    end
+
+    def self.readdir(dirp : Void*) : Void*
+      words = dirp.as(Int64*)
+      records = dirp.as(UInt8*) + HEAD' '      stream = Pointer(UInt8).malloc((HEAD + 8_i64).to_u64)
+      words = stream.as(Int64*)
+      words[0] = fd
+      words[1] = 0_i64
+      words[2] = 0_i64
+      words[3] = Pointer(UInt8).malloc(BUFFER.to_u64).address.to_i64
+      stream.as(Void*)
+    end
+
+    def self.readdir(dirp : Void*) : Void*
+      words = dirp.as(Int64*)
+      records = Pointer(UInt8).new(words[3].to_u64)' 'across\|written over' ;;
+esac
+
+echo
 echo "== what dir operations refuse"
 refuses() { # refuses <label> <name> <phrase> <code>
   local label="$1" name="$2" phrase="$3"
   shift 3
   cat > "$WORK/$name.iyi" <<EOF
-import std/dir
-using std/dir::{Dir}
+import std/dir::{Dir}
 $*
 EOF
   if IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$WORK/$name.iyi" >"$WORK/$name.out" 2>&1; then
@@ -193,6 +319,22 @@ refuses "open a path containing a NUL byte" open_nul "path contains a NUL byte" 
 
 refuses "cd to a missing directory" cd_missing "Cannot change directory to" \
   'Dir.cd("'"$WORK"'/missing_target_cwd")'
+
+# The working directory holds 254 characters unless long paths are
+# enabled, while every other call here takes a longer directory, and the
+# refusal named the directory and said nothing of why. Driven from here,
+# not the exercise: from an artifact a library's panic names a site its
+# source build does not, and the two runs' output is compared.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    long="$WORK"
+    for letter in d e f g; do
+      long="$long/$(printf "$letter%.0s" $(seq 60))"
+    done
+    refuses "cd past the working directory's limit" cd_long "past 254 characters" \
+      'Dir.mkdir_p("'"$long"'"); Dir.cd("'"$long"'")'
+    ;;
+esac
 
 refuses "read from a closed directory handle" read_closed "Cannot read from closed Dir" \
   'd = Dir.new("'"$WORK"'"); d.close; d.read'

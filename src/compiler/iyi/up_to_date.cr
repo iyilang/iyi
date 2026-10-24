@@ -199,9 +199,20 @@ module Iyi
         end
       end
 
+      # The record is what lets the next build skip, never what this build
+      # was for: a cache rotation can take its directory away while the
+      # build runs (`bench/packages_get.sh`, job 120832589669), and a record
+      # that cannot be written is the next build compiling, not this one
+      # failing.
       staging = "#{@path}.#{Process.pid}"
-      File.write(staging, json)
-      File.rename(staging, @path)
+      begin
+        Dir.mkdir_p(File.dirname(@path))
+        File.write(staging, json)
+        File.rename(staging, @path)
+      rescue ex : File::Error
+        File.delete?(staging) rescue nil
+        return ["its record could not be written (#{ex.message})"]
+      end
       nil
     end
 

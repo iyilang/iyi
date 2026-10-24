@@ -538,6 +538,12 @@ jobs:
       - name: The edit-rebuild loop stays cheap
         run: python3 bench/rebuild_speed.py
 
+      # A rebuild with nothing changed compiles nothing, `_main` included:
+      # debug builds ordered module initialisers at random, and every
+      # build was a slightly different program (#141).
+      - name: A rebuild with nothing changed reuses every object
+        run: python3 bench/rebuild_reuse.py
+
       # R-2c types every written def at its definition, and the probes that
       # do it merged their variables into the program's, one probe after
       # another: the front end grew with the square of the defs. Held as a
@@ -2540,6 +2546,7 @@ jobs:
           python bench/context_pack.py
           python bench/generic_boundary.py
           python bench/rebuild_speed.py
+          python bench/rebuild_reuse.py
 
       # The race, for the record, as darwin's job runs it: the same three
       # programs under iyi's collector, Boehm and Go on this runner. It

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 22,608 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 128,441 lines, none of it written in iyi |
+| compiler | 128,475 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,7 +1028,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 128,441 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 128,475 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 124,536 in std |
 | Specs | 21,146 lines | 15,176 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -3763,27 +3763,60 @@ module exports (R-2), and cannot reopen anything (R-3). So a module's
 initialiser has nothing of an unrelated module to look at. It does have what
 both modules import. This rule used to say the order was *unobservable*, that
 no program could tell which of two independent modules went first and no
-experiment could detect it, and four small modules do. `io/a` and
-`io/b` each import `io/c`, and each initialiser is one call, `Log.add("a")`
-and `Log.add("b")`, appending to a class variable `io/c` declares; the entry
-module's `puts Log.items.join(",")` printed `b,a` in debug builds under
-`IYI_INIT_SEED=1` and `4`, and `a,b` under 2, 3 and 6 and in a release build.
+experiment could detect it, and four small modules do. `probe/a` and
+`probe/b` each import `probe/log`, and each initialiser is one call,
+`Log.add("a")` and `Log.add("b")`, appending to a class variable `probe/log`
+declares; the entry module's `puts Log.items.join(",")` prints `b,a` in a
+debug build and under `IYI_INIT_SEED=2`, `5` and `6`, and `a,b` under 1, 3,
+4 and 7 and in a release build. `bench/rebuild_reuse.py` builds it under the
+eight seeds 0 to 7.
 Nothing refuses such an initialiser. Refusing it would mean knowing which
 calls write another module's state, which is rule 5's direction and is not
 built. The tiebreak is still left unspecified, on purpose: an output that
 changes with it is the bug.
 
 A rule a program can break without a word is a rule that rots, so **debug
-builds shuffle the order of independent modules. Built.** This is Go's own
-trick: map iteration was randomised precisely to stop programs depending on an
-order the specification never promised, and Go went further there than in its
-own `init`, which is ordered by file name and therefore depends on one.
+builds reorder independent modules. Built.** This is Go's own trick: map
+iteration was randomised precisely to stop programs depending on an order the
+specification never promised, and Go went further there than in its own
+`init`, which is ordered by file name and therefore depends on one.
 
-The compiler walks the DAG the way Kahn's algorithm does and picks at random
-among the modules whose imports have all been placed, so no two debug builds of
-a program need hand out the same order. Release builds keep the load order, so
-what ships is reproducible; `IYI_INIT_SEED` pins a debug one, for a program
-that fails under an order and has to be looked at twice.
+The compiler walks the DAG the way Kahn's algorithm does and, among the
+modules whose imports have all been placed, takes the one whose module path
+hashes lowest. That is Go's rule for its packages since Go 1.21, the first
+ready package in import-path order
+([Program initialization](https://go.dev/ref/spec#Program_initialization)),
+with a hash where Go sorts, for two reasons. A seed can move a hash and cannot
+move a sort, and `IYI_INIT_SEED=n` salts the hash, for looking at a program
+under another order. And a sort agrees with the load order wherever a file
+writes its imports alphabetically, as 30 of the 148 `.iyi` files in src/std,
+samples and bench with two or more imports did at 0.19.1, and the load order
+is the one this exists to differ from. Release builds keep the load order.
+
+**The pick used to be random, and that cost every rebuild (#141).** A fresh
+order each debug build meant no two needed to agree, and no two debug builds
+were the same program. Codegen is demand-driven from the entry, so a new
+order of the initialisers changed `_main` and the order functions were emitted
+into every unit an initialiser reached first, and a unit's object is reused
+only when its bitcode is the previous build's byte for byte. Ten no-change
+rebuilds of `bench/rebuild_reuse.py`'s seven-module fixture compiled 1 to 12
+of its 100 objects again, `_main` every time and `String`,
+`Hash(String, Int32)` and `Std::Regex::RxCompiler` among the rest; #141
+reports 2 to 16 of 991 on each of six rebuilds of a 10,700-line application.
+Disassembled over three more such rebuilds, every unit compiled again defined
+the same functions as in the build before it: most in another order (`_main`
+its 66 behind another order of the five initialisers, `String` its 52), the
+rest with their declarations reordered or an unused `printf` declaration
+gained or lost.
+Hashed, every debug build of an import graph hands out the same order, and the
+same ten rebuilds compile nothing, `_main` included. A module that nothing
+else imports goes in without reordering the others; codegen's own order still
+moves, so adding one to that fixture compiled 14 to 16 of 101 objects again
+under four seeds, against 15 to 22 when the order was a seeded shuffle.
+
+What a fixed order gives up: a program that works only in its hashed order
+works in every debug build and fails in a release one, where the random order
+would have failed some debug builds first. `IYI_INIT_SEED` is how to look.
 
 **What it cost, measured.** Every sample was built under eight orders and all
 eight produced identical output. The result is thinner than it sounds: of the
@@ -3792,9 +3825,9 @@ other, and their initialisers are declarations with nothing to observe. What it
 does establish is that the reordering is safe. The tree the compiler hands the
 rest of the pipeline is still one it types and generates code for, and that no
 sample was quietly relying on load order. Evidence for what the rule *catches*
-is the program under rule 2, whose unspecified order printed both ways across
-five seeds: its modules do work at initialisation, into a class variable they
-share.
+is the program under rule 2, whose unspecified order prints both ways across
+the eight seeds: its modules do work at initialisation, into a class variable
+they share.
 III.4.5 is the reason to expect few such programs, since module-level mutable
 state is not shareable and an initialiser mostly computes constants.
 
@@ -3821,7 +3854,7 @@ entry file is not in the list, which is rule 1 applied to it: it imports
 everything, so it initialises last. `samples/iyi/init_order.iyi` is the case
 above, printing in the order the DAG fixes.
 
-This is the separation rule 2's shuffle was waiting for. The order is now a
+This is the separation rule 2's reordering was waiting for. The order is now a
 list the compiler owns rather than a property of where the text sits, and it
 is the same separation Part IV needs, since an artifact cannot store an
 initialiser it never separated. What is still missing for Part IV is the step
@@ -8622,8 +8655,8 @@ Named honestly, so nobody mistakes this draft for complete.
    relative order between independent modules that is unspecified (two
    initialisers writing a module both import can show it), no `init()`, no
    import for side effects, and initialisation that may not fail. All but "no
-   import for side effects" are built, the shuffle that shows a program
-   depending on the unspecified order included.
+   import for side effects" are built, the debug reordering that shows a
+   program depending on the unspecified order included.
    That last one is the only rule here with a cost and no measurement.
 5. ~~**Concurrency semantics.**~~ **Specified in III.4**: structured
    concurrency so a leak is unrepresentable, cancellation owned by the scope

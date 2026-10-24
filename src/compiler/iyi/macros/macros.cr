@@ -328,19 +328,31 @@ class Iyi::Program
         return false
       end
 
+    # Both lists are compared as absolute, normalised paths. The one written
+    # at compile time is `Program#requires`, and an `import` resolved on
+    # `IYI_PATH` lands there spelled as the entry spells it: `$ORIGIN/../src`
+    # makes `.build/../src/std/eiy.iyi`. `IyiPath#find` below expands what it
+    # returns, so the same file came back as `src/std/eiy.iyi`, the lists
+    # never matched, and every build that rendered a template relinked the
+    # EIY helper inside `Semantic (main)` and then started that freshly
+    # written program for each `Eiy.render` (#143). Normalising here rather
+    # than where the list is written also reuses a helper an earlier compiler
+    # recorded.
     requires_with_timestamps =
       begin
-        Array(RequireWithTimestamp).from_json(File.read(requires_path))
+        Array(RequireWithTimestamp).from_json(File.read(requires_path)).map do |required|
+          RequireWithTimestamp.new(File.expand_path(required.filename), required.epoch)
+        end
       rescue JSON::Error
         return false
       end
 
     # From the recorded requires we reconstruct the effective required files.
     # We start with the target filename
-    required_files = Set{filename}
+    required_files = Set{File.expand_path(filename)}
     recorded_requires.map do |recorded_require|
       files = @program.find_in_path(recorded_require.filename, recorded_require.relative_to)
-      required_files.concat(files) if files
+      files.each { |file| required_files << File.expand_path(file) } if files
     rescue Iyi::IyiPath::NotFoundError
       # Maybe the file is gone
       next

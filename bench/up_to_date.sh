@@ -186,12 +186,15 @@ grep 'Up-to-date check: none of' "$WORK/b.log" | sed 's/^/       /'
 # to fingerprint it before it knew the file was the output - 1.97 s against
 # 0.018 s on a debug compiler and a 1.3 MB program.
 # The program itself, not `bin/iyi`'s shell wrapper, which Windows cannot
-# start from Python (WinError 193, job 120836799899) and which would add a
-# shell's start to both sides of the comparison anywhere.
+# start from Python (WinError 193, jobs 120836799899 and 120848661174, the
+# second because `$IYI` was not spelled as `$REPO/bin/iyi` there: matched
+# by its tail now, as below where the compiler's identity is asked).
 NATIVE="$IYI"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    [ "$IYI" = "$REPO/bin/iyi" ] && [ -x "$REPO/.build/iyi.exe" ] && NATIVE="$REPO/.build/iyi.exe"
+    case "$IYI" in
+      */bin/iyi) NATIVE="$(dirname "$(dirname "$IYI")")/.build/iyi.exe" ;;
+    esac
     ;;
 esac
 if [ -n "$PY" ]; then

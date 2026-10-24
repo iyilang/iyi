@@ -127,6 +127,11 @@ module Iyi
     # arrive verbatim (`\\?\C:\...`) or with either separator, and the cache's
     # own files have to be recognised whichever way they were spelled.
     def key(path : String) : String
+      BuildInputs.key(path)
+    end
+
+    # :ditto:
+    def self.key(path : String) : String
       expanded = ::File.expand_path(path)
       {% if flag?(:win32) %}
         expanded = Iyi.unverbatim(expanded).tr("/", "\\")
@@ -134,7 +139,13 @@ module Iyi
       expanded
     end
 
-    private def comparable(path : String) : String
+    # A `key` as names compare on this platform: without case on Windows.
+    def comparable(path : String) : String
+      BuildInputs.comparable(path)
+    end
+
+    # :ditto:
+    def self.comparable(path : String) : String
       path = key(path)
       {% if flag?(:win32) %}
         path = path.downcase

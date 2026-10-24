@@ -18,7 +18,7 @@ module Iyi
   # finished, so a build that fails or is interrupted leaves nothing that
   # could vouch for an output it did not finish.
   class UpToDate
-    FORMAT = 1
+    FORMAT = 2
 
     # The switches that change what a build prints and not what it builds,
     # left out of the comparison so that asking `-s` for the phases of a
@@ -95,9 +95,10 @@ module Iyi
         end
       end
 
+      outputs = record["outputs"].as_a.map(&.as_s).to_set
       record["listings"].as_h.each do |dir, names|
         @checked += 1
-        now = BuildInputs.children(dir)
+        now = BuildInputs.children(dir).try { |children| UpToDate.without(outputs, dir, children) }
         was = names.as_a?.try(&.map(&.as_s))
         return "the entries of #{Iyi.relative_filename(dir)} changed" unless now == was
       end
@@ -167,9 +168,21 @@ module Iyi
               outputs.uniq.each { |path| stamp_json(builder, path, BuildInputs.stamp(path)) }
             end
           end
+          # A listing is of the directories the build looked into, and the
+          # build's own outputs are not what it found there: on Windows the
+          # linker's search lists the working directory, which the program
+          # and its `.pdb` are then written into, so the next build always
+          # found "the entries changed" (run 40076984833). They are named
+          # here, and left out of the listing now and when it is compared.
+          compared = outputs.map { |path| inputs.comparable(path) }.to_set
+          builder.field "outputs" do
+            builder.array { compared.each { |path| builder.string path } }
+          end
           builder.field "listings" do
             builder.object do
-              inputs.listings.each { |dir, names| builder.field dir, names }
+              inputs.listings.each do |dir, names|
+                builder.field dir, names.try { |list| UpToDate.without(compared, dir, list) }
+              end
             end
           end
           builder.field "pkg_config" do
@@ -190,6 +203,13 @@ module Iyi
       File.write(staging, json)
       File.rename(staging, @path)
       nil
+    end
+
+    # *names*, the entries of *dir*, less those whose path is one of
+    # *outputs* (spelled as `BuildInputs#comparable` spells them).
+    def self.without(outputs : Set(String), dir : String, names : Array(String)) : Array(String)
+      return names if outputs.empty?
+      names.reject { |name| outputs.includes?(BuildInputs.comparable(::File.join(dir, name))) }
     end
 
     private def stamp_json(builder : JSON::Builder, path : String, stamp : BuildInputs::Stamp) : Nil

@@ -185,8 +185,17 @@ grep 'Up-to-date check: none of' "$WORK/b.log" | sed 's/^/       /'
 # whose time cannot vouch for it, and the recorder read the whole program
 # to fingerprint it before it knew the file was the output - 1.97 s against
 # 0.018 s on a debug compiler and a 1.3 MB program.
+# The program itself, not `bin/iyi`'s shell wrapper, which Windows cannot
+# start from Python (WinError 193, job 120836799899) and which would add a
+# shell's start to both sides of the comparison anywhere.
+NATIVE="$IYI"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    [ "$IYI" = "$REPO/bin/iyi" ] && [ -x "$REPO/.build/iyi.exe" ] && NATIVE="$REPO/.build/iyi.exe"
+    ;;
+esac
 if [ -n "$PY" ]; then
-  timing=$("$PY" - "$IYI" <<'PY'
+  timing=$("$PY" - "$NATIVE" <<'PY'
 import statistics, subprocess, sys, time
 iyi = sys.argv[1]
 def timed(extra):
@@ -200,6 +209,8 @@ skipped = statistics.median(pair[1] for pair in pairs)
 print(f"{skipped:.3f} {forced:.3f} {'ok' if skipped * 4 < forced else 'slow'}")
 PY
 )
+  # A timing that did not run is said as one, and fails the step below.
+  [ -n "$timing" ] || timing="? ? did-not-run"
   echo "       skipped $(echo "$timing" | cut -d' ' -f1) s against $(echo "$timing" | cut -d' ' -f2) s forced (medians of 5)"
   say "a skipped build costs under a quarter of a forced one" "$([ "$(echo "$timing" | cut -d' ' -f3)" = ok ]; echo $?)"
 else

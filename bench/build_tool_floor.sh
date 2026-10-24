@@ -2,7 +2,7 @@
 # Fails when iyi grows a build or runtime tool dependency:
 #
 #   crystal, llvm-config, c++, cc, git (build time)
-#   cc, dsymutil, pkg-config, git, ldd, wasmtime (compiler runtime)
+#   cc, dsymutil, pkg-config, git, ldd, wasmtime, xcrun (compiler runtime)
 #
 # A program iyi builds links only the platform libc (SPEC.md III.9, III.10).
 # The compiler binary links four libraries (libLLVM, libc++, libgc, libSystem).
@@ -50,6 +50,12 @@
 #      configuration. Goes when target libc is specified explicitly.
 #    - wasmtime: WebAssembly runtime for `iyi run --sandbox`. Conditional on
 #      --sandbox. Goes if sandboxing uses native container isolation.
+#    - xcrun: Names the macOS SDK (`xcrun --show-sdk-path`) so the up-to-date
+#      check (SPEC.md V.9 (e)) can find the libraries a link's `-l` flags
+#      name there. Conditional on macOS, and only when SDKROOT is unset; part
+#      of the Command Line Tools `cc` itself needs there. Without it the check
+#      says it cannot see those libraries and the build compiles. Goes when
+#      the check reads the SDK path from the driver instead.
 #
 # Usage:
 #     bash bench/build_tool_floor.sh
@@ -83,7 +89,7 @@ done
 
 # Allowlists: each entry has a stated reason in the header above.
 ALLOWED_BUILD_TOOLS="c++ cc crystal git llvm-config"
-ALLOWED_RUNTIME_TOOLS="cc dsymutil git ldd pkg-config wasmtime"
+ALLOWED_RUNTIME_TOOLS="cc dsymutil git ldd pkg-config wasmtime xcrun"
 
 # Tools reached only by auxiliary targets: docs, lint, spec, packaging. These
 # are not dependencies of iyi, because nobody needs them to build the compiler

@@ -17,13 +17,28 @@ module Iyi::EiyIO
   # output it is the buffer and nothing else.
   PLACEHOLDER = "__iyi_eiy_io_7f3a__"
 
-  private BOUNDED = /(?<![A-Za-z0-9_])__iyi_eiy_io_7f3a__(?![A-Za-z0-9_])/
-
   # *text* with every `PLACEHOLDER` replaced by *io_name*, or nil when one of
   # them is part of a longer word, which is not a name the helper printed.
+  # Scanned by hand, not with a `Regex`: one would link the compiler against
+  # libpcre2, which the Ubuntu 20.04 image the tarball is built on does not
+  # carry (integration/next, job 120807406014).
   def self.substitute(text : String, io_name : String) : String?
-    return nil unless text.scan(BOUNDED).size == text.scan(PLACEHOLDER).size
-    text.gsub(BOUNDED, io_name)
+    String.build do |io|
+      from = 0
+      while at = text.index(PLACEHOLDER, from)
+        after = at + PLACEHOLDER.bytesize
+        return nil if at > 0 && word_byte?(text.byte_at(at - 1))
+        return nil if after < text.bytesize && word_byte?(text.byte_at(after))
+        io.write text.to_slice[from, at - from]
+        io << io_name
+        from = after
+      end
+      io.write text.to_slice[from, text.bytesize - from]
+    end
+  end
+
+  private def self.word_byte?(byte : UInt8) : Bool
+    byte.unsafe_chr.ascii_alphanumeric? || byte == '_'.ord
   end
 
   # Whether *text* has the placeholder in it anywhere: a template or an

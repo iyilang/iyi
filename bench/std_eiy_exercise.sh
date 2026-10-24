@@ -371,7 +371,7 @@ else
 import sys
 with open('$REPO/src/compiler/iyi/macros/eiy_io.cr') as f:
     content = f.read()
-broken = content.replace('text.gsub(BOUNDED, io_name)', 'text')
+broken = content.replace('        io << io_name\n', '        io << PLACEHOLDER\n')
 if broken == content:
     sys.exit('the patch changed nothing')
 with open('$WORK/eiy_io_broken/eiy_io.cr', 'w') as f:

@@ -1487,10 +1487,15 @@ require "./file"
     # the chunk, reachable through the size header the next time a realloc
     # grows into them. Zeroed slack keeps a reused chunk indistinguishable
     # from a fresh mapping, the invariant every path in this file provided
-    # for free until now. `__iyi_malloc_atomic64` does not clear,
-    # matching `GC_malloc_atomic`: atomic means the collector never scans
-    # those bytes, so their initial value is no one's contract, and a reused
-    # chunk may come back dirty on that path on purpose.
+    # for free until now. `__iyi_malloc_atomic64` clears too, unlike
+    # `GC_malloc_atomic`, because codegen clears nothing after either
+    # entry under this branch (`generic_array_malloc`): the clear is the
+    # allocator's, which knows a carved chunk or a large mapping is the
+    # kernel's zero and leaves it alone. Cleared by the caller after the
+    # call, the fresh blocks of a large hash's growth held its worker
+    # unpreempted (SPEC.md III.4.13 part 9). An atomic instance
+    # (`__iyi_new`), which codegen zeroes before its initialisers run, and
+    # an atomic block `realloc` copies into are the paths left uncleared.
     #
     # The header's own two words are the exception, and they are cleared on
     # every reuse whichever path asked. They are not the caller's bytes, they
@@ -2277,13 +2282,19 @@ require "./file"
       # Untyped memory, `Pointer.malloc`'s and the like: headless and
       # flagged untyped, so the mark word-scans it, or, atomic, never
       # opens it. A 4096-byte buffer is a 4096-byte chunk. Past the top
-      # class it is a mapping and headed, the word its bits' home.
+      # class it is a mapping and headed, the word its bits' home. Both
+      # hand the block back zeroed, and codegen clears nothing after them
+      # (`generic_array_malloc`): a chunk off a list is cleared here, and a
+      # carved chunk or a large mapping is the kernel's zero, not touched
+      # until the caller writes it. Cleared after the call, three large
+      # blocks held a growing hash's worker 107 to 155 ms on darwin, past
+      # a preemption check's reach (SPEC.md III.4.13 part 9).
       def self.alloc(size : UInt64) : Void*
         Pointer(Void).new(take(size, true, UNTYPED_FLAG, 0_u64))
       end
 
       def self.alloc_atomic(size : UInt64) : Void*
-        Pointer(Void).new(take(size, false, UNTYPED_FLAG | ATOMIC_FLAG, 0_u64))
+        Pointer(Void).new(take(size, true, UNTYPED_FLAG | ATOMIC_FLAG, 0_u64))
       end
 
       # A class's instance: headed when the class's `:headed` byte says so
@@ -2312,10 +2323,12 @@ require "./file"
       # into the centre's atomic count every SLICE bytes, so a thread's
       # allocations cost no shared write until then.
       # `bits` are the chunk's entry less its parity: headed, untyped,
-      # atomic (`clear` false is the same promise, worn the other way: the
-      # path that does not clear is the path that holds no pointers);
-      # `type_id` goes into the entry beside them for a headless typed
-      # object, and is the caller's to store for a headed one.
+      # atomic; `type_id` goes into the entry beside them for a headless
+      # typed object, and is the caller's to store for a headed one.
+      # `clear` zeroes a chunk off a list, and is false only for an atomic
+      # instance, which codegen zeroes, and an atomic block `realloc`
+      # copies into; atomicity is the `bits`' to say, `alloc_atomic`
+      # clearing too.
       def self.take(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         table = cache
         # The arithmetic on the way in and out is wrapping, addresses
@@ -2421,7 +2434,7 @@ require "./file"
         headed = bits & HEADED_FLAG != 0
         # Past the top class: a mapping of its own, headed either way -
         # no arena, no byte, no slot - and `size_of` reads the node.
-        return take_large(headed ? bytes - HEADER : bytes, clear) + HEADER if bytes > TOP
+        return take_large(headed ? bytes - HEADER : bytes, bits) + HEADER if bytes > TOP
         # The small classes' index inline: `class_index` has a loop for
         # the large ones and is a call, and a call is what most
         # allocations would pay for a shift.
@@ -2443,16 +2456,15 @@ require "./file"
       def self.stamp(table : Pointer(UInt64), index : Int32, head : UInt64, bits : UInt64, type_id : UInt64) : Nil
         table[index] = read64(head &+ OFF_LINK)
         # The chunk's byte: this epoch's, white, atomic when the caller
-        # promised no pointers - `clear` is the atomic question worn the
-        # other way - and headed when it has a word. The epoch's parity
-        # is read here, after the refill: a refill takes the lock, and
-        # the lock's spin parks for a pause, whose sweep turns the
+        # promised no pointers, and headed when it has a word. The epoch's
+        # parity is read here, after the refill: a refill takes the lock,
+        # and the lock's spin parks for a pause, whose sweep turns the
         # epoch - a parity read before it stamped the chunk as the last
         # epoch's, and the next sweep freed it under its owner. A list
         # chunk is in an arena by construction, the mask names it. The
         # clearing path clears the whole chunk, header word and all: a
-        # stale type id in the word is a layout the mark would trust;
-        # an atomic chunk is never opened, and its word is left until
+        # stale type id in the word is a layout the mark would trust; an
+        # atomic instance is never opened, and its word is left until
         # codegen stores.
         arena = head & (0_u64 &- MAP)
         slot = read64(head &+ OFF_INDEX)
@@ -3258,11 +3270,13 @@ require "./file"
         base
       end
 
-      def self.take_large(size : UInt64, clear : Bool) : UInt64
+      # A mapping of its own, never cleared: the kernel zeroed it, and the
+      # first touch of each page is the caller's, inside its own loops.
+      def self.take_large(size : UInt64, bits : UInt64) : UInt64
         mapped = size + LARGE_USER
         base = __iyi_mmap(mapped).address
         write64(base + OFF_MAP, mapped)
-        write64(base + LARGE_HEAD + OFF_MARK, (clear ? 0_u64 : ATOMIC_FLAG) | IyiMark.epoch_flag)
+        write64(base + LARGE_HEAD + OFF_MARK, (bits & ATOMIC_FLAG) | IyiMark.epoch_flag)
         lock
         count_large(base, mapped, true)
         write64(base + OFF_NEXT, @@large)
@@ -3681,14 +3695,15 @@ require "./file"
     end
 
     # `memset` is defined locally for the bump branch's reason: codegen itself
-    # reaches for the name (`pre_initialize_aggregate` and
-    # `generic_array_malloc` lower to the LLVM `llvm.memset` intrinsic, which
-    # becomes a C `memset` call once the size is not a constant), and a
-    # definition with the same name, types and return is the only thing that
-    # can intercept that. The bulk goes eight bytes at a time, and the word
-    # store advances one word per store, because pointer arithmetic here
-    # counts elements: eight bytes is one step, not eight. The byte loop
-    # carries the tail, and the pattern word is the byte tiled eight wide.
+    # reaches for the name (`pre_initialize_aggregate` lowers to the LLVM
+    # `llvm.memset` intrinsic, and a --release build turns the allocator's
+    # clearing loops into it, which becomes a C `memset` call once the size
+    # is not a constant), and a definition with the same name, types and
+    # return is the only thing that can intercept that. The bulk goes eight
+    # bytes at a time, and the word store advances one word per store,
+    # because pointer arithmetic here counts elements: eight bytes is one
+    # step, not eight. The byte loop carries the tail, and the pattern word
+    # is the byte tiled eight wide.
     fun memset(destination : Void*, value : Int32, count : UInt64) : Void*
       byte = value.unsafe_to_u8
 
@@ -3711,10 +3726,9 @@ require "./file"
 
     {% if flag?(:darwin) %}
       # `bzero` is defined for the same reason on darwin: the aarch64 back end
-      # lowers a zeroing `llvm.memset` it will not inline — every
-      # `Pointer.malloc` clears with one, and a --release build keeps the
-      # allocator's variable-length ones — to a `bzero` call rather than a
-      # `memset` call, so without this every darwin release binary asked
+      # lowers a zeroing `llvm.memset` it will not inline — a --release build
+      # keeps the allocator's variable-length ones — to a `bzero` call rather
+      # than a `memset` call, so without this every darwin release binary asked
       # libSystem for one more name (bench/thread_floor.sh was the gate that
       # first read it; bench/dependency_floor.sh builds plain and never saw
       # it). The stores are inline asm, not a loop the compiler can read:
@@ -8097,8 +8111,10 @@ require "./file"
           Pointer(Void).new(take(size, true, UNTYPED_FLAG, 0_u64))
         end
 
+        # Cleared like `alloc`: codegen clears nothing after either entry
+        # under the arena (`generic_array_malloc`).
         def self.alloc_atomic(size : UInt64) : Void*
-          Pointer(Void).new(take(size, false, UNTYPED_FLAG | ATOMIC_FLAG, 0_u64))
+          Pointer(Void).new(take(size, true, UNTYPED_FLAG | ATOMIC_FLAG, 0_u64))
         end
 
         def self.new_object(size : UInt64, type_id : UInt64, headed : Bool, atomic : Bool) : Void*

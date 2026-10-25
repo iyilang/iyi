@@ -4465,10 +4465,14 @@ class IyiWorkers
   # The back-edge's slow half, on a worker whose word the monitor raised.
   # Nothing here when a runtime lock is held - a loop in a block a prelude
   # def runs under one may check, and a park there would park the holder -
-  # nor on the worker's own fiber, which runs no program code. A task
-  # holding a `Mutex` may give its worker up, as a thread the kernel
-  # preempts holding one does: a task waiting for it parks on the lock's
-  # word rather than spin (std/mutex).
+  # nor on the worker's own fiber, which runs no program code. The
+  # runtime's own code never checks, and neither does anything it calls
+  # (`codegen.cr#iyi_runtime_copy?`), so a check is in a program's code or
+  # a library's; and a fiber that is not `Running` - one the runtime has
+  # begun to move into a queue or a wait - is not given up again from a
+  # block the runtime runs there. A task holding a `Mutex` may give its
+  # worker up, as a thread the kernel preempts holding one does: a task
+  # waiting for it parks on the lock's word rather than spin (std/mutex).
   def self.preempted : Nil
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       @@preempt = 0_u64
@@ -4480,6 +4484,7 @@ class IyiWorkers
       fiber = IyiScheduler.current
       root = st.root
       return if root.is_a?(IyiFiber) && root.object_id == fiber.object_id
+      return unless fiber.state == IyiFiberState::Running
       IyiScheduler.take_mail(st) if st.mail?
       io = !st.io_head.is_a?(Nil)
       {% if flag?(:win32) %}

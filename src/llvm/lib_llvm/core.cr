@@ -224,9 +224,6 @@ lib LibLLVM
   fun is_a_phi_node = LLVMIsAPHINode(val : ValueRef) : ValueRef
   fun is_a_landing_pad_inst = LLVMIsALandingPadInst(val : ValueRef) : ValueRef
   fun is_a_argument = LLVMIsAArgument(val : ValueRef) : ValueRef
-  # iyi: the preemption pass asks whether a call's callee is a function,
-  # to tell an intrinsic from a call (src/compiler/iyi/preempt_checks.cr).
-  fun is_a_function = LLVMIsAFunction(val : ValueRef) : ValueRef
   fun get_instruction_parent = LLVMGetInstructionParent(inst : ValueRef) : BasicBlockRef
   fun get_first_use = LLVMGetFirstUse(val : ValueRef) : UseRef
   fun get_next_use = LLVMGetNextUse(u : UseRef) : UseRef

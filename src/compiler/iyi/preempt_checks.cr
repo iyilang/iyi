@@ -71,16 +71,7 @@ module Iyi::PreemptChecks
       calls = entries[fn.address]?
       unless latches.empty? && calls.nil?
         anchor = entry_value(mod, builder, ctx, fn, flag, linux, aarch64)
-        # Each loop's header and blocks, read before any check changes them;
-        # a loop whose turn is short counts its turns (`short_turn?`).
-        preds = predecessors(fn)
-        plans = latches.map do |latch|
-          found = loop_of(fn, latch, preds)
-          {latch, found && short_turn?(found[0], found[1]) ? found : nil}
-        end
-        plans.each do |latch, counted|
-          check(mod, builder, ctx, latch, LibLLVM.get_basic_block_terminator(latch), flag, linux, aarch64, anchor, counted)
-        end
+        latches.each { |latch| check(mod, builder, ctx, latch, LibLLVM.get_basic_block_terminator(latch), flag, linux, aarch64, anchor) }
         if calls
           calls.each do |call|
             following = LibLLVM.get_next_instruction(call)
@@ -264,9 +255,8 @@ module Iyi::PreemptChecks
   # The check at *first*: it and what follows it in *block* - a latch's
   # terminator, or what followed an entry's `ENTRY` call - move into a block
   # of its own, the successors' phis follow them there, and *block* ends in
-  # the check instead. A loop *counted* - its header and blocks - looks at
-  # the word every `LOOK_EVERY` turns rather than at every one.
-  private def self.check(mod, builder, ctx, block, first, flag, linux, aarch64, anchor, counted = nil) : Nil
+  # the check instead.
+  private def self.check(mod, builder, ctx, block, first, flag, linux, aarch64, anchor) : Nil
     fn = LibLLVM.get_basic_block_parent(block)
     resume = LibLLVM.append_basic_block_in_context(ctx, fn, "preempt_resume")
     slow = LibLLVM.append_basic_block_in_context(ctx, fn, "preempt")
@@ -292,26 +282,6 @@ module Iyi::PreemptChecks
     end
 
     builder.position_at_end LLVM::BasicBlock.new(block)
-    if counted
-      header, body = counted
-      look = LibLLVM.append_basic_block_in_context(ctx, fn, "preempt_look")
-      LibLLVM.move_basic_block_after(look, block)
-      # The turn count, a phi at the header: from 0 on entering the loop,
-      # carried through another of its back-edges, one more on this one.
-      int32 = ctx.int32
-      LibLLVM.position_builder_before(builder, LibLLVM.get_first_instruction(header))
-      turns = LibLLVM.build_phi(builder, int32, "")
-      builder.position_at_end LLVM::BasicBlock.new(block)
-      more = builder.add LLVM::Value.new(turns), int32.const_int(1)
-      due = builder.icmp LLVM::IntPredicate::EQ, builder.and(more, int32.const_int(LOOK_EVERY - 1)), int32.const_int(0)
-      builder.cond due, LLVM::BasicBlock.new(look), LLVM::BasicBlock.new(resume)
-      each_predecessor(fn, header) do |pred|
-        value = pred == resume ? more.to_unsafe : (body.includes?(pred.address) ? turns : int32.const_int(0).to_unsafe)
-        LibLLVM.add_incoming(turns, pointerof(value), pointerof(pred), 1)
-      end
-      body << resume.address << look.address << slow.address
-      builder.position_at_end LLVM::BasicBlock.new(look)
-    end
     word = load_word(mod, builder, ctx, flag, linux, aarch64, anchor)
     asked = builder.icmp LLVM::IntPredicate::NE, word, ctx.int64.const_int(0)
     builder.cond asked, LLVM::BasicBlock.new(slow), LLVM::BasicBlock.new(resume)
@@ -320,113 +290,6 @@ module Iyi::PreemptChecks
     preempt_type = LLVM::Type.function([] of LLVM::Type, ctx.void)
     builder.call preempt_type, preempt_fun(mod, preempt_type)
     builder.br LLVM::BasicBlock.new(resume)
-  end
-
-  # Turns of a short loop between two looks at the word. A short turn is
-  # straight code, at most `SHORT_TURN` instructions, so 256 of them are
-  # well under the 5 ms quantum; the count is an add and a test of its low
-  # bits in a register, where the look is a load through the thread pointer.
-  LOOK_EVERY = 256
-  SHORT_TURN = 512
-
-  # Every block's predecessors in *fn*, by address, once per edge.
-  private def self.predecessors(fn) : Hash(UInt64, Array(LibLLVM::BasicBlockRef))
-    preds = {} of UInt64 => Array(LibLLVM::BasicBlockRef)
-    block = LibLLVM.get_first_basic_block(fn)
-    until block.null?
-      terminator = LibLLVM.get_basic_block_terminator(block)
-      unless terminator.null?
-        LibLLVM.get_num_successors(terminator).times do |index|
-          (preds[LibLLVM.get_successor(terminator, index).address] ||= [] of LibLLVM::BasicBlockRef) << block
-        end
-      end
-      block = LibLLVM.get_next_basic_block(block)
-    end
-    preds
-  end
-
-  private def self.each_predecessor(fn, target, &) : Nil
-    predecessors(fn)[target.address]?.try &.each { |pred| yield pred }
-  end
-
-  # The loop *latch* closes: the successor of its terminator that every
-  # path from the entry to it passes through, and the blocks from there
-  # back to the latch. Nil when neither successor is that.
-  private def self.loop_of(fn, latch, preds) : {LibLLVM::BasicBlockRef, Set(UInt64)}?
-    entry = LibLLVM.get_first_basic_block(fn)
-    terminator = LibLLVM.get_basic_block_terminator(latch)
-    LibLLVM.get_num_successors(terminator).times do |index|
-      header = LibLLVM.get_successor(terminator, index)
-      body = Set{header.address}
-      work = [latch]
-      reached_entry = false
-      while block = work.pop?
-        next if body.includes?(block.address)
-        if block == entry
-          reached_entry = true
-          break
-        end
-        body << block.address
-        preds[block.address]?.try &.each { |pred| work << pred unless body.includes?(pred.address) }
-      end
-      return {header, body} unless reached_entry
-    end
-    nil
-  end
-
-  # Whether a turn of the loop at *header* over *body* is short: no call
-  # but to an LLVM intrinsic other than a memory copy or fill, no loop
-  # inside it, and at most `SHORT_TURN` instructions.
-  private def self.short_turn?(header, body : Set(UInt64)) : Bool
-    count = 0
-    blocks = [] of LibLLVM::BasicBlockRef
-    fn = LibLLVM.get_basic_block_parent(header)
-    block = LibLLVM.get_first_basic_block(fn)
-    until block.null?
-      blocks << block if body.includes?(block.address)
-      block = LibLLVM.get_next_basic_block(block)
-    end
-    blocks.each do |member|
-      inst = LibLLVM.get_first_instruction(member)
-      until inst.null?
-        count += 1
-        return false if count > SHORT_TURN
-        unless LibLLVM.is_a_call_inst(inst).null? && LibLLVM.is_a_invoke_inst(inst).null?
-          callee = LibLLVM.get_operand(inst, (LibLLVM.get_num_operands(inst) - 1).to_u32)
-          return false if LibLLVM.is_a_function(callee).null?
-          name = String.new(LibLLVM.get_value_name2(callee, out length), length)
-          return false unless name.starts_with?("llvm.") && !name.starts_with?("llvm.mem")
-        end
-        inst = LibLLVM.get_next_instruction(inst)
-      end
-    end
-    # A loop inside: a cycle among the body's blocks that does not pass
-    # through the header.
-    state = {} of UInt64 => Int32
-    blocks.each do |start|
-      next if start == header || state[start.address]?
-      stack = [{start, 0}]
-      state[start.address] = 1
-      while top = stack.last?
-        member, at = top
-        terminator = LibLLVM.get_basic_block_terminator(member)
-        if at < LibLLVM.get_num_successors(terminator)
-          stack[-1] = {member, at + 1}
-          succ = LibLLVM.get_successor(terminator, at.to_u32)
-          next if succ == header || !body.includes?(succ.address)
-          case state[succ.address]?
-          when 1 then return false
-          when nil
-            state[succ.address] = 1
-            stack << {succ, 0}
-          end
-        else
-          state[member.address] = 2
-          stack.pop
-        end
-      end
-    end
-    true
   end
 
   # Each phi of *block* that names *from* as a predecessor, remade naming

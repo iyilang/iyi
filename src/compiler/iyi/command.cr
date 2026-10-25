@@ -1105,6 +1105,18 @@ class Iyi::Command
           opts.on("--force", "Build even when nothing the output was built from has changed") do
             @force_build = true
           end
+          opts.on("--stale-key FILE", "iyi: write stale key output to FILE") do |file|
+            compiler.stale_key = file
+          end
+          opts.on("--stale-accept FILE", "iyi: stale accept file") do |file|
+            compiler.stale_accept = file
+          end
+          opts.on("--stale-block FILE", "iyi: stale block file") do |file|
+            compiler.stale_block = file
+          end
+          opts.on("--stale-dump-elements FILE", "iyi: stale dump elements file") do |file|
+            compiler.stale_dump_elements = file
+          end
         end
       end
 

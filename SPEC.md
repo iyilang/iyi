@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 130,704 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,301-line own prelude + 125,236 in std |
+| Library | 8,161 lines (3,551 of it core) | 24,301-line own prelude + 125,260 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -4019,10 +4019,11 @@ refuses `spawn_parallel` at compile time rather than run it on one thread.
 the task on the lock's word (`IyiScheduler.park_on`, a futex for tasks;
 std/mutex), a thread's join parks until the thread's body has returned
 and waits in the kernel only for its exit, and a process's end was already
-waited for parked (a pidfd, a kqueue, `RegisterWaitForSingleObject`), its
-one refused case now asking with a zero wait between sleeps. So the
-handoff Go makes around a blocking call has nothing to wrap, and is not
-built.
+waited for parked (a pidfd, a kqueue, `RegisterWaitForSingleObject`); where
+darwin's kqueue or Windows' registration is refused, the end is now asked
+for without waiting between sleeps of 1 to 50 ms, as Linux without a pidfd
+already did. So the handoff Go makes around a blocking call has nothing to
+wrap, and is not built.
 
 **Built as decided, and measured.** `src/iyi/concurrency.iyi` has the
 pool (`IyiWorkers`), the inbox, the doorbell and the scheduler's lock;

@@ -283,6 +283,7 @@ pub class Mutex(T)
     # The thread sleeps until a release, counted on the word's high half so
     # the release knows to ring. Taking the lock and uncounting are one
     # exchange, so no release can find a count that has already left.
+    @[Effect(:threads)]
     private def sleep_in_kernel : Nil
       {% if flag?(:win32) %}
         bell = doorbell
@@ -310,6 +311,7 @@ pub class Mutex(T)
     # Made once, by whichever sleeper is first; one that loses the race
     # closes its own. Made before a sleeper counts itself, so a release
     # that sees the count finds the semaphore.
+    @[Effect(:threads)]
     private def doorbell : Void*
       bell = @doorbell.get
       return Pointer(Void).new(bell) if bell != 0_u64

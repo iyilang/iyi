@@ -209,6 +209,7 @@ class SignalWaiter
   end
 
   {% if flag?(:win32) %}
+    @[Effect(:signal)]
     private def self.install(wanted : UInt64) : Nil
       @@named.set(@@named.get | wanted)
       # One ignored by `Signal.ignore` is taken again by a wait naming it.
@@ -247,6 +248,7 @@ class SignalWaiter
     # An arrival is a bit set, not a number added: two Ctrl-Breaks before a
     # `wait` took the first added the INT bit to itself and carried it into
     # the next one, 4 + 4 = 8, and the wait that followed never answered.
+    @[Effect(:signal)]
     def self.console_event(event : Int32) : Int32
       signal = event <= 1 ? 2 : 15
       bit = 1_u64.unsafe_shl(signal.to_u64)
@@ -318,6 +320,7 @@ class SignalWaiter
     # The pipe, both ends non-blocking and closed on exec: the handler's
     # write must never block, and the read end is waited on through the
     # poller.
+    @[Effect(:signal)]
     private def self.open_pipe : Nil
       fds = Pointer(Int32).malloc(2_u64)
       {% if flag?(:darwin) %}
@@ -344,6 +347,7 @@ class SignalWaiter
     # guard's does, SA_RESTART so a call the signal interrupts is resumed
     # rather than failed, and on x86_64 Linux the restorer the kernel
     # needs to return.
+    @[Effect(:signal)]
     private def self.handle(signal : Int32) : Nil
       entry = IyiStackGuard.address_of_handler(->(number : Int32, info : Void*, context : Void*) { SignalWaiter.arrived(number) })
       {% if flag?(:darwin) %}
@@ -371,6 +375,7 @@ class SignalWaiter
     end
 
     # *signal*'s action set to SIG_IGN (1) or SIG_DFL (0).
+    @[Effect(:signal)]
     def self.disposition(signal : Int32, handler : UInt64) : Nil
       {% if flag?(:darwin) %}
         action = Pointer(UInt64).malloc(2_u64)

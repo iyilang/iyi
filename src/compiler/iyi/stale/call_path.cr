@@ -10,11 +10,12 @@ module Iyi::Stale
     getter kind : String
     getter key : String
     getter digest : String
+    getter encoded_bytes : Int64
     getter file : String?
     getter line : Int32?
     getter end_line : Int32?
 
-    def initialize(@kind : String, @key : String, @digest : String,
+    def initialize(@kind : String, @key : String, @digest : String, @encoded_bytes : Int64,
                    @file : String?, @line : Int32?, @end_line : Int32?)
     end
   end
@@ -354,17 +355,21 @@ module Iyi::Stale
 
       # 2. Encode each element
       element_digests = Hash(String, Digest).new
+      element_sizes = Hash(Tuple(ElementKind, String, Digest), Int64).new
       digests_by_key = Hash(Tuple(ElementKind, String), Array(Digest)).new
       encoded_elements = [] of {Element, Digest}
 
       all_elements.each do |elem|
+        encoded_bytes = 0_i64
         enc_result = Stale.d(elem.kind.to_s.underscore) do |encoder|
           typed_encoder = TypedEncoder.new(program, roots, elem, encoder)
           typed_encoder.encode_element(elem)
+          encoded_bytes = encoder.encoded_bytes
         end
         key_tuple = {elem.kind, elem.key}
         list = (digests_by_key[key_tuple] ||= [] of Digest)
         list << enc_result
+        element_sizes[{elem.kind, elem.key, enc_result}] = encoded_bytes
 
         element_digests[elem.key] = enc_result
         encoded_elements << {elem, enc_result}
@@ -423,6 +428,7 @@ module Iyi::Stale
           kind: elem.kind.to_s.underscore,
           key: elem.key,
           digest: Stale.hex(dig),
+          encoded_bytes: element_sizes[{elem.kind, elem.key, dig}],
           file: loc_file,
           line: loc_line,
           end_line: loc_end_line

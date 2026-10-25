@@ -17,19 +17,22 @@ module Iyi::Stale
   end
 
   class Encoder # streams into SHA-256; every value self-delimiting
-    @hasher : Crystal::Digest::SHA256
+    getter encoded_bytes : Int64
 
     def initialize(@hasher : Crystal::Digest::SHA256)
+      @encoded_bytes = 0_i64
     end
 
     def str(s : String) # 0x01 u64be(bytesize) utf8 bytes
       write_prefix_and_u64(0x01_u8, s.bytesize.to_u64)
       @hasher.update(s.to_slice)
+      @encoded_bytes += s.bytesize
     end
 
     def bytes(b : Bytes) # 0x02 u64be(size) bytes
       write_prefix_and_u64(0x02_u8, b.size.to_u64)
       @hasher.update(b)
+      @encoded_bytes += b.size
     end
 
     def int(i : Int64) # 0x03 8 bytes big-endian two's complement
@@ -45,15 +48,18 @@ module Iyi::Stale
       buf[0] = 0x05_u8
       buf[1] = b ? 0x01_u8 : 0x00_u8
       @hasher.update(buf.to_slice)
+      @encoded_bytes += 2
     end
 
     def absent # 0x06
       @hasher.update(Slice[0x06_u8])
+      @encoded_bytes += 1
     end
 
     def digest(x : Digest) # 0x07 32 raw bytes
       @hasher.update(Slice[0x07_u8])
       @hasher.update(x.to_slice)
+      @encoded_bytes += 33
     end
 
     def list(n : Int, &) # 0x08 u64be(n), then the block writes n values
@@ -68,12 +74,15 @@ module Iyi::Stale
     def tag(name : String) # 0x09 u64be(bytesize) bytes (node and type class tags)
       write_prefix_and_u64(0x09_u8, name.bytesize.to_u64)
       @hasher.update(name.to_slice)
+      @encoded_bytes += name.bytesize
     end
+
     private def write_prefix_and_u64(prefix : UInt8, val : UInt64) : Nil
       buf = uninitialized UInt8[9]
       buf[0] = prefix
       IO::ByteFormat::BigEndian.encode(val, buf.to_slice[1, 8])
       @hasher.update(buf.to_slice)
+      @encoded_bytes += 9
     end
   end
 

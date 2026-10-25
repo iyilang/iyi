@@ -3617,6 +3617,7 @@ pub class Resolver
   # queue keeps deadlines by. A target without the runtime has no socket
   # to wait on either (`__sys_dgram_socket` refuses there), so nothing
   # there reads a time.
+  @[Effect(:clock)]
   def self.now_ms : Int64
     {% if @top_level.has_constant?("IyiScheduler") %}
       __iyi_monotonic_ns // 1000000_i64

@@ -482,6 +482,10 @@ def self.__iyi_observe_dir_stream(site : String) : Nil
   not_reusable(40_u8, site)
 end
 
+def self.__iyi_observe_host_state(site : String) : Nil
+  not_reusable(41_u8, site)
+end
+
 private def self.write_end(status : Int32) : Nil
   writer = RecordWriter.new
   writer.begin_record(0x7F_u8, 0_u64)
@@ -522,6 +526,7 @@ private def self.parse_kind(kind : UInt8 | Symbol | String) : UInt8
   when "runtime_timing" then 38_u8
   when "code_location"  then 39_u8
   when "dir_stream"     then 40_u8
+  when "host_state"     then 41_u8
   when "shared_write"   then 48_u8
   else                       32_u8
   end

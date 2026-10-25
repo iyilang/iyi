@@ -202,6 +202,23 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       effect.not_nil!.not_reusable?.should be_true
     end
 
+    it "sets Def#effect for not-reusable kind :host_state" do
+      runtime_file = File.join(Dir.current, "src", "std", "spec_test.iyi")
+      result = semantic(<<-CODE, filename: runtime_file)
+        @[Effect(:host_state)]
+        def runtime_host_state
+          42
+        end
+
+        runtime_host_state
+        CODE
+
+      target_def = result.program.lookup_first_def("runtime_host_state", false).not_nil!
+      effect = target_def.effect
+      effect.should_not be_nil
+      effect.not_nil!.kind.should eq(Iyi::EffectKind::HostState)
+      effect.not_nil!.not_reusable?.should be_true
+    end
     it "sets Def#effect for internal kind :memory" do
       runtime_file = File.join(Dir.current, "src", "std", "spec_test.iyi")
       result = semantic(<<-CODE, filename: runtime_file)

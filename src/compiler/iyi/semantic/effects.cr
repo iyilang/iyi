@@ -37,6 +37,7 @@ module Iyi
     RuntimeTiming = 38_u8
     CodeLocation  = 39_u8
     DirStream     = 40_u8
+    HostState     = 41_u8
 
     # taint only (48)
     SharedWrite = 48_u8
@@ -58,7 +59,7 @@ module Iyi
         EffectClass::Observed
       when Stdio, Exit, FileWrite
         EffectClass::Output
-      when Clock, Entropy, Timer, Network, Process, Signal, RuntimeTiming, CodeLocation, DirStream
+      when Clock, Entropy, Timer, Network, Process, Signal, RuntimeTiming, CodeLocation, DirStream, HostState
         EffectClass::NotReusable
       when SharedWrite
         EffectClass::TaintOnly
@@ -91,6 +92,7 @@ module Iyi
       when RuntimeTiming      then "runtime_timing"
       when CodeLocation       then "code_location"
       when DirStream          then "dir_stream"
+      when HostState          then "host_state"
       when SharedWrite        then "shared_write"
       when Memory             then "memory"
       when Collector          then "collector"
@@ -128,6 +130,7 @@ module Iyi
       when "runtime_timing"      then RuntimeTiming
       when "code_location"       then CodeLocation
       when "dir_stream"          then DirStream
+      when "host_state"          then HostState
       when "memory"              then Memory
       when "collector"           then Collector
       when "threads"             then Threads

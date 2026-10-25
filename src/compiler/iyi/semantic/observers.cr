@@ -128,8 +128,14 @@ module Iyi::Semantic
             a_def.raise "def '#{a_def.name}' cannot carry @[Effect(:file_write, :#{op.symbol_name})]: mismatched signature (observer expects two path parameters); annotate the non-yielding helper it calls instead"
           end
         end
+      when EffectKind::Host
+        ret_str = a_def.return_type.try(&.to_s)
+        if ret_str == "Nil" || ret_str == "Void" ||
+           (ret_str && (ret_str.includes?("Pointer") || ret_str.includes?("*")) && ret_str != "UInt8*" && !ret_str.ends_with?("Pointer(UInt8)"))
+          a_def.raise "def '#{a_def.name}' cannot carry @[Effect(:host)]: result is Nil or cannot express its answer as a value; annotate with a not-reusable kind instead"
+        end
       else
-        # Other kinds: Exit, EnvAll, Cwd, Host, NotReusable kinds
+        # Other kinds: Exit, EnvAll, Cwd, NotReusable kinds
       end
     end
 
@@ -283,11 +289,7 @@ module Iyi::Semantic
                    end
         Call.new(observer_path, "__iyi_observe_cwd", [path_arg] of ASTNode).at(a_def)
       when EffectKind::Host
-        val_arg = if a_def.args.size >= 1
-                    to_string_node(Var.new(a_def.args[0].name).at(a_def), a_def.args[0].restriction, a_def)
-                  else
-                    to_string_node(res_var, a_def.return_type, a_def)
-                  end
+        val_arg = to_string_node(res_var, a_def.return_type, a_def)
         Call.new(observer_path, "__iyi_observe_host", [val_arg] of ASTNode).at(a_def)
       when EffectKind::FileWrite
         op = effect.op.not_nil!
@@ -302,7 +304,7 @@ module Iyi::Semantic
       when EffectKind::Clock, EffectKind::Entropy, EffectKind::Timer,
            EffectKind::Network, EffectKind::Process, EffectKind::Signal,
            EffectKind::RuntimeTiming, EffectKind::CodeLocation,
-           EffectKind::DirStream
+           EffectKind::DirStream, EffectKind::HostState
         site = Effects.format_site(program, a_def.location)
         site_arg = StringLiteral.new(site).at(a_def).as(ASTNode)
         method_name = "__iyi_observe_#{effect.kind.symbol_name}"
@@ -316,7 +318,7 @@ module Iyi::Semantic
       restr = restriction.try(&.to_s)
       if restr == "String"
         node
-      elsif restr && (restr.includes?("UInt8") || restr.includes?("Pointer"))
+      elsif restr && (restr == "UInt8*" || restr.ends_with?("Pointer(UInt8)"))
         observer_path = Path.new(["Std", "Observe"], global: true).at(a_def)
         Call.new(observer_path, "c_str", [node] of ASTNode).at(a_def).as(ASTNode)
       else

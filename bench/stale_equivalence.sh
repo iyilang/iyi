@@ -199,6 +199,7 @@ kinds = [
     'runtime_timing',
     'code_location',
     'dir_stream',
+    'host_state',
 ]
 
 passed_kinds = []
@@ -336,6 +337,12 @@ GC.stats
         with open(fixture_src, 'w') as f:
             f.write('''module test/fixture
 Std::Observe.probe_code_location
+''')
+    elif kind == 'host_state':
+        with open(fixture_src, 'w') as f:
+            f.write('''module test/fixture
+import std/system_roots::{SystemRoots}
+SystemRoots.load
 ''')
     else:
         failed_kinds.append((kind, f'No fixture for kind {kind}'))

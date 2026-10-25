@@ -1150,7 +1150,7 @@ module Iyi
 
     # All created unions in a program, indexed by an array of opaque
     # ids of each type in the union. The array (the key) is sorted
-    # by this opaque id.
+    # Nil first, then by canonical name (to_s), breaking ties by opaque id.
     #
     # A program caches them this way so a union of `String | Int32`
     # or `Int32 | String` is represented by a single, unique type
@@ -1603,14 +1603,24 @@ module Iyi
       when 1
         types.first
       else
-        types.sort_by! &.opaque_id
+        types = types.is_a?(Array(Type)) ? types : types.map(&.as(Type))
+        types.sort! do |t1, t2|
+          if t1.nil_type?
+            t2.nil_type? ? 0 : -1
+          elsif t2.nil_type?
+            1
+          else
+            cmp = t1.to_s <=> t2.to_s
+            cmp == 0 ? (t1.opaque_id <=> t2.opaque_id) : cmp
+          end
+        end
         opaque_ids = types.map(&.opaque_id)
         unions[opaque_ids] ||= make_union_type(types, opaque_ids)
       end
     end
 
-    private def make_union_type(types, opaque_ids)
-      # NilType has opaque_id == 0
+    private def make_union_type(types : Array(Type), opaque_ids)
+      # NilType has opaque_id == 0, and Nil is always first if present
       has_nil = opaque_ids.first == 0
 
       if has_nil
@@ -1626,18 +1636,6 @@ module Iyi
             end
           end
         end
-
-        # Remove the Nil type now and later insert it at the end
-        nil_type = types.shift
-      end
-
-      # Sort by name so a same union type, say `Int32 | String`, always is named that
-      # way, regardless of the actual order of the types. However, we always put
-      # Nil at the end, inside the `nil_type` check.
-      types.sort_by! &.to_s
-
-      if nil_type
-        types.push nil_type
 
         if types.all?(&.reference_like?)
           return NilableReferenceUnionType.new(self, types)

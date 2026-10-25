@@ -469,6 +469,8 @@ module Iyi
         if target_defs = node.target_defs
           target_defs.each do |target_def|
             if target_def.is_a?(External) || target_def.owner.is_a?(LibType)
+              next if target_def.is_a?(External) && target_def.real_name.starts_with?("llvm.")
+
               is_global = target_def.is_a?(External) && target_def.external_var? ||
                           target_def.body.as?(Primitive).try(&.name.in?("external_var_get", "external_var_set"))
               site = Effects.format_site(@program, node.location || target_def.location)

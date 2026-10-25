@@ -405,5 +405,43 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       closure.rg3_sites.should be_empty
       closure.not_reusable.select { |r| r.reason == "unclassified runtime site" }.should be_empty
     end
+
+    it "treats llvm.* intrinsics as compiler operations rather than lib calls (no RG3 site, not opaque)" do
+      runtime_file = File.join(Dir.current, "src", "std", "math_intrinsic.iyi")
+      program_file = File.join(Dir.current, "src", "program_math.iyi")
+
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+      parser1 = program.new_parser(<<-CODE)
+        lib LibLLVMMath
+          fun sqrt = "llvm.sqrt.f64"(x : Float64) : Float64
+        end
+
+        def runtime_sqrt(x : Float64) : Float64
+          LibLLVMMath.sqrt(x)
+        end
+        CODE
+      parser1.filename = runtime_file
+      node1 = program.normalize(parser1.parse)
+      program.semantic(node1)
+
+      parser2 = program.new_parser(<<-CODE)
+        def user_code
+          runtime_sqrt(4.0)
+        end
+        user_code
+        CODE
+      parser2.filename = program_file
+      node2 = program.normalize(parser2.parse)
+      final_node = program.semantic(node2)
+
+      reach = Iyi::Stale::ReachWalk.walk(program, final_node)
+      closure = Iyi::Effects.closure_check(program, reach)
+
+      # Neither RG3 site nor opaque program construct should be reported for llvm.* intrinsic
+      closure.rg3_sites.should be_empty
+      closure.not_reusable.select { |r| r.category == "opaque program construct" }.should be_empty
+      closure.not_reusable.select { |r| r.reason == "unclassified runtime site" }.should be_empty
+    end
   end
 end

@@ -8,6 +8,7 @@ require "./mod/installer"
 require "./stale/encoding"
 require "./stale/toolchain"
 require "./stale/link"
+require "./stale/compiler_env"
 {% if flag?(:msvc) %}
   require "./loader"
 {% end %}

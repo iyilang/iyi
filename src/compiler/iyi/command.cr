@@ -434,13 +434,20 @@ class Iyi::Command
   # being told.
   private def build
     arguments = options.dup
-    inputs = BuildInputs.new(nil)
+    stale_build = options.includes?("--stale-key") ||
+                  options.any?(&.starts_with?("--stale-key=")) ||
+                  ENV["IYI_OPTS"]?.try(&.includes?("--stale-key"))
+    inputs = BuildInputs.new(nil, env_only: stale_build ? true : false)
     BuildInputs.current = inputs
     begin
       config = create_compiler "build", defer_move_aside: true
       compiler = config.compiler
+      if compiler.stale_key && !inputs.env_only?
+        inputs = BuildInputs.new(nil, env_only: true)
+        BuildInputs.current = inputs
+      end
       inputs.cache_root = CacheDir.instance.dir
-      check = up_to_date_check(config, arguments)
+      check = up_to_date_check(config, arguments) unless compiler.stale_key
 
       if check && !@force_build
         reason = @progress_tracker.stage("Up-to-date check") { check.stale_reason }

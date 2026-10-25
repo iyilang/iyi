@@ -311,7 +311,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # `IYI_CACHE_DIR` read by somebody who set the other one names a variable
     # they do not have. Backticked or quoted, by the rule above — a bare
     # `CRYSTAL_CACHE_DIR` would cover a slip as well as this.
-    (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"', "the variable the other command surface's author set"),
+    (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"|"?CRYSTAL_OPTS"?|"?CRYSTAL_CACHE_DIR"?', "the variable the other command surface's author set, or locator variables in stale/compiler_env"),
     # The linker's search path, in the gate that proves the binaries build
     # with bdw-gc unreachable. `IYI_LIBRARY_PATH` is not a substitute: it adds
     # to the default search path where `CRYSTAL_LIBRARY_PATH` replaces it, and

@@ -73,7 +73,7 @@ pub class Mutex(T)
   @change_waiters : Atomic(UInt64)
 
   # Spins before a waiter parks, while the holder may be running.
-  SPINS     = 100
+  SPINS     =   100
   FREE      = 0_u64
   HELD      = 1_u64
   CONTENDED = 2_u64

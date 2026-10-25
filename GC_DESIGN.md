@@ -1958,13 +1958,22 @@ and scans its spill and its stack from the stopped sp to the top of the
 mapping that holds it, a fiber's or the worker's own. Parked fibers on
 every worker are on the one fiber registry the root walk already reads;
 a parallel task waiting in the pool to start has no stack yet, and is
-rooted through the registry by its proc. What made this free is the
-rule the scheduler keeps: a started task never changes threads, so a
-fiber's stack is only ever live on the thread its registry entry was
-made for, and a worker allocates from its own cache like any thread.
+rooted through the registry by its proc. Nothing in the collector
+assumes a fiber stays on one thread either, now that a started task
+resumes on whichever worker is free: the registry is one list for every
+thread, a stopped thread's stack is bounded by whichever fiber's mapping
+holds its sp (`IyiScheduler.fiber_top_holding`, asked of every fiber),
+and a fiber on its way between workers - runnable in a ring, its saved sp
+on its own stack - is scanned from that sp, while the thread still
+switching away from it covers it from its own. The worker's allocator
+cache is a thread-local read through the thread pointer at every access,
+so a frame that resumes elsewhere allocates from the new thread's.
 `bench/parallel_exercise.sh` holds it: eight parallel tasks each keep a
 list of 150,000 nodes on their own stacks through the collections the
-others trigger, and find it whole by checksum.
+others trigger, and find it whole by checksum; and
+`bench/parallel_migrate.iyi` checks 32 tasks' lists node by node after
+each of 30 parks, hundreds of them resumed on another worker, through
+20 to 28 stops, where a collector that skipped runnable fibers loses one.
 
 ---
 

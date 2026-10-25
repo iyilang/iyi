@@ -24,6 +24,43 @@
   module. Twenty million allocations, release, best of five: 41 and 45
   ms before, 42 and 41 ms after, with other jobs loading the machine.
 
+- **A parallel task that parks resumes on whichever worker is free
+  (#145).** Each worker has a run queue of 256 that idle workers take
+  half of (Go's `runqgrab`), a task woken from outside the pool goes to a
+  shared queue, and a parallel task and the tasks `spawn` starts inside
+  it are one unit, never two of them running at once but each free to
+  park on one worker and resume on another. A worker waits on its own
+  stack, a fiber is not resumed before the worker that parked it has
+  left its stack, a cancel finds the poller or sleep heap a moved task
+  waits in, a socket a sibling closes on another worker wakes the read
+  parked there, and a Windows completion that reaches another worker's
+  port is forwarded to the one that posted it. Measured on 8 workers,
+  release, three runs each against the runtime before: 48 tasks that
+  park on a channel and then compute 25 ms took 2.11 to 2.57 times the
+  ideal and now 1.03 to 1.11; 32 connections of 25 ms requests 1.26 to
+  2.20 and now 1.16 to 1.20. `bench/parallel_migrate.iyi`, run by
+  `bench/parallel_exercise.sh` plain and release, checks lists on moved
+  tasks' stacks through collections, thread-locals against the kernel's
+  thread pointer, sockets, cancels, closes and deep frames after moves,
+  and seven broken copies are caught by name.
+
+- **A contended `Mutex` and a thread's join park the task, not the
+  thread.** std/mutex is a three-state futex mutex over the scheduler's
+  new `park_on`/`wake_on`, so a waiter's worker runs other tasks (a task
+  spawned beside a parked waiter started at once, where a waiter asleep
+  in the kernel left it nowhere to start for the holder's 300 ms), and
+  darwin waits no longer sleep a millisecond at a time. A join parks
+  until the thread's body returns. A deadlock on a lock is named by the
+  scheduler as on a channel, and on a program's one thread by the
+  `Mutex` as before. Windows' process wait, where
+  `RegisterWaitForSingleObject` is refused, asks with a zero wait between
+  sleeps instead of holding its thread.
+
+- **Not built: preemption.** A connection parked on the poller of a
+  worker computing a 100 ms request waits for it: 65 of 11,200 fast
+  requests beside four slow connections took over 20 ms (SPEC.md
+  III.4.13 has the measurement and the decision, loop back-edge checks).
+
 ## 0.19.1 — 2026-10-25
 
 **A collector hang and a handful of TLS and PKI edges fixed, a build
@@ -24728,7 +24765,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,667-line library and nothing else. Every other
+  written against iyi's own 23,765-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

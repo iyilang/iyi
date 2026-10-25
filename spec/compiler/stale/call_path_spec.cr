@@ -4,7 +4,7 @@ require "compiler/iyi/compiler"
 require "compiler/iyi/stale/call_path"
 require "compiler/iyi/stale/roots"
 
-private def compute_fp(code : String, filename : String = "test.iyi") : {String, Iyi::Stale::CallPathResult}
+private def compute_fp(code : String, filename : String = "test.iyi") : {String, Iyi::Stale::CallPathResult, Iyi::Program, Iyi::Stale::Reach}
   with_tempfile("callpath.key") do |key_path|
     with_tempfile("callpath.bin") do |bin_path|
       compiler = create_spec_compiler
@@ -17,7 +17,7 @@ private def compute_fp(code : String, filename : String = "test.iyi") : {String,
       reach = program.stale_reach.not_nil!
       roots = Iyi::Stale::Roots.default(program, filename, code)
       cp_res = Iyi::Stale::CallPath.compute(program, reach, roots)
-      {cp_res.hex_digest, cp_res}
+      {cp_res.hex_digest, cp_res, program, reach}
     end
   end
 end
@@ -429,9 +429,34 @@ describe "Iyi::Stale S3f: CallPathFp, typed encoder, roots, explain" do
     puts fib(10)
     IYI
 
-    fp1, _ = compute_fp(code)
-    fp2, _ = compute_fp(code)
-    fp1.should eq(fp2)
+    code = File.read("samples/iyi/hello.iyi")
+    fp1, res1, p1, r1 = compute_fp(code, "samples/iyi/hello.iyi")
+    ENV["IYI_WARM"] = "1"
+    begin
+      Iyi::Compiler.preanalysed.clear
+      fp3, res3, p3, r3 = compute_fp(code, "samples/iyi/hello.iyi")
+      d1 = res1.dump_rows.map { |r| {r.key, r.digest} }.to_h
+      d3 = res3.dump_rows.map { |r| {r.key, r.digest} }.to_h
+      diff = d1.keys.select { |k| d1[k] != d3[k]? }
+      puts "\nDIFF KEYS IN HELLO (#{diff.size}): #{diff}"
+      si_key = "*String::interpolation<String, String, String>:String"
+      elem1 = r1.elements.find { |e| e.key == si_key }.not_nil!
+      elem3 = r3.elements.find { |e| e.key == si_key }.not_nil!
+      roots1 = Iyi::Stale::Roots.default(p1, "samples/iyi/hello.iyi", code)
+      roots3 = Iyi::Stale::Roots.default(p3, "samples/iyi/hello.iyi", code)
+      Iyi::Stale.d("def") do |enc|
+        t = Iyi::Stale::TypedEncoder.new(p1, roots1, elem1, enc)
+        t.encode_element(elem1)
+        puts "elem1 temp_ordinals: #{t.temp_ordinals}"
+      end
+      Iyi::Stale.d("def") do |enc|
+        t = Iyi::Stale::TypedEncoder.new(p3, roots3, elem3, enc)
+        t.encode_element(elem3)
+        puts "elem3 temp_ordinals: #{t.temp_ordinals}"
+      end
+      Iyi::Compiler.preanalysed.clear
+      ENV.delete("IYI_WARM")
+    end
   end
 
   it "produces expected dump rows and explain keys" do

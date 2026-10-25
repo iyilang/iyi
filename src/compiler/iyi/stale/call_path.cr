@@ -355,7 +355,6 @@ module Iyi::Stale
           typed_encoder = TypedEncoder.new(program, roots, elem, encoder)
           typed_encoder.encode_element(elem)
         end
-
         key_tuple = {elem.kind, elem.key}
         list = (digests_by_key[key_tuple] ||= [] of Digest)
         list << enc_result
@@ -457,6 +456,7 @@ module Iyi::Stale
     getter program : Program
     getter roots : Roots
     getter current_element : Element
+    getter temp_ordinals : Hash(String, Int32)
 
     def initialize(@program : Program, @roots : Roots, @current_element : Element, @encoder : Encoder)
       @temp_ordinals = Hash(String, Int32).new
@@ -552,10 +552,47 @@ module Iyi::Stale
       @encoder.bool(node.varargs?)
     end
 
+    private class TempCollector < Visitor
+      def initialize(@encoder : TypedEncoder)
+      end
+
+      def visit(node : Var)
+        @encoder.register_temp_name(node.name)
+        true
+      end
+
+      def visit(node : MetaVar)
+        @encoder.register_temp_name(node.name)
+        true
+      end
+
+      def visit(node : MetaTypeVar)
+        @encoder.register_temp_name(node.name)
+        true
+      end
+
+      def visit(node : ASTNode)
+        true
+      end
+    end
+
+    def register_temp_name(name : String) : Nil
+      if compiler_temp_name?(name)
+        @temp_ordinals.put_if_absent(name) do
+          ord = @next_temp_ordinal
+          @next_temp_ordinal += 1
+          ord
+        end
+      end
+    end
+
     def encode_def(target_def : Def, self_type : Type) : Nil
+      collector = TempCollector.new(self)
+      target_def.args.each { |a| a.default_value.try &.accept(collector) }
+      target_def.body.accept(collector)
+
       @encoder.str(CallPath.canonical_type_name(target_def.owner))
       @encoder.str(CallPath.canonical_type_name(self_type))
-
       @encoder.list(target_def.args.size) do
         target_def.args.each do |arg|
           @encoder.str(arg.name)
@@ -593,7 +630,18 @@ module Iyi::Stale
       end
 
       if vars = target_def.vars
-        sorted_vars = vars.to_a.sort_by { |name, _| name }
+        sorted_vars = vars.to_a.sort_by do |name, _|
+          if compiler_temp_name?(name)
+            ord = @temp_ordinals.put_if_absent(name) do
+              val = @next_temp_ordinal
+              @next_temp_ordinal += 1
+              val
+            end
+            {1, ord, ""}
+          else
+            {0, 0, name}
+          end
+        end
         @encoder.list(sorted_vars.size) do
           sorted_vars.each do |var_name, var|
             encode_var_name(var_name)
@@ -1186,6 +1234,18 @@ module Iyi::Stale
         node_emits_in_main?(node.body)
       when Expressions
         node.expressions.any? { |e| node_emits_in_main?(e) }
+      when If
+        if node.iyi_definition_probe?
+          false
+        elsif node.cond.is_a?(BoolLiteral) && !node.cond.as(BoolLiteral).value
+          if els = node.else
+            node_emits_in_main?(els)
+          else
+            false
+          end
+        else
+          true
+        end
       when Assign
         !node.target.is_a?(Path)
       when Nop

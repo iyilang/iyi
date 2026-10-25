@@ -69,7 +69,6 @@ module Iyi::Stale
       write_prefix_and_u64(0x09_u8, name.bytesize.to_u64)
       @hasher.update(name.to_slice)
     end
-
     private def write_prefix_and_u64(prefix : UInt8, val : UInt64) : Nil
       buf = uninitialized UInt8[9]
       buf[0] = prefix

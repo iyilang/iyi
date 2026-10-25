@@ -22,12 +22,13 @@
 # (`CodeGenVisitor#iyi_tpidr_el0`). Mach-O and COFF have no local-exec, and
 # every other thread-local there is read through an accessor call
 # (`CodeGenVisitor#get_thread_local`), which the check took at first too:
-# a call per turn cost a vectorised sum 5.8 times its unchecked twin on
-# darwin arm64. So x86-64 Windows reads the TEB's TLS array through `%gs`
-# at every check, and darwin arm64 the thread's pthread slots through
-# `tpidrro_el0`, each a read no optimisation moves out of a loop, and the
-# rest comes from the function's entry (`entry_value`). x86-64 darwin and
-# arm64 Windows keep the accessor call.
+# a call per turn cost a vectorised sum 5.3 to 5.8 times its unchecked twin
+# on a darwin arm64 runner and 3.4 to 4.9 times on a Windows one. So x86-64
+# Windows reads a TEB slot of the pool's own, `cmpq $0, %gs:off` as Linux
+# reads `%fs`, and darwin arm64 the thread's pthread slots through
+# `tpidrro_el0`, each a read no optimisation moves out of a loop, the
+# offset and the slot's index from the function's entry (`entry_value`).
+# x86-64 darwin and arm64 Windows keep the accessor call.
 module Iyi::PreemptChecks
   MARK = "iyi.preempt"
 
@@ -38,6 +39,10 @@ module Iyi::PreemptChecks
   # pointer read is marked with, so LLVM neither merges two of them nor
   # moves one out of a loop.
   INACCESSIBLE_READ_WRITE = 3_u64 << 2
+
+  # darwin's and Windows' checks made the first way, the accessor called
+  # at every back-edge (`-Dpreempt_check_accessor`, `Compiler#preempt_checks`).
+  class_property? accessor_only = false
 
   # *flag* is the preemption word's global (`IyiWorkers::preempt`), and the
   # thread-local accessor is `*` and that name.
@@ -140,16 +145,12 @@ module Iyi::PreemptChecks
 
   # What every check in function *fn* starts from, made once in its entry
   # block: on Linux the word's offset from the thread pointer, a link-time
-  # constant the same on every thread; on Windows and on darwin arm64 a
-  # pair, the index of this program's slot in the thread's table and the
-  # word's offset in the block that slot points to; elsewhere the slot the
+  # constant the same on every thread; on x86-64 Windows the word's
+  # offset from `%gs`, a TEB slot the pool claims (`IyiWorkers::preempt_slot`,
+  # the flag's global and `_slot`); on darwin arm64 a pair, the index of
+  # this program's slot in the thread's pthread slots and the word's
+  # offset in the block that slot points to; elsewhere the slot the
   # accessor writes the word's address into.
-  #
-  # Windows: the slot is the C runtime's `_tls_index`, set when the
-  # program loads, and the offset the word's from the start of the `.tls`
-  # section, a link-time constant (`SECREL32`) - the two halves of the
-  # read LLVM makes of a thread-local there, whose `gs:0x58` is the
-  # thread's own and is read at the check.
   #
   # darwin: the slot is dyld's pthread key for this image's thread-locals,
   # the 32 bits at 8 in the word's TLV descriptor (`_tlv_get_addr` reads
@@ -171,42 +172,40 @@ module Iyi::PreemptChecks
       return pure_asm(builder, ctx, int64, text, global_value)
     end
     windows = windows?(mod)
-    unless (windows && !aarch64) || (!windows && aarch64)
+    unless ((windows && !aarch64) || (!windows && aarch64)) && !accessor_only?
       return builder.alloca(ctx.pointer)
     end
-    global_value = thread_local(mod, flag, int64, LLVM::ThreadLocalMode::GeneralDynamic)
     if windows
-      index_global = mod.globals["_tls_index"]? || LLVM::Value.new(LibLLVM.add_global(mod, ctx.int32, "_tls_index"))
-      slot = builder.zext(builder.load(ctx.int32, index_global), int64)
-      offset = builder.zext(pure_asm(builder, ctx, ctx.int32, "movl $$${1:P}@SECREL32, $0", global_value), int64)
-    else
-      descriptor = pure_asm(builder, ctx, int64, "adrp $0, ${1:c}@TLVPPAGE\n\tldr $0, [$0, ${1:c}@TLVPPAGEOFF]", global_value)
-      key_address = builder.int2ptr(builder.add(descriptor, int64.const_int(8)), ctx.pointer)
-      slot = builder.zext(builder.load(ctx.int32, key_address), int64)
-      answer = builder.alloca(ctx.pointer)
-      accessor_type = LLVM::Type.function([ctx.pointer], ctx.void)
-      builder.call accessor_type, accessor(mod, flag, accessor_type), [answer]
-      word_address = builder.ptr2int(builder.load(ctx.pointer, answer), int64)
-      offset = builder.sub(word_address, thread_block(builder, ctx, slot, false))
+      slot_name = "#{flag}_slot"
+      slot_global = mod.globals[slot_name]? || LLVM::Value.new(LibLLVM.add_global(mod, int64, slot_name))
+      return builder.load(int64, slot_global)
     end
+    global_value = thread_local(mod, flag, int64, LLVM::ThreadLocalMode::GeneralDynamic)
+    descriptor = pure_asm(builder, ctx, int64, "adrp $0, ${1:c}@TLVPPAGE\n\tldr $0, [$0, ${1:c}@TLVPPAGEOFF]", global_value)
+    key_address = builder.int2ptr(builder.add(descriptor, int64.const_int(8)), ctx.pointer)
+    slot = builder.zext(builder.load(ctx.int32, key_address), int64)
+    answer = builder.alloca(ctx.pointer)
+    accessor_type = LLVM::Type.function([ctx.pointer], ctx.void)
+    builder.call accessor_type, accessor(mod, flag, accessor_type), [answer]
+    word_address = builder.ptr2int(builder.load(ctx.pointer, answer), int64)
+    offset = builder.sub(word_address, thread_block(builder, ctx, slot))
     pair_type = ctx.struct([int64, int64])
     pair = LibLLVM.build_insert_value(builder, pair_type.undef, slot, 0, "")
     LLVM::Value.new(LibLLVM.build_insert_value(builder, pair, offset, 1, ""))
   end
 
   # The word, volatile, through the thread pointer read here: x86-64's
-  # `%fs` segment (address space 257) at the offset, aarch64's
-  # `tpidr_el0` plus it, the block of this thread's slot plus the pair's
-  # offset, or the accessor's answer.
+  # `%fs` (address space 257) or on Windows `%gs` (256) at the offset,
+  # aarch64 Linux's `tpidr_el0` plus it, darwin's block of this thread's
+  # slot plus the pair's offset, or the accessor's answer.
   private def self.load_word(mod, builder, ctx, flag, linux, aarch64, anchor) : LLVM::Value
     int64 = ctx.int64
     if linux && aarch64
       address = builder.int2ptr(builder.add(thread_pointer(builder, ctx, "mrs $0, tpidr_el0"), anchor), ctx.pointer)
-    elsif linux
-      address = builder.int2ptr(anchor, ctx.pointer(257))
+    elsif anchor.type.kind.integer?
+      address = builder.int2ptr(anchor, ctx.pointer(linux ? 257 : 256))
     elsif anchor.type.kind.struct?
-      slot = builder.extract_value(anchor, 0)
-      block = thread_block(builder, ctx, slot, windows?(mod))
+      block = thread_block(builder, ctx, builder.extract_value(anchor, 0))
       address = builder.int2ptr(builder.add(block, builder.extract_value(anchor, 1)), ctx.pointer)
     else
       accessor_type = LLVM::Type.function([ctx.pointer], ctx.void)
@@ -218,19 +217,12 @@ module Iyi::PreemptChecks
     word
   end
 
-  # The block this thread's *slot* holds, its table read through the
-  # thread pointer as it is here: on Windows the TEB's
-  # `ThreadLocalStoragePointer`, `gs:0x58`, a volatile load (address space
-  # 256 is `%gs`); on darwin `tpidrro_el0`, the thread's pthread slots, its
-  # low three bits cleared as `_tlv_get_addr` clears them.
-  private def self.thread_block(builder, ctx, slot, windows) : LLVM::Value
+  # The block darwin's pthread slot *slot* holds on the thread as it is
+  # here: `tpidrro_el0` is the thread's slots, its low three bits cleared
+  # as `_tlv_get_addr` clears them.
+  private def self.thread_block(builder, ctx, slot) : LLVM::Value
     int64 = ctx.int64
-    if windows
-      table = builder.load(int64, builder.int2ptr(int64.const_int(0x58), ctx.pointer(256)))
-      table.volatile = true
-    else
-      table = builder.and(thread_pointer(builder, ctx, "mrs $0, tpidrro_el0"), int64.const_int(0xFFFFFFFFFFFFFFF8_u64))
-    end
+    table = builder.and(thread_pointer(builder, ctx, "mrs $0, tpidrro_el0"), int64.const_int(0xFFFFFFFFFFFFFFF8_u64))
     builder.load(int64, builder.gep(int64, builder.int2ptr(table, ctx.pointer), slot))
   end
 

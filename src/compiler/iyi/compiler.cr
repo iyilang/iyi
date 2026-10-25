@@ -4097,9 +4097,13 @@ module Iyi
 
     # iyi: the back-edge checks of a program with a pool, put in after
     # optimisation so they keep no loop from being vectorised (SPEC.md
-    # III.4.13, part 9; `PreemptChecks`).
+    # III.4.13, part 9; `PreemptChecks`). `-Dpreempt_check_accessor` builds
+    # darwin's and Windows' checks as they were first, an accessor call at
+    # every back-edge: the broken copy bench/parallel_exercise.sh shows its
+    # tight-loop bound refusing.
     protected def preempt_checks(llvm_mod, flag : String?) : Nil
       return unless flag
+      PreemptChecks.accessor_only = @flags.includes?("preempt_check_accessor")
       PreemptChecks.run(llvm_mod, flag, @codegen_target.linux?, @codegen_target.architecture == "aarch64")
     end
 

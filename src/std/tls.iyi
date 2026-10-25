@@ -351,6 +351,10 @@
 # costs 0.11 ms a handshake, the HPKE seal and open and the inner built,
 # encoded and rebuilt. `TlsServerConfig#groups` orders the key exchange
 # groups a server takes, which is also how a server is made to ask again.
+# `TlsServerConfig#frozen` is the config a server whose handshakes run on
+# several threads at once reads (std/http's `Server.serve_parallel`):
+# `Share`, with one set of ticket keys among its threads, its identity
+# source a block the compiler checks.
 #
 # A record is at most 2^14 bytes of content, as section 5.1 holds both
 # sides to, and a TLS 1.3 record's inner plaintext - content type and
@@ -402,6 +406,9 @@ import std/digest::{SHA256, SHA384}
 import std/idna::{IDNA, IdnaError}
 import std/random::{Random}
 import std/time::{Time}
+import std/mutex::{Mutex}
+import std/list::{List}
+import std/shared_proc::{SharedProc}
 
 # The alerts of RFC 8446 section 6, by the code each is sent as.
 pub struct TlsAlert
@@ -3318,6 +3325,23 @@ end
 # Ed25519, ECDSA on P-256 or P-384 (std/p256, std/p384) or RSA (std/rsa),
 # each in constant time: what a server presents, and what a client
 # presents when a server asks.
+#
+# `Share` (SPEC.md III.4.4), trusted rather than derived: a server's
+# workers sign with one identity at once, and an `identity_source` that
+# runs on every worker answers identities it keeps. What the structural
+# rule cannot see is that nothing writes one after it is made: no method
+# here assigns a field, and none of std/x509's `Certificate`, std/p256's,
+# std/p384's and std/rsa's private keys does - a signature is computed
+# into new values, nothing is cached on the key - so what fails the rule
+# is only that the chain and the certificate are held in `Array`s. The
+# constructor copies the arrays it is given, so a caller that keeps them
+# writes its own. The one part that changes while a server runs, the OCSP
+# response it staples, is behind a `Mutex` (`staple`), which every
+# worker reads through. The edge is the one `List` closes by never
+# lending its array and this cannot: `chain`, `schemes` and the leaf's
+# fields are lent as arrays, read by every method of std, and a program
+# that writes into one writes what other threads read.
+@[Share]
 pub class TlsIdentity
   # The chain as sent, leaf first, each certificate's DER.
   getter chain : Array(Array(UInt8))
@@ -3332,11 +3356,12 @@ pub class TlsIdentity
   @p256 : P256PrivateKey?
   @p384 : P384PrivateKey?
   @rsa : RsaPrivateKey?
-  # The OCSP response a server staples for this chain (`TlsServerConfig#staple`),
-  # its DER and the SingleResponse for the leaf.
-  getter ocsp_staple : Array(UInt8)? = nil
-  @ocsp_response : OcspResponse? = nil
-  @ocsp_single : OcspSingleResponse? = nil
+  # The OCSP response a server staples for this chain (`staple`): its DER
+  # and when it stops being sent, behind a lock, since a server's workers
+  # read it while the program fetches a fresh one. What it says is read
+  # again from the DER where a handshake staples it: a parsed
+  # `OcspResponse` holds arrays, so it cannot leave the lock.
+  @ocsp : Mutex(TlsStapleCell)
 
   ED25519        = 0x0807
   P256           = 0x0403
@@ -3349,35 +3374,56 @@ pub class TlsIdentity
   # sign, for a client that takes no RSA-PSS (`scheme12_for`).
   RSA_PKCS1 = [0x0401, 0x0501, 0x0601]
 
-  def initialize(@chain : Array(Array(UInt8)), @leaf : Certificate, @schemes : Array(Int32), @seed : Array(UInt8)?, @p256 : P256PrivateKey?, @p384 : P384PrivateKey?, @rsa : RsaPrivateKey?)
+  def initialize(chain : Array(Array(UInt8)), @leaf : Certificate, schemes : Array(Int32), seed : Array(UInt8)?, @p256 : P256PrivateKey?, @p384 : P384PrivateKey?, @rsa : RsaPrivateKey?)
+    @chain = chain.map(&.dup)
+    @schemes = schemes.dup
+    @seed = seed ? seed.dup : nil
+    @ocsp = Mutex.new { TlsStapleCell.new }
   end
 
   # *der* kept as this chain's OCSP response, to be stapled for a client
   # that asks: refused unless it is an OCSPResponse std/ocsp reads, with a
   # SingleResponse for the leaf - its serial number and its issuer name's
   # hash. Its signature and times are the client's to check; this server
-  # only leaves one past its nextUpdate unsent.
+  # only leaves one past its nextUpdate unsent. A later call replaces it,
+  # from any thread, and a handshake on any worker staples the one held
+  # when it asks.
   def staple(der : Array(UInt8)) : TlsError?
     response = OcspResponse.parse(der)
     return TlsError.new("the OCSP response: #{response.message}") if response.is_a?(OcspError)
-    single = response.responses.find { |s| s.cert_id.serial == @leaf.serial && s.cert_id.issuer_name_hash == s.cert_id.hash.digest(@leaf.issuer) }
+    single = single_for(response)
     return TlsError.new("the OCSP response has no SingleResponse for #{@leaf.subject_name}") unless single
-    @ocsp_staple = der
-    @ocsp_response = response
-    @ocsp_single = single
+    text = TlsBytes.text(der)
+    next_update = single.next_update
+    until_ms = next_update ? next_update.to_unix_ms : nil
+    kept = @ocsp.lock { |cell| cell.hold(text, until_ms) }
+    return TlsError.new("the OCSP response was not kept: the task was cancelled", cancelled: true) if kept.is_a?(Cancelled)
     nil
+  end
+
+  # The OCSP response kept for this chain (`staple`), its DER; nil when
+  # none is.
+  def ocsp_staple : Array(UInt8)?
+    held = @ocsp.get { |cell| cell.der }
+    held.is_a?(String) ? TlsBytes.of(held) : nil
   end
 
   # The response to staple at *now*, with what it says; nil when there is
   # none, or it is past its nextUpdate.
   def staple_at(now : Time) : {Array(UInt8), OcspResponse, OcspSingleResponse}?
-    der = @ocsp_staple
-    response = @ocsp_response
-    single = @ocsp_single
-    return nil unless der && response && single
-    next_update = single.next_update
-    return nil if next_update && next_update < now
+    now_ms = now.to_unix_ms
+    held = @ocsp.get { |cell| cell.at(now_ms) }
+    return nil unless held.is_a?(String)
+    der = TlsBytes.of(held)
+    response = OcspResponse.parse(der)
+    return nil if response.is_a?(OcspError)
+    single = single_for(response)
+    return nil unless single
     {der, response, single}
+  end
+
+  private def single_for(response : OcspResponse) : OcspSingleResponse?
+    response.responses.find { |s| s.cert_id.serial == @leaf.serial && s.cert_id.issuer_name_hash == s.cert_id.hash.digest(@leaf.issuer) }
   end
 
   # The chain in *certificates*' CERTIFICATE blocks, leaf first, and the
@@ -3580,6 +3626,17 @@ end
 # What a server presents and asks: its identity, the protocols it speaks
 # by ALPN, the oldest version it speaks, and - for mutual TLS - the roots
 # a client's certificate must chain to.
+#
+# A config is written as a server runs - its properties are assigned, an
+# identity is added - and its `identity_source` is a `Proc`, which may
+# have captured anything; so it is not `Share` (SPEC.md III.4.4), and a
+# server whose connections run on several threads at once (std/http's
+# `Server.serve_parallel`) takes `frozen` instead: a copy no property of
+# which changes, that every worker reads at once. What must change while
+# such a server runs is shared rather than copied, and synchronised: the
+# ticket keys and the replay guard, whose state is behind a `Mutex`, so
+# a ticket one worker seals another opens; and each identity's OCSP
+# staple (`staple`), which a fresh response replaces from any thread.
 pub class TlsServerConfig
   getter identity : TlsIdentity
   # Protocols this server speaks by ALPN (RFC 7301), most wanted first; a
@@ -3786,6 +3843,137 @@ pub class TlsServerConfig
   def schemes : Array(Int32)
     @identity.schemes
   end
+
+  # A copy, to be written apart from this one: the arrays copied - the
+  # protocols, roots, identities, groups, and each ECH key, whose `retry`
+  # is its own - and the ticket keys and the replay guard shared, so that
+  # a ticket either seals the other opens, and early data either took
+  # the other refuses.
+  def dup : TlsServerConfig
+    copy = TlsServerConfig.new(@identity)
+    copy.share_state(@ticket_keys, @replay_guard)
+    copy.alpn = @alpn.dup
+    copy.client_roots = (roots = @client_roots) ? roots.dup : nil
+    copy.client_required = @client_required
+    copy.now = @now
+    @others.each { |other| copy.add_identity(other) }
+    copy.identity_source = @identity_source
+    copy.min_version = @min_version
+    copy.tickets = @tickets
+    copy.ticket_lifetime = @ticket_lifetime
+    copy.max_early_data = @max_early_data
+    copy.ech_keys = @ech_keys.map do |key|
+      own = TlsEchKey.new(key.config, key.private_key)
+      own.retry = key.retry
+      own
+    end
+    copy.groups = @groups.dup
+    copy
+  end
+
+  protected def share_state(keys : TlsTicketKeys, guard : TlsReplayGuard) : Nil
+    @ticket_keys = keys
+    @replay_guard = guard
+  end
+
+  # This config as it is now, for a server whose connections run on
+  # several threads at once (`TlsFrozenServerConfig`). One with an
+  # `identity_source` is refused by panicking: a `Proc` may have captured
+  # anything, and nothing checked it - the source goes to the block form
+  # below instead, where the compiler checks it.
+  def frozen : TlsFrozenServerConfig
+    TlsFrozenServerConfig.new(self, nil)
+  end
+
+  # The same, with the block as its `identity_source`, asked with the
+  # host, the protocols and the milliseconds left as that is. The def is
+  # `@[Share]`, so the block is checked where it is written as a parallel
+  # task's is (SPEC.md III.4.4, III.4.13): every value it captures must be
+  # `Share` - identities, which are, a `Mutex` around a table of them, a
+  # `Channel` to the thread that keeps them - every captured local
+  # assigned once, and the constants and class variables it names
+  # `Share`. It is called on whichever worker the handshake runs on,
+  # several at once. `identity_source`, if set, is not asked.
+  @[Share]
+  def frozen(&source : String?, Array(String)?, Int32? -> TlsIdentity | TlsError | Nil) : TlsFrozenServerConfig
+    TlsFrozenServerConfig.new(self, SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil).of { |asked| source.call(asked[0], asked[1], asked[2]) })
+  end
+end
+
+# A `TlsServerConfig` frozen (`TlsServerConfig#frozen`): what a server
+# whose connections run on several threads at once - std/http's
+# `Server.serve_parallel(tls:)` - reads on every worker. It is `Share`
+# (SPEC.md III.4.4), trusted rather than derived, and this is why it may
+# be. It holds a copy of the config it was made from (`dup`), which
+# nothing else holds and nothing writes after the constructor made it:
+# no method here assigns it or calls a setter on it, and it leaves only
+# for the `TlsServer` a handshake runs (`server`), which reads it and
+# has no getter for it. What the copy holds is `Share` itself or read
+# alone: its identities are `Share`, its ECH keys copied with it, its
+# arrays its own; the ticket keys and the replay guard it shares with
+# the config it was made from are `Share` by their fields, a `Mutex`
+# each, so a ticket one worker seals another opens and a replay one
+# refuses all refuse. Its identity source is a `SharedProc`, whose
+# block the compiler checked where it was written. The readers below
+# answer copies, a `List` or a new array, never the copy's own. What
+# changes while a server runs: an OCSP staple, through `staple`; the
+# ticket key, as it turns over; and whatever the identity source
+# answers, a certificate renewed (std/autocert). The rest - the
+# identities, the protocols, the ECH keys - is the server's for its
+# life: another set is another frozen config, served by another
+# `serve_parallel`.
+@[Share]
+pub class TlsFrozenServerConfig
+  @settings : TlsServerConfig
+  @source : SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil)?
+
+  # *config* copied, its `identity_source` replaced by *source*. A config
+  # with an `identity_source` and no *source* is refused by panicking, as
+  # `TlsServerConfig#frozen` says.
+  def initialize(config : TlsServerConfig, @source : SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil)?)
+    if config.identity_source && @source.nil?
+      raise "TlsServerConfig#frozen: its identity_source is a Proc, which nothing checked may run on another thread; give the source to `frozen` as a block instead - `config.frozen { |name, alpn, left_ms| ... }` - whose captures the compiler checks (SPEC.md III.4.4)"
+    end
+    @settings = config.dup
+    @settings.identity_source = nil
+  end
+
+  # The server's half of a connection on *socket* under this config, for
+  # `TlsServer.over` to run the handshake of.
+  def server(socket : IyiSocket) : TlsServer
+    TlsServer.new(socket, @settings, @source)
+  end
+
+  def identity : TlsIdentity
+    @settings.identity
+  end
+
+  def others : List(TlsIdentity)
+    List.new(@settings.others)
+  end
+
+  def alpn : List(String)
+    List.new(@settings.alpn)
+  end
+
+  def ticket_keys : TlsTicketKeys
+    @settings.ticket_keys
+  end
+
+  def replay_guard : TlsReplayGuard
+    @settings.replay_guard
+  end
+
+  # `TlsServerConfig#ech_config_list`'s, of the keys frozen with it.
+  def ech_config_list : Array(UInt8)?
+    @settings.ech_config_list
+  end
+
+  # *der* stapled for *identity*, as `TlsServerConfig#staple` does, from
+  # any thread: the handshakes after it, on every worker, staple it.
+  def staple(der : Array(UInt8), identity : TlsIdentity = @settings.identity) : TlsError?
+    identity.staple(der)
+  end
 end
 
 # The keys a server seals its tickets under. RFC 8446 section 4.6.1 leaves
@@ -3798,41 +3986,48 @@ end
 # periods. A key idle past both goes with the one before it. The keys live
 # in this process: a ticket outlives neither a restart nor a move to
 # another server, which would need the keys shared and is not offered.
+#
+# Every thread of the process may seal and open at once - a server's
+# workers under `TlsFrozenServerConfig` share one set, so a ticket one
+# sealed another opens - so the keys are behind a `Mutex`, which makes
+# this type `Share` by its fields: the current name and key, and the
+# previous ones, are read under the lock, the key turned over there when
+# it is due, and the seal or open done outside it with the key read.
+# The lock is held for a comparison and four reads, and for two random
+# draws when the key turns over.
 pub class TlsTicketKeys
-  @name : Array(UInt8)
-  @key : ChaCha20Poly1305
-  @made_ms : Int64
-  @previous_name : Array(UInt8)? = nil
-  @previous : ChaCha20Poly1305? = nil
+  @ring : Mutex(TlsTicketKeyRing)
 
   def initialize(now_ms : Int64 = TlsTime.now_ms)
-    @name = Random::Secure.random_bytes(8)
-    @key = ChaCha20Poly1305.new(Random::Secure.random_bytes(32))
-    @made_ms = now_ms
+    @ring = Mutex.new { TlsTicketKeyRing.new(now_ms) }
   end
 
   # *state* sealed at *now_ms* (monotonic) under the current key - a new
-  # one first, when *period_ms* has passed since it was made.
+  # one first, when *period_ms* has passed since it was made. Empty only
+  # when the task was cancelled while it waited for the keys.
   def seal(state : Array(UInt8), now_ms : Int64, period_ms : Int64) : Array(UInt8)
-    rotate_if_due(now_ms, period_ms)
+    keys = current(now_ms, period_ms)
+    return [] of UInt8 if keys.is_a?(Cancelled)
     nonce = Random::Secure.random_bytes(12)
-    @name + nonce + TlsBytes.of(@key.seal(nonce, state, @name))
+    name = TlsBytes.of(keys.name)
+    name + nonce + TlsBytes.of(ChaCha20Poly1305.new(keys.key).seal(nonce, state, name))
   end
 
   # The state *ticket* seals, when a key still held at *now_ms* opens it;
   # nil for any other bytes.
   def open(ticket : Array(UInt8), now_ms : Int64, period_ms : Int64) : Array(UInt8)?
-    rotate_if_due(now_ms, period_ms)
+    keys = current(now_ms, period_ms)
+    return nil if keys.is_a?(Cancelled)
     return nil if ticket.size < 8 + 12 + 16
-    name = ticket[0, 8]
-    key = nil.as(ChaCha20Poly1305?)
-    if name == @name
-      key = @key
-    elsif name == @previous_name
-      key = @previous
+    name = TlsBytes.text(ticket[0, 8])
+    key = nil.as(String?)
+    if name == keys.name
+      key = keys.key
+    elsif name == keys.previous_name
+      key = keys.previous
     end
     return nil unless key
-    opened = key.open(ticket[8, 12], ticket[20, ticket.size - 20], name)
+    opened = ChaCha20Poly1305.new(key).open(ticket[8, 12], ticket[20, ticket.size - 20], ticket[0, 8])
     return nil if opened.is_a?(AeadError)
     TlsBytes.of(opened)
   end
@@ -3840,10 +4035,41 @@ pub class TlsTicketKeys
   # A new key from *now_ms*: what the one before sealed still opens, and
   # what the one before that sealed no longer does.
   def rotate(now_ms : Int64 = TlsTime.now_ms) : Nil
+    @ring.lock { |ring| ring.rotate(now_ms) }
+    nil
+  end
+
+  private def current(now_ms : Int64, period_ms : Int64) : TlsTicketKeySet | Cancelled
+    @ring.get { |ring| ring.current(now_ms, period_ms) }
+  end
+end
+
+# The keys `TlsTicketKeys` holds behind its lock: each name and key as
+# the bytes they are, in a `String`, which may leave the lock.
+class TlsTicketKeyRing
+  @name : String
+  @key : String
+  @made_ms : Int64
+  @previous_name : String? = nil
+  @previous : String? = nil
+
+  def initialize(now_ms : Int64)
+    @name = TlsBytes.text(Random::Secure.random_bytes(8))
+    @key = TlsBytes.text(Random::Secure.random_bytes(32))
+    @made_ms = now_ms
+  end
+
+  # The keys at *now_ms*, turned over first when they are due.
+  def current(now_ms : Int64, period_ms : Int64) : TlsTicketKeySet
+    rotate_if_due(now_ms, period_ms)
+    TlsTicketKeySet.new(@name, @key, @previous_name, @previous)
+  end
+
+  def rotate(now_ms : Int64) : Nil
     @previous_name = @name
     @previous = @key
-    @name = Random::Secure.random_bytes(8)
-    @key = ChaCha20Poly1305.new(Random::Secure.random_bytes(32))
+    @name = TlsBytes.text(Random::Secure.random_bytes(8))
+    @key = TlsBytes.text(Random::Secure.random_bytes(32))
     @made_ms = now_ms
   end
 
@@ -3856,6 +4082,17 @@ pub class TlsTicketKeys
       @previous_name = nil
       @previous = nil
     end
+  end
+end
+
+# The ticket keys as one seal or open reads them, out of the lock.
+struct TlsTicketKeySet
+  getter name : String
+  getter key : String
+  getter previous_name : String?
+  getter previous : String?
+
+  def initialize(@name : String, @key : String, @previous_name : String?, @previous : String?)
   end
 end
 
@@ -3881,36 +4118,33 @@ end
 # early must be safe to run twice; and taking early data at all lets
 # whoever recorded the ClientHello replay it within the window to a server
 # that has not seen it - none, here.
+#
+# The binders are behind a `Mutex`, as the ticket keys are, so every
+# worker of a `TlsFrozenServerConfig`'s server records into one guard and
+# a replay sent to another worker is refused there too.
 pub class TlsReplayGuard
   WINDOW_MS = 10000_i64
   getter capacity : Int32
-  # The binders held, oldest first from `@head`, each with when it was
-  # recorded; and the same as a set.
-  @binders : Array(String) = [] of String
-  @times : Array(Int64) = [] of Int64
-  @head : Int32 = 0
-  @held : Hash(String, Bool) = {} of String => Bool
+  @book : Mutex(TlsReplayBook)
 
   def initialize(@capacity : Int32 = 65536)
+    capacity = @capacity
+    @book = Mutex.new { TlsReplayBook.new(capacity) }
   end
 
   # How many binders are held.
   def size : Int32
-    @binders.size - @head
+    held = @book.get { |book| book.size }
+    held.is_a?(Cancelled) ? 0 : held
   end
 
   # Whether early data may be taken, at *now_ms* (monotonic), for a
   # ClientHello whose PSK binder is *binder*: not one held already, and not
-  # past `capacity`. It is recorded when it may.
+  # past `capacity`. It is recorded when it may; a task cancelled while it
+  # waits for the guard is refused.
   def admit(binder : Array(UInt8), now_ms : Int64) : Bool
-    drop(now_ms)
     key = TlsBytes.hex(binder)
-    return false if @held.has_key?(key)
-    return false if size >= @capacity
-    @held[key] = true
-    @binders << key
-    @times << now_ms
-    true
+    @book.get { |book| book.admit(key, now_ms) } == true
   end
 
   # Whether a ticket age the client gives, *client_ms*, and this server's
@@ -3919,6 +4153,34 @@ pub class TlsReplayGuard
     gap = server_ms - client_ms
     gap = -gap if gap < 0
     gap <= WINDOW_MS
+  end
+end
+
+# The binders a `TlsReplayGuard` holds behind its lock, oldest first from
+# `@head`, each with when it was recorded; and the same as a set.
+class TlsReplayBook
+  WINDOW_MS = TlsReplayGuard::WINDOW_MS
+  @capacity : Int32
+  @binders : Array(String) = [] of String
+  @times : Array(Int64) = [] of Int64
+  @head : Int32 = 0
+  @held : Hash(String, Bool) = {} of String => Bool
+
+  def initialize(@capacity : Int32)
+  end
+
+  def size : Int32
+    @binders.size - @head
+  end
+
+  def admit(key : String, now_ms : Int64) : Bool
+    drop(now_ms)
+    return false if @held.has_key?(key)
+    return false if size >= @capacity
+    @held[key] = true
+    @binders << key
+    @times << now_ms
+    true
   end
 
   # The binders recorded two windows ago and more, dropped.
@@ -3931,6 +4193,26 @@ pub class TlsReplayGuard
     @binders = @binders[@head, @binders.size - @head]
     @times = @times[@head, @times.size - @head]
     @head = 0
+  end
+end
+
+# The OCSP response a `TlsIdentity` staples, behind its lock: the DER,
+# and when it stops being sent (its nextUpdate, Unix ms), nil for never.
+class TlsStapleCell
+  getter der : String? = nil
+  @until_ms : Int64? = nil
+
+  def hold(der : String, until_ms : Int64?) : Nil
+    @der = der
+    @until_ms = until_ms
+  end
+
+  # The DER to staple at *now_ms*: nil when none is held, or it is past
+  # its nextUpdate.
+  def at(now_ms : Int64) : String?
+    limit = @until_ms
+    return nil if limit && limit < now_ms
+    @der
   end
 end
 
@@ -4194,6 +4476,9 @@ pub class TlsServer < TlsConnection
   # `identity`, or one of its `others` the client asked for by name.
   getter identity : TlsIdentity
   @config : TlsServerConfig
+  # The identity source of the `TlsFrozenServerConfig` this connection
+  # runs under, asked in `identity_source`'s place (`server`).
+  @shared_source : SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil)?
   # Whether a ChangeCipherSpec went out after the first hello (appendix D.4).
   @sent_ccs : Bool = false
   # The scheme this side's CertificateVerify is signed under: the first of
@@ -4208,7 +4493,7 @@ pub class TlsServer < TlsConnection
   # without its trailing dot (see where the ClientHello is read).
   MAX_HOST_NAME = 253
 
-  def initialize(socket : IyiSocket, @config : TlsServerConfig)
+  def initialize(socket : IyiSocket, @config : TlsServerConfig, @shared_source : SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil)? = nil)
     super(socket, "the client", "the client")
     @identity = @config.identity
   end
@@ -4223,9 +4508,11 @@ pub class TlsServer < TlsConnection
   # is true, a ClientHello's early data may be taken: then the handshake
   # answers once this side's Finished is sent, `read_early` reads the
   # early data, a write goes at once (0.5-RTT), and `finish` - which
-  # `read` calls - reads the client's Finished.
-  def self.over(socket : IyiSocket, config : TlsServerConfig, timeout_ms : Int32 = HANDSHAKE_TIMEOUT_MS, early_data : Bool = true) : TlsServer | TlsError
-    server = TlsServer.new(socket, config)
+  # `read` calls - reads the client's Finished. Under a frozen config
+  # (`TlsFrozenServerConfig`) the handshake may run on any thread, as many
+  # at once as there are.
+  def self.over(socket : IyiSocket, config : TlsServerConfig | TlsFrozenServerConfig, timeout_ms : Int32 = HANDSHAKE_TIMEOUT_MS, early_data : Bool = true) : TlsServer | TlsError
+    server = config.is_a?(TlsFrozenServerConfig) ? config.server(socket) : TlsServer.new(socket, config)
     server.takes_early = early_data
     problem = server.within(timeout_ms) { server.handshake }
     return problem if problem
@@ -4719,7 +5006,7 @@ pub class TlsServer < TlsConnection
       psk = @schedule.resumption_psk(@resumption_secret, nonce)
       state = TlsTicket.new(@suite, now, lifetime, age_add, psk, @server_name, @alpn_protocol, identity, chain, @authenticated_ms, early)
       sealed = @config.ticket_keys.seal(state.encode, now, @config.lifetime_ms)
-      return nil if sealed.size > TlsServerConfig::MAX_TICKET
+      return nil if sealed.empty? || sealed.size > TlsServerConfig::MAX_TICKET
       flight.concat(TlsBytes.message(4, TlsBytes.u32(lifetime) + TlsBytes.u32(age_add) + [nonce.size.to_u8] + nonce +
                                         TlsBytes.u16(sealed.size) + sealed + TlsBytes.u16(extensions.size) + extensions))
     end
@@ -5003,7 +5290,7 @@ pub class TlsServer < TlsConnection
     unshown = nil.as(TlsError?)
     if schemes
       chosen = @config.identity_for(server_name, schemes)
-      if source = @config.identity_source
+      if source = identity_source
         given = source.call(server_name, alpn, left_ms)
         return given if given.is_a?(TlsError)
         chosen = given.scheme_for(schemes) ? given : nil if given
@@ -5364,11 +5651,20 @@ pub class TlsServer < TlsConnection
     {group, chosen.scheme12_for(schemes) || 0}
   end
 
+  # What is asked for the identity a client is shown: the frozen config's
+  # source, called with the three as one tuple, else the config's own.
+  private def identity_source : Proc(String?, Array(String)?, Int32?, TlsIdentity | TlsError | Nil)?
+    if shared = @shared_source
+      return ->(name : String?, alpn : Array(String)?, left : Int32?) { shared.call({name, alpn, left}) }
+    end
+    @config.identity_source
+  end
+
   # The identity a TLS 1.2 offer is answered under: the first of the
   # config's `others` that names the host asked for and can answer it, else
   # `identity` if it can; or why the client is refused.
   private def identity12(offer : TlsOffer12, schemes : Array(Int32)) : TlsIdentity | TlsError
-    if source = @config.identity_source
+    if source = identity_source
       given = source.call(offer.server_name, offer.alpn, left_ms)
       return given if given.is_a?(TlsError)
       if given

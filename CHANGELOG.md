@@ -91,6 +91,40 @@
   Windows and CI on aarch64 Linux under emulation; built for aarch64 by
   the compiler before this change it failed under qemu-user in 2 runs of
   2, and a copy reading the line from before the loop fails it by name.
+**std/http's `Server.serve_parallel` serves TLS (#145).**
+`serve_parallel(listener, tls: config.frozen)` runs each connection's
+handshake and requests on the pool worker that serves it - HTTP/2 and
+HTTP/1.1 by ALPN, client certificates, Encrypted Client Hello - with
+one set of ticket keys among the workers, so a ticket a connection on
+one worker was sent resumes on any other, and at a stop each waiting
+connection is sent close_notify from its own worker. Measured on Linux
+(twelve hardware threads, four busy with other work), release, wrk with
+32 kept-alive HTTPS connections and a request that computes: 3,867
+requests a second under `serve`, and 3,884, 7,727, 14,877 and 26,751
+under `serve_parallel` on 1, 2, 4 and 8 workers.
+
+- std/tls: `TlsServerConfig#frozen` is a `TlsFrozenServerConfig`, a copy
+  no property of which changes, `Share` (SPEC.md III.4.4) and taken by
+  `serve_parallel(tls:)` and by `serve(tls:)` alike; a `TlsServerConfig`
+  given to `serve_parallel` is refused by the compiler. An identity
+  source goes to `frozen` as a block, `config.frozen { |name, alpn,
+  left_ms| ... }`, whose captures the compiler checks; freezing a config
+  whose `identity_source` is set panics, saying so. `TlsServerConfig#dup`
+  copies a config, sharing its ticket keys and replay guard.
+- std/tls: `TlsTicketKeys`, `TlsReplayGuard` and each `TlsIdentity`'s OCSP
+  staple keep their state behind a `Mutex`, and may be used from any
+  thread; `TlsIdentity` is `Share`, and its constructor copies the
+  arrays it is given. `TlsIdentity#ocsp_staple` is a method now, not a
+  getter of a field, and answers the same.
+- std/autocert: `AutocertManager#frozen_tls_config` serves under
+  `serve_parallel`: held certificates and tls-alpn-01 challenges are
+  answered on the workers, and a name not held is asked of the
+  manager's `run`, which must run; one order still serves every worker
+  asking for a name at once.
+- std/http: `serve_parallel` gives a connection's place back with the
+  channel's locked `receive`; the unlocked `take_now` it used on every
+  worker raced the accepting thread (the runtime's fix, making the
+  public halves take the lock, is on `m-thread/steal`).
 
 ## 0.19.1 — 2026-10-25
 

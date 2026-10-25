@@ -479,7 +479,7 @@ parallel_base = "http://127.0.0.1:#{parallel.local_port}"
 stopping = Channel(Int32).new(1)
 routes = SharedRouter.new
   .handle("GET /users/{id}") { |_, params| Response.new(200, "user " + params["id"]) }
-  .handle("GET /stop") { |_, _| stopping.put_now(0); Response.new(200, "bye") }
+  .handle("GET /stop") { |_, _| stopping.send(0); Response.new(200, "bye") }
 group do |g|
   g.spawn do
     stopping.receive

@@ -168,7 +168,8 @@ jobs:
       # `mod` refusing the prefixes every other command accepts.
       - name: The commands, and the daemon
         run: |
-          export IYI_PATH="lib:$(pwd)/src"
+          IYI_PATH="lib:$(pwd)/src"
+          export IYI_PATH
           make -o .build/crystal cli_spec
 
       # Stale tests are a separate proof, not an assertion over YAML. The
@@ -207,7 +208,8 @@ jobs:
           if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
             args+=(--export-index "master=stale-index/master-x86_64-linux-gnu.json")
           fi
-          .build/iyi test "${args[@]}" samples/iyi/*.iyi
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          .build/iyi test "${args[@]}" "${tests[@]}"
 
       # archive: false leaves the uploaded JSON unhashed by an outer zip. The
       # filename and artifact name must remain identical (upload-artifact#785).
@@ -269,9 +271,10 @@ jobs:
 
       - name: All producer receipts hit on a fresh runner
         run: |
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           .build/iyi test --cached --json \
             --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
-            samples/iyi/*.iyi > stale-index/cached.json
+            "${tests[@]}" > stale-index/cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/cached.json
 
       # This is an export step, and therefore the only stale-fresh step that
@@ -283,14 +286,15 @@ jobs:
           IYI_CI_PRODUCER: "1"
         run: |
           bash bench/stale_ci.sh assert-export-env
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           .build/iyi test --fresh --json \
             --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
-            samples/iyi/*.iyi > stale-index/fresh.json
+            "${tests[@]}" > stale-index/fresh.json
           bash bench/stale_ci.sh shadow-audit \
             --cached-json stale-index/cached.json \
             --fresh-json stale-index/fresh.json \
-            --cached-snapshot stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json \
-            --fresh-snapshot stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json
+            --cached-snapshot "stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
+            --fresh-snapshot "stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
 
       - name: Planted hidden-read shadow-audit proof
         run: bash bench/stale_ci.sh test-planted-hidden-read
@@ -314,9 +318,10 @@ jobs:
       - name: Master snapshot git-diff self-check
         run: |
           if [ -f stale-index/master-x86_64-linux-gnu.json ]; then
+            mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
             .build/iyi test --cached --json \
               --import-index "master=stale-index/master-x86_64-linux-gnu.json" \
-              samples/iyi/*.iyi > stale-index/master-cached.json
+              "${tests[@]}" > stale-index/master-cached.json
             bash bench/stale_ci.sh git-diff-check \
               --master-snapshot stale-index/master-x86_64-linux-gnu.json \
               --cached-json stale-index/master-cached.json
@@ -2311,7 +2316,8 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
         run: |
-          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          export IYI
           bash bench/samples_roundtrip.sh
           python bench/agent_loop.py
           python bench/lsp_token_boundaries.py
@@ -2729,7 +2735,8 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
         run: |
-          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          export IYI
           python bench/debug_info.py
           python bench/measured_numbers.py
           python bench/lsp_latency.py
@@ -3238,8 +3245,9 @@ jobs:
       # fail.
       - name: install.sh installs the tarball, and refuses a wrong checksum
         run: |
-          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
-          tarball="$(basename dist/*.tar.gz)"
+          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS)
+          set -- dist/*.tar.gz
+          tarball="$(basename "$1")"
           version="${tarball#iyi-}"; version="${version%-linux-x86_64.tar.gz}"
           export IYI_RELEASE_URL="file://$PWD/dist" IYI_VERSION="$version"
           IYI_PREFIX="$PWD/installed" sh install.sh
@@ -3323,7 +3331,7 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           git tag -l --format='%(contents)' "$tag" > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md for ${tag#v}." > notes.md
-          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS)
+          (cd dist && sha256sum ./*.tar.gz ./*.zip > SHA256SUMS && cat SHA256SUMS)
           gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 

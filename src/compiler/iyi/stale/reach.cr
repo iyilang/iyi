@@ -117,8 +117,17 @@ module Iyi::Stale
     @visited_class_vars : Set(MetaTypeVar)
     @allocated_types : Set(Type)
     @visited_fun_defs : Set(External)
+    class BlockContext
+      getter block : Block
+      getter type : Type?
+      getter parent : BlockContext?
+
+      def initialize(@block : Block, @type : Type?, @parent : BlockContext?)
+      end
+    end
+
     @current_type : Type?
-    @current_block : Block?
+    @current_block_context : BlockContext?
     @in_lib : Bool
 
     def self.walk(program : Program, node : ASTNode, drop : EdgeKind? = nil) : Reach
@@ -146,9 +155,9 @@ module Iyi::Stale
       @allocated_types = Set(Type).new
       @visited_fun_defs = Set(External).new
       @current_type = @program
-      @current_block = nil
+      @current_block_context = nil
       @in_lib = false
-      @inlined_defs_stack = Set(Tuple(Def, Type)).new
+      @inlined_defs_stack = Set(Tuple(UInt64, String, UInt64)).new
     end
 
     def reach(node : ASTNode) : Nil
@@ -341,7 +350,8 @@ module Iyi::Stale
         if (fun_literal = block.fun_literal) && target_def.uses_block_arg?
           accept fun_literal
         else
-          reach_inlined_def(target_def, owner, block)
+          bc = BlockContext.new(block, @current_type, @current_block_context)
+          reach_inlined_def(target_def, owner, bc)
           return
         end
       end
@@ -358,7 +368,6 @@ module Iyi::Stale
       mangled_name = target_def.mangled_name(@program, owner)
       return if @visited_defs.includes?(mangled_name)
       @visited_defs << mangled_name
-
       @def_names << mangled_name
       record_element(
         target_def.is_a?(External) ? ElementKind::LibFun : ElementKind::Def,
@@ -370,8 +379,14 @@ module Iyi::Stale
       )
 
       old_type = @current_type
+      old_block_context = @current_block_context
+      old_inlined_stack = @inlined_defs_stack
       @current_type = owner
+      @current_block_context = nil
+      @inlined_defs_stack = Set(Tuple(UInt64, String, UInt64)).new
       accept target_def.body
+      @inlined_defs_stack = old_inlined_stack
+      @current_block_context = old_block_context
       @current_type = old_type
     end
 
@@ -395,18 +410,17 @@ module Iyi::Stale
       defining.responds_to?(:virtual_type) ? defining.virtual_type : defining
     end
 
-    private def reach_inlined_def(target_def : Def, owner : Type, block : Block) : Nil
-      key = {target_def, owner}
+    private def reach_inlined_def(target_def : Def, owner : Type, block_context : BlockContext) : Nil
+      key = {target_def.object_id, owner.to_s, block_context.block.object_id}
       return if @inlined_defs_stack.includes?(key)
       @inlined_defs_stack << key
-
-      old_block = @current_block
+      old_block_context = @current_block_context
       old_type = @current_type
-      @current_block = block
+      @current_block_context = block_context
       @current_type = owner
       accept target_def.body
       @current_type = old_type
-      @current_block = old_block
+      @current_block_context = old_block_context
       @inlined_defs_stack.delete(key)
     end
 
@@ -457,7 +471,7 @@ module Iyi::Stale
     # All 62 visit overloads mirroring CodeGenVisitor#visit exactly
 
     def visit(node : ASTNode)
-      false
+      true
     end
 
     def visit(node : Alias)
@@ -570,6 +584,7 @@ module Iyi::Stale
     end
 
     def visit(node : ExpandableNode)
+      node.expanded.try &.accept(self)
       false
     end
 
@@ -812,16 +827,21 @@ module Iyi::Stale
       accept node.body
       false
     end
-
     def visit(node : Yield)
+      if scope = node.scope
+        accept scope
+      end
       node.exps.each do |exp|
         accept exp
       end
-      if block = @current_block
-        old_block = @current_block
-        @current_block = nil
-        accept block.body
-        @current_block = old_block
+      if bc = @current_block_context
+        old_bc = @current_block_context
+        old_type = @current_type
+        @current_block_context = bc.parent
+        @current_type = bc.type
+        accept bc.block.body
+        @current_type = old_type
+        @current_block_context = old_bc
       end
       false
     end

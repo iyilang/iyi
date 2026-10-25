@@ -397,6 +397,7 @@ struct DwarfResolver
     #
     # The extension is the last dot after the last separator: a program in
     # a directory named `my.tools` keeps its own name.
+    @[Effect(:panic_backtrace)]
     def self.exe_pdb_wide(buffer : Pointer(UInt16), limit : Int32) : ::Bool
       n = LibC.GetModuleFileNameW(Pointer(Void).new(0_u64), buffer, limit)
       return false if n <= 0 || n >= limit
@@ -428,6 +429,7 @@ struct DwarfResolver
     # graph of offsets into blocks scattered through it, so reading it once
     # beats seeking per frame. `ReadFile` counts bytes in an Int32, so a
     # large one arrives in pieces.
+    @[Effect(:panic_backtrace)]
     def self.load_whole_file(handle : Void*, size_out : Pointer(Int64)) : Pointer(UInt8)
       none = Pointer(UInt8).new(0_u64)
       size = 0_i64
@@ -454,6 +456,7 @@ struct DwarfResolver
 
     # MEM_RELEASE (0x8000), which frees the whole reservation and wants a
     # size of zero.
+    @[Effect(:panic_backtrace)]
     def self.release(buf : Pointer(UInt8)) : Nil
       LibC.VirtualFree(buf.as(Void*), 0_u64, 0x8000) if buf.address != 0_u64
     end
@@ -467,6 +470,7 @@ struct DwarfResolver
     # 0x2C, four unused bytes, and the block index of the *block map* at
     # 0x34. The block map is an array of block numbers holding the
     # directory, which is the one structure read eagerly here.
+    @[Effect(:panic_backtrace)]
     def self.msf_open : ::Bool
       buf = @@pdb
       size = @@pdb_size
@@ -521,6 +525,7 @@ struct DwarfResolver
     # stream's list of block numbers. There is no index into those lists —
     # stream i's begins after the lists of every stream before it — so
     # finding one walks the sizes.
+    @[Effect(:panic_backtrace)]
     def self.read_stream(index : Int32, size_out : Pointer(Int64)) : Pointer(UInt8)
       none = Pointer(UInt8).new(0_u64)
       size_out.value = 0_i64
@@ -596,6 +601,7 @@ struct DwarfResolver
       false
     end
 
+    @[Effect(:panic_backtrace)]
     def self.pdb_load(wide : Pointer(UInt16), base : Pointer(UInt8), image_size : Int64,
                       cv : Int64) : ::Bool
       # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL:
@@ -1037,6 +1043,7 @@ struct DwarfResolver
     # The ELF header's address, the linker's `__ehdr_start`, as the thread
     # runtime reads it: in a def, so only a program that imports this
     # module references the symbol.
+    @[Effect(:self_image)]
     def self.ehdr_start : UInt64
       header = uninitialized UInt64
       {% if flag?(:x86_64) %}
@@ -1051,6 +1058,7 @@ struct DwarfResolver
     # The load bias - where the program runs less where it was linked -
     # into *answer*[0], and the running address of its `.eh_frame_hdr`, or
     # 0, into *answer*[1], both from the program headers in memory.
+    @[Effect(:self_image)]
     def self.image(answer : Pointer(UInt64)) : Nil
       header = ehdr_start
       phoff = Pointer(UInt64).new(header + 32_u64).value
@@ -1390,6 +1398,7 @@ struct DwarfResolver
     # the hook's - are not. `@[NoInline]` so the registers read are this
     # function's, whose rules the walk then looks up.
     @[NoInline]
+    @[Effect(:panic_backtrace)]
     def self.capture(frames : Pointer(Void*), limit : Int32, above : UInt64) : Int32
       spilled = uninitialized UInt64[4]
       registers = pointerof(spilled).as(Pointer(UInt64))
@@ -1493,6 +1502,7 @@ struct DwarfResolver
 
     # `/proc/self/exe` mapped whole, its size into *size_out*; 0 when it
     # cannot be.
+    @[Effect(:self_image)]
     def self.map_self(size_out : Pointer(UInt64)) : UInt64
       fd = __iyi_open_read("/proc/self/exe".to_unsafe)
       return 0_u64 if fd < 0_i64
@@ -1767,6 +1777,7 @@ struct DwarfResolver
     end
   {% end %}
 
+  @[Effect(:panic_backtrace)]
   def self.resolve_frames(frames : Pointer(Void*), count : Int32) : Nil
     {% if flag?(:darwin) %}
       slide = LibC._dyld_get_image_vmaddr_slide(0).to_u64

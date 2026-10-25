@@ -65,6 +65,7 @@ pub struct GC
 
   # `size` zeroed bytes the collector scans for pointers. A negative size
   # is refused by name.
+  @[Effect(:memory)]
   def self.malloc(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
     __iyi_malloc64(size.to_u64)
@@ -76,6 +77,7 @@ pub struct GC
   # `GC_malloc_atomic` hands them out - so the caller writes every byte
   # it reads. This said "zeroed" while 2000 chunks taken after a
   # collection freed 2000 filled ones came back dirty, every one.
+  @[Effect(:memory)]
   def self.malloc_atomic(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
     __iyi_malloc_atomic64(size.to_u64)
@@ -83,6 +85,7 @@ pub struct GC
 
   # The chunk at `pointer`, resized to `size` bytes; the answer may be a
   # new address, with the old bytes copied.
+  @[Effect(:memory)]
   def self.realloc(pointer : Void*, size : Int) : Void*
     raise "negative size: #{size}" if size < 0
     __iyi_realloc64(pointer, size.to_u64)
@@ -90,23 +93,27 @@ pub struct GC
 
   # Hands a chunk back before the sweep would. A null pointer is nothing
   # to free.
+  @[Effect(:memory)]
   def self.free(pointer : Void*) : Nil
     return if pointer.address == 0_u64
     IyiHeap.free(pointer)
   end
 
   # Runs one collection now.
+  @[Effect(:collector)]
   def self.collect : Nil
     IyiMark.collect
   end
 
   # The allocation trigger runs collections again. `collect` still works
   # while disabled.
+  @[Effect(:collector)]
   def self.enable : Nil
     IyiMark.auto = true
   end
 
   # The allocation trigger stops running collections until `enable`.
+  @[Effect(:collector)]
   def self.disable : Nil
     IyiMark.auto = false
   end
@@ -120,6 +127,7 @@ pub struct GC
   # unmaps those nodes under that lock. Walked without it, beside three
   # threads whose large chunks come and go, two seconds of `is_heap_ptr`
   # died of a memory fault in 10 runs of 10 (`bench/std_gc_exercise.iyi`).
+  @[Effect(:collector)]
   def self.is_heap_ptr(pointer : Void*) : Bool
     return false if pointer.address == 0_u64
     IyiHeap.lock
@@ -137,6 +145,7 @@ pub struct GC
   # it, and the walk's next read was of memory gone: beside three threads
   # allocating, two seconds of `stats` died of a memory fault in 10 runs
   # of 10 (`bench/std_gc_exercise.iyi`).
+  @[Effect(:runtime_timing)]
   def self.stats : Stats
     mapped = 0_u64
     IyiHeap.lock

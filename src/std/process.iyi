@@ -1489,6 +1489,7 @@ class ProcessChild
     {% end %}
 
     {% if flag?(:darwin) %}
+      @[Effect(:process)]
       def self.errno : Int32
         ::LibC.error_location.value
       end
@@ -1498,18 +1499,22 @@ class ProcessChild
         result < 0_i64 ? -(errno.to_i64) : result
       end
 
+      @[Effect(:process)]
       def self.sys_read(fd : Int32, buffer : Pointer(UInt8), count : Int32) : Int64
         answer(::LibC.read(fd, buffer.as(Void*), count.to_u64))
       end
 
+      @[Effect(:process)]
       def self.sys_write(fd : Int32, buffer : Pointer(UInt8), count : Int32) : Int64
         answer(::LibC.write(fd, buffer.as(Void*), count.to_u64))
       end
 
+      @[Effect(:process)]
       def self.sys_close(fd : Int32) : Nil
         ::LibC.close(fd)
       end
 
+      @[Effect(:file_exists)]
       def self.executable_file?(path : String) : Int32
         c = c_text(path)
         return errno if LibC.access(c, 1) != 0 # X_OK
@@ -1520,12 +1525,14 @@ class ProcessChild
         mode == 0x8000 ? 0 : EACCES
       end
 
+      @[Effect(:file_stat)]
       def self.directory?(path : String) : ::Bool
         buffer = Pointer(UInt64).malloc(32_u64)
         return false if LibC.stat(c_text(path), buffer.as(Void*)) != 0
         Pointer(Int32).new(buffer.address + 4_u64).value & 0xF000 == 0x4000
       end
 
+      @[Effect(:cwd)]
       def self.current_directory : String
         buffer = Pointer(UInt8).malloc(4096_u64)
         return "." if ::LibC.getcwd(buffer, 4096_u64).address == 0_u64
@@ -1536,6 +1543,7 @@ class ProcessChild
         String.new(length) { |target| target.copy_from(buffer, length) }
       end
 
+      @[Effect(:process)]
       def self.executable : String?
         size = 4096_u32
         buffer = Pointer(UInt8).malloc(4096_u64)
@@ -1648,6 +1656,7 @@ class ProcessChild
         mode_of(c_text(path)) == 0x4000
       end
 
+      @[Effect(:cwd)]
       def self.current_directory : String
         buffer = Pointer(UInt8).malloc(4096_u64)
         return "." if __iyi_conc_syscall3(SYS_GETCWD, buffer.address.to_i64, 4096_i64, 0_i64) < 0_i64
@@ -1818,6 +1827,7 @@ class ProcessChild
       # A pipe whose ends are closed on exec, the way `pipe2(O_CLOEXEC)`
       # makes one; this side's end also O_NONBLOCK, so it parks, and a write
       # on it answers EPIPE rather than raising SIGPIPE (F_SETNOSIGPIPE).
+      @[Effect(:process)]
       def self.pipe(ours_reads : ::Bool) : {Int32, Int32}?
         fds = Pointer(Int32).malloc(2_u64)
         return nil if LibC.pipe(fds) != 0
@@ -1828,6 +1838,7 @@ class ProcessChild
         ours_reads ? {fds[0], fds[1]} : {fds[1], fds[0]}
       end
 
+      @[Effect(:process)]
       def start(command : String, path : String, args : Array(String), chdir : String?,
                 input : Int32, output : Int32, error : Int32, environment : Array(String)?) : Nil | ProcessError
         theirs = Pointer(Int32).malloc(3_u64)
@@ -1893,6 +1904,7 @@ class ProcessChild
       # The end, as a kqueue of its own: one NOTE_EXIT event for the child,
       # which makes that queue's descriptor readable, and the poller waits
       # on that descriptor like any other.
+      @[Effect(:process)]
       def wait_end : Nil | Cancelled
         status = 0
         queue = ::LibC.kqueue
@@ -1916,16 +1928,19 @@ class ProcessChild
         nil
       end
 
+      @[Effect(:process)]
       def kill : Nil
         LibC.kill(@pid, 9) unless @ended
       end
 
       # *number* to the child; nothing once its end is collected, when the
       # pid may be another process's.
+      @[Effect(:process)]
       def send_signal(number : Int32) : Nil
         LibC.kill(@pid, number) unless @ended
       end
 
+      @[Effect(:process)]
       def reap : Nil
         status = 0
         while LibC.waitpid(@pid, pointerof(status), 0) < 0 && ProcessChild.errno == EINTR
@@ -1934,6 +1949,7 @@ class ProcessChild
       end
 
       # Whether the child has ended, asked with WNOHANG; collected if so.
+      @[Effect(:process)]
       def poll_end : ::Bool
         return true if @ended
         status = 0
@@ -1942,6 +1958,7 @@ class ProcessChild
         true
       end
 
+      @[Effect(:process)]
       def self.own_pid : Int64
         LibC.getpid.to_i64
       end
@@ -1952,6 +1969,7 @@ class ProcessChild
       # by `addinherit_np`), no signal held, and the directory a file
       # action, so a program that could not be started leaves this one
       # where it was.
+      @[Effect(:process)]
       def self.replace(command : String, path : String, args : Array(String), chdir : String?,
                        environment : Array(String)?) : ProcessError
         actions = Pointer(UInt64).malloc(1_u64)
@@ -1981,6 +1999,7 @@ class ProcessChild
       # place in the child would close it. A pipe that could not be made
       # is its errno: answered as EACCES, a program out of descriptors
       # (EMFILE) was told "permission denied".
+      @[Effect(:process)]
       def self.pipe(ours_reads : ::Bool) : {Int32, Int32} | Int32
         fds = Pointer(Int32).malloc(2_u64)
         made = __iyi_conc_syscall3(SYS_PIPE2, fds.address.to_i64, 0x80000_i64, 0_i64)
@@ -1999,6 +2018,7 @@ class ProcessChild
         ours_reads ? {fds[0], fds[1]} : {fds[1], fds[0]}
       end
 
+      @[Effect(:process)]
       def start(command : String, path : String, args : Array(String), chdir : String?,
                 input : Int32, output : Int32, error : Int32, environment : Array(String)?) : Nil | ProcessError
         # Everything the child will touch is made here, before the clone:
@@ -2201,16 +2221,19 @@ class ProcessChild
         nil
       end
 
+      @[Effect(:process)]
       def kill : Nil
         __iyi_conc_syscall3(SYS_KILL, @pid.to_i64, 9_i64, 0_i64) unless @ended
       end
 
       # *number* to the child; nothing once its end is collected, when the
       # pid may be another process's.
+      @[Effect(:process)]
       def send_signal(number : Int32) : Nil
         __iyi_conc_syscall3(SYS_KILL, @pid.to_i64, number.to_i64, 0_i64) unless @ended
       end
 
+      @[Effect(:process)]
       def reap : Nil
         status = Pointer(Int32).malloc(1_u64)
         while __iyi_conc_syscall6(SYS_WAIT4, @pid.to_i64, status.address.to_i64, 0_i64, 0_i64, 0_i64, 0_i64) == -(EINTR.to_i64)
@@ -2219,6 +2242,7 @@ class ProcessChild
       end
 
       # Whether the child has ended, asked with WNOHANG; collected if so.
+      @[Effect(:process)]
       def poll_end : ::Bool
         return true if @ended
         status = Pointer(Int32).malloc(1_u64)
@@ -2228,6 +2252,7 @@ class ProcessChild
         true
       end
 
+      @[Effect(:process)]
       def self.own_pid : Int64
         {% if flag?(:x86_64) %}
           __iyi_conc_syscall3(39_i64, 0_i64, 0_i64, 0_i64)
@@ -2241,6 +2266,7 @@ class ProcessChild
       # 5.11; before it they stay open), as a spawned child has them; and
       # the directory is entered first and left again if the program could
       # not be started.
+      @[Effect(:process)]
       def self.replace(command : String, path : String, args : Array(String), chdir : String?,
                        environment : Array(String)?) : ProcessError
         target = ProcessChild.c_text(path)

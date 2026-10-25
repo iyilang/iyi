@@ -917,6 +917,7 @@ pub class Location
       fun GetTimeZoneInformation(information : UInt8*) : UInt32
     end
 
+    @[Effect(:host)]
     private def self.windows_local : Location
       info = Pointer(UInt8).malloc(172_u64)
       return UTC if LibKernel32.GetTimeZoneInformation(info) == 0xFFFFFFFF_u32
@@ -1249,11 +1250,13 @@ pub struct Time
       fun clock_gettime_nsec_np(clock_id : Int32) : UInt64
     end
 
+    @[Effect(:clock)]
     def self.wall_clock_nanoseconds : UInt64
       # CLOCK_REALTIME = 0 on Darwin
       LibSystem.clock_gettime_nsec_np(0)
     end
 
+    @[Effect(:clock)]
     def self.monotonic_nanoseconds : UInt64
       # CLOCK_MONOTONIC = 6 on Darwin
       LibSystem.clock_gettime_nsec_np(6)
@@ -1266,6 +1269,7 @@ pub struct Time
       end
     end
 
+    @[Effect(:clock)]
     def self.kernel_clock_gettime(clock_id : Int64) : {Int64, Int64}
       ts = uninitialized KernelTimeSpec
       result = uninitialized Int64
@@ -1283,12 +1287,14 @@ pub struct Time
       {ts.tv_sec, ts.tv_nsec}
     end
 
+    @[Effect(:clock)]
     def self.wall_clock_nanoseconds : UInt64
       # CLOCK_REALTIME = 0 on Linux
       sec, nsec = kernel_clock_gettime(0_i64)
       sec.to_u64 * 1000000000_u64 + nsec.to_u64
     end
 
+    @[Effect(:clock)]
     def self.monotonic_nanoseconds : UInt64
       # CLOCK_MONOTONIC = 1 on Linux
       sec, nsec = kernel_clock_gettime(1_i64)
@@ -1302,6 +1308,7 @@ pub struct Time
       fun QueryPerformanceFrequency(freq : Int64*) : Int32
     end
 
+    @[Effect(:clock)]
     def self.wall_clock_nanoseconds : UInt64
       filetime = uninitialized Int64
       # The precise one, as Crystal reads: `GetSystemTimeAsFileTime` moves
@@ -1314,6 +1321,7 @@ pub struct Time
       unix_100ns.to_u64 * 100_u64
     end
 
+    @[Effect(:clock)]
     def self.monotonic_nanoseconds : UInt64
       count = uninitialized Int64
       freq = uninitialized Int64
@@ -1334,22 +1342,26 @@ pub struct Time
       fun clock_time_get = __wasi_clock_time_get(id : Int32, precision : UInt64, time : UInt64*) : Int32
     end
 
+    @[Effect(:clock)]
     def self.wall_clock_nanoseconds : UInt64
       ns = uninitialized UInt64
       LibWasi.clock_time_get(0, 1000_u64, pointerof(ns))
       ns
     end
 
+    @[Effect(:clock)]
     def self.monotonic_nanoseconds : UInt64
       ns = uninitialized UInt64
       LibWasi.clock_time_get(1, 1000_u64, pointerof(ns))
       ns
     end
   {% else %}
+    @[Effect(:clock)]
     def self.wall_clock_nanoseconds : UInt64
       0_u64
     end
 
+    @[Effect(:clock)]
     def self.monotonic_nanoseconds : UInt64
       0_u64
     end

@@ -405,5 +405,108 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       closure.rg3_sites.should be_empty
       closure.not_reusable.select { |r| r.reason == "unclassified runtime site" }.should be_empty
     end
+
+    it "treats llvm.* intrinsics as compiler operations rather than lib calls (no RG3 site, not opaque)" do
+      runtime_file = File.join(Dir.current, "src", "std", "math_intrinsic.iyi")
+      program_file = File.join(Dir.current, "src", "program_math.iyi")
+
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+      parser1 = program.new_parser(<<-CODE)
+        lib LibLLVMMath
+          fun sqrt = "llvm.sqrt.f64"(x : Float64) : Float64
+        end
+
+        def runtime_sqrt(x : Float64) : Float64
+          LibLLVMMath.sqrt(x)
+        end
+        CODE
+      parser1.filename = runtime_file
+      node1 = program.normalize(parser1.parse)
+      program.semantic(node1)
+
+      parser2 = program.new_parser(<<-CODE)
+        def user_code
+          runtime_sqrt(4.0)
+        end
+        user_code
+        CODE
+      parser2.filename = program_file
+      node2 = program.normalize(parser2.parse)
+      final_node = program.semantic(node2)
+
+      reach = Iyi::Stale::ReachWalk.walk(program, final_node)
+      closure = Iyi::Effects.closure_check(program, reach)
+
+      # Neither RG3 site nor opaque program construct should be reported for llvm.* intrinsic
+      closure.rg3_sites.should be_empty
+      closure.not_reusable.select { |r| r.category == "opaque program construct" }.should be_empty
+      closure.not_reusable.select { |r| r.reason == "unclassified runtime site" }.should be_empty
+    end
+
+    it "accepts an @[Effect] def read from a toolchain std module artifact" do
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+
+      with_tempfile("std_time.iyimod") do |path|
+        # Write a mock std/time artifact
+        artifact = Iyi::IyiMod::Artifact.new(
+          module_name: "std/time",
+          source_path: "src/std/time.iyi",
+          compiler_version: Iyi::IyiMod.compiler_version,
+          target_triple: program.codegen_target.to_s,
+          flags: program.flags.to_a.sort!,
+          imports: [] of Iyi::IyiMod::ImportEdge,
+          exports: Iyi::IyiMod::Exports.new([] of Iyi::IyiMod::Signature, [] of Iyi::IyiMod::TypeDecl, [] of Iyi::IyiMod::ImplRecord)
+        )
+        Iyi::IyiMod.write(artifact, path)
+
+        Effects.in_runtime_library_file?(program, path).should be_true
+
+        parser = program.new_parser(<<-CODE)
+          @[Effect(:clock)]
+          def time_from_artifact
+            100
+          end
+          CODE
+        parser.filename = path
+        node = program.normalize(parser.parse)
+        # Should not raise placement error
+        program.semantic(node)
+      end
+    end
+
+    it "refuses an @[Effect] def from a user artifact with a std-ish name not in toolchain" do
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+
+      with_tempfile("user_fake.iyimod") do |path|
+        # Write a user artifact with std-ish module name that does not exist in toolchain std root
+        artifact = Iyi::IyiMod::Artifact.new(
+          module_name: "std/fake_nonexistent_mod",
+          source_path: "user/fake.iyi",
+          compiler_version: Iyi::IyiMod.compiler_version,
+          target_triple: program.codegen_target.to_s,
+          flags: program.flags.to_a.sort!,
+          imports: [] of Iyi::IyiMod::ImportEdge,
+          exports: Iyi::IyiMod::Exports.new([] of Iyi::IyiMod::Signature, [] of Iyi::IyiMod::TypeDecl, [] of Iyi::IyiMod::ImplRecord)
+        )
+        Iyi::IyiMod.write(artifact, path)
+
+        Effects.in_runtime_library_file?(program, path).should be_false
+
+        parser = program.new_parser(<<-CODE)
+          @[Effect(:clock)]
+          def fake_time
+            200
+          end
+          CODE
+        parser.filename = path
+        node = program.normalize(parser.parse)
+        expect_raises(Iyi::TypeException, "@[Effect] is only permitted on defs in runtime library files") do
+          program.semantic(node)
+        end
+      end
+    end
   end
 end

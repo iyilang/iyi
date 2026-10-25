@@ -410,7 +410,7 @@ install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
 # iyi: the other library, because `--crystal` is not a developer's switch.
 #
 # A program built with it gets Crystal's standard library, and an install that
-# ships only iyi's own 940 KB answers `require "json"` with "can't find file",
+# ships only iyi's own 942 KB answers `require "json"` with "can't find file",
 # which is the headline feature failing in the thing people download.
 #
 # `compiler/` was cut from this, on the grounds that a compiler carrying its own
@@ -598,7 +598,7 @@ $(O)/$(CRYSTAL_BIN): $(DEPS) $(SOURCES)
 # iyi: the same compiler under its own name — the commands iyi has, a usage
 # line that names them, and a version that says what it is a fork of. It links
 # what `crystal` links, because it *is* `crystal`; what differs is the surface.
-# Its prelude is its own, and it is 940 KB: `iyi` installed as `bin/iyi` finds
+# Its prelude is its own, and it is 942 KB: `iyi` installed as `bin/iyi` finds
 # `share/iyi/src/iyi/prelude.iyi` beside it and needs nothing else — no
 # `IYI_PATH`, no standard library, because an iyi program requires only the
 # prelude and the prelude requires only itself.

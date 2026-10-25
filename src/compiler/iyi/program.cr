@@ -1705,7 +1705,8 @@ module Iyi
       dependency_printer = compiler.try(&.dependency_printer)
 
       filenames.each do |filename|
-        unseen_file = requires.add?(filename)
+        canonical_filename = File.expand_path(filename)
+        unseen_file = requires.add?(canonical_filename)
 
         dependency_printer.try(&.enter_file(filename, unseen_file))
 

@@ -299,13 +299,14 @@ module Iyi::Stale
     private def simple_class_var_init?(node : ASTNode?, type : Type) : Bool
       return true if node.nil?
       return true if node.type?.try(&.nil_type?) && !type.nil_type?
-      return true if node.simple_literal?
-      case node
-      when NilLiteral, BoolLiteral, CharLiteral, NumberLiteral, StringLiteral, SymbolLiteral
-        true
-      else
-        false
+      if type.is_a?(PrimitiveType) || type.is_a?(EnumType)
+        return true if node.simple_literal?
+        case node
+        when NilLiteral, BoolLiteral, CharLiteral, NumberLiteral, SymbolLiteral
+          return true
+        end
       end
+      false
     end
 
     def reach_allocate(type : Type) : Nil

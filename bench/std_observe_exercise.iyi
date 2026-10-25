@@ -1,0 +1,18 @@
+# Exercises `std/observe`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_observe_exercise.iyi
+
+module bench/std_observe_exercise
+
+import std/observe
+
+# Directly exercise each observer entry point
+Std::Observe.env_get("FOO", "bar")
+Std::Observe.env_all
+Std::Observe.cwd("/test/dir")
+Std::Observe.host("test-host")
+Std::Observe.file_write(1_u8, "/test/out.txt", "")
+Std::Observe.not_reusable(32_u8, "src:test.iyi:10")
+
+puts "std/observe exercise passed"

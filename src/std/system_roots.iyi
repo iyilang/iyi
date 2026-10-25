@@ -215,6 +215,7 @@ end
     RESULT_TRUST_AS_ROOT =              2
     RESULT_DENY          =              3
 
+    @[Effect(:host)]
     def self.read(collected : SystemRootsCollector) : Nil
       anchors = Pointer(Void).new(0_u64)
       if LibSecurity.SecTrustCopyAnchorCertificates(pointerof(anchors)) == 0 && anchors.address != 0
@@ -240,6 +241,7 @@ end
     end
 
     # 1 trusted as a root without constraint, -1 denied, 0 neither.
+    @[Effect(:host)]
     private def self.verdict(certificate : Void*, domain : UInt32, result_key : Void*, constraints : Array(Void*)) : Int32
       settings = Pointer(Void).new(0_u64)
       return 0 unless LibSecurity.SecTrustSettingsCopyTrustSettings(certificate, domain, pointerof(settings)) == 0 && settings.address != 0
@@ -277,6 +279,7 @@ end
       end
     end
 
+    @[Effect(:host)]
     private def self.bytes(certificate : Void*) : Array(UInt8)
       data = LibSecurity.SecCertificateCopyData(certificate)
       return [] of UInt8 if data.address == 0
@@ -287,12 +290,14 @@ end
       copied
     end
 
+    @[Effect(:host)]
     private def self.string(text : String) : Void*
       LibCoreFoundation.CFStringCreateWithCString(Pointer(Void).new(0_u64), text.to_unsafe, UTF8)
     end
   end
 {% elsif flag?(:win32) %}
   struct SystemRootsWindows
+    @[Effect(:host)]
     def self.read(collected : SystemRootsCollector) : Nil
       each_der("ROOT") { |der| collected.add(der) }
       each_der("Disallowed") { |der| collected.deny(der) }

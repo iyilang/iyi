@@ -7,6 +7,7 @@ require "./wasm_roots"
 require "./mod/installer"
 require "./stale/encoding"
 require "./stale/toolchain"
+require "./stale/compiler_env"
 {% if flag?(:msvc) %}
   require "./loader"
 {% end %}

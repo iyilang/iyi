@@ -68,6 +68,19 @@ module Iyi
       end
     end
 
+    # Runs the block with no recorder if the current recorder is env-only.
+    # When no recorder is active or when the recorder is UpToDate, runs normally.
+    def self.pause_if_env_only(&)
+      if current.try &.env_only?
+        paused { yield }
+      else
+        yield
+      end
+    end
+
+    getter? env_only : Bool = false
+    getter? env_enumerated : Bool = false
+
     getter files = {} of String => Stamp
     getter written = Set(String).new
     getter listings = {} of String => Array(String)?
@@ -88,9 +101,11 @@ module Iyi
     @cache_root : String? = nil
     @packages : String? = nil
 
-    def initialize(cache_root : String?)
+    def initialize(cache_root : String?, @env_only : Bool = false)
       @ignored = Set(String).new
-      CHILD_ENV.each { |name| @env[name] = Crystal::System::Env.get(name) }
+      unless @env_only
+        CHILD_ENV.each { |name| @env[name] = Crystal::System::Env.get(name) }
+      end
       cache_root.try { |root| self.cache_root = root }
     end
 
@@ -182,6 +197,7 @@ module Iyi
     # A path the build asked about or opened, with the answer it got when it
     # asked with symlinks followed, or `nil` to work the answer out here.
     def looked_at(path : String, info : ::File::Info? = nil, answered : Bool = false) : Nil
+      return if @env_only
       path = key(path)
       return if excluded?(path)
       return if @mutex.synchronize { @files.has_key?(path) || @written.includes?(path) }
@@ -213,6 +229,7 @@ module Iyi
     end
 
     def opening(path : String, mode : String) : Nil
+      return if @env_only
       if mode.includes?('w') || mode.includes?('a') || mode.includes?('+')
         wrote(path)
       else
@@ -223,6 +240,7 @@ module Iyi
     # A path this build created or replaced. It is an output rather than an
     # input, and what is recorded for it is what it is once the build is done.
     def wrote(path : String) : Nil
+      return if @env_only
       path = key(path)
       return if excluded?(path)
       @mutex.synchronize { @written << path }
@@ -230,6 +248,7 @@ module Iyi
 
     # A path this build removed, which it made itself or does not depend on.
     def deleted(path : String) : Nil
+      return if @env_only
       path = key(path)
       return if excluded?(path)
       @mutex.synchronize do
@@ -239,6 +258,7 @@ module Iyi
     end
 
     def renamed(from : String, to : String) : Nil
+      return if @env_only
       deleted(from)
       wrote(to)
     end
@@ -246,6 +266,7 @@ module Iyi
     # A directory whose entries the build read. What is kept is the names, so
     # a file added or removed there — a `require "./x/*"`, a glob — is seen.
     def listed(dir : String) : Nil
+      return if @env_only
       dir = key(dir)
       return if excluded?(dir)
       first = @mutex.synchronize do
@@ -262,7 +283,17 @@ module Iyi
       @mutex.synchronize { @env[name] = value unless @env.has_key?(name) }
     end
 
+    def env_enumerated : Nil
+      @mutex.synchronize do
+        @env_enumerated = true
+        Crystal::System::Env.each do |key, value|
+          @env[key] = value unless @env.has_key?(key)
+        end
+      end
+    end
+
     def pkg_config_read(mod : String, static : Bool, flags : String?) : Nil
+      return if @env_only
       @mutex.synchronize { @pkg_config << {mod, static, flags} }
     end
 
@@ -270,15 +301,18 @@ module Iyi
     # skipped build could not do again. Any one of them and nothing is
     # recorded, so the next build compiles.
     def cannot(reason : String) : Nil
+      return if @env_only
       @mutex.synchronize { @reasons << reason unless @reasons.includes?(reason) }
     end
 
     # Another recorder's inputs as this build's own: a prelude the build
     # daemon analysed before forking this build was read under that recorder.
     def merge(other : BuildInputs) : Nil
+      @env_enumerated ||= other.env_enumerated?
+      other.env.each { |name, value| @env[name] = value unless @env.has_key?(name) }
+      return if @env_only
       other.files.each { |path, stamp| @files[path] = stamp unless @files.has_key?(path) }
       other.listings.each { |dir, names| @listings[dir] = names unless @listings.has_key?(dir) }
-      other.env.each { |name, value| @env[name] = value unless @env.has_key?(name) }
       @pkg_config.concat(other.pkg_config)
       other.reasons.each { |reason| cannot(reason) }
     end
@@ -287,6 +321,7 @@ module Iyi
     # when it said nothing — a program that has read what it pleased, as far
     # as anything here can tell.
     def run_declared(program : String, declared : Array(String)?, started : Int64) : Nil
+      return if @env_only
       program = Iyi.relative_filename(program)
       unless declared
         cannot("`run(\"#{program}\")` did not say which files it read (a program `run` at compile time names them, " \
@@ -312,6 +347,7 @@ module Iyi
     # paths in it, and the library each `-lname` names, found the way the
     # linker finds it. The objects are this build's own and in its cache.
     def linked(command : String, args : Array(String)?) : Nil
+      return if @env_only
       tokens = {% if flag?(:win32) %} Process.parse_arguments_windows(command) {% else %} Process.parse_arguments_posix(command) {% end %}
       args.try { |extra| tokens.concat(extra) }
       tokens = tokens.flat_map { |token| response_file(token) || [token] }
@@ -587,5 +623,12 @@ module ENV
     value = Crystal::System::Env.get(key)
     Iyi::BuildInputs.current.try &.env_read(key, value)
     !value.nil?
+  end
+
+  def self.each(& : {String, String} ->)
+    Iyi::BuildInputs.current.try &.env_enumerated
+    previous_def do |kv|
+      yield kv
+    end
   end
 end

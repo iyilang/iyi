@@ -9994,7 +9994,7 @@ class Program
   # One variable, or nil. No map of everything: the asking program names
   # what it wants, and a tool that dumps its whole environment into a
   # structure was one `puts` away from leaking it.
-  def self.env(name : String) : String | Nil
+  @[Effect(:env_get)]; def self.env(name : String) : String | Nil
     {% if flag?(:wasm32) %}
       nil
     {% elsif flag?(:win32) %}

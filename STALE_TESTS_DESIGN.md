@@ -22,11 +22,11 @@ Status: Proposal for review. Nothing in it is built. Grounded at iyilang/iyi `90
 * **D3:** The build side extends `BuildInputs`/`UpToDate`. No second recorder (§4).
 * **D4:** The run side is an observation build with compiler-injected observers and a static closure check. Anything outside the closure is opaque (§5).
 * **D5:** Clock, entropy, timers, network, subprocesses, signal handlers, runtime timing values and writes outside the run scratch directory make a run not reusable. The test still runs and reports (§5).
-* **D6:** Values the runtime makes up for uniqueness or layout are unspecified, not inputs. Accessors that hand internal values to programs are annotated not reusable (§3, §5).
+* **D6:** Values the runtime makes up for uniqueness or layout are unspecified, not inputs. Accessors that hand machine or timing values to programs are annotated not reusable (§3, §5).
 * **D7:** Only passes become receipts. A non-pass under a state that validates a receipt revokes it in the local store; cross-machine revocation occurs through the master audit (§6, §8).
 * **D8:** Local state lives in `<cache root>/tests-v1/`, written atomically. Environment values are stored as keyed digests (§6, §7).
 * **D9:** There are two namespaces. `master` holds receipts from iyilang/iyi master pushes, fetched through the Actions API. `run:<id>` holds receipts within a single workflow run. Pull requests never write a namespace another ref reads (§8).
-* **D10:** Producer jobs carry no secrets, so portable records may hold plain digests of environment values. A gate checks the export step environment for secrets and tokens (§8).
+* **D10:** No secret or token reaches the export step environment; portable records hold plain digests of environment values. A gate checks this (§8).
 * **D11:** Every CI run produces receipts, then a fresh runner hits and re-executes them. Hits across runs and commits wait on RG1 (§8, §10).
 * **D12:** `--cached` is opt-in. Default `iyi test` behavior and output do not change. Changing the default is a separate proposal backed by §13 (§9).
 * **D13:** `--affected` keeps its selection; reuse applies inside it (§9).
@@ -58,7 +58,7 @@ Implementation starts only after Jason Waldrip approves this pull request. Appro
 * **Corpus and CI:**
   * No committed `*_test.iyi`. The test verb is exercised by generated fixtures: `bench/test_verb.sh` and `bench/agent_loop.py:72-76`, `674-695`, at `.github/workflows/iyi.yml:604`, `644`, `1519`, `1531`, `2106`, `2134`.
   * The std exercises run as four weighted shards per platform (`.github/workflows/iyi.yml:934-985`, `1663`, `2450`).
-  * `on: [push, pull_request]` (`iyi.yml:41`), `permissions: {}` (`iyi.yml:65`). The only `secrets.` references are in the VS Code job (`iyi.yml:3174-3175`). `github.token` is exported in step environments (`iyi.yml:2708`, `2795`, `3139`), and PR jobs use `actions/cache` (`iyi.yml:1362`, `1647`, `2700`, `2787`, `2880`).
+  * `on: [push, pull_request]` (`iyi.yml:41`), `permissions: {}` (`iyi.yml:65`). The only `secrets.` references are in the VS Code job (`iyi.yml:3174-3175`). `github.token` is exported in step environments (`iyi.yml:2708`, `2795`, `3139`), and PR jobs use `actions/cache` (`iyi.yml:1362`, `1647`, `2700`, `2787`, `2880`). Linux executables dynamically link libc (`SPEC.md:6425-6432`).
 
 ## 3. The claim and what it assumes
 
@@ -82,7 +82,7 @@ Carries over unchanged from `BuildInputs` and `UpToDate`:
 
 | Gap | Change | Slice |
 |---|---|---|
-| G1: stamps are size and mtime | SHA-256 of file input when first seen; receipt refused if stamp at hashing differs from first-look stamp (`build_inputs.cr:184-212`) | S1/S3 |
+| G1: stamps are size and mtime | SHA-256 of compile inputs; receipt compares first-look stamp with stamp after build, refusing on differences or inputs racy at first look (`build_inputs.cr:184-212`, `487-490`) | S1/S3 |
 | G2: absolute keys, cwd verbatim | Logical roots (`src`, `toolchain`, `pkg`, `scratch`, `abs`) | S3 |
 | G3: compiler identity is path, size, mtime | Toolchain identity digest | S2 |
 | G4: raw argument list | Resolved behavior key | S2 |
@@ -115,21 +115,21 @@ The runner builds each test with `-Diyi_observe`, which belongs to the behavior 
 | Class | Kinds | Effect on the run |
 |---|---|---|
 | observed | `file_read`, `file_stat`, `file_exists`, `dir_list`, `env_get`, `env_all`, `cwd`, `host` | Recorded in trace |
-| output | `stdio`, `exit`, `file_write` (create, delete, rename, mkdir) | Nothing; write outside scratch taints `shared-write` |
+| output | `stdio`, `exit`, `file_write` (create, delete, rename, mkdir, link, symlink, touch, chmod) | Nothing; write outside scratch taints `shared-write` |
 | not reusable | `clock`, `entropy`, `timer` (sleep, timeout, deadline), `network`, `process`, `signal`, `runtime_timing` | Taints run, naming def |
 | internal | `memory`, `collector`, `threads`, `scheduler`, `self_image`, `console`, `panic_backtrace`, `temp_name`, `observation_channel` | Nothing; internal to runtime |
 
 Examples: `src/std/file.iyi:1963` (`temp_name`, internal) vs `src/std/random.iyi:440-475` (`entropy`); `src/iyi/prelude.iyi:4781` (internal clock) vs `7529` (`runtime_timing`).
 
 * **Injection:** In observation builds the compiler renames each annotated def and generates a wrapper calling the renamed def followed by `__iyi_observe_<kind>` from `src/iyi/observe.iyi`. A kind without an observer or a def with a mismatched signature is a compile error.
-* **Closure:** Checked statically on the typed program. Reachable `asm`, `lib` `fun` calls, and `lib` globals must sit inside an `@[Effect]` def in runtime library files. In program files, any of these, integer-to-pointer conversions, or calls to internal defs mark the run opaque with `FILE:LINE`. Unclassified reachable runtime sites mark the run opaque and trigger gate RG3. Runtime accessors that hand an internal value to programs are annotated `not reusable` (for example, `IyiWorkers.resolved` in `src/iyi/concurrency.iyi:3116-3134` returning `IyiThread.core_count` in `src/iyi/thread.iyi:954`). RG3 reports every runtime def returning values derived from internal defs, checked by RG6.
-* **Channel:** `IYI_OBSERVE=<path>` names a runner-owned file outside scratch and outside roots. At startup the runtime opens it and unsets the variable before program code runs. It appends length-prefixed records and writes `END(status)` after `IyiTestCases.verdict` or program completion. Top-level assertion failures and panics call `__iyi_exit(1)` (`src/iyi/prelude.iyi:9608-9613`, `src/iyi/concurrency.iyi:2966-2971`, `3007-3010`), and signal deaths or timeout kills terminate the process without writing END. Missing or malformed END, trailing records, or reserved exit codes mark `interrupted: trace incomplete`.
+* **Closure:** Checked statically on the typed program. Reachable `asm`, `lib` `fun` calls, and `lib` globals must sit inside an `@[Effect]` def in runtime library files. In program files, any of these, integer-to-pointer conversions, or calls to internal defs mark the run opaque with `FILE:LINE`. Unclassified reachable runtime sites mark the run opaque and trigger gate RG3. Runtime accessors that hand machine or timing values to programs are annotated `not reusable` (for example, `IyiWorkers.resolved` in `src/iyi/concurrency.iyi:3116-3134` returning `IyiThread.core_count` in `src/iyi/thread.iyi:954`, or collector and scheduler statistics). Uniqueness and layout values (such as `Reference#object_id` in `src/iyi/primitives.iyi:59-60` or temp names in `src/std/file.iyi:1911-1957`) remain unspecified values under A2. Classification rests on review with dataflow verification, checked by RG6.
+* **Channel:** `IYI_OBSERVE=<path>` names a runner-owned file outside scratch and outside roots. At startup the runtime opens it and unsets the variable before program code runs. It appends length-prefixed records and writes `END(status)` after `IyiTestCases.verdict` or program completion. Top-level assertion failures and panics call `__iyi_exit(1)` (`src/iyi/prelude.iyi:9608-9613`, `src/iyi/concurrency.iyi:2966-2971`, `3007-3010`), and signal deaths or timeout kills terminate the process without writing END. Missing or malformed END, trailing records, or reserved exit codes mark `trace incomplete`.
 * **Trace content:**
-  * File reads record path as given, open flags, open-time stat, and absolute path as resolved at open (`Dir.cd` changes process directory, `src/std/dir.iyi:387-395`). `Dir.cd` is recorded as an observed `cwd` event in the trace. Absolute paths map to roots using cwd active at open. Content is hashed after exit.
+  * File reads and links: Reads are classified by the file actually opened, resolving symlinks at open (`src/std/file.iyi:1288`). File reads record path as given, open flags, open-time stat, and absolute path as resolved at open (`Dir.cd` changes process directory, `src/std/dir.iyi:387-395`). `Dir.cd` is recorded as an observed `cwd` event in the trace. Absolute paths map to roots using cwd active at open. Content is hashed after exit. Each trace record is tagged with its task id to preserve observation order per task. Creating a hard link to a file outside scratch (`src/std/file.iyi:1269`) taints `shared-write` because the two names cannot be told apart afterward.
   * Directory listings record names in the order returned.
-  * Environment reads record name and whether program wrote it first (`env_get`: unwritten reads observe initial environment; reads after writes are internal). `env_all` digests every initial value in the whole initial environment table (except `IYI_OBSERVE`).
-  * Scratch and writes: `TMPDIR`, `TEMP` and `TMP` map to the `scratch` locator, set on every platform (`src/std/dir.iyi:425-431`, `src/std/file.iyi:1921-1931`). Scratch directory starts empty for each run and is removed afterward. Reads under scratch, and reads of paths the run already wrote, stay internal (not hashed after exit, not validated at lookup). Writes are classified by path: a write outside scratch, or through a descriptor the runtime never observed being opened, taints `shared-write`.
-* **Process profile:** Empty argv, closed stdin (`src/process.cr:550-551`), piped stdout/stderr, inherited cwd as (root, path), isolated `TMPDIR`/`TEMP`/`TMP` scratch directory created empty, timeout, umask, all `getrlimit` values (stack, open files, address space, data, CPU time, file size) and cgroup memory limit, cleared or recorded loader variables (`DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` on Darwin acting on libSystem, `src/iyi/prelude.iyi:303-308`), target triple, OS and kernel release.
+  * Environment reads record name and whether program wrote it first (`env_get`: unwritten reads observe initial environment; reads after writes are internal). `env_all` digests every initial value in the whole initial environment table (except `IYI_OBSERVE`), recording `TMPDIR`, `TEMP` and `TMP` as the `scratch` locator.
+  * Scratch, timestamps and writes: `TMPDIR`, `TEMP` and `TMP` map to the `scratch` locator, set on every platform (`src/std/dir.iyi:425-431`, `src/std/file.iyi:1921-1931`). Scratch directory starts empty for each run and is removed afterward. Existence, size and content under scratch stay internal, as do reads of paths the run already wrote (not hashed after exit, not validated at lookup). Returning a timestamp of a scratch or self-written file taints the run with `clock`. Descriptors 0 to 2 count as `stdio`, and the trace channel descriptor counts as `observation_channel`. Writes outside scratch or through other descriptors the runtime never observed being opened taint `shared-write`.
+* **Process profile:** Empty argv, closed stdin (`src/process.cr:550-551`), piped stdout/stderr, inherited cwd as (root, path), isolated `TMPDIR`/`TEMP`/`TMP` scratch directory created empty, timeout, umask, all `getrlimit` values (stack, open files, address space, data, CPU time, file size) and cgroup memory limit, cleared or recorded loader variables (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `GLIBC_TUNABLES` on Linux per `SPEC.md:6425-6432`; `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` on Darwin acting on libSystem, `src/iyi/prelude.iyi:303-308`), target triple, OS and kernel release.
 
 ## 6. Signatures, lookup and revocation
 
@@ -165,17 +165,17 @@ for test in selected tests, in fresh run order:
 
 run(test):
   build with -Diyi_observe and recorder; blind reason taints
-  refuse receipt if any file stamp at hashing time differs from first-look stamp
+  refuse receipt if any compile input was racy at first look (build_inputs.cr:195, 487-490) or its stamp after build differs from its first-look stamp
   execute under profile; collect trace
   interrupted sent to iyi test itself: write nothing, revoke nothing
   non-pass exit (fail, signal, timeout kill, reserved status, build failure):
     revoke every receipt of test that validates now (whatever trace state)
-  pass with incomplete trace: write nothing
+  pass with trace incomplete: write nothing
   pass, complete, untainted, inputs unchanged during run: write receipt
 ```
 
 Why sound: A deterministic program whose recorded answers all still hold makes the same reads and reaches the same verdict. Replay in order stops at the first mismatch (`run: fixtures/a.txt changed`). A changed condition reruns the test and records a second receipt, while the first stays valid for its own inputs. Validating tests in execution order preserves sequential equivalence.
-Revocation: Local receipts mark `contradicted` (sticky). Imported receipts receive a local mask. Before serving any receipt, the runner checks whether any contradicted receipt or mask of that test validates under current state (matching by state, not signature, because CompileFp carries `CHILD_ENV` digests, `src/compiler/iyi/build_inputs.cr:46-47`, `93`, which use HMAC locally and plain SHA-256 in portable records). Local masks and contradictions persist in the local store; cross-machine revocation occurs through the master shadow audit.
+Revocation: Local receipts mark `contradicted` (sticky). Imported receipts receive a local mask storing the masked receipt observations. Before serving any receipt, the runner checks whether any contradicted receipt or mask of that test validates under current state (matching by state, not signature, because CompileFp carries `CHILD_ENV` digests, `src/compiler/iyi/build_inputs.cr:46-47`, `93`, which use HMAC locally and plain SHA-256 in portable records). A new pass matching a contradicted signature keeps the contradicted flag (read-modify-write under the lock). Unreadable record files are treated as contradictions of their test. Local masks and contradictions persist in the local store; cross-machine revocation occurs through the master shadow audit.
 
 ## 7. Local state
 
@@ -185,11 +185,11 @@ Revocation: Local receipts mark `contradicted` (sticky). Imported receipts recei
   seq                                attempt counter, advanced under lock
   lock                               held while writing receipts, masks, snapshots
   records/<ab>/<signature>.json
-  masks/<signature>                  local revocations of imported receipts
+  masks/<signature>                  local revocations storing observations
   imported/<namespace digest>.json   one snapshot per namespace
 ```
 
-Atomic writes write to a temp file, fsync, then rename (`MoveFileEx` with write-through on Windows). Readers take no lock. Masks are never deleted as corrupt; readers never delete masks. Corrupt record files are removed as misses. S6 adds `tests-v1` to `NOT_BUILDS` (`src/compiler/iyi/codegen/cache_dir.cr:261`) so cache rotation spares it (`cache_dir.cr:109-117`, `212-233`). Outdated toolchain receipts are pruned during recording runs. Interrupts sent to `iyi test` leave existing receipts intact.
+Masks store the masked receipt observations (`masks/<signature>`). Atomic writes write to a temp file, fsync, then rename (`MoveFileEx` with write-through on Windows). Readers take no lock. Masks are never deleted as corrupt; readers never delete masks. Corrupt or unreadable record files are removed only under the lock and treated as contradictions of their test. S6 adds `tests-v1` to `NOT_BUILDS` (`src/compiler/iyi/codegen/cache_dir.cr:261`) so cache rotation spares it (`cache_dir.cr:109-117`, `212-233`). Outdated toolchain receipts are pruned during recording runs. Interrupts sent to `iyi test` leave existing receipts intact.
 
 ## 8. Portable index, trust and secrets
 
@@ -203,23 +203,23 @@ Snapshot format:
  "records": []}
 ```
 
-* **Export:** Allowed only with `--fresh` within the CI producer context (an attestation the workflow sets and the CI gate checks; refused on developer workstations to prevent leaking digests of low-entropy secrets or local `.env` files). Contains reusable passes and drops receipts with `abs` or `host` observations.
-* **Import checks:** Validates format, version, matching namespace, matching target, sorted unique tests, and roots restricted to `src`, `toolchain` and `pkg`. Only the GitHub Actions API filter establishes `master` provenance (verifying `producer.run_id` against trusted push runs on `refs/heads/master`). Local files imported under `master=` without API verification are rejected. Newer snapshots replace older ones wholesale.
+* **Export:** Allowed only with `--fresh` within the CI producer context, guarded by an environment flag (such as `IYI_CI_PRODUCER=1`) set by the workflow and checked by the CI gate to prevent accidental export from developer workstations. Contains reusable passes and drops receipts with `abs` or `host` observations.
+* **Import checks:** Validates format, version, matching namespace, matching target, sorted unique tests, and roots restricted to `src`, `toolchain` and `pkg`. Only artifacts downloaded through the GitHub Actions API or verified by comparing the file SHA-256 against the API run artifact digest establish `master` provenance. Local files imported under `master=` without API digest verification are rejected. Newer snapshots replace older ones wholesale.
 * **Precedence:** Local masks and contradictions, then local passes, then imported passes. At most one receipt per test per snapshot.
 * **Namespace `master`:** Produced on iyilang/iyi workflow runs on master pushes (`--export-index master=...`). Consumers trust only artifacts from `push` runs on `refs/heads/master` of that repository. Consumers fetch the newest completed master `push` run and import nothing for `master` if that run has no snapshot for the target (e.g. build failed before export, artifact expired). A run whose shadow audit disagreed publishes an empty snapshot (disabling consumption per RG6).
 * **Namespace `run:<id>`:** Consumed only within the same workflow run. Snapshot union across shards is allowed only for shards from the same producer run; a snapshot union containing duplicate tests across shards is refused.
-* **Trust and secrets:** No cross-run cache persistence in stale jobs (`actions/cache`). Producer jobs reference no secrets (`.github/workflows/iyi.yml:3174-3175`). The export gate verifies that the export step environment contains neither `secrets.` nor `github.token` (`iyi.yml:2708`, `2795`, `3139`). Portable receipts use plain digests of public variables; local receipts use the machine key. Pull requests cannot write a namespace another ref reads.
+* **Trust and secrets:** No cross-run cache persistence in stale jobs (`actions/cache`). No secret or token reaches the export step environment; the token goes only to the artifact download step. The export gate verifies that the export step environment contains neither `secrets.` nor `github.token` (`.github/workflows/iyi.yml:2708`, `2795`, `3139`). Portable receipts use plain digests of public variables; local receipts use the machine key. Pull requests cannot write a namespace another ref reads.
 * **CI flow (Linux first, others as RG3 turns green):**
-  * Job `iyi` runs `bench/stale_tests.sh`. Under workflow `permissions: {}` (`iyi.yml:65`), the job configures `actions: read` and uses `github.token` to download the master snapshot for audit. Runs `iyi test --fresh --export-index run:<id>=...` (and on master pushes, `--export-index master=...`) over `samples/iyi/*.iyi`, auditing against master, and uploads snapshots.
+  * Job `iyi` runs `bench/stale_tests.sh`. Under workflow `permissions: {}` (`iyi.yml:65`), the download step uses `actions: read` and `github.token` to download the master snapshot for audit. Runs `iyi test --fresh --export-index run:<id>=...` (and on master pushes, `--export-index master=...`) over `samples/iyi/*.iyi`, auditing against master, and uploads snapshots.
   * Job `stale-fresh` on a fresh runner receives job `iyi`'s compiler binary as an artifact (matching compiler bytes so toolchain executable SHA-256 matches), imports the run snapshot, runs `--cached` and asserts every receipt hits (only platform identity mismatches allowed).
-  * Re-executes with `--fresh` for shadow audit: tests that would have hit must pass with matching verdict and observation sets (preserving observation order per task). Disagreements publish an empty master snapshot.
-  * Imports `master` and runs `--cached` with git-diff self-check against `git diff --name-only <producer sha> HEAD`. Git-diff self-check fetches producer SHA and checks only validation bugs: hits observing changed paths fail the step; misses on unchanged checkout paths fail only for `File` observations of tracked checkout files mapped from roots (`src` mapped via `Compiler.entry_root_of`, `src/compiler/iyi/compiler.cr:352`; `toolchain` mapped to checkout `src/`). Planted hidden read test modifies a hidden file between producer and audit where compiler bytes match; caught by the shadow audit.
+  * Re-executes with `--fresh` for shadow audit: tests that would have hit must pass with matching verdict and observation sets (preserving observation order per task). The planted hidden-read test (row 24) runs on a fixture outside the published corpus. On disagreement, `stale-fresh` overwrites the master artifact with an empty snapshot under `if: always()` (or a final publish job waits on both audits).
+  * Imports `master` and runs `--cached` with git-diff self-check against `git diff --name-only <producer sha> HEAD`. Git-diff self-check fetches producer SHA and checks only validation bugs: hits observing changed paths fail the step; misses on unchanged checkout paths fail only for `File` observations of tracked checkout files mapped from roots (`src` mapped via `Compiler.entry_root_of`, `src/compiler/iyi/compiler.cr:352`; `toolchain` mapped to checkout `src/`).
 
 ## 9. `iyi test` behavior
 
 ```
 iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--explain]
-         [--shard K/N] [--import-index NS=FILE]... [--export-index NS=FILE] [paths]
+         [--shard K/N] [--import-index NS=FILE]... [--export-index NS=FILE]... [paths]
 ```
 
 * **Default mode:** Unchanged. Normal builds, no recording, no new JSON fields.
@@ -228,8 +228,9 @@ iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--exp
 * **`--explain`:** Prints one decision line per test.
 * **`--affected`:** Selects candidates as today (`src/compiler/iyi/command/test.cr:120-163`): falls back to a full run when a manifest changed (`test.cr:129-131`), when a changed file cannot be in any closure (`test.cr:138-140`, `243-257`), or when a named file is missing (`test.cr:153`). A test whose own source does not parse is selected on its own (`test.cr:158`, `261-262`), and an import that does not parse stays in the closure by path (`test.cr:263-266`). Reuse evaluates inside selection. Unselected tests are never reported as passed and never touched in store.
 * **Failures/timeouts/signals:** Every non-pass exit (fail, signal death, timeout kill, reserved status, build failure) revokes every receipt of that test that validates now, regardless of trace state.
-* **Interrupt:** Sent to `iyi test` itself: child tree killed (via process group on POSIX, job object on Windows, `src/compiler/iyi/command/test.cr:377-380`, `416`), no receipt written for active test, existing receipts left intact, nothing revoked, exits 130.
+* **Interrupt:** Sent to `iyi test` itself: child tree killed (via a new process group on POSIX, job object on Windows, `src/compiler/iyi/command/test.cr:377-380`, `416`), no receipt written for active test, existing receipts left intact, nothing revoked, exits 130.
 * **`--shard K/N`:** Deals tests round-robin; snapshots unioned only across shards of the same producer run; duplicate test across shards refused.
+* **`--export-index NS=FILE`:** May be specified multiple times to export to multiple namespaces in a single run.
 * **MCP:** `test` tool gains optional `cached` parameter (`src/compiler/iyi/command/mcp.cr:179`, `221`).
 * **Crystal mode:** `iyi test` rejects `--crystal` as a direct CLI option (`src/compiler/iyi/command/test.cr:76-80`), so Crystal mode reaches `iyi test` only through `IYI_OPTS="--crystal"` (`src/compiler/iyi/command.cr:992`, `1565`). Tests always run fresh with reason `Crystal library effects are not classified` (SPEC.md V.9 (e)).
 * **Crystal spec aggregate:** `./bin/crystal spec` is unchanged. If ever covered, unit is whole generated program (`src/compiler/iyi/command/spec.cr:98-115`).
@@ -240,7 +241,7 @@ iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--exp
 |---|---|---|---|
 | RG1 | Compilers with equal build-input digests produce byte-identical test executables for corpus | Hits across commits | Executable SHA-256 stays in identity |
 | RG2 | Normal and `-Diyi_observe` builds give equal exit status, stdout and stderr | Shipping `--cached` | Shipping waits |
-| RG3 | Zero unclassified runtime sites reachable from corpus on target; report lists every runtime def returning values derived from internal defs | Enabling platform CI | Platform runs fresh |
+| RG3 | Zero unclassified runtime sites reachable from corpus on target; report lists every runtime def returning values derived from internal defs, checked by review and dataflow verification | Enabling platform CI | Platform runs fresh |
 | RG4 | Links byte-identical under randomized variables outside `CHILD_ENV` | Treating `CHILD_ENV` as whole link environment | Full link environment digested |
 | RG5 | Runtime patched via `IYI_PATH` dropping each observer allows changed input to pass; gate catches it | Claiming kind is covered | Kind is not claimed |
 | RG6 | Standing shadow audit catches unannotated leaks or disagreements | Keeping consumption enabled after disagreement | Consumption disabled until fix (publishes empty snapshot) |
@@ -257,7 +258,7 @@ iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--exp
 | S5 (P2) | `src/iyi/observe.iyi`, wrapper generation, `stale/trace.cr`, `bench/stale_equivalence.sh` | Observer injection, runtime trace channel, RG2 and RG5 gates | User-space tracing | RG2 and RG5 pass |
 | S6 (P3) | `command/test.cr`, `stale/store.cr`, `cache_dir.cr`, `mcp.cr`, `bench/stale_tests.sh`, workflows | Receipt storage, atomic files, lookup, revocation, CLI flags; S6 adds `tests-v1` to `NOT_BUILDS` (`cache_dir.cr:261`) | Remote cache | §12 local rows green |
 | S7 (P3) | `src/compiler/iyi/macros/macros.cr`, `methods.cr` | Macro run programs built with `-Diyi_observe` | External build tools | Macro runs recorded |
-| S8 (P3) | `src/compiler/iyi/stale/snapshot.cr` | Portable snapshot export and import, CI attestation check | Cross-repo sharing | Snapshot validation passes |
+| S8 (P3) | `src/compiler/iyi/stale/snapshot.cr` | Portable snapshot export and import, repeatable export flags, CI attestation check | Cross-repo sharing | Snapshot validation passes |
 | S9 (P4) | `.github/workflows/iyi.yml`, `bench/stale_ci.sh`, `bench/stale_census.sh` | Master index publishing, `stale-fresh` job, shadow audit | Third-party CI | CI steps green |
 | S10 (P5) | `SPEC.md`, `CHANGELOG.md`, `README.md` | SPEC test row, census and overhead documentation | Unmeasured claims | `bench/doc_numbers.py` passes |
 
@@ -276,22 +277,28 @@ Automated in `bench/stale_tests.sh` unless marked CI:
 8. Edited prelude or std module reruns every test compiling it.
 9. Compiler rebuilt from changed sources misses everywhere. Compiler rebuilt from identical sources hits once RG1 is green.
 10. Clock, entropy, sleep, socket, subprocess, signal handler and GC pause accessor each cause test to run, naming def. Accessor returning core count (`IyiWorkers.resolved`) runs with `not reusable`.
-11. Temp file under scratch directory (`TMPDIR`/`TEMP`/`TMP`) stays reusable; reads under scratch or of self-written files stay internal. Write outside scratch, or through descriptor not observed opened, runs with `shared-write`.
+11. Temp file under scratch directory (`TMPDIR`/`TEMP`/`TMP`) stays reusable; existence, size and content under scratch stay internal. Reads of self-written files stay internal. Write outside scratch, or through descriptor not observed opened (except descriptors 0 to 2 and trace channel), runs with `shared-write`.
 12. Program `asm`, `lib` binding, integer-to-pointer conversion, or internal def call runs with `FILE:LINE`.
 13. Failing test never served from receipt. Fixed test reruns, passes and records.
-14. Revocation: `--fresh` run forced to fail through input hidden by patched runtime contradicts receipt; next `--cached` run reruns (matching by state).
+14. Revocation: `--fresh` run forced to fail through input hidden by patched runtime contradicts receipt; next `--cached` run reruns (matching by state). Local contradiction blocks a same-state pass imported later.
 15. Non-pass exit (failure, signal, timeout kill, build failure) writes no receipt and revokes every receipt of that test that validates now, regardless of trace state.
 16. Interrupt sent to `iyi test` itself: finished tests keep receipts; nothing revoked; active test writes nothing.
-17. Closed trace channel or missing END: interrupted, no receipt.
+17. Closed trace channel or missing END: trace incomplete, no receipt written.
 18. Filtered runs and `--affected` touch only selected tests; excluded tests reported skipped, never passed.
 19. Union of `--shard k/3` snapshots from same producer run equals unsharded snapshot. Mixing shards across producer runs or duplicate tests across shards is rejected.
-20. Snapshot with wrong namespace, target, version, duplicate test, or path outside roots is refused. Export outside CI producer attestation is refused.
-21. Corrupt receipt becomes miss and is rewritten. Masks are never deleted as corrupt. Concurrent runs leave no torn receipts.
+20. Snapshot with wrong namespace, target, version, duplicate test, or path outside roots is refused. Accidental export outside CI producer attestation flag is refused.
+21. Corrupt or unreadable receipt becomes miss, is treated as contradiction, and is rewritten under lock. Masks store observations and are never deleted as corrupt. Concurrent runs leave no torn receipts.
 22. Crystal mode via `IYI_OPTS="--crystal"` always runs with reason. `./bin/crystal spec` output unchanged.
-23. Workflow check: pull request stale jobs upload nothing across runs and persist no state; producer job has no secrets and export step environment contains no secrets or `github.token`.
-24. (CI) `stale-fresh` reports all hits on push with matching compiler bytes. Shadow audit checks verdict and observation sets. Git-diff self-check catches validation bugs on tracked files. Planted hidden read with changed file between producer and audit fails shadow audit.
+23. Workflow check: pull request stale jobs upload nothing across runs and persist no state; export step environment contains no secrets or `github.token`.
+24. (CI) `stale-fresh` reports all hits on push with matching compiler bytes. Shadow audit checks verdict and observation sets. Git-diff self-check catches validation bugs on tracked files. Planted hidden read outside published corpus with changed file between producer and audit fails shadow audit.
 25. `Dir.cd` into subdirectory followed by relative file read resolves and records absolute path at open; modifying target file reruns test.
-26. Mid-build file modification where file stamp at hashing time differs from first-look stamp refuses receipt and rebuilds on next run.
+26. Edit during build followed by later revert does not hit: compile input racy at first look or whose stamp after build differs from first-look stamp refuses receipt.
+27. Newest master push run without target snapshot imports nothing; disagreeing audit run publishes empty snapshot turning consumption off.
+28. Changed `getrlimit` value, cgroup memory limit, or loader variable (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`) misses.
+29. Reading through a symlink in scratch pointing outside scratch resolves to target file outside scratch (observed read).
+30. Creating a hard link to a file outside scratch taints the run with `shared-write`.
+31. Returning a timestamp of a scratch or self-written file taints the run with `clock`.
+32. Local `master=` file that is unverified or carries a forged run id not matching Actions API artifact digest is refused.
 
 ## 13. Measurements and completion
 
@@ -322,7 +329,8 @@ If the census shows almost all real tests always running, work is not marked com
 * Per-case reuse within a test file.
 * Non-host targets.
 * Cached failures.
-* Snapshot export is limited to CI producer context with valid workflow attestation.
+* Snapshot export is limited to CI producer context via workflow attestation flag to prevent accidental export.
+* Cross-machine hits are expected only between runners configured alike (matching kernel release, rlimits, cgroup memory limit, and loader variables).
 * Local hits on CI receipts require identical checkout paths when location macros embed paths.
 * Hits across commits wait on RG1.
 * No speedup is promised.

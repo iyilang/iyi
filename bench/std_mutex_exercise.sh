@@ -216,7 +216,7 @@ PY
   fi
   local label="$1" phrase="$2"
   shift 4
-  IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" $LIMIT "$IYI" run "$REPO/bench/std_mutex_exercise.iyi" -- "$@" >"$WORK/mut.out" 2>&1
+  IYI_PATH="${UNPREEMPTED:+$UNPREEMPTED$PSEP}$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" $LIMIT "$IYI" run "$REPO/bench/std_mutex_exercise.iyi" -- "$@" >"$WORK/mut.out" 2>&1
   code=$?
   if [ "$code" -eq 0 ]; then
     echo "  the exercise PASSED on $label"
@@ -291,7 +291,19 @@ prove_broken "a release that does not wake a task waiting for a change" "deadloc
 ' ''
 # A waiter that holds its worker until the lock is free, spinning where it
 # parked, as one asleep in the kernel holds it: the task spawned beside it
-# waits for the release to start.
+# waits for the release to start. Built against a prelude whose pool never
+# preempts (SPEC.md III.4.13, part 9): the spin is a loop in a library
+# module, and a preempted spinner gives its worker to the task beside it,
+# which a waiter asleep in the kernel would not.
+mkdir -p "$WORK/unpreempted/iyi"
+cp "$REPO"/src/iyi/*.iyi "$WORK/unpreempted/iyi/"
+grep -v '^            Pointer(Atomic(UInt64)).new(address).value.set(1_u64) if address != 0_u64$' \
+  "$REPO/src/iyi/concurrency.iyi" > "$WORK/unpreempted/iyi/concurrency.iyi"
+if cmp -s "$WORK/unpreempted/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
+  echo "  the monitor's raise was not found, so the copy without preemption is the tree"
+  status=1
+fi
+UNPREEMPTED="$WORK/unpreempted"
 prove_broken "a waiter that holds its worker" "while a Mutex waiter held one worker of two" \
   '        waited = IyiScheduler.park_on(pointerof(@word), CONTENDED)
 ' '        while @word.get == CONTENDED

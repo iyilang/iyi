@@ -228,7 +228,7 @@ module Iyi
     property last : LLVM::Value
 
     delegate abi_prefix, abi_name, main_name, raise_name, raise_overflow_name,
-      raise_cast_failed_name, malloc_name, malloc_atomic_name, realloc_name,
+      raise_cast_failed_name, raise_closure_to_c_name, malloc_name, malloc_atomic_name, realloc_name,
       get_exception_name, once_init_name, once_name,
       type_id_to_class_name_map_name, to: @program
 
@@ -280,6 +280,7 @@ module Iyi
     @write_barrier_fun : LLVMTypedFunction?
     @raise_overflow_fun : LLVMTypedFunction?
     @raise_cast_failed_fun : LLVMTypedFunction?
+    @raise_closure_to_c_fun : LLVMTypedFunction?
     @c_malloc_fun : LLVMTypedFunction?
     @c_realloc_fun : LLVMTypedFunction?
 
@@ -694,7 +695,7 @@ module Iyi
         case node.name
         when @codegen.malloc_name, @codegen.malloc_atomic_name, @codegen.realloc_name, @codegen.raise_name,
              @codegen.personality_name, @codegen.get_exception_name, @codegen.raise_overflow_name,
-             @codegen.raise_cast_failed_name, @codegen.once_init_name, @codegen.once_name,
+             @codegen.raise_cast_failed_name, @codegen.raise_closure_to_c_name, @codegen.once_init_name, @codegen.once_name,
              WRITE_BARRIER_BEGIN_NAME, WRITE_BARRIER_NAME
           @codegen.accept node
         end
@@ -1956,10 +1957,17 @@ module Iyi
       set_current_debug_location(location) if location && @debug.line_numbers?
 
       if func = crystal_raise_cast_failed_fun
+        loc_str = if location
+                    if @program.iyi_abi?
+                      "#{location.expanded_location}:#{location.line_number}"
+                    else
+                      location.expanded_location.to_s
+                    end
+                  end
         call_args = [
           cast_to_void_pointer(type_id_to_class_name(type_id)),
           cast_to_void_pointer(build_string_constant(to_type.to_s)),
-          location ? cast_to_void_pointer(build_string_constant(location.expanded_location.to_s)) : llvm_context.void_pointer.null,
+          loc_str ? cast_to_void_pointer(build_string_constant(loc_str)) : llvm_context.void_pointer.null,
         ] of LLVM::Value
 
         if (rescue_block = @rescue_block)
@@ -2258,7 +2266,18 @@ module Iyi
           ret fun_ptr
 
           position_at_end ctx_is_not_null_block
-          accept cant_pass_closure_to_c_exception_call
+          if @program.iyi_abi? && (target_fun = crystal_raise_closure_to_c_fun)
+            if (rescue_block = @rescue_block)
+              invoke_out_block = new_block "invoke_out"
+              invoke target_fun, ([] of LLVM::Value), invoke_out_block, rescue_block
+              position_at_end invoke_out_block
+            else
+              call target_fun
+            end
+            unreachable
+          else
+            accept cant_pass_closure_to_c_exception_call
+          end
         end
       end
     end
@@ -2919,6 +2938,15 @@ module Iyi
       @raise_cast_failed_fun ||= typed_fun?(@main_mod, raise_cast_failed_name)
       if raise_cast_failed_fun = @raise_cast_failed_fun
         check_main_fun raise_cast_failed_name, raise_cast_failed_fun
+      else
+        nil
+      end
+    end
+
+    def crystal_raise_closure_to_c_fun
+      @raise_closure_to_c_fun ||= typed_fun?(@main_mod, raise_closure_to_c_name)
+      if raise_closure_to_c_fun = @raise_closure_to_c_fun
+        check_main_fun raise_closure_to_c_name, raise_closure_to_c_fun
       else
         nil
       end

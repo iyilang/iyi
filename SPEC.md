@@ -3960,8 +3960,16 @@ to 23.6 and 22.6 to 23.5; a join of 1,000,000 strings 5.0 to 5.4 and 5.5
 to 6.6; 64 copies of 16 MB, 1,000,000 appends of 7 bytes and a JSON parse
 of 2.4 MB within the noise; `fib(32)` against its `@[NoPreempt]` twin
 5.80 to 6.27 against 5.80 to 5.85. The sort's and the join's 4 to 9% are
-over the 2 to 3% aimed at, and not yet answered: their inner loops are a
-load and a branch per turn more. `bench/parallel_exercise.sh` holds each
+over the 2 to 3% aimed at. A turn count was tried in their place: a loop
+with no loop inside it, at most 512 instructions and no call looked at the
+word every 256 turns (every 16 with calls), the count an add and a test in
+a register. Measured the same way (load 5): the sort 57.2 to 59.0 ms
+before and 61.1 to 63.9 with the count, the join 5.07 to 5.31 and 6.11 to
+6.45, the `tight` sums 1.07x to 1.13x their twins against 1.06x to 1.12x
+with a look at every turn. It bought nothing, so every turn looks, the
+cheaper of the two. Those runs also had a `copy_from` that skipped its run
+loop for a short copy, undone with the count.
+`bench/parallel_exercise.sh` holds each
 step plain and release, the audit, and three broken copies by name: the
 library written into prelude.iyi (sort, copy, growth and join each wait
 316 to 1,022 ms), a `@[NoPreempt]` recursion, and the scheduler's file

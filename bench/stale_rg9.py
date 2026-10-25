@@ -40,19 +40,25 @@ def build(compiler: str, repo: str, work: str, source: str, number: int, dump: b
     if dump:
         cmd += ["--stale-dump-elements", elements]
     cmd += ["-o", out, source]
-    proc = subprocess.run(cmd, cwd=repo, env=env_for(repo, os.path.join(work, "cache"), warm), capture_output=True, text=True)
-    if proc.returncode:
-        raise GateFailure(f"{os.path.relpath(source, repo)} run {number}: build exited {proc.returncode}: {proc.stderr.strip()[-500:]}")
-    with open(key, encoding="utf-8") as f:
-        data = json.load(f)
-    mismatch = data.get("reach", {}).get("mismatch", [])
-    if mismatch:
-        raise GateFailure(f"{os.path.relpath(source, repo)} run {number}: reach.mismatch={mismatch}")
-    rows = []
-    if dump:
-        with open(elements, encoding="utf-8") as f:
-            rows = [json.loads(line) for line in f if line.strip()]
-    return data["portable"]["callpath"], len(rows), sum(row.get("encoded_bytes", 0) for row in rows)
+    try:
+        proc = subprocess.run(cmd, cwd=repo, env=env_for(repo, os.path.join(work, "cache"), warm), capture_output=True, text=True)
+        if proc.returncode:
+            raise GateFailure(f"{os.path.relpath(source, repo)} run {number}: build exited {proc.returncode}: {proc.stderr.strip()[-500:]}")
+        with open(key, encoding="utf-8") as f:
+            data = json.load(f)
+        mismatch = data.get("reach", {}).get("mismatch", [])
+        if mismatch:
+            raise GateFailure(f"{os.path.relpath(source, repo)} run {number}: reach.mismatch={mismatch}")
+        rows = []
+        if dump and os.path.exists(elements):
+            with open(elements, encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f if line.strip()]
+        return data["portable"]["callpath"], len(rows), sum(row.get("encoded_bytes", 0) for row in rows)
+    finally:
+        for p in (key, out, elements):
+            if os.path.exists(p):
+                try: os.remove(p)
+                except OSError: pass
 
 
 def main() -> None:
@@ -61,6 +67,7 @@ def main() -> None:
     parser.add_argument("--compiler", required=True)
     parser.add_argument("--work", required=True)
     args = parser.parse_args()
+    os.makedirs(args.work, exist_ok=True)
     repo = os.path.abspath(args.repo)
     compiler = os.path.abspath(args.compiler)
     programs = sorted(glob.glob(os.path.join(repo, "samples/iyi/*.iyi")))

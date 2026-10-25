@@ -342,7 +342,7 @@ describe "Semantic: union" do
   end
 
   describe "canonical union order" do
-    it "union_of([b, a]) and union_of([a, b]) are the same object, with Nil first" do
+    it "union_of([b, a]) and union_of([a, b]) are the same object, with Nil last in multi-member union_types" do
       program = Program.new
       a = program.nil
       b = program.string
@@ -351,12 +351,13 @@ describe "Semantic: union" do
       u1.same?(u2).should be_true
       u1.as(UnionType).union_types.first.should eq(a)
 
-      # Also with value type
+      # Also with value type (MixedUnionType stores Nil last)
       c = program.int32
       u3 = program.union_of([c, a]).not_nil!
       u4 = program.union_of([a, c]).not_nil!
       u3.same?(u4).should be_true
-      u3.as(UnionType).union_types.first.should eq(a)
+      u3.as(UnionType).union_types.first.should eq(c)
+      u3.as(UnionType).union_types.last.should eq(a)
 
       # Non-nil types sorted by canonical name
       u5 = program.union_of([b, c]).not_nil!
@@ -365,11 +366,11 @@ describe "Semantic: union" do
       u5.as(UnionType).union_types.first.should eq(c)
       u5.as(UnionType).union_types.last.should eq(b)
 
-      # Multiple members with Nil first
+      # Multiple members with Nil last
       u7 = program.union_of([b, c, a]).not_nil!
       u8 = program.union_of([a, b, c]).not_nil!
       u7.same?(u8).should be_true
-      u7.as(UnionType).union_types.map(&.to_s).should eq(["Nil", "Int32", "String"])
+      u7.as(UnionType).union_types.map(&.to_s).should eq(["Int32", "String", "Nil"])
     end
 
     it "two programs that create String | Int32 and Int32 | String in opposite orders print the same typeof" do

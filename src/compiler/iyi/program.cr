@@ -1620,7 +1620,7 @@ module Iyi
     end
 
     private def make_union_type(types : Array(Type), opaque_ids)
-      # NilType has opaque_id == 0, and Nil is always first if present
+      # NilType has opaque_id == 0, and Nil is always first in opaque_ids if present
       has_nil = opaque_ids.first == 0
 
       if has_nil
@@ -1636,6 +1636,10 @@ module Iyi
             end
           end
         end
+
+        # Remove the Nil type now and insert it at the end of union_types
+        nil_type = types.shift
+        types.push nil_type
 
         if types.all?(&.reference_like?)
           return NilableReferenceUnionType.new(self, types)

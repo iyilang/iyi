@@ -171,6 +171,28 @@ end
 @@scratch = ""
 @@written_paths = Set(String).new
 @@written_env = Set(String).new
+@@task_depths = Hash(UInt64, Int32).new
+
+def self.enter_frame(tid : UInt64 = current_task_id) : ::Bool
+  return true unless @@enabled
+  d = @@task_depths[tid]? || 0
+  @@task_depths[tid] = d + 1
+  d == 0
+end
+
+def self.leave_frame(tid : UInt64 = current_task_id) : Nil
+  return unless @@enabled
+  d = @@task_depths[tid]? || 0
+  if d <= 1
+    @@task_depths.delete(tid)
+  else
+    @@task_depths[tid] = d - 1
+  end
+end
+
+def self.frame_depth(tid : UInt64 = current_task_id) : Int32
+  @@task_depths[tid]? || 0
+end
 
 @[Effect(:observation_channel)]
 def self.channel_open(path : String) : Int64
@@ -187,7 +209,7 @@ def self.channel_close(fd : Int64) : Nil
   __iyi_close(fd)
 end
 
-def self.enabled? : Bool
+def self.enabled? : ::Bool
   @@enabled
 end
 
@@ -284,7 +306,11 @@ end
 def self.env_get(name : String, value : String?) : Nil
   return unless @@enabled
   present = value.nil? ? 0_u8 : 1_u8
-  val_str = value || ""
+  val_str = if name == "TMPDIR" || name == "TEMP" || name == "TMP"
+              @@scratch
+            else
+              value || ""
+            end
   written_first = @@written_env.includes?(name) ? 1_u8 : 0_u8
 
   writer = RecordWriter.new
@@ -460,7 +486,11 @@ private def self.parse_kind(kind : UInt8 | Symbol | String) : UInt8
 end
 
 private def self.current_task_id : UInt64
-  0_u64
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    IyiScheduler.current.object_id
+  {% else %}
+    0_u64
+  {% end %}
 end
 
 private def self.c_str(ptr : UInt8*) : String
@@ -611,7 +641,7 @@ private def self.mode_to_ftype(mode : Int64) : UInt8
   end
 end
 
-private def self.is_under_scratch?(real : String) : Bool
+private def self.is_under_scratch?(real : String) : ::Bool
   return false if @@scratch.empty?
   real == @@scratch || real.starts_with?(@@scratch.ends_with?("/") ? @@scratch : @@scratch + "/")
 end

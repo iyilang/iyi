@@ -64,11 +64,12 @@ module Iyi::Semantic
       effect = a_def.effect
       return unless effect
 
-      # stdio and internal kinds get no wrapper
-      return if effect.kind == EffectKind::Stdio || effect.effect_class.internal?
+      is_frame_only = (effect.kind == EffectKind::Stdio || effect.effect_class.internal?)
 
-      # Validate signature per C9 and effect shape
-      validate_signature(program, owner, a_def, effect)
+      # Validate signature per C9 and effect shape (only for non-frame-only defs)
+      unless is_frame_only
+        validate_signature(program, owner, a_def, effect)
+      end
 
       original_name = a_def.name
       renamed_name = "__iyi_effect_#{original_name}"
@@ -90,7 +91,7 @@ module Iyi::Semantic
       owner.add_def(a_def)
 
       # Build wrapper
-      wrapper = build_wrapper(program, owner, a_def, effect, original_name, renamed_name)
+      wrapper = build_wrapper(program, owner, a_def, effect, original_name, renamed_name, is_frame_only: is_frame_only)
 
       # Add wrapper to owner
       owner.add_def(wrapper)
@@ -151,7 +152,7 @@ module Iyi::Semantic
     end
 
     def self.build_wrapper(program : Program, owner : ModuleType, a_def : Def, effect : Effect,
-                           original_name : String, renamed_name : String) : Def
+                           original_name : String, renamed_name : String, *, is_frame_only : Bool = false) : Def
       wrapper = Def.new(
         original_name,
         a_def.args.map(&.clone),
@@ -174,6 +175,10 @@ module Iyi::Semantic
       wrapper.name_location = a_def.name_location
       wrapper.end_location = a_def.end_location
       wrapper.doc = a_def.doc
+      wrapper.always_inline = a_def.always_inline?
+      wrapper.no_inline = a_def.no_inline?
+      wrapper.naked = a_def.naked?
+      wrapper.returns_twice = a_def.returns_twice?
       wrapper.iyi_observer_wrapped = true
       wrapper.set_type program.nil
 
@@ -208,7 +213,14 @@ module Iyi::Semantic
       if observe_mod
         observer_path.target_type = observe_mod.metaclass
       end
-      if effect.kind == EffectKind::Exit
+      enter_call = Call.new(observer_path, "enter_frame").at(a_def)
+      leave_call = Call.new(observer_path, "leave_frame").at(a_def)
+
+      if is_frame_only
+        res_var = Var.new("__iyi_res").at(a_def)
+        assign = Assign.new(res_var, inner_call).at(a_def)
+        wrapper.body = Expressions.new([enter_call.as(ASTNode), assign.as(ASTNode), leave_call.as(ASTNode), res_var.as(ASTNode)]).at(a_def)
+      elsif effect.kind == EffectKind::Exit
         # C5: exit observer before the def
         status_arg = if a_def.args.size >= 1
                        Var.new(a_def.args[0].name).at(a_def).as(ASTNode)
@@ -216,13 +228,29 @@ module Iyi::Semantic
                        NumberLiteral.new(0).at(a_def).as(ASTNode)
                      end
         observer_call = Call.new(observer_path, "__iyi_observe_exit", [status_arg] of ASTNode).at(a_def)
-        wrapper.body = Expressions.new([observer_call.as(ASTNode), inner_call.as(ASTNode)]).at(a_def)
+
+        is_outer_var = Var.new("__iyi_is_outer").at(a_def)
+        assign_outer = Assign.new(is_outer_var, enter_call).at(a_def)
+        if_node = If.new(is_outer_var, observer_call).at(a_def)
+
+        wrapper.body = Expressions.new([assign_outer.as(ASTNode), if_node.as(ASTNode), inner_call.as(ASTNode)]).at(a_def)
       else
         res_var = Var.new("__iyi_res").at(a_def)
-        assign = Assign.new(res_var, inner_call).at(a_def)
+        assign_res = Assign.new(res_var, inner_call).at(a_def)
+
+        is_outer_var = Var.new("__iyi_is_outer").at(a_def)
+        assign_outer = Assign.new(is_outer_var, enter_call).at(a_def)
 
         observer_call = build_observer_call(program, owner, a_def, effect, observer_path, res_var)
-        wrapper.body = Expressions.new([assign.as(ASTNode), observer_call.as(ASTNode), res_var.as(ASTNode)]).at(a_def)
+        if_node = If.new(is_outer_var, observer_call).at(a_def)
+
+        wrapper.body = Expressions.new([
+          assign_outer.as(ASTNode),
+          assign_res.as(ASTNode),
+          if_node.as(ASTNode),
+          leave_call.as(ASTNode),
+          res_var.as(ASTNode)
+        ]).at(a_def)
       end
 
       wrapper

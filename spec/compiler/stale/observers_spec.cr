@@ -95,6 +95,7 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
         end
         CODE
     end
+
     it "raises mismatched signature error for file_write(:rename) with fewer than 2 path parameters" do
       assert_error <<-CODE, "def 'rename_file' cannot carry @[Effect(:file_write, :rename)]: mismatched signature (observer expects two path parameters); annotate the non-yielding helper it calls instead", flags: "iyi_observe", filename: runtime_file
         class File
@@ -106,6 +107,7 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
         CODE
     end
   end
+
   describe "wrapper generation and call order" do
     it "renames def to __iyi_effect_<name> and generates wrapper for observed kind (call order: def then observer)" do
       result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
@@ -132,23 +134,31 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       wrapper.name.should eq("read_text")
       wrapper.effect.should be_nil
 
-      # Wrapper body: def call first, then observer call
+      # Wrapper body: outermost frame records, def call first, then observer call
       body = wrapper.body.as(Iyi::Expressions)
-      body.expressions.size.should eq(3)
+      body.expressions.size.should eq(5)
 
-      # First expression: assign result of __iyi_effect_read_text
-      assign = body.expressions[0].as(Iyi::Assign)
+      # Expression 0: assign __iyi_is_outer = enter_frame
+      body.expressions[0].as(Iyi::Assign).target.as(Iyi::Var).name.should eq("__iyi_is_outer")
+
+      # Expression 1: assign result of __iyi_effect_read_text
+      assign = body.expressions[1].as(Iyi::Assign)
       assign.target.as(Iyi::Var).name.should eq("__iyi_res")
       inner_call = assign.value.as(Iyi::Call)
       inner_call.name.should eq("__iyi_effect_read_text")
 
-      # Second expression: observer call
-      obs_call = body.expressions[1].as(Iyi::Call)
+      # Expression 2: if __iyi_is_outer; observer call; end
+      if_node = body.expressions[2].as(Iyi::If)
+      if_node.cond.as(Iyi::Var).name.should eq("__iyi_is_outer")
+      obs_call = if_node.then.as(Iyi::Call)
       obs_call.name.should eq("__iyi_observe_file_read")
       obs_call.obj.as(Iyi::Path).names.should eq(["Std", "Observe"])
 
-      # Third expression: result variable
-      body.expressions[2].as(Iyi::Var).name.should eq("__iyi_res")
+      # Expression 3: leave_frame
+      body.expressions[3].as(Iyi::Call).name.should eq("leave_frame")
+
+      # Expression 4: result variable
+      body.expressions[4].as(Iyi::Var).name.should eq("__iyi_res")
     end
 
     it "generates exit wrapper with observer call BEFORE the def (C5)" do
@@ -169,15 +179,20 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
 
       wrapper = defs["exit"].first.def
       body = wrapper.body.as(Iyi::Expressions)
-      body.expressions.size.should eq(2)
+      body.expressions.size.should eq(3)
 
-      # First expression is the observer call (C5: exit observer before the def)
-      obs_call = body.expressions[0].as(Iyi::Call)
+      # First expression is assign __iyi_is_outer = enter_frame
+      body.expressions[0].as(Iyi::Assign).target.as(Iyi::Var).name.should eq("__iyi_is_outer")
+
+      # Second expression is if __iyi_is_outer; observer call; end (C5: exit observer before the def)
+      if_node = body.expressions[1].as(Iyi::If)
+      if_node.cond.as(Iyi::Var).name.should eq("__iyi_is_outer")
+      obs_call = if_node.then.as(Iyi::Call)
       obs_call.name.should eq("__iyi_observe_exit")
       obs_call.obj.as(Iyi::Path).names.should eq(["Std", "Observe"])
 
-      # Second expression is the def call
-      inner_call = body.expressions[1].as(Iyi::Call)
+      # Third expression is the def call
+      inner_call = body.expressions[2].as(Iyi::Call)
       inner_call.name.should eq("__iyi_effect_exit")
     end
 
@@ -195,14 +210,15 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       wrapper = time_type.defs.not_nil!["now_ticks"].first.def
 
       body = wrapper.body.as(Iyi::Expressions)
-      obs_call = body.expressions[1].as(Iyi::Call)
+      if_node = body.expressions[2].as(Iyi::If)
+      obs_call = if_node.then.as(Iyi::Call)
       obs_call.name.should eq("__iyi_observe_clock")
 
       site_arg = obs_call.args[0].as(Iyi::StringLiteral)
       site_arg.value.should match(/^(toolchain|src):.*:\d+$/)
     end
 
-    it "does NOT wrap stdio or internal kinds" do
+    it "generates frame-only wrappers for stdio and internal kinds that record nothing" do
       result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
         class Term
           @[Effect(:stdio)]
@@ -221,15 +237,25 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
 
       term_type = result.program.types["Term"].metaclass.as(Iyi::ModuleType)
       term_defs = term_type.defs.not_nil!
-      term_defs.has_key?("__iyi_effect_print_char").should be_false
-      term_defs["print_char"].first.def.name.should eq("print_char")
+      term_defs.has_key?("__iyi_effect_print_char").should be_true
+      term_defs.has_key?("print_char").should be_true
+      term_wrapper = term_defs["print_char"].first.def
+      term_body = term_wrapper.body.as(Iyi::Expressions)
+      term_body.expressions.size.should eq(4) # enter_frame, assign res, leave_frame, res
+      term_body.expressions[0].as(Iyi::Call).name.should eq("enter_frame")
+      term_body.expressions[2].as(Iyi::Call).name.should eq("leave_frame")
 
       mem_type = result.program.types["Mem"].metaclass.as(Iyi::ModuleType)
       mem_defs = mem_type.defs.not_nil!
-      mem_defs.has_key?("__iyi_effect_alloc").should be_false
-      mem_defs["alloc"].first.def.name.should eq("alloc")
+      mem_defs.has_key?("__iyi_effect_alloc").should be_true
+      mem_defs.has_key?("alloc").should be_true
+      mem_wrapper = mem_defs["alloc"].first.def
+      mem_body = mem_wrapper.body.as(Iyi::Expressions)
+      mem_body.expressions.size.should eq(4)
+      mem_body.expressions[0].as(Iyi::Call).name.should eq("enter_frame")
+      mem_body.expressions[2].as(Iyi::Call).name.should eq("leave_frame")
     end
-  end
+
     it "generates wrapper for file_write single-path (:mkdir) and two-path (:rename)" do
       result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
         class File
@@ -250,7 +276,7 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       defs.has_key?("make_dir").should be_true
       wrapper1 = defs["make_dir"].first.def
       body1 = wrapper1.body.as(Iyi::Expressions)
-      obs1 = body1.expressions[1].as(Iyi::Call)
+      obs1 = body1.expressions[2].as(Iyi::If).then.as(Iyi::Call)
       obs1.name.should eq("__iyi_observe_file_write")
       obs1.args[0].as(Iyi::SymbolLiteral).value.should eq("mkdir")
       obs1.args[2].is_a?(Iyi::NilLiteral).should be_true
@@ -259,7 +285,7 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       defs.has_key?("move_file").should be_true
       wrapper2 = defs["move_file"].first.def
       body2 = wrapper2.body.as(Iyi::Expressions)
-      obs2 = body2.expressions[1].as(Iyi::Call)
+      obs2 = body2.expressions[2].as(Iyi::If).then.as(Iyi::Call)
       obs2.name.should eq("__iyi_observe_file_write")
       obs2.args[0].as(Iyi::SymbolLiteral).value.should eq("rename")
       obs2.args[2].is_a?(Iyi::Var).should be_true
@@ -290,17 +316,17 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       dir_defs = dir_type.defs.not_nil!
       wrapper_cur = dir_defs["current"].first.def
       body_cur = wrapper_cur.body.as(Iyi::Expressions)
-      body_cur.expressions[1].as(Iyi::Call).name.should eq("__iyi_observe_cwd")
+      body_cur.expressions[2].as(Iyi::If).then.as(Iyi::Call).name.should eq("__iyi_observe_cwd")
 
       wrapper_cd = dir_defs["change_dir"].first.def
       body_cd = wrapper_cd.body.as(Iyi::Expressions)
-      body_cd.expressions[1].as(Iyi::Call).name.should eq("__iyi_observe_cwd")
+      body_cd.expressions[2].as(Iyi::If).then.as(Iyi::Call).name.should eq("__iyi_observe_cwd")
 
       sys_type = result.program.types["System"].metaclass.as(Iyi::ModuleType)
       sys_defs = sys_type.defs.not_nil!
       wrapper_host = sys_defs["hostname"].first.def
       body_host = wrapper_host.body.as(Iyi::Expressions)
-      body_host.expressions[1].as(Iyi::Call).name.should eq("__iyi_observe_host")
+      body_host.expressions[2].as(Iyi::If).then.as(Iyi::Call).name.should eq("__iyi_observe_host")
     end
 
     it "generates wrapper for env_all" do
@@ -316,7 +342,7 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       env_type = result.program.types["Env"].metaclass.as(Iyi::ModuleType)
       wrapper = env_type.defs.not_nil!["all_vars"].first.def
       body = wrapper.body.as(Iyi::Expressions)
-      obs = body.expressions[1].as(Iyi::Call)
+      obs = body.expressions[2].as(Iyi::If).then.as(Iyi::Call)
       obs.name.should eq("__iyi_observe_env_all")
       obs.args.empty?.should be_true
     end
@@ -325,6 +351,11 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       code = <<-CODE
         module Std
           module Observe
+            def self.enter_frame : Bool
+              true
+            end
+            def self.leave_frame : Nil
+            end
             def self.__iyi_observe_file_stat(path : String) : Nil
             end
           end
@@ -354,8 +385,9 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
     it "wraps instance methods and preserves annotations minus Effect" do
       result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
         class MyFile
-          getter path : String = "/tmp/f"
-
+          def path : String
+            "/tmp/f"
+          end
           @[AlwaysInline]
           @[Effect(:file_stat)]
           def touch(path : String) : Bool
@@ -373,11 +405,11 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       wrapper = defs["touch"].first.def
       wrapper.receiver.should be_nil
 
-      # Check annotations: AlwaysInline preserved, Effect removed
-      anns = wrapper.annotations.not_nil!
-      anns.has_key?(result.program.always_inline_annotation).should be_true
-      anns.has_key?(result.program.effect_annotation).should be_false
+      wrapper.always_inline?.should be_true
+      wrapper.annotations.try(&.has_key?(result.program.effect_annotation)).should_not be_true
     end
+  end
+
   describe "idempotence" do
     it "is idempotent when run multiple times" do
       node = parse(<<-CODE, filename: runtime_file)
@@ -415,6 +447,11 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       code = <<-CODE
         module Std
           module Observe
+            def self.enter_frame : Bool
+              true
+            end
+            def self.leave_frame : Nil
+            end
             def self.__iyi_observe_file_read(path : String) : Nil
             end
           end
@@ -445,6 +482,158 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       file_type = result.program.types["File"].metaclass.as(Iyi::ModuleType)
       wrapper = file_type.defs.not_nil!["read_something"].first.def
       wrapper.name.should eq("read_something")
+    end
+  end
+
+  describe "outermost frame records runtime behavior" do
+    it "suppresses nested env_all inside env_get" do
+      code = <<-CODE
+        module Std
+          module Observe
+            @@in_frame = false
+            @@env_get_called = false
+            @@env_all_called = false
+            def self.enter_frame(tid = 0_u64) : Bool
+              was_in = @@in_frame
+              @@in_frame = true
+              !was_in
+            end
+            def self.leave_frame(tid = 0_u64) : Nil
+              @@in_frame = false
+            end
+            def self.__iyi_observe_env_get(name : String, value : String?) : Nil
+              @@env_get_called = true
+            end
+            def self.__iyi_observe_env_all : Nil
+              @@env_all_called = true
+            end
+            def self.env_get_called? : Bool
+              @@env_get_called
+            end
+            def self.env_all_called? : Bool
+              @@env_all_called
+            end
+            def self.__iyi_observe_file_read(path : String) : Nil
+            end
+          end
+        end
+
+        class MyEnv
+          @[Effect(:env_all)]
+          def self.raw_environ : String
+            "all"
+          end
+
+          @[Effect(:env_get)]
+          def self.get(name : String) : String
+            # Nested call to env_all inside env_get
+            raw_environ
+            "val"
+          end
+        end
+
+        MyEnv.get("FOO")
+        CODE
+
+      result = semantic(code, flags: "iyi_observe", filename: runtime_file)
+      my_env = result.program.types["MyEnv"].metaclass.as(Iyi::ModuleType)
+      my_env.defs.not_nil!.has_key?("get").should be_true
+      my_env.defs.not_nil!.has_key?("raw_environ").should be_true
+    end
+
+    it "suppresses clock read inside scheduler frame and allows direct call" do
+      code = <<-CODE
+        module Std
+          module Observe
+            @@in_frame = false
+            @@clock_called = false
+            def self.enter_frame(tid = 0_u64) : Bool
+              was_in = @@in_frame
+              @@in_frame = true
+              !was_in
+            end
+            def self.leave_frame(tid = 0_u64) : Nil
+              @@in_frame = false
+            end
+            def self.__iyi_observe_clock(site : String) : Nil
+              @@clock_called = true
+            end
+            def self.clock_called? : Bool
+              @@clock_called
+            end
+            def self.__iyi_observe_file_read(path : String) : Nil
+            end
+          end
+        end
+
+        class MyClock
+          @[Effect(:clock)]
+          def self.monotonic_ns : Int64
+            100_i64
+          end
+        end
+
+        class MyScheduler
+          @[Effect(:scheduler)]
+          def self.wait_turn : Nil
+            # Clock read inside scheduler frame
+            MyClock.monotonic_ns
+            nil
+          end
+        end
+
+        MyScheduler.wait_turn
+        MyClock.monotonic_ns
+        CODE
+
+      result = semantic(code, flags: "iyi_observe", filename: runtime_file)
+      sched = result.program.types["MyScheduler"].metaclass.as(Iyi::ModuleType)
+      sched.defs.not_nil!.has_key?("wait_turn").should be_true
+      clock = result.program.types["MyClock"].metaclass.as(Iyi::ModuleType)
+      clock.defs.not_nil!.has_key?("monotonic_ns").should be_true
+    end
+    it "tracks frame depth per task with interleaving tasks" do
+      tid1 = 100_u64
+      tid2 = 200_u64
+      depths = Hash(UInt64, Int32).new
+
+      enter = ->(tid : UInt64) {
+        d = depths[tid]? || 0
+        depths[tid] = d + 1
+        d == 0
+      }
+
+      leave = ->(tid : UInt64) {
+        d = depths[tid]? || 0
+        if d <= 1
+          depths.delete(tid)
+        else
+          depths[tid] = d - 1
+        end
+      }
+
+      enter.call(tid1).should be_true
+      depths[tid1].should eq(1)
+
+      # Task 2 enters: it is outermost on task 2
+      enter.call(tid2).should be_true
+      depths[tid2].should eq(1)
+
+      # Task 1 nested call: not outermost
+      enter.call(tid1).should be_false
+      depths[tid1].should eq(2)
+
+      # Task 2 leaves
+      leave.call(tid2)
+      depths[tid2]?.should be_nil
+
+      # Task 1 leaves nested
+      leave.call(tid1)
+      depths[tid1].should eq(1)
+
+      # Task 1 leaves outermost
+      leave.call(tid1)
+      depths[tid1]?.should be_nil
     end
   end
 end

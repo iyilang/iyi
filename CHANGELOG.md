@@ -38,6 +38,13 @@
   `bench/rebuild_reuse.py` holds the program that way for a second and
   builds; the compiler before this failed that step in 2 runs of 2.
 
+- `bench/std_tls_ech_oracle.go`'s client reads what the std/tls server
+  sent after its Finished before closing a connection whose ECH it
+  refused. Closed with those 314 bytes unread, the connection was reset,
+  and Windows drops what a reset connection received and was not read:
+  the server read "the connection was aborted" in place of the client's
+  ech_required in 18 and 15 of 20 runs here, and in none of 40 after.
+
 - **`Channel#take_now` and `#put_now` take the scheduler's lock.** They
   were `select`'s lock-held halves, public because its arms call them,
   and std/http called them from pool workers with no lock: a wake of a

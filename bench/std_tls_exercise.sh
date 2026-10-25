@@ -3263,9 +3263,9 @@ prove_broken "the server's TLS 1.2 status_request answer left out" "FAIL s_clien
 prove_broken "a staple sent to a client that did not ask" "FAIL s_client without -status, sent none" \
   '    return nil unless @status_requested' '' ocsp-server
 prove_broken "a staple past its nextUpdate sent" "FAIL a staple past its nextUpdate is not sent" \
-  '    return nil if next_update && next_update < now' '' ocsp-server
+  '    return nil if limit && limit < now_ms' '' ocsp-server
 prove_broken "a staple for another certificate kept by the config" "FAIL a staple for another certificate refused by the config" \
-  '    return TlsError.new("the OCSP response has no SingleResponse for #{@leaf.subject_name}") unless single' '' ocsp-server
+  '    return TlsError.new("the OCSP response has no SingleResponse for #{@leaf.subject_name}") unless single' '    single = single || response.responses[0]' ocsp-server
 prove_broken "the config's identity's staple sent for an identity_source's" "FAIL an identity_source's identity, its own staple, TLS 1.3" \
   '    held = @identity.staple_at(@config.now || Time.utc)' '    held = @config.identity.staple_at(@config.now || Time.utc)' ocsp-server
 # The close (RFC 8446 section 6.1, RFC 5246 section 7.2.1), against the

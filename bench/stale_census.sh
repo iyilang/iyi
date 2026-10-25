@@ -107,11 +107,14 @@ def resolve_site_effect(site):
     return "internal", "unknown"
 
 def category_for_reason(r):
-    r_lower = r.lower()
+    # The names the compiler and the trace give (`effects.cr`, `trace.cr`),
+    # with `_` and `-` read alike.
+    r_lower = r.lower().replace('_', '-')
     if r_lower in ["clock", "entropy", "timer", "network", "process", "signal",
-                   "runtime_timing", "code_location", "dir_stream", "host_state"]:
+                   "runtime-timing", "code-location", "dir-stream", "host-state"]:
         return "requested effect"
-    if r_lower in ["assembly", "call to unclassified def", "call to internal def",
+    if r_lower in ["asm", "assembly", "pointer-new", "lib call", "lib global",
+                   "call to unclassified def", "call to internal def",
                    "external variable", "raw pointer"]:
         return "opaque program construct"
     if "refused" in r_lower or "build" in r_lower:

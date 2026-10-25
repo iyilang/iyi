@@ -340,4 +340,44 @@ describe "Semantic: union" do
       Child(Int32).new.as(Parent).bar
       CODE
   end
+
+  describe "canonical union order" do
+    it "union_of([b, a]) and union_of([a, b]) are the same object, with Nil first" do
+      program = Program.new
+      a = program.nil
+      b = program.string
+      u1 = program.union_of([b, a]).not_nil!
+      u2 = program.union_of([a, b]).not_nil!
+      u1.same?(u2).should be_true
+      u1.as(UnionType).union_types.first.should eq(a)
+
+      # Also with value type
+      c = program.int32
+      u3 = program.union_of([c, a]).not_nil!
+      u4 = program.union_of([a, c]).not_nil!
+      u3.same?(u4).should be_true
+      u3.as(UnionType).union_types.first.should eq(a)
+
+      # Non-nil types sorted by canonical name
+      u5 = program.union_of([b, c]).not_nil!
+      u6 = program.union_of([c, b]).not_nil!
+      u5.same?(u6).should be_true
+      u5.as(UnionType).union_types.first.should eq(c)
+      u5.as(UnionType).union_types.last.should eq(b)
+
+      # Multiple members with Nil first
+      u7 = program.union_of([b, c, a]).not_nil!
+      u8 = program.union_of([a, b, c]).not_nil!
+      u7.same?(u8).should be_true
+      u7.as(UnionType).union_types.map(&.to_s).should eq(["Nil", "Int32", "String"])
+    end
+
+    it "two programs that create String | Int32 and Int32 | String in opposite orders print the same typeof" do
+      res1 = semantic("a = 1 ? \"hello\" : 1; a")
+      res2 = semantic("a = 1 ? 1 : \"hello\"; a")
+      res1.node.type.to_s.should eq("(Int32 | String)")
+      res2.node.type.to_s.should eq("(Int32 | String)")
+      res1.node.type.to_s.should eq(res2.node.type.to_s)
+    end
+  end
 end

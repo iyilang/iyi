@@ -68,6 +68,10 @@ def run(argv, *, env=None, timeout):
     return subprocess.run(argv, env=env, capture_output=True,
                           text=False, timeout=timeout)
 
+def last_line(result):
+    tail = result.stderr.strip().splitlines()[-1:] or result.stdout.strip().splitlines()[-1:]
+    return tail[0].decode(errors='replace')[:160] if tail else '(no output)'
+
 def lines(value):
     return value.splitlines(keepends=True)
 
@@ -154,7 +158,8 @@ def check(item):
     except subprocess.TimeoutExpired:
         return 'excluded', name, 'normal run exceeded %ss ceiling' % timeout
     if first.returncode != second.returncode:
-        return 'excluded', name, 'normal runs disagree on exit (%d != %d)' % (first.returncode, second.returncode)
+        failed = first if first.returncode else second
+        return 'excluded', name, 'normal runs disagree on exit (%d != %d): %s' % (first.returncode, second.returncode, last_line(failed))
     stdout_mask = calibrated_mask(first.stdout, second.stdout)
     norm_stderr1 = normalize_stderr(first.stderr)
     norm_stderr2 = normalize_stderr(second.stderr)
@@ -175,7 +180,7 @@ def check(item):
     except subprocess.TimeoutExpired:
         return 'fail', name, 'observed run exceeded %ss ceiling' % timeout
     if first.returncode != observed_run.returncode:
-        return 'fail', name, 'exit %d != observed %d' % (first.returncode, observed_run.returncode)
+        return 'fail', name, 'exit %d != observed %d: %s' % (first.returncode, observed_run.returncode, last_line(observed_run if observed_run.returncode else first))
     stdout_ok, stdout_reason = matches_outside_mask(first.stdout, observed_run.stdout, stdout_mask)
     if not stdout_ok:
         return 'fail', name, 'stdout ' + stdout_reason
@@ -221,6 +226,24 @@ import json, os, sys, shutil, subprocess
 repo = sys.argv[1]
 iyi = sys.argv[2]
 work = sys.argv[3]
+
+NOT_REUSABLE_CODES = {
+    'clock': 32, 'entropy': 33, 'timer': 34, 'network': 35, 'process': 36,
+    'signal': 37, 'runtime_timing': 38, 'code_location': 39,
+    'dir_stream': 40, 'host_state': 41,
+}
+
+def taint_kinds(data):
+    # Records are u32le length then payload: u8 type, u64le task, fields.
+    # A TAINT (0x08) carries its kind as the first field byte.
+    found, at = set(), 0
+    while at + 4 <= len(data):
+        size = int.from_bytes(data[at:at + 4], 'little')
+        payload = data[at + 4:at + 4 + size]
+        if len(payload) >= 10 and payload[0] == 0x08:
+            found.add(payload[9])
+        at += 4 + size
+    return found
 
 kinds = [
     'file_read',
@@ -478,6 +501,18 @@ SystemRoots.load
     if os.path.exists(trace_pa) and os.path.exists(trace_pb):
         data_pa = open(trace_pa, 'rb').read()
         data_pb = open(trace_pb, 'rb').read()
+        code = NOT_REUSABLE_CODES.get(kind)
+        if code is not None:
+            # A not-reusable kind is load-bearing when its taint is in the
+            # observed trace and gone from the patched one. Lengths prove
+            # nothing: a run stops recording after its first taint, so a
+            # different taint can take the dropped one's place.
+            if code in taint_kinds(data_a) and code not in taint_kinds(data_pa):
+                passed_kinds.append(kind)
+                print(f'  [load-bearing] {kind}: observer is load-bearing')
+            else:
+                failed_kinds.append((kind, 'taint of this kind still recorded after dropping observer'))
+            continue
         # With observer deleted, changed input leaves trace unchanged (or record missing)
         if data_pa == data_pb or len(data_pa) < len(data_a):
             passed_kinds.append(kind)

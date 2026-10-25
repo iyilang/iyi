@@ -34,7 +34,9 @@ echo "== release build and run"
 echo "== observation build with IYI_OBSERVE and hexdump assertion"
 TRACE_FILE="$WORK/trace.bin"
 rm -f "$TRACE_FILE"
-IYI_OBSERVE="$TRACE_FILE" "$IYI" run -Diyi_observe "$REPO/bench/std_observe_exercise.iyi"
+# From `/`, so the cwd record (the real current directory) is the same in
+# every checkout.
+(cd / && IYI_OBSERVE="$TRACE_FILE" "$IYI" run -Diyi_observe "$REPO/bench/std_observe_exercise.iyi")
 
 if [ ! -f "$TRACE_FILE" ]; then
   echo "FAIL: trace file was not created"
@@ -42,7 +44,11 @@ if [ ! -f "$TRACE_FILE" ]; then
 fi
 
 ACTUAL_HEX="$(od -An -v -tx1 "$TRACE_FILE" | tr -d ' \n')"
-EXPECTED_HEX="1900000003000000000000000003000000464f4f0103000000626172000900000004000000000000000016000000050000000000000000090000002f746573742f6469721600000006000000000000000009000000746573742d686f737420000000070000000000000000010d0000002f746573742f6f75742e74787400000000001d000000080000000000000000200f0000007372633a746573742e6979693a31300d0000007f000000000000000000000000"
+EXPECTED_HEX="1900000003000000000000000003000000464f4f01030000006261720009000000040000000000000000"
+EXPECTED_HEX="${EXPECTED_HEX}0e00000005000000000000000001000000"'2f'"1600000006000000000000000009000000746573742d686f737420000000070000000000000000010d0000002f746573742f6f75742e74787400000000001d000000080000000000000000200f0000007372633a746573742e6979693a3130"
+# The second clock taint is dropped; the entropy taint is its kind's first.
+EXPECTED_HEX="${EXPECTED_HEX}1d000000080000000000000000210f0000007372633a746573742e6979693a3132"
+EXPECTED_HEX="${EXPECTED_HEX}0d0000007f000000000000000000000000"
 
 if [ "$ACTUAL_HEX" != "$EXPECTED_HEX" ]; then
   echo "FAIL: trace hex mismatch"
@@ -50,7 +56,7 @@ if [ "$ACTUAL_HEX" != "$EXPECTED_HEX" ]; then
   echo "  actual:   $ACTUAL_HEX"
   exit 1
 fi
-echo "  hexdump assertion passed (172 bytes matched exactly)"
+echo "  hexdump assertion passed ($(( ${#EXPECTED_HEX} / 2 )) bytes matched exactly)"
 
 echo "== normal end writes END(0)"
 # Last 17 bytes must be: 0d 00 00 00 7f 00 00 00 00 00 00 00 00 00 00 00 00
@@ -62,7 +68,9 @@ if [ "$TAIL_HEX" != "$EXPECTED_TAIL" ]; then
 fi
 echo "  END(0) verified"
 
-echo "== panic writes none"
+echo "== panic writes END(1)"
+# A panic leaves through __iyi_exit(1), so the trace ends with END(1); only a
+# signal death or a timeout kill leaves no END.
 PANIC_TRACE="$WORK/panic_trace.bin"
 cat << 'EOF' > "$WORK/panic_prog.iyi"
 raise "intentional panic for observation test"
@@ -74,11 +82,11 @@ if IYI_OBSERVE="$PANIC_TRACE" "$IYI" run -Diyi_observe "$WORK/panic_prog.iyi" >/
   exit 1
 fi
 
-PANIC_SIZE="$(wc -c < "$PANIC_TRACE" | tr -d ' ')"
-if [ "$PANIC_SIZE" -ne 0 ]; then
-  echo "FAIL: expected 0 bytes for panic trace, got $PANIC_SIZE bytes"
+PANIC_HEX="$(od -An -v -tx1 "$PANIC_TRACE" | tr -d ' \n')"
+if [ "$PANIC_HEX" != "0d0000007f000000000000000001000000" ]; then
+  echo "FAIL: expected only END(1) in panic trace, got $PANIC_HEX"
   exit 1
 fi
-echo "  panic wrote no END record (trace file size is 0)"
+echo "  panic wrote END(1)"
 
 echo "OK: bench/std_observe_exercise.sh passed all checks"

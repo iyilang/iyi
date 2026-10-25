@@ -442,6 +442,52 @@ describe "Iyi::Stale S3f: CallPathFp, typed encoder, roots, explain" do
       ENV.delete("IYI_WARM")
     end
   end
+  it "warm build with definition typing witness gives identical call path fingerprint" do
+    code = <<-IYI
+    module spec/test
+    trait Greetable
+      abstract def greet : String
+    end
+    def say_hi(g : Greetable) : String
+      g.greet
+    end
+    puts 42
+    IYI
+
+    fp1, _ = compute_fp(code)
+    ENV["IYI_WARM"] = "1"
+    begin
+      Iyi::Compiler.preanalysed.clear
+      fp2, _ = compute_fp(code)
+      fp2.should eq(fp1)
+    ensure
+      Iyi::Compiler.preanalysed.clear
+      ENV.delete("IYI_WARM")
+    end
+  end
+
+  it "warm build compiles NamedTuple.new without generic allocation error" do
+    code = <<-IYI
+    module spec/test
+    struct ::NamedTuple
+      def self.new(**opts : **T)
+        opts
+      end
+    end
+    empty = NamedTuple.new
+    puts 42
+    IYI
+
+    ENV["IYI_WARM"] = "1"
+    begin
+      Iyi::Compiler.preanalysed.clear
+      fp, _ = compute_fp(code)
+      fp.should_not be_empty
+    ensure
+      Iyi::Compiler.preanalysed.clear
+      ENV.delete("IYI_WARM")
+    end
+  end
 
   it "produces expected dump rows and explain keys" do
     code = <<-IYI

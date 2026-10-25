@@ -457,9 +457,10 @@ module Iyi
 
       begin
         node, processor = program.top_level_semantic(node, processor: pre.processor)
-        DefinitionTyping.append_probes(program, node)
+        combined = Expressions.from([pre.node, node] of ASTNode)
+        DefinitionTyping.append_probes(program, combined)
         node = program.semantic_after_top_level(
-          Expressions.from([pre.node, node] of ASTNode), processor,
+          combined, processor,
           cleanup: !no_cleanup?)
       rescue ex : SkipMacroCodeCoverageException
         program.macro_expansion_error_hook.try &.call(ex.cause)

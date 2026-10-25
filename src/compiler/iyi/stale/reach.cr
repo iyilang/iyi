@@ -148,6 +148,7 @@ module Iyi::Stale
       @current_type = @program
       @current_block = nil
       @in_lib = false
+      @inlined_defs_stack = Set(Tuple(Def, Type)).new
     end
 
     def reach(node : ASTNode) : Nil
@@ -264,9 +265,10 @@ module Iyi::Stale
     private def reach_concrete_class_var(class_var : MetaTypeVar) : Nil
       return if @visited_class_vars.includes?(class_var)
       @visited_class_vars << class_var
-
-      @class_vars << class_var
       init_node = class_var.initializer.try(&.node)
+      unless simple_class_var_init?(init_node, class_var.type)
+        @class_vars << class_var
+      end
       record_element(
         ElementKind::ClassVar,
         "#{class_var.owner}::#{class_var.name}",
@@ -281,6 +283,18 @@ module Iyi::Stale
         @current_type = class_var.owner
         accept initializer.node
         @current_type = old_type
+      end
+    end
+
+    private def simple_class_var_init?(node : ASTNode?, type : Type) : Bool
+      return true if node.nil?
+      return true if node.type?.try(&.nil_type?) && !type.nil_type?
+      return true if node.simple_literal?
+      case node
+      when NilLiteral, BoolLiteral, CharLiteral, NumberLiteral, StringLiteral, SymbolLiteral
+        true
+      else
+        false
       end
     end
 
@@ -382,6 +396,10 @@ module Iyi::Stale
     end
 
     private def reach_inlined_def(target_def : Def, owner : Type, block : Block) : Nil
+      key = {target_def, owner}
+      return if @inlined_defs_stack.includes?(key)
+      @inlined_defs_stack << key
+
       old_block = @current_block
       old_type = @current_type
       @current_block = block
@@ -389,6 +407,7 @@ module Iyi::Stale
       accept target_def.body
       @current_type = old_type
       @current_block = old_block
+      @inlined_defs_stack.delete(key)
     end
 
     private def reach_primitive(node : Call?, primitive : Primitive, target_def : Def, self_type : Type) : Nil
@@ -469,6 +488,7 @@ module Iyi::Stale
         end
       when ClassVar
         reach_class_var(target.var)
+        accept node.value
       when InstanceVar
         accept node.value
       else
@@ -762,6 +782,7 @@ module Iyi::Stale
         accept node.value if node.value
       when ClassVar
         reach_class_var(var.var)
+        accept node.value if node.value
       end
       false
     end
@@ -797,7 +818,10 @@ module Iyi::Stale
         accept exp
       end
       if block = @current_block
+        old_block = @current_block
+        @current_block = nil
         accept block.body
+        @current_block = old_block
       end
       false
     end

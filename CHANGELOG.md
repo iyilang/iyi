@@ -52,12 +52,13 @@
   darwin waits no longer sleep a millisecond at a time. A join parks
   until the thread's body returns. A deadlock on a lock is named by the
   scheduler as on a channel, and on a program's one thread by the
-  `Mutex` as before. Windows' process wait, where
-  `RegisterWaitForSingleObject` is refused, asks with a zero wait between
-  sleeps instead of holding its thread: `bench/std_process_exercise.sh`
-  holds every check with the registration refused, and its broken copy
-  now also makes the zero wait INFINITE, the blocking wait it was, which
-  the sibling's ticks still catch.
+  `Mutex` as before. A process's end where Windows refuses
+  `RegisterWaitForSingleObject` is asked for with a zero wait between
+  sleeps, and where darwin refuses the kqueue with `waitpid` and WNOHANG,
+  instead of holding the thread: `bench/std_process_exercise.sh` holds
+  every check with the registration or the kqueue refused, and its broken
+  copies also take the poll's not-waiting out, the blocking wait each
+  was, which the sibling's ticks still catch.
 
 - **A parallel task computing in a loop gives its worker up after 5 to 10
   ms.** In a program with a pool, every loop of a def that is not the

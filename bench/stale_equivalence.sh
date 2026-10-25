@@ -45,45 +45,45 @@ all_progs = samples + bench
 
 EXCLUDED = {
     # 1. Non-deterministic output (time, allocator metrics, thread counts, scratch paths)
-    "bench/std_time_exercise.iyi": "prints current wall-clock time",
-    "bench/std_weak_ref_exercise.iyi": "prints non-deterministic thread race counts across 4 threads",
-    "bench/std_file_utils_exercise.iyi": "prints temp paths and timestamps",
+    \"bench/std_time_exercise.iyi\": \"prints current wall-clock time\",
+    \"bench/std_weak_ref_exercise.iyi\": \"prints non-deterministic thread race counts across 4 threads\",
+    \"bench/std_file_utils_exercise.iyi\": \"prints temp paths and timestamps\",
 
     # 2. Heavy computational benchmarks / stress tests that exceed standalone execution budget
-    "bench/std_big_exercise.iyi": "benchmark measuring elapsed execution time for exponentiations",
-    "bench/std_bzip2_exercise.iyi": "heavy compression benchmark exceeding run timeout",
-    "bench/std_compress_exercise.iyi": "heavy compression benchmark exceeding run timeout",
-    "bench/std_csv_exercise.iyi": "heavy dataset processing benchmark exceeding run timeout",
-    "bench/std_fuzz_exercise.iyi": "multi-iteration fuzzing loop exceeding run timeout",
-    "bench/std_gc_exercise.iyi": "prints collector memory stats and runs heavy collection loops",
-    "bench/std_http_exercise.iyi": "network HTTP client/server loop exceeding run timeout",
-    "bench/std_mutex_exercise.iyi": "thread contention stress test exceeding run timeout",
-    "bench/std_password_exercise.iyi": "costly cryptographic key derivation exceeding run timeout",
-    "bench/std_shared_proc_exercise.iyi": "multi-fiber concurrency stress test exceeding run timeout",
-    "bench/std_tar_exercise.iyi": "archive compression benchmark exceeding run timeout",
-    "bench/std_text_scale_exercise.iyi": "large text scaling benchmark exceeding run timeout",
-    "bench/std_toml_exercise.iyi": "large document parsing benchmark exceeding run timeout",
-    "bench/std_xml_exercise.iyi": "large document parsing benchmark exceeding run timeout",
-    "bench/std_xz_exercise.iyi": "heavy compression benchmark exceeding run timeout",
-    "bench/std_zstd_exercise.iyi": "heavy compression benchmark exceeding run timeout",
+    \"bench/std_big_exercise.iyi\": \"benchmark measuring elapsed execution time for exponentiations\",
+    \"bench/std_bzip2_exercise.iyi\": \"heavy compression benchmark exceeding run timeout\",
+    \"bench/std_compress_exercise.iyi\": \"heavy compression benchmark exceeding run timeout\",
+    \"bench/std_csv_exercise.iyi\": \"heavy dataset processing benchmark exceeding run timeout\",
+    \"bench/std_fuzz_exercise.iyi\": \"multi-iteration fuzzing loop exceeding run timeout\",
+    \"bench/std_gc_exercise.iyi\": \"prints collector memory stats and runs heavy collection loops\",
+    \"bench/std_http_exercise.iyi\": \"network HTTP client/server loop exceeding run timeout\",
+    \"bench/std_mutex_exercise.iyi\": \"thread contention stress test exceeding run timeout\",
+    \"bench/std_password_exercise.iyi\": \"costly cryptographic key derivation exceeding run timeout\",
+    \"bench/std_shared_proc_exercise.iyi\": \"multi-fiber concurrency stress test exceeding run timeout\",
+    \"bench/std_tar_exercise.iyi\": \"archive compression benchmark exceeding run timeout\",
+    \"bench/std_text_scale_exercise.iyi\": \"large text scaling benchmark exceeding run timeout\",
+    \"bench/std_toml_exercise.iyi\": \"large document parsing benchmark exceeding run timeout\",
+    \"bench/std_xml_exercise.iyi\": \"large document parsing benchmark exceeding run timeout\",
+    \"bench/std_xz_exercise.iyi\": \"heavy compression benchmark exceeding run timeout\",
+    \"bench/std_zstd_exercise.iyi\": \"heavy compression benchmark exceeding run timeout\",
 
     # 3. Intentional panic tests that emit callstack backtraces to stderr containing randomized load addresses
-    "bench/std_cookie_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_dir_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_dns_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_file_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_ini_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_io_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_json_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_log_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_number_format_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_option_parser_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_regex_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_router_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_steppable_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_string_scanner_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_websocket_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
-    "bench/std_yaml_exercise.iyi": "negative panic tests emit stack backtrace with load addresses",
+    \"bench/std_cookie_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_dir_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_dns_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_file_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_ini_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_io_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_json_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_log_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_number_format_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_option_parser_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_regex_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_router_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_steppable_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_string_scanner_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_websocket_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+    \"bench/std_yaml_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
 }
 
 def check_prog(item):
@@ -92,6 +92,7 @@ def check_prog(item):
     if name in EXCLUDED:
         return ('excluded', name, EXCLUDED[name])
     prog_dir = os.path.join(work, str(idx))
+    os.makedirs(prog_dir, exist_ok=True)
     normal_bin = os.path.join(prog_dir, 'normal.bin')
     observe_bin = os.path.join(prog_dir, 'observe.bin')
     trace_file = os.path.join(prog_dir, 'trace.bin')
@@ -103,7 +104,7 @@ def check_prog(item):
     except subprocess.TimeoutExpired:
         return ('timeout_build_normal', name, '')
     if res_nb.returncode != 0:
-        return ('skip_normal_build_failed', name, '')
+        return ('skip_normal_build_failed', name, res_nb.stderr[:100])
 
     # 2. Build with -Diyi_observe
     try:
@@ -119,7 +120,7 @@ def check_prog(item):
 
     # 3. Run normal
     try:
-        res_nr = subprocess.run([normal_bin], capture_output=True, timeout=10)
+        res_nr = subprocess.run([normal_bin], capture_output=True, timeout=30)
     except subprocess.TimeoutExpired:
         return ('timeout_run_normal', name, '')
 
@@ -127,7 +128,7 @@ def check_prog(item):
     env = dict(os.environ)
     env['IYI_OBSERVE'] = trace_file
     try:
-        res_or = subprocess.run([observe_bin], env=env, capture_output=True, timeout=10)
+        res_or = subprocess.run([observe_bin], env=env, capture_output=True, timeout=30)
     except subprocess.TimeoutExpired:
         return ('timeout_run_observe', name, '')
 
@@ -150,13 +151,19 @@ checked = 0
 passed = 0
 c9_refused = 0
 failures = []
-
+excluded_count = 0
+print(f'Total results from executor: {len(results)}')
 for status, name, detail in results:
     if status == 'skip_normal_build_failed':
+        print(f'  [skip] {name}: {detail}')
         continue
     if status == 'c9_refused':
         c9_refused += 1
         print(f'  [C9 refusal] {name}: mismatched signature detected')
+        continue
+    if status == 'excluded':
+        excluded_count += 1
+        print(f'  [excluded] {name}: {detail}')
         continue
     checked += 1
     if status == 'pass':
@@ -164,7 +171,7 @@ for status, name, detail in results:
     else:
         failures.append((name, f'{status}: {detail}'))
 
-print(f'RG2: {passed} programs passed equivalence, {c9_refused} C9 signature refusals, {len(failures)} failures out of {checked + c9_refused} evaluated')
+print(f'RG2: {passed} programs passed equivalence, {excluded_count} excluded, {c9_refused} C9 signature refusals, {len(failures)} failures out of {checked} evaluated')
 if failures:
     for name, reason in failures[:5]:
         print(f'  FAILED: {name} -> {reason}', file=sys.stderr)

@@ -496,6 +496,10 @@ module Iyi
       abi_name("raise_cast_failed")
     end
 
+    def raise_closure_to_c_name
+      abi_name("raise_closure_to_c")
+    end
+
     def malloc_name
       abi_name("malloc64")
     end

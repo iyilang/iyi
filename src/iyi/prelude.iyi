@@ -9655,6 +9655,12 @@ end
 def raise(error : TypeCastError) : NoReturn
   raise error.message
 end
+fun __iyi_raise_cast_failed(from : Void*, to : Void*, at : Void*) : NoReturn
+  raise TypeCastError.new(at ? "Cast from #{from.as(String)} to #{to.as(String)} failed, at #{at.as(String)}" : "Cast from #{from.as(String)} to #{to.as(String)} failed")
+end
+fun __iyi_raise_closure_to_c : NoReturn
+  raise("passing a closure to C is not allowed", "??", 0)
+end
 
 # Until a `break`.
 def loop(& : -> Nil) : Nil

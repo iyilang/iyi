@@ -1369,6 +1369,7 @@ module Iyi
 
       # Built-in annotations
       types["AlwaysInline"] = @always_inline_annotation = AnnotationType.new self, self, "AlwaysInline"
+      types["Effect"] = @effect_annotation = AnnotationType.new self, self, "Effect"
       types["CallConvention"] = @call_convention_annotation = AnnotationType.new self, self, "CallConvention"
       types["Extern"] = @extern_annotation = AnnotationType.new self, self, "Extern"
       types["Flags"] = @flags_annotation = AnnotationType.new self, self, "Flags"
@@ -1702,7 +1703,8 @@ module Iyi
       dependency_printer = compiler.try(&.dependency_printer)
 
       filenames.each do |filename|
-        unseen_file = requires.add?(filename)
+        canonical_filename = File.expand_path(filename)
+        unseen_file = requires.add?(canonical_filename)
 
         dependency_printer.try(&.enter_file(filename, unseen_file))
 
@@ -1724,7 +1726,7 @@ module Iyi
                      uint8 uint16 uint32 uint64 uint128 float float32 float64 string symbol pointer enumerable indexable
                      array static_array exception tuple named_tuple proc union enum range slice regex crystal
                      packed_annotation thread_local_annotation no_inline_annotation target_feature_annotation
-                     always_inline_annotation naked_annotation returns_twice_annotation
+                     always_inline_annotation effect_annotation naked_annotation returns_twice_annotation
                      raises_annotation primitive_annotation call_convention_annotation
                      flags_annotation link_annotation extern_annotation deprecated_annotation experimental_annotation
                      share_annotation error_trait) %}

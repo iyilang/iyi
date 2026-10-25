@@ -1,0 +1,617 @@
+# std/observe: test observation runtime for stale test caching.
+#
+# Provides runtime observation channel and event recording for
+# `iyi test --cached` and `-Diyi_observe`.
+
+module std/observe
+
+import std/int
+import std/slice::{Slice, Bytes}
+
+{% if flag?(:darwin) %}
+  lib LibObserveC
+    struct StatDarwin
+      st_dev : Int32
+      st_mode_nlink : Int32
+      st_ino : UInt64
+      st_uid : Int32
+      st_gid : Int32
+      st_rdev : Int32
+      st_pad : Int32
+      st_atime_sec : Int64
+      st_atime_nsec : Int64
+      st_mtime_sec : Int64
+      st_mtime_nsec : Int64
+      st_ctime_sec : Int64
+      st_ctime_nsec : Int64
+      st_birthtime_sec : Int64
+      st_birthtime_nsec : Int64
+      st_size : Int64
+      st_blocks : Int64
+      st_blksize : Int32
+      st_flags : Int32
+      st_gen : Int32
+      st_lspare : Int32
+      st_qspare0 : Int64
+      st_qspare1 : Int64
+    end
+
+    fun unsetenv(name : UInt8*) : Int32
+    fun getenv(name : UInt8*) : UInt8*
+    fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
+    fun gethostname(name : UInt8*, len : UInt64) : Int32
+    fun stat = stat64(path : UInt8*, buf : StatDarwin*) : Int32
+    fun realpath(path : UInt8*, resolved : UInt8*) : UInt8*
+  end
+{% elsif flag?(:linux) %}
+  lib LibObserveC
+    struct StatLinux
+      st_dev : UInt64
+      st_ino : UInt64
+      st_nlink : UInt64
+      st_mode : UInt32
+      st_uid : UInt32
+      st_gid : UInt32
+      __pad0 : Int32
+      st_rdev : UInt64
+      st_size : Int64
+      st_blksize : Int64
+      st_blocks : Int64
+      st_atim_sec : Int64
+      st_atim_nsec : Int64
+      st_mtim_sec : Int64
+      st_mtim_nsec : Int64
+      st_ctim_sec : Int64
+      st_ctim_nsec : Int64
+      __glibc_reserved0 : Int64
+      __glibc_reserved1 : Int64
+      __glibc_reserved2 : Int64
+    end
+
+    fun unsetenv(name : UInt8*) : Int32
+    fun getenv(name : UInt8*) : UInt8*
+    fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
+    fun gethostname(name : UInt8*, len : UInt64) : Int32
+    fun stat(path : UInt8*, buf : StatLinux*) : Int32
+    fun realpath(path : UInt8*, resolved : UInt8*) : UInt8*
+  end
+{% elsif flag?(:win32) %}
+  lib LibKernel32
+    fun SetEnvironmentVariableW(name : UInt16*, value : UInt16*) : Int32
+    fun GetCurrentDirectoryW(len : UInt32, buf : UInt16*) : UInt32
+    fun GetComputerNameW(buf : UInt16*, size : UInt32*) : Int32
+  end
+{% end %}
+
+class RecordWriter
+  @buffer : Pointer(UInt8)
+  @capacity : Int32
+  @size : Int32
+
+  def initialize
+    @capacity = 4096
+    @size = 0
+    @buffer = Pointer(UInt8).malloc(@capacity.to_u64)
+  end
+
+  def begin_record(rec_type : UInt8, task : UInt64) : Nil
+    @size = 4 # Reserve 4 bytes for u32le payload_len
+    write_u8(rec_type)
+    write_u64(task)
+  end
+
+  def write_u8(val : UInt8) : Nil
+    ensure_room(1)
+    @buffer[@size] = val
+    @size += 1
+  end
+
+  def write_u32(val : UInt32) : Nil
+    ensure_room(4)
+    @buffer[@size]     = (val & 0xFF_u32).to_u8
+    @buffer[@size + 1] = ((val >> 8) & 0xFF_u32).to_u8
+    @buffer[@size + 2] = ((val >> 16) & 0xFF_u32).to_u8
+    @buffer[@size + 3] = ((val >> 24) & 0xFF_u32).to_u8
+    @size += 4
+  end
+
+  def write_i32(val : Int32) : Nil
+    write_u32(val.to_u32)
+  end
+
+  def write_u64(val : UInt64) : Nil
+    ensure_room(8)
+    i = 0
+    while i < 8
+      @buffer[@size + i] = ((val >> (i * 8)) & 0xFF_u64).to_u8
+      i += 1
+    end
+    @size += 8
+  end
+
+  def write_i64(val : Int64) : Nil
+    write_u64(val.to_u64)
+  end
+
+  def write_str(s : String) : Nil
+    len = s.bytesize.to_u32
+    write_u32(len)
+    ensure_room(s.bytesize)
+    (@buffer + @size).copy_from(s.to_unsafe, s.bytesize)
+    @size += s.bytesize
+  end
+
+  def flush(fd : Int64) : Nil
+    return if @size <= 4
+    payload_len = (@size - 4).to_u32
+    @buffer[0] = (payload_len & 0xFF_u32).to_u8
+    @buffer[1] = ((payload_len >> 8) & 0xFF_u32).to_u8
+    @buffer[2] = ((payload_len >> 16) & 0xFF_u32).to_u8
+    @buffer[3] = ((payload_len >> 24) & 0xFF_u32).to_u8
+
+    Std::Observe.channel_write(fd, @buffer.as(Void*), @size.to_u64)
+    @size = 0
+  end
+
+  private def ensure_room(extra : Int32) : Nil
+    if @size + extra > @capacity
+      while @size + extra > @capacity
+        @capacity *= 2
+      end
+      new_buf = Pointer(UInt8).malloc(@capacity.to_u64)
+      new_buf.copy_from(@buffer, @size)
+      @buffer = new_buf
+    end
+  end
+end
+
+@@started = false
+@@enabled = false
+@@fd = -1_i64
+@@scratch = ""
+@@written_paths = Set(String).new
+@@written_env = Set(String).new
+
+@[Effect(:observation_channel)]
+def self.channel_open(path : String) : Int64
+  __iyi_open_file(path.to_unsafe, false, true, true, false, true, 0o644)
+end
+
+@[Effect(:observation_channel)]
+def self.channel_write(fd : Int64, buf : Void*, len : UInt64) : Int64
+  __iyi_write(fd, buf, len)
+end
+
+@[Effect(:observation_channel)]
+def self.channel_close(fd : Int64) : Nil
+  __iyi_close(fd)
+end
+
+def self.enabled? : Bool
+  @@enabled
+end
+
+def self.start : Nil
+  return if @@started
+  @@started = true
+
+  observe_path = get_env("IYI_OBSERVE")
+  return if observe_path.nil? || observe_path.empty?
+
+  # Unset IYI_OBSERVE before program code runs
+  unset_env("IYI_OBSERVE")
+
+  # Classify scratch directory from TMPDIR/TEMP/TMP at start
+  scratch_env = get_env("TMPDIR") || get_env("TEMP") || get_env("TMP") || "/tmp"
+  @@scratch = safe_real_path(scratch_env)
+
+  # Open trace file for append
+  fd = channel_open(observe_path)
+  return if fd < 0_i64
+
+  @@fd = fd
+  @@enabled = true
+end
+
+def self.finish(status : Int32 = 0) : Nil
+  return unless @@enabled
+  write_end(status)
+  channel_close(@@fd)
+  @@fd = -1_i64
+  @@enabled = false
+end
+
+def self.file(kind : UInt8, path : String, open_flags : UInt32 = 0_u32) : Nil
+  return unless @@enabled
+  real = safe_real_path(path)
+  return if is_under_scratch?(real) || @@written_paths.includes?(real)
+
+  cwd_str = current_cwd
+  present, ftype, size, mtime_ns = stat_path(real)
+
+  writer = RecordWriter.new
+  writer.begin_record(0x01_u8, current_task_id)
+  writer.write_u8(kind)
+  writer.write_str(path)
+  writer.write_str(real)
+  writer.write_str(cwd_str)
+  writer.write_u32(open_flags)
+  writer.write_u8(present)
+  writer.write_u8(ftype)
+  writer.write_u64(size)
+  writer.write_i64(mtime_ns)
+  writer.flush(@@fd)
+end
+
+def self.__iyi_observe_file(kind : UInt8, path : String) : Nil
+  file(kind, path)
+end
+
+def self.__iyi_observe_file_read(path : String) : Nil
+  file(1_u8, path)
+end
+
+def self.__iyi_observe_file_stat(path : String) : Nil
+  file(2_u8, path)
+end
+
+def self.__iyi_observe_file_exists(path : String) : Nil
+  file(3_u8, path)
+end
+
+def self.dir_list(path : String, names : Array(String)) : Nil
+  return unless @@enabled
+  real = safe_real_path(path)
+  return if is_under_scratch?(real) || @@written_paths.includes?(real)
+
+  cwd_str = current_cwd
+  writer = RecordWriter.new
+  writer.begin_record(0x02_u8, current_task_id)
+  writer.write_str(path)
+  writer.write_str(real)
+  writer.write_str(cwd_str)
+  writer.write_u32(names.size.to_u32)
+  names.each do |n|
+    writer.write_str(n)
+  end
+  writer.flush(@@fd)
+end
+
+def self.__iyi_observe_dir_list(path : String, names : Array(String)) : Nil
+  dir_list(path, names)
+end
+
+def self.env_get(name : String, value : String?) : Nil
+  return unless @@enabled
+  present = value.nil? ? 0_u8 : 1_u8
+  val_str = value || ""
+  written_first = @@written_env.includes?(name) ? 1_u8 : 0_u8
+
+  writer = RecordWriter.new
+  writer.begin_record(0x03_u8, current_task_id)
+  writer.write_str(name)
+  writer.write_u8(present)
+  writer.write_str(val_str)
+  writer.write_u8(written_first)
+  writer.flush(@@fd)
+end
+
+def self.__iyi_observe_env_get(name : String, value : String?) : Nil
+  env_get(name, value)
+end
+
+def self.env_all : Nil
+  return unless @@enabled
+  writer = RecordWriter.new
+  writer.begin_record(0x04_u8, current_task_id)
+  writer.flush(@@fd)
+end
+
+def self.__iyi_observe_env_all : Nil
+  env_all
+end
+
+def self.cwd(path : String) : Nil
+  return unless @@enabled
+  real = safe_real_path(path)
+  writer = RecordWriter.new
+  writer.begin_record(0x05_u8, current_task_id)
+  writer.write_str(real)
+  writer.flush(@@fd)
+end
+
+def self.__iyi_observe_cwd(path : String) : Nil
+  cwd(path)
+end
+
+def self.host(value : String) : Nil
+  return unless @@enabled
+  writer = RecordWriter.new
+  writer.begin_record(0x06_u8, current_task_id)
+  writer.write_str(value)
+  writer.flush(@@fd)
+end
+
+def self.__iyi_observe_host(value : String) : Nil
+  host(value)
+end
+
+def self.file_write(op : UInt8 | Symbol | String, path : String, target : String? = nil) : Nil
+  return unless @@enabled
+  real = safe_real_path(path)
+  target_real = target.nil? || target.empty? ? "" : safe_real_path(target)
+  inside_scratch = is_under_scratch?(real) ? 1_u8 : 0_u8
+
+  @@written_paths.add(real)
+  @@written_paths.add(target_real) unless target_real.empty?
+
+  op_code = parse_op(op)
+
+  writer = RecordWriter.new
+  writer.begin_record(0x07_u8, current_task_id)
+  writer.write_u8(op_code)
+  writer.write_str(real)
+  writer.write_str(target_real)
+  writer.write_u8(inside_scratch)
+  writer.flush(@@fd)
+end
+
+def self.__iyi_observe_file_write(op : UInt8 | Symbol | String, path : String, target : String? = nil) : Nil
+  file_write(op, path, target)
+end
+
+def self.exit(status : Int32) : Nil
+  finish(status)
+end
+
+def self.__iyi_observe_exit(status : Int32) : Nil
+  finish(status)
+end
+
+def self.not_reusable(kind : UInt8 | Symbol | String, site : String) : Nil
+  return unless @@enabled
+  kind_code = parse_kind(kind)
+
+  writer = RecordWriter.new
+  writer.begin_record(0x08_u8, current_task_id)
+  writer.write_u8(kind_code)
+  writer.write_str(site)
+  writer.flush(@@fd)
+end
+
+def self.__iyi_observe_not_reusable(kind : UInt8 | Symbol | String, site : String) : Nil
+  not_reusable(kind, site)
+end
+
+def self.__iyi_observe_clock(site : String) : Nil
+  not_reusable(32_u8, site)
+end
+
+def self.__iyi_observe_entropy(site : String) : Nil
+  not_reusable(33_u8, site)
+end
+
+def self.__iyi_observe_timer(site : String) : Nil
+  not_reusable(34_u8, site)
+end
+
+def self.__iyi_observe_network(site : String) : Nil
+  not_reusable(35_u8, site)
+end
+
+def self.__iyi_observe_process(site : String) : Nil
+  not_reusable(36_u8, site)
+end
+
+def self.__iyi_observe_signal(site : String) : Nil
+  not_reusable(37_u8, site)
+end
+
+def self.__iyi_observe_runtime_timing(site : String) : Nil
+  not_reusable(38_u8, site)
+end
+
+def self.__iyi_observe_code_location(site : String) : Nil
+  not_reusable(39_u8, site)
+end
+
+private def self.write_end(status : Int32) : Nil
+  writer = RecordWriter.new
+  writer.begin_record(0x7F_u8, 0_u64)
+  writer.write_i32(status)
+  writer.flush(@@fd)
+end
+
+private def self.parse_op(op : UInt8 | Symbol | String) : UInt8
+  if op.is_a?(UInt8)
+    return op
+  end
+  s = op.to_s
+  case s
+  when "create"  then 1_u8
+  when "delete"  then 2_u8
+  when "rename"  then 3_u8
+  when "mkdir"   then 4_u8
+  when "link"    then 5_u8
+  when "symlink" then 6_u8
+  when "touch"   then 7_u8
+  when "chmod"   then 8_u8
+  else                1_u8
+  end
+end
+
+private def self.parse_kind(kind : UInt8 | Symbol | String) : UInt8
+  if kind.is_a?(UInt8)
+    return kind
+  end
+  s = kind.to_s
+  case s
+  when "clock"          then 32_u8
+  when "entropy"        then 33_u8
+  when "timer"          then 34_u8
+  when "network"        then 35_u8
+  when "process"        then 36_u8
+  when "signal"         then 37_u8
+  when "runtime_timing" then 38_u8
+  when "code_location"  then 39_u8
+  when "shared_write"   then 48_u8
+  else                       32_u8
+  end
+end
+
+private def self.current_task_id : UInt64
+  0_u64
+end
+
+private def self.c_str(ptr : UInt8*) : String
+  return "" if ptr.address == 0_u64
+  len = 0
+  while ptr[len] != 0_u8
+    len += 1
+  end
+  String.new(len) { |buf| buf.copy_from(ptr, len) }
+end
+
+private def self.get_env(name : String) : String?
+  {% if flag?(:win32) %}
+    __iyi_win_env_get(name.to_unsafe, name.bytesize)
+  {% elsif flag?(:darwin) || flag?(:linux) %}
+    ptr = LibObserveC.getenv(name.to_unsafe)
+    if ptr.address != 0_u64
+      c_str(ptr)
+    else
+      nil
+    end
+  {% else %}
+    nil
+  {% end %}
+end
+
+@[Effect(:observation_channel)]
+private def self.unset_env(name : String) : Nil
+  {% if flag?(:win32) %}
+    wide = __iyi_wide_path(name.to_unsafe)
+    LibKernel32.SetEnvironmentVariableW(wide, Pointer(UInt16).new(0_u64))
+  {% elsif flag?(:darwin) || flag?(:linux) %}
+    LibObserveC.unsetenv(name.to_unsafe)
+  {% end %}
+end
+
+private def self.current_cwd : String
+  {% if flag?(:win32) %}
+    buf = Pointer(UInt16).malloc(1024_u64)
+    len = LibKernel32.GetCurrentDirectoryW(1024_u32, buf)
+    if len > 0
+      __iyi_win_env_text(buf, len.to_i32) || ""
+    else
+      ""
+    end
+  {% elsif flag?(:darwin) || flag?(:linux) %}
+    buf = Pointer(UInt8).malloc(1024_u64)
+    res = LibObserveC.getcwd(buf, 1024_u64)
+    if res.address != 0_u64
+      c_str(res)
+    else
+      ""
+    end
+  {% else %}
+    ""
+  {% end %}
+end
+
+def self.current_host : String
+  {% if flag?(:win32) %}
+    buf = Pointer(UInt16).malloc(256_u64)
+    size = 256_u32
+    if LibKernel32.GetComputerNameW(buf, pointerof(size)) != 0
+      __iyi_win_env_text(buf, size.to_i32) || "localhost"
+    else
+      "localhost"
+    end
+  {% elsif flag?(:darwin) || flag?(:linux) %}
+    buf = Pointer(UInt8).malloc(256_u64)
+    if LibObserveC.gethostname(buf, 256_u64) == 0
+      c_str(buf)
+    else
+      "localhost"
+    end
+  {% else %}
+    "localhost"
+  {% end %}
+end
+
+def self.safe_real_path(path : String) : String
+  {% if flag?(:darwin) || flag?(:linux) %}
+    buf = Pointer(UInt8).malloc(4096_u64)
+    res = LibObserveC.realpath(path.to_unsafe, buf)
+    if res.address != 0_u64
+      return c_str(res)
+    end
+  {% end %}
+
+  p = path
+  unless p.starts_with?('/')
+    p = current_cwd + "/" + p
+  end
+  normalize_path(p)
+end
+
+private def self.normalize_path(path : String) : String
+  parts = path.split('/')
+  res = [] of String
+  parts.each do |part|
+    next if part.empty? || part == "."
+    if part == ".."
+      res.pop unless res.empty?
+    else
+      res << part
+    end
+  end
+  "/" + res.join("/")
+end
+
+private def self.stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
+  {% if flag?(:darwin) %}
+    st = uninitialized LibObserveC::StatDarwin
+    if LibObserveC.stat(real.to_unsafe, pointerof(st)) == 0
+      mode = st.st_mode_nlink.to_i64 & 0xffff_i64
+      ftype = mode_to_ftype(mode)
+      size = st.st_size.to_u64
+      mtime_ns = st.st_mtime_sec * 1_000_000_000_i64 + st.st_mtime_nsec
+      {1_u8, ftype, size, mtime_ns}
+    else
+      {0_u8, 0_u8, 0_u64, 0_i64}
+    end
+  {% elsif flag?(:linux) %}
+    st = uninitialized LibObserveC::StatLinux
+    if LibObserveC.stat(real.to_unsafe, pointerof(st)) == 0
+      mode = st.st_mode.to_i64
+      ftype = mode_to_ftype(mode)
+      size = st.st_size.to_u64
+      mtime_ns = st.st_mtim_sec * 1_000_000_000_i64 + st.st_mtim_nsec
+      {1_u8, ftype, size, mtime_ns}
+    else
+      {0_u8, 0_u8, 0_u64, 0_i64}
+    end
+  {% else %}
+    {0_u8, 0_u8, 0_u64, 0_i64}
+  {% end %}
+end
+
+private def self.mode_to_ftype(mode : Int64) : UInt8
+  case mode & 0o170000_i64
+  when 0o100000_i64 then 1_u8 # file
+  when 0o040000_i64 then 2_u8 # dir
+  when 0o120000_i64 then 3_u8 # symlink
+  when 0o020000_i64 then 4_u8 # char device
+  when 0o060000_i64 then 5_u8 # block device
+  when 0o010000_i64 then 6_u8 # fifo
+  when 0o140000_i64 then 7_u8 # socket
+  else                   0_u8
+  end
+end
+
+private def self.is_under_scratch?(real : String) : Bool
+  return false if @@scratch.empty?
+  real == @@scratch || real.starts_with?(@@scratch.ends_with?("/") ? @@scratch : @@scratch + "/")
+end

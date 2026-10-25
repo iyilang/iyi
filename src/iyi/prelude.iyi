@@ -9625,6 +9625,7 @@ end
 # `assert_panics`, named `test` cases and the rest - with no import, as
 # `assert` has none.
 require "./testing"
+{% if flag?(:iyi_observe) %} require "../std/observe" {% end %}
 
 # What a wait answers when its task was cancelled (III.4.2): an error
 # member. Here, not in the runtime: `IyiSocket` answers it on every target.
@@ -10227,11 +10228,13 @@ fun main(argc : Int32, argv : UInt8**) : Int32
   {% if flag?(:win32) %}
     __iyi_win_install_fault_handler
   {% end %}
+  {% if flag?(:iyi_observe) %} Std::Observe.start {% end %}
   LibIyiMain.__iyi_main(argc, argv)
   # Named `test` cases keep going past a failure, so the program's own code
   # ends normally and the exit status is theirs to give (testing.iyi).
   status = IyiTestCases.verdict
   __iyi_flush_std
+  {% if flag?(:iyi_observe) %} Std::Observe.finish(status) {% end %}
   {% if flag?(:win32) %}
     # Not back into the C runtime, whose `exit` is `ExitProcess`, for the
     # reason `__iyi_exit` is not: a mark helper stopping this thread as it
@@ -10260,9 +10263,11 @@ end
   # platform's contract already lives, and because `main` above stays exactly as
   # it is for every other target.
   fun __main_argc_argv(argc : Int32, argv : UInt8**) : Int32
+    {% if flag?(:iyi_observe) %} Std::Observe.start {% end %}
     LibIyiMain.__iyi_main(argc, argv)
     status = IyiTestCases.verdict
     __iyi_flush_std
+    {% if flag?(:iyi_observe) %} Std::Observe.finish(status) {% end %}
     status
   end
 {% end %}

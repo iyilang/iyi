@@ -26,6 +26,67 @@ def now_ms : Int64
   __iyi_monotonic_ns // 1000000_i64
 end
 
+# Two workers: one task holds the lock while it computes 300 ms without
+# parking, a second waits for it on the other worker, and a third parallel
+# task is started meanwhile. The waiter parks on the lock's word, so its
+# worker is free and the third starts at once. A waiter that held its
+# worker - asleep in the kernel, as the lock's waiters once slept when
+# their thread had nothing else - left the third nowhere to start until
+# the release. Last in the run, since the pool's threads are there for
+# good once it starts and the refusals before it count threads; and on its
+# own under `-- parks`, which is how bench/std_mutex_exercise.sh runs it
+# against a copy whose waiter holds its worker.
+def waiter_parks : Nil
+  puts "\n== a waiter parks, and its worker runs other tasks"
+  IyiWorkers.count = 2
+  gate = Mutex.new { [0] }
+  holding = Atomic(Int64).new(0_i64)
+  waiting = Atomic(Int64).new(0_i64)
+  started_at = Atomic(Int64).new(0_i64)
+  spawned_at = 0_i64
+  group do |g|
+    g.spawn_parallel do
+      gate.lock do |cell|
+        holding.set(1_i64)
+        began = __iyi_monotonic_ns
+        while __iyi_monotonic_ns - began < 300_000_000_i64
+          IyiThread.spin_pause
+        end
+        cell[0] = 1
+      end.or_panic
+      0
+    end
+    while holding.get == 0_i64
+      sleep(1)
+    end
+    g.spawn_parallel do
+      waiting.set(1_i64)
+      gate.lock { |cell| cell[0] = cell[0] + 1 }.or_panic
+      0
+    end
+    while waiting.get == 0_i64
+      sleep(1)
+    end
+    # Past the waiter's spin, and parked.
+    sleep(20)
+    spawned_at = now_ms
+    g.spawn_parallel do
+      started_at.set(now_ms)
+      0
+    end
+  end
+  late = started_at.get - spawned_at
+  assert_true(gate.get { |cell| cell[0] }.or_panic == 2, "the holder and the waiter each wrote once")
+  assert_true(late < 150, "a task started #{late} ms after it was spawned, while a Mutex waiter held one worker of two and the holder computed on the other")
+  puts "  a task spawned beside a parked waiter started #{late} ms later, the holder still computing"
+end
+
+if Program.args.includes?("parks")
+  waiter_parks
+  puts "\nALL CHECKS PASSED"
+  exit(0)
+end
+
 puts "== a value behind a lock"
 names = Mutex.new { [] of String }
 names.lock { |list| list << "ada" }.or_panic
@@ -93,7 +154,8 @@ assert_true(sums[0] == 5 * rounds && sums[1] == 10 * rounds, "five threads' incr
 puts "  five threads, #{5 * rounds} increments of two cells each, none lost or torn"
 
 # The main thread waits with nothing else to run while a thread holds the
-# lock for 150 ms: it sleeps until the release, and wakes for it.
+# lock for 150 ms: its task parks on the lock's word, the thread asleep in
+# its poller until the release rings it.
 puts "\n== a thread asleep until the release"
 slow = Mutex.new { [0] }
 started = Atomic(Int64).new(0_i64)
@@ -173,7 +235,7 @@ end
 assert_true(taken == [0, 1, 2, 3, 4], "a task waiting on another's queue took #{taken}")
 
 # Across threads: a producer thread, and the main thread waiting with
-# nothing else to run, which on Linux sleeps in the kernel until a release.
+# nothing else to run, whose task parks until a release rings its thread.
 items = Mutex.new { [] of Int32 }
 producer = IyiThread.start do
   1000.times do |item|
@@ -214,7 +276,7 @@ group do |g|
   end
 end
 assert_true(outcome_never == "cancelled", "a wait nothing ends, its sibling failed: #{outcome_never}")
-puts "  a queue between tasks and one between threads, a wait the kernel slept through, and a cancelled one"
+puts "  a queue between tasks and one between threads, a wait its thread slept through in its poller, and a cancelled one"
 
 puts "\n== what it refuses"
 said = assert_panics("already holds the lock") do
@@ -234,5 +296,7 @@ said_alone = assert_panics("nothing is left to change the value") do
 end
 assert_true(!count.locked?, "the refused wait holds no lock")
 puts "  a wait nothing could end panics, naming why"
+
+waiter_parks
 
 puts "\nALL CHECKS PASSED"

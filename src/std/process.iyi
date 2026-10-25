@@ -1420,7 +1420,18 @@ class ProcessChild
       registration = Pointer(Void).new(0_u64)
       # INFINITE, WT_EXECUTEONLYONCE.
       if LibKernel32.RegisterWaitForSingleObject(pointerof(registration), @process, callback, words.as(Void*), -1, 8) == 0
-        ::LibC.WaitForSingleObject(@process, -1)
+        # No wait to be had from the thread pool. The end is asked for
+        # without waiting (WAIT_TIMEOUT, 258, while the child runs) and the
+        # fiber sleeps between asks, from a millisecond to fifty, as Linux
+        # asks without a pidfd: waited for in the kernel, the child's whole
+        # run held this thread and every task on it.
+        pause = 1
+        while ::LibC.WaitForSingleObject(@process, 0) == 258
+          slept = sleep(pause)
+          return slept if slept.is_a?(Cancelled)
+          pause = pause * 2 if pause < 50
+          pause = 50 if pause > 50
+        end
         record_end
         return nil
       end

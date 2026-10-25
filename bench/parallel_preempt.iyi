@@ -1,0 +1,476 @@
+# Preemption at loop back-edges, exercised: SPEC.md III.4.13, part 9.
+#
+#   ./bin/iyi run bench/parallel_preempt.iyi -- slice --workers=1
+#   ./bin/iyi run bench/parallel_preempt.iyi -- server --workers=8
+#
+# A parallel task computing in a loop with no call in it held its worker
+# until it ended: a task queued behind it waited for the whole computation,
+# and so did whatever waited in that worker's poller and sleep heap - the
+# connection whose request had arrived, the sleeper whose time had come.
+# Every loop of a program with a pool now checks the worker's preemption
+# word at its back-edge, and the pool's monitor raises the word of a worker
+# one task has held for a quantum, 5 to 10 ms.
+#
+#   slice   a task computing a second - a xorshift walk, and then a sum the
+#           compiler vectorises - on a pool of one, and a short task spawned
+#           20 ms into it, which starts within 100 ms; the computation's
+#           answer is the one an unpreempted walk gives. Under
+#           `-Dpreempt_off` the walk is a `@[NoPreempt]` def's, and the
+#           short task waits for the second.
+#   unit    a preempted task keeps its unit's token: a task `spawn` started
+#           inside it never runs between two of its statements that are not
+#           a park, while another parallel task's ticker, asleep on the
+#           same worker, wakes within 100 ms of its time.
+#   server  28 connections making 0.2 ms requests beside 4 making 100 ms
+#           ones: a fast request whose connection waits in the poller of a
+#           worker busy with a slow one is answered within 80 ms, where it
+#           waited the 100 ms out before.
+#   tight   what the check costs a tight loop: four loops timed against
+#           `@[NoPreempt]` twins of themselves, interleaved, best of seven,
+#           printed as ratios - a measurement, held to no bound here.
+#
+# bench/parallel_exercise.sh runs it, and broken copies of the runtime,
+# each caught by the step that names it.
+
+module bench/parallel_preempt
+
+import std/int
+import std/indexable
+import std/socket::{IyiSocket, SocketError}
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  def elapsed_ms(since : Int64) : Int64
+    (__iyi_monotonic_ns - since) // 1000000_i64
+  end
+
+  # Integer work with nothing to allocate and no call in its loop: a
+  # xorshift walk.
+  def spin(rounds : Int64, seed : UInt64) : UInt64
+    x = seed | 1_u64
+    i = 0_i64
+    while i < rounds
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      i = i + 1
+    end
+    x
+  end
+
+  # The same walk, never preempted.
+  @[NoPreempt]
+  def spin_np(rounds : Int64, seed : UInt64) : UInt64
+    x = seed | 1_u64
+    i = 0_i64
+    while i < rounds
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      i = i + 1
+    end
+    x
+  end
+
+  # The walk the slice step's long task takes: preempted, or under
+  # `-Dpreempt_off` not.
+  def long_walk(rounds : Int64, seed : UInt64) : UInt64
+    {% if flag?(:preempt_off) %}
+      spin_np(rounds, seed)
+    {% else %}
+      spin(rounds, seed)
+    {% end %}
+  end
+
+  # A sum LLVM vectorises, and its twin.
+  def sum(values : Array(Int64), times : Int32) : Int64
+    total = 0_i64
+    t = 0
+    while t < times
+      i = 0
+      size = values.size
+      while i < size
+        total = total &+ values.unsafe_fetch(i)
+        i = i + 1
+      end
+      t = t + 1
+    end
+    total
+  end
+
+  @[NoPreempt]
+  def sum_np(values : Array(Int64), times : Int32) : Int64
+    total = 0_i64
+    t = 0
+    while t < times
+      i = 0
+      size = values.size
+      while i < size
+        total = total &+ values.unsafe_fetch(i)
+        i = i + 1
+      end
+      t = t + 1
+    end
+    total
+  end
+
+  # The same sum through `times` and `each`, whose loops are the prelude's
+  # and check because they are inlined into this def.
+  def sum_each(values : Array(Int64), times : Int32) : Int64
+    total = 0_i64
+    times.times do
+      values.each { |v| total = total &+ v }
+    end
+    total
+  end
+
+  @[NoPreempt]
+  def sum_each_np(values : Array(Int64), times : Int32) : Int64
+    total = 0_i64
+    times.times do
+      values.each { |v| total = total &+ v }
+    end
+    total
+  end
+
+  # A table-driven CRC-32, a loop of dependent loads.
+  def crc(table : Array(UInt32), data : Array(UInt8), times : Int32) : UInt32
+    c = 0xFFFFFFFF_u32
+    t = 0
+    while t < times
+      i = 0
+      size = data.size
+      while i < size
+        c = table.unsafe_fetch(((c ^ data.unsafe_fetch(i).to_u32) & 0xFF_u32).to_i32) ^ c.unsafe_shr(8_u32)
+        i = i + 1
+      end
+      t = t + 1
+    end
+    c ^ 0xFFFFFFFF_u32
+  end
+
+  @[NoPreempt]
+  def crc_np(table : Array(UInt32), data : Array(UInt8), times : Int32) : UInt32
+    c = 0xFFFFFFFF_u32
+    t = 0
+    while t < times
+      i = 0
+      size = data.size
+      while i < size
+        c = table.unsafe_fetch(((c ^ data.unsafe_fetch(i).to_u32) & 0xFF_u32).to_i32) ^ c.unsafe_shr(8_u32)
+        i = i + 1
+      end
+      t = t + 1
+    end
+    c ^ 0xFFFFFFFF_u32
+  end
+
+  def crc_table : Array(UInt32)
+    table = Array(UInt32).new(256, 0_u32)
+    n = 0
+    while n < 256
+      c = n.to_u32
+      k = 0
+      while k < 8
+        c = (c & 1_u32) != 0_u32 ? (0xEDB88320_u32 ^ c.unsafe_shr(1_u32)) : c.unsafe_shr(1_u32)
+        k = k + 1
+      end
+      table[n] = c
+      n = n + 1
+    end
+    table
+  end
+
+  # Walk rounds a millisecond on this machine, on the main thread.
+  def calibrate : Int64
+    t = __iyi_monotonic_ns
+    x = spin_np(50_000_000_i64, 3_u64)
+    ms = elapsed_ms(t)
+    ms = ms + 1_i64 if x == 0_u64
+    50_000_000_i64 // (ms > 0_i64 ? ms : 1_i64)
+  end
+
+  # Latencies the tasks record: `Share` by their atomic fields.
+  class Stat
+    @max : Atomic(Int64)
+    @count : Atomic(Int64)
+    @over20 : Atomic(Int64)
+
+    def initialize
+      @max = Atomic(Int64).new(0_i64)
+      @count = Atomic(Int64).new(0_i64)
+      @over20 = Atomic(Int64).new(0_i64)
+    end
+
+    def add(us : Int64) : Nil
+      @count.add(1_i64)
+      @over20.add(1_i64) if us > 20000_i64
+      while true
+        m = @max.get
+        break if us <= m
+        break if @max.compare_and_set(m, us)[1]
+      end
+    end
+
+    def max_ms : Int64
+      @max.get // 1000_i64
+    end
+
+    def count : Int64
+      @count.get
+    end
+
+    def over20 : Int64
+      @over20.get
+    end
+  end
+
+  # ── slice ────────────────────────────────────────────────────────────
+  # A pool of one worker, a task computing a second on it, and a short task
+  # spawned 20 ms in: it waits in the pool's queue until the long task
+  # gives the worker up at a back-edge. `which` is the walk or the sum.
+  BOUND_MS = 100_i64
+
+  def slice_round(which : String, per_ms : Int64) : Nil
+    started = Atomic(Int64).new(0_i64)
+    waited = Atomic(Int64).new(-1_i64)
+    answer = Atomic(UInt64).new(0_u64)
+    walk = 1000_i64 * per_ms
+    preempts = IyiWorkers.preempts
+    group do |g|
+      g.spawn_parallel do
+        if which == "walk"
+          started.set(__iyi_monotonic_ns)
+          answer.set(long_walk(walk, 5_u64))
+        else
+          values = Array(Int64).new(1_000_000) { |i| i.to_i64 * 3_i64 }
+          t = __iyi_monotonic_ns
+          once = sum_np(values, 10) // 10_i64
+          pass_ns = (__iyi_monotonic_ns - t) // 10_i64
+          times = (1_000_000_000_i64 // (pass_ns > 0_i64 ? pass_ns : 1_i64)).to_i32
+          times = 20000 if times > 20000
+          started.set(__iyi_monotonic_ns)
+          answer.set((sum(values, times) &- once &* times.to_i64).to_u64)
+        end
+        0
+      end
+      while started.get == 0_i64
+        sleep(1)
+      end
+      sleep(20)
+      asked = __iyi_monotonic_ns
+      g.spawn_parallel do
+        waited.set(elapsed_ms(asked))
+        0
+      end
+    end
+    ms = waited.get
+    if ms > BOUND_MS
+      fail("slice: a short task waited #{ms} ms behind a task computing a #{which} on its one worker, past #{BOUND_MS} ms")
+    end
+    want = which == "walk" ? spin_np(walk, 5_u64) : 0_u64
+    if answer.get != want
+      fail("slice: the preempted #{which} answered #{answer.get}, and unpreempted it answers #{want}")
+    end
+    given = IyiWorkers.preempts - preempts
+    fail("slice: the short task started and no task was preempted") if given == 0_u64
+    puts "slice: a short task spawned 20 ms into a task computing a #{which} on a pool of one started #{ms} ms later (#{given} preemptions); the #{which}'s answer is the unpreempted one"
+  end
+
+  def slice(per_ms : Int64) : Nil
+    slice_round("walk", per_ms)
+    slice_round("sum", per_ms)
+  end
+
+  # ── unit ─────────────────────────────────────────────────────────────
+  # A parallel task computes 300 ms on a pool of one while a task it
+  # spawned sleeps 1 ms and counts, and another parallel task's ticker
+  # sleeps 1 ms and measures how late it woke. The ticker is what the
+  # computing task is preempted for; its child, of the same unit, must not
+  # run until the computation ends, and the count it moves is read on both
+  # sides of the computation.
+  def unit(per_ms : Int64) : Nil
+    late = Stat.new
+    moved = Atomic(Int64).new(-1_i64)
+    done = Atomic(Int64).new(0_i64)
+    preempts = IyiWorkers.preempts
+    group do |g|
+      g.spawn_parallel do
+        count = Atomic(Int64).new(0_i64)
+        group do |inner|
+          inner.spawn do
+            while done.get == 0_i64
+              sleep(1)
+              count.add(1_i64)
+            end
+            0
+          end
+          sleep(5)
+          before = count.get
+          # The walk's answer is kept, or an optimised build drops the
+          # walk: it has no effect but its answer.
+          walked = spin(300_i64 * per_ms, 7_u64)
+          moved.set(count.get - before + (walked == 0_u64 ? 1_i64 : 0_i64))
+          done.set(1_i64)
+        end
+        0
+      end
+      g.spawn_parallel do
+        while done.get == 0_i64
+          s = __iyi_monotonic_ns
+          sleep(1)
+          late.add((__iyi_monotonic_ns - s) // 1000_i64 - 1000_i64)
+        end
+        0
+      end
+    end
+    given = IyiWorkers.preempts - preempts
+    fail("unit: the computing task was never preempted for the ticker beside it") if given == 0_u64
+    if moved.get != 0_i64
+      fail("unit: a task of the same unit ran #{moved.get} times between two statements of a preempted task")
+    end
+    if late.max_ms > BOUND_MS
+      fail("unit: a ticker asleep on the worker of a computing task woke #{late.max_ms} ms late, past #{BOUND_MS} ms")
+    end
+    puts "unit: a task preempted #{given} times kept its unit's token, and its child ran only after it; the ticker beside it woke at most #{late.max_ms} ms late over #{late.count} sleeps"
+  end
+
+  # ── server ───────────────────────────────────────────────────────────
+  FAST_BOUND_MS = 80_i64
+
+  def server(per_ms : Int64) : Nil
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    conns = 32
+    fast = Stat.new
+    slow = Stat.new
+    group do |g|
+      g.spawn do
+        conns.times do
+          client = listener.accept
+          fail("server: accept answered #{client}") unless client.is_a?(IyiSocket)
+          fd = client.fd
+          family = client.family
+          g.spawn_parallel do
+            socket = IyiSocket.new(fd, family)
+            while true
+              got = socket.read(64)
+              break unless got.is_a?(String) && !got.empty?
+              cost = got.starts_with?("b") ? 100_i64 * per_ms : per_ms // 5_i64
+              x = spin(cost, 5_u64)
+              socket.write(x == 0_u64 ? "K" : "k")
+            end
+            socket.close
+            0
+          end
+        end
+        0
+      end
+      clients = [] of IyiSocket
+      conns.times do
+        c = IyiSocket.connect("127.0.0.1", port, 5000)
+        fail("server: connect answered #{c}") unless c.is_a?(IyiSocket)
+        clients << c
+      end
+      group do |cg|
+        conns.times do |i|
+          c = clients[i]
+          cg.spawn do
+            heavy = i < 4
+            rounds = heavy ? 10 : 400
+            rounds.times do
+              s = __iyi_monotonic_ns
+              c.write(heavy ? "b" : "c")
+              c.read(8)
+              us = (__iyi_monotonic_ns - s) // 1000_i64
+              if heavy
+                slow.add(us)
+              else
+                fast.add(us)
+              end
+              sleep(1) unless heavy
+            end
+            0
+          end
+        end
+      end
+      clients.each(&.close)
+    end
+    if fast.max_ms > FAST_BOUND_MS
+      fail("server: a fast request took #{fast.max_ms} ms beside the 100 ms ones, past #{FAST_BOUND_MS} ms (#{fast.over20} of #{fast.count} over 20 ms)")
+    end
+    puts "server: 28 connections of 0.2 ms requests beside 4 of 100 ms on #{IyiWorkers.count} workers: the slowest fast request took #{fast.max_ms} ms, #{fast.over20} of #{fast.count} over 20 ms; the slow ones at most #{slow.max_ms} ms"
+  end
+
+  # ── tight ────────────────────────────────────────────────────────────
+  # Each loop and its `@[NoPreempt]` twin, alternately, seven times, inside
+  # a parallel task; the best of each, and their ratio.
+  def tight : Nil
+    group do |g|
+      g.spawn_parallel do
+        values = Array(Int64).new(1_000_000) { |i| i.to_i64 * 3_i64 }
+        bytes = Array(UInt8).new(262_144) { |i| ((i * 7 + 3) & 0xFF).to_u8 }
+        table = crc_table
+        ["walk", "sum", "each", "crc"].each do |name|
+          best = 9223372036854775807_i64
+          best_np = 9223372036854775807_i64
+          7.times do
+            t = __iyi_monotonic_ns
+            a = case name
+                when "walk" then spin(200_000_000_i64, 7_u64)
+                when "sum"  then sum(values, 300).to_u64
+                when "each" then sum_each(values, 300).to_u64
+                else             crc(table, bytes, 600).to_u64
+                end
+            took = __iyi_monotonic_ns - t
+            best = took if took < best
+            t = __iyi_monotonic_ns
+            b = case name
+                when "walk" then spin_np(200_000_000_i64, 7_u64)
+                when "sum"  then sum_np(values, 300).to_u64
+                when "each" then sum_each_np(values, 300).to_u64
+                else             crc_np(table, bytes, 600).to_u64
+                end
+            took = __iyi_monotonic_ns - t
+            best_np = took if took < best_np
+            fail("tight: #{name} answered #{a} checked and #{b} unchecked") if a != b
+          end
+          ratio = (best * 1000_i64 // best_np).to_f / 1000.0
+          puts "tight: #{name}: #{best // 1000_i64} us checked, #{best_np // 1000_i64} us unchecked, #{ratio}x"
+        end
+        0
+      end
+    end
+  end
+
+  STEPS = ["slice", "unit", "server", "tight"]
+
+  workers = 4
+  chosen = [] of String
+  Program.args.each do |argument|
+    if argument.starts_with?("--workers=")
+      workers = argument[10, argument.size - 10].to_i
+    else
+      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      chosen << argument
+    end
+  end
+  chosen = STEPS if chosen.empty?
+  IyiWorkers.count = workers
+  per_ms = calibrate
+  chosen.each do |name|
+    case name
+    when "slice"  then slice(per_ms)
+    when "unit"   then unit(per_ms)
+    when "server" then server(per_ms)
+    when "tight"  then tight
+    end
+  end
+  puts "parallel preemption: every property held on #{IyiWorkers.count} workers"
+{% else %}
+  puts "parallel preemption: no pool on this target, nothing to hold"
+{% end %}

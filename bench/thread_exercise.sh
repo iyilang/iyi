@@ -688,7 +688,7 @@ echo "  five runs, no list lost"
 step "failure proof: a fiber marked running before the switch loses its list"
 mkdir -p skipping/iyi
 cp "$REPO"/src/iyi/*.iyi skipping/iyi/
-awk '/^    state.current = fiber$/ { print "    fiber.state = IyiFiberState::Running"; found = 1 } { print } END { if (!found) exit 3 }' \
+awk '/^    st.current = fiber$/ { print "    fiber.state = IyiFiberState::Running"; found = 1 } { print } END { if (!found) exit 3 }' \
   "$REPO/src/iyi/concurrency.iyi" > skipping/iyi/concurrency.iyi || { echo "the switch's current-fiber line is not in concurrency.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/skipping${PSEP}$REPO/src" "$IYI" build switching.iyi -o skipping-run > build-skipping.log 2>&1; then
   cat build-skipping.log; exit 1

@@ -284,6 +284,7 @@ class Iyi::CodeGenVisitor
       context.vars = LLVMVars.new
       context.block_context = nil
       context.indirect_return = nil
+      context.iyi_preempt = iyi_preemptible?(target_def)
 
       @llvm_mod = fun_module_info.mod
       @llvm_context = @llvm_mod.context
@@ -759,8 +760,13 @@ class Iyi::CodeGenVisitor
       # `ld.lld: error: undefined symbol: __iyi_sigreturn`, from the two
       # instructions a signal handler returns through. A reference the
       # compiler cannot read is still a reference.
+      #
+      # `__iyi_preempt` for a reason of the same kind: its calls are put in
+      # after optimisation (`PreemptChecks`), so until then nothing calls
+      # it, and internal it was stripped before they were.
       asm_referenced = mangled_name.starts_with?("__iyi_fiber_") ||
-                       mangled_name.includes?("sigreturn")
+                       mangled_name.includes?("sigreturn") ||
+                       mangled_name == PREEMPT_NAME
       unless (@program.has_flag?("darwin") && mangled_name.starts_with?(@personality_name)) || asm_referenced
         context.fun.linkage = LLVM::Linkage::Internal
       end

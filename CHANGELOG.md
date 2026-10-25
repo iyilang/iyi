@@ -1,5 +1,97 @@
 # Changelog
 
+## Unreleased
+
+- **`Channel#take_now` and `#put_now` take the scheduler's lock.** They
+  were `select`'s lock-held halves, public because its arms call them,
+  and std/http called them from pool workers with no lock: a wake of a
+  task parked on another thread went into that thread's inbox unlocked
+  while other threads changed the same channel, and a stop was lost now
+  and then. The public `take_now`, `put_now`, `receive_ready?` and
+  `send_ready?` lock and look under the lock; `select`, `send` and
+  `receive` use the `*_held` halves. `bench/parallel_exercise.sh`'s new
+  `now` step claims and frees places from eight workers and the main
+  thread and puts 120,000 values from six workers; a copy without the
+  lock ended that step by name in 10 of 12 runs here and hung in 2, and
+  the gate reruns a hung or faulted copy up to five times.
+
+- **A thread-local is read through the thread pointer at every access**
+  on ELF, where it was the bare global and LLVM kept its address across
+  calls - on aarch64 across the calls in a loop, on x86_64 across a call
+  when the address was passed on (llc 21) - which a fiber that resumes
+  on another thread cannot survive. Mach-O and COFF keep the accessor,
+  which no longer gets replaced by the bare global outside the main
+  module. Twenty million allocations, release, best of five: 41 and 45
+  ms before, 42 and 41 ms after, with other jobs loading the machine.
+
+- **A parallel task that parks resumes on whichever worker is free
+  (#145).** Each worker has a run queue of 256 that idle workers take
+  half of (Go's `runqgrab`), a task woken from outside the pool goes to a
+  shared queue, and a parallel task and the tasks `spawn` starts inside
+  it are one unit, never two of them running at once but each free to
+  park on one worker and resume on another. A worker waits on its own
+  stack, a fiber is not resumed before the worker that parked it has
+  left its stack, a cancel finds the poller or sleep heap a moved task
+  waits in, a socket a sibling closes on another worker wakes the read
+  parked there, and a Windows completion that reaches another worker's
+  port is forwarded to the one that posted it. Measured on 8 workers,
+  release, three runs each against the runtime before: 48 tasks that
+  park on a channel and then compute 25 ms took 2.11 to 2.57 times the
+  ideal and now 1.03 to 1.11; 32 connections of 25 ms requests 1.26 to
+  2.20 and now 1.16 to 1.20. `bench/parallel_migrate.iyi`, run by
+  `bench/parallel_exercise.sh` plain and release, checks lists on moved
+  tasks' stacks through collections, thread-locals against the kernel's
+  thread pointer, sockets, cancels, closes and deep frames after moves,
+  and seven broken copies are caught by name.
+
+- **A contended `Mutex` and a thread's join park the task, not the
+  thread.** std/mutex is a three-state futex mutex over the scheduler's
+  new `park_on`/`wake_on`, so a waiter's worker runs other tasks (a task
+  spawned beside a parked waiter started at once, where a waiter asleep
+  in the kernel left it nowhere to start for the holder's 300 ms), and
+  darwin waits no longer sleep a millisecond at a time. A join parks
+  until the thread's body returns. A deadlock on a lock is named by the
+  scheduler as on a channel, and on a program's one thread by the
+  `Mutex` as before. Windows' process wait, where
+  `RegisterWaitForSingleObject` is refused, asks with a zero wait between
+  sleeps instead of holding its thread.
+
+- **A parallel task computing in a loop gives its worker up after 5 to 10
+  ms.** In a program with a pool, every loop of a def that is not the
+  prelude's checks the worker's preemption word at its back-edge, a load
+  through the thread pointer and a branch, put in after optimisation so no
+  loop loses its vectorisation (`src/compiler/iyi/preempt_checks.cr`); the
+  pool's monitor raises the word of a worker one task has held for a tick.
+  The slow half hands the worker's poller news and expired sleepers to idle
+  workers, and yields only when nothing idle can take what waits; the task
+  keeps its unit's token. 28 connections of 0.2 ms requests beside 4 of
+  100 ms: 67 to 84 of 11,200 fast requests over 20 ms, at most 112 to 206
+  ms, before; 0 to 5, at most 19 to 20 ms, with a 10 to 15 ms quantum, and
+  none at most 13 to 17 with the 5 to 10 kept. Tight loops against
+  `@[NoPreempt]` twins of themselves: a xorshift walk 1.001x, a vectorised
+  sum 0.97x, the same through `each` 1.012x, a CRC 0.992x.
+  `bench/parallel_preempt.iyi` holds it in `bench/parallel_exercise.sh`,
+  with broken copies caught by name.
+
+- **aarch64 Linux reads a thread-local afresh after a loop's back-edge
+  check.** Its thread pointer was `llvm.read_register`, which LLVM models
+  as only reading memory, and a release build hoisted it out of a loop
+  that stores nothing: a parallel task reading `IyiThread.current_line`
+  beside a xorshift walk loaded the line once before the loop, and a
+  check that moved the task left it reading the line of the thread it
+  had left. The thread pointer is now a volatile `mrs` marked as writing
+  memory nothing else names, read in every turn of the loop and after it
+  (llvm-objdump of release cross-builds). x86-64 Linux, darwin and Windows
+  already read at every access, in the loop and after a park, and their
+  objects are unchanged. Under qemu-user, 20,000,000 allocations, release,
+  best of five, three interleaved runs: 596, 617 and 601 ms before, 582,
+  937 and 578 after. `bench/parallel_migrate.iyi`'s new `loops` step reads
+  the line before, in and after loops whose checks moved the task,
+  against the kernel's thread. The gate runs it on Linux, darwin and
+  Windows and CI on aarch64 Linux under emulation; built for aarch64 by
+  the compiler before this change it failed under qemu-user in 2 runs of
+  2, and a copy reading the line from before the loop fails it by name.
+
 ## 0.19.1 — 2026-10-25
 
 **A collector hang and a handful of TLS and PKI edges fixed, a build
@@ -24704,7 +24796,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,608-line library and nothing else. Every other
+  written against iyi's own 24,160-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

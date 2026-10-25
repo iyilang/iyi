@@ -109,6 +109,14 @@ class IyiRuntimeLock
   def self.unlock : Nil
     word.value.add(0xFFFF_u64)
   end
+
+  # Whether some thread holds it: an answer that may be old by the time it
+  # is read, for a back-edge's slow half, which gives its worker up only
+  # when nobody does (`IyiWorkers.preempted`) - a loop in a block a holder
+  # runs is not a place to park the holder.
+  def self.held? : Bool
+    (word.value.get & 1_u64) != 0_u64
+  end
 end
 
 {% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}

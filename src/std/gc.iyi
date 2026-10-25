@@ -65,6 +65,7 @@ pub struct GC
 
   # `size` zeroed bytes the collector scans for pointers. A negative size
   # is refused by name.
+  @[Effect(:memory)]
   def self.malloc(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
     __iyi_malloc64(size.to_u64)

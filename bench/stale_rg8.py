@@ -102,16 +102,6 @@ def compile_source(
     )
 
 
-def copy_mutation(source: str, mutation: Mutation) -> str:
-    original = Path(source).read_text(encoding="utf-8")
-    if original == mutation.mutated_source:
-        raise GateFailure(f"{source}: {mutation.kind} did not change source")
-    Path(source).write_text(mutation.mutated_source, encoding="utf-8")
-    return original
-
-
-def restore_source(source: str, original: str) -> None:
-    Path(source).write_text(original, encoding="utf-8")
 
 
 def reports_for_corpus(compiler: str, repo: str, work: str, programs: list[str]) -> dict[str, tuple[Build, list[dict]]]:
@@ -157,17 +147,18 @@ def run_mutations(
     failures: list[str] = []
     overapprox: list[str] = []
     observed_expected_failure = False
+    mutation_dir = os.path.join(work, "mutations")
+    os.makedirs(mutation_dir, exist_ok=True)
     for index, (source, mutation) in enumerate(mutations):
         rel = os.path.relpath(source, repo)
         baseline, _ = reports[rel]
-        original = copy_mutation(source, mutation)
+        mutated_source = os.path.join(mutation_dir, f"{index}-{os.path.basename(source)}")
+        Path(mutated_source).write_text(mutation.mutated_source, encoding="utf-8")
         try:
-            changed, _ = compile_source(compiler, repo, work, source, f"mut-{index}-{mutation.kind}")
+            changed, _ = compile_source(compiler, repo, work, mutated_source, f"mut-{index}-{mutation.kind}")
         except GateFailure as ex:
             failures.append(f"{mutation.kind} on {rel}: {ex}")
             continue
-        finally:
-            restore_source(source, original)
 
         ir_changed = baseline.ir != changed.ir
         fp_changed = baseline.callpath != changed.callpath
@@ -216,6 +207,7 @@ def main() -> None:
     parser.add_argument("--expect-failure-kind")
     args = parser.parse_args()
 
+    os.makedirs(args.work, exist_ok=True)
     repo = os.path.abspath(args.repo)
     programs = sorted(glob.glob(os.path.join(repo, "samples/iyi/*.iyi")))
     programs += sorted(glob.glob(os.path.join(repo, "bench/std_*_exercise.iyi")))

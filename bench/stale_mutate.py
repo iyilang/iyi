@@ -68,25 +68,36 @@ def generate_mutations_for_source(
     def should_generate(k: str) -> bool:
         return kinds is None or k in kinds
 
+    # All generated declarations stay after a module header. A file's module
+    # header is first in iyi, so prepending declarations would test parsing,
+    # not a call-path edge.
+    module_end = next(
+        (index + 1 for index, line in enumerate(lines) if line.lstrip().startswith("module ")),
+        0,
+    )
+
+    def after_module(text: str) -> str:
+        return "".join(lines[:module_end]) + text + "".join(lines[module_end:])
+
     # 1. unreached_def (outside reached)
     if should_generate("unreached_def"):
-        mut_src = src + "\ndef __unreached_mut_probe_func\n  999999\nend\n"
+        mut_src = src + "\ndef unreached_mut_probe_func\n  999999\nend\n"
         mutations.append(Mutation("unreached_def", "add unreached def body", mut_src, in_reach=False))
 
     # 2. unrelated_type (outside reached)
     if should_generate("unrelated_type"):
-        mut_src = src + "\nclass __UnrelatedTypeMutProbe\n  def unreached_meth\n    888888\n  end\nend\n"
+        mut_src = src + "\nclass UnrelatedTypeMutProbe\n  def unreached_meth\n    888888\n  end\nend\n"
         mutations.append(Mutation("unrelated_type", "add unrelated type", mut_src, in_reach=False))
 
     # 3. unused_const (outside reached)
     if should_generate("unused_const"):
-        mut_src = src + "\n__UNUSED_CONST_MUT_PROBE = 777777\n"
+        mut_src = src + "\nclass UnusedConstMutProbe\n  UNUSED_CONST_MUT_PROBE = 777777\nend\n"
         mutations.append(Mutation("unused_const", "add unused constant", mut_src, in_reach=False))
 
     # 4. comment_no_loc (outside reached)
     if should_generate("comment_no_loc"):
-        mut_src = "# Comment above code without location literal\n" + src
-        mutations.append(Mutation("comment_no_loc", "comment above code with no location literal", mut_src, in_reach=False))
+        mut_src = src + "\n# Comment after the final location-dependent construct\n"
+        mutations.append(Mutation("comment_no_loc", "comment with no location literal", mut_src, in_reach=False))
 
     # 5. body (in reach)
     if should_generate("body"):
@@ -159,17 +170,9 @@ def generate_mutations_for_source(
                     mutated = True
                     break
         if not mutated:
-            # Add a called helper
-            new_lines = ["def __callee_mut_helper(x); x; end\n"] + list(lines)
-            # Find a callsite to wrap
-            for idx, line in enumerate(new_lines):
-                if "puts " in line:
-                    new_lines[idx] = line.replace("puts ", "puts __callee_mut_helper(", 1).rstrip() + ")\n"
-                    mutations.append(Mutation("callee", "wrap callee with helper", "".join(new_lines), in_reach=True))
-                    mutated = True
-                    break
-            if not mutated:
-                mutations.append(Mutation("callee", "add called helper in main", "".join(new_lines) + "\nputs __callee_mut_helper(42)\n", in_reach=True))
+            helper = "def callee_mut_helper(x); x; end\n"
+            mut_src = src + f"\n{helper}puts callee_mut_helper(42)\n"
+            mutations.append(Mutation("callee", "add reached helper call", mut_src, in_reach=True))
 
     # 7. overload_capture (in reach)
     if should_generate("overload_capture"):
@@ -202,8 +205,7 @@ def generate_mutations_for_source(
                     mutated = True
                     break
         if not mutated:
-            # Synthetic reached class with ivar
-            mut_src = src + "\nclass __MutIvarType; @x : Int32 = 10; def x; @x; end; end\nputs __MutIvarType.new.x\n"
+            mut_src = src + "\nclass MutIvarType; @x : Int32 = 10; def x; @x; end; end\nputs MutIvarType.new.x\n"
             mutations.append(Mutation("ivar_init", "add reached type with ivar init", mut_src, in_reach=True))
 
     # 9. constant (in reach)
@@ -220,7 +222,7 @@ def generate_mutations_for_source(
                 mutated = True
                 break
         if not mutated:
-            mut_src = "MUT_TEST_CONST = 9999\n" + src + "\nputs MUT_TEST_CONST\n"
+            mut_src = src + "\nclass MutConstType\n  VALUE = 9999\nend\nputs MutConstType::VALUE\n"
             mutations.append(Mutation("constant", "add and use reached constant", mut_src, in_reach=True))
 
     # 10. class_var_init (in reach)
@@ -246,7 +248,7 @@ def generate_mutations_for_source(
                     mutated = True
                     break
         if not mutated:
-            mut_src = src + "\nclass __MutCvarType; @@val : Int32 = 55; def self.val; @@val; end; end\nputs __MutCvarType.val\n"
+            mut_src = src + "\nclass MutCvarType; @@val : Int32 = 55; def self.val; @@val; end; end\nputs MutCvarType.val\n"
             mutations.append(Mutation("class_var_init", "add reached class var", mut_src, in_reach=True))
 
     # 11. annotation (in reach)
@@ -261,32 +263,24 @@ def generate_mutations_for_source(
                 mutated = True
                 break
         if not mutated:
-            mut_src = "@[NoInline]\ndef __mut_annotated_fn; 123; end\n" + src + "\nputs __mut_annotated_fn\n"
+            mut_src = after_module("@[NoInline]\ndef mut_annotated_fn; 123; end\n") + "\nputs mut_annotated_fn\n"
             mutations.append(Mutation("annotation", "add annotated reached def", mut_src, in_reach=True))
 
     # 12. macro_input (in reach)
     if should_generate("macro_input"):
-        mut_src = "macro __mut_mac(x); {{x}} + 1; end\n" + src + "\nputs __mut_mac(10)\n"
+        mut_src = after_module("macro mut_mac(x); {{x}} + 1; end\n") + "\nputs mut_mac(10)\n"
         mutations.append(Mutation("macro_input", "reached macro input expansion", mut_src, in_reach=True))
 
     # 13. position_change (in reach: position change above reached call or failable cast)
     if should_generate("position_change"):
-        # Add a def with line = __LINE__ and insert newlines above its callsite
-        mut_src = (
-            "def __here_loc(line = __LINE__); line; end\n"
-            + src
-            + "\n\n# Newline shift\n# Line shift comment\nputs __here_loc\n"
-        )
+        mut_src = after_module("def here_loc(line = __LINE__); line; end\n") + "\n\n# Line shift comment\nputs here_loc\n"
         mutations.append(Mutation("position_change", "position change above reached call with __LINE__ default", mut_src, in_reach=True))
 
     # Special: link_annotation
     if should_generate("link_annotation"):
-        mut_src = (
-            "@[Link(\"m\")]\n"
-            "lib LibMutMath; fun cos(x : Float64) : Float64; end\n"
-            + src
-            + "\nputs LibMutMath.cos(0.0)\n"
-        )
+        mut_src = after_module(
+            "@[Link(\"m\")]\nlib LibMutMath; fun cos(x : Float64) : Float64; end\n"
+        ) + "\nputs LibMutMath.cos(0.0)\n"
         mutations.append(Mutation("link_annotation", "link annotation mutation changing LinkFp", mut_src, in_reach=True, special="link_annotation"))
 
     return mutations

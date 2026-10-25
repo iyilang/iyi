@@ -1065,7 +1065,6 @@ class Iyi::Command
         compiler.use_iyimod = dir
       end
 
-
       unless no_codegen
         opts.on("--release", "Compile in release mode (-O3 --single-module)") do
           compiler.release!

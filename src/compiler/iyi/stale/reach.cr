@@ -117,6 +117,7 @@ module Iyi::Stale
     @visited_class_vars : Set(MetaTypeVar)
     @allocated_types : Set(Type)
     @visited_fun_defs : Set(External)
+
     class BlockContext
       getter block : Block
       getter type : Type?
@@ -827,6 +828,7 @@ module Iyi::Stale
       accept node.body
       false
     end
+
     def visit(node : Yield)
       if scope = node.scope
         accept scope

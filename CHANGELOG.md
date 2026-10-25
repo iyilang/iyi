@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- **`Channel#take_now` and `#put_now` take the scheduler's lock.** They
+  were `select`'s lock-held halves, public because its arms call them,
+  and std/http called them from pool workers with no lock: a wake of a
+  task parked on another thread went into that thread's inbox unlocked
+  while other threads changed the same channel, and a stop was lost now
+  and then. The public `take_now`, `put_now`, `receive_ready?` and
+  `send_ready?` lock and look under the lock; `select`, `send` and
+  `receive` use the `*_held` halves. `bench/parallel_exercise.sh`'s new
+  `now` step claims and frees places from eight workers and the main
+  thread and puts 120,000 values from six workers; a copy without the
+  lock ended that step by name in 10 of 12 runs here and hung in 2, and
+  the gate reruns a hung or faulted copy up to five times.
+
+- **A thread-local is read through the thread pointer at every access**
+  on ELF, where it was the bare global and LLVM kept its address across
+  calls - on aarch64 across the calls in a loop, on x86_64 across a call
+  when the address was passed on (llc 21) - which a fiber that resumes
+  on another thread cannot survive. Mach-O and COFF keep the accessor,
+  which no longer gets replaced by the bare global outside the main
+  module. Twenty million allocations, release, best of five: 41 and 45
+  ms before, 42 and 41 ms after, with other jobs loading the machine.
+
 ## 0.19.1 — 2026-10-25
 
 **A collector hang and a handful of TLS and PKI edges fixed, a build
@@ -24704,7 +24728,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,608-line library and nothing else. Every other
+  written against iyi's own 22,667-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

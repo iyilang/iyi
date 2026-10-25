@@ -307,7 +307,29 @@ puts "realloc: same-class, cross-class and null all hold their bytes"
   if IyiMark.flags(words.address) != IyiMark.epoch_flag | IyiHeap::UNTYPED_FLAG
     raise "clearing: reused chunk carried stale bits: #{IyiMark.flags(words.address).to_i64}"
   end
-  puts "clearing: a freed chunk of 0xAA bytes comes back zeroed, directly, through __iyi_malloc64, and in its byte"
+  # And through the atomic entry, `__iyi_malloc_atomic64`: codegen puts no
+  # memset after either entry under the arena (`generic_array_malloc`), so
+  # the allocator is what clears a reused chunk of an atomic buffer too.
+  freed = Pointer(UInt8).malloc(128_u64)
+  index = 0
+  while index < 128
+    freed[index] = 170_u8
+    index = index + 1
+  end
+  IyiHeap.free(freed.as(Void*))
+  reused = Pointer(UInt8).malloc(128_u64)
+  raise "clearing: the atomic entry did not reuse the freed chunk" if reused.address != freed.address
+  index = 0
+  while index < 128
+    if reused[index] != 0_u8
+      raise "clearing: __iyi_malloc_atomic64 reused chunk dirty at byte #{index}"
+    end
+    index = index + 1
+  end
+  if IyiMark.flags(reused.address) != IyiMark.epoch_flag | IyiHeap::UNTYPED_FLAG | IyiHeap::ATOMIC_FLAG
+    raise "clearing: reused atomic chunk carried stale bits: #{IyiMark.flags(reused.address).to_i64}"
+  end
+  puts "clearing: a freed chunk of 0xAA bytes comes back zeroed, directly, through __iyi_malloc64 and __iyi_malloc_atomic64, and in its byte"
 
   # --- No corruption under reuse: freed chunks serve new owners, survivors unchanged ---
   rblocks = [] of Pointer(UInt8)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives bench/alloc_cache.iyi: a pool's workers allocating from caches of
-# their own, refilled under their size class's lock (GC_DESIGN.md, "Whose
-# state is whose").
+# their own, refilled under their size class's lock (GC_DESIGN.md, "A
+# pool's workers and the centre: a lock per size class").
 #
 #     bash bench/alloc_cache.sh
 #
@@ -9,12 +9,19 @@
 # broken copies of the runtime, each caught by a named check or by the
 # program dying before it can pass:
 #
+#   * a sweep that hands nothing back - every slice's batch dropped, the
+#     helpers', the pause's and the allocating thread's own;
+#   * a worker that throws away the batch of the slice it swept;
 #   * a collection that leaves the caches' lists alone - a list kept
 #     across the epoch's turn holds chunks the sweep links again;
 #   * a class's lock that excludes nobody - two workers pop one batch;
 #   * a walk claim that excludes nobody - two workers sweep one slice and
 #     each takes its batch;
 #   * a thread that ends without retiring its cache.
+#
+# The first two are caught at `reused` by name and nowhere else: they
+# lose memory, not data, and a run that died of something else would not
+# be the reuse check failing.
 #
 # Needs `make` first. Exits non-zero if any step fails.
 
@@ -76,9 +83,10 @@ echo "== the checks fail when the caches or the centre are broken"
 # $1 label, $2 directory, $3 the checks that may name it (an ERE), $4 the
 # prelude file the awk program rewrites, $5 the awk program, which exits 3
 # when the line it breaks is not there - a proof whose break no longer
-# lands proves nothing.
+# lands proves nothing - and $6, `named`, when only those checks catch it
+# and a death on a signal does not.
 prove_fails() {
-  local label="$1" dir="$2" phrase="$3" file="$4" script="$5"
+  local label="$1" dir="$2" phrase="$3" file="$4" script="$5" named="${6:-}"
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   if ! awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"; then
@@ -106,6 +114,12 @@ prove_fails() {
       "$(grep -m1 -E "^FAIL: ($phrase):" "$WORK/$dir/out" | sed 's/^FAIL: //')"
     return
   fi
+  if [ -n "$named" ]; then
+    echo "  $label: failed, but not at the check that names it"
+    tail -6 "$WORK/$dir/out" | sed 's/^/    /'
+    status=1
+    return
+  fi
   # A chunk handed out twice can break what the program needs to say so -
   # the runtime's own buffers come from the same heap - and the process
   # dies before any check reports. That is the break caught, not missed,
@@ -125,6 +139,16 @@ prove_fails() {
   status=1
 }
 
+# The slice's walk ends answering no batch: the dead chunks are freed and
+# go on no list, and the second wave of `reused` carves all of itself.
+prove_fails "a sweep that hands nothing back" nothing "reused" prelude.iyi \
+  '/^      def self\.sweep_slice\(/ { inside = 1 } /^      def self\./ && !/sweep_slice/ { inside = 0 } { if (inside && $0 ~ /^        batch_head$/) { print "        0_u64"; found = 1; next } print } END { if (!found) exit 3 }' named
+
+# The allocating thread sweeps its slice and keeps nothing of it: with no
+# helper running, nobody else's batch hands the chunks back instead.
+prove_fails "a worker that throws its swept batch away" dropped "reused" prelude.iyi \
+  '{ if ($0 ~ /^        IyiHeap\.adopt_batch\(table, index, batch\) if batch != 0$/) { print "        # removed"; found = 1; next } print } END { if (!found) exit 3 }' named
+
 # The pause empties the centre and leaves every cache's list as it was.
 prove_fails "caches not flushed at a collection" unflushed "intact|distinct|flushed" prelude.iyi \
   '{ if ($0 ~ /^            table\[index\] = 0_u64$/ && prev ~ /^          while index < CLASSES$/) { print "            # removed"; found = 1; prev = $0; next } prev = $0; print } END { if (!found) exit 3 }'
@@ -137,14 +161,6 @@ prove_fails "a class's lock that excludes nobody" openlock "intact|distinct" pre
 # slice, each linking its dead chunks, each worker making the batch its own.
 prove_fails "two workers on one slice" shared "intact|distinct" prelude.iyi \
   '{ if ($0 ~ /^            if IyiHeap\.read64\(arena \+ IyiHeap::OFF_SWEEPING\) == epoch$/ && !found) { print "            if false"; found = 1; next } print } END { if (!found) exit 3 }'
-
-# The `reused` check has no broken copy here, and that is a measured gap,
-# not an oversight. Two were tried and passed it: a worker's own slice
-# dropped (the helpers' batches and the warm and cold runs a dropped batch
-# leaves hand the chunks back another way), and a sweep that hands nothing
-# back at all - the frontier the check sums is over the arenas still
-# mapped, and the scavenge hands the all-dead arenas back, so the sum fell.
-# A check on mappings made rather than bytes carved is the next one to try.
 
 # A thread that ends with its cache still on the list.
 prove_fails "an ended thread's cache kept" unretired "retired" thread.iyi \

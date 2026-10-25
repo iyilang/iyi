@@ -41,7 +41,10 @@ def build(compiler: str, repo: str, work: str, source: str, number: int, dump: b
         cmd += ["--stale-dump-elements", elements]
     cmd += ["-o", out, source]
     try:
-        proc = subprocess.run(cmd, cwd=repo, env=env_for(repo, os.path.join(work, "cache"), warm), capture_output=True, text=True)
+        # One cache per program: parallel builds of different programs sharing
+        # one cache directory would test the cache's locking, not determinism.
+        cache = os.path.join(work, f"cache-{base}")
+        proc = subprocess.run(cmd, cwd=repo, env=env_for(repo, cache, warm), capture_output=True, text=True)
         if proc.returncode:
             raise GateFailure(f"{os.path.relpath(source, repo)} run {number}: build exited {proc.returncode}: {proc.stderr.strip()[-500:]}")
         with open(key, encoding="utf-8") as f:
@@ -70,35 +73,38 @@ def main() -> None:
     os.makedirs(args.work, exist_ok=True)
     repo = os.path.abspath(args.repo)
     compiler = os.path.abspath(args.compiler)
-    c2 = [
-        os.path.join(repo, "samples/iyi", name)
-        for name in ("hello.iyi", "calc.iyi", "collections.iyi", "format.iyi", "shapes.iyi")
-    ]
+    # Plan §10: every C2 and C3 program. IYI_RG9_C3_SAMPLE bounds C3 for a
+    # quick local loop; unset, the whole corpus is checked.
+    c2 = sorted(glob.glob(os.path.join(repo, "samples/iyi/*.iyi")))
     c3 = sorted(glob.glob(os.path.join(repo, "bench/std_*_exercise.iyi")))
-    c3_limit = int(os.environ.get("IYI_RG9_C3_SAMPLE", "2"))
-    c3_sample = c3[1:1 + c3_limit]
+    c3_limit = int(os.environ.get("IYI_RG9_C3_SAMPLE", str(len(c3))))
+    c3_sample = c3[:c3_limit]
     programs = c2 + c3_sample
     print(f"RG9 corpus: C2={len(c2)} programs, deterministic C3 sample={len(c3_sample)}/{len(c3)}")
     if not programs:
         raise GateFailure("RG9 corpus is empty")
 
-    def check(source: str) -> tuple[str, int, int, str]:
-        first, reached, encoded = build(compiler, repo, args.work, source, 1, True, False)
-        second, _, _ = build(compiler, repo, args.work, source, 2, False, False)
-        warm, _, _ = build(compiler, repo, args.work, source, 3, False, True)
+    def check(source: str) -> tuple[str, int, int, str, str | None]:
+        name = os.path.relpath(source, repo)
+        try:
+            first, reached, encoded = build(compiler, repo, args.work, source, 1, True, False)
+            second, _, _ = build(compiler, repo, args.work, source, 2, False, False)
+            warm, _, _ = build(compiler, repo, args.work, source, 3, False, True)
+        except GateFailure as ex:
+            return name, 0, 0, "", str(ex)
         if first != second or first != warm:
-            raise GateFailure(
-                f"{os.path.relpath(source, repo)}: CallPathFp differs across processes/warm "
-                f"({first}, {second}, {warm})"
-            )
-        return os.path.relpath(source, repo), reached, encoded, first
+            return name, reached, encoded, first, f"{name}: CallPathFp differs across processes/warm ({first}, {second}, {warm})"
+        return name, reached, encoded, first, None
 
     workers = min(8, os.cpu_count() or 4)
     failures = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for future in pool.map(check, programs):
-            name, reached, encoded, fingerprint = future
-            print(f"  RG9 report: {name}: reached={reached} encoded_bytes={encoded} callpath={fingerprint}")
+        for name, reached, encoded, fingerprint, failure in pool.map(check, programs):
+            if failure:
+                failures.append(failure)
+                print(f"  RG9 FAIL: {failure}")
+            else:
+                print(f"  RG9 report: {name}: reached={reached} encoded_bytes={encoded} callpath={fingerprint}")
     if failures:
         raise GateFailure("; ".join(failures))
     print(f"RG9 PASSED: {len(programs)} corpus programs, two processes plus IYI_WARM=1")

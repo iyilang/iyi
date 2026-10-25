@@ -146,6 +146,7 @@ def run_mutations(
 ) -> int:
     failures: list[str] = []
     overapprox: list[str] = []
+    misplaced: list[str] = []
     observed_expected_failure = False
     mutation_dir = os.path.join(work, "mutations")
     os.makedirs(mutation_dir, exist_ok=True)
@@ -164,26 +165,31 @@ def run_mutations(
         fp_changed = baseline.callpath != changed.callpath
         if mutation.special == "link_annotation" and baseline.link == changed.link:
             failures.append(f"{mutation.kind} on {rel}: LinkFp did not change")
-        if mutation.in_reach:
-            if ir_changed and not fp_changed:
-                message = f"{mutation.kind} on {rel}: normalized IR changed but CallPathFp did not"
-                if mutation.kind == expect_failure_kind:
-                    print(f"  RG8 mutation proof caught: {message}")
-                    observed_expected_failure = True
-                else:
-                    failures.append(message)
-            elif fp_changed and not ir_changed:
-                overapprox.append(f"{mutation.kind}:{rel}")
-            elif not ir_changed and not fp_changed:
-                failures.append(f"{mutation.kind} on {rel}: mutation changed neither normalized IR nor CallPathFp")
-        elif ir_changed or fp_changed:
+        # Soundness, for every mutation wherever the generator placed it: a
+        # change to the code the compiler emits must change CallPathFp.
+        if ir_changed and not fp_changed:
+            message = f"{mutation.kind} on {rel}: normalized IR changed but CallPathFp did not"
+            if mutation.kind == expect_failure_kind:
+                print(f"  RG8 mutation proof caught: {message}")
+                observed_expected_failure = True
+            else:
+                failures.append(message)
+        elif fp_changed and not ir_changed:
+            # Precision: a rerun the emitted code did not need.
             overapprox.append(f"{mutation.kind}:{rel}")
+        elif mutation.in_reach and not ir_changed and not fp_changed:
+            failures.append(f"{mutation.kind} on {rel}: mutation changed neither normalized IR nor CallPathFp")
+        elif not mutation.in_reach and ir_changed:
+            # Both changed: the generator thought the site unreached, but the
+            # compiler emitted different code, so the rerun is required.
+            misplaced.append(f"{mutation.kind}:{rel}")
         print(
             f"  RG8 mutation: {mutation.kind} {rel}: "
             f"ir_changed={ir_changed} callpath_changed={fp_changed}"
         )
 
     print(f"RG8 over-approximation reruns: {len(overapprox)}" + (f" ({', '.join(overapprox)})" if overapprox else ""))
+    print(f"RG8 'unreached' mutations the compiler did emit (rerun required): {len(misplaced)}" + (f" ({', '.join(misplaced)})" if misplaced else ""))
     if expect_failure_kind:
         if failures:
             raise GateFailure("mutation proof had unexpected failures: " + "; ".join(failures))

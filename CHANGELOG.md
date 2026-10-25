@@ -91,6 +91,25 @@
   Windows and CI on aarch64 Linux under emulation; built for aarch64 by
   the compiler before this change it failed under qemu-user in 2 runs of
   2, and a copy reading the line from before the loop fails it by name.
+
+- **Preemption on Windows and darwin, measured on GitHub's runners.**
+  Windows' monitor waited on the system timer's tick, with looks 11.2 to
+  12.3 ms apart. It now waits on a high-resolution waitable timer: 5.15
+  to 5.27 ms, with turns of 10.3 to 10.5 ms. The back-edge check there
+  had called the thread-local accessor at every turn, which cost
+  vectorised sums 3.4 to 4.9 times their `@[NoPreempt]` twins on Windows
+  and 5.3 to 5.8 times on darwin. Windows now checks a TEB slot the pool
+  claims, `cmpq $0, %gs:off` (1.46 to 1.49x, a cost Linux CI's `%fs`
+  form shares on those runners). darwin arm64 reads `tpidrro_el0` and
+  dyld's pthread slot (0.94 to 1.07x). `bench/parallel_preempt.iyi`
+  gains a `period` step, held to 4 to 9 ms a look and 20 ms a turn.
+  Its tight loops are now held to 2x. The gate shows a Windows monitor
+  on the system tick (`period`) and the accessor check (`tight`,
+  `-Dpreempt_check_accessor`) both failing. On Windows the gate runs the
+  server shape on one worker fewer than the cores. Run with no
+  arguments, the bench now uses a pool of one and prints only its
+  verdict; on 4 workers its slice step had failed, on Windows CI and on
+  Linux alike, because an idle worker took the short task.
 **std/http's `Server.serve_parallel` serves TLS (#145).**
 `serve_parallel(listener, tls: config.frozen)` runs each connection's
 handshake and requests on the pool worker that serves it - HTTP/2 and
@@ -24830,7 +24849,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,160-line library and nothing else. Every other
+  written against iyi's own 24,251-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -454,14 +454,37 @@ module Iyi::Stale
 
     private def extract_test_from_corrupt_file(file_path : String) : TestId?
       content = File.read(file_path) rescue return nil
-      path_match = content.match(/"path"\s*:\s*"([^"]+)"/)
-      if path_match
-        root_match = content.match(/"root"\s*:\s*"([^"]+)"/)
-        root = root_match ? root_match[1] : "src"
-        TestId.new(root, path_match[1])
-      else
-        nil
+      path = json_string_field(content, "path")
+      return nil unless path
+      TestId.new(json_string_field(content, "root") || "src", path)
+    end
+
+    # The first `"name": "value"` in *content*, read without a Regex (a Regex
+    # links pcre2 into the compiler, which the dependency floor forbids) and
+    # without a JSON parse, which a corrupt record may not survive.
+    private def json_string_field(content : String, name : String) : String?
+      key = %("#{name}")
+      size = content.bytesize
+      from = 0
+      while at = content.byte_index(key, from)
+        i = skip_blank(content, at + key.bytesize)
+        if i < size && content.byte_at(i) == ':'.ord
+          i = skip_blank(content, i + 1)
+          if i < size && content.byte_at(i) == '"'.ord
+            close = content.byte_index('"'.ord.to_u8, i + 1)
+            return content.byte_slice(i + 1, close - i - 1) if close && close > i + 1
+          end
+        end
+        from = at + 1
       end
+      nil
+    end
+
+    private def skip_blank(content : String, i : Int32) : Int32
+      while i < content.bytesize && content.byte_at(i).unsafe_chr.ascii_whitespace?
+        i += 1
+      end
+      i
     end
   end
 end

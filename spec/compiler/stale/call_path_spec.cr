@@ -21,6 +21,7 @@ private def compute_fp(code : String, filename : String = "test.iyi") : {String,
     end
   end
 end
+
 describe "Iyi::Stale S3f: CallPathFp, typed encoder, roots, explain" do
   it "unreached def edit keeps call path fingerprint" do
     c1 = <<-IYI

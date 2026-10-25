@@ -111,10 +111,11 @@ module Iyi::Stale
     TRUSTED_REPOSITORIES = {"github.com/iyilang/iyi", "iyilang/iyi"}
     TRUSTED_REFS         = {"refs/heads/master", "master"}
 
+    # Without a Regex: a Regex links pcre2 into the compiler, which the
+    # dependency floor forbids.
     def self.normalize_repo(repo : String) : String
-      r = repo.sub(%r{^https?://}, "")
-      r = r.sub(%r{^github\.com/}, "")
-      r
+      r = repo.lchop("https://").lchop("http://")
+      r.lchop("github.com/")
     end
 
     def self.repos_match?(a : String, b : String) : Bool

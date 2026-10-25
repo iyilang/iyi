@@ -604,6 +604,7 @@ module Iyi::Stale
         @encoder.register_temp_name(node.name)
         true
       end
+
       def visit(node : ASTNode)
         true
       end

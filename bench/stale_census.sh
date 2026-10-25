@@ -56,8 +56,10 @@ c2_files = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
 c3_files = sorted(glob.glob(os.path.join(repo, 'bench/std_*_exercise.iyi')))
 all_progs = [('C2', p) for p in c2_files] + [('C3', p) for p in c3_files]
 
-work = '/tmp/stale_census_work'
-os.makedirs(work, exist_ok=True)
+# A directory of this run's own: one shared by name was removed under a
+# second census by the first one finishing.
+import tempfile
+work = tempfile.mkdtemp(prefix='stale_census.', dir='/tmp')
 
 OVERHEAD_NAMES = {
     'hello.iyi',

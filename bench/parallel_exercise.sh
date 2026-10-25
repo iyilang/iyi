@@ -160,6 +160,46 @@ done
 step "what the check costs a tight loop, release build: a measurement, held to no bound"
 timeout -k 5 300 ./preempt-release tight --workers=1 | grep '^tight' | sed 's/^/  /'
 
+# ── 2c. Preemption inside the library, std and recursion, twice ──────────
+# bench/parallel_preempt_lib.iyi: a sort, a copy, a hash's growth, a join,
+# a regex search, a JSON parse, a bcrypt hash and a recursion with no loop
+# each give their worker up to a short task within 100 ms. The release
+# build writes its IR too, for the audit after.
+for build in plain release; do
+  step "preemption inside library calls and recursion, $build build"
+  flag=""
+  [ "$build" = release ] && flag="--release --emit llvm-ir"
+  # shellcheck disable=SC2086 # the flags are words
+  if ! "$IYI" build $flag "$REPO/bench/parallel_preempt_lib.iyi" -o "preemptlib-$build" > "build-preemptlib-$build.log" 2>&1; then
+    echo "build failed:"; tail -20 "build-preemptlib-$build.log"; exit 1
+  fi
+  timeout -k 5 600 "./preemptlib-$build" sort copy rehash join regex json bcrypt fib --workers=1 > "preemptedlib-$build.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' "preemptedlib-$build.txt"; then
+    echo "the library preemption exercise failed (exit $code):"; cat "preemptedlib-$build.txt"; exit 1
+  fi
+  grep -v 'every property held' "preemptedlib-$build.txt" | sed 's/^/  /'
+done
+
+# The runtime's own functions, and every function they reach by a direct
+# call, hold no check (bench/preempt_audit.py), read from the release
+# build's IR. Python reads it, where there is a Python.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+step "the runtime reaches no preemption check, release build"
+if [ -z "$PY" ]; then
+  echo "  no python here to read the IR with, so the audit is not run"
+elif ! "$PY" "$REPO/bench/preempt_audit.py" preemptlib-release.ll > audit.txt 2>&1; then
+  echo "the audit failed:"; cat audit.txt; exit 1
+else
+  sed 's/^/  /' audit.txt
+fi
+
 # ── 2. The floor ──────────────────────────────────────────────────────────
 # What the pool costs each platform, by name. Its workers are the
 # runtime's own threads, so it pays what a thread pays and nothing else:
@@ -514,6 +554,45 @@ fi
 step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
 broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt
 caught tokenless 'unit: a task of the same unit ran' unit --workers=1
+
+step "failure proof: the prelude's library compiled as the runtime's holds its worker through a sort, a copy, a growth and a join"
+# `array.iyi`, `hash.iyi` and `string.iyi` written into prelude.iyi where it
+# requires them, so the compiler takes their defs for the runtime's, which
+# never check. A plain build, whose copy is a loop of bytes and long enough
+# to tell.
+broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.\//, "", name); file = "'"$REPO"'/src/iyi/" name ".iyi"; while ((getline line < file) > 0) print line; close(file); next } { print }' prelude.iyi parallel_preempt_lib
+for proof in sort copy rehash join; do
+  caught libruntime "$proof: a short task waited" "$proof" --workers=1
+done
+
+step "failure proof: a recursion marked @[NoPreempt] holds its worker for its whole computation"
+if ! "$IYI" build -Dpreempt_off "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then
+  echo "the @[NoPreempt] build failed:"; tail -20 build-recursionoff.log; exit 1
+fi
+caught recursionoff 'fib: a short task waited' fib --workers=1
+
+step "failure proof: a scheduler the compiler takes for a library's checks, and the audit names where"
+if [ -z "$PY" ]; then
+  echo "  no python here to read the IR with, so the audit is not run"
+else
+  # `concurrency.iyi` renamed `scheduler.iyi`: the compiler's runtime is
+  # the prelude's files of three names (`codegen.cr#IYI_RUNTIME_FILES`),
+  # and the audit's is wherever the scheduler is written.
+  mkdir -p rtout/iyi
+  cp "$REPO"/src/iyi/*.iyi rtout/iyi/
+  mv rtout/iyi/concurrency.iyi rtout/iyi/scheduler.iyi
+  awk '/^  require "\.\/concurrency"$/ { print "  require \"./scheduler\""; next } { print }' \
+    "$REPO/src/iyi/prelude.iyi" > rtout/iyi/prelude.iyi
+  cmp -s rtout/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk for rtout found nothing to change"; exit 1; }
+  if ! IYI_PATH="$WORK/rtout${PSEP}$REPO/src" "$IYI" build --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o rtout-run > build-rtout.log 2>&1; then
+    echo "the renamed scheduler failed to build:"; tail -20 build-rtout.log; exit 1
+  fi
+  if "$PY" "$REPO/bench/preempt_audit.py" rtout-run.ll > rtout.txt 2>&1; then
+    echo "the audit passed a scheduler compiled with checks:"; cat rtout.txt; exit 1
+  fi
+  grep -q 'hold a preemption check' rtout.txt || { echo "the audit failed some other way:"; cat rtout.txt; exit 1; }
+  echo "  $(head -1 rtout.txt | sed 's/^preempt audit: //'), the first of them $(sed -n 2p rtout.txt | sed 's/^ *//')"
+fi
 
 # ── 8. Failure proof: one worker, whatever was asked for ──────────────────
 step "failure proof: a pool held to one worker fails the speedup floor"

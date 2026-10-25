@@ -718,6 +718,7 @@ class ::File
     end
   end
 
+  @[Effect(:file_stat)]
   def self.info?(path : String | Path, follow_symlinks : Bool = true) : Info?
     p = path.to_s
     {% if flag?(:darwin) %}

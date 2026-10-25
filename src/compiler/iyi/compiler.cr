@@ -7,6 +7,7 @@ require "./wasm_roots"
 require "./mod/installer"
 require "./stale/encoding"
 require "./stale/toolchain"
+require "./stale/link"
 {% if flag?(:msvc) %}
   require "./loader"
 {% end %}
@@ -255,6 +256,10 @@ module Iyi
     property stale_block : String? = nil
     property stale_dump_elements : String? = nil
 
+    def stale_build? : Bool
+      !@stale_key.nil?
+    end
+
     # Compiles the given *source*, with *output_filename* as the name
     # of the generated executable.
     #
@@ -368,6 +373,7 @@ module Iyi
     private def compile_with_preanalysed_prelude(pre : Preanalysed, sources : Array(Source),
                                                  output_filename : String, & : Program -> Nil) : Result
       program = pre.program
+      @iyi_link_driver_only = true if stale_build?
 
       # What the prelude was read from belongs to this build's record too:
       # it was read before this build began, under the analysis's own.
@@ -718,6 +724,7 @@ module Iyi
     # Yields a `Program` instance before compiling.
     def compile_configure_program(source : Source | Array(Source), output_filename : String, & : Program -> Nil) : Result
       source = [source] unless source.is_a?(Array)
+      @iyi_link_driver_only = true if stale_build?
       return prelude_fork_probe(source, output_filename) if ENV["IYI_FORK_PROBE"]?
 
       # iyi: `IYI_WARM=1` — analyse the prelude and adopt it, in one process and
@@ -4244,19 +4251,51 @@ module Iyi
       BuildInputs.current.try &.linked(command, args)
 
       begin
-        Process.run(command, args, shell: true,
-          input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
-          process.error.each_line(chomp: false) do |line|
-            # iyi: the three `gsub(/... -l(\S+)\b/, "... \\1 hint")` rewrites,
-            # by hand — the compiler's own code must not be what links pcre2
-            # (zero-dep). A matching line gets the same hint; any other line
-            # passes through unchanged, byte for byte.
-            line = linker_library_hint(line, "cannot find -l")
-            line = linker_library_hint(line, "unable to find library -l")
-            line = linker_library_hint(line, "library not found for -l")
-            STDERR << line
+        {% if flag?(:win32) %}
+          Process.run(command, args, shell: true,
+            input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+            process.error.each_line(chomp: false) do |line|
+              line = linker_library_hint(line, "cannot find -l")
+              line = linker_library_hint(line, "unable to find library -l")
+              line = linker_library_hint(line, "library not found for -l")
+              STDERR << line
+            end
           end
-        end
+        {% else %}
+          if stale_build?
+            tokens = Process.parse_arguments_posix(command)
+            argv = [] of String
+            tokens.each do |token|
+              if token == "${@}"
+                argv.concat(args) if args
+              else
+                argv << token
+              end
+            end
+            if argv.empty?
+              raise CompilerError.new("empty linker command")
+            end
+            Process.run(argv[0], argv[1..], shell: false,
+              input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+              process.error.each_line(chomp: false) do |line|
+                line = linker_library_hint(line, "cannot find -l")
+                line = linker_library_hint(line, "unable to find library -l")
+                line = linker_library_hint(line, "library not found for -l")
+                STDERR << line
+              end
+            end
+          else
+            Process.run(command, args, shell: true,
+              input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+              process.error.each_line(chomp: false) do |line|
+                line = linker_library_hint(line, "cannot find -l")
+                line = linker_library_hint(line, "unable to find library -l")
+                line = linker_library_hint(line, "library not found for -l")
+                STDERR << line
+              end
+            end
+          end
+        {% end %}
       rescue exc : File::AccessDeniedError | File::NotFoundError
         linker_not_found exc.class, linker_name
       end

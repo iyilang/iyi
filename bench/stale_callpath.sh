@@ -369,6 +369,237 @@ if mismatches > 0:
 " "$REPO" "$IYI" "$WORK"
 }
 
+run_check() {
+  echo "== Running S3g: Check section (fingerprints, Build, accept/block, hit/linked phases) =="
+  "$PY" -c "
+import os, sys, glob, subprocess, json, time, shutil
+
+repo = sys.argv[1]
+iyi = sys.argv[2]
+work = sys.argv[3]
+
+sample = os.path.join(repo, 'samples/iyi/shapes.iyi')
+if not os.path.exists(sample):
+    sample = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))[0]
+
+build_cache = os.path.join(work, 'cache')
+os.makedirs(build_cache, exist_ok=True)
+env_base = os.environ.copy()
+env_base['IYI_CACHE_DIR'] = build_cache
+
+# 1. First build: linked phase, outputs produced
+key1 = os.path.join(work, 'run1.key')
+bin1 = os.path.join(work, 'run1.bin')
+if os.path.exists(key1): os.remove(key1)
+if os.path.exists(bin1): os.remove(bin1)
+
+res1 = subprocess.run([iyi, 'build', '--stale-key', key1, '-o', bin1, sample],
+                      env=env_base, capture_output=True, text=True)
+assert res1.returncode == 0, f'First build failed: {res1.stderr}'
+assert os.path.exists(bin1), 'First build output binary missing'
+assert os.path.exists(key1), 'First build key file missing'
+
+with open(key1) as f:
+    d1 = json.load(f)
+assert d1['format'] == 'iyi-stale-key', f'Bad format: {d1.get(\"format\")}'
+assert d1['version'] == 1
+assert d1['phase'] == 'linked', f'Expected phase linked, got {d1[\"phase\"]}'
+local_build = d1['local']['build']
+portable_build = d1['portable']['build']
+assert len(local_build) == 64
+assert len(portable_build) == 64
+assert d1['blocked'] is False
+assert d1['hit'] is None
+print('  First build: phase linked OK')
+
+# 2. Second build with --stale-accept local Build: hit phase, no output binary, no newer cache files, no stdout/stderr
+marker = os.path.join(build_cache, 'marker.tmp')
+with open(marker, 'w') as f:
+    f.write('marker')
+marker_mtime = os.path.getmtime(marker)
+time.sleep(0.02)
+
+accept_local = os.path.join(work, 'accept_local.json')
+with open(accept_local, 'w') as f:
+    json.dump([{'mode': 'local', 'build': local_build}], f)
+
+key2 = os.path.join(work, 'run2.key')
+bin2 = os.path.join(work, 'run2.bin')
+if os.path.exists(key2): os.remove(key2)
+if os.path.exists(bin2): os.remove(bin2)
+
+res2 = subprocess.run([iyi, 'build', '--stale-key', key2, '--stale-accept', accept_local, '-o', bin2, sample],
+                      env=env_base, capture_output=True, text=True)
+assert res2.returncode == 0, f'Second build failed: {res2.stderr}'
+assert not os.path.exists(bin2), 'Hit build should write no output file'
+assert res2.stdout == '', f'Hit build should print nothing on stdout, got: {res2.stdout}'
+assert res2.stderr == '', f'Hit build should print nothing on stderr, got: {res2.stderr}'
+
+with open(key2) as f:
+    d2 = json.load(f)
+assert d2['phase'] == 'hit', f'Expected phase hit, got {d2[\"phase\"]}'
+assert d2['hit'] == {'mode': 'local', 'build': local_build}, f'Bad hit: {d2.get(\"hit\")}'
+assert d2['blocked'] is False
+
+# Verify no file newer than marker in cache dir
+newer_cache_files = []
+for root, _, files in os.walk(build_cache):
+    for fn in files:
+        if fn == 'marker.tmp': continue
+        fp = os.path.join(root, fn)
+        if os.path.getmtime(fp) > marker_mtime:
+            newer_cache_files.append(fp)
+assert not newer_cache_files, f'Cache dir has modified files on hit: {newer_cache_files}'
+print('  Second build local accept: phase hit, no output, clean cache, silent OK')
+
+# 3. Portable accept hits similarly
+accept_portable = os.path.join(work, 'accept_portable.json')
+with open(accept_portable, 'w') as f:
+    json.dump([{'mode': 'portable', 'build': portable_build}], f)
+
+key3 = os.path.join(work, 'run3.key')
+bin3 = os.path.join(work, 'run3.bin')
+if os.path.exists(key3): os.remove(key3)
+if os.path.exists(bin3): os.remove(bin3)
+
+res3 = subprocess.run([iyi, 'build', '--stale-key', key3, '--stale-accept', accept_portable, '-o', bin3, sample],
+                      env=env_base, capture_output=True, text=True)
+assert res3.returncode == 0
+assert not os.path.exists(bin3)
+assert res3.stdout == ''
+assert res3.stderr == ''
+
+with open(key3) as f:
+    d3 = json.load(f)
+assert d3['phase'] == 'hit'
+assert d3['hit'] == {'mode': 'portable', 'build': portable_build}
+print('  Second build portable accept: phase hit, silent OK')
+
+# 4. Matching block entry wins: blocked: true, phase linked
+block_file = os.path.join(work, 'block.json')
+with open(block_file, 'w') as f:
+    json.dump([{'mode': 'local', 'build': local_build}], f)
+
+key4 = os.path.join(work, 'run4.key')
+bin4 = os.path.join(work, 'run4.bin')
+if os.path.exists(key4): os.remove(key4)
+if os.path.exists(bin4): os.remove(bin4)
+
+res4 = subprocess.run([iyi, 'build', '--stale-key', key4, '--stale-accept', accept_local, '--stale-block', block_file, '-o', bin4, sample],
+                      env=env_base, capture_output=True, text=True)
+assert res4.returncode == 0
+assert os.path.exists(bin4)
+with open(key4) as f:
+    d4 = json.load(f)
+assert d4['phase'] == 'linked', f'Expected phase linked when blocked, got {d4[\"phase\"]}'
+assert d4['blocked'] is True
+assert d4['hit'] is None
+print('  Matching block entry wins: blocked: true, phase linked OK')
+
+# 5. -s, --verbose and different OUT paths keep Build; IYI_OPTS=--release changes it (row 7)
+key_disp = os.path.join(work, 'disp.key')
+bin_disp = os.path.join(work, 'disp.bin')
+res_disp = subprocess.run([iyi, 'build', '-s', '--verbose', '--stale-key', key_disp, '-o', bin_disp, sample],
+                          env=env_base, capture_output=True, text=True)
+with open(key_disp) as f:
+    d_disp = json.load(f)
+assert d_disp['local']['build'] == local_build, 'Display flags altered Build'
+
+key_rel = os.path.join(work, 'rel.key')
+bin_rel = os.path.join(work, 'rel.bin')
+env_rel = env_base.copy()
+env_rel['IYI_OPTS'] = '--release'
+res_rel = subprocess.run([iyi, 'build', '--stale-key', key_rel, '-o', bin_rel, sample],
+                         env=env_rel, capture_output=True, text=True)
+with open(key_rel) as f:
+    d_rel = json.load(f)
+assert d_rel['local']['build'] != local_build, 'IYI_OPTS=--release should change Build'
+print('  Flag sensitivity: -s/--verbose/OUT keep Build, --release changes it OK')
+
+# 6. --no-cleanup refuses and never hits (44)
+key_nc = os.path.join(work, 'nc.key')
+bin_nc = os.path.join(work, 'nc.bin')
+env_nc = env_base.copy()
+env_nc['IYI_OPTS'] = '--no-cleanup'
+res_nc = subprocess.run([iyi, 'build', '--stale-key', key_nc, '--stale-accept', accept_local, '-o', bin_nc, sample],
+                        env=env_nc, capture_output=True, text=True)
+with open(key_nc) as f:
+    d_nc = json.load(f)
+assert d_nc['phase'] != 'hit', '--no-cleanup should never hit'
+nc_reasons = [r['reason'] for r in d_nc.get('not_reusable', []) if r.get('category') == 'refused build mode']
+assert any('--no-cleanup' in r for r in nc_reasons), f'Missing --no-cleanup refusal: {d_nc.get(\"not_reusable\")}'
+print('  --no-cleanup: refuses and never hits OK')
+
+# 7. IYI_OPTS=--crystal gives the crystal reason
+key_cr = os.path.join(work, 'cr.key')
+bin_cr = os.path.join(work, 'cr.bin')
+env_cr = env_base.copy()
+env_cr['IYI_OPTS'] = '--crystal'
+res_cr = subprocess.run([iyi, 'build', '--stale-key', key_cr, '-o', bin_cr, sample],
+                        env=env_cr, capture_output=True, text=True)
+with open(key_cr) as f:
+    d_cr = json.load(f)
+cr_reasons = [r['reason'] for r in d_cr.get('not_reusable', []) if r.get('category') == 'crystal']
+assert any('Crystal library effects are not classified' in r for r in cr_reasons), f'Missing crystal reason: {d_cr.get(\"not_reusable\")}'
+print('  --crystal: gives crystal reason OK')
+
+# 8. Type error writes no OUT and exits nonzero
+bad_src = os.path.join(work, 'type_error.iyi')
+with open(bad_src, 'w') as f:
+    f.write('a = 1 + \"foo\"\n')
+key_err = os.path.join(work, 'type_error.key')
+bin_err = os.path.join(work, 'type_error.bin')
+if os.path.exists(key_err): os.remove(key_err)
+res_err = subprocess.run([iyi, 'build', '--stale-key', key_err, '-o', bin_err, bad_src],
+                         env=env_base, capture_output=True, text=True)
+assert res_err.returncode != 0, 'Type error should exit nonzero'
+assert not os.path.exists(key_err), 'Type error should write no OUT key file'
+print('  Type error: writes no OUT and exits nonzero OK')
+
+# 9. Link failure after check leaves phase checked with Build
+link_bad = os.path.join(work, 'link_bad.iyi')
+with open(link_bad, 'w') as f:
+    f.write('lib BadLib; fun non_existent_fn_49392 : Void; end; BadLib.non_existent_fn_49392\n')
+key_lfail = os.path.join(work, 'link_fail.key')
+bin_lfail = os.path.join(work, 'link_fail.bin')
+if os.path.exists(key_lfail): os.remove(key_lfail)
+res_lfail = subprocess.run([iyi, 'build', '--stale-key', key_lfail, '-o', bin_lfail, link_bad],
+                           env=env_base, capture_output=True, text=True)
+assert res_lfail.returncode != 0, 'Link failure should exit nonzero'
+assert os.path.exists(key_lfail), 'Key file should exist after check even on link failure'
+with open(key_lfail) as f:
+    d_lfail = json.load(f)
+assert d_lfail['phase'] == 'checked', f'Expected phase checked on link failure, got {d_lfail[\"phase\"]}'
+assert len(d_lfail['local']['build']) == 64
+print('  Link failure: leaves phase checked with Build OK')
+
+# 10. Changed CHILD_ENV changes Build, changed display var does not (41)
+env_child = env_base.copy()
+env_child['LIBRARY_PATH'] = '/opt/different_path'
+key_cenv = os.path.join(work, 'cenv.key')
+bin_cenv = os.path.join(work, 'cenv.bin')
+res_cenv = subprocess.run([iyi, 'build', '--stale-key', key_cenv, '-o', bin_cenv, sample],
+                          env=env_child, capture_output=True, text=True)
+with open(key_cenv) as f:
+    d_cenv = json.load(f)
+assert d_cenv['local']['build'] != local_build, 'Changed CHILD_ENV (LIBRARY_PATH) should change Build'
+
+env_disp = env_base.copy()
+env_disp['DUMP'] = '1'
+env_disp['NO_COLOR'] = '1'
+key_disp2 = os.path.join(work, 'disp2.key')
+bin_disp2 = os.path.join(work, 'disp2.bin')
+res_disp2 = subprocess.run([iyi, 'build', '--stale-key', key_disp2, '-o', bin_disp2, sample],
+                           env=env_disp, capture_output=True, text=True)
+with open(key_disp2) as f:
+    d_disp2 = json.load(f)
+assert d_disp2['local']['build'] == local_build, 'Changed display var (DUMP/NO_COLOR) should not change Build'
+print('  CHILD_ENV sensitivity vs display var invariance OK')
+
+print('S3g check gate: ALL ACCEPTANCE TESTS PASSED')
+" "$REPO" "$IYI" "$WORK"
+}
+
 case "$MODE" in
   link)
     run_link
@@ -379,13 +610,17 @@ case "$MODE" in
   reach)
     run_reach
     ;;
+  check)
+    run_check
+    ;;
   all)
     run_link
     run_rg4
     run_reach
+    run_check
     ;;
   *)
-    echo "Unknown mode: $MODE (expected: all, link, rg4, reach)" >&2
+    echo "Unknown mode: $MODE (expected: all, link, rg4, reach, check)" >&2
     exit 1
     ;;
 esac

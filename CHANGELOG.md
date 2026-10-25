@@ -56,10 +56,22 @@
   `RegisterWaitForSingleObject` is refused, asks with a zero wait between
   sleeps instead of holding its thread.
 
-- **Not built: preemption.** A connection parked on the poller of a
-  worker computing a 100 ms request waits for it: 65 of 11,200 fast
-  requests beside four slow connections took over 20 ms (SPEC.md
-  III.4.13 has the measurement and the decision, loop back-edge checks).
+- **A parallel task computing in a loop gives its worker up after 5 to 10
+  ms.** In a program with a pool, every loop of a def that is not the
+  prelude's checks the worker's preemption word at its back-edge, a load
+  through the thread pointer and a branch, put in after optimisation so no
+  loop loses its vectorisation (`src/compiler/iyi/preempt_checks.cr`); the
+  pool's monitor raises the word of a worker one task has held for a tick.
+  The slow half hands the worker's poller news and expired sleepers to idle
+  workers, and yields only when nothing idle can take what waits; the task
+  keeps its unit's token. 28 connections of 0.2 ms requests beside 4 of
+  100 ms: 67 to 84 of 11,200 fast requests over 20 ms, at most 112 to 206
+  ms, before; 0 to 5, at most 19 to 20 ms, with a 10 to 15 ms quantum, and
+  none at most 13 to 17 with the 5 to 10 kept. Tight loops against
+  `@[NoPreempt]` twins of themselves: a xorshift walk 1.001x, a vectorised
+  sum 0.97x, the same through `each` 1.012x, a CRC 0.992x.
+  `bench/parallel_preempt.iyi` holds it in `bench/parallel_exercise.sh`,
+  with broken copies caught by name.
 
 ## 0.19.1 — 2026-10-25
 
@@ -24765,7 +24777,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 23,765-line library and nothing else. Every other
+  written against iyi's own 24,160-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

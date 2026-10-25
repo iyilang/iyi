@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 23,765 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,000 lines, none of it written in iyi |
+| iyi's own prelude | 24,160 lines, of which 4,642 are the library held to the 4,650 ceiling (6,655 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 130,332 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 23,765 lines
+> "No standard library worth the name" is still true of iyi's own 24,160 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 23,765 lines,
-primitives included, of which the library is 4,634.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 24,160 lines,
+primitives included, of which the library is 4,642.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,11 +299,11 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,634 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,642 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,013 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,647 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,655 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,000 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 23,765-line own prelude + 124,766 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 130,332 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,160-line own prelude + 124,766 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3595,7 +3595,8 @@ runtime's own that the collector stops and scans (III.4.11, GC_DESIGN.md
 Stage 4), a scheduler whose every field is one thread's (`IyiSchedulerState`),
 an allocator cache per thread, `Share` gating what a thread's block reaches
 (III.4.4) — and what was missing was a way for a *task* to stand on one of
-those threads. This is the decision, written before the code, in eight parts.
+those threads. This is the decision, written before the code, in eight parts;
+the ninth, preemption, came after it was measured.
 
 **1. The shape: M:N over a pool of workers, and a task resumes wherever a
 worker is free.** A program that asks for parallelism gets a pool of worker
@@ -3751,23 +3752,78 @@ no IO wait, no inbox holds a fiber and no parallel task is waiting to
 start. A worker that finds that rings a thread outside the pool, whose root
 fiber reports it as before (`deadlock: every fiber is blocked`).
 
-**Not built, and said so.** No task is preempted, so a CPU-bound task holds
-its worker until it parks or ends. Stealing takes what is runnable from
-under it; what it still holds is what waits in its own sleep heap and
-poller, which only it looks at. Measured (8 workers, release, two runs,
-load 4.8 to 5.7): seven tasks sleeping 1 ms 300 times each beside a task
-computing 100 ms ten times woke at most 1 ms late; 32 tasks woken by a task
-that then computed 100 ms started within 26 us on average, stolen; but in
-the server shape of 28 connections making 0.2 ms requests beside 4 making
-100 ms ones, 65 of 11,200 fast requests took over 20 ms, at most 110 to
-111 ms, a connection parked on the poller of a worker that took a long
-request (157 and 160 of 11,200, at most 115 and 232 ms, before tasks moved). That is not
-negligible at the tail, so the decision is cooperative checks at loop
-back-edges in programs that start parallel tasks, which turn a long
-computation into polls of its own worker; they are not built yet. wasm32
-has no runtime (III.4.12) and no pool, and a build under `-Dgc_none` or
-`-Dgc_boehm`, which has no `IyiThread`, refuses `spawn_parallel` at compile
-time rather than run it on one thread.
+**9. Preemption at loop back-edges. Built.** Stealing takes what is
+runnable from under a CPU-bound task; what it held still was what waits in
+its own sleep heap and poller, which only its worker looks at. Measured
+before this part (8 workers, release, two runs, load 4.8 to 5.7): seven
+tasks sleeping 1 ms beside a task computing 100 ms woke at most 1 ms late
+and 32 tasks woken by one that then computed started within 26 us, stolen;
+but in the server shape of 28 connections making 0.2 ms requests beside 4
+making 100 ms ones, 65 of 11,200 fast requests took over 20 ms, at most 110
+to 111 ms, a connection parked on the poller of a worker that took a long
+request. So every loop of a program with a pool checks the worker's
+preemption word at its back-edge, and a monitor raises the word.
+
+- *Where.* The loops of every def that is not the prelude's, and the
+  prelude's block iterators inlined into one (`each`, `times`, `loop`), in
+  a program that reached `IyiWorkers.start`; a program with no pool has no
+  check, since the word is only raised on a worker. Not the prelude's own
+  loops - the scheduler, the allocator and the collector are there - not a
+  `fun`, and not a def marked `@[NoPreempt]`, nor the blocks inlined into
+  it. Codegen marks the back-edge with a loop property (`!"iyi.preempt"`
+  in `!llvm.loop`) and the check goes in after optimisation
+  (`src/compiler/iyi/preempt_checks.cr`): emitted as code it was a volatile
+  load in the loop, and LLVM vectorised none - a sum of 1,000,000 `Int64`s
+  500 times went from 48 to 126 ms. LLVM keeps the property on the vector
+  body and the scalar remainder alike. The check is `cmpq $0, %fs:off` and
+  a branch on x86-64 Linux, `tpidr_el0` plus the offset on aarch64 Linux,
+  and the thread-local accessor on darwin and Windows, whose cost is not
+  measured. Against `@[NoPreempt]` twins of themselves (release, best of
+  seven, interleaved, load 5 to 6): a xorshift walk 0.999x to 1.001x, the
+  vectorised sum 0.97x to 1.055x, the same through `each` 1.012x to 1.04x,
+  a table CRC 0.992x to 1.004x - the noise of this machine, which is why
+  the gate prints them rather than bounding them.
+- *Who raises it.* The pool's monitor, a helper thread the collector does
+  not stop (Go's `sysmon`), looks every 5 ms and raises the word of a
+  worker whose switch count has not moved since its last look: one task
+  has held it 5 to 10 ms. It parks while every worker is idle. The quantum
+  is measured in `IyiWorkers::PREEMPT_TICKS`' comment: 10 to 15 ms left a
+  few fast requests over 20 ms, 5 to 10 none, and none of them moved
+  sixteen CPU-bound tasks' wall time out of the noise.
+- *What the slow half does.* It hands on what waits on the worker - its
+  poller's news without waiting, its expired sleepers, its mail - into its
+  ring and calls an idle worker, which steals them; that alone answers the
+  server shape while a worker is idle. It gives the worker up only when
+  something waits that no idle worker will take, or that only this worker
+  may run. Nothing when a runtime lock is held. A task holding a `Mutex`
+  may be preempted, as a thread the kernel preempts holding one: its
+  waiters park on the lock's word. Plain `spawn` tasks outside the pool
+  are never preempted, keeping III.4.5's promise that they interleave at
+  parks, and neither does any task of a unit run inside a preempted one:
+  the preempted task keeps its unit's token (`IyiUnit::YIELDED`) and waits
+  in a queue every worker takes from last, and first every 61st look.
+  The collector is untouched: the check is a call, and the stop already
+  takes a thread wherever it is.
+
+After it, the server shape (8 workers, release, three runs, load 3.3 to
+3.5) had 0 to 5 fast requests over 20 ms, at most 19 to 20 ms, with a 10 to
+15 ms quantum, against 67 to 84, at most 112 to 206 ms, without, and with
+the 5 to 10 ms kept, none and at most 14 to 17 ms in the gate's runs. A
+task spawned beside one computing a second on a pool of one starts 1 to 9
+ms later. `bench/parallel_preempt.iyi` holds each of these in
+`bench/parallel_exercise.sh`, with broken copies caught by name: a
+`@[NoPreempt]` loop, a monitor that never raises the word, a slow half that
+does not poll, and a preempted task that gives its unit's token away.
+
+**Not built, and said so.** A loop in the prelude's own code - a long
+`sort`, a large copy - is not preempted, nor is recursion with no loop.
+A thread-local read LLVM hoisted out of a loop that had no call in it on
+aarch64 (`llvm.read_register`) or darwin and Windows (the accessor) could
+be read stale after a preemption in that loop moves the task: x86-64's
+volatile read of `%fs:0` cannot be hoisted; the others are typechecked
+only. wasm32 has no runtime (III.4.12) and no pool, and a build under
+`-Dgc_none` or `-Dgc_boehm`, which has no `IyiThread`, refuses
+`spawn_parallel` at compile time rather than run it on one thread.
 
 **A task waiting in the kernel holds no worker.** A contended `Mutex` parks
 the task on the lock's word (`IyiScheduler.park_on`, a futex for tasks;
@@ -10544,7 +10600,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 23,765-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,160-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

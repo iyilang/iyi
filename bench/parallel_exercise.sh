@@ -453,12 +453,16 @@ else
     step "failure proofs for stealing"
     echo "  $CORES cores here: the balance step is not timed, so there is nothing to fail"
   else
+    # Both without preemption: a preempted task waits in a queue any worker
+    # takes from, which spreads the parked tasks as a steal would, and a
+    # pool that never steals took 1.88x the ideal with it on.
+    NOPREEMPT='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } '
     step "failure proof: a pool that never steals a started task leaves tasks woken on one worker there"
-    broken nosteal '/^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
+    broken nosteal "$NOPREEMPT"'/^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
     caught nosteal 'woken from a worker, took' balance
 
     step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
-    broken pinned '/^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; next } /^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
+    broken pinned "$NOPREEMPT"'/^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; next } /^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
     caught pinned 'woken from the main thread, took' balance
   fi
 fi

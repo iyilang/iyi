@@ -370,7 +370,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # module reached twice is entered twice and printed once, which is what
     # "duplicate skipped" means in the other language's tree.
     printer = @program.compiler.try(&.dependency_printer)
-    unseen = @program.requires.add?(filename)
+    unseen = @program.requires.add?(File.expand_path(filename))
     printer.try(&.enter_file(filename, unseen))
     begin
       if unseen

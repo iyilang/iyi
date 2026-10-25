@@ -85,5 +85,15 @@ module Iyi::Stale
 
       RootPath.new("abs", abs_path)
     end
+
+    def resolve(root : String, path : String) : String
+      case root
+      when "src"       then File.join(@src, path)
+      when "toolchain" then !@toolchain.empty? ? File.join(@toolchain, path) : path
+      when "pkg"       then !@pkg.empty? ? File.join(@pkg, path) : path
+      when "scratch"   then !@scratch.empty? ? File.join(@scratch, path) : path
+      else                  path
+      end
+    end
   end
 end

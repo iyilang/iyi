@@ -1501,6 +1501,7 @@ pub class IyiSocket
   # `CloseHandle` on a SOCKET releases the kernel handle and leaves Winsock's
   # half of it standing, and the graceful close that makes a peer's read
   # answer EOF rather than a reset is `closesocket`'s.
+  @[Effect(:network)]
   def self.__sys_close(fd : Int32) : Nil
     {% if flag?(:win32) %}
       # The send side ends first (SD_SEND, 1): a FIN behind whatever was
@@ -1558,81 +1559,98 @@ pub class IyiSocket
       family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
     end
 
+    @[Effect(:network)]
     def self.__sys_socket(family : Int32) : Int32
       LibC.socket(family, 1, 0)
     end
 
+    @[Effect(:network)]
     def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       LibC.bind(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
+    @[Effect(:network)]
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       LibC.listen(fd, backlog)
     end
 
+    @[Effect(:network)]
     def self.__sys_shutdown_write(fd : Int32) : Int64
       LibC.shutdown(fd, 1).to_i64
     end
 
+    @[Effect(:network)]
     def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       LibC.accept(fd, addr.as(Void*), addrlen)
     end
 
     # *ms* is `connect_to`'s wait's: the call answers EINPROGRESS at once.
+    @[Effect(:network)]
     def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       LibC.connect(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
+    @[Effect(:network)]
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       LibC.send(fd, buf.as(Void*), len, 0)
     end
 
     # Every connect here parks; see the Windows arm for the one that does not.
+    @[Effect(:network)]
     def self.__sys_connects_blocking?(family : Int32) : ::Bool
       false
     end
 
     # SO_NOSIGPIPE (0x1022) at SOL_SOCKET: a write to a connection the peer
     # closed answers EPIPE instead of killing the process.
+    @[Effect(:network)]
     def self.__sys_no_sigpipe(fd : Int32) : Nil
       val = 1_i32
       LibC.setsockopt(fd, 0xffff, 0x1022, pointerof(val).as(Void*), 4_u32)
     end
 
     # The failure a call answered -1 for, from errno.
+    @[Effect(:network)]
     def self.__sys_code(result : Int64) : Int32
       LibC.error_location.value
     end
 
+    @[Effect(:network)]
     def self.__sys_recv(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
       LibC.recv(fd, buf.as(Void*), len, 0)
     end
 
+    @[Effect(:network)]
     def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibC.getsockname(fd, addr.as(Void*), addrlen)
     end
 
+    @[Effect(:network)]
     def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibC.getpeername(fd, addr.as(Void*), addrlen)
     end
 
+    @[Effect(:network)]
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       val = 1_i32
       LibC.setsockopt(fd, 0xffff, 0x0004, pointerof(val).as(Void*), 4_u32)
     end
 
     # IPV6_V6ONLY (27) at IPPROTO_IPV6 (41).
+    @[Effect(:network)]
     def self.__sys_set_v6only(fd : Int32) : Int32
       val = 1_i32
       LibC.setsockopt(fd, 41, 27, pointerof(val).as(Void*), 4_u32)
     end
 
     # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    @[Effect(:network)]
     def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
       val = on ? 1_i32 : 0_i32
       LibC.setsockopt(fd, 6, 1, pointerof(val).as(Void*), 4_u32)
     end
 
+    @[Effect(:network)]
     def self.__sys_nodelay?(fd : Int32) : ::Bool
       val = 0_i32
       len = 4_u32
@@ -1642,6 +1660,7 @@ pub class IyiSocket
     # One `pollfd` (fd, events, revents) for *ms* milliseconds, -1 for as
     # long as it takes: the blocking wait a program without the runtime
     # does. 0 when the time ran out.
+    @[Effect(:network)]
     def self.__sys_poll(fd : Int32, events : Int32, ms : Int32) : Int32
       pfd = Pointer(UInt8).malloc(8_u64)
       pfd.as(Pointer(Int32)).value = fd
@@ -1653,6 +1672,7 @@ pub class IyiSocket
     end
 
     # F_SETFL with O_NONBLOCK; the flags already set are read first.
+    @[Effect(:network)]
     def self.__sys_set_nonblock(fd : Int32) : Int32
       flags = LibC.fcntl(fd, 3)
       LibC.fcntl(fd, 4, flags | 4)
@@ -1660,16 +1680,19 @@ pub class IyiSocket
 
     # libSystem answers -1 and leaves the reason in errno: EAGAIN is 35,
     # EINPROGRESS 36.
+    @[Effect(:network)]
     def self.__sys_would_block?(result : Int64) : ::Bool
       result < 0_i64 && LibC.error_location.value == 35
     end
 
+    @[Effect(:network)]
     def self.__sys_in_progress?(result : Int32) : ::Bool
       result < 0 && LibC.error_location.value == 36
     end
 
     # SO_ERROR (0x1007) at SOL_SOCKET (0xffff): what a connect that was in
     # progress ended with, 0 when it went through.
+    @[Effect(:network)]
     def self.__sys_sock_error(fd : Int32) : Int32
       err = 0_i32
       len = 4_u32
@@ -1681,21 +1704,25 @@ pub class IyiSocket
     # every socket here. A UDP `connect` records the peer and returns: it
     # is what makes the kernel drop a datagram from any other address, and
     # report a port nobody listens on as a refusal at the next receive.
+    @[Effect(:network)]
     def self.__sys_dgram_socket(family : Int32) : Int32
       fd = LibC.socket(family, 2, 0)
       __sys_set_nonblock(fd) if fd >= 0
       fd
     end
 
+    @[Effect(:network)]
     def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       __sys_connect(fd, addr, family, -1)
     end
 
+    @[Effect(:network)]
     def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
       LibC.send(fd, buf.as(Void*), len, 0)
     end
 
     # A readiness wait consumes nothing here, so it is the stream's.
+    @[Effect(:network)]
     def self.__sys_dgram_wait(fd : Int32, ms : Int32) : ::Bool | Cancelled
       IyiSocket.await_readable(fd, ms)
     end

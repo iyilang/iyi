@@ -161,7 +161,6 @@ print(f'assert-hits PASSED: all {len(tests)} tests hit from cache.')
 " "$json_file"
 }
 
-# 4. shadow-audit: verifies cached hits match fresh execution
 # 4. shadow-audit: verifies cached hits match fresh execution. The two
 # snapshots carry the portable Build and ordered observations the runner's
 # terse result JSON intentionally omits.
@@ -347,7 +346,7 @@ if mock_api and os.path.exists(mock_api):
     runs = api_data.get('workflow_runs', [])
     master_run = None
     for r in runs:
-        if r.get('head_branch') in ('master', 'refs/heads/master') and r.get('event') == 'push' and r.get('status') == 'completed':
+        if r.get('head_branch') in ('master', 'refs/heads/master') and r.get('event') == 'push' and r.get('status') == 'completed' and r.get('path', '.github/workflows/iyi.yml') == '.github/workflows/iyi.yml':
             master_run = r
             break
     if not master_run:
@@ -410,7 +409,7 @@ except Exception as e:
 runs = runs_data.get('workflow_runs', [])
 master_run = None
 for r in runs:
-    if r.get('head_branch') in ('master', 'refs/heads/master') and r.get('event') == 'push' and r.get('status') == 'completed':
+    if r.get('head_branch') in ('master', 'refs/heads/master') and r.get('event') == 'push' and r.get('status') == 'completed' and r.get('path', '.github/workflows/iyi.yml') == '.github/workflows/iyi.yml':
         master_run = r
         break
 

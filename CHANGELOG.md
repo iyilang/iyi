@@ -73,6 +73,23 @@
   `bench/parallel_preempt.iyi` holds it in `bench/parallel_exercise.sh`,
   with broken copies caught by name.
 
+- **A parallel task inside a long library call or a recursion gives its
+  worker up too.** The prelude's files other than the runtime's three
+  (`prelude.iyi`, `concurrency.iyi`, `thread.iyi`) check as a program's
+  code does, a library def the runtime calls is compiled a second time for
+  it with no check (`$runtime` after its name), `Pointer#copy_from` copies
+  a million elements a run with a check between, and a function on a call
+  cycle checks at its entry (`PreemptChecks.mark_recursion`). One worker,
+  release, a short task spawned 20 ms into the call: a sort waited 175 ms
+  before and 4 to 7 after, a `Hash` growth 85 and 17 to 18, a join 34 and 4
+  to 12, a naive `fib` 45 and 4 to 5. Cost, best of seven, three
+  interleaved rounds: a sort of 1,000,000 `Int64`s 57.9 to 59.6 ms before,
+  60.3 to 63.7 after, a join of 1,000,000 strings 5.0 to 5.4 and 5.5 to 6.6,
+  copies, appends, hash inserts, a JSON parse and `fib` within the noise.
+  `bench/parallel_preempt_lib.iyi` and `bench/preempt_audit.py` (no
+  function the runtime reaches holds a check) hold it in
+  `bench/parallel_exercise.sh`, with three broken copies caught by name.
+
 - **aarch64 Linux reads a thread-local afresh after a loop's back-edge
   check.** Its thread pointer was `llvm.read_register`, which LLVM models
   as only reading memory, and a release build hoisted it out of a loop
@@ -24830,7 +24847,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,160-line library and nothing else. Every other
+  written against iyi's own 24,185-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

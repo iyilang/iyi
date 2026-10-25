@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,160 lines, of which 4,642 are the library held to the 4,650 ceiling (6,655 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,371 lines, none of it written in iyi |
+| iyi's own prelude | 24,185 lines, of which 4,647 are the library held to the 4,650 ceiling (6,660 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 130,600 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,160 lines
+> "No standard library worth the name" is still true of iyi's own 24,185 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,160 lines,
-primitives included, of which the library is 4,642.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 24,185 lines,
+primitives included, of which the library is 4,647.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,11 +299,11 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,642 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,647 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,013 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,655 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,660 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,371 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,160-line own prelude + 125,236 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 130,600 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,185-line own prelude + 125,236 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3774,13 +3774,15 @@ to 111 ms, a connection parked on the poller of a worker that took a long
 request. So every loop of a program with a pool checks the worker's
 preemption word at its back-edge, and a monitor raises the word.
 
-- *Where.* The loops of every def that is not the prelude's, and the
-  prelude's block iterators inlined into one (`each`, `times`, `loop`), in
-  a program that reached `IyiWorkers.start`; a program with no pool has no
-  check, since the word is only raised on a worker. Not the prelude's own
-  loops - the scheduler, the allocator and the collector are there - not a
-  `fun`, and not a def marked `@[NoPreempt]`, nor the blocks inlined into
-  it. Codegen marks the back-edge with a loop property (`!"iyi.preempt"`
+- *Where.* The loops of every def that is not the runtime's, and the
+  runtime's block iterators inlined into one (`loop`), in a program that
+  reached `IyiWorkers.start`; a program with no pool has no check, since
+  the word is only raised on a worker. Not the runtime's own loops - the
+  scheduler, the allocator and the collector, in the three files below -
+  nor a library def's compiled for the runtime to call, not a `fun`, and
+  not a def marked `@[NoPreempt]`, nor the blocks inlined into it; a
+  function on a call cycle checks at its entry too (below). Codegen marks
+  the back-edge with a loop property (`!"iyi.preempt"`
   in `!llvm.loop`) and the check goes in after optimisation
   (`src/compiler/iyi/preempt_checks.cr`): emitted as code it was a volatile
   load in the loop, and LLVM vectorised none - a sum of 1,000,000 `Int64`s
@@ -3852,11 +3854,63 @@ compiler before the volatile `mrs`, that step failed for aarch64 under
 qemu-user in 2 runs of 2; a copy that reads the line before the loop in
 its place (`-Dparallel_hoisted_tls`) fails it by name.
 
-**Not built, and said so.** A loop in the prelude's own code - a long
-`sort`, a large copy - is not preempted, nor is recursion with no loop.
-wasm32 has no runtime (III.4.12) and no pool, and a build under
-`-Dgc_none` or `-Dgc_boehm`, which has no `IyiThread`, refuses
-`spawn_parallel` at compile time rather than run it on one thread.
+**The prelude's library, std, and recursion. Built.** Measured before
+(`bench/parallel_preempt_lib.iyi`, release, one worker, a short task
+spawned 20 ms into the call, load 8): a sort of 3,000,000 `Int64`s held it
+175 ms, a `Hash` growth at 4,194,304 entries 85, a join of 4,000,000
+strings 34, a naive `fib(37)` 45; a regex search, a JSON parse and a bcrypt
+hash, std's and already checked, 0 to 8. Now:
+
+- *The runtime is three files.* `codegen.cr#IYI_RUNTIME_FILES` -
+  `prelude.iyi` (allocator, collector, panics, entry), `concurrency.iyi`,
+  `thread.iyi`, in the prelude's own directory - never check. Every other
+  prelude file is a library and checks as a program does. A library def
+  the runtime calls is compiled a second time for it, `$runtime` after its
+  name, with no check in it and its own calls going to such copies too
+  (`iyi_runtime_copy?`): so nothing the runtime runs checks, whatever it
+  calls, and no rule about which runtime call is a safe place to give a
+  worker up is needed. The slow half also returns on a fiber that is not
+  `Running`. `bench/preempt_audit.py` reads a build's IR and fails if a
+  function written where the scheduler, threads, allocator or collector
+  are - or one it reaches by direct calls - holds a check: 175 runtime
+  functions reach 11 copies and none checks, release; 620 reach 97, plain.
+- *Copies* run a million elements at a time (`Pointer#copy_from`,
+  string.iyi) with the check between runs; the run itself
+  (`Pointer#copy_run`) is in the runtime's file, because a check in it put
+  a load and a branch on every byte of a short string's copy: a join of
+  1,000,000 strings took 6.6 ms against 5.1 with it, 5.5 to 6.6 without.
+- *Recursion.* Before optimisation the compiler finds call cycles among
+  the functions that check (Tarjan over direct calls, across modules) and
+  puts a call to `__iyi_preempt_entry` at each one's entry, which LLVM is
+  told touches only memory nothing else names; after it, the call becomes
+  the check (`PreemptChecks.mark_recursion`). A tail call LLVM turns into a
+  loop keeps the check in that loop. A check in every function's entry
+  was not chosen: `fib(32)` is all calls, and is what every call would pay.
+  Recursion through a `Proc` is not a cycle it sees.
+
+After (release, one worker, load 4 to 12): a sort of 6,000,000 started the
+short task 4 to 7 ms later, a growth at 8,388,608 entries 17 to 18, a join
+of 12,000,000 strings 4 to 12, `fib(40)` 4 to 5; plain builds 1 to 37,
+including the copy of 192 MB, which takes 392 ms there and 13 in release.
+The cost, release, best of seven, three interleaved rounds against the
+compiler and prelude before (load 4 to 5): a sort of 1,000,000 `Int64`s
+57.9 to 59.6 ms before and 60.3 to 63.7 after; 1,000,000 hash inserts 21.2
+to 23.6 and 22.6 to 23.5; a join of 1,000,000 strings 5.0 to 5.4 and 5.5
+to 6.6; 64 copies of 16 MB, 1,000,000 appends of 7 bytes and a JSON parse
+of 2.4 MB within the noise; `fib(32)` against its `@[NoPreempt]` twin
+5.80 to 6.27 against 5.80 to 5.85. The sort's and the join's 4 to 9% are
+over the 2 to 3% aimed at, and not yet answered: their inner loops are a
+load and a branch per turn more. `bench/parallel_exercise.sh` holds each
+step plain and release, the audit, and three broken copies by name: the
+library written into prelude.iyi (sort, copy, growth and join each wait
+316 to 1,022 ms), a `@[NoPreempt]` recursion, and the scheduler's file
+renamed, which the audit names.
+
+**Not built, and said so.** A copy inside the allocator - a `realloc` of a
+large buffer, which `String::Builder` grows by - and the allocator's own
+clearing are not preempted. wasm32 has no runtime (III.4.12) and no pool,
+and a build under `-Dgc_none` or `-Dgc_boehm`, which has no `IyiThread`,
+refuses `spawn_parallel` at compile time rather than run it on one thread.
 
 **A task waiting in the kernel holds no worker.** A contended `Mutex` parks
 the task on the lock's word (`IyiScheduler.park_on`, a futex for tasks;
@@ -10689,7 +10743,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,160-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,185-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

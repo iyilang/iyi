@@ -26,6 +26,18 @@
   keeps the word in the thread-local; it links, fails at `tight: sum:`
   (2.56x, release, 12 logical CPUs, Windows 11) and still preempts.
 
+- **A Windows build waits for a program Smart App Control holds.**
+  Evaluating, its services (`CryptSvc`, `AppIDSvc`, the `applockerfltr`
+  filter) open a program that has just run, shared for reading only, for
+  0.1 to 1.1 s, and a build begun at once could neither write nor rename
+  it: "LNK1104: cannot open file" at the link in 6 of 60 builds made right
+  after a run, or "in use and cannot be replaced or moved aside" before
+  the compile. The check before the compile now waits up to two seconds
+  for such a holder, as Go's `cmd/go` does, and a link that stops at
+  LNK1104 waits and links once more, its first words held back: 0 of 60.
+  `bench/rebuild_reuse.py` holds the program that way for a second and
+  builds; the compiler before this failed that step in 2 runs of 2.
+
 - **`Channel#take_now` and `#put_now` take the scheduler's lock.** They
   were `select`'s lock-held halves, public because its arms call them,
   and std/http called them from pool workers with no lock: a wake of a

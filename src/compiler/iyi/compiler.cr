@@ -3859,14 +3859,14 @@ module Iyi
       @progress_tracker.stage("Codegen (linking)") do
         Dir.cd(output_dir) do
           begin
-            run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true)
+            run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true), busy_output: output_filename
           rescue ex : CompilerError
             # A link the compiler built itself, on a machine where that does
             # not work: the driver is asked to do it instead and the template
             # is marked unusable, so this is paid once rather than every build.
             raise ex unless @iyi_direct_link
             iyi_disable_direct_link(@link_flags || "", program.lib_flags(@cross_compile))
-            run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true)
+            run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true), busy_output: output_filename
           end
         end
       end
@@ -4134,14 +4134,32 @@ module Iyi
       {% end %}
     end
 
-    private def run_linker(linker_name, command, args)
+    # iyi: *busy_output*, on Windows, is the program the link writes. A
+    # program that ran just before the build is held by Smart App Control's
+    # services from a moment after it exits (`Iyi.move_aside_if_busy`), so
+    # the check the build began with can find it free and the link then
+    # stop at "LNK1104: cannot open file": 6 of 60 builds begun right after
+    # a run of the program, on a Windows 11 machine whose Smart App Control
+    # evaluates, and 0 of 60 with this. That link's output is held back,
+    # the program waited for, and the link run once more; its words are
+    # printed only if it is not.
+    private def run_linker(linker_name, command, args, busy_output : String? = nil)
       print_command(command, args) if verbose?
       # iyi: the files the linker will read, for the up-to-date check.
       BuildInputs.current.try &.linked(command, args)
 
+      said = nil
+      complained = nil
+      {% if flag?(:win32) %}
+        if busy_output && !@cross_compile
+          said = IO::Memory.new
+          complained = IO::Memory.new
+        end
+      {% end %}
+      errors = complained || STDERR
       begin
         Process.run(command, args, shell: true,
-          input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+          input: Process::Redirect::Close, output: said || Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
           process.error.each_line(chomp: false) do |line|
             # iyi: the three `gsub(/... -l(\S+)\b/, "... \\1 hint")` rewrites,
             # by hand — the compiler's own code must not be what links pcre2
@@ -4150,7 +4168,7 @@ module Iyi
             line = linker_library_hint(line, "cannot find -l")
             line = linker_library_hint(line, "unable to find library -l")
             line = linker_library_hint(line, "library not found for -l")
-            STDERR << line
+            errors << line
           end
         end
       rescue exc : File::AccessDeniedError | File::NotFoundError
@@ -4158,6 +4176,11 @@ module Iyi
       end
 
       status = $?
+      if said && busy_output && status.exit_code? == 1104 && Iyi.move_aside_if_busy(busy_output)
+        return run_linker(linker_name, command, args)
+      end
+      STDOUT << said.to_s if said
+      STDERR << complained.to_s if complained
       unless status.success?
         exit_code = status.exit_code?
         case exit_code

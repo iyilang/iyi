@@ -465,15 +465,9 @@ module Iyi::Stale
     getter current_element : Element
     getter temp_ordinals : Hash(String, Int32)
 
-    @debug_main : File? = nil
-
     def initialize(@program : Program, @roots : Roots, @current_element : Element, @encoder : Encoder)
       @temp_ordinals = Hash(String, Int32).new
       @next_temp_ordinal = 0
-      if @current_element.kind == ElementKind::Main
-        mode = ENV["IYI_WARM"]? ? "warm" : "norm"
-        @debug_main = File.open("/tmp/main_#{mode}.log", "w")
-      end
     end
 
     def encode_element(element : Element) : Nil
@@ -500,7 +494,6 @@ module Iyi::Stale
         else
           @encoder.absent
         end
-        @debug_main.try &.close
       when ElementKind::Def
         if node = element.node
           target_def = node.as(Def)
@@ -876,13 +869,10 @@ module Iyi::Stale
     def encode_node(node : ASTNode?) : Nil
       if node.nil?
         @encoder.absent
-        @debug_main.try &.puts("absent")
         return
       end
 
-      tag = node.class.name.split("::").last
-      @encoder.tag(tag)
-      @debug_main.try &.puts("tag:#{tag} #{node.class} => #{node.to_s.gsub('\n', ' ')[0..50]}")
+      @encoder.tag(node.class.name.split("::").last)
       encode_type(node.type?)
 
       case node

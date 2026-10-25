@@ -1,6 +1,7 @@
 require "crystal/digest/sha256"
 require "./encoding"
 require "../config"
+require "json"
 
 module Iyi::Stale
   # Flipped to false when RG1 is green on master CI
@@ -245,13 +246,13 @@ module Iyi::Stale
       File.delete(tmp_file) if tmp_file rescue nil
     end
 
+    # The memo is JSON this module wrote. Parsed as JSON rather than matched
+    # with a regex: a Regex links pcre2 into the compiler, which
+    # bench/dependency_floor.sh forbids.
     private def self.extract_json_field(json : String, field : String) : String?
-      pattern = "\"#{field}\":\\s*\"([^\"]+)\""
-      if match = json.match(Regex.new(pattern))
-        match[1]
-      else
-        nil
-      end
+      JSON.parse(json)[field]?.try(&.as_s?)
+    rescue JSON::ParseException
+      nil
     end
   end
 end

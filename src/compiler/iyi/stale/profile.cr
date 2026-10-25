@@ -12,6 +12,7 @@ require "../config"
       version : UInt8[256]
       machine : UInt8[256]
     end
+
     fun uname(name : Utsname*) : Int
   end
 {% elsif flag?(:linux) %}
@@ -24,6 +25,7 @@ require "../config"
       machine : UInt8[65]
       domainname : UInt8[65]
     end
+
     fun uname(name : Utsname*) : Int
   end
 {% end %}

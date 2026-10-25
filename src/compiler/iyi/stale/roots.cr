@@ -52,6 +52,7 @@ module Iyi::Stale
         abs: "/"
       )
     end
+
     def self.default_for_file(entry_filename : String, entry_code : String? = nil, cache_root : String? = nil) : Roots
       src = Compiler.entry_root_of(entry_filename, entry_code || (File.read(entry_filename) rescue ""))
       toolchain = ""

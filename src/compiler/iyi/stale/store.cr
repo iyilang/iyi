@@ -3,7 +3,6 @@ require "./encoding"
 require "./receipt"
 require "./toolchain"
 require "./machine_key"
-require "../codegen/cache_dir"
 
 module Iyi::Stale
   class Store
@@ -18,7 +17,7 @@ module Iyi::Stale
     getter key_path : String
 
     def initialize(cache_root : String? = nil)
-      @cache_root = cache_root || CacheDir.instance.dir
+      @cache_root = cache_root || ENV["CRYSTAL_CACHE_DIR"]? || ENV["IYI_CACHE_DIR"]? || ".cache"
       @root_dir = File.join(@cache_root, "tests-v1")
       @records_dir = File.join(@root_dir, "records")
       @masks_dir = File.join(@root_dir, "masks")
@@ -55,14 +54,16 @@ module Iyi::Stale
              Crystal::System.to_wstr(path),
              LibC::MOVEFILE_REPLACE_EXISTING | LibC::MOVEFILE_WRITE_THROUGH
            ) == 0
-          File.delete(tmp_path) rescue nil
+          File.delete(tmp_path) if File.file?(tmp_path) rescue nil
           raise File::Error.from_winerror("Error atomically renaming file", file: tmp_path, other: path)
         end
       {% else %}
         File.rename(tmp_path, path)
       {% end %}
     rescue ex
-      File.delete(tmp_path) rescue nil
+      if tmp_path && File.file?(tmp_path)
+        File.delete(tmp_path) rescue nil
+      end
       raise ex
     end
 
@@ -189,7 +190,6 @@ module Iyi::Stale
         end
 
         Store.atomic_write(path, receipt.to_json)
-        prune_outdated_toolchains_under_lock
       end
     end
 
@@ -422,7 +422,7 @@ module Iyi::Stale
           end
         end
 
-        Dir.rmdir(ab_dir) rescue nil
+        Dir.delete(ab_dir) rescue nil
       end
 
       pruned

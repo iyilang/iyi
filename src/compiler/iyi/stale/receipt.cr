@@ -121,7 +121,7 @@ module Iyi::Stale
         enc.str(stdio)
         enc.str(cwd.root)
         enc.str(cwd.path)
-        enc.uint(timeout.to_bits)
+        enc.uint(timeout.unsafe_as(UInt64))
         enc.int(umask.to_i64)
         enc.list(rlimits.size) do |e|
           rlimits.keys.sort.each do |k|

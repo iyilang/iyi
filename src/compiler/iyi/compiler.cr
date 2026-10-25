@@ -4388,17 +4388,18 @@ module Iyi
       # iyi: and on one thread too, so the object is made from the bitcode
       # the cache compares and from nothing else. The module codegen built
       # in memory and the one parsed from its bitcode are the same program
-      # with their uses listed in another order, and the LLVM in the Windows
-      # Crystal package (23.1.1) optimised the two differently: a
-      # `--release` build, the one path that optimised the module in memory,
-      # made `String#to_i?`'s `value < -214748364 || (value == -214748364 &&
-      # digit > 8)` into `digit > 8`, so `"9".to_i` panicked "not a number"
-      # and std/http refused `HTTP/1.1 999`. The same bitcode parsed and
-      # optimised at `default<O3>` - here, by clang 23.1.1, or by that
-      # package's LLVM-C.dll - kept the test whole. Measured for
-      # bench/std_http_exercise.iyi, `--release`, the cache emptied, three
-      # runs each: codegen 23.9 to 25.8 s in memory and 24.3 to 26.3 s
-      # parsed, and 803 to 804 MB resident at its end against 888 to 892.
+      # with their uses listed in another order, and the LLVM the Windows
+      # bootstrap compiler's package ships (23.1.1) optimised the two
+      # differently: a `--release` build, the one path that optimised the
+      # module in memory, made `String#to_i?`'s `value < -214748364 ||
+      # (value == -214748364 && digit > 8)` into `digit > 8`, so `"9".to_i`
+      # panicked "not a number" and std/http refused `HTTP/1.1 999`. The
+      # same bitcode parsed and optimised at `default<O3>` - here, by clang
+      # 23.1.1, or by that package's LLVM-C.dll - kept the test whole.
+      # Measured for bench/std_http_exercise.iyi, `--release`, the cache
+      # emptied, three runs each: codegen 23.9 to 25.8 s in memory and 24.3
+      # to 26.3 s parsed, and 803 to 804 MB resident at its end against 888
+      # to 892.
       def isolate_module_context
         @llvm_mod = LLVM::Module.parse(@memory_buffer.not_nil!, LLVM::Context.new)
       end

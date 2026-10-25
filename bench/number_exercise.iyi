@@ -50,10 +50,11 @@ assert_int("-123".to_i, -123, "number: a negative reads")
 assert_int("+123".to_i, 123, "number: a plus sign reads")
 assert_true("+".to_i? == nil, "number: a lone plus is nil")
 # Every digit, in strings made at run time so the optimiser cannot fold the
-# read away. A `--release` build with the Windows Crystal package's LLVM
-# (23.1.1) read any number with a 9 in it as no number: optimised from the
-# module in memory, the loop's `value == -214748364 && digit > 8` lost its
-# first half, and `"59518".to_i` panicked.
+# read away. A `--release` build with the LLVM the Windows bootstrap
+# compiler's package ships (23.1.1) read any number with a 9 in it as no
+# number: optimised from the module in memory, the loop's
+# `value == -214748364 && digit > 8` lost its first half, and
+# `"59518".to_i` panicked.
 runtime = Program.args.size
 assert_int((1234567890 + runtime).to_s.to_i, 1234567890 + runtime, "number: every digit reads")
 assert_int((9 + runtime).to_s.to_i, 9 + runtime, "number: a nine reads")

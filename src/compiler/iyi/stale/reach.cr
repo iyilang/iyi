@@ -36,11 +36,11 @@ module Iyi::Stale
     getter class_vars : Set(MetaTypeVar)
     getter mismatch : Array(String)
 
-    def initialize(@elements : Array(Element),
-                   @def_names : Set(String),
-                   @proc_literals : Set(UInt64),
-                   @consts : Set(Const),
-                   @class_vars : Set(MetaTypeVar))
+    def initialize(@elements : Array(Element) = [] of Element,
+                   @def_names : Set(String) = Set(String).new,
+                   @proc_literals : Set(UInt64) = Set(UInt64).new,
+                   @consts : Set(Const) = Set(Const).new,
+                   @class_vars : Set(MetaTypeVar) = Set(MetaTypeVar).new)
       @mismatch = [] of String
     end
 

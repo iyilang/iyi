@@ -11,6 +11,8 @@ require "./stale/link"
 require "./stale/compiler_env"
 require "./stale/roots"
 require "./stale/call_path"
+require "./stale/machine_key"
+require "./stale/check"
 {% if flag?(:msvc) %}
   require "./loader"
 {% end %}
@@ -462,7 +464,9 @@ module Iyi
         program.macro_expansion_error_hook.try &.call(ex.cause)
       end
 
-      stale_check(program, node, sources)
+      if stale_check(program, node, sources)
+        return Result.new(program, node)
+      end
 
       prepared = prepare_iyimods program
       keep_iyi_namespace program
@@ -774,7 +778,9 @@ module Iyi
         program.macro_expansion_error_hook.try &.call(ex.cause)
       end
 
-      stale_check(program, node, source)
+      if stale_check(program, node, source)
+        return Result.new(program, node)
+      end
 
       prepared = prepare_iyimods program
       keep_iyi_namespace program
@@ -4402,27 +4408,11 @@ module Iyi
       obj.colorize.toggle(@color && Colorize.default_enabled?(stdout, stderr))
     end
 
-    private def stale_check(program : Program, node : ASTNode, source_or_sources) : Nil
-      return unless stale_build? || @stale_drop
-      key_file = @stale_key
+    private def stale_check(program : Program, node : ASTNode, source_or_sources) : Bool
+      return false unless stale_build? || @stale_drop || @stale_dump_elements
 
-      reach = Stale::ReachWalk.walk(program, node, drop: @stale_drop)
-      program.stale_reach = reach
-
-      recorder = Stale::Recorder.new
-      program.stale_recorder = recorder
-
-      closure = Effects.closure_check(program, reach)
-      program.stale_closure_result = closure
-      if key_file
-        primary_source = source_or_sources.is_a?(Array) ? source_or_sources.first : source_or_sources
-        test_root = "src"
-        entry_root = Compiler.entry_root_of(primary_source.filename, primary_source.code)
-        test_path = ::Path[primary_source.filename].relative_to(entry_root).to_s
-        test_path = test_path[2..-1] if test_path.starts_with?("./")
-        Stale::KeyFile.write_out(key_file, phase: "checked", test_root: test_root, test_path: test_path, reach: reach,
-          not_reusable: closure.not_reusable, rg3: closure.rg3_sites)
-      end
+      result = Stale::Check.run(self, program, node, source_or_sources)
+      result.hit?
     end
 
     private def stale_cross_check(program : Program, source_or_sources) : Nil
@@ -4432,7 +4422,21 @@ module Iyi
 
       reach.cross_check(recorder)
 
-      if key_file = @stale_key
+      if (result = program.stale_check_result) && (key_file = @stale_key)
+        Stale::KeyFile.write_out(
+          path: key_file,
+          phase: "linked",
+          test_root: result.test_root,
+          test_path: result.test_path,
+          local: result.local_mode_build,
+          portable: result.portable_mode_build,
+          not_reusable: result.not_reusable,
+          hit: result.hit,
+          blocked: result.blocked?,
+          reach: reach,
+          rg3: result.rg3
+        )
+      elsif key_file = @stale_key
         primary_source = source_or_sources.is_a?(Array) ? source_or_sources.first : source_or_sources
         test_root = "src"
         entry_root = Compiler.entry_root_of(primary_source.filename, primary_source.code)

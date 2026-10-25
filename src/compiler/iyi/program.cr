@@ -436,6 +436,7 @@ module Iyi
     property stale_recorder : Iyi::Stale::Recorder? = nil
     property stale_reach : Iyi::Stale::Reach? = nil
     property stale_closure_result : Iyi::Effects::ClosureResult? = nil
+    property stale_check_result : Iyi::Stale::CheckResult? = nil
 
     # iyi: true when the owners above are a `--iyi-keep` namespace, the fill
     # build `iyi bind` runs. A boundary's declarations write every parameter

@@ -172,54 +172,52 @@ end
 @@written_paths = ::Set(String).new
 @@written_env = ::Set(String).new
 @@main_depth = 0_i32
+@[ThreadLocal]
 @@in_hook = false
-@@task_depths : Hash(UInt64, Int32)? = nil
 
 def self.enter_frame(tid : UInt64 = current_task_id) : ::Bool
   return true unless @@enabled
   return false if @@in_hook
-  if tid == 0_u64
-    d = @@main_depth
-    @@main_depth = d + 1
-    return d == 0
-  end
-
-  @@in_hook = true
-  map = (@@task_depths ||= Hash(UInt64, Int32).new)
-  d = map[tid]? || 0
-  map[tid] = d + 1
-  @@in_hook = false
+  {% if !flag?(:single_thread) %}
+    if IyiScheduler.state_id != 0_u64
+      fiber = IyiScheduler.state.current
+      if fiber.is_a?(IyiFiber)
+        d = fiber.observe_depth
+        fiber.observe_depth = d + 1
+        return d == 0
+      end
+    end
+  {% end %}
+  d = @@main_depth
+  @@main_depth = d + 1
   d == 0
 end
 
 def self.leave_frame(tid : UInt64 = current_task_id) : Nil
   return unless @@enabled
   return if @@in_hook
-  if tid == 0_u64
-    d = @@main_depth
-    @@main_depth = d - 1 if d > 0
-    return
-  end
-
-  @@in_hook = true
-  if map = @@task_depths
-    d = map[tid]? || 0
-    if d <= 1
-      map.delete(tid)
-    else
-      map[tid] = d - 1
+  {% if !flag?(:single_thread) %}
+    if IyiScheduler.state_id != 0_u64
+      fiber = IyiScheduler.state.current
+      if fiber.is_a?(IyiFiber)
+        d = fiber.observe_depth
+        fiber.observe_depth = d - 1 if d > 0
+        return
+      end
     end
-  end
-  @@in_hook = false
+  {% end %}
+  d = @@main_depth
+  @@main_depth = d - 1 if d > 0
 end
 
 def self.frame_depth(tid : UInt64 = current_task_id) : Int32
-  if tid == 0_u64
-    @@main_depth
-  else
-    map = @@task_depths
-    map ? (map[tid]? || 0) : 0
-  end
+  {% if !flag?(:single_thread) %}
+    if IyiScheduler.state_id != 0_u64
+      fiber = IyiScheduler.state.current
+      return fiber.observe_depth if fiber.is_a?(IyiFiber)
+    end
+  {% end %}
+  @@main_depth
 end
 
 @[Effect(:observation_channel)]

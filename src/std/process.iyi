@@ -1420,9 +1420,18 @@ class ProcessChild
       registration = Pointer(Void).new(0_u64)
       # INFINITE, WT_EXECUTEONLYONCE.
       if LibKernel32.RegisterWaitForSingleObject(pointerof(registration), @process, callback, words.as(Void*), -1, 8) == 0
-        IyiScheduler.blocking_begin
-        ::LibC.WaitForSingleObject(@process, -1)
-        IyiScheduler.blocking_end
+        # No wait to be had from the thread pool. The end is asked for
+        # without waiting (WAIT_TIMEOUT, 258, while the child runs) and the
+        # fiber sleeps between asks, from a millisecond to fifty, as Linux
+        # asks without a pidfd: waited for in the kernel, the child's whole
+        # run held this thread and every task on it.
+        pause = 1
+        while ::LibC.WaitForSingleObject(@process, 0) == 258
+          slept = sleep(pause)
+          return slept if slept.is_a?(Cancelled)
+          pause = pause * 2 if pause < 50
+          pause = 50 if pause > 50
+        end
         record_end
         return nil
       end
@@ -1462,9 +1471,7 @@ class ProcessChild
 
     # After a kill, or a wait that could not be parked: the end is near.
     def reap : Nil
-      IyiScheduler.blocking_begin
       ::LibC.WaitForSingleObject(@process, -1)
-      IyiScheduler.blocking_end
       record_end
     end
 
@@ -1932,12 +1939,8 @@ class ProcessChild
 
       def reap : Nil
         status = 0
-        # A wait that holds the thread: a pool worker hands its runnable
-        # fibers on first (`IyiScheduler.blocking_begin`).
-        IyiScheduler.blocking_begin
         while LibC.waitpid(@pid, pointerof(status), 0) < 0 && ProcessChild.errno == EINTR
         end
-        IyiScheduler.blocking_end
         record_end(status)
       end
 
@@ -2221,10 +2224,8 @@ class ProcessChild
 
       def reap : Nil
         status = Pointer(Int32).malloc(1_u64)
-        IyiScheduler.blocking_begin
         while __iyi_conc_syscall6(SYS_WAIT4, @pid.to_i64, status.address.to_i64, 0_i64, 0_i64, 0_i64, 0_i64) == -(EINTR.to_i64)
         end
-        IyiScheduler.blocking_end
         record_end(status[0])
       end
 

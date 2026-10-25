@@ -12,12 +12,21 @@ module Iyi::Stale
     getter scratch : String
     getter abs : String
 
+    # Roots are compared with real paths (the runtime records realpath), so
+    # they are resolved the same way: `/tmp` is `/private/tmp` on darwin, and
+    # an unresolved root mapped every recorded path to `abs`.
     def initialize(src : String, toolchain : String, pkg : String, scratch : String, abs : String = "/")
-      @src = File.expand_path(src)
-      @toolchain = toolchain.empty? ? "" : File.expand_path(toolchain)
-      @pkg = pkg.empty? ? "" : File.expand_path(pkg)
-      @scratch = scratch.empty? ? "" : File.expand_path(scratch)
+      @src = Roots.real(src)
+      @toolchain = toolchain.empty? ? "" : Roots.real(toolchain)
+      @pkg = pkg.empty? ? "" : Roots.real(pkg)
+      @scratch = scratch.empty? ? "" : Roots.real(scratch)
       @abs = abs
+    end
+
+    # The real path when the directory exists, else the expanded path.
+    def self.real(path : String) : String
+      expanded = File.expand_path(path)
+      File.exists?(expanded) ? (File.realpath(expanded) rescue expanded) : expanded
     end
 
     def self.default(program : Program, entry_filename : String? = nil, entry_code : String? = nil, cache_root : String? = nil) : Roots

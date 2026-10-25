@@ -325,6 +325,28 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
       File.delete(file_path)
       Dir.delete(tmp_dir)
     end
+
+    it "replays a cwd record against the recorded directory, not the runner's cwd" do
+      tmp_dir = File.realpath(Dir.tempdir) + "/iyi_replay_cwd_#{Process.pid}"
+      Dir.mkdir_p(File.join(tmp_dir, "sub"))
+      roots_local = Iyi::Stale::Roots.new(src: tmp_dir, toolchain: "", pkg: "", scratch: "")
+      keyer = Iyi::Stale::Keyer.portable
+      ans = Iyi::Stale::Trace.compute_answer("cwd", "src", keyer) do |enc|
+        enc.str("src")
+        enc.str("sub")
+      end
+      obs = [Iyi::Stale::Observation.new(0_u64, "cwd", "src", "sub", ans)]
+
+      # The runner never stands in tmp_dir/sub, and the record still holds.
+      Dir.current.should_not eq(File.join(tmp_dir, "sub"))
+      Iyi::Stale::Trace.replay(obs, keyer, roots_local).should be_nil
+
+      # The directory the program stood in is gone: the run is not the same.
+      Dir.delete(File.join(tmp_dir, "sub"))
+      Iyi::Stale::Trace.replay(obs, keyer, roots_local).should eq("run: cwd sub is gone")
+
+      Dir.delete(tmp_dir)
+    end
   end
 
   describe "parse_file" do

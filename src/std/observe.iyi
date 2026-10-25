@@ -365,9 +365,13 @@ def self.__iyi_observe_env_all : Nil
   env_all
 end
 
+# The observer runs after the annotated def returns, so the process already
+# stands in the directory `cd` moved to. Resolving the def's argument again
+# would apply a relative `cd` twice (`sub` became `sub/sub`); the record is
+# the real current directory, which is what the program sees.
 def self.cwd(path : String) : Nil
   return unless @@enabled
-  real = safe_real_path(path)
+  real = safe_real_path(current_cwd)
   writer = RecordWriter.new
   writer.begin_record(0x05_u8, current_task_id)
   writer.write_str(real)
@@ -477,6 +481,7 @@ end
 def self.__iyi_observe_dir_stream(site : String) : Nil
   not_reusable(40_u8, site)
 end
+
 private def self.write_end(status : Int32) : Nil
   writer = RecordWriter.new
   writer.begin_record(0x7F_u8, 0_u64)
@@ -539,6 +544,7 @@ private def self.current_task_id : UInt64
     0_u64
   {% end %}
 end
+
 @[Effect(:observation_channel)]
 def self.c_str(ptr : UInt8*) : String
   return "" if ptr.address == 0_u64

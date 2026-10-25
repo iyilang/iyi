@@ -514,17 +514,24 @@ module Iyi::Stale
             return "run: env_all changed"
           end
         when "cwd"
-          current_dir = Dir.current
-          rp = roots.map(current_dir)
-          root = rp.root
-          rel_path = rp.path
-          current_ans = compute_answer("cwd", root, keyer) do |enc|
-            enc.str(root)
-            enc.str(rel_path)
+          # A CWD record is the directory the program stood in after a
+          # `Dir.cd` or saw from a cwd read: a real path, recorded as
+          # (root, path). The runner's own cwd says nothing about it. Replay
+          # asks whether that directory still resolves to the same real
+          # path: gone, or a symlink retargeted, and the run is not the same.
+          target = roots.resolve(obs.root, obs.path)
+          real = File.directory?(target) ? (File.realpath(target) rescue nil) : nil
+          unless real
+            return "run: cwd #{obs.path} is gone"
+          end
+          rp = roots.map(real)
+          current_ans = compute_answer("cwd", rp.root, keyer) do |enc|
+            enc.str(rp.root)
+            enc.str(rp.path)
           end
 
           if current_ans != obs.answer
-            return "run: cwd changed"
+            return "run: cwd #{obs.path} changed"
           end
         when "taint"
           # Taints represent non-reusable operations

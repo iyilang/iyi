@@ -40,7 +40,7 @@ import std/slice::{Slice, Bytes}
     fun getenv(name : UInt8*) : UInt8*
     fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
     fun gethostname(name : UInt8*, len : UInt64) : Int32
-    fun stat = stat64(path : UInt8*, buf : StatDarwin*) : Int32
+    fun stat = stat64(path : UInt8*, buf : Void*) : Int32
     fun realpath(path : UInt8*, resolved : UInt8*) : UInt8*
   end
 {% elsif flag?(:linux) %}
@@ -169,8 +169,8 @@ end
 @@enabled = false
 @@fd = -1_i64
 @@scratch = ""
-@@written_paths = Set(String).new
-@@written_env = Set(String).new
+@@written_paths = ::Set(String).new
+@@written_env = ::Set(String).new
 @@task_depths = Hash(UInt64, Int32).new
 
 def self.enter_frame(tid : UInt64 = current_task_id) : ::Bool
@@ -487,7 +487,11 @@ end
 
 private def self.current_task_id : UInt64
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-    IyiScheduler.current.object_id
+    {% if !flag?(:single_thread) %}
+      IyiScheduler.state_id != 0_u64 ? IyiScheduler.current.object_id : 0_u64
+    {% else %}
+      0_u64
+    {% end %}
   {% else %}
     0_u64
   {% end %}
@@ -603,7 +607,7 @@ end
 private def self.stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
   {% if flag?(:darwin) %}
     st = uninitialized LibObserveC::StatDarwin
-    if LibObserveC.stat(real.to_unsafe, pointerof(st)) == 0
+    if LibObserveC.stat(real.to_unsafe, pointerof(st).as(Void*)) == 0
       mode = st.st_mode_nlink.to_i64 & 0xffff_i64
       ftype = mode_to_ftype(mode)
       size = st.st_size.to_u64

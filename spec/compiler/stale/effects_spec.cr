@@ -344,6 +344,38 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       internal_reason = reasons.find { |r| r.reason.starts_with?("call to internal def:") }.not_nil!
       internal_reason.site.not_nil!.should match(/^src:.*call_internal_test\.iyi:\d+$/)
     end
+
+    it "does not flag a program call to an internal def that returns Nil (raise, collector toggles)" do
+      runtime_file = File.join(Dir.current, "src", "std", "internal_toggle.iyi")
+      program_file = File.join(Dir.current, "src", "call_toggle_test.iyi")
+
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+      parser1 = program.new_parser(<<-CODE)
+        @[Effect(:collector)]
+        def worker_internal_toggle : Nil
+          nil
+        end
+        CODE
+      parser1.filename = runtime_file
+      node1 = program.normalize(parser1.parse)
+      program.semantic(node1)
+
+      parser2 = program.new_parser(<<-CODE)
+        def user_code
+          worker_internal_toggle
+        end
+        user_code
+        CODE
+      parser2.filename = program_file
+      node2 = program.normalize(parser2.parse)
+      final_node = program.semantic(node2)
+
+      reach = Iyi::Stale::ReachWalk.walk(program, final_node)
+      closure = Iyi::Effects.closure_check(program, reach)
+
+      closure.not_reusable.select { |r| r.reason.starts_with?("call to internal def:") }.should be_empty
+    end
   end
 
   describe "closure check: runtime files and RG3 reporting" do

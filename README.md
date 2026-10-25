@@ -217,6 +217,37 @@ Compiling code it has never seen costs roughly 25 ms per thousand lines. The
 front end alone is 0.034 s for `hello`, and 0.018 s of that is the process
 starting up before it reads anything.
 
+### A web server's cores (issue #145)
+
+Issue #145 ported a web API to iyi and found it never used more than 1.8
+of twelve cores, while its Go port used 11. `Server.serve_parallel`
+answers connections on a pool of workers. The table below compares it
+with `Server.serve` and a Go twin that answers the same bytes. It covers
+the issue's kinds of endpoint, without the issue's database: a bcrypt
+login, a `check_version` that answers a few fields of JSON, and an
+`order` that reads, totals and sorts sixteen items of JSON.
+
+It was taken with `bench/web_cores.py`: wrk with 4 threads and 32
+kept-alive connections, bcrypt at cost 10, `serve_parallel` on 1, 2, 4,
+8 and 12 workers, best of 3 runs of 15 s (login) and 5 s (the others).
+The machine was Linux on a twelve-thread VM, with other work keeping
+about 2 of its cores busy. Each cell is requests a second over HTTP, with
+the server's CPU in brackets:
+
+| | login | check_version | order |
+|---|---:|---:|---:|
+| iyi `serve` | 27 (100%) | 46,241 (112%) | 33,665 (113%) |
+| iyi `serve_parallel`, 12 workers | **247** (1,032%) | 205,879 (631%) | **131,160** (697%) |
+| Go net/http | 242 (1,033%) | **216,298** (528%) | 90,732 (538%) |
+| *the issue's iyi: Windows, with a database* | *9.9* | *5,308* | |
+| *the issue's Go: Windows, with a database* | *108.2* | *21,099* | |
+
+The login is now as fast as Go's: bcrypt takes the same CPU per hash in
+both, and the gap was the number of cores in use. Past four workers, the
+light endpoints are held back by the load generator, and in iyi also by
+the collector's allocation lock. SPEC.md III.4.13 has every worker count,
+HTTPS, the latencies, and the profile behind both claims.
+
 ## The rules everything follows from
 
 | Rule | |

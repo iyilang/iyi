@@ -4143,6 +4143,104 @@ identities, protocols and ECH keys are the server's for its life -
 another set is another `serve_parallel` - and a ticket outlives neither
 the process nor a move to another server, as under `serve`.
 
+**Issue #145's shape, measured against Go.** The issue timed a whole
+application with a database. This times the three kinds of endpoint where
+its gap was widest, written once in iyi (`bench/web_cores.iyi`) and once
+in Go (`bench/web_cores/main.go`, net/http, encoding/json and
+golang.org/x/crypto/bcrypt). Before anything is timed, both servers must
+answer every request with the same bytes. There is no database: the
+issue's tuned pool is out of scope, and what is measured is what a
+server's own cores do with a request. The endpoints:
+
+- `login` checks a JSON body's password with bcrypt. The issue does not
+  state its cost, so cost 10 is used.
+- `check_version` reads a query and answers five fields of JSON.
+- `order` reads sixteen line items of JSON, totals and sorts them, and
+  answers in JSON.
+
+How it was taken - `bench/web_cores.py`: wrk with 4 threads and 32
+kept-alive connections, bcrypt at cost 10, `serve_parallel` on 1, 2, 4, 8
+and 12 workers, best of 3 runs of 15 s (login) and 5 s (the others). Each
+run waits for the server to finish what the run before left it. The
+machine was Linux on a twelve-thread QEMU VM, with release builds and Go
+1.25.14 at its default GOMAXPROCS; measured on 2026-10-25. Other work kept
+1.5 to 2.7 cores busy throughout (/proc/stat's busy time less the
+server's and wrk's), and wrk itself used up to 2 cores. Each cell is
+requests a second, the server's CPU as a share of one core, and p50 / p99
+latency in ms.
+
+| HTTP | login | check_version | order |
+|---|---:|---:|---:|
+| iyi `serve` | 27, 100%, 1190 / 1280 | 46,241, 112%, 0.7 / 2.3 | 33,665, 113%, 0.9 / 2.4 |
+| `serve_parallel`, 1 worker | 26, 100%, 1120 / 1570 | 45,445, 111%, 0.7 / 2.4 | 32,770, 111%, 0.9 / 2.7 |
+| `serve_parallel`, 2 | 52, 200%, 564 / 774 | 98,700, 213%, 0.3 / 2.4 | 69,092, 220%, 0.4 / 2.6 |
+| `serve_parallel`, 4 | 103, 400%, 289 / 404 | 195,346, 424%, 0.1 / 2.5 | 119,769, 468%, 0.2 / 2.9 |
+| `serve_parallel`, 8 | 196, 797%, 164 / 201 | 208,641, 602%, 0.1 / 3.6 | 137,744, 605%, 0.2 / 4.2 |
+| `serve_parallel`, 12 | 247, 1,032%, 128 / 174 | 205,879, 631%, 0.1 / 4.2 | 131,160, 697%, 0.2 / 6.9 |
+| Go net/http | 242, 1,033%, 129 / 215 | 216,298, 528%, 0.1 / 3.0 | 90,732, 538%, 0.2 / 3.5 |
+| *the issue's, iyi (Windows, with its database)* | *9.9* | *5,308* | |
+| *the issue's, Go (Windows, with its database)* | *108.2* | *21,099* | |
+
+| HTTPS (TLS 1.3, Ed25519) | login | check_version | order |
+|---|---:|---:|---:|
+| iyi `serve` | 27, 100%, 1180 / 1220 | 37,828, 114%, 0.8 / 2.5 | 25,668, 114%, 1.2 / 2.8 |
+| `serve_parallel`, 1 worker | 26, 100%, 1120 / 1550 | 38,313, 109%, 0.8 / 2.6 | 25,433, 109%, 1.2 / 3.0 |
+| `serve_parallel`, 2 | 53, 200%, 564 / 772 | 76,018, 220%, 0.4 / 2.6 | 54,217, 226%, 0.6 / 2.9 |
+| `serve_parallel`, 4 | 104, 400%, 288 / 396 | 149,869, 449%, 0.2 / 2.8 | 93,015, 497%, 0.3 / 3.1 |
+| `serve_parallel`, 8 | 197, 796%, 166 / 203 | 160,483, 605%, 0.1 / 3.9 | 116,324, 625%, 0.2 / 4.8 |
+| `serve_parallel`, 12 | 246, 1,030%, 128 / 180 | 143,231, 641%, 0.1 / 7.1 | 89,939, 735%, 0.3 / 11.2 |
+| Go net/http | 241, 1,032%, 129 / 228 | 169,636, 503%, 0.1 / 3.0 | 67,950, 504%, 0.3 / 3.8 |
+
+The issue's rows are its own numbers. They were taken on Windows 11 in a
+twelve-vCPU QEMU VM, with iyi 0.19.0 and a database behind every endpoint,
+so set them beside these for their ratio and not their size.
+
+**The login gap was cores, and it is closed.** Taken one request at a
+time on one connection, a cost-10 verify costs 37.0 to 38.5 ms of CPU
+in iyi (`serve`, and `serve_parallel` on 1 and 2 workers) and 38.0 to 38.5
+ms in Go (GOMAXPROCS 1 and 2). std/password's bcrypt is therefore not
+what was slow. On twelve workers iyi answers 247 logins a second on
+1,032% CPU, where Go answers 242 on 1,033%. The issue's ratio was 108.2 to
+9.9, about 11 to 1. Under `serve` the logins are answered first come,
+first served. Under `serve_parallel` the preemption of part 9 interleaves
+the logins on a worker, and they finish in batches about a second apart,
+which widens the spread: at one worker p50 is 1,120 ms against `serve`'s
+1,190, and p99 is 1,570 against 1,280.
+
+**The light endpoints scale to four workers, and then stop for two
+reasons.** On one worker `serve_parallel` answers what `serve` does, to
+within 3% on both endpoints and both protocols. On four it answers 4.2
+times `serve`'s `check_version` and 3.6 times its `order`. Past four, the
+first limit is the load generator and loopback: Go stops at 216,298
+`check_version` a second while using only 528% CPU. The second limit is
+iyi's own. perf is closed to
+unprivileged users on this machine, so every thread's stack was sampled
+with gdb instead: 20 stops during a 12-worker HTTPS `check_version` run,
+and 20 during a 4-worker one.
+
+- With twelve workers, 139 of the 260 samples of the threads serving
+  (twelve workers and the accepting thread) were inside `IyiRuntimeLock`.
+  Those threads were spinning, yielding the core, or parked for a stop,
+  all on the allocator's slow path: a size class's list refilled
+  (`refill`), a lazy sweep (`sweep_one`), or pages reopened
+  (`reopen_pages`).
+- With four workers, 17 of 100 samples were inside it.
+
+So at twelve workers over HTTPS, `check_version` answers 143,231 a second
+on 641% CPU, against Go's 169,636 on 503%: 22,000 a second per core
+against 34,000. At four workers iyi answers 33,000 per core. The lock is
+the collector's (GC_DESIGN.md), taken for a refill that each thread's own
+lists cannot satisfy. Making it per-thread or batching the refill is a
+change to the allocator, not to std/http, and it is not made here. `order`
+is answered faster per core than Go's on every row up to eight workers:
+137,744 a second on 605% CPU against Go's 90,732 on 538%.
+
+`bench/web_cores.py` is not a gate. On this shared machine its rows move
+with whatever else runs, and wrk takes cores the twelve-worker rows want.
+`bench/measured_numbers.py` names it among what a shared runner cannot
+check, and holds the sentence above (connections, cost, workers, runs) to
+the script's constants and the stored hash's cost to the script's.
+
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
 II.9 left this open with a concrete case: Kemal registers routes as a side

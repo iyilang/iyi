@@ -1,0 +1,220 @@
+# Issue #145's endpoint mix as a server: the iyi half of
+# `bench/web_cores.py`, which builds it and its Go twin
+# (`bench/web_cores/main.go`) and drives both with wrk.
+#
+#   ./bin/iyi run bench/web_cores.iyi
+#   ./bin/iyi build --release bench/web_cores.iyi -o web
+#   ./web serve|parallel WORKERS PORTFILE [tls]
+#
+# Three endpoints, the shapes the issue says carry the gap:
+#
+#   POST /login          a JSON body naming a user and a password, checked
+#                        with `Bcrypt.verify` against a stored cost-10 hash;
+#   GET  /check_version  a client's platform and version from the query,
+#                        compared with the current ones, answered in JSON;
+#   POST /order          sixteen line items in JSON, totalled, the three
+#                        largest picked out, and answered in JSON.
+#
+# No database. The issue's app read one through a tuned pool, and that pool
+# is out of scope here: these three are what the server's own cores do.
+#
+# `serve` answers on one thread, `parallel` on WORKERS of the pool's
+# (`Server.serve_parallel`), and `tls` serves HTTPS with
+# `bench/std_http_parallel.iyi`'s test PKI, an Ed25519 leaf for localhost.
+# The port goes to PORTFILE and the server runs until it is killed.
+#
+# With no arguments each endpoint is asked once in this process and its
+# answer printed: the answers the Go twin gives too, which
+# `bench/web_cores.py` holds both servers to over the wire before it times
+# either.
+
+module bench/web_cores
+
+import std/http::{Request, Response, Server}
+import std/socket::{IyiSocket}
+import std/tls::{TlsServerConfig}
+import std/password::{Bcrypt}
+import std/json::{JSON, serializable}
+import std/file::{File}
+
+# "correct horse battery staple" at cost 10, as Python's bcrypt wrote it.
+# The issue does not say which cost its login used, so this is the one
+# the issue's brief names when none is stated.
+STORED = "$2b$10$kUj/jTAf4epbl60uJp1DrO1.9/rLc0aH1R6bGrunr.zUgxVg9tb5S"
+USER   = "ada@example.com"
+
+LEAF_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBQzCB9qADAgECAgEDMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowFDESMBAGA1UEAwwJ\n" \
+           "bG9jYWxob3N0MCowBQYDK2VwAyEAOeskudtTVi76JObK6QHqJy6M7PaEu/aLlC5H\n" \
+           "B5OLks+jZjBkMBQGA1UdEQQNMAuCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAAMB0G\n" \
+           "A1UdDgQWBBQN8ZJay/U7zf07disj78hKukvGAjAfBgNVHSMEGDAWgBSNjkTWVhBs\n" \
+           "a874Ao2cPFX4w4saajAFBgMrZXADQQAcAgj9qe58GnzceRkYfxyfNHxmqWOgDJkn\n" \
+           "b3rO1pz+8OCRioO1P+BhFa1FR/FMHSH9bOFEKfXfy3Nwr+y+GkMM\n" \
+           "-----END CERTIFICATE-----\n"
+KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
+          "MC4CAQAwBQYDK2VwBCIEIOYKs3OzEJYJ/j+ZQYLoAU929MQeanF9kupAR9HpeHJ8\n" \
+          "-----END PRIVATE KEY-----\n"
+
+struct Login
+  getter email : String
+  getter password : String
+
+  derive serializable
+end
+
+struct Item
+  getter id : Int64
+  getter price : Float64
+  getter qty : Int64
+
+  derive serializable
+end
+
+struct Order
+  getter items : Array(Item)
+
+  derive serializable
+end
+
+# A dotted version as one comparable number: three parts of up to three
+# digits each, a missing or unreadable part read as 0.
+def version_number(text : String) : Int64
+  parts = text.split(".")
+  number = 0_i64
+  i = 0
+  while i < 3
+    part = parts.size > i ? parts[i].to_i? : nil
+    number = number * 1000_i64 + (part || 0).to_i64
+    i = i + 1
+  end
+  number
+end
+
+def json(status : Int32, body : String) : Response
+  Response.new(status, body, {"Content-Type" => "application/json"})
+end
+
+def login(request : Request) : Response
+  asked = Login.from_json(request.body)
+  ok = asked.email == USER && Bcrypt.verify(asked.password, STORED)
+  body = JSON.build do |b|
+    b.object do
+      b.field("ok", ok)
+      b.field("user", ok ? asked.email : "")
+    end
+  end
+  json(ok ? 200 : 401, body)
+end
+
+def check_version(request : Request) : Response
+  form = request.form
+  platform = form["platform"]? || ""
+  latest = platform == "ios" ? "2.4.1" : "2.4.0"
+  minimum = "2.0.0"
+  have = version_number(form["version"]? || "0")
+  body = JSON.build do |b|
+    b.object do
+      b.field("platform", platform)
+      b.field("latest", latest)
+      b.field("minimum", minimum)
+      b.field("update", have < version_number(latest))
+      b.field("forced", have < version_number(minimum))
+    end
+  end
+  json(200, body)
+end
+
+def order(request : Request) : Response
+  items = Order.from_json(request.body).items
+  total = 0.0
+  count = 0_i64
+  items.each do |item|
+    total = total + item.price * item.qty.to_f64
+    count = count + item.qty
+  end
+  largest = items.sorted_by { |item| -(item.price * item.qty.to_f64) }
+  body = JSON.build do |b|
+    b.object do
+      b.field("lines", items.size)
+      b.field("count", count)
+      b.field("total_cents", (total * 100.0).round.to_i64)
+      b.field("largest") do
+        b.array do
+          i = 0
+          while i < 3 && i < largest.size
+            b.number(largest[i].id)
+            i = i + 1
+          end
+        end
+      end
+    end
+  end
+  json(200, body)
+end
+
+def answer(request : Request) : Response
+  case request.path
+  when "/login"
+    login(request)
+  when "/check_version"
+    check_version(request)
+  when "/order"
+    order(request)
+  else
+    Response.new(404, "not here")
+  end
+end
+
+# The body `bench/web_cores.py` posts to /order, built the same way.
+def order_body : String
+  JSON.build do |b|
+    b.object do
+      b.field("items") do
+        b.array do
+          i = 1
+          while i <= 16
+            b.object do
+              b.field("id", i.to_i64)
+              b.field("price", (i * 37 % 101).to_f64 + 0.25)
+              b.field("qty", (i % 5 + 1).to_i64)
+            end
+            i = i + 1
+          end
+        end
+      end
+    end
+  end
+end
+
+args = Program.args
+if args.size >= 3
+  IyiWorkers.count = args[1].to_i
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[2], "#{listener.local_port}\n")
+  if args.size >= 4 && args[3] == "tls"
+    config = TlsServerConfig.from_pem(LEAF_PEM, KEY_PEM).or_panic
+    config.alpn = ["http/1.1"]
+    if args[0] == "parallel"
+      Server.serve_parallel(listener, tls: config.frozen) { |request| answer(request) }
+    else
+      Server.serve(listener, tls: config) { |request| answer(request) }
+    end
+  elsif args[0] == "parallel"
+    Server.serve_parallel(listener) { |request| answer(request) }
+  else
+    Server.serve(listener) { |request| answer(request) }
+  end
+  exit 0
+end
+
+def asked(method : String, path : String, query : String?, body : String) : Nil
+  got = answer(Request.new(method, path, query, {} of String => String, body))
+  puts "#{method} #{path}#{query ? "?#{query}" : ""}: #{got.status} #{got.body}"
+end
+
+asked("POST", "/login", nil, "{\"email\":\"#{USER}\",\"password\":\"correct horse battery staple\"}")
+asked("POST", "/login", nil, "{\"email\":\"#{USER}\",\"password\":\"Tr0ub4dor&3\"}")
+asked("GET", "/check_version", "platform=android&version=2.3.9", "")
+asked("GET", "/check_version", "platform=ios&version=1.9", "")
+asked("POST", "/order", nil, order_body)

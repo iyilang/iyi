@@ -718,6 +718,7 @@ class ::File
     end
   end
 
+  @[Effect(:file_stat)]
   def self.info?(path : String | Path, follow_symlinks : Bool = true) : Info?
     p = path.to_s
     {% if flag?(:darwin) %}
@@ -945,6 +946,7 @@ class ::File
     # panicked. A path another process holds without sharing refuses every
     # open (ERROR_SHARING_VIOLATION, 32), which says nothing about the
     # permission, and is answered from the attributes as before.
+    @[Effect(:file_stat)]
     private def self.win_opens?(path : String, access : Int32) : Bool?
       wide = __iyi_wide_path(sys_path(path))
       return false if wide.address == 0_u64
@@ -974,6 +976,7 @@ class ::File
     end
   {% end %}
 
+  @[Effect(:file_stat)]
   def self.readable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 4) == 0
@@ -988,6 +991,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_stat)]
   def self.writable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 2) == 0
@@ -1056,6 +1060,7 @@ class ::File
   # `Int64` second and an `Int32` microsecond padded to eight, so four
   # `Int64` slots are the two structures and the odd slots are the
   # microseconds, zero.
+  @[Effect(:file_write, :touch)]
   def self.touch(path : String | Path, time : Int64 = 0_i64) : Nil
     p = path.to_s
     {% if flag?(:win32) %}
@@ -1168,6 +1173,7 @@ class ::File
     end
   {% end %}
 
+  @[Effect(:file_write, :rename)]
   def self.rename(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
     n = new_path.to_s
@@ -1232,6 +1238,7 @@ class ::File
     # index; and a handle's final path is the name it was opened by, in
     # the case the directory keeps, so two links answer two paths where a
     # name and its spelling in another case answer one.
+    @[Effect(:file_stat)]
     private def self.two_links?(old_wide : UInt16*, new_wide : UInt16*) : Bool
       nothing = Pointer(Void).new(0_u64)
       one = Std::File::LibKernel32.CreateFileW(old_wide, 0, 0x7, nothing, 3, 0x2200000, nothing)
@@ -1266,6 +1273,7 @@ class ::File
     end
   {% end %}
 
+  @[Effect(:file_write, :link)]
   def self.link(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
     n = new_path.to_s
@@ -1285,6 +1293,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_write, :symlink)]
   def self.symlink(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
     n = new_path.to_s
@@ -1332,6 +1341,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_read)]
   def self.readlink(path : String | Path) : String
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1406,6 +1416,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_stat)]
   def self.real_path(path : String | Path) : String
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1469,6 +1480,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_write, :chmod)]
   def self.chmod(path : String | Path, mode : Int32) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1506,6 +1518,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_write, :chmod)]
   def self.chown(path : String | Path, uid : Int32, gid : Int32) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1521,6 +1534,7 @@ class ::File
     # looks portable and is not.
   end
 
+  @[Effect(:file_write, :create)]
   def self.truncate(path : String | Path, size : Int64 = 0_i64) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1960,6 +1974,7 @@ class ::File
   # Sixteen hex digits nobody could have guessed: the kernel's randomness
   # where a call reaches it without another library, the clock and a
   # counter where the create alone is the guarantee.
+  @[Effect(:temp_name)]
   private def self.temp_token : String
     word = 0_u64
     {% if flag?(:linux) %}
@@ -1989,6 +2004,7 @@ class ::File
 
   # True when the file was made here and now; false when something was
   # already at the path, whatever it is; a panic for any other refusal.
+  @[Effect(:file_write, :create)]
   private def self.create_new(path : String) : Bool
     {% if flag?(:linux) %}
       # O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode 0600. EEXIST is 17.
@@ -2140,6 +2156,7 @@ class ::IyiIO
   end
 
   # Gives the lock back; one this file does not hold is no error.
+  @[Effect(:process)]
   def flock_unlock : Nil
     raise "cannot unlock a closed IO" if closed?
     {% if flag?(:win32) %}
@@ -2167,6 +2184,7 @@ class ::IyiIO
 
   # Whether the lock was taken; contention is false, any other failure a
   # panic naming it.
+  @[Effect(:process)]
   private def flock_try(exclusive : Bool) : Bool
     raise "cannot lock a closed IO" if closed?
     {% if flag?(:win32) %}
@@ -2205,6 +2223,7 @@ class ::IyiIO
   # no descriptor - a `Memory` - is -1, which Windows' `to_u64` of it
   # panicked "arithmetic overflow" on; it is EBADF everywhere, as Linux's
   # kernel answers it.
+  @[Effect(:file_read)]
   protected def self.lseek(fd : Int64, offset : Int64, whence : Int32) : Int64
     return -9_i64 if fd < 0_i64
     {% if flag?(:win32) %}

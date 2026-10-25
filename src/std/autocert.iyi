@@ -43,6 +43,23 @@
 # connections are, and `Share` keeps it out of a block `spawn_parallel`
 # runs.
 #
+# **Under `serve_parallel`.** `frozen_tls_config` is `tls_config` frozen
+# (std/tls's `TlsFrozenServerConfig`) for a server whose handshakes run
+# on every worker, and the manager's state stays on the thread `run`
+# runs on. What the workers share with it is `Share` by its fields: the
+# certificates held, and the tls-alpn-01 challenges up, each a table
+# behind a `Mutex` that the manager writes as it keeps a certificate or
+# puts a challenge up, and a `Channel` to `run`. A handshake for a name
+# whose certificate is held and current is answered on its worker from
+# the table, a challenge under acme-tls/1 alone the same; any other -
+# a name not held yet, one expired, one refused - is sent to `run` as an
+# ask, which a task of its group answers with `identity_for`, so one
+# order serves however many workers ask for a name at once and a failure
+# is remembered as under `serve`. The worker waits for the answer no
+# longer than its handshake's time and `wait_ms`. So `run` must run: an
+# ask nothing takes is refused with internal_error once that time is
+# up. A name held is answered without asking `host_policy` again.
+#
 # **A handshake waits no longer than its deadline.** std/tls tells the
 # manager what is left of the handshake's time (`HANDSHAKE_TIMEOUT_MS`,
 # or the server's own), and a handshake's wait for an order is cut to
@@ -112,8 +129,9 @@ import std/p256::{P256PrivateKey}
 import std/ecdsa::{EcdsaError}
 import std/file::{File}
 import std/dir::{Dir}
-import std/tls::{TlsClient, TlsConfig, TlsServerConfig, TlsIdentity, TlsError, TlsAlert}
+import std/tls::{TlsClient, TlsConfig, TlsServerConfig, TlsFrozenServerConfig, TlsIdentity, TlsError, TlsAlert}
 import std/http::{Request, Response}
+import std/mutex::{Mutex}
 import std/random::{Random}
 import std/base64::{Base64}
 import std/time::{Time, Span}
@@ -305,6 +323,8 @@ pub class AutocertManager
   # handshake in; the names whose order waits for it to start one.
   @running : Bool = false
   @queued : Array(String) = [] of String
+  # What a `frozen_tls_config`'s workers read and ask (`AutocertShared`).
+  @shared : AutocertShared = AutocertShared.new
 
   # A manager for the CA whose directory is at *directory_url*, keeping
   # its keys and certificates in *cache*, that answers for *hosts* alone.
@@ -332,6 +352,17 @@ pub class AutocertManager
     config.alpn = protocols
     config.identity_source = ->(name : String?, offered : Array(String)?, left : Int32?) { identity_for(name, offered, left).as(TlsIdentity | TlsError | Nil) }
     config
+  end
+
+  # *config* - `tls_config`'s, or one the program got from it and set
+  # more of, a `min_version` or `groups` - frozen for std/http's
+  # `Server.serve_parallel(tls:)`: its identity source runs on every
+  # worker, answers what this manager holds there, and asks `run` for the
+  # rest (the header says how). `run` must run while it serves.
+  def frozen_tls_config(config : TlsServerConfig = tls_config) : TlsFrozenServerConfig
+    shared = @shared
+    wait = @wait_ms
+    config.frozen { |name, offered, left| shared.identity_for(name, offered, left, wait) }
   end
 
   private def placeholder : TlsIdentity
@@ -517,6 +548,8 @@ pub class AutocertManager
 
   private def keep(name : String, held : AutocertHeld) : Nil
     @held[name] = held
+    current = AutocertCurrent.new(held.identity, held.not_before_ms, held.not_after_ms)
+    @shared.held.lock { |table| table[name] = current }
     @wake.put_now(0) if @wake.send_ready?
   end
 
@@ -659,12 +692,15 @@ pub class AutocertManager
     config = AcmeTlsAlpn01.config(name, key_authorization)
     return AutocertError.new(config.message) if config.is_a?(AcmeError)
     @alpn_challenges[name] = config.identity
+    challenge = config.identity
+    @shared.challenges.lock { |table| table[name] = challenge }
     @http01.add(token, key_authorization)
     nil
   end
 
   def remove_challenge(name : String, token : String) : Nil
     @alpn_challenges.delete(name)
+    @shared.challenges.lock { |table| table.delete(name) }
     @http01.remove(token)
   end
 
@@ -681,6 +717,8 @@ pub class AutocertManager
   # fails is tried again `retry_ms` later, doubling to an hour. While it
   # runs, the orders handshakes ask for run in its group too, so that one
   # outlives the handshake that asked; `stop` cancels those still running.
+  # It answers a `frozen_tls_config`'s workers too, each ask in a task of
+  # its group.
   def run : Nil
     @running = true
     defer settle
@@ -729,6 +767,8 @@ pub class AutocertManager
           cancelled = woken.is_a?(Cancelled)
         when halted = @halt.receive
           nil
+        when asked = @shared.asks.receive
+          answer_ask(g, asked) if asked.is_a?(AutocertAsk)
         when timeout(wait.to_i32)
           nil
         end
@@ -738,6 +778,20 @@ pub class AutocertManager
       # is left early.
       @flights.each_value { |flight| flight.abandoned = true }
       return
+    end
+  end
+
+  # *ask*, from a worker of a `frozen_tls_config`'s server, answered by a
+  # task of `run`'s group with the certificate `identity_for` would show
+  # here, or its refusal's sentence and alert. Spawned from a method, so
+  # the task holds this call's ask and not the loop's variable, which the
+  # next ask overwrites.
+  private def answer_ask(g : IyiGroup, ask : AutocertAsk) : Nil
+    g.spawn do
+      held = certificate(ask.name, ask.left_ms)
+      reply = held.is_a?(AutocertError) ? AutocertReply.new(nil, held.message, @host_policy.call(ask.name) ? TlsAlert::INTERNAL_ERROR : TlsAlert::UNRECOGNIZED_NAME) : AutocertReply.new(held.identity, "", 0_u8)
+      ask.reply.put_now(reply)
+      0
     end
   end
 
@@ -777,6 +831,106 @@ pub class AutocertManager
     return if flight.abandoned
     held.failures = held.failures + 1
     held.renew_at_ms = AutocertPem.now_ms + backoff(held.failures)
+  end
+end
+
+# What a manager shares with the workers of a `frozen_tls_config`'s
+# server, `Share` by its fields (SPEC.md III.4.4): the certificates it
+# holds and the tls-alpn-01 challenges it has up, each by name in a
+# table behind a `Mutex` that the manager writes and the workers read,
+# and the channel its `run` takes asks from.
+class AutocertShared
+  getter held : Mutex(Hash(String, AutocertCurrent))
+  getter challenges : Mutex(Hash(String, TlsIdentity))
+  getter asks : Channel(AutocertAsk)
+
+  def initialize
+    @held = Mutex.new { {} of String => AutocertCurrent }
+    @challenges = Mutex.new { {} of String => TlsIdentity }
+    @asks = Channel(AutocertAsk).new
+  end
+
+  # The identity a handshake on a worker is shown, as
+  # `AutocertManager#identity_for` answers it: from the tables when they
+  # hold it - a certificate current at this moment, or a challenge
+  # under acme-tls/1 alone - else asked of `run`, waited for no longer
+  # than *left_ms*, when given, and *wait_ms*.
+  def identity_for(server_name : String?, alpn : Array(String)?, left_ms : Int32?, wait_ms : Int32) : TlsIdentity | TlsError
+    return TlsError.new("autocert: the client names no host (server_name)", TlsAlert::UNRECOGNIZED_NAME) unless server_name
+    name = server_name.downcase
+    challenge = !alpn.nil? && alpn.size == 1 && alpn[0] == AcmeTlsAlpn01::PROTOCOL
+    if challenge
+      up = @challenges.get { |table| table[name]? }
+      return up if up.is_a?(TlsIdentity)
+      return TlsError.new("autocert: no tls-alpn-01 challenge is up for #{name}", TlsAlert::UNRECOGNIZED_NAME)
+    end
+    now = AutocertPem.now_ms
+    held = @held.get { |table| table[name]? }
+    return held.identity if held.is_a?(AutocertCurrent) && held.current?(now)
+    ask(name, left_ms, wait_ms)
+  end
+
+  private def ask(name : String, left_ms : Int32?, wait_ms : Int32) : TlsIdentity | TlsError
+    limit = left_ms && left_ms < wait_ms ? left_ms : wait_ms
+    started = AutocertPem.now_ms
+    reply = Channel(AutocertReply).new(1)
+    sent = false
+    select
+    when @asks.send(AutocertAsk.new(name, left_ms, reply))
+      sent = true
+    when timeout(limit)
+      nil
+    end
+    return TlsError.new("autocert: no `run` took the ask for #{name} in #{limit} ms; a frozen_tls_config's server needs the manager's `run`", TlsAlert::INTERNAL_ERROR) unless sent
+    left = limit - (AutocertPem.now_ms - started).to_i32
+    left = 1 if left < 1
+    answered = nil.as(AutocertReply?)
+    select
+    when got = reply.receive
+      answered = got if got.is_a?(AutocertReply)
+    when timeout(left)
+      nil
+    end
+    return TlsError.new("autocert: #{name}'s certificate did not come in the #{limit} ms its handshake had", TlsAlert::INTERNAL_ERROR) unless answered
+    identity = answered.identity
+    identity || TlsError.new(answered.message, answered.alert)
+  end
+end
+
+# A certificate a manager holds, as the workers read it: what it shows
+# and while when.
+struct AutocertCurrent
+  getter identity : TlsIdentity
+  getter not_before_ms : Int64
+  getter not_after_ms : Int64
+
+  def initialize(@identity : TlsIdentity, @not_before_ms : Int64, @not_after_ms : Int64)
+  end
+
+  def current?(now_ms : Int64) : Bool
+    now_ms >= @not_before_ms && now_ms < @not_after_ms
+  end
+end
+
+# A worker's ask of `run` for a certificate: the name, the handshake's
+# time left, and where the answer goes.
+struct AutocertAsk
+  getter name : String
+  getter left_ms : Int32?
+  getter reply : Channel(AutocertReply)
+
+  def initialize(@name : String, @left_ms : Int32?, @reply : Channel(AutocertReply))
+  end
+end
+
+# `run`'s answer: the identity, or the error's sentence and alert - a
+# `TlsError` holds an array, so it does not cross threads itself.
+struct AutocertReply
+  getter identity : TlsIdentity?
+  getter message : String
+  getter alert : UInt8
+
+  def initialize(@identity : TlsIdentity?, @message : String, @alert : UInt8)
   end
 end
 

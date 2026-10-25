@@ -33,157 +33,147 @@ fi
 run_rg2() {
   echo "== Running RG2: equivalence under observation (-Diyi_observe with IYI_OBSERVE) =="
   "$PY" -c "
-import os, sys, glob, subprocess, concurrent.futures
+import concurrent.futures, glob, os, subprocess, sys
 
-repo = sys.argv[1]
-iyi = sys.argv[2]
-work = sys.argv[3]
-
+repo, iyi, work = sys.argv[1:]
 samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
 bench = sorted(glob.glob(os.path.join(repo, 'bench/std_*_exercise.iyi')))
-all_progs = samples + bench
+programs = samples + bench
 
-EXCLUDED = {
-    # 1. Non-deterministic output (time, allocator metrics, thread counts, scratch paths)
-    \"bench/std_time_exercise.iyi\": \"prints current wall-clock time\",
-    \"bench/std_weak_ref_exercise.iyi\": \"prints non-deterministic thread race counts across 4 threads\",
-    \"bench/std_file_utils_exercise.iyi\": \"prints temp paths and timestamps\",
-
-    # 2. Heavy computational benchmarks / stress tests that exceed standalone execution budget
-    \"bench/std_big_exercise.iyi\": \"benchmark measuring elapsed execution time for exponentiations\",
-    \"bench/std_bzip2_exercise.iyi\": \"heavy compression benchmark exceeding run timeout\",
-    \"bench/std_compress_exercise.iyi\": \"heavy compression benchmark exceeding run timeout\",
-    \"bench/std_csv_exercise.iyi\": \"heavy dataset processing benchmark exceeding run timeout\",
-    \"bench/std_fuzz_exercise.iyi\": \"multi-iteration fuzzing loop exceeding run timeout\",
-    \"bench/std_gc_exercise.iyi\": \"prints collector memory stats and runs heavy collection loops\",
-    \"bench/std_http_exercise.iyi\": \"network HTTP client/server loop exceeding run timeout\",
-    \"bench/std_mutex_exercise.iyi\": \"thread contention stress test exceeding run timeout\",
-    \"bench/std_password_exercise.iyi\": \"costly cryptographic key derivation exceeding run timeout\",
-    \"bench/std_shared_proc_exercise.iyi\": \"multi-fiber concurrency stress test exceeding run timeout\",
-    \"bench/std_tar_exercise.iyi\": \"archive compression benchmark exceeding run timeout\",
-    \"bench/std_text_scale_exercise.iyi\": \"large text scaling benchmark exceeding run timeout\",
-    \"bench/std_toml_exercise.iyi\": \"large document parsing benchmark exceeding run timeout\",
-    \"bench/std_xml_exercise.iyi\": \"large document parsing benchmark exceeding run timeout\",
-    \"bench/std_xz_exercise.iyi\": \"heavy compression benchmark exceeding run timeout\",
-    \"bench/std_zstd_exercise.iyi\": \"heavy compression benchmark exceeding run timeout\",
-
-    # 3. Intentional panic tests that emit callstack backtraces to stderr containing randomized load addresses
-    \"bench/std_cookie_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_dir_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_dns_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_file_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_ini_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_io_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_json_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_log_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_number_format_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_option_parser_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_regex_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_router_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_steppable_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_string_scanner_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_websocket_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
-    \"bench/std_yaml_exercise.iyi\": \"negative panic tests emit stack backtrace with load addresses\",
+# RG2 must not hide time, address, schedule, or scratch output behind a
+# hand-maintained exclusion list. Every program gets two normal executions
+# first. Their differing lines are the only values this run is allowed to
+# mask when comparing the observed execution.
+#
+# Normal runs have a 60 s ceiling. The corpus exercises that deliberately do
+# compression, fuzzing, or large parsing get 180 s, rather than being dropped.
+DEFAULT_TIMEOUT = 60
+HEAVY_TIMEOUT = 180
+HEAVY = {
+    'bench/std_big_exercise.iyi', 'bench/std_bzip2_exercise.iyi',
+    'bench/std_compress_exercise.iyi', 'bench/std_csv_exercise.iyi',
+    'bench/std_fuzz_exercise.iyi', 'bench/std_gc_exercise.iyi',
+    'bench/std_http_exercise.iyi', 'bench/std_mutex_exercise.iyi',
+    'bench/std_password_exercise.iyi', 'bench/std_shared_proc_exercise.iyi',
+    'bench/std_tar_exercise.iyi', 'bench/std_text_scale_exercise.iyi',
+    'bench/std_toml_exercise.iyi', 'bench/std_xml_exercise.iyi',
+    'bench/std_xz_exercise.iyi', 'bench/std_zstd_exercise.iyi',
 }
 
-def check_prog(item):
-    idx, prog = item
-    name = os.path.relpath(prog, repo)
-    if name in EXCLUDED:
-        return ('excluded', name, EXCLUDED[name])
-    prog_dir = os.path.join(work, str(idx))
-    os.makedirs(prog_dir, exist_ok=True)
-    normal_bin = os.path.join(prog_dir, 'normal.bin')
-    observe_bin = os.path.join(prog_dir, 'observe.bin')
-    trace_file = os.path.join(prog_dir, 'trace.bin')
+def timeout_for(name):
+    return HEAVY_TIMEOUT if name in HEAVY else DEFAULT_TIMEOUT
 
-    # 1. Build normal
+def run(argv, *, env=None, timeout):
+    return subprocess.run(argv, env=env, capture_output=True,
+                          text=False, timeout=timeout)
+
+def lines(value):
+    return value.splitlines(keepends=True)
+
+def calibrated_mask(first, second):
+    one, two = lines(first), lines(second)
+    if len(one) != len(two):
+        return None
+    return {index for index, (left, right) in enumerate(zip(one, two)) if left != right}
+
+def matches_outside_mask(expected, actual, mask):
+    before, after = lines(expected), lines(actual)
+    if len(before) != len(after):
+        return False, 'line count %d != %d' % (len(before), len(after))
+    for index, (left, right) in enumerate(zip(before, after)):
+        if index not in mask and left != right:
+            return False, 'line %d differs outside normal-run mask' % (index + 1)
+    return True, ''
+
+def check(item):
+    index, program = item
+    name = os.path.relpath(program, repo)
+    timeout = timeout_for(name)
+    directory = os.path.join(work, str(index))
+    os.makedirs(directory, exist_ok=True)
+    cache = os.path.join(directory, 'cache')
+    os.makedirs(cache, exist_ok=True)
+    env = dict(os.environ, IYI_CACHE_DIR=cache)
+    normal = os.path.join(directory, 'normal.bin')
+    observed = os.path.join(directory, 'observe.bin')
+    trace = os.path.join(directory, 'trace.bin')
+
     try:
-        res_nb = subprocess.run([iyi, 'build', '-o', normal_bin, prog],
-                                capture_output=True, text=True, errors='replace', timeout=30)
+        normal_build = run([iyi, 'build', '-o', normal, program], env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return ('timeout_build_normal', name, '')
-    if res_nb.returncode != 0:
-        return ('skip_normal_build_failed', name, res_nb.stderr[:100])
+        return 'excluded', name, 'normal build exceeded %ss ceiling' % timeout
+    if normal_build.returncode:
+        return 'excluded', name, 'normal build failed: ' + normal_build.stderr.decode(errors='replace')[:100]
 
-    # 2. Build with -Diyi_observe
+    # Calibration is deliberately normal versus normal. It does not bless a
+    # changed observation build and it never compares an observed result to a
+    # mask copied from another program.
     try:
-        res_ob = subprocess.run([iyi, 'build', '-Diyi_observe', '-o', observe_bin, prog],
-                                capture_output=True, text=True, errors='replace', timeout=30)
+        first = run([normal], timeout=timeout)
+        second = run([normal], timeout=timeout)
     except subprocess.TimeoutExpired:
-        return ('timeout_build_observe', name, '')
-    if res_ob.returncode != 0:
-        err = res_ob.stderr
-        if 'cannot carry @[Effect' in err or 'mismatched signature' in err or 'annotate the non-yielding helper' in err:
-            return ('c9_refused', name, '')
-        return ('fail_build_observe', name, err.strip()[:100])
+        return 'excluded', name, 'normal run exceeded %ss ceiling' % timeout
+    if first.returncode != second.returncode:
+        return 'excluded', name, 'normal runs disagree on exit (%d != %d)' % (first.returncode, second.returncode)
+    stdout_mask = calibrated_mask(first.stdout, second.stdout)
+    stderr_mask = calibrated_mask(first.stderr, second.stderr)
+    if stdout_mask is None or stderr_mask is None:
+        return 'excluded', name, 'normal runs change output shape'
 
-    # 3. Run normal
     try:
-        res_nr = subprocess.run([normal_bin], capture_output=True, timeout=30)
+        observed_build = run([iyi, 'build', '-Diyi_observe', '-o', observed, program], env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return ('timeout_run_normal', name, '')
+        return 'fail', name, 'observed build exceeded %ss ceiling' % timeout
+    if observed_build.returncode:
+        return 'fail', name, 'observed build failed: ' + observed_build.stderr.decode(errors='replace')[:100]
 
-    # 4. Run observe with IYI_OBSERVE
-    env = dict(os.environ)
-    env['IYI_OBSERVE'] = trace_file
+    observe_env = dict(os.environ, IYI_OBSERVE=trace)
     try:
-        res_or = subprocess.run([observe_bin], env=env, capture_output=True, timeout=30)
+        observed_run = run([observed], env=observe_env, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return ('timeout_run_observe', name, '')
+        return 'fail', name, 'observed run exceeded %ss ceiling' % timeout
+    if first.returncode != observed_run.returncode:
+        return 'fail', name, 'exit %d != observed %d' % (first.returncode, observed_run.returncode)
+    stdout_ok, stdout_reason = matches_outside_mask(first.stdout, observed_run.stdout, stdout_mask)
+    if not stdout_ok:
+        return 'fail', name, 'stdout ' + stdout_reason
+    stderr_ok, stderr_reason = matches_outside_mask(first.stderr, observed_run.stderr, stderr_mask)
+    if not stderr_ok:
+        return 'fail', name, 'stderr ' + stderr_reason
+    if not os.path.isfile(trace) or os.path.getsize(trace) == 0:
+        return 'fail', name, 'observed run wrote no trace'
+    return 'pass', name, '%d masked stdout lines, %d masked stderr lines' % (len(stdout_mask), len(stderr_mask))
 
-    # 5. Assert equivalence
-    if res_nr.returncode != res_or.returncode:
-        return ('fail_exit_mismatch', name, f'normal={res_nr.returncode}, observe={res_or.returncode}')
-    if res_nr.stdout != res_or.stdout:
-        return ('fail_stdout_mismatch', name, '')
-    if res_nr.stderr != res_or.stderr:
-        return ('fail_stderr_mismatch', name, '')
-    if not os.path.exists(trace_file) or os.path.getsize(trace_file) == 0:
-        return ('fail_empty_trace', name, '')
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    results = list(executor.map(check, enumerate(programs)))
 
-    return ('pass', name, '')
-
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    results = list(executor.map(check_prog, enumerate(all_progs)))
-
-checked = 0
 passed = 0
-c9_refused = 0
+excluded = []
 failures = []
-excluded_count = 0
-print(f'Total results from executor: {len(results)}')
 for status, name, detail in results:
-    if status == 'skip_normal_build_failed':
-        print(f'  [skip] {name}: {detail}')
-        continue
-    if status == 'c9_refused':
-        c9_refused += 1
-        print(f'  [C9 refusal] {name}: mismatched signature detected')
-        continue
-    if status == 'excluded':
-        excluded_count += 1
-        print(f'  [excluded] {name}: {detail}')
-        continue
-    checked += 1
     if status == 'pass':
         passed += 1
+    elif status == 'excluded':
+        excluded.append((name, detail))
     else:
-        failures.append((name, f'{status}: {detail}'))
+        failures.append((name, detail))
 
-print(f'RG2: {passed} programs passed equivalence, {excluded_count} excluded, {c9_refused} C9 signature refusals, {len(failures)} failures out of {checked} evaluated')
+print('RG2: %d evaluated, %d passed, %d still excluded with reason, %d failures' %
+      (len(programs) - len(excluded), passed, len(excluded), len(failures)))
+for name, reason in excluded:
+    print('  [excluded after calibration] %s: %s' % (name, reason))
+for name, reason in failures:
+    print('  FAILED: %s -> %s' % (name, reason), file=sys.stderr)
 if failures:
-    for name, reason in failures[:5]:
-        print(f'  FAILED: {name} -> {reason}', file=sys.stderr)
     sys.exit(1)
-print('RG2 PASSED: all observation builds behave identically with normal builds')
+print('RG2 PASSED: observed builds match normal runs outside each program’s calibrated mask')
 " "$REPO" "$IYI" "$WORK"
 }
 
 run_rg5() {
   echo "== Running RG5 (trace half): each observer call is load-bearing =="
   "$PY" -c "
-import os, sys, shutil, subprocess
+import json, os, sys, shutil, subprocess
 
 repo = sys.argv[1]
 iyi = sys.argv[2]
@@ -447,6 +437,67 @@ Std::Observe.probe_code_location
             failed_kinds.append((kind, 'Trace still differed after dropping observer'))
             continue
     failed_kinds.append((kind, 'Patched trace not generated'))
+
+# The trace half proves the recorder carries each value. This is the runner
+# half: a missing observer makes a changed input look like a cache hit, but a
+# forced fresh audit executes the program and reports the contradicted verdict.
+e2e_root = os.path.join(work, 'e2e')
+e2e_lib = os.path.join(e2e_root, 'runtime')
+e2e_src = os.path.join(e2e_root, 'read_test.iyi')
+e2e_input = os.path.join(e2e_root, 'input.txt')
+e2e_cache = os.path.join(e2e_root, 'cache')
+os.makedirs(e2e_root, exist_ok=True)
+shutil.copytree(os.path.join(repo, 'src'), os.path.join(e2e_lib, 'src'))
+e2e_observe = os.path.join(e2e_lib, 'src/std/observe.iyi')
+observe_source = open(e2e_observe).read()
+method = 'def self.__iyi_observe_file_read'
+start = observe_source.find(method)
+finish = observe_source.find('\nend', start)
+signature_end = observe_source.find('\n', start)
+if start < 0 or finish < 0:
+    failed_kinds.append(('cached audit', 'could not patch file_read observer'))
+else:
+    with open(e2e_observe, 'w') as f:
+        f.write(observe_source[:signature_end + 1] + '  return\n' + observe_source[finish + 1:])
+    with open(e2e_src, 'w') as f:
+        f.write('''import std/file::{File}
+value = File.read(ENV[\"RG5_INPUT\"])
+assert value == \"before\"
+''')
+    with open(e2e_input, 'w') as f:
+        f.write('before')
+    e2e_env = dict(os.environ)
+    e2e_env['IYI_PATH'] = os.path.join(e2e_lib, 'src')
+    e2e_env['IYI_CACHE_DIR'] = e2e_cache
+    e2e_env['RG5_INPUT'] = e2e_input
+    first = subprocess.run([iyi, 'test', '--cached', '--json', e2e_src],
+                           env=e2e_env, cwd=e2e_root, capture_output=True, text=True)
+    second = subprocess.run([iyi, 'test', '--cached', '--json', e2e_src],
+                            env=e2e_env, cwd=e2e_root, capture_output=True, text=True)
+    with open(e2e_input, 'w') as f:
+        f.write('after')
+    false_hit = subprocess.run([iyi, 'test', '--cached', '--json', e2e_src],
+                               env=e2e_env, cwd=e2e_root, capture_output=True, text=True)
+    fresh = subprocess.run([iyi, 'test', '--fresh', '--json', e2e_src],
+                           env=e2e_env, cwd=e2e_root, capture_output=True, text=True)
+    try:
+        first_json = json.loads(first.stdout)
+        second_json = json.loads(second.stdout)
+        false_hit_json = json.loads(false_hit.stdout)
+        fresh_json = json.loads(fresh.stdout)
+    except json.JSONDecodeError:
+        failed_kinds.append(('cached audit', 'runner did not return JSON: ' + first.stdout[:200] + first.stderr[:200]))
+    else:
+        if first.returncode or first_json['cached'] != 0:
+            failed_kinds.append(('cached audit', 'recording run did not miss'))
+        elif second.returncode or second_json['cached'] != 1:
+            failed_kinds.append(('cached audit', 'unchanged run did not hit'))
+        elif false_hit.returncode or false_hit_json['cached'] != 1:
+            failed_kinds.append(('cached audit', 'dropped observer did not produce changed-input hit'))
+        elif fresh.returncode != 1 or fresh_json['failed'] != 1:
+            failed_kinds.append(('cached audit', 'fresh audit did not report contradicted verdict'))
+        else:
+            print('  [cached audit] dropped file_read observer hits after input change; --fresh reports the contradiction')
 
 print(f'RG5 (trace half): {len(passed_kinds)} / {len(kinds)} kinds proven load-bearing')
 if failed_kinds:

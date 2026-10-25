@@ -17,7 +17,7 @@ module Iyi::Stale
     getter key_path : String
 
     def initialize(cache_root : String? = nil)
-      @cache_root = cache_root || ENV["CRYSTAL_CACHE_DIR"]? || ENV["IYI_CACHE_DIR"]? || ".cache"
+      @cache_root = cache_root || ENV["IYI_CACHE_DIR"]? || ENV["CRYSTAL_CACHE_DIR"]? || CacheDir.instance.dir
       @root_dir = File.join(@cache_root, "tests-v1")
       @records_dir = File.join(@root_dir, "records")
       @masks_dir = File.join(@root_dir, "masks")

@@ -207,10 +207,10 @@ module Iyi::Semantic
       observer_path = Path.new(["Std", "Observe"], global: true).at(a_def)
       observer_path.iyi_synthetic = true
       if observe_mod = program.types["Std"]?.as?(ModuleType).try do |std|
-          std.types?.try do |inner|
-            inner["Observe"]?.as?(ModuleType)
-          end
-        end
+           std.types?.try do |inner|
+             inner["Observe"]?.as?(ModuleType)
+           end
+         end
         observer_path.target_type = observe_mod.metaclass
         observer_path.type = observe_mod.metaclass
       end
@@ -253,7 +253,7 @@ module Iyi::Semantic
           assign_res.as(ASTNode),
           if_node.as(ASTNode),
           leave_call.as(ASTNode),
-          res_var.as(ASTNode)
+          res_var.as(ASTNode),
         ]).at(a_def)
       end
 
@@ -267,18 +267,14 @@ module Iyi::Semantic
         path_arg = extract_path_arg(owner, a_def)
         method_name = "__iyi_observe_#{effect.kind.symbol_name}"
         Call.new(observer_path, method_name, [path_arg] of ASTNode).at(a_def)
-
       when EffectKind::DirList
         path_arg = extract_path_arg(owner, a_def)
         Call.new(observer_path, "__iyi_observe_dir_list", [path_arg, res_var.as(ASTNode)] of ASTNode).at(a_def)
-
       when EffectKind::EnvGet
         name_arg = to_string_node(Var.new(a_def.args[0].name).at(a_def), a_def.args[0].restriction, a_def)
         Call.new(observer_path, "__iyi_observe_env_get", [name_arg, res_var.as(ASTNode)] of ASTNode).at(a_def)
-
       when EffectKind::EnvAll
         Call.new(observer_path, "__iyi_observe_env_all", [] of ASTNode).at(a_def)
-
       when EffectKind::Cwd
         path_arg = if a_def.args.size >= 1
                      to_string_node(Var.new(a_def.args[0].name).at(a_def), a_def.args[0].restriction, a_def)
@@ -286,7 +282,6 @@ module Iyi::Semantic
                      to_string_node(res_var, a_def.return_type, a_def)
                    end
         Call.new(observer_path, "__iyi_observe_cwd", [path_arg] of ASTNode).at(a_def)
-
       when EffectKind::Host
         val_arg = if a_def.args.size >= 1
                     to_string_node(Var.new(a_def.args[0].name).at(a_def), a_def.args[0].restriction, a_def)
@@ -294,7 +289,6 @@ module Iyi::Semantic
                     to_string_node(res_var, a_def.return_type, a_def)
                   end
         Call.new(observer_path, "__iyi_observe_host", [val_arg] of ASTNode).at(a_def)
-
       when EffectKind::FileWrite
         op = effect.op.not_nil!
         op_arg = SymbolLiteral.new(op.symbol_name).at(a_def).as(ASTNode)
@@ -305,7 +299,6 @@ module Iyi::Semantic
                        NilLiteral.new.at(a_def).as(ASTNode)
                      end
         Call.new(observer_path, "__iyi_observe_file_write", [op_arg, path_arg, target_arg] of ASTNode).at(a_def)
-
       when EffectKind::Clock, EffectKind::Entropy, EffectKind::Timer,
            EffectKind::Network, EffectKind::Process, EffectKind::Signal,
            EffectKind::RuntimeTiming, EffectKind::CodeLocation,
@@ -314,15 +307,18 @@ module Iyi::Semantic
         site_arg = StringLiteral.new(site).at(a_def).as(ASTNode)
         method_name = "__iyi_observe_#{effect.kind.symbol_name}"
         Call.new(observer_path, method_name, [site_arg] of ASTNode).at(a_def)
-
       else
         raise "unsupported effect kind for wrapper: #{effect.kind}"
       end
     end
 
     private def self.to_string_node(node : ASTNode, restriction : ASTNode?, a_def : Def) : ASTNode
-      if restriction.try(&.to_s) == "String"
+      restr = restriction.try(&.to_s)
+      if restr == "String"
         node
+      elsif restr && (restr.includes?("UInt8") || restr.includes?("Pointer"))
+        observer_path = Path.new(["Std", "Observe"], global: true).at(a_def)
+        Call.new(observer_path, "c_str", [node] of ASTNode).at(a_def).as(ASTNode)
       else
         Call.new(node, "to_s").at(a_def).as(ASTNode)
       end

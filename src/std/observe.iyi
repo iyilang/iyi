@@ -539,8 +539,8 @@ private def self.current_task_id : UInt64
     0_u64
   {% end %}
 end
-
-private def self.c_str(ptr : UInt8*) : String
+@[Effect(:observation_channel)]
+def self.c_str(ptr : UInt8*) : String
   return "" if ptr.address == 0_u64
   len = 0
   while ptr[len] != 0_u8

@@ -54,7 +54,10 @@
   scheduler as on a channel, and on a program's one thread by the
   `Mutex` as before. Windows' process wait, where
   `RegisterWaitForSingleObject` is refused, asks with a zero wait between
-  sleeps instead of holding its thread.
+  sleeps instead of holding its thread: `bench/std_process_exercise.sh`
+  holds every check with the registration refused, and its broken copy
+  now also makes the zero wait INFINITE, the blocking wait it was, which
+  the sibling's ticks still catch.
 
 - **A parallel task computing in a loop gives its worker up after 5 to 10
   ms.** In a program with a pool, every loop of a def that is not the

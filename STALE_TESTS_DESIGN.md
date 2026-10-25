@@ -351,7 +351,7 @@ Automated in `bench/stale_tests.sh` unless marked CI:
 41. Changed `pkg-config` answer or `CHILD_ENV` value reruns; `ldflags` containing a backtick or `$` is refused; changed `locator` or `display` compiler variable hits.
 42. A walk constructed with one edge kind disabled (internal constructor argument; no CLI or environment surface) makes the recording build refuse with `reach mismatch` for a program using that edge; one in-process spec per edge kind.
 43. Two checks of one tree in separate processes, and on the `stale-fresh` runner, give one signature.
-44. A stale build under a refused mode (`IYI_OPTS="--no-cleanup"`) runs with a not-reusable reason.
+44. A stale build under a refused mode (`IYI_OPTS="--emit llvm-ir"`) runs with a not-reusable reason. `--no-cleanup` is refused too, but only tooling verbs accept it, since an uncleaned program cannot be generated; its refusal is proven in-process.
 45. Def returning `__LINE__` default (`def here(line = __LINE__) = line`): moving a call to `here()` to another line reruns.
 46. Failable downcast: moving the cast to another line reruns; `__iyi_raise_cast_failed` in prelude prevents codegen-time typing.
 47. Two processes checking a def taking `Int32 | String` compute identical signatures under canonical union sorting.

@@ -1019,6 +1019,7 @@ module Iyi
 
     def visit(node : ProcLiteral)
       fun_literal_name = fun_literal_name(node)
+      @program.stale_recorder.try &.record_proc_literal(node, fun_literal_name)
       is_closure = node.def.closure?
 
       # If we don't care about a proc literal's return type then we mark the associated

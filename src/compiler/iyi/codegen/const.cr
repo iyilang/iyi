@@ -179,6 +179,8 @@ class Iyi::CodeGenVisitor
   end
 
   def create_initialize_const_function(fun_name, const)
+    @program.stale_recorder.try &.record_const(const)
+
     global, _ = declare_const_and_initialized_flag(const)
 
     in_main do

@@ -140,6 +140,8 @@ class Iyi::CodeGenVisitor
   end
 
   def create_initialize_class_var_function(class_var, initializer)
+    @program.stale_recorder.try &.record_class_var(class_var)
+
     return nil if class_var.simple_initializer?
     type = class_var.type
     node = initializer.node

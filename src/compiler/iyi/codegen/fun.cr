@@ -263,6 +263,9 @@ class Iyi::CodeGenVisitor
   end
 
   def codegen_fun(mangled_name, target_def, self_type, is_exported_fun = false, fun_module_info = type_module(self_type), is_fun_literal = false, is_closure = false, iyi_internal = false)
+    if (recorder = @program.stale_recorder) && !is_fun_literal
+      recorder.record_def(mangled_name)
+    end
     old_position = insert_block
     old_entry_block = @entry_block
     old_alloca_block = @alloca_block

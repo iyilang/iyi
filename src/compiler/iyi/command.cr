@@ -1058,6 +1058,10 @@ class Iyi::Command
         compiler.use_iyimod = dir
       end
 
+      opts.on("--stale-key FILE", "iyi: write stale key OUT file") do |file|
+        compiler.stale_key = file
+      end
+
       unless no_codegen
         opts.on("--release", "Compile in release mode (-O3 --single-module)") do
           compiler.release!

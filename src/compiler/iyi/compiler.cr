@@ -203,6 +203,9 @@ module Iyi
     # and can later be used to generate API docs.
     property? wants_doc = false
 
+    property stale_key : String? = nil
+    property stale_drop : Stale::EdgeKind? = nil
+
     # Warning settings and all detected warnings.
     property warnings = WarningCollection.new
 
@@ -443,10 +446,14 @@ module Iyi
         program.macro_expansion_error_hook.try &.call(ex.cause)
       end
 
+      stale_check(program, node, sources)
+
       prepared = prepare_iyimods program
       keep_iyi_namespace program
 
       units = codegen program, node, sources, output_filename unless @no_codegen
+
+      stale_cross_check(program, sources)
 
       write_iyimods program, prepared, units
       fill_bind_artifact program, units
@@ -535,7 +542,7 @@ module Iyi
       cleanup cross_compile dependency_printer dump_ll emit_base_filename
       emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
       iyi_link_driver_only link_flags mattr mcmodel mcpu n_threads no_cleanup
-      program progress_tracker single_module stderr target_machine verbose
+      program progress_tracker single_module stale_drop stale_key stderr target_machine verbose
     )
 
     # Everything that changes what the prelude analyses *to*. Macros branch on
@@ -626,10 +633,14 @@ module Iyi
         program.macro_expansion_error_hook.try &.call(ex.cause)
       end
 
+      stale_check(program, node, source)
+
       prepared = prepare_iyimods program
       keep_iyi_namespace program
 
       units = codegen program, node, source, output_filename unless @no_codegen
+
+      stale_cross_check(program, source)
 
       write_iyimods program, prepared, units
       fill_bind_artifact program, units
@@ -4216,6 +4227,47 @@ module Iyi
     # asked of the streams this compiler was actually given.
     private def colorize(obj)
       obj.colorize.toggle(@color && Colorize.default_enabled?(stdout, stderr))
+    end
+
+    private def stale_check(program : Program, node : ASTNode, source_or_sources) : Nil
+      key_file = @stale_key
+      return unless key_file || @stale_drop
+
+      reach = Stale::ReachWalk.walk(program, node, drop: @stale_drop)
+      program.stale_reach = reach
+
+      recorder = Stale::Recorder.new
+      program.stale_recorder = recorder
+
+      if key_file
+        primary_source = source_or_sources.is_a?(Array) ? source_or_sources.first : source_or_sources
+        test_root = "src"
+        entry_root = Compiler.entry_root_of(primary_source.filename, primary_source.code)
+        test_path = ::Path[primary_source.filename].relative_to(entry_root).to_s
+        test_path = test_path[2..-1] if test_path.starts_with?("./")
+        Stale::KeyFile.write_out(key_file, phase: "checked", test_root: test_root, test_path: test_path, reach: reach)
+      end
+    end
+
+    private def stale_cross_check(program : Program, source_or_sources) : Nil
+      reach = program.stale_reach
+      recorder = program.stale_recorder
+      return unless reach && recorder
+
+      reach.cross_check(recorder)
+
+      if key_file = @stale_key
+        primary_source = source_or_sources.is_a?(Array) ? source_or_sources.first : source_or_sources
+        test_root = "src"
+        entry_root = Compiler.entry_root_of(primary_source.filename, primary_source.code)
+        test_path = ::Path[primary_source.filename].relative_to(entry_root).to_s
+        test_path = test_path[2..-1] if test_path.starts_with?("./")
+        Stale::KeyFile.write_out(key_file, phase: "linked", test_root: test_root, test_path: test_path, reach: reach)
+      end
+
+      unless reach.mismatch.empty?
+        raise Error.new("reach mismatch: #{reach.mismatch.join(", ")}")
+      end
     end
 
     # An LLVM::Module with information to compile it.

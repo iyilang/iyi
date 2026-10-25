@@ -14,8 +14,9 @@
 #     waits, the parent waits for stdout's end, and the watchdog ends it;
 #   * the wait parks: the end awaited by a blocking call - a sibling that
 #     ticks every 50 ms ticks fewer than 10 times while the child sleeps;
-#     and the end polled, as without a pidfd on Linux or with
-#     RegisterWaitForSingleObject refused on Windows, holds every check;
+#     and the end polled, as without a pidfd on Linux, with the kqueue
+#     refused on darwin or with RegisterWaitForSingleObject refused on
+#     Windows, holds every check;
 #   * a cancelled run ends its child: the kill taken out - the run answers
 #     Cancelled only once its child has slept its 20 seconds out;
 #   * on Linux and darwin, a write to a child that stopped reading answers
@@ -332,8 +333,15 @@ else
         "while ::LibC.WaitForSingleObject(@process, -1) == 258"
       ;;
     darwin)
-      prove blocking "the end awaited by waitpid" "a sibling ticked" \
+      # With the kqueue refused the end is polled, as on Windows with the
+      # registration refused: every check holds. The poll's WNOHANG taken
+      # out is the blocking waitpid that fallback was until feat/m-thread,
+      # and the check still catches it.
+      holds polled "with the kqueue refused every check holds: the end is polled" \
         "queue = ::LibC.kqueue" "queue = -1"
+      prove blocking "the end awaited by a blocking waitpid" "a sibling ticked" \
+        "queue = ::LibC.kqueue" "queue = -1" \
+        "answered = LibC.waitpid(@pid, pointerof(status), 1)" "answered = LibC.waitpid(@pid, pointerof(status), 0)"
       ;;
     *)
       # A kernel before 5.3 has no pidfd, and the end is polled: with

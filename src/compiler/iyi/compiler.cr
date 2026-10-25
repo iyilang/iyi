@@ -4412,13 +4412,16 @@ module Iyi
       recorder = Stale::Recorder.new
       program.stale_recorder = recorder
 
+      closure = Effects.closure_check(program, reach)
+      program.stale_closure_result = closure
       if key_file
         primary_source = source_or_sources.is_a?(Array) ? source_or_sources.first : source_or_sources
         test_root = "src"
         entry_root = Compiler.entry_root_of(primary_source.filename, primary_source.code)
         test_path = ::Path[primary_source.filename].relative_to(entry_root).to_s
         test_path = test_path[2..-1] if test_path.starts_with?("./")
-        Stale::KeyFile.write_out(key_file, phase: "checked", test_root: test_root, test_path: test_path, reach: reach)
+        Stale::KeyFile.write_out(key_file, phase: "checked", test_root: test_root, test_path: test_path, reach: reach,
+          not_reusable: closure.not_reusable, rg3: closure.rg3_sites)
       end
     end
 
@@ -4435,7 +4438,9 @@ module Iyi
         entry_root = Compiler.entry_root_of(primary_source.filename, primary_source.code)
         test_path = ::Path[primary_source.filename].relative_to(entry_root).to_s
         test_path = test_path[2..-1] if test_path.starts_with?("./")
-        Stale::KeyFile.write_out(key_file, phase: "linked", test_root: test_root, test_path: test_path, reach: reach)
+        closure = program.stale_closure_result || Effects.closure_check(program, reach)
+        Stale::KeyFile.write_out(key_file, phase: "linked", test_root: test_root, test_path: test_path, reach: reach,
+          not_reusable: closure.not_reusable, rg3: closure.rg3_sites)
       end
 
       unless reach.mismatch.empty?

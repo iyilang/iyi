@@ -311,9 +311,7 @@ module Iyi::Stale
 
           observations << Observation.new(task, "env_get", "env", name, answer)
         when TYPE_ENVALL
-          answer = compute_answer("env_all", "env", keyer) do |enc|
-            enc.str("all")
-          end
+          answer = compute_env_all_digest(keyer, scratch: roots.scratch)
           observations << Observation.new(task, "env_all", "env", "*", answer)
         when TYPE_CWD
           real = read_str(p_io)
@@ -510,6 +508,11 @@ module Iyi::Stale
           if current_ans != obs.answer
             return "run: env #{obs.path} changed"
           end
+        when "env_all"
+          current_ans = compute_env_all_digest(keyer, scratch: roots.scratch)
+          if current_ans != obs.answer
+            return "run: env_all changed"
+          end
         when "cwd"
           current_dir = Dir.current
           rp = roots.map(current_dir)
@@ -530,6 +533,24 @@ module Iyi::Stale
       end
 
       nil
+    end
+
+    def self.compute_env_all_digest(keyer : Keyer, scratch : String = "") : StaticArray(UInt8, 32)
+      entries = [] of {String, String}
+      ENV.each do |k, v|
+        next if k == "IYI_OBSERVE"
+        val = (k == "TMPDIR" || k == "TEMP" || k == "TMP") ? "scratch" : v
+        entries << {k, val}
+      end
+      entries.sort_by! { |k, _| k }
+      compute_answer("env_all", "env", keyer) do |enc|
+        enc.list(entries.size) do |l|
+          entries.each do |k, val|
+            l.str(k)
+            l.str(val)
+          end
+        end
+      end
     end
 
     private def self.read_str(io : IO) : String?

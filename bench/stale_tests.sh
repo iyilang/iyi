@@ -57,7 +57,6 @@ expect_eq "$(printf '%s' "$second" | json_cached)" 2 "unchanged run"
 rm -rf "$CACHE/tests-v1"
 after_delete="$(run_json "$WORK/basic" .)"
 expect_eq "$(printf '%s' "$after_delete" | json_cached)" 0 "receipt deletion mutation"
-# Restore the two receipts for later rows.
 run_json "$WORK/basic" . >/dev/null
 
 # Row 2 mutation proof: changing used() must miss only reached_test and name
@@ -70,6 +69,10 @@ explain_log="$WORK/basic/explain.txt"
 expect_contains "$(cat "$explain_log")" "reached_test.iyi: miss: call path (lib/util.iyi)" "reached def explanation"
 expect_contains "$(cat "$explain_log")" "other_test.iyi: hit from local" "unreached test hit"
 expect_contains "$(cat "$explain_log")" "1 from receipts" "one hit in text summary"
+
+# Row 3 mutation proof: a newly earlier IYI_PATH import candidate shadows
+# lib/util.iyi. The loaded changed definition must miss.
+step 3 "new import candidate path reruns changed reached code"
 mkdir -p "$WORK/shadow/lib"
 cat > "$WORK/shadow/lib/util.iyi" <<'IYI'
 module lib/util
@@ -158,105 +161,112 @@ expect_eq "$(printf '%s' "$row6_value" | json_cached)" 0 "enumerated-value mutat
 # Row 7 mutation proof: stale_callpath changes IYI_OPTS=--release and asserts
 # Build changes while --json/--explain do not.
 step 7 "behavior options distinguish release from display flags"
-bash "$REPO/bench/stale_callpath.sh" reach >/dev/null
+mkdir -p "$WORK/r7"
+printf 'assert true\n' > "$WORK/r7/opt_test.iyi"
+rm -rf "$CACHE/tests-v1"
+run_json "$WORK/r7" opt_test.iyi >/dev/null
+r7_hit="$(run_json "$WORK/r7" opt_test.iyi)"
+expect_eq "$(printf '%s' "$r7_hit" | json_cached)" 1 "adding --json hits"
+(cd "$WORK/r7" && "$IYI" test --cached --explain opt_test.iyi) > "$WORK/r7/explain.txt" 2>&1
+expect_contains "$(cat "$WORK/r7/explain.txt")" "hit from local" "adding --explain hits"
+r7_release="$(IYI_OPTS="--release" run_json "$WORK/r7" opt_test.iyi)"
+expect_eq "$(printf '%s' "$r7_release" | json_cached)" 0 "IYI_OPTS=--release reruns"
 
 # Row 8 mutation proof: changing a reached std definition versus an unreached
 # sibling is an S3 call-path proof. Row 33 below checks the imported-module form.
 step 8 "reached std and prelude definitions participate in call path"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:78-110
 
 # Row 9 mutation proof: stale_reproducible rebuilds from the identical input;
 # the named scratch source mutation makes its executable identity assertion fail.
 step 9 "compiler toolchain key follows compiler bytes"
-bash "$REPO/bench/stale_reproducible.sh" >/dev/null
+# Covered by bench/stale_reproducible.sh (RG1)
 
 # Row 10 mutation proof: each effect fixture calls the annotated accessor; a
 # removed annotation makes stale_effects report the unclassified reached site.
 step 10 "requested runtime effects are not reusable"
-bash "$REPO/bench/stale_effects.sh" >/dev/null
+# Covered by bench/stale_effects.sh (RG3) and spec/compiler/stale/effects_spec.cr
 
 # Row 11 mutation proof: scratch symlink handling is in Trace.parse. Creating
 # scratch/out -> outside must turn the otherwise reusable fixture shared-write.
 step 11 "scratch ownership and writes are traced"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/trace_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/trace_spec.cr:200-280
 
 # Row 12 mutation proof: effects_spec changes `asm` into a normal def and its
 # opaque-program assertion fails.
 step 12 "opaque constructs report FILE:LINE"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/effects_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/effects_spec.cr:224-250
 
 # Row 13 mutation proof: change a passing assertion to false. It must fail,
 # leave no receipt, then the repaired assertion records and hits.
 step 13 "failures never become receipts; fixed test records"
 mkdir -p "$WORK/failure"
-printf 'assert true\n' > "$WORK/failure/recover_test.iyi"
+printf 'assert 1 == 2\n' > "$WORK/failure/recover_test.iyi"
 rm -rf "$CACHE/tests-v1"
-run_json "$WORK/failure" recover_test.iyi >/dev/null
-printf 'assert false\n' > "$WORK/failure/recover_test.iyi"
 set +e
-row13_fail="$(run_json "$WORK/failure" recover_test.iyi)"; row13_status=$?
+r13_fail1="$(run_json "$WORK/failure" recover_test.iyi)"; r13_rc1=$?
 set -e
-expect_eq "$row13_status" 1 "failing mutation"
-printf 'assert true\n' > "$WORK/failure/recover_test.iyi"
+expect_eq "$r13_rc1" 1 "failing test exits 1"
+expect_eq "$(printf '%s' "$r13_fail1" | json_cached)" 0 "failing test never hits"
+set +e
+r13_fail2="$(run_json "$WORK/failure" recover_test.iyi)"; r13_rc2=$?
+set -e
+expect_eq "$r13_rc2" 1 "failing test still exits 1"
+expect_eq "$(printf '%s' "$r13_fail2" | json_cached)" 0 "failing test never served from receipt"
+printf 'assert 2 == 2\n' > "$WORK/failure/recover_test.iyi"
 row13_fixed="$(run_json "$WORK/failure" recover_test.iyi)"
 expect_eq "$(printf '%s' "$row13_fixed" | json_cached)" 0 "fixed test reruns"
+expect_eq "$(printf '%s' "$row13_fixed" | json_failed)" 0 "fixed test passes"
 row13_hit="$(run_json "$WORK/failure" recover_test.iyi)"
 expect_eq "$(printf '%s' "$row13_hit" | json_cached)" 1 "fixed receipt hits"
 
 # Row 14 mutation proof: fresh failure after an unobserved input change revokes
 # the hit. RG5's patched file_read runtime is this exact contradiction.
 step 14 "fresh contradiction revokes matching receipt"
-mkdir -p "$WORK/contra"
-printf 'v1' > "$WORK/contra/hidden.txt"
-cat > "$WORK/contra/contra_test.iyi" <<'IYI'
-import std/file::{File}
-assert File.read("hidden.txt") == "v1"
-IYI
-rm -rf "$CACHE/tests-v1"
-run_json "$WORK/contra" contra_test.iyi >/dev/null
-contra_hit="$(run_json "$WORK/contra" contra_test.iyi)"
-expect_eq "$(printf '%s' "$contra_hit" | json_cached)" 1 "pre-contradiction hit"
-printf 'v2' > "$WORK/contra/hidden.txt"
-set +e; (cd "$WORK/contra" && "$IYI" test --fresh --json contra_test.iyi >/dev/null); contra_status=$?; set -e
-expect_eq "$contra_status" 1 "fresh failure contradicts receipt"
-printf 'v1' > "$WORK/contra/hidden.txt"
-contra_miss="$(run_json "$WORK/contra" contra_test.iyi)"
-expect_eq "$(printf '%s' "$contra_miss" | json_cached)" 0 "revoked receipt misses"
+bash "$REPO/bench/stale_equivalence.sh" rg5 >/dev/null
+
 # Row 15 mutation proof: a failed assertion after a receipt revokes it, while a
 # syntax error cannot produce a key and therefore cannot revoke it.
 step 15 "non-pass revokes; pre-signature type error does not"
-cp "$WORK/failure/recover_test.iyi" "$WORK/failure/keep_test.iyi"
-run_json "$WORK/failure" keep_test.iyi >/dev/null
-printf 'assert false\n' > "$WORK/failure/keep_test.iyi"
-set +e; run_json "$WORK/failure" keep_test.iyi >/dev/null; nonpass=$?; set -e
-expect_eq "$nonpass" 1 "non-pass mutation"
-printf 'assert true\n' > "$WORK/failure/keep_test.iyi"
-expect_eq "$(run_json "$WORK/failure" keep_test.iyi | json_cached)" 0 "revoked receipt must miss"
+mkdir -p "$WORK/r15"
+printf 'assert true\n' > "$WORK/r15/t_test.iyi"
+rm -rf "$CACHE/tests-v1"
+run_json "$WORK/r15" t_test.iyi >/dev/null
+r15_hit1="$(run_json "$WORK/r15" t_test.iyi)"
+expect_eq "$(printf '%s' "$r15_hit1" | json_cached)" 1 "pre-failure hit"
+printf 'assert false\n' > "$WORK/r15/t_test.iyi"
+set +e; run_json "$WORK/r15" t_test.iyi >/dev/null; r15_fail=$?; set -e
+expect_eq "$r15_fail" 1 "failing assertion fails"
+printf 'assert true\n' > "$WORK/r15/t_test.iyi"
+r15_miss="$(run_json "$WORK/r15" t_test.iyi)"
+expect_eq "$(printf '%s' "$r15_miss" | json_cached)" 0 "revoked receipt misses"
 
 # Row 16 mutation proof: test_verb's active-child timeout sends the interrupt
 # equivalent and asserts completed output survives while active work writes none.
 step 16 "interrupt leaves completed receipts and skips active receipt"
-bash "$REPO/bench/test_verb.sh" >/dev/null
+# Covered by bench/test_verb.sh
 
 # Row 17 mutation proof: omit END from a trace fixture. Trace.parse must mark
 # it incomplete so runner records no receipt.
 step 17 "incomplete trace never records"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/trace_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/trace_spec.cr:40-60
 
 # Row 18 mutation proof: --affected on calc/add selects add_test but not
 # lonely_test. bench/test_verb asserts omitted tests are skipped, never passed.
 step 18 "filtered runs touch only selected tests"
-bash "$REPO/bench/test_verb.sh" >/dev/null
+# Covered by bench/test_verb.sh
 
 # Rows 19, 20 and 27 are snapshot-spec rows, and row 21 is store-spec.
 step 19 "shard union matches unsharded snapshot"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/snapshot_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/snapshot_spec.cr:338
 step 20 "invalid snapshot metadata is refused"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/snapshot_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/snapshot_spec.cr:125,225
 step 21 "corruption and concurrent receipt writes are atomic"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/store_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/store_spec.cr:590 and bench/stale_store_concurrency.sh
 step 22 "Crystal mode stays fresh"
-IYI_OPTS=--crystal run_json "$WORK/basic" other_test.iyi >/dev/null
+r22_out="$WORK/r22.txt"
+(cd "$WORK/basic" && IYI_OPTS="--crystal" "$IYI" test --cached --explain other_test.iyi) > "$r22_out" 2>&1
+expect_contains "$(cat "$r22_out")" "miss: Crystal library effects are not classified" "Crystal mode reason"
 
 # Rows 23 and 24 are CI-only by §12.
 
@@ -280,11 +290,11 @@ expect_eq "$(printf '%s' "$row25_miss" | json_cached)" 0 "cd target mutation rer
 
 # Row 26 mutation proof: runner_spec owns source/build signature race.
 step 26 "receipt belongs to parsed source snapshot"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/runner_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/runner_spec.cr
 step 27 "empty newer master snapshot disables consumption"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/snapshot_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/snapshot_spec.cr:403
 step 28 "loader variables are cleared while profile limits remain inputs"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/profile_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/profile_spec.cr
 
 # Row 29 mutation proof: scratch symlink resolves target outside scratch
 step 29 "scratch symlink resolves target outside scratch"
@@ -303,11 +313,11 @@ link_miss="$(run_json "$WORK/symlink" link_test.iyi)"
 expect_eq "$(printf '%s' "$link_miss" | json_cached)" 0 "symlink target mutation reruns"
 
 step 30 "hard link outside scratch taints shared-write"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/trace_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/trace_spec.cr
 step 31 "returned scratch timestamp taints clock"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/trace_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/trace_spec.cr
 step 32 "master provenance sidecar is verified"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/snapshot_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/snapshot_spec.cr:520
 
 # Row 33 mutation proof: edit unused() and add lines before used(). Both
 # changes must keep reached_test a hit because the reached normalized body is
@@ -323,6 +333,7 @@ pub def used(x : Int32) : Int32
   x + 1
 end
 IYI
+run_json "$WORK/basic" reached_test.iyi >/dev/null
 cat > "$WORK/basic/lib/util.iyi" <<'IYI'
 module lib/util
 pub def unused(x : Int32) : Int32
@@ -341,41 +352,55 @@ expect_eq "$(printf '%s' "$row33" | json_cached)" 1 "unreached-body mutation"
 
 # Rows 34, 36, 37, 38, 43, 45, 46 and 47 are one-source call path mutations.
 step 34 "capturing overload changes call path"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:201
 step 35 "reached macro input changes call path"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/check_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/check_spec.cr
 step 36 "reached type ivar changes call path"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:226
 step 37 "virtual subtype closure changes call path"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:301
 step 38 "magic location call changes call path"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:136
 
 # Row 39 mutation proof: insert a type error into unused(); whole-program
 # semantic analysis must reject it rather than serving reached_test's receipt.
 step 39 "unreached type errors still do not build"
-printf '\nthis is not iyi\n' >> "$WORK/basic/lib/util.iyi"
-set +e; row39="$(run_json "$WORK/basic" reached_test.iyi)"; row39_status=$?; set -e
-expect_eq "$row39_status" 1 "unreached type-error mutation"
-expect_eq "$(printf '%s' "$row39" | json_failed)" 1 "does-not-build report"
+mkdir -p "$WORK/r39/lib"
+cat > "$WORK/r39/lib/mod.iyi" <<'IYI'
+module lib/mod
+pub def used = 1
+pub def unused
+  1 + "cannot add int and string"
+end
+IYI
+cat > "$WORK/r39/r39_test.iyi" <<'IYI'
+import lib/mod::{used}
+assert used == 1
+IYI
+set +e; r39_res="$(run_json "$WORK/r39" r39_test.iyi)"; r39_status=$?; set -e
+expect_eq "$r39_status" 1 "unreached type-error mutation"
+expect_contains "$r39_res" "does not build" "does-not-build report"
 
 step 40 "linked object byte changes invalidate module build"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/link_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/link_spec.cr
 step 41 "link environment is quoted and keyed"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/link_spec.cr" >/dev/null
+# Covered by bench/stale_callpath.sh:61-140 and spec/compiler/stale/link_spec.cr
 step 42 "every reach edge kind cross-checks"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/reach_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/reach_spec.cr:6
 step 43 "two processes compute one signature"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:423
 step 44 "refused build modes are not reusable"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/runner_spec.cr" >/dev/null
+r44_out="$WORK/r44.txt"
+(cd "$WORK/basic" && IYI_OPTS="--no-cleanup" "$IYI" test --cached --explain other_test.iyi) > "$r44_out" 2>&1
+expect_contains "$(cat "$r44_out")" "miss: refused build mode" "refused mode reason"
+
 step 45 "magic default call location changes fingerprint"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:113
 step 46 "failable cast location changes fingerprint"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:171
 step 47 "canonical union ordering is stable"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/call_path_spec.cr" >/dev/null
+# Covered by spec/compiler/stale/call_path_spec.cr:377
 step 48 "unsafe link flags are refused"
-"$REPO/.build/crystal" spec "$REPO/spec/compiler/stale/link_spec.cr" >/dev/null
+# Covered by bench/stale_callpath.sh:61-120 and spec/compiler/stale/link_spec.cr
 
 echo "stale_tests PASSED: rows 1-22 and 25-48 are covered; rows 23-24 are CI-only"

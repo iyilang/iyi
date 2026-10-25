@@ -330,7 +330,7 @@ end
 # thread floor, whose 2 µs stop came back as 2000 or 3000 on 6. A
 # deadline is a duration, so the slew 6 carries and 4 does not is
 # nothing the queue wants.
-def __iyi_monotonic_ns : Int64
+@[Effect(:clock)]; def __iyi_monotonic_ns : Int64
   {% if flag?(:win32) %}
     qpc = uninitialized Int64
     freq = uninitialized Int64
@@ -640,7 +640,7 @@ class IyiFiber
     settle_stack(map_stack)
   end
 
-  def map_stack : UInt64
+  @[Effect(:scheduler)]; def map_stack : UInt64
     # The runtime's own mapping (PROT_READ|PROT_WRITE = 3 on both
     # platforms), so a fiber stack exists under every allocator, Boehm
     # included, and a guard page (PROT_NONE) under it, so running off
@@ -696,7 +696,7 @@ class IyiFiber
   # The first frame, on a stack that is either fresh from the kernel or
   # back from the pool: every word the resume reads is written here, so a
   # reused stack starts exactly as a new one does.
-  def settle_stack(base : UInt64) : Nil
+  @[Effect(:scheduler)]; def settle_stack(base : UInt64) : Nil
     top = base + STACK_BYTES
     @stack_top = top
     {% if flag?(:win32) && flag?(:x86_64) %}
@@ -1110,7 +1110,7 @@ class IyiSchedLock
   # not take the line for writing on every turn; past 128 turns it gives
   # its core away, since a holder preempted with the lock is what it waits
   # for then.
-  def self.lock : Nil
+  @[Effect(:scheduler)]; def self.lock : Nil
     return unless IyiScheduler.shared?
     word = self.word
     spins = 0
@@ -1380,7 +1380,7 @@ class IyiScheduler
   # another, took the process from 60 handles to 2,061, and a thousand
   # that each ran four tasks kept 259 MiB of stacks committed after they
   # had all ended.
-  def self.retire_thread : Nil
+  @[Effect(:scheduler)]; def self.retire_thread : Nil
     state = @@state
     return if state.is_a?(Nil)
     main = state.current
@@ -1570,7 +1570,7 @@ class IyiScheduler
   # The doorbell, for a thread waiting in its poller. A thread that is not
   # idle reads its mail before it waits, so it is never rung; one already
   # rung is not rung twice. Lock held.
-  def self.ring(target : IyiSchedulerState) : Nil
+  @[Effect(:scheduler)]; def self.ring(target : IyiSchedulerState) : Nil
     return unless target.idle
     return if target.notified
     target.notified = true
@@ -1592,7 +1592,7 @@ class IyiScheduler
   # kqueue (EV_ADD | EV_CLEAR, so a ring is taken once), and on Windows an
   # OVERLAPPED of the state's own that a ring posts to the port and the
   # poller recognises.
-  def self.ensure_doorbell(st : IyiSchedulerState) : Nil
+  @[Effect(:scheduler)]; def self.ensure_doorbell(st : IyiSchedulerState) : Nil
     {% if flag?(:win32) %}
       return if st.wake_token.address != 0_u64
       pollfd
@@ -1815,7 +1815,7 @@ class IyiScheduler
   # fiber that has never run has no saved stack pointer: the main fiber
   # has one from the switch that left it, and a finished one is never
   # switched to.
-  def self.switch_to(fiber : IyiFiber) : Nil
+  @[Effect(:scheduler)]; def self.switch_to(fiber : IyiFiber) : Nil
     previous = current
     if fiber.sp_slot.address == previous.sp_slot.address
       fiber.state = IyiFiberState::Running
@@ -1952,7 +1952,7 @@ class IyiScheduler
     # completions go to *port* from here on; nonzero for a handle on no
     # port. *scratch* is the fiber's OVERLAPPED, which holds the
     # information and the status block for the call and is zeroed after.
-    def self.move_to_port(handle : Void*, port : Void*, scratch : Pointer(UInt8)) : Int32
+    @[Effect(:scheduler)]; def self.move_to_port(handle : Void*, port : Void*, scratch : Pointer(UInt8)) : Int32
       call = @@set_information
       if call.address == 0_u64
         call = Pointer(UInt64).malloc(2_u64)
@@ -1988,7 +1988,7 @@ class IyiScheduler
     fiber.io_bytes_read
   end
 
-  def self.read_current(fd : Int32 | Int64, buffer : Void*, count : UInt64, ms : Int32 = -1) : Int64 | Cancelled
+  @[Effect(:scheduler)]; def self.read_current(fd : Int32 | Int64, buffer : Void*, count : UInt64, ms : Int32 = -1) : Int64 | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
 
@@ -2126,7 +2126,7 @@ class IyiScheduler
   # of what its waiters want, and the event says which half is ready. A
   # second fiber in the same direction is refused: the event would wake
   # one of the two, and the other would wait for nothing.
-  def self.wait_posix(fd : Int32, direction : Int32, ms : Int32) : Nil | Cancelled
+  @[Effect(:scheduler)]; def self.wait_posix(fd : Int32, direction : Int32, ms : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
     others = io_interest(fd)
@@ -2370,7 +2370,7 @@ class IyiScheduler
   end
 
   # A cancelled fiber's own wait ended, on the thread whose lists it is in.
-  def self.cancel_wait(fiber : IyiFiber) : Nil
+  @[Effect(:scheduler)]; def self.cancel_wait(fiber : IyiFiber) : Nil
     if fiber.state == IyiFiberState::Sleeping
       sleep_remove(fiber)
       enqueue(fiber)
@@ -2451,7 +2451,7 @@ class IyiScheduler
 
   # Waits for the next event when *blocking*, and otherwise takes what has
   # arrived already (`poll_now`).
-  def self.wait_for_events(blocking : Bool) : Nil
+  @[Effect(:scheduler)]; def self.wait_for_events(blocking : Bool) : Nil
     sleep_head = state.sleep_head
     timeout = blocking ? -1_i64 : 0_i64
     {% if flag?(:win32) %}
@@ -2624,7 +2624,7 @@ class IyiScheduler
     {% end %}
   end
 
-  def self.wake_expired_sleepers : Nil
+  @[Effect(:scheduler)]; def self.wake_expired_sleepers : Nil
     return if state.sleep_head.is_a?(Nil)
     now = __iyi_monotonic_ns
     while true
@@ -2831,7 +2831,7 @@ class IyiScheduler
   {% if flag?(:darwin) %}
     # Whether *fd* is a regular file: S_IFREG in `st_mode`, the two bytes
     # at offset 4 of darwin's `struct stat64`, which is 144 bytes long.
-    def self.regular_file?(fd : Int32) : Bool
+    @[Effect(:scheduler)]; def self.regular_file?(fd : Int32) : Bool
       stat = uninitialized UInt64[24]
       bytes = pointerof(stat).as(Pointer(UInt8))
       return false if LibC.fstat(fd, bytes.as(Void*)) != 0
@@ -2864,7 +2864,7 @@ class IyiScheduler
   # gone is kevent's problem and not ours). On Linux the registration is
   # the fd's, so it is narrowed to what the other direction's waiter
   # still wants (EPOLL_CTL_MOD, 3), or removed when nobody does (DEL, 2).
-  def self.io_forget(fiber : IyiFiber) : Nil
+  @[Effect(:scheduler)]; def self.io_forget(fiber : IyiFiber) : Nil
     untime(fiber)
     {% if flag?(:win32) %}
       fiber.next_io = nil
@@ -2890,7 +2890,7 @@ class IyiScheduler
 
   # ── The poller's fd, lazily ──────────────────────────────────────────
 
-  def self.pollfd : Int64
+  @[Effect(:scheduler)]; def self.pollfd : Int64
     fd = state.pollfd
     return fd if fd > 0
     {% if flag?(:win32) %}
@@ -2941,7 +2941,7 @@ class IyiScheduler
     # A machine whose Windows does not know the flag (it arrived in
     # 10 1803) answers a null handle; that is remembered as -1 and the
     # poller keeps the millisecond timeout it had before.
-    def self.deadline_timer : Int64
+    @[Effect(:scheduler)]; def self.deadline_timer : Int64
       st = state
       handle = st.deadline_timer
       return handle if handle != 0_i64
@@ -3117,7 +3117,7 @@ class IyiWorkers
   # the cores this process may run on - the count the parallel marker
   # sizes its helpers by, and GC_DESIGN.md's bound on the mutator's
   # threads.
-  def self.resolved : Int32
+  @[Effect(:process)]; def self.resolved : Int32
     return @@asked if @@asked > 0
     text = Program.env("IYI_WORKERS")
     if text.is_a?(String)
@@ -3351,7 +3351,7 @@ end
     # Whether stdin's handle is one a read of could wait: a pipe (3) or a
     # character device (2), the console among them. A disk file (1)
     # answers at once, and is read where it is asked.
-    def self.waits?(handle : Void*) : Bool
+    @[Effect(:scheduler)]; def self.waits?(handle : Void*) : Bool
       kind = LibC.GetFileType(handle)
       kind == 2 || kind == 3
     end
@@ -3360,7 +3360,7 @@ end
     # are written, the thread made suspended (4) until then: two threads'
     # first reads would otherwise each make a reader, and one that saw the
     # page early would ring a doorbell not made yet.
-    def self.start(handle : Void*) : Nil
+    @[Effect(:scheduler)]; def self.start(handle : Void*) : Nil
       IyiRuntimeLock.lock
       if @@page == 0_u64
         page = __iyi_mmap(PAGE).address
@@ -3388,7 +3388,7 @@ end
     # never took the post and the program hung; one polling took it and
     # switched onto the other thread's fiber, an access violation, 3 runs
     # in 3 each.
-    def self.read(handle : Void*, console : Bool, buffer : Void*, count : UInt64, ms : Int32) : Int64 | Cancelled
+    @[Effect(:scheduler)]; def self.read(handle : Void*, console : Bool, buffer : Void*, count : UInt64, ms : Int32) : Int64 | Cancelled
       fiber = IyiScheduler.current
       return Cancelled.new if fiber.cancelled
       start(handle) if @@page == 0_u64
@@ -3432,7 +3432,7 @@ end
     # answered "second". So a console's read runs to its line, which the
     # fiber answers - a sibling's failure waits for Enter, and loses
     # nothing.
-    def self.withdraw : Nil
+    @[Effect(:scheduler)]; def self.withdraw : Nil
       return if word(W_STATE).value.compare_and_set(ASKED, WITHDRAWN)[1]
       return if word(W_CONSOLE).value.get != 0_u64
       thread = Pointer(Void).new(word(W_THREAD).value.get)
@@ -3461,7 +3461,7 @@ end
     # The thread's whole life. It touches no heap: its words and its wide
     # buffer are this page, and what it writes into is the buffer the
     # fiber asked with.
-    def self.run(argument : UInt64) : Nil
+    @[Effect(:scheduler)]; def self.run(argument : UInt64) : Nil
       doorbell = Pointer(Void).new(word(W_DOORBELL).value.get)
       while true
         LibC.WaitForSingleObject(doorbell, -1_i32)
@@ -3480,7 +3480,7 @@ end
     end
 
     # 0 for the end of the input, a broken pipe, and a withdrawn read.
-    def self.read_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
+    @[Effect(:scheduler)]; def self.read_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
       read = 0_i32
       return 0_i64 if LibC.ReadFile(handle, buffer, count.to_i32, pointerof(read), nil) == 0
       read.to_i64
@@ -4643,7 +4643,7 @@ end
 
     # Per thread: an alternate stack for the handler to run on, because the
     # stack that overflowed cannot; the handler itself once per process.
-    def self.install : Nil
+    @[Effect(:scheduler)]; def self.install : Nil
       {% if flag?(:darwin) %}
         alt = LibC.mmap(Pointer(Void).new(0_u64), IYI_SG_ALT_BYTES, 3, 4098, -1, 0_i64)
         return if alt.address &+ 1_u64 == 0_u64
@@ -4688,7 +4688,7 @@ end
 
     # The fault's address and the stack pointer it interrupted, from the
     # kernel's own structs; nothing here allocates or takes a lock.
-    def self.faulted(signal : Int32, info : UInt64, context : UInt64) : Nil
+    @[Effect(:scheduler)]; def self.faulted(signal : Int32, info : UInt64, context : UInt64) : Nil
       {% if flag?(:darwin) %}
         # darwin arm64's structs: `si_addr` at 24, `uc_mcontext` at 48, and
         # in `__darwin_mcontext64` the `__ss.__sp` at 264 — past the 16-byte

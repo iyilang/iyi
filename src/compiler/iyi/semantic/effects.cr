@@ -1,5 +1,6 @@
 require "../syntax/ast"
 require "../stale/reach"
+require "../iyimod"
 
 module Iyi
   enum EffectClass
@@ -273,6 +274,29 @@ module Iyi
         return true if File.file?(prelude_test)
       end
 
+      # 5. .iyimod artifact of a std module resolved through toolchain std root
+      if posix.ends_with?(".iyimod") && File.file?(posix)
+        mod_name = program.iyi_artifact_modules[posix]? ||
+                   begin
+                     IyiMod.read_summary(posix).module_name
+                   rescue
+                     nil
+                   end
+        if mod_name && mod_name.starts_with?("std/")
+          subpath = mod_name[4..-1]
+          if dir = program.iyi_prelude_dir
+            std_source = File.join(File.dirname(dir), "std", "#{subpath}.iyi")
+            return true if File.file?(std_source)
+          end
+          program.iyi_path.entries.each do |entry|
+            if File.file?(File.join(entry, "iyi", "prelude.iyi")) &&
+               File.file?(File.join(entry, "std", "#{subpath}.iyi"))
+              return true
+            end
+          end
+        end
+      end
+
       false
     end
 
@@ -378,6 +402,17 @@ module Iyi
         end
       end
 
+      if posix.ends_with?(".iyimod") && File.file?(posix)
+        mod_name = program.iyi_artifact_modules[posix]? ||
+                   begin
+                     IyiMod.read_summary(posix).module_name
+                   rescue
+                     nil
+                   end
+        if mod_name && mod_name.starts_with?("std/")
+          return "toolchain:#{mod_name}.iyi:#{line}"
+        end
+      end
       # Program root (src)
       entry_root = program.iyi_project_root || program.filename.try { |f| File.dirname(f) } || Dir.current
       posix_entry = ::Path[entry_root].to_posix.to_s

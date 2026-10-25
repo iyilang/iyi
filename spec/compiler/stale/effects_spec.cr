@@ -443,5 +443,70 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       closure.not_reusable.select { |r| r.category == "opaque program construct" }.should be_empty
       closure.not_reusable.select { |r| r.reason == "unclassified runtime site" }.should be_empty
     end
+
+    it "accepts an @[Effect] def read from a toolchain std module artifact" do
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+
+      with_tempfile("std_time.iyimod") do |path|
+        # Write a mock std/time artifact
+        artifact = Iyi::IyiMod::Artifact.new(
+          module_name: "std/time",
+          source_path: "src/std/time.iyi",
+          compiler_version: Iyi::IyiMod.compiler_version,
+          target_triple: program.codegen_target.to_s,
+          flags: program.flags.to_a.sort!,
+          imports: [] of Iyi::IyiMod::ImportEdge,
+          exports: Iyi::IyiMod::Exports.new([] of Iyi::IyiMod::Signature, [] of Iyi::IyiMod::TypeDecl, [] of Iyi::IyiMod::ImplRecord)
+        )
+        Iyi::IyiMod.write(artifact, path)
+
+        Effects.in_runtime_library_file?(program, path).should be_true
+
+        parser = program.new_parser(<<-CODE)
+          @[Effect(:clock)]
+          def time_from_artifact
+            100
+          end
+          CODE
+        parser.filename = path
+        node = program.normalize(parser.parse)
+        # Should not raise placement error
+        program.semantic(node)
+      end
+    end
+
+    it "refuses an @[Effect] def from a user artifact with a std-ish name not in toolchain" do
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+
+      with_tempfile("user_fake.iyimod") do |path|
+        # Write a user artifact with std-ish module name that does not exist in toolchain std root
+        artifact = Iyi::IyiMod::Artifact.new(
+          module_name: "std/fake_nonexistent_mod",
+          source_path: "user/fake.iyi",
+          compiler_version: Iyi::IyiMod.compiler_version,
+          target_triple: program.codegen_target.to_s,
+          flags: program.flags.to_a.sort!,
+          imports: [] of Iyi::IyiMod::ImportEdge,
+          exports: Iyi::IyiMod::Exports.new([] of Iyi::IyiMod::Signature, [] of Iyi::IyiMod::TypeDecl, [] of Iyi::IyiMod::ImplRecord)
+        )
+        Iyi::IyiMod.write(artifact, path)
+
+        Effects.in_runtime_library_file?(program, path).should be_false
+
+        parser = program.new_parser(<<-CODE)
+          @[Effect(:clock)]
+          def fake_time
+            200
+          end
+          CODE
+        parser.filename = path
+        node = program.normalize(parser.parse)
+        expect_raises(Iyi::TypeException, "@[Effect] is only permitted on defs in runtime library files") do
+          program.semantic(node)
+        end
+      end
+    end
   end
 end

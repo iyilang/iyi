@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 129,939 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 124,809 in std |
+| Library | 8,161 lines (3,551 of it core) | 22,608-line own prelude + 125,278 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -2783,10 +2783,20 @@ trust `@[Share]` on `Channel(T)` gives since a channel crosses threads
 is. So is the block of a def marked `@[Share]`: the mark says the block
 the def keeps may run on other threads, several at once, and every block
 given to it is checked where it is written - std/http's
-`Server.serve_parallel { }` and std/router's `SharedRouter#handle` are
-two, and std/shared_proc's `SharedProc.of` is the one that makes such a
+`Server.serve_parallel { }`, std/router's `SharedRouter#handle` and
+std/tls's `TlsServerConfig#frozen { }`, a server's identity source, are
+three, and std/shared_proc's `SharedProc.of` is the one that makes such a
 block a value: `@[Share(owns: true)]`, constructed by `of` alone, so
-`Share` whatever its arguments. Inside a `@[Share]` def its block, a
+`Share` whatever its arguments. std/tls trusts two types of its own with
+`@[Share]`, values nothing writes once made that fail the rule only by
+holding arrays: `TlsIdentity`, a certificate chain and its key, whose
+constructor copies the arrays it is given and whose one changing part,
+the OCSP staple, is behind a `Mutex`; and `TlsFrozenServerConfig`, a copy
+of a server config that nothing else holds and nothing writes, its
+ticket keys and replay guard `Share` by their fields (a `Mutex` each).
+What neither can close is the edge `List` closes by never lending its
+array: an identity's chain is lent, and a program that writes into it
+writes what other threads read. Inside a `@[Share]` def its block, a
 `Proc`, is the one non-`Share` value a parallel block may capture or be
 given as `&block`, while the def leaves it as given; any other proc
 passed as a block to a boundary - `g.spawn_parallel(&work)`,
@@ -3779,9 +3789,8 @@ handle is moved to the waiting thread's port. The stop needs part 6
 alone: the accept loop closes a `Channel`, and a watcher beside each
 connection, on its worker, closes the connection there if it is waiting on
 its client - the listener's `closed?` that `serve`'s connections read is
-the accepting thread's, so each connection reads a stop of its own. No
-`tls:`: `TlsServerConfig` changes its ticket keys and replay guard as it
-serves. Measured on Windows 11, twelve logical CPUs, release, 32
+the accepting thread's, so each connection reads a stop of its own.
+Measured on Windows 11, twelve logical CPUs, release, 32
 kept-alive connections: a request that computes went from 411 requests a
 second under `serve` to 410, 821, 1,617, 3,047 and 4,033 on 1, 2, 4, 8 and
 12 workers; one that answers a few bytes from 23,255 to 21,699 on one
@@ -3793,6 +3802,63 @@ requests a second on one and twelve workers, a `SharedRouter` 393 and
 4,003; `bench/std_router_exercise.sh` routes every table through a
 `SharedRouter` and holds its answers to `Router`'s, and serves one under
 `serve_parallel` over the wire.
+
+**Over TLS: `serve_parallel(listener, tls: config.frozen)`.** This
+section's first version had no `tls:`, because a `TlsServerConfig` is
+written as it serves - its ticket key turns over when a ticket is
+sealed, its replay guard records binders, its staple is replaced, and its
+properties and identity source are the program's to change - and a
+value written as it serves is the one thing a parallel block may not
+capture. The decision: what changes while a server runs is shared and
+synchronised, and everything else is frozen. `TlsTicketKeys` and
+`TlsReplayGuard` keep their state behind a `Mutex`, which makes them
+`Share` by their fields, so a server's workers hold one set of ticket
+keys and a ticket one worker sealed another opens; the key is read
+under the lock and the seal done outside it. A `TlsIdentity` keeps its
+OCSP staple behind a `Mutex` too, replaced from any thread; it is
+trusted `Share` (III.4.4), since nothing writes one once it is made.
+`TlsServerConfig#frozen` is a `TlsFrozenServerConfig`, a copy of the
+config that nothing else holds and nothing writes, sharing the
+original's ticket keys and replay guard, and trusted `Share` for that
+reason; its identity source is a block given to `frozen`, a `@[Share]`
+def, so what the block captures is checked where it is written, and a
+config whose source is a `Proc` is refused when frozen. A
+`TlsServerConfig` given to `serve_parallel` itself is refused by the
+compiler in the sentence any unshareable capture is (``captures `tls :
+TlsServerConfig`, which is not Share: ... field @alpn is given a setter
+`alpn=` ``). The alternative that lost was a config behind one `Mutex`:
+every handshake on every worker would have taken one lock for every
+field it read, and an identity source would still have been a `Proc`
+nobody checked. The handshake runs on the worker that
+serves the connection; HTTP/2 and HTTP/1.1 by ALPN, client certificates
+and ECH are `serve`'s code, unchanged, and at a stop a connection
+waiting on its client is sent close_notify from its own worker.
+std/autocert's `frozen_tls_config` keeps the manager on its own thread:
+the certificates it holds and the challenges it has up are tables
+behind a `Mutex` the workers read, and a name not held is asked of the
+manager's `run` over a `Channel`, so one order still serves every
+worker that asks for a name at once. Measured on Linux, twelve hardware
+threads with other jobs keeping four of them busy (load 4.0 to 5.0
+before each run), release, wrk with four threads and 32 kept-alive
+HTTPS connections, a request that computes (`spin(200000)` in
+`bench/std_http_parallel.iyi`'s `speed` mode, TLS 1.3, Ed25519), best of
+three 8 s runs: 3,867 requests a second under `serve`, which was the
+only TLS server before this, and 3,884, 7,727, 14,877 and 26,751 under
+`serve_parallel` on 1, 2, 4 and 8 workers - 2.00x, 3.85x and 6.92x of
+one. `bench/std_http_parallel.iyi`'s TLS leg holds it in
+`bench/std_http_exercise.sh`: eight connections answered on more than
+one worker, h2 and http/1.1, a ticket sent by a connection on one worker
+resumed by a connection that started on another, a client's
+certificate, ECH, and close_notify at the stop; with broken copies
+caught by name - each worker keeping ticket keys of its own (the
+resumption fails), and a stop sending no close_notify - and the two
+refusals checked by their sentences and compiled by copies of std/tls
+with the mark taken off. `bench/std_autocert_exercise.sh` serves under
+`serve_parallel` against Pebble: ten first handshakes at once making one
+order, answered on more than one worker. Not built: the frozen config's
+identities, protocols and ECH keys are the server's for its life -
+another set is another `serve_parallel` - and a ticket outlives neither
+the process nor a move to another server, as under `serve`.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 

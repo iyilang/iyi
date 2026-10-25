@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,185 lines, of which 4,647 are the library held to the 4,650 ceiling (6,660 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,600 lines, none of it written in iyi |
+| iyi's own prelude | 24,276 lines, of which 4,647 are the library held to the 4,650 ceiling (6,663 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 130,831 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,185 lines
+> "No standard library worth the name" is still true of iyi's own 24,276 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,185 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 24,276 lines,
 primitives included, of which the library is 4,647.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -301,9 +301,9 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 are most of its lines. So the figure held to the ceiling is the library:
 **4,647 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,013 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,016 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,660 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,663 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -424,7 +424,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,013 lines**
+exists for the same reason — the platform floor measures **2,016 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,600 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,185-line own prelude + 125,236 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 130,831 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,276-line own prelude + 125,236 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3788,14 +3788,15 @@ preemption word at its back-edge, and a monitor raises the word.
   load in the loop, and LLVM vectorised none - a sum of 1,000,000 `Int64`s
   500 times went from 48 to 126 ms. LLVM keeps the property on the vector
   body and the scalar remainder alike. The check is `cmpq $0, %fs:off` and
-  a branch on x86-64 Linux, a volatile `mrs` of `tpidr_el0` plus the
-  offset on aarch64 Linux, and the thread-local accessor on darwin and
-  Windows, whose cost is not measured. Against `@[NoPreempt]` twins of
-  themselves (release, best of seven, interleaved, load 5 to 6): a xorshift
-  walk 0.999x to 1.001x, the vectorised sum 0.97x to 1.055x, the same
-  through `each` 1.012x to 1.04x, a table CRC 0.992x to 1.004x - the noise
-  of this machine, which is why the gate prints them rather than bounding
-  them.
+  a branch on x86-64 Linux, `cmpq $0, %gs:off` on x86-64 Windows, a
+  volatile `mrs` of `tpidr_el0` plus the offset on aarch64 Linux, and on
+  darwin arm64 a volatile `mrs` of `tpidrro_el0` and two loads (the
+  Windows and darwin forms and their numbers are below). Against
+  `@[NoPreempt]` twins of themselves (release, best of seven,
+  interleaved, load 5 to 6, Linux here): a xorshift walk 0.999x to
+  1.001x, the vectorised sum 0.97x to 1.055x, the same through `each`
+  1.012x to 1.04x, a table CRC 0.992x to 1.004x. The gate holds every
+  ratio to 2x (below).
 - *Who raises it.* The pool's monitor, a helper thread the collector does
   not stop (Go's `sysmon`), looks every 5 ms and raises the word of a
   worker whose switch count has not moved since its last look: one task
@@ -3853,6 +3854,66 @@ checks moved them, against the kernel's thread read by asm. Built by the
 compiler before the volatile `mrs`, that step failed for aarch64 under
 qemu-user in 2 runs of 2; a copy that reads the line before the loop in
 its place (`-Dparallel_hoisted_tls`) fails it by name.
+
+**The check and the tick on Windows and darwin, measured on GitHub's
+runners.** A debug workflow ran `bench/parallel_preempt.iyi` on
+windows-2025 (4 cores) and macos-14 (3 cores), release. Both platforms
+called the thread-local accessor at every back-edge at first. Measured
+against `@[NoPreempt]` twins, best of seven, that made the vectorised sum
+and the same sum through `each` cost 3.41x to 4.92x on Windows and 5.28x
+to 5.80x on darwin; the walk and the CRC cost 1.00x to 1.09x.
+
+- *darwin arm64.* The check reads `tpidrro_el0` in the loop, masks off its
+  low three bits as dyld's `_tlv_get_addr` does, loads the thread's
+  pthread slot for dyld's key, and loads the word at the offset. The key is
+  the 32 bits at 8 in the word's TLV descriptor, which both of dyld's
+  thunk layouts keep. The offset is not read from the descriptor: it sits
+  at 16 in the first layout and at 12 in the second. Instead the
+  function's entry calls the accessor once and subtracts the block its own
+  thread's slot holds. Measured: the sums 0.935x to 1.069x, the CRC 0.987x
+  to 1.037x, the walk 1.052x to 1.114x. A probe build whose check loads a
+  plain global gave the walk 0.972x to 0.998x, so the walk pays about 5 to
+  10% for reading the thread register.
+- *x86-64 Windows.* Reading the TEB's TLS array (`gs:0x58`, `_tls_index`,
+  the word) made the sums 1.63x to 1.75x. The word now lives in a TEB slot
+  of the pool's own: `TlsAlloc` under 64, `TlsSlots` at 0x1480, Go's
+  `tls_g`, with `ArbitraryUserPointer` as the fallback, as in Go. The
+  check is `cmpq $0, %gs:off` with the offset loaded at entry
+  (`IyiWorkers.@@preempt_slot`). The sums came to 1.46x to 1.49x, the walk
+  and the CRC 0.997x to 1.002x.
+- *Why the sums stay above 1.4x.* On these x86-64 runners the vectorised
+  sum runs at one of two speeds, about 32 or 48 ms, and the checked loop
+  at the slower one. Linux CI's `%fs` form measured `each` at 1.513x, and
+  its unchecked `sum` landed at the slower speed too (1.001x). The
+  remaining cost is a check in a loop of about 1.3 cycles, not the
+  Windows read. Nothing under 3% was found for this loop.
+- *The gate's bound and its proof.* The `tight` step holds every ratio to
+  2x. Built with `-Dpreempt_check_accessor` (the accessor form, which
+  invalidates cached objects through the bitcode flags), it must fail at
+  `tight: sum:` on darwin and Windows.
+- *The tick.* Windows' monitor waited 5 ms on its semaphore, which ends on
+  the system timer's tick: looks came 11.2 to 12.3 ms apart, and a ticker
+  beside a computing task woke up to 30 ms late. It now waits on a
+  high-resolution waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`),
+  which leaves the machine's timer alone, as `timeBeginPeriod` would not.
+  Measured: looks 5.15 to 5.27 ms apart, two computing tasks on one worker
+  take turns of 10.3 to 10.5 ms, and the ticker is at most 10 ms late.
+  darwin looks every 5.8 to 6.3 ms with turns of 11.2 to 12.3 ms, and
+  Linux here every 5.1 to 5.3 ms with turns of 10.2 to 10.5 ms.
+  `bench/parallel_preempt.iyi`'s new `period` step holds the look at 4 to
+  9 ms and the turn at 20 ms. On Windows, a copy whose monitor keeps the
+  semaphore's timeout must fail at `period: the monitor looked every`.
+- *The server shape on Windows.* With 4 workers on 4 cores, the slowest
+  fast request took 64 to 99 ms, and 760 to 897 of 11,200 requests went
+  over 20 ms, with either tick. With 3 workers it took 36 to 49 ms. The
+  shape's clients are the program's own main thread, which by every sign
+  waits for a core there, so the gate runs it on one worker fewer than the
+  cores. darwin, 3 workers on 3 cores: 26 to 50 ms.
+- *The no-argument run.* It was all steps on 4 workers. Its slice step's
+  short task then went to an idle worker, so nothing was preempted, and
+  the step failed by name: on Windows CI, and on Linux here in 3 runs of
+  3. With no arguments it now runs slice, unit and period on a pool of one
+  and prints only that every property held.
 
 **The prelude's library, std, and recursion. Built.** Measured before
 (`bench/parallel_preempt_lib.iyi`, release, one worker, a short task
@@ -10743,7 +10804,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,185-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,276-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

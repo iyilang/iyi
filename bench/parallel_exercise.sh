@@ -27,9 +27,12 @@
 #      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
 #      request beside a task computing with no call in its loop wait no
 #      more than 100 ms, 80 for the request; a preempted task keeps its
-#      unit's token; and the tight-loop cost is printed, not bounded. Its
-#      failure proofs are with step 7's: a `@[NoPreempt]` loop, a monitor
-#      that never raises the word, a slow half that does not poll, and a
+#      unit's token; the monitor looks every 4 to 9 ms and the quantum is
+#      at most 20 ms; and a tight loop costs at most twice what its
+#      `@[NoPreempt]` twin does. Its failure proofs are with step 7's: a
+#      `@[NoPreempt]` loop, a monitor that never raises the word, a Windows
+#      monitor on the system timer's tick, a check that calls the
+#      accessor (darwin and Windows), a slow half that does not poll, and a
 #      preempted task that gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
@@ -137,9 +140,21 @@ done
 # bench/parallel_preempt.iyi: a task computing with no call in its loop
 # no longer holds a short task, a sleeper or a connection behind it past
 # 100 ms (80 for a fast request in the server shape); a preempted task
-# keeps its unit's token; and the tight-loop cost, printed, not bounded.
+# keeps its unit's token; the monitor looks every 4 to 9 ms and two tasks
+# on one worker take turns of 20 ms at most; and the tight loops cost at
+# most twice what their `@[NoPreempt]` twins cost.
 PREEMPT_WORKERS=8
 [ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
+# The server shape's clients are the program's own main thread, which on
+# Windows, by every sign, waits for a core behind workers holding all of
+# them: on a 4-core GitHub runner, 4 workers made the slowest fast request 64 to 99
+# ms, 760 to 897 of 11,200 over 20 ms, with the monitor's tick at 5 ms and
+# at the system timer's alike, and 3 workers made it 36 to 49 ms, 119 to
+# 142 over 20. darwin's 3 workers on 3 cores made it 26 to 50 ms.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    [ "$CORES" -gt 1 ] && [ "$PREEMPT_WORKERS" -ge "$CORES" ] && PREEMPT_WORKERS=$((CORES - 1)) ;;
+esac
 for build in plain release; do
   step "preemption at loop back-edges, $build build"
   flag=""
@@ -147,7 +162,7 @@ for build in plain release; do
   if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
   fi
-  for run in "slice --workers=1" "unit --workers=1" "server --workers=$PREEMPT_WORKERS"; do
+  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "server --workers=$PREEMPT_WORKERS"; do
     # shellcheck disable=SC2086 # the step and its count are words
     timeout -k 5 300 "./preempt-$build" $run > "preempted-$build.txt" 2>&1
     code=$?
@@ -157,8 +172,13 @@ for build in plain release; do
     grep -v 'every property held' "preempted-$build.txt" | sed 's/^/  /'
   done
 done
-step "what the check costs a tight loop, release build: a measurement, held to no bound"
-timeout -k 5 300 ./preempt-release tight --workers=1 | grep '^tight' | sed 's/^/  /'
+step "what the check costs a tight loop, release build"
+timeout -k 5 300 ./preempt-release tight --workers=1 > tight.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q 'every property held' tight.txt; then
+  echo "the tight loops failed (exit $code):"; cat tight.txt; exit 1
+fi
+grep '^tight' tight.txt | sed 's/^/  /'
 
 # ── 2c. Preemption inside the library, std and recursion, twice ──────────
 # bench/parallel_preempt_lib.iyi: a sort, a copy, a hash's growth, a join,
@@ -542,6 +562,25 @@ caught preemptoff 'slice: a short task waited' slice --workers=1
 step "failure proof: a monitor that never raises a worker's word preempts nothing"
 broken noflag '/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
 caught noflag 'slice: a short task waited' slice --workers=1
+
+step "failure proof: a Windows monitor that waits on the system timer looks too seldom"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    broken coarse '/^        @@monitor_timer = timer.address$/ { print "        @@monitor_timer = 0_u64"; next } { print }' concurrency.iyi parallel_preempt
+    caught coarse 'period: the monitor looked every' period --workers=1 ;;
+  *)
+    echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
+esac
+
+step "failure proof: a check that calls the thread-local accessor at every back-edge costs a tight loop"
+if [ "$(uname -s)" = Linux ]; then
+  echo "  the check on Linux never called the accessor: the copy builds the same code, so there is nothing to fail"
+else
+  if ! "$IYI" build --release -Dpreempt_check_accessor "$REPO/bench/parallel_preempt.iyi" -o accessor-run > build-accessor.log 2>&1; then
+    echo "the accessor build failed:"; tail -20 build-accessor.log; exit 1
+  fi
+  caught accessor 'tight: sum:' tight --workers=1
+fi
 
 step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"
 if [ "$CORES" -lt 2 ]; then

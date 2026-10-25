@@ -3980,10 +3980,30 @@ class IyiWorkers
   # Tasks that gave their worker up wait in the preempted queue, behind
   # the lock, counted in `@@preempted` so a look without the lock sees
   # them. The monitor's word is 1 while it is parked, with every worker
-  # idle; its page holds the tick's timespec on Linux and darwin, and on
-  # darwin the kevent its kqueue answers into.
+  # idle; its page holds the tick's timespec on Linux and darwin, on
+  # darwin the kevent its kqueue answers into, and on Windows the tick as
+  # a relative due time for its waitable timer (`monitor_wait`), whose
+  # handle `@@monitor_timer` is. `@@looks` counts the monitor's looks, which
+  # is what the exercise reads its period from.
+  #
+  # On x86-64 Windows the word is not `@@preempt` but a slot of the TEB's
+  # own: `@@preempt_slot` is its offset from `%gs`, which the compiler's
+  # check reads in every function's entry and then loads `%gs`-relative,
+  # as Linux loads `%fs:off` (`PreemptChecks`). A thread-local there is
+  # three loads deep - `gs:0x58`, the C runtime's index into that table,
+  # the word - and on a GitHub Windows runner, best of seven against
+  # `@[NoPreempt]` twins, a vectorised sum and the same through `each`
+  # took 1.63 to 1.75 times as long checked that way, 1.46 to 1.49 with
+  # the slot, and 3.4 to 4.9 through the accessor call. The slot is a
+  # `TlsAlloc` index under 64, `TlsSlots` at 0x1480 in the TEB, Go's
+  # `tls_g` the same way; until the pool claims one
+  # (`claim_preempt_slot`), and if it gets none under 64, it is
+  # `ArbitraryUserPointer` at 0x28, Go's fallback too. Nothing but a
+  # worker's slot is ever raised, and the slow half clears only a
+  # worker's.
   @[ThreadLocal]
   @@preempt : UInt64 = 0_u64
+  @@preempt_slot : UInt64 = 0x28_u64
   @@preempted_head : IyiFiber?
   @@preempted_tail : IyiFiber?
   @@preempted : Int64 = 0_i64
@@ -3991,6 +4011,8 @@ class IyiWorkers
   @@monitor_parked : UInt64 = 0_u64
   @@monitor_page : UInt64 = 0_u64
   @@monitor_handle : UInt64 = 0_u64
+  @@monitor_timer : UInt64 = 0_u64
+  @@looks : UInt64 = 0_u64
 
   def self.word(variable : Pointer(Int64)) : Pointer(Atomic(Int64))
     Pointer(Atomic(Int64)).new(variable.address)
@@ -4060,6 +4082,7 @@ class IyiWorkers
       @@workers = Array(IyiSchedulerState).new(workers)
       @@listed = Pointer(UInt64).malloc(workers.to_u64)
       IyiSchedLock.unlock
+      claim_preempt_slot
       index = 0
       while index < workers
         IyiThread.start { IyiWorkers.work }
@@ -4080,8 +4103,13 @@ class IyiWorkers
       root = IyiScheduler.current
       st.make_ring
       # Where the monitor raises this worker's preemption word: its own
-      # thread-local's address, the same for the worker's whole life.
-      st.preempt_word = pointerof(@@preempt).address
+      # thread-local's address, or on x86-64 Windows its TEB's slot, the
+      # same for the worker's whole life.
+      {% if flag?(:win32) && flag?(:x86_64) %}
+        st.preempt_word = IyiRoots.current_teb &+ @@preempt_slot
+      {% else %}
+        st.preempt_word = pointerof(@@preempt).address
+      {% end %}
       IyiSchedLock.lock
       st.worker = true
       listed = @@workers
@@ -4462,6 +4490,33 @@ class IyiWorkers
     Pointer(Atomic(UInt64)).new(pointerof(@@preempts).address).value.get
   end
 
+  # The monitor's looks, in all: what the exercise divides a busy
+  # stretch by to know the monitor's period.
+  def self.looks : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@looks).address).value.get
+  end
+
+  # x86-64 Windows: a `TlsAlloc` slot for the preemption word, as its
+  # offset from `%gs`, before the first worker starts. `TlsAlloc` zeroes
+  # the slot on every thread, and one at 64 or past it is in the
+  # expansion table, not the TEB, so it is given back and the word stays
+  # at `ArbitraryUserPointer`. Nothing elsewhere.
+  def self.claim_preempt_slot : Nil
+    {% if flag?(:win32) && flag?(:x86_64) %}
+      index = LibC.TlsAlloc
+      if index >= 0_i32 && index < 64_i32
+        @@preempt_slot = 0x1480_u64 &+ index.to_u64 &* 8_u64
+      elsif index >= 0_i32
+        LibC.TlsFree(index)
+      end
+    {% end %}
+  end
+
+  # The preemption word's offset from `%gs` on x86-64 Windows.
+  def self.preempt_slot : UInt64
+    @@preempt_slot
+  end
+
   # The back-edge's slow half, on a worker whose word the monitor raised.
   # Nothing here when a runtime lock is held - a loop in a block a prelude
   # def runs under one may check, and a park there would park the holder -
@@ -4475,9 +4530,15 @@ class IyiWorkers
   # waiting for it parks on the lock's word rather than spin (std/mutex).
   def self.preempted : Nil
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      @@preempt = 0_u64
-      st = IyiScheduler.state
-      return unless st.worker
+      {% if flag?(:win32) && flag?(:x86_64) %}
+        st = IyiScheduler.state
+        return unless st.worker
+        Pointer(Atomic(UInt64)).new(st.preempt_word).value.set(0_u64)
+      {% else %}
+        @@preempt = 0_u64
+        st = IyiScheduler.state
+        return unless st.worker
+      {% end %}
       # A fresh quantum from here: the monitor sees the count move.
       st.switches = st.switches &+ 1_u64
       return if IyiSchedLock.held_here? || IyiRuntimeLock.held?
@@ -4596,6 +4657,21 @@ class IyiWorkers
         semaphore = LibC.CreateSemaphoreW(nil, 0_i32, 0x7FFFFFFF_i32, nil)
         raise "the pool's monitor's semaphore could not be made" if semaphore.address == 0_u64
         @@monitor_handle = semaphore.address
+        # The tick's own timer. A millisecond timeout ends on the system
+        # timer's tick: on a GitHub Windows runner the semaphore's 5 ms
+        # wait made the monitor's looks 11.2 to 12.3 ms apart, and a
+        # ticker beside a computing task woke up to 30 ms late. A
+        # high-resolution waitable timer (0x2, the poller's
+        # `deadline_timer`) ends on time - 5.15 to 5.27 ms a look there,
+        # turns of 10.3 to 10.5 ms, the ticker at most 10 ms late - and
+        # leaves the machine's timer as it was, which `timeBeginPeriod(1)`
+        # would not. A Windows without the flag (before 10 1803) answers a
+        # null handle, and the semaphore's timeout stays. The due time is
+        # relative, in 100 ns.
+        timer = LibC.CreateWaitableTimerExW(Pointer(Void).new(0_u64),
+          Pointer(UInt16).new(0_u64), 2_i32, 0x1F0003_i32)
+        @@monitor_timer = timer.address
+        Pointer(Int64).new(page).value = 0_i64 - (PREEMPT_TICK_NS // 100_u64).to_i64
       {% end %}
       @@monitor_page = page
       IyiThread.start_helper(monitor_entry, page)
@@ -4610,6 +4686,7 @@ class IyiWorkers
   # The monitor's whole life.
   def self.monitor(page : UInt64) : Nil
     while true
+      Pointer(Atomic(UInt64)).new(pointerof(@@looks).address).value.add(1_u64)
       if look
         monitor_wait(false)
       else
@@ -4701,8 +4778,10 @@ class IyiWorkers
   # it is parked, so a wake that comes before the wait is not lost;
   # darwin's doorbell and Windows' semaphore keep a wake until it is
   # taken, and a wake left over ends a tick early, which costs a look.
-  # Windows' wait ends on the system timer's tick, 15.6 ms unless the
-  # machine runs a finer one, so its quantum is that long or longer.
+  # Windows' tick waits on the high-resolution timer alone (wakes come
+  # only to a parked monitor), and on the semaphore's millisecond timeout,
+  # the system timer's tick, where there is no such timer or it could not
+  # be set.
   private def self.monitor_wait(parked : Bool) : Nil
     {% if flag?(:linux) %}
       expected = parked ? 1_i64 : 0_i64
@@ -4713,6 +4792,15 @@ class IyiWorkers
       timeout = parked ? Pointer(Void).new(0_u64) : Pointer(Void).new(page)
       LibC.kevent(@@monitor_handle.to_i32, Pointer(Void).new(0_u64), 0, Pointer(Void).new(page &+ 64_u64), 1, timeout)
     {% elsif flag?(:win32) %}
+      timer = Pointer(Void).new(@@monitor_timer)
+      unless parked || timer.address == 0_u64
+        set = LibC.SetWaitableTimer(timer, Pointer(Int64).new(@@monitor_page), 0_i32,
+          Pointer(Void).new(0_u64), Pointer(Void).new(0_u64), 0_i32)
+        if set != 0_i32
+          LibC.WaitForSingleObject(timer, -1_i32)
+          return
+        end
+      end
       LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), parked ? -1_i32 : PREEMPT_TICK_MS)
     {% end %}
   end

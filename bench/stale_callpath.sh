@@ -526,19 +526,23 @@ with open(key_rel) as f:
 assert d_rel['local']['build'] != local_build, 'IYI_OPTS=--release should change Build'
 print('  Flag sensitivity: -s/--verbose/OUT keep Build, --release changes it OK')
 
-# 6. --no-cleanup refuses and never hits (44)
+# 6. A refused mode refuses and never hits (44). --emit llvm-ir is a refused
+# mode the build verb accepts and still links; --no-cleanup stays a
+# no-codegen tooling flag (an unclean tree cannot be generated), and its
+# refusal is covered in-process by spec/compiler/stale/check_spec.cr.
 key_nc = os.path.join(work, 'nc.key')
 bin_nc = os.path.join(work, 'nc.bin')
 env_nc = env_base.copy()
-env_nc['IYI_OPTS'] = '--no-cleanup'
+env_nc['IYI_OPTS'] = '--emit llvm-ir'
 res_nc = subprocess.run([iyi, 'build', '--stale-key', key_nc, '--stale-accept', accept_local, '-o', bin_nc, sample],
-                        env=env_nc, capture_output=True, text=True)
+                        env=env_nc, capture_output=True, text=True, cwd=work)
+assert res_nc.returncode == 0, f'--emit build failed: {res_nc.stderr[-500:]}'
 with open(key_nc) as f:
     d_nc = json.load(f)
-assert d_nc['phase'] != 'hit', '--no-cleanup should never hit'
+assert d_nc['phase'] != 'hit', '--emit should never hit'
 nc_reasons = [r['reason'] for r in d_nc.get('not_reusable', []) if r.get('category') == 'refused build mode']
-assert any('--no-cleanup' in r for r in nc_reasons), f'Missing --no-cleanup refusal: {d_nc.get(\"not_reusable\")}'
-print('  --no-cleanup: refuses and never hits OK')
+assert any('--emit' in r for r in nc_reasons), f'Missing --emit refusal: {d_nc.get(\"not_reusable\")}'
+print('  --emit: refuses and never hits OK')
 
 # 7. IYI_OPTS=--crystal gives the crystal reason
 key_cr = os.path.join(work, 'cr.key')

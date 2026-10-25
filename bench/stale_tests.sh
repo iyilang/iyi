@@ -390,7 +390,7 @@ step 43 "two processes compute one signature"
 # Covered by spec/compiler/stale/call_path_spec.cr:423
 step 44 "refused build modes are not reusable"
 r44_out="$WORK/r44.txt"
-(cd "$WORK/basic" && IYI_OPTS="--no-cleanup" "$IYI" test --cached --explain other_test.iyi) > "$r44_out" 2>&1
+(cd "$WORK/basic" && IYI_OPTS="--emit llvm-ir" "$IYI" test --cached --explain other_test.iyi) > "$r44_out" 2>&1
 expect_contains "$(cat "$r44_out")" "miss: refused build mode" "refused mode reason"
 
 step 45 "magic default call location changes fingerprint"

@@ -32,8 +32,16 @@ IYI="$REPO/bin/iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A native compiler cannot resolve this shell's own path mapping: a
+# search path of `/tmp/tmp.X` and `/d/a/...` finds no prelude, and the
+# gate's first run on Windows built none of its broken copies. The list's
+# separator is `;` there, where a drive letter owns the colon.
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    PSEP=';'
+    ;;
   *) PSEP=':' ;;
 esac
 

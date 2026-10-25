@@ -3978,8 +3978,8 @@ class Channel(T)
       IyiSchedLock.unlock
       return Cancelled.new
     end
-    if send_ready?
-      answer = put_now(value)
+    if send_ready_held?
+      answer = put_held(value)
       IyiSchedLock.unlock
       return answer
     end
@@ -4021,8 +4021,8 @@ class Channel(T)
         IyiSchedLock.unlock
         return Cancelled.new
       end
-      if receive_ready?
-        answer = take_now
+      if receive_ready_held?
+        answer = take_held
         IyiSchedLock.unlock
         return answer
       end
@@ -4061,17 +4061,52 @@ class Channel(T)
 
   # ── The halves `select` shares with the calls above ────────────────
   #
-  # `ready?` promises the `_now` half will not park. Both are called with
-  # the scheduler's lock held, so the promise cannot be invalidated in
-  # the gap, by a fiber on this thread or on any other.
+  # `*_held` assume the scheduler's lock: `ready?` promises the `_now`
+  # half will not park, and with the lock held from the look to the act
+  # the promise cannot be broken in the gap, by a fiber on this thread or
+  # on any other. `send`, `receive` and `select` call these.
+  #
+  # The public spellings take the lock themselves. They were these same
+  # halves, public because `select`'s arms call them, and the library
+  # called them directly with no lock: std/http's `serve_parallel` freed
+  # a connection's place with `slots.take_now` on whichever worker served
+  # it, and a handler stopped a server with `stop.put_now(0)` from a
+  # worker. A wake from there of a task parked on another thread - the
+  # accept loop waiting for a place - linked it into that thread's inbox
+  # under no lock, beside other threads doing the same, and the ring,
+  # the count and the queues were changed by two threads at once: a stop
+  # was lost now and then, and a waiter slept on. `bench/parallel_exercise`'s
+  # `now` step hammers both from every worker, and a copy without the
+  # lock is caught there.
 
   def receive_ready? : Bool
+    IyiSchedLock.lock
+    ready = receive_ready_held?
+    IyiSchedLock.unlock
+    ready
+  end
+
+  # :nodoc: - the scheduler's lock held.
+  def receive_ready_held? : Bool
     @closed || @count > 0 || sender_waiting?
   end
 
-  # Assumes `receive_ready?`: the buffer, then a parked sender's box,
-  # then the refusal.
+  # The next value without waiting: the buffer, then a parked sender's
+  # box, then `ChannelClosed`. On an empty open channel there is nothing
+  # to take, and asking is a bug the call panics over; `select` with an
+  # `else` arm is the receive that may find nothing.
   def take_now : T | ChannelClosed
+    IyiSchedLock.lock
+    ready = receive_ready_held?
+    answer = ready ? take_held : ChannelClosed.new
+    IyiSchedLock.unlock
+    raise "take_now on an empty open channel" unless ready
+    answer
+  end
+
+  # :nodoc: - the scheduler's lock held, and `receive_ready_held?` true:
+  # the buffer, then a parked sender's box, then the refusal.
+  def take_held : T | ChannelClosed
     if @count > 0
       value = shift_item
       # The buffer has room now; the oldest parked sender's value moves
@@ -4096,17 +4131,39 @@ class Channel(T)
   end
 
   def send_ready? : Bool
+    IyiSchedLock.lock
+    ready = send_ready_held?
+    IyiSchedLock.unlock
+    ready
+  end
+
+  # :nodoc: - the scheduler's lock held.
+  def send_ready_held? : Bool
     @closed || @count < @capacity || receiver_waiting?
   end
 
-  # Assumes `send_ready?`. A rendezvous puts the value in the parked
-  # receiver's own slot (`hand`). It went into the buffer, and the send
-  # answered delivered on the word of the wake: a select woken that way
-  # took another arm ready by then, a receiver cancelled before it ran
-  # answered `Cancelled`, and either way the value stayed in a channel of
-  # no capacity after its sender left. A buffered send completes when the
-  # buffer takes it, so there the woken receiver finds it in the buffer.
+  # The value sent without waiting: to a parked receiver, or into the
+  # buffer; `ChannelClosed` once the channel is. A full channel has no
+  # room, and asking is a bug the call panics over; `select` with an
+  # `else` arm is the send that may not happen.
   def put_now(value : T) : Nil | ChannelClosed
+    IyiSchedLock.lock
+    ready = send_ready_held?
+    answer = ready ? put_held(value) : nil
+    IyiSchedLock.unlock
+    raise "put_now on a full channel" unless ready
+    answer
+  end
+
+  # :nodoc: - the scheduler's lock held, and `send_ready_held?` true. A
+  # rendezvous puts the value in the parked receiver's own slot (`hand`).
+  # It went into the buffer, and the send answered delivered on the word
+  # of the wake: a select woken that way took another arm ready by then, a
+  # receiver cancelled before it ran answered `Cancelled`, and either way
+  # the value stayed in a channel of no capacity after its sender left. A
+  # buffered send completes when the buffer takes it, so there the woken
+  # receiver finds it in the buffer.
+  def put_held(value : T) : Nil | ChannelClosed
     return ChannelClosed.new if @closed
     return nil if @capacity == 0 && hand(value)
     if wake_receiver
@@ -4163,7 +4220,9 @@ class Channel(T)
 
   # `select`'s arms park through these with one shared nonce; a plain
   # call parks with a fresh nonce of its own. *slot* is where a rendezvous
-  # sender puts its value (`IyiWaiter#slot`).
+  # sender puts its value (`IyiWaiter#slot`). These and the two unlinks
+  # below are public for the arms' sake and change the queues, so like
+  # the `*_held` halves they are called with the scheduler's lock held.
   def park_receive_node(fiber : IyiFiber, nonce : UInt64, slot : UInt64) : IyiWaiter
     waiter = fiber.spare_waiter
     if waiter.is_a?(IyiWaiter) && !waiter.linked
@@ -4405,7 +4464,7 @@ class Channel(T)
     {bound, Cancelled.new, false}
   end
 
-  # Nothing happens on the arm `take_now` answers: `ChannelClosed` is
+  # Nothing happens on the arm `take_held` answers: `ChannelClosed` is
   # the refusal here, where a closed channel's buffer is spent.
   def receive_refused? : Bool
     @closed && @count == 0
@@ -4427,7 +4486,7 @@ class IyiReceiveSelect(T)
   end
 
   def ready? : Bool
-    @channel.receive_ready?
+    @channel.receive_ready_held?
   end
 
   def refused? : Bool
@@ -4435,7 +4494,7 @@ class IyiReceiveSelect(T)
   end
 
   def execute : T | ChannelClosed
-    @channel.take_now
+    @channel.take_held
   end
 
   def park(fiber : IyiFiber, nonce : UInt64) : Nil
@@ -4470,7 +4529,7 @@ class IyiSendSelect(T)
   end
 
   def ready? : Bool
-    @channel.send_ready?
+    @channel.send_ready_held?
   end
 
   def refused? : Bool
@@ -4478,7 +4537,7 @@ class IyiSendSelect(T)
   end
 
   def execute : Nil | ChannelClosed
-    @channel.put_now(@value)
+    @channel.put_held(@value)
   end
 
   def park(fiber : IyiFiber, nonce : UInt64) : Nil

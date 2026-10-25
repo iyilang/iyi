@@ -343,6 +343,82 @@
     end
   end
 
+  # One task's claims on places as std/http's `serve_parallel` holds them:
+  # a send claims one and parks while all are held, a `take_now` frees it.
+  def claim_places(places : Channel(Int32), served : Tally, rounds : Int32) : Int32
+    n = 0
+    while n < rounds
+      places.send(0)
+      served.add(1_i64)
+      places.take_now
+      n = n + 1
+    end
+    0
+  end
+
+  # `Channel#take_now` and `#put_now` from every worker at once, which
+  # take the scheduler's lock themselves (they were `select`'s lock-held
+  # halves, and std/http called them from workers with no lock). First
+  # places as `serve_parallel` holds them: a send claims one of two and
+  # parks while both are held, a `take_now` frees one and wakes the oldest
+  # claimant wherever it waits - eight parallel tasks and the main thread
+  # claiming beside them, so the wakes cross to a thread outside the pool
+  # as well. Then values `put_now` from six workers into one buffer, taken
+  # on the main thread, which parks whenever it is empty and is woken by
+  # whichever producer puts next: each value once, in each producer's
+  # order. A task's panic is read off its handle and named here.
+  def now_halves(watch : Int32) : Nil
+    watched("now", watch) do
+      places = Channel(Int32).new(2)
+      served = Tally.new
+      rounds = 2000
+      group do |g|
+        handles = [] of IyiTask(Int32)
+        8.times do
+          handles << g.spawn_parallel { claim_places(places, served, rounds) }
+        end
+        handles << g.spawn { claim_places(places, served, rounds) }
+        handles.each do |handle|
+          answer = handle.value
+          fail("now: a task claiming places answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+        end
+      end
+      fail("now: #{served.count} of #{9 * rounds} places claimed and freed") unless served.count == 9_i64 * rounds
+      fail("now: a place is still held after every claim was freed") if places.receive_ready?
+
+      producers = 6
+      per = 20000
+      fan = Channel(Tuple(Int32, Int32)).new(producers * per)
+      expected = Array(Int32).new(producers, 0)
+      group do |g|
+        handles = [] of IyiTask(Int32)
+        producers.times do |p|
+          handles << g.spawn_parallel do
+            i = 0
+            while i < per
+              fan.put_now({p, i})
+              i = i + 1
+            end
+            0
+          end
+        end
+        (producers * per).times do
+          got = fan.receive
+          fail("now: a receive of what put_now sent answered #{got}") unless got.is_a?(Tuple(Int32, Int32))
+          who = got[0]
+          fail("now: producer #{who} put #{got[1]} where #{expected[who]} was next") unless got[1] == expected[who]
+          expected[who] = expected[who] + 1
+        end
+        handles.each do |handle|
+          answer = handle.value
+          fail("now: a producer answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+        end
+      end
+      fail("now: values left in the channel after #{producers * per} were taken") if fan.receive_ready?
+      puts "now: #{9 * rounds} places claimed and freed with take_now from 8 workers and the main thread, #{producers * per} values put_now from #{producers} workers taken once each in each one's order"
+    end
+  end
+
   # A cancel reaches a task on another thread: asleep, parked on a
   # channel, and still waiting in the pool to start.
   def cancel(watch : Int32) : Nil
@@ -525,7 +601,7 @@
     end
   end
 
-  STEPS = ["placement", "exactly_once", "race", "channels", "cancel", "panics", "steal", "collector", "typed"]
+  STEPS = ["placement", "exactly_once", "race", "channels", "now", "cancel", "panics", "steal", "collector", "typed"]
 
   arguments = Program.args
   if arguments.size == 4 && arguments[0] == "speed"
@@ -549,6 +625,7 @@
       when "exactly_once" then exactly_once(watch)
       when "race"         then race(watch)
       when "channels"     then channels(watch)
+      when "now"          then now_halves(watch)
       when "cancel"       then cancel(watch)
       when "panics"       then panics(watch)
       when "steal"        then steal(watch)

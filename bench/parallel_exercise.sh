@@ -10,10 +10,11 @@
 #      tasks start on the pool and on more than one worker, each stays on
 #      the thread that started it, a thousand run exactly once, an atomic
 #      count loses nothing, channels carry values across threads once each
-#      and in each sender's order, a cancel reaches a task asleep, parked
-#      on a channel, or still waiting in the pool, a panic stops at the
-#      task's boundary, idle workers steal, collections keep the workers'
-#      lists, and the typed group answers.
+#      and in each sender's order, `take_now` and `put_now` from every
+#      worker at once lose and repeat nothing, a cancel reaches a task
+#      asleep, parked on a channel, or still waiting in the pool, a panic
+#      stops at the task's boundary, idle workers steal, collections keep
+#      the workers' lists, and the typed group answers.
 #   2. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   3. The speedup, measured: CPU-bound tasks on one worker and on several,
@@ -30,10 +31,11 @@
 #      the named check: a cross-thread wake that does not ring (a lost
 #      wakeup), a steal that leaves the task in its victim's queue (a task
 #      handed out twice), a cancel that is never delivered to the thread a
-#      sleeping task is on, and a cancel that skips tasks still waiting in
-#      the pool (a cancelled task run as if it were not); and the race
-#      step's add made a plain load and store, which loses adds only when
-#      tasks really run at the same instant.
+#      sleeping task is on, a cancel that skips tasks still waiting in the
+#      pool (a cancelled task run as if it were not), and `take_now` and
+#      `put_now` without the scheduler's lock; and the race step's add made
+#      a plain load and store, which loses adds only when tasks really run
+#      at the same instant.
 #   7. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 3's floor refuses the ratio that comes out.
 set -u
@@ -309,6 +311,29 @@ caught undelivered 'cancel: still waiting after 5000 ms' cancel --watch=5000
 step "failure proof: a cancel that skips tasks waiting in the pool runs them uncancelled"
 broken unflagged '/def self.cancel\(fiber/ { incancel = 1 } incancel && /^    fiber.cancelled = true$/ { print "    fiber.cancelled = true unless fiber.home.is_a?(Nil)"; incancel = 0; next } { print }'
 caught unflagged 'tasks waiting in the pool ran uncancelled' cancel --watch=60000
+
+step "failure proof: take_now and put_now without the scheduler's lock lose and repeat values across workers"
+# Two threads changing one channel's ring and queues at once end the step
+# by name most runs - a place still held, a value out of order, a take of
+# an empty channel, a wake lost - and some by a fault, or by a hang the
+# step's own watchdog does not end, with a channel's queues torn: 10 of 12
+# runs ended by name here and 2 hung, and a fault was seen in an earlier
+# set. A run that dies of a signal or is timed out is run again, up to
+# five times, and one ending by name is the proof.
+if [ "$CORES" -lt 2 ]; then
+  echo "  one core here: two workers cannot change a channel at the same instant, so the proof is not run"
+else
+  broken unlocked '/^  def (take_now|put_now)/ { inside = 1 } inside && /^    IyiSchedLock\.(lock|unlock)$/ { next } /^  end$/ { inside = 0 } { print }'
+  for attempt in 1 2 3 4 5; do
+    timeout -k 5 30 ./unlocked-run now --watch=5000 > unlocked.txt 2>&1
+    code=$?
+    [ "$code" -lt 124 ] && break
+  done
+  if [ "$code" -ne 1 ] || ! grep -q '^FAIL: now: ' unlocked.txt; then
+    echo "the copy without the lock was not caught by the now step (exit $code):"; tail -20 unlocked.txt; exit 1
+  fi
+  echo "  exits 1 at \"$(grep -m1 '^FAIL: now: ' unlocked.txt | sed 's/^FAIL: //')\""
+fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"
 if [ "$CORES" -lt 2 ]; then

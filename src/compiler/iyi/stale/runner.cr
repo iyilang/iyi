@@ -406,7 +406,9 @@ module Iyi::Stale
 
           if !trace_res.taints.empty?
             is_not_reusable = true
-            taint_reason = trace_res.taints.first.site
+            taint = trace_res.taints.first
+            kind = Iyi::EffectKind.from_value?(taint.kind).try(&.to_s.underscore) || "taint #{taint.kind}"
+            taint_reason = "#{kind} at #{taint.site}"
           elsif !trace_res.a3_mismatches.empty?
             is_not_reusable = true
             taint_reason = trace_res.a3_mismatches.first

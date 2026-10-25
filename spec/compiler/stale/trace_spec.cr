@@ -41,7 +41,7 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
     roots.map("/opt/iyi/share/iyi/src/iyi/prelude.iyi").should eq(Iyi::Stale::RootPath.new("toolchain", "iyi/prelude.iyi"))
     roots.map("/cache/mod/foo-1.0/lib.iyi").should eq(Iyi::Stale::RootPath.new("pkg", "foo-1.0/lib.iyi"))
     roots.map("/tmp/scratch-123/temp_out.txt").should eq(Iyi::Stale::RootPath.new("scratch", "temp_out.txt"))
-    roots.map("/etc/passwd").should eq(Iyi::Stale::RootPath.new("abs", "/etc/passwd"))
+    roots.map("/etc/passwd").should eq(Iyi::Stale::RootPath.new("abs", Iyi::Stale::Roots.real("/etc/passwd")))
   end
 
   it "parses a complete trace with all record types" do

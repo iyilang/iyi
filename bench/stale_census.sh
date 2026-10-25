@@ -174,6 +174,11 @@ def run_single_program(item):
 
     test_file = os.path.join(p_scratch, f"{stem}_test.iyi")
     shutil.copy(path, test_file)
+    # A program's own data files sit beside it under its stem (std_eiy
+    # reads std_eiy_exercise.eiy at compile time); they travel with it.
+    for companion in glob.glob(os.path.join(os.path.dirname(path), stem + '*')):
+        if not companion.endswith(('.iyi', '.sh')) and os.path.isfile(companion):
+            shutil.copy(companion, p_scratch)
 
     env = dict(os.environ,
                IYI_CACHE_DIR=p_cache,
@@ -478,7 +483,7 @@ def measure_overhead(results):
         print(f"| {bname:25} | {t_def} | {t_fr} | {t_ca} | {elem} | {tr_b} | {rc_b} | {ky_b} |")
 
     print()
-    print('*Note on cold-cache effects: The `--fresh` time includes the cold compilation of the runtime with `-Diyi_observe` in the private cache directory (initial build per cache). In a warm compiler cache, rebuild time is comparable to default mode, and `--cached` validation checks the receipt in <1s without recompiling.*')
+    print('*Wall-clock seconds, measured while the census runs up to 8 programs at once. `--fresh` starts from an empty private cache, so it includes compiling the runtime with `-Diyi_observe`. `--cached` is the second run in that cache, validated against the first run\'s receipt. No warm-cache `--fresh` time was measured.*')
     print()
 
     # Stage timing breakdown on samples/iyi/hello.iyi

@@ -434,13 +434,20 @@ class Iyi::Command
   # being told.
   private def build
     arguments = options.dup
-    inputs = BuildInputs.new(nil)
+    stale_build = options.includes?("--stale-key") ||
+                  options.any?(&.starts_with?("--stale-key=")) ||
+                  ENV["IYI_OPTS"]?.try(&.includes?("--stale-key"))
+    inputs = BuildInputs.new(nil, env_only: stale_build ? true : false)
     BuildInputs.current = inputs
     begin
       config = create_compiler "build", defer_move_aside: true
       compiler = config.compiler
+      if compiler.stale_key && !inputs.env_only?
+        inputs = BuildInputs.new(nil, env_only: true)
+        BuildInputs.current = inputs
+      end
       inputs.cache_root = CacheDir.instance.dir
-      check = up_to_date_check(config, arguments)
+      check = up_to_date_check(config, arguments) unless compiler.stale_key
 
       if check && !@force_build
         reason = @progress_tracker.stage("Up-to-date check") { check.stale_reason }
@@ -1058,9 +1065,6 @@ class Iyi::Command
         compiler.use_iyimod = dir
       end
 
-      opts.on("--stale-key FILE", "iyi: write stale key OUT file") do |file|
-        compiler.stale_key = file
-      end
 
       unless no_codegen
         opts.on("--release", "Compile in release mode (-O3 --single-module)") do
@@ -1108,6 +1112,18 @@ class Iyi::Command
         if command == "build"
           opts.on("--force", "Build even when nothing the output was built from has changed") do
             @force_build = true
+          end
+          opts.on("--stale-key FILE", "iyi: write stale key output to FILE") do |file|
+            compiler.stale_key = file
+          end
+          opts.on("--stale-accept FILE", "iyi: stale accept file") do |file|
+            compiler.stale_accept = file
+          end
+          opts.on("--stale-block FILE", "iyi: stale block file") do |file|
+            compiler.stale_block = file
+          end
+          opts.on("--stale-dump-elements FILE", "iyi: stale dump elements file") do |file|
+            compiler.stale_dump_elements = file
           end
         end
       end

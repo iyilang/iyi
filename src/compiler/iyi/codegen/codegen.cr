@@ -744,6 +744,7 @@ module Iyi
         iyi_define_metaclass_fun
         iyi_define_all_artifact_const_reads
         iyi_define_msvc_catch_globals if @program.has_flag?("msvc")
+        iyi_define_type_id_to_class_name_map if @program.iyi_abi?
       end
 
       # iyi: the mark loop runs inside the built program, so the pointer
@@ -1989,7 +1990,7 @@ module Iyi
       end
     end
 
-    def type_id_to_class_name(type_id)
+    def iyi_define_type_id_to_class_name_map : LLVM::Value
       map_name = type_id_to_class_name_map_name
 
       global = @main_mod.globals[map_name]?
@@ -1999,7 +2000,13 @@ module Iyi
         global.initializer = create_type_id_to_class_name_map
         global.global_constant = true
       end
+      global
+    end
 
+    def type_id_to_class_name(type_id)
+      map_name = type_id_to_class_name_map_name
+
+      global = iyi_define_type_id_to_class_name_map
       if @llvm_mod != @main_mod
         global = @llvm_mod.globals[map_name]?
         unless global

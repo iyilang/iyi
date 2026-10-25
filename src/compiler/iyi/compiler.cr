@@ -5,6 +5,10 @@ require "crystal/digest/md5"
 require "./optimization_mode"
 require "./wasm_roots"
 require "./mod/installer"
+require "./stale/encoding"
+require "./stale/toolchain"
+require "./stale/link"
+require "./stale/compiler_env"
 {% if flag?(:msvc) %}
   require "./loader"
 {% end %}
@@ -203,7 +207,6 @@ module Iyi
     # and can later be used to generate API docs.
     property? wants_doc = false
 
-    property stale_key : String? = nil
     property stale_drop : Stale::EdgeKind? = nil
 
     # Warning settings and all detected warnings.
@@ -249,6 +252,16 @@ module Iyi
 
     # Program that was created for the last compilation.
     property! program : Program
+
+    # Stale testing properties (S2 pre-listed DISPLAY_ONLY)
+    property stale_key : String? = nil
+    property stale_accept : String? = nil
+    property stale_block : String? = nil
+    property stale_dump_elements : String? = nil
+
+    def stale_build? : Bool
+      !@stale_key.nil?
+    end
 
     # Compiles the given *source*, with *output_filename* as the name
     # of the generated executable.
@@ -363,6 +376,7 @@ module Iyi
     private def compile_with_preanalysed_prelude(pre : Preanalysed, sources : Array(Source),
                                                  output_filename : String, & : Program -> Nil) : Result
       program = pre.program
+      @iyi_link_driver_only = true if stale_build?
 
       # What the prelude was read from belongs to this build's record too:
       # it was read before this build began, under the analysis's own.
@@ -542,7 +556,8 @@ module Iyi
       cleanup cross_compile dependency_printer dump_ll emit_base_filename
       emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
       iyi_link_driver_only link_flags mattr mcmodel mcpu n_threads no_cleanup
-      program progress_tracker single_module stale_drop stale_key stderr target_machine verbose
+      program progress_tracker single_module stale_drop stderr target_machine verbose
+      stale_accept stale_block stale_dump_elements stale_key
     )
 
     # Everything that changes what the prelude analyses *to*. Macros branch on
@@ -569,6 +584,129 @@ module Iyi
       end
     end
 
+    IN_BEHAVIOR_KEY = %w(
+      cleanup codegen_target cross_compile crystal_library debug dump_ll
+      emit_bind emit_iyimod emit_targets flags frame_pointers iyi_direct_link
+      iyi_keep iyi_link_driver_only iyi_prefers_source link_flags mattr mcmodel
+      mcpu n_threads no_cleanup no_codegen optimization_mode prelude single_module
+      static target_machine wants_doc
+    )
+
+    LOCATION_ONLY = %w(
+      emit_base_filename iyi_file_overrides iyi_header_root iyi_mod_table
+      iyi_project_root program use_iyimod
+    )
+
+    DISPLAY_ONLY = %w(
+      color dependency_printer progress_tracker show_error_trace stale_accept
+      stale_block stale_drop stale_dump_elements stale_key stderr stdout verbose warnings
+    )
+
+    def behavior_key : Stale::Digest
+      {% begin %}
+        {% classified = IN_BEHAVIOR_KEY + LOCATION_ONLY + DISPLAY_ONLY %}
+        {% for ivar in @type.instance_vars %}
+          {% unless classified.includes?(ivar.name.stringify) %}
+            {% raise "Compiler##{ivar.name} is new, and nothing says what it is to the " +
+                     "behavior key. Say which this is: add it to IN_BEHAVIOR_KEY, " +
+                     "LOCATION_ONLY or DISPLAY_ONLY in compiler.cr." %}
+          {% end %}
+        {% end %}
+      {% end %}
+
+      Stale.d("behavior") do |encoder|
+        encoder.bool(@cleanup)
+        encoder.str(@codegen_target.to_s)
+        encoder.bool(@cross_compile)
+        encoder.bool(@crystal_library)
+        encoder.str(@debug.to_s)
+        encoder.bool(@dump_ll)
+
+        if eb = @emit_bind
+          encoder.str(eb)
+        else
+          encoder.absent
+        end
+
+        if em = @emit_iyimod
+          encoder.str(em)
+        else
+          encoder.absent
+        end
+
+        encoder.uint(@emit_targets.value.to_u64)
+
+        eff_flags = @flags.dup
+        eff_flags << "release" if release? && !eff_flags.includes?("release")
+        eff_flags << "debug" if !debug.none? && !eff_flags.includes?("debug")
+        eff_flags << "static" if static? && !eff_flags.includes?("static")
+        eff_flags.sort!
+        encoder.list(eff_flags.size) do |enc|
+          eff_flags.each { |f| enc.str(f) }
+        end
+
+        encoder.str(@frame_pointers.to_s)
+        encoder.bool(@iyi_direct_link)
+
+        if ik = @iyi_keep
+          encoder.str(ik)
+        else
+          encoder.absent
+        end
+
+        encoder.bool(@iyi_link_driver_only)
+        encoder.bool(@iyi_prefers_source)
+
+        if lf = @link_flags
+          encoder.str(lf)
+        else
+          encoder.absent
+        end
+
+        if ma = @mattr
+          encoder.str(ma)
+        else
+          encoder.absent
+        end
+
+        encoder.str(@mcmodel.to_s)
+
+        if mc = @mcpu
+          encoder.str(mc)
+        else
+          encoder.absent
+        end
+
+        if Stale::THREADS_IN_BEHAVIOR
+          encoder.int(@n_threads.to_i64)
+        else
+          encoder.absent
+        end
+
+        encoder.bool(@no_cleanup)
+        encoder.bool(@no_codegen)
+        encoder.str(@optimization_mode.to_s)
+        encoder.str(@prelude)
+        encoder.bool(@single_module)
+        encoder.bool(@static)
+        encoder.str(target_machine.triple)
+        encoder.bool(@wants_doc)
+      end
+    end
+
+    def stale_refusals : Array(String)
+      refusals = [] of String
+      refusals << "refused build mode: --no-cleanup" if @no_cleanup
+      refusals << "refused build mode: --emit" unless @emit_targets.none?
+      refusals << "refused build mode: --emit-iyimod" if @emit_iyimod
+      refusals << "refused build mode: --emit-bind" if @emit_bind
+      refusals << "refused build mode: --iyi-keep" if @iyi_keep
+      refusals << "refused build mode: --cross-compile" if @cross_compile
+      refusals << "refused build mode: --no-codegen" if @no_codegen
+      refusals << "refused build mode: IYI_FORK_PROBE" if ENV.has_key?("IYI_FORK_PROBE")
+      refusals
+    end
+
     # Analyses the prelude on its own, so a later compile can start from it.
     # The filename is a placeholder: the build that adopts this has its own, and
     # sets it before compiling.
@@ -593,6 +731,7 @@ module Iyi
     # Yields a `Program` instance before compiling.
     def compile_configure_program(source : Source | Array(Source), output_filename : String, & : Program -> Nil) : Result
       source = [source] unless source.is_a?(Array)
+      @iyi_link_driver_only = true if stale_build?
       return prelude_fork_probe(source, output_filename) if ENV["IYI_FORK_PROBE"]?
 
       # iyi: `IYI_WARM=1` — analyse the prelude and adopt it, in one process and
@@ -4123,19 +4262,51 @@ module Iyi
       BuildInputs.current.try &.linked(command, args)
 
       begin
-        Process.run(command, args, shell: true,
-          input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
-          process.error.each_line(chomp: false) do |line|
-            # iyi: the three `gsub(/... -l(\S+)\b/, "... \\1 hint")` rewrites,
-            # by hand — the compiler's own code must not be what links pcre2
-            # (zero-dep). A matching line gets the same hint; any other line
-            # passes through unchanged, byte for byte.
-            line = linker_library_hint(line, "cannot find -l")
-            line = linker_library_hint(line, "unable to find library -l")
-            line = linker_library_hint(line, "library not found for -l")
-            STDERR << line
+        {% if flag?(:win32) %}
+          Process.run(command, args, shell: true,
+            input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+            process.error.each_line(chomp: false) do |line|
+              line = linker_library_hint(line, "cannot find -l")
+              line = linker_library_hint(line, "unable to find library -l")
+              line = linker_library_hint(line, "library not found for -l")
+              STDERR << line
+            end
           end
-        end
+        {% else %}
+          if stale_build?
+            tokens = Process.parse_arguments_posix(command)
+            argv = [] of String
+            tokens.each do |token|
+              if token == "${@}"
+                argv.concat(args) if args
+              else
+                argv << token
+              end
+            end
+            if argv.empty?
+              raise CompilerError.new("empty linker command")
+            end
+            Process.run(argv[0], argv[1..], shell: false,
+              input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+              process.error.each_line(chomp: false) do |line|
+                line = linker_library_hint(line, "cannot find -l")
+                line = linker_library_hint(line, "unable to find library -l")
+                line = linker_library_hint(line, "library not found for -l")
+                STDERR << line
+              end
+            end
+          else
+            Process.run(command, args, shell: true,
+              input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+              process.error.each_line(chomp: false) do |line|
+                line = linker_library_hint(line, "cannot find -l")
+                line = linker_library_hint(line, "unable to find library -l")
+                line = linker_library_hint(line, "library not found for -l")
+                STDERR << line
+              end
+            end
+          end
+        {% end %}
       rescue exc : File::AccessDeniedError | File::NotFoundError
         linker_not_found exc.class, linker_name
       end
@@ -4230,8 +4401,8 @@ module Iyi
     end
 
     private def stale_check(program : Program, node : ASTNode, source_or_sources) : Nil
+      return unless stale_build? || @stale_drop
       key_file = @stale_key
-      return unless key_file || @stale_drop
 
       reach = Stale::ReachWalk.walk(program, node, drop: @stale_drop)
       program.stale_reach = reach

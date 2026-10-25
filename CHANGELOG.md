@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **The allocator's centre is split by size class (#145).** Each class
+  has its own lock, its stack of batches and its own list of arenas, so a
+  refill, a sweep slice's claim, a warm run and a new bump region take
+  their class's lock and walk only their class's arenas. The runtime lock
+  keeps the heap's lists and the pause, and is always taken before a
+  class's lock. A worker that sweeps a slice keeps that slice's batch as
+  its own list. Interleaved with the build before, best of 3, HTTPS
+  `check_version` on twelve workers went from 167,319 a second on 819%
+  CPU to 204,526 on 599%, and `order` from 91,435 to 148,015; no sampled
+  worker stack is in a lock. `bench/alloc_cache.sh` is the new gate, with
+  broken copies for lists kept across a collection, a class's lock or a
+  slice claim that excludes nobody, and an unretired cache; its reuse
+  check has no broken copy that it catches yet. `bench/alloc_scaling.py` times a pool allocating
+  flat out at 1 to 12 workers and samples lock stacks with gdb; its curve
+  did not move (22% of one worker's rate per worker at twelve), and what
+  limits it looks like fresh memory and page faults rather than a lock.
+
 - **`bench/web_cores.py` measures issue #145's shape against a Go twin
   (#145).** It times three endpoints: a bcrypt login, a `check_version`
   and a JSON `order`. They are written once in iyi (`bench/web_cores.iyi`)
@@ -24907,7 +24924,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,301-line library and nothing else. Every other
+  written against iyi's own 24,523-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

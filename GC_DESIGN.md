@@ -1976,6 +1976,60 @@ others trigger, and find it whole by checksum; and
 each of 30 parks, hundreds of them resumed on another worker, through
 20 to 28 stops, where a collector that skipped runnable fibers loses one.
 
+**A pool's workers and the centre: a lock per size class.** The pool
+was the first thing to put a dozen threads on the allocator's slow path
+at once, and the slow path was one lock. Every refill a cache could not
+satisfy, every claim of a sweep slice, every warm run threaded and every
+bump region set took the runtime lock and walked the whole arena list
+under it - a list that grows by a fill arena per class per worker. A
+12-worker HTTPS `check_version` server had 111 of 500 sampled thread
+stacks inside that lock (refill 38, the sweep's claim 30, `reopen_pages`
+20), and `bench/web_cores.py` answered 20,400 requests a second per core
+there against 30,500 on four workers.
+
+The split is Go's mcentral beside its heap lock. Each size class has a
+line of its own on the centre: a lock, the stack of batches the sweep
+helpers leave, and the list of the class's own arenas. A refill, a
+slice's claim and its hand-back, a warm run threaded, a region set and
+`free_unswept` take their class's lock and walk their class's arenas.
+The runtime lock keeps what is the heap's - the list of every arena and
+the directory, the large list, the caches list, the epoch and the pause
+- and is taken before a class's lock, never after: its spin parks a
+thread for a pause, and a thread parked holding a class's lock would
+hold it against the pause's own sweep. Nothing parks under a class's
+lock, so a pause finds them all free and takes none. And a thread that
+sweeps a slice for its cache keeps the slice's batch as its own list
+rather than pushing it to the centre and popping one back, the mcache
+sweeping the span it is about to use: one lock round trip fewer per
+slice, and the batch is the sweeper's. The collector's side is
+unchanged - every list is dropped at a pause, a thread's last act
+retires its cache, an object born under a mark is black - and two waits
+on another walker's claim (the refill's, `free_unswept`'s) park for a
+stop where they hold nothing, as the runtime lock's spin did when they
+waited there: the claim may be a helper's whose end waits for the
+runtime lock the stopping thread holds.
+
+Measured interleaved with the build before it, best of three, 0 to 0.2
+cores busy elsewhere: HTTPS `check_version` on twelve workers 204,526 a
+second on 599% CPU against 167,319 on 819% - 34,100 a second per core
+against 20,400, and Go's 32,200 - with no sampled stack in a lock (10
+stops, 250 stacks) and 41,000 minor faults in ten seconds against
+781,000. `bench/alloc_cache.sh` holds it: workers' cells whole through
+collections, no chunk on two lists, every list empty after a collection,
+no cache left by an ended thread, the sweep's chunks reused, and broken
+copies - lists kept across a collection, a class's lock or a walk claim
+that excludes nobody, an unretired cache - each caught; the reuse check
+has no copy it catches yet (the gate says why). What it did not move is `bench/alloc_scaling.py`'s
+curve: twelve workers allocating flat out still run at 22% of one
+worker's rate per worker (24% before), with the lock gone from their
+stacks too (1 of 500 against 87). What limits them looks like fresh memory: twelve
+workers carve 510 to 800 MB where one carves 8, through fewer
+collections, and take 185,000 to 275,000 page faults a run. Neither
+build hung in 240 runs each of the scaling program and the gate at
+four, eight and twelve workers, plain and release; one four-worker run
+of a cut without the two parks did hang past ten minutes, and five more
+runs of that cut did not repeat it.
+
 ---
 
 ## What gcry Measured (Prior Art)

@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,301 lines, of which 4,647 are the library held to the 4,650 ceiling (6,663 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 24,523 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 130,704 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,301 lines
+> "No standard library worth the name" is still true of iyi's own 24,523 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,301 lines,
-primitives included, of which the library is 4,647.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 24,523 lines,
+primitives included, of which the library is 4,649.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,11 +299,11 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,647 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,649 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,016 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,663 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,665 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 130,704 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,301-line own prelude + 125,236 in std |
+| Library | 8,161 lines (3,551 of it core) | 24,523-line own prelude + 125,236 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -4228,12 +4228,33 @@ and 20 during a 4-worker one.
 
 So at twelve workers over HTTPS, `check_version` answers 143,231 a second
 on 641% CPU, against Go's 169,636 on 503%: 22,000 a second per core
-against 34,000. At four workers iyi answers 33,000 per core. The lock is
+against 34,000. At four workers iyi answers 33,000 per core. The lock was
 the collector's (GC_DESIGN.md), taken for a refill that each thread's own
-lists cannot satisfy. Making it per-thread or batching the refill is a
-change to the allocator, not to std/http, and it is not made here. `order`
-is answered faster per core than Go's on every row up to eight workers:
-137,744 a second on 605% CPU against Go's 90,732 on 538%.
+lists could not satisfy, and it is split now, below. `order` was answered
+faster per core than Go's on every row up to eight workers: 137,744 a
+second on 605% CPU against Go's 90,732 on 538%.
+
+**The allocator's centre, split by size class, and measured again.** Each
+size class has its own lock, its batches and its own list of arenas, and a
+worker that sweeps a slice keeps the slice's batch; the runtime lock keeps
+the heap's lists and the pause (GC_DESIGN.md, "A pool's workers and the
+centre"). The same rows, taken interleaved with the build before the split
+in one session on 2026-10-26, best of 3 runs each, the load average 4 to
+10 from the runs themselves and 0 to 0.2 cores busy elsewhere; requests a
+second and the server's CPU:
+
+| | HTTP check_version | HTTP order | HTTPS check_version | HTTPS order |
+|---|---:|---:|---:|---:|
+| 4 workers, before | 232,339, 471% | 135,639, 503% | 177,202, 544% | 101,492, 575% |
+| 4 workers, after | 248,242, 415% | 164,023, 422% | 185,398, 413% | 114,521, 419% |
+| 12 workers, before | 260,536, 793% | 156,387, 889% | 167,319, 819% | 91,435, 914% |
+| 12 workers, after | 286,922, 621% | 205,736, 636% | 204,526, 599% | 148,015, 640% |
+
+HTTPS `check_version` on twelve workers is 34,100 a second per core where
+it was 20,400, and Go's was 32,200 (the first session's Go row). Ten gdb
+stops under it found none of 250 thread stacks in a lock, against 60
+before, and the server took 41,000 minor faults in ten seconds against
+781,000.
 
 `bench/web_cores.py` is not a gate. On this shared machine its rows move
 with whatever else runs, and wrk takes cores the twelve-worker rows want.
@@ -10944,7 +10965,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,301-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,523-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

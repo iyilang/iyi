@@ -322,6 +322,53 @@ print LibTest.cos(0.0)
   echo "RG4 PASSED: all $total programs linked byte-identical under randomized non-CHILD_ENV variables"
 }
 
+run_reach() {
+  echo "== Running S3e: Reach section (reach walk vs codegen recording cross-check) =="
+  "$PY" -c "
+import os, sys, glob, subprocess, json
+
+repo = sys.argv[1]
+iyi = sys.argv[2]
+work = sys.argv[3]
+
+samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
+bench = sorted(glob.glob(os.path.join(repo, 'bench/std_*_exercise.iyi')))
+all_progs = samples + bench
+
+mismatches = 0
+for prog in all_progs:
+    name = os.path.relpath(prog, repo)
+    key_file = os.path.join(work, 'reach.key')
+    out_file = os.path.join(work, 'prog.bin')
+    if os.path.exists(key_file):
+        os.remove(key_file)
+    res = subprocess.run([iyi, 'build', '--stale-key', key_file, '-o', out_file, prog],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f'  Reach build FAILED: {name} (exit {res.returncode})', file=sys.stderr)
+        mismatches += 1
+        continue
+    if not os.path.exists(key_file):
+        print(f'  Reach key missing: {name}', file=sys.stderr)
+        mismatches += 1
+        continue
+    try:
+        with open(key_file) as f:
+            data = json.load(f)
+        mm = data.get('reach', {}).get('mismatch', [])
+        if mm:
+            print(f'  Reach MISMATCH in {name}: {mm}', file=sys.stderr)
+            mismatches += 1
+    except Exception as e:
+        print(f'  Reach JSON error {name}: {e}', file=sys.stderr)
+        mismatches += 1
+
+print(f'Reach checked {len(all_progs)} programs: {len(all_progs) - mismatches} OK, {mismatches} mismatches')
+if mismatches > 0:
+    sys.exit(1)
+" "$REPO" "$IYI" "$WORK"
+}
+
 case "$MODE" in
   link)
     run_link
@@ -330,11 +377,12 @@ case "$MODE" in
     run_rg4
     ;;
   reach)
-    echo "reach section not implemented in S3d (owned by S3e)"
+    run_reach
     ;;
   all)
     run_link
     run_rg4
+    run_reach
     ;;
   *)
     echo "Unknown mode: $MODE (expected: all, link, rg4, reach)" >&2

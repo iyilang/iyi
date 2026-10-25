@@ -2819,32 +2819,41 @@ class IyiScheduler
   end
 
   private def self.io_owner_chunk(index : Int32, make : Bool) : UInt64
-    return 0_u64 if index < 0
-    which = index.to_u64 // IO_CHUNK
-    return 0_u64 if which >= IO_CHUNKS
-    table = Pointer(Atomic(UInt64)).new(pointerof(@@io_owners).address).value.get
-    if table == 0_u64
-      return 0_u64 unless make
-      IyiRuntimeLock.lock
-      table = @@io_owners
+    # A build with no collector of iyi's own (`-Dgc_none`, `-Dgc_boehm`)
+    # has no `__iyi_mmap` and no pool for a descriptor to belong to a
+    # worker of, so nothing is recorded and every waiter is this thread's:
+    # the spec that builds one with Boehm stopped at the mmap (job
+    # 121202840186).
+    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+      0_u64
+    {% else %}
+      return 0_u64 if index < 0
+      which = index.to_u64 // IO_CHUNK
+      return 0_u64 if which >= IO_CHUNKS
+      table = Pointer(Atomic(UInt64)).new(pointerof(@@io_owners).address).value.get
       if table == 0_u64
-        table = __iyi_mmap(IO_CHUNKS &* 8_u64).address
-        Pointer(Atomic(UInt64)).new(pointerof(@@io_owners).address).value.set(table)
+        return 0_u64 unless make
+        IyiRuntimeLock.lock
+        table = @@io_owners
+        if table == 0_u64
+          table = __iyi_mmap(IO_CHUNKS &* 8_u64).address
+          Pointer(Atomic(UInt64)).new(pointerof(@@io_owners).address).value.set(table)
+        end
+        IyiRuntimeLock.unlock
       end
-      IyiRuntimeLock.unlock
-    end
-    entry = Pointer(Atomic(UInt64)).new(table &+ which &* 8_u64)
-    chunk = entry.value.get
-    if chunk == 0_u64 && make
-      IyiRuntimeLock.lock
+      entry = Pointer(Atomic(UInt64)).new(table &+ which &* 8_u64)
       chunk = entry.value.get
-      if chunk == 0_u64
-        chunk = __iyi_mmap(IO_CHUNK &* 8_u64).address
-        entry.value.set(chunk)
+      if chunk == 0_u64 && make
+        IyiRuntimeLock.lock
+        chunk = entry.value.get
+        if chunk == 0_u64
+          chunk = __iyi_mmap(IO_CHUNK &* 8_u64).address
+          entry.value.set(chunk)
+        end
+        IyiRuntimeLock.unlock
       end
-      IyiRuntimeLock.unlock
-    end
-    chunk
+      chunk
+    {% end %}
   end
 
   # Any number of fibers wait on one task, each pushed on its chain. A

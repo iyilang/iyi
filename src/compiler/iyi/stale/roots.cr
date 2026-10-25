@@ -96,7 +96,9 @@ module Iyi::Stale
                   else
                     File.expand_path(file_path)
                   end
-      abs_path = File.expand_path(candidate)
+      # Same resolution as the roots: a compiler location written through a
+      # symlinked directory (/tmp on darwin) must land in its root, not `abs`.
+      abs_path = Roots.real(candidate)
 
       if !@src.empty? && (rel = ::Path[abs_path].relative_to?(@src))
         rel_str = rel.to_s

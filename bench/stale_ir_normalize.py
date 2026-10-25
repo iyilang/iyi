@@ -217,8 +217,8 @@ def split_modules_and_functions(ir_text: str) -> tuple[list[str], list[FunctionD
 
 def strip_debug_and_comments(line: str) -> str:
     """Strips debug metadata and end-of-line comments from an IR line."""
-    # Scratch mutation: disable stripping debug metadata
-    pass
+    line = re.sub(r",\s*!dbg\s*!\d+", "", line)
+    line = re.sub(r"!dbg\s*!\d+", "", line)
     in_quote = False
     res: list[str] = []
     for ch in line:
@@ -301,8 +301,8 @@ def normalize_function_body(
 
     # 1. Replace proc names using proc_map
     text = "\n".join(cleaned_lines)
-    for raw_proc, ordinal_proc in proc_map.items():
-        text = text.replace(raw_proc, ordinal_proc)
+    # Scratch mutation: disable proc normalization in function bodies
+    pass
     cleaned_lines = text.splitlines()
 
     # 2. Temp variables: %__temp_[A-Za-z0-9_]+ to first-occurrence ordinals
@@ -609,8 +609,8 @@ def normalize_ir(ir_text: str, type_id_text: str = "") -> tuple[str, str]:
 
     for f in raw_functions:
         canon_name = f.raw_name
-        for raw_p, ord_p in proc_map.items():
-            canon_name = canon_name.replace(raw_p, ord_p)
+        # Scratch mutation: disable proc replacement in function names
+        pass
         f.canonical_name = canon_name
 
     ref_globals = extract_referenced_globals(

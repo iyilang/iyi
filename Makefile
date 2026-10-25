@@ -129,6 +129,7 @@ ifeq ($(shell $(check_lld)),1)
 endif
 override EXPORTS += \
   IYI_CONFIG_BUILD_COMMIT="$(IYI_CONFIG_BUILD_COMMIT)" \
+  IYI_CONFIG_BUILD_INPUTS="$(IYI_CONFIG_BUILD_INPUTS)" \
   IYI_CONFIG_PATH=$(IYI_CONFIG_PATH) \
   SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)"
 override EXPORTS_BUILD += \
@@ -143,6 +144,9 @@ ifndef LLVM_CONFIG
 endif
 ifeq ($(LLVM_VERSION),)
   LLVM_VERSION := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --version 2> /dev/null))
+endif
+ifndef IYI_CONFIG_BUILD_INPUTS
+	IYI_CONFIG_BUILD_INPUTS := $(shell python3 scripts/build_inputs.py --llvm-version "$(LLVM_VERSION)" --crystal-version "$(BASE_CRYSTAL_VERSION)" --flags "$(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS)" 2>/dev/null)
 endif
 
 # FIXME: Crystal docker images before 1.8 can't build a functional compiler

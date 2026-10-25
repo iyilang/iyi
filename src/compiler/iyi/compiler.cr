@@ -5,6 +5,8 @@ require "crystal/digest/md5"
 require "./optimization_mode"
 require "./wasm_roots"
 require "./mod/installer"
+require "./stale/encoding"
+require "./stale/toolchain"
 {% if flag?(:msvc) %}
   require "./loader"
 {% end %}
@@ -246,6 +248,12 @@ module Iyi
 
     # Program that was created for the last compilation.
     property! program : Program
+
+    # Stale testing properties (S2 pre-listed DISPLAY_ONLY)
+    property stale_key : String? = nil
+    property stale_accept : String? = nil
+    property stale_block : String? = nil
+    property stale_dump_elements : String? = nil
 
     # Compiles the given *source*, with *output_filename* as the name
     # of the generated executable.
@@ -536,6 +544,7 @@ module Iyi
       emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
       iyi_link_driver_only link_flags mattr mcmodel mcpu n_threads no_cleanup
       program progress_tracker single_module stderr target_machine verbose
+      stale_accept stale_block stale_dump_elements stale_key
     )
 
     # Everything that changes what the prelude analyses *to*. Macros branch on
@@ -560,6 +569,129 @@ module Iyi
         io << debug << '|' << static? << '|' << wants_doc? << '|'
         io << @flags.sort.join(',')
       end
+    end
+
+    IN_BEHAVIOR_KEY = %w(
+      cleanup codegen_target cross_compile crystal_library debug dump_ll
+      emit_bind emit_iyimod emit_targets flags frame_pointers iyi_direct_link
+      iyi_keep iyi_link_driver_only iyi_prefers_source link_flags mattr mcmodel
+      mcpu n_threads no_cleanup no_codegen optimization_mode prelude single_module
+      static target_machine wants_doc
+    )
+
+    LOCATION_ONLY = %w(
+      emit_base_filename iyi_file_overrides iyi_header_root iyi_mod_table
+      iyi_project_root program use_iyimod
+    )
+
+    DISPLAY_ONLY = %w(
+      color dependency_printer progress_tracker show_error_trace stale_accept
+      stale_block stale_dump_elements stale_key stderr stdout verbose warnings
+    )
+
+    def behavior_key : Stale::Digest
+      {% begin %}
+        {% classified = IN_BEHAVIOR_KEY + LOCATION_ONLY + DISPLAY_ONLY %}
+        {% for ivar in @type.instance_vars %}
+          {% unless classified.includes?(ivar.name.stringify) %}
+            {% raise "Compiler##{ivar.name} is new, and nothing says what it is to the " +
+                     "behavior key. Say which this is: add it to IN_BEHAVIOR_KEY, " +
+                     "LOCATION_ONLY or DISPLAY_ONLY in compiler.cr." %}
+          {% end %}
+        {% end %}
+      {% end %}
+
+      Stale.d("behavior") do |encoder|
+        encoder.bool(@cleanup)
+        encoder.str(@codegen_target.to_s)
+        encoder.bool(@cross_compile)
+        encoder.bool(@crystal_library)
+        encoder.str(@debug.to_s)
+        encoder.bool(@dump_ll)
+
+        if eb = @emit_bind
+          encoder.str(eb)
+        else
+          encoder.absent
+        end
+
+        if em = @emit_iyimod
+          encoder.str(em)
+        else
+          encoder.absent
+        end
+
+        encoder.uint(@emit_targets.value.to_u64)
+
+        eff_flags = @flags.dup
+        eff_flags << "release" if release? && !eff_flags.includes?("release")
+        eff_flags << "debug" if !debug.none? && !eff_flags.includes?("debug")
+        eff_flags << "static" if static? && !eff_flags.includes?("static")
+        eff_flags.sort!
+        encoder.list(eff_flags.size) do |enc|
+          eff_flags.each { |f| enc.str(f) }
+        end
+
+        encoder.str(@frame_pointers.to_s)
+        encoder.bool(@iyi_direct_link)
+
+        if ik = @iyi_keep
+          encoder.str(ik)
+        else
+          encoder.absent
+        end
+
+        encoder.bool(@iyi_link_driver_only)
+        encoder.bool(@iyi_prefers_source)
+
+        if lf = @link_flags
+          encoder.str(lf)
+        else
+          encoder.absent
+        end
+
+        if ma = @mattr
+          encoder.str(ma)
+        else
+          encoder.absent
+        end
+
+        encoder.str(@mcmodel.to_s)
+
+        if mc = @mcpu
+          encoder.str(mc)
+        else
+          encoder.absent
+        end
+
+        if Stale::THREADS_IN_BEHAVIOR
+          encoder.int(@n_threads.to_i64)
+        else
+          encoder.absent
+        end
+
+        encoder.bool(@no_cleanup)
+        encoder.bool(@no_codegen)
+        encoder.str(@optimization_mode.to_s)
+        encoder.str(@prelude)
+        encoder.bool(@single_module)
+        encoder.bool(@static)
+        encoder.str(target_machine.triple)
+        encoder.bool(@wants_doc)
+      end
+    end
+
+    def stale_refusals : Array(String)
+      refusals = [] of String
+      refusals << "refused build mode: --no-cleanup" if @no_cleanup
+      refusals << "refused build mode: --emit" unless @emit_targets.none?
+      refusals << "refused build mode: --emit-iyimod" if @emit_iyimod
+      refusals << "refused build mode: --emit-bind" if @emit_bind
+      refusals << "refused build mode: --iyi-keep" if @iyi_keep
+      refusals << "refused build mode: --cross-compile" if @cross_compile
+      refusals << "refused build mode: --no-codegen" if @no_codegen
+      refusals << "refused build mode: IYI_FORK_PROBE" if ENV.has_key?("IYI_FORK_PROBE")
+      refusals
     end
 
     # Analyses the prelude on its own, so a later compile can start from it.

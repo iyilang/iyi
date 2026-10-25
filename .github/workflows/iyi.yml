@@ -390,8 +390,7 @@ jobs:
       # the sweep's chunks reused, no chunk on two lists, every list empty
       # after a collection, no cache left by an ended thread - and broken
       # copies (lists kept across a collection, a class's lock or a walk
-      # claim that excludes nobody, a sweep that hands nothing back, an
-      # unretired cache), each caught.
+      # claim that excludes nobody, an unretired cache), each caught.
       - name: The allocator's caches and its centre per class
         run: bash bench/alloc_cache.sh
 

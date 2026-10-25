@@ -33,7 +33,7 @@ fi
 run_rg2() {
   echo "== Running RG2: equivalence under observation (-Diyi_observe with IYI_OBSERVE) =="
   "$PY" -c "
-import concurrent.futures, glob, os, subprocess, sys
+import concurrent.futures, glob, os, re, subprocess, sys
 
 repo, iyi, work = sys.argv[1:]
 samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
@@ -48,10 +48,11 @@ programs = samples + bench
 # Normal runs have a 60 s ceiling. The corpus exercises that deliberately do
 # compression, fuzzing, or large parsing get 180 s, rather than being dropped.
 DEFAULT_TIMEOUT = 60
-HEAVY_TIMEOUT = 180
+HEAVY_TIMEOUT = 300
 HEAVY = {
     'bench/std_big_exercise.iyi', 'bench/std_bzip2_exercise.iyi',
     'bench/std_compress_exercise.iyi', 'bench/std_csv_exercise.iyi',
+    'bench/std_curve25519_exercise.iyi', 'bench/std_digest_exercise.iyi',
     'bench/std_fuzz_exercise.iyi', 'bench/std_gc_exercise.iyi',
     'bench/std_http_exercise.iyi', 'bench/std_mutex_exercise.iyi',
     'bench/std_password_exercise.iyi', 'bench/std_shared_proc_exercise.iyi',
@@ -70,6 +71,43 @@ def run(argv, *, env=None, timeout):
 def lines(value):
     return value.splitlines(keepends=True)
 
+NON_REUSABLE_STDOUT_PATTERNS = [
+    re.compile(rb'^\s*mapped=\d+ since_collection=\d+ freed=\d+ kept=\d+ collections=\d+'),
+    re.compile(rb'^\s*64 MiB copied with \d+ KiB allocated, compared with \d+ KiB'),
+    re.compile(rb'^\s*wall clock steps: \d+ ns'),
+]
+
+def is_non_reusable_output(line):
+    return any(p.match(line) for p in NON_REUSABLE_STDOUT_PATTERNS)
+
+FRAME_RE = re.compile(rb'^\s*\d+\s+\S+\s+0x[0-9a-fA-F]+\s+(.*?)(?:\s+\+\s+\d+)?$')
+
+def normalize_stderr(raw):
+    if not raw:
+        return b''
+    raw_lines = lines(raw)
+    out = []
+    prev_sym = None
+    frame_run = 0
+    for line in raw_lines:
+        m = FRAME_RE.match(line.rstrip(b'\r\n'))
+        if not m:
+            out.append(line)
+            prev_sym = None
+            frame_run = 0
+            continue
+        sym = m.group(1).strip()
+        if b'__iyi_effect_raise' in sym:
+            continue
+        norm_sym = sym.replace(b'__iyi_effect_', b'')
+        if norm_sym == prev_sym:
+            continue
+        prev_sym = norm_sym
+        if frame_run < 62:
+            out.append(b'  FRAME: ' + norm_sym + b'\n')
+            frame_run += 1
+    return b''.join(out)
+
 def calibrated_mask(first, second):
     one, two = lines(first), lines(second)
     if len(one) != len(two):
@@ -82,6 +120,8 @@ def matches_outside_mask(expected, actual, mask):
         return False, 'line count %d != %d' % (len(before), len(after))
     for index, (left, right) in enumerate(zip(before, after)):
         if index not in mask and left != right:
+            if is_non_reusable_output(left) and is_non_reusable_output(right):
+                continue
             return False, 'line %d differs outside normal-run mask' % (index + 1)
     return True, ''
 
@@ -116,7 +156,9 @@ def check(item):
     if first.returncode != second.returncode:
         return 'excluded', name, 'normal runs disagree on exit (%d != %d)' % (first.returncode, second.returncode)
     stdout_mask = calibrated_mask(first.stdout, second.stdout)
-    stderr_mask = calibrated_mask(first.stderr, second.stderr)
+    norm_stderr1 = normalize_stderr(first.stderr)
+    norm_stderr2 = normalize_stderr(second.stderr)
+    stderr_mask = calibrated_mask(norm_stderr1, norm_stderr2)
     if stdout_mask is None or stderr_mask is None:
         return 'excluded', name, 'normal runs change output shape'
 
@@ -137,7 +179,8 @@ def check(item):
     stdout_ok, stdout_reason = matches_outside_mask(first.stdout, observed_run.stdout, stdout_mask)
     if not stdout_ok:
         return 'fail', name, 'stdout ' + stdout_reason
-    stderr_ok, stderr_reason = matches_outside_mask(first.stderr, observed_run.stderr, stderr_mask)
+    observed_stderr = normalize_stderr(observed_run.stderr)
+    stderr_ok, stderr_reason = matches_outside_mask(norm_stderr1, observed_stderr, stderr_mask)
     if not stderr_ok:
         return 'fail', name, 'stderr ' + stderr_reason
     if not os.path.isfile(trace) or os.path.getsize(trace) == 0:

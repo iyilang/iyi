@@ -276,7 +276,7 @@ iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--exp
 | Gate | Proves | Blocks | Until green |
 |---|---|---|---|
 | RG1 | Compilers with equal build-input digests produce byte-identical test executables for corpus | Hits across commits | Executable SHA-256 stays in identity |
-| RG2 | Normal and `-Diyi_observe` builds give equal exit status, stdout and stderr | Shipping `--cached` | Shipping waits |
+| RG2 | Normal and `-Diyi_observe` builds give equal exit status, stdout and stderr outside calibrated masks, non-reusable output, and normalized backtraces | Shipping `--cached` | Shipping waits |
 | RG3 | Zero unclassified runtime sites reachable from corpus on target; report lists candidate runtime defs flagged by the §4 walk, with completeness resting on review and RG6 as the check | Enabling platform CI | Platform runs fresh |
 | RG4 | Links byte-identical under randomized variables outside `CHILD_ENV` | Treating `CHILD_ENV` as whole link environment | Full link environment digested |
 | RG5 | Runtime patched via `IYI_PATH` dropping each observer allows changed input to pass; gate catches it | Claiming kind is covered | Kind is not claimed |
@@ -286,6 +286,8 @@ iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--exp
 | RG9 | Every C2 and C3 program checked in two processes with address randomization, with and without a preanalysed prelude (`compiler.cr:605-617`), and on the `stale-fresh` runner gets one `CallPathFp` | Shipping `--cached` | Shipping waits |
 
 Normalized reached IR is the unoptimized IR printed under `DUMP=1` (`codegen.cr:755-779`), with debug metadata stripped, type-id constants replaced by the names they denote and range checks by the sorted names in range, symbol indices by symbol strings, proc and temporary names by first-occurrence ordinals, union cases sorted by type name, and module-level tables (simple constants, type-id globals, GC layouts, symbol table) restricted to entries the emitted functions reference.
+
+RG2 equivalence under observation compares exit status, stdout and stderr. Because observer builds inject wrappers for every annotated def (where `def foo` calls `__iyi_effect_foo`) and `raise` carries `@[Effect(:panic_backtrace)]`, backtraces printed on panics inherently include implementation frames alongside wrapper frames. RG2 normalizes stderr by stripping internal `__iyi_effect_raise` frames, collapsing adjacent duplicate wrapper-implementation frames to the canonical method name, masking ASLR load addresses, and capping backtrace frame runs at 62 frames (the 64-frame buffer limit minus skipped frames). Stdout compares equal outside calibrated masks and documented non-reusable accessor output (A2: timing resolution `wall clock steps: ... ns`, collector statistics `mapped=...`, and allocation benchmarks `... KiB allocated` from `runtime_timing` and `clock` kinds).
 
 ## 11. Phases and slices
 

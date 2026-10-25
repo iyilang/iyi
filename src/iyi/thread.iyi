@@ -719,6 +719,9 @@
     def join : Nil
       line = @line
       return if line == 0
+      # A join holds its thread in the kernel: a pool worker hands its
+      # runnable fibers on first (`IyiScheduler.blocking_begin`).
+      IyiScheduler.blocking_begin
       {% if flag?(:linux) %}
         while (tid = IyiThread.word(line + IYI_TL_HANDLE).value.get) != 0_u64
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (line + IYI_TL_HANDLE).to_i64, IYI_FUTEX_WAIT, tid.to_i64, 0_i64, 0_i64, 0_i64)
@@ -732,6 +735,7 @@
         LibC.WaitForSingleObject(handle, -1_i32)
         LibC.CloseHandle(handle)
       {% end %}
+      IyiScheduler.blocking_end
       # The thread has left the stop's list and ended, so nothing reads
       # the line again: each thread's stayed mapped for good.
       @line = 0_u64

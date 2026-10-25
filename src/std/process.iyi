@@ -1420,7 +1420,9 @@ class ProcessChild
       registration = Pointer(Void).new(0_u64)
       # INFINITE, WT_EXECUTEONLYONCE.
       if LibKernel32.RegisterWaitForSingleObject(pointerof(registration), @process, callback, words.as(Void*), -1, 8) == 0
+        IyiScheduler.blocking_begin
         ::LibC.WaitForSingleObject(@process, -1)
+        IyiScheduler.blocking_end
         record_end
         return nil
       end
@@ -1460,7 +1462,9 @@ class ProcessChild
 
     # After a kill, or a wait that could not be parked: the end is near.
     def reap : Nil
+      IyiScheduler.blocking_begin
       ::LibC.WaitForSingleObject(@process, -1)
+      IyiScheduler.blocking_end
       record_end
     end
 
@@ -1928,8 +1932,12 @@ class ProcessChild
 
       def reap : Nil
         status = 0
+        # A wait that holds the thread: a pool worker hands its runnable
+        # fibers on first (`IyiScheduler.blocking_begin`).
+        IyiScheduler.blocking_begin
         while LibC.waitpid(@pid, pointerof(status), 0) < 0 && ProcessChild.errno == EINTR
         end
+        IyiScheduler.blocking_end
         record_end(status)
       end
 
@@ -2213,8 +2221,10 @@ class ProcessChild
 
       def reap : Nil
         status = Pointer(Int32).malloc(1_u64)
+        IyiScheduler.blocking_begin
         while __iyi_conc_syscall6(SYS_WAIT4, @pid.to_i64, status.address.to_i64, 0_i64, 0_i64, 0_i64, 0_i64) == -(EINTR.to_i64)
         end
+        IyiScheduler.blocking_end
         record_end(status[0])
       end
 

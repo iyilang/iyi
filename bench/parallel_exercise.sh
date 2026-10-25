@@ -356,11 +356,19 @@ broken() { # name, awk program[, file in src/iyi[, program in bench]]
     echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
   fi
 }
+# A broken copy is a race the gate makes on purpose, and its run can lose
+# the race some other way first: the intransit copy died of SIGSEGV in 2 of
+# 180 runs rather than failing by name. A run that dies of a signal is run
+# again, up to five times; one ending in exit 1 at the sentence is the
+# proof, and any other end after five is a failure of the gate.
 caught() { # name, expected FAIL text, step arguments...
-  local name="$1" want="$2"
+  local name="$1" want="$2" code attempt
   shift 2
-  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
-  local code=$?
+  for attempt in 1 2 3 4 5; do
+    timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+    code=$?
+    [ "$code" -lt 128 ] && [ "$code" -ne 124 ] && break
+  done
   if [ "$code" -ne 1 ] || ! grep -qF "$want" "$name.txt"; then
     echo "the broken copy $name was not caught at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
   fi
@@ -400,10 +408,12 @@ else
     code=$?
     [ "$code" -lt 124 ] && break
   done
-  if [ "$code" -ne 1 ] || ! grep -q '^FAIL: now: ' unlocked.txt; then
+  # Not anchored at the line's start: other workers' panics are printed
+  # beside it, and one landed in front of the FAIL in a run of this proof.
+  if [ "$code" -ne 1 ] || ! grep -q 'FAIL: now: ' unlocked.txt; then
     echo "the copy without the lock was not caught by the now step (exit $code):"; tail -20 unlocked.txt; exit 1
   fi
-  echo "  exits 1 at \"$(grep -m1 '^FAIL: now: ' unlocked.txt | sed 's/^FAIL: //')\""
+  echo "  exits 1 at \"$(grep -m1 -o 'FAIL: now: .*' unlocked.txt | sed 's/^FAIL: //')\""
 fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"

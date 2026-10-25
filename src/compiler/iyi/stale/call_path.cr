@@ -712,7 +712,9 @@ module Iyi::Stale
       @encoder.bool(target_def.iyi_from_impl?)
       @encoder.bool(target_def.iyi_from_artifact?)
 
-      encode_node(target_def.body)
+      {% unless flag?(:rg8_drop_def_body) %}
+        encode_node(target_def.body)
+      {% end %}
     end
 
     def encode_type_element(type : Type) : Nil

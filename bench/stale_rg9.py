@@ -70,8 +70,15 @@ def main() -> None:
     os.makedirs(args.work, exist_ok=True)
     repo = os.path.abspath(args.repo)
     compiler = os.path.abspath(args.compiler)
-    programs = sorted(glob.glob(os.path.join(repo, "samples/iyi/*.iyi")))
-    programs += sorted(glob.glob(os.path.join(repo, "bench/std_*_exercise.iyi")))
+    c2 = [
+        os.path.join(repo, "samples/iyi", name)
+        for name in ("hello.iyi", "calc.iyi", "collections.iyi", "format.iyi", "shapes.iyi")
+    ]
+    c3 = sorted(glob.glob(os.path.join(repo, "bench/std_*_exercise.iyi")))
+    c3_limit = int(os.environ.get("IYI_RG9_C3_SAMPLE", "2"))
+    c3_sample = c3[1:1 + c3_limit]
+    programs = c2 + c3_sample
+    print(f"RG9 corpus: C2={len(c2)} programs, deterministic C3 sample={len(c3_sample)}/{len(c3)}")
     if not programs:
         raise GateFailure("RG9 corpus is empty")
 

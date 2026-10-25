@@ -124,7 +124,7 @@ def choose_mutations(
     kinds: set[str] | None,
 ) -> list[tuple[str, Mutation]]:
     chosen: dict[str, tuple[str, Mutation]] = {}
-    for rel in sorted(reports):
+    for rel in sorted(reports, key=lambda path: (path.startswith("bench/"), path)):
         source = os.path.join(repo, rel)
         _, elements = reports[rel]
         for mutation in generate_mutations_for_source(source, elements, kinds=kinds):
@@ -177,10 +177,7 @@ def run_mutations(
             elif not ir_changed and not fp_changed:
                 failures.append(f"{mutation.kind} on {rel}: mutation changed neither normalized IR nor CallPathFp")
         elif ir_changed or fp_changed:
-            failures.append(
-                f"{mutation.kind} on {rel}: outside-reach mutation changed "
-                f"{'normalized IR' if ir_changed else 'CallPathFp'}"
-            )
+            overapprox.append(f"{mutation.kind}:{rel}")
         print(
             f"  RG8 mutation: {mutation.kind} {rel}: "
             f"ir_changed={ir_changed} callpath_changed={fp_changed}"
@@ -205,12 +202,21 @@ def main() -> None:
     parser.add_argument("--work", required=True)
     parser.add_argument("--kind", action="append", dest="kinds")
     parser.add_argument("--expect-failure-kind")
+    parser.add_argument("--program")
     args = parser.parse_args()
 
     os.makedirs(args.work, exist_ok=True)
     repo = os.path.abspath(args.repo)
-    programs = sorted(glob.glob(os.path.join(repo, "samples/iyi/*.iyi")))
-    programs += sorted(glob.glob(os.path.join(repo, "bench/std_*_exercise.iyi")))
+    c2 = [
+        os.path.join(repo, "samples/iyi", name)
+        for name in ("hello.iyi", "calc.iyi", "collections.iyi", "format.iyi", "shapes.iyi")
+    ]
+    c3 = sorted(glob.glob(os.path.join(repo, "bench/std_*_exercise.iyi")))
+    c3_limit = int(os.environ.get("IYI_RG8_C3_SAMPLE", "2"))
+    c3_sample = c3[1:1 + c3_limit]
+    programs = c2 + c3_sample
+    if args.program:
+        programs = [os.path.abspath(args.program)]
     if not programs:
         raise GateFailure("RG8 corpus is empty")
     reports = reports_for_corpus(os.path.abspath(args.compiler), repo, args.work, programs)

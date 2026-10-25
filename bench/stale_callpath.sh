@@ -610,6 +610,24 @@ print('S3g check gate: ALL ACCEPTANCE TESTS PASSED')
 " "$REPO" "$IYI" "$WORK"
 }
 
+run_rg8() {
+  echo "== Running RG8: normalized IR versus CallPathFp mutations =="
+  "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$IYI" --work "$WORK/rg8"
+
+  echo "  proving the def-body encoder field is load-bearing..."
+  local dropped="$WORK/iyi-rg8-drop-def-body"
+  "$REPO/bin/crystal" build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
+  "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$dropped" \
+    --work "$WORK/rg8-drop-def-body" --program "$REPO/samples/iyi/calc.iyi" \
+    --kind body --expect-failure-kind body
+  echo "RG8 def-body mutation proof PASSED"
+}
+
+run_rg9() {
+  echo "== Running RG9: CallPathFp process and warm-prelude determinism =="
+  "$PY" "$REPO/bench/stale_rg9.py" --repo "$REPO" --compiler "$IYI" --work "$WORK/rg9"
+}
+
 case "$MODE" in
   link)
     run_link
@@ -623,14 +641,22 @@ case "$MODE" in
   check)
     run_check
     ;;
+  rg8)
+    run_rg8
+    ;;
+  rg9)
+    run_rg9
+    ;;
   all)
     run_link
     run_rg4
     run_reach
     run_check
+    run_rg8
+    run_rg9
     ;;
   *)
-    echo "Unknown mode: $MODE (expected: all, link, rg4, reach, check)" >&2
+    echo "Unknown mode: $MODE (expected: all, link, rg4, reach, check, rg8, rg9)" >&2
     exit 1
     ;;
 esac

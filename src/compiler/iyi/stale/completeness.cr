@@ -33,6 +33,193 @@ module Iyi::Stale
     cant_pass_closure_to_c_exception_call
   )
 
+  ENCODED_NODES = %w(
+    Alias
+    AlignOf
+    And
+    Annotation
+    Arg
+    ArrayLiteral
+    Asm
+    AsmOperand
+    Assign
+    AssignWithRestriction
+    Block
+    BoolLiteral
+    Break
+    Call
+    Cast
+    CharLiteral
+    ClassDef
+    ClassVar
+    Def
+    EnumDef
+    ExceptionHandler
+    Expressions
+    External
+    ExternalVar
+    FileNode
+    FunDef
+    Generic
+    Global
+    HashLiteral
+    If
+    InstanceAlignOf
+    InstanceSizeOf
+    InstanceVar
+    IsA
+    LibDef
+    Macro
+    Metaclass
+    MetaTypeVar
+    MetaVar
+    ModuleDef
+    NamedArgument
+    NamedTupleLiteral
+    Next
+    NilLiteral
+    Nop
+    NumberLiteral
+    OffsetOf
+    Out
+    Path
+    PointerOf
+    Primitive
+    ProcLiteral
+    ProcPointer
+    RangeLiteral
+    ReadInstanceVar
+    RegexLiteral
+    Rescue
+    RespondsTo
+    Return
+    Self
+    SizeOf
+    StringInterpolation
+    StringLiteral
+    SymbolLiteral
+    TupleLiteral
+    TypeNode
+    TypeOf
+    Unreachable
+    Var
+    While
+    Yield
+  )
+
+  NEVER_TYPED = %w(
+    AnnotationDef
+    AssocTypeDecl
+    BinaryOp
+    CStructOrUnionDef
+    Case
+    ControlExpression
+    Defer
+    DoubleSplat
+    Extend
+    ImplicitObj
+    ImplDef
+    ImportDecl
+    Include
+    MacroExpression
+    MacroFor
+    MacroId
+    MacroIf
+    MacroLiteral
+    MacroVar
+    MacroVerbatim
+    MagicConstant
+    MetaMacroVar
+    ModuleHeader
+    MultiAssign
+    NilableCast
+    Not
+    OpAssign
+    Or
+    ProcNotation
+    Propagate
+    Recover
+    Require
+    Select
+    Splat
+    TraitDef
+    TupleIndexer
+    TypeDeclaration
+    TypeDef
+    TypeFilteredNode
+    UnaryExpression
+    Underscore
+    UninitializedVar
+    Union
+    Unless
+    Until
+    UsingDecl
+    VisibilityModifier
+    When
+    YieldBlockBinder
+  )
+
+  ENCODED_TYPES = %w(
+    AliasType
+    AnnotationType
+    AutocastType
+    BoolType
+    CharType
+    ClassType
+    Const
+    EnumType
+    FileModule
+    FloatType
+    GenericClassInstanceMetaclassType
+    GenericClassInstanceType
+    GenericClassType
+    GenericInstanceType
+    GenericModuleInstanceMetaclassType
+    GenericModuleInstanceType
+    GenericModuleType
+    GenericReferenceStorageType
+    GenericTraitType
+    GenericUnionType
+    IntegerType
+    LibType
+    MetaclassType
+    MixedUnionType
+    ModuleType
+    NamedTupleInstanceType
+    NamedTupleType
+    NamedType
+    NilType
+    NilableProcType
+    NilableReferenceUnionType
+    NilableType
+    NoReturnType
+    NonGenericClassType
+    NonGenericModuleType
+    NumberAutocastType
+    PointerInstanceType
+    PointerType
+    PrimitiveType
+    ProcInstanceType
+    ProcType
+    Program
+    ReferenceStorageType
+    ReferenceUnionType
+    StaticArrayInstanceType
+    StaticArrayType
+    SymbolAutocastType
+    SymbolType
+    TraitType
+    TupleInstanceType
+    TupleType
+    TypeDefType
+    TypeParameter
+    TypeSplat
+    UnionType
+    VirtualMetaclassType
+    VirtualType
+    VoidType
+  )
+
   macro check_completeness!
     {% begin %}
       # 1. Parity of visit restrictions between CodeGenVisitor and ReachWalk
@@ -99,6 +286,21 @@ module Iyi::Stale
       {% for allowed in ALLOWED_VISIT_MAIN_NORMALIZE_METHODS %}
         {% unless actual_visit_main_methods.includes?(allowed) %}
           {% raise "Stale entry in ALLOWED_VISIT_MAIN_NORMALIZE_METHODS: " + allowed %}
+        {% end %}
+      {% end %}
+      # 4. ASTNode subclasses completeness
+      {% for sub in Iyi::ASTNode.all_subclasses %}
+        {% name = sub.name.stringify.split("::").last %}
+        {% unless ENCODED_NODES.includes?(name) || NEVER_TYPED.includes?(name) %}
+          {% raise "ASTNode subclass " + name + " is neither in ENCODED_NODES nor NEVER_TYPED" %}
+        {% end %}
+      {% end %}
+
+      # 5. Type subclasses completeness
+      {% for sub in Iyi::Type.all_subclasses %}
+        {% name = sub.name.stringify.split("::").last %}
+        {% unless ENCODED_TYPES.includes?(name) %}
+          {% raise "Type subclass " + name + " is not in ENCODED_TYPES" %}
         {% end %}
       {% end %}
     {% end %}

@@ -2282,6 +2282,8 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when @program.experimental_annotation
       # ditto DeprecatedAnnotation
       ExperimentalAnnotation.from(ann)
+    when @program.effect_annotation
+      Effects.validate_annotation(ann)
     end
   end
 

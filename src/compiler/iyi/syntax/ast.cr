@@ -1671,6 +1671,11 @@ module Iyi
     # annotation because an instance is a clone, and a clone carries no
     # annotations.
     property? iyi_share_block = false
+    setter effect : Effect? = nil
+
+    def effect : Effect?
+      @effect || iyi_origin.try(&.effect)
+    end
 
     def initialize(@name, @args = [] of Arg, body = nil, @receiver = nil, @block_arg = nil, @return_type = nil, @macro_def = false, @block_arity = nil, @abstract = false, @splat_index = nil, @double_splat = nil, @free_vars = nil)
       @body = Expressions.from body
@@ -1707,6 +1712,7 @@ module Iyi
       a_def.iyi_defer = iyi_defer?
       a_def.iyi_from_derive = iyi_from_derive?
       a_def.iyi_share_block = iyi_share_block?
+      a_def.effect = @effect
       a_def.name_location = name_location
       a_def.visibility = visibility
       a_def.free_var_bounds = @free_var_bounds.clone

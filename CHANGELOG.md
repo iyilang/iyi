@@ -181,6 +181,15 @@ under `serve_parallel` on 1, 2, 4 and 8 workers.
   worker raced the accepting thread (the runtime's fix, making the
   public halves take the lock, is on `m-thread/steal`).
 
+- **The cursor sweep runs in three CI jobs.** `bench/lsp_positions.py
+  --shard K/N` sweeps one of N shards of the std modules, dealt by the
+  seconds each module's sweep took, and prints each module's seconds as
+  it goes. Whole, the sweep took 37 to 71 minutes on GitHub's runners in
+  ten green runs and was cut off at its job's 75 in four, master's among
+  them. On one machine it took 2,105 s under master's compiler and 2,206
+  under this branch's; std/autocert went from 50 s to 79, its compile
+  now 492 MB against the 512 at which the server retires its worker.
+
 ## 0.19.1 — 2026-10-25
 
 **A collector hang and a handful of TLS and PKI edges fixed, a build

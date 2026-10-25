@@ -333,7 +333,7 @@ class Iyi::Command
         return {file: file, status: "does not build", seconds: elapsed(started), output: output.to_s}
       end
 
-      process = Process.new(binary, output: output, error: output)
+      process = Process.new(binary, output: output, error: output, new_pgroup: true)
       tree = TestTree.new(process)
       running = tree
       done = ::Channel(Process::Status).new
@@ -382,6 +382,8 @@ class Iyi::Command
     @process : Process
     {% if flag?(:win32) %}
       @job : LibC::HANDLE = LibC::HANDLE.null
+    {% else %}
+      @pgid : Int32? = nil
     {% end %}
 
     def initialize(@process : Process)
@@ -401,6 +403,8 @@ class Iyi::Command
           return
         end
         @job = job
+      {% else %}
+        @pgid = @process.pid
       {% end %}
     end
 
@@ -410,6 +414,14 @@ class Iyi::Command
           LibC.TerminateJobObject(@job, 1)
           LibC.CloseHandle(@job)
           @job = LibC::HANDLE.null
+          return
+        end
+      {% else %}
+        if pgid = @pgid
+          begin
+            Process.signal(Signal::KILL, -pgid)
+          rescue
+          end
           return
         end
       {% end %}

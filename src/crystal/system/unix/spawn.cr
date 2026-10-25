@@ -30,6 +30,7 @@ require "c/unistd"
 
     # The same value in glibc, musl and darwin.
     POSIX_SPAWN_SETSIGMASK = 0x08
+    POSIX_SPAWN_SETPGROUP  = 0x02
 
     fun posix_spawn(pid : PidT*, path : Char*, file_actions : PosixSpawnFileActionsT*, attrp : PosixSpawnattrT*, argv : Char**, envp : Char**) : Int
     fun posix_spawnp(pid : PidT*, file : Char*, file_actions : PosixSpawnFileActionsT*, attrp : PosixSpawnattrT*, argv : Char**, envp : Char**) : Int
@@ -42,22 +43,27 @@ require "c/unistd"
     fun posix_spawnattr_destroy(attr : PosixSpawnattrT*) : Int
     fun posix_spawnattr_setflags(attr : PosixSpawnattrT*, flags : Short) : Int
     fun posix_spawnattr_setsigmask(attr : PosixSpawnattrT*, sigmask : SigsetT*) : Int
+    fun posix_spawnattr_setpgroup(attr : PosixSpawnattrT*, pgroup : PidT) : Int
   end
 {% end %}
 
+lib LibC
+  fun setpgid(pid : PidT, pgid : PidT) : Int
+end
+
 struct Crystal::System::Process
-  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, &)
+  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, new_pgroup : Bool = false, &)
     envp = Env.make_envp(env, clear_env)
 
     {% if LibC.has_method?(:posix_spawn_file_actions_addchdir_np) %}
-      if pid = posix_spawn(prepared_args, envp, input, output, error, chdir) { |errno, command| yield errno, command }
+      if pid = posix_spawn(prepared_args, envp, input, output, error, chdir, new_pgroup) { |errno, command| yield errno, command }
         return pid
       end
     {% end %}
 
     r, w = FileDescriptor.system_pipe
 
-    pid = self.fork_for_exec
+    pid = self.fork_for_exec(new_pgroup)
     if !pid
       LibC.close(r)
       begin
@@ -130,7 +136,7 @@ struct Crystal::System::Process
     # The child starts with no signal blocked, as the forked one did. Every
     # other descriptor is close-on-exec already (`FileDescriptor.system_pipe`,
     # `O_CLOEXEC`), and closes as it did.
-    private def self.posix_spawn(prepared_args, envp, input, output, error, chdir, &) : LibC::PidT?
+    private def self.posix_spawn(prepared_args, envp, input, output, error, chdir, new_pgroup : Bool = false, &) : LibC::PidT?
       streams = {input, output, error}
       targets = {ORIGINAL_STDIN, ORIGINAL_STDOUT, ORIGINAL_STDERR}
 
@@ -171,7 +177,12 @@ struct Crystal::System::Process
         mask = uninitialized LibC::SigsetT
         LibC.sigemptyset(pointerof(mask))
         return nil unless LibC.posix_spawnattr_setsigmask(pointerof(attributes), pointerof(mask)) == 0
-        return nil unless LibC.posix_spawnattr_setflags(pointerof(attributes), LibC::POSIX_SPAWN_SETSIGMASK.to_i16) == 0
+        flags = LibC::POSIX_SPAWN_SETSIGMASK
+        if new_pgroup
+          flags |= LibC::POSIX_SPAWN_SETPGROUP
+          return nil unless LibC.posix_spawnattr_setpgroup(pointerof(attributes), 0) == 0
+        end
+        return nil unless LibC.posix_spawnattr_setflags(pointerof(attributes), flags.to_i16) == 0
 
         file, argv = prepared_args
         pid = uninitialized LibC::PidT
@@ -208,7 +219,7 @@ struct Crystal::System::Process
     end
   {% end %}
 
-  private def self.fork_for_exec
+  private def self.fork_for_exec(new_pgroup : Bool = false)
     pid, errno = lock_write do
       pthread_disable_cancelstate do
         block_signals do |sigmask|
@@ -218,6 +229,9 @@ struct Crystal::System::Process
 
             Crystal::System::Signal.after_fork_before_exec
 
+            if new_pgroup
+              LibC.setpgid(0, 0)
+            end
             # reset sigmask (inherited on exec)
             LibC.sigemptyset(sigmask)
           end

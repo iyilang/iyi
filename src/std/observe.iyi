@@ -167,59 +167,59 @@ end
 
 @@started = false
 @@enabled = false
+@@tainted = false
+@@taint_kinds = 0_u64
 @@fd = -1_i64
 @@scratch = ""
 @@written_paths = ::Set(String).new
 @@written_env = ::Set(String).new
 @@main_depth = 0_i32
+@[ThreadLocal]
 @@in_hook = false
-@@task_depths : Hash(UInt64, Int32)? = nil
 
 def self.enter_frame(tid : UInt64 = current_task_id) : ::Bool
   return true unless @@enabled
   return false if @@in_hook
-  if tid == 0_u64
-    d = @@main_depth
-    @@main_depth = d + 1
-    return d == 0
-  end
-
-  @@in_hook = true
-  map = (@@task_depths ||= Hash(UInt64, Int32).new)
-  d = map[tid]? || 0
-  map[tid] = d + 1
-  @@in_hook = false
+  {% if !flag?(:single_thread) %}
+    if IyiScheduler.state_id != 0_u64
+      fiber = IyiScheduler.state.current
+      if fiber.is_a?(IyiFiber)
+        d = fiber.observe_depth
+        fiber.observe_depth = d + 1
+        return d == 0
+      end
+    end
+  {% end %}
+  d = @@main_depth
+  @@main_depth = d + 1
   d == 0
 end
 
 def self.leave_frame(tid : UInt64 = current_task_id) : Nil
   return unless @@enabled
   return if @@in_hook
-  if tid == 0_u64
-    d = @@main_depth
-    @@main_depth = d - 1 if d > 0
-    return
-  end
-
-  @@in_hook = true
-  if map = @@task_depths
-    d = map[tid]? || 0
-    if d <= 1
-      map.delete(tid)
-    else
-      map[tid] = d - 1
+  {% if !flag?(:single_thread) %}
+    if IyiScheduler.state_id != 0_u64
+      fiber = IyiScheduler.state.current
+      if fiber.is_a?(IyiFiber)
+        d = fiber.observe_depth
+        fiber.observe_depth = d - 1 if d > 0
+        return
+      end
     end
-  end
-  @@in_hook = false
+  {% end %}
+  d = @@main_depth
+  @@main_depth = d - 1 if d > 0
 end
 
 def self.frame_depth(tid : UInt64 = current_task_id) : Int32
-  if tid == 0_u64
-    @@main_depth
-  else
-    map = @@task_depths
-    map ? (map[tid]? || 0) : 0
-  end
+  {% if !flag?(:single_thread) %}
+    if IyiScheduler.state_id != 0_u64
+      fiber = IyiScheduler.state.current
+      return fiber.observe_depth if fiber.is_a?(IyiFiber)
+    end
+  {% end %}
+  @@main_depth
 end
 
 @[Effect(:observation_channel)]
@@ -272,7 +272,7 @@ def self.finish(status : Int32 = 0) : Nil
 end
 
 def self.file(kind : UInt8, path : String, open_flags : UInt32 = 0_u32) : Nil
-  return unless @@enabled
+  return if !@@enabled || @@tainted
   real = safe_real_path(path)
   return if is_under_scratch?(real) || @@written_paths.includes?(real)
 
@@ -310,7 +310,7 @@ def self.__iyi_observe_file_exists(path : String) : Nil
 end
 
 def self.dir_list(path : String, names : Array(String)) : Nil
-  return unless @@enabled
+  return if !@@enabled || @@tainted
   real = safe_real_path(path)
   return if is_under_scratch?(real) || @@written_paths.includes?(real)
 
@@ -332,7 +332,7 @@ def self.__iyi_observe_dir_list(path : String, names : Array(String)) : Nil
 end
 
 def self.env_get(name : String, value : String?) : Nil
-  return unless @@enabled
+  return if !@@enabled || @@tainted
   present = value.nil? ? 0_u8 : 1_u8
   val_str = if name == "TMPDIR" || name == "TEMP" || name == "TMP"
               @@scratch
@@ -355,7 +355,7 @@ def self.__iyi_observe_env_get(name : String, value : String?) : Nil
 end
 
 def self.env_all : Nil
-  return unless @@enabled
+  return if !@@enabled || @@tainted
   writer = RecordWriter.new
   writer.begin_record(0x04_u8, current_task_id)
   writer.flush(@@fd)
@@ -370,7 +370,7 @@ end
 # would apply a relative `cd` twice (`sub` became `sub/sub`); the record is
 # the real current directory, which is what the program sees.
 def self.cwd(path : String) : Nil
-  return unless @@enabled
+  return if !@@enabled || @@tainted
   real = safe_real_path(current_cwd)
   writer = RecordWriter.new
   writer.begin_record(0x05_u8, current_task_id)
@@ -383,7 +383,7 @@ def self.__iyi_observe_cwd(path : String) : Nil
 end
 
 def self.host(value : String) : Nil
-  return unless @@enabled
+  return if !@@enabled || @@tainted
   writer = RecordWriter.new
   writer.begin_record(0x06_u8, current_task_id)
   writer.write_str(value)
@@ -395,7 +395,7 @@ def self.__iyi_observe_host(value : String) : Nil
 end
 
 def self.file_write(op : UInt8 | Symbol | String, path : String, target : String? = nil) : Nil
-  return unless @@enabled
+  return if !@@enabled || @@tainted
   real = safe_real_path(path)
   target_real = target.nil? || target.empty? ? "" : safe_real_path(target)
   inside_scratch = is_under_scratch?(real) ? 1_u8 : 0_u8
@@ -426,9 +426,19 @@ def self.__iyi_observe_exit(status : Int32) : Nil
   finish(status)
 end
 
+# A tainted run never becomes a receipt, so after its first taint nothing
+# else it does can matter to reuse: every later observation is dropped, and
+# each kind of taint is recorded once, at its first site, so the reasons
+# reported stay complete while the observers stop allocating. That keeps a
+# network-heavy program's own allocation measurements what they are in a
+# normal build (RG2). END is still written, so the trace stays complete.
 def self.not_reusable(kind : UInt8 | Symbol | String, site : String) : Nil
   return unless @@enabled
   kind_code = parse_kind(kind)
+  bit = kind_code >= 32_u8 && kind_code < 95_u8 ? 1_u64 << (kind_code - 32_u8).to_i32 : 1_u64 << 63
+  return if (@@taint_kinds & bit) != 0_u64
+  @@taint_kinds = @@taint_kinds | bit
+  @@tainted = true
 
   writer = RecordWriter.new
   writer.begin_record(0x08_u8, current_task_id)
@@ -482,6 +492,10 @@ def self.__iyi_observe_dir_stream(site : String) : Nil
   not_reusable(40_u8, site)
 end
 
+def self.__iyi_observe_host_state(site : String) : Nil
+  not_reusable(41_u8, site)
+end
+
 private def self.write_end(status : Int32) : Nil
   writer = RecordWriter.new
   writer.begin_record(0x7F_u8, 0_u64)
@@ -522,6 +536,7 @@ private def self.parse_kind(kind : UInt8 | Symbol | String) : UInt8
   when "runtime_timing" then 38_u8
   when "code_location"  then 39_u8
   when "dir_stream"     then 40_u8
+  when "host_state"     then 41_u8
   when "shared_write"   then 48_u8
   else                       32_u8
   end

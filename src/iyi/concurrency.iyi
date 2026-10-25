@@ -441,6 +441,7 @@ class IyiFiber
   property home : IyiSchedulerState?
   # Spawned by `spawn_parallel`: started by whichever worker is free.
   property parallel : Bool
+  property observe_depth : Int32 = 0
   # A cancel from another thread, waiting in its home's list until that
   # thread takes the fiber out of its own sleep heap or poller.
   property next_cancel : IyiFiber?

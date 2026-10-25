@@ -98,7 +98,7 @@ def resolve_site_effect(site):
                 if m:
                     eff = m.group(1).lower()
                     if eff in ["clock", "entropy", "timer", "network", "process", "signal",
-                               "runtime_timing", "code_location", "dir_stream"]:
+                               "runtime_timing", "code_location", "dir_stream", "host_state"]:
                         return "requested effect", eff
                     elif eff == "shared_write":
                         return "runner", "shared-write"
@@ -109,7 +109,7 @@ def resolve_site_effect(site):
 def category_for_reason(r):
     r_lower = r.lower()
     if r_lower in ["clock", "entropy", "timer", "network", "process", "signal",
-                   "runtime_timing", "code_location", "dir_stream"]:
+                   "runtime_timing", "code_location", "dir_stream", "host_state"]:
         return "requested effect"
     if r_lower in ["assembly", "call to unclassified def", "call to internal def",
                    "external variable", "raw pointer"]:

@@ -106,6 +106,16 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
         end
         CODE
     end
+
+    it "raises compile error for host def with Nil return type" do
+      assert_error <<-CODE, "def 'read' cannot carry @[Effect(:host)]: result is Nil or cannot express its answer as a value; annotate with a not-reusable kind instead", flags: "iyi_observe", filename: runtime_file
+        class SystemRoots
+          @[Effect(:host)]
+          def self.read : Nil
+          end
+        end
+        CODE
+    end
   end
 
   describe "wrapper generation and call order" do
@@ -280,6 +290,29 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       site_arg.value.should match(/^(toolchain|src):.*:\d+$/)
     end
 
+    it "generates wrapper for host_state with site argument" do
+      result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
+        class SystemRoots
+          @[Effect(:host_state)]
+          def self.read : Nil
+            nil
+          end
+        end
+        CODE
+
+      roots_type = result.program.types["SystemRoots"].metaclass.as(Iyi::ModuleType)
+      roots_defs = roots_type.defs.not_nil!
+      roots_defs.has_key?("__iyi_effect_read").should be_true
+      roots_defs.has_key?("read").should be_true
+
+      wrapper = roots_defs["read"].first.def
+      body = wrapper.body.as(Iyi::Expressions)
+      if_node = body.expressions[2].as(Iyi::If)
+      obs_call = if_node.then.as(Iyi::Call)
+      obs_call.name.should eq("__iyi_observe_host_state")
+      site_arg = obs_call.args[0].as(Iyi::StringLiteral)
+      site_arg.value.should match(/^(toolchain|src):.*:\d+$/)
+    end
     it "treats File.lseek, File.two_links?, and Dir#rewind/close as frame-only" do
       result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
         class File
@@ -428,7 +461,9 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       sys_defs = sys_type.defs.not_nil!
       wrapper_host = sys_defs["hostname"].first.def
       body_host = wrapper_host.body.as(Iyi::Expressions)
-      body_host.expressions[2].as(Iyi::If).then.as(Iyi::Call).name.should eq("__iyi_observe_host")
+      host_call = body_host.expressions[2].as(Iyi::If).then.as(Iyi::Call)
+      host_call.name.should eq("__iyi_observe_host")
+      host_call.args[0].as(Iyi::Var).name.should eq("__iyi_res")
     end
 
     it "generates wrapper for env_all" do

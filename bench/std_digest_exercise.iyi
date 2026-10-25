@@ -273,7 +273,9 @@ puts "  CRC-64 of the check value, of nothing, and in pieces, cut anywhere"
   best_crc = 0_i64
   best_adler = 0_i64
   seen = 0_u32
-  3.times do |k|
+  # The best of seven, not three: under a second busy process the best of
+  # three still read Adler-32 at 4.3 and 6.4 byte sums, 2 runs in 12.
+  7.times do |k|
     t0 = IyiMark.now_ns
     seen = seen ^ byte_sum(sample)
     t1 = IyiMark.now_ns

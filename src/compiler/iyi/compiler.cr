@@ -9,6 +9,8 @@ require "./stale/encoding"
 require "./stale/toolchain"
 require "./stale/link"
 require "./stale/compiler_env"
+require "./stale/roots"
+require "./stale/call_path"
 {% if flag?(:msvc) %}
   require "./loader"
 {% end %}

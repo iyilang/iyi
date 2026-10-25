@@ -61,6 +61,10 @@ module Iyi::Stale
       yield self
     end
 
+    def list(n : Int) : Nil
+      write_prefix_and_u64(0x08_u8, n.to_u64)
+    end
+
     def tag(name : String) # 0x09 u64be(bytesize) bytes (node and type class tags)
       write_prefix_and_u64(0x09_u8, name.bytesize.to_u64)
       @hasher.update(name.to_slice)

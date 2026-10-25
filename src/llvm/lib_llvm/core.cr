@@ -69,7 +69,6 @@ lib LibLLVM
   fun int64_type_in_context = LLVMInt64TypeInContext(c : ContextRef) : TypeRef
   fun int128_type_in_context = LLVMInt128TypeInContext(c : ContextRef) : TypeRef
   fun int_type_in_context = LLVMIntTypeInContext(c : ContextRef, num_bits : UInt) : TypeRef
-  fun metadata_type_in_context = LLVMMetadataTypeInContext(c : ContextRef) : TypeRef
   fun get_int_type_width = LLVMGetIntTypeWidth(integer_ty : TypeRef) : UInt
 
   fun half_type_in_context = LLVMHalfTypeInContext(c : ContextRef) : TypeRef

@@ -17,11 +17,21 @@
 # as it is at the back-edge (a parallel task may resume on another worker
 # after the call), a branch, and the call to `__iyi_preempt` on the cold
 # side: on x86-64 Linux `cmpq $0, %fs:off`, the offset a link-time constant
-# held in a register; on aarch64 Linux `tpidr_el0` plus the offset. Mach-O
-# and COFF have no local-exec, and read it through the accessor every other
-# thread-local takes there (`CodeGenVisitor#get_thread_local`).
+# held in a register; on aarch64 Linux a volatile `mrs` of `tpidr_el0` plus
+# the offset, the read every thread-local takes there
+# (`CodeGenVisitor#iyi_tpidr_el0`). Mach-O and COFF have no local-exec, and
+# read it through the accessor every other thread-local takes there
+# (`CodeGenVisitor#get_thread_local`).
 module Iyi::PreemptChecks
   MARK = "iyi.preempt"
+
+  # `memory(inaccessiblemem: readwrite)` as the `memory` attribute's
+  # integer: two bits per location, read and write both set (3), for
+  # inaccessible memory, location 1 in every LLVM since the attribute
+  # replaced `readnone` and its kin (LLVM 16). What aarch64's thread
+  # pointer read is marked with, so LLVM neither merges two of them nor
+  # moves one out of a loop.
+  INACCESSIBLE_READ_WRITE = 3_u64 << 2
 
   # *flag* is the preemption word's global (`IyiWorkers::preempt`), and the
   # thread-local accessor is `*` and that name.
@@ -153,11 +163,13 @@ module Iyi::PreemptChecks
   private def self.load_word(mod, builder, ctx, flag, linux, aarch64, anchor) : LLVM::Value
     int64 = ctx.int64
     if linux && aarch64
-      register_type = LLVM::Type.function([LLVM::Type.new(LibLLVM.metadata_type_in_context(ctx))], int64)
-      register = mod.functions["llvm.read_register.i64"]? || LLVM::Function.new(LibLLVM.add_function(mod, "llvm.read_register.i64", register_type))
-      name = LibLLVM.md_string_in_context2(ctx, "tpidr_el0", 9)
-      node = LibLLVM.md_node_in_context2(ctx, pointerof(name), 1)
-      pointer = builder.call register_type, register, [LLVM::Value.new(LibLLVM.metadata_as_value(ctx, node.as(LibLLVM::MetadataRef)))]
+      read_type = LLVM::Type.function([] of LLVM::Type, int64)
+      assembly = LLVM::Function.from_value(read_type.inline_asm("mrs $0, tpidr_el0", "=r", true, false, false, LLVM::InlineAsmDialect::ATT))
+      pointer = builder.call read_type, assembly, [] of LLVM::Value
+      {"memory" => INACCESSIBLE_READ_WRITE, "nounwind" => 0_u64, "willreturn" => 0_u64}.each do |attribute, value|
+        kind = LibLLVM.get_enum_attribute_kind_for_name(attribute, attribute.bytesize)
+        LibLLVM.add_call_site_attribute(pointer, LLVM::AttributeIndex::FunctionIndex, LibLLVM.create_enum_attribute(ctx, kind, value))
+      end
       address = builder.int2ptr(builder.add(pointer, anchor), ctx.pointer)
     elsif linux
       address = builder.int2ptr(anchor, ctx.pointer(257))

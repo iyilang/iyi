@@ -1615,7 +1615,13 @@ module Iyi
       # array through a call or a load whatever the model, and one accessor
       # per read is what keeps that out of the middle of an allocation -
       # measured, the direct form cost darwin's binary trees six times its
-      # wall time. A `--crystal` program keeps it everywhere.
+      # wall time. LLVM 21 infers `memory(argmem: write)` for the accessor
+      # and still calls it at every read: release cross-builds for
+      # aarch64-apple-darwin and x86_64-windows-msvc call it in each turn
+      # of a loop whose only other call is the back-edge check's, and again
+      # after a channel receive (llvm-objdump). bench/parallel_migrate.iyi's
+      # `loops` step, run on both, is what fails if a later LLVM shares it.
+      # A `--crystal` program keeps it everywhere.
       if real_var.thread_local?
         if @program.iyi_prelude? && @program.has_flag?("linux")
           iyi_thread_local_address(get_global_var(name, type, real_var, initial_value))
@@ -1636,14 +1642,12 @@ module Iyi
     # shared object) that IR has no spelling for, so it comes out of a pure
     # asm the linker fills in - `$sym@TPOFF`, or `:tprel_g1:`/`:tprel_g0_nc:`
     # on aarch64 - marked `memory(none)` so LLVM may share and hoist it as
-    # it would a constant. The thread pointer is what must not be shared:
-    # on x86_64 a volatile load of `%fs:0`, which no pass removes, merges or
-    # moves across a call, and which instruction selection still folds into
-    # an `%fs:`-relative load of the variable; on aarch64
-    # `llvm.read_register` of `tpidr_el0`, which is modelled as reading
-    # memory and so is read again after any call that may write it. An
-    # inline `mrs` marked `memory(none)` was the other way, and LLVM hoisted
-    # it out of a loop past the calls in it.
+    # it would a constant. The thread pointer is what must not be shared,
+    # across a call or across a loop's back-edge, where the check put in
+    # after optimisation (`PreemptChecks`) may hand the task to another
+    # worker: on x86_64 a volatile load of `%fs:0`, which no pass removes,
+    # merges or moves, and which instruction selection still folds into an
+    # `%fs:`-relative load of the variable; on aarch64 `iyi_tpidr_el0`.
     private def iyi_thread_local_address(global : LLVM::Value) : LLVM::Value
       ctx = llvm_context
       int64 = ctx.int64
@@ -1657,17 +1661,40 @@ module Iyi
         LibLLVM.add_call_site_attribute(offset, LLVM::AttributeIndex::FunctionIndex, LibLLVM.create_enum_attribute(ctx, kind, 0_u64))
       end
       if aarch64
-        register = fetch_typed_fun(@llvm_mod, "llvm.read_register.i64") do
-          LLVM::Type.function([LLVM::Type.new(LibLLVM.metadata_type_in_context(ctx))], int64)
-        end
-        name = LibLLVM.md_string_in_context2(ctx, "tpidr_el0", 9)
-        node = LibLLVM.md_node_in_context2(ctx, pointerof(name), 1)
-        pointer = call register, [LLVM::Value.new(LibLLVM.metadata_as_value(ctx, node.as(LibLLVM::MetadataRef)))]
+        pointer = iyi_tpidr_el0
       else
         pointer = builder.load(int64, ctx.pointer(257).null)
         pointer.volatile = true
       end
       builder.int2ptr(builder.add(pointer, offset), ctx.pointer)
+    end
+
+    # aarch64's thread pointer as it is here: a volatile `mrs` of
+    # `tpidr_el0` that reads and writes memory nothing else can name
+    # (`memory(inaccessiblemem: readwrite)`), so no two of them are merged
+    # and none moves out of a loop, while the loads and stores around it are
+    # still optimised as if it were not there. `PreemptChecks` reads the
+    # thread pointer the same way.
+    #
+    # `llvm.read_register` was the read until this one. It is modelled as
+    # only reading memory, so it was read again after a call, but LLVM 21
+    # hoisted it out of a loop that stores nothing: a release build of a
+    # parallel task's loop that reads `IyiThread.current_line` beside a
+    # xorshift walk loaded the line once before the loop
+    # (`ldr x22, [x9, x8]`), and the back-edge check in it could resume the
+    # task on another worker, which went on summing the line of the thread
+    # it left. The same `mrs` marked `memory(none)`, as a pure asm, was
+    # hoisted too, out of that loop and past calls (opt -O3, LLVM 21).
+    private def iyi_tpidr_el0 : LLVM::Value
+      ctx = llvm_context
+      read_type = LLVM::Type.function([] of LLVM::Type, ctx.int64)
+      assembly = LLVM::Function.from_value(read_type.inline_asm("mrs $0, tpidr_el0", "=r", true, false, false, LLVM::InlineAsmDialect::ATT))
+      pointer = call LLVMTypedFunction.new(read_type, assembly), [] of LLVM::Value
+      {"memory" => PreemptChecks::INACCESSIBLE_READ_WRITE, "nounwind" => 0_u64, "willreturn" => 0_u64}.each do |attribute, value|
+        kind = LibLLVM.get_enum_attribute_kind_for_name(attribute, attribute.bytesize)
+        LibLLVM.add_call_site_attribute(pointer, LLVM::AttributeIndex::FunctionIndex, LibLLVM.create_enum_attribute(ctx, kind, value))
+      end
+      pointer
     end
 
     def get_global_var(name, type, real_var, initial_value = nil)

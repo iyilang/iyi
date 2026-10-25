@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,285 lines, of which 4,647 are the library held to the 4,650 ceiling (6,663 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,694 lines, none of it written in iyi |
+| iyi's own prelude | 24,301 lines, of which 4,647 are the library held to the 4,650 ceiling (6,663 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 130,704 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,285 lines
+> "No standard library worth the name" is still true of iyi's own 24,301 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,285 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 24,301 lines,
 primitives included, of which the library is 4,647.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,694 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,285-line own prelude + 125,236 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 130,704 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,301-line own prelude + 125,236 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3934,7 +3934,7 @@ hash, std's and already checked, 0 to 8. Now:
   `Running`. `bench/preempt_audit.py` reads a build's IR and fails if a
   function written where the scheduler, threads, allocator or collector
   are - or one it reaches by direct calls - holds a check: 175 runtime
-  functions reach 11 copies and none checks, release; 620 reach 97, plain.
+  functions reach 11 copies and none checks, release; 666 reach 82, plain.
 - *Copies* run a million elements at a time (`Pointer#copy_from`,
   string.iyi) with the check between runs; the run itself
   (`Pointer#copy_run`) is in the runtime's file, because a check in it put
@@ -3948,6 +3948,39 @@ hash, std's and already checked, 0 to 8. Now:
   loop keeps the check in that loop. A check in every function's entry
   was not chosen: `fib(32)` is all calls, and is what every call would pay.
   Recursion through a `Proc` is not a cycle it sees.
+- *A large block is not cleared after the call.* `Pointer.malloc` was the
+  allocator's call and then a `memset` codegen put after it, the
+  prelude's (`bzero` on darwin), which never checks; past 1 MiB the block
+  is a fresh mapping the kernel has zeroed, and the `memset` was a store
+  a word and every page's first fault. The growth of a `Hash(Int32,
+  Int32)` at 8,388,608 entries takes three such blocks, 64, 64 and 128
+  MB, and in a plain build held its worker through them: a short task
+  waited 198 ms in darwin CI (bound 100), 79 to 116 ms in five runs of a
+  debug job there, and 36 to 80 on Linux. Timed inside the growth, the
+  three blocks were done 107 to 155 ms into the call on darwin and 57 to
+  62 on Linux, and the wait was that less the 20 ms. Not the collection
+  the allocation triggers: it paused 1.4 to 3.6 ms on darwin and 1.4 to
+  1.9 on Linux. Of one 64 MB block on darwin (on Linux in brackets) the
+  mapping took 2 to 303 µs (7 to 647), its first clear 20 to 96 ms (15 to
+  30), a second clear of the same block 14 to 47 (6.2 to 6.4), and a
+  store to each 4 KiB of a fresh one 3.6 to 79 (8.2 to 44). Now under the
+  arena both entries hand the block back zeroed - a chunk off a list is
+  cleared in the allocator, a carved chunk or a mapping is left as the
+  kernel zeroed it - and codegen clears nothing after them
+  (`generic_array_malloc`), so the pages fault in the growth's own loops,
+  which check. After, plain: the three blocks took 2.2 to 2.5 ms on
+  Linux, 2.1 to 2.4 of it the collection's pause, and the short task
+  started 1 to 9 ms later; on darwin 1.1 to 2.9 ms, 1.0 to 2.7 of it the
+  pause, and 1 to 12 ms later, nine runs of nine inside the bound (a
+  debug job running objects this compiler built for it). The release
+  growth's 17 to 18 ms below was the same `memset`: 16 to 18 before and 0
+  to 9 after on Linux, 11 after on darwin. The costs measured below did
+  not move (Linux, release, best of seven, three interleaved rounds: hash
+  inserts 22.97 to 23.21 ms before and 22.34 to 22.79 after, the sort
+  58.6 to 59.6 and 57.1, the JSON parse 10.4 to 12.5 and 11.3 to 12.2).
+  `bench/arena_exercise.iyi` holds that a chunk freed dirty comes back
+  zeroed through the atomic entry; a copy whose atomic entry does not
+  clear fails it at byte 1.
 
 After (release, one worker, load 4 to 12): a sort of 6,000,000 started the
 short task 4 to 7 ms later, a growth at 8,388,608 entries 17 to 18, a join
@@ -3976,8 +4009,9 @@ library written into prelude.iyi (sort, copy, growth and join each wait
 renamed, which the audit names.
 
 **Not built, and said so.** A copy inside the allocator - a `realloc` of a
-large buffer, which `String::Builder` grows by - and the allocator's own
-clearing are not preempted. wasm32 has no runtime (III.4.12) and no pool,
+large buffer, which `String::Builder` grows by - is not preempted, nor is
+the allocator's clearing of a chunk it reuses, 1 MiB at most; a large
+block is not cleared at all. wasm32 has no runtime (III.4.12) and no pool,
 and a build under `-Dgc_none` or `-Dgc_boehm`, which has no `IyiThread`,
 refuses `spawn_parallel` at compile time rather than run it on one thread.
 
@@ -10812,7 +10846,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,285-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,301-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

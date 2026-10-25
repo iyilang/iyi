@@ -465,10 +465,17 @@ module Iyi::Stale
     getter current_element : Element
     getter temp_ordinals : Hash(String, Int32)
 
+    @debug_main : File? = nil
+
     def initialize(@program : Program, @roots : Roots, @current_element : Element, @encoder : Encoder)
       @temp_ordinals = Hash(String, Int32).new
       @next_temp_ordinal = 0
+      if @current_element.kind == ElementKind::Main
+        mode = ENV["IYI_WARM"]? ? "warm" : "norm"
+        @debug_main = File.open("/tmp/main_#{mode}.log", "w")
+      end
     end
+
     def encode_element(element : Element) : Nil
       collector = TempCollector.new(self)
       if node = element.node
@@ -477,8 +484,13 @@ module Iyi::Stale
             register_temp_name(a.name)
             a.default_value.try &.accept(collector)
           end
+          node.body.accept(collector)
+        elsif element.kind == ElementKind::Main && node.is_a?(Expressions)
+          active = filter_codegen_expressions(node.expressions)
+          active.each { |e| e.accept(collector) }
+        else
+          node.accept(collector)
         end
-        node.accept(collector)
       end
 
       case element.kind
@@ -488,6 +500,7 @@ module Iyi::Stale
         else
           @encoder.absent
         end
+        @debug_main.try &.close
       when ElementKind::Def
         if node = element.node
           target_def = node.as(Def)
@@ -863,10 +876,13 @@ module Iyi::Stale
     def encode_node(node : ASTNode?) : Nil
       if node.nil?
         @encoder.absent
+        @debug_main.try &.puts("absent")
         return
       end
 
-      @encoder.tag(node.class.name.split("::").last)
+      tag = node.class.name.split("::").last
+      @encoder.tag(tag)
+      @debug_main.try &.puts("tag:#{tag} #{node.class} => #{node.to_s.gsub('\n', ' ')[0..50]}")
       encode_type(node.type?)
 
       case node
@@ -1246,8 +1262,18 @@ module Iyi::Stale
       end
     end
 
+    private def flatten_expressions(node : ASTNode, result : Array(ASTNode)) : Nil
+      if node.is_a?(Expressions)
+        node.expressions.each { |e| flatten_expressions(e, result) }
+      else
+        result << node
+      end
+    end
+
     def filter_codegen_expressions(exps : Array(ASTNode)) : Array(ASTNode)
-      exps.select { |exp| node_emits_in_main?(exp) }
+      flat = [] of ASTNode
+      exps.each { |e| flatten_expressions(e, flat) }
+      flat.select { |exp| node_emits_in_main?(exp) }
     end
 
     def node_emits_in_main?(node : ASTNode) : Bool

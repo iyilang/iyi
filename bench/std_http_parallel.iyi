@@ -3,6 +3,8 @@
 # stops.
 #
 #   ./bin/iyi run bench/std_http_parallel.iyi
+#   ./bin/iyi build --release bench/std_http_parallel.iyi -o par
+#   ./par speed serve|parallel WORKERS PORTFILE
 #
 # Four workers. Eight clients connect and send a request that computes
 # for a while before the server has accepted any of them, so each
@@ -20,11 +22,54 @@
 # what it should be is followed by "FAIL <check>: <found>, not
 # <wanted>", and the run ends "ALL CHECKS PASSED" or exits 1. The panic
 # the third step makes is printed by its task, as any is.
+#
+# Then the same server over TLS, `tls: config.frozen`, on a listener of
+# its own. Eight clients connect before anything accepts and send their
+# ClientHello, then a request that computes: answered on more than one
+# worker, none of them the accepting thread. An HTTPClient offering h2
+# alone is answered HTTP/2, one offering http/1.1 alone HTTP/1.1. A
+# ticket is taken from a connection on one worker, which is then kept
+# computing for a second while a second connection offers the ticket:
+# that one starts on another worker, since the first holds its own, and
+# must resume there - the one set of ticket keys every worker shares. A
+# client presenting a certificate is seen presenting it, and an
+# encrypted ClientHello (ECH) is taken. Then the stop: a kept-alive
+# connection reads close_notify from its worker, not a truncation, and
+# `serve_parallel` returns. The TLS identity is std_http_resume.iyi's
+# test PKI, an Ed25519 leaf for localhost.
 
 module bench/std_http_parallel
 
-import std/http::{Request, Response, Server}
+import std/http::{HTTPClient, HTTPError, Request, Response, Server}
 import std/socket::{IyiSocket, SocketError}
+import std/tls::{TlsClient, TlsConfig, TlsEchKey, TlsError, TlsIdentity, TlsServerConfig, TlsSession}
+import std/x509::{Certificate}
+import std/file::{File}
+
+# std_http_resume.iyi's test PKI: a root, and a leaf for localhost it
+# signed, Ed25519, valid from 2025 to 9999. The leaf's key guards nothing
+# but these tests.
+LEAF_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBQzCB9qADAgECAgEDMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowFDESMBAGA1UEAwwJ\n" \
+           "bG9jYWxob3N0MCowBQYDK2VwAyEAOeskudtTVi76JObK6QHqJy6M7PaEu/aLlC5H\n" \
+           "B5OLks+jZjBkMBQGA1UdEQQNMAuCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAAMB0G\n" \
+           "A1UdDgQWBBQN8ZJay/U7zf07disj78hKukvGAjAfBgNVHSMEGDAWgBSNjkTWVhBs\n" \
+           "a874Ao2cPFX4w4saajAFBgMrZXADQQAcAgj9qe58GnzceRkYfxyfNHxmqWOgDJkn\n" \
+           "b3rO1pz+8OCRioO1P+BhFa1FR/FMHSH9bOFEKfXfy3Nwr+y+GkMM\n" \
+           "-----END CERTIFICATE-----\n"
+ROOT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBJDCB16ADAgECAgEBMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowGTEXMBUGA1UEAwwO\n" \
+           "aXlpIGJlbmNoIHJvb3QwKjAFBgMrZXADIQCQIEeX9suXr4DL8DiLdBUfoWaJU+Hv\n" \
+           "7JhN3IpqspsuOqNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYw\n" \
+           "HQYDVR0OBBYEFI2ORNZWEGxrzvgCjZw8VfjDixpqMAUGAytlcANBAFEfpUf437+b\n" \
+           "PwJvPGD/gB0zIegp6+3cJzF42Tx6Hj8tIJgdtXVKA58EXmitGetqb788+xoJ49My\n" \
+           "4Wc3L1uxxAI=\n" \
+           "-----END CERTIFICATE-----\n"
+KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
+          "MC4CAQAwBQYDK2VwBCIEIOYKs3OzEJYJ/j+ZQYLoAU929MQeanF9kupAR9HpeHJ8\n" \
+          "-----END PRIVATE KEY-----\n"
 
 # Integer work with nothing to park on: a xorshift walk.
 def spin(rounds : Int64) : UInt64
@@ -59,8 +104,18 @@ class Answers
       sleep(300)
       Response.new(200, "slow")
     when "/stop"
-      @stop.put_now(0)
+      @stop.send(0)
       Response.new(200, "stopping")
+    when "/where"
+      Response.new(200, "#{IyiScheduler.state.object_id} #{request.version} #{request.tls_resumed? ? "resumed" : "new"} peer=#{(leaf = request.peer_certificates.first?) ? leaf.subject_name : "none"}")
+    when "/hold"
+      # A second of work that never parks: the worker is held as long.
+      until_ns = __iyi_monotonic_ns + 1000000000_i64
+      sum = 0_u64
+      while __iyi_monotonic_ns < until_ns
+        sum = sum &+ spin(10000_i64)
+      end
+      Response.new(200, "#{IyiScheduler.state.object_id} #{sum}")
     else
       Response.new(200, "here")
     end
@@ -126,6 +181,85 @@ def watched(name : String, ms : Int32, &block : -> Nil) : Nil
     block.call
     w.cancel_children
   end
+end
+
+# A TLS client of *port*'s, as localhost, over a socket connected here.
+def tls_over(socket : IyiSocket, config : TlsConfig, session : TlsSession? = nil) : TlsClient
+  got = TlsClient.over(socket, "localhost", config, 10000, session: session)
+  raise "TLS: #{got.message}" if got.is_a?(TlsError)
+  got
+end
+
+def tls_config(roots : Array(Certificate), alpn : Array(String)) : TlsConfig
+  config = TlsConfig.new
+  config.roots = roots
+  config.alpn = alpn
+  config
+end
+
+# `answer` over TLS: the body, or how the connection ended -
+# "close_notify" when the server said it was done, "ended: <why>" when
+# the connection ended any other way.
+def tls_answer(tls : TlsClient) : String
+  heard = ""
+  while true
+    at = heard.index("\r\n\r\n")
+    if at
+      length = 0
+      heard[0, at].split("\r\n").each do |line|
+        length = line[15, line.bytesize - 15].strip.to_i if line.downcase.starts_with?("content-length:")
+      end
+      return heard[at + 4, length] if heard.bytesize >= at + 4 + length
+    end
+    got = tls.read(4096)
+    return "ended: #{got.message}" if got.is_a?(TlsError)
+    return "close_notify" if got.empty?
+    heard = heard + got
+  end
+end
+
+def tls_ask(tls : TlsClient, path : String) : String
+  tls.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+  tls_answer(tls)
+end
+
+# What an HTTPClient was answered, or why not.
+def said(got : Response | HTTPError | SocketError | Cancelled) : String
+  case got
+  in Response
+    got.body
+  in HTTPError
+    got.message
+  in SocketError
+    got.message
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# `speed`: the measurement, not a check. An HTTPS server on a port of its
+# own, written to PORTFILE, under `serve` or under `serve_parallel` with
+# WORKERS workers, with this program's test PKI, until it is killed.
+# `/work` computes (`spin(200000)`) and answers a few bytes; `/` answers
+# a few bytes. Driven by wrk over kept-alive connections (SPEC.md
+# III.4.13 has the numbers and how they were taken).
+speed_args = Program.args
+if speed_args.size >= 4 && speed_args[0] == "speed"
+  IyiWorkers.count = speed_args[2].to_i
+  measured = TlsServerConfig.from_pem(LEAF_PEM + ROOT_PEM, KEY_PEM).or_panic
+  measured.alpn = ["http/1.1"]
+  serving = IyiSocket.listen("127.0.0.1", 0)
+  File.write(speed_args[3], "#{serving.local_port}\n")
+  if speed_args[1] == "parallel"
+    Server.serve_parallel(serving, tls: measured.frozen) do |request|
+      request.path == "/work" ? Response.new(200, "#{spin(200000_i64) & 0xFF_u64}") : Response.new(200, "here")
+    end
+  else
+    Server.serve(serving, tls: measured) do |request|
+      request.path == "/work" ? Response.new(200, "#{spin(200000_i64) & 0xFF_u64}") : Response.new(200, "here")
+    end
+  end
+  exit 0
 end
 
 IyiWorkers.count = 4
@@ -195,5 +329,112 @@ watched("the whole run", 60000) do
   end
 end
 check("serve_parallel returned", returned ? "yes" : "no", "yes", failures)
+
+# The same server over TLS: a frozen config, which every worker reads.
+roots = Certificate.from_pem(ROOT_PEM).or_panic
+settings = TlsServerConfig.from_pem(LEAF_PEM + ROOT_PEM, KEY_PEM).or_panic
+settings.alpn = ["h2", "http/1.1"]
+settings.client_roots = roots
+settings.client_required = false
+settings.ech_keys = [TlsEchKey.generate("localhost").or_panic]
+frozen = settings.frozen
+tls_listener = IyiSocket.listen("127.0.0.1", 0)
+tls_port = tls_listener.local_port
+tls_stop = Channel(Int32).new(1)
+tls_returned = false
+plain = tls_config(roots, ["http/1.1"])
+
+# Connected before anything accepts; each sends its ClientHello as its
+# task first runs, before the server's.
+early_tls = [] of IyiSocket
+8.times { early_tls << connect(tls_port) }
+
+watched("the TLS run", 60000) do
+  group do |g|
+    first_threads = Channel(String).new(8)
+    early_tls.each do |socket|
+      g.spawn do
+        tls = tls_over(socket, plain)
+        first_threads.send(tls_ask(tls, "/spin").split(" ").first)
+        tls.close
+        0
+      end
+    end
+    g.spawn do
+      tls_stop.receive
+      tls_listener.close
+      0
+    end
+    g.spawn do
+      answers = Answers.new(tls_stop)
+      Server.serve_parallel(tls_listener, tls: frozen) { |request| answers.call(request) }
+      tls_returned = true
+      0
+    end
+    g.spawn do
+      threads = [] of String
+      watched("eight answers over TLS", 30000) do
+        8.times do
+          got = first_threads.receive
+          threads << got if got.is_a?(String)
+        end
+      end
+      distinct = threads.uniq
+      check("threads that answered over TLS", distinct.size > 1 ? "more than one" : "#{distinct.size}", "more than one", failures)
+      check("answered over TLS on the accepting thread", distinct.includes?(accepting.to_s) ? "yes" : "no", "no", failures)
+
+      watched("h2 and http/1.1 by ALPN", 20000) do
+        h2 = said(HTTPClient.new(idle: 0, tls: tls_config(roots, ["h2"])).get("https://localhost:#{tls_port}/where"))
+        check("a client offering h2", h2.split(" ")[1]? || h2, "HTTP/2", failures)
+        h1 = said(HTTPClient.new(idle: 0, tls: tls_config(roots, ["http/1.1"])).get("https://localhost:#{tls_port}/where"))
+        check("a client offering http/1.1", h1.split(" ")[1]? || h1, "HTTP/1.1", failures)
+      end
+
+      watched("a ticket resumed on another worker", 20000) do
+        session = TlsSession.new
+        issuer = tls_over(connect(tls_port), plain, session)
+        issued = tls_ask(issuer, "/where").split(" ")
+        check("the ticket's first connection", issued[2]? || "no answer", "new", failures)
+        # The worker that sent the ticket kept busy, so the next connection
+        # is started by another.
+        issuer.write("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        sleep(100)
+        resumer = tls_over(connect(tls_port), plain, session)
+        resumed = tls_ask(resumer, "/where").split(" ")
+        check("the resuming connection's worker", resumed[0]? == issued[0]? ? "the ticket's" : "another", "another", failures)
+        check("a ticket resumed on another worker", "#{resumed[2]? || "no answer"}, the client says #{resumer.resumed? ? "resumed" : "not resumed"}", "resumed, the client says resumed", failures)
+        held = tls_answer(issuer).split(" ")
+        check("the held worker", held[0]? == issued[0]? ? "the ticket's" : "another", "the ticket's", failures)
+        resumer.close
+        issuer.close
+      end
+
+      watched("a client's certificate and ECH", 20000) do
+        presenting = tls_config(roots, ["http/1.1"])
+        presenting.identity = TlsIdentity.from_pem(LEAF_PEM, KEY_PEM).or_panic
+        mtls = tls_over(connect(tls_port), presenting)
+        check("a client's certificate, on a worker", tls_ask(mtls, "/where").split(" ")[3]? || "no answer", "peer=CN=localhost", failures)
+        mtls.close
+        hidden = tls_config(roots, ["http/1.1"])
+        hidden.ech_configs = frozen.ech_config_list
+        ech = tls_over(connect(tls_port), hidden)
+        check("an encrypted ClientHello, on a worker", "#{ech.ech_accepted? ? "taken" : "turned down"}, #{tls_ask(ech, "/where").split(" ")[1]? || "no answer"}", "taken, HTTP/1.1", failures)
+        ech.close
+      end
+
+      watched("the TLS stop", 10000) do
+        idle = tls_over(connect(tls_port), plain)
+        check("kept alive over TLS", tls_ask(idle, "/where").split(" ")[1]? || "no answer", "HTTP/1.1", failures)
+        stopper = tls_over(connect(tls_port), plain)
+        check("asked to stop over TLS", tls_ask(stopper, "/stop"), "stopping", failures)
+        check("the kept-alive TLS connection, on the stop", tls_answer(idle), "close_notify", failures)
+        stopper.close
+        idle.close
+      end
+      0
+    end
+  end
+end
+check("serve_parallel over TLS returned", tls_returned ? "yes" : "no", "yes", failures)
 exit 1 unless failures.empty?
 puts "ALL CHECKS PASSED"

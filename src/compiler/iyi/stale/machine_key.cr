@@ -25,8 +25,8 @@ module Iyi::Stale
         case open_result
         when Tuple(Crystal::System::FileDescriptor::Handle, Bool)
           handle, blocking = open_result
+          IO::FileDescriptor.set_blocking(handle, blocking)
           io = IO::FileDescriptor.new(handle)
-          io.blocking = blocking
           begin
             {% if flag?(:unix) %}
               File.chmod(key_path, 0o600)

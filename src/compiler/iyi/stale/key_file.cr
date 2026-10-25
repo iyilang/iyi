@@ -94,7 +94,7 @@ module Iyi::Stale
       hit : Hit?,
       blocked : Bool,
       reach : Reach,
-      rg3 : Array(Effects::RG3Site)? = nil
+      rg3 : Array(Effects::RG3Site)? = nil,
     ) : Nil
       json = String.build do |io|
         JSON.build(io, indent: 2) do |j|

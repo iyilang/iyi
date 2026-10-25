@@ -38,7 +38,7 @@ module Iyi::Stale
       @not_reusable : Array(KeyFile::NotReusable),
       @hit : KeyFile::Hit?,
       @blocked : Bool,
-      @rg3 : Array(Effects::RG3Site)? = nil
+      @rg3 : Array(Effects::RG3Site)? = nil,
     )
     end
 
@@ -64,7 +64,7 @@ module Iyi::Stale
       compiler : Compiler,
       program : Program,
       node : ASTNode,
-      source_or_sources
+      source_or_sources,
     ) : CheckResult
       reach = Stale::ReachWalk.walk(program, node, drop: compiler.stale_drop)
       program.stale_reach = reach
@@ -197,7 +197,7 @@ module Iyi::Stale
 
       blocked = block_rules.any? do |rule|
         (rule.mode == "local" && rule.build.compare(local_build_hex, case_insensitive: true) == 0) ||
-        (rule.mode == "portable" && rule.build.compare(portable_build_hex, case_insensitive: true) == 0)
+          (rule.mode == "portable" && rule.build.compare(portable_build_hex, case_insensitive: true) == 0)
       end
 
       # Read accept file

@@ -253,6 +253,55 @@ describe "Iyi::Stale S3g: Check, MachineKey, KeyFile, Accept/Block" do
         end
       end
     end
+    it "unclassified runtime site in closure check prevents a hit" do
+      program = Iyi::Program.new
+      program.color = false
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+      parser = program.new_parser(<<-CODE)
+        lib LibSysUnclassified
+          fun getpid : Int32
+        end
+
+        def runtime_unannotated_getpid
+          LibSysUnclassified.getpid
+        end
+
+        runtime_unannotated_getpid
+        CODE
+      runtime_file = File.join(Dir.current, "src", "iyi", "fixture_unclassified.iyi")
+      parser.filename = runtime_file
+      node = program.semantic(program.normalize(parser.parse))
+
+      compiler = create_spec_compiler
+      source = Iyi::Compiler::Source.new(runtime_file, "runtime_unannotated_getpid")
+
+      with_tempfile("unclass1.key") do |key1_path|
+        compiler.stale_key = key1_path
+        res1 = Iyi::Stale::Check.run(compiler, program, node, source)
+        res1.hit?.should be_false
+        res1.not_reusable.any? { |nr| nr.reason == "unclassified runtime site" }.should be_true
+        local_build = res1.local_build_hex
+
+        with_tempfile("unclass2.key") do |key2_path|
+          with_tempfile("accept.json") do |accept_path|
+            File.write(accept_path, %([{"mode": "local", "build": "#{local_build}"}]))
+            compiler2 = create_spec_compiler
+            compiler2.stale_key = key2_path
+            compiler2.stale_accept = accept_path
+
+            res2 = Iyi::Stale::Check.run(compiler2, program, node, source)
+            # Unclassified runtime site in not_reusable must prevent a hit!
+            res2.hit?.should be_false
+            res2.hit.should be_nil
+
+            data2 = Iyi::Stale::KeyFile.parse(File.read(key2_path))
+            data2.phase.should eq("checked")
+            data2.hit.should be_nil
+            data2.not_reusable.not_nil!.any? { |nr| nr.reason == "unclassified runtime site" }.should be_true
+          end
+        end
+      end
+    end
 
     it "--no-cleanup refuses and prevents hit" do
       program = Iyi::Program.new
@@ -287,9 +336,9 @@ describe "Iyi::Stale S3g: Check, MachineKey, KeyFile, Accept/Block" do
         source = Iyi::Compiler::Source.new("test_cr.iyi", "def foo; 20; end; a = foo")
 
         res = Iyi::Stale::Check.run(compiler, program, node, source)
-        crystal_reasons = res.not_reusable.select { |nr| nr.category == "crystal" }
-        crystal_reasons.size.should be >= 1
-        crystal_reasons[0].reason.should eq("Crystal library effects are not classified")
+        compat_reasons = res.not_reusable.select { |nr| nr.category == "crystal" }
+        compat_reasons.size.should be >= 1
+        compat_reasons[0].reason.should eq("Crystal library effects are not classified")
         res.hit?.should be_false
       end
     end

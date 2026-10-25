@@ -18,6 +18,14 @@
   `bench/number_exercise.iyi` reads numbers made at run time with every
   digit; its release build panicked under the compiler before this.
 
+- **Windows' `-Dpreempt_check_accessor` build links again.** Its checks
+  call the preemption word's thread-local accessor, which nothing else on
+  Windows names since the word moved to a TEB slot, so
+  `bench/parallel_exercise.sh`'s proof that the accessor check costs a
+  tight loop stopped at LNK2019 on GitHub's runner and here. That build
+  keeps the word in the thread-local; it links, fails at `tight: sum:`
+  (2.56x, release, 12 logical CPUs, Windows 11) and still preempts.
+
 - **`Channel#take_now` and `#put_now` take the scheduler's lock.** They
   were `select`'s lock-held halves, public because its arms call them,
   and std/http called them from pool workers with no lock: a wake of a

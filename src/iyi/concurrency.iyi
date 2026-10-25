@@ -4113,8 +4113,17 @@ class IyiWorkers
       st.make_ring
       # Where the monitor raises this worker's preemption word: its own
       # thread-local's address, or on x86-64 Windows its TEB's slot, the
-      # same for the worker's whole life.
-      {% if flag?(:win32) && flag?(:x86_64) %}
+      # same for the worker's whole life. A Windows build with
+      # `-Dpreempt_check_accessor` keeps the thread-local, which its checks
+      # read through the accessor: nothing else on Windows names
+      # `@@preempt`, so with the slot the accessor was never emitted and
+      # bench/parallel_exercise.sh's proof that the accessor check costs a
+      # tight loop did not link (LNK2019, `*IyiWorkers::preempt`), on
+      # GitHub's windows-2025 runner and on a 12-core Windows 11 machine.
+      # Kept, that build links, fails at `tight: sum:` (2.56x its
+      # `@[NoPreempt]` twin, release, on that machine) and still preempts:
+      # its slice step's short tasks started 1 and 4 ms later.
+      {% if flag?(:win32) && flag?(:x86_64) && !flag?(:preempt_check_accessor) %}
         st.preempt_word = IyiRoots.current_teb &+ @@preempt_slot
       {% else %}
         st.preempt_word = pointerof(@@preempt).address
@@ -4539,7 +4548,7 @@ class IyiWorkers
   # waiting for it parks on the lock's word rather than spin (std/mutex).
   def self.preempted : Nil
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      {% if flag?(:win32) && flag?(:x86_64) %}
+      {% if flag?(:win32) && flag?(:x86_64) && !flag?(:preempt_check_accessor) %}
         st = IyiScheduler.state
         return unless st.worker
         Pointer(Atomic(UInt64)).new(st.preempt_word).value.set(0_u64)

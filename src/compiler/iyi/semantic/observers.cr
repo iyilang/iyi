@@ -63,9 +63,9 @@ module Iyi::Semantic
     def self.wrap_def(program : Program, owner : ModuleType, a_def : Def) : Nil
       effect = a_def.effect
       return unless effect
+      return if effect.kind == EffectKind::ObservationChannel
 
       is_frame_only = (effect.kind == EffectKind::Stdio || effect.effect_class.internal?)
-
       # Validate signature per C9 and effect shape (only for non-frame-only defs)
       unless is_frame_only
         validate_signature(program, owner, a_def, effect)
@@ -205,17 +205,19 @@ module Iyi::Semantic
 
       # Observer path: resolved reference to std/observe
       observer_path = Path.new(["Std", "Observe"], global: true).at(a_def)
-      observe_mod = program.types["Std"]?.as?(ModuleType).try do |std|
-        std.types?.try do |inner|
-          inner["Observe"]?.as?(ModuleType)
+      observer_path.iyi_synthetic = true
+      if observe_mod = program.types["Std"]?.as?(ModuleType).try do |std|
+          std.types?.try do |inner|
+            inner["Observe"]?.as?(ModuleType)
+          end
         end
-      end
-      if observe_mod
         observer_path.target_type = observe_mod.metaclass
+        observer_path.type = observe_mod.metaclass
       end
       enter_call = Call.new(observer_path, "enter_frame").at(a_def)
+      enter_call.iyi_synthetic = true
       leave_call = Call.new(observer_path, "leave_frame").at(a_def)
-
+      leave_call.iyi_synthetic = true
       if is_frame_only
         res_var = Var.new("__iyi_res").at(a_def)
         assign = Assign.new(res_var, inner_call).at(a_def)
@@ -228,6 +230,7 @@ module Iyi::Semantic
                        NumberLiteral.new(0).at(a_def).as(ASTNode)
                      end
         observer_call = Call.new(observer_path, "__iyi_observe_exit", [status_arg] of ASTNode).at(a_def)
+        observer_call.iyi_synthetic = true
 
         is_outer_var = Var.new("__iyi_is_outer").at(a_def)
         assign_outer = Assign.new(is_outer_var, enter_call).at(a_def)
@@ -242,6 +245,7 @@ module Iyi::Semantic
         assign_outer = Assign.new(is_outer_var, enter_call).at(a_def)
 
         observer_call = build_observer_call(program, owner, a_def, effect, observer_path, res_var)
+        observer_call.iyi_synthetic = true
         if_node = If.new(is_outer_var, observer_call).at(a_def)
 
         wrapper.body = Expressions.new([

@@ -171,27 +171,30 @@ end
 @@scratch = ""
 @@written_paths = ::Set(String).new
 @@written_env = ::Set(String).new
-@@task_depths = Hash(UInt64, Int32).new
+@@task_depths : Hash(UInt64, Int32)? = nil
 
 def self.enter_frame(tid : UInt64 = current_task_id) : ::Bool
   return true unless @@enabled
-  d = @@task_depths[tid]? || 0
-  @@task_depths[tid] = d + 1
+  map = (@@task_depths ||= Hash(UInt64, Int32).new)
+  d = map[tid]? || 0
+  map[tid] = d + 1
   d == 0
 end
 
 def self.leave_frame(tid : UInt64 = current_task_id) : Nil
   return unless @@enabled
-  d = @@task_depths[tid]? || 0
+  map = (@@task_depths ||= Hash(UInt64, Int32).new)
+  d = map[tid]? || 0
   if d <= 1
-    @@task_depths.delete(tid)
+    map.delete(tid)
   else
-    @@task_depths[tid] = d - 1
+    map[tid] = d - 1
   end
 end
 
 def self.frame_depth(tid : UInt64 = current_task_id) : Int32
-  @@task_depths[tid]? || 0
+  map = @@task_depths
+  map ? (map[tid]? || 0) : 0
 end
 
 @[Effect(:observation_channel)]
@@ -441,6 +444,9 @@ def self.__iyi_observe_code_location(site : String) : Nil
   not_reusable(39_u8, site)
 end
 
+def self.__iyi_observe_dir_stream(site : String) : Nil
+  not_reusable(40_u8, site)
+end
 private def self.write_end(status : Int32) : Nil
   writer = RecordWriter.new
   writer.begin_record(0x7F_u8, 0_u64)
@@ -480,21 +486,14 @@ private def self.parse_kind(kind : UInt8 | Symbol | String) : UInt8
   when "signal"         then 37_u8
   when "runtime_timing" then 38_u8
   when "code_location"  then 39_u8
+  when "dir_stream"     then 40_u8
   when "shared_write"   then 48_u8
   else                       32_u8
   end
 end
 
 private def self.current_task_id : UInt64
-  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-    {% if !flag?(:single_thread) %}
-      IyiScheduler.state_id != 0_u64 ? IyiScheduler.current.object_id : 0_u64
-    {% else %}
-      0_u64
-    {% end %}
-  {% else %}
-    0_u64
-  {% end %}
+  0_u64
 end
 
 private def self.c_str(ptr : UInt8*) : String

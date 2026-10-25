@@ -198,7 +198,7 @@ pub class Dir
     yield d
   end
 
-  @[Effect(:dir_list)]
+  @[Effect(:stdio)]
   private def open_dir(dir_path : String) : Void*
     {% if flag?(:darwin) || flag?(:linux) %}
       p = LibC.opendir(Dir.c_str(dir_path))
@@ -236,7 +236,7 @@ pub class Dir
     {% end %}
   end
 
-  @[Effect(:dir_list)]
+  @[Effect(:dir_stream)]
   def read : String?
     raise "Cannot read from closed Dir" if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -293,7 +293,7 @@ pub class Dir
     {% end %}
   end
 
-  @[Effect(:dir_list)]
+  @[Effect(:stdio)]
   def rewind : self
     raise "Cannot rewind closed Dir" if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -318,7 +318,7 @@ pub class Dir
     self
   end
 
-  @[Effect(:dir_list)]
+  @[Effect(:stdio)]
   def close : Nil
     return if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -340,6 +340,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def entries : Array(String)
     res = [] of String
     rewind
@@ -358,6 +359,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def children : Array(String)
     res = [] of String
     each_child do |entry|
@@ -427,7 +429,6 @@ pub class Dir
     yield
   end
 
-  @[Effect(:env_get)]
   def self.tempdir : String
     tmp = Program.env("TMPDIR")
     return without_trailing_separator(tmp) if tmp && !tmp.empty?
@@ -478,6 +479,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def self.entries(dirname : String | Path) : Array(String)
     Dir.open(dirname) do |dir|
       return dir.entries
@@ -493,6 +495,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def self.children(dirname : String | Path) : Array(String)
     Dir.open(dirname) do |dir|
       return dir.children

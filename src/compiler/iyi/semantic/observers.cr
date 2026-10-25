@@ -108,7 +108,7 @@ module Iyi::Semantic
 
       case effect.kind
       when EffectKind::DirList
-        if a_def.name == "read" || a_def.name == "rewind" || a_def.name == "close" || a_def.args.empty?
+        if a_def.name == "read" || a_def.name == "rewind" || a_def.name == "close" || (!has_path_arg?(a_def) && !has_path_property?(owner))
           a_def.raise "def '#{a_def.name}' cannot carry @[Effect(:dir_list)]: mismatched signature (observer expects (path, names)); annotate the non-yielding helper it calls instead"
         end
       when EffectKind::EnvGet
@@ -137,7 +137,7 @@ module Iyi::Semantic
       return false if a_def.args.empty?
       a_def.args.any? do |arg|
         name = arg.name.downcase
-        return true if name.includes?("path") || name == "filename" || name == "file" || name == "from" || name == "dir_path"
+        return true if name.includes?("path") || name.includes?("dir") || name == "filename" || name == "file" || name == "from"
         if restr = arg.restriction
           restr_str = restr.to_s
           return true if restr_str.includes?("Path") || restr_str.includes?("String")
@@ -308,7 +308,8 @@ module Iyi::Semantic
 
       when EffectKind::Clock, EffectKind::Entropy, EffectKind::Timer,
            EffectKind::Network, EffectKind::Process, EffectKind::Signal,
-           EffectKind::RuntimeTiming, EffectKind::CodeLocation
+           EffectKind::RuntimeTiming, EffectKind::CodeLocation,
+           EffectKind::DirStream
         site = Effects.format_site(program, a_def.location)
         site_arg = StringLiteral.new(site).at(a_def).as(ASTNode)
         method_name = "__iyi_observe_#{effect.kind.symbol_name}"
@@ -330,14 +331,13 @@ module Iyi::Semantic
     private def self.extract_path_arg(owner : ModuleType, a_def : Def) : ASTNode
       path_arg = a_def.args.find { |arg|
         n = arg.name.downcase
-        n.includes?("path") || n == "filename" || n == "file" || n == "from" || n == "dir_path"
+        n.includes?("path") || n.includes?("dir") || n == "filename" || n == "file" || n == "from"
       }
       path_arg ||= a_def.args.find { |arg|
         restr = arg.restriction.try(&.to_s)
         restr && (restr.includes?("String") || restr.includes?("Path"))
       }
       path_arg ||= a_def.args.first?
-
       if path_arg
         to_string_node(Var.new(path_arg.name).at(a_def), path_arg.restriction, a_def)
       else

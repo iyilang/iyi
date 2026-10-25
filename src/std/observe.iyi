@@ -171,30 +171,55 @@ end
 @@scratch = ""
 @@written_paths = ::Set(String).new
 @@written_env = ::Set(String).new
+@@main_depth = 0_i32
+@@in_hook = false
 @@task_depths : Hash(UInt64, Int32)? = nil
 
 def self.enter_frame(tid : UInt64 = current_task_id) : ::Bool
   return true unless @@enabled
+  return false if @@in_hook
+  if tid == 0_u64
+    d = @@main_depth
+    @@main_depth = d + 1
+    return d == 0
+  end
+
+  @@in_hook = true
   map = (@@task_depths ||= Hash(UInt64, Int32).new)
   d = map[tid]? || 0
   map[tid] = d + 1
+  @@in_hook = false
   d == 0
 end
 
 def self.leave_frame(tid : UInt64 = current_task_id) : Nil
   return unless @@enabled
-  map = (@@task_depths ||= Hash(UInt64, Int32).new)
-  d = map[tid]? || 0
-  if d <= 1
-    map.delete(tid)
-  else
-    map[tid] = d - 1
+  return if @@in_hook
+  if tid == 0_u64
+    d = @@main_depth
+    @@main_depth = d - 1 if d > 0
+    return
   end
+
+  @@in_hook = true
+  if map = @@task_depths
+    d = map[tid]? || 0
+    if d <= 1
+      map.delete(tid)
+    else
+      map[tid] = d - 1
+    end
+  end
+  @@in_hook = false
 end
 
 def self.frame_depth(tid : UInt64 = current_task_id) : Int32
-  map = @@task_depths
-  map ? (map[tid]? || 0) : 0
+  if tid == 0_u64
+    @@main_depth
+  else
+    map = @@task_depths
+    map ? (map[tid]? || 0) : 0
+  end
 end
 
 @[Effect(:observation_channel)]
@@ -444,6 +469,11 @@ def self.__iyi_observe_code_location(site : String) : Nil
   not_reusable(39_u8, site)
 end
 
+@[Effect(:code_location)]
+def self.probe_code_location : Int32
+  0
+end
+
 def self.__iyi_observe_dir_stream(site : String) : Nil
   not_reusable(40_u8, site)
 end
@@ -493,7 +523,21 @@ private def self.parse_kind(kind : UInt8 | Symbol | String) : UInt8
 end
 
 private def self.current_task_id : UInt64
-  0_u64
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    {% if !flag?(:single_thread) %}
+      if IyiScheduler.state_id != 0_u64
+        state = IyiScheduler.state
+        fiber = state.current
+        fiber.is_a?(IyiFiber) ? fiber.object_id : 0_u64
+      else
+        0_u64
+      end
+    {% else %}
+      0_u64
+    {% end %}
+  {% else %}
+    0_u64
+  {% end %}
 end
 
 private def self.c_str(ptr : UInt8*) : String
@@ -505,6 +549,7 @@ private def self.c_str(ptr : UInt8*) : String
   String.new(len) { |buf| buf.copy_from(ptr, len) }
 end
 
+@[Effect(:observation_channel)]
 private def self.get_env(name : String) : String?
   {% if flag?(:win32) %}
     __iyi_win_env_get(name.to_unsafe, name.bytesize)
@@ -530,6 +575,7 @@ private def self.unset_env(name : String) : Nil
   {% end %}
 end
 
+@[Effect(:observation_channel)]
 private def self.current_cwd : String
   {% if flag?(:win32) %}
     buf = Pointer(UInt16).malloc(1024_u64)
@@ -552,6 +598,7 @@ private def self.current_cwd : String
   {% end %}
 end
 
+@[Effect(:observation_channel)]
 def self.current_host : String
   {% if flag?(:win32) %}
     buf = Pointer(UInt16).malloc(256_u64)
@@ -573,6 +620,7 @@ def self.current_host : String
   {% end %}
 end
 
+@[Effect(:observation_channel)]
 def self.safe_real_path(path : String) : String
   {% if flag?(:darwin) || flag?(:linux) %}
     buf = Pointer(UInt8).malloc(4096_u64)
@@ -603,6 +651,7 @@ private def self.normalize_path(path : String) : String
   "/" + res.join("/")
 end
 
+@[Effect(:observation_channel)]
 private def self.stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
   {% if flag?(:darwin) %}
     st = uninitialized LibObserveC::StatDarwin

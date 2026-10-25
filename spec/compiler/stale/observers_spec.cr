@@ -256,6 +256,108 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
       mem_body.expressions[2].as(Iyi::Call).name.should eq("leave_frame")
     end
 
+    it "generates wrapper for dir_stream with site argument" do
+      result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
+        class Dir
+          @[Effect(:dir_stream)]
+          def read : String?
+            nil
+          end
+        end
+        CODE
+
+      dir_type = result.program.types["Dir"].as(Iyi::ModuleType)
+      dir_defs = dir_type.defs.not_nil!
+      dir_defs.has_key?("__iyi_effect_read").should be_true
+      dir_defs.has_key?("read").should be_true
+
+      wrapper = dir_defs["read"].first.def
+      body = wrapper.body.as(Iyi::Expressions)
+      if_node = body.expressions[2].as(Iyi::If)
+      obs_call = if_node.then.as(Iyi::Call)
+      obs_call.name.should eq("__iyi_observe_dir_stream")
+      site_arg = obs_call.args[0].as(Iyi::StringLiteral)
+      site_arg.value.should match(/^(toolchain|src):.*:\d+$/)
+    end
+
+    it "treats File.lseek, File.two_links?, and Dir#rewind/close as frame-only" do
+      result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
+        class File
+          @[Effect(:stdio)]
+          def self.lseek(fd : Int64, offset : Int64, whence : Int32) : Int64
+            0_i64
+          end
+
+          @[Effect(:memory)]
+          private def self.two_links?(old_w : Pointer(Void), new_w : Pointer(Void)) : Bool
+            false
+          end
+        end
+
+        class Dir
+          @[Effect(:stdio)]
+          def rewind : self
+            self
+          end
+
+          @[Effect(:stdio)]
+          def close : Nil
+          end
+        end
+        CODE
+
+      file_defs = result.program.types["File"].metaclass.as(Iyi::ModuleType).defs.not_nil!
+      file_defs.has_key?("__iyi_effect_lseek").should be_true
+      file_defs["lseek"].first.def.body.as(Iyi::Expressions).expressions.size.should eq(4)
+
+      file_defs.has_key?("__iyi_effect_two_links?").should be_true
+      file_defs["two_links?"].first.def.body.as(Iyi::Expressions).expressions.size.should eq(4)
+
+      dir_defs = result.program.types["Dir"].as(Iyi::ModuleType).defs.not_nil!
+      dir_defs.has_key?("__iyi_effect_rewind").should be_true
+      dir_defs["rewind"].first.def.body.as(Iyi::Expressions).expressions.size.should eq(4)
+
+      dir_defs.has_key?("__iyi_effect_close").should be_true
+      dir_defs["close"].first.def.body.as(Iyi::Expressions).expressions.size.should eq(4)
+    end
+
+    it "builds a std module calling an annotated def under -Diyi_observe" do
+      result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
+        module Std
+          module Observe
+            def self.enter_frame : Bool
+              true
+            end
+            def self.leave_frame : Nil
+            end
+            def self.__iyi_observe_file_stat(path : String) : Nil
+            end
+          end
+        end
+
+        module Std
+          module FileConsumer
+            class Inspector
+              @[Effect(:file_stat)]
+              def self.check(path : String) : Bool
+                true
+              end
+
+              def self.run : Bool
+                check("/tmp/test")
+              end
+            end
+          end
+        end
+
+        Std::FileConsumer::Inspector.run
+        CODE
+
+      inspector = result.program.types["Std"].types["FileConsumer"].types["Inspector"].metaclass.as(Iyi::ModuleType)
+      inspector.defs.not_nil!.has_key?("check").should be_true
+      inspector.defs.not_nil!.has_key?("__iyi_effect_check").should be_true
+      inspector.defs.not_nil!.has_key?("run").should be_true
+    end
     it "generates wrapper for file_write single-path (:mkdir) and two-path (:rename)" do
       result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
         class File

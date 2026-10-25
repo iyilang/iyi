@@ -361,6 +361,14 @@ module Iyi
       end
     end
 
+    # Whether a call to *a_def* gives its caller a value: anything but Nil or
+    # NoReturn. An untyped def is assumed to, which errs toward opacity.
+    def self.hands_value?(a_def : Def) : Bool
+      type = a_def.type?
+      return true unless type
+      !(type.nil_type? || type.no_return?)
+    end
+
     def self.format_site(program : Program, location : Location?) : String
       return "src:<unknown>:0" unless location
       loc = location.expanded_location || location
@@ -532,7 +540,13 @@ module Iyi
                 @not_reusable << NotReusableReason.new("opaque program construct", "pointer_new", site)
               end
 
-              if Effects.in_runtime_library_file?(@program, target_def) && target_def.effect.try(&.internal?)
+              # An internal def is opaque to a program only when it hands the
+              # program a value. One that returns Nil or never returns (`raise`,
+              # the collector's `enable`/`disable`/`collect`) leaves nothing a
+              # verdict can read beyond what A2 already calls unspecified;
+              # accessors that return machine or timing values carry a
+              # not-reusable kind instead (D6).
+              if Effects.in_runtime_library_file?(@program, target_def) && target_def.effect.try(&.internal?) && Effects.hands_value?(target_def)
                 site = Effects.format_site(@program, node.location)
                 @not_reusable << NotReusableReason.new("opaque program construct", "call to internal def: #{target_def.name}", site)
               end

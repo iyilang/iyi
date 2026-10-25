@@ -20,6 +20,10 @@ module Iyi
   WRITE_BARRIER_BEGIN_NAME = "__iyi_write_barrier_begin"
   WRITE_BARRIER_NAME       = "__iyi_write_barrier"
   MARKING_NAME             = "__iyi_marking"
+  # iyi: the slow half of a loop's back-edge check (SPEC.md III.4.13, part
+  # 9), which the prelude defines and a program with a worker pool calls
+  # when the pool's monitor has flagged the worker running it.
+  PREEMPT_NAME = "__iyi_preempt"
 
   class Program
     def run(code, filename : String? = nil, debug = Debug::Default)
@@ -278,6 +282,8 @@ module Iyi
     @realloc_fun : LLVMTypedFunction?
     @write_barrier_begin_fun : LLVMTypedFunction?
     @write_barrier_fun : LLVMTypedFunction?
+    @iyi_preempt_fun : LLVMTypedFunction?
+    @iyi_preempt_on : Bool?
     @raise_overflow_fun : LLVMTypedFunction?
     @raise_cast_failed_fun : LLVMTypedFunction?
     @c_malloc_fun : LLVMTypedFunction?
@@ -695,7 +701,7 @@ module Iyi
         when @codegen.malloc_name, @codegen.malloc_atomic_name, @codegen.realloc_name, @codegen.raise_name,
              @codegen.personality_name, @codegen.get_exception_name, @codegen.raise_overflow_name,
              @codegen.raise_cast_failed_name, @codegen.once_init_name, @codegen.once_name,
-             WRITE_BARRIER_BEGIN_NAME, WRITE_BARRIER_NAME
+             WRITE_BARRIER_BEGIN_NAME, WRITE_BARRIER_NAME, PREEMPT_NAME
           @codegen.accept node
         end
 
@@ -824,6 +830,10 @@ module Iyi
       if @in_lib
         return false
       end
+
+      # iyi: the back-edge's slow half is the pool's, and a program with no
+      # pool neither calls it nor carries it (`iyi_preempt_on?`).
+      return false if node.name == PREEMPT_NAME && !iyi_preempt_on?
 
       unless node.external.dead?
         # Mark as dead so we don't generate it twice
@@ -1355,7 +1365,7 @@ module Iyi
             position_at_end while_block
 
             discard_value(node.body)
-            br while_block
+            iyi_back_edge while_block
           end
         else
           while_block, body_block, fail_block = new_blocks "while", "body", "fail"
@@ -1377,7 +1387,7 @@ module Iyi
             position_at_end body_block
 
             discard_value(node.body)
-            br while_block
+            iyi_back_edge while_block
 
             position_at_end fail_block
 
@@ -1446,7 +1456,7 @@ module Iyi
       when While
         if while_block = context.while_block
           execute_ensures_until(target)
-          br while_block
+          iyi_back_edge while_block
           return false
         end
       else
@@ -2901,6 +2911,110 @@ module Iyi
 
     def iyi_marking_flag
       declare_lib_var(MARKING_NAME, @program.uint8, false)
+    end
+
+    # iyi: whether this program's loops check for preemption at their
+    # back-edges (SPEC.md III.4.13, part 9): a program with a worker pool,
+    # which is a program that reached `IyiWorkers.start` - every
+    # `spawn_parallel` does. The flag is only ever raised on a pool worker,
+    # so a program without one would pay for checks that never fire, and
+    # carries none. A build writing artifacts carries none either: the
+    # object code it writes is linked into programs that may have no pool,
+    # and a check calls the pool's slow half by name.
+    def iyi_preempt_on? : Bool
+      on = @iyi_preempt_on
+      return on unless on.nil?
+      @iyi_preempt_on = iyi_preempt_wanted?
+    end
+
+    private def iyi_preempt_wanted? : Bool
+      return false unless @program.iyi_prelude? && @program.iyi_exported_owners.empty?
+      workers = @program.types["IyiWorkers"]?
+      return false unless workers
+      meta = workers.metaclass
+      return false unless meta.is_a?(DefInstanceContainer)
+      return false unless meta.def_instances.each_value.any? { |a_def| a_def.name == "start" }
+      !iyi_preempt_word.nil?
+    end
+
+    # The worker's preemption word, `IyiWorkers.@@preempt`: a thread-local
+    # the pool's monitor sets on a worker that has run one task for a
+    # quantum, through the address the worker published.
+    private def iyi_preempt_word : MetaTypeVar?
+      workers = @program.types["IyiWorkers"]?
+      return nil unless workers.is_a?(ClassVarContainer)
+      workers.class_vars["@@preempt"]?
+    end
+
+    # Whether the loops of *target_def*'s function check: a def of the
+    # program's own or of a library module, in a program with a pool. Not
+    # the prelude's - the scheduler, the allocator and the collector are
+    # written there, and a loop of theirs giving the worker up would park
+    # a fiber inside the runtime - though a prelude def that takes a block
+    # is inlined into its caller and checks as the caller does, which is
+    # what makes `each` and `times` in a program's own def check. Not a
+    # `fun`, which C may call on any thread. Not a def marked
+    # `@[NoPreempt]`.
+    def iyi_preemptible?(target_def : Def) : Bool
+      return false unless iyi_preempt_on?
+      return false if target_def.is_a?(External)
+      return false if target_def.annotation(@program.no_preempt_annotation)
+      !iyi_written_in_prelude?(target_def)
+    end
+
+    @iyi_prelude_files = {} of String => Bool
+
+    private def iyi_written_in_prelude?(target_def : Def) : Bool
+      return false unless dir = @program.iyi_prelude_dir
+      filename = target_def.location.try(&.expanded_location).try(&.read_from.as?(String))
+      return false unless filename
+      @iyi_prelude_files.put_if_absent(filename) do
+        ::Path[filename].to_posix.to_s.starts_with?("#{::Path[dir].to_posix}/")
+      end
+    end
+
+    # iyi: a loop's back-edge (SPEC.md III.4.13, part 9). Where the
+    # function checks, the branch carries a loop property, `iyi.preempt`,
+    # in the loop's `!llvm.loop` metadata - one loop ID per `while`, on its
+    # every back-edge, as LLVM wants - and the check itself goes in after
+    # optimisation (`PreemptChecks`): emitted here, a volatile load in the
+    # loop kept LLVM from vectorising it.
+    def iyi_back_edge(target : LLVM::BasicBlock) : Nil
+      marked = context.iyi_preempt? && !@builder.end && iyi_preempt_fun
+      branch = br target
+      return unless marked
+      LibLLVM.set_metadata(branch, LibLLVM.get_md_kind_id_in_context(llvm_context, "llvm.loop", 9), iyi_loop_id(target))
+    end
+
+    @iyi_loop_ids = {} of UInt64 => LLVM::Value
+
+    # The loop ID of the `while` whose condition block is *header*:
+    # `distinct !{!self, !{!"iyi.preempt"}}`, made through a temporary node
+    # for the self-reference.
+    private def iyi_loop_id(header : LLVM::BasicBlock) : LLVM::Value
+      @iyi_loop_ids.put_if_absent(header.to_unsafe.address) do
+        ctx = llvm_context
+        temporary = LibLLVM.temporary_md_node(ctx, nil, 0)
+        text = LibLLVM.md_string_in_context2(ctx, PreemptChecks::MARK, PreemptChecks::MARK.bytesize)
+        property = LibLLVM.md_node_in_context2(ctx, pointerof(text), 1)
+        operands = StaticArray[temporary.as(LibLLVM::ValueRef), property]
+        loop_id = LibLLVM.md_node_in_context2(ctx, operands.to_unsafe, 2)
+        LibLLVM.metadata_replace_all_uses_with(temporary, loop_id.as(LibLLVM::MetadataRef))
+        LLVM::Value.new(LibLLVM.metadata_as_value(ctx, loop_id.as(LibLLVM::MetadataRef)))
+      end
+    end
+
+    # The slow half, emitted ahead of the program (`CodegenWellKnownFunctions`)
+    # and `cold`, so the check's call sits off the loop's path; nil in a
+    # program with no pool. Asked first at a back-edge, which is where the
+    # word's global is named for `PreemptChecks`.
+    private def iyi_preempt_fun : LLVMTypedFunction?
+      return nil unless word = iyi_preempt_word
+      preempt = @iyi_preempt_fun ||= typed_fun?(@main_mod, PREEMPT_NAME)
+      return nil unless preempt
+      preempt.func.add_attribute LLVM::Attribute::Cold
+      @program.iyi_preempt_flag ||= class_var_global_name(word)
+      preempt
     end
 
     # iyi: a store whose destination is a stack slot — an alloca, or a

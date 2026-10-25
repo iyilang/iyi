@@ -534,6 +534,12 @@ module Iyi
     # half of that rule answers instead.
     property iyi_prelude_dir : String? = nil
 
+    # iyi: the global of the pool's preemption word, `IyiWorkers::preempt`,
+    # once codegen has marked a loop's back-edge for the check
+    # (`CodeGenVisitor#iyi_back_edge`); nil in a program with no pool. The
+    # checks go in after optimisation (`PreemptChecks`).
+    property iyi_preempt_flag : String? = nil
+
     # iyi: the types each object-code unit refers to a type id of, by unit name
     # (SPEC.md IV.1g).
     #
@@ -1385,6 +1391,10 @@ module Iyi
       # every type it found shareable, and a consumer reads that and never
       # recomputes: the bodies that would tell it are not in the artifact.
       types["Share"] = @share_annotation = AnnotationType.new self, self, "Share"
+      # iyi: `@[NoPreempt]` on a def keeps the back-edge check out of its
+      # body and of the blocks inlined into it (SPEC.md III.4.13, part 9):
+      # a loop there is never where a parallel task gives its worker up.
+      types["NoPreempt"] = @no_preempt_annotation = AnnotationType.new self, self, "NoPreempt"
 
       # iyi: the marker that makes a union member an error member (SPEC.md
       # III.1.1). Created here rather than declared in the prelude because the
@@ -1718,7 +1728,7 @@ module Iyi
                      always_inline_annotation naked_annotation returns_twice_annotation
                      raises_annotation primitive_annotation call_convention_annotation
                      flags_annotation link_annotation extern_annotation deprecated_annotation experimental_annotation
-                     share_annotation error_trait) %}
+                     share_annotation no_preempt_annotation error_trait) %}
       def {{name.id}}
         @{{name.id}}.not_nil!
       end

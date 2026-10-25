@@ -4,6 +4,7 @@ require "colorize"
 require "crystal/digest/md5"
 require "./optimization_mode"
 require "./wasm_roots"
+require "./preempt_checks"
 require "./mod/installer"
 {% if flag?(:msvc) %}
   require "./loader"
@@ -3397,6 +3398,7 @@ module Iyi
       @progress_tracker.stage("Codegen (bc+obj)") do
         optimize llvm_mod, target_machine unless @optimization_mode.o0?
         WasmRoots.run(llvm_mod) if @codegen_target.architecture == "wasm32"
+        preempt_checks llvm_mod, program.iyi_preempt_flag
 
         unit.emit(@emit_targets, emit_base_filename || output_filename)
 
@@ -4093,6 +4095,14 @@ module Iyi
       end
     {% end %}
 
+    # iyi: the back-edge checks of a program with a pool, put in after
+    # optimisation so they keep no loop from being vectorised (SPEC.md
+    # III.4.13, part 9; `PreemptChecks`).
+    protected def preempt_checks(llvm_mod, flag : String?) : Nil
+      return unless flag
+      PreemptChecks.run(llvm_mod, flag, @codegen_target.linux?, @codegen_target.architecture == "aarch64")
+    end
+
     protected def optimize(llvm_mod, target_machine)
       {% if LibLLVM::IS_LT_130 %}
         optimize_with_pass_manager(llvm_mod)
@@ -4229,6 +4239,7 @@ module Iyi
       @memory_buffer : LLVM::MemoryBuffer?
       @object_name : String?
       @bc_name : String?
+      @preempt_flag : String?
 
       def initialize(@compiler : Compiler, program : Program, @name : String,
                      @llvm_mod : LLVM::Module, @output_dir : String, @bc_flags_changed : Bool)
@@ -4256,6 +4267,7 @@ module Iyi
 
         @name = "#{@name}#{@compiler.optimization_mode.suffix}"
         @object_extension = compiler.codegen_target.object_extension
+        @preempt_flag = program.iyi_preempt_flag
       end
 
       def generate_bitcode
@@ -4350,6 +4362,7 @@ module Iyi
         target_machine = compiler.create_target_machine
         compiler.optimize llvm_mod, target_machine unless compiler.optimization_mode.o0?
         WasmRoots.run(llvm_mod) if compiler.codegen_target.architecture == "wasm32"
+        compiler.preempt_checks llvm_mod, @preempt_flag
         target_machine.emit_obj_to_file llvm_mod, temporary_object_name
         File.rename(temporary_object_name, object_name)
       rescue ex

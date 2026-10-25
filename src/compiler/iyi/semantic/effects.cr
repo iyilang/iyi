@@ -571,6 +571,42 @@ module Iyi
         # Avoid recursing into nested def declarations (handled per Element)
         false
       end
+
+      def visit(node : FunDef)
+        false
+      end
+
+      def visit(node : LibDef)
+        false
+      end
+
+      def visit(node : ClassDef)
+        false
+      end
+
+      def visit(node : ModuleDef)
+        false
+      end
+
+      def visit(node : CStructOrUnionDef)
+        false
+      end
+
+      def visit(node : EnumDef)
+        false
+      end
+
+      def visit(node : Alias)
+        false
+      end
+
+      def visit(node : TypeDef)
+        false
+      end
+
+      def visit(node : Macro)
+        false
+      end
     end
 
     def self.closure_check(program : Program, reach : Stale::Reach) : ClosureResult

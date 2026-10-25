@@ -963,6 +963,9 @@ class Iyi::Command
         opts.on("--no-codegen", "Don't do code generation") do
           compiler.no_codegen = true
         end
+        opts.on("--no-cleanup", "Skip cleanup process on semantic analysis") do
+          compiler.no_cleanup = true
+        end
         opts.on("-o FILE", "--output FILE", "Output path. If a directory, the filename is derived from the first source file (default: ./)") do |an_output_filename|
           # `-o ""` is what a shell produces from `-o "$OUT"` with `OUT`
           # unset, and it used to mean the current directory - the

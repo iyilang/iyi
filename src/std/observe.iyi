@@ -108,7 +108,7 @@ class RecordWriter
 
   def write_u32(val : UInt32) : Nil
     ensure_room(4)
-    @buffer[@size]     = (val & 0xFF_u32).to_u8
+    @buffer[@size] = (val & 0xFF_u32).to_u8
     @buffer[@size + 1] = ((val >> 8) & 0xFF_u32).to_u8
     @buffer[@size + 2] = ((val >> 16) & 0xFF_u32).to_u8
     @buffer[@size + 3] = ((val >> 24) & 0xFF_u32).to_u8

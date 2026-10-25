@@ -212,14 +212,18 @@ def measure_overhead():
         os.path.join(repo, 'bench/std_bit_array_exercise.iyi'),
     ]
 
-    print('| Program | Default Build+Run (s) | --fresh Time (s) | --cached Validation (s) | Reusable Speedup | Reached Elements | Key Bytes |')
-    print('|---|---|---|---|---|---|---|')
+    print('| Program | Default Build+Run (s) | --fresh Time (s) | --cached Validation (s) | Reached Elements | Trace Bytes | Receipt Bytes | Key Bytes |')
+    print('|---|---|---|---|---|---|---|---|')
 
     cache_dir = os.path.join(work, 'bench_cache')
     os.makedirs(cache_dir, exist_ok=True)
     bench_env = dict(os.environ, IYI_CACHE_DIR=cache_dir)
 
     for prog in test_programs:
+        # Each program receives a fresh store: receipt and trace sizes then
+        # describe this program rather than an earlier run in the same cache.
+        subprocess.run(['rm', '-rf', cache_dir], check=True)
+        os.makedirs(cache_dir, exist_ok=True)
         bname = os.path.basename(prog)
         bin_out = os.path.join(work, f'bench_{bname}.bin')
         dump_out = os.path.join(work, f'dump_{bname}.json')
@@ -261,14 +265,27 @@ def measure_overhead():
             try: os.remove(dump_out)
             except: pass
 
+        trace_bytes = 0
+        receipt_bytes = 0
+        records_dir = os.path.join(cache_dir, 'tests-v1', 'records')
+        if os.path.isdir(records_dir):
+            for root, _, files in os.walk(records_dir):
+                for name in files:
+                    if not name.endswith('.json'):
+                        continue
+                    receipt_path = os.path.join(root, name)
+                    receipt_bytes += os.path.getsize(receipt_path)
+                    with open(receipt_path) as f:
+                        receipt = json.load(f)
+                    trace_bytes += len(json.dumps(receipt.get('trace', {}), separators=(',', ':')).encode())
+
         key_bytes = 0
         if os.path.exists(key_out):
             key_bytes = os.path.getsize(key_out)
             try: os.remove(key_out)
             except: pass
 
-        speedup_str = f'{t_default / t_cached:.2f}x' if t_cached > 0 else 'N/A'
-        print(f'| {bname:25} | {t_default:6.3f}s | {t_fresh:6.3f}s | {t_cached:6.3f}s | {speedup_str:8} | {elements_count:6} | {key_bytes:6} B |')
+        print(f'| {bname:25} | {t_default:6.3f}s | {t_fresh:6.3f}s | {t_cached:6.3f}s | {elements_count:6} | {trace_bytes:6} B | {receipt_bytes:6} B | {key_bytes:6} B |')
 
     print()
 

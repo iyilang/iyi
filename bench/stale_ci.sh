@@ -162,14 +162,21 @@ print(f'assert-hits PASSED: all {len(tests)} tests hit from cache.')
 }
 
 # 4. shadow-audit: verifies cached hits match fresh execution
+# 4. shadow-audit: verifies cached hits match fresh execution. The two
+# snapshots carry the portable Build and ordered observations the runner's
+# terse result JSON intentionally omits.
 shadow_audit() {
   local cached_json=""
   local fresh_json=""
+  local cached_snapshot=""
+  local fresh_snapshot=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --cached-json) cached_json="$2"; shift 2 ;;
       --fresh-json) fresh_json="$2"; shift 2 ;;
+      --cached-snapshot) cached_snapshot="$2"; shift 2 ;;
+      --fresh-snapshot) fresh_snapshot="$2"; shift 2 ;;
       *) echo "Unknown option: $1" >&2; return 1 ;;
     esac
   done
@@ -182,7 +189,7 @@ shadow_audit() {
   "$PY" -c "
 import json, sys, os
 
-cached_file, fresh_file = sys.argv[1], sys.argv[2]
+cached_file, fresh_file, cached_snapshot_file, fresh_snapshot_file = sys.argv[1:5]
 with open(cached_file) as f:
     cached_data = json.load(f)
 with open(fresh_file) as f:
@@ -191,21 +198,42 @@ with open(fresh_file) as f:
 cached_tests = {os.path.basename(t['file']): t for t in cached_data.get('tests', [])}
 fresh_tests = {os.path.basename(t['file']): t for t in fresh_data.get('tests', [])}
 
+cached_records = {}
+fresh_records = {}
+if cached_snapshot_file:
+    with open(cached_snapshot_file) as f:
+        cached_records = {r['test']['path']: r for r in json.load(f).get('records', [])}
+if fresh_snapshot_file:
+    with open(fresh_snapshot_file) as f:
+        fresh_records = {r['test']['path']: r for r in json.load(f).get('records', [])}
+
 disagreements = []
 hits_checked = 0
 
 for file, c_test in cached_tests.items():
-    if c_test.get('cached') and c_test.get('reuse') == 'hit':
-        hits_checked += 1
-        f_test = fresh_tests.get(file)
-        if not f_test:
-            disagreements.append(f'{file}: hit in cached run but missing from fresh audit')
-            continue
+    if not (c_test.get('cached') and c_test.get('reuse') == 'hit'):
+        continue
+    hits_checked += 1
+    f_test = fresh_tests.get(file)
+    if not f_test:
+        disagreements.append(f'{file}: hit in cached run but missing from fresh audit')
+        continue
 
-        c_status = c_test.get('status')
-        f_status = f_test.get('status')
-        if c_status != f_status:
-            disagreements.append(f'{file}: verdict mismatch (cached={c_status}, fresh={f_status})')
+    c_status = c_test.get('status')
+    f_status = f_test.get('status')
+    if c_status != f_status:
+        disagreements.append(f'{file}: verdict mismatch (cached={c_status}, fresh={f_status})')
+
+    if cached_records or fresh_records:
+        c_record = cached_records.get(file)
+        f_record = fresh_records.get(file)
+        if not c_record or not f_record:
+            disagreements.append(f'{file}: missing portable receipt in producer or audit snapshot')
+            continue
+        if c_record.get('build') != f_record.get('build'):
+            disagreements.append(f'{file}: portable Build mismatch')
+        if c_record.get('trace', {}).get('observations') != f_record.get('trace', {}).get('observations'):
+            disagreements.append(f'{file}: ordered trace observation mismatch')
 
 if disagreements:
     with open('.disagreement_marker', 'w') as f:
@@ -216,7 +244,7 @@ if disagreements:
     sys.exit(1)
 
 print(f'shadow-audit PASSED: {hits_checked} cached hits verified against fresh execution.')
-" "$cached_json" "$fresh_json"
+" "$cached_json" "$fresh_json" "$cached_snapshot" "$fresh_snapshot"
 }
 
 # 5. test-planted-hidden-read: proves row 24

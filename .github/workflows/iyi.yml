@@ -18,7 +18,7 @@ name: iyi
 #
 # What each job is for:
 #
-#   iyi              the rules, the artifact, the import path: this fork's work
+#   iyi              the rules, artifact, import path, and stale receipt producer
 #   compiler-specs   Crystal's compiler suite. Every rule iyi adds is a change
 #                    to the parser, the semantic passes or the codegen
 #   stdlib-specs     Crystal's library suite. The compiler is still a Crystal
@@ -32,6 +32,8 @@ name: iyi
 #   std              the native standard library (src/std/): its foundation here,
 #                    its modules' exercises in the std-siblings shards (and the
 #                    windows- and darwin- shards beside their own jobs)
+#   stale-fresh      a fresh runner audits the producer's imported receipts
+
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -100,6 +102,10 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # The producer may read Actions metadata only to retrieve a prior master
+    # snapshot. The token itself is scoped to that one download step.
+    permissions:
+      actions: read
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The rules, the artifact and the import path"
@@ -164,6 +170,182 @@ jobs:
         run: |
           export IYI_PATH="lib:$(pwd)/src"
           make -o .build/crystal cli_spec
+
+      # Stale tests are a separate proof, not an assertion over YAML. The
+      # acceptance suite includes the local rows; stale-fresh below owns the
+      # cross-run audit rows.
+      - name: Stale test acceptance suite
+        run: bash bench/stale_tests.sh
+
+      - name: Build the receipt producer compiler
+        run: make -o .build/crystal iyi
+
+      # C3: the compiler has no TLS and never receives a credential. This is
+      # the only workflow step whose environment exposes github.token.
+      - name: Download master snapshot for producer audit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p stale-index
+          bash bench/stale_ci.sh fetch-master \
+            --out stale-index/master-x86_64-linux-gnu.json \
+            --target x86_64-linux-gnu
+
+      # Keep export credential-free. `assert-export-env` is intentionally in
+      # this same step: moving a token into this environment makes the step
+      # fail before the producer can write a portable receipt.
+      - name: Export fresh run receipts
+        env:
+          IYI_CI_PRODUCER: "1"
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mkdir -p stale-index
+          args=(
+            --fresh
+            --export-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
+          )
+          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
+            args+=(--export-index "master=stale-index/master-x86_64-linux-gnu.json")
+          fi
+          .build/iyi test "${args[@]}" samples/iyi/*.iyi
+
+      # archive: false leaves the uploaded JSON unhashed by an outer zip. The
+      # filename and artifact name must remain identical (upload-artifact#785).
+      - name: Upload producer compiler
+        uses: actions/upload-artifact@v7
+        with:
+          name: iyi
+          path: .build/iyi
+          archive: false
+          retention-days: 1
+
+      - name: Upload run receipt snapshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: run-${{ github.run_id }}-x86_64-linux-gnu.json
+          path: stale-index/run-${{ github.run_id }}-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 1
+
+      - name: Publish master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-x86_64-linux-gnu.json
+          path: stale-index/master-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 7
+
+  # A second runner gets only the producer's compiler and portable receipt
+  # snapshot. No cache crosses this boundary: a hit here is evidence that the
+  # receipt is complete, rather than an accidental local-store hit.
+  stale-fresh:
+    needs: iyi
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "Fresh runner receipt audit"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download producer compiler
+        uses: actions/download-artifact@v5
+        with:
+          name: iyi
+          path: .build
+      - run: chmod +x .build/iyi
+
+      - name: Download producer receipt snapshot
+        uses: actions/download-artifact@v5
+        with:
+          name: run-${{ github.run_id }}-x86_64-linux-gnu.json
+          path: stale-index
+
+      - name: All producer receipts hit on a fresh runner
+        run: |
+          .build/iyi test --cached --json \
+            --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
+            samples/iyi/*.iyi > stale-index/cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/cached.json
+
+      # This is an export step, and therefore the only stale-fresh step that
+      # carries IYI_CI_PRODUCER. Comparing portable snapshots preserves both
+      # the public Build and every ordered observation for the shadow audit.
+      - name: Shadow audit fresh execution and export
+        id: shadow_audit
+        env:
+          IYI_CI_PRODUCER: "1"
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          .build/iyi test --fresh --json \
+            --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
+            samples/iyi/*.iyi > stale-index/fresh.json
+          bash bench/stale_ci.sh shadow-audit \
+            --cached-json stale-index/cached.json \
+            --fresh-json stale-index/fresh.json \
+            --cached-snapshot stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json \
+            --fresh-snapshot stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json
+
+      - name: Planted hidden-read shadow-audit proof
+        run: bash bench/stale_ci.sh test-planted-hidden-read
+
+      - name: RG1 and RG7 with the producer compiler
+        run: IYI="$PWD/.build/iyi" bash bench/stale_reproducible.sh
+
+      - name: RG9 CallPathFp on the fresh runner
+        run: IYI="$PWD/.build/iyi" bash bench/stale_ci.sh rg9
+
+      # C3 gives the compiler a single credential-scoped route to master.
+      # A missing artifact is a normal condition: no master import happens.
+      - name: Download master snapshot for git-diff audit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash bench/stale_ci.sh fetch-master \
+            --out stale-index/master-x86_64-linux-gnu.json \
+            --target x86_64-linux-gnu
+
+      - name: Master snapshot git-diff self-check
+        run: |
+          if [ -f stale-index/master-x86_64-linux-gnu.json ]; then
+            .build/iyi test --cached --json \
+              --import-index "master=stale-index/master-x86_64-linux-gnu.json" \
+              samples/iyi/*.iyi > stale-index/master-cached.json
+            bash bench/stale_ci.sh git-diff-check \
+              --master-snapshot stale-index/master-x86_64-linux-gnu.json \
+              --cached-json stale-index/master-cached.json
+          else
+            echo "No completed master snapshot for x86_64-linux-gnu; nothing to import."
+          fi
+
+      - name: Census and overhead measurements
+        run: IYI="$PWD/.build/iyi" bash bench/stale_census.sh
+
+      # RG6: an audit disagreement makes the next master consumer see an empty
+      # snapshot. The artifact is emitted only on master, and `always()` keeps
+      # this containment action reachable after the failing audit.
+      - name: Prepare empty master snapshot after disagreement
+        id: empty_snapshot
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.shadow_audit.outcome == 'failure'
+        run: |
+          bash bench/stale_ci.sh empty-snapshot \
+            --out stale-index/master-x86_64-linux-gnu.json \
+            --target x86_64-linux-gnu
+
+      - name: Publish empty master snapshot after disagreement
+        if: always() && steps.empty_snapshot.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-x86_64-linux-gnu.json
+          path: stale-index/master-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 7
 
   compiler-specs:
     needs: build
@@ -3103,7 +3285,7 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
+    needs: [binary, darwin, darwin-std-siblings, clean-room, iyi, stale-fresh, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, targets, cross-objects, cross-run, wasi-run,
             windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
             windows-std-siblings, windows-gates, windows-compiler-specs,

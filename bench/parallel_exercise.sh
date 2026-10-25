@@ -123,6 +123,33 @@ for build in plain release; do
   fi
   sed 's/^/  /' "migrated-$build.txt"
 done
+# ── 2b. Preemption at loop back-edges, twice ─────────────────────────────
+# bench/parallel_preempt.iyi: a task computing with no call in its loop
+# no longer holds a short task, a sleeper or a connection behind it past
+# 100 ms (80 for a fast request in the server shape); a preempted task
+# keeps its unit's token; and the tight-loop cost, printed, not bounded.
+PREEMPT_WORKERS=8
+[ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
+for build in plain release; do
+  step "preemption at loop back-edges, $build build"
+  flag=""
+  [ "$build" = release ] && flag="--release"
+  if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
+    echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
+  fi
+  for run in "slice --workers=1" "unit --workers=1" "server --workers=$PREEMPT_WORKERS"; do
+    # shellcheck disable=SC2086 # the step and its count are words
+    timeout -k 5 300 "./preempt-$build" $run > "preempted-$build.txt" 2>&1
+    code=$?
+    if [ "$code" -ne 0 ] || ! grep -q 'every property held' "preempted-$build.txt"; then
+      echo "the preemption exercise failed at $run (exit $code):"; cat "preempted-$build.txt"; exit 1
+    fi
+    grep -v 'every property held' "preempted-$build.txt" | sed 's/^/  /'
+  done
+done
+step "what the check costs a tight loop, release build: a measurement, held to no bound"
+timeout -k 5 300 ./preempt-release tight --workers=1 | grep '^tight' | sed 's/^/  /'
+
 # ── 2. The floor ──────────────────────────────────────────────────────────
 # What the pool costs each platform, by name. Its workers are the
 # runtime's own threads, so it pays what a thread pays and nothing else:
@@ -435,6 +462,28 @@ else
     caught pinned 'woken from the main thread, took' balance
   fi
 fi
+
+step "failure proof: a loop marked @[NoPreempt] holds its worker for its whole computation"
+if ! "$IYI" build --release -Dpreempt_off "$REPO/bench/parallel_preempt.iyi" -o preemptoff-run > build-preemptoff.log 2>&1; then
+  echo "the @[NoPreempt] build failed:"; tail -20 build-preemptoff.log; exit 1
+fi
+caught preemptoff 'slice: a short task waited' slice --workers=1
+
+step "failure proof: a monitor that never raises a worker's word preempts nothing"
+broken noflag '/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
+caught noflag 'slice: a short task waited' slice --workers=1
+
+step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"
+if [ "$CORES" -lt 2 ]; then
+  echo "  one core here: no idle worker takes what the poll would hand over, so the proof is not run"
+else
+  broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
+  caught nopoll 'server: a fast request took' server --workers="$PREEMPT_WORKERS"
+fi
+
+step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
+broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt
+caught tokenless 'unit: a task of the same unit ran' unit --workers=1
 
 # ── 8. Failure proof: one worker, whatever was asked for ──────────────────
 step "failure proof: a pool held to one worker fails the speedup floor"

@@ -2974,30 +2974,56 @@ module Iyi
     end
 
     # Whether the loops of *target_def*'s function check: a def of the
-    # program's own or of a library module, in a program with a pool. Not
-    # the prelude's - the scheduler, the allocator and the collector are
-    # written there, and a loop of theirs giving the worker up would park
-    # a fiber inside the runtime - though a prelude def that takes a block
-    # is inlined into its caller and checks as the caller does, which is
-    # what makes `each` and `times` in a program's own def check. Not a
-    # `fun`, which C may call on any thread. Not a def marked
-    # `@[NoPreempt]`.
+    # program's own, of a library module, or of the prelude's library -
+    # `Array`, `Hash`, `String` and the rest - in a program with a pool.
+    # Not the runtime's (`iyi_runtime_def?`), and not a def the runtime
+    # calls: that is compiled a second time for it, unchecked
+    # (`target_def_fun`). Not a `fun`, which C may call on any thread. Not
+    # a def marked `@[NoPreempt]`.
     def iyi_preemptible?(target_def : Def) : Bool
       return false unless iyi_preempt_on?
       return false if target_def.is_a?(External)
       return false if target_def.annotation(@program.no_preempt_annotation)
-      !iyi_written_in_prelude?(target_def)
+      !iyi_runtime_def?(target_def)
     end
 
-    @iyi_prelude_files = {} of String => Bool
+    # iyi: the prelude's files that hold the runtime - the scheduler and the
+    # pool (`concurrency.iyi`), kernel threads and the collector's stop
+    # (`thread.iyi`), and the allocator, the collector, panics and the
+    # entry point (`prelude.iyi`). Their code never checks for preemption:
+    # a loop of theirs giving the worker up would park a fiber inside the
+    # runtime, with a worker's structures half changed or a reference to
+    # one worker's state held across a move to another. The prelude's
+    # other files are a library, and check as a program's own code does.
+    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi"}
 
-    private def iyi_written_in_prelude?(target_def : Def) : Bool
+    @iyi_runtime_files = {} of String => Bool
+
+    # Whether *target_def* is written in one of `IYI_RUNTIME_FILES`, in the
+    # prelude's directory itself.
+    def iyi_runtime_def?(target_def : Def) : Bool
       return false unless dir = @program.iyi_prelude_dir
       filename = target_def.location.try(&.expanded_location).try(&.read_from.as?(String))
       return false unless filename
-      @iyi_prelude_files.put_if_absent(filename) do
-        ::Path[filename].to_posix.to_s.starts_with?("#{::Path[dir].to_posix}/")
+      @iyi_runtime_files.put_if_absent(filename) do
+        path = ::Path[filename].to_posix.to_s
+        prefix = "#{::Path[dir].to_posix}/"
+        path.starts_with?(prefix) && IYI_RUNTIME_FILES.includes?(path[prefix.size..])
       end
+    end
+
+    # iyi: whether a call from here to *target_def* goes to the copy of it
+    # compiled for the runtime: the caller is the runtime's code, or such a
+    # copy, and the callee is a library def, which checks where it is
+    # compiled for a program's own code. So nothing the runtime runs checks,
+    # whatever it calls - the push that grows the poller's list of closed
+    # fds, the `raise` of a failed `clone` - and the runtime needs no rule
+    # about which of its calls are safe places to give a worker up. A def
+    # read from a `.iyimod` has one body, compiled where no pool was
+    # (`iyi_preempt_on?`), and so no checks either.
+    def iyi_runtime_copy?(target_def : Def) : Bool
+      context.iyi_runtime? && !target_def.is_a?(External) && !target_def.iyi_from_artifact? &&
+        !iyi_runtime_def?(target_def)
     end
 
     # iyi: a loop's back-edge (SPEC.md III.4.13, part 9). Where the

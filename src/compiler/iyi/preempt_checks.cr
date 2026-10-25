@@ -22,8 +22,16 @@
 # (`CodeGenVisitor#iyi_tpidr_el0`). Mach-O and COFF have no local-exec, and
 # read it through the accessor every other thread-local takes there
 # (`CodeGenVisitor#get_thread_local`).
+#
+# Recursion with no loop in it has no back-edge, and gets the same check at
+# the entry of each function on a call cycle (`mark_recursion`).
 module Iyi::PreemptChecks
   MARK = "iyi.preempt"
+
+  # The call that stands for a check at a function's entry from codegen
+  # until optimisation is done (`mark_recursion`), and that `run` replaces
+  # with one.
+  ENTRY = "__iyi_preempt_entry"
 
   # `memory(inaccessiblemem: readwrite)` as the `memory` attribute's
   # integer: two bits per location, read and write both set (3), for
@@ -39,6 +47,7 @@ module Iyi::PreemptChecks
     ctx = mod.context
     kind = LibLLVM.get_md_kind_id_in_context(ctx, "llvm.loop", 9)
     builder = LLVM::Builder.new(LibLLVM.create_builder_in_context(ctx))
+    entries = entry_calls(mod)
     fn = LibLLVM.get_first_function(mod)
     until fn.null?
       latches = [] of LibLLVM::BasicBlockRef
@@ -48,12 +57,172 @@ module Iyi::PreemptChecks
         latches << block if !terminator.null? && marked?(LibLLVM.get_metadata(terminator, kind))
         block = LibLLVM.get_next_basic_block(block)
       end
-      unless latches.empty?
+      calls = entries[fn.address]?
+      unless latches.empty? && calls.nil?
         anchor = entry_value(mod, builder, ctx, fn, flag, linux, aarch64)
-        latches.each { |latch| check(mod, builder, ctx, latch, flag, linux, aarch64, anchor) }
+        latches.each { |latch| check(mod, builder, ctx, latch, LibLLVM.get_basic_block_terminator(latch), flag, linux, aarch64, anchor) }
+        if calls
+          calls.each do |call|
+            following = LibLLVM.get_next_instruction(call)
+            LibLLVM.instruction_erase_from_parent(call)
+            check(mod, builder, ctx, LibLLVM.get_instruction_parent(following), following, flag, linux, aarch64, anchor)
+          end
+        end
       end
       fn = LibLLVM.get_next_function(fn)
     end
+    if entry = mod.functions[ENTRY]?
+      LibLLVM.delete_function(entry)
+    end
+  end
+
+  # The calls to `ENTRY` left after optimisation, by the address of the
+  # function each is in.
+  private def self.entry_calls(mod : LLVM::Module) : Hash(UInt64, Array(LibLLVM::ValueRef))
+    calls = {} of UInt64 => Array(LibLLVM::ValueRef)
+    return calls unless entry = mod.functions[ENTRY]?
+    use = LibLLVM.get_first_use(entry)
+    until use.null?
+      call = LibLLVM.get_user(use)
+      fn = LibLLVM.get_basic_block_parent(LibLLVM.get_instruction_parent(call))
+      (calls[fn.address] ||= [] of LibLLVM::ValueRef) << call
+      use = LibLLVM.get_next_use(use)
+    end
+    calls
+  end
+
+  # iyi: a check at the entry of every function on a call cycle among the
+  # functions whose loops check (*names*, `Program#iyi_preempt_funs`), put
+  # in before optimisation across every module of the program, since a
+  # cycle may cross them. A naive `fib` has no loop and so no back-edge,
+  # and held a worker for as long as it recursed.
+  #
+  # What goes in is a call to `ENTRY`, a function LLVM is told touches
+  # only memory nothing else names, so it optimises around it as around
+  # nothing - except that it never removes it nor moves it out of a loop -
+  # and `run` replaces it with the check once optimisation is done. Put in
+  # here rather than there, because LLVM turns a call in tail position
+  # into a branch back to the function's top: the call to `ENTRY` at the
+  # top is then in the loop that made, and checks at every turn of it.
+  #
+  # A cycle is found among direct calls, so recursion through a `Proc` is
+  # not one.
+  def self.mark_recursion(mods : Array(LLVM::Module), names : Array(String)) : Nil
+    return if names.empty?
+    ids = {} of String => Int32
+    names.each { |name| ids[name] ||= ids.size }
+    # Every function of those names, by address - its definition, or the
+    # declaration another module's calls name it by - and its node.
+    node_of = {} of UInt64 => Int32
+    bodies = [] of {LLVM::Module, LibLLVM::ValueRef, Int32}
+    mods.each do |mod|
+      fn = LibLLVM.get_first_function(mod)
+      until fn.null?
+        name = LibLLVM.get_value_name2(fn, out length)
+        if id = ids[String.new(name, length)]?
+          node_of[fn.address] = id
+          bodies << {mod, fn, id} unless LibLLVM.get_first_basic_block(fn).null?
+        end
+        fn = LibLLVM.get_next_function(fn)
+      end
+    end
+    calls = Array(Array(Int32)).new(ids.size) { [] of Int32 }
+    bodies.each do |_, fn, id|
+      block = LibLLVM.get_first_basic_block(fn)
+      until block.null?
+        inst = LibLLVM.get_first_instruction(block)
+        until inst.null?
+          unless LibLLVM.is_a_call_inst(inst).null? && LibLLVM.is_a_invoke_inst(inst).null?
+            callee = LibLLVM.get_operand(inst, (LibLLVM.get_num_operands(inst) - 1).to_u32)
+            if target = node_of[callee.address]?
+              calls[id] << target
+            end
+          end
+          inst = LibLLVM.get_next_instruction(inst)
+        end
+        block = LibLLVM.get_next_basic_block(block)
+      end
+    end
+    cyclic = on_cycle(calls)
+    bodies.each do |mod, fn, id|
+      next unless cyclic[id]
+      ctx = mod.context
+      builder = LLVM::Builder.new(LibLLVM.create_builder_in_context(ctx))
+      # After the entry block's allocas, which stay where LLVM promotes them.
+      inst = LibLLVM.get_first_instruction(LibLLVM.get_first_basic_block(fn))
+      until LibLLVM.is_a_alloca_inst(inst).null?
+        inst = LibLLVM.get_next_instruction(inst)
+      end
+      LibLLVM.position_builder_before(builder, inst)
+      type = LLVM::Type.function([] of LLVM::Type, ctx.void)
+      builder.call type, entry_fun(mod, type)
+    end
+  end
+
+  private def self.entry_fun(mod : LLVM::Module, type : LLVM::Type) : LLVM::Function
+    mod.functions[ENTRY]? || begin
+      entry = LibLLVM.add_function(mod, ENTRY, type)
+      {"memory" => INACCESSIBLE_READ_WRITE, "nounwind" => 0_u64, "willreturn" => 0_u64}.each do |attribute, value|
+        kind = LibLLVM.get_enum_attribute_kind_for_name(attribute, attribute.bytesize)
+        LibLLVM.add_attribute_at_index(entry, LLVM::AttributeIndex::FunctionIndex, LibLLVM.create_enum_attribute(mod.context, kind, value))
+      end
+      LLVM::Function.new(entry)
+    end
+  end
+
+  # Which nodes of the graph *calls* are on a cycle: Tarjan's strongly
+  # connected components, kept on a stack of its own rather than the
+  # compiler's, a component of one node only when the node calls itself.
+  private def self.on_cycle(calls : Array(Array(Int32))) : Array(Bool)
+    count = calls.size
+    order = Array(Int32).new(count, -1)
+    low = Array(Int32).new(count, 0)
+    held = Array(Bool).new(count, false)
+    cyclic = Array(Bool).new(count, false)
+    stack = [] of Int32
+    work = [] of {Int32, Int32}
+    counter = 0
+    count.times do |root|
+      next if order[root] >= 0
+      order[root] = low[root] = counter
+      counter += 1
+      stack << root
+      held[root] = true
+      work << {root, 0}
+      until work.empty?
+        node, at = work.last
+        if at < calls[node].size
+          work[-1] = {node, at + 1}
+          callee = calls[node][at]
+          if order[callee] < 0
+            order[callee] = low[callee] = counter
+            counter += 1
+            stack << callee
+            held[callee] = true
+            work << {callee, 0}
+          elsif held[callee]
+            low[node] = Math.min(low[node], order[callee])
+          end
+          next
+        end
+        work.pop
+        if low[node] == order[node]
+          size = 0
+          while true
+            member = stack.pop
+            held[member] = false
+            size += 1
+            cyclic[member] = true
+            break if member == node
+          end
+          cyclic[node] = calls[node].includes?(node) if size == 1
+        end
+        if caller = work.last?
+          low[caller[0]] = Math.min(low[caller[0]], low[node])
+        end
+      end
+    end
+    cyclic
   end
 
   # Whether a loop ID carries the property.
@@ -72,29 +241,36 @@ module Iyi::PreemptChecks
     end
   end
 
-  # The latch's terminator moves into a block of its own, the successors'
-  # phis follow it there, and the latch ends in the check instead.
-  private def self.check(mod, builder, ctx, latch, flag, linux, aarch64, anchor) : Nil
-    terminator = LibLLVM.get_basic_block_terminator(latch)
-    fn = LibLLVM.get_basic_block_parent(latch)
+  # The check at *first*: it and what follows it in *block* - a latch's
+  # terminator, or what followed an entry's `ENTRY` call - move into a block
+  # of its own, the successors' phis follow them there, and *block* ends in
+  # the check instead.
+  private def self.check(mod, builder, ctx, block, first, flag, linux, aarch64, anchor) : Nil
+    fn = LibLLVM.get_basic_block_parent(block)
     resume = LibLLVM.append_basic_block_in_context(ctx, fn, "preempt_resume")
     slow = LibLLVM.append_basic_block_in_context(ctx, fn, "preempt")
-    LibLLVM.move_basic_block_after(resume, latch)
-    LibLLVM.move_basic_block_after(slow, latch)
+    LibLLVM.move_basic_block_after(resume, block)
+    LibLLVM.move_basic_block_after(slow, block)
 
-    LibLLVM.instruction_remove_from_parent(terminator)
     builder.position_at_end LLVM::BasicBlock.new(resume)
-    LibLLVM.insert_into_builder(builder, terminator)
+    inst = first
+    until inst.null?
+      following = LibLLVM.get_next_instruction(inst)
+      LibLLVM.instruction_remove_from_parent(inst)
+      LibLLVM.insert_into_builder(builder, inst)
+      inst = following
+    end
+    terminator = LibLLVM.get_basic_block_terminator(resume)
 
     successors = [] of LibLLVM::BasicBlockRef
     LibLLVM.get_num_successors(terminator).times do |index|
       successor = LibLLVM.get_successor(terminator, index)
       next if successors.includes?(successor)
       successors << successor
-      retarget_phis(builder, successor, latch, resume)
+      retarget_phis(builder, successor, block, resume)
     end
 
-    builder.position_at_end LLVM::BasicBlock.new(latch)
+    builder.position_at_end LLVM::BasicBlock.new(block)
     word = load_word(mod, builder, ctx, flag, linux, aarch64, anchor)
     asked = builder.icmp LLVM::IntPredicate::NE, word, ctx.int64.const_int(0)
     builder.cond asked, LLVM::BasicBlock.new(slow), LLVM::BasicBlock.new(resume)

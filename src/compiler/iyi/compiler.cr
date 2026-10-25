@@ -3311,9 +3311,15 @@ module Iyi
       # name from outside that module, so `a + b` in an imported module's
       # body was `undefined reference to '__iyi_raise_overflow'` at link.
       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
-        program.codegen node, debug: debug, frame_pointers: frame_pointers,
+        modules = program.codegen node, debug: debug, frame_pointers: frame_pointers,
           single_module: @cross_compile || !@emit_targets.none? ||
                          (@single_module && @emit_iyimod.nil? && program.iyi_artifact_objects.empty?)
+        # iyi: recursion's checks go in before optimisation (SPEC.md
+        # III.4.13, part 9; `PreemptChecks.mark_recursion`).
+        if program.iyi_preempt_flag
+          PreemptChecks.mark_recursion(modules.values.map(&.mod), program.iyi_preempt_funs)
+        end
+        modules
       end
 
       output_dir = CacheDir.instance.directory_for(sources)

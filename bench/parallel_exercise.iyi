@@ -6,15 +6,15 @@
 #
 # Every claim the pool makes, run rather than asserted: parallel tasks
 # start on worker threads and not on the thread that spawned them, on more
-# than one of them, and each stays on the thread that started it across
-# every park; a thousand of them run exactly once each; workers that run
-# out steal what another worker's tasks spawned; values cross threads
-# through channels exactly once and in each sender's order; a cancel
-# reaches a task asleep or parked on a channel on another thread, and a
-# task still waiting in the pool starts cancelled; a panic stops at the
-# task's boundary on whatever thread it ran; collections stop workers
-# with live lists on their fibers' stacks and free nothing of them; and
-# the typed group answers a tuple of parallel tasks.
+# than one of them, and resume on a worker - not always the one they
+# parked on - across every park; a thousand of them run exactly once
+# each; workers that run out steal what another worker's tasks spawned;
+# values cross threads through channels exactly once and in each sender's
+# order; a cancel reaches a task asleep or parked on a channel on another
+# thread, and a task still waiting in the pool starts cancelled; a panic
+# stops at the task's boundary on whatever thread it ran; collections stop
+# workers with live lists on their fibers' stacks and free nothing of
+# them; and the typed group answers a tuple of parallel tasks.
 #
 # Every step runs under a watchdog: a task on the main thread that sleeps
 # and fails the run by name if the step has not finished, so a wake that
@@ -159,8 +159,10 @@
   # ── the properties ───────────────────────────────────────────────────
 
   # Placement: parallel tasks run on the pool, not on the spawning thread,
-  # on more than one worker, and each stays on the thread that started it
-  # across every park - a sleep and a channel handoff from the main thread.
+  # on more than one worker, and never on the spawning thread after a park
+  # either - a sleep and a channel handoff from the main thread - though
+  # they may resume on another worker (bench/parallel_migrate.iyi holds
+  # what a move keeps).
   #
   # Every task, as it starts, counts itself and then keeps its worker busy
   # - spinning, never parking - until a second task has started. A worker
@@ -176,6 +178,7 @@
       pings = Channel(Int32).new
       arrived = Tally.new
       seen = [] of UInt64
+      moved = 0
       group do |g|
         handles = [] of IyiTask(Tuple(UInt64, UInt64, UInt64))
         16.times do |i|
@@ -200,12 +203,13 @@
           ids = handle.value
           fail("placement: a parallel task answered #{ids}") unless ids.is_a?(Tuple(UInt64, UInt64, UInt64))
           fail("placement: a parallel task ran on the thread that spawned it") if ids[0] == main_thread
-          fail("placement: a started task changed threads across a park: #{ids[0]}, #{ids[1]}, #{ids[2]}") unless ids[0] == ids[1] && ids[1] == ids[2]
+          fail("placement: a parallel task resumed on the thread that spawned it: #{ids[0]}, #{ids[1]}, #{ids[2]}") if ids[1] == main_thread || ids[2] == main_thread
+          moved = moved + 1 unless ids[0] == ids[1] && ids[1] == ids[2]
           seen << ids[0] unless seen.includes?(ids[0])
         end
       end
       fail("placement: 16 parallel tasks all ran on one worker of #{IyiWorkers.count}") if seen.size < 2
-      puts "placement: 16 parallel tasks on #{seen.size} of #{IyiWorkers.count} workers, none on the spawning thread, none moved across a sleep and a channel"
+      puts "placement: 16 parallel tasks on #{seen.size} of #{IyiWorkers.count} workers, none on the spawning thread, #{moved} resumed on another worker across a sleep and a channel"
     end
   end
 

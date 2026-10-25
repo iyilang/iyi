@@ -2580,9 +2580,16 @@ class IyiScheduler
   # of what its waiters want, and the event says which half is ready. A
   # second fiber in the same direction is refused: the event would wake
   # one of the two, and the other would wait for nothing.
+  #
+  # Mail is taken first when there is any: a descriptor another thread
+  # closed under a waiter here (`wake_closed`) may be this very number
+  # again by now, opened since, and the old waiter has to leave its slot
+  # before a new one takes it, or the new one is refused as a second.
   def self.wait_posix(fd : Int32, direction : Int32, ms : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
+    st = state
+    take_mail(st) if st.mail?
     others = io_interest(fd)
     raise "two fibers #{direction == 1 ? "reading" : "writing"} one fd" if others & direction != 0
 

@@ -1,0 +1,645 @@
+# Parallel tasks that move between workers, exercised: SPEC.md III.4.13,
+# the part about a started task resuming on whichever worker is free.
+#
+#   ./bin/iyi run bench/parallel_migrate.iyi                 # every step
+#   ./bin/iyi run bench/parallel_migrate.iyi -- sockets      # some of them
+#
+# A task that parks on one worker and resumes on another must find what it
+# had: its stack, scanned by the collector on the thread now running it;
+# the thread-locals of that thread, not of the one it left; its socket's
+# bytes, delivered by whichever poller or port took them; a cancel, from
+# whichever thread, that finds it where it waits; and on Windows the TEB's
+# stack bounds of its own stack, which a deep frame's probes read. Every
+# step parks tasks over and over while they and their siblings allocate,
+# so collections stop the workers while tasks are on their way between
+# them, and counts the parks a task resumed from on another thread: a step
+# whose tasks never moved proved nothing, and fails saying so.
+#
+# What a thread is, here, is read twice: by the thread-local the runtime
+# keeps (`IyiScheduler.state`), and by asm, from the register the kernel
+# keeps the thread's own pointer in - %fs:0 on x86-64 Linux, the TEB at
+# %gs:0x30 on Windows, tpidr_el0 on aarch64 (tpidrro_el0 on darwin) -
+# which no codegen of thread-locals touches. After every park the two
+# must change together. Under `-Dparallel_stale_tls` the thread-local is
+# the one read before the park, as code that kept a thread-local's
+# address across a call would read it, and the step fails by name.
+#
+# Then the timed shapes the issue's server is made of (#145): tasks that
+# park and then compute finish in about their work over the workers, when
+# the thread that wakes them is outside the pool and when it is a worker;
+# and a task joining a thread, or waiting on a Mutex's word, leaves its
+# worker to the tasks behind it. bench/parallel_exercise.sh runs this and
+# broken copies of the runtime, each caught by the check that names it.
+
+module bench/parallel_migrate
+
+import std/socket::{IyiSocket, SocketError}
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  def elapsed_ms(since : Int64) : Int64
+    (__iyi_monotonic_ns - since) // 1000000_i64
+  end
+
+  # Integer work with nothing to allocate: a xorshift walk.
+  def spin(rounds : Int64, seed : UInt64) : UInt64
+    x = seed | 1_u64
+    i = 0_i64
+    while i < rounds
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      i = i + 1
+    end
+    x
+  end
+
+  # Counts the tasks share: `Share` by their atomic fields.
+  class Tally
+    @count : Atomic(Int64)
+
+    def initialize
+      @count = Atomic(Int64).new(0_i64)
+    end
+
+    def add(value : Int64) : Nil
+      @count.add(value)
+    end
+
+    def count : Int64
+      @count.get
+    end
+  end
+
+  class Node
+    getter value : Int64
+    getter next_node : Node?
+
+    def initialize(@value : Int64, @next_node : Node?)
+    end
+  end
+
+  struct Boom
+    def initialize
+    end
+  end
+
+  impl Error for Boom
+    def message : String
+      "boom"
+    end
+  end
+
+  # The kernel's pointer for the calling thread, read by asm: what the
+  # thread is, without a thread-local in between.
+  def os_thread : UInt64
+    tp = 0_u64
+    {% if flag?(:win32) %}
+      asm("movq %gs:0x30, $0" : "=r"(tp) : : : "volatile")
+    {% elsif flag?(:x86_64) %}
+      asm("movq %fs:0, $0" : "=r"(tp) : : : "volatile")
+    {% elsif flag?(:darwin) %}
+      asm("mrs $0, tpidrro_el0" : "=r"(tp) : : : "volatile")
+    {% else %}
+      asm("mrs $0, tpidr_el0" : "=r"(tp) : : : "volatile")
+    {% end %}
+    tp
+  end
+
+  # The thread-local's answer after a park: this thread's scheduler state,
+  # or under `-Dparallel_stale_tls` the one read before it.
+  def state_after(before : UInt64) : UInt64
+    {% if flag?(:parallel_stale_tls) %}
+      before
+    {% else %}
+      IyiScheduler.state.object_id
+    {% end %}
+  end
+
+  # After a park: the thread-local and the kernel's thread changed together
+  # or not at all, and true when they changed - the task moved.
+  def moved?(step : String, os_before : UInt64, state_before : UInt64) : Bool
+    os_now = os_thread
+    state_now = state_after(state_before)
+    if (os_now == os_before) != (state_now == state_before)
+      fail("#{step}: a thread-local read after a park named another thread than the one the task resumed on: the kernel's thread went #{os_before} -> #{os_now}, the scheduler state #{state_before} -> #{state_now}")
+    end
+    os_now != os_before
+  end
+
+  # A list that lives only on the calling task's stack: *count* nodes whose
+  # values count down from the head, values no other list or garbage in
+  # the run has.
+  def build(count : Int32, seed : Int64) : Node?
+    head = nil.as(Node?)
+    i = 0
+    while i < count
+      head = Node.new((seed &+ 1_i64) &* 1000003_i64 &+ i.to_i64, head)
+      i = i + 1
+    end
+    head
+  end
+
+  # Whether the list is still the one `build` made, every value in order,
+  # each read before its link is followed: a node the collector freed and
+  # the heap gave to something else ends the walk there, by name, rather
+  # than sending it after a link that is not one.
+  def whole?(head : Node?, count : Int32, seed : Int64) : Bool
+    node = head
+    i = count - 1
+    while i >= 0
+      return false unless node.is_a?(Node)
+      return false unless node.value == (seed &+ 1_i64) &* 1000003_i64 &+ i.to_i64
+      node = node.next_node
+      i = i - 1
+    end
+    node.nil?
+  end
+
+  # Garbage, so the heap fills and collections stop the workers.
+  def churn(count : Int32) : Int64
+    kept = 0_i64
+    i = 0
+    while i < count
+      node = Node.new(i.to_i64, nil)
+      kept = kept &+ node.value
+      i = i + 1
+    end
+    kept
+  end
+
+  # Frames 600 bytes deep, *depth* of them, each page of them touched
+  # top down as a frame's own probes touch it.
+  @[NoInline]
+  def fill(pad : Pointer(UInt64), words : Int32, seed : UInt64) : UInt64
+    i = 0
+    while i < words
+      pad[i] = seed &+ i.to_u64
+      i = i + 1
+    end
+    pad[words - 1]
+  end
+
+  def deep(depth : Int32) : UInt64
+    pad = uninitialized UInt64[72]
+    words = pointerof(pad).as(Pointer(UInt64))
+    top = fill(words, 72, depth.to_u64)
+    return top if depth == 0
+    deep(depth - 1) &+ top &+ words[0]
+  end
+
+  # The step *name* under a watchdog: a task on the main thread that
+  # sleeps *ms* and fails the run by name unless the step ends first.
+  def watched(name : String, ms : Int32, &block : -> Nil) : Nil
+    group do |w|
+      w.spawn do
+        waited = sleep(ms)
+        fail("#{name}: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
+        0
+      end
+      block.call
+      w.cancel_children
+    end
+  end
+
+  # A connected pair of sockets on the loopback, as descriptors and the
+  # family, which cross into a parallel task.
+  def pair(listener : IyiSocket, port : Int32) : Tuple(IyiSocket, IyiSocket)
+    near = IyiSocket.connect("127.0.0.1", port, 5000)
+    fail("pair: connect answered #{near}") unless near.is_a?(IyiSocket)
+    far = listener.accept
+    fail("pair: accept answered #{far}") unless far.is_a?(IyiSocket)
+    {near, far}
+  end
+
+  # ── channels ─────────────────────────────────────────────────────────
+  # 32 tasks, each holding a list on its own stack, park on a channel 30
+  # times; the main thread sends, so each wake goes to the pool's shared
+  # queue and whichever worker is free resumes it. Each round allocates.
+  def channels(watch : Int32) : Nil
+    watched("channels", watch) do
+      tasks = 32
+      rounds = 30
+      feed = Channel(Int32).new
+      moves = Tally.new
+      stops = IyiThread.stops
+      group do |g|
+        tasks.times do |t|
+          g.spawn_parallel do
+            kept = build(3000, t.to_i64)
+            rounds.times do |r|
+              churn(4000)
+              os = os_thread
+              st = IyiScheduler.state.object_id
+              feed.receive
+              moves.add(1_i64) if moved?("channels", os, st)
+              fail("channels: task #{t}'s list was not whole after park #{r}") unless whole?(kept, 3000, t.to_i64)
+            end
+            0
+          end
+        end
+        (tasks * rounds).times { feed.send(1) }
+      end
+      fail("channels: no collection stopped a worker while the tasks moved") if IyiThread.stops == stops
+      if IyiWorkers.count > 1 && moves.count == 0_i64
+        fail("channels: none of #{tasks * rounds} parks on a channel resumed on another worker")
+      end
+      puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{IyiThread.stops - stops} stops"
+    end
+  end
+
+  # ── sockets ──────────────────────────────────────────────────────────
+  # 16 connections, a parallel task each, served for 12 requests: the
+  # task reads the request, parked on its socket, computes, and hands the
+  # answer to a writer - a task of its own on the same socket, which may
+  # run on another worker and, on Windows, moves the socket to that
+  # worker's port while the reader's next read is posted on its own.
+  def sockets(watch : Int32) : Nil
+    watched("sockets", watch) do
+      conns = 16
+      rounds = 12
+      listener = IyiSocket.listen("127.0.0.1", 0)
+      port = listener.local_port
+      moves = Tally.new
+      answered = Tally.new
+      stops = IyiThread.stops
+      group do |g|
+        g.spawn do
+          conns.times do |c|
+            client = listener.accept
+            fail("sockets: accept answered #{client}") unless client.is_a?(IyiSocket)
+            fd = client.fd
+            family = client.family
+            g.spawn_parallel do
+              socket = IyiSocket.new(fd, family)
+              kept = build(2000, c.to_i64 + 100_i64)
+              answers = Channel(Int32).new(rounds)
+              group do |inner|
+                inner.spawn do
+                  rounds.times do
+                    n = answers.receive
+                    fail("sockets: the writer's channel answered #{n}") unless n.is_a?(Int32)
+                    wrote = socket.write("#{n}.")
+                    fail("sockets: a write answered #{wrote}") unless wrote.is_a?(Int32)
+                  end
+                  0
+                end
+                rounds.times do |r|
+                  os = os_thread
+                  st = IyiScheduler.state.object_id
+                  got = socket.read(64)
+                  moves.add(1_i64) if moved?("sockets", os, st)
+                  fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == "q#{c}.#{r};"
+                  churn(3000)
+                  spin(200000_i64, r.to_u64)
+                  fail("sockets: connection #{c}'s list was not whole after request #{r}") unless whole?(kept, 2000, c.to_i64 + 100_i64)
+                  answered.add(1_i64)
+                  answers.send(r)
+                end
+              end
+              socket.close
+              0
+            end
+          end
+          0
+        end
+        clients = [] of IyiSocket
+        conns.times do
+          c = IyiSocket.connect("127.0.0.1", port, 5000)
+          fail("sockets: connect answered #{c}") unless c.is_a?(IyiSocket)
+          clients << c
+        end
+        rounds.times do |r|
+          clients.each_with_index do |client, c|
+            wrote = client.write("q#{c}.#{r};")
+            fail("sockets: a client's write answered #{wrote}") unless wrote.is_a?(Int32)
+          end
+          clients.each do |client|
+            got = client.read(16)
+            fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == "#{r}."
+          end
+        end
+        clients.each(&.close)
+      end
+      listener.close
+      fail("sockets: #{answered.count} of #{conns * rounds} requests answered") unless answered.count == (conns * rounds).to_i64
+      if IyiWorkers.count > 1 && moves.count == 0_i64
+        fail("sockets: none of #{conns * rounds} reads parked on a socket resumed on another worker")
+      end
+      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moves.count} reads resumed on another worker, through #{IyiThread.stops - stops} stops"
+    end
+  end
+
+  # ── cancel ───────────────────────────────────────────────────────────
+  # Tasks that moved first, then parked - on a socket nobody writes, in a
+  # sleep, on a channel nobody sends on - are cancelled by a sibling's
+  # failure, from whichever thread it fails on: each answers `Cancelled`.
+  def cancel(watch : Int32) : Nil
+    watched("cancel", watch) do
+      kinds = 3
+      per = 8
+      listener = IyiSocket.listen("127.0.0.1", 0)
+      port = listener.local_port
+      ends = [] of IyiSocket
+      fds = [] of Int32
+      families = [] of Int32
+      per.times do
+        p = pair(listener, port)
+        ends << p[0]
+        ends << p[1]
+        fds << p[1].fd
+        families << p[1].family
+      end
+      go = Channel(Int32).new
+      never = Channel(Int32).new
+      parked = Tally.new
+      cancelled = Tally.new
+      moves = Tally.new
+      began = 0_i64
+      group do |g|
+        (kinds * per).times do |i|
+          kind = i % kinds
+          fd = fds[i // kinds]
+          family = families[i // kinds]
+          g.spawn_parallel do
+            os = os_thread
+            st = IyiScheduler.state.object_id
+            go.receive
+            moves.add(1_i64) if moved?("cancel", os, st)
+            parked.add(1_i64)
+            outcome = if kind == 0
+                        socket = IyiSocket.new(fd, family)
+                        socket.read(16)
+                      elsif kind == 1
+                        sleep(20000)
+                      else
+                        never.receive
+                      end
+            cancelled.add(1_i64) if outcome.is_a?(Cancelled)
+            0
+          end
+        end
+        (kinds * per).times { go.send(1) }
+        while parked.count < (kinds * per).to_i64
+          sleep(1)
+        end
+        sleep(20)
+        began = __iyi_monotonic_ns
+        g.spawn_parallel { Boom.new }
+      end
+      took = elapsed_ms(began)
+      ends.each(&.close)
+      listener.close
+      fail("cancel: #{cancelled.count} of #{kinds * per} parked tasks answered Cancelled") unless cancelled.count == (kinds * per).to_i64
+      fail("cancel: a failure took #{took} ms to cancel tasks parked on other workers") if took >= 3000
+      puts "cancel: #{kinds * per} tasks, #{moves.count} of them moved before they parked on a socket, a sleep or a channel, all cancelled in #{took} ms"
+    end
+  end
+
+  # ── closes ───────────────────────────────────────────────────────────
+  # A socket closed by a task of the same parallel task on another worker
+  # wakes the read parked on it there: the close is the reader's poller's
+  # news, posted to its thread (`IyiScheduler.wake_closed`).
+  def closes(watch : Int32) : Nil
+    watched("closes", watch) do
+      units = 16
+      listener = IyiSocket.listen("127.0.0.1", 0)
+      port = listener.local_port
+      ends = [] of IyiSocket
+      fds = [] of Int32
+      families = [] of Int32
+      units.times do
+        p = pair(listener, port)
+        ends << p[0]
+        fds << p[1].fd
+        families << p[1].family
+      end
+      go = Channel(Int32).new
+      waiting = Tally.new
+      woken = Tally.new
+      crossed = Tally.new
+      group do |g|
+        units.times do |u|
+          fd = fds[u]
+          family = families[u]
+          g.spawn_parallel do
+            socket = IyiSocket.new(fd, family)
+            reader_on = 0_u64
+            group do |inner|
+              inner.spawn do
+                reader_on = os_thread
+                waiting.add(1_i64)
+                got = socket.read(16)
+                woken.add(1_i64) if got.is_a?(Cancelled)
+                0
+              end
+              inner.spawn do
+                go.receive
+                crossed.add(1_i64) if os_thread != reader_on
+                socket.close
+                0
+              end
+            end
+            0
+          end
+        end
+        while waiting.count < units.to_i64
+          sleep(1)
+        end
+        sleep(20)
+        units.times { go.send(1) }
+      end
+      ends.each(&.close)
+      listener.close
+      fail("closes: #{woken.count} of #{units} reads woke when a sibling closed their socket") unless woken.count == units.to_i64
+      if IyiWorkers.count > 1 && crossed.count == 0_i64
+        fail("closes: no socket was closed on another worker than the one its reader parked on")
+      end
+      puts "closes: #{units} reads woken by a sibling's close, #{crossed.count} of the closes made on another worker"
+    end
+  end
+
+  # ── deep ─────────────────────────────────────────────────────────────
+  # After every move, frames 120 KiB deep on the fiber's stack: on
+  # Windows the pages under the committed top are committed by the
+  # kernel as the probes reach the guard page, against the stack bounds
+  # in the TEB of the thread now running the fiber.
+  def deep_step(watch : Int32) : Nil
+    watched("deep", watch) do
+      tasks = 16
+      rounds = 10
+      feed = Channel(Int32).new
+      moves = Tally.new
+      group do |g|
+        tasks.times do |t|
+          g.spawn_parallel do
+            rounds.times do |r|
+              os = os_thread
+              st = IyiScheduler.state.object_id
+              feed.receive
+              moves.add(1_i64) if moved?("deep", os, st)
+              deep(200)
+              churn(2000)
+            end
+            0
+          end
+        end
+        (tasks * rounds).times { feed.send(1) }
+      end
+      if IyiWorkers.count > 1 && moves.count == 0_i64
+        fail("deep: no task resumed on another worker before its deep frames")
+      end
+      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moves.count} of them after a move"
+    end
+  end
+
+  # ── balance ──────────────────────────────────────────────────────────
+  # The parked shape (#145): every task starts, and parks on a channel,
+  # on one worker - the others are held by tasks that spin until all have
+  # parked - and then each computes 25 ms. Woken from the main thread, a
+  # task goes to the pool's shared queue; woken by a task on a worker, to
+  # that worker's ring, and only a steal spreads it. Without moving, every
+  # task resumes where it parked, on the one worker, at the workers' count
+  # times the ideal. Held to twice the ideal, the work being each task's
+  # own measured time.
+  def balance_round(label : String, from_worker : Bool, per_ms : Int64) : Nil
+    workers = IyiWorkers.count
+    tasks = workers * 6
+    gate = Channel(Int32).new
+    arrived = Tally.new
+    holding = Tally.new
+    work = Tally.new
+    grabs = IyiWorkers.grabs
+    began = 0_i64
+    group do |g|
+      (workers - 1).times do
+        g.spawn_parallel do
+          holding.add(1_i64)
+          while arrived.count < tasks.to_i64
+            IyiThread.spin_pause
+          end
+          0
+        end
+      end
+      while holding.count < (workers - 1).to_i64
+        sleep(1)
+      end
+      tasks.times do |i|
+        g.spawn_parallel do
+          arrived.add(1_i64)
+          gate.receive
+          t = __iyi_monotonic_ns
+          x = spin(25_i64 * per_ms, (i + 1).to_u64)
+          took = __iyi_monotonic_ns - t
+          work.add(x == 0_u64 ? took + 1_i64 : took)
+          0
+        end
+      end
+      while arrived.count < tasks.to_i64
+        sleep(1)
+      end
+      sleep(5)
+      began = __iyi_monotonic_ns
+      if from_worker
+        g.spawn_parallel do
+          tasks.times { gate.send(1) }
+          0
+        end
+      else
+        tasks.times { gate.send(1) }
+      end
+    end
+    wall = elapsed_ms(began)
+    ideal = work.count // 1000000_i64 // workers.to_i64
+    ideal = 1_i64 if ideal < 1_i64
+    ratio = (wall * 100_i64 // ideal).to_f / 100.0
+    took = IyiWorkers.grabs - grabs
+    if wall > ideal * 2_i64
+      fail("balance: #{tasks} tasks that parked on one worker, woken #{label}, took #{wall} ms against #{ideal} ms of work per worker (#{ratio}x)")
+    end
+    puts "balance: #{tasks} tasks parked on one worker, woken #{label}: #{wall} ms against an ideal #{ideal} ms (#{ratio}x), #{took} steals from a ring"
+  end
+
+  def balance(watch : Int32) : Nil
+    watched("balance", watch) do
+      # The walk's end is kept, or an optimised build drops the walk and the
+      # clock reads no time at all: a release build calibrated so spent
+      # 1,470 ms on each task's 25, and 17.5 s on the step.
+      t = __iyi_monotonic_ns
+      x = spin(50_000_000_i64, 3_u64)
+      ms = elapsed_ms(t)
+      ms = ms + 1_i64 if x == 0_u64
+      per_ms = 50_000_000_i64 // (ms > 0_i64 ? ms : 1_i64)
+      balance_round("from the main thread", false, per_ms)
+      balance_round("from a worker", true, per_ms)
+    end
+  end
+
+  # ── join ─────────────────────────────────────────────────────────────
+  # A task joining a thread parks: the task it spawned, asleep on the same
+  # worker, wakes on time while the thread runs 400 ms. A join held in the
+  # kernel held the worker, its sleepers and its unit with it.
+  def join(watch : Int32) : Nil
+    watched("join", watch) do
+      answer = 0_i64
+      group do |g|
+        task = g.spawn_parallel do
+          started = __iyi_monotonic_ns
+          child_at = -1_i64
+          group do |inner|
+            inner.spawn do
+              sleep(20)
+              child_at = elapsed_ms(started)
+              0
+            end
+            thread = IyiThread.start do
+              began = __iyi_monotonic_ns
+              while __iyi_monotonic_ns - began < 400_000_000_i64
+                IyiThread.spin_pause
+              end
+            end
+            thread.join
+          end
+          child_at
+        end
+        got = task.value
+        answer = got.is_a?(Int64) ? got : -2_i64
+      end
+      fail("join: a task's child asleep 20 ms woke #{answer} ms in, behind the 400 ms thread its parent joined") if answer < 0_i64 || answer >= 300_i64
+      puts "join: a task joining a 400 ms thread left its worker to its child, which woke #{answer} ms in"
+    end
+  end
+
+  STEPS = ["channels", "sockets", "cancel", "closes", "deep", "balance", "join"]
+
+  watch = 60000
+  chosen = [] of String
+  Program.args.each do |argument|
+    if argument.starts_with?("--watch=")
+      watch = argument[8, argument.size - 8].to_i
+    else
+      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      chosen << argument
+    end
+  end
+  chosen = STEPS if chosen.empty?
+  IyiWorkers.count = 4
+  chosen.each do |name|
+    case name
+    when "channels" then channels(watch)
+    when "sockets"  then sockets(watch)
+    when "cancel"   then cancel(watch)
+    when "closes"   then closes(watch)
+    when "deep"     then deep_step(watch)
+    when "balance"  then balance(watch)
+    when "join"     then join(watch)
+    end
+  end
+  puts "parallel migration: every property held on #{IyiWorkers.count} workers"
+{% else %}
+  puts "parallel migration: no pool on this target, nothing to hold"
+{% end %}

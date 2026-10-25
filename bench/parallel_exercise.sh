@@ -3,41 +3,53 @@
 #
 #     bash bench/parallel_exercise.sh
 #
-# Seven steps; the last three are failure proofs, because a gate that
+# Eight steps; the last three are failure proofs, because a gate that
 # cannot fail is not a gate:
 #
 #   1. The exercise holds every property, plain and --release: parallel
-#      tasks start on the pool and on more than one worker, each stays on
-#      the thread that started it, a thousand run exactly once, an atomic
-#      count loses nothing, channels carry values across threads once each
-#      and in each sender's order, `take_now` and `put_now` from every
-#      worker at once lose and repeat nothing, a cancel reaches a task
-#      asleep, parked on a channel, or still waiting in the pool, a panic
-#      stops at the task's boundary, idle workers steal, collections keep
-#      the workers' lists, and the typed group answers.
-#   2. The binary keeps the dependency floor the concurrency gate holds,
+#      tasks start on the pool and on more than one worker, never on the
+#      spawning thread, a thousand run exactly once, an atomic count loses
+#      nothing, channels carry values across threads once each and in each
+#      sender's order, `take_now` and `put_now` from every worker at once
+#      lose and repeat nothing, a cancel reaches a task asleep, parked on a
+#      channel, or still waiting in the pool, a panic stops at the task's
+#      boundary, idle workers steal, collections keep the workers' lists,
+#      and the typed group answers.
+#   2. bench/parallel_migrate.iyi holds what a task keeps when it resumes
+#      on another worker, plain and --release: its stack's lists through
+#      collections, thread-locals of the thread it is on, its socket's
+#      bytes, a cancel and a sibling's close that find it, frames 120 KiB
+#      deep; tasks parked on one worker finish in under twice the ideal,
+#      woken from the main thread and from a worker; and a task joining a
+#      thread leaves its worker to its child.
+#   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
-#   3. The speedup, measured: CPU-bound tasks on one worker and on several,
+#   4. The speedup, measured: CPU-bound tasks on one worker and on several,
 #      release build, best of three, and the ratio held to a floor of 0.6
 #      per worker - a pool that is parallel only in name cannot pass it.
 #      The table for 1, 2, 4 and 8 workers (as far as the cores go) is
 #      printed for the record.
-#   4. A deadlock across threads - a parallel task waiting on a channel
+#   5. A deadlock across threads - a parallel task waiting on a channel
 #      nobody sends on - is named, not hung.
-#   5. `Share` gates the parallel block at compile time: a captured
+#   6. `Share` gates the parallel block at compile time: a captured
 #      `Array`, a `Channel` of arrays, a local assigned after the spawn, and
 #      a loop's local are refused, each by name.
-#   6. Failure proofs against broken copies of the runtime, each caught at
+#   7. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: a cross-thread wake that does not ring (a lost
 #      wakeup), a steal that leaves the task in its victim's queue (a task
 #      handed out twice), a cancel that is never delivered to the thread a
 #      sleeping task is on, a cancel that skips tasks still waiting in the
 #      pool (a cancelled task run as if it were not), and `take_now` and
-#      `put_now` without the scheduler's lock; and the race step's add made
+#      `put_now` without the scheduler's lock; the race step's add made
 #      a plain load and store, which loses adds only when tasks really run
-#      at the same instant.
-#   7. Failure proof: the pool held to one worker whatever it was asked
-#      for, and step 3's floor refuses the ratio that comes out.
+#      at the same instant; and for the moves of step 2 - a thread-local
+#      read as it was before a park, a collector that skips a fiber on its
+#      way between workers, an io wait a cancel cannot find, a close posted
+#      to nobody, a pool that never steals a started task, tasks woken
+#      back onto the worker they parked on as they were before tasks
+#      moved, and a join held in the kernel.
+#   8. Failure proof: the pool held to one worker whatever it was asked
+#      for, and step 4's floor refuses the ratio that comes out.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -91,6 +103,26 @@ for build in plain release; do
   grep -v '^iyi: panic: parallel boom' "answers-$build.txt" | sed 's/^/  /'
 done
 
+# ── 2. What a move keeps, twice ───────────────────────────────────────────
+# Its balance step is timed against four workers' ideal, which a machine
+# with fewer cores than that cannot keep; there the other steps run.
+MIGRATE_STEPS="channels sockets cancel closes deep balance join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep join"
+for build in plain release; do
+  step "what a task keeps when it resumes on another worker, $build build"
+  flag=""
+  [ "$build" = release ] && flag="--release"
+  if ! "$IYI" build $flag "$REPO/bench/parallel_migrate.iyi" -o "migrate-$build" > "build-migrate-$build.log" 2>&1; then
+    echo "build failed:"; tail -20 "build-migrate-$build.log"; exit 1
+  fi
+  # shellcheck disable=SC2086 # the steps are words
+  timeout -k 5 600 "./migrate-$build" $MIGRATE_STEPS > "migrated-$build.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' "migrated-$build.txt"; then
+    echo "the migration exercise failed (exit $code):"; cat "migrated-$build.txt"; exit 1
+  fi
+  sed 's/^/  /' "migrated-$build.txt"
+done
 # ── 2. The floor ──────────────────────────────────────────────────────────
 # What the pool costs each platform, by name. Its workers are the
 # runtime's own threads, so it pays what a thread pays and nothing else:
@@ -271,17 +303,19 @@ group do |g|
   end
 end'
 
-# ── 6. Failure proofs: broken copies of the runtime ──────────────────────
-# Each a copy of src/iyi with one line of concurrency.iyi changed, built
-# against through IYI_PATH; nothing in the tree is touched.
-broken() { # name, awk program
+# ── 7. Failure proofs: broken copies of the runtime ──────────────────────
+# Each a copy of src/iyi with one file changed - concurrency.iyi unless
+# another is named - built against through IYI_PATH, of the program named
+# or of parallel_exercise.iyi; nothing in the tree is touched.
+broken() { # name, awk program[, file in src/iyi[, program in bench]]
+  local file="${3:-concurrency.iyi}" program="${4:-parallel_exercise}"
   mkdir -p "$1/iyi"
   cp "$REPO"/src/iyi/*.iyi "$1/iyi/"
-  awk "$2" "$REPO/src/iyi/concurrency.iyi" > "$1/iyi/concurrency.iyi"
-  if cmp -s "$1/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
+  awk "$2" "$REPO/src/iyi/$file" > "$1/iyi/$file"
+  if cmp -s "$1/iyi/$file" "$REPO/src/iyi/$file"; then
     echo "the awk for $1 found nothing to change"; exit 1
   fi
-  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/parallel_exercise.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/$program.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
     echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
   fi
 }
@@ -297,7 +331,7 @@ caught() { # name, expected FAIL text, step arguments...
 }
 
 step "failure proof: a cross-thread wake that does not ring is a lost wakeup"
-broken lostwake '/def self.ready\(fiber/ { inready = 1 } inready && /^    ring\(home\)$/ { print "    # the doorbell, not rung"; inready = 0; next } { print }'
+broken lostwake '/def self.send_home\(home/ { inhome = 1 } inhome && /^    ring\(home\)$/ { print "    # the doorbell, not rung"; inhome = 0; next } { print }'
 caught lostwake 'placement: still waiting after 5000 ms' placement --watch=5000
 
 step "failure proof: a steal that leaves the task in its victim's queue hands it out twice"
@@ -350,7 +384,59 @@ else
   echo "  exits 1 at \"$(grep -m1 'increments lost' plainadd.txt | sed 's/^FAIL: //')\""
 fi
 
-# ── 7. Failure proof: one worker, whatever was asked for ──────────────────
+# What a move keeps, broken one way each, and the migration exercise's
+# step that names it. A move needs two workers on two cores.
+if [ "$CORES" -lt 2 ]; then
+  step "failure proofs for tasks that move"
+  echo "  one core here: a task resumes where it parked, so the proofs are not run"
+else
+  step "failure proof: a thread-local read before a park and kept after it names the thread the task left"
+  if ! "$IYI" build --release -Dparallel_stale_tls "$REPO/bench/parallel_migrate.iyi" -o staletls-run > build-staletls.log 2>&1; then
+    echo "the stale thread-local build failed:"; tail -20 build-staletls.log; exit 1
+  fi
+  caught staletls 'a thread-local read after a park named another thread' channels
+
+  step "failure proof: a collector that skips a fiber on its way between workers frees the lists on its stack"
+  broken intransit '/^            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0$/ { print "            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Runnable && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0"; next } { print }' prelude.iyi parallel_migrate
+  caught intransit 'list was not whole' channels
+
+  step "failure proof: an io wait that does not say whose poller holds it is never cancelled"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      broken unlistedio '/def self.park_overlapped_current\(/ { inpark = 1 } inpark && /^    listed\(fiber, waiting_out\)$/ { inpark = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+    *)
+      broken unlistedio '/def self.wait_posix\(fd/ { inwait = 1 } inwait && /^    listed\(fiber\)$/ { inwait = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+  esac
+  caught unlistedio 'cancel: still waiting after 5000 ms' cancel --watch=5000
+
+  step "failure proof: a close posted to no thread leaves a read on another worker parked"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      echo "  a close on Windows ends the posted read, whose completion its own port takes: there is nothing to post" ;;
+    *)
+      broken noclose '/def self.wake_closed\(fd/ { inclose = 1 } inclose && /^      return unless @@shared$/ { print "      return"; inclose = 0; next } { print }' concurrency.iyi parallel_migrate
+      caught noclose 'closes: still waiting after 5000 ms' closes --watch=5000 ;;
+  esac
+
+  step "failure proof: a join held in the kernel holds its worker, and the sleepers on it"
+  broken kerneljoin '/^      while @ended.get == 0_u64$/ { skip = 3 } skip > 0 { skip = skip - 1; next } { print }' thread.iyi parallel_migrate
+  caught kerneljoin 'join: a task' join
+
+  if [ "$CORES" -lt 4 ]; then
+    step "failure proofs for stealing"
+    echo "  $CORES cores here: the balance step is not timed, so there is nothing to fail"
+  else
+    step "failure proof: a pool that never steals a started task leaves tasks woken on one worker there"
+    broken nosteal '/^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
+    caught nosteal 'woken from a worker, took' balance
+
+    step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
+    broken pinned '/^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; next } /^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
+    caught pinned 'woken from the main thread, took' balance
+  fi
+fi
+
+# ── 8. Failure proof: one worker, whatever was asked for ──────────────────
 step "failure proof: a pool held to one worker fails the speedup floor"
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: the floor is not held, so there is nothing to fail"

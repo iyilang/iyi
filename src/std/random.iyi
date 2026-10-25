@@ -438,6 +438,7 @@ class Random::Secure < Random
   # *count* bytes at *buffer*, every one from the platform's entropy source,
   # or a panic that says why there are none: a byte that only looks random
   # is never the answer.
+  @[Effect(:entropy)]
   def self.fill(buffer : Pointer(UInt8), count : Int32) : Nil
     raise "Random::Secure: a negative count of bytes: #{count}" if count < 0
     return if count == 0

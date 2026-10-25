@@ -74,7 +74,6 @@ SECONDS = {"login": 15, "check_version": 5, "order": 5}
 RUNS = 3
 WORKERS = (1, 2, 4, 8, 12)
 COST = 10
-TICK = os.sysconf("SC_CLK_TCK")
 
 USER = "ada@example.com"
 PASSWORD = "correct horse battery staple"
@@ -216,8 +215,12 @@ def wrk(server: Server, url: str, script: pathlib.Path, seconds: float) -> dict:
     _, status, usage = os.wait4(process.pid, 0)
     process.returncode = os.waitstatus_to_exitcode(status)
     wall = time.monotonic() - started
-    server_cores = (server.ticks() - before_server) / TICK / wall
-    machine_cores = (machine_ticks() - before_machine) / TICK / wall
+    # /proc's clock ticks a second, read here rather than at import:
+    # bench/measured_numbers.py loads this file on Windows too, which has
+    # no `os.sysconf`.
+    tick = os.sysconf("SC_CLK_TCK")
+    server_cores = (server.ticks() - before_server) / tick / wall
+    machine_cores = (machine_ticks() - before_machine) / tick / wall
     wrk_cores = (usage.ru_utime + usage.ru_stime) / wall
     rate = re.search(r"Requests/sec:\s+([\d.]+)", output)
     if process.returncode != 0 or rate is None:

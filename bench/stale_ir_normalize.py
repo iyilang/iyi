@@ -217,8 +217,8 @@ def split_modules_and_functions(ir_text: str) -> tuple[list[str], list[FunctionD
 
 def strip_debug_and_comments(line: str) -> str:
     """Strips debug metadata and end-of-line comments from an IR line."""
-    # Scratch mutation: disable stripping debug metadata
-    pass
+    line = re.sub(r",\s*!dbg\s*!\d+", "", line)
+    line = re.sub(r"!dbg\s*!\d+", "", line)
     in_quote = False
     res: list[str] = []
     for ch in line:

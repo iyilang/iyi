@@ -54,18 +54,20 @@ describe "Iyi::Stale S3f: CallPathFp, typed encoder, roots, explain" do
   it "reached def edit changes call path fingerprint" do
     c1 = <<-IYI
     module spec/test
-    def reached
-      42
+    def reached(x : Int32) : Int32
+      a = 1
+      a + x + 40
     end
-    puts reached
+    puts reached(1)
     IYI
 
     c2 = <<-IYI
     module spec/test
-    def reached
-      43
+    def reached(x : Int32) : Int32
+      a = 2
+      a + x + 40
     end
-    puts reached
+    puts reached(1)
     IYI
 
     fp1, _ = compute_fp(c1)

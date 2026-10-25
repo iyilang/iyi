@@ -86,6 +86,7 @@ pub struct System
 
   # The name of the machine, as the kernel holds it: `"build-07"`, or
   # `"host.example.org"` where it was set to a fully qualified name.
+  @[Effect(:host)]
   def self.hostname : String
     {% if flag?(:linux) %}
       # struct utsname is six fields of 65 bytes, `nodename` the second;
@@ -124,6 +125,7 @@ pub struct System
 
   # How many CPUs this process may run on: never more than the machine
   # has, fewer when the process is held to some of them.
+  @[Effect(:process)]
   def self.cpu_count : Int32
     {% if flag?(:linux) %}
       count = affinity_count
@@ -155,6 +157,7 @@ pub struct System
 
   # The size of a memory page in bytes: 4096 on most machines, 16384 on
   # Apple silicon and on some aarch64 Linux kernels, 65536 on others.
+  @[Effect(:host)]
   def self.page_size : Int32
     cached = @@page_size
     return cached if cached > 0
@@ -195,6 +198,7 @@ pub struct System
     # AT_PAGESZ, the auxiliary vector's tag for the page size (elf.h).
     AT_PAGESZ = 6_u64
 
+    @[Effect(:host)]
     private def self.sys(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -218,6 +222,7 @@ pub struct System
     # it fits; a kernel built for more CPUs than 1,024 is real (SGI UV,
     # NR_CPUS=8192 in distribution configs). On success the answer is the
     # bytes the kernel wrote, and only those are counted.
+    @[Effect(:process)]
     private def self.affinity_count : Int32
       bytes = 128
       while bytes <= 1048576
@@ -314,6 +319,7 @@ pub struct System
     end
   {% elsif flag?(:darwin) %}
     # A 32-bit integer sysctl by name, or 0 when the name is not there.
+    @[Effect(:process)]
     private def self.sysctl_int(name : String) : Int32
       value = 0_i32
       size = 4_u64

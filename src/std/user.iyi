@@ -140,6 +140,7 @@ pub struct User
   # The user this program runs as: the real user id's account. Panics
   # only when the system has no account for that id *and* `$USER` does
   # not name one.
+  @[Effect(:host)]
   def self.current : User
     {% if flag?(:win32) %}
       UserFiles.windows_current
@@ -495,6 +496,7 @@ struct UserFiles
     # The account called *name*, or with uid *uid* when *name* is nil.
     # Any answer but a record - not found, or an error of the directory -
     # is nil.
+    @[Effect(:host)]
     def self.darwin_user(name : String?, uid : UInt32) : User?
       size = 4096
       while size <= 1048576
@@ -520,6 +522,7 @@ struct UserFiles
     end
 
     # The group called *name*, or with gid *gid* when *name* is nil.
+    @[Effect(:host)]
     def self.darwin_group(name : String?, gid : UInt32) : Group?
       size = 4096
       while size <= 1048576
@@ -550,6 +553,7 @@ struct UserFiles
 
     # `getgrouplist` for *name* with primary group *base*: -1 and the count
     # it needs when the array is too small, which is grown and asked again.
+    @[Effect(:host)]
     def self.darwin_group_ids(name : String, base : UInt32) : Array(String)
       ids = [] of String
       # darwin's getgrouplist takes the gid as an `int`: the same 32 bits
@@ -582,6 +586,7 @@ struct UserFiles
     TOKEN_USER          =     1
     TOKEN_PRIMARY_GROUP =     5
 
+    @[Effect(:host)]
     def self.windows_current : User
       size = 257_u32
       wide = Pointer(UInt16).malloc(size.to_u64)
@@ -604,6 +609,7 @@ struct UserFiles
     # The SID a token's TOKEN_USER or TOKEN_PRIMARY_GROUP holds, as text.
     # Both structures start with the SID's pointer. Asked with no buffer
     # first, for the size.
+    @[Effect(:host)]
     def self.token_sid(token : Void*, klass : Int32) : String
       needed = 0_u32
       LibAdvapi32.GetTokenInformation(token, klass, Pointer(Void).new(0_u64), 0_u32, pointerof(needed))

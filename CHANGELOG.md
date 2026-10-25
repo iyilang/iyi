@@ -73,6 +73,25 @@
   `bench/parallel_preempt.iyi` holds it in `bench/parallel_exercise.sh`,
   with broken copies caught by name.
 
+- **aarch64 Linux reads a thread-local afresh after a loop's back-edge
+  check.** Its thread pointer was `llvm.read_register`, which LLVM models
+  as only reading memory, and a release build hoisted it out of a loop
+  that stores nothing: a parallel task reading `IyiThread.current_line`
+  beside a xorshift walk loaded the line once before the loop, and a
+  check that moved the task left it reading the line of the thread it
+  had left. The thread pointer is now a volatile `mrs` marked as writing
+  memory nothing else names, read in every turn of the loop and after it
+  (llvm-objdump of release cross-builds). x86-64 Linux, darwin and Windows
+  already read at every access, in the loop and after a park, and their
+  objects are unchanged. Under qemu-user, 20,000,000 allocations, release,
+  best of five, three interleaved runs: 596, 617 and 601 ms before, 582,
+  937 and 578 after. `bench/parallel_migrate.iyi`'s new `loops` step reads
+  the line before, in and after loops whose checks moved the task,
+  against the kernel's thread. The gate runs it on Linux, darwin and
+  Windows and CI on aarch64 Linux under emulation; built for aarch64 by
+  the compiler before this change it failed under qemu-user in 2 runs of
+  2, and a copy reading the line from before the loop fails it by name.
+
 ## 0.19.1 — 2026-10-25
 
 **A collector hang and a handful of TLS and PKI edges fixed, a build

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 24,160 lines, of which 4,642 are the library held to the 4,650 ceiling (6,655 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,332 lines, none of it written in iyi |
+| compiler | 130,371 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,7 +1028,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,332 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 130,371 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 24,160-line own prelude + 124,766 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -3776,13 +3776,14 @@ preemption word at its back-edge, and a monitor raises the word.
   load in the loop, and LLVM vectorised none - a sum of 1,000,000 `Int64`s
   500 times went from 48 to 126 ms. LLVM keeps the property on the vector
   body and the scalar remainder alike. The check is `cmpq $0, %fs:off` and
-  a branch on x86-64 Linux, `tpidr_el0` plus the offset on aarch64 Linux,
-  and the thread-local accessor on darwin and Windows, whose cost is not
-  measured. Against `@[NoPreempt]` twins of themselves (release, best of
-  seven, interleaved, load 5 to 6): a xorshift walk 0.999x to 1.001x, the
-  vectorised sum 0.97x to 1.055x, the same through `each` 1.012x to 1.04x,
-  a table CRC 0.992x to 1.004x - the noise of this machine, which is why
-  the gate prints them rather than bounding them.
+  a branch on x86-64 Linux, a volatile `mrs` of `tpidr_el0` plus the
+  offset on aarch64 Linux, and the thread-local accessor on darwin and
+  Windows, whose cost is not measured. Against `@[NoPreempt]` twins of
+  themselves (release, best of seven, interleaved, load 5 to 6): a xorshift
+  walk 0.999x to 1.001x, the vectorised sum 0.97x to 1.055x, the same
+  through `each` 1.012x to 1.04x, a table CRC 0.992x to 1.004x - the noise
+  of this machine, which is why the gate prints them rather than bounding
+  them.
 - *Who raises it.* The pool's monitor, a helper thread the collector does
   not stop (Go's `sysmon`), looks every 5 ms and raises the word of a
   worker whose switch count has not moved since its last look: one task
@@ -3815,13 +3816,35 @@ ms later. `bench/parallel_preempt.iyi` holds each of these in
 `@[NoPreempt]` loop, a monitor that never raises the word, a slow half that
 does not poll, and a preempted task that gives its unit's token away.
 
+A thread-local read is not shared across the check. The check goes in
+after LLVM has optimised the loop, so a read LLVM took as the same all
+through a function - hoisted out of a loop that stores nothing, or shared
+with the read before the loop - would name the thread a preempted task
+left. Read with llvm-objdump from release cross-builds of a task that reads
+`IyiThread.current_line` in a loop beside a xorshift walk: aarch64 Linux,
+whose thread pointer was `llvm.read_register`, which LLVM models as only
+reading memory, loaded the line once before the loop. Its thread pointer
+is now a volatile `mrs` that LLVM is told writes memory nothing else names,
+read in every turn and again after the loop. x86-64 Linux's volatile load
+of `%fs:0`, and the accessor darwin and Windows call (which LLVM infers to
+write only its argument), were already at every read, in the loop and after
+a channel receive, and their objects did not change. A loop that allocates
+calls the allocator, which reads its cache's thread-local at each call on
+all four. The aarch64 allocation path under qemu-user, release, 20,000,000
+allocations, best of five, three interleaved runs (load 2.4 to 5): 596, 617
+and 601 ms before, 582, 937 and 578 after; in a parallel task, whose loop
+has the check, 851, 879 and 855 before, 886, 856 and 857 after.
+`bench/parallel_migrate.iyi`'s `loops` step holds it wherever the gate
+runs, darwin and Windows included, and on aarch64 Linux under emulation
+in CI: 16 tasks on 4 workers read the line before, in and after loops whose
+checks moved them, against the kernel's thread read by asm. Built by the
+compiler before the volatile `mrs`, that step failed for aarch64 under
+qemu-user in 2 runs of 2; a copy that reads the line before the loop in
+its place (`-Dparallel_hoisted_tls`) fails it by name.
+
 **Not built, and said so.** A loop in the prelude's own code - a long
 `sort`, a large copy - is not preempted, nor is recursion with no loop.
-A thread-local read LLVM hoisted out of a loop that had no call in it on
-aarch64 (`llvm.read_register`) or darwin and Windows (the accessor) could
-be read stale after a preemption in that loop moves the task: x86-64's
-volatile read of `%fs:0` cannot be hoisted; the others are typechecked
-only. wasm32 has no runtime (III.4.12) and no pool, and a build under
+wasm32 has no runtime (III.4.12) and no pool, and a build under
 `-Dgc_none` or `-Dgc_boehm`, which has no `IyiThread`, refuses
 `spawn_parallel` at compile time rather than run it on one thread.
 

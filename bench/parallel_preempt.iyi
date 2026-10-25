@@ -26,13 +26,13 @@
 #           worker busy with a slow one is answered within 80 ms, where it
 #           waited the 100 ms out before.
 #   period  the monitor's period, its looks over a task computing half a
-#           second on a pool of one, held to 4 to 8 ms; and the quantum,
+#           second on a pool of one, held to 4 to 9 ms; and the quantum,
 #           two such tasks taking turns on the one worker, held to 20 ms. A
-#           Windows monitor waiting on the system timer's 15.6 ms tick fails
-#           both.
+#           Windows monitor waiting on the system timer's tick (11.2 to
+#           12.3 ms apart on a GitHub runner) fails it.
 #   tight   what the check costs a tight loop: four loops timed against
 #           `@[NoPreempt]` twins of themselves, interleaved, best of seven,
-#           printed as ratios - a measurement, held to no bound here.
+#           each ratio held to 2x.
 #
 # With no arguments it runs slice, unit and period on a pool of one and
 # prints only that every property held: the slice step's short task must
@@ -427,11 +427,13 @@ import std/socket::{IyiSocket, SocketError}
   # is a tick, PREEMPT_TICK_MS apart. Then two such tasks on the one
   # worker, which take turns: the time they took over the turns they took
   # is the quantum, two ticks once each look after a turn sees the count
-  # move and the next sees it stand. A wait that ends on Windows' system
-  # timer rather than on its own (15.6 ms there) is a period of about 15.6
-  # ms and a quantum of 31; one that ends at once spins the monitor.
+  # move and the next sees it stand. Linux, darwin and Windows looked every
+  # 5.1 to 6.3 ms and took turns of 10.2 to 12.3 ms on the machines
+  # measured (SPEC.md III.4.13); a Windows wait that ends on the system
+  # timer's tick looked every 11.2 to 12.3 ms, and a wait that ends at once
+  # would spin the monitor.
   PERIOD_FLOOR_US   =  4000_i64
-  PERIOD_BOUND_US   =  8000_i64
+  PERIOD_BOUND_US   =  9000_i64
   QUANTUM_BOUND_US  = 20000_i64
 
   def period(per_ms : Int64) : Nil
@@ -475,7 +477,16 @@ import std/socket::{IyiSocket, SocketError}
 
   # ── tight ────────────────────────────────────────────────────────────
   # Each loop and its `@[NoPreempt]` twin, alternately, seven times, inside
-  # a parallel task; the best of each, and their ratio.
+  # a parallel task; the best of each, and their ratio, held to
+  # TIGHT_BOUND thousandths. The check is a read or two and a branch per
+  # turn. On GitHub's x86-64 runners the vectorised sums run at one of two
+  # speeds, about 32 or 48 ms, and a checked one at the slower: 1.46 to
+  # 1.49x on Windows, and the same through `each` 1.51x on Linux, whose
+  # unchecked `sum` came in at the slower speed too, 1.001x. A check that
+  # calls the accessor at every turn - darwin and Windows had it - cost
+  # those sums 3.4 to 5.8 times their twins there. Twice is between.
+  TIGHT_BOUND = 2000_i64
+
   def tight : Nil
     group do |g|
       g.spawn_parallel do
@@ -507,6 +518,9 @@ import std/socket::{IyiSocket, SocketError}
             fail("tight: #{name} answered #{a} checked and #{b} unchecked") if a != b
           end
           ratio = (best * 1000_i64 // best_np).to_f / 1000.0
+          if best * 1000_i64 > best_np * TIGHT_BOUND
+            fail("tight: #{name}: #{best // 1000_i64} us checked against #{best_np // 1000_i64} us unchecked, #{ratio}x, past #{TIGHT_BOUND / 1000.0}x")
+          end
           say "tight: #{name}: #{best // 1000_i64} us checked, #{best_np // 1000_i64} us unchecked, #{ratio}x"
         end
         0

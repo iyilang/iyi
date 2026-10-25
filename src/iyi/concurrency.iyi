@@ -3991,13 +3991,15 @@ class IyiWorkers
   # check reads in every function's entry and then loads `%gs`-relative,
   # as Linux loads `%fs:off` (`PreemptChecks`). A thread-local there is
   # three loads deep - `gs:0x58`, the C runtime's index into that table,
-  # the word - and a vectorised sum checked that way took 1.63 to 1.64
-  # times its `@[NoPreempt]` twin on a GitHub Windows runner, against 3.4
-  # to 4.9 through the accessor call. The slot is a `TlsAlloc` index under
-  # 64, `TlsSlots` at 0x1480 in the TEB, Go's `tls_g` the same way; until
-  # the pool claims one (`claim_preempt_slot`), and if it gets none under
-  # 64, it is `ArbitraryUserPointer` at 0x28, Go's fallback too. Nothing
-  # but a worker's slot is ever raised, and the slow half clears only a
+  # the word - and on a GitHub Windows runner, best of seven against
+  # `@[NoPreempt]` twins, a vectorised sum and the same through `each`
+  # took 1.63 to 1.75 times as long checked that way, 1.46 to 1.49 with
+  # the slot, and 3.4 to 4.9 through the accessor call. The slot is a
+  # `TlsAlloc` index under 64, `TlsSlots` at 0x1480 in the TEB, Go's
+  # `tls_g` the same way; until the pool claims one
+  # (`claim_preempt_slot`), and if it gets none under 64, it is
+  # `ArbitraryUserPointer` at 0x28, Go's fallback too. Nothing but a
+  # worker's slot is ever raised, and the slow half clears only a
   # worker's.
   @[ThreadLocal]
   @@preempt : UInt64 = 0_u64
@@ -4651,13 +4653,16 @@ class IyiWorkers
         raise "the pool's monitor's semaphore could not be made" if semaphore.address == 0_u64
         @@monitor_handle = semaphore.address
         # The tick's own timer. A millisecond timeout ends on the system
-        # timer's tick, 15.6 ms unless something raised it, and the
-        # semaphore's 5 ms wait took that long: a quantum of 15.6 to 31 ms.
-        # A high-resolution waitable timer (0x2, the poller's
-        # `deadline_timer`) ends on time and leaves the machine's timer as
-        # it was, which `timeBeginPeriod(1)` would not. A Windows without
-        # the flag (before 10 1803) answers a null handle, and the
-        # semaphore's timeout stays. The due time is relative, in 100 ns.
+        # timer's tick: on a GitHub Windows runner the semaphore's 5 ms
+        # wait made the monitor's looks 11.2 to 12.3 ms apart, and a
+        # ticker beside a computing task woke up to 30 ms late. A
+        # high-resolution waitable timer (0x2, the poller's
+        # `deadline_timer`) ends on time - 5.15 to 5.27 ms a look there,
+        # turns of 10.3 to 10.5 ms, the ticker at most 10 ms late - and
+        # leaves the machine's timer as it was, which `timeBeginPeriod(1)`
+        # would not. A Windows without the flag (before 10 1803) answers a
+        # null handle, and the semaphore's timeout stays. The due time is
+        # relative, in 100 ns.
         timer = LibC.CreateWaitableTimerExW(Pointer(Void).new(0_u64),
           Pointer(UInt16).new(0_u64), 2_i32, 0x1F0003_i32)
         @@monitor_timer = timer.address

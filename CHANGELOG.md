@@ -106,6 +106,25 @@
   function the runtime reaches holds a check) hold it in
   `bench/parallel_exercise.sh`, with three broken copies caught by name.
 
+- **A large `Pointer.malloc` no longer holds a parallel task's worker.**
+  Codegen cleared every `Pointer.malloc` with a `memset` after the
+  allocator's call, the prelude's, which never checks; past 1 MiB the
+  block is a fresh mapping already zero, and that `memset` took every
+  page's first fault. A `Hash(Int32, Int32)` growing at 8,388,608 entries
+  takes three such blocks, 256 MB together, and in a plain build a short
+  task spawned 20 ms into it waited 36 to 80 ms on Linux and 79 to 198 on
+  darwin, past the gate's 100 there; the collection the allocation
+  triggers paused 1.4 to 3.6 ms of it. Under the arena both allocation
+  entries now hand the block back zeroed - a reused chunk cleared by the
+  allocator, a carved chunk or a large mapping left as the kernel zeroed
+  it - and codegen clears nothing after them, so the pages fault in the
+  growth's own loops, which check: 1 to 9 ms on Linux and 1 to 12 on
+  darwin; the release growth 16 to 18 ms before and 0 to 9 after on Linux.
+  Hash inserts, a sort, a JSON parse and the other costs, release, did
+  not move. `bench/arena_exercise.iyi` checks a dirty chunk comes back
+  zeroed through the atomic entry, which a copy that does not clear there
+  fails.
+
 - **aarch64 Linux reads a thread-local afresh after a loop's back-edge
   check.** Its thread pointer was `llvm.read_register`, which LLVM models
   as only reading memory, and a release build hoisted it out of a loop
@@ -24882,7 +24901,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,285-line library and nothing else. Every other
+  written against iyi's own 24,301-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

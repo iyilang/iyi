@@ -2862,7 +2862,17 @@ module Iyi
         pointer = call c_malloc_fun, size_t(size)
       end
 
-      memset pointer, int8(0), size_t(size)
+      # iyi: under the arena both entries hand the block back zeroed - a
+      # chunk off a list is cleared inside the allocator, and a carved chunk
+      # or a large mapping is the kernel's zero - so a memset here would
+      # clear it twice. It was worse than twice: the memset is the
+      # prelude's, runtime code with no preemption check, and on a large
+      # block it took every page fault of the fresh mapping as well. A
+      # `Hash(Int32, Int32)` of 8,388,608 entries growing, three blocks of
+      # 256 MB together, held its worker that way (SPEC.md III.4.13 part
+      # 9); left alone, the pages fault in the growth's own loops, which
+      # check.
+      memset pointer, int8(0), size_t(size) unless malloc_fun && @program.iyi_gc_arena?
       pointer_cast pointer, type.pointer
     end
 

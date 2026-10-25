@@ -1433,7 +1433,8 @@ slots are one thread's class variables and the program names the clash
 on the first thread joined. One more name appeared in a darwin
 `--release` binary and it was not the thread's: `bzero`, the aarch64
 back end's lowering of a memset it will not inline, and the compiler
-zeroes every `Pointer.malloc` with one — a plain binary has only small
+zeroed every `Pointer.malloc` with one then (under the arena it no longer
+does, SPEC.md III.4.13 part 9) — a plain binary had only small
 constant ones, a release binary inlines the allocator and keeps its
 variable-length ones, and a plain binary with a large constant one (the
 root exercise's 1.5 MiB object) named it too. A release `hello` carried

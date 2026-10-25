@@ -275,10 +275,10 @@ echo "== what root discovery asks the machine for"
 # list is every darwin program's — the poller, its clock and errno, which the
 # panic path carries — plus one this program's own: `mprotect`, the guard
 # page of the fiber it spawns. `bzero` was here for a day: the compiler
-# zeroes every `Pointer.malloc` with an `llvm.memset`, the aarch64 back end
-# lowers one it will not inline (the 1.5 MiB object below) to a `bzero`
-# call, and the prelude now defines `bzero` the way it defines `memset`, so
-# the call resolves to the program's own. The stale names (`malloc`,
+# zeroed every `Pointer.malloc` with an `llvm.memset` then, the aarch64 back
+# end lowered one it would not inline (the 1.5 MiB object below) to a
+# `bzero` call, and the prelude now defines `bzero` the way it defines
+# `memset`, so a call resolves to the program's own. The stale names (`malloc`,
 # `memset`, `realloc`, the file calls) are gone from the list, because an
 # entry nothing uses is a check without teeth.
 case "$(uname -s)" in

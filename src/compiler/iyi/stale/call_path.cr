@@ -248,11 +248,18 @@ module Iyi::Stale
           base.each_concrete_type do |concrete_type|
             queue << concrete_type
           end
-        elsif base.is_a?(ClassType) && base.virtual_type_made?
-          vt = base.virtual_type!
-          if vt.is_a?(VirtualType)
-            vt.each_concrete_type do |concrete_type|
-              queue << concrete_type
+        elsif base.is_a?(ClassType) && (base.virtual_type_made? || base.abstract?)
+          if base.virtual_type_made?
+            vt = base.virtual_type!
+            if vt.is_a?(VirtualType)
+              vt.each_concrete_type do |concrete_type|
+                queue << concrete_type
+              end
+            end
+          end
+          if base.abstract?
+            base.subclasses.each do |subclass|
+              queue << subclass unless subclass.abstract?
             end
           end
         end
@@ -462,8 +469,18 @@ module Iyi::Stale
       @temp_ordinals = Hash(String, Int32).new
       @next_temp_ordinal = 0
     end
-
     def encode_element(element : Element) : Nil
+      collector = TempCollector.new(self)
+      if node = element.node
+        if node.is_a?(Def)
+          node.args.each do |a|
+            register_temp_name(a.name)
+            a.default_value.try &.accept(collector)
+          end
+        end
+        node.accept(collector)
+      end
+
       case element.kind
       when ElementKind::Main
         if node = element.node
@@ -571,6 +588,10 @@ module Iyi::Stale
         true
       end
 
+      def visit(node : Arg)
+        @encoder.register_temp_name(node.name)
+        true
+      end
       def visit(node : ASTNode)
         true
       end
@@ -588,14 +609,17 @@ module Iyi::Stale
 
     def encode_def(target_def : Def, self_type : Type) : Nil
       collector = TempCollector.new(self)
-      target_def.args.each { |a| a.default_value.try &.accept(collector) }
+      target_def.args.each do |a|
+        register_temp_name(a.name)
+        a.default_value.try &.accept(collector)
+      end
       target_def.body.accept(collector)
 
       @encoder.str(CallPath.canonical_type_name(target_def.owner))
       @encoder.str(CallPath.canonical_type_name(self_type))
       @encoder.list(target_def.args.size) do
         target_def.args.each do |arg|
-          @encoder.str(arg.name)
+          encode_var_name(arg.name)
           encode_type(arg.type?)
           if dv = arg.default_value
             encode_node(dv)
@@ -968,6 +992,14 @@ module Iyi::Stale
       when AssignWithRestriction
         encode_node(node.assign)
         encode_node(node.restriction)
+      when MultiAssign
+        @encoder.list(node.targets.size) { node.targets.each { |t| encode_node(t) } }
+        @encoder.list(node.values.size) { node.values.each { |v| encode_node(v) } }
+      when UninitializedVar
+        encode_node(node.var)
+        encode_node(node.declared_type)
+      when TypeOf
+        @encoder.list(node.expressions.size) { node.expressions.each { |e| encode_node(e) } }
       when While
         encode_node(node.cond)
         encode_node(node.body)
@@ -1038,7 +1070,7 @@ module Iyi::Stale
         else
           @encoder.absent
         end
-      when PointerOf
+      when UnaryExpression
         encode_node(node.exp)
       when IsA
         encode_node(node.obj)
@@ -1126,7 +1158,7 @@ module Iyi::Stale
       when MetaTypeVar
         encode_var_name(node.name)
       when Arg
-        @encoder.str(node.name)
+        encode_var_name(node.name)
         encode_type(node.type?)
         if dv = node.default_value
           encode_node(dv)

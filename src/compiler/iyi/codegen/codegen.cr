@@ -1584,27 +1584,80 @@ module Iyi
     end
 
     def get_global(name, type, real_var, initial_value = nil)
-      # iyi: a program under iyi's prelude, on ELF, reads a thread-local
-      # straight off the thread pointer - one `%fs:`/`tpidr_el0` load,
-      # local-exec. The NoInline accessor below guards against LLVM hoisting
-      # a thread-local's address across a fiber switch that lands the fiber
-      # on another thread; an iyi fiber belongs to its scheduler thread and
-      # never moves (`src/iyi/concurrency.iyi`, the scheduler), so the
-      # address is a constant for the fiber's life and the guard priced four
-      # calls into every allocation.
+      # iyi: a program under iyi's prelude, on ELF, reaches a thread-local
+      # through the thread pointer as it is at the access, never as it was
+      # earlier in the function (`iyi_thread_local_address`): a parallel
+      # task parks on one worker and resumes on another (SPEC.md III.4.13),
+      # and the address of a thread-local is a different address on the
+      # thread it resumed on. Read straight off the global, as it was while
+      # a fiber never moved, LLVM takes that address as fixed for the life
+      # of a function: on aarch64 it computed `tpidr_el0` plus the offset
+      # once at the top of a loop and loaded through it after every call in
+      # it, and on x86_64 a thread-local whose address is passed on had
+      # `%fs:0` read once and kept in a callee-saved register across the
+      # call (llc 21, both seen in its output). A task that moved would
+      # have allocated from the cache of the thread it left.
       #
-      # Mach-O keeps the accessor, and the reason is the platform's: there
-      # is no local-exec there, a thread-local's address comes from
-      # `_tlv_bootstrap` through a call whatever the model, and one accessor
-      # per read is what keeps that call from being made several times in an
-      # allocation - measured, the direct form cost darwin's binary trees
-      # six times its wall time. A `--crystal` program keeps it everywhere:
-      # its fibers are Crystal's, which may change threads.
-      if real_var.thread_local? && !(@program.iyi_prelude? && @program.has_flag?("linux"))
-        get_thread_local(name, type, real_var)
+      # Mach-O and COFF keep the NoInline accessor below, which hands back
+      # the address on every call and is the guard Crystal's own moving
+      # fibers rely on: there is no local-exec on either, a thread-local's
+      # address comes from `_tlv_bootstrap` or `_tls_index` and the TEB's
+      # array through a call or a load whatever the model, and one accessor
+      # per read is what keeps that out of the middle of an allocation -
+      # measured, the direct form cost darwin's binary trees six times its
+      # wall time. A `--crystal` program keeps it everywhere.
+      if real_var.thread_local?
+        if @program.iyi_prelude? && @program.has_flag?("linux")
+          iyi_thread_local_address(get_global_var(name, type, real_var, initial_value))
+        else
+          get_thread_local(name, type, real_var)
+        end
       else
         get_global_var(name, type, real_var, initial_value)
       end
+    end
+
+    # The address of thread-local *global* on the thread executing this
+    # access: the thread pointer read here, every time, plus the variable's
+    # offset from it, which is the same on every thread and may be computed
+    # once and hoisted anywhere.
+    #
+    # The offset is a link-time constant (local-exec: an executable, never a
+    # shared object) that IR has no spelling for, so it comes out of a pure
+    # asm the linker fills in - `$sym@TPOFF`, or `:tprel_g1:`/`:tprel_g0_nc:`
+    # on aarch64 - marked `memory(none)` so LLVM may share and hoist it as
+    # it would a constant. The thread pointer is what must not be shared:
+    # on x86_64 a volatile load of `%fs:0`, which no pass removes, merges or
+    # moves across a call, and which instruction selection still folds into
+    # an `%fs:`-relative load of the variable; on aarch64
+    # `llvm.read_register` of `tpidr_el0`, which is modelled as reading
+    # memory and so is read again after any call that may write it. An
+    # inline `mrs` marked `memory(none)` was the other way, and LLVM hoisted
+    # it out of a loop past the calls in it.
+    private def iyi_thread_local_address(global : LLVM::Value) : LLVM::Value
+      ctx = llvm_context
+      int64 = ctx.int64
+      aarch64 = @program.has_flag?("aarch64")
+      text = aarch64 ? "movz $0, #:tprel_g1:${1:c}\n\tmovk $0, #:tprel_g0_nc:${1:c}" : "movq $$${1:P}@TPOFF, $0"
+      asm_type = LLVM::Type.function([global.type], int64)
+      assembly = LLVM::Function.from_value(asm_type.inline_asm(text, "=r,s", false, false, false, LLVM::InlineAsmDialect::ATT))
+      offset = call LLVMTypedFunction.new(asm_type, assembly), [global]
+      {"memory", "nounwind", "willreturn"}.each do |attribute|
+        kind = LibLLVM.get_enum_attribute_kind_for_name(attribute, attribute.bytesize)
+        LibLLVM.add_call_site_attribute(offset, LLVM::AttributeIndex::FunctionIndex, LibLLVM.create_enum_attribute(ctx, kind, 0_u64))
+      end
+      if aarch64
+        register = fetch_typed_fun(@llvm_mod, "llvm.read_register.i64") do
+          LLVM::Type.function([LLVM::Type.new(LibLLVM.metadata_type_in_context(ctx))], int64)
+        end
+        name = LibLLVM.md_string_in_context2(ctx, "tpidr_el0", 9)
+        node = LibLLVM.md_node_in_context2(ctx, pointerof(name), 1)
+        pointer = call register, [LLVM::Value.new(LibLLVM.metadata_as_value(ctx, node.as(LibLLVM::MetadataRef)))]
+      else
+        pointer = builder.load(int64, ctx.pointer(257).null)
+        pointer.volatile = true
+      end
+      builder.int2ptr(builder.add(pointer, offset), ctx.pointer)
     end
 
     def get_global_var(name, type, real_var, initial_value = nil)

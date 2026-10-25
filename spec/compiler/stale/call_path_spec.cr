@@ -21,7 +21,6 @@ private def compute_fp(code : String, filename : String = "test.iyi") : {String,
     end
   end
 end
-
 describe "Iyi::Stale S3f: CallPathFp, typed encoder, roots, explain" do
   it "unreached def edit keeps call path fingerprint" do
     c1 = <<-IYI
@@ -432,6 +431,16 @@ describe "Iyi::Stale S3f: CallPathFp, typed encoder, roots, explain" do
     fp1, _ = compute_fp(code)
     fp2, _ = compute_fp(code)
     fp1.should eq(fp2)
+
+    ENV["IYI_WARM"] = "1"
+    begin
+      Iyi::Compiler.preanalysed.clear
+      fp3, _ = compute_fp(code)
+      fp3.should eq(fp1)
+    ensure
+      Iyi::Compiler.preanalysed.clear
+      ENV.delete("IYI_WARM")
+    end
   end
 
   it "produces expected dump rows and explain keys" do

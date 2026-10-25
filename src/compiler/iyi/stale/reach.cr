@@ -173,9 +173,10 @@ module Iyi::Stale
         reach_const(const)
       end
 
-      # 4. Simple constants (codegen.cr:382, 422-430)
+      # 4. Simple constants (codegen.cr:382, 422-430). An unreferenced
+      # constant cannot cause emitted code merely by being declared.
       @program.const_initializers.each do |const|
-        reach_const(const) if const.simple? && !const.compile_time_value
+        reach_const(const) if const.used? && const.simple? && !const.compile_time_value
       end
 
       # 5. Artifact class variables (codegen.cr:383)

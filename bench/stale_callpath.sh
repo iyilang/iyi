@@ -325,7 +325,8 @@ print LibTest.cos(0.0)
 run_reach() {
   echo "== Running S3e: Reach section (reach walk vs codegen recording cross-check) =="
   "$PY" -c "
-import os, sys, glob, subprocess, json
+import os, sys, glob, subprocess, json, time
+from concurrent.futures import ThreadPoolExecutor
 
 repo = sys.argv[1]
 iyi = sys.argv[2]
@@ -335,35 +336,43 @@ samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
 bench = sorted(glob.glob(os.path.join(repo, 'bench/std_*_exercise.iyi')))
 all_progs = samples + bench
 
-mismatches = 0
-for prog in all_progs:
+def check_prog(prog):
     name = os.path.relpath(prog, repo)
-    key_file = os.path.join(work, 'reach.key')
-    out_file = os.path.join(work, 'prog.bin')
-    if os.path.exists(key_file):
-        os.remove(key_file)
+    pid = os.getpid()
+    t_ns = time.time_ns()
+    base = os.path.basename(prog)
+    key_file = os.path.join(work, f'reach_{base}_{pid}_{t_ns}.key')
+    out_file = os.path.join(work, f'prog_{base}_{pid}_{t_ns}.bin')
     extra_flags = os.environ.get('IYI_BUILD_FLAGS', '').split()
     cmd = [iyi, 'build'] + extra_flags + ['--stale-key', key_file, '-o', out_file, prog]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         print(f'  Reach build FAILED: {name} (exit {res.returncode})', file=sys.stderr)
-        mismatches += 1
-        continue
+        return False
     if not os.path.exists(key_file):
         print(f'  Reach key missing: {name}', file=sys.stderr)
-        mismatches += 1
-        continue
+        return False
+    ok = True
     try:
         with open(key_file) as f:
             data = json.load(f)
         mm = data.get('reach', {}).get('mismatch', [])
         if mm:
             print(f'  Reach MISMATCH in {name}: {mm}', file=sys.stderr)
-            mismatches += 1
+            ok = False
     except Exception as e:
         print(f'  Reach JSON error {name}: {e}', file=sys.stderr)
-        mismatches += 1
+        ok = False
+    finally:
+        if os.path.exists(key_file): os.remove(key_file)
+        if os.path.exists(out_file): os.remove(out_file)
+    return ok
 
+workers = min(8, os.cpu_count() or 4)
+with ThreadPoolExecutor(max_workers=workers) as ex:
+    results = list(ex.map(check_prog, all_progs))
+
+mismatches = sum(1 for r in results if not r)
 print(f'Reach checked {len(all_progs)} programs: {len(all_progs) - mismatches} OK, {mismatches} mismatches')
 if mismatches > 0:
     sys.exit(1)
@@ -601,6 +610,24 @@ print('S3g check gate: ALL ACCEPTANCE TESTS PASSED')
 " "$REPO" "$IYI" "$WORK"
 }
 
+run_rg8() {
+  echo "== Running RG8: normalized IR versus CallPathFp mutations =="
+  "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$IYI" --work "$WORK/rg8"
+
+  echo "  proving the def-body encoder field is load-bearing..."
+  local dropped="$WORK/iyi-rg8-drop-def-body"
+  "$REPO/bin/crystal" build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
+  "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$dropped" \
+    --work "$WORK/rg8-drop-def-body" --program "$REPO/samples/iyi/calc.iyi" \
+    --kind body --expect-failure-kind body
+  echo "RG8 def-body mutation proof PASSED"
+}
+
+run_rg9() {
+  echo "== Running RG9: CallPathFp process and warm-prelude determinism =="
+  "$PY" "$REPO/bench/stale_rg9.py" --repo "$REPO" --compiler "$IYI" --work "$WORK/rg9"
+}
+
 case "$MODE" in
   link)
     run_link
@@ -614,14 +641,22 @@ case "$MODE" in
   check)
     run_check
     ;;
+  rg8)
+    run_rg8
+    ;;
+  rg9)
+    run_rg9
+    ;;
   all)
     run_link
     run_rg4
     run_reach
     run_check
+    run_rg8
+    run_rg9
     ;;
   *)
-    echo "Unknown mode: $MODE (expected: all, link, rg4, reach, check)" >&2
+    echo "Unknown mode: $MODE (expected: all, link, rg4, reach, check, rg8, rg9)" >&2
     exit 1
     ;;
 esac

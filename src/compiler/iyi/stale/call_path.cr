@@ -10,11 +10,12 @@ module Iyi::Stale
     getter kind : String
     getter key : String
     getter digest : String
+    getter encoded_bytes : Int64
     getter file : String?
     getter line : Int32?
     getter end_line : Int32?
 
-    def initialize(@kind : String, @key : String, @digest : String,
+    def initialize(@kind : String, @key : String, @digest : String, @encoded_bytes : Int64,
                    @file : String?, @line : Int32?, @end_line : Int32?)
     end
   end
@@ -248,11 +249,18 @@ module Iyi::Stale
           base.each_concrete_type do |concrete_type|
             queue << concrete_type
           end
-        elsif base.is_a?(ClassType) && base.virtual_type_made?
-          vt = base.virtual_type!
-          if vt.is_a?(VirtualType)
-            vt.each_concrete_type do |concrete_type|
-              queue << concrete_type
+        elsif base.is_a?(ClassType) && (base.virtual_type_made? || base.abstract?)
+          if base.virtual_type_made?
+            vt = base.virtual_type!
+            if vt.is_a?(VirtualType)
+              vt.each_concrete_type do |concrete_type|
+                queue << concrete_type
+              end
+            end
+          end
+          if base.abstract?
+            base.subclasses.each do |subclass|
+              queue << subclass unless subclass.abstract?
             end
           end
         end
@@ -347,18 +355,21 @@ module Iyi::Stale
 
       # 2. Encode each element
       element_digests = Hash(String, Digest).new
+      element_sizes = Hash(Tuple(ElementKind, String, Digest), Int64).new
       digests_by_key = Hash(Tuple(ElementKind, String), Array(Digest)).new
       encoded_elements = [] of {Element, Digest}
 
       all_elements.each do |elem|
+        encoded_bytes = 0_i64
         enc_result = Stale.d(elem.kind.to_s.underscore) do |encoder|
           typed_encoder = TypedEncoder.new(program, roots, elem, encoder)
           typed_encoder.encode_element(elem)
+          encoded_bytes = encoder.encoded_bytes
         end
-
         key_tuple = {elem.kind, elem.key}
         list = (digests_by_key[key_tuple] ||= [] of Digest)
         list << enc_result
+        element_sizes[{elem.kind, elem.key, enc_result}] = encoded_bytes
 
         element_digests[elem.key] = enc_result
         encoded_elements << {elem, enc_result}
@@ -417,6 +428,7 @@ module Iyi::Stale
           kind: elem.kind.to_s.underscore,
           key: elem.key,
           digest: Stale.hex(dig),
+          encoded_bytes: element_sizes[{elem.kind, elem.key, dig}],
           file: loc_file,
           line: loc_line,
           end_line: loc_end_line
@@ -457,6 +469,7 @@ module Iyi::Stale
     getter program : Program
     getter roots : Roots
     getter current_element : Element
+    getter temp_ordinals : Hash(String, Int32)
 
     def initialize(@program : Program, @roots : Roots, @current_element : Element, @encoder : Encoder)
       @temp_ordinals = Hash(String, Int32).new
@@ -464,6 +477,22 @@ module Iyi::Stale
     end
 
     def encode_element(element : Element) : Nil
+      collector = TempCollector.new(self)
+      if node = element.node
+        if node.is_a?(Def)
+          node.args.each do |a|
+            register_temp_name(a.name)
+            a.default_value.try &.accept(collector)
+          end
+          node.body.accept(collector)
+        elsif element.kind == ElementKind::Main && node.is_a?(Expressions)
+          active = filter_codegen_expressions(node.expressions)
+          active.each { |e| e.accept(collector) }
+        else
+          node.accept(collector)
+        end
+      end
+
       case element.kind
       when ElementKind::Main
         if node = element.node
@@ -552,13 +581,57 @@ module Iyi::Stale
       @encoder.bool(node.varargs?)
     end
 
+    private class TempCollector < Visitor
+      def initialize(@encoder : TypedEncoder)
+      end
+
+      def visit(node : Var)
+        @encoder.register_temp_name(node.name)
+        true
+      end
+
+      def visit(node : MetaVar)
+        @encoder.register_temp_name(node.name)
+        true
+      end
+
+      def visit(node : MetaTypeVar)
+        @encoder.register_temp_name(node.name)
+        true
+      end
+
+      def visit(node : Arg)
+        @encoder.register_temp_name(node.name)
+        true
+      end
+      def visit(node : ASTNode)
+        true
+      end
+    end
+
+    def register_temp_name(name : String) : Nil
+      if compiler_temp_name?(name)
+        @temp_ordinals.put_if_absent(name) do
+          ord = @next_temp_ordinal
+          @next_temp_ordinal += 1
+          ord
+        end
+      end
+    end
+
     def encode_def(target_def : Def, self_type : Type) : Nil
+      collector = TempCollector.new(self)
+      target_def.args.each do |a|
+        register_temp_name(a.name)
+        a.default_value.try &.accept(collector)
+      end
+      target_def.body.accept(collector)
+
       @encoder.str(CallPath.canonical_type_name(target_def.owner))
       @encoder.str(CallPath.canonical_type_name(self_type))
-
       @encoder.list(target_def.args.size) do
         target_def.args.each do |arg|
-          @encoder.str(arg.name)
+          encode_var_name(arg.name)
           encode_type(arg.type?)
           if dv = arg.default_value
             encode_node(dv)
@@ -593,7 +666,18 @@ module Iyi::Stale
       end
 
       if vars = target_def.vars
-        sorted_vars = vars.to_a.sort_by { |name, _| name }
+        sorted_vars = vars.to_a.sort_by do |name, _|
+          if compiler_temp_name?(name)
+            ord = @temp_ordinals.put_if_absent(name) do
+              val = @next_temp_ordinal
+              @next_temp_ordinal += 1
+              val
+            end
+            {1, ord, ""}
+          else
+            {0, 0, name}
+          end
+        end
         @encoder.list(sorted_vars.size) do
           sorted_vars.each do |var_name, var|
             encode_var_name(var_name)
@@ -628,7 +712,9 @@ module Iyi::Stale
       @encoder.bool(target_def.iyi_from_impl?)
       @encoder.bool(target_def.iyi_from_artifact?)
 
-      encode_node(target_def.body)
+      {% unless flag?(:rg8_drop_def_body) %}
+        encode_node(target_def.body)
+      {% end %}
     end
 
     def encode_type_element(type : Type) : Nil
@@ -920,6 +1006,14 @@ module Iyi::Stale
       when AssignWithRestriction
         encode_node(node.assign)
         encode_node(node.restriction)
+      when MultiAssign
+        @encoder.list(node.targets.size) { node.targets.each { |t| encode_node(t) } }
+        @encoder.list(node.values.size) { node.values.each { |v| encode_node(v) } }
+      when UninitializedVar
+        encode_node(node.var)
+        encode_node(node.declared_type)
+      when TypeOf
+        @encoder.list(node.expressions.size) { node.expressions.each { |e| encode_node(e) } }
       when While
         encode_node(node.cond)
         encode_node(node.body)
@@ -990,7 +1084,7 @@ module Iyi::Stale
         else
           @encoder.absent
         end
-      when PointerOf
+      when UnaryExpression
         encode_node(node.exp)
       when IsA
         encode_node(node.obj)
@@ -1078,7 +1172,7 @@ module Iyi::Stale
       when MetaTypeVar
         encode_var_name(node.name)
       when Arg
-        @encoder.str(node.name)
+        encode_var_name(node.name)
         encode_type(node.type?)
         if dv = node.default_value
           encode_node(dv)
@@ -1166,8 +1260,18 @@ module Iyi::Stale
       end
     end
 
+    private def flatten_expressions(node : ASTNode, result : Array(ASTNode)) : Nil
+      if node.is_a?(Expressions)
+        node.expressions.each { |e| flatten_expressions(e, result) }
+      else
+        result << node
+      end
+    end
+
     def filter_codegen_expressions(exps : Array(ASTNode)) : Array(ASTNode)
-      exps.select { |exp| node_emits_in_main?(exp) }
+      flat = [] of ASTNode
+      exps.each { |e| flatten_expressions(e, flat) }
+      flat.select { |exp| node_emits_in_main?(exp) }
     end
 
     def node_emits_in_main?(node : ASTNode) : Bool
@@ -1186,6 +1290,18 @@ module Iyi::Stale
         node_emits_in_main?(node.body)
       when Expressions
         node.expressions.any? { |e| node_emits_in_main?(e) }
+      when If
+        if node.iyi_definition_probe?
+          false
+        elsif node.cond.is_a?(BoolLiteral) && !node.cond.as(BoolLiteral).value
+          if els = node.else
+            node_emits_in_main?(els)
+          else
+            false
+          end
+        else
+          true
+        end
       when Assign
         !node.target.is_a?(Path)
       when Nop

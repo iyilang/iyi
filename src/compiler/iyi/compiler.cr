@@ -3270,6 +3270,10 @@ module Iyi
     private def bc_flags_changed?(output_dir)
       bc_flags_changed = true
       current_bc_flags = "#{@codegen_target}|#{@mcpu}|#{@mattr}|#{@link_flags}|#{@mcmodel}"
+      # iyi: the back-edge checks go in after the bitcode is compared, so
+      # the flag that changes their form changes no bitcode, and a build
+      # with it reused the objects of one without (`preempt_checks`).
+      current_bc_flags += "|preempt_check_accessor" if @flags.includes?("preempt_check_accessor")
       bc_flags_filename = "#{output_dir}/bc_flags#{optimization_mode.suffix}"
       if File.file?(bc_flags_filename)
         previous_bc_flags = File.read(bc_flags_filename).strip
@@ -3311,9 +3315,15 @@ module Iyi
       # name from outside that module, so `a + b` in an imported module's
       # body was `undefined reference to '__iyi_raise_overflow'` at link.
       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
-        program.codegen node, debug: debug, frame_pointers: frame_pointers,
+        modules = program.codegen node, debug: debug, frame_pointers: frame_pointers,
           single_module: @cross_compile || !@emit_targets.none? ||
                          (@single_module && @emit_iyimod.nil? && program.iyi_artifact_objects.empty?)
+        # iyi: recursion's checks go in before optimisation (SPEC.md
+        # III.4.13, part 9; `PreemptChecks.mark_recursion`).
+        if program.iyi_preempt_flag
+          PreemptChecks.mark_recursion(modules.values.map(&.mod), program.iyi_preempt_funs)
+        end
+        modules
       end
 
       output_dir = CacheDir.instance.directory_for(sources)
@@ -4097,9 +4107,13 @@ module Iyi
 
     # iyi: the back-edge checks of a program with a pool, put in after
     # optimisation so they keep no loop from being vectorised (SPEC.md
-    # III.4.13, part 9; `PreemptChecks`).
+    # III.4.13, part 9; `PreemptChecks`). `-Dpreempt_check_accessor` builds
+    # darwin's and Windows' checks as they were first, an accessor call at
+    # every back-edge: the broken copy bench/parallel_exercise.sh shows its
+    # tight-loop bound refusing.
     protected def preempt_checks(llvm_mod, flag : String?) : Nil
       return unless flag
+      PreemptChecks.accessor_only = @flags.includes?("preempt_check_accessor")
       PreemptChecks.run(llvm_mod, flag, @codegen_target.linux?, @codegen_target.architecture == "aarch64")
     end
 

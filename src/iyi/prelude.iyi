@@ -538,6 +538,9 @@ end
     fun CancelWaitableTimer(h_timer : Void*) : Int32
     fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
     fun SwitchToThread : Int32
+    # The pool's preemption slot (`IyiWorkers.claim_preempt_slot`).
+    fun TlsAlloc : Int32
+    fun TlsFree(dw_tls_index : Int32) : Int32
     # The mark helpers' park (`IyiMark.wait_generation`): kernel32's own
     # counting semaphore. `WaitOnAddress` would be the futex, and it is
     # imported from a DLL beyond kernel32 that no program here links.
@@ -8676,6 +8679,21 @@ require "./file"
   end
 {% end %}
 
+# iyi: one run of `Pointer#copy_from` (string.iyi), which copies a million
+# elements a run and checks for preemption between runs (SPEC.md III.4.13,
+# part 9). Written in a runtime file, so the run carries no check of its
+# own: with one, a short string's copy paid a load and a branch per byte,
+# and a join of 1,000,000 strings took 6.6 ms against 5.1.
+struct Pointer(T)
+  def copy_run(source : Pointer(T), count : Int32) : Nil
+    index = 0
+    while index < count
+      self[index] = source[index]
+      index = index + 1
+    end
+  end
+end
+
 # iyi: weak references (GC_DESIGN.md, "Weak References"), the mechanism
 # under std/weak_ref. A weak reference is a *cell*: eight bytes of atomic
 # memory - which no collector here scans - holding the target's address.
@@ -9402,15 +9420,6 @@ struct Pointer(T)
 
   def []=(offset : Int32, value : T) : T
     (self + offset.to_i64).value = value
-  end
-
-  # Bytes, not elements: every caller here is copying string contents.
-  def copy_from(source : Pointer(T), count : Int32) : Nil
-    index = 0
-    while index < count
-      self[index] = source[index]
-      index = index + 1
-    end
   end
 end
 

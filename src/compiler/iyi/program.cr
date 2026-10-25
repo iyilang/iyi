@@ -540,6 +540,11 @@ module Iyi
     # checks go in after optimisation (`PreemptChecks`).
     property iyi_preempt_flag : String? = nil
 
+    # iyi: the name of every function codegen made whose loops check, which
+    # is where a call cycle gets a check at its entry too
+    # (`PreemptChecks.mark_recursion`).
+    getter iyi_preempt_funs = [] of String
+
     # iyi: the types each object-code unit refers to a type id of, by unit name
     # (SPEC.md IV.1g).
     #

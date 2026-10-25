@@ -73,6 +73,23 @@
   `bench/parallel_preempt.iyi` holds it in `bench/parallel_exercise.sh`,
   with broken copies caught by name.
 
+- **A parallel task inside a long library call or a recursion gives its
+  worker up too.** The prelude's files other than the runtime's three
+  (`prelude.iyi`, `concurrency.iyi`, `thread.iyi`) check as a program's
+  code does, a library def the runtime calls is compiled a second time for
+  it with no check (`$runtime` after its name), `Pointer#copy_from` copies
+  a million elements a run with a check between, and a function on a call
+  cycle checks at its entry (`PreemptChecks.mark_recursion`). One worker,
+  release, a short task spawned 20 ms into the call: a sort waited 175 ms
+  before and 4 to 7 after, a `Hash` growth 85 and 17 to 18, a join 34 and 4
+  to 12, a naive `fib` 45 and 4 to 5. Cost, best of seven, three
+  interleaved rounds: a sort of 1,000,000 `Int64`s 57.9 to 59.6 ms before,
+  60.3 to 63.7 after, a join of 1,000,000 strings 5.0 to 5.4 and 5.5 to 6.6,
+  copies, appends, hash inserts, a JSON parse and `fib` within the noise.
+  `bench/parallel_preempt_lib.iyi` and `bench/preempt_audit.py` (no
+  function the runtime reaches holds a check) hold it in
+  `bench/parallel_exercise.sh`, with three broken copies caught by name.
+
 - **aarch64 Linux reads a thread-local afresh after a loop's back-edge
   check.** Its thread pointer was `llvm.read_register`, which LLVM models
   as only reading memory, and a release build hoisted it out of a loop
@@ -91,6 +108,25 @@
   Windows and CI on aarch64 Linux under emulation; built for aarch64 by
   the compiler before this change it failed under qemu-user in 2 runs of
   2, and a copy reading the line from before the loop fails it by name.
+
+- **Preemption on Windows and darwin, measured on GitHub's runners.**
+  Windows' monitor waited on the system timer's tick, with looks 11.2 to
+  12.3 ms apart. It now waits on a high-resolution waitable timer: 5.15
+  to 5.27 ms, with turns of 10.3 to 10.5 ms. The back-edge check there
+  had called the thread-local accessor at every turn, which cost
+  vectorised sums 3.4 to 4.9 times their `@[NoPreempt]` twins on Windows
+  and 5.3 to 5.8 times on darwin. Windows now checks a TEB slot the pool
+  claims, `cmpq $0, %gs:off` (1.46 to 1.49x, a cost Linux CI's `%fs`
+  form shares on those runners). darwin arm64 reads `tpidrro_el0` and
+  dyld's pthread slot (0.94 to 1.07x). `bench/parallel_preempt.iyi`
+  gains a `period` step, held to 4 to 9 ms a look and 20 ms a turn.
+  Its tight loops are now held to 2x. The gate shows a Windows monitor
+  on the system tick (`period`) and the accessor check (`tight`,
+  `-Dpreempt_check_accessor`) both failing. On Windows the gate runs the
+  server shape on one worker fewer than the cores. Run with no
+  arguments, the bench now uses a pool of one and prints only its
+  verdict; on 4 workers its slice step had failed, on Windows CI and on
+  Linux alike, because an idle worker took the short task.
 **std/http's `Server.serve_parallel` serves TLS (#145).**
 `serve_parallel(listener, tls: config.frozen)` runs each connection's
 handshake and requests on the pool worker that serves it - HTTP/2 and
@@ -24830,7 +24866,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,169-line library and nothing else. Every other
+  written against iyi's own 24,285-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

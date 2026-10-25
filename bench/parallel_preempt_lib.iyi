@@ -1,0 +1,292 @@
+# Preemption inside the prelude's library, std, and recursion: SPEC.md
+# III.4.13, part 9.
+#
+#   ./bin/iyi run --release bench/parallel_preempt_lib.iyi -- sort fib
+#   ./bin/iyi run --release bench/parallel_preempt_lib.iyi -- cost
+#
+# Each step makes one long call in a parallel task on a pool of one
+# worker, and spawns a short task 20 ms into it, which starts within 100
+# ms: the call gives the worker up at a check inside it. Before the
+# prelude's library checked, a short task waited for a sort, a growth or a
+# join to end, and for a recursion with no loop in it.
+#
+#   sort    `Array#sort_in_place` of 6,000,000 `Int64`s
+#   copy    `Slice#copy_from` of 192 MB, a million bytes a turn; long
+#           enough to tell only in a plain build, whose copy is a loop of
+#           bytes rather than a `memcpy`
+#   rehash  the insert that grows a `Hash(Int32, Int32)` of 8,388,608
+#           entries
+#   join    `Array(String)#join` of 12,000,000 strings
+#   regex   `Regex#find` over 24 MB that the pattern never matches
+#   json    `JSON.parse` of a 24 MB array of numbers
+#   bcrypt  `Bcrypt.hash` at cost 12
+#   fib     a naive recursive Fibonacci of 40, with no loop in it; under
+#           `-Dpreempt_off` the same as a `@[NoPreempt]` def, which a
+#           short task waits for
+#   cost    not run unless named: what the checks cost the library's own
+#           work - a sort, copies, hash inserts, a JSON parse, a join and a
+#           recursion - best of seven inside a parallel task, printed as
+#           times to compare against a build from before the library
+#           checked, and held to no bound here
+#
+# With no step named every step but `cost` runs and nothing it measured is
+# printed. bench/parallel_exercise.sh runs it, and broken copies, each
+# caught by the step that names it.
+
+module bench/parallel_preempt_lib
+
+import std/slice::{Slice}
+import std/regex::{Regex}
+import std/json::{JSON}
+import std/password::{Bcrypt}
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  def elapsed_ms(since : Int64) : Int64
+    (__iyi_monotonic_ns - since) // 1000000_i64
+  end
+
+  def fib(n : Int32) : Int64
+    n < 2 ? n.to_i64 : fib(n - 1) + fib(n - 2)
+  end
+
+  # The same recursion, never preempted.
+  @[NoPreempt]
+  def fib_np(n : Int32) : Int64
+    n < 2 ? n.to_i64 : fib_np(n - 1) + fib_np(n - 2)
+  end
+
+  def long_fib(n : Int32) : Int64
+    {% if flag?(:preempt_off) %}
+      fib_np(n)
+    {% else %}
+      fib(n)
+    {% end %}
+  end
+
+  # A xorshift walk's values, the same every run.
+  def scrambled(count : Int32, seed : UInt64) : Array(Int64)
+    x = seed
+    Array(Int64).new(count) do
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      (x & 0xFFFFFFFFFFFF_u64).to_i64
+    end
+  end
+
+  # When the step's one call started and how long it took: `Share` by its
+  # atomic fields, and a class, so the task and the step read one copy.
+  class Clock
+    @started : Atomic(Int64)
+    @took : Atomic(Int64)
+
+    def initialize
+      @started = Atomic(Int64).new(0_i64)
+      @took = Atomic(Int64).new(-1_i64)
+    end
+
+    def start : Int64
+      t = __iyi_monotonic_ns
+      @started.set(t)
+      t
+    end
+
+    def stop(since : Int64) : Nil
+      @took.set(elapsed_ms(since))
+    end
+
+    def started? : Bool
+      @started.get != 0_i64
+    end
+
+    def took : Int64
+      @took.get
+    end
+  end
+
+  # The step's input, made before the clock starts, and then the one call;
+  # what the call answered, so an optimised build keeps it.
+  def run_op(name : String, clock : Clock) : Int64
+    case name
+    when "sort"
+      values = scrambled(6_000_000, 88172645463325252_u64)
+      t = clock.start
+      values.sort_in_place
+      clock.stop(t)
+      values[0] &+ values[values.size - 1]
+    when "copy"
+      size = 192 * 1024 * 1024
+      source = Slice(UInt8).new(size, 7_u8)
+      target = Slice(UInt8).new(size, 0_u8)
+      t = clock.start
+      target.copy_from(source)
+      clock.stop(t)
+      target[size - 1].to_i64
+    when "rehash"
+      # Each key is its index times an odd number, which no two indexes
+      # share: the table is full at 8,388,608, and the next key grows it.
+      table = Hash(Int32, Int32).new
+      i = 0
+      while i < 8_388_608
+        table[i &* 1640531527] = i
+        i = i + 1
+      end
+      t = clock.start
+      table[i &* 1640531527] = i
+      clock.stop(t)
+      table.size.to_i64
+    when "join"
+      words = ["iyi", "parallel", "task", "worker", "quantum", "check", "loop", "fib"]
+      parts = Array(String).new(12_000_000) { |i| words[i & 7] }
+      t = clock.start
+      joined = parts.join(",")
+      clock.stop(t)
+      joined.bytesize.to_i64
+    when "regex"
+      text = "abcabcabcabcabcabcabcabc" * 1_000_000
+      pattern = Regex.new("a[bc]*d")
+      t = clock.start
+      found = pattern.find(text)
+      clock.stop(t)
+      found.nil? ? 0_i64 : 1_i64
+    when "json"
+      text = "[" + "1234567,8901234," * 1_500_000 + "0]"
+      t = clock.start
+      doc = JSON.parse(text)
+      clock.stop(t)
+      doc.as_a.size.to_i64
+    when "bcrypt"
+      t = clock.start
+      made = Bcrypt.hash("correct horse battery staple", 12)
+      clock.stop(t)
+      made.bytesize.to_i64
+    else
+      t = clock.start
+      answer = long_fib(40)
+      clock.stop(t)
+      answer
+    end
+  end
+
+  BOUND_MS = 100_i64
+
+  def step(name : String, quiet : Bool) : Nil
+    clock = Clock.new
+    waited = Atomic(Int64).new(-1_i64)
+    answer = Atomic(Int64).new(0_i64)
+    preempts = IyiWorkers.preempts
+    group do |g|
+      g.spawn_parallel do
+        answer.set(run_op(name, clock))
+        0
+      end
+      until clock.started?
+        sleep(1)
+      end
+      sleep(20)
+      asked = __iyi_monotonic_ns
+      g.spawn_parallel do
+        waited.set(elapsed_ms(asked))
+        0
+      end
+    end
+    ms = waited.get
+    if ms > BOUND_MS
+      fail("#{name}: a short task waited #{ms} ms behind a #{clock.took} ms call on its one worker, past #{BOUND_MS} ms")
+    end
+    if name == "fib" && answer.get != 102334155_i64
+      fail("fib: the preempted recursion answered #{answer.get}, and 40's is 102334155")
+    end
+    given = IyiWorkers.preempts - preempts
+    puts "#{name}: a short task spawned 20 ms into a #{clock.took} ms call started #{ms} ms later (#{given} preemptions)" unless quiet
+  end
+
+  # ── cost ─────────────────────────────────────────────────────────────
+  # Best of seven of each workload inside a parallel task, in ms; the
+  # answers are summed and printed, so nothing is optimised away.
+  def best_of(name : String, & : -> Int64) : Int64
+    best = 9223372036854775807_i64
+    answer = 0_i64
+    7.times do
+      t = __iyi_monotonic_ns
+      answer = answer &+ yield
+      took = __iyi_monotonic_ns - t
+      best = took if took < best
+    end
+    puts "cost: #{name}: #{best // 1000_i64} us (answers #{answer})"
+    best
+  end
+
+  def cost : Nil
+    group do |g|
+      g.spawn_parallel do
+        values = scrambled(1_000_000, 88172645463325252_u64)
+        best_of("sort of 1,000,000 Int64") do
+          copy = values.dup
+          copy.sort_in_place
+          copy[0] &+ copy[999_999]
+        end
+        big = Slice(UInt8).new(16 * 1024 * 1024, 7_u8)
+        into = Slice(UInt8).new(16 * 1024 * 1024, 0_u8)
+        best_of("64 copies of 16 MB") do
+          64.times { into.copy_from(big) }
+          into[123].to_i64
+        end
+        best_of("1,000,000 appends of 7 bytes") do
+          built = String.build do |io|
+            1_000_000.times { io << "abcdefg" }
+          end
+          built.bytesize.to_i64
+        end
+        best_of("1,000,000 hash inserts") do
+          table = Hash(Int64, Int64).new
+          i = 0_i64
+          while i < 1_000_000_i64
+            table[i &* 2654435761_i64] = i
+            i = i + 1
+          end
+          table.size.to_i64
+        end
+        doc = "[" + "{\"id\":1234567,\"name\":\"iyi\",\"ok\":true,\"v\":[1,2,3]}," * 50_000 + "0]"
+        best_of("JSON.parse of 2.4 MB") { JSON.parse(doc).as_a.size.to_i64 }
+        words = ["iyi", "parallel", "task", "worker", "quantum", "check", "loop", "fib"]
+        parts = Array(String).new(1_000_000) { |i| words[i & 7] }
+        best_of("join of 1,000,000 strings") { parts.join(",").bytesize.to_i64 }
+        best_of("fib(32)") { fib(32) }
+        best_of("fib(32), its @[NoPreempt] twin") { fib_np(32) }
+        0
+      end
+    end
+  end
+
+  STEPS = ["sort", "copy", "rehash", "join", "regex", "json", "bcrypt", "fib"]
+
+  workers = 1
+  chosen = [] of String
+  Program.args.each do |argument|
+    if argument.starts_with?("--workers=")
+      workers = argument[10, argument.size - 10].to_i
+    else
+      fail("no step named #{argument}") unless STEPS.includes?(argument) || argument == "cost"
+      chosen << argument
+    end
+  end
+  quiet = chosen.empty?
+  chosen = STEPS if quiet
+  IyiWorkers.count = workers
+  chosen.each do |name|
+    if name == "cost"
+      cost
+    else
+      step(name, quiet)
+    end
+  end
+  puts "library preemption: every property held"
+{% else %}
+  puts "library preemption: no pool on this target, nothing to hold"
+{% end %}

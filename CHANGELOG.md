@@ -12,12 +12,24 @@
   `check_version` on twelve workers went from 167,319 a second on 819%
   CPU to 204,526 on 599%, and `order` from 91,435 to 148,015; no sampled
   worker stack is in a lock. `bench/alloc_cache.sh` is the new gate, with
-  broken copies for lists kept across a collection, a class's lock or a
-  slice claim that excludes nobody, and an unretired cache; its reuse
-  check has no broken copy that it catches yet. `bench/alloc_scaling.py` times a pool allocating
-  flat out at 1 to 12 workers and samples lock stacks with gdb; its curve
-  did not move (22% of one worker's rate per worker at twelve), and what
-  limits it looks like fresh memory and page faults rather than a lock.
+  broken copies for a sweep that hands nothing back, a worker that throws
+  its swept batch away, lists kept across a collection, a class's lock or
+  a slice claim that excludes nobody, and an unretired cache. Its reuse
+  check runs with no helper: the workers drop every other cell of an
+  88-byte class, sweep it back themselves, and a second wave of as many
+  may move the class's frontier by one slice and one page per cache at
+  most. It passed 60 runs of 60 at 4, 8 and 12 workers, plain and
+  release, moving it 65,472 bytes at most, where the frontier check it
+  replaces failed 21 runs in 120 before the split and 11 after and caught
+  neither broken copy. Twelve HTTPS `check_version` workers peaked at 29
+  to 30 MB resident (47 to 75 before) with 81,370 to 103,065 minor faults
+  in 20 s (1,428,966 to 1,446,569). `bench/alloc_scaling.py` times a pool
+  allocating flat out at 1 to 12 workers and samples lock stacks with gdb;
+  its curve did not move (22% of one worker's rate per worker at twelve),
+  and its twelve workers' heap of 637 to 925 MB (593 to 899 before) is
+  allocation while one thread pays the last epoch's sweep debt alone
+  before a collection's first stop - not the budget, which reaches 9.1 MB
+  at the most - and is left as it is.
 
 - **`bench/web_cores.py` measures issue #145's shape against a Go twin
   (#145).** It times three endpoints: a bcrypt login, a `check_version`

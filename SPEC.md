@@ -3416,9 +3416,10 @@ here from the deadlock it prevents. GC_DESIGN.md carries what the build
 found: the trigger's count made atomic and decided twice, the centre's
 free chunks handed out in the sweep's own per-arena batches so one
 thread cannot hoard, and a budget floored at half of what the sweep
-walked so eight threads do not turn a MiB budget into four thousand
-stops a second. The gate holds eight threads with live lists in their
-frames alone through collections triggered from any of them — by
+walked so eight threads did not turn a MiB budget into four thousand
+stops a second (the lazy sweep took that floor out again). The gate
+holds eight threads with live lists in their frames alone through
+collections triggered from any of them — by
 checksum and by the sweep's own free flag, after an explicit collection
 with every worker spinning and after twenty bursts of churn — fibers on
 threads, 32 threads past the core count, the floor, and a failure proof
@@ -4254,7 +4255,17 @@ HTTPS `check_version` on twelve workers is 34,100 a second per core where
 it was 20,400, and Go's was 32,200 (the first session's Go row). Ten gdb
 stops under it found none of 250 thread stacks in a lock, against 60
 before, and the server took 41,000 minor faults in ten seconds against
-781,000.
+781,000. Measured again interleaved on 2026-10-26, three 20-second runs
+each with the server's memory read from /proc as wrk ran, HTTPS
+`check_version` on twelve workers peaked at 29 to 30 MB resident where it
+peaked at 47 to 75, through 5,309 to 5,377 collections where it ran
+1,744 to 1,904, with 81,370 to 103,065 minor faults against 1,428,966 to
+1,446,569, at 200,022 to 201,538 requests a second against 147,597 to
+156,580. `bench/alloc_scaling.py`'s twelve workers allocating flat out
+are another shape: their heap reaches 637 to 925 MB (593 to 899 before)
+because the thread that crosses the budget pays the last epoch's sweep
+debt alone before its first stop while the rest allocate, unchecked
+(GC_DESIGN.md has the counts), and that is not changed here.
 
 `bench/web_cores.py` is not a gate. On this shared machine its rows move
 with whatever else runs, and wrk takes cores the twelve-worker rows want.

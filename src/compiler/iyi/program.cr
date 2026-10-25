@@ -433,6 +433,9 @@ module Iyi
     # unless `--emit-iyimod` asked for artifacts.
     getter iyi_exported_owners = Set(Type).new
 
+    property stale_recorder : Iyi::Stale::Recorder? = nil
+    property stale_reach : Iyi::Stale::Reach? = nil
+
     # iyi: true when the owners above are a `--iyi-keep` namespace, the fill
     # build `iyi bind` runs. A boundary's declarations write every parameter
     # at the type the keep file instantiates it at, so a parameter the shard

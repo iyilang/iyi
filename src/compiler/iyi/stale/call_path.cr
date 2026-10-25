@@ -627,7 +627,8 @@ module Iyi::Stale
       @encoder.bool(target_def.exported?)
       @encoder.bool(target_def.iyi_from_impl?)
       @encoder.bool(target_def.iyi_from_artifact?)
-      # MUTATION: dropped encode_node(target_def.body)
+
+      encode_node(target_def.body)
     end
 
     def encode_type_element(type : Type) : Nil

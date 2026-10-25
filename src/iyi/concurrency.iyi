@@ -3985,8 +3985,23 @@ class IyiWorkers
   # a relative due time for its waitable timer (`monitor_wait`), whose
   # handle `@@monitor_timer` is. `@@looks` counts the monitor's looks, which
   # is what the exercise reads its period from.
+  #
+  # On x86-64 Windows the word is not `@@preempt` but a slot of the TEB's
+  # own: `@@preempt_slot` is its offset from `%gs`, which the compiler's
+  # check reads in every function's entry and then loads `%gs`-relative,
+  # as Linux loads `%fs:off` (`PreemptChecks`). A thread-local there is
+  # three loads deep - `gs:0x58`, the C runtime's index into that table,
+  # the word - and a vectorised sum checked that way took 1.63 to 1.64
+  # times its `@[NoPreempt]` twin on a GitHub Windows runner, against 3.4
+  # to 4.9 through the accessor call. The slot is a `TlsAlloc` index under
+  # 64, `TlsSlots` at 0x1480 in the TEB, Go's `tls_g` the same way; until
+  # the pool claims one (`claim_preempt_slot`), and if it gets none under
+  # 64, it is `ArbitraryUserPointer` at 0x28, Go's fallback too. Nothing
+  # but a worker's slot is ever raised, and the slow half clears only a
+  # worker's.
   @[ThreadLocal]
   @@preempt : UInt64 = 0_u64
+  @@preempt_slot : UInt64 = 0x28_u64
   @@preempted_head : IyiFiber?
   @@preempted_tail : IyiFiber?
   @@preempted : Int64 = 0_i64
@@ -4065,6 +4080,7 @@ class IyiWorkers
       @@workers = Array(IyiSchedulerState).new(workers)
       @@listed = Pointer(UInt64).malloc(workers.to_u64)
       IyiSchedLock.unlock
+      claim_preempt_slot
       index = 0
       while index < workers
         IyiThread.start { IyiWorkers.work }
@@ -4085,8 +4101,13 @@ class IyiWorkers
       root = IyiScheduler.current
       st.make_ring
       # Where the monitor raises this worker's preemption word: its own
-      # thread-local's address, the same for the worker's whole life.
-      st.preempt_word = pointerof(@@preempt).address
+      # thread-local's address, or on x86-64 Windows its TEB's slot, the
+      # same for the worker's whole life.
+      {% if flag?(:win32) && flag?(:x86_64) %}
+        st.preempt_word = IyiRoots.current_teb &+ @@preempt_slot
+      {% else %}
+        st.preempt_word = pointerof(@@preempt).address
+      {% end %}
       IyiSchedLock.lock
       st.worker = true
       listed = @@workers
@@ -4473,6 +4494,27 @@ class IyiWorkers
     Pointer(Atomic(UInt64)).new(pointerof(@@looks).address).value.get
   end
 
+  # x86-64 Windows: a `TlsAlloc` slot for the preemption word, as its
+  # offset from `%gs`, before the first worker starts. `TlsAlloc` zeroes
+  # the slot on every thread, and one at 64 or past it is in the
+  # expansion table, not the TEB, so it is given back and the word stays
+  # at `ArbitraryUserPointer`. Nothing elsewhere.
+  def self.claim_preempt_slot : Nil
+    {% if flag?(:win32) && flag?(:x86_64) %}
+      index = LibC.TlsAlloc
+      if index >= 0_i32 && index < 64_i32
+        @@preempt_slot = 0x1480_u64 &+ index.to_u64 &* 8_u64
+      elsif index >= 0_i32
+        LibC.TlsFree(index)
+      end
+    {% end %}
+  end
+
+  # The preemption word's offset from `%gs` on x86-64 Windows.
+  def self.preempt_slot : UInt64
+    @@preempt_slot
+  end
+
   # The back-edge's slow half, on a worker whose word the monitor raised.
   # Nothing here when a runtime lock is held - a loop in a block a prelude
   # def runs under one may check, and a park there would park the holder -
@@ -4482,9 +4524,15 @@ class IyiWorkers
   # word rather than spin (std/mutex).
   def self.preempted : Nil
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      @@preempt = 0_u64
-      st = IyiScheduler.state
-      return unless st.worker
+      {% if flag?(:win32) && flag?(:x86_64) %}
+        st = IyiScheduler.state
+        return unless st.worker
+        Pointer(Atomic(UInt64)).new(st.preempt_word).value.set(0_u64)
+      {% else %}
+        @@preempt = 0_u64
+        st = IyiScheduler.state
+        return unless st.worker
+      {% end %}
       # A fresh quantum from here: the monitor sees the count move.
       st.switches = st.switches &+ 1_u64
       return if IyiSchedLock.held_here? || IyiRuntimeLock.held?

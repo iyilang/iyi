@@ -22,6 +22,14 @@
 #      deep; tasks parked on one worker finish in under twice the ideal,
 #      woken from the main thread and from a worker; and a task joining a
 #      thread leaves its worker to its child.
+#      bench/parallel_preempt.iyi then holds preemption at loop back-edges
+#      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
+#      request beside a task computing with no call in its loop wait no
+#      more than 100 ms, 80 for the request; a preempted task keeps its
+#      unit's token; and the tight-loop cost is printed, not bounded. Its
+#      failure proofs are with step 7's: a `@[NoPreempt]` loop, a monitor
+#      that never raises the word, a slow half that does not poll, and a
+#      preempted task that gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. The speedup, measured: CPU-bound tasks on one worker and on several,

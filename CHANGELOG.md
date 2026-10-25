@@ -1,6 +1,67 @@
 # Changelog
 
-## Unreleased
+## 0.19.1 — 2026-10-25
+
+**A collector hang and a handful of TLS and PKI edges fixed, a build
+with nothing changed that builds nothing, std/http's connections on every
+core, and TLS Encrypted Client Hello.** A program whose collections mark with
+helper threads back to back could hang for good: a helper that took its
+permit a round early was erased by the round's reset, on every platform,
+14 runs in 24,000 of `bench/sweep_exercise.iyi` before the fix and none
+after. Two automated reviews of 0.19.0's new TLS and PKI code found
+nothing worse than low to medium severity, all of it fixed: a client's
+`TlsSession` offers a ticket only to the port and configuration that
+checked it, and not past its certificate's expiry or seven days from the
+handshake that authenticated it; a server declines early data a lowered
+limit no longer allows rather than cutting the client off, and refuses a
+server_name past 253 bytes (in 0.19.0 one past 255 ended that
+connection's task with `arithmetic overflow` when its ticket was
+written, the server serving on); std/acme requires HTTPS; std/autocert
+checks an issued chain against its roots and holds a handshake no longer
+than its deadline; DNS over TLS and over HTTPS pad their queries to 128
+bytes. std/hpke is Hybrid Public Key Encryption
+(RFC 9180), and std/tls speaks Encrypted Client Hello (RFC 9849) at both
+ends over it, held to Go's crypto/tls each way; std/dns reads SVCB and
+HTTPS records (RFC 9460), and an `HTTPClient` asked to takes a site's
+ECH configuration and protocols from them. A body that travels in an
+artifact is located in its module's source, so `Eiy.render` in one finds
+its template from artifacts as it does from source (#140).
+
+The edit loop, from a port of a 10,700-line web application (#141-#144):
+`iyi build` records what a build read and, when none of it moved, says the
+program is up to date in about 0.01 s, where every program SPEC.md IV.3a
+times took 0.10 s to 1.09 s; a rebuild that does compile reuses every
+object, where debug builds put initialisers in a new order each time;
+`run` starts its program with `posix_spawn`, whose cost does not grow with
+the compiler's memory as `fork`'s did, and a template rendered several
+times in one compile runs its helper once, which took a 24-template
+application's `Semantic (main)` from 3.97 s to 1.66 s; and `-s` prints
+each phase's resident memory, where it printed `0.00MB`.
+`Server.serve_parallel` answers std/http's connections on every core
+(#145's first step): a request that computes went from 411 a second under
+`serve` to 4,033 on 12 workers, measured on Windows on 12 logical CPUs.
+
+**Some answers change:** a std/tls client sends a GREASE
+encrypted_client_hello extension in every ClientHello without an ECH
+configuration (`TlsConfig#ech_grease = false` turns it off);
+`AutocertManager` refuses chains its `roots`, the system's unless set,
+do not lead to, so a manager pointed at a private CA must set them;
+`TlsServerConfig#identity_source` is given a third argument, the
+milliseconds left of the handshake; and tickets a 0.19.0 server issued
+are not read by this one, so those clients make one full handshake.
+`.iyimod` is v59, and an artifact an earlier compiler wrote is refused
+and built again. `iyi build` skips a build with nothing changed unless
+given `--force`, and a debug build's initialiser order is fixed for a
+given import graph (`IYI_INIT_SEED` salts it) where it changed from build
+to build. **Some programs that compiled are refused:** a proc handed to a
+parallel boundary as `&work` (`g.spawn_parallel(&work)`,
+`m.lock(&work)`), whose captures nothing checked.
+
+**Not here, and said so:** std/tls has not been audited and is not to be
+called secure until it is; ECH's split mode is not here; the Go legs of
+the ECH gate run on Linux CI alone, where Go is 1.25 or later; the
+2x-5x spread of `Semantic (main)` on Windows (#143) did not reproduce on
+Linux and is not explained, and `-s` now prints what would show it.
 
 ### Added
 
@@ -53,6 +114,102 @@
   `bench/std_router_exercise.sh` routes every table through a
   `SharedRouter`, holds its answers and its conflict sentence to
   `Router`'s, and serves one under `serve_parallel` over the wire.
+
+- **std/dns: SVCB and HTTPS records (RFC 9460); std/http: `HTTPClient`
+  connects by them.** `SvcbRecord.parse` reads a record's priority,
+  target and params - mandatory, alpn, no-default-alpn, port, ipv4hint,
+  ech, ipv6hint, any other kept as bytes - refusing section 2.2's
+  malformed sets (keys out of order or twice, a param cut short, a
+  mandatory key missing), and `to_s` prints it as dig 9.20 does.
+  `Resolver#https_records(host, port)` asks `host` or
+  `_port._https.host`, follows AliasMode at most two links, and orders
+  ServiceMode records by priority, in the clear or over DoT/DoH upstreams.
+  `HTTPClient#use_https_records = true` (off by default: a DNS round trip
+  before each new ClientHello) connects to the first usable record's
+  target and port, takes its `ech` as the connection's `ech_configs`,
+  puts its alpn first, retries once under a refusal's retry_configs (RFC
+  9849 section 6.1.6), does not fall back to the clear when every
+  endpoint carries ech, and behaves as before without records.
+  `TlsMadeUnder` now holds `ech_configs`, so kept connections and tickets
+  do not cross between ECH and the clear; `TlsConfig#dup` copies a
+  configuration. bench/std_dns_exercise.sh holds the records to BIND's
+  nsupdate and dig; bench/std_http_https_records.iyi is the end-to-end
+  test, with broken copies in bench/std_http_exercise.sh.
+
+- **std/tls: Encrypted Client Hello (RFC 9849), client and server, over
+  std/hpke.** `TlsConfig#ech_configs` takes an ECHConfigList (a DNS
+  HTTPS record's `ech`); the name, ALPN and any ticket and early data go
+  in the encrypted ClientHelloInner, the ClientHelloOuter names the
+  config's public_name, the extensions both share are named by
+  ech_outer_extensions, and the encoding is padded (section 6.1.3).
+  `TlsServerConfig#ech_keys` holds `TlsEchKey`s (`TlsEchKey.generate`,
+  `from_bytes`, `config_list`; several for rotation), confirms what it
+  took in ServerHello.random and in a HelloRetryRequest, and answers what
+  no key opens on the outer, with retry_configs. A client turned down
+  checks the certificate for the public_name and ends with ech_required,
+  the `TlsError`'s `retry_configs` the server's list.
+  A ticket that comes over ECH is kept for the inner name, port and
+  configuration (the session binding), and sought by them inside.
+  `TlsConnection#ech_accepted?`, `TlsServer#outer_server_name`; GREASE
+  ECH without a config unless `TlsConfig#ech_grease` is off.
+  `TlsServerConfig#groups` orders the key exchange groups a server takes.
+  Split mode is not here. ECH cost 0.11 ms a handshake on loopback
+  (--release, iyi to iyi, the median of 200, the best of five: 0.619 ms
+  without, 0.730 with). Held by `bench/std_tls_exercise.sh`: this
+  program's client and server, ClientHellos crafted from the RFC's text
+  for each of the server's refusals and both confirmations, a scripted
+  server for the client's, Go's crypto/tls client and server
+  (`bench/std_tls_ech_oracle.go`, where Go 1.25 or later is here) each way
+  through a HelloRetryRequest, and 42 broken copies caught. CI's Linux
+  shards set Go up; the darwin and Windows runners' Go predates 1.25, so
+  there the Go legs go unasked and say so.
+
+- **std/hpke: Hybrid Public Key Encryption (RFC 9180), the building
+  block of TLS Encrypted Client Hello and Oblivious HTTP, written in iyi
+  over std/curve25519, std/p256, std/p384, std/crypto and std/aead.**
+  All four modes (base, psk, auth, auth_psk); the KEMs DHKEM(X25519,
+  HKDF-SHA256), DHKEM(P-256, HKDF-SHA256) and DHKEM(P-384, HKDF-SHA384);
+  HKDF-SHA256, -SHA384 and -SHA512; AES-128-GCM, AES-256-GCM,
+  ChaCha20-Poly1305 and the export-only AEAD.
+  - `HpkeSuite#seal`, `#open`, `#send_export` and `#receive_export` are
+    section 6's single-shot functions; `#sender` and `#recipient` set up
+    section 5's contexts, which seal and open at sequence 0, 1, 2 and on,
+    refuse to go past 2^96 - 2, and export secrets (section 5.3).
+    `HpkeKem#encapsulate` and `#decapsulate` are the KEM itself.
+  - `HpkePrivateKey.derive` is DeriveKeyPair (section 7.1.3);
+    `HpkePrivateKey.from_bytes`, `HpkePublicKey.from_bytes` and `bytes`
+    serialise keys as section 7.1.1 has them, P-256 and P-384 points
+    validated when read.
+  - An encapsulation of the wrong length, a point off its curve, an
+    X25519 shared secret of all zero bytes (section 7.1.4), a ciphertext
+    that does not open and a context whose nonces are spent are an
+    `HpkeError`, a value; a failed open leaves the sequence where it was.
+    The caller brings the randomness, as std/curve25519's and std/mlkem's
+    do.
+  - Not there: DHKEM(P-521) and DHKEM(X448), whose curves std lacks, and
+    the post-quantum KEMs ML-KEM-768 and X-Wing, whose code points and
+    test vectors were still being redefined by draft-ietf-hpke-pq.
+  - Measured (--release, best of five runs of 200, X25519, HKDF-SHA256,
+    AES-128-GCM, a 1 KiB message): a single-shot seal 46 us and open 36;
+    in a context, seal 3.8 us and open 5.0.
+
+  Held by `bench/std_hpke_exercise.sh`: RFC 9180's test vectors for every
+  suite of them std/hpke has, 64 vectors (a subset vendored in
+  `bench/std_hpke_fixture`, every encryption of each checked by its
+  ciphertexts' SHA-256, and the CFRG's whole file fetched and checked one
+  encryption at a time when the network answers): the key pairs, the
+  encapsulation and shared secret, all 257 encryptions at both ends, the
+  key and base nonce at sequence 2^96 - 2, and the exports. An HPKE
+  written in Python over the primitives of `cryptography`
+  (`bench/std_hpke_oracle.py`), held to the same vectors first, gives the
+  same bytes from the same randomness and opens what std/hpke seals, and
+  std/hpke opens what it seals, five rounds of each of the 36 suites in
+  each mode; known answers from it hold DHKEM(P-384) and HKDF-SHA384,
+  which the RFC has no vectors for. Twenty-two broken copies, among them
+  a LabeledExtract without its suite_id, a nonce without the sequence
+  XORed in, a sequence not incremented, a psk_id or info not bound, the
+  all-zero X25519 check removed from std/curve25519, and AuthEncap
+  without the sender's key, are each caught at the check that names it.
 
 ### Fixed
 
@@ -155,146 +312,6 @@
   Linux VM, where artifacts make the generated project's loop slower, not
   faster (0.96 s an edit against 0.22 s), which is written down there and
   not explained.
-
-## 0.19.1 — 2026-10-23
-
-**A collector hang and a handful of TLS and PKI edges fixed, and TLS
-Encrypted Client Hello added.** A program whose collections mark with
-helper threads back to back could hang for good: a helper that took its
-permit a round early was erased by the round's reset, on every platform,
-14 runs in 24,000 of `bench/sweep_exercise.iyi` before the fix and none
-after. Two automated reviews of 0.19.0's new TLS and PKI code found
-nothing worse than low to medium severity, all of it fixed: a client's
-`TlsSession` offers a ticket only to the port and configuration that
-checked it, and not past its certificate's expiry or seven days from the
-handshake that authenticated it; a server declines early data a lowered
-limit no longer allows rather than cutting the client off, and refuses a
-server_name past 253 bytes (in 0.19.0 one past 255 ended that
-connection's task with `arithmetic overflow` when its ticket was
-written, the server serving on); std/acme requires HTTPS; std/autocert checks an issued chain against its roots and holds a
-handshake no longer than its deadline; DNS over TLS and over HTTPS pad
-their queries to 128 bytes. std/hpke is Hybrid Public Key Encryption
-(RFC 9180), and std/tls speaks Encrypted Client Hello (RFC 9849) at both
-ends over it, held to Go's crypto/tls each way; std/dns reads SVCB and
-HTTPS records (RFC 9460), and an `HTTPClient` asked to takes a site's
-ECH configuration and protocols from them. A body that travels in an
-artifact is located in its module's source, so `Eiy.render` in one finds
-its template from artifacts as it does from source (#140).
-
-**Some answers change:** a std/tls client sends a GREASE
-encrypted_client_hello extension in every ClientHello without an ECH
-configuration (`TlsConfig#ech_grease = false` turns it off);
-`AutocertManager` refuses chains its `roots`, the system's unless set,
-do not lead to, so a manager pointed at a private CA must set them;
-`TlsServerConfig#identity_source` is given a third argument, the
-milliseconds left of the handshake; and tickets a 0.19.0 server issued
-are not read by this one, so those clients make one full handshake.
-`.iyimod` is v59, and an artifact an earlier compiler wrote is refused
-and built again.
-
-**Not here, and said so:** std/tls has not been audited and is not to be
-called secure until it is; ECH's split mode is not here; the Go legs of
-the ECH gate run on Linux CI alone, where Go is 1.25 or later.
-
-### Added
-
-- **std/dns: SVCB and HTTPS records (RFC 9460); std/http: `HTTPClient`
-  connects by them.** `SvcbRecord.parse` reads a record's priority,
-  target and params - mandatory, alpn, no-default-alpn, port, ipv4hint,
-  ech, ipv6hint, any other kept as bytes - refusing section 2.2's
-  malformed sets (keys out of order or twice, a param cut short, a
-  mandatory key missing), and `to_s` prints it as dig 9.20 does.
-  `Resolver#https_records(host, port)` asks `host` or
-  `_port._https.host`, follows AliasMode at most two links, and orders
-  ServiceMode records by priority, in the clear or over DoT/DoH upstreams.
-  `HTTPClient#use_https_records = true` (off by default: a DNS round trip
-  before each new ClientHello) connects to the first usable record's
-  target and port, takes its `ech` as the connection's `ech_configs`,
-  puts its alpn first, retries once under a refusal's retry_configs (RFC
-  9849 section 6.1.6), does not fall back to the clear when every
-  endpoint carries ech, and behaves as before without records.
-  `TlsMadeUnder` now holds `ech_configs`, so kept connections and tickets
-  do not cross between ECH and the clear; `TlsConfig#dup` copies a
-  configuration. bench/std_dns_exercise.sh holds the records to BIND's
-  nsupdate and dig; bench/std_http_https_records.iyi is the end-to-end
-  test, with broken copies in bench/std_http_exercise.sh.
-
-- **std/tls: Encrypted Client Hello (RFC 9849), client and server, over
-  std/hpke.** `TlsConfig#ech_configs` takes an ECHConfigList (a DNS
-  HTTPS record's `ech`); the name, ALPN and any ticket and early data go
-  in the encrypted ClientHelloInner, the ClientHelloOuter names the
-  config's public_name, the extensions both share are named by
-  ech_outer_extensions, and the encoding is padded (section 6.1.3).
-  `TlsServerConfig#ech_keys` holds `TlsEchKey`s (`TlsEchKey.generate`,
-  `from_bytes`, `config_list`; several for rotation), confirms what it
-  took in ServerHello.random and in a HelloRetryRequest, and answers what
-  no key opens on the outer, with retry_configs. A client turned down
-  checks the certificate for the public_name and ends with ech_required,
-  the `TlsError`'s `retry_configs` the server's list.
-  A ticket that comes over ECH is kept for the inner name, port and
-  configuration (the session binding), and sought by them inside.
-  `TlsConnection#ech_accepted?`, `TlsServer#outer_server_name`; GREASE
-  ECH without a config unless `TlsConfig#ech_grease` is off.
-  `TlsServerConfig#groups` orders the key exchange groups a server takes.
-  Split mode is not here. ECH cost 0.11 ms a handshake on loopback
-  (--release, iyi to iyi, the median of 200, the best of five: 0.619 ms
-  without, 0.730 with). Held by `bench/std_tls_exercise.sh`: this
-  program's client and server, ClientHellos crafted from the RFC's text
-  for each of the server's refusals and both confirmations, a scripted
-  server for the client's, Go's crypto/tls client and server
-  (`bench/std_tls_ech_oracle.go`, where Go 1.25 or later is here) each way
-  through a HelloRetryRequest, and 42 broken copies caught. CI's Linux
-  shards set Go up; the darwin and Windows runners' Go predates 1.25, so
-  there the Go legs go unasked and say so.
-
-- **std/hpke: Hybrid Public Key Encryption (RFC 9180), the building
-  block of TLS Encrypted Client Hello and Oblivious HTTP, written in iyi
-  over std/curve25519, std/p256, std/p384, std/crypto and std/aead.**
-  All four modes (base, psk, auth, auth_psk); the KEMs DHKEM(X25519,
-  HKDF-SHA256), DHKEM(P-256, HKDF-SHA256) and DHKEM(P-384, HKDF-SHA384);
-  HKDF-SHA256, -SHA384 and -SHA512; AES-128-GCM, AES-256-GCM,
-  ChaCha20-Poly1305 and the export-only AEAD.
-  - `HpkeSuite#seal`, `#open`, `#send_export` and `#receive_export` are
-    section 6's single-shot functions; `#sender` and `#recipient` set up
-    section 5's contexts, which seal and open at sequence 0, 1, 2 and on,
-    refuse to go past 2^96 - 2, and export secrets (section 5.3).
-    `HpkeKem#encapsulate` and `#decapsulate` are the KEM itself.
-  - `HpkePrivateKey.derive` is DeriveKeyPair (section 7.1.3);
-    `HpkePrivateKey.from_bytes`, `HpkePublicKey.from_bytes` and `bytes`
-    serialise keys as section 7.1.1 has them, P-256 and P-384 points
-    validated when read.
-  - An encapsulation of the wrong length, a point off its curve, an
-    X25519 shared secret of all zero bytes (section 7.1.4), a ciphertext
-    that does not open and a context whose nonces are spent are an
-    `HpkeError`, a value; a failed open leaves the sequence where it was.
-    The caller brings the randomness, as std/curve25519's and std/mlkem's
-    do.
-  - Not there: DHKEM(P-521) and DHKEM(X448), whose curves std lacks, and
-    the post-quantum KEMs ML-KEM-768 and X-Wing, whose code points and
-    test vectors were still being redefined by draft-ietf-hpke-pq.
-  - Measured (--release, best of five runs of 200, X25519, HKDF-SHA256,
-    AES-128-GCM, a 1 KiB message): a single-shot seal 46 us and open 36;
-    in a context, seal 3.8 us and open 5.0.
-
-  Held by `bench/std_hpke_exercise.sh`: RFC 9180's test vectors for every
-  suite of them std/hpke has, 64 vectors (a subset vendored in
-  `bench/std_hpke_fixture`, every encryption of each checked by its
-  ciphertexts' SHA-256, and the CFRG's whole file fetched and checked one
-  encryption at a time when the network answers): the key pairs, the
-  encapsulation and shared secret, all 257 encryptions at both ends, the
-  key and base nonce at sequence 2^96 - 2, and the exports. An HPKE
-  written in Python over the primitives of `cryptography`
-  (`bench/std_hpke_oracle.py`), held to the same vectors first, gives the
-  same bytes from the same randomness and opens what std/hpke seals, and
-  std/hpke opens what it seals, five rounds of each of the 36 suites in
-  each mode; known answers from it hold DHKEM(P-384) and HKDF-SHA384,
-  which the RFC has no vectors for. Twenty-two broken copies, among them
-  a LabeledExtract without its suite_id, a nonce without the sequence
-  XORed in, a sequence not incremented, a psk_id or info not bound, the
-  all-zero X25519 check removed from std/curve25519, and AuthEncap
-  without the sender's key, are each caught at the check that names it.
-
-### Fixed
 
 - **A body read back from an artifact is located in its module's source,
   so `Eiy.render` in a travelling body finds its template (#140).** A

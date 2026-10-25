@@ -298,8 +298,6 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
             nil
           end
         end
-
-        SystemRoots.read
         CODE
 
       roots_type = result.program.types["SystemRoots"].metaclass.as(Iyi::ModuleType)

@@ -263,9 +263,9 @@ step 20 "invalid snapshot metadata is refused"
 # Covered by spec/compiler/stale/snapshot_spec.cr:125,225
 step 21 "corruption and concurrent receipt writes are atomic"
 # Covered by spec/compiler/stale/store_spec.cr:590 and bench/stale_store_concurrency.sh
-step 22 "Crystal mode stays fresh"
-# Crystal's own test aggregate remains unchanged; cached Crystal mode is
-# covered by the command/runner spec because this host cannot link std specs.
+step 22 "compatibility-library mode stays fresh"
+# Its test aggregate remains unchanged; cached compatibility-library mode is
+# covered by the command/runner spec because this host cannot link its specs.
 
 # Rows 23 and 24 are CI-only by §12.
 

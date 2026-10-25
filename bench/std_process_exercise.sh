@@ -14,6 +14,8 @@
 #     waits, the parent waits for stdout's end, and the watchdog ends it;
 #   * the wait parks: the end awaited by a blocking call - a sibling that
 #     ticks every 50 ms ticks fewer than 10 times while the child sleeps;
+#     and the end polled, as without a pidfd on Linux or with
+#     RegisterWaitForSingleObject refused on Windows, holds every check;
 #   * a cancelled run ends its child: the kill taken out - the run answers
 #     Cancelled only once its child has slept its 20 seconds out;
 #   * on Linux and darwin, a write to a child that stopped reading answers
@@ -269,6 +271,25 @@ prove() {
   fi
 }
 
+# holds <name> <what it shows> <pairs...>: a copy of std with the pairs
+# replaced, under which every check still holds.
+holds() {
+  local name="$1" shows="$2"
+  shift 2
+  if ! patched "$name" "$@"; then
+    echo "  the patch for $name did not apply"
+    status=1
+  elif build "$name" "$WORK/$name-std${PSEP}$IYI_PATH"; then
+    if "$WORK/$name" >"$WORK/$name.out" 2>&1 && grep -q "ALL CHECKS PASSED" "$WORK/$name.out"; then
+      echo "  $shows"
+    else
+      echo "  with the patch for $name the exercise failed:"
+      grep -m3 FAIL "$WORK/$name.out" | sed 's/^/    /'
+      status=1
+    fi
+  fi
+}
+
 if [ -z "$PY" ]; then
   echo "  no python on this machine, so the broken-module proofs are unmeasured"
 else
@@ -292,9 +313,23 @@ else
 
   case "$PLATFORM" in
     windows)
-      prove blocking "the end awaited by WaitForSingleObject" "a sibling ticked" \
+      # With the thread pool refusing RegisterWaitForSingleObject the end
+      # is polled: a zero wait, and a sleep between asks that lets the
+      # sibling tick, so every check holds. The poll's zero wait made
+      # INFINITE is the blocking WaitForSingleObject that fallback was
+      # until feat/m-thread, and the check still catches it: the
+      # exercise's tasks share the main thread, which the wait holds, so
+      # no other thread carries the sibling. Proved with the registration
+      # refused alone, this copy passed (run 40213973629, job
+      # 121231000266): it no longer broke anything.
+      holds polled "with RegisterWaitForSingleObject refused every check holds: the end is polled" \
         "if LibKernel32.RegisterWaitForSingleObject(pointerof(registration), @process, callback, words.as(Void*), -1, 8) == 0" \
         "if true"
+      prove blocking "the end awaited by a blocking WaitForSingleObject" "a sibling ticked" \
+        "if LibKernel32.RegisterWaitForSingleObject(pointerof(registration), @process, callback, words.as(Void*), -1, 8) == 0" \
+        "if true" \
+        "while ::LibC.WaitForSingleObject(@process, 0) == 258" \
+        "while ::LibC.WaitForSingleObject(@process, -1) == 258"
       ;;
     darwin)
       prove blocking "the end awaited by waitpid" "a sibling ticked" \
@@ -304,19 +339,8 @@ else
       # A kernel before 5.3 has no pidfd, and the end is polled: with
       # pidfd_open answering nothing the exercise holds all the same. And
       # the poll made a plain wait4 again blocks the thread.
-      if ! patched nopidfd \
-           "pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)" "pidfd = -1_i64"; then
-        echo "  the patch for nopidfd did not apply"
-        status=1
-      elif build nopidfd "$WORK/nopidfd-std${PSEP}$IYI_PATH"; then
-        if "$WORK/nopidfd" >"$WORK/nopidfd.out" 2>&1 && grep -q "ALL CHECKS PASSED" "$WORK/nopidfd.out"; then
-          echo "  without a pidfd, as on a kernel before 5.3, every check holds: the end is polled"
-        else
-          echo "  without a pidfd the exercise failed:"
-          grep -m3 FAIL "$WORK/nopidfd.out" | sed 's/^/    /'
-          status=1
-        fi
-      fi
+      holds nopidfd "without a pidfd, as on a kernel before 5.3, every check holds: the end is polled" \
+        "pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)" "pidfd = -1_i64"
       prove blocking "the end awaited by a blocking wait4, as on a kernel before 5.3" "a sibling ticked" \
         "pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)" "pidfd = -1_i64" \
         "WNOHANG        =   1_i64" "WNOHANG        =   0_i64"

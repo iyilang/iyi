@@ -1149,6 +1149,15 @@ jobs:
           # ldaxr/stlxr, workers by the runtime's own `clone`.
           ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
             -o cross/parallel-aarch64 bench/parallel_exercise.iyi
+          # Thread-locals of a task that moves, the aarch64 arm, released:
+          # read after a park and after a loop whose back-edge check moved
+          # the task, where `llvm.read_register`, the thread pointer read
+          # this arm had before its volatile `mrs`, was hoisted out of the
+          # loop. The hoisted copy is the step's failure proof.
+          ./bin/iyi build --release --cross-compile --target aarch64-linux-gnu \
+            -o cross/migrate-aarch64 bench/parallel_migrate.iyi
+          ./bin/iyi build --release -Dparallel_hoisted_tls --cross-compile \
+            --target aarch64-linux-gnu -o cross/hoisted-aarch64 bench/parallel_migrate.iyi
           # std/process's Linux arm on the other instruction set and the
           # other libc: `clone`, `execve`, `pipe2`, `pidfd_open` and `wait4`
           # by syscall, with aarch64's numbers, which the native Linux job
@@ -1280,12 +1289,16 @@ jobs:
               timeout 300 ./threads-aarch64 4 > threads.txt 2>&1 &&
               gcc parallel-aarch64.o -o parallel-aarch64 &&
               timeout 900 ./parallel-aarch64 --watch=300000 > parallel.txt 2>&1 &&
+              gcc migrate-aarch64.o -o migrate-aarch64 &&
+              timeout 600 ./migrate-aarch64 channels loops --watch=300000 > migrate.txt 2>&1 &&
+              gcc hoisted-aarch64.o -o hoisted-aarch64 &&
+              { timeout 300 ./hoisted-aarch64 loops > hoisted.txt 2>&1; echo "exit $?" >> hoisted.txt; true; } &&
               gcc process-aarch64.o -o process-aarch64 &&
               timeout 300 ./process-aarch64 > process.txt 2>&1 &&
               gcc debug-aarch64.o -o debug-aarch64 &&
               { timeout 120 ./debug-aarch64 > debug-aarch64.txt 2>&1; true; }
             ' || status=$?
-          for out in got conc floor threads parallel process debug-aarch64; do
+          for out in got conc floor threads parallel migrate hoisted process debug-aarch64; do
             echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
           done
           [ "${status:-0}" -eq 0 ]
@@ -1296,6 +1309,10 @@ jobs:
           grep -q "every property held" cross/floor.txt && echo "aarch64: the thread floor held"
           grep -q "every property held" cross/threads.txt && echo "aarch64: threads under the collector held"
           grep -q "every property held" cross/parallel.txt && echo "aarch64: tasks across cores held"
+          grep -q "every property held" cross/migrate.txt && echo "aarch64: thread-locals after a park and after a loop's back-edge check held" || exit 1
+          { grep -qF "a thread-local read after a loop's back-edge check named another thread" cross/hoisted.txt &&
+            grep -qx "exit 1" cross/hoisted.txt &&
+            echo "aarch64: a thread-local read hoisted out of a loop was caught"; } || exit 1
           grep -q "ALL CHECKS PASSED" cross/process.txt && echo "aarch64: std/process held" || exit 1
           { grep -qE "^0 +[^ ]*gamma[^ ]* at .*std_debug_cross\.iyi:15:" cross/debug-aarch64.txt &&
             grep -qE "^1 +[^ ]*beta[^ ]* at .*std_debug_cross\.iyi:20:" cross/debug-aarch64.txt &&

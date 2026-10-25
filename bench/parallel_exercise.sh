@@ -17,11 +17,12 @@
 #      and the typed group answers.
 #   2. bench/parallel_migrate.iyi holds what a task keeps when it resumes
 #      on another worker, plain and --release: its stack's lists through
-#      collections, thread-locals of the thread it is on, its socket's
-#      bytes, a cancel and a sibling's close that find it, frames 120 KiB
-#      deep; tasks parked on one worker finish in under twice the ideal,
-#      woken from the main thread and from a worker; and a task joining a
-#      thread leaves its worker to its child.
+#      collections, thread-locals of the thread it is on, after a park and
+#      after a loop's back-edge check that moved it, its socket's bytes, a
+#      cancel and a sibling's close that find it, frames 120 KiB deep;
+#      tasks parked on one worker finish in under twice the ideal, woken
+#      from the main thread and from a worker; and a task joining a thread
+#      leaves its worker to its child.
 #      bench/parallel_preempt.iyi then holds preemption at loop back-edges
 #      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
 #      request beside a task computing with no call in its loop wait no
@@ -51,10 +52,11 @@
 #      `put_now` without the scheduler's lock; the race step's add made
 #      a plain load and store, which loses adds only when tasks really run
 #      at the same instant; and for the moves of step 2 - a thread-local
-#      read as it was before a park, a collector that skips a fiber on its
-#      way between workers, an io wait a cancel cannot find, a close posted
-#      to nobody, a pool that never steals a started task, tasks woken
-#      back onto the worker they parked on as they were before tasks
+#      read as it was before a park, one read as it was before a loop
+#      whose back-edge check moved the task, a collector that skips a fiber
+#      on its way between workers, an io wait a cancel cannot find, a close
+#      posted to nobody, a pool that never steals a started task, tasks
+#      woken back onto the worker they parked on as they were before tasks
 #      moved, and a join held in the kernel.
 #   8. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 4's floor refuses the ratio that comes out.
@@ -114,8 +116,8 @@ done
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
 # Its balance step is timed against four workers' ideal, which a machine
 # with fewer cores than that cannot keep; there the other steps run.
-MIGRATE_STEPS="channels sockets cancel closes deep balance join"
-[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep join"
+MIGRATE_STEPS="channels sockets cancel closes deep loops balance join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops join"
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
   flag=""
@@ -430,6 +432,12 @@ else
     echo "the stale thread-local build failed:"; tail -20 build-staletls.log; exit 1
   fi
   caught staletls 'a thread-local read after a park named another thread' channels
+
+  step "failure proof: a thread-local read hoisted out of a loop names the thread the task left once the back-edge check moves it"
+  if ! "$IYI" build --release -Dparallel_hoisted_tls "$REPO/bench/parallel_migrate.iyi" -o hoistedtls-run > build-hoistedtls.log 2>&1; then
+    echo "the hoisted thread-local build failed:"; tail -20 build-hoistedtls.log; exit 1
+  fi
+  caught hoistedtls "a thread-local read after a loop's back-edge check named another thread" loops
 
   step "failure proof: a collector that skips a fiber on its way between workers frees the lists on its stack"
   broken intransit '/^            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0$/ { print "            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Runnable && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0"; next } { print }' prelude.iyi parallel_migrate

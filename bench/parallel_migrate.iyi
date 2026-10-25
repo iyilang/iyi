@@ -20,9 +20,13 @@
 # keeps the thread's own pointer in - %fs:0 on x86-64 Linux, the TEB at
 # %gs:0x30 on Windows, tpidr_el0 on aarch64 (tpidrro_el0 on darwin) -
 # which no codegen of thread-locals touches. After every park the two
-# must change together. Under `-Dparallel_stale_tls` the thread-local is
-# the one read before the park, as code that kept a thread-local's
-# address across a call would read it, and the step fails by name.
+# must change together, and so must the thread's line and the kernel's
+# thread after a loop whose back-edge check moved the task (`loops`).
+# Under `-Dparallel_stale_tls` the thread-local is the one read before the
+# park, as code that kept a thread-local's address across a call would
+# read it, and under `-Dparallel_hoisted_tls` the line is the one read
+# before the loop, as a read hoisted out of it would be; each step fails
+# by name.
 #
 # Then the timed shapes the issue's server is made of (#145): tasks that
 # park and then compute finish in about their work over the workers, when
@@ -497,6 +501,105 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
+  # ── loops ────────────────────────────────────────────────────────────
+  # A task computing in a loop with no call in it gives its worker up at
+  # the loop's back-edge (SPEC.md III.4.13, part 9), and may go on in the
+  # middle of the loop on another worker. The check goes in after LLVM has
+  # optimised the loop, so a thread-local read LLVM took as the same for
+  # the whole function - hoisted out of a loop that stores nothing, and
+  # shared with the reads before and after it - names the thread the task
+  # left. aarch64 Linux read its thread pointer with `llvm.read_register`
+  # until it took a volatile `mrs` (`codegen.cr#iyi_tpidr_el0`): built by
+  # that compiler for aarch64-linux-gnu, release, this step loaded the line
+  # once before the loop and failed at its first check under qemu-user,
+  # in 2 runs of 2, where the volatile read passes.
+  #
+  # 16 tasks on the 4 workers each compute three loops of about 30 ms:
+  # the thread's line (`IyiThread.current_line`, a thread-local) is read
+  # before a loop, in every turn of it beside a xorshift walk, and right
+  # after it, with the kernel's thread read by asm on either side. The
+  # line after the loop and the kernel's thread changed together or not at
+  # all; and of the loops that moved, some turn read the line of a thread
+  # it moved to. Under `-Dparallel_hoisted_tls` the reads in and after the
+  # loop are the one before it, as the hoisted code read them, and the step
+  # fails by name.
+
+  # The thread's line in or after the loop: read here, or under
+  # `-Dparallel_hoisted_tls` the one read before the loop.
+  def line_in_loop(before : UInt64) : UInt64
+    {% if flag?(:parallel_hoisted_tls) %}
+      before
+    {% else %}
+      IyiThread.current_line
+    {% end %}
+  end
+
+  # One loop, all in one def as LLVM sees it, so the reads before, in and
+  # after it are LLVM's to share: whether the task moved, the turns that
+  # read another line than the one before the loop, and the walk's sum.
+  @[NoInline]
+  def line_loop(rounds : Int64, seed : UInt64) : Tuple(Bool, Int64, UInt64)
+    os_before = os_thread
+    line_before = IyiThread.current_line
+    x = seed | 1_u64
+    sum = 0_u64
+    turned = 0_i64
+    i = 0_i64
+    while i < rounds
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      line = line_in_loop(line_before)
+      turned = turned &+ (line != line_before ? 1_i64 : 0_i64)
+      sum = sum &+ (line ^ x)
+      i = i + 1
+    end
+    line_after = line_in_loop(line_before)
+    os_after = os_thread
+    if (os_after == os_before) != (line_after == line_before)
+      fail("loops: a thread-local read after a loop's back-edge check named another thread than the one the task was on: the kernel's thread went #{os_before} -> #{os_after}, the thread's line #{line_before} -> #{line_after}")
+    end
+    {os_after != os_before, turned, sum}
+  end
+
+  def loops(watch : Int32) : Nil
+    watched("loops", watch) do
+      t = __iyi_monotonic_ns
+      x = spin(20_000_000_i64, 3_u64)
+      ms = elapsed_ms(t)
+      ms = ms + 1_i64 if x == 0_u64
+      per_ms = 20_000_000_i64 // (ms > 0_i64 ? ms : 1_i64)
+      tasks = 16
+      rounds = 3
+      moved = Tally.new
+      turned = Tally.new
+      sums = Tally.new
+      preempts = IyiWorkers.preempts
+      group do |g|
+        tasks.times do |task|
+          g.spawn_parallel do
+            rounds.times do |r|
+              answer = line_loop(30_i64 * per_ms, (task * rounds + r + 1).to_u64)
+              moved.add(1_i64) if answer[0]
+              turned.add(answer[1])
+              sums.add((answer[2] & 1_u64).to_i64)
+            end
+            0
+          end
+        end
+      end
+      given = IyiWorkers.preempts - preempts
+      fail("loops: #{tasks} tasks computed #{tasks * rounds} loops of 30 ms on #{IyiWorkers.count} workers and none was preempted") if given == 0_u64
+      if IyiWorkers.count > 1 && moved.count == 0_i64
+        fail("loops: none of #{tasks * rounds} loops, preempted #{given} times, ended on another worker than it began on")
+      end
+      if moved.count > 0_i64 && turned.count == 0_i64
+        fail("loops: #{moved.count} loops ended on another worker and no turn of any of them read the line of a thread it moved to")
+      end
+      puts "loops: #{tasks * rounds} loops of 30 ms preempted #{given} times, #{moved.count} ended on another worker than they began on, #{turned.count} turns read the line of a thread they moved to"
+    end
+  end
+
   # ── balance ──────────────────────────────────────────────────────────
   # The parked shape (#145): every task starts, and parks on a channel,
   # on one worker - the others are held by tasks that spin until all have
@@ -614,7 +717,7 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  STEPS = ["channels", "sockets", "cancel", "closes", "deep", "balance", "join"]
+  STEPS = ["channels", "sockets", "cancel", "closes", "deep", "loops", "balance", "join"]
 
   watch = 60000
   chosen = [] of String
@@ -635,6 +738,7 @@ import std/socket::{IyiSocket, SocketError}
     when "cancel"   then cancel(watch)
     when "closes"   then closes(watch)
     when "deep"     then deep_step(watch)
+    when "loops"    then loops(watch)
     when "balance"  then balance(watch)
     when "join"     then join(watch)
     end

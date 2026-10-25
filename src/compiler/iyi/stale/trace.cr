@@ -1,62 +1,8 @@
 require "crystal/digest/sha256"
 require "./encoding"
+require "./roots"
 
 module Iyi::Stale
-  # Logical roots for path normalization:
-  # - src: Compiler.entry_root_of
-  # - toolchain: library entry holding iyi/prelude.iyi
-  # - pkg: cache mod/
-  # - scratch: runner per-test directory
-  # - abs: machine-bound files outside all roots
-  struct Roots
-    getter src : String
-    getter toolchain : String?
-    getter pkg : String?
-    getter scratch : String?
-
-    def initialize(@src : String, @toolchain : String? = nil, @pkg : String? = nil, @scratch : String? = nil)
-      @src = File.expand_path(@src)
-      @toolchain = @toolchain.try { |p| File.expand_path(p) }
-      @pkg = @pkg.try { |p| File.expand_path(p) }
-      @scratch = @scratch.try { |p| File.expand_path(p) }
-    end
-
-    def map(real_path : String) : {String, String}
-      exp = File.expand_path(real_path)
-      if (s = @scratch) && path_under?(exp, s)
-        {"scratch", relative_path(exp, s)}
-      elsif path_under?(exp, @src)
-        {"src", relative_path(exp, @src)}
-      elsif (t = @toolchain) && path_under?(exp, t)
-        {"toolchain", relative_path(exp, t)}
-      elsif (p = @pkg) && path_under?(exp, p)
-        {"pkg", relative_path(exp, p)}
-      else
-        {"abs", exp}
-      end
-    end
-
-    def resolve(root : String, path : String) : String
-      case root
-      when "src"       then File.join(@src, path)
-      when "toolchain" then @toolchain ? File.join(@toolchain.not_nil!, path) : path
-      when "pkg"       then @pkg ? File.join(@pkg.not_nil!, path) : path
-      when "scratch"   then @scratch ? File.join(@scratch.not_nil!, path) : path
-      else                  path
-      end
-    end
-
-    private def path_under?(path : String, root : String) : Bool
-      path == root || path.starts_with?(root.ends_with?('/') ? root : "#{root}/")
-    end
-
-    private def relative_path(path : String, root : String) : String
-      rel = ::Path[path].relative_to(root).to_s
-      rel = rel[2..-1] if rel.starts_with?("./")
-      rel
-    end
-  end
-
   record Observation,
     task : UInt64,
     kind : String,
@@ -240,7 +186,9 @@ module Iyi::Stale
             return TraceResult.new(complete: false, incomplete_reason: "truncated record")
           end
 
-          root, rel_path = roots.map(real)
+          rp = roots.map(real)
+          root = rp.root
+          rel_path = rp.path
           # The runtime drops reads under scratch, and reads of paths it already wrote, as internal
           if root == "scratch" || written_paths.includes?(real)
             next
@@ -329,7 +277,9 @@ module Iyi::Stale
             names << name
           end
 
-          root, rel_path = roots.map(real)
+          rp = roots.map(real)
+          root = rp.root
+          rel_path = rp.path
           if root == "scratch" || written_paths.includes?(real)
             next
           end
@@ -369,7 +319,9 @@ module Iyi::Stale
           real = read_str(p_io)
           return TraceResult.new(complete: false, incomplete_reason: "truncated record") if real.nil?
 
-          root, rel_path = roots.map(real)
+          rp = roots.map(real)
+          root = rp.root
+          rel_path = rp.path
           answer = compute_answer("cwd", root, keyer) do |enc|
             enc.str(root)
             enc.str(rel_path)
@@ -400,7 +352,9 @@ module Iyi::Stale
           # Taints shared-write for a WRITE outside scratch
           if inside_scratch == 0_u8
             taints << Taint.new(48_u8, real)
-            root, rel_path = roots.map(real)
+            rp = roots.map(real)
+            root = rp.root
+            rel_path = rp.path
             answer = compute_answer("taint", root, keyer) do |enc|
               enc.uint(48_u64)
               enc.str(real)
@@ -558,7 +512,9 @@ module Iyi::Stale
           end
         when "cwd"
           current_dir = Dir.current
-          root, rel_path = roots.map(current_dir)
+          rp = roots.map(current_dir)
+          root = rp.root
+          rel_path = rp.path
           current_ans = compute_answer("cwd", root, keyer) do |enc|
             enc.str(root)
             enc.str(rel_path)

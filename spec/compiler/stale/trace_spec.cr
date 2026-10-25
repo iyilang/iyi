@@ -37,11 +37,11 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
   )
 
   it "maps paths to logical roots correctly" do
-    roots.map("/workspace/project/src/main.iyi").should eq({"src", "src/main.iyi"})
-    roots.map("/opt/iyi/share/iyi/src/iyi/prelude.iyi").should eq({"toolchain", "iyi/prelude.iyi"})
-    roots.map("/cache/mod/foo-1.0/lib.iyi").should eq({"pkg", "foo-1.0/lib.iyi"})
-    roots.map("/tmp/scratch-123/temp_out.txt").should eq({"scratch", "temp_out.txt"})
-    roots.map("/etc/passwd").should eq({"abs", "/etc/passwd"})
+    roots.map("/workspace/project/src/main.iyi").should eq(Iyi::Stale::RootPath.new("src", "src/main.iyi"))
+    roots.map("/opt/iyi/share/iyi/src/iyi/prelude.iyi").should eq(Iyi::Stale::RootPath.new("toolchain", "iyi/prelude.iyi"))
+    roots.map("/cache/mod/foo-1.0/lib.iyi").should eq(Iyi::Stale::RootPath.new("pkg", "foo-1.0/lib.iyi"))
+    roots.map("/tmp/scratch-123/temp_out.txt").should eq(Iyi::Stale::RootPath.new("scratch", "temp_out.txt"))
+    roots.map("/etc/passwd").should eq(Iyi::Stale::RootPath.new("abs", "/etc/passwd"))
   end
 
   it "parses a complete trace with all record types" do
@@ -296,7 +296,7 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
       file_path = File.join(tmp_dir, "test.txt")
       File.write(file_path, "initial content")
 
-      roots_local = Iyi::Stale::Roots.new(src: tmp_dir)
+      roots_local = Iyi::Stale::Roots.new(src: tmp_dir, toolchain: "", pkg: "", scratch: "")
       keyer = Iyi::Stale::Keyer.portable
       content_hash = Iyi::Stale::Trace.hash_bytes("initial content".to_slice)
 

@@ -342,8 +342,9 @@ for prog in all_progs:
     out_file = os.path.join(work, 'prog.bin')
     if os.path.exists(key_file):
         os.remove(key_file)
-    res = subprocess.run([iyi, 'build', '--stale-key', key_file, '-o', out_file, prog],
-                         capture_output=True, text=True)
+    extra_flags = os.environ.get('IYI_BUILD_FLAGS', '').split()
+    cmd = [iyi, 'build'] + extra_flags + ['--stale-key', key_file, '-o', out_file, prog]
+    res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         print(f'  Reach build FAILED: {name} (exit {res.returncode})', file=sys.stderr)
         mismatches += 1

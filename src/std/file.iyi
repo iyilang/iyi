@@ -1238,7 +1238,7 @@ class ::File
     # index; and a handle's final path is the name it was opened by, in
     # the case the directory keeps, so two links answer two paths where a
     # name and its spelling in another case answer one.
-    @[Effect(:file_stat)]
+    @[Effect(:memory)]
     private def self.two_links?(old_wide : UInt16*, new_wide : UInt16*) : Bool
       nothing = Pointer(Void).new(0_u64)
       one = Std::File::LibKernel32.CreateFileW(old_wide, 0, 0x7, nothing, 3, 0x2200000, nothing)
@@ -2223,7 +2223,7 @@ class ::IyiIO
   # no descriptor - a `Memory` - is -1, which Windows' `to_u64` of it
   # panicked "arithmetic overflow" on; it is EBADF everywhere, as Linux's
   # kernel answers it.
-  @[Effect(:file_read)]
+  @[Effect(:stdio)]
   protected def self.lseek(fd : Int64, offset : Int64, whence : Int32) : Int64
     return -9_i64 if fd < 0_i64
     {% if flag?(:win32) %}

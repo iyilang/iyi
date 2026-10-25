@@ -1671,6 +1671,7 @@ module Iyi
     # annotation because an instance is a clone, and a clone carries no
     # annotations.
     property? iyi_share_block = false
+    property? iyi_observer_wrapped = false
     setter effect : Effect? = nil
 
     def effect : Effect?
@@ -1713,6 +1714,7 @@ module Iyi
       a_def.iyi_from_derive = iyi_from_derive?
       a_def.iyi_share_block = iyi_share_block?
       a_def.effect = @effect
+      a_def.iyi_observer_wrapped = iyi_observer_wrapped?
       a_def.name_location = name_location
       a_def.visibility = visibility
       a_def.free_var_bounds = @free_var_bounds.clone

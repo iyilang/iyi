@@ -458,6 +458,11 @@ class IyiFiber
   # Windows packet, standard input's read - which a cancel still in the
   # mail of the thread holding it does not end again (`listed`).
   property waiting_out : Bool
+  # Given its worker up at a loop's back-edge (`IyiWorkers.preempted`) and
+  # waiting to run again: its unit's token is still its own
+  # (`IyiUnit::YIELDED`), and whichever worker takes it next takes the
+  # token from it (`IyiScheduler.take_unit`).
+  property preempted : Bool
   # 1 from the moment a worker switches to this fiber until the switch
   # away from it has saved its stack pointer (`IyiScheduler.landed`): a
   # fiber woken in that gap may be taken by another worker, which waits
@@ -605,6 +610,7 @@ class IyiFiber
     @next_cancel = nil
     @cancel_posted = false
     @waiting_out = false
+    @preempted = false
     @on_cpu = Atomic(UInt64).new(0_u64)
     @listed_on = Atomic(UInt64).new(0_u64)
     @sp = 0_u64
@@ -878,8 +884,9 @@ end
 # and a store; the list is behind the scheduler's lock, and only a unit
 # with two of its fibers runnable on two workers at once ever uses it.
 class IyiUnit
-  # The id of the worker's state holding it, 0 when none does; and 1
-  # while the list holds a fiber.
+  # The id of the worker's state holding it, 0 when none does, or
+  # `YIELDED` while a fiber of it that gave its worker up at a loop's
+  # back-edge waits to run again; and 1 while the list holds a fiber.
   @active : Atomic(UInt64)
   @waiting : Atomic(UInt64)
   property deferred_head : IyiFiber?
@@ -890,6 +897,23 @@ class IyiUnit
     @waiting = Atomic(UInt64).new(0_u64)
     @deferred_head = nil
     @deferred_tail = nil
+  end
+
+  # No worker's id: a state's object id is an address. A fiber preempted
+  # at a back-edge keeps its unit's token through the wait, so no other
+  # fiber of its unit runs between two of its statements that are not a
+  # park - the promise `spawn` makes inside a parallel task - and the
+  # others wait on the list as they would for a worker holding it.
+  YIELDED = 1_u64
+
+  # From worker *id* to the preempted fiber, and back to the worker that
+  # takes that fiber.
+  def hand_to_yielded(id : UInt64) : Bool
+    @active.compare_and_set(id, YIELDED)[1]
+  end
+
+  def take_yielded(id : UInt64) : Bool
+    @active.compare_and_set(YIELDED, id)[1]
   end
 
   def take(id : UInt64) : Bool
@@ -1154,6 +1178,19 @@ class IyiSchedulerState
   # (`IyiScheduler.reschedule`).
   property parks : UInt64
   property polled_at : Int64
+  # Preemption at loop back-edges (SPEC.md III.4.13, part 9). `switches`
+  # counts this worker's switches and back-edge slow paths, and is all the
+  # pool's monitor reads to know whether one task has held the worker for
+  # a quantum; `preempt_word` is the address of this worker's own
+  # `IyiWorkers.@@preempt`, a thread-local, which the monitor raises.
+  # `watch_seen` and `watch_ticks` are the monitor's alone: the count it
+  # saw last and how many of its looks have seen it unchanged. `looks`
+  # counts `worker_next`, for the turn preempted tasks get first.
+  property switches : UInt64
+  property preempt_word : UInt64
+  property watch_seen : UInt64
+  property watch_ticks : UInt64
+  property looks : UInt64
 
   {% if flag?(:win32) %}
     # Windows' deadline: the timer this thread arms for the nearest
@@ -1199,6 +1236,11 @@ class IyiSchedulerState
     @sleep_seq = 0_u64
     @parks = 0_u64
     @polled_at = 0_i64
+    @switches = 0_u64
+    @preempt_word = 0_u64
+    @watch_seen = 0_u64
+    @watch_ticks = 0_u64
+    @looks = 0_u64
     @io_slots = nil
     @mail = Atomic(UInt64).new(0_u64)
     @idle = false
@@ -2001,7 +2043,11 @@ class IyiScheduler
       st.idle = false
       st.notified = false
       IyiWorkers.count_idle(-1_i64)
+      # The pool's monitor parks while every worker is idle, and this one
+      # is about to run something (`IyiWorkers.monitor`).
+      nudge = IyiWorkers.take_monitor_wake
       IyiSchedLock.unlock
+      IyiWorkers.wake_monitor if nudge
     {% end %}
   end
 
@@ -2098,16 +2144,27 @@ class IyiScheduler
   # ring, then the queues behind the lock - fibers a thread outside the
   # pool woke, the unstarted tasks its own tasks spawned, the pool's
   # injection queue - then half of another worker's ring, then another
-  # worker's unstarted task. A fiber of a unit another worker holds is
-  # left on that unit's list (`take_unit`) and the look goes on.
+  # worker's unstarted task - then a task preempted at a loop's back-edge
+  # (`IyiWorkers.preempted`), last, since it has had a quantum and every
+  # other one is waiting for its first; every `PREEMPTED_TURN`th look takes
+  # one first, so a stream of short tasks cannot keep it waiting for
+  # ever, Go's `schedtick % 61` for its global queue. A fiber of a unit
+  # another worker holds is left on that unit's list (`take_unit`) and the
+  # look goes on.
+  PREEMPTED_TURN = 61_u64
+
   def self.worker_next(st : IyiSchedulerState) : IyiFiber?
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       take_mail(st) if st.mail?
+      looks = st.looks &+ 1_u64
+      st.looks = looks
       while true
         fiber = dequeue(st)
+        fiber = IyiWorkers.take_preempted unless fiber.is_a?(IyiFiber) || looks % PREEMPTED_TURN != 0_u64
         fiber = IyiWorkers.pop(st) unless fiber.is_a?(IyiFiber)
         fiber = IyiWorkers.take_queued(st) unless fiber.is_a?(IyiFiber)
         fiber = IyiWorkers.steal(st) unless fiber.is_a?(IyiFiber)
+        fiber = IyiWorkers.take_preempted unless fiber.is_a?(IyiFiber)
         return nil unless fiber.is_a?(IyiFiber)
         return fiber if take_unit(st, fiber)
       end
@@ -2128,6 +2185,13 @@ class IyiScheduler
     held = st.unit
     return true if held.is_a?(IyiUnit) && held.object_id == unit.object_id
     id = st.object_id
+    # A preempted fiber takes its unit's token back from itself.
+    if fiber.preempted && unit.take_yielded(id)
+      fiber.preempted = false
+      release_unit(st)
+      st.unit = unit
+      return true
+    end
     unless unit.take(id)
       IyiSchedLock.lock
       unless unit.take(id)
@@ -2257,6 +2321,7 @@ class IyiScheduler
         fiber.on_cpu = true
         fiber.home = st
         st.left = previous
+        st.switches = st.switches &+ 1_u64
       end
     {% end %}
     st.current = fiber
@@ -3907,6 +3972,25 @@ class IyiWorkers
   # know each steal ran.
   @@steals : UInt64 = 0_u64
   @@grabs : UInt64 = 0_u64
+  # Preemption at loop back-edges (SPEC.md III.4.13, part 9). `@@preempt`
+  # is each worker's own word, which the code the compiler emits at every
+  # loop's back-edge in a program with a pool loads through the thread
+  # pointer (`codegen.cr#iyi_back_edge`), and which the monitor raises on
+  # a worker that has run one task for a quantum; nonzero only there.
+  # Tasks that gave their worker up wait in the preempted queue, behind
+  # the lock, counted in `@@preempted` so a look without the lock sees
+  # them. The monitor's word is 1 while it is parked, with every worker
+  # idle; its page holds the tick's timespec on Linux and darwin, and on
+  # darwin the kevent its kqueue answers into.
+  @[ThreadLocal]
+  @@preempt : UInt64 = 0_u64
+  @@preempted_head : IyiFiber?
+  @@preempted_tail : IyiFiber?
+  @@preempted : Int64 = 0_i64
+  @@preempts : UInt64 = 0_u64
+  @@monitor_parked : UInt64 = 0_u64
+  @@monitor_page : UInt64 = 0_u64
+  @@monitor_handle : UInt64 = 0_u64
 
   def self.word(variable : Pointer(Int64)) : Pointer(Atomic(Int64))
     Pointer(Atomic(Int64)).new(variable.address)
@@ -3981,6 +4065,7 @@ class IyiWorkers
         IyiThread.start { IyiWorkers.work }
         index = index + 1
       end
+      start_monitor
     {% end %}
   end
 
@@ -3994,6 +4079,9 @@ class IyiWorkers
       st = IyiScheduler.state
       root = IyiScheduler.current
       st.make_ring
+      # Where the monitor raises this worker's preemption word: its own
+      # thread-local's address, the same for the worker's whole life.
+      st.preempt_word = pointerof(@@preempt).address
       IyiSchedLock.lock
       st.worker = true
       listed = @@workers
@@ -4282,6 +4370,7 @@ class IyiWorkers
   # lock, as a look before sleeping.
   def self.work_waiting? : Bool
     return true if word(pointerof(@@queued)).value.get > 0_i64
+    return true if word(pointerof(@@preempted)).value.get > 0_i64
     count = word(pointerof(@@listed_count)).value.get
     index = 0_i64
     while index < count
@@ -4335,7 +4424,305 @@ class IyiWorkers
     word(pointerof(@@spinning)).value.sub(1_i64)
     wake_one if found && work_waiting?
   end
+
+  # ── Preemption at loop back-edges (SPEC.md III.4.13, part 9) ─────────
+  #
+  # A worker looks at its own poller, sleep heap and mail only when the
+  # task on it parks, so a task computing for 100 ms held everything that
+  # waited there - a connection whose request had arrived, a sleeper
+  # whose time had come - for the 100 ms. The compiler puts a check at
+  # every loop's back-edge in a program with a pool, a load of this
+  # worker's `@@preempt` and a branch, and the pool's monitor, a kernel
+  # thread of its own, raises the word of a worker whose task has held it
+  # for a quantum. The slow half below then hands on what waits on the
+  # worker - the poller's news and the expired sleepers into its ring,
+  # where an idle worker steals them - and gives the worker up only when
+  # something waits that no idle worker will take.
+
+  # The monitor looks every `PREEMPT_TICK_MS`, and raises the word of a
+  # worker whose switch count it has seen unchanged `PREEMPT_TICKS` looks
+  # in a row: one task has held it for between one and two ticks, 5 to 10
+  # ms, the order of Go's 10. Measured on the server shape of 28
+  # connections making 0.2 ms requests beside 4 making 100 ms ones (8
+  # workers, release, three runs, load 4.5 to 5.3), as fast requests over
+  # 20 ms and the slowest: 73 to 81, at most 113 to 231 ms, unpreempted;
+  # 119 to 174, at most 33 to 36 ms, flagged after 20 to 30 ms; 0 to 7, at
+  # most 19 to 21, after 10 to 15; none, at most 13 to 17, after 5 to 10;
+  # none, at most 9 to 11, after 4 to 6, with the monitor awake every 2
+  # ms. Sixteen CPU-bound tasks took 101 to 112 ms on eight workers and
+  # 720 to 741 on one under every one of them, 102 to 108 and 725 to 752
+  # unpreempted: what time-slicing costs them is under the noise.
+  PREEMPT_TICK_MS =           5
+  PREEMPT_TICK_NS = 5000000_u64
+  PREEMPT_TICKS   =       1_u64
+
+  # Tasks that gave their worker up at a back-edge, in all: what the
+  # exercise reads to know a preemption ran.
+  def self.preempts : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@preempts).address).value.get
+  end
+
+  # The back-edge's slow half, on a worker whose word the monitor raised.
+  # Nothing here when a runtime lock is held - a loop in a block a prelude
+  # def runs under one may check, and a park there would park the holder -
+  # nor on the worker's own fiber, which runs no program code. A task
+  # holding a `Mutex` may give its worker up, as a thread the kernel
+  # preempts holding one does: a task waiting for it parks on the lock's
+  # word rather than spin (std/mutex).
+  def self.preempted : Nil
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      @@preempt = 0_u64
+      st = IyiScheduler.state
+      return unless st.worker
+      # A fresh quantum from here: the monitor sees the count move.
+      st.switches = st.switches &+ 1_u64
+      return if IyiSchedLock.held_here? || IyiRuntimeLock.held?
+      fiber = IyiScheduler.current
+      root = st.root
+      return if root.is_a?(IyiFiber) && root.object_id == fiber.object_id
+      IyiScheduler.take_mail(st) if st.mail?
+      io = !st.io_head.is_a?(Nil)
+      {% if flag?(:win32) %}
+        io = io || IyiStdinReader.waiting?
+      {% end %}
+      if io
+        IyiScheduler.wait_for_events(false)
+      else
+        IyiScheduler.wake_expired_sleepers
+      end
+      # What the poll woke is in this worker's ring: an idle worker is
+      # called for it, even for one fiber, which `push_runnable` leaves
+      # for the worker itself to run next.
+      wake_one if st.ring_size > 0_u64
+      give_up(st, fiber) if turn_wanted?(st, fiber)
+    {% end %}
+  end
+
+  # Whether the task on worker *st* should give it up: something waits
+  # that only this worker may run, or something waits and no worker is
+  # idle to take it. A task of no unit - a thread outside the pool's, or
+  # the worker's own - never does, nor one woken onto its home only.
+  private def self.turn_wanted?(st : IyiSchedulerState, fiber : IyiFiber) : Bool
+    return false unless fiber.unit.is_a?(IyiUnit) && !fiber.homebound
+    return true unless st.run_head.is_a?(Nil)
+    if word(pointerof(@@idle)).value.get > 0_i64
+      wake_one if work_waiting?
+      return false
+    end
+    work_waiting?
+  end
+
+  # The task gives worker *st* up: the worker takes the next fiber as a
+  # park would (`IyiScheduler.worker_next`), and the task waits in the
+  # preempted queue, which every worker looks at last. Its unit's token
+  # goes with it (`IyiUnit::YIELDED`), so no other fiber of its unit runs
+  # before it does. With nothing found after all, it runs on.
+  private def self.give_up(st : IyiSchedulerState, fiber : IyiFiber) : Nil
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      unit = fiber.unit
+      return unless unit.is_a?(IyiUnit)
+      id = st.object_id
+      return unless unit.hand_to_yielded(id)
+      st.unit = nil
+      following = IyiScheduler.worker_next(st)
+      unless following.is_a?(IyiFiber)
+        unit.take_yielded(id)
+        st.unit = unit
+        return
+      end
+      fiber.preempted = true
+      IyiSchedLock.lock
+      fiber.state = IyiFiberState::Runnable
+      fiber.next_run = nil
+      tail = @@preempted_tail
+      if tail.is_a?(IyiFiber)
+        tail.next_run = fiber
+      else
+        @@preempted_head = fiber
+      end
+      @@preempted_tail = fiber
+      word(pointerof(@@preempted)).value.add(1_i64)
+      IyiSchedLock.unlock
+      Pointer(Atomic(UInt64)).new(pointerof(@@preempts).address).value.add(1_u64)
+      IyiScheduler.switch_to(following)
+    {% end %}
+  end
+
+  # The oldest preempted task, out of the queue, or nil.
+  def self.take_preempted : IyiFiber?
+    return nil if word(pointerof(@@preempted)).value.get <= 0_i64
+    IyiSchedLock.lock
+    fiber = @@preempted_head
+    if fiber.is_a?(IyiFiber)
+      @@preempted_head = fiber.next_run
+      @@preempted_tail = nil if @@preempted_head.is_a?(Nil)
+      fiber.next_run = nil
+      word(pointerof(@@preempted)).value.sub(1_i64)
+    end
+    IyiSchedLock.unlock
+    fiber
+  end
+
+  # ── The monitor ──────────────────────────────────────────────────────
+  #
+  # A helper thread (`IyiThread.start_helper`): the collector never stops
+  # it, and it allocates nothing, reads the workers' states by address
+  # and writes only their preemption words and its own two counts on
+  # them. Go's `sysmon`, which preempts a goroutine that has run for 10
+  # ms, does the same from a thread of its own. It parks while every
+  # worker is idle and nothing waits, so an idle pool costs no wakeups,
+  # and the first worker to leave its wait wakes it (`idle_worker`).
+  def self.start_monitor : Nil
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      page = __iyi_mmap(4096_u64).address
+      {% if flag?(:linux) || flag?(:darwin) %}
+        # The tick, as a timespec: no seconds, PREEMPT_TICK_NS.
+        Pointer(UInt64).new(page).value = 0_u64
+        Pointer(UInt64).new(page &+ 8_u64).value = PREEMPT_TICK_NS
+      {% end %}
+      {% if flag?(:darwin) %}
+        kq = LibC.kqueue
+        raise "kqueue failed for the pool's monitor" if kq < 0
+        change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_ADD)
+        added = LibC.kevent(kq, change.as(Void*), 1, Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
+        raise "kevent could not add the pool's monitor's doorbell" if added < 0
+        @@monitor_handle = kq.to_u64
+      {% elsif flag?(:win32) %}
+        semaphore = LibC.CreateSemaphoreW(nil, 0_i32, 0x7FFFFFFF_i32, nil)
+        raise "the pool's monitor's semaphore could not be made" if semaphore.address == 0_u64
+        @@monitor_handle = semaphore.address
+      {% end %}
+      @@monitor_page = page
+      IyiThread.start_helper(monitor_entry, page)
+    {% end %}
+  end
+
+  def self.monitor_entry : UInt64
+    proc = ->(page : UInt64) { IyiWorkers.monitor(page) }
+    Pointer(UInt64).new(pointerof(proc).address).value
+  end
+
+  # The monitor's whole life.
+  def self.monitor(page : UInt64) : Nil
+    while true
+      if look
+        monitor_wait(false)
+      else
+        park_monitor
+      end
+    end
+  end
+
+  # One look at every worker, raising the word of each that one task has
+  # held for the quantum; whether any worker was running.
+  private def self.look : Bool
+    busy = false
+    count = word(pointerof(@@listed_count)).value.get
+    index = 0_i64
+    while index < count
+      st = listed_at(index)
+      if st.idle
+        st.watch_ticks = 0_u64
+      else
+        busy = true
+        seen = st.switches
+        if seen != st.watch_seen
+          st.watch_seen = seen
+          st.watch_ticks = 0_u64
+        else
+          ticks = st.watch_ticks &+ 1_u64
+          if ticks >= PREEMPT_TICKS
+            ticks = 0_u64
+            address = st.preempt_word
+            Pointer(Atomic(UInt64)).new(address).value.set(1_u64) if address != 0_u64
+          end
+          st.watch_ticks = ticks
+        end
+      end
+      index = index &+ 1_i64
+    end
+    busy || work_waiting?
+  end
+
+  # Every worker idle and nothing waiting: the monitor says it is parked,
+  # under the lock a worker leaving its wait takes, and waits until that
+  # worker takes the word back (`take_monitor_wake`). Not before every
+  # worker has come up: one that finds a task the moment it starts never
+  # waits, so never leaves a wait to wake the monitor - the unit step's
+  # task was never preempted that way, on a pool of one.
+  private def self.park_monitor : Nil
+    IyiSchedLock.lock
+    count = word(pointerof(@@listed_count)).value.get
+    quiet = count == @@started.to_i64 && !work_waiting?
+    index = 0_i64
+    while quiet && index < count
+      quiet = false unless listed_at(index).idle
+      index = index &+ 1_i64
+    end
+    monitor_word.value.set(1_u64) if quiet
+    IyiSchedLock.unlock
+    return unless quiet
+    while monitor_word.value.get != 0_u64
+      monitor_wait(true)
+    end
+  end
+
+  private def self.monitor_word : Pointer(Atomic(UInt64))
+    Pointer(Atomic(UInt64)).new(pointerof(@@monitor_parked).address)
+  end
+
+  # A worker leaving its wait, with the lock held: whether the monitor is
+  # parked, taken back so one worker alone wakes it.
+  def self.take_monitor_wake : Bool
+    return false if monitor_word.value.get == 0_u64
+    monitor_word.value.set(0_u64)
+    true
+  end
+
+  # The monitor woken from its park, after `take_monitor_wake`.
+  def self.wake_monitor : Nil
+    {% if flag?(:linux) %}
+      __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@monitor_parked).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
+    {% elsif flag?(:darwin) %}
+      change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_TRIGGER)
+      LibC.kevent(@@monitor_handle.to_i32, change.as(Void*), 1, Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
+    {% elsif flag?(:win32) %}
+      LibC.ReleaseSemaphore(Pointer(Void).new(@@monitor_handle), 1_i32, nil)
+    {% end %}
+  end
+
+  # One tick, or while *parked* until a worker wakes it. Linux waits on
+  # the parked word itself, which is 0 while the monitor runs and 1 while
+  # it is parked, so a wake that comes before the wait is not lost;
+  # darwin's doorbell and Windows' semaphore keep a wake until it is
+  # taken, and a wake left over ends a tick early, which costs a look.
+  # Windows' wait ends on the system timer's tick, 15.6 ms unless the
+  # machine runs a finer one, so its quantum is that long or longer.
+  private def self.monitor_wait(parked : Bool) : Nil
+    {% if flag?(:linux) %}
+      expected = parked ? 1_i64 : 0_i64
+      timeout = parked ? 0_i64 : @@monitor_page.to_i64
+      __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@monitor_parked).address.to_i64, IYI_FUTEX_WAIT, expected, timeout, 0_i64, 0_i64)
+    {% elsif flag?(:darwin) %}
+      page = @@monitor_page
+      timeout = parked ? Pointer(Void).new(0_u64) : Pointer(Void).new(page)
+      LibC.kevent(@@monitor_handle.to_i32, Pointer(Void).new(0_u64), 0, Pointer(Void).new(page &+ 64_u64), 1, timeout)
+    {% elsif flag?(:win32) %}
+      LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), parked ? -1_i32 : PREEMPT_TICK_MS)
+    {% end %}
+  end
 end
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+  # The back-edge's slow half, called by name from the check the compiler
+  # emits (`codegen.cr#iyi_back_edge`) and emitted only into a program
+  # that has a pool (`iyi_preempt_on?`). Out of line, so a loop carries a
+  # call and not its body.
+  @[NoInline]
+  fun __iyi_preempt : Nil
+    IyiWorkers.preempted
+  end
+{% end %}
 
 {% if flag?(:win32) %}
   # Standard input, read by a thread of its own. A fiber reading stdin

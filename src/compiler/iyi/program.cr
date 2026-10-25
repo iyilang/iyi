@@ -137,6 +137,7 @@ module Iyi
     # that unit — its own imports, then onward only through `pub import`
     # edges. Anchored at the node, which is the line to fix.
     def iyi_check_import_reach(node : ASTNode, resolved : Type) : Nil
+      return if node.is_a?(Path) && node.iyi_synthetic?
       unit = iyi_walled_unit?(node.location, resolved)
       return unless unit
 

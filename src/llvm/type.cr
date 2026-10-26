@@ -144,12 +144,27 @@ struct LLVM::Type
     LibLLVM.is_function_var_arg(self) != 0
   end
 
+  # The value cut to the type's width before LLVM sees it, as Crystal
+  # 1.22's own does. `LLVMConstInt` takes 64 bits, and a negative value
+  # handed to an `i32` arrived sign-extended: the Windows Crystal
+  # package's LLVM (23.1.1) kept the bits past the width, a constant that
+  # printed as `i32 -1` and compared unequal to `i32 4294967295`. That
+  # made `(-1).unsafe_to_u32 == 4294967295_u32` false and its `to_u64`
+  # 18446744073709551615 in a plain build, and a `--release` build read
+  # any number with a 9 in it as no number (`String#to_i?`'s
+  # `-214748364`). LLVM 20.1.7, Crystal 1.21's, gave the right answers.
   def const_int(value) : Value
-    if !value.is_a?(Int128) && !value.is_a?(UInt128) && int_width != 128
-      Value.new LibLLVM.const_int(self, value, 0)
-    else
-      encoded_value = UInt64[value & UInt64::MAX, (value >> 64) & UInt64::MAX]
+    int_width = self.int_width
+
+    if int_width <= 64
+      mask = ~(UInt64::MAX << int_width)
+      Value.new LibLLVM.const_int(self, mask & value, 0)
+    elsif int_width <= 128
+      mask = ~(UInt64::MAX << (int_width - 64))
+      encoded_value = UInt64[value.to_u64!, mask & (value >> 64)]
       Value.new LibLLVM.const_int_of_arbitrary_precision(self, encoded_value.size, encoded_value)
+    else
+      raise NotImplementedError.new("LLVM::Type#const_int")
     end
   end
 

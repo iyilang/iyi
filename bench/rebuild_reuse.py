@@ -38,7 +38,9 @@ cache:
      the one object compiled again, and the program prints the edit;
   4. one more build with nothing changed: every object reused;
   5. on Windows, one more while another process holds the program, shared
-     for reading only, for a second: the build waits for it and links.
+     for reading only, for a second: the build waits for it and links;
+  6. eleven other programs built into the same cache, then the fixture
+     again: the EIY helper its template runs is reused, not built again.
 
 Step 5 is what Smart App Control's services do, evaluating, on Windows 11:
 the Restart Manager named `CryptSvc`, `AppIDSvc` and the `applockerfltr`
@@ -47,6 +49,10 @@ once stopped at "LNK1104: cannot open file" in 6 of 60 builds of the probe
 below - and this gate in 8 runs of 8 - where the compiler neither waited
 nor linked again. Against that compiler step 5 failed in 2 runs of 2, at
 "prog.exe is in use and cannot be replaced or moved aside".
+
+Step 6 is #143: the cache keeps the ten directories used last, and the
+helper counted with them. Against the compiler before helpers were kept
+apart it failed in 1 run of 1, the helper built again in 2.38 s.
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each
@@ -475,12 +481,42 @@ def held(work):
     print(f"  ok   5. a rebuild while another process held the program for {HOLD_SECONDS:g} s, shared for reading only")
 
 
+# More other programs than the cache's rotation keeps (`CacheDir::KEPT`).
+OTHERS = 11
+HELPER = re.compile(r"^ - .*eiy[\\/]process\.iyi: (.*)$", re.M)
+
+
+def outlived(work):
+    """The EIY helper `Eiy.def_to_s` runs is still built after more other
+    programs than the cache keeps were built into the same cache."""
+    root = work / "project"
+    env = environment(work / "cache")
+    others = work / "others"
+    for i in range(OTHERS):
+        write(others, {f"other{i}.iyi": f"module other{i}\n\nputs {i}\n"})
+        proc = subprocess.run([IYI, "build", f"other{i}.iyi", "-o", f"other{i}"], cwd=others, env=env,
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            fail("6. a helper outlives other builds", f"other{i}.iyi did not build\n{proc.stdout}{proc.stderr}")
+    proc = subprocess.run([IYI, "build", "-s", "--force", "main.iyi", "-o", "prog"], cwd=root, env=env,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        fail("6. a helper outlives other builds", f"main.iyi did not build\n{proc.stdout}{proc.stderr}")
+    found = HELPER.search(proc.stdout)
+    if not found:
+        fail("6. a helper outlives other builds", f"`iyi build -s` named no EIY helper\n{proc.stdout}")
+    if not found.group(1).startswith("reused previous compilation"):
+        fail("6. a helper outlives other builds", f"after {OTHERS} other programs the EIY helper was built again: {found.group(1)}")
+    print(f"  ok   6. after {OTHERS} other programs into the same cache, the EIY helper is reused")
+
+
 def main():
     work = Path(tempfile.mkdtemp(prefix="iyi-rebuild-reuse"))
     try:
         print(f"rebuild reuse ({IYI}):")
         reuse(work)
         held(work)
+        outlived(work)
         probe(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)

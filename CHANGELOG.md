@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- **An integer constant is cut to its type's width before LLVM gets it**
+  (`LLVM::Type#const_int`, as Crystal 1.22 has it). A negative value went
+  to `LLVMConstInt` sign-extended to 64 bits, and the LLVM in the Windows
+  Crystal package (23.1.1) kept the bits past an `i32`: `(-1).unsafe_to_u32
+  == 4294967295_u32` was false and its `to_u64` 18446744073709551615 in a
+  plain build (`bench/std_int_exercise.iyi`), and a `--release` build made
+  `String#to_i?`'s `value < -214748364 || (value == -214748364 && digit >
+  8)` into `digit > 8`, so any number with a 9 in it read as no number -
+  `"9".to_i` panicked, std/http refused `HTTP/1.1 999`, and std/tls's
+  exercise could not read the port Go's ECH server wrote. The compiler
+  built with Crystal 1.21 (LLVM 20.1.7) answered both right.
+  `bench/number_exercise.iyi` reads numbers made at run time with every
+  digit; its release build panicked under the compiler before this.
+
+- **A macro's `run` program is kept apart from the builds the cache
+  rotates (#143).** The cache keeps the ten directories used last, and a
+  helper such as std/eiy's counted with them: after ten builds of anything
+  else it was gone, and the next build of a program that renders
+  templates, nothing in it changed, built it again inside `Semantic
+  (main)`. On Windows its directory also kept the time it was first made,
+  its times never set when it ran. iyiturkiye (10,700 lines, 51 runs of
+  the helper) after 11 other programs, five rounds on Windows 11:
+  `Semantic (main)` 6.03 to 14.17 s before - 2.06 to 4.47 s building the
+  helper, and once 9.21 s for its runs, a program Windows had not seen
+  starting - and 3.44 to 4.11 s after, against 3.28 to 3.81 s for a build
+  right after another. Helpers are rotated among themselves, ten kept, and
+  their directory's time is set on every platform.
+  `bench/rebuild_reuse.py` builds 11 other programs into its cache and
+  wants the EIY helper reused; the compiler before this built it again.
+
 - **The allocator's centre is split by size class (#145).** Each class
   has its own lock, its stack of batches and its own list of arenas, so a
   refill, a sweep slice's claim, a warm run and a new bump region take
@@ -52,25 +82,6 @@
   The script is not a gate. `bench/measured_numbers.py` names it, and
   holds the docs' description of the run and the stored hash's cost to
   the script's constants.
-- **A `--release` build optimises its module as parsed from the bitcode
-  the cache keeps, not the module codegen left in memory.** The two list
-  their uses in another order, and the LLVM in the Windows Crystal
-  package (23.1.1) optimised the in-memory one wrongly: `String#to_i?`'s
-  `value < -214748364 || (value == -214748364 && digit > 8)` became
-  `digit > 8`, so any number with a 9 in it read as no number - `"9".to_i`
-  panicked, std/http refused `HTTP/1.1 999`, and std/tls's exercise could
-  not read the port Go's ECH server wrote. Plain builds, whose units were
-  already parsed on the codegen threads, were right, and so was the same
-  bitcode optimised by clang 23.1.1. `--cross-compile` optimises the
-  parsed module too. bench/std_http_exercise.iyi, release, cache emptied,
-  three runs each: on the Windows 11 machine codegen took 23.9 to 25.8 s
-  before and 24.3 to 26.3 s after, 803 to 804 MB resident at its end
-  before and 888 to 892 after; on Linux (LLVM 21, interleaved) 22.8 to
-  24.1 s before and 22.8 to 24.0 s after, the whole build's peak resident
-  set 880 to 939 MB before and 949 to 1,009 MB after.
-  `bench/number_exercise.iyi` reads numbers made at run time with every
-  digit; its release build panicked under the compiler before this.
-
 - **Windows' `-Dpreempt_check_accessor` build links again.** Its checks
   call the preemption word's thread-local accessor, which nothing else on
   Windows names since the word moved to a TEB slot, so

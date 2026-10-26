@@ -3197,7 +3197,7 @@ require "./file"
         @@arenas_mapped
       end
 
-      def self.map_arena(index : Int32, owner : UInt64) : UInt64
+      @[Effect(:collector)]; def self.map_arena(index : Int32, owner : UInt64) : UInt64
         base = map_aligned
         {% if flag?(:linux) %}
           __iyi_madvise_nohuge(base, HUGE_AT)
@@ -5801,7 +5801,7 @@ require "./file"
         # futex wake of fifteen threads is microseconds, and a per-helper
         # park that woke only the helpers a mark asked let a helper miss a
         # generation and the mark wait forever (`helper_main` says how).
-        def self.wait_generation(seen : UInt64) : UInt64
+        @[Effect(:collector)]; def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
           spun = spin_for_generation(word, seen)
           return spun if spun != seen
@@ -5811,7 +5811,7 @@ require "./file"
           now
         end
 
-        def self.wake_helpers : Nil
+        @[Effect(:collector)]; def self.wake_helpers : Nil
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (pool + POOL_GENERATION).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
         end
 

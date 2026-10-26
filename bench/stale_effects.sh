@@ -2,6 +2,7 @@
 # Gate for S4a: RG3 unclassified runtime sites report and check.
 # Usage:
 #     bash bench/stale_effects.sh [report|check]
+#     RG3_TARGET=x86_64-windows-msvc bash bench/stale_effects.sh check
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -81,7 +82,11 @@ for prog in all_progs:
     if os.path.exists(out_file):
         os.remove(out_file)
 
-    res = subprocess.run([iyi, 'build', '--stale-key', key_file, '-o', out_file, prog],
+    # RG3_TARGET=x86_64-windows-msvc (or another target triple) classifies the
+    # arms that target compiles, from any host: the closure check runs in the
+    # front end, so nothing is linked or run.
+    target_args = ['--cross-compile', '--target', os.environ['RG3_TARGET']] if os.environ.get('RG3_TARGET') else []
+    res = subprocess.run([iyi, 'build', '--stale-key', key_file, *target_args, '-o', out_file, prog],
                          capture_output=True, text=True)
     if res.returncode != 0:
         print(f'  Build failed: {rel_prog} (exit {res.returncode})', file=sys.stderr)

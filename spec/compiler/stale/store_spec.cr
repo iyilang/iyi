@@ -587,27 +587,34 @@ describe "Iyi::Stale S6a: Store and Receipts" do
     end
   end
 
-  it "survives two concurrent processes each recording 1,000 receipts (row 21)" do
-    with_tempfile("store_concurrency") do |cache_root|
-      bin_path = ".build/stale_store_concurrency"
-      unless File.file?(bin_path)
-        build_status = Process.run("./bin/crystal", ["build", "-o", bin_path, "bench/stale_store_concurrency.cr"])
-        build_status.success?.should be_true
+  # Builds and runs a helper through `./bin/crystal`, a shell script that
+  # Windows does not execute; the file lock it exercises is the same code the
+  # other store examples reach there.
+  {% if flag?(:win32) %}
+    pending "survives two concurrent processes each recording 1,000 receipts (row 21)"
+  {% else %}
+    it "survives two concurrent processes each recording 1,000 receipts (row 21)" do
+      with_tempfile("store_concurrency") do |cache_root|
+        bin_path = ".build/stale_store_concurrency"
+        unless File.file?(bin_path)
+          build_status = Process.run("./bin/crystal", ["build", "-o", bin_path, "bench/stale_store_concurrency.cr"])
+          build_status.success?.should be_true
+        end
+
+        # Run 2 processes in parallel
+        p1 = Process.new(bin_path, ["run", cache_root, "1", "1000"])
+        p2 = Process.new(bin_path, ["run", cache_root, "2", "1000"])
+
+        s1 = p1.wait
+        s2 = p2.wait
+
+        s1.success?.should be_true
+        s2.success?.should be_true
+
+        # Verify all 2,000 files parse cleanly and seq is 2,000
+        verify_status = Process.run(bin_path, ["verify", cache_root, "2000"])
+        verify_status.success?.should be_true
       end
-
-      # Run 2 processes in parallel
-      p1 = Process.new(bin_path, ["run", cache_root, "1", "1000"])
-      p2 = Process.new(bin_path, ["run", cache_root, "2", "1000"])
-
-      s1 = p1.wait
-      s2 = p2.wait
-
-      s1.success?.should be_true
-      s2.success?.should be_true
-
-      # Verify all 2,000 files parse cleanly and seq is 2,000
-      verify_status = Process.run(bin_path, ["verify", cache_root, "2000"])
-      verify_status.success?.should be_true
     end
-  end
+  {% end %}
 end

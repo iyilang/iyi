@@ -89,6 +89,7 @@ import std/file::{File}
       SYS_UNLINKAT   =  35_i64
     {% end %}
 
+    @[Effect(:primitive)]
     def self.sys(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}

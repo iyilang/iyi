@@ -352,7 +352,7 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
   describe "parse_file" do
     it "parses a real trace file written by std/observe" do
       hex = "1900000003000000000000000003000000464f4f0103000000626172000900000004000000000000000016000000050000000000000000090000002f746573742f6469721600000006000000000000000009000000746573742d686f737420000000070000000000000000010d0000002f746573742f6f75742e74787400000000001d000000080000000000000000200f0000007372633a746573742e6979693a31300d0000007f000000000000000000000000"
-      tmp_trace = "/tmp/trace_parse_test_#{Process.pid}.bin"
+      tmp_trace = File.join(Dir.tempdir, "trace_parse_test_#{Process.pid}.bin")
       File.write(tmp_trace, hex.hexbytes)
 
       res = Iyi::Stale::Trace.parse_file(tmp_trace, roots, check_disk_after_exit: false)

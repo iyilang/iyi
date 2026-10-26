@@ -438,6 +438,7 @@ struct UserFiles
     {% end %}
 
     # A syscall with no arguments; `getuid` and `getgid` cannot fail.
+    @[Effect(:primitive)]
     def self.sys0(number : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}

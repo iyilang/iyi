@@ -1609,6 +1609,7 @@ class ProcessChild
       AT_FDCWD       = -100_i64
       EPIPE          = 32
 
+      @[Effect(:process)]
       def self.sys_read(fd : Int32, buffer : Pointer(UInt8), count : Int32) : Int64
         __iyi_conc_syscall3(SYS_READ, fd.to_i64, buffer.address.to_i64, count.to_i64)
       end
@@ -1619,6 +1620,7 @@ class ProcessChild
       # sends it to - and when the write answered EPIPE the one it raised is
       # taken off the thread before the mask comes back. The program's own
       # SIGPIPE, from its own stdout, is untouched.
+      @[Effect(:process)]
       def self.sys_write(fd : Int32, buffer : Pointer(UInt8), count : Int32) : Int64
         masks = Pointer(UInt64).malloc(4_u64)
         masks[0] = 1_u64.unsafe_shl(12_u64) # SIGPIPE, 13
@@ -1634,16 +1636,19 @@ class ProcessChild
         put
       end
 
+      @[Effect(:process)]
       def self.sys_close(fd : Int32) : Nil
         __iyi_conc_syscall3(SYS_CLOSE, fd.to_i64, 0_i64, 0_i64)
       end
 
+      @[Effect(:process)]
       def self.mode_of(path : Pointer(UInt8)) : Int32
         buffer = Pointer(UInt64).malloc(32_u64)
         return -1 if __iyi_conc_syscall6(SYS_NEWFSTATAT, AT_FDCWD, path.address.to_i64, buffer.address.to_i64, 0_i64, 0_i64, 0_i64) != 0_i64
         Pointer(Int32).new(buffer.address + MODE_OFFSET).value & 0xF000
       end
 
+      @[Effect(:file_exists)]
       def self.executable_file?(path : String) : Int32
         c = c_text(path)
         # X_OK.
@@ -1667,6 +1672,7 @@ class ProcessChild
         String.new(length) { |target| target.copy_from(buffer, length) }
       end
 
+      @[Effect(:process)]
       def self.executable : String?
         buffer = Pointer(UInt8).malloc(4096_u64)
         link = c_text("/proc/self/exe")
@@ -2127,6 +2133,7 @@ class ProcessChild
       # The child, between the clone and the program. System calls on what
       # the parent already made, and nothing else; every way out is the
       # program or `exit_group`.
+      @[Effect(:process)]
       def self.become(theirs : Pointer(Int32), directory : Pointer(UInt8), target : Pointer(UInt8),
                       argv : Pointer(Pointer(UInt8)), envp : Pointer(Pointer(UInt8)), empty_mask : Pointer(UInt64),
                       report : Int32, said : Pointer(Int32), actions : Pointer(UInt64)) : Nil
@@ -2191,6 +2198,7 @@ class ProcessChild
       # end is asked for with WNOHANG and the fiber sleeps between asks,
       # from a millisecond to fifty, which is the most a child's end waits
       # to be noticed.
+      @[Effect(:process)]
       def wait_end : Nil | Cancelled
         pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)
         if pidfd >= 0_i64

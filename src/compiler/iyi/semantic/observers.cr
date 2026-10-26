@@ -63,7 +63,7 @@ module Iyi::Semantic
     def self.wrap_def(program : Program, owner : ModuleType, a_def : Def) : Nil
       effect = a_def.effect
       return unless effect
-      return if effect.kind == EffectKind::ObservationChannel
+      return if effect.kind == EffectKind::ObservationChannel || effect.kind == EffectKind::Primitive
 
       is_frame_only = (effect.kind == EffectKind::Stdio || effect.effect_class.internal?)
       # Validate signature per C9 and effect shape (only for non-frame-only defs)

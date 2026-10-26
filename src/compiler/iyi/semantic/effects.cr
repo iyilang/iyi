@@ -52,6 +52,7 @@ module Iyi
     PanicBacktrace     = 70_u8
     TempName           = 71_u8
     ObservationChannel = 72_u8
+    Primitive          = 73_u8
 
     def effect_class : EffectClass
       case self
@@ -63,7 +64,7 @@ module Iyi
         EffectClass::NotReusable
       when SharedWrite
         EffectClass::TaintOnly
-      when Memory, Collector, Threads, Scheduler, SelfImage, Console, PanicBacktrace, TempName, ObservationChannel
+      when Memory, Collector, Threads, Scheduler, SelfImage, Console, PanicBacktrace, TempName, ObservationChannel, Primitive
         EffectClass::Internal
       else
         raise "unknown effect kind #{self}"
@@ -103,6 +104,7 @@ module Iyi
       when PanicBacktrace     then "panic_backtrace"
       when TempName           then "temp_name"
       when ObservationChannel then "observation_channel"
+      when Primitive          then "primitive"
       else
         raise "unknown effect kind: #{self}"
       end
@@ -140,6 +142,7 @@ module Iyi
       when "panic_backtrace"     then PanicBacktrace
       when "temp_name"           then TempName
       when "observation_channel" then ObservationChannel
+      when "primitive"           then Primitive
       else
         nil
       end

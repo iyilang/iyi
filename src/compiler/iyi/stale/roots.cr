@@ -101,22 +101,22 @@ module Iyi::Stale
       abs_path = Roots.real(candidate)
 
       if !@src.empty? && (rel = ::Path[abs_path].relative_to?(@src))
-        rel_str = rel.to_s
+        rel_str = rel.to_posix.to_s
         return RootPath.new("src", rel_str) unless rel_str.starts_with?("..")
       end
 
       if !@toolchain.empty? && (rel = ::Path[abs_path].relative_to?(@toolchain))
-        rel_str = rel.to_s
+        rel_str = rel.to_posix.to_s
         return RootPath.new("toolchain", rel_str) unless rel_str.starts_with?("..")
       end
 
       if !@pkg.empty? && (rel = ::Path[abs_path].relative_to?(@pkg))
-        rel_str = rel.to_s
+        rel_str = rel.to_posix.to_s
         return RootPath.new("pkg", rel_str) unless rel_str.starts_with?("..")
       end
 
       if !@scratch.empty? && (rel = ::Path[abs_path].relative_to?(@scratch))
-        rel_str = rel.to_s
+        rel_str = rel.to_posix.to_s
         return RootPath.new("scratch", rel_str) unless rel_str.starts_with?("..")
       end
 

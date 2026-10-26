@@ -40,7 +40,7 @@ end
     # 0 not asked yet, 1 the processor has `roundsd`, 2 it has not.
     @@rounds : Int32 = 0
 
-    def self.hardware? : Bool
+    @[Effect(:primitive)]; def self.hardware? : Bool
       rounds = @@rounds
       if rounds == 0
         leaf = uninitialized UInt64
@@ -62,7 +62,7 @@ end
     # both on. An instruction the processor has and the system does not
     # save is an invalid-opcode fault. `std/math`'s `fma` asks, as `floor`
     # asks for `roundsd`, and takes musl's exact software arm on a no.
-    def self.fuses? : Bool
+    @[Effect(:primitive)]; def self.fuses? : Bool
       fuses = @@fuses
       if fuses == 0
         leaf = uninitialized UInt64
@@ -85,13 +85,13 @@ end
 
     # a * b + c rounded once, by the instruction: for a caller that asked
     # `fuses?` first.
-    def self.fma(a : Float64, b : Float64, c : Float64) : Float64
+    @[Effect(:primitive)]; def self.fma(a : Float64, b : Float64, c : Float64) : Float64
       fused = uninitialized Float64
       asm("vfmadd213sd $3, $2, $0" : "=x"(fused) : "0"(a), "x"(b), "x"(c))
       fused
     end
 
-    def self.fma(a : Float32, b : Float32, c : Float32) : Float32
+    @[Effect(:primitive)]; def self.fma(a : Float32, b : Float32, c : Float32) : Float32
       fused = uninitialized Float32
       asm("vfmadd213ss $3, $2, $0" : "=x"(fused) : "0"(a), "x"(b), "x"(c))
       fused
@@ -150,7 +150,7 @@ struct Float64
   # it. The answer carries the argument's sign, which is where a zero's
   # comes from - `(-0.3).ceil` is `-0.0`, as the instruction and the other
   # library answer.
-  def floor : Float64
+  @[Effect(:primitive)]; def floor : Float64
     {% if flag?(:aarch64) %}
       LibIyiRounding.floor(self)
     {% else %}
@@ -167,7 +167,7 @@ struct Float64
     {% end %}
   end
 
-  def ceil : Float64
+  @[Effect(:primitive)]; def ceil : Float64
     {% if flag?(:aarch64) %}
       LibIyiRounding.ceil(self)
     {% else %}

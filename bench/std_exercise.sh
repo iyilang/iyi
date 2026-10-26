@@ -351,7 +351,10 @@ echo "== the library is iyi all the way down"
 # only once a program reaches it and links libyaml, and a declaration nothing
 # reaches yet is exactly what this loop exists to name. So they are checked
 # too, against the libraries the platform supplies.
-PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32|LibCrypt32|LibSecurity|LibCoreFoundation'
+# `LibObserveC` is `std/observe`'s: the libc calls (`getenv`, `getcwd`, `stat`,
+# `realpath`) the test recorder makes about the process it records. Only a
+# `-Diyi_observe` build reaches them, and that build is run, never shipped.
+PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32|LibCrypt32|LibSecurity|LibCoreFoundation|LibObserveC'
 # The `@[Link]`s an exempt module may carry: the DLLs Windows itself ships,
 # named in SPEC.md III.10's inventory. `std/random` is here for `advapi32` —
 # the OS entropy `Random::Secure` reads is `RtlGenRandom`, and Windows has
@@ -374,7 +377,7 @@ for source in "$REPO"/src/std/*.iyi; do
     # `std/path` folds a Windows name's case the way NTFS does, which is
     # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
     # and `c:\ä` two names.
-    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots)
+    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots|observe)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.

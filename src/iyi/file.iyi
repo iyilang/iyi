@@ -76,7 +76,7 @@ class File
     # `/proc` file - and the string grows with what comes instead. Here
     # `fstat`, 5 on x86_64 and 80 on aarch64: `st_size` is the seventh word
     # of the struct on both, which is 144 bytes at most.
-    private def self.size_of(fd : Int64) : Int64
+    @[Effect(:primitive)]; private def self.size_of(fd : Int64) : Int64
       stat = uninitialized Int64[18]
       result = uninitialized Int64
       {% if flag?(:x86_64) %}

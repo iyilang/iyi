@@ -679,6 +679,7 @@ pub class UdpSocket
       EPOLL_DATA_OFFSET =   8_u64
     {% end %}
 
+    @[Effect(:primitive)]
     def self.__sys3(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -695,6 +696,7 @@ pub class UdpSocket
       result
     end
 
+    @[Effect(:primitive)]
     def self.__sys5(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64, e : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -711,6 +713,7 @@ pub class UdpSocket
       result
     end
 
+    @[Effect(:primitive)]
     def self.__sys6(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64, e : Int64, f : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}

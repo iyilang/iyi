@@ -166,6 +166,7 @@ pub class Mutex(T)
 
   # Parks until the count of releases is past *mine*, the one this task's
   # own release made.
+  @[Effect(:threads)]
   private def await_change(mine : UInt64, waits : Int32) : Nil | Cancelled
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       while @changes.get == mine
@@ -258,6 +259,7 @@ pub class Mutex(T)
     true
   end
 
+  @[Effect(:threads)]
   private def release : Nil
     @holder.set(0_u64)
     @holder_thread.set(0_u64)

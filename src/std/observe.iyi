@@ -45,15 +45,28 @@ import std/slice::{Slice, Bytes}
   end
 {% elsif flag?(:linux) %}
   lib LibObserveC
+    # `struct stat` as the kernel lays it out. The two architectures agree from
+    # `st_size` on and differ before it: x86_64 has a 64-bit `st_nlink` ahead of
+    # `st_mode`, and aarch64's generic layout has `st_mode` and a 32-bit
+    # `st_nlink` in the place of it.
     struct StatLinux
       st_dev : UInt64
       st_ino : UInt64
-      st_nlink : UInt64
-      st_mode : UInt32
-      st_uid : UInt32
-      st_gid : UInt32
-      __pad0 : Int32
-      st_rdev : UInt64
+      {% if flag?(:aarch64) %}
+        st_mode : UInt32
+        st_nlink : UInt32
+        st_uid : UInt32
+        st_gid : UInt32
+        st_rdev : UInt64
+        __pad1 : UInt64
+      {% else %}
+        st_nlink : UInt64
+        st_mode : UInt32
+        st_uid : UInt32
+        st_gid : UInt32
+        __pad0 : Int32
+        st_rdev : UInt64
+      {% end %}
       st_size : Int64
       st_blksize : Int64
       st_blocks : Int64
@@ -182,7 +195,7 @@ end
 @[ThreadLocal]
 @@in_hook = false
 
-def self.enter_frame(tid : UInt64 = current_task_id) : ::Bool
+pub def enter_frame(tid : UInt64 = current_task_id) : ::Bool
   return true unless @@enabled
   return false if @@in_hook
   {% if !flag?(:single_thread) %}
@@ -200,7 +213,7 @@ def self.enter_frame(tid : UInt64 = current_task_id) : ::Bool
   d == 0
 end
 
-def self.leave_frame(tid : UInt64 = current_task_id) : Nil
+pub def leave_frame(tid : UInt64 = current_task_id) : Nil
   return unless @@enabled
   return if @@in_hook
   {% if !flag?(:single_thread) %}
@@ -217,7 +230,7 @@ def self.leave_frame(tid : UInt64 = current_task_id) : Nil
   @@main_depth = d - 1 if d > 0
 end
 
-def self.frame_depth(tid : UInt64 = current_task_id) : Int32
+pub def frame_depth(tid : UInt64 = current_task_id) : Int32
   {% if !flag?(:single_thread) %}
     if IyiScheduler.state_id != 0_u64
       fiber = IyiScheduler.state.current
@@ -228,25 +241,25 @@ def self.frame_depth(tid : UInt64 = current_task_id) : Int32
 end
 
 @[Effect(:observation_channel)]
-def self.channel_open(path : String) : Int64
+pub def channel_open(path : String) : Int64
   __iyi_open_file(path.to_unsafe, false, true, true, false, true, 0o644)
 end
 
 @[Effect(:observation_channel)]
-def self.channel_write(fd : Int64, buf : Void*, len : UInt64) : Int64
+pub def channel_write(fd : Int64, buf : Void*, len : UInt64) : Int64
   __iyi_write(fd, buf, len)
 end
 
 @[Effect(:observation_channel)]
-def self.channel_close(fd : Int64) : Nil
+pub def channel_close(fd : Int64) : Nil
   __iyi_close(fd)
 end
 
-def self.enabled? : ::Bool
+pub def enabled? : ::Bool
   @@enabled
 end
 
-def self.start : Nil
+pub def start : Nil
   return if @@started
   @@started = true
 
@@ -268,7 +281,7 @@ def self.start : Nil
   @@enabled = true
 end
 
-def self.finish(status : Int32 = 0) : Nil
+pub def finish(status : Int32 = 0) : Nil
   return unless @@enabled
   write_end(status)
   channel_close(@@fd)
@@ -276,7 +289,7 @@ def self.finish(status : Int32 = 0) : Nil
   @@enabled = false
 end
 
-def self.file(kind : UInt8, path : String, open_flags : UInt32 = 0_u32) : Nil
+pub def file(kind : UInt8, path : String, open_flags : UInt32 = 0_u32) : Nil
   return if !@@enabled || @@tainted
   real = safe_real_path(path)
   return if is_under_scratch?(real) || @@written_paths.includes?(real)
@@ -298,23 +311,23 @@ def self.file(kind : UInt8, path : String, open_flags : UInt32 = 0_u32) : Nil
   writer.flush(@@fd)
 end
 
-def self.__iyi_observe_file(kind : UInt8, path : String) : Nil
+pub def __iyi_observe_file(kind : UInt8, path : String) : Nil
   file(kind, path)
 end
 
-def self.__iyi_observe_file_read(path : String) : Nil
+pub def __iyi_observe_file_read(path : String) : Nil
   file(1_u8, path)
 end
 
-def self.__iyi_observe_file_stat(path : String) : Nil
+pub def __iyi_observe_file_stat(path : String) : Nil
   file(2_u8, path)
 end
 
-def self.__iyi_observe_file_exists(path : String) : Nil
+pub def __iyi_observe_file_exists(path : String) : Nil
   file(3_u8, path)
 end
 
-def self.dir_list(path : String, names : Array(String)) : Nil
+pub def dir_list(path : String, names : Array(String)) : Nil
   return if !@@enabled || @@tainted
   real = safe_real_path(path)
   return if is_under_scratch?(real) || @@written_paths.includes?(real)
@@ -332,11 +345,11 @@ def self.dir_list(path : String, names : Array(String)) : Nil
   writer.flush(@@fd)
 end
 
-def self.__iyi_observe_dir_list(path : String, names : Array(String)) : Nil
+pub def __iyi_observe_dir_list(path : String, names : Array(String)) : Nil
   dir_list(path, names)
 end
 
-def self.env_get(name : String, value : String?) : Nil
+pub def env_get(name : String, value : String?) : Nil
   return if !@@enabled || @@tainted
   present = value.nil? ? 0_u8 : 1_u8
   # The scratch directory is the runner's, new for every run, so what is
@@ -357,31 +370,31 @@ def self.env_get(name : String, value : String?) : Nil
   writer.flush(@@fd)
 end
 
-def self.__iyi_observe_env_get(name : String, value : String?) : Nil
+pub def __iyi_observe_env_get(name : String, value : String?) : Nil
   env_get(name, value)
 end
 
-def self.env_all : Nil
+pub def env_all : Nil
   return if !@@enabled || @@tainted
   writer = RecordWriter.new
   writer.begin_record(0x04_u8, current_task_id)
   writer.flush(@@fd)
 end
 
-def self.__iyi_observe_env_all : Nil
+pub def __iyi_observe_env_all : Nil
   env_all
 end
 
 # `ENV.[]=` or `ENV.delete` on *name*: a later read of it records
 # `written_first`, and the trace keeps no observation for it. The write
 # itself records `env_all`, which covers what it returned.
-def self.env_write(name : String) : Nil
+pub def env_write(name : String) : Nil
   return unless @@enabled
   @@written_env.add(name)
   env_all
 end
 
-def self.__iyi_observe_env_write(name : String) : Nil
+pub def __iyi_observe_env_write(name : String) : Nil
   env_write(name)
 end
 
@@ -389,7 +402,7 @@ end
 # stands in the directory `cd` moved to. Resolving the def's argument again
 # would apply a relative `cd` twice (`sub` became `sub/sub`); the record is
 # the real current directory, which is what the program sees.
-def self.cwd(path : String) : Nil
+pub def cwd(path : String) : Nil
   return if !@@enabled || @@tainted
   real = safe_real_path(current_cwd)
   writer = RecordWriter.new
@@ -398,11 +411,11 @@ def self.cwd(path : String) : Nil
   writer.flush(@@fd)
 end
 
-def self.__iyi_observe_cwd(path : String) : Nil
+pub def __iyi_observe_cwd(path : String) : Nil
   cwd(path)
 end
 
-def self.host(value : String) : Nil
+pub def host(value : String) : Nil
   return if !@@enabled || @@tainted
   writer = RecordWriter.new
   writer.begin_record(0x06_u8, current_task_id)
@@ -410,11 +423,11 @@ def self.host(value : String) : Nil
   writer.flush(@@fd)
 end
 
-def self.__iyi_observe_host(value : String) : Nil
+pub def __iyi_observe_host(value : String) : Nil
   host(value)
 end
 
-def self.file_write(op : UInt8 | Symbol | String, path : String, target : String? = nil) : Nil
+pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : String? = nil) : Nil
   return if !@@enabled || @@tainted
   real = safe_real_path(path)
   target_real = target.nil? || target.empty? ? "" : safe_real_path(target)
@@ -434,15 +447,15 @@ def self.file_write(op : UInt8 | Symbol | String, path : String, target : String
   writer.flush(@@fd)
 end
 
-def self.__iyi_observe_file_write(op : UInt8 | Symbol | String, path : String, target : String? = nil) : Nil
+pub def __iyi_observe_file_write(op : UInt8 | ::Symbol | String, path : String, target : String? = nil) : Nil
   file_write(op, path, target)
 end
 
-def self.exit(status : Int32) : Nil
+pub def exit(status : Int32) : Nil
   finish(status)
 end
 
-def self.__iyi_observe_exit(status : Int32) : Nil
+pub def __iyi_observe_exit(status : Int32) : Nil
   finish(status)
 end
 
@@ -452,7 +465,7 @@ end
 # reported stay complete while the observers stop allocating. That keeps a
 # network-heavy program's own allocation measurements what they are in a
 # normal build (RG2). END is still written, so the trace stays complete.
-def self.not_reusable(kind : UInt8 | Symbol | String, site : String) : Nil
+pub def not_reusable(kind : UInt8 | ::Symbol | String, site : String) : Nil
   return unless @@enabled
   kind_code = parse_kind(kind)
   bit = kind_code >= 32_u8 && kind_code < 95_u8 ? 1_u64 << (kind_code - 32_u8).to_i32 : 1_u64 << 63
@@ -467,63 +480,63 @@ def self.not_reusable(kind : UInt8 | Symbol | String, site : String) : Nil
   writer.flush(@@fd)
 end
 
-def self.__iyi_observe_not_reusable(kind : UInt8 | Symbol | String, site : String) : Nil
+pub def __iyi_observe_not_reusable(kind : UInt8 | ::Symbol | String, site : String) : Nil
   not_reusable(kind, site)
 end
 
-def self.__iyi_observe_clock(site : String) : Nil
+pub def __iyi_observe_clock(site : String) : Nil
   not_reusable(32_u8, site)
 end
 
-def self.__iyi_observe_entropy(site : String) : Nil
+pub def __iyi_observe_entropy(site : String) : Nil
   not_reusable(33_u8, site)
 end
 
-def self.__iyi_observe_timer(site : String) : Nil
+pub def __iyi_observe_timer(site : String) : Nil
   not_reusable(34_u8, site)
 end
 
-def self.__iyi_observe_network(site : String) : Nil
+pub def __iyi_observe_network(site : String) : Nil
   not_reusable(35_u8, site)
 end
 
-def self.__iyi_observe_process(site : String) : Nil
+pub def __iyi_observe_process(site : String) : Nil
   not_reusable(36_u8, site)
 end
 
-def self.__iyi_observe_signal(site : String) : Nil
+pub def __iyi_observe_signal(site : String) : Nil
   not_reusable(37_u8, site)
 end
 
-def self.__iyi_observe_runtime_timing(site : String) : Nil
+pub def __iyi_observe_runtime_timing(site : String) : Nil
   not_reusable(38_u8, site)
 end
 
-def self.__iyi_observe_code_location(site : String) : Nil
+pub def __iyi_observe_code_location(site : String) : Nil
   not_reusable(39_u8, site)
 end
 
 @[Effect(:code_location)]
-def self.probe_code_location : Int32
+pub def probe_code_location : Int32
   0
 end
 
-def self.__iyi_observe_dir_stream(site : String) : Nil
+pub def __iyi_observe_dir_stream(site : String) : Nil
   not_reusable(40_u8, site)
 end
 
-def self.__iyi_observe_host_state(site : String) : Nil
+pub def __iyi_observe_host_state(site : String) : Nil
   not_reusable(41_u8, site)
 end
 
-private def self.write_end(status : Int32) : Nil
+private def write_end(status : Int32) : Nil
   writer = RecordWriter.new
   writer.begin_record(0x7F_u8, 0_u64)
   writer.write_i32(status)
   writer.flush(@@fd)
 end
 
-private def self.parse_op(op : UInt8 | Symbol | String) : UInt8
+private def parse_op(op : UInt8 | ::Symbol | String) : UInt8
   if op.is_a?(UInt8)
     return op
   end
@@ -541,7 +554,7 @@ private def self.parse_op(op : UInt8 | Symbol | String) : UInt8
   end
 end
 
-private def self.parse_kind(kind : UInt8 | Symbol | String) : UInt8
+private def parse_kind(kind : UInt8 | ::Symbol | String) : UInt8
   if kind.is_a?(UInt8)
     return kind
   end
@@ -562,7 +575,7 @@ private def self.parse_kind(kind : UInt8 | Symbol | String) : UInt8
   end
 end
 
-private def self.current_task_id : UInt64
+private def current_task_id : UInt64
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     {% if !flag?(:single_thread) %}
       if IyiScheduler.state_id != 0_u64
@@ -581,7 +594,7 @@ private def self.current_task_id : UInt64
 end
 
 @[Effect(:observation_channel)]
-def self.c_str(ptr : UInt8*) : String
+pub def c_str(ptr : UInt8*) : String
   return "" if ptr.address == 0_u64
   len = 0
   while ptr[len] != 0_u8
@@ -591,7 +604,7 @@ def self.c_str(ptr : UInt8*) : String
 end
 
 @[Effect(:observation_channel)]
-private def self.get_env(name : String) : String?
+private def get_env(name : String) : String?
   {% if flag?(:win32) %}
     __iyi_win_env_get(name.to_unsafe, name.bytesize)
   {% elsif flag?(:darwin) || flag?(:linux) %}
@@ -607,7 +620,7 @@ private def self.get_env(name : String) : String?
 end
 
 @[Effect(:observation_channel)]
-private def self.unset_env(name : String) : Nil
+private def unset_env(name : String) : Nil
   {% if flag?(:win32) %}
     __iyi_win_env_unset(name.to_unsafe, name.bytesize)
     nil
@@ -617,7 +630,7 @@ private def self.unset_env(name : String) : Nil
 end
 
 @[Effect(:observation_channel)]
-private def self.current_cwd : String
+private def current_cwd : String
   {% if flag?(:win32) %}
     buf = Pointer(UInt8).malloc(4096_u64)
     len = __iyi_getcwd(buf, 4096_u64)
@@ -640,7 +653,7 @@ private def self.current_cwd : String
 end
 
 @[Effect(:observation_channel)]
-def self.current_host : String
+pub def current_host : String
   {% if flag?(:win32) %}
     buf = Pointer(UInt16).malloc(256_u64)
     size = 256_u32
@@ -662,7 +675,7 @@ def self.current_host : String
 end
 
 @[Effect(:observation_channel)]
-def self.safe_real_path(path : String) : String
+pub def safe_real_path(path : String) : String
   {% if flag?(:darwin) || flag?(:linux) %}
     buf = Pointer(UInt8).malloc(4096_u64)
     res = LibObserveC.realpath(path.to_unsafe, buf)
@@ -678,7 +691,7 @@ def self.safe_real_path(path : String) : String
   normalize_path(p)
 end
 
-private def self.normalize_path(path : String) : String
+private def normalize_path(path : String) : String
   parts = path.split('/')
   res = [] of String
   parts.each do |part|
@@ -693,7 +706,7 @@ private def self.normalize_path(path : String) : String
 end
 
 @[Effect(:observation_channel)]
-private def self.stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
+private def stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
   {% if flag?(:darwin) %}
     st = uninitialized LibObserveC::StatDarwin
     if LibObserveC.stat(real.to_unsafe, pointerof(st).as(Void*)) == 0
@@ -721,7 +734,7 @@ private def self.stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
   {% end %}
 end
 
-private def self.mode_to_ftype(mode : Int64) : UInt8
+private def mode_to_ftype(mode : Int64) : UInt8
   case mode & 0o170000_i64
   when 0o100000_i64 then 1_u8 # file
   when 0o040000_i64 then 2_u8 # dir
@@ -734,7 +747,7 @@ private def self.mode_to_ftype(mode : Int64) : UInt8
   end
 end
 
-private def self.is_under_scratch?(real : String) : ::Bool
+private def is_under_scratch?(real : String) : ::Bool
   scratch = @@scratch
   return false if scratch.nil? || scratch.empty?
   real == scratch || real.starts_with?(scratch.ends_with?("/") ? scratch : scratch + "/")

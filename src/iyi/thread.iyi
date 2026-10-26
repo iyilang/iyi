@@ -268,7 +268,7 @@
       end
 
       # A block for one thread; answers the thread pointer to hand `clone`.
-      def self.make : UInt64
+      @[Effect(:threads)]; def self.make : UInt64
         read_segment
         size = round_up(@@memsz, @@align)
         mapping = __iyi_mmap(round_up(size + 64_u64, 4096_u64)).address

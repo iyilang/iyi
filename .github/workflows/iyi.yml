@@ -178,6 +178,15 @@ jobs:
       - name: Stale test acceptance suite
         run: bash bench/stale_tests.sh
 
+      # Every runtime site the reached code can take is classified, on this
+      # host and, through the front end, on the other Linux target. Windows
+      # is not claimed: its arms are unclassified, so a Windows test is
+      # never reusable.
+      - name: Effect classification (RG3), x86_64 and aarch64 Linux
+        run: |
+          bash bench/stale_effects.sh check
+          RG3_TARGET=aarch64-linux-gnu bash bench/stale_effects.sh check
+
       # The receipt digest and the RG8 oracle each answer to an outside
       # reference: std/digest's SHA-256 to Python's hashlib, the IR
       # normalizer to three cases it must tell apart.

@@ -535,7 +535,7 @@ class Random::Secure < Random
     # and a 64-bit st_nlink, and 16 into aarch64's, whose st_nlink comes
     # after it; the struct is 144 bytes on the one and 128 on the other.
     # A failed `fstat` answers no.
-    @[Effect(:file_stat)]
+    @[Effect(:entropy)]
     private def self.character_device?(fd : Int64) : Bool
       stat = uninitialized UInt8[144]
       result = uninitialized Int64

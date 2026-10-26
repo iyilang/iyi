@@ -73,11 +73,14 @@
 #     the writing thread for the write and taken off it after.
 #   * darwin: libSystem's `posix_spawn`, and the end awaited as a kqueue of
 #     its own, one whose single event is the child's NOTE_EXIT, which the
-#     poller waits on like any descriptor.
+#     poller waits on like any descriptor; with the kqueue refused the
+#     fiber asks `waitpid` with WNOHANG and sleeps between asks.
 #   * Windows: `CreateProcessW` with the child's three handles and no
 #     others (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), overlapped named pipes on
 #     this side so the reads and writes park on the completion port, and
-#     the end posted to the port by `RegisterWaitForSingleObject`.
+#     the end posted to the port by `RegisterWaitForSingleObject`; with the
+#     registration refused the fiber asks with a zero wait and sleeps
+#     between asks.
 #
 # `Process.executable` is this program's own path, which is how a program
 # starts another copy of itself, and `Process.pid` its process id.
@@ -1903,7 +1906,11 @@ class ProcessChild
 
       # The end, as a kqueue of its own: one NOTE_EXIT event for the child,
       # which makes that queue's descriptor readable, and the poller waits
-      # on that descriptor like any other.
+      # on that descriptor like any other. With no kqueue to be had, or the
+      # event refused, a blocking `waitpid` held this thread, and every
+      # other task on it, for as long as the child ran: the end is asked
+      # for with WNOHANG instead and the fiber sleeps between asks, from a
+      # millisecond to fifty, as Linux asks without a pidfd.
       def wait_end : Nil | Cancelled
         status = 0
         queue = ::LibC.kqueue
@@ -1915,13 +1922,30 @@ class ProcessChild
             waited = IyiScheduler.wait_readable_current(queue)
             ProcessChild.sys_close(queue)
             return waited if waited.is_a?(Cancelled)
-          else
-            ProcessChild.sys_close(queue)
-            if registered == 0
-              record_end(status)
-              return nil
-            end
+            reap
+            return nil
           end
+          ProcessChild.sys_close(queue)
+          if registered == 0
+            record_end(status)
+            return nil
+          end
+        end
+        pause = 1
+        while true
+          # WNOHANG: 0 while the child runs, its pid once it has ended.
+          answered = LibC.waitpid(@pid, pointerof(status), 1)
+          if answered == @pid
+            record_end(status)
+            return nil
+          end
+          # Anything but "still running" or an interruption has nothing
+          # more to wait for; the blocking reap says what it was.
+          break unless answered == 0 || ProcessChild.errno == EINTR
+          slept = sleep(pause)
+          return slept if slept.is_a?(Cancelled)
+          pause = pause * 2 if pause < 50
+          pause = 50 if pause > 50
         end
         reap
         nil

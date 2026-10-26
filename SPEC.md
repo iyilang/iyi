@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,310 lines, of which 4,647 are the library held to the 4,650 ceiling (6,663 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,766 lines, none of it written in iyi |
+| iyi's own prelude | 24,551 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 130,796 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,310 lines
+> "No standard library worth the name" is still true of iyi's own 24,551 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,310 lines,
-primitives included, of which the library is 4,647.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 24,551 lines,
+primitives included, of which the library is 4,649.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,11 +299,11 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,647 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,649 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,016 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,663 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,665 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,766 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,310-line own prelude + 125,236 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 130,796 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,551-line own prelude + 125,260 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3416,9 +3416,10 @@ here from the deadlock it prevents. GC_DESIGN.md carries what the build
 found: the trigger's count made atomic and decided twice, the centre's
 free chunks handed out in the sweep's own per-arena batches so one
 thread cannot hoard, and a budget floored at half of what the sweep
-walked so eight threads do not turn a MiB budget into four thousand
-stops a second. The gate holds eight threads with live lists in their
-frames alone through collections triggered from any of them — by
+walked so eight threads did not turn a MiB budget into four thousand
+stops a second (the lazy sweep took that floor out again). The gate
+holds eight threads with live lists in their frames alone through
+collections triggered from any of them — by
 checksum and by the sweep's own free flag, after an explicit collection
 with every worker spinning and after twenty bursts of churn — fibers on
 threads, 32 threads past the core count, the floor, and a failure proof
@@ -3965,8 +3966,9 @@ hash, std's and already checked, 0 to 8. Now:
   30), a second clear of the same block 14 to 47 (6.2 to 6.4), and a
   store to each 4 KiB of a fresh one 3.6 to 79 (8.2 to 44). Now under the
   arena both entries hand the block back zeroed - a chunk off a list is
-  cleared in the allocator, a carved chunk or a mapping is left as the
-  kernel zeroed it - and codegen clears nothing after them
+  cleared in the allocator, a chunk carved from a cold run past its first
+  page, and a frontier chunk or a mapping is left as the kernel zeroed
+  it - and codegen clears nothing after them
   (`generic_array_malloc`), so the pages fault in the growth's own loops,
   which check. After, plain: the three blocks took 2.2 to 2.5 ms on
   Linux, 2.1 to 2.4 of it the collection's pause, and the short task
@@ -3980,7 +3982,21 @@ hash, std's and already checked, 0 to 8. Now:
   58.6 to 59.6 and 57.1, the JSON parse 10.4 to 12.5 and 11.3 to 12.2).
   `bench/arena_exercise.iyi` holds that a chunk freed dirty comes back
   zeroed through the atomic entry; a copy whose atomic entry does not
-  clear fails it at byte 1.
+  clear fails it at byte 1. The `memset` had also hidden that a cold run
+  is zero on a chunk's head page only: a run's last chunk reaches onto a
+  page nobody released, and a chunk that was a list's when the pages
+  above its head went cold was written there by its owner, then joined
+  the run when its own page went cold. Without the `memset`, the carve
+  handed std/compress's exercise chunks of 1,280 to 24,576 bytes dirty
+  from a page boundary on (`bench/std_compress_exercise.sh` failed, and
+  a run of it with every clearing allocation read back failed on every
+  run). The carve now clears such a chunk from its second page on. The
+  arena exercise thins blocks of a page and a quarter to one in
+  twenty-one and takes them up again: without that clear it reads 170 at
+  byte 4,096 of a 5,000-byte block on Linux and at byte 12,288 of a
+  20,360-byte block on darwin arm64's 16 KiB pages. Sized at 5,000 bytes
+  there, three chunks shared a page, the carve listed the run's last one
+  and the pop cleared it, and the take-up met no cold page at all.
 
 After (release, one worker, load 4 to 12): a sort of 6,000,000 started the
 short task 4 to 7 ms later, a growth at 8,388,608 entries 17 to 18, a join
@@ -4142,6 +4158,135 @@ order, answered on more than one worker. Not built: the frozen config's
 identities, protocols and ECH keys are the server's for its life -
 another set is another `serve_parallel` - and a ticket outlives neither
 the process nor a move to another server, as under `serve`.
+
+**Issue #145's shape, measured against Go.** The issue timed a whole
+application with a database. This times the three kinds of endpoint where
+its gap was widest, written once in iyi (`bench/web_cores.iyi`) and once
+in Go (`bench/web_cores/main.go`, net/http, encoding/json and
+golang.org/x/crypto/bcrypt). Before anything is timed, both servers must
+answer every request with the same bytes. There is no database: the
+issue's tuned pool is out of scope, and what is measured is what a
+server's own cores do with a request. The endpoints:
+
+- `login` checks a JSON body's password with bcrypt. The issue does not
+  state its cost, so cost 10 is used.
+- `check_version` reads a query and answers five fields of JSON.
+- `order` reads sixteen line items of JSON, totals and sorts them, and
+  answers in JSON.
+
+How it was taken - `bench/web_cores.py`: wrk with 4 threads and 32
+kept-alive connections, bcrypt at cost 10, `serve_parallel` on 1, 2, 4, 8
+and 12 workers, best of 3 runs of 15 s (login) and 5 s (the others). Each
+run waits for the server to finish what the run before left it. The
+machine was Linux on a twelve-thread QEMU VM, with release builds and Go
+1.25.14 at its default GOMAXPROCS; measured on 2026-10-25. Other work kept
+1.5 to 2.7 cores busy throughout (/proc/stat's busy time less the
+server's and wrk's), and wrk itself used up to 2 cores. Each cell is
+requests a second, the server's CPU as a share of one core, and p50 / p99
+latency in ms.
+
+| HTTP | login | check_version | order |
+|---|---:|---:|---:|
+| iyi `serve` | 27, 100%, 1190 / 1280 | 46,241, 112%, 0.7 / 2.3 | 33,665, 113%, 0.9 / 2.4 |
+| `serve_parallel`, 1 worker | 26, 100%, 1120 / 1570 | 45,445, 111%, 0.7 / 2.4 | 32,770, 111%, 0.9 / 2.7 |
+| `serve_parallel`, 2 | 52, 200%, 564 / 774 | 98,700, 213%, 0.3 / 2.4 | 69,092, 220%, 0.4 / 2.6 |
+| `serve_parallel`, 4 | 103, 400%, 289 / 404 | 195,346, 424%, 0.1 / 2.5 | 119,769, 468%, 0.2 / 2.9 |
+| `serve_parallel`, 8 | 196, 797%, 164 / 201 | 208,641, 602%, 0.1 / 3.6 | 137,744, 605%, 0.2 / 4.2 |
+| `serve_parallel`, 12 | 247, 1,032%, 128 / 174 | 205,879, 631%, 0.1 / 4.2 | 131,160, 697%, 0.2 / 6.9 |
+| Go net/http | 242, 1,033%, 129 / 215 | 216,298, 528%, 0.1 / 3.0 | 90,732, 538%, 0.2 / 3.5 |
+| *the issue's, iyi (Windows, with its database)* | *9.9* | *5,308* | |
+| *the issue's, Go (Windows, with its database)* | *108.2* | *21,099* | |
+
+| HTTPS (TLS 1.3, Ed25519) | login | check_version | order |
+|---|---:|---:|---:|
+| iyi `serve` | 27, 100%, 1180 / 1220 | 37,828, 114%, 0.8 / 2.5 | 25,668, 114%, 1.2 / 2.8 |
+| `serve_parallel`, 1 worker | 26, 100%, 1120 / 1550 | 38,313, 109%, 0.8 / 2.6 | 25,433, 109%, 1.2 / 3.0 |
+| `serve_parallel`, 2 | 53, 200%, 564 / 772 | 76,018, 220%, 0.4 / 2.6 | 54,217, 226%, 0.6 / 2.9 |
+| `serve_parallel`, 4 | 104, 400%, 288 / 396 | 149,869, 449%, 0.2 / 2.8 | 93,015, 497%, 0.3 / 3.1 |
+| `serve_parallel`, 8 | 197, 796%, 166 / 203 | 160,483, 605%, 0.1 / 3.9 | 116,324, 625%, 0.2 / 4.8 |
+| `serve_parallel`, 12 | 246, 1,030%, 128 / 180 | 143,231, 641%, 0.1 / 7.1 | 89,939, 735%, 0.3 / 11.2 |
+| Go net/http | 241, 1,032%, 129 / 228 | 169,636, 503%, 0.1 / 3.0 | 67,950, 504%, 0.3 / 3.8 |
+
+The issue's rows are its own numbers. They were taken on Windows 11 in a
+twelve-vCPU QEMU VM, with iyi 0.19.0 and a database behind every endpoint,
+so set them beside these for their ratio and not their size.
+
+**The login gap was cores, and it is closed.** Taken one request at a
+time on one connection, a cost-10 verify costs 37.0 to 38.5 ms of CPU
+in iyi (`serve`, and `serve_parallel` on 1 and 2 workers) and 38.0 to 38.5
+ms in Go (GOMAXPROCS 1 and 2). std/password's bcrypt is therefore not
+what was slow. On twelve workers iyi answers 247 logins a second on
+1,032% CPU, where Go answers 242 on 1,033%. The issue's ratio was 108.2 to
+9.9, about 11 to 1. Under `serve` the logins are answered first come,
+first served. Under `serve_parallel` the preemption of part 9 interleaves
+the logins on a worker, and they finish in batches about a second apart,
+which widens the spread: at one worker p50 is 1,120 ms against `serve`'s
+1,190, and p99 is 1,570 against 1,280.
+
+**The light endpoints scale to four workers, and then stop for two
+reasons.** On one worker `serve_parallel` answers what `serve` does, to
+within 3% on both endpoints and both protocols. On four it answers 4.2
+times `serve`'s `check_version` and 3.6 times its `order`. Past four, the
+first limit is the load generator and loopback: Go stops at 216,298
+`check_version` a second while using only 528% CPU. The second limit is
+iyi's own. perf is closed to
+unprivileged users on this machine, so every thread's stack was sampled
+with gdb instead: 20 stops during a 12-worker HTTPS `check_version` run,
+and 20 during a 4-worker one.
+
+- With twelve workers, 139 of the 260 samples of the threads serving
+  (twelve workers and the accepting thread) were inside `IyiRuntimeLock`.
+  Those threads were spinning, yielding the core, or parked for a stop,
+  all on the allocator's slow path: a size class's list refilled
+  (`refill`), a lazy sweep (`sweep_one`), or pages reopened
+  (`reopen_pages`).
+- With four workers, 17 of 100 samples were inside it.
+
+So at twelve workers over HTTPS, `check_version` answers 143,231 a second
+on 641% CPU, against Go's 169,636 on 503%: 22,000 a second per core
+against 34,000. At four workers iyi answers 33,000 per core. The lock was
+the collector's (GC_DESIGN.md), taken for a refill that each thread's own
+lists could not satisfy, and it is split now, below. `order` was answered
+faster per core than Go's on every row up to eight workers: 137,744 a
+second on 605% CPU against Go's 90,732 on 538%.
+
+**The allocator's centre, split by size class, and measured again.** Each
+size class has its own lock, its batches and its own list of arenas, and a
+worker that sweeps a slice keeps the slice's batch; the runtime lock keeps
+the heap's lists and the pause (GC_DESIGN.md, "A pool's workers and the
+centre"). The same rows, taken interleaved with the build before the split
+in one session on 2026-10-26, best of 3 runs each, the load average 4 to
+10 from the runs themselves and 0 to 0.2 cores busy elsewhere; requests a
+second and the server's CPU:
+
+| | HTTP check_version | HTTP order | HTTPS check_version | HTTPS order |
+|---|---:|---:|---:|---:|
+| 4 workers, before | 232,339, 471% | 135,639, 503% | 177,202, 544% | 101,492, 575% |
+| 4 workers, after | 248,242, 415% | 164,023, 422% | 185,398, 413% | 114,521, 419% |
+| 12 workers, before | 260,536, 793% | 156,387, 889% | 167,319, 819% | 91,435, 914% |
+| 12 workers, after | 286,922, 621% | 205,736, 636% | 204,526, 599% | 148,015, 640% |
+
+HTTPS `check_version` on twelve workers is 34,100 a second per core where
+it was 20,400, and Go's was 32,200 (the first session's Go row). Ten gdb
+stops under it found none of 250 thread stacks in a lock, against 60
+before, and the server took 41,000 minor faults in ten seconds against
+781,000. Measured again interleaved on 2026-10-26, three 20-second runs
+each with the server's memory read from /proc as wrk ran, HTTPS
+`check_version` on twelve workers peaked at 29 to 30 MB resident where it
+peaked at 47 to 75, through 5,309 to 5,377 collections where it ran
+1,744 to 1,904, with 81,370 to 103,065 minor faults against 1,428,966 to
+1,446,569, at 200,022 to 201,538 requests a second against 147,597 to
+156,580. `bench/alloc_scaling.py`'s twelve workers allocating flat out
+are another shape: their heap reaches 637 to 925 MB (593 to 899 before)
+because the thread that crosses the budget pays the last epoch's sweep
+debt alone before its first stop while the rest allocate, unchecked
+(GC_DESIGN.md has the counts), and that is not changed here.
+
+`bench/web_cores.py` is not a gate. On this shared machine its rows move
+with whatever else runs, and wrk takes cores the twelve-worker rows want.
+`bench/measured_numbers.py` names it among what a shared runner cannot
+check, and holds the sentence above (connections, cost, workers, runs) to
+the script's constants and the stored hash's cost to the script's.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
@@ -10846,7 +10991,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,310-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,551-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

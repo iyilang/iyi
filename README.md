@@ -217,6 +217,37 @@ Compiling code it has never seen costs roughly 25 ms per thousand lines. The
 front end alone is 0.034 s for `hello`, and 0.018 s of that is the process
 starting up before it reads anything.
 
+### A web server's cores (issue #145)
+
+Issue #145 ported a web API to iyi and found it never used more than 1.8
+of twelve cores, while its Go port used 11. `Server.serve_parallel`
+answers connections on a pool of workers. The table below compares it
+with `Server.serve` and a Go twin that answers the same bytes. It covers
+the issue's kinds of endpoint, without the issue's database: a bcrypt
+login, a `check_version` that answers a few fields of JSON, and an
+`order` that reads, totals and sorts sixteen items of JSON.
+
+It was taken with `bench/web_cores.py`: wrk with 4 threads and 32
+kept-alive connections, bcrypt at cost 10, `serve_parallel` on 1, 2, 4,
+8 and 12 workers, best of 3 runs of 15 s (login) and 5 s (the others).
+The machine was Linux on a twelve-thread VM, with other work keeping
+about 2 of its cores busy. Each cell is requests a second over HTTP, with
+the server's CPU in brackets:
+
+| | login | check_version | order |
+|---|---:|---:|---:|
+| iyi `serve` | 27 (100%) | 46,241 (112%) | 33,665 (113%) |
+| iyi `serve_parallel`, 12 workers | **247** (1,032%) | 205,879 (631%) | **131,160** (697%) |
+| Go net/http | 242 (1,033%) | **216,298** (528%) | 90,732 (538%) |
+| *the issue's iyi: Windows, with a database* | *9.9* | *5,308* | |
+| *the issue's Go: Windows, with a database* | *108.2* | *21,099* | |
+
+The login is now as fast as Go's: bcrypt takes the same CPU per hash in
+both, and the gap was the number of cores in use. Past four workers, the
+light endpoints are held back by the load generator, and in iyi also by
+the collector's allocation lock. SPEC.md III.4.13 has every worker count,
+HTTPS, the latencies, and the profile behind both claims.
+
 ## The rules everything follows from
 
 | Rule | |
@@ -331,8 +362,8 @@ including the one pause the design does not bound.
 **Efficiency — mostly subtraction.** `puts "hello"` is a 36 KB binary that
 starts in 1.6 ms; the same program compiled with Crystal's standard library is
 1,553 KB and 3.2 ms. A program links what it uses, and
-iyi's own library is 24,310 lines rather than 8,161.
-The whole library is 1,008 KB on disk beside the binary.
+iyi's own library is 24,551 lines rather than 8,161.
+The whole library is 1,021 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
 and move with the platform; `python3 bench/machine_probe.py` prints your
@@ -354,7 +385,7 @@ tar -xzf iyi-0.19.1-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,008 KB prelude, the 4,917 KB of `src/std` that `import std/...`
+iyi's own 1,021 KB prelude, the 4,918 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`
@@ -559,7 +590,7 @@ $ curl localhost:3000/json
 traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
 of them work in a program that requires a shard, and R-2 still refuses an
 export that does not write its types. What changes is what the program *has*:
-8,161 lines of Crystal's standard library instead of 24,310 lines of iyi's own
+8,161 lines of Crystal's standard library instead of 24,551 lines of iyi's own
 prelude.
 
 **One name is unreachable, and it is a class of names.** `!` in iyi propagates
@@ -846,7 +877,7 @@ not the library.
 
 ## What is not here
 
-- **iyi's own library is 24,310 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 24,551 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`.** `gets`, `read_all`, `write` and `flush`
   on the streams; `File.read`, `File.write`, `File.exists?`, `File.delete`
   and `File.open(path, mode)`. Its collections carry a method because a
@@ -880,7 +911,7 @@ not the library.
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
 | [`samples/iyi`](samples/iyi) | twenty-seven programs: nineteen documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 24,310 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 24,551 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |

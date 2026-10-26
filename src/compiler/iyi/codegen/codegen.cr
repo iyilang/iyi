@@ -2863,9 +2863,10 @@ module Iyi
       end
 
       # iyi: under the arena both entries hand the block back zeroed - a
-      # chunk off a list is cleared inside the allocator, and a carved chunk
-      # or a large mapping is the kernel's zero - so a memset here would
-      # clear it twice. It was worse than twice: the memset is the
+      # chunk off a list is cleared inside the allocator, a chunk carved
+      # from a cold run past its first page (`IyiHeap.carve`), and a
+      # frontier chunk or a large mapping is the kernel's zero - so a memset
+      # here would clear it twice. It was worse than twice: the memset is the
       # prelude's, runtime code with no preemption check, and on a large
       # block it took every page fault of the fresh mapping as well. A
       # `Hash(Int32, Int32)` of 8,388,608 entries growing, three blocks of
@@ -3071,13 +3072,42 @@ module Iyi
     # and `cold`, so the check's call sits off the loop's path; nil in a
     # program with no pool. Asked first at a back-edge, which is where the
     # word's global is named for `PreemptChecks`.
+    #
+    # Where the check calls the word's accessor, it is defined here, in the
+    # main module, as a read of the variable defines it: `PreemptChecks`
+    # only declares it in the module it checks. And external: the check's
+    # call comes after optimisation, and before it nothing may call the
+    # accessor, which a `--release` build makes internal and so deletes.
+    # Nothing in the runtime read `@@preempt` on x86-64 Windows, where the
+    # word is a TEB slot, so `-Dpreempt_check_accessor` linked there to
+    # `unresolved external symbol *IyiWorkers::preempt` (CI job
+    # 121231000410); defined here but internal, the cross-compiled object
+    # still named it undefined. darwin had it because its slow half writes
+    # the variable.
     private def iyi_preempt_fun : LLVMTypedFunction?
       return nil unless word = iyi_preempt_word
       preempt = @iyi_preempt_fun ||= typed_fun?(@main_mod, PREEMPT_NAME)
       return nil unless preempt
       preempt.func.add_attribute LLVM::Attribute::Cold
-      @program.iyi_preempt_flag ||= class_var_global_name(word)
+      unless @program.iyi_preempt_flag
+        name = class_var_global_name(word)
+        @program.iyi_preempt_flag = name
+        if iyi_preempt_accessor?
+          declare_thread_local_fun(name, word.type, word).func.linkage = LLVM::Linkage::External
+        end
+      end
       preempt
+    end
+
+    # Whether `PreemptChecks` calls the word's accessor: never on Linux,
+    # which reads the thread pointer; on x86-64 Windows only in the
+    # accessor-check variant, the TEB slot otherwise; and on darwin and
+    # arm64 Windows always, darwin arm64 once per function for the word's
+    # offset and the rest at every back-edge.
+    private def iyi_preempt_accessor? : Bool
+      return false if @program.has_flag?("linux")
+      return true if @program.has_flag?("preempt_check_accessor")
+      !(@program.has_flag?("win32") && @program.has_flag?("x86_64"))
     end
 
     # iyi: a store whose destination is a stack slot — an alloca, or a

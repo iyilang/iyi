@@ -247,6 +247,46 @@ def check_webapp_size(wrong: list[str], held: list[str]) -> None:
     held.append(f"the generated web application is {measured[1]} files and {measured[2]:,} lines, as SPEC.md says")
 
 
+def check_web_cores_shape(wrong: list[str], held: list[str]) -> None:
+    """SPEC.md and the README say how issue #145's table was taken; the script holds it.
+
+    The sentence is matched with its line breaks folded to spaces, since a
+    rewrapped paragraph is the same sentence.
+    """
+    cores = load("bench/web_cores.py")
+    pattern = (
+        r"`bench/web_cores\.py`: wrk with (\d+) threads and (\d+) kept-alive connections, "
+        r"bcrypt at cost (\d+), `serve_parallel` on ([\d, and]+) workers, best of (\d+) runs of "
+        r"(\d+) s \(login\) and (\d+) s \(the others\)"
+    )
+    instrument = (
+        cores.WRK_THREADS, cores.CONNECTIONS, cores.COST, list(cores.WORKERS), cores.RUNS,
+        cores.SECONDS["login"], cores.SECONDS["check_version"],
+    )
+    if cores.SECONDS["check_version"] != cores.SECONDS["order"]:
+        wrong.append("bench/web_cores.py: check_version and order run for different times, which the docs' one figure cannot say")
+        return
+    for twin in ("bench/web_cores.iyi", "bench/web_cores/main.go"):
+        stored = re.search(r"\$2b\$(\d\d)\$", doc(twin))
+        if stored is None or int(stored.group(1)) != cores.COST:
+            wrong.append(f"{twin}: its stored hash is not at bench/web_cores.py's cost {cores.COST}")
+            return
+    for where in ("SPEC.md", "README.md"):
+        text = " ".join(doc(where).split())
+        if not quoted(text, pattern, where, wrong):
+            continue
+        found = re.search(pattern, text)
+        threads, connections, cost, workers, runs, login, others = found.groups()
+        said = (
+            int(threads), int(connections), int(cost),
+            [int(n) for n in re.findall(r"\d+", workers)], int(runs), int(login), int(others),
+        )
+        if said != instrument:
+            wrong.append(f"{where}: issue #145's table is said to be taken as {said}, bench/web_cores.py runs {instrument}")
+            continue
+        held.append(f"{where}'s web_cores table is taken as bench/web_cores.py takes it")
+
+
 # What no gate on a shared runner can check, named rather than left implied.
 # Each is a figure the docs state in the present tense and only a quiet,
 # release-built machine can produce; `bench/machine_probe.py` prints the
@@ -262,6 +302,8 @@ UNCHECKABLE = [
     "the resident-set band (bench/resident_probe.py, needs a release build)",
     "the runtime ratios (bench/runtime.py, needs release builds of both libraries)",
     "the real-program edit-loop table (bench/edit_loop.py, needs a release compiler)",
+    "issue #145's requests a second, CPU and latency (bench/web_cores.py, needs wrk and go)",
+    "the allocator's scaling across a pool and its lock samples (bench/alloc_scaling.py, needs release builds and gdb)",
 ]
 
 
@@ -276,6 +318,7 @@ def main() -> int:
         check_daemon_shape,
         check_context_threshold,
         check_webapp_size,
+        check_web_cores_shape,
     ):
         check(wrong, held)
 

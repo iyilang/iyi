@@ -418,16 +418,17 @@ broken() { # name, awk program[, file in src/iyi[, program in bench]]
 }
 # A broken copy is a race the gate makes on purpose, and its run can lose
 # the race some other way first: the intransit copy died of SIGSEGV in 2 of
-# 180 runs rather than failing by name. A run that dies of a signal is run
-# again, up to five times; one ending in exit 1 at the sentence is the
-# proof, and any other end after five is a failure of the gate.
+# 180 runs rather than failing by name, and in 60 runs each it slipped
+# through and exited 0 in 2 on one prelude and 1 on the next. A run that
+# ends any way but exit 1 at the sentence is run again, up to five times;
+# one ending there is the proof, and none in five is a failure of the gate.
 caught() { # name, expected FAIL text, step arguments...
   local name="$1" want="$2" code attempt
   shift 2
   for attempt in 1 2 3 4 5; do
     timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
     code=$?
-    [ "$code" -lt 128 ] && [ "$code" -ne 124 ] && break
+    [ "$code" -eq 1 ] && grep -qF "$want" "$name.txt" && break
   done
   if [ "$code" -ne 1 ] || ! grep -qF "$want" "$name.txt"; then
     echo "the broken copy $name was not caught at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1

@@ -44,6 +44,56 @@
   and Windows drops what a reset connection received and was not read:
   the server read "the connection was aborted" in place of the client's
   ech_required in 18 and 15 of 20 runs here, and in none of 40 after.
+- **The allocator's centre is split by size class (#145).** Each class
+  has its own lock, its stack of batches and its own list of arenas, so a
+  refill, a sweep slice's claim, a warm run and a new bump region take
+  their class's lock and walk only their class's arenas. The runtime lock
+  keeps the heap's lists and the pause, and is always taken before a
+  class's lock. A worker that sweeps a slice keeps that slice's batch as
+  its own list. Interleaved with the build before, best of 3, HTTPS
+  `check_version` on twelve workers went from 167,319 a second on 819%
+  CPU to 204,526 on 599%, and `order` from 91,435 to 148,015; no sampled
+  worker stack is in a lock. `bench/alloc_cache.sh` is the new gate, with
+  broken copies for a sweep that hands nothing back, a worker that throws
+  its swept batch away, lists kept across a collection, a class's lock or
+  a slice claim that excludes nobody, and an unretired cache. Its reuse
+  check runs with no helper: the workers drop every other cell of an
+  88-byte class, sweep it back themselves, and a second wave of as many
+  may move the class's frontier by one slice and one page per cache at
+  most. It passed 60 runs of 60 at 4, 8 and 12 workers, plain and
+  release, moving it 65,472 bytes at most, where the frontier check it
+  replaces failed 21 runs in 120 before the split and 11 after and caught
+  neither broken copy. Twelve HTTPS `check_version` workers peaked at 29
+  to 30 MB resident (47 to 75 before) with 81,370 to 103,065 minor faults
+  in 20 s (1,428,966 to 1,446,569). `bench/alloc_scaling.py` times a pool
+  allocating flat out at 1 to 12 workers and samples lock stacks with gdb;
+  its curve did not move (22% of one worker's rate per worker at twelve),
+  and its twelve workers' heap of 637 to 925 MB (593 to 899 before) is
+  allocation while one thread pays the last epoch's sweep debt alone
+  before a collection's first stop - not the budget, which reaches 9.1 MB
+  at the most - and is left as it is.
+
+- **`bench/web_cores.py` measures issue #145's shape against a Go twin
+  (#145).** It times three endpoints: a bcrypt login, a `check_version`
+  and a JSON `order`. They are written once in iyi (`bench/web_cores.iyi`)
+  and once in Go (`bench/web_cores/main.go`), and both must answer with
+  the same bytes. Each is driven by wrk over 32 kept-alive connections,
+  in the clear and over TLS, with no database. Measured on a twelve-thread
+  Linux VM with about two cores busy elsewhere, over HTTP:
+  - login: `serve_parallel` on 12 workers answers 247 a second on 1,032%
+    CPU, against Go's 242 on 1,033% and `serve`'s 27. The issue had 9.9
+    against 108.2.
+  - `check_version`: 205,879 a second against Go's 216,298.
+  - `order`: 131,160 a second against Go's 90,732.
+
+  bcrypt costs 37 to 38.5 ms of CPU per cost-10 verify in both languages,
+  so the login gap was cores. Past four workers, gdb samples put the
+  light endpoints' workers in the collector's runtime lock on the
+  allocator's refill: 139 of 260 samples at twelve workers, 17 of 100 at
+  four. That lock is reported in SPEC.md III.4.13 and not changed here.
+  The script is not a gate. `bench/measured_numbers.py` names it, and
+  holds the docs' description of the run and the stored hash's cost to
+  the script's constants.
 
 - **`Channel#take_now` and `#put_now` take the scheduler's lock.** They
   were `select`'s lock-held halves, public because its arms call them,
@@ -143,14 +193,22 @@
   darwin, past the gate's 100 there; the collection the allocation
   triggers paused 1.4 to 3.6 ms of it. Under the arena both allocation
   entries now hand the block back zeroed - a reused chunk cleared by the
-  allocator, a carved chunk or a large mapping left as the kernel zeroed
-  it - and codegen clears nothing after them, so the pages fault in the
-  growth's own loops, which check: 1 to 9 ms on Linux and 1 to 12 on
-  darwin; the release growth 16 to 18 ms before and 0 to 9 after on Linux.
-  Hash inserts, a sort, a JSON parse and the other costs, release, did
-  not move. `bench/arena_exercise.iyi` checks a dirty chunk comes back
-  zeroed through the atomic entry, which a copy that does not clear there
-  fails.
+  allocator, a chunk carved from a cold run cleared past its first page,
+  a frontier chunk or a large mapping left as the kernel zeroed it - and
+  codegen clears nothing after them, so the pages fault in the growth's
+  own loops, which check: 1 to 9 ms on Linux and 1 to 12 on darwin; the
+  release growth 16 to 18 ms before and 0 to 9 after on Linux. Hash
+  inserts, a sort, a JSON parse and the other costs, release, did not
+  move. The `memset` had hidden that a cold run is zero on a chunk's
+  first page only - the run's last chunk reaches onto a page never
+  released, and a chunk that was a list's while pages past its head went
+  cold was written there - and without it the std/compress, std/big,
+  std/png, std/fuzz and std/mlkem exercises failed in CI on Linux, darwin
+  and Windows; they pass on Linux with the carve clearing those chunks
+  from their second page on. `bench/arena_exercise.iyi` checks a dirty
+  chunk comes back zeroed through the atomic entry, and blocks carved
+  from thinned cold runs read zero; a copy without either clear fails by
+  name.
 
 - **aarch64 Linux reads a thread-local afresh after a loop's back-edge
   check.** Its thread pointer was `llvm.read_register`, which LLVM models
@@ -223,6 +281,15 @@ under `serve_parallel` on 1, 2, 4 and 8 workers.
   channel's locked `receive`; the unlocked `take_now` it used on every
   worker raced the accepting thread (the runtime's fix, making the
   public halves take the lock, is on `m-thread/steal`).
+
+- **The cursor sweep runs in three CI jobs.** `bench/lsp_positions.py
+  --shard K/N` sweeps one of N shards of the std modules, dealt by the
+  seconds each module's sweep took, and prints each module's seconds as
+  it goes. Whole, the sweep took 37 to 71 minutes on GitHub's runners in
+  ten green runs and was cut off at its job's 75 in four, master's among
+  them. On one machine it took 2,105 s under master's compiler and 2,206
+  under this branch's; std/autocert went from 50 s to 79, its compile
+  now 492 MB against the 512 at which the server retires its worker.
 
 ## 0.19.1 — 2026-10-25
 
@@ -24928,7 +24995,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,310-line library and nothing else. Every other
+  written against iyi's own 24,551-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -380,13 +380,16 @@ and every sweep grew with it; the centre keeps a class's chunks as a
 stack of the sweep's own per-arena batches now and a refill takes one.
 And a budget floored at a MiB met eight allocating threads as 4,000
 collections a second, each a stop of eight and a sweep of eleven
-arenas, 300 µs where one thread's was 15: **the budget is floored at
-half of what the sweep walked**, so a collection costs a bounded
+arenas, 300 µs where one thread's was 15: **the budget was floored at
+half of what the sweep walked**, so a collection cost a bounded
 amount per byte allocated however many arenas the threads carved —
-the single-thread gates keep their arithmetic exactly (64 MiB of churn
+the single-thread gates kept their arithmetic exactly (64 MiB of churn
 is 64 collections), and eight threads went from 634 ns an allocation
-to 239. The stop's own cost is the floor's table: 22 µs for seven
-threads, 7% of the pause. The frame question was answered by use
+to 239. The lazy sweep took that floor out again (its feedback took
+binary trees' heap to 160 MiB for 3 MiB live), and the budget is the
+mark's live bytes times the growth, floored at 4 MiB. The stop's own
+cost is the floor's table: 22 µs for seven threads, 7% of the pause.
+The frame question was answered by use
 rather than by a mechanism: the handler runs on whatever stack the
 thread is on, a 256 KiB fiber stack included, and the probe's 5.7 KB
 frame is what a fiber has to have spare above its guard page when a
@@ -1975,6 +1978,115 @@ others trigger, and find it whole by checksum; and
 `bench/parallel_migrate.iyi` checks 32 tasks' lists node by node after
 each of 30 parks, hundreds of them resumed on another worker, through
 20 to 28 stops, where a collector that skipped runnable fibers loses one.
+
+**A pool's workers and the centre: a lock per size class.** The pool
+was the first thing to put a dozen threads on the allocator's slow path
+at once, and the slow path was one lock. Every refill a cache could not
+satisfy, every claim of a sweep slice, every warm run threaded and every
+bump region set took the runtime lock and walked the whole arena list
+under it - a list that grows by a fill arena per class per worker. A
+12-worker HTTPS `check_version` server had 111 of 500 sampled thread
+stacks inside that lock (refill 38, the sweep's claim 30, `reopen_pages`
+20), and `bench/web_cores.py` answered 20,400 requests a second per core
+there against 30,500 on four workers.
+
+The split is Go's mcentral beside its heap lock. Each size class has a
+line of its own on the centre: a lock, the stack of batches the sweep
+helpers leave, and the list of the class's own arenas. A refill, a
+slice's claim and its hand-back, a warm run threaded, a region set and
+`free_unswept` take their class's lock and walk their class's arenas.
+The runtime lock keeps what is the heap's - the list of every arena and
+the directory, the large list, the caches list, the epoch and the pause
+- and is taken before a class's lock, never after: its spin parks a
+thread for a pause, and a thread parked holding a class's lock would
+hold it against the pause's own sweep. Nothing parks under a class's
+lock, so a pause finds them all free and takes none. And a thread that
+sweeps a slice for its cache keeps the slice's batch as its own list
+rather than pushing it to the centre and popping one back, the mcache
+sweeping the span it is about to use: one lock round trip fewer per
+slice, and the batch is the sweeper's. The collector's side is
+unchanged - every list is dropped at a pause, a thread's last act
+retires its cache, an object born under a mark is black - and two waits
+on another walker's claim (the refill's, `free_unswept`'s) park for a
+stop where they hold nothing, as the runtime lock's spin did when they
+waited there: the claim may be a helper's whose end waits for the
+runtime lock the stopping thread holds.
+
+Measured interleaved with the build before it, best of three, 0 to 0.2
+cores busy elsewhere: HTTPS `check_version` on twelve workers 204,526 a
+second on 599% CPU against 167,319 on 819% - 34,100 a second per core
+against 20,400, and Go's 32,200 - with no sampled stack in a lock (10
+stops, 250 stacks) and 41,000 minor faults in ten seconds against
+781,000. `bench/alloc_cache.sh` holds it: workers' cells whole through
+collections, no chunk on two lists, every list empty after a collection,
+no cache left by an ended thread, a class's dead cells handed back out
+before any of it is carved afresh, and broken copies - a sweep that
+hands nothing back, a worker that throws its swept batch away, lists
+kept across a collection, a class's lock or a walk claim that excludes
+nobody, an unretired cache - each caught.
+
+The reuse check is the second one written. The first summed every
+arena's frontier over a wave of work beside the helpers, and it was
+unsound three ways: it failed 21 runs in 120 with the runtime before the
+split and 11 with it, the frontier growing by up to 0.92 of what the wave
+allocated; the helpers' batches handed back what a worker's dropped
+batch lost; and the scavenge handed back the arenas a sweep that returns
+nothing leaves all dead, so the sum fell. The check now runs first, with
+no helper and the trigger off but for one lazy collection. The workers
+drop every other cell of an 88-byte class of their own, so no page is
+all dead and neither the warm and cold page paths nor the scavenge come
+into it; they sweep the class back themselves; and a second wave of as
+many cells may move the class's frontier by what the caches can hold
+past their need - a slice's batch and a carved page each - and no more.
+It passed 60 runs of 60 at each of four, eight and twelve workers, plain
+and release, the frontier moving 65,472 bytes at the most where twelve
+workers' caches may hold 905,216; both broken copies carve the whole
+wave, 11,555,456 bytes on eight workers, and fail at the check by name.
+
+What the split did not move is `bench/alloc_scaling.py`'s curve: twelve
+workers allocating flat out still run at 22% of one worker's rate per
+worker (24% before), with the lock gone from their stacks too (1 of 500
+against 87). Their heap grows, and the cause is measured, and it is not
+the budget. Interleaved with the build before the split, five runs each
+of 200,000 requests a worker, peak resident set, collections, minor
+faults and wall time:
+
+| workers | build | peak RSS | collections | minor faults | wall |
+|---:|---|---:|---:|---:|---:|
+| 1 | before | 11 MB | 57 | 2,531 to 2,595 | 0.106 to 0.115 s |
+| 1 | after | 11 MB | 57 | 2,526 to 2,542 | 0.103 to 0.131 s |
+| 4 | before | 89 to 114 MB | 54 to 66 | 24,300 to 29,899 | 0.223 to 0.242 s |
+| 4 | after | 79 to 114 MB | 50 to 66 | 20,878 to 30,789 | 0.200 to 0.261 s |
+| 12 | before | 593 to 899 MB | 23 to 41 | 170,676 to 267,174 | 0.419 to 0.851 s |
+| 12 | after | 637 to 925 MB | 14 to 28 | 192,093 to 301,879 | 0.398 to 0.665 s |
+
+The suspect was the budget's floor of half of what the sweep walked,
+which the Stage 4 account above describes; it went with the lazy sweep.
+A counting copy of the runtime (not committed) found the budget at its
+4 MiB floor on four workers and at 9.1 MB at the most on twelve, twice
+the 4.6 MB a mark found live. What grows the heap is allocation while a
+collection waits.
+The thread that crosses the budget pays the last epoch's sweep debt
+alone before its first stop - 1,239 to 2,794 arenas over a twelve-worker
+run, up to 71 ms at a time, 267 to 411 ms in all - and the other eleven
+allocate 1.5 to 2.3 GB beside it, unchecked, since a collection is under
+way; the stop finds the heap 281 to 478 MB past the budget, and the
+marks beside the program take 358 to 595 MB more. With no helper, every
+collection stopped, twelve workers peaked at 131 to 186 MB through 45 to
+94 collections, in 0.66 to 0.94 s against 0.43 to 0.61. A server is not
+that shape: `bench/web_cores.iyi` on twelve workers, HTTPS
+`check_version` under wrk for 20 s, three runs each, peaked at 29 to 30
+MB resident where it peaked at 47 to 75 before, through 5,309 to 5,377
+collections (1,744 to 1,904), with 81,370 to 103,065 minor faults
+(1,428,966 to 1,446,569), answering 200,022 to 201,538 requests a second
+(147,597 to 156,580). The debt paid alone is left as it is: what the
+other threads may allocate while a collection waits on it is the
+trigger's question, not the centre's.
+
+Neither build hung in 240 runs each of the scaling program and the
+first reuse check's gate at four, eight and twelve workers, plain and
+release; one four-worker run of a cut without the two parks did hang
+past ten minutes, and five more runs of that cut did not repeat it.
 
 ---
 

@@ -101,7 +101,11 @@ jobs:
   iyi:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 30 minutes held iyi's own specs and the daemon specs; the stale
+    # acceptance suite (about 10 minutes) and the effect census on two
+    # targets (about 9 each) came on top, and a run was cancelled in the
+    # census.
+    timeout-minutes: 60
     # The producer may read Actions metadata only to retrieve a prior master
     # snapshot. The token itself is scoped to that one download step.
     permissions:

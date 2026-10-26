@@ -63,8 +63,11 @@
   already parsed on the codegen threads, were right, and so was the same
   bitcode optimised by clang 23.1.1. `--cross-compile` optimises the
   parsed module too. bench/std_http_exercise.iyi, release, cache emptied,
-  three runs each: codegen 23.9 to 25.8 s before and 24.3 to 26.3 s after,
-  803 to 804 MB resident at its end before and 888 to 892 after.
+  three runs each: on the Windows 11 machine codegen took 23.9 to 25.8 s
+  before and 24.3 to 26.3 s after, 803 to 804 MB resident at its end
+  before and 888 to 892 after; on Linux (LLVM 21, interleaved) 22.8 to
+  24.1 s before and 22.8 to 24.0 s after, the whole build's peak resident
+  set 880 to 939 MB before and 949 to 1,009 MB after.
   `bench/number_exercise.iyi` reads numbers made at run time with every
   digit; its release build panicked under the compiler before this.
 

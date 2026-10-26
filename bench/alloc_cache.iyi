@@ -433,20 +433,55 @@
   fail("distinct: #{twice} chunks on two lists at once, of #{count} listed") unless twice == 0_i64
   puts "distinct: #{count} chunks on the caches' lists and the classes' centres, each free and on one list"
 
-  # The collection, and the look before anything allocates again.
+  # The collection, and the look at every cache that has not allocated
+  # since. A thread the pause lets go may allocate at once, and a list it
+  # takes then is no list kept across the pause: on macos-14, with the
+  # poll's timespec moved off the heap, one of nine caches still held a
+  # list after the collection in two of the three runs that reached this
+  # check (debug run 40250019927), where Linux and Windows never showed
+  # one. So each cache's count of bytes allocated (`CACHE_SLICE`, which
+  # every allocation moves) is read before and after, and a cache whose
+  # count moved is not looked at. This thread's own allocates nothing
+  # between the two reads and must be among those looked at.
+  slices = Pointer(UInt64).malloc(256_u64)
+  noted = 0
+  page = IyiHeap.first_cache
+  while page != 0 && noted < 128
+    slices[noted * 2] = page
+    slices[noted * 2 + 1] = IyiHeap.read64(page + IyiHeap::CACHE_SLICE)
+    noted = noted + 1
+    page = IyiHeap.cache_next(page)
+  end
+  own = IyiHeap.cache.address
   IyiMark.collect
   kept = 0_i64
+  looked = 0_i64
+  moved = 0_i64
+  own_looked = false
   page = IyiHeap.first_cache
   while page != 0
-    index = 0
-    while index < IyiHeap::CLASSES
-      kept = kept + 1_i64 if IyiHeap.read64(page + index.to_u64 * 8_u64) != 0
-      index = index + 1
+    still = false
+    at = 0
+    while at < noted
+      still = slices[at * 2 + 1] == IyiHeap.read64(page + IyiHeap::CACHE_SLICE) if slices[at * 2] == page
+      at = at + 1
+    end
+    if still
+      looked = looked + 1_i64
+      own_looked = true if page == own
+      index = 0
+      while index < IyiHeap::CLASSES
+        kept = kept + 1_i64 if IyiHeap.read64(page + index.to_u64 * 8_u64) != 0
+        index = index + 1
+      end
+    else
+      moved = moved + 1_i64
     end
     page = IyiHeap.cache_next(page)
   end
-  fail("flushed: #{kept} lists of #{caches} caches kept across a collection") unless kept == 0_i64
-  puts "flushed: every list of #{caches} caches, #{workers} of them idle workers', empty after a collection"
+  fail("flushed: this thread's own cache allocated across the collection, so the look has nothing it can trust") unless own_looked
+  fail("flushed: #{kept} lists of #{looked} caches kept across a collection") unless kept == 0_i64
+  puts "flushed: every list of #{looked} caches that allocated nothing since, this thread's among them, empty after a collection; #{moved} allocated after the pause and were not looked at"
 
   before = caches
   threads = [] of IyiThread

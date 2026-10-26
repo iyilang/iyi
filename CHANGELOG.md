@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Native stale testing for `iyi test`: opt-in `--cached` reuses passing receipts on equal build keys and replayed observations.** An observation build records run-time reads and effects, and the compiler hashes the reached call path (`CallPathFp`), linked object units, link environment, and compiler environment before codegen. A test that touches clock, entropy, timers, network, processes, signals, runtime timing, directory streams, host state, raw pointers, or shared writes outside its scratch directory runs fresh. In a census of 141 programs (27 sample programs and 114 standard library exercises), 90 of 141 (63.8%) were reusable on a second run, and static build keys were reusable for 138 of 141 (97.9%).
+
+Three defects that made reuse rarer than intended were found and fixed during the build: a test's writes in its own scratch directory were read as shared writes because the runtime lost the scratch path before the program ran; a variable a test set and read back missed every run; and the compiler-environment key differed between a cold and a warm build of a program with a macro `run` helper because IYI_LINK_DRIVER was read only when linking.
+
+Three exercise fixes from the test suite: `std_dns_exercise` skips its Happy Eyeballs races when a full listener resets SYNs instead of dropping them; `std_digest_exercise` times the best of seven; and `std_tar_exercise` writes absolute names past 100 bytes through pax records.
+
 ## 0.19.1 — 2026-10-25
 
 **A collector hang and a handful of TLS and PKI edges fixed, a build
@@ -24704,7 +24712,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,608-line library and nothing else. Every other
+  written against iyi's own 22,621-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

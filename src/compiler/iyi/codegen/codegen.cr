@@ -2863,9 +2863,10 @@ module Iyi
       end
 
       # iyi: under the arena both entries hand the block back zeroed - a
-      # chunk off a list is cleared inside the allocator, and a carved chunk
-      # or a large mapping is the kernel's zero - so a memset here would
-      # clear it twice. It was worse than twice: the memset is the
+      # chunk off a list is cleared inside the allocator, a chunk carved
+      # from a cold run past its first page (`IyiHeap.carve`), and a
+      # frontier chunk or a large mapping is the kernel's zero - so a memset
+      # here would clear it twice. It was worse than twice: the memset is the
       # prelude's, runtime code with no preemption check, and on a large
       # block it took every page fault of the fresh mapping as well. A
       # `Hash(Int32, Int32)` of 8,388,608 entries growing, three blocks of

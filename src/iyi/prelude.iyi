@@ -1490,10 +1490,11 @@ require "./file"
     # for free until now. `__iyi_malloc_atomic64` clears too, unlike
     # `GC_malloc_atomic`, because codegen clears nothing after either
     # entry under this branch (`generic_array_malloc`): the clear is the
-    # allocator's, which knows a carved chunk or a large mapping is the
-    # kernel's zero and leaves it alone. Cleared by the caller after the
-    # call, the fresh blocks of a large hash's growth held its worker
-    # unpreempted (SPEC.md III.4.13 part 9). An atomic instance
+    # allocator's, which knows a frontier chunk or a large mapping is the
+    # kernel's zero and leaves it alone, and that a chunk carved from a
+    # cold run is zero on its first page only (`carve`). Cleared by the
+    # caller after the call, the fresh blocks of a large hash's growth held
+    # its worker unpreempted (SPEC.md III.4.13 part 9). An atomic instance
     # (`__iyi_new`), which codegen zeroes before its initialisers run, and
     # an atomic block `realloc` copies into are the paths left uncleared.
     #
@@ -2284,8 +2285,9 @@ require "./file"
       # opens it. A 4096-byte buffer is a 4096-byte chunk. Past the top
       # class it is a mapping and headed, the word its bits' home. Both
       # hand the block back zeroed, and codegen clears nothing after them
-      # (`generic_array_malloc`): a chunk off a list is cleared here, and a
-      # carved chunk or a large mapping is the kernel's zero, not touched
+      # (`generic_array_malloc`): a chunk off a list is cleared here, a
+      # chunk carved from a cold run past its first page (`carve`), and a
+      # frontier chunk or a large mapping is the kernel's zero, not touched
       # until the caller writes it. Cleared after the call, three large
       # blocks held a growing hash's worker 107 to 155 ms on darwin, past
       # a preemption check's reach (SPEC.md III.4.13 part 9).
@@ -2446,7 +2448,7 @@ require "./file"
           clear_block(head, chunk_of(index)) if clear
           return headed ? head &+ HEADER : head
         end
-        head = carve(table, index, bits, type_id)
+        head = carve(table, index, clear, bits, type_id)
         headed ? head &+ HEADER : head
       end
 
@@ -2576,7 +2578,7 @@ require "./file"
         head
       end
 
-      def self.carve(table : Pointer(UInt64), index : Int32, bits : UInt64, type_id : UInt64) : UInt64
+      def self.carve(table : Pointer(UInt64), index : Int32, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         arena = table[FILL + index]
         if arena == 0 || read64(arena + OFF_LEFT) == 0 ||
            (read64(arena + OFF_REGION_REOPENED) == REGION_SLAB && read64(arena + OFF_IDLE) != read64(arena + OFF_WARM))
@@ -2594,13 +2596,29 @@ require "./file"
         # already wear this epoch's parity or it would read as last
         # epoch's dead — freed under the thread about to hand it out. The
         # parity is read here, past `reopen_pages` and its lock (the
-        # refill's comment). The chunk's memory is the kernel's zero: a
-        # region is a frontier slab or a cold run, warm runs being lists.
+        # refill's comment). A frontier slab is the kernel's zero. A cold
+        # run is zero on a chunk's head page only: past it, the chunk's
+        # bytes may be on a page that was never released - a cold run's
+        # last chunk reaches onto the page above the run (`reopen_in`) -
+        # or on one released while the chunk was a list's, its head on a
+        # warm page, and written by its owner since: the chunk that
+        # straddles into a cold run from below (`IyiMark.close_run`,
+        # `IyiMark.age_idle`), whose head page went cold later and joined
+        # the run. A carved chunk the caller wants clear is cleared from
+        # its second page on, then; one listed below is cleared when it is
+        # popped. The codegen `memset` after every `Pointer.malloc` hid
+        # both until it went (SPEC.md III.4.13 part 9): std/compress's
+        # exercise was handed chunks of 1,280 to 24,576 bytes dirty from a
+        # page boundary on.
         byte = read64(arena + OFF_CURSOR_BYTE)
         epoch = IyiMark.epoch_flag
         write8(byte, bits | CARVED_FLAG | epoch)
         write16(byte + 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
         chunk = read64(arena + OFF_CHUNK)
+        if clear && read64(arena + OFF_REGION_REOPENED) == REGION_COLD
+          second = (cursor &+ PAGE) & (0_u64 &- PAGE)
+          clear_block(second, cursor &+ chunk &- second) if cursor &+ chunk > second
+        end
         # The rest of a page's worth, onto the cache's list, which is empty
         # or the carve would not have been asked: stamped free and this
         # epoch's, as `free` and a warm run's thread stamp theirs - a free

@@ -263,169 +263,171 @@ class Iyi::Program
       raise Iyi::Error.new("`run` needs a compiler that can generate code, and this one links no LLVM")
     end
   {% else %}
+    # The file is named for this process and this run, beside the compiled
+    # program in the cache, and is gone once it has been read.
+    @@run_inputs_count = 0
 
-  # The file is named for this process and this run, beside the compiled
-  # program in the cache, and is gone once it has been read.
-  @@run_inputs_count = 0
+    def macro_run(filename, args)
+      compiled_macro_run = @compiled_macros_cache[filename] ||= macro_compile(filename)
+      compiled_file = compiled_macro_run.filename
 
-  def macro_run(filename, args)
-    compiled_macro_run = @compiled_macros_cache[filename] ||= macro_compile(filename)
-    compiled_file = compiled_macro_run.filename
-
-    out_io = IO::Memory.new
-    err_io = IO::Memory.new
-    declared = "#{compiled_file}.inputs-#{Process.pid}-#{@@run_inputs_count += 1}"
-    started = BuildInputs.now
-    status, inputs = BuildInputs.pause_if_env_only do
-      s = Process.run(compiled_file, args: args, output: out_io, error: err_io, env: {RUN_INPUTS => declared})
-      inp = read_run_inputs(declared)
-      {s, inp}
+      out_io = IO::Memory.new
+      err_io = IO::Memory.new
+      declared = "#{compiled_file}.inputs-#{Process.pid}-#{@@run_inputs_count += 1}"
+      started = BuildInputs.now
+      status, inputs = BuildInputs.pause_if_env_only do
+        s = Process.run(compiled_file, args: args, output: out_io, error: err_io, env: {RUN_INPUTS => declared})
+        inp = read_run_inputs(declared)
+        {s, inp}
+      end
+      BuildInputs.current.try &.run_declared(filename, inputs, started)
+      MacroRunResult.new(out_io.to_s, err_io.to_s, status, inputs)
     end
-    BuildInputs.current.try &.run_declared(filename, inputs, started)
-    MacroRunResult.new(out_io.to_s, err_io.to_s, status, inputs)
-  end
 
-  private def read_run_inputs(declared : String) : Array(String)?
-    return nil unless File.file?(declared)
-    text = File.read(declared)
-    File.delete?(declared)
-    text.lines.reject(&.empty?).map { |line| File.expand_path(line) }
-  rescue File::Error
-    nil
-  end
+    private def read_run_inputs(declared : String) : Array(String)?
+      return nil unless File.file?(declared)
+      text = File.read(declared)
+      File.delete?(declared)
+      text.lines.reject(&.empty?).map { |line| File.expand_path(line) }
+    rescue File::Error
+      nil
+    end
 
-  record RequireWithTimestamp, filename : String, epoch : Int64 do
-    include JSON::Serializable
-  end
+    record RequireWithTimestamp, filename : String, epoch : Int64 do
+      include JSON::Serializable
+    end
 
-  def macro_compile(filename)
-    time = Time.instant
+    def macro_compile(filename)
+      time = Time.instant
 
-    source = File.read(filename)
+      source = File.read(filename)
 
-    # We store the executable relative to the cache directory for 'filename',
-    # that way if it's already there from a previous compilation, and no file
-    # that this program uses changes, we can simply avoid recompiling it again
-    #
-    # NOTE: it could happen that a macro run program runs macros that could
-    # change the program behaviour even if files don't change, but this is
-    # discouraged (and we should strongly document it) because it prevents
-    # incremental compiles.
-    program_dir = CacheDir.instance.directory_for(filename)
-    executable_path = File.join(program_dir, "macro_run")
-    recorded_requires_path = File.join(program_dir, "recorded_requires")
-    requires_path = File.join(program_dir, "requires")
+      # We store the executable relative to the cache directory for 'filename',
+      # that way if it's already there from a previous compilation, and no file
+      # that this program uses changes, we can simply avoid recompiling it again
+      #
+      # NOTE: it could happen that a macro run program runs macros that could
+      # change the program behaviour even if files don't change, but this is
+      # discouraged (and we should strongly document it) because it prevents
+      # incremental compiles.
+      program_dir = CacheDir.instance.directory_for(filename)
+      executable_path = File.join(program_dir, CacheDir::MACRO_RUN)
+      recorded_requires_path = File.join(program_dir, "recorded_requires")
+      requires_path = File.join(program_dir, "requires")
 
-    {% unless flag?(:win32) %}
       # First, update times for the program dir, so it remains in the cache longer
       # (this is specially useful if a macro run program is used by multiple programs)
+      #
+      # iyi: on Windows too. It was left out there, and a helper's directory
+      # kept the time it was first made however often it ran: the oldest of
+      # the helpers whatever their use (`CacheDir#cleanup`). This tree's
+      # `File.utime` sets a directory's times on Windows: checked, it moved one
+      # from 10:26:38 to 10:26:44.
       now = Time.utc
       File.utime(now, now, program_dir)
-    {% end %}
 
-    if can_reuse_previous_compilation?(filename, executable_path, recorded_requires_path, requires_path)
-      return CompiledMacroRun.new(executable_path, time.elapsed, true)
-    end
-
-    # iyi: linked under this process's own name and renamed into place. The
-    # directory is one per helper and shared by every compiler on the
-    # machine, and the link went straight to `macro_run`: two `iyi check` of
-    # the eiy exercise at once, its helper stale, failed one of the two in
-    # each of 4 rounds with "LNK1104: cannot open file ...\macro_run" -
-    # Windows will not write over a program that is running, and the other
-    # compiler was running it. A rename is whole, so whoever starts the
-    # program starts the old one or the new one, never half of one. Windows
-    # refuses that rename too while the old one runs; then this process
-    # keeps its own copy until it exits, and records nothing, since the
-    # requires below would vouch for a `macro_run` that is still the old
-    # program.
-    staging_path = "#{executable_path}.#{Process.pid}"
-    sweep_macro_run_leftovers(program_dir, executable_path)
-    result = host_compiler.compile Compiler::Source.new(filename, source), staging_path
-    begin
-      File.rename(staging_path, executable_path)
-    rescue File::Error
-      at_exit { File.delete?(staging_path) rescue nil }
-      return CompiledMacroRun.new(staging_path, time.elapsed, false)
-    end
-
-    # Write the new files from which 'filename' depends into the cache dir
-    # (here we store how to obtain these files, because a require might use
-    # '/*' or '/**' and we need to recompile if a file is added or removed)
-    File.open(recorded_requires_path, "w") do |file|
-      result.program.recorded_requires.to_json(file)
-    end
-
-    # Together with their timestamp
-    # (this is the list of all effective files that were required)
-    requires_with_timestamps = result.program.requires.map do |required_file|
-      epoch = File.info(required_file).modification_time.to_unix
-      RequireWithTimestamp.new(required_file, epoch)
-    end
-
-    File.open(requires_path, "w") do |file|
-      requires_with_timestamps.to_json(file)
-    end
-
-    CompiledMacroRun.new(executable_path, time.elapsed, false)
-  end
-
-  # The copies `macro_compile` kept and a killed compiler left, an hour
-  # after: a younger one may be one another compiler has just linked and not
-  # yet started, and a copy that is running refuses the delete anyway.
-  private def sweep_macro_run_leftovers(program_dir, executable_path) : Nil
-    prefix = "#{File.basename(executable_path)}."
-    cutoff = Time.utc - 1.hour
-    Dir.each_child(program_dir) do |name|
-      next unless name.starts_with?(prefix)
-      path = File.join(program_dir, name)
-      next unless (info = File.info?(path)) && info.modification_time < cutoff
-      File.delete?(path) rescue nil
-    end
-  rescue File::Error
-  end
-
-  @host_compiler : Compiler?
-
-  # Creates a compiler instance with the host as target used for macro_run
-  # compilation.
-  def host_compiler
-    @host_compiler ||= Compiler.new.tap do |host_compiler|
-      if compiler = self.compiler
-        # When cross-compiling, the host compiler shouldn't copy the config for
-        # the target compiler and use the system defaults instead.
-        # TODO: Add configuration overrides for host compiler to CLI.
-        unless compiler.cross_compile?
-          host_compiler.flags = compiler.flags
-          host_compiler.dump_ll = compiler.dump_ll?
-          host_compiler.link_flags = compiler.link_flags
-          host_compiler.mcpu = compiler.mcpu
-          host_compiler.mattr = compiler.mattr
-          host_compiler.mcmodel = compiler.mcmodel
-          host_compiler.single_module = compiler.single_module?
-          host_compiler.static = compiler.static?
-        end
-
-        # Copy default settings that are not specific to host and target context:
-        host_compiler.n_threads = compiler.n_threads
-        host_compiler.prelude = compiler.prelude
+      if can_reuse_previous_compilation?(filename, executable_path, recorded_requires_path, requires_path)
+        return CompiledMacroRun.new(executable_path, time.elapsed, true)
       end
 
-      # Although release takes longer, once the bc is cached in .crystal
-      # the subsequent times will make program execution faster.
-      host_compiler.release!
+      # iyi: linked under this process's own name and renamed into place. The
+      # directory is one per helper and shared by every compiler on the
+      # machine, and the link went straight to `macro_run`: two `iyi check` of
+      # the eiy exercise at once, its helper stale, failed one of the two in
+      # each of 4 rounds with "LNK1104: cannot open file ...\macro_run" -
+      # Windows will not write over a program that is running, and the other
+      # compiler was running it. A rename is whole, so whoever starts the
+      # program starts the old one or the new one, never half of one. Windows
+      # refuses that rename too while the old one runs; then this process
+      # keeps its own copy until it exits, and records nothing, since the
+      # requires below would vouch for a `macro_run` that is still the old
+      # program.
+      staging_path = "#{executable_path}.#{Process.pid}"
+      sweep_macro_run_leftovers(program_dir, executable_path)
+      result = host_compiler.compile Compiler::Source.new(filename, source), staging_path
+      begin
+        File.rename(staging_path, executable_path)
+      rescue File::Error
+        at_exit { File.delete?(staging_path) rescue nil }
+        return CompiledMacroRun.new(staging_path, time.elapsed, false)
+      end
 
-      # Don't cleanup old directories after compiling: it might happen
-      # that in doing so we remove the directory associated with the current
-      # compilation (for example if we have more than 10 macro runs, the current
-      # directory will be the oldest).
-      host_compiler.cleanup = false
+      # Write the new files from which 'filename' depends into the cache dir
+      # (here we store how to obtain these files, because a require might use
+      # '/*' or '/**' and we need to recompile if a file is added or removed)
+      File.open(recorded_requires_path, "w") do |file|
+        result.program.recorded_requires.to_json(file)
+      end
 
-      # No need to generate debug info for macro run programs
-      host_compiler.debug = Iyi::Debug::None
+      # Together with their timestamp
+      # (this is the list of all effective files that were required)
+      requires_with_timestamps = result.program.requires.map do |required_file|
+        epoch = File.info(required_file).modification_time.to_unix
+        RequireWithTimestamp.new(required_file, epoch)
+      end
+
+      File.open(requires_path, "w") do |file|
+        requires_with_timestamps.to_json(file)
+      end
+
+      CompiledMacroRun.new(executable_path, time.elapsed, false)
     end
-  end
 
+    # The copies `macro_compile` kept and a killed compiler left, an hour
+    # after: a younger one may be one another compiler has just linked and not
+    # yet started, and a copy that is running refuses the delete anyway.
+    private def sweep_macro_run_leftovers(program_dir, executable_path) : Nil
+      prefix = "#{File.basename(executable_path)}."
+      cutoff = Time.utc - 1.hour
+      Dir.each_child(program_dir) do |name|
+        next unless name.starts_with?(prefix)
+        path = File.join(program_dir, name)
+        next unless (info = File.info?(path)) && info.modification_time < cutoff
+        File.delete?(path) rescue nil
+      end
+    rescue File::Error
+    end
+
+    @host_compiler : Compiler?
+
+    # Creates a compiler instance with the host as target used for macro_run
+    # compilation.
+    def host_compiler
+      @host_compiler ||= Compiler.new.tap do |host_compiler|
+        if compiler = self.compiler
+          # When cross-compiling, the host compiler shouldn't copy the config for
+          # the target compiler and use the system defaults instead.
+          # TODO: Add configuration overrides for host compiler to CLI.
+          unless compiler.cross_compile?
+            host_compiler.flags = compiler.flags
+            host_compiler.dump_ll = compiler.dump_ll?
+            host_compiler.link_flags = compiler.link_flags
+            host_compiler.mcpu = compiler.mcpu
+            host_compiler.mattr = compiler.mattr
+            host_compiler.mcmodel = compiler.mcmodel
+            host_compiler.single_module = compiler.single_module?
+            host_compiler.static = compiler.static?
+          end
+
+          # Copy default settings that are not specific to host and target context:
+          host_compiler.n_threads = compiler.n_threads
+          host_compiler.prelude = compiler.prelude
+        end
+
+        # Although release takes longer, once the bc is cached in .crystal
+        # the subsequent times will make program execution faster.
+        host_compiler.release!
+
+        # Don't cleanup old directories after compiling: it might happen
+        # that in doing so we remove the directory associated with the current
+        # compilation (for example if we have more than 10 macro runs, the current
+        # directory will be the oldest).
+        host_compiler.cleanup = false
+
+        # No need to generate debug info for macro run programs
+        host_compiler.debug = Iyi::Debug::None
+      end
+    end
   {% end %}
 
   private def can_reuse_previous_compilation?(filename, executable_path, recorded_requires_path, requires_path)

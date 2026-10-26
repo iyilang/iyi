@@ -89,12 +89,15 @@ cp "$REPO"/src/iyi/*.iyi patched/iyi/
 # is a completion port with no such buffer, the fiber's OVERLAPPED - held
 # as a number, the way the event buffer was. Storing it that way passed
 # every run until the exercise collected where only the field holds it,
-# between a connection's read and its write; it asks there now.
+# between a connection's read and its write; it asks there now. The size
+# is matched, not written: the OVERLAPPED grew from 32 bytes to 40 with the
+# worker its completion belongs to, and the sed found one line of two
+# (job 121201606737).
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "failure proof: the fiber's OVERLAPPED as a number is an OVERLAPPED nobody keeps"
     sed -e 's/^  property wait_overlapped : Pointer(UInt8)$/  property wait_overlapped_word : UInt64\n\n  def wait_overlapped : Pointer(UInt8)\n    Pointer(UInt8).new(@wait_overlapped_word)\n  end/' \
-        -e 's/^    @wait_overlapped = Pointer(UInt8)\.malloc(32_u64)$/    @wait_overlapped_word = Pointer(UInt8).malloc(32_u64).address/' \
+        -e 's/^    @wait_overlapped = Pointer(UInt8)\.malloc(\([0-9]*\)_u64)$/    @wait_overlapped_word = Pointer(UInt8).malloc(\1_u64).address/' \
         "$REPO/src/iyi/concurrency.iyi" > patched/iyi/concurrency.iyi
     [ "$(diff "$REPO/src/iyi/concurrency.iyi" patched/iyi/concurrency.iyi | grep -c '^>')" -eq 6 ] || {
       echo "the sed did not find both lines it changes"; exit 1; }

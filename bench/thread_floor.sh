@@ -150,9 +150,9 @@ case "$(uname -s)" in
     #   __tlv_bootstrap                              a @[ThreadLocal]: the
     #       thunk in every Mach-O thread-local descriptor, which dyld
     #       rebinds to its own tlv_get_addr at load
-    # The release build once carried one more, `bzero`: the compiler zeroes
-    # every `Pointer.malloc` with an `llvm.memset`, and the aarch64 back end
-    # lowers a memset it will not inline to a `bzero` call. The prelude
+    # The release build once carried one more, `bzero`: the compiler zeroed
+    # every `Pointer.malloc` with an `llvm.memset` then, and the aarch64 back
+    # end lowers a memset it will not inline to a `bzero` call. The prelude
     # defines `bzero` now, the way it defines `memset`, so the name resolves
     # to the program's own and the release list is the plain list.
     step "dependency floor: what a thread costs darwin, by name"

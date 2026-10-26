@@ -22,6 +22,12 @@ class Iyi::CodeGenVisitor
     mangled_name = target_def.mangled_name(@program, self_type)
     iyi_record_unit_lib(target_def)
 
+    # iyi: a library def the runtime calls is compiled a second time for
+    # it, under a name of its own and with no check in it
+    # (`iyi_runtime_copy?`); a program's own calls reach the checked one.
+    runtime_copy = iyi_runtime_copy?(target_def)
+    mangled_name = "#{mangled_name}$runtime" if runtime_copy
+
     # iyi: a method that takes a block is instantiated with the caller's block
     # inlined into it, and a `forall` method at the caller's types, so its
     # machine code belongs to whoever wrote the call and not to the module
@@ -39,7 +45,7 @@ class Iyi::CodeGenVisitor
     if iyi_caller_instantiated?(target_def, self_type)
       here = ModuleInfo.new(@llvm_mod, @llvm_typer, self.builder)
       func = typed_fun?(@llvm_mod, mangled_name) ||
-             codegen_fun(mangled_name, target_def, self_type, fun_module_info: here, iyi_internal: true)
+             codegen_fun(mangled_name, target_def, self_type, fun_module_info: here, iyi_internal: true, iyi_runtime_copy: runtime_copy)
       return check_mod_fun @llvm_mod, mangled_name, func
     end
 
@@ -73,13 +79,13 @@ class Iyi::CodeGenVisitor
     if host = iyi_closure_host(self_type)
       internal = host.mod != type_module(self_type).mod
       func = typed_fun?(host.mod, mangled_name) ||
-             codegen_fun(mangled_name, target_def, self_type, fun_module_info: host, iyi_internal: internal)
+             codegen_fun(mangled_name, target_def, self_type, fun_module_info: host, iyi_internal: internal, iyi_runtime_copy: runtime_copy)
       return check_mod_fun host.mod, mangled_name, func
     end
 
     self_type_mod = type_module(self_type).mod
 
-    func = typed_fun?(self_type_mod, mangled_name) || codegen_fun(mangled_name, target_def, self_type)
+    func = typed_fun?(self_type_mod, mangled_name) || codegen_fun(mangled_name, target_def, self_type, iyi_runtime_copy: runtime_copy)
     check_mod_fun self_type_mod, mangled_name, func
   end
 
@@ -262,9 +268,11 @@ class Iyi::CodeGenVisitor
     typed_fun
   end
 
-  def codegen_fun(mangled_name, target_def, self_type, is_exported_fun = false, fun_module_info = type_module(self_type), is_fun_literal = false, is_closure = false, iyi_internal = false)
+  def codegen_fun(mangled_name, target_def, self_type, is_exported_fun = false, fun_module_info = type_module(self_type), is_fun_literal = false, is_closure = false, iyi_internal = false, iyi_runtime_copy = false)
     if (recorder = @program.stale_recorder) && !is_fun_literal
-      recorder.record_def(mangled_name)
+      # A runtime copy (`iyi_runtime_copy?`) is the same def under `$runtime`:
+      # the reach walk reaches the def, not its two compilations.
+      recorder.record_def(iyi_runtime_copy ? mangled_name.chomp("$runtime") : mangled_name)
     end
     old_position = insert_block
     old_entry_block = @entry_block
@@ -287,6 +295,8 @@ class Iyi::CodeGenVisitor
       context.vars = LLVMVars.new
       context.block_context = nil
       context.indirect_return = nil
+      context.iyi_preempt = !iyi_runtime_copy && iyi_preemptible?(target_def)
+      context.iyi_runtime = iyi_runtime_copy || (iyi_preempt_on? && iyi_runtime_def?(target_def))
 
       @llvm_mod = fun_module_info.mod
       @llvm_context = @llvm_mod.context
@@ -445,6 +455,10 @@ class Iyi::CodeGenVisitor
         end
 
         new_entry_block
+
+        # iyi: a function that checks at its back-edges, for the recursion
+        # pass to look for call cycles among (`PreemptChecks.mark_recursion`).
+        @program.iyi_preempt_funs << context.fun.name if context.iyi_preempt? && !target_def.naked? && iyi_preempt_fun
 
         if is_closure
           clear_current_debug_location if @debug.line_numbers?
@@ -762,8 +776,13 @@ class Iyi::CodeGenVisitor
       # `ld.lld: error: undefined symbol: __iyi_sigreturn`, from the two
       # instructions a signal handler returns through. A reference the
       # compiler cannot read is still a reference.
+      #
+      # `__iyi_preempt` for a reason of the same kind: its calls are put in
+      # after optimisation (`PreemptChecks`), so until then nothing calls
+      # it, and internal it was stripped before they were.
       asm_referenced = mangled_name.starts_with?("__iyi_fiber_") ||
-                       mangled_name.includes?("sigreturn")
+                       mangled_name.includes?("sigreturn") ||
+                       mangled_name == PREEMPT_NAME
       unless (@program.has_flag?("darwin") && mangled_name.starts_with?(@personality_name)) || asm_referenced
         context.fun.linkage = LLVM::Linkage::Internal
       end

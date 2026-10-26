@@ -1668,6 +1668,12 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         node.effect = Effects.validate_annotation(ann)
       end
 
+      if annotation_type == @program.no_preempt_annotation
+        unless ann.args.empty? && ann.named_args.nil?
+          ann.raise "NoPreempt takes no arguments: it says no loop in this def gives its worker up (SPEC.md III.4.13)"
+        end
+      end
+
       node.add_annotation(annotation_type, ann)
     end
 

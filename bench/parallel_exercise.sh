@@ -3,39 +3,66 @@
 #
 #     bash bench/parallel_exercise.sh
 #
-# Seven steps; the last three are failure proofs, because a gate that
+# Eight steps; the last three are failure proofs, because a gate that
 # cannot fail is not a gate:
 #
 #   1. The exercise holds every property, plain and --release: parallel
-#      tasks start on the pool and on more than one worker, each stays on
-#      the thread that started it, a thousand run exactly once, an atomic
-#      count loses nothing, channels carry values across threads once each
-#      and in each sender's order, a cancel reaches a task asleep, parked
-#      on a channel, or still waiting in the pool, a panic stops at the
-#      task's boundary, idle workers steal, collections keep the workers'
-#      lists, and the typed group answers.
-#   2. The binary keeps the dependency floor the concurrency gate holds,
+#      tasks start on the pool and on more than one worker, never on the
+#      spawning thread, a thousand run exactly once, an atomic count loses
+#      nothing, channels carry values across threads once each and in each
+#      sender's order, `take_now` and `put_now` from every worker at once
+#      lose and repeat nothing, a cancel reaches a task asleep, parked on a
+#      channel, or still waiting in the pool, a panic stops at the task's
+#      boundary, idle workers steal, collections keep the workers' lists,
+#      and the typed group answers.
+#   2. bench/parallel_migrate.iyi holds what a task keeps when it resumes
+#      on another worker, plain and --release: its stack's lists through
+#      collections, thread-locals of the thread it is on, after a park and
+#      after a loop's back-edge check that moved it, its socket's bytes, a
+#      cancel and a sibling's close that find it, frames 120 KiB deep;
+#      tasks parked on one worker finish in under twice the ideal, woken
+#      from the main thread and from a worker; and a task joining a thread
+#      leaves its worker to its child.
+#      bench/parallel_preempt.iyi then holds preemption at loop back-edges
+#      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
+#      request beside a task computing with no call in its loop wait no
+#      more than 100 ms, 80 for the request; a preempted task keeps its
+#      unit's token; the monitor looks every 4 to 9 ms and the quantum is
+#      at most 20 ms; and a tight loop costs at most twice what its
+#      `@[NoPreempt]` twin does. Its failure proofs are with step 7's: a
+#      `@[NoPreempt]` loop, a monitor that never raises the word, a Windows
+#      monitor on the system timer's tick, a check that calls the
+#      accessor (darwin and Windows), a slow half that does not poll, and a
+#      preempted task that gives its unit's token away.
+#   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
-#   3. The speedup, measured: CPU-bound tasks on one worker and on several,
+#   4. The speedup, measured: CPU-bound tasks on one worker and on several,
 #      release build, best of three, and the ratio held to a floor of 0.6
 #      per worker - a pool that is parallel only in name cannot pass it.
 #      The table for 1, 2, 4 and 8 workers (as far as the cores go) is
 #      printed for the record.
-#   4. A deadlock across threads - a parallel task waiting on a channel
+#   5. A deadlock across threads - a parallel task waiting on a channel
 #      nobody sends on - is named, not hung.
-#   5. `Share` gates the parallel block at compile time: a captured
+#   6. `Share` gates the parallel block at compile time: a captured
 #      `Array`, a `Channel` of arrays, a local assigned after the spawn, and
 #      a loop's local are refused, each by name.
-#   6. Failure proofs against broken copies of the runtime, each caught at
+#   7. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: a cross-thread wake that does not ring (a lost
 #      wakeup), a steal that leaves the task in its victim's queue (a task
 #      handed out twice), a cancel that is never delivered to the thread a
-#      sleeping task is on, and a cancel that skips tasks still waiting in
-#      the pool (a cancelled task run as if it were not); and the race
-#      step's add made a plain load and store, which loses adds only when
-#      tasks really run at the same instant.
-#   7. Failure proof: the pool held to one worker whatever it was asked
-#      for, and step 3's floor refuses the ratio that comes out.
+#      sleeping task is on, a cancel that skips tasks still waiting in the
+#      pool (a cancelled task run as if it were not), and `take_now` and
+#      `put_now` without the scheduler's lock; the race step's add made
+#      a plain load and store, which loses adds only when tasks really run
+#      at the same instant; and for the moves of step 2 - a thread-local
+#      read as it was before a park, one read as it was before a loop
+#      whose back-edge check moved the task, a collector that skips a fiber
+#      on its way between workers, an io wait a cancel cannot find, a close
+#      posted to nobody, a pool that never steals a started task, tasks
+#      woken back onto the worker they parked on as they were before tasks
+#      moved, and a join held in the kernel.
+#   8. Failure proof: the pool held to one worker whatever it was asked
+#      for, and step 4's floor refuses the ratio that comes out.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -88,6 +115,110 @@ for build in plain release; do
   fi
   grep -v '^iyi: panic: parallel boom' "answers-$build.txt" | sed 's/^/  /'
 done
+
+# ── 2. What a move keeps, twice ───────────────────────────────────────────
+# Its balance step is timed against four workers' ideal, which a machine
+# with fewer cores than that cannot keep; there the other steps run.
+MIGRATE_STEPS="channels sockets cancel closes deep loops balance join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops join"
+for build in plain release; do
+  step "what a task keeps when it resumes on another worker, $build build"
+  flag=""
+  [ "$build" = release ] && flag="--release"
+  if ! "$IYI" build $flag "$REPO/bench/parallel_migrate.iyi" -o "migrate-$build" > "build-migrate-$build.log" 2>&1; then
+    echo "build failed:"; tail -20 "build-migrate-$build.log"; exit 1
+  fi
+  # shellcheck disable=SC2086 # the steps are words
+  timeout -k 5 600 "./migrate-$build" $MIGRATE_STEPS > "migrated-$build.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' "migrated-$build.txt"; then
+    echo "the migration exercise failed (exit $code):"; cat "migrated-$build.txt"; exit 1
+  fi
+  sed 's/^/  /' "migrated-$build.txt"
+done
+# ── 2b. Preemption at loop back-edges, twice ─────────────────────────────
+# bench/parallel_preempt.iyi: a task computing with no call in its loop
+# no longer holds a short task, a sleeper or a connection behind it past
+# 100 ms (80 for a fast request in the server shape); a preempted task
+# keeps its unit's token; the monitor looks every 4 to 9 ms and two tasks
+# on one worker take turns of 20 ms at most; and the tight loops cost at
+# most twice what their `@[NoPreempt]` twins cost.
+PREEMPT_WORKERS=8
+[ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
+# The server shape's clients are the program's own main thread, which on
+# Windows, by every sign, waits for a core behind workers holding all of
+# them: on a 4-core GitHub runner, 4 workers made the slowest fast request 64 to 99
+# ms, 760 to 897 of 11,200 over 20 ms, with the monitor's tick at 5 ms and
+# at the system timer's alike, and 3 workers made it 36 to 49 ms, 119 to
+# 142 over 20. darwin's 3 workers on 3 cores made it 26 to 50 ms.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    [ "$CORES" -gt 1 ] && [ "$PREEMPT_WORKERS" -ge "$CORES" ] && PREEMPT_WORKERS=$((CORES - 1)) ;;
+esac
+for build in plain release; do
+  step "preemption at loop back-edges, $build build"
+  flag=""
+  [ "$build" = release ] && flag="--release"
+  if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
+    echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
+  fi
+  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "server --workers=$PREEMPT_WORKERS"; do
+    # shellcheck disable=SC2086 # the step and its count are words
+    timeout -k 5 300 "./preempt-$build" $run > "preempted-$build.txt" 2>&1
+    code=$?
+    if [ "$code" -ne 0 ] || ! grep -q 'every property held' "preempted-$build.txt"; then
+      echo "the preemption exercise failed at $run (exit $code):"; cat "preempted-$build.txt"; exit 1
+    fi
+    grep -v 'every property held' "preempted-$build.txt" | sed 's/^/  /'
+  done
+done
+step "what the check costs a tight loop, release build"
+timeout -k 5 300 ./preempt-release tight --workers=1 > tight.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q 'every property held' tight.txt; then
+  echo "the tight loops failed (exit $code):"; cat tight.txt; exit 1
+fi
+grep '^tight' tight.txt | sed 's/^/  /'
+
+# ── 2c. Preemption inside the library, std and recursion, twice ──────────
+# bench/parallel_preempt_lib.iyi: a sort, a copy, a hash's growth, a join,
+# a regex search, a JSON parse, a bcrypt hash and a recursion with no loop
+# each give their worker up to a short task within 100 ms. The release
+# build writes its IR too, for the audit after.
+for build in plain release; do
+  step "preemption inside library calls and recursion, $build build"
+  flag=""
+  [ "$build" = release ] && flag="--release --emit llvm-ir"
+  # shellcheck disable=SC2086 # the flags are words
+  if ! "$IYI" build $flag "$REPO/bench/parallel_preempt_lib.iyi" -o "preemptlib-$build" > "build-preemptlib-$build.log" 2>&1; then
+    echo "build failed:"; tail -20 "build-preemptlib-$build.log"; exit 1
+  fi
+  timeout -k 5 600 "./preemptlib-$build" sort copy rehash join regex json bcrypt fib --workers=1 > "preemptedlib-$build.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' "preemptedlib-$build.txt"; then
+    echo "the library preemption exercise failed (exit $code):"; cat "preemptedlib-$build.txt"; exit 1
+  fi
+  grep -v 'every property held' "preemptedlib-$build.txt" | sed 's/^/  /'
+done
+
+# The runtime's own functions, and every function they reach by a direct
+# call, hold no check (bench/preempt_audit.py), read from the release
+# build's IR. Python reads it, where there is a Python.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+step "the runtime reaches no preemption check, release build"
+if [ -z "$PY" ]; then
+  echo "  no python here to read the IR with, so the audit is not run"
+elif ! "$PY" "$REPO/bench/preempt_audit.py" preemptlib-release.ll > audit.txt 2>&1; then
+  echo "the audit failed:"; cat audit.txt; exit 1
+else
+  sed 's/^/  /' audit.txt
+fi
 
 # ── 2. The floor ──────────────────────────────────────────────────────────
 # What the pool costs each platform, by name. Its workers are the
@@ -269,25 +400,36 @@ group do |g|
   end
 end'
 
-# ── 6. Failure proofs: broken copies of the runtime ──────────────────────
-# Each a copy of src/iyi with one line of concurrency.iyi changed, built
-# against through IYI_PATH; nothing in the tree is touched.
-broken() { # name, awk program
+# ── 7. Failure proofs: broken copies of the runtime ──────────────────────
+# Each a copy of src/iyi with one file changed - concurrency.iyi unless
+# another is named - built against through IYI_PATH, of the program named
+# or of parallel_exercise.iyi; nothing in the tree is touched.
+broken() { # name, awk program[, file in src/iyi[, program in bench]]
+  local file="${3:-concurrency.iyi}" program="${4:-parallel_exercise}"
   mkdir -p "$1/iyi"
   cp "$REPO"/src/iyi/*.iyi "$1/iyi/"
-  awk "$2" "$REPO/src/iyi/concurrency.iyi" > "$1/iyi/concurrency.iyi"
-  if cmp -s "$1/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
+  awk "$2" "$REPO/src/iyi/$file" > "$1/iyi/$file"
+  if cmp -s "$1/iyi/$file" "$REPO/src/iyi/$file"; then
     echo "the awk for $1 found nothing to change"; exit 1
   fi
-  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/parallel_exercise.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/$program.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
     echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
   fi
 }
+# A broken copy is a race the gate makes on purpose, and its run can lose
+# the race some other way first: the intransit copy died of SIGSEGV in 2 of
+# 180 runs rather than failing by name, and in 60 runs each it slipped
+# through and exited 0 in 2 on one prelude and 1 on the next. A run that
+# ends any way but exit 1 at the sentence is run again, up to five times;
+# one ending there is the proof, and none in five is a failure of the gate.
 caught() { # name, expected FAIL text, step arguments...
-  local name="$1" want="$2"
+  local name="$1" want="$2" code attempt
   shift 2
-  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
-  local code=$?
+  for attempt in 1 2 3 4 5; do
+    timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+    code=$?
+    [ "$code" -eq 1 ] && grep -qF "$want" "$name.txt" && break
+  done
   if [ "$code" -ne 1 ] || ! grep -qF "$want" "$name.txt"; then
     echo "the broken copy $name was not caught at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
   fi
@@ -295,7 +437,7 @@ caught() { # name, expected FAIL text, step arguments...
 }
 
 step "failure proof: a cross-thread wake that does not ring is a lost wakeup"
-broken lostwake '/def self.ready\(fiber/ { inready = 1 } inready && /^    ring\(home\)$/ { print "    # the doorbell, not rung"; inready = 0; next } { print }'
+broken lostwake '/def self.send_home\(home/ { inhome = 1 } inhome && /^    ring\(home\)$/ { print "    # the doorbell, not rung"; inhome = 0; next } { print }'
 caught lostwake 'placement: still waiting after 5000 ms' placement --watch=5000
 
 step "failure proof: a steal that leaves the task in its victim's queue hands it out twice"
@@ -309,6 +451,31 @@ caught undelivered 'cancel: still waiting after 5000 ms' cancel --watch=5000
 step "failure proof: a cancel that skips tasks waiting in the pool runs them uncancelled"
 broken unflagged '/def self.cancel\(fiber/ { incancel = 1 } incancel && /^    fiber.cancelled = true$/ { print "    fiber.cancelled = true unless fiber.home.is_a?(Nil)"; incancel = 0; next } { print }'
 caught unflagged 'tasks waiting in the pool ran uncancelled' cancel --watch=60000
+
+step "failure proof: take_now and put_now without the scheduler's lock lose and repeat values across workers"
+# Two threads changing one channel's ring and queues at once end the step
+# by name most runs - a place still held, a value out of order, a take of
+# an empty channel, a wake lost - and some by a fault, or by a hang the
+# step's own watchdog does not end, with a channel's queues torn: 10 of 12
+# runs ended by name here and 2 hung, and a fault was seen in an earlier
+# set. A run that dies of a signal or is timed out is run again, up to
+# five times, and one ending by name is the proof.
+if [ "$CORES" -lt 2 ]; then
+  echo "  one core here: two workers cannot change a channel at the same instant, so the proof is not run"
+else
+  broken unlocked '/^  def (take_now|put_now)/ { inside = 1 } inside && /^    IyiSchedLock\.(lock|unlock)$/ { next } /^  end$/ { inside = 0 } { print }'
+  for attempt in 1 2 3 4 5; do
+    timeout -k 5 30 ./unlocked-run now --watch=5000 > unlocked.txt 2>&1
+    code=$?
+    [ "$code" -lt 124 ] && break
+  done
+  # Not anchored at the line's start: other workers' panics are printed
+  # beside it, and one landed in front of the FAIL in a run of this proof.
+  if [ "$code" -ne 1 ] || ! grep -q 'FAIL: now: ' unlocked.txt; then
+    echo "the copy without the lock was not caught by the now step (exit $code):"; tail -20 unlocked.txt; exit 1
+  fi
+  echo "  exits 1 at \"$(grep -m1 -o 'FAIL: now: .*' unlocked.txt | sed 's/^FAIL: //')\""
+fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"
 if [ "$CORES" -lt 2 ]; then
@@ -325,7 +492,149 @@ else
   echo "  exits 1 at \"$(grep -m1 'increments lost' plainadd.txt | sed 's/^FAIL: //')\""
 fi
 
-# ── 7. Failure proof: one worker, whatever was asked for ──────────────────
+# What a move keeps, broken one way each, and the migration exercise's
+# step that names it. A move needs two workers on two cores.
+if [ "$CORES" -lt 2 ]; then
+  step "failure proofs for tasks that move"
+  echo "  one core here: a task resumes where it parked, so the proofs are not run"
+else
+  step "failure proof: a thread-local read before a park and kept after it names the thread the task left"
+  if ! "$IYI" build --release -Dparallel_stale_tls "$REPO/bench/parallel_migrate.iyi" -o staletls-run > build-staletls.log 2>&1; then
+    echo "the stale thread-local build failed:"; tail -20 build-staletls.log; exit 1
+  fi
+  caught staletls 'a thread-local read after a park named another thread' channels
+
+  step "failure proof: a thread-local read hoisted out of a loop names the thread the task left once the back-edge check moves it"
+  if ! "$IYI" build --release -Dparallel_hoisted_tls "$REPO/bench/parallel_migrate.iyi" -o hoistedtls-run > build-hoistedtls.log 2>&1; then
+    echo "the hoisted thread-local build failed:"; tail -20 build-hoistedtls.log; exit 1
+  fi
+  caught hoistedtls "a thread-local read after a loop's back-edge check named another thread" loops
+
+  step "failure proof: a collector that skips a fiber on its way between workers frees the lists on its stack"
+  broken intransit '/^            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0$/ { print "            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Runnable && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0"; next } { print }' prelude.iyi parallel_migrate
+  caught intransit 'list was not whole' channels
+
+  step "failure proof: an io wait that does not say whose poller holds it is never cancelled"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      broken unlistedio '/def self.park_overlapped_current\(/ { inpark = 1 } inpark && /^    listed\(fiber, waiting_out\)$/ { inpark = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+    *)
+      broken unlistedio '/def self.wait_posix\(fd/ { inwait = 1 } inwait && /^    listed\(fiber\)$/ { inwait = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+  esac
+  caught unlistedio 'cancel: still waiting after 5000 ms' cancel --watch=5000
+
+  step "failure proof: a close posted to no thread leaves a read on another worker parked"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      echo "  a close on Windows ends the posted read, whose completion its own port takes: there is nothing to post" ;;
+    *)
+      broken noclose '/def self.wake_closed\(fd/ { inclose = 1 } inclose && /^      return unless @@shared$/ { print "      return"; inclose = 0; next } { print }' concurrency.iyi parallel_migrate
+      caught noclose 'closes: still waiting after 5000 ms' closes --watch=5000 ;;
+  esac
+
+  step "failure proof: a join held in the kernel holds its worker, and the sleepers on it"
+  broken kerneljoin '/^      while @ended.get == 0_u64$/ { skip = 3 } skip > 0 { skip = skip - 1; next } { print }' thread.iyi parallel_migrate
+  caught kerneljoin 'join: a task' join
+
+  if [ "$CORES" -lt 4 ]; then
+    step "failure proofs for stealing"
+    echo "  $CORES cores here: the balance step is not timed, so there is nothing to fail"
+  else
+    # Both without preemption: a preempted task waits in a queue any worker
+    # takes from, which spreads the parked tasks as a steal would, and a
+    # pool that never steals took 1.88x the ideal with it on.
+    NOPREEMPT='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } '
+    step "failure proof: a pool that never steals a started task leaves tasks woken on one worker there"
+    broken nosteal "$NOPREEMPT"'/^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
+    caught nosteal 'woken from a worker, took' balance
+
+    step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
+    broken pinned "$NOPREEMPT"'/^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; next } /^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
+    caught pinned 'woken from the main thread, took' balance
+  fi
+fi
+
+step "failure proof: a loop marked @[NoPreempt] holds its worker for its whole computation"
+if ! "$IYI" build --release -Dpreempt_off "$REPO/bench/parallel_preempt.iyi" -o preemptoff-run > build-preemptoff.log 2>&1; then
+  echo "the @[NoPreempt] build failed:"; tail -20 build-preemptoff.log; exit 1
+fi
+caught preemptoff 'slice: a short task waited' slice --workers=1
+
+step "failure proof: a monitor that never raises a worker's word preempts nothing"
+broken noflag '/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
+caught noflag 'slice: a short task waited' slice --workers=1
+
+step "failure proof: a Windows monitor that waits on the system timer looks too seldom"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    broken coarse '/^        @@monitor_timer = timer.address$/ { print "        @@monitor_timer = 0_u64"; next } { print }' concurrency.iyi parallel_preempt
+    caught coarse 'period: the monitor looked every' period --workers=1 ;;
+  *)
+    echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
+esac
+
+step "failure proof: a check that calls the thread-local accessor at every back-edge costs a tight loop"
+if [ "$(uname -s)" = Linux ]; then
+  echo "  the check on Linux never called the accessor: the copy builds the same code, so there is nothing to fail"
+else
+  if ! "$IYI" build --release -Dpreempt_check_accessor "$REPO/bench/parallel_preempt.iyi" -o accessor-run > build-accessor.log 2>&1; then
+    echo "the accessor build failed:"; tail -20 build-accessor.log; exit 1
+  fi
+  caught accessor 'tight: sum:' tight --workers=1
+fi
+
+step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"
+if [ "$CORES" -lt 2 ]; then
+  echo "  one core here: no idle worker takes what the poll would hand over, so the proof is not run"
+else
+  broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
+  caught nopoll 'server: a fast request took' server --workers="$PREEMPT_WORKERS"
+fi
+
+step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
+broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt
+caught tokenless 'unit: a task of the same unit ran' unit --workers=1
+
+step "failure proof: the prelude's library compiled as the runtime's holds its worker through a sort, a copy, a growth and a join"
+# `array.iyi`, `hash.iyi` and `string.iyi` written into prelude.iyi where it
+# requires them, so the compiler takes their defs for the runtime's, which
+# never check. A plain build, whose copy is a loop of bytes and long enough
+# to tell.
+broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.\//, "", name); file = "'"$REPO"'/src/iyi/" name ".iyi"; while ((getline line < file) > 0) print line; close(file); next } { print }' prelude.iyi parallel_preempt_lib
+for proof in sort copy rehash join; do
+  caught libruntime "$proof: a short task waited" "$proof" --workers=1
+done
+
+step "failure proof: a recursion marked @[NoPreempt] holds its worker for its whole computation"
+if ! "$IYI" build -Dpreempt_off "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then
+  echo "the @[NoPreempt] build failed:"; tail -20 build-recursionoff.log; exit 1
+fi
+caught recursionoff 'fib: a short task waited' fib --workers=1
+
+step "failure proof: a scheduler the compiler takes for a library's checks, and the audit names where"
+if [ -z "$PY" ]; then
+  echo "  no python here to read the IR with, so the audit is not run"
+else
+  # `concurrency.iyi` renamed `scheduler.iyi`: the compiler's runtime is
+  # the prelude's files of three names (`codegen.cr#IYI_RUNTIME_FILES`),
+  # and the audit's is wherever the scheduler is written.
+  mkdir -p rtout/iyi
+  cp "$REPO"/src/iyi/*.iyi rtout/iyi/
+  mv rtout/iyi/concurrency.iyi rtout/iyi/scheduler.iyi
+  awk '/^  require "\.\/concurrency"$/ { print "  require \"./scheduler\""; next } { print }' \
+    "$REPO/src/iyi/prelude.iyi" > rtout/iyi/prelude.iyi
+  cmp -s rtout/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk for rtout found nothing to change"; exit 1; }
+  if ! IYI_PATH="$WORK/rtout${PSEP}$REPO/src" "$IYI" build --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o rtout-run > build-rtout.log 2>&1; then
+    echo "the renamed scheduler failed to build:"; tail -20 build-rtout.log; exit 1
+  fi
+  if "$PY" "$REPO/bench/preempt_audit.py" rtout-run.ll > rtout.txt 2>&1; then
+    echo "the audit passed a scheduler compiled with checks:"; cat rtout.txt; exit 1
+  fi
+  grep -q 'hold a preemption check' rtout.txt || { echo "the audit failed some other way:"; cat rtout.txt; exit 1; }
+  echo "  $(head -1 rtout.txt | sed 's/^preempt audit: //'), the first of them $(sed -n 2p rtout.txt | sed 's/^ *//')"
+fi
+
+# ── 8. Failure proof: one worker, whatever was asked for ──────────────────
 step "failure proof: a pool held to one worker fails the speedup floor"
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: the floor is not held, so there is nothing to fail"

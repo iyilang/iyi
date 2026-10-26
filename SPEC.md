@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 22,621 lines, of which 4,644 are the library held to the 4,650 ceiling (6,659 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 138,327 lines, none of it written in iyi |
+| iyi's own prelude | 24,562 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 139,214 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 22,621 lines
+> "No standard library worth the name" is still true of iyi's own 24,562 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 22,621 lines,
-primitives included, of which the library is 4,644.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 24,562 lines,
+primitives included, of which the library is 4,649.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,11 +299,11 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,644 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,649 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,015 lines, the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,016 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,659 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,665 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -424,7 +424,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason, the platform floor measures **2,015 lines**
+exists for the same reason — the platform floor measures **2,016 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 138,327 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 22,621-line own prelude + 125,762 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 139,214 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,562-line own prelude + 126,211 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -2783,10 +2783,20 @@ trust `@[Share]` on `Channel(T)` gives since a channel crosses threads
 is. So is the block of a def marked `@[Share]`: the mark says the block
 the def keeps may run on other threads, several at once, and every block
 given to it is checked where it is written - std/http's
-`Server.serve_parallel { }` and std/router's `SharedRouter#handle` are
-two, and std/shared_proc's `SharedProc.of` is the one that makes such a
+`Server.serve_parallel { }`, std/router's `SharedRouter#handle` and
+std/tls's `TlsServerConfig#frozen { }`, a server's identity source, are
+three, and std/shared_proc's `SharedProc.of` is the one that makes such a
 block a value: `@[Share(owns: true)]`, constructed by `of` alone, so
-`Share` whatever its arguments. Inside a `@[Share]` def its block, a
+`Share` whatever its arguments. std/tls trusts two types of its own with
+`@[Share]`, values nothing writes once made that fail the rule only by
+holding arrays: `TlsIdentity`, a certificate chain and its key, whose
+constructor copies the arrays it is given and whose one changing part,
+the OCSP staple, is behind a `Mutex`; and `TlsFrozenServerConfig`, a copy
+of a server config that nothing else holds and nothing writes, its
+ticket keys and replay guard `Share` by their fields (a `Mutex` each).
+What neither can close is the edge `List` closes by never lending its
+array: an identity's chain is lent, and a program that writes into it
+writes what other threads read. Inside a `@[Share]` def its block, a
 `Proc`, is the one non-`Share` value a parallel block may capture or be
 given as `&block`, while the def leaves it as given; any other proc
 passed as a block to a boundary - `g.spawn_parallel(&work)`,
@@ -3406,9 +3416,10 @@ here from the deadlock it prevents. GC_DESIGN.md carries what the build
 found: the trigger's count made atomic and decided twice, the centre's
 free chunks handed out in the sweep's own per-arena batches so one
 thread cannot hoard, and a budget floored at half of what the sweep
-walked so eight threads do not turn a MiB budget into four thousand
-stops a second. The gate holds eight threads with live lists in their
-frames alone through collections triggered from any of them — by
+walked so eight threads did not turn a MiB budget into four thousand
+stops a second (the lazy sweep took that floor out again). The gate
+holds eight threads with live lists in their frames alone through
+collections triggered from any of them — by
 checksum and by the sweep's own free flag, after an explicit collection
 with every worker spinning and after twenty bursts of churn — fibers on
 threads, 32 threads past the core count, the floor, and a failure proof
@@ -3584,7 +3595,7 @@ WASI 0.2/0.3 component-model async execution supporting stackful fibers directly
 Neither a sequential imitation nor a post-link bytecode transformation is
 acceptable.
 
-#### III.4.13 Tasks across cores: **BUILT — `spawn_parallel`, a pool of workers, a task placed when it starts and never moved; `Share` gates its block**
+#### III.4.13 Tasks across cores: **BUILT — `spawn_parallel`, a pool of workers that steal started tasks from each other; `Share` gates its block**
 
 0.18.0 ended with "the scheduler that spreads tasks across cores comes after
 this release". Until this section every task ran on the thread that spawned
@@ -3595,35 +3606,59 @@ runtime's own that the collector stops and scans (III.4.11, GC_DESIGN.md
 Stage 4), a scheduler whose every field is one thread's (`IyiSchedulerState`),
 an allocator cache per thread, `Share` gating what a thread's block reaches
 (III.4.4) — and what was missing was a way for a *task* to stand on one of
-those threads. This is the decision, written before the code, in eight parts.
+those threads. This is the decision, written before the code, in eight parts;
+the ninth, preemption, came after it was measured.
 
-**1. The shape: M:N over a pool of workers, a task placed when it starts.**
-A program that asks for parallelism gets a pool of worker threads, each an
-`IyiThread` the runtime starts with a scheduler of its own: its own run
-queue, sleep heap, poller and stack pool, exactly the state III.4.11 gave
-every thread. A parallel task waits in a queue until a worker is free to
-start it — the queue of the worker whose task spawned it, the pool's
-injection queue when a thread outside the pool spawned it, or, for a worker
-with nothing of its own, another worker's queue, stolen from — and **once it
-has run its first instruction it stays on that worker until it ends**. It
-parks and resumes on the thread that started it. That is the decision this
-section is most likely to be asked about, so here is why it is not Go's,
-which moves a parked goroutine to whichever thread is free. Go's compiler
-knows a goroutine can change threads under it; iyi's frames are LLVM's, and
-LLVM takes a thread-local's address as fixed for the life of a function: a
-frame that parked holding the address of its thread's allocator cache would
-resume on another thread still holding it, and two threads would allocate
-from one cache. iyi's codegen already builds on the fact, reading a
-thread-local off the thread pointer with no accessor on Linux because "an
-iyi fiber belongs to its scheduler thread and never moves"
-(`codegen.cr#get_global`); and a scheduler thread with nothing to run waits
-in its poller *on the stack of the fiber that parked last*, which another
-thread could not resume. Placement at the start is where the balance comes
-from instead: a worker that finishes a task takes the next unstarted one,
-so a fan-out of CPU-bound tasks — the program parallelism is for — spreads
-over every worker as fast as the workers free up. What it gives up is the
-rebalancing of tasks that are already running: a task that parks often stays
-where it began.
+**1. The shape: M:N over a pool of workers, and a task resumes wherever a
+worker is free.** A program that asks for parallelism gets a pool of worker
+threads, each an `IyiThread` the runtime starts with a scheduler of its own:
+its own run queue, sleep heap, poller and stack pool, exactly the state
+III.4.11 gave every thread. A parallel task waits in a queue until a worker
+is free to start it — the queue of the worker whose task spawned it, the
+pool's injection queue when a thread outside the pool spawned it, or, for a
+worker with nothing of its own, another worker's queue, stolen from — and a
+task that parks and is woken may resume on any worker, Go's rule. Woken by
+a task on a worker, it goes into that worker's run queue, a ring of 256 that
+an idle worker takes half of (Go's `runqgrab`); woken from a thread outside
+the pool, into a shared queue any worker takes from. One idle worker at a
+time is rung to come and steal, and one that finds work rings the next.
+
+This section first decided the other way - a task placed when it starts and
+never moved - for two reasons, and both were answered before tasks moved.
+LLVM took a thread-local's address as fixed for a function's life (llc 21
+kept `tpidr_el0` plus the offset across the calls in a loop on aarch64, and
+`%fs:0` across a call on x86-64), so a frame that parked holding its
+thread's allocator cache would have resumed on another thread still holding
+it; the codegen now reads the thread pointer at every access
+(`codegen.cr#iyi_thread_local_address`). And a thread with nothing to run
+waited in its poller on the stack of the fiber that parked last; a worker
+now waits on its own fiber's stack (`IyiWorkers.work`), and a fiber woken
+before the worker that parked it has finished switching away is not resumed
+until it has (`IyiFiber#on_cpu`). What placement alone gave up was measured
+against the change, the same probe built on each runtime (8 workers,
+release, three runs each, load 4.8 to 5.6 from other jobs): 48 tasks that
+started together, parked on a channel and then computed 25 ms each took
+2.11 to 2.57 times the ideal before and 1.03 to 1.11 after, and a server
+shape of 32 connections making 25 ms requests 1.26 to 2.20 times before
+and 1.16 to 1.20 after. In the best runs one worker did 328 ms of the
+parked tasks' work and another 59 before, and every worker 157 to 167 ms
+after. `bench/parallel_migrate.iyi`'s balance step holds the parked shape
+on four workers, under twice the ideal.
+
+What a move keeps, and what holds it: the fiber's stack is found by the
+collector on whichever thread runs it, through the fiber registry and the
+stopped thread's sp, as before; on Windows the switch writes the fiber's
+own StackBase, StackLimit and DeallocationStack into the TEB of the thread
+it lands on (`__iyi_ctx_swap`), so a frame's probes grow the fiber's stack
+on any worker; an io wait is registered per wait on the waiting thread's
+epoll or kqueue, and on Windows a handle is moved to the waiting thread's
+port, a completion that reaches another port being forwarded by the thread
+id its OVERLAPPED carries; a cancel finds the thread whose sleep heap or
+poller holds the task by an id the task writes there (`IyiFiber#listed_on`);
+and a socket a sibling closes on another worker wakes the read parked on it
+through that worker's mail. `bench/parallel_migrate.iyi` holds each of
+these after hundreds of moves, plain and release, with broken copies caught
+by name.
 
 **2. The door is its own verb, and `Share` gates it as it gates a thread.**
 `g.spawn_parallel { }` is a task of the group like any other — joined at the
@@ -3646,10 +3681,13 @@ no line of the program saying so. Rust's tokio arrived at the same pair:
 `spawn` demands `Send` and work-steals, `spawn_local` demands nothing and
 stays.
 
-A task `g.spawn` starts *inside* a parallel task is on that task's worker,
-because a spawn's thread is its spawner's and a started task never moves;
-so the parent and the child may share the parent's non-`Share` locals, as
-any task and its spawner may, and neither can move away from the other.
+A task `g.spawn` starts *inside* a parallel task belongs to that task's
+unit (`IyiUnit`): the parent and the child may share the parent's
+non-`Share` locals, as any task and its spawner may, so no two tasks of a
+unit run at the same instant - a worker holds the unit's token from its
+switch to one of them until it switches to another unit's task or to none -
+but each may park on one worker and resume on another. std/http's
+`serve_parallel` needs it: a connection's real work is in such children.
 
 **3. What crosses, and what does not need to.** Across a parallel boundary:
 `Atomic(T)`, `Mutex(T)`, `List(T)`, immutable values, and now `Channel(T)`:
@@ -3678,11 +3716,12 @@ since the pool does not shrink. The workers start at the first
 
 **5. A poller per worker, not a shared one.** An IO wait is the waiting
 task's thread's — the fd is registered with that thread's epoll, kqueue or
-completion port, as it always was — because the task resumes there. A
-shared poller would hand every readiness event from the thread that polled
-it to the thread the task is on, a cross-thread wake per event, to save a
-file descriptor per worker. The worker owns its poller, its sleep heap and
-its stacks, and nothing of them is locked.
+completion port, per wait, as it always was. A woken task may resume on
+another worker (part 1), and its next wait registers there. A shared
+poller would have saved a file descriptor per worker; what a poller per
+worker costs instead is part 1's open end: a worker busy computing looks at
+its own poller only when it parks. The worker owns its poller, its sleep
+heap and its stacks, and nothing of them is locked.
 
 **6. Waking across threads, and the one lock.** What does cross threads is
 a wake: a sender on one worker hands a value to a receiver parked on
@@ -3724,13 +3763,282 @@ no IO wait, no inbox holds a fiber and no parallel task is waiting to
 start. A worker that finds that rings a thread outside the pool, whose root
 fiber reports it as before (`deadlock: every fiber is blocked`).
 
-**Not built, and said so.** No task moves once started (part 1); no task is
-preempted, so a CPU-bound task holds its worker until it parks or ends, as
-a task always held its thread; a worker sleeping in the kernel on a
-contended `Mutex` holds its own tasks while it sleeps. wasm32 has no
-runtime (III.4.12) and no pool, and a build under `-Dgc_none` or
-`-Dgc_boehm`, which has no `IyiThread`, refuses `spawn_parallel` at compile
-time rather than run it on one thread.
+**9. Preemption at loop back-edges. Built.** Stealing takes what is
+runnable from under a CPU-bound task; what it held still was what waits in
+its own sleep heap and poller, which only its worker looks at. Measured
+before this part (8 workers, release, two runs, load 4.8 to 5.7): seven
+tasks sleeping 1 ms beside a task computing 100 ms woke at most 1 ms late
+and 32 tasks woken by one that then computed started within 26 us, stolen;
+but in the server shape of 28 connections making 0.2 ms requests beside 4
+making 100 ms ones, 65 of 11,200 fast requests took over 20 ms, at most 110
+to 111 ms, a connection parked on the poller of a worker that took a long
+request. So every loop of a program with a pool checks the worker's
+preemption word at its back-edge, and a monitor raises the word.
+
+- *Where.* The loops of every def that is not the runtime's, and the
+  runtime's block iterators inlined into one (`loop`), in a program that
+  reached `IyiWorkers.start`; a program with no pool has no check, since
+  the word is only raised on a worker. Not the runtime's own loops - the
+  scheduler, the allocator and the collector, in the three files below -
+  nor a library def's compiled for the runtime to call, not a `fun`, and
+  not a def marked `@[NoPreempt]`, nor the blocks inlined into it; a
+  function on a call cycle checks at its entry too (below). Codegen marks
+  the back-edge with a loop property (`!"iyi.preempt"`
+  in `!llvm.loop`) and the check goes in after optimisation
+  (`src/compiler/iyi/preempt_checks.cr`): emitted as code it was a volatile
+  load in the loop, and LLVM vectorised none - a sum of 1,000,000 `Int64`s
+  500 times went from 48 to 126 ms. LLVM keeps the property on the vector
+  body and the scalar remainder alike. The check is `cmpq $0, %fs:off` and
+  a branch on x86-64 Linux, `cmpq $0, %gs:off` on x86-64 Windows, a
+  volatile `mrs` of `tpidr_el0` plus the offset on aarch64 Linux, and on
+  darwin arm64 a volatile `mrs` of `tpidrro_el0` and two loads (the
+  Windows and darwin forms and their numbers are below). Against
+  `@[NoPreempt]` twins of themselves (release, best of seven,
+  interleaved, load 5 to 6, Linux here): a xorshift walk 0.999x to
+  1.001x, the vectorised sum 0.97x to 1.055x, the same through `each`
+  1.012x to 1.04x, a table CRC 0.992x to 1.004x. The gate holds every
+  ratio to 2x (below).
+- *Who raises it.* The pool's monitor, a helper thread the collector does
+  not stop (Go's `sysmon`), looks every 5 ms and raises the word of a
+  worker whose switch count has not moved since its last look: one task
+  has held it 5 to 10 ms. It parks while every worker is idle. The quantum
+  is measured in `IyiWorkers::PREEMPT_TICKS`' comment: 10 to 15 ms left a
+  few fast requests over 20 ms, 5 to 10 none, and none of them moved
+  sixteen CPU-bound tasks' wall time out of the noise.
+- *What the slow half does.* It hands on what waits on the worker - its
+  poller's news without waiting, its expired sleepers, its mail - into its
+  ring and calls an idle worker, which steals them; that alone answers the
+  server shape while a worker is idle. It gives the worker up only when
+  something waits that no idle worker will take, or that only this worker
+  may run. Nothing when a runtime lock is held. A task holding a `Mutex`
+  may be preempted, as a thread the kernel preempts holding one: its
+  waiters park on the lock's word. Plain `spawn` tasks outside the pool
+  are never preempted, keeping III.4.5's promise that they interleave at
+  parks, and neither does any task of a unit run inside a preempted one:
+  the preempted task keeps its unit's token (`IyiUnit::YIELDED`) and waits
+  in a queue every worker takes from last, and first every 61st look.
+  The collector is untouched: the check is a call, and the stop already
+  takes a thread wherever it is.
+
+After it, the server shape (8 workers, release, three runs, load 3.3 to
+3.5) had 0 to 5 fast requests over 20 ms, at most 19 to 20 ms, with a 10 to
+15 ms quantum, against 67 to 84, at most 112 to 206 ms, without, and with
+the 5 to 10 ms kept, none and at most 14 to 17 ms in the gate's runs. A
+task spawned beside one computing a second on a pool of one starts 1 to 9
+ms later. `bench/parallel_preempt.iyi` holds each of these in
+`bench/parallel_exercise.sh`, with broken copies caught by name: a
+`@[NoPreempt]` loop, a monitor that never raises the word, a slow half that
+does not poll, and a preempted task that gives its unit's token away.
+
+A thread-local read is not shared across the check. The check goes in
+after LLVM has optimised the loop, so a read LLVM took as the same all
+through a function - hoisted out of a loop that stores nothing, or shared
+with the read before the loop - would name the thread a preempted task
+left. Read with llvm-objdump from release cross-builds of a task that reads
+`IyiThread.current_line` in a loop beside a xorshift walk: aarch64 Linux,
+whose thread pointer was `llvm.read_register`, which LLVM models as only
+reading memory, loaded the line once before the loop. Its thread pointer
+is now a volatile `mrs` that LLVM is told writes memory nothing else names,
+read in every turn and again after the loop. x86-64 Linux's volatile load
+of `%fs:0`, and the accessor darwin and Windows call (which LLVM infers to
+write only its argument), were already at every read, in the loop and after
+a channel receive, and their objects did not change. A loop that allocates
+calls the allocator, which reads its cache's thread-local at each call on
+all four. The aarch64 allocation path under qemu-user, release, 20,000,000
+allocations, best of five, three interleaved runs (load 2.4 to 5): 596, 617
+and 601 ms before, 582, 937 and 578 after; in a parallel task, whose loop
+has the check, 851, 879 and 855 before, 886, 856 and 857 after.
+`bench/parallel_migrate.iyi`'s `loops` step holds it wherever the gate
+runs, darwin and Windows included, and on aarch64 Linux under emulation
+in CI: 16 tasks on 4 workers read the line before, in and after loops whose
+checks moved them, against the kernel's thread read by asm. Built by the
+compiler before the volatile `mrs`, that step failed for aarch64 under
+qemu-user in 2 runs of 2; a copy that reads the line before the loop in
+its place (`-Dparallel_hoisted_tls`) fails it by name.
+
+**The check and the tick on Windows and darwin, measured on GitHub's
+runners.** A debug workflow ran `bench/parallel_preempt.iyi` on
+windows-2025 (4 cores) and macos-14 (3 cores), release. Both platforms
+called the thread-local accessor at every back-edge at first. Measured
+against `@[NoPreempt]` twins, best of seven, that made the vectorised sum
+and the same sum through `each` cost 3.41x to 4.92x on Windows and 5.28x
+to 5.80x on darwin; the walk and the CRC cost 1.00x to 1.09x.
+
+- *darwin arm64.* The check reads `tpidrro_el0` in the loop, masks off its
+  low three bits as dyld's `_tlv_get_addr` does, loads the thread's
+  pthread slot for dyld's key, and loads the word at the offset. The key is
+  the 32 bits at 8 in the word's TLV descriptor, which both of dyld's
+  thunk layouts keep. The offset is not read from the descriptor: it sits
+  at 16 in the first layout and at 12 in the second. Instead the
+  function's entry calls the accessor once and subtracts the block its own
+  thread's slot holds. Measured: the sums 0.935x to 1.069x, the CRC 0.987x
+  to 1.037x, the walk 1.052x to 1.114x. A probe build whose check loads a
+  plain global gave the walk 0.972x to 0.998x, so the walk pays about 5 to
+  10% for reading the thread register.
+- *x86-64 Windows.* Reading the TEB's TLS array (`gs:0x58`, `_tls_index`,
+  the word) made the sums 1.63x to 1.75x. The word now lives in a TEB slot
+  of the pool's own: `TlsAlloc` under 64, `TlsSlots` at 0x1480, Go's
+  `tls_g`, with `ArbitraryUserPointer` as the fallback, as in Go. The
+  check is `cmpq $0, %gs:off` with the offset loaded at entry
+  (`IyiWorkers.@@preempt_slot`). The sums came to 1.46x to 1.49x, the walk
+  and the CRC 0.997x to 1.002x.
+- *Why the sums stay above 1.4x.* On these x86-64 runners the vectorised
+  sum runs at one of two speeds, about 32 or 48 ms, and the checked loop
+  at the slower one. Linux CI's `%fs` form measured `each` at 1.513x, and
+  its unchecked `sum` landed at the slower speed too (1.001x). The
+  remaining cost is a check in a loop of about 1.3 cycles, not the
+  Windows read. Nothing under 3% was found for this loop.
+- *The gate's bound and its proof.* The `tight` step holds every ratio to
+  2x. Built with `-Dpreempt_check_accessor` (the accessor form, which
+  invalidates cached objects through the bitcode flags), it must fail at
+  `tight: sum:` on darwin and Windows.
+- *The tick.* Windows' monitor waited 5 ms on its semaphore, which ends on
+  the system timer's tick: looks came 11.2 to 12.3 ms apart, and a ticker
+  beside a computing task woke up to 30 ms late. It now waits on a
+  high-resolution waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`),
+  which leaves the machine's timer alone, as `timeBeginPeriod` would not.
+  Measured: looks 5.15 to 5.27 ms apart, two computing tasks on one worker
+  take turns of 10.3 to 10.5 ms, and the ticker is at most 10 ms late.
+  darwin looks every 5.8 to 6.3 ms with turns of 11.2 to 12.3 ms, and
+  Linux here every 5.1 to 5.3 ms with turns of 10.2 to 10.5 ms.
+  `bench/parallel_preempt.iyi`'s new `period` step holds the look at 4 to
+  9 ms and the turn at 20 ms. On Windows, a copy whose monitor keeps the
+  semaphore's timeout must fail at `period: the monitor looked every`.
+- *The server shape on Windows.* With 4 workers on 4 cores, the slowest
+  fast request took 64 to 99 ms, and 760 to 897 of 11,200 requests went
+  over 20 ms, with either tick. With 3 workers it took 36 to 49 ms. The
+  shape's clients are the program's own main thread, which by every sign
+  waits for a core there, so the gate runs it on one worker fewer than the
+  cores. darwin, 3 workers on 3 cores: 26 to 50 ms.
+- *The no-argument run.* It was all steps on 4 workers. Its slice step's
+  short task then went to an idle worker, so nothing was preempted, and
+  the step failed by name: on Windows CI, and on Linux here in 3 runs of
+  3. With no arguments it now runs slice, unit and period on a pool of one
+  and prints only that every property held.
+
+**The prelude's library, std, and recursion. Built.** Measured before
+(`bench/parallel_preempt_lib.iyi`, release, one worker, a short task
+spawned 20 ms into the call, load 8): a sort of 3,000,000 `Int64`s held it
+175 ms, a `Hash` growth at 4,194,304 entries 85, a join of 4,000,000
+strings 34, a naive `fib(37)` 45; a regex search, a JSON parse and a bcrypt
+hash, std's and already checked, 0 to 8. Now:
+
+- *The runtime is three files.* `codegen.cr#IYI_RUNTIME_FILES` -
+  `prelude.iyi` (allocator, collector, panics, entry), `concurrency.iyi`,
+  `thread.iyi`, in the prelude's own directory - never check. Every other
+  prelude file is a library and checks as a program does. A library def
+  the runtime calls is compiled a second time for it, `$runtime` after its
+  name, with no check in it and its own calls going to such copies too
+  (`iyi_runtime_copy?`): so nothing the runtime runs checks, whatever it
+  calls, and no rule about which runtime call is a safe place to give a
+  worker up is needed. The slow half also returns on a fiber that is not
+  `Running`. `bench/preempt_audit.py` reads a build's IR and fails if a
+  function written where the scheduler, threads, allocator or collector
+  are - or one it reaches by direct calls - holds a check: 175 runtime
+  functions reach 11 copies and none checks, release; 666 reach 82, plain.
+- *Copies* run a million elements at a time (`Pointer#copy_from`,
+  string.iyi) with the check between runs; the run itself
+  (`Pointer#copy_run`) is in the runtime's file, because a check in it put
+  a load and a branch on every byte of a short string's copy: a join of
+  1,000,000 strings took 6.6 ms against 5.1 with it, 5.5 to 6.6 without.
+- *Recursion.* Before optimisation the compiler finds call cycles among
+  the functions that check (Tarjan over direct calls, across modules) and
+  puts a call to `__iyi_preempt_entry` at each one's entry, which LLVM is
+  told touches only memory nothing else names; after it, the call becomes
+  the check (`PreemptChecks.mark_recursion`). A tail call LLVM turns into a
+  loop keeps the check in that loop. A check in every function's entry
+  was not chosen: `fib(32)` is all calls, and is what every call would pay.
+  Recursion through a `Proc` is not a cycle it sees.
+- *A large block is not cleared after the call.* `Pointer.malloc` was the
+  allocator's call and then a `memset` codegen put after it, the
+  prelude's (`bzero` on darwin), which never checks; past 1 MiB the block
+  is a fresh mapping the kernel has zeroed, and the `memset` was a store
+  a word and every page's first fault. The growth of a `Hash(Int32,
+  Int32)` at 8,388,608 entries takes three such blocks, 64, 64 and 128
+  MB, and in a plain build held its worker through them: a short task
+  waited 198 ms in darwin CI (bound 100), 79 to 116 ms in five runs of a
+  debug job there, and 36 to 80 on Linux. Timed inside the growth, the
+  three blocks were done 107 to 155 ms into the call on darwin and 57 to
+  62 on Linux, and the wait was that less the 20 ms. Not the collection
+  the allocation triggers: it paused 1.4 to 3.6 ms on darwin and 1.4 to
+  1.9 on Linux. Of one 64 MB block on darwin (on Linux in brackets) the
+  mapping took 2 to 303 µs (7 to 647), its first clear 20 to 96 ms (15 to
+  30), a second clear of the same block 14 to 47 (6.2 to 6.4), and a
+  store to each 4 KiB of a fresh one 3.6 to 79 (8.2 to 44). Now under the
+  arena both entries hand the block back zeroed - a chunk off a list is
+  cleared in the allocator, a chunk carved from a cold run past its first
+  page, and a frontier chunk or a mapping is left as the kernel zeroed
+  it - and codegen clears nothing after them
+  (`generic_array_malloc`), so the pages fault in the growth's own loops,
+  which check. After, plain: the three blocks took 2.2 to 2.5 ms on
+  Linux, 2.1 to 2.4 of it the collection's pause, and the short task
+  started 1 to 9 ms later; on darwin 1.1 to 2.9 ms, 1.0 to 2.7 of it the
+  pause, and 1 to 12 ms later, nine runs of nine inside the bound (a
+  debug job running objects this compiler built for it). The release
+  growth's 17 to 18 ms below was the same `memset`: 16 to 18 before and 0
+  to 9 after on Linux, 11 after on darwin. The costs measured below did
+  not move (Linux, release, best of seven, three interleaved rounds: hash
+  inserts 22.97 to 23.21 ms before and 22.34 to 22.79 after, the sort
+  58.6 to 59.6 and 57.1, the JSON parse 10.4 to 12.5 and 11.3 to 12.2).
+  `bench/arena_exercise.iyi` holds that a chunk freed dirty comes back
+  zeroed through the atomic entry; a copy whose atomic entry does not
+  clear fails it at byte 1. The `memset` had also hidden that a cold run
+  is zero on a chunk's head page only: a run's last chunk reaches onto a
+  page nobody released, and a chunk that was a list's when the pages
+  above its head went cold was written there by its owner, then joined
+  the run when its own page went cold. Without the `memset`, the carve
+  handed std/compress's exercise chunks of 1,280 to 24,576 bytes dirty
+  from a page boundary on (`bench/std_compress_exercise.sh` failed, and
+  a run of it with every clearing allocation read back failed on every
+  run). The carve now clears such a chunk from its second page on. The
+  arena exercise thins blocks of a page and a quarter to one in
+  twenty-one and takes them up again: without that clear it reads 170 at
+  byte 4,096 of a 5,000-byte block on Linux and at byte 12,288 of a
+  20,360-byte block on darwin arm64's 16 KiB pages. Sized at 5,000 bytes
+  there, three chunks shared a page, the carve listed the run's last one
+  and the pop cleared it, and the take-up met no cold page at all.
+
+After (release, one worker, load 4 to 12): a sort of 6,000,000 started the
+short task 4 to 7 ms later, a growth at 8,388,608 entries 17 to 18, a join
+of 12,000,000 strings 4 to 12, `fib(40)` 4 to 5; plain builds 1 to 37,
+including the copy of 192 MB, which takes 392 ms there and 13 in release.
+The cost, release, best of seven, three interleaved rounds against the
+compiler and prelude before (load 4 to 5): a sort of 1,000,000 `Int64`s
+57.9 to 59.6 ms before and 60.3 to 63.7 after; 1,000,000 hash inserts 21.2
+to 23.6 and 22.6 to 23.5; a join of 1,000,000 strings 5.0 to 5.4 and 5.5
+to 6.6; 64 copies of 16 MB, 1,000,000 appends of 7 bytes and a JSON parse
+of 2.4 MB within the noise; `fib(32)` against its `@[NoPreempt]` twin
+5.80 to 6.27 against 5.80 to 5.85. The sort's and the join's 4 to 9% are
+over the 2 to 3% aimed at. A turn count was tried in their place: a loop
+with no loop inside it, at most 512 instructions and no call looked at the
+word every 256 turns (every 16 with calls), the count an add and a test in
+a register. Measured the same way (load 5): the sort 57.2 to 59.0 ms
+before and 61.1 to 63.9 with the count, the join 5.07 to 5.31 and 6.11 to
+6.45, the `tight` sums 1.07x to 1.13x their twins against 1.06x to 1.12x
+with a look at every turn. It bought nothing, so every turn looks, the
+cheaper of the two. Those runs also had a `copy_from` that skipped its run
+loop for a short copy, undone with the count.
+`bench/parallel_exercise.sh` holds each
+step plain and release, the audit, and three broken copies by name: the
+library written into prelude.iyi (sort, copy, growth and join each wait
+316 to 1,022 ms), a `@[NoPreempt]` recursion, and the scheduler's file
+renamed, which the audit names.
+
+**Not built, and said so.** A copy inside the allocator - a `realloc` of a
+large buffer, which `String::Builder` grows by - is not preempted, nor is
+the allocator's clearing of a chunk it reuses, 1 MiB at most; a large
+block is not cleared at all. wasm32 has no runtime (III.4.12) and no pool,
+and a build under `-Dgc_none` or `-Dgc_boehm`, which has no `IyiThread`,
+refuses `spawn_parallel` at compile time rather than run it on one thread.
+
+**A task waiting in the kernel holds no worker.** A contended `Mutex` parks
+the task on the lock's word (`IyiScheduler.park_on`, a futex for tasks;
+std/mutex), a thread's join parks until the thread's body has returned
+and waits in the kernel only for its exit, and a process's end was already
+waited for parked (a pidfd, a kqueue, `RegisterWaitForSingleObject`), its
+one refused case now asking with a zero wait between sleeps. So the
+handoff Go makes around a blocking call has nothing to wrap, and is not
+built.
 
 **Built as decided, and measured.** `src/iyi/concurrency.iyi` has the
 pool (`IyiWorkers`), the inbox, the doorbell and the scheduler's lock;
@@ -3744,14 +4052,15 @@ is the other proof the tasks run at the same instant: eight tasks adding
 2,000,000 times each to one count lose nothing through an atomic, and
 with the add made a load and a store they lost 8,403,659 of 16,000,000,
 which no schedule of one thread can do. The gate also holds placement on
-more than one worker with no task moving across a sleep or a channel,
+more than one worker and never on the spawning thread,
 channel values across threads once each and in each sender's order, a
 cancel reaching a sleeper, a channel waiter, a task on the spawning
 thread and tasks still in the pool in about 100 ms, steals, lists on
 eight workers' fiber stacks through the collections, a deadlock across
 threads named, and broken copies of the runtime caught by name - a wake
 that does not ring, a steal that leaves the task queued, a cancel never
-delivered, a cancel that skips the pool, and a pool held to one worker.
+delivered, a cancel that skips the pool, and a pool held to one worker -
+and runs `bench/parallel_migrate.iyi` with seven more for part 1's moves.
 The one name the pool adds to the floor is `environ`, the C runtime's
 table `IYI_WORKERS` is read from on Linux and darwin.
 
@@ -3779,9 +4088,8 @@ handle is moved to the waiting thread's port. The stop needs part 6
 alone: the accept loop closes a `Channel`, and a watcher beside each
 connection, on its worker, closes the connection there if it is waiting on
 its client - the listener's `closed?` that `serve`'s connections read is
-the accepting thread's, so each connection reads a stop of its own. No
-`tls:`: `TlsServerConfig` changes its ticket keys and replay guard as it
-serves. Measured on Windows 11, twelve logical CPUs, release, 32
+the accepting thread's, so each connection reads a stop of its own.
+Measured on Windows 11, twelve logical CPUs, release, 32
 kept-alive connections: a request that computes went from 411 requests a
 second under `serve` to 410, 821, 1,617, 3,047 and 4,033 on 1, 2, 4, 8 and
 12 workers; one that answers a few bytes from 23,255 to 21,699 on one
@@ -3793,6 +4101,192 @@ requests a second on one and twelve workers, a `SharedRouter` 393 and
 4,003; `bench/std_router_exercise.sh` routes every table through a
 `SharedRouter` and holds its answers to `Router`'s, and serves one under
 `serve_parallel` over the wire.
+
+**Over TLS: `serve_parallel(listener, tls: config.frozen)`.** This
+section's first version had no `tls:`, because a `TlsServerConfig` is
+written as it serves - its ticket key turns over when a ticket is
+sealed, its replay guard records binders, its staple is replaced, and its
+properties and identity source are the program's to change - and a
+value written as it serves is the one thing a parallel block may not
+capture. The decision: what changes while a server runs is shared and
+synchronised, and everything else is frozen. `TlsTicketKeys` and
+`TlsReplayGuard` keep their state behind a `Mutex`, which makes them
+`Share` by their fields, so a server's workers hold one set of ticket
+keys and a ticket one worker sealed another opens; the key is read
+under the lock and the seal done outside it. A `TlsIdentity` keeps its
+OCSP staple behind a `Mutex` too, replaced from any thread; it is
+trusted `Share` (III.4.4), since nothing writes one once it is made.
+`TlsServerConfig#frozen` is a `TlsFrozenServerConfig`, a copy of the
+config that nothing else holds and nothing writes, sharing the
+original's ticket keys and replay guard, and trusted `Share` for that
+reason; its identity source is a block given to `frozen`, a `@[Share]`
+def, so what the block captures is checked where it is written, and a
+config whose source is a `Proc` is refused when frozen. A
+`TlsServerConfig` given to `serve_parallel` itself is refused by the
+compiler in the sentence any unshareable capture is (``captures `tls :
+TlsServerConfig`, which is not Share: ... field @alpn is given a setter
+`alpn=` ``). The alternative that lost was a config behind one `Mutex`:
+every handshake on every worker would have taken one lock for every
+field it read, and an identity source would still have been a `Proc`
+nobody checked. The handshake runs on the worker that
+serves the connection; HTTP/2 and HTTP/1.1 by ALPN, client certificates
+and ECH are `serve`'s code, unchanged, and at a stop a connection
+waiting on its client is sent close_notify from its own worker.
+std/autocert's `frozen_tls_config` keeps the manager on its own thread:
+the certificates it holds and the challenges it has up are tables
+behind a `Mutex` the workers read, and a name not held is asked of the
+manager's `run` over a `Channel`, so one order still serves every
+worker that asks for a name at once. Measured on Linux, twelve hardware
+threads with other jobs keeping four of them busy (load 4.0 to 5.0
+before each run), release, wrk with four threads and 32 kept-alive
+HTTPS connections, a request that computes (`spin(200000)` in
+`bench/std_http_parallel.iyi`'s `speed` mode, TLS 1.3, Ed25519), best of
+three 8 s runs: 3,867 requests a second under `serve`, which was the
+only TLS server before this, and 3,884, 7,727, 14,877 and 26,751 under
+`serve_parallel` on 1, 2, 4 and 8 workers - 2.00x, 3.85x and 6.92x of
+one. `bench/std_http_parallel.iyi`'s TLS leg holds it in
+`bench/std_http_exercise.sh`: eight connections answered on more than
+one worker, h2 and http/1.1, a ticket sent by a connection on one worker
+resumed by a connection that started on another, a client's
+certificate, ECH, and close_notify at the stop; with broken copies
+caught by name - each worker keeping ticket keys of its own (the
+resumption fails), and a stop sending no close_notify - and the two
+refusals checked by their sentences and compiled by copies of std/tls
+with the mark taken off. `bench/std_autocert_exercise.sh` serves under
+`serve_parallel` against Pebble: ten first handshakes at once making one
+order, answered on more than one worker. Not built: the frozen config's
+identities, protocols and ECH keys are the server's for its life -
+another set is another `serve_parallel` - and a ticket outlives neither
+the process nor a move to another server, as under `serve`.
+
+**Issue #145's shape, measured against Go.** The issue timed a whole
+application with a database. This times the three kinds of endpoint where
+its gap was widest, written once in iyi (`bench/web_cores.iyi`) and once
+in Go (`bench/web_cores/main.go`, net/http, encoding/json and
+golang.org/x/crypto/bcrypt). Before anything is timed, both servers must
+answer every request with the same bytes. There is no database: the
+issue's tuned pool is out of scope, and what is measured is what a
+server's own cores do with a request. The endpoints:
+
+- `login` checks a JSON body's password with bcrypt. The issue does not
+  state its cost, so cost 10 is used.
+- `check_version` reads a query and answers five fields of JSON.
+- `order` reads sixteen line items of JSON, totals and sorts them, and
+  answers in JSON.
+
+How it was taken - `bench/web_cores.py`: wrk with 4 threads and 32
+kept-alive connections, bcrypt at cost 10, `serve_parallel` on 1, 2, 4, 8
+and 12 workers, best of 3 runs of 15 s (login) and 5 s (the others). Each
+run waits for the server to finish what the run before left it. The
+machine was Linux on a twelve-thread QEMU VM, with release builds and Go
+1.25.14 at its default GOMAXPROCS; measured on 2026-10-25. Other work kept
+1.5 to 2.7 cores busy throughout (/proc/stat's busy time less the
+server's and wrk's), and wrk itself used up to 2 cores. Each cell is
+requests a second, the server's CPU as a share of one core, and p50 / p99
+latency in ms.
+
+| HTTP | login | check_version | order |
+|---|---:|---:|---:|
+| iyi `serve` | 27, 100%, 1190 / 1280 | 46,241, 112%, 0.7 / 2.3 | 33,665, 113%, 0.9 / 2.4 |
+| `serve_parallel`, 1 worker | 26, 100%, 1120 / 1570 | 45,445, 111%, 0.7 / 2.4 | 32,770, 111%, 0.9 / 2.7 |
+| `serve_parallel`, 2 | 52, 200%, 564 / 774 | 98,700, 213%, 0.3 / 2.4 | 69,092, 220%, 0.4 / 2.6 |
+| `serve_parallel`, 4 | 103, 400%, 289 / 404 | 195,346, 424%, 0.1 / 2.5 | 119,769, 468%, 0.2 / 2.9 |
+| `serve_parallel`, 8 | 196, 797%, 164 / 201 | 208,641, 602%, 0.1 / 3.6 | 137,744, 605%, 0.2 / 4.2 |
+| `serve_parallel`, 12 | 247, 1,032%, 128 / 174 | 205,879, 631%, 0.1 / 4.2 | 131,160, 697%, 0.2 / 6.9 |
+| Go net/http | 242, 1,033%, 129 / 215 | 216,298, 528%, 0.1 / 3.0 | 90,732, 538%, 0.2 / 3.5 |
+| *the issue's, iyi (Windows, with its database)* | *9.9* | *5,308* | |
+| *the issue's, Go (Windows, with its database)* | *108.2* | *21,099* | |
+
+| HTTPS (TLS 1.3, Ed25519) | login | check_version | order |
+|---|---:|---:|---:|
+| iyi `serve` | 27, 100%, 1180 / 1220 | 37,828, 114%, 0.8 / 2.5 | 25,668, 114%, 1.2 / 2.8 |
+| `serve_parallel`, 1 worker | 26, 100%, 1120 / 1550 | 38,313, 109%, 0.8 / 2.6 | 25,433, 109%, 1.2 / 3.0 |
+| `serve_parallel`, 2 | 53, 200%, 564 / 772 | 76,018, 220%, 0.4 / 2.6 | 54,217, 226%, 0.6 / 2.9 |
+| `serve_parallel`, 4 | 104, 400%, 288 / 396 | 149,869, 449%, 0.2 / 2.8 | 93,015, 497%, 0.3 / 3.1 |
+| `serve_parallel`, 8 | 197, 796%, 166 / 203 | 160,483, 605%, 0.1 / 3.9 | 116,324, 625%, 0.2 / 4.8 |
+| `serve_parallel`, 12 | 246, 1,030%, 128 / 180 | 143,231, 641%, 0.1 / 7.1 | 89,939, 735%, 0.3 / 11.2 |
+| Go net/http | 241, 1,032%, 129 / 228 | 169,636, 503%, 0.1 / 3.0 | 67,950, 504%, 0.3 / 3.8 |
+
+The issue's rows are its own numbers. They were taken on Windows 11 in a
+twelve-vCPU QEMU VM, with iyi 0.19.0 and a database behind every endpoint,
+so set them beside these for their ratio and not their size.
+
+**The login gap was cores, and it is closed.** Taken one request at a
+time on one connection, a cost-10 verify costs 37.0 to 38.5 ms of CPU
+in iyi (`serve`, and `serve_parallel` on 1 and 2 workers) and 38.0 to 38.5
+ms in Go (GOMAXPROCS 1 and 2). std/password's bcrypt is therefore not
+what was slow. On twelve workers iyi answers 247 logins a second on
+1,032% CPU, where Go answers 242 on 1,033%. The issue's ratio was 108.2 to
+9.9, about 11 to 1. Under `serve` the logins are answered first come,
+first served. Under `serve_parallel` the preemption of part 9 interleaves
+the logins on a worker, and they finish in batches about a second apart,
+which widens the spread: at one worker p50 is 1,120 ms against `serve`'s
+1,190, and p99 is 1,570 against 1,280.
+
+**The light endpoints scale to four workers, and then stop for two
+reasons.** On one worker `serve_parallel` answers what `serve` does, to
+within 3% on both endpoints and both protocols. On four it answers 4.2
+times `serve`'s `check_version` and 3.6 times its `order`. Past four, the
+first limit is the load generator and loopback: Go stops at 216,298
+`check_version` a second while using only 528% CPU. The second limit is
+iyi's own. perf is closed to
+unprivileged users on this machine, so every thread's stack was sampled
+with gdb instead: 20 stops during a 12-worker HTTPS `check_version` run,
+and 20 during a 4-worker one.
+
+- With twelve workers, 139 of the 260 samples of the threads serving
+  (twelve workers and the accepting thread) were inside `IyiRuntimeLock`.
+  Those threads were spinning, yielding the core, or parked for a stop,
+  all on the allocator's slow path: a size class's list refilled
+  (`refill`), a lazy sweep (`sweep_one`), or pages reopened
+  (`reopen_pages`).
+- With four workers, 17 of 100 samples were inside it.
+
+So at twelve workers over HTTPS, `check_version` answers 143,231 a second
+on 641% CPU, against Go's 169,636 on 503%: 22,000 a second per core
+against 34,000. At four workers iyi answers 33,000 per core. The lock was
+the collector's (GC_DESIGN.md), taken for a refill that each thread's own
+lists could not satisfy, and it is split now, below. `order` was answered
+faster per core than Go's on every row up to eight workers: 137,744 a
+second on 605% CPU against Go's 90,732 on 538%.
+
+**The allocator's centre, split by size class, and measured again.** Each
+size class has its own lock, its batches and its own list of arenas, and a
+worker that sweeps a slice keeps the slice's batch; the runtime lock keeps
+the heap's lists and the pause (GC_DESIGN.md, "A pool's workers and the
+centre"). The same rows, taken interleaved with the build before the split
+in one session on 2026-10-26, best of 3 runs each, the load average 4 to
+10 from the runs themselves and 0 to 0.2 cores busy elsewhere; requests a
+second and the server's CPU:
+
+| | HTTP check_version | HTTP order | HTTPS check_version | HTTPS order |
+|---|---:|---:|---:|---:|
+| 4 workers, before | 232,339, 471% | 135,639, 503% | 177,202, 544% | 101,492, 575% |
+| 4 workers, after | 248,242, 415% | 164,023, 422% | 185,398, 413% | 114,521, 419% |
+| 12 workers, before | 260,536, 793% | 156,387, 889% | 167,319, 819% | 91,435, 914% |
+| 12 workers, after | 286,922, 621% | 205,736, 636% | 204,526, 599% | 148,015, 640% |
+
+HTTPS `check_version` on twelve workers is 34,100 a second per core where
+it was 20,400, and Go's was 32,200 (the first session's Go row). Ten gdb
+stops under it found none of 250 thread stacks in a lock, against 60
+before, and the server took 41,000 minor faults in ten seconds against
+781,000. Measured again interleaved on 2026-10-26, three 20-second runs
+each with the server's memory read from /proc as wrk ran, HTTPS
+`check_version` on twelve workers peaked at 29 to 30 MB resident where it
+peaked at 47 to 75, through 5,309 to 5,377 collections where it ran
+1,744 to 1,904, with 81,370 to 103,065 minor faults against 1,428,966 to
+1,446,569, at 200,022 to 201,538 requests a second against 147,597 to
+156,580. `bench/alloc_scaling.py`'s twelve workers allocating flat out
+are another shape: their heap reaches 637 to 925 MB (593 to 899 before)
+because the thread that crosses the budget pays the last epoch's sweep
+debt alone before its first stop while the rest allocate, unchecked
+(GC_DESIGN.md has the counts), and that is not changed here.
+
+`bench/web_cores.py` is not a gate. On this shared machine its rows move
+with whatever else runs, and wrk takes cores the twelve-worker rows want.
+`bench/measured_numbers.py` names it among what a shared runner cannot
+check, and holds the sentence above (connections, cost, workers, runs) to
+the script's constants and the stored hash's cost to the script's.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
@@ -10594,7 +11088,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 22,621-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,562-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

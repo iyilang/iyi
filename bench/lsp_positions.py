@@ -34,19 +34,23 @@ had to tune. It opens one server per module, asks every question, and holds
 the *tree's* resident megabytes under a bound. `bench/lsp_memory.py` is the
 gate for the bounding itself.
 
-    python3 bench/lsp_positions.py [stride]
+    python3 bench/lsp_positions.py [stride] [module.iyi ...] [--shard K/N]
 
 `stride` is the line step of the plain sweep, 200 by default. Two shapes are
 asked at besides it, because they are the two the defects were found on: a
 macro directive line (`{% if flag?(:win32) %}`, where a variable assigned in
 the arm this target does not take has no type) and a local assignment (where
 `_, anchor_end = anchor_indices` inside an unreached `if` has none either).
+
+`--shard K/N` sweeps the Kth of N shards of the modules, dealt by weight
+(`WEIGHTS`): the CI job runs as three of them side by side.
 """
 
 import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -99,6 +103,41 @@ MODULE_LINES = 2400
 
 MACRO_LINE = re.compile(r"\{%")
 ASSIGNMENT = re.compile(r"^\s*[\w, ]+ = [^=]")
+
+# The modules are dealt into shards by weight, the way bench/std_siblings.sh
+# deals the module exercises: every module, heaviest first, goes to the
+# shard with the least weight so far (the first such shard on a tie, and
+# modules of one weight by name, so every shard computes the same deal). A
+# weight is the seconds the module's sweep took at stride 200 on a Linux
+# x86_64 workstation, load about 2, at eab791d5b: 2,206 s for all 118
+# modules, std/http 258 of them. A module not here weighs 7, the mean of
+# the 88 left out (0.6 to 19 s each). Dealt three ways, the shards hold
+# 734, 739 and 733 s by these weights and took 707, 709 and 790 s of that
+# run. The runner is slower and uneven: the whole sweep took 37 to 71
+# minutes in green runs of 2026-10-23 to 10-25 and was cut off past 72 in
+# four (master's job 120891621408 among them).
+WEIGHTS = {
+    "http": 258, "math": 159, "tls": 146, "websocket": 80, "autocert": 79,
+    "big": 68, "socket": 62, "acme": 58, "xml": 57, "json": 50, "file": 48,
+    "time": 44, "mail": 42, "router": 34, "unicode": 31, "secure_dns": 30,
+    "sse": 30, "debug": 29, "yaml": 28, "compress": 27, "zstd": 27,
+    "process": 26, "x509": 25, "cookie": 23, "regex": 23, "dns": 22,
+    "ecdsa": 22, "dir": 21, "udp": 21, "tar": 20,
+}
+UNWEIGHED = 7
+
+
+def deal(modules: list[Path], shards: int) -> list[list[Path]]:
+    """The modules in *shards* shards, heaviest first to the lightest."""
+    def weight(path: Path) -> int:
+        return WEIGHTS.get(path.stem, UNWEIGHED)
+    dealt: list[list[Path]] = [[] for _ in range(shards)]
+    load = [0] * shards
+    for path in sorted(modules, key=lambda p: (-weight(p), p.name)):
+        lightest = load.index(min(load))
+        dealt[lightest].append(path)
+        load[lightest] += weight(path)
+    return [sorted(shard) for shard in dealt]
 
 
 def positions(lines: list[str], stride: int) -> list[tuple[int, int]]:
@@ -269,9 +308,19 @@ def prove_it_can_fail(stride: int) -> None:
 
 
 def main() -> int:
-    stride = int(sys.argv[1]) if len(sys.argv) > 1 else 200
+    args = sys.argv[1:]
+    shard = shards = 0
+    if "--shard" in args:
+        at = args.index("--shard")
+        k, _, n = (args[at + 1] if at + 1 < len(args) else "").partition("/")
+        if not (k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n)):
+            print("lsp positions: --shard takes K/N, with K from 1 to N")
+            return 1
+        shard, shards = int(k), int(n)
+        del args[at:at + 2]
+    stride = int(args[0]) if args else 200
     # Names narrow it to those modules, for a bisect or a repair.
-    wanted = set(sys.argv[2:])
+    wanted = set(args[1:])
     modules = [p for p in MODULES if not wanted or p.name in wanted]
     if wanted and len(modules) != len(wanted):
         print(f"lsp positions: no module under src/std named {sorted(wanted - {p.name for p in modules})}")
@@ -279,16 +328,23 @@ def main() -> int:
     if not MODULES:
         print("lsp positions: no module under src/std, so this checked nothing")
         return 1
+    if shards:
+        everything = len(modules)
+        modules = deal(modules, shards)[shard - 1]
+        print(f"== shard {shard} of {shards}: {len(modules)} of {everything} modules, "
+              f"{sum(WEIGHTS.get(p.stem, UNWEIGHED) for p in modules)} s by the weights")
 
     print(f"== every cursor question, every {stride} lines, one server per module")
     total = 0
     worst = (0, "")
     for path in modules:
+        started = time.monotonic()
         asked, peak = sweep(path, stride)
         total += asked
         if peak > worst[0]:
             worst = (peak, path.name)
-        print(f"  {path.name:28s} {asked:5d} questions, {peak:5d} MB")
+        print(f"  {path.name:28s} {asked:5d} questions, {peak:5d} MB, "
+              f"{time.monotonic() - started:6.1f} s")
 
     print()
     print("== proving the sweep sees a module that stopped compiling")

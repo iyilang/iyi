@@ -44,6 +44,20 @@ module Iyi::Stale
   end
 
   module CallPath
+    # Whether *a_def* is written in one of the prelude's runtime files
+    # (`CodeGenVisitor::IYI_RUNTIME_FILES`), whose loops never check for
+    # preemption. Codegen decides it from the def's file
+    # (`CodeGenVisitor#iyi_runtime_def?`), and the file is not otherwise part
+    # of an element's digest, so the answer is.
+    def self.runtime_def?(program : Program, a_def : Def) : Bool
+      return false unless dir = program.iyi_prelude_dir
+      filename = a_def.location.try(&.expanded_location).try(&.read_from.as?(String))
+      return false unless filename
+      path = ::Path[filename].to_posix.to_s
+      prefix = "#{::Path[dir].to_posix}/"
+      path.starts_with?(prefix) && CodeGenVisitor::IYI_RUNTIME_FILES.includes?(path[prefix.size..])
+    end
+
     def self.canonical_type_name(type : Type) : String
       String.build do |io|
         canonical_type_name(type, io)
@@ -712,6 +726,7 @@ module Iyi::Stale
       @encoder.bool(target_def.exported?)
       @encoder.bool(target_def.iyi_from_impl?)
       @encoder.bool(target_def.iyi_from_artifact?)
+      @encoder.bool(CallPath.runtime_def?(program, target_def))
 
       {% unless flag?(:rg8_drop_def_body) %}
         encode_node(target_def.body)

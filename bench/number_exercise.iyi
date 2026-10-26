@@ -49,6 +49,16 @@ assert_int("-123".to_i, -123, "number: a negative reads")
 # and `std/text`'s `to_i?(base)` read it - one name, two answers.
 assert_int("+123".to_i, 123, "number: a plus sign reads")
 assert_true("+".to_i? == nil, "number: a lone plus is nil")
+# Every digit, in strings made at run time so the optimiser cannot fold the
+# read away. A `--release` build with the LLVM the Windows bootstrap
+# compiler's package ships (23.1.1) read any number with a 9 in it as no
+# number: `-214748364` reached LLVM with bits past its `i32` set
+# (`LLVM::Type#const_int`), the loop's `value == -214748364 && digit > 8`
+# lost its first half, and `"59518".to_i` panicked.
+runtime = Program.args.size
+assert_int((1234567890 + runtime).to_s.to_i, 1234567890 + runtime, "number: every digit reads")
+assert_int((9 + runtime).to_s.to_i, 9 + runtime, "number: a nine reads")
+assert_int((-59518 - runtime).to_s.to_i, -59518 - runtime, "number: a negative with a nine reads")
 
 # ---- 2. What does not fit says so
 assert_true("2147483648".to_i? == nil, "number: max plus one is nil")

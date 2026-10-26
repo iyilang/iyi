@@ -4,6 +4,7 @@ require "colorize"
 require "crystal/digest/md5"
 require "./optimization_mode"
 require "./wasm_roots"
+require "./preempt_checks"
 require "./mod/installer"
 require "./stale/encoding"
 require "./stale/toolchain"
@@ -3429,6 +3430,10 @@ module Iyi
     private def bc_flags_changed?(output_dir)
       bc_flags_changed = true
       current_bc_flags = "#{@codegen_target}|#{@mcpu}|#{@mattr}|#{@link_flags}|#{@mcmodel}"
+      # iyi: the back-edge checks go in after the bitcode is compared, so
+      # the flag that changes their form changes no bitcode, and a build
+      # with it reused the objects of one without (`preempt_checks`).
+      current_bc_flags += "|preempt_check_accessor" if @flags.includes?("preempt_check_accessor")
       bc_flags_filename = "#{output_dir}/bc_flags#{optimization_mode.suffix}"
       if File.file?(bc_flags_filename)
         previous_bc_flags = File.read(bc_flags_filename).strip
@@ -3470,9 +3475,15 @@ module Iyi
       # name from outside that module, so `a + b` in an imported module's
       # body was `undefined reference to '__iyi_raise_overflow'` at link.
       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
-        program.codegen node, debug: debug, frame_pointers: frame_pointers,
+        modules = program.codegen node, debug: debug, frame_pointers: frame_pointers,
           single_module: @cross_compile || !@emit_targets.none? ||
                          (@single_module && @emit_iyimod.nil? && program.iyi_artifact_objects.empty?)
+        # iyi: recursion's checks go in before optimisation (SPEC.md
+        # III.4.13, part 9; `PreemptChecks.mark_recursion`).
+        if program.iyi_preempt_flag
+          PreemptChecks.mark_recursion(modules.values.map(&.mod), program.iyi_preempt_funs)
+        end
+        modules
       end
 
       output_dir = CacheDir.instance.directory_for(sources)
@@ -3557,6 +3568,7 @@ module Iyi
       @progress_tracker.stage("Codegen (bc+obj)") do
         optimize llvm_mod, target_machine unless @optimization_mode.o0?
         WasmRoots.run(llvm_mod) if @codegen_target.architecture == "wasm32"
+        preempt_checks llvm_mod, program.iyi_preempt_flag
 
         unit.emit(@emit_targets, emit_base_filename || output_filename)
 
@@ -4003,14 +4015,14 @@ module Iyi
       @progress_tracker.stage("Codegen (linking)") do
         Dir.cd(output_dir) do
           begin
-            run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true)
+            run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true), busy_output: output_filename
           rescue ex : CompilerError
             # A link the compiler built itself, on a machine where that does
             # not work: the driver is asked to do it instead and the template
             # is marked unusable, so this is paid once rather than every build.
             raise ex unless @iyi_direct_link
             iyi_disable_direct_link(@link_flags || "", program.lib_flags(@cross_compile))
-            run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true)
+            run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true), busy_output: output_filename
           end
         end
       end
@@ -4253,6 +4265,18 @@ module Iyi
       end
     {% end %}
 
+    # iyi: the back-edge checks of a program with a pool, put in after
+    # optimisation so they keep no loop from being vectorised (SPEC.md
+    # III.4.13, part 9; `PreemptChecks`). `-Dpreempt_check_accessor` builds
+    # darwin's and Windows' checks as they were first, an accessor call at
+    # every back-edge: the broken copy bench/parallel_exercise.sh shows its
+    # tight-loop bound refusing.
+    protected def preempt_checks(llvm_mod, flag : String?) : Nil
+      return unless flag
+      PreemptChecks.accessor_only = @flags.includes?("preempt_check_accessor")
+      PreemptChecks.run(llvm_mod, flag, @codegen_target.linux?, @codegen_target.architecture == "aarch64")
+    end
+
     protected def optimize(llvm_mod, target_machine)
       {% if LibLLVM::IS_LT_130 %}
         optimize_with_pass_manager(llvm_mod)
@@ -4266,20 +4290,42 @@ module Iyi
       {% end %}
     end
 
-    private def run_linker(linker_name, command, args)
+    # iyi: *busy_output*, on Windows, is the program the link writes. A
+    # program that ran just before the build is held by Smart App Control's
+    # services from a moment after it exits (`Iyi.move_aside_if_busy`), so
+    # the check the build began with can find it free and the link then
+    # stop at "LNK1104: cannot open file": 6 of 60 builds begun right after
+    # a run of the program, on a Windows 11 machine whose Smart App Control
+    # evaluates, and 0 of 60 with this. That link's output is held back,
+    # the program waited for, and the link run once more; its words are
+    # printed only if it is not.
+    private def run_linker(linker_name, command, args, busy_output : String? = nil)
       print_command(command, args) if verbose?
       # iyi: the files the linker will read, for the up-to-date check.
       BuildInputs.current.try &.linked(command, args)
 
+      said = nil
+      complained = nil
+      {% if flag?(:win32) %}
+        if busy_output && !@cross_compile
+          said = IO::Memory.new
+          complained = IO::Memory.new
+        end
+      {% end %}
+      errors = complained || STDERR
       begin
         {% if flag?(:win32) %}
           Process.run(command, args, shell: true,
-            input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+            input: Process::Redirect::Close, output: said || Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
             process.error.each_line(chomp: false) do |line|
+              # iyi: the three `gsub(/... -l(\S+)\b/, "... \\1 hint")` rewrites,
+              # by hand — the compiler's own code must not be what links pcre2
+              # (zero-dep). A matching line gets the same hint; any other line
+              # passes through unchanged, byte for byte.
               line = linker_library_hint(line, "cannot find -l")
               line = linker_library_hint(line, "unable to find library -l")
               line = linker_library_hint(line, "library not found for -l")
-              STDERR << line
+              errors << line
             end
           end
         {% else %}
@@ -4322,6 +4368,11 @@ module Iyi
       end
 
       status = $?
+      if said && busy_output && status.exit_code? == 1104 && Iyi.move_aside_if_busy(busy_output)
+        return run_linker(linker_name, command, args)
+      end
+      STDOUT << said.to_s if said
+      STDERR << complained.to_s if complained
       unless status.success?
         exit_code = status.exit_code?
         case exit_code
@@ -4465,6 +4516,7 @@ module Iyi
       @memory_buffer : LLVM::MemoryBuffer?
       @object_name : String?
       @bc_name : String?
+      @preempt_flag : String?
 
       def initialize(@compiler : Compiler, program : Program, @name : String,
                      @llvm_mod : LLVM::Module, @output_dir : String, @bc_flags_changed : Bool)
@@ -4492,6 +4544,7 @@ module Iyi
 
         @name = "#{@name}#{@compiler.optimization_mode.suffix}"
         @object_extension = compiler.codegen_target.object_extension
+        @preempt_flag = program.iyi_preempt_flag
       end
 
       def generate_bitcode
@@ -4586,6 +4639,7 @@ module Iyi
         target_machine = compiler.create_target_machine
         compiler.optimize llvm_mod, target_machine unless compiler.optimization_mode.o0?
         WasmRoots.run(llvm_mod) if compiler.codegen_target.architecture == "wasm32"
+        compiler.preempt_checks llvm_mod, @preempt_flag
         target_machine.emit_obj_to_file llvm_mod, temporary_object_name
         File.rename(temporary_object_name, object_name)
       rescue ex

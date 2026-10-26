@@ -1,0 +1,511 @@
+# The allocator's caches and its centre per class, held: a pool's workers
+# allocate from caches of their own, refill them from slices they sweep
+# themselves and from batches on their class's centre under their class's
+# lock (GC_DESIGN.md, "A pool's workers and the centre: a lock per size
+# class"; SPEC.md's collector section), and every property the collector
+# needs of that is checked by running it.
+#
+#   ./bin/iyi run bench/alloc_cache.iyi
+#
+#   * reused: a class's dead cells go back out to that class before any
+#     of it is carved afresh. With no sweep helper running, the workers
+#     fill a class of their own, drop every other cell, and a collection
+#     by the trigger leaves the class's sweep to them; a second wave of
+#     as many cells is then the dead cells again, swept by the workers
+#     for their own caches. The class's frontier may move by what the
+#     caches can hold past their need - a slice's batch and a carved page
+#     each - and no further: one class, between two collections, so no
+#     scavenge runs and no helper's timing decides where a chunk goes;
+#   * intact: eight workers allocate cells, a cell's array and its tag,
+#     and garbage beside them, through collection after collection, each
+#     keeping a ring of its last cells on its fiber's stack and reading the
+#     whole ring back every so often - a chunk handed to two workers at
+#     once, or swept from under the one that holds it, reads back wrong;
+#     and the workers swept slices of the debt themselves;
+#   * distinct: with the workers idle, every chunk on every cache's list
+#     and on every class's centre is free, and none is on two lists;
+#   * flushed: after a collection every cache's lists are empty, the
+#     idle workers' as well - a list kept across the epoch's turn holds
+#     chunks the sweep links again;
+#   * retired: threads that allocated and ended left no cache behind.
+#
+# bench/alloc_cache.sh runs it plain and optimised and runs broken copies
+# of the runtime to prove each check can fail.
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  # One cell: its id twice over, an array the id fills, and a tag the id
+  # spells, all four allocations a worker reads back.
+  class Cell
+    @id : Int64
+    @twin : Int64
+    @data : Array(Int64)
+    @tag : String
+
+    def initialize(@id : Int64, @data : Array(Int64), @tag : String)
+      @twin = @id ^ 0x5A5A5A5A5A5A5A5A_i64
+    end
+
+    def id : Int64
+      @id
+    end
+
+    def intact?(id : Int64) : Bool
+      @id == id && @twin == id ^ 0x5A5A5A5A5A5A5A5A_i64 && @data.size == 3 &&
+        @data[0] == id && @data[1] == id &* 3_i64 && @data[2] == id &* 7_i64 && @tag == "c#{id}"
+    end
+  end
+
+  # The reuse check's cell: eleven words, 88 bytes, a class nothing else
+  # here allocates in bulk.
+  class Slot
+    @id : Int64
+    @twin : Int64
+    @w2 : Int64
+    @w3 : Int64
+    @w4 : Int64
+    @w5 : Int64
+    @w6 : Int64
+    @w7 : Int64
+    @w8 : Int64
+    @w9 : Int64
+    @last : Int64
+
+    def initialize(@id : Int64)
+      @twin = @id ^ 0x5A5A5A5A5A5A5A5A_i64
+      @w2 = 2_i64
+      @w3 = 3_i64
+      @w4 = 4_i64
+      @w5 = 5_i64
+      @w6 = 6_i64
+      @w7 = 7_i64
+      @w8 = 8_i64
+      @w9 = 9_i64
+      @last = @id &* 3_i64
+    end
+
+    def intact?(id : Int64) : Bool
+      @id == id && @twin == id ^ 0x5A5A5A5A5A5A5A5A_i64 && @w2 == 2_i64 && @w9 == 9_i64 && @last == id &* 3_i64
+    end
+  end
+
+  # The reuse check's cells per worker, and the half of them dropped:
+  # every other one, so every page keeps live cells, no run of whole dead
+  # pages forms, and no arena of the class is all dead - the warm and cold
+  # page paths and the scavenge stay out of it, and the dead cells come
+  # back by the sweep's batches or not at all.
+  SLOTS   = 32768
+  DROPPED = 16384
+
+  WORKERS =     8
+  ROUNDS  = 60000
+  RING    =  2048
+  # How often a worker reads its whole ring back, in rounds.
+  CHECK = 4096
+
+  def cell_for(id : Int64) : Cell
+    Cell.new(id, [id, id &* 3_i64, id &* 7_i64], "c#{id}")
+  end
+
+  # A worker's run: what it read back wrong, 0 for nothing.
+  def work(task : Int64) : Int64
+    ring = Array(Cell?).new(RING, nil)
+    wrong = 0_i64
+    sink = 0_i64
+    i = 0_i64
+    while i < ROUNDS
+      id = task &* 1000000000_i64 &+ i
+      ring[(i % RING).to_i] = cell_for(id)
+      # Garbage beside the cells, in two more classes.
+      junk = "g#{i}-#{task}"
+      spare = [i, i &+ 1_i64]
+      sink = sink &+ junk.bytesize &+ spare.size
+      if i % CHECK == CHECK - 1
+        k = 0
+        while k < RING
+          slot = ring[k]
+          if slot.is_a?(Cell)
+            back = i - ((i - k) % RING)
+            wrong = wrong &+ 1_i64 unless slot.intact?(task &* 1000000000_i64 &+ back)
+          end
+          k = k + 1
+        end
+      end
+      i = i + 1_i64
+    end
+    k = 0
+    while k < RING
+      slot = ring[k]
+      wrong = wrong &+ 1_i64 unless slot.is_a?(Cell) && slot.intact?(slot.id)
+      k = k + 1
+    end
+    sink == 0_i64 ? -1_i64 : wrong
+  end
+
+  # Bytes the class at `index` ever carved: its arenas' frontiers past
+  # their first chunks, read with the workers idle. A frontier moves only
+  # when a chunk is carved above it, and a class's arenas leave its list
+  # only in a pause.
+  def class_carved(index : Int32) : Int64
+    total = 0_u64
+    arena = IyiHeap.class_first(index)
+    while arena != 0
+      total = total + (IyiHeap.arena_high(arena) - IyiHeap.arena_first(arena))
+      arena = IyiHeap.class_next(arena)
+    end
+    total.to_i64
+  end
+
+  def caches : Int64
+    count = 0_i64
+    page = IyiHeap.first_cache
+    while page != 0
+      count = count + 1_i64
+      page = IyiHeap.cache_next(page)
+    end
+    count
+  end
+
+  # Every chunk on a list into `seen`, from every cache and every class's
+  # centre, each checked free by its entry. Allocates nothing, so nothing
+  # it walks moves under it: the workers are idle. Answers how many, or
+  # -1 for a listed chunk not marked free, -2 for more than `room`.
+  def listed_chunks(seen : Pointer(UInt64), room : Int64) : Int64
+    count = 0_i64
+    page = IyiHeap.first_cache
+    while page != 0
+      index = 0
+      while index < IyiHeap::CLASSES
+        chunk = IyiHeap.read64(page + index.to_u64 * 8_u64)
+        while chunk != 0
+          return -2_i64 if count >= room
+          return -1_i64 unless IyiHeap.read8(IyiHeap.meta_of(chunk)) & IyiHeap::FREE_FLAG != 0
+          (seen + count).value = chunk
+          count = count + 1_i64
+          chunk = IyiHeap.read64(chunk + IyiHeap::OFF_LINK) & IyiHeap::LOW48
+        end
+        index = index + 1
+      end
+      page = IyiHeap.cache_next(page)
+    end
+    index = 0
+    while index < IyiHeap::CLASSES
+      batch = IyiHeap.read64(IyiHeap.class_line(index) + IyiHeap::CLASS_BATCHES)
+      while batch != 0
+        chunk = batch
+        while chunk != 0
+          return -2_i64 if count >= room
+          return -1_i64 unless IyiHeap.read8(IyiHeap.meta_of(chunk)) & IyiHeap::FREE_FLAG != 0
+          (seen + count).value = chunk
+          count = count + 1_i64
+          chunk = IyiHeap.read64(chunk + IyiHeap::OFF_LINK) & IyiHeap::LOW48
+        end
+        batch = IyiHeap.read64(batch + IyiHeap::BATCH_NEXT) & IyiHeap::LOW48
+      end
+      index = index + 1
+    end
+    count
+  end
+
+  # Heapsort in place, no allocation, indexed through pointer arithmetic:
+  # `Pointer#[]` takes an `Int32`, and the count is an `Int64`.
+  def swap(items : Pointer(UInt64), a : Int64, b : Int64) : Nil
+    held = (items + a).value
+    (items + a).value = (items + b).value
+    (items + b).value = held
+  end
+
+  def sift(items : Pointer(UInt64), start : Int64, stop : Int64) : Nil
+    root = start
+    while root * 2_i64 + 1_i64 < stop
+      child = root * 2_i64 + 1_i64
+      child = child + 1_i64 if child + 1_i64 < stop && (items + child).value < (items + child + 1_i64).value
+      return unless (items + root).value < (items + child).value
+      swap(items, root, child)
+      root = child
+    end
+  end
+
+  def sort(items : Pointer(UInt64), count : Int64) : Nil
+    start = count // 2_i64 - 1_i64
+    while start >= 0_i64
+      sift(items, start, count)
+      start = start - 1_i64
+    end
+    stop = count - 1_i64
+    while stop > 0_i64
+      swap(items, 0_i64, stop)
+      sift(items, 0_i64, stop)
+      stop = stop - 1_i64
+    end
+  end
+
+  # One wave of the work on the pool: what the workers read back wrong.
+  def wave(workers : Int32) : Int64
+    wrong = 0_i64
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      workers.times do |t|
+        handles << g.spawn_parallel { work(t.to_i64) }
+      end
+      handles.each do |handle|
+        value = handle.value
+        fail("intact: a worker answered #{value}") unless value.is_a?(Int64) && value >= 0_i64
+        wrong = wrong &+ value
+      end
+    end
+    wrong
+  end
+
+  # A worker's part of the reuse check. The first wave: its cells made,
+  # then every other one dropped, the address in the `dead` ledger first -
+  # off the heap, so recording it roots nothing. Then it says so and
+  # waits, parked, its kept cells on its stack, while the collection
+  # runs. The second wave: as many cells as it dropped, kept, each
+  # address in the `born` ledger, and every cell of both waves still held
+  # read back. Answers what read back wrong.
+  def slot_task(task : Int64, dead : UInt64, born : UInt64, ready : Channel(Int64), go : Channel(Int64)) : Int64
+    firsts = Array(Slot?).new(SLOTS, nil)
+    seconds = Array(Slot?).new(DROPPED, nil)
+    base = task &* 1000000000_i64
+    cell = 0
+    while cell < SLOTS
+      firsts[cell] = Slot.new(base &+ cell)
+      cell = cell + 1
+    end
+    cell = 1
+    while cell < SLOTS
+      slot = firsts[cell]
+      return -1_i64 unless slot.is_a?(Slot)
+      Pointer(UInt64).new(dead + (task.to_u64 * DROPPED.to_u64 + (cell // 2).to_u64) * 8_u64).value = slot.object_id.to_u64
+      firsts[cell] = nil
+      cell = cell + 2
+    end
+    ready.send(task)
+    return -1_i64 unless go.receive.is_a?(Int64)
+    again = base &+ 500000000_i64
+    cell = 0
+    while cell < DROPPED
+      slot = Slot.new(again &+ cell)
+      seconds[cell] = slot
+      Pointer(UInt64).new(born + (task.to_u64 * DROPPED.to_u64 + cell.to_u64) * 8_u64).value = slot.object_id.to_u64
+      cell = cell + 1
+    end
+    wrong = 0_i64
+    cell = 0
+    while cell < DROPPED
+      slot = seconds[cell]
+      wrong = wrong &+ 1_i64 unless slot.is_a?(Slot) && slot.intact?(again &+ cell)
+      kept = firsts[cell * 2]
+      wrong = wrong &+ 1_i64 unless kept.is_a?(Slot) && kept.intact?(base &+ cell * 2)
+      cell = cell + 1
+    end
+    wrong
+  end
+
+  # The reuse check. It runs first, before any helper exists, with the
+  # trigger off but for the one collection it asks for: every slice of the
+  # class is then swept by an allocating thread for its own cache - the
+  # path the split gave the workers - and no other sweeper's batch can
+  # hand the dead cells back in its place. The check it replaces summed
+  # every arena's frontier over a wave beside the helpers: it failed 21
+  # runs in 120 with the runtime before the split and 11 with it, the
+  # frontier growing by up to 0.92 of what the wave allocated, and it
+  # passed both broken copies - the helpers' batches hand back a worker's
+  # dropped one, and the scavenge hands back the arenas a sweep that
+  # returns nothing leaves all dead, so the sum fell. This one passed 60
+  # runs of 60 at each of four, eight and twelve workers, plain and
+  # release, the class's frontier moving 65,472 bytes at the most, where
+  # twelve workers' caches may hold 905,216; both broken copies carve the
+  # whole second wave, 11,555,456 bytes on eight workers.
+  def reuse(workers : Int32) : Nil
+    dropped = workers.to_i64 * DROPPED.to_i64
+    dead = __iyi_mmap((dropped * 8_i64).to_u64).address
+    born = __iyi_mmap((dropped * 8_i64).to_u64).address
+    ready = Channel(Int64).new(workers)
+    go = Channel(Int64).new(workers)
+    wrong = 0_i64
+    chunk = 0_u64
+    index = 0
+    carved = 0_i64
+    by_workers = 0_u64
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      workers.times do |t|
+        handles << g.spawn_parallel { slot_task(t.to_i64, dead, born, ready, go) }
+      end
+      workers.times do
+        fail("intact: a reuse worker stopped before its first wave's end") unless ready.receive.is_a?(Int64)
+      end
+      chunk = IyiHeap.arena_chunk(Pointer(UInt64).new(dead).value & (0_u64 &- IyiHeap::MAP))
+      index = IyiHeap.class_index(chunk)
+      # The collection, the trigger's, with the workers parked: lazy, so
+      # the class's arenas are all left for the allocating threads to
+      # sweep.
+      IyiMark.auto = true
+      ran = IyiMark.collections
+      sink = 0_i64
+      while IyiMark.collections == ran
+        sink = sink &+ "t#{sink}".bytesize
+      end
+      IyiMark.auto = false
+      fail("reused: the collection swept the class inside its pause, so no worker had any of it to sweep") if IyiHeap.sweep_left_of(index) == 0_u64
+      carved = class_carved(index)
+      by_workers = IyiMark.swept_by_allocator
+      workers.times { |t| go.send(t.to_i64) }
+      handles.each do |handle|
+        value = handle.value
+        fail("intact: a reuse worker answered #{value}") unless value.is_a?(Int64) && value >= 0_i64
+        wrong = wrong &+ value
+      end
+    end
+    grown = class_carved(index) - carved
+    begun = IyiMark.swept_by_allocator - by_workers
+    fail("intact: #{wrong} of the reuse check's cells read back wrong") unless wrong == 0_i64
+    # The second wave's addresses against the dead cells', both sorted.
+    dead_cells = Pointer(UInt64).new(dead)
+    born_cells = Pointer(UInt64).new(born)
+    sort(dead_cells, dropped)
+    sort(born_cells, dropped)
+    twice = 0_i64
+    back = 0_i64
+    at = 0_i64
+    near = 0_i64
+    while at < dropped
+      twice = twice + 1_i64 if at > 0_i64 && (born_cells + at).value == (born_cells + (at - 1_i64)).value
+      while near < dropped && (dead_cells + near).value < (born_cells + at).value
+        near = near + 1_i64
+      end
+      back = back + 1_i64 if near < dropped && (dead_cells + near).value == (born_cells + at).value
+      at = at + 1_i64
+    end
+    fail("intact: #{twice} of the second wave's live cells share an address with another") unless twice == 0_i64
+    # What the caches can hold past their need once the class has nothing
+    # left to sweep, which is when the refill carves: the rest of the
+    # last slice each swept and of the last page each carved. A cache
+    # sweeps a slice only when its list is empty, so the rest is one
+    # batch at most, and the carve hands a page's worth at a time.
+    room = caches * (IyiMark::SWEEP_SPAN + IyiHeap::PAGE).to_i64
+    afresh = dropped * chunk.to_i64
+    fail("reused: the second wave carved #{grown} bytes of its class afresh, past the #{room} its caches can hold beyond their need, and #{back} of its #{dropped} cells took a dead cell's address - the sweep's chunks did not go back out") unless grown <= room
+    puts "reused: #{workers} workers dropped #{dropped} cells of #{chunk} bytes and swept them back themselves, no helper running, beginning #{begun} arenas; a second wave of as many took #{back} of their addresses, and the class's frontier moved #{grown} bytes, within the #{room} its caches can hold past their need - the wave carved afresh is #{afresh}"
+  end
+
+  # WORKERS, or the count the one argument names (the stress runs 4 to 12).
+  workers = Program.args.size == 1 ? Program.args[0].to_i : WORKERS
+  IyiWorkers.count = workers
+  # The reuse check first, with no helper and the trigger off (`reuse`
+  # says why); then the helpers the cores give, and the trigger, for the
+  # rest.
+  IyiMark.auto = false
+  IyiMark.workers = 0_u64
+  reuse(workers)
+  IyiMark.workers = IyiMark.default_helpers
+  IyiMark.auto = true
+  collections = IyiMark.collections
+  beside = IyiMark.concurrent_collections
+  swept_by_workers = IyiMark.swept_by_allocator
+  # Two waves, and more until five collections ran beside them, six at
+  # most: on macos-14's three cores two release waves of eight workers
+  # ran 4 collections once (debug run 40252479434), where the trigger's
+  # count is the budget's and the cores', not this check's.
+  waves = 2
+  wrong = wave(workers)
+  wrong = wrong &+ wave(workers)
+  while IyiMark.collections - collections < 5_u64 && waves < 6
+    wrong = wrong &+ wave(workers)
+    waves = waves + 1
+  end
+  ran = IyiMark.collections - collections
+  swept = IyiMark.swept_by_allocator - swept_by_workers
+  fail("intact: #{wrong} cells read back wrong from #{workers} workers' rings") unless wrong == 0_i64
+  fail("intact: only #{ran} collections ran beside #{workers} workers in #{waves} waves") if ran < 5_u64
+  fail("intact: no worker swept a slice of the debt itself") if swept == 0_u64
+  puts "intact: #{workers} workers read #{workers * ROUNDS * waves} cells back whole in #{waves} waves through #{ran} collections, #{IyiMark.concurrent_collections - beside} of them marked beside the program, #{swept} arenas begun by an allocating thread's slice"
+
+  room = 4194304_i64
+  seen = Pointer(UInt64).malloc(room.to_u64)
+  count = listed_chunks(seen, room)
+  fail("distinct: a chunk on a list is not marked free") if count == -1_i64
+  fail("distinct: more than #{room} chunks on the lists") if count == -2_i64
+  sort(seen, count)
+  twice = 0_i64
+  k = 1_i64
+  while k < count
+    twice = twice + 1_i64 if (seen + k).value == (seen + (k - 1_i64)).value
+    k = k + 1_i64
+  end
+  fail("distinct: #{twice} chunks on two lists at once, of #{count} listed") unless twice == 0_i64
+  puts "distinct: #{count} chunks on the caches' lists and the classes' centres, each free and on one list"
+
+  # The collection, and the look at every cache that has not allocated
+  # since. A thread the pause lets go may allocate at once, and a list it
+  # takes then is no list kept across the pause: on macos-14, with the
+  # poll's timespec moved off the heap, one of nine caches still held a
+  # list after the collection in two of the three runs that reached this
+  # check (debug run 40250019927), where Linux and Windows never showed
+  # one. So each cache's count of bytes allocated (`CACHE_SLICE`, which
+  # every allocation moves) is read before and after, and a cache whose
+  # count moved is not looked at. This thread's own allocates nothing
+  # between the two reads and must be among those looked at.
+  slices = Pointer(UInt64).malloc(256_u64)
+  noted = 0
+  page = IyiHeap.first_cache
+  while page != 0 && noted < 128
+    slices[noted * 2] = page
+    slices[noted * 2 + 1] = IyiHeap.read64(page + IyiHeap::CACHE_SLICE)
+    noted = noted + 1
+    page = IyiHeap.cache_next(page)
+  end
+  own = IyiHeap.cache.address
+  IyiMark.collect
+  kept = 0_i64
+  looked = 0_i64
+  moved = 0_i64
+  own_looked = false
+  page = IyiHeap.first_cache
+  while page != 0
+    still = false
+    at = 0
+    while at < noted
+      still = slices[at * 2 + 1] == IyiHeap.read64(page + IyiHeap::CACHE_SLICE) if slices[at * 2] == page
+      at = at + 1
+    end
+    if still
+      looked = looked + 1_i64
+      own_looked = true if page == own
+      index = 0
+      while index < IyiHeap::CLASSES
+        kept = kept + 1_i64 if IyiHeap.read64(page + index.to_u64 * 8_u64) != 0
+        index = index + 1
+      end
+    else
+      moved = moved + 1_i64
+    end
+    page = IyiHeap.cache_next(page)
+  end
+  fail("flushed: this thread's own cache allocated across the collection, so the look has nothing it can trust") unless own_looked
+  fail("flushed: #{kept} lists of #{looked} caches kept across a collection") unless kept == 0_i64
+  puts "flushed: every list of #{looked} caches that allocated nothing since, this thread's among them, empty after a collection; #{moved} allocated after the pause and were not looked at"
+
+  before = caches
+  threads = [] of IyiThread
+  16.times do |t|
+    threads << IyiThread.start {
+      text = ""
+      200.times { |n| text = "t#{t}-#{n}" }
+      nil
+    }
+  end
+  threads.each { |thread| thread.join }
+  after = caches
+  fail("retired: #{after - before} caches left behind by 16 threads that ended") unless after == before
+  puts "retired: 16 threads allocated and ended, and the caches list is the #{before} it was"
+  puts "alloc cache: every property held"
+{% else %}
+  puts "alloc cache: no pool on this target, nothing to hold"
+{% end %}

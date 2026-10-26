@@ -1,4 +1,9 @@
 module Iyi::Stale
+  # `iyi_runtime_def?` reads a def's file to tell the runtime's (whose loops
+  # never check for preemption) from a library's. That is output-affecting, not
+  # debug information, so `CallPath#encode_def` encodes the same answer for every
+  # def (`CallPath.runtime_def?`): moving a def between the runtime's files and
+  # the library's changes its element's digest.
   ALLOWED_LOCATION_READ_METHODS = %w(
     alloca_non_closured_vars
     codegen_fun
@@ -21,6 +26,7 @@ module Iyi::Stale
     initialize_simple_const
     iyi_define_all_artifact_const_reads
     iyi_refuse_unreached
+    iyi_runtime_def?
     prepare_call_args_non_external
     set_current_debug_location
     setup_closure_vars

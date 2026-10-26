@@ -15,6 +15,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+# The oracle and the mutations are bench/stale_ir_normalize.py and
+# bench/stale_mutate.py, imported rather than run, so this names them for
+# bench/gates_reachable.py.
 from stale_ir_normalize import normalize_ir
 from stale_mutate import Mutation, generate_mutations_for_source
 

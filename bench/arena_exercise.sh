@@ -253,6 +253,29 @@ else
   fi
 fi
 
+# A cold run is zero on a chunk's head page only, and the carve clears a
+# chunk it hands out from its second page on: taken back out, a block from
+# a cold run reads what its last owner left past its first page. Codegen
+# cleared every `Pointer.malloc` after the call until SPEC.md III.4.13
+# part 9's change, which is what hid this.
+echo
+echo "== a carve that trusts a cold run past a chunk's first page fails by name"
+mkdir -p "$WORK/coldtail/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/coldtail/iyi/"
+awk '{ if ($0 ~ /^          clear_block\(second, cursor &\+ chunk &- second\) if cursor &\+ chunk > second$/) { print "          # removed"; next } print }' "$REPO/src/iyi/prelude.iyi" > "$WORK/coldtail/iyi/prelude.iyi"
+if cmp -s "$WORK/coldtail/iyi/prelude.iyi" "$REPO/src/iyi/prelude.iyi"; then
+  echo "  the awk found nothing to change"; status=1
+elif ! IYI_PATH="$WORK/coldtail${PSEP}$REPO/src" "$IYI" build -o "$WORK/coldtail/program" "$REPO/bench/arena_exercise.iyi" >"$WORK/coldtail/build.log" 2>&1; then
+  echo "  the patched prelude did not build"; sed -n '1,12p' "$WORK/coldtail/build.log"; status=1
+else
+  "$WORK/coldtail/program" >"$WORK/coldtail/out" 2>&1
+  if grep -q "panic: clearing: a 5000-byte block carved from a cold run read" "$WORK/coldtail/out"; then
+    echo "  caught at \"$(grep -m1 'panic: clearing' "$WORK/coldtail/out" | sed 's/^iyi: panic: //')\""
+  else
+    echo "  the exercise did not fail at the cold-run check:"; sed -n '$p' "$WORK/coldtail/out"; status=1
+  fi
+fi
+
 echo
 echo "== the allocation floor, measured against the -Dgc_iyi binary"
 # The default program floor is `bench/dependency_floor.sh`'s to state, and it

@@ -109,6 +109,70 @@ def verify(pointer : Pointer(UInt8), size : Int32, seed : Int32, tag : String) :
   end
 end
 
+# 4,000 blocks of a class past a page, 5,000 bytes in 5,120-byte chunks,
+# each filled with 0xAA, one in twenty-one kept and the rest dropped when
+# `fill` returns: the runs between the kept ones die whole, and past the
+# warm budget their pages go back cold. Twenty-one chunks are not a whole
+# number of pages, so each run's last chunk reaches onto the page of the
+# kept one above it, which nobody released. Filled on a kernel thread of
+# its own, joined before the collections, for bench/reuse_integrity.iyi's
+# reason: filled on the main thread in a release build, the 4,000 blocks
+# survived the collections - the budget after them was 41 MB - and no
+# page went cold.
+class Thinned
+  @@kept : Array(Pointer(UInt8)) = [] of Pointer(UInt8)
+
+  def self.kept : Array(Pointer(UInt8))
+    @@kept
+  end
+
+  def self.fill : Nil
+    all = [] of Pointer(UInt8)
+    index = 0
+    while index < 4000
+      block = Pointer(UInt8).malloc(5000_u64)
+      byte = 0
+      while byte < 5000
+        block[byte] = 170_u8
+        byte = byte + 1
+      end
+      all << block
+      @@kept << block if index % 21 == 0
+      index = index + 1
+    end
+  end
+
+  @@dirty_at : Int32 = -1
+  @@dirty_value : Int32 = 0
+
+  def self.dirty_at : Int32
+    @@dirty_at
+  end
+
+  def self.dirty_value : Int32
+    @@dirty_value
+  end
+
+  # The same 4,000 again, each read whole before anything is written, the
+  # first byte that is not zero recorded.
+  def self.take_up : Nil
+    index = 0
+    while index < 4000
+      block = Pointer(UInt8).malloc(5000_u64)
+      byte = 0
+      while byte < 5000
+        if block[byte] != 0_u8 && @@dirty_at < 0
+          @@dirty_at = byte
+          @@dirty_value = block[byte].to_i32
+        end
+        byte = byte + 1
+      end
+      @@kept << block
+      index = index + 1
+    end
+  end
+end
+
 sizes = [24, 100, 500, 2000, 9000, 48, 300, 1200]
 
 # --- Survival: patterns written are patterns read back, both allocators ---
@@ -330,6 +394,36 @@ puts "realloc: same-class, cross-class and null all hold their bytes"
     raise "clearing: reused atomic chunk carried stale bits: #{IyiMark.flags(reused.address).to_i64}"
   end
   puts "clearing: a freed chunk of 0xAA bytes comes back zeroed, directly, through __iyi_malloc64 and __iyi_malloc_atomic64, and in its byte"
+
+  # A cold run taken up again is zero on a chunk's head page only: the
+  # run's last chunk reaches onto a page nobody released, and a chunk
+  # that was a list's when its run went cold beside it was written there
+  # since. The carve clears a chunk from its second page on, and codegen
+  # clears nothing after it, so a block from such a run that read old
+  # bytes would be the carve's.
+  {% if !flag?(:darwin) || flag?(:aarch64) %}
+    filler = IyiThread.start do
+      Thinned.fill
+      nil
+    end
+    filler.join
+    IyiMark.collect
+    IyiMark.collect
+    reopened = IyiHeap.pages_reopened
+    rewarmed = IyiHeap.pages_rewarmed
+    # Taken up on a thread of its own too: its cache has no fill arena of
+    # the class, so its carve reopens a cold run before it carves a
+    # frontier.
+    taker = IyiThread.start do
+      Thinned.take_up
+      nil
+    end
+    taker.join
+    raise "clearing: a 5000-byte block carved from a cold run read #{Thinned.dirty_value} at byte #{Thinned.dirty_at}" if Thinned.dirty_at >= 0
+    cold = (IyiHeap.pages_reopened - reopened) - (IyiHeap.pages_rewarmed - rewarmed)
+    raise "clearing: no cold page was taken up again, so the cold-run check proved nothing" if cold == 0_u64
+    puts "clearing: 4000 blocks of 5000 bytes on #{cold.to_i64} cold pages taken up again, every byte zero"
+  {% end %}
 
   # --- No corruption under reuse: freed chunks serve new owners, survivors unchanged ---
   rblocks = [] of Pointer(UInt8)

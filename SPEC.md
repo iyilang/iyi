@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,303 lines, of which 4,647 are the library held to the 4,650 ceiling (6,663 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,733 lines, none of it written in iyi |
+| iyi's own prelude | 24,321 lines, of which 4,647 are the library held to the 4,650 ceiling (6,663 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 130,734 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,303 lines
+> "No standard library worth the name" is still true of iyi's own 24,321 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,303 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 24,321 lines,
 primitives included, of which the library is 4,647.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,733 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,303-line own prelude + 125,260 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 130,734 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,321-line own prelude + 125,260 in std |
 | Specs | 21,146 lines | 15,270 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3965,8 +3965,9 @@ hash, std's and already checked, 0 to 8. Now:
   30), a second clear of the same block 14 to 47 (6.2 to 6.4), and a
   store to each 4 KiB of a fresh one 3.6 to 79 (8.2 to 44). Now under the
   arena both entries hand the block back zeroed - a chunk off a list is
-  cleared in the allocator, a carved chunk or a mapping is left as the
-  kernel zeroed it - and codegen clears nothing after them
+  cleared in the allocator, a chunk carved from a cold run past its first
+  page, and a frontier chunk or a mapping is left as the kernel zeroed
+  it - and codegen clears nothing after them
   (`generic_array_malloc`), so the pages fault in the growth's own loops,
   which check. After, plain: the three blocks took 2.2 to 2.5 ms on
   Linux, 2.1 to 2.4 of it the collection's pause, and the short task
@@ -3980,7 +3981,17 @@ hash, std's and already checked, 0 to 8. Now:
   58.6 to 59.6 and 57.1, the JSON parse 10.4 to 12.5 and 11.3 to 12.2).
   `bench/arena_exercise.iyi` holds that a chunk freed dirty comes back
   zeroed through the atomic entry; a copy whose atomic entry does not
-  clear fails it at byte 1.
+  clear fails it at byte 1. The `memset` had also hidden that a cold run
+  is zero on a chunk's head page only: a run's last chunk reaches onto a
+  page nobody released, and a chunk that was a list's when the pages
+  above its head went cold was written there by its owner, then joined
+  the run when its own page went cold. Without the `memset`, the carve
+  handed std/compress's exercise chunks of 1,280 to 24,576 bytes dirty
+  from a page boundary on (`bench/std_compress_exercise.sh` failed, and
+  a run of it with every clearing allocation read back failed on every
+  run). The carve now clears such a chunk from its second page on; a
+  run of 5,120-byte chunks thinned to one in twenty-one in the arena
+  exercise reads 170 at byte 4,096 without that clear.
 
 After (release, one worker, load 4 to 12): a sort of 6,000,000 started the
 short task 4 to 7 ms later, a growth at 8,388,608 entries 17 to 18, a join
@@ -10945,7 +10956,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,303-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,321-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

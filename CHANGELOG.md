@@ -126,14 +126,22 @@
   darwin, past the gate's 100 there; the collection the allocation
   triggers paused 1.4 to 3.6 ms of it. Under the arena both allocation
   entries now hand the block back zeroed - a reused chunk cleared by the
-  allocator, a carved chunk or a large mapping left as the kernel zeroed
-  it - and codegen clears nothing after them, so the pages fault in the
-  growth's own loops, which check: 1 to 9 ms on Linux and 1 to 12 on
-  darwin; the release growth 16 to 18 ms before and 0 to 9 after on Linux.
-  Hash inserts, a sort, a JSON parse and the other costs, release, did
-  not move. `bench/arena_exercise.iyi` checks a dirty chunk comes back
-  zeroed through the atomic entry, which a copy that does not clear there
-  fails.
+  allocator, a chunk carved from a cold run cleared past its first page,
+  a frontier chunk or a large mapping left as the kernel zeroed it - and
+  codegen clears nothing after them, so the pages fault in the growth's
+  own loops, which check: 1 to 9 ms on Linux and 1 to 12 on darwin; the
+  release growth 16 to 18 ms before and 0 to 9 after on Linux. Hash
+  inserts, a sort, a JSON parse and the other costs, release, did not
+  move. The `memset` had hidden that a cold run is zero on a chunk's
+  first page only - the run's last chunk reaches onto a page never
+  released, and a chunk that was a list's while pages past its head went
+  cold was written there - and without it the std/compress, std/big,
+  std/png, std/fuzz and std/mlkem exercises failed in CI on Linux, darwin
+  and Windows; they pass on Linux with the carve clearing those chunks
+  from their second page on. `bench/arena_exercise.iyi` checks a dirty
+  chunk comes back zeroed through the atomic entry, and blocks carved
+  from thinned cold runs read zero; a copy without either clear fails by
+  name.
 
 - **aarch64 Linux reads a thread-local afresh after a loop's back-edge
   check.** Its thread pointer was `llvm.read_register`, which LLVM models
@@ -24920,7 +24928,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,303-line library and nothing else. Every other
+  written against iyi's own 24,321-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

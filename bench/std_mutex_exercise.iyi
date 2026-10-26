@@ -78,7 +78,10 @@ def waiter_parks : Nil
   late = started_at.get - spawned_at
   assert_true(gate.get { |cell| cell[0] }.or_panic == 2, "the holder and the waiter each wrote once")
   assert_true(late < 150, "a task started #{late} ms after it was spawned, while a Mutex waiter held one worker of two and the holder computed on the other")
-  puts "  a task spawned beside a parked waiter started #{late} ms later, the holder still computing"
+  # The milliseconds stay in the assertion's sentence: the exercise's
+  # output is compared between its source and artifact builds, and a
+  # printed 0 against a 1 failed that comparison (job 121373299527).
+  puts "  a task spawned beside a parked waiter started within 150 ms, the holder still computing"
 end
 
 if Program.args.includes?("parks")

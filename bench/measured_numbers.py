@@ -303,6 +303,7 @@ UNCHECKABLE = [
     "the runtime ratios (bench/runtime.py, needs release builds of both libraries)",
     "the real-program edit-loop table (bench/edit_loop.py, needs a release compiler)",
     "issue #145's requests a second, CPU and latency (bench/web_cores.py, needs wrk and go)",
+    "the allocator's scaling across a pool and its lock samples (bench/alloc_scaling.py, needs release builds and gdb)",
 ]
 
 

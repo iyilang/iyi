@@ -1,0 +1,142 @@
+# Allocation on many workers at once: how the allocator scales.
+#
+#   ./bin/iyi build --release bench/alloc_scaling.iyi && ./alloc_scaling 4 20000
+#
+# `W ROUNDS` runs W parallel tasks on a pool of W workers, each doing
+# ROUNDS of a request's worth of small allocations - an array of eight
+# records, each a record, its label built by interpolation and a
+# three-element array of tags, the label and tags read back - and prints
+# the wall time. A sixty-fourth of the records are kept in a ring of
+# 4,096 per task, replaced as the task goes, so each worker holds a live
+# set the collections mark and the sweep steps around, and the garbage
+# lies between live objects the way a server's does. Every worker does the
+# same work whatever W is, so a pool that scales holds the wall time flat:
+# `bench/alloc_scaling.py` runs W = 1, 2, 4, 8 and 12 and divides.
+#
+# The answer is checked: each task's sum of the ids, label lengths and tag
+# counts it read is the sum the arithmetic says, and every record left in
+# the ring still holds what it was built with, so a chunk handed to two
+# workers at once, or swept from under one, fails the run by name.
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  class Record
+    @id : Int64
+    @label : String
+    @tags : Array(Int64)
+
+    def initialize(@id : Int64, @label : String, @tags : Array(Int64))
+    end
+
+    def id : Int64
+      @id
+    end
+
+    def label : String
+      @label
+    end
+
+    def tags : Array(Int64)
+      @tags
+    end
+  end
+
+  RING = 4096
+
+  # One request: eight records built and read back. Answers what was read.
+  def request(task : Int64, round : Int64, ring : Array(Record?)) : Int64
+    records = [] of Record
+    k = 0_i64
+    while k < 8_i64
+      id = task &* 1000000000_i64 &+ round &* 8_i64 &+ k
+      records << Record.new(id, "r#{round}-#{k}", [id, id &+ 1_i64, id &+ 2_i64])
+      k = k + 1_i64
+    end
+    total = 0_i64
+    records.each do |record|
+      total = total &+ record.id &+ record.label.size.to_i64 &+ record.tags.size.to_i64
+    end
+    ring[(round // 8_i64 % RING.to_i64).to_i] = records[(round % 8_i64).to_i] if round % 8_i64 == 0_i64
+    total
+  end
+
+  # The digits of a non-negative number.
+  def digits(n : Int64) : Int64
+    count = 1_i64
+    while n >= 10_i64
+      n = n // 10_i64
+      count = count + 1_i64
+    end
+    count
+  end
+
+  # What `request` reads, by arithmetic rather than by allocating.
+  def expected(task : Int64, round : Int64) : Int64
+    total = 0_i64
+    k = 0_i64
+    while k < 8_i64
+      id = task &* 1000000000_i64 &+ round &* 8_i64 &+ k
+      total = total &+ id &+ (2_i64 &+ digits(round) &+ digits(k)) &+ 3_i64
+      k = k + 1_i64
+    end
+    total
+  end
+
+  def work(task : Int64, rounds : Int64) : Int64
+    ring = Array(Record?).new(RING, nil)
+    lost = 0_i64
+    round = 0_i64
+    while round < rounds
+      lost = lost &+ 1_i64 if request(task, round, ring) != expected(task, round)
+      round = round + 1_i64
+    end
+    ring.each do |kept|
+      next unless kept.is_a?(Record)
+      id = kept.id
+      lost = lost &+ 1_i64 unless kept.tags.size == 3 && kept.tags[0] == id && kept.tags[2] == id &+ 2_i64
+      lost = lost &+ 1_i64 unless kept.label == "r#{(id - task &* 1000000000_i64) // 8_i64}-#{id % 8_i64}"
+    end
+    lost
+  end
+
+  # Bytes every arena ever carved, the frontier past its first chunk: how
+  # much fresh memory the run took beside what the sweep gave back.
+  def carved_bytes : UInt64
+    total = 0_u64
+    arena = IyiHeap.first_arena
+    while arena != 0
+      total = total + (IyiHeap.arena_high(arena) - IyiHeap.arena_first(arena))
+      arena = IyiHeap.arena_next(arena)
+    end
+    total
+  end
+
+  arguments = Program.args
+  fail("usage: alloc_scaling WORKERS ROUNDS") unless arguments.size == 2
+  workers = arguments[0].to_i
+  rounds = arguments[1].to_i.to_i64
+  IyiWorkers.count = workers
+  collections = IyiMark.collections
+  started = __iyi_monotonic_ns
+  bad = 0_i64
+  group do |g|
+    handles = [] of IyiTask(Int64)
+    workers.times do |t|
+      handles << g.spawn_parallel { work(t.to_i64, rounds) }
+    end
+    handles.each do |handle|
+      value = handle.value
+      fail("a task answered #{value}") unless value.is_a?(Int64)
+      bad = bad &+ value
+    end
+  end
+  wall = (__iyi_monotonic_ns - started) // 1000_i64
+  fail("#{bad} requests or kept records read back wrong") unless bad == 0_i64
+  puts "workers=#{workers} rounds=#{rounds} wall_us=#{wall} collections=#{IyiMark.collections - collections} carved_kb=#{carved_bytes // 1024_u64}"
+{% else %}
+  puts "alloc scaling: no pool on this target, nothing to measure"
+{% end %}

@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **The allocator's centre is split by size class (#145).** Each class
+  has its own lock, its stack of batches and its own list of arenas, so a
+  refill, a sweep slice's claim, a warm run and a new bump region take
+  their class's lock and walk only their class's arenas. The runtime lock
+  keeps the heap's lists and the pause, and is always taken before a
+  class's lock. A worker that sweeps a slice keeps that slice's batch as
+  its own list. Interleaved with the build before, best of 3, HTTPS
+  `check_version` on twelve workers went from 167,319 a second on 819%
+  CPU to 204,526 on 599%, and `order` from 91,435 to 148,015; no sampled
+  worker stack is in a lock. `bench/alloc_cache.sh` is the new gate, with
+  broken copies for a sweep that hands nothing back, a worker that throws
+  its swept batch away, lists kept across a collection, a class's lock or
+  a slice claim that excludes nobody, and an unretired cache. Its reuse
+  check runs with no helper: the workers drop every other cell of an
+  88-byte class, sweep it back themselves, and a second wave of as many
+  may move the class's frontier by one slice and one page per cache at
+  most. It passed 60 runs of 60 at 4, 8 and 12 workers, plain and
+  release, moving it 65,472 bytes at most, where the frontier check it
+  replaces failed 21 runs in 120 before the split and 11 after and caught
+  neither broken copy. Twelve HTTPS `check_version` workers peaked at 29
+  to 30 MB resident (47 to 75 before) with 81,370 to 103,065 minor faults
+  in 20 s (1,428,966 to 1,446,569). `bench/alloc_scaling.py` times a pool
+  allocating flat out at 1 to 12 workers and samples lock stacks with gdb;
+  its curve did not move (22% of one worker's rate per worker at twelve),
+  and its twelve workers' heap of 637 to 925 MB (593 to 899 before) is
+  allocation while one thread pays the last epoch's sweep debt alone
+  before a collection's first stop - not the budget, which reaches 9.1 MB
+  at the most - and is left as it is.
+
 - **`bench/web_cores.py` measures issue #145's shape against a Go twin
   (#145).** It times three endpoints: a bcrypt login, a `check_version`
   and a JSON `order`. They are written once in iyi (`bench/web_cores.iyi`)
@@ -74,13 +103,9 @@
   darwin waits no longer sleep a millisecond at a time. A join parks
   until the thread's body returns. A deadlock on a lock is named by the
   scheduler as on a channel, and on a program's one thread by the
-  `Mutex` as before. A process's end where Windows refuses
-  `RegisterWaitForSingleObject` is asked for with a zero wait between
-  sleeps, and where darwin refuses the kqueue with `waitpid` and WNOHANG,
-  instead of holding the thread: `bench/std_process_exercise.sh` holds
-  every check with the registration or the kqueue refused, and its broken
-  copies also take the poll's not-waiting out, the blocking wait each
-  was, which the sibling's ticks still catch.
+  `Mutex` as before. Windows' process wait, where
+  `RegisterWaitForSingleObject` is refused, asks with a zero wait between
+  sleeps instead of holding its thread.
 
 - **A parallel task computing in a loop gives its worker up after 5 to 10
   ms.** In a program with a pool, every loop of a def that is not the
@@ -24928,7 +24953,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,321-line library and nothing else. Every other
+  written against iyi's own 24,551-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

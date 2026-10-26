@@ -343,10 +343,14 @@ def __iyi_monotonic_ns : Int64
   {% elsif flag?(:darwin) %}
     LibC.clock_gettime_nsec_np(4).to_i64
   {% else %}
-    spec = Pointer(UInt64).malloc(2_u64)
-    result = __iyi_conc_syscall3(IYI_SYS_CLOCK_GETTIME, 1_i64, spec.address.to_i64, 0_i64)
+    # The timespec in this frame: a heap block here was an allocation
+    # every time anything read the clock, the scheduler's sleep queue
+    # included.
+    spec = uninitialized UInt64[2]
+    words = pointerof(spec).as(Pointer(UInt64))
+    result = __iyi_conc_syscall3(IYI_SYS_CLOCK_GETTIME, 1_i64, words.address.to_i64, 0_i64)
     raise "clock_gettime failed" if result < 0
-    spec[0].to_i64 * 1000000000_i64 + spec[1].to_i64
+    words[0].to_i64 * 1000000000_i64 + words[1].to_i64
   {% end %}
 end
 
@@ -3309,15 +3313,19 @@ class IyiScheduler
       end
     {% elsif flag?(:darwin) %}
       # kevent's timeout is a timespec pointer and null means forever:
-      # -1 becomes the null, anything else two 8-byte words. A -1 return
+      # -1 becomes the null, anything else two 8-byte words in this
+      # frame. They were a heap block, taken off the worker's cache at
+      # every poll with a timeout, the zero of a poll that does not wait
+      # included, so a worker with nothing to run allocated. A -1 return
       # with errno EINTR (4) is a wakeup with no news, the same story
       # epoll's -EINTR tells below; anything else negative is real.
       timeout_ptr = Pointer(Void).new(0_u64)
+      spec = uninitialized UInt64[2]
       if timeout >= 0_i64
-        spec = Pointer(UInt64).malloc(2_u64)
-        spec[0] = (timeout // 1000_i64).to_u64
-        spec[1] = ((timeout % 1000_i64) * 1000000_i64).to_u64
-        timeout_ptr = spec.as(Void*)
+        words = pointerof(spec).as(Pointer(UInt64))
+        words[0] = (timeout // 1000_i64).to_u64
+        words[1] = ((timeout % 1000_i64) * 1000000_i64).to_u64
+        timeout_ptr = words.as(Void*)
       end
       count = LibC.kevent(pollfd.to_i32, Pointer(Void).new(0_u64), 0,
         Pointer(Void).new(events_buffer), EVENTS.to_i32, timeout_ptr).to_i64

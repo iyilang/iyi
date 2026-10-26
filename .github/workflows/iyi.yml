@@ -406,6 +406,15 @@ jobs:
       - name: Tasks across cores (III.4.13)
         run: bash bench/parallel_exercise.sh
 
+      # A pool's workers allocating from their own caches, refilled under
+      # their size class's lock: cells read back whole through collections,
+      # the sweep's chunks reused, no chunk on two lists, every list empty
+      # after a collection, no cache left by an ended thread - and broken
+      # copies (lists kept across a collection, a class's lock or a walk
+      # claim that excludes nobody, an unretired cache), each caught.
+      - name: The allocator's caches and its centre per class
+        run: bash bench/alloc_cache.sh
+
       # The shape those primitives are actually used in: a fiber per
       # connection, both halves parked on the poller, and a collection
       # in the middle. Two crashes lived here — the poller's event

@@ -280,7 +280,14 @@ module Iyi::Semantic
         name_arg = to_string_node(Var.new(a_def.args[0].name).at(a_def), a_def.args[0].restriction, a_def)
         Call.new(observer_path, "__iyi_observe_env_get", [name_arg, res_var.as(ASTNode)] of ASTNode).at(a_def)
       when EffectKind::EnvAll
-        Call.new(observer_path, "__iyi_observe_env_all", [] of ASTNode).at(a_def)
+        # `ENV.[]=` and `ENV.delete` name what they write: the runtime then
+        # reads the program's own value back as no input (§12 row 6).
+        if (first = a_def.args.first?) && first.name == "key"
+          key_arg = to_string_node(Var.new(first.name).at(a_def), first.restriction, a_def)
+          Call.new(observer_path, "__iyi_observe_env_write", [key_arg] of ASTNode).at(a_def)
+        else
+          Call.new(observer_path, "__iyi_observe_env_all", [] of ASTNode).at(a_def)
+        end
       when EffectKind::Cwd
         path_arg = if a_def.args.size >= 1
                      to_string_node(Var.new(a_def.args[0].name).at(a_def), a_def.args[0].restriction, a_def)

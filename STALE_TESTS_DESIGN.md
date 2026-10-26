@@ -400,5 +400,5 @@ If the census shows almost all real tests always running, work is not marked com
 * Cross-machine hits also need identical checkout and toolchain paths, since reached code holds absolute location literals (every `assert`).
 * Cross-machine hits are expected only between runners configured alike (matching kernel release, rlimits, cgroup memory limit, and loader variables).
 * Hits across commits wait on RG1.
-* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all` because `std/observe` provides no dedicated write hook.
+* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable (`__iyi_observe_env_write`), and a later read of it is the test's own value, not an input (row 6).
 * No speedup is promised.

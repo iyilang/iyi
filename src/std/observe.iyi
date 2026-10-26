@@ -370,12 +370,17 @@ def self.__iyi_observe_env_all : Nil
   env_all
 end
 
-# A name the program set or deleted: a later read of it records
+# `ENV.[]=` or `ENV.delete` on *name*: a later read of it records
 # `written_first`, and the trace keeps no observation for it. The write
 # itself records `env_all`, which covers what it returned.
-def self.env_written(name : String) : Nil
+def self.env_write(name : String) : Nil
   return unless @@enabled
   @@written_env.add(name)
+  env_all
+end
+
+def self.__iyi_observe_env_write(name : String) : Nil
+  env_write(name)
 end
 
 # The observer runs after the annotated def returns, so the process already

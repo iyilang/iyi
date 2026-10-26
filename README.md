@@ -105,7 +105,12 @@ it.
   not that audit.
 - Concurrency (`group`/`spawn`, `spawn_parallel`, `Channel`, cancellation;
   SPEC.md III.4) runs on Linux (x86_64, aarch64), macOS arm64 and Windows
-  x86-64, and not on wasm32.
+  x86-64, and not on wasm32. `spawn` keeps a task on the thread that
+  spawned it, taking turns with its siblings: the choice for work that
+  waits on sockets and channels. `spawn_parallel` runs it on the pool's
+  workers, one per core, for work that computes, and its block may capture
+  only `Share` values. std/http's `Server.serve` puts each connection on
+  the pool by default; `workers: 1` keeps a server on one thread.
 - Dependencies resolve and pin (`iyi.mod`, `iyi get`, `iyi.sum`; SPEC.md
   III.7), but there is no registry and no artifact distribution yet, and
   `--crystal` still leans on shards.
@@ -220,15 +225,16 @@ starting up before it reads anything.
 ### A web server's cores (issue #145)
 
 Issue #145 ported a web API to iyi and found it never used more than 1.8
-of twelve cores, while its Go port used 11. `Server.serve_parallel`
-answers connections on a pool of workers. The table below compares it
-with `Server.serve` and a Go twin that answers the same bytes. It covers
-the issue's kinds of endpoint, without the issue's database: a bcrypt
-login, a `check_version` that answers a few fields of JSON, and an
-`order` that reads, totals and sorts sixteen items of JSON.
+of twelve cores, while its Go port used 11. `Server.serve` now answers
+connections on a pool of workers, one per core unless `workers:` says
+otherwise. The table below compares it with `workers: 1` and a Go twin
+that answers the same bytes. It covers the issue's kinds of endpoint,
+without the issue's database: a bcrypt login, a `check_version` that
+answers a few fields of JSON, and an `order` that reads, totals and
+sorts sixteen items of JSON.
 
 It was taken with `bench/web_cores.py`: wrk with 4 threads and 32
-kept-alive connections, bcrypt at cost 10, `serve_parallel` on 1, 2, 4,
+kept-alive connections, bcrypt at cost 10, `serve` on 1, 2, 4,
 8 and 12 workers, best of 3 runs of 15 s (login) and 5 s (the others).
 The machine was Linux on a twelve-thread VM, with other work keeping
 about 2 of its cores busy. Each cell is requests a second over HTTP, with
@@ -236,8 +242,8 @@ the server's CPU in brackets:
 
 | | login | check_version | order |
 |---|---:|---:|---:|
-| iyi `serve` | 27 (100%) | 46,241 (112%) | 33,665 (113%) |
-| iyi `serve_parallel`, 12 workers | **247** (1,032%) | 205,879 (631%) | **131,160** (697%) |
+| iyi `serve`, `workers: 1` | 27 (100%) | 46,241 (112%) | 33,665 (113%) |
+| iyi `serve`, 12 workers | **247** (1,032%) | 205,879 (631%) | **131,160** (697%) |
 | Go net/http | 242 (1,033%) | **216,298** (528%) | 90,732 (538%) |
 | *the issue's iyi: Windows, with a database* | *9.9* | *5,308* | |
 | *the issue's Go: Windows, with a database* | *108.2* | *21,099* | |
@@ -385,7 +391,7 @@ tar -xzf iyi-0.19.1-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,021 KB prelude, the 4,918 KB of `src/std` that `import std/...`
+iyi's own 1,021 KB prelude, the 4,921 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`
@@ -888,8 +894,8 @@ not the library.
   toolchain's `cc` (CI uses wasi-sdk's clang), not by a bare linker.
 - **Only the threads and parallel tasks are gated by `Share`.** A block passed
   to `IyiThread.start`, `spawn_parallel` or a def marked `@[Share]` (std/http's
-  `Server.serve_parallel`) may capture only `Share` values; a `spawn` is not
-  gated, and a task is never preempted.
+  `Server.serve`, unless given `workers: 1`) may capture only `Share` values;
+  a `spawn` is not gated, and a task is never preempted.
 - **No registry and no self-hosting.** Packages resolve from git; the compiler
   is still a Crystal program.
 - **Windows has gaps.** No IANA zone database of its own (local time comes

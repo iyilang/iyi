@@ -136,7 +136,10 @@ module Iyi::Stale::Profile
 
       map.each do |name, res|
         if LibC.getrlimit(res, out rlim) == 0
-          rlimits[name] = rlim.rlim_cur.to_i64
+          # RLIM_INFINITY is the largest UInt64 on Linux: unlimited is one
+          # value, not an overflow.
+          current = rlim.rlim_cur.to_u64
+          rlimits[name] = current > Int64::MAX.to_u64 ? Int64::MAX : current.to_i64
         end
       end
     {% end %}

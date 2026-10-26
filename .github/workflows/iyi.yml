@@ -3253,7 +3253,7 @@ jobs:
       # fail.
       - name: install.sh installs the tarball, and refuses a wrong checksum
         run: |
-          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS)
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
           set -- dist/*.tar.gz
           tarball="$(basename "$1")"
           version="${tarball#iyi-}"; version="${version%-linux-x86_64.tar.gz}"
@@ -3339,7 +3339,7 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           git tag -l --format='%(contents)' "$tag" > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md for ${tag#v}." > notes.md
-          (cd dist && sha256sum ./*.tar.gz ./*.zip > SHA256SUMS && cat SHA256SUMS)
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS)
           gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 

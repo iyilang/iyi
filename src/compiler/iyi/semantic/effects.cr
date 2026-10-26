@@ -254,6 +254,14 @@ module Iyi
       end
     end
 
+    # A directory in one spelling: resolved when it exists (Windows hands
+    # out both `RUNNER~1` and `runneradmin`, and a temp directory may sit
+    # behind a symlink), written with `/`, no trailing one.
+    private def self.real_posix(dir : String) : String
+      resolved = File.realpath(dir) rescue dir
+      ::Path[resolved].to_posix.to_s.rstrip('/')
+    end
+
     def self.in_runtime_library_file?(program : Program, filename : String?) : Bool
       return false unless filename
       posix = ::Path[filename].to_posix.to_s
@@ -278,6 +286,21 @@ module Iyi
       if index = posix.rindex("/iyi/")
         prelude_test = File.join(posix[0, index], "iyi", "prelude.iyi")
         return true if File.file?(prelude_test)
+      end
+
+      # 4b. An overlay of a toolchain std module: `<IYI_PATH entry>/std/x.iyi`
+      # where the toolchain has a `std/x.iyi` of its own. Whoever puts it
+      # first on IYI_PATH has replaced that runtime module (the std exercises
+      # patch one to prove their checks can fail), and its annotations are
+      # the runtime's. A `std/` file the toolchain has no module for is not.
+      if index = posix.rindex("/std/")
+        subpath = posix[index + 5..]
+        root = real_posix(posix[0, index])
+        if (dir = program.iyi_prelude_dir) &&
+           File.file?(File.join(File.dirname(dir), "std", subpath)) &&
+           program.iyi_path.entries.any? { |entry| real_posix(entry) == root }
+          return true
+        end
       end
 
       # 5. .iyimod artifact of a std module resolved through toolchain std root

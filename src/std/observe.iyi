@@ -76,9 +76,11 @@ import std/slice::{Slice, Bytes}
     fun realpath(path : UInt8*, resolved : UInt8*) : UInt8*
   end
 {% elsif flag?(:win32) %}
+  # The two Win32 calls the prelude has no wrapper for. The directory and the
+  # environment come through the prelude's own (`__iyi_getcwd`,
+  # `__iyi_win_env_unset`): a second declaration of `GetCurrentDirectoryW`
+  # here, with other parameter types, is a redefinition the compiler refuses.
   lib LibKernel32
-    fun SetEnvironmentVariableW(name : UInt16*, value : UInt16*) : Int32
-    fun GetCurrentDirectoryW(len : UInt32, buf : UInt16*) : UInt32
     fun GetComputerNameW(buf : UInt16*, size : UInt32*) : Int32
   end
 {% end %}
@@ -607,8 +609,8 @@ end
 @[Effect(:observation_channel)]
 private def self.unset_env(name : String) : Nil
   {% if flag?(:win32) %}
-    wide = __iyi_wide_path(name.to_unsafe)
-    LibKernel32.SetEnvironmentVariableW(wide, Pointer(UInt16).new(0_u64))
+    __iyi_win_env_unset(name.to_unsafe, name.bytesize)
+    nil
   {% elsif flag?(:darwin) || flag?(:linux) %}
     LibObserveC.unsetenv(name.to_unsafe)
   {% end %}
@@ -617,10 +619,10 @@ end
 @[Effect(:observation_channel)]
 private def self.current_cwd : String
   {% if flag?(:win32) %}
-    buf = Pointer(UInt16).malloc(1024_u64)
-    len = LibKernel32.GetCurrentDirectoryW(1024_u32, buf)
+    buf = Pointer(UInt8).malloc(4096_u64)
+    len = __iyi_getcwd(buf, 4096_u64)
     if len > 0
-      __iyi_win_env_text(buf, len.to_i32) || ""
+      c_str(buf)
     else
       ""
     end

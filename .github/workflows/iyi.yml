@@ -1528,25 +1528,6 @@ jobs:
           bash bench/reuse_integrity.sh
           bash bench/collect_trigger.sh
 
-      # The standard library's own gates, on the platform the darwin tarball
-      # is shipped for. The std job runs all of them on Linux and nothing
-      # ran them here, which is the same gap the collector's five had — and
-      # it cost the same way: run on a darwin machine, six of them were red.
-      # One was the module's (`File.touch` set "now" whatever second it was
-      # given, because darwin's branch passed `utimes` a null), five were
-      # the gates' own (a Python 3.11 oracle, an IR audit reading aarch64's
-      # lowering, two floor lists that predated backtraces, proofs that
-      # patched a branch this platform never compiles). Every one had been
-      # green on Linux for a release. `std_exercise.sh` drives the whole
-      # set and fails on any of them, and the gate-per-module rule with it.
-      # The foundation's own sections; the modules' exercises are the
-      # darwin-std-siblings shards below, which ran this job past its two
-      # hours when they were a step here.
-      - name: The native standard library's foundation
-        env:
-          STD_SIBLINGS: "0"
-        run: bash bench/std_exercise.sh
-
       # `std/socket`'s gate is named from before the `std_` prefix, so the
       # sweep above never ran it, and its darwin arm - libSystem's calls,
       # kqueue's two filters, a `sockaddr` with a length byte - was
@@ -1708,6 +1689,54 @@ jobs:
         run: python3 -m pip install -q cryptography pillow
       - name: The module exercises of this shard, on darwin
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+
+  # The standard library's own gates, on the platform the darwin tarball
+  # is shipped for. The std job runs all of them on Linux and nothing
+  # ran them here, which is the same gap the collector's five had — and
+  # it cost the same way: run on a darwin machine, six of them were red.
+  # One was the module's (`File.touch` set "now" whatever second it was
+  # given, because darwin's branch passed `utimes` a null), five were
+  # the gates' own (a Python 3.11 oracle, an IR audit reading aarch64's
+  # lowering, two floor lists that predated backtraces, proofs that
+  # patched a branch this platform never compiles). Every one had been
+  # green on Linux for a release. `std_exercise.sh` drives the whole
+  # set and fails on any of them, and the gate-per-module rule with it.
+  # The foundation's own sections; the modules' exercises are the
+  # darwin-std-siblings shards above.
+  #
+  # A job of its own, building its own compiler as the shards do: as a
+  # step of the darwin job it took 51 to 54 of that job's minutes, and
+  # the job, 116 minutes in a green run on feat/m-thread (job
+  # 121411796955), was cut off at its 120 by the next (job 121530482309),
+  # its build 5 minutes slower on that runner and every gate it reached
+  # green.
+  darwin-std:
+    runs-on: macos-14
+    timeout-minutes: 90
+    name: "The native standard library's foundation, on darwin"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: Build `iyi`
+        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      - name: The native standard library's foundation
+        env:
+          STD_SIBLINGS: "0"
+        run: bash bench/std_exercise.sh
 
   # A Windows binary, run twenty times, and every run held to the right
   # answer. Three things used to happen: it printed the right answer, it
@@ -3150,7 +3179,7 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
+    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, targets, cross-objects, cross-run, wasi-run,
             windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
             windows-std-siblings, windows-gates, windows-compiler-specs,

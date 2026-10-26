@@ -913,14 +913,21 @@ module Iyi
     end
 
     # Whether *name* is the block parameter of the `@[Share]` def being
-    # transformed, never assigned in it: the one proc a boundary inside
-    # that def takes on trust, since every block given to the def was
-    # checked where it was written.
+    # transformed, or one of its `crossing:` parameters, never assigned in
+    # it: what a boundary inside that def takes on trust, since every
+    # block and every crossing argument given to the def was checked at
+    # the call. A call its `serial:` parameter's literal 1 exempted was
+    # not, and the def answers for that: it must not reach the boundary
+    # when its serial parameter is 1 (std/http's `Server.serve` serves
+    # such a call on its own thread).
     private def trusted_share_block?(name : String) : Bool
       current = @current_def
-      return false unless current && current.iyi_share_block?
+      return false unless current
       block_arg = current.block_arg
-      return false unless block_arg && block_arg.name == name
+      kept = current.iyi_share_block? && block_arg && block_arg.name == name
+      crossing = current.iyi_share_crossing
+      crossed = crossing && current.args.any? { |arg| arg.name == name && crossing.has_key?(arg.external_name) }
+      return false unless kept || crossed
       assigned = AssignedNames.new
       current.body.accept assigned
       !assigned.names.includes?(name)

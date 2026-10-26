@@ -5101,6 +5101,48 @@ describe "Semantic: iyi" do
           end
           CODE
       end
+
+      # std/http's `Server.serve(listener, handler)`: a value crossing to
+      # the workers, which the def's own parallel block takes on trust.
+      value_stub = group_stub + <<-STUB
+        @[Share(serial: workers, crossing: {handler: "Make it Share"})]
+        def serve_value(handler : H, workers : Int32 = 4) : Nil forall H
+          G.spawn_parallel do
+            kept = handler
+            1
+          end
+          nil
+        end
+
+        STUB
+
+      it "refuses a handler value that is not shareable, at the argument" do
+        assert_error(value_stub + <<-CODE, "serve_value hands `handler : Counter` to other threads, several at once, and it is not Share: Counter's field @count is given a setter `count=`. Make it Share, or pass `workers: 1` so it stays on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          serve_value(Counter.new)
+          CODE
+      end
+
+      it "takes a handler value that is not shareable under the literal 1, its block trusting the parameter" do
+        assert_type(value_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          serve_value(Counter.new, workers: 1)
+          CODE
+      end
+
+      it "trusts a crossing parameter only while the def leaves it as given" do
+        assert_error(group_stub + <<-CODE, "captures `handler : Counter`, which is not Share", filename: "x.iyi")
+          @[Share(serial: workers, crossing: {handler: "Make it Share"})]
+          def swapped_value(handler : H, workers : Int32 = 4) : Nil forall H
+            handler = Counter.new
+            G.spawn_parallel do
+              kept = handler
+              1
+            end
+            nil
+          end
+
+          swapped_value(Counter.new, workers: 1)
+          CODE
+      end
     end
   end
 

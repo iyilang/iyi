@@ -767,7 +767,8 @@ def scripted_checks : Nil
   outcome = "no answer"
   group do |g|
     g.spawn do
-      Server.serve(listener, tls: served) { |req| script.answer(req) }
+      # One thread: the scripted CA's state is written as it answers.
+      Server.serve(listener, tls: served, workers: 1) { |req| script.answer(req) }
       0
     end
     g.spawn do
@@ -918,7 +919,8 @@ def pebble(args : Array(String)) : Nil
   retries = 0
   group do |g|
     g.spawn do
-      Server.serve(http_listener) { |req| responder.answer(req) || Response.new(404, "not a challenge") }
+      # One thread: the responder's table is written as the order runs.
+      Server.serve(http_listener, workers: 1) { |req| responder.answer(req) || Response.new(404, "not a challenge") }
       0
     end
     g.spawn do

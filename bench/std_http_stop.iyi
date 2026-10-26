@@ -128,14 +128,16 @@ if mode.empty?
   failures = [] of String
   group do |g|
     g.spawn do
-      Server.serve(tls, tls: secure) do |req|
+      # One thread: `/stop` closes the listener from the block, and the
+      # answers append to `said`.
+      Server.serve(tls, tls: secure, workers: 1) do |req|
         tls.close if req.path == "/stop"
         answer(req, said)
       end
       0
     end
     g.spawn do
-      Server.serve(plain) do |req|
+      Server.serve(plain, workers: 1) do |req|
         plain.close if req.path == "/stop"
         answer(req, said)
       end
@@ -184,7 +186,8 @@ if mode == "serve"
   secure.alpn = ["http/1.1"]
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1], listener.local_port.to_s)
-  Server.serve(listener, tls: secure) do |req|
+  # One thread: `/stop` closes the listener, which is this thread's.
+  Server.serve(listener, tls: secure, workers: 1) do |req|
     listener.close if req.path == "/stop"
     Response.new(200, "ok")
   end

@@ -24,7 +24,7 @@
 # Pebble that issues certificates for 24 seconds, a renewal seen as a new
 # serial before the first certificate ends; a manager that trusts
 # only Pebble's minica refusing the chain Pebble issues, not caching it;
-# and the server under `Server.serve_parallel` on four workers with
+# and the server under `Server.serve(workers: 4)` with
 # `frozen_tls_config`: ten first handshakes at once making one order,
 # answered on more than one worker, and ten more shown the held
 # certificate with no order.
@@ -409,9 +409,9 @@ prove_broken autocert "an order run in the handshake that asked, with run runnin
   '    if @running' '    if false'
 prove_broken autocert "an order cancelled at the deadline remembered as a failure" "without run, an order cancelled at the deadline is not remembered as a failure" local \
   '      return made if flight.abandoned' ''
-prove_broken autocert "a worker's ask that run never answers" "under serve_parallel, ten concurrent first connections verify, one certificate" parallel \
+prove_broken autocert "a worker's ask that run never answers" "on four workers, ten concurrent first connections verify, one certificate" parallel \
   '          answer_ask(g, asked) if asked.is_a?(AutocertAsk)' '          nil'
-prove_broken tls "a frozen config's identity source not asked" "under serve_parallel, ten concurrent first connections verify, one certificate" parallel \
+prove_broken tls "a frozen config's identity source not asked" "on four workers, ten concurrent first connections verify, one certificate" parallel \
   '    if shared = @shared_source' '    if shared = nil.as(SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil)?)'
 prove_broken tls "std/tls's identity source not told the time left" "without run, a handshake waiting for an order ends by its" local \
   '    return nil if @deadline_ns == 0_i64' '    return nil'

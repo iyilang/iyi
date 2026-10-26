@@ -347,7 +347,7 @@
     end
   end
 
-  # One task's claims on places as std/http's `serve_parallel` holds them:
+  # One task's claims on places as std/http's pooled `serve` holds them:
   # a send claims one and parks while all are held, a `take_now` frees it.
   def claim_places(places : Channel(Int32), served : Tally, rounds : Int32) : Int32
     n = 0
@@ -363,7 +363,7 @@
   # `Channel#take_now` and `#put_now` from every worker at once, which
   # take the scheduler's lock themselves (they were `select`'s lock-held
   # halves, and std/http called them from workers with no lock). First
-  # places as `serve_parallel` holds them: a send claims one of two and
+  # places as the pooled `serve` holds them: a send claims one of two and
   # parks while both are held, a `take_now` frees one and wakes the oldest
   # claimant wherever it waits - eight parallel tasks and the main thread
   # claiming beside them, so the wakes cross to a thread outside the pool

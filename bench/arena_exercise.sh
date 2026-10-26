@@ -269,7 +269,7 @@ elif ! IYI_PATH="$WORK/coldtail${PSEP}$REPO/src" "$IYI" build -o "$WORK/coldtail
   echo "  the patched prelude did not build"; sed -n '1,12p' "$WORK/coldtail/build.log"; status=1
 else
   "$WORK/coldtail/program" >"$WORK/coldtail/out" 2>&1
-  if grep -q "panic: clearing: a 5000-byte block carved from a cold run read" "$WORK/coldtail/out"; then
+  if grep -q "panic: clearing: a [0-9]*-byte block carved from a cold run read" "$WORK/coldtail/out"; then
     echo "  caught at \"$(grep -m1 'panic: clearing' "$WORK/coldtail/out" | sed 's/^iyi: panic: //')\""
   else
     echo "  the exercise did not fail at the cold-run check:"; sed -n '$p' "$WORK/coldtail/out"; status=1

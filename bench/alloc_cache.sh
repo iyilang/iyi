@@ -57,7 +57,9 @@ run_case() {
     status=1
     return 1
   fi
-  "$WORK/$name" >"$WORK/$name.out" 2>&1
+  # Bounded: a run takes seconds, and a hang should cost two minutes of
+  # a runner rather than its job.
+  timeout -k 5 120 "$WORK/$name" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -110,7 +112,7 @@ prove_fails() {
     status=1
     return
   fi
-  "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  timeout -k 5 120 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
   local exit_code=$?
   if [ "$exit_code" -eq 0 ]; then
     echo "  $label: the exercise still passed, so it does not test this"
@@ -140,6 +142,13 @@ prove_fails() {
   fi
   if grep -q "died of a memory fault" "$WORK/$dir/out" && ! grep -q "every property held" "$WORK/$dir/out"; then
     printf '  %s: dies of a memory fault before it can report, and never passes\n' "$label"
+    return
+  fi
+  # A lock that excludes nobody can leave two threads each waiting on
+  # what the other broke: on darwin that copy hung, where Linux and
+  # Windows died of it. Stopped at the bound, it never passed either.
+  if [ "$exit_code" -eq 124 ] && ! grep -q "every property held" "$WORK/$dir/out"; then
+    printf '  %s: hangs past 120 s before it can report, and never passes\n' "$label"
     return
   fi
   echo "  $label: failed, but not at the expected check"

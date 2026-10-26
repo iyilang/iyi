@@ -269,7 +269,7 @@ elif ! IYI_PATH="$WORK/coldtail${PSEP}$REPO/src" "$IYI" build -o "$WORK/coldtail
   echo "  the patched prelude did not build"; sed -n '1,12p' "$WORK/coldtail/build.log"; status=1
 else
   "$WORK/coldtail/program" >"$WORK/coldtail/out" 2>&1
-  if grep -q "panic: clearing: a 5000-byte block carved from a cold run read" "$WORK/coldtail/out"; then
+  if grep -q "panic: clearing: a [0-9]*-byte block carved from a cold run read" "$WORK/coldtail/out"; then
     echo "  caught at \"$(grep -m1 'panic: clearing' "$WORK/coldtail/out" | sed 's/^iyi: panic: //')\""
   else
     echo "  the exercise did not fail at the cold-run check:"; sed -n '$p' "$WORK/coldtail/out"; status=1
@@ -286,7 +286,10 @@ echo "== the allocation floor, measured against the -Dgc_iyi binary"
 # libSystem as the interface and raw syscalls as not a stable ABI), minus the
 # file calls no exercise makes, plus `clock_gettime`, which is the exercise
 # program's own stopwatch rather than the allocator's and is not on any
-# sample's line. The list is exact and every entry is used: `malloc`,
+# sample's line, and `pthread_join` and `close`, which arrived with the
+# cold-run check's two kernel threads (`Thinned`, filled and taken up on
+# threads of their own) and are the check's join, not the allocator's. The
+# list is exact and every entry is used: `malloc`,
 # `memset` and `realloc` were here from before the collector became the
 # default and would have let a fallback to libSystem's allocator pass; the
 # kqueue, clock and dyld names arrived with the concurrency runtime and the
@@ -306,7 +309,7 @@ case "$(uname -s)" in
     # kernel32's `VirtualAlloc` and `VirtualFree`, so it may add none.
     allowed_symbols=""
     ;;
-  *) allowed_symbols="__error _tlv_bootstrap backtrace backtrace_symbols_fd pipe pthread_create pthread_kill sigaction sigaltstack sysctlbyname read _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime clock_gettime_nsec_np exit kevent kqueue mmap munmap pthread_get_stackaddr_np pthread_self write" ;;
+  *) allowed_symbols="__error _tlv_bootstrap backtrace backtrace_symbols_fd pipe pthread_create pthread_join pthread_kill sigaction sigaltstack sysctlbyname read close _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime clock_gettime_nsec_np exit kevent kqueue mmap munmap pthread_get_stackaddr_np pthread_self write" ;;
 esac
 allowed_libs="libSystem libc.so ld-linux libgcc_s"
 

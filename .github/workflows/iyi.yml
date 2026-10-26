@@ -219,6 +219,7 @@ jobs:
       - name: Export fresh run receipts
         env:
           IYI_CI_PRODUCER: "1"
+        shell: bash
         run: |
           bash bench/stale_ci.sh assert-export-env
           mkdir -p stale-index
@@ -291,6 +292,7 @@ jobs:
           path: stale-index
 
       - name: All producer receipts hit on a fresh runner
+        shell: bash
         run: |
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           .build/iyi test --cached --json \
@@ -305,6 +307,7 @@ jobs:
         id: shadow_audit
         env:
           IYI_CI_PRODUCER: "1"
+        shell: bash
         run: |
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
@@ -337,6 +340,7 @@ jobs:
             --target x86_64-linux-gnu
 
       - name: Master snapshot git-diff self-check
+        shell: bash
         run: |
           if [ -f stale-index/master-x86_64-linux-gnu.json ]; then
             mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)

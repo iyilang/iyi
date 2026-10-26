@@ -52,6 +52,52 @@
   The script is not a gate. `bench/measured_numbers.py` names it, and
   holds the docs' description of the run and the stored hash's cost to
   the script's constants.
+- **A `--release` build optimises its module as parsed from the bitcode
+  the cache keeps, not the module codegen left in memory.** The two list
+  their uses in another order, and the LLVM in the Windows Crystal
+  package (23.1.1) optimised the in-memory one wrongly: `String#to_i?`'s
+  `value < -214748364 || (value == -214748364 && digit > 8)` became
+  `digit > 8`, so any number with a 9 in it read as no number - `"9".to_i`
+  panicked, std/http refused `HTTP/1.1 999`, and std/tls's exercise could
+  not read the port Go's ECH server wrote. Plain builds, whose units were
+  already parsed on the codegen threads, were right, and so was the same
+  bitcode optimised by clang 23.1.1. `--cross-compile` optimises the
+  parsed module too. bench/std_http_exercise.iyi, release, cache emptied,
+  three runs each: codegen 23.9 to 25.8 s before and 24.3 to 26.3 s after,
+  803 to 804 MB resident at its end before and 888 to 892 after.
+  `bench/number_exercise.iyi` reads numbers made at run time with every
+  digit; its release build panicked under the compiler before this.
+
+- **Windows' `-Dpreempt_check_accessor` build links again.** Its checks
+  call the preemption word's thread-local accessor, which nothing else on
+  Windows names since the word moved to a TEB slot, so
+  `bench/parallel_exercise.sh`'s proof that the accessor check costs a
+  tight loop stopped at LNK2019 (`*IyiWorkers::preempt`) on GitHub's
+  runner and on a 12-core Windows 11 machine. Codegen now defines the
+  accessor, with external linkage so `--release` keeps it, wherever that
+  check will call it (`iyi_preempt_accessor?`), and that build keeps the
+  word in the thread-local the monitor raises. It links, fails at
+  `tight: sum:` - 2.95x on windows-2025, 2.56x on the Windows 11
+  machine, 5.5x on macos-14 - and still preempts.
+
+- **A Windows build waits for a program Smart App Control holds.**
+  Evaluating, its services (`CryptSvc`, `AppIDSvc`, the `applockerfltr`
+  filter) open a program that has just run, shared for reading only, for
+  0.1 to 1.1 s, and a build begun at once could neither write nor rename
+  it: "LNK1104: cannot open file" at the link in 6 of 60 builds made right
+  after a run, or "in use and cannot be replaced or moved aside" before
+  the compile. The check before the compile now waits up to two seconds
+  for such a holder, as Go's `cmd/go` does, and a link that stops at
+  LNK1104 waits and links once more, its first words held back: 0 of 60.
+  `bench/rebuild_reuse.py` holds the program that way for a second and
+  builds; the compiler before this failed that step in 2 runs of 2.
+
+- `bench/std_tls_ech_oracle.go`'s client reads what the std/tls server
+  sent after its Finished before closing a connection whose ECH it
+  refused. Closed with those 314 bytes unread, the connection was reset,
+  and Windows drops what a reset connection received and was not read:
+  the server read "the connection was aborted" in place of the client's
+  ech_required in 18 and 15 of 20 runs here, and in none of 40 after.
 
 - **`Channel#take_now` and `#put_now` take the scheduler's lock.** They
   were `select`'s lock-held halves, public because its arms call them,
@@ -24953,6 +24999,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
+  written against iyi's own 24,551-line library and nothing else. Every other
   written against iyi's own 24,551-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.

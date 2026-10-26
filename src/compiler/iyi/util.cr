@@ -186,25 +186,44 @@ module Iyi
   # file, which is the question.
   # iyi: on Windows, *path* made free for a new file: false only when it is
   # there, cannot be opened for writing - a running program, a read-only
-  # file - and cannot be renamed either. Moved to `*.old`, or `*.old-<pid>`
-  # when an earlier one is still running and cannot be deleted.
+  # file - and cannot be renamed either, for `BUSY_WAIT`. Moved to `*.old`,
+  # or `*.old-<pid>` when an earlier one is still running and cannot be
+  # deleted.
+  #
+  # The wait is for a holder that lets go. With Smart App Control
+  # evaluating (Windows 11), a program that has just run is opened by
+  # `CryptSvc`, `AppIDSvc` and the `applockerfltr` filter, shared for
+  # reading only, so it can be neither written nor renamed: the Restart
+  # Manager named those three after each run, held 0.1 to 1.1 s, and a
+  # build begun at once over 30 seeds of `bench/rebuild_reuse.py`'s probe
+  # stopped at "LNK1104: cannot open file" in 6 of 60 builds, or here at
+  # "in use and cannot be replaced". Go's `cmd/go` waits the same way
+  # for the same holders (`robustio`, two seconds).
+  BUSY_WAIT = 2.seconds
+
   def self.move_aside_if_busy(path : String) : Bool
-    return true unless File.file?(path)
-    begin
-      File.open(path, "r+") { }
-      return true
-    rescue File::Error
+    deadline = Time.instant + BUSY_WAIT
+    while true
+      return true unless File.file?(path)
+      begin
+        File.open(path, "r+") { }
+        return true
+      rescue File::Error
+      end
+      aside = "#{path}.old"
+      begin
+        File.delete(aside) if File.exists?(aside)
+      rescue File::Error
+        aside = "#{path}.old-#{Process.pid}"
+      end
+      begin
+        File.rename(path, aside)
+        return true
+      rescue File::Error
+        return false if Time.instant >= deadline
+        sleep 20.milliseconds
+      end
     end
-    aside = "#{path}.old"
-    begin
-      File.delete(aside) if File.exists?(aside)
-    rescue File::Error
-      aside = "#{path}.old-#{Process.pid}"
-    end
-    File.rename(path, aside)
-    true
-  rescue File::Error
-    false
   end
 
   def self.writable_directory?(directory : String) : Bool

@@ -3076,7 +3076,21 @@ module Iyi
       preempt = @iyi_preempt_fun ||= typed_fun?(@main_mod, PREEMPT_NAME)
       return nil unless preempt
       preempt.func.add_attribute LLVM::Attribute::Cold
-      @program.iyi_preempt_flag ||= class_var_global_name(word)
+      unless @program.iyi_preempt_flag
+        @program.iyi_preempt_flag = class_var_global_name(word)
+        # The accessor form (`-Dpreempt_check_accessor`) calls the word's
+        # accessor at every back-edge, and the accessor is made where
+        # something reads the word through it. On x86-64 Windows nothing
+        # does - the monitor raises a TEB slot there - and that form's
+        # build for bench/parallel_exercise.sh's proof ended at the link,
+        # `*IyiWorkers::preempt` undefined. Made here, and external: the
+        # checks that call it go in after optimisation, which strips an
+        # internal function nothing calls yet.
+        if @program.has_flag?("preempt_check_accessor")
+          accessor = declare_thread_local_fun(class_var_global_name(word), word.type, word)
+          accessor.func.linkage = LLVM::Linkage::External
+        end
+      end
       preempt
     end
 

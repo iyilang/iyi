@@ -170,7 +170,10 @@ end
 @@tainted = false
 @@taint_kinds = 0_u64
 @@fd = -1_i64
-@@scratch = ""
+# Nil, not "": `start` sets it before `__iyi_main`, and `__iyi_main` runs a
+# String initializer again, which left every write in the test's own scratch
+# directory read as a shared write. A nil initializer is not run again.
+@@scratch : ::String? = nil
 @@written_paths = ::Set(String).new
 @@written_env = ::Set(String).new
 @@main_depth = 0_i32
@@ -334,8 +337,10 @@ end
 def self.env_get(name : String, value : String?) : Nil
   return if !@@enabled || @@tainted
   present = value.nil? ? 0_u8 : 1_u8
+  # The scratch directory is the runner's, new for every run, so what is
+  # recorded is that it was there, not where it was.
   val_str = if name == "TMPDIR" || name == "TEMP" || name == "TMP"
-              @@scratch
+              value.nil? ? "" : "scratch"
             else
               value || ""
             end
@@ -715,6 +720,7 @@ private def self.mode_to_ftype(mode : Int64) : UInt8
 end
 
 private def self.is_under_scratch?(real : String) : ::Bool
-  return false if @@scratch.empty?
-  real == @@scratch || real.starts_with?(@@scratch.ends_with?("/") ? @@scratch : @@scratch + "/")
+  scratch = @@scratch
+  return false if scratch.nil? || scratch.empty?
+  real == scratch || real.starts_with?(scratch.ends_with?("/") ? scratch : scratch + "/")
 end

@@ -497,7 +497,11 @@ module Iyi::Stale
             return "run: #{obs.path} directory listing changed"
           end
         when "env_get"
-          curr_val = ENV[obs.path]?
+          # The runner sets the scratch names for every run
+          # (`Profile.clean_child_env`), and the runtime records only that
+          # they were set: the directory is new each run.
+          scratch_name = obs.path == "TMPDIR" || obs.path == "TEMP" || obs.path == "TMP"
+          curr_val = scratch_name ? "scratch" : ENV[obs.path]?
           current_ans = compute_answer("env_get", "env", keyer) do |enc|
             enc.str(obs.path)
             enc.bool(!curr_val.nil?)

@@ -177,13 +177,17 @@ def run_single_program(item):
                 except:
                     pass
 
-    test_file = os.path.join(p_scratch, f"{stem}_test.iyi")
+    # A C3 program sits in `bench/` as it does in the tree: std_eiy checks
+    # that `Eiy.locate` finds a template in the caller's own `bench/`.
+    home = os.path.join(p_scratch, 'bench') if corpus == 'C3' else p_scratch
+    os.makedirs(home, exist_ok=True)
+    test_file = os.path.join(home, f"{stem}_test.iyi")
     shutil.copy(path, test_file)
     # A program's own data files sit beside it under its stem (std_eiy
     # reads std_eiy_exercise.eiy at compile time); they travel with it.
     for companion in glob.glob(os.path.join(os.path.dirname(path), stem + '*')):
         if not companion.endswith(('.iyi', '.sh')) and os.path.isfile(companion):
-            shutil.copy(companion, p_scratch)
+            shutil.copy(companion, home)
 
     env = dict(os.environ,
                IYI_CACHE_DIR=p_cache,

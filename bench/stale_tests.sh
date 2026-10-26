@@ -402,4 +402,27 @@ step 47 "canonical union ordering is stable"
 step 48 "unsafe link flags are refused"
 # Covered by bench/stale_callpath.sh:61-120 and spec/compiler/stale/link_spec.cr
 
-echo "stale_tests PASSED: rows 1-22 and 25-48 are covered; rows 23-24 are CI-only"
+# Row 49 mutation proof: a write in the test's own scratch directory
+# (TMPDIR) is no shared write, so the test still hits; its real input still
+# misses when edited. The runtime once lost the scratch path before the
+# program ran and called every such write shared, and the TMPDIR it recorded
+# never matched a later run.
+step 49 "writes in the test's own scratch directory keep it reusable"
+mkdir -p "$WORK/scratch-write"
+printf 'in_v1' > "$WORK/scratch-write/in.txt"
+cat > "$WORK/scratch-write/tmp_test.iyi" <<'IYI'
+import std/file::{File}
+import std/dir::{Dir}
+path = Dir.tempdir + "/note.txt"
+File.write(path, File.read("in.txt"))
+File.read(path)
+IYI
+rm -rf "$CACHE/tests-v1"
+run_json "$WORK/scratch-write" tmp_test.iyi >/dev/null
+row49_hit="$(run_json "$WORK/scratch-write" tmp_test.iyi)"
+expect_eq "$(printf '%s' "$row49_hit" | json_cached)" 1 "scratch write stays reusable"
+printf 'in_v2' > "$WORK/scratch-write/in.txt"
+row49_miss="$(run_json "$WORK/scratch-write" tmp_test.iyi)"
+expect_eq "$(printf '%s' "$row49_miss" | json_cached)" 0 "input beside a scratch write reruns"
+
+echo "stale_tests PASSED: rows 1-22 and 25-49 are covered; rows 23-24 are CI-only"

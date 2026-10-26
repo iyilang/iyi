@@ -5611,7 +5611,7 @@ Crystal mode (`IYI_OPTS="--crystal"`) always runs fresh with reason `Crystal lib
 - *Path sensitivity:* Cross-machine hits require identical checkout and toolchain paths because reached code carries absolute source location literals in assertions.
 - *Runner parity:* Cross-machine hits expect alike runner configurations (matching kernel release, rlimits, cgroup memory limits, and loader variables).
 - *Cross-commit hits:* Hits across commits wait on RG1 compiler reproducibility in CI.
-- *Environment writes:* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, causing any runner environment change to rerun the test.
+- *Environment writes:* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable, and the test reading back its own value is not an input.
 - *No speedup promised:* No speedup is promised or claimed.
 
 **Verification gates (RG1-RG9).**

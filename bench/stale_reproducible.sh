@@ -128,8 +128,12 @@ run_rg1() {
   echo "  building second compiler at $rg1_dir..."
   export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
   export IYI_CACHE_DIR="$rg1_dir/cache"
+  # The commit compiler 1 carries, not HEAD: `make` does not rebuild the
+  # compiler for a commit that touches no compiler source, so after one its
+  # stamp is older than HEAD, and every program differed by the stamp alone.
   local commit
-  commit="$(/usr/bin/git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo "")"
+  commit="$("$IYI" --version 2>/dev/null | sed -n 's/.*\[\([0-9a-f]*\)\].*/\1/p' | head -1)"
+  [ -n "$commit" ] || commit="$(/usr/bin/git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo "")"
   make -C "$rg1_dir" -j8 iyi FLAGS="$extra_flags" IYI_CONFIG_BUILD_COMMIT="$commit" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"
 
   local c2_iyi="$rg1_dir/.build/iyi"

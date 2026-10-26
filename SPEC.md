@@ -5618,7 +5618,7 @@ Crystal mode (`IYI_OPTS="--crystal"`) always runs fresh with reason `Crystal lib
 
 | Gate | Proves | Status | How Proven |
 |---|---|---|---|
-| RG1 | Compiler rebuilt from identical sources gives identical build-input digest | green locally | bench/stale_reproducible.sh |
+| RG1 | A second compiler built from a copy of the tree, with the same build-input digest and the same commit stamp, builds all 27 C2 programs byte for byte the same. The stamp (`Crystal 1.22.0-dev [commit] (date)`) is in every executable, so compilers built at two commits differ in every program even from identical sources | green locally | bench/stale_reproducible.sh |
 | RG2 | 141 of 141 C2+C3 programs equal under observation outside calibrated masks, 0 excluded | green | bench/stale_equivalence.sh rg2 |
 | RG3 | 0 unclassified runtime sites reachable | green | bench/stale_effects.sh |
 | RG4 | Link under randomized non-CHILD_ENV variables | green | bench/stale_callpath.sh |

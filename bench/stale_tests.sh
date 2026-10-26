@@ -157,6 +157,19 @@ row6_empty="$(STALE_EMPTY='' STALE_ENUM=one run_json "$WORK/env-all" env_test.iy
 expect_eq "$(printf '%s' "$row6_empty" | json_cached)" 0 "unset-to-empty mutation"
 row6_value="$(STALE_EMPTY='' STALE_ENUM=two run_json "$WORK/env-all" env_test.iyi)"
 expect_eq "$(printf '%s' "$row6_value" | json_cached)" 0 "enumerated-value mutation"
+# A variable the test sets and then reads is its own value, not an input:
+# with nothing changed the second run hits. It missed every run while the
+# read was replayed against the runner's environment, which never has it.
+mkdir -p "$WORK/env-own"
+cat > "$WORK/env-own/own_test.iyi" <<'IYI'
+import std/env::{ENV}
+ENV["STALE_OWN"] = "mine"
+raise "own value lost" unless ENV["STALE_OWN"]? == "mine"
+IYI
+rm -rf "$CACHE/tests-v1"
+(unset STALE_OWN; run_json "$WORK/env-own" own_test.iyi >/dev/null)
+row6_own="$(unset STALE_OWN; run_json "$WORK/env-own" own_test.iyi)"
+expect_eq "$(printf '%s' "$row6_own" | json_cached)" 1 "variable written before read hits"
 
 # Row 7 mutation proof: stale_callpath changes IYI_OPTS=--release and asserts
 # Build changes while --json/--explain do not.
@@ -425,4 +438,21 @@ printf 'in_v2' > "$WORK/scratch-write/in.txt"
 row49_miss="$(run_json "$WORK/scratch-write" tmp_test.iyi)"
 expect_eq "$(printf '%s' "$row49_miss" | json_cached)" 0 "input beside a scratch write reruns"
 
-echo "stale_tests PASSED: rows 1-22 and 25-49 are covered; rows 23-24 are CI-only"
+# Row 50 mutation proof: a test whose macro `run` helper is compiled cold on
+# the recording run hits on the next run, when the helper comes from the
+# cache. Linking the cold helper read IYI_LINK_DRIVER and the warm check did
+# not, so the compiler environment never matched and the test always reran.
+step 50 "a macro run helper compiled cold still lets the test hit"
+mkdir -p "$WORK/macro-run"
+cat > "$WORK/macro-run/helper.iyi" <<'IYI'
+puts "41 + 1"
+IYI
+cat > "$WORK/macro-run/run_test.iyi" <<'IYI'
+raise "macro run lost" unless ({{ run("./helper") }}) == 42
+IYI
+rm -rf "$CACHE"
+run_json "$WORK/macro-run" run_test.iyi >/dev/null
+row50_hit="$(run_json "$WORK/macro-run" run_test.iyi)"
+expect_eq "$(printf '%s' "$row50_hit" | json_cached)" 1 "cold macro run helper hits"
+
+echo "stale_tests PASSED: rows 1-22 and 25-50 are covered; rows 23-24 are CI-only"

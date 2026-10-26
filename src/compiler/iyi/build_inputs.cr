@@ -46,6 +46,12 @@ module Iyi
     CHILD_ENV = %w(PATH CC LIBRARY_PATH LD_LIBRARY_PATH LD_RUN_PATH COMPILER_PATH GCC_EXEC_PREFIX
       SDKROOT MACOSX_DEPLOYMENT_TARGET LIB LIBPATH LINK _LINK_)
 
+    # The compiler's own reads that happen only when it links: a warm build
+    # links nothing (a cached macro `run` helper, an up-to-date program), so
+    # these are recorded whether or not this build links, and a key taken
+    # from a cold build and one from a warm build agree.
+    LINK_ONLY_ENV = %w(IYI_LINK_DRIVER)
+
     @@current : BuildInputs?
 
     # The recorder of the build running in this process, or nil.
@@ -106,6 +112,7 @@ module Iyi
       unless @env_only
         CHILD_ENV.each { |name| @env[name] = Crystal::System::Env.get(name) }
       end
+      LINK_ONLY_ENV.each { |name| @env[name] = Crystal::System::Env.get(name) }
       cache_root.try { |root| self.cache_root = root }
     end
 

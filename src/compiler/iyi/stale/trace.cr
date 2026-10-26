@@ -302,11 +302,16 @@ module Iyi::Stale
             return TraceResult.new(complete: false, incomplete_reason: "truncated record")
           end
 
+          # A variable the test set before reading it holds the test's own
+          # value, no input: replay reads the runner's environment, which never
+          # has it, so recording it missed every run (§12 row 6).
+          next if written_first != 0
+
           answer = compute_answer("env_get", "env", keyer) do |enc|
             enc.str(name)
             enc.bool(present != 0)
             enc.str(value)
-            enc.bool(written_first != 0)
+            enc.bool(false)
           end
 
           observations << Observation.new(task, "env_get", "env", name, answer)

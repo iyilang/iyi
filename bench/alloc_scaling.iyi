@@ -2,6 +2,10 @@
 #
 #   ./bin/iyi build --release bench/alloc_scaling.iyi && ./alloc_scaling 4 20000
 #
+# With no arguments it runs two workers briefly, checks every answer and
+# prints a fixed line: Windows CI runs every bench program bare, and this
+# one failed there at its usage line (job 121372908042).
+#
 # `W ROUNDS` runs W parallel tasks on a pool of W workers, each doing
 # ROUNDS of a request's worth of small allocations - an array of eight
 # records, each a record, its label built by interpolation and a
@@ -115,10 +119,14 @@
     total
   end
 
+  # With no arguments it checks rather than measures - two workers, 2,000
+  # rounds each, every answer read back - and prints one fixed line, the
+  # way every bench program's bare run does on CI.
   arguments = Program.args
-  fail("usage: alloc_scaling WORKERS ROUNDS") unless arguments.size == 2
-  workers = arguments[0].to_i
-  rounds = arguments[1].to_i.to_i64
+  quiet = arguments.empty?
+  fail("usage: alloc_scaling WORKERS ROUNDS") unless quiet || arguments.size == 2
+  workers = quiet ? 2 : arguments[0].to_i
+  rounds = quiet ? 2000_i64 : arguments[1].to_i.to_i64
   IyiWorkers.count = workers
   collections = IyiMark.collections
   started = __iyi_monotonic_ns
@@ -136,7 +144,11 @@
   end
   wall = (__iyi_monotonic_ns - started) // 1000_i64
   fail("#{bad} requests or kept records read back wrong") unless bad == 0_i64
-  puts "workers=#{workers} rounds=#{rounds} wall_us=#{wall} collections=#{IyiMark.collections - collections} carved_kb=#{carved_bytes // 1024_u64}"
+  if quiet
+    puts "alloc scaling: every request and kept record read back as built"
+  else
+    puts "workers=#{workers} rounds=#{rounds} wall_us=#{wall} collections=#{IyiMark.collections - collections} carved_kb=#{carved_bytes // 1024_u64}"
+  end
 {% else %}
   puts "alloc scaling: no pool on this target, nothing to measure"
 {% end %}

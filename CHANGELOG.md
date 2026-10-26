@@ -8,7 +8,10 @@
   else the cores - and `serve(..., workers: 1)` is the one-thread server
   `serve` was. The pooled method 0.19.1 added beside `serve` is removed,
   with no alias; its value form, `serve(listener, routes)` with a
-  `SharedRouter` or a `SharedProc`, keeps its arguments under `serve`.
+  `SharedRouter` or a `SharedProc`, keeps its arguments under `serve`,
+  and takes any handler value under `workers: 1` - a plain `Router`
+  included - while on more than one worker one that is not `Share` is
+  refused at the argument with the same two ways out.
   The block is checked as a parallel task's is, and a capture that is not
   `Share` is refused where it is written, naming both ways out: ``the
   block Server.serve keeps, which may run on other threads captures

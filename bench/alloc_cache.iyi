@@ -409,14 +409,23 @@
   collections = IyiMark.collections
   beside = IyiMark.concurrent_collections
   swept_by_workers = IyiMark.swept_by_allocator
+  # Two waves, and more until five collections ran beside them, six at
+  # most: on macos-14's three cores two release waves of eight workers
+  # ran 4 collections once (debug run 40252479434), where the trigger's
+  # count is the budget's and the cores', not this check's.
+  waves = 2
   wrong = wave(workers)
   wrong = wrong &+ wave(workers)
+  while IyiMark.collections - collections < 5_u64 && waves < 6
+    wrong = wrong &+ wave(workers)
+    waves = waves + 1
+  end
   ran = IyiMark.collections - collections
   swept = IyiMark.swept_by_allocator - swept_by_workers
   fail("intact: #{wrong} cells read back wrong from #{workers} workers' rings") unless wrong == 0_i64
-  fail("intact: only #{ran} collections ran beside #{workers} workers") if ran < 5_u64
+  fail("intact: only #{ran} collections ran beside #{workers} workers in #{waves} waves") if ran < 5_u64
   fail("intact: no worker swept a slice of the debt itself") if swept == 0_u64
-  puts "intact: #{workers} workers read #{workers * ROUNDS * 2} cells back whole through #{ran} collections, #{IyiMark.concurrent_collections - beside} of them marked beside the program, #{swept} arenas begun by an allocating thread's slice"
+  puts "intact: #{workers} workers read #{workers * ROUNDS * waves} cells back whole in #{waves} waves through #{ran} collections, #{IyiMark.concurrent_collections - beside} of them marked beside the program, #{swept} arenas begun by an allocating thread's slice"
 
   room = 4194304_i64
   seen = Pointer(UInt64).malloc(room.to_u64)

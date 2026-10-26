@@ -189,13 +189,9 @@ module Iyi::Stale
         else
           nil
         end
-      {% elsif flag?(:win32) %}
-        if LibC._stat64(path, out stat) == 0
-          StatKey.new(path, stat.st_dev.to_u64, stat.st_ino.to_u64, stat.st_size.to_i64, stat.st_mtime.to_i64, stat.st_ctime.to_i64)
-        else
-          nil
-        end
       {% else %}
+        # Windows' LibC has no `_stat64` binding; File.info carries no device
+        # or inode there, so the key is size and time.
         info = File.info(path)
         StatKey.new(path, 0_u64, 0_u64, info.size, info.modification_time.to_unix, info.modification_time.to_unix)
       {% end %}

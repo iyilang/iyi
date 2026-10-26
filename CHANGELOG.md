@@ -2,19 +2,17 @@
 
 ## Unreleased
 
-- **A `--release` build optimises its module as parsed from the bitcode
-  the cache keeps, not the module codegen left in memory.** The two list
-  their uses in another order, and the LLVM in the Windows Crystal
-  package (23.1.1) optimised the in-memory one wrongly: `String#to_i?`'s
-  `value < -214748364 || (value == -214748364 && digit > 8)` became
-  `digit > 8`, so any number with a 9 in it read as no number - `"9".to_i`
-  panicked, std/http refused `HTTP/1.1 999`, and std/tls's exercise could
-  not read the port Go's ECH server wrote. Plain builds, whose units were
-  already parsed on the codegen threads, were right, and so was the same
-  bitcode optimised by clang 23.1.1. `--cross-compile` optimises the
-  parsed module too. bench/std_http_exercise.iyi, release, cache emptied,
-  three runs each: codegen 23.9 to 25.8 s before and 24.3 to 26.3 s after,
-  803 to 804 MB resident at its end before and 888 to 892 after.
+- **An integer constant is cut to its type's width before LLVM gets it**
+  (`LLVM::Type#const_int`, as Crystal 1.22 has it). A negative value went
+  to `LLVMConstInt` sign-extended to 64 bits, and the LLVM in the Windows
+  Crystal package (23.1.1) kept the bits past an `i32`: `(-1).unsafe_to_u32
+  == 4294967295_u32` was false and its `to_u64` 18446744073709551615 in a
+  plain build (`bench/std_int_exercise.iyi`), and a `--release` build made
+  `String#to_i?`'s `value < -214748364 || (value == -214748364 && digit >
+  8)` into `digit > 8`, so any number with a 9 in it read as no number -
+  `"9".to_i` panicked, std/http refused `HTTP/1.1 999`, and std/tls's
+  exercise could not read the port Go's ECH server wrote. The compiler
+  built with Crystal 1.21 (LLVM 20.1.7) answered both right.
   `bench/number_exercise.iyi` reads numbers made at run time with every
   digit; its release build panicked under the compiler before this.
 

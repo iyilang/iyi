@@ -462,11 +462,12 @@ end
 #     router = Router.new
 #     router.handle("GET /users/{id}") { |req, params| Response.new(200, params["id"]) }
 #     router.handle("/static/") { |req, params| FileServer.serve(root, req) }
-#     Server.serve(listener, workers: 1) { |req| router.call(req) }
+#     Server.serve(listener, router, workers: 1)
 #
 # A `Router` is written as it is set up and holds procs nobody checked,
-# so it is not `Share`, and a block that calls one is served on one
-# thread (`workers: 1`); `SharedRouter` below routes on every worker.
+# so it is not `Share`: it is served on one thread (`workers: 1`), as the
+# handler or from a block that calls it, and refused at the argument on
+# more than one worker; `SharedRouter` below routes on every worker.
 #
 # `handle` panics on a pattern that is not one, on one that conflicts with
 # a pattern already registered, and after the router has answered a
@@ -655,9 +656,8 @@ end
 # capture: `handle` is `@[Share]`, so each block is checked where it is
 # written as a parallel task's is - every value it captures `Share`, a
 # pool behind a `Mutex`, a count in an `Atomic` - and kept as a
-# `SharedProc`. A `Router` holds procs nobody checked, so it is no
-# `Server.serve` handler, and a block that calls one is served under
-# `workers: 1` alone. A `SharedRouter` is never written:
+# `SharedProc`. A `Router` holds procs nobody checked, so `Server.serve`
+# takes one under `workers: 1` alone. A `SharedRouter` is never written:
 # `handle` answers a new router with the route added, so the one being
 # served is the table it was when the server was given it, with no
 # `handle` after the first request to refuse.

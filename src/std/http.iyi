@@ -1719,7 +1719,7 @@ pub struct Server
       serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
       return
     end
-    serve(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers)
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers)
   end
 
   # `serve` on the calling thread alone, `workers: 1`: every connection a
@@ -1809,17 +1809,18 @@ pub struct Server
   # `serve` with a value for its handler rather than a block: a
   # `SharedProc`, a `SharedRouter` (std/router), or one of the program's
   # own, whose `call(request : Request) : Response` answers each request,
-  # as Go's `http.Handler` does. It must be `Share` (SPEC.md III.4.4),
-  # since every connection on every worker calls the one value at once,
-  # and under `workers: 1` too: the compiler refuses a handler with a
-  # field anything assigns after `initialize` and names the field - a
-  # count goes in an `Atomic`, a pool or a cache behind a `Mutex`. A
-  # `Router` is refused, since it holds procs nobody checked; the block
-  # form checks its block instead, and serves one under `workers: 1`.
-  # What the check does not see is the edge `spawn_parallel` has too: a
-  # method the handler calls that writes a module's state. A struct
-  # handler is copied into each connection's task, and an `Atomic` in it
-  # with it: what the connections share is a class, or held by one.
+  # as Go's `http.Handler` does. On more than one worker it must be
+  # `Share` (SPEC.md III.4.4), since every connection on every worker
+  # calls the one value at once: the compiler refuses one that is not at
+  # the argument, naming the field that failed and the two ways out - a
+  # count in an `Atomic`, a pool or a cache behind a `Mutex`, a
+  # `SharedRouter` for a `Router`, or `workers: 1`, under which any value
+  # with that `call` is served on the calling thread, a `Router`
+  # included. What the check does not see is the edge `spawn_parallel`
+  # has too: a method the handler calls that writes a module's state. A
+  # struct handler is copied into each connection's task, and an `Atomic`
+  # in it with it: what the connections share is a class, or held by
+  # one.
   #
   # The rest is the block form's: *stream_bodies*, *compress*,
   # *timeout_ms*, *tls* (`config.frozen` on more than one worker),
@@ -1827,7 +1828,7 @@ pub struct Server
   # preface, `Response.upgrade`, and a close of *listener* - on the
   # thread that called this - ending every connection waiting on its
   # client and returning once the others have answered.
-  @[Share(serial: workers, crossing: {tls: "Pass `config.frozen`, the copy every worker may read"})]
+  @[Share(serial: workers, crossing: {handler: "Make it Share - a `SharedRouter` for a `Router`, its state behind a `Mutex` (std/mutex)", tls: "Pass `config.frozen`, the copy every worker may read"})]
   def self.serve(listener : IyiSocket, handler : H, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, tls : C = nil, request_timeout_ms : Int32 = REQUEST_TIMEOUT, max_connections : Int32 = MAX_CONNECTIONS, workers : Int32 = IyiWorkers.count) : Nil forall H, C
     raise "HTTP: #{workers} workers" if workers < 1
     # As the block form: a `TlsServerConfig` comes with `workers: 1` alone.
@@ -1835,6 +1836,14 @@ pub struct Server
       serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections) { |request| handler.call(request) }
       return
     end
+    # *handler* was checked at the call unless *workers* is 1, which
+    # returned above, so the block below takes it on trust (`crossing:`).
+    serve_pool(listener, SharedProc(Request, Response).of { |request| handler.call(request) }, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers)
+  end
+
+  # `serve` on the pool's workers, *handler* a `SharedProc` either form
+  # made.
+  private def self.serve_pool(listener : IyiSocket, handler : H, stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : C, request_timeout_ms : Int32, max_connections : Int32, workers : Int32) : Nil forall H, C
     raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
     raise "HTTP: a request timeout of #{request_timeout_ms} ms" if request_timeout_ms < 0
     raise "HTTP: at most #{max_connections} connections" if max_connections < 0

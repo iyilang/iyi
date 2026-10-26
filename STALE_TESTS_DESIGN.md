@@ -402,3 +402,4 @@ If the census shows almost all real tests always running, work is not marked com
 * Hits across commits wait on RG1.
 * Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable (`__iyi_observe_env_write`), and a later read of it is the test's own value, not an input (row 6).
 * No speedup is promised.
+* Windows: no platform arm is classified, so no Windows test is reusable (RG3 holds on macOS arm64 and Linux x86_64 and aarch64 only).

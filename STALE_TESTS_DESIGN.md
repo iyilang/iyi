@@ -130,7 +130,7 @@ The runner builds each test with `-Diyi_observe`, which belongs to the behavior 
 | observed | `file_read`, `file_stat`, `file_exists`, `dir_list`, `env_get`, `env_all`, `cwd`, `host` | Recorded in trace |
 | output | `stdio`, `exit`, `file_write` (create, delete, rename, mkdir, link, symlink, touch, chmod) | Nothing; write outside scratch taints `shared-write` |
 | not reusable | `clock`, `entropy`, `timer` (sleep, timeout, deadline), `network`, `process`, `signal`, `runtime_timing`, `code_location`, `dir_stream` (40, reason: directory read as a stream), `host_state` (41, reason: machine state the program cannot see as a value) | Taints run, naming def |
-| internal | `memory`, `collector`, `threads`, `scheduler`, `self_image`, `console`, `panic_backtrace`, `temp_name`, `observation_channel` | Nothing; internal to runtime |
+| internal | `memory`, `collector`, `threads`, `scheduler`, `self_image`, `console`, `panic_backtrace`, `temp_name`, `observation_channel`, `primitive` | Nothing; internal to runtime. `primitive` marks a leaf the platform arm is built from, a raw system call or a bare CPU instruction (`sys`, `__sys3`, `ldexp`-style asm), whose caller carries the real classification; the def is not wrapped |
 
 Examples: `src/std/file.iyi:1963` (`temp_name`, internal) vs `src/std/random.iyi:440-475` (`entropy`); `src/iyi/prelude.iyi:4781` (internal clock) vs `7529` (`runtime_timing`). `self_image` and `panic_backtrace` are internal because their results reach only the error stream; a runtime def returning code locations or debug information to program code is `code_location` (D18).
 

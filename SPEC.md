@@ -5612,6 +5612,8 @@ Crystal mode (`IYI_OPTS="--crystal"`) always runs fresh with reason `Crystal lib
 - *Runner parity:* Cross-machine hits expect alike runner configurations (matching kernel release, rlimits, cgroup memory limits, and loader variables).
 - *Cross-commit hits:* Hits across commits wait on RG1 compiler reproducibility in CI.
 - *Environment writes:* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable, and the test reading back its own value is not an input.
+- *Windows:* Nothing on Windows is reusable yet. Its platform arms are not classified (RG3 below), so every test reaches an unclassified site and runs. macOS and Linux are classified.
+- *Raw system calls and instructions:* Linux's leaf wrappers over a system call, and the x86_64 floating-point instructions, are classified `primitive` and are not wrapped. A test's reads and writes are recorded by the public def above them, as they are on darwin by the def above each libc call; a def that reached one of these leaves with no annotated def above it would not be recorded. The closure check is lexical and does not walk callers.
 - *No speedup promised:* No speedup is promised or claimed.
 
 **Verification gates (RG1-RG9).**
@@ -5620,7 +5622,7 @@ Crystal mode (`IYI_OPTS="--crystal"`) always runs fresh with reason `Crystal lib
 |---|---|---|---|
 | RG1 | A second compiler built from a copy of the tree, with the same build-input digest and the same commit stamp, builds all 27 C2 programs byte for byte the same. The stamp (`Crystal 1.22.0-dev [commit] (date)`) is in every executable, so compilers built at two commits differ in every program even from identical sources | green locally | bench/stale_reproducible.sh |
 | RG2 | 141 of 141 C2+C3 programs equal under observation outside calibrated masks, 0 excluded | green | bench/stale_equivalence.sh rg2 |
-| RG3 | 0 unclassified runtime sites reachable | green | bench/stale_effects.sh |
+| RG3 | 0 unclassified runtime sites reachable from the 141 corpus programs | green on macOS arm64, x86_64 Linux and aarch64 Linux (the Linux targets through the front end, `RG3_TARGET`). Not met on Windows: 24 sites in its arms (console, collector doorbell, I/O completion ports, fault handler) are unclassified, so a Windows test is never reusable | bench/stale_effects.sh |
 | RG4 | Link under randomized non-CHILD_ENV variables | green | bench/stale_callpath.sh |
 | RG5 | 20 of 20 observer kinds load-bearing | green | bench/stale_equivalence.sh rg5 |
 | RG6 | Standing shadow audit catches unannotated leaks or disagreements | NOT yet proven | wired in CI (.github/workflows/iyi.yml audit + empty snapshot on disagreement), provable only on master after merge |

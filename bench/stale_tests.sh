@@ -203,7 +203,9 @@ step 10 "requested runtime effects are not reusable"
 # Row 11 mutation proof: scratch symlink handling is in Trace.parse. Creating
 # scratch/out -> outside must turn the otherwise reusable fixture shared-write.
 step 11 "scratch ownership and writes are traced"
-# Covered by spec/compiler/stale/trace_spec.cr:200-280
+# Covered by spec/compiler/stale/trace_spec.cr:200-280 on fixture traces, and
+# end to end by row 49: the fixtures set the scratch byte by hand, so they
+# passed while the runtime marked every scratch write shared.
 
 # Row 12 mutation proof: effects_spec changes `asm` into a normal def and its
 # opaque-program assertion fails.

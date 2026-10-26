@@ -535,7 +535,7 @@ os.makedirs(e2e_root, exist_ok=True)
 shutil.copytree(os.path.join(repo, 'src'), os.path.join(e2e_lib, 'src'))
 e2e_observe = os.path.join(e2e_lib, 'src/std/observe.iyi')
 observe_source = open(e2e_observe).read()
-method = 'def self.__iyi_observe_file_read'
+method = 'pub def __iyi_observe_file_read'
 start = observe_source.find(method)
 finish = observe_source.find('\nend', start)
 signature_end = observe_source.find('\n', start)

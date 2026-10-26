@@ -3990,9 +3990,13 @@ hash, std's and already checked, 0 to 8. Now:
   handed std/compress's exercise chunks of 1,280 to 24,576 bytes dirty
   from a page boundary on (`bench/std_compress_exercise.sh` failed, and
   a run of it with every clearing allocation read back failed on every
-  run). The carve now clears such a chunk from its second page on; a
-  run of 5,120-byte chunks thinned to one in twenty-one in the arena
-  exercise reads 170 at byte 4,096 without that clear.
+  run). The carve now clears such a chunk from its second page on. The
+  arena exercise thins blocks of a page and a quarter to one in
+  twenty-one and takes them up again: without that clear it reads 170 at
+  byte 4,096 of a 5,000-byte block on Linux and at byte 12,288 of a
+  20,360-byte block on darwin arm64's 16 KiB pages. Sized at 5,000 bytes
+  there, three chunks shared a page, the carve listed the run's last one
+  and the pop cleared it, and the take-up met no cold page at all.
 
 After (release, one worker, load 4 to 12): a sort of 6,000,000 started the
 short task 4 to 7 ms later, a growth at 8,388,608 entries 17 to 18, a join

@@ -6,7 +6,7 @@
 
 Three defects that made reuse rarer than intended were found and fixed during the build: a test's writes in its own scratch directory were read as shared writes because the runtime lost the scratch path before the program ran; a variable a test set and read back missed every run; and the compiler-environment key differed between a cold and a warm build of a program with a macro `run` helper because IYI_LINK_DRIVER was read only when linking.
 
-Three exercise fixes from the test suite: `std_dns_exercise` skips its Happy Eyeballs races when a full listener resets SYNs instead of dropping them; `std_digest_exercise` times the best of seven; and `std_tar_exercise` writes absolute names past 100 bytes through pax records.
+Four exercise fixes, each found by the equivalence and census runs on one macOS machine: `std_dns_exercise` skips its Happy Eyeballs races when a full listener resets SYNs instead of dropping them; `std_digest_exercise` times the best of seven, and `std_big_exercise` judges the pass whose division-to-product ratio is smallest, timed back to back, since both timing checks failed under load; and `std_tar_exercise` writes absolute names past 100 bytes through pax records, which a long `TMPDIR` needs.
 
 ## 0.19.1 — 2026-10-25
 

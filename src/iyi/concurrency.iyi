@@ -5634,7 +5634,7 @@ class Channel(T)
   #
   # The public spellings take the lock themselves. They were these same
   # halves, public because `select`'s arms call them, and the library
-  # called them directly with no lock: std/http's `serve_parallel` freed
+  # called them directly with no lock: std/http's pooled server freed
   # a connection's place with `slots.take_now` on whichever worker served
   # it, and a handler stopped a server with `stop.put_now(0)` from a
   # worker. A wake from there of a task parked on another thread - the

@@ -249,6 +249,16 @@ func connect(port string, roots *x509.CertPool, configs []byte) (string, []byte)
 	if err := conn.Handshake(); err != nil {
 		var rejection *tls.ECHRejectionError
 		if errors.As(err, &rejection) {
+			// The refusal sent ech_required; the server's records after
+			// its Finished are still unread, and a close with bytes unread
+			// is a reset. Windows throws away what a reset connection had
+			// received and not yet read, the alert with it: the std/tls
+			// server read "the connection was aborted" in place of
+			// ech_required in 18 and 15 of 20 runs on Windows 11, and in
+			// none of two more twenties with the 314 bytes read first, to
+			// the server's close.
+			raw.SetReadDeadline(time.Now().Add(5 * time.Second))
+			io.Copy(io.Discard, raw)
 			return fmt.Sprintf("refused: ECH rejected, hellos=%d", counted.count()), rejection.RetryConfigList
 		}
 		return "refused: " + err.Error(), nil

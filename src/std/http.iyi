@@ -52,7 +52,9 @@
 # directory, std/sse streams events, and std/websocket takes a
 # connection over. `Server.serve_parallel(listener) { |request| ... }`
 # serves the same way on every core, its block checked by the compiler
-# as a parallel task's is, and std/router's `SharedRouter` routes there.
+# as a parallel task's is, and std/router's `SharedRouter` routes there;
+# with `tls: config.frozen` its connections are TLS on every worker, one
+# set of ticket keys among them.
 # A connection the server closes after writing to it - an answer that
 # says `close`, a body left unread past that megabyte, a refusal, a
 # GOAWAY - closes by lingering (RFC 9112 §9.6): the sending half shut
@@ -142,7 +144,7 @@ module std/http
 
 import std/dns::{DnsError, DnsName, SvcbAnswer, SvcbRecord}
 import std/socket::{IyiSocket, Resolver, SocketError}
-import std/tls::{TlsAlert, TlsClient, TlsConfig, TlsConnection, TlsEchConfig, TlsError, TlsMadeUnder, TlsServer, TlsServerConfig, TlsSession}
+import std/tls::{TlsAlert, TlsClient, TlsConfig, TlsConnection, TlsEchConfig, TlsError, TlsFrozenServerConfig, TlsMadeUnder, TlsServer, TlsServerConfig, TlsSession}
 import std/x509::{Certificate}
 import std/uri::{URI, Params}
 import std/mime::{MIME}
@@ -1657,8 +1659,10 @@ pub struct Server
   # it a connection that opens with HTTP/2's preface - as a client whose
   # ALPN chose `h2` does, when `tls.alpn` offers it - is served HTTP/2,
   # and any other HTTP/1.1. A `Response.upgrade` block over TLS is handed
-  # the `TlsStream`, so a WebSocket is `wss://`.
-  def self.serve(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, tls : TlsServerConfig? = nil, request_timeout_ms : Int32 = REQUEST_TIMEOUT, max_connections : Int32 = MAX_CONNECTIONS, &handler : Request -> Response) : Nil
+  # the `TlsStream`, so a WebSocket is `wss://`. A frozen config
+  # (`TlsServerConfig#frozen`) serves here as it does under
+  # `serve_parallel`.
+  def self.serve(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, tls : TlsServerConfig | TlsFrozenServerConfig | Nil = nil, request_timeout_ms : Int32 = REQUEST_TIMEOUT, max_connections : Int32 = MAX_CONNECTIONS, &handler : Request -> Response) : Nil
     raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
     raise "HTTP: a request timeout of #{request_timeout_ms} ms" if request_timeout_ms < 0
     raise "HTTP: at most #{max_connections} connections" if max_connections < 0
@@ -1724,7 +1728,7 @@ pub struct Server
   # Go's server does. Unread, the panic reached `serve`'s group, which
   # cancelled every other connection and the accept loop and panicked "a
   # task panicked": one request whose block failed took the server down.
-  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, Conn), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : TlsServerConfig?, request_timeout_ms : Int32, slots : Channel(Int32)?) : Nil
+  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, Conn), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : TlsServerConfig | TlsFrozenServerConfig | Nil, request_timeout_ms : Int32, slots : Channel(Int32)?) : Nil
     g.spawn do
       group do |own|
         served = own.spawn do
@@ -1766,18 +1770,35 @@ pub struct Server
   # The close is made on the thread that called this, since the listener
   # is that thread's: a handler that stops the server sends on a
   # `Channel` a task beside the server receives from, and that task
-  # closes it. There is no *tls*: a `TlsServerConfig` changes its ticket
-  # keys and replay guard as it serves, so it is not `Share`, and a TLS
-  # server is `serve`'s.
+  # closes it.
+  #
+  # *tls*: each connection is TLS as under `serve`, its handshake run on
+  # the worker that serves it, HTTP/2 or HTTP/1.1 as ALPN and the preface
+  # say, and at a stop a connection waiting on its client is sent
+  # close_notify on its worker before it closes. The config is a
+  # `TlsFrozenServerConfig` - `config.frozen` - since every worker reads
+  # it at once: its ticket keys are one set behind a lock, so a ticket a
+  # connection on one worker was sent resumes on any other, and an
+  # identity source given to `frozen` is a block the compiler checked. A
+  # `TlsServerConfig` itself is refused where it would cross to a worker,
+  # as any value that is not `Share` is: "captures `tls :
+  # TlsServerConfig`, which is not Share: ... field @alpn is given a
+  # setter `alpn=`".
   #
   # A connection stays on the worker that started it (III.4.13, part 1):
   # connections spread over the workers free as they arrive, and one kept
   # alive is not moved later. A handler that computes without parking
   # holds its worker meanwhile, as any task does.
-  def self.serve_parallel(listener : IyiSocket, handler : H, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, request_timeout_ms : Int32 = REQUEST_TIMEOUT, max_connections : Int32 = MAX_CONNECTIONS) : Nil forall H
+  def self.serve_parallel(listener : IyiSocket, handler : H, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, request_timeout_ms : Int32 = REQUEST_TIMEOUT, max_connections : Int32 = MAX_CONNECTIONS, tls : C = nil) : Nil forall H, C
     raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
     raise "HTTP: a request timeout of #{request_timeout_ms} ms" if request_timeout_ms < 0
     raise "HTTP: at most #{max_connections} connections" if max_connections < 0
+    # The places are given back from every worker and claimed on this
+    # thread, so each give-back is `receive`, which takes the scheduler's
+    # lock: `take_now` is `select`'s half, written for the lock `select`
+    # holds, and unlocked on a worker it races this thread's claims and
+    # the wakes they make (bench/std_http_parallel.iyi's stop, sent with
+    # `put_now` from a handler, lost its wake about once in fifty runs).
     slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil
     # Closed once the listener is: every connection's watcher wakes to it
     # on the connection's own worker (`spawn_parallel_handler`).
@@ -1790,15 +1811,15 @@ pub struct Server
         end
         case client = listener.accept
         in Cancelled
-          slots.take_now if slots
+          slots.receive if slots
           break
         in SocketError
-          slots.take_now if slots
+          slots.receive if slots
           sleep(pause)
           pause = pause * 2 if pause < 1000
         in IyiSocket
           pause = 5
-          spawn_parallel_handler(g, client.fd, client.family, handler, stopping, stream_bodies, compress, timeout_ms, request_timeout_ms, slots)
+          spawn_parallel_handler(g, client.fd, client.family, handler, stopping, stream_bodies, compress, timeout_ms, request_timeout_ms, slots, tls)
         end
       end
       stopping.close
@@ -1816,8 +1837,8 @@ pub struct Server
   # block that captures a `Router` or an `Array` is refused for that
   # reason, since every worker runs it at once.
   @[Share]
-  def self.serve_parallel(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, request_timeout_ms : Int32 = REQUEST_TIMEOUT, max_connections : Int32 = MAX_CONNECTIONS, &handler : Request -> Response) : Nil
-    serve_parallel(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, request_timeout_ms, max_connections)
+  def self.serve_parallel(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, request_timeout_ms : Int32 = REQUEST_TIMEOUT, max_connections : Int32 = MAX_CONNECTIONS, tls : C = nil, &handler : Request -> Response) : Nil forall C
+    serve_parallel(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, request_timeout_ms, max_connections, tls)
   end
 
   # A connection of `serve_parallel`'s, a parallel task. The socket crosses
@@ -1832,8 +1853,8 @@ pub struct Server
   # thread at a stop: no read starts after it (`ServeStop`), and a
   # connection waiting on its client is closed (`close_for_stop`). Its
   # group is `spawn_handler`'s, so a handler that panics ends its own
-  # connection alone.
-  private def self.spawn_parallel_handler(g : IyiGroup, fd : Int32, family : Int32, handler : H, stopping : Channel(Int32), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32, slots : Channel(Int32)?) : Nil forall H
+  # connection alone. *tls*, the frozen config, crosses with it.
+  private def self.spawn_parallel_handler(g : IyiGroup, fd : Int32, family : Int32, handler : H, stopping : Channel(Int32), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32, slots : Channel(Int32)?, tls : C) : Nil forall H, C
     g.spawn_parallel do
       client = IyiSocket.new(fd, family)
       stop = ServeStop.new
@@ -1847,7 +1868,7 @@ pub struct Server
           0
         end
         served = own.spawn do
-          serve_parallel_connection(client, handler, stop, idle, stream_bodies, compress, timeout_ms, request_timeout_ms)
+          serve_parallel_connection(client, handler, stop, idle, stream_bodies, compress, timeout_ms, request_timeout_ms, tls)
           0
         end
         served.value
@@ -1855,15 +1876,14 @@ pub struct Server
         own.cancel_children
         0
       end
-      slots.take_now if slots
+      slots.receive if slots
       0
     end
   end
 
-  private def self.serve_parallel_connection(client : IyiSocket, handler : H, stop : ServeStop, idle : Hash(UInt64, Conn), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32) : Nil forall H
-    defer client.close
+  private def self.serve_parallel_connection(client : IyiSocket, handler : H, stop : ServeStop, idle : Hash(UInt64, Conn), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32, tls : C) : Nil forall H, C
     answer = ->(request : Request) { handler.call(request) }
-    serve_connection(client, nil, answer, stop, idle, stream_bodies, compress, timeout_ms, request_timeout_ms)
+    handle(client, answer, stop, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms)
   end
 
   # One connection: requests until the client is done. A request that is
@@ -1879,7 +1899,7 @@ pub struct Server
   # cancelled, with nothing of this side's waiting to be read, closes at
   # once, and so does one whose client said `close` and sent nothing past
   # its request (`serve_h1`).
-  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, Conn)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0, tls : TlsServerConfig? = nil, request_timeout_ms : Int32 = 0) : Nil
+  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket | ServeStop | Nil = nil, idle : Hash(UInt64, Conn)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0, tls : TlsServerConfig | TlsFrozenServerConfig | Nil = nil, request_timeout_ms : Int32 = 0) : Nil
     defer client.close
     unless config = tls
       serve_connection(client, nil, handler, listener, idle, stream_bodies, compress, timeout_ms, request_timeout_ms)

@@ -362,6 +362,10 @@ class Iyi::CodeGenVisitor
         context.reset_closure
 
         target_def = node.target_def
+        # iyi: the inlined def's loops check as its caller's do, unless the
+        # def is `@[NoPreempt]`; the block's own code, run at each `yield`,
+        # keeps the caller's answer through `block_context`.
+        context.iyi_preempt = false if target_def.annotation(@program.no_preempt_annotation)
 
         set_ensure_exception_handler(node)
         set_ensure_exception_handler(target_def)

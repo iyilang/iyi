@@ -79,7 +79,7 @@ fi
 
 echo
 echo "== every mutex section reported"
-for phrase in "== a value behind a lock" "== tasks that park while they hold it" "== threads" "== a thread asleep until the release" "== cancelled while it waits" "== waiting for the value to change" "== what it refuses"; do
+for phrase in "== a value behind a lock" "== tasks that park while they hold it" "== threads" "== a thread asleep until the release" "== cancelled while it waits" "== waiting for the value to change" "== what it refuses" "== a waiter parks, and its worker runs other tasks"; do
   if ! grep -q "$phrase" "$WORK/mutex-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -186,9 +186,10 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-# prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
-# copy of the module with <old> replaced, at the check that names <phrase>,
-# or, given `hangs` as the phrase, by running past the time limit.
+# prove_broken <label> <phrase> <old> <new> [argument...]: the exercise,
+# given the arguments, must fail on a copy of the module with <old>
+# replaced, at the check that names <phrase>, or, given `hangs` as the
+# phrase, by running past the time limit.
 prove_broken() {
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
@@ -213,24 +214,27 @@ PY
     status=1
     return
   fi
-  IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" $LIMIT "$IYI" run "$REPO/bench/std_mutex_exercise.iyi" >"$WORK/mut.out" 2>&1
+  local label="$1" phrase="$2"
+  shift 4
+  IYI_PATH="${UNPREEMPTED:+$UNPREEMPTED$PSEP}$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" $LIMIT "$IYI" run "$REPO/bench/std_mutex_exercise.iyi" -- "$@" >"$WORK/mut.out" 2>&1
   code=$?
   if [ "$code" -eq 0 ]; then
-    echo "  the exercise PASSED on $1"
+    echo "  the exercise PASSED on $label"
     status=1
-  elif [ "$2" = hangs ] && [ "$code" -eq 124 ]; then
-    echo "  $1 is caught: the waiter never woke"
-  elif [ "$2" != hangs ] && grep -qF "$2" "$WORK/mut.out"; then
-    echo "  $1 is caught"
+  elif [ "$phrase" = hangs ] && [ "$code" -eq 124 ]; then
+    echo "  $label is caught: the waiter never woke"
+  elif [ "$phrase" != hangs ] && grep -qF "$phrase" "$WORK/mut.out"; then
+    echo "  $label is caught"
   else
-    echo "  $1 failed, but not where it should have (exit $code):"
+    echo "  $label failed, but not where it should have (exit $code):"
     tail -2 "$WORK/mut.out" | sed 's/^/    /'
     status=1
   fi
 }
 prove_broken "a lock taken while it is held" "parking inside the lock counted" \
-  '    return false if seen & 1_u64 != 0_u64
-' ''
+  '    return false unless @word.compare_and_set(FREE, HELD)[1]
+' '    @word.set(HELD)
+'
 # A waiter whose cancellation is ignored takes the lock anyway, and its
 # block runs; the exercise's waiter then reports that it ran.
 prove_broken "a cancelled waiter whose block runs anyway" "not Cancelled" \
@@ -266,25 +270,47 @@ prove_broken "a block that does not release" "already holds the lock" \
 prove_broken "a release not counted as a change" hangs \
   '    @changes.add(1_u64)
 ' ''
-# The refusal of a wait nothing could end, taken out: the wait sleeps on.
-prove_broken "a wait nothing could end left to wait" hangs \
-  '        if !busy && alone
+# The refusal of a wait nothing could end, taken out: the task parks, and
+# the scheduler names the deadlock on the main thread, which the
+# exercise's `assert_panics` around that task does not catch.
+prove_broken "a wait nothing could end left to wait" "deadlock: every fiber is blocked" \
+  '        if Mutex.alone?
           raise "Mutex#wait_for: deadlock: nothing is left to change the value - no other task on this thread, and no other thread"
         end
 ' ''
-case "$(uname -s)" in
-  Linux)
-    # A thread asleep on the futex is woken by the release and nothing
-    # else; without the wake it sleeps for good.
-    prove_broken "a release that does not wake a sleeping thread" hangs \
-      '        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@word).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
+# A task parked on the lock is woken by a release and nothing else;
+# without the wake it stays parked, and with nothing left to run the
+# scheduler names the deadlock.
+prove_broken "a release that does not wake a task parked on the lock" "deadlock: every fiber is blocked" \
+  '      IyiScheduler.wake_on(pointerof(@word), 1) if @word.swap(FREE) == CONTENDED
+' '      @word.swap(FREE)
+'
+# The same for a task parked waiting for a change.
+prove_broken "a release that does not wake a task waiting for a change" "deadlock: every fiber is blocked" \
+  '      IyiScheduler.wake_on(pointerof(@changes), 0x7FFFFFFF) if @change_waiters.get != 0_u64
 ' ''
-    # The same for a thread asleep waiting for a change.
-    prove_broken "a release that does not wake a thread waiting for a change" hangs \
-      '        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@changes).address.to_i64, IYI_FUTEX_WAKE, 0x7FFFFFFF_i64, 0_i64, 0_i64, 0_i64)
-' ''
-    ;;
-esac
+# A waiter that holds its worker until the lock is free, spinning where it
+# parked, as one asleep in the kernel holds it: the task spawned beside it
+# waits for the release to start. Built against a prelude whose pool never
+# preempts (SPEC.md III.4.13, part 9): the spin is a loop in a library
+# module, and a preempted spinner gives its worker to the task beside it,
+# which a waiter asleep in the kernel would not.
+mkdir -p "$WORK/unpreempted/iyi"
+cp "$REPO"/src/iyi/*.iyi "$WORK/unpreempted/iyi/"
+grep -v '^            Pointer(Atomic(UInt64)).new(address).value.set(1_u64) if address != 0_u64$' \
+  "$REPO/src/iyi/concurrency.iyi" > "$WORK/unpreempted/iyi/concurrency.iyi"
+if cmp -s "$WORK/unpreempted/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
+  echo "  the monitor's raise was not found, so the copy without preemption is the tree"
+  status=1
+fi
+UNPREEMPTED="$WORK/unpreempted"
+prove_broken "a waiter that holds its worker" "while a Mutex waiter held one worker of two" \
+  '        waited = IyiScheduler.park_on(pointerof(@word), CONTENDED)
+' '        while @word.get == CONTENDED
+          IyiThread.spin_pause
+        end
+        waited = nil
+' parks
 
 echo
 if [ "$status" -eq 0 ]; then

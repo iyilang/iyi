@@ -69,9 +69,11 @@ require "./atomic"
   end
 {% end %}
 
-# The runtime's one lock: what the allocator's centre, the scheduler's
-# registries and the thread list are behind, and what a collection takes
-# before it stops anything, so no stopped thread can be holding it. Bit 0
+# The runtime's one lock: what the heap's lists of arenas, large objects
+# and caches, the scheduler's registries and the thread list are behind,
+# and what a collection takes before it stops anything, so no stopped
+# thread can be holding it. A size class's centre has a lock of its own,
+# taken inside this one when both are (`IyiHeap.class_lock`). Bit 0
 # holds it, bits 1-15 count the spinners `IyiThread.lock_turn` counts, by
 # 2, and each release adds 1 at bit 16.
 class IyiRuntimeLock
@@ -108,6 +110,14 @@ class IyiRuntimeLock
 
   def self.unlock : Nil
     word.value.add(0xFFFF_u64)
+  end
+
+  # Whether some thread holds it: an answer that may be old by the time it
+  # is read, for a back-edge's slow half, which gives its worker up only
+  # when nobody does (`IyiWorkers.preempted`) - a loop in a block a holder
+  # runs is not a place to park the holder.
+  def self.held? : Bool
+    (word.value.get & 1_u64) != 0_u64
   end
 end
 
@@ -530,6 +540,9 @@ end
     fun CancelWaitableTimer(h_timer : Void*) : Int32
     fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
     fun SwitchToThread : Int32
+    # The pool's preemption slot (`IyiWorkers.claim_preempt_slot`).
+    fun TlsAlloc : Int32
+    fun TlsFree(dw_tls_index : Int32) : Int32
     # The mark helpers' park (`IyiMark.wait_generation`): kernel32's own
     # counting semaphore. `WaitOnAddress` would be the futex, and it is
     # imported from a DLL beyond kernel32 that no program here links.
@@ -1446,20 +1459,20 @@ require "./file"
     # first 64 bytes of an arena are its header: the next arena in the heap's
     # list, the mapped length, the chunk size, and the fill cursor with the
     # count of chunks never handed out. Everything that varies per class
-    # lives in one mapped page holding seventeen free-list heads and
-    # seventeen fill-arena pointers — the thread's cache, since the split
-    # the class's own comment describes; the centre's page is seventeen
-    # heads and the lock: the language has no array class variable, so
-    # seventeen scalars would mean a seventeen-way branch on every
-    # allocation, and one zeroed page is the whole table.
+    # lives in one mapped page holding a free-list head and a fill-arena
+    # pointer per class — the thread's cache, since the split the class's
+    # own comment describes; the centre is a page of counts and a line per
+    # class, its lock and its batches: the language has no array class
+    # variable, so sixty-seven scalars would mean a sixty-seven-way branch
+    # on every allocation, and one zeroed page is the whole table.
     #
     # Allocation pops the class's free list in the thread's cache, refills
-    # it from the centre when it is empty, and with both empty carves the
-    # next fresh chunk from the cache's fill arena, and with the arena
-    # spent it maps another and links it in. Free reads the class back out of
-    # the size the header carries and pushes the chunk onto that class's
-    # list. Neither walks the arena list: the list exists to be
-    # traversed, not to serve the hot path.
+    # it from a slice of the sweep it walks itself or from the class's
+    # centre when it is empty, and with both empty carves the next fresh
+    # chunk from the cache's fill arena, and with the arena spent it maps
+    # another and links it in. Free reads the class back out of the arena
+    # and pushes the chunk onto that class's list. Neither walks the arena
+    # list: the list exists to be traversed, not to serve the hot path.
     #
     # The clearing contract is the stage's correctness point, because reuse
     # is what is new here. `__iyi_malloc64` is documented to allocate
@@ -1476,10 +1489,16 @@ require "./file"
     # the chunk, reachable through the size header the next time a realloc
     # grows into them. Zeroed slack keeps a reused chunk indistinguishable
     # from a fresh mapping, the invariant every path in this file provided
-    # for free until now. `__iyi_malloc_atomic64` does not clear,
-    # matching `GC_malloc_atomic`: atomic means the collector never scans
-    # those bytes, so their initial value is no one's contract, and a reused
-    # chunk may come back dirty on that path on purpose.
+    # for free until now. `__iyi_malloc_atomic64` clears too, unlike
+    # `GC_malloc_atomic`, because codegen clears nothing after either
+    # entry under this branch (`generic_array_malloc`): the clear is the
+    # allocator's, which knows a frontier chunk or a large mapping is the
+    # kernel's zero and leaves it alone, and that a chunk carved from a
+    # cold run is zero on its first page only (`carve`). Cleared by the
+    # caller after the call, the fresh blocks of a large hash's growth held
+    # its worker unpreempted (SPEC.md III.4.13 part 9). An atomic instance
+    # (`__iyi_new`), which codegen zeroes before its initialisers run, and
+    # an atomic block `realloc` copies into are the paths left uncleared.
     #
     # The header's own two words are the exception, and they are cleared on
     # every reuse whichever path asked. They are not the caller's bytes, they
@@ -1910,6 +1929,10 @@ require "./file"
       OFF_LISTED_PAGES = 1168_u64
       OFF_SWEEP_COUNTED = 1688_u64
       OFF_BUMP_END = 1696_u64
+      # The next arena of the same class (`class_first`): the walks that
+      # look for a class's debt, warm run or cold run or frontier walk the
+      # class's arenas and nobody else's.
+      OFF_CLASS_NEXT = 1704_u64
       # The first chunk head, page-aligned past the tables; the layout
       # table's address; the reciprocal of the chunk size in eights.
       # The collection this arena was last swept for (`IyiMark.epoch`): an
@@ -2010,23 +2033,50 @@ require "./file"
       # it costs is one thread-local read per allocation, and
       # `bench/arena_exercise.sh` prints the number.
       #
-      # The centre is the class free lists the sweep fills, the arena list
-      # and the large list, behind one spin lock (`CENTRAL_LOCK`, a word on
-      # the centre's page, taken with the prelude's `Atomic`). A cache that
-      # runs dry takes the lock and takes the class's whole central list —
-      # one pointer swap, the same cost as today with one thread; a bounded
-      # batch is the fairness a profile with two threads may ask for, and
-      # it is not guessed here. `map_arena` and `take_large` push under the
-      # lock; `free` pushes to the centre under it, and the sweep frees an
-      # arena's chunks as one batch under one take of it.
+      # The centre is shared, and it is two kinds of state behind two
+      # kinds of lock, Go's mcentral beside its heap lock. What belongs to
+      # one size class - the stack of batches the sweep leaves for the
+      # class, the list of the class's arenas (`OFF_CLASS_NEXT`), and every
+      # word of an arena that a region change, a sweep's claim or a run of
+      # idle pages taken up moves - is behind the class's own lock, a word
+      # on a line of its own (`class_lock`, `CLASS_LINE`). What belongs to
+      # the heap - the list of every arena and the directory, the large
+      # list, the caches list, the epoch - is behind the runtime lock
+      # (`IyiRuntimeLock`), which a collection takes before it stops
+      # anything. A cache that runs dry sweeps a slice of its class's debt
+      # and makes the slice's batch its own list (`IyiMark.sweep_for`), or
+      # takes a batch a sweep helper left, or threads a warm run, or
+      # carves - each under its class's lock alone; the runtime lock is
+      # taken by a mapping (`map_arena`, `take_large`), a large free, a
+      # thread's first and last allocation, and the trigger.
       #
-      # What this decides for Stage 4, said now: a thread stopped while it
-      # holds `CENTRAL_LOCK` — inside a refill, a carve that maps, a free —
-      # deadlocks a sweep that needs the lock. So the stop handler must not
-      # park a thread that holds it: the lock word is the thread's own to
-      # check, and a held lock defers the park to the release, which is
-      # Go's "no preemption inside mallocgc". One thread never contends,
-      # and the lock is one uncontended `compare_and_set` per refill.
+      # One lock for all of it was the first cut, and a pool outgrew it:
+      # with twelve workers serving HTTPS, 139 of 260 sampled worker stacks
+      # were spinning, yielding or parked on the runtime lock in the
+      # refill, the sweep's claim or `reopen_pages` - each walking the
+      # whole arena list under it, a list that grows with every worker's
+      # fill arenas - and 17 of 100 with four (SPEC.md III.4.13).
+      #
+      # The order is the runtime lock, then a class's; never the other way.
+      # The runtime lock's spin parks a thread for a pause, and a thread
+      # parked while it held a class's lock would hold it against the
+      # pause's own sweep, which pushes batches. A class's lock is not
+      # parked in, and nothing under it waits: its holder is inside the
+      # allocator (`CACHE_INSIDE`), where no stop parks it, or a helper or
+      # a collector holding the runtime lock, which a pause holds first.
+      # So a pause, with every thread stopped, finds every class's lock
+      # free and takes none. Inside the allocator a thread parks where it
+      # holds nothing and waits on another thread: the runtime lock's spin,
+      # and the two waits on another walker's claim (the refill's, and
+      # `free_unswept`'s). Between two steps with none of those between
+      # them, it sees no pause.
+      #
+      # What this decides for Stage 4, said when the lock was one: a
+      # thread stopped while it holds a lock the sweep needs deadlocks the
+      # sweep. So the stop handler does not park a thread inside the
+      # allocator: a held lock defers the park to `leave`, which is Go's
+      # "no preemption inside mallocgc". One thread never contends, and a
+      # lock is one uncontended `compare_and_set` per refill.
       # The cache page past its two tables: the link, the pressure slice
       # (bytes this cache allocated since it last told the trigger), and
       # the two words the stop reads and writes — set while the thread is
@@ -2040,10 +2090,22 @@ require "./file"
       SLICE         = 65536_u64
       CENTRAL_ALLOCATED = 1280_u64
 
+      # A class's line on the centre: its lock, the top of its stack of
+      # batches, the first of its arenas. A line each, since a class's
+      # lock word is written by every thread that refills the class, and
+      # eight classes to a line would put seven other classes' locks on
+      # the line every take of one writes. 67 lines, two pages.
+      CLASS_LINE    = 64_u64
+      CLASS_LOCK    = 0_u64
+      CLASS_BATCHES = 8_u64
+      CLASS_ARENAS  = 16_u64
+      CLASS_MAP     = 8192_u64
+
       @[ThreadLocal]
       @@cache : UInt64 = 0_u64
       @@caches : UInt64 = 0_u64
       @@central : UInt64 = 0_u64
+      @@classes : UInt64 = 0_u64
       @@arenas : UInt64 = 0_u64
       @@large : UInt64 = 0_u64
 
@@ -2072,6 +2134,7 @@ require "./file"
         # thread reaches the heap: two threads' first allocations would
         # otherwise each map a centre of their own.
         @@central = __iyi_mmap(DIR_LEN).address if @@central == 0
+        @@classes = __iyi_mmap(CLASS_MAP).address if @@classes == 0
         arena_dir
         write64(page + CACHE_NEXT, @@caches)
         @@caches = page
@@ -2105,14 +2168,19 @@ require "./file"
         allocated_word.value.add(read64(page + CACHE_SLICE))
         lock
         index = 0
-        while index < FILL
+        while index < CLASSES
           head = table[index]
-          if head != 0
-            free_batch(index, head)
-            table[index] = 0_u64
-          end
           fill = table[FILL + index]
-          write64(fill + OFF_OWNER, 0_u64) if fill != 0 && read64(fill + OFF_OWNER) == page
+          if head != 0 || fill != 0
+            # The class's lock inside the runtime lock, the order the
+            # two go in: the batch onto its stack, and the owner word a
+            # region change reads under it.
+            class_lock(index)
+            push_batch(index, head) if head != 0
+            write64(fill + OFF_OWNER, 0_u64) if fill != 0 && read64(fill + OFF_OWNER) == page
+            class_unlock(index)
+          end
+          table[index] = 0_u64
           table[FILL + index] = 0_u64
           index = index + 1
         end
@@ -2187,12 +2255,55 @@ require "./file"
         Pointer(UInt64).new(@@central)
       end
 
+      # A class's line (`CLASS_LINE`), mapped with the centre by the first
+      # thread to reach the heap; mapped here only for a collection that
+      # runs before any allocation did.
+      def self.class_line(index : Int32) : UInt64
+        @@classes = __iyi_mmap(CLASS_MAP).address if @@classes == 0
+        @@classes &+ index.to_u64 &* CLASS_LINE
+      end
+
+      # A class's lock: read first, then one `compare_and_set`, a pause
+      # hint between looks and the core given away every 128th, never a
+      # park (the section above says why). What it is held across is a
+      # batch's pop or push, a claim, a walk of the class's own arenas for
+      # one to take up, and a warm run threaded - nothing that waits.
+      def self.class_lock(index : Int32) : Nil
+        word = Pointer(Atomic(UInt64)).new(class_line(index) &+ CLASS_LOCK)
+        spins = 0
+        until word.value.get == 0_u64 && word.value.compare_and_set(0_u64, 1_u64)[1]
+          spins = spins &+ 1
+          {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+            # A holder the kernel preempted is not waited out on this
+            # core's whole timeslice.
+            IyiThread.yield_cpu if spins & 127 == 0
+          {% end %}
+          IyiMark.spin_pause
+        end
+      end
+
+      def self.class_unlock(index : Int32) : Nil
+        Pointer(Atomic(UInt64)).new(class_line(index) &+ CLASS_LOCK).value.set(0_u64)
+      end
+
+      # The class's arenas, newest first, linked through `OFF_CLASS_NEXT`:
+      # linked by `map_arena` under the runtime lock and the class's, and
+      # unlinked only by the scavenge, in a pause - so a walk under the
+      # class's lock, or in a pause, reads arenas that are mapped.
+      def self.class_first(index : Int32) : UInt64
+        read64(class_line(index) + CLASS_ARENAS)
+      end
+
+      def self.class_next(arena : UInt64) : UInt64
+        read64(arena + OFF_CLASS_NEXT)
+      end
+
       # How many arenas of a class have sweeping left this epoch, on the
-      # centre's page past the lists: the allocator's answer without the
-      # lock to whether a slice of the class is worth taking. Written
-      # under the lock, read without it - a stale nonzero takes the lock
-      # and finds nothing, a stale zero carves a chunk a sweep would have
-      # handed back later.
+      # centre's page: the allocator's answer without a lock to whether a
+      # slice of the class is worth taking. Written under the class's
+      # lock, or in a pause, read without it - a stale nonzero takes the
+      # lock and finds nothing, a stale zero carves a chunk a sweep would
+      # have handed back later.
       SWEEP_LEFT_AT = 256
 
       def self.sweep_left_of(index : Int32) : UInt64
@@ -2266,13 +2377,20 @@ require "./file"
       # Untyped memory, `Pointer.malloc`'s and the like: headless and
       # flagged untyped, so the mark word-scans it, or, atomic, never
       # opens it. A 4096-byte buffer is a 4096-byte chunk. Past the top
-      # class it is a mapping and headed, the word its bits' home.
+      # class it is a mapping and headed, the word its bits' home. Both
+      # hand the block back zeroed, and codegen clears nothing after them
+      # (`generic_array_malloc`): a chunk off a list is cleared here, a
+      # chunk carved from a cold run past its first page (`carve`), and a
+      # frontier chunk or a large mapping is the kernel's zero, not touched
+      # until the caller writes it. Cleared after the call, three large
+      # blocks held a growing hash's worker 107 to 155 ms on darwin, past
+      # a preemption check's reach (SPEC.md III.4.13 part 9).
       def self.alloc(size : UInt64) : Void*
         Pointer(Void).new(take(size, true, UNTYPED_FLAG, 0_u64))
       end
 
       def self.alloc_atomic(size : UInt64) : Void*
-        Pointer(Void).new(take(size, false, UNTYPED_FLAG | ATOMIC_FLAG, 0_u64))
+        Pointer(Void).new(take(size, true, UNTYPED_FLAG | ATOMIC_FLAG, 0_u64))
       end
 
       # A class's instance: headed when the class's `:headed` byte says so
@@ -2301,10 +2419,12 @@ require "./file"
       # into the centre's atomic count every SLICE bytes, so a thread's
       # allocations cost no shared write until then.
       # `bits` are the chunk's entry less its parity: headed, untyped,
-      # atomic (`clear` false is the same promise, worn the other way: the
-      # path that does not clear is the path that holds no pointers);
-      # `type_id` goes into the entry beside them for a headless typed
-      # object, and is the caller's to store for a headed one.
+      # atomic; `type_id` goes into the entry beside them for a headless
+      # typed object, and is the caller's to store for a headed one.
+      # `clear` zeroes a chunk off a list, and is false only for an atomic
+      # instance, which codegen zeroes, and an atomic block `realloc`
+      # copies into; atomicity is the `bits`' to say, `alloc_atomic`
+      # clearing too.
       def self.take(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         table = cache
         # The arithmetic on the way in and out is wrapping, addresses
@@ -2410,7 +2530,7 @@ require "./file"
         headed = bits & HEADED_FLAG != 0
         # Past the top class: a mapping of its own, headed either way -
         # no arena, no byte, no slot - and `size_of` reads the node.
-        return take_large(headed ? bytes - HEADER : bytes, clear) + HEADER if bytes > TOP
+        return take_large(headed ? bytes - HEADER : bytes, bits) + HEADER if bytes > TOP
         # The small classes' index inline: `class_index` has a loop for
         # the large ones and is a call, and a call is what most
         # allocations would pay for a shift.
@@ -2422,7 +2542,7 @@ require "./file"
           clear_block(head, chunk_of(index)) if clear
           return headed ? head &+ HEADER : head
         end
-        head = carve(table, index, bits, type_id)
+        head = carve(table, index, clear, bits, type_id)
         headed ? head &+ HEADER : head
       end
 
@@ -2432,16 +2552,15 @@ require "./file"
       def self.stamp(table : Pointer(UInt64), index : Int32, head : UInt64, bits : UInt64, type_id : UInt64) : Nil
         table[index] = read64(head &+ OFF_LINK)
         # The chunk's byte: this epoch's, white, atomic when the caller
-        # promised no pointers - `clear` is the atomic question worn the
-        # other way - and headed when it has a word. The epoch's parity
-        # is read here, after the refill: a refill takes the lock, and
-        # the lock's spin parks for a pause, whose sweep turns the
+        # promised no pointers, and headed when it has a word. The epoch's
+        # parity is read here, after the refill: a refill takes the lock,
+        # and the lock's spin parks for a pause, whose sweep turns the
         # epoch - a parity read before it stamped the chunk as the last
         # epoch's, and the next sweep freed it under its owner. A list
         # chunk is in an arena by construction, the mask names it. The
         # clearing path clears the whole chunk, header word and all: a
-        # stale type id in the word is a layout the mark would trust;
-        # an atomic chunk is never opened, and its word is left until
+        # stale type id in the word is a layout the mark would trust; an
+        # atomic instance is never opened, and its word is left until
         # codegen stores.
         arena = head & (0_u64 &- MAP)
         slot = read64(head &+ OFF_INDEX)
@@ -2450,27 +2569,28 @@ require "./file"
         write16(byte &+ 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
       end
 
-      # The cache's list for this class is empty: take the centre's top
-      # batch for it, under the lock — one arena's sweep, `free_batch`
-      # says why one. Answers the new head, 0 if the centre had nothing
-      # and the carve is next.
+      # The cache's list for this class is empty: a batch for it, from a
+      # slice this thread sweeps or off the class's centre, under the
+      # class's lock alone. Answers the new head, 0 if there was none and
+      # the carve is next.
       def self.refill(table : Pointer(UInt64), index : Int32) : UInt64
-        centre = central
-        if centre[index] == 0
-          # Nothing swept for this class yet. A bump region of cold pages
-          # in hand, or a slab to be carved to its end, is carved. Warm
-          # idle pages of the class are the sweep's produce already,
-          # resident and nobody's: with any in reach, a run of them is
-          # threaded into the cache's list, no slice waited for. Otherwise
-          # a slice of an arena of the class, and another, until a batch
-          # of the class appears, warm pages come into reach, or the
-          # class has nothing left to sweep - the sweep's cost lands on
-          # the allocations that need its chunks rather than inside the
-          # pause (GC_DESIGN.md), and a chunk swept is cheaper than one
-          # carved, a page faulted in costing what a hundred sweep. A
-          # helper inside a slice of the only arena of the class answers
-          # busy: its batch is microseconds away, and the wait is for
-          # that. With helpers at a round the class is named for them.
+        line = class_line(index)
+        if read64(line + CLASS_BATCHES) == 0
+          # Nothing swept for this class on the centre. A bump region of
+          # cold pages in hand, or a slab to be carved to its end, is
+          # carved. Warm idle pages of the class are the sweep's produce
+          # already, resident and nobody's: with any in reach, a run of
+          # them is threaded into the cache's list, no slice waited for.
+          # Otherwise a slice of an arena of the class, and another,
+          # until one leaves this cache a list, a batch of the class
+          # appears, warm pages come into reach, or the class has nothing
+          # left to sweep - the sweep's cost lands on the allocations
+          # that need its chunks rather than inside the pause
+          # (GC_DESIGN.md), and a chunk swept is cheaper than one carved,
+          # a page faulted in costing what a hundred sweep. With every
+          # arena of the class inside another walker's slice the answer
+          # is busy: a slice is microseconds, and the wait is for that.
+          # With helpers at a round the class is named for them.
           arena = table[FILL + index]
           region = arena == 0 || read64(arena + OFF_LEFT) == 0 ? REGION_SLAB : read64(arena + OFF_REGION_REOPENED)
           return 0_u64 if region != REGION_SLAB
@@ -2487,26 +2607,40 @@ require "./file"
             write64(arena + OFF_REGION_REOPENED, REGION_SLAB_STAY) if arena != 0 && read64(arena + OFF_LEFT) != 0
           end
           IyiMark.sweep_wanted(index) if IyiMark.helpers_sweeping?
-          chunk = chunk_of(index)
-          while centre[index] == 0 && sweep_left_of(index) != 0_u64
-            answer = IyiMark.sweep_one(chunk)
+          while read64(line + CLASS_BATCHES) == 0 && sweep_left_of(index) != 0_u64
+            answer = IyiMark.sweep_for(table, index)
             break if answer == 0_u64
+            # This thread's own slice, its batch this cache's list now.
+            return table[index] if table[index] != 0
             if answer == 2_u64
-              # Every arena of the class is inside another thread's
-              # slice: its batch lands within the slice, microseconds,
-              # and the wait for it is off the lock. Carving instead was
+              # Every arena of the class with sweeping left is inside
+              # another walker's slice, which lets go of its claim within
+              # microseconds - and a helper's leaves its batch on the
+              # centre. The wait is off every lock. Carving instead was
               # tried and costs: a fresh page is a fault where a swept
               # chunk is free, and churn - whose every refill meets a
               # helper mid-slice - ran 40 ms to 59.
               spins = 0
-              while centre[index] == 0 && spins < 256
+              while read64(line + CLASS_BATCHES) == 0 && spins < 256
                 IyiMark.spin_pause
                 spins = spins + 1
               end
+              # Holding nothing, as a spinner on the runtime lock holds
+              # nothing, this thread parks here for a stop that asked it
+              # to. The claim it waits on may be a helper's whose end
+              # waits for the runtime lock, which the stopping thread
+              # holds. A pool of four allocating ran past ten minutes once
+              # without this park; that cycle is the suspected cause, and
+              # five more runs of the same build did not repeat it.
+              # Everything the loop reads it reads again, as after the
+              # lock's park.
+              {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+                IyiThread.park_if_requested
+              {% end %}
             end
             # A slice of this thread's or another's may have left warm
             # pages in reach.
-            if centre[index] == 0 && warm_of(index) != 0_u64
+            if read64(line + CLASS_BATCHES) == 0 && warm_of(index) != 0_u64
               head = thread_warm_of(index)
               if head != 0
                 table[index] = head
@@ -2514,46 +2648,55 @@ require "./file"
               end
             end
           end
-          return 0_u64 if centre[index] == 0
+          return 0_u64 if read64(line + CLASS_BATCHES) == 0
         end
-        lock
-        head = centre[index]
-        # The batch's whole pages are being allocated from now: unlisted,
-        # or the pause would turn them idle with objects on them.
-        if head != 0
-          # The batch's page range off its head's two words, then the
-          # words as the pop and the byte stamp want them.
-          arena = head & (0_u64 &- MAP)
-          link = read64(head + OFF_LINK)
-          chain = read64(head + BATCH_NEXT)
-          unlist_batch(arena, link.unsafe_shr(RANGE_SHIFT), chain.unsafe_shr(RANGE_SHIFT))
-          centre[index] = chain & LOW48
-          write64(head + OFF_LINK, link & LOW48)
-          write64(head + OFF_INDEX, chunk_index(arena, head))
-        end
-        unlock
+        class_lock(index)
+        head = read64(line + CLASS_BATCHES)
+        write64(line + CLASS_BATCHES, read64(head + BATCH_NEXT) & LOW48) if head != 0
+        class_unlock(index)
+        return 0_u64 if head == 0
+        adopt_batch(table, index, head)
+        head
+      end
+
+      # A batch made the cache's list - off the centre, or out of this
+      # thread's own slice: its page range read back off its head's two
+      # words (`stash_batch_range`), the listed pages in the range
+      # unlisted - their chunks are being allocated from now, and the
+      # pause would turn a listed page idle with objects on it - and the
+      # words cleaned for the pop and the byte stamp. No lock: the batch
+      # is this cache's alone, the listed bits are compare-and-set, and
+      # nothing between the batch's taking and this parks, so no pause
+      # turns the listed pages idle in between.
+      def self.adopt_batch(table : Pointer(UInt64), index : Int32, head : UInt64) : Nil
+        arena = head & (0_u64 &- MAP)
+        link = read64(head + OFF_LINK)
+        chain = read64(head + BATCH_NEXT)
+        unlist_batch(arena, link.unsafe_shr(RANGE_SHIFT), chain.unsafe_shr(RANGE_SHIFT))
+        write64(head + OFF_LINK, link & LOW48)
+        write64(head + OFF_INDEX, chunk_index(arena, head))
         table[index] = head
-        head
       end
 
-      # The class's first warm run in reach, as a list: the arenas of the
-      # class walked under the lock, any of them - a list is the cache's
-      # and needs no claim on the arena. Answers the list's head, 0 for
-      # none in reach.
+      # The class's first warm run in reach, as a list: the class's
+      # arenas walked under its lock, any of them - a list is the cache's
+      # and needs no claim on the arena. Threaded under the lock, because
+      # a slice claimed beside the threading would read the run's chunks
+      # as the last epoch's free ones, dead, and link them a second time.
+      # Answers the list's head, 0 for none in reach.
       def self.thread_warm_of(index : Int32) : UInt64
-        chunk = chunk_of(index)
         head = 0_u64
-        lock
-        candidate = @@arenas
+        class_lock(index)
+        candidate = class_first(index)
         while candidate != 0 && head == 0
-          head = thread_warm(candidate) if read64(candidate + OFF_CHUNK) == chunk && read64(candidate + OFF_WARM) != 0
-          candidate = read64(candidate + OFF_NEXT)
+          head = thread_warm(candidate) if read64(candidate + OFF_WARM) != 0
+          candidate = class_next(candidate)
         end
-        unlock
+        class_unlock(index)
         head
       end
 
-      def self.carve(table : Pointer(UInt64), index : Int32, bits : UInt64, type_id : UInt64) : UInt64
+      def self.carve(table : Pointer(UInt64), index : Int32, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         arena = table[FILL + index]
         if arena == 0 || read64(arena + OFF_LEFT) == 0 ||
            (read64(arena + OFF_REGION_REOPENED) == REGION_SLAB && read64(arena + OFF_IDLE) != read64(arena + OFF_WARM))
@@ -2571,13 +2714,29 @@ require "./file"
         # already wear this epoch's parity or it would read as last
         # epoch's dead — freed under the thread about to hand it out. The
         # parity is read here, past `reopen_pages` and its lock (the
-        # refill's comment). The chunk's memory is the kernel's zero: a
-        # region is a frontier slab or a cold run, warm runs being lists.
+        # refill's comment). A frontier slab is the kernel's zero. A cold
+        # run is zero on a chunk's head page only: past it, the chunk's
+        # bytes may be on a page that was never released - a cold run's
+        # last chunk reaches onto the page above the run (`reopen_in`) -
+        # or on one released while the chunk was a list's, its head on a
+        # warm page, and written by its owner since: the chunk that
+        # straddles into a cold run from below (`IyiMark.close_run`,
+        # `IyiMark.age_idle`), whose head page went cold later and joined
+        # the run. A carved chunk the caller wants clear is cleared from
+        # its second page on, then; one listed below is cleared when it is
+        # popped. The codegen `memset` after every `Pointer.malloc` hid
+        # both until it went (SPEC.md III.4.13 part 9): std/compress's
+        # exercise was handed chunks of 1,280 to 24,576 bytes dirty from a
+        # page boundary on.
         byte = read64(arena + OFF_CURSOR_BYTE)
         epoch = IyiMark.epoch_flag
         write8(byte, bits | CARVED_FLAG | epoch)
         write16(byte + 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
         chunk = read64(arena + OFF_CHUNK)
+        if clear && read64(arena + OFF_REGION_REOPENED) == REGION_COLD
+          second = (cursor &+ PAGE) & (0_u64 &- PAGE)
+          clear_block(second, cursor &+ chunk &- second) if cursor &+ chunk > second
+        end
         # The rest of a page's worth, onto the cache's list, which is empty
         # or the carve would not have been asked: stamped free and this
         # epoch's, as `free` and a warm run's thread stamp theirs - a free
@@ -2799,11 +2958,14 @@ require "./file"
       # a fresh mapping. Answers the arena whose region the carve now
       # bumps in. Warm runs are not the carve's: the refill threads them
       # into the cache's list (`thread_warm`).
-      # The whole choice is one take of the lock: the lock's spin parks
-      # for a pause, whose scavenge hands arenas back, so an arena read
-      # off the list outside the lock is not an arena to trust across a
-      # take of it - the first cut walked the list between takes and
-      # crashed reading an arena the pause had unmapped.
+      # The whole choice is one take of the class's lock, over the class's
+      # own arenas. It was one take of the runtime lock over every arena:
+      # that lock's spin parks for a pause, whose scavenge hands arenas
+      # back, so an arena read off the list outside it was not an arena to
+      # trust across a take of it - the first cut walked the list between
+      # takes and crashed reading an arena the pause had unmapped. A
+      # class's lock parks for nothing, and the class's list changes under
+      # it or in a pause, so the walk reads arenas that are mapped.
       # A warm run inside a sweep's slice is out of reach for the slice,
       # some ten microseconds: a slab taken with warm pages still out of
       # reach is carved to its end before the class's warm pages are
@@ -2817,23 +2979,22 @@ require "./file"
 
       def self.reopen_pages(table : Pointer(UInt64), arena : UInt64, index : Int32) : UInt64
         owner = table.address
-        chunk = chunk_of(index)
-        lock
+        class_lock(index)
         chosen = 0_u64
         if arena != 0
           chosen = arena if read64(arena + OFF_IDLE) != read64(arena + OFF_WARM) && reopen_in(arena, owner)
           chosen = arena if chosen == 0 && next_slab(arena, owner)
         end
-        candidate = @@arenas
+        candidate = class_first(index)
         while candidate != 0 && chosen == 0
-          if candidate != arena && read64(candidate + OFF_CHUNK) == chunk && read64(candidate + OFF_OWNER) == 0
+          if candidate != arena && read64(candidate + OFF_OWNER) == 0
             if read64(candidate + OFF_IDLE) != read64(candidate + OFF_WARM) && reopen_in(candidate, owner)
               chosen = candidate
             elsif next_slab(candidate, owner)
               chosen = candidate
             end
           end
-          candidate = read64(candidate + OFF_NEXT)
+          candidate = class_next(candidate)
         end
         # A slab taken while the class has warm pages: they were out of
         # reach, and the slab is carved to its end before they are asked
@@ -2842,7 +3003,7 @@ require "./file"
         # The old arena is nobody's from here, whatever was chosen: a
         # fresh mapping claims itself as it is made.
         write64(arena + OFF_OWNER, 0_u64) if arena != 0 && chosen != arena && read64(arena + OFF_OWNER) == owner
-        unlock
+        class_unlock(index)
         if chosen == 0
           chosen = map_arena(index, owner)
           write64(chosen + OFF_REGION_REOPENED, REGION_SLAB_STAY) if warm_of(index) != 0_u64
@@ -2850,18 +3011,19 @@ require "./file"
         chosen
       end
 
-      # Whether the arena is still an arena, under the lock: the directory
-      # byte is cleared before the unmap, under the same lock.
+      # Whether the arena is still an arena: the directory byte is cleared
+      # by the scavenge, in a pause, before the arena is let go.
       def self.mapped?(arena : UInt64) : Bool
         Pointer(UInt8).new(arena_dir + arena.unsafe_shr(24_u64)).value == DIR_ARENA
       end
 
-      # Under the lock: whether `owner` may set a region in `arena`, which
-      # it may when nobody's fill arena it is, or its own. The claim is
-      # written when a region is set, not here: a candidate tried and
-      # found spent stayed claimed by the cache that tried it, and the
-      # scavenge, which leaves a claimed arena alone, kept the spike's
-      # twenty mappings for a cache that had moved on from all of them.
+      # Under the class's lock: whether `owner` may set a region in
+      # `arena`, which it may when nobody's fill arena it is, or its own.
+      # The claim is written when a region is set, not here: a candidate
+      # tried and found spent stayed claimed by the cache that tried it,
+      # and the scavenge, which leaves a claimed arena alone, kept the
+      # spike's twenty mappings for a cache that had moved on from all of
+      # them.
       def self.claimable?(arena : UInt64, owner : UInt64) : Bool
         current = read64(arena + OFF_OWNER)
         current == 0 || current == owner
@@ -2869,7 +3031,7 @@ require "./file"
 
       # The frontier's next slab as the bump region: from the high-water
       # mark, `SLAB` bytes or what the mapping has left. False when the
-      # mapping is carved to its end. Under the lock.
+      # mapping is carved to its end. Under the class's lock.
       def self.next_slab(arena : UInt64, owner : UInt64) : Bool
         return false if read64(arena + OFF_SWEEPING) != 0 || !claimable?(arena, owner)
         high = read64(arena + OFF_HIGH)
@@ -2896,7 +3058,7 @@ require "./file"
       # The first run of idle pages in `arena` - warm ones when `warm`,
       # cold ones otherwise - taken: its bits cleared, its counts down,
       # and its bounds answered as `{low, high}`, page-aligned, or
-      # `{0, 0}` for none. Under the lock.
+      # `{0, 0}` for none. Under the class's lock.
       # With a sweep's slice in flight on the arena the run is looked for
       # below the slice only: the slice walks up from the arena's sweep
       # cursor and sets bits at and above it, and this clears bits below
@@ -2944,15 +3106,15 @@ require "./file"
         set_idle(arena, low, high, false)
         set_cold(arena, low, high, false) unless warm
         idle_sub(arena, stop - page, warm)
-        @@pages_reopened = @@pages_reopened + (stop - page)
-        @@pages_rewarmed = @@pages_rewarmed + (stop - page) if warm
+        Pointer(Atomic(UInt64)).new(pointerof(@@pages_reopened).address).value.add(stop - page)
+        Pointer(Atomic(UInt64)).new(pointerof(@@pages_rewarmed).address).value.add(stop - page) if warm
         {low, high}
       end
 
       # The first run of cold pages in `arena` becomes its bump region,
-      # under the lock. The region's chunks are the grid chunks whose
-      # head is on its pages; the one straddling its start belongs to the
-      # page before - a list's, or an idle run's own - and the one
+      # under the class's lock. The region's chunks are the grid chunks
+      # whose head is on its pages; the one straddling its start belongs
+      # to the page before - a list's, or an idle run's own - and the one
       # straddling its end is the region's, its tail on a page nobody
       # released. The slice read its region's bounds once, at its start;
       # a region set here is below everything the slice walks, and the
@@ -2981,10 +3143,10 @@ require "./file"
       end
 
       # The first run of warm idle pages in `arena` becomes a free list,
-      # under the lock: its chunks linked head to tail, each stamped free
-      # and this epoch's, and the head answered - 0 for no run. A list
-      # rather than a bump region because the list's pop is the
-      # allocator's fast path and the carve is not: carving every warm
+      # under the class's lock: its chunks linked head to tail, each
+      # stamped free and this epoch's, and the head answered - 0 for no
+      # run. A list rather than a bump region because the list's pop is
+      # the allocator's fast path and the carve is not: carving every warm
       # chunk cost an ordered store of the cursor and a refill's worth of
       # loads per allocation, and churn ran 48 ms to 73. Two stores per
       # chunk here, on pages the last epoch's sweep listed and no cache
@@ -3070,9 +3232,10 @@ require "./file"
         head >= read64(arena + OFF_HIGH) || page_idle?(arena, head)
       end
 
-      # The same question under the lock, which the sweep holds and a
-      # region change takes: the uncarved part of the bump region is
-      # exact here, and the sweep must not free it.
+      # The same question for a caller nothing allocates beside - the
+      # exercises' `unmark`, single-threaded: the region a carve moves
+      # holds still, its uncarved part is exact here, and the sweep must
+      # not free it.
       def self.uncarved_held?(arena : UInt64, head : UInt64) : Bool
         return true if head >= read64(arena + OFF_HIGH)
         return true if head >= arena_cursor(arena) && head < read64(arena + OFF_BUMP_END)
@@ -3240,6 +3403,12 @@ require "./file"
         write64(base + OFF_SWEEP_CURSOR, SWEEP_DONE)
         write64(base + OFF_NEXT, @@arenas)
         @@arenas = base
+        # On its class's list too, the class's lock inside the runtime
+        # lock, the order the two go in.
+        class_lock(index)
+        write64(base + OFF_CLASS_NEXT, class_first(index))
+        write64(class_line(index) + CLASS_ARENAS, base)
+        class_unlock(index)
         # The directory byte last, after the header and the link: a reader
         # that finds the byte finds an arena that is whole.
         Pointer(UInt8).new(arena_dir + base.unsafe_shr(24_u64)).value = DIR_ARENA
@@ -3247,11 +3416,13 @@ require "./file"
         base
       end
 
-      def self.take_large(size : UInt64, clear : Bool) : UInt64
+      # A mapping of its own, never cleared: the kernel zeroed it, and the
+      # first touch of each page is the caller's, inside its own loops.
+      def self.take_large(size : UInt64, bits : UInt64) : UInt64
         mapped = size + LARGE_USER
         base = __iyi_mmap(mapped).address
         write64(base + OFF_MAP, mapped)
-        write64(base + LARGE_HEAD + OFF_MARK, (clear ? 0_u64 : ATOMIC_FLAG) | IyiMark.epoch_flag)
+        write64(base + LARGE_HEAD + OFF_MARK, (bits & ATOMIC_FLAG) | IyiMark.epoch_flag)
         lock
         count_large(base, mapped, true)
         write64(base + OFF_NEXT, @@large)
@@ -3345,33 +3516,37 @@ require "./file"
       end
 
       # A chunk the last mark kept, freed before its arena's sweep reached
-      # it. A slice is claimed and let go under the lock, so with the lock
-      # held and no claim of this epoch on the arena nothing walks it until
-      # the unlock; a claim standing is waited out off the lock, which the
-      # slice's end wants. A claim of an older epoch is a walker parked
-      # after its slice (`release_claim`), and the pause's own sweep takes
-      # none, with this thread stopped. The lock's spin parks for a pause,
-      # whose sweep may turn the epoch and drop the list: both are read
-      # after it.
+      # it. A slice is claimed and let go under the class's lock, so with
+      # that lock held and no claim of this epoch on the arena nothing
+      # walks it until the unlock; a claim standing is waited out off the
+      # lock, which the slice's end wants. A claim of an older epoch is a
+      # helper that waited out a pause after its slice (`release_claim`),
+      # and the pause's own sweep takes none, with this thread stopped.
+      # The wait parks for a stop that asks, as the runtime lock's spin
+      # did when this waited there - the claim may be a helper's whose
+      # end waits for the runtime lock - and the pause may turn the epoch
+      # and drop the list: both are read again after it.
       @[NoInline]
       def self.free_unswept(arena : UInt64, head : UInt64, slot : UInt64, table : Pointer(UInt64), index : Int32) : Nil
-        lock
+        class_lock(index)
         while read64(arena + OFF_SWEEPING) == IyiMark.epoch
-          unlock
+          class_unlock(index)
           IyiMark.spin_pause
-          lock
+          {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+            IyiThread.park_if_requested
+          {% end %}
+          class_lock(index)
         end
         list_freed(arena, head, slot, table, index)
-        unlock
+        class_unlock(index)
       end
 
-      # Every free list emptied, under the lock with every thread stopped:
-      # the sweep's `begin_sweep` says why.
+      # Every free list emptied, in a pause with every thread stopped: the
+      # sweep's `begin_sweep` says why.
       def self.drop_free_lists : Nil
-        centre = central
         index = 0
         while index < CLASSES
-          centre[index] = 0_u64
+          write64(class_line(index) + CLASS_BATCHES, 0_u64)
           index = index + 1
         end
         page = @@caches
@@ -3399,24 +3574,31 @@ require "./file"
       end
 
       # An arena's worth of swept chunks, already flagged and linked head to
-      # tail by the sweep, pushed onto the centre as one batch: the centre
-      # keeps a class's chunks as a stack of batches, each one arena's
-      # sweep, chained through the second word of each batch's head - the
-      # first is its link, the second every other free chunk's byte
-      # address (`OFF_INDEX`), and a 16-byte chunk has no third. A refill
-      # takes one batch, which is how the
-      # centre is shared rather than hoarded — the whole-list refill let
-      # one of eight threads take every chunk and the other seven carve,
-      # and the heap and every sweep grew with it. The sweep runs under
-      # the collector's own take of the lock, with every other thread
-      # stopped, so nothing here takes it again.
+      # tail by the sweep, pushed onto the class's centre as one batch: the
+      # centre keeps a class's chunks as a stack of batches, each one
+      # slice's sweep, chained through the second word of each batch's
+      # head - the first is its link, the second every other free chunk's
+      # byte address (`OFF_INDEX`), and a 16-byte chunk has no third. A
+      # refill takes one batch, which is how the centre is shared rather
+      # than hoarded — the whole-list refill let one of eight threads take
+      # every chunk and the other seven carve, and the heap and every sweep
+      # grew with it. What reaches the stack is a helper's slice, the
+      # pause's and the trigger's sweeps, and a retired thread's lists; an
+      # allocating thread keeps its own slice's batch (`IyiMark.sweep_for`).
       BATCH_NEXT = 8_u64
 
       def self.free_batch(index : Int32, head : UInt64) : Nil
-        centre = central
+        class_lock(index)
+        push_batch(index, head)
+        class_unlock(index)
+      end
+
+      # The push itself, under the class's lock.
+      def self.push_batch(index : Int32, head : UInt64) : Nil
+        line = class_line(index)
         # The chain below the stashed range (`stash_batch_range`).
-        write64(head + BATCH_NEXT, (read64(head + BATCH_NEXT) & (0_u64 &- LOW48 &- 1_u64)) | centre[index])
-        centre[index] = head
+        write64(head + BATCH_NEXT, (read64(head + BATCH_NEXT) & (0_u64 &- LOW48 &- 1_u64)) | read64(line + CLASS_BATCHES))
+        write64(line + CLASS_BATCHES, head)
       end
 
       # Under the lock, whoever holds it: `free` takes it for a mutator's
@@ -3465,10 +3647,11 @@ require "./file"
       # own list so `containing` never walks into a hole, and only then
       # does the mapping go back.
       def self.release_arena(previous : UInt64, arena : UInt64) : Bool
-        # A walk in flight on a stopped thread holds chunks of this arena
-        # in a batch it has yet to hand over; a cache that claimed it has
-        # yet to write it into its table - it parked in the lock spin of
-        # letting its old arena go, this arena's address in a register.
+        # A walk in flight holds chunks of this arena in a batch it has
+        # yet to hand over - a helper at the runtime lock after its slice;
+        # a cache that claimed it has yet to write it into its table - it
+        # parked in the runtime lock's spin while it mapped another, this
+        # arena still its owner.
         return false if read64(arena + OFF_SWEEPING) != 0 || read64(arena + OFF_OWNER) != 0
         chunk = read64(arena + OFF_CHUNK)
         index = class_index(chunk)
@@ -3481,6 +3664,20 @@ require "./file"
           @@arenas = read64(arena + OFF_NEXT)
         else
           write64(previous + OFF_NEXT, read64(arena + OFF_NEXT))
+        end
+        # And off its class's list, every thread stopped and no class's
+        # lock held by anyone.
+        line = class_line(index)
+        before = 0_u64
+        cursor = read64(line + CLASS_ARENAS)
+        while cursor != 0 && cursor != arena
+          before = cursor
+          cursor = class_next(cursor)
+        end
+        if before == 0
+          write64(line + CLASS_ARENAS, class_next(arena))
+        else
+          write64(before + OFF_CLASS_NEXT, class_next(arena))
         end
         # Its warm pages leave the class's count with it, or a refill
         # would carve for pages no arena has.
@@ -3670,14 +3867,15 @@ require "./file"
     end
 
     # `memset` is defined locally for the bump branch's reason: codegen itself
-    # reaches for the name (`pre_initialize_aggregate` and
-    # `generic_array_malloc` lower to the LLVM `llvm.memset` intrinsic, which
-    # becomes a C `memset` call once the size is not a constant), and a
-    # definition with the same name, types and return is the only thing that
-    # can intercept that. The bulk goes eight bytes at a time, and the word
-    # store advances one word per store, because pointer arithmetic here
-    # counts elements: eight bytes is one step, not eight. The byte loop
-    # carries the tail, and the pattern word is the byte tiled eight wide.
+    # reaches for the name (`pre_initialize_aggregate` lowers to the LLVM
+    # `llvm.memset` intrinsic, and a --release build turns the allocator's
+    # clearing loops into it, which becomes a C `memset` call once the size
+    # is not a constant), and a definition with the same name, types and
+    # return is the only thing that can intercept that. The bulk goes eight
+    # bytes at a time, and the word store advances one word per store,
+    # because pointer arithmetic here counts elements: eight bytes is one
+    # step, not eight. The byte loop carries the tail, and the pattern word
+    # is the byte tiled eight wide.
     fun memset(destination : Void*, value : Int32, count : UInt64) : Void*
       byte = value.unsafe_to_u8
 
@@ -3700,10 +3898,9 @@ require "./file"
 
     {% if flag?(:darwin) %}
       # `bzero` is defined for the same reason on darwin: the aarch64 back end
-      # lowers a zeroing `llvm.memset` it will not inline — every
-      # `Pointer.malloc` clears with one, and a --release build keeps the
-      # allocator's variable-length ones — to a `bzero` call rather than a
-      # `memset` call, so without this every darwin release binary asked
+      # lowers a zeroing `llvm.memset` it will not inline — a --release build
+      # keeps the allocator's variable-length ones — to a `bzero` call rather
+      # than a `memset` call, so without this every darwin release binary asked
       # libSystem for one more name (bench/thread_floor.sh was the gate that
       # first read it; bench/dependency_floor.sh builds plain and never saw
       # it). The stores are inline asm, not a loop the compiler can read:
@@ -6030,77 +6227,127 @@ require "./file"
       SWEEP_BUSY_SPINS = 4096_u64
 
       # A slice of an arena of `wanted`'s class, or any if the class has
-      # none left, by an allocating thread. Answers 1 for a slice swept,
-      # 2 for a slice of the class that a helper is inside - the caller
+      # none left, its batch onto the class's centre: the verb for a
+      # caller outside the allocator - `sweep`, and the exercises that
+      # sweep a class to its end. Answers 1 for a slice swept, 2 for a
+      # slice of the class that another walker is inside - the caller
       # spins, its batch is microseconds away - and 0 for nothing left.
+      # Inside the allocator's bracket (`CACHE_INSIDE`), as an
+      # allocating thread's slice is, so no pause stops the walk halfway
+      # and the epoch the claim was taken in is the batch's.
       def self.sweep_one(wanted : UInt64) : UInt64
-        # No debt, no lock: with every list dropped at the pause, a thread
-        # carving fresh chunks refills on every allocation, and each refill
-        # came here - a lock and a walk of the arena list, 39 ns of a
-        # release build's allocation on Linux and a microsecond on
-        # darwin, for nothing to sweep. The count is read without the
-        # lock; a stale nonzero takes the lock and finds nothing, a stale
-        # zero carves a chunk that a sweep would have handed back later.
-        IyiRuntimeLock.lock
-        arena = claim_slice(wanted, false)
-        IyiRuntimeLock.unlock
-        return arena if arena < 4_u64
+        IyiHeap.enter_barrier
+        arena = claim_slice(wanted, 1)
+        if arena < 4_u64
+          IyiHeap.leave_barrier
+          return arena
+        end
         epoch = @@epoch
         batch = sweep_slice(arena, SWEEP_SPAN)
-        IyiRuntimeLock.lock
+        index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
+        IyiHeap.class_lock(index)
         release_claim(arena, epoch)
         arena_done(arena, epoch)
-        # A collection may have come and gone while this thread waited
-        # for the lock - it was inside the allocator, so it was stopped
-        # after its slice and after the cursor was written, and the pause
-        # went on from there - and the pause dropped every list. A batch
-        # from the old epoch is left to the new one's sweep, which finds
-        # its chunks by their flag; handed over, the same chunk would be
-        # on two lists.
-        IyiHeap.free_batch(IyiHeap.class_index(IyiHeap.arena_chunk(arena)), batch) if batch != 0 && @@epoch == epoch
-        IyiRuntimeLock.unlock
+        IyiHeap.push_batch(index, batch) if batch != 0
+        IyiHeap.class_unlock(index)
+        IyiHeap.leave_barrier
         1_u64
       end
 
-      # Under the lock: an arena with sweeping left, its walk claim taken.
-      # An arena not yet begun this epoch is begun here: its cursor set
-      # to its first chunk, the count of unbegun arenas down by one.
-      #
-      # `wanted` names a class to take first, 0 any; `helper` says a
-      # helper asks, which takes any class when the wanted one has none
-      # left, where an allocating thread answers 2 (busy) if the wanted
-      # class has arenas but every one is inside another walker's slice,
-      # and 0 only when the class has nothing left to sweep at all.
-      def self.claim_slice(wanted : UInt64, helper : Bool) : UInt64
+      # A slice of an arena of the class at `index`, by an allocating
+      # thread for its own cache (`IyiHeap.refill`): claimed and let go
+      # under the class's lock, walked under none, and its batch made the
+      # cache's list (`IyiHeap.adopt_batch`) rather than handed to the
+      # centre for any thread to take - the thread that swept a span
+      # allocates from it, as Go's mcache sweeps the span it is about to
+      # use. Pushed to the centre and popped back, a slice cost its
+      # thread two more takes of a lock every other thread of the class
+      # was taking, and the batch went to whichever of them popped first.
+      # Answers 1 for a slice swept - the cache has a list unless the
+      # slice found nothing dead - 2 for every arena of the class with
+      # sweeping left inside another walker's slice, 0 for nothing left.
+      # Between the claim and the batch this thread is inside the
+      # allocator and takes no runtime lock, so no pause runs in between:
+      # the epoch the claim was taken in is the epoch the batch is
+      # adopted in, which the runtime lock's take after the slice, and
+      # the pause it could park through, once made a question.
+      def self.sweep_for(table : Pointer(UInt64), index : Int32) : UInt64
+        IyiHeap.class_lock(index)
+        arena = claim_class(index, 1)
+        IyiHeap.class_unlock(index)
+        return arena if arena < 4_u64
+        epoch = @@epoch
+        batch = sweep_slice(arena, SWEEP_SPAN)
+        IyiHeap.class_lock(index)
+        release_claim(arena, epoch)
+        arena_done(arena, epoch)
+        IyiHeap.class_unlock(index)
+        IyiHeap.adopt_batch(table, index, batch) if batch != 0
+        1_u64
+      end
+
+      # Under the class's lock: an arena of the class with sweeping left,
+      # its walk claim taken, or 2 for every such arena inside another
+      # walker's slice, or 0 for none. An arena not yet begun this epoch
+      # is begun here: its cursor set to its first chunk, the count of
+      # unbegun arenas down by one. The walk is the class's own arenas.
+      def self.claim_class(index : Int32, who : Int32) : UInt64
         epoch = @@epoch
         busy = false
-        pass = 0
-        while pass < 2
-          chunk = pass == 0 ? wanted : 0_u64
-          if chunk != 0 || pass == 1
-            arena = IyiHeap.first_arena
-            while arena != 0
-              if (chunk == 0 || IyiHeap.arena_chunk(arena) == chunk) && sweep_left?(arena, epoch)
-                if IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) == epoch
-                  busy = true
-                else
-                  begin_arena(arena, epoch, helper ? 2 : 1) if IyiHeap.arena_epoch(arena) != epoch
-                  IyiHeap.write64(arena + IyiHeap::OFF_SWEEPING, epoch)
-                  return arena
-                end
-              end
-              arena = IyiHeap.arena_next(arena)
+        arena = IyiHeap.class_first(index)
+        while arena != 0
+          if sweep_left?(arena, epoch)
+            if IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) == epoch
+              busy = true
+            else
+              begin_arena(arena, epoch, who) if IyiHeap.arena_epoch(arena) != epoch
+              IyiHeap.write64(arena + IyiHeap::OFF_SWEEPING, epoch)
+              return arena
             end
           end
+          arena = IyiHeap.class_next(arena)
+        end
+        busy ? 2_u64 : 0_u64
+      end
+
+      # An arena with sweeping left, its walk claim taken, each class
+      # looked at under its own lock. `wanted` names a class to take
+      # first, 0 any; `who` says who asks - a helper (2), an allocating
+      # thread (1), the collector before its stop (0). A helper and the
+      # collector take any class when the wanted one has none left, where
+      # an allocating thread answers 2 (busy) if the wanted class has
+      # arenas but every one is inside another walker's slice, and 0 only
+      # when the class has nothing left to sweep at all. A class whose
+      # count of arenas with sweeping left reads 0 is passed without its
+      # lock: the count only falls within an epoch, and nobody who asks
+      # here can see a pause between the read and the take.
+      def self.claim_slice(wanted : UInt64, who : Int32) : UInt64
+        busy = false
+        if wanted != 0
+          index = IyiHeap.class_index(wanted)
+          IyiHeap.class_lock(index)
+          arena = claim_class(index, who)
+          IyiHeap.class_unlock(index)
+          return arena if arena > 2_u64
+          busy = arena == 2_u64
           # An allocating thread wants its class: busy is an answer, and
           # so is nothing of the class; a helper goes on to any, and busy
           # is its answer too once every arena with work is inside
           # another's slice - a helper that took that for nothing left
           # went back to its park with the round barely begun, and the
           # allocating thread swept the heap itself, slice after slice.
-          return 2_u64 if !helper && busy
-          return 0_u64 if !helper && wanted != 0
-          pass = pass + 1
+          return busy ? 2_u64 : 0_u64 if who == 1
+        end
+        index = 0
+        while index < IyiHeap::CLASSES
+          if IyiHeap.sweep_left_of(index) != 0_u64
+            IyiHeap.class_lock(index)
+            arena = claim_class(index, who)
+            IyiHeap.class_unlock(index)
+            return arena if arena > 2_u64
+            busy = true if arena == 2_u64
+          end
+          index = index + 1
         end
         busy ? 2_u64 : 0_u64
       end
@@ -6109,47 +6356,59 @@ require "./file"
         IyiHeap.arena_epoch(arena) != epoch || IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_CURSOR) != IyiHeap::SWEEP_DONE
       end
 
-      # Under the lock: an arena's sweep for this epoch begun, by a
-      # helper (2), an allocating thread (1) or a pause (0).
+      # Under the class's lock, or in a pause: an arena's sweep for this
+      # epoch begun, by a helper (2), an allocating thread (1) or a pause
+      # (0). The counts are the heap's, and two classes' locks are held
+      # at once by two threads, so they are atomic.
       def self.begin_arena(arena : UInt64, epoch : UInt64, who : Int32) : Nil
         IyiHeap.arena_epoch_set(arena, epoch)
         IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, IyiHeap.arena_first(arena))
-        @@unswept = @@unswept - 1_u64 if @@unswept > 0_u64
-        @@swept_by_helpers = @@swept_by_helpers + 1_u64 if who == 2
-        @@swept_by_allocator = @@swept_by_allocator + 1_u64 if who == 1
+        count_down(pointerof(@@unswept).address)
+        Pointer(Atomic(UInt64)).new(pointerof(@@swept_by_helpers).address).value.add(1_u64) if who == 2
+        Pointer(Atomic(UInt64)).new(pointerof(@@swept_by_allocator).address).value.add(1_u64) if who == 1
       end
 
-      # Under the lock, after a slice: the arena counted out if the slice
-      # reached its end, in the epoch the slice ran in - a slice parked
-      # through a pause finished an arena of an epoch that is gone, and
-      # the new epoch's count is the new epoch's.
+      # One off a count the heap shares, never below zero.
+      def self.count_down(address : UInt64) : Nil
+        word = Pointer(Atomic(UInt64)).new(address)
+        while (seen = word.value.get) > 0_u64
+          break if word.value.compare_and_set(seen, seen - 1_u64)[1]
+        end
+      end
+
+      # Under the class's lock, or in a pause, after a slice: the arena
+      # counted out if the slice reached its end, in the epoch the slice
+      # ran in - a helper's slice that waited out a pause finished an
+      # arena of an epoch that is gone, and the new epoch's count is the
+      # new epoch's.
       def self.arena_done(arena : UInt64, epoch : UInt64) : Nil
         return unless @@epoch == epoch && IyiHeap.mapped?(arena)
         return unless IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_CURSOR) == IyiHeap::SWEEP_DONE
-        # Once: a walker parked through a pause that finished its arena
+        # Once: a walker that waited out a pause that finished its arena
         # comes here after the pause did.
         return if IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_COUNTED) == epoch
         IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_COUNTED, epoch)
-        @@sweep_left = @@sweep_left - 1_u64 if @@sweep_left > 0_u64
+        count_down(pointerof(@@sweep_left).address)
         IyiHeap.sweep_left_add(IyiHeap.class_index(IyiHeap.arena_chunk(arena)), -1_i64)
       end
 
-      # Under the lock: the walk claim let go, if it is still this walk's
-      # - a claim of an older epoch stands until its walker clears it,
-      # and a newer walker's claim on the same arena is not this one's -
-      # and only if the arena is still an arena: a pause's scavenge may
-      # have handed the mapping back while this thread waited at the lock.
+      # Under the class's lock: the walk claim let go, if it is still
+      # this walk's - a claim of an older epoch stands until its walker
+      # clears it, and a newer walker's claim on the same arena is not
+      # this one's - and only if the arena is still an arena: a pause's
+      # scavenge may have handed the mapping back while a helper waited
+      # at the runtime lock.
       def self.release_claim(arena : UInt64, epoch : UInt64) : Nil
         if IyiHeap.mapped?(arena) && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) == epoch
           IyiHeap.write64(arena + IyiHeap::OFF_SWEEPING, 0_u64)
         end
       end
 
-      # The pause's own sweep, the lock held and every thread stopped: one
-      # arena with sweeping left finished from its cursor, whoever's
-      # claim stands on it - a claim stands for a walker parked at the
-      # lock after its slice, whose batch that walker will discard.
-      # Answers whether there was one.
+      # The pause's own sweep, the runtime lock held and every thread
+      # stopped: one arena with sweeping left finished from its cursor,
+      # whoever's claim stands on it - a claim stands for a helper waiting
+      # at the runtime lock after its slice, whose batch that helper will
+      # discard. Answers whether there was one.
       def self.sweep_one_held : Bool
         epoch = @@epoch
         arena = IyiHeap.first_arena
@@ -6165,27 +6424,25 @@ require "./file"
         true
       end
 
-      # The triggering thread's sweep before the stop, the lock held on
-      # entry and on exit and released for the walk: one arena with
-      # sweeping left and no slice in flight, claimed and finished from
-      # its cursor while every other thread runs. An arena a thread is
-      # inside a slice of is left to the pause. Answers whether there was
-      # one.
+      # The triggering thread's sweep before the stop, the runtime lock
+      # held on entry and on exit and released for the walk: one arena
+      # with sweeping left and no slice in flight, claimed and finished
+      # from its cursor while every other thread runs. An arena a thread
+      # is inside a slice of is left to the pause. Answers whether there
+      # was one.
       def self.sweep_one_before_stop : Bool
         epoch = @@epoch
-        arena = IyiHeap.first_arena
-        while arena != 0 && !(sweep_left?(arena, epoch) && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) != epoch)
-          arena = IyiHeap.arena_next(arena)
-        end
-        return false if arena == 0
-        begin_arena(arena, epoch, 0) if IyiHeap.arena_epoch(arena) != epoch
-        IyiHeap.write64(arena + IyiHeap::OFF_SWEEPING, epoch)
+        arena = claim_slice(0_u64, 0)
+        return false if arena < 4_u64
         IyiRuntimeLock.unlock
         batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)
         IyiRuntimeLock.lock
+        index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
+        IyiHeap.class_lock(index)
         release_claim(arena, epoch)
         arena_done(arena, epoch)
-        IyiHeap.free_batch(IyiHeap.class_index(IyiHeap.arena_chunk(arena)), batch) if batch != 0
+        IyiHeap.push_batch(index, batch) if batch != 0
+        IyiHeap.class_unlock(index)
         true
       end
 
@@ -6203,19 +6460,21 @@ require "./file"
         # A helper's turn of the round: one slice, the way an allocating
         # thread takes one - so three helpers are on one arena at once,
         # and the arena a program churns through is swept three times
-        # faster - its batch handed over under the lock; or false when
-        # the round is closed or nothing is left. The slice is counted in
-        # while it runs, so the collection that closes the round can wait
-        # it out; a helper parked at the lock after its slice may wait
-        # through a whole collection, and its batch is then an old
-        # epoch's, discarded.
+        # faster - its batch handed to the class's centre; or false when
+        # the round is closed or nothing is left. The claim and the hand
+        # over are under the runtime lock, which closes the round, and
+        # the class's inside it. The slice is counted in while it runs,
+        # so the collection that closes the round can wait it out; a
+        # helper at the runtime lock after its slice may wait through a
+        # whole collection, and its batch is then an old epoch's,
+        # discarded.
         def self.sweep_one_helper : Bool
           return false if pool_word(POOL_SWEEP).value.get == 0_u64
           IyiRuntimeLock.lock
           arena = 0_u64
           if pool_word(POOL_SWEEP).value.get != 0_u64
             wanted = pool_word(POOL_SWEEP_WANTED).value.get
-            arena = claim_slice(wanted == 0_u64 ? 0_u64 : IyiHeap.chunk_of(wanted.to_i32 - 1), true)
+            arena = claim_slice(wanted == 0_u64 ? 0_u64 : IyiHeap.chunk_of(wanted.to_i32 - 1), 2)
             # Counted in under the lock that closes the round: closed, no
             # slice starts; open, a slice begun is counted before the
             # closer looks.
@@ -6228,12 +6487,13 @@ require "./file"
             # is a slice long, because a slice is what it waits for: the
             # claim this helper wants is let go at some walker's slice
             # end, and POOL_SWEEPERS falls when a helper's does. Looking
-            # again sooner buys nothing and costs the runtime lock, which
-            # every refill takes: 64 spins between looks had a helper
-            # take that lock a hundred times a slice, and on three cores
-            # the allocating thread's own claim went with it - darwin's
-            # binary trees 1.36 s against 0.33, churn 0.27 against 0.085,
-            # with the mark and the sweep otherwise unchanged.
+            # again sooner buys nothing and costs the runtime lock and
+            # the classes' locks a refill takes: 64 spins between looks
+            # had a helper take the one lock there was then a hundred
+            # times a slice, and on three cores the allocating thread's
+            # own claim went with it - darwin's binary trees 1.36 s
+            # against 0.33, churn 0.27 against 0.085, with the mark and
+            # the sweep otherwise unchanged.
             watch = pool_word(POOL_SWEEPERS)
             seen = watch.value.get
             spins = 0_u64
@@ -6244,12 +6504,17 @@ require "./file"
             return true
           end
           epoch = @@epoch
+          # The class, read before the walk rather than past the runtime
+          # lock, which a whole collection may come and go behind.
+          index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
           batch = sweep_slice(arena, SWEEP_SPAN)
           pool_word(POOL_SWEEPERS).value.sub(1_u64)
           IyiRuntimeLock.lock
+          IyiHeap.class_lock(index)
           release_claim(arena, epoch)
           arena_done(arena, epoch)
-          IyiHeap.free_batch(IyiHeap.class_index(IyiHeap.arena_chunk(arena)), batch) if batch != 0 && @@epoch == epoch
+          IyiHeap.push_batch(index, batch) if batch != 0 && @@epoch == epoch
+          IyiHeap.class_unlock(index)
           IyiRuntimeLock.unlock
           true
         end
@@ -8086,8 +8351,10 @@ require "./file"
           Pointer(Void).new(take(size, true, UNTYPED_FLAG, 0_u64))
         end
 
+        # Cleared like `alloc`: codegen clears nothing after either entry
+        # under the arena (`generic_array_malloc`).
         def self.alloc_atomic(size : UInt64) : Void*
-          Pointer(Void).new(take(size, false, UNTYPED_FLAG | ATOMIC_FLAG, 0_u64))
+          Pointer(Void).new(take(size, true, UNTYPED_FLAG | ATOMIC_FLAG, 0_u64))
         end
 
         def self.new_object(size : UInt64, type_id : UInt64, headed : Bool, atomic : Bool) : Void*
@@ -8667,6 +8934,21 @@ require "./file"
     destination
   end
 {% end %}
+
+# iyi: one run of `Pointer#copy_from` (string.iyi), which copies a million
+# elements a run and checks for preemption between runs (SPEC.md III.4.13,
+# part 9). Written in a runtime file, so the run carries no check of its
+# own: with one, a short string's copy paid a load and a branch per byte,
+# and a join of 1,000,000 strings took 6.6 ms against 5.1.
+struct Pointer(T)
+  def copy_run(source : Pointer(T), count : Int32) : Nil
+    index = 0
+    while index < count
+      self[index] = source[index]
+      index = index + 1
+    end
+  end
+end
 
 # iyi: weak references (GC_DESIGN.md, "Weak References"), the mechanism
 # under std/weak_ref. A weak reference is a *cell*: eight bytes of atomic
@@ -9394,15 +9676,6 @@ struct Pointer(T)
 
   def []=(offset : Int32, value : T) : T
     (self + offset.to_i64).value = value
-  end
-
-  # Bytes, not elements: every caller here is copying string contents.
-  def copy_from(source : Pointer(T), count : Int32) : Nil
-    index = 0
-    while index < count
-      self[index] = source[index]
-      index = index + 1
-    end
   end
 end
 

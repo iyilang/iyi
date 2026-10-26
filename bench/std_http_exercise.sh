@@ -1161,10 +1161,20 @@ echo "== connections on every core: serve_parallel (bench/std_http_parallel.iyi)
 # more than one worker and on none of them the accepting thread; a
 # handler that panics ending its own connection; and the stop, an answer
 # in progress written and a kept-alive connection closed, under
-# watchdogs. Then copies of std/http with the connection spawned on the
-# accepting thread, and with the watcher that carries the stop to a
-# connection's worker made to do nothing, each caught at the line that
-# names it.
+# watchdogs. Then the same over TLS (`tls: config.frozen`): eight
+# connections answered on more than one worker, h2 and http/1.1 by ALPN,
+# a ticket a connection on one worker was sent resumed by a connection
+# that started on another, a client's certificate seen and an encrypted
+# ClientHello taken on a worker, and the stop reaching a kept-alive
+# connection on its worker as close_notify. Then copies of std/http with
+# the connection spawned on the accepting thread, with the watcher that
+# carries the stop to a connection's worker made to do nothing, and with
+# the stop sending no close_notify, and a copy of std/tls whose ticket
+# keys are every worker's own, each caught at the line that names it.
+# And what the compiler refuses: a `TlsServerConfig` that is not frozen,
+# given to `serve_parallel`, and a `frozen` identity source that captures
+# a table of identities - each refused with its sentence, and each
+# compiled by a copy of std/tls with the mark that refuses it taken off.
 if ! "$IYI" build -o "$WORK/parallel" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel.build" 2>&1; then
   echo "  bench/std_http_parallel.iyi did not build"
   sed -n '1,8p' "$WORK/parallel.build"
@@ -1175,12 +1185,13 @@ elif ! timeout 120 "$WORK/parallel" >"$WORK/parallel.out" 2>&1; then
   status=1
 else
   grep -v -e 'ALL CHECKS PASSED' -e '^iyi: panic' -e '^  at ' "$WORK/parallel.out" | tr -d '\r' | sed 's/^/  /'
-  # parallel_breaks <label> <old> <new> <check>: the program over a copy
-  # of http.iyi with <old> made <new> must print "FAIL <check>".
+  # parallel_breaks <label> <old> <new> <check> [module]: the program over
+  # a copy of std/<module> (http unless given) with <old> made <new> must
+  # print "FAIL <check>".
   parallel_breaks() {
-    local label="$1" old="$2" new="$3" check="$4"
+    local label="$1" old="$2" new="$3" check="$4" module="${5:-http}"
     rm -rf "$WORK/parbreak" && mkdir -p "$WORK/parbreak/std"
-    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/http.iyi" "$WORK/parbreak/std/http.iyi" <<'PY'
+    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module.iyi" "$WORK/parbreak/std/$module.iyi" <<'PY'
 import os, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 if src.count(os.environ["OLD"]) != 1:
@@ -1215,7 +1226,93 @@ PY
   parallel_breaks "a stop that never reaches a connection on another worker" \
     '            stop.close
             idle.values.each { |waiting| waiting.close_for_stop }' '            nil' "the stop"
+  parallel_breaks "a stop that sends no close_notify on a worker" \
+    '      stream.close_write
+    end
+    @socket.close' '      nil
+    end
+    @socket.close' "the kept-alive TLS connection, on the stop"
+  # Each thread seals and opens under a key of its own, named as the
+  # shared one: a ticket opens only on the worker that sealed it.
+  parallel_breaks "workers keeping ticket keys of their own" \
+    '    rotate_if_due(now_ms, period_ms)
+    TlsTicketKeySet.new(@name, @key, @previous_name, @previous)' '    rotate_if_due(now_ms, period_ms)
+    own = (IyiScheduler.state.object_id.to_s * 4)[0, 32]
+    TlsTicketKeySet.new(@name, own, @previous_name, @previous)' "a ticket resumed on another worker" tls
 fi
+
+# What the compiler refuses of a TLS server whose connections run on
+# every worker: a config that is not frozen, which changes as it serves,
+# and an identity source given to `frozen` that captures a table. Each
+# must be refused with its sentence; and each must compile against a
+# copy of std/tls with the mark that refuses it taken off - the config
+# trusted as `Share`, and `frozen`'s block no longer kept by a `@[Share]`
+# def - so the refusal is the mark's doing.
+cat >"$WORK/unfrozen.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/socket::{IyiSocket}
+import std/tls::{TlsServerConfig}
+
+config = TlsServerConfig.from_pem(Program.args[0], Program.args[1])
+raise "no config" unless config.is_a?(TlsServerConfig)
+Server.serve_parallel(IyiSocket.listen("127.0.0.1", 0), tls: config) { |request| Response.new(200, "here") }
+IYI
+cat >"$WORK/source.iyi" <<'IYI'
+module main
+
+import std/tls::{TlsIdentity, TlsServerConfig}
+
+config = TlsServerConfig.from_pem(Program.args[0], Program.args[1])
+raise "no config" unless config.is_a?(TlsServerConfig)
+held = {} of String => TlsIdentity
+frozen = config.frozen { |name, alpn, left_ms| held[name || ""]? }
+puts frozen.alpn.size
+IYI
+# refused_tls <label> <file> <sentence> <old> <new>
+refused_tls() {
+  local label="$1" file="$2" sentence="$3" old="$4" new="$5"
+  if "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/refused.log" 2>&1; then
+    echo "  FAIL $label: compiled"
+    status=1
+    return
+  fi
+  if ! grep -qF "$sentence" "$WORK/refused.log"; then
+    echo "  FAIL $label: refused, but not for the reason: $(grep -m1 'Error' "$WORK/refused.log")"
+    status=1
+    return
+  fi
+  echo "  $label: refused: $(grep -m1 -F "$sentence" "$WORK/refused.log" | sed 's/^Error: //' | cut -c1-150)"
+  rm -rf "$WORK/refbreak" && mkdir -p "$WORK/refbreak/std"
+  if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/tls.iyi" "$WORK/refbreak/std/tls.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/refbreak${PSEP}$IYI_PATH" "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/refused-broken.log" 2>&1; then
+    echo "  $label, the mark taken off: compiled, so caught"
+  else
+    echo "  FAIL $label, the mark taken off: still refused: $(grep -m1 'Error' "$WORK/refused-broken.log")"
+    status=1
+  fi
+}
+refused_tls "a TlsServerConfig given to serve_parallel" unfrozen.iyi \
+  'captures `tls : Std::Tls::TlsServerConfig`, which is not Share: Std::Tls::TlsServerConfig'"'"'s field @alpn is given a setter `alpn=`' \
+  'pub class TlsServerConfig' '@[Share]
+pub class TlsServerConfig'
+refused_tls "an identity source that captures a table" source.iyi \
+  'the block TlsServerConfig#frozen keeps, which may run on other threads captures `held : Hash(String, Std::Tls::TlsIdentity)`, which is not Share' \
+  '  @[Share]
+  def frozen(&source : String?, Array(String)?, Int32? -> TlsIdentity | TlsError | Nil) : TlsFrozenServerConfig
+    TlsFrozenServerConfig.new(self, SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil).of { |asked| source.call(asked[0], asked[1], asked[2]) })' \
+  '  def frozen(&source : String?, Array(String)?, Int32? -> TlsIdentity | TlsError | Nil) : TlsFrozenServerConfig
+    TlsFrozenServerConfig.new(self, nil)'
 
 echo
 echo "== TLS resumption: an HTTPClient's tickets (bench/std_http_resume.iyi)"

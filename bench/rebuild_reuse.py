@@ -36,7 +36,23 @@ cache:
   2. three builds with nothing changed: each reports every object reused;
   3. one line of one module's function body edited: that module's unit is
      the one object compiled again, and the program prints the edit;
-  4. one more build with nothing changed: every object reused.
+  4. one more build with nothing changed: every object reused;
+  5. on Windows, one more while another process holds the program, shared
+     for reading only, for a second: the build waits for it and links;
+  6. eleven other programs built into the same cache, then the fixture
+     again: the EIY helper its template runs is reused, not built again.
+
+Step 5 is what Smart App Control's services do, evaluating, on Windows 11:
+the Restart Manager named `CryptSvc`, `AppIDSvc` and the `applockerfltr`
+filter holding a program 0.1 to 1.1 s after it ran, and a build begun at
+once stopped at "LNK1104: cannot open file" in 6 of 60 builds of the probe
+below - and this gate in 8 runs of 8 - where the compiler neither waited
+nor linked again. Against that compiler step 5 failed in 2 runs of 2, at
+"prog.exe is in use and cannot be replaced or moved aside".
+
+Step 6 is #143: the cache keeps the ten directories used last, and the
+helper counted with them. Against the compiler before helpers were kept
+apart it failed in 1 run of 1, the helper built again in 2.38 s.
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each
@@ -425,11 +441,82 @@ def probe(work):
     print(f"  ok   rule 2: a release build keeps the load order ({released})")
 
 
+# How long step 5 holds the program: past the half second a rebuild that
+# reuses every object takes to reach its link here, inside the two seconds
+# the compiler waits.
+HOLD_SECONDS = 1.0
+
+
+def held(work):
+    """Windows: the program rebuilt while another process has it open for
+    reading and shares it for reading only, as Smart App Control's services
+    have a program that just ran."""
+    if os.name != "nt":
+        return
+    import ctypes
+    import threading
+    from ctypes import wintypes
+
+    root = work / "project"
+    env = environment(work / "cache")
+    exe = root / "prog.exe"
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+    handle = kernel32.CreateFileW(str(exe), 0x80000000, 1, None, 3, 0, None)
+    if handle is None or handle == wintypes.HANDLE(-1).value:
+        fail("5. a held program", f"could not open {exe}: error {ctypes.get_last_error()}")
+    release = threading.Timer(HOLD_SECONDS, kernel32.CloseHandle, (handle,))
+    release.start()
+    try:
+        build(root, "main.iyi", "prog", env)
+    finally:
+        release.join()
+    printed = run(root, "prog")
+    if printed != EXPECTED.replace("int 1\n", "integer 1\n", 1):
+        fail("5. a held program", f"the program printed\n{printed}")
+    print(f"  ok   5. a rebuild while another process held the program for {HOLD_SECONDS:g} s, shared for reading only")
+
+
+# More other programs than the cache's rotation keeps (`CacheDir::KEPT`).
+OTHERS = 11
+HELPER = re.compile(r"^ - .*eiy[\\/]process\.iyi: (.*)$", re.M)
+
+
+def outlived(work):
+    """The EIY helper `Eiy.def_to_s` runs is still built after more other
+    programs than the cache keeps were built into the same cache."""
+    root = work / "project"
+    env = environment(work / "cache")
+    others = work / "others"
+    for i in range(OTHERS):
+        write(others, {f"other{i}.iyi": f"module other{i}\n\nputs {i}\n"})
+        proc = subprocess.run([IYI, "build", f"other{i}.iyi", "-o", f"other{i}"], cwd=others, env=env,
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            fail("6. a helper outlives other builds", f"other{i}.iyi did not build\n{proc.stdout}{proc.stderr}")
+    proc = subprocess.run([IYI, "build", "-s", "--force", "main.iyi", "-o", "prog"], cwd=root, env=env,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        fail("6. a helper outlives other builds", f"main.iyi did not build\n{proc.stdout}{proc.stderr}")
+    found = HELPER.search(proc.stdout)
+    if not found:
+        fail("6. a helper outlives other builds", f"`iyi build -s` named no EIY helper\n{proc.stdout}")
+    if not found.group(1).startswith("reused previous compilation"):
+        fail("6. a helper outlives other builds", f"after {OTHERS} other programs the EIY helper was built again: {found.group(1)}")
+    print(f"  ok   6. after {OTHERS} other programs into the same cache, the EIY helper is reused")
+
+
 def main():
     work = Path(tempfile.mkdtemp(prefix="iyi-rebuild-reuse"))
     try:
         print(f"rebuild reuse ({IYI}):")
         reuse(work)
+        held(work)
+        outlived(work)
         probe(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)

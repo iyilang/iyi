@@ -22,7 +22,11 @@
 #       MINICA - by CHALLENGES in that order, checks each chain to ROOTS,
 #       answers http-01 on HTTP_PORT, keeps them in CACHE and renews
 #       them; READY written once it listens. It answers every request
-#       with the count of orders and renewals it has made.
+#       with the count of orders and renewals it has made;
+#   serve ... READY parallel
+#       the same under `Server.serve_parallel` on four workers, its
+#       config `frozen_tls_config`'s, each request answered with the
+#       worker that took it.
 
 import std/autocert::{AutocertManager, AutocertDirCache, AutocertError, AutocertHeld}
 import std/x509::{Certificate, SigningKey, X509Error}
@@ -358,7 +362,16 @@ def serve(args : Array(String)) : Nil
       Server.serve(http_listener) { |r| manager.answer(r) || Response.new(404, "not a challenge") }
       0
     end
-    Server.serve(tls_listener, tls: config) { |r| Response.new(200, "orders #{manager.orders} renewals #{manager.renewals}\n") }
+    if args.size > 10 && args[10] == "parallel"
+      IyiWorkers.count = 4
+      # A worker waits for `run` this long at most: a broken copy whose
+      # asks go unanswered is then caught in seconds, not minutes.
+      manager.wait_ms = 20000
+      frozen = manager.frozen_tls_config(config)
+      Server.serve_parallel(tls_listener, tls: frozen) { |r| Response.new(200, "worker #{IyiScheduler.state.object_id}\n") }
+    else
+      Server.serve(tls_listener, tls: config) { |r| Response.new(200, "orders #{manager.orders} renewals #{manager.renewals}\n") }
+    end
     0
   end
 end

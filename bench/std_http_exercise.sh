@@ -1178,9 +1178,10 @@ echo "== connections on every core: serve's default workers, and workers: 1 (ben
 # ticket keys are every worker's own, each caught at the line that
 # names it. And what the compiler refuses and takes: a block that
 # captures an `Array` under the default workers, a `TlsServerConfig`
-# that is not frozen, and a `frozen` identity source that captures a
-# table of identities, each refused with its sentence; and the `Array`
-# and the config under `workers: 1`, taken.
+# that is not frozen, a `Router` given as the handler value, and a
+# `frozen` identity source that captures a table of identities, each
+# refused with its sentence; and the `Array`, the config and the
+# `Router` under `workers: 1`, taken.
 if ! "$IYI" build -o "$WORK/parallel" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel.build" 2>&1; then
   echo "  bench/std_http_parallel.iyi did not build"
   sed -n '1,8p' "$WORK/parallel.build"
@@ -1236,11 +1237,11 @@ PY
       serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
       return
     end
-    serve(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers)' '    if tls.is_a?(TlsServerConfig)
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers)' '    if tls.is_a?(TlsServerConfig)
       serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
       return
     end
-    serve(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, IyiWorkers.count)' "workers: 1, the threads that answered"
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, IyiWorkers.count)' "workers: 1, the threads that answered"
   parallel_breaks "a connection served on the thread that accepted it" \
     '    g.spawn_parallel do
       client = IyiSocket.new(fd, family)' '    g.spawn do
@@ -1312,6 +1313,28 @@ Server.serve(IyiSocket.listen("127.0.0.1", 0), tls: config, workers: 1) do |requ
   seen << request.path
   Response.new(200, "here")
 end
+IYI
+cat >"$WORK/router_value.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/router::{Router}
+import std/socket::{IyiSocket}
+
+router = Router.new
+router.handle("GET /") { |_, _| Response.new(200, "home") }
+Server.serve(IyiSocket.listen("127.0.0.1", 0), router)
+IYI
+cat >"$WORK/router_alone.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/router::{Router}
+import std/socket::{IyiSocket}
+
+router = Router.new
+router.handle("GET /") { |_, _| Response.new(200, "home") }
+Server.serve(IyiSocket.listen("127.0.0.1", 0), router, workers: 1)
 IYI
 cat >"$WORK/source.iyi" <<'IYI'
 module main
@@ -1404,7 +1427,7 @@ refused "a block that captures an Array, on every worker" captures.iyi \
   end
 
   def self.serve(listener : IyiSocket, stream_bodies' \
-  '    serve(listener, SharedProc(Request, Response).of(&handler), stream_bodies' '    serve(listener, UncheckedHandler.new(handler), stream_bodies'
+  '    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies' '    serve_pool(listener, UncheckedHandler.new(handler), stream_bodies'
 refused "a TlsServerConfig on every worker" unfrozen.iyi \
   'Server.serve hands `tls : Std::Tls::TlsServerConfig` to other threads, several at once, and it is not Share: Std::Tls::TlsServerConfig'"'"'s field @alpn is given a setter `alpn=`. Pass `config.frozen`, the copy every worker may read, or pass `workers: 1` so it stays on one thread' \
   http "$serve_mark" '  @[Share(serial: workers)]
@@ -1420,6 +1443,27 @@ taken "an Array and a TlsServerConfig under workers: 1" alone.iyi \
   'Server.serve hands `tls : Std::Tls::TlsServerConfig` to other threads' \
   http "$serve_mark" '  @[Share(crossing: {tls: "Pass `config.frozen`, the copy every worker may read"})]
   def self.serve(listener : IyiSocket, stream_bodies'
+# The value form: a `Router` refused at the argument on every worker, and
+# taken under `workers: 1`. Its mark taken off is the `handler:` crossing
+# gone and the value handed to the workers unchecked.
+value_mark='  @[Share(serial: workers, crossing: {handler: "Make it Share - a `SharedRouter` for a `Router`, its state behind a `Mutex` (std/mutex)", tls:'
+refused "a Router as the handler, on every worker" router_value.iyi \
+  'Server.serve hands `handler : Std::Router::Router` to other threads, several at once, and it is not Share' \
+  http "$value_mark" '  @[Share(owns: true)]
+  struct UncheckedValue(H)
+    def initialize(@handler : H)
+    end
+
+    def call(request : Request) : Response
+      @handler.call(request)
+    end
+  end
+
+  @[Share(serial: workers, crossing: {tls:' \
+  '    serve_pool(listener, SharedProc(Request, Response).of { |request| handler.call(request) }, stream_bodies' '    serve_pool(listener, UncheckedValue.new(handler), stream_bodies'
+taken "a Router as the handler under workers: 1" router_alone.iyi \
+  'Server.serve hands `handler : Std::Router::Router` to other threads' \
+  http "$value_mark" '  @[Share(crossing: {handler: "Make it Share - a `SharedRouter` for a `Router`, its state behind a `Mutex` (std/mutex)", tls:'
 
 echo
 echo "== TLS resumption: an HTTPClient's tickets (bench/std_http_resume.iyi)"

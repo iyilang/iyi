@@ -440,8 +440,9 @@ group do |g|
       listener.close
       Response.new(200, "bye")
     end
-    # One thread: a `Router` is not `Share`, and `/stop` closes the listener.
-    Server.serve(listener, workers: 1) { |req| router.call(req) }
+    # One thread, the `Router` itself the handler: it is not `Share`, and
+    # `/stop` closes the listener.
+    Server.serve(listener, router, workers: 1)
     0
   end
   g.spawn do

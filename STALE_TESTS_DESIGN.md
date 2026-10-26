@@ -358,6 +358,7 @@ Automated in `bench/stale_tests.sh` unless marked CI:
 46. Failable downcast: moving the cast to another line reruns; `__iyi_raise_cast_failed` in prelude prevents codegen-time typing.
 47. Two processes checking a def taking `Int32 | String` compute identical signatures under canonical union sorting.
 48. Linked library or link flag using a backtick, `$`, `*`, `?`, `[` or `~` is refused with a not-reusable reason; link command uses exact flags vector computed during check.
+49. A test that writes and reads back a file in its own scratch directory (`TMPDIR`) hits on its second run; editing the input it copied there reruns. (Added in the build: the runtime had lost the scratch path before the program ran.)
 
 ## 13. Measurements and completion
 

@@ -13,8 +13,9 @@
 #     manager.email = "admin@example.com"
 #     group do |g|
 #       g.spawn { manager.run; 0 }         # renewals, until `manager.stop`
-#       g.spawn { Server.serve(IyiSocket.listen(80)) { |r| manager.answer(r) || Response.new(404, "") }; 0 }
-#       Server.serve(IyiSocket.listen(443), tls: manager.tls_config) { |r| Response.new(200, "hello") }
+#       # Port 80's block calls the manager, whose state is one thread's.
+#       g.spawn { Server.serve(IyiSocket.listen(80), workers: 1) { |r| manager.answer(r) || Response.new(404, "") }; 0 }
+#       Server.serve(IyiSocket.listen(443), tls: manager.frozen_tls_config) { |r| Response.new(200, "hello") }
 #       0
 #     end
 #
@@ -43,7 +44,7 @@
 # connections are, and `Share` keeps it out of a block `spawn_parallel`
 # runs.
 #
-# **Under `serve_parallel`.** `frozen_tls_config` is `tls_config` frozen
+# **On every worker.** `frozen_tls_config` is `tls_config` frozen
 # (std/tls's `TlsFrozenServerConfig`) for a server whose handshakes run
 # on every worker, and the manager's state stays on the thread `run`
 # runs on. What the workers share with it is `Share` by its fields: the
@@ -55,7 +56,7 @@
 # a name not held yet, one expired, one refused - is sent to `run` as an
 # ask, which a task of its group answers with `identity_for`, so one
 # order serves however many workers ask for a name at once and a failure
-# is remembered as under `serve`. The worker waits for the answer no
+# is remembered as under `workers: 1`. The worker waits for the answer no
 # longer than its handshake's time and `wait_ms`. So `run` must run: an
 # ask nothing takes is refused with internal_error once that time is
 # up. A name held is answered without asking `host_policy` again.
@@ -356,9 +357,10 @@ pub class AutocertManager
 
   # *config* - `tls_config`'s, or one the program got from it and set
   # more of, a `min_version` or `groups` - frozen for std/http's
-  # `Server.serve_parallel(tls:)`: its identity source runs on every
-  # worker, answers what this manager holds there, and asks `run` for the
-  # rest (the header says how). `run` must run while it serves.
+  # `Server.serve(tls:)` on more than one worker: its identity source
+  # runs on every worker, answers what this manager holds there, and
+  # asks `run` for the rest (the header says how). `run` must run while
+  # it serves.
   def frozen_tls_config(config : TlsServerConfig = tls_config) : TlsFrozenServerConfig
     shared = @shared
     wait = @wait_ms
@@ -706,7 +708,8 @@ pub class AutocertManager
 
   # http-01's answer to a request on port 80
   # (`/.well-known/acme-challenge/<token>`), or nil for any other path:
-  # `Server.serve(listener) { |r| manager.answer(r) || ... }`.
+  # `Server.serve(listener, workers: 1) { |r| manager.answer(r) || ... }`,
+  # on one thread, since the manager's state is that thread's.
   def answer(request : Request) : Response?
     @http01.answer(request)
   end

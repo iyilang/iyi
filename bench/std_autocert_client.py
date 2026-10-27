@@ -438,7 +438,7 @@ class Scenario:
             server.stop()
 
     def parallel(self):
-        print("\n== under serve_parallel: handshakes on four workers, the manager on its own thread", flush=True)
+        print("\n== serve on four workers: handshakes on the pool, the manager on its own thread", flush=True)
         if self.server:
             self.server.stop()
             self.server = None
@@ -473,15 +473,15 @@ class Scenario:
                 workers = {r[1] for r in results if r and r[1].startswith("worker ")}
                 errors = [r[0] for r in results if r and r[0].startswith("error")][:1]
                 if round == "first":
-                    held(len(serials) == 10 and len(set(serials)) == 1, "under serve_parallel, ten concurrent first connections verify, one certificate",
+                    held(len(serials) == 10 and len(set(serials)) == 1, "on four workers, ten concurrent first connections verify, one certificate",
                          f"{len(serials)} verified, serials {sorted(set(serials))}; {errors}; server: {open(server.out).read()[-300:] if errors else ''}")
-                    held(made == 1, "under serve_parallel, ten concurrent first connections create one order", f"Pebble made {made}")
+                    held(made == 1, "on four workers, ten concurrent first connections create one order", f"Pebble made {made}")
                     first_workers = workers
                 else:
-                    held(len(serials) == 10 and made == 0, "under serve_parallel, a held certificate is shown with no order",
+                    held(len(serials) == 10 and made == 0, "on four workers, a held certificate is shown with no order",
                          f"{len(serials)} verified; Pebble made {made}; {errors}")
                     every = first_workers | workers
-                    held(len(every) > 1, "under serve_parallel, handshakes answered on more than one worker", f"{len(every)} workers answered")
+                    held(len(every) > 1, "on four workers, handshakes answered on more than one worker", f"{len(every)} workers answered")
         finally:
             server.stop()
 

@@ -256,7 +256,7 @@ def check_web_cores_shape(wrong: list[str], held: list[str]) -> None:
     cores = load("bench/web_cores.py")
     pattern = (
         r"`bench/web_cores\.py`: wrk with (\d+) threads and (\d+) kept-alive connections, "
-        r"bcrypt at cost (\d+), `serve_parallel` on ([\d, and]+) workers, best of (\d+) runs of "
+        r"bcrypt at cost (\d+), `serve` on ([\d, and]+) workers, best of (\d+) runs of "
         r"(\d+) s \(login\) and (\d+) s \(the others\)"
     )
     instrument = (

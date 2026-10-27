@@ -20,7 +20,7 @@
 #     end
 #
 # A def that keeps a block and is itself `@[Share]` - std/http's
-# `Server.serve_parallel { }`, std/router's `SharedRouter#handle` - hands
+# `Server.serve { }`, std/router's `SharedRouter#handle` - hands
 # its block on with `SharedProc(...).of(&block)`: that block was checked
 # where the def was given it, and it is the one proc a boundary takes on
 # trust. Any other `&proc` is refused there.

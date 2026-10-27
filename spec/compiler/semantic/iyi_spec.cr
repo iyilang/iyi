@@ -4938,7 +4938,7 @@ describe "Semantic: iyi" do
     end
 
     # SPEC.md III.4.13: `@[Share]` on a def says the block it keeps may run
-    # on other threads, several at once (std/http's `serve_parallel`).
+    # on other threads, several at once (std/http's `Server.serve`).
     describe "the block a @[Share] def keeps" do
       group_stub = <<-STUB
         class IyiGroup
@@ -5027,6 +5027,120 @@ describe "Semantic: iyi" do
           end
 
           swapped { 1 }
+          CODE
+      end
+
+      # std/http's `Server.serve(..., workers: 1)`: `serial: workers` names
+      # the parameter whose literal 1 keeps a call on one thread, and
+      # `crossing:` the arguments handed to other threads.
+      serial_stub = group_stub + <<-STUB
+        @[Share(serial: workers, crossing: {config: "Pass a frozen one"})]
+        def serve(config : C = nil, workers : Int32 = 4, &work : -> Int32) : Nil forall C
+          G.spawn_parallel do
+            kept = work
+            1
+          end
+          nil
+        end
+
+        STUB
+
+      it "refuses a captured value that is not shareable, naming the lock and workers: 1" do
+        assert_error(serial_stub + <<-CODE, "the block serve keeps, which may run on other threads captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=`. Put it behind a lock, a `Mutex(Counter)` (std/mutex), or pass `workers: 1` so the block runs on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          counter = Counter.new
+          serve(workers: 8) do
+            counter.count = 1
+            1
+          end
+          CODE
+      end
+
+      it "takes anything under the literal 1" do
+        assert_type(serial_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          counter = Counter.new
+          count = 1
+          serve(counter, workers: 1) do
+            counter.count = 1
+            count = 2
+            1
+          end
+          CODE
+      end
+
+      it "checks a count in a variable, whatever it holds" do
+        assert_error(serial_stub + <<-CODE, "captures `counter : Counter`, which is not Share", filename: "x.iyi")
+          counter = Counter.new
+          one = 1
+          serve(workers: one) do
+            counter.count = 1
+            1
+          end
+          CODE
+      end
+
+      it "refuses a crossing argument that is not shareable, where it is passed" do
+        assert_error(serial_stub + <<-CODE, "serve hands `config : Counter` to other threads, several at once, and it is not Share: Counter's field @count is given a setter `count=`. Pass a frozen one, or pass `workers: 1` so it stays on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          serve(Counter.new) { 1 }
+          CODE
+      end
+
+      it "refuses a serial name that is no parameter" do
+        assert_error(<<-CODE, "Share's 'serial' names a parameter of `run`", filename: "x.iyi")
+          @[Share(serial: threads)]
+          def run(workers : Int32 = 1, &work : -> Int32) : Nil
+            nil
+          end
+          CODE
+      end
+
+      it "refuses a named argument a def's Share does not know" do
+        assert_error(<<-CODE, "unknown Share named argument on a def, valid arguments are: 'serial', 'crossing'", filename: "x.iyi")
+          @[Share(owns: true)]
+          def run(&work : -> Int32) : Nil
+            nil
+          end
+          CODE
+      end
+
+      # std/http's `Server.serve(listener, handler)`: a value crossing to
+      # the workers, which the def's own parallel block takes on trust.
+      value_stub = group_stub + <<-STUB
+        @[Share(serial: workers, crossing: {handler: "Make it Share"})]
+        def serve_value(handler : H, workers : Int32 = 4) : Nil forall H
+          G.spawn_parallel do
+            kept = handler
+            1
+          end
+          nil
+        end
+
+        STUB
+
+      it "refuses a handler value that is not shareable, at the argument" do
+        assert_error(value_stub + <<-CODE, "serve_value hands `handler : Counter` to other threads, several at once, and it is not Share: Counter's field @count is given a setter `count=`. Make it Share, or pass `workers: 1` so it stays on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          serve_value(Counter.new)
+          CODE
+      end
+
+      it "takes a handler value that is not shareable under the literal 1, its block trusting the parameter" do
+        assert_type(value_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          serve_value(Counter.new, workers: 1)
+          CODE
+      end
+
+      it "trusts a crossing parameter only while the def leaves it as given" do
+        assert_error(group_stub + <<-CODE, "captures `handler : Counter`, which is not Share", filename: "x.iyi")
+          @[Share(serial: workers, crossing: {handler: "Make it Share"})]
+          def swapped_value(handler : H, workers : Int32 = 4) : Nil forall H
+            handler = Counter.new
+            G.spawn_parallel do
+              kept = handler
+              1
+            end
+            nil
+          end
+
+          swapped_value(Counter.new, workers: 1)
           CODE
       end
     end

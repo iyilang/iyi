@@ -23,10 +23,11 @@ There is no database. The issue's app read one through a tuned pool; that
 pool is out of scope, and what is measured is what the server's own cores
 do with a request.
 
-The servers: iyi's `Server.serve` (one thread), `Server.serve_parallel` on
-each of WORKERS, and Go's net/http at its default GOMAXPROCS. Before any is
-timed, each endpoint is asked over the wire and the iyi and Go answers must
-be the same bytes, or the run stops. Then wrk runs RUNS times per endpoint
+The servers: iyi's `Server.serve` with `workers: 1` (one thread), and with
+its default pool sized to each of WORKERS, and Go's net/http at its
+default GOMAXPROCS. Before any is timed, each endpoint is asked over the
+wire and the iyi and Go answers must be the same bytes, or the run
+stops. Then wrk runs RUNS times per endpoint
 (after a one-second warm-up, and each after the server has finished what
 the run before left it) and the best run's requests a second is kept,
 with that run's p50 and p99 latency and the CPU the server used in it, read
@@ -36,7 +37,7 @@ too, and so is what the rest of the machine was doing: /proc/stat's busy
 time over the run less the server's and wrk's, in cores.
 
 Not a gate, and nothing runs it: the numbers are a machine's and a
-moment's. On a shared twelve-thread machine the `serve_parallel` rows move
+moment's. On a shared twelve-thread machine the pooled `serve` rows move
 by tens of percent with whatever else is running, and wrk takes cores the
 twelve-worker row wants. `bench/measured_numbers.py` names it among the
 figures a shared runner cannot check, and holds the shape SPEC.md III.4.13
@@ -67,7 +68,7 @@ GO = ["mise", "exec", "go@1.25.14", "--", "go"]
 CONNECTIONS = 32
 WRK_THREADS = 4
 # Seconds per run. A login is about 37 ms of one core in either server
-# (cost 10, measured one request at a time), and under `serve_parallel`
+# (cost 10, measured one request at a time), and on the pool's workers
 # the 32 asked at once are preempted and interleaved, so they finish in
 # batches of a second or more: a login run is long enough for many.
 SECONDS = {"login": 15, "check_version": 5, "order": 5}
@@ -244,9 +245,9 @@ def wrk(server: Server, url: str, script: pathlib.Path, seconds: float) -> dict:
 
 
 def servers(iyi: pathlib.Path, go: pathlib.Path, portfile: pathlib.Path, chosen: set[str]) -> list[tuple[str, list[str]]]:
-    every = [("iyi serve", [str(iyi), "serve", "1", str(portfile)], "serve")]
+    every = [("iyi serve, workers: 1", [str(iyi), "serve", "1", str(portfile)], "serve")]
     every += [
-        (f"iyi serve_parallel, {n}", [str(iyi), "parallel", str(n), str(portfile)], f"parallel{n}")
+        (f"iyi serve, {n} workers", [str(iyi), "parallel", str(n), str(portfile)], f"parallel{n}")
         for n in WORKERS
     ]
     every.append(("Go net/http", [str(go), str(portfile)], "go"))

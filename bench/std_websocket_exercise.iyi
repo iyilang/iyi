@@ -568,7 +568,9 @@ end
 def serve(tls : TlsServerConfig?) : Nil
   listener = IyiSocket.listen("127.0.0.1", 0)
   puts listener.local_port
-  Server.serve(listener, tls: tls) do |req|
+  # One thread: a peer's "stop" message closes the listener, which is
+  # this thread's.
+  Server.serve(listener, tls: tls, workers: 1) do |req|
     WebSocket.upgrade(req, ["chat", "superchat"]) { |ws| echo(ws, listener) }
   end
   puts "stopped"
@@ -1155,7 +1157,8 @@ seen = [] of String
 agreed_seen = [] of String
 group do |g|
   g.spawn do
-    Server.serve(listener) do |req|
+    # One thread: the blocks append to `seen` and close the listener.
+    Server.serve(listener, workers: 1) do |req|
       if req.path == "/plain"
         Response.new(200, "plain")
       elsif req.path == "/small"
@@ -1294,7 +1297,8 @@ echo_port = echo_l.local_port
 server_seen = [] of String
 group do |g|
   g.spawn do
-    Server.serve(echo_l) do |req|
+    # One thread: the block appends to `server_seen` and closes the listener.
+    Server.serve(echo_l, workers: 1) do |req|
       WebSocket.upgrade(req) do |ws|
         server_seen << "#{req.path} proxy-auth=#{req.header("Proxy-Authorization") || "-"}"
         echo(ws, echo_l)

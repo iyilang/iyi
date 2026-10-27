@@ -18,8 +18,9 @@
 # No database. The issue's app read one through a tuned pool, and that pool
 # is out of scope here: these three are what the server's own cores do.
 #
-# `serve` answers on one thread, `parallel` on WORKERS of the pool's
-# (`Server.serve_parallel`), and `tls` serves HTTPS with
+# `serve` answers on one thread (`Server.serve(..., workers: 1)`),
+# `parallel` on WORKERS of the pool's (`Server.serve`'s default, the
+# pool sized to WORKERS), and `tls` serves HTTPS with
 # `bench/std_http_parallel.iyi`'s test PKI, an Ed25519 leaf for localhost.
 # The port goes to PORTFILE and the server runs until it is killed.
 #
@@ -196,14 +197,14 @@ if args.size >= 3
     config = TlsServerConfig.from_pem(LEAF_PEM, KEY_PEM).or_panic
     config.alpn = ["http/1.1"]
     if args[0] == "parallel"
-      Server.serve_parallel(listener, tls: config.frozen) { |request| answer(request) }
+      Server.serve(listener, tls: config.frozen) { |request| answer(request) }
     else
-      Server.serve(listener, tls: config) { |request| answer(request) }
+      Server.serve(listener, tls: config, workers: 1) { |request| answer(request) }
     end
   elsif args[0] == "parallel"
-    Server.serve_parallel(listener) { |request| answer(request) }
-  else
     Server.serve(listener) { |request| answer(request) }
+  else
+    Server.serve(listener, workers: 1) { |request| answer(request) }
   end
   exit 0
 end

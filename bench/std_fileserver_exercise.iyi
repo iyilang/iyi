@@ -50,13 +50,24 @@ if args.size > 1 && args[0] == "serve"
   serving = IyiSocket.listen("127.0.0.1", 0)
   puts serving.local_port
   root = args[1]
-  Server.serve(serving) do |req|
-    if req.path == "/stop"
+  # On every worker, `serve`'s default: `/stop` sends on a channel, and a
+  # task on this thread, which owns the listener, closes it.
+  stop = Channel(Int32).new(1)
+  group do |g|
+    g.spawn do
+      stop.receive
       serving.close
-      Response.new(200, "bye")
-    else
-      FileServer.serve(root, req)
+      0
     end
+    Server.serve(serving) do |req|
+      if req.path == "/stop"
+        stop.send(0)
+        Response.new(200, "bye")
+      else
+        FileServer.serve(root, req)
+      end
+    end
+    0
   end
   __iyi_exit(0)
 end
@@ -73,11 +84,18 @@ File.write(stream_dir + "/secret.txt", "secret")
 files_l = IyiSocket.listen("127.0.0.1", 0)
 files_port = files_l.local_port
 files_base = "http://127.0.0.1:#{files_port}"
+files_stop = Channel(Int32).new(1)
 group do |g|
+  # On every worker, as `/stop` reaches the listener through a channel.
+  g.spawn do
+    files_stop.receive
+    files_l.close
+    0
+  end
   g.spawn do
     Server.serve(files_l) do |req|
       if req.path == "/stop"
-        files_l.close
+        files_stop.send(0)
         Response.new(200, "bye")
       else
         FileServer.serve(stream_dir + "/www", req)

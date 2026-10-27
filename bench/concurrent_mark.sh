@@ -62,9 +62,10 @@
 #      one helper; nobody drains that mark, the runtime says the mark is
 #      overdue, and the program's watchdog exits 1.
 #  14. Failure proof: the collection let go after helper 0 releases the
-#      threads, with helper 0 held 300 ms between the two; the threads
-#      allocate past the budget with nothing triggered, and the watchdog
-#      exits 1.
+#      threads, with helper 0 held between the two until nothing has been
+#      counted for half a second; the threads allocate past the budget
+#      with nothing triggered until the watchdog holds them, and it exits
+#      1.
 #  15. A collection a program's own thread finishes, whose mark ends in
 #      its first stop, with no helper, and `IyiMark.collect`'s, three runs:
 #      a second thread's slices past the budget after each trigger the
@@ -664,20 +665,24 @@ fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'went below zero' stored.txt | cut -c1-150)"
 
 # Helper 0 reading the generation it waits past after `@@collecting`
-# falls, and held there until another thread's mark turns it: helper 0
-# then waits past that mark, and with no other helper nobody takes its
-# permit. The collection stands still and the tasks allocate; the
-# runtime's overdue report, its bound cut to 20 ms here, names the mark
-# while they do, and the watchdog holds them at 512 MiB and fails the run
-# two seconds later - 4 runs of 4 here, each at the second collection,
-# the reports at 20 to 21, 40 to 46 and 81 to 93 ms.
+# falls, and held there until another thread's mark turns it, ten seconds
+# at most: helper 0 then waits past that mark, and with no other helper
+# nobody takes its permit. The collection stands still and the tasks
+# allocate; the runtime's overdue report, its bound cut to 20 ms here,
+# names the mark while they do, and the watchdog holds them at 512 MiB and
+# fails the run two seconds later - 12 runs of 12 here held to three,
+# four and twelve cores, each at the second collection, the reports at 20
+# to 22, 40 to 46 and 81 to 93 ms and in one run 182. The hold was 50 ms
+# at most, and on a four-core Windows runner no mark began inside it at
+# any of one run's 13 collections, the tasks held by the watchdog at 11 of
+# them, and the copy exited 0 (job 122392781393).
 step "failure proof: helper 0 waiting past the next mark leaves it to nobody"
 mkdir -p late/iyi
 cp "$REPO"/src/iyi/*.iyi late/iyi/
 awk '/^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { early = 1; next }
   /^            return generation$/ {
     print "            held = pool_word(POOL_GENERATION).value.get"
-    print "            until_ns = now_ns + 50000000_u64"
+    print "            until_ns = now_ns + 10000000000_u64"
     print "            while pool_word(POOL_GENERATION).value.get == held && now_ns < until_ns"
     print "              spin_pause"
     print "            end"
@@ -701,21 +706,35 @@ printf '  says "%s"\n' "$(grep -m1 "the collector's mark has run" late.txt | cut
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stall:' late.txt | cut -c1-150)"
 
 # `@@collecting` let go after helper 0 releases the threads, as it was,
-# and helper 0 held 300 ms between the two: the window a four-core Windows
-# runner gave twelve and eight workers whenever they took helper 0's cores.
-# The tasks allocate with no mark to assist and no trigger to cross, the
-# watchdog holds them at 256 MiB, and once helper 0 lets the collection go
+# and helper 0 held between the two until nothing has been counted for
+# half a second, ten seconds at most: the window a four-core Windows
+# runner gave twelve and eight workers whenever they took helper 0's
+# cores, held until the watchdog has held the tasks. They allocate with
+# no mark to assist and no trigger to cross, the watchdog holds them at
+# 256 MiB or after two seconds, and once helper 0 lets the collection go
 # nobody allocates to trigger the next: the run fails, naming the count
-# since the last collection against its budget.
+# since the last collection against its budget: 12 runs of 12 here held
+# to three, four and twelve cores, and a run on each of three four-core
+# Windows runners and a three-core darwin one (run 40570662734), at the
+# third to the ninth collection.
+# The hold was 300 ms, which catches it only where the tasks allocate
+# 256 MiB inside it: the four-core Windows runners held them at 287 and
+# 289 MiB (jobs 122392780789 and 122392781553).
 step "failure proof: a collection let go after its threads are released leaves their allocation untriggered"
 mkdir -p released/iyi
 cp "$REPO"/src/iyi/*.iyi released/iyi/
 awk '/^            @@collecting = false$/ && !moved { held = $0; next }
   held != "" && /^            IyiThread\.resume_others\(others\)$/ {
     print
-    print "            window = now_ns + 300000000_u64"
-    print "            while now_ns < window"
+    print "            quiet_since = now_ns"
+    print "            quiet_count = allocated_since"
+    print "            quiet_until = now_ns + 10000000000_u64"
+    print "            while now_ns < quiet_until && now_ns - quiet_since < 500000000_u64"
     print "              spin_pause"
+    print "              if allocated_since != quiet_count"
+    print "                quiet_count = allocated_since"
+    print "                quiet_since = now_ns"
+    print "              end"
     print "            end"
     held = ""; moved = 1; next }
   held != "" { print held; held = "" }

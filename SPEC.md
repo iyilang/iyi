@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 24,551 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,935 lines, none of it written in iyi |
+| compiler | 131,234 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,935 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 131,234 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 24,551-line own prelude + 125,314 in std |
-| Specs | 21,146 lines | 15,384 for iyi |
+| Specs | 21,146 lines | 15,689 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2845,16 +2845,64 @@ what a captured variable is: `COUNTS = [0]`, bumped a million times by a
 thread's block and a million by its starter, had compiled and printed
 1061337, and is refused now with ``names the constant `COUNTS :
 Array(Int32)`, which is not Share``. A constant that a method the block
-calls reads is reached through the call, and is not checked. Step 6d
-holds it. A class variable the block names is the same state with a cell
-of its own: one written after its initializer - by the block, by any
-method the program calls, or through `pointerof` - is refused by name, as
-a captured local assigned after the start is (``assigns `@@count`, a class
-variable, so every thread that reaches it shares one mutable cell``), and
-one only its initializer writes is asked what a constant is. A
-thread-local one is every thread's own. `@@count += 1` run two million
-times by a thread and two million by its starter had compiled and printed
-2548908 of 4000000.
+calls reads is reached through the call, and is warned about rather than
+refused (below). Step 6d holds the refusal. A class variable the block
+names is the same state with a cell of its own: one written after its
+initializer - by the block, by any method the program calls, or through
+`pointerof` - is refused by name, as a captured local assigned after the
+start is (``assigns `@@count`, a class variable, so every thread that
+reaches it shares one mutable cell``), and one only its initializer
+writes is asked what a constant is. A thread-local one is every thread's
+own. `@@count += 1` run two million times by a thread and two million by
+its starter had compiled and printed 2548908 of 4000000.
+
+**What the block reaches through a call is warned about (#148).** The
+refusals above read the block's own text, and the edge they leave is
+where a program keeps its database pool: a parallel block calling `ask`,
+which ran `DATABASE.query_one`, compiled silently, and an application on
+iyi-web reaching its pool through 193 call sites, all in model functions,
+mixed rows between requests at 12 workers. The block of `IyiThread.start`,
+of `spawn_parallel` and of a `@[Share]` def is walked through the typed
+call graph - every def it calls, every target of a virtual call, a
+recursive def once - and every constant and class variable met whose type
+is not `Share` is a warning at the block, once per block, by the
+shortest path: ``the block spawn_parallel runs on another thread reaches
+`DATABASE : Main::Database` (not Share) through `ask` →
+`DATABASE.query_one`: Main::Database's field @total is assigned in
+`query_one` ``. A warning and not a refusal, as the issue asked: whether
+the call is made, and whether the state is set once and only read after,
+is not something the walk can tell. The walk covers the program's
+modules and the packages it depends on - an application's pool is the
+application's constant, read through its own functions, and a
+dependency's module state is as far out of the program's sight - and
+never std or the prelude, nor a constant std declares: std's state is
+std's to keep, and its boundaries are checked where std writes them. It
+stops where the capture check does: a constant typed `Mutex`, `Atomic`,
+`List` or another trusted `@[Share]` type is `Share`, and is not warned
+about. A block given to a lock is walked like any other, since the lock
+guards what it holds, not the constants its block reaches. A program
+that knows its state is safe says so on the declaration, with the reason
+as the claim: `@[SafeReach("set once at startup, then only read")]` on a
+constant or a class variable quiets the warning for it alone, and never
+the refusal of a block that names it. The warning is a build's and
+`iyi check`'s, and `--error-on-warnings` makes it a failure in either.
+Held by `spec/compiler/semantic/iyi_spec.cr` (eleven shapes: the issue's
+program with its exact text, a `@[Share]` def's block, a direct naming
+still refused under the mark, `Share` constants silent, the mark on a
+constant and on a class variable, the mark without a reason refused, a
+path through two defs and a recursive pair, a virtual call, a class
+variable, std's state silent) and by `bench/parallel_exercise.sh`'s
+`Share` step, which builds the issue's shape and fails it under
+`--error-on-warnings`, and passes its copy marked `@[SafeReach]`.
+What each def names and calls is read once per compilation and kept, so
+many blocks reaching the same functions read them once: the main
+semantic stage, best of 3, was 1.019 s before and 1.032 s after on
+`bench/std_http_exercise.iyi`, 1.030 and 1.009 on `bench/web_cores.iyi`,
+and 1.344 and 1.454 on iyi-web's `examples/security.iyi`.
+In this tree the walk found three benches whose threads reach a class
+variable one at a time, each joined before the next starts or before the
+main thread reads it, or each writing its own reserved slot; each is
+marked with that reason.
 
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,
@@ -3683,12 +3731,12 @@ block reaches it, and every constant and class variable it names. Two
 alternatives lost. Every spawn parallel: the tasks that share their group's
 mutable state legally today would be refused, or raced. And a spawn made
 parallel by the compiler whenever its captures happen to be `Share`: the
-check has a known edge — a method the block calls that touches module
-state is not seen (III.4.4's own words) — and a spawn that moved onto two
-cores because its captures happened to qualify would race that state with
-no line of the program saying so. Rust's tokio arrived at the same pair:
-`spawn` demands `Send` and work-steals, `spawn_local` demands nothing and
-stays.
+check's refusals stop at the block's own text — module state a method the
+block calls touches is warned about, not refused (III.4.4) — and a spawn
+that moved onto two cores because its captures happened to qualify would
+race that state with nothing but a warning saying so. Rust's tokio arrived
+at the same pair: `spawn` demands `Send` and work-steals, `spawn_local`
+demands nothing and stays.
 
 A task `g.spawn` starts *inside* a parallel task belongs to that task's
 unit (`IyiUnit`): the parent and the child may share the parent's

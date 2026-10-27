@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **A shared block that reaches module state through a call is warned
+  about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and
+  of a `@[Share]` def - `Server.serve`'s, a router's - was checked only
+  for what it names, so a parallel block calling `ask`, which ran
+  `DATABASE.query_one` on a pool that assumes one thread, compiled with
+  nothing said. The compiler now walks the typed call graph from the
+  block through the program's modules and its packages, never std or
+  the prelude, and warns at the block for every constant and class
+  variable it reaches whose type is not `Share`, once each, by the
+  shortest path: ``the block spawn_parallel runs on another thread
+  reaches `DATABASE : Main::Database` (not Share) through `ask` →
+  `DATABASE.query_one`: ...``. Every target of a virtual call is
+  walked, and a recursive def once; a constant typed `Mutex`, `Atomic`,
+  `List` or another trusted `@[Share]` type is `Share` and says nothing.
+  State that is safe - set once and then only read, or guarded some
+  other way - is marked on its declaration with the reason as the claim,
+  `@[SafeReach("set once at startup, then only read")]`, on a constant
+  or a class variable; the mark quiets the warning for that state
+  alone, and a block that names it is still refused. `iyi check` now
+  takes `--error-on-warnings` (and `--warnings`, `--exclude-warnings`),
+  which it refused as invalid options, so the warning can fail a check
+  as it fails a build; like a build, it now leaves out warnings from
+  `lib`. In this repository three benches whose threads
+  take turns at a class variable carry the mark with their reason. A
+  warning rather than a refusal, so nothing that compiled stops
+  compiling; a build with `--error-on-warnings` that reaches such state
+  fails until the state is marked or moved behind a `Mutex`.
+
 - **Breaking: std/http's `Server.serve` serves on every core by default
   (#145).** `serve(listener) { |request| ... }` runs each connection as a
   parallel task on the pool, `IyiWorkers.count` workers - `IYI_WORKERS`,

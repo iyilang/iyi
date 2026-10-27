@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Fourteen steps, the last eight failure proofs:
+# Seventeen steps, ten of them failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -46,15 +46,29 @@
 #      outgrown under a mark is unmapped beside the helpers at once, which
 #      is how a helper walking the large list faulted, and the program
 #      exits 1 saying so.
-#  11. Failure proof: `free` outside the allocator's bracket; a pause
+#  11. Marks beside the program that end, the shape of #149's server:
+#      bench/mark_stall.iyi's twenty-four connections on twelve workers,
+#      each a parallel task parked on its socket for every request, ten
+#      seconds with the runtime's helpers and ten with one: every
+#      collection finishes, and no collection count stands still while
+#      the tasks allocate.
+#  12. Failure proof: the remainder round's store of the count of workers
+#      marking put back, with the assists that begin in a window before it
+#      held until it lands; the count goes below zero and the runtime
+#      exits 1 saying so.
+#  13. Failure proof: helper 0 reading the generation it waits past after
+#      the collection is let go, held until the next mark turns it, with
+#      one helper; nobody drains that mark, the runtime says the mark is
+#      overdue, and the program's watchdog exits 1.
+#  14. Failure proof: `free` outside the allocator's bracket; a pause
 #      among the frees puts the lists it dropped back on the cache, and
 #      step 5's program exits 1 within ten runs.
-#  12. Failure proof, on Windows: the helpers given back the boost a
+#  15. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
 #      program's wakes past a millisecond - exits 1.
-#  13. Failure proof, on Windows: the cap on the helpers beside a busy
+#  16. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
-#  14. Failure proof, on Windows: the first collection's wait for every
+#  17. Failure proof, on Windows: the first collection's wait for every
 #      helper to reach its park put back, and the crowded check fires.
 set -u
 
@@ -555,6 +569,109 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: small:" thousand.txt; then
   echo "the small live set check did not fire (exit $code):"; tail -3 thousand.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: small:' thousand.txt)"
+
+# A mark beside the program that never ended (#149): on Windows at eight
+# and twelve workers, a server whose every connection was a parallel task
+# parked on its socket stopped collecting, and its heap grew until the
+# machine ran out. The remainder round, which runs beside the program when
+# the second stop retreats, stored the count of workers marking over the
+# mutators' assists counted in, and no drain saw it reach zero again.
+# bench/mark_stall.iyi is that server's shape. Its watchdog fails a run
+# whose collections stand still while it allocates, and the runtime fails
+# one whose count goes below zero. Ten seconds with the helpers the
+# runtime gives it, and ten with one: helper 0 alone, the case in which
+# helper 0 waiting past the next mark leaves nobody to drain it. Linux
+# never showed the stall unwidened - twenty runs of fifteen seconds at
+# twelve workers on master, 1,588 second stops retreated, none stalled -
+# so each proof below widens its window.
+step "marks beside twenty-four connections on twelve workers all end, with every helper and with one"
+if ! "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stall > build-stall.log 2>&1; then
+  cat build-stall.log; exit 1
+fi
+for helpers in every one; do
+  case "$helpers" in
+    every) timeout -k 5 120 ./stall workers=12 seconds=10 > "stall-$helpers.txt" 2>&1 ;;
+    one) timeout -k 5 120 ./stall workers=12 seconds=10 helpers=1 > "stall-$helpers.txt" 2>&1 ;;
+  esac
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q "every collection finished" "stall-$helpers.txt"; then
+    echo "  with $helpers helper, exit $code:"; cat "stall-$helpers.txt"; exit 1
+  fi
+  echo "  with $helpers helper: $(grep '^collections:' "stall-$helpers.txt")"
+done
+
+# The store put back where the remainder round counts helper 0 in, and a
+# window of 200 us before it in which every assist that begins is held
+# until the store has landed: the window Windows' release leaves open
+# while the threads it resumed first allocate, made certain. The count
+# goes below zero at a remainder round beside the program, and
+# `count_out` says so - 4 runs of 4 here.
+step "failure proof: the remainder round's count stored over the assists counted in"
+mkdir -p stored/iyi
+cp "$REPO"/src/iyi/*.iyi stored/iyi/
+awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
+    print "          pool_word(1344_u64).value.set(1_u64)"
+    print "          window = now_ns + 200000_u64"
+    print "          while now_ns < window"
+    print "            spin_pause"
+    print "          end"
+    print "          pool_word(POOL_ACTIVE).value.set(1_u64)"
+    print "          pool_word(1344_u64).value.set(0_u64)"
+    stored = 1; next }
+  /^        active\.value\.add\(1_u64\)$/ {
+    print
+    print "        while pool_word(1344_u64).value.get != 0_u64"
+    print "          spin_pause"
+    print "        end"
+    held = 1; next }
+  { print } END { if (!stored || !held) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > stored/iyi/prelude.iyi || { echo "the count this proof stores, or the assist it holds, is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/stored${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stored-run > build-stored.log 2>&1; then
+  cat build-stored.log; exit 1
+fi
+timeout -k 5 120 ./stored-run workers=12 seconds=10 > stored.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "count of workers marking went below zero" stored.txt; then
+  echo "the stored count was not caught (exit $code):"; tail -3 stored.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 'went below zero' stored.txt | cut -c1-150)"
+
+# Helper 0 reading the generation it waits past after `@@collecting`
+# falls, and held there until another thread's mark turns it: helper 0
+# then waits past that mark, and with no other helper nobody takes its
+# permit. The collection stands still and the tasks allocate; the
+# runtime's overdue report, its bound cut to 20 ms here, names the mark
+# while they do, and the watchdog holds them at 512 MiB and fails the run
+# two seconds later - 4 runs of 4 here, each at the second collection,
+# the reports at 20 to 21, 40 to 46 and 81 to 93 ms.
+step "failure proof: helper 0 waiting past the next mark leaves it to nobody"
+mkdir -p late/iyi
+cp "$REPO"/src/iyi/*.iyi late/iyi/
+awk '/^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { early = 1; next }
+  /^            return generation$/ {
+    print "            held = pool_word(POOL_GENERATION).value.get"
+    print "            until_ns = now_ns + 50000000_u64"
+    print "            while pool_word(POOL_GENERATION).value.get == held && now_ns < until_ns"
+    print "              spin_pause"
+    print "            end"
+    print "            return pool_word(POOL_GENERATION).value.get"
+    late = 1; next }
+  /^      MARK_OVERDUE_NS = 10000000000_u64$/ { print "      MARK_OVERDUE_NS = 20000000_u64"; due = 1; next }
+  { print } END { if (!early || !late || !due) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > late/iyi/prelude.iyi || { echo "the generation read or the overdue bound this proof moves is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o late-run > build-late.log 2>&1; then
+  cat build-late.log; exit 1
+fi
+timeout -k 5 120 ./late-run workers=12 seconds=10 helpers=1 stall_mib=512 stall_ms=2000 > late.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: stall:" late.txt; then
+  echo "the watchdog did not catch the mark nobody drained (exit $code):"; tail -3 late.txt; exit 1
+fi
+if ! grep -q "the collector's mark has run .* permits left 1 and taken 0" late.txt; then
+  echo "the runtime did not say the mark nobody drained was overdue:"; tail -3 late.txt; exit 1
+fi
+printf '  says "%s"\n' "$(grep -m1 "the collector's mark has run" late.txt | cut -c1-150)"
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stall:' late.txt | cut -c1-150)"
 
 # Windows only: a suspended thread stops at any instruction there, the
 # window measured. darwin's runner kept every chunk in ten runs without the

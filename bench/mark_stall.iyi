@@ -1,0 +1,369 @@
+# A mark beside the program that never finishes, looked for: #149.
+#
+#   ./bin/iyi run bench/mark_stall.iyi                       # a short run
+#   ./mark_stall workers=12 seconds=10 stall_ms=5000          # the gate's
+#
+# The options, each `name=value`: `workers`, the pool's size (4); `seconds`
+# of requests (2); `stall_mib`, how much the tasks may allocate while the
+# count of collections stands still before they wait for it (256);
+# `stall_ms`, how long they may allocate before they wait, and how long
+# they wait (5000); `helpers`, the mark's helpers (the runtime's default).
+# Any option given prints the run's numbers too.
+#
+# The workload is the one the issue's server was: every connection a
+# parallel task on the pool, each request a round trip on a socket the
+# task parks on, allocation on every request, and a live set big enough
+# that every collection's mark goes beside the program. Here a client task
+# and an echo task per connection, both parallel, over the loopback. The
+# client holds a list of its own and a ring of references into the list's
+# head, which every request turns - sixty-four stores of references a mark
+# may not have reached yet, so the barrier feeds the pool and the
+# mutators' assists find work there. And on every request it cuts the
+# list's tail off, holds the tail on its stack alone through the round
+# trip and the request's garbage, and links it back. A tail cut while a
+# mark is under way is a structure only a stack reaches, which the second
+# stop finds white: that stop retreats and marks it beside the program
+# once more, helpers and assists together - the round whose count of the
+# workers draining was once stored over under the assists' feet
+# (GC_DESIGN.md Stage 9 says how).
+#
+# A watchdog thread, outside the pool, reads the collector's count of
+# collections every 50 ms. When the count has stood still while the tasks
+# allocated `stall_mib`, or for `stall_ms` while they allocated at all,
+# the tasks stop allocating and wait for a collection to end; one that has
+# not ended `stall_ms` later, with nothing allocated meanwhile, is a stall,
+# and the run says so by name with the mark's state as it stands and exits
+# 1 - within the bound, and before a heap that never collects runs the
+# machine out of memory. The wait is what tells a stall from a mark that
+# is only late. Here, twelve workers allocating 6 GB/s on twelve cores, a
+# run that failed at 256 MiB without it had a collection open while 382
+# MiB went by: three helpers with permits not yet done, but nothing
+# counted in and the pool empty, which is where every drain ends - a late
+# collection, in one run of fourteen, and no wait at all in the twenty
+# runs after the wait went in. Every list is walked and checked as well: a
+# collection that freed a node the program holds fails by name too.
+#
+# bench/concurrent_mark.sh runs it at twelve workers, and broken copies of
+# the runtime it catches.
+
+module bench/mark_stall
+
+import std/socket::{IyiSocket, SocketError}
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  # Counts the tasks and the watchdog share: `Share` by their atomic field.
+  class Tally
+    @count : Atomic(Int64)
+
+    def initialize
+      @count = Atomic(Int64).new(0_i64)
+    end
+
+    def add(value : Int64) : Nil
+      @count.add(value)
+    end
+
+    def count : Int64
+      @count.get
+    end
+  end
+
+  class Node
+    getter value : Int64
+    property next_node : Node?
+
+    def initialize(@value : Int64, @next_node : Node?)
+    end
+  end
+
+  # Nodes a client keeps, where its tail is cut, the ring's references
+  # (all of them ahead of the cut, so the cut tail is reached from the
+  # stack alone), and garbage nodes per request.
+  LIVE  = 4000
+  CUT   = 1000
+  RING  =   64
+  CHURN = 3000
+
+  # A list of *count* nodes whose values count down from the head.
+  def build(count : Int32, seed : Int64) : Node?
+    head = nil.as(Node?)
+    i = 0
+    while i < count
+      head = Node.new((seed &+ 1_i64) &* 1000003_i64 &+ i.to_i64, head)
+      i = i + 1
+    end
+    head
+  end
+
+  # The node *steps* links on from *head*.
+  def node_at(head : Node?, steps : Int32) : Node
+    node = head
+    i = 0
+    while i < steps
+      node = node.as(Node).next_node
+      i = i + 1
+    end
+    node.as(Node)
+  end
+
+  # Whether the list is still the one `build` made, each value read before
+  # its link is followed.
+  def whole?(head : Node?, count : Int32, seed : Int64) : Bool
+    node = head
+    i = count - 1
+    while i >= 0
+      return false unless node.is_a?(Node)
+      return false unless node.value == (seed &+ 1_i64) &* 1000003_i64 &+ i.to_i64
+      node = node.next_node
+      i = i - 1
+    end
+    node.nil?
+  end
+
+  # The ring pointed at nodes spread over the list's head.
+  def fill(ring : Array(Node?), head : Node?) : Nil
+    i = 0
+    while i < RING
+      ring[i] = node_at(head, i * (CUT // RING))
+      i = i + 1
+    end
+  end
+
+  # The ring turned by one: a store of a reference per slot.
+  def turn(ring : Array(Node?)) : Nil
+    first = ring[0]
+    i = 0
+    while i < RING - 1
+      ring[i] = ring[i + 1]
+      i = i + 1
+    end
+    ring[RING - 1] = first
+  end
+
+  # A request's garbage: nodes, and a string every sixty-four of them.
+  def churn(count : Int32, seed : Int64) : Int64
+    kept = 0_i64
+    i = 0
+    while i < count
+      node = Node.new(seed &+ i.to_i64, nil)
+      kept = kept &+ node.value
+      kept = kept &+ "r#{seed}.#{i}".bytesize.to_i64 if i & 63 == 0
+      i = i + 1
+    end
+    kept
+  end
+
+  # Bytes one `churn` allocates, about: a node is a 32-byte chunk, and the
+  # string every sixty-four nodes rides in that rounding.
+  CHURN_BYTES = (CHURN * 32).to_i64
+
+  # Exactly *count* bytes off the socket, or a failure by name.
+  def read_exactly(socket : IyiSocket, count : Int32, who : String) : String
+    got = ""
+    while got.bytesize < count
+      piece = socket.read(count - got.bytesize)
+      fail("#{who}: a read answered #{piece}") unless piece.is_a?(String)
+      fail("#{who}: the peer closed mid-answer") if piece.empty?
+      got = got + piece
+    end
+    got
+  end
+
+  # The connection's client: requests until *until_ns*, each a round trip
+  # with the list's tail held on this stack alone - or, while the watchdog
+  # holds the tasks, nothing.
+  def client(fd : Int32, family : Int32, c : Int32, until_ns : Int64, requests : Tally, bytes : Tally, hold : Tally) : Nil
+    socket = IyiSocket.new(fd, family)
+    seed = c.to_i64 &* 7919_i64
+    head = build(LIVE, seed)
+    cut = node_at(head, CUT)
+    ring = Array(Node?).new(RING, nil)
+    fill(ring, head)
+    r = 0
+    while __iyi_monotonic_ns < until_ns
+      while hold.count != 0_i64
+        sleep(1)
+      end
+      tail = cut.next_node
+      cut.next_node = nil
+      turn(ring)
+      churn(CHURN, seed &+ r.to_i64)
+      ask = r & 1 == 0 ? "ping" : "pong"
+      wrote = socket.write(ask)
+      fail("client #{c}: a write answered #{wrote}") unless wrote.is_a?(Int32)
+      answer = read_exactly(socket, 4, "client #{c}")
+      fail("client #{c}: asked #{ask} and was answered #{answer}") unless answer == ask
+      cut.next_node = tail
+      if r & 15 == 0
+        fail("client #{c}: the list was not whole after request #{r}") unless whole?(head, LIVE, seed)
+      end
+      # A fresh list now and then: what was live goes to the sweep, and
+      # what replaces it is allocated live.
+      if r & 63 == 63
+        seed = seed &+ 1_i64
+        head = build(LIVE, seed)
+        cut = node_at(head, CUT)
+        fill(ring, head)
+        bytes.add((LIVE * 32).to_i64)
+      end
+      bytes.add(CHURN_BYTES)
+      requests.add(1_i64)
+      r = r + 1
+    end
+    fail("client #{c}: the list was not whole at the end") unless whole?(head, LIVE, seed)
+    socket.close
+  end
+
+  # The connection's other end: every request answered with itself, until
+  # the client closes.
+  def echo(fd : Int32, family : Int32) : Nil
+    socket = IyiSocket.new(fd, family)
+    while true
+      got = socket.read(4)
+      break unless got.is_a?(String)
+      break if got.empty?
+      wrote = socket.write(got)
+      break unless wrote.is_a?(Int32)
+    end
+    socket.close
+  end
+
+  # The mark's state as it stands, for a stall's report: the words the
+  # runtime's own report names (`IyiMark.say_mark`).
+  def mark_state : String
+    active = IyiMark.pool_word(IyiMark::POOL_ACTIVE).value.get
+    head = IyiMark.pool_word(IyiMark::POOL_HEAD).value.get
+    generation = IyiMark.pool_word(IyiMark::POOL_GENERATION).value.get
+    done = IyiMark.pool_word(IyiMark::POOL_HELPERS_DONE).value.get
+    permits = IyiMark.pool_word(IyiMark::POOL_MARK_PERMITS).value.get
+    "marking #{IyiMark.marking?}, POOL_ACTIVE #{active}, POOL_HEAD #{head}, generation #{generation}, permits left #{permits & 0xFFFFFFFF_u64} and taken #{permits.unsafe_shr(32_u64)}, helpers done #{done}, #{IyiMark.finish_retries} second stops retreated so far"
+  end
+
+  workers = 4
+  seconds = 2
+  stall_ms = 5000
+  stall_mib = 256
+  told = false
+  Program.args.each do |argument|
+    parts = argument.split('=')
+    fail("an option is name=value, not #{argument}") unless parts.size == 2
+    value = parts[1].to_i
+    case parts[0]
+    when "workers"   then workers = value
+    when "seconds"   then seconds = value
+    when "stall_ms"  then stall_ms = value
+    when "stall_mib" then stall_mib = value
+    when "helpers"   then IyiMark.workers = value.to_u64
+    else
+      fail("no option named #{parts[0]}")
+    end
+    told = true
+  end
+  IyiWorkers.count = workers
+  connections = workers * 2
+  stall_bytes = stall_mib.to_i64 * 1048576_i64
+  requests = Tally.new
+  bytes = Tally.new
+  over = Tally.new
+  hold = Tally.new
+  holds = Tally.new
+  longest_hold = Tally.new
+
+  # The watchdog: an OS thread of its own, outside the pool, so that a
+  # pool whose every worker is held still has a thread that looks.
+  watchdog = IyiThread.start do
+    seen = IyiMark.collections
+    since = __iyi_monotonic_ns
+    from = bytes.count
+    held_at = 0_i64
+    while over.count == 0_i64
+      sleep(50)
+      now = IyiMark.collections
+      t = __iyi_monotonic_ns
+      if now != seen
+        seen = now
+        since = t
+        from = bytes.count
+        if held_at != 0_i64
+          took = (t - held_at) // 1000000_i64
+          longest_hold.add(took - longest_hold.count) if took > longest_hold.count
+          held_at = 0_i64
+          hold.add(-1_i64)
+        end
+      else
+        waited = (t - since) // 1000000_i64
+        grown = bytes.count - from
+        if held_at == 0_i64
+          if grown >= stall_bytes || (waited >= stall_ms.to_i64 && grown > 0_i64)
+            # Enough allocated with no collection: the tasks wait for one.
+            held_at = t
+            holds.add(1_i64)
+            hold.add(1_i64)
+          end
+        elsif (t - held_at) // 1000000_i64 >= stall_ms.to_i64
+          fail("stall: collections stood at #{seen} for #{waited} ms - the tasks allocated #{grown // 1048576_i64} MiB, then waited #{stall_ms} ms for a collection with nothing allocated; #{mark_state}")
+        end
+      end
+    end
+    nil
+  end
+
+  collections = IyiMark.collections
+  beside = IyiMark.concurrent_collections
+  retreats = IyiMark.finish_retries
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  port = listener.local_port
+  ends = [] of IyiSocket
+  near_fds = [] of Int32
+  near_families = [] of Int32
+  far_fds = [] of Int32
+  far_families = [] of Int32
+  connections.times do
+    near = IyiSocket.connect("127.0.0.1", port, 5000)
+    fail("connect answered #{near}") unless near.is_a?(IyiSocket)
+    far = listener.accept
+    fail("accept answered #{far}") unless far.is_a?(IyiSocket)
+    ends << near
+    ends << far
+    near_fds << near.fd
+    near_families << near.family
+    far_fds << far.fd
+    far_families << far.family
+  end
+  until_ns = __iyi_monotonic_ns + seconds.to_i64 * 1000000000_i64
+  group do |g|
+    connections.times do |c|
+      near_fd = near_fds[c]
+      near_family = near_families[c]
+      far_fd = far_fds[c]
+      far_family = far_families[c]
+      g.spawn_parallel do
+        client(near_fd, near_family, c, until_ns, requests, bytes, hold)
+        0
+      end
+      g.spawn_parallel do
+        echo(far_fd, far_family)
+        0
+      end
+    end
+  end
+  over.add(1_i64)
+  watchdog.join
+  listener.close
+  ran = IyiMark.collections - collections
+  went_beside = IyiMark.concurrent_collections - beside
+  fail("no collection ran beside the #{connections} connections") if went_beside == 0_u64
+  if told
+    puts "requests: #{requests.count} over #{connections} connections on #{IyiWorkers.count} workers, #{bytes.count // 1048576_i64} MiB allocated"
+    puts "collections: #{ran}, #{went_beside} beside the program, #{IyiMark.finish_retries - retreats} second stops retreated"
+    puts "waits: the tasks waited #{holds.count} times for a collection, the longest #{longest_hold.count} ms"
+  end
+  puts "mark stall: every collection finished beside #{connections} connections"
+{% else %}
+  puts "mark stall: no mark beside the program on this target, nothing to hold"
+{% end %}

@@ -97,7 +97,7 @@ private def make_receipt(
   prof = make_profile(test, target)
   tr = make_trace(observations)
 
-  Iyi::Stale::Receipt.new(
+  receipt = Iyi::Stale::Receipt.new(
     test: test,
     build: b,
     profile: prof,
@@ -108,6 +108,9 @@ private def make_receipt(
     seq: seq,
     contradicted: contradicted
   )
+  # A runner-written record carries the twin an export ships.
+  receipt.portable_twin = Iyi::Stale::PortableRecord.new(b, explain, tr)
+  receipt
 end
 
 private def make_obs(kind : String, root : String, path : String, task : UInt64 = 0_u64) : Iyi::Stale::Observation

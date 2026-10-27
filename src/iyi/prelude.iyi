@@ -3210,8 +3210,42 @@ require "./file"
         @@pages_rewarmed
       end
 
-      def self.pages_released_add(count : UInt64) : Nil
-        Pointer(Atomic(UInt64)).new(pointerof(@@pages_released).address).value.add(count)
+      @@release_calls : UInt64 = 0_u64
+      @@release_calls_inside : UInt64 = 0_u64
+      @@release_ns : UInt64 = 0_u64
+
+      # A run of pages handed back (`__iyi_release_pages`), counted: the
+      # calls, the calls made by a thread inside the allocator - an
+      # allocating thread's refill, or the triggering thread's sweep
+      # before its stop - rather than by a helper, and the pages. Built
+      # with `-Dgc_release_timing`, the time spent in them too, which is
+      # two clock reads a call and a syscall each on Linux, so not by
+      # default. `bench/release_pages.iyi` reads all four (issue #150).
+      def self.release_run(address : UInt64, length : UInt64) : Nil
+        page = @@cache
+        inside = page != 0 && read64(page + CACHE_INSIDE) != 0
+        {% if flag?(:gc_release_timing) %}
+          started = IyiMark.now_ns
+        {% end %}
+        __iyi_release_pages(address, length)
+        {% if flag?(:gc_release_timing) %}
+          Pointer(Atomic(UInt64)).new(pointerof(@@release_ns).address).value.add(IyiMark.now_ns - started)
+        {% end %}
+        Pointer(Atomic(UInt64)).new(pointerof(@@release_calls).address).value.add(1_u64)
+        Pointer(Atomic(UInt64)).new(pointerof(@@release_calls_inside).address).value.add(1_u64) if inside
+        Pointer(Atomic(UInt64)).new(pointerof(@@pages_released).address).value.add(length.unsafe_shr(PAGE_SHIFT))
+      end
+
+      def self.release_calls : UInt64
+        @@release_calls
+      end
+
+      def self.release_calls_inside : UInt64
+        @@release_calls_inside
+      end
+
+      def self.release_ns : UInt64
+        @@release_ns
       end
 
       def self.pages_retained_add(count : UInt64) : Nil
@@ -6587,7 +6621,9 @@ require "./file"
       # program churns through went back and came back each cycle - a
       # syscall per run and a fault per page - and a 64-byte allocation
       # cost 220 ns where it had cost 21. What the program will allocate
-      # before the next collection is the budget, and that much of the
+      # before the next collection is the budget, and more when a mark
+      # beside many workers lets them run past it - which the last epoch's
+      # cold reopenings measure (`warm_pages`) - and that much of the
       # free pages is kept warm; what is free beyond it is what a smaller
       # program would never have touched, and it goes back. Kept as list
       # chunks alone, the warm pages the program had not got to were
@@ -6837,8 +6873,7 @@ require "./file"
           IyiHeap.set_cold(arena, cold_low, page_high, true)
           # After the links: a released page written to would be resident
           # again, and none is written to above.
-          __iyi_release_pages(cold_low, page_high - cold_low)
-          IyiHeap.pages_released_add(cold)
+          IyiHeap.release_run(cold_low, page_high - cold_low)
           # The counts last: a carve that reads an idle count takes the
           # lock and looks for the run, and finds it whole.
           IyiHeap.idle_add(arena, cold, false)
@@ -6860,13 +6895,47 @@ require "./file"
       # the rest came back each epoch by a fault a page - Pidigits' loop
       # 680 ms, and 500 counted this way. The eight-byte steps below
       # round by less than a header and keep the chunk.
+      #
+      # And the budget is short whenever an epoch allocates more than it:
+      # a mark beside the program lasts as long as its helpers take, the
+      # workers allocate all the while, and what they ask past the budget
+      # was carved from the pages this sweep had just handed back - a
+      # release on the allocating thread's refill, a fault a page after
+      # it, and on Windows a decommit and a commit whose TLB flush reaches
+      # every core the workers run on (issue #150). Twelve workers on a
+      # 4 MB budget took 94-97% of the pages the sweep released back cold
+      # on Windows, and 97-98% on Linux. So the pages the carve took up
+      # cold in an epoch are added to the next one's room (`begin_sweep`),
+      # and the addition fades by a sixteenth an epoch, so a churn that
+      # slows hands its pages back again: at a steady shortfall the room
+      # settles at sixteen seventeenths of it. bench/release_pages.iyi,
+      # before and after, three interleaved rounds. On a windows-2025
+      # runner (2 cores, 4 logical processors; job 122352634501),
+      # check_version in-process for 8 s at 12 workers: 473k-514k requests
+      # a second, 151k-162k releases and 3.1-3.6 of the 32 processor
+      # seconds in them, against 720k-758k, 14k-18k and 0.5-0.8 s, the
+      # peak working set 292-427 MB against 407-719; at 4 workers 689k-831k
+      # against 594k-723k, 31k-41k releases against 20k-24k - and +7-9% in
+      # an earlier run of the same arms, so inside the runner's noise.
+      # Served to oha (32 connections, same processors, 10 s): 41k-42k a
+      # second at 12 workers against 54k-67k, 48k-50k at 4 against
+      # 67k-72k, with 23-37% fewer releases at 4 and 53-62% fewer at 12.
+      # On a 12-core Linux machine, 12 workers in-process: 1.57M-1.60M
+      # against 3.54M-3.59M, 366k-372k releases against 70k-74k, peak RSS
+      # 157-203 MB against 367-434; 4 workers 1.91M-1.92M against
+      # 1.94M-1.96M, 25-26 MB against 26-30; over HTTP to wrk at 12
+      # workers 215k against 220k.
+      @@warm_extra : UInt64 = 0_u64
+      @@reopened_cold : UInt64 = 0_u64
+
       def self.warm_pages(chunk : UInt64, pages : UInt64) : UInt64
         kept = Pointer(Atomic(UInt64)).new(pointerof(@@kept_warm).address)
         seen = kept.value.get
-        return 0_u64 if seen >= budget
+        limit = budget + @@warm_extra
+        return 0_u64 if seen >= limit
         floor = chunk > 128_u64 ? IyiHeap.chunk_of(IyiHeap.class_index(chunk) - 1) + 1_u64 : chunk
         per_page = (IyiHeap::PAGE * (floor - IyiHeap::HEADER)).unsafe_div(chunk)
-        room = (budget - seen + per_page - 1_u64).unsafe_div(per_page)
+        room = (limit - seen + per_page - 1_u64).unsafe_div(per_page)
         take = pages < room ? pages : room
         kept.value.add(take * per_page)
         take
@@ -6901,8 +6970,7 @@ require "./file"
           elsif cold_low != 0
             pages = (page - cold_low).unsafe_shr(IyiHeap::PAGE_SHIFT)
             IyiHeap.set_cold(arena, cold_low, page, true)
-            __iyi_release_pages(cold_low, page - cold_low)
-            IyiHeap.pages_released_add(pages)
+            IyiHeap.release_run(cold_low, page - cold_low)
             IyiHeap.warm_sub(arena, pages)
             cold_low = 0_u64
           end
@@ -7001,6 +7069,12 @@ require "./file"
       # join whatever run they lie in.
       def self.begin_sweep : Nil
         @@kept_warm = 0_u64
+        # The pages the carve took up cold since the last turn are pages
+        # the sweep released and the epoch wanted back: the warm budget
+        # was short by that much (`warm_pages`), and this epoch keeps it.
+        reopened_cold = IyiHeap.pages_reopened - IyiHeap.pages_rewarmed
+        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr(4_u64) + (reopened_cold - @@reopened_cold) * IyiHeap::PAGE
+        @@reopened_cold = reopened_cold
         @@epoch = @@epoch + 1_u64
         @@epoch_flag = (@@epoch & 1_u64) * IyiHeap::EPOCH_FLAG
         @@swept = 0_u64

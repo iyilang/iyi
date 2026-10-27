@@ -300,7 +300,8 @@ jobs:
           .build/iyi test --cached --json \
             --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
             "${tests[@]}" > stale-index/cached.json
-          bash bench/stale_ci.sh assert-hits --json stale-index/cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
+            --snapshot "stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
 
       # This is an export step, and therefore the only stale-fresh step that
       # carries IYI_CI_PRODUCER. Comparing portable snapshots preserves both

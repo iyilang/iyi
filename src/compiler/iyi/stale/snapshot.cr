@@ -195,19 +195,24 @@ module Iyi::Stale
       eligible_by_test.each_value do |recs|
         chosen = recs.max_by?(&.seq) || recs.last
 
-        # Convert to portable mode
+        # The portable twin the runner recorded beside it: a local record's
+        # build components are keyed under this machine's key and its
+        # environment answers too, so only plain digests can be hit elsewhere.
+        # A receipt without one (written by an older runner) is not exported.
+        twin = chosen.portable_twin
+        next unless twin
+
         portable_rec = Receipt.new(
           test: chosen.test,
-          build: chosen.build,
+          build: twin.build,
           profile: chosen.profile,
-          trace: chosen.trace,
-          explain: chosen.explain,
+          trace: twin.trace,
+          explain: twin.explain,
           version: 1,
           mode: "portable",
           newest: "pass",
           seq: 0_u64,
-          contradicted: false,
-          signature: chosen.signature
+          contradicted: false
         )
         portable_rec.ensure_signature!
         portable_records << portable_rec

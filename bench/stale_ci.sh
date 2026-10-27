@@ -135,6 +135,7 @@ assert_hits() {
   "$PY" -c "
 import json, sys
 json_file = sys.argv[1]
+snapshot_file = sys.argv[2] if len(sys.argv) > 2 else ''
 with open(json_file) as f:
     data = json.load(f)
 
@@ -143,13 +144,30 @@ if not tests:
     print('assert-hits FAILED: no tests found in results', file=sys.stderr)
     sys.exit(1)
 
+# A test the producer could not reuse (it reads the clock, opens a socket,
+# writes beside itself) is not in its snapshot and is not reusable here
+# either: that is the claim holding, not a cache failing. It is only excused
+# when a snapshot is named, is absent from it, and says so; a test the
+# snapshot holds must hit.
+exported = None
+if snapshot_file:
+    with open(snapshot_file) as f:
+        snap = json.load(f)
+    exported = {r['test']['path'] for r in snap.get('records', [])}
+
 non_hits = []
+excused = []
 for t in tests:
     file = t.get('file', '')
     reuse = t.get('reuse', '')
     cached = t.get('cached', False)
-    if not (cached and reuse == 'hit'):
-        non_hits.append((file, reuse, t.get('reason', '')))
+    if cached and reuse == 'hit':
+        continue
+    base = file.split('/')[-1]
+    if exported is not None and reuse == 'not reusable' and base not in exported:
+        excused.append((file, t.get('reason', '')))
+        continue
+    non_hits.append((file, reuse, t.get('reason', '')))
 
 if non_hits:
     print(f'assert-hits FAILED: {len(non_hits)} tests did not hit from cache:', file=sys.stderr)
@@ -157,8 +175,14 @@ if non_hits:
         print(f'  {f}: reuse={r} reason={reason}', file=sys.stderr)
     sys.exit(1)
 
-print(f'assert-hits PASSED: all {len(tests)} tests hit from cache.')
-" "$json_file"
+hits = len(tests) - len(excused)
+print(f'assert-hits PASSED: {hits} of {len(tests)} tests hit from cache.')
+for f, reason in excused:
+    print(f'  not reusable, so not exported: {f}: {reason}')
+if exported is not None and hits != len(exported):
+    print(f'assert-hits FAILED: the snapshot holds {len(exported)} tests and {hits} hit', file=sys.stderr)
+    sys.exit(1)
+" "$json_file" "$snapshot_file"
 }
 
 # 4. shadow-audit: verifies cached hits match fresh execution. The two

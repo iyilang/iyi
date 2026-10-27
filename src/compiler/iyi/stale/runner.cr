@@ -198,12 +198,12 @@ module Iyi::Stale
           valid = candidates.select do |rec|
             rec.pass? && !rec.contradicted &&
               rec.profile.fp == current_profile.fp &&
-              Trace.replay(rec.trace.observations, keyer_local, roots).nil?
+              Trace.replay(rec.trace.observations, keyer_for(rec, keyer_local), roots).nil?
           end
 
           matching_blockers = blockers.select do |rec|
             rec.profile.fp == current_profile.fp &&
-              Trace.replay(rec.trace.observations, keyer_local, roots).nil?
+              Trace.replay(rec.trace.observations, keyer_for(rec, keyer_local), roots).nil?
           end
 
           block_rules = matching_blockers.map { |b| KeyFile::StaleRule.new(b.mode, b.build.build) }
@@ -282,7 +282,7 @@ module Iyi::Stale
             if key_data && (key_data.local || key_data.portable)
               # Build failure after Build computed: revoke every receipt of test that validates now
               @store.revoke(test_id) do |rec|
-                rec.profile.fp == current_profile.fp && Trace.replay(rec.trace.observations, keyer_local, roots).nil?
+                rec.profile.fp == current_profile.fp && Trace.replay(rec.trace.observations, keyer_for(rec, keyer_local), roots).nil?
               end
             end
             res = TestResult.new(
@@ -349,7 +349,7 @@ module Iyi::Stale
             # Non-pass exit (fail, signal, timeout kill, reserved status):
             # revoke every receipt of test that validates now (whatever trace state)
             @store.revoke(test_id) do |rec|
-              rec.profile.fp == current_profile.fp && Trace.replay(rec.trace.observations, keyer_local, roots).nil?
+              rec.profile.fp == current_profile.fp && Trace.replay(rec.trace.observations, keyer_for(rec, keyer_local), roots).nil?
             end
             res = TestResult.new(
               file: file,
@@ -463,6 +463,27 @@ module Iyi::Stale
                 mode: "local",
                 newest: "pass"
               )
+              # The twin a CI producer exports: the same run, keyed plainly.
+              if (portable_build = key_data.portable) && File.file?(trace_file)
+                portable_trace = File.open(trace_file) { |io| Trace.parse(io, roots, Keyer.portable, check_disk_after_exit: false) }
+                if portable_trace.complete
+                  receipt.portable_twin = PortableRecord.new(
+                    ReceiptBuild.new(
+                      build: portable_build.build,
+                      toolchain: portable_build.toolchain,
+                      behavior: portable_build.behavior,
+                      callpath: portable_build.callpath,
+                      link: portable_build.link,
+                      cenv: portable_build.cenv
+                    ),
+                    portable_build.explain,
+                    ReceiptTrace.new(
+                      fp: Stale.hex(Trace.compute_trace_fp(portable_trace.observations)),
+                      observations: portable_trace.observations
+                    )
+                  )
+                end
+              end
               @store.record(receipt)
               recorded_receipts << receipt
             end
@@ -615,7 +636,7 @@ module Iyi::Stale
         return "fresh run"
       end
 
-      local = key_data.try(&.local)
+      local = newest.portable? ? key_data.try(&.portable) : key_data.try(&.local)
       unless local
         return "does not build"
       end
@@ -660,11 +681,17 @@ module Iyi::Stale
         return "profile changed"
       end
 
-      if run_mismatch = Trace.replay(newest.trace.observations, keyer, roots)
+      if run_mismatch = Trace.replay(newest.trace.observations, keyer_for(newest, keyer), roots)
         return run_mismatch
       end
 
       "unclassified miss"
+    end
+
+    # An imported record's observations are plain digests; a local one's are
+    # keyed under this machine's key.
+    private def keyer_for(rec : Receipt, local : Keyer) : Keyer
+      rec.portable? ? Keyer.portable : local
     end
 
     private def elapsed(started : Time::Instant) : Float64

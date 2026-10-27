@@ -156,6 +156,22 @@ module Iyi::Stale
     end
   end
 
+  # What a CI producer exports: the same build, explain and trace as the local
+  # record, keyed with plain digests instead of the machine key (§6, D10). A
+  # local record's build components are HMACs under this machine's key, which
+  # no other machine can reproduce, so a snapshot built from them could never
+  # be hit anywhere else.
+  struct PortableRecord
+    include JSON::Serializable
+
+    property build : ReceiptBuild
+    property explain : Hash(String, String)
+    property trace : ReceiptTrace
+
+    def initialize(@build : ReceiptBuild, @explain : Hash(String, String), @trace : ReceiptTrace)
+    end
+  end
+
   class Receipt
     include JSON::Serializable
 
@@ -170,6 +186,8 @@ module Iyi::Stale
     property newest : String = "pass" # "pass" | "fail" | "hung" | "build-failed"
     property seq : UInt64 = 0_u64
     property contradicted : Bool = false
+    # Only on a local record the runner wrote; see `PortableRecord`.
+    property portable_twin : PortableRecord? = nil
 
     def initialize(
       @test : TestId,

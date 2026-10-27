@@ -278,15 +278,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # v8: these two were uploaded with `archive: false`, which v5 cannot
+      # download (it reads every artifact as a zip and failed after 5 retries).
       - name: Download producer compiler
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: iyi
           path: .build
       - run: chmod +x .build/iyi
 
       - name: Download producer receipt snapshot
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: run-${{ github.run_id }}-x86_64-linux-gnu.json
           path: stale-index

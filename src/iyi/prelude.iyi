@@ -4819,7 +4819,8 @@ require "./file"
       # The pool: a lock word, the batch list's head, the bump piece and
       # its cursor and end, the free batches, the count of workers holding
       # work, and the generation the helpers wake on — each on a line of
-      # its own in one mapping.
+      # its own in one mapping. The count moves by one, up and down by the
+      # worker it counts, and nothing stores it (`drain` says why).
       @@pool : UInt64 = 0_u64
       POOL_LOCK = 0_u64
       POOL_HEAD = 64_u64
@@ -4881,6 +4882,9 @@ require "./file"
       # Windows' helpers asleep on the semaphore, counted so a wake
       # releases one count per sleeper (`wake_helpers`).
       POOL_SLEEPERS = 1216_u64
+      # When the mark in flight is next reported as overdue, or 0 when no
+      # mark is in flight (`watch_overdue`).
+      POOL_OVERDUE_AT = 1280_u64
       NO_PERMIT = 0xFFFFFFFFFFFFFFFF_u64
 
       # A mark's permit, or NO_PERMIT: the slot is the order of taking,
@@ -5157,6 +5161,12 @@ require "./file"
       # set from the marked bytes less these.
       W_BORN = 80_u64
       W_CAP = 88_u64
+      # Assists this thread has made, for the look at an overdue mark
+      # every OVERDUE_LOOK of them; and the page's second half, where a
+      # report on the mark is put together - the collector writes no
+      # line from its own heap (`say_mark`).
+      W_ASSISTS = 96_u64
+      W_LINE = 2048_u64
       @@worker_pages : UInt64 = 0_u64
 
       def self.worker : UInt64
@@ -5313,7 +5323,13 @@ require "./file"
         end
         flush_mutator(w)
         flush_live(w)
-        active.value.sub(1_u64)
+        count_out(w)
+        # The mark's age, looked at every OVERDUE_LOOK assists: a mark that
+        # never ends leaves the program assisting it for good, so this is
+        # where a stuck one is seen while the program allocates.
+        assists = IyiHeap.read64(w + W_ASSISTS) + 1_u64
+        IyiHeap.write64(w + W_ASSISTS, assists)
+        watch_overdue(w) if assists & (OVERDUE_LOOK - 1_u64) == 0_u64
       end
 
       # An object born under the mark is born black - Go's allocate-black:
@@ -5702,7 +5718,10 @@ require "./file"
           IyiHeap.arena_live_reset(arena)
           arena = IyiHeap.arena_next(arena)
         end
-        IyiHeap.write64(pool + POOL_HEAD, 0_u64)
+        # Nothing counted in and nothing in the pool, said if not; and the
+        # mark's clock started (`watch_overdue`).
+        expect_idle(w, true)
+        mark_begins
         # Helpers by the work: one per MiB the last mark found live, up to
         # the number wanted — fifteen helpers on a three-MiB heap spent
         # the mark waking, contending for the pool and detecting the end
@@ -5724,7 +5743,8 @@ require "./file"
         # Measured on Windows, where a woken helper is at the pool that
         # soon: 11 helpers took permits and blackened nothing in 7 of 20 of the
         # tree's marks, and the collector marked a million nodes alone.
-        pool_word(POOL_ACTIVE).value.set(1_u64)
+        # Counted in by one, as every worker is (`drain` says why).
+        pool_word(POOL_ACTIVE).value.add(1_u64)
         pool_word(POOL_HELPERS_DONE).value.set(0_u64)
         # The permits last, once every count a taker adds to is this
         # round's (`open_mark_permits` says why).
@@ -5747,6 +5767,7 @@ require "./file"
         @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
         @@last_marked = @@bytes_marked
         @@workers = 0_u64
+        mark_ends
         black
       end
 
@@ -5765,6 +5786,34 @@ require "./file"
       # ever pay - the collector's own gate on a two-core runner, and the
       # thread exercise on three.
       # `counted` is a caller that counted itself in already (`mark`).
+      #
+      # The count moves by one and is never stored. Each round stored it -
+      # `mark` 1, the first stop 0, the second stop 1, the remainder round
+      # 0 - and the remainder round runs beside the program when the
+      # second stop retreats, where the mutators' assists count themselves
+      # in and out of it. An assist counted in before the store had its one
+      # wiped, and its own -1 after the store took the count one below what
+      # the drainers held: when they had all counted out it read the top of
+      # the range, never zero, and every drainer spun on it for good with
+      # `@@collecting` up, so no collection ran again and the heap grew
+      # until the machine ran out (#149: Windows, eight and twelve workers,
+      # nine helpers in `drain` and one of them from `remainder_round`).
+      # Windows' release is a `ResumeThread` per thread and then a wait for
+      # every thread that parked at the stop, and the threads resumed first
+      # allocate all the while; Linux's is one futex wake. The stores hid
+      # most of it, too: an assist whose -1 landed after the drains had
+      # ended left a count the next stop's store wrote over. A copy of the
+      # prelude that paused 200 us before the remainder round's store saw
+      # 253 assists begin inside the pause over 22 rounds, the count read 1
+      # to 6 before the store, and no stall; with each of those assists
+      # held until the store had landed, it stalled at the first run's 39th
+      # collection, POOL_ACTIVE 18446744073709551608 with ten helpers
+      # holding permits, none done, and the pool empty
+      # (bench/mark_stall.iyi). By one, an assist is a worker like any
+      # other, and every round starts from zero because every worker of
+      # the last one has counted out: its drainers are waited for, and a
+      # stop waits out every assist. Where that does not hold, `count_out`
+      # and `expect_idle` say so.
       def self.drain(w : UInt64, counted : Bool = false) : UInt64
         black = 0_u64
         active = pool_word(POOL_ACTIVE)
@@ -5779,7 +5828,8 @@ require "./file"
             black = black + 1_u64
           end
           next if take_batch(w)
-          active.value.sub(1_u64)
+          count_out(w)
+          spins = 0_u64
           while true
             if IyiHeap.read64(pool + POOL_HEAD) != 0
               active.value.add(1_u64)
@@ -5790,6 +5840,8 @@ require "./file"
               return black
             end
             spin_pause
+            spins = spins + 1_u64
+            watch_overdue(w) if spins & (OVERDUE_SPINS - 1_u64) == 0_u64
           end
         end
       end
@@ -5814,6 +5866,130 @@ require "./file"
           scan(w, IyiHeap.read64(IyiHeap.read64(w + W_STACK) + len * 8_u64))
           scanned = scanned + 1_u64
         end
+      end
+
+      # ── A mark that does not end ────────────────────────────────────────
+      #
+      # A mark that never ended never said so: `pressure` skips while one is
+      # in flight, a mark beside the program sends every slice of
+      # allocation to an assist instead, the helpers spun in `drain` and
+      # the program went on allocating into a heap that was never collected
+      # (#149). Three looks, all cheap, put it on standard error with the
+      # words it turns on - the count of workers marking, the pool's head,
+      # the generation that names the round, its permits and the helpers
+      # done. A count that went below zero is the protocol broken, and it
+      # is fatal where it happens: no drain sees that count reach zero
+      # again. A round that begins with a worker counted in, or a mark
+      # with work in its pool, is a count or a batch the protocol lost:
+      # fatal at the stop, before the round can hang on it. And a mark in
+      # flight past MARK_OVERDUE_NS is said, by whichever thread looks
+      # first - an assist every OVERDUE_LOOK assists, a drain every
+      # OVERDUE_SPINS spins with nothing to do, a `collect` waiting for it
+      # - once per doubling of its age, and the mark goes on: a long mark
+      # is not a wrong one, and the line is what shows a stuck one. Ten
+      # seconds is far past a working mark: from first stop to second the
+      # longest was 42 ms over bench/mark_stall.iyi's 1,151 collections on
+      # twelve workers, and 21 ms in bench/concurrent_mark.iyi, whose
+      # 200,000-node chain it marks beside the program. And a look is
+      # cheap: the clock every 64 assists - four megabytes of a thread's
+      # allocation - and every 65,536 spins of a drain with nothing to do.
+      MARK_OVERDUE_NS = 10000000000_u64
+      OVERDUE_LOOK = 64_u64
+      OVERDUE_SPINS = 65536_u64
+      @@mark_began : UInt64 = 0_u64
+
+      # A mark's clock started, inside the stop that begins it.
+      def self.mark_begins : Nil
+        began = now_ns
+        @@mark_began = began
+        pool_word(POOL_OVERDUE_AT).value.set(began + MARK_OVERDUE_NS)
+      end
+
+      # And stopped, inside the stop that ends it.
+      def self.mark_ends : Nil
+        pool_word(POOL_OVERDUE_AT).value.set(0_u64)
+      end
+
+      # This worker counted out: the count one down, and fatal when it was
+      # zero already - a -1 no +1 paid for.
+      def self.count_out(w : UInt64) : Nil
+        return unless pool_word(POOL_ACTIVE).value.sub(1_u64) == 0_u64
+        say_mark(w, line_text(w, w + W_LINE, "iyi: the collector's count of workers marking went below zero: "), true)
+      end
+
+      # Inside the stop that begins a round: nothing counted in - the last
+      # round's drainers were waited for, and the stop waited out every
+      # assist - and, where a mark begins (`pool_too`), nothing in its
+      # pool.
+      def self.expect_idle(w : UInt64, pool_too : Bool) : Nil
+        return if pool_word(POOL_ACTIVE).value.get == 0_u64 && (!pool_too || IyiHeap.read64(pool + POOL_HEAD) == 0_u64)
+        say_mark(w, line_text(w, w + W_LINE, "iyi: a round of the mark began with a worker counted in or work in its pool: "), true)
+      end
+
+      # The mark in flight, said if it is past its due time: whoever moves
+      # the due time on to twice the mark's age says it, so one line per
+      # doubling, from whichever thread looked.
+      def self.watch_overdue(w : UInt64) : Nil
+        due = pool_word(POOL_OVERDUE_AT)
+        at = due.value.get
+        return if at == 0_u64
+        now = now_ns
+        return if now < at
+        age = now - @@mark_began
+        return unless due.value.compare_and_set(at, now + age)[1]
+        line = line_text(w, w + W_LINE, "iyi: the collector's mark has run ")
+        line = line_number(w, line, age.unsafe_div(1000000_u64))
+        say_mark(w, line_text(w, line, " ms and is not over: "), false)
+      end
+
+      # The line begun at `line` on this worker's page, finished with the
+      # mark's words and written to standard error; then the end of the
+      # program, if `fatal`. Put together on the page, not in the heap:
+      # the heap is what the collector is in the middle of.
+      def self.say_mark(w : UInt64, line : UInt64, fatal : Bool) : Nil
+        permits = pool_word(POOL_MARK_PERMITS).value.get
+        line = line_text(w, line, "POOL_ACTIVE ")
+        line = line_number(w, line, pool_word(POOL_ACTIVE).value.get)
+        line = line_text(w, line, ", POOL_HEAD ")
+        line = line_number(w, line, IyiHeap.read64(pool + POOL_HEAD))
+        line = line_text(w, line, ", generation ")
+        line = line_number(w, line, pool_word(POOL_GENERATION).value.get)
+        line = line_text(w, line, ", permits left ")
+        line = line_number(w, line, permits & MARK_PERMITS_LEFT)
+        line = line_text(w, line, " and taken ")
+        line = line_number(w, line, permits.unsafe_shr(32_u64))
+        line = line_text(w, line, ", helpers done ")
+        line = line_number(w, line, pool_word(POOL_HELPERS_DONE).value.get)
+        line = line_text(w, line, ". A mark that does not end is a bug in iyi's runtime, ours to fix: https://github.com/iyilang/iyi/issues\n")
+        __iyi_write(2, Pointer(Void).new(w + W_LINE), line - (w + W_LINE))
+        __iyi_exit(1) if fatal
+      end
+
+      # `text`'s bytes at `line`, up to the page's end; answers where the
+      # line goes on.
+      def self.line_text(w : UInt64, line : UInt64, text : String) : UInt64
+        bytes = text.to_unsafe
+        index = 0
+        while index < text.bytesize && line < w + 4096_u64
+          IyiHeap.write8(line, bytes[index].to_u64)
+          line = line + 1_u64
+          index = index + 1
+        end
+        line
+      end
+
+      # `value` in decimal at `line`, the same way.
+      def self.line_number(w : UInt64, line : UInt64, value : UInt64) : UInt64
+        scale = 1_u64
+        while value.unsafe_div(scale) >= 10_u64
+          scale = scale * 10_u64
+        end
+        while scale > 0_u64 && line < w + 4096_u64
+          IyiHeap.write8(line, 48_u64 + value.unsafe_div(scale).unsafe_mod(10_u64))
+          line = line + 1_u64
+          scale = scale.unsafe_div(10_u64)
+        end
+        line
       end
 
       # ── Helpers ─────────────────────────────────────────────────────────
@@ -7215,10 +7391,14 @@ require "./file"
         IyiRoots.clear_dead_stack
         IyiRuntimeLock.lock
         # A collection already running beside the program is finished by
-        # its helper; this one waits for it rather than racing it.
+        # its helper; this one waits for it rather than racing it, and
+        # says so if it is overdue (`watch_overdue`).
+        spins = 0_u64
         while @@collecting
           IyiRuntimeLock.unlock
           spin_pause
+          spins = spins + 1_u64
+          watch_overdue(worker) if spins & (OVERDUE_SPINS - 1_u64) == 0_u64
           IyiRuntimeLock.lock
         end
         @@collecting = true
@@ -7238,8 +7418,11 @@ require "./file"
       # swept, so it is not one yet — and a program that reads the count
       # after churn wants the one it triggered included.
       def self.settle : Nil
+        spins = 0_u64
         while @@collecting
           spin_pause
+          spins = spins + 1_u64
+          watch_overdue(worker) if spins & (OVERDUE_SPINS - 1_u64) == 0_u64
         end
       end
 
@@ -7427,14 +7610,14 @@ require "./file"
             IyiHeap.arena_live_reset(arena)
             arena = IyiHeap.arena_next(arena)
           end
-          IyiHeap.write64(pool + POOL_HEAD, 0_u64)
+          expect_idle(w, true)
+          mark_begins
           # The roots, and then the mark up to the bound on this thread
           # with the world still stopped: no barrier is needed for it,
           # nothing is running.
           @@workers = 1_u64
           open_mark_permits(0_u64)
           pool_word(POOL_FINISH).value.set(0_u64)
-          pool_word(POOL_ACTIVE).value.set(0_u64)
           pool_word(POOL_HELPERS_DONE).value.set(0_u64)
           IyiRoots.each_root(->(base : UInt64) { shade(base) })
           flush_mutator(w)
@@ -7450,7 +7633,7 @@ require "./file"
             @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
             @@last_marked = @@bytes_marked
             @@workers = 0_u64
-            pool_word(POOL_ACTIVE).value.set(0_u64)
+            mark_ends
             # The live counts this thread was holding into their arenas
             # before the scavenge reads them: `drain` flushes them where
             # it ends, and a bounded drain does not end there. An arena
@@ -7492,8 +7675,8 @@ require "./file"
           @@workers = helpers + 1_u64
           pool_word(POOL_FINISH).value.set(1_u64)
           # Every helper counts itself in when it starts draining; the
-          # triggering thread is not a worker after this.
-          pool_word(POOL_ACTIVE).value.set(0_u64)
+          # triggering thread is not a worker after this, and the count
+          # stays the zero it is.
           # What the bounded mark left on this thread's stack goes to the
           # pool: from here this thread is a mutator, and its stack is
           # only its barrier's.
@@ -7584,6 +7767,9 @@ require "./file"
             others = IyiThread.stop_others
             w = worker
             @@collector_worker = w
+            # Every helper of the round before was waited for and the stop
+            # waited out every assist: nothing is counted in, said if not.
+            expect_idle(w, false)
             IyiHeap.write64(w + W_LEN, 0_u64)
             @@workers = @@helpers
             page = @@worker_pages
@@ -7607,7 +7793,6 @@ require "./file"
             # finish within the bound is a structure hanging off a
             # register, and that is the retreat's case.
             @@workers = 1_u64
-            pool_word(POOL_ACTIVE).value.set(1_u64)
             unfinished = !drain_bounded(w, FINISH_SCAN)
             # The probe's live counts into their arenas before the
             # scavenge reads them: an arena whose only live objects sat in
@@ -7630,6 +7815,7 @@ require "./file"
             @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
             @@last_marked = @@bytes_marked
             LibIyiGCTable.__iyi_marking = 0_u8
+            mark_ends
             @@concurrent = false
             @@workers = 0_u64
             scavenge
@@ -7671,13 +7857,18 @@ require "./file"
             @@pause_max = longest if longest > @@pause_max
             @@pause_total = @@pause_total + total
             @@concurrent_collections = @@concurrent_collections + 1_u64
+            # The generation helper 0 waits past next - turned for the
+            # remainder and again for the round, and it takes its own turn
+            # at the round before it parks - read while the collection is
+            # still this one's. Read after `@@collecting` falls, it could
+            # be the turn of a mark another thread began in between: helper
+            # 0 then waited past that mark, and with no other helper to
+            # take its permit nobody drained it and nobody finished it.
+            generation = pool_word(POOL_GENERATION).value.get
             @@collecting = false
             IyiRuntimeLock.unlock
             wake_sweep_round
-            # Helper 0 takes its own turn at the round before it parks.
-            # The generation as it stands - turned for the remainder and
-            # again for the round - is the one it waits past.
-            return pool_word(POOL_GENERATION).value.get
+            return generation
           end
         end
 
@@ -7688,15 +7879,19 @@ require "./file"
           helpers = @@helpers
           @@workers = helpers
           pool_word(POOL_FINISH).value.set(0_u64)
-          pool_word(POOL_ACTIVE).value.set(0_u64)
           pool_word(POOL_HELPERS_DONE).value.set(0_u64)
-          # This helper is inside the finish and drains below without a
-          # permit; every other may take one, once the counts above are
-          # this round's (`open_mark_permits` says why).
+          # This helper is counted in before a helper can see the
+          # generation, as `mark` counts itself, and by one: beside the
+          # program the count holds the assists running now, and the store
+          # of zero this was took theirs out from under them (`drain`).
+          pool_word(POOL_ACTIVE).value.add(1_u64)
+          # It drains below without a permit; every other helper may take
+          # one, once the counts above are this round's
+          # (`open_mark_permits` says why).
           open_mark_permits(helpers - 1_u64)
           generation = pool_word(POOL_GENERATION).value.add(1_u64) + 1_u64
           wake_helpers
-          drain(w)
+          drain(w, true)
           takers = close_mark_permits
           while pool_word(POOL_HELPERS_DONE).value.get < takers
             spin_pause

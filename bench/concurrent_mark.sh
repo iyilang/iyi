@@ -607,9 +607,13 @@ done
 # The store put back where the remainder round counts helper 0 in, and a
 # window of 200 us before it in which every assist that begins is held
 # until the store has landed: the window Windows' release leaves open
-# while the threads it resumed first allocate, made certain. The count
-# goes below zero at a remainder round beside the program, and
-# `count_out` says so - 4 runs of 4 here.
+# while the threads it resumed first allocate, made certain. And every
+# second stop retreats once, so that round runs at every collection: on
+# four-core Windows and three-core darwin runners the program retreated
+# 0 or 1 times in ten seconds, and this copy without the forced retreat
+# exited 0 on both. The count goes below zero at a remainder round
+# beside the program, and `count_out` says so: 4 runs of 4 here without
+# the forced retreat, and with it at the first collection.
 step "failure proof: the remainder round's count stored over the assists counted in"
 mkdir -p stored/iyi
 cp "$REPO"/src/iyi/*.iyi stored/iyi/
@@ -628,7 +632,10 @@ awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
     print "          spin_pause"
     print "        end"
     held = 1; next }
-  { print } END { if (!stored || !held) exit 3 }' \
+  /^            if attempts < FINISH_RETRIES && unfinished$/ {
+    print "            if attempts < FINISH_RETRIES && (unfinished || attempts == 0_u64)"
+    forced = 1; next }
+  { print } END { if (!stored || !held || !forced) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > stored/iyi/prelude.iyi || { echo "the count this proof stores, or the assist it holds, is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/stored${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stored-run > build-stored.log 2>&1; then
   cat build-stored.log; exit 1

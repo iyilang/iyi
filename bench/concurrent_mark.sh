@@ -53,8 +53,9 @@
 #      collection finishes, and no collection count stands still while
 #      the tasks allocate.
 #  12. Failure proof: the remainder round's store of the count of workers
-#      marking put back, with the assists that begin in a window before it
-#      held until it lands; the count goes below zero and the runtime
+#      marking put back, every second stop retreating once, and a window
+#      before the store held open until an assist has counted itself in;
+#      the count goes below zero at the first collection and the runtime
 #      exits 1 saying so.
 #  13. Failure proof: helper 0 reading the generation it waits past after
 #      the collection is let go, held until the next mark turns it, with
@@ -605,22 +606,25 @@ for helpers in every one; do
 done
 
 # The store put back where the remainder round counts helper 0 in, and a
-# window of 200 us before it in which every assist that begins is held
-# until the store has landed: the window Windows' release leaves open
-# while the threads it resumed first allocate, made certain. And every
-# second stop retreats once, so that round runs at every collection: on
-# four-core Windows and three-core darwin runners the program retreated
-# 0 or 1 times in ten seconds, and this copy without the forced retreat
-# exited 0 on both. The count goes below zero at a remainder round
-# beside the program, and `count_out` says so: 4 runs of 4 here without
-# the forced retreat, and with it at the first collection.
+# window before it, held open until an assist has counted itself in - a
+# second at most - in which every assist that begins is held until the
+# store has landed: the window Windows' release leaves open while the
+# threads it resumed first allocate, made certain. And every second stop
+# retreats once, so that round runs at every collection. Both were left
+# to the machine before: a window of 200 us, and no forced retreat, and
+# on four-core Windows and three-core darwin runners the program
+# retreated 0 or 1 times in ten seconds and that copy exited 0. The
+# count goes below zero at the first collection's remainder round, and
+# `count_out` says so: 12 runs of 12 here held to three, four and twelve
+# cores, each ended inside 110 ms.
 step "failure proof: the remainder round's count stored over the assists counted in"
 mkdir -p stored/iyi
 cp "$REPO"/src/iyi/*.iyi stored/iyi/
 awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
+    print "          pool_word(1408_u64).value.set(0_u64)"
     print "          pool_word(1344_u64).value.set(1_u64)"
-    print "          window = now_ns + 200000_u64"
-    print "          while now_ns < window"
+    print "          window = now_ns + 1000000000_u64"
+    print "          while pool_word(1408_u64).value.get == 0_u64 && now_ns < window"
     print "            spin_pause"
     print "          end"
     print "          pool_word(POOL_ACTIVE).value.set(1_u64)"
@@ -628,8 +632,11 @@ awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
     stored = 1; next }
   /^        active\.value\.add\(1_u64\)$/ {
     print
-    print "        while pool_word(1344_u64).value.get != 0_u64"
-    print "          spin_pause"
+    print "        if pool_word(1344_u64).value.get != 0_u64"
+    print "          pool_word(1408_u64).value.set(1_u64)"
+    print "          while pool_word(1344_u64).value.get != 0_u64"
+    print "            spin_pause"
+    print "          end"
     print "        end"
     held = 1; next }
   /^            if attempts < FINISH_RETRIES && unfinished$/ {

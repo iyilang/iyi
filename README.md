@@ -363,7 +363,7 @@ including the one pause the design does not bound.
 starts in 1.6 ms; the same program compiled with Crystal's standard library is
 1,553 KB and 3.2 ms. A program links what it uses, and
 iyi's own library is 24,562 lines rather than 8,161.
-The whole library is 1,025 KB on disk beside the binary.
+The whole library is 1,026 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
 and move with the platform; `python3 bench/machine_probe.py` prints your
@@ -385,7 +385,7 @@ tar -xzf iyi-0.19.1-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,025 KB prelude, the 4,943 KB of `src/std` that `import std/...`
+iyi's own 1,026 KB prelude, the 4,943 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`

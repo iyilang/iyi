@@ -198,7 +198,7 @@ end
 pub def enter_frame(tid : UInt64 = current_task_id) : ::Bool
   return true unless @@enabled
   return false if @@in_hook
-  {% if !flag?(:single_thread) %}
+  {% if !flag?(:single_thread) && flag?(:iyi_observe) %}
     if IyiScheduler.state_id != 0_u64
       fiber = IyiScheduler.state.current
       if fiber.is_a?(IyiFiber)
@@ -216,7 +216,7 @@ end
 pub def leave_frame(tid : UInt64 = current_task_id) : Nil
   return unless @@enabled
   return if @@in_hook
-  {% if !flag?(:single_thread) %}
+  {% if !flag?(:single_thread) && flag?(:iyi_observe) %}
     if IyiScheduler.state_id != 0_u64
       fiber = IyiScheduler.state.current
       if fiber.is_a?(IyiFiber)
@@ -231,7 +231,7 @@ pub def leave_frame(tid : UInt64 = current_task_id) : Nil
 end
 
 pub def frame_depth(tid : UInt64 = current_task_id) : Int32
-  {% if !flag?(:single_thread) %}
+  {% if !flag?(:single_thread) && flag?(:iyi_observe) %}
     if IyiScheduler.state_id != 0_u64
       fiber = IyiScheduler.state.current
       return fiber.observe_depth if fiber.is_a?(IyiFiber)
@@ -577,7 +577,7 @@ end
 
 private def current_task_id : UInt64
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-    {% if !flag?(:single_thread) %}
+    {% if !flag?(:single_thread) && flag?(:iyi_observe) %}
       if IyiScheduler.state_id != 0_u64
         state = IyiScheduler.state
         fiber = state.current

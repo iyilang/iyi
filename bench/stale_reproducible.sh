@@ -134,6 +134,15 @@ run_rg1() {
   local commit
   commit="$("$IYI" --version 2>/dev/null | sed -n 's/.*\[\([0-9a-f]*\)\].*/\1/p' | head -1)"
   [ -n "$commit" ] || commit="$(/usr/bin/git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo "")"
+  # The stamp's date too: it is the day of SOURCE_DATE_EPOCH when compiler 1
+  # was built, which an incremental rebuild does not renew, so a compiler built
+  # yesterday stamps yesterday whatever HEAD's commit time says now.
+  local stamp_date stamp_epoch
+  stamp_date="$("$IYI" --version 2>/dev/null | sed -n 's/.*(\([0-9][0-9-]*\)).*/\1/p' | head -1)"
+  if [ -n "$stamp_date" ]; then
+    stamp_epoch="$("$PY" -c 'import sys,datetime; print(int(datetime.datetime.strptime(sys.argv[1], "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()))' "$stamp_date" 2>/dev/null || true)"
+    [ -z "$stamp_epoch" ] || SOURCE_DATE_EPOCH="$stamp_epoch"
+  fi
   make -C "$rg1_dir" -j8 iyi FLAGS="$extra_flags" IYI_CONFIG_BUILD_COMMIT="$commit" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"
 
   local c2_iyi="$rg1_dir/.build/iyi"

@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Eighteen steps, eleven of them failure proofs:
+# Twenty-one steps, thirteen of them failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -65,15 +65,24 @@
 #      threads, with helper 0 held 300 ms between the two; the threads
 #      allocate past the budget with nothing triggered, and the watchdog
 #      exits 1.
-#  15. Failure proof: `free` outside the allocator's bracket; a pause
+#  15. A collection a program's own thread finishes, whose mark ends in
+#      its first stop, with no helper, and `IyiMark.collect`'s, three runs:
+#      a second thread's slices past the budget after each trigger the
+#      next (bench/release_trigger.iyi).
+#  16. Failure proof: the stopped collection let go after its release,
+#      its thread held a second between the two; the stopped and the
+#      verb's rounds exit 1 saying their slices triggered nothing.
+#  17. Failure proof: the same for a collection whose mark ends in its
+#      first stop, and the bounded round exits 1.
+#  18. Failure proof: `free` outside the allocator's bracket; a pause
 #      among the frees puts the lists it dropped back on the cache, and
 #      step 5's program exits 1 within ten runs.
-#  16. Failure proof, on Windows: the helpers given back the boost a
+#  19. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
 #      program's wakes past a millisecond - exits 1.
-#  17. Failure proof, on Windows: the cap on the helpers beside a busy
+#  20. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
-#  18. Failure proof, on Windows: the first collection's wait for every
+#  21. Failure proof, on Windows: the first collection's wait for every
 #      helper to reach its park put back, and the crowded check fires.
 set -u
 
@@ -722,6 +731,76 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: stall:.*marking false" released.txt; t
   echo "the untriggered allocation was not caught (exit $code):"; tail -3 released.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stall:' released.txt | cut -c1-150)"
+
+# The same window where a program's own thread finishes the collection:
+# the trigger's whose mark ends inside its first stop (`finish_stopped`),
+# and the stopped ones, the trigger's with no helper and `IyiMark.collect`
+# (`collect_locked`). Before the flag moved there, the window between their
+# release and its fall lasted 1.6 to 24.2 ms at its longest in a run here,
+# and one counted 166,789,120 bytes against a budget of 4,194,304
+# (GC_DESIGN.md Stage 9). bench/release_trigger.iyi runs one collection
+# of each and then a second thread's slices past the budget, which must
+# trigger the next; three runs.
+step "every collection a program's thread finishes is let go before its threads are released"
+if ! "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o trigger > build-trigger.log 2>&1; then
+  cat build-trigger.log; exit 1
+fi
+for run in 1 2 3; do
+  if ! timeout -k 5 60 ./trigger > "trigger-$run.txt" 2>&1 || ! grep -q "every collection was let go" "trigger-$run.txt"; then
+    echo "  run $run:"; cat "trigger-$run.txt"; exit 1
+  fi
+done
+grep -E '^(bounded|stopped|verb|one core):' trigger-1.txt | sed 's/^/  /'
+
+# `@@collecting` let go after the release again, in one of the two places
+# that let it go, and the thread that ran the collection held a second
+# between the two: the second thread's slices are turned away, it
+# triggers nothing and does nothing more, and the rounds that end there
+# fail by name - `collect_locked`'s the stopped round and the verb's, and
+# `finish_stopped`'s the bounded one; 12 runs of 12 each here held to
+# three, four and twelve cores, and the runtime as it is 12 of 12 clean.
+let_go_late() {
+  name=$1 indent=$2
+  shift 2
+  mkdir -p "$name/iyi"
+  cp "$REPO"/src/iyi/*.iyi "$name/iyi/"
+  awk -v n="$indent" 'BEGIN { while (length(pad) < n) pad = pad " " }
+    $0 == (pad "@@collecting = false") && !moved { held = 1; next }
+    held && /^          IyiThread\.resume_others\(others\)$/ {
+      print
+      print "          window = now_ns + 1000000000_u64"
+      print "          while now_ns < window"
+      print "            spin_pause"
+      print "          end"
+      print "          @@collecting = false"
+      held = 0; moved = 1; next }
+    { print } END { if (!moved) exit 3 }' \
+    "$REPO/src/iyi/prelude.iyi" > "$name/iyi/prelude.iyi" || { echo "the order the $name proof undoes is not in the prelude any more"; exit 1; }
+  if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o "$name-run" > "build-$name.log" 2>&1; then
+    cat "build-$name.log"; exit 1
+  fi
+  timeout -k 5 60 "./$name-run" > "$name.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 1 ]; then
+    echo "the untriggered slices were not caught (exit $code):"; cat "$name.txt"; exit 1
+  fi
+  for round in "$@"; do
+    if ! grep -q "^FAIL: $round: after collection" "$name.txt"; then
+      echo "the $round round did not fail:"; cat "$name.txt"; exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$(grep -m1 "^FAIL: $round:" "$name.txt" | cut -c1-150)"
+  done
+}
+
+step "failure proof: a stopped collection let go after its threads are released leaves their slices untriggered"
+let_go_late locked-late 8 stopped verb
+
+step "failure proof: a collection that ends in its first stop let go after its threads are released leaves their slices untriggered"
+if grep -q '^one core:' trigger-1.txt; then
+  echo "  not run: one core, no helper, and no mark that ends in its first stop"
+else
+  let_go_late bounded-late 10 bounded
+fi
 
 # Windows only: a suspended thread stops at any instruction there, the
 # window measured. darwin's runner kept every chunk in ten runs without the

@@ -454,7 +454,7 @@ class IyiFiber
   # must leave that heap on the thread that owns it. Under the scheduler's
   # lock, as the select that sets it is.
   property homebound : Bool
-  property observe_depth : Int32 = 0
+  {% if flag?(:iyi_observe) %} property observe_depth : Int32 = 0 {% end %}
   # A cancel from another thread, waiting in its home's list until that
   # thread takes the fiber out of its own sleep heap or poller.
   property next_cancel : IyiFiber?

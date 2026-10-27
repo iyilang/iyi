@@ -299,10 +299,17 @@ module Iyi
       if index = posix.rindex("/std/")
         subpath = posix[index + 5..]
         root = real_posix(posix[0, index])
-        if (dir = program.iyi_prelude_dir) &&
-           File.file?(File.join(File.dirname(dir), "std", subpath)) &&
-           program.iyi_path.entries.any? { |entry| real_posix(entry) == root }
-          return true
+        if program.iyi_path.entries.any? { |entry| real_posix(entry) == root }
+          # A toolchain is a directory with `iyi/prelude.iyi` and a `std/`
+          # beside it: the prelude's own, or any IYI_PATH entry that has both
+          # (an exercise that overlays `iyi/` as well as one `std/` module has
+          # its prelude elsewhere than its std).
+          toolchains = [] of String
+          program.iyi_prelude_dir.try { |dir| toolchains << File.dirname(dir) }
+          program.iyi_path.entries.each do |entry|
+            toolchains << entry if File.file?(File.join(entry, "iyi", "prelude.iyi"))
+          end
+          return true if toolchains.any? { |tc| File.file?(File.join(tc, "std", subpath)) }
         end
       end
 

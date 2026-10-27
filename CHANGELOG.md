@@ -21,16 +21,30 @@
   task parked on its socket - with a watchdog that holds the tasks when
   collections stand still and fails the run if none ends;
   `bench/concurrent_mark.sh` runs it with every helper and with one. Its
-  broken copies - the store put back with assists held across it, the
-  late generation read with one helper - fail 4 runs of 4 each here.
-  Linux never stalled unwidened: twenty runs of fifteen seconds at twelve
-  workers on master, 1,588 second stops retreated. Windows showed one more
-  in the same place: `@@collecting` fell after helper 0 released the
-  threads, and on a four-core runner the released workers took helper 0's
-  cores and allocated with no mark to assist and no trigger to cross,
-  334 MB counted against a budget of 4.3 MB. The collection is let go
-  before the release now, `settle` waits for helper 0's accounts, and a
-  third broken copy puts the old order back with helper 0 held 300 ms.
+  broken copies - the store put back with a retreat forced at every
+  second stop and an assist held across it, the late generation read with
+  one helper held until the next mark begins - fail every run, at the
+  first collection and the second, 12 runs of 12 each held to three, four
+  and twelve cores; left to the machine, the first missed on four-core
+  Windows and three-core darwin runners and the second on a four-core
+  Windows one. Linux never stalled unwidened: twenty runs of fifteen
+  seconds at twelve workers on master, 1,588 second stops retreated.
+  Windows showed one more in the same place: `@@collecting` fell after
+  helper 0 released the threads, and on a four-core runner the released
+  workers took helper 0's cores and allocated with no mark to assist and
+  no trigger to cross, 334 MB counted against a budget of 4.3 MB. The
+  collections a program's own thread finishes - the trigger's that end in
+  their first stop, the trigger's with no helper, and `collect` - had the
+  same order: with 8 and 12 threads allocating, their window lasted up to
+  24.2 ms on twelve Linux cores, 164.2 ms on four-core Windows runners
+  and 151.5 ms on a three-core darwin one, and up to 176,816,128 bytes
+  were counted in one against a budget of 4,194,304. Every collection is
+  let go before its release now, `settle` waits for the accounts, and
+  broken copies put each old order back with the collecting thread held:
+  helper 0 until the tasks stop allocating, caught by the watchdog, and
+  the others a second, caught by `bench/release_trigger.iyi`, whose
+  second thread's slices past the budget must trigger the next
+  collection.
 
 - **Breaking: std/http's `Server.serve` serves on every core by default
   (#145).** `serve(listener) { |request| ... }` runs each connection as a
@@ -25119,7 +25133,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,762-line library and nothing else. Every other
+  written against iyi's own 24,779-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -530,7 +530,18 @@ slices turned away by `pressure`, the count since the last collection at
 334 MB against a budget of 4.3; the server's shape had its watchdog end
 3 to 7 runs of 8 there, on master and with the count fixed alike. The collection is let
 go before the release now, and the first thread to cross the budget
-waits at the lock for helper 0's accounts. And a mark that does not end
+waits at the lock for helper 0's accounts. The collections a program's
+own thread finishes had the same order - the trigger's whose mark ends
+in its first stop, the trigger's with no helper, and `collect` - and
+there the window was the program thread's: unwidened, with 8 and 12
+threads allocating garbage beside a small live set, the longest window
+in a run lasted 1.6 to 24.2 ms on twelve Linux cores, 18.9 to 164.2 ms
+on four-core Windows runners and 23.4 to 151.5 ms on a three-core darwin
+one, and the most counted in one was 176,816,128 bytes against a budget
+of 4,194,304. `collect_locked` and `finish_stopped` let the collection
+go before their release too, and `settle` waits for the lock after the
+flag, so a program that reads the accounts after it reads them whole.
+And a mark that does not end
 says so, on standard
 error, with the count, the pool's head, the generation, the permits and
 the helpers done: a count that goes below zero is fatal at the -1 that
@@ -542,10 +553,26 @@ longest mark measured beside the server's shape was 42 ms.
 `bench/concurrent_mark.sh` runs `bench/mark_stall.iyi` at twelve
 workers with every helper and with one; its watchdog holds the tasks
 once the collections have stood still for 256 MiB of allocation and
-fails the run if none ends in five seconds. Its proofs put the store
-back with a window before it, which the runtime's below-zero check
-catches, and the late generation read back with one helper, which the
-overdue report and the watchdog both catch.
+fails the run if none ends in five seconds. And it runs
+`bench/release_trigger.iyi`: one collection on each of the program
+thread's paths, then a second thread's slices past the budget, which
+must trigger the next. Its proofs put the store back, a retreat forced
+at every second stop and a window before the store held open until an
+assist has counted itself in, which the runtime's below-zero check
+catches at the first collection; the late generation read back with one
+helper, held until the next mark begins, which the overdue report and
+the watchdog both catch at the second; and each `@@collecting` after its
+release again, its thread held between the two - helper 0 until the
+tasks stop allocating, the others a second - which the watchdog catches
+for helper 0 and `bench/release_trigger.iyi` names by round for the
+others. The first three were left to the machine once: the store's
+missed on four-core Windows and three-core darwin runners, the late
+read's on a four-core Windows one, and helper 0's held the tasks there
+at 287 and 289 MiB against the watchdog's 256. Every proof is caught in
+every run now: 12 of 12 each here held to three, four and twelve cores,
+and one run on each of three four-core Windows runners and a three-core
+darwin one, where `bench/concurrent_mark.sh` and `bench/parallel_mark.sh`
+passed whole.
 
 The budget is twice what survived, and what was allocated under the
 mark did not survive anything: born gray, so counted marked, but not

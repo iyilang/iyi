@@ -2520,6 +2520,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     process_annotations(annotations) do |annotation_type, ann|
       # annotations on constants are inaccessible in macros so we only add deprecations
       const.add_annotation(annotation_type, ann) if annotation_type == @program.deprecated_annotation
+      # iyi: the program's word that every thread may reach the constant
+      # through a call (SPEC.md III.4.4); see `ShareReach`.
+      const.iyi_safe_reach = ShareReach.claim(ann, "`#{name}`") if annotation_type == @program.safe_reach_annotation
     end
 
     check_ditto node, node.location

@@ -56,6 +56,49 @@
   `bench/sweep_exercise.sh`'s refault check churns twice the budget an
   epoch and allows a quarter of the excess back (344 pages of 8,256);
   its broken copy, without the carry-over, hands back 6,960.
+- **A mark beside the program counts its workers by one and never stores
+  the count (#149).** The remainder round, which runs beside the program
+  when the second stop retreats, stored the count of workers marking over
+  the mutators' assists counted in; their -1s took it below zero, every
+  helper spun in `drain`, no collection ran again and the heap grew -
+  on Windows at eight and twelve workers. The count moves by one now; the
+  remainder round counts helper 0 in by one; and helper 0 reads the
+  generation it waits past before `@@collecting` falls, where a mark
+  another thread began in between was one it skipped (with one helper,
+  nobody drained it). A mark that does not end says so on standard error,
+  naming POOL_ACTIVE, POOL_HEAD, the generation, the permits and the
+  helpers done: fatally at the -1 that takes the count below zero or at
+  a stop that begins a round with a worker counted in, and once per
+  doubling of its age past ten seconds otherwise (the longest mark
+  measured beside the stress program was 42 ms). `bench/mark_stall.iyi`
+  is the server's shape - 24 connections on 12 workers, each a parallel
+  task parked on its socket - with a watchdog that holds the tasks when
+  collections stand still and fails the run if none ends;
+  `bench/concurrent_mark.sh` runs it with every helper and with one. Its
+  broken copies - the store put back with a retreat forced at every
+  second stop and an assist held across it, the late generation read with
+  one helper held until the next mark begins - fail every run, at the
+  first collection and the second, 12 runs of 12 each held to three, four
+  and twelve cores; left to the machine, the first missed on four-core
+  Windows and three-core darwin runners and the second on a four-core
+  Windows one. Linux never stalled unwidened: twenty runs of fifteen
+  seconds at twelve workers on master, 1,588 second stops retreated.
+  Windows showed one more in the same place: `@@collecting` fell after
+  helper 0 released the threads, and on a four-core runner the released
+  workers took helper 0's cores and allocated with no mark to assist and
+  no trigger to cross, 334 MB counted against a budget of 4.3 MB. The
+  collections a program's own thread finishes - the trigger's that end in
+  their first stop, the trigger's with no helper, and `collect` - had the
+  same order: with 8 and 12 threads allocating, their window lasted up to
+  24.2 ms on twelve Linux cores, 164.2 ms on four-core Windows runners
+  and 151.5 ms on a three-core darwin one, and up to 176,816,128 bytes
+  were counted in one against a budget of 4,194,304. Every collection is
+  let go before its release now, `settle` waits for the accounts, and
+  broken copies put each old order back with the collecting thread held:
+  helper 0 until the tasks stop allocating, caught by the watchdog, and
+  the others a second, caught by `bench/release_trigger.iyi`, whose
+  second thread's slices past the budget must trigger the next
+  collection.
 
 - **Breaking: std/http's `Server.serve` serves on every core by default
   (#145).** `serve(listener) { |request| ... }` runs each connection as a
@@ -25171,7 +25214,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,768-line library and nothing else. Every other
+  written against iyi's own 24,996-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

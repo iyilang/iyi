@@ -488,6 +488,92 @@ and lowers it under. `bench/concurrent_mark.sh` outgrows blocks under
 marks, requires each still listed while the mark runs and each freed
 after, and its proof removes the look.
 
+And one thing a server on every core found (#149). The mark's workers -
+the helpers, the collector, a mutator's assist - count themselves in and
+out of one word, and a drain ends when it reads zero with the pool
+empty. Each round also *stored* that word as it began: `mark` 1, the
+first stop 0, the second stop 1, the remainder round 0. The remainder
+round runs beside the program when the second stop retreats, and
+assists run there too: an assist counted in before the store had its
+one wiped, and its own -1 afterwards took the count below zero, where
+it never reads zero again. Every helper spun in `drain`, `@@collecting`
+stayed up, no collection ran again, and the heap of an API server on a
+twelve-vCPU Windows VM grew until the machine ran out, at eight and
+twelve workers and never at four. Windows' release is a `ResumeThread`
+per thread and then a wait for every thread that parked at the stop,
+and the threads resumed first allocate all the while; Linux's is one
+futex wake, and twenty runs of fifteen seconds of the server's shape at
+twelve workers here (`bench/mark_stall.iyi`, 1,588 second stops
+retreated) never stalled. The stores hid most of it besides: an assist
+whose -1 landed after the drains had ended left a count the next stop's
+store wrote over. A copy of the prelude that paused 200 µs before the
+remainder round's store saw 253 assists begin inside the pause over 22
+rounds, the count 1 to 6 before the store, and no stall; with each of
+those assists held until the store had landed, it stalled at its 39th
+collection with the count at 2^64 - 8, ten helpers holding permits and
+none done - the issue's nine helpers in `drain`, one from
+`remainder_round`.
+
+The count moves by one now and nothing stores it. Every round starts
+from the zero the last one ended at, because its drainers are waited
+for and a stop waits out every assist; the remainder round counts
+helper 0 in by one before the permits open, as `mark` counts the
+collector. Reviewing every store and permit found one more: helper 0
+read the generation it waits past next after letting the collection
+go, so a mark another thread began in between was one it waited past,
+and with one helper nobody drained it. It reads the generation before
+the lock is let go. And Windows showed one more, in the same place:
+`@@collecting` fell after helper 0 released the threads, and on a
+four-core runner the eight released workers took helper 0's cores, so
+they allocated with no mark to assist and no trigger to cross - 19,745
+slices turned away by `pressure`, the count since the last collection at
+334 MB against a budget of 4.3; the server's shape had its watchdog end
+3 to 7 runs of 8 there, on master and with the count fixed alike. The collection is let
+go before the release now, and the first thread to cross the budget
+waits at the lock for helper 0's accounts. The collections a program's
+own thread finishes had the same order - the trigger's whose mark ends
+in its first stop, the trigger's with no helper, and `collect` - and
+there the window was the program thread's: unwidened, with 8 and 12
+threads allocating garbage beside a small live set, the longest window
+in a run lasted 1.6 to 24.2 ms on twelve Linux cores, 18.9 to 164.2 ms
+on four-core Windows runners and 23.4 to 151.5 ms on a three-core darwin
+one, and the most counted in one was 176,816,128 bytes against a budget
+of 4,194,304. `collect_locked` and `finish_stopped` let the collection
+go before their release too, and `settle` waits for the lock after the
+flag, so a program that reads the accounts after it reads them whole.
+And a mark that does not end
+says so, on standard
+error, with the count, the pool's head, the generation, the permits and
+the helpers done: a count that goes below zero is fatal at the -1 that
+took it there, a round that begins with a worker counted in or a mark
+with work in its pool is fatal at its stop, and a mark in flight past
+ten seconds is reported once per doubling of its age by an assist (every
+64th), a drain with nothing to do, or a `collect` waiting for it - the
+longest mark measured beside the server's shape was 42 ms.
+`bench/concurrent_mark.sh` runs `bench/mark_stall.iyi` at twelve
+workers with every helper and with one; its watchdog holds the tasks
+once the collections have stood still for 256 MiB of allocation and
+fails the run if none ends in five seconds. And it runs
+`bench/release_trigger.iyi`: one collection on each of the program
+thread's paths, then a second thread's slices past the budget, which
+must trigger the next. Its proofs put the store back, a retreat forced
+at every second stop and a window before the store held open until an
+assist has counted itself in, which the runtime's below-zero check
+catches at the first collection; the late generation read back with one
+helper, held until the next mark begins, which the overdue report and
+the watchdog both catch at the second; and each `@@collecting` after its
+release again, its thread held between the two - helper 0 until the
+tasks stop allocating, the others a second - which the watchdog catches
+for helper 0 and `bench/release_trigger.iyi` names by round for the
+others. The first three were left to the machine once: the store's
+missed on four-core Windows and three-core darwin runners, the late
+read's on a four-core Windows one, and helper 0's held the tasks there
+at 287 and 289 MiB against the watchdog's 256. Every proof is caught in
+every run now: 12 of 12 each here held to three, four and twelve cores,
+and one run on each of three four-core Windows runners and a three-core
+darwin one, where `bench/concurrent_mark.sh` and `bench/parallel_mark.sh`
+passed whole.
+
 The budget is twice what survived, and what was allocated under the
 mark did not survive anything: born gray, so counted marked, but not
 live in the sense the budget wants, and counted the other way a program

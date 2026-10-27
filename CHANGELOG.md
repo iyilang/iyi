@@ -20,11 +20,17 @@
   is the server's shape - 24 connections on 12 workers, each a parallel
   task parked on its socket - with a watchdog that holds the tasks when
   collections stand still and fails the run if none ends;
-  `bench/concurrent_mark.sh` runs it with every helper and with one, and
-  its two broken copies (the store put back with assists held across it,
-  the late generation read with one helper) fail 4 runs of 4 each here.
+  `bench/concurrent_mark.sh` runs it with every helper and with one. Its
+  broken copies - the store put back with assists held across it, the
+  late generation read with one helper - fail 4 runs of 4 each here.
   Linux never stalled unwidened: twenty runs of fifteen seconds at twelve
-  workers on master, 1,588 second stops retreated.
+  workers on master, 1,588 second stops retreated. Windows showed one more
+  in the same place: `@@collecting` fell after helper 0 released the
+  threads, and on a four-core runner the released workers took helper 0's
+  cores and allocated with no mark to assist and no trigger to cross,
+  334 MB counted against a budget of 4.3 MB. The collection is let go
+  before the release now, `settle` waits for helper 0's accounts, and a
+  third broken copy puts the old order back with helper 0 held 300 ms.
 
 - **Breaking: std/http's `Server.serve` serves on every core by default
   (#145).** `serve(listener) { |request| ... }` runs each connection as a
@@ -25113,7 +25119,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,746-line library and nothing else. Every other
+  written against iyi's own 24,762-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

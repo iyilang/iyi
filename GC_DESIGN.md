@@ -522,7 +522,16 @@ collector. Reviewing every store and permit found one more: helper 0
 read the generation it waits past next after letting the collection
 go, so a mark another thread began in between was one it waited past,
 and with one helper nobody drained it. It reads the generation before
-`@@collecting` falls. And a mark that does not end says so, on standard
+the lock is let go. And Windows showed one more, in the same place:
+`@@collecting` fell after helper 0 released the threads, and on a
+four-core runner the eight released workers took helper 0's cores, so
+they allocated with no mark to assist and no trigger to cross - 19,745
+slices turned away by `pressure`, the count since the last collection at
+334 MB against a budget of 4.3; the server's shape had its watchdog end
+3 to 7 runs of 8 there, on master and with the count fixed alike. The collection is let
+go before the release now, and the first thread to cross the budget
+waits at the lock for helper 0's accounts. And a mark that does not end
+says so, on standard
 error, with the count, the pool's head, the generation, the permits and
 the helpers done: a count that goes below zero is fatal at the -1 that
 took it there, a round that begins with a worker counted in or a mark

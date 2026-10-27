@@ -5144,6 +5144,311 @@ describe "Semantic: iyi" do
           CODE
       end
     end
+
+    # #148: a parallel block that reaches a constant through the defs it
+    # calls is warned about, with the path; one that names it is refused,
+    # as above. The issue's program kept its database pool in `DATABASE`
+    # and read it through `ask`, and compiled silently.
+    describe "what a shared block reaches through the defs it calls" do
+      reach_stub = <<-STUB
+        class IyiGroup
+          def spawn_parallel(&block : -> T) : Nil forall T
+            keep = block
+            nil
+          end
+        end
+
+        G = IyiGroup.new
+
+        class Database
+          def initialize
+            @total = 0
+          end
+
+          def query_one(n : Int64) : Int64
+            @total = 1
+            n
+          end
+        end
+
+        DATABASE = Database.new
+
+        def ask(n : Int64) : Int64
+          DATABASE.query_one(n)
+        end
+
+        STUB
+
+      reach_warnings = ->(code : String) { semantic(code, filename: "x.iyi").program.warnings.infos }
+
+      it "warns at the block, naming the constant, its type, why and the path" do
+        code = reach_stub + <<-CODE
+          def ask_twice : Int64
+            ask(2_i64)
+            ask(3_i64)
+          end
+
+          g = G
+          g.spawn_parallel do
+            ask(1_i64)
+            ask_twice
+            nil
+          end
+          CODE
+        line = code.lines.index!(&.includes?("g.spawn_parallel do")) + 1
+        infos = reach_warnings.call(code)
+        infos.size.should eq(1)
+        infos[0].should start_with("warning in line #{line}\n")
+        infos[0].should contain("Warning: the block spawn_parallel runs on another thread reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on the constant: `@[SafeReach(\"...\")]` (SPEC.md III.4.4)")
+      end
+
+      it "warns for the block a @[Share] def keeps" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          @[Share]
+          def everywhere(&work : -> Int64) : Nil
+            G.spawn_parallel do
+              kept = work
+              1
+            end
+            nil
+          end
+
+          everywhere { ask(1_i64) }
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("the block everywhere keeps, which may run on other threads reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`")
+      end
+
+      it "still refuses a block that names the constant, marked or not" do
+        assert_error(reach_stub + <<-CODE, "the block spawn_parallel runs on another thread names the constant `QUIET : Database`, which is not Share", filename: "x.iyi")
+          @[SafeReach("set once at startup, then only read")]
+          QUIET = Database.new
+
+          g = G
+          g.spawn_parallel do
+            QUIET.query_one(1_i64)
+            nil
+          end
+          CODE
+      end
+
+      it "does not warn for Share constants: an owning type, a trusted one, one whose fields nothing assigns" do
+        infos = reach_warnings.call(owning + reach_stub + <<-CODE)
+          @[Share]
+          class Cell
+            def initialize
+              @n = 0
+            end
+
+            def set(n : Int32) : Nil
+              @n = n
+            end
+          end
+
+          class Limit
+            def initialize(@limit : Int32)
+            end
+
+            def limit : Int32
+              @limit
+            end
+          end
+
+          GUARD = Guard.new { Bag.new }
+          CELL = Cell.new
+          LIMIT = Limit.new(4)
+
+          def touch : Int32
+            GUARD.lock { |bag| bag.add(1) }
+            CELL.set(2)
+            LIMIT.limit
+          end
+
+          g = G
+          g.spawn_parallel do
+            touch
+            nil
+          end
+          CODE
+        infos.should be_empty
+      end
+
+      it "is silenced by @[SafeReach] for that constant alone" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          @[SafeReach("set once at startup, then only read")]
+          QUIET = Database.new
+
+          def both : Int64
+            QUIET.query_one(1_i64)
+            ask(2_i64)
+          end
+
+          g = G
+          g.spawn_parallel do
+            both
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `both` → `ask` → `DATABASE.query_one`")
+      end
+
+      it "refuses SafeReach without a reason" do
+        assert_error(reach_stub + <<-CODE, "SafeReach takes one string, the reason every thread may reach `QUIET` through a call", filename: "x.iyi")
+          @[SafeReach]
+          QUIET = Database.new
+          CODE
+      end
+
+      it "follows a path through two defs and a recursive pair to the shortest one" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          def outer(n : Int32) : Int64
+            inner(n)
+          end
+
+          def inner(n : Int32) : Int64
+            inner(n)
+            again(n)
+          end
+
+          def again(n : Int32) : Int64
+            DATABASE.query_one(1_i64)
+            inner(n)
+          end
+
+          g = G
+          g.spawn_parallel do
+            outer(2)
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `outer` → `inner` → `again` → `DATABASE.query_one`")
+      end
+
+      it "walks every target of a virtual call" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          abstract class Store
+            abstract def get : Int64
+          end
+
+          class MemStore < Store
+            def get : Int64
+              1_i64
+            end
+          end
+
+          class DbStore < Store
+            def get : Int64
+              ask(1_i64)
+            end
+          end
+
+          DbStore.new
+          g = G
+          g.spawn_parallel do
+            MemStore.new.as(Store).get
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `DbStore#get` → `ask` → `DATABASE.query_one`")
+      end
+
+      it "warns for a class variable reached through a call" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          class Registry
+            @@db = Database.new
+
+            def self.ask : Int64
+              @@db.query_one(1_i64)
+            end
+          end
+
+          g = G
+          g.spawn_parallel do
+            Registry.ask
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("reaches `@@db : Database` (not Share) through `Registry.ask` → `@@db.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on the class variable: `@[SafeReach(\"...\")]` (SPEC.md III.4.4)")
+      end
+
+      it "is silenced by @[SafeReach] on a class variable" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          class Registry
+            @[SafeReach("one thread at a time, joined before anything reads it")]
+            @@db = Database.new
+
+            def self.ask : Int64
+              @@db.query_one(1_i64)
+            end
+          end
+
+          g = G
+          g.spawn_parallel do
+            Registry.ask
+            nil
+          end
+          CODE
+        infos.should be_empty
+      end
+
+      # std's own state is std's to keep safe: a def written beside the
+      # prelude is not walked - the class variable `std_take` reaches is
+      # never seen - and a constant declared there is not warned about when
+      # the program names it in a def of its own.
+      it "does not warn for state std keeps" do
+        root = File.tempname("iyi-reach")
+        Dir.mkdir_p(File.join(root, "iyi"))
+        File.write(File.join(root, "iyi", "prelude.iyi"), "")
+        begin
+          std = parse(<<-STD, filename: File.join(root, "std", "pool.iyi"))
+            class StdPool
+              def initialize
+                @n = 0
+              end
+
+              def take : Int32
+                @n = 1
+              end
+            end
+
+            STDPOOL = StdPool.new
+
+            class StdShelf
+              @@pool = StdPool.new
+
+              def self.take : Int32
+                @@pool.take
+              end
+            end
+
+            def std_take : Int32
+              StdShelf.take
+            end
+            STD
+          user = parse(reach_stub + <<-CODE, filename: "x.iyi")
+            def mine : Int32
+              STDPOOL.take
+            end
+
+            g = G
+            g.spawn_parallel do
+              std_take
+              mine
+              nil
+            end
+            CODE
+          warnings = WarningCollection.new
+          semantic(Expressions.new([std, user] of ASTNode), warnings: warnings)
+          warnings.infos.should be_empty
+        ensure
+          FileUtils.rm_rf(root)
+        end
+      end
+    end
   end
 
   # #136. A literal records each type it can be cast to while the overloads

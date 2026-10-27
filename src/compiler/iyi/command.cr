@@ -582,8 +582,8 @@ class Iyi::Command
     end
   end
 
-  private def compile_no_codegen(command, wants_doc = false, hierarchy = false, no_cleanup = false, cursor_command = false, top_level = false, path_filter = false, unreachable_command = false, allowed_formats = ["text", "json"])
-    config = create_compiler command, no_codegen: true, hierarchy: hierarchy, cursor_command: cursor_command, path_filter: path_filter, unreachable_command: unreachable_command, allowed_formats: allowed_formats
+  private def compile_no_codegen(command, wants_doc = false, hierarchy = false, no_cleanup = false, cursor_command = false, top_level = false, path_filter = false, unreachable_command = false, allowed_formats = ["text", "json"], warning_options = false)
+    config = create_compiler command, no_codegen: true, hierarchy: hierarchy, cursor_command: cursor_command, path_filter: path_filter, unreachable_command: unreachable_command, allowed_formats: allowed_formats, warning_options: warning_options
     config.compiler.no_codegen = true
     config.compiler.no_cleanup = no_cleanup
     config.compiler.wants_doc = wants_doc
@@ -801,7 +801,8 @@ class Iyi::Command
                               hierarchy = false, cursor_command = false,
                               single_file = false, dependencies = false,
                               path_filter = false, unreachable_command = false,
-                              allowed_formats = ["text", "json"], defer_move_aside = false)
+                              allowed_formats = ["text", "json"], defer_move_aside = false,
+                              warning_options = false)
     compiler = new_compiler
     compiler.progress_tracker = @progress_tracker
     compiler.no_codegen = no_codegen
@@ -946,6 +947,10 @@ class Iyi::Command
         target_specific_opts(opts, compiler)
         setup_compiler_warning_options(opts, compiler)
       end
+      # iyi: `check` reports warnings as a build does (`Command#check`), and
+      # takes the same three switches: `--error-on-warnings` was refused
+      # there as an invalid option, so the exit that reads it never fired.
+      setup_compiler_warning_options(opts, compiler) if no_codegen && warning_options
 
       opts.on("--no-color", "Disable colored output") do
         @color = false

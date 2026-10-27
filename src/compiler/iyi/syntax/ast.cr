@@ -1677,6 +1677,15 @@ module Iyi
     def effect : Effect?
       @effect || iyi_origin.try(&.effect)
     end
+    # iyi: `@[Share(serial: workers)]`: the parameter whose literal `1` at a
+    # call runs the def on the caller's thread alone, so that call's block
+    # and crossing arguments are not checked (SPEC.md III.4.13). Nil when
+    # every call crosses.
+    property iyi_share_serial : String? = nil
+    # iyi: `@[Share(crossing: {tls: "..."})]`: parameters whose values the
+    # def hands to other threads, each with the sentence that says what to
+    # pass instead when a call's value is not `Share`.
+    property iyi_share_crossing : Hash(String, String)? = nil
 
     def initialize(@name, @args = [] of Arg, body = nil, @receiver = nil, @block_arg = nil, @return_type = nil, @macro_def = false, @block_arity = nil, @abstract = false, @splat_index = nil, @double_splat = nil, @free_vars = nil)
       @body = Expressions.from body
@@ -1715,6 +1724,8 @@ module Iyi
       a_def.iyi_share_block = iyi_share_block?
       a_def.effect = @effect
       a_def.iyi_observer_wrapped = iyi_observer_wrapped?
+      a_def.iyi_share_serial = iyi_share_serial
+      a_def.iyi_share_crossing = iyi_share_crossing
       a_def.name_location = name_location
       a_def.visibility = visibility
       a_def.free_var_bounds = @free_var_bounds.clone

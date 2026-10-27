@@ -230,7 +230,8 @@ if args.size > 0 && args[0] == "serve"
   serving = IyiSocket.listen("127.0.0.1", 0)
   puts serving.local_port
   routes = Routes.new
-  Server.serve(serving) do |req|
+  # One thread: `/stop` closes the listener, which is this thread's.
+  Server.serve(serving, workers: 1) do |req|
     if req.path == "/stop"
       serving.close
       Response.new(200, "bye")
@@ -367,7 +368,8 @@ base = "http://127.0.0.1:#{listener.local_port}"
 routes = Routes.new
 group do |g|
   g.spawn do
-    Server.serve(listener) do |req|
+    # One thread: `/stop` closes the listener, which is this thread's.
+    Server.serve(listener, workers: 1) do |req|
       if req.path == "/stop"
         listener.close
         Response.new(200, "bye")

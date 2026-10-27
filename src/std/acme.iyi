@@ -838,7 +838,10 @@ end
 # server's own to answer.
 #
 #     responder = AcmeHttp01.new
-#     Server.serve(listener) { |request| responder.answer(request) || app(request) }
+#     Server.serve(listener, workers: 1) { |request| responder.answer(request) || app(request) }
+#
+# The table of answers is written as orders run, so it is one thread's:
+# the server that answers from it serves on that thread (`workers: 1`).
 pub class AcmeHttp01
   PATH = "/.well-known/acme-challenge/"
   @answers : Hash(String, String) = {} of String => String

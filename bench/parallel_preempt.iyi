@@ -26,7 +26,7 @@
 #           worker busy with a slow one is answered within 80 ms, where it
 #           waited the 100 ms out before.
 #   period  the monitor's period, its looks over a task computing half a
-#           second on a pool of one, held to 4 to 9 ms; and the quantum,
+#           second on a pool of one, held to 4 to 10.5 ms; and the quantum,
 #           two such tasks taking turns on the one worker, held to 20 ms. A
 #           Windows monitor waiting on the system timer's tick (11.2 to
 #           12.3 ms apart on a GitHub runner) fails it.
@@ -430,10 +430,14 @@ import std/socket::{IyiSocket, SocketError}
   # move and the next sees it stand. Linux, darwin and Windows looked every
   # 5.1 to 6.3 ms and took turns of 10.2 to 12.3 ms on the machines
   # measured (SPEC.md III.4.13); a Windows wait that ends on the system
-  # timer's tick looked every 11.2 to 12.3 ms, and a wait that ends at once
-  # would spin the monitor.
+  # timer's tick looked every 11.2 to 12.3 ms, and 14.3 in CI's run of
+  # that broken copy, and a wait that ends at once would spin the monitor.
+  # The bound sits between the two: darwin's three-core runners, sharing
+  # their cores with the task the monitor watches, looked every 6.3, 8.9
+  # and 9.0 ms in three CI runs (the last, job 122004173378, past the 9 ms
+  # this bound was), and no run of the timer-tick copy came under 11.2.
   PERIOD_FLOOR_US   =  4000_i64
-  PERIOD_BOUND_US   =  9000_i64
+  PERIOD_BOUND_US   = 10500_i64
   QUANTUM_BOUND_US  = 20000_i64
 
   def period(per_ms : Int64) : Nil

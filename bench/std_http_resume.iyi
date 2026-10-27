@@ -153,7 +153,8 @@ if mode.empty?
   group do |g|
     listeners.each_with_index do |listener, i|
       g.spawn do
-        Server.serve(listener, tls: i == 3 ? generous : shared) do |req|
+        # One thread: `/stop` closes the listener, which is this thread's.
+        Server.serve(listener, tls: i == 3 ? generous : shared, workers: 1) do |req|
           listener.close if req.path == "/stop"
           answer(req)
         end
@@ -267,7 +268,8 @@ if mode == "serve"
   config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1], listener.local_port.to_s)
-  Server.serve(listener, tls: config) do |req|
+  # One thread: `/quit` closes the listener, which is this thread's.
+  Server.serve(listener, tls: config, workers: 1) do |req|
     listener.close if req.path == "/quit"
     answer(req)
   end

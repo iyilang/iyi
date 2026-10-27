@@ -652,8 +652,9 @@ module Iyi
     # may (III.4.13): a parallel task is started by whichever pool worker is
     # free, so it is held to exactly what a thread's block is. A def marked
     # `@[Share]` keeps a block that may run on other threads, several at
-    # once - std/http's `Server.serve_parallel` - and its blocks are held to
-    # the same. And the block
+    # once - std/http's `Server.serve` - and its blocks are held to the
+    # same, unless the call passes its `serial` parameter the literal 1
+    # (`workers: 1`), which keeps the def on the caller's thread. And the block
     # a method of an owning type runs (`@[Share(owns: true)]`, `Mutex#lock`
     # and the rest) reaches the value the type keeps behind its lock: what
     # the block captures would come within reach of that value, so it must
@@ -667,6 +668,10 @@ module Iyi
     # or called one of self's methods receiverless.
     def check_share_boundary(node : Call, target_def : Def)
       owner = target_def.owner
+      # `Server.serve(..., workers: 1)`: the def runs on the caller's thread
+      # alone, and nothing it is given crosses.
+      return if serial_call?(node, target_def)
+      check_share_crossing(node, target_def)
       thread = if target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiThread"
                  THREAD_BOUNDARY
                elsif target_def.name == "spawn_parallel" && !owner.metaclass? && owner.to_s == "IyiGroup"
@@ -708,6 +713,10 @@ module Iyi
         check_share_class_var_types(a_def, subject, consequence)
       elsif thread
         consequence = "(SPEC.md III.4.4)"
+        # A def with a `serial` parameter: a lock, or that parameter's 1.
+        unless thread.alone.empty?
+          consequence = "(SPEC.md III.4.4); or #{thread.alone}"
+        end
         check_thread_constants_share(a_def, thread)
         check_thread_class_vars_share(a_def, thread)
       end
@@ -736,6 +745,9 @@ module Iyi
           # it was given, and a proc, which no type can say that of.
           next if trusted_share_block?(captured.name)
           if why = Iyi::Share.reason(type)
+            if thread && !thread.alone.empty?
+              captured.raise "#{subject} captures `#{captured.name} : #{type}`, which is not Share: #{why}. Put it behind a lock, a `Mutex(#{type})` (std/mutex), or #{thread.alone} (SPEC.md III.4.4)"
+            end
             captured.raise "#{subject} captures `#{captured.name} : #{type}`, which is not Share: #{why}#{owning ? "; " : " "}#{consequence}"
           end
           # A block behind a lock runs in the task that called it, so a
@@ -797,8 +809,10 @@ module Iyi
     end
 
     # iyi: who the two parties to a shared cell are, in the sentences the
-    # thread check and the parallel task's check refuse one with.
-    record ShareBoundary, subject : String, local_owner : String, pair : String, again : String, after : String
+    # thread check and the parallel task's check refuse one with; *alone*,
+    # for a def with a `serial` parameter, the other way out its refusals
+    # name: "pass `workers: 1` so the block runs on one thread".
+    record ShareBoundary, subject : String, local_owner : String, pair : String, again : String, after : String, alone : String = ""
 
     THREAD_BOUNDARY = ShareBoundary.new(
       subject: "the block IyiThread.start runs on another thread",
@@ -817,21 +831,72 @@ module Iyi
     # The block a `@[Share]` def keeps, in the words its refusals use: the
     # def by its type's short name, as an owning type's are.
     private def shared_block_boundary(owner : Type, target_def : Def) : ShareBoundary
-      type = owner.metaclass? ? owner.instance_type : owner
-      short = type.to_s.split('(').first.split("::").last
-      called = if type.is_a?(Program)
-                 target_def.name
-               elsif owner.metaclass?
-                 "#{short}.#{target_def.name}"
-               else
-                 "#{short}##{target_def.name}"
-               end
+      called = share_called(owner, target_def)
+      serial = target_def.iyi_share_serial
       ShareBoundary.new(
         subject: "the block #{called} keeps, which may run on other threads",
         local_owner: "a local of the code that gave #{called} its block, so the block and that code",
         pair: "the block and the code that gave it",
         again: "gives the block again",
-        after: "the block was given")
+        after: "the block was given",
+        alone: serial ? "pass `#{serial}: 1` so the block runs on one thread" : "")
+    end
+
+    # The def as its caller wrote it: an expansion for named arguments is
+    # named `serve:tls`, and the refusal says `Server.serve`.
+    private def share_called(owner : Type, target_def : Def) : String
+      type = owner.metaclass? ? owner.instance_type : owner
+      short = type.to_s.split('(').first.split("::").last
+      name = target_def.name.split(':').first
+      if type.is_a?(Program)
+        name
+      elsif owner.metaclass?
+        "#{short}.#{name}"
+      else
+        "#{short}##{name}"
+      end
+    end
+
+    # The argument a call gives the parameter named *param* (by its
+    # external name): named, or by position; nil when the default stands.
+    private def share_argument(node : Call, target_def : Def, param : String) : ASTNode?
+      if named = node.named_args.try &.find(&.name.==(param))
+        return named.value
+      end
+      index = target_def.args.index { |arg| arg.external_name == param }
+      index ? node.args[index]? : nil
+    end
+
+    # iyi: a call to a def with `@[Share(serial: workers)]` that passes the
+    # literal `1` for that parameter: the def runs what it was given on the
+    # caller's thread, so neither its block nor its crossing arguments are
+    # asked anything. A variable that holds 1 is asked, since the compiler
+    # cannot know it does.
+    private def serial_call?(node : Call, target_def : Def) : Bool
+      param = target_def.iyi_share_serial
+      return false unless param
+      value = share_argument(node, target_def, param)
+      value.is_a?(NumberLiteral) && (value.kind.signed_int? || value.kind.unsigned_int?) && value.integer_value == 1
+    end
+
+    # iyi: the arguments a `@[Share(crossing: ...)]` def hands to other
+    # threads - std/http's `Server.serve(tls:)`, read by every worker -
+    # must be Share, as a captured value is; the refusal is made at the
+    # argument, with the def's own sentence for what to pass instead.
+    private def check_share_crossing(node : Call, target_def : Def) : Nil
+      crossing = target_def.iyi_share_crossing
+      return unless crossing
+      serial = target_def.iyi_share_serial
+      crossing.each do |param, instead|
+        value = share_argument(node, target_def, param)
+        next unless value
+        type = value.type?
+        next unless type
+        if why = Iyi::Share.reason(type)
+          alone = serial ? ", or pass `#{serial}: 1` so it stays on one thread" : ""
+          value.raise "#{share_called(target_def.owner, target_def)} hands `#{param} : #{type}` to other threads, several at once, and it is not Share: #{why}. #{instead}#{alone} (SPEC.md III.4.4)"
+        end
+      end
     end
 
     # iyi: a proc passed as the block - `g.spawn_parallel(&work)` - was not
@@ -848,14 +913,21 @@ module Iyi
     end
 
     # Whether *name* is the block parameter of the `@[Share]` def being
-    # transformed, never assigned in it: the one proc a boundary inside
-    # that def takes on trust, since every block given to the def was
-    # checked where it was written.
+    # transformed, or one of its `crossing:` parameters, never assigned in
+    # it: what a boundary inside that def takes on trust, since every
+    # block and every crossing argument given to the def was checked at
+    # the call. A call its `serial:` parameter's literal 1 exempted was
+    # not, and the def answers for that: it must not reach the boundary
+    # when its serial parameter is 1 (std/http's `Server.serve` serves
+    # such a call on its own thread).
     private def trusted_share_block?(name : String) : Bool
       current = @current_def
-      return false unless current && current.iyi_share_block?
+      return false unless current
       block_arg = current.block_arg
-      return false unless block_arg && block_arg.name == name
+      kept = current.iyi_share_block? && block_arg && block_arg.name == name
+      crossing = current.iyi_share_crossing
+      crossed = crossing && current.args.any? { |arg| arg.name == name && crossing.has_key?(arg.external_name) }
+      return false unless kept || crossed
       assigned = AssignedNames.new
       current.body.accept assigned
       !assigned.names.includes?(name)
@@ -887,6 +959,12 @@ module Iyi
       end
     end
 
+    # The other way out a refusal at a `serial` def's block names, after a
+    # comma; nothing at any other boundary.
+    private def or_alone(boundary : ShareBoundary) : String
+      boundary.alone.empty? ? "" : ", or #{boundary.alone}"
+    end
+
     # iyi: a captured local is one cell on the heap, and the thread and the
     # code that started it both reach that cell. A Share type makes the
     # value safe to read from two threads, not the cell safe to write: `count
@@ -906,7 +984,7 @@ module Iyi
       inside = CaptureAssignments.new(@program, meta, nil, a_def.vars)
       a_def.body.accept inside
       if first = inside.assigns.first?
-        first[0].raise "#{boundary.subject} assigns `#{name}`, #{boundary.local_owner} share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
+        first[0].raise "#{boundary.subject} assigns `#{name}`, #{boundary.local_owner} share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       end
 
       scope = meta.context
@@ -919,7 +997,7 @@ module Iyi
       line = start.location.try(&.line_number)
       advice = "so #{boundary.pair} share one mutable cell: a data race (SPEC.md III.4.4). " \
                "Capture a local that is assigned once (a block's own locals are new on every call), " \
-               "or keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
+               "or keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       # Not found, or found assigned nowhere: the walk does not know this
       # scope, and the typer's answer stands.
       unless outside.found_start? && !outside.assigns.empty?
@@ -953,7 +1031,7 @@ module Iyi
       a_def.body.accept named
       named.paths.each do |path, type|
         if why = Iyi::Share.reason(type)
-          path.raise "#{boundary.subject} names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+          path.raise "#{boundary.subject} names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)#{or_alone(boundary)}"
         end
       end
     end
@@ -987,7 +1065,7 @@ module Iyi
     def check_thread_class_vars_share(a_def : Def, boundary : ShareBoundary) : Nil
       named = NamedClassVars.new
       a_def.body.accept named
-      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
+      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       named.vars.each do |class_var, var|
         next if var.thread_local?
         if assign = named.assigns[var]?
@@ -1007,7 +1085,7 @@ module Iyi
         type = var.type?
         next unless type
         if why = Iyi::Share.reason(type)
-          class_var.raise "#{boundary.subject} names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+          class_var.raise "#{boundary.subject} names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)#{or_alone(boundary)}"
         end
       end
     end

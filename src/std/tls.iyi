@@ -352,7 +352,7 @@
 # encoded and rebuilt. `TlsServerConfig#groups` orders the key exchange
 # groups a server takes, which is also how a server is made to ask again.
 # `TlsServerConfig#frozen` is the config a server whose handshakes run on
-# several threads at once reads (std/http's `Server.serve_parallel`):
+# several threads at once reads (std/http's `Server.serve`):
 # `Share`, with one set of ticket keys among its threads, its identity
 # source a block the compiler checks.
 #
@@ -3631,7 +3631,7 @@ end
 # identity is added - and its `identity_source` is a `Proc`, which may
 # have captured anything; so it is not `Share` (SPEC.md III.4.4), and a
 # server whose connections run on several threads at once (std/http's
-# `Server.serve_parallel`) takes `frozen` instead: a copy no property of
+# `Server.serve`) takes `frozen` instead: a copy no property of
 # which changes, that every worker reads at once. What must change while
 # such a server runs is shared rather than copied, and synchronised: the
 # ticket keys and the replay guard, whose state is behind a `Mutex`, so
@@ -3902,7 +3902,7 @@ end
 
 # A `TlsServerConfig` frozen (`TlsServerConfig#frozen`): what a server
 # whose connections run on several threads at once - std/http's
-# `Server.serve_parallel(tls:)` - reads on every worker. It is `Share`
+# `Server.serve(tls:)` - reads on every worker. It is `Share`
 # (SPEC.md III.4.4), trusted rather than derived, and this is why it may
 # be. It holds a copy of the config it was made from (`dup`), which
 # nothing else holds and nothing writes after the constructor made it:
@@ -3921,7 +3921,7 @@ end
 # answers, a certificate renewed (std/autocert). The rest - the
 # identities, the protocols, the ECH keys - is the server's for its
 # life: another set is another frozen config, served by another
-# `serve_parallel`.
+# `Server.serve`.
 @[Share]
 pub class TlsFrozenServerConfig
   @settings : TlsServerConfig

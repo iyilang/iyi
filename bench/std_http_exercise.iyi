@@ -557,7 +557,9 @@ idle_closed = 0_i64
 idle_returned = 0_i64
 group do |g|
   g.spawn do
-    Server.serve(idle_listener) do |req|
+    # One thread here and below wherever a block closes its listener: the
+    # listener is the accepting thread's (`workers: 1`).
+    Server.serve(idle_listener, workers: 1) do |req|
       idle_listener.close if req.path == "/stop"
       Response.new(200, "ok")
     end
@@ -596,7 +598,8 @@ sport = listener.local_port
 seen_paths = [] of String
 group do |g|
   g.spawn do
-    Server.serve(listener) do |req|
+    # One thread: the block appends to `seen_paths`.
+    Server.serve(listener, workers: 1) do |req|
       seen_paths << req.method + " " + req.path
       if req.path == "/echo"
         Response.new(200, req.body, {"X-Query" => req.query || "-", "X-Agent" => req.header("user-agent") || "-"})
@@ -833,7 +836,7 @@ closer = IyiSocket.listen(0)
 closer_port = closer.local_port
 group do |g|
   g.spawn do
-    Server.serve(closer) do |req|
+    Server.serve(closer, workers: 1) do |req|
       if req.path == "/bye"
         Response.new(200, "bye", {"Connection" => "close"})
       else
@@ -897,7 +900,7 @@ blank = IyiSocket.listen(0)
 blank_port = blank.local_port
 group do |g|
   g.spawn do
-    Server.serve(blank) do |req|
+    Server.serve(blank, workers: 1) do |req|
       blank.close if req.path == "/stop"
       Response.new(200, "#{req.method} #{req.path} #{req.body}")
     end
@@ -932,7 +935,7 @@ stream_base = "http://127.0.0.1:#{stream_port}"
 first_piece_seen = false
 group do |g|
   g.spawn do
-    Server.serve(stream_l, stream_bodies: true) do |req|
+    Server.serve(stream_l, stream_bodies: true, workers: 1) do |req|
       if req.path == "/stop"
         stream_l.close
         Response.new(200, "bye")
@@ -1101,7 +1104,7 @@ coding_base = "http://127.0.0.1:#{coding_port}"
 long_text = "the quick brown fox jumps over the lazy dog. " * 400
 group do |g|
   g.spawn do
-    Server.serve(coding_l, compress: true) do |req|
+    Server.serve(coding_l, compress: true, workers: 1) do |req|
       if req.path == "/stop"
         coding_l.close
         Response.new(200, "bye")
@@ -1257,7 +1260,7 @@ other_l = IyiSocket.listen("127.0.0.1", 0)
 other_base = "http://127.0.0.1:#{other_l.local_port}"
 group do |g|
   g.spawn do
-    Server.serve(hop_l) do |req|
+    Server.serve(hop_l, workers: 1) do |req|
       case req.path
       when "/stop"
         hop_l.close
@@ -1281,7 +1284,7 @@ group do |g|
     0
   end
   g.spawn do
-    Server.serve(other_l) do |req|
+    Server.serve(other_l, workers: 1) do |req|
       other_l.close if req.path == "/stop"
       Response.new(200, "other auth=#{req.header("Authorization") || "-"} cookie=#{req.header("Cookie") || "-"}")
     end
@@ -1323,7 +1326,7 @@ form_port = form_l.local_port
 form_base = "http://127.0.0.1:#{form_port}"
 group do |g|
   g.spawn do
-    Server.serve(form_l, stream_bodies: true) do |req|
+    Server.serve(form_l, stream_bodies: true, workers: 1) do |req|
       if req.path == "/stop"
         form_l.close
         Response.new(200, "bye")
@@ -1411,7 +1414,7 @@ kept_l = IyiSocket.listen("127.0.0.1", 0)
 kept_base = "http://127.0.0.1:#{kept_l.local_port}"
 group do |g|
   g.spawn do
-    Server.serve(kept_l, compress: true) do |req|
+    Server.serve(kept_l, compress: true, workers: 1) do |req|
       if req.path == "/stop"
         kept_l.close
         Response.new(200, "bye")
@@ -1514,7 +1517,7 @@ slow_l = IyiSocket.listen("127.0.0.1", 0)
 slow_port = slow_l.local_port
 group do |g|
   g.spawn do
-    Server.serve(slow_l, timeout_ms: 1000) do |req|
+    Server.serve(slow_l, timeout_ms: 1000, workers: 1) do |req|
       if req.path == "/stop"
         slow_l.close
         Response.new(200, "bye")
@@ -1590,7 +1593,7 @@ end
 none_l = IyiSocket.listen("127.0.0.1", 0)
 group do |g|
   g.spawn do
-    Server.serve(none_l, timeout_ms: 0) do |req|
+    Server.serve(none_l, timeout_ms: 0, workers: 1) do |req|
       none_l.close if req.path == "/stop"
       Response.new(200, "ok")
     end
@@ -1642,7 +1645,7 @@ up_stopped = 0_i64
 up_returned = 0_i64
 group do |g|
   g.spawn do
-    Server.serve(up_l) do |req|
+    Server.serve(up_l, workers: 1) do |req|
       if req.path == "/stop"
         up_l.close
         Response.new(200, "bye")

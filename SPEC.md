@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 24,562 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 139,221 lines, none of it written in iyi |
+| compiler | 139,407 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 139,221 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,562-line own prelude + 126,211 in std |
-| Specs | 21,146 lines | 15,270 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 139,407 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,562-line own prelude + 126,265 in std |
+| Specs | 21,146 lines | 15,384 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2681,6 +2681,14 @@ end
 and a signature that leaves it out is refused with that sentence. III.4.9
 is how the group comes to answer the type.
 
+**`spawn` or `spawn_parallel`.** `g.spawn` keeps the task on the thread
+that spawned it, taking turns with its siblings at every park: the choice
+for work that waits on sockets and channels, and its block may capture
+anything. `g.spawn_parallel` runs it on the pool's workers, one per core,
+for work that computes, and its block may capture only `Share` values
+(III.4.4, III.4.13). std/http's `Server.serve` puts each connection on the
+pool by default; `workers: 1` keeps a server on one thread.
+
 **This is `defer` again, and that is the argument for it.** III.1.4 built a
 cleanup that runs on a normal exit, on a `!` propagation, and on an unwind, by
 lowering to an `ensure`. A group is that same guarantee applied to a set of
@@ -2783,7 +2791,7 @@ trust `@[Share]` on `Channel(T)` gives since a channel crosses threads
 is. So is the block of a def marked `@[Share]`: the mark says the block
 the def keeps may run on other threads, several at once, and every block
 given to it is checked where it is written - std/http's
-`Server.serve_parallel { }`, std/router's `SharedRouter#handle` and
+`Server.serve { }`, std/router's `SharedRouter#handle` and
 std/tls's `TlsServerConfig#frozen { }`, a server's identity source, are
 three, and std/shared_proc's `SharedProc.of` is the one that makes such a
 block a value: `@[Share(owns: true)]`, constructed by `of` alone, so
@@ -3497,7 +3505,8 @@ wake the waiter (`wake_closed`). `bench/socket_exercise.sh` holds it: a
 task parked in `read` on a connection nobody writes to leaves with
 `Cancelled` when a sibling fails, on one thread, which a blocking read
 could not have done. `std/http` has `Server.serve(listener) { |request|
-Response }` on that socket — a fiber per connection under a group,
+Response }` on that socket — a fiber per connection under a group (on
+one thread; `workers: 1` since the pool became its default, III.4.13),
 keep-alive across requests, chunked request bodies, `HEAD`, a 400 for
 what is not HTTP — and `bench/std_http_exercise.sh` runs the module's
 own client against it, Python's `http.client` against it, and `wrk -c50`
@@ -3687,7 +3696,7 @@ non-`Share` locals, as any task and its spawner may, so no two tasks of a
 unit run at the same instant - a worker holds the unit's token from its
 switch to one of them until it switches to another unit's task or to none -
 but each may park on one worker and resume on another. std/http's
-`serve_parallel` needs it: a connection's real work is in such children.
+pooled `serve` needs it: a connection's real work is in such children.
 
 **3. What crosses, and what does not need to.** Across a parallel boundary:
 `Atomic(T)`, `Mutex(T)`, `List(T)`, immutable values, and now `Channel(T)`:
@@ -4064,45 +4073,68 @@ and runs `bench/parallel_migrate.iyi` with seven more for part 1's moves.
 The one name the pool adds to the floor is `environ`, the C runtime's
 table `IYI_WORKERS` is read from on Linux and darwin.
 
-**The first library caller: std/http's `Server.serve_parallel` (issue
-#145).** `serve` runs every connection with `g.spawn`, so a server it
-runs has one core whatever the machine has: the Açık Türkiye port never
-passed 178% CPU on twelve vCPUs where its Go port reached 1,117%.
-`serve_parallel` starts each connection with `spawn_parallel` and accepts
-on the calling thread.
+**The first library caller: std/http's `Server.serve` (issue #145).**
+`serve` ran every connection with `g.spawn`, so a server it ran had one
+core whatever the machine had: the Açık Türkiye port never passed 178%
+CPU on twelve vCPUs where its Go port reached 1,117%. The pooled server
+came first as a second method beside `serve`; 0.20.0 made it `serve`
+itself. `serve` starts each connection with `spawn_parallel` on a pool
+of *workers* - `IyiWorkers.count` by default, so `IYI_WORKERS` or the
+cores - and accepts on the calling thread; `workers: 1` is the one
+thread `serve` used to be, every connection a `g.spawn` beside the
+accept loop.
 What part 2 asks of a parallel block decided its first shape: the user's
 handler is captured by every connection's block, a block is a `Proc` and a
 `Proc` is never `Share`, so the handler was a value with `call(Request) :
 Response` - Go's `http.Handler` - and an unshareable one is refused at
 the call with the field that failed. The block form came with the
-`@[Share]` def (III.4.4): `serve_parallel(listener) { |request| ... }`
+`@[Share]` def (III.4.4): `serve(listener) { |request| ... }`
 checks the block where it is written and hands it on as a `SharedProc`,
 and std/router's `SharedRouter` is `Router`'s table, routed by the same
 code, whose `handle` checks each handler the same way and answers a new
 router rather than writing the one being served. A block capturing a
-`Router` is refused, naming `Router`'s `Array` field. The socket crosses
-as its descriptor and family, both `Share`; part 5 is what makes that
-enough, since a
+`Router` is refused, naming `Router`'s `Array` field.
+
+Making the pool the default raised one question: a block that captures
+what is not `Share` - a `Router`, an `Array` it appends to, the listener
+it closes - has to stay serveable, on one thread. `workers` is a value
+the compiler cannot read in general, so the mark carries the parameter:
+`@[Share(serial: workers)]` on `serve` says a call that passes `workers`
+the literal `1` runs the block on the calling thread, and that call is
+not checked; a count in a variable is checked whatever it holds. The
+refusal names both ways out: ``the block Server.serve keeps, which may
+run on other threads captures `seen : Array(String)`, which is not
+Share: Array(String)'s field @size is assigned in `append`. Put it
+behind a lock, a `Mutex(Array(String))` (std/mutex), or pass `workers:
+1` so the block runs on one thread``. The mark's other half,
+`crossing: {tls: ...}`, names an argument the def hands to every
+worker, checked as a capture is and refused at the argument with the
+def's own advice. A program's own server loop takes the same mark and
+gets the same sentences.
+
+The socket crosses as its descriptor and family, both `Share`; part 5
+is what makes that enough, since a
 poller's registration is made per wait on the waiting thread and a Windows
 handle is moved to the waiting thread's port. The stop needs part 6
 alone: the accept loop closes a `Channel`, and a watcher beside each
 connection, on its worker, closes the connection there if it is waiting on
-its client - the listener's `closed?` that `serve`'s connections read is
+its client - the listener's `closed?` that `workers: 1`'s connections read is
 the accepting thread's, so each connection reads a stop of its own.
 Measured on Windows 11, twelve logical CPUs, release, 32
 kept-alive connections: a request that computes went from 411 requests a
-second under `serve` to 410, 821, 1,617, 3,047 and 4,033 on 1, 2, 4, 8 and
+second on one thread to 410, 821, 1,617, 3,047 and 4,033 on 1, 2, 4, 8 and
 12 workers; one that answers a few bytes from 23,255 to 21,699 on one
 worker - the handoff's price - and 77,163 on four. `bench/std_http_parallel.iyi`
 holds it in `bench/std_http_exercise.sh`, with broken copies caught by
-name: a connection spawned on the accepting thread, and a stop never
-carried to a worker. The block form measured the same: 392 and 3,751
-requests a second on one and twelve workers, a `SharedRouter` 393 and
-4,003; `bench/std_router_exercise.sh` routes every table through a
-`SharedRouter` and holds its answers to `Router`'s, and serves one under
-`serve_parallel` over the wire.
+name: a `serve` that runs on the calling thread whatever its *workers*,
+`workers: 1` served on the pool, a connection spawned on the accepting
+thread, and a stop never carried to a worker. The block form measured
+the same: 392 and 3,751 requests a second on one and twelve workers, a
+`SharedRouter` 393 and 4,003; `bench/std_router_exercise.sh` routes
+every table through a `SharedRouter` and holds its answers to
+`Router`'s, and serves one on the pool's workers over the wire.
 
-**Over TLS: `serve_parallel(listener, tls: config.frozen)`.** This
+**Over TLS: `serve(listener, tls: config.frozen)`.** This
 section's first version had no `tls:`, because a `TlsServerConfig` is
 written as it serves - its ticket key turns over when a ticket is
 sealed, its replay guard records binders, its staple is replaced, and its
@@ -4122,10 +4154,16 @@ original's ticket keys and replay guard, and trusted `Share` for that
 reason; its identity source is a block given to `frozen`, a `@[Share]`
 def, so what the block captures is checked where it is written, and a
 config whose source is a `Proc` is refused when frozen. A
-`TlsServerConfig` given to `serve_parallel` itself is refused by the
-compiler in the sentence any unshareable capture is (``captures `tls :
-TlsServerConfig`, which is not Share: ... field @alpn is given a setter
-`alpn=` ``). The alternative that lost was a config behind one `Mutex`:
+`TlsServerConfig` given to `serve` itself is refused at the argument,
+by `serve`'s `crossing:` (``Server.serve hands `tls :
+TlsServerConfig` to other threads, several at once, and it is not
+Share: ... field @alpn is given a setter `alpn=`. Pass `config.frozen`,
+the copy every worker may read, or pass `workers: 1` so it stays on
+one thread``) - refused rather than frozen by `serve`, since `frozen`
+copies: a property the program assigns after the server started would
+reach no worker and nothing would say so, and a config whose identity
+source is a `Proc` cannot be frozen at all. Under `workers: 1` the
+config itself is served. The alternative that lost was a config behind one `Mutex`:
 every handshake on every worker would have taken one lock for every
 field it read, and an identity source would still have been a `Proc`
 nobody checked. The handshake runs on the worker that
@@ -4141,9 +4179,9 @@ threads with other jobs keeping four of them busy (load 4.0 to 5.0
 before each run), release, wrk with four threads and 32 kept-alive
 HTTPS connections, a request that computes (`spin(200000)` in
 `bench/std_http_parallel.iyi`'s `speed` mode, TLS 1.3, Ed25519), best of
-three 8 s runs: 3,867 requests a second under `serve`, which was the
-only TLS server before this, and 3,884, 7,727, 14,877 and 26,751 under
-`serve_parallel` on 1, 2, 4 and 8 workers - 2.00x, 3.85x and 6.92x of
+three 8 s runs: 3,867 requests a second on one thread, which was the
+only TLS server before this, and 3,884, 7,727, 14,877 and 26,751 on the
+pool's 1, 2, 4 and 8 workers - 2.00x, 3.85x and 6.92x of
 one. `bench/std_http_parallel.iyi`'s TLS leg holds it in
 `bench/std_http_exercise.sh`: eight connections answered on more than
 one worker, h2 and http/1.1, a ticket sent by a connection on one worker
@@ -4151,13 +4189,14 @@ resumed by a connection that started on another, a client's
 certificate, ECH, and close_notify at the stop; with broken copies
 caught by name - each worker keeping ticket keys of its own (the
 resumption fails), and a stop sending no close_notify - and the two
-refusals checked by their sentences and compiled by copies of std/tls
-with the mark taken off. `bench/std_autocert_exercise.sh` serves under
-`serve_parallel` against Pebble: ten first handshakes at once making one
-order, answered on more than one worker. Not built: the frozen config's
-identities, protocols and ECH keys are the server's for its life -
-another set is another `serve_parallel` - and a ticket outlives neither
-the process nor a move to another server, as under `serve`.
+refusals checked by their sentences and compiled by copies of std/http
+and std/tls with the mark taken off. `bench/std_autocert_exercise.sh`
+serves on four workers against Pebble: ten first handshakes at once
+making one order, answered on more than one worker. Not built: the
+frozen config's identities, protocols and ECH keys are the server's for
+its life - another set is another `serve` - and a ticket outlives
+neither the process nor a move to another server, as under `workers:
+1`.
 
 **Issue #145's shape, measured against Go.** The issue timed a whole
 application with a database. This times the three kinds of endpoint where
@@ -4175,7 +4214,7 @@ server's own cores do with a request. The endpoints:
   answers in JSON.
 
 How it was taken - `bench/web_cores.py`: wrk with 4 threads and 32
-kept-alive connections, bcrypt at cost 10, `serve_parallel` on 1, 2, 4, 8
+kept-alive connections, bcrypt at cost 10, `serve` on 1, 2, 4, 8
 and 12 workers, best of 3 runs of 15 s (login) and 5 s (the others). Each
 run waits for the server to finish what the run before left it. The
 machine was Linux on a twelve-thread QEMU VM, with release builds and Go
@@ -4183,28 +4222,34 @@ machine was Linux on a twelve-thread QEMU VM, with release builds and Go
 1.5 to 2.7 cores busy throughout (/proc/stat's busy time less the
 server's and wrk's), and wrk itself used up to 2 cores. Each cell is
 requests a second, the server's CPU as a share of one core, and p50 / p99
-latency in ms.
+latency in ms. The tables were taken before the pool became `serve`'s
+default, under the method's earlier name; the code path is the one
+`serve` runs now, and on 2026-10-26 the two measured the same run beside
+each other (CHANGELOG.md's entry for the change). One row has no
+counterpart today: the pool held to one worker, since `serve` with one
+worker now serves on the calling thread - the first row's server, which
+is what the script's 1-worker row times.
 
 | HTTP | login | check_version | order |
 |---|---:|---:|---:|
-| iyi `serve` | 27, 100%, 1190 / 1280 | 46,241, 112%, 0.7 / 2.3 | 33,665, 113%, 0.9 / 2.4 |
-| `serve_parallel`, 1 worker | 26, 100%, 1120 / 1570 | 45,445, 111%, 0.7 / 2.4 | 32,770, 111%, 0.9 / 2.7 |
-| `serve_parallel`, 2 | 52, 200%, 564 / 774 | 98,700, 213%, 0.3 / 2.4 | 69,092, 220%, 0.4 / 2.6 |
-| `serve_parallel`, 4 | 103, 400%, 289 / 404 | 195,346, 424%, 0.1 / 2.5 | 119,769, 468%, 0.2 / 2.9 |
-| `serve_parallel`, 8 | 196, 797%, 164 / 201 | 208,641, 602%, 0.1 / 3.6 | 137,744, 605%, 0.2 / 4.2 |
-| `serve_parallel`, 12 | 247, 1,032%, 128 / 174 | 205,879, 631%, 0.1 / 4.2 | 131,160, 697%, 0.2 / 6.9 |
+| `serve`, `workers: 1` | 27, 100%, 1190 / 1280 | 46,241, 112%, 0.7 / 2.3 | 33,665, 113%, 0.9 / 2.4 |
+| the pool, 1 worker | 26, 100%, 1120 / 1570 | 45,445, 111%, 0.7 / 2.4 | 32,770, 111%, 0.9 / 2.7 |
+| `serve`, 2 workers | 52, 200%, 564 / 774 | 98,700, 213%, 0.3 / 2.4 | 69,092, 220%, 0.4 / 2.6 |
+| `serve`, 4 | 103, 400%, 289 / 404 | 195,346, 424%, 0.1 / 2.5 | 119,769, 468%, 0.2 / 2.9 |
+| `serve`, 8 | 196, 797%, 164 / 201 | 208,641, 602%, 0.1 / 3.6 | 137,744, 605%, 0.2 / 4.2 |
+| `serve`, 12 | 247, 1,032%, 128 / 174 | 205,879, 631%, 0.1 / 4.2 | 131,160, 697%, 0.2 / 6.9 |
 | Go net/http | 242, 1,033%, 129 / 215 | 216,298, 528%, 0.1 / 3.0 | 90,732, 538%, 0.2 / 3.5 |
 | *the issue's, iyi (Windows, with its database)* | *9.9* | *5,308* | |
 | *the issue's, Go (Windows, with its database)* | *108.2* | *21,099* | |
 
 | HTTPS (TLS 1.3, Ed25519) | login | check_version | order |
 |---|---:|---:|---:|
-| iyi `serve` | 27, 100%, 1180 / 1220 | 37,828, 114%, 0.8 / 2.5 | 25,668, 114%, 1.2 / 2.8 |
-| `serve_parallel`, 1 worker | 26, 100%, 1120 / 1550 | 38,313, 109%, 0.8 / 2.6 | 25,433, 109%, 1.2 / 3.0 |
-| `serve_parallel`, 2 | 53, 200%, 564 / 772 | 76,018, 220%, 0.4 / 2.6 | 54,217, 226%, 0.6 / 2.9 |
-| `serve_parallel`, 4 | 104, 400%, 288 / 396 | 149,869, 449%, 0.2 / 2.8 | 93,015, 497%, 0.3 / 3.1 |
-| `serve_parallel`, 8 | 197, 796%, 166 / 203 | 160,483, 605%, 0.1 / 3.9 | 116,324, 625%, 0.2 / 4.8 |
-| `serve_parallel`, 12 | 246, 1,030%, 128 / 180 | 143,231, 641%, 0.1 / 7.1 | 89,939, 735%, 0.3 / 11.2 |
+| `serve`, `workers: 1` | 27, 100%, 1180 / 1220 | 37,828, 114%, 0.8 / 2.5 | 25,668, 114%, 1.2 / 2.8 |
+| the pool, 1 worker | 26, 100%, 1120 / 1550 | 38,313, 109%, 0.8 / 2.6 | 25,433, 109%, 1.2 / 3.0 |
+| `serve`, 2 workers | 53, 200%, 564 / 772 | 76,018, 220%, 0.4 / 2.6 | 54,217, 226%, 0.6 / 2.9 |
+| `serve`, 4 | 104, 400%, 288 / 396 | 149,869, 449%, 0.2 / 2.8 | 93,015, 497%, 0.3 / 3.1 |
+| `serve`, 8 | 197, 796%, 166 / 203 | 160,483, 605%, 0.1 / 3.9 | 116,324, 625%, 0.2 / 4.8 |
+| `serve`, 12 | 246, 1,030%, 128 / 180 | 143,231, 641%, 0.1 / 7.1 | 89,939, 735%, 0.3 / 11.2 |
 | Go net/http | 241, 1,032%, 129 / 228 | 169,636, 503%, 0.1 / 3.0 | 67,950, 504%, 0.3 / 3.8 |
 
 The issue's rows are its own numbers. They were taken on Windows 11 in a
@@ -4213,20 +4258,20 @@ so set them beside these for their ratio and not their size.
 
 **The login gap was cores, and it is closed.** Taken one request at a
 time on one connection, a cost-10 verify costs 37.0 to 38.5 ms of CPU
-in iyi (`serve`, and `serve_parallel` on 1 and 2 workers) and 38.0 to 38.5
+in iyi (`workers: 1`, and the pool on 1 and 2 workers) and 38.0 to 38.5
 ms in Go (GOMAXPROCS 1 and 2). std/password's bcrypt is therefore not
 what was slow. On twelve workers iyi answers 247 logins a second on
 1,032% CPU, where Go answers 242 on 1,033%. The issue's ratio was 108.2 to
-9.9, about 11 to 1. Under `serve` the logins are answered first come,
-first served. Under `serve_parallel` the preemption of part 9 interleaves
+9.9, about 11 to 1. Under `workers: 1` the logins are answered first come,
+first served. On the pool the preemption of part 9 interleaves
 the logins on a worker, and they finish in batches about a second apart,
-which widens the spread: at one worker p50 is 1,120 ms against `serve`'s
-1,190, and p99 is 1,570 against 1,280.
+which widens the spread: at one worker p50 is 1,120 ms against `workers:
+1`'s 1,190, and p99 is 1,570 against 1,280.
 
 **The light endpoints scale to four workers, and then stop for two
-reasons.** On one worker `serve_parallel` answers what `serve` does, to
+reasons.** On one worker the pool answers what `workers: 1` does, to
 within 3% on both endpoints and both protocols. On four it answers 4.2
-times `serve`'s `check_version` and 3.6 times its `order`. Past four, the
+times `workers: 1`'s `check_version` and 3.6 times its `order`. Past four, the
 first limit is the load generator and loopback: Go stops at 216,298
 `check_version` a second while using only 528% CPU. The second limit is
 iyi's own. perf is closed to

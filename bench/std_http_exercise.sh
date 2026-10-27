@@ -105,7 +105,7 @@ echo "== what the module reaches"
 # over std/digest's XXH64, and std/x509 - the certificate a request
 # carries - is std/tls's own already, as std/unicode is std/uri's, and
 # std/dns - the HTTPS records a client may connect by - std/socket's.
-# std/shared_proc, the handler `serve_parallel` calls on every worker, is
+# std/shared_proc, the handler `serve` calls on every worker, is
 # iyi over the prelude and reaches nothing. No std/env: a proxy the
 # environment names is std/http_proxy's to read.
 imports=$(grep -oE '^import std/[a-z_0-9]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
@@ -1152,35 +1152,42 @@ PY
 fi
 
 echo
-echo "== connections on every core: serve_parallel (bench/std_http_parallel.iyi)"
-# `Server.serve_parallel` starts each connection as a parallel task, so a
-# request is answered on a pool worker rather than on the thread that
-# accepts, and a stop closes the listener on that thread while the
-# connections it must close are on others. The program holds it: eight
-# requests that compute, waiting before anything accepts, answered on
-# more than one worker and on none of them the accepting thread; a
-# handler that panics ending its own connection; and the stop, an answer
-# in progress written and a kept-alive connection closed, under
-# watchdogs. Then the same over TLS (`tls: config.frozen`): eight
-# connections answered on more than one worker, h2 and http/1.1 by ALPN,
-# a ticket a connection on one worker was sent resumed by a connection
-# that started on another, a client's certificate seen and an encrypted
-# ClientHello taken on a worker, and the stop reaching a kept-alive
-# connection on its worker as close_notify. Then copies of std/http with
-# the connection spawned on the accepting thread, with the watcher that
-# carries the stop to a connection's worker made to do nothing, and with
-# the stop sending no close_notify, and a copy of std/tls whose ticket
-# keys are every worker's own, each caught at the line that names it.
-# And what the compiler refuses: a `TlsServerConfig` that is not frozen,
-# given to `serve_parallel`, and a `frozen` identity source that captures
-# a table of identities - each refused with its sentence, and each
-# compiled by a copy of std/tls with the mark that refuses it taken off.
+echo "== connections on every core: serve's default workers, and workers: 1 (bench/std_http_parallel.iyi)"
+# `Server.serve` starts each connection as a parallel task on the pool,
+# one worker per core unless *workers* says otherwise, so a request is
+# answered on a pool worker rather than on the thread that accepts, and
+# a stop closes the listener on that thread while the connections it
+# must close are on others. The program holds it: eight requests that
+# compute, waiting before anything accepts, answered on more than one
+# worker and on none of them the accepting thread; a handler that
+# panics ending its own connection; and the stop, an answer in progress
+# written and a kept-alive connection closed, under watchdogs. Then
+# `workers: 1`: four requests waiting before anything accepts, every one
+# answered on the accepting thread, by a block that appends to an
+# `Array` and closes its own listener. Then the same over TLS (`tls:
+# config.frozen`): eight connections answered on more than one worker,
+# h2 and http/1.1 by ALPN, a ticket a connection on one worker was sent
+# resumed by a connection that started on another, a client's
+# certificate seen and an encrypted ClientHello taken on a worker, and
+# the stop reaching a kept-alive connection on its worker as
+# close_notify. Then copies of std/http with `serve` on the calling
+# thread whatever *workers* says, with `workers: 1` served on the pool,
+# with the connection spawned on the accepting thread, with the watcher
+# that carries the stop to a connection's worker made to do nothing, and
+# with the stop sending no close_notify, and a copy of std/tls whose
+# ticket keys are every worker's own, each caught at the line that
+# names it. And what the compiler refuses and takes: a block that
+# captures an `Array` under the default workers, a `TlsServerConfig`
+# that is not frozen, a `Router` given as the handler value, and a
+# `frozen` identity source that captures a table of identities, each
+# refused with its sentence; and the `Array`, the config and the
+# `Router` under `workers: 1`, taken.
 if ! "$IYI" build -o "$WORK/parallel" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel.build" 2>&1; then
   echo "  bench/std_http_parallel.iyi did not build"
   sed -n '1,8p' "$WORK/parallel.build"
   status=1
 elif ! timeout 120 "$WORK/parallel" >"$WORK/parallel.out" 2>&1; then
-  echo "  serve_parallel did not hold:"
+  echo "  serve on every core did not hold:"
   grep -e '^FAIL ' "$WORK/parallel.out" | sed 's/^/    /'
   status=1
 else
@@ -1219,6 +1226,22 @@ PY
       status=1
     fi
   }
+  # Every count is at least 1 by here, so the copy serves on the calling
+  # thread whatever it is given, and `tls` is narrowed as `serve`'s is.
+  parallel_breaks "a serve on the calling thread whatever its workers" \
+    '    if workers == 1 || tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)' '    if workers > 0 || tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)' "threads that answered"
+  parallel_breaks "workers: 1 served on the pool" \
+    '    if workers == 1 || tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
+      return
+    end
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers)' '    if tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
+      return
+    end
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, IyiWorkers.count)' "workers: 1, the threads that answered"
   parallel_breaks "a connection served on the thread that accepted it" \
     '    g.spawn_parallel do
       client = IyiSocket.new(fd, family)' '    g.spawn do
@@ -1241,13 +1264,30 @@ PY
     TlsTicketKeySet.new(@name, own, @previous_name, @previous)' "a ticket resumed on another worker" tls
 fi
 
-# What the compiler refuses of a TLS server whose connections run on
-# every worker: a config that is not frozen, which changes as it serves,
-# and an identity source given to `frozen` that captures a table. Each
-# must be refused with its sentence; and each must compile against a
-# copy of std/tls with the mark that refuses it taken off - the config
-# trusted as `Share`, and `frozen`'s block no longer kept by a `@[Share]`
-# def - so the refusal is the mark's doing.
+# What the compiler refuses of a server whose connections run on every
+# worker: a block that captures an `Array`, which every worker would
+# append to at once; a config that is not frozen, which changes as it
+# serves; and an identity source given to `frozen` that captures a
+# table. Each must be refused with its sentence, and each must compile
+# against a copy of std/http or std/tls with the mark that refuses it
+# taken off - `serve`'s `@[Share]` gone (its block handed on as a value
+# nothing checked), its `crossing:` gone, `frozen`'s block no longer
+# kept by a `@[Share]` def - so the refusal is the mark's doing. And
+# what it takes: the same `Array` and config under `workers: 1`, which
+# must compile, and be refused by a copy of std/http whose `serve`
+# names no `serial:` parameter.
+cat >"$WORK/captures.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/socket::{IyiSocket}
+
+seen = [] of String
+Server.serve(IyiSocket.listen("127.0.0.1", 0)) do |request|
+  seen << request.path
+  Response.new(200, "here")
+end
+IYI
 cat >"$WORK/unfrozen.iyi" <<'IYI'
 module main
 
@@ -1257,7 +1297,44 @@ import std/tls::{TlsServerConfig}
 
 config = TlsServerConfig.from_pem(Program.args[0], Program.args[1])
 raise "no config" unless config.is_a?(TlsServerConfig)
-Server.serve_parallel(IyiSocket.listen("127.0.0.1", 0), tls: config) { |request| Response.new(200, "here") }
+Server.serve(IyiSocket.listen("127.0.0.1", 0), tls: config) { |request| Response.new(200, "here") }
+IYI
+cat >"$WORK/alone.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/socket::{IyiSocket}
+import std/tls::{TlsServerConfig}
+
+config = TlsServerConfig.from_pem(Program.args[0], Program.args[1])
+raise "no config" unless config.is_a?(TlsServerConfig)
+seen = [] of String
+Server.serve(IyiSocket.listen("127.0.0.1", 0), tls: config, workers: 1) do |request|
+  seen << request.path
+  Response.new(200, "here")
+end
+IYI
+cat >"$WORK/router_value.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/router::{Router}
+import std/socket::{IyiSocket}
+
+router = Router.new
+router.handle("GET /") { |_, _| Response.new(200, "home") }
+Server.serve(IyiSocket.listen("127.0.0.1", 0), router)
+IYI
+cat >"$WORK/router_alone.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/router::{Router}
+import std/socket::{IyiSocket}
+
+router = Router.new
+router.handle("GET /") { |_, _| Response.new(200, "home") }
+Server.serve(IyiSocket.listen("127.0.0.1", 0), router, workers: 1)
 IYI
 cat >"$WORK/source.iyi" <<'IYI'
 module main
@@ -1270,9 +1347,26 @@ held = {} of String => TlsIdentity
 frozen = config.frozen { |name, alpn, left_ms| held[name || ""]? }
 puts frozen.alpn.size
 IYI
-# refused_tls <label> <file> <sentence> <old> <new>
-refused_tls() {
-  local label="$1" file="$2" sentence="$3" old="$4" new="$5"
+# mark_off <module> <old> <new> [<old2> <new2>]: $WORK/refbreak/std/<module>.iyi,
+# std's with each <old> made its <new>.
+mark_off() {
+  rm -rf "$WORK/refbreak" && mkdir -p "$WORK/refbreak/std"
+  OLD="$2" NEW="$3" OLD2="${4:-}" NEW2="${5:-}" "$PY" - "$REPO/src/std/$1.iyi" "$WORK/refbreak/std/$1.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+for old, new in ((os.environ["OLD"], os.environ["NEW"]), (os.environ["OLD2"], os.environ["NEW2"])):
+    if not old:
+        continue
+    if src.count(old) != 1:
+        raise SystemExit("patch site missing or not unique")
+    src = src.replace(old, new, 1)
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src)
+PY
+}
+# refused <label> <file> <sentence> <module> <old> <new> [<old2> <new2>]
+refused() {
+  local label="$1" file="$2" sentence="$3"
+  shift 3
   if "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/refused.log" 2>&1; then
     echo "  FAIL $label: compiled"
     status=1
@@ -1284,15 +1378,7 @@ refused_tls() {
     return
   fi
   echo "  $label: refused: $(grep -m1 -F "$sentence" "$WORK/refused.log" | sed 's/^Error: //' | cut -c1-150)"
-  rm -rf "$WORK/refbreak" && mkdir -p "$WORK/refbreak/std"
-  if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/tls.iyi" "$WORK/refbreak/std/tls.iyi" <<'PY'
-import os, sys
-src = open(sys.argv[1], encoding="utf-8").read()
-if src.count(os.environ["OLD"]) != 1:
-    raise SystemExit("patch site missing or not unique")
-open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
-PY
-  then
+  if ! mark_off "$@"; then
     echo "  $label: the patch did not apply"
     status=1
   elif IYI_PATH="$WORK/refbreak${PSEP}$IYI_PATH" "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/refused-broken.log" 2>&1; then
@@ -1302,17 +1388,82 @@ PY
     status=1
   fi
 }
-refused_tls "a TlsServerConfig given to serve_parallel" unfrozen.iyi \
-  'captures `tls : Std::Tls::TlsServerConfig`, which is not Share: Std::Tls::TlsServerConfig'"'"'s field @alpn is given a setter `alpn=`' \
-  'pub class TlsServerConfig' '@[Share]
-pub class TlsServerConfig'
-refused_tls "an identity source that captures a table" source.iyi \
+# taken <label> <file> <sentence> <module> <old> <new>: <file> compiles,
+# and over the copy refuses with <sentence>.
+taken() {
+  local label="$1" file="$2" sentence="$3"
+  shift 3
+  if ! "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/taken.log" 2>&1; then
+    echo "  FAIL $label: refused: $(grep -m1 'Error' "$WORK/taken.log")"
+    status=1
+    return
+  fi
+  echo "  $label: compiled"
+  if ! mark_off "$@"; then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/refbreak${PSEP}$IYI_PATH" "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/taken-broken.log" 2>&1; then
+    echo "  FAIL $label, the mark taken off: still compiled"
+    status=1
+  elif grep -qF "$sentence" "$WORK/taken-broken.log"; then
+    echo "  $label, the mark taken off: refused, so caught"
+  else
+    echo "  FAIL $label, the mark taken off: refused, but not for the reason: $(grep -m1 'Error' "$WORK/taken-broken.log")"
+    status=1
+  fi
+}
+serve_mark='  @[Share(serial: workers, crossing: {tls: "Pass `config.frozen`, the copy every worker may read"})]
+  def self.serve(listener : IyiSocket, stream_bodies'
+refused "a block that captures an Array, on every worker" captures.iyi \
+  'the block Server.serve keeps, which may run on other threads captures `seen : Array(String)`, which is not Share: Array(String)'"'"'s field @size is assigned in `append`. Put it behind a lock, a `Mutex(Array(String))` (std/mutex), or pass `workers: 1` so the block runs on one thread' \
+  http "$serve_mark" '  @[Share]
+  struct UncheckedHandler
+    def initialize(@proc : Proc(Request, Response))
+    end
+
+    def call(request : Request) : Response
+      @proc.call(request)
+    end
+  end
+
+  def self.serve(listener : IyiSocket, stream_bodies' \
+  '    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies' '    serve_pool(listener, UncheckedHandler.new(handler), stream_bodies'
+refused "a TlsServerConfig on every worker" unfrozen.iyi \
+  'Server.serve hands `tls : Std::Tls::TlsServerConfig` to other threads, several at once, and it is not Share: Std::Tls::TlsServerConfig'"'"'s field @alpn is given a setter `alpn=`. Pass `config.frozen`, the copy every worker may read, or pass `workers: 1` so it stays on one thread' \
+  http "$serve_mark" '  @[Share(serial: workers)]
+  def self.serve(listener : IyiSocket, stream_bodies'
+refused "an identity source that captures a table" source.iyi \
   'the block TlsServerConfig#frozen keeps, which may run on other threads captures `held : Hash(String, Std::Tls::TlsIdentity)`, which is not Share' \
-  '  @[Share]
+  tls '  @[Share]
   def frozen(&source : String?, Array(String)?, Int32? -> TlsIdentity | TlsError | Nil) : TlsFrozenServerConfig
     TlsFrozenServerConfig.new(self, SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil).of { |asked| source.call(asked[0], asked[1], asked[2]) })' \
   '  def frozen(&source : String?, Array(String)?, Int32? -> TlsIdentity | TlsError | Nil) : TlsFrozenServerConfig
     TlsFrozenServerConfig.new(self, nil)'
+taken "an Array and a TlsServerConfig under workers: 1" alone.iyi \
+  'Server.serve hands `tls : Std::Tls::TlsServerConfig` to other threads' \
+  http "$serve_mark" '  @[Share(crossing: {tls: "Pass `config.frozen`, the copy every worker may read"})]
+  def self.serve(listener : IyiSocket, stream_bodies'
+# The value form: a `Router` refused at the argument on every worker, and
+# taken under `workers: 1`. Its mark taken off is the `handler:` crossing
+# gone and the value handed to the workers unchecked.
+value_mark='  @[Share(serial: workers, crossing: {handler: "Make it Share - a `SharedRouter` for a `Router`, its state behind a `Mutex` (std/mutex)", tls:'
+refused "a Router as the handler, on every worker" router_value.iyi \
+  'Server.serve hands `handler : Std::Router::Router` to other threads, several at once, and it is not Share' \
+  http "$value_mark" '  @[Share(owns: true)]
+  struct UncheckedValue(H)
+    def initialize(@handler : H)
+    end
+
+    def call(request : Request) : Response
+      @handler.call(request)
+    end
+  end
+
+  @[Share(serial: workers, crossing: {tls:' \
+  '    serve_pool(listener, SharedProc(Request, Response).of { |request| handler.call(request) }, stream_bodies' '    serve_pool(listener, UncheckedValue.new(handler), stream_bodies'
+taken "a Router as the handler under workers: 1" router_alone.iyi \
+  'Server.serve hands `handler : Std::Router::Router` to other threads' \
+  http "$value_mark" '  @[Share(crossing: {handler: "Make it Share - a `SharedRouter` for a `Router`, its state behind a `Mutex` (std/mutex)", tls:'
 
 echo
 echo "== TLS resumption: an HTTPClient's tickets (bench/std_http_resume.iyi)"
@@ -2968,9 +3119,11 @@ config.alpn = ["h2", "http/1.1"]
 plain = IyiSocket.listen("127.0.0.1", 0)
 secure = IyiSocket.listen("127.0.0.1", 0)
 File.write(Program.args[0], "#{plain.local_port} #{secure.local_port}")
+# Both on every worker, `serve`'s default: the TLS one with its config
+# frozen, which every worker reads.
 group do |g|
   g.spawn { Server.serve(plain) { |req| told(req) }; 0 }
-  g.spawn { Server.serve(secure, tls: config) { |req| told(req) }; 0 }
+  g.spawn { Server.serve(secure, tls: config.frozen) { |req| told(req) }; 0 }
   0
 end
 IYI
@@ -3913,8 +4066,8 @@ guard_breaks "an HTTP/2 body bounded per read alone" guard_h2 \
   '      conn.deadline_at(whole, "read a request") if whole > 0_i64
       unless stream_bodies' '      unless stream_bodies' \
   h2 "an HTTP/2 body a frame of a byte at a time"
-# `serve`'s own line: `serve_parallel` makes its places the same way, and
-# the comment above this one is `serve`'s alone.
+# `workers: 1`'s own line: the pool makes its places the same way, and
+# the comment above this one is `serve_one_thread`'s alone.
 guard_breaks "connections served without a cap" guard_cap \
   '    # A place per connection served: a send waits while every one is held.
     slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' '    slots = nil.as(Channel(Int32)?)' \

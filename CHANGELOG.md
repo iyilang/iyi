@@ -8,6 +8,81 @@
 
   Four exercise fixes, each found by the equivalence and census runs on one macOS machine: `std_dns_exercise` skips its Happy Eyeballs races when a full listener resets SYNs instead of dropping them; `std_digest_exercise` times the best of seven, and `std_big_exercise` judges the pass whose division-to-product ratio is smallest, timed back to back, since both timing checks failed under load; and `std_tar_exercise` writes absolute names past 100 bytes through pax records, which a long `TMPDIR` needs.
 
+- **Breaking: std/http's `Server.serve` serves on every core by default
+  (#145).** `serve(listener) { |request| ... }` runs each connection as a
+  parallel task on the pool, `IyiWorkers.count` workers - `IYI_WORKERS`,
+  else the cores - and `serve(..., workers: 1)` is the one-thread server
+  `serve` was. The pooled method 0.19.1 added beside `serve` is removed,
+  with no alias; its value form, `serve(listener, routes)` with a
+  `SharedRouter` or a `SharedProc`, keeps its arguments under `serve`,
+  and takes any handler value under `workers: 1` - a plain `Router`
+  included - while on more than one worker one that is not `Share` is
+  refused at the argument with the same two ways out.
+  The block is checked as a parallel task's is, and a capture that is not
+  `Share` is refused where it is written, naming both ways out: ``the
+  block Server.serve keeps, which may run on other threads captures
+  `seen : Array(String)`, which is not Share: Array(String)'s field @size
+  is assigned in `append`. Put it behind a lock, a `Mutex(Array(String))`
+  (std/mutex), or pass `workers: 1` so the block runs on one thread``. A
+  `TlsServerConfig` on more than one worker is refused at the argument
+  (``Pass `config.frozen`, the copy every worker may read, or pass
+  `workers: 1` so it stays on one thread``) rather than frozen by
+  `serve`: `frozen` copies, so a property assigned while the server runs
+  would reach no worker and nothing would say so, and a config whose
+  `identity_source` is a `Proc` cannot be frozen at all. The mark is the
+  compiler's: `@[Share(serial: workers, crossing: {tls: "..."})]` on a
+  def, which a program's own server loop may take - a call that passes
+  the serial parameter the literal `1` is not checked, a count in a
+  variable is.
+
+  Migrating: a call to the removed method is a call to `serve` with the
+  same arguments. A `serve` whose block captures a `Router`, an array, a
+  counter or the listener it closes, or whose `tls:` is a
+  `TlsServerConfig`, either keeps one thread with `workers: 1` or moves
+  to what crosses threads: the state behind a `Mutex` or in an `Atomic`,
+  the router to a `SharedRouter`, the config to `config.frozen`, and the
+  stop to a `Channel` that a task beside the server receives from before
+  it closes the listener. A block that captures nothing unshareable
+  needs no change, and now uses every core. In this repository the
+  exercise servers that close their listener from the block or record
+  into arrays pass `workers: 1`; `bench/std_fileserver_exercise.iyi`'s
+  two servers moved to a stopping channel and serve on the pool.
+
+  The pool path is the removed method's, unchanged. `bench/web_cores.py`
+  over HTTP on twelve workers, best of 3, run twice each and interleaved
+  with the compiler of the branch master merged for it (8b9c1de1a)
+  building the same program around the removed method, on a twelve-thread
+  Linux VM with 0.1 cores busy
+  elsewhere: login 293 and 292 a second on 1,184% and 1,185% CPU before,
+  293 and 292 on 1,185% and 1,184% after; `check_version` 286,866 and
+  286,004 before, 283,493 and 288,208 after. `bench/std_http_exercise.sh`
+  holds the default (requests that compute answered on more than one
+  worker, none the accepting thread), `workers: 1` (every answer on the
+  accepting thread, from a block that appends to an `Array` and closes
+  its listener), and the refusals, with broken copies: a `serve` on the
+  calling thread whatever its workers, `workers: 1` served on the pool,
+  `serve`'s mark taken off, its `crossing:` taken off, and its `serial:`
+  taken off.
+
+- **A Windows `--release` build with a pool its optimiser cannot reach
+  links.** x86-64 Windows' preemption checks read the TEB slot's offset,
+  `IyiWorkers::preempt_slot`, by name after optimisation, and only the
+  pool's start and its workers touch that global. A program whose every
+  `serve` passes `workers: 1` has the pool in its types and none on any
+  path, so `--release` deleted the internal global and the link stopped
+  at `LNK2019: unresolved external symbol IyiWorkers::preempt_slot` - the
+  release builds of std/http, std/cookie, std/sse, std/websocket and
+  std/acme's exercises on Windows. The global is kept external now, and
+  holds the fallback slot, 0x28, which nothing raises. A cross-compiled
+  object of `bench/std_cookie_exercise.iyi` named it undefined before
+  and defines it after.
+
+- **`bench/parallel_migrate.iyi`'s closes step runs rounds of 16 until
+  one close is made on another worker than its reader's, five at most.**
+  That is the step's precondition, not the runtime's property: darwin's
+  release build once took all 16 closers on their readers' own workers,
+  where master's had crossed 15 and the same job's plain build 11.
+
 - **An integer constant is cut to its type's width before LLVM gets it**
   (`LLVM::Type#const_int`, as Crystal 1.22 has it). A negative value went
   to `LLVMConstInt` sign-extended to 64 bits, and the LLVM in the Windows
@@ -74,8 +149,8 @@
   the same bytes. Each is driven by wrk over 32 kept-alive connections,
   in the clear and over TLS, with no database. Measured on a twelve-thread
   Linux VM with about two cores busy elsewhere, over HTTP:
-  - login: `serve_parallel` on 12 workers answers 247 a second on 1,032%
-    CPU, against Go's 242 on 1,033% and `serve`'s 27. The issue had 9.9
+  - login: `serve` on 12 workers answers 247 a second on 1,032% CPU,
+    against Go's 242 on 1,033% and `workers: 1`'s 27. The issue had 9.9
     against 108.2.
   - `check_version`: 205,879 a second against Go's 216,298.
   - `order`: 131,160 a second against Go's 90,732.
@@ -263,7 +338,7 @@
   claims, `cmpq $0, %gs:off` (1.46 to 1.49x, a cost Linux CI's `%fs`
   form shares on those runners). darwin arm64 reads `tpidrro_el0` and
   dyld's pthread slot (0.94 to 1.07x). `bench/parallel_preempt.iyi`
-  gains a `period` step, held to 4 to 9 ms a look and 20 ms a turn.
+  gains a `period` step, held to 4 to 10.5 ms a look and 20 ms a turn.
   Its tight loops are now held to 2x. The gate shows a Windows monitor
   on the system tick (`period`) and the accessor check (`tight`,
   `-Dpreempt_check_accessor`) both failing. On Windows the gate runs the
@@ -271,8 +346,8 @@
   arguments, the bench now uses a pool of one and prints only its
   verdict; on 4 workers its slice step had failed, on Windows CI and on
   Linux alike, because an idle worker took the short task.
-**std/http's `Server.serve_parallel` serves TLS (#145).**
-`serve_parallel(listener, tls: config.frozen)` runs each connection's
+**std/http's pooled `Server.serve` serves TLS (#145).**
+`serve(listener, tls: config.frozen)` runs each connection's
 handshake and requests on the pool worker that serves it - HTTP/2 and
 HTTP/1.1 by ALPN, client certificates, Encrypted Client Hello - with
 one set of ticket keys among the workers, so a ticket a connection on
@@ -280,13 +355,14 @@ one worker was sent resumes on any other, and at a stop each waiting
 connection is sent close_notify from its own worker. Measured on Linux
 (twelve hardware threads, four busy with other work), release, wrk with
 32 kept-alive HTTPS connections and a request that computes: 3,867
-requests a second under `serve`, and 3,884, 7,727, 14,877 and 26,751
-under `serve_parallel` on 1, 2, 4 and 8 workers.
+requests a second on one thread, and 3,884, 7,727, 14,877 and 26,751
+on the pool's 1, 2, 4 and 8 workers.
 
 - std/tls: `TlsServerConfig#frozen` is a `TlsFrozenServerConfig`, a copy
   no property of which changes, `Share` (SPEC.md III.4.4) and taken by
-  `serve_parallel(tls:)` and by `serve(tls:)` alike; a `TlsServerConfig`
-  given to `serve_parallel` is refused by the compiler. An identity
+  `serve(tls:)` on the pool and under `workers: 1` alike; a
+  `TlsServerConfig` given to `serve` on more than one worker is refused
+  by the compiler. An identity
   source goes to `frozen` as a block, `config.frozen { |name, alpn,
   left_ms| ... }`, whose captures the compiler checks; freezing a config
   whose `identity_source` is set panics, saying so. `TlsServerConfig#dup`
@@ -296,12 +372,12 @@ under `serve_parallel` on 1, 2, 4 and 8 workers.
   thread; `TlsIdentity` is `Share`, and its constructor copies the
   arrays it is given. `TlsIdentity#ocsp_staple` is a method now, not a
   getter of a field, and answers the same.
-- std/autocert: `AutocertManager#frozen_tls_config` serves under
-  `serve_parallel`: held certificates and tls-alpn-01 challenges are
+- std/autocert: `AutocertManager#frozen_tls_config` serves on the
+  pool's workers: held certificates and tls-alpn-01 challenges are
   answered on the workers, and a name not held is asked of the
   manager's `run`, which must run; one order still serves every worker
   asking for a name at once.
-- std/http: `serve_parallel` gives a connection's place back with the
+- std/http: the pooled `serve` gives a connection's place back with the
   channel's locked `receive`; the unlocked `take_now` it used on every
   worker raced the accepting thread (the runtime's fix, making the
   public halves take the lock, is on `m-thread/steal`).

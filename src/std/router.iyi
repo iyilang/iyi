@@ -462,7 +462,12 @@ end
 #     router = Router.new
 #     router.handle("GET /users/{id}") { |req, params| Response.new(200, params["id"]) }
 #     router.handle("/static/") { |req, params| FileServer.serve(root, req) }
-#     Server.serve(listener) { |req| router.call(req) }
+#     Server.serve(listener, router, workers: 1)
+#
+# A `Router` is written as it is set up and holds procs nobody checked,
+# so it is not `Share`: it is served on one thread (`workers: 1`), as the
+# handler or from a block that calls it, and refused at the argument on
+# more than one worker; `SharedRouter` below routes on every worker.
 #
 # `handle` panics on a pattern that is not one, on one that conflicts with
 # a pattern already registered, and after the router has answered a
@@ -638,21 +643,21 @@ pub class Router
   end
 end
 
-# `Router`'s table for `Server.serve_parallel`, where every worker routes
-# at once (SPEC.md III.4.13):
+# `Router`'s table for `Server.serve` on every worker, which route at
+# once (SPEC.md III.4.13):
 #
 #     routes = SharedRouter.new
 #       .handle("GET /users/{id}") { |req, params| Response.new(200, params["id"]) }
 #       .handle("/static/") { |req, params| FileServer.serve(root, req) }
-#     Server.serve_parallel(listener, routes)
+#     Server.serve(listener, routes)
 #
 # The same patterns, precedence, conflicts and answers as `Router`'s, by
 # the same code (`Router.route`). What differs is what a handler may
 # capture: `handle` is `@[Share]`, so each block is checked where it is
 # written as a parallel task's is - every value it captures `Share`, a
 # pool behind a `Mutex`, a count in an `Atomic` - and kept as a
-# `SharedProc`. A `Router` holds procs nobody checked and is refused by
-# `serve_parallel` for that reason. A `SharedRouter` is never written:
+# `SharedProc`. A `Router` holds procs nobody checked, so `Server.serve`
+# takes one under `workers: 1` alone. A `SharedRouter` is never written:
 # `handle` answers a new router with the route added, so the one being
 # served is the table it was when the server was given it, with no
 # `handle` after the first request to refuse.

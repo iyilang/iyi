@@ -1,6 +1,7 @@
-# std/http's `Server.serve_parallel`: connections answered on the pool's
-# workers, not on the thread that accepts them, and stopped as `serve`
-# stops.
+# std/http's `Server.serve` with its default workers: connections
+# answered on the pool's workers, not on the thread that accepts them,
+# and stopped as `workers: 1` stops; and under `workers: 1`, on the
+# accepting thread alone.
 #
 #   ./bin/iyi run bench/std_http_parallel.iyi
 #   ./bin/iyi build --release bench/std_http_parallel.iyi -o par
@@ -16,12 +17,17 @@
 # request is being answered, while another asks the handler to stop -
 # the handler sends on a channel, and a task on the accepting thread
 # closes the listener. The answer in progress is written, the idle
-# connection is closed, and `serve_parallel` returns. Every step runs
+# connection is closed, and `serve` returns. Every step runs
 # under a watchdog, so a stop that never reaches a connection on another
 # thread is a named failure rather than a hung job. A line that is not
 # what it should be is followed by "FAIL <check>: <found>, not
 # <wanted>", and the run ends "ALL CHECKS PASSED" or exits 1. The panic
 # the third step makes is printed by its task, as any is.
+#
+# Then `workers: 1`: four clients connect and ask before anything
+# accepts, and every answer must name the accepting thread; the block
+# appends to an `Array`, which is not `Share`, and closes its listener
+# itself, both of which the compiler refuses on more than one worker.
 #
 # Then the same server over TLS, `tls: config.frozen`, on a listener of
 # its own. Eight clients connect before anything accepts and send their
@@ -35,7 +41,7 @@
 # client presenting a certificate is seen presenting it, and an
 # encrypted ClientHello (ECH) is taken. Then the stop: a kept-alive
 # connection reads close_notify from its worker, not a truncation, and
-# `serve_parallel` returns. The TLS identity is std_http_resume.iyi's
+# `serve` returns. The TLS identity is std_http_resume.iyi's
 # test PKI, an Ed25519 leaf for localhost.
 
 module bench/std_http_parallel
@@ -86,7 +92,7 @@ end
 
 # What the server's block answers with, `Share` by its fields: a channel
 # of Ints, which crosses threads. The block captures it, and the compiler
-# checks that it may (`serve_parallel` is `@[Share]`).
+# checks that it may (`serve` is `@[Share]`).
 class Answers
   @stop : Channel(Int32)
 
@@ -238,7 +244,7 @@ def said(got : Response | HTTPError | SocketError | Cancelled) : String
 end
 
 # `speed`: the measurement, not a check. An HTTPS server on a port of its
-# own, written to PORTFILE, under `serve` or under `serve_parallel` with
+# own, written to PORTFILE, under `serve` with `workers: 1` or with
 # WORKERS workers, with this program's test PKI, until it is killed.
 # `/work` computes (`spin(200000)`) and answers a few bytes; `/` answers
 # a few bytes. Driven by wrk over kept-alive connections (SPEC.md
@@ -251,11 +257,11 @@ if speed_args.size >= 4 && speed_args[0] == "speed"
   serving = IyiSocket.listen("127.0.0.1", 0)
   File.write(speed_args[3], "#{serving.local_port}\n")
   if speed_args[1] == "parallel"
-    Server.serve_parallel(serving, tls: measured.frozen) do |request|
+    Server.serve(serving, tls: measured.frozen) do |request|
       request.path == "/work" ? Response.new(200, "#{spin(200000_i64) & 0xFF_u64}") : Response.new(200, "here")
     end
   else
-    Server.serve(serving, tls: measured) do |request|
+    Server.serve(serving, tls: measured, workers: 1) do |request|
       request.path == "/work" ? Response.new(200, "#{spin(200000_i64) & 0xFF_u64}") : Response.new(200, "here")
     end
   end
@@ -287,7 +293,7 @@ watched("the whole run", 60000) do
     end
     g.spawn do
       answers = Answers.new(stop)
-      Server.serve_parallel(listener) { |request| answers.call(request) }
+      Server.serve(listener) { |request| answers.call(request) }
       returned = true
       0
     end
@@ -328,7 +334,42 @@ watched("the whole run", 60000) do
     end
   end
 end
-check("serve_parallel returned", returned ? "yes" : "no", "yes", failures)
+check("serve returned", returned ? "yes" : "no", "yes", failures)
+
+# `workers: 1`: the accepting thread alone, and a block the compiler
+# does not check. Asked before anything accepts, as above.
+alone = IyiSocket.listen("127.0.0.1", 0)
+alone_port = alone.local_port
+heard = [] of String
+early_alone = [] of IyiSocket
+4.times do
+  socket = connect(alone_port)
+  send(socket, "/where")
+  early_alone << socket
+end
+watched("the run under workers: 1", 30000) do
+  group do |g|
+    g.spawn do
+      Server.serve(alone, workers: 1) do |request|
+        heard << request.path
+        alone.close if request.path == "/stop"
+        Response.new(200, "#{IyiScheduler.state.object_id}")
+      end
+      0
+    end
+    g.spawn do
+      threads = early_alone.map { |socket| answer(socket) }
+      early_alone.each(&.close)
+      distinct = threads.uniq
+      check("workers: 1, the threads that answered", distinct == [accepting.to_s] ? "the accepting thread alone" : "#{distinct.size}, not all the accepting one", "the accepting thread alone", failures)
+      stopper = connect(alone_port)
+      ask(stopper, "/stop")
+      stopper.close
+      check("workers: 1, the requests the block recorded", heard.size.to_s, "5", failures)
+      0
+    end
+  end
+end
 
 # The same server over TLS: a frozen config, which every worker reads.
 roots = Certificate.from_pem(ROOT_PEM).or_panic
@@ -367,7 +408,7 @@ watched("the TLS run", 60000) do
     end
     g.spawn do
       answers = Answers.new(tls_stop)
-      Server.serve_parallel(tls_listener, tls: frozen) { |request| answers.call(request) }
+      Server.serve(tls_listener, tls: frozen) { |request| answers.call(request) }
       tls_returned = true
       0
     end
@@ -435,6 +476,6 @@ watched("the TLS run", 60000) do
     end
   end
 end
-check("serve_parallel over TLS returned", tls_returned ? "yes" : "no", "yes", failures)
+check("serve over TLS returned", tls_returned ? "yes" : "no", "yes", failures)
 exit 1 unless failures.empty?
 puts "ALL CHECKS PASSED"

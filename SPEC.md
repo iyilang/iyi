@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,551 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 24,746 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 130,935 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,551 lines
+> "No standard library worth the name" is still true of iyi's own 24,746 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,551 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 24,746 lines,
 primitives included, of which the library is 4,649.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 130,935 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,551-line own prelude + 125,314 in std |
+| Library | 8,161 lines (3,551 of it core) | 24,746-line own prelude + 125,314 in std |
 | Specs | 21,146 lines | 15,384 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3440,7 +3440,9 @@ sweep left the pause and runs beside the program, in slices of an
 arena taken by the mark's helpers after every collection and by an
 allocating thread only for the slice it needs; the mark is parallel on
 helper threads and runs beside the program on a write barrier the
-compiler emits, a collection being two stops of tens of microseconds;
+compiler emits, a collection being two stops of tens of microseconds,
+its workers counted in and out by one and a mark that does not end said
+on standard error;
 an object is its fields, a word ahead of it only for a class something
 reads the type id off (the collector's bits and the other ids are
 tables at the arena's head), the classes eight bytes apart, and the
@@ -3762,7 +3764,17 @@ from the stopped sp to the top of whichever mapping holds it, a fiber's or
 its own, and every parked fiber on every worker scanned through the fiber
 registry, as III.4.11 has it. An unstarted parallel task has no stack yet,
 and its block is rooted through the registry by its fiber's proc. Nothing
-in the collector changes; the stop already took every thread a program had.
+in the collector changes for the stop; the stop already took every thread
+a program had. What a pool did find in the collector is a mark beside the
+program that never ended (#149, GC_DESIGN.md Stage 9): a server's tasks
+allocating on every worker assist the mark, the remainder round stored
+the count of workers marking over the assists counted in, and the count
+went below zero, where no drain sees it end - collections stopped and
+the heap grew until a twelve-vCPU Windows machine ran out. The count
+moves by one now and nothing stores it, and a mark that does not end
+says so on standard error, fatally where the count goes wrong.
+`bench/mark_stall.iyi` is that server's shape, and `bench/concurrent_mark.sh`
+runs it at twelve workers.
 
 **8. Deadlock, across threads.** One thread used to know it was
 deadlocked when it had nothing to run and nothing to wait on. With wakes
@@ -11036,7 +11048,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,551-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,746-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

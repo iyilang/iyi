@@ -488,6 +488,56 @@ and lowers it under. `bench/concurrent_mark.sh` outgrows blocks under
 marks, requires each still listed while the mark runs and each freed
 after, and its proof removes the look.
 
+And one thing a server on every core found (#149). The mark's workers -
+the helpers, the collector, a mutator's assist - count themselves in and
+out of one word, and a drain ends when it reads zero with the pool
+empty. Each round also *stored* that word as it began: `mark` 1, the
+first stop 0, the second stop 1, the remainder round 0. The remainder
+round runs beside the program when the second stop retreats, and
+assists run there too: an assist counted in before the store had its
+one wiped, and its own -1 afterwards took the count below zero, where
+it never reads zero again. Every helper spun in `drain`, `@@collecting`
+stayed up, no collection ran again, and the heap of an API server on a
+twelve-vCPU Windows VM grew until the machine ran out, at eight and
+twelve workers and never at four. Windows' release is a `ResumeThread`
+per thread and then a wait for every thread that parked at the stop,
+and the threads resumed first allocate all the while; Linux's is one
+futex wake, and twenty runs of fifteen seconds of the server's shape at
+twelve workers here (`bench/mark_stall.iyi`, 1,588 second stops
+retreated) never stalled. The stores hid most of it besides: an assist
+whose -1 landed after the drains had ended left a count the next stop's
+store wrote over. A copy of the prelude that paused 200 µs before the
+remainder round's store saw 253 assists begin inside the pause over 22
+rounds, the count 1 to 6 before the store, and no stall; with each of
+those assists held until the store had landed, it stalled at its 39th
+collection with the count at 2^64 - 8, ten helpers holding permits and
+none done - the issue's nine helpers in `drain`, one from
+`remainder_round`.
+
+The count moves by one now and nothing stores it. Every round starts
+from the zero the last one ended at, because its drainers are waited
+for and a stop waits out every assist; the remainder round counts
+helper 0 in by one before the permits open, as `mark` counts the
+collector. Reviewing every store and permit found one more: helper 0
+read the generation it waits past next after letting the collection
+go, so a mark another thread began in between was one it waited past,
+and with one helper nobody drained it. It reads the generation before
+`@@collecting` falls. And a mark that does not end says so, on standard
+error, with the count, the pool's head, the generation, the permits and
+the helpers done: a count that goes below zero is fatal at the -1 that
+took it there, a round that begins with a worker counted in or a mark
+with work in its pool is fatal at its stop, and a mark in flight past
+ten seconds is reported once per doubling of its age by an assist (every
+64th), a drain with nothing to do, or a `collect` waiting for it - the
+longest mark measured beside the server's shape was 42 ms.
+`bench/concurrent_mark.sh` runs `bench/mark_stall.iyi` at twelve
+workers with every helper and with one; its watchdog holds the tasks
+once the collections have stood still for 256 MiB of allocation and
+fails the run if none ends in five seconds. Its proofs put the store
+back with a window before it, which the runtime's below-zero check
+catches, and the late generation read back with one helper, which the
+overdue report and the watchdog both catch.
+
 The budget is twice what survived, and what was allocated under the
 mark did not survive anything: born gray, so counted marked, but not
 live in the sense the budget wants, and counted the other way a program

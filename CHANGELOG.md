@@ -58,6 +58,25 @@
   `serve`'s mark taken off, its `crossing:` taken off, and its `serial:`
   taken off.
 
+- **A Windows `--release` build with a pool its optimiser cannot reach
+  links.** x86-64 Windows' preemption checks read the TEB slot's offset,
+  `IyiWorkers::preempt_slot`, by name after optimisation, and only the
+  pool's start and its workers touch that global. A program whose every
+  `serve` passes `workers: 1` has the pool in its types and none on any
+  path, so `--release` deleted the internal global and the link stopped
+  at `LNK2019: unresolved external symbol IyiWorkers::preempt_slot` - the
+  release builds of std/http, std/cookie, std/sse, std/websocket and
+  std/acme's exercises on Windows. The global is kept external now, and
+  holds the fallback slot, 0x28, which nothing raises. A cross-compiled
+  object of `bench/std_cookie_exercise.iyi` named it undefined before
+  and defines it after.
+
+- **`bench/parallel_migrate.iyi`'s closes step runs rounds of 16 until
+  one close is made on another worker than its reader's, five at most.**
+  That is the step's precondition, not the runtime's property: darwin's
+  release build once took all 16 closers on their readers' own workers,
+  where master's had crossed 15 and the same job's plain build 11.
+
 - **An integer constant is cut to its type's width before LLVM gets it**
   (`LLVM::Type#const_int`, as Crystal 1.22 has it). A negative value went
   to `LLVMConstInt` sign-extended to 64 bits, and the LLVM in the Windows

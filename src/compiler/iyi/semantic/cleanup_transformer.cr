@@ -1145,8 +1145,22 @@ module Iyi
         path << "`#{named.use}`"
         where = named.state.is_a?(Const) ? "the constant" : "the class variable"
         instead = "Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on #{where}: `@[SafeReach(\"...\")]`"
+        # A list that is only read - iyi-web's `CONTENT_CODINGS : Array(String)`
+        # - is the commonest case, and has a third way out that needs no claim.
+        if (list = share_reach_list(named.type))
+          instead = "If it is only read, make it a `#{list}` (std/list), which is Share. #{instead}"
+        end
         @program.warnings.add_warning(block, "#{boundary.subject} reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}: #{why}. #{instead} (SPEC.md III.4.4)")
       end
+    end
+
+    # `List(String)` for an `Array(String)` whose elements are Share: the
+    # immutable list a read-only array can become. Nil for anything else.
+    private def share_reach_list(type : Type) : String?
+      return nil unless type.is_a?(GenericClassInstanceType) && type.generic_type == @program.array
+      element = type.type_vars["T"]?.try(&.type?)
+      return nil unless element && Iyi::Share.shareable?(element)
+      "List(#{element})"
     end
 
     @share_reach_warned = Set({String, UInt64}).new

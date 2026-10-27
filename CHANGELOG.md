@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **The sweep keeps warm what the last epoch carved back cold (#150).**
+  Beside many workers a concurrent mark lets them allocate past the
+  budget, and the sweep released those pages - on the allocating thread's
+  refill, 99% of the calls, a decommit and a commit on Windows - for the
+  carve to fault them in again: 94-98% of what twelve workers released
+  came back. The pages the carve takes up cold are added to the next
+  epoch's warm room, fading by a sixteenth an epoch. In-process
+  check_version (`bench/release_pages.iyi`), before against after, three
+  interleaved rounds of 8 s: on a windows-2025 runner (2 cores, 4 logical
+  processors) at twelve workers 473,000-514,000 requests a second and
+  151,000-162,000 releases against 720,000-758,000 and 14,000-18,000,
+  peak working set 292-427 MB against 407-719; at four workers
+  689,000-831,000 against 594,000-723,000, within the runner's noise (an
+  earlier run of the same arms read 7-9% the other way). Served to oha
+  at 32 connections on the same processors, 41,000-42,000 a second at
+  twelve workers against 54,000-67,000, and 48,000-50,000 at four
+  against 67,000-72,000. On a 12-core Linux machine at twelve workers
+  1.57-1.60 million against 3.54-3.59 million, 366,000-372,000 releases
+  against 70,000-74,000, peak RSS 157-203 MB against 367-434; at four
+  workers 1.91-1.92 million against 1.94-1.96 and 25-26 MB against
+  26-30. Over HTTP to wrk on Linux the releases were already the
+  helpers' (12-15 a second inside the allocator of 854-1,037), and halve.
+  `bench/sweep_exercise.sh`'s refault check churns twice the budget an
+  epoch and allows a quarter of the excess back (344 pages of 8,256);
+  its broken copy, without the carry-over, hands back 6,960.
+
 - **Breaking: std/http's `Server.serve` serves on every core by default
   (#145).** `serve(listener) { |request| ... }` runs each connection as a
   parallel task on the pool, `IyiWorkers.count` workers - `IYI_WORKERS`,
@@ -25089,7 +25115,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,551-line library and nothing else. Every other
+  written against iyi's own 24,625-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

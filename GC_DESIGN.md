@@ -828,6 +828,52 @@ this cycle set out to cut is the mark's floating garbage and the edges
 runs lose to it, and the next cycles' terms - the pool region and the
 workers' stacks - are the heap's neighbours, not the heap.
 
+**The warm room past the budget (#150).** The budget is what an epoch
+allocates when the mark is short. Beside many workers it is not: a
+concurrent mark lasts as long as its helpers take to get a core, the
+workers allocate all the while, and what they ask past the budget is
+carved from the pages the sweep has just released - a release on the
+allocating thread's own refill (a thread inside the allocator made
+99% of them on a windows-2025 runner's four logical processors, and on
+this Linux machine at twelve workers on twelve cores, where helpers
+get no core), then a fault a page when the carve takes the run up
+again, and on Windows a decommit and a commit whose TLB flush reaches
+every core the workers run on. Twelve workers on a 4 MB budget took
+94-97% of the pages released back cold on Windows and 97-98% on
+Linux. Moving the releases to the helpers would not have saved the
+faults, and the helpers are the threads that get no core in that
+shape. So the pages the carve takes up cold in an epoch are added to
+the next epoch's warm room, fading by a sixteenth an epoch
+(`IyiMark.warm_pages`, `begin_sweep`): a steady shortfall settles at
+sixteen seventeenths kept, and a churn that slows hands its pages back
+again. `bench/release_pages.iyi` counts the releases, the ones made
+inside the allocator, their time under `-Dgc_release_timing` and the
+pages; on this 12-core machine, in-process check_version, three
+interleaved rounds of 8 s: twelve workers 1.57-1.60 million requests a
+second and 366,000-372,000 releases (14 of the 96 processor seconds in
+them, peak RSS 157-203 MB) before, 3.54-3.59 million and 70,000-74,000
+(3.2 s, 367-434 MB) after; four workers, whose releases helpers make,
+1.91-1.92 million and 34,000-36,000 (25-26 MB) against 1.94-1.96
+million and 29,000-30,000 (26-30 MB). Served over HTTP to wrk on the
+same cores at twelve workers, 215,000 a second and 854-1,037 releases
+a second, 12-15 of them inside the allocator, against 220,000-221,000
+and 450-509, at 24-26 MB either way. On a windows-2025 runner (2
+cores, 4 logical processors), the same rounds: twelve workers
+473,000-514,000 a second and 151,000-162,000 releases, 3.1-3.6 of the 32
+processor seconds inside `VirtualFree` and `VirtualAlloc`, peak working
+set 292-427 MB, against 720,000-758,000, 14,000-18,000 and 0.5-0.8 s at
+407-719 MB; four workers 689,000-831,000 against 594,000-723,000, inside
+the runner's noise (an earlier run of the same arms read 7-9% the other
+way); served to oha at 32 connections, 41,000-42,000 against
+54,000-67,000 at twelve workers and 48,000-50,000 against 67,000-72,000
+at four. The resident set is the price
+where the shortfall was large: the epoch's allocation is resident
+either way, and releasing it kept the peak lower only by the pages
+between their release and their next carve. `bench/sweep_exercise.sh`'s
+refault check churns twice the budget an epoch and allows a quarter of
+the excess back over eight steady epochs: 344 pages of 8,256, and the
+copy without the carry-over hands back 6,960.
+
 **The heap's neighbours, read from `/proc/self/smaps`.** The second
 cycle began by reading every mapping's resident size at the end of
 binary trees and of the probe, rather than the terms the first cycle

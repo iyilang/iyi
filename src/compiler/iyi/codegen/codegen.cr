@@ -3084,6 +3084,17 @@ module Iyi
     # 121231000410); defined here but internal, the cross-compiled object
     # still named it undefined. darwin had it because its slow half writes
     # the variable.
+    #
+    # The TEB slot's offset, `IyiWorkers.@@preempt_slot`, which every check
+    # on x86-64 Windows reads by name after optimisation, is kept external
+    # for the same reason. Only the pool's start writes it and a worker
+    # reads it, and a program whose every server is `workers: 1` has a pool
+    # in its types and none its optimiser can reach: a `--release` build
+    # deleted the internal global with them, and every std/http program
+    # built so on Windows stopped at `unresolved external symbol
+    # IyiWorkers::preempt_slot referenced in function __iyi_main` (CI job
+    # 121953306408). Its checks then read the fallback slot, 0x28, which
+    # nothing raises.
     private def iyi_preempt_fun : LLVMTypedFunction?
       return nil unless word = iyi_preempt_word
       preempt = @iyi_preempt_fun ||= typed_fun?(@main_mod, PREEMPT_NAME)
@@ -3094,9 +3105,19 @@ module Iyi
         @program.iyi_preempt_flag = name
         if iyi_preempt_accessor?
           declare_thread_local_fun(name, word.type, word).func.linkage = LLVM::Linkage::External
+        elsif @program.has_flag?("win32") && (slot = iyi_preempt_slot)
+          global = declare_class_var(slot)
+          global.initializer ||= @main_llvm_typer.llvm_type(slot.type).null
+          global.linkage = LLVM::Linkage::External
         end
       end
       preempt
+    end
+
+    private def iyi_preempt_slot : MetaTypeVar?
+      workers = @program.types["IyiWorkers"]?
+      return nil unless workers.is_a?(ClassVarContainer)
+      workers.class_vars["@@preempt_slot"]?
     end
 
     # Whether `PreemptChecks` calls the word's accessor: never on Linux,

@@ -1671,6 +1671,13 @@ module Iyi
     # annotation because an instance is a clone, and a clone carries no
     # annotations.
     property? iyi_share_block = false
+    property? iyi_observer_wrapped = false
+    setter effect : Effect? = nil
+
+    def effect : Effect?
+      @effect || iyi_origin.try(&.effect)
+    end
+
     # iyi: `@[Share(serial: workers)]`: the parameter whose literal `1` at a
     # call runs the def on the caller's thread alone, so that call's block
     # and crossing arguments are not checked (SPEC.md III.4.13). Nil when
@@ -1716,6 +1723,8 @@ module Iyi
       a_def.iyi_defer = iyi_defer?
       a_def.iyi_from_derive = iyi_from_derive?
       a_def.iyi_share_block = iyi_share_block?
+      a_def.effect = @effect
+      a_def.iyi_observer_wrapped = iyi_observer_wrapped?
       a_def.iyi_share_serial = iyi_share_serial
       a_def.iyi_share_crossing = iyi_share_crossing
       a_def.name_location = name_location

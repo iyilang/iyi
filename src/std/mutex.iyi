@@ -165,6 +165,7 @@ pub class Mutex(T)
   # own release made. The waiter counts itself before `park_on` looks at
   # the count again, under the scheduler's lock: a release that read no
   # waiter had moved the count first, and the look sees it.
+  @[Effect(:threads)]
   private def await_change(mine : UInt64) : Nil | Cancelled
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       while @changes.get == mine
@@ -239,6 +240,7 @@ pub class Mutex(T)
     @holder_thread.set(Mutex.thread_id)
   end
 
+  @[Effect(:threads)]
   private def release : Nil
     @holder.set(0_u64)
     @holder_thread.set(0_u64)

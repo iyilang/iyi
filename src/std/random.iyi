@@ -438,6 +438,7 @@ class Random::Secure < Random
   # *count* bytes at *buffer*, every one from the platform's entropy source,
   # or a panic that says why there are none: a byte that only looks random
   # is never the answer.
+  @[Effect(:entropy)]
   def self.fill(buffer : Pointer(UInt8), count : Int32) : Nil
     raise "Random::Secure: a negative count of bytes: #{count}" if count < 0
     return if count == 0
@@ -477,6 +478,7 @@ class Random::Secure < Random
   {% if flag?(:linux) %}
     # `getrandom` with no flags: 318 on x86_64, 278 on aarch64. The answer
     # is the count written or a negative errno.
+    @[Effect(:entropy)]
     private def self.getrandom(buffer : Pointer(UInt8), count : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -533,6 +535,7 @@ class Random::Secure < Random
     # and a 64-bit st_nlink, and 16 into aarch64's, whose st_nlink comes
     # after it; the struct is 144 bytes on the one and 128 on the other.
     # A failed `fstat` answers no.
+    @[Effect(:entropy)]
     private def self.character_device?(fd : Int64) : Bool
       stat = uninitialized UInt8[144]
       result = uninitialized Int64

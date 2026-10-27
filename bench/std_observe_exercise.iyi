@@ -1,0 +1,25 @@
+# Exercises `std/observe`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_observe_exercise.iyi
+
+module bench/std_observe_exercise
+
+import std/observe
+
+# Directly exercise each observer entry point
+Std::Observe.env_get("FOO", "bar")
+Std::Observe.env_all
+# The cwd record is the real current directory, whatever the argument says:
+# the script runs this from `/`.
+Std::Observe.cwd("/test/dir")
+Std::Observe.host("test-host")
+Std::Observe.file_write(1_u8, "/test/out.txt", "")
+Std::Observe.not_reusable(32_u8, "src:test.iyi:10")
+# A tainted run never becomes a receipt: each taint kind is recorded once,
+# and nothing else is recorded after the first taint.
+Std::Observe.not_reusable(32_u8, "src:test.iyi:11")
+Std::Observe.not_reusable(33_u8, "src:test.iyi:12")
+Std::Observe.host("after-the-taint")
+
+puts "std/observe exercise passed"

@@ -702,12 +702,24 @@ def slip(work : String, archive : String, phrase : String, label : String) : Nil
   puts "  #{shown}"
 end
 
+# A header for *name*, with a pax record in front for a name or a link
+# target the 100-byte ustar field cannot hold. The absolute names below
+# are the run's own directory, and a long TMPDIR (`iyi test --fresh` runs
+# in a scratch directory under it) puts them past 100 bytes.
+def entry(name : String, flag : Char, size : Int64, linkname : String = "") : String
+  records = ""
+  records = records + prec("path", name) if name.bytesize > 100
+  records = records + prec("linkpath", linkname) if linkname.bytesize > 100
+  header = raw(name.bytesize > 100 ? "long" : name, flag, size, linkname: linkname.bytesize > 100 ? "long" : linkname)
+  records.empty? ? header : pax(records) + header
+end
+
 evil = padded("evil")
 slip(work, raw("../evil.txt", '0', 4_i64) + evil + END_BLOCKS, "would be extracted outside the directory (tar slip): the name climbs out with ..", "tar slip ../evil.txt")
 slip(work, raw("a/../../evil.txt", '0', 4_i64) + evil + END_BLOCKS, "climbs out with ..", "tar slip a/../../evil.txt")
-slip(work, raw(work + "/evil.txt", '0', 4_i64) + evil + END_BLOCKS, "the name is absolute", "tar slip an absolute name")
+slip(work, entry(work + "/evil.txt", '0', 4_i64) + evil + END_BLOCKS, "the name is absolute", "tar slip an absolute name")
 slip(work, pax(prec("path", "../evil.txt")) + raw("safe.txt", '0', 4_i64) + evil + END_BLOCKS, "climbs out with ..", "tar slip through a pax path")
-slip(work, raw("l", '2', 0_i64, linkname: work) + raw("l/evil.txt", '0', 4_i64) + evil + END_BLOCKS, "the target is absolute", "a symbolic link to an absolute path")
+slip(work, entry("l", '2', 0_i64, linkname: work) + raw("l/evil.txt", '0', 4_i64) + evil + END_BLOCKS, "the target is absolute", "a symbolic link to an absolute path")
 slip(work, raw("sub/l", '2', 0_i64, linkname: "../..") + END_BLOCKS, "the target climbs out with ..", "a symbolic link climbing out")
 slip(work, raw("sub/x", '2', 0_i64, linkname: "..") + raw("w", '2', 0_i64, linkname: "sub/x/..") + END_BLOCKS,
   "goes down and back up", "a link going down and back up")

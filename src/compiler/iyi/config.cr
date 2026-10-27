@@ -50,6 +50,11 @@ module Iyi
       sha
     end
 
+    def self.build_inputs : String?
+      sha = {{ env("IYI_CONFIG_BUILD_INPUTS") || "" }}
+      sha.empty? ? nil : sha
+    end
+
     def self.date
       source_date_epoch = {{ (t = env("SOURCE_DATE_EPOCH")) && !t.empty? ? t.to_i : nil }}
       if source_date_epoch

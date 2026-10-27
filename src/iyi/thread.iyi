@@ -224,7 +224,7 @@
       # program that starts a thread: a `fun` is emitted into every
       # binary, and this one put `__ehdr_start` on every Linux object's
       # undefined list, which the root gate's cross-object audit counts.
-      def self.ehdr_start : UInt64
+      @[Effect(:threads)]; def self.ehdr_start : UInt64
         header = uninitialized UInt64
         {% if flag?(:x86_64) %}
           asm("leaq __ehdr_start(%rip), $0" : "=r"(header) ::: "volatile")
@@ -268,7 +268,7 @@
       end
 
       # A block for one thread; answers the thread pointer to hand `clone`.
-      def self.make : UInt64
+      @[Effect(:threads)]; def self.make : UInt64
         read_segment
         size = round_up(@@memsz, @@align)
         mapping = __iyi_mmap(round_up(size + 64_u64, 4096_u64)).address
@@ -419,7 +419,7 @@
 
     # ── Lines and the control page ──────────────────────────────────────
 
-    def self.control : UInt64
+    @[Effect(:threads)]; def self.control : UInt64
       @@control = __iyi_mmap(4096_u64).address if @@control == 0
       @@control
     end
@@ -476,7 +476,7 @@
       @@count > 1_i64 ? @@count.to_u64 : 1_u64
     end
 
-    def self.new_line : UInt64
+    @[Effect(:threads)]; def self.new_line : UInt64
       __iyi_mmap(IYI_THREAD_LINE).address
     end
 
@@ -514,7 +514,7 @@
     # The main thread's line, made when the first thread is: its handle
     # and its stack top, which `IyiRoots` found. `@@line` on the thread
     # that calls `start` is then never 0.
-    def self.register_current : Nil
+    @[Effect(:threads)]; def self.register_current : Nil
       return if @@line != 0
       line = new_line
       {% if flag?(:linux) %}
@@ -546,7 +546,7 @@
       start(block)
     end
 
-    def self.start(proc : Proc(Nil)) : IyiThread
+    @[Effect(:threads)]; def self.start(proc : Proc(Nil)) : IyiThread
       register_current
       install_handler
       # A second scheduler thread is coming: from here fibers on two
@@ -613,7 +613,7 @@
     # its whole life, and is never joined. Its thread-locals are its own
     # (a TLS block on Linux, dyld's on darwin), which is what lets the
     # marker keep per-worker state in `@[ThreadLocal]` variables.
-    def self.start_helper(entry : UInt64, argument : UInt64) : Nil
+    @[Effect(:threads)]; def self.start_helper(entry : UInt64, argument : UInt64) : Nil
       {% if flag?(:linux) %}
         stack = __iyi_mmap(IYI_THREAD_STACK).address
         __iyi_madvise_nohuge(stack, IYI_THREAD_STACK)
@@ -644,7 +644,7 @@
     # The child's whole life: name its line, find its body on the rooted
     # list, run it, leave the stop's list, and return into the exit the
     # clone asm (or pthread) performs.
-    def self.run(line : UInt64) : Nil
+    @[Effect(:threads)]; def self.run(line : UInt64) : Nil
       @@line = line
       # An alternate signal stack is a thread's own, so a stack overflow on
       # this thread has somewhere to say so (`IyiStackGuard`).
@@ -736,7 +736,7 @@
     # one held every task in its ring in the kernel with it - and the
     # kernel's join then waits only for the end `finish` is followed by.
     # A cancel does not end the wait, which has no `Cancelled` to answer.
-    def join : Nil
+    @[Effect(:threads)]; def join : Nil
       line = @line
       return if line == 0
       while @ended.get == 0_u64
@@ -779,7 +779,7 @@
 
     # ── The stop ────────────────────────────────────────────────────────
 
-    def self.install_handler : Nil
+    @[Effect(:threads)]; def self.install_handler : Nil
       return if @@installed
       @@installed = true
       {% if flag?(:linux) %}
@@ -807,7 +807,7 @@
     end
 
     {% if flag?(:darwin) %}
-      def self.make_park(line : UInt64) : Nil
+      @[Effect(:threads)]; def self.make_park(line : UInt64) : Nil
         fds = Pointer(Int32).malloc(2_u64)
         raise "pipe failed" if LibC.pipe(fds) != 0
         IyiHeap.write64(line + IYI_TL_PARK, fds[1].to_i64.to_u64.unsafe_shl(32_u64) | fds[0].to_i64.to_u64)
@@ -884,7 +884,7 @@
     # registered thread is signalled and waited for; when this returns,
     # each has its registers and sp on its line and is parked. Answers
     # how many stopped, which is how many `resume_others` releases.
-    def self.stop_others : Int64
+    @[Effect(:threads)]; def self.stop_others : Int64
       # A helper has no line and stops every registered thread; a thread
       # with a line stops every other.
       line = @@line
@@ -932,7 +932,7 @@
       others
     end
 
-    def self.resume_others(others : Int64) : Nil
+    @[Effect(:threads)]; def self.resume_others(others : Int64) : Nil
       return if others == 0_i64
       page = control
       word(page + IYI_TC_RESUME).value.set(1_u64)
@@ -974,7 +974,7 @@
     # reason. The mask lives in a mapping, not the heap: the caller is the
     # collector, holding the runtime lock inside an allocation, and an
     # allocation here would refill against that lock and never return.
-    def self.core_count : UInt64
+    @[Effect(:process)]; def self.core_count : UInt64
       {% if flag?(:win32) %}
         # The process's affinity mask, counted, as Linux counts its own:
         # the machine's count started eleven helpers for a process held to
@@ -1018,7 +1018,7 @@
     end
 
     # A spin's breath: the CPU's pause hint, no syscall.
-    def self.spin_pause : Nil
+    @[Effect(:threads)]; def self.spin_pause : Nil
       {% if flag?(:x86_64) %}
         asm("pause" :::: "volatile")
       {% else %}
@@ -1026,7 +1026,7 @@
       {% end %}
     end
 
-    def self.yield_cpu : Nil
+    @[Effect(:threads)]; def self.yield_cpu : Nil
       {% if flag?(:win32) %}
         LibC.SwitchToThread
       {% elsif flag?(:linux) %}
@@ -1095,7 +1095,7 @@
 
     # This thread's line, from the thread-local or, in the instant before
     # a child names its own, by its handle.
-    def self.own_line : UInt64
+    @[Effect(:threads)]; def self.own_line : UInt64
       line = @@line
       return line if line != 0
       {% if flag?(:linux) %}
@@ -1155,7 +1155,7 @@
     # `IyiRoots.spill_registers` already had the Windows set; this has
     # it now.
     @[NoInline]
-    def self.stop_here : Nil
+    @[Effect(:threads)]; def self.stop_here : Nil
       line = @@line
       return if line == 0
       spill = line + IYI_TL_SPILL
@@ -1189,7 +1189,7 @@
       park(line)
     end
 
-    def self.park(line : UInt64) : Nil
+    @[Effect(:threads)]; def self.park(line : UInt64) : Nil
       page = control
       word(page + IYI_TC_SUSPENDED).value.add(1_u64)
       {% if flag?(:linux) %}
@@ -1246,7 +1246,7 @@
       # it, and a task 1,500 frames into its 256 KiB was reported a "stack
       # overflow" (6 runs in 20). Nothing below a guard page was ever
       # written, so the scan begins above it.
-      def self.first_written(sp : UInt64, top : UInt64) : UInt64
+      @[Effect(:threads)]; def self.first_written(sp : UInt64, top : UInt64) : UInt64
         buffer = uninitialized UInt64[6]
         info = pointerof(buffer).as(Pointer(UInt64))
         while sp < top && LibC.VirtualQuery(Pointer(Void).new(sp), info.as(Void*), 48_u64) != 0_u64

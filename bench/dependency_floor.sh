@@ -222,7 +222,13 @@ ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN flock"
 # Linux makes as a system call and Windows as ws2_32's `shutdown`, already
 # imported for `close`. The fuzz exercise's scripted peers reach it.
 ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN shutdown"
-ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
+# `getcwd` and `realpath` are `std/observe`'s, the test recorder behind
+# `iyi test --cached`: the directory a recorded read was relative to, and the
+# real path a recorded path resolves to. Only a `-Diyi_observe` build reaches
+# them, a build that is run and never shipped; `bench/std_observe_exercise.iyi`
+# calls them directly, which is how they arrive here. Darwin already allows
+# both. A shipped program's floor is unchanged.
+ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ getcwd realpath"
 
 # What a program may link. The platform libc only.
 ALLOWED_LIBS_PROGRAM="$FLOOR_LIBS_PROGRAM"

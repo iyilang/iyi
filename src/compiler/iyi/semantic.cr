@@ -144,6 +144,14 @@ class Iyi::Program
       end
     end
 
+    if has_flag?("iyi_observe")
+      @progress_tracker.stage("Semantic (observers)") do
+        Prof.span("observers") do
+          Iyi::Semantic::Observers.run(self)
+        end
+      end
+    end
+
     self.top_level_semantic_complete = true
 
     {node, processor}

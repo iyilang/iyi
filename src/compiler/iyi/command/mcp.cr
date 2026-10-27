@@ -182,7 +182,8 @@ class Iyi::Command
           "type": "object",
           "properties": {
             "path": {"type": "string", "description": "directory or test file (default: .)"},
-            "affected": {"type": "array", "items": {"type": "string"}, "description": "files that changed; only tests that can reach them run"}
+            "affected": {"type": "array", "items": {"type": "string"}, "description": "files that changed; only tests that can reach them run"},
+            "cached": {"type": "boolean", "description": "reuse test receipts when code and environment have not changed"}
           }
         }
       },
@@ -220,6 +221,9 @@ class Iyi::Command
         ["mod", "context", "--json", file]
       when "test"
         built = ["test", "--json"]
+        if arguments.try(&.dig?("cached")).try(&.as_bool?)
+          built << "--cached"
+        end
         arguments.try(&.dig?("affected")).try(&.as_a?).try &.each do |changed|
           if path = changed.as_s?
             built << "--affected" << path

@@ -523,39 +523,48 @@ pub class UdpSocket
       fun __error : Int32*
     end
 
+    @[Effect(:network)]
     def self.__sys_socket(domain : Int32 = 2) : Int32
       LibC.socket(domain, 2, 0)
     end
 
+    @[Effect(:network)]
     def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : UInt32) : Int32
       LibC.bind(fd, addr.as(Void*), len)
     end
 
+    @[Effect(:network)]
     def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), len : UInt32) : Int32
       LibC.connect(fd, addr.as(Void*), len)
     end
 
+    @[Effect(:network)]
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
       LibC.send(fd, buf.as(Void*), len, 0)
     end
 
+    @[Effect(:network)]
     def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : UInt32) : Int64
       LibC.sendto(fd, buf.as(Void*), len, flags, addr.as(Void*), addrlen)
     end
 
+    @[Effect(:network)]
     def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
       LibC.recvfrom(fd, buf.as(Void*), len, flags, addr.as(Void*), addrlen)
     end
 
+    @[Effect(:network)]
     def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibC.getsockname(fd, addr.as(Void*), addrlen)
     end
 
+    @[Effect(:network)]
     def self.__sys_set_buffer_size(fd : Int32, level : Int32, optname : Int32, size : Int32) : Int32
       val = size
       LibC.setsockopt(fd, level, optname, pointerof(val).as(Void*), 4_u32)
     end
 
+    @[Effect(:network)]
     def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
       val = 0_i32
       len = 4_u32
@@ -564,6 +573,7 @@ pub class UdpSocket
       val
     end
 
+    @[Effect(:network)]
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       kq = LibC.kqueue
       return false if kq < 0
@@ -602,10 +612,12 @@ pub class UdpSocket
       nev > 0
     end
 
+    @[Effect(:network)]
     def self.__is_eagain(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 35
     end
 
+    @[Effect(:network)]
     def self.__is_eintr(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 4
     end
@@ -625,6 +637,7 @@ pub class UdpSocket
     end
 
     # ECONNREFUSED (61): see the Linux arm.
+    @[Effect(:network)]
     def self.__is_refused(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 61
     end
@@ -666,6 +679,7 @@ pub class UdpSocket
       EPOLL_DATA_OFFSET =   8_u64
     {% end %}
 
+    @[Effect(:primitive)]
     def self.__sys3(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -682,6 +696,7 @@ pub class UdpSocket
       result
     end
 
+    @[Effect(:primitive)]
     def self.__sys5(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64, e : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -698,6 +713,7 @@ pub class UdpSocket
       result
     end
 
+    @[Effect(:primitive)]
     def self.__sys6(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64, e : Int64, f : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}

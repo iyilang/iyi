@@ -67,6 +67,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     special_type = nil
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       case annotation_type
       when @program.primitive_annotation
         if ann.args.size != 1
@@ -230,6 +233,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     node.resolved_type = type
 
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       if annotation_type == @program.share_annotation
         # iyi: trust, not a check (SPEC.md III.4.4). Any struct or class,
         # generic or not; the generic's instances inherit the trust and are
@@ -630,6 +636,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     attach_doc type, node, annotations
 
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       type.add_annotation(annotation_type, ann)
     end
 
@@ -869,6 +878,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     node.resolved_type = target_type
 
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       target_type.add_annotation(annotation_type, ann)
     end
 
@@ -1440,6 +1452,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     attach_doc type, node, annotations
 
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       type.add_annotation(annotation_type, ann)
     end
 
@@ -1478,6 +1493,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     annotations = read_annotations
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       node.add_annotation(annotation_type, ann)
     end
 
@@ -1521,6 +1539,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     alias_type = AliasType.new(@program, scope, name, node.value)
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       alias_type.add_annotation(annotation_type, ann)
     end
     attach_doc alias_type, node, annotations
@@ -1543,6 +1564,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     annotations = read_annotations
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       node.add_annotation(annotation_type, ann)
     end
     node.doc ||= annotations_doc(annotations)
@@ -1658,6 +1682,13 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
           ann.raise "Share on a def says the block it keeps may run on other threads, and `#{node.name}` keeps no block: name one, `&block : A -> R`"
         end
         node.iyi_share_block = block_kept
+      end
+
+      if annotation_type == @program.effect_annotation
+        unless Effects.in_runtime_library_file?(@program, node)
+          ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+        end
+        node.effect = Effects.validate_annotation(ann)
       end
 
       if annotation_type == @program.no_preempt_annotation
@@ -2276,6 +2307,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     enum_type.private = true if node.visibility.private?
 
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       enum_type.flags = true if annotation_type == @program.flags_annotation
       enum_type.add_annotation(annotation_type, ann)
     end
@@ -2518,6 +2552,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     record_export scope, name, target.exported?
 
     process_annotations(annotations) do |annotation_type, ann|
+      if annotation_type == @program.effect_annotation
+        ann.raise "@[Effect] is only permitted on defs in runtime library files (src/iyi or src/std)"
+      end
       # annotations on constants are inaccessible in macros so we only add deprecations
       const.add_annotation(annotation_type, ann) if annotation_type == @program.deprecated_annotation
     end

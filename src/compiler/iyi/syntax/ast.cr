@@ -1677,6 +1677,7 @@ module Iyi
     def effect : Effect?
       @effect || iyi_origin.try(&.effect)
     end
+
     # iyi: `@[Share(serial: workers)]`: the parameter whose literal `1` at a
     # call runs the def on the caller's thread alone, so that call's block
     # and crossing arguments are not checked (SPEC.md III.4.13). Nil when

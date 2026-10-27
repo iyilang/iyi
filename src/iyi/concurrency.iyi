@@ -1173,6 +1173,9 @@ class IyiSchedulerState
   # on Windows the OVERLAPPED a ring posts to its port (`wake_token`).
   property wake_fd : Int64
   property wake_token : Pointer(UInt8)
+  # On Windows, the serial its completion port was given when made
+  # (`IyiScheduler.next_port_serial`), which a handle's record names.
+  property port_serial : UInt64
 
   # The thread's own fiber, the one with no task above it: a deadlock is
   # reported on its stack, whichever fiber's park found it.
@@ -1257,6 +1260,7 @@ class IyiSchedulerState
     @spinning = false
     @wake_fd = 0_i64
     @wake_token = Pointer(UInt8).new(0_u64)
+    @port_serial = 0_u64
   end
 
   # Whether another thread has handed this one a fiber or a cancel: one
@@ -2429,13 +2433,13 @@ class IyiScheduler
     # operation associated the handle and ignored the answer, which after
     # the first is a refusal (87): a socket read on the main thread and
     # handed to a worker kept its completions on the main thread's port,
-    # and the worker's read waited forever, its deadline with it. The
-    # handle is moved to this thread's port each time instead - a handle
-    # on none refuses the move and is associated - and the move clears the
-    # skip-on-success mode, so the mode follows it: without it, 50 reads
-    # that answered at once left 50 completions that woke the next read.
-    LibC.CreateIoCompletionPort(handle, port, 0_u64, 0_i32) if move_to_port(handle, port, ov) != 0
-    LibC.SetFileCompletionNotificationModes(handle, 1_u8)
+    # and the worker's read waited forever, its deadline with it. So the
+    # handle is moved to this thread's port - a handle on none refuses the
+    # move and is associated - unless its record says it is there already
+    # (`to_port`).
+    {% if flag?(:win32) %}
+      to_port(handle, port, ov)
+    {% end %}
 
     Pointer(UInt64).new(ov.address + 0_u64).value = 0_u64
     Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
@@ -2473,6 +2477,142 @@ class IyiScheduler
       Pointer(UInt64).new(scratch.address + 8_u64).value = 0_u64
       set = call.as(Pointer(Proc(Void*, Void*, Void*, UInt32, Int32, Int32))).value
       set.call(handle, Pointer(Void).new(scratch.address + 16_u64), scratch.as(Void*), 16_u32, 61)
+    end
+
+    # Where each handle was last moved, so that a wait on a handle already
+    # on this thread's port makes neither call. Both were made on every
+    # wait - `NtSetInformationFile` twice, the move and the skip-on-success
+    # mode the move clears - which was 3.1% of the running samples of a
+    # server at 12 workers and 12,000 requests a second in #151, once per
+    # read, and once more per query on a database socket.
+    #
+    # Measured on a Windows runner with 4 logical processors, release, two
+    # parallel tasks a connection trading 32 bytes, five runs each, medians:
+    # one connection went from 98,808 round trips a second to 127,028, its
+    # 80,000 waits making 3 moves where they had made 80,000; 8 and 32
+    # connections on 4 workers from 228,748 to 239,830 and from 264,846 to
+    # 281,057, where 51% and 64% of the waits still move, each one a task
+    # that resumed on another worker than its last wait's (job
+    # 122342296628).
+    #
+    # The record is a word per handle value, in a table built as the io
+    # owners' is (`io_chunk`) and indexed by the value over 4, since a
+    # kernel handle's low two bits are not part of it. The word is 0 for a
+    # handle the standard library did not make, which every wait moves as
+    # before and nothing records; PORT_OWNED for one it made (`port_made`)
+    # whose port is not known; and otherwise a mark (`port_mark`): the
+    # serial of the port it was last moved to and the epoch the move was
+    # made in, with PORT_MOVING beside it while a move is under way. A wait
+    # makes neither call only when the word is its own thread's mark, and a
+    # skip on a handle that is not on this port would post an operation
+    # whose completion comes to another port, or to none. A mark is not
+    # stale in any of the four ways a handle's port changes behind it:
+    #
+    # - Closed, and its value given to a new handle. Only a handle std made
+    #   is recorded, and each close std makes of one zeroes the word before
+    #   the handle goes (`port_closing`), so a new handle with that value
+    #   starts at 0 or PORT_OWNED and its first wait moves it. A handle a
+    #   program opened and closes itself is never recorded: that close is
+    #   not one this file can see, which is why there is an owned state.
+    # - Its port's thread ended. A mark carries the port's serial, given
+    #   once in the process's life - not the port's handle, which Windows
+    #   gives the next port, nor the state's address, which the collector
+    #   gives the next object - so no live thread's mark is a dead port's,
+    #   and a handle left on one moves at its next wait.
+    # - Moved by another thread at the same time. A mover claims the word
+    #   by exchange from what it read, moves, sets the mode, and then writes
+    #   its mark by exchange from its claim; one whose exchange fails, or
+    #   that saw another's claim, writes PORT_OWNED over whatever mark is
+    #   there instead. A mark therefore stands only if nobody wrote the word
+    #   between its claim and itself, and every mover writes the word after
+    #   its move, so once no move is under way a mark is the last move's.
+    #   The mode is set before the mark, so a skip finds it set.
+    # - Moved through a duplicate. A second value for the same file moves
+    #   the file and leaves the first value's word naming the port it left.
+    #   Std duplicates only the program's standard handles, for a child, and
+    #   records neither; and a move of a handle with no record - which is
+    #   where a program's own duplicate is - advances the epoch, so every
+    #   mark made before it stops matching and each handle moves once more.
+    #
+    # What it shares with moving on every wait: a reader on one worker and
+    # a writer on another move one handle under each other's posted
+    # operation, whose completion comes to the other port and is handed on
+    # (`forward_completion`), and an operation posted between another's
+    # move and its mode can answer at once and still leave a packet. Both
+    # were there before; a skip does not widen either window.
+    PORT_OWNED  =                  1_u64
+    PORT_MOVING = 0x8000000000000000_u64
+    @@port_records : UInt64 = 0_u64
+    @@port_serials : UInt64 = 2_u64
+    @@port_epoch : UInt64 = 0_u64
+    # Moves and first associations, in all: what `bench/socket_exercise.iyi`
+    # reads to know a handle that stays on one thread is not moved again.
+    @@port_moves : UInt64 = 0_u64
+
+    def self.to_port(handle : Void*, port : Void*, scratch : Pointer(UInt8)) : Nil
+      word = port_word(handle, false)
+      seen = word.address == 0_u64 ? 0_u64 : word.value.get
+      mine = port_mark
+      return if seen == mine && mine != 0_u64
+      claim = mine | PORT_MOVING
+      claimed = mine != 0_u64 && seen != 0_u64 && (seen & PORT_MOVING) == 0_u64 && word.value.compare_and_set(seen, claim)[1]
+      moved = move_to_port(handle, port, scratch) == 0 || LibC.CreateIoCompletionPort(handle, port, 0_u64, 0_i32).address != 0_u64
+      # The move clears the skip-on-success mode, so it follows every move:
+      # without it, 50 reads that answered at once left 50 completions that
+      # woke the next read.
+      LibC.SetFileCompletionNotificationModes(handle, 1_u8)
+      Pointer(Atomic(UInt64)).new(pointerof(@@port_moves).address).value.add(1_u64)
+      if seen == 0_u64
+        Pointer(Atomic(UInt64)).new(pointerof(@@port_epoch).address).value.add(1_u64)
+        return
+      end
+      return if claimed && moved && word.value.compare_and_set(claim, mine)[1]
+      while true
+        held = word.value.get
+        return if held <= PORT_OWNED || word.value.compare_and_set(held, PORT_OWNED)[1]
+      end
+    end
+
+    # This thread's port's serial under the epoch, 0 - never a match - past
+    # the serials a mark has room for.
+    def self.port_mark : UInt64
+      serial = state.port_serial
+      return 0_u64 if serial > 0xFFFFFFFF_u64
+      epoch = Pointer(Atomic(UInt64)).new(pointerof(@@port_epoch).address).value.get
+      (epoch & 0x7FFFFFFF_u64).unsafe_shl(32_u64) | serial
+    end
+
+    # The serial for a port just made: from 2, so a mark is never 0 or
+    # PORT_OWNED.
+    def self.next_port_serial : UInt64
+      Pointer(Atomic(UInt64)).new(pointerof(@@port_serials).address).value.add(1_u64)
+    end
+
+    # *handle*'s word, null when the table has no room for its value or,
+    # unless *make*, no chunk for it yet.
+    def self.port_word(handle : Void*, make : Bool) : Pointer(Atomic(UInt64))
+      index = handle.address.unsafe_shr(2_u64)
+      return Pointer(Atomic(UInt64)).new(0_u64) if index > 0x7FFFFFFF_u64
+      chunk = io_chunk(pointerof(@@port_records), index.to_i32, make)
+      return Pointer(Atomic(UInt64)).new(0_u64) if chunk == 0_u64
+      Pointer(Atomic(UInt64)).new(chunk &+ (index % IO_CHUNK) &* 8_u64)
+    end
+
+    # A handle std just made, and will close through `port_closing`.
+    def self.port_made(handle : Void*) : Nil
+      word = port_word(handle, true)
+      word.value.set(PORT_OWNED) if word.address != 0_u64
+    end
+
+    # A handle std is about to close: its word is zeroed while the value is
+    # still this handle's.
+    def self.port_closing(handle : Void*) : Nil
+      word = port_word(handle, false)
+      word.value.set(0_u64) if word.address != 0_u64
+    end
+
+    def self.port_moves : UInt64
+      Pointer(Atomic(UInt64)).new(pointerof(@@port_moves).address).value.get
     end
 
     # A park for standard input's reader thread: off the io list, which is
@@ -2802,13 +2942,13 @@ class IyiScheduler
   @@io_owners : UInt64 = 0_u64
 
   def self.io_owner(index : Int32, id : UInt64) : Nil
-    chunk = io_owner_chunk(index, id != 0_u64)
+    chunk = io_chunk(pointerof(@@io_owners), index, id != 0_u64)
     return if chunk == 0_u64
     Pointer(UInt64).new(chunk &+ (index.to_u64 % IO_CHUNK) &* 8_u64).value = id
   end
 
   def self.io_owner_of(index : Int32) : UInt64
-    chunk = io_owner_chunk(index, false)
+    chunk = io_chunk(pointerof(@@io_owners), index, false)
     return 0_u64 if chunk == 0_u64
     Pointer(UInt64).new(chunk &+ (index.to_u64 % IO_CHUNK) &* 8_u64).value
   end
@@ -2816,13 +2956,15 @@ class IyiScheduler
   # Cleared only while it still names this thread: the descriptor may have
   # been closed and its number given to a socket another thread waits on.
   def self.io_owner_clear(index : Int32, id : UInt64) : Nil
-    chunk = io_owner_chunk(index, false)
+    chunk = io_chunk(pointerof(@@io_owners), index, false)
     return if chunk == 0_u64
     entry = Pointer(UInt64).new(chunk &+ (index.to_u64 % IO_CHUNK) &* 8_u64)
     entry.value = 0_u64 if entry.value == id
   end
 
-  private def self.io_owner_chunk(index : Int32, make : Bool) : UInt64
+  # Entry *index*'s chunk of the table whose root word is *root*: the io
+  # owners', and on Windows the port records (`port_word`).
+  private def self.io_chunk(root : Pointer(UInt64), index : Int32, make : Bool) : UInt64
     # A build with no collector of iyi's own (`-Dgc_none`, `-Dgc_boehm`)
     # has no `__iyi_mmap` and no pool for a descriptor to belong to a
     # worker of, so nothing is recorded and every waiter is this thread's:
@@ -2834,14 +2976,14 @@ class IyiScheduler
       return 0_u64 if index < 0
       which = index.to_u64 // IO_CHUNK
       return 0_u64 if which >= IO_CHUNKS
-      table = Pointer(Atomic(UInt64)).new(pointerof(@@io_owners).address).value.get
+      table = Pointer(Atomic(UInt64)).new(root.address).value.get
       if table == 0_u64
         return 0_u64 unless make
         IyiRuntimeLock.lock
-        table = @@io_owners
+        table = root.value
         if table == 0_u64
           table = __iyi_mmap(IO_CHUNKS &* 8_u64).address
-          Pointer(Atomic(UInt64)).new(pointerof(@@io_owners).address).value.set(table)
+          Pointer(Atomic(UInt64)).new(root.address).value.set(table)
         end
         IyiRuntimeLock.unlock
       end
@@ -3770,6 +3912,7 @@ class IyiScheduler
       h = LibC.CreateIoCompletionPort(Pointer(Void).new(0xFFFFFFFFFFFFFFFF_u64), Pointer(Void).new(0_u64), 0_u64, 1_i32)
       raise "CreateIoCompletionPort failed" if h.address == 0_u64
       fd = h.address.to_i64
+      state.port_serial = next_port_serial
     {% elsif flag?(:darwin) %}
       fd = LibC.kqueue.to_i64
       raise "kqueue failed" if fd < 0

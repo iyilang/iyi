@@ -27,7 +27,7 @@
 #      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
 #      request beside a task computing with no call in its loop wait no
 #      more than 100 ms, 80 for the request; a preempted task keeps its
-#      unit's token; the monitor looks every 4 to 9 ms and the quantum is
+#      unit's token; the monitor looks every 4 to 10.5 ms and the quantum is
 #      at most 20 ms; and a tight loop costs at most twice what its
 #      `@[NoPreempt]` twin does. Its failure proofs are with step 7's: a
 #      `@[NoPreempt]` loop, a monitor that never raises the word, a Windows
@@ -140,7 +140,7 @@ done
 # bench/parallel_preempt.iyi: a task computing with no call in its loop
 # no longer holds a short task, a sleeper or a connection behind it past
 # 100 ms (80 for a fast request in the server shape); a preempted task
-# keeps its unit's token; the monitor looks every 4 to 9 ms and two tasks
+# keeps its unit's token; the monitor looks every 4 to 10.5 ms and two tasks
 # on one worker take turns of 20 ms at most; and the tight loops cost at
 # most twice what their `@[NoPreempt]` twins cost.
 PREEMPT_WORKERS=8

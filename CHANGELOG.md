@@ -332,7 +332,7 @@
   claims, `cmpq $0, %gs:off` (1.46 to 1.49x, a cost Linux CI's `%fs`
   form shares on those runners). darwin arm64 reads `tpidrro_el0` and
   dyld's pthread slot (0.94 to 1.07x). `bench/parallel_preempt.iyi`
-  gains a `period` step, held to 4 to 9 ms a look and 20 ms a turn.
+  gains a `period` step, held to 4 to 10.5 ms a look and 20 ms a turn.
   Its tight loops are now held to 2x. The gate shows a Windows monitor
   on the system tick (`period`) and the accessor check (`tight`,
   `-Dpreempt_check_accessor`) both failing. On Windows the gate runs the

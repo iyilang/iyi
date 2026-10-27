@@ -241,7 +241,7 @@ import std/socket::{IyiSocket, SocketError}
     generation = IyiMark.pool_word(IyiMark::POOL_GENERATION).value.get
     done = IyiMark.pool_word(IyiMark::POOL_HELPERS_DONE).value.get
     permits = IyiMark.pool_word(IyiMark::POOL_MARK_PERMITS).value.get
-    "marking #{IyiMark.marking?}, POOL_ACTIVE #{active}, POOL_HEAD #{head}, generation #{generation}, permits left #{permits & 0xFFFFFFFF_u64} and taken #{permits.unsafe_shr(32_u64)}, helpers done #{done}, #{IyiMark.finish_retries} second stops retreated so far"
+    "marking #{IyiMark.marking?}, POOL_ACTIVE #{active}, POOL_HEAD #{head}, generation #{generation}, permits left #{permits & 0xFFFFFFFF_u64} and taken #{permits.unsafe_shr(32_u64)}, helpers done #{done}, #{IyiMark.finish_retries} second stops retreated so far, #{IyiMark.allocated_since} bytes counted since the last collection against a budget of #{IyiMark.budget}"
   end
 
   workers = 4

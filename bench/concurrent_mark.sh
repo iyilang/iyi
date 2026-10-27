@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Seventeen steps, ten of them failure proofs:
+# Eighteen steps, eleven of them failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -60,15 +60,19 @@
 #      the collection is let go, held until the next mark turns it, with
 #      one helper; nobody drains that mark, the runtime says the mark is
 #      overdue, and the program's watchdog exits 1.
-#  14. Failure proof: `free` outside the allocator's bracket; a pause
+#  14. Failure proof: the collection let go after helper 0 releases the
+#      threads, with helper 0 held 300 ms between the two; the threads
+#      allocate past the budget with nothing triggered, and the watchdog
+#      exits 1.
+#  15. Failure proof: `free` outside the allocator's bracket; a pause
 #      among the frees puts the lists it dropped back on the cache, and
 #      step 5's program exits 1 within ten runs.
-#  15. Failure proof, on Windows: the helpers given back the boost a
+#  16. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
 #      program's wakes past a millisecond - exits 1.
-#  16. Failure proof, on Windows: the cap on the helpers beside a busy
+#  17. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
-#  17. Failure proof, on Windows: the first collection's wait for every
+#  18. Failure proof, on Windows: the first collection's wait for every
 #      helper to reach its park put back, and the crowded check fires.
 set -u
 
@@ -672,6 +676,38 @@ if ! grep -q "the collector's mark has run .* permits left 1 and taken 0" late.t
 fi
 printf '  says "%s"\n' "$(grep -m1 "the collector's mark has run" late.txt | cut -c1-150)"
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stall:' late.txt | cut -c1-150)"
+
+# `@@collecting` let go after helper 0 releases the threads, as it was,
+# and helper 0 held 300 ms between the two: the window a four-core Windows
+# runner gave twelve and eight workers whenever they took helper 0's cores.
+# The tasks allocate with no mark to assist and no trigger to cross, the
+# watchdog holds them at 256 MiB, and once helper 0 lets the collection go
+# nobody allocates to trigger the next: the run fails, naming the count
+# since the last collection against its budget.
+step "failure proof: a collection let go after its threads are released leaves their allocation untriggered"
+mkdir -p released/iyi
+cp "$REPO"/src/iyi/*.iyi released/iyi/
+awk '/^            @@collecting = false$/ && !moved { held = $0; next }
+  held != "" && /^            IyiThread\.resume_others\(others\)$/ {
+    print
+    print "            window = now_ns + 300000000_u64"
+    print "            while now_ns < window"
+    print "              spin_pause"
+    print "            end"
+    held = ""; moved = 1; next }
+  held != "" { print held; held = "" }
+  moved && !put && /^            IyiRuntimeLock\.unlock$/ { print "            @@collecting = false"; put = 1 }
+  { print } END { if (!moved || !put) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > released/iyi/prelude.iyi || { echo "the order this proof undoes is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/released${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o released-run > build-released.log 2>&1; then
+  cat build-released.log; exit 1
+fi
+timeout -k 5 120 ./released-run workers=12 seconds=10 stall_ms=2000 > released.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: stall:.*marking false" released.txt; then
+  echo "the untriggered allocation was not caught (exit $code):"; tail -3 released.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stall:' released.txt | cut -c1-150)"
 
 # Windows only: a suspended thread stops at any instruction there, the
 # window measured. darwin's runner kept every chunk in ten runs without the

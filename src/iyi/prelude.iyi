@@ -7416,7 +7416,9 @@ require "./file"
       # Wait out a collection running beside the program, if one is. The
       # count below is of finished collections — a mark in flight has not
       # swept, so it is not one yet — and a program that reads the count
-      # after churn wants the one it triggered included.
+      # after churn wants the one it triggered included. The lock after:
+      # helper 0 lets the collection go before it releases the threads,
+      # and keeps the lock until its accounts are written.
       def self.settle : Nil
         spins = 0_u64
         while @@collecting
@@ -7424,6 +7426,8 @@ require "./file"
           spins = spins + 1_u64
           watch_overdue(worker) if spins & (OVERDUE_SPINS - 1_u64) == 0_u64
         end
+        IyiRuntimeLock.lock
+        IyiRuntimeLock.unlock
       end
 
       # How many helpers a mark may use, decided once, at the first
@@ -7843,6 +7847,27 @@ require "./file"
             # wanted - the largest - itself, a millisecond on the
             # allocating thread the round exists to spare.
             open_sweep_round
+            # The generation helper 0 waits past next - turned for the
+            # remainder and again for the round, and it takes its own turn
+            # at the round before it parks - read before the lock is let
+            # go: a mark another thread begins turns it under the lock.
+            # Read after, it could be that mark's turn: helper 0 then waited
+            # past that mark, and with no other helper to take its permit
+            # nobody drained it and nobody finished it.
+            generation = pool_word(POOL_GENERATION).value.get
+            # And the collection over before the threads are released.
+            # It fell after the release, and between the two the threads
+            # allocated with no mark to assist and no trigger to cross:
+            # on a four-core Windows runner eight workers resumed onto the
+            # cores helper 0 needed, which has no boost, and 19,745 slices
+            # passed `pressure` with `@@collecting` up while the count
+            # since the last collection reached 334 MB against a budget of
+            # 4.3 (bench/mark_stall.iyi, 3 to 7 runs of 8 ended by its
+            # watchdog). Now the first of them to cross the
+            # budget waits at the runtime lock for helper 0's accounts
+            # below, and collects. `settle` waits for the lock too, so a
+            # program that reads those accounts after it reads them whole.
+            @@collecting = false
             IyiThread.resume_others(others)
             pause = now_ns - started
             IyiHeap.unmap_released
@@ -7857,15 +7882,6 @@ require "./file"
             @@pause_max = longest if longest > @@pause_max
             @@pause_total = @@pause_total + total
             @@concurrent_collections = @@concurrent_collections + 1_u64
-            # The generation helper 0 waits past next - turned for the
-            # remainder and again for the round, and it takes its own turn
-            # at the round before it parks - read while the collection is
-            # still this one's. Read after `@@collecting` falls, it could
-            # be the turn of a mark another thread began in between: helper
-            # 0 then waited past that mark, and with no other helper to
-            # take its permit nobody drained it and nobody finished it.
-            generation = pool_word(POOL_GENERATION).value.get
-            @@collecting = false
             IyiRuntimeLock.unlock
             wake_sweep_round
             return generation

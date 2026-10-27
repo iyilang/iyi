@@ -125,6 +125,7 @@ end
 # after them was 41 MB - and no page went cold.
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   class Thinned
+    @[SafeReach("one thread at a time fills it, each joined before the next starts and before the main thread reads it")]
     @@kept : Array(Pointer(UInt8)) = [] of Pointer(UInt8)
 
     def self.kept : Array(Pointer(UInt8))

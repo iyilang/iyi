@@ -95,7 +95,7 @@
   were counted in one against a budget of 4,194,304. Every collection is
   let go before its release now, `settle` waits for the accounts, and
   broken copies put each old order back with the collecting thread held:
-  helper 0 until the tasks stop allocating, caught by the watchdog, and
+  helper 0 ten seconds after its unlock, caught by the watchdog, and
   the others a second, caught by `bench/release_trigger.iyi`, whose
   second thread's slices past the budget must trigger the next
   collection.

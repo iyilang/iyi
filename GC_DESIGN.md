@@ -562,17 +562,23 @@ assist has counted itself in, which the runtime's below-zero check
 catches at the first collection; the late generation read back with one
 helper, held until the next mark begins, which the overdue report and
 the watchdog both catch at the second; and each `@@collecting` after its
-release again, its thread held between the two - helper 0 until the
-tasks stop allocating, the others a second - which the watchdog catches
-for helper 0 and `bench/release_trigger.iyi` names by round for the
-others. The first three were left to the machine once: the store's
-missed on four-core Windows and three-core darwin runners, the late
-read's on a four-core Windows one, and helper 0's held the tasks there
-at 287 and 289 MiB against the watchdog's 256. Every proof is caught in
-every run now: 12 of 12 each here held to three, four and twelve cores,
-and one run on each of three four-core Windows runners and a three-core
-darwin one, where `bench/concurrent_mark.sh` and `bench/parallel_mark.sh`
-passed whole.
+release again, its thread held between the two - helper 0 ten seconds,
+past its unlock, the others a second - which the watchdog catches for
+helper 0 and `bench/release_trigger.iyi` names by round for the others.
+The first three were left to the machine once: the store's missed on
+four-core Windows and three-core darwin runners, the late read's on a
+four-core Windows one, and helper 0's held the tasks there at 287 and 289
+MiB against the watchdog's 256. Every proof is caught in every run now:
+12 of 12 each here held to three, four and twelve cores, and one run on
+each of three four-core Windows runners and a three-core darwin one,
+where `bench/concurrent_mark.sh` and `bench/parallel_mark.sh` passed
+whole. Helper 0's was held then until the count stood still for half a
+second, and beside #150's warm room it slipped through in 2 runs of 12 on
+twelve cores: a cache folds its allocation into the count a slice at a
+time, so the held tasks still allocated, and a slice collected once the
+flag fell. A fixed hold under the lock was worse, 2 of 36 caught; a
+fixed hold after the unlock is caught 36 of 36 on three, four and twelve
+cores.
 
 The budget is twice what survived, and what was allocated under the
 mark did not survive anything: born gray, so counted marked, but not

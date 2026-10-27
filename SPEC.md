@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 24,551 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 131,234 lines, none of it written in iyi |
+| compiler | 131,248 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,7 +1028,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 131,234 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 131,248 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 24,551-line own prelude + 125,314 in std |
 | Specs | 21,146 lines | 15,689 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -2880,7 +2880,10 @@ std's to keep, and its boundaries are checked where std writes them. It
 stops where the capture check does: a constant typed `Mutex`, `Atomic`,
 `List` or another trusted `@[Share]` type is `Share`, and is not warned
 about. A block given to a lock is walked like any other, since the lock
-guards what it holds, not the constants its block reaches. A program
+guards what it holds, not the constants its block reaches. An array of
+`Share` elements that is only read - iyi-web's `CONTENT_CODINGS :
+Array(String)`, the commonest case - is told it can be a `List`, which is
+`Share` and needs no claim. A program
 that knows its state is safe says so on the declaration, with the reason
 as the claim: `@[SafeReach("set once at startup, then only read")]` on a
 constant or a class variable quiets the warning for it alone, and never
@@ -2895,10 +2898,10 @@ variable, std's state silent) and by `bench/parallel_exercise.sh`'s
 `Share` step, which builds the issue's shape and fails it under
 `--error-on-warnings`, and passes its copy marked `@[SafeReach]`.
 What each def names and calls is read once per compilation and kept, so
-many blocks reaching the same functions read them once: the main
-semantic stage, best of 3, was 1.019 s before and 1.032 s after on
-`bench/std_http_exercise.iyi`, 1.030 and 1.009 on `bench/web_cores.iyi`,
-and 1.344 and 1.454 on iyi-web's `examples/security.iyi`.
+many blocks reaching the same functions read them once. Timed inside the
+compiler on iyi-web's `examples/security.iyi`, whose 15 shared blocks walk
+the framework's own defs, the check took 14.5 to 16.7 ms a compile, the
+walk itself 3.4 to 4.2 ms, of a main semantic stage of about 1.4 s.
 In this tree the walk found three benches whose threads reach a class
 variable one at a time, each joined before the next starts or before the
 main thread reads it, or each writing its own reserved slot; each is

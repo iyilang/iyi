@@ -15,7 +15,9 @@
   reaches `DATABASE : Main::Database` (not Share) through `ask` →
   `DATABASE.query_one`: ...``. Every target of a virtual call is
   walked, and a recursive def once; a constant typed `Mutex`, `Atomic`,
-  `List` or another trusted `@[Share]` type is `Share` and says nothing.
+  `List` or another trusted `@[Share]` type is `Share` and says nothing,
+  and an array of `Share` elements is told it can be a `List` if it is
+  only read.
   State that is safe - set once and then only read, or guarded some
   other way - is marked on its declaration with the reason as the claim,
   `@[SafeReach("set once at startup, then only read")]`, on a constant

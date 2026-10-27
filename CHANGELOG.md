@@ -88,6 +88,33 @@
   `serve`'s mark taken off, its `crossing:` taken off, and its `serial:`
   taken off.
 
+- **On Windows a wait no longer moves a handle already on its thread's
+  port (#151).** Every overlapped wait moved its handle to the waiting
+  thread's completion port and set its skip-on-success mode again - two
+  `NtSetInformationFile` calls, 3.1% of a 12-worker server's running
+  samples in the issue - even when the handle was there. The port each
+  socket, accepted connection, datagram socket and child-process pipe the
+  standard library made was last moved to is recorded now, by the port's
+  serial, and a wait on one already on its thread's port makes neither
+  call; a closing std makes zeroes the record first, a serial is never
+  given twice, a move by another thread at the same time leaves no record
+  standing, and a move of a handle with no record - a program's own, where
+  a duplicate would be - makes every record stale (`IyiScheduler.to_port`
+  says why each is enough). On a 4-logical-processor runner, release, a
+  connection trading 32 bytes between two parallel tasks, medians of five:
+  one connection from 98,808 round trips a second to 127,028, and 3 moves
+  for its 80,000 waits; 8 and 32 connections on 4 workers from 228,748 to
+  239,830 and from 264,846 to 281,057, where 51% and 64% of waits are a
+  task's first on another worker and still move (job 122342296628).
+  `bench/socket_exercise.sh` counts the moves of 200 round trips on one
+  thread (at most 4; a copy that moves on every wait makes 400), reads a
+  pipe the program made with a closed socket's value, a socket another
+  thread closed whose value is made again here, one a thread that has ended
+  waited on last, and one parallel tasks read in turn on two workers; a
+  copy that skips the move whenever a port is recorded never completes the
+  ended thread's socket, and one whose close leaves the record never
+  completes the pipe's read, each ended by a watcher that names the step.
+
 - **A Windows `--release` build with a pool its optimiser cannot reach
   links.** x86-64 Windows' preemption checks read the TEB slot's offset,
   `IyiWorkers::preempt_slot`, by name after optimisation, and only the
@@ -25119,7 +25146,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,551-line library and nothing else. Every other
+  written against iyi's own 24,694-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

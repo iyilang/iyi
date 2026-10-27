@@ -860,4 +860,343 @@ quiet_talker.close
 stream_server.close
 puts "stream: ok"
 
+# 12. Where a wait leaves its socket (#151). A Windows handle belongs to
+# one completion port and each thread has its own, so a wait moves the
+# socket to its thread's port, and one already there is not moved again:
+# the port each socket was last moved to is recorded
+# (`IyiScheduler.to_port`). The record has to be right after everything
+# that changes a socket's port behind it, or a wait posts to a port that
+# is not its thread's - one whose thread has ended, or none - and never
+# completes. Such a wait cannot be bounded by its own deadline, whose
+# cancel completes into the same port, so each step is watched by a
+# thread of its own that ends the program with the step's name.
+class PortGate
+  @@done = Pointer(Atomic(UInt64)).malloc(1_u64)
+  @@arrived = Pointer(Atomic(UInt64)).malloc(1_u64)
+  # The values of the sockets the other thread closed, for `port_reuse`.
+  @@closed = Pointer(Int64).malloc(2_u64)
+
+  def self.closed : Pointer(Int64)
+    @@closed
+  end
+
+  def self.done : Pointer(Atomic(UInt64))
+    @@done
+  end
+
+  def self.arrived : Pointer(Atomic(UInt64))
+    @@arrived
+  end
+end
+
+def thread_here : UInt64
+  IyiScheduler.state.object_id
+end
+
+def port_moves : UInt64
+  {% if flag?(:win32) %}
+    IyiScheduler.port_moves
+  {% else %}
+    0_u64
+  {% end %}
+end
+
+def port_watch(name : String, ms : Int32, &block : -> Nil) : Nil
+  PortGate.done.value.set(0_u64)
+  watcher = IyiThread.start do
+    waited = 0
+    while PortGate.done.value.get == 0_u64 && waited < ms
+      sleep(10)
+      waited = waited + 10
+    end
+    if PortGate.done.value.get == 0_u64
+      puts "#{name}: a wait had not completed after #{ms} ms"
+      __iyi_exit(1)
+    end
+  end
+  block.call
+  PortGate.done.value.set(1_u64)
+  watcher.join
+end
+
+# The running thread held to the first processor, answering where it was
+# free to run; and let go again. Nothing elsewhere.
+def pin_to_first_cpu : UInt64
+  {% if flag?(:win32) %}
+    LibC.SetThreadAffinityMask(LibC.GetCurrentThread, 1_u64)
+  {% else %}
+    0_u64
+  {% end %}
+end
+
+def unpin(mask : UInt64) : Nil
+  {% if flag?(:win32) %}
+    LibC.SetThreadAffinityMask(LibC.GetCurrentThread, mask) if mask != 0_u64
+  {% end %}
+end
+
+# Two hundred round trips between two tasks of one thread, two waits a
+# round: each socket's first wait associates it, and none after moves it.
+# A copy that moves on every wait moves them about 400 times.
+s_server = IyiSocket.listen("127.0.0.1", 0)
+s_client = IyiSocket.connect("127.0.0.1", s_server.local_port).or_panic
+s_conn = s_server.accept.or_panic
+s_moved = 0_u64
+port_watch("port_stays", 20000) do
+  s_before = port_moves
+  group do |g|
+    g.spawn do
+      200.times { s_conn.write(s_conn.read(1).or_panic).or_panic }
+      0
+    end
+    g.spawn do
+      200.times do
+        s_client.write("s").or_panic
+        s_client.read(1).or_panic
+      end
+      0
+    end
+  end
+  s_moved = port_moves - s_before
+end
+s_client.close
+s_conn.close
+s_server.close
+raise "port_stays: 200 round trips on one thread moved their sockets #{s_moved} times" if s_moved > 4_u64
+puts "port_stays: ok"
+
+# A socket waited on here and closed, and its value given to a handle the
+# program made itself, which nothing records: its wait has to move it to
+# this port. Windows gives a freed value to the next handle made, so the
+# pipes are made until one has a closed socket's value. A copy whose close
+# leaves the record behind skips the move, and the pipe, on no port at
+# all, never completes its read.
+{% if flag?(:win32) %}
+  lib LibC
+    fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
+                    disposition : Int32, flags : Int32, template : Void*) : Void*
+    fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+  end
+
+  def pipe_pair : {Int64, Int64}
+    name = "\\\\.\\pipe\\iyi_port_gate_#{__iyi_monotonic_ns}".to_unsafe
+    reading = LibC.CreateNamedPipeA(name, 0x40000001_i32, 0_i32, 1_i32, 4096_i32, 4096_i32, 0_i32, Pointer(Void).new(0_u64))
+    raise "port_reuse: CreateNamedPipeA failed" if reading.address &+ 1_u64 == 0_u64
+    writing = LibC.CreateFileA(name, 1073741824_i32, 0_i32, Pointer(Void).new(0_u64), 3_i32, 128_i32, Pointer(Void).new(0_u64))
+    raise "port_reuse: CreateFileA for the pipe failed" if writing.address &+ 1_u64 == 0_u64
+    {reading.address.to_i64, writing.address.to_i64}
+  end
+
+  port_watch("port_reuse", 10000) do
+    r_server = IyiSocket.listen("127.0.0.1", 0)
+    r_client = IyiSocket.connect("127.0.0.1", r_server.local_port).or_panic
+    r_conn = r_server.accept.or_panic
+    group do |g|
+      g.spawn do
+        r_conn.read(1).or_panic
+        0
+      end
+      g.spawn do
+        sleep(20)
+        r_client.write("r").or_panic
+        0
+      end
+    end
+    r_values = [r_client.fd.to_i64, r_conn.fd.to_i64]
+    r_client.close
+    r_conn.close
+    r_server.close
+    r_pipes = [] of Int64
+    r_pipe = {0_i64, 0_i64}
+    32.times do
+      next if r_pipe[0] != 0_i64
+      r_made = pipe_pair
+      r_pipes << r_made[0] << r_made[1]
+      r_pipe = r_made if r_values.includes?(r_made[0])
+    end
+    raise "port_reuse: 32 pipes made after the close and none had a closed socket's value #{r_values}" if r_pipe[0] == 0_i64
+    r_got = 0_i64
+    group do |g|
+      g.spawn do
+        r_buffer = Pointer(UInt8).malloc(8_u64)
+        r_read = iyi_read(r_pipe[0], r_buffer.as(Void*), 1_u64)
+        r_got = r_read.is_a?(Int64) ? r_read : -1_i64
+        0
+      end
+      g.spawn do
+        sleep(20)
+        __iyi_write(r_pipe[1], "p".to_unsafe.as(Void*), 1_u64)
+        0
+      end
+    end
+    r_pipes.each { |r_handle| __iyi_close(r_handle) }
+    raise "port_reuse: the pipe with a closed socket's value read #{r_got} bytes, not 1" unless r_got == 1_i64
+  end
+{% end %}
+
+# The same on another thread, which lives on: a socket waited on and closed
+# on a thread of its own, and a socket made here with its value waited on
+# here, while that thread waits for the read to be over. Both threads are
+# held to the first processor until the value is found: free to run
+# anywhere, a release build on a 4-core runner made 16 connections here and
+# none had a value the other thread had closed (job 122326556425).
+t_server = IyiSocket.listen("127.0.0.1", 0)
+t_port = t_server.local_port
+port_watch("port_reuse", 10000) do
+  PortGate.arrived.value.set(0_u64)
+  t_listen_fd = t_server.fd
+  t_mask = pin_to_first_cpu
+  t_thread = IyiThread.start do
+    pin_to_first_cpu
+    t_first = IyiSocket.connect("127.0.0.1", t_port).or_panic
+    t_second = IyiSocket.new(t_listen_fd).accept.or_panic
+    group do |g|
+      g.spawn do
+        t_second.read(1).or_panic
+        0
+      end
+      g.spawn do
+        sleep(20)
+        t_first.write("t").or_panic
+        0
+      end
+    end
+    PortGate.closed[0] = t_first.fd.to_i64
+    PortGate.closed[1] = t_second.fd.to_i64
+    t_first.close
+    t_second.close
+    PortGate.arrived.value.set(1_u64)
+    while PortGate.arrived.value.get == 1_u64
+      sleep(5)
+    end
+  end
+  while PortGate.arrived.value.get == 0_u64
+    sleep(5)
+  end
+  t_held = [] of IyiSocket
+  t_reader : IyiSocket? = nil
+  t_writer : IyiSocket? = nil
+  16.times do
+    next if t_reader
+    t_one = IyiSocket.connect("127.0.0.1", t_port).or_panic
+    t_two = t_server.accept.or_panic
+    t_held << t_one << t_two
+    if t_one.fd.to_i64 == PortGate.closed[0] || t_one.fd.to_i64 == PortGate.closed[1]
+      t_reader = t_one
+      t_writer = t_two
+    elsif t_two.fd.to_i64 == PortGate.closed[0] || t_two.fd.to_i64 == PortGate.closed[1]
+      t_reader = t_two
+      t_writer = t_one
+    end
+  end
+  unpin(t_mask)
+  {% if flag?(:win32) %}
+    raise "port_reuse: 16 connections made after the other thread's close and none had its sockets' values" unless t_reader
+  {% end %}
+  if t_reader && t_writer
+    t_reading = t_reader.as(IyiSocket)
+    t_writing = t_writer.as(IyiSocket)
+    t_heard = ""
+    group do |g|
+      g.spawn do
+        t_heard = t_reading.read(1).or_panic
+        0
+      end
+      g.spawn do
+        sleep(20)
+        t_writing.write("u").or_panic
+        0
+      end
+    end
+    raise "port_reuse: a socket with another thread's closed socket's value read #{t_heard.inspect}" unless t_heard == "u"
+  end
+  t_held.each { |t_socket| t_socket.close }
+  PortGate.arrived.value.set(2_u64)
+  t_thread.join
+end
+t_server.close
+puts "port_reuse: ok"
+
+# A socket waited on by a thread that then ended, and waited on here: its
+# record names a port whose thread is gone. A copy that skips the move
+# whenever a port is recorded posts this read to that port, which nobody
+# takes completions from again.
+e_server = IyiSocket.listen("127.0.0.1", 0)
+e_client = IyiSocket.connect("127.0.0.1", e_server.local_port).or_panic
+e_conn = e_server.accept.or_panic
+port_watch("port_thread_ended", 10000) do
+  e_conn_fd = e_conn.fd
+  e_thread = IyiThread.start do
+    raise "port_thread_ended: the other thread read the wrong byte" unless IyiSocket.new(e_conn_fd).read(1).or_panic == "1"
+  end
+  sleep(50)
+  e_client.write("1").or_panic
+  e_thread.join
+  e_heard = ""
+  group do |g|
+    g.spawn do
+      e_heard = e_conn.read(1).or_panic
+      0
+    end
+    g.spawn do
+      sleep(20)
+      e_client.write("2").or_panic
+      0
+    end
+  end
+  raise "port_thread_ended: the read here heard #{e_heard.inspect}" unless e_heard == "2"
+end
+e_client.close
+e_conn.close
+e_server.close
+puts "port_thread_ended: ok"
+
+# A socket read by parallel tasks on the pool's workers in turn: two tasks
+# a round, each spinning until the other has started, so they are on two
+# workers, and the round's reader alternating between them. Every read
+# completes, and the reads ran on more than one worker, so the socket was
+# moved between them.
+m_server = IyiSocket.listen("127.0.0.1", 0)
+m_client = IyiSocket.connect("127.0.0.1", m_server.local_port).or_panic
+m_conn = m_server.accept.or_panic
+m_conn_fd = m_conn.fd
+m_readers = [] of UInt64
+port_watch("port_migrate", 30000) do
+  20.times do |m_round|
+    PortGate.arrived.value.set(0_u64)
+    group do |g|
+      m_tasks = [] of IyiTask(UInt64)
+      2.times do |m_index|
+        m_tasks << g.spawn_parallel do
+          PortGate.arrived.value.add(1_u64)
+          m_spun = __iyi_monotonic_ns
+          while PortGate.arrived.value.get < 2_u64
+            raise "port_migrate: a parallel task spun 10000 ms and no second one started" if __iyi_monotonic_ns - m_spun > 10_000_000_000_i64
+            IyiThread.spin_pause
+          end
+          if m_index == m_round % 2
+            m_here = thread_here
+            raise "port_migrate: round #{m_round}'s read was not the byte sent" unless IyiSocket.new(m_conn_fd).read(1).or_panic == "m"
+            m_here
+          else
+            0_u64
+          end
+        end
+      end
+      sleep(5)
+      m_client.write("m").or_panic
+      m_tasks.each do |m_task|
+        m_ran = m_task.value
+        raise "port_migrate: a task answered #{m_ran.inspect}" unless m_ran.is_a?(UInt64)
+        m_readers << m_ran unless m_ran == 0_u64 || m_readers.includes?(m_ran)
+      end
+    end
+  end
+end
+m_client.close
+m_conn.close
+m_server.close
+raise "port_migrate: 20 reads all ran on one worker" if m_readers.size < 2
+puts "port_migrate: ok"
+
 puts "socket_exercise: all checks passed"

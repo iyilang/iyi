@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,551 lines
+> "No standard library worth the name" is still true of iyi's own 24,694 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,551 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 24,694 lines,
 primitives included, of which the library is 4,649.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -3777,11 +3777,18 @@ since the pool does not shrink. The workers start at the first
 **5. A poller per worker, not a shared one.** An IO wait is the waiting
 task's thread's — the fd is registered with that thread's epoll, kqueue or
 completion port, per wait, as it always was. A woken task may resume on
-another worker (part 1), and its next wait registers there. A shared
-poller would have saved a file descriptor per worker; what a poller per
-worker costs instead is part 1's open end: a worker busy computing looks at
-its own poller only when it parks. The worker owns its poller, its sleep
-heap and its stacks, and nothing of them is locked.
+another worker (part 1), and its next wait registers there. On Windows a
+handle belongs to one port, so a wait moves it to its thread's - two
+`NtSetInformationFile` calls, the move and the skip-on-success mode the move
+clears - and only when it is not there already: the port each handle the
+standard library made was last moved to is recorded, and a wait on one
+already on its thread's port makes neither call (#151; `IyiScheduler.to_port`
+says why a closed handle's value, an ended thread, a move by another thread
+and a duplicate cannot leave a record that sends a wait's completion
+elsewhere). A shared poller would have saved a file descriptor per worker;
+what a poller per worker costs instead is part 1's open end: a worker busy
+computing looks at its own poller only when it parks. The worker owns its
+poller, its sleep heap and its stacks, and nothing of them is locked.
 
 **6. Waking across threads, and the one lock.** What does cross threads is
 a wake: a sender on one worker hands a value to a receiver parked on
@@ -11087,7 +11094,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,551-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,694-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

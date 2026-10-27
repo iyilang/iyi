@@ -1503,6 +1503,9 @@ pub class IyiSocket
   # answer EOF rather than a reset is `closesocket`'s.
   def self.__sys_close(fd : Int32) : Nil
     {% if flag?(:win32) %}
+      # Its port record goes first, while the value is still this socket's
+      # (`IyiScheduler.port_closing`).
+      IyiScheduler.port_closing(Pointer(Void).new(__sys_handle(fd)))
       # The send side ends first (SD_SEND, 1): a FIN behind whatever was
       # written. `closesocket` with a read still posted beneath a parked
       # task - the kernel's until its completion is dequeued - reset the
@@ -2133,11 +2136,19 @@ pub class IyiSocket
       -(LibWs2_32.WSAGetLastError.to_i64)
     end
 
+    # A socket this file made, as the class carries it, and recorded as
+    # one whose closes are this file's, so a wait on it can skip moving it
+    # to a port it is on already (`IyiScheduler.to_port`).
+    def self.__sys_made(s : UInt64) : Int32
+      IyiScheduler.port_made(Pointer(Void).new(s))
+      s.unsafe_to_i32
+    end
+
     def self.__sys_socket(family : Int32) : Int32
       __sys_winsock
       s = LibWs2_32.socket(family, SOCK_STREAM, __sys_protocol(family))
       return -1 if s == INVALID_SOCKET
-      s.unsafe_to_i32
+      __sys_made(s)
     end
 
     def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
@@ -2166,7 +2177,7 @@ pub class IyiSocket
     def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       s = __sys_handle(fd)
       client = LibWs2_32.accept(s, addr.as(Void*), addrlen.as(Pointer(Int32)))
-      return client.unsafe_to_i32 if client != INVALID_SOCKET
+      return __sys_made(client) if client != INVALID_SOCKET
       err = LibWs2_32.WSAGetLastError
       return -err if err != WSAEWOULDBLOCK
       # Nothing was queued, and a listening socket has no readable state a
@@ -2243,7 +2254,7 @@ pub class IyiSocket
       addrlen.value = size == SOCKADDR_UN_SIZE ? 110_u32 : size == SOCKADDR_IN6_SIZE ? 28_u32 : 16_u32
       owner = s
       LibWs2_32.setsockopt(client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, pointerof(owner).as(Void*), 8)
-      client.unsafe_to_i32
+      __sys_made(client)
     end
 
     # The handshake is waited for here, inside `ConnectEx`, so *ms* bounds
@@ -2545,7 +2556,7 @@ pub class IyiSocket
       return __sys_error.to_i32 if s == INVALID_SOCKET
       on = 1
       LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))
-      s.unsafe_to_i32
+      __sys_made(s)
     end
 
     # The plain call, not `__sys_connect`'s `ConnectEx`, which is TCP's: a

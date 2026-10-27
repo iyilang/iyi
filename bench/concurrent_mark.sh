@@ -62,10 +62,9 @@
 #      one helper; nobody drains that mark, the runtime says the mark is
 #      overdue, and the program's watchdog exits 1.
 #  14. Failure proof: the collection let go after helper 0 releases the
-#      threads, with helper 0 held between the two until nothing has been
-#      counted for half a second; the threads allocate past the budget
-#      with nothing triggered until the watchdog holds them, and it exits
-#      1.
+#      threads, with helper 0 held ten seconds after its unlock and before
+#      the fall; the threads allocate past the budget with nothing
+#      triggered, and the watchdog exits 1.
 #  15. A collection a program's own thread finishes, whose mark ends in
 #      its first stop, with no helper, and `IyiMark.collect`'s, three runs:
 #      a second thread's slices past the budget after each trigger the
@@ -706,39 +705,40 @@ printf '  says "%s"\n' "$(grep -m1 "the collector's mark has run" late.txt | cut
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stall:' late.txt | cut -c1-150)"
 
 # `@@collecting` let go after helper 0 releases the threads, as it was,
-# and helper 0 held between the two until nothing has been counted for
-# half a second, ten seconds at most: the window a four-core Windows
-# runner gave twelve and eight workers whenever they took helper 0's
-# cores, held until the watchdog has held the tasks. They allocate with
-# no mark to assist and no trigger to cross, the watchdog holds them at
-# 256 MiB or after two seconds, and once helper 0 lets the collection go
-# nobody allocates to trigger the next: the run fails, naming the count
-# since the last collection against its budget: 12 runs of 12 here held
-# to three, four and twelve cores, and a run on each of three four-core
-# Windows runners and a three-core darwin one (run 40570662734), at the
-# third to the ninth collection.
-# The hold was 300 ms, which catches it only where the tasks allocate
-# 256 MiB inside it: the four-core Windows runners held them at 287 and
-# 289 MiB (jobs 122392780789 and 122392781553).
+# and helper 0 held ten seconds before it lets it go: the window a
+# four-core Windows runner gave twelve and eight workers whenever they
+# took helper 0's cores, held past the watchdog's whole course - its hold
+# at 256 MiB or two seconds after the last collection, and its two
+# seconds' wait after. The tasks allocate with no mark to assist and no
+# trigger to cross, and while the flag is up `pressure` turns every slice
+# away, so nothing the held tasks still allocate triggers the next: the
+# run fails, naming the count since the last collection against its
+# budget. The hold is after helper 0's unlock, the flag's fall moved
+# there with it: held under the lock, the tasks waited for helper 0
+# wherever they needed the lock, and on master merged with #150 and #151
+# the copy exited 0 in 34 runs of 36. Here it fails at the first
+# collection, 36 runs of 36 held to three, four and twelve cores, and the
+# runtime as it is passes the same run 36 of 36. Two holds were left to
+# the machine before. 300 ms caught it only where the tasks allocated
+# 256 MiB inside it: four-core Windows runners held them at 287 and 289
+# MiB (jobs 122392780789 and 122392781553). And a hold until nothing was
+# counted for half a second let the flag fall while the held tasks still
+# allocated - a cache folds its allocation into the count a 64 KiB slice
+# at a time - and a slice then crossed the budget and collected: on the
+# same merge 2 runs of 12 on twelve cores exited 0, the tasks held 554 ms
+# at the longest.
 step "failure proof: a collection let go after its threads are released leaves their allocation untriggered"
 mkdir -p released/iyi
 cp "$REPO"/src/iyi/*.iyi released/iyi/
-awk '/^            @@collecting = false$/ && !moved { held = $0; next }
-  held != "" && /^            IyiThread\.resume_others\(others\)$/ {
+awk '/^            @@collecting = false$/ && !moved { moved = 1; next }
+  moved && !put && /^            IyiRuntimeLock\.unlock$/ {
     print
-    print "            quiet_since = now_ns"
-    print "            quiet_count = allocated_since"
-    print "            quiet_until = now_ns + 10000000000_u64"
-    print "            while now_ns < quiet_until && now_ns - quiet_since < 500000000_u64"
+    print "            window = now_ns + 10000000000_u64"
+    print "            while now_ns < window"
     print "              spin_pause"
-    print "              if allocated_since != quiet_count"
-    print "                quiet_count = allocated_since"
-    print "                quiet_since = now_ns"
-    print "              end"
     print "            end"
-    held = ""; moved = 1; next }
-  held != "" { print held; held = "" }
-  moved && !put && /^            IyiRuntimeLock\.unlock$/ { print "            @@collecting = false"; put = 1 }
+    print "            @@collecting = false"
+    put = 1; next }
   { print } END { if (!moved || !put) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > released/iyi/prelude.iyi || { echo "the order this proof undoes is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/released${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o released-run > build-released.log 2>&1; then

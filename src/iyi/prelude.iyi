@@ -7359,19 +7359,18 @@ require "./file"
             # live set turns out past the bound: then this thread goes
             # back to its allocation and helper 0 finishes the collection
             # and clears `@@collecting`. Inside the bound the mark is
-            # over already and this thread owns the rest.
+            # over already, this thread owns the rest, and `finish_stopped`
+            # cleared the flag before it released the threads.
             if start_concurrent
               IyiRuntimeLock.unlock
               return
             end
-            @@collecting = false
             IyiRuntimeLock.unlock
             wake_sweep_round
             return
           end
         {% end %}
         collect_locked(false)
-        @@collecting = false
         IyiRuntimeLock.unlock
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           wake_sweep_round
@@ -7406,7 +7405,6 @@ require "./file"
           close_sweep_round
         {% end %}
         collect_locked(true)
-        @@collecting = false
         IyiRuntimeLock.unlock
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           IyiThread.yield_to_stopped
@@ -7417,8 +7415,8 @@ require "./file"
       # count below is of finished collections — a mark in flight has not
       # swept, so it is not one yet — and a program that reads the count
       # after churn wants the one it triggered included. The lock after:
-      # helper 0 lets the collection go before it releases the threads,
-      # and keeps the lock until its accounts are written.
+      # every collection is let go before its threads are released, and
+      # its thread keeps the lock until its accounts are written.
       def self.settle : Nil
         spins = 0_u64
         while @@collecting
@@ -7496,6 +7494,23 @@ require "./file"
         # each object's size as it blackened it — which is what lets the
         # sweep be lazy: the budget no longer waits on a sweep to count.
         @@budget = next_budget(@@bytes_marked)
+        # The collection let go before the threads are released, as helper
+        # 0 lets its own go (`finish_concurrent`). `collect_locked`'s
+        # callers and `finish_stopped` cleared the flag after the release,
+        # and until they did the threads resumed allocated with `pressure`
+        # turning every slice away - here the window of the program thread
+        # that ran the collection, not a helper's. With 8 and 12 threads
+        # allocating garbage beside a small live set, with helpers and
+        # without, the longest window in a run lasted 1.6 to 24.2 ms on
+        # twelve Linux cores (12 runs), 18.9 to 164.2 ms on four-core
+        # Windows runners (36) and 23.4 to 151.5 ms on a three-core darwin
+        # one (12), and the most counted in one was 166,789,120,
+        # 176,816,128 and 166,592,512 bytes against a budget of 4,194,304.
+        # Now the first thread past the budget waits at the runtime lock,
+        # which is held until the pause's accounts below are written;
+        # `settle` waits for the lock too, so a program that reads those
+        # accounts after it reads them whole (bench/release_trigger.iyi).
+        @@collecting = false
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           open_sweep_round
           IyiThread.resume_others(others)
@@ -7720,8 +7735,9 @@ require "./file"
         end
 
         # A collection whose mark ended inside the first stop: the tail of
-        # `collect_locked`, with the threads released and the pause
-        # recorded. The caller holds the lock and clears `@@collecting`.
+        # `collect_locked`, with the collection let go before the threads
+        # are released (`collect_locked` says why) and the pause recorded.
+        # The caller holds the lock.
         def self.finish_stopped(started : UInt64, others : Int64) : Nil
           scavenge
           begin_sweep
@@ -7729,6 +7745,7 @@ require "./file"
           IyiHeap.allocated_word.value.set(0_u64)
           @@budget = next_budget(@@bytes_marked)
           open_sweep_round
+          @@collecting = false
           IyiThread.resume_others(others)
           pause = now_ns - started
           IyiHeap.unmap_released

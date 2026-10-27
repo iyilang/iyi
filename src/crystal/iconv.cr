@@ -22,7 +22,10 @@ struct Crystal::Iconv
     original_from, original_to = from, to
 
     @skip_invalid = invalid == :skip
-    {% unless flag?(:freebsd) || flag?(:musl) || flag?(:dragonfly) || flag?(:netbsd) || flag?(:solaris) %}
+    # macOS 14+ uses FreeBSD's Citrus iconv, where //IGNORE loses the character
+    # after an invalid byte (both measured examples), so this struct does the
+    # skipping itself; GNU via -Duse_libiconv keeps the suffix.
+    {% unless flag?(:freebsd) || flag?(:musl) || flag?(:dragonfly) || flag?(:netbsd) || flag?(:solaris) || (flag?(:darwin) && !flag?(:use_libiconv)) %}
       if @skip_invalid
         from = "#{from}//IGNORE"
         to = "#{to}//IGNORE"

@@ -748,7 +748,7 @@ describe IO do
           io = SimpleIOMemory.new(Slice.new(1, 255_u8))
           io.set_encoding("EUC-JP")
           message =
-            {% if flag?(:musl) || flag?(:freebsd) || flag?(:netbsd) || flag?(:dragonfly) %}
+            {% if flag?(:musl) || flag?(:freebsd) || flag?(:netbsd) || flag?(:dragonfly) || (flag?(:darwin) && !flag?(:use_libiconv)) %}
               "Incomplete multibyte sequence"
             {% else %}
               "Invalid multibyte sequence"

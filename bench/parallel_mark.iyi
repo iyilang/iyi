@@ -42,6 +42,35 @@
     Node.new(build(depth - 1, seed &* 3_i64 &+ 1_i64), build(depth - 1, seed &* 5_i64 &+ 2_i64), seed)
   end
 
+  {% if flag?(:win32) %}
+    lib LibC
+      fun GetProcessTimes(process : Void*, creation : UInt64*, exited : UInt64*, kernel : UInt64*, user : UInt64*) : Int32
+    end
+  {% end %}
+
+  # The CPU time every thread of this process has had, in nanoseconds:
+  # the kernel's process clock on Linux, by syscall; libSystem's on darwin,
+  # through the clock call the runtime already makes (12 is
+  # CLOCK_PROCESS_CPUTIME_ID there); kernel32's user and kernel times on
+  # Windows, in 100 ns ticks.
+  def process_cpu_ns : UInt64
+    {% if flag?(:linux) %}
+      spec = uninitialized UInt64[2]
+      words = pointerof(spec).as(Pointer(UInt64))
+      fail("idle: the process clock could not be read") if __iyi_conc_syscall3(IYI_SYS_CLOCK_GETTIME, 2_i64, words.address.to_i64, 0_i64) < 0
+      words[0] * 1000000000_u64 + words[1]
+    {% elsif flag?(:darwin) %}
+      LibC.clock_gettime_nsec_np(12)
+    {% else %}
+      creation = 0_u64
+      exited = 0_u64
+      kernel = 0_u64
+      user = 0_u64
+      fail("idle: the process times could not be read") if LibC.GetProcessTimes(LibC.GetCurrentProcess, pointerof(creation), pointerof(exited), pointerof(kernel), pointerof(user)) == 0
+      (kernel + user) * 100_u64
+    {% end %}
+  end
+
   # Five explicit collections, the mean pause and the last mark's helper
   # count, with the tree checked after each.
   def collect_five(tree : Node, expected : Int64) : Tuple(Int64, Int64)
@@ -167,28 +196,47 @@
   grown = one_core ? IyiMark.stacks_grown : IyiMark.stacks_grown - grown_before
   puts "stack: the mark of a 300,000-wide object grew a worker's stack #{grown.to_i64} times from #{IyiMark::STACK_START.to_i64} entries"
 
-  # A helper with nothing to do spins for fifty microseconds by the clock
-  # and then parks, whatever a pause hint costs here: counted in hints, it
-  # was 400 us on a machine whose hint is 20 ns, and a program collecting
-  # every half millisecond had helpers that never parked. The shortest of
-  # ten spins on a word nobody turns, so a spin the scheduler interrupted
-  # does not count; a quarter millisecond is five times the bound.
-  {% if flag?(:linux) || flag?(:win32) %}
-    cell = Pointer(UInt64).malloc(1_u64)
-    word = Pointer(Atomic(UInt64)).new(cell.address)
-    shortest = 0_u64
-    attempt = 0
-    while attempt < 10
-      started = IyiMark.now_ns
-      IyiMark.spin_for_generation(word, 0_u64)
-      took = IyiMark.now_ns - started
-      shortest = took if attempt == 0 || took < shortest
-      attempt = attempt + 1
-    end
-    fail("park: a helper with no work spun #{(shortest // 1000_u64).to_i64} us before it parked, past five times the #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} us it should") if shortest > 5_u64 * IyiMark::SPIN_BEFORE_PARK_NS
-    fail("park: a helper with no work spun #{(shortest // 1000_u64).to_i64} us, short of the #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} us it should") if shortest < IyiMark::SPIN_BEFORE_PARK_NS
-    puts "park: a helper with no work spins #{(shortest // 1000_u64).to_i64} us before it parks, for #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} asked"
-  {% end %}
+  # An idle program's helpers cost nothing: once the marks are over, each
+  # spins SPIN_BEFORE_PARK_NS and parks, so a second of sleep is a second
+  # of nobody's CPU. Read from the process's own clock of every thread's
+  # time, over one second of `sleep` after a tenth of one for the last
+  # sweep round to end. darwin's helpers spun on the generation forever
+  # until they parked: this read 8,586 to 8,943 ms of CPU in the second
+  # with nine helpers on a ten-core M2 Pro (macOS 26.6), and 1,956 to
+  # 2,001 ms with two on CI's three-core macos-14, where it reads 0 ms now
+  # on both, as it does on Linux and Windows. The bound is a tenth of one
+  # core; a helper that never parks is a whole one.
+  helpers = IyiMark.default_helpers
+  sleep(100)
+  cpu_before = process_cpu_ns
+  wall_before = IyiMark.now_ns
+  sleep(1000)
+  cpu = process_cpu_ns - cpu_before
+  wall = IyiMark.now_ns - wall_before
+  fail("idle: #{(cpu // 1000000_u64).to_i64} ms of CPU in #{(wall // 1000000_u64).to_i64} ms of sleep after the marks, with #{helpers.to_i64} helpers that should be parked, past the 100 ms bound") if cpu > 100000000_u64
+  puts "idle: #{(cpu // 1000000_u64).to_i64} ms of CPU in #{(wall // 1000000_u64).to_i64} ms of sleep after the marks, with #{helpers.to_i64} helpers parked"
+
+  # A helper with nothing to do spins SPIN_BEFORE_PARK_NS by the clock -
+  # fifty microseconds on Linux and Windows, 250 on darwin - and then
+  # parks, whatever a pause hint costs here: counted in hints, it was 400
+  # us on a machine whose hint is 20 ns, and a program collecting every
+  # half millisecond had helpers that never parked. The shortest of ten
+  # spins on a word nobody turns, so a spin the scheduler interrupted
+  # does not count; five times the spin is the bound.
+  cell = Pointer(UInt64).malloc(1_u64)
+  word = Pointer(Atomic(UInt64)).new(cell.address)
+  shortest = 0_u64
+  attempt = 0
+  while attempt < 10
+    started = IyiMark.now_ns
+    IyiMark.spin_for_generation(word, 0_u64)
+    took = IyiMark.now_ns - started
+    shortest = took if attempt == 0 || took < shortest
+    attempt = attempt + 1
+  end
+  fail("park: a helper with no work spun #{(shortest // 1000_u64).to_i64} us before it parked, past five times the #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} us it should") if shortest > 5_u64 * IyiMark::SPIN_BEFORE_PARK_NS
+  fail("park: a helper with no work spun #{(shortest // 1000_u64).to_i64} us, short of the #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} us it should") if shortest < IyiMark::SPIN_BEFORE_PARK_NS
+  puts "park: a helper with no work spins #{(shortest // 1000_u64).to_i64} us before it parks, for #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} asked"
   puts "parallel mark: every property held"
 {% else %}
   puts "parallel mark: needs the collector and a thread target; nothing to exercise here"

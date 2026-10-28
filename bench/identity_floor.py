@@ -138,6 +138,13 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"/usr/lib/crystal\b", "the bootstrap release's library directory, as a path"),
     (r"^\s*crystal --version$", "the bootstrap compiler reporting itself"),
     (r"[Cc]opyright.*Crystal", "copyright"),
+    # `selfhost/macro/expand.iyi` says what it is a port of: Crystal runs a
+    # macro by expanding it into source and parsing the result, and this
+    # pass does the same for the shapes the corpora write. The sentence is
+    # about the other compiler's behaviour, which is the whole reason the
+    # file explains itself that way. Found by this gate the first run it
+    # ever reached, because the step above it used to fail first.
+    (r"Crystal expands a macro into source", "how the other compiler runs one"),
     # The compiler still declares these names itself, in
     # `src/compiler/iyi/macros.cr`: `__crystal_pseudo_sizeof`,
     # `__crystal_pseudo_is_a?` and their siblings, with

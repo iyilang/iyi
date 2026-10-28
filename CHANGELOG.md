@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Fixed: macOS system libiconv handles invalid byte skip and shift states correctly.**
+  macOS 14+ provides FreeBSD Citrus iconv without GNU extensions. Crystal::Iconv no
+  longer appends //IGNORE on Darwin when using system libiconv, avoiding dropped
+  characters after invalid bytes, and std specs reflect Citrus shift state mappings
+  for BIG5-HKSCS and EUC-JP.
+
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and
   of a `@[Share]` def - `Server.serve`'s, a router's - was checked only

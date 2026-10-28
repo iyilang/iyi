@@ -1210,8 +1210,19 @@ def orphan_steps():
         left.extend(descendants(workers[0]))
         return workers[0], held
 
+    # A worker already gone when the kill lands is the death the step
+    # asks about, come a moment early: Windows answered the kill with
+    # WinError 87 (no such process) on master's CI (job 122939534975),
+    # and the traceback ended the session before 73k could say what the
+    # request got. The step's own verdict - the answer, and its code - is
+    # what judges it either way.
+    gone_first = []
+
     def kill_alone(worker):
-        os.kill(worker, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        try:
+            os.kill(worker, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            gone_first.append(worker)
         deadline = time.monotonic() + 10
         while worker in children(o.proc.pid) and time.monotonic() < deadline:
             time.sleep(0.1)
@@ -1268,14 +1279,14 @@ def orphan_steps():
          "the held compile did not start within 30 s" if not worker else
          f"{len(held)} holder(s); "
          f"{'no answer' if after is None else 'an outline' if 'result' in after else json.dumps(after.get('error'))[:70]} "
-         f"in {after_took:.1f} s")
+         f"in {after_took:.1f} s{', the worker gone before the kill' if worker in gone_first else ''}")
     step("73k", "a request the worker died holding, its pipes held, is refused",
          bool(second) and bool(second_held) and refused is not None
          and refused.get("error", {}).get("code") == -32603,
          "the held request's compile did not start within 30 s" if not second else
          f"{len(second_held)} holder(s); "
          f"{'no answer' if refused is None else json.dumps(refused.get('error') or refused.get('result'))[:70]} "
-         f"in {refused_took:.1f} s")
+         f"in {refused_took:.1f} s{', the worker gone before the kill' if second in gone_first else ''}")
 
 
 def restore_binary(backup, binary):

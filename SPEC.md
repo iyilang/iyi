@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,996 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 131,248 lines, none of it written in iyi |
+| iyi's own prelude | 25,002 lines, of which 4,650 are the library held to the 4,650 ceiling (6,666 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 131,423 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,996 lines
+> "No standard library worth the name" is still true of iyi's own 25,002 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,996 lines,
-primitives included, of which the library is 4,649.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 25,002 lines,
+primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,11 +299,11 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,649 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,650 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,016 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,665 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,666 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 131,248 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,996-line own prelude + 125,353 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 131,423 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 25,002-line own prelude + 125,353 in std |
 | Specs | 21,146 lines | 15,689 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -4033,6 +4033,9 @@ hash, std's and already checked, 0 to 8. Now:
   (`Pointer#copy_run`) is in the runtime's file, because a check in it put
   a load and a branch on every byte of a short string's copy: a join of
   1,000,000 strings took 6.6 ms against 5.1 with it, 5.5 to 6.6 without.
+  A copy of one run or less calls `copy_run` without the loop of runs,
+  whose check sits at its latch and so ran once even for a copy of three
+  bytes (below).
 - *Recursion.* Before optimisation the compiler finds call cycles among
   the functions that check (Tarjan over direct calls, across modules) and
   puts a call to `__iyi_preempt_entry` at each one's entry, which LLVM is
@@ -4100,7 +4103,7 @@ compiler and prelude before (load 4 to 5): a sort of 1,000,000 `Int64`s
 to 23.6 and 22.6 to 23.5; a join of 1,000,000 strings 5.0 to 5.4 and 5.5
 to 6.6; 64 copies of 16 MB, 1,000,000 appends of 7 bytes and a JSON parse
 of 2.4 MB within the noise; `fib(32)` against its `@[NoPreempt]` twin
-5.80 to 6.27 against 5.80 to 5.85. The sort's and the join's 4 to 9% are
+5.80 to 6.27 against 5.80 to 5.85. The sort's and the join's 4 to 9% were
 over the 2 to 3% aimed at. A turn count was tried in their place: a loop
 with no loop inside it, at most 512 instructions and no call looked at the
 word every 256 turns (every 16 with calls), the count an add and a test in
@@ -4108,13 +4111,54 @@ a register. Measured the same way (load 5): the sort 57.2 to 59.0 ms
 before and 61.1 to 63.9 with the count, the join 5.07 to 5.31 and 6.11 to
 6.45, the `tight` sums 1.07x to 1.13x their twins against 1.06x to 1.12x
 with a look at every turn. It bought nothing, so every turn looks, the
-cheaper of the two. Those runs also had a `copy_from` that skipped its run
-loop for a short copy, undone with the count.
+cheaper of the two.
+
+*Where the join's time went.* A check sits at the latch, before the
+branch that leaves the loop or turns, so a loop that runs once reads the
+word once. `String::Builder#<<` copies through `copy_from`, whose loop of
+runs a short string takes once: the disassembly of the release build
+showed `cmpq $0, %fs:(%r12)` on the way out of every append, so a join
+read the word three times a string - twice in its appends and once in its
+own loop. Measured against the same program with the prelude's library
+unchecked, which takes the sort and join out of what is compared (Linux,
+a 12-vCPU VM, release, best of seven inside a parallel task, 21
+interleaved rounds, load 0.5 to 0.8): the sort 1.011x to 1.016x and the
+join 1.095x to 1.097x. Now `copy_from` calls `copy_run` directly for a
+copy of one run or less: the sort 0.993x to 0.995x and the join 0.974x to
+0.978x, the join 5.43 ms against 6.83 before. Two other placements were
+measured and dropped. A check on the edge back to the header alone, found
+by a dominator tree after optimisation, read nothing on the way out, but
+its block between latch and header cost the sort 1.06x to 1.08x and the
+join 1.09x to 1.10x (load 5 to 6).
+
+*darwin's anchor.* darwin arm64's check reads through a pair the
+accessor's call makes (above), and that call was in the entry block of
+every function with a checked loop, so every append paid it, run or not.
+On an M2 Pro (macOS 26.6, the user's machine, best of seven, eleven
+interleaved rounds, load 3 to 18) the join took 1.37x to 1.43x the
+unchecked one and the sort 1.10x to 1.12x. The pair is now made where the
+outermost loop around its checks is entered - the one block into the
+loop's header from outside, or the header's immediate dominator
+(`PreemptChecks::Loops`, natural loops from a dominator tree): the join
+1.08x to 1.18x over three runs and the sort 1.08x to 1.14x. Linux's and
+Windows' anchors, a constant and a load, stay in the entry block; the
+Linux object is byte-identical. What darwin has left is the read: a probe
+whose check loaded a plain global, preempting nothing, cost the sort
+1.05x to 1.07x and the join 1.07x to 1.12x, and the same build with its
+loops marked but no check put in 0.98x to 1.01x. Not under 3% there.
+
 `bench/parallel_exercise.sh` holds each
 step plain and release, the audit, and three broken copies by name: the
 library written into prelude.iyi (sort, copy, growth and join each wait
 316 to 1,022 ms), a `@[NoPreempt]` recursion, and the scheduler's file
-renamed, which the audit names.
+renamed, which the audit names. Its `copy_checks` reads the release IR of
+`copy_bytes` (bench/parallel_preempt_lib.iyi, `copy_from` as a function
+of its own): some path from the entry must copy and return through no
+check, the loop of runs must still check, and on darwin the entry block
+must not call the accessor. A `copy_from` without the way around its loop
+fails it at "every copy in copy_bytes passes a check", and on darwin a
+build with `-Dpreempt_anchor_entry`, the anchor where it was, at "the
+entry block of copy_bytes calls the thread-local accessor".
 
 **Not built, and said so.** A copy inside the allocator - a `realloc` of a
 large buffer, which `String::Builder` grows by - is not preempted, nor is
@@ -11119,7 +11163,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,996-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 25,002-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

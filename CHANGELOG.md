@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **darwin's mark helpers park: an idle program no longer burns every
+  core.** They spun on the generation forever (`yield` is ARM's hint,
+  not a syscall): `bench/web_cores.iyi`'s server, idle after a second of
+  load, used 88.9 s of CPU in 10 s on a ten-core M2 Pro (macOS 26.6) and
+  19.9 s on CI's three-core macos-14; it uses 0.0 on both now. A helper
+  spins `SPIN_BEFORE_PARK_NS` - 250 µs on darwin, chosen from fifty
+  microseconds to five milliseconds; fifty stays on Linux and Windows -
+  and then sleeps on the generation word in `os_sync_wait_on_address`,
+  woken by one `os_sync_wake_by_address_all` when the sleepers count
+  says anyone sleeps. On the M2, best of five: check_version at eight
+  workers 64,331 requests a second to 114,495 (p99 44.7 ms to 0.92),
+  binary trees 0.281 s to 0.144, churn 0.076 to 0.060. On macos-14, best
+  (median) of nine: binary trees 0.177 s (0.199) to 0.192 (0.205), churn
+  0.067 (0.078) to 0.064 (0.075), check_version 37,743 (33,385) to
+  40,870 (37,366). The futex is libSystem's public one, so darwin
+  programs need macOS 14.4 (CI's macos-14 builds say `minos` 14.0); two
+  names join `FLOOR_BASE_DARWIN` and the exact darwin lists.
+  `bench/parallel_mark.sh` now checks on every platform that a second of
+  sleep after the marks costs under 100 ms of CPU (0 ms on Linux,
+  Windows and both Macs), and a copy whose spin never gives up is caught
+  (2.0 s on macos-14, 3.0 on windows-2025, 9.2 on twelve-core Linux);
+  its spin-length proof counts a hundred hints a nanosecond of the spin,
+  since 200,000 hints were 113 µs on macos-14 and did not fire.
+
 - **`bench/parallel_exercise.sh` tells the accessor check from the cheap
   one in the IR, not by the clock.** Its proof that a check calling the
   thread-local accessor at every back-edge is refused failed on master's
@@ -25294,7 +25318,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,996-line library and nothing else. Every other
+  written against iyi's own 25,059-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

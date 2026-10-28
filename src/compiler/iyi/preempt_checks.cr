@@ -76,11 +76,23 @@ module Iyi::PreemptChecks
       unless latches.empty? && calls.nil?
         sites = latches.map { |latch| {latch, LibLLVM.get_basic_block_terminator(latch)} }
         if calls
+          # The instruction after each call that is not itself one: two
+          # functions on a cycle inlined one into the other leave their
+          # calls side by side, and the first call's next instruction was
+          # the second, erased before its check went in - a check on a
+          # freed instruction, which crashed the compiler on
+          # bench/std_http_latency.iyi in --release. Two calls in a row
+          # make one check.
+          erased = calls.map(&.address).to_set
+          seen = Set(UInt64).new
           calls.each do |call|
             following = LibLLVM.get_next_instruction(call)
-            LibLLVM.instruction_erase_from_parent(call)
-            sites << {LibLLVM.get_instruction_parent(following), following}
+            while erased.includes?(following.address)
+              following = LibLLVM.get_next_instruction(following)
+            end
+            sites << {LibLLVM.get_instruction_parent(following), following} if seen.add?(following.address)
           end
+          calls.each { |call| LibLLVM.instruction_erase_from_parent(call) }
         end
         # Every anchor first, on the function as optimisation left it, and
         # then every check, which splits the blocks it is in.

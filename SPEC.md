@@ -6257,6 +6257,17 @@ real collection now costs not one library. Crystal's own `hello`
 additionally pulls `libiconv`, which iyi's `String` has no reason to
 want, and the compiler dropped that one too (`-Dwithout_iconv`).
 
+Two more of libSystem's names set darwin's floor in versions. The collector's mark
+helpers sleep on `os_sync_wait_on_address` and are woken by
+`os_sync_wake_by_address_all`, libSystem's public futex, which is macOS
+14.4's: **a darwin arm64 program iyi builds needs macOS 14.4 or later.** A
+program built on macOS 14 says it runs on 14.0, the host's major version, and
+dyld refuses it on 14.0 to 14.3 for the missing symbol. A weak import with the
+old spin as its fallback would lift that, and iyi has no weak linkage to
+declare it with; the private `__ulock_wait` beneath the futex has no 14.4, and
+every program would carry a private name (GC_DESIGN.md, "darwin's helpers
+park").
+
 So **an own-prelude program's dependency is the platform libc and nothing
 else**, and what that is worth depends on which artifact is being read, so this
 section says which. The gate checks this mode at two layers.

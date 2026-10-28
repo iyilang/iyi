@@ -1504,22 +1504,28 @@ collections and wakes it late (binary trees' median 0.257 s at fifty,
 0.230 at a hundred, 0.205 at 250). The pipe refused before parked
 between every collection with no spin first, and cost the three-core
 runner binary trees 1.07 s against 0.23; with the spin first the cost
-there is the table's. What it costs on the M2: `concurrent_mark`'s
-stopped mark of a 200,000-cell chain, five explicit collections back to
-back with the mark alone, read 2.6 ms a pause beside spinning helpers
-(after a first, cold run) and 5.1 to 6.0 ms beside parked ones - a
-sweep round's spinning helpers see the generation turn inside the
-stop, a parked one is woken
-after the lock is let go [INFERENCE: the next stop then sweeps what they
-had not reached; unmeasured]. The second stop beside the program fell
-the other way, from milliseconds (108 µs to 10.1 ms across five runs) to
-about 300 µs [INFERENCE: its threads no longer queued behind nine
-spinners for a core]. The wake is the program's own thread's: at most
-25 µs on the M2.
+there is the table's. One cost seemed to stay on the M2:
+`concurrent_mark`'s stopped mark of a 200,000-cell chain, five explicit
+collections back to back with the mark alone, read 2.6 ms a pause
+beside spinning helpers and 5.1 to 6.0 ms beside parked ones in the
+interleaved runs above. It is not the park's. The gate's own program,
+built both ways and run alternately, reads 2,592 to 2,615 µs a pause
+parked and 2,594 to 2,656 spinning, each after a first run of 5.1 to
+6.6 ms, and no sweep is paid inside any of those pauses (the
+guess was that a parked sweep round left the next stop arenas to
+sweep; the count of them is zero both ways). The second stop beside
+the program fell, from 108 µs to 10.1 ms across five runs to about
+300 µs [INFERENCE: its threads no longer wait behind nine spinners for
+a core]. The wake is the program's own thread's: at most 25 µs on the
+M2.
 
 Why this futex. It is public from macOS 14.4, and a program built on
 macOS 14 says it runs on 14.0 (`minos` 14.0 on CI's 14.8.9; 26.0 on the
-M2), so iyi's darwin programs need 14.4 now. `__ulock_wait`, the private
+M2), so iyi's darwin programs need 14.4 now. A weak import, the old spin
+its fallback where the name is absent, would keep 14.0 to 14.3, and iyi
+has no weak linkage: no annotation declares one and codegen gives a
+`lib` function no linkage but the external one, so the floor is stated
+(README, SPEC.md III.9) rather than worked around. `__ulock_wait`, the private
 call beneath it - a parked helper's frame under `sample` is
 `__ulock_wait2`, and the wake's disassembly is a call to `__ulock_wake` -
 is the same futex without the 14.4, but every program would carry a
@@ -1534,9 +1540,9 @@ wake. `bench/parallel_mark.sh` holds the property on all three
 platforms: a second of sleep after the marks costs the process under a
 tenth of a core's second (0 ms on Linux, Windows and both Macs). The
 same second read 8.6 to 8.9 s with nine helpers on the M2 under the
-forever spin, and the gate's copy whose spin never gives up reads 2.0 s
-with two on macos-14, 3.0 s with three on windows-2025 and 9.2 s with
-eleven on a twelve-core Linux machine.
+forever spin, and the gate's copy whose spin never gives up reads 8.8 s
+with nine there, 2.0 s with two on macos-14, 3.0 s with three on
+windows-2025 and 9.2 s with eleven on a twelve-core Linux machine.
 
 **This machine's cores are not alike, and the race's numbers move
 with placement.** The Ryzen AI 9 465 has four Zen 5 cores and six Zen

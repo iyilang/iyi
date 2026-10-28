@@ -8,7 +8,10 @@
 **A language built for Developer & Agentic Experience, Portability, Performance,
 and Efficiency.** (*iyi* is Turkish for "good".)
 
-Install the latest release into `~/.local` (Linux x86-64, macOS arm64):
+Install the latest release into `~/.local` (Linux x86-64, macOS arm64;
+a program built for macOS runs on macOS 14.4 or later, whose public
+futex its collector's helpers sleep on - GC_DESIGN.md, "darwin's helpers
+park"):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | sh

@@ -514,15 +514,24 @@ EOF
       fi
     fi
 
-    # 2e. What a killed `iyi run` leaves behind. On POSIX the runner
+    # 2e. What an ended `iyi run` leaves behind. On POSIX the runner
     # traps SIGTERM and passes it on; Windows delivers nothing to trap
-    # and `TerminateProcess` — which is what an editor, a CI step and
-    # `taskkill /F` use — runs no code in the runner at all. Measured
-    # before the job object: killing the runner left the program alive
+    # and TerminateProcess runs no code in the runner at all. Measured
+    # before the job object: ending the runner left the program alive
     # and its port LISTENING, and the next build of the same program
     # failed to link, because the orphan holds its own exe open. The
     # runner puts the program in a job with
     # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE now, so the kernel ends it.
+    #
+    # MSYS2's `kill -9` cannot be used here: its runtime walks process
+    # trees (exit_process_tree) and signals descendants itself, which
+    # made the job object check vacuous, and in CI runs 40598101650
+    # (exit 2304 = SIGKILL * 256) and 40283017680 (exit 3840 =
+    # SIGTERM * 256) terminated the step's top-level shell. The gate
+    # targets the runner's native Windows PID directly with taskkill
+    # without /T, ending only the runner. A failure proof starts the
+    # same program under cmd.exe and ends cmd.exe alone to prove that
+    # without a job object the port remains listening.
     echo
     echo "== A killed runner takes its program with it =="
     cat > "$WORK/holds.iyi" <<'EOF'
@@ -552,16 +561,98 @@ EOF
       sed -n '1,5p' "$WORK/holds.out"
       status=1
     else
-      # `kill -9` from this shell is TerminateProcess on a native
-      # process: the unblockable kill, which is the whole point.
-      kill -9 "$runner" 2>/dev/null || true
-      wait "$runner" 2>/dev/null || true
-      sleep 3
-      if netstat -ano | grep "LISTENING" | grep -q ":$held "; then
-        echo "  the program outlived its runner and still holds port $held"
+      runner_winpid="$(cat "/proc/$runner/winpid" 2>/dev/null || true)"
+      runner_image="$(cat "/proc/$runner/exename" 2>/dev/null || true)"
+      [ -z "$runner_image" ] && runner_image="$(readlink "/proc/$runner/exe" 2>/dev/null || true)"
+      runner_image_lower="$(echo "$runner_image" | tr '[:upper:]' '[:lower:]')"
+      if [ -z "$runner_winpid" ]; then
+        echo "  could not read Windows PID for runner from /proc/$runner/winpid"
+        status=1
+      elif ! case "$runner_image_lower" in *[/\\]iyi | *[/\\]iyi.exe | iyi | iyi.exe) true ;; *) false ;; esac; then
+        echo "  the runner process was not iyi.exe: $runner_image"
         status=1
       else
-        echo "  the runner was killed and port $held came back"
+        # Taskkill on the runner's native PID without /T ends only iyi.exe.
+        # The child process ends if and only if the kernel closes the job.
+        taskkill //F //PID "$runner_winpid" >/dev/null 2>&1 || true
+        wait "$runner" 2>/dev/null || true
+        sleep 3
+        if netstat -ano | grep "LISTENING" | grep -q ":$held "; then
+          echo "  the program outlived its runner and still holds port $held"
+          status=1
+        else
+          echo "  the runner's own process (iyi.exe) was ended and port $held came back"
+        fi
+      fi
+    fi
+
+    # Failure proof: a parent without a job object leaves its program
+    # behind when ended alone. Building holds.exe and starting it under
+    # cmd.exe proves the positive test cannot pass by accident.
+    if ! "$IYI" build -o "$WORK/holds.exe" "$WORK/holds.iyi" > "$WORK/holds_build.log" 2>&1; then
+      echo "  failure proof: the holds probe did not build"
+      tail -5 "$WORK/holds_build.log"
+      status=1
+    else
+      cmd //c "$(cygpath -w "$WORK/holds.exe")" > "$WORK/bare.out" 2>&1 &
+      parent=$!
+      bare_port=""
+      for _ in $(seq 1 90); do
+        bare_port="$(sed -n 's/^listening on \([0-9]*\)$/\1/p' "$WORK/bare.out")"
+        [ -n "$bare_port" ] && break
+        sleep 1
+      done
+      if [ -z "$bare_port" ]; then
+        echo "  failure proof: the program never came up under cmd.exe"
+        sed -n '1,5p' "$WORK/bare.out"
+        status=1
+      else
+        parent_winpid="$(cat "/proc/$parent/winpid" 2>/dev/null || true)"
+        parent_image="$(cat "/proc/$parent/exename" 2>/dev/null || true)"
+        [ -z "$parent_image" ] && parent_image="$(readlink "/proc/$parent/exe" 2>/dev/null || true)"
+        parent_image_lower="$(echo "$parent_image" | tr '[:upper:]' '[:lower:]')"
+        if [ -z "$parent_winpid" ]; then
+          echo "  failure proof: could not read Windows PID for parent from /proc/$parent/winpid"
+          status=1
+        elif ! case "$parent_image_lower" in *[/\\]cmd | *[/\\]cmd.exe | cmd | cmd.exe) true ;; *) false ;; esac; then
+          echo "  failure proof: the parent process was not cmd.exe: $parent_image"
+          status=1
+        else
+          taskkill //F //PID "$parent_winpid" >/dev/null 2>&1 || true
+          wait "$parent" 2>/dev/null || true
+          sleep 3
+          if ! netstat -ano | grep "LISTENING" | grep -q ":$bare_port "; then
+            echo "  failure proof: program port $bare_port did not stay open after parent cmd.exe ended"
+            status=1
+          else
+            echo "  failure proof: a parent with no job, ended the same way, leaves its program on port $bare_port"
+            orphan_pid="$(netstat -ano | grep "LISTENING" | grep ":$bare_port " | awk '{print $NF}' | tr -d '\r' | sort -u | head -n 1)"
+            if [ -n "$orphan_pid" ] && [ "$orphan_pid" -gt 0 ] 2>/dev/null; then
+              orphan_name="$(powershell -NoProfile -Command "(Get-Process -Id $orphan_pid -ErrorAction SilentlyContinue).ProcessName" 2>/dev/null | tr -d '\r' || true)"
+              if [ -z "$orphan_name" ]; then
+                orphan_name="$(tasklist //FI "PID eq $orphan_pid" //FO CSV //NH 2>/dev/null | tr -d '\r' | cut -d',' -f1 | tr -d '"' || true)"
+              fi
+              orphan_lower="$(echo "$orphan_name" | tr '[:upper:]' '[:lower:]')"
+              case "$orphan_lower" in
+                holds | holds.exe | *[/\\]holds | *[/\\]holds.exe)
+                  taskkill //F //PID "$orphan_pid" >/dev/null 2>&1 || true
+                  sleep 3
+                  if netstat -ano | grep "LISTENING" | grep -q ":$bare_port "; then
+                    echo "  failure proof: orphan process $orphan_pid on port $bare_port did not exit"
+                    status=1
+                  fi
+                  ;;
+                *)
+                  echo "  failure proof: orphan process $orphan_pid is not holds.exe: $orphan_name"
+                  status=1
+                  ;;
+              esac
+            else
+              echo "  failure proof: could not determine orphan PID listening on port $bare_port"
+              status=1
+            fi
+          fi
+        fi
       fi
     fi
 

@@ -1926,7 +1926,7 @@ class ProcessChild
         if queue >= 0
           # ident = the pid; EVFILT_PROC (-5), EV_ADD | EV_ONESHOT, NOTE_EXIT.
           change = __iyi_kevent_change(@pid, 0x800000000011FFFB_u64)
-          registered = ::LibC.kevent(queue, change.as(Void*), 1, Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
+          registered = ::LibC.kevent(queue, pointerof(change).as(Void*), 1, Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
           if registered == 0 && LibC.waitpid(@pid, pointerof(status), 1) == 0 # WNOHANG
             waited = IyiScheduler.wait_readable_current(queue)
             ProcessChild.sys_close(queue)

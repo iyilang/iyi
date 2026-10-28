@@ -3271,9 +3271,10 @@ module Iyi
       bc_flags_changed = true
       current_bc_flags = "#{@codegen_target}|#{@mcpu}|#{@mattr}|#{@link_flags}|#{@mcmodel}"
       # iyi: the back-edge checks go in after the bitcode is compared, so
-      # the flag that changes their form changes no bitcode, and a build
-      # with it reused the objects of one without (`preempt_checks`).
+      # the flags that change their form change no bitcode, and a build
+      # with one reused the objects of one without (`preempt_checks`).
       current_bc_flags += "|preempt_check_accessor" if @flags.includes?("preempt_check_accessor")
+      current_bc_flags += "|preempt_anchor_entry" if @flags.includes?("preempt_anchor_entry")
       bc_flags_filename = "#{output_dir}/bc_flags#{optimization_mode.suffix}"
       if File.file?(bc_flags_filename)
         previous_bc_flags = File.read(bc_flags_filename).strip
@@ -4111,9 +4112,13 @@ module Iyi
     # darwin's and Windows' checks as they were first, an accessor call at
     # every back-edge: the broken copy bench/parallel_exercise.sh catches in
     # the release build's IR, its tight loops' checks calling the accessor.
+    # `-Dpreempt_anchor_entry` makes darwin's anchor in the entry block, as
+    # it was before it moved to where loops are entered: the broken copy
+    # the same gate's short-copy step catches calling the accessor there.
     protected def preempt_checks(llvm_mod, flag : String?) : Nil
       return unless flag
       PreemptChecks.accessor_only = @flags.includes?("preempt_check_accessor")
+      PreemptChecks.anchor_at_entry = @flags.includes?("preempt_anchor_entry")
       PreemptChecks.run(llvm_mod, flag, @codegen_target.linux?, @codegen_target.architecture == "aarch64")
     end
 

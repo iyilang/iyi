@@ -278,14 +278,19 @@ end
   # the prelude has no Int16 or UInt32 to declare the struct's middle
   # fields with. Bytes 8..15 hold filter (-1 = EVFILT_READ), flags and
   # fflags, which as one little-endian word are 0x1FFFF for EV_ADD and
-  # 0x2FFFF for EV_DELETE; `data` and `udata` are zeroed explicitly so
-  # no byte of the struct rides on what malloc left behind.
-  def __iyi_kevent_change(fd : Int32, word : UInt64) : Pointer(UInt8)
-    change = Pointer(UInt8).malloc(32_u64)
-    change.as(Pointer(UInt64)).value = fd.to_u64
-    Pointer(UInt64).new(change.address + 8_u64).value = word
-    Pointer(UInt64).new(change.address + 16_u64).value = 0_u64
-    Pointer(UInt64).new(change.address + 24_u64).value = 0_u64
+  # 0x2FFFF for EV_DELETE; `data` and `udata` are zeroed explicitly.
+  #
+  # Answered by value, so the change is in its caller's frame for the
+  # `kevent` it is handed to, as the idle wait's timespec is. It was a
+  # 32-byte heap block, taken at every cross-thread wake (`ring`), every
+  # fd wait's add and every forget.
+  def __iyi_kevent_change(fd : Int32, word : UInt64) : UInt64[4]
+    change = uninitialized UInt64[4]
+    words = pointerof(change).as(Pointer(UInt64))
+    words[0] = fd.to_u64
+    words[1] = word
+    words[2] = 0_u64
+    words[3] = 0_u64
     change
   end
 {% elsif flag?(:win32) %}
@@ -1876,7 +1881,7 @@ class IyiScheduler
       LibC.PostQueuedCompletionStatus(Pointer(Void).new(target.pollfd.to_u64), 0_i32, 0_u64, target.wake_token.as(Void*))
     {% elsif flag?(:darwin) %}
       change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_TRIGGER)
-      LibC.kevent(target.pollfd.to_i32, change.as(Void*), 1,
+      LibC.kevent(target.pollfd.to_i32, pointerof(change).as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
     {% else %}
       one = 1_u64
@@ -1898,7 +1903,7 @@ class IyiScheduler
     {% elsif flag?(:darwin) %}
       return if st.wake_fd != 0_i64
       change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_ADD)
-      added = LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
+      added = LibC.kevent(pollfd.to_i32, pointerof(change).as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
       raise "kevent could not add the scheduler's doorbell" if added < 0
       st.wake_fd = 1_i64
@@ -2811,7 +2816,7 @@ class IyiScheduler
       # epoll's -EPERM below: ready now instead of dying, or a program
       # whose stdin is `< /dev/null` panics on its first wait.
       change = __iyi_kevent_change(fd, direction == 1 ? 0x1FFFF_u64 : 0x1FFFE_u64)
-      added = LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
+      added = LibC.kevent(pollfd.to_i32, pointerof(change).as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64)).to_i64
       return nil if added < 0 && LibC.error_location.value == 22
       raise "kevent add failed" if added < 0
@@ -3885,7 +3890,7 @@ class IyiScheduler
       fiber.next_io = nil
     {% elsif flag?(:darwin) %}
       change = __iyi_kevent_change(fiber.wait_fd, fiber.wait_dir == 1 ? 0x2FFFF_u64 : 0x2FFFE_u64)
-      LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
+      LibC.kevent(pollfd.to_i32, pointerof(change).as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
     {% else %}
       remaining = io_interest(fiber.wait_fd)
@@ -4812,7 +4817,7 @@ class IyiWorkers
         kq = LibC.kqueue
         raise "kqueue failed for the pool's monitor" if kq < 0
         change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_ADD)
-        added = LibC.kevent(kq, change.as(Void*), 1, Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
+        added = LibC.kevent(kq, pointerof(change).as(Void*), 1, Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
         raise "kevent could not add the pool's monitor's doorbell" if added < 0
         @@monitor_handle = kq.to_u64
       {% elsif flag?(:win32) %}
@@ -4929,7 +4934,7 @@ class IyiWorkers
       __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@monitor_parked).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
     {% elsif flag?(:darwin) %}
       change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_TRIGGER)
-      LibC.kevent(@@monitor_handle.to_i32, change.as(Void*), 1, Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
+      LibC.kevent(@@monitor_handle.to_i32, pointerof(change).as(Void*), 1, Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
     {% elsif flag?(:win32) %}
       LibC.ReleaseSemaphore(Pointer(Void).new(@@monitor_handle), 1_i32, nil)
     {% end %}

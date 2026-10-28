@@ -25,6 +25,38 @@
   (2.0 s on macos-14, 3.0 on windows-2025, 9.2 on twelve-core Linux);
   its spin-length proof counts a hundred hints a nanosecond of the spin,
   since 200,000 hints were 113 µs on macos-14 and did not fire.
+- **A short copy passes no preemption check, and the library's join
+  costs nothing for its checks on Linux.** `Pointer#copy_from` calls its
+  run directly for a copy of a million elements or less; its loop of runs
+  checked at the latch, so every `String::Builder#<<` read the word once
+  and a join of 1,000,000 strings three times a string. Against the same
+  program with the library unchecked (Linux, release, best of seven, 21
+  interleaved rounds, load 0.5 to 0.8): the join 1.095x to 1.097x before
+  and 0.974x to 0.978x after (5.43 ms against 6.83), the sort of
+  1,000,000 `Int64`s 1.011x to 1.016x and 0.993x to 0.995x. A check on
+  the edge back to the header alone was measured too and dropped: sort
+  1.06x to 1.08x, join 1.09x to 1.10x (load 5 to 6).
+  `bench/parallel_exercise.sh`'s new `copy_checks` reads the release IR
+  of `copy_bytes` and fails a `copy_from` without the way around.
+
+- **darwin's check makes what it reads through where its loop is
+  entered, not at every function's entry.** The accessor call that gives
+  darwin arm64's check its slot and offset was in the entry block of every
+  function with a checked loop, so each append paid it. It now goes where
+  the outermost loop around the checks is entered (natural loops from a
+  dominator tree, `PreemptChecks::Loops`). On an M2 Pro (macOS 26.6, the
+  user's machine, eleven interleaved rounds, load 3 to 18) the join went
+  from 1.37x-1.43x to 1.08x-1.18x the unchecked one; the sort stays at
+  1.08x-1.14x, the check's own read (a plain-global probe: 1.05x-1.07x).
+  Linux's objects are byte-identical. `copy_checks` fails a build with
+  `-Dpreempt_anchor_entry` on darwin.
+
+- **darwin's kevent change is on the caller's stack.**
+  `__iyi_kevent_change` answers the 32 bytes by value instead of a heap
+  block, at every cross-thread wake (`ring`), fd add and forget. A
+  ping-pong between the main thread and one parallel task (200,000 round
+  trips, best of seven, five interleaved pairs, M2 Pro, load 8 to 14):
+  333,926-392,822 wakes/s before, 691,911-703,810 after.
 
 - **`bench/parallel_exercise.sh` tells the accessor check from the cheap
   one in the IR, not by the clock.** Its proof that a check calling the
@@ -25319,6 +25351,7 @@ the same flags.
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
   written against iyi's own 25,059-line library and nothing else. Every other
+  written against iyi's own 25,002-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

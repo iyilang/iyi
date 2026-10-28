@@ -24,10 +24,10 @@
 #           `-Dpreempt_off` the same as a `@[NoPreempt]` def, which a
 #           short task waits for
 #   cost    not run unless named: what the checks cost the library's own
-#           work - a sort, copies, hash inserts, a JSON parse, a join and a
-#           recursion - best of seven inside a parallel task, printed as
-#           times to compare against a build from before the library
-#           checked, and held to no bound here
+#           work - a sort, copies long and short, hash inserts, a JSON
+#           parse, a join and a recursion - best of seven inside a parallel
+#           task, printed as times to compare against a build from before
+#           the library checked, and held to no bound here
 #
 # With no step named every step but `cost` runs and nothing it measured is
 # printed. bench/parallel_exercise.sh runs it, and broken copies, each
@@ -66,6 +66,15 @@ import std/password::{Bcrypt}
     {% else %}
       fib(n)
     {% end %}
+  end
+
+  # `Pointer#copy_from`, a function of its own in the release build's IR,
+  # which bench/parallel_exercise.sh's `copy_checks` reads: a copy of one
+  # run or less passes no check, and on darwin calls no accessor. The cost
+  # step calls it with long counts and short ones, so neither is folded in.
+  @[NoInline]
+  def copy_bytes(to : Pointer(UInt8), from : Pointer(UInt8), count : Int32) : Nil
+    to.copy_from(from, count)
   end
 
   # A xorshift walk's values, the same every run.
@@ -234,8 +243,12 @@ import std/password::{Bcrypt}
         big = Slice(UInt8).new(16 * 1024 * 1024, 7_u8)
         into = Slice(UInt8).new(16 * 1024 * 1024, 0_u8)
         best_of("64 copies of 16 MB") do
-          64.times { into.copy_from(big) }
+          64.times { copy_bytes(into.to_unsafe, big.to_unsafe, into.size) }
           into[123].to_i64
+        end
+        best_of("1,000,000 copies of 1 to 8 bytes") do
+          1_000_000.times { |i| copy_bytes(into.to_unsafe + (i & 1023).to_i64, big.to_unsafe, (i & 7) + 1) }
+          into[1000].to_i64
         end
         best_of("1,000,000 appends of 7 bytes") do
           built = String.build do |io|

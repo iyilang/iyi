@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 131,514 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 25,065-line own prelude + 125,353 in std |
+| Library | 8,161 lines (3,551 of it core) | 25,065-line own prelude + 125,572 in std |
 | Specs | 21,146 lines | 15,806 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |

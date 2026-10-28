@@ -24,6 +24,17 @@
   `untrusted-late` 20 times and `untrusted-hold` once, with broken copies
   that close at once, linger without the shut, and linger ten seconds.
 
+- `bench/std_tls_exercise.sh` reads the alert s_server took from the
+  std/tls client once s_server has written it, five seconds at most,
+  before killing it. Two of darwin's stapling checks found no alert in
+  CI job 122532136003, the log holding the port probe's line alone:
+  s_server writes the alert after it reads it, and a client gone as soon
+  as its alert was sent left the gate to kill s_server first. With
+  s_server at nice 19 beside a busy loop on its CPU (Linux), such a
+  client's alert was written in 0 of 50 runs killed at once and in 50 of
+  50 awaited. The stapling checks waited for nothing, and `client_alert`
+  slept 300 ms.
+
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and
   of a `@[Share]` def - `Server.serve`'s, a router's - was checked only

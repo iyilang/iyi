@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **A `std/tls` connection that refuses its peer lets the alert arrive.**
+  After a fatal alert either end now shuts the socket's sending half and
+  reads and drops what the peer sent until the peer closes, a second and
+  64 KiB at most, then closes the socket. The server read on before,
+  without the shut; the client closed at once, and with a server's
+  records past its Finished still unread - 0.5-RTT data, tickets - the
+  close was a reset. `bench/std_tls_server.py`'s new `untrusted-late`
+  sends a certificate the client refuses and three full records of
+  0.5-RTT data in one write: it read alert 42 and then a reset in 100 of
+  100 refusals on Linux and 100 of 100 on darwin, and the alert and then
+  the end of the stream in 100 of 100 on each with the change. Linux and
+  darwin still hand over the alert, even read 300 ms after the reset;
+  Windows throws away what a reset connection received and had not read,
+  as the ECH oracle's client showed the std/tls server, which lost
+  ech_required in 18 and 15 of 20 runs. A peer that closes once it has
+  the alert ends the wait then - OpenSSL's s_server 0.2 ms after it on
+  darwin - and `untrusted-hold`, a server that sends a record every 50 ms
+  and never closes, has the refusal back after its second (1000 to 1005
+  ms on Linux and darwin). `bench/std_tls_exercise.sh` asks
+  `untrusted-late` 20 times and `untrusted-hold` once, with broken copies
+  that close at once, linger without the shut, and linger ten seconds.
+
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and
   of a `@[Share]` def - `Server.serve`'s, a router's - was checked only

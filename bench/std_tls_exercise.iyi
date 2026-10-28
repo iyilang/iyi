@@ -151,6 +151,10 @@ SCENARIOS = [
   {"hrr-hybrid", false, "a HelloRetryRequest for the X25519MLKEM768 share already sent (illegal_parameter)"},
 ]
 
+# Connections to untrusted-late, each refused with the server's 0.5-RTT
+# data still coming in.
+LATE_RUNS = 20
+
 # Resumption scenarios: a first connection through a TlsSession, which
 # must hold one ticket after it; then a second, which comes to "resumed",
 # "full" (a full handshake, the ticket declined), or the refusal named.
@@ -818,6 +822,46 @@ if args.size > 0 && args[0] == "scenarios"
   end
   puts "  #{held} handshakes held and echoed, #{refused} refused, each for its reason"
   puts "  the hybrid handshake not asked: the scripted server's cryptography has no ML-KEM (it has from 48, on an OpenSSL with it)" if skipped > 0
+  # A refusal with the server's records past its Finished still unread:
+  # untrusted-late's server writes its flight and three full records of
+  # 0.5-RTT data at once, more than the client's reads take before it
+  # refuses the certificate, and keeps what it read after them under
+  # the token in the name. The alert, then at once the end of the
+  # stream, each time: the client shuts its sending half and reads what
+  # was sent to the server's close (`TlsConnection#fail`).
+  late = 0
+  LATE_RUNS.times do |run|
+    token = hex_of(Random::Secure.random_bytes(6))
+    socket = IyiSocket.connect("127.0.0.1", port)
+    check socket.is_a?(IyiSocket), "untrusted-late: no connection to the scripted server"
+    next unless socket.is_a?(IyiSocket)
+    conn = TlsClient.over(socket, "untrusted-late-#{token}.tls.test", config, 3000)
+    said = conn.is_a?(TlsError) ? conn.message : "held"
+    check said.includes?("no certificate here issued CN=Other Root") && said.ends_with?("(bad_certificate)"), "untrusted-late: run #{run + 1}: refused with #{said.inspect}"
+    kept = args[1] + "/refusals/" + token
+    waited = 0
+    while !File.file?(kept) && waited < 3000
+      sleep(10)
+      waited = waited + 10
+    end
+    read = File.file?(kept) ? File.read(kept) : "nothing in 3 s"
+    check read == "alert 42, then the end of the stream", "untrusted-late: run #{run + 1}: the server read #{read}"
+    late = late + 1
+  end
+  puts "  untrusted-late: alert 42, then the end of the stream, in #{late} of #{LATE_RUNS} runs"
+  # A server that goes on sending and never closes holds the refusing
+  # client's linger to its bound, `LINGER_MS`, and no longer.
+  started = Time.monotonic_nanoseconds.to_i64
+  socket = IyiSocket.connect("127.0.0.1", port)
+  check socket.is_a?(IyiSocket), "untrusted-hold: no connection to the scripted server"
+  if socket.is_a?(IyiSocket)
+    conn = TlsClient.over(socket, "untrusted-hold.tls.test", config, 3000)
+    took = (Time.monotonic_nanoseconds.to_i64 - started) // 1000000_i64
+    said = conn.is_a?(TlsError) ? conn.message : "held"
+    check said.includes?("no certificate here issued CN=Other Root") && said.ends_with?("(bad_certificate)"), "untrusted-hold: refused with #{said.inspect}"
+    check took < 2000, "untrusted-hold: the refusal came back after #{took} ms, past its linger's second"
+    puts "  untrusted-hold: refused in #{took} ms, its linger given up at its second"
+  end
   resumed = 0
   RESUMPTIONS.each do |r|
     session = TlsSession.new

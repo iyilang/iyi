@@ -362,7 +362,10 @@
 # split across records has no record of another type between its pieces.
 # KeyUpdate is answered. `read` answers "" once the peer's close_notify
 # arrives; any other alert, or anything the protocol does not allow, is a
-# `TlsError` saying what, and the connection is closed.
+# `TlsError` saying what, and the connection is closed. A refusal of this
+# side's sends its alert, shuts the socket's sending half and reads what
+# the peer sent until it closes, for a second and 64 KiB at most, before
+# the socket closes: either end, every fatal alert (section 6.2).
 #
 # Closing (section 6.1). `close_write` sends close_notify and shuts the
 # socket's sending half, and reading goes on to the peer's own
@@ -1437,11 +1440,23 @@ pub abstract class TlsConnection
   # an alert the peer sent, whose sentence names no alert of this side's.
   # no_renegotiation goes as the warning it always is (RFC 5246 section
   # 7.2.2); every other, fatal.
-  # A server then reads and drops what the client goes on sending, until
-  # it closes, for at most `LINGER_BYTES` and `LINGER_MS` in all: a close
-  # with the client's flight unread is a reset, which can take the alert
-  # from the client's buffer before it is read - a client refused for its
-  # certificate would read "reset", not why.
+  # Then either end shuts its sending half, so the peer reads the alert
+  # and then the end of the stream, and reads and drops what the peer
+  # sent or goes on sending until it closes, `LINGER_BYTES` and
+  # `LINGER_MS` at most. A close with bytes unread, or one that bytes
+  # still on their way reach, is a reset, and Windows throws away what a
+  # reset connection received and had not read, the alert with it: a
+  # client refused for its certificate read "reset", not why, and the
+  # server lost a client's ech_required in 18 and 15 of 20 runs
+  # (bench/std_tls_ech_oracle.go). A client closed at once on a server's
+  # 0.5-RTT records reset the connection in each of 100 refusals on Linux
+  # and on darwin (bench/std_tls_server.py's untrusted-late), where the
+  # server still read the alert, even read 300 ms after the reset; shut
+  # and lingering, the alert and then the end of the stream in each of
+  # 100. A peer that closes once it has the alert ends the linger then -
+  # OpenSSL's s_server 0.2 ms after it, on darwin - and one that goes on
+  # sending and never closes holds a refusal for the second
+  # (untrusted-hold: 1000 to 1001 ms on Linux, 1001 to 1005 on darwin).
   protected def fail(error : TlsError) : TlsError
     @held = nil
     code = error.alert
@@ -1452,7 +1467,7 @@ pub abstract class TlsConnection
              else
                send_plain(TlsRecords::ALERT, content, first: false)
              end
-      linger if server_side? && !sent
+      linger unless sent
     end
     abort
     error
@@ -1461,16 +1476,20 @@ pub abstract class TlsConnection
   LINGER_BYTES = 65536
   LINGER_MS    =  1000
 
+  # Read into the inbox: what it held is past use once the connection
+  # has failed.
   private def linger : Nil
+    return if @socket.close_write
+    @inbox = Pointer(UInt8).malloc(INBOX_SIZE.to_u64) if @inbox.address == 0_u64
     until_ns = Time.monotonic_nanoseconds.to_i64 + LINGER_MS.to_i64 * 1000000_i64
     left = LINGER_BYTES
     while left > 0
       wait = (until_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
       break if wait <= 0
       @socket.read_timeout_ms = wait.to_i32
-      got = @socket.read(left < 16384 ? left : 16384)
-      break unless got.is_a?(String) && !got.empty?
-      left = left - got.bytesize
+      got = @socket.read(@inbox, left < INBOX_SIZE ? left : INBOX_SIZE)
+      break unless got.is_a?(Int32) && got > 0
+      left = left - got
     end
   end
 

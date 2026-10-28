@@ -2927,7 +2927,17 @@ prove_broken "a certificate required where it is optional" "FAIL mtls-optional-n
       return nil' '
       return nil' server-mtls-optional
 prove_broken "a refused client's flight left unread at the close" "FAIL mtls-late " \
-  '      linger if server_side? && !sent' '' server-mtls
+  '      linger unless sent' '' server-mtls
+# The client's own: closed at once on the server's 0.5-RTT records, or
+# reading them without shutting its sending half first, so the end comes
+# at the linger's second rather than with the alert; or lingering past it.
+prove_broken "a refusing client's close with the server's records unread" "untrusted-late: run 1: the server read" \
+  '      linger unless sent' '      linger if server_side? && !sent' scenarios
+prove_broken "a refusing client's sending half left open while it lingers" "then the end of the stream, " \
+  '    return if @socket.close_write
+' '' scenarios
+prove_broken "a refusing client lingering for ten seconds" "untrusted-hold: the refusal came back after" \
+  '  LINGER_MS    =  1000' '  LINGER_MS    = 10000' scenarios
 prove_broken "a client certificate with no CertificateVerify after it taken" "FAIL mtls-no-cv " \
   '    return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client'"'"'s CertificateVerify belongs", TlsAlert::UNEXPECTED_MESSAGE) unless verify[0] == 15_u8' '' server-mtls
 prove_broken "a client Certificate of any length searched" "FAIL mtls-long-chain " \

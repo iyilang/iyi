@@ -82,6 +82,10 @@ SCENARIOS = {
     "alpn-unoffered": "ALPN answered with a protocol not offered",
     "wrong-host": "a certificate for another name",
     "untrusted": "a certificate from a root the client does not trust",
+    # Named untrusted-late-<token>.tls.test; what this side read after the
+    # refusal goes to WORKDIR/refusals/<token>.
+    "untrusted-late": "that, then three full records of 0.5-RTT data in the same write: the client's alert read, then the end of the stream",
+    "untrusted-hold": "that, then a record of 0.5-RTT data every 50 ms for 5 s, nothing read and nothing closed",
     "expired": "a certificate past its end",
     "bad-record-mac": "the first protected record's tag one bit off",
     "oversize": "a ServerHello record past 2^14 + 256 bytes",
@@ -160,6 +164,8 @@ except Exception:
 TICKETS = {}
 NOW = dt.datetime.now(dt.timezone.utc)
 DAY = dt.timedelta(days=1)
+# untrusted-late's verdicts, by token: WORKDIR/refusals.
+REFUSALS = None
 
 
 def name(cn):
@@ -411,6 +417,9 @@ class Conn:
     def serve(self):
         ch, sid, suites, sni, share, alpn, exts = self.client_hello()
         s = sni.split(".")[0]
+        token = None
+        if s.startswith("untrusted-late-"):
+            s, token = "untrusted-late", s[len("untrusted-late-"):]
         transcript = ch
         if s == "alert":
             self.sock.sendall(plain(21, bytes([2, 40])))
@@ -603,6 +612,7 @@ class Conn:
         kind = {"rsa": "rsa", "cv-pkcs1": "rsa", "p384": "p384", "cv-wrong-curve": "p384", "ed25519": "ed25519",
                 "bad-cv-ed25519": "ed25519"}.get(s, "p256")
         leaf = {"wrong-host": self.pki.wrong_host, "expired": self.pki.expired, "untrusted": self.pki.untrusted,
+                "untrusted-late": self.pki.untrusted, "untrusted-hold": self.pki.untrusted,
                 "ku-no-sign": self.pki.no_sign}.get(s, self.pki.leaves[kind])
         sent = (leaf, self.pki.inter) * (6 if s == "cert-many" else 1)
         # Extensions on the leaf's entry (on every entry for cert-entry-ext):
@@ -658,6 +668,12 @@ class Conn:
             return
         if s == "trailing-after-finished":
             self.sock.sendall(writer.seal(22, flight + message(4, b"\x00" * 13)))
+            return
+        if s == "untrusted-late":
+            self.refused_late(schedule, hs, transcript, writer.seal(22, flight), reader, token)
+            return
+        if s == "untrusted-hold":
+            self.held_refusal(schedule, hs, transcript, writer.seal(22, flight))
             return
         if s == "fragmented":
             out = b""
@@ -880,6 +896,59 @@ class Conn:
             self.sock.sendall(writer.seal(23, b"echo:" + data))
         self.sock.sendall(writer.seal(21, b"\x01\x00"))
 
+    def refused_late(self, schedule, hs, transcript, flight, reader, token):
+        """untrusted-late: the flight, then three full records of 0.5-RTT
+        data (RFC 8446 section 2) under this side's application keys, in one
+        write - more than a read of the client's takes, so some of it is
+        still unread when the client refuses the certificate. What this side
+        reads after it goes to WORKDIR/refusals/<token>: the client's alert,
+        then the end of the stream; or a reset, which a client that closes
+        with bytes unread sends, before the alert or after it. The end comes
+        with the alert from a client that shuts its sending half after it,
+        and from one that does not only when its linger gives up, a second
+        later: past half a second, how long is named."""
+        assert token and token.isalnum(), f"a token of {token!r}"
+        master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
+        data = Cipher(schedule, schedule.derive(master, b"s ap traffic", transcript))
+        self.sock.sendall(flight + b"".join(data.seal(23, bytes(16384)) for _ in range(3)))
+        said = "no alert"
+        try:
+            header, body = self.record()
+            while header[0] == 20:
+                header, body = self.record()
+            type_, content = reader.open(header, body) if header[0] == 23 else (header[0], body)
+            said = f"alert {content[1]}" if type_ == 21 and len(content) == 2 else f"a record of type {type_}"
+            alerted = time.monotonic()
+            if self.buf or self.sock.recv(65536):
+                said += ", then more"
+            else:
+                after = round((time.monotonic() - alerted) * 1000)
+                said += ", then the end of the stream" + (f", {after} ms after it" if after >= 500 else "")
+        except EOFError:
+            said += ", then the end of the stream"
+        except OSError as e:
+            said += f", then {type(e).__name__}"
+        path = os.path.join(REFUSALS, token)
+        with open(path + ".part", "w") as f:
+            f.write(said)
+        os.replace(path + ".part", path)
+
+    def held_refusal(self, schedule, hs, transcript, flight):
+        """untrusted-hold: the flight, then a record of 0.5-RTT data every
+        50 ms for 5 s, nothing read and nothing closed until then - a peer
+        that would keep a refusing client lingering for as long as it
+        likes."""
+        master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
+        data = Cipher(schedule, schedule.derive(master, b"s ap traffic", transcript))
+        self.sock.sendall(flight)
+        until = time.monotonic() + 5
+        try:
+            while time.monotonic() < until:
+                time.sleep(0.05)
+                self.sock.sendall(data.seal(23, b"hold"))
+        except OSError:
+            pass
+
     def judge_psk(self, ch, exts):
         """A resumption's ClientHello, judged: its pre_shared_key last and
         offering one ticket this server issued, psk_dhe_ke its one mode, the
@@ -908,7 +977,10 @@ class Conn:
 
 
 def main():
+    global REFUSALS
     work = sys.argv[1]
+    REFUSALS = os.path.join(work, "refusals")
+    os.makedirs(REFUSALS, exist_ok=True)
     pki = Pki()
     with open(os.path.join(work, "roots.pem"), "wb") as f:
         f.write(pki.root.public_bytes(serialization.Encoding.PEM))

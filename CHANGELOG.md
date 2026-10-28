@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A refused TCP connect from a `--crystal` program on macOS 27 reported
+  success, and now raises `Socket::ConnectError`.** Non-blocking
+  `Socket#connect` on Unix waited for writability and retried `connect(2)`
+  treating `EISCONN` as success, hiding connection failures. The socket
+  error state is now inspected via `SO_ERROR` without retrying connect
+  (crystal-lang/crystal#17436, #17619).
+
 - **Fixed: macOS system libiconv handles invalid byte skip and shift states correctly.**
   macOS 14+ provides FreeBSD Citrus iconv without GNU extensions. Crystal::Iconv no
   longer appends //IGNORE on Darwin when using system libiconv, avoiding dropped

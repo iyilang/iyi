@@ -23,6 +23,11 @@
   ms on Linux and darwin). `bench/std_tls_exercise.sh` asks
   `untrusted-late` 20 times and `untrusted-hold` once, with broken copies
   that close at once, linger without the shut, and linger ten seconds.
+  `untrusted-late` sends a fourth record 300 ms after the three: Windows
+  closes a socket with bytes unread in order, and resets it only when
+  bytes come after the close, so without it the copy that closes at once
+  had the alert and the end of the stream read in each of 20 runs there
+  (CI job 122639709895).
 
 - `bench/std_tls_exercise.sh` reads the alert s_server took from the
   std/tls client once s_server has written it, five seconds at most,

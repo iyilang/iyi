@@ -900,17 +900,30 @@ class Conn:
         """untrusted-late: the flight, then three full records of 0.5-RTT
         data (RFC 8446 section 2) under this side's application keys, in one
         write - more than a read of the client's takes, so some of it is
-        still unread when the client refuses the certificate. What this side
-        reads after it goes to WORKDIR/refusals/<token>: the client's alert,
-        then the end of the stream; or a reset, which a client that closes
-        with bytes unread sends, before the alert or after it. The end comes
-        with the alert from a client that shuts its sending half after it,
-        and from one that does not only when its linger gives up, a second
-        later: past half a second, how long is named."""
+        still unread when the client refuses the certificate - and 300 ms
+        later a fourth, after a client that closes at once has closed. What
+        this side reads after it goes to WORKDIR/refusals/<token>: the
+        client's alert, then the end of the stream; or a reset, before the
+        alert or after it. Linux and darwin reset a socket closed with bytes
+        unread; Windows closes it in order, and resets it only when bytes
+        come after the close, which the fourth record does: without it a
+        client that closed at once had the alert and the end of the stream
+        read in each of 20 runs on Windows (CI job 122639709895). The end
+        comes with the alert from a client that shuts its sending half after
+        it, and from one that does not only when its linger gives up, a
+        second after it began: past half a second, how long is named."""
         assert token and token.isalnum(), f"a token of {token!r}"
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
         data = Cipher(schedule, schedule.derive(master, b"s ap traffic", transcript))
         self.sock.sendall(flight + b"".join(data.seal(23, bytes(16384)) for _ in range(3)))
+        time.sleep(0.3)
+        # A send to a reset connection is refused, and the refusal is the
+        # reset's one report: the reads after it end as if closed in order.
+        refused = ""
+        try:
+            self.sock.sendall(data.seal(23, bytes(16384)))
+        except OSError as e:
+            refused = f", the fourth record refused: {type(e).__name__}"
         said = "no alert"
         try:
             header, body = self.record()
@@ -930,7 +943,7 @@ class Conn:
             said += f", then {type(e).__name__}"
         path = os.path.join(REFUSALS, token)
         with open(path + ".part", "w") as f:
-            f.write(said)
+            f.write(said + refused)
         os.replace(path + ".part", path)
 
     def held_refusal(self, schedule, hs, transcript, flight):

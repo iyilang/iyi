@@ -787,11 +787,12 @@ Each one names the rule and the line to write.
 
 ## The samples
 
-Twenty-seven programs in [`samples/iyi`](samples/iyi). Nineteen document a
+Twenty-eight programs in [`samples/iyi`](samples/iyi). Twenty document a
 part of the design: `hello` (traits and `impl`), `modules` (`import` across
 files), `generics`, `errors`, `collections`, `immutable` (a shareable
 collection), `init_order`, `webapp`, `workers` (a pool and a typed pair of
-tasks), `derive`, `files`, `formatting`, `format` (format strings), `enums`,
+tasks), `cores` (`spawn_parallel`, a server on every core, `@[SafeReach]`),
+`derive`, `files`, `formatting`, `format` (format strings), `enums`,
 `io` (standard input a line at a time), `socket` (TCP on loopback), and
 `std_iterator`, `std_text` and `std_time`. `calc` is a language. The other
 seven — `basics`, `inventory`, `config`, `grid`, `shapes`, `sessions`,
@@ -918,7 +919,7 @@ not the library.
 | | |
 |---|---|
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
-| [`samples/iyi`](samples/iyi) | twenty-seven programs: nineteen documenting a part of it, seven being a first hour, and `calc`, a language |
+| [`samples/iyi`](samples/iyi) | twenty-eight programs: twenty documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
 | [`src/iyi`](src/iyi) | iyi's own library, 25,065 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |

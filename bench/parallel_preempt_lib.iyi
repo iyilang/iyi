@@ -68,6 +68,28 @@ import std/password::{Bcrypt}
     {% end %}
   end
 
+  # A shift that turns the other way for a negative count through its
+  # twin: a call cycle, so each has a check at its entry. Inlined into
+  # `mix` with constant counts, the branches fold away and the calls that
+  # stand for those checks until optimisation is done sit side by side.
+  # The pass took the instruction after the first call to be the second,
+  # erased by then, and put a check on it: a use of freed memory, which
+  # crashed the compiler on bench/std_http_latency.iyi in --release
+  # (MD5's compress had 64 such pairs) and built this file by luck. Built
+  # in --release by bench/parallel_exercise.sh, and `mix`'s answer held
+  # after the steps.
+  def shift_left(x : UInt64, n : Int32) : UInt64
+    n < 0 ? shift_right(x, 0 - n) : x.unsafe_shl(n.to_u64)
+  end
+
+  def shift_right(x : UInt64, n : Int32) : UInt64
+    n < 0 ? shift_left(x, 0 - n) : x.unsafe_shr(n.to_u64)
+  end
+
+  def mix(h : UInt64) : UInt64
+    shift_left(h, 3) ^ shift_right(h, 5) ^ shift_left(h, 7) ^ shift_right(h, 11)
+  end
+
   # `Pointer#copy_from`, a function of its own in the release build's IR,
   # which bench/parallel_exercise.sh's `copy_checks` reads: a copy of one
   # run or less passes no check, and on darwin calls no accessor. The cost
@@ -299,6 +321,17 @@ import std/password::{Bcrypt}
       step(name, quiet)
     end
   end
+  mixed = Atomic(Int64).new(0_i64)
+  group do |g|
+    g.spawn_parallel do
+      h = 7_u64
+      100.times { h = mix(h) &+ 1_u64 }
+      mixed.set(h.unsafe_to_i64)
+      0
+    end
+  end
+  # What a plain build and a release one both answered on Linux.
+  fail("mix: the cycle's answer is #{mixed.get}, where plain and release builds gave 170835095431268661") if mixed.get != 170835095431268661_i64
   puts "library preemption: every property held"
 {% else %}
   puts "library preemption: no pool on this target, nothing to hold"

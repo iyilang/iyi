@@ -1458,7 +1458,8 @@ live churn 0.095 against 0.091 at 173 MB resident against 187. That is
 where the release was cut.
 
 What the wall time was not, each measured: the helpers' park (the pipe
-was built, measured and refused; they spin as they did), the
+was built, measured and refused; they spun as they did until the
+bounded spin and the futex below), the
 thread-local (Mach-O keeps its accessor), the two hangs found on
 few-core machines (both fixed, both in this document's Stage 8 and 9
 sections), the 16-kilobyte page against `RELEASE_PAGES` (churn hands
@@ -1471,6 +1472,77 @@ once the wait is a slice. The mark's thread was not the wall either -
 it reads the same under both rules - but it was darwin's longest
 *pause*, and the rule is the measured bound there now: "Which thread a
 mark runs on is measured, not estimated" above has the numbers.
+
+**darwin's helpers park: a bounded spin, then the public futex.** The
+spin they kept had a price the race could not show: an idle program
+held a core per helper. `bench/web_cores.iyi`'s server, idle after a
+second of load, used 88.9 s of CPU in ten seconds of wall on a ten-core
+M2 Pro (macOS 26.6, nine helpers) and 19.9 s on CI's three-core
+macos-14 (two), and `sample` found the helpers in
+`IyiMark::helper_main`; under load the spinners had the workers' cores.
+darwin's helpers now do what Windows' do: spin `SPIN_BEFORE_PARK_NS` on
+the generation by the clock, then sleep - on the generation word itself,
+in `os_sync_wait_on_address`, the kernel comparing the word before it
+sleeps the helper, and the collector's wake is one
+`os_sync_wake_by_address_all`, made only when the sleepers count says
+somebody sleeps. Interleaved against the spinning helpers, best of five
+on the M2 and best (median) of nine on the three-core runner:
+
+| | M2 Pro, spinning | M2 Pro, parked | macos-14, spinning | macos-14, parked |
+|---|---|---|---|---|
+| idle CPU over 10 s after load | 88.9 s | 0.0 s | 19.9 s | 0.0 s |
+| check_version, 8 workers | 64,331 req/s, p99 44.7 ms | 114,495, p99 0.92 ms | 37,743 (33,385) | 40,870 (37,366) |
+| binary trees | 0.281 s | 0.144 s | 0.177 s (0.199) | 0.192 s (0.205) |
+| churn | 0.076 s | 0.060 s | 0.067 s (0.078) | 0.064 s (0.075) |
+
+The spin is darwin's own, a quarter of a millisecond, chosen from
+fifty microseconds to five milliseconds: on the M2 a long spin is cores
+the program wanted (binary trees 0.135 s at fifty, 0.173 at one
+millisecond, 0.274 at five; check_version 115,279, 104,986 and 81,834),
+and on three cores a short one parks a helper between a burst's
+collections and wakes it late (binary trees' median 0.257 s at fifty,
+0.230 at a hundred, 0.205 at 250). The pipe refused before parked
+between every collection with no spin first, and cost the three-core
+runner binary trees 1.07 s against 0.23; with the spin first the cost
+there is the table's. One cost seemed to stay on the M2:
+`concurrent_mark`'s stopped mark of a 200,000-cell chain, five explicit
+collections back to back with the mark alone, read 2.6 ms a pause
+beside spinning helpers and 5.1 to 6.0 ms beside parked ones in the
+interleaved runs above. It is not the park's. The gate's own program,
+built both ways and run alternately, reads 2,592 to 2,615 µs a pause
+parked and 2,594 to 2,656 spinning, each after a first run of 5.1 to
+6.6 ms, and no sweep is paid inside any of those pauses (the
+guess was that a parked sweep round left the next stop arenas to
+sweep; the count of them is zero both ways). The second stop beside
+the program fell, from 108 µs to 10.1 ms across five runs to about
+300 µs [INFERENCE: its threads no longer wait behind nine spinners for
+a core]. The wake is the program's own thread's: at most 25 µs on the
+M2.
+
+Why this futex. It is public from macOS 14.4, and a program built on
+macOS 14 says it runs on 14.0 (`minos` 14.0 on CI's 14.8.9; 26.0 on the
+M2), so iyi's darwin programs need 14.4 now. A weak import, the old spin
+its fallback where the name is absent, would keep 14.0 to 14.3, and iyi
+has no weak linkage: no annotation declares one and codegen gives a
+`lib` function no linkage but the external one, so the floor is stated
+(README, SPEC.md III.9) rather than worked around. `__ulock_wait`, the private
+call beneath it - a parked helper's frame under `sample` is
+`__ulock_wait2`, and the wake's disassembly is a call to `__ulock_wake` -
+is the same futex without the 14.4, but every program would carry a
+private name, which this document refused for the stop's park. A Mach
+semaphore is public everywhere, four names with `mach_task_self_`, and a
+trap per sleeper in a wake the program's thread pays. A condition
+variable is ruled out by the stop: no caller of the wake runs in a
+signal handler, but a program thread can be stopped inside the wake
+(`wake_sweep_round` runs after the runtime lock is let go), and a thread
+parked holding the condition's mutex would hold the collector's next
+wake. `bench/parallel_mark.sh` holds the property on all three
+platforms: a second of sleep after the marks costs the process under a
+tenth of a core's second (0 ms on Linux, Windows and both Macs). The
+same second read 8.6 to 8.9 s with nine helpers on the M2 under the
+forever spin, and the gate's copy whose spin never gives up reads 8.8 s
+with nine there, 2.0 s with two on macos-14, 3.0 s with three on
+windows-2025 and 9.2 s with eleven on a twelve-core Linux machine.
 
 **This machine's cores are not alike, and the race's numbers move
 with placement.** The Ryzen AI 9 465 has four Zen 5 cores and six Zen

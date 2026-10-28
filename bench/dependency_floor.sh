@@ -206,6 +206,16 @@ COMPILER="$REPO/.build/iyi"
 # stream - standard input, a pipe, a socket - links the name, and only
 # standard input makes the call; Linux's epoll refuses a regular file
 # and says the same by syscall.
+# `os_sync_wait_on_address` and `os_sync_wake_by_address_all` joined with
+# the mark helpers' park (GC_DESIGN.md, "darwin's helpers park"): a helper
+# with no work spins SPIN_BEFORE_PARK_NS and then sleeps on the
+# generation word, where it had spun on that word forever and an idle
+# program held every core. They are libSystem's public futex, in
+# `FLOOR_BASE_DARWIN` because every program's collector reaches them.
+# `__ulock_wait`, the private call they wrap, was the other futex; a
+# Mach semaphore was the other public park, four names with
+# `mach_task_self_` and a trap per sleeper woken. Linux's park is the
+# futex syscall and Windows' kernel32's semaphore, so neither list moved.
 ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawn_file_actions_addinherit_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill getpid _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist fstat64"
 # `std/system_roots` reads the roots darwin trusts, which are kept behind
 # Security.framework and nowhere else - no file holds them - and arrive in

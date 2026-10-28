@@ -3,13 +3,15 @@
 #
 #     bash bench/parallel_mark.sh
 #
-# Nine steps, six of them failure proofs:
+# Ten steps, seven of them failure proofs:
 #   1. The program holds, release: a million-node tree survives five marks
 #      alone and five with helpers, and the helpers blackened nodes; a
 #      mark's round of permits, closed, gives none to a late helper; the
 #      pool holds a handful of pieces after them; a worker's stack grew to
-#      hold a 300,000-wide object marked alone; and, on Linux and Windows,
-#      a helper with no work spins fifty microseconds before it parks.
+#      hold a 300,000-wide object marked alone; once the marks are over,
+#      a second of sleep costs the process under a tenth of a core's
+#      second, every helper parked; and a helper with no work spins
+#      SPIN_BEFORE_PARK_NS before it parks.
 #   2. The two pause means, printed: alone against with helpers.
 #   3. Failure proof: the marker's donation of its stack's bottom removed
 #      from a copy of the prelude; the helpers wake and find nothing, and
@@ -20,13 +22,15 @@
 #      by name, on the wide object.
 #   6. Failure proof: the spin before the park counted in pause hints, far
 #      past the bound on any machine; the park check names its length.
-#   7. Failure proof: a close that leaves the round's permits open; the
+#   7. Failure proof: the spin before the park never gives up, as darwin's
+#      helpers spun until they parked; the idle check names the CPU.
+#   8. Failure proof: a close that leaves the round's permits open; the
 #      late take succeeds, and the permits check says so.
-#   8. A helper a round late is counted: on a copy of the prelude where
+#   9. A helper a round late is counted: on a copy of the prelude where
 #      every helper waits between its wake and its permit, and the
 #      collector after opening a mark's permits, 200 back-to-back
 #      collections with helpers end, in each of five runs.
-#   9. Failure proof: that copy with the permits opened before the
+#  10. Failure proof: that copy with the permits opened before the
 #      mark's counts are reset, as every round had them; it never ends,
 #      and the bound ends it.
 set -u
@@ -78,7 +82,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the mark, alone and with helpers ($CORES cores here)"
-grep -E '^(tree|permits|mark|pool|stack|park):' answers.txt | sed 's/^/  /'
+grep -E '^(tree|permits|mark|pool|stack|idle|park):' answers.txt | sed 's/^/  /'
 
 # $1 label, $2 awk program over the prelude, $3 the phrase the failing check
 # prints, $4 the exit code expected.
@@ -126,17 +130,27 @@ prove_fails "a stack that will not grow dies by name" \
   '{ if ($0 ~ /^        return IyiHeap\.read64\(w \+ W_STACK\) if need <= cap$/) { print "        IyiRoots.fatal(\"iyi: a mark worker'"'"'s stack overflowed\\n\") if need > cap"; print; next } print }' "stack overflowed" 1
 
 # A spin counted in pause hints and not by the clock, long enough on any
-# machine: the check reads the spin's length and names it.
-case "$(uname -s)" in
-  Darwin)
-    step "failure proof: a spin before the park that ignores the clock is refused"
-    echo "  not here: darwin's helpers spin without parking, so the spin before a park is Linux's and Windows'"
-    ;;
-  *)
-    prove_fails "a spin before the park that ignores the clock is refused" \
-      '{ sub(/spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "spins >= 200000_u64"); print }' "park:" 1
-    ;;
-esac
+# machine: the check reads the spin's length and names it. A hundred
+# hints for every nanosecond the clock allows, which is past the check's
+# five times wherever a hint costs more than 0.05 ns. It was 200,000
+# hints, 4.4 ms on a twelve-core Linux machine and 3.6 on a four-core
+# Windows runner, and 113 us on CI's three-core M1, a hint there being
+# 0.56 ns: inside the bound, and the proof did not fire.
+prove_fails "a spin before the park that ignores the clock is refused" \
+  '{ sub(/spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "spins >= 100_u64 * SPIN_BEFORE_PARK_NS"); print }' "park:" 1
+
+# A helper that never parks: the spin before the park never gives up,
+# which is what darwin's helpers did until they parked. The second of
+# sleep after the marks is then a second of every helper's CPU, and the
+# idle check names it - on every platform, since every platform's park
+# begins with that spin.
+if [ "$CORES" -gt 1 ]; then
+  prove_fails "helpers that spin forever once the marks are over are refused" \
+    '{ sub(/return seen if spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "return seen if false"); print }' "idle:" 1
+else
+  step "failure proof: helpers that spin forever once the marks are over are refused"
+  echo "  one core here: the runtime starts no helper, so there is none to spin"
+fi
 
 # The round's close leaves its permits where they were: a helper waking
 # after the wait takes one, on any machine and any core count.

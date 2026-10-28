@@ -309,7 +309,7 @@ case "$(uname -s)" in
     # kernel32's `VirtualAlloc` and `VirtualFree`, so it may add none.
     allowed_symbols=""
     ;;
-  *) allowed_symbols="__error _tlv_bootstrap backtrace backtrace_symbols_fd pipe pthread_create pthread_join pthread_kill sigaction sigaltstack sysctlbyname read close _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime clock_gettime_nsec_np exit kevent kqueue mmap munmap pthread_get_stackaddr_np pthread_self write" ;;
+  *) allowed_symbols="__error _tlv_bootstrap backtrace backtrace_symbols_fd pipe pthread_create pthread_join pthread_kill sigaction sigaltstack sysctlbyname read close _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime clock_gettime_nsec_np exit kevent kqueue mmap munmap os_sync_wait_on_address os_sync_wake_by_address_all pthread_get_stackaddr_np pthread_self write" ;;
 esac
 allowed_libs="libSystem libc.so ld-linux libgcc_s"
 

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 24,996 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 131,248 lines, none of it written in iyi |
+| compiler | 131,339 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 131,248 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 131,339 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 24,996-line own prelude + 125,353 in std |
-| Specs | 21,146 lines | 15,689 for iyi |
+| Specs | 21,146 lines | 15,806 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2865,17 +2865,29 @@ mixed rows between requests at 12 workers. The block of `IyiThread.start`,
 of `spawn_parallel` and of a `@[Share]` def is walked through the typed
 call graph - every def it calls, every target of a virtual call, a
 recursive def once - and every constant and class variable met whose type
-is not `Share` is a warning at the block, once per block, by the
-shortest path: ``the block spawn_parallel runs on another thread reaches
+is not `Share` is one warning, at the first block that reaches it, by that
+block's shortest path, counting the other blocks that reach it:
+``the block spawn_parallel runs on another thread reaches
 `DATABASE : Main::Database` (not Share) through `ask` →
-`DATABASE.query_one`: Main::Database's field @total is assigned in
-`query_one` ``. A warning and not a refusal, as the issue asked: whether
+`DATABASE.query_one`, as does 1 other parallel block: Main::Database's
+field @total is assigned in `query_one` ``. Warned once per block, as
+first built, iyiturkiye (8c56a83, on iyi-web 4684125, iyi-db v0.3.0 and
+iyi-pg v0.3.1) gave 1251 warnings from 91 shared blocks (`iyi check`,
+Linux) about 37 constants, 88 each for iyi-db's `LOG` and the app's own
+pool; gathered, they are 37. A constant or class variable declared in a
+package - a file in the checkout of one of the program's requirements -
+says whose it is and where, since that is where it changes: ``... `LOG`
+is the package github.com/iyilang/db's at db/core.iyi:41, so the change
+goes there``. Of the 1251, 1057 were iyi-pg's, iyi-db's and iyi-web's,
+`TLS_VERSIONS` and `DECODERS` among them, which read as std's. A warning
+and not a refusal, as the issue asked: whether
 the call is made, and whether the state is set once and only read after,
 is not something the walk can tell. The walk covers the program's
 modules and the packages it depends on - an application's pool is the
 application's constant, read through its own functions, and a
 dependency's module state is as far out of the program's sight - and
-never std or the prelude, nor a constant std declares: std's state is
+never std or the prelude, nor a constant std declares, read off where
+the constant is declared: std's state is
 std's to keep, and its boundaries are checked where std writes them. It
 stops where the capture check does: a constant typed `Mutex`, `Atomic`,
 `List` or another trusted `@[Share]` type is `Share`, and is not warned
@@ -2889,19 +2901,26 @@ as the claim: `@[SafeReach("set once at startup, then only read")]` on a
 constant or a class variable quiets the warning for it alone, and never
 the refusal of a block that names it. The warning is a build's and
 `iyi check`'s, and `--error-on-warnings` makes it a failure in either.
-Held by `spec/compiler/semantic/iyi_spec.cr` (eleven shapes: the issue's
+Held by `spec/compiler/semantic/iyi_spec.cr` (fifteen shapes: the issue's
 program with its exact text, a `@[Share]` def's block, a direct naming
 still refused under the mark, `Share` constants silent, the mark on a
 constant and on a class variable, the mark without a reason refused, a
 path through two defs and a recursive pair, a virtual call, a class
-variable, std's state silent) and by `bench/parallel_exercise.sh`'s
-`Share` step, which builds the issue's shape and fails it under
+variable, std's state silent, three blocks reaching one constant as one
+warning counting two, one other counted in the singular,
+`--error-on-warnings` failing on the gathered warning, a package's
+constant named with its package and file) and by
+`bench/parallel_exercise.sh`'s `Share` step, which builds the issue's
+shape with two blocks, warns once counting the other and fails it under
 `--error-on-warnings`, and passes its copy marked `@[SafeReach]`.
 What each def names and calls is read once per compilation and kept, so
 many blocks reaching the same functions read them once. Timed inside the
 compiler on iyi-web's `examples/security.iyi`, whose 15 shared blocks walk
 the framework's own defs, the check took 14.5 to 16.7 ms a compile, the
 walk itself 3.4 to 4.2 ms, of a main semantic stage of about 1.4 s.
+Gathering costs nothing measurable: `iyi check` of iyiturkiye took 4.12
+to 5.78 s warning 1251 times and 3.94 to 4.22 s warning 37 times, three
+runs each, interleaved (Linux, a 12-vCPU QEMU guest with 11 GB).
 In this tree the walk found three benches whose threads reach a class
 variable one at a time, each joined before the next starts or before the
 main thread reads it, or each writing its own reserved slot; each is

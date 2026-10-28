@@ -19,10 +19,10 @@
 #      on another worker, plain and --release: its stack's lists through
 #      collections, thread-locals of the thread it is on, after a park and
 #      after a loop's back-edge check that moved it, its socket's bytes, a
-#      cancel and a sibling's close that find it, frames 120 KiB deep;
-#      tasks parked on one worker finish in under twice the ideal, woken
-#      from the main thread and from a worker; and a task joining a thread
-#      leaves its worker to its child.
+#      cancel and a close from a sibling or the main thread that find it,
+#      frames 120 KiB deep; tasks parked on one worker finish in under
+#      twice the ideal, woken from the main thread and from a worker; and a
+#      task joining a thread leaves its worker to its child.
 #      bench/parallel_preempt.iyi then holds preemption at loop back-edges
 #      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
 #      request beside a task computing with no call in its loop wait no
@@ -61,9 +61,10 @@
 #      read as it was before a park, one read as it was before a loop
 #      whose back-edge check moved the task, a collector that skips a fiber
 #      on its way between workers, an io wait a cancel cannot find, a close
-#      posted to nobody, a pool that never steals a started task, tasks
-#      woken back onto the worker they parked on as they were before tasks
-#      moved, and a join held in the kernel.
+#      posted to nobody, a read made on the thread that closes its socket,
+#      a pool that never steals a started task, tasks woken back onto the
+#      worker they parked on as they were before tasks moved, and a join
+#      held in the kernel.
 #   8. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 4's floor refuses the ratio that comes out.
 set -u
@@ -590,6 +591,12 @@ else
       broken noclose '/def self.wake_closed\(fd/ { inclose = 1 } inclose && /^      return unless @@shared$/ { print "      return"; inclose = 0; next } { print }' concurrency.iyi parallel_migrate
       caught noclose 'closes: still waiting after 5000 ms' closes --watch=5000 ;;
   esac
+
+  step "failure proof: a read made on the thread that closes its socket is a close that never crossed"
+  if ! "$IYI" build --release -Dparallel_closes_home "$REPO/bench/parallel_migrate.iyi" -o closeshome-run > build-closeshome.log 2>&1; then
+    echo "the closes-home build failed:"; tail -20 build-closeshome.log; exit 1
+  fi
+  caught closeshome 'the main thread closed a socket on the thread its reader parked on' closes
 
   step "failure proof: a join held in the kernel holds its worker, and the sleepers on it"
   broken kerneljoin '/^      while @ended.get == 0_u64$/ { skip = 3 } skip > 0 { skip = skip - 1; next } { print }' thread.iyi parallel_migrate

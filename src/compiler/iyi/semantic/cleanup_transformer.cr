@@ -1130,17 +1130,29 @@ module Iyi
     # refusal: whether a call is really made, or the state is set once and
     # only read after, is not something the walk can tell, and a program
     # that knows says so on the constant or class variable with
-    # `@[SafeReach("why")]`. The walk is `ShareReach`'s; each is warned
-    # about once per block, at the block, with the shortest path to it.
+    # `@[SafeReach("why")]`. The walk is `ShareReach`'s.
+    #
+    # Each piece of state is one warning, at the first block that reaches
+    # it, by that block's shortest path, counting the other blocks that
+    # reach it too; `report_share_reach` writes them once every block is
+    # checked. Warned once per block, iyiturkiye's 91 warned blocks gave
+    # 1251 warnings about 37 constants (`iyi check`, Linux): iyi-db's `LOG`
+    # was 88 of them, and the app's own pool, `SQL`, 88 more; gathered,
+    # they are 37. A block where warnings are not reported
+    # (`--exclude-warnings`, `lib`) is not counted either.
     def check_share_reach(block : Block, a_def : Def, boundary : ShareBoundary) : Nil
       reach = @program.iyi_share_reach
       return if reach.std?(block)
+      return if @program.warnings.ignore_warning_due_to_location?(block.location)
       reach.reach(a_def).each do |found|
         named = found.named
         next if named.state.iyi_safe_reach
+        if gathered = @share_reach_gathered[named.key]?
+          gathered.blocks << block.location.to_s
+          next
+        end
         why = Iyi::Share.reason(named.type)
         next unless why
-        next unless @share_reach_warned.add?({block.location.to_s, named.key})
         path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
         path << "`#{named.use}`"
         where = named.state.is_a?(Const) ? "the constant" : "the class variable"
@@ -1150,8 +1162,39 @@ module Iyi
         if (list = share_reach_list(named.type))
           instead = "If it is only read, make it a `#{list}` (std/list), which is Share. #{instead}"
         end
-        @program.warnings.add_warning(block, "#{boundary.subject} reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}: #{why}. #{instead} (SPEC.md III.4.4)")
+        # A package's state is changed in the package, which the program
+        # cannot do: the warning says whose it is and where.
+        if (package = reach.package_at(named.declared, @program.iyi_mod_table))
+          prefix, file = package
+          at = named.state.is_a?(Const) ? named.declared.try { |declared| " at #{file}:#{declared.line_number}" } : nil
+          instead = "`#{named.label}` is the package #{prefix}'s#{at}, so the change goes there. #{instead}"
+        end
+        head = "#{boundary.subject} reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}"
+        tail = ": #{why}. #{instead} (SPEC.md III.4.4)"
+        @share_reach_gathered[named.key] = ShareReachWarning.new(block, head, tail, Set{block.location.to_s})
       end
+    end
+
+    # One warning being gathered: the first block to reach the state, the
+    # text either side of the count of the others, and every block, by its
+    # location, that reaches it - one block typed for two instantiations is
+    # one block.
+    record ShareReachWarning, block : Block, head : String, tail : String, blocks : Set(String)
+
+    # The gathered warnings, one per piece of state, in the order their
+    # first blocks were checked. Called once every block is checked
+    # (`Program#semantic_after_top_level`); a warning is never written twice.
+    def report_share_reach : Nil
+      @share_reach_gathered.each_value do |gathered|
+        others = gathered.blocks.size - 1
+        count = case others
+                when 0 then ""
+                when 1 then ", as does 1 other parallel block"
+                else        ", as do #{others} other parallel blocks"
+                end
+        @program.warnings.add_warning(gathered.block, "#{gathered.head}#{count}#{gathered.tail}")
+      end
+      @share_reach_gathered.clear
     end
 
     # `List(String)` for an `Array(String)` whose elements are Share: the
@@ -1163,7 +1206,7 @@ module Iyi
       "List(#{element})"
     end
 
-    @share_reach_warned = Set({String, UInt64}).new
+    @share_reach_gathered = {} of UInt64 => ShareReachWarning
 
     # The assignments to one variable in a body, each with the loops,
     # blocks and procs around it and whether it comes after the call that

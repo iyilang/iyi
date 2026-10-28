@@ -57,6 +57,29 @@
   ping-pong between the main thread and one parallel task (200,000 round
   trips, best of seven, five interleaved pairs, M2 Pro, load 8 to 14):
   333,926-392,822 wakes/s before, 691,911-703,810 after.
+- **State many shared blocks reach is one warning, and a package's says
+  whose it is (#148).** The reach warning was written once per block, so
+  every route of an iyi-web app that reached a constant warned about it
+  again: iyiturkiye (8c56a83, on iyi-web 4684125, iyi-db v0.3.0 and
+  iyi-pg v0.3.1) printed 1251 from 91 blocks under `iyi check` on Linux,
+  88 each for iyi-db's `LOG` and for the app's own pool, `SQL`. Each
+  constant or class variable is now one warning, at the first block that
+  reaches it, by that block's shortest path, with the count of the
+  others: ``... reaches `SQL : Iyiturkiye::Src::Database::SharedDatabase`
+  (not Share) through `Home.index` → `Submission.latest` →
+  `SQL.query_all`, as do 87 other parallel blocks: ...``. iyiturkiye's
+  are 37. One that a package
+  declares - a file in the checkout of one of the program's requirements -
+  says so, since the change goes there: ``... `TLS_VERSIONS` is the
+  package github.com/iyilang/pg's at pg/pq/conninfo.iyi:45, so the change
+  goes there``. 1057 of the 1251 were iyi-pg's, iyi-db's and iyi-web's;
+  `TLS_VERSIONS` and `DECODERS`, whose types are std's, are iyi-pg's,
+  and no std constant warned. Whether a constant is std's is now read
+  off its declaration rather than its value. `--error-on-warnings` fails
+  as before. `iyi check` of iyiturkiye took 3.94 to 4.22 s against 4.12
+  to 5.78 s, three interleaved runs each (Linux, a 12-vCPU QEMU guest).
+  `bench/parallel_exercise.sh`'s `Share` step builds two blocks reaching
+  `DATABASE` and wants one warning counting the other.
 
 - **`bench/parallel_exercise.sh` tells the accessor check from the cheap
   one in the IR, not by the clock.** Its proof that a check calling the

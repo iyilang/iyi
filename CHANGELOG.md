@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **`bench/parallel_exercise.sh` tells the accessor check from the cheap
+  one in the IR, not by the clock.** Its proof that a check calling the
+  thread-local accessor at every back-edge is refused failed on master's
+  Windows CI (job 122792275988): that copy's `sum` measured 1.776x its
+  `@[NoPreempt]` twin and `each` 1.828x, under the `tight` step's bound
+  of 2x, where macos-14 had measured it at 5.35x. The gate now reads the
+  release build's IR (`tight_checks`): each back-edge check of the tight
+  step's loops, now `@[NoInline]` so each is a function of its own, must
+  read the worker's word through the thread pointer - `%gs:off` on
+  Windows, `tpidrro_el0` on darwin, `%fs:off` and `tpidr_el0` on Linux -
+  and none may call `*IyiWorkers::preempt`. Cross-compiled, the normal
+  build's 9 checks read the thread pointer on x86_64-windows-msvc and
+  aarch64-apple-darwin, and the `-Dpreempt_check_accessor` copy's 9 call
+  the accessor on both, which the gate refuses there. On Linux the copy
+  builds the same code, which the step says. The timing stays a
+  measurement, its bound 2x: the cheap check itself measured `each` up
+  to 1.762x on a windows-2025 runner (job 122916661258), about what the
+  accessor copy cost on job 122792275988's, so no bound between them
+  holds. The copy's timing is no longer run.
+
 - **A refused TCP connect from a `--crystal` program on macOS 27 reported
   success, and now raises `Socket::ConnectError`.** Non-blocking
   `Socket#connect` on Unix waited for writability and retried `connect(2)`

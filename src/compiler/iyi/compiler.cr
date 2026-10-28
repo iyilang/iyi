@@ -4109,8 +4109,8 @@ module Iyi
     # optimisation so they keep no loop from being vectorised (SPEC.md
     # III.4.13, part 9; `PreemptChecks`). `-Dpreempt_check_accessor` builds
     # darwin's and Windows' checks as they were first, an accessor call at
-    # every back-edge: the broken copy bench/parallel_exercise.sh shows its
-    # tight-loop bound refusing.
+    # every back-edge: the broken copy bench/parallel_exercise.sh catches in
+    # the release build's IR, its tight loops' checks calling the accessor.
     protected def preempt_checks(llvm_mod, flag : String?) : Nil
       return unless flag
       PreemptChecks.accessor_only = @flags.includes?("preempt_check_accessor")

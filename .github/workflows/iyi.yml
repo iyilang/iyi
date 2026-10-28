@@ -2466,6 +2466,14 @@ jobs:
   # windows-2025: on 2022 its proof that helpers woken with Windows' wake
   # boost hold the program's thread did not fire in ten runs (job
   # 119973055363).
+  # On windows-2022 shard 1 lost its runner seven times in two days (jobs
+  # 122184178930, 122344814090, 122604891994, 122689159690, 122696158968,
+  # 122727878119 and 122981462617), each 81 to 95 minutes into its step,
+  # where a green shard 1's siblings take 43 to 56: run so on a Windows
+  # machine, std/tls hung on a broken copy's server whose TERM MSYS had lost
+  # while still starting it, and was stopped at its 50 minutes, the shard at
+  # 84 (bench/std_tls_exercise.sh, stop_server). What then ends the runner
+  # is not measured; that the gate no longer hangs is.
   windows-std-siblings:
     runs-on: windows-2022
     timeout-minutes: 120

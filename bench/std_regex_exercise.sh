@@ -493,7 +493,7 @@ mutate "an empty negation taken" 'if !any || (negated && !after_minus)' 'if !any
 # negations, \Q..\E, and the escaping `union` relies on.
 mutate "a character stepped as one byte" '    @width = width
     point' '    point'
-mutate "a class that holds nothing past ASCII" 'low < ranges.size // 2 && data[2 * low] <= cp' 'false'
+mutate "a class that holds nothing past ASCII" 'low < ranges.size // 2 && ranges[2 * low] <= cp' 'false'
 mutate "a \\p range cut to its first character" 'set.add(ranges[k], ranges[k + 1])' 'set.add(ranges[k], ranges[k])'
 mutate "\\p{^..} not negated" 'negated = property(set) != negated' 'property(set)' "\\p{^Greek}"
 mutate "\\Q..\\E taken unescaped" '            io.write_byte(92_u8) if c < 128_u8 && !word?(c)' '' "\\Q..\\E is the text itself"
@@ -557,6 +557,204 @@ PY
     status=1
   else
     echo "  a state joined more than once a step: caught, no answer within 20 s"
+  fi
+fi
+
+# A compiled pattern is Share, and twelve workers match one constant at
+# once: each worker's answers - every match's span and groups over its
+# share of the texts, folded into a hash - must be the ones the same
+# share gives on one thread. The broken copy keeps the scratch a match
+# steps, its thread lists and capture positions, and hands it to the next
+# match of the same machine, which on one thread answers the same and on
+# twelve answers whatever the others left in it. And the constant reached
+# from the parallel block through a call is not warned about; its broken
+# copy gives the machine's start a setter, so the compiled pattern is not
+# Share.
+echo
+echo "== twelve workers matching one constant"
+cat > "$WORK/shared.iyi" <<'IYI'
+module shared_regex
+
+import std/regex::{Regex}
+
+EMAIL = Regex.compile("(\\w+)@(\\w+)\\.(com|org)")
+
+ROUNDS  = 60
+TEXTS   = 600
+WORKERS = 12
+
+# The i-th text: words, then an address whose parts and place the index
+# decides, and more words after it.
+def text_for(i : Int32) : String
+  String.build do |io|
+    w = 0
+    while w < 20 + i % 37
+      io << "word" << ((i * 7 + w) % 11) << " "
+      w = w + 1
+    end
+    io << "user" << i << "@host" << (i % 13) << (i % 2 == 0 ? ".com" : ".org")
+    w = 0
+    while w < i % 5
+      io << " more" << w
+      w = w + 1
+    end
+  end
+end
+
+def answer(text : String) : String
+  m = EMAIL.match(text)
+  return "-" unless m
+  "#{m.byte_begin(0)}-#{m.byte_end(0)}:#{m[1]}:#{m[2]}:#{m[3]}"
+end
+
+# Worker k's share, every text whose index is k modulo the workers,
+# ROUNDS times over, its answers folded by FNV-1a.
+def share(k : Int32) : UInt64
+  h = 14695981039346656037_u64
+  r = 0
+  while r < ROUNDS
+    i = k
+    while i < TEXTS
+      said = answer(text_for(i))
+      j = 0
+      while j < said.bytesize
+        h = (h ^ said.to_unsafe[j].to_u64) &* 1099511628211_u64
+        j = j + 1
+      end
+      i = i + WORKERS
+    end
+    r = r + 1
+  end
+  h
+end
+
+IyiWorkers.count = WORKERS
+alone = [] of UInt64
+WORKERS.times { |k| alone << share(k) }
+# Read inside the group, so a worker that panicked - which the broken
+# copy's can, its lists' counts torn - is an answer that differs and not
+# the group's own panic.
+wrong = 0
+group do |g|
+  handles = [] of IyiTask(UInt64)
+  WORKERS.times do |k|
+    handles << g.spawn_parallel { share(k) }
+  end
+  k = 0
+  while k < WORKERS
+    value = handles[k].value
+    wrong = wrong + 1 unless value.is_a?(UInt64) && value == alone[k]
+    k = k + 1
+  end
+end
+if wrong > 0
+  puts "FAIL: #{wrong} of #{WORKERS} workers matching one constant answered other than one thread"
+  exit(1)
+end
+puts "#{WORKERS} workers matched one constant #{ROUNDS * TEXTS} times and answered as one thread"
+IYI
+# copy_regex <dir> <old> <new> [<old> <new>]...: src/std/regex.iyi with
+# each old text, which must be there once, replaced, into <dir>/std.
+copy_regex() {
+  local dir="$1"
+  shift
+  rm -rf "$WORK/$dir" && mkdir -p "$WORK/$dir/std"
+  DEST="$WORK/$dir/std/regex.iyi" "$PY" - "$@" <<PY
+import os, sys
+from pathlib import Path
+src = Path("$REPO/src/std/regex.iyi").read_text()
+pairs = sys.argv[1:]
+for old, new in zip(pairs[0::2], pairs[1::2]):
+    if src.count(old) != 1:
+        raise SystemExit("patch site missing or not unique: " + old)
+    src = src.replace(old, new, 1)
+Path(os.environ["DEST"]).write_text(src)
+PY
+}
+if ! "$IYI" build -o "$WORK/shared" "$WORK/shared.iyi" > "$WORK/shared.build" 2>&1; then
+  echo "  FAIL: the twelve-worker program did not build"
+  tail -12 "$WORK/shared.build"
+  status=1
+elif ! timeout 120 "$WORK/shared" > "$WORK/shared.out" 2>&1; then
+  echo "  FAIL: $(tail -3 "$WORK/shared.out")"
+  status=1
+else
+  echo "  $(cat "$WORK/shared.out")"
+fi
+if "$IYI" check --error-on-warnings "$WORK/shared.iyi" > "$WORK/shared.check" 2>&1; then
+  echo "  EMAIL, a constant Regex reached from the parallel block, checks under --error-on-warnings"
+else
+  echo "  FAIL: the constant regex was warned about or refused:"
+  sed 's/^/    /' "$WORK/shared.check" | head -12
+  status=1
+fi
+if [ -z "$PY" ]; then
+  echo "  skipped the broken copies: no working python3"
+else
+  # The race the copy makes can end some other way than by name - a
+  # fault, when the counts in the shared lists run past their buffers -
+  # so a run that does not exit 1 at the sentence is run again, up to
+  # five times.
+  if ! copy_regex scratch 'class RxRun
+' 'class RxRun
+  @@last : RxRun?
+
+  def self.reused(nfa : RxNfa, text : String, slots : Int32) : RxRun
+    last = @@last
+    if last && last.fits?(nfa, slots)
+      last.retarget(text)
+      return last
+    end
+    run = new(nfa, text, slots)
+    @@last = run
+    run
+  end
+
+  def fits?(nfa : RxNfa, slots : Int32) : Bool
+    @nfa.object_id == nfa.object_id && @slots == slots
+  end
+
+  def retarget(text : String) : Nil
+    @src = text.to_unsafe
+    @n = text.bytesize
+  end
+' '    run = RxRun.new(self, text, slots)
+    run.search(from, false, forbid) ? run.slots : nil' '    run = RxRun.reused(self, text, slots)
+    run.search(from, false, forbid) ? run.slots : nil'; then
+    echo "  the shared-scratch patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/scratch${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/shared-scratch" "$WORK/shared.iyi" > "$WORK/scratch.build" 2>&1; then
+    echo "  the shared-scratch copy did not build:"
+    tail -12 "$WORK/scratch.build"
+    status=1
+  else
+    for attempt in 1 2 3 4 5; do
+      timeout 120 "$WORK/shared-scratch" > "$WORK/scratch.out" 2>&1
+      code=$?
+      [ "$code" -eq 1 ] && grep -q "^FAIL: " "$WORK/scratch.out" && break
+    done
+    if [ "$code" -eq 1 ] && grep -q "^FAIL: " "$WORK/scratch.out"; then
+      echo "  scratch shared across matches is caught: $(grep -m1 '^FAIL: ' "$WORK/scratch.out" | sed 's/^FAIL: //')"
+    else
+      echo "  scratch shared across matches was not caught (exit $code):"
+      tail -3 "$WORK/scratch.out" | sed 's/^/    /'
+      status=1
+    fi
+  fi
+  if ! copy_regex settable '  getter start : Int32
+  getter count : Int32' '  property start : Int32
+  getter count : Int32'; then
+    echo "  the setter patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/settable${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" check --error-on-warnings "$WORK/shared.iyi" > "$WORK/settable.check" 2>&1; then
+    echo "  a machine with a setter PASSED the check"
+    status=1
+  elif ! grep -qF 'Std::Regex::RxNfa'"'"'s field @start is given a setter `start=`' "$WORK/settable.check"; then
+    echo "  a machine with a setter failed the check, but not by name:"
+    head -6 "$WORK/settable.check" | sed 's/^/    /'
+    status=1
+  else
+    echo "  a compiled pattern whose machine has a setter is caught: warned, not Share"
   fi
 fi
 

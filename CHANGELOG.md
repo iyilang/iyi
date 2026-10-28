@@ -9,6 +9,104 @@
   error state is now inspected via `SO_ERROR` without retrying connect
   (crystal-lang/crystal#17436, #17619).
 
+- **A shared block that reaches module state through a call is warned
+  about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and
+  of a `@[Share]` def - `Server.serve`'s, a router's - was checked only
+  for what it names, so a parallel block calling `ask`, which ran
+  `DATABASE.query_one` on a pool that assumes one thread, compiled with
+  nothing said. The compiler now walks the typed call graph from the
+  block through the program's modules and its packages, never std or
+  the prelude, and warns at the block for every constant and class
+  variable it reaches whose type is not `Share`, once each, by the
+  shortest path: ``the block spawn_parallel runs on another thread
+  reaches `DATABASE : Main::Database` (not Share) through `ask` →
+  `DATABASE.query_one`: ...``. Every target of a virtual call is
+  walked, and a recursive def once; a constant typed `Mutex`, `Atomic`,
+  `List` or another trusted `@[Share]` type is `Share` and says nothing,
+  and an array of `Share` elements is told it can be a `List` if it is
+  only read.
+  State that is safe - set once and then only read, or guarded some
+  other way - is marked on its declaration with the reason as the claim,
+  `@[SafeReach("set once at startup, then only read")]`, on a constant
+  or a class variable; the mark quiets the warning for that state
+  alone, and a block that names it is still refused. `iyi check` now
+  takes `--error-on-warnings` (and `--warnings`, `--exclude-warnings`),
+  which it refused as invalid options, so the warning can fail a check
+  as it fails a build; like a build, it now leaves out warnings from
+  `lib`. In this repository three benches whose threads
+  take turns at a class variable carry the mark with their reason. A
+  warning rather than a refusal, so nothing that compiled stops
+  compiling; a build with `--error-on-warnings` that reaches such state
+  fails until the state is marked or moved behind a `Mutex`.
+- **The sweep keeps warm what the last epoch carved back cold (#150).**
+  Beside many workers a concurrent mark lets them allocate past the
+  budget, and the sweep released those pages - on the allocating thread's
+  refill, 99% of the calls, a decommit and a commit on Windows - for the
+  carve to fault them in again: 94-98% of what twelve workers released
+  came back. The pages the carve takes up cold are added to the next
+  epoch's warm room, fading by a sixteenth an epoch. In-process
+  check_version (`bench/release_pages.iyi`), before against after, three
+  interleaved rounds of 8 s: on a windows-2025 runner (2 cores, 4 logical
+  processors) at twelve workers 473,000-514,000 requests a second and
+  151,000-162,000 releases against 720,000-758,000 and 14,000-18,000,
+  peak working set 292-427 MB against 407-719; at four workers
+  689,000-831,000 against 594,000-723,000, within the runner's noise (an
+  earlier run of the same arms read 7-9% the other way). Served to oha
+  at 32 connections on the same processors, 41,000-42,000 a second at
+  twelve workers against 54,000-67,000, and 48,000-50,000 at four
+  against 67,000-72,000. On a 12-core Linux machine at twelve workers
+  1.57-1.60 million against 3.54-3.59 million, 366,000-372,000 releases
+  against 70,000-74,000, peak RSS 157-203 MB against 367-434; at four
+  workers 1.91-1.92 million against 1.94-1.96 and 25-26 MB against
+  26-30. Over HTTP to wrk on Linux the releases were already the
+  helpers' (12-15 a second inside the allocator of 854-1,037), and halve.
+  `bench/sweep_exercise.sh`'s refault check churns twice the budget an
+  epoch and allows a quarter of the excess back (344 pages of 8,256);
+  its broken copy, without the carry-over, hands back 6,960.
+- **A mark beside the program counts its workers by one and never stores
+  the count (#149).** The remainder round, which runs beside the program
+  when the second stop retreats, stored the count of workers marking over
+  the mutators' assists counted in; their -1s took it below zero, every
+  helper spun in `drain`, no collection ran again and the heap grew -
+  on Windows at eight and twelve workers. The count moves by one now; the
+  remainder round counts helper 0 in by one; and helper 0 reads the
+  generation it waits past before `@@collecting` falls, where a mark
+  another thread began in between was one it skipped (with one helper,
+  nobody drained it). A mark that does not end says so on standard error,
+  naming POOL_ACTIVE, POOL_HEAD, the generation, the permits and the
+  helpers done: fatally at the -1 that takes the count below zero or at
+  a stop that begins a round with a worker counted in, and once per
+  doubling of its age past ten seconds otherwise (the longest mark
+  measured beside the stress program was 42 ms). `bench/mark_stall.iyi`
+  is the server's shape - 24 connections on 12 workers, each a parallel
+  task parked on its socket - with a watchdog that holds the tasks when
+  collections stand still and fails the run if none ends;
+  `bench/concurrent_mark.sh` runs it with every helper and with one. Its
+  broken copies - the store put back with a retreat forced at every
+  second stop and an assist held across it, the late generation read with
+  one helper held until the next mark begins - fail every run, at the
+  first collection and the second, 12 runs of 12 each held to three, four
+  and twelve cores; left to the machine, the first missed on four-core
+  Windows and three-core darwin runners and the second on a four-core
+  Windows one. Linux never stalled unwidened: twenty runs of fifteen
+  seconds at twelve workers on master, 1,588 second stops retreated.
+  Windows showed one more in the same place: `@@collecting` fell after
+  helper 0 released the threads, and on a four-core runner the released
+  workers took helper 0's cores and allocated with no mark to assist and
+  no trigger to cross, 334 MB counted against a budget of 4.3 MB. The
+  collections a program's own thread finishes - the trigger's that end in
+  their first stop, the trigger's with no helper, and `collect` - had the
+  same order: with 8 and 12 threads allocating, their window lasted up to
+  24.2 ms on twelve Linux cores, 164.2 ms on four-core Windows runners
+  and 151.5 ms on a three-core darwin one, and up to 176,816,128 bytes
+  were counted in one against a budget of 4,194,304. Every collection is
+  let go before its release now, `settle` waits for the accounts, and
+  broken copies put each old order back with the collecting thread held:
+  helper 0 ten seconds after its unlock, caught by the watchdog, and
+  the others a second, caught by `bench/release_trigger.iyi`, whose
+  second thread's slices past the budget must trigger the next
+  collection.
+
 - **Breaking: std/http's `Server.serve` serves on every core by default
   (#145).** `serve(listener) { |request| ... }` runs each connection as a
   parallel task on the pool, `IyiWorkers.count` workers - `IYI_WORKERS`,
@@ -64,6 +162,33 @@
   calling thread whatever its workers, `workers: 1` served on the pool,
   `serve`'s mark taken off, its `crossing:` taken off, and its `serial:`
   taken off.
+
+- **On Windows a wait no longer moves a handle already on its thread's
+  port (#151).** Every overlapped wait moved its handle to the waiting
+  thread's completion port and set its skip-on-success mode again - two
+  `NtSetInformationFile` calls, 3.1% of a 12-worker server's running
+  samples in the issue - even when the handle was there. The port each
+  socket, accepted connection, datagram socket and child-process pipe the
+  standard library made was last moved to is recorded now, by the port's
+  serial, and a wait on one already on its thread's port makes neither
+  call; a closing std makes zeroes the record first, a serial is never
+  given twice, a move by another thread at the same time leaves no record
+  standing, and a move of a handle with no record - a program's own, where
+  a duplicate would be - makes every record stale (`IyiScheduler.to_port`
+  says why each is enough). On a 4-logical-processor runner, release, a
+  connection trading 32 bytes between two parallel tasks, medians of five:
+  one connection from 98,808 round trips a second to 127,028, and 3 moves
+  for its 80,000 waits; 8 and 32 connections on 4 workers from 228,748 to
+  239,830 and from 264,846 to 281,057, where 51% and 64% of waits are a
+  task's first on another worker and still move (job 122342296628).
+  `bench/socket_exercise.sh` counts the moves of 200 round trips on one
+  thread (at most 4; a copy that moves on every wait makes 400), reads a
+  pipe the program made with a closed socket's value, a socket another
+  thread closed whose value is made again here, one a thread that has ended
+  waited on last, and one parallel tasks read in turn on two workers; a
+  copy that skips the move whenever a port is recorded never completes the
+  ended thread's socket, and one whose close leaves the record never
+  completes the pipe's read, each ended by a watcher that names the step.
 
 - **A Windows `--release` build with a pool its optimiser cannot reach
   links.** x86-64 Windows' preemption checks read the TEB slot's offset,
@@ -25096,7 +25221,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 24,551-line library and nothing else. Every other
+  written against iyi's own 24,996-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

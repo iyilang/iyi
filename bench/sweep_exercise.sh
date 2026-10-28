@@ -47,13 +47,13 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in reclaimed warm survivor liveness large steady; do
+for phrase in reclaimed warm survivor liveness large steady refault; do
   grep -q "$phrase" "$WORK/sweep.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large and steady all reported"
+[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady and refault all reported"
 
 echo
 echo "== the same program with optimisation on"
@@ -155,6 +155,12 @@ prove_fails "the fast path does not clear" dirtyfast "warm:" \
 # fifth too few stay warm, and the steady churn hands pages back.
 prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \
   '{ if ($0 ~ /^        floor = chunk > 128_u64 \?/) { print "        floor = chunk"; next } print }'
+
+# The cold reopenings not carried into the next epoch's warm room: the
+# churn that asks twice its budget hands its excess back every epoch and
+# carves it again (issue #150).
+prove_fails "cold reopenings not kept warm" refault "refault:" \
+  '{ if ($0 ~ /^        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr\(4_u64\) \+ \(reopened_cold - @@reopened_cold\) \* IyiHeap::PAGE$/) { print "        @@warm_extra = 0_u64"; found = 1; next } print } END { if (!found) exit 3 }'
 
 # The carve's batch left unstamped: the listed chunks read as nothing the
 # sweep or the mark can tell from an uncarved one.

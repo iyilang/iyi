@@ -153,6 +153,7 @@
   # back, and the check that names the fault read the ledger through
   # zeros. The global's array is a root in every build.
   class Ledgers
+    @[SafeReach("reserved to its full size before any thread starts; each thread writes only its own slot, and nothing grows it while they run")]
     @@all : Array(Ledger?) = [] of Ledger?
 
     def self.reserve(count : Int32) : Nil

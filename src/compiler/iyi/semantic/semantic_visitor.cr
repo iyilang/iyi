@@ -2289,16 +2289,21 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     annotations.try(&.first?).try &.doc
   end
 
-  def check_class_var_annotations
+  # Whether a class variable is `@[ThreadLocal]`, and the reason its
+  # `@[SafeReach("...")]` gives (SPEC.md III.4.4), if it has one.
+  def check_class_var_annotations : {Bool, String?}
     thread_local = false
+    safe_reach = nil
     process_annotations(@annotations) do |annotation_type, ann|
       if annotation_type == @program.thread_local_annotation
         thread_local = true
+      elsif annotation_type == @program.safe_reach_annotation
+        safe_reach = ShareReach.claim(ann, "this class variable")
       else
-        ann.raise "class variables can only be annotated with ThreadLocal"
+        ann.raise "class variables can only be annotated with ThreadLocal or SafeReach"
       end
     end
-    thread_local
+    {thread_local, safe_reach}
   end
 
   def check_allowed_in_lib(node, type = node.type.instance_type)

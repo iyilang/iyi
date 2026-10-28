@@ -488,6 +488,98 @@ and lowers it under. `bench/concurrent_mark.sh` outgrows blocks under
 marks, requires each still listed while the mark runs and each freed
 after, and its proof removes the look.
 
+And one thing a server on every core found (#149). The mark's workers -
+the helpers, the collector, a mutator's assist - count themselves in and
+out of one word, and a drain ends when it reads zero with the pool
+empty. Each round also *stored* that word as it began: `mark` 1, the
+first stop 0, the second stop 1, the remainder round 0. The remainder
+round runs beside the program when the second stop retreats, and
+assists run there too: an assist counted in before the store had its
+one wiped, and its own -1 afterwards took the count below zero, where
+it never reads zero again. Every helper spun in `drain`, `@@collecting`
+stayed up, no collection ran again, and the heap of an API server on a
+twelve-vCPU Windows VM grew until the machine ran out, at eight and
+twelve workers and never at four. Windows' release is a `ResumeThread`
+per thread and then a wait for every thread that parked at the stop,
+and the threads resumed first allocate all the while; Linux's is one
+futex wake, and twenty runs of fifteen seconds of the server's shape at
+twelve workers here (`bench/mark_stall.iyi`, 1,588 second stops
+retreated) never stalled. The stores hid most of it besides: an assist
+whose -1 landed after the drains had ended left a count the next stop's
+store wrote over. A copy of the prelude that paused 200 µs before the
+remainder round's store saw 253 assists begin inside the pause over 22
+rounds, the count 1 to 6 before the store, and no stall; with each of
+those assists held until the store had landed, it stalled at its 39th
+collection with the count at 2^64 - 8, ten helpers holding permits and
+none done - the issue's nine helpers in `drain`, one from
+`remainder_round`.
+
+The count moves by one now and nothing stores it. Every round starts
+from the zero the last one ended at, because its drainers are waited
+for and a stop waits out every assist; the remainder round counts
+helper 0 in by one before the permits open, as `mark` counts the
+collector. Reviewing every store and permit found one more: helper 0
+read the generation it waits past next after letting the collection
+go, so a mark another thread began in between was one it waited past,
+and with one helper nobody drained it. It reads the generation before
+the lock is let go. And Windows showed one more, in the same place:
+`@@collecting` fell after helper 0 released the threads, and on a
+four-core runner the eight released workers took helper 0's cores, so
+they allocated with no mark to assist and no trigger to cross - 19,745
+slices turned away by `pressure`, the count since the last collection at
+334 MB against a budget of 4.3; the server's shape had its watchdog end
+3 to 7 runs of 8 there, on master and with the count fixed alike. The collection is let
+go before the release now, and the first thread to cross the budget
+waits at the lock for helper 0's accounts. The collections a program's
+own thread finishes had the same order - the trigger's whose mark ends
+in its first stop, the trigger's with no helper, and `collect` - and
+there the window was the program thread's: unwidened, with 8 and 12
+threads allocating garbage beside a small live set, the longest window
+in a run lasted 1.6 to 24.2 ms on twelve Linux cores, 18.9 to 164.2 ms
+on four-core Windows runners and 23.4 to 151.5 ms on a three-core darwin
+one, and the most counted in one was 176,816,128 bytes against a budget
+of 4,194,304. `collect_locked` and `finish_stopped` let the collection
+go before their release too, and `settle` waits for the lock after the
+flag, so a program that reads the accounts after it reads them whole.
+And a mark that does not end
+says so, on standard
+error, with the count, the pool's head, the generation, the permits and
+the helpers done: a count that goes below zero is fatal at the -1 that
+took it there, a round that begins with a worker counted in or a mark
+with work in its pool is fatal at its stop, and a mark in flight past
+ten seconds is reported once per doubling of its age by an assist (every
+64th), a drain with nothing to do, or a `collect` waiting for it - the
+longest mark measured beside the server's shape was 42 ms.
+`bench/concurrent_mark.sh` runs `bench/mark_stall.iyi` at twelve
+workers with every helper and with one; its watchdog holds the tasks
+once the collections have stood still for 256 MiB of allocation and
+fails the run if none ends in five seconds. And it runs
+`bench/release_trigger.iyi`: one collection on each of the program
+thread's paths, then a second thread's slices past the budget, which
+must trigger the next. Its proofs put the store back, a retreat forced
+at every second stop and a window before the store held open until an
+assist has counted itself in, which the runtime's below-zero check
+catches at the first collection; the late generation read back with one
+helper, held until the next mark begins, which the overdue report and
+the watchdog both catch at the second; and each `@@collecting` after its
+release again, its thread held between the two - helper 0 ten seconds,
+past its unlock, the others a second - which the watchdog catches for
+helper 0 and `bench/release_trigger.iyi` names by round for the others.
+The first three were left to the machine once: the store's missed on
+four-core Windows and three-core darwin runners, the late read's on a
+four-core Windows one, and helper 0's held the tasks there at 287 and 289
+MiB against the watchdog's 256. Every proof is caught in every run now:
+12 of 12 each here held to three, four and twelve cores, and one run on
+each of three four-core Windows runners and a three-core darwin one,
+where `bench/concurrent_mark.sh` and `bench/parallel_mark.sh` passed
+whole. Helper 0's was held then until the count stood still for half a
+second, and beside #150's warm room it slipped through in 2 runs of 12 on
+twelve cores: a cache folds its allocation into the count a slice at a
+time, so the held tasks still allocated, and a slice collected once the
+flag fell. A fixed hold under the lock was worse, 2 of 36 caught; a
+fixed hold after the unlock is caught 36 of 36 on three, four and twelve
+cores.
+
 The budget is twice what survived, and what was allocated under the
 mark did not survive anything: born gray, so counted marked, but not
 live in the sense the budget wants, and counted the other way a program
@@ -827,6 +919,52 @@ was, its resident set moving with where its last collection falls,
 this cycle set out to cut is the mark's floating garbage and the edges
 runs lose to it, and the next cycles' terms - the pool region and the
 workers' stacks - are the heap's neighbours, not the heap.
+
+**The warm room past the budget (#150).** The budget is what an epoch
+allocates when the mark is short. Beside many workers it is not: a
+concurrent mark lasts as long as its helpers take to get a core, the
+workers allocate all the while, and what they ask past the budget is
+carved from the pages the sweep has just released - a release on the
+allocating thread's own refill (a thread inside the allocator made
+99% of them on a windows-2025 runner's four logical processors, and on
+this Linux machine at twelve workers on twelve cores, where helpers
+get no core), then a fault a page when the carve takes the run up
+again, and on Windows a decommit and a commit whose TLB flush reaches
+every core the workers run on. Twelve workers on a 4 MB budget took
+94-97% of the pages released back cold on Windows and 97-98% on
+Linux. Moving the releases to the helpers would not have saved the
+faults, and the helpers are the threads that get no core in that
+shape. So the pages the carve takes up cold in an epoch are added to
+the next epoch's warm room, fading by a sixteenth an epoch
+(`IyiMark.warm_pages`, `begin_sweep`): a steady shortfall settles at
+sixteen seventeenths kept, and a churn that slows hands its pages back
+again. `bench/release_pages.iyi` counts the releases, the ones made
+inside the allocator, their time under `-Dgc_release_timing` and the
+pages; on this 12-core machine, in-process check_version, three
+interleaved rounds of 8 s: twelve workers 1.57-1.60 million requests a
+second and 366,000-372,000 releases (14 of the 96 processor seconds in
+them, peak RSS 157-203 MB) before, 3.54-3.59 million and 70,000-74,000
+(3.2 s, 367-434 MB) after; four workers, whose releases helpers make,
+1.91-1.92 million and 34,000-36,000 (25-26 MB) against 1.94-1.96
+million and 29,000-30,000 (26-30 MB). Served over HTTP to wrk on the
+same cores at twelve workers, 215,000 a second and 854-1,037 releases
+a second, 12-15 of them inside the allocator, against 220,000-221,000
+and 450-509, at 24-26 MB either way. On a windows-2025 runner (2
+cores, 4 logical processors), the same rounds: twelve workers
+473,000-514,000 a second and 151,000-162,000 releases, 3.1-3.6 of the 32
+processor seconds inside `VirtualFree` and `VirtualAlloc`, peak working
+set 292-427 MB, against 720,000-758,000, 14,000-18,000 and 0.5-0.8 s at
+407-719 MB; four workers 689,000-831,000 against 594,000-723,000, inside
+the runner's noise (an earlier run of the same arms read 7-9% the other
+way); served to oha at 32 connections, 41,000-42,000 against
+54,000-67,000 at twelve workers and 48,000-50,000 against 67,000-72,000
+at four. The resident set is the price
+where the shortfall was large: the epoch's allocation is resident
+either way, and releasing it kept the peak lower only by the pages
+between their release and their next carve. `bench/sweep_exercise.sh`'s
+refault check churns twice the budget an epoch and allows a quarter of
+the excess back over eight steady epochs: 344 pages of 8,256, and the
+copy without the carry-over hands back 6,960.
 
 **The heap's neighbours, read from `/proc/self/smaps`.** The second
 cycle began by reading every mapping's resident size at the end of

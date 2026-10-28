@@ -3719,6 +3719,11 @@ module Iyi
     # program's `ARGV_UNSAFE` — which is right: those are not a shard's to carry.
     property iyi_value_source : String = ""
 
+    # iyi: the reason `@[SafeReach("...")]` gives, when the constant has
+    # one: the program says every thread may reach it through a call, and
+    # the walk from a shared block does not warn about it (SPEC.md III.4.4).
+    property iyi_safe_reach : String? = nil
+
     # Is this constant accessed with pointerof(...)?
     property? pointer_read = false
 

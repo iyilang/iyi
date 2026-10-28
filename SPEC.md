@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,551 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 130,935 lines, none of it written in iyi |
+| iyi's own prelude | 24,996 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 131,248 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,551 lines
+> "No standard library worth the name" is still true of iyi's own 24,996 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,551 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 24,996 lines,
 primitives included, of which the library is 4,649.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 130,935 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,551-line own prelude + 125,314 in std |
-| Specs | 21,146 lines | 15,384 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 131,248 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 24,996-line own prelude + 125,334 in std |
+| Specs | 21,146 lines | 15,689 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2845,16 +2845,67 @@ what a captured variable is: `COUNTS = [0]`, bumped a million times by a
 thread's block and a million by its starter, had compiled and printed
 1061337, and is refused now with ``names the constant `COUNTS :
 Array(Int32)`, which is not Share``. A constant that a method the block
-calls reads is reached through the call, and is not checked. Step 6d
-holds it. A class variable the block names is the same state with a cell
-of its own: one written after its initializer - by the block, by any
-method the program calls, or through `pointerof` - is refused by name, as
-a captured local assigned after the start is (``assigns `@@count`, a class
-variable, so every thread that reaches it shares one mutable cell``), and
-one only its initializer writes is asked what a constant is. A
-thread-local one is every thread's own. `@@count += 1` run two million
-times by a thread and two million by its starter had compiled and printed
-2548908 of 4000000.
+calls reads is reached through the call, and is warned about rather than
+refused (below). Step 6d holds the refusal. A class variable the block
+names is the same state with a cell of its own: one written after its
+initializer - by the block, by any method the program calls, or through
+`pointerof` - is refused by name, as a captured local assigned after the
+start is (``assigns `@@count`, a class variable, so every thread that
+reaches it shares one mutable cell``), and one only its initializer
+writes is asked what a constant is. A thread-local one is every thread's
+own. `@@count += 1` run two million times by a thread and two million by
+its starter had compiled and printed 2548908 of 4000000.
+
+**What the block reaches through a call is warned about (#148).** The
+refusals above read the block's own text, and the edge they leave is
+where a program keeps its database pool: a parallel block calling `ask`,
+which ran `DATABASE.query_one`, compiled silently, and an application on
+iyi-web reaching its pool through 193 call sites, all in model functions,
+mixed rows between requests at 12 workers. The block of `IyiThread.start`,
+of `spawn_parallel` and of a `@[Share]` def is walked through the typed
+call graph - every def it calls, every target of a virtual call, a
+recursive def once - and every constant and class variable met whose type
+is not `Share` is a warning at the block, once per block, by the
+shortest path: ``the block spawn_parallel runs on another thread reaches
+`DATABASE : Main::Database` (not Share) through `ask` →
+`DATABASE.query_one`: Main::Database's field @total is assigned in
+`query_one` ``. A warning and not a refusal, as the issue asked: whether
+the call is made, and whether the state is set once and only read after,
+is not something the walk can tell. The walk covers the program's
+modules and the packages it depends on - an application's pool is the
+application's constant, read through its own functions, and a
+dependency's module state is as far out of the program's sight - and
+never std or the prelude, nor a constant std declares: std's state is
+std's to keep, and its boundaries are checked where std writes them. It
+stops where the capture check does: a constant typed `Mutex`, `Atomic`,
+`List` or another trusted `@[Share]` type is `Share`, and is not warned
+about. A block given to a lock is walked like any other, since the lock
+guards what it holds, not the constants its block reaches. An array of
+`Share` elements that is only read - iyi-web's `CONTENT_CODINGS :
+Array(String)`, the commonest case - is told it can be a `List`, which is
+`Share` and needs no claim. A program
+that knows its state is safe says so on the declaration, with the reason
+as the claim: `@[SafeReach("set once at startup, then only read")]` on a
+constant or a class variable quiets the warning for it alone, and never
+the refusal of a block that names it. The warning is a build's and
+`iyi check`'s, and `--error-on-warnings` makes it a failure in either.
+Held by `spec/compiler/semantic/iyi_spec.cr` (eleven shapes: the issue's
+program with its exact text, a `@[Share]` def's block, a direct naming
+still refused under the mark, `Share` constants silent, the mark on a
+constant and on a class variable, the mark without a reason refused, a
+path through two defs and a recursive pair, a virtual call, a class
+variable, std's state silent) and by `bench/parallel_exercise.sh`'s
+`Share` step, which builds the issue's shape and fails it under
+`--error-on-warnings`, and passes its copy marked `@[SafeReach]`.
+What each def names and calls is read once per compilation and kept, so
+many blocks reaching the same functions read them once. Timed inside the
+compiler on iyi-web's `examples/security.iyi`, whose 15 shared blocks walk
+the framework's own defs, the check took 14.5 to 16.7 ms a compile, the
+walk itself 3.4 to 4.2 ms, of a main semantic stage of about 1.4 s.
+In this tree the walk found three benches whose threads reach a class
+variable one at a time, each joined before the next starts or before the
+main thread reads it, or each writing its own reserved slot; each is
+marked with that reason.
 
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,
@@ -3440,7 +3491,9 @@ sweep left the pause and runs beside the program, in slices of an
 arena taken by the mark's helpers after every collection and by an
 allocating thread only for the slice it needs; the mark is parallel on
 helper threads and runs beside the program on a write barrier the
-compiler emits, a collection being two stops of tens of microseconds;
+compiler emits, a collection being two stops of tens of microseconds,
+its workers counted in and out by one and a mark that does not end said
+on standard error;
 an object is its fields, a word ahead of it only for a class something
 reads the type id off (the collector's bits and the other ids are
 tables at the arena's head), the classes eight bytes apart, and the
@@ -3683,12 +3736,12 @@ block reaches it, and every constant and class variable it names. Two
 alternatives lost. Every spawn parallel: the tasks that share their group's
 mutable state legally today would be refused, or raced. And a spawn made
 parallel by the compiler whenever its captures happen to be `Share`: the
-check has a known edge — a method the block calls that touches module
-state is not seen (III.4.4's own words) — and a spawn that moved onto two
-cores because its captures happened to qualify would race that state with
-no line of the program saying so. Rust's tokio arrived at the same pair:
-`spawn` demands `Send` and work-steals, `spawn_local` demands nothing and
-stays.
+check's refusals stop at the block's own text — module state a method the
+block calls touches is warned about, not refused (III.4.4) — and a spawn
+that moved onto two cores because its captures happened to qualify would
+race that state with nothing but a warning saying so. Rust's tokio arrived
+at the same pair: `spawn` demands `Send` and work-steals, `spawn_local`
+demands nothing and stays.
 
 A task `g.spawn` starts *inside* a parallel task belongs to that task's
 unit (`IyiUnit`): the parent and the child may share the parent's
@@ -3726,11 +3779,18 @@ since the pool does not shrink. The workers start at the first
 **5. A poller per worker, not a shared one.** An IO wait is the waiting
 task's thread's — the fd is registered with that thread's epoll, kqueue or
 completion port, per wait, as it always was. A woken task may resume on
-another worker (part 1), and its next wait registers there. A shared
-poller would have saved a file descriptor per worker; what a poller per
-worker costs instead is part 1's open end: a worker busy computing looks at
-its own poller only when it parks. The worker owns its poller, its sleep
-heap and its stacks, and nothing of them is locked.
+another worker (part 1), and its next wait registers there. On Windows a
+handle belongs to one port, so a wait moves it to its thread's - two
+`NtSetInformationFile` calls, the move and the skip-on-success mode the move
+clears - and only when it is not there already: the port each handle the
+standard library made was last moved to is recorded, and a wait on one
+already on its thread's port makes neither call (#151; `IyiScheduler.to_port`
+says why a closed handle's value, an ended thread, a move by another thread
+and a duplicate cannot leave a record that sends a wait's completion
+elsewhere). A shared poller would have saved a file descriptor per worker;
+what a poller per worker costs instead is part 1's open end: a worker busy
+computing looks at its own poller only when it parks. The worker owns its
+poller, its sleep heap and its stacks, and nothing of them is locked.
 
 **6. Waking across threads, and the one lock.** What does cross threads is
 a wake: a sender on one worker hands a value to a receiver parked on
@@ -3762,7 +3822,17 @@ from the stopped sp to the top of whichever mapping holds it, a fiber's or
 its own, and every parked fiber on every worker scanned through the fiber
 registry, as III.4.11 has it. An unstarted parallel task has no stack yet,
 and its block is rooted through the registry by its fiber's proc. Nothing
-in the collector changes; the stop already took every thread a program had.
+in the collector changes for the stop; the stop already took every thread
+a program had. What a pool did find in the collector is a mark beside the
+program that never ended (#149, GC_DESIGN.md Stage 9): a server's tasks
+allocating on every worker assist the mark, the remainder round stored
+the count of workers marking over the assists counted in, and the count
+went below zero, where no drain sees it end - collections stopped and
+the heap grew until a twelve-vCPU Windows machine ran out. The count
+moves by one now and nothing stores it, and a mark that does not end
+says so on standard error, fatally where the count goes wrong.
+`bench/mark_stall.iyi` is that server's shape, and `bench/concurrent_mark.sh`
+runs it at twelve workers.
 
 **8. Deadlock, across threads.** One thread used to know it was
 deadlocked when it had nothing to run and nothing to wait on. With wakes
@@ -11036,7 +11106,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,551-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 24,996-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

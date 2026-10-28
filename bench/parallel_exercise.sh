@@ -45,7 +45,10 @@
 #      nobody sends on - is named, not hung.
 #   6. `Share` gates the parallel block at compile time: a captured
 #      `Array`, a `Channel` of arrays, a local assigned after the spawn, and
-#      a loop's local are refused, each by name.
+#      a loop's local are refused, each by name. A block that reaches a
+#      constant that is not Share through a def it calls is warned about
+#      with the path, a failed build under `--error-on-warnings`; its
+#      copy with the constant marked `@[SafeReach]` builds clean under it.
 #   7. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: a cross-thread wake that does not ring (a lost
 #      wakeup), a steal that leaves the task in its victim's queue (a task
@@ -399,6 +402,62 @@ group do |g|
     i = i + 1
   end
 end'
+
+# #148: the issue's shape, a pool in a constant read through `ask`. The
+# block names no constant, so nothing above refuses it; it is warned
+# about at the block, with the path, by a build and by `check`, and
+# `--error-on-warnings` makes the warning a failure. The broken copy is
+# the clean one with the mark taken off, and the check that passes the
+# marked copy catches it.
+step "a parallel block reaching a constant through a call is warned about"
+cat > reaches.iyi <<'IYI'
+module reaches
+
+class Database
+  def initialize
+    @total = 0
+  end
+
+  def query_one(n : Int64) : Int64
+    @total += 1
+    n
+  end
+end
+
+@[SafeReach("the gate's clean copy: one task asks, and the program says so")]
+DATABASE = Database.new
+
+def ask(n : Int64) : Int64
+  DATABASE.query_one(n)
+end
+
+group do |g|
+  g.spawn_parallel { ask(1_i64) }
+end
+IYI
+awk '/^@\[SafeReach/ { next } /^module reaches$/ { print "module reaches_bare"; next } { print }' reaches.iyi > reaches_bare.iyi
+if cmp -s reaches.iyi reaches_bare.iyi; then
+  echo "the awk for reaches_bare found nothing to change"; exit 1
+fi
+if ! "$IYI" check --error-on-warnings reaches.iyi > check-reaches.log 2>&1; then
+  echo "a constant marked @[SafeReach] failed the check under --error-on-warnings:"; cat check-reaches.log; exit 1
+fi
+echo "  checks under --error-on-warnings: DATABASE marked @[SafeReach]"
+if ! "$IYI" build reaches_bare.iyi -o reaches_bare > build-reaches-bare.log 2>&1; then
+  echo "a warning stopped a build without --error-on-warnings:"; cat build-reaches-bare.log; exit 1
+fi
+want='the block spawn_parallel runs on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`'
+if ! grep -qF "$want" build-reaches-bare.log; then
+  echo "the block reaching DATABASE through ask was not warned about:"; cat build-reaches-bare.log; exit 1
+fi
+if "$IYI" check --error-on-warnings reaches_bare.iyi > check-reaches-strict.log 2>&1; then
+  echo "--error-on-warnings passed the program the warning names:"; cat check-reaches-strict.log; exit 1
+fi
+if ! grep -qF "$want" check-reaches-strict.log; then
+  echo "check failed the program, but not for the warning:"; cat check-reaches-strict.log; exit 1
+fi
+echo "  broken copy, the mark taken off: warned by the build, and failed by check --error-on-warnings"
+echo "  warned: $(grep -m1 -F "$want" build-reaches-bare.log | sed 's/^Warning: //' | cut -c1-150)"
 
 # ── 7. Failure proofs: broken copies of the runtime ──────────────────────
 # Each a copy of src/iyi with one file changed - concurrency.iyi unless

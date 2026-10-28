@@ -126,7 +126,9 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
   end
 
   class Pairs
+    @[SafeReach("one filler thread at a time sets it, joined before the main thread goes on")]
     @@all : Array(Pair)? = nil
+    @[SafeReach("one filler thread at a time appends, joined before the main thread goes on")]
     @@kept : Array(Pair) = [] of Pair
 
     def self.all=(value : Array(Pair)?) : Nil

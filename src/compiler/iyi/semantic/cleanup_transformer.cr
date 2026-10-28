@@ -719,6 +719,7 @@ module Iyi
         end
         check_thread_constants_share(a_def, thread)
         check_thread_class_vars_share(a_def, thread)
+        check_share_reach(block, a_def, thread)
       end
       return unless a_def.closure?
 
@@ -1120,6 +1121,49 @@ module Iyi
         true
       end
     end
+
+    # iyi: module state the block reaches through the defs it calls, which
+    # the checks above, reading the block's own text, do not see: a
+    # parallel block calling `ask`, which ran `DATABASE.query_one` on a pool
+    # that assumes one thread, compiled silently, and at 12 workers a
+    # request was answered another's rows (#148). A warning rather than a
+    # refusal: whether a call is really made, or the state is set once and
+    # only read after, is not something the walk can tell, and a program
+    # that knows says so on the constant or class variable with
+    # `@[SafeReach("why")]`. The walk is `ShareReach`'s; each is warned
+    # about once per block, at the block, with the shortest path to it.
+    def check_share_reach(block : Block, a_def : Def, boundary : ShareBoundary) : Nil
+      reach = @program.iyi_share_reach
+      return if reach.std?(block)
+      reach.reach(a_def).each do |found|
+        named = found.named
+        next if named.state.iyi_safe_reach
+        why = Iyi::Share.reason(named.type)
+        next unless why
+        next unless @share_reach_warned.add?({block.location.to_s, named.key})
+        path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
+        path << "`#{named.use}`"
+        where = named.state.is_a?(Const) ? "the constant" : "the class variable"
+        instead = "Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on #{where}: `@[SafeReach(\"...\")]`"
+        # A list that is only read - iyi-web's `CONTENT_CODINGS : Array(String)`
+        # - is the commonest case, and has a third way out that needs no claim.
+        if (list = share_reach_list(named.type))
+          instead = "If it is only read, make it a `#{list}` (std/list), which is Share. #{instead}"
+        end
+        @program.warnings.add_warning(block, "#{boundary.subject} reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}: #{why}. #{instead} (SPEC.md III.4.4)")
+      end
+    end
+
+    # `List(String)` for an `Array(String)` whose elements are Share: the
+    # immutable list a read-only array can become. Nil for anything else.
+    private def share_reach_list(type : Type) : String?
+      return nil unless type.is_a?(GenericClassInstanceType) && type.generic_type == @program.array
+      element = type.type_vars["T"]?.try(&.type?)
+      return nil unless element && Iyi::Share.shareable?(element)
+      "List(#{element})"
+    end
+
+    @share_reach_warned = Set({String, UInt64}).new
 
     # The assignments to one variable in a body, each with the loops,
     # blocks and procs around it and whether it comes after the call that

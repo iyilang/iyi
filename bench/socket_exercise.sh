@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every socket check reported"
-phrases="connect_accept message_exchange short_read nodelay connect_bound closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
+phrases="connect_accept message_exchange short_read nodelay connect_bound closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream port_stays port_reuse port_thread_ended port_migrate"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
@@ -91,7 +91,7 @@ for phrase in $phrases; do
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, connect_bound, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, connect_bound, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout, stream, port_stays, port_reuse, port_thread_ended and port_migrate all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -357,6 +357,57 @@ else
   fi
 fi
 
+# 12. The record of the port each socket was last moved to (#151), on
+#     Windows, where a handle has a port: a copy that moves on every wait,
+#     which the move count catches; one that skips the move whenever a
+#     port is recorded, which posts a read to the port of a thread that
+#     has ended and never completes; and one whose close leaves the record
+#     for the next handle with its value, which a pipe the program made
+#     takes and never completes a read on. The exercise's watcher ends a
+#     wait that never completes with the step's name.
+prove_port() { # prove_port <label> <dir> <phrase, a regex> <awk script>
+  local label="$1" dir="$2" phrase="$3" script="$4"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  awk "$script" "$REPO/src/iyi/concurrency.iyi" > "$WORK/$dir/iyi/concurrency.iyi"
+  if cmp -s "$REPO/src/iyi/concurrency.iyi" "$WORK/$dir/iyi/concurrency.iyi"; then
+    echo "  $label: the patch changed nothing"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -o "$WORK/$dir/program" \
+       "$REPO/bench/socket_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+    echo "  $label: the patched prelude did not build"
+    sed -n '1,12p' "$WORK/$dir/build.log"
+    status=1
+    return
+  fi
+  timeout -k 5 120 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ] && ! grep -q "iyi: panic" "$WORK/$dir/out"; then
+    echo "  $label: the exercise still passed, so it does not test this"
+    status=1
+  elif ! grep -q -E "$phrase" "$WORK/$dir/out"; then
+    echo "  $label: failed (exit $code), but not at the expected check"
+    tail -2 "$WORK/$dir/out" | sed 's/^/    /'
+    status=1
+  else
+    printf '  %s: exits %s at "%s"\n' "$label" "$code" \
+      "$(grep -m1 -E "$phrase" "$WORK/$dir/out" | sed 's/^iyi: panic: //')"
+  fi
+}
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_port "a socket moved on every wait" portevery "port_stays: 200 round trips" \
+      '{ sub(/return if seen == mine && mine != 0_u64$/, "return if false"); print }'
+    prove_port "a move skipped whenever a port is recorded" portany "port_thread_ended: a wait had not completed" \
+      '{ sub(/return if seen == mine && mine != 0_u64$/, "return if seen > PORT_OWNED"); print }'
+    prove_port "a close that leaves its record" portkept "port_reuse: a wait had not completed" \
+      '{ sub(/word.value.set\(0_u64\) if word.address != 0_u64$/, "nil"); print }' ;;
+  *)
+    echo "  the port record: Windows' completion ports, proved there" ;;
+esac
+
 # 8. An IPv6 address written without its `::`, or a family forgotten.
 prove_fails "ipv6 written uncompressed" badsix "ipv6:" \
   '{ sub(/best_size = 1$/, "best_size = 8"); print }'
@@ -555,8 +606,8 @@ echo
 if [ "$status" -eq 0 ]; then
   echo "Sockets: connect, accept, message exchange, short reads, closed peer,"
   echo "refused connections, IPv6, unix sockets and timeouts all verified, a port and an address are checked before"
-  echo "they are packed, a closed socket says so, and every check is proved to fail"
-  echo "when broken."
+  echo "they are packed, a closed socket says so, a socket waits on its thread's port wherever it last was,"
+  echo "and every check is proved to fail when broken."
 else
   echo "Sockets: something above failed."
 fi

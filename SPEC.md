@@ -66,7 +66,7 @@ own reference accepts.
 | iyi's own prelude | 24,996 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 131,248 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
-| samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
+| samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
 `python3 bench/incremental.py` and `python3 bench/build_speed.py` print the

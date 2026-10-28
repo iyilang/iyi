@@ -28,12 +28,14 @@
 #      request beside a task computing with no call in its loop wait no
 #      more than 100 ms, 80 for the request; a preempted task keeps its
 #      unit's token; the monitor looks every 4 to 10.5 ms and the quantum is
-#      at most 20 ms; and a tight loop costs at most twice what its
-#      `@[NoPreempt]` twin does. Its failure proofs are with step 7's: a
-#      `@[NoPreempt]` loop, a monitor that never raises the word, a Windows
-#      monitor on the system timer's tick, a check that calls the
-#      accessor (darwin and Windows), a slow half that does not poll, and a
-#      preempted task that gives its unit's token away.
+#      at most 20 ms; a tight loop costs at most twice what its
+#      `@[NoPreempt]` twin does; and the release build's IR shows each
+#      tight loop's checks reading the worker's word through the thread
+#      pointer, none calling its thread-local accessor. Its failure proofs
+#      are with step 7's: a `@[NoPreempt]` loop, a monitor that never raises
+#      the word, a Windows monitor on the system timer's tick, a check that
+#      calls the accessor (darwin and Windows), a slow half that does not
+#      poll, and a preempted task that gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. The speedup, measured: CPU-bound tasks on one worker and on several,
@@ -145,8 +147,10 @@ done
 # no longer holds a short task, a sleeper or a connection behind it past
 # 100 ms (80 for a fast request in the server shape); a preempted task
 # keeps its unit's token; the monitor looks every 4 to 10.5 ms and two tasks
-# on one worker take turns of 20 ms at most; and the tight loops cost at
-# most twice what their `@[NoPreempt]` twins cost.
+# on one worker take turns of 20 ms at most; the tight loops cost at most
+# twice what their `@[NoPreempt]` twins cost; and their checks read
+# the word through the thread pointer, in the release build's IR, which
+# it writes for that.
 PREEMPT_WORKERS=8
 [ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
 # The server shape's clients are the program's own main thread, which on
@@ -162,7 +166,8 @@ esac
 for build in plain release; do
   step "preemption at loop back-edges, $build build"
   flag=""
-  [ "$build" = release ] && flag="--release"
+  [ "$build" = release ] && flag="--release --emit llvm-ir"
+  # shellcheck disable=SC2086 # the flags are words
   if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
   fi
@@ -183,6 +188,93 @@ if [ "$code" -ne 0 ] || ! grep -q 'every property held' tight.txt; then
   echo "the tight loops failed (exit $code):"; cat tight.txt; exit 1
 fi
 grep '^tight' tight.txt | sed 's/^/  /'
+
+# The checks at the tight step's loops' back-edges in an IR file, as
+# `--emit llvm-ir` writes it after they went in (`PreemptChecks`): the
+# loops of bench/parallel_preempt.iyi's `spin`, `sum`, `sum_each` and
+# `crc`, each `@[NoInline]` so that it is a function of its own. A check is
+# the block that branches to a block calling `__iyi_preempt`, that block's
+# one predecessor, and it reads the worker's word through the thread
+# pointer - `%gs:off` on x86-64 Windows (address space 256), `%fs:off` on
+# x86-64 Linux (257), `tpidrro_el0` on darwin arm64, `tpidr_el0` on arm64
+# Linux - or by calling the word's thread-local accessor,
+# `*IyiWorkers::preempt`, at every turn. darwin's entry block calls the
+# accessor once for the offset, and is no check. A line per loop, and exit
+# 1 at a loop that is not there, one with no check, and one with a check
+# that does not read the thread pointer. The timing above cannot tell the
+# accessor's checks from these: on the Windows runner of CI job
+# 122792275988 they cost `sum` 1.776x and `each` 1.828x, where the thread
+# pointer's cost them 1.049x and 1.108x, and the bound was twice.
+tight_checks() { # IR file
+  awk '
+    BEGIN {
+      split("spin sum sum_each crc", order, " ")
+      for (i = 1; i <= 4; i++) wanted[order[i]] = 1
+      split("%gs:off|%fs:off|tpidrro_el0|tpidr_el0|accessor|another way", kinds, "|")
+    }
+    /^define / {
+      line = $0
+      gsub(/\.3A\./, ":", line)
+      gsub(/\.3C\./, "<", line)
+      fn = ""
+      if (match(line, /ParallelPreempt::[a-z_]+</)) {
+        name = substr(line, RSTART + 17, RLENGTH - 18)
+        if (name in wanted) { fn = name; found[fn] = 1; block = "%entry"; pred = "" }
+      }
+      next
+    }
+    fn == "" { next }
+    /^}/ { fn = ""; next }
+    /^[^ \t]/ {
+      block = "%" substr($0, 1, index($0, ":") - 1)
+      at = index($0, "; preds = ")
+      pred = at ? substr($0, at + 10) : ""
+      sub(/[ \t]+$/, "", pred)
+      next
+    }
+    index($0, "call void @__iyi_preempt()") { checks[fn] = checks[fn] + 1; check[fn, checks[fn]] = pred; next }
+    index($0, "@\"*IyiWorkers::preempt\"(") || index($0, "@.2A.IyiWorkers.3A..3A.preempt(") { how[fn, block] = "accessor"; next }
+    how[fn, block] == "accessor" { next }
+    /load volatile i64, ptr addrspace\(256\)/ { how[fn, block] = "%gs:off"; next }
+    /load volatile i64, ptr addrspace\(257\)/ { how[fn, block] = "%fs:off"; next }
+    /tpidrro_el0/ { how[fn, block] = "tpidrro_el0"; next }
+    /tpidr_el0/ { how[fn, block] = "tpidr_el0"; next }
+    END {
+      for (i = 1; i <= 4; i++) {
+        fn = order[i]
+        if (!(fn in found)) { fails = fails "FAIL: tight checks: " fn " is not a function of the IR\n"; continue }
+        n = checks[fn] + 0
+        if (n == 0) { fails = fails "FAIL: tight checks: " fn " checks at no back-edge\n"; continue }
+        split("", counts)
+        for (k = 1; k <= n; k++) {
+          kind = how[fn, check[fn, k]]
+          if (kind == "") kind = "another way"
+          counts[kind] = counts[kind] + 1
+        }
+        said = ""
+        for (k = 1; k <= 6; k++) {
+          kind = kinds[k]
+          if (!(kind in counts)) continue
+          word = kind == "accessor" ? "calling the accessor" : (kind == "another way" ? "reading the word another way" : "reading " kind)
+          said = said ", " counts[kind] " " word
+        }
+        print fn ": " n " back-edge check" (n == 1 ? "" : "s") said
+        if ("accessor" in counts) fails = fails "FAIL: tight checks: " fn ": " counts["accessor"] " of " n " back-edge checks call the thread-local accessor *IyiWorkers::preempt\n"
+        else if ("another way" in counts) fails = fails "FAIL: tight checks: " fn ": " counts["another way"] " of " n " back-edge checks read the word neither through the thread pointer nor by the accessor\n"
+      }
+      printf "%s", fails
+      exit (fails != "")
+    }
+  ' "$1"
+}
+step "how the tight loops' checks read the worker's word, release build"
+if ! tight_checks preempt-release.ll > reads.txt 2>&1; then
+  echo "the tight loops' checks are not the thread pointer's:"; cat reads.txt; exit 1
+fi
+sed 's/^/  /' reads.txt
+if [ "$(uname -s)" = Linux ]; then
+  echo "  the check on Linux never calls the accessor: \`-Dpreempt_check_accessor\` builds the same code"
+fi
 
 # ── 2c. Preemption inside the library, std and recursion, twice ──────────
 # bench/parallel_preempt_lib.iyi: a sort, a copy, a hash's growth, a join,
@@ -639,14 +731,29 @@ case "$(uname -s)" in
     echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
 esac
 
-step "failure proof: a check that calls the thread-local accessor at every back-edge costs a tight loop"
+# The accessor's checks are caught in the IR, where they are calls of
+# `*IyiWorkers::preempt` however fast the runner is. By the clock the
+# copy's `sum` measured 5.351x and 5.409x on macos-14 runners, but 1.776x
+# on the windows-2025 one of CI job 122792275988, under the bound of twice
+# it had to pass, and the thread pointer's checks measured `each` up to
+# 1.762x on another windows-2025 runner (CI job 122916661258): no bound
+# between the two holds on every runner. So the copy's timing is not a
+# proof any more, and is not run.
+step "failure proof: a check that calls the thread-local accessor at every back-edge"
 if [ "$(uname -s)" = Linux ]; then
-  echo "  the check on Linux never called the accessor: the copy builds the same code, so there is nothing to fail"
+  echo "  the check on Linux never calls the accessor: the copy builds the same code, so there is nothing to fail"
 else
-  if ! "$IYI" build --release -Dpreempt_check_accessor "$REPO/bench/parallel_preempt.iyi" -o accessor-run > build-accessor.log 2>&1; then
+  if ! "$IYI" build --release --emit llvm-ir -Dpreempt_check_accessor "$REPO/bench/parallel_preempt.iyi" -o accessor-run > build-accessor.log 2>&1; then
     echo "the accessor build failed:"; tail -20 build-accessor.log; exit 1
   fi
-  caught accessor 'tight: sum:' tight --workers=1
+  if tight_checks accessor-run.ll > accessor.txt 2>&1; then
+    echo "the broken copy accessor was not caught by the tight loops' checks:"; cat accessor.txt; exit 1
+  fi
+  if ! grep -q '^FAIL: tight checks: .* call the thread-local accessor' accessor.txt; then
+    echo "the tight loops' checks failed the accessor copy some other way:"; cat accessor.txt; exit 1
+  fi
+  sed '/^FAIL: /d; s/^/  /' accessor.txt
+  echo "  exits 1 at \"$(grep -m1 '^FAIL: ' accessor.txt | sed 's/^FAIL: //')\""
 fi
 
 step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"

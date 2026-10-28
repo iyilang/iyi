@@ -64,7 +64,11 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # Integer work with nothing to allocate and no call in its loop: a
-  # xorshift walk.
+  # xorshift walk. It and the tight step's other loops, and their twins, are
+  # `@[NoInline]`: bench/parallel_exercise.sh reads the checks of each in
+  # the release build's IR by the def's name, which inlined into the step's
+  # block it would not have.
+  @[NoInline]
   def spin(rounds : Int64, seed : UInt64) : UInt64
     x = seed | 1_u64
     i = 0_i64
@@ -78,6 +82,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # The same walk, never preempted.
+  @[NoInline]
   @[NoPreempt]
   def spin_np(rounds : Int64, seed : UInt64) : UInt64
     x = seed | 1_u64
@@ -102,6 +107,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # A sum LLVM vectorises, and its twin.
+  @[NoInline]
   def sum(values : Array(Int64), times : Int32) : Int64
     total = 0_i64
     t = 0
@@ -117,6 +123,7 @@ import std/socket::{IyiSocket, SocketError}
     total
   end
 
+  @[NoInline]
   @[NoPreempt]
   def sum_np(values : Array(Int64), times : Int32) : Int64
     total = 0_i64
@@ -135,6 +142,7 @@ import std/socket::{IyiSocket, SocketError}
 
   # The same sum through `times` and `each`, whose loops are the prelude's
   # and check because they are inlined into this def.
+  @[NoInline]
   def sum_each(values : Array(Int64), times : Int32) : Int64
     total = 0_i64
     times.times do
@@ -143,6 +151,7 @@ import std/socket::{IyiSocket, SocketError}
     total
   end
 
+  @[NoInline]
   @[NoPreempt]
   def sum_each_np(values : Array(Int64), times : Int32) : Int64
     total = 0_i64
@@ -153,6 +162,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # A table-driven CRC-32, a loop of dependent loads.
+  @[NoInline]
   def crc(table : Array(UInt32), data : Array(UInt8), times : Int32) : UInt32
     c = 0xFFFFFFFF_u32
     t = 0
@@ -168,6 +178,7 @@ import std/socket::{IyiSocket, SocketError}
     c ^ 0xFFFFFFFF_u32
   end
 
+  @[NoInline]
   @[NoPreempt]
   def crc_np(table : Array(UInt32), data : Array(UInt8), times : Int32) : UInt32
     c = 0xFFFFFFFF_u32
@@ -485,10 +496,19 @@ import std/socket::{IyiSocket, SocketError}
   # TIGHT_BOUND thousandths. The check is a read or two and a branch per
   # turn. On GitHub's x86-64 runners the vectorised sums run at one of two
   # speeds, about 32 or 48 ms, and a checked one at the slower: 1.46 to
-  # 1.49x on Windows, and the same through `each` 1.51x on Linux, whose
-  # unchecked `sum` came in at the slower speed too, 1.001x. A check that
-  # calls the accessor at every turn - darwin and Windows had it - cost
-  # those sums 3.4 to 5.8 times their twins there. Twice is between.
+  # 1.50x on Windows (`sum` 1.503x in CI job 121231000410), and through
+  # `each` 1.51x on Linux, whose unchecked `sum` came in at the slower speed
+  # too, 1.001x. A windows-2025 runner then took a checked sum about 54 ms
+  # against 31: `each` 1.745x to 1.762x over eight runs as master builds
+  # it, `sum` 1.252x to 1.265x inlined and 1.744x to 1.755x `@[NoInline]`
+  # (CI job 122916661258). Windows 11 on 12 logical processors (the
+  # user's machine) measured every loop 0.98x to 1.08x, either way. The
+  # bound is twice, room of an eighth above that runner's worst. It says
+  # what the check costs, not which check it is: one that calls the
+  # accessor at every turn, as darwin's and Windows' did at first, cost
+  # those sums 3.4 to 5.8 times their twins there, but 1.776x and 1.828x on
+  # the Windows runner of CI job 122792275988, about what the cheap check
+  # cost on another. bench/parallel_exercise.sh tells the two in the IR.
   TIGHT_BOUND = 2000_i64
 
   def tight : Nil

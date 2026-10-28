@@ -3969,9 +3969,21 @@ to 5.80x on darwin; the walk and the CRC cost 1.00x to 1.09x.
   remaining cost is a check in a loop of about 1.3 cycles, not the
   Windows read. Nothing under 3% was found for this loop.
 - *The gate's bound and its proof.* The `tight` step holds every ratio to
-  2x. Built with `-Dpreempt_check_accessor` (the accessor form, which
-  invalidates cached objects through the bitcode flags), it must fail at
-  `tight: sum:` on darwin and Windows.
+  2x, a measurement of what the check costs: a windows-2025 runner took
+  the checked sums about 54 ms against 31, `each` 1.745x to 1.762x over
+  eight runs (CI job 122916661258), where Windows 11 on 12 logical
+  processors (the user's machine) measured 0.98x to 1.08x. Which check it
+  is, is read from the release build's IR instead
+  (`bench/parallel_exercise.sh`'s `tight_checks`): every back-edge check
+  of `spin`, `sum`, `sum_each` and `crc` must read the thread pointer
+  (`%gs:off`, `%fs:off`, `tpidrro_el0` or `tpidr_el0`) and none may call
+  `*IyiWorkers::preempt`. Built with `-Dpreempt_check_accessor` (the
+  accessor form, which invalidates cached objects through the bitcode
+  flags), all 9 of those checks call it on darwin and Windows, and the
+  IR check must refuse that build there. The timing could not be the
+  proof: the accessor form's `sum` measured 5.35x and 5.41x on macos-14,
+  but 1.776x on the windows-2025 runner of CI job 122792275988, about
+  what the thread pointer's cost on another.
 - *The tick.* Windows' monitor waited 5 ms on its semaphore, which ends on
   the system timer's tick: looks came 11.2 to 12.3 ms apart, and a ticker
   beside a computing task woke up to 30 ms late. It now waits on a

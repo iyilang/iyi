@@ -25,8 +25,9 @@
 # Under `-Dparallel_stale_tls` the thread-local is the one read before the
 # park, as code that kept a thread-local's address across a call would
 # read it, and under `-Dparallel_hoisted_tls` the line is the one read
-# before the loop, as a read hoisted out of it would be; each step fails
-# by name.
+# before the loop, as a read hoisted out of it would be; under
+# `-Dparallel_closes_home` a read is made on the thread that closes its
+# socket (`closes`); each step fails by name.
 #
 # Then the timed shapes the issue's server is made of (#145): tasks that
 # park and then compute finish in about their work over the workers, when
@@ -405,91 +406,151 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # ── closes ───────────────────────────────────────────────────────────
-  # A socket closed by a task of the same parallel task on another worker
-  # wakes the read parked on it there: the close is the reader's poller's
-  # news, posted to its thread (`IyiScheduler.wake_closed`).
+  # A socket closed on another thread than the one its read parked on
+  # wakes the read there: the close is the reader's poller's news, posted
+  # to its thread (`IyiScheduler.wake_closed`).
   #
-  # Every close must wake its read, each round. That a close is made on
-  # another worker than its reader's is the precondition the step needs,
-  # not a property of the runtime: the closer is woken from the main
-  # thread into the pool's shared queue, and whichever worker takes it
-  # first runs it. darwin's release build once had all 16 closers taken by
-  # their readers' own workers (CI job 121953306559, on a branch whose
-  # runtime was master's), where the plain build of the same run crossed 11
-  # of 16. So rounds of 16 run until one close has crossed, five at most,
-  # and only five rounds with none fail.
+  # 16 sockets are each read and closed by two tasks of one parallel task.
+  # The closer is woken from the main thread into the pool's shared queue
+  # and whichever worker takes it first runs it, which may be the reader's
+  # own: darwin's release build once had all 16 closers there (CI job
+  # 121953306559), and its plain build on 3 cores, run until one crossed,
+  # had none of 80 cross in five rounds of 16 (job 122696158944). A close
+  # made on another thread than its reader's is the precondition the step
+  # needs, so a seventeenth socket is read by a parallel task and closed
+  # by the main thread, which is never a pool worker: one close each run
+  # crosses by construction. 120 runs of the step crossed on a 12-core
+  # Linux machine, 30 of each build held to 3 cores (`taskset -c 0-2`) and
+  # 30 on all 12, the siblings 0 to 16 times of 16 and not once in two
+  # release runs, one on 3 cores and one on 12; and 10 of each build on
+  # macos-14's 3 cores, the siblings 8 to 15 times (job 122760384513), and
+  # on windows-2025's 4, 8 to 14 times (job 122760384624).
+  #
+  # The main thread's close is the call a worker's is: `wake_closed` posts
+  # to whichever thread's poller holds the read, from any thread, so a
+  # close posted to no thread leaves that read parked in every run
+  # (bench/parallel_exercise.sh's `noclose`). The main thread's close
+  # alone, the 16 siblings taken out, woke its read in 5 runs of 5 on
+  # Linux, and under `noclose` left it parked in 5 of 5.
+  #
+  # The seventeenth socket is one object, the one the main thread
+  # accepted, lent to its reader (`Lent`) and closed by the main thread
+  # alone: a second object for its fd would keep its own `@fd`, and the
+  # read woken in it would ask the kernel for a closed descriptor's bytes,
+  # or a reused one's. The 16 accepted objects whose fds the tasks close
+  # are dropped open: iyi has no finalizers (prelude.iyi's sweep), so
+  # nothing closes a number twice. Under `-Dparallel_closes_home` the
+  # seventeenth read is a task of the main thread's own, made where its
+  # close is, and the step fails by name.
   def closes(watch : Int32) : Nil
     watched("closes", watch) do
       units = 16
-      woken_all = 0_i64
-      crossed_all = 0_i64
-      rounds = 0
-      while rounds < 5 && (rounds == 0 || crossed_all == 0_i64)
-        rounds = rounds + 1
-        woken, crossed = close_round(units)
-        fail("closes: #{woken} of #{units} reads woke when a sibling closed their socket, in round #{rounds}") unless woken == units.to_i64
-        woken_all = woken_all + woken
-        crossed_all = crossed_all + crossed
+      listener = IyiSocket.listen("127.0.0.1", 0)
+      port = listener.local_port
+      ends = [] of IyiSocket
+      fds = [] of Int32
+      families = [] of Int32
+      units.times do
+        p = pair(listener, port)
+        ends << p[0]
+        fds << p[1].fd
+        families << p[1].family
       end
-      if IyiWorkers.count > 1 && crossed_all == 0_i64
-        fail("closes: no socket was closed on another worker than the one its reader parked on, in #{rounds} rounds of #{units}")
+      last = pair(listener, port)
+      ends << last[0]
+      lent = Lent.new(last[1])
+      lent_reader = Where.new
+      go = Channel(Int32).new
+      waiting = Tally.new
+      woken = Tally.new
+      crossed = Tally.new
+      main_crossed = false
+      group do |g|
+        units.times do |u|
+          fd = fds[u]
+          family = families[u]
+          g.spawn_parallel do
+            socket = IyiSocket.new(fd, family)
+            reader_on = 0_u64
+            group do |inner|
+              inner.spawn do
+                reader_on = os_thread
+                waiting.add(1_i64)
+                got = socket.read(16)
+                woken.add(1_i64) if got.is_a?(Cancelled)
+                0
+              end
+              inner.spawn do
+                go.receive
+                crossed.add(1_i64) if os_thread != reader_on
+                socket.close
+                0
+              end
+            end
+            0
+          end
+        end
+        {% if flag?(:parallel_closes_home) %}
+          g.spawn { lent_read(lent, lent_reader, waiting, woken) }
+        {% else %}
+          g.spawn_parallel { lent_read(lent, lent_reader, waiting, woken) }
+        {% end %}
+        while waiting.count < (units + 1).to_i64
+          sleep(1)
+        end
+        sleep(20)
+        units.times { go.send(1) }
+        main_crossed = os_thread != lent_reader.thread
+        lent.socket.close
       end
-      puts "closes: #{woken_all} reads woken by a sibling's close, #{crossed_all} of the closes made on another worker"
+      ends.each(&.close)
+      listener.close
+      fail("closes: #{woken.count} of #{units + 1} reads woke when their socket was closed") unless woken.count == (units + 1).to_i64
+      fail("closes: the main thread closed a socket on the thread its reader parked on") unless main_crossed
+      puts "closes: #{units + 1} reads woken by a close, the main thread's and #{units} a sibling task's, #{crossed.count} of those made on another worker"
     end
   end
 
-  # One round of *units* reads and their closes: how many reads woke, and
-  # how many closes were made on another worker than their reader's.
-  def close_round(units : Int32) : {Int64, Int64}
-    listener = IyiSocket.listen("127.0.0.1", 0)
-    port = listener.local_port
-    ends = [] of IyiSocket
-    fds = [] of Int32
-    families = [] of Int32
-    units.times do
-      p = pair(listener, port)
-      ends << p[0]
-      fds << p[1].fd
-      families << p[1].family
+  # The seventeenth socket's read, the thread it parks on noted for the
+  # main thread's close to be measured against.
+  def lent_read(lent : Lent, where : Where, waiting : Tally, woken : Tally) : Int32
+    where.note(os_thread)
+    waiting.add(1_i64)
+    got = lent.socket.read(16)
+    woken.add(1_i64) if got.is_a?(Cancelled)
+    0
+  end
+
+  # The socket the main thread closes under a parallel task's read. Not
+  # `Share` by its fields - `close` writes `@fd` - and trusted for the one
+  # crossing the step makes: the main thread writes `@fd` before the call
+  # that wakes the read, the post `wake_closed` makes under the scheduler's
+  # lock or on Windows the closesocket whose completion ends it, the order
+  # a sibling's close on another worker relies on too.
+  @[Share]
+  class Lent
+    getter socket : IyiSocket
+
+    def initialize(@socket : IyiSocket)
     end
-    go = Channel(Int32).new
-    waiting = Tally.new
-    woken = Tally.new
-    crossed = Tally.new
-    group do |g|
-      units.times do |u|
-        fd = fds[u]
-        family = families[u]
-        g.spawn_parallel do
-          socket = IyiSocket.new(fd, family)
-          reader_on = 0_u64
-          group do |inner|
-            inner.spawn do
-              reader_on = os_thread
-              waiting.add(1_i64)
-              got = socket.read(16)
-              woken.add(1_i64) if got.is_a?(Cancelled)
-              0
-            end
-            inner.spawn do
-              go.receive
-              crossed.add(1_i64) if os_thread != reader_on
-              socket.close
-              0
-            end
-          end
-          0
-        end
-      end
-      while waiting.count < units.to_i64
-        sleep(1)
-      end
-      sleep(20)
-      units.times { go.send(1) }
+  end
+
+  # The thread a task was on, as `os_thread` reads it, for another to read:
+  # `Share` by its atomic field.
+  class Where
+    @thread : Atomic(UInt64)
+
+    def initialize
+      @thread = Atomic(UInt64).new(0_u64)
     end
-    ends.each(&.close)
-    listener.close
-    {woken.count, crossed.count}
+
+    def note(thread : UInt64) : Nil
+      @thread.set(thread)
+    end
+
+    def thread : UInt64
+      @thread.get
+    end
   end
 
   # ── deep ─────────────────────────────────────────────────────────────

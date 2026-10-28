@@ -209,11 +209,21 @@
   object of `bench/std_cookie_exercise.iyi` named it undefined before
   and defines it after.
 
-- **`bench/parallel_migrate.iyi`'s closes step runs rounds of 16 until
-  one close is made on another worker than its reader's, five at most.**
-  That is the step's precondition, not the runtime's property: darwin's
-  release build once took all 16 closers on their readers' own workers,
-  where master's had crossed 15 and the same job's plain build 11.
+- **`bench/parallel_migrate.iyi`'s closes step has the main thread close
+  one socket under a parallel task's read, so a close crosses threads in
+  every run.** The step needs one close made on another thread than its
+  reader's, and its 16 closers, each a task of its reader's parallel
+  task, run on whichever worker takes them first: darwin's release build
+  once took all 16 on their readers' own workers, and its plain build on
+  3 cores, run in rounds of 16 until one crossed, had none of 80 cross
+  (job 122696158944). The main thread is never a pool worker, and its
+  close posts to the reader's worker as a worker's does (`wake_closed`):
+  120 runs on a 12-core Linux machine, 30 of each build on 3 cores and on
+  12, all crossed, two with no sibling crossing, and so did 20 on
+  macos-14's 3 cores (job 122760384513) and 20 on windows-2025's 4 (job
+  122760384624). A read made on the main thread instead
+  (`-Dparallel_closes_home`) fails the step by name in
+  bench/parallel_exercise.sh, and `noclose` still hangs it.
 
 - **An integer constant is cut to its type's width before LLVM gets it**
   (`LLVM::Type#const_int`, as Crystal 1.22 has it). A negative value went

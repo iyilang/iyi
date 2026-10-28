@@ -3717,8 +3717,9 @@ epoll or kqueue, and on Windows a handle is moved to the waiting thread's
 port, a completion that reaches another port being forwarded by the thread
 id its OVERLAPPED carries; a cancel finds the thread whose sleep heap or
 poller holds the task by an id the task writes there (`IyiFiber#listed_on`);
-and a socket a sibling closes on another worker wakes the read parked on it
-through that worker's mail. `bench/parallel_migrate.iyi` holds each of
+and a socket closed on another thread than its reader's - by a sibling on
+another worker, or by the main thread - wakes the read parked on it through
+the reader's worker's mail. `bench/parallel_migrate.iyi` holds each of
 these after hundreds of moves, plain and release, with broken copies caught
 by name.
 
@@ -4139,7 +4140,7 @@ eight workers' fiber stacks through the collections, a deadlock across
 threads named, and broken copies of the runtime caught by name - a wake
 that does not ring, a steal that leaves the task queued, a cancel never
 delivered, a cancel that skips the pool, and a pool held to one worker -
-and runs `bench/parallel_migrate.iyi` with seven more for part 1's moves.
+and runs `bench/parallel_migrate.iyi` with nine more for part 1's moves.
 The one name the pool adds to the floor is `environ`, the C runtime's
 table `IYI_WORKERS` is read from on Linux and darwin.
 

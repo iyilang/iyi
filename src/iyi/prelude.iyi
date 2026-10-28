@@ -1560,6 +1560,10 @@ require "./file"
         # uses on the concurrency targets and the same declaration, so the
         # two `lib` reopenings agree the way `mmap`'s do.
         fun clock_gettime_nsec_np(clock_id : Int32) : UInt64
+        # The mark helpers' park (`IyiMark.wait_generation`): libSystem's
+        # public futex, macOS 14.4 and later.
+        fun os_sync_wait_on_address(address : Void*, value : UInt64, size : UInt64, flags : UInt32) : Int32
+        fun os_sync_wake_by_address_all(address : Void*, size : UInt64, flags : UInt32) : Int32
       end
 
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
@@ -4913,8 +4917,10 @@ require "./file"
       POOL_PIECE_END = 1024_u64
       POOL_PIECES = 1088_u64
       POOL_REUSED = 1152_u64
-      # Windows' helpers asleep on the semaphore, counted so a wake
-      # releases one count per sleeper (`wake_helpers`).
+      # The helpers asleep in their park on Windows and darwin, counted so
+      # a wake knows who is there: Windows releases one count of its
+      # semaphore per sleeper, and darwin makes no call when there is
+      # nobody to wake (`wake_helpers`).
       POOL_SLEEPERS = 1216_u64
       # When the mark in flight is next reported as overdue, or 0 when no
       # mark is in flight (`watch_overdue`).
@@ -6031,8 +6037,8 @@ require "./file"
       # How many helpers a mark may use. Set before the first collection;
       # the default is the core count less one, capped at fifteen, and 0
       # marks alone. A count past the cores is the cores less one: a
-      # helper past the cores has no core to run on, and on darwin, where
-      # a parked helper spins, fifteen of them on three cores held the
+      # helper past the cores has no core to run on, and on darwin, when a
+      # parked helper spun, fifteen of them on three cores held the
       # parallel mark's exercise past its five minutes.
       def self.workers=(count : UInt64) : Nil
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
@@ -6137,15 +6143,35 @@ require "./file"
       # and its every-collection stop went from tens of microseconds to
       # milliseconds when the helpers stopped spinning. Collections come
       # in bursts, so a helper that spins for the length of one stays hot
-      # through the burst and sleeps between them. The spin is fifty
-      # microseconds by the clock: it was 20,000 pause hints, which is
-      # fifty microseconds where a hint is 2.5 ns, and a hint is not that
-      # everywhere - on a twelve-core Windows machine it was 20 ns, the
-      # spin 400 us, and churn's collections, one every half millisecond,
-      # never let a helper without work park: eleven helpers held eight
-      # cores spinning, and churn ran 0.162 s against 0.068 marked alone.
+      # through the burst and sleeps between them. The spin is by the
+      # clock, fifty microseconds on Linux and Windows: it was 20,000
+      # pause hints, which is fifty microseconds where a hint is 2.5 ns,
+      # and a hint is not that everywhere - on a twelve-core Windows
+      # machine it was 20 ns, the spin 400 us, and churn's collections,
+      # one every half millisecond, never let a helper without work park:
+      # eleven helpers held eight cores spinning, and churn ran 0.162 s
+      # against 0.068 marked alone.
       # The clock is read once every SPIN_CHECK hints.
-      SPIN_BEFORE_PARK_NS = 50000_u64
+      #
+      # darwin's spin is a quarter of a millisecond, chosen from spins of
+      # fifty microseconds to five milliseconds, the helpers parking after
+      # it (`wait_generation`). On a ten-core M2 Pro (macOS
+      # 26.6), best of five, the long spins took the program's cores:
+      # binary trees 0.135 s at fifty, 0.144 at 250, 0.173 at a
+      # millisecond and 0.274 at five, and bench/web_cores.iyi's
+      # check_version at eight workers 115,279, 114,495, 104,986 and
+      # 81,834 requests a second. On CI's three-core macos-14, nine runs
+      # each, the short ones parked a helper between a burst's collections
+      # and woke it late: binary trees' median 0.257 s at fifty, 0.230 at
+      # a hundred, 0.205 at 250 and 0.224 at a millisecond, where helpers
+      # that never parked read 0.199. A quarter millisecond is near the
+      # best of each: 7% behind fifty on the M2's binary trees, level on
+      # its churn and requests, and the best median on three cores.
+      {% if flag?(:darwin) %}
+        SPIN_BEFORE_PARK_NS = 250000_u64
+      {% else %}
+        SPIN_BEFORE_PARK_NS = 50000_u64
+      {% end %}
       SPIN_CHECK = 1024_u64
 
       def self.spin_for_generation(word : Pointer(Atomic(UInt64)), seen : UInt64) : UInt64
@@ -6160,9 +6186,9 @@ require "./file"
         end
       end
 
-      # A round's permits are SWEEP_HELPERS; on Linux that many helpers
-      # are woken and each takes one, on darwin every helper spins awake
-      # and the first that many do.
+      # A round's permits are SWEEP_HELPERS; every helper is woken, or
+      # finds the generation turned in its spin before the park, and the
+      # first that many take one.
       def self.take_sweep_permit : Bool
         word = pool_word(POOL_SWEEP_PERMITS)
         while true
@@ -6270,35 +6296,71 @@ require "./file"
           wake_helpers
         end
       {% else %}
-        # darwin has no futex: a helper spins on the generation with a
-        # yield between reads, which costs no name on the floor.
-        # darwin's helpers spin on the generation, and it is a hot spin -
-        # `yield` there is the ARM hint, not a syscall. Measured and kept:
-        # a park was built for them, a pipe per helper (there is no futex
-        # on darwin, and a signal handler may call `read` but not
-        # `os_unfair_lock_lock`), and on CI's three-core runner it cost
+        # darwin's helpers spin SPIN_BEFORE_PARK_NS on the generation, as
+        # Linux's and Windows' do, and then sleep on the word itself in
+        # `os_sync_wait_on_address`, libSystem's public futex: the kernel
+        # sleeps the helper only while the word still holds the generation
+        # it waits past, so a turn between its read and its sleep is not
+        # slept through, and one `os_sync_wake_by_address_all` wakes every
+        # sleeper. The sleepers count is Windows' protocol, and here it
+        # spares the wake its call when nobody sleeps: a helper counts
+        # itself before it reads the word and the collector turns the word
+        # before it reads the count, both locked read-modify-writes, so
+        # either the helper sees the new generation or the collector sees
+        # the sleeper.
+        #
+        # They spun on the word forever before, `yield` being the ARM hint
+        # and not a syscall, and an idle program held a core per helper:
+        # bench/web_cores.iyi's server, idle after a second of load, used
+        # 88.9 s of CPU in ten seconds with nine helpers on a ten-core M2
+        # Pro (macOS 26.6) and 19.9 with two on CI's three-core macos-14,
+        # and uses 0.0 on both parked. Under load the spinners had the
+        # workers' cores: check_version at eight workers answered 64,331
+        # requests a second on the M2 and 114,495 parked, p99 44.7 ms
+        # against 0.92, and binary trees ran 0.281 s against 0.144. The
+        # park refused before, a pipe per helper, slept between every
+        # collection with no spin first, and cost the three-core runner
         # binary trees 1.07 s against the spin's 0.23 and churn 0.19
-        # against 0.075. A parked helper has to be woken and then
-        # scheduled before it marks, and on a machine with three cores
-        # that is the mark's latency; a spinning helper is at the pool the
-        # instant the generation turns, and the core it burns while idle
-        # is worth less than the mark it delays. Linux's futex park costs
-        # microseconds and keeps its cores, which is why the platforms
-        # differ here at all.
+        # against 0.075; with the spin first, nine runs each there, binary
+        # trees' median is 0.205 s against the spinners' 0.199 and churn's
+        # 0.075 against 0.078.
+        #
+        # The futex is public from macOS 14.4, and a program built on
+        # macOS 14 says it runs on 14.0 (`minos` 14.0 on CI's 14.8), so it
+        # now needs 14.4 there. `__ulock_wait`, the private call beneath
+        # it (a parked helper's frame under `sample` is `__ulock_wait2`),
+        # is the same futex without the 14.4, but a program built here
+        # would carry a private name. A Mach semaphore is public
+        # everywhere, but it is four names (`mach_task_self_` among them)
+        # and a trap per sleeper in the wake, which the program's own
+        # thread pays. A condition variable is ruled out by the stop: no
+        # caller of the wake runs in a signal handler - the stop's handler
+        # only parks its thread on its pipe - but a program thread can be
+        # stopped inside the wake, since `wake_sweep_round` runs after the
+        # runtime lock is let go, and a thread parked holding the
+        # condition's mutex would hold the collector's next wake. The
+        # futex's wake checks its arguments and calls `__ulock_wake`, read
+        # off its disassembly: one system call, holding nothing.
         def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
+          spun = spin_for_generation(word, seen)
+          return spun if spun != seen
+          sleepers = pool_word(POOL_SLEEPERS)
+          sleepers.value.add(1_u64)
           while (now = word.value.get) == seen
-            IyiThread.yield_cpu
+            LibC.os_sync_wait_on_address(word.as(Void*), seen, 8_u64, 0_u32)
           end
+          sleepers.value.sub(1_u64)
           now
         end
 
-        # Nothing to wake: a darwin helper is spinning on the generation,
-        # which the caller has already turned.
         def self.wake_helpers : Nil
+          return if pool_word(POOL_SLEEPERS).value.get == 0_u64
+          LibC.os_sync_wake_by_address_all(pool_word(POOL_GENERATION).as(Void*), 8_u64, 0_u32)
         end
 
         def self.wake_some_helpers(count : UInt64) : Nil
+          wake_helpers
         end
       {% end %}
       {% else %}
@@ -6734,9 +6796,9 @@ require "./file"
         # after the release finds helpers coming rather than sweep alone.
         # The wake itself comes after the lock is released - a thread
         # woken may preempt the waker, and seven helpers woken inside the
-        # stop made a 90 us pause 1.6 ms. SWEEP_HELPERS of the parked
-        # helpers are woken, and each takes a permit; on darwin every
-        # helper spins awake and the first SWEEP_HELPERS take one.
+        # stop made a 90 us pause 1.6 ms. The parked helpers are woken,
+        # every platform waking them all, and the first SWEEP_HELPERS take
+        # a permit.
         def self.open_sweep_round : Nil
           return if @@helpers == 0_u64 || @@sweep_left == 0_u64
           open_mark_permits(0_u64)

@@ -1035,8 +1035,9 @@
         # darwin's `yield` is the ARM hint, not a syscall: it gives the
         # core's other hardware thread a turn and nothing to the
         # scheduler, so a loop around it is a hot spin. Where a thread has
-        # nothing to do until somebody tells it, `park_pipe_wait` is the
-        # answer; this remains for the short spins.
+        # nothing to do until somebody tells it, it parks - a stopped
+        # thread on its pipe, a mark helper on the generation word
+        # (`IyiMark.wait_generation`); this remains for the short spins.
         asm("yield" :::: "volatile")
       {% end %}
     end

@@ -2804,7 +2804,19 @@ of a server config that nothing else holds and nothing writes, its
 ticket keys and replay guard `Share` by their fields (a `Mutex` each).
 What neither can close is the edge `List` closes by never lending its
 array: an identity's chain is lent, and a program that writes into it
-writes what other threads read. Inside a `@[Share]` def its block, a
+writes what other threads read. Two more of std's types are `Share` by
+their fields, with no trust, because a parallel route logs and matches:
+std/log's `Logger`, whose level is an `Atomic`, whose backend and
+children are each behind a `Mutex`, and whose backends write a line at a
+time behind locks of their own - so a backend or formatter of the
+program's own must be `Share` too, and one that is not is refused where
+std/log hands it to a lock - and std/regex's `Regex`, whose compiled
+machine is `List`s and strings, read and never written by a match, which
+steps scratch of its own. `bench/std_log_exercise.sh` holds the first
+(twelve workers' lines through one constant logger each whole, and the
+logger checking under `--error-on-warnings`), `bench/std_regex_exercise.sh`
+the second (twelve workers matching one constant answer as one thread),
+each with a copy that fails. Inside a `@[Share]` def its block, a
 `Proc`, is the one non-`Share` value a parallel block may capture or be
 given as `&block`, while the def leaves it as given; any other proc
 passed as a block to a boundary - `g.spawn_parallel(&work)`,

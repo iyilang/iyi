@@ -80,6 +80,56 @@
   to 5.78 s, three interleaved runs each (Linux, a 12-vCPU QEMU guest).
   `bench/parallel_exercise.sh`'s `Share` step builds two blocks reaching
   `DATABASE` and wants one warning counting the other.
+- **std/log's `Logger` is `Share`, so a constant logger may be reached
+  from a parallel block, a server's handler or a route.** `LOG =
+  Log.for("x")` reached from one was warned about: the logger's level had
+  a setter and its children were a `Hash`, and its `IOBackend` wrote the
+  entry and its newline as two writes to an IO no lock kept. Twelve
+  workers writing 100,000 lines each through it to one file left 2,563 to
+  4,378 of the 1.2 million torn or lost in five runs.
+  - The level is an `Atomic`; the backend and the children are each
+    behind a `Mutex`, so two workers asking `for` one name get one
+    logger. `level=`, `backend=` and the rest keep their names.
+  - Every backend writes behind its own lock. `IOBackend` writes each
+    line, newline and all, through a handle of its own on the IO's
+    descriptor, as `AsyncBackend` did, and no longer has `io`;
+    `MemoryBackend#entries` answers a copy; `AsyncBackend` keeps its
+    writer thread behind its queue's lock, where `close` joins it.
+  - A backend's formatter is set in `new` and has no setter any more,
+    and `Formatter#format(entry, io)` is gone: a backend formats with
+    `format(entry)`. An `Entry` keeps its data as `pairs`, a `List`;
+    `data` answers a hash of them.
+  - A backend or formatter of the program's own must be `Share` too, and
+    one that is not is refused where std/log hands it to a lock, naming
+    its field.
+  - `Log.root` is made once, by the first read, on whichever thread.
+  - Measured with `--release` on 12-core x86_64 Linux, medians of five:
+    a disabled `debug` costs 2.0 ns where it cost 1.7; an enabled line to
+    a file on one thread 652 ns where it cost 569 (the two locks); twelve
+    workers 864 ns a line between them where they took 1,008, and none
+    torn.
+  - `bench/std_log_exercise.sh` holds it: twelve workers' 48,000 lines
+    through one constant each whole and each once, which a copy of the
+    backend claiming `Share` without its lock fails; and the constant
+    logger checks under `--error-on-warnings`, which a copy whose level
+    field its setter names fails.
+
+- **std/regex's `Regex` is `Share`, so one constant pattern may be
+  matched from every worker at once.** A match never wrote the pattern -
+  the thread lists and capture positions it steps were always its own,
+  made for that match - but the compiled machine was held in `Array`s and
+  raw pointers, and a parallel block reaching a constant regex was warned
+  about. The machine is now frozen into `List`s and its byte tables into
+  strings once the compiler has built it. Matching speed is unchanged:
+  over 2 MB of words, addresses and DNA, medians of five runs moved by
+  less than their spread on every path (groups 62.1 ms then 60.1; the
+  byte-run path 4.22 then 4.19; Shift-And 1.78 both). The byte-run path
+  took 5.4 ms while it read where each run began from a list beside the
+  lengths; it steps past each run instead. `bench/std_regex_exercise.sh`
+  matches one constant from twelve workers and wants one thread's
+  answers, which a copy that hands one match's scratch to the next fails;
+  and the constant checks under `--error-on-warnings`, which a copy whose
+  machine has a setter fails.
 
 - **`bench/parallel_exercise.sh` tells the accessor check from the cheap
   one in the IR, not by the clock.** Its proof that a check calling the

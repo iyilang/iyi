@@ -1045,6 +1045,7 @@ class ProcessChild
         ::LibC.CloseHandle(ours)
         return nil
       end
+      IyiScheduler.port_made(ours)
       {ours, theirs}
     end
 
@@ -1285,7 +1286,7 @@ class ProcessChild
 
     def close_output(output : ::Bool) : Nil
       handle = output ? @output : @errors
-      ::LibC.CloseHandle(handle) if handle.address != 0_u64
+      ProcessChild.close_pipe(handle)
       if output
         @output = Pointer(Void).new(0_u64)
       else
@@ -1336,7 +1337,7 @@ class ProcessChild
     end
 
     def close_input : Nil
-      ::LibC.CloseHandle(@input) if @input.address != 0_u64
+      ProcessChild.close_pipe(@input)
       @input = Pointer(Void).new(0_u64)
     end
 
@@ -1379,6 +1380,14 @@ class ProcessChild
       ::LibC.CloseHandle(@job) if @job.address != 0_u64
       @process = Pointer(Void).new(0_u64)
       @job = Pointer(Void).new(0_u64)
+    end
+
+    # This side of a pipe `pipe` made, closed, and its port record with it
+    # while the value is still this pipe's (`IyiScheduler.port_closing`).
+    def self.close_pipe(handle : Pointer(Void)) : Nil
+      return if handle.address == 0_u64
+      IyiScheduler.port_closing(handle)
+      ::LibC.CloseHandle(handle)
     end
 
     # The wait a cancelled overlapped call still owes: the operation is the
@@ -1479,9 +1488,9 @@ class ProcessChild
     end
 
     def close_all : Nil
-      ::LibC.CloseHandle(@input) if @input.address != 0_u64
-      ::LibC.CloseHandle(@output) if @output.address != 0_u64
-      ::LibC.CloseHandle(@errors) if @errors.address != 0_u64
+      ProcessChild.close_pipe(@input)
+      ProcessChild.close_pipe(@output)
+      ProcessChild.close_pipe(@errors)
       ::LibC.CloseHandle(@process) if @process.address != 0_u64
       ::LibC.CloseHandle(@job) if @job.address != 0_u64
       @job = Pointer(Void).new(0_u64)

@@ -1400,6 +1400,13 @@ module Iyi
       # body and of the blocks inlined into it (SPEC.md III.4.13, part 9):
       # a loop there is never where a parallel task gives its worker up.
       types["NoPreempt"] = @no_preempt_annotation = AnnotationType.new self, self, "NoPreempt"
+      # iyi: `@[SafeReach("why")]` on a constant or a class variable is the
+      # program's word that every thread may reach it through the defs a
+      # shared block calls - set once and then only read, or guarded some
+      # other way the type does not show - and the reason is the claim,
+      # written where the state is. It quiets the warning that walk gives
+      # (SPEC.md III.4.4), never the refusal of a block that names it itself.
+      types["SafeReach"] = @safe_reach_annotation = AnnotationType.new self, self, "SafeReach"
 
       # iyi: the marker that makes a union member an error member (SPEC.md
       # III.1.1). Created here rather than declared in the prelude because the
@@ -1733,7 +1740,7 @@ module Iyi
                      always_inline_annotation naked_annotation returns_twice_annotation
                      raises_annotation primitive_annotation call_convention_annotation
                      flags_annotation link_annotation extern_annotation deprecated_annotation experimental_annotation
-                     share_annotation no_preempt_annotation error_trait) %}
+                     share_annotation no_preempt_annotation safe_reach_annotation error_trait) %}
       def {{name.id}}
         @{{name.id}}.not_nil!
       end

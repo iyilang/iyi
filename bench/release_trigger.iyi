@@ -1,0 +1,153 @@
+# The trigger after a collection's release, looked for: #149.
+#
+#   ./bin/iyi run bench/release_trigger.iyi
+#
+# A collection that releases the threads it stopped before it lets
+# `@@collecting` fall leaves them a window in which they allocate past the
+# budget and nothing triggers the next collection: `pressure` turns every
+# slice away while the flag is up. Helper 0 had that window, and the
+# collections a program's own thread finishes had it too (GC_DESIGN.md
+# Stage 9). Each round here runs one collection on the main thread, and a
+# second thread, asleep until that collection's count has landed, then
+# hands `IyiMark.pressure` three budgets' worth of slices, waits out any
+# collection still running (`IyiMark.settle`) and asks whether its slices
+# triggered one. They must have: the main thread's collection was counted
+# before the first of them. And after them the second thread does nothing
+# more, so a trigger it was refused is not made up by a later one - the
+# case a server's threads were in once a watchdog held them
+# (bench/mark_stall.iyi).
+#
+# The slices are the allocator's own call (`IyiHeap.slice_full`), made
+# directly. Allocated for real, a slice's refill may sweep, and a sweep
+# takes the runtime lock, which the collection holds through the window:
+# on a copy that held the window open for a second, the second thread's
+# allocation after a collection without helpers took that second in 2
+# runs of 3, its slices counted after the flag fell, and the round passed.
+#
+# The rounds: the trigger's collection whose mark ends inside the bound,
+# with one helper (`finish_stopped`); the trigger's collection with no
+# helper (`collect_locked`); and `IyiMark.collect`, the verb
+# (`collect_locked` too). Every round is checked and named, and a run
+# with any round failed exits 1 at the end.
+#
+# bench/concurrent_mark.sh runs it, and broken copies of the runtime it
+# catches.
+
+module bench/release_trigger
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  class Node
+    getter value : Int64
+    property next_node : Node?
+
+    def initialize(@value : Int64, @next_node : Node?)
+    end
+  end
+
+  # A word the second thread writes and the main thread reads after its
+  # join: `Share` by its atomic field.
+  class Word
+    @value : Atomic(UInt64)
+
+    def initialize
+      @value = Atomic(UInt64).new(0_u64)
+    end
+
+    def set(value : UInt64) : Nil
+      @value.set(value)
+    end
+
+    def get : UInt64
+      @value.get
+    end
+  end
+
+  # Garbage: *bytes* of it in nodes, a node a 32-byte chunk, each one's
+  # value summed so the loop is not taken away.
+  def churn(bytes : UInt64) : Int64
+    sum = 0_i64
+    count = bytes // 32_u64
+    i = 0_u64
+    while i < count
+      node = Node.new(i.to_i64, nil)
+      sum = sum &+ node.value
+      i = i + 1_u64
+    end
+    sum
+  end
+
+  # One round: the main thread's collection on *path*, then the second
+  # thread's slices past the budget. Answers whether it held.
+  def round(name : String, path : String) : Bool
+    before = IyiMark.collections
+    beside = IyiMark.concurrent_collections
+    ready = Word.new
+    seen = Word.new
+    budget = Word.new
+    counted = Word.new
+    settled = Word.new
+    second = IyiThread.start do
+      ready.set(1_u64)
+      while IyiMark.collections == before
+        sleep(1)
+      end
+      seen.set(IyiMark.collections)
+      budget.set(IyiMark.budget)
+      slices = budget.get * 3_u64 // IyiHeap::SLICE
+      i = 0_u64
+      while i < slices
+        IyiMark.pressure(IyiHeap::SLICE)
+        i = i + 1_u64
+      end
+      counted.set(IyiMark.allocated_since)
+      IyiMark.settle
+      settled.set(IyiMark.collections)
+      nil
+    end
+    # The second thread running its block before the collection: a thread
+    # takes the runtime lock before its block runs (`IyiThread.run`), and
+    # one that met the collection's lock there began after the flag had
+    # fallen - the verb's round, the first that starts its collection at
+    # once, passed on a copy it had to fail, 5 runs of 5, without this.
+    while ready.get == 0_u64
+      sleep(1)
+    end
+    if path == "verb"
+      IyiMark.collect
+    else
+      sum = 0_i64
+      while IyiMark.collections == before
+        sum = sum &+ churn(4096_u64)
+      end
+    end
+    second.join
+    went = IyiMark.concurrent_collections - beside
+    if went != 0_u64
+      print "FAIL: #{name}: #{went} of the round's collections went beside the program, so the round tried no collection that ends in its stop\n"
+      return false
+    end
+    if settled.get == seen.get
+      print "FAIL: #{name}: after collection #{seen.get} was counted, a thread's slices came to #{budget.get * 3_u64 // IyiHeap::SLICE * IyiHeap::SLICE} bytes, three budgets of #{budget.get}, and no collection ran - #{settled.get} collections once it was done, #{counted.get} bytes counted since the last collection\n"
+      return false
+    end
+    puts "#{name}: after collection #{seen.get}, three budgets of #{budget.get} bytes in slices on a second thread triggered #{settled.get - seen.get} more"
+    true
+  end
+
+  failed = 0
+  IyiMark.workers = 1_u64
+  if IyiMark.workers == 0_u64
+    puts "one core: no helper, so the bounded round is the stopped one"
+  end
+  failed = failed + 1 unless round("bounded", "trigger")
+  IyiMark.workers = 0_u64
+  failed = failed + 1 unless round("stopped", "trigger")
+  failed = failed + 1 unless round("verb", "verb")
+  if failed != 0
+    print "FAIL: #{failed} of 3 rounds left an allocation past the budget untriggered\n"
+    __iyi_exit(1)
+  end
+  puts "release trigger: every collection was let go before its threads were released"
+{% else %}
+  puts "release trigger: no stop that releases threads on this target, nothing to look for"
+{% end %}

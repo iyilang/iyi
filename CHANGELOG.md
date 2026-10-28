@@ -14,6 +14,43 @@
   longer appends //IGNORE on Darwin when using system libiconv, avoiding dropped
   characters after invalid bytes, and std specs reflect Citrus shift state mappings
   for BIG5-HKSCS and EUC-JP.
+- **A `std/tls` connection that refuses its peer lets the alert arrive.**
+  After a fatal alert either end now shuts the socket's sending half and
+  reads and drops what the peer sent until the peer closes, a second and
+  64 KiB at most, then closes the socket. The server read on before,
+  without the shut; the client closed at once, and with a server's
+  records past its Finished still unread - 0.5-RTT data, tickets - the
+  close was a reset. `bench/std_tls_server.py`'s new `untrusted-late`
+  sends a certificate the client refuses and three full records of
+  0.5-RTT data in one write: it read alert 42 and then a reset in 100 of
+  100 refusals on Linux and 100 of 100 on darwin, and the alert and then
+  the end of the stream in 100 of 100 on each with the change. Linux and
+  darwin still hand over the alert, even read 300 ms after the reset;
+  Windows throws away what a reset connection received and had not read,
+  as the ECH oracle's client showed the std/tls server, which lost
+  ech_required in 18 and 15 of 20 runs. A peer that closes once it has
+  the alert ends the wait then - OpenSSL's s_server 0.2 ms after it on
+  darwin - and `untrusted-hold`, a server that sends a record every 50 ms
+  and never closes, has the refusal back after its second (1000 to 1005
+  ms on Linux and darwin). `bench/std_tls_exercise.sh` asks
+  `untrusted-late` 20 times and `untrusted-hold` once, with broken copies
+  that close at once, linger without the shut, and linger ten seconds.
+  `untrusted-late` sends a fourth record 300 ms after the three: Windows
+  closes a socket with bytes unread in order, and resets it only when
+  bytes come after the close, so without it the copy that closes at once
+  had the alert and the end of the stream read in each of 20 runs there
+  (CI job 122639709895).
+
+- `bench/std_tls_exercise.sh` reads the alert s_server took from the
+  std/tls client once s_server has written it, five seconds at most,
+  before killing it. Two of darwin's stapling checks found no alert in
+  CI job 122532136003, the log holding the port probe's line alone:
+  s_server writes the alert after it reads it, and a client gone as soon
+  as its alert was sent left the gate to kill s_server first. With
+  s_server at nice 19 beside a busy loop on its CPU (Linux), such a
+  client's alert was written in 0 of 50 runs killed at once and in 50 of
+  50 awaited. The stapling checks waited for nothing, and `client_alert`
+  slept 300 ms.
 
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and

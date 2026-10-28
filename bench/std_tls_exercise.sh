@@ -169,6 +169,23 @@ else
   fi
 fi
 
+# await_alert <s_server log>: until s_server has written the alert it
+# read, five seconds at most. It writes it after it reads it, and a check
+# that kills s_server the moment the client returns reads whether it got
+# that far, not what it read: on darwin (CI job 122532136003) two of the
+# stapling checks found no alert, the log holding the port probe's line
+# alone; on Linux, s_server at nice 19 on a CPU beside a busy loop and a
+# client that returned as soon as its alert was sent, the alert was
+# written in 0 of 50 runs killed at once, and in 50 of 50 awaited.
+await_alert() {
+  local _
+  for _ in $(seq 1 100); do
+    grep -q "alert number" "$1" && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 echo
 echo "== OpenSSL's own server"
 hybrid_openssl=no
@@ -283,7 +300,7 @@ else
       sleep 0.1
     done
     "$1" get "$port" "$PKI/ca.pem" example.com >/dev/null 2>&1
-    sleep 0.3
+    await_alert "$CW/s_server-alert.log"
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
     if grep -q "SSL alert number 42" "$CW/s_server-alert.log"; then
@@ -1891,6 +1908,10 @@ stapling_round() {
     wait_port "$port"
     # shellcheck disable=SC2086
     got="$(env $env "$bin" get "$port" "$O/ca.pem" localhost 2>&1)"
+    # The alert as s_server read it, once it has written it (await_alert).
+    if [ "$alert" != - ]; then
+      case "$got" in refused:*) await_alert "$log" ;; esac
+    fi
     # Whether this s_server staples at all here, asked of s_client -status
     # on the same server, for an alert it may never be put to (below).
     local sent=yes
@@ -2927,7 +2948,17 @@ prove_broken "a certificate required where it is optional" "FAIL mtls-optional-n
       return nil' '
       return nil' server-mtls-optional
 prove_broken "a refused client's flight left unread at the close" "FAIL mtls-late " \
-  '      linger if server_side? && !sent' '' server-mtls
+  '      linger unless sent' '' server-mtls
+# The client's own: closed at once on the server's 0.5-RTT records, or
+# reading them without shutting its sending half first, so the end comes
+# at the linger's second rather than with the alert; or lingering past it.
+prove_broken "a refusing client's close with the server's records unread" "untrusted-late: run 1: the server read" \
+  '      linger unless sent' '      linger if server_side? && !sent' scenarios
+prove_broken "a refusing client's sending half left open while it lingers" "then the end of the stream, " \
+  '    return if @socket.close_write
+' '' scenarios
+prove_broken "a refusing client lingering for ten seconds" "untrusted-hold: the refusal came back after" \
+  '  LINGER_MS    =  1000' '  LINGER_MS    = 10000' scenarios
 prove_broken "a client certificate with no CertificateVerify after it taken" "FAIL mtls-no-cv " \
   '    return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client'"'"'s CertificateVerify belongs", TlsAlert::UNEXPECTED_MESSAGE) unless verify[0] == 15_u8' '' server-mtls
 prove_broken "a client Certificate of any length searched" "FAIL mtls-long-chain " \

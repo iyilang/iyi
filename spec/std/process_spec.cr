@@ -652,14 +652,18 @@ describe Process do
           Dir.mkdir dir
           File.write(Path[dir, "foo"], "#!/bin/sh\necho bar")
           File.chmod(Path[dir, "foo"], 0o555)
-          if {{ flag?(:darwin) }}
-            String.build do |io|
-              Process.run("foo", chdir: dir, output: io)
-            end.should eq "bar\n"
-          else
+          # The search reads only $PATH, so the runner's own PATH must not decide the result.
+          # Never use a trailing : here.
+          with_env("PATH": "/does/not/exist") do
             expect_raises(File::NotFoundError) do
               Process.run("foo", chdir: dir)
             end
+          end
+
+          with_env("PATH": ":/does/not/exist") do
+            String.build do |io|
+              Process.run("foo", chdir: dir, output: io)
+            end.should eq "bar\n"
           end
         end
       end

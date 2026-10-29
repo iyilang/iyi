@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **darwin's floor names `memset_pattern16`, LLVM's call for a pattern
+  fill.** `samples/iyi/cores.iyi` is the first sample to reach
+  std/compress's Inflater (through std/http's `BodyReader#read`), and
+  its `--release` build on darwin asked libSystem for
+  `memset_pattern16`: LLVM 20.1.2's loop-idiom pass rewrites the
+  Inflater's fill of the fixed distance code's thirty lengths with 5.
+  The fill is library code, not the runtime that clears its own memory,
+  so the name joins `bench/dependency_floor.sh`'s darwin list with that
+  reason. It was latent: `std_compress_exercise --release` names it on
+  master too, and the exercises build plain.
 - **darwin's mark helpers park: an idle program no longer burns every
   core.** They spun on the generation forever (`yield` is ARM's hint,
   not a syscall): `bench/web_cores.iyi`'s server, idle after a second of

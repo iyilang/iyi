@@ -293,10 +293,26 @@ echo "== a receive parks rather than blocking the thread (SPEC.md III.4.2)"
 # blocked the worker would never let the sender run, and the program would
 # hang; it is given ten seconds. Then the same shape with a `close` instead
 # of a send: the parked receive answers `Cancelled`.
+#
+# The ten seconds are the program's, not its launch's. A freshly linked
+# exe's first launch on Windows is held before its first line runs (as
+# std_http_exercise.sh measured: Defender checks an exe it has not seen,
+# and its real-time protection is on on this machine too). Measured on
+# Windows 11, 12 logical processors (the user's machine), 50 fresh builds
+# of this program, idle and beside two looping builds: the first launch
+# took 0.6 to 17.0 s, and the 17.0 s one printed its first line at
+# 16.85 s; every launch after a build's first took 0.17 to 0.30 s. Timed
+# from the first launch, the check failed in one of two shard runs there
+# with all three lines printed - "hung or died" about a program that had
+# answered. So each build is first launched with an argument, which
+# makes it exit at once and takes the hold, and only the second launch is
+# bounded.
 cat > "$WORK/park.iyi" <<'IYI'
 module park
 
 import std/udp::{UdpSocket, Datagram}
+
+exit 0 unless Program.args.empty?
 
 server = UdpSocket.bind("127.0.0.1", 0)
 port = server.local_port
@@ -370,11 +386,14 @@ group do |g|
 end
 puts "sibling error under a parked receive: #{cancel_answer}, probe beside it: #{probe_answer}"
 IYI
+# warm <exe>: the build's first launch, which exits at once - bounded by
+# the minute std_http_exercise.sh gives a Defender that holds a new exe.
+warm() { timeout -k 5 60 "$1" warm >/dev/null 2>&1; }
 if ! "$IYI" build -o "$WORK/park" "$WORK/park.iyi" > "$WORK/park.build" 2>&1; then
   echo "  the parking program did not build:"
   sed -n '1,8p' "$WORK/park.build"
   status=1
-elif timeout 10 "$WORK/park" > "$WORK/park.out" 2>&1; then
+elif warm "$WORK/park"; timeout 10 "$WORK/park" > "$WORK/park.out" 2>&1; then
   if grep -q "parked receive answered: after a wait" "$WORK/park.out" &&
      grep -q "closed under a parked receive: cancelled" "$WORK/park.out" &&
      grep -q "sibling error under a parked receive: cancelled, probe beside it: nil" "$WORK/park.out"; then
@@ -406,7 +425,9 @@ fi
 # it, and one first start under load took nine seconds, so the gate hung
 # past its bound. A SIGKILL is not lost, and it takes the program with it,
 # so it follows the TERM; elsewhere the TERM ends the copy and the KILL
-# never goes.
+# never goes. The copy is launched once first, as the program is: killed
+# at five seconds while its first launch was still being held, it would
+# read as pinned without having run at all.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) BLOCKING_SITE=win32 ;;
   *) BLOCKING_SITE=posix ;;
@@ -435,7 +456,7 @@ PY
     echo "  the blocking copy did not build:"
     sed -n '1,8p' "$WORK/park_blocking.build"
     status=1
-  elif timeout -k 5 5 "$WORK/park_blocking" > "$WORK/park_blocking.out" 2>&1; then
+  elif warm "$WORK/park_blocking"; timeout -k 5 5 "$WORK/park_blocking" > "$WORK/park_blocking.out" 2>&1; then
     echo "  a blocking receive still let the sibling run, so this arm does not test parking"
     status=1
   else

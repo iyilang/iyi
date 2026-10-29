@@ -30,6 +30,18 @@
   darwin, where the old pipe, or on Linux an eventfd per thread, dies by
   name; `bench/thread_floor.iyi` parks on the futex too, with the pipe
   kept as `-Dtf_park_pipe`.
+- **parallel_exercise's proof that the slow half polls holds its window.**
+  The copy whose back-edge does not poll was caught by the server shape
+  only when a fast connection happened to wait in the poller of a worker
+  a slow request then took: eight runs on the M2 read 76, 77, 78, 81,
+  81, 121, 125 and 141 ms against the 80 ms bound, three of them passing.
+  `bench/parallel_preempt.iyi`'s `poller` step makes it certain on a pool
+  of one: the fast connection's server is parked in the worker's poller,
+  and the slow request computes until the fast one is answered or a
+  second has passed. The real slow half answers in 11.1 to 11.2 ms there
+  (ten runs on the M2) and 5.1 to 9.2 ms in five on 12-core Linux; the
+  copy at the second, 999 ms in five of five on the M2 and 1,000 in four
+  of four on Linux. The server shape's own check is unchanged.
 - **darwin's floor names `memset_pattern16`, LLVM's call for a pattern
   fill.** `samples/iyi/cores.iyi` is the first sample to reach
   std/compress's Inflater (through std/http's `BodyReader#read`), and

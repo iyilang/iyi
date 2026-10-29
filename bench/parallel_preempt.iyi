@@ -25,6 +25,11 @@
 #           ones: a fast request whose connection waits in the poller of a
 #           worker busy with a slow one is answered within 80 ms, where it
 #           waited the 100 ms out before.
+#   poller  the server shape's claim with its window held: one connection
+#           waits in the poller of the pool's one worker while that worker
+#           computes a request that runs until the connection's own request
+#           is answered, or a second has passed; the answer comes within
+#           80 ms. A slow half that does not poll answers it at the second.
 #   period  the monitor's period, its looks over a task computing half a
 #           second on a pool of one, held to 4 to 10.5 ms; and the quantum,
 #           two such tasks taking turns on the one worker, held to 20 ms. A
@@ -432,6 +437,84 @@ import std/socket::{IyiSocket, SocketError}
     say "server: 28 connections of 0.2 ms requests beside 4 of 100 ms on #{IyiWorkers.count} workers: the slowest fast request took #{fast.max_ms} ms, #{fast.over20} of #{fast.count} over 20 ms; the slow ones at most #{slow.max_ms} ms"
   end
 
+  # ── poller ───────────────────────────────────────────────────────────
+  # The server shape's claim, held open rather than met by chance. There a
+  # fast request waits in a busy worker's poller only when its connection
+  # happened to park on the worker a slow request then landed on, and the
+  # wait is what was left of that request's 100 ms: the copy whose slow
+  # half does not poll read 76 to 141 ms in eight runs on macOS 26.6,
+  # Apple M2 Pro, 10 cores (the user's machine), three of them under the
+  # 80 ms bound. Here one worker and two connections make it certain: a
+  # fast connection's server has answered once and parked on its next
+  # read in the worker's poller, the worker takes the slow connection's
+  # request, and that request computes until the fast one has been
+  # answered, or POLLER_HOLD_MS if it never is. The fast request is sent
+  # once the slow one is computing, and the worker holds nothing else, so
+  # only the back-edge's poll hands it on: answered within FAST_BOUND_MS,
+  # or at POLLER_HOLD_MS. The M2 answered in 11.1 to 11.2 ms over ten
+  # runs, and the copy at 999 ms in five of five.
+  POLLER_HOLD_MS = 1000_i64
+
+  def poller(per_ms : Int64) : Nil
+    fail("poller: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    computing = Atomic(Int64).new(0_i64)
+    answered = Atomic(Int64).new(0_i64)
+    took_us = 0_i64
+    group do |g|
+      g.spawn do
+        2.times do
+          client = listener.accept
+          fail("poller: accept answered #{client}") unless client.is_a?(IyiSocket)
+          fd = client.fd
+          family = client.family
+          g.spawn_parallel do
+            socket = IyiSocket.new(fd, family)
+            while true
+              got = socket.read(64)
+              break unless got.is_a?(String) && !got.empty?
+              x = spin(per_ms // 5_i64, 5_u64)
+              if got.starts_with?("b")
+                computing.set(1_i64)
+                since = __iyi_monotonic_ns
+                while answered.get == 0_i64 && elapsed_ms(since) < POLLER_HOLD_MS
+                  x = spin(per_ms, x)
+                end
+              end
+              socket.write(x == 0_u64 ? "K" : "k")
+            end
+            socket.close
+            0
+          end
+        end
+        0
+      end
+      slow = IyiSocket.connect("127.0.0.1", port, 5000)
+      fail("poller: connect answered #{slow}") unless slow.is_a?(IyiSocket)
+      fast = IyiSocket.connect("127.0.0.1", port, 5000)
+      fail("poller: connect answered #{fast}") unless fast.is_a?(IyiSocket)
+      fast.write("c")
+      fast.read(8)
+      slow.write("b")
+      while computing.get == 0_i64
+        sleep(1)
+      end
+      s = __iyi_monotonic_ns
+      fast.write("c")
+      fast.read(8)
+      took_us = (__iyi_monotonic_ns - s) // 1000_i64
+      answered.set(1_i64)
+      slow.read(8)
+      slow.close
+      fast.close
+    end
+    if took_us // 1000_i64 > FAST_BOUND_MS
+      fail("poller: a fast request took #{took_us // 1000_i64} ms, its connection in the poller of the one worker while that worker computed, past #{FAST_BOUND_MS} ms")
+    end
+    say "poller: a fast request whose connection waited in the poller of the one worker, busy computing, was answered in #{took_us} us"
+  end
+
   # ── period ───────────────────────────────────────────────────────────
   # The monitor's period, and the quantum it makes. A task computing half a
   # second on a pool of one, and the monitor's looks over it: every look
@@ -552,7 +635,7 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  STEPS = ["slice", "unit", "server", "period", "tight"]
+  STEPS = ["slice", "unit", "server", "poller", "period", "tight"]
 
   # With no arguments, the steps that hold on a pool of one and take
   # seconds, there: slice, unit and period, which wants the pool of one.
@@ -575,6 +658,7 @@ import std/socket::{IyiSocket, SocketError}
     when "slice"  then slice(per_ms)
     when "unit"   then unit(per_ms)
     when "server" then server(per_ms)
+    when "poller" then poller(per_ms)
     when "period" then period(per_ms)
     when "tight"  then tight
     end

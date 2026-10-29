@@ -26,10 +26,11 @@
 #      bench/parallel_preempt.iyi then holds preemption at loop back-edges
 #      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
 #      request beside a task computing with no call in its loop wait no
-#      more than 100 ms, 80 for the request; a preempted task keeps its
-#      unit's token; the monitor looks every 4 to 10.5 ms and the quantum is
-#      at most 20 ms; a tight loop costs at most twice what its
-#      `@[NoPreempt]` twin does; and the release build's IR shows each
+#      more than 100 ms, 80 for the request, in the server shape and with
+#      the request's window held open on one worker; a preempted task
+#      keeps its unit's token; the monitor looks every 4 to 10.5 ms and
+#      the quantum is at most 20 ms; a tight loop costs at most twice what
+#      its `@[NoPreempt]` twin does; and the release build's IR shows each
 #      tight loop's checks reading the worker's word through the thread
 #      pointer, none calling its thread-local accessor. Its failure proofs
 #      are with step 7's: a `@[NoPreempt]` loop, a monitor that never raises
@@ -172,7 +173,7 @@ for build in plain release; do
   if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
   fi
-  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "server --workers=$PREEMPT_WORKERS"; do
+  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "poller --workers=1" "server --workers=$PREEMPT_WORKERS"; do
     # shellcheck disable=SC2086 # the step and its count are words
     timeout -k 5 300 "./preempt-$build" $run > "preempted-$build.txt" 2>&1
     code=$?
@@ -862,12 +863,13 @@ else
 fi
 
 step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"
-if [ "$CORES" -lt 2 ]; then
-  echo "  one core here: no idle worker takes what the poll would hand over, so the proof is not run"
-else
-  broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
-  caught nopoll 'server: a fast request took' server --workers="$PREEMPT_WORKERS"
-fi
+# Caught by the poller step, whose window is held: the server shape's
+# copy waited only when a connection happened to park on a worker a slow
+# request then took, and passed three of eight runs under its 80 ms bound,
+# at 76 to 78 ms, on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+# machine).
+broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
+caught nopoll 'poller: a fast request took' poller --workers=1
 
 step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
 broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt

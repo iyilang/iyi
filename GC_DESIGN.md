@@ -353,21 +353,22 @@ A collection takes the runtime lock first, so no thread it stops can
 be holding it; then signals every other registered thread and waits
 for each to count itself in. The handler copies the interrupted
 general registers out of the ucontext onto the thread's line, records
-sp and pc, and parks — futex on Linux, a pipe per thread on darwin —
-and the collector scans each stopped thread's spill and its stack from
-that sp to the top of whichever mapping holds it, the thread's own or
-a fiber's, found by asking every fiber. Two threads are not parked
-where they stand, and both are the Go rule this document reached from
-the allocator's side: one inside `IyiHeap.take` — between reading a
-cache list's head and popping it, a stop would leave a chunk claimed
-by nobody the sweep could then unmap — finds the handler leaving a
-request on its cache page and parks itself on the way out, spilling
-its own callee-saved registers; and one spinning for the runtime lock
-parks inside the spin, where it holds nothing. `SA_RESTART` restarts
-the syscalls a stop interrupts, and the poller already read EINTR as
-a wakeup with no news. A thread's last act returns its cache to the
-centre, lets its fill arenas go, and leaves the list a stop walks;
-the stop that began before it left waited for it.
+sp and pc, and parks — on a futex, the kernel's on Linux and libSystem's
+on darwin — and the collector scans each stopped thread's spill and its
+stack from that sp to the top of whichever mapping holds it, the
+thread's own or a fiber's, found by asking every fiber. Two threads are
+not parked where they stand, and both are the Go rule this document
+reached from the allocator's side: one inside `IyiHeap.take` — between
+reading a cache list's head and popping it, a stop would leave a chunk
+claimed by nobody the sweep could then unmap — finds the handler
+leaving a request on its cache page and parks itself on the way out,
+spilling its own callee-saved registers; and one spinning for the
+runtime lock parks inside the spin, where it holds nothing.
+`SA_RESTART` restarts the syscalls a stop interrupts, and the poller
+already read EINTR as a wakeup with no news. A thread's last act
+returns its cache to the centre, lets its fill arenas go, and leaves
+the list a stop walks; the stop that began before it left waited for
+it.
 
 What the build found, and what it decided. The trigger's count moved
 off the class variable onto the centre's atomic, folded per cache
@@ -1595,6 +1596,24 @@ runtime's twelve names, plus these eight — the five above, `pipe` and
 `read`, and `__tlv_bootstrap` — with each refused variant held to a
 list of its own.
 
+The pipe did not survive the runtime. Each thread's pipe was made when
+the thread was and never closed, two descriptors for every thread a
+program ever started, and under a terminal's `ulimit -n` of 256 five
+hundred short-lived threads died at "pipe failed" (macOS 26.6, Apple M2
+Pro, 10 cores, the user's machine). Once the mark helpers needed macOS
+14.4 for libSystem's public futex, the stop could park on it as Linux's
+does on the kernel's: `os_sync_wait_on_address` on the one release
+word, released by one `os_sync_wake_by_address_all`. Its disassembly
+is an argument check and one `__ulock_wait2` system call, holding no
+lock and writing nothing but errno on a failure, which the handler puts
+back — as safe there as `read`, without POSIX's list to say so. It is
+the probe's park now, and costs the floor no name, since the helpers'
+park already carries both: a thread's names are six, the five above and
+`__tlv_bootstrap`. One thread's best resume in the probe was 0.21 µs
+against the pipe's 1.75, and 10.5 and 14.6 µs against 12.5 and 19.3
+for 4 and 8 threads, in one run of each on the M2; `-Dtf_park_pipe`
+keeps the pipe measured.
+
 Go's stop was weighed too, and it is the one this probe cannot build
 without the compiler's help. Go's handler blocks nowhere: it
 rewrites the interrupted context so the thread, on return from the
@@ -1700,7 +1719,8 @@ to 2.2. Resume is worse still past 4 threads: 3 ms mean for 8 against
 returns only once its target has been through a core and stopped, and
 the next begins after it, where N `pthread_kill`s are queued at once
 and the handlers stop in parallel as their threads get a core. So
-Stage 4's darwin stop is the signal and the per-thread pipe, and its
+Stage 4's darwin stop is the signal and a park the stop releases at
+once - the per-thread pipe then, libSystem's futex since - and its
 register capture is the handler's `ucontext`, as on Linux.
 
 **Owner's Decision:** Own the garbage collector. Concurrency, parallelism, and performance control are the reasons. gcry is prior art: measurements, design hints, and a record of what has already been tried and cost what. iyi writes the heap, the STW mechanism, root discovery, and finalizers from scratch.

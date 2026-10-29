@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # The allocation-pressure trigger, driven. Runs the trigger exercise plain
-# and optimised, checks it reached its last line, and proves the checks fail
-# in the directions that matter: a heap where nothing triggers, a budget
-# that never grows with the live set, mappings that never go back, a
-# scheduler state left off the list that roots it, an ended thread's
-# allocation left uncounted, a budget floor blind to the threads, and
-# threads allocating free while a triggered collection pays its debt.
+# and optimised, checks it reached its last line, runs it again under a
+# terminal's descriptor limit, and proves the checks fail in the
+# directions that matter: a heap where nothing triggers, a budget that
+# never grows with the live set, mappings that never go back, a scheduler
+# state left off the list that roots it, an ended thread's allocation left
+# uncounted, a budget floor blind to the threads, threads allocating free
+# while a triggered collection pays its debt, and a descriptor every
+# thread keeps.
 #
 #   bash bench/collect_trigger.sh
 #
@@ -120,11 +122,37 @@ else
 fi
 
 echo
+echo "== five hundred short-lived threads under a terminal's descriptor limit"
+# A Mac's terminal starts a program under `ulimit -n` 256. darwin's stop
+# parked each thread on a pipe of its own that nothing closed, so the 500
+# threads of the exercise's step 7 died at "pipe failed" under that limit
+# on macOS 26.6, Apple M2 Pro, 10 cores (the user's machine). A thread
+# holds no descriptor past its end on Linux or darwin now. Windows has no
+# such limit to run under; a thread's handles are counted by
+# bench/thread_exercise.sh's teardown.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  no descriptor limit to run under here" ;;
+  *)
+    ( ulimit -n 256 && exec "$WORK/trigger" ) > "$WORK/trigger-256.out" 2>&1
+    code=$?
+    if [ "$code" -ne 0 ] || ! grep -q "all trigger checks passed" "$WORK/trigger-256.out"; then
+      echo "  under ulimit -n 256 the exercise exited $code:"
+      tail -5 "$WORK/trigger-256.out" | sed 's/^/  /'
+      status=1
+    else
+      grep "threads:" "$WORK/trigger-256.out"
+    fi
+    ;;
+esac
+
+echo
 echo "== the checks fail when the trigger is broken"
 prove_fails() {
   # $5 names the prelude file the awk program rewrites; prelude.iyi unless
-  # said. $6 the exercise; collect_trigger.iyi unless said.
-  local label="$1" dir="$2" phrase="$3" script="$4" file="${5:-prelude.iyi}" program="${6:-collect_trigger.iyi}"
+  # said. $6 the exercise; collect_trigger.iyi unless said. $7 a
+  # descriptor limit the program runs under; none unless said.
+  local label="$1" dir="$2" phrase="$3" script="$4" file="${5:-prelude.iyi}" program="${6:-collect_trigger.iyi}" limit="${7:-}"
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"
@@ -136,7 +164,11 @@ prove_fails() {
     status=1
     return
   fi
-  "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  if [ -n "$limit" ]; then
+    ( ulimit -n "$limit" && exec "$WORK/$dir/program" ) >"$WORK/$dir/out" 2>&1
+  else
+    "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  fi
   local exit_code=$?
   if [ "$exit_code" -eq 0 ]; then
     echo "  $label: the exercise still passed, so it does not test this"
@@ -207,6 +239,26 @@ prove_fails "floor blind to the threads" nofloor "floor:" \
 prove_fails "debt never assisted" noassist "debt:" \
   '{ sub(/sweep_assist if total >= budget/, "# removed"); print }' prelude.iyi debt_assist.iyi
 
+# A descriptor every thread keeps, under the terminal's limit: the darwin
+# park's pipe again, made at every start and never closed, and on Linux
+# the same leak in Linux's calls, an eventfd. Step 7's five hundred
+# threads run out of descriptors.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  a descriptor every thread keeps: no descriptor limit to run under here" ;;
+  Darwin)
+    prove_fails "a pipe every thread keeps" keptpipe "pipe failed" \
+      '/^      fun sysctlbyname\(name : UInt8\*/ { print; print "      fun pipe(fds : Int32*) : Int32"; next }
+       /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { start = 1 }
+       start && /^      \{% elsif flag\?\(:darwin\) %\}$/ { print; print "        fds = Pointer(Int32).malloc(2_u64)"; print "        raise \"pipe failed\" if LibC.pipe(fds) != 0"; start = 0; next }
+       { print }' thread.iyi collect_trigger.iyi 256 ;;
+  *)
+    prove_fails "an eventfd every thread keeps" keptfd "eventfd2 failed" \
+      '/^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { start = 1 }
+       start && /^      \{% if flag\?\(:linux\) %\}$/ { print; print "        raise \"eventfd2 failed\" if __iyi_conc_syscall3(IYI_SYS_EVENTFD2, 0_i64, 0x80000_i64, 0_i64) < 0"; start = 0; next }
+       { print }' thread.iyi collect_trigger.iyi 256 ;;
+esac
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "Trigger: collections come from allocation pressure alone, the heap"
@@ -215,7 +267,8 @@ if [ "$status" -eq 0 ]; then
   echo "measured numbers, the budget grows with what survives and is floored"
   echo "for every thread, a triggered collection's debt is swept by every"
   echo "thread past the budget, a parked fiber's reference lives through it,"
-  echo "and the checks fail when any of it is broken."
+  echo "five hundred ended threads hold no descriptor, and the checks fail"
+  echo "when any of it is broken."
 else
   echo "Trigger: something above failed."
 fi

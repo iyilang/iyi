@@ -10,7 +10,7 @@
 # cannot fail is not a gate:
 #
 #   1. The program holds every property, plain and --release (and on darwin
-#      the three refused variants, release): N threads,
+#      the four refused variants, release): N threads,
 #      each with a tid of its own and a thread-local block of its own;
 #      every one stopped where it ran by a signal and a handler that read
 #      the thread's sp and pc out of the context and found the sp on that
@@ -98,13 +98,13 @@ if ! timeout 60 ./floor-release 4 100 > answers-release.txt 2>&1; then
 fi
 grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
 
-# darwin has the alternatives it measured and refused, each a flag: two
-# other parks (`-Dtf_park_lock`, `-Dtf_park_sigsuspend`) and a second stop
-# (`-Dtf_mach`, Mach's thread_suspend and thread_get_state in place of a
-# signal). Built and held to their own lists so the comparison in step 3
-# stays reproducible.
+# darwin has the alternatives it measured and refused, each a flag: three
+# other parks (`-Dtf_park_pipe`, `-Dtf_park_lock`, `-Dtf_park_sigsuspend`)
+# and a second stop (`-Dtf_mach`, Mach's thread_suspend and
+# thread_get_state in place of a signal). Built and held to their own
+# lists so the comparison in step 3 stays reproducible.
 if [ "$(uname -s)" = Darwin ]; then
-  for variant in park_lock park_sigsuspend mach; do
+  for variant in park_pipe park_lock park_sigsuspend mach; do
     step "thread floor, release build, -Dtf_$variant"
     if ! "$IYI" build --release "-Dtf_$variant" "$REPO/bench/thread_floor.iyi" -o "floor-$variant" > "build-$variant.log" 2>&1; then
       cat "build-$variant.log"; exit 1
@@ -139,55 +139,54 @@ case "$(uname -s)" in
     ;;
   Darwin)
     # The exact list, held the way bench/concurrency_exercise.sh holds the
-    # exercise's. Twelve names are every darwin program's (the runtime's
-    # list in bench/dependency_floor.sh). Eight are what a thread costs,
-    # and each one is a dependency taken on by name:
+    # exercise's. The runtime's names are every darwin program's (its list
+    # in bench/dependency_floor.sh). Six are what a thread costs, and each
+    # one is a dependency taken on by name:
     #   pthread_create, pthread_join, pthread_kill   the thread
     #   pthread_threadid_np                          its id, both views
     #   sigaction                                    the stop
-    #   pipe, read                                   the park: a handler
-    #       blocked in `read`, which POSIX promises a handler may call
     #   __tlv_bootstrap                              a @[ThreadLocal]: the
     #       thunk in every Mach-O thread-local descriptor, which dyld
     #       rebinds to its own tlv_get_addr at load
+    # The park costs none: it is libSystem's futex, which the collector's
+    # helpers park on in every program.
     # The release build once carried one more, `bzero`: the compiler zeroed
     # every `Pointer.malloc` with an `llvm.memset` then, and the aarch64 back
     # end lowers a memset it will not inline to a `bzero` call. The prelude
     # defines `bzero` now, the way it defines `memset`, so the name resolves
     # to the program's own and the release list is the plain list.
     step "dependency floor: what a thread costs darwin, by name"
-    # `_read` is the runtime's now, not only this probe's: since thread.iyi
-    # every darwin program can park for a collection's stop, and the park
-    # is a read on a pipe, reachable from the runtime lock's spin in every
-    # build the optimiser cannot fold — including the refused variants,
-    # which park their own threads differently but carry the runtime's.
-    # `_pipe`, `_pthread_create`, `_pthread_kill`, `_sigaction` and
-    # `_sysctlbyname` are the runtime's too: the parallel marker starts
-    # its helpers as kernel threads sized by `hw.ncpu`, and the concurrent
-    # mark's second stop registers the main thread, whose park is a pipe,
-    # installs the stop's handler and signals with `pthread_kill`. The
-    # refused variants carry them for the same reason - the Mach one
-    # included, whose own stop never signals - so the five sit in the
-    # runtime's list, not the probe's. So do the helpers' park and wake,
-    # `_os_sync_wait_on_address` and `_os_sync_wake_by_address_all`
-    # (bench/dependency_floor.sh says why those two).
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pipe _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _read _sigaction _sigaltstack _sysctlbyname _write'
+    # `_pthread_create`, `_pthread_kill`, `_sigaction` and `_sysctlbyname`
+    # are the runtime's too: the parallel marker starts its helpers as
+    # kernel threads sized by `hw.ncpu`, and the concurrent mark's second
+    # stop registers the main thread, installs the stop's handler and
+    # signals with `pthread_kill`. The refused variants carry them for the
+    # same reason - the Mach one included, whose own stop never signals -
+    # so the four sit in the runtime's list, not the probe's. So do the
+    # helpers' park and wake, `_os_sync_wait_on_address` and
+    # `_os_sync_wake_by_address_all`, which the runtime's stop and the
+    # probe's park on too (bench/dependency_floor.sh says why those two).
+    # `_pipe` and `_read` were the runtime's while a stopped thread parked
+    # in `read` on a pipe of its own, and left with that park.
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
     thread='__tlv_bootstrap _pthread_join _pthread_threadid_np'
-    # The refused parks: the lock's two calls in place of `pipe` and `read`,
-    # and `sigsuspend` alone in their place. The Mach stop swaps the stop
-    # and park names for four of its own:
+    # The refused parks: a pipe per thread, `pipe` and `read`; the lock's
+    # two calls; and `sigsuspend` alone. The Mach stop swaps the stop for
+    # four names of its own:
     #   pthread_mach_thread_np                       the thread's port
     #   thread_suspend, thread_resume                the stop
     #   thread_get_state                             the registers, read held
+    park_pipe='__tlv_bootstrap _pipe _pthread_join _pthread_threadid_np _read'
     park_lock='__tlv_bootstrap _os_unfair_lock_lock _os_unfair_lock_unlock _pthread_join _pthread_threadid_np'
     park_sigsuspend='__tlv_bootstrap _pthread_join _pthread_threadid_np _sigsuspend'
     mach='__tlv_bootstrap _pthread_join _pthread_mach_thread_np _pthread_threadid_np _thread_get_state _thread_resume _thread_suspend'
     printf '%s\n' $runtime $thread | LC_ALL=C sort > expected-floor.txt
     printf '%s\n' $runtime $thread | LC_ALL=C sort > expected-floor-release.txt
+    printf '%s\n' $runtime $park_pipe | LC_ALL=C sort > expected-floor-park_pipe.txt
     printf '%s\n' $runtime $park_lock | LC_ALL=C sort > expected-floor-park_lock.txt
     printf '%s\n' $runtime $park_sigsuspend | LC_ALL=C sort > expected-floor-park_sigsuspend.txt
     printf '%s\n' $runtime $mach | LC_ALL=C sort > expected-floor-mach.txt
-    for bin in floor floor-release floor-park_lock floor-park_sigsuspend floor-mach; do
+    for bin in floor floor-release floor-park_pipe floor-park_lock floor-park_sigsuspend floor-mach; do
       nm -u "$bin" | sed -e 's/^ *//' | awk '{ print $NF }' | LC_ALL=C sort > "found-$bin.txt"
       if ! diff "expected-$bin.txt" "found-$bin.txt" > "diff-$bin.txt"; then
         echo "$bin moved the darwin floor (< expected, > found):"
@@ -201,7 +200,7 @@ case "$(uname -s)" in
         exit 1
       fi
     done
-    echo "  the runtime's thirteen names, the thread's seven, libSystem alone, plain and release; each refused variant to its own list"
+    echo "  the runtime's $(echo $runtime | wc -w | tr -d ' ') names, the thread's $(echo $thread | wc -w | tr -d ' '), libSystem alone, plain and release; each refused variant to its own list"
     ;;
 esac
 
@@ -214,11 +213,13 @@ done
 if [ "$(uname -s)" = Darwin ]; then
   # The refused variants, same table up to the core count — the regime the
   # design lives in; past it every one of them is the quantum, and the
-  # 16- and 64-thread rows are in CHANGELOG.md. The two parks resume a
-  # little faster (the lock) or slower (sigsuspend, a second kill loop)
-  # than the pipe; the Mach stop loses at every count. Printed so each of
-  # those stays a measurement.
-  for variant in park_lock park_sigsuspend mach; do
+  # 16- and 64-thread rows are in CHANGELOG.md. The futex resumes as the
+  # lock does and ahead of the pipe and sigsuspend (a second kill loop):
+  # one thread's best resume 0.21 µs, the lock's 0.21, the pipe's 1.75
+  # and sigsuspend's 2.1, one run on macOS 26.6, Apple M2 Pro, 10 cores
+  # (the user's machine). The Mach stop loses at every count. Printed so
+  # each of those stays a measurement.
+  for variant in park_pipe park_lock park_sigsuspend mach; do
     step "the same, -Dtf_$variant"
     for count in 1 4 8; do
       echo "  $count threads:"
@@ -262,18 +263,16 @@ case "$(uname -s)" in
   Darwin)
     # No bit to drop: dyld lays the block out for every pthread. What can
     # be dropped is the annotation, and then the slot, the seed and the
-    # line are one thread's class variables that every thread writes. With
-    # the line shared, every handler parks on one thread's pipe and only
-    # one byte ever reaches it, so the program would hang before it could
-    # name the clash; the lock park releases every lock whoever holds it,
-    # and is what this proof builds with — the proof is about the
-    # thread-local, not the park.
+    # line are one thread's class variables that every thread writes. The
+    # park waits on the one resume word whatever line a thread finds, so
+    # the program names the clash rather than hanging, as it did when
+    # every handler parked on one thread's pipe and only one byte ever
+    # reached it - the proof is about the thread-local, not the park.
     sed '/@\[ThreadLocal\]/d' "$REPO/bench/thread_floor.iyi" > shared.iyi
     [ "$(grep -c '@\[ThreadLocal\]' "$REPO/bench/thread_floor.iyi")" -ge 3 ] || { echo "the sed found nothing to change"; exit 1; }
-    shared_flags="-Dtf_park_lock"
     ;;
 esac
-if ! "$IYI" build ${shared_flags:-} shared.iyi -o shared > build-shared.log 2>&1; then
+if ! "$IYI" build shared.iyi -o shared > build-shared.log 2>&1; then
   cat build-shared.log; exit 1
 fi
 timeout 60 ./shared 2 10 > shared.txt 2>&1

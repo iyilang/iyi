@@ -112,10 +112,11 @@ COMPILER="$REPO/.build/iyi"
 # `pthread_create` and `sysctlbyname` joined with the parallel marker
 # (Stage 7): the collector starts its helpers as kernel threads of its own
 # and sizes them by `hw.ncpu`. `pipe` joined with the concurrent mark
-# (Stage 9): helper 0 takes the mark's second stop, which stops the main
-# thread, so the main thread registers a line - and on darwin a line's park
-# is a pipe - the first time a mark runs beside it, and `sigaction`
-# joins with it, the stop's handler installed then. `madvise` left when
+# (Stage 9), when helper 0's second stop registered the main thread and a
+# line's park on darwin was a pipe, and left every program's list when the
+# park became the futex (`IyiThread.park`): the pipes were never closed,
+# two descriptors for every thread a program started. `sigaction` joined
+# with it, the stop's handler installed then. `madvise` left when
 # the sweep's release of dead pages became a fresh `mmap` over the run:
 # its advice, `MADV_FREE_REUSABLE`, kept the bytes, and a fresh object
 # carved there read them. `mprotect` joined with the first
@@ -174,9 +175,10 @@ COMPILER="$REPO/.build/iyi"
 # attributes that go with it (the child's three streams, its directory, an
 # empty signal mask), waits for it with `waitpid`, ends a cancelled one with
 # `kill`, and finds its own executable with `_NSGetExecutablePath`: all
-# libSystem's. Linux spells the same with `clone`, `execve`, `wait4`, `kill`
-# and `/proc/self/exe`, by syscall. `Process.exec` is `posix_spawn` with
-# POSIX_SPAWN_SETEXEC, keeping the three streams by
+# libSystem's. A child's piped stream is a `pipe`, as `std/signal`'s
+# self-pipe is. Linux spells the same with `clone`, `execve`, `wait4`,
+# `kill`, `pipe2` and `/proc/self/exe`, by syscall. `Process.exec` is
+# `posix_spawn` with POSIX_SPAWN_SETEXEC, keeping the three streams by
 # `posix_spawn_file_actions_addinherit_np`, and `Process.pid` is `getpid`;
 # Linux's are `execve` and `getpid`, by syscall.
 # `std/system` asks libSystem for the host name (`gethostname`) and the
@@ -216,7 +218,7 @@ COMPILER="$REPO/.build/iyi"
 # Mach semaphore was the other public park, four names with
 # `mach_task_self_` and a trap per sleeper woken. Linux's park is the
 # futex syscall and Windows' kernel32's semaphore, so neither list moved.
-ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawn_file_actions_addinherit_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill getpid _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist fstat64"
+ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawn_file_actions_addinherit_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask pipe waitpid kill getpid _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist fstat64"
 # `std/system_roots` reads the roots darwin trusts, which are kept behind
 # Security.framework and nowhere else - no file holds them - and arrive in
 # CoreFoundation's containers: the anchors and the administrator's and

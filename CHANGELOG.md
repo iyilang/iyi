@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **A darwin thread keeps no descriptor past its end.** The stop parked
+  each stopped thread on a pipe of its own, made when the thread was and
+  never closed: two descriptors for every thread a program ever started,
+  242 pipe ends in `lsof` after 120 threads had run and been joined
+  (macOS 26.6, Apple M2 Pro, 10 cores, the user's machine). Under a
+  terminal's `ulimit -n` of 256, `bench/collect_trigger.sh`'s 500
+  short-lived threads died at "pipe failed", and `bench/thread_exercise.sh`
+  at "kqueue failed" once the pipes had left a thread's poller one
+  descriptor short. The stop parks on libSystem's public futex now, as
+  Linux's parks on the kernel's: `os_sync_wait_on_address` on the stop's
+  release word, read off its disassembly as one `__ulock_wait2` call
+  holding nothing, and one `os_sync_wake_by_address_all` for every
+  thread parked. Both are the mark helpers' already, so darwin still
+  needs macOS 14.4, and errno is put back around both. The same 120
+  threads leave nothing open; a live thread holds one kqueue while it
+  polls, closed at its end. Three rounds of 300 collections each, the two
+  runtimes interleaved: beside 8 computing threads a pause averaged 313
+  to 351 µs against 669 to 780 with the pipes, its median 146 to 148 µs
+  against 159 to 165, and the stop's own half 121 to 143 µs against 193
+  to 287; beside 1 and 4, and beside sleeping threads, the medians did
+  not move (31 to 32 µs against 32 to 35, 74 to 75 against 76 to 77),
+  nor did a thread's start and join (21 to 36 µs against 21 to 34).
+  `pipe` and `read` left the names every darwin program carries, and
+  `pipe` stays on the floor for `std/process` and `std/signal`.
+  `collect_trigger` runs its exercise under `ulimit -n 256` on Linux and
+  darwin, where the old pipe, or on Linux an eventfd per thread, dies by
+  name; `bench/thread_floor.iyi` parks on the futex too, with the pipe
+  kept as `-Dtf_park_pipe`.
 - **darwin's floor names `memset_pattern16`, LLVM's call for a pattern
   fill.** `samples/iyi/cores.iyi` is the first sample to reach
   std/compress's Inflater (through std/http's `BodyReader#read`), and
@@ -25519,7 +25547,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,118-line library and nothing else. Every other
+  written against iyi's own 25,130-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -412,8 +412,8 @@ fi
 #   darwin   the runtime's list (bench/thread_exercise.sh spells it out),
 #            the thread floor's names a started thread costs -
 #            `pthread_create`, `pthread_kill` and `sigaction` for the
-#            thread and the stop, `pipe`/`read`/`write` for the stop's
-#            park, and `close` for a retiring thread's kqueue
+#            thread and the stop, whose park is the futex already on the
+#            list, and `close` for a retiring thread's kqueue
 #            (`IyiScheduler.retire_thread`, linked with every thread
 #            body) - and `_environ` for `IYI_WORKERS`. The doorbell is an
 #            `EVFILT_USER` change through `kevent`, already on the list,
@@ -443,7 +443,7 @@ case "$(uname -s)" in
   Darwin)
     [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
     runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
-    thread='_close _pipe _pthread_kill _read'
+    thread='_close _pthread_kill'
     pool='_environ'
     allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
     for bin in exercise-plain exercise-release; do

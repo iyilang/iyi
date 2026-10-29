@@ -16,9 +16,16 @@
   11 GET endpoints, best of 3: 593.8 requests a second at the geometric
   mean against 571.3 (goturkiye 609.3), app CPU 4.52 ms a request
   against 5.20 (Go 4.59), peak working set 424 MB against 811; p99 1.91×
-  goturkiye's against 2.02×, worse on both tags endpoints.
-  `bench/collect_trigger.sh` checks the floor and runs
-  `bench/debt_assist.iyi`, with a broken copy of each.
+  goturkiye's against 2.02×, worse on both tags endpoints. That tail is
+  not the collector's: tags' 103 queries a request stall in bursts of
+  four or more across workers, all ending together, and on the old
+  budget 115 of 125 such bursts ended at a collection's first stop or its
+  mark; with the floor, 60 of 445 did, and the bursts ran on. A wakeup
+  the stops used to deliver, open. `bench/collect_trigger.sh` checks the floor and
+  runs `bench/debt_assist.iyi`, with a broken copy of each;
+  `bench/parallel_exercise.iyi`'s collector step allocates a quarter of
+  the budget a task, since its lists alone no longer crossed a pool's
+  floor.
 
 - **darwin's mark helpers park: an idle program no longer burns every
   core.** They spun on the generation forever (`yield` is ARM's hint,

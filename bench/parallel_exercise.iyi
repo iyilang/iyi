@@ -551,7 +551,11 @@
 
   # Collections stop the workers: tasks build lists that live only on
   # their fibers' stacks while every worker allocates, and every node is
-  # still there by checksum.
+  # still there by checksum. Each task then allocates a quarter of the
+  # budget in garbage, so the eight cross it twice whatever it stands at:
+  # the budget is floored at MIN_BUDGET for every registered thread
+  # (`IyiMark.next_budget`), and the lists' own 150,000 nodes each no
+  # longer crossed a pool's floor - no stop at all on four workers.
   def collector(watch : Int32) : Nil
     watched("collector", watch) do
       stops = IyiThread.stops
@@ -567,6 +571,12 @@
               head = Node.new(value, head)
               want = want &+ value
               i = i + 1_i64
+            end
+            garbage = 0_u64
+            quarter = IyiMark.budget // 4_u64
+            while garbage < quarter
+              Pointer(UInt8).malloc(64_u64).value = 1_u8
+              garbage = garbage + 64_u64
             end
             sleep(1)
             have = 0_i64
@@ -584,8 +594,8 @@
           fail("collector: task #{t}'s list lost #{lost} by checksum") unless lost == 0_i64
         end
       end
-      fail("collector: no collection stopped a thread while 8 parallel tasks allocated") if IyiThread.stops == stops
-      puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops"
+      fail("collector: no collection stopped a thread while 8 parallel tasks allocated, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget") if IyiThread.stops == stops
+      puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget"
     end
   end
 

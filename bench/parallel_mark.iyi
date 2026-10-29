@@ -205,16 +205,27 @@
   # with nine helpers on a ten-core M2 Pro (macOS 26.6), and 1,956 to
   # 2,001 ms with two on CI's three-core macos-14, where it reads 0 ms now
   # on both, as it does on Linux and Windows. The bound is a tenth of one
-  # core; a helper that never parks is a whole one.
+  # core; a helper that never parks is a whole one. The least of three
+  # one-second windows is held to it: a sweep round the last collection
+  # left to the helpers may still be running in the first, and once read
+  # 112 ms with eleven helpers on 12-core Linux beside 0 ms in the three
+  # runs after it; a helper that never parks costs every window.
   helpers = IyiMark.default_helpers
   sleep(100)
-  cpu_before = process_cpu_ns
-  wall_before = IyiMark.now_ns
-  sleep(1000)
-  cpu = process_cpu_ns - cpu_before
-  wall = IyiMark.now_ns - wall_before
-  fail("idle: #{(cpu // 1000000_u64).to_i64} ms of CPU in #{(wall // 1000000_u64).to_i64} ms of sleep after the marks, with #{helpers.to_i64} helpers that should be parked, past the 100 ms bound") if cpu > 100000000_u64
-  puts "idle: #{(cpu // 1000000_u64).to_i64} ms of CPU in #{(wall // 1000000_u64).to_i64} ms of sleep after the marks, with #{helpers.to_i64} helpers parked"
+  cpu = 0xFFFFFFFFFFFFFFFF_u64
+  wall = 0_u64
+  3.times do
+    cpu_before = process_cpu_ns
+    wall_before = IyiMark.now_ns
+    sleep(1000)
+    spent = process_cpu_ns - cpu_before
+    if spent < cpu
+      cpu = spent
+      wall = IyiMark.now_ns - wall_before
+    end
+  end
+  fail("idle: #{(cpu // 1000000_u64).to_i64} ms of CPU in the least of three #{(wall // 1000000_u64).to_i64} ms sleeps after the marks, with #{helpers.to_i64} helpers that should be parked, past the 100 ms bound") if cpu > 100000000_u64
+  puts "idle: #{(cpu // 1000000_u64).to_i64} ms of CPU in the least of three #{(wall // 1000000_u64).to_i64} ms sleeps after the marks, with #{helpers.to_i64} helpers parked"
 
   # A helper with nothing to do spins SPIN_BEFORE_PARK_NS by the clock -
   # fifty microseconds on Linux and Windows, 250 on darwin - and then

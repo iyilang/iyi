@@ -143,7 +143,6 @@ module std/process
     fun RegisterWaitForSingleObject(wait : Void**, object : Void*, callback : Void*, context : Void*,
                                     milliseconds : Int32, flags : Int32) : Int32
     fun UnregisterWaitEx(wait : Void*, completion_event : Void*) : Int32
-    fun GetOverlappedResult(handle : Void*, overlapped : Void*, transferred : Int32*, wait : Int32) : Int32
     fun GetCurrentProcessId : Int32
     fun QueryFullProcessImageNameW(process : Void*, flags : Int32, name : UInt16*, size : Int32*) : Int32
   end
@@ -885,9 +884,8 @@ class ProcessChild
   end
 
   {% if flag?(:win32) %}
-    INVALID             = 0xFFFFFFFFFFFFFFFF_u64
-    ERROR_IO_PENDING    =                    997
-    ERROR_IO_INCOMPLETE =                    996
+    INVALID          = 0xFFFFFFFFFFFFFFFF_u64
+    ERROR_IO_PENDING =                    997
     # ERROR_BROKEN_PIPE and ERROR_NO_DATA: the other end has gone.
     ERROR_BROKEN_PIPE = 109
     ERROR_NO_DATA     = 232
@@ -1272,16 +1270,12 @@ class ProcessChild
     end
 
     # One read from the child's output (or errors) into *buffer*, parked on
-    # the port: the bytes read, and 0 or less at the end.
+    # the port: the bytes read, and 0 or less at the end. A cancelled read
+    # has been waited out by `read_current` already.
     def read_into(output : ::Bool, buffer : Pointer(UInt8), max : Int32) : Int64 | Cancelled
       handle = output ? @output : @errors
       return 0_i64 if handle.address == 0_u64
-      got = IyiScheduler.read_current(handle.address.to_i64, buffer.as(Void*), max.to_u64)
-      if got.is_a?(Cancelled)
-        ProcessChild.settle(handle)
-        return got
-      end
-      got
+      IyiScheduler.read_current(handle.address.to_i64, buffer.as(Void*), max.to_u64)
     end
 
     def close_output(output : ::Bool) : Nil
@@ -1325,7 +1319,11 @@ class ProcessChild
           return false if ::LibC.GetLastError != ERROR_IO_PENDING
           parked = IyiScheduler.park_overlapped_current
           if parked.is_a?(Cancelled)
-            ProcessChild.settle(handle)
+            # The write is the kernel's until a poller takes its packet off
+            # the port, and the text and the OVERLAPPED are in use until
+            # then: one park more, which answers at once when some thread
+            # took the packet already.
+            IyiScheduler.park_overlapped_current
             return parked
           end
           put = parked
@@ -1390,20 +1388,6 @@ class ProcessChild
       ::LibC.CloseHandle(handle)
     end
 
-    # The wait a cancelled overlapped call still owes: the operation is the
-    # kernel's until the port hands its packet over, and the buffer and the
-    # OVERLAPPED are in use until then (the same reckoning as
-    # `std/socket`'s `__sys_overlapped_await`). Asked first, because one
-    # the port already delivered has no second packet coming.
-    def self.settle(handle : Pointer(Void)) : Nil
-      ov = IyiScheduler.current.wait_overlapped
-      moved = 0
-      if LibKernel32.GetOverlappedResult(handle, ov.as(Void*), pointerof(moved), 0) == 0 &&
-         ::LibC.GetLastError == ERROR_IO_INCOMPLETE
-        IyiScheduler.park_overlapped_current
-      end
-    end
-
     # On a thread-pool thread, when the child has ended: no allocation, no
     # lock, no fiber. *context* is two words, the port and the parked
     # fiber's OVERLAPPED; the second is taken, so a wait that was
@@ -1419,11 +1403,8 @@ class ProcessChild
     def wait_end : Nil | Cancelled
       fiber = IyiScheduler.current
       return Cancelled.new if fiber.cancelled
-      ov = fiber.wait_overlapped
-      4.times { |index| Pointer(UInt64).new(ov.address + (index * 8).to_u64).value = 0_u64 }
       # No handle: a cancellation's `CancelIoEx` has no operation to stop.
-      fiber.wait_handle = Pointer(Void).new(0_u64)
-      fiber.io_bytes_read = 0_i64
+      ov = IyiScheduler.prepare_overlapped_current
       words = Pointer(UInt64).malloc(2_u64)
       words[0] = IyiScheduler.pollfd.to_u64
       words[1] = ov.address

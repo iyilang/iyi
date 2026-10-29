@@ -839,9 +839,6 @@ pub class UdpSocket
     POLLRDNORM = 0x0100_i16
     # SIO_UDP_CONNRESET, the ioctl that turns off the report below.
     SIO_UDP_CONNRESET = 0x9800000c_u32
-    # WSA_IO_INCOMPLETE: what the read below answers while the operation it
-    # is asked about is still under way.
-    WSA_IO_INCOMPLETE = 996
 
     # This module's own bindings, the way each arm in this file has its own
     # `lib LibC`: `std/socket`'s block declares the stream calls it needs and
@@ -1031,7 +1028,7 @@ pub class UdpSocket
     # request, and on a socket tied to a completion port the operation is not
     # over when it returns: measured here, the status stays STATUS_PENDING
     # and the descriptor, the caller's address and the OVERLAPPED are the
-    # kernel's until the completion packet is taken *off the port* — the
+    # kernel's until the completion packet is taken *off the port* — a
     # poller's `GetQueuedCompletionStatus` is what writes them. The same
     # measurement on an unassociated socket had the status written by
     # `CancelIoEx` itself, which is why this is not obvious. So
@@ -1040,15 +1037,11 @@ pub class UdpSocket
     # and the socket handle it falls back to is never signalled for a socket
     # on a port — it hung forever on the first cancelled receive tried.
     #
-    # What ends the operation is the poller, so the frame parks once more and
-    # lets it. `IyiScheduler.cancel` has already unregistered this fiber,
-    # which is what would have left the packet to be dropped; parking puts it
-    # back, and the wake means the dequeue has happened. Asked first, because
-    # a completion the poller delivered *before* the cancel is already over
-    # and no second packet is coming — parking on one would never wake.
+    # What ends the operation is a poller, so the frame parks once more and
+    # lets it, and a packet some thread took already answers that park at
+    # once (std/socket's `__sys_overlapped_await` says why the status is
+    # not the question).
     def self.__sys_overlapped_await(s : UInt64, ov : Pointer(UInt8)) : Int64
-      result = __sys_overlapped_result(s, ov)
-      return result if result != -(WSA_IO_INCOMPLETE.to_i64)
       IyiScheduler.park_overlapped_current
       __sys_overlapped_result(s, ov)
     end

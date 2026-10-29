@@ -2076,13 +2076,12 @@ pub class IyiSocket
     # Windows has no `fcntl`, and the flag cannot be read back.
     FIONBIO = -2147195266
 
-    # The three numbers this arm reads by name: what a non-blocking call with
-    # nothing to do says, what a posted operation says, and what an
-    # operation that is not over yet says when it is asked how it went.
-    WSAEWOULDBLOCK    = 10035
-    WSAETIMEDOUT      = 10060
-    ERROR_IO_PENDING  =   997
-    WSA_IO_INCOMPLETE =   996
+    # The numbers this arm reads by name: what a non-blocking call with
+    # nothing to do says, what a deadline that ran out says, and what a
+    # posted operation says.
+    WSAEWOULDBLOCK   = 10035
+    WSAETIMEDOUT     = 10060
+    ERROR_IO_PENDING =   997
 
     INVALID_SOCKET                     = 0xffffffffffffffff_u64
     SIO_GET_EXTENSION_FUNCTION_POINTER =         0xc8000006_u32
@@ -2136,9 +2135,9 @@ pub class IyiSocket
       -(LibWs2_32.WSAGetLastError.to_i64)
     end
 
-    # A socket this file made, as the class carries it, and recorded as
-    # one whose closes are this file's, so a wait on it can skip moving it
-    # to a port it is on already (`IyiScheduler.to_port`).
+    # A socket this file made, as the class carries it: joined to the
+    # process's port now, and recorded as one whose closes are this file's,
+    # so no wait on it asks to join it again (`IyiScheduler.port_made`).
     def self.__sys_made(s : UInt64) : Int32
       IyiScheduler.port_made(Pointer(Void).new(s))
       s.unsafe_to_i32
@@ -2523,7 +2522,7 @@ pub class IyiSocket
     # request, and on a socket tied to a completion port the operation is not
     # over when it returns: measured here, the status stays STATUS_PENDING
     # and the address block, the descriptor and the OVERLAPPED are the
-    # kernel's until the completion packet is taken *off the port* — the
+    # kernel's until the completion packet is taken *off the port* — a
     # poller's `GetQueuedCompletionStatus` is what writes them. The same
     # measurement on an unassociated socket had the status written by
     # `CancelIoEx` itself, which is why this is not obvious. So
@@ -2532,15 +2531,15 @@ pub class IyiSocket
     # and the socket handle it falls back to is never signalled for a socket
     # on a port — it hung forever on the first cancelled receive tried.
     #
-    # What ends the operation is the poller, so the frame parks once more and
+    # What ends the operation is a poller, so the frame parks once more and
     # lets it. `IyiScheduler.cancel` has already unregistered this fiber,
     # which is what would have left the packet to be dropped; parking puts it
-    # back, and the wake means the dequeue has happened. Asked first, because
-    # a completion the poller delivered *before* the cancel is already over
-    # and no second packet is coming — parking on one would never wake.
+    # back, and the wake means the packet was taken. A packet some thread
+    # took already - before the cancel, or since - is no second packet, and
+    # the park answers at once (`IyiScheduler.park_overlapped_current`).
+    # The status is not the question: it is written as the packet is taken,
+    # before the thread that took it has handed it over.
     def self.__sys_overlapped_await(s : UInt64, ov : Pointer(UInt8)) : Int64
-      result = __sys_overlapped_result(s, ov)
-      return result if result != -(WSA_IO_INCOMPLETE.to_i64)
       IyiScheduler.park_overlapped_current
       __sys_overlapped_result(s, ov)
     end

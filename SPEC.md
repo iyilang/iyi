@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 25,118 lines, of which 4,650 are the library held to the 4,650 ceiling (6,666 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 25,500 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 131,526 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 25,118 lines
+> "No standard library worth the name" is still true of iyi's own 25,500 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 25,118 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 25,500 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -301,9 +301,9 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 are most of its lines. So the figure held to the ceiling is the library:
 **4,650 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,016 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,022 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,666 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,672 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -424,7 +424,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,016 lines**
+exists for the same reason — the platform floor measures **2,022 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 131,526 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 25,118-line own prelude + 125,572 in std |
+| Library | 8,161 lines (3,551 of it core) | 25,500-line own prelude + 125,539 in std |
 | Specs | 21,146 lines | 15,806 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3744,9 +3744,9 @@ stopped thread's sp, as before; on Windows the switch writes the fiber's
 own StackBase, StackLimit and DeallocationStack into the TEB of the thread
 it lands on (`__iyi_ctx_swap`), so a frame's probes grow the fiber's stack
 on any worker; an io wait is registered per wait on the waiting thread's
-epoll or kqueue, and on Windows a handle is moved to the waiting thread's
-port, a completion that reaches another port being forwarded by the thread
-id its OVERLAPPED carries; a cancel finds the thread whose sleep heap or
+epoll or kqueue, and on Windows every thread takes completions off the
+process's one port and the fiber off the io list of the thread it parked
+on (part 5); a cancel finds the thread whose sleep heap or
 poller holds the task by an id the task writes there (`IyiFiber#listed_on`);
 and a socket closed on another thread than its reader's - by a sibling on
 another worker, or by the main thread - wakes the read parked on it through
@@ -3808,38 +3808,96 @@ after the pool has started, and different from it, is refused by panic,
 since the pool does not shrink. The workers start at the first
 `spawn_parallel`, so a program without one has no pool and no new thread.
 
-**5. A poller per worker, not a shared one.** An IO wait is the waiting
-task's thread's — the fd is registered with that thread's epoll, kqueue or
-completion port, per wait, as it always was. A woken task may resume on
-another worker (part 1), and its next wait registers there. On Windows a
-handle belongs to one port, so a wait moves it to its thread's - two
-`NtSetInformationFile` calls, the move and the skip-on-success mode the move
-clears - and only when it is not there already: the port each handle the
-standard library made was last moved to is recorded, and a wait on one
-already on its thread's port makes neither call (#151; `IyiScheduler.to_port`
-says why a closed handle's value, an ended thread, a move by another thread
-and a duplicate cannot leave a record that sends a wait's completion
-elsewhere). A shared poller would have saved a file descriptor per worker;
-what a poller per worker costs instead is part 1's open end: a worker busy
-computing looks at its own poller only when it parks. The worker owns its
-poller, its sleep heap and its stacks, and nothing of them is locked.
+**5. A poller per worker on Linux and darwin; on Windows, one completion
+port for the process.** On Linux and darwin an IO wait is the waiting
+task's thread's — the fd is registered with that thread's epoll or
+kqueue, per wait, as it always was. A woken task may resume on another
+worker (part 1), and its next wait registers there. A shared poller would
+have saved a file descriptor per worker; what a poller per worker costs
+instead is part 1's open end: a worker busy computing looks at its own
+poller only when it parks, or when part 9's check calls it to. The worker
+owns its poller, its sleep heap and its stacks, and nothing of them is
+locked.
+
+Windows had the same shape, a completion port per scheduler thread, and
+it cost more there: a completion is not readiness that any poller may be
+told about, it is a packet queued to the one port its handle belongs to,
+so a handle was moved to the waiting thread's port at each wait (#151
+skipped the move when a record said it was there already), and the
+packet was taken only by the thread its task had parked on. Agent
+TagsTick traced the tags endpoints' 103 queries a request against a
+local postgres on the user's Windows 11 machine with 12 logical
+processors: with Windows' priority boost turned off from outside, 145
+answers sat on iyi's sockets over 100 ms each while that thread waited in
+the ready queue, and a median of 7 other workers ran. So Windows is Go's
+shape now (`runtime/netpoll_windows.go`): one port for the process
+(`IyiScheduler.pollfd`), made by the first call that wants it.
+
+- *A handle joins it once and never moves.* A socket or pipe the standard
+  library makes is joined when it is made (`port_made`), and a wait on it
+  makes no call; a handle a program made itself is joined at each wait,
+  which the call refuses, changing nothing, once it is. The moves, and
+  the record of which port each handle was moved to, are gone; what is
+  left is a word per handle value saying std joined it, which std's close
+  zeroes while the value is still that handle's.
+- *Any thread takes any completion.* The word after a fiber's OVERLAPPED
+  names the thread it parks on; the thread that takes the packet takes
+  the fiber off that thread's io list, out of its sleep heap and its
+  listing, under that thread's *lists lock* (`IyiScheduler.lists_lock`,
+  which every change to a Windows thread's io list and sleep heap holds,
+  a leaf under the other locks), and wakes it where it is: a fiber that
+  may move into this worker's ring, where a steal may take it, any other
+  home. Go readies what its netpoller found the same way, wherever the
+  poll ran (`injectglist`).
+- *Who waits on the port.* One idle thread at a time, the seat's holder
+  (a pool worker once the pool has started), waits on the port beside its
+  doorbell and its deadline timer; every other idle thread waits on its
+  doorbell and timer alone, so a packet wakes one thread, not all.
+  `WaitForMultipleObjects` on a port takes no packet: what the port holds
+  stays for whichever thread looks first, so a holder the kernel readied
+  and then left in the ready queue holds nobody's answer from a worker
+  that runs. A worker that runs out of its own work looks at the port
+  without waiting, at most every millisecond (`take_port`), as Go's
+  `findrunnable` polls its netpoller before it steals; and a holder that
+  leaves the seat to run something rings another idle thread to take it
+  (`left_idle`), as Go's poller thread wakes a spinning one (`wakep`).
+- *A cancelled operation is waited out* by parking once more, and the
+  park does not wait when a thread has taken the packet already: whether
+  a packet is still to come is the fiber's own flag, cleared by whichever
+  thread takes it (`IyiFiber#io_pending`). It was the OVERLAPPED's status,
+  which the kernel writes as the packet is dequeued, before the thread
+  that dequeued it has handed it on; a fiber reading it there could post
+  its next operation into the same OVERLAPPED and be woken by the old
+  one's packet.
+
+The pool also turns Windows' dynamic priority boost off for the process
+as it starts (`IyiWorkers.start`), as Go's runtime does at its own start
+(`runtime/os_windows.go`: "dynamic priority boosting does nothing but
+harm"). In TagsTick's trace with the boost on, iyi's workers ran 14.7 of
+their 15.7 CPU-seconds at priority 10, level with postgres's woken
+backends, and 175 queries waited over 100 ms for postgres to read them;
+turned off alone, the stall moved into iyi's workers, as above, and the
+real app's p99 got worse. The two belong together.
 
 **6. Waking across threads, and the one lock.** What does cross threads is
 a wake: a sender on one worker hands a value to a receiver parked on
 another, a task's end wakes the owner joining its group, a cancel reaches a
 task on another thread. Each scheduler thread gets an inbox, the fibers
 other threads have woken, and a doorbell its poller waits on beside its
-fds — an eventfd on Linux, an `EVFILT_USER` event on darwin's kqueue, a
-posted completion on Windows' port. A thread with nothing to run marks
-itself idle, *after* finding its inbox empty and under the lock its wakers
-take, and a waker rings only an idle thread: so no wake is lost between
-the look and the wait, and a busy thread is never rung. A cancel of a task
-parked on another thread sets its flag and is delivered to the task's own
-thread, which takes it out of its own sleep heap or poller; nothing touches
-another thread's private lists. Channels, groups, the joiner chains, the
-inboxes and the pool's queues are behind **one runtime-wide scheduler
-lock**, taken only once a second scheduler thread exists — a program with
-one pays a load and a branch. One lock rather than one per channel because
+fds — an eventfd on Linux, an `EVFILT_USER` event on darwin's kqueue, and
+on Windows an event of its own, waited on beside the port. A thread with
+nothing to run marks itself idle, *after* finding its inbox empty and
+under the lock its wakers take, and a waker rings only an idle thread: so
+no wake is lost between the look and the wait, and a busy thread is never
+rung. A cancel of a task parked on another thread sets its flag and is
+delivered to the task's own thread, which takes it out of its own sleep
+heap or poller; nothing else touches another thread's private lists, save
+on Windows, where a thread that takes a completion takes its fiber off the
+io list and sleep heap of the thread it parked on, under that thread's
+lists lock (part 5). Channels, groups, the joiner chains, the inboxes and
+the pool's queues are behind **one runtime-wide scheduler lock**, taken
+only once a second scheduler thread exists — a program with one pays a
+load and a branch. One lock rather than one per channel because
 `select` parks on several channels and a cancel walks groups whose tasks
 are on several threads: one lock has no order to get wrong, and the work it
 serialises is a few pointer moves. Its price is contention in a program
@@ -11205,7 +11263,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 25,118-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 25,500-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

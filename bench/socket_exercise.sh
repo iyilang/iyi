@@ -357,14 +357,17 @@ else
   fi
 fi
 
-# 12. The record of the port each socket was last moved to (#151), on
-#     Windows, where a handle has a port: a copy that moves on every wait,
-#     which the move count catches; one that skips the move whenever a
-#     port is recorded, which posts a read to the port of a thread that
-#     has ended and never completes; and one whose close leaves the record
-#     for the next handle with its value, which a pipe the program made
-#     takes and never completes a read on. The exercise's watcher ends a
-#     wait that never completes with the step's name.
+# 12. The process's one port and the record of the handles std joined to
+#     it (#151), on Windows: a copy that asks to join a socket at every
+#     wait, which the join count catches; one whose close leaves the
+#     record for the next handle with its value, which a pipe the program
+#     made takes and never completes a read on; and one that closes the
+#     port as a thread ends, the port each thread had before the process
+#     had one, which the first wait after a thread's end never completes -
+#     port_reuse's, since the first thread to end is port_stays' watcher;
+#     port_thread_ended holds the same after a thread that waited on the
+#     socket. The exercise's watcher ends a wait that never completes with
+#     the step's name.
 prove_port() { # prove_port <label> <dir> <phrase, a regex> <awk script>
   local label="$1" dir="$2" phrase="$3" script="$4"
   mkdir -p "$WORK/$dir/iyi"
@@ -398,10 +401,10 @@ prove_port() { # prove_port <label> <dir> <phrase, a regex> <awk script>
 }
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    prove_port "a socket moved on every wait" portevery "port_stays: 200 round trips" \
-      '{ sub(/return if seen == mine && mine != 0_u64$/, "return if false"); print }'
-    prove_port "a move skipped whenever a port is recorded" portany "port_thread_ended: a wait had not completed" \
-      '{ sub(/return if seen == mine && mine != 0_u64$/, "return if seen > PORT_OWNED"); print }'
+    prove_port "a socket joined at every wait" portevery "port_stays: 200 round trips" \
+      '{ sub(/return if word.address != 0_u64 && word.value.get == PORT_JOINED$/, "return if false"); print }'
+    prove_port "the port closed as a thread ends" portclosed "port_(reuse|thread_ended): a wait had not completed" \
+      '{ print } /^      __iyi_close\(state.deadline_timer\) if state.deadline_timer > 0_i64$/ { print "      __iyi_close(pollfd)" }'
     prove_port "a close that leaves its record" portkept "port_reuse: a wait had not completed" \
       '{ sub(/word.value.set\(0_u64\) if word.address != 0_u64$/, "nil"); print }' ;;
   *)

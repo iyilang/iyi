@@ -1,0 +1,239 @@
+# Windows' one completion port, exercised: SPEC.md III.4.13, part 5.
+#
+#   ./bin/iyi run bench/completions_taken.iyi                # both steps
+#   ./bin/iyi run bench/completions_taken.iyi -- taken       # one of them
+#
+# `taken`: a parallel task parks on a socket's read, and the worker it
+# parked on starts a sibling task that computes for COMPUTE_MS with its
+# loop marked `@[NoPreempt]`, so nothing of that worker looks at a port or
+# a queue until it ends. The read's answer is sent while it computes. With
+# the process's one port another worker takes the answer, and the task
+# reads it on that worker within BOUND_MS; with a port per worker, or a
+# port only its own worker takes from, the answer waits for the
+# computation's end. The sibling is spawned onto the worker's own queue,
+# where an idle worker may steal it first: a round where it ran elsewhere
+# proves nothing and is run again, and `ROUNDS` that do prove are needed.
+#
+# `boost`: the process's dynamic priority boost is off once the pool has
+# started (`IyiWorkers.start`), as `GetProcessPriorityBoost` reads it.
+#
+# bench/parallel_exercise.sh runs both on Windows, at twelve workers, and
+# a broken copy of the runtime each: a port whose packets only the thread
+# their task parked on takes, and a pool that leaves the boost on.
+
+module bench/completions_taken
+
+import std/socket::{IyiSocket, SocketError}
+
+{% if flag?(:win32) && flag?(:x86_64) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+  lib LibBoost
+    fun GetProcessPriorityBoost(h_process : Void*, disabled : Int32*) : Int32
+  end
+
+  COMPUTE_MS = 1500_i64
+  BOUND_MS   =  250_i64
+  ROUNDS     =        3
+  ATTEMPTS   =       40
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  # What a round's two tasks say, `Share` by their atomic fields and with
+  # no setter (III.4.4): the worker the reader parked on and the one it
+  # read on, the worker the computation ran on and whether it computed,
+  # and when the answer was read and the computation ended.
+  class Marks
+    @reader : Atomic(UInt64)
+    @read_on : Atomic(UInt64)
+    @computer : Atomic(UInt64)
+    @computing : Atomic(Int64)
+    @read_at : Atomic(Int64)
+    @computed_until : Atomic(Int64)
+
+    def initialize
+      @reader = Atomic(UInt64).new(0_u64)
+      @read_on = Atomic(UInt64).new(0_u64)
+      @computer = Atomic(UInt64).new(0_u64)
+      @computing = Atomic(Int64).new(0_i64)
+      @read_at = Atomic(Int64).new(0_i64)
+      @computed_until = Atomic(Int64).new(0_i64)
+    end
+
+    def reader : UInt64
+      @reader.get
+    end
+
+    def note_reader(id : UInt64) : Nil
+      @reader.set(id)
+    end
+
+    def read_on : UInt64
+      @read_on.get
+    end
+
+    def note_read_on(id : UInt64) : Nil
+      @read_on.set(id)
+    end
+
+    def computer : UInt64
+      @computer.get
+    end
+
+    def note_computer(id : UInt64) : Nil
+      @computer.set(id)
+    end
+
+    # 0 until the sibling has started, then 1 when it computes on the
+    # reader's worker and 2 when it ran elsewhere.
+    def computing : Int64
+      @computing.get
+    end
+
+    def note_computing(how : Int64) : Nil
+      @computing.set(how)
+    end
+
+    def read_at : Int64
+      @read_at.get
+    end
+
+    def note_read_at(ns : Int64) : Nil
+      @read_at.set(ns)
+    end
+
+    def computed_until : Int64
+      @computed_until.get
+    end
+
+    def note_computed_until(ns : Int64) : Nil
+      @computed_until.set(ns)
+    end
+  end
+
+  # The computation: integer work until *deadline*, with no check at the
+  # loop's back-edge, so its worker is the task's alone until then.
+  @[NoPreempt]
+  def compute(deadline : Int64) : UInt64
+    x = 1_u64
+    while __iyi_monotonic_ns < deadline
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+    end
+    x
+  end
+
+  # One round: true when the computation ran on the reader's worker, and
+  # then the read must have come in within the bound.
+  def round(listener : IyiSocket, port : Int32, number : Int32) : Bool
+    near = IyiSocket.connect("127.0.0.1", port, 5000)
+    fail("taken: connect answered #{near}") unless near.is_a?(IyiSocket)
+    far = listener.accept
+    fail("taken: accept answered #{far}") unless far.is_a?(IyiSocket)
+    far_fd = far.fd
+    marks = Marks.new
+    sent_at = 0_i64
+    group do |g|
+      g.spawn_parallel do
+        group do |inner|
+          # Onto this worker's own queue, which it takes from next once the
+          # read below parks; a steal may take it first.
+          inner.spawn_parallel do
+            here = IyiScheduler.state.object_id
+            marks.note_computer(here)
+            if here == marks.reader
+              marks.note_computing(1_i64)
+              x = compute(__iyi_monotonic_ns + COMPUTE_MS * 1_000_000_i64)
+              marks.note_computed_until(__iyi_monotonic_ns + (x == 0_u64 ? 1_i64 : 0_i64))
+            else
+              marks.note_computing(2_i64)
+            end
+            0
+          end
+          marks.note_reader(IyiScheduler.state.object_id)
+          got = IyiSocket.new(far_fd).read(1).or_panic
+          marks.note_read_at(__iyi_monotonic_ns)
+          marks.note_read_on(IyiScheduler.state.object_id)
+          fail("taken: round #{number}'s read answered #{got.inspect}") unless got == "x"
+        end
+        0
+      end
+      waited = 0
+      while marks.computing == 0_i64
+        sleep(1)
+        waited = waited + 1
+        fail("taken: round #{number}'s sibling did not start in 10000 ms") if waited > 10000
+      end
+      sent_at = __iyi_monotonic_ns
+      near.write("x").or_panic
+    end
+    near.close
+    far.close
+    return false unless marks.computing == 1_i64
+    took = (marks.read_at - sent_at) // 1_000_000_i64
+    computed = (marks.computed_until - sent_at) // 1_000_000_i64
+    if took > BOUND_MS
+      fail("taken: round #{number}'s answer, sent while its worker computed, was read #{took} ms later (the worker computed #{computed} ms more)")
+    end
+    if marks.read_on == marks.reader
+      fail("taken: round #{number}'s answer was read on the worker that computed, #{took} ms after it was sent")
+    end
+    puts "taken: round #{number}: read #{took} ms after it was sent, on another worker, while its own computed #{computed} ms more"
+    true
+  end
+
+  def taken : Nil
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    proved = 0
+    attempts = 0
+    while proved < ROUNDS && attempts < ATTEMPTS
+      attempts = attempts + 1
+      proved = proved + 1 if round(listener, port, attempts)
+    end
+    listener.close
+    if proved < ROUNDS
+      fail("taken: in #{attempts} rounds the computation ran on its reader's worker #{proved} times, not #{ROUNDS}")
+    end
+    puts "taken: #{proved} answers read on another worker in #{attempts} rounds, on #{IyiWorkers.count} workers"
+  end
+
+  def boost : Nil
+    # The pool starts at the first parallel task.
+    group do |g|
+      g.spawn_parallel { 0 }
+    end
+    disabled = 0
+    if LibBoost.GetProcessPriorityBoost(::LibC.GetCurrentProcess, pointerof(disabled)) == 0
+      fail("boost: GetProcessPriorityBoost failed")
+    end
+    fail("boost: the process's priority boost is on with the pool started") if disabled == 0
+    puts "boost: off with the pool started"
+  end
+
+  STEPS = ["boost", "taken"]
+
+  workers = 12
+  chosen = [] of String
+  Program.args.each do |argument|
+    if argument.starts_with?("--workers=")
+      workers = argument[10, argument.size - 10].to_i
+    else
+      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      chosen << argument
+    end
+  end
+  chosen = STEPS if chosen.empty?
+  IyiWorkers.count = workers
+  chosen.each do |name|
+    case name
+    when "boost" then boost
+    when "taken" then taken
+    end
+  end
+  puts "completions taken: every property held on #{IyiWorkers.count} workers"
+{% else %}
+  puts "completions taken: one completion port is Windows', nothing to hold here"
+{% end %}

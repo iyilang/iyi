@@ -269,14 +269,8 @@ class SignalWaiter
     private def self.park : Nil | Cancelled
       fiber = IyiScheduler.current
       return Cancelled.new if fiber.cancelled
-      ov = fiber.wait_overlapped
-      Pointer(UInt64).new(ov.address).value = 0_u64
-      Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
-      Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
-      Pointer(UInt64).new(ov.address + 24_u64).value = 0_u64
       # No handle: a cancellation's `CancelIoEx` has no operation to stop.
-      fiber.wait_handle = Pointer(Void).new(0_u64)
-      fiber.io_bytes_read = 0_i64
+      ov = IyiScheduler.prepare_overlapped_current
       # One waiter at a time, as the poller holds a descriptor to one
       # reader: a second park wrote its slot over the first's, and the
       # first was never woken, not even by the next Ctrl-Break.

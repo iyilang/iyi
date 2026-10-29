@@ -42,6 +42,24 @@
   (ten runs on the M2) and 5.1 to 9.2 ms in five on 12-core Linux; the
   copy at the second, 999 ms in five of five on the M2 and 1,000 in four
   of four on Linux. The server shape's own check is unchanged.
+- **parallel_exercise's server shape leaves Windows two cores.** Its
+  clients are the main thread, and on 4 cores the gate ran 3 workers,
+  which left that thread one core and none for anything else the runner
+  ran. GitHub's 4-core Windows runners come in two speeds, and on the
+  slower the plain build's server step read 36 to 63 ms in 13 jobs, then
+  157 and 159 ms against the 80 ms bound, 2753 and 1682 of 11,200 fast
+  requests over 20 ms (CI jobs 123312302895 and 123350279733), the poller
+  step before it. That step leaves nothing running: its process ends with
+  its group joined, and on Windows 11, 12 logical processors (the user's
+  machine), held to 4, 15 runs each with it, without it and on master
+  read 19 to 25, 18 to 30 and 20 to 29 ms. A shell loop busy on one of
+  the 4 made the failure's shape there, 59 to 104 ms and 914 to 1364
+  over 20 on 3 workers in 24 runs, with each of the three alike; on 2,
+  26 to 31 ms and 123 to 300 over in 20. The gate now leaves Windows two
+  cores, so 2 workers on 4: the preemption part of the gate passed 15
+  runs of 15 there, its server step 27 to 33 ms plain and 26 to 36
+  release. The 4 slow connections still outnumber the workers, so a
+  fast request is still answered beside them only by a preemption.
 - **darwin's floor names `memset_pattern16`, LLVM's call for a pattern
   fill.** `samples/iyi/cores.iyi` is the first sample to reach
   std/compress's Inflater (through std/http's `BodyReader#read`), and

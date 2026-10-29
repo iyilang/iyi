@@ -2086,9 +2086,17 @@ class IyiScheduler
   # lists are looked at as well as what it said when it went idle: another
   # thread may have taken its last io waiter's completion since
   # (`complete_packet`), and an idle thread's lists only shrink.
+  #
+  # The lists are read first, then the packets in hand, then the queues:
+  # a thread taking a packet counts it in hand before the fiber leaves a
+  # list, and gives the count back only once the fiber is in a queue or a
+  # thread's mail, so a fiber between the two is seen in one of the three.
+  # Read the other way round, the main thread of bench/completions_taken.iyi
+  # was named deadlocked in 3 runs of 5 on the user's Windows 11 machine
+  # with 12 logical processors: its accept's packet was off its list and
+  # not yet in its mail, taken by an idle worker that still said it was
+  # idle and quiet.
   def self.all_quiet?(me : IyiSchedulerState) : Bool
-    return false if @@coming > 0_i64
-    return false unless IyiWorkers.queues_empty?
     other = @@states_head
     while other.is_a?(IyiSchedulerState)
       if other.object_id != me.object_id
@@ -2100,6 +2108,11 @@ class IyiScheduler
       end
       other = other.next_state
     end
+    {% if flag?(:win32) %}
+      return false if in_hand?
+    {% end %}
+    return false if @@coming > 0_i64
+    return false unless IyiWorkers.queues_empty?
     true
   end
 
@@ -3679,13 +3692,39 @@ class IyiScheduler
     # marked over (`IyiFiber#io_pending`), which its park reads under the
     # same lock and then does not wait. A packet no fiber claims is
     # dropped.
+    #
+    # The packet is counted in hand from before its fiber leaves a list
+    # until the fiber is in a queue or its thread's mail (`all_quiet?`).
+    # A dropped one rings the thread that names a deadlock, which may have
+    # declined to while it was in hand.
     def self.complete_packet(overlapped : UInt64, bytes : Int64) : Nil
       if overlapped == IyiStdinReader.overlapped_address
         IyiStdinReader.answered
         return
       end
+      hand = Pointer(Atomic(Int64)).new(pointerof(@@in_hand).address)
+      hand.value.add(1_i64)
+      claimed = take_packet(overlapped, bytes)
+      hand.value.sub(1_i64)
+      return if claimed || !@@shared
+      IyiSchedLock.lock
+      ring_reporter
+      IyiSchedLock.unlock
+    end
+
+    # Packets some thread has taken off the port and not yet handed to a
+    # queue or a mail (`complete_packet`).
+    @@in_hand : Int64 = 0_i64
+
+    def self.in_hand? : Bool
+      Pointer(Atomic(Int64)).new(pointerof(@@in_hand).address).value.get > 0_i64
+    end
+
+    # The packet's fiber woken, or its operation marked over; false when no
+    # fiber claims it.
+    def self.take_packet(overlapped : UInt64, bytes : Int64) : Bool
       owner = state_named(Pointer(UInt64).new(overlapped + 32_u64).value)
-      return unless owner.is_a?(IyiSchedulerState)
+      return false unless owner.is_a?(IyiSchedulerState)
       lists_lock(owner)
       fiber = io_take_overlapped(owner, overlapped)
       if fiber.is_a?(IyiFiber)
@@ -3693,11 +3732,11 @@ class IyiScheduler
         fiber.io_pending = false
         lists_unlock(owner)
         wake_completed(fiber)
-        return
+        return true
       end
       lists_unlock(owner)
       posting = fiber_posting(overlapped)
-      return unless posting.is_a?(IyiFiber)
+      return false unless posting.is_a?(IyiFiber)
       lists_lock(owner)
       fiber = io_take_overlapped(owner, overlapped)
       if fiber.is_a?(IyiFiber)
@@ -3705,13 +3744,14 @@ class IyiScheduler
         fiber.io_pending = false
         lists_unlock(owner)
         wake_completed(fiber)
-        return
+        return true
       end
       if posting.io_pending
         posting.io_bytes_read = bytes
         posting.io_pending = false
       end
       lists_unlock(owner)
+      true
     end
 
     # The fiber whose OVERLAPPED is at *overlapped*, from the registry, or

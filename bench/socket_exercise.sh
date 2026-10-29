@@ -609,7 +609,7 @@ echo
 if [ "$status" -eq 0 ]; then
   echo "Sockets: connect, accept, message exchange, short reads, closed peer,"
   echo "refused connections, IPv6, unix sockets and timeouts all verified, a port and an address are checked before"
-  echo "they are packed, a closed socket says so, a socket waits on its thread's port wherever it last was,"
+  echo "they are packed, a closed socket says so, a socket std made waits on the process's one port with no call to join it,"
   echo "and every check is proved to fail when broken."
 else
   echo "Sockets: something above failed."

@@ -13,6 +13,11 @@
 # computation's end. The sibling is spawned onto the worker's own queue,
 # where an idle worker may steal it first: a round where it ran elsewhere
 # proves nothing and is run again, and `ROUNDS` that do prove are needed.
+# On the user's Windows 11 machine with 12 logical processors, 36 rounds
+# of 279 proved in 12 runs, about one in eight: at 40 attempts a run
+# would find fewer than three about one time in ten, at 120 about once
+# in ninety thousand, and a round that does not prove costs a
+# connection and no computation.
 #
 # `boost`: the process's dynamic priority boost is off once the pool has
 # started (`IyiWorkers.start`), as `GetProcessPriorityBoost` reads it.
@@ -33,7 +38,7 @@ import std/socket::{IyiSocket, SocketError}
   COMPUTE_MS = 1500_i64
   BOUND_MS   =  250_i64
   ROUNDS     =        3
-  ATTEMPTS   =       40
+  ATTEMPTS   =      120
 
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"

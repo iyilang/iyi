@@ -166,19 +166,21 @@ PREEMPT_WORKERS=8
 # machine runs. GitHub's 4-core Windows runners come in two speeds: the
 # job's runtime exercises take 486 to 658 s or 688 to 738 s, and on the
 # slower the plain `spin` runs a sixth slower than its calibration (the
-# period step's 111 to 116 looks, where the faster takes 86 to 99). There
+# period step's 111 to 121 looks, where the faster takes 86 to 99). There
 # the plain build's server step read 36 to 63 ms, 286 to 427 over 20, in
 # 13 jobs, then 157 and 159 ms, 2753 and 1682 over (CI jobs 123312302895
-# and 123350279733); an earlier master read 102 ms, 2504 over, with its
-# ticker 61 ms late (123170544267). Windows 11, 12 logical processors
-# (the user's machine), held to 4 by `start /affinity F` with a shell loop
-# busy on one of them, made the same shape: 3 workers 59 to 104 ms, 914
-# to 1364 over 20, in 24 runs, master's binary and this one alike, the
-# poller step before it or not; 2 workers 26 to 31 ms, 123 to 300 over,
-# in 20.
-# So Windows leaves two cores, the main thread's and a spare. The 4 slow
-# connections still outnumber the workers, so a fast request is answered
-# beside them only by a preemption.
+# and 123350279733); a commit master has since merged read 102 ms, 2504
+# over, with its ticker 61 ms late (123170544267). Windows 11, 12 logical
+# processors (the user's machine), held to 4 by `start /affinity F` with
+# a shell loop busy on one of them, made the same shape: 3 workers 59 to
+# 104 ms, 914 to 1364 over 20, in 24 runs, master's binary and this one
+# alike, the poller step before it or not; 2 workers 26 to 31 ms, 123 to
+# 300 over, in 20. So Windows leaves two cores, the main thread's and a
+# spare: on 2 workers CI read 27 to 31 ms plain, 409 to 458 over,
+# and 27 to 37 release, 250 to 303 over, in four jobs, three of them on
+# the slower runner (123506061763, 123575207812, 123639425845; and
+# 123702042367). The 4 slow connections still outnumber the workers, so
+# a fast request is answered beside them only by a preemption.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     room=1

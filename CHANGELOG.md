@@ -58,8 +58,10 @@
   26 to 31 ms and 123 to 300 over in 20. The gate now leaves Windows two
   cores, so 2 workers on 4: the preemption part of the gate passed 15
   runs of 15 there, its server step 27 to 33 ms plain and 26 to 36
-  release. The 4 slow connections still outnumber the workers, so a
-  fast request is still answered beside them only by a preemption.
+  release, and the Windows job passed four of four in CI, three of them
+  on the slower runner, at 27 to 31 ms plain and 27 to 37 release. The 4
+  slow connections still outnumber the workers, so a fast request is
+  still answered beside them only by a preemption.
 - **darwin's floor names `memset_pattern16`, LLVM's call for a pattern
   fill.** `samples/iyi/cores.iyi` is the first sample to reach
   std/compress's Inflater (through std/http's `BodyReader#read`), and

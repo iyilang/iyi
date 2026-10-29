@@ -48,6 +48,15 @@ trap 'rm -rf "$WORK"' EXIT
 
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
+# The Python below opens every text file as UTF-8 and prints through
+# UTF-8 itself, rather than leaning on CI's PYTHONUTF8: a Windows desktop's
+# Python reads and prints in its ANSI code page, cp1252, which has no
+# character for the byte 0x9D in 東 (E6 9D B1). Measured on Windows 11, 12
+# logical processors (the user's machine): `check_codec.py`'s bare `open`
+# of codec_want.txt died on that byte with a UnicodeDecodeError, so the
+# encodings comparison and both of its broken-copy proofs failed with a
+# traceback rather than an answer, in five runs of five.
+export PYTHONIOENCODING=utf-8
 
 build_and_run() {
   local label="$1" name="$2"
@@ -175,14 +184,14 @@ for i in range(200):
     lines.append("end")
     spec.extend(lines); cases.append(c)
 open(os.path.join(work, "spec.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(spec) + "\n")
-json.dump(cases, open(os.path.join(work, "cases.json"), "w"))
+json.dump(cases, open(os.path.join(work, "cases.json"), "w", encoding="utf-8"))
 PY
 cat >"$WORK/check_build.py" <<'PY'
 import email, email.policy, json, os, sys, datetime as dt
 from email.utils import parsedate_to_datetime, format_datetime
 from email.headerregistry import Address
 work = sys.argv[1]
-cases = json.load(open(os.path.join(work, "cases.json")))
+cases = json.load(open(os.path.join(work, "cases.json"), encoding="utf-8"))
 said = open(os.path.join(work, "built.txt"), encoding="utf-8").read().splitlines()
 bad = []
 SAFE = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!*+-/ ")
@@ -368,8 +377,8 @@ PY
 cat >"$WORK/cmp_parse.py" <<'PY'
 import itertools, os, sys
 work = sys.argv[1]
-want = open(os.path.join(work, "py_expected.txt")).read().splitlines()
-got = open(os.path.join(work, "py_got.txt")).read().splitlines()
+want = open(os.path.join(work, "py_expected.txt"), encoding="utf-8").read().splitlines()
+got = open(os.path.join(work, "py_got.txt"), encoding="utf-8").read().splitlines()
 bad, current, shown = 0, "", 0
 messages = sum(1 for w in want if w.startswith("message "))
 wrong = set()
@@ -474,9 +483,9 @@ cat >"$WORK/check_codec.py" <<'PY'
 import email, email.policy, os, sys
 from collections import Counter
 work = sys.argv[1]
-got = open(os.path.join(work, "codec_got.txt")).read().splitlines()
-want = [line.split("\t", 1) for line in open(os.path.join(work, "codec_want.txt")).read().splitlines()]
-cases = open(os.path.join(work, "codec_cases.txt")).read().splitlines()
+got = open(os.path.join(work, "codec_got.txt"), encoding="utf-8").read().splitlines()
+want = [line.split("\t", 1) for line in open(os.path.join(work, "codec_want.txt"), encoding="utf-8").read().splitlines()]
+cases = open(os.path.join(work, "codec_cases.txt"), encoding="utf-8").read().splitlines()
 seen, bad = Counter(), Counter()
 for c, w, g in zip(cases, want, got + [""] * len(want)):
     op = c.split(" ")[0]

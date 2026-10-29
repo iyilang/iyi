@@ -3,8 +3,9 @@
 # and optimised, checks it reached its last line, and proves the checks fail
 # in the directions that matter: a heap where nothing triggers, a budget
 # that never grows with the live set, mappings that never go back, a
-# scheduler state left off the list that roots it, and an ended thread's
-# allocation left uncounted.
+# scheduler state left off the list that roots it, an ended thread's
+# allocation left uncounted, a budget floor blind to the threads, and
+# threads allocating free while a triggered collection pays its debt.
 #
 #   bash bench/collect_trigger.sh
 #
@@ -71,13 +72,23 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in quiet trigger bounded_or_budget fiber scavenge pauses threads; do
+for phrase in quiet trigger bounded_or_budget fiber scavenge pauses threads floor; do
   case "$phrase" in
     bounded_or_budget) grep -q "budget:" "$WORK/trigger.out" || { echo "  MISSING: budget"; status=1; } ;;
     *) grep -q "$phrase:" "$WORK/trigger.out" || { echo "  MISSING: $phrase"; status=1; } ;;
   esac
 done
-[ "$status" -eq 0 ] && echo "  quiet, trigger, budget, fiber, scavenge, pauses and threads all reported"
+[ "$status" -eq 0 ] && echo "  quiet, trigger, budget, fiber, scavenge, pauses, threads and floor all reported"
+
+echo
+echo "== a triggered collection's debt, swept by the threads past the budget"
+if ! "$IYI" build --release -o "$WORK/debt" "$REPO/bench/debt_assist.iyi" >"$WORK/debt.build.log" 2>&1; then
+  echo "  the debt exercise did not build"; sed -n '1,12p' "$WORK/debt.build.log"; status=1
+elif ! "$WORK/debt" >"$WORK/debt.out" 2>&1 || ! grep -q "^debt:" "$WORK/debt.out"; then
+  echo "  the debt exercise failed:"; sed 's/^/  /' "$WORK/debt.out"; status=1
+else
+  sed 's/^/  /' "$WORK/debt.out"
+fi
 
 echo
 echo "== the same program with optimisation on"
@@ -111,13 +122,14 @@ fi
 echo
 echo "== the checks fail when the trigger is broken"
 prove_fails() {
-  # $5 names the prelude file the awk program rewrites; prelude.iyi unless said.
-  local label="$1" dir="$2" phrase="$3" script="$4" file="${5:-prelude.iyi}"
+  # $5 names the prelude file the awk program rewrites; prelude.iyi unless
+  # said. $6 the exercise; collect_trigger.iyi unless said.
+  local label="$1" dir="$2" phrase="$3" script="$4" file="${5:-prelude.iyi}" program="${6:-collect_trigger.iyi}"
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"
   if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
-       -o "$WORK/$dir/program" "$REPO/bench/collect_trigger.iyi" \
+       -o "$WORK/$dir/program" "$REPO/bench/$program" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched prelude did not build"
     sed -n '1,12p' "$WORK/$dir/build.log"
@@ -184,14 +196,26 @@ prove_fails "scheduler state unrooted" unrooted "scheduler state:" \
 prove_fails "an ended thread's slice uncounted" noretire "threads:" \
   '{ sub(/allocated_word\.value\.add\(read64\(page \+ CACHE_SLICE\)\)/, "# removed"); print }'
 
+# The floor back at MIN_BUDGET whatever the threads: four threads
+# registered, and the budget a collection leaves is a single thread's.
+prove_fails "floor blind to the threads" nofloor "floor:" \
+  '{ sub(/floor = MIN_BUDGET \* IyiThread\.program_threads/, "floor = MIN_BUDGET"); print }'
+
+# The debt's assist removed: a slice that finds a collection triggered
+# runs on as it did, and four threads churning together with no helper
+# sweep none of the debt the triggering thread pays.
+prove_fails "debt never assisted" noassist "debt:" \
+  '{ sub(/sweep_assist if total >= budget/, "# removed"); print }' prelude.iyi debt_assist.iyi
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "Trigger: collections come from allocation pressure alone, the heap"
   echo "stays bounded, empty arenas go back to the kernel past what a deep"
   echo "budget will fill again, the pauses have"
-  echo "measured numbers, the budget grows with what survives, a parked"
-  echo "fiber's reference lives through it, and the checks fail when any"
-  echo "of it is broken."
+  echo "measured numbers, the budget grows with what survives and is floored"
+  echo "for every thread, a triggered collection's debt is swept by every"
+  echo "thread past the budget, a parked fiber's reference lives through it,"
+  echo "and the checks fail when any of it is broken."
 else
   echo "Trigger: something above failed."
 fi

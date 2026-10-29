@@ -38,6 +38,24 @@
     end
   end
 
+  # A count the threads of step 8 and the main thread share: `Share` by
+  # its atomic field.
+  class Tally
+    @value : Atomic(UInt64)
+
+    def initialize
+      @value = Atomic(UInt64).new(0_u64)
+    end
+
+    def add(value : UInt64) : Nil
+      @value.add(value)
+    end
+
+    def get : UInt64
+      @value.get
+    end
+  end
+
   # The scheduler's state and its running fiber, each XOR'd with the key,
   # taken in a frame of their own so no raw pointer to either is left in
   # the frame that churns: the spill slots and registers this frame used
@@ -53,6 +71,19 @@
       block = Pointer(UInt8).malloc(64_u64)
       block.value = 1_u8
       burned = burned + 64_u64
+    end
+  end
+
+  # Garbage across twenty size classes: sixteen bytes to 512 in steps of
+  # sixteen, nothing kept.
+  def churn_classes(bytes : UInt64) : Nil
+    burned = 0_u64
+    size = 16_u64
+    while burned < bytes
+      block = Pointer(UInt8).malloc(size)
+      block.value = 1_u8
+      burned = burned + size
+      size = size >= 512_u64 ? 16_u64 : size + 16_u64
     end
   end
 
@@ -374,6 +405,43 @@
       raise "threads: five hundred threads of a thousand strings each, then a slice here, ran no collection under a #{count(IyiMark.budget)}-byte budget"
     end
     puts "    threads: five hundred short-lived threads' allocation counted, and the next slice ran a collection"
+  {% end %}
+
+  # 8. A budget floored for every thread. Four threads churn garbage
+  # across sixteen size classes, so each has a fill arena of its own in
+  # each, and with the four still registered a collection's budget is at
+  # least MIN_BUDGET for each thread there is: a collection's fixed
+  # price - every arena swept before the mark, two stops of every thread
+  # - grows with the threads, not with the live set. The debt's assist
+  # is bench/debt_assist.iyi's.
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    IyiMark.collect
+    churned = Tally.new
+    let_go = Tally.new
+    together = [] of IyiThread
+    4.times do
+      together << IyiThread.start do
+        churn_classes(33554432_u64)
+        churned.add(1_u64)
+        while let_go.get == 0_u64
+          sleep(1)
+        end
+        nil
+      end
+    end
+    while churned.get < 4_u64
+      sleep(1)
+    end
+    IyiMark.collect
+    threads_now = IyiThread.program_threads
+    floor = IyiMark::MIN_BUDGET * threads_now
+    budget_now = IyiMark.budget
+    let_go.add(1_u64)
+    together.each { |thread| thread.join }
+    if budget_now < floor
+      raise "floor: a collection with #{count(threads_now)} threads registered left a #{count(budget_now)}-byte budget, under #{count(floor)}, so the floor does not grow with the threads"
+    end
+    puts "    floor: #{count(threads_now)} threads registered, the budget #{count(budget_now)} bytes"
   {% end %}
 
   puts "    all trigger checks passed"

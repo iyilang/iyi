@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **A collection's fixed price is bought per thread, and its debt is
+  swept by every thread past the budget.** Issue #145's app on twelve
+  workers (Windows 11, 12 logical processors) kept 3-5 MB live on a
+  6-10 MB budget and collected 4.5-21 times a second; each collection's
+  triggering thread first swept every arena the last epoch left (a
+  median of 380 on `/api/v1/`, 15-19 ms, up to 844 ms) while the other
+  threads allocated free, up to 514 MB past an 8.7 MB budget. The
+  budget is now floored at `MIN_BUDGET` for every registered thread
+  (`IyiMark.next_budget`), and a slice that finds a collection triggered
+  and the count past the budget sweeps slices of its debt
+  (`IyiMark.sweep_assist`, counted in `IyiMark.sweep_assists`). Over the
+  11 GET endpoints, best of 3: 593.8 requests a second at the geometric
+  mean against 571.3 (goturkiye 609.3), app CPU 4.52 ms a request
+  against 5.20 (Go 4.59), peak working set 424 MB against 811; p99 1.91×
+  goturkiye's against 2.02×, worse on both tags endpoints.
+  `bench/collect_trigger.sh` checks the floor and runs
+  `bench/debt_assist.iyi`, with a broken copy of each.
+
 - **darwin's mark helpers park: an idle program no longer burns every
   core.** They spun on the generation forever (`yield` is ARM's hint,
   not a syscall): `bench/web_cores.iyi`'s server, idle after a second of
@@ -25484,7 +25502,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,065-line library and nothing else. Every other
+  written against iyi's own 25,118-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

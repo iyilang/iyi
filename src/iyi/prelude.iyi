@@ -7433,11 +7433,27 @@ require "./file"
         @@growth
       end
 
-      # The survivors grown by the percentage, floored at MIN_BUDGET so a
-      # small program pays nothing.
+      # The survivors grown by the percentage, floored at MIN_BUDGET for
+      # every thread the program registered, so a small program pays
+      # nothing and a collection's fixed price is bought with allocation.
+      # That price grows with the threads, not with the live set: each
+      # thread's cache has a fill arena of its own in every class it
+      # allocates in, a collection sweeps every arena before it marks
+      # (`sweep_one_before_stop`) and stops every thread twice. Issue
+      # #145's app on twelve workers (Windows 11, 12 logical processors,
+      # 11 endpoints, best of 3) kept 3-5 MB live on a 6-10 MB budget:
+      # 4.5-21 collections a second, a median of 380 arenas swept before
+      # each on `/api/v1/`. Floored at 52 MB for its 13 threads, 0.8-8 a
+      # second, and
+      # app CPU per request 4.57 ms at the geometric mean against 5.20
+      # (Go's 4.59), 596.0 requests a second against 571.3.
       def self.next_budget(survived : UInt64) : UInt64
         grown = survived.unsafe_div(100_u64) * @@growth
-        grown < MIN_BUDGET ? MIN_BUDGET : grown
+        floor = MIN_BUDGET
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+          floor = MIN_BUDGET * IyiThread.program_threads
+        {% end %}
+        grown < floor ? floor : grown
       end
 
       def self.auto=(value : Bool) : Nil
@@ -7455,12 +7471,49 @@ require "./file"
       # under the lock, because two threads can cross the budget in the
       # same instant and the second must not collect a heap the first just
       # swept.
+      #
+      # A slice that finds a collection already triggered and the count
+      # past the budget sweeps with it (`sweep_assist`) rather than run
+      # on: the triggering thread pays the last epoch's debt before it
+      # stops anything, and every other thread allocated free beside it:
+      # on #145's `/api/v1/`, 15-19 ms of debt at the median and up to 844 ms,
+      # with up to 514 MB allocated past an 8.7 MB budget meanwhile.
+      # With the assist and the floor, `/api/v1/`'s debt was 3.9 ms at the
+      # median and 54 ms at most against 18.6 and 428 in the same
+      # sitting, 67 MB past the budget at most against 290, and the peak
+      # working set over 11 endpoints 424 MB against 811 (best of 3).
       def self.pressure(size : UInt64) : Nil
         total = IyiHeap.allocated_word.value.add(size) + size
-        return if @@collecting
+        if @@collecting
+          sweep_assist if total >= budget
+          return
+        end
         return unless @@auto
         return if total < budget
         collect_if_due
+      end
+
+      @@sweep_assists : UInt64 = 0_u64
+
+      # The debt's assist: while a triggered collection's thread sweeps
+      # what the last epoch left (`sweep_one_before_stop`), a thread past
+      # the budget sweeps slices of it too, each handed to its class's
+      # centre (`sweep_one`), until the mark has begun, a stop is asked
+      # for, or every arena left is swept or inside another walker's
+      # slice - Go's gcStart has every goroutine that crosses the trigger
+      # sweep the spans left before the cycle begins. Inside the
+      # allocator's bracket, as every allocating thread's sweep is.
+      def self.sweep_assist : Nil
+        while @@collecting && LibIyiGCTable.__iyi_marking == 0_u8
+          break if IyiHeap.stop_requested?
+          break if sweep_one(0_u64) != 1_u64
+          Pointer(Atomic(UInt64)).new(pointerof(@@sweep_assists).address).value.add(1_u64)
+        end
+      end
+
+      # Slices the debt's assists swept, in all, for the exercises.
+      def self.sweep_assists : UInt64
+        @@sweep_assists
       end
 
       def self.collect_if_due : Nil

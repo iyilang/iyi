@@ -1888,8 +1888,9 @@ pub struct Server
   # as its descriptor and family, which are `Share`, and is made again on
   # the worker; the accepting thread never touches its own object again.
   # A poller's registration is made per wait on the waiting thread's, and
-  # on Windows a handle is moved to the waiting thread's port, so the
-  # descriptor carries nothing of the thread that accepted it.
+  # on Windows a handle is on the process's one port, whose packets any
+  # thread takes, so the descriptor carries nothing of the thread that
+  # accepted it.
   #
   # Beside the connection, on its worker, a watcher waits for *stopping*
   # to close and does there what `serve`'s accept loop does on its own

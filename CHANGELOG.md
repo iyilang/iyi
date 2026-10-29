@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Windows: one completion port for the process, any thread takes any
+  completion, and the pool turns the priority boost off.** On the user's
+  Windows 11 machine with 12 logical processors, saturated by postgres,
+  the tags endpoints' 103 queries a request stalled for several 125 ms
+  ticks: iyi's boosted workers starved postgres, and with the boost off
+  an answer waited on the port of the worker its task had parked on
+  while other workers ran (agent TagsTick). Now every handle joins the
+  process's one port once (`IyiScheduler.pollfd`; #151's moves are
+  gone), whichever thread takes a packet wakes its fiber off the owner's
+  lists under that thread's lists lock, one idle worker at a time waits
+  on the port as a waitable object so a packet stays for any running
+  worker to take, doorbells are per-thread events, and
+  `SetProcessPriorityBoost` turns the boost off as the pool starts, as
+  Go does (SPEC.md III.4.13, part 5). Measured there, interleaved with
+  master, best of 3: TagsTick's loop at request p99 355-484 ms against
+  582-610 (Go 321-516), 7-14 queries a run past three ticks against
+  73-103; the real app's 11 GET endpoints at 563.9 requests a second at
+  the geometric mean against 519.5 (goturkiye 535.2), p99 176.6 ms
+  against 220.4. Worse, and open: at four processors' affinity the app
+  is at 397.1 against 412.5, the tags endpoints 8-11% behind (in the
+  loop there, master with its boost turned off from outside was as
+  slow), and bench/web_cores.iyi's `check_version` on
+  twelve workers makes 105,837 requests a second against 119,161, with
+  p99 1.15 ms against 2.29. A packet in hand while its fiber was between
+  a list and a queue read as a deadlock in 3 runs of 5 of the new
+  bench/completions_taken.iyi, and is counted now.
+  bench/parallel_exercise.sh runs that program on Windows, with broken
+  copies whose packets only the parking worker runs and that leave the
+  boost on; bench/socket_exercise.sh counts joins, and
+  std_http_parallel's ticket check holds the other workers with
+  preemption off, since a connection's next request no longer runs where
+  its last one did.
 - **darwin's floor names `memset_pattern16`, LLVM's call for a pattern
   fill.** `samples/iyi/cores.iyi` is the first sample to reach
   std/compress's Inflater (through std/http's `BodyReader#read`), and
@@ -25519,7 +25551,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,500-line library and nothing else. Every other
+  written against iyi's own 25,540-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

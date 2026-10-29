@@ -206,6 +206,16 @@ COMPILER="$REPO/.build/iyi"
 # stream - standard input, a pipe, a socket - links the name, and only
 # standard input makes the call; Linux's epoll refuses a regular file
 # and says the same by syscall.
+# `os_sync_wait_on_address` and `os_sync_wake_by_address_all` joined with
+# the mark helpers' park (GC_DESIGN.md, "darwin's helpers park"): a helper
+# with no work spins SPIN_BEFORE_PARK_NS and then sleeps on the
+# generation word, where it had spun on that word forever and an idle
+# program held every core. They are libSystem's public futex, in
+# `FLOOR_BASE_DARWIN` because every program's collector reaches them.
+# `__ulock_wait`, the private call they wrap, was the other futex; a
+# Mach semaphore was the other public park, four names with
+# `mach_task_self_` and a trap per sleeper woken. Linux's park is the
+# futex syscall and Windows' kernel32's semaphore, so neither list moved.
 ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawn_file_actions_addinherit_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill getpid _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist fstat64"
 # `std/system_roots` reads the roots darwin trusts, which are kept behind
 # Security.framework and nowhere else - no file holds them - and arrive in
@@ -222,6 +232,24 @@ ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN flock"
 # Linux makes as a system call and Windows as ws2_32's `shutdown`, already
 # imported for `close`. The fuzz exercise's scripted peers reach it.
 ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN shutdown"
+# `memset_pattern16` is LLVM's, not the library's: the loop-idiom pass
+# turns a loop storing one value that is not a byte repeated into a call
+# to libSystem's 16-byte pattern fill, the way it turns a zeroing loop into
+# a memset. The loop is std/compress's `Inflater#initialize` filling the
+# fixed distance code's thirty lengths with 5 (120 bytes, pattern i32 5),
+# which a --release program reaching it - `cores-release`, through
+# std/http's `BodyReader#read` - inlines and the pass rewrites. It is
+# library code, not the runtime that clears its own memory, so the call
+# stays. The fill dates from std/compress's DEFLATE (6c9f29160) and went
+# unseen because the std exercises build plain and no sample reached it
+# until `samples/iyi/cores.iyi` (release/0.20.0-prep):
+# `std_compress_exercise --release` names it on master 88bb3a0e5 too, and
+# its plain build does not. LLVM 20.1.2, CI's and tmac's, makes the call;
+# 21.1.8 cross-compiling the same exercise for arm64-apple-macosx15.0
+# stores the fill as vectors and names nothing, so an LLVM bump may report
+# it no longer needed. LLVM offers the call on Apple targets only, so
+# Linux and Windows keep the loop.
+ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN memset_pattern16"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.

@@ -87,6 +87,55 @@ CW="$WORK"
 SERVER_PID=""
 trap '[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
 
+# Run as CI runs it, on a Windows machine (Windows 11, 12 logical
+# processors; MUT_JOBS=2, SIBLING_MINUTES=50), the shard holding this gate
+# took 84 minutes: Windows shard 1 had run 81 to 95 minutes of its step
+# when GitHub marked its runner lost, in the seven jobs that lost it
+# (122184178930 to 122981462617, .github/workflows/iyi.yml), where the
+# siblings of a green one take 43 to 56. This gate was stopped at its 50,
+# waiting on one broken copy's server, which had served nothing and was
+# still listening. Its client had been refused, run when the wait for the
+# server's port gave up at 10 seconds; the TERM after it never reached the
+# server. A copy is a program linked a moment before, and its first start
+# is slow: 1.2 to 9.5 seconds to write its port on that machine idle, and
+# in the gate, two copies at a time, three servers were still being
+# created by MSYS 15 seconds after they were started. A signal sent to a
+# program MSYS is still starting is lost: 8 TERMs of 8 and 3 KILLs of 3,
+# each 0.3 seconds into a just-written server's start; the next one, once
+# it served, ended it every time.
+#
+# port_written <file> <pid>: until the server <pid> has written its port to
+# <file>, it has ended, or a minute has passed. Where the server is a
+# program just linked - a broken copy's, or the one built from artifacts.
+port_written() {
+  local _
+  for _ in $(seq 1 600); do
+    [ -s "$1" ] && return 0
+    kill -0 "$2" 2>/dev/null || return 1
+    sleep 0.1
+  done
+  return 1
+}
+# stop_server <pid>: the server <pid> ends and is reaped. A TERM, then a
+# KILL every second until it has gone, so a lost signal costs a second, not
+# the gate; one still there after a minute is named, and the gate fails
+# rather than waiting on it.
+stop_server() {
+  local pid="$1" i
+  kill "$pid" 2>/dev/null
+  for i in $(seq 1 600); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null
+      return 0
+    fi
+    [ $((i % 10)) -eq 0 ] && kill -9 "$pid" 2>/dev/null
+    sleep 0.1
+  done
+  echo "  FAIL: a server, pid $pid, outlived a minute of TERM and KILL"
+  : >"$WORK/outlived"
+  return 1
+}
+
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
@@ -265,8 +314,7 @@ else
       sleep 0.1
     done
     got="$("$WORK/tls-release" get "$port" "$PKI/ca.pem" "$host" "$alpn" ${identity[@]+"${identity[@]}"} 2>&1)"
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
     if printf '%s' "$got" | grep -qF -e "$want"; then
       interop=$((interop + 1))
       echo "  $label: $got"
@@ -301,8 +349,7 @@ else
     done
     "$1" get "$port" "$PKI/ca.pem" example.com >/dev/null 2>&1
     await_alert "$CW/s_server-alert.log"
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
     if grep -q "SSL alert number 42" "$CW/s_server-alert.log"; then
       echo "  the std/tls client's refusal, as OpenSSL read it: alert bad_certificate (42)"
       return 0
@@ -372,8 +419,7 @@ else
       done
       got="$("$bin" get "$port" "$PKI/ca.pem" "$host" 2>&1)"
       sleep 0.2
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      stop_server "$pid"
       if ! printf '%s' "$got" | grep -qF "HTTP/1.0 200 ok"; then
         echo "  FAIL server_name for \"$host\": $got"
         failed=1
@@ -416,8 +462,7 @@ else
         sleep 0.1
       done
       got="$("$1" resume "$port" "$PKI/ca.pem" localhost - 3 2>&1)"
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      stop_server "$pid"
       if printf '%s\n' "$got" | sed -n 1p | grep -q 'resumed=no .*peer=CN=localhost said=New, TLSv1.3' &&
          [ "$(printf '%s\n' "$got" | grep -c 'resumed=yes .*peer=CN=localhost said=Reused, TLSv1.3')" = 2 ]; then
         echo "  resumed by OpenSSL's tickets, $label: $(printf '%s\n' "$got" | sed -n 2p)"
@@ -499,8 +544,7 @@ else
       sleep 0.1
     done
     got="$("$1" get "$port" "$PKI/ca.pem" localhost 2>&1)"
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
     if printf '%s' "$got" | grep -qF "HTTP/1.0 200 ok" && printf '%s' "$got" | grep -qF "group=X25519MLKEM768"; then
       echo "  X25519MLKEM768 alone: $got"
       return 0
@@ -606,11 +650,9 @@ else
         proxy=$!
         for _ in $(seq 1 50); do [ -s "$CW/proxyport" ] && break; sleep 0.1; done
         got="$(TLS_MIN_VERSION=1.2 "$bin" get "$(cat "$CW/proxyport")" ca.pem localhost 2>&1)"
-        kill "$proxy" 2>/dev/null
-        wait "$proxy" 2>/dev/null
+        stop_server "$proxy"
       fi
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      stop_server "$pid"
       if printf '%s' "$got" | grep -qF -e "$want"; then
         echo "  $label: $got"
       else
@@ -697,8 +739,7 @@ else
       wait "$client"
       exec 7>&-
       sleep 0.3
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      stop_server "$pid"
       if grep -q 'HelloRequest' "$CW/s12-reneg.log" && grep -q 'warning no_renegotiation' "$CW/s12-reneg.log"; then
         echo "  a HelloRequest answered: OpenSSL read \"warning no_renegotiation\"; the client: $(head -1 "$CW/reneg.out")"
       else
@@ -800,8 +841,7 @@ PY
     pid=$!
     wait_port "$port"
     TLS_MIN_VERSION=1.2 "$WORK/$name/tlsx" get "$port" "$PKI/ca.pem" localhost 2>&1
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
   }
   got="$(downgraded downgrade)"
   if printf '%s' "$got" | grep -qF "carrying RFC 8446's downgrade sentinel, where TLS 1.3 was offered: a downgrade (illegal_parameter)"; then
@@ -1359,8 +1399,7 @@ let got = ""; s.on("data", d => got += d); s.on("end", () => console.log(s.alpnP
 s.on("error", e => console.log("error", e.message));
 ' "$port" "$SRV/roots.pem"
     fi
-    kill "$SERVE_PID" 2>/dev/null
-    wait "$SERVE_PID" 2>/dev/null
+    stop_server "$SERVE_PID"
   }
   # Python's TLS client is these checks' oracle, and its first certificate
   # check on a runner is not the server's to time. On Windows CI the first
@@ -1520,8 +1559,7 @@ let got = ""; s.on("data", d => got += d); s.on("end", () => console.log(got));
 s.on("error", e => console.log("error", e.message));
 ' "$port" "$SRV/roots.pem" "$M/client.pem" "$M/client.key"
     fi
-    kill "$SERVE_PID" 2>/dev/null
-    wait "$SERVE_PID" 2>/dev/null
+    stop_server "$SERVE_PID"
   fi
   # The same server, not requiring one: a client without is let in, a
   # client with one is still checked.
@@ -1546,8 +1584,7 @@ s.on("error", e => console.log("error", e.message));
   fi
   served_check "the std/tls client presenting none, where none is required" "HTTP/1.0 200 ok" \
     "$WORK/tls-release" get "$port" "$SRV/roots.pem" localhost -
-  kill "$SERVE_PID" 2>/dev/null
-  wait "$SERVE_PID" 2>/dev/null
+  stop_server "$SERVE_PID"
   echo "  $served_ok answers from other clients as they should be"
 fi
 
@@ -1598,15 +1635,11 @@ server12_round() {
     [ -n "${2:-}" ] && : >"$CW/srv12/client-optional"
     TLS_MIN_VERSION=1.2 "$bin" serve "$CW/srv12" 1000 >"$CW/serve12.log" 2>&1 &
     pid=$!
-    for _ in $(seq 1 100); do
-      [ -s "$CW/srv12/port" ] && break
-      sleep 0.1
-    done
+    port_written "$CW/srv12/port" "$pid"
     port="$(cat "$CW/srv12/port" 2>/dev/null || echo 1)"
   }
   stop12() {
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
   }
   scripted12() {
     local label="$1"
@@ -1919,8 +1952,7 @@ stapling_round() {
       printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost -status -ign_eof 2>&1 |
         grep -q 'OCSP Response Status' || sent=no
     fi
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
     # A <want> of re:<pattern> is an extended regular expression: the group
     # agreed is whatever this OpenSSL has (X25519 in 3.0, the hybrid from
     # 3.5), and is not what these cases are about.
@@ -1948,7 +1980,7 @@ stapling_round() {
     rm -rf "$dir" && cp -R "$from" "$dir"
     TLS_MIN_VERSION=1.2 "$bin" serve "$dir" 1 >"$CW/serve-staple.log" 2>&1 &
     pid=$!
-    for _ in $(seq 1 100); do [ -s "$dir/port" ] && break; sleep 0.1; done
+    port_written "$dir/port" "$pid"
     port="$(cat "$dir/port" 2>/dev/null || echo 1)"
     if [ "$1" = iyi ]; then
       shift
@@ -1957,8 +1989,7 @@ stapling_round() {
     else
       out="$(printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost -CAfile "$O/ca.pem" -ign_eof "$@" 2>&1 | tr -d '\r')"
     fi
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
     # A <want> of re:<pattern> is an extended regular expression.
     local how=-F
     case "$want" in re:*) how=-E want="${want#re:}" ;; esac
@@ -2183,8 +2214,7 @@ for curve in [None] + [c for c in sys.argv[5].split(",") if c]:
     said.append(f"{statistics.median(took) * 1000:.2f} ms in " + (curve or default))
 print(f"  {sys.argv[3]}, {version}: " + ", ".join(said) + " (the median of 100 each)")
 PY
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      stop_server "$pid"
     done
   done
 else
@@ -2293,12 +2323,9 @@ if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench
     cp "$SRV/rsa2048/chain.pem" "$SRV/rsa2048/key.pem" "$WORK/r1/srv/"
     "$WORK/r1/from-artifact" serve "$WORK/r1/srv" 1 >"$WORK/r1/serve.log" 2>&1 &
     pid=$!
-    for _ in $(seq 1 100); do
-      [ -s "$WORK/r1/srv/port" ] && break
-      sleep 0.1
-    done
+    port_written "$WORK/r1/srv/port" "$pid"
     got="$("$WORK/r1/from-source" get "$(cat "$WORK/r1/srv/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" localhost 2>&1)"
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
     if printf '%s' "$got" | grep -qF "HTTP/1.0 200 ok"; then
       echo "  the server built from its artifacts signs with RSA for the client built from source: $got"
     else
@@ -2309,6 +2336,52 @@ if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench
 else
   echo "  FAIL: the artifacts did not build: $(grep -m1 -E 'Error|BUG' "$WORK/r1/build.log")"
   status=1
+fi
+
+echo
+echo "== a server whose TERM is lost is stopped all the same"
+# A server that ignores TERM stands in for one whose TERM was lost (above
+# stop_server): stop_server ends it, and the stop it replaced - a TERM,
+# then a wait - does not, so the check is seen to fail. Each is given 15
+# seconds, where stop_server needs its first KILL's one.
+stop_holds() { # stop_holds <stop>: <stop> ends a server that ignores TERM
+  local checker _
+  rm -f "$WORK/deaf.pid"
+  (
+    bash -c 'trap "" TERM; while :; do sleep 0.2; done' >/dev/null 2>&1 &
+    deaf=$!
+    echo "$deaf" >"$WORK/deaf.pid"
+    sleep 0.5
+    "$1" "$deaf" >/dev/null
+    ! kill -0 "$deaf" 2>/dev/null
+  ) &
+  checker=$!
+  for _ in $(seq 1 150); do
+    kill -0 "$checker" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$checker" 2>/dev/null; then
+    kill -9 "$checker" "$(cat "$WORK/deaf.pid" 2>/dev/null)" 2>/dev/null
+    wait "$checker" 2>/dev/null
+    return 1
+  fi
+  wait "$checker"
+}
+term_then_wait() {
+  kill "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+}
+if stop_holds stop_server; then
+  echo "  a server that ignores TERM is ended by the KILL after it"
+else
+  echo "  FAIL: stop_server left a server that ignores TERM running"
+  status=1
+fi
+if stop_holds term_then_wait; then
+  echo "  FAIL: the check holds a stop that waits on a TERM that was lost"
+  status=1
+else
+  echo "  the stop it replaced, a TERM and a wait, is caught waiting"
 fi
 
 echo
@@ -2458,18 +2531,14 @@ prove_copy() {
       [ "$mode" = server-mtls-optional ] && : >"$W/srv/client-optional"
       "$W/tlsx" serve "$W/srv" 1000 >"$W/serve.log" 2>&1 &
       pid=$!
-      for _ in $(seq 1 100); do
-        [ -s "$W/srv/port" ] && break
-        sleep 0.1
-      done
+      port_written "$W/srv/port" "$pid"
       if [ "$mode" = server-hybrid ]; then
         hybrid_served "$(cat "$W/srv/port" 2>/dev/null || echo 1)" ed25519 >"$W/mut.out" 2>&1
       else
         "$PY" "$REPO/bench/std_tls_client.py" "$(cat "$W/srv/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" ${flag[@]+"${flag[@]}"} >"$W/mut.out" 2>&1
       fi
       rc=$?
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      stop_server "$pid"
       ;;
   esac
   if [ "$rc" -eq 0 ]; then
@@ -3428,6 +3497,12 @@ prove_broken 'an ECHConfigList cut short taken' 'a malformed ECHConfigList' \
 prove_broken 'a ticket that came over ECH held for the public_name' 'a ticket that came over ECH is held for the inner name' \
   'lifetime * 1000_i64, age_add, @host, @port, under, @alpn_protocol,' 'lifetime * 1000_i64, age_add, (ech = @ech) ? ech.config.public_name : @host, @port, under, @alpn_protocol,'
 mutations_report
+# A server stop_server could not end was named where it was stopped, in a
+# broken copy's subshell as often as not; the gate fails for it here.
+if [ -e "$WORK/outlived" ]; then
+  echo "FAIL: a server outlived its stop (named above)"
+  status=1
+fi
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/tls exercise holds ($mutations breaks caught)"

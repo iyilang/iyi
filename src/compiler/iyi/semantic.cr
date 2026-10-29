@@ -69,6 +69,11 @@ class Iyi::Program
       end
     end
 
+    # iyi: every shared block is checked by now, so each piece of state
+    # they reach is warned about once, with how many blocks reach it
+    # (SPEC.md III.4.4).
+    @cleanup_transformer.try &.report_share_reach
+
     @progress_tracker.stage("Semantic (recursive struct check)") do
       Prof.span("recursive struct check") { RecursiveStructChecker.new(self).run }
     end

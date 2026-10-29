@@ -51,6 +51,7 @@
 #      constant that is not Share through a def it calls is warned about
 #      with the path, a failed build under `--error-on-warnings`; its
 #      copy with the constant marked `@[SafeReach]` builds clean under it.
+#      Two blocks reaching it are one warning, counting the other.
 #   7. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: a cross-thread wake that does not ring (a lost
 #      wakeup), a steal that leaves the task in its victim's queue (a task
@@ -297,6 +298,90 @@ for build in plain release; do
   grep -v 'every property held' "preemptedlib-$build.txt" | sed 's/^/  /'
 done
 
+# A short copy's checks, in the release IR of bench/parallel_preempt_lib.iyi's
+# `copy_bytes`, `Pointer#copy_from` as a function of its own. Its loop of
+# runs checks between runs; a copy of one run or less takes no such loop.
+# With the check at that loop's latch every copy read the word once,
+# however short: a join of 1,000,000 short strings, two copies a string,
+# read it three times a string, and cost 9.5 to 10.7% over the same
+# program with the library unchecked (Linux here, release, load 3 to 4.5).
+# So some path from the entry must reach a block that copies and go on to
+# a return through no check. And on darwin, where what a check reads
+# through is made by calling the word's accessor, that call must not be in
+# the entry block: there `String::Builder#<<` paid it at every append, and
+# the join cost 1.37x to 1.43x the unchecked one (an M2 Pro, load 3 to
+# 17; `PreemptChecks.entry_value`). A check is the block that calls
+# `__iyi_preempt` and the blocks that branch to it. Exit 1 at a function
+# that is not there, one with no check at all - a long copy must still
+# give its worker up - one whose every copy passes a check, and one whose
+# entry calls the accessor.
+copy_checks() { # IR file
+  awk '
+    function label(text) {
+      if (substr(text, 1, 1) == "\"") return "%" substr(text, 1, index(substr(text, 2), "\"") + 1)
+      return "%" substr(text, 1, index(text, ":") - 1)
+    }
+    /^define / {
+      line = $0
+      gsub(/\.3A\./, ":", line)
+      gsub(/\.3C\./, "<", line)
+      inside = (line ~ /ParallelPreemptLib::copy_bytes</)
+      if (inside) { found = 1; block = "%entry"; blocks[block] = 1 }
+      next
+    }
+    !inside { next }
+    /^}/ { inside = 0; next }
+    /^[^ \t]/ { block = label($0); blocks[block] = 1; next }
+    {
+      rest = $0
+      while (match(rest, /label %("[^"]*"|[-a-zA-Z$._0-9]+)/)) {
+        to = substr(rest, RSTART + 6, RLENGTH - 6)
+        edges[block, ++count[block]] = to
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
+    index($0, "call void @__iyi_preempt()") { slow[block] = 1; checks++ }
+    /^  store / { stores[block] = 1 }
+    /^  ret / { returns[block] = 1 }
+    block == "%entry" && (index($0, "@\"*IyiWorkers::preempt\"(") || index($0, "@.2A.IyiWorkers.3A..3A.preempt(")) { accessor = 1 }
+    END {
+      if (!found) { print "FAIL: copy checks: copy_bytes is not a function of the IR"; exit 1 }
+      if (checks == 0) { print "FAIL: copy checks: copy_bytes checks at no back-edge, so a long copy holds its worker"; exit 1 }
+      for (b in blocks) {
+        checking[b] = slow[b]
+        for (k = 1; k <= count[b]; k++) if (slow[edges[b, k]]) checking[b] = 1
+      }
+      # From the entry through no check, and back from a return through none.
+      queue[1] = "%entry"; reached["%entry"] = 1; n = 1
+      for (i = 1; i <= n; i++) {
+        b = queue[i]
+        for (k = 1; k <= count[b]; k++) {
+          to = edges[b, k]
+          if (!(to in reached) && !checking[to]) { reached[to] = 1; queue[++n] = to }
+        }
+      }
+      do {
+        grew = 0
+        for (b in blocks) {
+          if (checking[b] || (b in leaves)) continue
+          if (returns[b]) { leaves[b] = 1; grew = 1; continue }
+          for (k = 1; k <= count[b]; k++) if (edges[b, k] in leaves) { leaves[b] = 1; grew = 1; break }
+        }
+      } while (grew)
+      free = 0
+      for (b in stores) if ((b in reached) && (b in leaves)) free++
+      print "copy_bytes: " checks " check" (checks == 1 ? "" : "s") " between runs, " free " copying block" (free == 1 ? "" : "s") " a short copy reaches and returns from past none"
+      if (free == 0) { print "FAIL: copy checks: every copy in copy_bytes passes a check before it returns, however short"; exit 1 }
+      if (accessor) { print "FAIL: copy checks: the entry block of copy_bytes calls the thread-local accessor *IyiWorkers::preempt, which every copy then pays"; exit 1 }
+    }
+  ' "$1"
+}
+step "a short copy passes no check, release build"
+if ! copy_checks preemptlib-release.ll > copies.txt 2>&1; then
+  echo "a short copy checks:"; cat copies.txt; exit 1
+fi
+sed 's/^/  /' copies.txt
+
 # The runtime's own functions, and every function they reach by a direct
 # call, hold no check (bench/preempt_audit.py), read from the release
 # build's IR. Python reads it, where there is a Python.
@@ -357,7 +442,7 @@ case "$(uname -s)" in
     ;;
   Darwin)
     [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
     thread='_close _pipe _pthread_kill _read'
     pool='_environ'
     allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
@@ -501,7 +586,11 @@ end'
 # about at the block, with the path, by a build and by `check`, and
 # `--error-on-warnings` makes the warning a failure. The broken copy is
 # the clean one with the mark taken off, and the check that passes the
-# marked copy catches it.
+# marked copy catches it. Two blocks reach `DATABASE`, and that is one
+# warning at the first, counting the second: iyiturkiye's routes gave
+# 1251 warnings about 37 constants, each once per route that reached
+# it, on Linux; gathered they are 37. Its broken copy
+# has the second block left out, and says nothing of another block.
 step "a parallel block reaching a constant through a call is warned about"
 cat > reaches.iyi <<'IYI'
 module reaches
@@ -526,6 +615,7 @@ end
 
 group do |g|
   g.spawn_parallel { ask(1_i64) }
+  g.spawn_parallel { ask(2_i64) }
 end
 IYI
 awk '/^@\[SafeReach/ { next } /^module reaches$/ { print "module reaches_bare"; next } { print }' reaches.iyi > reaches_bare.iyi
@@ -539,7 +629,10 @@ echo "  checks under --error-on-warnings: DATABASE marked @[SafeReach]"
 if ! "$IYI" build reaches_bare.iyi -o reaches_bare > build-reaches-bare.log 2>&1; then
   echo "a warning stopped a build without --error-on-warnings:"; cat build-reaches-bare.log; exit 1
 fi
-want='the block spawn_parallel runs on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`'
+want='the block spawn_parallel runs on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`, as does 1 other parallel block: '
+if [ "$(grep -c 'reaches `DATABASE' build-reaches-bare.log)" != 1 ]; then
+  echo "two blocks reaching DATABASE were not one warning:"; cat build-reaches-bare.log; exit 1
+fi
 if ! grep -qF "$want" build-reaches-bare.log; then
   echo "the block reaching DATABASE through ask was not warned about:"; cat build-reaches-bare.log; exit 1
 fi
@@ -550,7 +643,19 @@ if ! grep -qF "$want" check-reaches-strict.log; then
   echo "check failed the program, but not for the warning:"; cat check-reaches-strict.log; exit 1
 fi
 echo "  broken copy, the mark taken off: warned by the build, and failed by check --error-on-warnings"
-echo "  warned: $(grep -m1 -F "$want" build-reaches-bare.log | sed 's/^Warning: //' | cut -c1-150)"
+echo "  warned once for two blocks: $(grep -m1 -F "$want" build-reaches-bare.log | sed 's/^Warning: //' | cut -c1-190)"
+awk '/ask\(2_i64\)/ { next } /^module reaches_bare$/ { print "module reaches_lone"; next } { print }' reaches_bare.iyi > reaches_lone.iyi
+if cmp -s reaches_bare.iyi reaches_lone.iyi; then
+  echo "the awk for reaches_lone found nothing to change"; exit 1
+fi
+if ! "$IYI" check reaches_lone.iyi > check-reaches-lone.log 2>&1; then
+  echo "check failed a program it only warns about:"; cat check-reaches-lone.log; exit 1
+fi
+if grep -qF "$want" check-reaches-lone.log || grep -qF 'other parallel block' check-reaches-lone.log \
+  || ! grep -qF 'through `ask` → `DATABASE.query_one`: ' check-reaches-lone.log; then
+  echo "one block reaching DATABASE was not warned about alone:"; cat check-reaches-lone.log; exit 1
+fi
+echo "  broken copy, the second block left out: warned with no other block counted"
 
 # ── 7. Failure proofs: broken copies of the runtime ──────────────────────
 # Each a copy of src/iyi with one file changed - concurrency.iyi unless
@@ -777,6 +882,38 @@ broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.
 for proof in sort copy rehash join; do
   caught libruntime "$proof: a short task waited" "$proof" --workers=1
 done
+
+# The two halves of `copy_checks`, broken: `Pointer#copy_from` with no way
+# around its loop of runs, as it was, and darwin's anchor in the entry
+# block (`-Dpreempt_anchor_entry`), which only darwin's makes by a call.
+step "failure proof: a copy whose every run goes through the loop of runs checks however short it is"
+mkdir -p copyruns/iyi
+cp "$REPO"/src/iyi/*.iyi copyruns/iyi/
+awk '/^    return copy_run\(source, count\) if count <= 1048576$/ { next } { print }' \
+  "$REPO/src/iyi/string.iyi" > copyruns/iyi/string.iyi
+cmp -s copyruns/iyi/string.iyi "$REPO/src/iyi/string.iyi" && { echo "the awk for copyruns found nothing to change"; exit 1; }
+if ! IYI_PATH="$WORK/copyruns${PSEP}$REPO/src" "$IYI" build --release --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o copyruns-run > build-copyruns.log 2>&1; then
+  echo "the copyruns copy failed to build:"; tail -20 build-copyruns.log; exit 1
+fi
+if copy_checks copyruns-run.ll > copyruns.txt 2>&1; then
+  echo "the broken copy copyruns was not caught by the short-copy checks:"; cat copyruns.txt; exit 1
+fi
+grep -q '^FAIL: copy checks: every copy' copyruns.txt || { echo "the short-copy checks failed copyruns some other way:"; cat copyruns.txt; exit 1; }
+echo "  exits 1 at \"$(grep -m1 '^FAIL: ' copyruns.txt | sed 's/^FAIL: //')\""
+
+step "failure proof: darwin's anchor in the entry block calls the accessor at every copy"
+if [ "$(uname -s)" != Darwin ]; then
+  echo "  the anchor here is a constant or a load and calls nothing: the copy builds the same code, so there is nothing to fail"
+else
+  if ! "$IYI" build --release --emit llvm-ir -Dpreempt_anchor_entry "$REPO/bench/parallel_preempt_lib.iyi" -o anchorentry-run > build-anchorentry.log 2>&1; then
+    echo "the anchor-at-entry build failed:"; tail -20 build-anchorentry.log; exit 1
+  fi
+  if copy_checks anchorentry-run.ll > anchorentry.txt 2>&1; then
+    echo "the broken copy anchorentry was not caught by the short-copy checks:"; cat anchorentry.txt; exit 1
+  fi
+  grep -q '^FAIL: copy checks: the entry block' anchorentry.txt || { echo "the short-copy checks failed anchorentry some other way:"; cat anchorentry.txt; exit 1; }
+  echo "  exits 1 at \"$(grep -m1 '^FAIL: ' anchorentry.txt | sed 's/^FAIL: //')\""
+fi
 
 step "failure proof: a recursion marked @[NoPreempt] holds its worker for its whole computation"
 if ! "$IYI" build -Dpreempt_off "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then

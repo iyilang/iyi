@@ -63,10 +63,10 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 24,996 lines, of which 4,649 are the library held to the 4,650 ceiling (6,665 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 131,248 lines, none of it written in iyi |
+| iyi's own prelude | 25,065 lines, of which 4,650 are the library held to the 4,650 ceiling (6,666 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 131,526 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
-| samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
+| samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
 `python3 bench/incremental.py` and `python3 bench/build_speed.py` print the
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 24,996 lines
+> "No standard library worth the name" is still true of iyi's own 25,065 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 24,996 lines,
-primitives included, of which the library is 4,649.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 25,065 lines,
+primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,11 +299,11 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,649 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,650 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,016 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,665 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,666 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 131,248 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 24,996-line own prelude + 125,353 in std |
-| Specs | 21,146 lines | 15,689 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 131,526 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 25,065-line own prelude + 125,572 in std |
+| Specs | 21,146 lines | 15,806 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2804,7 +2804,19 @@ of a server config that nothing else holds and nothing writes, its
 ticket keys and replay guard `Share` by their fields (a `Mutex` each).
 What neither can close is the edge `List` closes by never lending its
 array: an identity's chain is lent, and a program that writes into it
-writes what other threads read. Inside a `@[Share]` def its block, a
+writes what other threads read. Two more of std's types are `Share` by
+their fields, with no trust, because a parallel route logs and matches:
+std/log's `Logger`, whose level is an `Atomic`, whose backend and
+children are each behind a `Mutex`, and whose backends write a line at a
+time behind locks of their own - so a backend or formatter of the
+program's own must be `Share` too, and one that is not is refused where
+std/log hands it to a lock - and std/regex's `Regex`, whose compiled
+machine is `List`s and strings, read and never written by a match, which
+steps scratch of its own. `bench/std_log_exercise.sh` holds the first
+(twelve workers' lines through one constant logger each whole, and the
+logger checking under `--error-on-warnings`), `bench/std_regex_exercise.sh`
+the second (twelve workers matching one constant answer as one thread),
+each with a copy that fails. Inside a `@[Share]` def its block, a
 `Proc`, is the one non-`Share` value a parallel block may capture or be
 given as `&block`, while the def leaves it as given; any other proc
 passed as a block to a boundary - `g.spawn_parallel(&work)`,
@@ -2865,17 +2877,29 @@ mixed rows between requests at 12 workers. The block of `IyiThread.start`,
 of `spawn_parallel` and of a `@[Share]` def is walked through the typed
 call graph - every def it calls, every target of a virtual call, a
 recursive def once - and every constant and class variable met whose type
-is not `Share` is a warning at the block, once per block, by the
-shortest path: ``the block spawn_parallel runs on another thread reaches
+is not `Share` is one warning, at the first block that reaches it, by that
+block's shortest path, counting the other blocks that reach it:
+``the block spawn_parallel runs on another thread reaches
 `DATABASE : Main::Database` (not Share) through `ask` →
-`DATABASE.query_one`: Main::Database's field @total is assigned in
-`query_one` ``. A warning and not a refusal, as the issue asked: whether
+`DATABASE.query_one`, as does 1 other parallel block: Main::Database's
+field @total is assigned in `query_one` ``. Warned once per block, as
+first built, iyiturkiye (8c56a83, on iyi-web 4684125, iyi-db v0.3.0 and
+iyi-pg v0.3.1) gave 1251 warnings from 91 shared blocks (`iyi check`,
+Linux) about 37 constants, 88 each for iyi-db's `LOG` and the app's own
+pool; gathered, they are 37. A constant or class variable declared in a
+package - a file in the checkout of one of the program's requirements -
+says whose it is and where, since that is where it changes: ``... `LOG`
+is the package github.com/iyilang/db's at db/core.iyi:41, so the change
+goes there``. Of the 1251, 1057 were iyi-pg's, iyi-db's and iyi-web's,
+`TLS_VERSIONS` and `DECODERS` among them, which read as std's. A warning
+and not a refusal, as the issue asked: whether
 the call is made, and whether the state is set once and only read after,
 is not something the walk can tell. The walk covers the program's
 modules and the packages it depends on - an application's pool is the
 application's constant, read through its own functions, and a
 dependency's module state is as far out of the program's sight - and
-never std or the prelude, nor a constant std declares: std's state is
+never std or the prelude, nor a constant std declares, read off where
+the constant is declared: std's state is
 std's to keep, and its boundaries are checked where std writes them. It
 stops where the capture check does: a constant typed `Mutex`, `Atomic`,
 `List` or another trusted `@[Share]` type is `Share`, and is not warned
@@ -2889,19 +2913,26 @@ as the claim: `@[SafeReach("set once at startup, then only read")]` on a
 constant or a class variable quiets the warning for it alone, and never
 the refusal of a block that names it. The warning is a build's and
 `iyi check`'s, and `--error-on-warnings` makes it a failure in either.
-Held by `spec/compiler/semantic/iyi_spec.cr` (eleven shapes: the issue's
+Held by `spec/compiler/semantic/iyi_spec.cr` (fifteen shapes: the issue's
 program with its exact text, a `@[Share]` def's block, a direct naming
 still refused under the mark, `Share` constants silent, the mark on a
 constant and on a class variable, the mark without a reason refused, a
 path through two defs and a recursive pair, a virtual call, a class
-variable, std's state silent) and by `bench/parallel_exercise.sh`'s
-`Share` step, which builds the issue's shape and fails it under
+variable, std's state silent, three blocks reaching one constant as one
+warning counting two, one other counted in the singular,
+`--error-on-warnings` failing on the gathered warning, a package's
+constant named with its package and file) and by
+`bench/parallel_exercise.sh`'s `Share` step, which builds the issue's
+shape with two blocks, warns once counting the other and fails it under
 `--error-on-warnings`, and passes its copy marked `@[SafeReach]`.
 What each def names and calls is read once per compilation and kept, so
 many blocks reaching the same functions read them once. Timed inside the
 compiler on iyi-web's `examples/security.iyi`, whose 15 shared blocks walk
 the framework's own defs, the check took 14.5 to 16.7 ms a compile, the
 walk itself 3.4 to 4.2 ms, of a main semantic stage of about 1.4 s.
+Gathering costs nothing measurable: `iyi check` of iyiturkiye took 4.12
+to 5.78 s warning 1251 times and 3.94 to 4.22 s warning 37 times, three
+runs each, interleaved (Linux, a 12-vCPU QEMU guest with 11 GB).
 In this tree the walk found three benches whose threads reach a class
 variable one at a time, each joined before the next starts or before the
 main thread reads it, or each writing its own reserved slot; each is
@@ -4033,6 +4064,9 @@ hash, std's and already checked, 0 to 8. Now:
   (`Pointer#copy_run`) is in the runtime's file, because a check in it put
   a load and a branch on every byte of a short string's copy: a join of
   1,000,000 strings took 6.6 ms against 5.1 with it, 5.5 to 6.6 without.
+  A copy of one run or less calls `copy_run` without the loop of runs,
+  whose check sits at its latch and so ran once even for a copy of three
+  bytes (below).
 - *Recursion.* Before optimisation the compiler finds call cycles among
   the functions that check (Tarjan over direct calls, across modules) and
   puts a call to `__iyi_preempt_entry` at each one's entry, which LLVM is
@@ -4100,7 +4134,7 @@ compiler and prelude before (load 4 to 5): a sort of 1,000,000 `Int64`s
 to 23.6 and 22.6 to 23.5; a join of 1,000,000 strings 5.0 to 5.4 and 5.5
 to 6.6; 64 copies of 16 MB, 1,000,000 appends of 7 bytes and a JSON parse
 of 2.4 MB within the noise; `fib(32)` against its `@[NoPreempt]` twin
-5.80 to 6.27 against 5.80 to 5.85. The sort's and the join's 4 to 9% are
+5.80 to 6.27 against 5.80 to 5.85. The sort's and the join's 4 to 9% were
 over the 2 to 3% aimed at. A turn count was tried in their place: a loop
 with no loop inside it, at most 512 instructions and no call looked at the
 word every 256 turns (every 16 with calls), the count an add and a test in
@@ -4108,13 +4142,54 @@ a register. Measured the same way (load 5): the sort 57.2 to 59.0 ms
 before and 61.1 to 63.9 with the count, the join 5.07 to 5.31 and 6.11 to
 6.45, the `tight` sums 1.07x to 1.13x their twins against 1.06x to 1.12x
 with a look at every turn. It bought nothing, so every turn looks, the
-cheaper of the two. Those runs also had a `copy_from` that skipped its run
-loop for a short copy, undone with the count.
+cheaper of the two.
+
+*Where the join's time went.* A check sits at the latch, before the
+branch that leaves the loop or turns, so a loop that runs once reads the
+word once. `String::Builder#<<` copies through `copy_from`, whose loop of
+runs a short string takes once: the disassembly of the release build
+showed `cmpq $0, %fs:(%r12)` on the way out of every append, so a join
+read the word three times a string - twice in its appends and once in its
+own loop. Measured against the same program with the prelude's library
+unchecked, which takes the sort and join out of what is compared (Linux,
+a 12-vCPU VM, release, best of seven inside a parallel task, 21
+interleaved rounds, load 0.5 to 0.8): the sort 1.011x to 1.016x and the
+join 1.095x to 1.097x. Now `copy_from` calls `copy_run` directly for a
+copy of one run or less: the sort 0.993x to 0.995x and the join 0.974x to
+0.978x, the join 5.43 ms against 6.83 before. Two other placements were
+measured and dropped. A check on the edge back to the header alone, found
+by a dominator tree after optimisation, read nothing on the way out, but
+its block between latch and header cost the sort 1.06x to 1.08x and the
+join 1.09x to 1.10x (load 5 to 6).
+
+*darwin's anchor.* darwin arm64's check reads through a pair the
+accessor's call makes (above), and that call was in the entry block of
+every function with a checked loop, so every append paid it, run or not.
+On an M2 Pro (macOS 26.6, the user's machine, best of seven, eleven
+interleaved rounds, load 3 to 18) the join took 1.37x to 1.43x the
+unchecked one and the sort 1.10x to 1.12x. The pair is now made where the
+outermost loop around its checks is entered - the one block into the
+loop's header from outside, or the header's immediate dominator
+(`PreemptChecks::Loops`, natural loops from a dominator tree): the join
+1.08x to 1.18x over three runs and the sort 1.08x to 1.14x. Linux's and
+Windows' anchors, a constant and a load, stay in the entry block; the
+Linux object is byte-identical. What darwin has left is the read: a probe
+whose check loaded a plain global, preempting nothing, cost the sort
+1.05x to 1.07x and the join 1.07x to 1.12x, and the same build with its
+loops marked but no check put in 0.98x to 1.01x. Not under 3% there.
+
 `bench/parallel_exercise.sh` holds each
 step plain and release, the audit, and three broken copies by name: the
 library written into prelude.iyi (sort, copy, growth and join each wait
 316 to 1,022 ms), a `@[NoPreempt]` recursion, and the scheduler's file
-renamed, which the audit names.
+renamed, which the audit names. Its `copy_checks` reads the release IR of
+`copy_bytes` (bench/parallel_preempt_lib.iyi, `copy_from` as a function
+of its own): some path from the entry must copy and return through no
+check, the loop of runs must still check, and on darwin the entry block
+must not call the accessor. A `copy_from` without the way around its loop
+fails it at "every copy in copy_bytes passes a check", and on darwin a
+build with `-Dpreempt_anchor_entry`, the anchor where it was, at "the
+entry block of copy_bytes calls the thread-local accessor".
 
 **Not built, and said so.** A copy inside the allocator - a `realloc` of a
 large buffer, which `String::Builder` grows by - is not preempted, nor is
@@ -6256,6 +6331,17 @@ the arena maps and unmaps through the platform's own VM interface, so
 real collection now costs not one library. Crystal's own `hello`
 additionally pulls `libiconv`, which iyi's `String` has no reason to
 want, and the compiler dropped that one too (`-Dwithout_iconv`).
+
+Two more of libSystem's names set darwin's floor in versions. The collector's mark
+helpers sleep on `os_sync_wait_on_address` and are woken by
+`os_sync_wake_by_address_all`, libSystem's public futex, which is macOS
+14.4's: **a darwin arm64 program iyi builds needs macOS 14.4 or later.** A
+program built on macOS 14 says it runs on 14.0, the host's major version, and
+dyld refuses it on 14.0 to 14.3 for the missing symbol. A weak import with the
+old spin as its fallback would lift that, and iyi has no weak linkage to
+declare it with; the private `__ulock_wait` beneath the futex has no 14.4, and
+every program would carry a private name (GC_DESIGN.md, "darwin's helpers
+park").
 
 So **an own-prelude program's dependency is the platform libc and nothing
 else**, and what that is worth depends on which artifact is being read, so this
@@ -11119,7 +11205,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 24,996-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 25,065-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

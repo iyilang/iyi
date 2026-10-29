@@ -8,7 +8,10 @@
 **A language built for Developer & Agentic Experience, Portability, Performance,
 and Efficiency.** (*iyi* is Turkish for "good".)
 
-Install the latest release into `~/.local` (Linux x86-64, macOS arm64):
+Install the latest release into `~/.local` (Linux x86-64, macOS arm64;
+a program built for macOS runs on macOS 14.4 or later, whose public
+futex its collector's helpers sleep on - GC_DESIGN.md, "darwin's helpers
+park"):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | sh
@@ -368,8 +371,8 @@ including the one pause the design does not bound.
 **Efficiency — mostly subtraction.** `puts "hello"` is a 36 KB binary that
 starts in 1.6 ms; the same program compiled with Crystal's standard library is
 1,553 KB and 3.2 ms. A program links what it uses, and
-iyi's own library is 24,996 lines rather than 8,161.
-The whole library is 1,045 KB on disk beside the binary.
+iyi's own library is 25,065 lines rather than 8,161.
+The whole library is 1,049 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
 and move with the platform; `python3 bench/machine_probe.py` prints your
@@ -391,7 +394,7 @@ tar -xzf iyi-0.19.1-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,045 KB prelude, the 4,924 KB of `src/std` that `import std/...`
+iyi's own 1,049 KB prelude, the 4,934 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`
@@ -596,7 +599,7 @@ $ curl localhost:3000/json
 traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
 of them work in a program that requires a shard, and R-2 still refuses an
 export that does not write its types. What changes is what the program *has*:
-8,161 lines of Crystal's standard library instead of 24,996 lines of iyi's own
+8,161 lines of Crystal's standard library instead of 25,065 lines of iyi's own
 prelude.
 
 **One name is unreachable, and it is a class of names.** `!` in iyi propagates
@@ -784,11 +787,12 @@ Each one names the rule and the line to write.
 
 ## The samples
 
-Twenty-seven programs in [`samples/iyi`](samples/iyi). Nineteen document a
+Twenty-eight programs in [`samples/iyi`](samples/iyi). Twenty document a
 part of the design: `hello` (traits and `impl`), `modules` (`import` across
 files), `generics`, `errors`, `collections`, `immutable` (a shareable
 collection), `init_order`, `webapp`, `workers` (a pool and a typed pair of
-tasks), `derive`, `files`, `formatting`, `format` (format strings), `enums`,
+tasks), `cores` (`spawn_parallel`, a server on every core, `@[SafeReach]`),
+`derive`, `files`, `formatting`, `format` (format strings), `enums`,
 `io` (standard input a line at a time), `socket` (TCP on loopback), and
 `std_iterator`, `std_text` and `std_time`. `calc` is a language. The other
 seven — `basics`, `inventory`, `config`, `grid`, `shapes`, `sessions`,
@@ -883,7 +887,7 @@ not the library.
 
 ## What is not here
 
-- **iyi's own library is 24,996 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 25,065 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`.** `gets`, `read_all`, `write` and `flush`
   on the streams; `File.read`, `File.write`, `File.exists?`, `File.delete`
   and `File.open(path, mode)`. Its collections carry a method because a
@@ -915,9 +919,9 @@ not the library.
 | | |
 |---|---|
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
-| [`samples/iyi`](samples/iyi) | twenty-seven programs: nineteen documenting a part of it, seven being a first hour, and `calc`, a language |
+| [`samples/iyi`](samples/iyi) | twenty-eight programs: twenty documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 24,996 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 25,065 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |

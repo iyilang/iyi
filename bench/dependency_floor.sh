@@ -232,6 +232,24 @@ ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN flock"
 # Linux makes as a system call and Windows as ws2_32's `shutdown`, already
 # imported for `close`. The fuzz exercise's scripted peers reach it.
 ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN shutdown"
+# `memset_pattern16` is LLVM's, not the library's: the loop-idiom pass
+# turns a loop storing one value that is not a byte repeated into a call
+# to libSystem's 16-byte pattern fill, the way it turns a zeroing loop into
+# a memset. The loop is std/compress's `Inflater#initialize` filling the
+# fixed distance code's thirty lengths with 5 (120 bytes, pattern i32 5),
+# which a --release program reaching it - `cores-release`, through
+# std/http's `BodyReader#read` - inlines and the pass rewrites. It is
+# library code, not the runtime that clears its own memory, so the call
+# stays. The fill dates from std/compress's DEFLATE (6c9f29160) and went
+# unseen because the std exercises build plain and no sample reached it
+# until `samples/iyi/cores.iyi` (release/0.20.0-prep):
+# `std_compress_exercise --release` names it on master 88bb3a0e5 too, and
+# its plain build does not. LLVM 20.1.2, CI's and tmac's, makes the call;
+# 21.1.8 cross-compiling the same exercise for arm64-apple-macosx15.0
+# stores the fill as vectors and names nothing, so an LLVM bump may report
+# it no longer needed. LLVM offers the call on Apple targets only, so
+# Linux and Windows keep the loop.
+ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN memset_pattern16"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.

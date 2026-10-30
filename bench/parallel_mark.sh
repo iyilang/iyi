@@ -134,8 +134,8 @@ prove_fails "a stack that will not grow dies by name" \
 # hints for every nanosecond the clock allows, which is past the check's
 # five times wherever a hint costs more than 0.05 ns. It was 200,000
 # hints, 4.4 ms on a twelve-core Linux machine and 3.6 on a four-core
-# Windows runner, and 113 us on CI's three-core M1, a hint there being
-# 0.56 ns: inside the bound, and the proof did not fire.
+# Windows runner, and 113 us on the three-core M1 of CI's macos-14, a
+# hint there being 0.56 ns: inside the bound, and the proof did not fire.
 prove_fails "a spin before the park that ignores the clock is refused" \
   '{ sub(/spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "spins >= 100_u64 * SPIN_BEFORE_PARK_NS"); print }' "park:" 1
 

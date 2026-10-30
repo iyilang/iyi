@@ -6332,7 +6332,7 @@ require "./file"
         # 0.075 against 0.078.
         #
         # The futex is public from macOS 14.4, and a program built on
-        # macOS 14 says it runs on 14.0 (`minos` 14.0 on CI's 14.8), so it
+        # macOS 14 says it runs on 14.0 (`minos` 14.0 on macos-14, 14.8), so it
         # now needs 14.4 there. `__ulock_wait`, the private call beneath
         # it (a parked helper's frame under `sample` is `__ulock_wait2`),
         # is the same futex without the 14.4, but a program built here

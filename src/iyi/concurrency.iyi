@@ -2417,6 +2417,27 @@ class IyiScheduler
   # (`IyiFiber#on_cpu`), which is the length of the other worker's switch.
   # The fiber's home is this worker from here, the thread its next sleep
   # or io wait parks in.
+  #
+  # A worker's switch lowers its preemption word: the monitor raises the
+  # worker's word, not a task's, and the task switched in begins its own
+  # quantum, as the count moved here tells the monitor. Left up, a word
+  # raised after a task's last back-edge - a slow request's task that
+  # answered and parked in the gap between a look and the next switch -
+  # gave the next task up at its first back-edge, into the queue of
+  # preempted tasks every worker looks at last. The server shape on 2
+  # workers traced it on Windows 11, 12 logical processors (the user's
+  # machine), held to 4 with one of them busy: the two slowest of 30 runs,
+  # 45 and 44 ms, were each a fast request whose task was given up 2 to 3
+  # us after its switch, on a word raised 22 to 33 us before it, and then
+  # waited 28.6 and 38.6 ms in that queue, where the slow requests' tasks
+  # waited up to 47 and 51 ms. The step failed at 83 ms on CI's slower
+  # runner (job 124117601245), past its 80 ms bound. Traced again, 20 runs
+  # each and interleaved, a fast task was given up so in 2 runs with the
+  # word left up, then waiting 13.1 and 22.3 ms, and in none with it
+  # lowered. Untraced, 20 runs each and interleaved, the slowest fast
+  # request took 24 to 43 ms plain and 22 to 38 release with it left up,
+  # 23 to 29 and 22 to 31 lowered. The lowering is a load, and a store
+  # only when the word is up.
   def self.switch_to(fiber : IyiFiber) : Nil
     st = state
     previous = current
@@ -2440,6 +2461,8 @@ class IyiScheduler
         fiber.home = st
         st.left = previous
         st.switches = st.switches &+ 1_u64
+        raised = Pointer(Atomic(UInt64)).new(st.preempt_word)
+        raised.value.set(0_u64) if raised.value.get != 0_u64
       end
     {% end %}
     st.current = fiber

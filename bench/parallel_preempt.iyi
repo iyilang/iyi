@@ -30,6 +30,12 @@
 #           computes a request that runs until the connection's own request
 #           is answered, or a second has passed; the answer comes within
 #           80 ms. A slow half that does not poll answers it at the second.
+#   fresh   a task switched in after one that held its worker 30 ms with
+#           no check in its loop, on a pool of one, runs its first
+#           millisecond without giving the worker up, beside a task queued
+#           behind it: the word the monitor raised for the one before is
+#           not its. With the word left up it gave the worker up at its
+#           first back-edge.
 #   period  the monitor's period, its looks over a task computing half a
 #           second on a pool of one, held to 4 to 10.5 ms; and the quantum,
 #           two such tasks taking turns on the one worker, held to 20 ms. A
@@ -515,6 +521,56 @@ import std/socket::{IyiSocket, SocketError}
     say "poller: a fast request whose connection waited in the poller of the one worker, busy computing, was answered in #{took_us} us"
   end
 
+  # ── fresh ────────────────────────────────────────────────────────────
+  # A task switched in begins a quantum of its own. On a pool of one, a
+  # task holds the worker FRESH_HOLD_MS with no check in its loop, across
+  # the monitor's looks, so the worker's word is raised, and ends; the
+  # task queued behind it computes a millisecond in FRESH_SLICES slices,
+  # with a third queued behind it for a give-up to hand the worker to.
+  # Raised for that second task, the word comes only once the monitor has
+  # seen the switch count stand from one look to the next, never under
+  # PERIOD_FLOOR_US into its run; a give-up sooner is on the word left up
+  # for the task before. In the server shape that word gave a fast
+  # request's task up behind every preempted slow one
+  # (`IyiScheduler.switch_to`). FRESH_ROUNDS rounds, each failing by
+  # itself.
+  FRESH_ROUNDS  = 10
+  FRESH_HOLD_MS = 30_i64
+  FRESH_SLICES  = 20
+
+  def fresh(per_ms : Int64) : Nil
+    fail("fresh: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    preempts = IyiWorkers.preempts
+    FRESH_ROUNDS.times do |round|
+      gave_us = Atomic(Int64).new(-1_i64)
+      group do |g|
+        g.spawn_parallel do
+          spin_np(FRESH_HOLD_MS * per_ms, 17_u64) == 0_u64 ? 1 : 0
+        end
+        g.spawn_parallel do
+          start = __iyi_monotonic_ns
+          before = IyiWorkers.preempts
+          x = 19_u64
+          FRESH_SLICES.times do
+            at = __iyi_monotonic_ns
+            x = spin(per_ms // FRESH_SLICES.to_i64, x)
+            gave_us.set((at - start) // 1000_i64) if gave_us.get < 0_i64 && IyiWorkers.preempts != before
+          end
+          x == 0_u64 ? 1 : 0
+        end
+        g.spawn_parallel do
+          0
+        end
+      end
+      gave = gave_us.get
+      if gave >= 0_i64 && gave < PERIOD_FLOOR_US
+        fail("fresh: round #{round + 1}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up #{gave} us into its run, under the monitor's #{PERIOD_FLOOR_US} us")
+      end
+    end
+    given = IyiWorkers.preempts - preempts
+    say "fresh: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check ran its first ms through, #{FRESH_ROUNDS} rounds (#{given} preemptions)"
+  end
+
   # ── period ───────────────────────────────────────────────────────────
   # The monitor's period, and the quantum it makes. A task computing half a
   # second on a pool of one, and the monitor's looks over it: every look
@@ -635,7 +691,7 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  STEPS = ["slice", "unit", "server", "poller", "period", "tight"]
+  STEPS = ["slice", "unit", "server", "poller", "fresh", "period", "tight"]
 
   # With no arguments, the steps that hold on a pool of one and take
   # seconds, there: slice, unit and period, which wants the pool of one.
@@ -659,6 +715,7 @@ import std/socket::{IyiSocket, SocketError}
     when "unit"   then unit(per_ms)
     when "server" then server(per_ms)
     when "poller" then poller(per_ms)
+    when "fresh"  then fresh(per_ms)
     when "period" then period(per_ms)
     when "tight"  then tight
     end

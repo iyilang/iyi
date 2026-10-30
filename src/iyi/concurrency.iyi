@@ -2024,6 +2024,9 @@ class IyiScheduler
     st.idle = true
     st.quiet = quiet
     if quiet && all_quiet?(st)
+      {% if flag?(:deadlock_dump) %}
+        dump_quiet(st)
+      {% end %}
       st.idle = false
       IyiSchedLock.unlock
       deadlock_found
@@ -2031,10 +2034,6 @@ class IyiScheduler
     end
     IyiSchedLock.unlock
     wait_for_events(true)
-    IyiSchedLock.lock
-    st.idle = false
-    st.notified = false
-    IyiSchedLock.unlock
   end
 
   # A worker with nothing to run, on its own fiber's stack (`IyiWorkers.work`),
@@ -2066,17 +2065,36 @@ class IyiScheduler
         IyiSchedLock.unlock
         return
       end
-      ring_reporter if quiet && all_quiet?(st)
+      if quiet && all_quiet?(st)
+        {% if flag?(:deadlock_dump) %}
+          dump_quiet(st)
+        {% end %}
+        ring_reporter
+      end
       IyiSchedLock.unlock
       wait_for_events(true)
-      IyiSchedLock.lock
-      st.idle = false
-      st.notified = false
-      IyiWorkers.count_idle(-1_i64)
-      # The pool's monitor parks while every worker is idle, and this one
-      # is about to run something (`IyiWorkers.monitor`).
-      nudge = IyiWorkers.take_monitor_wake
-      IyiSchedLock.unlock
+    {% end %}
+  end
+
+  # A thread its idle wait let go, marked busy again under the lock it
+  # was marked idle under (`wait_shared`, `idle_worker`); a worker leaves
+  # the idle count too and wakes the pool's monitor, which parks while
+  # every worker is idle (`IyiWorkers.monitor`). Called by the wait
+  # (`wait_for_events`): on Windows before it takes anything, and
+  # elsewhere once it has taken its events.
+  def self.end_idle(st : IyiSchedulerState) : Nil
+    IyiSchedLock.lock
+    st.idle = false
+    st.notified = false
+    nudge = false
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      if st.worker
+        IyiWorkers.count_idle(-1_i64)
+        nudge = IyiWorkers.take_monitor_wake
+      end
+    {% end %}
+    IyiSchedLock.unlock
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       IyiWorkers.wake_monitor if nudge
     {% end %}
   end
@@ -2085,17 +2103,24 @@ class IyiScheduler
   # and no mail, and nothing on its way. Lock held. On Windows a thread's
   # lists are looked at as well as what it said when it went idle: another
   # thread may have taken its last io waiter's completion since
-  # (`complete_packet`), and an idle thread's lists only shrink.
+  # (`complete_packet`).
   #
-  # The lists are read first, then the packets in hand, then the queues:
-  # a thread taking a packet counts it in hand before the fiber leaves a
-  # list, and gives the count back only once the fiber is in a queue or a
-  # thread's mail, so a fiber between the two is seen in one of the three.
-  # Read the other way round, the main thread of bench/completions_taken.iyi
-  # was named deadlocked in 3 runs of 5 on the user's Windows 11 machine
-  # with 12 logical processors: its accept's packet was off its list and
-  # not yet in its mail, taken by an idle worker that still said it was
-  # idle and quiet.
+  # That reading needs an idle thread to take nothing itself, and on
+  # Windows its wait marks it busy before it does (`end_idle`): what it
+  # takes - its expired sleepers, its own packets off the port - goes into
+  # its own run queue, which this walk does not read. Marked busy only
+  # back in `wait_shared`, after its timer's sleeper had come out of its
+  # heap and into its run queue, the second thread of
+  # bench/release_trigger.iyi was read as idle and quiet while the main
+  # thread waited in its join, and the main thread named a deadlock: 9
+  # runs of 200 and, at 4 processors' affinity, 15 of 200 on the user's
+  # Windows 11 machine with 12 logical processors, and none of 300 at
+  # either once it was marked busy first. And a thread that takes
+  # another's packet is busy while it holds the fiber, from its list to
+  # that thread's mail, so the walk sees it too:
+  # bench/completions_taken.iyi's main thread was named deadlocked in 3
+  # runs of 5 on that machine while an idle worker that still said it was
+  # idle and quiet held its accept.
   def self.all_quiet?(me : IyiSchedulerState) : Bool
     other = @@states_head
     while other.is_a?(IyiSchedulerState)
@@ -2108,13 +2133,43 @@ class IyiScheduler
       end
       other = other.next_state
     end
-    {% if flag?(:win32) %}
-      return false if in_hand?
-    {% end %}
     return false if @@coming > 0_i64
     return false unless IyiWorkers.queues_empty?
     true
   end
+
+  {% if flag?(:deadlock_dump) %}
+    # `-Ddeadlock_dump`: every scheduler thread as the walk that named a
+    # deadlock read it, on standard error, the lock held - what it said
+    # when it went idle, what its lists, run queue and mail hold, and its
+    # root fiber's state (`IyiFiberState`'s number). An idle thread with
+    # something in its run queue is one the walk should not have read as
+    # quiet.
+    def self.dump_quiet(me : IyiSchedulerState) : Nil
+      now = __iyi_monotonic_ns
+      text = "iyi: deadlock dump: coming #{@@coming}, pool queues empty #{IyiWorkers.queues_empty? ? 1 : 0}"
+      {% if flag?(:win32) %}
+        text = text + ", port seat #{seat_word.value.get}"
+      {% end %}
+      text = text + "\n"
+      other = @@states_head
+      while other.is_a?(IyiSchedulerState)
+        text = text + "  thread #{other.object_id}#{other.object_id == me.object_id ? " (the walk's)" : ""}: worker #{other.worker ? 1 : 0}, idle #{other.idle ? 1 : 0}, quiet #{other.quiet ? 1 : 0}, mail #{other.mail? ? 1 : 0}, io #{other.io_head.is_a?(IyiFiber) ? 1 : 0}"
+        sleeper = other.sleep_head
+        text = text + (sleeper.is_a?(IyiFiber) ? ", sleeper due in #{sleeper.deadline - now} ns" : ", no sleeper")
+        running = other.run_head
+        text = text + (running.is_a?(IyiFiber) ? ", run queue's head #{running.state.value}" : ", run queue empty")
+        root = other.root
+        text = text + ", root #{root.is_a?(IyiFiber) ? root.state.value : -1}"
+        {% if flag?(:win32) %}
+          text = text + ", stdin #{other.stdin_waiter.is_a?(IyiFiber) ? 1 : 0}, held the seat #{other.held_seat ? 1 : 0}"
+        {% end %}
+        text = text + "\n"
+        other = other.next_state
+      end
+      __iyi_write(2, text.to_unsafe.as(Void*), text.bytesize.to_u64)
+    end
+  {% end %}
 
   # A worker found the deadlock: the first thread outside the pool is rung
   # to name it on its root. Lock held.
@@ -3524,6 +3579,10 @@ class IyiScheduler
         end
         LibC.WaitForMultipleObjects(named, words.as(Void*), 0_i32, timeout_ms)
         seat_word.value.set(0_u64) if seated
+        # Busy before anything below is taken: the drain's packets and the
+        # expired sleepers go into this thread's own run queue, which a
+        # deadlock's walk does not read (`all_quiet?`).
+        end_idle(st)
       elsif blocking && timer > 0
         # The one scheduler thread, with a deadline: the port and the
         # timer.
@@ -3620,6 +3679,11 @@ class IyiScheduler
     end
 
     wake_expired_sleepers
+    {% unless flag?(:win32) %}
+      # A thread's lists are its own here, and a deadlock's walk reads
+      # only what an idle thread said when it went idle.
+      end_idle(st) if blocking && @@shared
+    {% end %}
   end
 
   # A thread's io list and sleep heap, locked (SPEC.md III.4.13, part 5).
@@ -3693,38 +3757,22 @@ class IyiScheduler
     # same lock and then does not wait. A packet no fiber claims is
     # dropped.
     #
-    # The packet is counted in hand from before its fiber leaves a list
-    # until the fiber is in a queue or its thread's mail (`all_quiet?`).
-    # A dropped one rings the thread that names a deadlock, which may have
-    # declined to while it was in hand.
+    # The thread taking a packet is busy from before its fiber leaves a
+    # list until the fiber is in a queue or its thread's mail: an idle
+    # thread's wait marks it busy before its drain (`end_idle`), so a
+    # deadlock's walk sees the fiber, or the taker (`all_quiet?`).
     def self.complete_packet(overlapped : UInt64, bytes : Int64) : Nil
       if overlapped == IyiStdinReader.overlapped_address
         IyiStdinReader.answered
         return
       end
-      hand = Pointer(Atomic(Int64)).new(pointerof(@@in_hand).address)
-      hand.value.add(1_i64)
-      claimed = take_packet(overlapped, bytes)
-      hand.value.sub(1_i64)
-      return if claimed || !@@shared
-      IyiSchedLock.lock
-      ring_reporter
-      IyiSchedLock.unlock
+      take_packet(overlapped, bytes)
     end
 
-    # Packets some thread has taken off the port and not yet handed to a
-    # queue or a mail (`complete_packet`).
-    @@in_hand : Int64 = 0_i64
-
-    def self.in_hand? : Bool
-      Pointer(Atomic(Int64)).new(pointerof(@@in_hand).address).value.get > 0_i64
-    end
-
-    # The packet's fiber woken, or its operation marked over; false when no
-    # fiber claims it.
-    def self.take_packet(overlapped : UInt64, bytes : Int64) : Bool
+    # The packet's fiber woken, or its operation marked over.
+    def self.take_packet(overlapped : UInt64, bytes : Int64) : Nil
       owner = state_named(Pointer(UInt64).new(overlapped + 32_u64).value)
-      return false unless owner.is_a?(IyiSchedulerState)
+      return unless owner.is_a?(IyiSchedulerState)
       lists_lock(owner)
       fiber = io_take_overlapped(owner, overlapped)
       if fiber.is_a?(IyiFiber)
@@ -3732,11 +3780,11 @@ class IyiScheduler
         fiber.io_pending = false
         lists_unlock(owner)
         wake_completed(fiber)
-        return true
+        return
       end
       lists_unlock(owner)
       posting = fiber_posting(overlapped)
-      return false unless posting.is_a?(IyiFiber)
+      return unless posting.is_a?(IyiFiber)
       lists_lock(owner)
       fiber = io_take_overlapped(owner, overlapped)
       if fiber.is_a?(IyiFiber)
@@ -3744,14 +3792,13 @@ class IyiScheduler
         fiber.io_pending = false
         lists_unlock(owner)
         wake_completed(fiber)
-        return true
+        return
       end
       if posting.io_pending
         posting.io_bytes_read = bytes
         posting.io_pending = false
       end
       lists_unlock(owner)
-      true
     end
 
     # The fiber whose OVERLAPPED is at *overlapped*, from the registry, or

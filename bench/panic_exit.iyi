@@ -1,0 +1,158 @@
+# A panic or an `exit` ends the process whatever its other tasks are
+# parked on.
+#
+#   ./bin/iyi run bench/panic_exit.iyi -- task-panic --workers=12
+#
+# Each step parks tasks beside the one that ends the program: reads on
+# both ends of connections nobody writes to and an accept nobody connects
+# to, all on the poller (Windows' completion port), and sleepers and
+# channel receivers. Then, LEAD_MS after the start:
+#
+#   task-panic: a task panics. Its group cancels the others, and the join
+#               re-raises in the main task, which exits 1.
+#   main-panic: the main task panics inside the group. The join it
+#               deferred cancels the tasks, and the process exits 1.
+#   task-exit:  a task calls `exit(3)`, and the process ends with 3, the
+#               other tasks with it.
+#
+# `--workers=N` runs the tasks on a pool of N workers. `--workers=0` runs
+# them as fibers on the main thread, the shape of bench/server_load.iyi.
+# A watchdog on the main thread fails the run by name if it is still
+# going `--watch` ms (5,000 by default) after the start. A cancel that
+# never ends a parked wait is a join that never ends, so that hang
+# becomes a named failure, not a hung job. When a panic's join is over,
+# the watchdog, cancelled last, prints how long the tasks took to end.
+# bench/parallel_exercise.sh runs every step both ways, and a broken copy
+# of the runtime whose cancel leaves an io wait parked.
+module bench/panic_exit
+
+import std/socket::{IyiSocket, SocketError}
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  PAIRS   =   4
+  LEAD_MS = 300
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  # A read nobody answers: parked on the poller until it is cancelled.
+  def park_read(fd : Int32) : Int32
+    case got = IyiSocket.new(fd).read(1)
+    in Cancelled, SocketError
+      0
+    in String
+      1
+    end
+  end
+
+  def park_accept(fd : Int32) : Int32
+    case got = IyiSocket.new(fd).accept
+    in Cancelled, SocketError
+      0
+    in IyiSocket
+      1
+    end
+  end
+
+  def park_receive(never : Channel(Int32)) : Int32
+    case got = never.receive
+    in Cancelled, ChannelClosed
+      0
+    in Int32
+      got
+    end
+  end
+
+  # The parked tasks and the ending, spawned one way or the other: the
+  # block a parallel task runs is checked for what it captures, so it is
+  # written out at each spawn rather than passed along as a proc.
+  {% for kind in ["spawn", "spawn_parallel"] %}
+    def ends_{{kind.id}}(g : IyiGroup, mode : String, near : Array(Int32), far : Array(Int32), listening : Int32, never : Channel(Int32)) : Nil
+      PAIRS.times do |index|
+        a = near[index]
+        b = far[index]
+        g.{{kind.id}} { park_read(a) }
+        g.{{kind.id}} { park_read(b) }
+      end
+      g.{{kind.id}} { park_accept(listening) }
+      2.times do
+        g.{{kind.id}} do
+          sleep(60000)
+          0
+        end
+        g.{{kind.id}} { park_receive(never) }
+      end
+      case mode
+      when "task-panic"
+        g.{{kind.id}} do
+          sleep(LEAD_MS)
+          raise "a task's panic, with tasks parked on the poller"
+        end
+      when "task-exit"
+        g.{{kind.id}} do
+          sleep(LEAD_MS)
+          exit(3)
+        end
+      when "main-panic"
+        sleep(LEAD_MS)
+        raise "the main task's panic, with tasks parked on the poller"
+      end
+    end
+  {% end %}
+
+  def ends(mode : String, parallel : Bool, watch : Int32) : Nil
+    started = __iyi_monotonic_ns
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    near = [] of Int32
+    far = [] of Int32
+    PAIRS.times do
+      client = IyiSocket.connect("127.0.0.1", port, 5000)
+      fail("#{mode}: connect answered #{client}") unless client.is_a?(IyiSocket)
+      server = listener.accept
+      fail("#{mode}: accept answered #{server}") unless server.is_a?(IyiSocket)
+      near << client.fd
+      far << server.fd
+    end
+    never = Channel(Int32).new
+    group do |w|
+      w.spawn do
+        waited = sleep(watch)
+        fail("#{mode}: still running #{watch} ms after it started") unless waited.is_a?(Cancelled)
+        puts "#{mode}: every task ended #{(__iyi_monotonic_ns - started) // 1000000_i64} ms after the start"
+        0
+      end
+      group do |g|
+        if parallel
+          ends_spawn_parallel(g, mode, near, far, listener.fd, never)
+        else
+          ends_spawn(g, mode, near, far, listener.fd, never)
+        end
+      end
+      fail("#{mode}: the group ended, and the program went on")
+    end
+  end
+
+  STEPS = ["task-panic", "main-panic", "task-exit"]
+
+  workers = 12
+  watch = 5000
+  chosen = ""
+  Program.args.each do |argument|
+    if argument.starts_with?("--workers=")
+      workers = argument[10, argument.size - 10].to_i
+    elsif argument.starts_with?("--watch=")
+      watch = argument[8, argument.size - 8].to_i
+    else
+      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      chosen = argument
+    end
+  end
+  fail("name a step: #{STEPS.join(", ")}") if chosen.empty?
+  IyiWorkers.count = workers if workers > 0
+  ends(chosen, workers > 0, watch)
+{% else %}
+  puts "panic exit: no pool on this target, nothing to hold"
+{% end %}

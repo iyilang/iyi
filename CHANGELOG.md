@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- **server_load's OVERLAPPED copy ends at its catch, and a panic or an
+  exit is gated with tasks parked on the poller.** Master's
+  `bench/server_load.sh` timed out on its Windows broken copy, whose
+  fibers hold their OVERLAPPED as a number (job 123987176637). It
+  printed its panic and then ran on until the 300 s timeout: exit 124,
+  where exit 1 was owed. The runtime's panic and exit paths were not
+  the cause. The copy frees every fiber's OVERLAPPED while the kernel
+  still writes into it, and since the process's one completion port,
+  the thread taking a packet finds its fiber through the OVERLAPPED's
+  owner word (`IyiScheduler.take_packet`). In a chunk the allocator has
+  handed on, that word is garbage. The panic cancels the sibling tasks,
+  and its join waits until each cancelled operation's packet comes;
+  those packets were dropped. On the user's Windows 11 machine (12
+  logical processors), 2 runs in 10 hung. A debug line named the two
+  dropped packets, whose owner word was not the one thread's, and cdb
+  showed that thread in `GetQueuedCompletionStatus` with no timeout.
+  The check now prints its FAIL line and ends the process with
+  `__iyi_exit 1`, because the heap past it is corrupt by design: 50 runs
+  in 50 exited 1, in 0.13 s each after the first, and `server_load.sh`
+  held 10 times in 10. The new `bench/panic_exit.iyi` parks tasks on
+  reads nobody answers and on an accept, beside sleepers and channel
+  receivers. It then ends the program by a task's panic, by the main
+  task's panic, and by a task's `exit(3)`, on twelve workers and on the
+  main thread alone. `bench/parallel_exercise.sh` runs it under the
+  program's 5 s watchdog. Every task ended 300 to 316 ms after the
+  start, 300 of them the lead before the ending, on that Windows
+  machine, on Linux (12-vCPU QEMU) and on macOS 26.6 (Apple M2 Pro, 10
+  cores, the user's machine). Its broken copy is a cancel that leaves
+  an io wait parked, which is caught by name: "task-panic: still running
+  5000 ms after it started".
 - **A darwin thread keeps no descriptor past its end.** The stop parked
   each stopped thread on a pipe of its own, made when the thread was and
   never closed: two descriptors for every thread a program ever started,

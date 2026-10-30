@@ -43,7 +43,7 @@ the arm this target does not take has no type) and a local assignment (where
 `_, anchor_end = anchor_indices` inside an unreached `if` has none either).
 
 `--shard K/N` sweeps the Kth of N shards of the modules, dealt by weight
-(`WEIGHTS`): the CI job runs as three of them side by side.
+(`WEIGHTS`): the CI job runs as four of them side by side.
 """
 
 import os
@@ -107,22 +107,35 @@ ASSIGNMENT = re.compile(r"^\s*[\w, ]+ = [^=]")
 # The modules are dealt into shards by weight, the way bench/std_siblings.sh
 # deals the module exercises: every module, heaviest first, goes to the
 # shard with the least weight so far (the first such shard on a tie, and
-# modules of one weight by name, so every shard computes the same deal). A
-# weight is the seconds the module's sweep took at stride 200 on a Linux
-# x86_64 workstation, load about 2, at eab791d5b: 2,206 s for all 118
-# modules, std/http 258 of them. A module not here weighs 7, the mean of
-# the 88 left out (0.6 to 19 s each). Dealt three ways, the shards hold
-# 734, 739 and 733 s by these weights and took 707, 709 and 790 s of that
-# run. The runner is slower and uneven: the whole sweep took 37 to 71
-# minutes in green runs of 2026-10-23 to 10-25 and was cut off past 72 in
-# four (master's job 120891621408 among them).
+# modules of one weight by name, so every shard computes the same deal).
+#
+# A weight is the seconds the module's sweep took at stride 200 on GitHub's
+# ubuntu-24.04 runners, read from the per-module lines of 39 green shard
+# jobs, 13 master runs of 2026-10-26 to 10-30 (a98f03fe6 to 1ae9e94db).
+# The runners differ in speed by a factor, the same for every module of a
+# job (0.57 to 1.24 of the median job), so each job's seconds are divided
+# by its factor first and the weight is the median of what is left: the
+# seconds on a median runner, 4,286 for all 118 modules, std/http 442 of
+# them. A module not here weighs 7, the mean of the 54 under 15 s (1.1 to
+# 14.7). Dealt four ways, the shards hold 1,079, 1,072, 1,072 and 1,078 s
+# by these weights and 1,079, 1,069, 1,063 and 1,075 by every module's own.
+# The weights before these were one Linux workstation's (eab791d5b, std/http
+# 258 s), and its ratio to a runner is not one number: 1.7 for std/http,
+# 2.0 for std/autocert.
 WEIGHTS = {
-    "http": 258, "math": 159, "tls": 146, "websocket": 80, "autocert": 79,
-    "big": 68, "socket": 62, "acme": 58, "xml": 57, "json": 50, "file": 48,
-    "time": 44, "mail": 42, "router": 34, "unicode": 31, "secure_dns": 30,
-    "sse": 30, "debug": 29, "yaml": 28, "compress": 27, "zstd": 27,
-    "process": 26, "x509": 25, "cookie": 23, "regex": 23, "dns": 22,
-    "ecdsa": 22, "dir": 21, "udp": 21, "tar": 20,
+    "http": 442, "math": 302, "tls": 286, "websocket": 168, "autocert": 158,
+    "big": 148, "socket": 135, "xml": 122, "json": 105, "acme": 100,
+    "time": 93, "file": 77, "mail": 75, "unicode": 68, "router": 62,
+    "secure_dns": 61, "yaml": 61, "debug": 60, "process": 58, "zstd": 58,
+    "sse": 51, "regex": 50, "compress": 47, "cookie": 47, "udp": 44,
+    "x509": 43, "aead": 42, "tar": 42, "dir": 40, "p256": 39, "toml": 39,
+    "bzip2": 36, "digest": 36, "smtp": 36, "ecdsa": 34, "zip": 34, "dns": 33,
+    "curve25519": 29, "format": 29, "text": 29, "xz": 29, "ocsp": 27,
+    "png": 26, "system_roots": 26, "user": 25, "http_proxy": 24, "netip": 24,
+    "p384": 23, "float": 22, "hpack": 22, "fileserver": 21, "int": 21,
+    "mlkem": 21, "password": 21, "uri": 20, "io": 19, "path": 19,
+    "enumerable": 17, "random": 17, "term": 17, "asn1": 16, "csv": 16,
+    "system": 16, "hpke": 15,
 }
 UNWEIGHED = 7
 

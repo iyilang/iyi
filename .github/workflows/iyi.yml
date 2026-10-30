@@ -221,19 +221,35 @@ jobs:
   # that way and nothing had asked. A job of its own: it grows with the
   # library, and took 22 to 41 of the samples job's 90 minutes.
   #
-  # In three shards (`lsp_positions.py --shard`), dealt by each module's
+  # In four shards (`lsp_positions.py --shard`), dealt by each module's
   # measured weight. Whole, the sweep took 37 to 71 minutes in ten green
-  # runs of 2026-10-23 to 10-25 and was cut off past 72 of this job's 75
-  # in four: master's 120891621408, feat/m-thread's twice and
-  # m-thread/steal-wip's - about 66,100 questions each time, on runners
-  # of uneven speed. On one machine the whole sweep took 2,105 s under
-  # master's compiler and 2,206 under feat/m-thread's (+4.8%), most of
-  # the difference std/autocert's, 50 s to 79: its compile grew from 481
-  # to 492 MB, nearer the 512 at which the server retires its worker, and
-  # its sweep started 36 workers where it had 19. The job had no margin
-  # before the branch. The heaviest shard took 790 of the 2,206 s there:
-  # 25 minutes at the slowest green run's rate, and forty-five leaves
-  # room for a runner 1.7 times slower again and still ends a hang.
+  # runs of 2026-10-23 to 10-25 and was cut off past 72 of the job's 75
+  # then in four (master's 120891621408 among them), on runners of uneven
+  # speed; it was dealt three ways on 10-26.
+  #
+  # Three were not enough. In 39 green shard jobs of 13 master runs,
+  # 2026-10-26 to 10-30, the sweep step took 14.0 to 24.7 minutes in
+  # shard 1, 13.8 to 25.2 in shard 2 and 16.2 to 28.0 in shard 3, and the
+  # job about 3 more; master's 1ae9e94db had shard 1 cut off at 45 (job
+  # 124118534818, its step 42 minutes in, its log never kept), and the
+  # rerun passed in 24.7. The runners, not the sweep: each job's modules
+  # are slower by one factor, 0.57 to 1.24 of the median job, and divided
+  # by it each shard cost the same over those four days (shard 1 1,149 s
+  # on a median runner on 10-26 and 1,197 on 10-30, std/http asked 40
+  # questions more; shards 2 and 3 1,422 to 1,472 and 1,632 to 1,671).
+  # On one Linux workstation shard 1 took 726 and 740 s at c1fe669cf, where
+  # it was dealt, and 780 and 748 at 1ae9e94db, interleaved, and the front
+  # end's stages over std/http are level (Semantic (main) 0.743 s against
+  # 0.738, best of five); the reach walk (#148) is in cleanup, which the
+  # server does not run. The cut-off shard costs 1,197 s on a median
+  # runner, so its runner was at least 2.1 times the median, or it hung.
+  #
+  # Dealt four ways by those jobs' own seconds, the heaviest shard is
+  # 1,079 s on a median runner: 22 minutes at the slowest green job's
+  # 1.24 and about 25 with its setup, 56% of forty-five, where three
+  # dealt the same way would take 33 (73%). At the cut-off job's 2.1 it
+  # would end in about 41, inside the limit, and forty-five still ends a
+  # hang.
   lsp-positions:
     needs: build
     runs-on: ubuntu-24.04
@@ -241,10 +257,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     container:
       image: crystallang/crystal:1.21.0-build
-    name: "Every cursor question, everywhere in the library, shard ${{ matrix.shard }} of 3"
+    name: "Every cursor question, everywhere in the library, shard ${{ matrix.shard }} of 4"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -260,7 +276,7 @@ jobs:
       - name: Every cursor question, everywhere in the library
         env:
           PYTHONUNBUFFERED: "1"
-        run: python3 bench/lsp_positions.py 200 --shard ${{ matrix.shard }}/3
+        run: python3 bench/lsp_positions.py 200 --shard ${{ matrix.shard }}/4
 
   samples:
     needs: build

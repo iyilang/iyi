@@ -71,7 +71,7 @@
   # +16  the thread's own stack: its low address, 0 when unknown (darwin)
   # +24  its top: the mapping's end on Linux, a first-frame local's address
   #      on darwin — everything above it is libSystem's, holding nothing
-  # +32  darwin: the park pipe, read end low, write end high
+  # +32  unused
   # +40  where the thread stopped: sp
   # +48  pc
   # +56  the thread's IyiThread object, raw, for the child to find its body
@@ -85,7 +85,6 @@
   IYI_TL_NEXT    =   8_u64
   IYI_TL_LOW     =  16_u64
   IYI_TL_TOP     =  24_u64
-  IYI_TL_PARK    =  32_u64
   IYI_TL_SP      =  40_u64
   IYI_TL_PC      =  48_u64
   IYI_TL_OBJECT  =  56_u64
@@ -310,17 +309,15 @@
   {% elsif flag?(:darwin) %}
     # darwin: libSystem's thread, by name, the exact list the thread floor
     # measured — `pthread_create`, `pthread_join`, `pthread_kill`,
-    # `sigaction`, and a pipe per thread to park on, because `read` is on
-    # POSIX's list of what a handler may call and `os_unfair_lock_lock`,
-    # which measured a little faster, is not.
+    # `sigaction` — and the park, which is Linux's on libSystem's public
+    # futex (`park`): `os_sync_wait_on_address` and
+    # `os_sync_wake_by_address_all`, declared in prelude.iyi beside the
+    # mark helpers' park, which needs the same macOS 14.4.
     lib LibC
       fun pthread_create(thread : UInt64*, attributes : Void*, start : Void*, argument : Void*) : Int32
       fun pthread_join(thread : Void*, value : Void*) : Int32
       fun pthread_kill(thread : Void*, signal : Int32) : Int32
       fun sigaction(signal : Int32, action : Void*, previous : Void*) : Int32
-      fun pipe(fds : Int32*) : Int32
-      fun read(fd : Int32, buffer : Void*, count : UInt64) : Int64
-      fun write(fd : Int32, buffer : Void*, count : UInt64) : Int64
       fun sysctlbyname(name : UInt8*, old : Void*, old_size : UInt64*, new : Void*, new_size : UInt64) : Int32
     end
 
@@ -521,7 +518,6 @@
         IyiHeap.write64(line + IYI_TL_HANDLE, __iyi_conc_syscall3(IYI_SYS_GETTID, 0_i64, 0_i64, 0_i64).to_u64)
       {% elsif flag?(:darwin) %}
         IyiHeap.write64(line + IYI_TL_HANDLE, LibC.pthread_self.address)
-        IyiThread.make_park(line)
       {% elsif flag?(:win32) %}
         real_handle = Pointer(Void).new(0_u64)
         LibC.DuplicateHandle(Pointer(Void).new(0xFFFFFFFFFFFFFFFF_u64), LibC.GetCurrentThread,
@@ -578,7 +574,6 @@
         IyiRuntimeLock.unlock
         raise "clone failed: #{result}" if result < 0
       {% elsif flag?(:darwin) %}
-        make_park(line)
         IyiRuntimeLock.lock
         IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
         @@lines = line
@@ -806,14 +801,6 @@
       {% end %}
     end
 
-    {% if flag?(:darwin) %}
-      def self.make_park(line : UInt64) : Nil
-        fds = Pointer(Int32).malloc(2_u64)
-        raise "pipe failed" if LibC.pipe(fds) != 0
-        IyiHeap.write64(line + IYI_TL_PARK, fds[1].to_i64.to_u64.unsafe_shl(32_u64) | fds[0].to_i64.to_u64)
-      end
-    {% end %}
-
     {% if flag?(:win32) %}
       # Windows has no signal to deliver: the thread that stops the others
       # suspends them where they stand. The one check the POSIX handler
@@ -951,15 +938,13 @@
         {% if flag?(:linux) %}
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (page + IYI_TC_RESUME).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
         {% else %}
-          byte = 1_u8
-          cursor = @@lines
-          while cursor != 0
-            if cursor != @@line
-              fd = IyiHeap.read64(cursor + IYI_TL_PARK).unsafe_shr(32_u64).to_i32
-              LibC.write(fd, pointerof(byte).as(Void*), 1_u64)
-            end
-            cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
-          end
+          # The wake answers -1 with errno ENOENT when no thread has
+          # reached its wait yet, and this runs inside an allocation, which
+          # may fall between a failed call of the program's and its look
+          # at errno.
+          errno = LibC.error_location.value
+          LibC.os_sync_wake_by_address_all(Pointer(Void).new(page + IYI_TC_RESUME), 8_u64, 0_u32)
+          LibC.error_location.value = errno
         {% end %}
         while word(page + IYI_TC_RESUMED).value.get < others.to_u64
           yield_cpu
@@ -1036,8 +1021,9 @@
         # core's other hardware thread a turn and nothing to the
         # scheduler, so a loop around it is a hot spin. Where a thread has
         # nothing to do until somebody tells it, it parks - a stopped
-        # thread on its pipe, a mark helper on the generation word
-        # (`IyiMark.wait_generation`); this remains for the short spins.
+        # thread on the stop's release word (`park`), a mark helper on the
+        # generation word (`IyiMark.wait_generation`); this remains for
+        # the short spins.
         asm("yield" :::: "volatile")
       {% end %}
     end
@@ -1141,7 +1127,7 @@
       end
       IyiHeap.write64(line + IYI_TL_SP, sp)
       IyiHeap.write64(line + IYI_TL_PC, pc)
-      park(line)
+      park
     end
 
     # A voluntary stop, from `take`'s exit or the lock's spin: the
@@ -1187,10 +1173,34 @@
       here = uninitialized UInt64
       IyiHeap.write64(line + IYI_TL_SP, pointerof(here).address)
       IyiHeap.write64(line + IYI_TL_PC, 0_u64)
-      park(line)
+      park
     end
 
-    def self.park(line : UInt64) : Nil
+    # Counted in, held until the stopper lets every parked thread go at
+    # once, counted out. On Linux and darwin the hold is a futex on the
+    # release word: the kernel sleeps the thread only while the word
+    # still reads 0, so a release between the look and the sleep is not
+    # slept through, and one wake releases every thread parked.
+    #
+    # darwin parked on a pipe per thread, made when the thread was and
+    # never closed, and released by a write to each: two descriptors for
+    # every thread a program ever started, so under a terminal's
+    # `ulimit -n` of 256 bench/collect_trigger.sh's five hundred
+    # short-lived threads died at "pipe failed", and thread_exercise's at
+    # "kqueue failed" when the pipes had left a thread's poller one
+    # descriptor short. libSystem's futex is public from macOS 14.4, which
+    # the mark helpers' park already needs. Here it runs in the stop's
+    # signal handler, where `read` had POSIX's promise and this has none
+    # in writing; what it does is read off its disassembly (macOS 26.6):
+    # it checks its arguments and makes the one `__ulock_wait2` system
+    # call, holding no lock and touching nothing but the word and, when
+    # it fails, errno - which is what made `read` safe here too. A handler
+    # that changes errno changes it under the code it interrupted, between
+    # a failed call and its look at errno, so errno is put back. And a
+    # wait answers EFAULT at once when the word's page is not resident
+    # (an untouched word did, in C on the M2); the loop's read brings the
+    # page back and waits again.
+    def self.park : Nil
       page = control
       word(page + IYI_TC_SUSPENDED).value.add(1_u64)
       {% if flag?(:linux) %}
@@ -1198,10 +1208,11 @@
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (page + IYI_TC_RESUME).to_i64, IYI_FUTEX_WAIT, 0_i64, 0_i64, 0_i64, 0_i64)
         end
       {% elsif flag?(:darwin) %}
-        byte = uninitialized UInt8
-        fd = (IyiHeap.read64(line + IYI_TL_PARK) & 0xFFFFFFFF_u64).to_i32
-        while LibC.read(fd, pointerof(byte).as(Void*), 1_u64) != 1_i64
+        errno = LibC.error_location.value
+        while word(page + IYI_TC_RESUME).value.get == 0_u64
+          LibC.os_sync_wait_on_address(Pointer(Void).new(page + IYI_TC_RESUME), 0_u64, 8_u64, 0_u32)
         end
+        LibC.error_location.value = errno
       {% elsif flag?(:win32) %}
         while word(page + IYI_TC_RESUME).value.get == 0_u64
           yield_cpu

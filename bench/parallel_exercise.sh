@@ -26,10 +26,11 @@
 #      bench/parallel_preempt.iyi then holds preemption at loop back-edges
 #      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
 #      request beside a task computing with no call in its loop wait no
-#      more than 100 ms, 80 for the request; a preempted task keeps its
-#      unit's token; the monitor looks every 4 to 10.5 ms and the quantum is
-#      at most 20 ms; a tight loop costs at most twice what its
-#      `@[NoPreempt]` twin does; and the release build's IR shows each
+#      more than 100 ms, 80 for the request, in the server shape and with
+#      the request's window held open on one worker; a preempted task
+#      keeps its unit's token; the monitor looks every 4 to 10.5 ms and
+#      the quantum is at most 20 ms; a tight loop costs at most twice what
+#      its `@[NoPreempt]` twin does; and the release build's IR shows each
 #      tight loop's checks reading the worker's word through the thread
 #      pointer, none calling its thread-local accessor. Its failure proofs
 #      are with step 7's: a `@[NoPreempt]` loop, a monitor that never raises
@@ -160,9 +161,31 @@ PREEMPT_WORKERS=8
 # ms, 760 to 897 of 11,200 over 20 ms, with the monitor's tick at 5 ms and
 # at the system timer's alike, and 3 workers made it 36 to 49 ms, 119 to
 # 142 over 20. darwin's 3 workers on 3 cores made it 26 to 50 ms.
+#
+# Three left the main thread one core and none for anything else the
+# machine runs. GitHub's 4-core Windows runners come in two speeds: the
+# job's runtime exercises take 486 to 658 s or 688 to 738 s, and on the
+# slower the plain `spin` runs a sixth slower than its calibration (the
+# period step's 111 to 121 looks, where the faster takes 86 to 99). There
+# the plain build's server step read 36 to 63 ms, 286 to 427 over 20, in
+# 13 jobs, then 157 and 159 ms, 2753 and 1682 over (CI jobs 123312302895
+# and 123350279733); a commit master has since merged read 102 ms, 2504
+# over, with its ticker 61 ms late (123170544267). Windows 11, 12 logical
+# processors (the user's machine), held to 4 by `start /affinity F` with
+# a shell loop busy on one of them, made the same shape: 3 workers 59 to
+# 104 ms, 914 to 1364 over 20, in 24 runs, master's binary and this one
+# alike, the poller step before it or not; 2 workers 26 to 31 ms, 123 to
+# 300 over, in 20. So Windows leaves two cores, the main thread's and a
+# spare: on 2 workers CI read 27 to 31 ms plain, 409 to 458 over,
+# and 27 to 37 release, 250 to 303 over, in four jobs, three of them on
+# the slower runner (123506061763, 123575207812, 123639425845; and
+# 123702042367). The 4 slow connections still outnumber the workers, so
+# a fast request is answered beside them only by a preemption.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    [ "$CORES" -gt 1 ] && [ "$PREEMPT_WORKERS" -ge "$CORES" ] && PREEMPT_WORKERS=$((CORES - 1)) ;;
+    room=1
+    [ "$CORES" -gt 2 ] && room=$((CORES - 2))
+    [ "$PREEMPT_WORKERS" -gt "$room" ] && PREEMPT_WORKERS="$room" ;;
 esac
 for build in plain release; do
   step "preemption at loop back-edges, $build build"
@@ -172,7 +195,7 @@ for build in plain release; do
   if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
   fi
-  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "server --workers=$PREEMPT_WORKERS"; do
+  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "poller --workers=1" "server --workers=$PREEMPT_WORKERS"; do
     # shellcheck disable=SC2086 # the step and its count are words
     timeout -k 5 300 "./preempt-$build" $run > "preempted-$build.txt" 2>&1
     code=$?
@@ -412,8 +435,8 @@ fi
 #   darwin   the runtime's list (bench/thread_exercise.sh spells it out),
 #            the thread floor's names a started thread costs -
 #            `pthread_create`, `pthread_kill` and `sigaction` for the
-#            thread and the stop, `pipe`/`read`/`write` for the stop's
-#            park, and `close` for a retiring thread's kqueue
+#            thread and the stop, whose park is the futex already on the
+#            list, and `close` for a retiring thread's kqueue
 #            (`IyiScheduler.retire_thread`, linked with every thread
 #            body) - and `_environ` for `IYI_WORKERS`. The doorbell is an
 #            `EVFILT_USER` change through `kevent`, already on the list,
@@ -443,7 +466,7 @@ case "$(uname -s)" in
   Darwin)
     [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
     runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
-    thread='_close _pipe _pthread_kill _read'
+    thread='_close _pthread_kill'
     pool='_environ'
     allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
     for bin in exercise-plain exercise-release; do
@@ -862,12 +885,13 @@ else
 fi
 
 step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"
-if [ "$CORES" -lt 2 ]; then
-  echo "  one core here: no idle worker takes what the poll would hand over, so the proof is not run"
-else
-  broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
-  caught nopoll 'server: a fast request took' server --workers="$PREEMPT_WORKERS"
-fi
+# Caught by the poller step, whose window is held: the server shape's
+# copy waited only when a connection happened to park on a worker a slow
+# request then took, and passed three of eight runs under its 80 ms bound,
+# at 76 to 78 ms, on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+# machine).
+broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
+caught nopoll 'poller: a fast request took' poller --workers=1
 
 step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
 broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt

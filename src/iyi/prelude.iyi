@@ -6335,12 +6335,13 @@ require "./file"
         # and a trap per sleeper in the wake, which the program's own
         # thread pays. A condition variable is ruled out by the stop: no
         # caller of the wake runs in a signal handler - the stop's handler
-        # only parks its thread on its pipe - but a program thread can be
-        # stopped inside the wake, since `wake_sweep_round` runs after the
-        # runtime lock is let go, and a thread parked holding the
-        # condition's mutex would hold the collector's next wake. The
-        # futex's wake checks its arguments and calls `__ulock_wake`, read
-        # off its disassembly: one system call, holding nothing.
+        # only parks its thread on this same futex (`IyiThread.park`) - but
+        # a program thread can be stopped inside the wake, since
+        # `wake_sweep_round` runs after the runtime lock is let go, and a
+        # thread parked holding the condition's mutex would hold the
+        # collector's next wake. The futex's wake checks its arguments and
+        # calls `__ulock_wake`, read off its disassembly: one system call,
+        # holding nothing.
         def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
           spun = spin_for_generation(word, seen)

@@ -79,7 +79,8 @@
   #   +16  work counter, the thread's own
   #   +24  the seed the thread found in its thread-local block
   #   +32  set if the thread ever saw another thread's value in its slot
-  #   +40  darwin only: the thread's park word, an `os_unfair_lock`
+  #   +40  darwin only: the thread's park word, a pipe's two descriptors or
+  #        an `os_unfair_lock`, under the flags that park so
   #   +48  where the thread's stack is: on Linux the mapping's base, on
   #        darwin the address of a local in the thread's first frame
   #   +56  the most bytes a stop handler ran below the interrupted sp
@@ -639,29 +640,34 @@
     # trampoline for the handler's return, so there is no sigreturn to
     # write.
     #
-    # The park is the finding. darwin has no futex, and the
-    # `__ulock_wait`/`__ulock_wake` beneath libSystem's own locks is private
-    # ABI, so a stopped thread must park on something libSystem exports.
-    # Five were measured (CHANGELOG.md has the numbers): a mutex and
-    # condition, four names, released by one broadcast; one
-    # `os_unfair_lock` the main thread holds, two names, released by one
-    # unlock — which the kernel hands waiter to waiter, so the resume is a
-    # chain of wakeups at some 40 µs a link; one `os_unfair_lock` per
-    # thread, on the thread's own line, two names, released by N unlocks
-    # issued back to back, which wake in parallel and resume as fast as
-    # the broadcast does; then, once the question was asked with
-    # async-signal-safety in it, `sigsuspend` and a pipe per thread. The
-    # pipe is what is here, for the reason given at the stop below, and the
-    # per-thread lock and `sigsuspend` stay as flags. `sched_yield` was
-    # measured too and is not here: the main thread spins on the counters
-    # with a `yield` hint instead, which costs no name and, below the core
-    # count, no time. And the stop has an alternative with no signal in
-    # it at all — Mach's `thread_suspend`, which returns with the thread
-    # held, and `thread_get_state` for its registers — kept under
-    # `-Dtf_mach` below because it was the obvious other answer and it
-    # loses at every count: each suspend returns only once its target has
-    # been through a core and stopped, one target after another, where N
-    # signals are queued at once and the handlers stop in parallel.
+    # The park is the finding. A mutex and condition were measured first,
+    # four names, released by one broadcast (CHANGELOG.md has the numbers
+    # for all of these); one `os_unfair_lock` the main thread holds, two
+    # names, released by one unlock - which the kernel hands waiter to
+    # waiter, so the resume is a chain of wakeups at some 40 µs a link;
+    # one `os_unfair_lock` per thread, on the thread's own line, two
+    # names, released by N unlocks issued back to back, which wake in
+    # parallel and resume as fast as the broadcast does; then, once the
+    # question was asked with async-signal-safety in it, `sigsuspend` and
+    # a pipe per thread. The pipe was the runtime's park until it was
+    # found holding two descriptors for every thread a program ever
+    # started (src/iyi/thread.iyi, `IyiThread.park`). What is here now is
+    # Linux's park on libSystem's public futex, macOS 14.4's
+    # `os_sync_wait_on_address` on the one resume word and one
+    # `os_sync_wake_by_address_all`, which cost no name of their own: the
+    # collector's helpers park on them in every program. `__ulock_wait`,
+    # beneath them and beneath libSystem's own locks, is the same futex as
+    # private ABI. The pipe, the per-thread lock and `sigsuspend` stay as
+    # flags. `sched_yield` was measured too and is not here: the main
+    # thread spins on the counters with a `yield` hint instead, which
+    # costs no name and, below the core count, no time. And the stop has
+    # an alternative with no signal in it at all — Mach's
+    # `thread_suspend`, which returns with the thread held, and
+    # `thread_get_state` for its registers — kept under `-Dtf_mach` below
+    # because it was the obvious other answer and it loses at every
+    # count: each suspend returns only once its target has been through a
+    # core and stopped, one target after another, where N signals are
+    # queued at once and the handlers stop in parallel.
     lib LibC
       fun pthread_create(thread : UInt64*, attributes : Void*, start : Void*, argument : Void*) : Int32
       fun pthread_join(thread : Void*, value : Void*) : Int32
@@ -673,7 +679,7 @@
       {% elsif flag?(:tf_park_lock) %}
         fun os_unfair_lock_lock(lock : Void*) : Nil
         fun os_unfair_lock_unlock(lock : Void*) : Nil
-      {% else %}
+      {% elsif flag?(:tf_park_pipe) %}
         fun pipe(fds : Int32*) : Int32
         fun read(fd : Int32, buffer : Void*, count : UInt64) : Int64
         fun write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -693,9 +699,10 @@
     # resume handler first and leaving the thread parked for good - the
     # lost wakeup that hung this variant on CI one run in ten.
     TF_SA_STOP_WORD = 0x0000004040000000_u64
-    # The thread's park word on its own line at this offset: the pipe's two
-    # descriptors, read end low, write end high; or under -Dtf_park_lock an
-    # `os_unfair_lock` (OS_UNFAIR_LOCK_INIT is zero).
+    # The thread's park word on its own line at this offset, under the
+    # flags that park on one of their own: the pipe's two descriptors, read
+    # end low, write end high; or an `os_unfair_lock` (OS_UNFAIR_LOCK_INIT
+    # is zero).
     TF_PARK = 40_u64
     # libSystem's ucontext: uc_onstack and a 32-bit sigmask, a 24-byte
     # uc_stack, uc_link, uc_mcsize, then at 48 a pointer to the mcontext,
@@ -935,14 +942,19 @@
       # An `os_unfair_lock` the main thread holds is the fastest release (N
       # unlocks back to back) and is not on Apple's list of calls a signal
       # handler may make: it works, with no promise, and it was the first
-      # answer here. The park is a pipe per thread now — the handler blocks
-      # in `read`, the main thread releases it with one `write` per thread —
-      # because `read` is async-signal-safe by POSIX's own list and the
-      # numbers are the lock's below the core count (CHANGELOG.md has both);
-      # it costs `pipe` and `read` where the lock cost its two calls. The
-      # other two parks are kept as flags so they stay measured:
-      #   -Dtf_park_lock        the `os_unfair_lock`, two names, the fastest
-      #                         resume, no promise;
+      # answer here. A pipe per thread was the second - the handler blocks
+      # in `read`, the main thread releases it with one `write` per thread -
+      # because `read` is async-signal-safe by POSIX's own list; it cost
+      # `pipe` and `read` where the lock cost its two calls, and two
+      # descriptors a thread. The park is the futex now, as on Linux: the
+      # handler waits on the resume word in `os_sync_wait_on_address`,
+      # which checks its arguments and makes one `__ulock_wait2` system
+      # call holding nothing - as safe in a handler as `read`, with no
+      # list to say so - and one `os_sync_wake_by_address_all` releases
+      # every thread. The other three parks are kept as flags so they stay
+      # measured:
+      #   -Dtf_park_pipe        the pipe per thread, `pipe` and `read`;
+      #   -Dtf_park_lock        the `os_unfair_lock`, two names, no promise;
       #   -Dtf_park_sigsuspend  `sigsuspend` on a mask that lets SIGUSR2
       #                         through, released by one `pthread_kill` per
       #                         thread — Boehm's stop on every POSIX, one
@@ -1028,7 +1040,7 @@
 
         def install_parks(count : Int64) : Nil
         end
-      {% else %}
+      {% elsif flag?(:tf_park_pipe) %}
         def park(line : UInt64) : Nil
           byte = uninitialized UInt8
           fd = (__tf_load(line + TF_PARK) & 0xFFFFFFFF_u64).to_i32
@@ -1057,6 +1069,24 @@
             __tf_store(Threads.line(index) + TF_PARK, fds[1].to_i64.to_u64.unsafe_shl(32_u64) | fds[0].to_i64.to_u64)
             index = index + 1_i64
           end
+        end
+      {% else %}
+        def park(line : UInt64) : Nil
+          while __tf_load(Threads.resume) == 0_u64
+            LibC.os_sync_wait_on_address(Pointer(Void).new(Threads.resume), 0_u64, 8_u64, 0_u32)
+          end
+        end
+
+        def take_parks(count : Int64) : Nil
+          __tf_store(Threads.resume, 0_u64)
+        end
+
+        def release_parks(count : Int64) : Nil
+          __tf_store(Threads.resume, 1_u64)
+          LibC.os_sync_wake_by_address_all(Pointer(Void).new(Threads.resume), 8_u64, 0_u32)
+        end
+
+        def install_parks(count : Int64) : Nil
         end
       {% end %}
 

@@ -50,7 +50,11 @@
 #      The table for 1, 2, 4 and 8 workers (as far as the cores go) is
 #      printed for the record.
 #   5. A deadlock across threads - a parallel task waiting on a channel
-#      nobody sends on - is named, not hung.
+#      nobody sends on - is named, not hung. And bench/panic_exit.iyi
+#      ends the process with tasks parked on the poller, on twelve
+#      workers and on the main thread alone: a task's panic and the main
+#      task's panic each exit 1, and a task's `exit(3)` exits 3, inside
+#      the program's watchdog's 5 s.
 #   6. `Share` gates the parallel block at compile time: a captured
 #      `Array`, a `Channel` of arrays, a local assigned after the spawn, and
 #      a loop's local are refused, each by name. A block that reaches a
@@ -63,19 +67,20 @@
 #      wakeup), a steal that leaves the task in its victim's queue (a task
 #      handed out twice), a cancel that is never delivered to the thread a
 #      sleeping task is on, a cancel that skips tasks still waiting in the
-#      pool (a cancelled task run as if it were not), and `take_now` and
-#      `put_now` without the scheduler's lock; the race step's add made
-#      a plain load and store, which loses adds only when tasks really run
-#      at the same instant; and for the moves of step 2 - a thread-local
-#      read as it was before a park, one read as it was before a loop
-#      whose back-edge check moved the task, a collector that skips a fiber
-#      on its way between workers, an io wait a cancel cannot find, a close
-#      posted to nobody, a read made on the thread that closes its socket,
-#      a pool that never steals a started task, tasks woken back onto the
-#      worker they parked on as they were before tasks moved, and a join
-#      held in the kernel; and on Windows a port whose packets only the
-#      worker their task parked on runs, and a pool that leaves the
-#      priority boost on.
+#      pool (a cancelled task run as if it were not), a cancel that leaves
+#      an io wait parked (a panic that never ends its program), and
+#      `take_now` and `put_now` without the scheduler's lock; the race
+#      step's add made a plain load and store, which loses adds only when
+#      tasks really run at the same instant; and for the moves of step 2 -
+#      a thread-local read as it was before a park, one read as it was
+#      before a loop whose back-edge check moved the task, a collector that
+#      skips a fiber on its way between workers, an io wait a cancel cannot
+#      find, a close posted to nobody, a read made on the thread that
+#      closes its socket, a pool that never steals a started task, tasks
+#      woken back onto the worker they parked on as they were before tasks
+#      moved, and a join held in the kernel; and on Windows a port whose
+#      packets only the worker their task parked on runs, and a pool that
+#      leaves the priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 4's floor refuses the ratio that comes out.
 set -u
@@ -595,6 +600,41 @@ if [ "$code" -ne 1 ] || ! grep -q 'deadlock: every fiber is blocked' deadlock.tx
 fi
 echo "  exits 1: $(grep -m1 'deadlock' deadlock.txt)"
 
+# ── 4a. A panic or an exit ends the process ──────────────────────────────
+# bench/panic_exit.iyi: tasks parked on the poller (reads nobody answers,
+# an accept nobody connects to) beside sleepers and channel receivers. The
+# program is then ended three ways: a task's panic, the main task's panic,
+# and a task's `exit(3)`. Each runs on twelve workers and on the main
+# thread alone. The program's watchdog names a run still going 5 s after
+# its start, which is a cancel that left some wait parked and the join
+# waiting on it. The timeout here is for an exit that never ends. The
+# first run is the virus scanner's first look at a new binary, 11.1 s for
+# one program on the user's Windows 11 machine (12 logical processors),
+# so it is not one of the timed runs.
+step "a panic or an exit ends the process with tasks parked on the poller"
+if ! "$IYI" build "$REPO/bench/panic_exit.iyi" -o panic_exit > build-panic-exit.log 2>&1; then
+  echo "build failed:"; tail -20 build-panic-exit.log; exit 1
+fi
+timeout -k 5 60 ./panic_exit > /dev/null 2>&1
+for workers in 12 0; do
+  where="on 12 workers"
+  [ "$workers" = 0 ] && where="on the main thread"
+  for mode in task-panic main-panic task-exit; do
+    case "$mode" in
+      task-panic) want=1 said='iyi: panic: a task panicked: ' ;;
+      main-panic) want=1 said="iyi: panic: the main task's panic" ;;
+      task-exit) want=3 said='' ;;
+    esac
+    timeout -k 5 10 ./panic_exit "$mode" --workers="$workers" > panic-exit.txt 2>&1
+    code=$?
+    if [ "$code" -ne "$want" ] || grep -q '^FAIL: ' panic-exit.txt || { [ -n "$said" ] && ! grep -qF "$said" panic-exit.txt; }; then
+      echo "$mode $where exited $code, not $want (124 is an exit that never ended):"; cat panic-exit.txt; exit 1
+    fi
+    ended="$(grep -m1 'every task ended' panic-exit.txt | sed 's/^[a-z-]*: every task ended /, every task ended /')"
+    echo "  $mode $where: exits $code$ended"
+  done
+done
+
 # ── 5. Share gates the parallel block ─────────────────────────────────────
 step "Share gates what a parallel task's block captures"
 refused() { # name, expected text, program body
@@ -764,6 +804,16 @@ caught undelivered 'cancel: still waiting after 5000 ms' cancel --watch=5000
 step "failure proof: a cancel that skips tasks waiting in the pool runs them uncancelled"
 broken unflagged '/def self.cancel\(fiber/ { incancel = 1 } incancel && /^    fiber.cancelled = true$/ { print "    fiber.cancelled = true unless fiber.home.is_a?(Nil)"; incancel = 0; next } { print }'
 caught unflagged 'tasks waiting in the pool ran uncancelled' cancel --watch=60000
+
+step "failure proof: a cancel that leaves an io wait parked keeps a panicking program running"
+# The cancel ends no io wait, so a task parked on a read nobody answers is
+# parked for good, and the panic's join waits on it. This is how master
+# bcefa35fc's server_load copy hung after its panic line in job
+# 123987176637: a cancelled read's packet was dropped, and nothing else
+# could wake it.
+broken parkedio '/^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "    elsif false"; next } { print }' concurrency.iyi panic_exit
+caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=12
+caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=0
 
 step "failure proof: take_now and put_now without the scheduler's lock lose and repeat values across workers"
 # Two threads changing one channel's ring and queues at once end the step

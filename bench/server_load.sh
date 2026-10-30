@@ -92,7 +92,11 @@ cp "$REPO"/src/iyi/*.iyi patched/iyi/
 # between a connection's read and its write; it asks there now. The size
 # is matched, not written: the OVERLAPPED grew from 32 bytes to 40 with the
 # worker its completion belongs to, and the sed found one line of two
-# (job 121201606737).
+# (job 121201606737). The check ends the run with `__iyi_exit` rather than
+# a panic. After it the heap is corrupt, and a panic's cancelled siblings
+# wait for packets that a freed OVERLAPPED's garbage owner word gets
+# dropped: the run then hung after its panic line (job 123987176637;
+# server_load.iyi says more).
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "failure proof: the fiber's OVERLAPPED as a number is an OVERLAPPED nobody keeps"
@@ -110,7 +114,7 @@ case "$(uname -s)" in
       echo "an OVERLAPPED the collector cannot see survived the run, so the run proves nothing (exit $code):"
       tail -3 hidden.txt; exit 1
     fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 'freed the OVERLAPPED' hidden.txt | sed 's/^iyi: panic: FAIL: //')"
+    printf '  exits 1 at "%s"\n' "$(grep -m1 'freed the OVERLAPPED' hidden.txt | sed 's/^FAIL: //')"
     ;;
   *)
     step "failure proof: the poller's buffer as a number is a buffer nobody keeps"

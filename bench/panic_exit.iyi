@@ -150,9 +150,15 @@ import std/socket::{IyiSocket, SocketError}
       chosen = argument
     end
   end
-  fail("name a step: #{STEPS.join(", ")}") if chosen.empty?
-  IyiWorkers.count = workers if workers > 0
-  ends(chosen, workers > 0, watch)
+  # Every step ends the process, by panic or by exit, so a bare run - which
+  # Windows CI makes of every bench program and holds to exit 0 - names
+  # them and ends there.
+  if chosen.empty?
+    puts "panic exit: each step ends the program; name one of #{STEPS.join(", ")}, as bench/parallel_exercise.sh does"
+  else
+    IyiWorkers.count = workers if workers > 0
+    ends(chosen, workers > 0, watch)
+  end
 {% else %}
   puts "panic exit: no pool on this target, nothing to hold"
 {% end %}

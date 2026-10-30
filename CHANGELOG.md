@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- **Windows: a thread its idle wait lets go is busy before it takes
+  anything, so a join beside a thread waking from its sleeps is not
+  named a deadlock.** Master's `bench/concurrent_mark.sh` failed on the
+  Windows runner at "every collection a program's thread finishes is let
+  go before its threads are released": bench/release_trigger.iyi
+  panicked "deadlock: every fiber is blocked". Its main thread joins a
+  second thread that sleeps a millisecond at a time. Under the process's
+  one completion port a deadlock's walk reads an idle thread's lists as
+  well as what the thread said when it went idle
+  (`IyiScheduler.all_quiet?`), and a thread its timer woke still said
+  idle while its sleeper went from its heap into its own run queue,
+  which the walk does not read. On the user's Windows 11 machine (12
+  logical processors) release_trigger named a deadlock in 9 runs of 200,
+  and in 15 of 200 at 4 processors' affinity. A snapshot the walk now
+  prints under `-Ddeadlock_dump` showed the second thread idle, with no
+  sleeper and its root fiber runnable at the head of its run queue,
+  beside the main thread parked in its join. The idle wait now marks the
+  thread busy before it takes the port's packets or its expired sleepers
+  (`end_idle`); elsewhere the walk reads only what a thread said when it
+  went idle, and the mark stays where it was. A thread that takes
+  another's packet is then busy for as long as it holds the fiber, so
+  the count of packets in hand that mended bench/completions_taken.iyi's
+  false deadlock is gone, and with it an atomic add and subtract a
+  packet, and the ring a dropped packet sent the deadlock's reporter.
+  release_trigger then held 300 runs of 300 at 12 processors and at 4.
+  The new bench/woken_busy.iyi is that join; bench/concurrency_exercise.sh
+  runs it, and on Windows two copies of the runtime whose idle wait
+  holds the woken thread 200 ms once it has taken its sleeper: the one
+  marked busy before the hold passes, and the one marked busy after it
+  names the deadlock, its snapshot showing the sleeper in the run queue.
 - **server_load's OVERLAPPED copy ends at its catch, and a panic or an
   exit is gated with tasks parked on the poller.** Master's
   `bench/server_load.sh` timed out on its Windows broken copy, whose
@@ -25641,7 +25671,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,552-line library and nothing else. Every other
+  written against iyi's own 25,599-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

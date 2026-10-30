@@ -17,21 +17,22 @@
   preempted tasks, which every worker looks at last, and waited 28.6 and
   38.6 ms there, where the slow tasks waited up to 47 and 51. In those
   runs every request's packets were taken off the port within 11.1 ms,
-  by the back-edge's poll, by `take_port` or by the main thread's own
-  poll, and the main thread, which runs the clients, ran a client within
-  3.8 ms of its answer being taken. `IyiScheduler.switch_to` now lowers
-  the word beside the count it already moves: a load, and a store only
-  when the word is up. Traced again, 20 runs each and interleaved, a fast
-  task was given up so in 2 runs before and in none after; untraced, the
-  slowest fast request took 24 to 43 ms plain and 22 to 38 release
-  before, 23 to 29 and 22 to 31 after. The new `fresh` step of
-  `bench/parallel_preempt.iyi` holds it on a pool of one: a task holds the
-  worker 30 ms with no check, so its word is raised, and ends; the task
-  switched in next computes a millisecond beside a third, and gives the
-  worker up only on its own word. Master's runtime gave it up 0 to 1 µs
-  in, at round 1 of 10, in three runs of three on that machine and on
-  Linux here (12 vCPUs), and the gate's copy without the lowering is
-  caught there by name; with it, 10 rounds of 10 ran with no preemption.
+  by a computing worker's back-edge poll or by a thread's look that does
+  not wait (`take_port`, `poll_now`), and the main thread, which runs the
+  clients, ran a client within 3.8 ms of its answer being taken.
+  `IyiScheduler.switch_to` now lowers the word beside the count it
+  already moves: a load, and a store only when the word is up. Traced
+  again, 20 runs each and interleaved, a fast task was given up so in 2
+  runs before and in none after; untraced, the slowest fast request took
+  24 to 43 ms plain and 22 to 38 release before, 23 to 29 and 22 to 31
+  after. The new `fresh` step of `bench/parallel_preempt.iyi` holds it on
+  a pool of one: a task holds the worker 30 ms with no check, so its word
+  is raised, and ends; the task switched in next computes a millisecond
+  beside a third, and gives the worker up only on its own word. Master's
+  runtime gave it up 0 to 1 µs in, at round 1 of 10, in three runs of
+  three on that machine and on Linux here (12 vCPUs), and the gate's copy
+  without the lowering is caught there by name; with it, 10 rounds of 10
+  ran with no preemption.
 - **Windows: a thread its idle wait lets go is busy before it takes
   anything, so a join beside a thread waking from its sleeps is not
   named a deadlock.** Master's `bench/concurrent_mark.sh` failed on the

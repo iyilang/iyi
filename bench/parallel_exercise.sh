@@ -998,7 +998,11 @@ step "failure proof: a word the monitor raised for the task before preempts the 
 # task in three runs of three on Windows 11, 12 logical processors (the
 # user's machine), and 0 us in three of three on Linux here (12 vCPUs);
 # the lowered word ran 10 rounds of 10 through with no preemption on
-# both, plain and on Windows release too.
+# both, plain and on Windows release too. In this gate's first runs the
+# copy was caught at round 1, 0 us in, on that Windows machine at 12
+# processors and held to 4, on Linux here and on macOS 26.6, Apple M2
+# Pro, 10 cores (the user's machine), and the fresh step held 10 rounds
+# with no preemption, plain and release, on each.
 broken stale '/^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
 caught stale 'fresh: round ' fresh --workers=1
 

@@ -518,9 +518,15 @@ end
     fun GetFileType(h_file : Void*) : Int32
     fun CancelSynchronousIo(h_thread : Void*) : Int32
     # The mark helpers' waking without the boost Windows gives a thread
-    # whose wait is satisfied (`IyiThread.start_helper` says why).
+    # whose wait is satisfied (`IyiThread.start_helper` says why), and the
+    # process's, once its pool starts (`IyiWorkers.start`).
     fun SetThreadPriorityBoost(h_thread : Void*, disable_priority_boost : Int32) : Int32
+    fun SetProcessPriorityBoost(h_process : Void*, disable_priority_boost : Int32) : Int32
     fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
+    # A scheduler thread's doorbell: an auto-reset event its idle wait
+    # names beside the port (`IyiScheduler.ensure_doorbell`).
+    fun CreateEventW(lp_event_attributes : Void*, b_manual_reset : Int32, b_initial_state : Int32, lp_name : UInt16*) : Void*
+    fun SetEvent(h_event : Void*) : Int32
     fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
     fun WaitForMultipleObjects(n_count : Int32, lp_handles : Void*, b_wait_all : Int32,
                                dw_milliseconds : Int32) : Int32

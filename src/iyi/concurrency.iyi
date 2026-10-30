@@ -217,10 +217,6 @@ end
 {% if flag?(:win32) %}
   IYI_POLL_DATA_OFFSET =  0_u64
   IYI_POLL_EVENT_BYTES = 32_i64
-
-  lib LibC
-    fun GetProcAddress(h_module : Void*, proc_name : UInt8*) : Void*
-  end
 {% elsif flag?(:darwin) %}
   # A kevent's fd is its first field (`ident`), so the data offset is 0.
   IYI_POLL_DATA_OFFSET =  0_u64
@@ -549,6 +545,18 @@ class IyiFiber
   property io_direction : Int32
   property wait_overlapped : Pointer(UInt8)
   property io_bytes_read : Int64
+  # Windows: the operation this fiber posted last still has a packet to
+  # come that no thread has taken. Set when the operation is armed and
+  # cleared by whichever thread takes its packet off the port
+  # (`IyiScheduler.complete_packet`), under the lists lock of the thread
+  # the fiber parks on; a park that finds it cleared does not wait, and a
+  # cancelled operation is waited out until it is. The OVERLAPPED's own
+  # status was the test before, and the kernel writes it when the packet
+  # is taken, before the taker has handed it on: with every thread taking
+  # from one port, a fiber that read it there could post its next
+  # operation into the same OVERLAPPED and then be woken by the old one's
+  # packet.
+  property io_pending : Bool
 
   # Which park this fiber is suspended in, counted up at every park. A
   # channel node names the park it was made for, and a node whose nonce is
@@ -652,11 +660,13 @@ class IyiFiber
     @wait_handle = Pointer(Void).new(0_u64)
     @io_direction = 0
     # The OVERLAPPED is the kernel's 32 bytes; the word after it is the
-    # runtime's, the id of the thread whose io list holds the fiber while
-    # the operation is posted, which a completion that arrives on another
-    # thread's port is forwarded to (`IyiScheduler.forward_completion`).
+    # runtime's, the id of the thread whose io list the fiber parks on
+    # while the operation is posted, written when it is armed: whichever
+    # thread takes the packet finds the fiber there
+    # (`IyiScheduler.complete_packet`).
     @wait_overlapped = Pointer(UInt8).malloc(40_u64)
     @io_bytes_read = 0_i64
+    @io_pending = false
   end
 
   # Whether a thread is still on this fiber's stack (`@on_cpu`).
@@ -1074,7 +1084,8 @@ end
 # ── The scheduler ──────────────────────────────────────────────────────
 #
 # One run queue, one sleep list, one io list, one poller fd (an epoll on
-# Linux, a kqueue on darwin) — per scheduler thread, and the shape that
+# Linux, a kqueue on darwin; on Windows the process has one completion
+# port, `IyiScheduler.pollfd`) — per scheduler thread, and the shape that
 # makes it so is decided here before the second thread exists, because
 # it is a shape the thread floor priced (GC_DESIGN.md). Every field lives
 # on one `IyiSchedulerState`, and one `@[ThreadLocal]` pointer names the
@@ -1167,20 +1178,25 @@ class IyiSchedulerState
   # (`IyiWorkers.wake_one`), under the scheduler's lock.
   property spinning : Bool
   # Descriptors another thread closed while a fiber of this one may wait
-  # on them, behind the scheduler's lock (`IyiScheduler.wake_closed`); and
-  # on Windows the completions another thread's port took for an
-  # operation a fiber of this one posted (`forward_completion`), as pairs
-  # of the OVERLAPPED's address and the bytes it moved.
+  # on them, behind the scheduler's lock (`IyiScheduler.wake_closed`).
   property closed_fds : Array(Int32)?
-  property forwarded : Array(UInt64)?
   # The doorbell another thread rings: an eventfd in this thread's epoll on
   # Linux, 1 once the `EVFILT_USER` event is on its kqueue on darwin, and
-  # on Windows the OVERLAPPED a ring posts to its port (`wake_token`).
+  # on Windows an auto-reset event this thread's idle wait names beside
+  # the process's completion port (`IyiScheduler.ring`).
   property wake_fd : Int64
-  property wake_token : Pointer(UInt8)
-  # On Windows, the serial its completion port was given when made
-  # (`IyiScheduler.next_port_serial`), which a handle's record names.
-  property port_serial : UInt64
+  # Windows: the word that locks this thread's io list and sleep heap,
+  # which another thread that takes one of its fibers' completions off
+  # the process's one port reaches into (`IyiScheduler.lists_lock`).
+  @lists : Atomic(UInt64)
+  # Windows: this thread waited on the port in its last idle wait
+  # (`IyiScheduler.take_seat`), or was rung to (`call_sitter`); one that
+  # leaves its idle wait to run something calls another to the port.
+  property held_seat : Bool
+  property seat_duty : Bool
+  # Windows: standard input's reader answered this thread's fiber, and
+  # another thread took the post off the port (`IyiStdinReader.answered`).
+  property stdin_posted : Bool
 
   # The thread's own fiber, the one with no task above it: a deadlock is
   # reported on its stack, whichever fiber's park found it.
@@ -1206,22 +1222,19 @@ class IyiSchedulerState
 
   {% if flag?(:win32) %}
     # Windows' deadline: the timer this thread arms for the nearest
-    # sleeper, and the two handles it waits on — the completion port and
-    # that timer. The pair is a heap buffer held as a typed pointer for
-    # the reason `events` above is: an address parked in a number is a
-    # reference the collector cannot see. Zero timer means the machine
-    # refused a high-resolution one and the poller is back on the
-    # millisecond timeout.
+    # sleeper, which its poller waits on beside its doorbell and, when it
+    # holds the seat, the port. Zero timer means the machine refused a
+    # high-resolution one and the poller is back on the millisecond
+    # timeout.
     #
-    # Declared with their zeroes and read by hand, rather than through
+    # Declared with its zero and read by hand, rather than through
     # `property`: that macro writes the type alone, and a field the
-    # `initialize` below does not list is nilable, while listing them
+    # `initialize` below does not list is nilable, while listing it
     # there means writing that method twice — once per platform, since
     # an assignment inside a macro conditional is not counted either.
     @deadline_timer : Int64 = 0_i64
-    @wait_handles : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
-    # The fiber on this thread waiting for standard input's reader, which
-    # posts to this thread's port (`IyiStdinReader.read`).
+    # The fiber on this thread waiting for standard input's reader, whose
+    # post is this thread's to deliver (`IyiStdinReader.read`).
     property stdin_waiter : IyiFiber?
 
     def deadline_timer : Int64
@@ -1230,14 +1243,6 @@ class IyiSchedulerState
 
     def deadline_timer=(handle : Int64) : Int64
       @deadline_timer = handle
-    end
-
-    def wait_handles : Pointer(UInt8)
-      @wait_handles
-    end
-
-    def wait_handles=(pair : Pointer(UInt8)) : Pointer(UInt8)
-      @wait_handles = pair
     end
   {% end %}
 
@@ -1264,8 +1269,21 @@ class IyiSchedulerState
     @ring_tail = Atomic(UInt64).new(0_u64)
     @spinning = false
     @wake_fd = 0_i64
-    @wake_token = Pointer(UInt8).new(0_u64)
-    @port_serial = 0_u64
+    @lists = Atomic(UInt64).new(0_u64)
+    @held_seat = false
+    @seat_duty = false
+    @stdin_posted = false
+  end
+
+  # The lists lock's two halves (`IyiScheduler.lists_lock`): a read before
+  # the exchange, as the scheduler's lock does, so a spinner does not take
+  # the line for writing on every turn.
+  def take_lists : Bool
+    @lists.get == 0_u64 && @lists.compare_and_set(0_u64, 1_u64)[1]
+  end
+
+  def free_lists : Nil
+    @lists.set(0_u64)
   end
 
   # Whether another thread has handed this one a fiber or a cancel: one
@@ -1673,11 +1691,14 @@ class IyiScheduler
     end
     IyiRuntimeLock.unlock
     IyiSchedLock.unlock
+    # Windows' port is the process's, not this thread's: `pollfd` stays 0
+    # in its state there, and only its doorbell and timer go.
     __iyi_close(state.pollfd) if state.pollfd > 0_i64
     {% if flag?(:linux) %}
       __iyi_close(state.wake_fd) if state.wake_fd > 0_i64
     {% end %}
     {% if flag?(:win32) %}
+      __iyi_close(state.wake_fd) if state.wake_fd > 0_i64
       __iyi_close(state.deadline_timer) if state.deadline_timer > 0_i64
     {% end %}
     base = state.stack_pool
@@ -1878,7 +1899,7 @@ class IyiScheduler
     return if target.notified
     target.notified = true
     {% if flag?(:win32) %}
-      LibC.PostQueuedCompletionStatus(Pointer(Void).new(target.pollfd.to_u64), 0_i32, 0_u64, target.wake_token.as(Void*))
+      LibC.SetEvent(Pointer(Void).new(target.wake_fd.to_u64))
     {% elsif flag?(:darwin) %}
       change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_TRIGGER)
       LibC.kevent(target.pollfd.to_i32, pointerof(change).as(Void*), 1,
@@ -1893,13 +1914,15 @@ class IyiScheduler
   # idle, so a waker that sees it idle always has something to ring: an
   # eventfd in the epoll on Linux, an `EVFILT_USER` event on darwin's
   # kqueue (EV_ADD | EV_CLEAR, so a ring is taken once), and on Windows an
-  # OVERLAPPED of the state's own that a ring posts to the port and the
-  # poller recognises.
+  # auto-reset event of the thread's own. A packet posted to the port, as
+  # it was, is the process's on Windows now: any thread waiting there may
+  # take it, and the thread it was for slept on.
   def self.ensure_doorbell(st : IyiSchedulerState) : Nil
     {% if flag?(:win32) %}
-      return if st.wake_token.address != 0_u64
-      pollfd
-      st.wake_token = Pointer(UInt8).malloc(32_u64)
+      return if st.wake_fd != 0_i64
+      event = LibC.CreateEventW(Pointer(Void).new(0_u64), 0_i32, 0_i32, Pointer(UInt16).new(0_u64))
+      raise "CreateEventW could not make the scheduler's doorbell" if event.address == 0_u64
+      st.wake_fd = event.address.to_i64
     {% elsif flag?(:darwin) %}
       return if st.wake_fd != 0_i64
       change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_ADD)
@@ -1926,8 +1949,7 @@ class IyiScheduler
   # they woke onto the end of the run queue, in the order they came; the
   # cancels done here, on the thread whose lists the fibers wait in; the
   # descriptors closed elsewhere that a fiber here waits on; and on
-  # Windows the completions another thread's port took for operations
-  # posted here.
+  # Windows standard input's answer, when another thread took its post.
   #
   # A fiber that may move is cancelled here only while this thread's
   # lists hold it, which only this thread can say (`IyiFiber#listed_on`):
@@ -1969,14 +1991,9 @@ class IyiScheduler
       closed.each { |fd| wake_io(fd, 5) }
     end
     {% if flag?(:win32) %}
-      posted = st.forwarded
-      if posted.is_a?(Array(UInt64))
-        st.forwarded = nil
-        index = 0
-        while index + 1 < posted.size
-          complete_here(posted[index], posted[index + 1].to_i64)
-          index = index + 2
-        end
+      if st.stdin_posted
+        st.stdin_posted = false
+        IyiStdinReader.delivered
       end
     {% end %}
     IyiSchedLock.unlock
@@ -2065,17 +2082,37 @@ class IyiScheduler
   end
 
   # Every other scheduler thread idle with nothing of its own to wait for
-  # and no mail, and nothing on its way. Lock held.
+  # and no mail, and nothing on its way. Lock held. On Windows a thread's
+  # lists are looked at as well as what it said when it went idle: another
+  # thread may have taken its last io waiter's completion since
+  # (`complete_packet`), and an idle thread's lists only shrink.
+  #
+  # The lists are read first, then the packets in hand, then the queues:
+  # a thread taking a packet counts it in hand before the fiber leaves a
+  # list, and gives the count back only once the fiber is in a queue or a
+  # thread's mail, so a fiber between the two is seen in one of the three.
+  # Read the other way round, the main thread of bench/completions_taken.iyi
+  # was named deadlocked in 3 runs of 5 on the user's Windows 11 machine
+  # with 12 logical processors: its accept's packet was off its list and
+  # not yet in its mail, taken by an idle worker that still said it was
+  # idle and quiet.
   def self.all_quiet?(me : IyiSchedulerState) : Bool
-    return false if @@coming > 0_i64
-    return false unless IyiWorkers.queues_empty?
     other = @@states_head
     while other.is_a?(IyiSchedulerState)
       if other.object_id != me.object_id
-        return false unless other.idle && other.quiet && !other.mail?
+        quiet = other.quiet
+        {% if flag?(:win32) %}
+          quiet = quiet || (other.io_head.is_a?(Nil) && other.sleep_head.is_a?(Nil) && other.stdin_waiter.is_a?(Nil))
+        {% end %}
+        return false unless other.idle && quiet && !other.mail?
       end
       other = other.next_state
     end
+    {% if flag?(:win32) %}
+      return false if in_hand?
+    {% end %}
+    return false if @@coming > 0_i64
+    return false unless IyiWorkers.queues_empty?
     true
   end
 
@@ -2141,6 +2178,9 @@ class IyiScheduler
       take_mail(st) if st.mail?
       fiber = dequeue(st)
       if fiber.is_a?(IyiFiber)
+        {% if flag?(:win32) %}
+          left_idle(st)
+        {% end %}
         switch_to(fiber)
         return
       end
@@ -2156,14 +2196,14 @@ class IyiScheduler
   # its mail, then the fibers only it may run (`homebound`), then its own
   # ring, then the queues behind the lock - fibers a thread outside the
   # pool woke, the unstarted tasks its own tasks spawned, the pool's
-  # injection queue - then half of another worker's ring, then another
-  # worker's unstarted task - then a task preempted at a loop's back-edge
-  # (`IyiWorkers.preempted`), last, since it has had a quantum and every
-  # other one is waiting for its first; every `PREEMPTED_TURN`th look takes
-  # one first, so a stream of short tasks cannot keep it waiting for
-  # ever, Go's `schedtick % 61` for its global queue. A fiber of a unit
-  # another worker holds is left on that unit's list (`take_unit`) and the
-  # look goes on.
+  # injection queue - then on Windows the process's port, then half of
+  # another worker's ring, then another worker's unstarted task - then a
+  # task preempted at a loop's back-edge (`IyiWorkers.preempted`), last,
+  # since it has had a quantum and every other one is waiting for its
+  # first; every `PREEMPTED_TURN`th look takes one first, so a stream of
+  # short tasks cannot keep it waiting for ever, Go's `schedtick % 61` for
+  # its global queue. A fiber of a unit another worker holds is left on
+  # that unit's list (`take_unit`) and the look goes on.
   PREEMPTED_TURN = 61_u64
 
   def self.worker_next(st : IyiSchedulerState) : IyiFiber?
@@ -2176,6 +2216,12 @@ class IyiScheduler
         fiber = IyiWorkers.take_preempted unless fiber.is_a?(IyiFiber) || looks % PREEMPTED_TURN != 0_u64
         fiber = IyiWorkers.pop(st) unless fiber.is_a?(IyiFiber)
         fiber = IyiWorkers.take_queued(st) unless fiber.is_a?(IyiFiber)
+        {% if flag?(:win32) %}
+          if !fiber.is_a?(IyiFiber) && take_port(st)
+            fiber = dequeue(st)
+            fiber = IyiWorkers.pop(st) unless fiber.is_a?(IyiFiber)
+          end
+        {% end %}
         fiber = IyiWorkers.steal(st) unless fiber.is_a?(IyiFiber)
         fiber = IyiWorkers.take_preempted unless fiber.is_a?(IyiFiber)
         return nil unless fiber.is_a?(IyiFiber)
@@ -2262,11 +2308,15 @@ class IyiScheduler
   end
 
   # The expired sleepers and, when its time has come, the poller's news,
-  # without waiting; nothing at all when nobody waits on either.
+  # without waiting; nothing at all when nobody waits on either. On
+  # Windows the port is the process's, so a fiber waiting on any thread
+  # is reason to look (`io_waiting?`).
   def self.poll_now(st : IyiSchedulerState) : Nil
-    io = !st.io_head.is_a?(Nil)
+    io = false
     {% if flag?(:win32) %}
-      io = io || IyiStdinReader.waiting?
+      io = io_waiting?
+    {% else %}
+      io = !st.io_head.is_a?(Nil)
     {% end %}
     if io
       now = __iyi_monotonic_ns
@@ -2410,11 +2460,12 @@ class IyiScheduler
   # would otherwise fall back to costs 15.6 ms a round on the default
   # Windows timer tick.
   #
-  # `arm` associates the handle with the port, zeroes the running fiber's
-  # OVERLAPPED and answers it; `park` waits for the port to name that
-  # operation. Between the two the caller makes exactly one overlapped
-  # call, and reads `GetLastError` itself: ERROR_IO_PENDING (997) means
-  # park, anything else means the call answered on the spot.
+  # `arm` joins the handle to the process's port when it is not on it
+  # already, readies the running fiber's OVERLAPPED and answers it; `park`
+  # waits for the operation's packet. Between the two the caller makes
+  # exactly one overlapped call, and reads `GetLastError` itself:
+  # ERROR_IO_PENDING (997) means park, anything else means the call
+  # answered on the spot.
   #
   # *direction* is the rule `wait_posix` keeps on POSIX: one fiber reading a
   # handle and one writing it, and a second in the same direction refused.
@@ -2422,175 +2473,125 @@ class IyiScheduler
   # turns, which a program written there panicked over everywhere else.
   def self.arm_overlapped_current(handle : Void*, direction : Int32 = 0) : Pointer(UInt8)
     fiber = current
+    st = state
     if direction != 0
-      other = state.io_head
+      lists_lock(st)
+      other = st.io_head
       while other.is_a?(IyiFiber)
         if other.wait_handle.address == handle.address && other.io_direction == direction
+          lists_unlock(st)
           raise "two fibers #{direction == 1 ? "reading" : "writing"} one fd"
         end
         other = other.next_io
       end
+      lists_unlock(st)
     end
     fiber.io_direction = direction
-    port = Pointer(Void).new(pollfd.to_u64)
-    ov = fiber.wait_overlapped
-    # A handle belongs to one port, and each thread has its own. Every
-    # operation associated the handle and ignored the answer, which after
-    # the first is a refusal (87): a socket read on the main thread and
-    # handed to a worker kept its completions on the main thread's port,
-    # and the worker's read waited forever, its deadline with it. So the
-    # handle is moved to this thread's port - a handle on none refuses the
-    # move and is associated - unless its record says it is there already
-    # (`to_port`).
     {% if flag?(:win32) %}
-      to_port(handle, port, ov)
+      join_port(handle)
     {% end %}
+    ov = prepare_overlapped_current
+    fiber.wait_handle = handle
+    ov
+  end
 
+  # The running fiber's OVERLAPPED, readied for an operation about to be
+  # posted for it: zeroed, the thread it will park on written after it -
+  # this one, since nothing is scheduled between the post and the park -
+  # for whichever thread takes the packet (`complete_packet`), and the
+  # operation pending until one does (`IyiFiber#io_pending`). A wait with
+  # no handle readies it here directly: std/process's for a child's end
+  # and std/signal's for a console event, whose packets other threads
+  # post.
+  def self.prepare_overlapped_current : Pointer(UInt8)
+    fiber = current
+    ov = fiber.wait_overlapped
     Pointer(UInt64).new(ov.address + 0_u64).value = 0_u64
     Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
     Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
     Pointer(UInt64).new(ov.address + 24_u64).value = 0_u64
-    # Whose io list will hold the fiber, written before the operation is
-    # posted: a handle a fiber of this one's unit moved to another
-    # worker's port since has this completion arrive there, which hands it
-    # here (`forward_completion`).
     Pointer(UInt64).new(ov.address + 32_u64).value = state.object_id
-
-    fiber.wait_handle = handle
+    fiber.wait_handle = Pointer(Void).new(0_u64)
     fiber.io_bytes_read = 0_i64
+    fiber.io_pending = true
     ov
   end
 
   {% if flag?(:win32) %}
-    # `NtSetInformationFile`, asked of ntdll once and kept as a proc's two
-    # words: ntdll is in every process, and naming it on the import table
-    # adds a DLL to the floor `bench/concurrency_exercise.sh` reads.
-    @@set_information = Pointer(UInt64).new(0_u64)
+    # The process's one completion port (SPEC.md III.4.13, part 5): every
+    # scheduler thread takes completions from it, as every thread of a Go
+    # program takes them from Go's one `iocphandle`
+    # (`runtime/netpoll_windows.go`). Made by the first call that wants it,
+    # under the runtime lock so two threads' first calls make one, and
+    # never closed.
+    #
+    # It was a port per scheduler thread, a handle moved to the waiting
+    # thread's at each wait, and a completion was taken only by the thread
+    # whose task had parked on it. On the user's Windows 11 machine with 12
+    # logical processors, saturated by a database and with the priority
+    # boost off (agent TagsTick's trace of a loop of 103 queries a
+    # request), 145 answers sat on iyi's sockets over 100 ms each while the
+    # worker their task had parked on waited in the ready queue, and a
+    # median of 7 other workers ran.
+    @@port : UInt64 = 0_u64
 
-    # FileReplaceCompletionInformation (61, Windows 8.1): *handle*'s
-    # completions go to *port* from here on; nonzero for a handle on no
-    # port. *scratch* is the fiber's OVERLAPPED, which holds the
-    # information and the status block for the call and is zeroed after.
-    def self.move_to_port(handle : Void*, port : Void*, scratch : Pointer(UInt8)) : Int32
-      call = @@set_information
-      if call.address == 0_u64
-        call = Pointer(UInt64).malloc(2_u64)
-        call.value = LibC.GetProcAddress(LibC.GetModuleHandleA("ntdll.dll".to_unsafe), "NtSetInformationFile".to_unsafe).address
-        @@set_information = call
+    def self.make_port : Int64
+      IyiRuntimeLock.lock
+      port = @@port
+      if port == 0_u64
+        made = LibC.CreateIoCompletionPort(Pointer(Void).new(0xFFFFFFFFFFFFFFFF_u64), Pointer(Void).new(0_u64), 0_u64, 0_i32)
+        port = made.address
+        Pointer(Atomic(UInt64)).new(pointerof(@@port).address).value.set(port) if port != 0_u64
       end
-      Pointer(UInt64).new(scratch.address).value = port.address
-      Pointer(UInt64).new(scratch.address + 8_u64).value = 0_u64
-      set = call.as(Pointer(Proc(Void*, Void*, Void*, UInt32, Int32, Int32))).value
-      set.call(handle, Pointer(Void).new(scratch.address + 16_u64), scratch.as(Void*), 16_u32, 61)
+      IyiRuntimeLock.unlock
+      raise "CreateIoCompletionPort failed" if port == 0_u64
+      port.to_i64
     end
 
-    # Where each handle was last moved, so that a wait on a handle already
-    # on this thread's port makes neither call. Both were made on every
-    # wait - `NtSetInformationFile` twice, the move and the skip-on-success
-    # mode the move clears - which was 3.1% of the running samples of a
-    # server at 12 workers and 12,000 requests a second in #151, once per
-    # read, and once more per query on a database socket.
+    # Where a handle stands with the port. A handle joins it once and never
+    # leaves - there is no other port to go to - so a handle the standard
+    # library made is joined when it is made (`port_made`), and a wait on
+    # it makes no call at all; a handle with no record, which a program
+    # made itself, is joined at each wait, and the call refuses one that is
+    # on the port already (87) and changes nothing.
     #
-    # Measured on a Windows runner with 4 logical processors, release, two
-    # parallel tasks a connection trading 32 bytes, five runs each, medians:
-    # one connection went from 98,808 round trips a second to 127,028, its
-    # 80,000 waits making 3 moves where they had made 80,000; 8 and 32
-    # connections on 4 workers from 228,748 to 239,830 and from 264,846 to
-    # 281,057, where 51% and 64% of the waits still move, each one a task
-    # that resumed on another worker than its last wait's (job
-    # 122342296628).
+    # #151 measured why a wait should make no call: moving a handle to the
+    # waiting thread's port at every wait, two `NtSetInformationFile` calls,
+    # was 3.1% of the running samples of a server at 12 workers and 12,000
+    # requests a second, and skipping the moves took one connection's round
+    # trips from 98,808 a second to 127,028 on a Windows runner with 4
+    # logical processors (job 122342296628). Those moves are gone, and the
+    # record of which port a handle was moved to with them: what is left is
+    # one word per handle value, PORT_JOINED for a handle std made and
+    # joined, 0 otherwise, in a table built as the io owners' is
+    # (`io_chunk`) and indexed by the value over 4, since a kernel handle's
+    # low two bits are not part of it.
     #
-    # The record is a word per handle value, in a table built as the io
-    # owners' is (`io_chunk`) and indexed by the value over 4, since a
-    # kernel handle's low two bits are not part of it. The word is 0 for a
-    # handle the standard library did not make, which every wait moves as
-    # before and nothing records; PORT_OWNED for one it made (`port_made`)
-    # whose port is not known; and otherwise a mark (`port_mark`): the
-    # serial of the port it was last moved to and the epoch the move was
-    # made in, with PORT_MOVING beside it while a move is under way. A wait
-    # makes neither call only when the word is its own thread's mark, and a
-    # skip on a handle that is not on this port would post an operation
-    # whose completion comes to another port, or to none. A mark is not
-    # stale in any of the four ways a handle's port changes behind it:
-    #
-    # - Closed, and its value given to a new handle. Only a handle std made
-    #   is recorded, and each close std makes of one zeroes the word before
-    #   the handle goes (`port_closing`), so a new handle with that value
-    #   starts at 0 or PORT_OWNED and its first wait moves it. A handle a
-    #   program opened and closes itself is never recorded: that close is
-    #   not one this file can see, which is why there is an owned state.
-    # - Its port's thread ended. A mark carries the port's serial, given
-    #   once in the process's life - not the port's handle, which Windows
-    #   gives the next port, nor the state's address, which the collector
-    #   gives the next object - so no live thread's mark is a dead port's,
-    #   and a handle left on one moves at its next wait.
-    # - Moved by another thread at the same time. A mover claims the word
-    #   by exchange from what it read, moves, sets the mode, and then writes
-    #   its mark by exchange from its claim; one whose exchange fails, or
-    #   that saw another's claim, writes PORT_OWNED over whatever mark is
-    #   there instead. A mark therefore stands only if nobody wrote the word
-    #   between its claim and itself, and every mover writes the word after
-    #   its move, so once no move is under way a mark is the last move's.
-    #   The mode is set before the mark, so a skip finds it set.
-    # - Moved through a duplicate. A second value for the same file moves
-    #   the file and leaves the first value's word naming the port it left.
-    #   Std duplicates only the program's standard handles, for a child, and
-    #   records neither; and a move of a handle with no record - which is
-    #   where a program's own duplicate is - advances the epoch, so every
-    #   mark made before it stops matching and each handle moves once more.
-    #
-    # What it shares with moving on every wait: a reader on one worker and
-    # a writer on another move one handle under each other's posted
-    # operation, whose completion comes to the other port and is handed on
-    # (`forward_completion`), and an operation posted between another's
-    # move and its mode can answer at once and still leave a packet. Both
-    # were there before; a skip does not widen either window.
-    PORT_OWNED  =                  1_u64
-    PORT_MOVING = 0x8000000000000000_u64
+    # A word is right as long as std's closes zero it while the value is
+    # still the handle's (`port_closing`): the next handle Windows gives
+    # that value starts at 0, and its first wait joins it. A handle a
+    # program opened and closes itself is never recorded, because that
+    # close is not one this file can see.
+    PORT_JOINED = 1_u64
     @@port_records : UInt64 = 0_u64
-    @@port_serials : UInt64 = 2_u64
-    @@port_epoch : UInt64 = 0_u64
-    # Moves and first associations, in all: what `bench/socket_exercise.iyi`
-    # reads to know a handle that stays on one thread is not moved again.
-    @@port_moves : UInt64 = 0_u64
+    # Calls to join a handle, in all: what `bench/socket_exercise.iyi` reads
+    # to know a wait on a socket std made makes none.
+    @@port_joins : UInt64 = 0_u64
 
-    def self.to_port(handle : Void*, port : Void*, scratch : Pointer(UInt8)) : Nil
+    def self.join_port(handle : Void*) : Nil
       word = port_word(handle, false)
-      seen = word.address == 0_u64 ? 0_u64 : word.value.get
-      mine = port_mark
-      return if seen == mine && mine != 0_u64
-      claim = mine | PORT_MOVING
-      claimed = mine != 0_u64 && seen != 0_u64 && (seen & PORT_MOVING) == 0_u64 && word.value.compare_and_set(seen, claim)[1]
-      moved = move_to_port(handle, port, scratch) == 0 || LibC.CreateIoCompletionPort(handle, port, 0_u64, 0_i32).address != 0_u64
-      # The move clears the skip-on-success mode, so it follows every move:
-      # without it, 50 reads that answered at once left 50 completions that
-      # woke the next read.
+      return if word.address != 0_u64 && word.value.get == PORT_JOINED
+      join_handle(handle)
+    end
+
+    # The association, and the skip-on-success mode once the handle is on
+    # the port: without it, 50 reads that answered at once left 50
+    # completions that woke the next read.
+    def self.join_handle(handle : Void*) : Bool
+      Pointer(Atomic(UInt64)).new(pointerof(@@port_joins).address).value.add(1_u64)
+      return false if LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32).address == 0_u64
       LibC.SetFileCompletionNotificationModes(handle, 1_u8)
-      Pointer(Atomic(UInt64)).new(pointerof(@@port_moves).address).value.add(1_u64)
-      if seen == 0_u64
-        Pointer(Atomic(UInt64)).new(pointerof(@@port_epoch).address).value.add(1_u64)
-        return
-      end
-      return if claimed && moved && word.value.compare_and_set(claim, mine)[1]
-      while true
-        held = word.value.get
-        return if held <= PORT_OWNED || word.value.compare_and_set(held, PORT_OWNED)[1]
-      end
-    end
-
-    # This thread's port's serial under the epoch, 0 - never a match - past
-    # the serials a mark has room for.
-    def self.port_mark : UInt64
-      serial = state.port_serial
-      return 0_u64 if serial > 0xFFFFFFFF_u64
-      epoch = Pointer(Atomic(UInt64)).new(pointerof(@@port_epoch).address).value.get
-      (epoch & 0x7FFFFFFF_u64).unsafe_shl(32_u64) | serial
-    end
-
-    # The serial for a port just made: from 2, so a mark is never 0 or
-    # PORT_OWNED.
-    def self.next_port_serial : UInt64
-      Pointer(Atomic(UInt64)).new(pointerof(@@port_serials).address).value.add(1_u64)
+      true
     end
 
     # *handle*'s word, null when the table has no room for its value or,
@@ -2603,10 +2604,12 @@ class IyiScheduler
       Pointer(Atomic(UInt64)).new(chunk &+ (index % IO_CHUNK) &* 8_u64)
     end
 
-    # A handle std just made, and will close through `port_closing`.
+    # A handle std just made, which will close through `port_closing`:
+    # joined to the port now, and recorded so no wait on it asks again.
     def self.port_made(handle : Void*) : Nil
+      return unless join_handle(handle)
       word = port_word(handle, true)
-      word.value.set(PORT_OWNED) if word.address != 0_u64
+      word.value.set(PORT_JOINED) if word.address != 0_u64
     end
 
     # A handle std is about to close: its word is zeroed while the value is
@@ -2616,8 +2619,8 @@ class IyiScheduler
       word.value.set(0_u64) if word.address != 0_u64
     end
 
-    def self.port_moves : UInt64
-      Pointer(Atomic(UInt64)).new(pointerof(@@port_moves).address).value.get
+    def self.port_joins : UInt64
+      Pointer(Atomic(UInt64)).new(pointerof(@@port_joins).address).value.get
     end
 
     # A park for standard input's reader thread: off the io list, which is
@@ -2627,9 +2630,12 @@ class IyiScheduler
     def self.park_stdin_current(ms : Int32) : Nil
       fiber = current
       waiting_out = fiber.cancelled
+      st = state
       fiber.state = IyiFiberState::WaitingIo
       fiber.wait_handle = Pointer(Void).new(0_u64)
+      lists_lock(st)
       arm_deadline(fiber, ms)
+      lists_unlock(st)
       listed(fiber, waiting_out)
       reschedule
     end
@@ -2638,17 +2644,41 @@ class IyiScheduler
   # The park of a posted operation. A fiber cancelled already parks here
   # to wait out the packet of the operation its cancel ended, and is not
   # ended by that cancel a second time (`listed`); it parks on the thread
-  # whose port the packet comes to, since its cancel made it `homebound`
+  # its OVERLAPPED names, since its cancel made it `homebound`
   # (`cancel_wait`), which it is not past this park.
+  #
+  # On Windows another thread may take the packet before the fiber is
+  # here - the operation answered while this thread was between the post
+  # and the park, or after the cancel that woke the fiber - and then the
+  # park does not wait (`IyiFiber#io_pending`). So a cancelled operation
+  # is waited out by parking here once, whatever became of its packet.
+  # The fiber goes on the io list, into the sleep heap for its deadline,
+  # and names this thread as its own (`IyiFiber#list_on`) in one step under
+  # this thread's lists lock, which the thread taking the packet holds to
+  # take it off them all.
   def self.park_overlapped_current(ms : Int32 = -1) : Int64 | Cancelled
     fiber = current
     waiting_out = fiber.cancelled
-    fiber.state = IyiFiberState::WaitingIo
     st = state
+    lists_lock(st)
+    {% if flag?(:win32) %}
+      unless fiber.io_pending
+        lists_unlock(st)
+        fiber.timed_out = false
+        fiber.homebound = false
+        return Cancelled.new if fiber.cancelled
+        return fiber.io_bytes_read
+      end
+    {% end %}
+    fiber.state = IyiFiberState::WaitingIo
     fiber.next_io = st.io_head
     st.io_head = fiber
+    io_waiters(1_i64)
     arm_deadline(fiber, ms)
-    listed(fiber, waiting_out)
+    fiber.waiting_out = waiting_out
+    fiber.list_on(st.object_id) if @@shared && fiber.unit.is_a?(IyiUnit)
+    lists_unlock(st)
+    cancel_wait(fiber) if @@shared && fiber.unit.is_a?(IyiUnit) && fiber.cancelled && !waiting_out
     reschedule
     fiber.homebound = false
 
@@ -2716,15 +2746,16 @@ class IyiScheduler
     parked = park_overlapped_current(ms)
     return parked unless parked.is_a?(Cancelled)
     # Cancelled, and the read is the kernel's until its packet is off the
-    # port: the bytes and the OVERLAPPED's status are written when the
+    # port: the bytes and the OVERLAPPED's status are written when a
     # poller takes it (`cancel` says what was measured), and a read whose
     # bytes had come already is not ended by `CancelIoEx` at all. Answered
     # `Cancelled` on the flag, those bytes were gone from the pipe and lost:
     # a sibling that wrote three and then failed left the reader's buffer
-    # 0,0,0 at the answer and 97,98,99 after it, 8 runs in 8. So a status
-    # still STATUS_PENDING (0x103) parks once more for the packet, as
-    # `ProcessChild.settle` does, and bytes it carried are the answer.
-    park_overlapped_current if Pointer(UInt64).new(ov.address).value == 0x103_u64
+    # 0,0,0 at the answer and 97,98,99 after it, 8 runs in 8. So it parks
+    # once more for the packet, which answers at once when a thread took
+    # it already (`park_overlapped_current`), and bytes it carried are the
+    # answer.
+    park_overlapped_current
     fiber.io_bytes_read > 0_i64 ? fiber.io_bytes_read : parked
   end
 
@@ -2850,20 +2881,31 @@ class IyiScheduler
   # An io wait's deadline, *ms* milliseconds from now, or none for -1. The
   # fiber goes into the sleep list beside the io list; `timed_out` starts
   # false either way, so a caller reads it only after a wait that armed it.
+  # This thread's lists lock held (`lists_lock`).
   def self.arm_deadline(fiber : IyiFiber, ms : Int32) : Nil
     fiber.timed_out = false
     return if ms < 0
     fiber.deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
     fiber.io_timed = true
-    sleep_insert(fiber)
+    heap_insert(state, fiber)
   end
 
   # An io wait that ended some other way leaves the sleep list, or its
   # deadline would wake the fiber a second time, wherever it is by then.
   def self.untime(fiber : IyiFiber) : Nil
+    st = state
+    lists_lock(st)
+    untime_in(st, fiber)
+    lists_unlock(st)
+  end
+
+  # The same out of *st*'s sleep heap, whichever thread asks: on Windows
+  # the thread that takes a fiber's completion takes it out of the heap of
+  # the thread it parked on. *st*'s lists lock held.
+  def self.untime_in(st : IyiSchedulerState, fiber : IyiFiber) : Nil
     return unless fiber.io_timed
     fiber.io_timed = false
-    sleep_remove(fiber)
+    heap_remove(st, fiber)
   end
 
   # The directions fibers are waiting in on *fd*, as epoll bits: its two
@@ -3310,26 +3352,41 @@ class IyiScheduler
         # miss. So a caller cannot wait for the operation with
         # `WSAGetOverlappedResult(wait = 1)`: this OVERLAPPED has no event
         # and the handle is never signalled, and such a wait never returns.
-        # `std/socket`'s cancelled paths therefore ask once and park again,
-        # and the poller's dequeue is what ends them.
+        # `std/socket`'s cancelled paths therefore park again, and a
+        # poller's dequeue is what ends them (`park_overlapped_current`).
         #
-        # The shorter answer, not taken: drop the `io_remove` and `enqueue`
-        # below and let the completion wake the fiber, which would make the
+        # The shorter answer, not taken: leave the fiber parked below and
+        # let the completion wake it, which would make the
         # operation provably over at every wake. It changes cancellation
         # for every kind of handle on this platform — files, the console,
         # pipes — and each would need its own measurement first.
         #
-        # So the fiber resumes here, `homebound`, though it may move: the
-        # packet comes to this thread's port, or is forwarded here by the
-        # thread id the OVERLAPPED carries (`forward_completion`), and the
-        # park that waits it out must be on this thread's io list. Resumed
-        # on another worker it parked on that one's, the packet found no
-        # fiber here, and the next operation's park could take it as its
-        # own. `park_overlapped_current` lets go of it.
-        LibC.CancelIoEx(fiber.wait_handle, fiber.wait_overlapped.as(Void*))
-        io_remove(fiber)
-        fiber.homebound = true if fiber.unit.is_a?(IyiUnit)
-        enqueue(fiber)
+        # So the fiber resumes here, `homebound`, though it may move: its
+        # OVERLAPPED names this thread, and the park that waits the packet
+        # out must be on this thread's io list, where the thread that takes
+        # the packet looks for it (`complete_packet`). Resumed on another
+        # worker it parked on that one's, the packet found no fiber here,
+        # and the next operation's park could take it as its own.
+        # `park_overlapped_current` lets go of it.
+        #
+        # Any thread may take the packet meanwhile, and the fiber off this
+        # thread's lists with it, so the cancel takes the fiber only while
+        # it is still there, under the lock that thread takes: taken by
+        # both, it was queued twice. Standard input's waiter is on no io
+        # list (`park_stdin_current`), and no other thread wakes it.
+        st = state
+        stdin = IyiStdinReader.waiter?(fiber)
+        taken = false
+        unless stdin
+          lists_lock(st)
+          taken = io_take_overlapped(st, fiber.wait_overlapped.address).is_a?(IyiFiber)
+          lists_unlock(st)
+        end
+        if taken || stdin
+          LibC.CancelIoEx(fiber.wait_handle, fiber.wait_overlapped.as(Void*)) if taken
+          fiber.homebound = true if fiber.unit.is_a?(IyiUnit)
+          enqueue(fiber)
+        end
       {% else %}
         io_remove(fiber)
         enqueue(fiber)
@@ -3384,7 +3441,16 @@ class IyiScheduler
   # Waits for the next event when *blocking*, and otherwise takes what has
   # arrived already (`poll_now`).
   def self.wait_for_events(blocking : Bool) : Nil
-    sleep_head = state.sleep_head
+    st = state
+    # The heap's root and its deadline read together, under the lock: on
+    # Windows another thread may take the root out of it meanwhile
+    # (`complete_packet`), and the fiber's deadline is its next wait's
+    # once it runs again. A root gone by the time of the wait is a wake
+    # with nothing due, which the loop that called this takes again.
+    lists_lock(st)
+    sleep_head = st.sleep_head
+    head_deadline = sleep_head.is_a?(IyiFiber) ? sleep_head.deadline : 0_i64
+    lists_unlock(st)
     timeout = blocking ? -1_i64 : 0_i64
     {% if flag?(:win32) %}
       gap_ns = -1_i64
@@ -3393,7 +3459,7 @@ class IyiScheduler
     # wait for may still be woken by another, and its doorbell is in this
     # poller: whether that is a deadlock is `wait_shared`'s to decide.
     if blocking && !@@shared
-      quiet = state.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
+      quiet = st.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
       {% if flag?(:win32) %}
         quiet = quiet && !IyiStdinReader.waiting?
       {% end %}
@@ -3404,7 +3470,7 @@ class IyiScheduler
     end
     if blocking && sleep_head.is_a?(IyiFiber)
       now = __iyi_monotonic_ns
-      gap = sleep_head.deadline - now
+      gap = head_deadline - now
       gap = 0_i64 if gap < 0
       timeout = (gap + 999999_i64) // 1000000_i64
       {% if flag?(:win32) %}
@@ -3420,43 +3486,69 @@ class IyiScheduler
       overlapped_ptr = Pointer(Void).new(0_u64)
       port = Pointer(Void).new(pollfd.to_u64)
 
-      # No deadline to keep, or a Windows that refused the timer: the
-      # port's own wait, blocking or rounded up to the tick as before. Not
-      # waiting, the drain below is the whole of it.
+      # A due time in hundred-nanosecond units, negative for "from now"; a
+      # gap of zero is an absolute time already past, which signals at
+      # once. The drain below takes whatever the port has, so a wait only
+      # has to end at the right moment. No deadline to keep, or a Windows
+      # that refused the timer: the millisecond timeout alone, rounded up
+      # to the tick as before.
       timer = gap_ns < 0 ? -1_i64 : deadline_timer
-      if timer <= 0 && blocking
-        LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), timeout_ms)
-        if overlapped_ptr.address != 0_u64 && overlapped_ptr.address == IyiStdinReader.overlapped_address
-          IyiStdinReader.delivered
-        elsif overlapped_ptr.address != 0_u64 && overlapped_ptr.address == state.wake_token.address
-          # The doorbell (III.4.13): another thread left mail, which the
-          # scheduler's loop takes.
-        elsif overlapped_ptr.address != 0_u64
-          complete_or_forward(overlapped_ptr.address, bytes_transferred.to_i64)
-        end
-      elsif timer > 0
-        # A due time in hundred-nanosecond units, negative for "from
-        # now"; a gap of zero is an absolute time already past, which
-        # signals at once. The drain below takes whatever the port has,
-        # so this wait only has to end at the right moment.
+      timer_handle = Pointer(Void).new(timer > 0 ? timer.to_u64 : 0_u64)
+      if blocking && timer > 0
         due = 0_i64 - gap_ns // 100_i64
-        timer_handle = Pointer(Void).new(timer.to_u64)
         LibC.SetWaitableTimer(timer_handle, pointerof(due), 0_i32,
           Pointer(Void).new(0_u64), Pointer(Void).new(0_u64), 0_i32)
-        LibC.WaitForMultipleObjects(2_i32, state.wait_handles.as(Void*), 0_i32, timeout_ms)
-        LibC.CancelWaitableTimer(timer_handle)
       end
-
-      while true
-        overlapped_ptr = Pointer(Void).new(0_u64)
-        more = LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), 0_i32)
-        break if overlapped_ptr.address == 0_u64
-        if overlapped_ptr.address == IyiStdinReader.overlapped_address
-          IyiStdinReader.delivered
-          next
+      handles = uninitialized UInt64[3]
+      words = pointerof(handles).as(Pointer(UInt64))
+      seated = false
+      if blocking && @@shared
+        # Every thread with nothing to run waits on its doorbell and its
+        # timer, and one of them - the seat's holder (`take_seat`) - on the
+        # port as well. A port is a waitable object, signalled while it
+        # holds a packet, and a wait on it takes no packet: what it holds
+        # stays for whichever thread looks first, so a holder the kernel
+        # wakes and then leaves in the ready queue keeps nobody's answer
+        # from a worker that is running (`take_port`). One holder, not
+        # every idle thread, so a packet wakes one of them.
+        words[0] = st.wake_fd.to_u64
+        named = 1
+        seated = take_seat(st)
+        if seated
+          words[named] = port.address
+          named = named + 1
         end
-        next if overlapped_ptr.address == state.wake_token.address
-        complete_or_forward(overlapped_ptr.address, bytes_transferred.to_i64)
+        if timer > 0
+          words[named] = timer.to_u64
+          named = named + 1
+        end
+        LibC.WaitForMultipleObjects(named, words.as(Void*), 0_i32, timeout_ms)
+        seat_word.value.set(0_u64) if seated
+      elsif blocking && timer > 0
+        # The one scheduler thread, with a deadline: the port and the
+        # timer.
+        words[0] = port.address
+        words[1] = timer.to_u64
+        LibC.WaitForMultipleObjects(2_i32, words.as(Void*), 0_i32, timeout_ms)
+      elsif blocking
+        # The one scheduler thread, with none: the port's own wait.
+        LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), timeout_ms)
+        complete_packet(overlapped_ptr.address, bytes_transferred.to_i64) if overlapped_ptr.address != 0_u64
+      end
+      LibC.CancelWaitableTimer(timer_handle) if blocking && timer > 0
+
+      # What the port holds, taken: by a poll, by the one thread, and by
+      # the seat's holder; a thread its doorbell woke leaves the port to
+      # the holder and to the workers that look on their way
+      # (`take_port`).
+      if !blocking || !@@shared || seated
+        st.polled_at = __iyi_monotonic_ns if seated
+        while true
+          overlapped_ptr = Pointer(Void).new(0_u64)
+          LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), 0_i32)
+          break if overlapped_ptr.address == 0_u64
+          complete_packet(overlapped_ptr.address, bytes_transferred.to_i64)
+        end
       end
     {% elsif flag?(:darwin) %}
       # kevent's timeout is a timespec pointer and null means forever:
@@ -3530,53 +3622,281 @@ class IyiScheduler
     wake_expired_sleepers
   end
 
-  {% if flag?(:win32) %}
-    # A completion this thread's port took: the fiber that posted it woken
-    # here, or, when no fiber here posted it, handed to the thread that
-    # did (`forward_completion`).
-    def self.complete_or_forward(overlapped : UInt64, bytes : Int64) : Nil
-      fiber = io_take_overlapped(overlapped)
-      if fiber.is_a?(IyiFiber)
-        fiber.io_bytes_read = bytes
-        enqueue(fiber)
-        return
+  # A thread's io list and sleep heap, locked (SPEC.md III.4.13, part 5).
+  # On Windows any thread may take a completion off the process's port,
+  # and with it the fiber off the io list and out of the sleep heap of the
+  # thread it parked on (`complete_packet`); every change to those two,
+  # by their own thread or another, is made holding this. Nothing is
+  # taken while it is held, so it nests inside the scheduler's lock and
+  # the runtime's in any order; past 128 turns a spinner gives its core
+  # away, as the scheduler's lock's does. Elsewhere a thread's lists are
+  # its own and this is nothing.
+  def self.lists_lock(st : IyiSchedulerState) : Nil
+    {% if flag?(:win32) %}
+      return unless @@shared
+      spins = 0
+      while true
+        return if st.take_lists
+        spins = spins &+ 1
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+          IyiThread.yield_cpu if spins & 127 == 0
+        {% end %}
+        {% if flag?(:x86_64) %}
+          asm("pause" :::: "volatile")
+        {% else %}
+          asm("yield" :::: "volatile")
+        {% end %}
       end
-      forward_completion(overlapped, bytes) if @@shared
+    {% end %}
+  end
+
+  def self.lists_unlock(st : IyiSchedulerState) : Nil
+    {% if flag?(:win32) %}
+      return unless @@shared
+      st.free_lists
+    {% end %}
+  end
+
+  # Fibers parked on io lists, every thread's together: on Windows what
+  # tells a thread whether the port is worth a look (`io_waiting?`).
+  @@io_waiters : Int64 = 0_i64
+
+  def self.io_waiters(delta : Int64) : Nil
+    {% if flag?(:win32) %}
+      Pointer(Atomic(Int64)).new(pointerof(@@io_waiters).address).value.add(delta)
+    {% end %}
+  end
+
+  {% if flag?(:win32) %}
+    # Whether a fiber anywhere in the process waits on the port: on an
+    # io list, or for standard input's reader.
+    def self.io_waiting? : Bool
+      Pointer(Atomic(Int64)).new(pointerof(@@io_waiters).address).value.get > 0_i64 || IyiStdinReader.asked?
     end
 
-    # A completion for an operation another thread's fiber posted. A handle
-    # belongs to one port at a time, and each operation moves it to the
-    # port of the thread posting (`arm_overlapped_current`): a parallel
-    # task's unit may read a socket on one worker and write it on another,
-    # and the read's completion then comes to the writer's port. Whose it
-    # is says the word after the OVERLAPPED, once the address is known to
-    # be a fiber's own - the registry is walked for that, and only for a
-    # completion no fiber here claims - and that thread takes it from its
-    # mail (`complete_here`).
-    def self.forward_completion(overlapped : UInt64, bytes : Int64) : Nil
-      owner = 0_u64
+    # A packet some thread took off the process's port: standard input's
+    # answer (`IyiStdinReader.answered`), or the end of an operation a
+    # fiber posted. The fiber is on the io list of the thread its
+    # OVERLAPPED names, the one it parked on, whichever thread took the
+    # packet: it comes off that list, out of that thread's sleep heap and
+    # its listing (`IyiFiber#list_on`) under that thread's lists lock, and
+    # is woken here - a fiber that may move into this worker's ring,
+    # where an idle worker may steal it, and any other sent home
+    # (`wake_completed`). Go readies a goroutine its netpoller found the
+    # same way, wherever the poll ran (`injectglist`).
+    #
+    # A fiber on no list yet - its operation answered between the post and
+    # the park, or after a cancel woke it and before the park that waits
+    # it out - is found by the registry, the one place a fiber on no list
+    # can be told from an address that is nobody's, and its operation
+    # marked over (`IyiFiber#io_pending`), which its park reads under the
+    # same lock and then does not wait. A packet no fiber claims is
+    # dropped.
+    #
+    # The packet is counted in hand from before its fiber leaves a list
+    # until the fiber is in a queue or its thread's mail (`all_quiet?`).
+    # A dropped one rings the thread that names a deadlock, which may have
+    # declined to while it was in hand.
+    def self.complete_packet(overlapped : UInt64, bytes : Int64) : Nil
+      if overlapped == IyiStdinReader.overlapped_address
+        IyiStdinReader.answered
+        return
+      end
+      hand = Pointer(Atomic(Int64)).new(pointerof(@@in_hand).address)
+      hand.value.add(1_i64)
+      claimed = take_packet(overlapped, bytes)
+      hand.value.sub(1_i64)
+      return if claimed || !@@shared
+      IyiSchedLock.lock
+      ring_reporter
+      IyiSchedLock.unlock
+    end
+
+    # Packets some thread has taken off the port and not yet handed to a
+    # queue or a mail (`complete_packet`).
+    @@in_hand : Int64 = 0_i64
+
+    def self.in_hand? : Bool
+      Pointer(Atomic(Int64)).new(pointerof(@@in_hand).address).value.get > 0_i64
+    end
+
+    # The packet's fiber woken, or its operation marked over; false when no
+    # fiber claims it.
+    def self.take_packet(overlapped : UInt64, bytes : Int64) : Bool
+      owner = state_named(Pointer(UInt64).new(overlapped + 32_u64).value)
+      return false unless owner.is_a?(IyiSchedulerState)
+      lists_lock(owner)
+      fiber = io_take_overlapped(owner, overlapped)
+      if fiber.is_a?(IyiFiber)
+        fiber.io_bytes_read = bytes
+        fiber.io_pending = false
+        lists_unlock(owner)
+        wake_completed(fiber)
+        return true
+      end
+      lists_unlock(owner)
+      posting = fiber_posting(overlapped)
+      return false unless posting.is_a?(IyiFiber)
+      lists_lock(owner)
+      fiber = io_take_overlapped(owner, overlapped)
+      if fiber.is_a?(IyiFiber)
+        fiber.io_bytes_read = bytes
+        fiber.io_pending = false
+        lists_unlock(owner)
+        wake_completed(fiber)
+        return true
+      end
+      if posting.io_pending
+        posting.io_bytes_read = bytes
+        posting.io_pending = false
+      end
+      lists_unlock(owner)
+      true
+    end
+
+    # The fiber whose OVERLAPPED is at *overlapped*, from the registry, or
+    # nil.
+    def self.fiber_posting(overlapped : UInt64) : IyiFiber?
+      found : IyiFiber? = nil
       IyiRuntimeLock.lock
       fiber = @@all_head
       while fiber.is_a?(IyiFiber)
         if fiber.wait_overlapped.address == overlapped
-          owner = Pointer(UInt64).new(overlapped + 32_u64).value
+          found = fiber
           break
         end
         fiber = fiber.next_fiber
       end
       IyiRuntimeLock.unlock
-      return if owner == 0_u64 || owner == state.object_id
+      found
+    end
+
+    # The scheduler state whose id is *id* while it is on the roots' list,
+    # or nil: this thread's, a worker's from the pool's list without a lock
+    # (`IyiWorkers.worker_named`), or any other's under the scheduler's
+    # lock, as a deadlock's walk reads the list.
+    def self.state_named(id : UInt64) : IyiSchedulerState?
+      return nil if id == 0_u64
+      st = state
+      return st if st.object_id == id
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        worker = IyiWorkers.worker_named(id)
+        return worker if worker.is_a?(IyiSchedulerState)
+      {% end %}
+      found : IyiSchedulerState? = nil
+      IyiSchedLock.lock
+      other = @@states_head
+      while other.is_a?(IyiSchedulerState)
+        if other.object_id == id
+          found = other
+          break
+        end
+        other = other.next_state
+      end
+      IyiSchedLock.unlock
+      found
+    end
+
+    # A fiber whose packet this thread took, made runnable from here.
+    def self.wake_completed(fiber : IyiFiber) : Nil
+      unless @@shared
+        enqueue(fiber)
+        return
+      end
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        if state.worker && fiber.unit.is_a?(IyiUnit) && !fiber.homebound
+          enqueue(fiber)
+          return
+        end
+      {% end %}
+      IyiSchedLock.lock
+      ready(fiber)
+      IyiSchedLock.unlock
+    end
+
+    # The seat: the one thread with nothing to run that waits on the port,
+    # by its state's id, 0 while none does. A pool worker, once the pool
+    # has started, and before it any scheduler thread: a thread outside
+    # the pool that held it woke for a worker's task, handed it to the
+    # pool's queue and called a worker, two wakes where one would do. Go
+    # keeps one thread blocked in its netpoller the same way, the one that
+    # sets `sched.lastpoll` to 0.
+    @@seat : UInt64 = 0_u64
+
+    def self.seat_word : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(pointerof(@@seat).address)
+    end
+
+    # Whether *st*, about to wait with nothing to run, takes the seat.
+    def self.take_seat(st : IyiSchedulerState) : Bool
+      st.seat_duty = false
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        return false if IyiWorkers.started? != st.worker
+      {% end %}
+      return false unless seat_word.value.compare_and_set(0_u64, st.object_id)[1]
+      st.held_seat = true
+      true
+    end
+
+    # A thread leaving its idle wait to run something, which held the seat
+    # or was rung to take it: one idle thread is rung to the port in its
+    # place, which takes the seat when it waits again (`take_seat`), or
+    # finding something to run calls the next. Go's netpoller thread, when
+    # it finds work, wakes a spinning thread the same way (`wakep`).
+    # Without it, a holder that went on to compute for seconds would leave
+    # the port to nobody while idle workers slept on their doorbells.
+    def self.left_idle(st : IyiSchedulerState) : Nil
+      return unless st.held_seat || st.seat_duty
+      st.held_seat = false
+      st.seat_duty = false
+      return if seat_word.value.get != 0_u64
+      IyiSchedLock.lock
+      call_sitter(st)
+      IyiSchedLock.unlock
+    end
+
+    # Lock held.
+    def self.call_sitter(me : IyiSchedulerState) : Nil
+      return if seat_word.value.get != 0_u64
+      pool = false
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        pool = IyiWorkers.started?
+      {% end %}
+      other = @@states_head
+      while other.is_a?(IyiSchedulerState)
+        if other.object_id != me.object_id && other.worker == pool && other.idle && !other.notified
+          other.seat_duty = true
+          ring(other)
+          return
+        end
+        other = other.next_state
+      end
+    end
+
+    # A worker with nothing of its own to run looks at the port without
+    # waiting, once `POLL_IO_NS` have passed since it last looked: the
+    # seat's holder may be in the ready queue behind other processes'
+    # threads, and the packets it was woken for are any thread's to take.
+    # True when it looked.
+    def self.take_port(st : IyiSchedulerState) : Bool
+      return false unless io_waiting?
+      now = __iyi_monotonic_ns
+      return false if now - st.polled_at < POLL_IO_NS
+      st.polled_at = now
+      wait_for_events(false)
+      true
+    end
+
+    # Standard input's answer, taken off the port here for a fiber of the
+    # thread whose id is *owner*: into that thread's mail, which delivers
+    # it (`take_mail`), since the waiter and its deadline are that
+    # thread's. Nothing when that thread has ended.
+    def self.hand_stdin(owner : UInt64) : Nil
       IyiSchedLock.lock
       other = @@states_head
       while other.is_a?(IyiSchedulerState)
         if other.object_id == owner
-          posted = other.forwarded
-          unless posted.is_a?(Array(UInt64))
-            posted = [] of UInt64
-            other.forwarded = posted
-          end
-          posted << overlapped
-          posted << bytes.to_u64
+          other.stdin_posted = true
           other.post_mail
           ring(other)
           break
@@ -3584,14 +3904,6 @@ class IyiScheduler
         other = other.next_state
       end
       IyiSchedLock.unlock
-    end
-
-    # A completion another thread's port took for a fiber here. Lock held.
-    def self.complete_here(overlapped : UInt64, bytes : Int64) : Nil
-      fiber = io_take_overlapped(overlapped)
-      return unless fiber.is_a?(IyiFiber)
-      fiber.io_bytes_read = bytes
-      enqueue(fiber)
     end
   {% end %}
 
@@ -3613,8 +3925,8 @@ class IyiScheduler
   # thread's poller - a parallel task's unit closing on one worker what
   # one of its fibers waits on in another's - is that thread's to wake,
   # and the close is posted to it (`io_owner`), which wakes it from its
-  # mail. On Windows a close ends the posted operation, whose completion
-  # goes to the port the waiting thread posted it on.
+  # mail. On Windows a close ends the posted operation, whose packet any
+  # thread takes off the process's port (`complete_packet`).
   def self.wake_closed(fd : Int32) : Nil
     {% if flag?(:win32) %}
     {% else %}
@@ -3645,13 +3957,21 @@ class IyiScheduler
   end
 
   def self.wake_expired_sleepers : Nil
-    return if state.sleep_head.is_a?(Nil)
+    st = state
+    return if st.sleep_head.is_a?(Nil)
     now = __iyi_monotonic_ns
     while true
-      head = state.sleep_head
-      return unless head.is_a?(IyiFiber)
-      return if head.deadline > now
-      sleep_remove(head)
+      lists_lock(st)
+      head = st.sleep_head
+      unless head.is_a?(IyiFiber)
+        lists_unlock(st)
+        return
+      end
+      if head.deadline > now
+        lists_unlock(st)
+        return
+      end
+      heap_remove(st, head)
       if head.io_timed
         # An io wait whose deadline came first.
         head.io_timed = false
@@ -3661,17 +3981,25 @@ class IyiScheduler
           # the port, and the OVERLAPPED is the fiber's next operation's
           # too: it is cancelled here, and the cancellation's completion is
           # what wakes the fiber, so nothing of it is left to arrive later.
-          # Standard input's read is its thread's, and withdrawn there.
+          # The cancel is made holding the lock, which a thread taking the
+          # fiber's packet needs: the operation it cancels is still the one
+          # the fiber waits on, and not one the fiber has posted since on
+          # another worker. Standard input's read is its thread's, and
+          # withdrawn there once the lock is let go - a withdrawal may wait
+          # 50 ms (`IyiStdinReader.withdraw`).
           if IyiStdinReader.waiter?(head)
+            lists_unlock(st)
             IyiStdinReader.withdraw
           else
             LibC.CancelIoEx(head.wait_handle, head.wait_overlapped.as(Void*))
+            lists_unlock(st)
           end
           next
         {% else %}
           io_remove(head)
         {% end %}
       end
+      lists_unlock(st)
       # A select with a timeout arm is in this heap and a channel's queues
       # at once, and either can wake it: one already woken is not queued
       # twice. Its `unpark` takes it out of here when it runs. A channel's
@@ -3699,6 +4027,13 @@ class IyiScheduler
   # Equal deadlines leave in the order they came, as the list kept them.
   def self.sleep_insert(fiber : IyiFiber) : Nil
     st = state
+    lists_lock(st)
+    heap_insert(st, fiber)
+    lists_unlock(st)
+  end
+
+  # The same into *st*'s heap, its lists lock held.
+  def self.heap_insert(st : IyiSchedulerState, fiber : IyiFiber) : Nil
     st.sleep_seq = st.sleep_seq &+ 1_u64
     fiber.sleep_seq = st.sleep_seq
     fiber.sleep_child = nil
@@ -3708,9 +4043,10 @@ class IyiScheduler
     st.sleep_head = root.is_a?(IyiFiber) ? sleep_meld(root, fiber) : fiber
   end
 
-  # Whether *fiber* is in the heap: its root, or linked under a node.
-  def self.sleeping?(fiber : IyiFiber) : Bool
-    root = state.sleep_head
+  # Whether *fiber* is in *st*'s heap: its root, or linked under a node.
+  # The lists lock held.
+  def self.heap_holds?(st : IyiSchedulerState, fiber : IyiFiber) : Bool
+    root = st.sleep_head
     return true if root.is_a?(IyiFiber) && root.object_id == fiber.object_id
     fiber.sleep_prev.is_a?(IyiFiber)
   end
@@ -3718,6 +4054,13 @@ class IyiScheduler
   # Out of the heap from wherever it is; nothing when it is not in it.
   def self.sleep_remove(fiber : IyiFiber) : Nil
     st = state
+    lists_lock(st)
+    heap_remove(st, fiber)
+    lists_unlock(st)
+  end
+
+  # The same out of *st*'s heap, its lists lock held.
+  def self.heap_remove(st : IyiSchedulerState, fiber : IyiFiber) : Nil
     root = st.sleep_head
     return unless root.is_a?(IyiFiber)
     children = fiber.sleep_child
@@ -3809,13 +4152,16 @@ class IyiScheduler
     result
   end
 
-  def self.io_take_overlapped(ptr : UInt64) : IyiFiber?
-    head = state.io_head
+  # The fiber on *st*'s io list whose OVERLAPPED is at *ptr*, taken off it,
+  # out of *st*'s sleep heap and its listing there (`IyiFiber#list_on`); nil
+  # when none is. *st*'s lists lock held: on Windows the thread asking may
+  # be any (`complete_packet`).
+  def self.io_take_overlapped(st : IyiSchedulerState, ptr : UInt64) : IyiFiber?
+    head = st.io_head
     return nil unless head.is_a?(IyiFiber)
     if head.wait_overlapped.address == ptr
-      state.io_head = head.next_io
-      head.next_io = nil
-      untime(head)
+      st.io_head = head.next_io
+      left_io(st, head)
       return head
     end
     cursor = head
@@ -3824,12 +4170,18 @@ class IyiScheduler
       return nil unless after.is_a?(IyiFiber)
       if after.wait_overlapped.address == ptr
         cursor.next_io = after.next_io
-        after.next_io = nil
-        untime(after)
+        left_io(st, after)
         return after
       end
       cursor = after
     end
+  end
+
+  private def self.left_io(st : IyiSchedulerState, fiber : IyiFiber) : Nil
+    fiber.next_io = nil
+    untime_in(st, fiber)
+    fiber.unlist(st.object_id)
+    io_waiters(-1_i64)
   end
 
   def self.read_posix(fd : Int32, buffer : Void*, count : UInt64) : Int64 | Cancelled
@@ -3869,10 +4221,10 @@ class IyiScheduler
 
   # *fiber* off the io list, whichever fd and direction it waits on: a
   # cancelled waiter is that fiber, and not whoever else waits on its fd.
+  # Windows' io list is posted operations, taken off by their OVERLAPPED
+  # (`io_take_overlapped`), and nothing is in the registry this reads.
   def self.io_remove(fiber : IyiFiber) : Nil
-    {% if flag?(:win32) %}
-      io_take_overlapped(fiber.wait_overlapped.address)
-    {% else %}
+    {% unless flag?(:win32) %}
       io_forget(fiber) if io_unlink(fiber)
     {% end %}
   end
@@ -3886,9 +4238,7 @@ class IyiScheduler
   # still wants (EPOLL_CTL_MOD, 3), or removed when nobody does (DEL, 2).
   def self.io_forget(fiber : IyiFiber) : Nil
     untime(fiber)
-    {% if flag?(:win32) %}
-      fiber.next_io = nil
-    {% elsif flag?(:darwin) %}
+    {% if flag?(:darwin) %}
       change = __iyi_kevent_change(fiber.wait_fd, fiber.wait_dir == 1 ? 0x2FFFF_u64 : 0x2FFFE_u64)
       LibC.kevent(pollfd.to_i32, pointerof(change).as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
@@ -3911,22 +4261,23 @@ class IyiScheduler
   # ── The poller's fd, lazily ──────────────────────────────────────────
 
   def self.pollfd : Int64
-    fd = state.pollfd
-    return fd if fd > 0
     {% if flag?(:win32) %}
-      h = LibC.CreateIoCompletionPort(Pointer(Void).new(0xFFFFFFFFFFFFFFFF_u64), Pointer(Void).new(0_u64), 0_u64, 1_i32)
-      raise "CreateIoCompletionPort failed" if h.address == 0_u64
-      fd = h.address.to_i64
-      state.port_serial = next_port_serial
-    {% elsif flag?(:darwin) %}
-      fd = LibC.kqueue.to_i64
-      raise "kqueue failed" if fd < 0
+      port = Pointer(Atomic(UInt64)).new(pointerof(@@port).address).value.get
+      return port.to_i64 if port != 0_u64
+      make_port
     {% else %}
-      fd = __iyi_conc_syscall3(IYI_SYS_EPOLL_CREATE1, 0_i64, 0_i64, 0_i64)
-      raise "epoll_create1 failed" if fd < 0
+      fd = state.pollfd
+      return fd if fd > 0
+      {% if flag?(:darwin) %}
+        fd = LibC.kqueue.to_i64
+        raise "kqueue failed" if fd < 0
+      {% else %}
+        fd = __iyi_conc_syscall3(IYI_SYS_EPOLL_CREATE1, 0_i64, 0_i64, 0_i64)
+        raise "epoll_create1 failed" if fd < 0
+      {% end %}
+      state.pollfd = fd
+      fd
     {% end %}
-    state.pollfd = fd
-    fd
   end
 
   def self.events_buffer : UInt64
@@ -3939,8 +4290,8 @@ class IyiScheduler
   end
 
   {% if flag?(:win32) %}
-    # This thread's deadline timer, and the pair of handles the poller
-    # waits on: the completion port first, the timer second.
+    # This thread's deadline timer, which its poller waits on beside its
+    # doorbell and, when it holds the seat, the port.
     #
     # The port's own timeout cannot keep a deadline — Windows rounds a
     # millisecond wait up to the system timer tick, so the poller woke
@@ -3950,7 +4301,7 @@ class IyiScheduler
     # (1,513 us measured) and the same object without the flag does not
     # (15,879 us), so the flag is the whole point of asking for it here.
     #
-    # The wake is a wait on the pair rather than the timer's completion
+    # The wake is a wait on the handles rather than the timer's completion
     # routine because a high-resolution timer refuses one:
     # `SetWaitableTimer` with a routine answers 0 and ERROR_INVALID_PARAMETER
     # on this timer and 1 on a plain one. A completion port is a waitable
@@ -3966,17 +4317,12 @@ class IyiScheduler
       st = state
       handle = st.deadline_timer
       return handle if handle != 0_i64
-      port = pollfd
       timer = LibC.CreateWaitableTimerExW(Pointer(Void).new(0_u64),
         Pointer(UInt16).new(0_u64), 2_i32, 0x1F0003_i32)
       if timer.address == 0_u64
         st.deadline_timer = -1_i64
         return -1_i64
       end
-      pair = Pointer(UInt8).malloc(16_u64)
-      Pointer(UInt64).new(pair.address).value = port.to_u64
-      Pointer(UInt64).new(pair.address + 8_u64).value = timer.address
-      st.wait_handles = pair
       st.deadline_timer = timer.address.to_i64
       timer.address.to_i64
     end
@@ -4211,6 +4557,23 @@ class IyiWorkers
     Pointer(Atomic(UInt64)).new(pointerof(@@grabs).address).value.get
   end
 
+  # Whether the pool has started (`start`).
+  def self.started? : Bool
+    @@started > 0
+  end
+
+  # The worker whose state's id is *id*, or nil: the pool's list read
+  # without the lock, as a steal reads it.
+  def self.worker_named(id : UInt64) : IyiSchedulerState?
+    count = word(pointerof(@@listed_count)).value.get
+    index = 0_i64
+    while index < count
+      return listed_at(index) if Pointer(UInt64).new(@@listed.address &+ index.to_u64 &* 8_u64).value == id
+      index = index &+ 1_i64
+    end
+    nil
+  end
+
   # What the program asked for, `IYI_WORKERS` from the environment, or
   # the cores this process may run on - the count the parallel marker
   # sizes its helpers by, and GC_DESIGN.md's bound on the mutator's
@@ -4248,6 +4611,25 @@ class IyiWorkers
       @@listed = Pointer(UInt64).malloc(workers.to_u64)
       IyiSchedLock.unlock
       claim_preempt_slot
+      {% if flag?(:win32) %}
+        # Windows' dynamic priority boost, off for the process: a thread
+        # whose wait is satisfied runs two levels above its base for a
+        # while, and every worker is such a thread at every wake. Go turns
+        # it off the same way as it starts (`runtime/os_windows.go`,
+        # go1.27.3: "dynamic priority boosting does nothing but harm").
+        # Agent TagsTick traced the tags endpoints' loop of 103 queries a
+        # request against a local postgres on the user's Windows 11 machine
+        # with 12 logical processors: with the boost iyi's workers ran 14.7
+        # of their 15.7 CPU-seconds at priority 10, level with postgres's
+        # woken backends, which then waited in the ready queue - 175
+        # queries waited over 100 ms for postgres to read them - where Go's
+        # threads ran at their base 8. Off alone, the stall moved into the
+        # workers - 145 answers sat on iyi's sockets over 100 ms - and the
+        # app's p99 got worse; with the process's one port
+        # (`IyiScheduler.pollfd`), a worker that runs takes what one the
+        # kernel left waiting would have held.
+        LibC.SetProcessPriorityBoost(LibC.GetCurrentProcess, 1_i32)
+      {% end %}
       index = 0
       while index < workers
         IyiThread.start { IyiWorkers.work }
@@ -4289,6 +4671,9 @@ class IyiWorkers
         fiber = IyiScheduler.worker_next(st)
         if fiber.is_a?(IyiFiber)
           stop_spinning(st, true)
+          {% if flag?(:win32) %}
+            IyiScheduler.left_idle(st)
+          {% end %}
           root.state = IyiFiberState::Pooled
           IyiScheduler.switch_to(fiber)
         else
@@ -4714,9 +5099,11 @@ class IyiWorkers
       return if root.is_a?(IyiFiber) && root.object_id == fiber.object_id
       return unless fiber.state == IyiFiberState::Running
       IyiScheduler.take_mail(st) if st.mail?
-      io = !st.io_head.is_a?(Nil)
+      io = false
       {% if flag?(:win32) %}
-        io = io || IyiStdinReader.waiting?
+        io = IyiScheduler.io_waiting?
+      {% else %}
+        io = !st.io_head.is_a?(Nil)
       {% end %}
       if io
         IyiScheduler.wait_for_events(false)
@@ -4999,8 +5386,9 @@ end
   # makes it into the fiber's buffer - a console wide, through its own
   # page, since it has no heap to allocate from - and posts to the port
   # with an OVERLAPPED of its own, never the fiber's, so a post arriving
-  # late is never taken for the fiber's next operation. The poller hands
-  # the answer over (`delivered`) and the state is IDLE again.
+  # late is never taken for the fiber's next operation. Whichever thread
+  # takes the post hands it to the asking thread (`answered`), which
+  # hands the answer over (`delivered`), and the state is IDLE again.
   #
   # A cancellation or a deadline withdraws the read: before the thread
   # claims it, the claim fails and the thread posts nothing read; after,
@@ -5025,6 +5413,7 @@ end
     W_PORT     =    48_u64
     W_DOORBELL =    56_u64
     W_THREAD   =    64_u64
+    W_OWNER    =    72_u64
     OVERLAPPED =   128_u64
     WIDE       =  4096_u64
     PAGE       = 65536_u64
@@ -5044,6 +5433,12 @@ end
     # This scheduler's: the fiber asking, on the thread that asked.
     def self.waiting? : Bool
       IyiScheduler.state.stdin_waiter.is_a?(IyiFiber)
+    end
+
+    # Any thread's: a read asked and not yet answered, whose post a poll
+    # of the port may find.
+    def self.asked? : Bool
+      @@page != 0_u64 && word(W_STATE).value.get != IDLE
     end
 
     def self.waiter?(fiber : IyiFiber) : Bool
@@ -5083,11 +5478,11 @@ end
     end
 
     # Any thread's fiber may ask, one read at a time in the process: the
-    # claim is the state's own IDLE to ASKED, and the port to post to and
-    # the fiber to wake are the asking scheduler's. They were the first
-    # reader's: the port was set once, at the start, and the waiter was
-    # one for the process, so a second `IyiThread` reading stdin had its
-    # line posted to the main thread's port. A main thread joining it
+    # claim is the state's own IDLE to ASKED, and the fiber to wake and
+    # the thread that wakes it are the asking scheduler's. They were the
+    # first reader's: the port was set once, at the start, and the waiter
+    # was one for the process, so a second `IyiThread` reading stdin had
+    # its line posted to the main thread's port. A main thread joining it
     # never took the post and the program hung; one polling took it and
     # switched onto the other thread's fiber, an access violation, 3 runs
     # in 3 each.
@@ -5096,9 +5491,9 @@ end
       return Cancelled.new if fiber.cancelled
       start(handle) if @@page == 0_u64
       raise "two fibers reading standard input" unless word(W_STATE).value.compare_and_set(IDLE, ASKED)[1]
-      # The read is this thread's - its port is posted to, its state names
-      # the waiter - so a parallel task asking stays here until it is
-      # answered (`IyiFiber#homebound`).
+      # The read is this thread's - its state names the waiter, and the
+      # post is handed here (`answered`) - so a parallel task asking stays
+      # here until it is answered (`IyiFiber#homebound`).
       fiber.homebound = true if fiber.unit.is_a?(IyiUnit)
       st = IyiScheduler.state
       st.stdin_waiter = fiber
@@ -5107,6 +5502,7 @@ end
       word(W_COUNT).value.set(count)
       word(W_CONSOLE).value.set(console ? 1_u64 : 0_u64)
       word(W_PORT).value.set(IyiScheduler.pollfd.to_u64)
+      word(W_OWNER).value.set(st.object_id)
       LibC.ReleaseSemaphore(Pointer(Void).new(word(W_DOORBELL).value.get), 1_i32, nil)
       deadline = ms
       withdrawn = false
@@ -5151,9 +5547,21 @@ end
       end
     end
 
-    # The post taken off the asking scheduler's port: the answer to its
-    # fiber, and the next read free to be asked - by any thread, so the
-    # bytes are read off the page first.
+    # The post, taken off the port by whichever thread polled it: delivered
+    # here when this thread asked, and otherwise handed to the thread that
+    # did, whose fiber and sleep heap the waiter is in.
+    def self.answered : Nil
+      owner = word(W_OWNER).value.get
+      if !IyiScheduler.shared? || owner == IyiScheduler.state.object_id
+        delivered
+        return
+      end
+      IyiScheduler.hand_stdin(owner)
+    end
+
+    # The answer to the asking thread's fiber, on that thread, and the next
+    # read free to be asked - by any thread, so the bytes are read off the
+    # page first.
     def self.delivered : Nil
       st = IyiScheduler.state
       waiter = st.stdin_waiter
@@ -6310,16 +6718,24 @@ class IyiTimeoutSelect
   # woken by a channel from any thread, so until it has left the heap
   # again it is woken onto this thread alone (`IyiFiber#homebound`):
   # `unpark` runs where the fiber does. Both under the scheduler's lock,
-  # which `select` holds.
+  # which `select` holds, and the look and the change together under the
+  # thread's lists lock, which on Windows another thread takes to take an
+  # io waiter out of the same heap (`IyiScheduler.lists_lock`).
   def park(fiber : IyiFiber, nonce : UInt64) : Nil
     @fiber = fiber
     fiber.homebound = true
-    if IyiScheduler.sleeping?(fiber)
-      return if fiber.deadline <= @deadline
-      IyiScheduler.sleep_remove(fiber)
+    st = IyiScheduler.state
+    IyiScheduler.lists_lock(st)
+    if IyiScheduler.heap_holds?(st, fiber)
+      if fiber.deadline <= @deadline
+        IyiScheduler.lists_unlock(st)
+        return
+      end
+      IyiScheduler.heap_remove(st, fiber)
     end
     fiber.deadline = @deadline
-    IyiScheduler.sleep_insert(fiber)
+    IyiScheduler.heap_insert(st, fiber)
+    IyiScheduler.lists_unlock(st)
   end
 
   def unpark : Nil

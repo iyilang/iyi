@@ -367,13 +367,14 @@ fail("a wait on an empty pipe answered #{stale_quiet}, and then on one holding t
 puts "a wait after a timed-out one found the bytes waiting"
 
 # ── 5d. A handle read on one thread reads on another ────────────────────
-# Windows only: each thread has its own completion port and a handle
-# belongs to one, so a pipe read on the main thread and then on a worker
+# Windows only: each thread had its own completion port and a handle
+# belonged to one, so a pipe read on the main thread and then on a worker
 # had the worker's completions go to the main thread's port, and its read
-# - deadline and all - waited forever. Fifty bytes already in the pipe
-# answer the worker's first reads at once, which would leave fifty stray
-# completions on its port if moving the handle lost the "skip a completion
-# that answered at once" mode; the late read then woke on one of them.
+# - deadline and all - waited forever. The process has one port now, and
+# this holds it to the same. Fifty bytes already in the pipe answer the
+# worker's first reads at once, which would leave fifty stray completions
+# on the port if joining the handle lost the "skip a completion that
+# answered at once" mode; the late read then woke on one of them.
 {% if flag?(:win32) %}
   class Handoff
     @@outcome = Pointer(Atomic(UInt64)).malloc(1_u64)

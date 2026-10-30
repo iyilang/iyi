@@ -861,12 +861,12 @@ stream_server.close
 puts "stream: ok"
 
 # 12. Where a wait leaves its socket (#151). A Windows handle belongs to
-# one completion port and each thread has its own, so a wait moves the
-# socket to its thread's port, and one already there is not moved again:
-# the port each socket was last moved to is recorded
-# (`IyiScheduler.to_port`). The record has to be right after everything
-# that changes a socket's port behind it, or a wait posts to a port that
-# is not its thread's - one whose thread has ended, or none - and never
+# one completion port, and the process has one: a socket the standard
+# library made is joined to it when it is made, and a wait on it makes no
+# call to join it again (`IyiScheduler.port_made`); a handle a program made
+# itself is joined at its first wait. The record of which handles std
+# joined has to be right after everything that changes a value's handle
+# behind it, or a wait posts on a handle that is on no port and never
 # completes. Such a wait cannot be bounded by its own deadline, whose
 # cancel completes into the same port, so each step is watched by a
 # thread of its own that ends the program with the step's name.
@@ -893,9 +893,9 @@ def thread_here : UInt64
   IyiScheduler.state.object_id
 end
 
-def port_moves : UInt64
+def port_joins : UInt64
   {% if flag?(:win32) %}
-    IyiScheduler.port_moves
+    IyiScheduler.port_joins
   {% else %}
     0_u64
   {% end %}
@@ -936,14 +936,14 @@ def unpin(mask : UInt64) : Nil
 end
 
 # Two hundred round trips between two tasks of one thread, two waits a
-# round: each socket's first wait associates it, and none after moves it.
-# A copy that moves on every wait moves them about 400 times.
+# round: each socket was joined when it was made, and no wait joins it
+# again. A copy that asks at every wait asks about 400 times.
 s_server = IyiSocket.listen("127.0.0.1", 0)
 s_client = IyiSocket.connect("127.0.0.1", s_server.local_port).or_panic
 s_conn = s_server.accept.or_panic
-s_moved = 0_u64
+s_joined = 0_u64
 port_watch("port_stays", 20000) do
-  s_before = port_moves
+  s_before = port_joins
   group do |g|
     g.spawn do
       200.times { s_conn.write(s_conn.read(1).or_panic).or_panic }
@@ -957,19 +957,19 @@ port_watch("port_stays", 20000) do
       0
     end
   end
-  s_moved = port_moves - s_before
+  s_joined = port_joins - s_before
 end
 s_client.close
 s_conn.close
 s_server.close
-raise "port_stays: 200 round trips on one thread moved their sockets #{s_moved} times" if s_moved > 4_u64
+raise "port_stays: 200 round trips on sockets std made asked to join them to the port #{s_joined} times" if s_joined > 0_u64
 puts "port_stays: ok"
 
 # A socket waited on here and closed, and its value given to a handle the
-# program made itself, which nothing records: its wait has to move it to
-# this port. Windows gives a freed value to the next handle made, so the
+# program made itself, which nothing records: its wait has to join it to
+# the port. Windows gives a freed value to the next handle made, so the
 # pipes are made until one has a closed socket's value. A copy whose close
-# leaves the record behind skips the move, and the pipe, on no port at
+# leaves the record behind skips the join, and the pipe, on no port at
 # all, never completes its read.
 {% if flag?(:win32) %}
   lib LibC
@@ -1117,10 +1117,10 @@ end
 t_server.close
 puts "port_reuse: ok"
 
-# A socket waited on by a thread that then ended, and waited on here: its
-# record names a port whose thread is gone. A copy that skips the move
-# whenever a port is recorded posts this read to that port, which nobody
-# takes completions from again.
+# A socket waited on by a thread that then ended, and waited on here. A
+# copy that closes the port as a thread ends - the port was each thread's
+# own before the process had one - leaves this read posted to a port
+# nobody takes completions from again.
 e_server = IyiSocket.listen("127.0.0.1", 0)
 e_client = IyiSocket.connect("127.0.0.1", e_server.local_port).or_panic
 e_conn = e_server.accept.or_panic
@@ -1154,8 +1154,8 @@ puts "port_thread_ended: ok"
 # A socket read by parallel tasks on the pool's workers in turn: two tasks
 # a round, each spinning until the other has started, so they are on two
 # workers, and the round's reader alternating between them. Every read
-# completes, and the reads ran on more than one worker, so the socket was
-# moved between them.
+# completes, and the reads ran on more than one worker, each posted on the
+# one port the socket joined when it was made.
 m_server = IyiSocket.listen("127.0.0.1", 0)
 m_client = IyiSocket.connect("127.0.0.1", m_server.local_port).or_panic
 m_conn = m_server.accept.or_panic

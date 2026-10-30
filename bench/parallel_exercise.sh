@@ -22,7 +22,12 @@
 #      cancel and a close from a sibling or the main thread that find it,
 #      frames 120 KiB deep; tasks parked on one worker finish in under
 #      twice the ideal, woken from the main thread and from a worker; and a
-#      task joining a thread leaves its worker to its child.
+#      task joining a thread leaves its worker to its child. On Windows,
+#      bench/completions_taken.iyi holds the process's one completion port
+#      at twelve workers: a task's socket answered while the worker it
+#      parked on computes with preemption off is read on another worker
+#      within 250 ms; and the process's priority boost is off once the pool
+#      has started.
 #      bench/parallel_preempt.iyi then holds preemption at loop back-edges
 #      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
 #      request beside a task computing with no call in its loop wait no
@@ -68,7 +73,9 @@
 #      posted to nobody, a read made on the thread that closes its socket,
 #      a pool that never steals a started task, tasks woken back onto the
 #      worker they parked on as they were before tasks moved, and a join
-#      held in the kernel.
+#      held in the kernel; and on Windows a port whose packets only the
+#      worker their task parked on runs, and a pool that leaves the
+#      priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 4's floor refuses the ratio that comes out.
 set -u
@@ -144,6 +151,32 @@ for build in plain release; do
   fi
   sed 's/^/  /' "migrated-$build.txt"
 done
+# ── 2a. Windows' one completion port, twice ──────────────────────────────
+# bench/completions_taken.iyi at twelve workers: a task's socket answered
+# while the worker it parked on computes with preemption off is read on
+# another worker within 250 ms, and the process's priority boost is off
+# once the pool has started (SPEC.md III.4.13, part 5).
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    for build in plain release; do
+      step "the process's one completion port and its boost, $build build"
+      flag=""
+      [ "$build" = release ] && flag="--release"
+      if ! "$IYI" build $flag "$REPO/bench/completions_taken.iyi" -o "taken-$build" > "build-taken-$build.log" 2>&1; then
+        echo "build failed:"; tail -20 "build-taken-$build.log"; exit 1
+      fi
+      timeout -k 5 300 "./taken-$build" boost taken --workers=12 > "taken-$build.txt" 2>&1
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q 'every property held' "taken-$build.txt"; then
+        echo "the completion port exercise failed (exit $code):"; cat "taken-$build.txt"; exit 1
+      fi
+      grep -v 'every property held' "taken-$build.txt" | sed 's/^/  /'
+    done ;;
+  *)
+    step "the process's one completion port and its boost"
+    echo "  Windows' alone: a poller here is the waiting worker's epoll or kqueue" ;;
+esac
+
 # ── 2b. Preemption at loop back-edges, twice ─────────────────────────────
 # bench/parallel_preempt.iyi: a task computing with no call in its loop
 # no longer holds a short task, a sleeper or a connection behind it past
@@ -797,7 +830,7 @@ else
   step "failure proof: an io wait that does not say whose poller holds it is never cancelled"
   case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      broken unlistedio '/def self.park_overlapped_current\(/ { inpark = 1 } inpark && /^    listed\(fiber, waiting_out\)$/ { inpark = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+      broken unlistedio '/def self.park_overlapped_current\(/ { inpark = 1 } inpark && /^    fiber\.list_on\(st\.object_id\) if @@shared && fiber\.unit\.is_a\?\(IyiUnit\)$/ { inpark = 0; next } { print }' concurrency.iyi parallel_migrate ;;
     *)
       broken unlistedio '/def self.wait_posix\(fd/ { inwait = 1 } inwait && /^    listed\(fiber\)$/ { inwait = 0; next } { print }' concurrency.iyi parallel_migrate ;;
   esac
@@ -806,7 +839,7 @@ else
   step "failure proof: a close posted to no thread leaves a read on another worker parked"
   case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      echo "  a close on Windows ends the posted read, whose completion its own port takes: there is nothing to post" ;;
+      echo "  a close on Windows ends the posted read, whose completion any thread takes off the port: there is nothing to post" ;;
     *)
       broken noclose '/def self.wake_closed\(fd/ { inclose = 1 } inclose && /^      return unless @@shared$/ { print "      return"; inclose = 0; next } { print }' concurrency.iyi parallel_migrate
       caught noclose 'closes: still waiting after 5000 ms' closes --watch=5000 ;;
@@ -890,8 +923,33 @@ step "failure proof: a slow half that does not poll leaves a connection in a bus
 # request then took, and passed three of eight runs under its 80 ms bound,
 # at 76 to 78 ms, on macOS 26.6, Apple M2 Pro, 10 cores (the user's
 # machine).
-broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
-caught nopoll 'poller: a fast request took' poller --workers=1
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  Windows' port is the process's, and a busy worker holds none of it: what its poll would hand over is any idle worker's to take, and a worker that does not is the next proof" ;;
+  *)
+    broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
+    caught nopoll 'poller: a fast request took' poller --workers=1 ;;
+esac
+
+step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # Every task woken from a packet is woken onto the worker it parked on,
+    # as a port per worker that no other worker takes from would wake it.
+    broken nocross '/^        wake_completed\(fiber\)$/ { print "        fiber.homebound = true if owner.object_id != state.object_id" } { print }' concurrency.iyi completions_taken
+    caught nocross 'answer, sent while its worker computed, was read' taken --workers=12 ;;
+  *)
+    echo "  Windows' alone, as the port is" ;;
+esac
+
+step "failure proof: a pool that leaves Windows' priority boost on"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    broken boosted '/^        LibC\.SetProcessPriorityBoost\(LibC\.GetCurrentProcess, 1_i32\)$/ { next } { print }' concurrency.iyi completions_taken
+    caught boosted "boost: the process's priority boost is on" boost --workers=12 ;;
+  *)
+    echo "  Windows' alone: the boost is its scheduler's" ;;
+esac
 
 step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
 broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt

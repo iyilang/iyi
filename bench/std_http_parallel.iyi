@@ -37,7 +37,9 @@
 # ticket is taken from a connection on one worker, which is then kept
 # computing for a second while a second connection offers the ticket:
 # that one starts on another worker, since the first holds its own, and
-# must resume there - the one set of ticket keys every worker shares. A
+# must resume there - the one set of ticket keys every worker shares. On
+# Windows every other worker is held first, so the ticket is sealed on
+# the one left (the check says why). A
 # client presenting a certificate is seen presenting it, and an
 # encrypted ClientHello (ECH) is taken. Then the stop: a kept-alive
 # connection reads close_notify from its worker, not a truncation, and
@@ -77,6 +79,20 @@ KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
           "MC4CAQAwBQYDK2VwBCIEIOYKs3OzEJYJ/j+ZQYLoAU929MQeanF9kupAR9HpeHJ8\n" \
           "-----END PRIVATE KEY-----\n"
 
+# A computation that holds its worker until *until_ns*: no check at its
+# loop's back-edge, so nothing else runs there and no completion is taken
+# there until it ends (the Windows arm of the ticket check below).
+@[NoPreempt]
+def pinned(until_ns : Int64) : UInt64
+  x = 7_u64
+  while __iyi_monotonic_ns < until_ns
+    x = x ^ x.unsafe_shl(13_u64)
+    x = x ^ x.unsafe_shr(7_u64)
+    x = x ^ x.unsafe_shl(17_u64)
+  end
+  x
+end
+
 # Integer work with nothing to park on: a xorshift walk.
 def spin(rounds : Int64) : UInt64
   x = 7_u64
@@ -114,6 +130,12 @@ class Answers
       Response.new(200, "stopping")
     when "/where"
       Response.new(200, "#{IyiScheduler.state.object_id} #{request.version} #{request.tls_resumed? ? "resumed" : "new"} peer=#{(leaf = request.peer_certificates.first?) ? leaf.subject_name : "none"}")
+    when "/pin"
+      # Milliseconds from the query, held with preemption off.
+      query = request.query
+      ms = query.is_a?(String) ? query.to_i.to_i64 : 1000_i64
+      sum = pinned(__iyi_monotonic_ns + ms * 1000000_i64)
+      Response.new(200, "#{IyiScheduler.state.object_id} #{sum}")
     when "/hold"
       # A second of work that never parks: the worker is held as long.
       until_ns = __iyi_monotonic_ns + 1000000000_i64
@@ -432,20 +454,52 @@ watched("the TLS run", 60000) do
       end
 
       watched("a ticket resumed on another worker", 20000) do
+        # On Windows a connection's task resumes on whichever worker takes
+        # its read's completion off the process's one port (SPEC.md
+        # III.4.13, part 5), so the worker that answered a request is not
+        # the one its connection's next request runs on, and a busy
+        # worker holds nothing for it: /hold, sent after the ticket, ran
+        # on another worker than the ticket's, and that one started the
+        # resuming connection. So every worker but one is first held with
+        # preemption off (/pin), and the ticket is sealed on the one left;
+        # that one is then held longest, by the ticket's own connection,
+        # whose request it alone can take, and the others are free again
+        # when the second connection offers the ticket. Eight resumptions
+        # in a row instead, with no worker held, were sealed and opened on
+        # the same worker often enough that a copy of std/tls whose
+        # workers keep ticket keys of their own resumed all eight in 1 run
+        # of 6 on the user's Windows 11 machine with 12 logical
+        # processors; held this way, the check passed 6 runs of 6 there
+        # and that copy failed it 10 of 10.
+        pins = [] of TlsClient
+        {% if flag?(:win32) %}
+          (IyiWorkers.count - 1).times { pins << tls_over(connect(tls_port), plain) }
+          pins.each { |pin| pin.write("GET /pin?1000 HTTP/1.1\r\nHost: localhost\r\n\r\n") }
+          sleep(100)
+        {% end %}
         session = TlsSession.new
         issuer = tls_over(connect(tls_port), plain, session)
         issued = tls_ask(issuer, "/where").split(" ")
         check("the ticket's first connection", issued[2]? || "no answer", "new", failures)
         # The worker that sent the ticket kept busy, so the next connection
         # is started by another.
-        issuer.write("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        sleep(100)
+        {% if flag?(:win32) %}
+          issuer.write("GET /pin?3000 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+          sleep(1300)
+        {% else %}
+          issuer.write("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n")
+          sleep(100)
+        {% end %}
         resumer = tls_over(connect(tls_port), plain, session)
         resumed = tls_ask(resumer, "/where").split(" ")
         check("the resuming connection's worker", resumed[0]? == issued[0]? ? "the ticket's" : "another", "another", failures)
         check("a ticket resumed on another worker", "#{resumed[2]? || "no answer"}, the client says #{resumer.resumed? ? "resumed" : "not resumed"}", "resumed, the client says resumed", failures)
         held = tls_answer(issuer).split(" ")
         check("the held worker", held[0]? == issued[0]? ? "the ticket's" : "another", "the ticket's", failures)
+        pins.each do |pin|
+          tls_answer(pin)
+          pin.close
+        end
         resumer.close
         issuer.close
       end

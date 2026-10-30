@@ -922,14 +922,14 @@ step "failure proof: a slow half that does not poll leaves a connection in a bus
 # copy waited only when a connection happened to park on a worker a slow
 # request then took, and passed three of eight runs under its 80 ms bound,
 # at 76 to 78 ms, on macOS 26.6, Apple M2 Pro, 10 cores (the user's
-# machine).
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    echo "  Windows' port is the process's, and a busy worker holds none of it: what its poll would hand over is any idle worker's to take, and a worker that does not is the next proof" ;;
-  *)
-    broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
-    caught nopoll 'poller: a fast request took' poller --workers=1 ;;
-esac
+# machine). Windows' port is the process's, and in the server shape an
+# idle worker takes what the busy one's poll would have; the poller
+# step's pool of one has no idle worker, so only the poll hands the
+# answer on. On Windows 11, 12 logical processors (the user's machine),
+# the copy answered at 999 to 1001 ms in ten runs of ten, where the
+# gate's own poller step read 7.0 to 9.1 ms in six.
+broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
+caught nopoll 'poller: a fast request took' poller --workers=1
 
 step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
 case "$(uname -s)" in

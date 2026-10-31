@@ -18,7 +18,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-. "$REPO/bench/artifact_frames.sh"
+. "$REPO/bench/darwin_frames.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -1048,7 +1048,7 @@ echo
 echo "== the exercise's artifacts and other platforms"
 # Built from the modules' artifacts, the exercise must print what it
 # printed from source, darwin's frames under a task's panic left out
-# (bench/artifact_frames.sh); and it typechecks for the four other
+# (bench/darwin_frames.sh); and it typechecks for the four other
 # platforms std is held to.
 mkdir -p "$WORK/r1/mods"
 if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_websocket_exercise.iyi" \

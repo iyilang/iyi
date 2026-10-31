@@ -19,11 +19,12 @@
   three-core Apple M1 (Virtual), with Xcode 16.4 and Python 3.15.2.
   There `backtrace` walks a task's stack, which on macos-14 it did not,
   so a panic a task raises on purpose prints its frames, each naming
-  `from-source` or `from-artifact` and an address of its own: 22 of the
-  113 std exercises, and the std/big, std/toml and std/websocket gates,
-  printed otherwise from their artifacts for those lines alone. Their
-  comparisons now leave darwin's frames out (`bench/artifact_frames.sh`,
-  byte-safe, since darwin's sed stops at a byte that is not UTF-8), and
+  its binary and an address of its own: 22 of the 113 std exercises,
+  and the std/big, std/toml and std/websocket gates, printed otherwise
+  from their artifacts for those lines alone, and std/toml's release
+  build otherwise than its plain one. Those comparisons now leave
+  darwin's frames out (`bench/darwin_frames.sh`, byte-safe, since
+  darwin's sed stops at a byte that is not UTF-8), and
   bench/std_exercise.sh proves the filter leaves out a frame and nothing
   else. A darwin job that builds the static LLVM pays 25 to 37 minutes
   for it there, and the foundation's job was cut off at its 90 by that,

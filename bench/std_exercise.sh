@@ -15,7 +15,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-. "$REPO/bench/artifact_frames.sh"
+. "$REPO/bench/darwin_frames.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -537,7 +537,7 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
       continue
       ;;
   esac
-  # Without darwin's frames under a task's panic (bench/artifact_frames.sh).
+  # Without darwin's frames under a task's panic (bench/darwin_frames.sh).
   without_frames < "$work/source.out" > "$work/source.cmp"
   without_frames < "$work/artifact.out" > "$work/artifact.cmp"
   if ! cmp -s "$work/source.cmp" "$work/artifact.cmp"; then
@@ -553,20 +553,20 @@ else
   echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
 fi
 
-# The filter above leaves out a frame and nothing else: a panic's message
-# beside it, a frame of another binary, a line that only starts with a
+# The filter above (bench/darwin_frames.sh) leaves out a frame, whichever
+# binary it names, and nothing else: a panic's message beside it, a line
+# that starts with a number and a name, one with a shorter hexadecimal
 # number, and a byte that is not UTF-8 stay, so a difference there is
 # still a difference.
 kept="$(printf '%s\n' "iyi: panic: refused" \
-  "1   libsystem_c.dylib                   0x0000000180001234 abort + 12" \
-  "2   from-elsewhere                      0x0000000180001234 main + 8" \
-  "3 from-source answers")"
+  "3 from-source answers" \
+  "4   from-source                         0x12ab answered")"
 printf '%s\n' "iyi: panic: refused" \
   "0   from-source                         0x000000010299550c *Std::Cookie::Cookie#to_set_cookie:String + 356" \
   "1   libsystem_c.dylib                   0x0000000180001234 abort + 12" \
-  "2   from-elsewhere                      0x0000000180001234 main + 8" \
-  "12  from-artifact                       0x0000000100c0447c ~procProc(Nil) + 92" \
-  "3 from-source answers" > "$WORK/frames.in"
+  "3 from-source answers" \
+  "12  toml-plain                          0x0000000100c0447c ~procProc(Nil) + 92" \
+  "4   from-source                         0x12ab answered" > "$WORK/frames.in"
 printf '%s\n' "$kept" > "$WORK/frames.want"
 printf 'after \377 a byte\n' | tee -a "$WORK/frames.in" >> "$WORK/frames.want"
 if without_frames < "$WORK/frames.in" > "$WORK/frames.out" && cmp -s "$WORK/frames.want" "$WORK/frames.out"; then

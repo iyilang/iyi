@@ -15,7 +15,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-. "$REPO/bench/artifact_frames.sh"
+. "$REPO/bench/darwin_frames.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -108,12 +108,18 @@ if build_and_run "release" toml-release --release; then
   if ! grep -q "ALL CHECKS PASSED" "$WORK/toml-release.out"; then
     echo "  release: missing pass sentinel"
     status=1
-  elif cmp -s "$WORK/toml-plain.out" "$WORK/toml-release.out"; then
-    echo "  passes, and prints every line and record the plain build prints"
   else
-    echo "  passes, but prints otherwise than the plain build:"
-    diff "$WORK/toml-plain.out" "$WORK/toml-release.out" | sed -n '1,6p' | sed 's/^/    /'
-    status=1
+    # Without darwin's frames under a task's panic (bench/darwin_frames.sh):
+    # a release build inlines, and its frames are fewer.
+    without_frames < "$WORK/toml-plain.out" > "$WORK/toml-plain.cmp"
+    without_frames < "$WORK/toml-release.out" > "$WORK/toml-release.cmp"
+    if cmp -s "$WORK/toml-plain.cmp" "$WORK/toml-release.cmp"; then
+      echo "  passes, and prints every line and record the plain build prints"
+    else
+      echo "  passes, but prints otherwise than the plain build:"
+      diff "$WORK/toml-plain.cmp" "$WORK/toml-release.cmp" | sed -n '1,6p' | sed 's/^/    /'
+      status=1
+    fi
   fi
 fi
 
@@ -475,7 +481,7 @@ if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$EXERCISE" 
   && "$IYI" build --use-iyimod mods -o from-artifact "$EXERCISE") >"$WORK/r1/build.log" 2>&1; then
   "$WORK/r1/from-source" >"$WORK/r1/source.out" 2>&1
   "$WORK/r1/from-artifact" >"$WORK/r1/artifact.out" 2>&1
-  # Without darwin's frames under a task's panic (bench/artifact_frames.sh).
+  # Without darwin's frames under a task's panic (bench/darwin_frames.sh).
   without_frames < "$WORK/r1/source.out" > "$WORK/r1/source.cmp"
   without_frames < "$WORK/r1/artifact.out" > "$WORK/r1/artifact.cmp"
   if cmp -s "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then

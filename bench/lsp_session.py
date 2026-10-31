@@ -1104,14 +1104,14 @@ def holders(worker):
     """The processes *worker* started that hold its stdout: on Windows
     every child of a worker, which inherits each handle the worker could
     hand on (its own stdin and stdout among them) - the `cmd.exe` a
-    macro's `system` runs, and what that runs; on Linux the ones whose
-    stdout is the worker's pipe, read back through /proc."""
+    macro's `system` runs; on Linux the ones whose stdout is the
+    worker's pipe, read back through /proc."""
     found = descendants(worker)
     if os.name == "nt":
         named = []
         for pid in found:
             try:
-                if os.path.basename(process_binary(pid)).lower() in ("cmd.exe", "ping.exe"):
+                if os.path.basename(process_binary(pid)).lower() == "cmd.exe":
                     named.append(pid)
             except OSError:
                 continue
@@ -1160,9 +1160,10 @@ def orphan_steps():
     watchdog waited (Windows CI, the step after 73b).
 
     The hold is a macro's `system` that writes a file the gate names and
-    then waits a minute: `cmd` and a `ping` on Windows, which hold the
-    pipes by inheritance from the start, and on Linux a shell that opens
-    the worker's two pipes through /proc before it writes the file. The
+    then waits: on Windows `cmd`, which holds the pipes by inheritance
+    from the start, reading a named pipe the gate keeps open until the
+    step is over; on Linux a shell that opens the worker's two pipes
+    through /proc before it writes the file, and sleeps a minute. The
     file is the gate's proof that the worker is inside that compile, and
     nothing else compiles that text. The step used to take a `ping` or
     `sleep` found under the worker as that proof, and hold an outline
@@ -1170,7 +1171,15 @@ def orphan_steps():
     one, killed the worker, and had the outline answered before the kill,
     so whatever was found, the worker was not inside the compile then.
     The held request is now the compile itself, a pull. The worker alone
-    is killed, and the holders are left running until the step is over."""
+    is killed, and the holders are left running until the step is over.
+
+    The Windows wait was a `ping -n 61`, a minute by its own clock. Twice
+    on master's CI (jobs 122939534975 and 124281113104) these steps took
+    97 and 98 s from step 73c's line to 73k's, where 122 passing Windows
+    runs took 2.7 to 3.2 s, and by the kill the ping had ended: the pull
+    was answered clean (`items: []`), nothing held the worker's pipes,
+    and the worker was gone (WinError 87 for its pid). What held the gate
+    up is not in either log. A wait the gate ends cannot end first."""
     if os.name != "nt" and not sys.platform.startswith("linux"):
         for label, name in (("73j", "a request after a worker died with its pipes held is answered"),
                             ("73k", "a request the worker died holding, its pipes held, is refused")):
@@ -1185,12 +1194,22 @@ def orphan_steps():
     other_uri = opened(o, own, "other.iyi", "def other\nend\n")
     left = []
 
+    # The named pipes the Windows holds wait on, let go of when the step
+    # is over.
+    pipes = []
+
     def held_text(name):
         """A module whose compile writes *name*.started under the gate's
-        directory, holding the worker's pipes by then, and waits a minute."""
+        directory, holding the worker's pipes by then, and waits: on
+        Windows until the gate lets go of a pipe, on Linux a minute."""
         mark = os.path.join(own, f"{name}.started")
         if os.name == "nt":
-            hold = f'cmd /c type nul > "{mark}" & ping -n 61 127.0.0.1'
+            pipe = r"\\.\pipe\%s-%s" % (os.path.basename(own), name)
+            pipes.append(nt_pipe(pipe))
+            # `set /p` and not `type`: `type` was refused a pipe of one
+            # instance nothing else had opened ("All pipe instances are
+            # busy"), and `set /p` waited on it until it was closed.
+            hold = f'cmd /c type nul > "{mark}" & set /p held=< "{pipe}"'
         else:
             hold = (f"exec </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null; "
                     f"touch '{mark}'; sleep 60")
@@ -1210,12 +1229,11 @@ def orphan_steps():
         left.extend(descendants(workers[0]))
         return workers[0], held
 
-    # A worker already gone when the kill lands is the death the step
-    # asks about, come a moment early: Windows answered the kill with
-    # WinError 87 (no such process) on master's CI (job 122939534975),
-    # and the traceback ended the session before 73k could say what the
-    # request got. The step's own verdict - the answer, and its code - is
-    # what judges it either way.
+    # A worker already gone when the kill lands is reported rather than
+    # raised: Windows answered the kill with WinError 87 (no such process)
+    # on master's CI (job 122939534975), and the traceback ended the
+    # session before 73k could say what the request got. The step's own
+    # verdict - the answer, and its code - is what judges it either way.
     gone_first = []
 
     def kill_alone(worker):
@@ -1267,6 +1285,8 @@ def orphan_steps():
             os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
         except OSError:
             pass
+    for kernel, handle in pipes:
+        kernel.CloseHandle(handle)
     stuck = (worker and after is None) or (second and refused is None)
     if not stuck and answer_within(o, o.request_nowait("shutdown", {}), 10):
         o.send("exit", {}, wait=False)
@@ -1307,6 +1327,25 @@ def restore_binary(backup, binary):
             time.sleep(0.2)
 
 
+def nt_pipe(path):
+    """A named pipe at *path* that nothing is written to: a reader that
+    opens it waits until this side closes it, then reads as empty. The
+    kernel32 that closes it, and its handle."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+    kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
+    kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    # Outbound, bytes, one instance. A reader connects to it before this
+    # side has asked for one, and reads until it is closed.
+    handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return kernel, handle
+
+
 def held_open(work, seconds):
     """A path a macro's `read_file` waits on for *seconds*, then reads
     as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
@@ -1314,17 +1353,8 @@ def held_open(work, seconds):
     go of, the path is gone, and a later compile of the same text
     fails at once rather than waiting again."""
     if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.CreateNamedPipeW.restype = wintypes.HANDLE
-        kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
-        kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         path = r"\\.\pipe\iyi-lsp-held-%d" % os.getpid()
-        # Outbound, bytes, one instance. A reader connects to it before
-        # this side has asked for one, and reads until it is closed.
-        handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+        kernel, handle = nt_pipe(path)
 
         def release():
             time.sleep(seconds)

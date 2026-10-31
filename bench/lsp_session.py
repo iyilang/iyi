@@ -1160,10 +1160,10 @@ def orphan_steps():
     watchdog waited (Windows CI, the step after 73b).
 
     The hold is a macro's `system` that writes a file the gate names and
-    then waits: on Windows `cmd`, which holds the pipes by inheritance
-    from the start, reading a named pipe the gate keeps open until the
-    step is over; on Linux a shell that opens the worker's two pipes
-    through /proc before it writes the file, and sleeps a minute. The
+    then waits on a pipe the gate keeps open until the step is over: on
+    Windows `cmd`, which holds the worker's pipes by inheritance from the
+    start, reading a named pipe; on Linux a shell that opens the worker's
+    two pipes through /proc before it writes the file, reading a FIFO. The
     file is the gate's proof that the worker is inside that compile, and
     nothing else compiles that text. The step used to take a `ping` or
     `sleep` found under the worker as that proof, and hold an outline
@@ -1173,13 +1173,16 @@ def orphan_steps():
     The held request is now the compile itself, a pull. The worker alone
     is killed, and the holders are left running until the step is over.
 
-    The Windows wait was a `ping -n 61`, a minute by its own clock. Twice
-    on master's CI (jobs 122939534975 and 124281113104) these steps took
-    97 and 98 s from step 73c's line to 73k's, where 122 passing Windows
-    runs took 2.7 to 3.2 s, and by the kill the ping had ended: the pull
-    was answered clean (`items: []`), nothing held the worker's pipes,
-    and the worker was gone (WinError 87 for its pid). What held the gate
-    up is not in either log. A wait the gate ends cannot end first."""
+    The wait used to be a minute by its own clock, `ping -n 61` on
+    Windows and `sleep 60` on Linux. Twice on master's CI (jobs
+    122939534975 and 124281113104) these steps took 97 and 98 s from step
+    73c's line to 73k's, where 122 passing Windows runs took 2.7 to 3.2 s,
+    and by the kill the ping had ended: the pull was answered clean
+    (`items: []`), nothing held the worker's pipes, and the worker was
+    gone (WinError 87 for its pid). What held the gate up is not in
+    either log. Held up 92 s after listing 73k's worker, a Linux gate
+    with the `sleep` failed 73k the same way, and with the FIFO it held.
+    A wait the gate ends cannot end first."""
     if os.name != "nt" and not sys.platform.startswith("linux"):
         for label, name in (("73j", "a request after a worker died with its pipes held is answered"),
                             ("73k", "a request the worker died holding, its pipes held, is refused")):
@@ -1194,14 +1197,14 @@ def orphan_steps():
     other_uri = opened(o, own, "other.iyi", "def other\nend\n")
     left = []
 
-    # The named pipes the Windows holds wait on, let go of when the step
-    # is over.
-    pipes = []
+    # The pipes the holds wait on, let go of when the step is over: named
+    # pipes on Windows, and on Linux the gate's ends of FIFOs.
+    pipes, fifos = [], []
 
     def held_text(name):
         """A module whose compile writes *name*.started under the gate's
-        directory, holding the worker's pipes by then, and waits: on
-        Windows until the gate lets go of a pipe, on Linux a minute."""
+        directory, holding the worker's pipes by then, and waits until
+        the gate lets go of a pipe."""
         mark = os.path.join(own, f"{name}.started")
         if os.name == "nt":
             pipe = r"\\.\pipe\%s-%s" % (os.path.basename(own), name)
@@ -1211,8 +1214,15 @@ def orphan_steps():
             # busy"), and `set /p` waited on it until it was closed.
             hold = f'cmd /c type nul > "{mark}" & set /p held=< "{pipe}"'
         else:
+            # Held open for writing by the gate alone, so `read` waits until
+            # the gate closes it - or dies, which closes it too. Read-write,
+            # so this open does not wait for the reader; Linux allows that
+            # on a FIFO (fifo(7)), and only Linux runs these steps.
+            fifo = os.path.join(own, f"{name}.held")
+            os.mkfifo(fifo)
+            fifos.append(os.open(fifo, os.O_RDWR))
             hold = (f"exec </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null; "
-                    f"touch '{mark}'; sleep 60")
+                    f"touch '{mark}'; read held < '{fifo}'")
         return mark, f"module {name}\n\n{{% system({json.dumps(hold)}) %}}\nputs 1\n"
 
     def inside(mark):
@@ -1287,6 +1297,8 @@ def orphan_steps():
             pass
     for kernel, handle in pipes:
         kernel.CloseHandle(handle)
+    for writer in fifos:
+        os.close(writer)
     stuck = (worker and after is None) or (second and refused is None)
     if not stuck and answer_within(o, o.request_nowait("shutdown", {}), 10):
         o.send("exit", {}, wait=False)

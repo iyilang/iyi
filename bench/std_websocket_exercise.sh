@@ -18,6 +18,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/darwin_frames.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -1046,20 +1047,23 @@ fi
 echo
 echo "== the exercise's artifacts and other platforms"
 # Built from the modules' artifacts, the exercise must print what it
-# printed from source; and it typechecks for the four other platforms std
-# is held to.
+# printed from source, darwin's frames under a task's panic left out
+# (bench/darwin_frames.sh); and it typechecks for the four other
+# platforms std is held to.
 mkdir -p "$WORK/r1/mods"
 if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_websocket_exercise.iyi" \
       && "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_websocket_exercise.iyi") > "$WORK/r1/build.log" 2>&1 \
    && timeout -k 5 300 "$WORK/r1/from-source" > "$WORK/r1/source.out" 2>&1 \
    && timeout -k 5 300 "$WORK/r1/from-artifact" > "$WORK/r1/artifact.out" 2>&1 \
-   && cmp -s "$WORK/r1/source.out" "$WORK/r1/artifact.out" \
+   && without_frames < "$WORK/r1/source.out" > "$WORK/r1/source.cmp" \
+   && without_frames < "$WORK/r1/artifact.out" > "$WORK/r1/artifact.cmp" \
+   && cmp -s "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" \
    && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
   echo "  from source and from its artifacts alike, $(wc -l < "$WORK/r1/artifact.out" | tr -d ' ') lines"
 else
   echo "  FAIL: the exercise does not run the same from its artifacts"
   grep -m3 -E 'Error|panic: ASSERTION' "$WORK/r1/build.log" "$WORK/r1/source.out" "$WORK/r1/artifact.out" 2>/dev/null | sed 's/^/    /'
-  diff "$WORK/r1/source.out" "$WORK/r1/artifact.out" 2>/dev/null | sed -n '1,6p' | sed 's/^/    /'
+  diff "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" 2>/dev/null | sed -n '1,6p' | sed 's/^/    /'
   status=1
 fi
 for target in x86_64-linux-gnu aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do

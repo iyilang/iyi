@@ -1380,7 +1380,20 @@ jobs:
   # directory (BSD cp's trailing-slash reading of `src/*/`) and only
   # unpacking it somewhere else could have caught that.
   darwin:
-    runs-on: macos-14
+    # macos-15, pinned. GitHub retires macos-14 on 2026-11-02, and its
+    # scheduled brownouts cancelled every darwin job of two master runs
+    # before then (job 124229745795). The numbers that name macos-14 in
+    # these comments and the documents were measured there: a three-core
+    # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
+    runs-on: macos-15
+    # A runner builds for its own major version, which on macos-15 is 15.0:
+    # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
+    # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
+    # collector's futex (README.md, GC_DESIGN.md), so everything the darwin
+    # jobs compile - the static LLVM, the compiler and every gate's program -
+    # is built for it, and the unpacked tarball is held to it below.
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
     # Ninety, and the number is this job's own measurement rather than a
     # guess: the run before this one took 54m32s of a sixty-minute bound,
     # and 34 of those minutes are two steps nothing can shorten - building
@@ -1403,8 +1416,14 @@ jobs:
       # beside Crystal's compiler). brew's llvm is not asked for: the
       # compiler this job ships links the static one built below, and
       # the Crystal bootstrap brings whatever LLVM it needs for itself.
+      # What the runner is, in every log: the jobs' times and the gates'
+      # numbers are this machine's.
       - name: Install the bootstrap toolchain
         run: |
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          xcodebuild -version
+          python3 --version
           brew install crystal coreutils pkgconf
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
@@ -1416,8 +1435,11 @@ jobs:
       # Now it links a static minimal LLVM, and with the collector off the
       # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
-      # SDK it was compiled against; cached on the recipe's hash and the
-      # platform, so the build is paid once per recipe change. `$HOME`
+      # SDK it was compiled against; cached on the recipe's hash, the
+      # platform, the image and the deployment target, so the build is paid
+      # once per recipe or image change (28 minutes on macos-14, job
+      # 115861374075; 25 to 37 in the six darwin jobs of macos-15's first
+      # run, 41131916587). `$HOME`
       # rather than `/tmp`: darwin's `/tmp` is a symlink into `/private`,
       # and a cache path should not depend on how a symlink is archived.
       - name: Restore the static LLVM
@@ -1425,7 +1447,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
@@ -1615,6 +1637,24 @@ jobs:
           test "$(env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi run conc.iyi)" = "a7"
           echo "the kqueue runtime runs out of the tarball"
 
+      # Built for the floor, and the check has its broken copy: the same
+      # sample built without the deployment target says the runner's own
+      # version, which this check must tell apart from 14.4.
+      - name: The tarball runs on macOS 14.4
+        run: |
+          minos() { otool -l "$1" | awk '$1 == "minos" { print $2; exit }'; }
+          for bin in iyi iyi-daemon; do
+            got=$(minos "/tmp/unpacked/bin/$bin")
+            [ "$got" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "bin/$bin says minos '$got', not $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+            echo "bin/$bin runs on macOS $got and later"
+          done
+          cd /tmp
+          env -u MACOSX_DEPLOYMENT_TARGET -u IYI_PATH -u CRYSTAL_PATH \
+            /tmp/unpacked/bin/iyi build -o /tmp/host_minos /tmp/unpacked/share/iyi/samples/hello.iyi
+          got=$(minos /tmp/host_minos)
+          [ -n "$got" ] && [ "$got" != "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "a build without the target says minos '$got': the check above tells nothing apart"; exit 1; }
+          echo "a build without the target says minos $got, which the check refuses"
+
       # The native standard library, out of the same tarball. `import std/text`
       # is a line a program writes, so it has to resolve from what was
       # downloaded and from nothing else — and on darwin especially, because
@@ -1671,7 +1711,9 @@ jobs:
   # shard has a hundred and five: on integration/0.19 shard 4 was cut off
   # at seventy-five, std/http alone 27 minutes of it and std/big 14.
   darwin-std-siblings:
-    runs-on: macos-14
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
     strategy:
       fail-fast: false
@@ -1691,7 +1733,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
@@ -1725,10 +1767,16 @@ jobs:
   # the job, 116 minutes in a green run on feat/m-thread (job
   # 121411796955), was cut off at its 120 by the next (job 121530482309),
   # its build 5 minutes slower on that runner and every gate it reached
-  # green.
+  # green. A hundred and twenty since, for a run that finds no static
+  # LLVM in the cache and builds it: on the first macos-15 run the build
+  # took 34 minutes and the job was cut off at ninety (job 124324684065)
+  # in "and on the platforms this runner is not", which took 24 minutes
+  # on macos-14 (job 123810587348) and had run 24 when it was cancelled.
   darwin-std:
-    runs-on: macos-14
-    timeout-minutes: 90
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+    timeout-minutes: 120
     name: "The native standard library's foundation, on darwin"
     steps:
       - uses: actions/checkout@v7
@@ -1743,7 +1791,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"

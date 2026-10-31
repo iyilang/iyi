@@ -1539,14 +1539,15 @@ a core]. The wake is the program's own thread's: at most 25 µs on the
 M2.
 
 Why this futex. It is public from macOS 14.4, and a program built on
-macOS 14 says it runs on 14.0 (`minos` 14.0 on CI's 14.8.9; 26.0 on the
-M2), so iyi's darwin programs need 14.4 now. A weak import, the old spin
-its fallback where the name is absent, would keep 14.0 to 14.3, and iyi
-has no weak linkage: no annotation declares one and codegen gives a
-`lib` function no linkage but the external one, so the floor is stated
-(README, SPEC.md III.9) rather than worked around. `__ulock_wait`, the private
-call beneath it - a parked helper's frame under `sample` is
-`__ulock_wait2`, and the wake's disassembly is a call to `__ulock_wake` -
+macOS 14 says it runs on 14.0 (`minos` 14.0 on CI's macos-14 runner,
+14.8.9; 26.0 on the M2), so iyi's darwin programs need 14.4 now. A weak
+import, the old spin its fallback where the name is absent, would keep
+14.0 to 14.3, and iyi has no weak linkage: no annotation declares one and
+codegen gives a `lib` function no linkage but the external one, so the
+floor is stated (README, SPEC.md III.9) rather than worked around.
+`__ulock_wait`, the private call beneath it - a parked helper's frame
+under `sample` is `__ulock_wait2`, and the wake's disassembly is a call
+to `__ulock_wake` -
 is the same futex without the 14.4, but every program would carry a
 private name, which this document refused for the stop's park. A Mach
 semaphore is public everywhere, four names with `mach_task_self_`, and a

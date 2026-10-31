@@ -6451,7 +6451,10 @@ dyld refuses it on 14.0 to 14.3 for the missing symbol. A weak import with the
 old spin as its fallback would lift that, and iyi has no weak linkage to
 declare it with; the private `__ulock_wait` beneath the futex has no 14.4, and
 every program would carry a private name (GC_DESIGN.md, "darwin's helpers
-park").
+park"). The darwin tarball's own `iyi` and daemon are built for 14.4 too: CI
+builds on macos-15, whose host version is 15.0, with `MACOSX_DEPLOYMENT_TARGET`
+at 14.4, which iyi honours as clang does, and holds the unpacked binaries'
+`minos` to it.
 
 So **an own-prelude program's dependency is the platform libc and nothing
 else**, and what that is worth depends on which artifact is being read, so this
@@ -11175,7 +11178,7 @@ Named honestly, so nobody mistakes this draft for complete.
 
     Darwin was what remained unrun when this was written, the excuse being
     that macOS runners exist. They do, and it is run: `aarch64-darwin` has
-    its own native job in the workflow (`darwin`, on `macos-14`), which
+    its own native job in the workflow (`darwin`, on `macos-15`), which
     builds the release compiler, holds the same gates a Linux push answers
     for, and ships the darwin tarball beside the Linux one.
 

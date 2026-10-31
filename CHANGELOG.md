@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **bench: std/tls names a TLS 1.2 Python server whose client never
+  connects, rather than waiting on it.** Python's ssl server in the gate's
+  TLS 1.2 section accepted with no timeout, and the gate waited on it
+  with a plain `wait`: a client that failed before it connected would
+  have held the gate until the sibling's 35-minute limit. The server's
+  accept now gives up after 10 s ("no client connected in 10 s"), and the
+  gate gives a server 15 s after its client - one ends 2 to 54 ms after
+  it, in 75 rounds on Linux - before naming it and stopping it with
+  `stop_server`. Three copies run side by side, 25 s each: a client that
+  never connects is named by Python, a server without its accept timeout
+  is named and stopped by the gate, and the plain wait it replaced is
+  caught still waiting. Found looking into master's Linux std-siblings
+  shard 1 (job 124230515630), which was not hung there: its runner built
+  iyi 3.6 times and ran the siblings before std/tls 3.4 times slower than
+  the same shard's first attempt, and the job's 90 minutes ran out inside
+  std/tls.
 - **Windows: a thread its idle wait lets go is busy before it takes
   anything, so a join beside a thread waking from its sleeps is not
   named a deadlock.** Master's `bench/concurrent_mark.sh` failed on the

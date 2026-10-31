@@ -613,7 +613,8 @@ echo "== TLS 1.2: the client against servers that speak nothing newer"
 # signature or point one bit off and the downgrade sentinel written into
 # an honest server's random, each refused. Then Python's ssl, pinned to
 # TLS 1.2 by maximum_version, each suite set by set_ciphers on ECDSA and
-# RSA certificates.
+# RSA certificates; and a client that never connects to it, named within
+# seconds rather than waited on.
 tls12=0
 if [ "$windows" = yes ] || ! command -v "$OPENSSL" >/dev/null 2>&1 || [ -z "$PY" ] || ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; then
   echo "  no openssl and python here, so TLS 1.2 goes unasked"
@@ -757,7 +758,9 @@ else
     status=1
   fi
   tls12=$(grep -c -v FAIL "$WORK/tls12.out")
-  # Python's ssl, maximum_version TLS 1.2, one connection a suite.
+  # Python's ssl, maximum_version TLS 1.2, one connection a suite. Its
+  # accept gives up after 10 s, saying so: one that waited for a client
+  # that never came was waited on in turn, and held the gate.
   cat >"$WORK/py12.py" <<'PY'
 import socket, ssl, sys
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -768,8 +771,12 @@ ctx.set_alpn_protocols(["http/1.1"])
 listener = socket.socket()
 listener.bind(("127.0.0.1", 0))
 listener.listen(1)
+listener.settimeout(10)
 open(sys.argv[1], "w").write(str(listener.getsockname()[1]))
-conn, _ = listener.accept()
+try:
+    conn, _ = listener.accept()
+except socket.timeout:
+    sys.exit("no client connected in 10 s")
 conn.settimeout(10)
 with ctx.wrap_socket(conn, server_side=True) as s:
     data = b""
@@ -781,37 +788,126 @@ with ctx.wrap_socket(conn, server_side=True) as s:
     s.sendall(f"HTTP/1.0 200 ok\r\n\r\n{s.version()} {s.cipher()[0]}\n".encode())
     s.unwrap()
 PY
+  py12_server="$WORK/py12.py"
+  # py12_reap <pid>: Python's server ends on its own once its one
+  # connection is done - 2 to 54 ms after its client, in 75 rounds
+  # (Linux, x86-64, 12 threads) - or 10 s after it started without one.
+  # One still there 15 s after its client is named, stop_server ends it,
+  # and the round fails. A plain wait held the gate for as long as the
+  # server ran, which for one whose client never connected was until
+  # the sibling's limit.
+  py12_reap() {
+    local _
+    for _ in $(seq 1 150); do
+      if ! kill -0 "$1" 2>/dev/null; then
+        wait "$1" 2>/dev/null
+        return 0
+      fi
+      sleep 0.1
+    done
+    echo "  FAIL: Python's TLS 1.2 server, pid $1, still running 15 s after its client"
+    stop_server "$1"
+    return 1
+  }
+  # py12_round <kind> <suite> <client>: py12_server on <kind>'s key and
+  # <suite>, and <client> - a command given its port - run against it:
+  # the client's answer in $got, Python's in $CW/py12.log.
+  py12_round() {
+    local pid _
+    rm -f "$CW/py12port"
+    "$PY" "$py12_server" "$CW/py12port" "$PKI/$1.pem" "$PKI/$1.key" "$2" >"$CW/py12.log" 2>&1 &
+    pid=$!
+    echo "$pid" >"$CW/py12.pid"
+    for _ in $(seq 1 50); do [ -s "$CW/py12port" ] && break; sleep 0.1; done
+    got="$("$3" "$(cat "$CW/py12port" 2>/dev/null)" 2>&1)"
+    py12_reap "$pid"
+  }
+  py12_get12() { TLS_MIN_VERSION=1.2 "$WORK/tls-release" get "$1" "$PKI/ca.pem" localhost http/1.1; }
+  py12_get() { "$WORK/tls-release" get "$1" "$PKI/ca.pem" localhost http/1.1; }
   for pair in p256:ECDHE-ECDSA-AES128-GCM-SHA256 p256:ECDHE-ECDSA-AES256-GCM-SHA384 p256:ECDHE-ECDSA-CHACHA20-POLY1305 \
     rsa:ECDHE-RSA-AES128-GCM-SHA256 rsa:ECDHE-RSA-AES256-GCM-SHA384 rsa:ECDHE-RSA-CHACHA20-POLY1305; do
     kind="${pair%%:*}"
     suite="${pair#*:}"
-    rm -f "$WORK/py12port"
-    "$PY" "$WORK/py12.py" "$WORK/py12port" "$PKI/$kind.pem" "$PKI/$kind.key" "$suite" >"$WORK/py12.log" 2>&1 &
-    pid=$!
-    for _ in $(seq 1 50); do [ -s "$WORK/py12port" ] && break; sleep 0.1; done
-    got="$(TLS_MIN_VERSION=1.2 "$WORK/tls-release" get "$(cat "$WORK/py12port")" "$PKI/ca.pem" localhost http/1.1 2>&1)"
-    wait "$pid" 2>/dev/null
-    if printf '%s' "$got" | grep -qE "^HTTP/1.0 200 ok TLS_ECDHE_.* alpn=http/1.1 TLSv1.2 group=[A-Za-z0-9]+$" && ! [ -s "$WORK/py12.log" ]; then
+    if py12_round "$kind" "$suite" py12_get12 &&
+       printf '%s' "$got" | grep -qE "^HTTP/1.0 200 ok TLS_ECDHE_.* alpn=http/1.1 TLSv1.2 group=[A-Za-z0-9]+$" && ! [ -s "$CW/py12.log" ]; then
       tls12=$((tls12 + 1))
       echo "  Python's ssl, TLS 1.2, $kind, $suite: $got"
     else
-      echo "  FAIL Python's ssl, TLS 1.2, $kind, $suite: $got; Python said: $(tail -1 "$WORK/py12.log")"
+      echo "  FAIL Python's ssl, TLS 1.2, $kind, $suite: $got; Python said: $(tail -1 "$CW/py12.log")"
       status=1
     fi
   done
   # Not told to speak TLS 1.2, the client offers Python's 1.2-only server
   # nothing it takes: refused, as before 1.2 was here.
-  rm -f "$WORK/py12port"
-  "$PY" "$WORK/py12.py" "$WORK/py12port" "$PKI/p256.pem" "$PKI/p256.key" ECDHE-ECDSA-AES128-GCM-SHA256 >"$WORK/py12.log" 2>&1 &
-  pid=$!
-  for _ in $(seq 1 50); do [ -s "$WORK/py12port" ] && break; sleep 0.1; done
-  got="$("$WORK/tls-release" get "$(cat "$WORK/py12port")" "$PKI/ca.pem" localhost http/1.1 2>&1)"
-  wait "$pid" 2>/dev/null
-  if printf '%s' "$got" | grep -qF "alert protocol_version (70)"; then
+  if py12_round p256 ECDHE-ECDSA-AES128-GCM-SHA256 py12_get && printf '%s' "$got" | grep -qF "alert protocol_version (70)"; then
     tls12=$((tls12 + 1))
     echo "  Python's ssl, TLS 1.2 alone, the client not told to speak it: $got"
   else
     echo "  FAIL Python's ssl, TLS 1.2 alone, the client not told to speak it: $got"
+    status=1
+  fi
+  # A client that never connects - one that failed before it could - is
+  # named within seconds: Python's accept gives up, saying so; a server
+  # without that timeout is named and stopped by py12_reap; and the plain
+  # wait py12_reap replaced is caught still waiting. Side by side, each
+  # in its own directory, each given 25 s: the seven rounds above and
+  # these three took 27.3 s together (Linux, x86-64, 12 threads).
+  py12_absent() { :; }
+  grep -v '^listener.settimeout(10)$' "$WORK/py12.py" >"$WORK/py12-untimed.py"
+  # never_connects <name> <server> [waited]: a py12_round against <server>
+  # whose client never connects, its wait py12_reap's or, with "waited",
+  # a plain one; what it said in never-<name>/said. 124 when it had not
+  # ended in 25 s, and was killed with its server.
+  never_connects() {
+    local dir="$WORK/never-$1" checker _
+    rm -rf "$dir" && mkdir -p "$dir"
+    (
+      CW="$dir"
+      py12_server="$2"
+      [ "${3:-}" = waited ] && py12_reap() { wait "$1" 2>/dev/null; }
+      py12_round p256 ECDHE-ECDSA-AES128-GCM-SHA256 py12_absent
+      echo "Python said: $(tail -1 "$CW/py12.log")"
+    ) >"$dir/said" 2>&1 &
+    checker=$!
+    for _ in $(seq 1 250); do
+      kill -0 "$checker" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$checker" 2>/dev/null; then
+      kill -9 "$checker" "$(cat "$dir/py12.pid" 2>/dev/null)" 2>/dev/null
+      wait "$checker" 2>/dev/null
+      return 124
+    fi
+    wait "$checker"
+  }
+  never_connects timed "$WORK/py12.py" &
+  timed=$!
+  never_connects untimed "$WORK/py12-untimed.py" &
+  untimed=$!
+  never_connects waited "$WORK/py12-untimed.py" waited &
+  waited=$!
+  wait "$timed"
+  timed=$?
+  wait "$untimed"
+  untimed=$?
+  wait "$waited"
+  waited=$?
+  if [ "$timed" -ne 124 ] && grep -qF "Python said: no client connected in 10 s" "$WORK/never-timed/said"; then
+    echo "  a client that never connects: Python's server says \"no client connected in 10 s\" and ends"
+  else
+    echo "  FAIL a client that never connects: $(tr '\n' ' ' <"$WORK/never-timed/said")"
+    status=1
+  fi
+  if [ "$untimed" -ne 124 ] && grep -qF "still running 15 s after its client" "$WORK/never-untimed/said"; then
+    echo "  the same server without its accept timeout: named 15 s after its client, and stopped"
+  else
+    echo "  FAIL the same server without its accept timeout went unnamed: $(tr '\n' ' ' <"$WORK/never-untimed/said")"
+    status=1
+  fi
+  if [ "$waited" -eq 124 ]; then
+    echo "  the plain wait py12_reap replaced is caught still waiting at 25 s"
+  else
+    echo "  FAIL: the check holds a plain wait on a server whose client never connected"
     status=1
   fi
   # The downgrade sentinel from a real server: a copy whose ClientHello

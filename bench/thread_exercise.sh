@@ -5,7 +5,8 @@
 #     bash bench/thread_exercise.sh
 #
 # Seven steps, and the fifth and sixth are failure proofs, because a gate
-# that cannot fail is not a gate; the seventh, Windows' own, carries its own:
+# that cannot fail is not a gate; the seventh, Windows' own and one of
+# darwin's, carries its own:
 #
 #   1. The program holds every property, plain and --release, with eight
 #      threads: each allocates from its own cache while collections run
@@ -56,6 +57,9 @@
 #  7c. On Windows, threads and their tasks grow fresh stacks while a thread
 #      collects in a loop, and every run ends; with the stop's scan started
 #      at sp again, inside the guard page, a run dies.
+#  7d. On darwin, threads are born sixteen at a time beside a thread that
+#      collects in a loop, and every one starts; with a thread's line linked
+#      before its first touch of a thread-local again, a run is killed.
 #
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
@@ -1681,6 +1685,123 @@ IYI
       echo "five runs scanning from sp all ended well"; exit 1
     fi
     echo "  run $caught of up to five died"
+    ;;
+esac
+
+# ── 7d. darwin: a stop names a thread only once its thread-locals are made ─
+# dyld makes a thread's thread-locals at its first touch of one, a `calloc`
+# of the image's whole block, and the stop's handler reads two of them. The
+# parent linked a thread's line before `pthread_create`, so a stop could
+# signal the thread inside that `calloc`; the handler's read made the block
+# again and took the allocator's lock the interrupted call held, and
+# libplatform killed the process ("Trying to recursively lock an
+# os_unfair_lock") or libmalloc trapped ("ulock_wait failure"). The
+# switching program above died so in 5 runs of 130 on macOS 26.6 (an M2
+# Pro), and the program below in 19 of 20 (18 killed, 1 trapped), each
+# inside 4 s. A thread links its own line now, after its first touch: the
+# program, 3,200 threads a run, sixteen at a time beside a thread that
+# collects in a loop, ran 20 runs of 20 there. The failure proof links the
+# line in the parent again. Then a handler that lands before the thread's
+# touch, or inside it where the allocator lets its own touch through,
+# finds no line, returns without counting in, and the stop waits for it
+# forever (5 runs of 5 hung so on the M2): the copy's handler aborts there
+# instead, so the proof counts a kill, a trap or an abort, each by name,
+# and never waits out a timeout. The M2 counted 5 aborts in 5 runs.
+case "$(uname -s)" in
+  Darwin)
+    step "darwin: threads born sixteen at a time beside a thread collecting in a loop: five runs of 3,200, and every one ends well"
+    cat > born.iyi <<'IYI'
+module born
+
+import std/gc::{GC}
+
+class Flag
+  getter stop : Atomic(Int64)
+  getter born : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @born = Atomic(Int64).new(0_i64)
+  end
+end
+
+def storm(flag : Flag) : Nil
+  while flag.stop.get == 0_i64
+    GC.collect
+  end
+end
+
+def arrive(flag : Flag) : Nil
+  flag.born.add(1_i64)
+end
+
+flag = Flag.new
+stormer = IyiThread.start { storm(flag) }
+started = 0
+Program.args[0].to_i.times do
+  batch = [] of IyiThread
+  16.times { batch << IyiThread.start { arrive(flag) } }
+  started = started + 16
+  batch.each(&.join)
+end
+flag.stop.set(1_i64)
+stormer.join
+raise "born #{flag.born.get} of #{started}" if flag.born.get != started
+puts "ok born=#{started} stops=#{IyiThread.stops}"
+IYI
+    if ! "$IYI" build born.iyi -o born > build-born.log 2>&1; then
+      cat build-born.log; exit 1
+    fi
+    # In a subshell that waits, so a run a signal ends is reported here,
+    # by its status, and not by the shell's job notice.
+    run=1
+    while [ "$run" -le 5 ]; do
+      ( timeout -k 5 60 ./born 200 > born.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^ok born=3200 ' born.txt; then
+        echo "run $run exited $code:"; tail -3 born.txt; exit 1
+      fi
+      run=$((run + 1))
+    done
+    echo "  five runs, every thread born and joined ($(sed -n 's/^ok born=3200 stops=//p' born.txt) stops in the last)"
+
+    step "failure proof: the line linked by the parent before the thread's first touch, as it was"
+    probe='function probe(pad) {
+      print pad "if line == 0"
+      print pad "  message = \"iyi: proof: a stop reached a thread before it wrote its line\\n\""
+      print pad "  __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print pad "  LibC.pthread_kill(LibC.pthread_self, 6)"
+      print pad "end"
+    }'
+    mkdir -p unborn/iyi
+    cp "$REPO"/src/iyi/*.iyi unborn/iyi/
+    awk "$probe"' /^        result = LibC\.pthread_create\(Pointer\(UInt64\)\.new\(line \+ IYI_TL_HANDLE\), / {
+        print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"; print "        @@lines = line"; found++ }
+      /^        link_own\(line\)$/ { found++; next }
+      /^      line = own_line$/ { print; probe("      "); found++; next }
+      { print } END { if (found != 3) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > unborn/iyi/thread.iyi || { echo "the start's pthread_create, the thread's own link or the handler's line is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/unborn${PSEP}$REPO/src" "$IYI" build born.iyi -o unborn-run > build-unborn.log 2>&1; then
+      cat build-unborn.log; exit 1
+    fi
+    killed=0; trapped=0; aborted=0; ended=0; other=""
+    run=1
+    while [ "$run" -le 5 ]; do
+      ( timeout -k 5 60 ./unborn-run 200 > unborn.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      case "$code" in
+        137) killed=$((killed + 1)) ;;
+        133) trapped=$((trapped + 1)) ;;
+        134) grep -q '^iyi: proof: a stop reached a thread before it wrote its line' unborn.txt && aborted=$((aborted + 1)) || other="$other 134" ;;
+        0) ended=$((ended + 1)) ;;
+        *) other="$other $code" ;;
+      esac
+      run=$((run + 1))
+    done
+    echo "  five runs: $killed killed (SIGKILL), $trapped trapped (SIGTRAP), $aborted aborted at the handler's unwritten line (SIGABRT), $ended ended${other:+, other exits:$other}"
+    if [ $((killed + trapped + aborted)) -eq 0 ]; then
+      echo "five runs with the line linked before the thread's first touch: none killed, trapped or aborted"; exit 1
+    fi
     ;;
 esac
 

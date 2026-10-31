@@ -368,7 +368,25 @@ runtime lock parks inside the spin, where it holds nothing.
 already read EINTR as a wakeup with no news. A thread's last act
 returns its cache to the centre, lets its fill arenas go, and leaves
 the list a stop walks; the stop that began before it left waited for
-it.
+it. Its first act is the mirror, and the platforms differ there. On
+Linux the line is linked, the tid in it, before `clone` returns, and a
+stop that signals the thread before its first instruction finds the
+line by that tid. On darwin a thread links its own line, after its
+first touch of a thread-local: dyld makes a thread's thread-locals
+there, one `calloc` of the image's block, and the stop's handler reads
+two of them (the line and the heap's cache). Linked by its parent
+before `pthread_create`, a thread could take the stop's signal inside
+that `calloc`; the handler's read made the block again and took the
+lock the interrupted call held, and on macOS 26.6 (the M2 Pro)
+libplatform killed the process ("Trying to recursively lock an
+os_unfair_lock") - `bench/thread_exercise.sh`'s switching program in 5
+runs of 130, and threads born beside a thread collecting in a loop
+(its step 7d) in 19 of 20, each inside 4 s. No stop names a darwin
+thread before that touch now, and the handler is never the one to make
+the block. Linux's block is mapped and copied by the parent before
+`clone`, and its thread-locals are loads that allocate nothing;
+Windows' stop runs no code on the thread it suspends, and the loader
+hands a thread its TLS array when it creates it.
 
 What the build found, and what it decided. The trigger's count moved
 off the class variable onto the centre's atomic, folded per cache

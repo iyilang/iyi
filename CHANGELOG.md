@@ -763,6 +763,37 @@ wants more cores starts more parallel tasks.
 
 ### Fixed
 
+- **A darwin thread a collection stops at its birth is not killed by
+  libplatform.** dyld makes a thread's `@[ThreadLocal]`s at its first
+  touch of one, one `calloc` of the image's block, and the stop's handler
+  reads two of them: `IyiThread`'s line and the heap's cache. A thread's
+  line was linked for the stops by its parent, before `pthread_create`,
+  so a collection could signal the thread inside that `calloc`; the
+  handler's read made the block again and took the allocator's lock the
+  interrupted call held. On macOS 26.6 (an M2 Pro) libplatform killed the
+  process ("BUG IN CLIENT OF LIBPLATFORM: Trying to recursively lock an
+  os_unfair_lock", SIGKILL) or libmalloc trapped ("ulock_wait failure",
+  SIGTRAP): `bench/thread_exercise.sh`'s switching program died so in 3
+  runs of the gate in 14, and in 5 of 130 runs alone. A darwin thread
+  links its own line now, under the runtime lock, once it has written
+  it: no stop names it before its thread-locals are made, and until then
+  it has allocated nothing from the heap and holds no pointer into it.
+  `start` still counts it and still creates it under the lock, so its
+  handle is in the line before a stop can read it, and the handler's
+  search by handle for a line not yet written is Linux's alone. No
+  libSystem name was added. Linux's thread-locals are a block the parent
+  maps and copies before `clone`, read by loads that allocate nothing;
+  Windows' stop suspends a thread and runs no code on it. The gate's new
+  darwin step starts 3,200 threads sixteen at a time beside a thread
+  that collects in a loop, five runs, every thread born and joined:
+  origin/master's runtime died in 19 runs of 20 there (18 killed, 1
+  trapped), each inside 4 s, and this one ran 20 of 20, the switching
+  program 30 of 30. Its broken copy links the line in the parent again;
+  its handler then finds no line and returns without counting in, and
+  the stop waited forever in 5 runs of 5, so the copy's handler aborts
+  there by name, and the proof counts each run killed, trapped or
+  aborted: 5 aborted in 5.
+
 - **A mark beside the program counts its workers by one and never stores
   the count (#149).** The remainder round, which runs beside the program
   when the second stop retreats, stored the count of workers marking over
@@ -25671,7 +25702,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,599-line library and nothing else. Every other
+  written against iyi's own 25,630-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

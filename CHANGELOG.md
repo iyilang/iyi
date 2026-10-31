@@ -938,15 +938,47 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
   libSystem name was added. Linux's thread-locals are a block the parent
   maps and copies before `clone`, read by loads that allocate nothing;
   Windows' stop suspends a thread and runs no code on it. The gate's new
-  darwin step starts 3,200 threads sixteen at a time beside a thread
-  that collects in a loop, five runs, every thread born and joined:
-  origin/master's runtime died in 19 runs of 20 there (18 killed, 1
-  trapped), each inside 4 s, and this one ran 20 of 20, the switching
-  program 30 of 30. Its broken copy links the line in the parent again;
-  its handler then finds no line and returns without counting in, and
-  the stop waited forever in 5 runs of 5, so the copy's handler aborts
-  there by name, and the proof counts each run killed, trapped or
-  aborted: 5 aborted in 5.
+  darwin step starts threads sixteen at a time beside a thread that
+  collects in a loop, 3,200 or 10 s' worth a run, five runs, every thread
+  born and joined: origin/master's runtime died in 19 runs of 20 of 3,200
+  there (18 killed, 1 trapped), each inside 4 s, and this one ran 20 of
+  20, the switching program 30 of 30. Its broken copy links the line in
+  the parent again; its handler then finds no line and returns without
+  counting in, and the stop waited forever in 5 runs of 5, so the copy's
+  handler aborts there by name, and the proof counts each run killed,
+  trapped or aborted: 5 aborted in 5.
+
+- **A darwin thread's first allocation is a root.** A thread wrote its
+  stack's top on its line after `IyiStackGuard.install`, whose `stack_t`
+  is its first heap chunk, so a stop between that allocation and the
+  chunk's three stores scanned the thread's stack from sp up to 0.
+  `GC.collect` sweeps inside its pause: the chunk went onto a free batch
+  there, the stores wrote over the batch's chain, and the centre's next
+  pop of the class read address 0x10008 - the `stack_t`'s 65,536 plus 8.
+  The thread-local fix's step (`bench/thread_exercise.sh` 7d) failed 2
+  of 3 CI runs on macos-15's three cores, one of them this SIGSEGV, and
+  debug jobs died of it in 13 runs of 342 of 3,200 threads: 6 of 115
+  with the runtime from before that fix, 5 of 103 after it, 2 of 124
+  with the stop masked across the first touch instead, 12 of the 13 at
+  0x10008, every one inside the newborn thread's install. Linux's top is
+  written by the parent before `clone`, and 60 runs held to three cores
+  did not fault. A darwin thread's first store is its top now,
+  `pthread_get_stackaddr_np`'s as the main thread's is, rather than a
+  local's address in `run`, so the scan takes `run`'s own frame whole.
+  Step 7e holds it: a copy of the runtime keeps the `stack_t` in the
+  install's frame until two collections have stopped the thread and
+  aborts by name if the sweep's flag says the chunk was freed; its
+  broken copy writes the top after the install again. With the top
+  first, 128 runs of 128 of 3,200 threads held on a macos-15 runner (7.8
+  to 48.8 s), and three runs of the gate held 7d and 7e there, their
+  proofs catching 15 runs of 15 and 9 of 9. 7d's runs are bounded by
+  their own clock now - twenty rounds, then rounds until 10 s, 3,200
+  threads at most - because the other CI failure was its 60 s timeout:
+  macos-15's runners made 54 to 479 threads a second (147 the median,
+  425 runs on four runners) where the M2 makes about 1,100, 3,200
+  threads took 7.2 to 59.6 s, and none of the 438 runs hung - every one
+  ended or faulted inside 60 s. Bounded, a run bore 512 to 2,640 threads
+  there.
 
 - **darwin's mark helpers park: an idle program no longer burns every
   core.** They spun on the generation forever (`yield` is ARM's hint,
@@ -25875,7 +25907,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,653-line library and nothing else. Every other
+  written against iyi's own 25,668-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

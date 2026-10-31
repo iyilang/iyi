@@ -59,8 +59,12 @@
 #      collects in a loop, and every run ends; with the stop's scan started
 #      at sp again, inside the guard page, a run dies.
 #  7d. On darwin, threads are born sixteen at a time beside a thread that
-#      collects in a loop, and every one starts; with a thread's line linked
-#      before its first touch of a thread-local again, a run is killed.
+#      collects in a loop, for 10 s or 3,200 threads, and every one starts;
+#      with a thread's line linked before its first touch of a thread-local
+#      again, a run is killed.
+#  7e. On darwin, a thread's first allocation held in its frame through two
+#      collections is not swept; with its stack's top written after that
+#      allocation again, a run aborts by name.
 #
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
@@ -1806,9 +1810,18 @@ esac
 # forever (5 runs of 5 hung so on the M2): the copy's handler aborts there
 # instead, so the proof counts a kill, a trap or an abort, each by name,
 # and never waits out a timeout. The M2 counted 5 aborts in 5 runs.
+#
+# A run is bounded by its own clock, not by a count: twenty rounds, then
+# rounds until 10 s have passed, 200 at most. Every run was 200 rounds and
+# held to 60 s by the harness, and macos-15's three-core runners make 54
+# to 479 threads a second (147 the median, 425 runs over four runners in
+# debug jobs) where the M2 makes about 1,100: 3,200 threads took 7.2 to
+# 59.6 s there, and CI's job ran out the 60 s on its first run once. The
+# slowest twenty rounds of 438 runs took 11.5 s, so a run ends inside
+# about 23 s on that machine, and the 60 s is left to say a run hung.
 case "$(uname -s)" in
   Darwin)
-    step "darwin: threads born sixteen at a time beside a thread collecting in a loop: five runs of 3,200, and every one ends well"
+    step "darwin: threads born sixteen at a time beside a thread collecting in a loop, for 10 s or 3,200 threads: five runs, and every one ends well"
     cat > born.iyi <<'IYI'
 module born
 
@@ -1836,12 +1849,16 @@ end
 
 flag = Flag.new
 stormer = IyiThread.start { storm(flag) }
+rounds = Program.args[0].to_i
+deadline = __iyi_monotonic_ns + Program.args[1].to_i.to_i64 * 1_000_000_000_i64
 started = 0
-Program.args[0].to_i.times do
+round = 0
+while round < rounds && (round < 20 || __iyi_monotonic_ns < deadline)
   batch = [] of IyiThread
   16.times { batch << IyiThread.start { arrive(flag) } }
   started = started + 16
   batch.each(&.join)
+  round = round + 1
 end
 flag.stop.set(1_i64)
 stormer.join
@@ -1854,15 +1871,17 @@ IYI
     # In a subshell that waits, so a run a signal ends is reported here,
     # by its status, and not by the shell's job notice.
     run=1
+    born=""
     while [ "$run" -le 5 ]; do
-      ( timeout -k 5 60 ./born 200 > born.txt 2>&1; exit $? ) 2> /dev/null
+      ( timeout -k 5 60 ./born 200 10 > born.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
-      if [ "$code" -ne 0 ] || ! grep -q '^ok born=3200 ' born.txt; then
+      if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ' born.txt; then
         echo "run $run exited $code:"; tail -3 born.txt; exit 1
       fi
+      born="$born $(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' born.txt)"
       run=$((run + 1))
     done
-    echo "  five runs, every thread born and joined ($(sed -n 's/^ok born=3200 stops=//p' born.txt) stops in the last)"
+    echo "  five runs, every thread born and joined:$born threads"
 
     step "failure proof: the line linked by the parent before the thread's first touch, as it was"
     probe='function probe(pad) {
@@ -1886,7 +1905,7 @@ IYI
     killed=0; trapped=0; aborted=0; ended=0; other=""
     run=1
     while [ "$run" -le 5 ]; do
-      ( timeout -k 5 60 ./unborn-run 200 > unborn.txt 2>&1; exit $? ) 2> /dev/null
+      ( timeout -k 5 60 ./unborn-run 200 10 > unborn.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
       case "$code" in
         137) killed=$((killed + 1)) ;;
@@ -1900,6 +1919,86 @@ IYI
     echo "  five runs: $killed killed (SIGKILL), $trapped trapped (SIGTRAP), $aborted aborted at the handler's unwritten line (SIGABRT), $ended ended${other:+, other exits:$other}"
     if [ $((killed + trapped + aborted)) -eq 0 ]; then
       echo "five runs with the line linked before the thread's first touch: none killed, trapped or aborted"; exit 1
+    fi
+    ;;
+esac
+
+# ── 7e. darwin: a thread's first allocation is a root ─────────────────────
+# A darwin thread wrote its stack's top on its line after
+# `IyiStackGuard.install`, whose `stack_t` is the thread's first heap
+# chunk. A stop between that allocation and the chunk's three stores
+# scanned the stack from sp up to 0, `GC.collect` freed the chunk in its
+# pause's sweep, and the stores wrote over the free batch it went onto: 7d's
+# program died of SIGSEGV in 13 runs of 342 of 3,200 threads on macos-15's
+# three cores, the same before the thread-local fix (6 of 115) as after it
+# (5 of 103), 12 of the 13 at the centre's next pop of the class, reading
+# 0x10008 - the `stack_t`'s 65,536 plus 8. Linux's top is written by the
+# parent before `clone`. A darwin thread's first store is its top now. A
+# copy of the runtime holds the `stack_t` in the install's frame until two
+# collections have stopped the thread (50 ms at most), then asks the sweep's
+# own flag whether the chunk was freed, and aborts by name if it was; every
+# thread of three runs keeps it. With the top written after the install
+# again, the same copy aborts, or dies of the overwritten batch: on
+# macos-15, three runs of this gate aborted 9 runs of 9, and kept every
+# first allocation in the fixed copy's 9.
+case "$(uname -s)" in
+  Darwin)
+    step "darwin: a thread's first allocation, held in its frame through two collections, is not swept: three runs"
+    held='function held(pad) {
+      print pad "held_until = __iyi_monotonic_ns + 50_000_000_i64"
+      print pad "held_from = IyiThread.stops"
+      print pad "while IyiThread.stops < held_from + 2_u64 && __iyi_monotonic_ns < held_until"
+      print pad "end"
+      print pad "if IyiMark.flags(stack.address) & IyiHeap::FREE_FLAG != 0"
+      print pad "  message = \"iyi: proof: a thread'"'"'s first allocation was swept from under it\\n\""
+      print pad "  __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print pad "  LibC.pthread_kill(LibC.pthread_self, 6)"
+      print pad "end"
+    }'
+    for copy in topfirst toplate; do
+      mkdir -p "$copy/iyi"
+      cp "$REPO"/src/iyi/*.iyi "$copy/iyi/"
+      awk "$held"' /^        stack = Pointer\(UInt64\)\.malloc\(3_u64\)$/ && !found { print; held("        "); found = 1; next }
+        { print } END { if (!found) exit 3 }' \
+        "$REPO/src/iyi/concurrency.iyi" > "$copy/iyi/concurrency.iyi" || { echo "the stack guard's stack_t is not in concurrency.iyi any more"; exit 1; }
+    done
+    awk '/^        IyiHeap\.write64\(line \+ IYI_TL_TOP, IyiRoots\.discover_stack_base\)$/ && !top { top = $0; next }
+      /^        IyiStackGuard\.install$/ && top { print; print top; moved = 1; next }
+      { print } END { if (!top || !moved) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > toplate/iyi/thread.iyi || { echo "the thread's top or its stack guard is not in thread.iyi any more"; exit 1; }
+    for copy in topfirst toplate; do
+      if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build born.iyi -o "$copy-run" > "build-$copy.log" 2>&1; then
+        cat "build-$copy.log"; exit 1
+      fi
+    done
+    run=1
+    while [ "$run" -le 3 ]; do
+      ( timeout -k 5 60 ./topfirst-run 20 1 > topfirst.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^ok born=320 ' topfirst.txt; then
+        echo "run $run exited $code:"; tail -3 topfirst.txt; exit 1
+      fi
+      run=$((run + 1))
+    done
+    echo "  three runs of 320 threads, every first allocation kept"
+
+    step "failure proof: the top written after the stack guard's allocation, as it was"
+    aborted=0; faulted=0; ended=0; other=""
+    run=1
+    while [ "$run" -le 3 ]; do
+      ( timeout -k 5 60 ./toplate-run 20 1 > toplate.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      case "$code" in
+        134) grep -q "^iyi: proof: a thread's first allocation was swept from under it" toplate.txt && aborted=$((aborted + 1)) || other="$other 134" ;;
+        139) faulted=$((faulted + 1)) ;;
+        0) ended=$((ended + 1)) ;;
+        *) other="$other $code" ;;
+      esac
+      run=$((run + 1))
+    done
+    echo "  three runs: $aborted aborted at a swept first allocation (SIGABRT), $faulted faulted (SIGSEGV), $ended ended${other:+, other exits:$other}"
+    if [ $((aborted + faulted)) -eq 0 ]; then
+      echo "three runs with the top written after the stack guard's allocation: none aborted or faulted"; exit 1
     fi
     ;;
 esac

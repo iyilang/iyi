@@ -386,7 +386,16 @@ thread before that touch now, and the handler is never the one to make
 the block. Linux's block is mapped and copied by the parent before
 `clone`, and its thread-locals are loads that allocate nothing;
 Windows' stop runs no code on the thread it suspends, and the loader
-hands a thread its TLS array when it creates it.
+hands a thread its TLS array when it creates it. A thread's stack top,
+which bounds the scan of its stack, is the other thing a stop needs
+before the thread holds anything: the parent writes Linux's before
+`clone`, and a darwin thread writes `pthread_get_stackaddr_np`'s as its
+first store. It wrote it after `IyiStackGuard.install`'s allocation,
+and a stop in between scanned that stack from sp up to 0: the eager
+sweep in `GC.collect`'s pause freed the thread's first chunk, the
+thread's stores into it wrote over the free batch it went onto, and the
+centre's next pop faulted - 13 runs of 342 of step 7d on macos-15's
+three cores, before the thread-local fix as after it.
 
 What the build found, and what it decided. The trigger's count moved
 off the class variable onto the centre's atomic, folded per cache

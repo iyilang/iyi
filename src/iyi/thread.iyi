@@ -69,8 +69,8 @@
   #      start and cleared by it at exit; the pthread_t on darwin
   # +8   the next line, from IyiThread.first_line
   # +16  the thread's own stack: its low address, 0 when unknown (darwin)
-  # +24  its top: the mapping's end on Linux, a first-frame local's address
-  #      on darwin — everything above it is libSystem's, holding nothing
+  # +24  its top: the mapping's end on Linux, `pthread_get_stackaddr_np`'s
+  #      on darwin, written by the thread before anything it does allocates
   # +32  unused
   # +40  where the thread stopped: sp
   # +48  pc
@@ -646,6 +646,24 @@
     # list, run it, leave the stop's list, and return into the exit the
     # clone asm (or pthread) performs.
     def self.run(line : UInt64) : Nil
+      # darwin: the stack's top before anything here allocates. It was
+      # written below `IyiStackGuard.install`, whose `stack_t` is a heap
+      # chunk, and a stop between that allocation and the three stores
+      # scanned this stack from sp up to 0 - nothing. `GC.collect` sweeps
+      # inside its pause, so the unmarked chunk went onto a free batch
+      # there, and the stores after it wrote the batch's chain: the
+      # centre's next pop of the class read address 0x10008, the
+      # `stack_t`'s 65,536 plus 8, and the process died of SIGSEGV.
+      # Threads born sixteen at a time beside a thread collecting in a
+      # loop (bench/thread_exercise.sh, 7d) died so on macos-15's three
+      # cores in 6 of 115 runs of 3,200 threads before the fix below
+      # (`@@line`'s) and 5 of 103 after it; with the top first, in none of
+      # 128. The top is `pthread_get_stackaddr_np`'s, as the main thread's
+      # is, rather than a local's address in this frame: the scan covers
+      # `run`'s own frame whole.
+      {% if flag?(:darwin) %}
+        IyiHeap.write64(line + IYI_TL_TOP, IyiRoots.discover_stack_base)
+      {% end %}
       @@line = line
       # darwin makes a thread's thread-locals at its first touch of one:
       # the store above, where dyld `calloc`s one block for every
@@ -683,10 +701,7 @@
         guarantee = 16384_i32
         LibC.SetThreadStackGuarantee(pointerof(guarantee))
       {% end %}
-      {% if flag?(:darwin) %}
-        here = uninitialized UInt64
-        IyiHeap.write64(line + IYI_TL_TOP, pointerof(here).address)
-      {% elsif flag?(:win32) %}
+      {% if flag?(:win32) %}
         IyiHeap.write64(line + IYI_TL_TOP, IyiRoots.discover_stack_base)
         # Before the body runs, so the first stop that names this line
         # reads a cache and not a zero (see `suspend_others`).

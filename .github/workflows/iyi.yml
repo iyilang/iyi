@@ -1422,7 +1422,8 @@ jobs:
       # SDK it was compiled against; cached on the recipe's hash, the
       # platform, the image and the deployment target, so the build is paid
       # once per recipe or image change (28 minutes on macos-14, job
-      # 115861374075). `$HOME`
+      # 115861374075; 25 to 37 in the six darwin jobs of macos-15's first
+      # run, 41131916587). `$HOME`
       # rather than `/tmp`: darwin's `/tmp` is a symlink into `/private`,
       # and a cache path should not depend on how a symlink is archived.
       - name: Restore the static LLVM
@@ -1750,12 +1751,16 @@ jobs:
   # the job, 116 minutes in a green run on feat/m-thread (job
   # 121411796955), was cut off at its 120 by the next (job 121530482309),
   # its build 5 minutes slower on that runner and every gate it reached
-  # green.
+  # green. A hundred and twenty since, for a run that finds no static
+  # LLVM in the cache and builds it: on the first macos-15 run the build
+  # took 34 minutes and the job was cut off at ninety (job 124324684065)
+  # in "and on the platforms this runner is not", which took 24 minutes
+  # on macos-14 (job 123810587348) and had run 24 when it was cancelled.
   darwin-std:
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
-    timeout-minutes: 90
+    timeout-minutes: 120
     name: "The native standard library's foundation, on darwin"
     steps:
       - uses: actions/checkout@v7

@@ -15,6 +15,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/artifact_frames.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -536,10 +537,13 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
       continue
       ;;
   esac
-  if ! cmp -s "$work/source.out" "$work/artifact.out"; then
+  # Without darwin's frames under a task's panic (bench/artifact_frames.sh).
+  without_frames < "$work/source.out" > "$work/source.cmp"
+  without_frames < "$work/artifact.out" > "$work/artifact.cmp"
+  if ! cmp -s "$work/source.cmp" "$work/artifact.cmp"; then
     unconsumable="$unconsumable $name"
     echo "  $name: runs differently from its artifacts"
-    diff "$work/source.out" "$work/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+    diff "$work/source.cmp" "$work/artifact.cmp" | sed -n '1,6p' | sed 's/^/    /'
   fi
 done
 if [ -n "$unconsumable" ]; then
@@ -547,6 +551,30 @@ if [ -n "$unconsumable" ]; then
   status=1
 else
   echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
+fi
+
+# The filter above leaves out a frame and nothing else: a panic's message
+# beside it, a frame of another binary, a line that only starts with a
+# number, and a byte that is not UTF-8 stay, so a difference there is
+# still a difference.
+kept="$(printf '%s\n' "iyi: panic: refused" \
+  "1   libsystem_c.dylib                   0x0000000180001234 abort + 12" \
+  "2   from-elsewhere                      0x0000000180001234 main + 8" \
+  "3 from-source answers")"
+printf '%s\n' "iyi: panic: refused" \
+  "0   from-source                         0x000000010299550c *Std::Cookie::Cookie#to_set_cookie:String + 356" \
+  "1   libsystem_c.dylib                   0x0000000180001234 abort + 12" \
+  "2   from-elsewhere                      0x0000000180001234 main + 8" \
+  "12  from-artifact                       0x0000000100c0447c ~procProc(Nil) + 92" \
+  "3 from-source answers" > "$WORK/frames.in"
+printf '%s\n' "$kept" > "$WORK/frames.want"
+printf 'after \377 a byte\n' | tee -a "$WORK/frames.in" >> "$WORK/frames.want"
+if without_frames < "$WORK/frames.in" > "$WORK/frames.out" && cmp -s "$WORK/frames.want" "$WORK/frames.out"; then
+  echo "  darwin's frames are left out of the comparison, and nothing else is"
+else
+  echo "  FAIL: the frame filter left out more or less than the frames:"
+  LC_ALL=C sed 's/^/    /' "$WORK/frames.out"
+  status=1
 fi
 
 echo

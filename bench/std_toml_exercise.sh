@@ -15,6 +15,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/artifact_frames.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -474,11 +475,14 @@ if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$EXERCISE" 
   && "$IYI" build --use-iyimod mods -o from-artifact "$EXERCISE") >"$WORK/r1/build.log" 2>&1; then
   "$WORK/r1/from-source" >"$WORK/r1/source.out" 2>&1
   "$WORK/r1/from-artifact" >"$WORK/r1/artifact.out" 2>&1
-  if cmp -s "$WORK/r1/source.out" "$WORK/r1/artifact.out" && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
+  # Without darwin's frames under a task's panic (bench/artifact_frames.sh).
+  without_frames < "$WORK/r1/source.out" > "$WORK/r1/source.cmp"
+  without_frames < "$WORK/r1/artifact.out" > "$WORK/r1/artifact.cmp"
+  if cmp -s "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
     echo "  built from its artifacts, the exercise prints what it prints from source"
   else
     echo "  from its artifacts the exercise prints otherwise:"
-    diff "$WORK/r1/source.out" "$WORK/r1/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+    diff "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" | sed -n '1,6p' | sed 's/^/    /'
     status=1
   fi
 else

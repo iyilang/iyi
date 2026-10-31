@@ -14,8 +14,20 @@
   cache key names the image and the target, since an archive is bound
   to the SDK and libc++ it was built with; and a new step holds the
   unpacked `iyi` and daemon to `minos` 14.4, beside a build of the same
-  sample without the target, which says the runner's version and must
-  be told apart. The numbers labelled macos-14 in these notes, SPEC.md,
+  sample without the target, which says the runner's 15.0 and must be
+  told apart (job 124324684183). The runner is macOS 15.8.2 on a
+  three-core Apple M1 (Virtual), with Xcode 16.4 and Python 3.15.2.
+  There `backtrace` walks a task's stack, which on macos-14 it did not,
+  so a panic a task raises on purpose prints its frames, each naming
+  `from-source` or `from-artifact` and an address of its own: 22 of the
+  113 std exercises, and the std/big, std/toml and std/websocket gates,
+  printed otherwise from their artifacts for those lines alone. Their
+  comparisons now leave darwin's frames out (`bench/artifact_frames.sh`,
+  byte-safe, since darwin's sed stops at a byte that is not UTF-8), and
+  bench/std_exercise.sh proves the filter leaves out a frame and nothing
+  else. A darwin job that builds the static LLVM pays 25 to 37 minutes
+  for it there, and the foundation's job was cut off at its 90 by that,
+  so it has 120. The numbers labelled macos-14 in these notes, SPEC.md,
   GC_DESIGN.md and the gates' comments were measured on that image, a
   three-core M1 virtual machine on macOS 14.8.9, and stay as measured.
 - **Windows: a thread its idle wait lets go is busy before it takes

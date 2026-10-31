@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- **thread_exercise's proof that Windows' stop asks every suspend at
+  once holds on any core count.** Its copy that waits for each suspend
+  before asking the next stayed under the 60 ms bound beside 48
+  computing threads on the user's Windows 11 machine (12 logical
+  processors) in 15 runs of 15, and below 8 cores the proof did not run.
+  The stop is now measured beside three threads held to one processor:
+  one at the highest priority, computing 400 ms at a time, and two at
+  the lowest, which it keeps off the processor, with each collection
+  started as a run of the high one does. On that machine, in 10 runs of
+  10 each at 12 processors and held to 4, the copy stopped them in 400
+  to 401 ms and the runtime in 81 to 608 us; in one run each held to 2
+  and to 1, 400 and 380 ms against 108 and 44 us. The proof runs at
+  every core count; the lock's proof still needs 8.
+- **std_http_exercise ends every process it started, stops each server
+  with a KILL after its TERM, and waits a minute for a copy's port.**
+  `bench/std_siblings.sh` stopped it past its 50 minutes on the user's
+  Windows 11 machine (12 logical processors), and a bash of the gate's
+  and the `close_nolinger.bin` it ran were still alive four and a half
+  hours later. Run alone there, master's gate waited 44 minutes on a
+  broken copy's `close_nohalf.bin` that its TERM had not ended, and a
+  TERM to the gate's group, as the sibling limit sends, left that
+  round's bash and the server running. Each server is now stopped as
+  `bench/std_tls_exercise.sh` stops its own (`stop_server`: a KILL every
+  second after the TERM, a server alive after a minute named and the gate
+  failed), with its proof against a server that ignores TERM. A trap on
+  exit, TERM, INT and HUP kills every process under the gate, found by
+  parent in one table of every process (with `taskkill /T` on Windows):
+  stopped from outside at 2 minutes and during the close rounds, no
+  process of the gate's was left on that machine or on Linux. And a
+  copy's port is waited for a minute, not ten seconds: held to 4
+  processors, an HTTP/2 copy's frames were sent to an empty port. The
+  gate then held there in three runs of three held to 4 processors, in
+  1617, 1499 and 1583 s, and in one at 12, 1761 s; 805 s on Linux.
+- **std_netip_exercise says which Python its oracle needs.** Python 3.12
+  writes an IPv4-mapped address `::ffff:102:304` and 3.13 on
+  `::ffff:1.2.3.4`, as `std/netip` does, so under 3.12 the corpus
+  disagreed in 2726 of 108204 answers. An older Python now fails the gate
+  at once: "the oracle needs Python 3.13 or later (IPv4-mapped formatting
+  changed in 3.13), found 3.12.10". CI's is 3.14.
 - **Windows: a thread its idle wait lets go is busy before it takes
   anything, so a join beside a thread waking from its sleeps is not
   named a deadlock.** Master's `bench/concurrent_mark.sh` failed on the

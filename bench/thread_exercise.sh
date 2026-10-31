@@ -31,9 +31,10 @@
 #      there too.
 #  4b. Four times the cores' threads taking the runtime lock in turn, held
 #      on Windows to five times one thread taking it for all their turns,
-#      and as many computing stopped by collections, held there to 60 ms a
-#      stop; with a failure proof each - the lock's yield removed, and the
-#      suspends asked one at a time.
+#      and three threads computing on one processor, two of them kept off
+#      it, stopped by collections, held there to 60 ms a stop; with a
+#      failure proof each - the lock's yield removed, and the suspends
+#      asked one at a time.
 #  4c. On Windows held to one core, five threads start and are joined
 #      beside a thread that collects in a loop, and beside one that takes
 #      the runtime lock in a loop, each within 10 s; with the lock's count
@@ -245,7 +246,7 @@ fi
 grep -q 'every property held' answers-32.txt || { cat answers-32.txt; exit 1; }
 grep -E '^threads:' answers-32.txt | sed 's/^/  /'
 
-# ── 4b. The runtime lock and the stop, four times the cores' threads ──────
+# ── 4b. The runtime lock with four times the cores' threads, and the stop ─
 # The lock only spun: a holder preempted with it waited out the spinners'
 # timeslices, and 48 threads taking it on twelve cores took 30 to 35 times
 # what one thread took for all of their turns (r2_alloc_threads: 64 threads
@@ -254,8 +255,9 @@ grep -E '^threads:' answers-32.txt | sed 's/^/  /'
 # suspend before asking for the next, so a thread with no core held the
 # stop until the scheduler ran it: collections beside 48 threads computing
 # on twelve cores, half a second after they started, stopped them in 85 to
-# 275 ms each, and in 0 to 13 asked all at once. Asserted on Windows, where
-# it was measured; printed everywhere.
+# 275 ms each, and in 0 to 13 asked all at once. The stop is now measured
+# with threads that have no core by construction (below). Asserted on
+# Windows, where it was measured; printed everywhere.
 cat > crowd.iyi <<'IYI'
 module crowd
 
@@ -269,10 +271,53 @@ end
 
 class Flag
   getter stop : Atomic(Int64)
+  getter held : Atomic(Int64)
+  getter go : Atomic(Int64)
+  getter burst : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
+    @held = Atomic(Int64).new(0_i64)
+    @go = Atomic(Int64).new(0_i64)
+    @burst = Atomic(Int64).new(0_i64)
   end
+end
+
+{% if flag?(:win32) %}
+  lib Placing
+    fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+    fun SetThreadPriority(thread : Void*, priority : Int32) : Int32
+    fun Sleep(milliseconds : UInt32) : Nil
+  end
+{% end %}
+
+# The running thread held to the processors `mask` names, at Windows'
+# `priority` (-2 lowest, 2 highest) with no boost above it; nothing
+# elsewhere, where the stop is not asserted.
+def hold(mask : UInt64, priority : Int32) : Nil
+  {% if flag?(:win32) %}
+    Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, mask)
+    Placing.SetThreadPriority(::LibC.GetCurrentThread, priority)
+    ::LibC.SetThreadPriorityBoost(::LibC.GetCurrentThread, 1_i32)
+  {% end %}
+end
+
+# The processors this process may run on, lowest first; one guessed bit
+# outside Windows.
+def processors : Array(UInt64)
+  mask = 1_u64
+  {% if flag?(:win32) %}
+    system = 0_u64
+    ::LibC.GetProcessAffinityMask(::LibC.GetCurrentProcess, pointerof(mask), pointerof(system))
+  {% end %}
+  bits = [] of UInt64
+  bit = 1_u64
+  while mask != 0_u64
+    bits << bit if (mask & 1_u64) != 0_u64
+    mask = mask.unsafe_shr(1_u64)
+    bit = bit.unsafe_shl(1_u64)
+  end
+  bits
 end
 
 def hammer(counter : Counter, rounds : Int32) : Nil
@@ -293,6 +338,34 @@ def spin(flag : Flag) : Nil
   x = 0_i64
   while flag.stop.get == 0_i64
     x = x &+ 1
+  end
+end
+
+# A thread on the shared processor below the one above it: `hold` moves it
+# there before it lowers it, so it gets there while nothing above it is.
+def spin_low(flag : Flag, mask : UInt64) : Nil
+  hold(mask, -2_i32)
+  flag.held.add(1_i64)
+  spin(flag)
+end
+
+# The thread above the two low ones, moved there once they are: it
+# computes 400 ms at a time, counting each start, and lets them run for a
+# millisecond in between.
+def spin_high(flag : Flag, mask : UInt64) : Nil
+  while flag.go.get == 0_i64
+    IyiThread.yield_cpu
+  end
+  hold(mask, 2_i32)
+  flag.held.add(1_i64)
+  while flag.stop.get == 0_i64
+    flag.burst.add(1_i64)
+    ends = IyiMark.now_ns + 400000000_u64
+    while IyiMark.now_ns < ends && flag.stop.get == 0_i64
+    end
+    {% if flag?(:win32) %}
+      Placing.Sleep(1_u32)
+    {% end %}
   end
 end
 
@@ -329,32 +402,58 @@ end
 fail("lock: #{crowd} threads taking the runtime lock took #{best // 1000000_u64} ms, past 5 times the #{alone // 1000000_u64} ms one thread took for all their turns") if asserted && best > 5_u64 * alone
 puts "lock: #{crowd} threads taking the runtime lock on #{cores} cores, held to 5 times one thread taking it for all their turns"
 
-# The threads run half a second before the first stop: in the first
-# moments of 48 new threads a stop asked one thread at a time was as quick
-# as one asked at once (every stop of one run in three), and after half a
-# second it was slow in every run.
+# The stop, beside three threads that only compute on one processor, the
+# stopping thread on another: one thread at Windows' highest priority,
+# which computes 400 ms at a time, and two at its lowest, which it keeps
+# off the processor. The stop walks the threads newest first and the high
+# one is in the middle, so either way round a low one is asked first; and
+# each collection starts as a run of the high one does. A stop asked all
+# at once suspends the high thread at once, and the low ones take theirs
+# the moment they run; one that waits for each suspend before asking for
+# the next waits out the high thread's run for the first low one. Beside
+# 48 threads with no such hold, on a Windows machine (Windows 11, 12
+# logical processors), that stop stayed under 60 ms in 15 runs of 15 and
+# the check could not tell it from a stop asked all at once.
+cpus = processors
+shared = cpus.last
+hold(cpus.first, 0_i32)
 flag = Flag.new
 spinners = [] of IyiThread
-crowd.times { spinners << IyiThread.start { spin(flag) } }
-settled = IyiMark.now_ns + 500000000_u64
-while IyiMark.now_ns < settled
+spinners << IyiThread.start { spin_low(flag, shared) }
+spinners << IyiThread.start { spin_high(flag, shared) }
+spinners << IyiThread.start { spin_low(flag, shared) }
+while flag.held.get < 2_i64
+  IyiThread.yield_cpu
+end
+# On a machine of one processor, the stopping thread shares it, and stays
+# level with the high thread, or that thread would hold it off as well.
+hold(cpus.first, 2_i32) if cpus.size == 1
+flag.go.set(1_i64)
+while flag.held.get < 3_i64
+  IyiThread.yield_cpu
 end
 mean = 0_u64
 tries = 0
 while tries < 3 && (tries == 0 || mean > 60000000_u64)
   stop_ns = IyiThread.stop_ns
   stops = IyiThread.stops
-  5.times { IyiMark.collect }
+  5.times do
+    burst = flag.burst.get
+    while flag.burst.get == burst
+      IyiThread.yield_cpu
+    end
+    IyiMark.collect
+  end
   round = (IyiThread.stop_ns - stop_ns) // (IyiThread.stops - stops)
   mean = round if tries == 0 || round < mean
   tries = tries + 1
 end
 flag.stop.set(1_i64)
 spinners.each { |thread| thread.join }
-fail("stop: five collections stopped #{spinners.size} threads that only compute in #{mean // 1000000_u64} ms each, past 60") if asserted && mean > 60000000_u64
-puts "stop: five collections stopped #{spinners.size} threads that only compute, held to 60 ms a stop"
+fail("stop: five collections stopped #{spinners.size} threads that only compute, on one processor, in #{mean // 1000000_u64} ms each, past 60") if asserted && mean > 60000000_u64
+puts "stop: five collections stopped #{spinners.size} threads that only compute, on one processor, in #{mean // 1000_u64} us each, held to 60 ms a stop"
 IYI
-step "the runtime lock and the stop with four times the cores' threads"
+step "the runtime lock with four times the cores' threads, and the stop"
 if ! "$IYI" build --release crowd.iyi -o crowd > build-crowd.log 2>&1; then
   cat build-crowd.log; exit 1
 fi
@@ -362,30 +461,32 @@ if ! timeout -k 5 300 ./crowd > crowd.txt 2>&1; then
   cat crowd.txt; exit 1
 fi
 sed 's/^/  /' crowd.txt
-# The two proofs need cores for the spin and the serial stop to show: on a
-# CI runner's four, sixteen threads spinning without the yield stayed under
-# five times one thread's turns, and the proof did not fire. Measured on
-# twelve; below eight they are said to be unmeasured.
+# The lock's proof needs cores for the spin to show: on a CI runner's
+# four, sixteen threads spinning without the yield stayed under five times
+# one thread's turns, and the proof did not fire. Measured on twelve;
+# below eight it is said to be unmeasured. The stop's proof holds on any
+# count, its threads placed as above.
 cores="${NUMBER_OF_PROCESSORS:-0}"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     if [ "$cores" -lt 8 ]; then
-      echo "  the lock and stop failure proofs need 8 cores to show; this machine has $cores: unmeasured here"
+      echo "  the lock's failure proof needs 8 cores to show; this machine has $cores: unmeasured here"
     else
-    step "failure proof: a lock that only spins is caught"
-    mkdir -p spinning/iyi
-    cp "$REPO"/src/iyi/*.iyi spinning/iyi/
-    awk '/^        since = released$/ { after = 1 } after && /^        yield_cpu$/ { found = 1; after = 0; next } { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > spinning/iyi/thread.iyi || { echo "the lock's yield is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/spinning${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -o crowd-spinning > build-spinning.log 2>&1; then
-      cat build-spinning.log; exit 1
+      step "failure proof: a lock that only spins is caught"
+      mkdir -p spinning/iyi
+      cp "$REPO"/src/iyi/*.iyi spinning/iyi/
+      awk '/^        since = released$/ { after = 1 } after && /^        yield_cpu$/ { found = 1; after = 0; next } { print } END { if (!found) exit 3 }' \
+        "$REPO/src/iyi/thread.iyi" > spinning/iyi/thread.iyi || { echo "the lock's yield is not in thread.iyi any more"; exit 1; }
+      if ! IYI_PATH="$WORK/spinning${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -o crowd-spinning > build-spinning.log 2>&1; then
+        cat build-spinning.log; exit 1
+      fi
+      timeout -k 5 300 ./crowd-spinning > spinning.txt 2>&1
+      code=$?
+      if [ "$code" -ne 1 ] || ! grep -q '^FAIL: lock:' spinning.txt; then
+        echo "the lock check did not fire (exit $code):"; tail -3 spinning.txt; exit 1
+      fi
+      printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock:' spinning.txt)"
     fi
-    timeout -k 5 300 ./crowd-spinning > spinning.txt 2>&1
-    code=$?
-    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: lock:' spinning.txt; then
-      echo "the lock check did not fire (exit $code):"; tail -3 spinning.txt; exit 1
-    fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock:' spinning.txt)"
     step "failure proof: a stop that waits for each suspend before the next is caught"
     mkdir -p serial/iyi
     cp "$REPO"/src/iyi/*.iyi serial/iyi/
@@ -397,20 +498,18 @@ case "$(uname -s)" in
     if ! IYI_PATH="$WORK/serial${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -o crowd-serial > build-serial.log 2>&1; then
       cat build-serial.log; exit 1
     fi
-    # A stop asked one thread at a time was now and then as quick as the
-    # other through a whole run - one run in three here - so five runs, and
-    # the first caught is the proof.
-    caught=""
-    for try in 1 2 3 4 5; do
-      timeout -k 5 300 ./crowd-serial > serial.txt 2>&1
-      code=$?
-      if [ "$code" -eq 1 ] && grep -q '^FAIL: stop:' serial.txt; then
-        caught="$try"; break
-      fi
-    done
-    [ -n "$caught" ] || { echo "the stop check did not fire in five runs:"; tail -3 serial.txt; exit 1; }
-    printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 '^FAIL: stop:' serial.txt)"
+    # One run. On a Windows machine (Windows 11, 12 logical processors)
+    # this copy stopped them in 400 to 401 ms a stop in 10 runs of 10,
+    # and in 400 in 10 of 10 held to four processors (`start /affinity
+    # F`), where the runtime's own stop took 81 to 108 us and 90 to 608;
+    # in one run each held to two and to one, 400 and 380 ms against 108
+    # and 44 us.
+    timeout -k 5 300 ./crowd-serial > serial.txt 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: stop:' serial.txt; then
+      echo "the stop check did not fire (exit $code):"; tail -3 serial.txt; exit 1
     fi
+    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stop:' serial.txt)"
     ;;
 esac
 

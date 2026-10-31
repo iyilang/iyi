@@ -9,7 +9,85 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+
+# Every process under this gate - its servers, the broken copies' rounds
+# and their clients, python, node - ends with it, at its end and at a
+# TERM, INT or HUP: bench/std_siblings.sh stops a sibling past its limit
+# with `timeout`'s TERM to the gate's whole group, and on a Windows
+# machine (Windows 11, 12 logical processors) this gate's stop there
+# left a bash of its own and the `close_nolinger.bin` it ran alive four
+# and a half hours later. A TERM to this shell alone ends them once the
+# command in the foreground has ended, as bash runs a trap. They are
+# found by their parents in one table of every process: /proc's ppid on
+# Windows, which is Git bash's view, with `taskkill /T` for what a native
+# program started in turn; one `ps` elsewhere. A walk that asked `pgrep`
+# parent by parent started a process under the gate with each question,
+# found it, and never ended.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) windows=1 ;;
+  *) windows=0 ;;
+esac
+CHILDREN=""
+gate_children() {
+  local table="" list=" $$ " changed=1 dir pid parent
+  if [ "$windows" -eq 1 ]; then
+    for dir in /proc/[0-9]*; do
+      { read -r parent < "$dir/ppid"; } 2>/dev/null && table="$table${dir#/proc/} $parent
+"
+    done
+  else
+    table="$(ps -A -o pid= -o ppid=)"
+  fi
+  while [ "$changed" -eq 1 ]; do
+    changed=0
+    while read -r pid parent; do
+      case "$list" in *" $pid "*) continue ;; esac
+      case "$list" in *" $parent "*) list="$list$pid "; changed=1 ;; esac
+    done <<<"$table"
+  done
+  CHILDREN="${list# $$ }"
+}
+end_children() {
+  local round p w
+  for round in 1 2; do
+    gate_children
+    for p in $CHILDREN; do
+      if [ "$windows" -eq 1 ] && { read -r w < "/proc/$p/winpid"; } 2>/dev/null; then
+        taskkill //F //T //PID "$w" >/dev/null 2>&1
+      fi
+      kill -KILL "$p" 2>/dev/null
+    done
+  done
+}
+trap 'end_children; rm -rf "$WORK"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+
+# stop_server <pid>: the server <pid> ends and is reaped, as
+# bench/std_tls_exercise.sh stops its own. A TERM, then a KILL every
+# second until it has gone, so a lost signal costs a second, not the gate;
+# one still there after a minute is named, and the gate fails rather than
+# waiting on it. Each server here was stopped with a TERM and a wait, and
+# on that Windows machine the TERM to a broken copy's `close_nohalf.bin`,
+# once its client had finished, did not end it: the gate waited on it 44
+# minutes, until a TERM to its group ended the gate and left that round's
+# bash and the server running, as the sibling limit had.
+stop_server() {
+  local pid="$1" i
+  kill "$pid" 2>/dev/null
+  for i in $(seq 1 600); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null
+      return 0
+    fi
+    [ $((i % 10)) -eq 0 ] && kill -9 "$pid" 2>/dev/null
+    sleep 0.1
+  done
+  echo "  FAIL: a server, pid $pid, outlived a minute of TERM and KILL"
+  : >"$WORK/outlived"
+  return 1
+}
 
 # A native compiler cannot resolve this shell's own path mapping: a search
 # path built from the shell's `pwd` finds no prelude at all, and a scratch
@@ -184,6 +262,23 @@ await_port() { # await_port <output file> <pid>
   done
   [ -n "$line" ] || line=$(head -1 "$out" 2>/dev/null)
   printf '%s' "$line"
+}
+
+# port_written <file> <pid>: until the server <pid> has written its port to
+# <file>, it has ended, or a minute has passed, as bench/std_tls_exercise.sh
+# waits. Each wait here was ten seconds, and a broken copy is a program
+# linked a moment before, whose first start on Windows took 1.2 to 9.5 s
+# to write its port there: on that Windows machine held to four
+# processors, with two copies built and run at a time, an HTTP/2 copy's
+# frames were sent to an empty port.
+port_written() {
+  local _
+  for _ in $(seq 1 600); do
+    [ -s "$1" ] && return 0
+    kill -0 "$2" 2>/dev/null || return 1
+    sleep 0.1
+  done
+  return 1
 }
 
 echo
@@ -688,8 +783,7 @@ PY
     serve_tls
     tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
     said=$(timeout 60 "$WORK/tls_client" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
-    kill "$tls_pid" 2>/dev/null
-    wait "$tls_pid" 2>/dev/null
+    stop_server "$tls_pid"
     expected="gzip true true
 hop 200 GET https://localhost:$tport/landed
 kept 1 made, 1 reused
@@ -734,8 +828,7 @@ PY
       serve_tls
       tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
       broken=$(timeout 60 "$WORK/tls_broken" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
-      kill "$tls_pid" 2>/dev/null
-      wait "$tls_pid" 2>/dev/null
+      stop_server "$tls_pid"
       want="$(printf '%s\n' "$expected" | sed "s/$tport/PORT/g" | grep -m1 "^$line")"
       got="$(printf '%s\n' "$broken" | sed "s/$tport/PORT/g" | grep -m1 "^$line")"
       if [ -n "$got" ] && [ "$got" != "$want" ]; then
@@ -764,8 +857,7 @@ PY
       serve_tls
       tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
       clear=$(timeout 60 "$WORK/tls_clear" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
-      kill "$tls_pid" 2>/dev/null
-      wait "$tls_pid" 2>/dev/null
+      stop_server "$tls_pid"
       if [ "$clear" = "$expected" ]; then
         echo "  https:// sent in the clear answered the same, so the section does not test TLS"
         status=1
@@ -850,17 +942,13 @@ latency_run() {
       sleep 0.1
     done
     timeout 120 "$bin" s_server "$port" "$WORK/tls/root.pem" 50 2>&1
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
   fi
   if [ "$latency_curl" = yes ]; then
     rm -f "$WORK/latency.port"
     "$bin" serve "$WORK/latency.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >/dev/null 2>&1 &
     pid=$!
-    for _ in $(seq 1 100); do
-      [ -s "$WORK/latency.port" ] && break
-      sleep 0.1
-    done
+    port_written "$WORK/latency.port" "$pid"
     port="$(cat "$WORK/latency.port" 2>/dev/null)"
     # A curl that could not speak to the server answers 000 in no time,
     # which is no latency: only 200s are counted, and all 50 must be.
@@ -1547,14 +1635,12 @@ resume_run() {
     sleep 0.1
   done
   if [ "$listening" = no ]; then
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
     echo "s_server never listened: $("$OPENSSL" version 2>&1 | head -1); it said: $(head -5 "$log" | tr '\n' ' ')"
     return 0
   fi
   timeout 60 "$bin" s_server "$port" "$WORK/tls/root.pem" 2>&1
-  kill "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
+  stop_server "$pid"
   "$PY" - "$log" <<'PY'
 import re, sys
 lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
@@ -1815,10 +1901,7 @@ h2_serve() {
   rm -f "$WORK/h2.port"
   "$H2BIN" serve "$WORK/h2.port" >"$WORK/h2-serve.log" 2>&1 &
   H2PID=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/h2.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/h2.port" "$H2PID"
   H2PORT="$(cat "$WORK/h2.port" 2>/dev/null)"
 }
 h2_stop() {
@@ -2305,14 +2388,10 @@ close_round() {
     "$bin" serve-close "$WORK/close-$tag.port" >"$WORK/close-$tag.log" 2>&1 &
   fi
   cpid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/close-$tag.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/close-$tag.port" "$cpid"
   cport="$(cat "$WORK/close-$tag.port" 2>/dev/null || echo 1)"
   timeout -k 5 600 "$PY" "$WORK/close.py" "$cport" "$runs" "$root" "$@" || code=1
-  kill "$cpid" 2>/dev/null
-  wait "$cpid" 2>/dev/null
+  stop_server "$cpid"
   return "$code"
 }
 # Five runs a case by default, CLOSE_RUNS= for more: closed at once, the
@@ -2413,10 +2492,7 @@ client_close_round() { # client_close_round <binary> [tls] [tag]
     "$PY" "$WORK/close_server.py" "$WORK/$tag.port" >"$WORK/$tag.sout" 2>&1 &
   fi
   spid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/$tag.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/$tag.port" "$spid"
   sport="$(cat "$WORK/$tag.port" 2>/dev/null || echo 1)"
   if [ -n "$over" ]; then
     timeout -k 5 60 "$bin" close-client "https://localhost:$sport" "$WORK/tls/root.pem" 2>&1
@@ -2596,15 +2672,11 @@ JS
     rm -f "$WORK/node.port" "$WORK/node.log"
     "$NODE" "$WORK/h2-server.js" "$mode" "$WORK/node.port" "$WORK/node.log" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" &
     local npid=$!
-    for _ in $(seq 1 100); do
-      [ -s "$WORK/node.port" ] && break
-      sleep 0.1
-    done
+    port_written "$WORK/node.port" "$npid"
     local host=127.0.0.1
     [ "$scheme" = "https" ] && host=localhost
     timeout -k 5 120 "$H2BIN" fetch "$scheme://$host:$(cat "$WORK/node.port")" $roots >"$WORK/fetch.out" 2>&1
-    kill "$npid" 2>/dev/null
-    wait "$npid" 2>/dev/null
+    stop_server "$npid"
     if ! grep -qx "connections 1" "$WORK/fetch.out"; then
       echo "  $label: FAIL: $(grep -v '^/' "$WORK/fetch.out" | head -n 3 | tr '\n' ' ')"
       status=1
@@ -2666,10 +2738,7 @@ https_checks() {
   rm -f "$WORK/h2tls.port"
   "$bin" serve-tls "$WORK/h2tls.port" "$chain" "$key" >"$WORK/h2tls.log" 2>&1 &
   tpid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/h2tls.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/h2tls.port" "$tpid"
   tport="$(cat "$WORK/h2tls.port" 2>/dev/null)"
   local base="https://localhost:$tport"
   https_fail() { echo "  FAIL: $1"; failed=$((failed + 1)); }
@@ -2687,8 +2756,7 @@ https_checks() {
   # it only wait out their timeouts against a server that cannot answer
   # them: "the TLS handshake skipped" spent 684 s of the gate there.
   if [ -n "${HTTPS_FIRST_FAIL:-}" ] && [ "$failed" -gt 0 ]; then
-    kill "$tpid" 2>/dev/null
-    wait "$tpid" 2>/dev/null
+    stop_server "$tpid"
     return $failed
   fi
   if curl_asked "$kind"; then
@@ -2719,8 +2787,7 @@ https_checks() {
     got="$(timeout -k 5 120 "$NODE" "$WORK/h2-client.js" "$tport" "$WORK/tls/root.pem" 2>&1)"
     case "$got" in *FAIL*|"") https_fail "Node's client: $got" ;; esac
   fi
-  kill "$tpid" 2>/dev/null
-  wait "$tpid" 2>/dev/null
+  stop_server "$tpid"
   return $failed
 }
 # mtls_checks <binary>: its serve-tls asking for a client's certificate
@@ -2733,10 +2800,7 @@ mtls_checks() {
   rm -f "$WORK/mtls.port"
   "$bin" serve-tls "$WORK/mtls.port" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" "$WORK/tls/root.pem" >"$WORK/mtls.log" 2>&1 &
   mpid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/mtls.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/mtls.port" "$mpid"
   mport="$(cat "$WORK/mtls.port" 2>/dev/null)"
   local base="https://localhost:$mport"
   got="$(timeout -k 5 60 "$bin" whoami "$base" "$WORK/tls/root.pem" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" 2>&1 | tr '\n' '|')"
@@ -2763,8 +2827,7 @@ print(data.decode().split("\r\n\r\n")[1])
 ' "$mport" "$WORK/tls/root.pem" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" 2>&1)"
     [ "$got" = "peer=CN=localhost HTTP/1.0" ] || { echo "  FAIL: Python presenting a certificate: $got"; failed=$((failed + 1)); }
   fi
-  kill "$mpid" 2>/dev/null
-  wait "$mpid" 2>/dev/null
+  stop_server "$mpid"
   return $failed
 }
 if [ "$h2_built" -ne 1 ] || [ ! -s "$WORK/tls/ed.key" ]; then
@@ -2965,14 +3028,10 @@ guarded() {
   rm -f "$WORK/guarded.port"
   "$bin" serve-guarded "$WORK/guarded.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" 2 3000 5000 >"$WORK/guarded.log" 2>&1 &
   gpid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/guarded.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/guarded.port" "$gpid"
   timeout -k 5 180 "$PY" "$WORK/guard.py" "$(cat "$WORK/guarded.port" 2>/dev/null || echo 1)" "$WORK/tls/root.pem" 3000 5000 "$@" >"$out" 2>&1
   local code=$?
-  kill "$gpid" 2>/dev/null
-  wait "$gpid" 2>/dev/null
+  stop_server "$gpid"
   return $code
 }
 guard_ready=0
@@ -3198,15 +3257,12 @@ proxy_up() {
   "$WORK/proxy_origin" "$WORK/origin.ports" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" > "$WORK/origin.out" 2>&1 &
   origin_pid=$!
   PPORT=$(await_port "$WORK/proxy.out" "$proxy_pid")
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/origin.ports" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/origin.ports" "$origin_pid"
   read -r HPORT SPORT < "$WORK/origin.ports"
 }
 proxy_down() {
-  kill "$proxy_pid" "$origin_pid" 2>/dev/null
-  wait "$proxy_pid" "$origin_pid" 2>/dev/null
+  stop_server "$proxy_pid"
+  stop_server "$origin_pid"
 }
 # What the client must print, and the proxy log, for ALPN's HTTP/<version>.
 proxy_expected() {
@@ -4150,6 +4206,58 @@ proxy_breaks "a ws:// handshake sent to the proxy in absolute form" proxy_upgrad
 mutations_report
 judge_later
 close_breaks_report
+
+echo
+echo "== a server whose TERM is lost is stopped all the same"
+# A server that ignores TERM stands in for one whose TERM was lost (above
+# stop_server): stop_server ends it, and the stop it replaced - a TERM,
+# then a wait - does not, so the check is seen to fail. Each is given 15
+# seconds, where stop_server needs its first KILL's one.
+stop_holds() { # stop_holds <stop>: <stop> ends a server that ignores TERM
+  local checker _
+  rm -f "$WORK/deaf.pid"
+  (
+    bash -c 'trap "" TERM; while :; do sleep 0.2; done' >/dev/null 2>&1 &
+    deaf=$!
+    echo "$deaf" >"$WORK/deaf.pid"
+    sleep 0.5
+    "$1" "$deaf" >/dev/null
+    ! kill -0 "$deaf" 2>/dev/null
+  ) &
+  checker=$!
+  for _ in $(seq 1 150); do
+    kill -0 "$checker" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$checker" 2>/dev/null; then
+    kill -9 "$checker" "$(cat "$WORK/deaf.pid" 2>/dev/null)" 2>/dev/null
+    wait "$checker" 2>/dev/null
+    return 1
+  fi
+  wait "$checker"
+}
+term_then_wait() {
+  kill "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+}
+if stop_holds stop_server; then
+  echo "  a server that ignores TERM is ended by the KILL after it"
+else
+  echo "  FAIL: stop_server left a server that ignores TERM running"
+  status=1
+fi
+if stop_holds term_then_wait; then
+  echo "  FAIL: the check holds a stop that waits on a TERM that was lost"
+  status=1
+else
+  echo "  the stop it replaced, a TERM and a wait, is caught waiting"
+fi
+# A server stop_server could not end was named where it was stopped, in a
+# broken copy's subshell as often as not; the gate fails for it here.
+if [ -e "$WORK/outlived" ]; then
+  echo "FAIL: a server outlived its stop (named above)"
+  status=1
+fi
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/http exercise holds"

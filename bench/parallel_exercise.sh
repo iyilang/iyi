@@ -33,15 +33,17 @@
 #      request beside a task computing with no call in its loop wait no
 #      more than 100 ms, 80 for the request, in the server shape and with
 #      the request's window held open on one worker; a preempted task
-#      keeps its unit's token; the monitor looks every 4 to 10.5 ms and
-#      the quantum is at most 20 ms; a tight loop costs at most twice what
-#      its `@[NoPreempt]` twin does; and the release build's IR shows each
-#      tight loop's checks reading the worker's word through the thread
-#      pointer, none calling its thread-local accessor. Its failure proofs
-#      are with step 7's: a `@[NoPreempt]` loop, a monitor that never raises
-#      the word, a Windows monitor on the system timer's tick, a check that
-#      calls the accessor (darwin and Windows), a slow half that does not
-#      poll, and a preempted task that gives its unit's token away.
+#      keeps its unit's token; a task switched in after one that held its
+#      worker past a look begins its own quantum; the monitor looks every
+#      4 to 10.5 ms and the quantum is at most 20 ms; a tight loop costs at
+#      most twice what its `@[NoPreempt]` twin does; and the release
+#      build's IR shows each tight loop's checks reading the worker's word
+#      through the thread pointer, none calling its thread-local accessor.
+#      Its failure proofs are with step 7's: a `@[NoPreempt]` loop, a
+#      monitor that never raises the word, a Windows monitor on the system
+#      timer's tick, a check that calls the accessor (darwin and Windows),
+#      a slow half that does not poll, a word left raised for the task
+#      before, and a preempted task that gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. The speedup, measured: CPU-bound tasks on one worker and on several,
@@ -186,11 +188,12 @@ esac
 # bench/parallel_preempt.iyi: a task computing with no call in its loop
 # no longer holds a short task, a sleeper or a connection behind it past
 # 100 ms (80 for a fast request in the server shape); a preempted task
-# keeps its unit's token; the monitor looks every 4 to 10.5 ms and two tasks
-# on one worker take turns of 20 ms at most; the tight loops cost at most
-# twice what their `@[NoPreempt]` twins cost; and their checks read
-# the word through the thread pointer, in the release build's IR, which
-# it writes for that.
+# keeps its unit's token; a task switched in is not given up on the word
+# raised for the one before it; the monitor looks every 4 to 10.5 ms and
+# two tasks on one worker take turns of 20 ms at most; the tight loops
+# cost at most twice what their `@[NoPreempt]` twins cost; and their
+# checks read the word through the thread pointer, in the release build's
+# IR, which it writes for that.
 PREEMPT_WORKERS=8
 [ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
 # The server shape's clients are the program's own main thread, which on
@@ -218,7 +221,14 @@ PREEMPT_WORKERS=8
 # and 27 to 37 release, 250 to 303 over, in four jobs, three of them on
 # the slower runner (123506061763, 123575207812, 123639425845; and
 # 123702042367). The 4 slow connections still outnumber the workers, so
-# a fast request is answered beside them only by a preemption.
+# a fast request is answered beside them only by a preemption. On 2
+# workers master then failed at 83 ms on the slower runner (job
+# 124117601245). Traced on that Windows 11 machine, held to 4 with one
+# busy, its slowest requests were not waiting for a core: each was a fast
+# task given up at its first back-edge on the word raised for the task
+# before it, which the switch now lowers (`IyiScheduler.switch_to`, and
+# the fresh step). There, master's 20 runs each read 24 to 43 ms plain
+# and 22 to 38 release, and the lowered word's 23 to 29 and 22 to 31.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     room=1
@@ -233,7 +243,7 @@ for build in plain release; do
   if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
   fi
-  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "poller --workers=1" "server --workers=$PREEMPT_WORKERS"; do
+  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "poller --workers=1" "fresh --workers=1" "server --workers=$PREEMPT_WORKERS"; do
     # shellcheck disable=SC2086 # the step and its count are words
     timeout -k 5 300 "./preempt-$build" $run > "preempted-$build.txt" 2>&1
     code=$?
@@ -980,6 +990,21 @@ step "failure proof: a slow half that does not poll leaves a connection in a bus
 # gate's own poller step read 7.0 to 9.1 ms in six.
 broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
 caught nopoll 'poller: a fast request took' poller --workers=1
+
+step "failure proof: a word the monitor raised for the task before preempts the task switched in after it"
+# The switch lowers the word no more: the task the fresh step switches
+# in after a 30 ms hold with no check gives its worker up at its first
+# back-edge, round 1 of 10. Master's runtime did so 0 to 1 us into the
+# task in three runs of three on Windows 11, 12 logical processors (the
+# user's machine), and 0 us in three of three on Linux here (12 vCPUs);
+# the lowered word ran 10 rounds of 10 through with no preemption on
+# both, plain and on Windows release too. In this gate's first runs the
+# copy was caught at round 1, 0 us in, on that Windows machine at 12
+# processors and held to 4, on Linux here and on macOS 26.6, Apple M2
+# Pro, 10 cores (the user's machine), and the fresh step held 10 rounds
+# with no preemption, plain and release, on each.
+broken stale '/^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
+caught stale 'fresh: round ' fresh --workers=1
 
 step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
 case "$(uname -s)" in

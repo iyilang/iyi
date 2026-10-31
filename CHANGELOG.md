@@ -983,6 +983,7 @@ set (444.5 MB against 111.1) are still above Go's.
   machine has a setter fails.
 
 - **The cursor sweep runs in three CI jobs.** `bench/lsp_positions.py
+- **The cursor sweep runs in four CI jobs.** `bench/lsp_positions.py
   --shard K/N` sweeps one of N shards of the std modules, dealt by the
   seconds each module's sweep took, and prints each module's seconds as
   it goes. Whole, the sweep took 37 to 71 minutes on GitHub's runners in
@@ -990,6 +991,11 @@ set (444.5 MB against 111.1) are still above Go's.
   them. On one machine it took 2,105 s under master's compiler and 2,206
   under this branch's; std/autocert went from 50 s to 79, its compile
   now 492 MB against the 512 at which the server retires its worker.
+  Dealt three ways, the heaviest shard took up to 28 minutes of its job's
+  45 in green runs and master's 1ae9e94db had one cut off; the shards
+  cost the same on a median runner from 10-26 to 10-30, so the runners
+  differ, not the sweep. The weights are now the runners' own seconds
+  (std/http 442), and four shards hold 1,063 to 1,079 s each.
 
 ### Fixed
 

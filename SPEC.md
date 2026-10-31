@@ -3781,7 +3781,7 @@ non-`Share` locals, as any task and its spawner may, so no two tasks of a
 unit run at the same instant - a worker holds the unit's token from its
 switch to one of them until it switches to another unit's task or to none -
 but each may park on one worker and resume on another. std/http's
-pooled `serve` needs it: a connection's real work is in such children.
+`serve` on the pool needs it: a connection's real work is in such children.
 
 **3. What crosses, and what does not need to.** Across a parallel boundary:
 `Atomic(T)`, `Mutex(T)`, `List(T)`, immutable values, and now `Channel(T)`:

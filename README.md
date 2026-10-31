@@ -253,9 +253,10 @@ the server's CPU in brackets:
 
 The login is now as fast as Go's: bcrypt takes the same CPU per hash in
 both, and the gap was the number of cores in use. Past four workers, the
-light endpoints are held back by the load generator, and in iyi also by
-the collector's allocation lock. SPEC.md III.4.13 has every worker count,
-HTTPS, the latencies, and the profile behind both claims.
+light endpoints are held back by the load generator, and in this table's
+iyi also by the collector's allocation lock, since split by size class.
+SPEC.md III.4.13 has every worker count, HTTPS, the latencies, the profile
+behind both claims, and the split measured again.
 
 ## The rules everything follows from
 
@@ -899,7 +900,8 @@ not the library.
 - **Only the threads and parallel tasks are gated by `Share`.** A block passed
   to `IyiThread.start`, `spawn_parallel` or a def marked `@[Share]` (std/http's
   `Server.serve`, unless given `workers: 1`) may capture only `Share` values;
-  a `spawn` is not gated, and a task is never preempted.
+  a `spawn` is not gated, and one outside the pool is never preempted; a
+  parallel task gives its worker up after 5 to 10 ms of computing.
 - **No registry and no self-hosting.** Packages resolve from git; the compiler
   is still a Crystal program.
 - **Windows has gaps.** No IANA zone database of its own (local time comes

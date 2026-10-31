@@ -346,8 +346,9 @@
 
   class IyiThread
     # This thread's line; 0 on a thread nobody registered, which is the
-    # main thread before the first `start`, and a child in the instant
-    # before its first instruction — both found by handle then.
+    # main thread before the first `start`, and on Linux a child in the
+    # instant before its first instruction, found by its tid then. A
+    # darwin child is named by no stop until it has written it (`run`).
     @[ThreadLocal]
     @@line : UInt64 = 0_u64
     # Every line, from the newest; the control page; the count of threads
@@ -510,7 +511,9 @@
 
     # The main thread's line, made when the first thread is: its handle
     # and its stack top, which `IyiRoots` found. `@@line` on the thread
-    # that calls `start` is then never 0.
+    # that calls `start` is then never 0. Its read below, if no thread-local
+    # was touched on this thread before, is where darwin makes them all
+    # (`run`): before `link` names the line, so no stop's handler does.
     def self.register_current : Nil
       return if @@line != 0
       line = new_line
@@ -574,12 +577,15 @@
         IyiRuntimeLock.unlock
         raise "clone failed: #{result}" if result < 0
       {% elsif flag?(:darwin) %}
+        # Counted here and linked by the thread itself, once `@@line` is
+        # written (`run`), so no stop signals it before. Created under the
+        # lock all the same: `pthread_create` writes the handle into the
+        # line after the thread exists, and the thread's own link waits on
+        # this lock, so the handle is there before a stop can read it.
         IyiRuntimeLock.lock
-        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
-        @@lines = line
-        @@count = @@count + 1_i64
         result = LibC.pthread_create(Pointer(UInt64).new(line + IYI_TL_HANDLE), Pointer(Void).new(0_u64),
           Pointer(Void).new(thread_entry), Pointer(Void).new(line))
+        @@count = @@count + 1_i64 if result == 0
         IyiRuntimeLock.unlock
         raise "pthread_create failed: #{result}" if result != 0
       {% elsif flag?(:win32) %}
@@ -641,6 +647,22 @@
     # clone asm (or pthread) performs.
     def self.run(line : UInt64) : Nil
       @@line = line
+      # darwin makes a thread's thread-locals at its first touch of one:
+      # the store above, where dyld `calloc`s one block for every
+      # `@[ThreadLocal]` in the image (three `__thread` variables in C sat
+      # in one 128-byte block on macOS 26.6), the two the stop's handler
+      # reads among them - `@@line` and the heap's `@@cache`. The parent
+      # linked this line before `pthread_create`, so a stop could signal
+      # the thread inside that `calloc`, under libmalloc's lock; the
+      # handler's read made the block again, took the lock the
+      # interrupted call held, and libplatform killed the process
+      # ("Trying to recursively lock an os_unfair_lock"). So the thread
+      # links its own line now, with its thread-locals made: no stop names
+      # it before, and nothing it did before allocates from the heap or
+      # holds a pointer into it.
+      {% if flag?(:darwin) %}
+        link_own(line)
+      {% end %}
       # An alternate signal stack is a thread's own, so a stack overflow on
       # this thread has somewhere to say so (`IyiStackGuard`).
       {% unless flag?(:win32) %}
@@ -1080,22 +1102,31 @@
     end
 
 
-    # This thread's line, from the thread-local or, in the instant before
-    # a child names its own, by its handle.
+    # darwin's child joining the stop's list (`run`): `start` counted it.
+    def self.link_own(line : UInt64) : Nil
+      IyiRuntimeLock.lock
+      IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
+      @@lines = line
+      IyiRuntimeLock.unlock
+    end
+
+    # This thread's line, from the thread-local or, on Linux in the
+    # instant before a child names its own, by its tid. A darwin thread
+    # wrote it before any stop could name it.
     def self.own_line : UInt64
       line = @@line
-      return line if line != 0
       {% if flag?(:linux) %}
+        return line if line != 0
         handle = __iyi_conc_syscall3(IYI_SYS_GETTID, 0_i64, 0_i64, 0_i64).to_u64
+        cursor = @@lines
+        while cursor != 0
+          return cursor if IyiHeap.read64(cursor + IYI_TL_HANDLE) == handle
+          cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+        end
+        0_u64
       {% else %}
-        handle = LibC.pthread_self.address
+        line
       {% end %}
-      cursor = @@lines
-      while cursor != 0
-        return cursor if IyiHeap.read64(cursor + IYI_TL_HANDLE) == handle
-        cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
-      end
-      0_u64
     end
 
     # The handler. Inside the allocator, leave the request and return:

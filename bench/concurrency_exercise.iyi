@@ -10,6 +10,13 @@
 # blocked for 10 s finishing under 5 s cannot happen unless cancellation
 # reached it while blocked. Generous margins, because the aarch64 arm of CI
 # runs under emulation.
+#
+# A step that reads the clock, or keeps any other large integer, runs in a
+# `def` of its own, so the number goes with that frame. Left in the top
+# level's frame it is a word the collector cannot tell from a pointer: an
+# integer at 0x49f9af3be there, written by step 3, fell inside 16e's 64 MB
+# string and kept it in a recorded run on macos-15, where 2 of 720 runs
+# failed 16e's rendezvous check.
 
 import std/gc::{GC}
 

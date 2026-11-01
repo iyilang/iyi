@@ -792,6 +792,29 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
   (`-Dparallel_closes_home`) fails the step by name in
   bench/parallel_exercise.sh, and `noclose` still hangs it.
 
+- **std/weak_ref's threaded check counts a round's two collections from
+  after its targets are made, and its gate names every failure in its
+  verdict.** Master's second soak run failed the Windows std shard 2 (job
+  124704511844) at "a round's targets nothing held are cleared once two
+  collections end (3557 of 4000)", in the plain build, 30 lines above a
+  verdict that said only "did not hold" under the proof section. A reader
+  read the collection count before it made its 400 objects: a collection
+  that ended while they were made, with the next already marking, counted
+  as one of the two, and the targets born black under the next lived
+  through it. On tssh (Windows 11, 12 logical processors, the user's
+  machine), held to 4 processors, 20 of 620 plain rounds kept 5 or more
+  of their 200, 19 of them 50 to 200, each with a collection ended inside
+  its `make`; held to 2, master's gate failed the check in 10 of 10 runs,
+  plain and --release, keeping up to 45 a round where the bound allows
+  20. Counted from after `make`, the gate passed 10 of 10 at 2, 4 and 12
+  processors, keeping 1.06, 1.09 and 1.13 a round in the plain build, and
+  10 of 10 on Linux; the bound stays at nine in ten. Every failure of the
+  gate now goes through one `fail`: it prints `FAIL:` with the reason (an
+  exit names its first assertion or panic, and a broken copy caught
+  elsewhere names where), and the verdict lists each again. "Every
+  section reported" says so on its own account, where a failure before it
+  had left it silent.
+
 ### Fixed
 
 - **Windows: a thread its idle wait lets go is busy before it takes

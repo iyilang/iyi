@@ -56,24 +56,35 @@ negative frees a live one. `bench/mark_exercise.sh` proves the precision
 differentially and proves the check fails when the lookup is disabled.
 
 The stack is conservative too, and an optimised build decides what is on
-it. Two ways a dead structure stayed marked were measured and closed. A
+it. Three ways a dead structure stayed marked were measured and closed. A
 helper the top level called once was inlined into `__iyi_main`, whose
 frame lives as long as the program, and its array spilled to a slot of
 that frame nothing wrote again: 312 MB stayed marked through three
 `GC.collect` under --release, where a debug build freed it all. The
 compiler keeps a call the top level makes once out of line
-(`keep_call_out_of_main`, codegen/call.cr). And the collector's own
+(`keep_call_out_of_main`, codegen/call.cr). The collector's own
 frames are built over what earlier, deeper calls left on the stack, so a
 slot one of them never wrote held a returned helper's 32 MB array:
 `IyiMark.collect` zeroes 2 KiB of dead stack under itself first, as
-Boehm's `GC_clear_a_few_frames` does. Two cases stay open, both
+Boehm's `GC_clear_a_few_frames` does. And `__iyi_main`'s frame is laid
+over the stack the loader ran on before `main` - dyld left 2,209 words
+down to 21,696 bytes under it on macos-15, Linux x86_64's start 5,352
+bytes deep - so a slot of it the program never wrote held the loader's
+word: on macos-15 four bytes dyld wrote, beside an `Int32` the top level
+left at 4, made a word inside a 64 MB string, and
+bench/concurrency_exercise.iyi's rendezvous check found 61 MiB kept in
+25 runs of 40 on one runner. `main` enters the program through
+`__iyi_enter`, which zeroes the 64 KiB under itself before
+`__iyi_main`'s frame is made. Two cases stay open, both
 measured. A helper inlined into a top-level *loop* can leave its last
 pass's structure in that frame (156 MB after a two-pass loop of the same
 helper), because keeping calls in a loop out of line cost a loop of a
 small function 2.6 times its time (613 ms against 240). And a debug
 build's own `collect` frame sits above the zeroed stretch, where a
-stale word kept the 32 MB. `bench/root_exercise.sh` checks both closed
-cases in its --release run.
+stale word kept the 32 MB. `bench/root_exercise.sh` checks the first two
+closed cases in its --release run, and the third with a top-level array
+the program never writes, which reads zero plain and --release and holds
+the loader's words in a copy of the prelude that zeroes nothing.
 
 Stage 6 sweeps what this stage decided, and the collector runs *itself*: an
 allocation-pressure trigger in the allocator's one funnel runs a collection

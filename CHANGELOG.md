@@ -794,6 +794,50 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
 
 ### Fixed
 
+- **A top-level frame no longer keeps what the loader left in it.**
+  Two of master 9147544d1's three CI runs failed on macos-15 at
+  "channel: 64 MB received through a rendezvous left 61 MiB kept"
+  (bench/concurrency_exercise.iyi, step 16e; jobs 124704511841 and
+  124728418948). Not the darwin stack-top change that commit made: the
+  exercise starts no thread there, and built for darwin with 4552e9305's
+  runtime and with 9147544d1's its code differs in two line-number
+  immediates; on a macos-15 runner (macOS 15.8.2, a three-core M1
+  virtual machine) the check failed in 21 runs of 60 with master's
+  runtime and 24 of 60 with 4552e9305's. A copy of the collector that
+  records each object's parent as the mark pushes it named the root the
+  same in every failing run: one word of `__iyi_main`'s frame, whose
+  high four bytes are the `Int32` of step 16a's
+  `(round % 5).times`, left at 4, and whose low four the program never
+  writes. Those were dyld's, from before `main` (0x9e0c7d00 on one
+  runner, 0x9b47bd00 on another), and the word they made lay inside the
+  64 MB string whenever its mapping covered it (at 0x49a000020,
+  0x49b000020 and 0x49c000020 in the failing runs). dyld left 2,209 nonzero words down to 21,696 bytes under
+  `main` there, the same in 40 runs, and Linux x86_64's start 453, 5,352
+  bytes deep. On a runner whose word did alias, the check failed 25 runs
+  of 40, the instrumented copy kept the bytes in 24, and with the stack
+  under `main` zeroed in none of 40. `main` now enters the program
+  through `__iyi_enter`, which zeroes the 64 KiB under its own stack
+  pointer, reading a word that is zero already rather than storing it,
+  and stops at the committed limit on Windows; `__iyi_program`, never
+  inlined, makes `__iyi_main`'s frame after it. Cleared from a leaf, the
+  leaf's frame and red zone stayed the loader's (22 words of them on
+  Linux), and called straight from `main`, --release inlined
+  `__iyi_main` there and made its frame before the clear (458 words). The
+  new step of `bench/root_exercise.sh` reads a 32 KiB top-level array the
+  program never writes, plain and --release: 0 words on Linux, on
+  macos-15 and on Windows 11 with 12 logical processors (the user's
+  machine), where `__chkstk`'s call from the frame's prologue writes the
+  top two words and the probe reads the 4,094 under them; its broken
+  copy, a `main` that zeroes nothing, leaves 452 there, 2,209 and 774.
+  With the change, on a macos-15 runner where master's runtime failed the
+  check in 25 runs of 40, the exercise held it in 40 of 40 and a copy
+  printing its numbers in 39 of 40: one run still kept the 61 MiB, from
+  a root not found. On a third, where master's failed 8 of 20, the
+  printing copy held 40 of 40 and the recording collector found nothing
+  kept in 40; on a fourth, where master's held 40 of 40, both held 80
+  of 80. The gate held three times of three on two of them, and twice on
+  the Windows machine.
+
 - **Windows: a thread its idle wait lets go is busy before it takes
   anything, so a join beside a thread waking from its sleeps is not
   named a deadlock.** Master's `bench/concurrent_mark.sh` failed on the
@@ -25907,7 +25951,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,668-line library and nothing else. Every other
+  written against iyi's own 25,725-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

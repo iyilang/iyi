@@ -231,10 +231,11 @@ puts "  a literal's reference answers it after a collection"
 
   # Rounds of 400 objects, the even ones held, read over and over while
   # the allocation beside it keeps the trigger firing, until two
-  # collections have ended since they were made - a mark already running
-  # when they were made treats them as live, the next one does not. A
-  # held target must answer itself, intact; any other, nil or itself,
-  # intact, and nil once the two have ended.
+  # collections have ended since the last of them was made - a mark
+  # running then saw some of them born, and born black, so it treats them
+  # as live; the next one began after them all, and does not. A held
+  # target must answer itself, intact; any other, nil or itself, intact,
+  # and nil once the two have ended.
   def reader(seat : Int32) : Nil
     rounds = 0_i64
     reads = 0_i64
@@ -246,8 +247,21 @@ puts "  a literal's reference answers it after a collection"
       refs = [] of WeakRef(Thing)
       places = [] of UInt64
       first = seat * 1000000 + (rounds % 1000).to_i32 * 400
-      since = IyiMark.collections
       make(first, 400, held, refs, places)
+      # Counted from here and not from before `make`: a collection that
+      # ended while they were made, with the next one already marking
+      # when the rest were born, counted two ends that a round's targets
+      # born black had not seen begin. On 4 of tssh's processors (Windows
+      # 11, 12 logical processors, the user's machine) the count from
+      # before `make` had 20 of 620 plain rounds keep 5 or more of their
+      # 200, 19 of them 50 to 200, and a collection had ended inside each
+      # one's `make`; from here, no round of 561 kept more than 3. Held to
+      # 2 of its processors, the gate counting from before failed the
+      # bound below in 10 of 10 runs, plain and --release, keeping up to
+      # 45 a round plain and 58 --release, as CI job 124704511844's plain
+      # run did with 443 in 20 rounds; counted from here it passed 10 of
+      # 10, keeping 1.1 a round at most.
+      since = IyiMark.collections
       pass = 0
       done = false
       while !done && Stop.flag.value.get == 0_u64
@@ -311,9 +325,14 @@ puts "  a literal's reference answers it after a collection"
   # Each reader's registers and stack, and the other readers' when the
   # world stops, can hold a target it let go: a conservative root keeps
   # what it happens to point at, and promises no bound. Linux keeps about
-  # one a round; Windows' plain build kept 217 in 20 rounds, about eleven.
-  # Nine in ten cleared is what is asked: a collection that clears no cell,
-  # or one in two, still fails it by far.
+  # one a round. tssh (Windows 11, 12 logical processors, the user's
+  # machine), in 10 runs of the gate held to each of 2, 4 and 12
+  # processors, kept 1.06, 1.09 and 1.13 a round in the plain build, and
+  # a probe of every round at 4 and at 12 saw none keep more than 3. The
+  # 217 in 20 rounds that set this bound at nine in ten, and CI's 443 in
+  # 20 that failed it, were counted from before `make` (see `reader`).
+  # Nine in ten cleared is what is asked: a collection that clears no
+  # cell, or one in two, still fails it by far.
   check(lost >= finished * 180, "a round's targets nothing held are cleared once two collections end (#{lost} of #{finished * 200})")
   check(long_lived.next.nil? == false, "the long-lived chain is still whole")
   puts "  4 threads, #{rounds} rounds, #{reads} reads, #{ran} collections (#{went_beside} beside the program): every read nil or the object, intact; #{lost} of #{finished * 200} cleared in the #{finished} rounds that saw two collections end"

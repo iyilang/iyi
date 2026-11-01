@@ -51,6 +51,22 @@ esac
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
+# fail <reason>: every failure says what it was where it happens, and the
+# verdict names each again. A failure the last lines left unnamed misled
+# a reader of CI job 124704511844: the plain build's assertion was 30
+# lines up, and the verdict under the proof section read as the proof's.
+reasons=()
+fail() {
+  echo "  FAIL: $1"
+  reasons+=("$1")
+  status=1
+}
+# The first assertion or panic a run printed, to name its failure by.
+why() {
+  local line
+  line="$(grep -m1 -E "ASSERTION FAILED|panic" "$1" 2>/dev/null | tr -d '\r' | sed 's/^ *//; s/^iyi: panic: //')"
+  echo "${line:-no assertion or panic printed}"
+}
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 EXERCISE="$REPO/bench/std_weak_ref_exercise.iyi"
 
@@ -58,22 +74,19 @@ build_and_run() { # build_and_run <label> <name> [flags...]
   local label="$1" name="$2"
   shift 2
   if ! "$IYI" build "$@" -o "$WORK/$name" "$EXERCISE" >"$WORK/$name.build.log" 2>&1; then
-    echo "$label: build failed"
     tail -12 "$WORK/$name.build.log"
-    status=1
+    fail "$label: build failed"
     return 1
   fi
   "$WORK/$name" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
-    echo "$label: exited $exit_code"
-    status=1
+    fail "$label: exited $exit_code at \"$(why "$WORK/$name.out")\""
     return 1
   fi
   if ! grep -q "ALL CHECKS PASSED" "$WORK/$name.out"; then
-    echo "$label: missing pass sentinel"
-    status=1
+    fail "$label: missing pass sentinel"
     return 1
   fi
 }
@@ -88,13 +101,16 @@ phrases=("== a reference that is held" "== a reference whose target is gone" "==
 # The thread section is where the program has threads (the exercise says
 # which targets), and every runner this gate trusts is one of them.
 phrases+=("== threads reading while collections run")
+missing=0
 for phrase in "${phrases[@]}"; do
   if ! grep -q "$phrase" "$WORK/weak-plain.out" 2>/dev/null; then
-    echo "  missing section: $phrase"
-    status=1
+    fail "missing section: $phrase"
+    missing=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  sections reported"
+# Its own verdict, not the gate's so far: a failure above left this
+# section silent when every section was there.
+[ "$missing" -eq 0 ] && echo "  sections reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -159,12 +175,10 @@ end
 puts "held #{kept} cleared #{cleared}"
 IYI
 if ! "$IYI" build -Dgc_none -o "$WORK/none" "$WORK/collectors.iyi" >"$WORK/none.build.log" 2>&1; then
-  echo "  -Dgc_none: build failed"
   tail -8 "$WORK/none.build.log"
-  status=1
+  fail "-Dgc_none: build failed"
 elif [ "$("$WORK/none")" != "held 500 cleared 0" ]; then
-  echo "  -Dgc_none: '$("$WORK/none")', where every target is kept and none cleared"
-  status=1
+  fail "-Dgc_none: '$("$WORK/none")', where every target is kept and none cleared"
 else
   echo "  -Dgc_none: 500 held targets answered, nothing cleared, as nothing is collected"
 fi
@@ -172,9 +186,8 @@ if ! "$IYI" build -Dgc_boehm -o "$WORK/boehm" "$WORK/collectors.iyi" >"$WORK/boe
   if grep -qi "cannot find -lgc\|library 'gc' not found\|lgc.*not found\|gc.lib\|bdw-gc" "$WORK/boehm.build.log"; then
     echo "  -Dgc_boehm: no libgc to link on this machine"
   else
-    echo "  -Dgc_boehm: build failed"
     tail -8 "$WORK/boehm.build.log"
-    status=1
+    fail "-Dgc_boehm: build failed"
   fi
 else
   boehm="$("$WORK/boehm")"
@@ -182,8 +195,7 @@ else
   held_count="${held_count%% *}"
   cleared_count="${boehm##* }"
   if [ "$held_count" != "500" ] || [ "${cleared_count:-0}" -lt 490 ]; then
-    echo "  -Dgc_boehm: '$boehm', where 500 are held and the rest cleared"
-    status=1
+    fail "-Dgc_boehm: '$boehm', where 500 are held and the rest cleared"
   else
     echo "  -Dgc_boehm: 500 held targets answered, $cleared_count of 500 cleared through libgc's links"
   fi
@@ -198,9 +210,8 @@ esac
 if [ "$wasm_backend" -eq 0 ]; then
   echo "  wasm32: not built here, this compiler's LLVM has no WebAssembly back end"
 elif ! "$IYI" build --no-codegen --target wasm32-wasi -o "$WORK/wasm" "$WORK/collectors.iyi" >"$WORK/wasm.build.log" 2>&1; then
-  echo "  wasm32: the program does not compile"
   tail -8 "$WORK/wasm.build.log"
-  status=1
+  fail "wasm32: the program does not compile"
 else
   echo "  wasm32: compiles against its own collector's cells"
 fi
@@ -209,12 +220,10 @@ echo
 echo "== what it refuses"
 printf 'module main\n\nimport std/weak_ref::{WeakRef}\n\nputs WeakRef.new(1).value\n' >"$WORK/value.iyi"
 if "$IYI" build --no-codegen -o "$WORK/value" "$WORK/value.iyi" >"$WORK/value.log" 2>&1; then
-  echo "  WeakRef(Int32): compiled, where a value type has no lifetime to watch"
-  status=1
+  fail "WeakRef(Int32): compiled, where a value type has no lifetime to watch"
 elif ! grep -q "WeakRef(Int32): a weak reference watches an object's lifetime" "$WORK/value.log"; then
-  echo "  WeakRef(Int32): refused, but not by name:"
   sed -n '1,8p' "$WORK/value.log" | sed 's/^/    /'
-  status=1
+  fail "WeakRef(Int32): refused, but not by name"
 else
   echo "  WeakRef(Int32): $(grep -m1 -o "a weak reference watches.*" "$WORK/value.log")"
 fi
@@ -243,24 +252,20 @@ PY
 breaks() {
   local label="$1" name="$2" old="$3" new="$4" check="$5"
   if ! patch "$name" "$old" "$new"; then
-    echo "  $label: the patch did not apply"
-    status=1
+    fail "$label: the patch did not apply"
     return
   fi
   if ! IYI_PATH="$WORK/$name${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/$name.bin" "$EXERCISE" >"$WORK/$name.build.log" 2>&1; then
-    echo "  $label: the broken copy did not build"
     tail -5 "$WORK/$name.build.log" | sed 's/^/    /'
-    status=1
+    fail "$label: the broken copy did not build"
     return
   fi
   "$WORK/$name.bin" >"$WORK/$name.out" 2>&1
+  local exit_code=$?
   if grep -q "ALL CHECKS PASSED" "$WORK/$name.out"; then
-    echo "  $label: the exercise PASSED on a broken collector"
-    status=1
+    fail "$label: the exercise PASSED on a broken collector"
   elif ! grep -qF -- "ASSERTION FAILED: $check" "$WORK/$name.out"; then
-    echo "  $label: it failed, but not at '$check'"
-    sed -n '1,6p' "$WORK/$name.out" | sed 's/^/    /'
-    status=1
+    fail "$label: exited $exit_code at \"$(why "$WORK/$name.out")\", not at \"$check\""
   else
     echo "  $label: caught at \"$check\""
   fi
@@ -307,6 +312,7 @@ echo
 if [ "$status" -eq 0 ]; then
   echo "the std/weak_ref exercise holds"
 else
-  echo "the std/weak_ref exercise did not hold"
+  echo "the std/weak_ref exercise did not hold:"
+  printf '  %s\n' "${reasons[@]}"
 fi
 exit $status

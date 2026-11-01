@@ -35,15 +35,17 @@
 #      the request's window held open on one worker; a preempted task
 #      keeps its unit's token; a task switched in after one that held its
 #      worker past a look begins its own quantum; the monitor looks every
-#      4 to 10.5 ms and the quantum is at most 20 ms; a tight loop costs at
-#      most twice what its `@[NoPreempt]` twin does; and the release
-#      build's IR shows each tight loop's checks reading the worker's word
-#      through the thread pointer, none calling its thread-local accessor.
-#      Its failure proofs are with step 7's: a `@[NoPreempt]` loop, a
-#      monitor that never raises the word, a Windows monitor on the system
-#      timer's tick, a check that calls the accessor (darwin and Windows),
-#      a slow half that does not poll, a word left raised for the task
-#      before, and a preempted task that gives its unit's token away.
+#      4 to 10.5 ms (8 on Windows) and the quantum is at most three of
+#      those looks; a tight loop costs at most twice what its
+#      `@[NoPreempt]` twin does; and the release build's IR shows each
+#      tight loop's checks reading the worker's word through the thread
+#      pointer, none calling its thread-local accessor. Its failure proofs
+#      are with step 7's: a `@[NoPreempt]` loop, a monitor that never
+#      raises the word, a Windows monitor on the system timer's tick, a
+#      monitor that raises it after three unchanged looks, a check that
+#      calls the accessor (darwin and Windows), a slow half that does not
+#      poll, a word left raised for the task before, and a preempted task
+#      that gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. The speedup, measured: CPU-bound tasks on one worker and on several,
@@ -189,19 +191,20 @@ esac
 # no longer holds a short task, a sleeper or a connection behind it past
 # 100 ms (80 for a fast request in the server shape); a preempted task
 # keeps its unit's token; a task switched in is not given up on the word
-# raised for the one before it; the monitor looks every 4 to 10.5 ms and
-# two tasks on one worker take turns of 20 ms at most; the tight loops
-# cost at most twice what their `@[NoPreempt]` twins cost; and their
-# checks read the word through the thread pointer, in the release build's
-# IR, which it writes for that.
+# raised for the one before it; the monitor looks every 4 to 10.5 ms (8
+# on Windows) and two tasks on one worker take turns of at most three of
+# those looks; the tight loops cost at most twice what their
+# `@[NoPreempt]` twins cost; and their checks read the word through the
+# thread pointer, in the release build's IR, which it writes for that.
 PREEMPT_WORKERS=8
 [ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
 # The server shape's clients are the program's own main thread, which on
-# Windows, by every sign, waits for a core behind workers holding all of
-# them: on a 4-core GitHub runner, 4 workers made the slowest fast request 64 to 99
-# ms, 760 to 897 of 11,200 over 20 ms, with the monitor's tick at 5 ms and
-# at the system timer's alike, and 3 workers made it 36 to 49 ms, 119 to
-# 142 over 20. darwin's 3 workers on 3 cores made it 26 to 50 ms.
+# a machine of few cores, by every sign, waits for a core behind workers
+# holding all of them: on a 4-core GitHub Windows runner, 4 workers made
+# the slowest fast request 64 to 99 ms, 760 to 897 of 11,200 over 20 ms,
+# with the monitor's tick at 5 ms and at the system timer's alike, and 3
+# workers made it 36 to 49 ms, 119 to 142 over 20. darwin's 3 workers on
+# 3 cores made it 26 to 50 ms.
 #
 # Three left the main thread one core and none for anything else the
 # machine runs. GitHub's 4-core Windows runners come in two speeds: the
@@ -216,7 +219,7 @@ PREEMPT_WORKERS=8
 # a shell loop busy on one of them, made the same shape: 3 workers 59 to
 # 104 ms, 914 to 1364 over 20, in 24 runs, master's binary and this one
 # alike, the poller step before it or not; 2 workers 26 to 31 ms, 123 to
-# 300 over, in 20. So Windows leaves two cores, the main thread's and a
+# 300 over, in 20. So Windows was left two cores, the main thread's and a
 # spare: on 2 workers CI read 27 to 31 ms plain, 409 to 458 over,
 # and 27 to 37 release, 250 to 303 over, in four jobs, three of them on
 # the slower runner (123506061763, 123575207812, 123639425845; and
@@ -229,12 +232,23 @@ PREEMPT_WORKERS=8
 # before it, which the switch now lowers (`IyiScheduler.switch_to`, and
 # the fresh step). There, master's 20 runs each read 24 to 43 ms plain
 # and 22 to 38 release, and the lowered word's 23 to 29 and 22 to 31.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    room=1
-    [ "$CORES" -gt 2 ] && room=$((CORES - 2))
-    [ "$PREEMPT_WORKERS" -gt "$room" ] && PREEMPT_WORKERS="$room" ;;
-esac
+#
+# darwin's three-core runners, where 3 workers took every core, then
+# starved the same way: 24 to 46 ms in the 13 macos-14 and macos-15 runs
+# in CI's logs, and then 87 and 85 ms, 356 and 138 over 20, in two of
+# the three macos-15 runs of master 7cdb1271a's soak (jobs 124862458037
+# and 124885593220; the third read 44 ms, 197 over). Left two cores
+# there, 1 worker made it worse, not better: 54 to 100 ms, 2951 to 5466
+# over 20, failing 4 of 10 runs (debug job 124913849625), as every fast
+# request then waits behind the slow ones' turns on the one worker. So a
+# machine of four cores or fewer runs 2 workers: two cores left on 4, one
+# on 3. On 2 workers, ten debug runs on macos-15 read 37 to 55 ms
+# plain, 654 to 1044 over 20, and 31 to 50 release, 542 to 1068 over, and
+# windows-2025's 10 read 24 to 33 plain and 23 to 47 release (jobs
+# 124922160678 and 124922160886); Linux here, 12 vCPUs held to 4 by
+# `taskset`, read 32 and 33 ms. The 4 slow connections outnumber the
+# workers, so a fast request is still answered only by a preemption.
+[ "$CORES" -le 4 ] && [ "$PREEMPT_WORKERS" -gt 2 ] && PREEMPT_WORKERS=2
 for build in plain release; do
   step "preemption at loop back-edges, $build build"
   flag=""
@@ -943,6 +957,11 @@ step "failure proof: a monitor that never raises a worker's word preempts nothin
 broken noflag '/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
 caught noflag 'slice: a short task waited' slice --workers=1
 
+# Caught at its look, which the period step holds to 8 ms on Windows: the
+# copy read 10.1 to 13.1 ms in 20 runs of debug jobs 124913849506 and
+# 124922160886, and 15.6 and 16.0 on Windows 11, 12 logical processors
+# (the user's machine), held to 4. Against the 10.5 ms every platform was
+# held to, it passed the look in master's soak (job 124885593140).
 step "failure proof: a Windows monitor that waits on the system timer looks too seldom"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
@@ -951,6 +970,17 @@ case "$(uname -s)" in
   *)
     echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
 esac
+
+# The turn is held to three of the period step's own looks. This copy
+# took 3.45 to 4.35 looks a turn in 16 runs on macos-15 and 3.84 to 4.02
+# in 20 on windows-2025 (debug jobs 124913849625 and 124922160678,
+# 124913849506 and 124922160886), 3.88 to 4.21 in three here on Linux,
+# and 4.02 and 3.96 on Windows 11, 12 logical processors (the user's
+# machine), held to 4; the real monitor's turns took 1.61 to 2.25 looks
+# in those debug jobs.
+step "failure proof: a monitor that raises a worker's word after three unchanged looks makes turns of four"
+broken slowturn '/^  PREEMPT_TICKS   =       1_u64$/ { print "  PREEMPT_TICKS   =       3_u64"; next } { print }' concurrency.iyi parallel_preempt
+caught slowturn 'period: two tasks computing on one worker took turns of' period --workers=1
 
 # The accessor's checks are caught in the IR, where they are calls of
 # `*IyiWorkers::preempt` however fast the runner is. By the clock the

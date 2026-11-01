@@ -37,10 +37,13 @@
 #           not its. With the word left up it gave the worker up at its
 #           first back-edge.
 #   period  the monitor's period, its looks over a task computing half a
-#           second on a pool of one, held to 4 to 10.5 ms; and the quantum,
-#           two such tasks taking turns on the one worker, held to 20 ms. A
-#           Windows monitor waiting on the system timer's tick (11.2 to
-#           12.3 ms apart on a GitHub runner) fails it.
+#           second on a pool of one, held to 4 to 10.5 ms (8 on Windows);
+#           and the quantum, two such tasks taking turns on the one worker,
+#           held to three of the looks the same run measured. A Windows
+#           monitor waiting on the system timer's tick (10.1 to 14.3 ms
+#           apart in 56 runs on GitHub's runners) fails the first, and a
+#           monitor that waits three looks unchanged rather than one the
+#           second.
 #   tight   what the check costs a tight loop: four loops timed against
 #           `@[NoPreempt]` twins of themselves, interleaved, best of seven,
 #           each ratio held to 2x.
@@ -580,15 +583,40 @@ import std/socket::{IyiSocket, SocketError}
   # move and the next sees it stand. Linux, darwin and Windows looked every
   # 5.1 to 6.3 ms and took turns of 10.2 to 12.3 ms on the machines
   # measured (SPEC.md III.4.13); a Windows wait that ends on the system
-  # timer's tick looked every 11.2 to 12.3 ms, and 14.3 in CI's run of
-  # that broken copy, and a wait that ends at once would spin the monitor.
-  # The bound sits between the two: darwin's three-core runners, sharing
-  # their cores with the task the monitor watches, looked every 6.3, 8.9
-  # and 9.0 ms in three CI runs (the last, job 122004173378, past the 9 ms
-  # this bound was), and no run of the timer-tick copy came under 11.2.
+  # timer's tick looked every 11.2 to 12.3 ms there, and a wait that ends
+  # at once would spin the monitor.
+  #
+  # The look's bound sits between the two. darwin's three-core runners,
+  # sharing their cores with the task the monitor watches, looked every
+  # 6.3, 8.9 and 9.0 ms in three CI runs (the last, job 122004173378, past
+  # the 9 ms this bound was), and 7.1 to 8.9 ms in the 7 runs of macos-15
+  # in CI's logs. Windows' looks end on a high-resolution timer: its
+  # runners read 5.14 to 5.42 ms in 101 runs. The timer-tick copy read
+  # 10.6 to 14.3 ms in 36, and in job 124885593140 came under 10.5: it
+  # passed the look and was caught only by the 20 ms the turn was then
+  # held to, at turns of 20845 us, about two of its looks. It read 10.1 to
+  # 13.1 ms in 20 runs of debug jobs 124913849506 and 124922160886, where
+  # the real looks read 5.15 to 5.30. So on Windows the bound is 8 ms,
+  # half again the slowest real look and under four fifths of the copy's
+  # quickest.
+  #
+  # The quantum is two looks wherever the looks are, so it is held to
+  # QUANTUM_LOOKS of the ones this run measured, not to a time a slow
+  # runner's looks stretch it towards: Windows took 1.91 to 2.09 looks a
+  # turn in those 101 runs, and darwin 1.52 to 2.52 in 15 on macos-14 and
+  # macos-15, where looks of up to 8.9 ms made turns of up to 17.2 ms,
+  # 2.8 ms under the 20 ms the turn was held to. In the debug jobs,
+  # macos-15 took 1.61 to 2.25 looks a turn in 44 runs (124913849625 and
+  # 124922160678) and windows-2025 1.94 to 2.03 in 40. A monitor that
+  # raises the word after three unchanged looks rather than one takes
+  # four looks a turn, and fails it.
   PERIOD_FLOOR_US   =  4000_i64
-  PERIOD_BOUND_US   = 10500_i64
-  QUANTUM_BOUND_US  = 20000_i64
+  {% if flag?(:win32) %}
+    PERIOD_BOUND_US = 8000_i64
+  {% else %}
+    PERIOD_BOUND_US = 10500_i64
+  {% end %}
+  QUANTUM_LOOKS     =     3_i64
 
   def period(per_ms : Int64) : Nil
     fail("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
@@ -623,8 +651,8 @@ import std/socket::{IyiSocket, SocketError}
     turns = (IyiWorkers.preempts - preempts).to_i64
     fail("period: two tasks computing on one worker took no turns in #{total} us") if turns == 0_i64
     quantum = total // (turns + 1_i64)
-    if quantum > QUANTUM_BOUND_US
-      fail("period: two tasks computing on one worker took turns of #{quantum} us, past #{QUANTUM_BOUND_US} us")
+    if quantum > QUANTUM_LOOKS * us
+      fail("period: two tasks computing on one worker took turns of #{quantum} us, past #{QUANTUM_LOOKS} of the #{us} us looks")
     end
     say "period: the monitor looked every #{us} us over #{looks} looks; two tasks computing on one worker took #{turns} turns of #{quantum} us"
   end

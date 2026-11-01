@@ -776,6 +776,25 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
   slow connections still outnumber the workers, so a fast request is
   still answered beside them only by a preemption.
 
+- **parallel_exercise's server shape runs 2 workers on four cores or
+  fewer, and its period step holds the turn to its own looks.** darwin's
+  three-core runners starved the main thread as Windows' had: 3 workers
+  read 24 to 46 ms in 13 runs in CI's logs, then 87 and 85 ms against the
+  80 ms bound in two of the three macos-15 runs of master 7cdb1271a's
+  soak. 1 worker there made it worse, 54 to 100 ms and 4 of 10 runs
+  failing, so every machine of four cores or fewer now runs 2: ten runs
+  of the preemption part on macos-15 read 31 to 55 ms, and ten on
+  windows-2025 23 to 47. The same soak's Windows job failed the proof
+  that a monitor on the system timer's tick looks too seldom: that copy
+  looked every 10.6 to 14.3 ms in 36 CI runs, but under the 10.5 ms bound
+  darwin's slow looks need, and was caught only by the 20 ms turn. On
+  Windows, whose real looks read 5.14 to 5.42 ms in 101 runs and 5.15 to
+  5.30 in 20 debug runs, the look is now held to 8 ms; the copy read 10.1
+  to 13.1 there. The turn is held to three of the looks the same run
+  measured, where real monitors took 1.52 to 2.52 looks a turn in CI's
+  logs and 1.61 to 2.25 in the debug runs, and a new copy whose monitor
+  waits three unchanged looks rather than one, 3.45 to 4.35, fails it.
+
 - **`bench/parallel_migrate.iyi`'s closes step has the main thread close
   one socket under a parallel task's read, so a close crosses threads in
   every run.** The step needs one close made on another thread than its

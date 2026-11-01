@@ -1378,7 +1378,10 @@ puts "a parked sender's receipt survived the next sender's park"
   end
 
   # Writes over the stack a finished call left, so what stays kept is the
-  # channels' and not a stale frame's.
+  # channels' and not a stale frame's. A word of the top level's own frame
+  # is beyond it: four bytes there that dyld wrote before `main`, beside an
+  # `Int32` left at 4, kept the rendezvous' 61 MiB on macos-15 until `main`
+  # zeroed the loader's stack (prelude.iyi).
   def scrub_stack(depth : Int32) : Int32
     a = 0_u64
     b = 0_u64

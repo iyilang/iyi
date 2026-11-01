@@ -10020,6 +10020,63 @@ end
     end
   end
 {% end %}
+
+# The stack under `main` is the loader's: dyld, or ld.so and the C
+# runtime's start, ran there before `main`, and `__iyi_main`'s frame -
+# every top-level local of the program - is laid over what they left. A
+# slot of it the program never writes is scanned with the loader's word
+# still in it, and the collector keeps whatever that word names. On
+# macos-15 (macOS 15.8.2, a three-core M1 virtual machine) dyld left
+# 2,209 nonzero words down to 21,696 bytes under `main`, the same in 40
+# runs, and Linux x86_64's start 453, 5,352 bytes deep. In
+# bench/concurrency_exercise.iyi four bytes of that frame were never
+# written and the `Int32` beside them was left at 4, and the word the
+# two made - 0x4_9b47bd00 on one runner, the low half dyld's - lay inside
+# the 64 MB string step 16e's rendezvous check had mapped there: 61 MiB
+# kept in 25 runs of 40 on that runner, and in none of 40 with the stack
+# under `main` zeroed. 64 KiB, three times dyld's depth, from this
+# frame's own stack pointer down, since this calls on and keeps nothing
+# under it: a leaf that cleared it left its own frame and red zone the
+# loader's, 22 words of them in the probe's array. A word
+# already zero is only read, since much of the stretch is pages nothing
+# has touched, and a store would make each the process's. Windows stops
+# at the committed limit, under which the guard page faults. The stack
+# pointer is read here rather than by a call, whose frame would lie
+# between its answer and this one. The loop calls nothing, as
+# `IyiRoots.clear_dead_stack`'s does not.
+@[NoInline]
+fun __iyi_enter(argc : Int32, argv : UInt8**) : Nil
+  {% if !flag?(:gc_boehm) && !flag?(:gc_none) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32)) %}
+    high = uninitialized UInt64
+    {% if flag?(:x86_64) %}
+      asm("movq %rsp, $0" : "=r"(high) :: : "volatile")
+    {% else %}
+      asm("mov $0, sp" : "=r"(high) :: : "volatile")
+    {% end %}
+    low = high - 65536_u64
+    {% if flag?(:win32) %}
+      limit = IyiRoots.stack_limit
+      low = limit if low < limit
+    {% end %}
+    while low < high
+      spot = Pointer(UInt64).new(low)
+      spot.value = 0_u64 if spot.value != 0_u64
+      low = low + 8_u64
+    end
+  {% end %}
+  __iyi_program(argc, argv)
+end
+
+# `__iyi_main`'s frame, made after `__iyi_enter` has zeroed the stack it
+# goes on. Called from there itself, --release could inline it, and its
+# frame would be `__iyi_enter`'s, made before the clear: called from
+# `main`, it was inlined, and the probe's array in bench/root_exercise.sh
+# read 458 of the loader's words through it on Linux x86_64.
+@[NoInline]
+fun __iyi_program(argc : Int32, argv : UInt8**) : Nil
+  LibIyiMain.__iyi_main(argc, argv)
+end
+
 # ── end of the memory layer ─────────────────────────────────────────────
 
 # The three symbols an `ensure` names and a `defer` links: a personality,
@@ -10918,7 +10975,7 @@ fun main(argc : Int32, argv : UInt8**) : Int32
   {% if flag?(:win32) %}
     __iyi_win_install_fault_handler
   {% end %}
-  LibIyiMain.__iyi_main(argc, argv)
+  __iyi_enter(argc, argv)
   # Named `test` cases keep going past a failure, so the program's own code
   # ends normally and the exit status is theirs to give (testing.iyi).
   status = IyiTestCases.verdict

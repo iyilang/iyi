@@ -5143,6 +5143,49 @@ describe "Semantic: iyi" do
           swapped_value(Counter.new, workers: 1)
           CODE
       end
+
+      # iyi-web's `get "/boom" do raise ... end`: a route block that only
+      # raises makes the handler's block `Proc(Context, NoReturn)`, and the
+      # router's `@[Share(serial: workers)]` def passes what it answers to a
+      # generic def inside the block it hands `SharedProc.of`. A call given
+      # a NoReturn argument is never typed, so that block's proc was left
+      # without a type, and code generation stopped on it with a cast from
+      # Nil.
+      it "compiles a kept block whose body passes a NoReturn block result to a def" do
+        codegen(<<-CODE, filename: "x.iyi")
+          struct Kept(A, R)
+            def initialize(@proc : Proc(A, R))
+            end
+
+            @[Share]
+            def self.of(&block : A -> R) : Kept(A, R)
+              new(block)
+            end
+
+            def call(argument : A) : R
+              @proc.call(argument)
+            end
+          end
+
+          def fire : NoReturn
+            while true
+            end
+          end
+
+          def wrap(r : R) : String forall R
+            "wrapped"
+          end
+
+          @[Share(serial: workers)]
+          def reg(*, workers : Int32? = nil, &block : Int32 -> B) : Nil forall B
+            kept = Kept(Int32, String).of { |x| wrap(block.call(x)) }
+            kept.call(1)
+            nil
+          end
+
+          reg { |x| fire }
+          CODE
+      end
     end
 
     # #148: a parallel block that reaches a constant through the defs it

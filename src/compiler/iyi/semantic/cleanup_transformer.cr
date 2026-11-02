@@ -1488,6 +1488,22 @@ module Iyi
       else
         node.def.body = node.def.body.transform(self)
       end
+
+      # iyi: a block a def keeps can end up with a body that has a type only
+      # now. A call given a NoReturn argument, `wrap(block.call(x))` where
+      # the block is `Proc(Int32, NoReturn)`, is never typed, so the block's
+      # def and its proc were left without one while the call that keeps the
+      # block went on with the type its block parameter declares; the call
+      # was rewritten above to the arguments up to the NoReturn one, which
+      # are typed. Type the proc from that body, as inference would have,
+      # or code generation finds a kept block with no proc type. Only a
+      # block's proc: nothing is bound to it, so setting its type here
+      # cannot start inference again in a node that observes it.
+      if node.from_block? && !node.type? && (body_type = node.def.body.type?)
+        node.def.set_type(body_type)
+        node.update
+      end
+
       node
     end
 

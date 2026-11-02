@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A kept block whose body passes a NoReturn value to a call compiles.**
+  iyi-web's `get "/boom" do raise "..." end` stopped the compiler with
+  "Cast from Nil to Iyi::ProcInstanceType failed" (bindings.cr:622): the
+  route's block was `Proc(Context, NoReturn)`, and the router's
+  `@[Share(serial: workers)]` def handed `SharedProc.of` a block that
+  passed what it answered to a generic def. A call given a NoReturn
+  argument is never typed, so the block's proc was left without a type
+  while the call that keeps it went on with the type its block
+  parameter declares; cleanup rewrote the call to its arguments, which
+  are typed, but nothing typed the proc from them, and code generation
+  asked it for its return type. The cleanup now types a block's proc
+  from the body it leaves, and the program raises at run time as
+  written. The same happened with no `@[Share]` and no `SharedProc`, in
+  any def that keeps a block, `def keep(&b : Int32 -> String)` given
+  `{ |x| block.call(x).to_s }`. A spec in
+  `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
+
 ## 0.20.0 — 2026-11-02
 
 **std/http's `Server.serve` answers on every core, and a parallel task

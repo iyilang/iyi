@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.0 — 2026-11-02
 
 **std/http's `Server.serve` answers on every core, and a parallel task
 is free to move between them.** `serve` now runs each connection as a

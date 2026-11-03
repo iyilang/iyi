@@ -14,7 +14,10 @@
 # thread, and a task still waiting in the pool starts cancelled; a panic
 # stops at the task's boundary on whatever thread it ran; collections stop
 # workers with live lists on their fibers' stacks and free nothing of
-# them; and the typed group answers a tuple of parallel tasks.
+# them; the typed group answers a tuple of parallel tasks; and wakes that
+# race across workers - selects parked on two channels, cancels landing
+# as tasks park, turns handed through `park_on` - are neither lost nor
+# doubled.
 #
 # Every step runs under a watchdog: a task on the main thread that sleeps
 # and fails the run by name if the step has not finished, so a wake that
@@ -615,7 +618,196 @@
     end
   end
 
-  STEPS = ["placement", "exactly_once", "race", "channels", "now", "cancel", "panics", "steal", "collector", "typed"]
+  # Turns two tasks take on one word, for the wakes step: `park_on` and
+  # `wake_on` take its address, which only atomics reach, as std/mutex's
+  # word is.
+  @[Share(owns: true)]
+  class Turns
+    @word : Atomic(UInt64)
+
+    def initialize
+      @word = Atomic(UInt64).new(0_u64)
+    end
+
+    def word : Pointer(Atomic(UInt64))
+      pointerof(@word)
+    end
+  end
+
+  # Receives from either channel until one is closed, with a timeout arm
+  # beside them, so three wakers race for each park: a send on *a*, a
+  # send on *b*, the deadline.
+  def select_both(a : Channel(Int64), b : Channel(Int64), got : Tally) : Int32
+    while true
+      closed = false
+      select
+      when x = a.receive
+        if x.is_a?(Int64)
+          got.add(x)
+        else
+          closed = true
+        end
+      when y = b.receive
+        if y.is_a?(Int64)
+          got.add(y)
+        else
+          closed = true
+        end
+      when timeout(1)
+        closed = false
+      end
+      return 0 if closed
+    end
+    0
+  end
+
+  def send_run(channel : Channel(Int64), first : Int64, count : Int64) : Int32
+    i = 0_i64
+    while i < count
+      return 1 unless channel.send(first + i).nil?
+      i = i + 1_i64
+    end
+    0
+  end
+
+  # A child parked on a channel nobody sends on, cancelled the moment it
+  # has started, so the cancel lands as it parks; *ended* counts it if
+  # its receive answered `Cancelled`.
+  def cancel_as_parked(ended : Tally) : Nil
+    started = Tally.new
+    never = Channel(Int32).new
+    group do |inner|
+      inner.spawn_parallel do
+        started.add(1_i64)
+        ended.add(1_i64) if never.receive.is_a?(Cancelled)
+        0
+      end
+      while started.count == 0_i64
+        IyiThread.spin_pause
+      end
+      inner.cancel_children
+    end
+  end
+
+  # The parked side of the turns: odd turns are its own, and it parks on
+  # the word whenever the turn is not.
+  def parked_turns(turns : Turns, rounds : Int64) : Int32
+    word = turns.word
+    done = 0_i64
+    while done < rounds
+      seen = word.value.get
+      if seen % 2_u64 == 0_u64
+        IyiScheduler.park_on(word, seen, false)
+        next
+      end
+      word.value.set(seen + 1_u64)
+      IyiScheduler.wake_on(word, 1)
+      done = done + 1_i64
+    end
+    0
+  end
+
+  # The other side, on the main thread, which is no worker: it never
+  # parks, but looks at the word until its turn comes, so it takes the
+  # turn the moment the parked side hands it over - while that side looks
+  # at the word again and parks - and its wake lands between a park's
+  # look and its link as often as a race can make it. The main thread's
+  # watchdog cannot run while it looks, so it names a turn that never
+  # comes itself. The copy that looks outside the lock
+  # (bench/parallel_exercise.sh) is caught here in 10 runs of 10 on Linux
+  # x86_64; with both sides parked tasks it was caught in 1 run of 10, and
+  # with both looking 32 times before they parked, in none of 10.
+  def spun_turns(turns : Turns, rounds : Int64, watch : Int32) : Nil
+    word = turns.word
+    done = 0_i64
+    while done < rounds
+      seen = word.value.get
+      if seen % 2_u64 == 1_u64
+        started = __iyi_monotonic_ns
+        while word.value.get == seen
+          IyiThread.spin_pause
+          fail("wakes, words: turn #{seen + 1_u64} was not taken in #{watch} ms, so a wake on the word was lost") if elapsed_ms(started) >= watch.to_i64
+        end
+        next
+      end
+      word.value.set(seen + 1_u64)
+      IyiScheduler.wake_on(word, 1)
+      done = done + 1_i64
+    end
+  end
+
+  # Wakes that race, now that each channel and each list `park_on` waits
+  # in has a lock of its own and a parked fiber's wake goes to whichever
+  # waker claims it (`IyiFiber#claim`). Selects parked on two channels
+  # and a deadline at once, sent to from four workers: each value
+  # arrives exactly once. Cancels landing as tasks park on a channel:
+  # each task ends cancelled, which a cancel between the park's look at
+  # its flag and its wake word does only if the park looks again
+  # (`IyiScheduler.suspend`). Tasks handing turns through a word with
+  # `park_on` and `wake_on`: every turn is taken, which a wake between
+  # the look at the word and the link in its list does only if the look
+  # is under the list's lock. A lost wake is a hang the watchdogs name;
+  # bench/parallel_exercise.sh breaks each of the three.
+  def wakes(watch : Int32) : Nil
+    per = 20000_i64
+    want = 0_i64
+    got = Tally.new
+    watched("wakes, selects", watch) do
+      a = Channel(Int64).new
+      b = Channel(Int64).new
+      group do |g|
+        2.times { g.spawn_parallel { select_both(a, b, got) } }
+        senders = [] of IyiTask(Int32)
+        4.times do |k|
+          channel = k % 2 == 0 ? a : b
+          first = k.to_i64 * per
+          senders << g.spawn_parallel { send_run(channel, first, per) }
+        end
+        senders.each do |sender|
+          answer = sender.value
+          fail("wakes: a sender answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+        end
+        a.close
+        b.close
+      end
+      want = 4_i64 * per * (4_i64 * per - 1_i64) // 2_i64
+      fail("wakes: selects over two channels received #{got.count} of #{4_i64 * per} values sent, summing #{got.sum} for #{want}") unless got.count == 4_i64 * per && got.sum == want
+    end
+
+    # Half the workers spin waiting for their child to start, so the
+    # other half are there to start it: four spinners on four workers
+    # left each child to wait for a preemption.
+    tasks = IyiWorkers.count // 2 < 1 ? 1 : IyiWorkers.count // 2
+    rounds = 2000
+    ended = Tally.new
+    watched("wakes, cancels", watch) do
+      group do |g|
+        tasks.times do
+          g.spawn_parallel do
+            round = 0
+            while round < rounds
+              cancel_as_parked(ended)
+              round = round + 1
+            end
+            0
+          end
+        end
+      end
+      fail("wakes: #{ended.count} of #{tasks * rounds} tasks cancelled as they parked answered Cancelled") unless ended.count == tasks.to_i64 * rounds
+    end
+
+    turns_each = 20000_i64
+    turns = Turns.new
+    group do |g|
+      parker = g.spawn_parallel { parked_turns(turns, turns_each) }
+      spun_turns(turns, turns_each, watch)
+      answer = parker.value
+      fail("wakes: the parked side answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+    end
+    puts "wakes: #{got.count} values through selects over two channels and a deadline, each once; #{ended.count} tasks cancelled as they parked; #{turns_each * 2_i64} turns handed through park_on and wake_on"
+  end
+
+  STEPS = ["placement", "exactly_once", "race", "channels", "now", "cancel", "panics", "steal", "collector", "typed", "wakes"]
 
   arguments = Program.args
   if arguments.size == 4 && arguments[0] == "speed"
@@ -645,6 +837,7 @@
       when "steal"        then steal(watch)
       when "collector"    then collector(watch)
       when "typed"        then typed_step(watch)
+      when "wakes"        then wakes(watch)
       end
     end
     puts "parallel exercise: every property held on #{IyiWorkers.count} workers"

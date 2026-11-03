@@ -34,7 +34,7 @@ import sys
 # Names that only the runtime defines functions under, and its entry point
 # and the check's slow half.
 ANCHORS = ("*IyiScheduler::", "*IyiWorkers::", "*IyiThread", "*IyiHeap::", "*IyiMark::",
-           "*IyiRoots::", "*IyiSchedLock::", "*IyiRuntimeLock::")
+           "*IyiRoots::", "*IyiSchedLock::", "*IyiChanLock::", "*IyiRuntimeLock::")
 ENTRY_POINTS = {"main", "__iyi_preempt"}
 SLOW = "__iyi_preempt"
 PROGRAM = "__iyi_main"

@@ -1,0 +1,237 @@
+# Where a plain `spawn` runs, exercised: SPEC.md III.4.15.
+#
+#   ./bin/iyi run bench/spawn_eligible.iyi -- together nested unit serial --workers=4
+#   ./bin/iyi run bench/spawn_eligible.iyi -- one --workers=1
+#
+# The compiler decides per call: a block every capture of which is `Share`,
+# reaching no module state that is not, runs as a parallel task of its own
+# unit; any other stays in its spawner's unit, as every spawn did before.
+#
+#   together  four spawns whose blocks capture only atomics, from the main
+#             thread, are all running at one instant: each counts itself in
+#             and spins, without parking, until the four are in or two
+#             seconds have passed. Four tasks in one unit, or on the one
+#             thread, run one at a time, and each waits the two seconds
+#             out alone.
+#   nested    the same four, spawned inside a parallel task: an eligible
+#             spawn there is a unit of its own, not its parent's.
+#   unit      four spawns inside a parallel task whose blocks append to the
+#             parent's `Array` stay in its unit: each spins 20 ms counting
+#             how many of the unit's tasks are running, and the parent
+#             spins too before it joins; the most ever running is one, and
+#             the array holds the four appends.
+#   serial    the same with `spawn_serial` and blocks that capture only
+#             atomics, which `spawn` would have run in parallel: one at a
+#             time, from inside a parallel task and from the main thread.
+#   one       on a pool of one, eligible spawns stay on the spawner's
+#             thread, one at a time, and the pool never starts.
+#
+# bench/spawn_eligible.sh runs it, and broken copies of the runtime, each
+# caught by the step that names it.
+
+module bench/spawn_eligible
+
+import std/int
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  TASKS    =                4
+  TOGETHER =            4_i64
+  WAIT_NS  = 2000_000_000_i64
+  SPIN_NS  =   20_000_000_i64
+
+  # Each block below spins with its counters in its own text rather than
+  # through a def: an `Atomic` is a struct, and an argument is a copy of
+  # it. A spinning task never parks, so nothing but another thread runs
+  # beside it.
+
+  def together(where : String) : Nil
+    arrived = Atomic(Int64).new(0_i64)
+    missed = Atomic(Int64).new(0_i64)
+    started = __iyi_monotonic_ns
+    group do |g|
+      TASKS.times do
+        g.spawn do
+          arrived.add(1_i64)
+          until_ns = __iyi_monotonic_ns + WAIT_NS
+          while arrived.get < TOGETHER && __iyi_monotonic_ns < until_ns
+          end
+          missed.add(1_i64) if arrived.get < TOGETHER
+          0
+        end
+      end
+    end
+    took = (__iyi_monotonic_ns - started) // 1000000_i64
+    if missed.get != 0_i64
+      fail("#{where}: #{missed.get} of #{TOGETHER} eligible spawns waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
+    end
+    puts "#{where}: #{TOGETHER} eligible spawns were all running at one instant, in #{took} ms"
+  end
+
+  def nested : Nil
+    group do |g|
+      g.spawn_parallel do
+        together("nested")
+        0
+      end
+    end
+  end
+
+  def unit : Nil
+    running = Atomic(Int64).new(0_i64)
+    most = Atomic(Int64).new(0_i64)
+    total = Atomic(Int64).new(0_i64)
+    group do |g|
+      g.spawn_parallel do
+        appended = [] of Int64
+        group do |inner|
+          TASKS.times do |i|
+            inner.spawn do
+              now = running.add(1_i64) + 1_i64
+              seen = most.get
+              while now > seen
+                seen, set = most.compare_and_set(seen, now)
+                break if set
+              end
+              until_ns = __iyi_monotonic_ns + SPIN_NS
+              while __iyi_monotonic_ns < until_ns
+              end
+              running.add(-1_i64)
+              appended << i.to_i64
+              0
+            end
+          end
+          mine = running.add(1_i64) + 1_i64
+          high = most.get
+          while mine > high
+            high, done = most.compare_and_set(high, mine)
+            break if done
+          end
+          spun_until = __iyi_monotonic_ns + SPIN_NS
+          while __iyi_monotonic_ns < spun_until
+          end
+          running.add(-1_i64)
+        end
+        total.set(appended.size.to_i64)
+        0
+      end
+    end
+    if most.get != 1_i64
+      fail("unit: #{most.get} tasks of one unit were running at one instant")
+    end
+    fail("unit: the unit's array holds #{total.get} of #{TOGETHER} appends") if total.get != TOGETHER
+    puts "unit: #{TOGETHER} spawns appending to their parent's array ran one at a time in its unit"
+  end
+
+  # The most `spawn_serial` tasks, and their spawner, ever running at one
+  # instant.
+  def serial_round : Int64
+    running = Atomic(Int64).new(0_i64)
+    most = Atomic(Int64).new(0_i64)
+    group do |g|
+      TASKS.times do
+        g.spawn_serial do
+          now = running.add(1_i64) + 1_i64
+          seen = most.get
+          while now > seen
+            seen, set = most.compare_and_set(seen, now)
+            break if set
+          end
+          until_ns = __iyi_monotonic_ns + SPIN_NS
+          while __iyi_monotonic_ns < until_ns
+          end
+          running.add(-1_i64)
+          0
+        end
+      end
+      mine = running.add(1_i64) + 1_i64
+      high = most.get
+      while mine > high
+        high, done = most.compare_and_set(high, mine)
+        break if done
+      end
+      spun_until = __iyi_monotonic_ns + SPIN_NS
+      while __iyi_monotonic_ns < spun_until
+      end
+      running.add(-1_i64)
+    end
+    most.get
+  end
+
+  def serial : Nil
+    inside = Atomic(Int64).new(0_i64)
+    group do |g|
+      g.spawn_parallel do
+        inside.set(serial_round)
+        0
+      end
+    end
+    if inside.get != 1_i64
+      fail("serial: #{inside.get} spawn_serial tasks were running at one instant inside a parallel task")
+    end
+    outside = serial_round
+    if outside != 1_i64
+      fail("serial: #{outside} spawn_serial tasks were running at one instant on the main thread")
+    end
+    puts "serial: spawn_serial kept #{TOGETHER} tasks that capture only atomics in their unit, one at a time, inside a parallel task and on the main thread"
+  end
+
+  def one : Nil
+    running = Atomic(Int64).new(0_i64)
+    most = Atomic(Int64).new(0_i64)
+    away = Atomic(Int64).new(0_i64)
+    group do |g|
+      TASKS.times do
+        g.spawn do
+          now = running.add(1_i64) + 1_i64
+          seen = most.get
+          while now > seen
+            seen, set = most.compare_and_set(seen, now)
+            break if set
+          end
+          until_ns = __iyi_monotonic_ns + SPIN_NS
+          while __iyi_monotonic_ns < until_ns
+          end
+          running.add(-1_i64)
+          away.add(1_i64) if IyiScheduler.state.worker
+          0
+        end
+      end
+    end
+    fail("one: #{most.get} eligible spawns were running at one instant on a pool of one") if most.get != 1_i64
+    fail("one: #{away.get} eligible spawns ran on a pool worker, with one worker asked for") if away.get != 0_i64
+    fail("one: the pool started for eligible spawns on a pool of one") if IyiWorkers.started?
+    puts "one: on a pool of one, #{TOGETHER} eligible spawns ran on the main thread, one at a time, and no pool started"
+  end
+
+  STEPS = ["together", "nested", "unit", "serial", "one"]
+
+  workers = 4
+  chosen = [] of String
+  Program.args.each do |argument|
+    if argument.starts_with?("--workers=")
+      workers = argument[10, argument.size - 10].to_i
+    else
+      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      chosen << argument
+    end
+  end
+  chosen = ["together", "nested", "unit", "serial"] if chosen.empty?
+  IyiWorkers.count = workers
+  chosen.each do |name|
+    case name
+    when "together" then together("together")
+    when "nested"   then nested
+    when "unit"     then unit
+    when "serial"   then serial
+    when "one"      then one
+    end
+  end
+  puts "spawn eligibility: every property held on #{IyiWorkers.count} workers"
+{% else %}
+  puts "spawn eligibility: no pool on this target, nothing to hold"
+{% end %}

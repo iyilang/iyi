@@ -42,7 +42,9 @@
 # `Response`. By default the body is read whole before the block runs;
 # with `stream_bodies: true` the block reads `request.body_io` itself, and
 # what it leaves unread is read past, up to a megabyte, or the connection
-# closed. An answer is a `String`, written with its length; an `IyiIO`,
+# closed - its answer saying `Connection: close` when the body's length
+# is past that megabyte, or the client still waits for the `100 Continue`
+# it asked for. An answer is a `String`, written with its length; an `IyiIO`,
 # copied out and closed (with its length when the block gave a
 # `Content-Length`, chunked otherwise); a `Response.stream { |w| ... }`
 # whose block writes as it goes; or a `Response.upgrade`, after whose 101
@@ -828,6 +830,19 @@ pub class BodyReader
       return zstd.finished?
     end
     true
+  end
+
+  # Whether a server reading past the rest of this body, so that the next
+  # request starts where it should, would close instead: its length says
+  # more than *limit* bytes are left, or its client still waits for the
+  # `100 Continue` its `Expect` asked for - which, written after the
+  # answer, the client reads as its next request's, and the body it
+  # holds back is then waited for. A chunked body's rest is not known
+  # until it is read.
+  def left_past?(limit : Int64) : Bool
+    return false if @finished
+    return true if @hello
+    @kind == LENGTH && @left > limit
   end
 
   # The body's coding undone from here on: `Envelope::Gzip` for gzip,
@@ -2062,9 +2077,11 @@ pub struct Server
         # Writing the answer waits as the client reads it, a pause at a time.
         conn.no_deadline
         # An answer the connection closes after says so: one made while
-        # the server stops went out `keep-alive`, and a client that took
-        # it at its word sent its next request into the close.
-        unless answered?(conn, response, req, head.close || conn.stopped?, compress)
+        # the server stops, or whose block left more of the body than is
+        # read past for the next request (`left_past?`), went out
+        # `keep-alive`, and a client that took it at its word sent its
+        # next request into the close.
+        unless answered?(conn, response, req, head.close || conn.stopped? || reader.left_past?(MAX_DRAIN.to_i64), compress)
           # A client that said `close` sends no further request (RFC 9112
           # section 9.6): its request read whole and nothing after it,
           # nothing of the client's is left to come, and the close waits

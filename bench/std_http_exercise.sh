@@ -2169,7 +2169,10 @@ echo "== a close while the client still sends (RFC 9112 section 9.6)"
 # `Connection: close` - and by curl, with no reset anywhere, and the end
 # of the stream (a FIN; over TLS a close_notify first, which Python is
 # told to insist on) within half a second of the answer's last byte, not
-# the second a server that never shuts its half lingers for.
+# the second a server that never shuts its half lingers for. And the
+# answer says the close is coming: http.client's next request after a
+# body past MAX_DRAIN is answered, and an `Expect: 100-continue` answered
+# before its body is closed on, with no `100 Continue` after the answer.
 cat >"$WORK/close.py" <<'PY'
 import http.client, os, select, shutil, socket, ssl, subprocess, sys, time
 
@@ -2356,11 +2359,69 @@ def by_curl(close):
             out.returncode, time.monotonic() - began, len(body), out.stdout.decode(errors="replace"), curl_said(out.stderr))
     return None
 
+
+# A body past MAX_DRAIN that the block left unread is closed on after the
+# answer, so the answer says `Connection: close`: http.client takes a
+# `keep-alive` at its word, sends its next request on the connection,
+# and the close ends it unanswered (RemoteDisconnected).
+def next_after():
+    if ctx:
+        c = http.client.HTTPSConnection("localhost", port, context=ctx, timeout=STALL)
+    else:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=STALL)
+    said = None
+    try:
+        c.request("POST", "/ignore?n=%d" % SMALL, body=b"u" * UP)
+        r = c.getresponse()
+        got = r.read()
+        said = r.getheader("Connection")
+        if r.status != 200 or got != small:
+            return "answered %d, %d bytes" % (r.status, len(got))
+        c.request("GET", "/ignore?n=%d" % SMALL)
+        r = c.getresponse()
+        got = r.read()
+    except OSError as e:
+        return "%s on the request after it, the answer before saying Connection: %s" % (type(e).__name__, said)
+    finally:
+        c.close()
+    return None if r.status == 200 and got == small else "the request after it answered %d, %d bytes" % (r.status, len(got))
+
+
+# `Expect: 100-continue`, answered before the body is asked for: the client
+# holds its body back, so the connection closes after the answer, which
+# says so. Before, `100 Continue` went out after the answer - a client
+# reads it as its next request's - and the server waited out its timeout
+# for the body.
+def expect_unasked():
+    s = connect()
+    s.sendall(("POST /ignore?n=%d HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\nExpect: 100-continue\r\n\r\n" % (SMALL, host, UP)).encode())
+    s.settimeout(STALL)
+    data = b""
+    try:
+        while True:
+            more = s.recv(65536)
+            if not more:
+                break
+            data += more
+    except OSError as e:
+        s.close()
+        return "%s after %d bytes, ending %r" % (type(e).__name__, len(data), data[-40:])
+    s.close()
+    head, _, body = data.partition(b"\r\n\r\n")
+    if not head.startswith(b"HTTP/1.1 200"):
+        return "answered %r" % head[:40]
+    if b"\r\nconnection: close" not in head.lower():
+        return "the answer's head: %r" % head
+    return None if body == small else "%d bytes after the head, ending %r" % (len(body), body[-40:])
+
+
 cases = {
     "Python reading as it sends, Connection: close": lambda: as_sent(True),
     "Python reading as it sends, a body past MAX_DRAIN": lambda: as_sent(False),
     "http.client, Connection: close": lambda: sent_first(True),
     "http.client, a body past MAX_DRAIN": lambda: sent_first(False),
+    "http.client, a body past MAX_DRAIN and a request after it": next_after,
+    "Expect: 100-continue answered before the body": expect_unasked,
     "200 requests pipelined behind Connection: close": pipelined,
 }
 if CURL:
@@ -4089,6 +4150,11 @@ close_breaks "TLS: the client closing at once" close_client_tls http.iyi \
     else' '    elsif stream = @stream
       close_now
     else' - - client-tls
+close_breaks "a body past MAX_DRAIN answered keep-alive" close_drain_kept http.iyi \
+  '    @kind == LENGTH && @left > limit' '    false' plain 'http.client, a body past MAX_DRAIN and a request after it'
+close_breaks "100 Continue written after the answer" close_late_continue http.iyi \
+  '    return true if @hello
+' '' plain 'Expect: 100-continue answered before the body'
 h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
   '          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK' '          mode = IGNORED_BLOCK' \
   'HEADERS on a closed stream'

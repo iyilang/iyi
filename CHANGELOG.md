@@ -43,6 +43,18 @@
   client for the server's going, in place of the close a client may
   retry on. `bench/std_http_parallel.iyi`'s stop holds both, with a
   broken copy of each.
+- **A `stream_bodies` answer says `Connection: close` when the server
+  will close after it.** A block that left more of a body than the
+  server reads past (`Server::MAX_DRAIN`, by the body's
+  `Content-Length`) was answered `keep-alive` and the connection closed
+  after the answer, so Python's http.client sent its next request into
+  the close (RemoteDisconnected). And a block that answered an `Expect:
+  100-continue` request without reading its body had `100 Continue`
+  written after its answer - read by the client as its next request's -
+  and then the body it held back waited for, for the server's timeout.
+  Both now say `close`, and no `100 Continue` follows an answer.
+  `bench/std_http_exercise.sh`'s close cases hold both, plain and over
+  std/tls, with a broken copy of each.
 
 ## 0.20.0 — 2026-11-02
 

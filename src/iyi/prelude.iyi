@@ -1367,6 +1367,14 @@ require "./file"
   # library, and it is what lets a homebrew-installed collector link on
   # darwin, where `-lgc` alone has no search path that finds it.
   @[Link("gc", pkg_config: "bdw-gc")]
+  # And on Windows the DLL that link imports, named as `gc/boehm.cr` names
+  # it, so that the compiler puts it beside the program (`copy_dlls`). It
+  # was not named: the program imported gc.dll and found it only on PATH,
+  # and with no Crystal installation there it exited 0xC0000135,
+  # STATUS_DLL_NOT_FOUND, before its first line.
+  {% if flag?(:win32) %}
+    @[Link(dll: "gc.dll")]
+  {% end %}
   lib LibGC
     fun init = GC_init
     fun malloc = GC_malloc(size : UInt64) : Void*

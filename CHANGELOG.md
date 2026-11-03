@@ -49,6 +49,17 @@
   flag, reads a piped line through it on Windows, and refuses a copy
   whose reader asks `__iyi_mmap` again.
 
+- **A Windows program built with `-Dgc_boehm` has its gc.dll beside it.**
+  The prelude's libgc binding named the library but not the DLL its link
+  imports, so the compiler put none beside the program, which found
+  gc.dll only on PATH. On Windows 11 with 12 logical processors (the
+  user's machine), with the Crystal installation taken off PATH, it exited
+  0xC0000135 (STATUS_DLL_NOT_FOUND) before its first line. The binding
+  names gc.dll on Windows as Crystal's `gc/boehm.cr` does.
+  `bench/std_weak_ref_exercise.sh` runs its `-Dgc_boehm` program there
+  with only the system directory on PATH, and refuses a copy of the
+  prelude that does not name the DLL.
+
 ### Known
 
 - **0.20.0's Windows light-endpoint loss is the load generator sharing
@@ -26059,7 +26070,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,735-line library and nothing else. Every other
+  written against iyi's own 25,743-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

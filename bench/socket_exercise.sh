@@ -84,6 +84,7 @@ phrases="connect_accept message_exchange short_read nodelay connect_bound closed
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
+  Darwin) phrases="$phrases reset_before_accept" ;;
 esac
 for phrase in $phrases; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
@@ -288,8 +289,33 @@ case "$(uname -s)" in
         status=1
       fi
     fi ;;
+  Darwin)
+    # The send without MSG_NOSIGNAL, SO_NOSIGPIPE left as it was: the
+    # connection reset before its accept refuses that option, and the
+    # first write to it ends the process.
+    mkdir -p "$WORK/sigpipe/std"
+    cp -R "$REPO/src/std/." "$WORK/sigpipe/std/"
+    awk '{ sub(/LibC.send\(fd, buf.as\(Void\*\), len, 0x80000\)/, "LibC.send(fd, buf.as(Void*), len, 0)"); print }' \
+      "$REPO/src/std/socket.iyi" > "$WORK/sigpipe/std/socket.iyi"
+    if cmp -s "$REPO/src/std/socket.iyi" "$WORK/sigpipe/std/socket.iyi"; then
+      echo "  SIGPIPE on a connection reset before its accept: the patch changed nothing"
+      status=1
+    elif ! IYI_PATH="$WORK/sigpipe${PSEP}$REPO/src" "$IYI" build -o "$WORK/sigpipe/program" \
+         "$REPO/bench/socket_exercise.iyi" >"$WORK/sigpipe/build.log" 2>&1; then
+      echo "  SIGPIPE on a connection reset before its accept: the patched library did not build"
+      status=1
+    else
+      "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
+      code=$?
+      if [ "$code" -eq 141 ] && grep -q "disconnect: ok" "$WORK/sigpipe/out" && ! grep -q "reset_before_accept: ok" "$WORK/sigpipe/out"; then
+        echo "  SIGPIPE on a connection reset before its accept: killed by the signal there (exit 141)"
+      else
+        echo "  SIGPIPE on a connection reset before its accept: exited $code, so the check does not see it"
+        status=1
+      fi
+    fi ;;
   *)
-    echo "  SIGPIPE on a gone peer: Linux's MSG_NOSIGNAL, proved there" ;;
+    echo "  SIGPIPE on a gone peer: MSG_NOSIGNAL, proved on Linux and darwin" ;;
 esac
 
 # 7. The poller keeping one waiter per fd, as it did: the reading fiber

@@ -247,6 +247,42 @@ gone_conn.close
 gone_server.close
 puts "disconnect: ok (#{wrote.message})"
 
+# 5a. A connection its client reset before the server accepted it: darwin
+#     refuses SO_NOSIGPIPE on the accepted socket (EINVAL, "the socket has
+#     been shut down"), and with nothing but that option between a write
+#     and SIGPIPE, the server's first write to it ended the process - an
+#     std/http server under clients that connect and reset died within a
+#     second (exit 141). The write is a `SocketError` like any other to a
+#     gone peer. Linux's sends have said MSG_NOSIGNAL all along.
+{% if flag?(:darwin) %}
+  lib LibReset
+    fun setsockopt(fd : Int32, level : Int32, name : Int32, value : Void*, length : UInt32) : Int32
+  end
+
+  reset_server = IyiSocket.listen("127.0.0.1", 0)
+  reset_client = IyiSocket.connect("127.0.0.1", reset_server.local_port).or_panic
+  # SO_LINGER (0x80) at SOL_SOCKET, on and zero: the close is a reset.
+  linger = Pointer(Int32).malloc(2_u64)
+  linger[0] = 1
+  linger[1] = 0
+  raise "reset_before_accept: SO_LINGER refused" if LibReset.setsockopt(reset_client.fd, 0xffff, 0x80, linger.as(Void*), 8_u32) != 0
+  reset_client.close
+  sleep(50)
+  reset_conn = reset_server.accept.or_panic
+  reset_tries = 0
+  reset_wrote = reset_conn.write("after the reset")
+  while reset_wrote.is_a?(Int32)
+    reset_tries = reset_tries + 1
+    raise "reset_before_accept: #{reset_tries} writes to a reset peer all went through" if reset_tries > 100
+    sleep(10)
+    reset_wrote = reset_conn.write("after the reset")
+  end
+  raise "reset_before_accept: expected a SocketError, got #{reset_wrote.inspect}" unless reset_wrote.is_a?(SocketError)
+  reset_conn.close
+  reset_server.close
+  puts "reset_before_accept: ok (#{reset_wrote.message})"
+{% end %}
+
 # 6. A connect nobody answers is refused as a value.
 refusing = IyiSocket.listen(0)
 refused_port = refusing.local_port

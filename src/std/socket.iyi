@@ -69,7 +69,7 @@
 # `SocketError` now, and `disconnected?` says the client is gone. What a
 # program does wrong itself - reading a socket it closed, a negative
 # count - still panics. Writing to a connection the peer closed does not
-# raise SIGPIPE: `MSG_NOSIGNAL` on Linux, `SO_NOSIGPIPE` on darwin.
+# raise SIGPIPE: every send says `MSG_NOSIGNAL`, on Linux and on darwin.
 #
 # Where it lives:
 # Outside the prelude, because a program that opens no socket should not
@@ -1586,8 +1586,17 @@ pub class IyiSocket
       LibC.connect(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
+    # MSG_NOSIGNAL (0x80000), as Linux's send says it: a write to a
+    # connection the peer closed answers EPIPE instead of killing the
+    # process with SIGPIPE. SO_NOSIGPIPE alone (`__sys_no_sigpipe`) was
+    # not enough: a client that resets its connection before the server
+    # accepts it leaves a socket the option is refused on (EINVAL, "the
+    # socket has been shut down"), and the server's first write to it
+    # killed the server - measured on macOS 26.6, an iyi std/http server
+    # under clients that connect and reset died within a second of each
+    # start.
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
-      LibC.send(fd, buf.as(Void*), len, 0)
+      LibC.send(fd, buf.as(Void*), len, 0x80000)
     end
 
     # Every connect here parks; see the Windows arm for the one that does not.
@@ -1595,8 +1604,9 @@ pub class IyiSocket
       false
     end
 
-    # SO_NOSIGPIPE (0x1022) at SOL_SOCKET: a write to a connection the peer
-    # closed answers EPIPE instead of killing the process.
+    # SO_NOSIGPIPE (0x1022) at SOL_SOCKET, beside `__sys_send`'s
+    # MSG_NOSIGNAL: a write to a connection the peer closed answers EPIPE
+    # instead of killing the process, by whatever call it is written.
     def self.__sys_no_sigpipe(fd : Int32) : Nil
       val = 1_i32
       LibC.setsockopt(fd, 0xffff, 0x1022, pointerof(val).as(Void*), 4_u32)

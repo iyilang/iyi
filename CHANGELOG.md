@@ -21,6 +21,19 @@
   `{ |x| block.call(x).to_s }`. A spec in
   `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
 
+- **A darwin server is no longer killed by SIGPIPE when a client resets
+  its connection before the accept.** darwin's sockets were kept from
+  SIGPIPE by SO_NOSIGPIPE, set as each was accepted; on a connection its
+  client had already reset, darwin refuses the option (EINVAL, "the
+  socket has been shut down"), and the server's first write to it ended
+  the process. On macOS 26.6 (Apple M2 Pro, 10 cores, the user's
+  machine) an std/http server under clients that connect and reset -
+  bad heads refused, TLS handshakes cut, requests and answers cut short
+  - died within a second of each start, 9 times in 70 seconds. Every
+  send now says MSG_NOSIGNAL, as Linux's has. `bench/socket_exercise.iyi`
+  writes to a connection reset before its accept, and on darwin the gate
+  builds a copy whose send drops the flag and sees it killed (exit 141).
+
 - **A stopping server's `stream_bodies` block that waits on its body no
   longer panics.** The stop closes a connection waiting on its client
   (`close_for_stop`), and a block reading its own body waits on its

@@ -147,13 +147,14 @@
   # each worker is idle, and each spawn rings one not yet rung.
   def fill_pool : Nil
     arrived = Tally.new
-    workers = IyiWorkers.count.to_i64
+    workers = IyiWorkers.count
+    want = workers.to_i64
     group do |g|
       workers.times do
         g.spawn_parallel do
           arrived.add(1_i64)
           until_ns = __iyi_monotonic_ns + 2_000_000_000_i64
-          while arrived.count < workers && __iyi_monotonic_ns < until_ns
+          while arrived.count < want && __iyi_monotonic_ns < until_ns
             IyiThread.spin_pause
           end
           0

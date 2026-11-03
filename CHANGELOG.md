@@ -131,6 +131,26 @@
   six runs each, interleaved, request p99 179 to 257 ms before and 175 to
   250 after, the slowest query 253 to 621 ms and 372 to 628. Whether the
   rest is the kernel's ready queue agent TagsTick traced is not measured.
+- **On Windows a stop no longer waits out a thread above the one
+  stopping.** A stop there is the stopping thread's own loop of
+  `SuspendThread` and `ResumeThread`, and a busier thread on its
+  processor held the world stopped until it let go: in iyiturkiye on a
+  saturated machine (Windows 11, 12 logical processors, the user's
+  machine) single calls in that loop took 148 to 214 ms, and of the
+  stops past 2 ms in three runs, 17 of 145 passed 10 ms on master. The
+  stopping thread now runs at `THREAD_PRIORITY_HIGHEST` from the start
+  of the stop to the end of its release, and is put back after, or at a
+  panic raised inside the stop. Raised, 4 of 127 passed 10 ms, the
+  longest 33 ms, and the longest single call took 26 us; the geometric
+  mean of the endpoints' p99 was 289 ms, against 306 without the raise
+  and 290 on master.
+  `bench/thread_exercise.sh` collects in a loop beside a process one
+  level above normal that computes 100 ms at a time on the stopping
+  thread's processor, and holds every stop to 20 ms: five interleaved
+  runs there gave 0.7 to 1.9 ms with the raise and 100.3 to 103.1 ms in
+  every run without it, and the copy without it is caught. A copy that
+  panics inside its stop is run too, and the copy whose panic keeps the
+  priority is caught. Linux and darwin are unchanged.
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with
@@ -26401,7 +26421,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,566-line library and nothing else. Every other
+  written against iyi's own 26,629-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

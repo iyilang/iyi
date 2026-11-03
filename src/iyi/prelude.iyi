@@ -501,6 +501,12 @@ end
     fun VirtualProtect(lpAddress : Void*, dwSize : UInt64, flNewProtect : Int32, lpflOldProtect : Int32*) : Int32
     fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
     fun GetCurrentThread : Void*
+    # The stopping thread's priority, raised over a stop and put back after
+    # its release or at a panic, by the thread that raised it
+    # (`IyiThread.raise_stopper`).
+    fun GetCurrentThreadId : Int32
+    fun GetThreadPriority(hThread : Void*) : Int32
+    fun SetThreadPriority(hThread : Void*, nPriority : Int32) : Int32
     fun SuspendThread(hThread : Void*) : Int32
     fun ResumeThread(hThread : Void*) : Int32
     fun GetThreadContext(hThread : Void*, lpContext : Void*) : Int32
@@ -10597,6 +10603,16 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
       marker = 0_u64
       count = c.call(pointerof(callstack).as(Void**), 64, pointerof(marker).address)
     end
+  {% end %}
+  {% if flag?(:win32) && flag?(:x86_64) %}
+    # A panic inside a stop: the stopping thread holds the priority the
+    # stop raised it to (`IyiThread.raise_stopper`), and a task's panic
+    # ends the task and not its thread, which would run every task after
+    # it raised. Put back here, by that thread only. `-Dgc_none` and
+    # `-Dgc_boehm` have no `IyiThread` and no stop.
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiThread.lower_stopper
+    {% end %}
   {% end %}
   __iyi_say("iyi: panic: ")
   __iyi_say(message)

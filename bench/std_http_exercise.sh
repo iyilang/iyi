@@ -2391,10 +2391,11 @@ def next_after():
 # holds its body back, so the connection closes after the answer, which
 # says so. Before, `100 Continue` went out after the answer - a client
 # reads it as its next request's - and the server waited out its timeout
-# for the body.
+# for the body. The body is short, well inside MAX_DRAIN, so that the
+# close is the expectation's alone.
 def expect_unasked():
     s = connect()
-    s.sendall(("POST /ignore?n=%d HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\nExpect: 100-continue\r\n\r\n" % (SMALL, host, UP)).encode())
+    s.sendall(("POST /ignore?n=%d HTTP/1.1\r\nHost: %s\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n" % (SMALL, host)).encode())
     s.settimeout(STALL)
     data = b""
     try:

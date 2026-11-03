@@ -140,6 +140,28 @@
     end
   end
 
+  # Every worker of the pool started: one task a worker, each spinning
+  # until all have arrived, up to two seconds. The pool starts a worker
+  # only while none is idle (SPEC.md III.4.15, part 6), so a step that
+  # needs its tasks on threads of their own fills it first; after this
+  # each worker is idle, and each spawn rings one not yet rung.
+  def fill_pool : Nil
+    arrived = Tally.new
+    workers = IyiWorkers.count.to_i64
+    group do |g|
+      workers.times do
+        g.spawn_parallel do
+          arrived.add(1_i64)
+          until_ns = __iyi_monotonic_ns + 2_000_000_000_i64
+          while arrived.count < workers && __iyi_monotonic_ns < until_ns
+            IyiThread.spin_pause
+          end
+          0
+        end
+      end
+    end
+  end
+
   # ── speed ────────────────────────────────────────────────────────────
   def speed(workers : Int32, tasks : Int32, rounds : Int64) : Nil
     IyiWorkers.count = workers
@@ -427,9 +449,12 @@
   end
 
   # A cancel reaches a task on another thread: asleep, parked on a
-  # channel, and still waiting in the pool to start.
+  # channel, and still waiting in the pool to start. The pool is filled
+  # first: with it grown to the work instead, a copy that delivers no
+  # cancel to another thread passed the step.
   def cancel(watch : Int32) : Nil
     watched("cancel", watch) do
+      fill_pool
       never = Channel(Int32).new
       started = __iyi_monotonic_ns
       slept = 0

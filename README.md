@@ -8,6 +8,9 @@
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE)
 [![site](https://img.shields.io/badge/site-iyi.dev-black.svg)](https://iyi.dev)
 [![packages](https://img.shields.io/badge/packages-iyipacks-blue.svg)](https://packs.iyi.dev/)
+[![reddit](https://img.shields.io/badge/reddit-r%2Fiyilang-FF4500.svg?logo=reddit&logoColor=white)](https://www.reddit.com/r/iyilang/)
+[![discord](https://img.shields.io/badge/discord-join-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/hKYtbSNTx2)
+[![X](https://img.shields.io/badge/X-%40iyi__lang-black.svg?logo=x&logoColor=white)](https://x.com/iyi_lang)
 
 **A language built for Developer & Agentic Experience, Portability, Performance,
 and Efficiency.** (*iyi* is Turkish for "good".)
@@ -843,8 +846,22 @@ not the library.
 | [GC_DESIGN.md](GC_DESIGN.md) | the collector |
 | [AI_FIRST.md](AI_FIRST.md) | the agent loop, and every recorded run |
 | [CHANGELOG.md](CHANGELOG.md) | what is in a release, and what a later one has to keep faith with |
-| [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | how to contribute, how to report a vulnerability, how to behave |
 | [README.crystal.md](README.crystal.md) | Crystal's own README, kept |
+
+## Community
+
+- **[Discord](https://discord.gg/hKYtbSNTx2)**: questions, help with a build,
+  and talking through a design before it becomes an issue.
+- **[r/iyilang](https://www.reddit.com/r/iyilang/)**: longer posts, things you
+  built, and discussion that should outlive a chat scroll.
+- **[@iyi_lang](https://x.com/iyi_lang)** on X: releases and announcements.
+- **[GitHub issues](https://github.com/iyilang/iyi/issues)**: bugs and feature
+  requests, ideally with the smallest program that shows it.
+
+A vulnerability goes to a private security advisory, not to any of the
+above; [SECURITY.md](SECURITY.md) says where, and which code it covers.
+[CONTRIBUTING.md](CONTRIBUTING.md) is how to send a change, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) applies in every project space.
 
 ## Licence and provenance
 

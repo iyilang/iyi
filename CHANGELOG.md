@@ -74,8 +74,8 @@
   user's machine), its LLVM-C.dll of 2026-09-17, 53,079,552 bytes, stood
   beside every compiler spec program linked against LLVM 23.1.1's,
   55,308,800 bytes, and each exited 0xC0000139
-  (STATUS_ENTRYPOINT_NOT_FOUND) before its first line, which `crystal
-  spec` printed as "Process terminated abnormally, the cause is unknown".
+  (STATUS_ENTRYPOINT_NOT_FOUND) before its first line, which the spec
+  runner printed as "Process terminated abnormally, the cause is unknown".
   That was the windows-native job's "Every rule this fork adds" step
   failing on that machine on 0.19.1 and 0.20.0 alike, which an earlier
   soak had put down to its Crystal 1.22-dev bootstrap; CI's runners start

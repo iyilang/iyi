@@ -440,7 +440,19 @@
     while churned.get < 4_u64
       sleep(1)
     end
-    IyiMark.collect
+    # The budget the churn's own collections left: a `collect` asked for
+    # here could come microseconds after one the churn triggered - it
+    # waits out a mark in flight and then runs - and count only the one
+    # or two threads that filled a slice in between (a release build on
+    # Windows 11, 12 logical processors, the user's machine, left
+    # 8388608 bytes that way). The count is bumped as the epoch turns,
+    # just before the budget is set, so three on from here the budget
+    # read is the second's or the third's: set at the end of an epoch the
+    # four threads churned through.
+    busy_from = IyiMark.collections
+    while IyiMark.collections < busy_from + 3_u64
+      sleep(1)
+    end
     threads_now = IyiThread.program_threads
     busy_floor = IyiMark::MIN_BUDGET * 4_u64
     budget_busy = IyiMark.budget

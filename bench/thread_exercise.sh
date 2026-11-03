@@ -40,6 +40,12 @@
 #      beside a thread that collects in a loop, and beside one that takes
 #      the runtime lock in a loop, each within 10 s; with the lock's count
 #      and the collection's yield taken out a run never ends.
+#  4d. On Windows, a process one level above normal computes in bursts on
+#      the stopping thread's processor while that thread collects in a
+#      loop, and no stop lasts past the bound; with the stop's raise of
+#      its thread's priority taken out, stops last a burst. A panic inside
+#      a stop puts the priority back; with `raise`'s lowering taken out,
+#      the thread keeps it.
 #   5. Failure proof: the thread-root walk removed from a copy of the
 #      prelude, and a thread's list — reachable from its stopped frames
 #      alone — is swept out from under it; the program exits 1 naming the
@@ -622,6 +628,237 @@ IYI
       echo "the unfair lock let every thread start:"; cat unfair.txt; exit 1
     fi
     echo "  $(grep -c ', held to 10 s$' unfair.txt) of the two shapes ended within 30 s"
+    ;;
+esac
+
+# ── 4d. Windows: the stopping thread above a burst on its processor ──────
+# A stop on Windows is the stopping thread's own loop of `SuspendThread`
+# and `ResumeThread` calls, and nothing else moves until it ends: where a
+# thread above it takes its processor, the world stays stopped until that
+# thread lets go. In a real server on a saturated machine (iyiturkiye,
+# Windows 11, 12 logical processors, the user's machine) single calls in
+# that loop took 148 to 214 ms. The stop raises its thread to Windows'
+# highest priority now (`IyiThread.raise_stopper`).
+#
+# Placed so that only the priority decides: the stopping thread is held
+# to one processor, its boost off, beside a separate process one level
+# above normal (and below highest), also boostless, that computes 100 ms
+# at a time and sleeps between; the threads the stop suspends compute on
+# every other processor, allocating nothing, so none is ever waited for
+# at its park. The burst is another process because a thread of the
+# program's own would be suspended by the stop it is meant to hold up.
+# The first shape of this check, a spinner at normal priority sharing the
+# processor, paused 17 ms on both builds and told them apart in nothing.
+#
+# On that machine, five runs of four seconds each, interleaved: the
+# shipped build's longest stop 0.7 to 1.9 ms (3.1 ms alone, no burst),
+# and with the raise taken out, or on the build before it, 100.3 to
+# 103.1 ms in every run, the stops 73 to 93% of the run against 7%. The
+# bound is 20 ms.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    if [ "${NUMBER_OF_PROCESSORS:-1}" -lt 2 ]; then
+      echo "  the stop beside a burst needs a second processor for the threads it stops; this machine has ${NUMBER_OF_PROCESSORS:-1}: unmeasured here"
+    else
+    cat > burst.iyi <<'IYI'
+module burst
+
+import std/file::{File}
+
+lib Placing
+  fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+  fun SetThreadPriority(thread : Void*, priority : Int32) : Int32
+  fun Sleep(milliseconds : UInt32) : Nil
+end
+
+# On the processor the first argument numbers, one level above normal and
+# with no boost, computing the second argument's milliseconds at a time
+# and sleeping a millisecond between, until a file named burst-stop
+# appears, or 300 s.
+processor = Program.args[0].to_i
+length = Program.args[1].to_i.to_u64 * 1000000_u64
+Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, 1_u64.unsafe_shl(processor.to_u64))
+Placing.SetThreadPriority(::LibC.GetCurrentThread, 1_i32)
+::LibC.SetThreadPriorityBoost(::LibC.GetCurrentThread, 1_i32)
+File.touch("burst-ready")
+bursts = 0
+deadline = IyiMark.now_ns + 300000000000_u64
+while !File.file?("burst-stop") && IyiMark.now_ns < deadline
+  ends = IyiMark.now_ns + length
+  while IyiMark.now_ns < ends
+  end
+  bursts = bursts + 1
+  Placing.Sleep(1_u32)
+end
+puts "bursts: #{bursts}"
+IYI
+    cat > stopping.iyi <<'IYI'
+module stopping
+
+class Flag
+  getter stop : Atomic(Int64)
+  getter held : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @held = Atomic(Int64).new(0_i64)
+  end
+end
+
+lib Placing
+  fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+end
+
+def fail(message : String) : Nil
+  print "FAIL: #{message}\n"
+  __iyi_exit(1)
+end
+
+# Computes, allocating nothing, on the processors *mask* names.
+def compute(flag : Flag, mask : UInt64) : Nil
+  Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, mask)
+  flag.held.add(1_i64)
+  x = 0_i64
+  while flag.stop.get == 0_i64
+    x = x &+ 1
+  end
+end
+
+# The processor the first argument numbers is the stopping thread's, and
+# the burst's; the threads it stops compute on every other one.
+processor = Program.args[0].to_i
+bound = Program.args[1].to_i.to_u64 * 1000000_u64
+shared = 1_u64.unsafe_shl(processor.to_u64)
+mask = 0_u64
+system = 0_u64
+::LibC.GetProcessAffinityMask(::LibC.GetCurrentProcess, pointerof(mask), pointerof(system))
+elsewhere = mask ^ shared
+IyiMark.workers = 0_u64
+flag = Flag.new
+threads = [] of IyiThread
+4.times { threads << IyiThread.start { compute(flag, elsewhere) } }
+while flag.held.get < 4_i64
+  IyiThread.yield_cpu
+end
+Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, shared)
+::LibC.SetThreadPriorityBoost(::LibC.GetCurrentThread, 1_i32)
+collections = 0
+over = 0
+longest = 0_u64
+stop_ns = IyiThread.stop_ns
+started = IyiMark.now_ns
+ends = started + 4000000000_u64
+while IyiMark.now_ns < ends
+  before = IyiThread.stop_ns
+  IyiMark.collect
+  took = IyiThread.stop_ns - before
+  longest = took if took > longest
+  over = over + 1 if took > bound
+  collections = collections + 1
+end
+share = (IyiThread.stop_ns - stop_ns) * 100_u64 // (IyiMark.now_ns - started)
+flag.stop.set(1_i64)
+threads.each { |thread| thread.join }
+fail("stop: #{over} of #{collections} stops beside a burst on the stopping thread's processor took past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us") if over > 0
+puts "stop: #{collections} stops of #{threads.size} threads beside a burst on the stopping thread's processor, #{share}% of the run in stops, the longest #{longest // 1000_u64} us, held to #{bound // 1000000_u64} ms"
+IYI
+    shared=$(( NUMBER_OF_PROCESSORS - 1 ))
+    # `./$1` beside the burst, its output in `$2`.
+    beside_burst() {
+      rm -f burst-ready burst-stop
+      MSYS_NO_PATHCONV=1 cmd /c start "" /b burst.exe "$shared" 100 > burst.txt 2>&1
+      for wait in $(seq 1 100); do [ -f burst-ready ] && break; sleep 0.1; done
+      [ -f burst-ready ] || { echo "the burst did not start"; exit 1; }
+      timeout -k 5 120 "./$1" "$shared" 20 > "$2" 2>&1
+      touch burst-stop
+      sleep 1
+      taskkill //F //IM burst.exe > /dev/null 2>&1
+      tr -d '\r' < burst.txt >> "$2"
+    }
+    step "the stop beside a burst on the stopping thread's processor"
+    if ! "$IYI" build --release burst.iyi -o burst > build-burst.log 2>&1; then
+      cat build-burst.log; exit 1
+    fi
+    if ! "$IYI" build --release stopping.iyi -o stopping > build-stopping.log 2>&1; then
+      cat build-stopping.log; exit 1
+    fi
+    beside_burst stopping stopping.txt
+    if grep -q '^FAIL' stopping.txt || ! grep -q '^stop:' stopping.txt; then
+      echo "beside a burst:"; cat stopping.txt; exit 1
+    fi
+    sed 's/^/  /' stopping.txt
+
+    step "failure proof: a stopping thread left at its priority is held by the burst"
+    mkdir -p level/iyi
+    cp "$REPO"/src/iyi/*.iyi level/iyi/
+    awk '/^        raise_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > level/iyi/thread.iyi || { echo "the stop's raise is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/level${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -o stopping-level > build-level.log 2>&1; then
+      cat build-level.log; exit 1
+    fi
+    beside_burst stopping-level level.txt
+    if ! grep -q '^FAIL: stop:' level.txt; then
+      echo "the stop check did not fire:"; cat level.txt; exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stop:' level.txt)"
+    fi
+
+    # A panic inside a stop ends its task, not its thread, which then runs
+    # every task after it: `raise` puts the priority back. A copy panics
+    # in its first stop, raised, and the main fiber's defer reads its
+    # thread's priority, writing what it read without allocating - the
+    # runtime lock is the stop's still.
+    step "a panic inside a stop puts the stopping thread's priority back"
+    cat > panicky.iyi <<'IYI'
+module panicky
+
+def say(text : String) : Nil
+  __iyi_write(1, text.to_unsafe.as(Void*), text.bytesize.to_u64)
+end
+
+def report : Nil
+  if ::LibC.GetThreadPriority(::LibC.GetCurrentThread) == 0
+    say("panic: the stopping thread's priority put back\n")
+  else
+    say("FAIL: panic: the stopping thread kept the stop's priority\n")
+  end
+end
+
+def run : Nil
+  defer report
+  IyiMark.collect
+end
+
+asleep = IyiThread.start { sleep(10000); nil }
+run
+asleep.join
+IYI
+    mkdir -p panicking/iyi
+    cp "$REPO"/src/iyi/*.iyi panicking/iyi/
+    awk '{ print } /^        raise_stopper$/ { print "        raise \"inside the stop\""; found = 1 } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > panicking/iyi/thread.iyi || { echo "the stop's raise is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/panicking${PSEP}$REPO/src" "$IYI" build --release panicky.iyi -o panicky > build-panicky.log 2>&1; then
+      cat build-panicky.log; exit 1
+    fi
+    timeout -k 5 60 ./panicky > panicky.txt 2>&1
+    if ! grep -q '^iyi: panic: inside the stop' panicky.txt || ! grep -q "^panic: the stopping thread's priority put back" panicky.txt; then
+      echo "a panic inside the stop:"; cat panicky.txt; exit 1
+    fi
+    echo "  $(grep -m1 '^panic:' panicky.txt)"
+
+    step "failure proof: a panic inside a stop that keeps the priority is caught"
+    mkdir -p unlowered/iyi
+    cp panicking/iyi/*.iyi unlowered/iyi/
+    awk '/^ *IyiThread\.lower_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/prelude.iyi" > unlowered/iyi/prelude.iyi || { echo "the panic's lowering is not in the prelude any more"; exit 1; }
+    if ! IYI_PATH="$WORK/unlowered${PSEP}$REPO/src" "$IYI" build --release panicky.iyi -o panicky-unlowered > build-unlowered.log 2>&1; then
+      cat build-unlowered.log; exit 1
+    fi
+    timeout -k 5 60 ./panicky-unlowered > unlowered.txt 2>&1
+    if ! grep -q '^FAIL: panic:' unlowered.txt; then
+      echo "the panic check did not fire:"; cat unlowered.txt; exit 1
+    fi
+    printf '  says "%s"\n' "$(grep -m1 '^FAIL: panic:' unlowered.txt)"
     ;;
 esac
 

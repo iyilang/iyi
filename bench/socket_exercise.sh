@@ -309,6 +309,34 @@ case "$(uname -s)" in
       code=$?
       if [ "$code" -eq 141 ] && grep -q "disconnect: ok" "$WORK/sigpipe/out" && ! grep -q "reset_before_accept: ok" "$WORK/sigpipe/out"; then
         echo "  SIGPIPE on a connection reset before its accept: killed by the signal there (exit 141)"
+      elif [ "$code" -eq 0 ] && grep -q "reset_before_accept: ok" "$WORK/sigpipe/out"; then
+        # Not every darwin refuses the option on a reset socket. macOS 26.6
+        # did (EINVAL, measured on an M2 Pro); the macos-15 runners took it,
+        # and this copy exited 0 there (job 126129546207), so it proved
+        # nothing about the check. With SO_NOSIGPIPE dropped as well the
+        # write is unprotected on every version, and the check must see the
+        # process die where it writes to the gone peer.
+        mkdir -p "$WORK/sigpipe2/std"
+        cp -R "$WORK/sigpipe/std/." "$WORK/sigpipe2/std/"
+        awk '{ sub(/LibC.setsockopt\(fd, 0xffff, 0x1022, pointerof\(val\)/, "val = 0_i32; LibC.setsockopt(fd, 0xffff, 0x1022, pointerof(val)"); print }' \
+          "$WORK/sigpipe/std/socket.iyi" > "$WORK/sigpipe2/std/socket.iyi"
+        if cmp -s "$WORK/sigpipe/std/socket.iyi" "$WORK/sigpipe2/std/socket.iyi"; then
+          echo "  SIGPIPE with neither protection: the patch changed nothing"
+          status=1
+        elif ! IYI_PATH="$WORK/sigpipe2${PSEP}$REPO/src" "$IYI" build -o "$WORK/sigpipe2/program" \
+             "$REPO/bench/socket_exercise.iyi" >"$WORK/sigpipe2/build.log" 2>&1; then
+          echo "  SIGPIPE with neither protection: the patched library did not build"
+          status=1
+        else
+          "$WORK/sigpipe2/program" >"$WORK/sigpipe2/out" 2>&1
+          code2=$?
+          if [ "$code2" -eq 141 ]; then
+            echo "  SIGPIPE on a connection reset before its accept: this darwin takes SO_NOSIGPIPE there; with neither protection, killed by the signal (exit 141)"
+          else
+            echo "  SIGPIPE with neither protection: exited $code2, so the check does not see it"
+            status=1
+          fi
+        fi
       else
         echo "  SIGPIPE on a connection reset before its accept: exited $code, so the check does not see it"
         status=1

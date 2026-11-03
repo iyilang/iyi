@@ -634,6 +634,12 @@ while IFS= read -r annotation; do
     '@[Link("kernel32")]') ;;
     '@[Link(ldflags: "msvcrt.lib ucrt.lib vcruntime.lib")]') ;;
     '@[Link("gc", pkg_config: "bdw-gc")]') ;;
+    # The same opt-in collector on Windows, named by its DLL so the compiler
+    # copies gc.dll beside a `-Dgc_boehm` program, as Crystal's own binding
+    # does; without it such a program found the DLL only on PATH and exited
+    # 0xC0000135 where none was there. No library is added: it is the file
+    # the line above already links against.
+    '@[Link(dll: "gc.dll")]') ;;
     # Windows has no kernel32 name for OS entropy: `RtlGenRandom` lives in
     # advapi32, which ships with every Windows the way kernel32 does, and
     # `std/random` calls it; `std/socket` reads the registry there for the

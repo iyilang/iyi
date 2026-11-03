@@ -4991,27 +4991,46 @@ always in the unit, `spawn_parallel` always on the pool, refused when its
 block is not `Share`. The typed group takes `spawn_serial` as a direct
 spawn, as it takes the other two (III.4.9).
 
-**6. The pool, started at the first eligible spawn.** The workers start
-where `spawn_parallel` starts them, at the first eligible spawn that goes
-to the pool, and not before: a program none of whose spawns is eligible has
-no pool and no new thread. `IYI_WORKERS=1`, or `IyiWorkers.count = 1`
-before the first parallel task, keeps an eligible spawn in its spawner's
-unit and the pool unstarted, so a program held to one worker is a program
-on one thread, as before (`IyiWorkers.parallel?`; the count read once, not
-an environment lookup at every spawn). What the pool costs a small program
-is what it costs `spawn_parallel`'s. On the shared 12-vCPU Linux machine,
-load 10 to 12 from other jobs, release builds, the mean of 200 runs: one
-spawn that prints a line took 0.88 ms a process before, and with the spawn
-eligible 0.95 ms on one worker, 1.9 on two, 2.2 on four and 5.1 on twelve,
-where `spawn_parallel`'s twin of it, built before, took 1.35, 1.58, 2.32
-and 5.20 ms; its peak resident set went from 1.8 to 2.3 MB on twelve
-workers. About 0.35 ms a worker, paid once. A program that allocates pays
-more: the collector's budget is floored at `MIN_BUDGET`, 4 MiB, for every
-thread (`IyiMark.next_budget`), and the pool's twelve are twelve more. One
-eligible spawn of nothing, then the main thread building 200 lists of
-20,000 short strings, peaked at 85 to 106 MB resident on twelve workers
-where it peaked at 20 to 35 MB before, and at 16 to 30 MB with
-`IYI_WORKERS=1` (three runs each).
+**6. The pool, started at the first eligible spawn and grown to the work.**
+The pool starts where `spawn_parallel` starts it, at the first eligible
+spawn that goes to the pool, and not before: a program none of whose spawns
+is eligible has no pool and no new thread. `IYI_WORKERS=1`, or
+`IyiWorkers.count = 1` before the first parallel task, keeps an eligible
+spawn in its spawner's unit and the pool unstarted, so a program held to one
+worker is a program on one thread, as before (`IyiWorkers.parallel?`; the
+count read once, not an environment lookup at every spawn).
+
+It starts with one worker, and starts another only when a task is waiting
+and no worker is idle to take it (`IyiWorkers.grow`), up to the count, as Go
+starts a thread from `wakep` when no idle one is parked. One is on its way
+at a time: a new worker holds the token of the one worker out looking until
+its first look, so a burst of spawns starts one, and that one, finding a
+task with more waiting, starts the next. `IyiThread.start` takes the
+scheduler's lock and allocates, so a thread holding that lock, or the
+monitor's own thread, owes the start instead, and the next worker to look,
+task to give its worker up at a back-edge, or spawn to let the lock go pays
+it.
+`IyiWorkers.launched` reads how many have started.
+
+Started whole, the pool cost a small program a thread a worker. On the
+shared 12-vCPU Linux machine, load 2 to 2.4, release builds, the mean of 200
+runs interleaved: one spawn that prints a line took 0.44 ms a process with
+the spawn serial, and with it eligible 0.45 ms on one worker, 0.89 on two,
+1.10 on four and 2.46 on twelve with the pool started whole; grown to the
+work, 0.68 ms on two, four or twelve - one worker and the monitor. A program
+that allocates paid more: the collector's budget is floored at
+`MIN_BUDGET`, 4 MiB, for every thread (`IyiMark.next_budget`). One eligible
+spawn of nothing, then the main thread building 200 lists of 20,000 short
+strings, peaked at 82 MB resident on twelve workers in each of three runs
+with the pool started whole, and at 17 to 28 MB grown to the work, against
+11 to 13 MB with `IYI_WORKERS=1`. Part 9's fan-out took the same time
+either way, the best of two runs of best of five: 95 and 96 ms on one
+worker, 48 and 48 on two, 24 and 24 on four, 13 and 13 on eight, 10 and 10
+on twelve.
+`bench/spawn_eligible.sh` holds it on a pool of four: one spawn starts one
+worker, 200 spawns made and joined one at a time at most three, and four
+tasks running at one instant all four; a pool that starts every worker at
+once, and one that never starts a second, are each caught.
 
 **7. With the rest of III.4.** An eligible task is a task of its group
 like any other: joined at the scope's end, cancelled with it, its failure
@@ -5068,19 +5087,35 @@ done about it:
   step is about a thread's own fibers, so they are `spawn_serial`, and
   the gate holds.
 - `concurrency_exercise`'s dependency floor: spawns there are eligible,
-  the pool starts, and `environ` and, on darwin, `_close` are on the link
-  line. They are the pool's, as `parallel_exercise`'s floor lists them,
-  and the floor lists them now with that reason. After that, one of its
-  broken copies - "a send node allocated for every park" - passed the
-  sleep check it should fail: the exercise's allocation counts are a
-  thread's, and its tasks now allocate on workers. Open.
+  the pool starts, and `environ` is on the link line. It is the pool's,
+  as `parallel_exercise`'s floor lists it, and the floor lists it now
+  with that reason. Then two of its broken copies passed - "a send node
+  allocated for every park" (step 16b, which counts what a park costs
+  tasks taking turns on one thread, ran its ring of tasks on the pool)
+  and "an io waiter found by walking every waiter" (step 0b's 2,000
+  parked readers, capturing only a descriptor, parked on the workers'
+  pollers and not beside the round trips on the main thread's) - and a
+  run failed "rendezvous select: select first:1;then second:2;" (step
+  12b's two senders, each on a worker, raced to park). Those, and the steps
+  whose subject is one thread's order or turns - the FIFO senders (11),
+  the select woken by its deadline and a sender at once (16a), the
+  receipt read after a later sender parks (16c) and the ping-pong beside
+  a sleeper (21) - spawn with `spawn_serial` now, and the gate holds
+  with every copy caught: the send node at 39 bytes a message, the io
+  walk at 13 times the round trips' time.
 - `parallel_exercise`'s broken copy `closeshome` was not caught. Under
   `-Dparallel_closes_home` its seventeenth read is meant to be a task of
   the main thread's own; its block captures only `Share` values, so it
   ran on the pool. It is `spawn_serial`, and the copy is caught again.
-- `std_http_exercise` failed, and fails at the same check with the old
-  prelude ("a connection served on the thread that accepted it: not
-  caught"), so this change did not cause that failure.
+- `std_http_exercise`'s copy "a connection served on the thread that
+  accepted it" was not caught. The copy spelled the connection's spawn
+  `g.spawn` for "on the accepting thread", and the block, which
+  `spawn_parallel` takes, is eligible, so the copy served every request
+  on a worker as the real code does (`--explain-spawn-std` notes it
+  "spawn runs in parallel"). On master's CI the same check catches it
+  (run 41668221971, "caught: FAIL answered on the accepting thread: yes,
+  not no"), so this change, and not the shared machine's load, made it
+  pass. The copy spells it `g.spawn_serial` now, and is caught.
 
 `std_signal_exercise`, `std_mutex_exercise` and `root_exercise` failed
 too, and failed the same way when run with the old prelude through

@@ -65,24 +65,39 @@
   marks these notes `"severity": "note"`, and the language server shows
   the same verdict as an inlay hint. `g.spawn_serial { }` keeps a task in
   its unit whatever it captures. `IYI_WORKERS=1` keeps every eligible
-  spawn on one thread and the pool unstarted. The workers start at the
-  first eligible spawn, at the cost `spawn_parallel` already paid. On a
-  shared 12-vCPU Linux machine, a one-spawn program took 0.88 ms before
-  and 5.1 ms on twelve workers. A program that allocates peaks higher,
-  because the collector's budget floor counts the pool's threads: 85 to
-  106 MB against 20 to 35 MB. Of the spawns that bench/ and samples/
-  programs reach, 125 locations now run in parallel, 289 stay serial and
-  6 differ by instantiation. All 12 of std's spawns stay serial.
-  `bench/spawn_eligible.sh` holds the placement, the unit, the opt-out,
-  one worker and the notes, with a broken copy caught for each.
-  `bench/spawn_fanout.iyi` hashes 31 MiB in 64 plain spawns. It runs in
-  99 ms on one worker and 12 ms on twelve on Linux (12 vCPUs), and in
-  158 ms on one and 20 ms on ten on macOS 26.6 (Apple M2 Pro, 10 cores,
-  the user's machine).
-  Not yet BUILT: `runtime_exercise`, `thread_exercise`,
-  `concurrency_exercise`'s floor, one broken copy in `parallel_exercise`
-  and `std_http_exercise` each depend on the old spawn order (SPEC.md
-  III.4.15, part 8).
+  spawn on one thread and the pool unstarted. The pool starts at the
+  first eligible spawn, with one worker (the entry below). Of the spawns
+  that bench/ and samples/ programs reach, 125 locations now run in
+  parallel, 289 stay serial and 6 differ by instantiation. All 12 of
+  std's spawns stay serial. `bench/spawn_eligible.sh` holds the
+  placement, the unit, the opt-out, one worker and the notes, with a
+  broken copy caught for each. `bench/spawn_fanout.iyi` hashes 31 MiB in
+  64 plain spawns. It runs in 99 ms on one worker and 12 ms on twelve on
+  Linux (12 vCPUs), and in 158 ms on one and 20 ms on ten on macOS 26.6
+  (Apple M2 Pro, 10 cores, the user's machine). Gate steps that tested a
+  unit's order or one thread's turns, and depended on spawns staying
+  in their unit, spawn with `spawn_serial`: in `runtime_exercise`,
+  `thread_exercise`, `concurrency_exercise` and `parallel_exercise`,
+  and in `std_http_exercise`'s copy that serves a connection on the
+  accepting thread (SPEC.md III.4.15, part 8).
+
+- **The pool starts one worker and grows to the work.** The first
+  parallel task, from `spawn_parallel`, `Server.serve` or an eligible
+  `spawn`, started every worker at once. It now starts one, and another
+  only when a task is waiting and no worker is idle to take it, up to
+  `IyiWorkers.count`, one on its way at a time, as Go starts a thread
+  from `wakep`. On a shared 12-vCPU Linux machine, a program whose one
+  eligible spawn prints a line took 2.46 ms on twelve workers and now
+  takes 0.68 ms, against 0.44 ms with the spawn serial. One eligible
+  spawn followed by the main thread building 200 lists of 20,000
+  strings peaked at 82 MB resident on twelve workers, and now peaks at 17
+  to 28 MB, because the collector's budget floor counts threads.
+  `bench/spawn_fanout.iyi` runs as fast as before: 10 ms on twelve
+  workers, 96 ms on one. `IyiWorkers.launched` says how many have
+  started. `bench/spawn_eligible.sh`'s `grows` step holds that one spawn
+  starts one worker and four tasks running at once start four, and
+  catches a pool that starts whole and one that never grows (SPEC.md
+  III.4.15, part 6).
 
 ### Gates
 

@@ -97,7 +97,11 @@ case "$(uname -s)" in
   *)
     added="$(nm -u exercise |
       sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
-      grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main)$' |
+      # `environ`: the exercise's spawns whose blocks capture only `Share`
+      # values run on the pool (SPEC.md III.4.15), whose start reads
+      # `IYI_WORKERS` from the environment, as bench/parallel_exercise.sh's
+      # floor says.
+      grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main|environ|__environ)$' |
       grep -cv '^\s*$')"
     if [ "$added" -ne 0 ]; then
       echo "the runtime put $added undefined symbols back on the link line:"

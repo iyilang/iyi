@@ -491,7 +491,9 @@ import std/socket::{IyiSocket, SocketError}
           end
         end
         {% if flag?(:parallel_closes_home) %}
-          g.spawn { lent_read(lent, lent_reader, waiting, woken) }
+          # The main thread's own task: its block captures only `Share`
+          # values, so a plain spawn would run on the pool (SPEC.md III.4.15).
+          g.spawn_serial { lent_read(lent, lent_reader, waiting, woken) }
         {% else %}
           g.spawn_parallel { lent_read(lent, lent_reader, waiting, woken) }
         {% end %}

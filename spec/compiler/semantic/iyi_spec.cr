@@ -5186,6 +5186,58 @@ describe "Semantic: iyi" do
           reg { |x| fire }
           CODE
       end
+
+      # The same block with a line before that call, with the NoReturn
+      # value assigned first, or with the call in both branches of an `if`:
+      # the cleanup cuts a list of expressions at its NoReturn one and
+      # leaves the list, and the `if`, untyped, so the proc still had no
+      # type to take from its body, and code generation stopped on the same
+      # cast from Nil.
+      it "compiles a kept block whose body is cut at a NoReturn value" do
+        codegen(<<-CODE, filename: "x.iyi")
+          struct Kept(A, R)
+            def initialize(@proc : Proc(A, R))
+            end
+
+            @[Share]
+            def self.of(&block : A -> R) : Kept(A, R)
+              new(block)
+            end
+
+            def call(argument : A) : R
+              @proc.call(argument)
+            end
+          end
+
+          def fire : NoReturn
+            while true
+            end
+          end
+
+          def wrap(r : R) : String forall R
+            "wrapped"
+          end
+
+          first = Kept(Int32, String).of do |x|
+            wrap(x)
+            wrap(fire)
+          end
+          first.call(1)
+          second = Kept(Int32, String).of do |x|
+            v = fire
+            wrap(v)
+          end
+          second.call(1)
+          third = Kept(Int32, String).of do |x|
+            if x > 0
+              wrap(fire)
+            else
+              wrap(fire)
+            end
+          end
+          third.call(1)
+          CODE
+      end
     end
 
     # #148: a parallel block that reaches a constant through the defs it

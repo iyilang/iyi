@@ -1504,8 +1504,15 @@ module Iyi
       # or code generation finds a kept block with no proc type. Only a
       # block's proc: nothing is bound to it, so setting its type here
       # cannot start inference again in a node that observes it.
-      if node.from_block? && !node.type? && (body_type = node.def.body.type?)
-        node.def.set_type(body_type)
+      #
+      # A body still without a type is one no way out of which returns:
+      # inference types a node from any dependency that has a type. The
+      # cleanup cuts a list of expressions at its first NoReturn one and
+      # leaves the list untyped, `puts "x"; wrap(block.call(y))` and
+      # `v = raise "x"; v.to_s` both, so such a block is NoReturn, which is
+      # what FixMissingTypes calls a block with no type.
+      if node.from_block? && !node.type?
+        node.def.set_type(node.def.body.type? || @program.no_return)
         node.update
       end
 

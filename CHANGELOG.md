@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Added
+
+- **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,
+  PROPOSED).** `each_parallel`, `map_parallel`, `sum_parallel` and
+  `reduce_parallel` on a `List`, an `Array` and an `Int32` or `Int64`
+  range cut the elements into chunks, eight a worker unless `grain:`
+  names a chunk's size, and as many parallel tasks as there are workers
+  take chunks from one count. `map_parallel` answers what `map` does, in
+  order; `each_parallel` answers the error of the lowest failing index
+  and starts nothing past a failure it knows of; a panic in a chunk
+  reaches the caller, and a cancelled caller is stopped without a partial
+  answer. The block and the elements must be `Share`: a def says its
+  elements cross with `@[Share(elements: "...")]`, refused at the call -
+  ``Array#map_parallel hands its block `Counter` on other threads, ...``
+  - and a refused capture names the one-thread twin (`map`) as the other
+  way out. An `Array` is copied into a `List` first, since a task of the
+  caller's unit may write it while the caller waits. With one worker, one
+  chunk, `-Dgc_none` or `-Dgc_boehm` the chunks run on the caller. On
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine), ten workers
+  ran two CPU-bound sums, SHA-256 of 20,000 strings and a string
+  transform 6.4 to 7.4 times faster than one thread; on Windows 11 with
+  12 logical processors (the user's machine), twelve workers ran the
+  sums and SHA-256 6.4 to 7.9 times faster, and the transform, which
+  allocates, 3.8 times. `bench/std_parallel_exercise.sh` holds it, with
+  five broken copies caught by name.
+
 ### Fixed
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard

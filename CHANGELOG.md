@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Changed
+
+- **A plain `spawn` runs in parallel where the compiler can prove it
+  safe (SPEC.md III.4.14, proposed).** A `g.spawn { }` whose block
+  passes every check `spawn_parallel`'s does, and whose walk of the
+  module state it reaches through calls finds nothing that is not
+  `Share` other than state marked `@[SafeReach]`, is a parallel task of
+  its own unit on the pool. Any other spawn stays in its spawner's unit,
+  as before. Nothing that compiled stops compiling, and there are no new
+  warnings. `--explain-spawn` on `build`, `check` and `run` writes a note
+  for each spawn: `spawn runs in parallel`, or `spawn stays in its
+  spawner's unit:` followed by the refusal that kept it there, which
+  names the capture. `--explain-spawn-std` adds std's spawns. `-f json`
+  marks these notes `"severity": "note"`, and the language server shows
+  the same verdict as an inlay hint. `g.spawn_serial { }` keeps a task in
+  its unit whatever it captures. `IYI_WORKERS=1` keeps every eligible
+  spawn on one thread and the pool unstarted. The workers start at the
+  first eligible spawn, at the cost `spawn_parallel` already paid. On a
+  shared 12-vCPU Linux machine, a one-spawn program took 0.88 ms before
+  and 5.1 ms on twelve workers. A program that allocates peaks higher,
+  because the collector's budget floor counts the pool's threads: 85 to
+  106 MB against 20 to 35 MB. Of the spawns that bench/ and samples/
+  programs reach, 125 locations now run in parallel, 289 stay serial and
+  6 differ by instantiation. All 12 of std's spawns stay serial.
+  `bench/spawn_eligible.sh` holds the placement, the unit, the opt-out,
+  one worker and the notes, with a broken copy caught for each.
+  `bench/spawn_fanout.iyi` hashes 31 MiB in 64 plain spawns. It runs in
+  99 ms on one worker and 12 ms on twelve on Linux (12 vCPUs), and in
+  158 ms on one and 20 ms on ten on macOS 26.6 (Apple M2 Pro, 10 cores,
+  the user's machine).
+  Not yet BUILT: `runtime_exercise`, `thread_exercise`,
+  `concurrency_exercise`'s floor, one broken copy in `parallel_exercise`
+  and `std_http_exercise` each depend on the old spawn order (SPEC.md
+  III.4.14, part 8).
+
 ### Fixed
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
@@ -26187,7 +26222,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,763-line library and nothing else. Every other
+  written against iyi's own 25,826-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

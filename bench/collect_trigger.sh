@@ -6,8 +6,8 @@
 # never grows with the live set, mappings that never go back, a scheduler
 # state left off the list that roots it, an ended thread's allocation left
 # uncounted, a budget floor blind to the threads, threads allocating free
-# while a triggered collection pays its debt, and a descriptor every
-# thread keeps.
+# while a triggered collection pays its debt, threads allocating past the
+# collection's ceiling, and a descriptor every thread keeps.
 #
 #   bash bench/collect_trigger.sh
 #
@@ -90,6 +90,16 @@ elif ! "$WORK/debt" >"$WORK/debt.out" 2>&1 || ! grep -q "^debt:" "$WORK/debt.out
   echo "  the debt exercise failed:"; sed 's/^/  /' "$WORK/debt.out"; status=1
 else
   sed 's/^/  /' "$WORK/debt.out"
+fi
+
+echo
+echo "== twelve workers allocating flat out peak within four budgets"
+if ! "$IYI" build --release -o "$WORK/working" "$REPO/bench/working_set.iyi" >"$WORK/working.build.log" 2>&1; then
+  echo "  the working-set program did not build"; sed -n '1,12p' "$WORK/working.build.log"; status=1
+elif ! "$WORK/working" >"$WORK/working.out" 2>&1 || ! grep -q "^working set:" "$WORK/working.out"; then
+  echo "  the working-set program failed:"; sed 's/^/  /' "$WORK/working.out"; status=1
+else
+  sed 's/^/  /' "$WORK/working.out"
 fi
 
 echo
@@ -231,13 +241,50 @@ prove_fails "an ended thread's slice uncounted" noretire "threads:" \
 # The floor back at MIN_BUDGET whatever the threads: four threads
 # registered, and the budget a collection leaves is a single thread's.
 prove_fails "floor blind to the threads" nofloor "floor:" \
-  '{ sub(/floor = MIN_BUDGET \* IyiThread\.program_threads/, "floor = MIN_BUDGET"); print }'
+  '{ sub(/floor = MIN_BUDGET \* allocating_threads/, "floor = MIN_BUDGET"); print }'
+
+# The floor counting every registered thread again, idle or not: the four
+# threads stop allocating, and the next budget is still five threads'.
+prove_fails "floor counts idle threads" idlefloor "floor:" \
+  '{ sub(/floor = MIN_BUDGET \* allocating_threads/, "floor = MIN_BUDGET * IyiThread.program_threads"); print }'
 
 # The debt's assist removed: a slice that finds a collection triggered
 # runs on as it did, and four threads churning together with no helper
 # sweep none of the debt the triggering thread pays.
 prove_fails "debt never assisted" noassist "debt:" \
   '{ sub(/sweep_assist if total >= budget/, "# removed"); print }' prelude.iyi debt_assist.iyi
+
+# The collection's ceiling removed: a slice that finds a collection under
+# way past the budget allocates on, as every slice did, and twelve
+# workers peak past four budgets. Built for release as the step above
+# runs it, and given three runs, since the peak is the largest epoch's
+# and an epoch is as large as its collection is slow - on Windows 11, 12
+# logical processors (the user's machine), the runtime without the
+# ceiling peaked at 231 to 248 MiB in 5 runs on a 52 MiB budget, past
+# four of them; the bound is four of the twelve workers' 48 MiB floor.
+mkdir -p "$WORK/noceiling/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/noceiling/iyi/"
+if ! awk '{ if ($0 ~ /^ *hold if total >= ceiling$/) { print "# removed"; removed++; next } print } END { if (removed != 2) exit 3 }' \
+     "$REPO/src/iyi/prelude.iyi" > "$WORK/noceiling/iyi/prelude.iyi"; then
+  echo "  the ceiling never holds: the two holds this proof removes are not in the prelude any more"; status=1
+elif ! IYI_PATH="$WORK/noceiling${PSEP}$REPO/src" "$IYI" build --release \
+       -o "$WORK/noceiling/program" "$REPO/bench/working_set.iyi" >"$WORK/noceiling/build.log" 2>&1; then
+  echo "  the ceiling never holds: the patched prelude did not build"; sed -n '1,12p' "$WORK/noceiling/build.log"; status=1
+else
+  caught=""
+  for run in 1 2 3; do
+    "$WORK/noceiling/program" >"$WORK/noceiling/out" 2>&1
+    if [ $? -ne 0 ] && grep -q "^FAIL: working set:" "$WORK/noceiling/out"; then
+      caught="$run"; break
+    fi
+  done
+  if [ -z "$caught" ]; then
+    echo "  the ceiling never holds: three runs stayed within the bound, so it does not test this"
+    sed -n '$p' "$WORK/noceiling/out"; status=1
+  else
+    printf '  the ceiling never holds: run %s exits 1 at "%s"\n' "$caught" "$(grep -m1 '^FAIL: working set:' "$WORK/noceiling/out")"
+  fi
+fi
 
 # A descriptor every thread keeps, under the terminal's limit: the darwin
 # park's pipe again, made at every start and never closed, and on Linux
@@ -266,7 +313,8 @@ if [ "$status" -eq 0 ]; then
   echo "budget will fill again, the pauses have"
   echo "measured numbers, the budget grows with what survives and is floored"
   echo "for every thread, a triggered collection's debt is swept by every"
-  echo "thread past the budget, a parked fiber's reference lives through it,"
+  echo "thread past the budget, twelve workers allocating flat out peak within"
+  echo "four budgets, a parked fiber's reference lives through it,"
   echo "five hundred ended threads hold no descriptor, and the checks fail"
   echo "when any of it is broken."
 else

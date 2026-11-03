@@ -17,6 +17,14 @@
 # case a server's threads were in once a watchdog held them
 # (bench/mark_stall.iyi).
 #
+# Past the collection's ceiling (`IyiMark.hold`) a slice that finds the
+# flag up is held until it falls rather than turned away, so on a copy
+# with the window the second thread's slices are held there and trigger
+# late, not never - one second's window, and the rounds counted 2 to 3
+# collections each. So a round also fails when any of the second
+# thread's slices was held: none of them can meet a collection that is
+# not its own.
+#
 # The slices are the allocator's own call (`IyiHeap.slice_full`), made
 # directly. Allocated for real, a slice's refill may sweep, and a sweep
 # takes the runtime lock, which the collection holds through the window:
@@ -86,6 +94,7 @@ module bench/release_trigger
     budget = Word.new
     counted = Word.new
     settled = Word.new
+    held = Word.new
     second = IyiThread.start do
       ready.set(1_u64)
       while IyiMark.collections == before
@@ -94,11 +103,13 @@ module bench/release_trigger
       seen.set(IyiMark.collections)
       budget.set(IyiMark.budget)
       slices = budget.get * 3_u64 // IyiHeap::SLICE
+      holds = IyiMark.holds
       i = 0_u64
       while i < slices
         IyiMark.pressure(IyiHeap::SLICE)
         i = i + 1_u64
       end
+      held.set(IyiMark.holds - holds)
       counted.set(IyiMark.allocated_since)
       IyiMark.settle
       settled.set(IyiMark.collections)
@@ -128,6 +139,10 @@ module bench/release_trigger
     end
     if settled.get == seen.get
       print "FAIL: #{name}: after collection #{seen.get} was counted, a thread's slices came to #{budget.get * 3_u64 // IyiHeap::SLICE * IyiHeap::SLICE} bytes, three budgets of #{budget.get}, and no collection ran - #{settled.get} collections once it was done, #{counted.get} bytes counted since the last collection\n"
+      return false
+    end
+    if held.get != 0_u64
+      print "FAIL: #{name}: after collection #{seen.get} was counted, #{held.get} of a thread's slices were held at the ceiling of a collection that was not theirs, which had not been let go\n"
       return false
     end
     puts "#{name}: after collection #{seen.get}, three budgets of #{budget.get} bytes in slices on a second thread triggered #{settled.get - seen.get} more"

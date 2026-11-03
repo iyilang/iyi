@@ -39,7 +39,10 @@
   vCPUs, a hand-off its back-off skipped beside a 100 ms hold started
   7.8 to 9.9 ms after its send, against 100.0 ms without the call.
   `bench/parallel_migrate.iyi`'s backstop step holds it, and its failure
-  proof takes the call away.
+  proof takes the call away. The tags loop's tail did not move with it:
+  six runs each, interleaved, request p99 179 to 257 ms before and 175 to
+  250 after, the slowest query 253 to 621 ms and 372 to 628, still on
+  the 125 ms grid of the kernel's ready queue that agent TagsTick traced.
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with

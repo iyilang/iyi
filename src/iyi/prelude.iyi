@@ -501,6 +501,8 @@ end
     fun VirtualProtect(lpAddress : Void*, dwSize : UInt64, flNewProtect : Int32, lpflOldProtect : Int32*) : Int32
     fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
     fun GetCurrentThread : Void*
+    fun GetThreadPriority(hThread : Void*) : Int32
+    fun SetThreadPriority(hThread : Void*, nPriority : Int32) : Int32
     fun SuspendThread(hThread : Void*) : Int32
     fun ResumeThread(hThread : Void*) : Int32
     fun GetThreadContext(hThread : Void*, lpContext : Void*) : Int32

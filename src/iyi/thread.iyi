@@ -839,6 +839,26 @@
     end
 
     {% if flag?(:win32) %}
+      # The stopping thread's priority, raised over the stop and put back
+      # after the release (`raise_stopper`, `lower_stopper`).
+      THREAD_PRIORITY_HIGHEST = 2_i32
+      @@stopper_priority : Int32 = 0_i32
+      @@stopper_raised = false
+
+      private def self.raise_stopper : Nil
+        me = LibC.GetCurrentThread
+        priority = LibC.GetThreadPriority(me)
+        return if priority >= THREAD_PRIORITY_HIGHEST
+        @@stopper_priority = priority
+        @@stopper_raised = LibC.SetThreadPriority(me, THREAD_PRIORITY_HIGHEST) != 0
+      end
+
+      private def self.lower_stopper : Nil
+        return unless @@stopper_raised
+        @@stopper_raised = false
+        LibC.SetThreadPriority(LibC.GetCurrentThread, @@stopper_priority)
+      end
+
       # Windows has no signal to deliver: the thread that stops the others
       # suspends them where they stand. The one check the POSIX handler
       # makes on the thread itself — never park a thread inside the
@@ -923,6 +943,7 @@
         # registers on its line, or running with a request to park. Only
         # the second kind is waited for, and only it counts itself in.
         others = @@count - (line != 0 ? 1_i64 : 0_i64)
+        raise_stopper
         deferred = suspend_others(line)
         @@deferred = deferred
         while word(page + IYI_TC_SUSPENDED).value.get < deferred.to_u64
@@ -969,6 +990,7 @@
         while word(page + IYI_TC_RESUMED).value.get < @@deferred.to_u64
           yield_cpu
         end
+        lower_stopper
       {% else %}
         page = control
         word(page + IYI_TC_RESUME).value.set(1_u64)

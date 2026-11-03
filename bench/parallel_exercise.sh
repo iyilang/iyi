@@ -859,7 +859,8 @@ step "failure proof: take_now and put_now without their channel's lock lose and 
 # not a hang, and a soak on Windows 11, 12 logical processors (the user's
 # machine), at IYI_WORKERS=2 found the gate failed by a run that died of
 # a memory fault (master 7d4d4a137). With each channel's own lock, 10
-# runs of 10 ended by name on Linux x86_64.
+# runs of 10 ended by name on Linux x86_64, and on that Windows machine
+# at IYI_WORKERS=2 19 of 20, the other a memory fault (48c31c427).
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: two workers cannot change a channel at the same instant, so the proof is not run"
 else
@@ -887,7 +888,9 @@ step "failure proof: a hand that never marks its select, a cancel lost as a task
 # park's look at its flag and its wake word finds nothing to claim unless
 # the park looks again (`IyiScheduler.suspend`); and a look at the word
 # outside its list's lock misses the wake between the look and the link.
-# On Linux x86_64 each copy was caught by name in 10 runs of 10. A copy
+# On Linux x86_64 each copy was caught by name in 10 runs of 10, and on
+# Windows 11, 12 logical processors (the user's machine), in 20 of 20 at
+# IYI_WORKERS=2 and 10 of 10 at four workers (48c31c427). A copy
 # whose claim is a load and a store, not an exchange, never failed at the
 # count in 10 runs: 9 hung and 1 ended at the selects' watchdog. The one
 # sampled had a worker in `take_mail` holding the scheduler's lock and

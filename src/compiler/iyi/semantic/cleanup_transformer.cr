@@ -3,7 +3,41 @@ require "../syntax/transformer"
 require "../types"
 
 module Iyi
+  # iyi: a `g.spawn` the cleanup classified (SPEC.md III.4.15): where its
+  # name is written, why it stays in its spawner's unit (nil when it runs
+  # in parallel), and whether std or the prelude wrote it.
+  record SpawnSite, location : Location, reason : String?, std : Bool do
+    def parallel? : Bool
+      reason.nil?
+    end
+  end
+
   class Program
+    # Every spawn site the cleanup classified, in the order it met them;
+    # one per instantiation of the def the call is in.
+    getter iyi_spawn_sites = [] of SpawnSite
+
+    # The `--explain-spawn` notes, once the cleanup has met every spawn:
+    # one per place and verdict, since a def typed for two `T`s classified
+    # its spawn twice, usually alike. The program's own spawns, and std's
+    # and the prelude's too under `--explain-spawn-std`; a path whose
+    # warnings are excluded (`lib` by default) is left out of the first.
+    def iyi_note_spawns : Nil
+      level = @warnings.explain_spawn
+      return if level.none?
+      seen = Set({String, String?}).new
+      @iyi_spawn_sites.each do |site|
+        location = site.location.expanded_location || site.location
+        next if !level.all? && (site.std || @warnings.ignore_warning_due_to_location?(location))
+        next unless seen.add?({location.to_s, site.reason})
+        if reason = site.reason
+          @warnings.add_note(location, "spawn stays in its spawner's unit: #{reason}")
+        else
+          @warnings.add_note(location, "spawn runs in parallel: every capture is Share, and nothing it reaches is module state that is not (SPEC.md III.4.15)")
+        end
+      end
+    end
+
     getter(cleanup_transformer : CleanupTransformer) do
       CleanupTransformer.new(self)
     end
@@ -595,11 +629,16 @@ module Iyi
             check_args_are_not_closure node, "can't set closure as C #{obj_type.type_desc} member"
           end
           check_share_boundary(node, target_defs[0])
+          classify_spawn(node, target_defs[0])
+          # An eligible spawn now names `spawn_pooled`, whose body is the
+          # one to transform below.
+          target_defs = node.target_defs.not_nil!
         end
 
         current_def = @current_def
 
         target_defs.each do |target_def|
+          note_pool_start(target_def)
           if @transformed.add?(target_def)
             node.bubbling_exception do
               @current_def = target_def
@@ -644,6 +683,15 @@ module Iyi
       end
 
       node
+    end
+
+    # A call the cleanup keeps to `IyiWorkers.start`: the program has a
+    # pool, and its loops check for preemption (`Program#iyi_pool_reached?`).
+    private def note_pool_start(target_def : Def) : Nil
+      return if @program.iyi_pool_reached?
+      owner = target_def.owner
+      return unless target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiWorkers"
+      @program.iyi_pool_reached = true
     end
 
     # iyi: a block that crosses a `Share` boundary may capture only `Share`
@@ -723,6 +771,15 @@ module Iyi
         check_thread_class_vars_share(a_def, thread)
         check_share_reach(block, a_def, thread)
       end
+      check_block_captures(node, block, a_def, subject, consequence, thread, owning)
+    end
+
+    # The captures of a block crossing a boundary: each variable it closed
+    # over, and `self` when it reaches it, asked what `check_share_boundary`
+    # says; raises at the first that fails. *thread* is the boundary when
+    # the block may run on another thread, *owning* the type when it runs
+    # behind that type's lock.
+    private def check_block_captures(node : Call, block : Block, a_def : Def, subject : String, consequence : String?, thread : ShareBoundary?, owning : Type?) : Nil
       return unless a_def.closure?
 
       vars = a_def.vars
@@ -776,6 +833,149 @@ module Iyi
         end
       end
     end
+
+    # iyi: where a `g.spawn { }` runs, decided here, after typing (SPEC.md
+    # III.4.15): on the pool, as a parallel task of its own unit, when the
+    # block would pass every check `spawn_parallel`'s block is held to -
+    # its captures, `self`, the constants and class variables it names -
+    # and the module state it reaches through the defs it calls, which a
+    # parallel block is only warned about, holds nothing that is not
+    # Share, save state its declaration claims is safe from any thread
+    # (`@[SafeReach]`). Such a call is pointed at `IyiGroup#spawn_pooled`,
+    # typed for the same `T` beside it; any other stays on `spawn`'s own
+    # body, in its spawner's unit, exactly as every spawn ran before.
+    # Nothing is refused or warned about: the verdict, and for a serial
+    # one the first check that kept it there, is kept for `--explain-spawn`
+    # (`Program#iyi_spawn_sites`).
+    private def classify_spawn(node : Call, target_def : Def) : Nil
+      return unless CleanupTransformer.spawn_def?(target_def)
+      pooled = pooled_spawn(target_def)
+      reason = pooled ? spawn_serial_reason(node) : NO_THREADS
+      node.target_defs = [pooled] if pooled && reason.nil?
+      location = node.name_location || node.location
+      return unless location
+      @program.iyi_spawn_sites << SpawnSite.new(location, reason, @program.iyi_share_reach.std_at?(location))
+    end
+
+    NO_THREADS = "a build under -Dgc_none or -Dgc_boehm has no threads (SPEC.md III.4.13)"
+
+    # Whether *target_def* is `IyiGroup#spawn`, the call the cleanup
+    # classifies.
+    def self.spawn_def?(target_def : Def) : Bool
+      owner = target_def.owner
+      target_def.name == "spawn" && !owner.metaclass? && owner.to_s == "IyiGroup"
+    end
+
+    # The same verdict for a typed tree the cleanup has not run on - the
+    # language server's, whose inlay hints say where each spawn runs - for
+    # the spawn *node* written in *in_def* (nil at the top level): why it
+    # stays in its unit, or nil when it runs in parallel. Changes nothing.
+    def spawn_reason_for(node : Call, in_def : Def?) : String?
+      return NO_THREADS if @program.has_flag?("gc_none") || @program.has_flag?("gc_boehm")
+      saved = @current_def
+      @current_def = in_def
+      begin
+        spawn_serial_reason(node)
+      ensure
+        @current_def = saved
+      end
+    end
+
+    # The `spawn_pooled` instance `spawn`'s never-taken line typed beside
+    # *spawn_def*, read before the cleanup drops that line, and kept per
+    # instance; nil under `-Dgc_none` and `-Dgc_boehm`, where `spawn` has
+    # no such line.
+    private def pooled_spawn(spawn_def : Def) : Def?
+      @pooled_spawns.fetch(spawn_def) do
+        finder = PooledSpawnFinder.new
+        spawn_def.body.accept finder
+        @pooled_spawns[spawn_def] = finder.found
+      end
+    end
+
+    class PooledSpawnFinder < Visitor
+      getter found : Def?
+
+      def visit(node : Call) : Bool
+        if node.name == "spawn_pooled" && (targets = node.target_defs) && targets.size == 1
+          @found = targets.first
+        end
+        @found.nil?
+      end
+
+      # The line sits in `{% if %}`, whose typed code is its expansion.
+      def visit(node : ExpandableNode) : Bool
+        node.expanded.try &.accept(self)
+        false
+      end
+
+      def visit(node : ASTNode) : Bool
+        @found.nil?
+      end
+    end
+
+    # A refusal as a note's reason: the innermost exception's words, since
+    # one raised inside a macro's expansion is wrapped in an "expanding
+    # macro" frame; and the line it names, when that is not the spawn's,
+    # since "is assigned here" means there.
+    private def refusal_text(refused : TypeException, node : Call) : String
+      deepest = refused
+      while (inner = deepest.inner).is_a?(TypeException)
+        deepest = inner
+      end
+      text = deepest.message || ""
+      at = node.name_location || node.location
+      line = deepest.line_number
+      if at && line && line != at.line_number && at.filename.is_a?(String)
+        "line #{line}: #{text}"
+      else
+        text
+      end
+    end
+
+    # Why the spawn at *node* stays in its unit, in the words of the check
+    # that refused its block - the capture, the constant, the class
+    # variable, the state reached and the path to it - or nil when nothing
+    # does and it may run in parallel. The checks are `check_share_boundary`'s
+    # own, run against `SPAWN_BOUNDARY` and caught rather than raised.
+    private def spawn_serial_reason(node : Call) : String?
+      if forwarded = node.block_arg
+        return "the block is a proc, `&#{forwarded}`, and what a proc captured is not written in its type"
+      end
+      block = node.block
+      return "the call has no block" unless block
+      fun_literal = block.fun_literal
+      return "the block was not typed" unless fun_literal.is_a?(ProcLiteral)
+      a_def = fun_literal.def
+      begin
+        check_thread_constants_share(a_def, SPAWN_BOUNDARY)
+        check_thread_class_vars_share(a_def, SPAWN_BOUNDARY)
+        check_block_captures(node, block, a_def, SPAWN_BOUNDARY.subject, "(SPEC.md III.4.4)", SPAWN_BOUNDARY, nil)
+      rescue refused : TypeException
+        return refusal_text(refused, node)
+      end
+      reach = @program.iyi_share_reach
+      return nil if reach.std?(block)
+      reach.reach(a_def).each do |found|
+        named = found.named
+        next if named.state.iyi_safe_reach
+        why = Iyi::Share.reason(named.type)
+        next unless why
+        path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
+        path << "`#{named.use}`"
+        where = named.state.is_a?(Const) ? "the constant" : "the class variable"
+        return "the block reaches #{where} `#{named.label} : #{named.type}` through #{path.join(" → ")}, and it is not Share: #{why}; " \
+               "if every thread may reach it safely, say why on it with `@[SafeReach(\"...\")]` (SPEC.md III.4.4)"
+      end
+      nil
+    end
+
+    SPAWN_BOUNDARY = ShareBoundary.new(
+      subject: "the block",
+      local_owner: "a local of the code that spawned the task, so the task and its spawner",
+      pair: "the task and the code that spawned it",
+      again: "spawns the task again",
+      after: "the task was spawned")
 
     # The owning type a method belongs to, its class method or its
     # instance's: `Mutex` for `Mutex.new` and for `Mutex(Array(Int32))#lock`.
@@ -1243,6 +1443,9 @@ module Iyi
     end
 
     @share_reach_gathered = {} of UInt64 => ShareReachWarning
+    # `spawn_pooled` by the `spawn` instance it was typed beside
+    # (`pooled_spawn`); by identity, since a def's `==` compares its text.
+    @pooled_spawns = ({} of Def => Def?).compare_by_identity
 
     # The assignments to one variable in a body, each with the loops,
     # blocks and procs around it and whether it comes after the call that

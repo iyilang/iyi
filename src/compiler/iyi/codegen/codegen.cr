@@ -2953,12 +2953,13 @@ module Iyi
 
     # iyi: whether this program's loops check for preemption at their
     # back-edges (SPEC.md III.4.13, part 9): a program with a worker pool,
-    # which is a program that reached `IyiWorkers.start` - every
-    # `spawn_parallel` does. The flag is only ever raised on a pool worker,
-    # so a program without one would pay for checks that never fire, and
-    # carries none. A build writing artifacts carries none either: the
-    # object code it writes is linked into programs that may have no pool,
-    # and a check calls the pool's slow half by name.
+    # which is a program whose kept code calls `IyiWorkers.start` - every
+    # `spawn_parallel` does, and every `spawn` the compiler found eligible
+    # (III.4.15; `Program#iyi_pool_reached?`). The flag is only ever raised
+    # on a pool worker, so a program without one would pay for checks that
+    # never fire, and carries none. A build writing artifacts carries none
+    # either: the object code it writes is linked into programs that may
+    # have no pool, and a check calls the pool's slow half by name.
     def iyi_preempt_on? : Bool
       on = @iyi_preempt_on
       return on unless on.nil?
@@ -2967,11 +2968,7 @@ module Iyi
 
     private def iyi_preempt_wanted? : Bool
       return false unless @program.iyi_prelude? && @program.iyi_exported_owners.empty?
-      workers = @program.types["IyiWorkers"]?
-      return false unless workers
-      meta = workers.metaclass
-      return false unless meta.is_a?(DefInstanceContainer)
-      return false unless meta.def_instances.each_value.any? { |a_def| a_def.name == "start" }
+      return false unless @program.iyi_pool_reached?
       !iyi_preempt_word.nil?
     end
 

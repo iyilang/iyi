@@ -7131,8 +7131,9 @@ cannot reach: a `@[Link]` sitting in the library against the day somebody
 calls it, which is the shape a link line grows in. So the annotations are
 also read as text, across `src/iyi` and `src/std`, and the list is the three
 the library has reasons for — `kernel32` and the MSVC runtime on Windows,
-and `bdw-gc` for the opt-in collector. A fourth fails the gate, whether or
-not any program reaches it.
+and `bdw-gc` for the opt-in collector, which on Windows also names its
+`gc.dll` so that the compiler copies it beside the program. A fourth fails
+the gate, whether or not any program reaches it.
 
 **The five on Linux are allowed by exact name.** `__libc_start_main`,
 `__gmon_start__`, `__cxa_finalize` and the two weak `_ITM_` clone-table

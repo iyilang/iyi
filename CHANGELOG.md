@@ -104,6 +104,28 @@
   with only the system directory on PATH, and refuses a copy of the
   prelude that does not name the DLL.
 
+- **A collection has a ceiling, and twelve workers allocating flat out
+  peak at 154 to 180 MB where they peaked at 204 to 856.** Past the budget every thread
+  allocated on while a collection paid its debt, stopped the threads and
+  marked beside them, and an object born under a mark lives to the sweep
+  after the next, so the heap held the largest epoch twice: twelve
+  workers of `bench/alloc_scaling.iyi` on a 52 MB budget counted up to
+  232 MB in one epoch. Now a thread whose slice finds a collection under
+  way and the epoch past 125% of its budget sweeps the debt or marks for
+  it, and sleeps when there is neither, until the collection is let go
+  (GC_DESIGN.md, "The collection's ceiling"). The twelve workers peak at
+  158 to 180 MB in 0.70 to 0.74 s against 692 to 856 MB in 1.02 to 1.12
+  on a 12-vCPU Linux machine; at 154 to 161 MB against 204 to 265 on
+  Windows 11 with 12 logical processors; and at 156 to 162 MB in 1.33
+  to 1.41 s against 408 to 481 MB in 1.68 to 1.99 on macOS 26.6 with an
+  M2 Pro's 10 cores (both the user's machines). `bench/web_cores.iyi`
+  on twelve workers did not move on either of the user's machines, and
+  `bench/release_pages.iyi` on the M2 answered 1.83M requests a second
+  against 1.79M, peaking at 121 to 124 MB against 267 to 355.
+  `bench/collect_trigger.sh` runs `bench/working_set.iyi`, which fails
+  past four budgets, and a copy without the ceiling it catches (231 to
+  248 MiB on the Windows machine against the bound's 208).
+
 ### Known
 
 - **0.20.0's Windows light-endpoint loss is the load generator sharing
@@ -26187,7 +26209,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,763-line library and nothing else. Every other
+  written against iyi's own 25,976-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

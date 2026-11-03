@@ -1,0 +1,181 @@
+# Twelve workers allocating flat out, and the resident set they peak at.
+#
+#   ./bin/iyi build --release bench/working_set.iyi && ./working_set
+#
+# `bench/alloc_scaling.iyi`'s load - every worker builds eight records a
+# request, their labels and tags, keeps one in sixty-four in a ring of
+# 4,096 and reads every answer back - on twelve parallel tasks, each a
+# worker of a pool of twelve. A collection's fixed cost grows with the
+# threads, so the budget is floored at 4 MiB a registered thread
+# (`IyiMark.next_budget`), and twelve workers' live set of a few
+# megabytes is far under it: the budget is the floor. What the program
+# may allocate while a collection is under way is the collection's
+# ceiling (`IyiMark.hold`), and what lies resident at the peak is the
+# epochs' allocation in chunks, an epoch's garbage being reused while the
+# next is born: the run fails by name past four budgets.
+#
+# Without the ceiling every thread allocated on while a collection paid
+# its debt, stopped the threads and marked beside them, and the peak was
+# the largest epoch's twice over: 473 to 825 MiB against 150 to 166 with
+# it on a shared 12-vCPU Linux machine (3 runs each), 231 to 248 against
+# 152 to 155 on Windows 11, 12 logical processors (the user's machine; 5
+# runs each), on a budget of 52 MiB both times.
+#
+# `WORKERS ROUNDS` runs another shape; the bound is the same. Every
+# answer is checked too, as alloc_scaling checks it.
+#
+# bench/collect_trigger.sh runs it, and a copy of the runtime with the
+# ceiling removed, which it catches.
+
+module bench/working_set
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% if flag?(:win32) %}
+    lib LibPeak
+      fun GetCurrentProcess : Void*
+      fun K32GetProcessMemoryInfo(process : Void*, counters : UInt64*, size : UInt32) : Int32
+    end
+
+    # PROCESS_MEMORY_COUNTERS: two DWORDs, then PeakWorkingSetSize.
+    def peak_bytes : UInt64
+      counters = Pointer(UInt64).malloc(9_u64)
+      counters.value = 72_u64
+      return 0_u64 if LibPeak.K32GetProcessMemoryInfo(LibPeak.GetCurrentProcess, counters, 72_u32) == 0
+      counters[1]
+    end
+  {% elsif flag?(:darwin) %}
+    lib LibPeak
+      fun getrusage(who : Int32, usage : UInt64*) : Int32
+    end
+
+    # struct rusage: two timevals, then ru_maxrss - bytes, on darwin.
+    def peak_bytes : UInt64
+      usage = Pointer(UInt64).malloc(18_u64)
+      return 0_u64 if LibPeak.getrusage(0, usage) != 0
+      usage[4]
+    end
+  {% else %}
+    # VmHWM, the kernel's peak resident set, in kB.
+    def peak_bytes : UInt64
+      File.read("/proc/self/status").lines.each do |line|
+        next unless line.starts_with?("VmHWM:")
+        return line.split('\t').last.strip.split(' ')[0].to_i.to_u64 * 1024_u64
+      end
+      0_u64
+    end
+  {% end %}
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  class Record
+    @id : Int64
+    @label : String
+    @tags : Array(Int64)
+
+    def initialize(@id : Int64, @label : String, @tags : Array(Int64))
+    end
+
+    def id : Int64
+      @id
+    end
+
+    def label : String
+      @label
+    end
+
+    def tags : Array(Int64)
+      @tags
+    end
+  end
+
+  RING = 4096
+
+  # One request: eight records built and read back. Answers what was read.
+  def request(task : Int64, round : Int64, ring : Array(Record?)) : Int64
+    records = [] of Record
+    k = 0_i64
+    while k < 8_i64
+      id = task &* 1000000000_i64 &+ round &* 8_i64 &+ k
+      records << Record.new(id, "r#{round}-#{k}", [id, id &+ 1_i64, id &+ 2_i64])
+      k = k + 1_i64
+    end
+    total = 0_i64
+    records.each do |record|
+      total = total &+ record.id &+ record.label.size.to_i64 &+ record.tags.size.to_i64
+    end
+    ring[(round // 8_i64 % RING.to_i64).to_i] = records[(round % 8_i64).to_i] if round % 8_i64 == 0_i64
+    total
+  end
+
+  def digits(n : Int64) : Int64
+    count = 1_i64
+    while n >= 10_i64
+      n = n // 10_i64
+      count = count + 1_i64
+    end
+    count
+  end
+
+  # What `request` reads, by arithmetic rather than by allocating.
+  def expected(task : Int64, round : Int64) : Int64
+    total = 0_i64
+    k = 0_i64
+    while k < 8_i64
+      id = task &* 1000000000_i64 &+ round &* 8_i64 &+ k
+      total = total &+ id &+ (2_i64 &+ digits(round) &+ digits(k)) &+ 3_i64
+      k = k + 1_i64
+    end
+    total
+  end
+
+  def work(task : Int64, rounds : Int64) : Int64
+    ring = Array(Record?).new(RING, nil)
+    lost = 0_i64
+    round = 0_i64
+    while round < rounds
+      lost = lost &+ 1_i64 if request(task, round, ring) != expected(task, round)
+      round = round + 1_i64
+    end
+    ring.each do |kept|
+      next unless kept.is_a?(Record)
+      id = kept.id
+      lost = lost &+ 1_i64 unless kept.tags.size == 3 && kept.tags[0] == id && kept.tags[2] == id &+ 2_i64
+      lost = lost &+ 1_i64 unless kept.label == "r#{(id - task &* 1000000000_i64) // 8_i64}-#{id % 8_i64}"
+    end
+    lost
+  end
+
+  arguments = Program.args
+  fail("usage: working_set [WORKERS ROUNDS]") unless arguments.empty? || arguments.size == 2
+  workers = arguments.empty? ? 12 : arguments[0].to_i
+  rounds = arguments.empty? ? 200000_i64 : arguments[1].to_i.to_i64
+  IyiWorkers.count = workers
+  collections = IyiMark.collections
+  bad = 0_i64
+  group do |g|
+    handles = [] of IyiTask(Int64)
+    workers.times do |t|
+      handles << g.spawn_parallel { work(t.to_i64, rounds) }
+    end
+    handles.each do |handle|
+      value = handle.value
+      fail("a task answered #{value}") unless value.is_a?(Int64)
+      bad = bad &+ value
+    end
+  end
+  fail("#{bad} requests or kept records read back wrong") unless bad == 0_i64
+  peak = peak_bytes
+  fail("working set: the peak resident set could not be read") if peak == 0_u64
+  budget = IyiMark.budget
+  mib = 1048576_u64
+  ran = IyiMark.collections - collections
+  if peak > budget * 4_u64
+    fail("working set: #{workers} workers peaked at #{peak // mib} MiB resident, past four budgets of #{budget // mib} MiB, through #{ran} collections")
+  end
+  puts "working set: #{workers} workers peaked at #{peak // mib} MiB resident, within four budgets of #{budget // mib} MiB, through #{ran} collections"
+{% else %}
+  puts "working set: no pool on this target, nothing to measure"
+{% end %}

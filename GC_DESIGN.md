@@ -2357,6 +2357,45 @@ first reuse check's gate at four, eight and twelve workers, plain and
 release; one four-worker run of a cut without the two parks did hang
 past ten minutes, and five more runs of that cut did not repeat it.
 
+**The collection's ceiling.** The trigger's question has an answer now.
+The debt's assist (#145) has the threads past the budget sweep while the
+triggering thread pays the debt, and the budget is floored for every
+thread; but every slice still allocated on once there was no debt left
+to take - through the stop, a mark beside the program and its second
+stop - and an object born black under a mark is swept only after the
+next mark, so the heap held the largest epoch twice. A counting copy of
+the runtime (not committed) found twelve workers of the scaling program
+on a 52 MB budget counting up to 232 MB in one epoch, and up to 85 MB
+born under a single mark of 6 to 25 ms, its second stop alone 2 to 13
+ms of one (Linux, 12 vCPUs).
+
+So an epoch has a ceiling of 125% of its budget, the budget and the
+collection's own allocation counted together - the mark's slices are
+counted where the trigger's are, and its end sets the count to what was
+born under it as it did. A thread whose slice finds a collection under
+way and the count past the ceiling holds (`IyiMark.hold`): it sweeps
+the debt, or marks while the pool has work for it, and otherwise
+sleeps until the collection is let go - on a futex on Linux, a kernel32
+semaphore on Windows, an empty kqueue's tenth of a millisecond on
+darwin - out of the allocator's bracket, where a stop takes it as it
+stands. Go's assist is the same bargain with a pacer in front of it. A
+hold lasts 100 ms at the most, so a mark that never ends slows the
+program rather than stopping it, and the watchdogs that look for one
+still get to say so. Twelve workers peak at 158 to 180 MB in 0.70 to
+0.74 s against 692 to 856 MB in 1.02 to 1.12 on the Linux machine, 154
+to 161 MB against 204 to 265 on Windows 11 with 12 logical processors,
+and 156 to 162 MB in 1.33 to 1.41 s against 408 to 481 MB in 1.68 to
+1.99 on macOS 26.6 with an M2 Pro's 10 cores (both the user's machines),
+the walls faster where the faults on fresh pages went. Servers, whose
+collections end before their ceiling, did not move: `bench/web_cores.iyi`
+on twelve workers within its run-to-run spread on both of the user's
+machines, and `bench/release_pages.iyi` in-process at 1.83M against 1.79M
+a second on the M2, peaking at 121 to 124 MB against 267 to 355.
+`bench/collect_trigger.sh` runs `bench/working_set.iyi`, the scaling
+program's load held to four budgets, and a copy without the ceiling that
+peaks past them; `bench/release_trigger.iyi` asks besides that no slice
+holds at a collection that was let go.
+
 ---
 
 ## What gcry Measured (Prior Art)

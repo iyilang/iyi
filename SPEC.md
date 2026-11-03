@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 26,162 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 26,179 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 131,595 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 26,162 lines
+> "No standard library worth the name" is still true of iyi's own 26,179 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 26,162 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 26,179 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 131,595 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 26,162-line own prelude + 125,597 in std |
+| Library | 8,161 lines (3,551 of it core) | 26,179-line own prelude + 125,597 in std |
 | Specs | 21,146 lines | 15,901 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3850,8 +3850,20 @@ event it reads cannot be stale against a waiter the owner parked
 meanwhile. Nothing allocates under it: the slots grow, and the owners'
 table maps its chunk, before the owner takes it (`io_room`).
 `bench/parallel_migrate.iyi`'s heldio step holds the answer to within 20
-ms; it is read on another worker in 0.2 to 4.8 ms on Linux, the
+ms; it is read on another worker in 0.4 to 5.0 ms on Linux, the
 monitor's 5 ms tick and the call.
+
+A worker's idle wait still takes its own poller's news and its expired
+sleepers before it says it is busy (`end_idle`), unlike Windows' below,
+so a deadlock's walk reads only what each idle thread said when it went
+idle, as before (`all_quiet?`): one that takes anything in its wait had
+a waiter or a sleeper then. A taker that empties the lists of a worker
+that went idle meanwhile, saying it had waiters, rings it to look and say
+again. Busy first, as on Windows, cost the loop that asks most of the
+machine: 32 tasks each making 100 queries in turn on 12 workers, the
+database's process on all 12 vCPUs of the Linux machine, had a request
+p99 of 69 to 83 ms and 38 to 91 queries over 20 ms in 8 s, against 58
+to 65 ms and 0 to 2 with the order kept (five runs each, interleaved).
 
 Windows had the same shape, a completion port per scheduler thread, and
 it cost more there: a completion is not readiness that any poller may be
@@ -3882,24 +3894,23 @@ shape now (`runtime/netpoll_windows.go`): one port for the process
   under the other locks), and wakes it where it is: a fiber that
   may move into this worker's ring, where a steal may take it, any other
   home. Go readies what its netpoller found the same way, wherever the
-  poll ran (`injectglist`). A deadlock's walk reads a thread's lists as
-  well as what the thread said when it went idle, since a taker - of a
-  completion here, of a held worker's news on Linux and darwin - may have
-  emptied them since (`all_quiet?`), so an idle thread may take nothing
-  itself: its idle wait marks it busy before it takes the port's packets,
-  its poller's news or its expired sleepers (`end_idle`), and a taker is
-  busy while it holds a fiber between a list and a queue. Marked busy
-  only once it had taken them, an idle worker holding the main thread's
-  accept read as quiet - bench/completions_taken.iyi was named
-  deadlocked in 3 runs of 5 on the user's Windows 11 machine with 12
-  logical processors, which a count of packets in hand mended - and so
-  did a thread whose timer's sleeper was already in its own run queue:
+  poll ran (`injectglist`). A deadlock's walk reads a Windows thread's
+  lists as well as what the thread said when it went idle, since a taker
+  may have emptied them since (`all_quiet?`), so an idle thread may take
+  nothing itself: its idle wait marks it busy before it takes the port's
+  packets or its expired sleepers (`end_idle`), and a taker is busy while
+  it holds a fiber between a list and a queue. Marked busy only once it
+  had taken them, an idle worker holding the main thread's accept read
+  as quiet - bench/completions_taken.iyi was named deadlocked in 3 runs
+  of 5 on the user's Windows 11 machine with 12 logical processors,
+  which a count of packets in hand mended - and so did a thread whose
+  timer's sleeper was already in its own run queue:
   bench/release_trigger.iyi's main thread named a deadlock in its join in
   9 runs of 200 there, and in 15 of 200 at 4 processors' affinity, and in
   none of 300 at either once the mark moved. bench/woken_busy.iyi is that
   join, and bench/concurrency_exercise.sh holds its woken thread 200 ms
   in a copy of the runtime marked busy after the hold, which names the
-  deadlock, on every platform.
+  deadlock.
 - *Who waits on the port.* One idle thread at a time, the seat's holder
   (a pool worker once the pool has started), waits on the port beside its
   doorbell and its deadline timer; every other idle thread waits on its
@@ -11359,7 +11370,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 26,162-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 26,179-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

@@ -16,7 +16,7 @@
   running worker with io waiters that has not looked at it for a
   millisecond, without waiting and taking nothing, and with news there
   calls an idle worker, which takes the waiters off that worker's lists
-  and runs them: the answer is read on another worker in 0.2 to 4.8 ms
+  and runs them: the answer is read on another worker in 0.4 to 5.0 ms
   on Linux. A worker's io list, slots and sleep heap are behind its
   lists lock on every platform, as Windows' were, held by the owner from
   the second-waiter check through the registration, and the io
@@ -24,10 +24,15 @@
   epoll event each wait and narrowing built is in its frame now, not a
   16-byte heap block. `bench/parallel_migrate.iyi`'s heldio step holds
   the answer to 20 ms in `bench/parallel_exercise.sh`, and its failure
-  proof takes the monitor's call away; `bench/concurrency_exercise.sh`'s
-  copy that marks a woken thread busy after its hold, named a deadlock,
-  runs everywhere now, since a deadlock's walk reads every thread's
-  lists.
+  proof takes the monitor's call away. A worker's idle wait still takes
+  its own news before it says it is busy, so a deadlock's walk reads only
+  what an idle worker said, and a taker that empties the lists of one
+  that went idle meanwhile rings it to say again. Said busy first, as on
+  Windows, 32 tasks each making 100 queries in turn on 12 workers, with
+  the database's process on all 12 vCPUs, had a request p99 of 69 to 83
+  ms and 38 to 91 queries over 20 ms in 8 s, against 58 to 65 ms and 0
+  to 2 with the order kept and 59 to 66 ms and 0 to 3 before the change
+  (Linux, five runs each, interleaved).
 
 - **A task handed over by a task that computes on starts on an idle
   worker.** A send, a `Mutex` let go or any other wake from a running
@@ -26252,7 +26257,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,162-line library and nothing else. Every other
+  written against iyi's own 26,179-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

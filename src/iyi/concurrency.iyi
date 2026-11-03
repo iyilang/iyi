@@ -2145,11 +2145,13 @@ class IyiScheduler
   end
 
   # Every other scheduler thread idle with nothing of its own to wait for
-  # and no mail, and nothing on its way. Lock held. A thread's lists are
-  # looked at as well as what it said when it went idle: another thread
-  # may have taken its last io waiter since - on Windows its completion
-  # (`complete_packet`), elsewhere its news, out of its poller, while the
-  # thread went idle (`take_held`).
+  # and no mail, and nothing on its way. Lock held. On Windows a thread's
+  # lists are looked at as well as what it said when it went idle: another
+  # thread may have taken its last io waiter's completion since
+  # (`complete_packet`). Elsewhere what it said is read alone, since its
+  # wait takes its own news while it is still idle (`wait_for_events`);
+  # a worker that empties an idle one's lists from its poller rings it,
+  # to say again (`take_held`).
   #
   # That reading needs an idle thread to take nothing itself, and on
   # Windows its wait marks it busy before it does (`end_idle`): what it
@@ -2174,8 +2176,6 @@ class IyiScheduler
         quiet = other.quiet
         {% if flag?(:win32) %}
           quiet = quiet || (other.io_head.is_a?(Nil) && other.sleep_head.is_a?(Nil) && other.stdin_waiter.is_a?(Nil))
-        {% else %}
-          quiet = quiet || (other.io_head.is_a?(Nil) && other.sleep_head.is_a?(Nil))
         {% end %}
         return false unless other.idle && quiet && !other.mail?
       end
@@ -3783,12 +3783,6 @@ class IyiScheduler
 
     {% unless flag?(:win32) %}
       st.polled_at = __iyi_monotonic_ns
-      # Busy before anything below is taken, as on Windows: a worker may
-      # take this one's news while it runs (`take_held`), so a deadlock's
-      # walk reads its lists as well as what it said when it went idle
-      # (`all_quiet?`), and what is taken here goes into this thread's
-      # own run queue, which the walk does not read.
-      end_idle(st) if blocking && @@shared
     {% end %}
 
     index = 0_i64
@@ -3814,6 +3808,19 @@ class IyiScheduler
     end
 
     wake_expired_sleepers
+    {% unless flag?(:win32) %}
+      # Busy only once its news and its expired sleepers are in its own
+      # run queue: a deadlock's walk here reads what an idle thread said
+      # when it went idle (`all_quiet?`), and one that takes anything
+      # had a waiter or a sleeper then. Marked busy first, as on Windows,
+      # 32 tasks each making 100 queries in turn on 12 workers, the
+      # database's process on all 12 vCPUs of a Linux machine, went from
+      # a request p99 of 58 to 65 ms, with 0 to 2 queries over 20 ms in
+      # 8 s, to 69 to 83 ms and 38 to 91 queries (five runs each,
+      # interleaved); taking the monitor's call to `take_held` away,
+      # alone or with the lists lock or the poll's time, left it as slow.
+      end_idle(st) if blocking && @@shared
+    {% end %}
   end
 
   # What the poller's event at *entry* says is ready, as `wake_io` takes
@@ -3858,7 +3865,10 @@ class IyiScheduler
     # (`wake_completed`). Level-triggered news stays for whoever polls
     # next; the doorbell is left as it was: an eventfd is not read here,
     # and a kevent's `EVFILT_USER`, which this poll takes off the kqueue,
-    # is rung again. True when a waiter was taken.
+    # is rung again. A worker that went idle meanwhile said then that it
+    # had waiters, and a deadlock's walk reads only what it said
+    # (`all_quiet?`): with its lists emptied here it is rung, to look and
+    # say again (`idle_worker`). True when a waiter was taken.
     def self.take_held(other : IyiSchedulerState) : Bool
       poller = other.pollfd
       return false if poller <= 0_i64
@@ -3903,6 +3913,7 @@ class IyiScheduler
         end
         index = index + 1
       end
+      emptied = other.io_head.is_a?(Nil) && other.sleep_head.is_a?(Nil)
       lists_unlock(other)
       {% if flag?(:darwin) %}
         retrigger(other) if rung
@@ -3913,6 +3924,13 @@ class IyiScheduler
         taken.next_run = nil
         wake_completed(taken)
         taken = following
+      end
+      if found && emptied
+        # Under the lock it went idle under: either it saw its lists
+        # emptied when it said, or it is idle here and rung.
+        IyiSchedLock.lock
+        ring(other) unless other.quiet
+        IyiSchedLock.unlock
       end
       found
     end

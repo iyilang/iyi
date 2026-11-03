@@ -3,11 +3,9 @@
 #
 #   ./bin/iyi run bench/woken_busy.iyi
 #
-# A deadlock's walk reads an idle thread's lists as well as what the
-# thread said when it went idle (`IyiScheduler.all_quiet?`): another
-# thread may have taken its last io waiter since - on Windows its
-# completion off the process's port, and on Linux and darwin its news
-# out of its poller (`IyiScheduler.take_held`).
+# On Windows a deadlock's walk reads an idle thread's lists as well as
+# what the thread said when it went idle (`IyiScheduler.all_quiet?`):
+# another thread may have taken its last io waiter's completion since.
 # So a thread still marked idle while it takes its own expired sleeper
 # into its own run queue reads as idle with nothing to wait for. Each
 # round here starts a thread that sleeps a millisecond at a time for

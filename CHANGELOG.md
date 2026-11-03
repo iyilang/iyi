@@ -21,6 +21,23 @@
   `{ |x| block.call(x).to_s }`. A spec in
   `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
 
+### Known
+
+- **0.20.0's Windows light-endpoint loss is the load generator sharing
+  every processor, not the shared completion port.** On Windows 11 with
+  12 logical processors (the user's machine), interleaved best of 3
+  against 0d8922efd, the commit before the shared port: `check_version`
+  and `order` at twelve workers answer 0.89 and 0.94 of it only when oha
+  runs on all 12 processors beside them. Given processors of its own, the
+  shared port answers 9-12% more (6 or 12 workers on 6 processors, oha on
+  the other 6) and 19-36% more with oha held to 4. Kernel traces put the
+  port's own cost level (ntoskrnl 22.6 against 22.9 us a request); under
+  that co-location the workers seldom idle, so the port is drained in
+  batches of 7 by 1 ms polls, and both the server (+3.5 us) and oha
+  (+5.5 to +6 us) spend more CPU a request. Keeping a connection on its
+  worker without stalling it would take per-worker ports again, which is
+  not a patch.
+
 ## 0.20.0 — 2026-11-02
 
 **std/http's `Server.serve` answers on every core, and a parallel task

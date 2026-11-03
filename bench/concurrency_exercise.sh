@@ -225,9 +225,11 @@ else
       fi
       ;;
     *)
+      # `environ`: the pool's start reading `IYI_WORKERS` (above). Said out
+      # here: inside the `$( )` below, this comment made macOS's bash 3.2
+      # refuse the whole script with a syntax error 150 lines further on.
       added="$("$NM" -u exercise |
         sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
-        # `environ`: the pool's start reading `IYI_WORKERS` (above).
         grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main|environ|__environ)$' |
         grep -cv '^\s*$')"
       if [ "$added" -ne 0 ]; then

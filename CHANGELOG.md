@@ -41,8 +41,8 @@
   `bench/parallel_migrate.iyi`'s backstop step holds it, and its failure
   proof takes the call away. The tags loop's tail did not move with it:
   six runs each, interleaved, request p99 179 to 257 ms before and 175 to
-  250 after, the slowest query 253 to 621 ms and 372 to 628, still on
-  the 125 ms grid of the kernel's ready queue that agent TagsTick traced.
+  250 after, the slowest query 253 to 621 ms and 372 to 628. Whether the
+  rest is the kernel's ready queue agent TagsTick traced is not measured.
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with

@@ -3794,9 +3794,8 @@ class IyiScheduler
     index = 0_i64
     # Out here for the reason `ready` is below.
     doorbell = st.wake_fd
-    buffer = events_buffer
     while index < count
-      entry = buffer + (index * IYI_POLL_EVENT_BYTES).to_u64
+      entry = events_buffer + (index * IYI_POLL_EVENT_BYTES).to_u64
       fd = Pointer(UInt64).new(entry + IYI_POLL_DATA_OFFSET).value.to_i64
       # Declared out here: a local born inside the `{% if %}` dies at its
       # `{% end %}`.

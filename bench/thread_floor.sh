@@ -168,7 +168,7 @@ case "$(uname -s)" in
     # probe's park on too (bench/dependency_floor.sh says why those two).
     # `_pipe` and `_read` were the runtime's while a stopped thread parked
     # in `read` on a pipe of its own, and left with that park.
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
     thread='__tlv_bootstrap _pthread_join _pthread_threadid_np'
     # The refused parks: a pipe per thread, `pipe` and `read`; the lock's
     # two calls; and `sigsuspend` alone. The Mach stop swaps the stop for

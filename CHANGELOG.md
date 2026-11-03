@@ -240,6 +240,30 @@
   `bench/collect_trigger.sh` asks for both: four threads allocating keep
   four threads' floor, and the same four idle add nothing; a copy that
   counts every registered thread fails the second.
+### Changed
+
+- **darwin's spinners give their core away, and a stop sleeps on its
+  count.** `IyiThread.yield_cpu` was the ARM `yield` hint on darwin, which
+  gives the scheduler nothing, so the runtime lock's spinner, a class
+  lock's and the scheduler's spun through the timeslice of the thread they
+  waited for; it is Mach's `thread_switch` with the depress option now,
+  after 1,024 turns of the hint (`IyiThread::YIELD_AFTER`), and darwin's
+  floor has one name more (SPEC.md III.9). The stop's waits for its
+  threads to count in and out spin briefly and then sleep on the count,
+  woken by the last thread (Linux's futex, darwin's `os_sync`). On macOS
+  26.6, an M2 Pro with 10 cores, five interleaved runs: 7d's storm beside
+  ten busy processes made 784 to 1,056 threads in its 10 s and makes
+  3,200 in 1.0 to 1.6 s; `bench/thread_exercise.iyi` at 20 threads alone
+  took 3.3 to 4.8 s and takes 1.5 to 3.7; `bench/web_cores.iyi` serves
+  the same (login 171.02 against 171.45 req/s, `check_version` 119,338
+  against 118,778, `order` 117,066 against 115,664, best of five). On
+  Linux, 12 vCPU, the storm beside nine busy processes went from 848 to
+  1,184 threads in 10 s to 3,200 in 5.8 to 8.6 s. `sched_yield`, measured
+  first, lost at 20 threads beside a busy process per core (src/iyi/
+  thread.iyi). `bench/thread_exercise.sh` 7h runs the storm with its
+  stops asleep, and proves the wake by a run that hangs without it; 7i
+  asks darwin's storm beside busy processes for half its rate alone, and
+  puts the hint back to fail it.
 
 ### Known
 
@@ -26324,7 +26348,8 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,456-line library and nothing else. Every other
+  written against iyi's own 26,559-line library and nothing else. Every other
+  written against iyi's own 26,559-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -35,6 +35,46 @@
 
 ### Fixed
 
+- **A task handed over by a task that computes on starts on an idle
+  worker.** A send, a `Mutex` let go or any other wake from a running
+  parallel task put the woken task in its waker's ring and called nobody
+  when it was the ring's only fiber, so it waited until the waker parked:
+  beside a 50 ms loop with preemption off it started 50.0 ms after the
+  send in all 20 wakes of two runs, with three workers idle (Linux, 12
+  vCPUs). Such a hand-off now calls an idle worker, Go's `ready` calling
+  `wakep`, and the task starts in 23 to 28 us at the median. Calling on
+  every one cost a channel ping-pong between two parallel tasks 323 to
+  338 ns a round trip against 137 to 139 on macOS 26.6, an M2 Pro with 10
+  cores, so a worker that keeps taking back the fiber it called for -
+  the waker parked first - calls for fewer and fewer, down to one
+  hand-off in 4,096, and starts over when it goes idle; and a worker
+  stealing a lone fiber from a running one waits up to 3 us for its
+  owner to take it, as Go spares a running P's `runnext`. The ping-pong
+  is 144 to 146 ns on the M2 and 150 to 157 against 136 to 156 on
+  Windows 11, 12 logical processors. `bench/parallel_migrate.iyi`'s
+  handoff step holds the wake in `bench/parallel_exercise.sh`, and its
+  failure proof takes the call away.
+
+- **A fiber left in the ring of a worker held a whole tick is stolen.**
+  A worker whose task runs where no back-edge check is - the runtime,
+  the collector, a `@[NoPreempt]` def - or whose thread the kernel left
+  in the ready queue, held what was in its ring until it came back: a
+  completion taken off Windows' port onto it, a lone fiber pushed on its
+  way to the next, a hand-off its back-off left uncalled (the entry
+  above). Traced on Windows 11, 12 logical processors, against a local
+  postgres in the tags endpoints' loop (103 queries a request, 32 tasks
+  on 12 workers), 17 to 33 fibers a run of 8 s waited 100 ms or more
+  runnable after their completion was taken, while hand-offs never
+  waited 10 ms. The pool's monitor now calls an idle worker for a worker
+  it finds held by one task a tick with fibers in its ring. On Linux, 12
+  vCPUs, a hand-off its back-off skipped beside a 100 ms hold started
+  7.8 to 9.9 ms after its send, against 100.0 ms without the call.
+  `bench/parallel_migrate.iyi`'s backstop step holds it, and its failure
+  proof takes the call away. The tags loop's tail did not move with it:
+  six runs each, interleaved, request p99 179 to 257 ms before and 175 to
+  250 after, the slowest query 253 to 621 ms and 372 to 628. Whether the
+  rest is the kernel's ready queue agent TagsTick traced is not measured.
+
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with
   are the library Crystal shipped at 0.1.0 (SPEC.md I.4), not what
@@ -26218,7 +26258,8 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,075-line library and nothing else. Every other
+  written against iyi's own 26,176-line library and nothing else. Every other
+  written against iyi's own 26,176-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

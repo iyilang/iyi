@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 26,075 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 26,176 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 131,595 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 26,075 lines
+> "No standard library worth the name" is still true of iyi's own 26,176 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 26,075 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 26,176 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 131,595 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 26,075-line own prelude + 125,597 in std |
+| Library | 8,161 lines (3,551 of it core) | 26,176-line own prelude + 125,597 in std |
 | Specs | 21,146 lines | 15,901 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3714,7 +3714,11 @@ task that parks and is woken may resume on any worker, Go's rule. Woken by
 a task on a worker, it goes into that worker's run queue, a ring of 256 that
 an idle worker takes half of (Go's `runqgrab`); woken from a thread outside
 the pool, into a shared queue any worker takes from. One idle worker at a
-time is rung to come and steal, and one that finds work rings the next.
+time is rung to come and steal, and one that finds work rings the next;
+a task handed over by a task that runs on, of another parallel task, rings
+one too, Go's `ready` calling `wakep`, since the waker may compute for as
+long as it likes and its worker comes back for the woken task only when
+it parks.
 
 This section first decided the other way - a task placed when it starts and
 never moved - for two reasons, and both were answered before tasks moved.
@@ -3736,7 +3740,11 @@ shape of 32 connections making 25 ms requests 1.26 to 2.20 times before
 and 1.16 to 1.20 after. In the best runs one worker did 328 ms of the
 parked tasks' work and another 59 before, and every worker 157 to 167 ms
 after. `bench/parallel_migrate.iyi`'s balance step holds the parked shape
-on four workers, under twice the ideal.
+on four workers, under twice the ideal. Its handoff step holds the wake a
+handed-over task brings: a task woken by a task that then computes 50 ms
+with preemption off starts on an idle worker in 23 to 28 us at the median
+of ten (Linux, 12 vCPUs, release), where it waited the 50 ms out in all
+20 wakes of two runs before.
 
 What a move keeps, and what holds it: the fiber's stack is found by the
 collector on whichever thread runs it, through the fiber registry and the
@@ -4355,7 +4363,7 @@ eight workers' fiber stacks through the collections, a deadlock across
 threads named, and broken copies of the runtime caught by name - a wake
 that does not ring, a steal that leaves the task queued, a cancel never
 delivered, a cancel that skips the pool, and a pool held to one worker -
-and runs `bench/parallel_migrate.iyi` with nine more for part 1's moves.
+and runs `bench/parallel_migrate.iyi` with eleven more for part 1's moves.
 The one name the pool adds to the floor is `environ`, the C runtime's
 table `IYI_WORKERS` is read from on Linux and darwin.
 
@@ -11336,7 +11344,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 26,075-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 26,176-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

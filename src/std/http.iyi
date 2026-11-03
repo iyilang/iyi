@@ -316,6 +316,12 @@ class Conn
     @ended
   end
 
+  # Whether `serve` has stopped: its listener closed, or on a worker of the
+  # pool the connection's `ServeStop`. No read starts after it (`fill`).
+  def stopped? : Bool
+    (listener = @listener) ? listener.closed? : false
+  end
+
   def available : Int32
     @stop - @start
   end
@@ -2026,9 +2032,11 @@ pub struct Server
           in String
             req = Request.new(head.method, head.path, head.query, head.headers, body, head.version, remote)
           in HTTPError
-            # A client that went is not answered; one that sent a body that
-            # is not one is told why.
-            return false if conn.ended?
+            # A client that went is not answered, nor one whose body the
+            # stop cut short - told "400 the body ended after 500 of its
+            # 1000 bytes", it was blamed for the server's going; one that
+            # sent a body that is not one is told why.
+            return false if conn.ended? || conn.stopped?
             refuse(conn.transport, body)
             return true
           in Cancelled
@@ -2053,7 +2061,10 @@ pub struct Server
         end
         # Writing the answer waits as the client reads it, a pause at a time.
         conn.no_deadline
-        unless answered?(conn, response, req, head.close, compress)
+        # An answer the connection closes after says so: one made while
+        # the server stops went out `keep-alive`, and a client that took
+        # it at its word sent its next request into the close.
+        unless answered?(conn, response, req, head.close || conn.stopped?, compress)
           # A client that said `close` sends no further request (RFC 9112
           # section 9.6): its request read whole and nothing after it,
           # nothing of the client's is left to come, and the close waits

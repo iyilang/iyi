@@ -34,6 +34,15 @@
   `bench/std_http_stop.iyi` stops a server under two such blocks, one
   answering a string and one a stream; the gate counts the panics, and a
   copy without either guard is caught.
+- **An answer the server makes while it stops says `Connection: close`,
+  and a body the stop cut short is not answered 400.** An answer in
+  progress at a stop went out `keep-alive` and the connection closed
+  after it, so a client's next request on it met the close; and a
+  request read behind it whose body was still arriving was answered "400
+  Bad Request: the body ended after 500 of its 1000 bytes", blaming the
+  client for the server's going, in place of the close a client may
+  retry on. `bench/std_http_parallel.iyi`'s stop holds both, with a
+  broken copy of each.
 
 ## 0.20.0 — 2026-11-02
 

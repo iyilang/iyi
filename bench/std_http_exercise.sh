@@ -1267,8 +1267,10 @@ echo "== connections on every core: serve's default workers, and workers: 1 (ben
 # must close are on others. The program holds it: eight requests that
 # compute, waiting before anything accepts, answered on more than one
 # worker and on none of them the accepting thread; a handler that
-# panics ending its own connection; and the stop, an answer in progress
-# written and a kept-alive connection closed, under watchdogs. Then
+# panics ending its own connection; and the stop, the answers in
+# progress written - the one made at the stop saying `Connection:
+# close` - requests half sent behind them closed on rather than answered
+# 400, and a kept-alive connection closed, under watchdogs. Then
 # `workers: 1`: four requests waiting before anything accepts, every one
 # answered on the accepting thread, by a block that appends to an
 # `Array` and closes its own listener. Then the same over TLS (`tls:
@@ -1280,15 +1282,16 @@ echo "== connections on every core: serve's default workers, and workers: 1 (ben
 # close_notify. Then copies of std/http with `serve` on the calling
 # thread whatever *workers* says, with `workers: 1` served on the pool,
 # with the connection spawned on the accepting thread, with the watcher
-# that carries the stop to a connection's worker made to do nothing, and
-# with the stop sending no close_notify, and a copy of std/tls whose
-# ticket keys are every worker's own, each caught at the line that
-# names it. And what the compiler refuses and takes: a block that
-# captures an `Array` under the default workers, a `TlsServerConfig`
-# that is not frozen, a `Router` given as the handler value, and a
-# `frozen` identity source that captures a table of identities, each
-# refused with its sentence; and the `Array`, the config and the
-# `Router` under `workers: 1`, taken.
+# that carries the stop to a connection's worker made to do nothing,
+# with the stop sending no close_notify, with an answer made at the stop
+# saying `keep-alive`, and with a body the stop cut short answered 400,
+# and a copy of std/tls whose ticket keys are every worker's own, each
+# caught at the line that names it. And what the compiler refuses and
+# takes: a block that captures an `Array` under the default workers, a
+# `TlsServerConfig` that is not frozen, a `Router` given as the handler
+# value, and a `frozen` identity source that captures a table of
+# identities, each refused with its sentence; and the `Array`, the
+# config and the `Router` under `workers: 1`, taken.
 if ! "$IYI" build -o "$WORK/parallel" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel.build" 2>&1; then
   echo "  bench/std_http_parallel.iyi did not build"
   sed -n '1,8p' "$WORK/parallel.build"
@@ -1362,6 +1365,10 @@ PY
     @socket.close' '      nil
     end
     @socket.close' "the kept-alive TLS connection, on the stop"
+  parallel_breaks "an answer made at the stop saying keep-alive" \
+    'head.close || conn.stopped?' 'head.close' "the answer being made at the stop, its Connection"
+  parallel_breaks "a body the stop cut short answered 400" \
+    'return false if conn.ended? || conn.stopped?' 'return false if conn.ended?' "a request half sent behind that answer, on the stop"
   # Each thread seals and opens under a key of its own, named as the
   # shared one: a ticket opens only on the worker that sealed it.
   parallel_breaks "workers keeping ticket keys of their own" \

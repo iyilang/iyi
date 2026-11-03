@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 25,763 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 131,595 lines, none of it written in iyi |
+| iyi's own prelude | 25,826 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 131,890 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 25,763 lines
+> "No standard library worth the name" is still true of iyi's own 25,826 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 25,763 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 25,826 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 131,595 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 25,763-line own prelude + 125,597 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 131,890 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 25,826-line own prelude + 125,597 in std |
 | Specs | 21,146 lines | 15,901 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -4749,6 +4749,88 @@ one on a thread outside the pool into the injection queue. Under
 `-Dgc_none` and `-Dgc_boehm`, where `spawn_parallel` is refused, `spawn`
 has no line pointing at the pool and every spawn stays serial; its note
 says why.
+
+**8. The audit: what the new default moves, and what it broke.**
+`iyi check --explain-spawn-std` over every program under `bench/` and
+`samples/` that spawns or serves (141 programs, one of which did not
+compile and showed the bug fixed before this was written: a `Proc(T)`
+parameter binds no `T` for a block that never returns), counted by the
+place the spawn is written:
+
+| Where | Parallel | In its unit | Differs by instantiation |
+|---|---|---|---|
+| std (autocert 5, http 4, process 2, socket 1) | 0 | 12 | 0 |
+| prelude (`testing.iyi`'s `assert_panics`) | 0 | 1 | 0 |
+| bench/ | 120 | 286 | 6 |
+| samples/ | 5 | 3 | 0 |
+
+All of std's spawns stay serial, each for a capture that is not `Share`:
+a connection's `IyiSocket`, a `ServeStop`, the autocert flight records, a
+`ProcessChild`, an `Array` of outcomes, a forwarded `Proc`. A server's
+connections, a process's pipes and autocert's renewals run as they did,
+so `bench/web_cores.py` has no spawn of std's to move. Every place counted
+parallel captures only atomics, channels of `Share` values, strings and
+integers, and reaches nothing through a call that is not `Share`.
+
+The gates run against the new default on the shared Linux machine, each
+through the machine's one heavy slot. `socket_exercise`, and the std
+siblings `process`, `sse`, `websocket`, `tls`, `json`, `log`, `router`,
+`file`, `regex`, `autocert`, `fileserver`, `cookie`, `csv` and `dir`,
+held. These did not, and they are part 5's evidence:
+
+- `runtime_exercise` step 11, "rendezvous FIFO: expected 123, got 312":
+  three spawns that send 1, 2 and 3 on one channel, counting on starting
+  in the order spawned. They capture only the channel, so each runs on its
+  own worker and the sends race. The gate holds on the old prelude.
+- `thread_exercise`, "registry: 12 fibers of 8 finished threads are still
+  registered": tasks spawned inside `IyiThread.start` blocks now leave for
+  the pool, so the fibers outlive the threads the check counts them by.
+  The gate holds on the old prelude.
+- `concurrency_exercise`'s dependency floor: a spawn there is eligible,
+  the pool starts, and `environ` (the table `IYI_WORKERS` is read from)
+  is on the link line, which that gate's floor, unlike
+  `parallel_exercise`'s, does not list.
+- `parallel_exercise`'s broken copy `closeshome` was not caught: the run
+  depends on which worker a sibling's close is made on, and a spawn that
+  was in its parent's unit now is not.
+- `std_http_exercise` did not hold.
+
+`std_signal_exercise`, `std_mutex_exercise` and `root_exercise` failed
+too, and failed the same way when run with the old prelude through
+`IYI_PATH`, so this change did not cause those failures.
+
+No std code was changed: none of std's own spawns moved, and every failure
+above is a test program's ordering assumption. Each failing site would
+either take `spawn_serial` or have its assumption corrected. That is
+still to do on `mt/spawn` before this section is BUILT.
+
+**9. What it buys.** `bench/spawn_fanout.iyi`, 31 MiB hashed by 64 plain
+spawns whose blocks capture a `String`, two integers and a `List`, best of
+five rounds, with the answer the same at every count:
+
+| Workers | Linux, 12 vCPUs, load 6 | macOS 26.6, Apple M2 Pro, 10 cores (the user's machine) |
+|---|---|---|
+| 1 | 99 ms | 158 ms |
+| 2 | 50 ms | 81 ms |
+| 4 | 25 ms | 41 ms |
+| 8 | 14 ms | 23 ms |
+| 12 (Linux), 10 (macOS) | 12 ms | 20 ms |
+
+That is 8.3× on twelve workers and 7.9× on ten, where the same source
+before ran on one thread whatever the count.
+
+**10. Open questions.**
+
+- Should `@[SafeReach]` keep making a spawn eligible (part 1)? It is
+  honoured here.
+- The bench and gate programs that assumed spawn order (part 8): mark each
+  `spawn_serial`, or fix the assumption?
+- A pool that grows to the work, as Go starts its threads, rather than
+  starting whole (part 6). This is being built on `mt/spawn` as its own
+  change.
+- The budget floor counting only threads that allocated since the last
+  collection, so that idle workers cost no heap. This goes to the
+  working-set work.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
@@ -11467,7 +11549,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 25,763-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 25,826-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

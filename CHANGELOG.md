@@ -372,6 +372,25 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
 
 ### Added
 
+- **A `--release` build optimises on every core.** It still generates one
+  LLVM module, so LLVM sees the whole program, and then cuts it into
+  partitions of about 20,000 instructions, each optimised and compiled on
+  a thread of its own (`ReleasePartition`). A partition gets its own copy
+  of the small functions its code calls and of the constants it reads, as
+  LLVM's ThinLTO imports them, done through the C API because that is all
+  Windows' `LLVM-C.dll` exports. `samples/iyi/cores.iyi` (std/http and
+  TLS), cold, one module against partitions: 22.17 s against 8.31 s on
+  macOS 26.6, Apple M2 Pro, 10 cores (the user's machine); 25.94 s against
+  11.78 s on Windows 11, 12 logical processors (the user's machine); 20.52
+  s against 6.68 s on a shared 12-vCPU Linux VM. The programs it builds
+  ran within noise of the one-module build on the M2 Pro (best of 11
+  interleaved runs: bcrypt, SHA-256, JSON, ChaCha20-Poly1305, sorting
+  strings, and `bench/runtime.py`'s four, 0.98x to 1.03x). The cut is a
+  function of the program, so the objects are the same on one thread and
+  on twelve. `IYI_RELEASE_PARTITIONS=1` keeps the one module.
+  `bench/release_cores.sh` holds the cores, the output and the objects,
+  each against a broken copy.
+
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and
   of a `@[Share]` def - `Server.serve`'s, a router's - was checked only

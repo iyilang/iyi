@@ -536,6 +536,10 @@ fi
 # children newest first and named "a task panicked: second", where III.4.3
 # says the first failing task is the one that leaves the group.
 step "a group's join re-raises the first task that panicked"
+# The two tasks spawn_serial: plain spawns of these blocks are eligible
+# (SPEC.md III.4.15) and run at once on two workers, where either may
+# panic first; macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine)
+# joined with "second" named. In their unit, "first" runs first.
 cat > two_panics.iyi <<'IYI'
 module two_panics
 
@@ -544,8 +548,8 @@ def bomb(m : String) : Int32
 end
 
 group do |g|
-  g.spawn { bomb("first") }
-  g.spawn { bomb("second") }
+  g.spawn_serial { bomb("first") }
+  g.spawn_serial { bomb("second") }
 end
 IYI
 if ! "$IYI" build two_panics.iyi -o two_panics > build-two-panics.log 2>&1; then

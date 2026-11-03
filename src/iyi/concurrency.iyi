@@ -1713,12 +1713,25 @@ class IyiScheduler
 
   # The top of the fiber stack holding `address`, 0 when no fiber's
   # does: how a stopped thread's stack is bounded when the stop landed
-  # on one of its fibers.
+  # on one of its fibers. The top itself is the fiber's. On aarch64 a
+  # fresh fiber's first resume pops the whole frame `settle_stack` laid,
+  # so the switch's `ret` and `__iyi_fiber_main`'s first instruction run
+  # with sp at the top; read as no fiber's, that sp was scanned up to the
+  # thread's own top, across the mappings between, and the collector
+  # died of SIGSEGV or SIGBUS in `scan_range`. On macOS 26.6, an M2 Pro
+  # with 10 cores, a thread collecting in a loop beside bursts of 64
+  # tasks on the main thread killed 9 runs of 23 so, each of 5 s, the
+  # main thread stopped at that instruction in every crash report, and
+  # bench/concurrency_exercise.iyi hung in 2 of 675 soak runs, the one
+  # sampled with a mark helper faulted so, then held in the fault
+  # handler (`IyiStackGuard.faulted`); with the top counted, none of 26
+  # died. The lowest address is the guard page's, never an sp, and is
+  # left to the fiber whose top it may be: the stack mapped just below.
   def self.fiber_top_holding(address : UInt64) : UInt64
     fiber = @@all_head
     while fiber.is_a?(IyiFiber)
       top = fiber.stack_top
-      return top if top != 0 && address < top && address >= top - IyiFiber::STACK_BYTES
+      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES
       fiber = fiber.next_fiber
     end
     0_u64

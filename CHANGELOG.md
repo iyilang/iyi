@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **A thread stopped as a task begins is scanned on that task's stack.**
+  A fresh fiber's first resume pops the whole frame laid for it, and on
+  aarch64 the switch's `ret` and `__iyi_fiber_main`'s first instruction
+  run with sp at the stack's top. The stop's scan read the top as no
+  fiber's, scanned from there up to the thread's own top across the
+  mappings between, and the collector died of SIGSEGV or SIGBUS. On
+  macOS 26.6, an M2 Pro with 10 cores, a thread collecting in a loop
+  beside bursts of 64 tasks killed 9 runs of 23 of 5 s so, the main
+  thread stopped at that instruction in every crash report; and
+  `bench/concurrency_exercise.iyi`, which a mark helper stops for the
+  mark beside the program, hung in 2 of 675 soak runs, the one sampled
+  with the helper faulted there (the entry below). A fiber's top is its
+  own now, and the same program ended 26 runs of 26. Linux aarch64 lays
+  the same frame.
+  `bench/thread_exercise.sh` 7f asks the scan each task's own top beside
+  a thread collecting in a loop; its failure proof puts the old bound
+  back.
+
 - **A memory fault inside a collection kills the process rather than
   hanging it.** The stack guard's handler hands a fault that is not a
   stack's edge back to the signal's default action, and built that
@@ -26029,7 +26047,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,732-line library and nothing else. Every other
+  written against iyi's own 25,745-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

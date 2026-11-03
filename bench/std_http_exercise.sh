@@ -1094,17 +1094,22 @@ echo "== a server stopped while clients hold connections (bench/std_http_stop.iy
 # here: std/http's clients keeping HTTP/1.1 and HTTP/2 over TLS, HTTP/1.1
 # and h2c in the clear, and an upgrade each way whose block reads until
 # the stop and asks `closed?` before it says goodbye, as std/websocket
-# does - no panic printed, exit 0, both upgrades told "closed"; and
+# does - no panic printed, exit 0, both upgrades told "closed"; under
+# `stream_bodies`, a block waiting on the rest of its body, answering a
+# string or a stream, its read cancelled by the stop and its answer not
+# written - "iyi: panic: socket is closed" was printed for each, the
+# server writing on the socket the stop had closed under the block; and
 # Python's ssl, holding a kept-alive connection with
 # `suppress_ragged_eofs=False` while the server stops, reading
 # close_notify rather than an end without one (SSLEOFError, which it read
 # before). Then copies of the modules without the write's check, with
-# `closed?` blind to the socket, and with a stop that sends no
-# close_notify, each caught at the line that names it. The iyi half is
-# the program run with no arguments, as CI runs every bench program: it
-# holds what each of its lines should say, under a test PKI of its own -
-# a std/tls client among its own clients, reading close_notify as Python
-# does - and names one that is not so with "FAIL <line>:".
+# `closed?` blind to the socket, with a stop that sends no close_notify,
+# and with either answer written on the closed socket, each caught at
+# the line that names it. The iyi half is the program run with no
+# arguments, as CI runs every bench program: it holds what each of its
+# lines should say, under a test PKI of its own - a std/tls client among
+# its own clients, reading close_notify as Python does - and names one
+# that is not so with "FAIL <line>:".
 STOP_EXPECTED="ALL CHECKS PASSED
 exit 0
 kept connection: HTTP/1.1 200 OK, then on the server's stop: close_notify
@@ -1237,6 +1242,20 @@ PY
     @socket.close' '      nil
     end
     @socket.close' "the waiting std/tls client, on the stop"
+  stop_breaks "a reading block's answer written on the socket the stop closed" http.iyi \
+    '        if conn.socket.closed?
+          if source = response.source
+            source.close
+          end
+          return false
+        end
+' '' "panics printed"
+  stop_breaks "a stream's write on the socket the stop closed" http.iyi \
+    '    if socket.is_a?(IyiSocket) && socket.closed?
+      @fault = Cancelled.new
+      return false
+    end
+' '' "panics printed"
 fi
 
 echo

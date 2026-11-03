@@ -21,6 +21,20 @@
   `{ |x| block.call(x).to_s }`. A spec in
   `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
 
+- **A stopping server's `stream_bodies` block that waits on its body no
+  longer panics.** The stop closes a connection waiting on its client
+  (`close_for_stop`), and a block reading its own body waits on its
+  client: its read was cancelled, the block answered, and the server
+  wrote that answer on the socket the stop had closed - "iyi: panic:
+  socket is closed", once per such connection, on a pool worker or under
+  `workers: 1` alike, in 3 of 16 stops of a 30-minute soak on 12 cores.
+  The answer, with nowhere to go, is no longer written (a stream it
+  answers with is closed), and a `Response.stream` block's write after
+  such a read is `Cancelled` rather than the panic.
+  `bench/std_http_stop.iyi` stops a server under two such blocks, one
+  answering a string and one a stream; the gate counts the panics, and a
+  copy without either guard is caught.
+
 ## 0.20.0 — 2026-11-02
 
 **std/http's `Server.serve` answers on every core, and a parallel task

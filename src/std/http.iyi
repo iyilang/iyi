@@ -1212,7 +1212,15 @@ pub class BodyWriter
   end
 
   private def send(text : String) : Bool
-    got = @socket.write(text)
+    socket = @socket
+    # A server's stop closes a connection whose `Response.stream` block
+    # waits on the request's body (`Conn#close_for_stop`); the write after
+    # it is cancelled, as that read was, not `IyiSocket#write`'s panic.
+    if socket.is_a?(IyiSocket) && socket.closed?
+      @fault = Cancelled.new
+      return false
+    end
+    got = socket.write(text)
     case got
     in Int32
       true
@@ -2032,6 +2040,17 @@ pub struct Server
         req.tls_resumed = conn.resumed?
         req.peer_certificates = peer
         response = handler.call(req)
+        # A block that read its body itself (`stream_bodies`) may have had
+        # the connection closed under that read by the stop
+        # (`close_for_stop`): its answer has nowhere to go - written, it
+        # was `IyiSocket#write`'s panic on the closed socket - and a
+        # stream it answers with is closed as a written one is.
+        if conn.socket.closed?
+          if source = response.source
+            source.close
+          end
+          return false
+        end
         # Writing the answer waits as the client reads it, a pause at a time.
         conn.no_deadline
         unless answered?(conn, response, req, head.close, compress)

@@ -1,14 +1,19 @@
-# iyi: inlay hints, off the typed graph. Two kinds, both facts the
+# iyi: inlay hints, off the typed graph. Three kinds, all facts the
 # compiler already established and the source merely omits:
 #
 #   x = parse(input)        →  x: Parser::Result = parse(input)
 #   move(3, 7)              →  move(x: 3, y: 7)
+#   g.spawn { sum(part) }   →  g.spawn parallel { sum(part) }
 #
 # A type hint lands after a bare assignment's target — an assignment
 # that spells its type already says it. A parameter hint lands before a
 # positional literal argument — a variable passed by name documents
-# itself, a bare `3` does not. Instantiations dedupe by position: a
-# generic def typed many ways is still one line of source.
+# itself, a bare `3` does not. A spawn hint lands after `spawn`, saying
+# where the compiler decided the task runs (SPEC.md III.4.14):
+# `parallel`, or `in its unit` with the capture that kept it there as
+# the hint's tooltip. Instantiations dedupe by position: a generic def
+# typed many ways is still one line of source, and a spawn one of whose
+# instantiations stays in its unit is hinted as staying.
 require "../syntax/ast"
 require "../compiler"
 require "../tools/typed_def_processor"
@@ -17,11 +22,13 @@ module Iyi::Lsp
   class InlayVisitor < Visitor
     include TypedDefProcessor
 
+    KIND_NOTE      = 0
     KIND_TYPE      = 1
     KIND_PARAMETER = 2
 
-    # line/column are iyi's 1-based units, naming the insertion point.
-    record Hint, line : Int32, column : Int32, label : String, kind : Int32
+    # line/column are iyi's 1-based units, naming the insertion point. A
+    # note has no LSP kind, and may carry a tooltip.
+    record Hint, line : Int32, column : Int32, label : String, kind : Int32, tooltip : String? = nil
 
     getter hints = [] of Hint
     @seen = Set({Int32, Int32, String}).new
@@ -40,16 +47,29 @@ module Iyi::Lsp
     # nags.
     @scope_vars = Set(String).new
 
+    # The program's cleanup, which judges each spawn (`spawn_reason_for`),
+    # and the def being walked, whose `self` a spawn's block may capture;
+    # and each spawn's verdict by where its hint goes.
+    @program : Program?
+    @in_def : Def?
+    @spawns = {} of {Int32, Int32} => String?
+
     def process(result : Compiler::Result) : Array(Hint)
+      @program = result.program
       process_result result
       @scope_vars.clear
+      @in_def = nil
       result.node.accept self
+      @spawns.each do |(line, column), reason|
+        @hints << Hint.new(line, column, reason ? "in its unit" : "parallel", KIND_NOTE, reason)
+      end
       hints.sort_by! { |hint| {hint.line, hint.column} }
       hints
     end
 
     def process_typed_def(typed_def : Def) : Nil
       @scope_vars.clear
+      @in_def = typed_def
       typed_def.accept self
     end
 
@@ -71,6 +91,7 @@ module Iyi::Lsp
 
     def visit(node : Call)
       defs = node.target_defs
+      spawn_hint(node, defs) if defs && defs.size == 1
       # Parentheses are the gate: `f(3)` earns a parameter name,
       # `a % b` and a paren-less `puts x` read as prose already —
       # an operator wearing `other:` was this rule's discovery.
@@ -87,6 +108,18 @@ module Iyi::Lsp
         end
       end
       true
+    end
+
+    # A `g.spawn`: one verdict per place, a serial one winning over a
+    # parallel one from another instantiation.
+    private def spawn_hint(node : Call, defs : Array(Def)) : Nil
+      return unless CleanupTransformer.spawn_def?(defs.first)
+      program = @program
+      location = node.name_location
+      return unless program && location && wanted?(location)
+      key = {location.line_number, location.column_number + "spawn".size}
+      return if @spawns[key]?
+      @spawns[key] = program.cleanup_transformer.spawn_reason_for(node, @in_def)
     end
 
     def visit(node)

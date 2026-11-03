@@ -73,6 +73,8 @@ class Iyi::Program
     # they reach is warned about once, with how many blocks reach it
     # (SPEC.md III.4.4).
     @cleanup_transformer.try &.report_share_reach
+    # And every spawn is classified (III.4.14): `--explain-spawn`'s notes.
+    iyi_note_spawns
 
     @progress_tracker.stage("Semantic (recursive struct check)") do
       Prof.span("recursive struct check") { RecursiveStructChecker.new(self).run }

@@ -534,6 +534,14 @@ module Iyi
     # half of that rule answers instead.
     property iyi_prelude_dir : String? = nil
 
+    # iyi: whether code the cleanup kept calls `IyiWorkers.start` - a
+    # `spawn_parallel`, or a `spawn` it found eligible (SPEC.md III.4.14) -
+    # which is what makes a program's loops check for preemption
+    # (`CodeGenVisitor#iyi_preempt_on?`). Asked of the kept code rather
+    # than of the typed defs: every program that spawns types the pool's
+    # path beside `spawn`'s, for a call the cleanup may never point at it.
+    property? iyi_pool_reached : Bool = false
+
     # iyi: the global of the pool's preemption word, `IyiWorkers::preempt`,
     # once codegen has marked a loop's back-edge for the check
     # (`CodeGenVisitor#iyi_back_edge`); nil in a program with no pool. The

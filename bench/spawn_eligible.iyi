@@ -25,6 +25,10 @@
 #             time, from inside a parallel task and from the main thread.
 #   one       on a pool of one, eligible spawns stay on the spawner's
 #             thread, one at a time, and the pool never starts.
+#   grows     run first in its process: the pool starts one worker for one
+#             eligible spawn, a few for spawns made and joined one at a
+#             time, and every worker only when that many tasks are running
+#             at one instant (`IyiWorkers.grow`).
 #
 # bench/spawn_eligible.sh runs it, and broken copies of the runtime, each
 # caught by the step that names it.
@@ -208,7 +212,47 @@ import std/int
     puts "one: on a pool of one, #{TOGETHER} eligible spawns ran on the main thread, one at a time, and no pool started"
   end
 
-  STEPS = ["together", "nested", "unit", "serial", "one"]
+  # The pool starts its workers as the work asks for them. One spawn,
+  # joined, is the shape of a small program and starts one worker. Spawns
+  # made and joined one at a time may find the worker that ran the last
+  # still on its way to idle, and start another: 2 in each of 12 runs on
+  # four workers, and 3 in one of three runs on twelve (Linux, 12 vCPUs,
+  # shared), so LIGHT_MOST is 3, short of the pool's four. Four tasks that
+  # spin until all four are running start the four.
+  LIGHT_ROUNDS = 200
+  LIGHT_MOST   =   3
+
+  def grows : Nil
+    done = Atomic(Int64).new(0_i64)
+    group do |g|
+      g.spawn do
+        done.add(1_i64)
+        0
+      end
+    end
+    first = IyiWorkers.launched
+    fail("grows: one eligible spawn started #{first} of the pool's #{IyiWorkers.count} workers") if first != 1
+    LIGHT_ROUNDS.times do
+      group do |g|
+        g.spawn do
+          done.add(1_i64)
+          0
+        end
+      end
+    end
+    light = IyiWorkers.launched
+    if light > LIGHT_MOST
+      fail("grows: #{LIGHT_ROUNDS} eligible spawns made and joined one at a time started #{light} of the pool's #{IyiWorkers.count} workers")
+    end
+    together("grows")
+    loaded = IyiWorkers.launched
+    if loaded != IyiWorkers.count
+      fail("grows: #{TOGETHER} eligible spawns running at one instant started #{loaded} of the pool's #{IyiWorkers.count} workers, with #{IyiWorkers.owes} starts owed")
+    end
+    puts "grows: one eligible spawn started 1 of #{IyiWorkers.count} workers, #{LIGHT_ROUNDS} joined one at a time #{light}, and #{TOGETHER} running at one instant all #{loaded}"
+  end
+
+  STEPS = ["together", "nested", "unit", "serial", "one", "grows"]
 
   workers = 4
   chosen = [] of String
@@ -229,6 +273,7 @@ import std/int
     when "unit"     then unit
     when "serial"   then serial
     when "one"      then one
+    when "grows"    then grows
     end
   end
   puts "spawn eligibility: every property held on #{IyiWorkers.count} workers"

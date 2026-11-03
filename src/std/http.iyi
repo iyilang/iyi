@@ -1713,7 +1713,7 @@ pub struct Server
   #
   # *workers*: the pool's size, `IyiWorkers.count` by default - `IYI_WORKERS`
   # from the environment, else the cores this process may run on. The
-  # pool is the process's one, and it does not grow or shrink once it has
+  # pool is the process's one, and its size does not change once it has
   # started, so a count other than the one it started with panics. Every
   # worker runs the block at once, so the compiler checks it where it is
   # written as it checks a parallel task's (`@[Share]`, SPEC.md III.4.4):

@@ -10,7 +10,9 @@
 #      four that append to their parent's `Array` stay in its unit, one at
 #      a time; and four `spawn_serial` tasks that capture only atomics stay
 #      in theirs. On a pool of one, eligible spawns stay on the main thread
-#      and no pool starts.
+#      and no pool starts. On a pool of four, in a process of its own, one
+#      spawn starts one worker, spawns joined one at a time at most three,
+#      and four tasks running at one instant all four.
 #   2. The explanation: `--explain-spawn` notes each spawn, naming the
 #      capture that kept one in its unit - a captured `Array`, a local
 #      assigned in the loop that spawns, a constant reached through a call
@@ -20,8 +22,9 @@
 #      none.
 #   3. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: an eligible spawn left in its unit, an ineligible
-#      one sent to the pool, `spawn_serial` sent to the pool, and a pool
-#      of one that starts for eligible spawns anyway.
+#      one sent to the pool, `spawn_serial` sent to the pool, a pool of one
+#      that starts for eligible spawns anyway, a pool that starts every
+#      worker at once, and one that never starts a second.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,7 +52,7 @@ for build in plain release; do
   if ! "$IYI" build $flag "$REPO/bench/spawn_eligible.iyi" -o "eligible-$build" > "build-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-$build.log"; exit 1
   fi
-  for run in "together nested unit serial --workers=4" "one --workers=1"; do
+  for run in "together nested unit serial --workers=4" "one --workers=1" "grows --workers=4"; do
     # shellcheck disable=SC2086 # the steps are words
     timeout -k 5 120 "./eligible-$build" $run > "ran-$build.txt" 2>&1
     code=$?
@@ -175,5 +178,13 @@ caught optoutignored 'spawn_serial tasks were running at one instant' serial --w
 step "failure proof: a pool of one that starts for eligible spawns"
 broken oneignored '/^  def self.parallel\? : Bool$/ { print; print "    return true"; next } { print }'
 caught oneignored 'one: ' one --workers=1
+
+step "failure proof: a pool that starts every worker at once"
+broken wholepool '/^      start_monitor$/ { print "      while word(pointerof(@@launched)).value.get < @@started.to_i64"; print "        word(pointerof(@@launched)).value.add(1_i64)"; print "        word(pointerof(@@spinning)).value.add(1_i64)"; print "        IyiThread.start { IyiWorkers.work }"; print "      end" } { print }'
+caught wholepool 'grows: one eligible spawn started 4 of' grows --workers=4
+
+step "failure proof: a pool that never starts a second worker"
+broken nevergrows '/^  def self.grow : Nil$/ { print; print "    return"; next } { print }'
+caught nevergrows 'grows: 4 eligible spawns running at one instant started 1 of' grows --workers=4
 
 echo "== spawn eligibility: every check held"

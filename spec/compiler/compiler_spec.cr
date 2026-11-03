@@ -265,6 +265,34 @@ describe "Compiler" do
     end
   end
 
+  # iyi: a DLL standing beside the output under the name of one the program
+  # links is replaced when it is not the DLL the link resolved. It was kept:
+  # the cache directory's LLVM-C.dll from an older build stood beside every
+  # compiler spec program on the user's Windows machine, and each died
+  # before its first line with 0xC0000139. Here a gc.dll that is not one,
+  # beside a program on Crystal's prelude, whose collector is libgc's and
+  # names gc.dll (`src/gc/boehm.cr`); kept, the program does not start.
+  it "replaces a DLL beside the output that is not the one the link resolved" do
+    {% unless flag?(:msvc) %}
+      pending! "only the msvc link puts the DLLs a program needs beside it"
+    {% end %}
+
+    with_tempdir("iyi-stale-dll") do
+      File.write "hello.cr", %(puts "hello"\n)
+      source = Iyi::Compiler::Source.new(File.expand_path("hello.cr"), File.read("hello.cr"))
+      File.write "gc.dll", "an older build's gc.dll"
+
+      result = create_spec_compiler.compile(source, File.expand_path("hello.exe"))
+
+      resolved = nil
+      result.program.each_dll_path do |path, found|
+        resolved = path if found && File.basename(path).compare("gc.dll", case_insensitive: true) == 0
+      end
+      File.read("gc.dll").should eq File.read(resolved.should_not be_nil)
+      Process.capture(File.expand_path("hello.exe")).should eq "hello\n"
+    end
+  end
+
   # The same claim at the layer a person checks it at: a plain build, no flags,
   # and no `GC_*` left to resolve. What replaces the collector is the
   # platform's own allocator, and the two platforms prove it in opposite

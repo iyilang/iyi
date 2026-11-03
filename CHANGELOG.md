@@ -21,6 +21,25 @@
   `{ |x| block.call(x).to_s }`. A spec in
   `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
 
+- **A DLL beside a Windows program is the one the program was linked
+  against.** The compiler copies each DLL a program links beside it, and
+  kept any file already there by that name (Crystal's #14315, so that a
+  DLL a running program holds did not fail the copy). So the cache
+  directory `crystal spec` and `iyi run` link into, one for the machine,
+  kept an older build's: on Windows 11 with 12 logical processors (the
+  user's machine), its LLVM-C.dll of 2026-09-17, 53,079,552 bytes, stood
+  beside every compiler spec program linked against LLVM 23.1.1's,
+  55,308,800 bytes, and each exited 0xC0000139
+  (STATUS_ENTRYPOINT_NOT_FOUND) before its first line, which `crystal
+  spec` printed as "Process terminated abnormally, the cause is unknown".
+  That was the windows-native job's "Every rule this fork adds" step
+  failing on that machine on 0.19.1 and 0.20.0 alike, which an earlier
+  soak had put down to its Crystal 1.22-dev bootstrap; CI's runners start
+  with an empty cache. A DLL there now stays only with its source's size
+  and modification time, which the copy is given, and one a running
+  program holds is moved aside. A spec in `spec/compiler/compiler_spec.cr`
+  builds beside a gc.dll that is not one.
+
 ### Known
 
 - **0.20.0's Windows light-endpoint loss is the load generator sharing

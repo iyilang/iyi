@@ -7893,7 +7893,11 @@ require "./file"
             # A thread of the program's waiting in its scheduler's poller
             # with nothing to run holds no core, and is not counted: a
             # server's pool, idle between requests, was thirteen threads
-            # on twelve cores and left its every mark one helper.
+            # on twelve cores and left its every mark one helper. On
+            # Windows 11 with 12 logical processors, iyiturkiye against
+            # postgres at twelve workers asked for 1 helper in each of 546
+            # marks and now 5.4 to 9.0 on average, its median mark 5.9 ms
+            # and now 4.5 (seven endpoints, three runs each).
             threads = IyiThread.program_threads
             waiting = IyiScheduler.waiting_threads
             threads = threads > waiting ? threads - waiting : 1_u64

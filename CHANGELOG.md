@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Changed
+
+- **On Windows a mark beside the program counts a waiting worker's core
+  free.** The mark's helpers there are held to the cores the program's
+  own threads leave, and every pool worker counted as one of those
+  threads whether it was running or waiting in its poller with nothing
+  to run: a server of twelve workers on twelve processors, idle between
+  requests, marked with one helper at every collection. A scheduler
+  thread waiting in its poller is not counted now. On Windows 11 with 12
+  logical processors (the user's machine), iyiturkiye against postgres
+  at twelve workers, seven endpoints, three interleaved runs of each:
+  the helpers a mark asked for went from 1 at every one of 546 marks to
+  5.4 to 9.0 on average across the endpoints, and the median mark from
+  5.9 ms to 4.5; the longest marks did not move (90th percentile 200 ms
+  against 167, the longest 557 against 592), nor did request p99 beyond
+  the runs' own spread. Linux and darwin never held the helpers so.
+  `bench/concurrent_mark.sh` asks a mark beside a pool of a worker per
+  core for more than one helper while every worker waits, everywhere,
+  and for one while every worker runs a task, on Windows; one broken
+  copy counts the waiting workers again and one counts every worker of
+  a started pool free, and each is caught.
+
+### Gates
+
+- **concurrent_mark.sh's wake-boost proof fires whatever the machine.**
+  The proof gives the mark's helpers back the boost a satisfied wait
+  brings and expects the wake check to catch them preempting the
+  program's thread, which they do only when no processor is idle: on
+  Windows 11 with 12 logical processors (the user's machine) the boosted
+  build lost 0 to 3 wakes of 256 in five runs, and a soak's runs at two
+  and four workers missed it in all ten tries. Each run of it is now
+  held to two processors beside a spinning process, where the boosted
+  build lost 118 to 132 wakes of 256 in four runs of four started after
+  the spinner, and the shipped build, run the same way first, 0 or 1.
+
 ### Fixed
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
@@ -26187,7 +26222,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,763-line library and nothing else. Every other
+  written against iyi's own 25,791-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

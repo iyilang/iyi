@@ -359,13 +359,10 @@
     @@installed : Bool = false
     {% if flag?(:win32) %}
       # How many threads the last stop left running with a request to
-      # park, which is how many it waits for and how many count
-      # themselves out of the park after the release.
+      # park, which is how many it waits for and how many the resume
+      # waits to see leave.
       @@deferred : Int64 = 0_i64
     {% end %}
-    # How many threads the last release let out of their park and the
-    # next stop waits to see leave (`resume_others`).
-    @@owed : Int64 = 0_i64
     # Every thread object started and not yet running, so a body's closure
     # is rooted from `start` until the thread that runs it holds it on its
     # own stack, and no longer (`run`).
@@ -918,12 +915,6 @@
       return 0_i64 if @@count == 0_i64 || (line != 0 && @@count <= 1_i64)
       started = IyiMark.now_ns
       page = control
-      # The last stop's threads out of their park before its words are
-      # cleared: one still inside reads the release word, and cleared
-      # under it, the release it was given is taken back.
-      while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64
-        yield_cpu
-      end
       word(page + IYI_TC_SUSPENDED).value.set(0_u64)
       word(page + IYI_TC_RESUMED).value.set(0_u64)
       word(page + IYI_TC_RESUME).value.set(0_u64)
@@ -965,19 +956,6 @@
       others
     end
 
-    # The release, and no wait for the released to leave their park: the
-    # next stop waits for that before it clears the words they read
-    # (`stop_others`), and until then each runs as soon as it has a core.
-    # Waited for here, the collection lasted until the last of them had a
-    # processor again. On a ten-core M2 Pro (macOS 26.6), pool workers
-    # stopped while they ran came back late at every stop, and the
-    # release waited 3.5 ms a collection for them (eight workers beside
-    # two allocating tasks, 23 collections, 81 ms of 92 ms of pauses);
-    # and on Windows 11, 12 logical processors, a thread parked inside
-    # the allocator and then held off its processor by another program
-    # kept each collection 403 to 410 ms past its stop, 25 to 28 now
-    # (bench/thread_exercise.sh, step 4d, the mark of 2,000,000 links
-    # among it).
     def self.resume_others(others : Int64) : Nil
       return if others == 0_i64
       page = control
@@ -985,11 +963,15 @@
       {% if flag?(:win32) %}
         # A thread that parked itself is not suspended, and `ResumeThread`
         # on a suspend count of zero is nothing: the flag above releases
-        # the one and this releases the other. Only the parked ones count
-        # themselves out.
+        # the one and this releases the other. The parked ones are waited
+        # for, because the next stop clears the flag they are watching.
         resume_suspended(@@line)
-        @@owed = @@deferred
+        while word(page + IYI_TC_RESUMED).value.get < @@deferred.to_u64
+          yield_cpu
+        end
       {% else %}
+        page = control
+        word(page + IYI_TC_RESUME).value.set(1_u64)
         {% if flag?(:linux) %}
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (page + IYI_TC_RESUME).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
         {% else %}
@@ -1001,7 +983,9 @@
           LibC.os_sync_wake_by_address_all(Pointer(Void).new(page + IYI_TC_RESUME), 8_u64, 0_u32)
           LibC.error_location.value = errno
         {% end %}
-        @@owed = others
+        while word(page + IYI_TC_RESUMED).value.get < others.to_u64
+          yield_cpu
+        end
       {% end %}
     end
 

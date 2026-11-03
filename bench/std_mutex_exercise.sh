@@ -268,13 +268,25 @@ prove_broken "a block that does not release" "already holds the lock" \
 # release as one, checks again at once, and spins with the lock in turn,
 # never yielding to the producer on its thread.
 prove_broken "a release not counted as a change" hangs \
-  '    @changes.add(1_u64)
+  '    @changes.add(1_u64) if counted
 ' ''
+# A waiter that counts itself as waiting only after its release, as one
+# once did: its own release reads nobody waiting and skips the count, and
+# the waiter spins as above.
+prove_broken "a waiter counted after its release" hangs \
+  '    defer release
+    answer = block.call(@value)
+    @change_waiters.add(1_u64) if answer.nil?
+' '    answer = block.call(@value)
+    release
+    @change_waiters.add(1_u64) if answer.nil?
+'
 # The refusal of a wait nothing could end, taken out: the task parks, and
 # the scheduler names the deadlock on the main thread, which the
 # exercise's `assert_panics` around that task does not catch.
 prove_broken "a wait nothing could end left to wait" "deadlock: every fiber is blocked" \
   '        if Mutex.alone?
+          @change_waiters.sub(1_u64)
           raise "Mutex#wait_for: deadlock: nothing is left to change the value - no other task on this thread, and no other thread"
         end
 ' ''
@@ -287,7 +299,7 @@ prove_broken "a release that does not wake a task parked on the lock" "deadlock:
 '
 # The same for a task parked waiting for a change.
 prove_broken "a release that does not wake a task waiting for a change" "deadlock: every fiber is blocked" \
-  '      IyiScheduler.wake_on(pointerof(@changes), 0x7FFFFFFF) if @change_waiters.get != 0_u64
+  '      IyiScheduler.wake_on(pointerof(@changes), 0x7FFFFFFF) if counted
 ' ''
 # A waiter that holds its worker until the lock is free, spinning where it
 # parked, as one asleep in the kernel holds it: the task spawned beside it

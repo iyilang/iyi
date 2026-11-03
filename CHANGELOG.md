@@ -33,6 +33,25 @@
   until it fails by name, where a run that died of a memory fault failed
   the gate on Windows.
 
+- **A `std/mutex` lock and its release are two locked instructions, from
+  seven.** The holder's task and thread were four sequentially consistent
+  stores, an `xchg` each on x86_64, and neither orders anything: one
+  tells a task whether it holds the lock already, the other is a hint
+  for spinning. They are relaxed, through `IyiAtomic` inside std/mutex,
+  and `Atomic` keeps its one ordering. Every release also counted itself
+  a change for `wait_for`, a `lock xadd`; a waiter now counts itself as
+  waiting before its own release, with the lock held, so a release that
+  reads no waiter under the lock skips the count and the wake, and the
+  window a waiter counted after its release left - a release reading 0
+  first, the waiter parking on a count it never moved - is closed (the
+  proof is beside `release`). `bench/chan_scaling.iyi`'s `mutexes`, a
+  mutex to each pair of tasks, median of 5 interleaved on Linux x86_64
+  (12 vCPU, shared): 25.8 million updates a second with one pair, 37.6
+  with the stores relaxed, 43.3 with the count skipped too; twelve pairs
+  73.6, 106.6 and 111.9; `mutex`, twelve tasks on one, 21.6, 32.0 and
+  40.1. `bench/std_mutex_exercise.sh` proves a waiter counted after its
+  release hangs the exercise.
+
 ### Fixed
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard

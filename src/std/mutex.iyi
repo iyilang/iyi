@@ -64,11 +64,13 @@ pub class Mutex(T)
   @word : Atomic(UInt64)
   # The task holding it and the thread it took it on, by object id; 0
   # when it is free. The thread is a hint for spinning, and may be old:
-  # a parallel task moves between workers (SPEC.md III.4.13).
+  # a parallel task moves between workers (SPEC.md III.4.13). Neither
+  # orders anything, so both are written and read relaxed (`record`).
   @holder : Atomic(UInt64)
   @holder_thread : Atomic(UInt64)
-  # How many times the lock has been released, which `wait_for` watches
-  # for a change, and how many tasks are parked watching it.
+  # How many times the lock has been released with a task waiting for a
+  # change, which `wait_for` watches, and how many tasks are waiting for
+  # one, each counted in with the lock held (`held`).
   @changes : Atomic(UInt64)
   @change_waiters : Atomic(UInt64)
 
@@ -147,7 +149,8 @@ pub class Mutex(T)
         return refused
       end
       # Read with the lock held, so the only release before the wait below
-      # is this task's own: one more than this is another task's.
+      # is this task's own, which counts since this task is counted: one
+      # more than this is another task's.
       mine = @changes.get + 1_u64
       answer = held(block)
       return answer unless answer.nil?
@@ -156,28 +159,37 @@ pub class Mutex(T)
     end
   end
 
+  # A block that answers nil counts this task as waiting for a change
+  # before the release, with the lock still held, which is what lets a
+  # release with nobody counted skip the count (`release`).
   private def held(block : T -> R?) : R? forall R
     defer release
-    block.call(@value)
+    answer = block.call(@value)
+    @change_waiters.add(1_u64) if answer.nil?
+    answer
   end
 
   # Parks until the count of releases is past *mine*, the one this task's
-  # own release made. The waiter counts itself before `park_on` looks at
-  # the count again, under the scheduler's lock: a release that read no
-  # waiter had moved the count first, and the look sees it.
+  # own release made, and counts itself out of the waiters once it stops.
+  # `park_on` looks at the count again under its list's lock, and a
+  # release that moves it wakes the list after, so no move is missed.
   private def await_change(mine : UInt64) : Nil | Cancelled
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       while @changes.get == mine
         if Mutex.alone?
+          @change_waiters.sub(1_u64)
           raise "Mutex#wait_for: deadlock: nothing is left to change the value - no other task on this thread, and no other thread"
         end
-        @change_waiters.add(1_u64)
         waited = IyiScheduler.park_on(pointerof(@changes), mine)
-        @change_waiters.sub(1_u64)
-        return waited if waited.is_a?(Cancelled)
+        if waited.is_a?(Cancelled)
+          @change_waiters.sub(1_u64)
+          return waited
+        end
       end
+      @change_waiters.sub(1_u64)
       nil
     {% else %}
+      @change_waiters.sub(1_u64)
       raise "Mutex#wait_for: deadlock: this program's one thread waits, and nothing else can change the value"
     {% end %}
   end
@@ -191,12 +203,12 @@ pub class Mutex(T)
   private def acquire : Cancelled?
     me = Mutex.task_id
     return nil if take(me)
-    if @holder.get == me
+    if Mutex.relaxed_get(pointerof(@holder)) == me
       raise "Mutex: this task already holds the lock, and a second lock would wait for itself"
     end
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       turns = 0
-      while turns < SPINS && Mutex.holder_may_run?(@holder_thread.get)
+      while turns < SPINS && Mutex.holder_may_run?(Mutex.relaxed_get(pointerof(@holder_thread)))
         return nil if take(me)
         IyiThread.spin_pause
         turns = turns + 1
@@ -234,20 +246,51 @@ pub class Mutex(T)
     true
   end
 
+  # Relaxed stores, as the reads are: neither field orders anything.
+  # `@holder` answers whether the asking task holds the lock, and a task
+  # reads its own last write to the word or a later one - its 0 from its
+  # release, or another holder's id - so it reads its own id only while
+  # it holds the lock; a parallel task that moved worker meanwhile was
+  # handed over through the scheduler's queues, which order it.
+  # `@holder_thread` is a hint, right or wrong either way. Sequentially
+  # consistent, each was an `xchg` on x86_64, four of seven locked
+  # instructions in a lock and its release; relaxed, with the count below
+  # skipped, two are left, and bench/chan_scaling.iyi's `mutexes` on Linux
+  # x86_64 (12 vCPU, shared), median of 5 interleaved, went from 25.8 to
+  # 37.6 million updates a second with one pair, and 43.3 with the skip.
   private def record(me : UInt64) : Nil
-    @holder.set(me)
-    @holder_thread.set(Mutex.thread_id)
+    Mutex.relaxed_set(pointerof(@holder), me)
+    Mutex.relaxed_set(pointerof(@holder_thread), Mutex.thread_id)
+  end
+
+  protected def self.relaxed_set(word : Pointer(Atomic(UInt64)), value : UInt64) : Nil
+    IyiAtomic.store(word.as(Pointer(UInt64)), value, :monotonic, false)
+  end
+
+  protected def self.relaxed_get(word : Pointer(Atomic(UInt64))) : UInt64
+    IyiAtomic.load(word.as(Pointer(UInt64)), :monotonic, false)
   end
 
   private def release : Nil
-    @holder.set(0_u64)
-    @holder_thread.set(0_u64)
+    Mutex.relaxed_set(pointerof(@holder), 0_u64)
+    Mutex.relaxed_set(pointerof(@holder_thread), 0_u64)
     # A change for `wait_for`, counted before the lock is free, so a waiter
-    # that takes the lock next sees it.
-    @changes.add(1_u64)
+    # that takes the lock next sees it - and counted only when a task is
+    # waiting for one. A waiter counts itself before its own release, the
+    # lock held (`held`), and counts itself out only once it stops
+    # waiting, to take the lock and look again. So a task that looked
+    # before this holder took the lock and waits for a change was counted
+    # before that look's release, which came before this holder's take:
+    # the read here, under the lock, sees its count, relaxed or not. Read
+    # as 0, nobody is parked on `@changes` or about to park, and the add
+    # and the wake are both skipped. A waiter that counted itself after
+    # its release, as one did, left a window: a release read 0 before the
+    # count, and the waiter parked on a count that release never moved.
+    counted = Mutex.relaxed_get(pointerof(@change_waiters)) != 0_u64
+    @changes.add(1_u64) if counted
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       IyiScheduler.wake_on(pointerof(@word), 1) if @word.swap(FREE) == CONTENDED
-      IyiScheduler.wake_on(pointerof(@changes), 0x7FFFFFFF) if @change_waiters.get != 0_u64
+      IyiScheduler.wake_on(pointerof(@changes), 0x7FFFFFFF) if counted
     {% else %}
       @word.set(FREE)
     {% end %}

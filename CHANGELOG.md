@@ -54,6 +54,45 @@
   `{ |x| block.call(x).to_s }`. A spec in
   `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
 
+- **A DLL beside a Windows program is the one the program was linked
+  against.** The compiler copies each DLL a program links beside it, and
+  kept any file already there by that name (Crystal's #14315, so that a
+  DLL a running program holds did not fail the copy). So the cache
+  directory `crystal spec` and `iyi run` link into, one for the machine,
+  kept an older build's: on Windows 11 with 12 logical processors (the
+  user's machine), its LLVM-C.dll of 2026-09-17, 53,079,552 bytes, stood
+  beside every compiler spec program linked against LLVM 23.1.1's,
+  55,308,800 bytes, and each exited 0xC0000139
+  (STATUS_ENTRYPOINT_NOT_FOUND) before its first line, which `crystal
+  spec` printed as "Process terminated abnormally, the cause is unknown".
+  That was the windows-native job's "Every rule this fork adds" step
+  failing on that machine on 0.19.1 and 0.20.0 alike, which an earlier
+  soak had put down to its Crystal 1.22-dev bootstrap; CI's runners start
+  with an empty cache. A DLL there now stays only with its source's size
+  and modification time, which the copy is given, and one a running
+  program holds is moved aside. A spec in `spec/compiler/compiler_spec.cr`
+  builds beside a gc.dll that is not one.
+
+- **A Windows program built with `-Dgc_none` or `-Dgc_boehm` that reads
+  standard input builds.** Standard input's reader thread took its page
+  from `__iyi_mmap`, which only iyi's own collector defines, and the
+  build stopped at "undefined method '__iyi_mmap' for
+  IyiStdinReader.class". In those builds the page is `VirtualAlloc`'s.
+  `bench/windows_exercise.sh` cross-compiles such a program under each
+  flag, reads a piped line through it on Windows, and refuses a copy
+  whose reader asks `__iyi_mmap` again.
+
+- **A Windows program built with `-Dgc_boehm` has its gc.dll beside it.**
+  The prelude's libgc binding named the library but not the DLL its link
+  imports, so the compiler put none beside the program, which found
+  gc.dll only on PATH. On Windows 11 with 12 logical processors (the
+  user's machine), with the Crystal installation taken off PATH, it exited
+  0xC0000135 (STATUS_DLL_NOT_FOUND) before its first line. The binding
+  names gc.dll on Windows as Crystal's `gc/boehm.cr` does.
+  `bench/std_weak_ref_exercise.sh` runs its `-Dgc_boehm` program there
+  with only the system directory on PATH, and refuses a copy of the
+  prelude that does not name the DLL.
+
 ### Known
 
 - **0.20.0's Windows light-endpoint loss is the load generator sharing
@@ -26112,6 +26151,7 @@ the same flags.
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
   written against iyi's own 25,745-line library and nothing else. Every other
+  written against iyi's own 25,743-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

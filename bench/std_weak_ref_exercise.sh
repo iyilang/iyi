@@ -199,6 +199,37 @@ else
   else
     echo "  -Dgc_boehm: 500 held targets answered, $cleared_count of 500 cleared through libgc's links"
   fi
+  # Windows: the gc.dll the program imports is put beside it, so it starts
+  # with only the system's directory on PATH. It was not: the prelude never
+  # named the DLL, the program found it only on PATH, where a Crystal
+  # installation put it, and without one exited 0xC0000135 (Windows 11, 12
+  # logical processors, the user's machine). A copy of the prelude that does
+  # not name it is refused the same way.
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      system_path="$(cygpath -u "${SYSTEMROOT:-C:\\Windows}")/System32"
+      alone="$(PATH="$system_path" "$WORK/boehm" 2>&1)"
+      if [ ! -f "$WORK/gc.dll" ]; then
+        fail "-Dgc_boehm: no gc.dll beside the program, which imports it"
+      elif [ "${alone#held 500 cleared }" = "$alone" ]; then
+        fail "-Dgc_boehm: with only $system_path on PATH the program answered '$(echo "$alone" | head -1)'"
+      else
+        echo "  -Dgc_boehm: gc.dll put beside the program, which starts with only $system_path on PATH"
+      fi
+      mkdir -p "$WORK/nodll/iyi" "$WORK/nodll/out"
+      cp -R "$REPO/src/iyi/." "$WORK/nodll/iyi/"
+      if ! awk '/^    @\[Link\(dll: "gc.dll"\)\]$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+           "$REPO/src/iyi/prelude.iyi" > "$WORK/nodll/iyi/prelude.iyi"; then
+        fail "-Dgc_boehm: the prelude no longer names gc.dll where this proof takes it out"
+      elif ! IYI_PATH="$WORK/nodll${PSEP}$REPO/src" "$IYI" build -Dgc_boehm -o "$WORK/nodll/out/boehm" "$WORK/collectors.iyi" > "$WORK/nodll.build.log" 2>&1; then
+        tail -8 "$WORK/nodll.build.log"
+        fail "-Dgc_boehm: the copy that does not name gc.dll did not build"
+      elif [ -f "$WORK/nodll/out/gc.dll" ] || PATH="$system_path" "$WORK/nodll/out/boehm" > /dev/null 2>&1; then
+        fail "-Dgc_boehm: a prelude that does not name gc.dll still left the program able to start alone"
+      else
+        echo "  -Dgc_boehm: a prelude that does not name gc.dll leaves none beside the program, which does not start alone"
+      fi ;;
+  esac
 fi
 # Windows' LLVM carries x86 and AArch64 only (bench/verbs_exercise.sh holds
 # that refusal); Linux's and darwin's carry WebAssembly, so there a failed

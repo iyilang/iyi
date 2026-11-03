@@ -712,6 +712,50 @@ EOF
     ;;
 esac
 
+# 2b. Standard input in a build with no collector of iyi's own, `-Dgc_none`
+# or `-Dgc_boehm`. Windows reads a pipe or a console on a thread of its own
+# (`IyiStdinReader`), whose page came from the owned collector's
+# `__iyi_mmap`, so on 0.20.0 such a program did not build: "undefined method
+# '__iyi_mmap' for IyiStdinReader.class". Cross-compiled, so every host
+# holds it, and run with a line piped in where the host is Windows; a copy
+# whose reader asks `__iyi_mmap` again is refused the same way.
+echo
+echo "== Standard input with no collector of iyi's own =="
+printf 'module stdin_line\n\nline = STDIN.gets(chomp: true)\nputs "read #{line}"\n' > "$WORK/stdin_line.iyi"
+for gc in gc_none gc_boehm; do
+  if "$IYI" build "-D$gc" --cross-compile --target x86_64-windows-msvc "$WORK/stdin_line.iyi" \
+       -o "$WORK/stdin-$gc.obj" > "$WORK/stdin-$gc.log" 2>&1; then
+    echo "  -D$gc: a program reading standard input cross-compiles"
+  else
+    echo "  -D$gc: a program reading standard input did not cross-compile:"
+    grep -m1 'Error' "$WORK/stdin-$gc.log" || tail -3 "$WORK/stdin-$gc.log"
+    status=1
+  fi
+done
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    if ! "$IYI" build -Dgc_none "$WORK/stdin_line.iyi" -o "$WORK/stdin-none.exe" > "$WORK/stdin-none.log" 2>&1; then
+      echo "  -Dgc_none: the program did not build:"; tail -3 "$WORK/stdin-none.log"; status=1
+    elif [ "$(printf 'a line\n' | "$WORK/stdin-none.exe" 2>&1)" = "read a line" ]; then
+      echo "  -Dgc_none: a line piped in is read through the reader thread"
+    else
+      echo "  -Dgc_none: a line piped in was not read: $(printf 'a line\n' | "$WORK/stdin-none.exe" 2>&1 | head -3)"; status=1
+    fi ;;
+esac
+mkdir -p "$WORK/stdinmmap/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/stdinmmap/iyi/"
+if ! awk '/^          page = LibC\.VirtualAlloc\(nil, PAGE, 0x3000_i32, 4_i32\)\.address$/ { print "          page = __iyi_mmap(PAGE).address"; found = 1; next }
+     { print } END { if (!found) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > "$WORK/stdinmmap/iyi/concurrency.iyi"; then
+  echo "  the reader's page this proof puts back is not in concurrency.iyi any more"; status=1
+elif IYI_PATH="$WORK/stdinmmap${PSEP}$REPO/src" "$IYI" build -Dgc_none --cross-compile --target x86_64-windows-msvc \
+       "$WORK/stdin_line.iyi" -o "$WORK/stdinmmap.obj" > "$WORK/stdinmmap.log" 2>&1; then
+  echo "  a reader whose page is __iyi_mmap's still cross-compiled, so the check proves nothing"; status=1
+elif grep -q "undefined method '__iyi_mmap' for IyiStdinReader.class" "$WORK/stdinmmap.log"; then
+  echo "  a reader whose page is __iyi_mmap's is refused: \"undefined method '__iyi_mmap' for IyiStdinReader.class\""
+else
+  echo "  a reader whose page is __iyi_mmap's failed some other way:"; grep -m1 'Error' "$WORK/stdinmmap.log" || tail -3 "$WORK/stdinmmap.log"; status=1
+fi
+
 # 3. Proving Checks Can Fail (Patched copy trick)
 echo
 echo "== Proving Checks Can Fail =="

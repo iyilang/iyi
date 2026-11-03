@@ -3389,7 +3389,11 @@ module Iyi
       program.each_dll_path do |path, found|
         if found
           dest = File.join(output_directory, File.basename(path))
-          File.copy(path, dest) unless File.exists?(dest)
+          begin
+            place_dll(path, dest)
+          rescue ex : File::Error
+            stderr << "Warning: " << dest << " is not the DLL the program was linked against (" << path << ") and could not be replaced: " << ex.message << '\n'
+          end
         else
           not_found ||= [] of String
           not_found << path
@@ -3400,6 +3404,43 @@ module Iyi
         stderr << "Warning: The following DLLs are required at run time, but Crystal is unable to locate them in IYI_LIBRARY_PATH, the compiler's directory, or PATH: "
         not_found.sort!.join(stderr, ", ")
       end
+    end
+
+    # iyi: a DLL already beside the program is kept only when it is the one
+    # the link resolved. Crystal's #14315 kept whatever stood there by that
+    # name, so that a DLL a running program holds did not fail the write,
+    # and so it kept an older build's DLL too. `crystal spec` and `iyi run`
+    # link into the cache directory, and `iyi test` into %TEMP%, one each
+    # for the machine: on Windows 11, 12 logical processors (the user's
+    # machine) the cache's LLVM-C.dll, 53,079,552 bytes and copied there on
+    # 2026-09-17, stood beside the compiler spec program linked against
+    # .build's, 55,308,800 bytes (LLVM 23.1.1), which then died before its
+    # first line with 0xC0000139, STATUS_ENTRYPOINT_NOT_FOUND - "Process
+    # terminated abnormally, the cause is unknown" from `crystal spec` - and
+    # passed with .build's DLL beside it. The copy carries its source's
+    # modification time, so the same size and time is the same DLL, at two
+    # stats a build. A loaded DLL refuses a delete but not a rename, so one
+    # a running program holds is moved aside, and the asides a replacement
+    # left before go once nothing holds them.
+    private def place_dll(source : String, dest : String) : Nil
+      info = File.info(source)
+      if existing = File.info?(dest)
+        return if existing.size == info.size && existing.modification_time == info.modification_time
+
+        directory = File.dirname(dest)
+        aside = "#{File.basename(dest)}.old-"
+        Dir.each_child(directory) do |name|
+          next unless name.starts_with?(aside)
+          File.delete?(File.join(directory, name)) rescue nil
+        end
+        begin
+          File.delete(dest)
+        rescue File::Error
+          File.rename(dest, "#{dest}.old-#{Process.pid}")
+        end
+      end
+      File.copy(source, dest)
+      File.utime(info.modification_time, info.modification_time, dest)
     end
 
     private def cross_compile(program, units, output_filename)

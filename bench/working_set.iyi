@@ -6,9 +6,10 @@
 # request, their labels and tags, keeps one in sixty-four in a ring of
 # 4,096 and reads every answer back - on twelve parallel tasks, each a
 # worker of a pool of twelve. A collection's fixed cost grows with the
-# threads, so the budget is floored at 4 MiB a registered thread
+# threads, so the budget is floored at 4 MiB a thread that allocates
 # (`IyiMark.next_budget`), and twelve workers' live set of a few
-# megabytes is far under it: the budget is the floor. What the program
+# megabytes is far under it: the budget is the floor, 48 MiB for the
+# twelve. What the program
 # may allocate while a collection is under way is the collection's
 # ceiling (`IyiMark.hold`), and what lies resident at the peak is the
 # epochs' allocation in chunks, an epoch's garbage being reused while the
@@ -169,7 +170,10 @@ module bench/working_set
   fail("#{bad} requests or kept records read back wrong") unless bad == 0_i64
   peak = peak_bytes
   fail("working set: the peak resident set could not be read") if peak == 0_u64
-  budget = IyiMark.budget
+  # The floor the workers set, each allocating (`IyiMark.next_budget`):
+  # the budget a collection leaves at the end of the run is the tail's,
+  # when the workers that finished first allocate no more.
+  budget = IyiMark::MIN_BUDGET * workers.to_u64
   mib = 1048576_u64
   ran = IyiMark.collections - collections
   if peak > budget * 4_u64

@@ -241,7 +241,12 @@ prove_fails "an ended thread's slice uncounted" noretire "threads:" \
 # The floor back at MIN_BUDGET whatever the threads: four threads
 # registered, and the budget a collection leaves is a single thread's.
 prove_fails "floor blind to the threads" nofloor "floor:" \
-  '{ sub(/floor = MIN_BUDGET \* IyiThread\.program_threads/, "floor = MIN_BUDGET"); print }'
+  '{ sub(/floor = MIN_BUDGET \* allocating_threads/, "floor = MIN_BUDGET"); print }'
+
+# The floor counting every registered thread again, idle or not: the four
+# threads stop allocating, and the next budget is still five threads'.
+prove_fails "floor counts idle threads" idlefloor "floor:" \
+  '{ sub(/floor = MIN_BUDGET \* allocating_threads/, "floor = MIN_BUDGET * IyiThread.program_threads"); print }'
 
 # The debt's assist removed: a slice that finds a collection triggered
 # runs on as it did, and four threads churning together with no helper
@@ -255,7 +260,8 @@ prove_fails "debt never assisted" noassist "debt:" \
 # runs it, and given three runs, since the peak is the largest epoch's
 # and an epoch is as large as its collection is slow - on Windows 11, 12
 # logical processors (the user's machine), the runtime without the
-# ceiling peaked at 231 to 248 MiB in 5 runs against the bound's 208.
+# ceiling peaked at 231 to 248 MiB in 5 runs on a 52 MiB budget, past
+# four of them; the bound is four of the twelve workers' 48 MiB floor.
 mkdir -p "$WORK/noceiling/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/noceiling/iyi/"
 if ! awk '{ if ($0 ~ /^ *hold if total >= ceiling$/) { print "# removed"; removed++; next } print } END { if (removed != 2) exit 3 }' \

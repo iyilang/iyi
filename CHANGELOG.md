@@ -124,7 +124,19 @@
   against 1.79M, peaking at 121 to 124 MB against 267 to 355.
   `bench/collect_trigger.sh` runs `bench/working_set.iyi`, which fails
   past four budgets, and a copy without the ceiling it catches (231 to
-  248 MiB on the Windows machine against the bound's 208).
+  248 MiB on the Windows machine, past four budgets of 52 MiB).
+
+- **Idle threads no longer raise the collection budget's floor.** The
+  floor was 4 MiB for every registered thread, so a pool of twelve with
+  one parallel task and the main thread churning collected on a 52 MB
+  budget and peaked at 95 MB resident. It counts the threads that filled
+  an allocation slice since the last collection now: the same program
+  runs on 8 MB and peaks at 18 MB, in 0.15 s against 0.17 (a shared
+  12-vCPU Linux machine, 3 runs each). A server under load has every
+  worker allocating and keeps the floor #145 measured.
+  `bench/collect_trigger.sh` asks for both: four threads allocating keep
+  four threads' floor, and the same four idle add nothing; a copy that
+  counts every registered thread fails the second.
 
 ### Known
 
@@ -26209,7 +26221,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,979-line library and nothing else. Every other
+  written against iyi's own 26,015-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

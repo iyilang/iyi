@@ -2105,6 +2105,9 @@ require "./file"
       CACHE_SLICE   = 1288_u64
       CACHE_INSIDE  = 1296_u64
       CACHE_REQUEST = 1304_u64
+      # The collection this cache last filled a slice in (`IyiMark.round`):
+      # a thread counts once a collection towards the budget's floor.
+      CACHE_ROUND   = 1312_u64
       SLICE         = 65536_u64
       CENTRAL_ALLOCATED = 1280_u64
 
@@ -2510,6 +2513,7 @@ require "./file"
       # allocation carried in its body.
       @[NoInline]
       def self.slice_full(slice : UInt64) : Nil
+        IyiMark.count_allocating
         if LibIyiGCTable.__iyi_marking != 0_u8
           IyiMark.assist
           IyiMark.marking_slice(slice)
@@ -7456,8 +7460,9 @@ require "./file"
       end
 
       # The survivors grown by the percentage, floored at MIN_BUDGET for
-      # every thread the program registered, so a small program pays
-      # nothing and a collection's fixed price is bought with allocation.
+      # every thread that filled a slice since the last collection, so a
+      # small program pays nothing and a collection's fixed price is bought
+      # with allocation.
       # That price grows with the threads, not with the live set: each
       # thread's cache has a fill arena of its own in every class it
       # allocates in, a collection sweeps every arena before it marks
@@ -7469,13 +7474,44 @@ require "./file"
       # second, and
       # app CPU per request 4.57 ms at the geometric mean against 5.20
       # (Go's 4.59), 596.0 requests a second against 571.3.
+      # Counted by every thread registered, idle workers raised the floor
+      # too: a pool of twelve with one parallel task and the main thread
+      # churning ran on a 52 MB budget and peaked at 95 MB resident where
+      # counting the two allocating threads gives 8 MB and 18 MB, in 0.15
+      # s against 0.17 (3 runs each, a shared 12-vCPU Linux machine). A
+      # server under load has every worker allocating, and keeps its
+      # floor.
       def self.next_budget(survived : UInt64) : UInt64
         grown = survived.unsafe_div(100_u64) * @@growth
         floor = MIN_BUDGET
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-          floor = MIN_BUDGET * IyiThread.program_threads
+          floor = MIN_BUDGET * allocating_threads
         {% end %}
         grown < floor ? floor : grown
+      end
+
+      # Threads that filled a slice since the last collection, one at the
+      # least, counted for the next budget's floor and started again: a
+      # registered thread that does not allocate adds nothing to the
+      # sweep's arenas, and its stop is the pause's own. In the pause.
+      @@allocating : UInt64 = 0_u64
+      @@round : UInt64 = 1_u64
+
+      def self.allocating_threads : UInt64
+        counted = Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.get
+        Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.set(0_u64)
+        @@round = @@round + 1_u64
+        counted > 1_u64 ? counted : 1_u64
+      end
+
+      # A slice filled: its thread counted once for this collection. Inside
+      # the allocator's bracket, so no pause turns the round in between.
+      def self.count_allocating : Nil
+        page = IyiHeap.cache_page
+        round = @@round
+        return if IyiHeap.read64(page + IyiHeap::CACHE_ROUND) == round
+        IyiHeap.write64(page + IyiHeap::CACHE_ROUND, round)
+        Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.add(1_u64)
       end
 
       def self.auto=(value : Bool) : Nil

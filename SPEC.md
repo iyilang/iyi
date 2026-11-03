@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 25,763 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 26,075 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 131,595 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 25,763 lines
+> "No standard library worth the name" is still true of iyi's own 26,075 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 25,763 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 26,075 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1029,7 +1029,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 131,595 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 25,763-line own prelude + 125,597 in std |
+| Library | 8,161 lines (3,551 of it core) | 26,075-line own prelude + 125,597 in std |
 | Specs | 21,146 lines | 15,901 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3940,15 +3940,33 @@ delivered to the task's own thread, which takes it out of its own sleep
 heap or poller; nothing else touches another thread's private lists, save
 on Windows, where a thread that takes a completion takes its fiber off the
 io list and sleep heap of the thread it parked on, under that thread's
-lists lock (part 5). Channels, groups, the joiner chains, the inboxes and
-the pool's queues are behind **one runtime-wide scheduler lock**, taken
-only once a second scheduler thread exists — a program with one pays a
-load and a branch. One lock rather than one per channel because
-`select` parks on several channels and a cancel walks groups whose tasks
-are on several threads: one lock has no order to get wrong, and the work it
-serialises is a few pointer moves. Its price is contention in a program
-that sends on channels from many cores at once; that is measured, not
-assumed away.
+lists lock (part 5). Groups, the joiner chains, the inboxes and the
+pool's queues are behind **one runtime-wide scheduler lock**, taken only
+once a second scheduler thread exists — a program with one pays a load
+and a branch. Channels were behind it too, and are not now: each channel
+has a lock of its own, and so does each of the 64 lists `park_on` waits
+in (std/mutex, a thread's join). One lock had no order to get wrong, and
+its price was measured: `bench/chan_scaling.iyi`'s twelve pairs of
+tasks on twelve workers, each pair ping-ponging on two channels of its
+own, made 1.49 million messages a second where one pair on one worker
+made 12.7 million, and 127 of the 144 task stacks gdb sampled were
+spinning or yielding in that lock (Linux x86_64, 12 vCPU, shared, load
+0.9). With a lock each the twelve pairs made 57.3 million (load 9.1);
+best of three interleaved, twelve pairs went from 1.13 to 38.2 million on
+Windows 11, 12 logical processors (the user's machine), where Go's twin
+of the shape made 24.5 million, and from 0.85 to 27.5 million on macOS
+26.6, an Apple M2 Pro with 10 cores (the user's machine). A
+`select` takes its channels' locks in the order of their addresses; a
+fiber in several queues at once — a select's arms, a park a cancel or a
+deadline also reaches — is woken by the one waker whose exchange takes
+its park's nonce (`IyiFiber#claim`), and a park looks at its cancel flag
+again once its nonce is set, so a cancel that came between its first
+look and the park is not lost. The fiber an operation wakes is readied
+after its channel's lock is let go. What a channel still serialises is
+its own traffic: into one channel of 128, twelve producers made 14.4
+million values a second on that Windows machine (Go 12.4 million), eight
+made 8.1 million (Go 12.7 million) and one 71.4 million (Go 37.8
+million); on the M2, twelve made 2.1 million against one's 63.4 million.
 
 **7. The collector stops and scans a worker as any thread.** A worker is an
 `IyiThread`: a registered line, stopped by the stop signal (a suspend on
@@ -11318,7 +11336,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 25,763-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 26,075-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

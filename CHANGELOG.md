@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Changed
+
+- **Each channel has a lock of its own, and so does each list a
+  `std/mutex` waiter parks in.** Every channel was behind the runtime's
+  one scheduler lock, and tasks talking on channels of their own on
+  different cores waited for each other there: `bench/chan_scaling.iyi`'s
+  twelve pairs of tasks, each ping-ponging on two channels of its own,
+  made 1.49 million messages a second on twelve workers, against 12.7
+  million for one pair on one worker, with 127 of 144 sampled task
+  stacks in that lock; they make 57.3 million now (Linux x86_64, 12
+  vCPU, shared). On Windows 11, 12 logical processors (the user's
+  machine), they went from 1.13 to 38.2 million (Go's twin,
+  `bench/chan_scaling/main.go`: 24.5 million), and on macOS 26.6, an
+  M2 Pro with 10 cores (the user's machine), from 0.85 to 27.5 million;
+  twelve producers into one channel went from 1.93 to 14.4 million values
+  a second on the Windows machine (Go 12.4 million). A woken fiber is
+  readied once the channel's lock is let go. `web_cores`, whose requests
+  take no channel operation, held: best of four interleaved at twelve
+  workers on the Windows machine, `check_version` 103,770 req/s before
+  and 104,787 after, `order` 93,478 and 91,607; best of three at ten on
+  the M2, 118,593 and 118,855, 114,853 and 115,602. A `select` takes its
+  channels' locks in address order, and a fiber parked in several queues
+  is woken once, by whichever waker
+  claims its park. `bench/parallel_exercise.sh`'s new `wakes` step holds
+  selects over two channels and a deadline to each value once, cancels
+  landing as tasks park to ending them, and turns handed through
+  `park_on` to every one taken, with a broken copy caught for each; its
+  proof that `take_now` and `put_now` need their lock now runs the copy
+  until it fails by name, where a run that died of a memory fault failed
+  the gate on Windows.
+
 ### Fixed
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
@@ -26187,7 +26218,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,763-line library and nothing else. Every other
+  written against iyi's own 26,075-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

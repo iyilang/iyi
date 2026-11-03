@@ -171,6 +171,12 @@ lib LibLLVM
   fun global_set_metadata = LLVMGlobalSetMetadata(global_var : ValueRef, kind : UInt, md : MetadataRef)
 
   fun delete_function = LLVMDeleteFunction(fn : ValueRef)
+  fun get_first_global = LLVMGetFirstGlobal(m : ModuleRef) : ValueRef
+  fun get_next_global = LLVMGetNextGlobal(global_var : ValueRef) : ValueRef
+  fun delete_global = LLVMDeleteGlobal(global_var : ValueRef)
+  fun is_declaration = LLVMIsDeclaration(global : ValueRef) : Bool
+  fun get_called_value = LLVMGetCalledValue(instr : ValueRef) : ValueRef
+  fun set_module_inline_asm2 = LLVMSetModuleInlineAsm2(m : ModuleRef, asm : Char*, len : SizeT)
   fun set_personality_fn = LLVMSetPersonalityFn(fn : ValueRef, personality_fn : ValueRef)
   fun get_function_call_convention = LLVMGetFunctionCallConv(fn : ValueRef) : LLVM::CallConvention
   fun set_function_call_convention = LLVMSetFunctionCallConv(fn : ValueRef, cc : LLVM::CallConvention)
@@ -355,6 +361,7 @@ lib LibLLVM
   fun build_atomic_cmp_xchg = LLVMBuildAtomicCmpXchg(b : BuilderRef, ptr : ValueRef, cmp : ValueRef, new : ValueRef, success_ordering : LLVM::AtomicOrdering, failure_ordering : LLVM::AtomicOrdering, single_thread : Bool) : ValueRef
 
   fun create_memory_buffer_with_contents_of_file = LLVMCreateMemoryBufferWithContentsOfFile(path : Char*, out_mem_buf : MemoryBufferRef*, out_message : Char**) : Bool
+  fun create_memory_buffer_with_memory_range = LLVMCreateMemoryBufferWithMemoryRange(input_data : Char*, input_data_length : SizeT, buffer_name : Char*, requires_null_terminator : Bool) : MemoryBufferRef
   fun get_buffer_start = LLVMGetBufferStart(mem_buf : MemoryBufferRef) : Char*
   fun get_buffer_size = LLVMGetBufferSize(mem_buf : MemoryBufferRef) : SizeT
   fun dispose_memory_buffer = LLVMDisposeMemoryBuffer(mem_buf : MemoryBufferRef)

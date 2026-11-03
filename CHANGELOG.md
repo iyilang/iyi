@@ -132,8 +132,31 @@
   budget and peaked at 95 MB resident. It counts the threads that filled
   an allocation slice since the last collection now: the same program
   runs on 8 MB and peaks at 18 MB, in 0.15 s against 0.17 (a shared
-  12-vCPU Linux machine, 3 runs each). A server under load has every
-  worker allocating and keeps the floor #145 measured.
+  12-vCPU Linux machine, 3 runs each).
+
+  Issue #145's app (iyiturkiye, twelve workers, 11 GET endpoints, oha
+  with 32 connections) counted 7 to 13 threads an epoch under load, so
+  its budget read 28 to 52 MB against master's 52. With the ceiling
+  beside it, against master (decc9f1fb), on Windows 11, 12 logical
+  processors (the user's machine), 3 interleaved rounds with goturkiye:
+
+  | | master | this branch | goturkiye |
+  |---|---:|---:|---:|
+  | requests a second, geometric mean of the best | 605.3 | 608.5 | 564.7 |
+  | p99, geometric mean of the best (ms) | 171.0 | 159.7 | 102.2 |
+  | app CPU per request (ms) | 4.56 | 4.56 | 5.00 |
+  | peak working set (MB) | 493 | 220 | 129 |
+
+  A counting copy (2 rounds) read each collection's epoch and debt:
+  `/api/v1/` allocated up to 59-60 MB an epoch against 214-223, paid
+  at most 2.2-2.7 ms of debt before a stop against 5-249 ms, and its
+  carry-over (#150's `warm_extra`) reached 23-25 MB against 141-172.
+  Across the endpoints the carry-over peaked at 41 MB against 172, so
+  it needs no cap of its own. Best p99 rose on web tags (384 ms against
+  366; the bursts of stalled queries #145's entry below describes) and
+  on cities, discover and `/admin` by 0.2-8 ms, and fell on the other
+  seven.
+
   `bench/collect_trigger.sh` asks for both: four threads allocating keep
   four threads' floor, and the same four idle add nothing; a copy that
   counts every registered thread fails the second. The busy budget is
@@ -26225,7 +26248,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,015-line library and nothing else. Every other
+  written against iyi's own 26,022-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

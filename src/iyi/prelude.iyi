@@ -7478,9 +7478,16 @@ require "./file"
       # too: a pool of twelve with one parallel task and the main thread
       # churning ran on a 52 MB budget and peaked at 95 MB resident where
       # counting the two allocating threads gives 8 MB and 18 MB, in 0.15
-      # s against 0.17 (3 runs each, a shared 12-vCPU Linux machine). A
-      # server under load has every worker allocating, and keeps its
-      # floor.
+      # s against 0.17 (3 runs each, a shared 12-vCPU Linux machine). The
+      # #145 app's epochs counted 7 to 13 threads under load, a 28-52 MB
+      # budget, and the extra collections cost nothing that showed: with
+      # the ceiling beside it, against master, 4.56 ms of app CPU a
+      # request either way, p99 160 ms against 171 at the geometric mean,
+      # an epoch 65 MB at the most against 223, the longest debt before a
+      # stop 4.1 ms against 249, and a peak working set of 220 MB against
+      # 493 (Windows 11, 12 logical processors, the user's machine; 11
+      # endpoints, 3 interleaved rounds, the epochs and debts from 2 of a
+      # counting copy not committed).
       def self.next_budget(survived : UInt64) : UInt64
         grown = survived.unsafe_div(100_u64) * @@growth
         floor = MIN_BUDGET

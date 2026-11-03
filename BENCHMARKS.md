@@ -1,6 +1,6 @@
 # What it costs, measured
 
-The build-time and server measurements behind [README.md](README.md). Every
+The build-time, run-time and server measurements behind [README.md](README.md). Every
 figure names the script that prints it; `python3 bench/machine_probe.py`
 prints your machine beside three reference timings, so a figure taken
 elsewhere can be compared with yours. SPEC.md has the design each one tests.
@@ -81,6 +81,27 @@ each row is 11 lines and 6,016.</sup>
 Compiling code it has never seen costs roughly 25 ms per thousand lines. The
 front end alone is 0.034 s for `hello`, and 0.018 s of that is the process
 starting up before it reads anything.
+
+## Run time
+
+`python3 bench/runtime.py` runs the same program under iyi's own library and
+under Crystal's (under 1.00 is iyi ahead):
+
+| workload | as it runs | with the collector off |
+|---|---|---|
+| arithmetic | 0.97x | 0.97x |
+| array append and read | 0.74x | 0.78x |
+| hash insert and read | 0.10x | 0.10x |
+| string building | 1.23x | **1.80x** |
+
+Where the two libraries do the same work they are within noise. `Hash` is
+ahead on sequential integer keys, which flatter a compact table, and keeps
+insertion order as Crystal's does. `String` building is slower, and the
+collector masks part of that.
+
+`python3 bench/gc_race.py` runs three programs written in iyi and in Go, under
+iyi's collector, Boehm and Go's; [GC_DESIGN.md](GC_DESIGN.md) records the
+machine and every figure.
 
 ## A web server's cores (issue #145)
 

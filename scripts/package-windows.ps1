@@ -159,6 +159,7 @@ try {
         'share\iyi\README.md',
         'share\iyi\SPEC.md',
         'share\iyi\BENCHMARKS.md',
+        'share\iyi\INSTALL.md',
         'share\licenses\iyi\LICENSE',
         'share\licenses\iyi\NOTICE.md'
     )

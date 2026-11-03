@@ -9,9 +9,11 @@
   are the library Crystal shipped at 0.1.0 (SPEC.md I.4), not what
   `--crystal` links today, and the efficiency paragraph read as iyi's
   library being three times Crystal's. The README now opens with the
-  claim, the table and the install, and its build and server
-  measurements moved to BENCHMARKS.md, which the tarball and the zip
-  carry beside it; `bench/measured_numbers.py` checks them there.
+  claim, the table and the install, and is a quarter shorter: the build,
+  run-time and server measurements moved to BENCHMARKS.md, installing,
+  targets and dependencies to INSTALL.md, both carried by the tarball and
+  the zip beside it. `bench/doc_numbers.py` and
+  `bench/measured_numbers.py` check the numbers where they now live.
 
 - **A thread stopped as a task begins is scanned on that task's stack.**
   A fresh fiber's first resume pops the whole frame laid for it, and on

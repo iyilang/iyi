@@ -625,6 +625,195 @@ IYI
     ;;
 esac
 
+# ── 4d. The release waits for nobody it lets go ──────────────────────────
+# A stop's release waited for every thread it let go to leave its park,
+# so a collection lasted until the last of them had a processor again. A
+# thread asked to stop inside the allocator parks itself where it leaves.
+# Here it shares a processor, at the lowest priority, with another
+# program - one the stop does not stop - computing 400 ms at a time at
+# the highest: it parks in that program's millisecond off, the mark that
+# follows outlasts the millisecond, and the release waited out the next
+# run. The release now leaves the wait to the next stop, which clears the
+# words the parked threads read: on Windows 11, 12 logical processors,
+# 403 to 410 ms past each stop before, 25 to 28 after, the mark among
+# it (3 runs each). On Linux the held thread is at SCHED_IDLE, which the
+# scheduler still runs within ticks: 34 to 47 ms before and 38 to 42
+# after on twelve vCPUs, so it is printed there; darwin has no placing
+# to hold it by. Asserted on Windows; printed everywhere.
+cat > release.iyi <<'IYI'
+module release
+
+import std/process::{Process, ChildProcess}
+
+class Link
+  getter next_link : Link?
+
+  def initialize(@next_link : Link?)
+  end
+end
+
+class Flag
+  getter stop : Atomic(Int64)
+  getter held : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @held = Atomic(Int64).new(0_i64)
+  end
+end
+
+{% if flag?(:win32) %}
+  lib Placing
+    fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+    fun SetThreadPriority(thread : Void*, priority : Int32) : Int32
+    fun Sleep(milliseconds : UInt32) : Nil
+  end
+{% elsif flag?(:linux) && flag?(:x86_64) %}
+  SYS_SCHED_SETAFFINITY  = 203_i64
+  SYS_SCHED_SETSCHEDULER = 144_i64
+  SYS_NANOSLEEP          =  35_i64
+{% elsif flag?(:linux) %}
+  SYS_SCHED_SETAFFINITY  = 122_i64
+  SYS_SCHED_SETSCHEDULER = 119_i64
+  SYS_NANOSLEEP          = 101_i64
+{% end %}
+
+# The running thread held to processor `cpu`, the lowest of its
+# priorities when `low` and otherwise the highest, with no boost:
+# Windows' -2 and 2, Linux's SCHED_IDLE and the default policy. Nothing
+# on darwin.
+def hold(cpu : Int32, low : Bool) : Nil
+  {% if flag?(:win32) %}
+    Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, 1_u64.unsafe_shl(cpu.to_u64))
+    Placing.SetThreadPriority(::LibC.GetCurrentThread, low ? -2_i32 : 2_i32)
+    ::LibC.SetThreadPriorityBoost(::LibC.GetCurrentThread, 1_i32)
+  {% elsif flag?(:linux) %}
+    mask = Pointer(UInt64).malloc(16_u64)
+    mask[cpu // 64] = 1_u64.unsafe_shl((cpu % 64).to_u64)
+    __iyi_conc_syscall3(SYS_SCHED_SETAFFINITY, 0_i64, 128_i64, mask.address.to_i64)
+    if low
+      param = Pointer(Int32).malloc(1_u64)
+      __iyi_conc_syscall3(SYS_SCHED_SETSCHEDULER, 0_i64, 5_i64, param.address.to_i64)
+    end
+  {% end %}
+end
+
+# A millisecond off the processor, for the held thread to run in.
+def nap : Nil
+  {% if flag?(:win32) %}
+    Placing.Sleep(1_u32)
+  {% elsif flag?(:linux) %}
+    spec = Pointer(Int64).malloc(2_u64)
+    spec[1] = 1000000_i64
+    __iyi_conc_syscall3(SYS_NANOSLEEP, spec.address.to_i64, 0_i64, 0_i64)
+  {% end %}
+end
+
+# Inside the allocator nearly all its time, so a stop finds it there and
+# leaves it to park where it leaves (`IyiHeap.leave_barrier`).
+def spin_low(flag : Flag, cpu : Int32) : Nil
+  hold(cpu, true)
+  flag.held.add(1_i64)
+  while flag.stop.get == 0_i64
+    IyiHeap.enter_barrier
+    turns = 0_i64
+    while turns < 100000_i64
+      turns = turns + flag.held.get
+    end
+    IyiHeap.leave_barrier
+  end
+end
+
+def fail(message : String) : Nil
+  print "FAIL: #{message}\n"
+  __iyi_exit(1)
+end
+
+# The other program: on the held thread's processor, above it, 400 ms
+# computing at a time and a millisecond off between, for 60 s at most.
+if Program.args.size == 2 && Program.args[0] == "hog"
+  hold(Program.args[1].to_i, false)
+  quits = IyiMark.now_ns + 60000000000_u64
+  while IyiMark.now_ns < quits
+    ends = IyiMark.now_ns + 400000000_u64
+    while IyiMark.now_ns < ends
+    end
+    nap
+  end
+  exit 0
+end
+
+asserted = false
+{% if flag?(:win32) %}
+  asserted = true
+{% end %}
+if IyiThread.core_count < 2_u64
+  puts "release: one processor here, nothing to hold a thread off"
+  exit 0
+end
+# A chain the stop's mark walks one link at a time, some tens of
+# milliseconds: past the other program's millisecond off, which a timer
+# of Windows' default resolution makes 15.6.
+chain = nil.as(Link?)
+2000000.times { chain = Link.new(chain) }
+hog = Process.spawn(Process.executable || "", ["hog", "1"])
+unless hog.is_a?(ChildProcess)
+  print "FAIL: release: the other program did not start\n"
+  exit 1
+end
+flag = Flag.new
+held = IyiThread.start { spin_low(flag, 1) }
+while flag.held.get < 1_i64
+  IyiThread.yield_cpu
+end
+hold(0, false)
+stop_ns = IyiThread.stop_ns
+pause_ns = IyiMark.pause_total_ns
+stops = IyiThread.stops
+5.times { IyiMark.collect }
+count = IyiThread.stops - stops
+after = ((IyiMark.pause_total_ns - pause_ns) - (IyiThread.stop_ns - stop_ns)) // count
+flag.stop.set(1_i64)
+hog.kill
+hog.wait
+held.join
+links = 0
+link = chain
+while link.is_a?(Link)
+  links = links + 1
+  link = link.next_link
+end
+fail("release: the chain kept #{links} links of 2000000") if links != 2000000
+fail("release: #{count} collections beside a thread held off its processor went on #{after // 1000000_u64} ms each past their stops, past 200") if asserted && after > 200000000_u64
+puts "release: #{count} collections beside a thread held off its processor, #{after // 1000_u64} us each past their stops (the mark of 2000000 links among it), held to 200 ms"
+IYI
+step "a collection's release, beside a thread held off its processor"
+if ! "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
+  cat build-release.log; exit 1
+fi
+if ! timeout -k 5 120 ./release > release.txt 2>&1; then
+  cat release.txt; exit 1
+fi
+sed 's/^/  /' release.txt
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "failure proof: a release that waits for the threads it let go is caught"
+    mkdir -p waiting/iyi
+    cp "$REPO"/src/iyi/*.iyi waiting/iyi/
+    awk '{ print } /^        @@owed = @@deferred$/ { print "        while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64"; print "          yield_cpu"; print "        end"; found = 1 } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > waiting/iyi/thread.iyi || { echo "the release is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
+      cat build-waiting.log; exit 1
+    fi
+    timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release:' waiting.txt; then
+      echo "the release check did not fire (exit $code):"; tail -3 waiting.txt; exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: release:' waiting.txt)"
+    ;;
+esac
+
 # ── 5. Failure proof: a stopped thread's frames are roots ─────────────────
 # The walk over stopped threads removed from the root set, in a copy of
 # the prelude built against through IYI_PATH; nothing in the tree is

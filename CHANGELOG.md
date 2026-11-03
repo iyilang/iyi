@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A collection no longer waits for the threads it releases to run
+  again.** A stop's release waited for every thread it had stopped to
+  leave its park, so the collecting thread - a request's - spun until the
+  last of them had a processor. The next stop waits for that instead,
+  before it clears the words they read, and by then they have long run.
+  On Windows 11, 12 logical processors, a thread parked inside the
+  allocator and held off its processor by another program kept each
+  collection 403-410 ms past its stop, now 25-28; on a ten-core M2 Pro
+  (macOS 26.6), pool workers stopped mid-run added 3.5 ms to every
+  collection's pause. `bench/thread_exercise.sh` step 4d holds it, with
+  a copy of the runtime that waits again, which it catches.
+
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with
   are the library Crystal shipped at 0.1.0 (SPEC.md I.4), not what
@@ -26187,7 +26199,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,763-line library and nothing else. Every other
+  written against iyi's own 25,779-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -161,6 +161,7 @@ class Iyi::Def
     expansion.iyi_share_block = iyi_share_block?
     expansion.iyi_share_serial = iyi_share_serial
     expansion.iyi_share_crossing = iyi_share_crossing
+    expansion.iyi_share_elements = iyi_share_elements
     if owner = self.owner?
       expansion.owner = owner
     end

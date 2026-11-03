@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 26,559 lines, of which 4,650 are the library held to the 4,650 ceiling (6,672 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 131,595 lines, none of it written in iyi |
+| compiler | 131,646 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 131,595 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 26,559-line own prelude + 125,597 in std |
-| Specs | 21,146 lines | 15,901 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 131,646 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 26,559-line own prelude + 126,069 in std |
+| Specs | 21,146 lines | 15,941 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2642,7 +2642,7 @@ hook, and the prelude's own definition of it is untouched. Compile-time
 `responds_to?` works unchanged, which the error message is entitled to claim
 because it is tested.
 
-### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13)**
+### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14)**
 
 This is the section where the design either beats Go or does not, so it is worth
 being blunt about where Go actually loses. Not goroutines: they are cheap, the
@@ -4633,6 +4633,251 @@ with whatever else runs, and wrk takes cores the twelve-worker rows want.
 `bench/measured_numbers.py` names it among what a shared runner cannot
 check, and holds the sentence above (connections, cost, workers, runs) to
 the script's constants and the stored hash's cost to the script's.
+
+#### III.4.14 Data parallelism as a library: **PROPOSED — `each_parallel`, `map_parallel`, `sum_parallel` and `reduce_parallel` in `std/parallel`, over `Share` elements; built as proposed on branch `mt/datapar`, gated and measured below**
+
+PARALLEL_PLAN.md's third layer. Most of the speed a program gets from more
+cores is in a loop, not in a `spawn`, and III.4.13 left the loop to the
+program: cut the work, start a parallel task a piece, join, put the answers
+back together. This section is that, written once, as std code over
+`spawn_parallel`, the way Rust's Rayon is a library over its pool.
+
+```
+import std/parallel
+
+squares = (0...1000).map_parallel { |i| i * i }       # in the elements' order
+total = words.sum_parallel { |w| w.size }             # an Array: copied once
+failed = jobs.each_parallel { |job| job.run }         # nil, or the first error
+longest = names.reduce_parallel("") { |a, b| a.size >= b.size ? a : b }
+```
+
+**1. The names: the sequential verb with `_parallel`.** `each`, `map`,
+`sum` and `reduce` are how iteration is spelled in the prelude (`Array`,
+`Range`) and in std's `Enumerable` (`List`, `Slice`, `Deque`), so the
+parallel forms are the same words with a suffix that says what it costs,
+and `map` keeps the one meaning it has everywhere else, one thread in order
+(III.1.7a settled what a shared name costs; a name that changed meaning
+with an import would be that cost again). Rayon's `par_iter()` adaptor was
+not taken because it needs an iterator tower whose every stage knows how to
+split itself, and iyi's prelude `Range` has no `Enumerable` at all; a free
+function, `Parallel.map(xs) { }`, reads unlike every other loop. `grain:`
+is each method's one optional argument.
+
+What has them: `List(T)` (std/list), `Array(T)`, and the `Int32` and
+`Int64` ranges, through a trait `Parallel` that `std/parallel` declares and
+implements for each, since R-3 lets a module add methods to a type it did
+not declare only through a trait of its own. `import std/parallel` is all
+a program writes.
+
+**2. What the compiler asks: the block and the elements are `Share`.** The
+block runs on several workers at once, so it is checked as
+`spawn_parallel`'s is (III.4.4, III.4.13 part 2): every value it captures
+`Share`, every captured local assigned once. The methods are `@[Share]`
+defs, std/http's `serve` mechanism, so the refusal names the call. What a
+method hands its block crosses as well: the elements are read by chunks on
+several workers at once, an object may be in the sequence twice, and a
+block that calls a mutating method on one races. So a def can say so,
+`@[Share(elements: "what to do instead")]`, and the compiler holds each of
+its block's parameters to `Share` at the call, as a captured value is
+held. The three refusals, as the gate reads them:
+
+```
+Array#map_parallel hands its block `Counter` on other threads, several at
+once, and it is not Share: Counter's field @count is given a setter
+`count=`. Make the elements Share - every field assigned only in
+`initialize`, what changes behind a `Mutex` (std/mutex) - or use `map`,
+which stays on one thread (SPEC.md III.4.4)
+
+the block Range#map_parallel keeps, which may run on other threads captures
+`counter : Counter`, which is not Share: Counter's field @count is given a
+setter `count=`. Put it behind a lock, a `Mutex(Counter)` (std/mutex), or
+use `map`, which stays on one thread (SPEC.md III.4.4)
+
+the block Range#each_parallel keeps, which may run on other threads assigns
+`total`, a local of the code that gave Range#each_parallel its block, ...
+```
+
+The way out each names is the sequential twin, which a `@[Share(elements:)]`
+def named `*_parallel` gives the compiler without a second annotation.
+
+The sequence itself must not change under the chunks either, and that is
+not what `Share` on the elements says. The caller waits in the chunks'
+join, and while it waits another task of its unit may run (III.4.13 part
+2) - `g.spawn { xs << 1 }` beside `xs.map_parallel { ... }` is legal - and
+write the array the chunks are reading. A `List` cannot change and a range
+is two numbers, so they are read where they are; an `Array` is copied into
+a `List` first, the copy std/list already calls "the honest price of not
+having" a borrow checker. Without `elements:` the copy is still refused
+for a non-`Share` element, but inside std, by the capture check on
+`spawn_parallel`'s block (`source : Std::List::List(Counter)`), which is
+the gate's proof that the sentence at the call is the new check's.
+
+**3. Chunking.** *n* elements are cut into chunks of `grain` elements, or,
+when `grain` is 0, into eight chunks a worker; as many parallel tasks as
+there are workers, or chunks if fewer, each take the next chunk from one
+atomic count until none is left, so a worker that drew cheap chunks takes
+more. Eight from measurement: every worker of the pool, release, best of
+five, ms, with `grain` set to cut the count of chunks a worker in the first
+column (the workloads are part 9's).
+
+macOS 26.6, Apple M2 Pro, 10 cores (the user's machine), ten workers:
+
+| chunks a worker | sum, 4,000,000 | skewed sum, 4,000,000 | SHA-256, 20,000 |
+|---:|---:|---:|---:|
+| 1 | 7.5 | 29.3 | 12.3 |
+| 2 | 6.8 | 25.0 | 12.2 |
+| 4 | 6.8 | 20.7 | 10.7 |
+| 8 | 6.2 | 18.7 | 10.4 |
+| 16 | 6.2 | 18.6 | 10.4 |
+| 64 | 6.2 | 18.1 | 10.2 |
+
+Windows 11, 12 logical processors (the user's machine), twelve workers:
+
+| chunks a worker | sum, 4,000,000 | skewed sum, 4,000,000 | SHA-256, 20,000 |
+|---:|---:|---:|---:|
+| 1 | 6.1 | 26.8 | 11.9 |
+| 2 | 6.1 | 24.4 | 9.5 |
+| 4 | 5.1 | 24.1 | 7.1 |
+| 8 | 5.0 | 18.7 | 7.5 |
+| 16 | 4.5 | 17.8 | 7.5 |
+| 64 | 4.6 | 16.3 | 7.6 |
+
+A chunk a worker leaves workers idle while one finishes the heavy end: the
+skewed sum took 1.57 times as long in one chunk a worker as in eight on the
+M2, and 1.43 on Windows. Past eight the M2 gains under 4%; Windows gains up
+to 13% on the skewed sum at sixty-four, and moves as much between two runs
+of the same work - its one-thread skewed sum took 106.5 to 143.8 ms in this
+one session. What a call costs on its own: summing 100 integers took 41 us
+on ten workers on the M2 against 1 us on one thread, 117 us on twelve on
+Windows; 10,000 took 60 us against 101 on the M2 and 125 against 100 on
+Windows, and 100,000 took 204 against 1,018 and 198 against 809 (best of
+twenty). So the break-even is near 50 us of work on the M2 and between 100
+and 810 on Windows, and a grain is how a program says its elements are
+cheaper than that.
+
+**4. Order.** `map_parallel` answers what `map` answers: each task keeps
+what its chunks answered by chunk number, and the answers are put together
+in chunk order. `sum_parallel` and `reduce_parallel` fold each chunk from
+its start and then the chunks' answers in chunk order, so an associative
+block gives `reduce`'s answer - the gate folds strings, associative and not
+commutative - and `identity` must be the block's identity, since every
+chunk starts from it. A `Float64` sum depends on where the chunks are cut,
+which the worker count decides when `grain` is 0: the same for the same
+count, and possibly not `sum`'s to the last bit.
+
+**5. Errors and panics.** A block may answer an error member (III.1.1).
+`map_parallel` keeps it in its place, as `map` does: one answer per
+element. `each_parallel` answers the error of the lowest index whose block
+answered one, which is the error a loop that stops at its first failure
+answers: once an index has failed no element past it is started, every
+element before it still runs, and the lowest of what the tasks saw is
+answered (`Nil` when none failed; the method's type is the block's, with
+`Nil`). A task answers its failure as a pair, not as an error member, so the
+group's own policy (III.4.3) - the first failure cancels the siblings -
+does not cut short the elements before it. A panic in one chunk is a bug:
+the group cancels the other tasks, which start no further chunk, and the
+caller panics at the join with `a task panicked: ...`, the boundary's
+sentence for a panic nobody read (III.1.4).
+
+**6. Cancellation.** A caller whose group is cancelled while it waits -
+a sibling failed, or the scope ended early - cancels the chunks' tasks with
+it, as III.4.2 says a cancel flows; each task looks before it takes a chunk
+and stops, and the caller is stopped at the end of the call, as a
+cancelled task joining another is stopped (`IyiScheduler.join`). No caller
+sees part of an answer, so no method's type carries `Cancelled`. A chunk
+already running finishes unless its block waits: a loop does not look, so
+`grain` bounds how long a cancel takes.
+
+**7. Nesting.** The caller waits by parking in the join. On a pool worker
+- inside a parallel task, or inside another `map_parallel`'s chunk - that
+gives the worker to the chunks, its own among them, rather than holding it.
+Each call opens its own group. The gate nests a `map_parallel` in another's
+block and a `sum_parallel` in a parallel task.
+
+**8. One worker, and no threads.** With `IYI_WORKERS=1`, with one chunk, and
+in a build under `-Dgc_none` or `-Dgc_boehm` - which refuses
+`spawn_parallel` at compile time (III.4.13) - the chunks run one after
+another on the caller and no pool starts. The answers, errors, panics and
+cancellation are the same; the program compiles the same, `Share` checks
+included, on every collector. The cost against the sequential twin is the
+call through the block's proc per element, which the twin inlines: the
+1-worker columns below, 0 to 8% on the M2 and 2 to 17% on Windows.
+
+**9. Measured.** The same release binary, `bench/std_parallel_exercise.iyi
+speed`, best of five, ms; "one thread" is the sequential twin (`map`, or a
+`while` loop for the sums) in the same run, and each speedup is against it.
+The workloads: a sum of a 16-round xorshift of each of 4,000,000 integers;
+SHA-256 of 20,000 strings of 1 KiB; 300,000 words upcased and reversed,
+which allocates two strings an element; and the sum again with each
+element's rounds growing from 1 to 64 with its index.
+
+macOS 26.6, Apple M2 Pro, 10 cores (the user's machine), at `mt/datapar`
+144cfe9aa, the load average 7.0 as the run began, from the job before it,
+and 5.3 as it ended:
+
+| workload | one thread | 1 worker | 2 workers | 4 workers | 10 workers |
+|---|---:|---:|---:|---:|---:|
+| sum, 4,000,000 | 40.8 | 42.8, 0.95x | 21.9, 1.86x | 11.3, 3.62x | 6.2, 6.55x |
+| SHA-256, 20,000 | 77.8 | 77.9, 1.00x | 40.1, 1.94x | 20.6, 3.77x | 10.5, 7.43x |
+| strings, 300,000 | 40.1 | 41.2, 0.97x | 20.8, 1.89x | 11.0, 3.57x | 6.2, 6.43x |
+| skewed sum, 4,000,000 | 123.9 | 133.5, 0.93x | 71.4, 1.71x | 36.4, 3.39x | 18.9, 6.45x |
+
+Windows 11, 12 logical processors (the user's machine), the same commit:
+
+| workload | one thread | 1 worker | 2 workers | 4 workers | 12 workers |
+|---|---:|---:|---:|---:|---:|
+| sum, 4,000,000 | 34.4 | 40.2, 0.86x | 19.5, 1.72x | 10.6, 3.29x | 4.7, 6.94x |
+| SHA-256, 20,000 | 44.9 | 48.0, 0.94x | 23.1, 1.92x | 11.9, 3.76x | 7.0, 6.41x |
+| strings, 300,000 | 25.9 | 28.7, 0.90x | 14.3, 1.79x | 7.6, 3.07x | 6.1, 3.84x |
+| skewed sum, 4,000,000 | 117.3 | 119.9, 0.98x | 66.0, 1.73x | 33.0, 3.23x | 13.6, 7.89x |
+
+Two workers are 1.7 to 1.9 times one thread on both machines and four 3.1
+to 3.8. The M2 Pro's ten cores are six performance and four efficiency
+cores, so ten workers are 6.4 to 7.4 times, not ten. On Windows the
+workload that allocates stops at 3.8 times on twelve where the others
+reach 6.4 to 7.9; where its time goes is not measured here.
+
+**The gate.** `bench/std_parallel_exercise.sh`, found by `std_siblings.sh`'s
+glob as every std exercise is. It runs the exercise plain and `--release`
+on four workers, with `IYI_WORKERS=1`, and built under `-Dgc_none` and,
+where libgc links, `-Dgc_boehm`; reads the three refusals above; holds
+four workers to at least half of four times one worker's speed on the
+sum; and fails copies
+of the module that drop the last chunk (`answers what map answers`), that
+put the chunks back in reverse order (the same check), that start one task
+(`chunks run on more than one worker`), that go on past a failure another
+task found (`starts no element past a failure it knows of`), and that leave
+`elements:` off (refused inside std, not at the call).
+
+**Open.**
+
+- *Small inputs.* A call costs about 40 us on ten workers on the M2 and
+  about 100 on twelve on Windows, whatever its size. An automatic cutoff
+  needs the per-element cost, which only a run can measure; Rayon does
+  not guess either. `grain` is the answer for now.
+- *`Slice`, `Deque`, `Hash`, `Set`.* Not `Parallel`. A `Slice` is a pointer
+  and a size that another task may write through; the others would need a
+  copy like `Array`'s, or a split of their own.
+- *The default of eight chunks a worker.* The M2's table is flat past
+  eight; Windows' leans to sixteen or more by less than its own noise.
+- *Allocation on twelve workers.* The strings workload's 3.8 times on
+  Windows against 6.4 on the M2; a profile of the collector and the
+  allocator's centre under it is the next measurement.
+- *The proc call on one worker.* Up to 17% on Windows against the twin's
+  inlined loop. A def that yielded on one worker and captured its block
+  only for the pool would remove it, and iyi has no such def.
+- *The copy of an `Array`.* A word an element, not measured on its own
+  here: the workloads above read a `List` or a range. A borrow the
+  compiler checked - "nothing writes this array until the call returns" -
+  would remove it, and nothing in iyi says that today.
+- *`each_parallel`'s type* is the block's with `Nil`, so a block whose
+  last expression answers an `Int64` makes the method `Int64 | Nil`
+  though it only ever answers nil or an error member. The error members
+  alone are not a type a signature can name.
+- *A parallel `select`, `find`, `any?`, `min_by`.* Each is a `reduce` over
+  chunks today; which deserve a name is a question of use.
+- *Plain `spawn` in a chunk.* A task a chunk's block spawns joins that
+  chunk's unit and runs one at a time with it, as in any parallel task.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 

@@ -63,6 +63,9 @@ Most of the speed a program gets from more cores comes from a loop, not from
 chunks across the pool the way Rust's Rayon does, give that without the
 program thinking about tasks or threads.
 
+Being built on branch `mt/datapar`, its API written into SPEC.md as
+III.4.14, PROPOSED.
+
 ### 4. A heap per unit (0.23 or later, research first)
 
 This is the layer that can beat Go rather than match it. A value that is not

@@ -37,6 +37,53 @@
   (+5.5 to +6 us) spend more CPU a request. Keeping a connection on its
   worker without stalling it would take per-worker ports again, which is
   not a patch.
+- **A darwin server is no longer killed by SIGPIPE when a client resets
+  its connection before the accept.** darwin's sockets were kept from
+  SIGPIPE by SO_NOSIGPIPE, set as each was accepted; on a connection its
+  client had already reset, darwin refuses the option (EINVAL, "the
+  socket has been shut down"), and the server's first write to it ended
+  the process. On macOS 26.6 (Apple M2 Pro, 10 cores, the user's
+  machine) an std/http server under clients that connect and reset -
+  bad heads refused, TLS handshakes cut, requests and answers cut short
+  - died within a second of each start, 9 times in 70 seconds. Every
+  send now says MSG_NOSIGNAL, as Linux's has. `bench/socket_exercise.iyi`
+  writes to a connection reset before its accept, and on darwin the gate
+  builds a copy whose send drops the flag and sees it killed (exit 141).
+
+- **A stopping server's `stream_bodies` block that waits on its body no
+  longer panics.** The stop closes a connection waiting on its client
+  (`close_for_stop`), and a block reading its own body waits on its
+  client: its read was cancelled, the block answered, and the server
+  wrote that answer on the socket the stop had closed - "iyi: panic:
+  socket is closed", once per such connection, on a pool worker or under
+  `workers: 1` alike, in 3 of 16 stops of a 30-minute soak on 12 cores.
+  The answer, with nowhere to go, is no longer written (a stream it
+  answers with is closed), and a `Response.stream` block's write after
+  such a read is `Cancelled` rather than the panic.
+  `bench/std_http_stop.iyi` stops a server under two such blocks, one
+  answering a string and one a stream; the gate counts the panics, and a
+  copy without either guard is caught.
+- **An answer the server makes while it stops says `Connection: close`,
+  and a body the stop cut short is not answered 400.** An answer in
+  progress at a stop went out `keep-alive` and the connection closed
+  after it, so a client's next request on it met the close; and a
+  request read behind it whose body was still arriving was answered "400
+  Bad Request: the body ended after 500 of its 1000 bytes", blaming the
+  client for the server's going, in place of the close a client may
+  retry on. `bench/std_http_parallel.iyi`'s stop holds both, with a
+  broken copy of each.
+- **A `stream_bodies` answer says `Connection: close` when the server
+  will close after it.** A block that left more of a body than the
+  server reads past (`Server::MAX_DRAIN`, by the body's
+  `Content-Length`) was answered `keep-alive` and the connection closed
+  after the answer, so Python's http.client sent its next request into
+  the close (RemoteDisconnected). And a block that answered an `Expect:
+  100-continue` request without reading its body had `100 Continue`
+  written after its answer - read by the client as its next request's -
+  and then the body it held back waited for, for the server's timeout.
+  Both now say `close`, and no `100 Continue` follows an answer.
+  `bench/std_http_exercise.sh`'s close cases hold both, plain and over
+  std/tls, with a broken copy of each.
 
 ## 0.20.0 — 2026-11-02
 

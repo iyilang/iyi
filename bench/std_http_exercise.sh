@@ -1094,17 +1094,22 @@ echo "== a server stopped while clients hold connections (bench/std_http_stop.iy
 # here: std/http's clients keeping HTTP/1.1 and HTTP/2 over TLS, HTTP/1.1
 # and h2c in the clear, and an upgrade each way whose block reads until
 # the stop and asks `closed?` before it says goodbye, as std/websocket
-# does - no panic printed, exit 0, both upgrades told "closed"; and
+# does - no panic printed, exit 0, both upgrades told "closed"; under
+# `stream_bodies`, a block waiting on the rest of its body, answering a
+# string or a stream, its read cancelled by the stop and its answer not
+# written - "iyi: panic: socket is closed" was printed for each, the
+# server writing on the socket the stop had closed under the block; and
 # Python's ssl, holding a kept-alive connection with
 # `suppress_ragged_eofs=False` while the server stops, reading
 # close_notify rather than an end without one (SSLEOFError, which it read
 # before). Then copies of the modules without the write's check, with
-# `closed?` blind to the socket, and with a stop that sends no
-# close_notify, each caught at the line that names it. The iyi half is
-# the program run with no arguments, as CI runs every bench program: it
-# holds what each of its lines should say, under a test PKI of its own -
-# a std/tls client among its own clients, reading close_notify as Python
-# does - and names one that is not so with "FAIL <line>:".
+# `closed?` blind to the socket, with a stop that sends no close_notify,
+# and with either answer written on the closed socket, each caught at
+# the line that names it. The iyi half is the program run with no
+# arguments, as CI runs every bench program: it holds what each of its
+# lines should say, under a test PKI of its own - a std/tls client among
+# its own clients, reading close_notify as Python does - and names one
+# that is not so with "FAIL <line>:".
 STOP_EXPECTED="ALL CHECKS PASSED
 exit 0
 kept connection: HTTP/1.1 200 OK, then on the server's stop: close_notify
@@ -1237,6 +1242,20 @@ PY
     @socket.close' '      nil
     end
     @socket.close' "the waiting std/tls client, on the stop"
+  stop_breaks "a reading block's answer written on the socket the stop closed" http.iyi \
+    '        if conn.socket.closed?
+          if source = response.source
+            source.close
+          end
+          return false
+        end
+' '' "panics printed"
+  stop_breaks "a stream's write on the socket the stop closed" http.iyi \
+    '    if socket.is_a?(IyiSocket) && socket.closed?
+      @fault = Cancelled.new
+      return false
+    end
+' '' "panics printed"
 fi
 
 echo
@@ -1248,8 +1267,10 @@ echo "== connections on every core: serve's default workers, and workers: 1 (ben
 # must close are on others. The program holds it: eight requests that
 # compute, waiting before anything accepts, answered on more than one
 # worker and on none of them the accepting thread; a handler that
-# panics ending its own connection; and the stop, an answer in progress
-# written and a kept-alive connection closed, under watchdogs. Then
+# panics ending its own connection; and the stop, the answers in
+# progress written - the one made at the stop saying `Connection:
+# close` - requests half sent behind them closed on rather than answered
+# 400, and a kept-alive connection closed, under watchdogs. Then
 # `workers: 1`: four requests waiting before anything accepts, every one
 # answered on the accepting thread, by a block that appends to an
 # `Array` and closes its own listener. Then the same over TLS (`tls:
@@ -1261,15 +1282,16 @@ echo "== connections on every core: serve's default workers, and workers: 1 (ben
 # close_notify. Then copies of std/http with `serve` on the calling
 # thread whatever *workers* says, with `workers: 1` served on the pool,
 # with the connection spawned on the accepting thread, with the watcher
-# that carries the stop to a connection's worker made to do nothing, and
-# with the stop sending no close_notify, and a copy of std/tls whose
-# ticket keys are every worker's own, each caught at the line that
-# names it. And what the compiler refuses and takes: a block that
-# captures an `Array` under the default workers, a `TlsServerConfig`
-# that is not frozen, a `Router` given as the handler value, and a
-# `frozen` identity source that captures a table of identities, each
-# refused with its sentence; and the `Array`, the config and the
-# `Router` under `workers: 1`, taken.
+# that carries the stop to a connection's worker made to do nothing,
+# with the stop sending no close_notify, with an answer made at the stop
+# saying `keep-alive`, and with a body the stop cut short answered 400,
+# and a copy of std/tls whose ticket keys are every worker's own, each
+# caught at the line that names it. And what the compiler refuses and
+# takes: a block that captures an `Array` under the default workers, a
+# `TlsServerConfig` that is not frozen, a `Router` given as the handler
+# value, and a `frozen` identity source that captures a table of
+# identities, each refused with its sentence; and the `Array`, the
+# config and the `Router` under `workers: 1`, taken.
 if ! "$IYI" build -o "$WORK/parallel" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel.build" 2>&1; then
   echo "  bench/std_http_parallel.iyi did not build"
   sed -n '1,8p' "$WORK/parallel.build"
@@ -1343,6 +1365,10 @@ PY
     @socket.close' '      nil
     end
     @socket.close' "the kept-alive TLS connection, on the stop"
+  parallel_breaks "an answer made at the stop saying keep-alive" \
+    'head.close || conn.stopped?' 'head.close' "the answer being made at the stop, its Connection"
+  parallel_breaks "a body the stop cut short answered 400" \
+    'return false if conn.ended? || conn.stopped?' 'return false if conn.ended?' "a request half sent behind that answer, on the stop"
   # Each thread seals and opens under a key of its own, named as the
   # shared one: a ticket opens only on the worker that sealed it.
   parallel_breaks "workers keeping ticket keys of their own" \
@@ -2143,7 +2169,10 @@ echo "== a close while the client still sends (RFC 9112 section 9.6)"
 # `Connection: close` - and by curl, with no reset anywhere, and the end
 # of the stream (a FIN; over TLS a close_notify first, which Python is
 # told to insist on) within half a second of the answer's last byte, not
-# the second a server that never shuts its half lingers for.
+# the second a server that never shuts its half lingers for. And the
+# answer says the close is coming: http.client's next request after a
+# body past MAX_DRAIN is answered, and an `Expect: 100-continue` answered
+# before its body is closed on, with no `100 Continue` after the answer.
 cat >"$WORK/close.py" <<'PY'
 import http.client, os, select, shutil, socket, ssl, subprocess, sys, time
 
@@ -2330,11 +2359,70 @@ def by_curl(close):
             out.returncode, time.monotonic() - began, len(body), out.stdout.decode(errors="replace"), curl_said(out.stderr))
     return None
 
+
+# A body past MAX_DRAIN that the block left unread is closed on after the
+# answer, so the answer says `Connection: close`: http.client takes a
+# `keep-alive` at its word, sends its next request on the connection,
+# and the close ends it unanswered (RemoteDisconnected).
+def next_after():
+    if ctx:
+        c = http.client.HTTPSConnection("localhost", port, context=ctx, timeout=STALL)
+    else:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=STALL)
+    said = None
+    try:
+        c.request("POST", "/ignore?n=%d" % SMALL, body=b"u" * UP)
+        r = c.getresponse()
+        got = r.read()
+        said = r.getheader("Connection")
+        if r.status != 200 or got != small:
+            return "answered %d, %d bytes" % (r.status, len(got))
+        c.request("GET", "/ignore?n=%d" % SMALL)
+        r = c.getresponse()
+        got = r.read()
+    except OSError as e:
+        return "%s on the request after it, the answer before saying Connection: %s" % (type(e).__name__, said)
+    finally:
+        c.close()
+    return None if r.status == 200 and got == small else "the request after it answered %d, %d bytes" % (r.status, len(got))
+
+
+# `Expect: 100-continue`, answered before the body is asked for: the client
+# holds its body back, so the connection closes after the answer, which
+# says so. Before, `100 Continue` went out after the answer - a client
+# reads it as its next request's - and the server waited out its timeout
+# for the body. The body is short, well inside MAX_DRAIN, so that the
+# close is the expectation's alone.
+def expect_unasked():
+    s = connect()
+    s.sendall(("POST /ignore?n=%d HTTP/1.1\r\nHost: %s\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n" % (SMALL, host)).encode())
+    s.settimeout(STALL)
+    data = b""
+    try:
+        while True:
+            more = s.recv(65536)
+            if not more:
+                break
+            data += more
+    except OSError as e:
+        s.close()
+        return "%s after %d bytes, ending %r" % (type(e).__name__, len(data), data[-40:])
+    s.close()
+    head, _, body = data.partition(b"\r\n\r\n")
+    if not head.startswith(b"HTTP/1.1 200"):
+        return "answered %r" % head[:40]
+    if b"\r\nconnection: close" not in head.lower():
+        return "the answer's head: %r" % head
+    return None if body == small else "%d bytes after the head, ending %r" % (len(body), body[-40:])
+
+
 cases = {
     "Python reading as it sends, Connection: close": lambda: as_sent(True),
     "Python reading as it sends, a body past MAX_DRAIN": lambda: as_sent(False),
     "http.client, Connection: close": lambda: sent_first(True),
     "http.client, a body past MAX_DRAIN": lambda: sent_first(False),
+    "http.client, a body past MAX_DRAIN and a request after it": next_after,
+    "Expect: 100-continue answered before the body": expect_unasked,
     "200 requests pipelined behind Connection: close": pipelined,
 }
 if CURL:
@@ -4063,6 +4151,11 @@ close_breaks "TLS: the client closing at once" close_client_tls http.iyi \
     else' '    elsif stream = @stream
       close_now
     else' - - client-tls
+close_breaks "a body past MAX_DRAIN answered keep-alive" close_drain_kept http.iyi \
+  '    @kind == LENGTH && @left > limit' '    false' plain 'http.client, a body past MAX_DRAIN and a request after it'
+close_breaks "100 Continue written after the answer" close_late_continue http.iyi \
+  '    return true if @hello
+' '' plain 'Expect: 100-continue answered before the body'
 h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
   '          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK' '          mode = IGNORED_BLOCK' \
   'HEADERS on a closed stream'

@@ -65,6 +65,14 @@
 #  7e. On darwin, a thread's first allocation held in its frame through two
 #      collections is not swept; with its stack's top written after that
 #      allocation again, a run aborts by name.
+#  7f. On Linux and darwin, tasks begin on fresh stacks beside a thread that
+#      collects in a loop, and each task's stack top is its own stack's to
+#      the stop's scan; with a fiber's top read as no fiber's again, the
+#      first task says so by name.
+#  7g. On Linux and darwin, a mark helper that faults holding the runtime
+#      lock kills the process with SIGSEGV; with the fault handler's
+#      default action built in a heap block again, the process outlives
+#      the fault.
 #
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
@@ -2000,6 +2008,174 @@ case "$(uname -s)" in
     if [ $((aborted + faulted)) -eq 0 ]; then
       echo "three runs with the top written after the stack guard's allocation: none aborted or faulted"; exit 1
     fi
+    ;;
+esac
+
+# ── 7f. A stop at a fresh task's first instruction scans that task's stack ─
+# On aarch64 a fresh fiber's first resume pops the whole frame
+# `settle_stack` laid, so the switch's `ret` and `__iyi_fiber_main`'s first
+# instruction run with sp at the fiber stack's top. The stop's scan asks
+# `IyiScheduler.fiber_top_holding` which stack holds a stopped thread's sp,
+# and it answered that the top was no fiber's: the scan ran from there up
+# to the thread's own top, across the mappings between. On macOS 26.6, an
+# M2 Pro with 10 cores, the program below without its check died so, of
+# SIGSEGV or SIGBUS in the collector's `scan_range`, in 9 runs of 23 of
+# 5 s, the main thread stopped at that instruction in every crash report;
+# and bench/concurrency_exercise.iyi hung in 2 of 675 soak runs there,
+# the one sampled where a mark helper had faulted so and its fault
+# handler waited on the runtime lock (7g). With the top counted as the
+# fiber's, none of 26.
+# A stop lands on one of two instructions in a task's life, so a run's
+# death is luck; each task asks the scan's own question of its own top
+# as well, which the old bound answers wrongly every time.
+case "$(uname -s)" in
+  Linux | Darwin)
+    step "tasks begin on fresh stacks beside a thread collecting in a loop, and each task's top is its own stack's: three runs of 5 s"
+    cat > fresh.iyi <<'IYI'
+module fresh
+
+import std/gc::{GC}
+
+class Flag
+  getter stop : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+  end
+end
+
+def storm(flag : Flag) : Nil
+  while flag.stop.get == 0_i64
+    GC.collect
+  end
+end
+
+# Where a stop finds sp at a task's first instruction on aarch64, asked of
+# the scan the way the stop asks it.
+def first_run : Int32
+  top = IyiScheduler.current_stack_top
+  raise "a task's stack top is no task's to the stop's scan" if IyiScheduler.fiber_top_holding(top) != top
+  0
+end
+
+def burst : Nil
+  group do |g|
+    64.times do
+      g.spawn do
+        first_run
+      end
+    end
+  end
+end
+
+flag = Flag.new
+stormer = IyiThread.start { storm(flag) }
+deadline = __iyi_monotonic_ns + Program.args[0].to_i.to_i64 * 1_000_000_000_i64
+started = 0
+while __iyi_monotonic_ns < deadline
+  burst
+  started = started + 64
+end
+flag.stop.set(1_i64)
+stormer.join
+puts "ok started=#{started} stops=#{IyiThread.stops}"
+IYI
+    if ! "$IYI" build fresh.iyi -o fresh > build-fresh.log 2>&1; then
+      cat build-fresh.log; exit 1
+    fi
+    run=1
+    started=""
+    while [ "$run" -le 3 ]; do
+      ( timeout -k 5 60 ./fresh 5 > fresh.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^ok started=[0-9]* ' fresh.txt; then
+        echo "run $run exited $code:"; tail -3 fresh.txt; exit 1
+      fi
+      started="$started $(sed -n 's/^ok started=\([0-9]*\) .*/\1/p' fresh.txt)"
+      run=$((run + 1))
+    done
+    echo "  three runs, every task's top its own stack's:$started tasks"
+
+    step "failure proof: a fiber's top read as no fiber's, as it was"
+    mkdir -p topless/iyi
+    cp "$REPO"/src/iyi/*.iyi topless/iyi/
+    awk '/^      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES$/ {
+        print "      return top if top != 0 && address < top && address >= top - IyiFiber::STACK_BYTES"; found = 1; next }
+      { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/concurrency.iyi" > topless/iyi/concurrency.iyi || { echo "the fiber stack's bound is not in concurrency.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/topless${PSEP}$REPO/src" "$IYI" build fresh.iyi -o topless-run > build-topless.log 2>&1; then
+      cat build-topless.log; exit 1
+    fi
+    ( timeout -k 5 60 ./topless-run 5 > topless.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -eq 0 ] || ! grep -q "a task's stack top is no task's to the stop's scan" topless.txt; then
+      echo "with a fiber's top read as no fiber's, a run exited $code:"; tail -3 topless.txt; exit 1
+    fi
+    echo "  the first task named its top no task's (exit $code)"
+    ;;
+esac
+
+# ── 7g. A fault the stack guard does not own kills the process ───────────
+# The guard's handler (`IyiStackGuard.faulted`) gives a fault away from a
+# stack's edge back to the signal's default action, and built that action
+# in a heap block. A mark helper has no allocator cache, and one that
+# faulted inside a collection, holding the runtime lock, waited for that
+# lock at the block's first touch for good: on macOS 26.6, an M2 Pro with
+# 10 cores, a soak run of bench/concurrency_exercise.iyi hung so, sampled
+# with its helper in `IyiRuntimeLock.lock` under the handler, under a root
+# scan that had faulted. The action is in the handler's frame now. A
+# helper that takes the runtime lock and stores to address 8 kills the
+# process with SIGSEGV at once, on the M2 and on Linux x86_64; with the
+# heap block back, the process outlives the fault by the 5 s it waits,
+# and says so.
+case "$(uname -s)" in
+  Linux | Darwin)
+    step "a mark helper's fault inside a collection kills the process"
+    cat > wild.iyi <<'IYI'
+module wild
+
+# A helper's life here: the runtime lock taken, as a collection on a mark
+# helper holds it, then a store to an address nothing maps.
+def fault_holding_the_lock(address : UInt64) : Nil
+  IyiRuntimeLock.lock
+  Pointer(UInt64).new(address).value = 1_u64
+end
+
+entry = ->(address : UInt64) { fault_holding_the_lock(address) }
+IyiThread.start_helper(Pointer(UInt64).new(pointerof(entry).address).value, 8_u64)
+deadline = __iyi_monotonic_ns + 5_000_000_000_i64
+while __iyi_monotonic_ns < deadline
+end
+message = "the helper's fault left the process alive for 5 s\n"
+__iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+__iyi_exit(3)
+IYI
+    if ! "$IYI" build wild.iyi -o wild > build-wild.log 2>&1; then
+      cat build-wild.log; exit 1
+    fi
+    ( timeout -k 5 60 ./wild > wild.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -ne 139 ]; then
+      echo "a helper's fault holding the runtime lock exited $code, not 139 (SIGSEGV):"; tail -3 wild.txt; exit 1
+    fi
+    echo "  killed by SIGSEGV (exit 139)"
+
+    step "failure proof: the default action built in a heap block, as it was"
+    mkdir -p heaped/iyi
+    cp "$REPO"/src/iyi/*.iyi heaped/iyi/
+    awk '/^      action = uninitialized UInt64\[4\]$/ { found++; next }
+      /^      words = pointerof\(action\)\.as\(Pointer\(UInt64\)\)$/ { print "      words = Pointer(UInt64).malloc(4_u64)"; found++; next }
+      { print } END { if (found != 2) exit 3 }' \
+      "$REPO/src/iyi/concurrency.iyi" > heaped/iyi/concurrency.iyi || { echo "the stack guard's default action is not in concurrency.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/heaped${PSEP}$REPO/src" "$IYI" build wild.iyi -o heaped-run > build-heaped.log 2>&1; then
+      cat build-heaped.log; exit 1
+    fi
+    ( timeout -k 5 60 ./heaped-run > heaped.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -ne 3 ] || ! grep -q "^the helper's fault left the process alive for 5 s" heaped.txt; then
+      echo "with the action in a heap block, a helper's fault exited $code:"; tail -3 heaped.txt; exit 1
+    fi
+    echo "  the process outlived its helper's fault by 5 s"
     ;;
 esac
 

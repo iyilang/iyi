@@ -1713,12 +1713,25 @@ class IyiScheduler
 
   # The top of the fiber stack holding `address`, 0 when no fiber's
   # does: how a stopped thread's stack is bounded when the stop landed
-  # on one of its fibers.
+  # on one of its fibers. The top itself is the fiber's. On aarch64 a
+  # fresh fiber's first resume pops the whole frame `settle_stack` laid,
+  # so the switch's `ret` and `__iyi_fiber_main`'s first instruction run
+  # with sp at the top; read as no fiber's, that sp was scanned up to the
+  # thread's own top, across the mappings between, and the collector
+  # died of SIGSEGV or SIGBUS in `scan_range`. On macOS 26.6, an M2 Pro
+  # with 10 cores, a thread collecting in a loop beside bursts of 64
+  # tasks on the main thread killed 9 runs of 23 so, each of 5 s, the
+  # main thread stopped at that instruction in every crash report, and
+  # bench/concurrency_exercise.iyi hung in 2 of 675 soak runs, the one
+  # sampled with a mark helper faulted so, then held in the fault
+  # handler (`IyiStackGuard.faulted`); with the top counted, none of 26
+  # died. The lowest address is the guard page's, never an sp, and is
+  # left to the fiber whose top it may be: the stack mapped just below.
   def self.fiber_top_holding(address : UInt64) : UInt64
     fiber = @@all_head
     while fiber.is_a?(IyiFiber)
       top = fiber.stack_top
-      return top if top != 0 && address < top && address >= top - IyiFiber::STACK_BYTES
+      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES
       fiber = fiber.next_fiber
     end
     0_u64
@@ -6973,18 +6986,25 @@ end
         __iyi_exit(1)
       end
       # Not the stack's edge: the signal's default action, on the retry.
+      # The action is in this frame. It was a heap block, and a fault
+      # comes wherever it likes: on a mark helper, which has no allocator
+      # cache, inside a collection that holds the runtime lock, the
+      # block's first touch waited on that lock for good, and a fault that
+      # should have killed the process hung it - a soak run of
+      # bench/concurrency_exercise.iyi on macOS 26.6, an M2 Pro with 10
+      # cores, was sampled so. A helper faulting with the lock held
+      # (bench/thread_exercise.sh, 7g) was alive 5 s after its fault, on
+      # the M2 and on Linux x86_64; it dies of SIGSEGV at once now.
+      action = uninitialized UInt64[4]
+      words = pointerof(action).as(Pointer(UInt64))
+      words[0] = 0_u64
+      words[1] = 0_u64
+      words[2] = 0_u64
+      words[3] = 0_u64
       {% if flag?(:darwin) %}
-        action = Pointer(UInt64).malloc(2_u64)
-        action[0] = 0_u64
-        action[1] = 0_u64
-        LibC.sigaction(signal, action.as(Void*), Pointer(Void).new(0_u64))
+        LibC.sigaction(signal, words.as(Void*), Pointer(Void).new(0_u64))
       {% else %}
-        action = Pointer(UInt64).malloc(4_u64)
-        action[0] = 0_u64
-        action[1] = 0_u64
-        action[2] = 0_u64
-        action[3] = 0_u64
-        __iyi_conc_syscall6(IYI_SG_SYS_RT_SIGACTION, signal.to_i64, action.address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
+        __iyi_conc_syscall6(IYI_SG_SYS_RT_SIGACTION, signal.to_i64, words.address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
       {% end %}
     end
 

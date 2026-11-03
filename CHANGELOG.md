@@ -4,6 +4,39 @@
 
 ### Fixed
 
+- **A thread stopped as a task begins is scanned on that task's stack.**
+  A fresh fiber's first resume pops the whole frame laid for it, and on
+  aarch64 the switch's `ret` and `__iyi_fiber_main`'s first instruction
+  run with sp at the stack's top. The stop's scan read the top as no
+  fiber's, scanned from there up to the thread's own top across the
+  mappings between, and the collector died of SIGSEGV or SIGBUS. On
+  macOS 26.6, an M2 Pro with 10 cores, a thread collecting in a loop
+  beside bursts of 64 tasks killed 9 runs of 23 of 5 s so, the main
+  thread stopped at that instruction in every crash report; and
+  `bench/concurrency_exercise.iyi`, which a mark helper stops for the
+  mark beside the program, hung in 2 of 675 soak runs, the one sampled
+  with the helper faulted there (the entry below). A fiber's top is its
+  own now, and the same program ended 26 runs of 26. Linux aarch64 lays
+  the same frame.
+  `bench/thread_exercise.sh` 7f asks the scan each task's own top beside
+  a thread collecting in a loop; its failure proof puts the old bound
+  back.
+
+- **A memory fault inside a collection kills the process rather than
+  hanging it.** The stack guard's handler hands a fault that is not a
+  stack's edge back to the signal's default action, and built that
+  action in a heap block. A mark helper has no allocator cache: one that
+  faulted inside a collection, holding the runtime lock, waited for that
+  lock at the block's first touch for good, and the process hung where
+  it should have died. On macOS 26.6, an M2 Pro with 10 cores, a soak
+  run of `bench/concurrency_exercise.iyi` hung so, sampled with the
+  helper in `IyiRuntimeLock.lock` under the handler, under a root scan
+  that had faulted. The action is in the handler's frame now.
+  `bench/thread_exercise.sh` 7g: a helper that takes the runtime lock
+  and stores to address 8 kills the process with SIGSEGV at once, where
+  the process was alive 5 s later before (2 runs of 2 on the M2, 1 of 1
+  on Linux x86_64); its failure proof puts the heap block back.
+
 - **A kept block whose body passes a NoReturn value to a call compiles.**
   iyi-web's `get "/boom" do raise "..." end` stopped the compiler with
   "Cast from Nil to Iyi::ProcInstanceType failed" (bindings.cr:622): the
@@ -26078,7 +26111,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,725-line library and nothing else. Every other
+  written against iyi's own 25,745-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

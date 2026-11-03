@@ -501,6 +501,12 @@ end
     fun VirtualProtect(lpAddress : Void*, dwSize : UInt64, flNewProtect : Int32, lpflOldProtect : Int32*) : Int32
     fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
     fun GetCurrentThread : Void*
+    # The stopping thread's priority, raised over a stop and put back after
+    # its release or at a panic, by the thread that raised it
+    # (`IyiThread.raise_stopper`).
+    fun GetCurrentThreadId : Int32
+    fun GetThreadPriority(hThread : Void*) : Int32
+    fun SetThreadPriority(hThread : Void*, nPriority : Int32) : Int32
     fun SuspendThread(hThread : Void*) : Int32
     fun ResumeThread(hThread : Void*) : Int32
     fun GetThreadContext(hThread : Void*, lpContext : Void*) : Int32
@@ -1370,7 +1376,7 @@ require "./file"
   # And on Windows the DLL that link imports, named as `gc/boehm.cr` names
   # it, so that the compiler puts it beside the program (`copy_dlls`). It
   # was not named: the program imported gc.dll and found it only on PATH,
-  # and with no Crystal installation there it exited 0xC0000135,
+  # and with no other copy of the DLL there it exited 0xC0000135,
   # STATUS_DLL_NOT_FOUND, before its first line.
   {% if flag?(:win32) %}
     @[Link(dll: "gc.dll")]
@@ -2105,6 +2111,9 @@ require "./file"
       CACHE_SLICE   = 1288_u64
       CACHE_INSIDE  = 1296_u64
       CACHE_REQUEST = 1304_u64
+      # The collection this cache last filled a slice in (`IyiMark.round`):
+      # a thread counts once a collection towards the budget's floor.
+      CACHE_ROUND   = 1312_u64
       SLICE         = 65536_u64
       CENTRAL_ALLOCATED = 1280_u64
 
@@ -2282,10 +2291,11 @@ require "./file"
       end
 
       # A class's lock: read first, then one `compare_and_set`, a pause
-      # hint between looks and the core given away every 128th, never a
-      # park (the section above says why). What it is held across is a
-      # batch's pop or push, a claim, a walk of the class's own arenas for
-      # one to take up, and a warm run threaded - nothing that waits.
+      # hint between looks and the core given away every 128th from
+      # `IyiThread::YIELD_AFTER` on, never a park (the section above says
+      # why). What it is held across is a batch's pop or push, a claim, a
+      # walk of the class's own arenas for one to take up, and a warm run
+      # threaded - nothing that waits.
       def self.class_lock(index : Int32) : Nil
         word = Pointer(Atomic(UInt64)).new(class_line(index) &+ CLASS_LOCK)
         spins = 0
@@ -2294,7 +2304,7 @@ require "./file"
           {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
             # A holder the kernel preempted is not waited out on this
             # core's whole timeslice.
-            IyiThread.yield_cpu if spins & 127 == 0
+            IyiThread.yield_cpu if spins & 127 == 0 && spins >= IyiThread::YIELD_AFTER
           {% end %}
           IyiMark.spin_pause
         end
@@ -2503,14 +2513,17 @@ require "./file"
       # triggered here cannot sweep the object about to be born, because
       # it does not exist yet, and everything already born is reachable
       # or fair game. Under a mark, a slice's worth of allocation buys a
-      # slice's worth of marking on this thread first - the assist. Out
-      # of line, because it runs once a slice: inlined, the assist's and
-      # the trigger's paths - syscalls and all - were code every
+      # slice's worth of marking on this thread first - the assist - and
+      # is counted against the collection's ceiling (`IyiMark.hold`).
+      # Out of line, because it runs once a slice: inlined, the assist's
+      # and the trigger's paths - syscalls and all - were code every
       # allocation carried in its body.
       @[NoInline]
       def self.slice_full(slice : UInt64) : Nil
+        IyiMark.count_allocating
         if LibIyiGCTable.__iyi_marking != 0_u8
           IyiMark.assist
+          IyiMark.marking_slice(slice)
         else
           IyiMark.pressure(slice)
         end
@@ -7181,6 +7194,11 @@ require "./file"
       @@warm_extra : UInt64 = 0_u64
       @@reopened_cold : UInt64 = 0_u64
 
+      # The carry-over as it stands, for the exercises and the benches.
+      def self.warm_extra : UInt64
+        @@warm_extra
+      end
+
       def self.warm_pages(chunk : UInt64, pages : UInt64) : UInt64
         kept = Pointer(Atomic(UInt64)).new(pointerof(@@kept_warm).address)
         seen = kept.value.get
@@ -7449,8 +7467,9 @@ require "./file"
       end
 
       # The survivors grown by the percentage, floored at MIN_BUDGET for
-      # every thread the program registered, so a small program pays
-      # nothing and a collection's fixed price is bought with allocation.
+      # every thread that filled a slice since the last collection, so a
+      # small program pays nothing and a collection's fixed price is bought
+      # with allocation.
       # That price grows with the threads, not with the live set: each
       # thread's cache has a fill arena of its own in every class it
       # allocates in, a collection sweeps every arena before it marks
@@ -7462,13 +7481,51 @@ require "./file"
       # second, and
       # app CPU per request 4.57 ms at the geometric mean against 5.20
       # (Go's 4.59), 596.0 requests a second against 571.3.
+      # Counted by every thread registered, idle workers raised the floor
+      # too: a pool of twelve with one parallel task and the main thread
+      # churning ran on a 52 MB budget and peaked at 95 MB resident where
+      # counting the two allocating threads gives 8 MB and 18 MB, in 0.15
+      # s against 0.17 (3 runs each, a shared 12-vCPU Linux machine). The
+      # #145 app's epochs counted 7 to 13 threads under load, a 28-52 MB
+      # budget, and the extra collections cost nothing that showed: with
+      # the ceiling beside it, against master, 4.56 ms of app CPU a
+      # request either way, p99 160 ms against 171 at the geometric mean,
+      # an epoch 65 MB at the most against 223, the longest debt before a
+      # stop 4.1 ms against 249, and a peak working set of 220 MB against
+      # 493 (Windows 11, 12 logical processors, the user's machine; 11
+      # endpoints, 3 interleaved rounds, the epochs and debts from 2 of a
+      # counting copy not committed).
       def self.next_budget(survived : UInt64) : UInt64
         grown = survived.unsafe_div(100_u64) * @@growth
         floor = MIN_BUDGET
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-          floor = MIN_BUDGET * IyiThread.program_threads
+          floor = MIN_BUDGET * allocating_threads
         {% end %}
         grown < floor ? floor : grown
+      end
+
+      # Threads that filled a slice since the last collection, one at the
+      # least, counted for the next budget's floor and started again: a
+      # registered thread that does not allocate adds nothing to the
+      # sweep's arenas, and its stop is the pause's own. In the pause.
+      @@allocating : UInt64 = 0_u64
+      @@round : UInt64 = 1_u64
+
+      def self.allocating_threads : UInt64
+        counted = Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.get
+        Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.set(0_u64)
+        @@round = @@round + 1_u64
+        counted > 1_u64 ? counted : 1_u64
+      end
+
+      # A slice filled: its thread counted once for this collection. Inside
+      # the allocator's bracket, so no pause turns the round in between.
+      def self.count_allocating : Nil
+        page = IyiHeap.cache_page
+        round = @@round
+        return if IyiHeap.read64(page + IyiHeap::CACHE_ROUND) == round
+        IyiHeap.write64(page + IyiHeap::CACHE_ROUND, round)
+        Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.add(1_u64)
       end
 
       def self.auto=(value : Bool) : Nil
@@ -7501,11 +7558,215 @@ require "./file"
         total = IyiHeap.allocated_word.value.add(size) + size
         if @@collecting
           sweep_assist if total >= budget
+          hold if total >= ceiling
           return
         end
         return unless @@auto
         return if total < budget
         collect_if_due
+      end
+
+      # The collection's ceiling: what an epoch may allocate, budget and
+      # collection together, before a thread with a slice to report holds
+      # (`hold`) until the collection is over. Past the budget every slice
+      # allocated on while the collection ran - the debt paid before the
+      # stop, the stop, a mark beside the program and its second stop -
+      # and an object born under a mark lives to the sweep after the next
+      # one, so the heap held the largest epoch twice over. Twelve workers
+      # of `bench/alloc_scaling.iyi` on a 52 MB budget (the floor of
+      # thirteen threads) counted up to 232 MB in an epoch, and up to 85
+      # MB was born under one mark of 6 to 25 ms, the second stop alone 2
+      # to 13 ms of one (Linux, 12 vCPUs, a counting copy of the runtime
+      # not committed). Go's assist has a mutator that outruns the mark
+      # work for it or wait; here it is the collection's thread work it
+      # takes - the debt's sweep, the mark's pool - and a sleep when there
+      # is none.
+      #
+      # Twelve workers of 200,000 requests each, peak resident set and
+      # wall, before and after, interleaved: on a shared 12-vCPU Linux
+      # machine 692 to 856 MB in 1.02 to 1.12 s against 158 to 180 MB in
+      # 0.70 to 0.74 (3 runs each); on Windows 11, 12 logical processors
+      # (the user's machine) 204 to 265 MB in 0.68 to 0.86 s against 154
+      # to 161 in 0.68 to 0.71 (5); on macOS 26.6, Apple M2 Pro, 10 cores
+      # (the user's machine) 408 to 481 MB in 1.68 to 1.99 s against 156
+      # to 162 in 1.33 to 1.41 (5). A ceiling of 100 peaked at 124 to 128
+      # MB and one of 150 at 194 to 207 on the Linux machine. Servers,
+      # whose collections end before the ceiling: `bench/web_cores.iyi`
+      # at twelve workers, best of 3, answered check_version at 91,387
+      # against 93,679 a second, order at 83,064 against 84,871 and login
+      # at 252 against 252 on the Windows machine, and 117,419 against
+      # 117,650, 114,723 against 111,527 and 170 against 168 on the M2;
+      # `bench/release_pages.iyi` in-process at twelve workers 1.83M
+      # against 1.79M a second on the M2, peaking at 121 to 124 MB
+      # against 267 to 355 with 616 to 824 releases against 12,141 to
+      # 17,313, and 3.14M against 3.06M on Windows at 99 to 106 MB
+      # against 100 to 102. `bench/working_set.iyi` holds the peak.
+      HOLD_PAST = 125_u64
+
+      @@holds : UInt64 = 0_u64
+
+      # What a collection lets the program allocate, counted from the
+      # last one's end, before an allocating thread holds.
+      def self.ceiling : UInt64
+        budget.unsafe_div(100_u64) * HOLD_PAST
+      end
+
+      # A slice allocated under a mark: counted where the trigger counts,
+      # which the mark's end sets to what was born under it.
+      def self.marking_slice(size : UInt64) : Nil
+        total = IyiHeap.allocated_word.value.add(size) + size
+        hold if total >= ceiling
+      end
+
+      # The thread allocates no further until the collection is over: it
+      # sweeps the debt, or marks while the pool has work for it, and
+      # otherwise sleeps until the collection is let go (`hold_wait`).
+      # A stop asked for ends the wait. And for HOLD_NS at the most: a
+      # collection that has not ended by then lets the thread have one
+      # more slice, so a mark that never ends - a bug, which
+      # `watch_overdue` names - slows the program to a slice a thread per
+      # HOLD_NS rather than stopping it, and a thread outside the pool
+      # that watches for such a mark still gets to say so.
+      HOLD_NS = 100000000_u64
+
+      def self.hold : Nil
+        Pointer(Atomic(UInt64)).new(pointerof(@@holds).address).value.add(1_u64)
+        until_ns = now_ns + HOLD_NS
+        while @@collecting && !IyiHeap.stop_requested?
+          if now_ns >= until_ns
+            Pointer(Atomic(UInt64)).new(pointerof(@@holds_timed_out).address).value.add(1_u64)
+            break
+          end
+          if LibIyiGCTable.__iyi_marking != 0_u8
+            if IyiHeap.read64(pool + POOL_HEAD) != 0_u64
+              assist
+              next
+            end
+            # With nothing to mark, the assists' look at the mark's age
+            # is this thread's to take: a mark nobody drains is named.
+            watch_overdue(worker)
+          else
+            sweep_assist
+          end
+          hold_wait
+        end
+      end
+
+      # The word a held thread sleeps on, turned as each collection is let
+      # go (`let_go_holders`), and how many sleep on it.
+      @@let_go : UInt64 = 0_u64
+      @@holders_asleep : UInt64 = 0_u64
+      # Windows' doorbell for them, a kernel32 semaphore as the helpers'
+      # is (`wait_generation`); darwin's empty kqueue, waited on for its
+      # timeout alone.
+      @@holder_bell : UInt64 = 0_u64
+      # The centre page's words a Linux wait's timeout and a darwin wait's
+      # timeout and event are read from: the same values from every thread.
+      HOLD_TIMEOUT_AT = 1344_u64
+      HOLD_EVENT_AT = 1360_u64
+
+      # One sleep of a held thread: until the collection is let go, a
+      # millisecond at the most on Linux and Windows - where the timeout
+      # is the system timer's tick, 15.6 ms unless raised - and a tenth of
+      # one on darwin, which has no wake for it here and looks again. A
+      # spin was the first cut, and darwin's `yield_cpu` is the ARM hint,
+      # not a syscall: twelve held threads on ten cores kept the helpers
+      # and the stopping thread off them, and twelve workers ran
+      # `bench/alloc_scaling.iyi` in 13.9 to 31.6 s where they had run in
+      # 1.7 to 2.0 (macOS 26.6, Apple M2 Pro, 10 cores, the user's
+      # machine; ceilings of 100, 125 and 150%, five runs each). The
+      # same spin on Linux's `sched_yield` and Windows' `SwitchToThread`
+      # cost nothing that showed. The thread sleeps out of the allocator's
+      # bracket, where a stop takes it as it stands: it is inside
+      # `slice_full`, before its allocation has a chunk, and holds
+      # nothing. A stop already asked of it in the bracket is paid first,
+      # as `leave` pays it. Inside a nested bracket it gives its core away
+      # instead.
+      def self.hold_wait : Nil
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+          page = IyiHeap.cache_page
+          inside = IyiHeap.read64(page + IyiHeap::CACHE_INSIDE)
+          if inside > 1_u64
+            IyiThread.yield_cpu
+            return
+          end
+          IyiHeap.write64(page + IyiHeap::CACHE_INSIDE, 0_u64)
+          IyiThread.park_if_requested if IyiHeap.read64(page + IyiHeap::CACHE_REQUEST) != 0_u64
+          word = Pointer(Atomic(UInt64)).new(pointerof(@@let_go).address)
+          asleep = Pointer(Atomic(UInt64)).new(pointerof(@@holders_asleep).address)
+          seen = word.value.get
+          asleep.value.add(1_u64)
+          if @@collecting
+            {% if flag?(:linux) %}
+              timeout = IyiHeap.central.address + HOLD_TIMEOUT_AT
+              IyiHeap.write64(timeout, 0_u64)
+              IyiHeap.write64(timeout + 8_u64, 1000000_u64)
+              __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@let_go).address.to_i64, IYI_FUTEX_WAIT, seen.to_i64, timeout.to_i64, 0_i64, 0_i64)
+            {% elsif flag?(:win32) %}
+              bell = Pointer(Atomic(UInt64)).new(pointerof(@@holder_bell).address).value.get
+              if bell == 0_u64
+                IyiThread.yield_cpu
+              else
+                LibC.WaitForSingleObject(Pointer(Void).new(bell), 1_i32)
+              end
+            {% else %}
+              bell = Pointer(Atomic(UInt64)).new(pointerof(@@holder_bell).address).value.get
+              if bell == 0_u64
+                IyiThread.yield_cpu
+              else
+                timeout = IyiHeap.central.address + HOLD_TIMEOUT_AT
+                IyiHeap.write64(timeout, 0_u64)
+                IyiHeap.write64(timeout + 8_u64, 100000_u64)
+                LibC.kevent((bell - 1_u64).to_i32, Pointer(Void).new(0_u64), 0, Pointer(Void).new(IyiHeap.central.address + HOLD_EVENT_AT), 1, Pointer(Void).new(timeout))
+              end
+            {% end %}
+          end
+          asleep.value.sub(1_u64)
+          IyiHeap.write64(page + IyiHeap::CACHE_INSIDE, inside)
+        {% else %}
+          spin_pause
+        {% end %}
+      end
+
+      # Under the runtime lock, as a collection begins: Windows' doorbell
+      # and darwin's kqueue, made once, before any thread can hold.
+      def self.make_holder_bell : Nil
+        return if @@holder_bell != 0_u64
+        {% if flag?(:win32) && flag?(:x86_64) %}
+          bell = LibC.CreateSemaphoreW(nil, 0_i32, 0x7FFFFFFF_i32, nil).address
+          Pointer(Atomic(UInt64)).new(pointerof(@@holder_bell).address).value.set(bell) if bell != 0_u64
+        {% elsif flag?(:darwin) && flag?(:aarch64) %}
+          queue = LibC.kqueue
+          Pointer(Atomic(UInt64)).new(pointerof(@@holder_bell).address).value.set(queue.to_u64 + 1_u64) if queue >= 0
+        {% end %}
+      end
+
+      # A collection let go: the word turned, and whoever sleeps on it
+      # woken - darwin's sleepers wake on their own a tenth of a
+      # millisecond in. The world is still stopped, and a sleeper woken
+      # runs when it is released.
+      def self.let_go_holders : Nil
+        Pointer(Atomic(UInt64)).new(pointerof(@@let_go).address).value.add(1_u64)
+        asleep = Pointer(Atomic(UInt64)).new(pointerof(@@holders_asleep).address).value.get
+        return if asleep == 0_u64
+        {% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+          __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@let_go).address.to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
+        {% elsif flag?(:win32) && flag?(:x86_64) %}
+          bell = @@holder_bell
+          LibC.ReleaseSemaphore(Pointer(Void).new(bell), asleep.unsafe_to_i32, nil) if bell != 0_u64
+        {% end %}
+      end
+
+      @@holds_timed_out : UInt64 = 0_u64
+
+      # Slices whose thread held at the ceiling, in all, and the holds a
+      # collection outlasted.
+      def self.holds : UInt64
+        @@holds
+      end
+
+      def self.holds_timed_out : UInt64
+        @@holds_timed_out
       end
 
       @@sweep_assists : UInt64 = 0_u64
@@ -7555,6 +7816,7 @@ require "./file"
           return
         end
         @@collecting = true
+        make_holder_bell
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           start_helpers(wanted)
           close_sweep_round
@@ -7605,6 +7867,7 @@ require "./file"
           IyiRuntimeLock.lock
         end
         @@collecting = true
+        make_holder_bell
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           close_sweep_round
         {% end %}
@@ -7715,6 +7978,7 @@ require "./file"
         # `settle` waits for the lock too, so a program that reads those
         # accounts after it reads them whole (bench/release_trigger.iyi).
         @@collecting = false
+        let_go_holders
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           open_sweep_round
           IyiThread.resume_others(others)
@@ -7889,7 +8153,18 @@ require "./file"
             # 8.7), and binary trees ran as it did.
             # The floor is one helper, which takes the finish. Asserted
             # where it was measured.
+            #
+            # A thread of the program's waiting in its scheduler's poller
+            # with nothing to run holds no core, and is not counted: a
+            # server's pool, idle between requests, was thirteen threads
+            # on twelve cores and left its every mark one helper. On
+            # Windows 11 with 12 logical processors, iyiturkiye against
+            # postgres at twelve workers asked for 1 helper in each of 546
+            # marks and now 5.4 to 9.0 on average, its median mark 5.9 ms
+            # and now 4.5 (seven endpoints, three runs each).
             threads = IyiThread.program_threads
+            waiting = IyiScheduler.waiting_threads
+            threads = threads > waiting ? threads - waiting : 1_u64
             cores = IyiThread.core_count
             free = cores > threads + 1_u64 ? cores - threads : 1_u64
             helpers = free if helpers > free
@@ -7950,6 +8225,7 @@ require "./file"
           @@budget = next_budget(@@bytes_marked)
           open_sweep_round
           @@collecting = false
+          let_go_holders
           IyiThread.resume_others(others)
           pause = now_ns - started
           IyiHeap.unmap_released
@@ -8089,6 +8365,7 @@ require "./file"
             # below, and collects. `settle` waits for the lock too, so a
             # program that reads those accounts after it reads them whole.
             @@collecting = false
+            let_go_holders
             IyiThread.resume_others(others)
             pause = now_ns - started
             IyiHeap.unmap_released
@@ -10326,6 +10603,16 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
       marker = 0_u64
       count = c.call(pointerof(callstack).as(Void**), 64, pointerof(marker).address)
     end
+  {% end %}
+  {% if flag?(:win32) && flag?(:x86_64) %}
+    # A panic inside a stop: the stopping thread holds the priority the
+    # stop raised it to (`IyiThread.raise_stopper`), and a task's panic
+    # ends the task and not its thread, which would run every task after
+    # it raised. Put back here, by that thread only. `-Dgc_none` and
+    # `-Dgc_boehm` have no `IyiThread` and no stop.
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiThread.lower_stopper
+    {% end %}
   {% end %}
   __iyi_say("iyi: panic: ")
   __iyi_say(message)

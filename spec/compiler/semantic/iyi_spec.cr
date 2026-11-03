@@ -5094,9 +5094,49 @@ describe "Semantic: iyi" do
       end
 
       it "refuses a named argument a def's Share does not know" do
-        assert_error(<<-CODE, "unknown Share named argument on a def, valid arguments are: 'serial', 'crossing'", filename: "x.iyi")
+        assert_error(<<-CODE, "unknown Share named argument on a def, valid arguments are: 'serial', 'crossing', 'elements'", filename: "x.iyi")
           @[Share(owns: true)]
           def run(&work : -> Int32) : Nil
+            nil
+          end
+          CODE
+      end
+
+      # std/parallel's `map_parallel`: `elements:` says the values the def
+      # hands its block are read on several threads at once, so the
+      # block's parameters must be Share as well as what it captures.
+      elements_stub = group_stub + <<-STUB
+        @[Share(elements: "Make them Share, or use `each`, which stays on one thread")]
+        def each_parallel(item : T, &work : T -> Int32) : Nil forall T
+          G.spawn_parallel do
+            kept = work
+            1
+          end
+          nil
+        end
+
+        STUB
+
+      it "refuses an element the def hands its block that is not shareable, at the call" do
+        assert_error(elements_stub + <<-CODE, "each_parallel hands its block `Counter` on other threads, several at once, and it is not Share: Counter's field @count is given a setter `count=`. Make them Share, or use `each`, which stays on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          each_parallel(Counter.new) { |counter| 1 }
+          CODE
+      end
+
+      it "takes shareable elements, and still checks what the block captures, naming the twin" do
+        assert_type(elements_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          each_parallel("seven") { |name| 7 }
+          CODE
+        assert_error(elements_stub + <<-CODE, "the block each_parallel keeps, which may run on other threads captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=`. Put it behind a lock, a `Mutex(Counter)` (std/mutex), or use `each`, which stays on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          counter = Counter.new
+          each_parallel(1) { |n| counter.count = n; n }
+          CODE
+      end
+
+      it "refuses elements on a def that keeps no block" do
+        assert_error(<<-CODE, "Share's 'elements' says the values `run` hands its block are read on other threads", filename: "x.iyi")
+          @[Share(elements: "Make them Share")]
+          def run(item : Int32) : Nil
             nil
           end
           CODE

@@ -24,9 +24,10 @@
 # discovery, and the park of the mark helpers and of a stopped thread,
 # os_sync_wait_on_address and os_sync_wake_by_address_all), the thread
 # layer (pthread_*, sigaction, sigaltstack, sysctlbyname, the one
-# thread-local), errno's `__error` and the panic path's backtrace are all
-# its symbols.
-FLOOR_BASE_DARWIN="__error _tlv_bootstrap backtrace backtrace_symbols_fd clock_gettime_nsec_np exit kevent kqueue mmap mprotect munmap os_sync_wait_on_address os_sync_wake_by_address_all pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read sigaction sigaltstack sysctlbyname write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+# thread-local, and Mach's thread_switch for a spinner giving its core
+# away),
+# errno's `__error` and the panic path's backtrace are all its symbols.
+FLOOR_BASE_DARWIN="__error _tlv_bootstrap backtrace backtrace_symbols_fd clock_gettime_nsec_np exit kevent kqueue mmap mprotect munmap os_sync_wait_on_address os_sync_wake_by_address_all pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read sigaction sigaltstack sysctlbyname thread_switch write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
 
 # Linux: the prelude issues raw syscalls and adds no symbol of its own; what
 # a program carries is what the C runtime's start files leave undefined.

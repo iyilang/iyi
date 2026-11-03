@@ -407,23 +407,31 @@
     puts "    threads: five hundred short-lived threads' allocation counted, and the next slice ran a collection"
   {% end %}
 
-  # 8. A budget floored for every thread. Four threads churn garbage
-  # across sixteen size classes, so each has a fill arena of its own in
-  # each, and with the four still registered a collection's budget is at
-  # least MIN_BUDGET for each thread there is: a collection's fixed
+  # 8. A budget floored for every thread that allocates. Four threads
+  # churn garbage across sixteen size classes, so each has a fill arena
+  # of its own in each, and a collection taken while all four churn
+  # leaves a budget of at least MIN_BUDGET for each: a collection's fixed
   # price - every arena swept before the mark, two stops of every thread
-  # - grows with the threads, not with the live set. The debt's assist
-  # is bench/debt_assist.iyi's.
+  # - grows with the threads, not with the live set. And with the four
+  # still registered but idle, the next collection's floor is one
+  # thread's: a thread that allocated nothing since the last collection
+  # adds no arena to sweep. The debt's assist is bench/debt_assist.iyi's.
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     IyiMark.collect
     churned = Tally.new
     let_go = Tally.new
+    stopped = Tally.new
     together = [] of IyiThread
     4.times do
       together << IyiThread.start do
-        churn_classes(33554432_u64)
-        churned.add(1_u64)
+        rounds = 0_u64
         while let_go.get == 0_u64
+          churn_classes(1048576_u64)
+          rounds = rounds + 1_u64
+          churned.add(1_u64) if rounds == 32_u64
+        end
+        stopped.add(1_u64)
+        while let_go.get == 1_u64
           sleep(1)
         end
         nil
@@ -432,16 +440,39 @@
     while churned.get < 4_u64
       sleep(1)
     end
-    IyiMark.collect
+    # The budget the churn's own collections left: a `collect` asked for
+    # here could come microseconds after one the churn triggered - it
+    # waits out a mark in flight and then runs - and count only the one
+    # or two threads that filled a slice in between (a release build on
+    # Windows 11, 12 logical processors, the user's machine, left
+    # 8388608 bytes that way). The count is bumped as the epoch turns,
+    # just before the budget is set, so three on from here the budget
+    # read is the second's or the third's: set at the end of an epoch the
+    # four threads churned through.
+    busy_from = IyiMark.collections
+    while IyiMark.collections < busy_from + 3_u64
+      sleep(1)
+    end
     threads_now = IyiThread.program_threads
-    floor = IyiMark::MIN_BUDGET * threads_now
-    budget_now = IyiMark.budget
+    busy_floor = IyiMark::MIN_BUDGET * 4_u64
+    budget_busy = IyiMark.budget
+    let_go.add(1_u64)
+    while stopped.get < 4_u64
+      sleep(1)
+    end
+    IyiMark.collect
+    IyiMark.collect
+    budget_idle = IyiMark.budget
+    registered = IyiThread.program_threads
     let_go.add(1_u64)
     together.each { |thread| thread.join }
-    if budget_now < floor
-      raise "floor: a collection with #{count(threads_now)} threads registered left a #{count(budget_now)}-byte budget, under #{count(floor)}, so the floor does not grow with the threads"
+    if budget_busy < busy_floor
+      raise "floor: a collection while four threads allocated, #{count(threads_now)} registered, left a #{count(budget_busy)}-byte budget, under #{count(busy_floor)}, so the floor does not grow with the threads"
     end
-    puts "    floor: #{count(threads_now)} threads registered, the budget #{count(budget_now)} bytes"
+    if budget_idle >= IyiMark::MIN_BUDGET * registered
+      raise "floor: a collection with #{count(registered)} threads registered and none of them allocating left a #{count(budget_idle)}-byte budget, so threads that allocate nothing raise the floor"
+    end
+    puts "    floor: four threads allocating, the budget #{count(budget_busy)} bytes; #{count(registered)} registered and idle, #{count(budget_idle)}"
   {% end %}
 
   puts "    all trigger checks passed"

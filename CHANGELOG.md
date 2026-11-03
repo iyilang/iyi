@@ -2,7 +2,155 @@
 
 ## Unreleased
 
+### Changed
+
+- **Each channel has a lock of its own, and so does each list a
+  `std/mutex` waiter parks in.** Every channel was behind the runtime's
+  one scheduler lock, and tasks talking on channels of their own on
+  different cores waited for each other there: `bench/chan_scaling.iyi`'s
+  twelve pairs of tasks, each ping-ponging on two channels of its own,
+  made 1.49 million messages a second on twelve workers, against 12.7
+  million for one pair on one worker, with 127 of 144 sampled task
+  stacks in that lock; they make 57.3 million now (Linux x86_64, 12
+  vCPU, shared). On Windows 11, 12 logical processors (the user's
+  machine), they went from 1.13 to 38.2 million (Go's twin,
+  `bench/chan_scaling/main.go`: 24.5 million), and on macOS 26.6, an
+  M2 Pro with 10 cores (the user's machine), from 0.85 to 27.5 million;
+  twelve producers into one channel went from 1.93 to 14.4 million values
+  a second on the Windows machine (Go 12.4 million). A woken fiber is
+  readied once the channel's lock is let go. `web_cores`, whose requests
+  take no channel operation, held: best of four interleaved at twelve
+  workers on the Windows machine, `check_version` 103,770 req/s before
+  and 104,787 after, `order` 93,478 and 91,607; best of three at ten on
+  the M2, 118,593 and 118,855, 114,853 and 115,602. A `select` takes its
+  channels' locks in address order, and a fiber parked in several queues
+  is woken once, by whichever waker
+  claims its park. `bench/parallel_exercise.sh`'s new `wakes` step holds
+  selects over two channels and a deadline to each value once, cancels
+  landing as tasks park to ending them, and turns handed through
+  `park_on` to every one taken, with a broken copy caught for each; its
+  proof that `take_now` and `put_now` need their lock now runs the copy
+  until it fails by name, where a run that died of a memory fault failed
+  the gate on Windows.
+- **On Windows a mark beside the program counts a waiting worker's core
+  free.** The mark's helpers there are held to the cores the program's
+  own threads leave, and every pool worker counted as one of those
+  threads whether it was running or waiting in its poller with nothing
+  to run: a server of twelve workers on twelve processors, idle between
+  requests, marked with one helper at every collection. A scheduler
+  thread waiting in its poller is not counted now. On Windows 11 with 12
+  logical processors (the user's machine), iyiturkiye against postgres
+  at twelve workers, seven endpoints, three interleaved runs of each:
+  the helpers a mark asked for went from 1 at every one of 546 marks to
+  5.4 to 9.0 on average across the endpoints, and the median mark from
+  5.9 ms to 4.5; the longest marks did not move (90th percentile 200 ms
+  against 167, the longest 557 against 592), nor did request p99 beyond
+  the runs' own spread. Linux and darwin never held the helpers so.
+  `bench/concurrent_mark.sh` asks a mark beside a pool of a worker per
+  core for more than one helper while every worker waits, everywhere,
+  and for one while every worker runs a task, on Windows; one broken
+  copy counts the waiting workers again and one counts every worker of
+  a started pool free, and each is caught.
+
+### Gates
+
+- **concurrent_mark.sh's wake-boost proof fires whatever the machine.**
+  The proof gives the mark's helpers back the boost a satisfied wait
+  brings and expects the wake check to catch them preempting the
+  program's thread, which they do only when no processor is idle: on
+  Windows 11 with 12 logical processors (the user's machine) the boosted
+  build lost 0 to 3 wakes of 256 in five runs, and a soak's runs at two
+  and four workers missed it in all ten tries. Each run of it is now
+  held to two processors beside a spinning process, where the boosted
+  build lost 118 to 132 wakes of 256 in four runs of four started after
+  the spinner, and the shipped build, run the same way first, 0 or 1.
+### Added
+
+- **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,
+  PROPOSED).** `each_parallel`, `map_parallel`, `sum_parallel` and
+  `reduce_parallel` on a `List`, an `Array` and an `Int32` or `Int64`
+  range cut the elements into chunks, eight a worker unless `grain:`
+  names a chunk's size, and as many parallel tasks as there are workers
+  take chunks from one count. `map_parallel` answers what `map` does, in
+  order; `each_parallel` answers the error of the lowest failing index
+  and starts nothing past a failure it knows of; a panic in a chunk
+  reaches the caller, and a cancelled caller is stopped without a partial
+  answer. The block and the elements must be `Share`: a def says its
+  elements cross with `@[Share(elements: "...")]`, refused at the call -
+  ``Array#map_parallel hands its block `Counter` on other threads, ...``
+  - and a refused capture names the one-thread twin (`map`) as the other
+  way out. An `Array` is copied into a `List` first, since a task of the
+  caller's unit may write it while the caller waits. With one worker, one
+  chunk, `-Dgc_none` or `-Dgc_boehm` the chunks run on the caller. On
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine), ten workers
+  ran two CPU-bound sums, SHA-256 of 20,000 strings and a string
+  transform 6.4 to 7.4 times faster than one thread; on Windows 11 with
+  12 logical processors (the user's machine), twelve workers ran the
+  sums and SHA-256 6.4 to 7.9 times faster, and the transform, which
+  allocates, 3.8 times. `bench/std_parallel_exercise.sh` holds it, with
+  five broken copies caught by name.
+
 ### Fixed
+
+- **A task handed over by a task that computes on starts on an idle
+  worker.** A send, a `Mutex` let go or any other wake from a running
+  parallel task put the woken task in its waker's ring and called nobody
+  when it was the ring's only fiber, so it waited until the waker parked:
+  beside a 50 ms loop with preemption off it started 50.0 ms after the
+  send in all 20 wakes of two runs, with three workers idle (Linux, 12
+  vCPUs). Such a hand-off now calls an idle worker, Go's `ready` calling
+  `wakep`, and the task starts in 23 to 28 us at the median. Calling on
+  every one cost a channel ping-pong between two parallel tasks 323 to
+  338 ns a round trip against 137 to 139 on macOS 26.6, an M2 Pro with 10
+  cores, so a worker that keeps taking back the fiber it called for -
+  the waker parked first - calls for fewer and fewer, down to one
+  hand-off in 4,096, and starts over when it goes idle; and a worker
+  stealing a lone fiber from a running one waits up to 3 us for its
+  owner to take it, as Go spares a running P's `runnext`. The ping-pong
+  is 144 to 146 ns on the M2 and 150 to 157 against 136 to 156 on
+  Windows 11, 12 logical processors. `bench/parallel_migrate.iyi`'s
+  handoff step holds the wake in `bench/parallel_exercise.sh`, and its
+  failure proof takes the call away.
+
+- **A fiber left in the ring of a worker held a whole tick is stolen.**
+  A worker whose task runs where no back-edge check is - the runtime,
+  the collector, a `@[NoPreempt]` def - or whose thread the kernel left
+  in the ready queue, held what was in its ring until it came back: a
+  completion taken off Windows' port onto it, a lone fiber pushed on its
+  way to the next, a hand-off its back-off left uncalled (the entry
+  above). Traced on Windows 11, 12 logical processors, against a local
+  postgres in the tags endpoints' loop (103 queries a request, 32 tasks
+  on 12 workers), 17 to 33 fibers a run of 8 s waited 100 ms or more
+  runnable after their completion was taken, while hand-offs never
+  waited 10 ms. The pool's monitor now calls an idle worker for a worker
+  it finds held by one task a tick with fibers in its ring. On Linux, 12
+  vCPUs, a hand-off its back-off skipped beside a 100 ms hold started
+  7.8 to 9.9 ms after its send, against 100.0 ms without the call.
+  `bench/parallel_migrate.iyi`'s backstop step holds it, and its failure
+  proof takes the call away. The tags loop's tail did not move with it:
+  six runs each, interleaved, request p99 179 to 257 ms before and 175 to
+  250 after, the slowest query 253 to 621 ms and 372 to 628. Whether the
+  rest is the kernel's ready queue agent TagsTick traced is not measured.
+- **On Windows a stop no longer waits out a thread above the one
+  stopping.** A stop there is the stopping thread's own loop of
+  `SuspendThread` and `ResumeThread`, and a busier thread on its
+  processor held the world stopped until it let go: in iyiturkiye on a
+  saturated machine (Windows 11, 12 logical processors, the user's
+  machine) single calls in that loop took 148 to 214 ms, and of the
+  stops past 2 ms in three runs, 17 of 145 passed 10 ms on master. The
+  stopping thread now runs at `THREAD_PRIORITY_HIGHEST` from the start
+  of the stop to the end of its release, and is put back after, or at a
+  panic raised inside the stop. Raised, 4 of 127 passed 10 ms, the
+  longest 33 ms, and the longest single call took 26 us; the geometric
+  mean of the endpoints' p99 was 289 ms, against 306 without the raise
+  and 290 on master.
+  `bench/thread_exercise.sh` collects in a loop beside a process one
+  level above normal that computes 100 ms at a time on the stopping
+  thread's processor, and holds every stop to 20 ms: five interleaved
+  runs there gave 0.7 to 1.9 ms with the raise and 100.3 to 103.1 ms in
+  every run without it, and the copy without it is caught. A copy that
+  panics inside its stop is run too, and the copy whose panic keeps the
+  priority is caught. Linux and darwin are unchanged.
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with
@@ -74,8 +222,8 @@
   user's machine), its LLVM-C.dll of 2026-09-17, 53,079,552 bytes, stood
   beside every compiler spec program linked against LLVM 23.1.1's,
   55,308,800 bytes, and each exited 0xC0000139
-  (STATUS_ENTRYPOINT_NOT_FOUND) before its first line, which `crystal
-  spec` printed as "Process terminated abnormally, the cause is unknown".
+  (STATUS_ENTRYPOINT_NOT_FOUND) before its first line, which the spec
+  runner printed as "Process terminated abnormally, the cause is unknown".
   That was the windows-native job's "Every rule this fork adds" step
   failing on that machine on 0.19.1 and 0.20.0 alike, which an earlier
   soak had put down to its Crystal 1.22-dev bootstrap; CI's runners start
@@ -103,6 +251,92 @@
   `bench/std_weak_ref_exercise.sh` runs its `-Dgc_boehm` program there
   with only the system directory on PATH, and refuses a copy of the
   prelude that does not name the DLL.
+
+- **A collection has a ceiling, and twelve workers allocating flat out
+  peak at 154 to 180 MB where they peaked at 204 to 856.** Past the budget every thread
+  allocated on while a collection paid its debt, stopped the threads and
+  marked beside them, and an object born under a mark lives to the sweep
+  after the next, so the heap held the largest epoch twice: twelve
+  workers of `bench/alloc_scaling.iyi` on a 52 MB budget counted up to
+  232 MB in one epoch. Now a thread whose slice finds a collection under
+  way and the epoch past 125% of its budget sweeps the debt or marks for
+  it, and sleeps when there is neither, until the collection is let go
+  (GC_DESIGN.md, "The collection's ceiling"). The twelve workers peak at
+  158 to 180 MB in 0.70 to 0.74 s against 692 to 856 MB in 1.02 to 1.12
+  on a 12-vCPU Linux machine; at 154 to 161 MB against 204 to 265 on
+  Windows 11 with 12 logical processors; and at 156 to 162 MB in 1.33
+  to 1.41 s against 408 to 481 MB in 1.68 to 1.99 on macOS 26.6 with an
+  M2 Pro's 10 cores (both the user's machines). `bench/web_cores.iyi`
+  on twelve workers did not move on either of the user's machines, and
+  `bench/release_pages.iyi` on the M2 answered 1.83M requests a second
+  against 1.79M, peaking at 121 to 124 MB against 267 to 355.
+  `bench/collect_trigger.sh` runs `bench/working_set.iyi`, which fails
+  past four budgets, and a copy without the ceiling it catches (231 to
+  248 MiB on the Windows machine, past four budgets of 52 MiB).
+
+- **Idle threads no longer raise the collection budget's floor.** The
+  floor was 4 MiB for every registered thread, so a pool of twelve with
+  one parallel task and the main thread churning collected on a 52 MB
+  budget and peaked at 95 MB resident. It counts the threads that filled
+  an allocation slice since the last collection now: the same program
+  runs on 8 MB and peaks at 18 MB, in 0.15 s against 0.17 (a shared
+  12-vCPU Linux machine, 3 runs each).
+
+  Issue #145's app (iyiturkiye, twelve workers, 11 GET endpoints, oha
+  with 32 connections) counted 7 to 13 threads an epoch under load, so
+  its budget read 28 to 52 MB against master's 52. With the ceiling
+  beside it, against master (decc9f1fb), on Windows 11, 12 logical
+  processors (the user's machine), 3 interleaved rounds with goturkiye:
+
+  | | master | this branch | goturkiye |
+  |---|---:|---:|---:|
+  | requests a second, geometric mean of the best | 605.3 | 608.5 | 564.7 |
+  | p99, geometric mean of the best (ms) | 171.0 | 159.7 | 102.2 |
+  | app CPU per request (ms) | 4.56 | 4.56 | 5.00 |
+  | peak working set (MB) | 493 | 220 | 129 |
+
+  A counting copy (2 rounds) read each collection's epoch and debt:
+  `/api/v1/` allocated up to 59-60 MB an epoch against 214-223, paid
+  at most 2.2-2.7 ms of debt before a stop against 5-249 ms, and its
+  carry-over (#150's `warm_extra`) reached 23-25 MB against 141-172.
+  Across the endpoints the carry-over peaked at 41 MB against 172, so
+  it needs no cap of its own. Best p99 rose on web tags (384 ms against
+  366; the bursts of stalled queries #145's entry below describes) and
+  on cities, discover and `/admin` by 0.2-8 ms, and fell on the other
+  seven.
+
+  `bench/collect_trigger.sh` asks for both: four threads allocating keep
+  four threads' floor, and the same four idle add nothing; a copy that
+  counts every registered thread fails the second.
+### Changed
+
+- **darwin's spinners give their core away, and a stop sleeps on its
+  count.** `IyiThread.yield_cpu` was the ARM `yield` hint on darwin, which
+  gives the scheduler nothing, so the runtime lock's spinner, a class
+  lock's and the scheduler's spun through the timeslice of the thread they
+  waited for; it is Mach's `thread_switch` with the depress option now,
+  after 1,024 turns of the hint (`IyiThread::YIELD_AFTER`), and darwin's
+  floor has one name more (SPEC.md III.9). The stop's waits for its
+  threads to count in and out spin briefly and then sleep on the count,
+  woken by the last thread (Linux's futex, darwin's `os_sync`). On macOS
+  26.6, an M2 Pro with 10 cores, five interleaved runs: 7d's storm beside
+  ten busy processes made 784 to 1,056 threads in its 10 s and makes
+  3,200 in 1.0 to 1.6 s; `bench/thread_exercise.iyi` at 20 threads alone
+  took 3.3 to 4.8 s and takes 1.5 to 3.7; `bench/web_cores.iyi` serves
+  the same (login 171.02 against 171.45 req/s, `check_version` 119,338
+  against 118,778, `order` 117,066 against 115,664, best of five). On
+  Linux, 12 vCPU, the storm beside nine busy processes went from 848 to
+  1,184 threads in 10 s to 3,200 in 5.8 to 8.6 s. `sched_yield`, measured
+  first, lost at 20 threads beside a busy process per core (src/iyi/
+  thread.iyi). `bench/thread_exercise.sh` 7h runs the storm with its
+  stops asleep, and proves the wake by a run that hangs without it; 7i
+  asks darwin's storm beside busy processes for half its rate alone, and
+  puts the hint back to fail it.
+  counts every registered thread fails the second. The busy budget is
+  the one the churn's own collections leave: a `collect` asked for
+  straight after one the churn triggered counted the two threads that
+  filled a slice in between, an 8 MiB budget, once on Windows 11, 12
+  logical processors (the user's machine).
 
 ### Known
 
@@ -26187,7 +26421,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,763-line library and nothing else. Every other
+  written against iyi's own 26,629-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Twenty-one steps, thirteen of them failure proofs:
+# Twenty-three steps, fifteen of them failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -15,6 +15,9 @@
 #      program's thread spent waking the helpers, which on Windows is
 #      held under 1 ms; and how many helpers a mark beside a thread on
 #      every core but one asked for, which on Windows is held to one.
+#      And a mark beside a pool of a worker per core: more than one
+#      helper while every worker waits with nothing to run, everywhere,
+#      and one while every worker runs a task, on Windows.
 #   3. The machine alone, printed: one thread per core reading the clock
 #      and nothing else, and the longest gap any of them saw. A pause is
 #      only the runtime's where the machine gives its threads their cores:
@@ -79,10 +82,16 @@
 #      step 5's program exits 1 within ten runs.
 #  19. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
-#      program's wakes past a millisecond - exits 1.
+#      program's wakes past a millisecond - exits 1, run held to two
+#      processors beside a spinning process, where the shipped build
+#      holds.
 #  20. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
-#  21. Failure proof, on Windows: the first collection's wait for every
+#  21. Failure proof, on Windows: the pool's waiting workers counted as
+#      threads of the program's, and the idle pool check exits 1.
+#  22. Failure proof, on Windows: every worker of a started pool counted
+#      free, running or not, and the busy pool check exits 1.
+#  23. Failure proof, on Windows: the first collection's wait for every
 #      helper to reach its park put back, and the crowded check fires.
 set -u
 
@@ -863,18 +872,62 @@ fi
 # The wake is one scheduling race per collection, and the check counts
 # the races lost over two hundred and fifty: on a four-core runner the
 # boosted build lost 5 to 88 in each of 40 runs, where the check allows 3.
-# Ten runs, and the first that is caught is the proof: on an idle twelve-core
-# machine the boost showed in 1 wake of 256 across five runs once, and the
-# next run of the gate caught it on its second.
+# On a machine with idle processors the race is the machine's to lose: a
+# woken helper takes an idle processor and preempts nobody. On twelve
+# processors the boosted build lost 0 to 3 wakes of 256 in five runs, and
+# the gate's ten runs missed it at two and four workers (WinSoak's soak).
+# So each run is held to two processors (`start /affinity 3`), with a
+# process spinning beside it: the program's thread and the spinner hold
+# both, and a boosted helper preempts one of them at every wake. Here,
+# Windows 11 with 12 logical processors (the user's machine), five runs
+# so: the boosted build lost 118 to 132 wakes of 256 in the four that
+# started after the spinner (a fifth, its spinner a Python not yet
+# running, lost none, which is why the spinner here says it is ready),
+# and the shipped build 0 or 1 in each of five. The shipped build is run
+# the same way first, and holds.
+cat > spin.iyi <<'IYI'
+module spin
+
+import std/file::{File}
+
+File.touch("spin-ready")
+deadline = IyiMark.now_ns + 300000000000_u64
+x = 0_i64
+while !File.file?("spin-stop") && IyiMark.now_ns < deadline
+  i = 0_i64
+  while i < 1000000_i64
+    x = x &+ i
+    i = i + 1_i64
+  end
+end
+puts "spun #{x}"
+IYI
+if ! "$IYI" build --release spin.iyi -o spin > build-spin.log 2>&1; then
+  cat build-spin.log; exit 1
+fi
+# `./$1` held to two processors beside the spinner, its output in `$2`.
+pinned_run() {
+  rm -f spin-ready spin-stop
+  MSYS_NO_PATHCONV=1 cmd /c start "" /b /affinity 3 spin.exe > spin.txt 2>&1
+  for wait in $(seq 1 100); do [ -f spin-ready ] && break; sleep 0.1; done
+  [ -f spin-ready ] || { echo "the spinner did not start"; exit 1; }
+  MSYS_NO_PATHCONV=1 timeout -k 5 300 cmd /c start "" /b /wait /affinity 3 "$1.exe" > "$2" 2>&1
+  touch spin-stop
+  sleep 1
+}
+pinned_run marks pinned.txt
+if grep -q "^FAIL:" pinned.txt || ! grep -q "^wake: the program's thread woke the helpers" pinned.txt; then
+  echo "the shipped build, held to two processors beside a spinner:"; tail -3 pinned.txt; exit 1
+fi
+echo "  the shipped build, held to two processors beside a spinner: $(grep -m1 '^wake: the program' pinned.txt)"
 caught=""
-for try in 1 2 3 4 5 6 7 8 9 10; do
-  timeout -k 5 300 ./boosted-run > boosted.txt 2>&1
-  code=$?
-  if [ "$code" -eq 1 ] && grep -q "waking the helpers held the program's thread" boosted.txt; then
+for try in 1 2 3; do
+  pinned_run boosted-run boosted.txt
+  if grep -q "^FAIL: wake: waking the helpers held the program's thread" boosted.txt; then
     caught="$try"; break
   fi
 done
-[ -n "$caught" ] || { echo "the wake check did not fire in 10 runs:"; tail -3 boosted.txt; exit 1; }
+[ -n "$caught" ] || { echo "the wake check did not fire in 3 runs held to two processors beside a spinner:"; tail -3 boosted.txt; exit 1; }
 printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 'waking the helpers' boosted.txt)"
 
 step "failure proof: a mark beside a busy program that asks for every helper is caught"
@@ -891,6 +944,41 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: share:" greedy.txt; then
   echo "the share check did not fire (exit $code):"; tail -3 greedy.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
+
+# The pool's waiting workers counted as threads of the program's again,
+# as they were: the idle pool's mark asks for one helper, and the idle
+# pool check exits 1.
+step "failure proof: a mark beside an idle pool that counts its waiting workers is caught"
+mkdir -p counted/iyi
+cp "$REPO"/src/iyi/*.iyi counted/iyi/
+awk '/^ *threads = threads > waiting \? threads - waiting : 1_u64$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > counted/iyi/prelude.iyi || { echo "the line this proof removes is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/counted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o counted-run > build-counted.log 2>&1; then
+  cat build-counted.log; exit 1
+fi
+timeout -k 5 300 ./counted-run > counted.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: idle pool:" counted.txt; then
+  echo "the idle pool check did not fire (exit $code):"; tail -3 counted.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' counted.txt)"
+
+# Every worker of a started pool counted free, running or not: the busy
+# pool's mark asks for every helper, and the busy pool check exits 1.
+step "failure proof: a mark beside a busy pool that counts its running workers free is caught"
+mkdir -p pooled/iyi
+cp "$REPO"/src/iyi/*.iyi pooled/iyi/
+awk '/^ *waiting = IyiScheduler\.waiting_threads$/ { sub(/IyiScheduler\.waiting_threads/, "IyiWorkers.started? ? IyiWorkers.count.to_u64 : IyiScheduler.waiting_threads"); found = 1 } { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > pooled/iyi/prelude.iyi || { echo "the line this proof changes is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/pooled${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o pooled-run > build-pooled.log 2>&1; then
+  cat build-pooled.log; exit 1
+fi
+timeout -k 5 300 ./pooled-run > pooled.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: busy pool:" pooled.txt; then
+  echo "the busy pool check did not fire (exit $code):"; tail -3 pooled.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: busy pool:' pooled.txt)"
 
 # Measured on twelve cores, where eleven new helpers waited for a core;
 # on a CI runner's four the wait cost 35 ms against a 164 ms bound and the

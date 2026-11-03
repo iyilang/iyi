@@ -1,0 +1,350 @@
+# Exercises `std/parallel`: data parallelism as a library, SPEC.md III.4.14.
+#
+#     ./bin/iyi run bench/std_parallel_exercise.iyi                 # every check
+#     IYI_WORKERS=1 ./bin/iyi run bench/std_parallel_exercise.iyi   # on the caller
+#     ./bin/iyi run bench/std_parallel_exercise.iyi speed WORK N REPS [GRAIN]
+#
+# Proves, on four workers unless `IYI_WORKERS` says otherwise:
+#   * `map_parallel`, `sum_parallel`, `reduce_parallel` and `each_parallel`
+#     over a `List`, an `Array`, an `Int32` range and an `Int64` range of 0
+#     to 100,003 elements, at four grains, answer what `map`, `sum`,
+#     `reduce` and `each` answer: `map_parallel` in the elements' order,
+#     a string `reduce_parallel` - associative, not commutative - in it
+#     too, and `each_parallel` running each of 10,000 elements once.
+#   * Chunks run on the pool's workers, never on the caller's thread, on
+#     more than one of them, and two on different workers overlap in time.
+#   * `each_parallel` answers the error of the lowest index whose block
+#     answered one, every element before it run once, and starts no
+#     element past a failure it knows of; `map_parallel`
+#     keeps an error member in its place, as `map` does.
+#   * A panic in one chunk reaches the caller, naming the panic.
+#   * A caller whose group is cancelled stops: the chunks not started are
+#     skipped, and the caller ends with no answer.
+#   * Nested: a `map_parallel` inside another's block, and one inside a
+#     parallel task, answer as one thread does.
+#   * With one worker (`IYI_WORKERS=1`), and in a build under `-Dgc_none`,
+#     every chunk runs on the caller and no pool starts; the answers above
+#     are the same.
+#
+# `speed WORK N REPS [GRAIN]` times WORK - `hash` (SHA-256 of N strings of
+# 1 KiB), `sum` (a xorshift of each of N integers, summed), `skew` (the
+# same, each element costing in proportion to its index), `strings` (N
+# words upcased and reversed) - in parallel and on one thread, the best of
+# REPS runs each, on as many workers as `IYI_WORKERS` says;
+# bench/std_parallel_exercise.sh prints it at several counts, and SPEC.md
+# III.4.14 records what it printed.
+
+module bench/std_parallel_exercise
+
+import std/digest::{SHA256}
+import std/list::{List}
+import std/parallel::{Parallel}
+import std/text
+
+def check(cond : Bool, what : String) : Nil
+  raise "ASSERTION FAILED: #{what}" unless cond
+end
+
+def thread_here : UInt64
+  IyiScheduler.state.object_id
+end
+
+# A xorshift walk the optimiser cannot fold away.
+def spin(rounds : Int64, seed : UInt64) : UInt64
+  x = seed | 1_u64
+  i = 0_i64
+  while i < rounds
+    x = x ^ x.unsafe_shl(13_u64)
+    x = x ^ x.unsafe_shr(7_u64)
+    x = x ^ x.unsafe_shl(17_u64)
+    i = i + 1
+  end
+  x
+end
+
+# Busy for *ms* milliseconds of the clock, parking nowhere.
+def busy(ms : Int64) : Nil
+  began = __iyi_monotonic_ns
+  while __iyi_monotonic_ns - began < ms * 1000000_i64
+    spin(1000_i64, 7_u64)
+  end
+end
+
+pub struct Bad
+  getter index : Int32
+
+  def initialize(@index : Int32)
+  end
+end
+
+impl Error for Bad
+  def message : String
+    "bad #{@index}"
+  end
+end
+
+# Counts the blocks add to from every worker: `Share`, its fields atomic.
+class Tally
+  @count : Atomic(Int64)
+  @sum : Atomic(Int64)
+
+  def initialize
+    @count = Atomic(Int64).new(0_i64)
+    @sum = Atomic(Int64).new(0_i64)
+  end
+
+  def add(value : Int64) : Nil
+    @count.add(1_i64)
+    @sum.add(value)
+  end
+
+  def count : Int64
+    @count.get
+  end
+
+  def sum : Int64
+    @sum.get
+  end
+end
+
+SIZES  = [0, 1, 7, 1000, 100003]
+GRAINS = [0, 1, 3, 1000]
+
+def same_answers : Nil
+  puts "== the same answers as one thread"
+  SIZES.each do |n|
+    numbers = Array(Int32).new(n) { |i| i * 3 + 1 }
+    list = List.new(numbers)
+    GRAINS.each do |grain|
+      at = "#{n} elements, grain #{grain}"
+      check(list.map_parallel(grain) { |x| x * 2 - 1 } == numbers.map { |x| x * 2 - 1 }, "List#map_parallel answers what map answers (#{at})")
+      check(numbers.map_parallel(grain) { |x| x * 2 - 1 } == numbers.map { |x| x * 2 - 1 }, "Array#map_parallel answers what map answers (#{at})")
+      check((0...n).map_parallel(grain) { |i| i * 5 } == (0...n).map { |i| i * 5 }, "Range(Int32)#map_parallel answers what map answers (#{at})")
+      check((1_i64..n.to_i64).map_parallel(grain) { |i| i * 5_i64 } == (1_i64..n.to_i64).map { |i| i * 5_i64 }, "Range(Int64)#map_parallel answers what map answers (#{at})")
+      check(list.sum_parallel(grain) { |x| x.to_i64 } == numbers.sum { |x| x.to_i64 }, "List#sum_parallel answers what sum answers (#{at})")
+      check(numbers.sum_parallel(grain) { |x| x.to_i64 * x.to_i64 } == numbers.sum { |x| x.to_i64 * x.to_i64 }, "Array#sum_parallel answers what sum answers (#{at})")
+      check((1_i64..n.to_i64).sum_parallel(grain) { |i| i } == n.to_i64 * (n.to_i64 + 1_i64) // 2_i64, "Range(Int64)#sum_parallel answers what sum answers (#{at})")
+      check(list.reduce_parallel(0, grain) { |a, b| a > b ? a : b } == numbers.reduce(0) { |a, b| a > b ? a : b }, "List#reduce_parallel answers what reduce answers (#{at})")
+      tally = Tally.new
+      check(numbers.each_parallel(grain) { |x| tally.add(x.to_i64) }.nil?, "each_parallel answers nil when no block failed (#{at})")
+      check(tally.count == n.to_i64 && tally.sum == numbers.sum { |x| x.to_i64 }, "each_parallel ran every element once (#{at}): #{tally.count} runs adding to #{tally.sum}")
+    end
+  end
+  words = List.new(Array(String).new(1000) { |i| "w#{i}," })
+  GRAINS.each do |grain|
+    joined = words.reduce_parallel("", grain) { |a, b| a + b }
+    check(joined == words.reduce("") { |a, b| a + b }, "reduce_parallel folds the chunks in the elements' order (grain #{grain})")
+  end
+  puts "  map, sum, reduce and each over a List, an Array and two ranges of 0 to 100,003 elements, at grains 0, 1, 3 and 1,000, answer as one thread does"
+  puts "  a string reduce_parallel, associative and not commutative, keeps the elements' order"
+
+  ordered = (0...100003).map_parallel(1) { |i| i }
+  index = 0
+  while index < ordered.size
+    check(ordered[index] == index, "map_parallel keeps the elements' order: #{ordered[index]} at #{index}")
+    index = index + 1
+  end
+  puts "  map_parallel keeps the elements' order, chunk by chunk"
+
+  # Each element says it ran on a channel with room for all of them,
+  # which works with threads and without.
+  runs = Channel(Int32).new(10000)
+  (0...10000).each_parallel(1) { |i| runs.send(i).or_panic }
+  counts = Array(Int32).new(10000, 0)
+  10000.times do
+    i = runs.receive.or_panic
+    counts[i] = counts[i] + 1
+  end
+  counts.each_with_index { |seen, i| check(seen == 1, "each_parallel runs every element exactly once: element #{i} ran #{seen} times") }
+  puts "  each_parallel ran every one of 10,000 elements exactly once"
+end
+
+# Where each of 32 chunks of one element ran, and when.
+def placement : Nil
+  puts "\n== where the chunks run"
+  caller = thread_here
+  seen = Channel({UInt64, Int64, Int64}).new(32)
+  List.new(Array(Int32).new(32) { |i| i }).each_parallel(1) do |i|
+    began = __iyi_monotonic_ns
+    busy(2_i64)
+    seen.send({thread_here, began, __iyi_monotonic_ns}).or_panic
+  end
+  ran = Array({UInt64, Int64, Int64}).new(32) { |_| seen.receive.or_panic }
+  threads = [] of UInt64
+  ran.each { |entry| threads << entry[0] unless threads.includes?(entry[0]) }
+  pooled = IyiWorkers.count > 1
+  {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+    pooled = false
+  {% end %}
+  if pooled
+    check(!threads.includes?(caller), "chunks run on the pool's workers, never on the caller's thread")
+    check(threads.size > 1, "chunks run on more than one worker: all 32 ran on one")
+    overlap = false
+    ran.each do |a|
+      ran.each do |b|
+        overlap = true if a[0] != b[0] && a[1] < b[2] && b[1] < a[2]
+      end
+    end
+    check(overlap, "chunks overlap in time on different workers: no two did")
+    puts "  chunks ran on the pool's workers, never on the caller's thread, on more than one,"
+    puts "  and two on different workers overlapped in time"
+  else
+    check(threads.size == 1 && threads[0] == caller, "with one worker every chunk runs on the caller")
+    check(!IyiWorkers.started?, "with one worker no pool starts")
+    puts "  one worker: every chunk ran on the caller's thread, and no pool started"
+  end
+end
+
+def errors : Nil
+  puts "\n== errors and panics"
+  GRAINS.each do |grain|
+    before = Tally.new
+    failed = (0...2000).each_parallel(grain) do |i|
+      before.add(1_i64) if i < 300
+      i >= 300 && i % 100 == 0 ? Bad.new(i) : nil
+    end
+    check(failed.is_a?(Bad) && failed.index == 300, "each_parallel answers the lowest index that failed (grain #{grain}): #{failed.is_a?(Bad) ? failed.index : "nil"}")
+    check(before.count == 300_i64, "every element before the failure ran once (grain #{grain}): #{before.count} of 300")
+  end
+  puts "  each_parallel answered the error of the lowest index that failed, every element before it run once"
+
+  started = Tally.new
+  first = (0...2000).each_parallel(1) do |i|
+    started.add(1_i64)
+    sleep(1)
+    i == 0 ? Bad.new(0) : nil
+  end
+  check(first.is_a?(Bad) && started.count < 1000_i64, "each_parallel starts no element past a failure it knows of: #{started.count} of 2000 started after index 0 failed")
+  puts "  and starts no element past a failure it knows of"
+
+  kept = (0...10).map_parallel(1) { |i| i.odd? ? Bad.new(i) : i }
+  check(kept.size == 10 && kept[3].is_a?(Bad) && kept[4] == 4, "map_parallel keeps an error member in its place")
+  puts "  map_parallel kept each error member in its place, as map does"
+
+  caught = group do |g|
+    task = g.spawn do
+      (0...100).map_parallel(1) do |i|
+        raise "chunk fifty" if i == 50
+        i
+      end
+    end
+    task.value
+  end
+  check(caught.is_a?(Panicked) && caught.text.includes?("chunk fifty"), "a panic in one chunk reaches the caller")
+  puts "  a panic in one chunk reached the caller, naming the panic"
+end
+
+# The block parks, so the failing sibling runs on the caller's thread too
+# when the chunks do: with one worker, and with no threads at all.
+def cancel : Nil
+  puts "\n== cancellation"
+  ran = Tally.new
+  stopped = group do |g|
+    work = g.spawn do
+      (0...800).map_parallel(1) do |i|
+        sleep(2)
+        ran.add(1_i64)
+        i
+      end
+    end
+    g.spawn do
+      sleep(30)
+      Bad.new(-1)
+    end
+    work
+  end
+  answer = stopped.value
+  check(answer.is_a?(Panicked) && answer.text.includes?("cancellation"), "a cancelled caller ends with no answer")
+  check(ran.count < 800_i64, "a cancelled caller's chunks not yet started are skipped: all 800 ran")
+  puts "  a caller whose group failed stopped, its chunks not yet started skipped"
+end
+
+def nested : Nil
+  puts "\n== nested"
+  inner = (0...40).map_parallel(1) { |i| (0...i).map_parallel { |j| j * i }.size }
+  check(inner == (0...40).map { |i| i }, "a map_parallel inside another's block answers as one thread does")
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    answer = group do |g|
+      task = g.spawn_parallel { (1..1000).sum_parallel { |i| i } }
+      task.value
+    end
+    check(answer == 500500, "a sum_parallel inside a parallel task answers as one thread does")
+  {% end %}
+  puts "  a map_parallel inside another's block answers as one thread does"
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    puts "  and a sum_parallel inside a parallel task"
+  {% end %}
+end
+
+def best_of(reps : Int32, &work : -> Int64) : {Int64, Int64}
+  best = 0_i64
+  answer = 0_i64
+  run = 0
+  while run < reps
+    began = __iyi_monotonic_ns
+    answer = work.call
+    took = __iyi_monotonic_ns - began
+    best = took if run == 0 || took < best
+    run = run + 1
+  end
+  {best, answer}
+end
+
+# `speed WORK N REPS [GRAIN]`: the parallel verb against its sequential
+# twin, best of REPS each; the two answers must agree.
+def speed(work : String, n : Int32, reps : Int32, grain : Int32) : Nil
+  case work
+  when "hash"
+    texts = List.new(Array(String).new(n) { |i| ("#{i}-" * 200)[0, 1024] })
+    plain = Array(String).new(n) { |i| texts[i] }
+    many = best_of(reps) { texts.map_parallel(grain) { |t| SHA256.hexdigest(t) }.size.to_i64 }
+    one = best_of(reps) { plain.map { |t| SHA256.hexdigest(t) }.size.to_i64 }
+  when "sum"
+    many = best_of(reps) { (0_i64...n.to_i64).sum_parallel(grain) { |i| (spin(16_i64, i.to_u64) & 1023_u64).to_i64 } }
+    one = best_of(reps) do
+      total = 0_i64
+      i = 0_i64
+      while i < n.to_i64
+        total = total + (spin(16_i64, i.to_u64) & 1023_u64).to_i64
+        i = i + 1_i64
+      end
+      total
+    end
+  when "skew"
+    # The sum's work, but each element costs in proportion to its index:
+    # cut into one chunk a worker, the last chunk is the heaviest.
+    many = best_of(reps) { (0_i64...n.to_i64).sum_parallel(grain) { |i| (spin(1_i64 + i * 64_i64 // n.to_i64, i.to_u64) & 1023_u64).to_i64 } }
+    one = best_of(reps) do
+      total = 0_i64
+      i = 0_i64
+      while i < n.to_i64
+        total = total + (spin(1_i64 + i * 64_i64 // n.to_i64, i.to_u64) & 1023_u64).to_i64
+        i = i + 1_i64
+      end
+      total
+    end
+  when "strings"
+    words = List.new(Array(String).new(n) { |i| "word#{i}-and-some-more-letters" })
+    plain = Array(String).new(n) { |i| words[i] }
+    many = best_of(reps) { words.map_parallel(grain) { |w| w.upcase.reverse }.size.to_i64 }
+    one = best_of(reps) { plain.map { |w| w.upcase.reverse }.size.to_i64 }
+  else
+    raise "speed: no workload named #{work}; hash, sum, skew or strings"
+  end
+  check(many[1] == one[1], "#{work}: the parallel answer #{many[1]} is the sequential #{one[1]}")
+  puts "#{work} n=#{n} workers=#{IyiWorkers.count} grain=#{grain}: parallel #{many[0] // 1000_i64} us, sequential #{one[0] // 1000_i64} us"
+end
+
+arguments = Program.args
+if arguments.size >= 4 && arguments[0] == "speed"
+  speed(arguments[1], arguments[2].to_i, arguments[3].to_i, arguments.size > 4 ? arguments[4].to_i : 0)
+else
+  asked = Program.env("IYI_WORKERS")
+  IyiWorkers.count = 4 unless asked.is_a?(String)
+  same_answers
+  placement
+  errors
+  cancel
+  nested
+  puts "\nALL CHECKS PASSED"
+end

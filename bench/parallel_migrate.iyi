@@ -768,6 +768,121 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
+  # ── handoff ──────────────────────────────────────────────────────────
+  # A task woken by a task of another unit goes into its waker's ring,
+  # and the waker computes on: here a `@[NoPreempt]` loop, as the
+  # runtime's own code is, which no back-edge check gives up. The worker
+  # comes back for the woken task only when the loop ends, so an idle
+  # worker must be called to take it then and there. Each of ten wakes is
+  # timed from the send to the woken task's first statement after its
+  # receive, beside a 50 ms hold: half must start within 1 ms, and none
+  # may wait the hold out.
+  @[NoInline]
+  @[NoPreempt]
+  def hold_np(ns : Int64) : Nil
+    t = __iyi_monotonic_ns
+    while __iyi_monotonic_ns - t < ns
+      IyiThread.spin_pause
+    end
+  end
+
+  def handoff(watch : Int32) : Nil
+    watched("handoff", watch) do
+      rounds = 10
+      waits = [] of Int64
+      rounds.times do
+        gate = Channel(Int64).new(1)
+        arrived = Tally.new
+        sleeper = nil.as(IyiTask(Int64)?)
+        group do |g|
+          sleeper = g.spawn_parallel do
+            arrived.add(1_i64)
+            sent = gate.receive
+            sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
+          end
+          g.spawn_parallel do
+            while arrived.count < 1_i64
+              sleep(1)
+            end
+            sleep(5)
+            gate.send(__iyi_monotonic_ns)
+            hold_np(50_000_000_i64)
+            0
+          end
+        end
+        task = sleeper
+        got = task.is_a?(IyiTask(Int64)) ? task.value : -1_i64
+        waits << (got.is_a?(Int64) ? got : -1_i64)
+      end
+      fail("handoff: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
+      sorted = waits.sorted
+      median = sorted[rounds // 2]
+      longest = sorted[rounds - 1]
+      if median > 1_000_000_i64 || longest >= 40_000_000_i64
+        fail("handoff: tasks woken onto a worker held 50 ms with preemption off started after #{sorted.map { |w| w // 1000_i64 }} us, while other workers were idle")
+      end
+      puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off started in #{median // 1000_i64} us at the median, #{longest // 1000_i64} us at most"
+    end
+  end
+
+  # ── backstop ─────────────────────────────────────────────────────────
+  # The same wake right after its waker ping-ponged with another task
+  # 20,000 times: the worker took back the fiber it called for each time,
+  # so its back-off calls nobody for the hand-off (`push_runnable`), and
+  # the waker then holds the worker 100 ms with preemption off. The
+  # monitor, seeing the worker held a tick with a fiber in its ring,
+  # calls an idle worker: each of five wakes must start within 50 ms.
+  def backstop(watch : Int32) : Nil
+    watched("backstop", watch) do
+      rounds = 5
+      waits = [] of Int64
+      rounds.times do
+        gate = Channel(Int64).new(1)
+        ping = Channel(Int32).new
+        pong = Channel(Int32).new
+        arrived = Tally.new
+        sleeper = nil.as(IyiTask(Int64)?)
+        group do |g|
+          sleeper = g.spawn_parallel do
+            arrived.add(1_i64)
+            sent = gate.receive
+            sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
+          end
+          g.spawn_parallel do
+            20_000.times do
+              v = ping.receive
+              pong.send(v.is_a?(Int32) ? v : 0)
+            end
+            0
+          end
+          g.spawn_parallel do
+            while arrived.count < 1_i64
+              sleep(1)
+            end
+            sleep(5)
+            20_000.times do |i|
+              ping.send(i)
+              pong.receive
+            end
+            gate.send(__iyi_monotonic_ns)
+            hold_np(100_000_000_i64)
+            0
+          end
+        end
+        task = sleeper
+        got = task.is_a?(IyiTask(Int64)) ? task.value : -1_i64
+        waits << (got.is_a?(Int64) ? got : -1_i64)
+      end
+      fail("backstop: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
+      sorted = waits.sorted
+      held = waits.count { |w| w > 1_000_000_i64 }
+      if sorted[rounds - 1] >= 50_000_000_i64
+        fail("backstop: tasks woken after a ping-pong onto a worker held 100 ms with preemption off started after #{sorted.map { |w| w // 1000_i64 }} us")
+      end
+      puts "backstop: #{rounds} tasks woken after a ping-pong onto a worker held 100 ms started in #{sorted[rounds // 2] // 1000_i64} us at the median, #{sorted[rounds - 1] // 1000_i64} us at most, #{held} after more than 1 ms"
+    end
+  end
+
   # ── join ─────────────────────────────────────────────────────────────
   # A task joining a thread parks: the task it spawned, asleep on the same
   # worker, wakes on time while the thread runs 400 ms. A join held in the
@@ -803,7 +918,7 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  STEPS = ["channels", "sockets", "cancel", "closes", "deep", "loops", "balance", "join"]
+  STEPS = ["channels", "sockets", "cancel", "closes", "deep", "loops", "balance", "handoff", "backstop", "join"]
 
   watch = 60000
   chosen = [] of String
@@ -826,6 +941,8 @@ import std/socket::{IyiSocket, SocketError}
     when "deep"     then deep_step(watch)
     when "loops"    then loops(watch)
     when "balance"  then balance(watch)
+    when "handoff"  then handoff(watch)
+    when "backstop" then backstop(watch)
     when "join"     then join(watch)
     end
   end

@@ -1,0 +1,262 @@
+# Channels and locks on many workers at once: how they scale.
+#
+#   ./bin/iyi build --release bench/chan_scaling.iyi
+#   for w in 1 2 4 8 10 12; do ./chan_scaling $w 100000; done
+#
+# With no arguments it runs two workers briefly, checks every answer and
+# prints a fixed line, as every bench program's bare run does on CI.
+#
+# `W ROUNDS [SHAPE]` sets a pool of W workers and runs each shape (or the
+# one named), printing its wall time and operations a second:
+#
+# - `pingpong`: W pairs of parallel tasks, each pair its own two
+#   rendezvous channels, ROUNDS round trips a pair. Nothing is shared
+#   between pairs but the runtime, so a runtime that scales holds the wall
+#   time flat as W grows; whatever the pairs do share - the scheduler's
+#   one lock, the pool's queues - is what bends it.
+# - `fanin`: W parallel producers sending ROUNDS values each into one
+#   channel of 128, one parallel consumer taking them all, in each
+#   producer's order. One receiver is a ceiling of its own; what this
+#   adds over it is the cost of many cores sending on one channel.
+# - `mutexes`: W pairs of parallel tasks, each pair its own `std/mutex`,
+#   ROUNDS updates a task. Pairs share nothing but the runtime; a waiter
+#   that parks goes through `IyiScheduler.park_on` and its release through
+#   `wake_on`.
+# - `mutex`: W parallel tasks on one `Mutex`, ROUNDS updates each: the
+#   lock every core wants at once.
+# - `held`: W pairs on W mutexes, each update holding its lock 20 us, so
+#   the waiter parks: ROUNDS / 100 updates a task, and `over_ns` is what
+#   a pair loses per update beyond the hold - the park, the wake and the
+#   switch.
+#
+# Every answer is checked - each round trip's value, each producer's
+# order and sum, each mutex's count - so a value lost or handed twice
+# fails the run by name. `bench/chan_scaling/main.go` is the Go twin of
+# `pingpong`, `fanin` and `held` (on a `sync.Mutex`), at GOMAXPROCS = W,
+# with the same output line.
+
+import std/mutex::{Mutex}
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  # One side of a pair: sends the round's number, and its partner answers
+  # it plus one. Answers how many answers were wrong.
+  def ping(there : Channel(Int64), back : Channel(Int64), rounds : Int64) : Int64
+    wrong = 0_i64
+    round = 0_i64
+    while round < rounds
+      there.send(round)
+      answer = back.receive
+      wrong = wrong &+ 1_i64 unless answer == round &+ 1_i64
+      round = round + 1_i64
+    end
+    wrong
+  end
+
+  def pong(there : Channel(Int64), back : Channel(Int64), rounds : Int64) : Int64
+    round = 0_i64
+    while round < rounds
+      got = there.receive
+      return 1_i64 unless got.is_a?(Int64)
+      back.send(got &+ 1_i64)
+      round = round + 1_i64
+    end
+    0_i64
+  end
+
+  # The task's answer, or a failure naming the shape.
+  def joined(shape : String, handle : IyiTask(Int64)) : Int64
+    value = handle.value
+    fail("#{shape}: a task answered #{value.is_a?(Panicked) ? value.text : value}") unless value.is_a?(Int64)
+    value
+  end
+
+  def pingpong(workers : Int32, rounds : Int64) : Int64
+    wrong = 0_i64
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      workers.times do
+        there = Channel(Int64).new
+        back = Channel(Int64).new
+        handles << g.spawn_parallel { ping(there, back, rounds) }
+        handles << g.spawn_parallel { pong(there, back, rounds) }
+      end
+      handles.each { |handle| wrong = wrong &+ joined("pingpong", handle) }
+    end
+    fail("pingpong: #{wrong} round trips answered wrong") unless wrong == 0_i64
+    workers.to_i64 * rounds * 2_i64
+  end
+
+  # Producer *who* sends its number and a count, so the consumer checks
+  # each one's order.
+  def produce(fan : Channel(Int64), who : Int64, rounds : Int64) : Int64
+    i = 0_i64
+    while i < rounds
+      fan.send(who.unsafe_shl(32_u64) | i)
+      i = i + 1_i64
+    end
+    0_i64
+  end
+
+  def consume(fan : Channel(Int64), workers : Int32, rounds : Int64) : Int64
+    expected = Array(Int64).new(workers, 0_i64)
+    total = workers.to_i64 * rounds
+    taken = 0_i64
+    while taken < total
+      got = fan.receive
+      return -1_i64 unless got.is_a?(Int64)
+      who = got.unsafe_shr(32_u64).to_i
+      return -2_i64 unless who >= 0 && who < workers && got & 0xFFFFFFFF_i64 == expected[who]
+      expected[who] = expected[who] + 1_i64
+      taken = taken + 1_i64
+    end
+    taken
+  end
+
+  def fanin(workers : Int32, rounds : Int64) : Int64
+    fan = Channel(Int64).new(128)
+    taken = 0_i64
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      consumer = g.spawn_parallel { consume(fan, workers, rounds) }
+      workers.times do |who|
+        handles << g.spawn_parallel { produce(fan, who.to_i64, rounds) }
+      end
+      handles.each { |handle| joined("fanin", handle) }
+      taken = joined("fanin", consumer)
+    end
+    fail("fanin: the consumer answered #{taken}, not #{workers.to_i64 * rounds} values in each producer's order") unless taken == workers.to_i64 * rounds
+    taken
+  end
+
+  def bump(lock : Mutex(Int64), rounds : Int64) : Int64
+    i = 0_i64
+    while i < rounds
+      lock.update { |n| n + 1_i64 }.or_panic
+      i = i + 1_i64
+    end
+    0_i64
+  end
+
+  def mutexes(workers : Int32, rounds : Int64) : Int64
+    locks = [] of Mutex(Int64)
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      workers.times do
+        lock = Mutex.new { 0_i64 }
+        locks << lock
+        handles << g.spawn_parallel { bump(lock, rounds) }
+        handles << g.spawn_parallel { bump(lock, rounds) }
+      end
+      handles.each { |handle| joined("mutexes", handle) }
+    end
+    locks.each do |lock|
+      count = lock.get { |n| n }.or_panic
+      fail("mutexes: a pair's mutex counted #{count}, not #{rounds * 2_i64}") unless count == rounds * 2_i64
+    end
+    workers.to_i64 * rounds * 2_i64
+  end
+
+  def mutex(workers : Int32, rounds : Int64) : Int64
+    lock = Mutex.new { 0_i64 }
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      workers.times do
+        handles << g.spawn_parallel { bump(lock, rounds) }
+      end
+      handles.each { |handle| joined("mutex", handle) }
+    end
+    count = lock.get { |n| n }.or_panic
+    fail("mutex: one mutex counted #{count}, not #{workers.to_i64 * rounds}") unless count == workers.to_i64 * rounds
+    count
+  end
+
+  # The `held` shape's time inside the lock, spent looking at the clock:
+  # chosen to be far longer than a waiter's spin (`Mutex::SPINS` turns of
+  # a pause), so the waiter parks and the release wakes it.
+  HOLD_NS = 20000_i64
+
+  def hold : Nil
+    began = __iyi_monotonic_ns
+    while __iyi_monotonic_ns - began < HOLD_NS
+      IyiThread.spin_pause
+    end
+  end
+
+  def bump_held(lock : Mutex(Int64), rounds : Int64) : Int64
+    i = 0_i64
+    while i < rounds
+      lock.update do |n|
+        hold
+        n + 1_i64
+      end.or_panic
+      i = i + 1_i64
+    end
+    0_i64
+  end
+
+  # W pairs on W mutexes, each update holding its lock for `HOLD_NS`, so
+  # nearly every lock waits out the other task's hold parked: a pair can
+  # do no better than one update per `HOLD_NS`, and what it loses beyond
+  # that is the park, the wake and the switch (`over_ns`). A hundredth of
+  # ROUNDS each, since every update is 20 us.
+  def held(workers : Int32, rounds : Int64) : Int64
+    locks = [] of Mutex(Int64)
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      workers.times do
+        lock = Mutex.new { 0_i64 }
+        locks << lock
+        handles << g.spawn_parallel { bump_held(lock, rounds) }
+        handles << g.spawn_parallel { bump_held(lock, rounds) }
+      end
+      handles.each { |handle| joined("held", handle) }
+    end
+    locks.each do |lock|
+      count = lock.get { |n| n }.or_panic
+      fail("held: a pair's mutex counted #{count}, not #{rounds * 2_i64}") unless count == rounds * 2_i64
+    end
+    workers.to_i64 * rounds * 2_i64
+  end
+
+  def held_rounds(rounds : Int64) : Int64
+    rounds // 100_i64 < 1_i64 ? 1_i64 : rounds // 100_i64
+  end
+
+  def run(shape : String, workers : Int32, rounds : Int64) : Int64
+    case shape
+    when "pingpong" then pingpong(workers, rounds)
+    when "fanin"    then fanin(workers, rounds)
+    when "mutexes"  then mutexes(workers, rounds)
+    when "mutex"    then mutex(workers, rounds)
+    when "held"     then held(workers, held_rounds(rounds))
+    else
+      fail("no shape #{shape}: pingpong, fanin, mutexes, mutex or held")
+      0_i64
+    end
+  end
+
+  arguments = Program.args
+  quiet = arguments.empty?
+  fail("usage: chan_scaling WORKERS ROUNDS [SHAPE]") unless quiet || arguments.size == 2 || arguments.size == 3
+  workers = quiet ? 2 : arguments[0].to_i
+  rounds = quiet ? 2000_i64 : arguments[1].to_i.to_i64
+  shapes = arguments.size == 3 ? [arguments[2]] : ["pingpong", "fanin", "mutexes", "mutex", "held"]
+  IyiWorkers.count = workers
+  shapes.each do |shape|
+    started = __iyi_monotonic_ns
+    ops = run(shape, workers, rounds)
+    wall = (__iyi_monotonic_ns - started) // 1000_i64
+    wall = 1_i64 if wall < 1_i64
+    line = "shape=#{shape} workers=#{workers} rounds=#{rounds} ops=#{ops} wall_us=#{wall} ops_per_s=#{ops * 1000000_i64 // wall}"
+    line = line + " over_ns=#{wall * 1000_i64 // (held_rounds(rounds) * 2_i64) - HOLD_NS}" if shape == "held"
+    puts line unless quiet
+  end
+  puts "chan scaling: every round trip, fan-in order and mutex count read back as sent" if quiet
+{% else %}
+  puts "chan scaling: no pool on this target, nothing to measure"
+{% end %}

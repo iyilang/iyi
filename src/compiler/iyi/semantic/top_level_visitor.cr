@@ -1630,10 +1630,13 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       # other threads, each checked at every call with the sentence given
       # for it. `serial: workers` names the parameter whose literal `1` at
       # a call keeps the def on the caller's thread: that call is not
-      # checked (std/http's `Server.serve(..., workers: 1)`).
+      # checked (std/http's `Server.serve(..., workers: 1)`). `elements:`
+      # says the values the def hands its block are read on several
+      # threads at once, so the block's parameters must be Share too
+      # (std/parallel's `map_parallel`, SPEC.md III.4.14).
       if annotation_type == @program.share_annotation
         unless ann.args.empty?
-          ann.raise "Share on a def takes only named arguments, 'serial' and 'crossing': it says the block the def keeps may run on other threads"
+          ann.raise "Share on a def takes only named arguments, 'serial', 'crossing' and 'elements': it says the block the def keeps may run on other threads"
         end
         ann.named_args.try &.each do |named_arg|
           value = named_arg.value
@@ -1649,8 +1652,13 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
               named_arg.raise "Share's 'crossing' names parameters of `#{node.name}` it hands to other threads, each with what to pass instead of a value that is not Share: `crossing: {tls: \"Pass `config.frozen`\"}`"
             end
             node.iyi_share_crossing = value.entries.to_h { |entry| {entry.key, entry.value.as(StringLiteral).value} }
+          when "elements"
+            unless value.is_a?(StringLiteral) && node.block_arg.try(&.name.presence)
+              named_arg.raise "Share's 'elements' says the values `#{node.name}` hands its block are read on other threads, with what to do instead when they are not Share: `elements: \"Make them Share\"`, on a def that keeps its block, `&block : T -> R`"
+            end
+            node.iyi_share_elements = value.as(StringLiteral).value
           else
-            named_arg.raise "unknown Share named argument on a def, valid arguments are: 'serial', 'crossing'"
+            named_arg.raise "unknown Share named argument on a def, valid arguments are: 'serial', 'crossing', 'elements'"
           end
         end
         block_kept = !!node.block_arg.try(&.name.presence)

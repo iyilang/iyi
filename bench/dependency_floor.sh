@@ -218,6 +218,15 @@ COMPILER="$REPO/.build/iyi"
 # Mach semaphore was the other public park, four names with
 # `mach_task_self_` and a trap per sleeper woken. Linux's park is the
 # futex syscall and Windows' kernel32's semaphore, so neither list moved.
+# `thread_switch` joined as a spinner's way of giving its core away
+# (`IyiThread.yield_cpu`): the runtime lock's spinner and the stop's wait
+# for its threads spun on the ARM `yield` hint, which gives the scheduler
+# nothing, through the timeslice of the thread they waited for
+# (src/iyi/thread.iyi says what that cost, and what `sched_yield` cost
+# instead). It is Mach's, declared in <mach/thread_switch.h>, and in
+# `FLOOR_BASE_DARWIN` because every program's runtime lock reaches it.
+# Linux's is the syscall and Windows' kernel32's `SwitchToThread`, so
+# neither list moved.
 ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawn_file_actions_addinherit_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask pipe waitpid kill getpid _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist fstat64"
 # `std/system_roots` reads the roots darwin trusts, which are kept behind
 # Security.framework and nowhere else - no file holds them - and arrive in
@@ -634,6 +643,12 @@ while IFS= read -r annotation; do
     '@[Link("kernel32")]') ;;
     '@[Link(ldflags: "msvcrt.lib ucrt.lib vcruntime.lib")]') ;;
     '@[Link("gc", pkg_config: "bdw-gc")]') ;;
+    # The same opt-in collector on Windows, named by its DLL so the compiler
+    # copies gc.dll beside a `-Dgc_boehm` program, as Crystal's own binding
+    # does; without it such a program found the DLL only on PATH and exited
+    # 0xC0000135 where none was there. No library is added: it is the file
+    # the line above already links against.
+    '@[Link(dll: "gc.dll")]') ;;
     # Windows has no kernel32 name for OS entropy: `RtlGenRandom` lives in
     # advapi32, which ships with every Windows the way kernel32 does, and
     # `std/random` calls it; `std/socket` reads the registry there for the

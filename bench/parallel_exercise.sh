@@ -14,15 +14,23 @@
 #      lose and repeat nothing, a cancel reaches a task asleep, parked on a
 #      channel, or still waiting in the pool, a panic stops at the task's
 #      boundary, idle workers steal, collections keep the workers' lists,
-#      and the typed group answers.
+#      the typed group answers, and wakes that race across workers are
+#      neither lost nor doubled: selects parked on two channels and a
+#      deadline take each value once, a cancel landing as a task parks
+#      ends it, and turns handed through `park_on` and `wake_on` are
+#      every one taken.
 #   2. bench/parallel_migrate.iyi holds what a task keeps when it resumes
 #      on another worker, plain and --release: its stack's lists through
 #      collections, thread-locals of the thread it is on, after a park and
 #      after a loop's back-edge check that moved it, its socket's bytes, a
 #      cancel and a close from a sibling or the main thread that find it,
 #      frames 120 KiB deep; tasks parked on one worker finish in under
-#      twice the ideal, woken from the main thread and from a worker; and a
-#      task joining a thread leaves its worker to its child. On Windows,
+#      twice the ideal, woken from the main thread and from a worker; a
+#      task woken by a task that then computes with preemption off starts
+#      on an idle worker within 1 ms, and within 50 ms after a ping-pong
+#      left its waker's worker calling nobody, where the monitor calls;
+#      and a task joining a thread leaves its worker to its child. On
+#      Windows,
 #      bench/completions_taken.iyi holds the process's one completion port
 #      at twelve workers: a task's socket answered while the worker it
 #      parked on computes with preemption off is read on another worker
@@ -72,8 +80,11 @@
 #      handed out twice), a cancel that is never delivered to the thread a
 #      sleeping task is on, a cancel that skips tasks still waiting in the
 #      pool (a cancelled task run as if it were not), a cancel that leaves
-#      an io wait parked (a panic that never ends its program), and
-#      `take_now` and `put_now` without the scheduler's lock; the race
+#      an io wait parked (a panic that never ends its program),
+#      `take_now` and `put_now` without their channel's lock, a
+#      rendezvous hand that never marks the select it woke, a cancel the
+#      park it lands in never looks for, and `park_on` looking at its word
+#      outside its list's lock; the race
 #      step's add made a plain load and store, which loses adds only when
 #      tasks really run at the same instant; and for the moves of step 2 -
 #      a thread-local read as it was before a park, one read as it was
@@ -82,7 +93,9 @@
 #      find, a close posted to nobody, a read made on the thread that
 #      closes its socket, a pool that never steals a started task, tasks
 #      woken back onto the worker they parked on as they were before tasks
-#      moved, and a join held in the kernel; and on Windows a port whose
+#      moved, a hand-off that calls no idle worker, a monitor that calls
+#      nobody for a held worker's ring, and a join held in the
+#      kernel; and on Windows a port whose
 #      packets only the worker their task parked on runs, and a pool that
 #      leaves the priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
@@ -143,8 +156,8 @@ done
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
 # Its balance step is timed against four workers' ideal, which a machine
 # with fewer cores than that cannot keep; there the other steps run.
-MIGRATE_STEPS="channels sockets cancel closes deep loops balance join"
-[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops join"
+MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop join"
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
   flag=""
@@ -527,7 +540,7 @@ case "$(uname -s)" in
     ;;
   Darwin)
     [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
     thread='_close _pthread_kill'
     pool='_environ'
     allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
@@ -839,29 +852,65 @@ broken parkedio '/^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "
 caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=12
 caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=0
 
-step "failure proof: take_now and put_now without the scheduler's lock lose and repeat values across workers"
+step "failure proof: take_now and put_now without their channel's lock lose and repeat values across workers"
 # Two threads changing one channel's ring and queues at once end the step
 # by name most runs - a place still held, a value out of order, a take of
 # an empty channel, a wake lost - and some by a fault, or by a hang the
 # step's own watchdog does not end, with a channel's queues torn: 10 of 12
 # runs ended by name here and 2 hung, and a fault was seen in an earlier
-# set. A run that dies of a signal or is timed out is run again, up to
-# five times, and one ending by name is the proof.
+# set. The proof is the step's own sentence, and nothing else: a fault is
+# the race too, but one a copy that broke anything else could end in, so
+# a run that ends any other way - a fault, a signal, a hang, exit 0 - is
+# run again, up to ten times. The loop ended at the first run that was
+# not a hang, and a soak on Windows 11, 12 logical processors (the user's
+# machine), at IYI_WORKERS=2 found the gate failed by a run that died of
+# a memory fault (master 7d4d4a137). With each channel's own lock, 10
+# runs of 10 ended by name on Linux x86_64, and on that Windows machine
+# at IYI_WORKERS=2 19 of 20, the other a memory fault (48c31c427).
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: two workers cannot change a channel at the same instant, so the proof is not run"
 else
-  broken unlocked '/^  def (take_now|put_now)/ { inside = 1 } inside && /^    IyiSchedLock\.(lock|unlock)$/ { next } /^  end$/ { inside = 0 } { print }'
-  for attempt in 1 2 3 4 5; do
+  broken unlocked '/^  def (take_now|put_now)/ { inside = 1 } inside && /^    (lock|unlock)$/ { next } /^  end$/ { inside = 0 } { print }'
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
     timeout -k 5 30 ./unlocked-run now --watch=5000 > unlocked.txt 2>&1
     code=$?
-    [ "$code" -lt 124 ] && break
+    [ "$code" -eq 1 ] && grep -q 'FAIL: now: ' unlocked.txt && break
   done
   # Not anchored at the line's start: other workers' panics are printed
   # beside it, and one landed in front of the FAIL in a run of this proof.
   if [ "$code" -ne 1 ] || ! grep -q 'FAIL: now: ' unlocked.txt; then
-    echo "the copy without the lock was not caught by the now step (exit $code):"; tail -20 unlocked.txt; exit 1
+    echo "the copy without the lock was not caught by the now step in 10 runs (the last: exit $code):"; tail -20 unlocked.txt; exit 1
   fi
-  echo "  exits 1 at \"$(grep -m1 -o 'FAIL: now: .*' unlocked.txt | sed 's/^FAIL: //')\""
+  echo "  exits 1 at \"$(grep -m1 -o 'FAIL: now: .*' unlocked.txt | sed 's/^FAIL: //')\" (run $attempt)"
+fi
+
+step "failure proof: a hand that never marks its select, a cancel lost as a task parks, a word's wake lost before the link"
+# Each channel and each list `park_on` waits in has a lock of its own, so
+# a select parked on two channels is in the reach of two wakers holding
+# two locks, and a cancel claims a park under neither: the wake goes to
+# the one claim that takes the park's nonce (`IyiFiber#claim`). A
+# rendezvous sender that hands its value without marking the node lets
+# the select take another arm, and the value is gone; a cancel between a
+# park's look at its flag and its wake word finds nothing to claim unless
+# the park looks again (`IyiScheduler.suspend`); and a look at the word
+# outside its list's lock misses the wake between the look and the link.
+# On Linux x86_64 each copy was caught by name in 10 runs of 10, and on
+# Windows 11, 12 logical processors (the user's machine), in 20 of 20 at
+# IYI_WORKERS=2 and 10 of 10 at four workers (48c31c427). A copy
+# whose claim is a load and a store, not an exchange, never failed at the
+# count in 10 runs: 9 hung and 1 ended at the selects' watchdog. The one
+# sampled had a worker in `take_mail` holding the scheduler's lock and
+# every other thread waiting for it, its watchdog's among them, so it is
+# not one of the proofs.
+if [ "$CORES" -lt 2 ]; then
+  echo "  one core here: no two wakers race, so the proofs are not run"
+else
+  broken unhanded '/^      head.handed = true$/ { next } { print }'
+  caught unhanded 'wakes: selects over two channels received' wakes --watch=5000
+  broken lostcancel '/^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; next } { print }'
+  caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --watch=5000
+  broken lostword '/def self.park_on\(/ { inpark = 1 } inpark && held == "" && /^    IyiChanLock.lock\(lock\)$/ { held = $0; next } inpark && held != "" && /^      IyiChanLock.unlock\(lock\)$/ { next } inpark && held != "" && /^    end$/ { print; print held; held = ""; inpark = 0; next } { print }'
+  caught lostword 'wakes, words: turn' wakes --watch=5000
 fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"
@@ -928,6 +977,17 @@ else
   step "failure proof: a join held in the kernel holds its worker, and the sleepers on it"
   broken kerneljoin '/^      while @ended.get == 0_u64$/ { skip = 3 } skip > 0 { skip = skip - 1; next } { print }' thread.iyi parallel_migrate
   caught kerneljoin 'join: a task' join
+
+  step "failure proof: a task woken by a task that computes on waits for that computation"
+  # Measured with the handoff step, Linux, 12 vCPUs, release: the woken
+  # task started 50.0 ms after its send in each of 20 wakes without the
+  # call, beside a 50 ms hold, and 23 to 28 us with it.
+  broken nohandoff '/^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; next } { print }' concurrency.iyi parallel_migrate
+  caught nohandoff 'handoff: tasks woken onto a worker held 50 ms' handoff
+
+  step "failure proof: a monitor that calls nobody for a held worker's ring leaves a hand-off its back-off skipped behind the hold"
+  broken nobackstop '/^    wake_one if stuck$/ { next } { print }' concurrency.iyi parallel_migrate
+  caught nobackstop 'backstop: tasks woken after a ping-pong onto a worker held 100 ms' backstop
 
   if [ "$CORES" -lt 4 ]; then
     step "failure proofs for stealing"

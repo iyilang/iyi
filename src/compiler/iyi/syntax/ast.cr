@@ -1680,6 +1680,11 @@ module Iyi
     # def hands to other threads, each with the sentence that says what to
     # pass instead when a call's value is not `Share`.
     property iyi_share_crossing : Hash(String, String)? = nil
+    # iyi: `@[Share(elements: "...")]`: the values the def hands its block
+    # are read on other threads, several at once - std/parallel's
+    # `map_parallel` - so each block parameter's type must be `Share`; the
+    # sentence says what to do instead when one is not.
+    property iyi_share_elements : String? = nil
 
     def initialize(@name, @args = [] of Arg, body = nil, @receiver = nil, @block_arg = nil, @return_type = nil, @macro_def = false, @block_arity = nil, @abstract = false, @splat_index = nil, @double_splat = nil, @free_vars = nil)
       @body = Expressions.from body
@@ -1718,6 +1723,7 @@ module Iyi
       a_def.iyi_share_block = iyi_share_block?
       a_def.iyi_share_serial = iyi_share_serial
       a_def.iyi_share_crossing = iyi_share_crossing
+      a_def.iyi_share_elements = iyi_share_elements
       a_def.name_location = name_location
       a_def.visibility = visibility
       a_def.free_var_bounds = @free_var_bounds.clone

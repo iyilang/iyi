@@ -136,7 +136,11 @@
   worker allocating and keeps the floor #145 measured.
   `bench/collect_trigger.sh` asks for both: four threads allocating keep
   four threads' floor, and the same four idle add nothing; a copy that
-  counts every registered thread fails the second.
+  counts every registered thread fails the second. The busy budget is
+  the one the churn's own collections leave: a `collect` asked for
+  straight after one the churn triggered counted the two threads that
+  filled a slice in between, an 8 MiB budget, once on Windows 11, 12
+  logical processors (the user's machine).
 
 ### Known
 

@@ -4776,33 +4776,42 @@ The gates run against the new default on the shared Linux machine, each
 through the machine's one heavy slot. `socket_exercise`, and the std
 siblings `process`, `sse`, `websocket`, `tls`, `json`, `log`, `router`,
 `file`, `regex`, `autocert`, `fileserver`, `cookie`, `csv` and `dir`,
-held. These did not, and they are part 5's evidence:
+held. These did not, and they are part 5's evidence, each with what was
+done about it:
 
 - `runtime_exercise` step 11, "rendezvous FIFO: expected 123, got 312":
-  three spawns that send 1, 2 and 3 on one channel, counting on starting
-  in the order spawned. They capture only the channel, so each runs on its
-  own worker and the sends race. The gate holds on the old prelude.
+  three spawns that send 1, 2 and 3 on one channel, counting on parking in
+  the order spawned. They capture only the channel, so each ran on its own
+  worker and the sends raced. The step tests the order, so its senders
+  are `spawn_serial` now, and the step holds. The same gate's floor then
+  read `environ`, the pool's, and lists it, as `parallel_exercise`'s does.
 - `thread_exercise`, "registry: 12 fibers of 8 finished threads are still
-  registered": tasks spawned inside `IyiThread.start` blocks now leave for
-  the pool, so the fibers outlive the threads the check counts them by.
-  The gate holds on the old prelude.
-- `concurrency_exercise`'s dependency floor: a spawn there is eligible,
-  the pool starts, and `environ` (the table `IYI_WORKERS` is read from)
-  is on the link line, which that gate's floor, unlike
-  `parallel_exercise`'s, does not list.
-- `parallel_exercise`'s broken copy `closeshome` was not caught: the run
-  depends on which worker a sibling's close is made on, and a spawn that
-  was in its parent's unit now is not.
-- `std_http_exercise` did not hold.
+  registered": tasks spawned inside `IyiThread.start` blocks left for the
+  pool, so the fibers outlived the threads the check counts them by. The
+  step is about a thread's own fibers, so they are `spawn_serial`, and
+  the gate holds.
+- `concurrency_exercise`'s dependency floor: spawns there are eligible,
+  the pool starts, and `environ` and, on darwin, `_close` are on the link
+  line. They are the pool's, as `parallel_exercise`'s floor lists them,
+  and the floor lists them now with that reason. After that, one of its
+  broken copies - "a send node allocated for every park" - passed the
+  sleep check it should fail: the exercise's allocation counts are a
+  thread's, and its tasks now allocate on workers. Open.
+- `parallel_exercise`'s broken copy `closeshome` was not caught. Under
+  `-Dparallel_closes_home` its seventeenth read is meant to be a task of
+  the main thread's own; its block captures only `Share` values, so it
+  ran on the pool. It is `spawn_serial`, and the copy is caught again.
+- `std_http_exercise` failed, and fails at the same check with the old
+  prelude ("a connection served on the thread that accepted it: not
+  caught"), so this change did not cause that failure.
 
 `std_signal_exercise`, `std_mutex_exercise` and `root_exercise` failed
 too, and failed the same way when run with the old prelude through
-`IYI_PATH`, so this change did not cause those failures.
+`IYI_PATH`, so this change did not cause those failures either.
 
-No std code was changed: none of std's own spawns moved, and every failure
-above is a test program's ordering assumption. Each failing site would
-either take `spawn_serial` or have its assumption corrected. That is
-still to do on `mt/spawn` before this section is BUILT.
+No std code was changed: none of std's own spawns moved, and every
+failure above was a test program's assumption about where or in what
+order its spawns ran.
 
 **9. What it buys.** `bench/spawn_fanout.iyi`, 31 MiB hashed by 64 plain
 spawns whose blocks capture a `String`, two integers and a `List`, best of

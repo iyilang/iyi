@@ -839,6 +839,47 @@
     end
 
     {% if flag?(:win32) %}
+      # The stopping thread runs at Windows' highest priority from the
+      # start of its stop to the end of its release, the pause between
+      # included, and is put back after (`raise_stopper`, `lower_stopper`).
+      # A stop here is that thread's own loop of `SuspendThread` and
+      # `ResumeThread`, and a thread above it on its processor held the
+      # world stopped until it let go: in iyiturkiye on a saturated machine
+      # (Windows 11, 12 logical processors, the user's machine) single
+      # calls in the loop took 148 to 214 ms, and of the stops past 2 ms
+      # in three runs, 17 of 145 passed 10 ms on master, 13 of them inside
+      # the suspends. Raised, 4 of 127 passed it, the longest 33 ms and
+      # waiting in `GetThreadContext`, and the longest single call took
+      # 26 us. bench/thread_exercise.sh's burst on the stopping thread's
+      # processor holds a stop for 100 ms without the raise and under 2 ms
+      # with it.
+      #
+      # Windows only: a POSIX stop is a signal per thread, and an
+      # unprivileged Linux thread cannot raise its own priority; neither
+      # was measured. A thread already at the highest or above is left so.
+      THREAD_PRIORITY_HIGHEST = 2_i32
+      @@stopper_priority : Int32 = 0_i32
+      @@stopper_id : Int32 = 0_i32
+      @@stopper_raised = false
+
+      private def self.raise_stopper : Nil
+        me = LibC.GetCurrentThread
+        priority = LibC.GetThreadPriority(me)
+        return if priority >= THREAD_PRIORITY_HIGHEST
+        @@stopper_priority = priority
+        @@stopper_id = LibC.GetCurrentThreadId
+        @@stopper_raised = LibC.SetThreadPriority(me, THREAD_PRIORITY_HIGHEST) != 0
+      end
+
+      # The raise put back, by the thread that made it and by no other: the
+      # release's thread, and `raise`'s for a panic inside a stop, which ends
+      # only its task and leaves the thread to run the tasks after it.
+      def self.lower_stopper : Nil
+        return unless @@stopper_raised && @@stopper_id == LibC.GetCurrentThreadId
+        @@stopper_raised = false
+        LibC.SetThreadPriority(LibC.GetCurrentThread, @@stopper_priority)
+      end
+
       # Windows has no signal to deliver: the thread that stops the others
       # suspends them where they stand. The one check the POSIX handler
       # makes on the thread itself — never park a thread inside the
@@ -913,6 +954,11 @@
       # with a line stops every other.
       line = @@line
       return 0_i64 if @@count == 0_i64 || (line != 0 && @@count <= 1_i64)
+      {% if flag?(:win32) %}
+        # Raised before the stop's clock starts, so all of what that clock
+        # counts runs above the program's other threads.
+        raise_stopper
+      {% end %}
       started = IyiMark.now_ns
       page = control
       word(page + IYI_TC_SUSPENDED).value.set(0_u64)
@@ -969,6 +1015,7 @@
         while word(page + IYI_TC_RESUMED).value.get < @@deferred.to_u64
           yield_cpu
         end
+        lower_stopper
       {% else %}
         page = control
         word(page + IYI_TC_RESUME).value.set(1_u64)

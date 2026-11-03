@@ -248,6 +248,7 @@ iyi-zip: $(O)\iyi.exe check_iyi_is_release
 
 	$(call CP,README.md,"$(IYI_PACKAGE_DIR)\share\iyi\README.md")
 	$(call CP,SPEC.md,"$(IYI_PACKAGE_DIR)\share\iyi\SPEC.md")
+	$(call CP,BENCHMARKS.md,"$(IYI_PACKAGE_DIR)\share\iyi\BENCHMARKS.md")
 	$(call MKDIR,"$(IYI_PACKAGE_DIR)\share\licenses\iyi")
 	$(call CP,LICENSE,"$(IYI_PACKAGE_DIR)\share\licenses\iyi\LICENSE")
 	$(call CP,NOTICE.md,"$(IYI_PACKAGE_DIR)\share\licenses\iyi\NOTICE.md")

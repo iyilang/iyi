@@ -490,6 +490,7 @@ iyi-tarball: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN) check_iyi_is_release
 	$(MAKE) install_iyi release=1 DESTDIR="$(CURDIR)/$(O)/iyi-package" PREFIX=""
 	$(INSTALL) -m 644 README.md "$(O)/iyi-package/share/iyi/README.md"
 	$(INSTALL) -m 644 SPEC.md "$(O)/iyi-package/share/iyi/SPEC.md"
+	$(INSTALL) -m 644 BENCHMARKS.md "$(O)/iyi-package/share/iyi/BENCHMARKS.md"
 	cp -R -p samples/iyi "$(O)/iyi-package/share/iyi/samples"
 	cp -R -p samples/crystal "$(O)/iyi-package/share/iyi/samples/crystal"
 # A sample that depends on a shard leaves what it builds beside it, and the

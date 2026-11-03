@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="doc/assets/iyi-logo.png" alt="iyi's mascot: a red heart, waving" width="160">
+</p>
+
 # iyi
 
 [![iyi](https://github.com/iyilang/iyi/actions/workflows/iyi.yml/badge.svg)](https://github.com/iyilang/iyi/actions/workflows/iyi.yml)
@@ -8,36 +12,85 @@
 **A language built for Developer & Agentic Experience, Portability, Performance,
 and Efficiency.** (*iyi* is Turkish for "good".)
 
-Install the latest release into `~/.local` (Linux x86-64, macOS arm64;
-a program built for macOS runs on macOS 14.4 or later, whose public
-futex its collector's helpers sleep on - GC_DESIGN.md, "darwin's helpers
-park"):
+Those four are one design decision seen from four sides. A module is the unit of
+compilation and it is compiled against its dependencies' **declarations**, never
+their bodies — so a build reads less, a program carries less, a tool can read an
+interface without a repository, and a person waits less.
+
+| | measured |
+|---|---|
+| **Developer experience** | edit one module in a 7,207-line project and rebuild: **0.13 s**, against Crystal's 1.17 s and `go build`'s 0.16 s |
+| **Agentic experience** | `iyi mod context` hands an edit the exact surface of every import at **52–59%** of the sources' size, and a model writing against it spent **31–43% fewer prompt tokens** (`bench/context_pack.py`, AI_FIRST.md §5) |
+| **Portability** | an iyi program compiles for **nine targets** and is **run** on five of them every build: x86-64 glibc, x86-64 musl, aarch64 under emulation, wasm32-wasi under wasmtime, and aarch64-darwin natively |
+| **Performance** | native code through LLVM, and a front end that answers `hello` in **0.034 s**. At run time, within noise of Crystal's library wherever both do the same work |
+| **Efficiency** | that `hello` is a **36 KB** binary that starts in **1.6 ms**; the same program with Crystal's library is 1,553 KB and 3.2 ms |
+
+<sup>Build times: Linux, AMD Ryzen AI 9 465 under WSL2. Binary size and start-up:
+macOS arm64. Every number in this README names the command that prints it;
+[BENCHMARKS.md](BENCHMARKS.md) has the machines, the commands and the full tables.</sup>
+
+## Install
+
+Linux x86-64, or macOS 14.4 or later on arm64, into `~/.local`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | sh
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
-On Windows x86-64, with the Visual C++ build tools installed
-([Getting it](#getting-it) says why):
+Windows x86-64, with the Visual C++ build tools installed:
 
 ```powershell
 irm https://raw.githubusercontent.com/iyilang/iyi/master/install.ps1 | iex
 & "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
 ```
 
-Those four are one design decision seen from four sides. A module is the unit of
-compilation and it is compiled against its dependencies' **declarations**, never
-their bodies — so a build reads less, a program carries less, a tool can read an
-interface without a repository, and a person waits less.
+[Getting it](#getting-it) covers what each installer checks, building by
+hand, and building from source.
 
-| | measured today |
-|---|---|
-| **Developer experience** | edit one module in a 7,207-line project and rebuild: **0.13 s**, against Crystal's 1.17 s and `go build`'s 0.16 s |
-| **Agentic experience** | `iyi mod context` hands an edit the exact surface of every import at **52–59%** of the sources' size, and a model writing against it spent **31–43% fewer prompt tokens** (`bench/context_pack.py`, AI_FIRST.md §5) |
-| **Portability** | an iyi program compiles for **nine targets** and is **run** on five of them every build: x86-64 glibc, x86-64 musl, aarch64 under emulation, wasm32-wasi under wasmtime, and aarch64-darwin natively |
-| **Performance** | native code through LLVM, and a front end that answers `hello` in **0.034 s**. At run time the two libraries are within noise where they do the same work |
-| **Efficiency** | that `hello` is a **36 KB** binary that starts in **1.6 ms**; the same program with Crystal's library is 1,553 KB and 3.2 ms |
+## Delete the library's source, and it still builds
+
+Two files. `app/greeter.iyi` is a module, and its path is its file's path:
+
+```crystal
+module app/greeter
+
+pub def polite(name : String) : String
+  "Hello, #{name}."
+end
+```
+
+`main.iyi` imports it, and names what it wants in scope on the same line. The
+library does not get to put them there:
+
+```crystal
+module main
+
+import app/greeter::{polite}
+
+puts polite("world")
+```
+
+```console
+$ iyi run main.iyi
+Hello, world.
+```
+
+Now the part the language is for. Build it once, keeping each module's
+artifact, then **delete the library's source** and build again:
+
+```console
+$ iyi build --emit-iyimod mods -o hello main.iyi
+$ rm -r app                                     # the library, gone
+$ iyi build --use-iyimod mods -o hello main.iyi
+$ ./hello
+Hello, world.
+```
+
+The second build never sees `polite`'s body. It reads
+`mods/app/greeter.iyimod`, which carries the declarations it type-checks
+against and the machine code it links, and that is R-1: a module compiles
+against what its imports *say*, not against what they *do*.
 
 **iyi is its own language, and it is compatible with
 [Crystal](https://crystal-lang.org).** The same compiler builds `.cr` files,
@@ -49,37 +102,9 @@ recorded in the [licence](LICENSE) and [NOTICE.md](NOTICE.md).
 
 ## The edit loop
 
-One script writes the same program three times, in iyi, in Crystal and in Go:
-**30 modules**, 10 types each, **7,207 lines**, and one `main` that calls all
-thirty and prints the total. The benchmark changes a single number in one
-function of one module, then rebuilds. One of the thirty, as iyi, with nine of
-its ten types left out:
-
-```crystal
-module parts/mod0
-
-pub struct Widget0
-  @a : Int32
-  @b : Int32
-
-  def initialize(@a : Int32, @b : Int32)
-  end
-
-  def score : Int32
-    ((@a * 3) + (@b * 5)) % 1000
-  end
-
-  def blend(other : Widget0) : Int32
-    (score + other.score) % 1000
-  end
-end
-
-pub def total0 : Int32
-  edit_point = 0            # the line the benchmark changes, then rebuilds
-  w0 = Widget0.new(0, 0)
-  (edit_point + w0.score + w0.blend(w0)) % 100000
-end
-```
+One script writes the same program in iyi, in Crystal and in Go: **30
+modules**, 10 types each, **7,207 lines**. The benchmark changes a single
+number in one function of one module, then rebuilds:
 
 <img src="doc/assets/edit-loop.anim.svg" alt="rebuild after one edit: iyi 0.13 s, Crystal 1.17 s, go build 0.16 s" width="742">
 
@@ -91,21 +116,22 @@ Crystal class is open until the last line of the last file, so no build may
 trust anything it read last time, and every rebuild reads all 7,207 lines
 again. Take that rule away and the line you just changed costs **9x less**.
 `bench/incremental.py` refuses to start the clock until all three programs
-print the same total.
+print the same total. [BENCHMARKS.md](BENCHMARKS.md#the-edit-loop) has the
+generated module, every row of the table, and the sessions it was taken in.
 
 The design is in [SPEC.md](SPEC.md), which records what was measured, what was
-thrown away and why. Every number in this README names the command that prints
-it.
+thrown away and why.
 
 **Where it loses, and what is young:**
 
-- A full build of 6,912 never-seen lines is 0.24 s against `go build`'s 0.09 s.
-- iyi's own prelude is the small-tool floor — `puts`, stdin, whole-file
-  `File`, `Program.args`/`.env` — and no more. Sockets, format strings and
-  TLS are opt-in modules (`import std/socket`, `std/format`, `std/tls`).
-  `std/tls` has not been audited and is not to be called secure until it is;
-  [SECURITY_REVIEW_TLS.md](SECURITY_REVIEW_TLS.md) is an automated review,
-  not that audit.
+- A full build of 6,912 never-seen lines is 0.24 s against `go build`'s 0.09 s
+  ([BENCHMARKS.md](BENCHMARKS.md#the-full-build)).
+- iyi's own prelude holds what a small command-line tool needs — `puts`,
+  stdin, whole-file `File`, `Program.args`/`.env` — and no more. Sockets,
+  format strings and TLS are opt-in modules (`import std/socket`,
+  `std/format`, `std/tls`). `std/tls` has not been audited and is not to be
+  called secure until it is; [SECURITY_REVIEW_TLS.md](SECURITY_REVIEW_TLS.md)
+  is an automated review, not that audit.
 - Concurrency (`group`/`spawn`, `spawn_parallel`, `Channel`, cancellation;
   SPEC.md III.4) runs on Linux (x86_64, aarch64), macOS arm64 and Windows
   x86-64, and not on wasm32. `spawn` keeps a task on the thread that
@@ -113,7 +139,9 @@ it.
   waits on sockets and channels. `spawn_parallel` runs it on the pool's
   workers, one per core, for work that computes, and its block may capture
   only `Share` values. std/http's `Server.serve` puts each connection on
-  the pool by default; `workers: 1` keeps a server on one thread.
+  the pool by default; `workers: 1` keeps a server on one thread
+  ([BENCHMARKS.md](BENCHMARKS.md#a-web-servers-cores-issue-145) measures it
+  against Go).
 - Dependencies resolve and pin (`iyi.mod`, `iyi get`, `iyi.sum`; SPEC.md
   III.7), but there is no registry and no artifact distribution yet, and
   `--crystal` still leans on shards.
@@ -179,84 +207,6 @@ $ iyi build --emit-iyimod mods samples/iyi/webapp.iyi   # writes kemal/router.iy
 $ rm -rf samples/iyi/kemal                              # the library's source, gone
 $ iyi build --use-iyimod mods samples/iyi/webapp.iyi    # builds, links, runs, same output
 ```
-
-## What it costs, measured
-
-The project from [The edit loop](#the-edit-loop), best of 7, release compiler,
-one idle Linux box (AMD Ryzen AI 9 465 under WSL2, LLVM 19.1.7, Go 1.25.2),
-seconds:
-
-| what changed | iyi | Crystal | `go build` |
-|---|---|---|---|
-| **one module's body** | **0.13** | 1.17 | 0.16 |
-| the entry file only | **0.12** | 1.15 | 0.16 |
-| nothing at all | 0.12 | 1.14 | 0.08 |
-| nothing cached anywhere | 0.61 | 1.97 | 3.09 |
-| the same edit, *without* artifacts | 0.23 | — | — |
-
-The last row is R-1 with a price on it: with all thirty modules read from
-source the edit costs 0.23 s; with the `.iyimod` files in hand the other
-twenty-nine arrive as declarations and it costs 0.13 s. `go build` from nothing
-also compiles its own dependencies once, so its 3.09 s is a first build on a
-fresh machine rather than a claim about Go's compiler. Seconds are a machine,
-not a language: other sessions on the same box read 0.16 / 1.29 / 0.19 and
-0.22 / 1.81 / 0.27 on the first row. The ratios hold.
-
-The *nothing at all* row was taken before `iyi build` learned to stop when
-nothing changed: it now reads back what the last build read, finds it all as
-it was, and says `out is up to date` without compiling (`--force` builds
-anyway). On the machine SPEC.md IV.3a measures that on, the row went from
-0.60 s to 0.01 s, with `go build`'s at 0.04 s.
-
-The full build is the row iyi loses. `python3 bench/build_speed.py`, same
-session:
-
-| program | iyi | `go build` |
-|---|---|---|
-| `hello` (149 lines) | **0.07 s** | 0.08 s |
-| generated pair, 6,912 lines | 0.24 s | **0.09 s** |
-
-<sup>Both counts are `wc -l`: 149 for `samples/iyi/hello.iyi`, of which 44 are
-code and the rest the commentary that makes it a sample, and 6,912 for what
-`python3 bench/build_speed/generate_pair.py 300 <dir>` writes. The Go side of
-each row is 11 lines and 6,016.</sup>
-
-Compiling code it has never seen costs roughly 25 ms per thousand lines. The
-front end alone is 0.034 s for `hello`, and 0.018 s of that is the process
-starting up before it reads anything.
-
-### A web server's cores (issue #145)
-
-Issue #145 ported a web API to iyi and found it never used more than 1.8
-of twelve cores, while its Go port used 11. `Server.serve` now answers
-connections on a pool of workers, one per core unless `workers:` says
-otherwise. The table below compares it with `workers: 1` and a Go twin
-that answers the same bytes. It covers the issue's kinds of endpoint,
-without the issue's database: a bcrypt login, a `check_version` that
-answers a few fields of JSON, and an `order` that reads, totals and
-sorts sixteen items of JSON.
-
-It was taken with `bench/web_cores.py`: wrk with 4 threads and 32
-kept-alive connections, bcrypt at cost 10, `serve` on 1, 2, 4,
-8 and 12 workers, best of 3 runs of 15 s (login) and 5 s (the others).
-The machine was Linux on a twelve-thread VM, with other work keeping
-about 2 of its cores busy. Each cell is requests a second over HTTP, with
-the server's CPU in brackets:
-
-| | login | check_version | order |
-|---|---:|---:|---:|
-| iyi `serve`, `workers: 1` | 27 (100%) | 46,241 (112%) | 33,665 (113%) |
-| iyi `serve`, 12 workers | **247** (1,032%) | 205,879 (631%) | **131,160** (697%) |
-| Go net/http | 242 (1,033%) | **216,298** (528%) | 90,732 (538%) |
-| *the issue's iyi: Windows, with a database* | *9.9* | *5,308* | |
-| *the issue's Go: Windows, with a database* | *108.2* | *21,099* | |
-
-The login is now as fast as Go's: bcrypt takes the same CPU per hash in
-both, and the gap was the number of cores in use. Past four workers, the
-light endpoints are held back by the load generator, and in this table's
-iyi also by the collector's allocation lock, since split by size class.
-SPEC.md III.4.13 has every worker count, HTTPS, the latencies, the profile
-behind both claims, and the split measured again.
 
 ## The rules everything follows from
 
@@ -371,9 +321,9 @@ including the one pause the design does not bound.
 
 **Efficiency — mostly subtraction.** `puts "hello"` is a 36 KB binary that
 starts in 1.6 ms; the same program compiled with Crystal's standard library is
-1,553 KB and 3.2 ms. A program links what it uses, and
-iyi's own library is 25,763 lines rather than 8,161.
-The whole library is 1,080 KB on disk beside the binary.
+1,553 KB and 3.2 ms. A program links only what it uses, and
+iyi's own library is 25,763 lines, written to be linked that way. That
+library is 1,080 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
 and move with the platform; `python3 bench/machine_probe.py` prints your
@@ -404,6 +354,10 @@ does not bring is a C toolchain, because iyi links through `cc`. CI unpacks it
 in a bare Ubuntu 20.04 image with nothing but `gcc` and builds a program there.
 The Linux tarball needs glibc 2.31 or newer (Ubuntu 20.04, Debian 11, RHEL 9
 and later), because it is built on Ubuntu 20.04.
+
+**macOS** 14.4 is the floor for the compiler and for every program it builds:
+the collector's helper threads sleep on the public futex API that release
+added (GC_DESIGN.md, "darwin's helpers park").
 
 **Windows.** The release also carries `iyi-0.20.0-windows-x86_64.zip`, and
 [`install.ps1`](install.ps1) installs it the way `install.sh` installs the
@@ -499,50 +453,6 @@ prints. The compiler carries no collector, so the server compiles in a worker
 process it replaces from time to time, and a session rests at about 100 MB
 (`bench/lsp_memory.py`).
 
-### Your first module, and then the rule that matters
-
-Two files. `app/greeter.iyi` is a module, and its path is its file's path:
-
-```crystal
-module app/greeter
-
-pub def polite(name : String) : String
-  "Hello, #{name}."
-end
-```
-
-`main.iyi` imports it, and names what it wants in scope on the same line. The
-library does not get to put them there:
-
-```crystal
-module main
-
-import app/greeter::{polite}
-
-puts polite("world")
-```
-
-```console
-$ iyi run main.iyi
-Hello, world.
-```
-
-Now the part the language is for. Build it once, keeping each module's
-artifact, then **delete the library's source** and build again:
-
-```console
-$ iyi build --emit-iyimod mods -o hello main.iyi
-$ rm -r app                                     # the library, gone
-$ iyi build --use-iyimod mods -o hello main.iyi
-$ ./hello
-Hello, world.
-```
-
-The second build never sees `polite`'s body. It reads
-`mods/app/greeter.iyimod`, which carries the declarations it type-checks
-against and the machine code it links, and that is R-1: a module compiles
-against what its imports *say*, not against what they *do*.
-
 ### What a program depends on
 
 A plain build with iyi's own prelude links the platform's C library and
@@ -600,8 +510,7 @@ $ curl localhost:3000/json
 traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
 of them work in a program that requires a shard, and R-2 still refuses an
 export that does not write its types. What changes is what the program *has*:
-8,161 lines of Crystal's standard library instead of 25,763 lines of iyi's own
-prelude.
+Crystal's standard library instead of 25,763 lines of iyi's own prelude.
 
 **One name is unreachable, and it is a class of names.** `!` in iyi propagates
 an error, so a method whose name ends in one cannot be called from a `.iyi`
@@ -856,10 +765,10 @@ The namespace becomes the path, qualified names become names on `import`
 lines, an import cycle becomes one module, and a reopened foreign type stays
 Crystal beside its module. `--annotate` writes the types R-2 asks for by
 reading them off the program the compiler already typed. `--check` compiles
-each module written and says whose each refusal is: the environment's, yours,
-or the verb's own. On a 99-file, 8,079-line Kemal application that is 91
-modules, all of which compile, and the program answers the Crystal build byte
-for byte on every route tried.
+each module written and, for each refusal, says where the cause lies: the
+environment, your code, or a limit of `migrate` itself. On a 99-file,
+8,079-line Kemal application that is 91 modules, all of which compile, and the
+program answers the Crystal build byte for byte on every route tried.
 
 ## Questions you are about to ask
 
@@ -921,10 +830,11 @@ not the library.
 | | |
 |---|---|
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
+| [BENCHMARKS.md](BENCHMARKS.md) | the build and server measurements, with their machines and commands |
 | [`samples/iyi`](samples/iyi) | twenty-eight programs: twenty documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
 | [`src/iyi`](src/iyi) | iyi's own library, 25,763 lines. `--crystal` swaps it for Crystal's |
-| [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
+| [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, and not counted against the prelude's size limit (SPEC.md I.4) |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |
 | [`bench/edit_loop.py`](bench/edit_loop.py) | the edit loop on real programs and a generated web application, with and without artifacts |

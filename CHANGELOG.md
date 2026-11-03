@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **README no longer calls Crystal 0.1.0's library Crystal's standard
+  library.** The 8,161 lines it compared iyi's 25,763-line prelude with
+  are the library Crystal shipped at 0.1.0 (SPEC.md I.4), not what
+  `--crystal` links today, and the efficiency paragraph read as iyi's
+  library being three times Crystal's. The README now opens with the
+  claim, the table and the install, and its build and server
+  measurements moved to BENCHMARKS.md, which the tarball and the zip
+  carry beside it; `bench/measured_numbers.py` checks them there.
+
 - **A thread stopped as a task begins is scanned on that task's stack.**
   A fresh fiber's first resume pops the whole frame laid for it, and on
   aarch64 the switch's `ret` and `__iyi_fiber_main`'s first instruction

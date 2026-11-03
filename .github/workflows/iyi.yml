@@ -397,6 +397,13 @@ jobs:
       - name: Build the samples again with their modules' source deleted
         run: bash bench/samples_roundtrip.sh
 
+      # A `--release` build cut into partitions and optimised on every core:
+      # more than one core busy, the samples printing what one module
+      # prints, and the same objects on one thread and on four - each with
+      # a broken copy it has to catch (`ReleasePartition`).
+      - name: A release build uses every core and builds the same program
+        run: bash bench/release_cores.sh
+
       # V.9 (e): a build with nothing changed compiles nothing, and each kind
       # of input a build reads, changed, builds again and prints the change.
       - name: A build with nothing changed is up to date, and only then
@@ -1605,6 +1612,9 @@ jobs:
       - name: Samples, from artifacts (R-1)
         run: bash bench/samples_roundtrip.sh
 
+      - name: Release builds on every core, the same program
+        run: bash bench/release_cores.sh
+
       - name: Up to date, and only then (V.9 (e))
         run: bash bench/up_to_date.sh
 
@@ -2271,6 +2281,7 @@ jobs:
         run: |
           export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
           bash bench/samples_roundtrip.sh
+          bash bench/release_cores.sh
           python bench/agent_loop.py
           python bench/lsp_token_boundaries.py
           python bench/lsp_positions.py 600

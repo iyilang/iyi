@@ -27,7 +27,8 @@
 #
 # Every answer is checked - each round trip's value, each producer's
 # order and sum, each mutex's count - so a value lost or handed twice
-# fails the run by name.
+# fails the run by name. `bench/chan_scaling/main.go` is the Go twin of
+# `pingpong` and `fanin`, at GOMAXPROCS = W, with the same output line.
 
 import std/mutex::{Mutex}
 

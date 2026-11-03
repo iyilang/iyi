@@ -12,8 +12,19 @@
   made 1.49 million messages a second on twelve workers, against 12.7
   million for one pair on one worker, with 127 of 144 sampled task
   stacks in that lock; they make 57.3 million now (Linux x86_64, 12
-  vCPU, shared). A `select` takes its channels' locks in address order,
-  and a fiber parked in several queues is woken once, by whichever waker
+  vCPU, shared). On Windows 11, 12 logical processors (the user's
+  machine), they went from 1.13 to 38.2 million (Go's twin,
+  `bench/chan_scaling/main.go`: 24.5 million), and on macOS 26.6, an
+  M2 Pro with 10 cores (the user's machine), from 0.85 to 27.5 million;
+  twelve producers into one channel went from 1.93 to 14.4 million values
+  a second on the Windows machine (Go 12.4 million). A woken fiber is
+  readied once the channel's lock is let go. `web_cores`, whose requests
+  take no channel operation, held: best of four interleaved at twelve
+  workers on the Windows machine, `check_version` 103,770 req/s before
+  and 104,787 after, `order` 93,478 and 91,607; best of three at ten on
+  the M2, 118,593 and 118,855, 114,853 and 115,602. A `select` takes its
+  channels' locks in address order, and a fiber parked in several queues
+  is woken once, by whichever waker
   claims its park. `bench/parallel_exercise.sh`'s new `wakes` step holds
   selects over two channels and a deadline to each value once, cancels
   landing as tasks park to ending them, and turns handed through

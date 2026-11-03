@@ -3951,15 +3951,22 @@ tasks on twelve workers, each pair ping-ponging on two channels of its
 own, made 1.49 million messages a second where one pair on one worker
 made 12.7 million, and 127 of the 144 task stacks gdb sampled were
 spinning or yielding in that lock (Linux x86_64, 12 vCPU, shared, load
-0.9). With a lock each the twelve pairs made 57.3 million (load 9.1). A
+0.9). With a lock each the twelve pairs made 57.3 million (load 9.1);
+best of three interleaved, twelve pairs went from 1.13 to 38.2 million on
+Windows 11, 12 logical processors (the user's machine), where Go's twin
+of the shape made 24.5 million, and from 0.85 to 27.5 million on macOS
+26.6, an Apple M2 Pro with 10 cores (the user's machine). A
 `select` takes its channels' locks in the order of their addresses; a
 fiber in several queues at once — a select's arms, a park a cancel or a
 deadline also reaches — is woken by the one waker whose exchange takes
 its park's nonce (`IyiFiber#claim`), and a park looks at its cancel flag
 again once its nonce is set, so a cancel that came between its first
-look and the park is not lost. What a channel still serialises is its
-own traffic: twelve producers sending into one channel of 128 made 3.1
-million values a second against one producer's 48.8 million.
+look and the park is not lost. The fiber an operation wakes is readied
+after its channel's lock is let go. What a channel still serialises is
+its own traffic: into one channel of 128, twelve producers made 14.4
+million values a second on that Windows machine (Go 12.4 million), eight
+made 8.1 million (Go 12.7 million) and one 71.4 million (Go 37.8
+million); on the M2, twelve made 2.1 million against one's 63.4 million.
 
 **7. The collector stops and scans a worker as any thread.** A worker is an
 `IyiThread`: a registered line, stopped by the stop signal (a suspend on

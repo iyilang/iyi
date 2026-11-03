@@ -542,6 +542,81 @@
     puts "share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers"
     fail("the chain's tail lost its payload beside the busy threads") unless tail(chain).payload.is_a?(Payload)
   end
+
+  # ── The helpers' share beside an idle pool ────────────────────────────
+  # A pool of a worker per core, every worker waiting in its poller with
+  # nothing to run, and a mark beside the program from the main thread:
+  # the waiting workers hold no core, and the mark asks for more than one
+  # helper. On Windows it asked for one, the workers counted as threads
+  # computing, and a server idle between requests marked alone. Then the
+  # same pool with every worker running a task: on Windows the mark asks
+  # for one helper again, the busy workers' cores not the helpers' to
+  # take. Asserted everywhere for the idle pool, on Windows for the busy.
+  if cores >= 3_u64
+    IyiWorkers.count = cores.to_i32
+    group do |g|
+      cores.to_i32.times { g.spawn_parallel { 0 } }
+    end
+    deadline = IyiMark.now_ns + 5000000000_u64
+    # A spin, not a sleep: this thread asleep would be counted waiting.
+    while IyiScheduler.waiting_threads < cores && IyiMark.now_ns < deadline
+      IyiThread.yield_cpu
+    end
+    waiting = IyiScheduler.waiting_threads
+    fail("idle pool: #{waiting.to_i64} of #{cores.to_i64} workers waiting after five seconds") if waiting < cores
+    threads = IyiThread.program_threads
+    IyiMark.auto = false
+    chain = build_chain(11_u64)
+    IyiMark.auto = true
+    asked = 0_u64
+    marked = false
+    attempt = 0
+    while !marked && attempt < 8
+      marked = allocate_until_marking
+      asked = IyiMark.beside_helpers if marked
+      IyiMark.settle
+      attempt = attempt + 1
+    end
+    IyiMark.auto = false
+    fail("idle pool: no mark ran beside the idle pool in 8 tries") unless marked
+    fail("idle pool: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, #{waiting.to_i64} of them pool workers waiting, the mark beside them asked for #{asked.to_i64} helper") if asked < 2_u64
+    puts "idle pool: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, #{waiting.to_i64} of them pool workers waiting, the mark beside them asked for #{asked.to_i64} helpers"
+    fail("the chain's tail lost its payload beside the idle pool") unless tail(chain).payload.is_a?(Payload)
+
+    Busy.stop.value.set(0_u64)
+    busy_asked = 0_u64
+    busy_waiting = 0_u64
+    group do |g|
+      cores.to_i32.times do
+        g.spawn_parallel do
+          busy_until_stopped
+          0
+        end
+      end
+      deadline = IyiMark.now_ns + 5000000000_u64
+      while IyiScheduler.waiting_threads > 0_u64 && IyiMark.now_ns < deadline
+        IyiThread.yield_cpu
+      end
+      busy_waiting = IyiScheduler.waiting_threads
+      IyiMark.auto = true
+      marked = false
+      attempt = 0
+      while !marked && attempt < 8
+        marked = allocate_until_marking
+        busy_asked = IyiMark.beside_helpers if marked
+        IyiMark.settle
+        attempt = attempt + 1
+      end
+      IyiMark.auto = false
+      Busy.stop.value.set(1_u64)
+    end
+    fail("busy pool: no mark ran beside the busy pool in 8 tries") unless marked
+    {% if flag?(:win32) %}
+      fail("busy pool: with #{cores.to_i64} pool workers running on #{cores.to_i64} cores, #{busy_waiting.to_i64} waiting, the mark beside them asked for #{busy_asked.to_i64} helpers rather than 1") if busy_asked != 1_u64
+    {% end %}
+    puts "busy pool: with #{cores.to_i64} pool workers running on #{cores.to_i64} cores, #{busy_waiting.to_i64} waiting, the mark beside them asked for #{busy_asked.to_i64} helpers"
+    fail("the chain's tail lost its payload beside the busy pool") unless tail(chain).payload.is_a?(Payload)
+  end
   puts "concurrent mark: every property held"
 {% else %}
   puts "concurrent mark: needs the collector and a thread target; nothing to exercise here"

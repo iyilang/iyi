@@ -1177,6 +1177,13 @@ class IyiSchedulerState
   # Rung by a worker with a fiber for another to run, and looking for it
   # (`IyiWorkers.wake_one`), under the scheduler's lock.
   property spinning : Bool
+  # The worker's hand-offs (`IyiWorkers.push_runnable`): the last fiber
+  # one called an idle worker for, by address; how many more hand-offs
+  # call nobody; and the length of that run, doubled each time the worker
+  # took the fiber it called for itself. The owner's alone.
+  property handoff_last : UInt64
+  property handoff_skip : UInt64
+  property handoff_backoff : UInt64
   # Descriptors another thread closed while a fiber of this one may wait
   # on them, behind the scheduler's lock (`IyiScheduler.wake_closed`).
   property closed_fds : Array(Int32)?
@@ -1258,6 +1265,9 @@ class IyiSchedulerState
     @watch_seen = 0_u64
     @watch_ticks = 0_u64
     @looks = 0_u64
+    @handoff_last = 0_u64
+    @handoff_skip = 0_u64
+    @handoff_backoff = 0_u64
     @io_slots = nil
     @mail = Atomic(UInt64).new(0_u64)
     @idle = false
@@ -2070,6 +2080,8 @@ class IyiScheduler
         quiet = quiet && st.stdin_waiter.is_a?(Nil)
       {% end %}
       st.idle = true
+      st.handoff_skip = 0_u64
+      st.handoff_backoff = 0_u64
       st.quiet = quiet
       IyiWorkers.count_idle(1_i64)
       if IyiWorkers.work_waiting?
@@ -4532,7 +4544,10 @@ end
 # A worker with more runnable fibers than it can run calls one idle
 # worker to come and steal (`wake_one`), and only one at a time is out
 # looking: one that finds work calls the next, so a burst brings the
-# pool in one by one and a lone wake brings nobody, Go's `wakep`.
+# pool in one by one, Go's `wakep`. A lone fiber the worker woke on its
+# way to its next one brings nobody; one a running task handed over -
+# a send, a lock let go - does, since that task may compute on
+# (`handed_on?`).
 class IyiWorkers
   # `count=`'s answer, 0 when the program did not ask; the number started,
   # 0 before the pool is.
@@ -4931,7 +4946,25 @@ class IyiWorkers
 
   # Onto the owner's ring; a full ring sends half of itself and this one
   # to the shared queue. A ring holding more than the fiber the worker
-  # runs next calls one idle worker to steal (`wake_one`).
+  # runs next calls one idle worker to steal (`wake_one`), and so does a
+  # fiber handed over by a task that runs on (`handed_on?`) - unless the
+  # worker's last such calls were wasted. A call is wasted when the
+  # worker takes the fiber it called for itself (`pop`): its task parked
+  # first, as a ping-pong's does a few hundred ns after its send, and the
+  # idle worker woke for nothing. Each wasted call doubles the run of
+  # hand-offs after it that call nobody, up to 4,095, and a worker that
+  # goes idle starts again at none.
+  #
+  # Calling on every hand-off cost a channel ping-pong between two
+  # parallel tasks (12 workers, release, best of 5 of 200,000 round
+  # trips) 323 to 338 ns a round trip against 137 to 139 on macOS 26.6,
+  # an M2 Pro with 10 cores, and 339 to 340 against 136 to 156 on Windows
+  # 11, 12 logical processors; with the run capped at 255 and `steal`'s
+  # wait, 179 to 181 and 200 to 213; at 4,095 with the wait, 144 to 146
+  # and 150 to 157, the bookkeeping alone 139 to 142 and 147 to 151. Four
+  # pairs at once on the M2: 3,809 to 3,833 ns before, 5,493 to 5,504
+  # calling every time, 3,927 to 4,035 at 4,095. A first hand-off always
+  # calls.
   def self.push_runnable(st : IyiSchedulerState, fiber : IyiFiber) : Nil
     while true
       head = st.ring_head
@@ -4943,7 +4976,40 @@ class IyiWorkers
       end
       break if spill(st, fiber, head)
     end
-    wake_one if st.ring_size > 1_u64
+    if st.ring_size > 1_u64
+      wake_one
+    elsif handed_on?(st, fiber)
+      skip = st.handoff_skip
+      if skip > 0_u64
+        st.handoff_skip = skip &- 1_u64
+      else
+        st.handoff_last = fiber.object_id
+        wake_one
+      end
+    end
+  end
+
+  # Whether *fiber*, pushed onto worker *st*'s ring, was woken by a task
+  # that is still running there - a channel's send, a lock's release, a
+  # `wake_on` - and is of another unit, which could run beside it: the
+  # worker comes back for it only when that task parks, and a task that
+  # computes on holds it until then, Go's `ready` calling `wakep`. A
+  # fiber the worker woke on its way to run the next one - from its
+  # poller, its sleepers or a unit let go, with the parking fiber or the
+  # worker's own on its stack - is the next it runs, and needs nobody.
+  # Measured with bench/parallel_migrate.iyi's handoff step (Linux, 12
+  # vCPUs, release, 4 workers): a task woken onto a worker held 50 ms by
+  # a `@[NoPreempt]` loop started 50.0 ms after its send in all 20 wakes
+  # of two runs, with three workers idle the whole time.
+  private def self.handed_on?(st : IyiSchedulerState, fiber : IyiFiber) : Bool
+    running = st.current
+    return false unless running.is_a?(IyiFiber)
+    return false unless running.state == IyiFiberState::Running
+    root = st.root
+    return false if root.is_a?(IyiFiber) && root.object_id == running.object_id
+    held = running.unit
+    woken = fiber.unit
+    !(held.is_a?(IyiUnit) && woken.is_a?(IyiUnit) && held.object_id == woken.object_id)
   end
 
   # Half the ring, oldest first, and *fiber* after them into the shared
@@ -4965,7 +5031,8 @@ class IyiWorkers
     true
   end
 
-  # The owner's oldest.
+  # The owner's oldest. The fiber it last called an idle worker for, taken
+  # here, was a wasted call (`push_runnable`).
   def self.pop(st : IyiSchedulerState) : IyiFiber?
     return nil if st.ring.address == 0_u64
     while true
@@ -4973,7 +5040,16 @@ class IyiWorkers
       tail = st.ring_tail
       return nil if head == tail
       address = st.slot(head)
-      return fiber_at(address) if st.take_ring_head(head, head &+ 1_u64)
+      if st.take_ring_head(head, head &+ 1_u64)
+        if address == st.handoff_last
+          st.handoff_last = 0_u64
+          run = st.handoff_backoff
+          run = run >= 2047_u64 ? 4095_u64 : run &* 2_u64 &+ 1_u64
+          st.handoff_backoff = run
+          st.handoff_skip = run
+        end
+        return fiber_at(address)
+      end
     end
   end
 
@@ -4981,6 +5057,14 @@ class IyiWorkers
   # empty: each other worker asked once, from the one after the last
   # asked. The oldest it took is answered to run now and the rest are in
   # its ring. Without the lock.
+  #
+  # A lone fiber in the ring of a worker that is running is waited on for
+  # up to 3 us first, Go's `runqgrab` sparing a running P's `runnext`: it
+  # is most often a hand-off whose waker parks a moment later, and its
+  # worker takes it then, warm. Without the wait a channel ping-pong
+  # between two parallel tasks lost its fiber to the woken idle worker
+  # 2,429 to 3,059 times in a run of 1,000,000 round trips (Linux, 12
+  # vCPUs, release), and 41 to 144 times with it.
   def self.steal(st : IyiSchedulerState) : IyiFiber?
     count = word(pointerof(@@listed_count)).value.get
     return nil if count < 2_i64
@@ -4989,6 +5073,12 @@ class IyiWorkers
     while index < count
       victim = listed_at((start &+ index) % count)
       if victim.object_id != st.object_id && victim.ring_size > 0_u64
+        if victim.ring_size == 1_u64 && !victim.idle
+          until_ns = __iyi_monotonic_ns + 3_000_i64
+          while victim.ring_size == 1_u64 && __iyi_monotonic_ns < until_ns
+            IyiThread.spin_pause
+          end
+        end
         fiber = grab(victim, st)
         if fiber.is_a?(IyiFiber)
           Pointer(Atomic(UInt64)).new(pointerof(@@grabs).address).value.add(1_u64)
@@ -5333,9 +5423,18 @@ class IyiWorkers
   end
 
   # One look at every worker, raising the word of each that one task has
-  # held for the quantum; whether any worker was running.
+  # held for the quantum; whether any worker was running. A worker held so
+  # with fibers in its ring calls an idle worker to steal them, since its
+  # task may be in code no back-edge check is in - the runtime's own, the
+  # collector's, a `@[NoPreempt]` def - or its thread may be one the
+  # kernel left in the ready queue, and nothing else calls anybody for a
+  # lone fiber pushed on the way to the next one, or for a hand-off a
+  # worker's back-off left uncalled (`push_runnable`). The monitor holds
+  # no scheduler state of its own; the call takes the scheduler's lock
+  # and rings, which allocates nothing.
   private def self.look : Bool
     busy = false
+    stuck = false
     count = word(pointerof(@@listed_count)).value.get
     index = 0_i64
     while index < count
@@ -5354,12 +5453,14 @@ class IyiWorkers
             ticks = 0_u64
             address = st.preempt_word
             Pointer(Atomic(UInt64)).new(address).value.set(1_u64) if address != 0_u64
+            stuck = true if st.ring_size > 0_u64
           end
           st.watch_ticks = ticks
         end
       end
       index = index &+ 1_i64
     end
+    wake_one if stuck
     busy || work_waiting?
   end
 

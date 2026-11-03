@@ -21,8 +21,12 @@
 #      after a loop's back-edge check that moved it, its socket's bytes, a
 #      cancel and a close from a sibling or the main thread that find it,
 #      frames 120 KiB deep; tasks parked on one worker finish in under
-#      twice the ideal, woken from the main thread and from a worker; and a
-#      task joining a thread leaves its worker to its child. On Windows,
+#      twice the ideal, woken from the main thread and from a worker; a
+#      task woken by a task that then computes with preemption off starts
+#      on an idle worker within 1 ms, and within 50 ms after a ping-pong
+#      left its waker's worker calling nobody, where the monitor calls;
+#      and a task joining a thread leaves its worker to its child. On
+#      Windows,
 #      bench/completions_taken.iyi holds the process's one completion port
 #      at twelve workers: a task's socket answered while the worker it
 #      parked on computes with preemption off is read on another worker
@@ -82,7 +86,9 @@
 #      find, a close posted to nobody, a read made on the thread that
 #      closes its socket, a pool that never steals a started task, tasks
 #      woken back onto the worker they parked on as they were before tasks
-#      moved, and a join held in the kernel; and on Windows a port whose
+#      moved, a hand-off that calls no idle worker, a monitor that calls
+#      nobody for a held worker's ring, and a join held in the
+#      kernel; and on Windows a port whose
 #      packets only the worker their task parked on runs, and a pool that
 #      leaves the priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
@@ -143,8 +149,8 @@ done
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
 # Its balance step is timed against four workers' ideal, which a machine
 # with fewer cores than that cannot keep; there the other steps run.
-MIGRATE_STEPS="channels sockets cancel closes deep loops balance join"
-[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops join"
+MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop join"
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
   flag=""
@@ -928,6 +934,17 @@ else
   step "failure proof: a join held in the kernel holds its worker, and the sleepers on it"
   broken kerneljoin '/^      while @ended.get == 0_u64$/ { skip = 3 } skip > 0 { skip = skip - 1; next } { print }' thread.iyi parallel_migrate
   caught kerneljoin 'join: a task' join
+
+  step "failure proof: a task woken by a task that computes on waits for that computation"
+  # Measured with the handoff step, Linux, 12 vCPUs, release: the woken
+  # task started 50.0 ms after its send in each of 20 wakes without the
+  # call, beside a 50 ms hold, and 23 to 28 us with it.
+  broken nohandoff '/^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; next } { print }' concurrency.iyi parallel_migrate
+  caught nohandoff 'handoff: tasks woken onto a worker held 50 ms' handoff
+
+  step "failure proof: a monitor that calls nobody for a held worker's ring leaves a hand-off its back-off skipped behind the hold"
+  broken nobackstop '/^    wake_one if stuck$/ { next } { print }' concurrency.iyi parallel_migrate
+  caught nobackstop 'backstop: tasks woken after a ping-pong onto a worker held 100 ms' backstop
 
   if [ "$CORES" -lt 4 ]; then
     step "failure proofs for stealing"

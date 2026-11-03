@@ -65,6 +65,10 @@
 #  7e. On darwin, a thread's first allocation held in its frame through two
 #      collections is not swept; with its stack's top written after that
 #      allocation again, a run aborts by name.
+#  7g. On Linux and darwin, a mark helper that faults holding the runtime
+#      lock kills the process with SIGSEGV; with the fault handler's
+#      default action built in a heap block again, the process outlives
+#      the fault.
 #
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
@@ -2000,6 +2004,70 @@ case "$(uname -s)" in
     if [ $((aborted + faulted)) -eq 0 ]; then
       echo "three runs with the top written after the stack guard's allocation: none aborted or faulted"; exit 1
     fi
+    ;;
+esac
+
+# ── 7g. A fault the stack guard does not own kills the process ───────────
+# The guard's handler (`IyiStackGuard.faulted`) gives a fault away from a
+# stack's edge back to the signal's default action, and built that action
+# in a heap block. A mark helper has no allocator cache, and one that
+# faulted inside a collection, holding the runtime lock, waited for that
+# lock at the block's first touch for good: on macOS 26.6, an M2 Pro with
+# 10 cores, a soak run of bench/concurrency_exercise.iyi hung so, sampled
+# with its helper in `IyiRuntimeLock.lock` under the handler, under a root
+# scan that had faulted. The action is in the handler's frame now. A
+# helper that takes the runtime lock and stores to address 8 kills the
+# process with SIGSEGV at once, on the M2 and on Linux x86_64; with the
+# heap block back, the process outlives the fault by the 5 s it waits,
+# and says so.
+case "$(uname -s)" in
+  Linux | Darwin)
+    step "a mark helper's fault inside a collection kills the process"
+    cat > wild.iyi <<'IYI'
+module wild
+
+# A helper's life here: the runtime lock taken, as a collection on a mark
+# helper holds it, then a store to an address nothing maps.
+def fault_holding_the_lock(address : UInt64) : Nil
+  IyiRuntimeLock.lock
+  Pointer(UInt64).new(address).value = 1_u64
+end
+
+entry = ->(address : UInt64) { fault_holding_the_lock(address) }
+IyiThread.start_helper(Pointer(UInt64).new(pointerof(entry).address).value, 8_u64)
+deadline = __iyi_monotonic_ns + 5_000_000_000_i64
+while __iyi_monotonic_ns < deadline
+end
+message = "the helper's fault left the process alive for 5 s\n"
+__iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+__iyi_exit(3)
+IYI
+    if ! "$IYI" build wild.iyi -o wild > build-wild.log 2>&1; then
+      cat build-wild.log; exit 1
+    fi
+    ( timeout -k 5 60 ./wild > wild.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -ne 139 ]; then
+      echo "a helper's fault holding the runtime lock exited $code, not 139 (SIGSEGV):"; tail -3 wild.txt; exit 1
+    fi
+    echo "  killed by SIGSEGV (exit 139)"
+
+    step "failure proof: the default action built in a heap block, as it was"
+    mkdir -p heaped/iyi
+    cp "$REPO"/src/iyi/*.iyi heaped/iyi/
+    awk '/^      action = uninitialized UInt64\[4\]$/ { found++; next }
+      /^      words = pointerof\(action\)\.as\(Pointer\(UInt64\)\)$/ { print "      words = Pointer(UInt64).malloc(4_u64)"; found++; next }
+      { print } END { if (found != 2) exit 3 }' \
+      "$REPO/src/iyi/concurrency.iyi" > heaped/iyi/concurrency.iyi || { echo "the stack guard's default action is not in concurrency.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/heaped${PSEP}$REPO/src" "$IYI" build wild.iyi -o heaped-run > build-heaped.log 2>&1; then
+      cat build-heaped.log; exit 1
+    fi
+    ( timeout -k 5 60 ./heaped-run > heaped.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -ne 3 ] || ! grep -q "^the helper's fault left the process alive for 5 s" heaped.txt; then
+      echo "with the action in a heap block, a helper's fault exited $code:"; tail -3 heaped.txt; exit 1
+    fi
+    echo "  the process outlived its helper's fault by 5 s"
     ;;
 esac
 

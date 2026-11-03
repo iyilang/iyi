@@ -6456,6 +6456,15 @@ builds on macos-15, whose host version is 15.0, with `MACOSX_DEPLOYMENT_TARGET`
 at 14.4, which iyi honours as clang does, and holds the unpacked binaries'
 `minos` to it.
 
+One more joined after 0.20.1: Mach's `thread_switch`, a spinner's way of
+giving its core away. The runtime lock's spinner, a class lock's and the
+scheduler's spun on the ARM `yield` hint, which gives the scheduler nothing,
+through the timeslice of the very thread they waited for; every program's
+runtime lock reaches the call, so it is in every program's floor, as the
+syscall is on Linux and `SwitchToThread` on Windows. It is declared in
+<mach/thread_switch.h> and has been libSystem's since the first darwin, so it
+moves no version.
+
 So **an own-prelude program's dependency is the platform libc and nothing
 else**, and what that is worth depends on which artifact is being read, so this
 section says which. The gate checks this mode at two layers.

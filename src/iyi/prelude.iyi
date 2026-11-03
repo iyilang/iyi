@@ -2282,10 +2282,11 @@ require "./file"
       end
 
       # A class's lock: read first, then one `compare_and_set`, a pause
-      # hint between looks and the core given away every 128th, never a
-      # park (the section above says why). What it is held across is a
-      # batch's pop or push, a claim, a walk of the class's own arenas for
-      # one to take up, and a warm run threaded - nothing that waits.
+      # hint between looks and the core given away every 128th from
+      # `IyiThread::YIELD_AFTER` on, never a park (the section above says
+      # why). What it is held across is a batch's pop or push, a claim, a
+      # walk of the class's own arenas for one to take up, and a warm run
+      # threaded - nothing that waits.
       def self.class_lock(index : Int32) : Nil
         word = Pointer(Atomic(UInt64)).new(class_line(index) &+ CLASS_LOCK)
         spins = 0
@@ -2294,7 +2295,7 @@ require "./file"
           {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
             # A holder the kernel preempted is not waited out on this
             # core's whole timeslice.
-            IyiThread.yield_cpu if spins & 127 == 0
+            IyiThread.yield_cpu if spins & 127 == 0 && spins >= IyiThread::YIELD_AFTER
           {% end %}
           IyiMark.spin_pause
         end

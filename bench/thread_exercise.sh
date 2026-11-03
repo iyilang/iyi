@@ -177,7 +177,7 @@ case "$(uname -s)" in
     # and close for a finished thread's kqueue
     # (`IyiScheduler.retire_thread`). Nothing else.
     step "dependency floor: what threads cost darwin, by name"
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
     thread='_close _pthread_create _pthread_join _pthread_kill'
     for bin in threads threads-release; do
       allowed="$(printf '%s\n' $runtime $thread | sort -u)"
@@ -491,7 +491,7 @@ case "$(uname -s)" in
       step "failure proof: a lock that only spins is caught"
       mkdir -p spinning/iyi
       cp "$REPO"/src/iyi/*.iyi spinning/iyi/
-      awk '/^        since = released$/ { after = 1 } after && /^        yield_cpu$/ { found = 1; after = 0; next } { print } END { if (!found) exit 3 }' \
+      awk '/^        since = released$/ { after = 1 } after && /^        yield_cpu if turn >= YIELD_AFTER$/ { found = 1; after = 0; next } { print } END { if (!found) exit 3 }' \
         "$REPO/src/iyi/thread.iyi" > spinning/iyi/thread.iyi || { echo "the lock's yield is not in thread.iyi any more"; exit 1; }
       if ! IYI_PATH="$WORK/spinning${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -o crowd-spinning > build-spinning.log 2>&1; then
         cat build-spinning.log; exit 1
@@ -2176,6 +2176,159 @@ IYI
       echo "with the action in a heap block, a helper's fault exited $code:"; tail -3 heaped.txt; exit 1
     fi
     echo "  the process outlived its helper's fault by 5 s"
+    ;;
+esac
+
+# ── 7h. A stop sleeps on its count, and its last thread wakes it ─────────
+# The stopper waited for its threads to count in, and after the release
+# to count out, in a loop around `yield_cpu`; it spins a little now and
+# then sleeps on the count's word (`IyiThread.wait_count`), and the thread
+# that brings the count to what the stopper waits for wakes it
+# (`IyiThread.count_in`). A wake that never comes is a stop that never
+# ends, so the proof takes the wake out and a run hangs; the storm's
+# thousands of stops are where a sleeping stopper is all but certain.
+case "$(uname -s)" in
+  Linux | Darwin)
+    step "threads born sixteen at a time beside a thread collecting in a loop, its stops asleep on their counts: three runs, and every one ends"
+    cat > asleep.iyi <<'IYI'
+module asleep
+
+import std/gc::{GC}
+
+class Flag
+  getter stop : Atomic(Int64)
+  getter born : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @born = Atomic(Int64).new(0_i64)
+  end
+end
+
+def storm(flag : Flag) : Nil
+  while flag.stop.get == 0_i64
+    GC.collect
+  end
+end
+
+def arrive(flag : Flag) : Nil
+  flag.born.add(1_i64)
+end
+
+flag = Flag.new
+stormer = IyiThread.start { storm(flag) }
+rounds = Program.args[0].to_i
+deadline = __iyi_monotonic_ns + Program.args[1].to_i.to_i64 * 1_000_000_000_i64
+started_ns = __iyi_monotonic_ns
+started = 0
+round = 0
+while round < rounds && (round < 20 || __iyi_monotonic_ns < deadline)
+  batch = [] of IyiThread
+  16.times { batch << IyiThread.start { arrive(flag) } }
+  started = started + 16
+  batch.each(&.join)
+  round = round + 1
+end
+took = (__iyi_monotonic_ns - started_ns) // 1_000_000_i64
+flag.stop.set(1_i64)
+stormer.join
+raise "born #{flag.born.get} of #{started}" if flag.born.get != started
+puts "ok born=#{started} ms=#{took} stops=#{IyiThread.stops}"
+IYI
+    if ! "$IYI" build asleep.iyi -o asleep > build-asleep.log 2>&1; then
+      cat build-asleep.log; exit 1
+    fi
+    run=1
+    while [ "$run" -le 3 ]; do
+      ( timeout -k 5 60 ./asleep 200 10 > asleep.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ' asleep.txt; then
+        echo "run $run exited $code:"; tail -3 asleep.txt; exit 1
+      fi
+      echo "  $(sed 's/^ok //' asleep.txt)"
+      run=$((run + 1))
+    done
+
+    step "failure proof: the last thread to count in leaves the stopper asleep, and a run hangs"
+    mkdir -p unwoken/iyi
+    cp "$REPO"/src/iyi/*.iyi unwoken/iyi/
+    awk '/^        return if sleeper == 0_u64 \|\| now < sleeper$/ { print "        return"; found = 1; next }
+      { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > unwoken/iyi/thread.iyi || { echo "the count's wake is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/unwoken${PSEP}$REPO/src" "$IYI" build asleep.iyi -o unwoken-run > build-unwoken.log 2>&1; then
+      cat build-unwoken.log; exit 1
+    fi
+    ( timeout -k 5 30 ./unwoken-run 200 10 > unwoken.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -ne 124 ]; then
+      echo "with the wake taken out, a run exited $code rather than hanging:"; tail -3 unwoken.txt; exit 1
+    fi
+    echo "  the run hung until the 30 s timeout (exit 124)"
+    ;;
+esac
+
+# ── 7i. darwin: a spinner gives its core away ────────────────────────────
+# darwin's `IyiThread.yield_cpu` was the ARM `yield` hint, which gives the
+# scheduler nothing; it is Mach's `thread_switch` with the depress option
+# now (src/iyi/thread.iyi says what each try cost). Beside a busy process
+# per core, 7h's program made its threads at a tenth of the rate it made
+# them alone with the hint, and as fast or faster with the switch; the
+# check asks half, the best of three runs each way, and the proof puts
+# the hint back.
+case "$(uname -s)" in
+  Darwin)
+    cores="$(sysctl -n hw.ncpu)"
+    # Threads a second, alone and beside a busy process per core: the
+    # best of three runs of the given program each way.
+    rates() {
+      alone=0; beside=0
+      for way in alone beside; do
+        run=1
+        while [ "$run" -le 3 ]; do
+          busy=""
+          if [ "$way" = beside ]; then
+            i=0
+            while [ "$i" -lt "$cores" ]; do yes > /dev/null & busy="$busy $!"; i=$((i + 1)); done
+          fi
+          ( timeout -k 5 60 "./$1" 200 10 > rates.txt 2>&1; exit $? ) 2> /dev/null
+          code=$?
+          [ -n "$busy" ] && { kill $busy; wait $busy 2> /dev/null; }
+          if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* ' rates.txt; then
+            echo "$1, $way, run $run exited $code:"; tail -3 rates.txt; exit 1
+          fi
+          born="$(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' rates.txt)"
+          ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' rates.txt)"
+          rate=$((born * 1000 / (ms + 1)))
+          if [ "$way" = alone ]; then [ "$rate" -gt "$alone" ] && alone=$rate; else [ "$rate" -gt "$beside" ] && beside=$rate; fi
+          run=$((run + 1))
+        done
+      done
+    }
+    if [ "$cores" -lt 6 ]; then
+      echo "  the core's give-away needs 6 cores to show beside busy processes; this machine has $cores: unmeasured here"
+    else
+      step "darwin: threads born beside a busy process per core at least half as fast as alone, best of three runs each"
+      rates asleep
+      echo "  alone $alone threads a second, beside $cores busy processes $beside"
+      if [ $((beside * 2)) -lt "$alone" ]; then
+        echo "beside $cores busy processes the storm made $beside threads a second, under half of $alone alone"; exit 1
+      fi
+
+      step "failure proof: yield_cpu as the ARM hint again, and beside the busy processes it falls under half"
+      mkdir -p hinted/iyi
+      cp "$REPO"/src/iyi/*.iyi hinted/iyi/
+      awk '/^        LibC\.thread_switch\(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32\)$/ { print "        asm(\"yield\" :::: \"volatile\")"; found = 1; next }
+        { print } END { if (!found) exit 3 }' \
+        "$REPO/src/iyi/thread.iyi" > hinted/iyi/thread.iyi || { echo "darwin's thread_switch is not in thread.iyi any more"; exit 1; }
+      if ! IYI_PATH="$WORK/hinted${PSEP}$REPO/src" "$IYI" build asleep.iyi -o hinted-run > build-hinted.log 2>&1; then
+        cat build-hinted.log; exit 1
+      fi
+      rates hinted-run
+      echo "  with the hint: alone $alone threads a second, beside $cores busy processes $beside"
+      if [ $((beside * 2)) -ge "$alone" ]; then
+        echo "with the hint back, the storm beside the busy processes kept $beside threads a second of $alone alone"; exit 1
+      fi
+    fi
     ;;
 esac
 

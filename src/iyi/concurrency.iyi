@@ -1373,9 +1373,9 @@ class IyiSchedLock
   end
 
   # Read before the exchange, as the runtime lock is, so a spinner does
-  # not take the line for writing on every turn; past 128 turns it gives
-  # its core away, since a holder preempted with the lock is what it waits
-  # for then.
+  # not take the line for writing on every turn; past
+  # `IyiThread::YIELD_AFTER` turns it gives its core away every 128th,
+  # since a holder preempted with the lock is what it waits for then.
   def self.lock : Nil
     return unless IyiScheduler.shared?
     word = self.word
@@ -1387,7 +1387,7 @@ class IyiSchedLock
       end
       spins = spins &+ 1
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-        IyiThread.yield_cpu if spins & 127 == 0
+        IyiThread.yield_cpu if spins & 127 == 0 && spins >= IyiThread::YIELD_AFTER
       {% end %}
       {% if flag?(:x86_64) %}
         asm("pause" :::: "volatile")
@@ -2467,7 +2467,7 @@ class IyiScheduler
         spins = 0
         while fiber.on_cpu?
           spins = spins &+ 1
-          IyiThread.yield_cpu if spins & 127 == 0
+          IyiThread.yield_cpu if spins & 127 == 0 && spins >= IyiThread::YIELD_AFTER
           IyiThread.spin_pause
         end
         fiber.on_cpu = true

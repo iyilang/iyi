@@ -21,6 +21,21 @@
   `{ |x| block.call(x).to_s }`. A spec in
   `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
 
+- **A proc whose body gives a call a NoReturn value runs that body.**
+  iyi-web's `get "/boom", workers: 1 do ... raise "..." end` answered
+  500 with "iyi: panic: can't execute `route_answer(block.call(ctx))`"
+  in its log, and the route never ran: not the line before its `raise`,
+  not the `raise`. A call given a NoReturn argument, `wrap(block.call(x))`
+  with the block `Proc(Int32, NoReturn)`, is never typed, which left the
+  proc's def without a type, and cleanup replaced the whole body of such
+  a proc with that panic, where a def's body is cleaned up instead: the
+  call becomes the arguments up to the NoReturn one. A proc's body now
+  is too, so `->(x : Int32) : String { puts "ran"; wrap(block.call(x)) }`
+  prints "ran", calls the block and panics with the block's message, or
+  exits with the block's `exit` status. Inherited from Crystal, whose
+  1.21 raises the same "can't execute". A spec in
+  `spec/compiler/compiler_spec.cr` runs the shape.
+
 ## 0.20.0 — 2026-11-02
 
 **std/http's `Server.serve` answers on every core, and a parallel task

@@ -385,7 +385,10 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
   s against 6.68 s on a shared 12-vCPU Linux VM. The programs it builds
   ran within noise of the one-module build on the M2 Pro (best of 11
   interleaved runs: bcrypt, SHA-256, JSON, ChaCha20-Poly1305, sorting
-  strings, and `bench/runtime.py`'s four, 0.98x to 1.03x). The cut is a
+  strings, and `bench/runtime.py`'s four, 0.98x to 1.03x). **Not yet on
+  Windows**: on the 12-processor machine above, best of 15 interleaved,
+  `bench/runtime.py`'s arithmetic ran 1.43x its one-module time, JSON
+  1.10x and the hash 1.08x, while bcrypt and SHA-256 held at 1.00x. The cut is a
   function of the program, so the objects are the same on one thread and
   on twelve. `IYI_RELEASE_PARTITIONS=1` keeps the one module.
   `bench/release_cores.sh` holds the cores, the output and the objects,

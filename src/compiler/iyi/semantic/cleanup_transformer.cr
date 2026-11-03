@@ -672,6 +672,7 @@ module Iyi
       # alone, and nothing it is given crosses.
       return if serial_call?(node, target_def)
       check_share_crossing(node, target_def)
+      check_share_elements(node, target_def)
       thread = if target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiThread"
                  THREAD_BOUNDARY
                elsif target_def.name == "spawn_parallel" && !owner.metaclass? && owner.to_s == "IyiGroup"
@@ -713,7 +714,8 @@ module Iyi
         check_share_class_var_types(a_def, subject, consequence)
       elsif thread
         consequence = "(SPEC.md III.4.4)"
-        # A def with a `serial` parameter: a lock, or that parameter's 1.
+        # A def with a `serial` parameter: a lock, or that parameter's 1;
+        # a parallel twin's (`map_parallel`): a lock, or the twin.
         unless thread.alone.empty?
           consequence = "(SPEC.md III.4.4); or #{thread.alone}"
         end
@@ -830,17 +832,28 @@ module Iyi
       after: "the task was spawned")
 
     # The block a `@[Share]` def keeps, in the words its refusals use: the
-    # def by its type's short name, as an owning type's are.
+    # def by its type's short name, as an owning type's are. The other way
+    # out they name: a `serial` def's literal 1, or, for a def whose
+    # elements cross (`map_parallel`), the method it is the parallel twin
+    # of (`map`).
     private def shared_block_boundary(owner : Type, target_def : Def) : ShareBoundary
       called = share_called(owner, target_def)
       serial = target_def.iyi_share_serial
+      name = target_def.name.split(':').first
+      alone = if serial
+                "pass `#{serial}: 1` so the block runs on one thread"
+              elsif target_def.iyi_share_elements && name.ends_with?("_parallel")
+                "use `#{name.rchop("_parallel")}`, which stays on one thread"
+              else
+                ""
+              end
       ShareBoundary.new(
         subject: "the block #{called} keeps, which may run on other threads",
         local_owner: "a local of the code that gave #{called} its block, so the block and that code",
         pair: "the block and the code that gave it",
         again: "gives the block again",
         after: "the block was given",
-        alone: serial ? "pass `#{serial}: 1` so the block runs on one thread" : "")
+        alone: alone)
     end
 
     # The def as its caller wrote it: an expansion for named arguments is
@@ -896,6 +909,29 @@ module Iyi
         if why = Iyi::Share.reason(type)
           alone = serial ? ", or pass `#{serial}: 1` so it stays on one thread" : ""
           value.raise "#{share_called(target_def.owner, target_def)} hands `#{param} : #{type}` to other threads, several at once, and it is not Share: #{why}. #{instead}#{alone} (SPEC.md III.4.4)"
+        end
+      end
+    end
+
+    # iyi: the values a `@[Share(elements: ...)]` def hands its block are
+    # read on other threads, several at once: std/parallel's
+    # `map_parallel` gives each element to the block on whichever worker
+    # runs its chunk (SPEC.md III.4.14). So every parameter of the block
+    # must be Share, as a captured value must be, and the refusal is made
+    # at the call, with the def's own sentence for the way out. The block
+    # is the one written at the call, or a proc forwarded as it.
+    private def check_share_elements(node : Call, target_def : Def) : Nil
+      instead = target_def.iyi_share_elements
+      return unless instead
+      given = [] of Type
+      if block = node.block
+        block.args.each { |arg| arg.type?.try { |type| given << type } }
+      elsif (forwarded = node.block_arg) && (proc = forwarded.type?).is_a?(ProcInstanceType)
+        given.concat(proc.arg_types)
+      end
+      given.each do |type|
+        if why = Iyi::Share.reason(type)
+          node.raise "#{share_called(target_def.owner, target_def)} hands its block `#{type}` on other threads, several at once, and it is not Share: #{why}. #{instead} (SPEC.md III.4.4)"
         end
       end
     end
@@ -960,8 +996,8 @@ module Iyi
       end
     end
 
-    # The other way out a refusal at a `serial` def's block names, after a
-    # comma; nothing at any other boundary.
+    # The other way out a refusal at a `serial` def's block, or a parallel
+    # twin's, names, after a comma; nothing at any other boundary.
     private def or_alone(boundary : ShareBoundary) : String
       boundary.alone.empty? ? "" : ", or #{boundary.alone}"
     end

@@ -52,6 +52,34 @@
   40.1. `bench/std_mutex_exercise.sh` proves a waiter counted after its
   release hangs the exercise.
 
+- **A `std/mutex` waiter that starves is handed the lock.** A task that
+  let the lock go and took it straight back, running while the waiter it
+  woke was still waking, kept it for as long as it went on: beside a
+  holder taking it back after every 20 us hold, a waiter waited 611 ms,
+  all 30,000 holds, on Linux x86_64 (12 vCPU, shared), and 3.0 s beside
+  100 us holds. A waiter that has waited 1 ms, or been woken 4 times to
+  find the lock taken again, now starves, and the next release hands it
+  the lock rather than letting it go, Go's `sync.Mutex` starvation mode;
+  until a waiter starves the lock goes to whoever takes it first. The
+  same waiter has it in 7.3 and 7.1 ms, two wakes each queued behind the
+  running holder until the monitor preempts it, and in 0.14 and 0.50 ms
+  with the pool calling an idle worker for a hand-off from a running
+  task. On macOS 26.6, an M2 Pro with 10 cores (the user's machine), 41.9
+  ms and 3.0 s before, median of 5, and 1.6 ms after.
+  `bench/std_mutex_exercise.sh` has the step, a waiter beside 1 ms holds
+  (599 ms before), with a broken copy each for a waiter that never
+  starves and a release that frees the lock where it hands it over.
+  `bench/chan_scaling.iyi`'s `held`, two tasks taking turns on each of W
+  mutexes with 20 us holds, against its Go twin on `sync.Mutex`, `over_ns`
+  before, after and Go's, median of 7 interleaved on Linux: 281/263/110
+  at one pair, 307/287/151 at two, 356/301/189 at four, 454/566/239 at
+  eight. The park, the wake and the switch, `over_ns` less the new
+  `floor_ns` (the same updates with nothing waiting), are -2 to 41 ns
+  after against Go's -34 to 17; the rest is the hold's clock, a
+  clock_gettime syscall where Go reads the vDSO. On the M2, median of 5,
+  after against Go: 59/55 at one pair, 61/95 at two, 136/392 at four,
+  231/507 at eight.
+
 ### Fixed
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard

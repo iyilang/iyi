@@ -79,7 +79,7 @@ fi
 
 echo
 echo "== every mutex section reported"
-for phrase in "== a value behind a lock" "== tasks that park while they hold it" "== threads" "== a thread asleep until the release" "== cancelled while it waits" "== waiting for the value to change" "== what it refuses" "== a waiter parks, and its worker runs other tasks"; do
+for phrase in "== a value behind a lock" "== tasks that park while they hold it" "== threads" "== a thread asleep until the release" "== cancelled while it waits" "== waiting for the value to change" "== what it refuses" "== a waiter parks, and its worker runs other tasks" "== a waiter the holder keeps taking the lock back from"; do
   if ! grep -q "$phrase" "$WORK/mutex-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -294,13 +294,27 @@ prove_broken "a wait nothing could end left to wait" "deadlock: every fiber is b
 # without the wake it stays parked, and with nothing left to run the
 # scheduler names the deadlock.
 prove_broken "a release that does not wake a task parked on the lock" "deadlock: every fiber is blocked" \
-  '      IyiScheduler.wake_on(pointerof(@word), 1) if @word.swap(FREE) == CONTENDED
-' '      @word.swap(FREE)
+  '          @word.set(FREE)
+          IyiScheduler.wake_on(pointerof(@word), 1)
+        else
+' '          @word.set(FREE)
+        else
 '
 # The same for a task parked waiting for a change.
 prove_broken "a release that does not wake a task waiting for a change" "deadlock: every fiber is blocked" \
   '      IyiScheduler.wake_on(pointerof(@changes), 0x7FFFFFFF) if counted
 ' ''
+# A waiter that never starves, and a release that lets the lock go where
+# it should hand it over: either way the holder takes it back after each
+# hold, and the waiter waits out all of them.
+prove_broken "a waiter that never starves" "the holder taking it back each time it let it go" \
+  '          if retakes >= RETAKES || __iyi_monotonic_ns - began >= STARVE_NS
+' '          if false
+' starves
+prove_broken "a release that lets go where it hands over" "the holder taking it back each time it let it go" \
+  '    @word.set(HANDED)
+' '    @word.set(FREE)
+' starves
 # A waiter that holds its worker until the lock is free, spinning where it
 # parked, as one asleep in the kernel holds it: the task spawned beside it
 # waits for the release to start. Built against a prelude whose pool never
@@ -317,8 +331,8 @@ if cmp -s "$WORK/unpreempted/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi
 fi
 UNPREEMPTED="$WORK/unpreempted"
 prove_broken "a waiter that holds its worker" "while a Mutex waiter held one worker of two" \
-  '        waited = IyiScheduler.park_on(pointerof(@word), CONTENDED)
-' '        while @word.get == CONTENDED
+  '        waited = IyiScheduler.park_on(pointerof(@word), seen)
+' '        while @word.get == seen
           IyiThread.spin_pause
         end
         waited = nil

@@ -7889,7 +7889,14 @@ require "./file"
             # 8.7), and binary trees ran as it did.
             # The floor is one helper, which takes the finish. Asserted
             # where it was measured.
+            #
+            # A thread of the program's waiting in its scheduler's poller
+            # with nothing to run holds no core, and is not counted: a
+            # server's pool, idle between requests, was thirteen threads
+            # on twelve cores and left its every mark one helper.
             threads = IyiThread.program_threads
+            waiting = IyiScheduler.waiting_threads
+            threads = threads > waiting ? threads - waiting : 1_u64
             cores = IyiThread.core_count
             free = cores > threads + 1_u64 ? cores - threads : 1_u64
             helpers = free if helpers > free

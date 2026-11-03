@@ -1448,6 +1448,20 @@ class IyiScheduler
     @@shared
   end
 
+  # Scheduler threads waiting in their poller with nothing to run - pool
+  # workers (`idle_worker`) and threads outside the pool (`wait_shared`)
+  # alike - behind the scheduler's lock, as each thread's `idle` is. A
+  # thread so counted holds no core, which is what the mark beside the
+  # program reads to size its helpers on Windows (`IyiMark.start_concurrent`).
+  @@waiting : Int64 = 0_i64
+
+  # The count, read without the lock: the mark reads it with every other
+  # thread stopped.
+  def self.waiting_threads : UInt64
+    waiting = @@waiting
+    waiting > 0_i64 ? waiting.to_u64 : 0_u64
+  end
+
   # This thread's state, by its object id, or 0 before it has one; read
   # without making it, for the lock's own bookkeeping.
   def self.state_id : UInt64
@@ -2045,6 +2059,7 @@ class IyiScheduler
       deadlock_found
       return
     end
+    @@waiting = @@waiting + 1_i64
     IyiSchedLock.unlock
     wait_for_events(true)
   end
@@ -2084,6 +2099,7 @@ class IyiScheduler
         {% end %}
         ring_reporter
       end
+      @@waiting = @@waiting + 1_i64
       IyiSchedLock.unlock
       wait_for_events(true)
     {% end %}
@@ -2097,6 +2113,7 @@ class IyiScheduler
   # elsewhere once it has taken its events.
   def self.end_idle(st : IyiSchedulerState) : Nil
     IyiSchedLock.lock
+    @@waiting = @@waiting - 1_i64 if st.idle
     st.idle = false
     st.notified = false
     nudge = false

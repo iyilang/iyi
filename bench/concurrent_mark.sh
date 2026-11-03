@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Twenty-one steps, thirteen of them failure proofs:
+# Twenty-three steps, fifteen of them failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -15,6 +15,9 @@
 #      program's thread spent waking the helpers, which on Windows is
 #      held under 1 ms; and how many helpers a mark beside a thread on
 #      every core but one asked for, which on Windows is held to one.
+#      And a mark beside a pool of a worker per core: more than one
+#      helper while every worker waits with nothing to run, everywhere,
+#      and one while every worker runs a task, on Windows.
 #   3. The machine alone, printed: one thread per core reading the clock
 #      and nothing else, and the longest gap any of them saw. A pause is
 #      only the runtime's where the machine gives its threads their cores:
@@ -82,7 +85,11 @@
 #      program's wakes past a millisecond - exits 1.
 #  20. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
-#  21. Failure proof, on Windows: the first collection's wait for every
+#  21. Failure proof, on Windows: the pool's waiting workers counted as
+#      threads of the program's, and the idle pool check exits 1.
+#  22. Failure proof, on Windows: every worker of a started pool counted
+#      free, running or not, and the busy pool check exits 1.
+#  23. Failure proof, on Windows: the first collection's wait for every
 #      helper to reach its park put back, and the crowded check fires.
 set -u
 
@@ -891,6 +898,41 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: share:" greedy.txt; then
   echo "the share check did not fire (exit $code):"; tail -3 greedy.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
+
+# The pool's waiting workers counted as threads of the program's again,
+# as they were: the idle pool's mark asks for one helper, and the idle
+# pool check exits 1.
+step "failure proof: a mark beside an idle pool that counts its waiting workers is caught"
+mkdir -p counted/iyi
+cp "$REPO"/src/iyi/*.iyi counted/iyi/
+awk '/^ *threads = threads > waiting \? threads - waiting : 1_u64$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > counted/iyi/prelude.iyi || { echo "the line this proof removes is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/counted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o counted-run > build-counted.log 2>&1; then
+  cat build-counted.log; exit 1
+fi
+timeout -k 5 300 ./counted-run > counted.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: idle pool:" counted.txt; then
+  echo "the idle pool check did not fire (exit $code):"; tail -3 counted.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' counted.txt)"
+
+# Every worker of a started pool counted free, running or not: the busy
+# pool's mark asks for every helper, and the busy pool check exits 1.
+step "failure proof: a mark beside a busy pool that counts its running workers free is caught"
+mkdir -p pooled/iyi
+cp "$REPO"/src/iyi/*.iyi pooled/iyi/
+awk '/^ *waiting = IyiScheduler\.waiting_threads$/ { sub(/IyiScheduler\.waiting_threads/, "IyiWorkers.started? ? IyiWorkers.count.to_u64 : IyiScheduler.waiting_threads"); found = 1 } { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > pooled/iyi/prelude.iyi || { echo "the line this proof changes is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/pooled${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o pooled-run > build-pooled.log 2>&1; then
+  cat build-pooled.log; exit 1
+fi
+timeout -k 5 300 ./pooled-run > pooled.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: busy pool:" pooled.txt; then
+  echo "the busy pool check did not fire (exit $code):"; tail -3 pooled.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: busy pool:' pooled.txt)"
 
 # Measured on twelve cores, where eleven new helpers waited for a core;
 # on a CI runner's four the wait cost 35 ms against a 164 ms bound and the

@@ -24,9 +24,11 @@
 #      twice the ideal, woken from the main thread and from a worker; a
 #      task woken by a task that then computes with preemption off starts
 #      on an idle worker within 1 ms, and within 50 ms after a ping-pong
-#      left its waker's worker calling nobody, where the monitor calls;
-#      and a task joining a thread leaves its worker to its child. On
-#      Windows,
+#      left its waker's worker calling nobody, where the monitor calls; on
+#      Linux and darwin a connection's answer, sent while the worker its
+#      reader parked on is held 100 ms with preemption off, is read on
+#      another worker within 20 ms; and a task joining a thread leaves its
+#      worker to its child. On Windows,
 #      bench/completions_taken.iyi holds the process's one completion port
 #      at twelve workers: a task's socket answered while the worker it
 #      parked on computes with preemption off is read on another worker
@@ -87,10 +89,10 @@
 #      closes its socket, a pool that never steals a started task, tasks
 #      woken back onto the worker they parked on as they were before tasks
 #      moved, a hand-off that calls no idle worker, a monitor that calls
-#      nobody for a held worker's ring, and a join held in the
-#      kernel; and on Windows a port whose
-#      packets only the worker their task parked on runs, and a pool that
-#      leaves the priority boost on.
+#      nobody for a held worker's ring, a monitor that calls nobody for a
+#      held worker's poller, and a join held in the kernel; and on Windows
+#      a port whose packets only the worker their task parked on runs, and
+#      a pool that leaves the priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 4's floor refuses the ratio that comes out.
 set -u
@@ -149,8 +151,8 @@ done
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
 # Its balance step is timed against four workers' ideal, which a machine
 # with fewer cores than that cannot keep; there the other steps run.
-MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop join"
-[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop join"
+MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop heldio join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop heldio join"
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
   flag=""
@@ -912,7 +914,7 @@ else
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
       broken unlistedio '/def self.park_overlapped_current\(/ { inpark = 1 } inpark && /^    fiber\.list_on\(st\.object_id\) if @@shared && fiber\.unit\.is_a\?\(IyiUnit\)$/ { inpark = 0; next } { print }' concurrency.iyi parallel_migrate ;;
     *)
-      broken unlistedio '/def self.wait_posix\(fd/ { inwait = 1 } inwait && /^    listed\(fiber\)$/ { inwait = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+      broken unlistedio '/def self.wait_posix\(fd/ { inwait = 1 } inwait && /^    fiber\.list_on\(st\.object_id\) if moving$/ { inwait = 0; next } { print }' concurrency.iyi parallel_migrate ;;
   esac
   caught unlistedio 'cancel: still waiting after 5000 ms' cancel --watch=5000
 
@@ -945,6 +947,18 @@ else
   step "failure proof: a monitor that calls nobody for a held worker's ring leaves a hand-off its back-off skipped behind the hold"
   broken nobackstop '/^    wake_one if stuck$/ { next } { print }' concurrency.iyi parallel_migrate
   caught nobackstop 'backstop: tasks woken after a ping-pong onto a worker held 100 ms' backstop
+
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+    *)
+      step "failure proof: a monitor that calls nobody for a held worker's poller leaves its connection's answer behind the hold"
+      # Measured with the heldio step, Linux, 12 vCPUs, plain build: the
+      # answer was read 98 ms after its send beside a 100 ms hold without
+      # the call, and 0.2 to 4.8 ms with it.
+      broken noheldio '/^          stuck = true if held_io\?\(st\)$/ { next } { print }' concurrency.iyi parallel_migrate
+      caught noheldio 'heldio: an answer sent while the worker its reader parked on was held 100 ms' heldio
+      ;;
+  esac
 
   if [ "$CORES" -lt 4 ]; then
     step "failure proofs for stealing"

@@ -22,8 +22,8 @@
 #      exits 1 with the deadlock named, rather than hanging; and one found
 #      in a task's park is named once, with every cleanup run. A join
 #      beside a thread waking from its sleeps is not named one
-#      (bench/woken_busy.iyi), and on Windows a copy of the runtime that
-#      marks the woken thread busy only after a hold is caught naming it.
+#      (bench/woken_busy.iyi), and a copy of the runtime that marks the
+#      woken thread busy only after a hold is caught naming it.
 #   4. A group whose spelling would compile sequentially still interleaves:
 #      step 1's first property, called out because III.4.8 refused the
 #      sequential imitation by name; this step proves the check *can* fail
@@ -557,11 +557,13 @@ fi
 
 # ── 3h. A thread its wait let go is busy before it takes anything ────────
 # bench/woken_busy.iyi: a join parks beside a thread waking from its
-# sleeps, which must not be named a deadlock. On Windows a deadlock's walk
-# reads an idle thread's lists, and a thread marked busy only once its
-# woken sleeper was in its own run queue read as idle and quiet: the main
-# thread of bench/release_trigger.iyi named a deadlock in its join in 9
-# runs of 200 there, and in 15 of 200 at 4 processors' affinity.
+# sleeps, which must not be named a deadlock. A deadlock's walk reads an
+# idle thread's lists - on Windows another thread may have taken its last
+# io waiter's completion, and on Linux and darwin its news out of its
+# poller - and a thread marked busy only once its woken sleeper was in its
+# own run queue read as idle and quiet: the main thread of
+# bench/release_trigger.iyi named a deadlock in its join in 9 runs of 200
+# on Windows, and in 15 of 200 at 4 processors' affinity.
 step "a join beside a thread waking from its sleeps is not named a deadlock"
 if ! "$IYI" build --release "$REPO/bench/woken_busy.iyi" -o woken_busy > build-woken-busy.log 2>&1; then
   echo "woken_busy failed to build:"; tail -5 build-woken-busy.log; exit 1
@@ -576,9 +578,9 @@ sed 's/^/  /' woken_busy.txt
 # inside the hold: one marked busy before it takes anything, as the
 # runtime is, which must still pass; and one marked busy only after the
 # hold, which must name a deadlock, its `-Ddeadlock_dump` snapshot showing
-# the woken thread idle with its sleeper in its own run queue. Windows
-# only: elsewhere a deadlock's walk reads only what a thread said when it
-# went idle, and this thread went idle with a sleeper.
+# the woken thread idle with its sleeper in its own run queue. The line
+# that marks it busy in the wait is Windows' before the port's packets,
+# and elsewhere the one before the poller's news.
 woken_copy() { # woken_copy <dir> <awk program>
   mkdir -p "$1/iyi"
   cp -R "$REPO/src/iyi/." "$1/iyi/"
@@ -593,33 +595,30 @@ woken_copy() { # woken_copy <dir> <awk program>
 }
 HOLD='print "    held = __iyi_monotonic_ns + 200000000_i64"; print "    while __iyi_monotonic_ns < held"; print "    end"'
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "a thread held 200 ms after its wake, marked busy before, is not named a deadlock"
-    woken_copy held "\$0 == \"    wait_for_events(true)\" { print; $HOLD; found = found + 1; next }
-      { print } END { if (found != 1) exit 3 }"
-    code=$?
-    if [ "$code" -ne 0 ] || ! grep -q '^woken busy: ' held.txt; then
-      echo "a thread held after its wake and marked busy before it was named deadlocked (exit $code):"; cat held.txt; exit 1
-    fi
-    echo "  $(cat held.txt)"
-
-    step "failure proof: a thread held 200 ms after its wake, marked busy after, is named a deadlock"
-    woken_copy late "\$0 == \"        end_idle(st)\" { dropped = dropped + 1; next }
-      \$0 == \"    wait_for_events(true)\" { print; $HOLD; print \"    end_idle(st)\"; held = held + 1; next }
-      \$0 == \"      wait_for_events(true)\" { print; print \"      end_idle(st)\"; worker = worker + 1; next }
-      { print } END { if (dropped != 1 || held != 1 || worker != 1) exit 3 }"
-    code=$?
-    if [ "$code" -ne 1 ] || ! grep -q 'panic: deadlock: every fiber is blocked' late.txt ||
-       ! grep -q "idle 1, quiet 0, mail 0, io 0, no sleeper, run queue's head 1," late.txt; then
-      echo "a thread marked busy only after its hold was not named deadlocked with its sleeper in its run queue (exit $code):"; cat late.txt; exit 1
-    fi
-    echo "  exits 1 at \"$(grep -m1 'panic: deadlock' late.txt)\""
-    echo "  the woken thread as the walk read it:$(grep -m1 "run queue's head 1," late.txt | sed 's/^ *thread [0-9]*://')"
-    ;;
-  *)
-    step "failure proof: a thread marked busy after its wake's hold is named a deadlock: not here, because a deadlock's walk reads an idle thread's lists on Windows only"
-    ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) BUSY='        end_idle(st)' ;;
+  *) BUSY='      end_idle(st) if blocking && @@shared' ;;
 esac
+step "a thread held 200 ms after its wake, marked busy before, is not named a deadlock"
+woken_copy held "\$0 == \"    wait_for_events(true)\" { print; $HOLD; found = found + 1; next }
+  { print } END { if (found != 1) exit 3 }"
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q '^woken busy: ' held.txt; then
+  echo "a thread held after its wake and marked busy before it was named deadlocked (exit $code):"; cat held.txt; exit 1
+fi
+echo "  $(cat held.txt)"
+
+step "failure proof: a thread held 200 ms after its wake, marked busy after, is named a deadlock"
+woken_copy late "\$0 == \"$BUSY\" { dropped = dropped + 1; next }
+  \$0 == \"    wait_for_events(true)\" { print; $HOLD; print \"    end_idle(st)\"; held = held + 1; next }
+  \$0 == \"      wait_for_events(true)\" { print; print \"      end_idle(st)\"; worker = worker + 1; next }
+  { print } END { if (dropped != 1 || held != 1 || worker != 1) exit 3 }"
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'panic: deadlock: every fiber is blocked' late.txt ||
+   ! grep -q "idle 1, quiet 0, mail 0, io 0, no sleeper, run queue's head 1," late.txt; then
+  echo "a thread marked busy only after its hold was not named deadlocked with its sleeper in its run queue (exit $code):"; cat late.txt; exit 1
+fi
+echo "  exits 1 at \"$(grep -m1 'panic: deadlock' late.txt)\""
+echo "  the woken thread as the walk read it:$(grep -m1 "run queue's head 1," late.txt | sed 's/^ *thread [0-9]*://')"
 
 # ── 4. Failure proof: the interleaving assert is reachable ────────────────
 step "failure proof: a wrong order is refused"
@@ -753,7 +752,7 @@ sleep_proof "a send node handed out before its sender read it" unread_sender \
 case "$(uname -s)" in
   Linux)
     sleep_proof "an io waiter found by walking every waiter" walked_io \
-      '/^    index < slots.size \? slots\[index\] : nil$/ { print "    found_waiter = nil"; print "    walk = state.io_head"; print "    while walk.is_a?(IyiFiber)"; print "      found_waiter = walk if walk.wait_fd == fd && walk.wait_dir == direction"; print "      walk = walk.next_io"; print "    end"; print "    found_waiter"; found = 1; next }
+      '/^    index < slots.size \? slots\[index\] : nil$/ { print "    found_waiter = nil"; print "    walk = st.io_head"; print "    while walk.is_a?(IyiFiber)"; print "      found_waiter = walk if walk.wait_fd == fd && walk.wait_dir == direction"; print "      walk = walk.next_io"; print "    end"; print "    found_waiter"; found = 1; next }
        { print } END { if (!found) exit 3 }' \
       'FAIL: io: 5000 round trips'
     ;;

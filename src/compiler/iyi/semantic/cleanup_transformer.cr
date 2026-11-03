@@ -1482,12 +1482,17 @@ module Iyi
     end
 
     def transform(node : ProcLiteral)
-      body = node.def.body
-      if node.def.no_returns? && !body.type?
-        node.def.body = untyped_expression(body)
-      else
-        node.def.body = node.def.body.transform(self)
-      end
+      # iyi: a proc's body is transformed as a def's is, typed or not. One
+      # with no type, in a proc whose def inference left without one (and so
+      # NoReturn), was replaced whole with a `can't execute` raise; but a call
+      # given a NoReturn argument is never typed either, and it runs. With
+      # the block `Proc(Int32, NoReturn)`, `->(x : Int32) : String {
+      # wrap(block.call(x)) }` panicked with "can't execute `wrap(block.call(
+      # x))`" without calling the block, so neither its side effects nor its
+      # own panic happened. The transform rewrites that call to the
+      # arguments up to the NoReturn one, and an expression that has no
+      # type at all to that same raise, so the proc runs what was written.
+      node.def.body = node.def.body.transform(self)
 
       # iyi: a block a def keeps can end up with a body that has a type only
       # now. A call given a NoReturn argument, `wrap(block.call(x))` where
@@ -1499,8 +1504,15 @@ module Iyi
       # or code generation finds a kept block with no proc type. Only a
       # block's proc: nothing is bound to it, so setting its type here
       # cannot start inference again in a node that observes it.
-      if node.from_block? && !node.type? && (body_type = node.def.body.type?)
-        node.def.set_type(body_type)
+      #
+      # A body still without a type is one no way out of which returns:
+      # inference types a node from any dependency that has a type. The
+      # cleanup cuts a list of expressions at its first NoReturn one and
+      # leaves the list untyped, `puts "x"; wrap(block.call(y))` and
+      # `v = raise "x"; v.to_s` both, so such a block is NoReturn, which is
+      # what FixMissingTypes calls a block with no type.
+      if node.from_block? && !node.type?
+        node.def.set_type(node.def.body.type? || @program.no_return)
         node.update
       end
 

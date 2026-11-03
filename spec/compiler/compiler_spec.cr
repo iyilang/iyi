@@ -528,6 +528,49 @@ describe "Compiler" do
     end
   end
 
+  # iyi: a proc literal whose body gives a call a NoReturn value. With the
+  # block `Proc(Int32, NoReturn)`, `wrap(block.call(x))` is a call inference
+  # never types, which left the proc's def untyped, and the cleanup replaced
+  # such a proc's whole body with a "can't execute" panic: nothing in it ran,
+  # not the block and not the line before it. iyi-web's `get "/boom",
+  # workers: 1 do ... raise ... end` is that proc, and its log line named
+  # `route_answer(block.call(ctx))` instead of the route's own panic.
+  describe "a proc whose body gives a call a NoReturn value" do
+    it "runs the body and the block, and panics with the block's message" do
+      with_tempdir("iyi-proc-no-return-argument") do
+        File.write "proc.iyi", <<-'IYI'
+          def wrap(r : R) : String forall R
+            "wrapped"
+          end
+
+          def reg(&block : Int32 -> B) : Nil forall B
+            pr = ->(x : Int32) : String do
+              puts "the proc ran"
+              wrap(block.call(x))
+            end
+            puts pr.call(1)
+          end
+
+          reg do |x|
+            puts "the block ran"
+            raise "fire"
+          end
+          IYI
+        source = Iyi::Compiler::Source.new(
+          File.expand_path("proc.iyi"), File.read("proc.iyi"))
+        iyi_compiler.compile(source, File.expand_path("proc"))
+
+        output = IO::Memory.new
+        error = IO::Memory.new
+        status = Process.run(File.expand_path("proc"), output: output, error: error)
+        status.success?.should be_false
+        output.to_s.should eq("the proc ran\nthe block ran\n")
+        error.to_s.should contain "iyi: panic: fire"
+        error.to_s.should_not contain "can't execute"
+      end
+    end
+  end
+
   # iyi: the concurrency runtime — SPEC.md III.4, Linux only. The bench gate
   # (`bench/concurrency_exercise.sh`) is the full property list; what earns a
   # place *here* is what `make compiler_spec` should catch without bash: the

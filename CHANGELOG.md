@@ -156,6 +156,32 @@
   Both now say `close`, and no `100 Continue` follows an answer.
   `bench/std_http_exercise.sh`'s close cases hold both, plain and over
   std/tls, with a broken copy of each.
+- **So does a kept block whose body is more than that call.** The fix
+  above typed the block's proc from the body cleanup leaves, and cleanup
+  leaves no type on a body it cuts at its NoReturn expression: a line
+  before the call, `{ |y| puts "x"; wrap(raise "x") }`, the value
+  assigned first, `{ |y| v = raise "x"; v.to_s }`, or the call in both
+  branches of an `if`. Each still stopped the compiler with "Cast from
+  Nil to Iyi::ProcInstanceType failed" (bindings.cr:622), in a block
+  `Kept.of`, `SharedProc.of` or any `&block : Int32 -> String` keeps. No
+  way out of such a body returns, so its proc is NoReturn, which is what
+  a block with no type is everywhere else. A spec in
+  `spec/compiler/semantic/iyi_spec.cr` compiles the three shapes.
+
+- **A proc whose body gives a call a NoReturn value runs that body.**
+  iyi-web's `get "/boom", workers: 1 do ... raise "..." end` answered
+  500 with "iyi: panic: can't execute `route_answer(block.call(ctx))`"
+  in its log, and the route never ran: not the line before its `raise`,
+  not the `raise`. A call given a NoReturn argument, `wrap(block.call(x))`
+  with the block `Proc(Int32, NoReturn)`, is never typed, which left the
+  proc's def without a type, and cleanup replaced the whole body of such
+  a proc with that panic, where a def's body is cleaned up instead: the
+  call becomes the arguments up to the NoReturn one. A proc's body now
+  is too, so `->(x : Int32) : String { puts "ran"; wrap(block.call(x)) }`
+  prints "ran", calls the block and panics with the block's message, or
+  exits with the block's `exit` status. Inherited from Crystal, whose
+  1.21 raises the same "can't execute". A spec in
+  `spec/compiler/compiler_spec.cr` runs the shape.
 
 ## 0.20.0 — 2026-11-02
 

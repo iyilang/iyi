@@ -1487,8 +1487,22 @@ class IyiChanLock
     acquire(word) if IyiScheduler.shared?
   end
 
+  # A release store, not the sequentially consistent one an `Atomic`'s
+  # `set` is: on x86_64 that is an exchange, a full barrier, which a
+  # lock's release does not need - what the holder wrote is ordered
+  # before the store either way, and the next holder's exchange orders
+  # it after. Twice a message, it was what made one pair on one worker
+  # slower than under the scheduler's lock: bench/chan_scaling.iyi
+  # `1 400000 pingpong`, best of 6 interleaved on Linux x86_64 (12 vCPU,
+  # shared), made 13.6 million messages a second with the exchange,
+  # 15.5 million with this, and 14.9 million on the scheduler's lock.
+  # On aarch64 the two are the same `stlr`.
   def self.unlock(word : Pointer(Atomic(UInt64))) : Nil
-    word.value.set(0_u64) if IyiScheduler.shared?
+    release(word) if IyiScheduler.shared?
+  end
+
+  private def self.release(word : Pointer(Atomic(UInt64))) : Nil
+    IyiAtomic.store(word.as(Pointer(UInt64)), 0_u64, :release, false)
   end
 
   # The lock word of each of a select's arms, in the arms' order, on the
@@ -1544,7 +1558,7 @@ class IyiChanLock
     return unless IyiScheduler.shared?
     index = 0
     while index < count
-      Pointer(Atomic(UInt64)).new(words[index]).value.set(0_u64)
+      release(Pointer(Atomic(UInt64)).new(words[index]))
       index = index + 1
     end
   end
@@ -3503,7 +3517,10 @@ class IyiScheduler
   end
 
   # The lists exist once a second thread does (`expect_thread`); with one
-  # thread and none made, nothing has parked.
+  # thread and none made, nothing has parked. The fibers whose wakes are
+  # claimed are chained through their run links, which a parked fiber
+  # does not use, and readied once the list's lock is let go, as a
+  # channel's are (`Channel#take_woken`).
   def self.wake_on(word : Pointer(Atomic(UInt64)), count : Int32) : Nil
     heads = @@lot_heads
     tails = @@lot_tails
@@ -3512,19 +3529,33 @@ class IyiScheduler
     lock = lot_lock(bucket)
     IyiChanLock.lock(lock)
     woken = 0
+    chain : IyiFiber? = nil
+    last : IyiFiber? = nil
     node = heads[bucket]
     while node.is_a?(IyiWaiter) && woken < count
       following = node.next_node
       if node.slot == word.address
         lot_unlink(heads, tails, bucket, node)
         if node.claim
-          ready(node.fiber, false)
+          fiber = node.fiber
+          fiber.next_run = nil
+          if last.is_a?(IyiFiber)
+            last.next_run = fiber
+          else
+            chain = fiber
+          end
+          last = fiber
           woken = woken + 1
         end
       end
       node = following
     end
     IyiChanLock.unlock(lock)
+    while chain.is_a?(IyiFiber)
+      following = chain.next_run
+      ready(chain, false)
+      chain = following
+    end
   end
 
   # Made by the first park on a program's one thread, or before the
@@ -6374,6 +6405,17 @@ class Channel(T)
   @spare_send : IyiSendNode(T)?
   # The channel's lock (`IyiChanLock`): 0 free, 1 held.
   @guard : Atomic(UInt64)
+  # The fiber an operation claimed and has yet to ready: it is readied
+  # once the lock is let go (`take_woken`), so the lock is not held over
+  # the scheduler's queues - another worker's ring, the shared queue and
+  # the scheduler's lock, an idle worker's doorbell. An operation wakes
+  # one fiber at most; `close` wakes each as it claims it. With this and
+  # the lock's release store (`IyiChanLock.unlock`), bench/chan_scaling.iyi
+  # at 200000 rounds, best of 5 interleaved on Linux x86_64 (12 vCPU,
+  # shared), went from the wake made under the lock to: twelve producers
+  # into one channel 7.5 to 17.9 million values a second, four 16.1 to
+  # 32.1, one 51.5 to 72.1; twelve ping-pong pairs 38.4 to 44.4 million.
+  @woken : IyiFiber?
 
   def initialize
     initialize(0)
@@ -6393,6 +6435,7 @@ class Channel(T)
     @send_tail = nil
     @spare_send = nil
     @guard = Atomic(UInt64).new(0_u64)
+    @woken = nil
   end
 
   # :nodoc: - the lock's word, by address: what `select` orders its
@@ -6409,6 +6452,19 @@ class Channel(T)
     IyiChanLock.unlock(pointerof(@guard))
   end
 
+  # :nodoc: - the lock held: the fiber the last operation claimed, taken
+  # out to be readied once the lock is let go (`wake`).
+  def take_woken : IyiFiber?
+    woken = @woken
+    @woken = nil
+    woken
+  end
+
+  # :nodoc: - what `take_woken` answered, readied with no lock held.
+  def self.wake(woken : IyiFiber?) : Nil
+    IyiScheduler.ready(woken, false) if woken.is_a?(IyiFiber)
+  end
+
   def send(value : T) : Nil | ChannelClosed | Cancelled
     fiber = IyiScheduler.current
     lock
@@ -6418,7 +6474,9 @@ class Channel(T)
     end
     answer = put_held(value)
     unless answer.is_a?(IyiMissed)
+      woken = take_woken
       unlock
+      Channel.wake(woken)
       return answer
     end
 
@@ -6462,7 +6520,9 @@ class Channel(T)
       end
       answer = take_held
       unless answer.is_a?(IyiMissed)
+        woken = take_woken
         unlock
+        Channel.wake(woken)
         return answer
       end
       got = uninitialized T
@@ -6486,6 +6546,7 @@ class Channel(T)
     lock
     @closed = true
     while wake_receiver
+      Channel.wake(take_woken)
     end
     while true
       node = take_sender
@@ -6537,7 +6598,9 @@ class Channel(T)
   def take_now : T | ChannelClosed
     lock
     answer = take_held
+    woken = take_woken
     unlock
+    Channel.wake(woken)
     raise "take_now on an empty open channel" if answer.is_a?(IyiMissed)
     answer
   end
@@ -6552,7 +6615,7 @@ class Channel(T)
       refill = take_sender
       if refill.is_a?(IyiSendNode(T))
         push_item(refill.take)
-        IyiScheduler.ready(refill.fiber, false)
+        @woken = refill.fiber
       end
       return value
     end
@@ -6560,7 +6623,7 @@ class Channel(T)
     node = take_sender
     if node.is_a?(IyiSendNode(T))
       value = node.take
-      IyiScheduler.ready(node.fiber, false)
+      @woken = node.fiber
       return value
     end
     IyiMissed.new
@@ -6582,7 +6645,9 @@ class Channel(T)
   def put_now(value : T) : Nil | ChannelClosed
     lock
     answer = put_held(value)
+    woken = take_woken
     unlock
+    Channel.wake(woken)
     raise "put_now on a full channel" if answer.is_a?(IyiMissed)
     answer
   end
@@ -6764,17 +6829,18 @@ class Channel(T)
     node.linked = false
   end
 
-  # True when a parked receiver was woken; stale nodes — parks their
-  # fiber already left, or whose wake another channel's waker or a cancel
-  # claimed first — are consumed and skipped, so a real waiter behind one
-  # is never starved by a leftover in front of it.
+  # True when a parked receiver's wake was claimed, to be readied once the
+  # lock is let go (`@woken`); stale nodes — parks their fiber already
+  # left, or whose wake another channel's waker or a cancel claimed first
+  # — are consumed and skipped, so a real waiter behind one is never
+  # starved by a leftover in front of it.
   private def wake_receiver : Bool
     while true
       head = @recv_head
       return false unless head.is_a?(IyiWaiter)
       unlink_receiver(head)
       next unless head.claim
-      IyiScheduler.ready(head.fiber, false)
+      @woken = head.fiber
       return true
     end
   end
@@ -6784,7 +6850,7 @@ class Channel(T)
   # the select that parked the node takes this arm, and a cancellation
   # that comes after the wake cannot strand the value. The wake is
   # claimed first, so the slot's owner is suspended in the park that made
-  # it, and stays there until this readies it.
+  # it, and stays there until it is readied.
   private def hand(value : T) : Bool
     while true
       head = @recv_head
@@ -6793,7 +6859,7 @@ class Channel(T)
       next unless head.claim
       Pointer(T).new(head.slot).value = value
       head.handed = true
-      IyiScheduler.ready(head.fiber, false)
+      @woken = head.fiber
       return true
     end
   end
@@ -6842,7 +6908,9 @@ class Channel(T)
         happened{{ i }} = !actions[{{ i }}].refused?
         answer{{ i }} = actions[{{ i }}].execute
         unless answer{{ i }}.is_a?(IyiMissed)
+          woken = actions[{{ i }}].take_woken
           IyiChanLock.unlock_all(words, held)
+          Channel.wake(woken)
           return { {{ i }}, answer{{ i }}, happened{{ i }} }
         end
       {% end %}
@@ -6889,7 +6957,9 @@ class Channel(T)
       happened{{ i }} = !actions[{{ i }}].refused?
       answer{{ i }} = actions[{{ i }}].execute
       unless answer{{ i }}.is_a?(IyiMissed)
+        woken = actions[{{ i }}].take_woken
         IyiChanLock.unlock_all(words, held)
+        Channel.wake(woken)
         return { {{ i }}, answer{{ i }}, happened{{ i }} }
       end
     {% end %}
@@ -6943,6 +7013,10 @@ class IyiReceiveSelect(T)
     @node = @channel.park_receive_node(fiber, nonce, pointerof(@got).address)
   end
 
+  def take_woken : IyiFiber?
+    @channel.take_woken
+  end
+
   def unpark : Nil
     node = @node
     @channel.unlink_receiver(node) if node.is_a?(IyiWaiter)
@@ -6984,6 +7058,10 @@ class IyiSendSelect(T)
 
   def park(fiber : IyiFiber, nonce : UInt64) : Nil
     @node = @channel.park_send_node(fiber, nonce, @value)
+  end
+
+  def take_woken : IyiFiber?
+    @channel.take_woken
   end
 
   # A losing arm's node lets go of the value as it leaves: the channel
@@ -7059,6 +7137,10 @@ class IyiTimeoutSelect
     fiber.deadline = @deadline
     IyiScheduler.heap_insert(st, fiber)
     IyiScheduler.lists_unlock(st)
+  end
+
+  def take_woken : IyiFiber?
+    nil
   end
 
   def unpark : Nil

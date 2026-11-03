@@ -4797,6 +4797,8 @@ class IyiWorkers
   # 0 before the pool is.
   @@asked : Int32 = 0
   @@started : Int32 = 0
+  # `resolved`'s answer as `parallel?` last read it, 0 before it has.
+  @@wanted : Int32 = 0
   @@inject_head : IyiFiber?
   @@inject_tail : IyiFiber?
   # Started fibers that may move, runnable and in no worker's ring: woken
@@ -4888,6 +4890,7 @@ class IyiWorkers
       raise "IyiWorkers.count: the pool started with #{started} workers, and it does not grow or shrink once it has"
     end
     @@asked = workers
+    @@wanted = 0
     workers
   end
 
@@ -4902,6 +4905,24 @@ class IyiWorkers
   # Whether the pool has started (`start`).
   def self.started? : Bool
     @@started > 0
+  end
+
+  # Whether an eligible `spawn` (SPEC.md III.4.15) goes to the pool: a
+  # pool of more than one worker, started or still to start. One worker
+  # keeps such a spawn in its spawner's unit and the pool unstarted, so
+  # `IYI_WORKERS=1` is a program on one thread. The count the pool would
+  # start with is kept once read, since before the pool starts it is an
+  # environment lookup, and a program held to one worker asks it at every
+  # spawn; `count=` forgets it.
+  def self.parallel? : Bool
+    started = @@started
+    return started > 1 if started > 0
+    wanted = @@wanted
+    if wanted == 0
+      wanted = resolved
+      @@wanted = wanted
+    end
+    wanted > 1
   end
 
   # The worker whose state's id is *id*, or nil: the pool's list read
@@ -6243,12 +6264,39 @@ class IyiGroup
   # group acts on (III.4.3): the first cancels the siblings, and the task
   # it is told on is `first_failure`, which the typed group answers. A
   # task a cancelled one starts, or one a cancelled group starts, is
-  # cancelled from its first wait on. It never runs at the same instant as
-  # its spawner: on a thread outside the pool it runs on that thread for
-  # its whole life, and inside a parallel task it joins that task's unit
-  # (`IyiUnit`), whose fibers may each resume on another worker but never
-  # two at once.
+  # cancelled from its first wait on.
+  #
+  # Where it runs is the compiler's decision, per call (SPEC.md III.4.15):
+  # a block every capture of which is `Share`, and that reaches no module
+  # state that is not, may run on another core, and the compiler points
+  # such a call at `spawn_pooled`; every other call runs this body, and
+  # the task stays in its spawner's unit, as `spawn_serial`'s does.
   def spawn(&block : -> T) : IyiTask(T) forall T
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      # Never taken. The line is here so that `spawn_pooled` is typed for
+      # every `T` this def is, which is what lets the compiler point an
+      # eligible call at it after typing (`CleanupTransformer#
+      # classify_spawn`); a branch on `false` is dropped before codegen.
+      return spawn_pooled(&block) if false
+    {% end %}
+    in_unit(&block)
+  end
+
+  # A task that stays in its spawner's unit whatever its block captures:
+  # it never runs at the same instant as its spawner or as any other task
+  # of the unit, and it does not run until its spawner parks, as every
+  # `spawn` did before 0.21.0 (SPEC.md III.4.15, part 5). On a thread
+  # outside the pool it runs on that thread for its whole life; inside a
+  # parallel task it joins that task's unit (`IyiUnit`), whose fibers may
+  # each resume on another worker but never two at once.
+  def spawn_serial(&block : -> T) : IyiTask(T) forall T
+    in_unit(&block)
+  end
+
+  # The two starts take the block as `spawn` does, `-> T`: a `Proc(T)`
+  # parameter binds no `T` for a block that never returns, and
+  # `g.spawn_parallel { raise "boom" }` stopped compiling.
+  private def in_unit(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
@@ -6276,6 +6324,21 @@ class IyiGroup
     # values, as the block a thread runs may (III.4.4,
     # `CleanupTransformer#check_share_boundary`).
     def spawn_parallel(&block : -> T) : IyiTask(T) forall T
+      on_pool(&block)
+    end
+
+    # :nodoc: — a `spawn` the compiler found eligible (SPEC.md III.4.15):
+    # a parallel task of its own unit, on a pool of more than one worker.
+    # On one worker, `IYI_WORKERS=1` or `IyiWorkers.count = 1`, it stays in
+    # its spawner's unit, so a program held to one worker runs its spawns
+    # on one thread, as before. Private: nothing but the compiler, which
+    # has checked the block, may call it.
+    private def spawn_pooled(&block : -> T) : IyiTask(T) forall T
+      return in_unit(&block) unless IyiWorkers.parallel?
+      on_pool(&block)
+    end
+
+    private def on_pool(&block : -> T) : IyiTask(T) forall T
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
       IyiWorkers.start

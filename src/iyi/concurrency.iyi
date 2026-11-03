@@ -5531,20 +5531,30 @@ end
     def self.start(handle : Void*) : Nil
       IyiRuntimeLock.lock
       if @@page == 0_u64
-        page = __iyi_mmap(PAGE).address
-        Pointer(UInt64).new(page + W_HANDLE).value = handle.address
-        Pointer(UInt64).new(page + W_DOORBELL).value = LibC.CreateSemaphoreW(nil, 0_i32, 1_i32, nil).address
-        entry = ->(argument : UInt64) { IyiStdinReader.run(argument) }
-        thread = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(Pointer(UInt64).new(pointerof(entry).address).value),
-          Pointer(Void).new(0_u64), 4_i32, nil)
-        if thread.address != 0_u64
-          Pointer(UInt64).new(page + W_THREAD).value = thread.address
-          @@page = page
-          LibC.ResumeThread(thread)
+        # A build with no collector of iyi's own (`-Dgc_none`, `-Dgc_boehm`)
+        # has no `__iyi_mmap` (`io_chunk`), and a program of one that read
+        # standard input did not build: "undefined method '__iyi_mmap' for
+        # IyiStdinReader.class". The page is the kernel's either way.
+        {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+          page = LibC.VirtualAlloc(nil, PAGE, 0x3000_i32, 4_i32).address
+        {% else %}
+          page = __iyi_mmap(PAGE).address
+        {% end %}
+        if page != 0_u64
+          Pointer(UInt64).new(page + W_HANDLE).value = handle.address
+          Pointer(UInt64).new(page + W_DOORBELL).value = LibC.CreateSemaphoreW(nil, 0_i32, 1_i32, nil).address
+          entry = ->(argument : UInt64) { IyiStdinReader.run(argument) }
+          thread = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(Pointer(UInt64).new(pointerof(entry).address).value),
+            Pointer(Void).new(0_u64), 4_i32, nil)
+          if thread.address != 0_u64
+            Pointer(UInt64).new(page + W_THREAD).value = thread.address
+            @@page = page
+            LibC.ResumeThread(thread)
+          end
         end
       end
       IyiRuntimeLock.unlock
-      raise "CreateThread failed for standard input's reader" if @@page == 0_u64
+      raise "standard input's reader could not start" if @@page == 0_u64
     end
 
     # Any thread's fiber may ask, one read at a time in the process: the

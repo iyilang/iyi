@@ -40,6 +40,15 @@
   program holds is moved aside. A spec in `spec/compiler/compiler_spec.cr`
   builds beside a gc.dll that is not one.
 
+- **A Windows program built with `-Dgc_none` or `-Dgc_boehm` that reads
+  standard input builds.** Standard input's reader thread took its page
+  from `__iyi_mmap`, which only iyi's own collector defines, and the
+  build stopped at "undefined method '__iyi_mmap' for
+  IyiStdinReader.class". In those builds the page is `VirtualAlloc`'s.
+  `bench/windows_exercise.sh` cross-compiles such a program under each
+  flag, reads a piped line through it on Windows, and refuses a copy
+  whose reader asks `__iyi_mmap` again.
+
 ### Known
 
 - **0.20.0's Windows light-endpoint loss is the load generator sharing
@@ -26050,7 +26059,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,725-line library and nothing else. Every other
+  written against iyi's own 25,735-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

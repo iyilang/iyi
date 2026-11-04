@@ -9,8 +9,9 @@
 #
 #   * On Darwin, libSystem's `clock_gettime_nsec_np` provides wall clock and
 #     monotonic readings with zero new symbols beyond what concurrency already links.
-#   * On Linux, raw `clock_gettime` syscalls (228 on x86_64, 113 on aarch64)
-#     issue direct kernel requests with zero libc symbols.
+#   * On Linux, `clock_gettime` read through the vDSO the kernel maps into
+#     every process, found by the runtime's `IyiClock` without libc, and the
+#     raw syscall (228 on x86_64, 113 on aarch64) where there is none.
 #   * On Windows, kernel32's `GetSystemTimePreciseAsFileTime` and `QueryPerformanceCounter`
 #     provide nanosecond-scale wall and monotonic time.
 #   * On wasm32-wasi, WASI import `__wasi_clock_time_get` provides both clocks.
@@ -1259,42 +1260,17 @@ pub struct Time
       LibSystem.clock_gettime_nsec_np(6)
     end
   {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
-    struct KernelTimeSpec
-      property tv_sec : Int64
-      property tv_nsec : Int64
-      def initialize(@tv_sec : Int64, @tv_nsec : Int64)
-      end
-    end
-
-    def self.kernel_clock_gettime(clock_id : Int64) : {Int64, Int64}
-      ts = uninitialized KernelTimeSpec
-      result = uninitialized Int64
-      {% if flag?(:x86_64) %}
-        asm("syscall" : "={rax}"(result)
-                      : "{rax}"(228_i64), "{rdi}"(clock_id), "{rsi}"(pointerof(ts).as(Void*))
-                      : "rcx", "r11", "memory"
-                      : "volatile")
-      {% else %}
-        asm("svc #0" : "={x0}"(result)
-                     : "{x8}"(113_i64), "{x0}"(clock_id), "{x1}"(pointerof(ts).as(Void*))
-                     : "memory"
-                     : "volatile")
-      {% end %}
-      {ts.tv_sec, ts.tv_nsec}
-    end
-
+    # Both through the runtime's clock (`IyiClock`), the vDSO with the
+    # syscall behind it.
     def self.wall_clock_nanoseconds : UInt64
       # CLOCK_REALTIME = 0 on Linux
-      sec, nsec = kernel_clock_gettime(0_i64)
-      sec.to_u64 * 1000000000_u64 + nsec.to_u64
+      IyiClock.read(0)
     end
 
     def self.monotonic_nanoseconds : UInt64
       # CLOCK_MONOTONIC = 1 on Linux
-      sec, nsec = kernel_clock_gettime(1_i64)
-      sec.to_u64 * 1000000000_u64 + nsec.to_u64
+      IyiClock.read(1)
     end
-
   {% elsif flag?(:windows) %}
     lib LibKernel32
       fun GetSystemTimePreciseAsFileTime(time : Int64*) : Void

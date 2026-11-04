@@ -133,6 +133,206 @@ class IyiRuntimeLock
 end
 
 {% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+  lib LibIyiClock
+    struct Timespec
+      sec : Int64
+      nsec : Int64
+    end
+  end
+
+  # Linux's clocks, read through the vDSO: the page of code the kernel
+  # maps into every process for exactly this, which reads the clock
+  # source from user space where the `clock_gettime` syscall enters the
+  # kernel. libc's `clock_gettime` is the same call, and binding it would
+  # put a libc symbol on every program's floor (SPEC.md III.9), so the
+  # vDSO is found here the way Go's runtime finds it (`vdso_linux.go`):
+  # its ELF header's address is the auxiliary vector's `AT_SYSINFO_EHDR`,
+  # which the kernel left after the environment on the first stack, and
+  # its dynamic symbol table names `__vdso_clock_gettime` (x86_64) or
+  # `__kernel_clock_gettime` (aarch64). Looked up once, by whichever
+  # thread reads a clock first - two that race write the same answer -
+  # and without allocating, since the collector reads this clock too
+  # (`IyiMark.now_ns`). Where there is no vDSO, or no such symbol, or its
+  # call fails, the syscall is made here as before; a clock source the
+  # vDSO cannot read it hands to the syscall itself.
+  #
+  # CLOCK_MONOTONIC read in a loop of ten million on the Linux machine
+  # (x86_64, 12 vCPU, shared, kvm-clock), release: 64 to 65 ns a read by
+  # the syscall, 17 to 18 through the vDSO. The scheduler's sleep queue,
+  # its timers and the preemption monitor read it through
+  # `__iyi_monotonic_ns`, std/time's `Time.monotonic` and `Time.utc`
+  # through `read`.
+  class IyiClock
+    # The vDSO's function: 0 not looked up yet, 1 none, else its address.
+    @@vdso : UInt64 = 0_u64
+
+    def self.monotonic_ns : UInt64
+      read(1)
+    end
+
+    # Clock *clock* (CLOCK_REALTIME 0, CLOCK_MONOTONIC 1, ...) in
+    # nanoseconds.
+    def self.read(clock : Int32) : UInt64
+      stamp = uninitialized LibIyiClock::Timespec
+      call = @@vdso
+      if call == 0_u64
+        call = find
+        @@vdso = call
+      end
+      if call != 1_u64
+        # A proc is its function and its closure; this one closes over
+        # nothing, so it is called as the C function it is.
+        cell = {call, 0_u64}
+        if pointerof(cell).as(Pointer(Proc(Int32, Pointer(LibIyiClock::Timespec), Int32))).value.call(clock, pointerof(stamp)) == 0
+          return stamp.sec.to_u64 * 1000000000_u64 + stamp.nsec.to_u64
+        end
+      end
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(228_i64), "{rdi}"(clock.to_i64), "{rsi}"(pointerof(stamp))
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(113_i64), "{x0}"(clock.to_i64), "{x1}"(pointerof(stamp))
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      stamp.sec.to_u64 * 1000000000_u64 + stamp.nsec.to_u64
+    end
+
+    # The vDSO's `clock_gettime`, or 1. The auxiliary vector follows the
+    # environment's terminating null, which follows argv's.
+    def self.find : UInt64
+      at = ARGV_UNSAFE.as(Pointer(UInt64)) + (ARGC_UNSAFE.to_i64 + 1_i64)
+      while at.value != 0_u64
+        at = at + 1_i64
+      end
+      at = at + 1_i64
+      base = 0_u64
+      # AT_NULL ends it; AT_SYSINFO_EHDR is 33.
+      while at.value != 0_u64
+        base = at[1] if at.value == 33_u64
+        at = at + 2_i64
+      end
+      return 1_u64 if base == 0_u64
+      found = symbol(base)
+      found == 0_u64 ? 1_u64 : found
+    end
+
+    # *count* bytes at *address*, little-endian: the ELF fields here are
+    # 16 and 32 bits wide, and the prelude's integers are not.
+    private def self.bytes(address : UInt64, count : Int32) : UInt64
+      at = Pointer(UInt8).new(address)
+      value = 0_u64
+      index = count - 1
+      while index >= 0
+        value = value.unsafe_shl(8_u64) | at[index].to_u64
+        index = index - 1
+      end
+      value
+    end
+
+    # The clock's address in the vDSO image at *base*, or 0: the first
+    # `PT_LOAD` segment gives the image's load bias, `PT_DYNAMIC` its
+    # string and symbol tables, and the symbol count is the SysV hash's
+    # chain count or, with only the GNU hash, its highest chain's end.
+    private def self.symbol(base : UInt64) : UInt64
+      return 0_u64 unless bytes(base, 4) == 0x464C457F_u64 && bytes(base &+ 4_u64, 1) == 2_u64
+      phoff = bytes(base &+ 32_u64, 8)
+      phsize = bytes(base &+ 54_u64, 2)
+      phnum = bytes(base &+ 56_u64, 2)
+      bias = 0_u64
+      loaded = false
+      dynamic = 0_u64
+      index = 0_u64
+      while index < phnum
+        header = base &+ phoff &+ index &* phsize
+        kind = bytes(header, 4)
+        if kind == 1_u64 && !loaded
+          bias = base &+ bytes(header &+ 8_u64, 8) &- bytes(header &+ 16_u64, 8)
+          loaded = true
+        elsif kind == 2_u64
+          dynamic = base &+ bytes(header &+ 8_u64, 8)
+        end
+        index = index &+ 1_u64
+      end
+      return 0_u64 unless loaded && dynamic != 0_u64
+      strings = 0_u64
+      symbols = 0_u64
+      hash = 0_u64
+      gnu = 0_u64
+      while (tag = bytes(dynamic, 8)) != 0_u64
+        value = bytes(dynamic &+ 8_u64, 8) &+ bias
+        case tag
+        when 4_u64          then hash = value
+        when 5_u64          then strings = value
+        when 6_u64          then symbols = value
+        when 0x6FFFFEF5_u64 then gnu = value
+        end
+        dynamic = dynamic &+ 16_u64
+      end
+      return 0_u64 if strings == 0_u64 || symbols == 0_u64
+      count = 0_u64
+      if hash != 0_u64
+        count = bytes(hash &+ 4_u64, 4)
+      elsif gnu != 0_u64
+        buckets = bytes(gnu, 4)
+        first = bytes(gnu &+ 4_u64, 4)
+        bucket_at = gnu &+ 16_u64 &+ bytes(gnu &+ 8_u64, 4) &* 8_u64
+        chains = bucket_at &+ buckets &* 4_u64
+        last = 0_u64
+        index = 0_u64
+        while index < buckets
+          start = bytes(bucket_at &+ index &* 4_u64, 4)
+          last = start if start > last
+          index = index &+ 1_u64
+        end
+        if last < first
+          count = first
+        else
+          while bytes(chains &+ (last &- first) &* 4_u64, 4) & 1_u64 == 0_u64
+            last = last &+ 1_u64
+          end
+          count = last &+ 1_u64
+        end
+      else
+        return 0_u64
+      end
+      {% if flag?(:x86_64) %}
+        wanted = "__vdso_clock_gettime"
+      {% else %}
+        wanted = "__kernel_clock_gettime"
+      {% end %}
+      index = 0_u64
+      while index < count
+        entry = symbols &+ index &* 24_u64
+        info = bytes(entry &+ 4_u64, 1)
+        bind = info.unsafe_shr(4_u64)
+        # A defined function, global or weak (STT_FUNC, STB_GLOBAL or
+        # STB_WEAK, a section index other than SHN_UNDEF).
+        if info & 15_u64 == 2_u64 && (bind == 1_u64 || bind == 2_u64) && bytes(entry &+ 6_u64, 2) != 0_u64
+          return bias &+ bytes(entry &+ 8_u64, 8) if named?(strings &+ bytes(entry, 4), wanted)
+        end
+        index = index &+ 1_u64
+      end
+      0_u64
+    end
+
+    private def self.named?(address : UInt64, wanted : String) : Bool
+      name = Pointer(UInt8).new(address)
+      text = wanted.to_unsafe
+      size = wanted.bytesize
+      index = 0
+      while index < size
+        return false unless name[index] == text[index]
+        index = index + 1
+      end
+      name[size] == 0_u8
+    end
+  end
+
   # iyi: On Linux, libc is not bound at all. The dependency floor (SPEC.md
   # III.9) named seven undefined symbols in a default program and five of them
   # were libc's; the kernel's syscall ABI is a stable contract, so `write` and
@@ -5067,41 +5267,19 @@ require "./file"
       @@pause_max : UInt64 = 0_u64
       @@pause_total : UInt64 = 0_u64
 
-      # The pause clock. Linux asks the kernel directly — clock_gettime,
-      # CLOCK_MONOTONIC — writing the timespec into the caller's frame,
-      # because a collector must not allocate from the heap it is
-      # collecting, not even sixteen bytes for a stamp, and a page shared
-      # between callers is a stamp two threads tear: the runtime's own
-      # calls are all under its lock, but a probe that read the clock from
-      # an allocation while helper 0 read it under the lock saw time go
-      # backwards. darwin asks libSystem's clock_gettime_nsec_np for
-      # CLOCK_MONOTONIC_RAW, the scheduler's own clock and for its reason:
-      # a pause is microseconds, and 6 would report it in whole ones.
-      {% if flag?(:linux) %}
-        lib LibIyiClock
-          struct Timespec
-            sec : Int64
-            nsec : Int64
-          end
-        end
-      {% end %}
-
+      # The pause clock. Linux reads CLOCK_MONOTONIC through the vDSO
+      # (`IyiClock`), the timespec in the caller's frame, because a
+      # collector must not allocate from the heap it is collecting, not
+      # even sixteen bytes for a stamp, and a page shared between callers
+      # is a stamp two threads tear: the runtime's own calls are all under
+      # its lock, but a probe that read the clock from an allocation while
+      # helper 0 read it under the lock saw time go backwards. darwin asks
+      # libSystem's clock_gettime_nsec_np for CLOCK_MONOTONIC_RAW, the
+      # scheduler's own clock and for its reason: a pause is microseconds,
+      # and 6 would report it in whole ones.
       def self.now_ns : UInt64
         {% if flag?(:linux) %}
-          stamp = uninitialized LibIyiClock::Timespec
-          result = uninitialized Int64
-          {% if flag?(:x86_64) %}
-            asm("syscall" : "={rax}"(result)
-                          : "{rax}"(228_i64), "{rdi}"(1_i64), "{rsi}"(pointerof(stamp))
-                          : "rcx", "r11", "memory"
-                          : "volatile")
-          {% else %}
-            asm("svc #0" : "={x0}"(result)
-                         : "{x8}"(113_i64), "{x0}"(1_i64), "{x1}"(pointerof(stamp))
-                         : "memory"
-                         : "volatile")
-          {% end %}
-          stamp.sec.to_u64 * 1000000000_u64 + stamp.nsec.to_u64
+          IyiClock.monotonic_ns
         {% elsif flag?(:win32) %}
           counts = uninitialized Int64
           freq = uninitialized Int64
@@ -10666,6 +10844,10 @@ end
 
   def __iyi_defer_push(cleanup : Proc(Nil)) : Nil
     IyiDefers.push(IyiDeferNode.new(cleanup))
+  end
+
+  def __iyi_defer_push_node(node : IyiDeferNode) : Nil
+    IyiDefers.push(node)
   end
 
   def __iyi_defer_pop_run : Nil

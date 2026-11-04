@@ -229,11 +229,13 @@ import std/mutex::{Mutex}
   # The held shape's updates with one task a mutex, so nothing waits: what
   # an update costs beyond `HOLD_NS` with no park in it, in nanoseconds.
   # Most of it is the hold's own clock. On Linux x86_64 (12 vCPU, shared)
-  # the hold alone, no lock, overran 20 us by 203-212 ns: a
-  # `__iyi_monotonic_ns` is a clock_gettime syscall, 60 ns a read, where
-  # Go's `time.Since` reads the vDSO. The floor takes that out of the
-  # comparison with Go. A first pass of two updates a mutex starts the
-  # pool's threads, which the floor timed in it came out above `over_ns`.
+  # the hold alone, no lock, overran 20 us by 203-212 ns while
+  # `__iyi_monotonic_ns` was a clock_gettime syscall, 64 ns a read; read
+  # through the vDSO (`IyiClock`), as Go's `time.Since` reads it, it is
+  # 17-18 ns, and the one-pair floor went from 373 to 185 ns. The floor
+  # takes what is left out of the comparison with Go. A first pass of two
+  # updates a mutex starts the pool's threads, which the floor timed in it
+  # came out above `over_ns`.
   def held_floor(workers : Int32, rounds : Int64) : Int64
     held(workers, 1_i64, 1)
     started = __iyi_monotonic_ns

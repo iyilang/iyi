@@ -346,14 +346,11 @@ def __iyi_monotonic_ns : Int64
   {% elsif flag?(:darwin) %}
     LibC.clock_gettime_nsec_np(4).to_i64
   {% else %}
-    # The timespec in this frame: a heap block here was an allocation
+    # Through the vDSO (`IyiClock`), with the syscall behind it. The
+    # timespec is in that frame: a heap block here was an allocation
     # every time anything read the clock, the scheduler's sleep queue
     # included.
-    spec = uninitialized UInt64[2]
-    words = pointerof(spec).as(Pointer(UInt64))
-    result = __iyi_conc_syscall3(IYI_SYS_CLOCK_GETTIME, 1_i64, words.address.to_i64, 0_i64)
-    raise "clock_gettime failed" if result < 0
-    words[0].to_i64 * 1000000000_i64 + words[1].to_i64
+    IyiClock.monotonic_ns.to_i64
   {% end %}
 end
 
@@ -1464,17 +1461,19 @@ class IyiSchedLock
     @@holder = IyiScheduler.state_id
   end
 
+  # The lock's byte alone, as `IyiChanLock.unlock` lets it go: the word's
+  # second byte is the one spinner's mark, which this must not clear.
   def self.unlock : Nil
     return unless IyiScheduler.shared?
     @@holder = 0_u64
-    word.value.set(0_u64)
+    IyiAtomic.store(word.as(Pointer(UInt8)), 0_u8, :sequentially_consistent, false)
   end
 
   # Whether this thread holds it.
   def self.held_here? : Bool
     return false unless IyiScheduler.shared?
     id = IyiScheduler.state_id
-    id != 0_u64 && word.value.get == 1_u64 && @@holder == id
+    id != 0_u64 && word.value.get & IyiChanLock::HELD != 0_u64 && @@holder == id
   end
 
   # Let go, when this thread holds it: a panic on its way to the task's
@@ -1504,29 +1503,102 @@ end
 # 12.7 million, and 127 of the 144 task stacks gdb sampled were in that
 # lock, spinning or yielding.
 class IyiChanLock
+  # The word's first byte is the lock, and its second marks the one
+  # waiter that spins on it; every other waiter at a channel's lock looks
+  # only every `CHANNEL_WAIT` pauses, Go's spinbit mutex (go1.24,
+  # `lock_spinbit.go`) without its sleep. Every waiter spun on the word,
+  # a pause a look, and a channel many producers sent into was a line
+  # every one of their cores read between each of the holder's writes:
+  # its receiver, the one task all of them waited on, spent 150 of its
+  # 166 samples in this spin on macOS 26.6, M2 Pro, 10 cores (the user's
+  # machine; `sample`, 8 producers). The lock is taken by whoever finds
+  # it free - the spinner, a waiter back from its wait, or a newcomer - so
+  # a thread that lets it go and takes it again, as a receiver draining a
+  # buffer does, keeps its line.
+  #
   # Read before the exchange, as the runtime lock is, so a spinner does
   # not take the line for writing on every turn; past
-  # `IyiThread::YIELD_AFTER` turns it gives its core away every 128th,
-  # since a holder preempted with the lock is what it waits for then. The
+  # `IyiThread::YIELD_AFTER` turns the spinner gives its core away every
+  # 128th, since a holder preempted with the lock is what it waits for
+  # then, and every other waiter every 8th of its longer turns. The
   # scheduler's lock spins here too.
-  def self.acquire(word : Pointer(Atomic(UInt64))) : Nil
-    spins = 0
+  HELD     =                0x1_u64
+  SPINNER  =              0x100_u64
+  UNMARKED = 0xFFFFFFFFFFFFFEFF_u64
+  # The pauses between a waiter's looks at a channel's lock when another
+  # spins (`Channel#lock`, `lock_all`). An x86-64 `pause` is 19 ns on the
+  # Linux machine (x86_64, 12 vCPU, shared) and 19 to 20 on the Windows
+  # one; the M2's `yield` is under a nanosecond, so an arm64 waiter waits
+  # in `isb`s, 11 to 16 ns each there. In `yield`s its 2,048 were a
+  # look every microsecond, and four producers made 9.6 million values a
+  # second against 30.3 in `isb`s; 1,024 `isb`s made 26.4 and 512 22.8.
+  # The scheduler's lock and `park_on`'s lists take *wait* 1, every
+  # waiter spinning as before: a wait of 2,048 at every lock cut Windows'
+  # twelve-task `mutex` from 26.7 to 17.9 million updates a second, and
+  # the long wait at the scheduler's lock as well lowered fan-in on the
+  # Windows machine and the M2.
+  #
+  # bench/chan_scaling.iyi's `fanin`, W producers into one channel of 128,
+  # millions of values a second at W = 2/4/8/12 (10 on the M2), before
+  # this, with it, and Go's twin (go 1.25), best of interleaved runs:
+  #
+  #   Linux x86_64, 12 vCPU, shared,    22.7/16.1/9.0/9.4, 58.2/39.9/25.3/30.2,
+  #     of 9                            Go 36.4/30.3/23.4/26.0
+  #   Windows 11, 12 logical processors 14.7/18.4/10.7/6.6, 43.4/34.7/27.0/28.5,
+  #     (the user's machine), of 7      Go 17.5/15.7/14.7/12.9
+  #   macOS 26.6, M2 Pro, 10 cores      19.8/4.1/4.5/4.3, 53.5/30.4/19.7/18.6,
+  #     (the user's machine), of 7      Go 20.5/13.8/9.1/8.1
+  CHANNEL_WAIT = {% if flag?(:x86_64) %}512{% else %}2048{% end %}
+
+  def self.acquire(word : Pointer(Atomic(UInt64)), wait : Int32 = 1) : Nil
+    seen = word.value.get
+    return if seen & HELD == 0_u64 && word.value.compare_and_set(seen, seen | HELD)[1]
+    contend(word, wait)
+  end
+
+  private def self.contend(word : Pointer(Atomic(UInt64)), wait : Int32) : Nil
+    turns = 0
+    spinner = false
     while true
-      return if word.value.get == 0_u64 && word.value.compare_and_set(0_u64, 1_u64)[1]
-      spins = spins &+ 1
-      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-        IyiThread.yield_cpu if spins & 127 == 0 && spins >= IyiThread::YIELD_AFTER
-      {% end %}
-      {% if flag?(:x86_64) %}
-        asm("pause" :::: "volatile")
-      {% else %}
-        asm("yield" :::: "volatile")
-      {% end %}
+      seen = word.value.get
+      if seen & HELD == 0_u64
+        # The spinner takes its mark down with the lock.
+        taken = spinner ? (seen | HELD) & UNMARKED : seen | HELD
+        return if word.value.compare_and_set(seen, taken)[1]
+        next
+      end
+      if wait > 1 && !spinner && seen & SPINNER == 0_u64
+        spinner = word.value.compare_and_set(seen, seen | SPINNER)[1]
+      end
+      turns = turns &+ 1
+      pauses = 1
+      if spinner || wait == 1
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+          IyiThread.yield_cpu if turns & 127 == 0 && turns >= IyiThread::YIELD_AFTER
+        {% end %}
+      else
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+          IyiThread.yield_cpu if turns & 7 == 0
+        {% end %}
+        pauses = wait
+      end
+      while pauses > 0
+        {% if flag?(:x86_64) %}
+          asm("pause" :::: "volatile")
+        {% else %}
+          if spinner || wait == 1
+            asm("yield" :::: "volatile")
+          else
+            asm("isb" :::: "volatile")
+          end
+        {% end %}
+        pauses = pauses &- 1
+      end
     end
   end
 
-  def self.lock(word : Pointer(Atomic(UInt64))) : Nil
-    acquire(word) if IyiScheduler.shared?
+  def self.lock(word : Pointer(Atomic(UInt64)), wait : Int32 = 1) : Nil
+    acquire(word, wait) if IyiScheduler.shared?
   end
 
   # A release store, not the sequentially consistent one an `Atomic`'s
@@ -1543,8 +1615,9 @@ class IyiChanLock
     release(word) if IyiScheduler.shared?
   end
 
+  # The lock's byte alone: the spinner's mark beside it stays.
   private def self.release(word : Pointer(Atomic(UInt64))) : Nil
-    IyiAtomic.store(word.as(Pointer(UInt64)), 0_u64, :release, false)
+    IyiAtomic.store(word.as(Pointer(UInt8)), 0_u8, :release, false)
   end
 
   # The lock word of each of a select's arms, in the arms' order, on the
@@ -1591,7 +1664,7 @@ class IyiChanLock
     return unless IyiScheduler.shared?
     index = 0
     while index < count
-      acquire(Pointer(Atomic(UInt64)).new(words[index]))
+      acquire(Pointer(Atomic(UInt64)).new(words[index]), CHANNEL_WAIT)
       index = index + 1
     end
   end
@@ -6505,9 +6578,27 @@ end
 # what is left on the list when a panic arrives is exactly what did not
 # get to clean up.
 def __iyi_defer_push(cleanup : Proc(Nil)) : Nil
+  __iyi_defer_push_node(IyiDeferNode.new(cleanup))
+end
+
+# A node its caller made once and registers each time it needs the
+# cleanup, never twice at once: std/mutex's release, where a `defer` was
+# two allocations, the node and its block's closure, around every block
+# a Mutex runs (`Mutex#register_release`). Its link is written only when
+# it changes and taken down when it is popped, so the tasks taking turns
+# at a lock, with nothing registered below it, read the node and never
+# write it: written each time, it was one more line passed between their
+# cores with the lock's own. A panic's drain leaves the link, which the
+# next push puts right.
+def __iyi_defer_push_node(node : IyiDeferNode) : Nil
   fiber = IyiScheduler.current
-  node = IyiDeferNode.new(cleanup)
-  node.next_node = fiber.defers
+  below = fiber.defers
+  linked = node.next_node
+  if below.is_a?(IyiDeferNode)
+    node.next_node = below unless linked.is_a?(IyiDeferNode) && linked.object_id == below.object_id
+  elsif linked.is_a?(IyiDeferNode)
+    node.next_node = nil
+  end
   fiber.defers = node
 end
 
@@ -6515,7 +6606,9 @@ def __iyi_defer_pop_run : Nil
   fiber = IyiScheduler.current
   node = fiber.defers
   return unless node.is_a?(IyiDeferNode)
-  fiber.defers = node.next_node
+  below = node.next_node
+  fiber.defers = below
+  node.next_node = nil if below.is_a?(IyiDeferNode)
   node.run
 end
 
@@ -7087,7 +7180,7 @@ class Channel(T)
   end
 
   private def lock : Nil
-    IyiChanLock.lock(pointerof(@guard))
+    IyiChanLock.lock(pointerof(@guard), IyiChanLock::CHANNEL_WAIT)
   end
 
   private def unlock : Nil

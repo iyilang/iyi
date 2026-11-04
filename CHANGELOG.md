@@ -32,6 +32,52 @@
   server with three claims, and 0.10 to 0.11 s and 20 MB to 2.5 to 2.7 s on
   iyi-web's `examples/security.iyi` given two (Linux, 12 vCPU, three runs
   each); as first written it took 3.87 s and grew RSS to 4,069 MB.
+- **A `std/mutex` lock allocates nothing.** Its release was registered
+  for a panic in the block by a `defer`, a node and a closure made each
+  time; a Mutex now makes its node once and registers that, and its link
+  is written only when it changes, so tasks taking turns at a lock do not
+  pass the node's line between their cores. An uncontended update went
+  from 16-18 ns to 11-12 (Go's `sync.Mutex`: 8), and
+  `bench/chan_scaling.iyi`'s `held` shape, the nanoseconds an update loses
+  beyond its 20 us hold at 1, 2, 4 and 8 pairs, least of 7 interleaved:
+  on Linux x86_64 (12 vCPU, shared) 195/203/195/492 before, 145/123/151/395
+  after, Go's twin 137/222/364/473; on macOS 26.6, an M2 Pro with 10 cores
+  (the user's machine) 57/57/164/374, 13/17/74/208 and 58/83/399/550; on
+  Windows 11, 12 logical processors (the user's machine) 159/225/271/298
+  and 86/153/131/151 (Go's twin holds by a calibrated spin there, so its
+  figures do not compare). Tasks on one Mutex, millions of updates a
+  second at 4 and 12 (10 on the M2): 44.8/35.3 to 64.9/43.9 on Linux,
+  36.0/32.6 to 68.1/36.3 on the M2, 36.2/28.2 to 67.8/73.1 on Windows.
+
+- **Many producers into one channel no longer queue at its lock.** Every
+  task waiting for a channel's lock read it between each of the holder's
+  writes; now one of them spins on it and the rest look every 512 pauses
+  on x86-64, or 2,048 `isb`s on arm64, Go's spinbit lock without its
+  sleep. `bench/chan_scaling.iyi`'s `fanin`, 2, 4, 8 and 12 producers
+  into one channel of 128 (10 on the M2), millions of values a second
+  before, after and Go's twin's: on Linux x86_64 (12 vCPU, shared, best
+  of 9) 22.7/16.1/9.0/9.4, 58.2/39.9/25.3/30.2 and 36.4/30.3/23.4/26.0;
+  on Windows 11, 12 logical processors (the user's machine, best of 7)
+  14.7/18.4/10.7/6.6, 43.4/34.7/27.0/28.5 and 17.5/15.7/14.7/12.9; on
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine, best of 7)
+  19.8/4.1/4.5/4.3, 53.5/30.4/19.7/18.6 and 20.5/13.8/9.1/8.1. The
+  scheduler's lock and the lists `std/mutex` parks in spin as before:
+  waiting long there too cut Windows' twelve tasks on one mutex from
+  26.7 to 17.9 million updates a second.
+
+- **Linux reads its clocks through the vDSO.** The runtime's monotonic
+  clock, the collector's pause clock and std/time's `Time.monotonic` and
+  `Time.utc` each made a `clock_gettime` syscall, 64 to 65 ns a read on
+  Linux x86_64 (12 vCPU, shared, kvm-clock); they call the
+  `clock_gettime` the kernel maps into every process, found through the
+  auxiliary vector and the vDSO's own symbol table as Go's runtime finds
+  it, 17 to 18 ns a read, with the syscall behind it where there is no
+  vDSO. No libc symbol is bound, so the dependency floor is unchanged.
+  The scheduler's sleep queue, its timers and the preemption monitor read
+  this clock. `bench/chan_scaling.iyi`'s `held` shape, which holds a
+  mutex 20 us by watching the clock, lost 303, 355, 413 and 1,169 ns an
+  update beyond the hold at 1, 2, 4 and 8 pairs and loses 200, 239, 314
+  and 529 (least of five interleaved runs, same machine).
 
 - **Each channel has a lock of its own, and so does each list a
   `std/mutex` waiter parks in.** Every channel was behind the runtime's
@@ -26952,7 +26998,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,125-line library and nothing else. Every other
+  written against iyi's own 28,400-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

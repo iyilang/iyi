@@ -27,6 +27,11 @@
 #      statement; one keeps a copy at module init (`COPIES = [TABLE]`)
 #      and writes through it later, refused naming the copy, since a
 #      copy kept where the proof cannot follow may be written anywhere.
+#      A constant whose initializer writes the state, declared before the
+#      first parallel task and first read by a task: accepted, since the
+#      initializer runs at the declaration. Its broken copy, the same
+#      constant declared after the tasks, which a task's read initializes:
+#      refused, naming the write in the initializer's call.
 #   5. `@[UnsafeReach]`, the claim nothing checks, in a file that uses
 #      `Pointer`: accepted for the program step 1 refuses. Its broken copy,
 #      the same program without a `Pointer`: refused, since the unsafe
@@ -247,6 +252,66 @@ END { print "COPIES.first.add(\"late\")" }'
 refused startup_copied '@[SafeReach] on `TABLE` is refused' \
   'keeps a copy of it where the proof cannot follow (`Pointer#[]=` stores it in memory' \
   'whatever writes through that copy may do so anywhere'
+
+step "(c) a constant whose initializer writes the state is placed where it runs"
+# A constant's initializer runs at its declaration, or at its first read
+# when that comes first. Both measured on Linux with an initializer that
+# prints: `EARLY = f("early")` printed "init early" between the
+# statements around it, and `LATE`, read by a call above its declaration,
+# printed "init late" at that read. The proof places the initializer at
+# the declaration. Declared before the first parallel task, it has run by
+# then whoever reads it first: accepted. Declared after, a task's read may
+# be the first and run it there: refused, as any write after the first
+# parallel task is - the one case a read before the declaration makes.
+cat > startup_early.iyi <<'IYI'
+module startup_early
+
+class Table
+  def initialize
+    @rows = [] of String
+  end
+
+  def add(row : String) : Nil
+    @rows << row
+  end
+
+  def first_size : Int32
+    @rows[0].size
+  end
+end
+
+@[SafeReach("filled at module init, then only read")]
+TABLE = Table.new
+
+def fill : Int32
+  TABLE.add("hello")
+  1
+end
+
+def early : Int32
+  EARLY
+end
+
+def first_size : Int32
+  TABLE.first_size
+end
+
+EARLY = fill
+
+group do |g|
+  g.spawn(parallel: true) { early }
+  g.spawn(parallel: true) { first_size }
+end
+IYI
+accepted startup_early
+derive startup_early startup_before '
+/^module startup_early$/ { print "module startup_before"; next }
+/^EARLY = fill$/ { next }
+{ print }
+END { print "EARLY = fill" }'
+refused startup_before '@[SafeReach] on `TABLE` is refused' \
+  '`TABLE.add("hello")` in `fill`' \
+  'it may run once a parallel task has started'
 
 # ── 5. UnsafeReach, where it is allowed ───────────────────────────────────
 step "@[UnsafeReach] is kept for a file that uses Pointer"

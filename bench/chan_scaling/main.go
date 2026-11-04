@@ -68,14 +68,10 @@ func fanin(w int, rounds int64) int64 {
 	return <-done
 }
 
-// holdNS is the held shape's time inside the lock, as in the iyi program.
+// holdNS is the held shape's time inside the lock, as in the iyi program;
+// hold, which spends it looking at the clock, is hold_windows.go's or
+// hold_other.go's.
 const holdNS = 20000
-
-func hold() {
-	began := time.Now()
-	for time.Since(began) < holdNS*time.Nanosecond {
-	}
-}
 
 // held runs tasks goroutines on each of w mutexes; one a mutex is the floor,
 // making both goroutines' share with nothing waiting.

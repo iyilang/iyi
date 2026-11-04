@@ -4,7 +4,7 @@
 #
 #     bash bench/release_cores.sh
 #
-# Three checks, each with a broken copy it has to catch:
+# Four checks, each with a broken copy it has to catch:
 #
 #   1. Cores. `samples/iyi/cores.iyi` (std/http and TLS) built `--release`:
 #      the build's processor time over its wall time is above 1.5. The broken
@@ -19,6 +19,12 @@
 #      thread and on four are the same bytes: the cut is the program's and
 #      not the machine's. The broken copy cuts by the thread count, as
 #      `IYI_RELEASE_PARTITIONS` set to `--threads` does, and has to differ.
+#   4. Inlined across the cut. In check 3's build, no partition object
+#      calls `__iyi_new` - external, called by every `new` - or
+#      `IyiHeap.cache` - a thread-local's reader, inline assembly on Linux:
+#      every partition inlined its copy, as one module inlines every call
+#      to them. The broken copy copies nothing (`IYI_RELEASE_IMPORT=0`),
+#      and has to be caught calling them.
 #
 # Exits non-zero if any check fails or any broken copy passes.
 set -u
@@ -30,6 +36,9 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     REPO="$(cygpath -m "$REPO")"
     WORK="$(cygpath -m "$WORK")"
+    # Windows keeps one module unless told (`Compiler#release_partitions`);
+    # `0` is the size's count, which every check here holds.
+    export IYI_RELEASE_PARTITIONS=0
     ;;
 esac
 status=0
@@ -142,6 +151,50 @@ elif cmp -s "$WORK/by-threads-2.sums" "$WORK/by-threads-4.sums"; then
   echo "  broken copy, cut by the thread count: the same objects - not caught"; status=1
 else
   echo "  broken copy, cut by the thread count: different objects - caught"
+fi
+
+# ── 4. Inlined across the cut ────────────────────────────────────────────
+# The symbols an object calls and does not define. Not its strings: debug
+# information names every function inlined into it, and `__iyi_new` was
+# in all 14 of `cores.iyi`'s partitions that way, called by none but its
+# owner.
+undefined_in() { # object
+  if command -v nm > /dev/null 2>&1; then
+    nm -u "$1"
+  else
+    dumpbin -nologo -symbols "$1" | awk '/ UNDEF / { print $NF }'
+  fi
+}
+# How many partition objects of a build call a symbol matching *pattern*.
+calling() { # name, pattern
+  find "$WORK/cache-$1" -name '*.part*' | while read -r file; do
+    if undefined_in "$file" | grep -q -E "$2"; then echo "$file"; fi
+  done | wc -l | tr -d ' '
+}
+# `__iyi_new`, `___iyi_new` on darwin; `IyiHeap.cache` as each platform
+# spells it, Windows' with its punctuation escaped.
+NEW='(^|[[:space:]])_?__iyi_new$'
+CACHE='IyiHeap(::|\.3A\.\.3A\.)cache(:|\.3A\.)Pointer'
+
+if [ ! -s "$WORK/one-thread.sums" ]; then
+  echo "inlined: no partitions to read, check 3's build failed"; status=1
+else
+  new=$(calling one-thread "$NEW") cache=$(calling one-thread "$CACHE")
+  if [ "$new" -eq 0 ] && [ "$cache" -eq 0 ]; then
+    echo "inlined: no partition calls __iyi_new or IyiHeap.cache across the cut"
+  else
+    echo "inlined: $new partitions call __iyi_new and $cache IyiHeap.cache across the cut"; status=1
+  fi
+  if ! objects no-import 4 IYI_RELEASE_IMPORT=0; then
+    echo "  broken copy, nothing copied: the build failed"; status=1
+  else
+    new=$(calling no-import "$NEW") cache=$(calling no-import "$CACHE")
+    if [ "$new" -gt 0 ] || [ "$cache" -gt 0 ]; then
+      echo "  broken copy, nothing copied: $new partitions call __iyi_new, $cache IyiHeap.cache - caught"
+    else
+      echo "  broken copy, nothing copied: no call across the cut - not caught"; status=1
+    fi
+  fi
 fi
 
 rm -rf "$WORK"

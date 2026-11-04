@@ -50,6 +50,9 @@ lib LibLLVM
   {% else %}
     fun get_inline_asm = LLVMGetInlineAsm(t : TypeRef, asm_string : Char*, asm_string_size : SizeT, constraints : Char*, constraints_size : SizeT, has_side_effects : Bool, is_align_stack : Bool, dialect : LLVM::InlineAsmDialect) : ValueRef
   {% end %}
+  {% unless LibLLVM::IS_LT_180 %}
+    fun get_inline_asm_asm_string = LLVMGetInlineAsmAsmString(inline_asm_val : ValueRef, len : SizeT*) : Char*
+  {% end %}
   fun get_module_context = LLVMGetModuleContext(m : ModuleRef) : ContextRef
 
   fun add_function = LLVMAddFunction(m : ModuleRef, name : Char*, function_ty : TypeRef) : ValueRef

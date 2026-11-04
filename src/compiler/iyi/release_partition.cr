@@ -19,7 +19,10 @@
 # * a partition also gets its own copy of the small functions its code calls,
 #   wherever they are owned, and of the constants it reads. LLVM inlines and
 #   folds those as it would in one module, so the call into
-#   `Array#unsafe_fetch` still disappears and a type id is still a constant;
+#   `Array#unsafe_fetch` still disappears and a type id is still a constant.
+#   A copy of a local function is local to the partition; a copy of an
+#   external one, `__iyi_new` that every `new` calls, is
+#   `available_externally`, there to be inlined and dropped after;
 # * whatever is local to the module and still reached from a partition that
 #   does not own it is **promoted**: given a name of its own and hidden
 #   external linkage, so the partitions link to each other and to nothing
@@ -40,8 +43,15 @@ module Iyi::ReleasePartition
 
   # A callee is imported when it has at most this many instructions before
   # optimisation, and a callee of an imported function at `IMPORT_DECAY`
-  # times its caller's limit, as ThinLTO decays its own.
-  IMPORT_LIMIT = 300
+  # times its caller's limit, as ThinLTO decays its own. A copy the inliner
+  # turns down is optimised and compiled anyway, once in every partition
+  # that has it. `samples/iyi/cores.iyi` on a shared 12-vCPU Linux VM: at
+  # 300, 42.1 s of processor in 7.55 s and 3.23 MB of text; at 100, 28.1 s
+  # in 5.76 s and 2.28 MB; at 50, 21.4 s in 5.25 s and 1.89 MB; the one
+  # module, 19.0 s in 19.1 s and 1.90 MB. At 50 the JSON benchmark ran
+  # 1.065x its one-module time on macOS 26.6, Apple M2 Pro, 10 cores (the
+  # user's machine), best of 15 interleaved, against 1.028x at 100.
+  IMPORT_LIMIT = 100
   IMPORT_DECAY = 0.7
 
   # Appended to a promoted name. Promotion happens once, before the module
@@ -57,8 +67,12 @@ module Iyi::ReleasePartition
     getter owner : Array(Int32)
     # Per partition: the positions of the functions it gets a copy of.
     getter imports : Array(Array(Int32))
+    # Per function: whether a copy of it is `available_externally`, there
+    # only to be inlined, because the function is external and its owner's
+    # definition answers every call the copy does not take (`copyable?`).
+    getter external : Array(Bool)
 
-    def initialize(@count, @owner, @imports)
+    def initialize(@count, @owner, @imports, @external)
     end
   end
 
@@ -67,7 +81,9 @@ module Iyi::ReleasePartition
   # share; *mod* is written out after this and each partition is read back
   # from that. *named* is what something will look up by name after
   # optimisation (`PreemptChecks.named`), which keeps its name.
-  def self.plan(mod : LLVM::Module, count : Int32? = nil, named : Array(String) = [] of String) : Plan?
+  # *import_limit* is `IMPORT_LIMIT` unless a build says otherwise.
+  def self.plan(mod : LLVM::Module, count : Int32? = nil, named : Array(String) = [] of String,
+                import_limit : Int32 = IMPORT_LIMIT) : Plan?
     return nil if count == 1
     functions = [] of LibLLVM::ValueRef
     position = {} of UInt64 => Int32
@@ -81,20 +97,24 @@ module Iyi::ReleasePartition
     sizes = Array(Int32).new(functions.size, 0)
     callees = Array(Array(Int32)).new(functions.size) { [] of Int32 }
     copyable = Array(Bool).new(functions.size, false)
+    external = Array(Bool).new(functions.size, false)
     total = 0_i64
+    never_inlined = {"noinline", "naked"}.map { |name| LibLLVM.get_enum_attribute_kind_for_name(name, name.bytesize) }
     functions.each_with_index do |function, index|
       next if declaration?(function)
-      size, has_asm = scan(function, position, callees[index])
+      size, labels = scan(function, position, callees[index])
       sizes[index] = size
       total += size
-      copyable[index] = !has_asm && local?(function) && only_called?(function)
+      external[index] = LibLLVM.get_linkage(function).external?
+      copyable[index] = !labels && inlinable?(function, never_inlined) &&
+                        (external[index] || (local?(function) && only_called?(function)))
     end
 
     count ||= partition_count(total)
     return nil if count < 2
 
     owner = assign(functions, sizes, total, count)
-    imports = Array(Array(Int32)).new(count) { |partition| import_list(partition, owner, sizes, callees, copyable) }
+    imports = Array(Array(Int32)).new(count) { |partition| import_list(partition, owner, sizes, callees, copyable, import_limit) }
 
     importers = Array(Array(Int32)?).new(functions.size, nil)
     imports.each_with_index do |list, partition|
@@ -102,7 +122,7 @@ module Iyi::ReleasePartition
     end
 
     promote(mod, position, owner, importers, named)
-    Plan.new(count, owner, imports)
+    Plan.new(count, owner, imports, external)
   end
 
   def self.partition_count(instructions : Int64) : Int32
@@ -110,11 +130,12 @@ module Iyi::ReleasePartition
     ((instructions + size - 1) // size).clamp(1_i64, MAX_PARTITIONS.to_i64).to_i32
   end
 
-  # Instructions in *function*, and whether any is inline assembly; the
-  # defined functions it calls directly go into *callees*, once each.
+  # Instructions in *function*, and whether any inline assembly in it may
+  # define a symbol (`defines_symbol?`); the defined functions it calls
+  # directly go into *callees*, once each.
   private def self.scan(function, position, callees) : {Int32, Bool}
     size = 0
-    has_asm = false
+    labels = false
     block = LibLLVM.get_first_basic_block(function)
     until block.null?
       inst = LibLLVM.get_first_instruction(block)
@@ -128,20 +149,49 @@ module Iyi::ReleasePartition
               callees << index
             end
           when .inline_asm?
-            has_asm = true
+            labels ||= defines_symbol?(callee)
           end
         end
         inst = LibLLVM.get_next_instruction(inst)
       end
       block = LibLLVM.get_next_basic_block(block)
     end
-    {size, has_asm}
+    {size, labels}
   end
 
-  # Whether a copy of *function* can stand in for it: nothing but a direct
-  # call names it, so no partition can tell its copy from the original by
-  # address. Inline assembly is left alone too, since it can define a label,
-  # and a label defined by two copies is defined twice.
+  # Whether the inline assembly *value* may define a symbol, which two
+  # copies of it would define twice: a statement that starts with a name
+  # and a colon (`1:`, `loop:`), or with a directive (`.set`, `.globl`).
+  # Every one in the prelude is neither: a system call, `pause`, and on
+  # Linux each thread-local read (`movq $$sym@TPOFF, $0`), which put every
+  # function that read one, `IyiHeap.cache` among them, out of reach of a
+  # copy. LLVM before 18 cannot say what the text is, so there any inline
+  # assembly may.
+  private def self.defines_symbol?(value) : Bool
+    {% if LibLLVM::IS_LT_180 %}
+      true
+    {% else %}
+      text = String.new(LibLLVM.get_inline_asm_asm_string(value, out length), length)
+      text.tr(";", "\n").each_line.any? do |statement|
+        statement = statement.lstrip
+        next true if statement.starts_with?('.')
+        colon = statement.index(':')
+        colon && colon > 0 && statement[0, colon].each_char.all? { |char| char.alphanumeric? || char.in?('_', '$') }
+      end
+    {% end %}
+  end
+
+  # Whether LLVM may inline *function* at all: a copy of one it may not is
+  # one more body to optimise and compile, and inlined nowhere.
+  private def self.inlinable?(function, never_inlined) : Bool
+    never_inlined.none? do |kind|
+      !LibLLVM.get_enum_attribute_at_index(function, LLVM::AttributeIndex::FunctionIndex, kind).null?
+    end
+  end
+
+  # Whether a copy of *function* can stand in for it as a local of the
+  # partition that has it: nothing but a direct call names it, so no
+  # partition can tell its copy from the original by address.
   private def self.only_called?(function) : Bool
     use = LibLLVM.get_first_use(function)
     until use.null?
@@ -185,10 +235,10 @@ module Iyi::ReleasePartition
     owner
   end
 
-  # What *partition* gets a copy of: the small functions its own code calls,
-  # then theirs at a decayed limit, keeping for each function the largest
-  # limit it was reached at.
-  private def self.import_list(partition, owner, sizes, callees, copyable) : Array(Int32)
+  # What *partition* gets a copy of: the functions of at most
+  # *import_limit* instructions its own code calls, then theirs at a decayed
+  # limit, keeping for each function the largest limit it was reached at.
+  private def self.import_list(partition, owner, sizes, callees, copyable, import_limit) : Array(Int32)
     best = {} of Int32 => Float64
     work = [] of {Int32, Float64}
     consider = ->(index : Int32, limit : Float64) do
@@ -200,7 +250,7 @@ module Iyi::ReleasePartition
     end
     owner.each_with_index do |owning, index|
       next unless owning == partition
-      callees[index].each { |callee| consider.call(callee, IMPORT_LIMIT.to_f) }
+      callees[index].each { |callee| consider.call(callee, import_limit.to_f) }
     end
     until work.empty?
       index, limit = work.pop
@@ -321,15 +371,20 @@ module Iyi::ReleasePartition
     plan.imports[partition].each { |index| imported[index] = true }
 
     # A body this partition neither owns nor copies goes, through LLVM's
-    # own pass for it and before anything reads it. A copy is local here:
-    # every call to it in this partition is to the copy, and nothing else
-    # names it (`only_called?`).
+    # own pass for it and before anything reads it. A copy of a local is
+    # local here: every call to it in this partition is to the copy, and
+    # nothing else names it (`only_called?`). A copy of an external
+    # function stays whole through that pass, which would take its body,
+    # and is `available_externally` once the partition is linked.
+    inline_only = [] of String
     index = 0
     fn = LibLLVM.get_first_function(lazy)
     until fn.null?
       owner = plan.owner[index]? || raise "BUG: partition #{partition} read more functions than its plan has"
       if owner >= 0 && owner != partition
-        if imported[index]
+        if imported[index] && plan.external[index]
+          inline_only << String.new(LibLLVM.get_value_name2(fn, out length), length)
+        elsif imported[index]
           LibLLVM.set_linkage(fn, LLVM::Linkage::Internal)
           LibLLVM.set_visibility(fn, LLVM::Visibility::Default)
         else
@@ -355,6 +410,9 @@ module Iyi::ReleasePartition
       raise "BUG: partition #{partition} could not be linked"
     end
     globals_to_partition_zero(mod, context, target_machine) unless partition == 0
+    inline_only.each do |name|
+      LibLLVM.set_linkage(mod.functions[name], LLVM::Linkage::AvailableExternally)
+    end
     mod
   end
 

@@ -3165,9 +3165,27 @@ module Iyi
     # `IYI_RELEASE_PARTITIONS` says; otherwise nil, and the module's size
     # decides (`ReleasePartition.partition_count`). `1` keeps the one module
     # of every build before partitioning, which is the broken copy
-    # `bench/release_cores.sh` holds the default against.
+    # `bench/release_cores.sh` holds the default against; `0` is the size's
+    # count anywhere.
+    #
+    # Windows keeps the one module unless told: there the JSON benchmark
+    # still ran 1.068x and 1.083x its one-module time cut at the default,
+    # best of 15 interleaved, on Windows 11, 12 logical processors (the
+    # user's machine), against 1.028x on macOS 26.6, Apple M2 Pro, 10 cores
+    # (the user's machine).
     private def release_partitions : Int32?
-      ENV["IYI_RELEASE_PARTITIONS"]?.try(&.to_i?).try(&.clamp(1, ReleasePartition::MAX_PARTITIONS))
+      if count = ENV["IYI_RELEASE_PARTITIONS"]?.try(&.to_i?)
+        return count == 0 ? nil : count.clamp(1, ReleasePartition::MAX_PARTITIONS)
+      end
+      1 if @codegen_target.win32?
+    end
+
+    # iyi: the largest function, in instructions before optimisation, a
+    # partition gets a copy of to inline (`ReleasePartition::IMPORT_LIMIT`),
+    # when `IYI_RELEASE_IMPORT` says. `0` copies nothing, which is the broken
+    # copy `bench/release_cores.sh` holds the import against.
+    private def release_import : Int32
+      ENV["IYI_RELEASE_IMPORT"]?.try(&.to_i?).try { |limit| Math.max(limit, 0) } || ReleasePartition::IMPORT_LIMIT
     end
 
     private def new_program(sources)
@@ -3356,7 +3374,7 @@ module Iyi
       {% unless LibLLVM::IS_LT_130 %}
         if single_module && !@cross_compile && @emit_targets.none? && !@optimization_mode.o0? && units.size == 1
           @progress_tracker.stage("Codegen (partition)") do
-            units.first.partition(release_partitions)
+            units.first.partition(release_partitions, release_import)
           end
         end
       {% end %}
@@ -4447,9 +4465,9 @@ module Iyi
       # stand in for it: each is optimised and compiled on its own, and their
       # objects are what links. Nothing changes when the module is too small
       # to be worth cutting.
-      def partition(count : Int32?) : Nil
+      def partition(count : Int32?, import_limit : Int32) : Nil
         named = @preempt_flag.try { |flag| PreemptChecks.named(flag) } || [] of String
-        @plan = ReleasePartition.plan(llvm_mod, count, named)
+        @plan = ReleasePartition.plan(llvm_mod, count, named, import_limit)
       end
 
       def partitions : Int32

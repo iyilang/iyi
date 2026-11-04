@@ -855,7 +855,11 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
   `IYI_RELEASE_PARTITIONS=1` keeps the one module and
   `IYI_RELEASE_IMPORT=0` copies nothing. `bench/release_cores.sh` holds
   the cores, the output, the objects and the inlining across the cut, each
-  against a broken copy.
+  against a broken copy. On `mt/next`, `bench/concurrent_mark.sh`'s copy
+  whose barrier shades nothing passed when cut, 8 runs of 8 on Linux: the
+  loop that reads the payload's colour held it where the second stop's
+  conservative scan found it. That read is in a frame of its own now, as
+  the move was, and the cut copy lost round 0's payload in 5 runs of 5.
 
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and

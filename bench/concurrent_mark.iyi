@@ -200,6 +200,20 @@
     last.payload = nil
   end
 
+  # Whether the chain's tail still holds a white payload, read in a frame
+  # of its own for `move`'s reason: the payload is in no local of the
+  # caller's. Read in the loop below, a `--release` build cut into
+  # partitions (`src/compiler/iyi/release_partition.cr`) kept it where the
+  # second stop's conservative scan found it, and the copy whose barrier
+  # shades nothing kept every payload: 8 of 8 runs on Linux x86_64 (12
+  # vCPUs, shared), against 5 of 5 caught when built as one module. Read
+  # here, the partitioned copy lost round 0's payload in 4 of 4 runs.
+  @[NoInline]
+  def tail_white?(chain : Cell) : Bool
+    payload = tail(chain).payload
+    payload.is_a?(Payload) && IyiMark.colour(payload.object_id.to_u64) == IyiMark::WHITE
+  end
+
   def check(holder : Holder, seed : UInt64, round : Int32) : Nil
     payload = holder.payload
     fail("round #{round}: the holder's payload is nil") unless payload.is_a?(Payload)
@@ -392,8 +406,7 @@
     # Under a mark, and the chain's tail not reached yet: a payload the
     # workers found through the chain is saved by the chain, and that
     # round is not the barrier's to prove.
-    payload = tail(chain).payload
-    payload_white = payload.is_a?(Payload) && IyiMark.colour(payload.object_id.to_u64) == IyiMark::WHITE
+    payload_white = tail_white?(chain)
     marking = marking && IyiMark.marking? && IyiMark.colour(holder.object_id.to_u64) == IyiMark::BLACK && payload_white
     under_mark = under_mark + 1 if marking
     move(chain, holder)

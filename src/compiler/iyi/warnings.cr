@@ -99,6 +99,18 @@ module Iyi
       @reports << report
     end
 
+    # iyi: an empty collection that keeps what this one keeps, for a parse on
+    # another thread (`ParseAhead`). Its reports join these when the walk
+    # takes the file, in the order the walk reads files.
+    def fork : WarningCollection
+      dup.tap &.forget_reports
+    end
+
+    protected def forget_reports : Nil
+      @reports = [] of CodeError
+      @notes = [] of {Location, String}
+    end
+
     def report(io : IO)
       unless @reports.empty?
         @reports.each do |report|

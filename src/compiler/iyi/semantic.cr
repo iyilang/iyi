@@ -121,7 +121,15 @@ class Iyi::Program
       # use a new MainVisitor which will have no vars.
       visitor.vars = main_visitor.vars.dup unless main_visitor.vars.empty?
 
-      Prof.span("top level: node.accept") { node.accept visitor }
+      # The files this walk will read are parsed ahead of it, on threads of
+      # their own, for as long as the walk runs (`ParseAhead`).
+      @parse_ahead = ParseAhead.start(self, node, parse_ahead_threads)
+      begin
+        Prof.span("top level: node.accept") { node.accept visitor }
+      ensure
+        @parse_ahead.try &.stop
+        @parse_ahead = nil
+      end
       Prof.span("top level: finished hooks") { visitor.process_finished_hooks }
       visitor.new_expansions
     end

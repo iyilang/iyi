@@ -793,7 +793,14 @@ module Iyi
         # Always run verifications so we can catch bugs earlier and more often.
         # We can probably remove this, or only enable this when compiling in
         # release mode, once we reach 1.0.
-        mod.verify
+        #
+        # iyi: one module is verified here; a unit per type is verified by
+        # `CompilationUnit#prepare`, on the codegen threads. Each unit's
+        # module has a context of its own (`type_module`), so nothing stops
+        # them being verified at once, and here they were 64 ms of one core
+        # out of `Codegen (crystal)`'s 0.31 s for samples/iyi/cores.iyi
+        # (Linux, 12 vCPU, `IYI_PROF=1`, release compiler).
+        mod.verify if @single_module
       end
 
       if type_info_path = ENV["IYI_DUMP_TYPE_INFO"]?.presence

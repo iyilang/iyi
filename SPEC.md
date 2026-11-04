@@ -10835,6 +10835,167 @@ The version is iyi's, read from `src/IYI_VERSION` at compile time rather than
 from the environment, because two binaries in this repository write artifacts
 and an equality test between them cannot depend on how each was invoked.
 
+### IV.7 The front end on every core
+
+A debug build of samples/iyi/cores.iyi (std/http and TLS: the prelude's 18
+files and 27,353 lines, and the 46 std modules its three imports reach) by a
+release compiler from a cold cache, Linux 12 vCPU VM, `IYI_PROF=1`, before
+anything in this section:
+
+| Stage | Time | Where it goes |
+|---|---:|---|
+| Semantic (top level) | 0.137 s | import parse 0.065, require parse 0.015, macro reparse 0.024, macro interpret 0.009 |
+| declarations, ivars and the rest | 0.06 s | `Std::Tls::TlsClient#@authenticated_ms` is 18 ms of the ivars' 20 |
+| Semantic (main) | 0.32 s | typing 0.24, missing types 0.03, cleanup 0.056 |
+| Codegen (crystal) | 0.22–0.31 s | visitor 0.16–0.19, verifying 404 modules 0.064, recursion marks 0.02 |
+| Codegen (bc+obj) | 0.61 s | 404 units, 3.3 s of work; the largest, `TlsClient`, 212 ms |
+
+The 3.98 s and 2.1 s this work started from were the debug-built compiler's
+(`.build/iyi`): the same build is 3.41 s there, 0.657 s of it top level and
+1.05 main. Every number below is a release compiler's.
+
+Everything before `Codegen (bc+obj)` ran on one core. Two parts run on every
+core now, and the rest is written down below with what it would take.
+
+**IV.7a Codegen (bc+obj): units on threads of their own, the largest first.**
+The main thread wrote each unit's bitcode, one unit after another, while the
+workers waited for it; each worker read that bitcode back into a context of
+its own before compiling, because Crystal's modules once shared one; and the
+workers were fibers of the default execution context, which on 12 vCPUs ran
+about two at once (the round that prepares the units took 136–141 ms with 2,
+4, 8 or 12 of them). Each unit's module has a context of its own already
+(`CodeGenVisitor#type_module`), so a unit is now verified, written and
+compared with the cache on a thread (`CompilationUnit#prepare`; 25 ms for
+the 404), compiled in the context it was built in, and the units are
+compiled largest bitcode first, which bounds the round by its largest unit
+rather than by where that unit stood in the list (`Compiler#mt_codegen`,
+`#mt_run`). A failing unit is reported by its place in the list, not by
+which thread failed first. On Windows the stage barely moved cold (0.976 s to
+0.920, median; warm 0.253 to 0.056): with `--threads` 1, 4, 8 and 12 it is 2.69–2.86 s, 1.08–1.09,
+0.92–0.98 and 0.89–0.90, so there it stops scaling past four threads for a
+reason this section has not found.
+
+**IV.7b Parsing ahead of the walk.** The top-level visitor reads a file when
+it reaches the `import` or `require` that names it, depth first and load
+once, and parsing was most of that stage. A parse depends on the file's
+bytes, its name, the doc setting and the package its header is read under,
+and on nothing the walk has done, so up to four workers (`ParseAhead`) parse
+the files a program names, and the files those name, while the walk does
+everything else. Nothing there decides what is read: the walk resolves,
+reads and sets up a parser for every file as before, and takes a worker's
+nodes only for the same bytes under the same name, package and doc setting;
+otherwise it parses the file itself. A worker's parser warnings join the
+program's when the walk takes the file, which is where its own parse would
+have added them, so diagnostics come out in the order they always did. How
+the workers find files is a guess, and may be one: requires, imports outside
+packages (from `Program#iyi_import_candidates`, the list the walk tries) and
+requires written in a macro's text. A wrong guess is a parse for nothing; a
+file nobody guessed is parsed by the walk, which hands what it names to the
+workers. Four is where the stage stopped getting faster on Linux: none 0.128
+/ 0.142 s (best / median of five cold builds), two 0.081 / 0.091, four 0.082
+/ 0.086, eight 0.084 / 0.087, while its processor time grew with every worker
+(0.13–0.14 s, 0.17–0.19, 0.19–0.22, 0.23–0.24). The walk still waits 12–20 ms
+at the start, for `prelude.iyi` and its first requires, when there is nothing
+else it could be doing.
+
+What the two did, as wall time of the whole build, best / median, five
+interleaved builds per row of cores.iyi and three of iyi-web's
+`examples/security.iyi`; *before* is `04256414f`, *bc+obj* the first change
+alone (`5d1e1f5f7`), *both* the two:
+
+| Machine | Program | Build | before | bc+obj | both |
+|---|---|---|---:|---:|---:|
+| Linux, 12 vCPU VM | cores | cold | 1.435 / 1.534 | 1.165 / 1.182 | 1.087 / 1.123 |
+| | | warm | 0.989 / 1.031 | 0.869 / 0.877 | 0.742 / 0.830 |
+| | security | cold | 2.102 / 2.150 | 1.656 / 1.776 | 1.671 / 1.713 |
+| | | warm | 1.468 / 1.560 | 1.246 / 1.334 | 1.221 / 1.246 |
+| macOS 26.6, M2 Pro, 10 cores (the user's machine) | cores | cold | 1.132 / 1.163 | 0.903 / 0.909 | 0.869 / 0.871 |
+| | | warm | 0.773 / 0.778 | 0.639 / 0.642 | 0.610 / 0.612 |
+| | security | cold | 1.441 / 1.459 | 1.201 / 1.212 | 1.167 / 1.173 |
+| | | warm | 1.061 / 1.064 | 0.898 / 0.900 | 0.862 / 0.864 |
+| Windows 11, 12 logical processors (the user's machine) | cores | cold | 2.777 / 2.845 | 2.466 / 2.643 | 2.413 / 2.449 |
+| | | warm | 1.923 / 2.006 | 1.635 / 1.685 | 1.592 / 1.629 |
+| | security | cold | 4.039 / 4.065 | 3.888 / 3.951 | 3.855 / 3.892 |
+| | | warm | 2.867 / 2.971 | 2.564 / 2.600 | 2.497 / 2.675 |
+
+`Semantic (top level)` alone, median, before and after parsing ahead: cores
+0.140 s to 0.084 on Linux, 0.107 to 0.066 on the M2, 0.251 to 0.166 on
+Windows.
+
+The objects are the same bytes. Built with one version stamp, the base
+compiler's 404 objects of cores.iyi and the final one's are identical on
+Linux, and so is the linked binary; on macOS the objects of `5d1e1f5f7` and
+the final compiler are identical (the binaries differ in the link's stab
+entries, which name the objects' modification times), and on Windows the 405
+differ only in `_main`, which carries the compiler's version. Peak memory
+went down rather than up, because no unit reads its bitcode back any more:
+cores.iyi's peak resident set from before to bc+obj to both is 1,037–1,039
+MB, 946–950 and 954–955 on Linux, 1,005 MB, 930 and 937 on the M2, and a
+peak working set of 1,063–1,066 MB, 969–971 and 999–1,002 on Windows. The
+workers' parse adds what they allocate for themselves, about 7 MB on Linux
+and 30 on Windows.
+
+**IV.7c What is not on threads, and what it would take.**
+
+- *Macro expansion* (interpret 0.009 s, reparse 0.024). An expansion is made
+  where the walk stands, from what is declared up to there (`@type.methods`,
+  `instance_vars`, a constant's value), so it cannot be made earlier, and the
+  walk needs its reparse at once. There is nothing to overlap it with.
+
+- *Top-level declarations, per module* (what is left of the stage once it
+  parses nothing: 0.084 s, about 0.035 of it macros). Declaring writes one
+  program-wide table of types and methods; a module reopens prelude types and
+  runs its imports' macros; and the walk's depth-first order is the order of
+  III.5's initialisers and of every diagnostic. Declaring at once the modules
+  whose imports are declared needs a table per module merged in walk order,
+  macros that read only what their own imports declared, and diagnostics
+  sorted by walk position: for cores.iyi a bound of about 0.05 s.
+
+- *Typing bodies against their dependencies' declarations* (`main: typing`,
+  0.20–0.24 s). Inference here is demand-driven: a call instantiates its
+  target for the types it was given, in the one type graph the program
+  shares, so a generic body of module A is typed once per set of types
+  module B's calls hand it, and the bindings that carry a type from a call
+  into a body cross every module boundary. Inside one process this work has
+  no partition by module. The partition that exists is the artifact: a module
+  read from its `.iyimod` is not typed again, because its non-generic bodies
+  arrive as object code (IV.1g). Measured on Linux, cores.iyi cold, three
+  builds each, from source and against the 46 artifacts `--emit-iyimod`
+  wrote for its imports (71 MB): `Semantic (main)` 0.308–0.337 s against
+  0.040–0.048, `Codegen (crystal)` 0.203–0.241 against 0.043–0.047, bc+obj
+  0.305–0.370 against 0.102–0.116, while reading the artifacts makes the top
+  level 0.251–0.269 against 0.088–0.090 and the link 0.185–0.190 against
+  0.053–0.070; the build is 1.085–1.236 s against 0.721–0.754, its peak
+  resident set 953–956 MB against 511–512, and the program prints the same.
+  So typing modules in parallel is building the artifacts of modules that do
+  not import each other in processes of their own, in the order of the import
+  DAG: a build driver over `--emit-iyimod`, not threads in the type checker.
+  Each such process pays the prelude's top level and holds its own few
+  hundred megabytes, and that, on an 11 GB machine, bounds how many run at
+  once.
+
+- *Missing types* (0.03 s) walks each typed body once; too small to move.
+
+- *The cleanup, per def* (0.056 s). It walks from the program's top level
+  through each call's target defs, depth first, transforming each body once;
+  it raises the first error it meets in that order, records spawn sites and
+  `--explain-spawn` notes in that order, and fills Share caches as it goes
+  (`ShareReach#@facts`, the class-level mutation cache in `share.cr`). On
+  threads it needs the typed defs listed first, a transform that touches its
+  own body only, the first error and the notes chosen by depth-first
+  position, and those caches safe to fill from several threads, for at most
+  0.05 s here.
+
+- *IR generation per unit* (`Codegen (crystal)`, visitor 0.16–0.19 s). The
+  modules are separate already; the visitor is not. It finds what to generate
+  by generating (a def is emitted when a call first reaches it,
+  `target_def_fun`), and string constants and other program-wide
+  declarations go through its one state (`@strings`). A visitor per unit
+  needs each unit's defs known before it starts, which the cleanup's typed
+  defs are, and the program-wide declarations made once beforehand, in an
+  order that does not depend on threads, which is what keeps the objects the
+  same bytes.
+
 ---
 
 ## Part V: Not yet specified

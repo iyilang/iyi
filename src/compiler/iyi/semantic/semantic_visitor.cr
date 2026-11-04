@@ -497,44 +497,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # about what `app/greeter` is. Go takes the same position.
   #
   # The project root is the directory of the entry file until iyi has a
-  # manifest to declare one.
-  #
-  # `.iyi` wins over `.cr` so an iyi module can shadow a Crystal file of the
-  # same name during the transition.
+  # manifest to declare one. The roots, their order and the files tried in
+  # each are `Program#iyi_import_candidates`'s, which `ParseAhead` guesses
+  # with as well.
   private def resolve_import(path : String) : String?
-    candidates = [] of String
-
-    # Inside a package only `IYI_PATH` is asked: what reaches here from
-    # there is iyi's standard library (`resolve_package`), and a module of
-    # the same name in the consuming project is not it.
-    inside_package = !@iyi_package_stack.empty?
-
-    # Each in the platform's spelling (`Iyi.native_path`): the module path's
-    # `/` went into the file name as it was, and on Windows every place an
-    # imported file is named - a diagnostic, `check -f json`, `fix --json`
-    # - named `C:\proj\app/deep/util.iyi`, which a tool matching paths
-    # does not match to `C:\proj\app\deep\util.iyi`.
-    if !inside_package && (root = project_root)
-      candidates << Iyi.native_path(File.join(root, "#{path}.iyi"))
-      candidates << Iyi.native_path(File.join(root, "#{path}.cr"))
-    end
-
-    # Then the root the entry's own header names, if its path ends with it
-    # (IV.6 read backwards): that is how `iyi check app/greeter.iyi` —
-    # or a migrated module built on its own — resolves `import app/formal`
-    # the way a build from the project root would. After the entry's
-    # directory, never instead of it.
-    if !inside_package && (header_root = @program.iyi_header_root)
-      candidates << Iyi.native_path(File.join(header_root, "#{path}.iyi"))
-      candidates << Iyi.native_path(File.join(header_root, "#{path}.cr"))
-    end
-
-    @program.iyi_path.entries.each do |entry|
-      candidates << Iyi.native_path(File.join(entry, "#{path}.iyi"))
-      candidates << Iyi.native_path(File.join(entry, "#{path}.cr"))
-    end
-
-    candidates.find do |candidate|
+    @program.iyi_import_candidates(path, inside_package: !@iyi_package_stack.empty?).find do |candidate|
       !@program.iyi_file_override(candidate).nil? || File.file?(candidate)
     end
   end
@@ -576,14 +543,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # chosen from. `calc/ad` looks in every root's `calc/` and answers
   # `calc/add` for `calc/add.iyi`.
   private def import_siblings(path : String) : Array(String)
-    roots = [] of String
-    if root = project_root
-      roots << root
-    end
-    if header_root = @program.iyi_header_root
-      roots << header_root
-    end
-    roots.concat(@program.iyi_path.entries)
+    roots = @program.iyi_import_roots
 
     dir = File.dirname(path)
     prefix = dir == "." ? "" : "#{dir}/"
@@ -594,14 +554,6 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       end
     end
     siblings.uniq!
-  end
-
-  private def project_root : String?
-    if root = @program.iyi_project_root
-      return root
-    end
-    filename = @program.filename
-    filename ? File.dirname(filename) : nil
   end
 
   # iyi: refuses an import cycle (R-1, SPEC.md III.5 rule 1).
@@ -645,7 +597,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # The module path a file would be imported by, for diagnostics. Files outside
   # the project root have none, so they keep their name.
   private def iyi_module_name(filename : String) : String
-    root = project_root
+    root = @program.iyi_import_root
     # The file's path from the root, spelled as a module path: posix by
     # grammar (R-1), while both sides of the question arrive in the
     # platform's own separators. `starts_with?("#{root}/")` therefore
@@ -1431,8 +1383,8 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         parser.iyi_package_name = @program.iyi_record_module_package(module_path,
           @program.iyi_root_package_name_for(module_path, filename))
       end
-      parsed_nodes = parser.parse
-      parsed_nodes = @program.normalize(parsed_nodes, inside_exp: false)
+      parsed_nodes = Prof.span("import: parse") { @program.parse_file(parser, filename, source) }
+      parsed_nodes = Prof.span("import: normalize") { @program.normalize(parsed_nodes, inside_exp: false) }
       iyi_at_top_level { parsed_nodes.accept self }
     rescue ex : InvalidByteSequenceError
       # Wherever the byte is. `new_parser` decodes the first character and
@@ -1797,7 +1749,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     parser.filename = filename
     parser.wants_doc = @program.wants_doc?
     begin
-      parsed_nodes = Prof.span("require: parse") { parser.parse }
+      parsed_nodes = Prof.span("require: parse") { @program.parse_file(parser, filename, source) }
       parsed_nodes = Prof.span("require: normalize") { @program.normalize(parsed_nodes, inside_exp: inside_exp?) }
       # We must type the node immediately, in case a file requires another
       # *before* one of the files in `filenames`

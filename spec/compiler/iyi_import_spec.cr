@@ -19,7 +19,7 @@ private def with_iyi_modules(files : Hash(String, String), &)
 end
 
 private def semantic_iyi(entry : String, iyi_module_dir : String? = nil,
-                         prelude_dir : String? = nil)
+                         prelude_dir : String? = nil, parse_ahead_threads = 0)
   program = Iyi::Program.new
   program.color = false
   program.filename = File.expand_path(entry)
@@ -28,6 +28,7 @@ private def semantic_iyi(entry : String, iyi_module_dir : String? = nil,
   # says where its files are — the one fact `require`ing it would have left
   # behind (`SemanticVisitor#require_file`).
   program.iyi_prelude_dir = prelude_dir
+  program.parse_ahead_threads = parse_ahead_threads
 
   parser = program.new_parser(File.read(entry))
   parser.filename = program.filename
@@ -288,6 +289,65 @@ describe "Semantic: iyi import" do
       }) do
         expect_raises(Iyi::TypeException, /this one is `app\/ghost.iyi`/) do
           semantic_iyi("main.iyi")
+        end
+      end
+    end
+  end
+
+  # The modules a program imports, parsed on threads ahead of the walk that
+  # reads them (SPEC.md IV.7). Whatever the workers did, the walk builds the
+  # program a parse on one thread built, and says the same things about it
+  # in the same order.
+  describe "parsed ahead" do
+    modules = {
+      "main.iyi"      => "module main\n\nimport app/left::*\nimport app/right\n\npair\n",
+      "app/left.iyi"  => "module app/left\n\nimport app/base::*\n\npub def pair: Int32\n  value\nend\n",
+      "app/right.iyi" => "module app/right\n\nimport app/base\n",
+      "app/base.iyi"  => "module app/base\n\npub def value: Int32\n  41\nend\n",
+    }
+
+    it "loads the same modules, in the same order, with the same warnings" do
+      with_iyi_modules(modules) do
+        one = semantic_iyi("main.iyi")
+        four = semantic_iyi("main.iyi", parse_ahead_threads: 4)
+
+        four.iyi_module_paths.should eq one.iyi_module_paths
+        four.iyi_module_imports.should eq one.iyi_module_imports
+        # `left` is read before `base`, which it imports: its warning first.
+        infos = four.warnings.infos
+        infos.size.should eq 2
+        infos[0].should contain("left.iyi")
+        infos[1].should contain("base.iyi")
+        infos.should eq one.warnings.infos
+      end
+    end
+
+    it "says what is wrong with a module that does not parse at its import" do
+      with_iyi_modules(modules.merge({"app/base.iyi" => "module app/base\n\npub def value : Int32\n  41 +\nend\n"})) do
+        one = expect_raises(Iyi::TypeException) { semantic_iyi("main.iyi") }
+        four = expect_raises(Iyi::TypeException) { semantic_iyi("main.iyi", parse_ahead_threads: 4) }
+        four.to_s.should eq one.to_s
+      end
+    end
+
+    # The walk reads the file itself and takes a worker's nodes only for the
+    # bytes it read: what changed between the two is parsed again, here.
+    it "parses a file again when it is not what was parsed ahead" do
+      with_iyi_modules(modules) do
+        program = Iyi::Program.new
+        program.filename = File.expand_path("main.iyi")
+        entry = Iyi::Parser.parse(File.read("main.iyi"))
+        ahead = Iyi::ParseAhead.start(program, entry, 2).should_not be_nil
+        begin
+          filename = Iyi.native_path(File.join(Dir.current, "app/left.iyi"))
+          changed = "module app/left\n\npub def other : Int32\n  2\nend\n"
+          parser = program.new_parser(changed)
+          parser.filename = filename
+          nodes = ahead.parse(parser, filename, changed)
+          nodes.to_s.should contain("other")
+          nodes.to_s.should_not contain("pair")
+        ensure
+          ahead.stop
         end
       end
     end

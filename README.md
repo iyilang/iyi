@@ -607,7 +607,7 @@ classes, and it should not.
 building iyi should, and they are separate commits for that reason. The rules
 will not.
 
-**Is the syntax stable?** No. 0.20.0 is a release of a language that is still
+**Is the syntax stable?** No. 0.20.1 is a release of a language that is still
 moving, and the parts of SPEC.md marked PROPOSED are exactly the parts that
 will move.
 
@@ -684,7 +684,7 @@ iyi's compiler is built on the Crystal compiler and carries Crystal's licence
 and copyright: Apache 2.0, Copyright 2012-2026 Manas Technology Solutions. See
 [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Everything here that is not
 Crystal's is a change to Crystal's source. `iyi --version` reports
-`iyi 0.20.0 (built on Crystal 1.22.0-dev)`: the language first, then what it
+`iyi 0.20.1 (built on Crystal 1.22.0-dev)`: the language first, then what it
 is built on. The compatibility binary in the same checkout still reports itself
 as `Crystal 1.22.0-dev`, because that is what it is. This paragraph is a licence
 obligation and an accurate one; the language above it is iyi's own.

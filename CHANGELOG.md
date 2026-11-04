@@ -32,6 +32,7 @@
   proof that `take_now` and `put_now` need their lock now runs the copy
   until it fails by name, where a run that died of a memory fault failed
   the gate on Windows.
+
 - **On Windows a mark beside the program counts a waiting worker's core
   free.** The mark's helpers there are held to the cores the program's
   own threads leave, and every pool worker counted as one of those
@@ -51,6 +52,7 @@
   and for one while every worker runs a task, on Windows; one broken
   copy counts the waiting workers again and one counts every worker of
   a started pool free, and each is caught.
+
 - **A plain `spawn` runs in parallel where the compiler can prove it
   safe (SPEC.md III.4.15, proposed).** A `g.spawn { }` whose block
   passes every check `spawn_parallel`'s does, and whose walk of the
@@ -111,6 +113,66 @@
   catches a pool that starts whole and one that never grows (SPEC.md
   III.4.15, part 6).
 
+- **darwin's spinners give their core away, and a stop sleeps on its
+  count.** `IyiThread.yield_cpu` was the ARM `yield` hint on darwin, which
+  gives the scheduler nothing, so the runtime lock's spinner, a class
+  lock's and the scheduler's spun through the timeslice of the thread they
+  waited for; it is Mach's `thread_switch` with the depress option now,
+  after 1,024 turns of the hint (`IyiThread::YIELD_AFTER`), and darwin's
+  floor has one name more (SPEC.md III.9). The stop's waits for its
+  threads to count in and out spin briefly and then sleep on the count,
+  woken by the last thread (Linux's futex, darwin's `os_sync`). On macOS
+  26.6, an M2 Pro with 10 cores, five interleaved runs: 7d's storm beside
+  ten busy processes made 784 to 1,056 threads in its 10 s and makes
+  3,200 in 1.0 to 1.6 s; `bench/thread_exercise.iyi` at 20 threads alone
+  took 3.3 to 4.8 s and takes 1.5 to 3.7; `bench/web_cores.iyi` serves
+  the same (login 171.02 against 171.45 req/s, `check_version` 119,338
+  against 118,778, `order` 117,066 against 115,664, best of five). On
+  Linux, 12 vCPU, the storm beside nine busy processes went from 848 to
+  1,184 threads in 10 s to 3,200 in 5.8 to 8.6 s. `sched_yield`, measured
+  first, lost at 20 threads beside a busy process per core (src/iyi/
+  thread.iyi). `bench/thread_exercise.sh` 7h runs the storm with its
+  stops asleep, and proves the wake by a run that hangs without it; 7i
+  asks darwin's storm beside busy processes for half its rate alone, and
+  puts the hint back to fail it.
+  counts every registered thread fails the second. The busy budget is
+  the one the churn's own collections leave: a `collect` asked for
+  straight after one the churn triggered counted the two threads that
+  filled a slice in between, an 8 MiB budget, once on Windows 11, 12
+  logical processors (the user's machine).
+
+- **A size class the program stopped allocating in gives its memory
+  back.** Issue #145's app on twelve workers kept every size class's
+  pages from the endpoints before: after its 11 endpoints one after
+  another it held 617 arenas (thirteen threads' fill arenas in about 47
+  classes, none ever released) and 208 MB resident. The arenas were 195
+  MB of it: 18 MB of chunk tables and 176 MB of chunk pages, against 4.4
+  MB live and 133 MB counted warm idle. Fiber stacks were 1.2 MB and
+  images 6.8 MB. A class no cache has refilled for three collections and
+  at least a second now keeps no warm pages, and its empty arenas are
+  let go by their caches and unmapped. The same run ended with 432
+  arenas and 182 MB, 63 MB of it warm idle.
+
+  Against the branch before it, 2 interleaved rounds, on Windows 11, 12
+  logical processors (the user's machine): peak working set 205 MB
+  against 222; requests a second 613.4 against 615.4 and p99 161.5
+  against 159.8 ms at the geometric mean, app CPU 4.42 against 4.43 ms a
+  request. `bench/release_pages.iyi`, whose handler asks for the same
+  classes every epoch, held there (best of 3, 4.03M against 3.84M a
+  second, peak 100-103 MB against 101-104) and on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine; 1.51M against 1.51M).
+
+  The rest of the gap to goturkiye's 53-129 MB is structural. The epoch
+  allocates up to the budget, 28-52 MB at the floor of 4 MiB for each
+  allocating thread, and the sweep keeps another budget's worth (plus
+  #150's carry-over) warm for the next one; goturkiye under
+  `GODEBUG=gctrace=1` ran a 16-24 MB goal on 7-11 MB live in #145's
+  campaign, Windows 11, 12 logical processors (the user's machine).
+  `bench/sweep_exercise.sh` checks it both ways: a class idle
+  for four short epochs keeps its warm pages, and past a second it keeps
+  none and maps no arena. Each direction has a broken copy that fails,
+  and so does a copy whose cache keeps the arena.
+
 ### Gates
 
 - **concurrent_mark.sh's wake-boost proof fires whatever the machine.**
@@ -123,6 +185,7 @@
   held to two processors beside a spinning process, where the boosted
   build lost 118 to 132 wakes of 256 in four runs of four started after
   the spinner, and the shipped build, run the same way first, 0 or 1.
+
 ### Added
 
 - **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,
@@ -208,6 +271,52 @@
   coarsely there for the hold - 1.84 ms an update - and its twin spins a
   count measured at start instead.
 
+- **A `--release` build optimises on every core.** It still generates one
+  LLVM module, so LLVM sees the whole program, and then cuts it into
+  partitions of about 20,000 instructions, each optimised and compiled on
+  a thread of its own (`ReleasePartition`). A partition gets its own copy
+  of the functions of up to 100 instructions its code calls and of the
+  constants it reads, as LLVM's ThinLTO imports them, done through the C
+  API because that is all Windows' `LLVM-C.dll` exports: a local copy of a
+  local function, an `available_externally` one of an external function
+  such as `__iyi_new`, and none of what LLVM may not inline. A copy the
+  inliner turns down is compiled anyway, so the limit is what the build
+  costs: `samples/iyi/cores.iyi` (std/http and TLS), cold, took 19.1 s as
+  one module against 5.76 s cut at 100 and 7.55 s at 300 on a shared
+  12-vCPU Linux VM, and 21.37 s against 7.06 s and 8.27 s on macOS 26.6,
+  Apple M2 Pro, 10 cores (the user's machine). The programs it builds ran
+  within noise of the one-module build on the M2 Pro, best of 15
+  interleaved runs: bcrypt, SHA-256, ChaCha20-Poly1305 and
+  `bench/runtime.py`'s four from 0.97x to 1.01x, and JSON 1.028x, where
+  the same JSON binary run twice on Linux differed by 4%. **Windows keeps
+  one module by default**: on Windows 11, 12 logical processors (the
+  user's machine), 25.01 s against 7.81 s cut, the hash at 1.00x and
+  bcrypt, SHA-256 and ChaCha20-Poly1305 within 1.2%, but JSON at 1.068x
+  and 1.083x in two runs. `IYI_RELEASE_PARTITIONS=0` cuts it there too.
+
+  Two causes of the Windows numbers are found. LLVM 23, which Windows
+  builds with, added a value kind before `Instruction`, so every
+  instruction read as an unnamed kind and the cut took every local
+  function for reached from elsewhere and made it external: 819 functions
+  in the hash benchmark's binary against 254 for one module, and the hash
+  at 1.07x. `LLVM::Value::Kind` has the kind now, and the binary has 317.
+  The arithmetic benchmark's 1.43x was where its loop landed: the same
+  instructions, at offset 16 of a 64-byte line in the cut build and 32 in
+  the one module. The loop alone, at each offset, ran 0.32 s from offset 0
+  to 12, 0.43 s from 13 to 16 and 0.30 s from 17 on, the same on Windows
+  and on Linux; which offset a build draws moves with any change before
+  the loop, and LLVM's branch alignment (`-x86-align-branch`) left the
+  cut build's at 1.43x. The cut is a function of the program, so the
+  objects are the same on one thread and on twelve.
+  `IYI_RELEASE_PARTITIONS=1` keeps the one module and
+  `IYI_RELEASE_IMPORT=0` copies nothing. `bench/release_cores.sh` holds
+  the cores, the output, the objects and the inlining across the cut, each
+  against a broken copy. On `mt/next`, `bench/concurrent_mark.sh`'s copy
+  whose barrier shades nothing passed when cut, 8 runs of 8 on Linux: the
+  loop that reads the payload's colour held it where the second stop's
+  conservative scan found it. That read is in a frame of its own now, as
+  the move was, and the cut copy lost round 0's payload in 5 runs of 5.
+
 ### Fixed
 
 - **A connection's answer in the poller of a held worker is taken by an
@@ -279,6 +388,7 @@
   six runs each, interleaved, request p99 179 to 257 ms before and 175 to
   250 after, the slowest query 253 to 621 ms and 372 to 628. Whether the
   rest is the kernel's ready queue agent TagsTick traced is not measured.
+
 - **On Windows a stop no longer waits out a thread above the one
   stopping.** A stop there is the stopping thread's own loop of
   `SuspendThread` and `ResumeThread`, and a busier thread on its
@@ -324,6 +434,87 @@
   bounded: under the new lock path no broken copy of the lock crossed
   the bound (spin-only 2.4-3.5 times one thread, against the runtime's
   2.0), and 4c holds what the lock's yield is for.
+
+- **A collection has a ceiling, and twelve workers allocating flat out
+  peak at 154 to 180 MB where they peaked at 204 to 856.** Past the budget every thread
+  allocated on while a collection paid its debt, stopped the threads and
+  marked beside them, and an object born under a mark lives to the sweep
+  after the next, so the heap held the largest epoch twice: twelve
+  workers of `bench/alloc_scaling.iyi` on a 52 MB budget counted up to
+  232 MB in one epoch. Now a thread whose slice finds a collection under
+  way and the epoch past 125% of its budget sweeps the debt or marks for
+  it, and sleeps when there is neither, until the collection is let go
+  (GC_DESIGN.md, "The collection's ceiling"). The twelve workers peak at
+  158 to 180 MB in 0.70 to 0.74 s against 692 to 856 MB in 1.02 to 1.12
+  on a 12-vCPU Linux machine; at 154 to 161 MB against 204 to 265 on
+  Windows 11 with 12 logical processors; and at 156 to 162 MB in 1.33
+  to 1.41 s against 408 to 481 MB in 1.68 to 1.99 on macOS 26.6 with an
+  M2 Pro's 10 cores (both the user's machines). `bench/web_cores.iyi`
+  on twelve workers did not move on either of the user's machines, and
+  `bench/release_pages.iyi` on the M2 answered 1.83M requests a second
+  against 1.79M, peaking at 121 to 124 MB against 267 to 355.
+  `bench/collect_trigger.sh` runs `bench/working_set.iyi`, which fails
+  past four budgets, and a copy without the ceiling it catches (231 to
+  248 MiB on the Windows machine, past four budgets of 52 MiB).
+
+- **Idle threads no longer raise the collection budget's floor.** The
+  floor was 4 MiB for every registered thread, so a pool of twelve with
+  one parallel task and the main thread churning collected on a 52 MB
+  budget and peaked at 95 MB resident. It counts the threads that filled
+  an allocation slice since the last collection now: the same program
+  runs on 8 MB and peaks at 18 MB, in 0.15 s against 0.17 (a shared
+  12-vCPU Linux machine, 3 runs each).
+
+  Issue #145's app (iyiturkiye, twelve workers, 11 GET endpoints, oha
+  with 32 connections) counted 7 to 13 threads an epoch under load, so
+  its budget read 28 to 52 MB against master's 52. With the ceiling
+  beside it, against master (decc9f1fb), on Windows 11, 12 logical
+  processors (the user's machine), 3 interleaved rounds with goturkiye:
+
+  | | master | this branch | goturkiye |
+  |---|---:|---:|---:|
+  | requests a second, geometric mean of the best | 605.3 | 608.5 | 564.7 |
+  | p99, geometric mean of the best (ms) | 171.0 | 159.7 | 102.2 |
+  | app CPU per request (ms) | 4.56 | 4.56 | 5.00 |
+  | peak working set (MB) | 493 | 220 | 129 |
+
+  A counting copy (2 rounds) read each collection's epoch and debt:
+  `/api/v1/` allocated up to 59-60 MB an epoch against 214-223, paid
+  at most 2.2-2.7 ms of debt before a stop against 5-249 ms, and its
+  carry-over (#150's `warm_extra`) reached 23-25 MB against 141-172.
+  Across the endpoints the carry-over peaked at 41 MB against 172, so
+  it needs no cap of its own. Best p99 rose on web tags (384 ms against
+  366; the bursts of stalled queries #145's entry below describes) and
+  on cities, discover and `/admin` by 0.2-8 ms, and fell on the other
+  seven.
+
+  `bench/collect_trigger.sh` asks for both: four threads allocating keep
+  four threads' floor, and the same four idle add nothing; a copy that
+  counts every registered thread fails the second.
+
+## 0.20.1 — 2026-11-04
+
+**Fixes found by soaking 0.20.0 on every core: a darwin server a client
+could kill, two compiler crashes and a miscompile around NoReturn
+blocks, a collector crash on aarch64 and a fault that hung instead of
+ending, and Windows builds that picked up the wrong DLL.** A darwin
+server was killed by SIGPIPE when a client reset its connection before
+the accept, nine times in seventy seconds of adversarial load; every
+send now says `MSG_NOSIGNAL`. A collection
+that stopped a thread at the first instruction of a new task scanned
+past that task's stack, and crashed 9 of 23 runs of a test on an M2; a
+memory fault inside a collection hung the process instead of ending it.
+A block kept by a def, such as iyi-web's `get "/boom" do raise ... end`,
+stopped the compiler with a TypeCastError when its body passed a NoReturn
+value to a call, and a proc whose body did so panicked "can't execute"
+without running. std/http's stop no longer panics under a
+`stream_bodies` block waiting on its body, and an answer made while the
+server stops, or that the server will close after, says
+`Connection: close`. On Windows a stale DLL in the shared build cache no
+longer stands beside a new program, and `-Dgc_none`/`-Dgc_boehm` builds
+that read standard input or link libgc build and start.
+
+### Fixed
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with
@@ -386,6 +577,33 @@
   `{ |x| block.call(x).to_s }`. A spec in
   `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
 
+- **So does a kept block whose body is more than that call.** The fix
+  above typed the block's proc from the body cleanup leaves, and cleanup
+  leaves no type on a body it cuts at its NoReturn expression: a line
+  before the call, `{ |y| puts "x"; wrap(raise "x") }`, the value
+  assigned first, `{ |y| v = raise "x"; v.to_s }`, or the call in both
+  branches of an `if`. Each still stopped the compiler with "Cast from
+  Nil to Iyi::ProcInstanceType failed" (bindings.cr:622), in a block
+  `Kept.of`, `SharedProc.of` or any `&block : Int32 -> String` keeps. No
+  way out of such a body returns, so its proc is NoReturn, which is what
+  a block with no type is everywhere else. A spec in
+  `spec/compiler/semantic/iyi_spec.cr` compiles the three shapes.
+
+- **A proc whose body gives a call a NoReturn value runs that body.**
+  iyi-web's `get "/boom", workers: 1 do ... raise "..." end` answered
+  500 with "iyi: panic: can't execute `route_answer(block.call(ctx))`"
+  in its log, and the route never ran: not the line before its `raise`,
+  not the `raise`. A call given a NoReturn argument, `wrap(block.call(x))`
+  with the block `Proc(Int32, NoReturn)`, is never typed, which left the
+  proc's def without a type, and cleanup replaced the whole body of such
+  a proc with that panic, where a def's body is cleaned up instead: the
+  call becomes the arguments up to the NoReturn one. A proc's body now
+  is too, so `->(x : Int32) : String { puts "ran"; wrap(block.call(x)) }`
+  prints "ran", calls the block and panics with the block's message, or
+  exits with the block's `exit` status. Inherited from Crystal, whose
+  1.21 raises the same "can't execute". A spec in
+  `spec/compiler/compiler_spec.cr` runs the shape.
+
 - **A DLL beside a Windows program is the one the program was linked
   against.** The compiler copies each DLL a program links beside it, and
   kept any file already there by that name (Crystal's #14315, so that a
@@ -425,140 +643,6 @@
   with only the system directory on PATH, and refuses a copy of the
   prelude that does not name the DLL.
 
-- **A collection has a ceiling, and twelve workers allocating flat out
-  peak at 154 to 180 MB where they peaked at 204 to 856.** Past the budget every thread
-  allocated on while a collection paid its debt, stopped the threads and
-  marked beside them, and an object born under a mark lives to the sweep
-  after the next, so the heap held the largest epoch twice: twelve
-  workers of `bench/alloc_scaling.iyi` on a 52 MB budget counted up to
-  232 MB in one epoch. Now a thread whose slice finds a collection under
-  way and the epoch past 125% of its budget sweeps the debt or marks for
-  it, and sleeps when there is neither, until the collection is let go
-  (GC_DESIGN.md, "The collection's ceiling"). The twelve workers peak at
-  158 to 180 MB in 0.70 to 0.74 s against 692 to 856 MB in 1.02 to 1.12
-  on a 12-vCPU Linux machine; at 154 to 161 MB against 204 to 265 on
-  Windows 11 with 12 logical processors; and at 156 to 162 MB in 1.33
-  to 1.41 s against 408 to 481 MB in 1.68 to 1.99 on macOS 26.6 with an
-  M2 Pro's 10 cores (both the user's machines). `bench/web_cores.iyi`
-  on twelve workers did not move on either of the user's machines, and
-  `bench/release_pages.iyi` on the M2 answered 1.83M requests a second
-  against 1.79M, peaking at 121 to 124 MB against 267 to 355.
-  `bench/collect_trigger.sh` runs `bench/working_set.iyi`, which fails
-  past four budgets, and a copy without the ceiling it catches (231 to
-  248 MiB on the Windows machine, past four budgets of 52 MiB).
-
-- **Idle threads no longer raise the collection budget's floor.** The
-  floor was 4 MiB for every registered thread, so a pool of twelve with
-  one parallel task and the main thread churning collected on a 52 MB
-  budget and peaked at 95 MB resident. It counts the threads that filled
-  an allocation slice since the last collection now: the same program
-  runs on 8 MB and peaks at 18 MB, in 0.15 s against 0.17 (a shared
-  12-vCPU Linux machine, 3 runs each).
-
-  Issue #145's app (iyiturkiye, twelve workers, 11 GET endpoints, oha
-  with 32 connections) counted 7 to 13 threads an epoch under load, so
-  its budget read 28 to 52 MB against master's 52. With the ceiling
-  beside it, against master (decc9f1fb), on Windows 11, 12 logical
-  processors (the user's machine), 3 interleaved rounds with goturkiye:
-
-  | | master | this branch | goturkiye |
-  |---|---:|---:|---:|
-  | requests a second, geometric mean of the best | 605.3 | 608.5 | 564.7 |
-  | p99, geometric mean of the best (ms) | 171.0 | 159.7 | 102.2 |
-  | app CPU per request (ms) | 4.56 | 4.56 | 5.00 |
-  | peak working set (MB) | 493 | 220 | 129 |
-
-  A counting copy (2 rounds) read each collection's epoch and debt:
-  `/api/v1/` allocated up to 59-60 MB an epoch against 214-223, paid
-  at most 2.2-2.7 ms of debt before a stop against 5-249 ms, and its
-  carry-over (#150's `warm_extra`) reached 23-25 MB against 141-172.
-  Across the endpoints the carry-over peaked at 41 MB against 172, so
-  it needs no cap of its own. Best p99 rose on web tags (384 ms against
-  366; the bursts of stalled queries #145's entry below describes) and
-  on cities, discover and `/admin` by 0.2-8 ms, and fell on the other
-  seven.
-
-  `bench/collect_trigger.sh` asks for both: four threads allocating keep
-  four threads' floor, and the same four idle add nothing; a copy that
-  counts every registered thread fails the second.
-### Changed
-
-- **darwin's spinners give their core away, and a stop sleeps on its
-  count.** `IyiThread.yield_cpu` was the ARM `yield` hint on darwin, which
-  gives the scheduler nothing, so the runtime lock's spinner, a class
-  lock's and the scheduler's spun through the timeslice of the thread they
-  waited for; it is Mach's `thread_switch` with the depress option now,
-  after 1,024 turns of the hint (`IyiThread::YIELD_AFTER`), and darwin's
-  floor has one name more (SPEC.md III.9). The stop's waits for its
-  threads to count in and out spin briefly and then sleep on the count,
-  woken by the last thread (Linux's futex, darwin's `os_sync`). On macOS
-  26.6, an M2 Pro with 10 cores, five interleaved runs: 7d's storm beside
-  ten busy processes made 784 to 1,056 threads in its 10 s and makes
-  3,200 in 1.0 to 1.6 s; `bench/thread_exercise.iyi` at 20 threads alone
-  took 3.3 to 4.8 s and takes 1.5 to 3.7; `bench/web_cores.iyi` serves
-  the same (login 171.02 against 171.45 req/s, `check_version` 119,338
-  against 118,778, `order` 117,066 against 115,664, best of five). On
-  Linux, 12 vCPU, the storm beside nine busy processes went from 848 to
-  1,184 threads in 10 s to 3,200 in 5.8 to 8.6 s. `sched_yield`, measured
-  first, lost at 20 threads beside a busy process per core (src/iyi/
-  thread.iyi). `bench/thread_exercise.sh` 7h runs the storm with its
-  stops asleep, and proves the wake by a run that hangs without it; 7i
-  asks darwin's storm beside busy processes for half its rate alone, and
-  puts the hint back to fail it.
-  counts every registered thread fails the second. The busy budget is
-  the one the churn's own collections leave: a `collect` asked for
-  straight after one the churn triggered counted the two threads that
-  filled a slice in between, an 8 MiB budget, once on Windows 11, 12
-  logical processors (the user's machine).
-
-- **A size class the program stopped allocating in gives its memory
-  back.** Issue #145's app on twelve workers kept every size class's
-  pages from the endpoints before: after its 11 endpoints one after
-  another it held 617 arenas (thirteen threads' fill arenas in about 47
-  classes, none ever released) and 208 MB resident. The arenas were 195
-  MB of it: 18 MB of chunk tables and 176 MB of chunk pages, against 4.4
-  MB live and 133 MB counted warm idle. Fiber stacks were 1.2 MB and
-  images 6.8 MB. A class no cache has refilled for three collections and
-  at least a second now keeps no warm pages, and its empty arenas are
-  let go by their caches and unmapped. The same run ended with 432
-  arenas and 182 MB, 63 MB of it warm idle.
-
-  Against the branch before it, 2 interleaved rounds, on Windows 11, 12
-  logical processors (the user's machine): peak working set 205 MB
-  against 222; requests a second 613.4 against 615.4 and p99 161.5
-  against 159.8 ms at the geometric mean, app CPU 4.42 against 4.43 ms a
-  request. `bench/release_pages.iyi`, whose handler asks for the same
-  classes every epoch, held there (best of 3, 4.03M against 3.84M a
-  second, peak 100-103 MB against 101-104) and on macOS 26.6, Apple M2
-  Pro, 10 cores (the user's machine; 1.51M against 1.51M).
-
-  The rest of the gap to goturkiye's 53-129 MB is structural. The epoch
-  allocates up to the budget, 28-52 MB at the floor of 4 MiB for each
-  allocating thread, and the sweep keeps another budget's worth (plus
-  #150's carry-over) warm for the next one; goturkiye under
-  `GODEBUG=gctrace=1` ran a 16-24 MB goal on 7-11 MB live in #145's
-  campaign, Windows 11, 12 logical processors (the user's machine).
-  `bench/sweep_exercise.sh` checks it both ways: a class idle
-  for four short epochs keeps its warm pages, and past a second it keeps
-  none and maps no arena. Each direction has a broken copy that fails,
-  and so does a copy whose cache keeps the arena.
-
-### Known
-
-- **0.20.0's Windows light-endpoint loss is the load generator sharing
-  every processor, not the shared completion port.** On Windows 11 with
-  12 logical processors (the user's machine), interleaved best of 3
-  against 0d8922efd, the commit before the shared port: `check_version`
-  and `order` at twelve workers answer 0.89 and 0.94 of it only when oha
-  runs on all 12 processors beside them. Given processors of its own, the
-  shared port answers 9-12% more (6 or 12 workers on 6 processors, oha on
-  the other 6) and 19-36% more with oha held to 4. Kernel traces put the
-  port's own cost level (ntoskrnl 22.6 against 22.9 us a request); under
-  that co-location the workers seldom idle, so the port is drained in
-  batches of 7 by 1 ms polls, and both the server (+3.5 us) and oha
-  (+5.5 to +6 us) spend more CPU a request. Keeping a connection on its
-  worker without stalling it would take per-worker ports again, which is
-  not a patch.
 - **A darwin server is no longer killed by SIGPIPE when a client resets
   its connection before the accept.** darwin's sockets were kept from
   SIGPIPE by SO_NOSIGPIPE, set as each was accepted; on a connection its
@@ -589,6 +673,7 @@
   `bench/std_http_stop.iyi` stops a server under two such blocks, one
   answering a string and one a stream; the gate counts the panics, and a
   copy without either guard is caught.
+
 - **An answer the server makes while it stops says `Connection: close`,
   and a body the stop cut short is not answered 400.** An answer in
   progress at a stop went out `keep-alive` and the connection closed
@@ -598,6 +683,7 @@
   client for the server's going, in place of the close a client may
   retry on. `bench/std_http_parallel.iyi`'s stop holds both, with a
   broken copy of each.
+
 - **A `stream_bodies` answer says `Connection: close` when the server
   will close after it.** A block that left more of a body than the
   server reads past (`Server::MAX_DRAIN`, by the body's
@@ -610,32 +696,23 @@
   Both now say `close`, and no `100 Continue` follows an answer.
   `bench/std_http_exercise.sh`'s close cases hold both, plain and over
   std/tls, with a broken copy of each.
-- **So does a kept block whose body is more than that call.** The fix
-  above typed the block's proc from the body cleanup leaves, and cleanup
-  leaves no type on a body it cuts at its NoReturn expression: a line
-  before the call, `{ |y| puts "x"; wrap(raise "x") }`, the value
-  assigned first, `{ |y| v = raise "x"; v.to_s }`, or the call in both
-  branches of an `if`. Each still stopped the compiler with "Cast from
-  Nil to Iyi::ProcInstanceType failed" (bindings.cr:622), in a block
-  `Kept.of`, `SharedProc.of` or any `&block : Int32 -> String` keeps. No
-  way out of such a body returns, so its proc is NoReturn, which is what
-  a block with no type is everywhere else. A spec in
-  `spec/compiler/semantic/iyi_spec.cr` compiles the three shapes.
 
-- **A proc whose body gives a call a NoReturn value runs that body.**
-  iyi-web's `get "/boom", workers: 1 do ... raise "..." end` answered
-  500 with "iyi: panic: can't execute `route_answer(block.call(ctx))`"
-  in its log, and the route never ran: not the line before its `raise`,
-  not the `raise`. A call given a NoReturn argument, `wrap(block.call(x))`
-  with the block `Proc(Int32, NoReturn)`, is never typed, which left the
-  proc's def without a type, and cleanup replaced the whole body of such
-  a proc with that panic, where a def's body is cleaned up instead: the
-  call becomes the arguments up to the NoReturn one. A proc's body now
-  is too, so `->(x : Int32) : String { puts "ran"; wrap(block.call(x)) }`
-  prints "ran", calls the block and panics with the block's message, or
-  exits with the block's `exit` status. Inherited from Crystal, whose
-  1.21 raises the same "can't execute". A spec in
-  `spec/compiler/compiler_spec.cr` runs the shape.
+### Known
+
+- **0.20.0's Windows light-endpoint loss is the load generator sharing
+  every processor, not the shared completion port.** On Windows 11 with
+  12 logical processors (the user's machine), interleaved best of 3
+  against 0d8922efd, the commit before the shared port: `check_version`
+  and `order` at twelve workers answer 0.89 and 0.94 of it only when oha
+  runs on all 12 processors beside them. Given processors of its own, the
+  shared port answers 9-12% more (6 or 12 workers on 6 processors, oha on
+  the other 6) and 19-36% more with oha held to 4. Kernel traces put the
+  port's own cost level (ntoskrnl 22.6 against 22.9 us a request); under
+  that co-location the workers seldom idle, so the port is drained in
+  batches of 7 by 1 ms polls, and both the server (+3.5 us) and oha
+  (+5.5 to +6 us) spend more CPU a request. Keeping a connection on its
+  worker without stalling it would take per-worker ports again, which is
+  not a patch.
 
 ## 0.20.0 — 2026-11-02
 
@@ -814,52 +891,6 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
   taken off.
 
 ### Added
-
-- **A `--release` build optimises on every core.** It still generates one
-  LLVM module, so LLVM sees the whole program, and then cuts it into
-  partitions of about 20,000 instructions, each optimised and compiled on
-  a thread of its own (`ReleasePartition`). A partition gets its own copy
-  of the functions of up to 100 instructions its code calls and of the
-  constants it reads, as LLVM's ThinLTO imports them, done through the C
-  API because that is all Windows' `LLVM-C.dll` exports: a local copy of a
-  local function, an `available_externally` one of an external function
-  such as `__iyi_new`, and none of what LLVM may not inline. A copy the
-  inliner turns down is compiled anyway, so the limit is what the build
-  costs: `samples/iyi/cores.iyi` (std/http and TLS), cold, took 19.1 s as
-  one module against 5.76 s cut at 100 and 7.55 s at 300 on a shared
-  12-vCPU Linux VM, and 21.37 s against 7.06 s and 8.27 s on macOS 26.6,
-  Apple M2 Pro, 10 cores (the user's machine). The programs it builds ran
-  within noise of the one-module build on the M2 Pro, best of 15
-  interleaved runs: bcrypt, SHA-256, ChaCha20-Poly1305 and
-  `bench/runtime.py`'s four from 0.97x to 1.01x, and JSON 1.028x, where
-  the same JSON binary run twice on Linux differed by 4%. **Windows keeps
-  one module by default**: on Windows 11, 12 logical processors (the
-  user's machine), 25.01 s against 7.81 s cut, the hash at 1.00x and
-  bcrypt, SHA-256 and ChaCha20-Poly1305 within 1.2%, but JSON at 1.068x
-  and 1.083x in two runs. `IYI_RELEASE_PARTITIONS=0` cuts it there too.
-
-  Two causes of the Windows numbers are found. LLVM 23, which Windows
-  builds with, added a value kind before `Instruction`, so every
-  instruction read as an unnamed kind and the cut took every local
-  function for reached from elsewhere and made it external: 819 functions
-  in the hash benchmark's binary against 254 for one module, and the hash
-  at 1.07x. `LLVM::Value::Kind` has the kind now, and the binary has 317.
-  The arithmetic benchmark's 1.43x was where its loop landed: the same
-  instructions, at offset 16 of a 64-byte line in the cut build and 32 in
-  the one module. The loop alone, at each offset, ran 0.32 s from offset 0
-  to 12, 0.43 s from 13 to 16 and 0.30 s from 17 on, the same on Windows
-  and on Linux; which offset a build draws moves with any change before
-  the loop, and LLVM's branch alignment (`-x86-align-branch`) left the
-  cut build's at 1.43x. The cut is a function of the program, so the
-  objects are the same on one thread and on twelve.
-  `IYI_RELEASE_PARTITIONS=1` keeps the one module and
-  `IYI_RELEASE_IMPORT=0` copies nothing. `bench/release_cores.sh` holds
-  the cores, the output, the objects and the inlining across the cut, each
-  against a broken copy. On `mt/next`, `bench/concurrent_mark.sh`'s copy
-  whose barrier shades nothing passed when cut, 8 runs of 8 on Linux: the
-  loop that reads the payload's colour held it where the second stop's
-  conservative scan found it. That read is in a frame of its own now, as
-  the move was, and the cut copy lost round 0's payload in 5 runs of 5.
 
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and

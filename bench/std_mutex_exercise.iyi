@@ -102,8 +102,10 @@ end
 # waiter that had the lock once is the running thread at its release,
 # the holder the one woken, and the next four asks took the lock back as
 # the holder had. So each ask waits first for the holder to take the
-# lock twice more, and asks against a holder that is retaking it. With
-# the handoff the one ask took 2 to 3 ms there, and on Windows 11, 12
+# lock twice more, and asks against a holder that is retaking it: on
+# three of those runners the copy failed 40 runs of 40 on each, and the
+# shipped module passed 20 of 20 (debug run 41812323963). With the
+# handoff the one ask took 2 to 3 ms there, and on Windows 11, 12
 # logical processors (the user's machine), where the copy's 20 took 257
 # to 605 ms. The holder stops after 3,000 holds, so the copy's first ask
 # that is not let in early ends there.

@@ -259,9 +259,10 @@ prove_fails "floor counts idle threads" idlefloor "floor:" \
 # With the hold's left in, a thread that reached the ceiling while the
 # collection's thread paid the debt swept it there: held to 3 cores on
 # Linux (12 vCPUs), the copy passed 5 of 10 runs, 12 to 62 slices swept,
-# and it passed on darwin arm64's 3-core runner (run 41800443380). With
-# both out it failed 20 of 20 held to 3 cores, and the shipped runtime
-# swept 435 to 1202 slices in 10.
+# and it passed on darwin arm64's 3-core runner (run 41800443380), 2 of
+# 10 runs there. With both out it failed 20 of 20 held to 3 cores, and
+# 10 of 10 on that runner (debug run 41812323963), where the shipped
+# runtime swept 98 to 861 slices in 10; 435 to 1202 on Linux.
 prove_fails "debt never assisted" noassist "debt:" \
   '{ if (sub(/sweep_assist if total >= budget/, "# removed")) found++; if (sub(/^            sweep_assist$/, "            nil")) found++; print } END { if (found != 2) exit 3 }' prelude.iyi debt_assist.iyi
 

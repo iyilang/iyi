@@ -192,6 +192,38 @@
   build lost 118 to 132 wakes of 256 in four runs of four started after
   the spinner, and the shipped build, run the same way first, 0 or 1.
 
+- **The wake-boost proof takes out the collection's raises too.** Since
+  the collecting thread is raised before it takes the runtime lock, it
+  wakes the helpers at the highest priority, where a boosted helper
+  preempts nothing: the proof lost 0 wakes of 256 in three runs on
+  windows-2025 (run 41800443380). With the raises out it failed all 30
+  runs on three of those runners (debug run 41812323963).
+
+- **collect_trigger.sh's "debt never assisted" copy takes out both of
+  the assist's calls.** A thread held at the collection's ceiling swept
+  the debt too, and on darwin arm64's 3-core runner the copy that took
+  out only the slice's assist passed (run 41800443380): 2 of 10 runs
+  there, 5 of 10 held to 3 cores on Linux. With the hold's taken out as
+  well it failed 10 of 10 there and 20 of 20 on Linux (debug run
+  41812323963).
+
+- **std_mutex's starving waiter asks five times, each against a holder
+  retaking the lock.** Asked five times in a row, the copy that never
+  starves still passed 2 of 40 runs on windows-2025: a waiter that had
+  the lock once was the running thread at its own release, and took it
+  back as the holder had. Each ask waits for the holder's next two takes
+  now, and the copy failed 120 of 120 runs on three runners, the shipped
+  build passing 60 of 60 (debug run 41812323963).
+
+- **thread_exercise.sh's stop beside a burst leaves a processor idle,
+  and lets three stray stops pass.** On windows-2025's 4-processor
+  runners a healthy stop sometimes took 24 to 33 ms against the 20 ms
+  bound, all but 12 us of it in one `GetThreadContext` waiting for a
+  stopped thread on another processor; the burst holds dozens a run, 21
+  to 33 stops of 100 to 142 ms. The lock taker's longest wait, beside two
+  computing threads on three processors, was up to 41 ms against its 50;
+  beside one, 1.6 ms (debug run 41812323963, 45 runs each).
+
 ### Added
 
 - **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,

@@ -872,7 +872,8 @@ cmp -s boosted/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "the awk foun
 # helpers already at the highest priority, where a boosted helper does
 # not preempt it. With those raises in, the copy lost 0 wakes of 256 in
 # each of three runs held to two processors beside a spinner (run
-# 41800443380, windows-2025). The stop's own raise stays, as it was.
+# 41800443380, windows-2025); with them out, it failed 30 of 30 on three
+# of those runners (debug run 41812323963). The stop's own raise stays.
 awk '/^ *IyiThread\.raise_stopper$/ { found++; next } { print } END { if (found != 4) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > boosted/iyi/prelude.iyi || { echo "the collection's four raises are not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/boosted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o boosted-run > build-boosted.log 2>&1; then

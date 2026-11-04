@@ -1,0 +1,8 @@
+module main
+
+pub def mix(a : Int32, b : Int32, c : Int32) : Int32
+  a + b * c - a
+end
+
+y = mix(2, 3, 4)
+puts y

@@ -5136,7 +5136,7 @@ constant, not exported. State under any other claim is recorded as
 reached, the record saying the claim was proven only for the program that
 wrote the artifact. The claim itself does not cross: the annotation does
 not travel with a constant or a class variable, so a body that travelled
-and names the state reads it as unclaimed. A crystal shard's boundary
+and names the state reads it as unclaimed. A Crystal shard's boundary
 (`iyi bind`) has no `Reaches` section and is read as not known.
 `bench/spawn_eligible.sh` gates all of it beside broken copies through
 `IYI_SPAWN_BROKEN`: an artifact written without the section, a function

@@ -2755,13 +2755,18 @@ IYI
       cat build-asleep.log; exit 1
     fi
     run=1
+    slowest=""
     while [ "$run" -le 3 ]; do
       ( timeout -k 5 60 ./asleep 200 10 > asleep.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
-      if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ' asleep.txt; then
+      if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* ' asleep.txt; then
         echo "run $run exited $code:"; tail -3 asleep.txt; exit 1
       fi
       echo "  $(sed 's/^ok //' asleep.txt)"
+      born="$(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' asleep.txt)"
+      ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' asleep.txt)"
+      rate=$((born * 1000 / (ms + 1)))
+      if [ -z "$slowest" ] || [ "$rate" -lt "$slowest" ]; then slowest=$rate; fi
       run=$((run + 1))
     done
 
@@ -2788,11 +2793,16 @@ IYI
     # from the lock's spin have tried it, and they never get it. The copy
     # returns from the wait at once. On Linux (12 vCPU) it hung 5 runs of
     # 5 past 30 s, where the runtime made its 3,200 threads in 1.3 to
-    # 1.4 s. darwin's spinners give their core away (7i), and there the
-    # same copy made its threads in 1.6 to 1.7 s, 3 runs of 3 on the M2,
-    # so the proof is Linux's.
+    # 1.4 s. On ubuntu-24.04's 4-core runners it made the program's
+    # floor of 320 threads in 28.3 s, under the timeout (run 41800443380),
+    # and held to 4 cores of that machine in 14.7 to 22.8 s, 6 runs of 6,
+    # where the runtime made its 3,200 in 1.28 to 1.34 s: so a run that
+    # ends is caught too, at under a tenth of the slowest rate the runtime
+    # made above. darwin's spinners give their core away (7i), and there
+    # the same copy made its threads in 1.6 to 1.7 s, 3 runs of 3 on the
+    # M2, so the proof is Linux's.
     if [ "$(uname -s)" = Linux ]; then
-      step "failure proof: no wait for the released lock waiters' turns, and a run hangs"
+      step "failure proof: no wait for the released lock waiters' turns, and a run hangs or crawls"
       mkdir -p unowed/iyi
       cp "$REPO"/src/iyi/*.iyi unowed/iyi/
       awk '/^      return if turns\.value\.get == 0_u64$/ { print "      return"; found = 1; next } { print } END { if (!found) exit 3 }' \
@@ -2802,10 +2812,19 @@ IYI
       fi
       ( timeout -k 5 30 ./unowed-run 200 10 > unowed.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
-      if [ "$code" -ne 124 ]; then
-        echo "with the wait for the turns taken out, a run exited $code rather than hanging:"; tail -3 unowed.txt; exit 1
+      if [ "$code" -eq 124 ]; then
+        echo "  the run hung until the 30 s timeout (exit 124)"
+      elif [ "$code" -eq 0 ] && grep -q '^ok born=[0-9]* ms=[0-9]* ' unowed.txt; then
+        born="$(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' unowed.txt)"
+        ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' unowed.txt)"
+        rate=$((born * 1000 / (ms + 1)))
+        if [ $((rate * 10)) -ge "$slowest" ]; then
+          echo "with the wait for the turns taken out, a run made $rate threads a second, not under a tenth of the runtime's $slowest:"; tail -3 unowed.txt; exit 1
+        fi
+        echo "  the run made $rate threads a second, against $slowest at the slowest above"
+      else
+        echo "with the wait for the turns taken out, a run exited $code:"; tail -3 unowed.txt; exit 1
       fi
-      echo "  the run hung until the 30 s timeout (exit 124)"
     fi
     ;;
 esac

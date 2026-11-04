@@ -224,6 +224,15 @@
   computing threads on three processors, was up to 41 ms against its 50;
   beside one, 1.6 ms (debug run 41812323963, 45 runs each).
 
+- **thread_exercise.sh's copy without the wait for the lock waiters'
+  turns is caught when it crawls, not only when it hangs.** On
+  ubuntu-24.04's 4-core runners the copy made the storm's floor of 320
+  threads in 28.3 s, under the 30 s timeout (run 41800443380), and held
+  to 4 cores on Linux in 14.7 to 22.8 s, 6 runs of 6, where the runtime
+  made its 3,200 in 1.28 to 1.34 s. A run that ends now has to make its
+  threads at under a tenth of the slowest rate the runtime made beside
+  it.
+
 ### Added
 
 - **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,

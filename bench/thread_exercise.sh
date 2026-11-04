@@ -2441,7 +2441,12 @@ esac
 # fiber's, none of 26.
 # A stop lands on one of two instructions in a task's life, so a run's
 # death is luck; each task asks the scan's own question of its own top
-# as well, which the old bound answers wrongly every time.
+# as well, which the old bound answers wrongly every time. It asks under
+# the runtime lock, as the stop does: the fiber list changes under that
+# lock, and with the pool's workers starting tasks beside it the walk
+# unlocked read a list mid-change. On the M2, on mt/next at 341a034b3,
+# the unlocked check failed 18 of 20 runs of 5 s, with and without the
+# turn-counter release; under the lock, none of 6.
 case "$(uname -s)" in
   Linux | Darwin)
     step "tasks begin on fresh stacks beside a thread collecting in a loop, and each task's top is its own stack's: three runs of 5 s"
@@ -2468,7 +2473,10 @@ end
 # the scan the way the stop asks it.
 def first_run : Int32
   top = IyiScheduler.current_stack_top
-  raise "a task's stack top is no task's to the stop's scan" if IyiScheduler.fiber_top_holding(top) != top
+  IyiRuntimeLock.lock
+  held = IyiScheduler.fiber_top_holding(top)
+  IyiRuntimeLock.unlock
+  raise "a task's stack top is no task's to the stop's scan" if held != top
   0
 end
 

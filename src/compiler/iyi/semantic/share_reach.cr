@@ -4,7 +4,45 @@ require "../types"
 
 module Iyi
   class Program
-    getter(iyi_share_reach : ShareReach) { ShareReach.new }
+    getter(iyi_share_reach : ShareReach) { ShareReach.new(self) }
+
+    # What the functions of the modules read from artifacts reach of
+    # module state (`IyiMod::Section::Reaches`), by `ShareReach.reach_key`,
+    # every artifact's together: a function an artifact's object code holds
+    # an instance of may be declared by another module.
+    getter iyi_artifact_reaches = {} of String => Array(IyiMod::ReachRecord)
+
+    # The artifacts read without a `Reaches` section, by path, each with its
+    # module: what their functions reach is not known.
+    getter iyi_artifacts_without_reaches = {} of String => String
+
+    # The claims `ReachProof` found hold for every program that imports
+    # the module declaring the state, by the state's `object_id`: what
+    # they reach is left out of the module's `Reaches`. A claim itself
+    # never crosses an artifact - the annotation does not travel - so a
+    # consumer naming the state in a body that travelled reads it as
+    # unclaimed.
+    getter iyi_reach_robust = Set(UInt64).new
+
+    # Records what the artifact at *path* says its functions reach, or
+    # that it does not say.
+    def iyi_record_artifact_reaches(path : String, artifact : IyiMod::Artifact) : Nil
+      reaches = artifact.reaches
+      unless reaches
+        @iyi_artifacts_without_reaches[path] = artifact.module_name
+        return
+      end
+      reaches.each do |record|
+        (@iyi_artifact_reaches[record.function] ||= [] of IyiMod::ReachRecord) << record
+      end
+    end
+
+    # The module whose artifact *location* was read from, or nil for one
+    # read from source.
+    def iyi_artifact_module_at(location : Location?) : String?
+      file = location.try(&.original_artifact)
+      file ? (@iyi_artifact_modules[file]? || @iyi_artifacts_without_reaches[file]?) : nil
+    end
   end
 
   # iyi: the module state a block that crosses threads reaches through the
@@ -30,6 +68,14 @@ module Iyi
   # behind a lock may not name one either. Every target of a call is
   # walked, so a virtual call reaches each override, and a def met twice,
   # by recursion or by two paths, is walked once.
+  #
+  # A module read from its `.iyimod` has declarations and no bodies, and
+  # the walk read each of its functions as reaching nothing: a spawn
+  # calling a dependency's `note`, which appended to an unguarded `Array`,
+  # was placed in parallel and lost appends (SPEC.md III.4.15). The build
+  # writing the artifact records what each function reaches
+  # (`summarise`), and a consumer's walk reads that where the body is not
+  # (`remote_of`); an artifact without the record is "not known".
   #
   # What each def names and calls is read once per compilation and kept, so
   # a hundred routes reaching the same model functions read them once.
@@ -57,9 +103,12 @@ module Iyi
 
     # A named thing the walk found, and the defs that lead to it from the
     # block: the first is one the block calls, the last the one naming it.
-    record Found, named : Named, path : Array(Def)
+    # Or what a function read from an artifact reaches, as its artifact
+    # recorded it, the last def being that function; a record with an
+    # empty *kind* says the artifact recorded nothing (`remote_of`).
+    record Found, named : Named | IyiMod::ReachRecord, path : Array(Def)
 
-    def initialize
+    def initialize(@program : Program)
       @facts = {} of Def => Facts
       @facts.compare_by_identity
       @std_files = {} of String => Bool
@@ -75,12 +124,27 @@ module Iyi
       start = scan(block_def.body)
       seen = Set(UInt64).new
       start.named.each { |named| seen << named.key }
+      walk(start.calls, seen)
+    end
+
+    # The walk from *calls*, past what *seen* holds. A function read from
+    # an artifact has no body here (SPEC.md IV.1g): what it reaches is
+    # what its artifact recorded when the body was there, and the walk
+    # does not go past it.
+    private def walk(calls : Array(Def), seen : Set(UInt64)) : Array(Found)
+      remote = Set({String, String}).new
       visited = Set(Def).new.compare_by_identity
       queue = Deque({Def, Array(Def)}).new
-      start.calls.each { |target| queue << {target, [target]} if visited.add?(target) }
+      calls.each { |target| queue << {target, [target]} if visited.add?(target) }
       found = [] of Found
       while entry = queue.shift?
         a_def, path = entry
+        if header?(a_def)
+          remote_of(a_def).each do |record|
+            found << Found.new(record, path) if remote.add?({record.module_name, record.label})
+          end
+          next
+        end
         facts = facts_of(a_def)
         facts.named.each do |named|
           found << Found.new(named, path) if seen.add?(named.key)
@@ -90,6 +154,127 @@ module Iyi
         end
       end
       found
+    end
+
+    # A def read from an artifact with no body under it: the module's
+    # machine code is elsewhere, and so is what it reaches. Not an
+    # `abstract def`, whose answers are the overrides a call reaches too.
+    # `IYI_SPAWN_BROKEN=headers` reads it as the body it lacks, which
+    # reaches nothing: the walk as it was before artifacts recorded it.
+    private def header?(a_def : Def) : Bool
+      a_def.iyi_from_artifact? && a_def.body.is_a?(Nop) && !a_def.abstract? && !SPAWN_BROKEN.includes?("headers")
+    end
+
+    NONE = [] of IyiMod::ReachRecord
+
+    # What *a_def*, read from an artifact, reaches as the artifact said:
+    # nothing when its artifact has the section and no record for it, and
+    # one record naming the module, with no *kind*, when its artifact has
+    # no section at all.
+    private def remote_of(a_def : Def) : Array(IyiMod::ReachRecord)
+      file = a_def.location.try(&.original_artifact)
+      if file && (module_name = @program.iyi_artifacts_without_reaches[file]?)
+        return [IyiMod::ReachRecord.new(ShareReach.called(a_def), "", "", "", "", [] of String, "", module_name)]
+      end
+      @program.iyi_artifact_reaches[ShareReach.reach_key(a_def)]? || NONE
+    end
+
+    # A function as a typed call to it names it in every program: the type
+    # that declares it, as both sides print it, and its name without a
+    # named-argument expansion's suffix. Overloads and instantiations share
+    # one, so what one reaches is said of all, which may keep a spawn in
+    # its unit that the source build would not and never the other way.
+    def self.reach_key(a_def : Def) : String
+      owner = a_def.original_owner? || a_def.owner
+      "#{owner}##{a_def.name.split(':').first}"
+    end
+
+    # The `Reaches` section of the artifact for the module written in
+    # *file* (SPEC.md III.4.15): for each function this build typed there,
+    # what it reaches that is not safe for every thread of every program
+    # importing the module. State under a claim that holds in every such
+    # program (`ReachProof#robust?`) is left out; under one proven only
+    # for this program, it is recorded, saying so.
+    def summarise(file : String) : Array(IyiMod::ReachRecord)
+      records = [] of IyiMod::ReachRecord
+      recorded = Set({String, String, String}).new
+      instances_in(file).each do |a_def|
+        next if a_def.iyi_from_artifact?
+        key = ShareReach.reach_key(a_def)
+        own = facts_of(a_def)
+        seen = Set(UInt64).new
+        found = [] of Found
+        own.named.each { |named| found << Found.new(named, [] of Def) if seen.add?(named.key) }
+        found.concat walk(own.calls, seen)
+        found.each do |entry|
+          record = summary_record(key, entry, file)
+          records << record if record && recorded.add?({key, record.module_name, record.label})
+        end
+      end
+      # In one order whatever order this build typed them in, since the
+      # interface hash is over them.
+      records.sort_by! { |record| {record.function, record.module_name, record.label} }
+    end
+
+    # One found thing as the record *key*'s function keeps: nil for state
+    # that is Share or claimed safe for every importer.
+    # `IYI_SPAWN_BROKEN=robust` takes every claim this build proved as one
+    # that holds for every importer.
+    private def summary_record(key : String, entry : Found, file : String) : IyiMod::ReachRecord?
+      steps = entry.path.map { |target| ShareReach.called(target) }
+      case named = entry.named
+      in IyiMod::ReachRecord
+        named.copy_with(function: key, path: steps + named.path)
+      in Named
+        state = named.state
+        robust = @program.iyi_reach_robust.includes?(state.object_id) || SPAWN_BROKEN.includes?("robust")
+        return nil if state.iyi_safe_reach && robust
+        why = Iyi::Share.reason(named.type, file)
+        return nil unless why
+        if state.iyi_safe_reach
+          why = "#{why}; its @[SafeReach] is proven for the program that wrote this artifact and not for every program importing the module: it is written outside the module's initialiser, named outside the module, or answered by a function"
+        end
+        declared = named.declared
+        declared_file = declared.try { |at| (at.expanded_location || at).filename }.as?(String)
+        owner = declared_file.try { |path| @program.iyi_module_paths[path]? } ||
+                @program.iyi_artifact_module_at(declared) || ""
+        kind = state.is_a?(Const) ? "the constant" : "the class variable"
+        IyiMod::ReachRecord.new(key, named.label, named.type.to_s, kind, named.use, steps, why, owner)
+      end
+    end
+
+    # Every def instance this build typed whose def is written in *file*,
+    # a macro's by where the macro was called: every one an artifact's
+    # object code may hold, since a block-taking one, which no type keeps,
+    # travels as its body (SPEC.md IV.1g). Indexed once per build.
+    private def instances_in(file : String) : Array(Def)
+      index = @instances ||= begin
+        by_file = {} of String => Array(Def)
+        seen = Set(UInt64).new
+        collect_instances(@program, by_file, seen)
+        @program.file_modules.each_value { |file_module| collect_instances(file_module, by_file, seen) }
+        by_file
+      end
+      index[file]? || [] of Def
+    end
+
+    @instances : Hash(String, Array(Def))?
+
+    private def collect_instances(type : Type, by_file : Hash(String, Array(Def)), seen : Set(UInt64)) : Nil
+      if type.is_a?(NamedType) || type.is_a?(Program) || type.is_a?(FileModule)
+        type.types?.try &.each_value { |inner| collect_instances(inner, by_file, seen) }
+      end
+      if type.is_a?(GenericType)
+        type.each_instantiated_type { |instance| collect_instances(instance, by_file, seen) }
+      end
+      collect_instances(type.metaclass, by_file, seen) if type.metaclass != type
+      return unless type.is_a?(DefInstanceContainer)
+      type.def_instances.each_value do |instance|
+        next unless seen.add?(instance.object_id)
+        at = instance.location
+        written = (at.try(&.expanded_location) || at).try(&.filename)
+        (by_file[written] ||= [] of Def) << instance if written.is_a?(String)
+      end
     end
 
     private def facts_of(a_def : Def) : Facts

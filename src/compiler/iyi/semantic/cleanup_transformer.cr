@@ -4,12 +4,16 @@ require "../types"
 
 module Iyi
   # iyi: the broken copies `bench/spawn_eligible.sh` proves its compiler
-  # checks with (SPEC.md III.4.16), each turning one mechanism off, as
-  # `IYI_RELEASE_IMPORT=0` is `release_cores.sh`'s: `remote` names no
-  # module in a reason, `fallback` gives `iyi check` no note unasked,
-  # `moves` prints no line for a spawn a rebuild moved, and `retired`
-  # answers `spawn_parallel` as any undefined method. Read once; empty in
-  # every other run.
+  # checks with (SPEC.md III.4.15, III.4.16), each turning one mechanism
+  # off, as `IYI_RELEASE_IMPORT=0` is `release_cores.sh`'s: `remote` names
+  # no module in a reason, `fallback` gives `iyi check` no note unasked,
+  # `moves` prints no line for a spawn a rebuild moved, `retired` answers
+  # `spawn_parallel` as any undefined method, `reaches` writes an artifact
+  # without what its functions reach (`IyiMod::Section::Reaches`),
+  # `headers` reads a function from an artifact as reaching nothing, and
+  # `robust` writes an artifact that leaves out state under any claim its
+  # build proved, as if every claim held for every importer.
+  # Read once; empty in every other run.
   SPAWN_BROKEN = (ENV["IYI_SPAWN_BROKEN"]? || "").split(',')
 
   # iyi: a `g.spawn` the cleanup classified (SPEC.md III.4.15): where its
@@ -1114,16 +1118,35 @@ module Iyi
       return nil if reach.std?(block)
       reach.reach(a_def).each do |found|
         named = found.named
+        path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
+        if named.is_a?(IyiMod::ReachRecord)
+          return remote_reach_reason(named, path)
+        end
         next if named.state.iyi_safe_reach
         why = Iyi::Share.reason(named.type, @reason_from)
         next unless why
-        path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
         path << "`#{named.use}`"
         where = named.state.is_a?(Const) ? "the constant" : "the class variable"
         return "the block reaches #{where} `#{named.label} : #{named.type}` through #{path.join(" → ")}, and it is not Share: #{why}; " \
                "if every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on it with `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)"
       end
       nil
+    end
+
+    # Why a spawn whose block calls a function read from an artifact stays
+    # in its unit: what the artifact recorded the function reaches, or that
+    # it recorded nothing (SPEC.md III.4.15). *path* is the defs from the
+    # block to that function.
+    private def remote_reach_reason(record : IyiMod::ReachRecord, path : Array(String)) : String
+      if record.kind.empty?
+        return "the block calls #{path.join(" → ")}, and #{record.module_name} arrived as an artifact that does not record what its functions reach of module state, so nothing says what that is; " \
+               "build #{record.module_name}'s artifact again with this compiler, or build against its source (SPEC.md III.4.15)"
+      end
+      path.concat record.path.map { |step| "`#{step}`" }
+      path << "`#{record.use}`"
+      "the block reaches #{record.kind} `#{record.label} : #{record.type}` (module `#{record.module_name}`) through #{path.join(" → ")}, and it is not Share: #{record.why}; " \
+      "the artifact of #{record.module_name} recorded that its code reaches it (SPEC.md III.4.15), and if every thread may reach it safely, " \
+      "`@[SafeReach(\"...\")]` on it in #{record.module_name} says why, which the compiler proves (SPEC.md III.4.4)"
     end
 
     SPAWN_BOUNDARY = ShareBoundary.new(
@@ -1538,6 +1561,10 @@ module Iyi
       return if @program.warnings.ignore_warning_due_to_location?(block.location)
       reach.reach(a_def).each do |found|
         named = found.named
+        if named.is_a?(IyiMod::ReachRecord)
+          gather_remote_reach(block, boundary, found, named)
+          next
+        end
         next if named.state.iyi_safe_reach
         if gathered = @share_reach_gathered[named.key]?
           gathered.blocks << block.location.to_s
@@ -1565,6 +1592,27 @@ module Iyi
         tail = ": #{why}. #{instead} (SPEC.md III.4.4)"
         @share_reach_gathered[named.key] = ShareReachWarning.new(block, head, tail, Set{block.location.to_s})
       end
+    end
+
+    # The warning for state a function read from an artifact reaches, as
+    # its artifact recorded it (SPEC.md III.4.15); gathered by the state,
+    # as the others are. Not for a function whose artifact recorded
+    # nothing, an `iyi bind` boundary's: that keeps a plain spawn in its
+    # unit, and warning every parallel block that calls into a bound shard
+    # would say only that nothing is known.
+    private def gather_remote_reach(block : Block, boundary : ShareBoundary, found : ShareReach::Found, record : IyiMod::ReachRecord) : Nil
+      return if record.kind.empty?
+      key = {record.module_name, record.label}.hash
+      if gathered = @share_reach_gathered[key]?
+        gathered.blocks << block.location.to_s
+        return
+      end
+      path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
+      path.concat record.path.map { |step| "`#{step}`" }
+      path << "`#{record.use}`"
+      head = "#{boundary.subject} reaches `#{record.label} : #{record.type}` (not Share; module `#{record.module_name}`) through #{path.join(" → ")}"
+      tail = ": #{record.why}. The change goes in #{record.module_name}, whose artifact recorded it: keep the value behind a `Mutex` (std/mutex), or say why every thread may reach it with `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4, III.4.15)"
+      @share_reach_gathered[key] = ShareReachWarning.new(block, head, tail, Set{block.location.to_s})
     end
 
     # One warning being gathered: the first block to reach the state, the

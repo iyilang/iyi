@@ -208,6 +208,39 @@ describe Iyi::IyiMod do
     end
   end
 
+  # What each function reaches of module state (SPEC.md III.4.15): absent
+  # and empty mean opposite things to a consumer, so both survive the
+  # trip, and the record is in the interface hash, since a dependent's
+  # spawn placement is compiled from it.
+  it "round-trips what each function reaches, absent, empty and recorded" do
+    dumped = ->(path : String) do
+      io = IO::Memory.new
+      Iyi::IyiMod.dump Iyi::IyiMod.read(path), io
+      io.to_s
+    end
+    with_temporary_file do |path|
+      artifact = sample_artifact
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).reaches.should be_nil
+      dumped.call(path).should contain "reaches       (not recorded)"
+
+      artifact.reaches = [] of Iyi::IyiMod::ReachRecord
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).reaches.should eq [] of Iyi::IyiMod::ReachRecord
+      dumped.call(path).should contain "reaches       (nothing unsafe)"
+      empty = Iyi::IyiMod.hashes_for(artifact, "").interface
+
+      record = Iyi::IyiMod::ReachRecord.new("App::Greeter#note", "SEEN", "Array(Int32)", "the constant",
+        "SEEN.<<", ["helper"], "Array(Int32)'s field @size is assigned in `append`", "app/greeter")
+      artifact.reaches = [record]
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).reaches.should eq [record]
+      dumped.call(path).should contain \
+        "App::Greeter#note reaches the constant `SEEN : Array(Int32)` (module `app/greeter`) through `helper` → `SEEN.<<`"
+      Iyi::IyiMod.hashes_for(artifact, "").interface.should_not eq empty
+    end
+  end
+
   # Atomic replacement is the property IV.1 picks a single-file container for:
   # a half-written artifact that a later build reads as valid is the worst
   # failure a cache has, because it is wrong and nothing about it looks broken.

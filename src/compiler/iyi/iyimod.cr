@@ -77,7 +77,14 @@ module Iyi::IyiMod
   # the artifact's own path a body's `@caller.first.filename` named
   # `mods/lib/page.iyimod`, and `Eiy.render("../views/greet.eiy")` read its
   # template from beside the artifact (#140).
-  FORMAT_VERSION = 59_u32
+  # v60: an artifact records what each of its functions reaches of module
+  # state (`Section::Reaches`), because a consumer has the declarations
+  # and not the bodies, and a `g.spawn` whose block called a v59 module's
+  # `note`, which appended to the module's `SEEN : Array(Int32)`, was
+  # placed in parallel and lost appends: 19,870 to 19,952 of 20,000 at 4
+  # workers on Linux. A v59 artifact is refused and rebuilt rather than
+  # read as reaching nothing.
+  FORMAT_VERSION = 60_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -230,7 +237,32 @@ module Iyi::IyiMod
     # code depends on it. 66, beside `SourcePositions`, for `Layouts`'
     # reason.
     Spawns = 66
+
+    # iyi: the module state each of the module's functions may reach,
+    # through every call it makes, that is not safe for every thread
+    # (SPEC.md III.4.15): a constant or a class variable whose type is not
+    # Share and whose `@[SafeReach]` does not hold for every program that
+    # imports the module. A consumer has the declarations and not the
+    # bodies, and its walk from a spawn's block stopped at them: a call to
+    # a function that appended to an unguarded `Array` read as reaching
+    # nothing, and the spawn ran in parallel. Its presence is the promise:
+    # a function absent from a present section reaches nothing unsafe, and
+    # an absent section is a module whose functions reach what nobody
+    # knows, whose spawns stay in their units. In the interface hash,
+    # since a dependent's placement is decided by it. 67, beside `Spawns`.
+    Reaches = 67
   end
+
+  # One piece of module state a function of the module may reach (SPEC.md
+  # III.4.15, `Section::Reaches`). *function* is the function as a
+  # consumer's typed call names it (`ShareReach.reach_key`), *label* and
+  # *type* the state as the source spells it and its type, *kind* "the
+  # constant" or "the class variable", *use* the expression it is used in,
+  # *path* the functions between *function* and that expression, *why* the
+  # reason it is not safe for every thread, and *module_name* the module
+  # that declares it.
+  record ReachRecord, function : String, label : String, type : String, kind : String,
+    use : String, path : Array(String), why : String, module_name : String
 
   # One `g.spawn` written in a module, and where the build placed it
   # (SPEC.md III.4.16). *owner* is the def it is written in, as a reader
@@ -600,6 +632,10 @@ module Iyi::IyiMod
     # brings the types an exported signature names into existence, so changing
     # one changes what those signatures mean.
     write_strings interface, artifact.requires
+    # And what each function reaches of module state: a dependent's spawn
+    # is placed by it, so a change to it is a change to what a dependent
+    # compiled, and the dependent is built again (SPEC.md III.4.15).
+    artifact.reaches.try { |reaches| interface.write encode_reaches(reaches) }
 
     implementation = IO::Memory.new
     implementation.write encode_mono_bodies(artifact)
@@ -1549,6 +1585,11 @@ module Iyi::IyiMod
     # `Section::Spawns`.
     property spawns = [] of SpawnRecord
 
+    # What each function reaches of module state (SPEC.md III.4.15). Nil
+    # when the section is absent, which a consumer reads as "not known".
+    # See `Section::Reaches`.
+    property reaches : Array(ReachRecord)? = nil
+
     def initialize(@module_name, @source_path, @compiler_version, @target_triple,
                    @flags, @imports, @usings = [] of String, @exports = Exports.empty,
                    @object_code = [] of ObjectUnit, @has_initialiser = false,
@@ -1607,6 +1648,12 @@ module Iyi::IyiMod
     # module, which compares its own verdicts with these.
     unless artifact.spawns.empty?
       sections << {Section::Spawns, encode_spawns(artifact.spawns)}
+    end
+
+    # Whenever it is known, empty or not: its presence is what says the
+    # module's functions reach nothing else.
+    if reaches = artifact.reaches
+      sections << {Section::Reaches, encode_reaches(reaches)}
     end
 
     # Between the declarations and the machine code, which is where it belongs:
@@ -1900,6 +1947,7 @@ module Iyi::IyiMod
       layouts = [] of {String, TypeLayout}
       inputs = [] of String
       spawns = [] of SpawnRecord
+      reaches = nil
       positions = {bodies: {} of String => Array(SourcePosition), initialiser: [] of SourcePosition}
 
       table.each do |(kind, length, sum)|
@@ -1941,6 +1989,7 @@ module Iyi::IyiMod
         when Section::SymbolLiterals  then symbol_literals = decode_strings(payload)
         when Section::SourcePositions then positions = decode_source_positions(payload)
         when Section::Spawns          then spawns = decode_spawns(payload)
+        when Section::Reaches         then reaches = decode_reaches(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -1961,6 +2010,7 @@ module Iyi::IyiMod
         declarations_only: header[:declarations_only], package_name: header[:package_name],
         body_positions: positions[:bodies], initialiser_positions: positions[:initialiser])
       artifact.spawns = spawns
+      artifact.reaches = reaches
       artifact
     end
   rescue ex : Error
@@ -2072,6 +2122,26 @@ module Iyi::IyiMod
         verdict = record.parallel ? "parallel" : "in its unit: #{record.reason}"
         io.puts "  #{where} #{record.line}:#{record.column} #{verdict}#{record.asked ? " (asked)" : ""}"
       end
+    end
+
+    # Said either way, since an absent section and an empty one mean
+    # opposite things to a consumer (`Section::Reaches`).
+    if reaches = artifact.reaches
+      if reaches.empty?
+        io.puts "reaches       (nothing unsafe)"
+      else
+        io.puts "reaches"
+        reaches.each do |record|
+          if record.kind.empty?
+            io.puts "  #{record.function} calls into #{record.module_name}, whose artifact does not record what it reaches"
+            next
+          end
+          through = (record.path + [record.use]).map { |step| "`#{step}`" }.join(" → ")
+          io.puts "  #{record.function} reaches #{record.kind} `#{record.label} : #{record.type}` (module `#{record.module_name}`) through #{through}"
+        end
+      end
+    else
+      io.puts "reaches       (not recorded)"
     end
 
     macros = artifact.macro_bodies
@@ -3609,6 +3679,37 @@ module Iyi::IyiMod
       bits = io.read_bytes(UInt8, FORMAT)
       SpawnRecord.new(owner, digest, line, column, bits & 1 != 0, bits & 2 != 0, read_string(io))
     end
+  end
+
+  private def self.encode_reaches(records : Array(ReachRecord)) : Bytes
+    io = IO::Memory.new
+    io.write_bytes records.size.to_u32, FORMAT
+    records.each do |record|
+      write_string io, record.function
+      write_string io, record.label
+      write_string io, record.type
+      write_string io, record.kind
+      write_string io, record.use
+      write_strings io, record.path
+      write_string io, record.why
+      write_string io, record.module_name
+    end
+    io.to_slice
+  end
+
+  private def self.decode_reaches(payload : Bytes) : Array(ReachRecord)
+    io = IO::Memory.new(payload)
+    records = Array(ReachRecord).new(io.read_bytes(UInt32, FORMAT)) do
+      function = read_string(io)
+      label = read_string(io)
+      type = read_string(io)
+      kind = read_string(io)
+      use = read_string(io)
+      path = read_strings(io)
+      why = read_string(io)
+      ReachRecord.new(function, label, type, kind, use, path, why, read_string(io))
+    end
+    records
   end
 
   private def self.decode_mono_bodies(payload : Bytes) : Hash(String, String)

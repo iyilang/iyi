@@ -1022,6 +1022,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # records the far end's hashes whichever way the far end arrived (IV.3).
     @program.iyi_artifact_hashes[artifact.module_name] = artifact.hashes
 
+    # And what its functions reach of module state, which the walk from a
+    # spawn's block reads where their bodies are not here (SPEC.md
+    # III.4.15, `ShareReach#remote_of`).
+    @program.iyi_record_artifact_reaches(artifact_path, artifact)
+
     # With the places the travelling bodies and the initialiser were written,
     # so their nodes are located in the module's source and not in this
     # rendering of it (`IyiMod::SourcePosition`): a macro's

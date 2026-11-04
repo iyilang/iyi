@@ -239,11 +239,21 @@ module Iyi
 
     def run : Nil
       check_unsafe_places
+      robust = @program.iyi_reach_robust
       @program.iyi_reach_claims.each do |claim|
-        next if claim.unsafe?
+        # An `UnsafeReach` is the author's word, and holds wherever the
+        # module is imported as it does here.
+        if claim.unsafe?
+          robust << claim.state.object_id
+          next
+        end
         type = claim.type?
+        next if type.nil?
         # (a), by what the type declares: nothing to walk.
-        next if type.nil? || share?(type)
+        if share?(type)
+          robust << claim.state.object_id
+          next
+        end
         @tracked[claim.state.object_id] = claim
       end
       return if @tracked.empty?
@@ -255,15 +265,58 @@ module Iyi
       compute_written
       @program.iyi_reach_claims.each do |claim|
         next unless @tracked.has_key?(claim.state.object_id)
-        next unless refusal = refusal_of(claim)
+        unless refusal = refusal_of(claim)
+          robust << claim.state.object_id if robust?(claim)
+          next
+        end
         # (a), structurally: a value nothing writes once it is made. Read
         # only for a claim the walk would refuse, since it expands every
         # macro of every def of the type and its ancestors: asked of the
         # three claims of a small server it took 55 ms, a third of the
         # proof (`--stats`, Linux).
-        next if (type = claim.type?) && Iyi::Share.shareable?(type)
+        if (type = claim.type?) && Iyi::Share.shareable?(type)
+          robust << claim.state.object_id
+          next
+        end
         claim.annotation.raise refusal
       end
+    end
+
+    # Whether a proven claim holds in every program that imports the
+    # module declaring the state, which is what a consumer reading the
+    # module's artifact has to know (SPEC.md III.4.4, III.4.15): it has the
+    # module's declarations and not its bodies, and cannot prove the claim
+    # again. (c) and (b) were proven of where this program's code calls the
+    # module's functions from, and another program may call them from a
+    # parallel task. So: every write is a statement of the module's own
+    # initialiser, before any parallel task, which runs first in every
+    # program; nothing keeps a copy; no function answers the state; and a
+    # constant is not exported, so no other module's code names it.
+    private def robust?(claim : ReachClaim) : Bool
+      state = claim.state
+      key = state.object_id
+      at = claim.annotation.location
+      file = at.try { |place| (place.expanded_location || place).filename }
+      return false unless file.is_a?(String)
+      if state.is_a?(Const)
+        namespace = state.namespace
+        return false if namespace.is_a?(ModuleType) && namespace.exported_names.try(&.includes?(state.name))
+      end
+      @callables.each do |callable|
+        next if callable.literal?
+        return false if callable.a_def && callable.answerer? && state_out(callable).includes?(key)
+        callable.events.each do |event|
+          next if event.root.kind.slot?
+          next unless states_of(event.root).includes?(key)
+          return false if fired?(event.cause, escapes: true)
+          next unless fired?(event.cause, escapes: false)
+          origin = event.origin
+          return false unless origin && origin.kind.top_level? && origin.index < @first_start
+          written = event.at.try { |place| (place.expanded_location || place).filename }
+          return false unless written == file
+        end
+      end
+      true
     end
 
     # --- where UnsafeReach may be written --------------------------------

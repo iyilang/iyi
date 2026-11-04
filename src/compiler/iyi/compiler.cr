@@ -755,6 +755,14 @@ module Iyi
           package_name: program.iyi_module_packages[module_name]? || "",
         )
 
+        # What each of its functions reaches of module state, for the walk
+        # a consumer's spawn makes into them (SPEC.md III.4.15). Before the
+        # hashes, whose interface it is part of. `IYI_SPAWN_BROKEN=reaches`
+        # leaves it out: the gate's artifact that does not say.
+        unless SPAWN_BROKEN.includes?("reaches")
+          artifact.reaches = program.iyi_share_reach.summarise(filename)
+        end
+
         # Here rather than in `write_iyimods`, so that they are taken from the
         # front end alone: an artifact from a `--no-codegen` build and one from
         # a full build describe the same module and have to hash the same, or a

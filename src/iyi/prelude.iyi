@@ -46,10 +46,12 @@ require "./atomic"
   require "./concurrency"
   # Kernel threads and the stop-the-world over them (GC_DESIGN.md Stage 4).
   require "./thread"
-  # The chaos scheduler (SPEC.md III.4.17), only in a build that asks for
-  # it: `iyi test --chaos` builds with `-Diyi_chaos`.
+  # The chaos scheduler (SPEC.md III.4.17), and its points in `Atomic`'s
+  # verbs, only in a build that asks for them: `iyi test --chaos` builds
+  # with `-Diyi_chaos`.
   {% if flag?(:iyi_chaos) %}
     require "./chaos"
+    require "./chaos_points"
   {% end %}
 {% elsif flag?(:win32) %}
   # Windows on anything but x86-64. The runtime's Windows arm is x86-64

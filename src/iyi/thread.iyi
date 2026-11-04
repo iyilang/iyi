@@ -71,7 +71,9 @@
   # +16  the thread's own stack: its low address, 0 when unknown (darwin)
   # +24  its top: the mapping's end on Linux, `pthread_get_stackaddr_np`'s
   #      on darwin, written by the thread before anything it does allocates
-  # +32  unused
+  # +32  the thread's wait for the runtime lock, written by the thread
+  #      alone: 1 while it spins for the lock, 3 once a stop parked it
+  #      there and until it has tried the lock again (`owe_turn`)
   # +40  where the thread stopped: sp
   # +48  pc
   # +56  the thread's IyiThread object, raw, for the child to find its body
@@ -85,6 +87,7 @@
   IYI_TL_NEXT    =   8_u64
   IYI_TL_LOW     =  16_u64
   IYI_TL_TOP     =  24_u64
+  IYI_TL_LOCKWAIT = 32_u64
   IYI_TL_SP      =  40_u64
   IYI_TL_PC      =  48_u64
   IYI_TL_OBJECT  =  56_u64
@@ -95,12 +98,15 @@
   # The stop's shared words, each on a line of its own on the control
   # page: threads counted in, threads counted out, the release flag, and
   # the count a stopper asleep on one of the first two waits for
-  # (`wait_count`), 0 while none sleeps.
+  # (`wait_count`), 0 while none sleeps, and the threads a stop parked in
+  # the runtime lock's spin that have not tried the lock since
+  # (`await_turns`).
   IYI_TC_SUSPENDED = 0_u64
   IYI_TC_RESUMED   = 64_u64
   IYI_TC_RESUME    = 128_u64
   IYI_TC_PID       = 192_u64
   IYI_TC_SLEEPER   = 256_u64
+  IYI_TC_TURNS     = 320_u64
 
   {% if flag?(:linux) %}
     {% if flag?(:x86_64) %}
@@ -368,10 +374,13 @@
     @@installed : Bool = false
     {% if flag?(:win32) %}
       # How many threads the last stop left running with a request to
-      # park, which is how many it waits for and how many the resume
-      # waits to see leave.
+      # park, which is how many it waits for and how many count
+      # themselves out of the park after the release.
       @@deferred : Int64 = 0_i64
     {% end %}
+    # How many threads the last release let out of their park and the
+    # next stop waits to see leave (`resume_others`).
+    @@owed : Int64 = 0_i64
     # Every thread object started and not yet running, so a body's closure
     # is rooted from `start` until the thread that runs it holds it on its
     # own stack, and no longer (`run`).
@@ -970,6 +979,17 @@
       {% end %}
       started = IyiMark.now_ns
       page = control
+      # The last stop's threads out of their park before its words are
+      # cleared: one still inside reads the release word, and cleared
+      # under it, the release it was given is taken back. On Windows the
+      # raise above covers this wait too.
+      {% if flag?(:win32) %}
+        while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64
+          yield_cpu
+        end
+      {% else %}
+        wait_count(page + IYI_TC_RESUMED, @@owed.to_u64)
+      {% end %}
       word(page + IYI_TC_SUSPENDED).value.set(0_u64)
       word(page + IYI_TC_RESUMED).value.set(0_u64)
       word(page + IYI_TC_RESUME).value.set(0_u64)
@@ -1009,6 +1029,19 @@
       others
     end
 
+    # The release, and no wait for the released to leave their park: the
+    # next stop waits for that before it clears the words they read
+    # (`stop_others`), and until then each runs as soon as it has a core.
+    # Waited for here, the collection lasted until the last of them had a
+    # processor again. On a ten-core M2 Pro (macOS 26.6), pool workers
+    # stopped while they ran came back late at every stop, and the
+    # release waited 3.5 ms a collection for them (eight workers beside
+    # two allocating tasks, 23 collections, 81 ms of 92 ms of pauses);
+    # and on Windows 11, 12 logical processors, a thread parked inside
+    # the allocator and then held off its processor by another program
+    # kept each collection 403 to 410 ms past its stop, 25 to 28 now
+    # (bench/thread_exercise.sh, step 4e, the mark of 2,000,000 links
+    # among it).
     def self.resume_others(others : Int64) : Nil
       return if others == 0_i64
       page = control
@@ -1016,16 +1049,12 @@
       {% if flag?(:win32) %}
         # A thread that parked itself is not suspended, and `ResumeThread`
         # on a suspend count of zero is nothing: the flag above releases
-        # the one and this releases the other. The parked ones are waited
-        # for, because the next stop clears the flag they are watching.
+        # the one and this releases the other. Only the parked ones count
+        # themselves out.
         resume_suspended(@@line)
-        while word(page + IYI_TC_RESUMED).value.get < @@deferred.to_u64
-          yield_cpu
-        end
+        @@owed = @@deferred
         lower_stopper
       {% else %}
-        page = control
-        word(page + IYI_TC_RESUME).value.set(1_u64)
         {% if flag?(:linux) %}
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (page + IYI_TC_RESUME).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
         {% else %}
@@ -1037,19 +1066,19 @@
           LibC.os_sync_wake_by_address_all(Pointer(Void).new(page + IYI_TC_RESUME), 8_u64, 0_u32)
           LibC.error_location.value = errno
         {% end %}
-        wait_count(page + IYI_TC_RESUMED, others.to_u64)
+        @@owed = others
       {% end %}
     end
 
-    # The stopper's wait for its threads to count in, and after the
-    # release for them to count out: a spin of `STOP_SPINS` pause hints,
-    # then a sleep on the count's own word, which the thread that brings
-    # it to `target` wakes (`count_in`). The stopper says what it waits
-    # for on `IYI_TC_SLEEPER` before it looks at the count a last time,
-    # and a thread counts itself before it looks there, so either the
-    # stopper sees the last count and does not sleep, or the last thread
-    # sees the stopper and wakes it; the kernel sleeps it only while the
-    # word still holds the count it saw.
+    # The stopper's wait for its threads to count in, and at the next
+    # stop's start for the last release's to have counted out: a spin of
+    # `STOP_SPINS` pause hints, then a sleep on the count's own word,
+    # which the thread that brings it to `target` wakes (`count_in`). The
+    # stopper says what it waits for on `IYI_TC_SLEEPER` before it looks
+    # at the count a last time, and a thread counts itself before it
+    # looks there, so either the stopper sees the last count and does not
+    # sleep, or the last thread sees the stopper and wakes it; the kernel
+    # sleeps it only while the word still holds the count it saw.
     #
     # This was a loop around `yield_cpu`, which is the syscall on Linux
     # and the ARM hint on darwin. The hint gives nothing away, so a stop
@@ -1110,6 +1139,69 @@
           LibC.error_location.value = errno
         {% end %}
       {% end %}
+    end
+
+    # ── The turn a released lock waiter is owed ─────────────────────────
+    #
+    # The release no longer waits for anybody, and a thread collecting in
+    # a loop let the runtime lock go and took it back before the threads
+    # it had released were awake: the ones waiting for that lock to start
+    # or end a thread were stopped again before they had tried it once.
+    # On a ten-core M2 Pro (macOS 26.6), threads started sixteen at a
+    # time beside such a thread hung past 60 s (bench/thread_exercise.sh,
+    # step 7d). A wait before the lock for every released thread to leave
+    # its park was not enough - a thread out of its park has not yet
+    # reached the lock, and the collector, spinning on the count, got
+    # there first - and the same program made 320 threads in 10 to 17 s
+    # against 3,200 in about 3 s with the wait in the release.
+    #
+    # So a thread a stop parks in the lock's spin owes a try of the lock,
+    # counted on the control page before it counts itself in, and pays
+    # when it next takes the lock or finds it held. The collection waits
+    # for the debts off the lock, before it takes it (`await_turns`): the
+    # threads it released are then at the lock, competing for it, as they
+    # were when the release waited. Only those threads owe: one blocked in
+    # the kernel or computing is not starved by a stop, and waiting for
+    # its turn would hold every collection for nothing.
+
+    # A park inside the lock's spin. The word is the thread's own, and
+    # written in its handler: `pay_turn` swaps it, so a stop landing in
+    # the middle of a payment neither loses a debt nor counts one twice.
+    def self.owe_turn(line : UInt64, page : UInt64) : Nil
+      return if line == 0 || IyiHeap.read64(line + IYI_TL_LOCKWAIT) != 1_u64
+      IyiHeap.write64(line + IYI_TL_LOCKWAIT, 3_u64)
+      word(page + IYI_TC_TURNS).value.add(1_u64)
+    end
+
+    # A try of the lock after the park: the thread still spinning
+    # (`waiting` 1) or holding it (0).
+    def self.pay_turn(line : UInt64, waiting : UInt64) : Nil
+      if word(line + IYI_TL_LOCKWAIT).value.swap(waiting) == 3_u64
+        word(control + IYI_TC_TURNS).value.sub(1_u64)
+      end
+    end
+
+    # The lock taken after a spin (`IyiRuntimeLock.lock`).
+    def self.lock_taken : Nil
+      line = @@line
+      pay_turn(line, 0_u64) if line != 0
+    end
+
+    # How long a collection waits for the debts before it takes the lock
+    # anyway: a thread owing a turn and held off every core pays nothing
+    # until it has one, and the collection is not its to wait out.
+    TURN_WAIT_NS = 2_000_000_u64
+
+    # Before a collection takes the runtime lock to stop the program.
+    def self.await_turns : Nil
+      page = @@control
+      return if page == 0
+      turns = word(page + IYI_TC_TURNS)
+      return if turns.value.get == 0_u64
+      ends = IyiMark.now_ns + TURN_WAIT_NS
+      while turns.value.get != 0_u64 && IyiMark.now_ns < ends
+        yield_cpu
+      end
     end
 
     # The cores this process may run on: what the marker sizes its
@@ -1247,11 +1339,17 @@
     # plain lock 1.4 to 1.7 on the same machine, and alone a take and
     # release cost the same.
     def self.lock_turn(word : Pointer(Atomic(UInt64)), seen : UInt64, spins : Int64, since : UInt64) : Tuple(Int64, UInt64)
+      if spins != 0
+        line = @@line
+        pay_turn(line, 1_u64) if line != 0 && IyiHeap.read64(line + IYI_TL_LOCKWAIT) == 3_u64
+      end
       counted = spins < 0
       turn = (counted ? 0_i64 &- spins : spins) &+ 1
       released = seen.unsafe_shr(16_u64)
       if turn == 1
         since = released
+        line = @@line
+        IyiHeap.write64(line + IYI_TL_LOCKWAIT, 1_u64) if line != 0
         yield_cpu if (seen & 0xFFFE_u64) != 0_u64
       elsif turn & 127 == 0
         if !counted && released == since
@@ -1261,6 +1359,9 @@
         since = released
         yield_cpu if turn >= YIELD_AFTER
       end
+      # The park after the turn, so the first thing a thread does after
+      # a park here is try the lock (`owe_turn`).
+      park_if_requested
       {counted ? 0_i64 &- turn : turn, since}
     end
 
@@ -1321,7 +1422,7 @@
       end
       IyiHeap.write64(line + IYI_TL_SP, sp)
       IyiHeap.write64(line + IYI_TL_PC, pc)
-      park
+      park(line)
     end
 
     # A voluntary stop, from `take`'s exit or the lock's spin: the
@@ -1367,7 +1468,7 @@
       here = uninitialized UInt64
       IyiHeap.write64(line + IYI_TL_SP, pointerof(here).address)
       IyiHeap.write64(line + IYI_TL_PC, 0_u64)
-      park
+      park(line)
     end
 
     # Counted in, held until the stopper lets every parked thread go at
@@ -1394,8 +1495,9 @@
     # wait answers EFAULT at once when the word's page is not resident
     # (an untouched word did, in C on the M2); the loop's read brings the
     # page back and waits again.
-    def self.park : Nil
+    def self.park(line : UInt64) : Nil
       page = control
+      owe_turn(line, page)
       count_in(page + IYI_TC_SUSPENDED)
       {% if flag?(:linux) %}
         while word(page + IYI_TC_RESUME).value.get == 0_u64

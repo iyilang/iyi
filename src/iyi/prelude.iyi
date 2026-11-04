@@ -91,7 +91,6 @@ class IyiRuntimeLock
     since = 0_u64
     until ((seen = word.value.get) & 1_u64) == 0_u64 && ((seen & 0xFFFE_u64) == 0_u64 || spins != 0) && (spins < 0 ? word.value.compare_and_set(seen, seen &- 1_u64)[1] : (IyiAtomic.rmw(:or, pointerof(@@word), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64)
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-        IyiThread.park_if_requested
         spins, since = IyiThread.lock_turn(word, seen, spins, since)
       {% end %}
       {% if flag?(:x86_64) %}
@@ -100,6 +99,7 @@ class IyiRuntimeLock
         asm("yield" :::: "volatile")
       {% end %}
     end
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %} IyiThread.lock_taken if spins != 0 {% end %}
   end
 
   # One try, no wait and no park: for a walk that must not park here.
@@ -7885,6 +7885,9 @@ require "./file"
             IyiThread.register_current
             IyiThread.install_handler
           end
+          # The threads the last stop parked at the runtime lock try it
+          # before this collection takes it (`IyiThread.await_turns`).
+          IyiThread.await_turns
         {% end %}
         IyiRuntimeLock.lock
         if allocated_since < budget || @@collecting
@@ -7930,6 +7933,9 @@ require "./file"
       # trigger's collections leave the sweep to the allocator.
       def self.collect : Nil
         IyiRoots.clear_dead_stack
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+          IyiThread.await_turns
+        {% end %}
         IyiRuntimeLock.lock
         # A collection already running beside the program is finished by
         # its helper; this one waits for it rather than racing it, and
@@ -8339,6 +8345,9 @@ require "./file"
           retries_ns = 0_u64
           longest_retry = 0_u64
           while true
+            # A retry's stop follows its own release: the threads that
+            # release let go from the lock's spin try it first.
+            IyiThread.await_turns
             IyiRuntimeLock.lock
             started = now_ns
             others = IyiThread.stop_others

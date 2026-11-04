@@ -273,13 +273,31 @@ grep -E '^threads:' answers-32.txt | sed 's/^/  /'
 # timeslices, and 48 threads taking it on twelve cores took 30 to 35 times
 # what one thread took for all of their turns (r2_alloc_threads: 64 threads
 # allocating 1.8 to 20 s against 0.2 to 0.4 for twelve). It yields the core
-# every 128th turn now: 1.3 to 1.5 times. And Windows' stop waited for each
-# suspend before asking for the next, so a thread with no core held the
-# stop until the scheduler ran it: collections beside 48 threads computing
-# on twelve cores, half a second after they started, stopped them in 85 to
-# 275 ms each, and in 0 to 13 asked all at once. The stop is now measured
-# with threads that have no core by construction (below). Asserted on
-# Windows, where it was measured; printed everywhere.
+# every 128th turn now: 1.3 to 1.5 times. That ratio was asserted, at 5,
+# with a copy whose lock never gives its core away as the proof, and the
+# bound is retired: what the copy measured was the spin's code shape, not
+# its spinning. On mt/next the copy took 14.7 to 15.4 times one thread on
+# Linux (12 vCPU) and on Windows 11, 12 logical processors (the user's
+# machine), and 37 to 43 with the first turn's yield gone too; with the
+# runtime lock's spin keeping a word for the turn a stop's release owes
+# it (`IyiThread.owe_turn`), the same copy took 2.4 to 3.5 times on both,
+# a copy with no yield and no count of spinners 1.8 to 2.1, one taking
+# the lock by CAS of the whole word 2.0 - and the runtime's lock 2.0. Any
+# one of the four lines that word adds to the lock's path took the first
+# copy from 37 to between 5 and 7, with no stop in the run and an overlap
+# count of holders at 0; holds of 500 and 2,000 increments showed nothing
+# for any copy (1.1 to 2.1). A bound no broken lock can cross holds
+# nothing, so the ratio is printed now and not asserted. What the yield
+# is for is held where it shows: one core, a thread taking the lock in a
+# loop, and threads starting beside it (4c), with its proof copy.
+#
+# And Windows' stop waited for each suspend before asking for the next, so
+# a thread with no core held the stop until the scheduler ran it:
+# collections beside 48 threads computing on twelve cores, half a second
+# after they started, stopped them in 85 to 275 ms each, and in 0 to 13
+# asked all at once. The stop is now measured with threads that have no
+# core by construction (below). Asserted on Windows, where it was
+# measured; printed everywhere.
 cat > crowd.iyi <<'IYI'
 module crowd
 
@@ -409,20 +427,12 @@ counter = Counter.new
 started = IyiMark.now_ns
 hammer(counter, crowd * rounds)
 alone = IyiMark.now_ns - started
-# The best of up to three tries: a machine busy elsewhere is not the lock.
-best = 0_u64
-tries = 0
-while tries < 3 && (tries == 0 || best > 5_u64 * alone)
-  started = IyiMark.now_ns
-  threads = [] of IyiThread
-  crowd.times { threads << IyiThread.start { hammer(counter, rounds); nil } }
-  threads.each { |thread| thread.join }
-  took = IyiMark.now_ns - started
-  best = took if tries == 0 || took < best
-  tries = tries + 1
-end
-fail("lock: #{crowd} threads taking the runtime lock took #{best // 1000000_u64} ms, past 5 times the #{alone // 1000000_u64} ms one thread took for all their turns") if asserted && best > 5_u64 * alone
-puts "lock: #{crowd} threads taking the runtime lock on #{cores} cores, held to 5 times one thread taking it for all their turns"
+started = IyiMark.now_ns
+threads = [] of IyiThread
+crowd.times { threads << IyiThread.start { hammer(counter, rounds); nil } }
+threads.each { |thread| thread.join }
+took = IyiMark.now_ns - started
+puts "lock: #{crowd} threads taking the runtime lock on #{cores} cores took #{(took * 10_u64) // alone // 10_u64}.#{(took * 10_u64) // alone % 10_u64} times what one thread took for all their turns (printed, not bounded)"
 
 # The stop, beside three threads that only compute on one processor, the
 # stopping thread on another: one thread at Windows' highest priority,
@@ -483,32 +493,9 @@ if ! timeout -k 5 300 ./crowd > crowd.txt 2>&1; then
   cat crowd.txt; exit 1
 fi
 sed 's/^/  /' crowd.txt
-# The lock's proof needs cores for the spin to show: on a CI runner's
-# four, sixteen threads spinning without the yield stayed under five times
-# one thread's turns, and the proof did not fire. Measured on twelve;
-# below eight it is said to be unmeasured. The stop's proof holds on any
-# count, its threads placed as above.
-cores="${NUMBER_OF_PROCESSORS:-0}"
+# The stop's proof holds on any core count, its threads placed as above.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    if [ "$cores" -lt 8 ]; then
-      echo "  the lock's failure proof needs 8 cores to show; this machine has $cores: unmeasured here"
-    else
-      step "failure proof: a lock that only spins is caught"
-      mkdir -p spinning/iyi
-      cp "$REPO"/src/iyi/*.iyi spinning/iyi/
-      awk '/^        since = released$/ { after = 1 } after && /^        yield_cpu if turn >= YIELD_AFTER$/ { found = 1; after = 0; next } { print } END { if (!found) exit 3 }' \
-        "$REPO/src/iyi/thread.iyi" > spinning/iyi/thread.iyi || { echo "the lock's yield is not in thread.iyi any more"; exit 1; }
-      if ! IYI_PATH="$WORK/spinning${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -o crowd-spinning > build-spinning.log 2>&1; then
-        cat build-spinning.log; exit 1
-      fi
-      timeout -k 5 300 ./crowd-spinning > spinning.txt 2>&1
-      code=$?
-      if [ "$code" -ne 1 ] || ! grep -q '^FAIL: lock:' spinning.txt; then
-        echo "the lock check did not fire (exit $code):"; tail -3 spinning.txt; exit 1
-      fi
-      printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock:' spinning.txt)"
-    fi
     step "failure proof: a stop that waits for each suspend before the next is caught"
     mkdir -p serial/iyi
     cp "$REPO"/src/iyi/*.iyi serial/iyi/
@@ -859,6 +846,195 @@ IYI
       echo "the panic check did not fire:"; cat unlowered.txt; exit 1
     fi
     printf '  says "%s"\n' "$(grep -m1 '^FAIL: panic:' unlowered.txt)"
+    ;;
+esac
+
+# ── 4e. The release waits for nobody it lets go ──────────────────────────
+# A stop's release waited for every thread it let go to leave its park,
+# so a collection lasted until the last of them had a processor again. A
+# thread asked to stop inside the allocator parks itself where it leaves.
+# Here it shares a processor, at the lowest priority, with another
+# program - one the stop does not stop - computing 400 ms at a time at
+# the highest: it parks in that program's millisecond off, the mark that
+# follows outlasts the millisecond, and the release waited out the next
+# run. The release now leaves the wait to the next stop, which clears the
+# words the parked threads read: on Windows 11, 12 logical processors,
+# 403 to 410 ms past each stop before, 25 to 28 after, the mark among
+# it (3 runs each). On Linux the held thread is at SCHED_IDLE, which the
+# scheduler still runs within ticks: 34 to 47 ms before and 38 to 42
+# after on twelve vCPUs, so it is printed there; darwin has no placing
+# to hold it by. Asserted on Windows; printed everywhere.
+cat > release.iyi <<'IYI'
+module release
+
+import std/process::{Process, ChildProcess}
+
+class Link
+  getter next_link : Link?
+
+  def initialize(@next_link : Link?)
+  end
+end
+
+class Flag
+  getter stop : Atomic(Int64)
+  getter held : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @held = Atomic(Int64).new(0_i64)
+  end
+end
+
+{% if flag?(:win32) %}
+  lib Placing
+    fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+    fun SetThreadPriority(thread : Void*, priority : Int32) : Int32
+    fun Sleep(milliseconds : UInt32) : Nil
+  end
+{% elsif flag?(:linux) && flag?(:x86_64) %}
+  SYS_SCHED_SETAFFINITY  = 203_i64
+  SYS_SCHED_SETSCHEDULER = 144_i64
+  SYS_NANOSLEEP          =  35_i64
+{% elsif flag?(:linux) %}
+  SYS_SCHED_SETAFFINITY  = 122_i64
+  SYS_SCHED_SETSCHEDULER = 119_i64
+  SYS_NANOSLEEP          = 101_i64
+{% end %}
+
+# The running thread held to processor `cpu`, the lowest of its
+# priorities when `low` and otherwise the highest, with no boost:
+# Windows' -2 and 2, Linux's SCHED_IDLE and the default policy. Nothing
+# on darwin.
+def hold(cpu : Int32, low : Bool) : Nil
+  {% if flag?(:win32) %}
+    Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, 1_u64.unsafe_shl(cpu.to_u64))
+    Placing.SetThreadPriority(::LibC.GetCurrentThread, low ? -2_i32 : 2_i32)
+    ::LibC.SetThreadPriorityBoost(::LibC.GetCurrentThread, 1_i32)
+  {% elsif flag?(:linux) %}
+    mask = Pointer(UInt64).malloc(16_u64)
+    mask[cpu // 64] = 1_u64.unsafe_shl((cpu % 64).to_u64)
+    __iyi_conc_syscall3(SYS_SCHED_SETAFFINITY, 0_i64, 128_i64, mask.address.to_i64)
+    if low
+      param = Pointer(Int32).malloc(1_u64)
+      __iyi_conc_syscall3(SYS_SCHED_SETSCHEDULER, 0_i64, 5_i64, param.address.to_i64)
+    end
+  {% end %}
+end
+
+# A millisecond off the processor, for the held thread to run in.
+def nap : Nil
+  {% if flag?(:win32) %}
+    Placing.Sleep(1_u32)
+  {% elsif flag?(:linux) %}
+    spec = Pointer(Int64).malloc(2_u64)
+    spec[1] = 1000000_i64
+    __iyi_conc_syscall3(SYS_NANOSLEEP, spec.address.to_i64, 0_i64, 0_i64)
+  {% end %}
+end
+
+# Inside the allocator nearly all its time, so a stop finds it there and
+# leaves it to park where it leaves (`IyiHeap.leave_barrier`).
+def spin_low(flag : Flag, cpu : Int32) : Nil
+  hold(cpu, true)
+  flag.held.add(1_i64)
+  while flag.stop.get == 0_i64
+    IyiHeap.enter_barrier
+    turns = 0_i64
+    while turns < 100000_i64
+      turns = turns + flag.held.get
+    end
+    IyiHeap.leave_barrier
+  end
+end
+
+def fail(message : String) : Nil
+  print "FAIL: #{message}\n"
+  __iyi_exit(1)
+end
+
+# The other program: on the held thread's processor, above it, 400 ms
+# computing at a time and a millisecond off between, for 60 s at most.
+if Program.args.size == 2 && Program.args[0] == "hog"
+  hold(Program.args[1].to_i, false)
+  quits = IyiMark.now_ns + 60000000000_u64
+  while IyiMark.now_ns < quits
+    ends = IyiMark.now_ns + 400000000_u64
+    while IyiMark.now_ns < ends
+    end
+    nap
+  end
+  exit 0
+end
+
+asserted = false
+{% if flag?(:win32) %}
+  asserted = true
+{% end %}
+if IyiThread.core_count < 2_u64
+  puts "release: one processor here, nothing to hold a thread off"
+  exit 0
+end
+# A chain the stop's mark walks one link at a time, some tens of
+# milliseconds: past the other program's millisecond off, which a timer
+# of Windows' default resolution makes 15.6.
+chain = nil.as(Link?)
+2000000.times { chain = Link.new(chain) }
+hog = Process.spawn(Process.executable || "", ["hog", "1"])
+unless hog.is_a?(ChildProcess)
+  print "FAIL: release: the other program did not start\n"
+  exit 1
+end
+flag = Flag.new
+held = IyiThread.start { spin_low(flag, 1) }
+while flag.held.get < 1_i64
+  IyiThread.yield_cpu
+end
+hold(0, false)
+stop_ns = IyiThread.stop_ns
+pause_ns = IyiMark.pause_total_ns
+stops = IyiThread.stops
+5.times { IyiMark.collect }
+count = IyiThread.stops - stops
+after = ((IyiMark.pause_total_ns - pause_ns) - (IyiThread.stop_ns - stop_ns)) // count
+flag.stop.set(1_i64)
+hog.kill
+hog.wait
+held.join
+links = 0
+link = chain
+while link.is_a?(Link)
+  links = links + 1
+  link = link.next_link
+end
+fail("release: the chain kept #{links} links of 2000000") if links != 2000000
+fail("release: #{count} collections beside a thread held off its processor went on #{after // 1000000_u64} ms each past their stops, past 200") if asserted && after > 200000000_u64
+puts "release: #{count} collections beside a thread held off its processor, #{after // 1000_u64} us each past their stops (the mark of 2000000 links among it), held to 200 ms"
+IYI
+step "a collection's release, beside a thread held off its processor"
+if ! "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
+  cat build-release.log; exit 1
+fi
+if ! timeout -k 5 120 ./release > release.txt 2>&1; then
+  cat release.txt; exit 1
+fi
+sed 's/^/  /' release.txt
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "failure proof: a release that waits for the threads it let go is caught"
+    mkdir -p waiting/iyi
+    cp "$REPO"/src/iyi/*.iyi waiting/iyi/
+    awk '{ print } /^        @@owed = @@deferred$/ { print "        while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64"; print "          yield_cpu"; print "        end"; found = 1 } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > waiting/iyi/thread.iyi || { echo "the release is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
+      cat build-waiting.log; exit 1
+    fi
+    timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release:' waiting.txt; then
+      echo "the release check did not fire (exit $code):"; tail -3 waiting.txt; exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: release:' waiting.txt)"
     ;;
 esac
 
@@ -2165,6 +2341,7 @@ IYI
     if [ $((killed + trapped + aborted)) -eq 0 ]; then
       echo "five runs with the line linked before the thread's first touch: none killed, trapped or aborted"; exit 1
     fi
+
     ;;
 esac
 
@@ -2264,7 +2441,12 @@ esac
 # fiber's, none of 26.
 # A stop lands on one of two instructions in a task's life, so a run's
 # death is luck; each task asks the scan's own question of its own top
-# as well, which the old bound answers wrongly every time.
+# as well, which the old bound answers wrongly every time. It asks under
+# the runtime lock, as the stop does: the fiber list changes under that
+# lock, and with the pool's workers starting tasks beside it the walk
+# unlocked read a list mid-change. On the M2, on mt/next at 341a034b3,
+# the unlocked check failed 18 of 20 runs of 5 s, with and without the
+# turn-counter release; under the lock, none of 6.
 case "$(uname -s)" in
   Linux | Darwin)
     step "tasks begin on fresh stacks beside a thread collecting in a loop, and each task's top is its own stack's: three runs of 5 s"
@@ -2291,7 +2473,10 @@ end
 # the scan the way the stop asks it.
 def first_run : Int32
   top = IyiScheduler.current_stack_top
-  raise "a task's stack top is no task's to the stop's scan" if IyiScheduler.fiber_top_holding(top) != top
+  IyiRuntimeLock.lock
+  held = IyiScheduler.fiber_top_holding(top)
+  IyiRuntimeLock.unlock
+  raise "a task's stack top is no task's to the stop's scan" if held != top
   0
 end
 
@@ -2501,6 +2686,33 @@ IYI
       echo "with the wake taken out, a run exited $code rather than hanging:"; tail -3 unwoken.txt; exit 1
     fi
     echo "  the run hung until the 30 s timeout (exit 124)"
+
+    # The same storm holds the collection's wait for the turns the last
+    # stop's lock waiters are owed (`IyiThread.await_turns`): the release
+    # waits for nobody, and without that wait the thread collecting in a
+    # loop takes the runtime lock back before the threads it released
+    # from the lock's spin have tried it, and they never get it. The copy
+    # returns from the wait at once. On Linux (12 vCPU) it hung 5 runs of
+    # 5 past 30 s, where the runtime made its 3,200 threads in 1.3 to
+    # 1.4 s. darwin's spinners give their core away (7i), and there the
+    # same copy made its threads in 1.6 to 1.7 s, 3 runs of 3 on the M2,
+    # so the proof is Linux's.
+    if [ "$(uname -s)" = Linux ]; then
+      step "failure proof: no wait for the released lock waiters' turns, and a run hangs"
+      mkdir -p unowed/iyi
+      cp "$REPO"/src/iyi/*.iyi unowed/iyi/
+      awk '/^      return if turns\.value\.get == 0_u64$/ { print "      return"; found = 1; next } { print } END { if (!found) exit 3 }' \
+        "$REPO/src/iyi/thread.iyi" > unowed/iyi/thread.iyi || { echo "the wait for the turns is not in thread.iyi any more"; exit 1; }
+      if ! IYI_PATH="$WORK/unowed${PSEP}$REPO/src" "$IYI" build asleep.iyi -o unowed-run > build-unowed.log 2>&1; then
+        cat build-unowed.log; exit 1
+      fi
+      ( timeout -k 5 30 ./unowed-run 200 10 > unowed.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      if [ "$code" -ne 124 ]; then
+        echo "with the wait for the turns taken out, a run exited $code rather than hanging:"; tail -3 unowed.txt; exit 1
+      fi
+      echo "  the run hung until the 30 s timeout (exit 124)"
+    fi
     ;;
 esac
 

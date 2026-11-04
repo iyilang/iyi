@@ -91,7 +91,7 @@ try {
 $arch = $env:PROCESSOR_ARCHITEW6432
 if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
 if ($arch -eq 'x86') {
-    Die "no release for 32-bit Windows: releases ship windows-x86_64, see README.md (Getting it) to build from source"
+    Die "no release for 32-bit Windows: releases ship windows-x86_64, see INSTALL.md (From source) to build from source"
 }
 if ($arch -eq 'ARM64') {
     Say "note: this is an arm64 Windows and the release is x86_64; it runs under the system's x64 emulation"

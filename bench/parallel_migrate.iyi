@@ -234,7 +234,7 @@ import std/socket::{IyiSocket, SocketError}
       stops = IyiThread.stops
       group do |g|
         tasks.times do |t|
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             kept = build(3000, t.to_i64)
             rounds.times do |r|
               churn(4000)
@@ -279,7 +279,7 @@ import std/socket::{IyiSocket, SocketError}
             fail("sockets: accept answered #{client}") unless client.is_a?(IyiSocket)
             fd = client.fd
             family = client.family
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               socket = IyiSocket.new(fd, family)
               kept = build(2000, c.to_i64 + 100_i64)
               answers = Channel(Int32).new(rounds)
@@ -370,7 +370,7 @@ import std/socket::{IyiSocket, SocketError}
           kind = i % kinds
           fd = fds[i // kinds]
           family = families[i // kinds]
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             os = os_thread
             st = IyiScheduler.state.object_id
             go.receive
@@ -394,7 +394,7 @@ import std/socket::{IyiSocket, SocketError}
         end
         sleep(20)
         began = __iyi_monotonic_ns
-        g.spawn_parallel { Boom.new }
+        g.spawn(parallel: true) { Boom.new }
       end
       took = elapsed_ms(began)
       ends.each(&.close)
@@ -469,7 +469,7 @@ import std/socket::{IyiSocket, SocketError}
         units.times do |u|
           fd = fds[u]
           family = families[u]
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             socket = IyiSocket.new(fd, family)
             reader_on = 0_u64
             group do |inner|
@@ -493,9 +493,9 @@ import std/socket::{IyiSocket, SocketError}
         {% if flag?(:parallel_closes_home) %}
           # The main thread's own task: its block captures only `Share`
           # values, so a plain spawn would run on the pool (SPEC.md III.4.15).
-          g.spawn_serial { lent_read(lent, lent_reader, waiting, woken) }
+          g.spawn(serial: true) { lent_read(lent, lent_reader, waiting, woken) }
         {% else %}
-          g.spawn_parallel { lent_read(lent, lent_reader, waiting, woken) }
+          g.spawn(parallel: true) { lent_read(lent, lent_reader, waiting, woken) }
         {% end %}
         while waiting.count < (units + 1).to_i64
           sleep(1)
@@ -568,7 +568,7 @@ import std/socket::{IyiSocket, SocketError}
       moves = Tally.new
       group do |g|
         tasks.times do |t|
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             rounds.times do |r|
               os = os_thread
               st = IyiScheduler.state.object_id
@@ -665,7 +665,7 @@ import std/socket::{IyiSocket, SocketError}
       preempts = IyiWorkers.preempts
       group do |g|
         tasks.times do |task|
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             rounds.times do |r|
               answer = line_loop(30_i64 * per_ms, (task * rounds + r + 1).to_u64)
               moved.add(1_i64) if answer[0]
@@ -708,7 +708,7 @@ import std/socket::{IyiSocket, SocketError}
     began = 0_i64
     group do |g|
       (workers - 1).times do
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           holding.add(1_i64)
           while arrived.count < tasks.to_i64
             IyiThread.spin_pause
@@ -720,7 +720,7 @@ import std/socket::{IyiSocket, SocketError}
         sleep(1)
       end
       tasks.times do |i|
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           arrived.add(1_i64)
           gate.receive
           t = __iyi_monotonic_ns
@@ -736,7 +736,7 @@ import std/socket::{IyiSocket, SocketError}
       sleep(5)
       began = __iyi_monotonic_ns
       if from_worker
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           tasks.times { gate.send(1) }
           0
         end
@@ -797,12 +797,12 @@ import std/socket::{IyiSocket, SocketError}
         arrived = Tally.new
         sleeper = nil.as(IyiTask(Int64)?)
         group do |g|
-          sleeper = g.spawn_parallel do
+          sleeper = g.spawn(parallel: true) do
             arrived.add(1_i64)
             sent = gate.receive
             sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
           end
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             while arrived.count < 1_i64
               sleep(1)
             end
@@ -845,19 +845,19 @@ import std/socket::{IyiSocket, SocketError}
         arrived = Tally.new
         sleeper = nil.as(IyiTask(Int64)?)
         group do |g|
-          sleeper = g.spawn_parallel do
+          sleeper = g.spawn(parallel: true) do
             arrived.add(1_i64)
             sent = gate.receive
             sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
           end
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             20_000.times do
               v = ping.receive
               pong.send(v.is_a?(Int32) ? v : 0)
             end
             0
           end
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             while arrived.count < 1_i64
               sleep(1)
             end
@@ -972,11 +972,11 @@ import std/socket::{IyiSocket, SocketError}
     marks = Held.new
     sent_at = 0_i64
     group do |g|
-      g.spawn_parallel do
+      g.spawn(parallel: true) do
         group do |inner|
           # Onto this worker's own queue, which it takes from next once the
           # read below parks; a steal may take it first.
-          inner.spawn_parallel do
+          inner.spawn(parallel: true) do
             if IyiScheduler.state.object_id == marks.reader
               marks.note_holding(1_i64)
               hold_np(HELD_NS)
@@ -1049,7 +1049,7 @@ import std/socket::{IyiSocket, SocketError}
     watched("join", watch) do
       answer = 0_i64
       group do |g|
-        task = g.spawn_parallel do
+        task = g.spawn(parallel: true) do
           started = __iyi_monotonic_ns
           child_at = -1_i64
           group do |inner|

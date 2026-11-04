@@ -33,11 +33,15 @@ module Iyi
     # iyi: `--explain-spawn` (SPEC.md III.4.15): a note for each `g.spawn`,
     # saying whether it runs in parallel and, when it stays in its
     # spawner's unit, what kept it there - the program's own spawns, or
-    # with `--explain-spawn=all` std's and the prelude's too. A note is
-    # not a warning: nothing is detected, so `--error-on-warnings` does not
-    # count one, and a build that asked for none prints none.
+    # with `--explain-spawn-std` std's and the prelude's too. `Fallback`,
+    # `iyi check`'s level when nothing else is asked for (III.4.16): a note
+    # only for a spawn the compiler kept in its unit, in a file under the
+    # project's root. A note is not a warning: nothing is detected, so
+    # `--error-on-warnings` does not count one, and a build that asked for
+    # none prints none.
     enum ExplainSpawn
       None
+      Fallback
       Program
       All
     end

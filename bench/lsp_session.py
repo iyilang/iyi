@@ -2583,6 +2583,38 @@ def main():
          param_hint["position"] == {"line": 6, "character": 14},
          f"{len(hints)} hint(s): {[h['label'] for h in hints]}")
 
+    # 23s. inlayHint after a plain `spawn` (SPEC.md III.4.16): `parallel`
+    #      where the compiler placed it on the pool, `in its unit: ` and
+    #      the first clause of the reason where it kept it in its unit,
+    #      the whole reason as the tooltip, and nothing after a spawn that
+    #      spelled its placement.
+    spawns_text = ("module spawns\n"
+                   "\n"
+                   "done = Atomic(Int32).new(0)\n"
+                   "log = [] of Int32\n"
+                   "group do |g|\n"
+                   "  g.spawn { done.add(1) }\n"
+                   "  g.spawn { log << 1; 0 }\n"
+                   "  g.spawn(serial: true) { done.add(1) }\n"
+                   "end\n")
+    spawns_uri = opened(c, work, "spawns.iyi", spawns_text)
+    reply = c.send("textDocument/inlayHint",
+                   {"textDocument": {"uri": spawns_uri},
+                    "range": {"start": {"line": 0, "character": 0},
+                              "end": {"line": 9, "character": 0}}})
+    hints = reply["result"] or []
+    after_spawn = {line: at(spawns_text, line, "spawn") + len("spawn") for line in (5, 6, 7)}
+    placed = {h["position"]["line"]: h for h in hints
+              if h["position"]["line"] in after_spawn
+              and h["position"]["character"] == after_spawn[h["position"]["line"]]}
+    unit_label = "in its unit: the block captures `log : Array(Int32)`, which is not Share"
+    step("23s", "inlayHint says where each plain spawn runs, and why one stays in its unit",
+         5 in placed and placed[5]["label"] == "parallel" and
+         6 in placed and placed[6]["label"] == unit_label and
+         "Array(Int32)'s field" in placed[6].get("tooltip", "") and
+         7 not in placed,
+         f"{[(line, h['label']) for line, h in sorted(placed.items())]}")
+
     # 24. typeDefinition: from the local to where String is declared.
     reply = c.send("textDocument/typeDefinition",
                    {"textDocument": {"uri": app_uri},

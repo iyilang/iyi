@@ -3,7 +3,7 @@
 #   ./bin/iyi run samples/iyi/cores.iyi
 #
 # `spawn` is a task on the thread that spawned it, and its block may touch
-# anything; `spawn_parallel` is a task a pool of workers runs on any core,
+# anything; `spawn(parallel: true)` is a task a pool of workers runs on any core,
 # and its block may capture only what is `Share` (III.4.4). std/http's
 # `Server.serve` puts each connection on that pool, so its block is checked
 # the same way. When a block reaches module state through a call, the
@@ -23,10 +23,10 @@ def collatz_steps(n : Int64) : Int64
   steps
 end
 
-# 1. `spawn` and `spawn_parallel`.
+# 1. `spawn` and `spawn(parallel: true)`.
 #
 # The tasks `spawn` starts share their spawner's thread, so they may append
-# to an `Array` they captured. The tasks `spawn_parallel` starts run on
+# to an `Array` they captured. The tasks `spawn(parallel: true)` starts run on
 # whichever core is free; each answers its own value, and a task's answer
 # need not be `Share`, because it is handed over once, after the task ends.
 seen = [] of Int64
@@ -44,7 +44,7 @@ longest = 0_i64
 group do |g|
   handles = [] of IyiTask(Int64)
   4.times do |part|
-    handles << g.spawn_parallel do
+    handles << g.spawn(parallel: true) do
       best = 0_i64
       start = part.to_i64 * 25_000 + 1
       (start..start + 24_999).each { |n| best = collatz_steps(n) if collatz_steps(n) > best }
@@ -82,7 +82,7 @@ end
 # 4. A server on every core.
 #
 # `Server.serve` runs each connection on the pool's workers, so its block is
-# checked as `spawn_parallel`'s is. It stops through a channel: closing the
+# checked as `spawn(parallel: true)`'s is. It stops through a channel: closing the
 # listener from inside the block would capture it, and `/stop` may arrive on
 # any worker. `workers: 1` keeps the one-thread server, whose block may
 # capture anything.

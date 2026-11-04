@@ -199,14 +199,14 @@
     # Fibers on a thread that is not the main one: a parked fiber holding
     # the only reference to an object while the thread's main fiber
     # churns, which is the fiber root walk on a thread whose main fiber
-    # has a top of its own. `spawn_serial`, since the fiber must be this
+    # has a top of its own. `spawn(serial: true)`, since the fiber must be this
     # thread's: its block captures only channels, and a plain spawn would
     # run on the pool (SPEC.md III.4.15).
     ready = Channel(Int32).new
     release = Channel(Int32).new
     verdict = Channel(Int32).new
     group do |g|
-      g.spawn_serial do
+      g.spawn(serial: true) do
         kept = Ledger.new(100)
         keep = build_list(100, seed &+ 7000_u64, kept)
         sum = checksum(keep)
@@ -399,7 +399,7 @@
     worker = IyiThread.start do
       group do |g|
         # This thread's own tasks, whose scheduler is what is counted.
-        4.times { g.spawn_serial { sleep(1); 0 } }
+        4.times { g.spawn(serial: true) { sleep(1); 0 } }
       end
       nil
     end

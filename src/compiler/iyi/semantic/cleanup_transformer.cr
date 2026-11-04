@@ -3,10 +3,25 @@ require "../syntax/transformer"
 require "../types"
 
 module Iyi
+  # iyi: the broken copies `bench/spawn_eligible.sh` proves its compiler
+  # checks with (SPEC.md III.4.16), each turning one mechanism off, as
+  # `IYI_RELEASE_IMPORT=0` is `release_cores.sh`'s: `remote` names no
+  # module in a reason, `fallback` gives `iyi check` no note unasked,
+  # `moves` prints no line for a spawn a rebuild moved, and `retired`
+  # answers `spawn_parallel` as any undefined method. Read once; empty in
+  # every other run.
+  SPAWN_BROKEN = (ENV["IYI_SPAWN_BROKEN"]? || "").split(',')
+
   # iyi: a `g.spawn` the cleanup classified (SPEC.md III.4.15): where its
   # name is written, why it stays in its spawner's unit (nil when it runs
-  # in parallel), and whether std or the prelude wrote it.
-  record SpawnSite, location : Location, reason : String?, std : Bool do
+  # in parallel), and whether std or the prelude wrote it. *asked* is a
+  # spawn that spelled its placement, `parallel: true` or `serial: true`
+  # (III.4.16), which no change elsewhere can move. *owner* is the def the
+  # spawn is written in, as a reader names it (`App::Work.crunch`; empty at
+  # a module's top level), and *digest* the block's text, hashed: the
+  # spawn's name in a module's artifact (`IyiMod::SpawnRecord`).
+  record SpawnSite, location : Location, reason : String?, std : Bool,
+    asked : Bool = false, owner : String = "", digest : String = "" do
     def parallel? : Bool
       reason.nil?
     end
@@ -17,25 +32,43 @@ module Iyi
     # one per instantiation of the def the call is in.
     getter iyi_spawn_sites = [] of SpawnSite
 
-    # The `--explain-spawn` notes, once the cleanup has met every spawn:
-    # one per place and verdict, since a def typed for two `T`s classified
-    # its spawn twice, usually alike. The program's own spawns, and std's
-    # and the prelude's too under `--explain-spawn-std`; a path whose
-    # warnings are excluded (`lib` by default) is left out of the first.
+    # The notes on spawns, once the cleanup has met every spawn: one per
+    # place and verdict, since a def typed for two `T`s classified its
+    # spawn twice, usually alike. `--explain-spawn` notes every spawn of
+    # the program's own, and `--explain-spawn-std` std's and the prelude's
+    # too; a path whose warnings are excluded (`lib` by default) is left
+    # out of the first. `iyi check` notes, unasked, each spawn the
+    # compiler kept in its spawner's unit in a module of the program's own
+    # (`ExplainSpawn::Fallback`, SPEC.md III.4.16): the cliff a spawn falls
+    # off when a type it captures stops being Share, said where the author
+    # looks before a build.
     def iyi_note_spawns : Nil
       level = @warnings.explain_spawn
-      return if level.none?
+      return if level.none? || (level.fallback? && SPAWN_BROKEN.includes?("fallback"))
       seen = Set({String, String?}).new
       @iyi_spawn_sites.each do |site|
         location = site.location.expanded_location || site.location
         next if !level.all? && (site.std || @warnings.ignore_warning_due_to_location?(location))
+        next if level.fallback? && (site.asked || site.parallel? || !iyi_own_file?(location.filename))
         next unless seen.add?({location.to_s, site.reason})
         if reason = site.reason
           @warnings.add_note(location, "spawn stays in its spawner's unit: #{reason}")
+        elsif site.asked
+          @warnings.add_note(location, "spawn runs in parallel: `parallel: true` asks for it, and every capture is Share (SPEC.md III.4.16)")
         else
           @warnings.add_note(location, "spawn runs in parallel: every capture is Share, and nothing it reaches is module state that is not (SPEC.md III.4.15)")
         end
       end
+    end
+
+    # Whether *filename* is the program's own: under the project's root -
+    # the entry's directory unless a root was given - and not std's, the
+    # prelude's or a dependency's checkout outside it.
+    private def iyi_own_file?(filename : String | VirtualFile | Nil) : Bool
+      return false unless filename.is_a?(String)
+      root = iyi_project_root || @filename.try { |entry| File.dirname(entry) }
+      return false unless root
+      !Iyi.path_under?(File.expand_path(filename), File.expand_path(root)).nil?
     end
 
     getter(cleanup_transformer : CleanupTransformer) do
@@ -628,6 +661,7 @@ module Iyi
           elsif obj_type && obj_type.extern? && node.name.ends_with?('=')
             check_args_are_not_closure node, "can't set closure as C #{obj_type.type_desc} member"
           end
+          check_spawn_placement(node, target_defs[0])
           check_share_boundary(node, target_defs[0])
           classify_spawn(node, target_defs[0])
           # An eligible spawn now names `spawn_pooled`, whose body is the
@@ -696,7 +730,7 @@ module Iyi
 
     # iyi: a block that crosses a `Share` boundary may capture only `Share`
     # values (SPEC.md III.4.4). Four blocks cross one. `IyiThread.start { }`'s
-    # runs on another thread (III.4.11), and `IyiGroup#spawn_parallel { }`'s
+    # runs on another thread (III.4.11), and `g.spawn(parallel: true) { }`'s
     # may (III.4.13): a parallel task is started by whichever pool worker is
     # free, so it is held to exactly what a thread's block is. A def marked
     # `@[Share]` keeps a block that may run on other threads, several at
@@ -723,7 +757,7 @@ module Iyi
       check_share_elements(node, target_def)
       thread = if target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiThread"
                  THREAD_BOUNDARY
-               elsif target_def.name == "spawn_parallel" && !owner.metaclass? && owner.to_s == "IyiGroup"
+               elsif CleanupTransformer.spawn_placement(node, target_def).try(&.parallel?)
                  PARALLEL_BOUNDARY
                elsif target_def.iyi_share_block?
                  shared_block_boundary(owner, target_def)
@@ -804,7 +838,7 @@ module Iyi
           # The block of the `@[Share]` def this call is in: checked where
           # it was given, and a proc, which no type can say that of.
           next if trusted_share_block?(captured.name)
-          if why = Iyi::Share.reason(type)
+          if why = Iyi::Share.reason(type, @reason_from)
             if thread && !thread.alone.empty?
               captured.raise "#{subject} captures `#{captured.name} : #{type}`, which is not Share: #{why}. Put it behind a lock, a `Mutex(#{type})` (std/mutex), or #{thread.alone} (SPEC.md III.4.4)"
             end
@@ -826,7 +860,7 @@ module Iyi
       if captures_self || ReceiverlessSelfCalls.any?(a_def.body)
         if self_type = @current_def.try(&.owner)
           unless self_type.is_a?(Program) || self_type.metaclass?
-            if why = Iyi::Share.reason(self_type)
+            if why = Iyi::Share.reason(self_type, @reason_from)
               block.raise "#{subject} captures `self : #{self_type}`, which is not Share: #{why}#{owning ? "; " : " "}#{consequence}"
             end
           end
@@ -836,35 +870,139 @@ module Iyi
 
     # iyi: where a `g.spawn { }` runs, decided here, after typing (SPEC.md
     # III.4.15): on the pool, as a parallel task of its own unit, when the
-    # block would pass every check `spawn_parallel`'s block is held to -
-    # its captures, `self`, the constants and class variables it names -
-    # and the module state it reaches through the defs it calls, which a
+    # block would pass every check `spawn(parallel: true)`'s block is held
+    # to - its captures, `self`, the constants and class variables it names
+    # - and the module state it reaches through the defs it calls, which a
     # parallel block is only warned about, holds nothing that is not
     # Share, save state its declaration claims is safe from any thread
     # (`@[SafeReach]`). Such a call is pointed at `IyiGroup#spawn_pooled`,
     # typed for the same `T` beside it; any other stays on `spawn`'s own
     # body, in its spawner's unit, exactly as every spawn ran before.
     # Nothing is refused or warned about: the verdict, and for a serial
-    # one the first check that kept it there, is kept for `--explain-spawn`
-    # (`Program#iyi_spawn_sites`).
+    # one the first check that kept it there, is kept for the notes and
+    # the artifact (`Program#iyi_spawn_sites`). A spawn that spelled its
+    # placement (III.4.16) is kept too, as asked.
     private def classify_spawn(node : Call, target_def : Def) : Nil
-      return unless CleanupTransformer.spawn_def?(target_def)
-      pooled = pooled_spawn(target_def)
-      reason = pooled ? spawn_serial_reason(node) : NO_THREADS
-      node.target_defs = [pooled] if pooled && reason.nil?
+      placement = CleanupTransformer.spawn_placement(node, target_def)
+      return unless placement
       location = node.name_location || node.location
+      case placement
+      in .placed?
+        pooled = pooled_spawn(target_def)
+        reason = pooled ? spawn_serial_reason(node) : NO_THREADS
+        node.target_defs = [pooled] if pooled && reason.nil?
+        asked = false
+      in .parallel?
+        reason = nil
+        asked = true
+      in .serial?
+        reason = ASKED_SERIAL
+        asked = true
+      end
       return unless location
-      @program.iyi_spawn_sites << SpawnSite.new(location, reason, @program.iyi_share_reach.std_at?(location))
+      @program.iyi_spawn_sites << SpawnSite.new(location, reason, @program.iyi_share_reach.std_at?(location),
+        asked, spawn_owner_label, @program.iyi_rewrites_artifacts ? spawn_digest(node) : "")
     end
 
-    NO_THREADS = "a build under -Dgc_none or -Dgc_boehm has no threads (SPEC.md III.4.13)"
+    NO_THREADS   = "a build under -Dgc_none or -Dgc_boehm has no threads (SPEC.md III.4.13)"
+    ASKED_SERIAL = "`serial: true` keeps it there (SPEC.md III.4.16)"
 
-    # Whether *target_def* is `IyiGroup#spawn`, the call the cleanup
-    # classifies.
+    # How a call to `IyiGroup#spawn` places its task (SPEC.md III.4.16):
+    # written plain, the compiler places it; `parallel: true` and
+    # `serial: true` say where. Asked of the call's named arguments, which
+    # the cleanup turns into positional ones only after this.
+    enum SpawnPlacement
+      Placed
+      Parallel
+      Serial
+    end
+
+    # The placement *node* spells, when it calls `IyiGroup#spawn`; nil for
+    # any other call. A call naming both arguments is refused before this
+    # is asked (`check_spawn_placement`).
+    def self.spawn_placement(node : Call, target_def : Def) : SpawnPlacement?
+      owner = target_def.owner
+      return nil unless target_def.name.split(':').first == "spawn" && !owner.metaclass? && owner.to_s == "IyiGroup"
+      named = node.named_args
+      return SpawnPlacement::Placed if named.nil? || named.empty?
+      named.any?(&.name.==("parallel")) ? SpawnPlacement::Parallel : SpawnPlacement::Serial
+    end
+
+    # Whether *target_def* is `IyiGroup#spawn` written plain, the call the
+    # cleanup places.
     def self.spawn_def?(target_def : Def) : Bool
       owner = target_def.owner
       target_def.name == "spawn" && !owner.metaclass? && owner.to_s == "IyiGroup"
     end
+
+    # iyi: `parallel:` and `serial:` take the literal `true` (SPEC.md
+    # III.4.16). Where a task runs is settled when the program compiles, so
+    # a value known only when it runs cannot say; `false` says nothing that
+    # leaving the argument out does not; and a task is placed one way.
+    private def check_spawn_placement(node : Call, target_def : Def) : Nil
+      placement = CleanupTransformer.spawn_placement(node, target_def)
+      return unless placement && !placement.placed?
+      named = node.named_args.not_nil!
+      if named.size > 1
+        node.raise "a spawn is placed one way: `parallel: true` runs it on the pool, and `serial: true` keeps it in its spawner's unit. Write one of them, or neither and let the compiler place it (SPEC.md III.4.16)"
+      end
+      argument = named.first
+      value = argument.value
+      other = argument.name == "parallel" ? "`serial: true` to keep it in its spawner's unit" : "`parallel: true` to run it on the pool"
+      if value.is_a?(BoolLiteral)
+        return if value.value
+        value.raise "`#{argument.name}: false` asks for nothing that leaving it out does not: write `g.spawn { }` and the compiler places the task, or #{other} (SPEC.md III.4.16)"
+      end
+      value.raise "`#{argument.name}:` takes the literal `true`: where a task runs is settled when the program compiles, and `#{value}` is known only when it runs. Write `#{argument.name}: true`, or leave it out and let the compiler place the task (SPEC.md III.4.16)"
+    end
+
+    # The def a spawn is written in, as a reader names it: `App::Work.crunch`
+    # for a module's function, `App::Pool#run` for a method, a top-level
+    # def by its name, and empty at a module's top level.
+    private def spawn_owner_label : String
+      a_def = @current_def
+      return "" unless a_def
+      owner = a_def.owner
+      name = a_def.name.split(':').first
+      if owner.is_a?(Program)
+        name
+      elsif owner.metaclass?
+        "#{owner.instance_type}.#{name}"
+      elsif owner.module?
+        "#{owner}.#{name}"
+      else
+        "#{owner}##{name}"
+      end
+    end
+
+    # The spawn's block as it is written, hashed: what names it in its
+    # module's artifact across builds, where its line moves with every
+    # edit above it. The text between the block's two ends in the file;
+    # empty for a block no file holds, a macro's.
+    private def spawn_digest(node : Call) : String
+      block = node.block
+      return "" unless block
+      start = block.location.try(&.expanded_location) || block.location
+      finish = block.end_location.try(&.expanded_location) || block.end_location
+      return "" unless start && finish
+      filename = start.filename
+      return "" unless filename.is_a?(String) && finish.filename == filename
+      lines = @spawn_source_lines.fetch(filename) do
+        @spawn_source_lines[filename] = File.exists?(filename) ? File.read_lines(filename) : [] of String
+      end
+      return "" if lines.empty?
+      text = String.build do |io|
+        (start.line_number..finish.line_number).each do |number|
+          line = lines[number - 1]? || ""
+          from = number == start.line_number ? start.column_number - 1 : 0
+          to = number == finish.line_number ? finish.column_number : line.size
+          io << line[from.clamp(0, line.size)...to.clamp(0, line.size)] << '\n'
+        end
+      end
+      ::Crystal::Digest::MD5.hexdigest(text)[0, 16]
+    end
+
+    @spawn_source_lines = {} of String => Array(String)
 
     # The same verdict for a typed tree the cleanup has not run on - the
     # language server's, whose inlay hints say where each spawn runs - for
@@ -937,7 +1075,10 @@ module Iyi
     # that refused its block - the capture, the constant, the class
     # variable, the state reached and the path to it - or nil when nothing
     # does and it may run in parallel. The checks are `check_share_boundary`'s
-    # own, run against `SPAWN_BOUNDARY` and caught rather than raised.
+    # own, run against `SPAWN_BOUNDARY` and caught rather than raised; a
+    # type in the chain that another module declares is said with that
+    # module (`@reason_from`, SPEC.md III.4.16), since that is where a
+    # spawn that ran in parallel is moved back from.
     private def spawn_serial_reason(node : Call) : String?
       if forwarded = node.block_arg
         return "the block is a proc, `&#{forwarded}`, and what a proc captured is not written in its type"
@@ -947,6 +1088,21 @@ module Iyi
       fun_literal = block.fun_literal
       return "the block was not typed" unless fun_literal.is_a?(ProcLiteral)
       a_def = fun_literal.def
+      at = node.name_location || node.location
+      saved = @reason_from
+      @reason_from = (at.try(&.expanded_location) || at).try(&.filename).as?(String)
+      begin
+        spawn_serial_reason(node, block, a_def)
+      ensure
+        @reason_from = saved
+      end
+    end
+
+    # The file of the spawn being explained, while it is: a type the reason
+    # names that another module declares is named with that module.
+    @reason_from : String?
+
+    private def spawn_serial_reason(node : Call, block : Block, a_def : Def) : String?
       begin
         check_thread_constants_share(a_def, SPAWN_BOUNDARY)
         check_thread_class_vars_share(a_def, SPAWN_BOUNDARY)
@@ -959,7 +1115,7 @@ module Iyi
       reach.reach(a_def).each do |found|
         named = found.named
         next if named.state.iyi_safe_reach
-        why = Iyi::Share.reason(named.type)
+        why = Iyi::Share.reason(named.type, @reason_from)
         next unless why
         path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
         path << "`#{named.use}`"
@@ -1025,7 +1181,7 @@ module Iyi
       after: "the thread has started")
 
     PARALLEL_BOUNDARY = ShareBoundary.new(
-      subject: "the block spawn_parallel runs on another thread",
+      subject: "the block spawn(parallel: true) runs on another thread",
       local_owner: "a local of the code that spawned the task, so the task and its spawner",
       pair: "the task and the code that spawned it",
       again: "spawns the task again",
@@ -1136,7 +1292,7 @@ module Iyi
       end
     end
 
-    # iyi: a proc passed as the block - `g.spawn_parallel(&work)` - was not
+    # iyi: a proc passed as the block - `g.spawn(parallel: true, &work)` - was not
     # written at the call, so nothing here saw what it captured, and its
     # type cannot say: such a call compiled whatever `work` closed over.
     # Refused at every boundary, owning types' included, with one
@@ -1267,7 +1423,7 @@ module Iyi
       named = NamedConstants.new
       a_def.body.accept named
       named.paths.each do |path, type|
-        if why = Iyi::Share.reason(type)
+        if why = Iyi::Share.reason(type, @reason_from)
           path.raise "#{boundary.subject} names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)#{or_alone(boundary)}"
         end
       end
@@ -1321,7 +1477,7 @@ module Iyi
         end
         type = var.type?
         next unless type
-        if why = Iyi::Share.reason(type)
+        if why = Iyi::Share.reason(type, @reason_from)
           class_var.raise "#{boundary.subject} names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)#{or_alone(boundary)}"
         end
       end

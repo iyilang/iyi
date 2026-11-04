@@ -282,7 +282,7 @@ import std/socket::{IyiSocket, SocketError}
     walk = 1000_i64 * per_ms
     preempts = IyiWorkers.preempts
     group do |g|
-      g.spawn_parallel do
+      g.spawn(parallel: true) do
         if which == "walk"
           started.set(__iyi_monotonic_ns)
           answer.set(long_walk(walk, 5_u64))
@@ -303,7 +303,7 @@ import std/socket::{IyiSocket, SocketError}
       end
       sleep(20)
       asked = __iyi_monotonic_ns
-      g.spawn_parallel do
+      g.spawn(parallel: true) do
         waited.set(elapsed_ms(asked))
         0
       end
@@ -339,7 +339,7 @@ import std/socket::{IyiSocket, SocketError}
     done = Atomic(Int64).new(0_i64)
     preempts = IyiWorkers.preempts
     group do |g|
-      g.spawn_parallel do
+      g.spawn(parallel: true) do
         count = Atomic(Int64).new(0_i64)
         group do |inner|
           inner.spawn do
@@ -359,7 +359,7 @@ import std/socket::{IyiSocket, SocketError}
         end
         0
       end
-      g.spawn_parallel do
+      g.spawn(parallel: true) do
         while done.get == 0_i64
           s = __iyi_monotonic_ns
           sleep(1)
@@ -395,7 +395,7 @@ import std/socket::{IyiSocket, SocketError}
           fail("server: accept answered #{client}") unless client.is_a?(IyiSocket)
           fd = client.fd
           family = client.family
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             socket = IyiSocket.new(fd, family)
             while true
               got = socket.read(64)
@@ -478,7 +478,7 @@ import std/socket::{IyiSocket, SocketError}
           fail("poller: accept answered #{client}") unless client.is_a?(IyiSocket)
           fd = client.fd
           family = client.family
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             socket = IyiSocket.new(fd, family)
             while true
               got = socket.read(64)
@@ -547,10 +547,10 @@ import std/socket::{IyiSocket, SocketError}
     FRESH_ROUNDS.times do |round|
       gave_us = Atomic(Int64).new(-1_i64)
       group do |g|
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           spin_np(FRESH_HOLD_MS * per_ms, 17_u64) == 0_u64 ? 1 : 0
         end
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           start = __iyi_monotonic_ns
           before = IyiWorkers.preempts
           x = 19_u64
@@ -561,7 +561,7 @@ import std/socket::{IyiSocket, SocketError}
           end
           x == 0_u64 ? 1 : 0
         end
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           0
         end
       end
@@ -623,7 +623,7 @@ import std/socket::{IyiSocket, SocketError}
     looked = Atomic(Int64).new(0_i64)
     took = Atomic(Int64).new(0_i64)
     group do |g|
-      g.spawn_parallel do
+      g.spawn(parallel: true) do
         before = IyiWorkers.looks
         t = __iyi_monotonic_ns
         x = spin(500_i64 * per_ms, 11_u64)
@@ -642,7 +642,7 @@ import std/socket::{IyiSocket, SocketError}
     t = __iyi_monotonic_ns
     group do |g|
       2.times do |i|
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           spin(300_i64 * per_ms, 13_u64 + i.to_u64) == 0_u64 ? 1 : 0
         end
       end
@@ -680,7 +680,7 @@ import std/socket::{IyiSocket, SocketError}
 
   def tight : Nil
     group do |g|
-      g.spawn_parallel do
+      g.spawn(parallel: true) do
         values = Array(Int64).new(1_000_000) { |i| i.to_i64 * 3_i64 }
         bytes = Array(UInt8).new(262_144) { |i| ((i * 7 + 3) & 0xFF).to_u8 }
         table = crc_table

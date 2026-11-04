@@ -68,30 +68,30 @@ import std/socket::{IyiSocket, SocketError}
   # The parked tasks and the ending, spawned one way or the other: the
   # block a parallel task runs is checked for what it captures, so it is
   # written out at each spawn rather than passed along as a proc.
-  {% for kind in ["spawn", "spawn_parallel"] %}
-    def ends_{{kind.id}}(g : IyiGroup, mode : String, near : Array(Int32), far : Array(Int32), listening : Int32, never : Channel(Int32)) : Nil
+  {% for kind in [{"spawn", "spawn"}, {"parallel", "spawn(parallel: true)"}] %}
+    def ends_{{kind[0].id}}(g : IyiGroup, mode : String, near : Array(Int32), far : Array(Int32), listening : Int32, never : Channel(Int32)) : Nil
       PAIRS.times do |index|
         a = near[index]
         b = far[index]
-        g.{{kind.id}} { park_read(a) }
-        g.{{kind.id}} { park_read(b) }
+        g.{{kind[1].id}} { park_read(a) }
+        g.{{kind[1].id}} { park_read(b) }
       end
-      g.{{kind.id}} { park_accept(listening) }
+      g.{{kind[1].id}} { park_accept(listening) }
       2.times do
-        g.{{kind.id}} do
+        g.{{kind[1].id}} do
           sleep(60000)
           0
         end
-        g.{{kind.id}} { park_receive(never) }
+        g.{{kind[1].id}} { park_receive(never) }
       end
       case mode
       when "task-panic"
-        g.{{kind.id}} do
+        g.{{kind[1].id}} do
           sleep(LEAD_MS)
           raise "a task's panic, with tasks parked on the poller"
         end
       when "task-exit"
-        g.{{kind.id}} do
+        g.{{kind[1].id}} do
           sleep(LEAD_MS)
           exit(3)
         end
@@ -126,7 +126,7 @@ import std/socket::{IyiSocket, SocketError}
       end
       group do |g|
         if parallel
-          ends_spawn_parallel(g, mode, near, far, listener.fd, never)
+          ends_parallel(g, mode, near, far, listener.fd, never)
         else
           ends_spawn(g, mode, near, far, listener.fd, never)
         end

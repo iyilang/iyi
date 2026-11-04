@@ -132,7 +132,7 @@ module main
 seen = [] of Int32
 work = -> { seen << 1; nil }
 group do |g|
-  g.spawn_parallel(&work)
+  g.spawn(parallel: true, &work)
 end
 puts seen.size
 IYI
@@ -142,7 +142,7 @@ echo "== what the compiler refuses"
 refused "a block capturing an Array" array.iyi "captures \`seen : Array(Int32)\`, which is not Share"
 refused "a captured local assigned after the block was given" after.iyi "is assigned here, after the block was given"
 refused "a SharedProc made from an unchecked proc" new.iyi "private method 'new'"
-refused "a proc forwarded to spawn_parallel" forward.iyi "is given a proc, \`&work\`"
+refused "a proc forwarded to spawn(parallel: true)" forward.iyi "is given a proc, \`&work\`"
 
 echo
 echo "== proving the checks can fail when the module is broken"

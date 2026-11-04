@@ -141,11 +141,11 @@ import std/socket::{IyiSocket, SocketError}
     marks = Marks.new
     sent_at = 0_i64
     group do |g|
-      g.spawn_parallel do
+      g.spawn(parallel: true) do
         group do |inner|
           # Onto this worker's own queue, which it takes from next once the
           # read below parks; a steal may take it first.
-          inner.spawn_parallel do
+          inner.spawn(parallel: true) do
             here = IyiScheduler.state.object_id
             marks.note_computer(here)
             if here == marks.reader
@@ -208,7 +208,7 @@ import std/socket::{IyiSocket, SocketError}
   def boost : Nil
     # The pool starts at the first parallel task.
     group do |g|
-      g.spawn_parallel { 0 }
+      g.spawn(parallel: true) { 0 }
     end
     disabled = 0
     if LibBoost.GetProcessPriorityBoost(::LibC.GetCurrentProcess, pointerof(disabled)) == 0

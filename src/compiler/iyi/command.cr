@@ -806,6 +806,10 @@ class Iyi::Command
     compiler = new_compiler
     compiler.progress_tracker = @progress_tracker
     compiler.no_codegen = no_codegen
+    # iyi: `iyi check` says, unasked, where the compiler kept a spawn of
+    # the program's own in its spawner's unit (SPEC.md III.4.16): a note
+    # per such spawn, which `--explain-spawn` widens to every spawn.
+    compiler.warnings.explain_spawn = Iyi::WarningCollection::ExplainSpawn::Fallback if command == "check"
     link_flags = [] of String
     filenames = [] of String
     has_stdin_filename = false

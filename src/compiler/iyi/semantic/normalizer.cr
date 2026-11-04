@@ -356,9 +356,12 @@ module Iyi
 
     # The statement's own spawn, when the statement is exactly a direct one:
     # `g.spawn { }` bare, or assigned to a variable or an underscore. A
-    # parallel task (`g.spawn_parallel { }`, SPEC.md III.4.13) and one held
-    # in its unit (`g.spawn_serial { }`, III.4.15) are tasks of the group
-    # like any other, and take their slots the same way.
+    # spawn that spells its placement, `g.spawn(parallel: true) { }` or
+    # `g.spawn(serial: true) { }` (SPEC.md III.4.16), is a task of the
+    # group like any other, and takes its slot the same way. So do the two
+    # verbs those replaced, so that a typed group written with one is told
+    # about the verb (`Call#iyi_raise_retired_spawn`) and not about its
+    # tuple.
     private def iyi_direct_spawn(statement : ASTNode, group_name : String) : Call?
       target = statement.is_a?(Assign) ? statement.value : statement
       return nil unless target.is_a?(Call)

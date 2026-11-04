@@ -1203,7 +1203,7 @@ port_watch("port_migrate", 30000) do
     group do |g|
       m_tasks = [] of IyiTask(UInt64)
       2.times do |m_index|
-        m_tasks << g.spawn_parallel do
+        m_tasks << g.spawn(parallel: true) do
           PortGate.arrived.value.add(1_u64)
           m_spun = __iyi_monotonic_ns
           while PortGate.arrived.value.get < 2_u64

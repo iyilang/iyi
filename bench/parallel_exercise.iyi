@@ -151,7 +151,7 @@
     want = workers.to_i64
     group do |g|
       workers.times do
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           arrived.add(1_i64)
           until_ns = __iyi_monotonic_ns + 2_000_000_000_i64
           while arrived.count < want && __iyi_monotonic_ns < until_ns
@@ -171,7 +171,7 @@
     group do |g|
       handles = [] of IyiTask(UInt64)
       tasks.times do |i|
-        handles << g.spawn_parallel { spin(rounds, (i + 1).to_u64) }
+        handles << g.spawn(parallel: true) { spin(rounds, (i + 1).to_u64) }
       end
       handles.each do |handle|
         value = handle.value
@@ -208,7 +208,7 @@
       group do |g|
         handles = [] of IyiTask(Tuple(UInt64, UInt64, UInt64))
         16.times do |i|
-          task = g.spawn_parallel do
+          task = g.spawn(parallel: true) do
             first = thread_here
             arrived.add(1_i64)
             held = __iyi_monotonic_ns
@@ -248,7 +248,7 @@
       group do |g|
         handles = [] of IyiTask(Int64)
         1000.times do |i|
-          task = g.spawn_parallel do
+          task = g.spawn(parallel: true) do
             tally.add(i.to_i64)
             i.to_i64
           end
@@ -277,7 +277,7 @@
       rounds = 2_000_000
       group do |g|
         tasks.times do
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             n = 0
             while n < rounds
               racer.bump
@@ -305,7 +305,7 @@
       expected = Array(Int32).new(producers, 0)
       group do |g|
         producers.times do |p|
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             i = 0
             while i < per
               fan.send({p, i})
@@ -329,7 +329,7 @@
       jobs = Channel(Int64).new
       results = Channel(Int64).new
       group do |g|
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           while true
             job = jobs.receive
             break unless job.is_a?(Int64)
@@ -351,7 +351,7 @@
       tally = Tally.new
       group do |g|
         4.times do
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             while true
               item = work.receive
               break unless item.is_a?(Int64)
@@ -405,7 +405,7 @@
       group do |g|
         handles = [] of IyiTask(Int32)
         8.times do
-          handles << g.spawn_parallel { claim_places(places, served, rounds) }
+          handles << g.spawn(parallel: true) { claim_places(places, served, rounds) }
         end
         handles << g.spawn { claim_places(places, served, rounds) }
         handles.each do |handle|
@@ -423,7 +423,7 @@
       group do |g|
         handles = [] of IyiTask(Int32)
         producers.times do |p|
-          handles << g.spawn_parallel do
+          handles << g.spawn(parallel: true) do
             i = 0
             while i < per
               fan.put_now({p, i})
@@ -462,10 +462,10 @@
       parked = 0
       pinned = 0
       group do |g|
-        sleeper = g.spawn_parallel { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
-        waiter = g.spawn_parallel { never.receive.is_a?(Cancelled) ? 1 : 0 }
+        sleeper = g.spawn(parallel: true) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        waiter = g.spawn(parallel: true) { never.receive.is_a?(Cancelled) ? 1 : 0 }
         local = g.spawn { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           sleep(100)
           Boom.new
         end
@@ -491,12 +491,12 @@
       waited = Tally.new
       go = Channel(Int32).new
       group do |g|
-        g.spawn_parallel do
+        g.spawn(parallel: true) do
           go.receive
           Boom.new
         end
         (IyiWorkers.count * 8).times do
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             waited.add(1_i64) unless sleep(1000).is_a?(Cancelled)
             0
           end
@@ -516,11 +516,11 @@
       fine = 0
       text = ""
       group do |g|
-        bad = g.spawn_parallel do
+        bad = g.spawn(parallel: true) do
           raise "parallel boom" unless thread_here == 0_u64
           1
         end
-        good = g.spawn_parallel { 2 }
+        good = g.spawn(parallel: true) { 2 }
         answer = bad.value
         text = answer.is_a?(Panicked) ? answer.text : "not a panic: #{answer}"
         other = good.value
@@ -547,11 +547,11 @@
       elsewhere = Tally.new
       waited_ms = 0_i64
       group do |g|
-        spawner = g.spawn_parallel do
+        spawner = g.spawn(parallel: true) do
           home = thread_here
           group do |inner|
             64.times do |i|
-              inner.spawn_parallel do
+              inner.spawn(parallel: true) do
                 spin(1_000_000_i64, (i + 7).to_u64)
                 elsewhere.add(1_i64) unless thread_here == home
                 tally.add(1_i64)
@@ -591,7 +591,7 @@
       group do |g|
         handles = [] of IyiTask(Int64)
         8.times do |t|
-          task = g.spawn_parallel do
+          task = g.spawn(parallel: true) do
             head = nil.as(Node?)
             want = 0_i64
             i = 0_i64
@@ -631,8 +631,8 @@
   # The typed group (III.4.9) answers parallel tasks' tuple.
   def typed : Tuple(Int32, String) | Panicked
     group do |g|
-      a = g.spawn_parallel { 6 * 7 }
-      b = g.spawn_parallel { "parallel" }
+      a = g.spawn(parallel: true) { 6 * 7 }
+      b = g.spawn(parallel: true) { "parallel" }
     end!
   end
 
@@ -703,7 +703,7 @@
     started = Tally.new
     never = Channel(Int32).new
     group do |inner|
-      inner.spawn_parallel do
+      inner.spawn(parallel: true) do
         started.add(1_i64)
         ended.add(1_i64) if never.receive.is_a?(Cancelled)
         0
@@ -782,12 +782,12 @@
       a = Channel(Int64).new
       b = Channel(Int64).new
       group do |g|
-        2.times { g.spawn_parallel { select_both(a, b, got) } }
+        2.times { g.spawn(parallel: true) { select_both(a, b, got) } }
         senders = [] of IyiTask(Int32)
         4.times do |k|
           channel = k % 2 == 0 ? a : b
           first = k.to_i64 * per
-          senders << g.spawn_parallel { send_run(channel, first, per) }
+          senders << g.spawn(parallel: true) { send_run(channel, first, per) }
         end
         senders.each do |sender|
           answer = sender.value
@@ -809,7 +809,7 @@
     watched("wakes, cancels", watch) do
       group do |g|
         tasks.times do
-          g.spawn_parallel do
+          g.spawn(parallel: true) do
             round = 0
             while round < rounds
               cancel_as_parked(ended)
@@ -825,7 +825,7 @@
     turns_each = 20000_i64
     turns = Turns.new
     group do |g|
-      parker = g.spawn_parallel { parked_turns(turns, turns_each) }
+      parker = g.spawn(parallel: true) { parked_turns(turns, turns_each) }
       spun_turns(turns, turns_each, watch)
       answer = parker.value
       fail("wakes: the parked side answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0

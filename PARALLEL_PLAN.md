@@ -34,14 +34,17 @@ for its non-`Share` data.
 
 This is Swift 6's isolation model without its annotation load: the domains are
 inferred, not declared. The price of inference is that one capture can flip a
-`spawn` to serial without a word, so the compiler says why on request: the
-capture that kept it serial and why that capture is not `Share`. No new
-warning by default, so `--error-on-warnings` builds keep building.
+`spawn` to serial from a distance, so the compiler says so where the author
+looks (SPEC.md III.4.16): `iyi check` notes each spawn kept in its unit with
+the capture, field and module that kept it there, the language server hints
+it, and a rebuild that moves a library's spawn prints one line naming it. No
+new warning, so `--error-on-warnings` builds keep building.
 
 What changes for an eligible `spawn` is ordering, not memory safety: today a
 child does not run until its spawner parks, and once eligible it may start at
-once on another core. A program that wants the old ordering for one spawn
-says so with an explicit opt-out.
+once on another core. One verb carries both answers: `g.spawn(serial: true)`
+keeps the old ordering for one spawn and `g.spawn(parallel: true)` asks for
+the pool; `spawn_serial` and `spawn_parallel` are gone (III.4.16).
 
 Measured starting point (master decc9f1fb): `spawn` appears at 27 sites in
 src/std, 14 in iyi-db, 18 in iyi-pg and 467 in bench/. Every one is audited

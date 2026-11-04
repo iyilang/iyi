@@ -359,10 +359,10 @@ log_msg("a parked receiver completed a rendezvous send\n")
 log_msg("step 11: FIFO rendezvous\n")
 
 # The senders park in the order spawned, which is what FIFO is checked
-# against: `spawn_serial`, since three blocks capturing only the channel
+# against: `spawn(serial: true)`, since three blocks capturing only the channel
 # would otherwise run on three workers and race to park (SPEC.md III.4.15).
 def spawn_send(g : IyiGroup, fifo : Channel(Int32), n : Int32) : Nil
-  g.spawn_serial do
+  g.spawn(serial: true) do
     fifo.send(n)
     0
   end

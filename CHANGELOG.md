@@ -165,6 +165,38 @@
   filled a slice in between, an 8 MiB budget, once on Windows 11, 12
   logical processors (the user's machine).
 
+- **A size class the program stopped allocating in gives its memory
+  back.** Issue #145's app on twelve workers kept every size class's
+  pages from the endpoints before: after its 11 endpoints one after
+  another it held 617 arenas (thirteen threads' fill arenas in about 47
+  classes, none ever released) and 208 MB resident. The arenas were 195
+  MB of it: 18 MB of chunk tables and 176 MB of chunk pages, against 4.4
+  MB live and 133 MB counted warm idle. Fiber stacks were 1.2 MB and
+  images 6.8 MB. A class no cache has refilled for three collections and
+  at least a second now keeps no warm pages, and its empty arenas are
+  let go by their caches and unmapped. The same run ended with 432
+  arenas and 182 MB, 63 MB of it warm idle.
+
+  Against the branch before it, 2 interleaved rounds, on Windows 11, 12
+  logical processors (the user's machine): peak working set 205 MB
+  against 222; requests a second 613.4 against 615.4 and p99 161.5
+  against 159.8 ms at the geometric mean, app CPU 4.42 against 4.43 ms a
+  request. `bench/release_pages.iyi`, whose handler asks for the same
+  classes every epoch, held there (best of 3, 4.03M against 3.84M a
+  second, peak 100-103 MB against 101-104) and on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine; 1.51M against 1.51M).
+
+  The rest of the gap to goturkiye's 53-129 MB is structural. The epoch
+  allocates up to the budget, 28-52 MB at the floor of 4 MiB for each
+  allocating thread, and the sweep keeps another budget's worth (plus
+  #150's carry-over) warm for the next one; goturkiye under
+  `GODEBUG=gctrace=1` ran a 16-24 MB goal on 7-11 MB live in #145's
+  campaign, Windows 11, 12 logical processors (the user's machine).
+  `bench/sweep_exercise.sh` checks it both ways: a class idle
+  for four short epochs keeps its warm pages, and past a second it keeps
+  none and maps no arena. Each direction has a broken copy that fails,
+  and so does a copy whose cache keeps the arena.
+
 ### Known
 
 - **0.20.0's Windows light-endpoint loss is the load generator sharing
@@ -26248,7 +26280,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,022-line library and nothing else. Every other
+  written against iyi's own 26,098-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -162,6 +162,21 @@ prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \
 prove_fails "cold reopenings not kept warm" refault "refault:" \
   '{ if ($0 ~ /^        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr\(4_u64\) \+ \(reopened_cold - @@reopened_cold\) \* IyiHeap::PAGE$/) { print "        @@warm_extra = 0_u64"; found = 1; next } print } END { if (!found) exit 3 }'
 
+# A class nobody allocates in any more kept warm within the budget, as
+# every class was: its pages hold the room the classes in use want.
+prove_fails "idle classes kept warm" idlewarm "idle class:" \
+  '{ if ($0 ~ /^        @@epoch - IyiHeap\.read64\(line \+ IyiHeap::CLASS_USED\) >= IDLE_EPOCHS &&$/) { print "        false &&"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# A class idle after a few epochs however short: four collections back
+# to back hand its pages back.
+prove_fails "idle by epochs alone" idleshort "idle class:" \
+  '{ if ($0 ~ /^          @@epoch_ns - IyiHeap\.read64\(line \+ IyiHeap::CLASS_USED_NS\) >= IDLE_NS$/) { print "          true"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# An idle class's empty arena kept by its cache as every fill arena was:
+# its pages go cold but the mapping, its header and its tables stay.
+prove_fails "idle classes' arenas kept" idlearena "idle class:" \
+  '{ if ($0 ~ /^          IyiHeap\.let_go_fill\(arena\) if idle$/) { print "          # removed"; found = 1; next } print } END { if (!found) exit 3 }'
+
 # The carve's batch left unstamped: the listed chunks read as nothing the
 # sweep or the mark can tell from an uncarved one.
 prove_fails "a batch left unstamped" batchstamp "batch:" \

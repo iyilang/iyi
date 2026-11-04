@@ -2120,6 +2120,13 @@ require "./file"
       CLASS_LOCK    = 0_u64
       CLASS_BATCHES = 8_u64
       CLASS_ARENAS  = 16_u64
+      # The collection (`IyiMark.epoch`) a cache last refilled the class
+      # in, and when that collection's epoch began, written once a
+      # collection: every list is dropped in the pause, so a thread that
+      # allocates in the class at all refills it at least once a
+      # collection (`IyiMark.class_idle?`).
+      CLASS_USED    = 24_u64
+      CLASS_USED_NS = 32_u64
       CLASS_MAP     = 8192_u64
 
       @[ThreadLocal]
@@ -2599,6 +2606,11 @@ require "./file"
       # the carve is next.
       def self.refill(table : Pointer(UInt64), index : Int32) : UInt64
         line = class_line(index)
+        used = IyiMark.epoch
+        if read64(line + CLASS_USED) != used
+          write64(line + CLASS_USED, used)
+          write64(line + CLASS_USED_NS, IyiMark.epoch_ns)
+        end
         if read64(line + CLASS_BATCHES) == 0
           # Nothing swept for this class on the centre. A bump region of
           # cold pages in hand, or a slab to be carved to its end, is
@@ -3692,6 +3704,23 @@ require "./file"
           byte.value = on ? byte.value &+ 1_u8 : byte.value &- 1_u8
           slot = slot + 1_u64
         end
+      end
+
+      # An arena of a class nobody allocates in (`IyiMark.class_idle?`),
+      # let go by every cache whose fill arena it is, in the pause: the
+      # cache's next allocation in the class finds no fill arena and takes
+      # one up as a new thread's does (`carve`). No thread is inside the
+      # class's refill or carve, holding the arena in a local: either
+      # would have stamped the class used this collection.
+      def self.let_go_fill(arena : UInt64) : Nil
+        index = class_index(read64(arena + OFF_CHUNK))
+        page = @@caches
+        while page != 0
+          table = Pointer(UInt64).new(page)
+          table[FILL + index] = 0_u64 if table[FILL + index] == arena
+          page = read64(page + CACHE_NEXT)
+        end
+        write64(arena + OFF_OWNER, 0_u64)
       end
 
       # Hand one empty arena's mapping back to the kernel — the sweep's
@@ -7083,7 +7112,7 @@ require "./file"
         # run is an arena at a time when the arena is all dead, and a run
         # kept or released whole overshot the budget by the run - 13 MB
         # warm for a 4 MB budget.
-        warm = warm_pages(chunk, pages)
+        warm = class_idle?(chunk) ? 0_u64 : warm_pages(chunk, pages)
         if continuing && warm == 0
           # The straddler into the first page is a run's the carve may
           # hand out before a cold page's release lands, and the release
@@ -7205,6 +7234,47 @@ require "./file"
         take
       end
 
+      # A class no cache refilled in the last two collections or this one
+      # so far, nor for a second (`IyiHeap::CLASS_USED`): its idle pages
+      # go cold whatever the budget, counting nothing against it, and an
+      # empty arena of it is let go by its cache (`scavenge`). Pages kept
+      # warm for a class the program stopped allocating in held the room
+      # the classes it moved to wanted. One whole epoch unused is not
+      # enough: a program that collects twice between two batches of a
+      # class takes its warm pages back (`bench/sweep_exercise.iyi`, check
+      # 1b). Nor are three when they are short: twelve workers of
+      # `bench/release_pages.iyi` collect about every 4 ms (1,800 in 8 s
+      # on a shared 12-vCPU Linux machine), and a class they ask for now
+      # and then would hand its arena back and map it again.
+      #
+      # Issue #145's app, its 11 endpoints one after another on twelve
+      # workers, ended with 617 arenas - thirteen threads' fill arenas in
+      # about 47 classes, none ever released - and 195 MB of them
+      # resident, 133 MB of it counted warm idle and 4.4 MB live: the
+      # classes of the endpoints before kept their room. With idle classes
+      # cold, 432 arenas and 169 MB, 63 MB warm idle; the peak working
+      # set 205 MB against 222 over two interleaved rounds, requests a
+      # second, p99 and CPU level (Windows 11, 12 logical processors, the
+      # user's machine). `bench/release_pages.iyi`, whose one handler asks
+      # for the same classes every epoch, held: best of 3, 4.03M against
+      # 3.84M a second there, peak 100-103 MB against 101-104, and on
+      # macOS 26.6, Apple M2 Pro, 10 cores (the user's machine), 1.51M
+      # against 1.51M.
+      IDLE_EPOCHS = 3_u64
+      IDLE_NS = 1000000000_u64
+      @@epoch_ns : UInt64 = 0_u64
+
+      # When this epoch began, read by the refill for its stamp.
+      def self.epoch_ns : UInt64
+        @@epoch_ns
+      end
+
+      def self.class_idle?(chunk : UInt64) : Bool
+        line = IyiHeap.class_line(IyiHeap.class_index(chunk))
+        @@epoch - IyiHeap.read64(line + IyiHeap::CLASS_USED) >= IDLE_EPOCHS &&
+          @@epoch_ns - IyiHeap.read64(line + IyiHeap::CLASS_USED_NS) >= IDLE_NS
+      end
+
       # A run of idle pages `[low, high)` the slice met, left by an earlier
       # epoch: each warm page counts against this epoch's budget as a run
       # closed today would, and past the budget it goes cold - the runs of
@@ -7221,6 +7291,7 @@ require "./file"
       def self.age_idle(arena : UInt64, low : UInt64, high : UInt64) : Nil
         return if IyiHeap.read64(arena + IyiHeap::OFF_WARM) == 0
         chunk = IyiHeap.arena_chunk(arena)
+        idle = class_idle?(chunk)
         first = IyiHeap.arena_first(arena)
         cold_low = 0_u64
         page = low
@@ -7228,7 +7299,7 @@ require "./file"
         while page <= high
           # A warm page within the budget stays; past it, it is a cold
           # run's from here.
-          cool = page < high && !IyiHeap.page_cold?(arena, page) && warm_pages(chunk, 1_u64) == 0
+          cool = page < high && !IyiHeap.page_cold?(arena, page) && (idle || warm_pages(chunk, 1_u64) == 0)
           if cool
             cold_low = page if cold_low == 0
           elsif cold_low != 0
@@ -7288,7 +7359,11 @@ require "./file"
           # here, the lists being gone.
           IyiHeap.idle_listed(arena)
           empty = IyiHeap.arena_live(arena) == 0
-          if empty && spared + IyiHeap::MAP + SPARE_BELOW <= budget
+          # An idle class's empty arena is nobody's cushion: its cache lets
+          # it go, and it goes back whatever the spare room.
+          idle = empty && class_idle?(IyiHeap.arena_chunk(arena))
+          IyiHeap.let_go_fill(arena) if idle
+          if empty && !idle && spared + IyiHeap::MAP + SPARE_BELOW <= budget
             spared = spared + IyiHeap::MAP
             previous = arena
           elsif empty && IyiHeap.release_arena(previous, arena)
@@ -7340,6 +7415,7 @@ require "./file"
         @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr(4_u64) + (reopened_cold - @@reopened_cold) * IyiHeap::PAGE
         @@reopened_cold = reopened_cold
         @@epoch = @@epoch + 1_u64
+        @@epoch_ns = now_ns
         @@epoch_flag = (@@epoch & 1_u64) * IyiHeap::EPOCH_FLAG
         @@swept = 0_u64
         @@kept = 0_u64

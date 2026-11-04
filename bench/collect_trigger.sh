@@ -213,7 +213,7 @@ prove_fails "mappings never return" noscavenge "scavenge:" \
 # Every empty arena handed back whatever the budget: the next epoch maps
 # the ones it needs afresh, and the spare check counts them.
 prove_fails "empty arenas never spared" nospare "spare:" \
-  '{ sub(/if empty && spared \+ IyiHeap::MAP \+ SPARE_BELOW <= budget/, "if false"); print }'
+  '{ if (sub(/if empty && !idle && spared \+ IyiHeap::MAP \+ SPARE_BELOW <= budget/, "if false")) found = 1; print } END { if (!found) exit 3 }'
 
 # The allocator's slices and the helpers' round removed: every arena is
 # debt until a pause pays it, which is the eager sweep back inside the

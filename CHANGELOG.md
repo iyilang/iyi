@@ -233,6 +233,22 @@
   threads at under a tenth of the slowest rate the runtime made beside
   it.
 
+- **chaos_exercise.sh: `iyi test --chaos` catches a check-then-act and a
+  missing join, and their seeds reproduce.** Both bugs pass 40 of 40
+  plain runs on the machine's pool. `--chaos=1 --chaos-runs 100` catches
+  each, the printed `--chaos=SEED` fails again, and five traced runs of
+  the seed print one schedule. A seed drawn by `iyi test` catches the
+  claim and reproduces. The exercise's 30 seeds, run twice each, are
+  alike run for run, meet 28 orders, and never break the unit rules.
+  Five broken copies are each caught at their own check: the stream
+  ignored, the seed not honoured, units ignored, parallel tasks left in
+  their unit, and the scheduler left in a plain build. It held in 36 s on
+  Linux (12 vCPUs, shared), 23 s on macOS 26.6 (Apple M2 Pro, 10 cores,
+  the user's machine) and 42 s on Windows 11 (12 logical processors, the
+  user's machine). test_verb.sh refuses a `--chaos=` seed that is not
+  decimal digits below 2^64, which `to_u64?` alone would have read from
+  `+7` and ` 7`, and a `--chaos-runs` below 1.
+
 ### Added
 
 - **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,
@@ -363,6 +379,33 @@
   loop that reads the payload's colour held it where the second stop's
   conservative scan found it. That read is in a frame of its own now, as
   the move was, and the cut copy lost round 0's payload in 5 runs of 5.
+
+- **`iyi test --chaos[=SEED] [--chaos-runs N]` finds a test that passes
+  only because its tasks ran in one order (SPEC.md III.4.17).** The
+  compiler rules out memory races; this is for the ordering races left.
+  Each test is built with `-Diyi_chaos` and run once per seed, 100 seeds
+  from a drawn one unless told, with one worker. Every scheduling choice
+  is drawn from the seed: which task runs next, a preemption at any
+  `Atomic` verb, channel operation, `select`, spawn, `value` or loop
+  back-edge, the order a wake readies a word's waiters, and which ready
+  `select` arm goes first. Half the seeds walk at random, and half use PCT
+  priorities for depth. A parallel task runs as a unit of its own, so the
+  orders two cores could produce are met, and tasks of one unit still
+  meet only at parks. A failure prints its seed and `reproduce: iyi test
+  --chaos=SEED file`, which runs the same schedule again; `--json`
+  carries `chaos_seed`. On Linux (12 vCPUs, shared), a check-then-act on
+  an `Atomic` and a missing join each passed 1,000 of 1,000 plain runs
+  on the 12-worker pool. They were caught under 63 and 57 of seeds 1 to
+  1,000 - the random walk caught the first, PCT the second. A seed is
+  the same schedule on every target. Seeds 6 and 42 caught the two bugs
+  with the same schedule hashes on Linux, on macOS 26.6 (Apple M2 Pro,
+  10 cores, the user's machine) and on Windows 11 (12 logical
+  processors, the user's machine). With more than one worker the threads
+  are real and a seed names no schedule, which the report says. A build
+  without the flag is unchanged. On Linux, release `web_cores` and
+  `chan_scaling` have the same IR, but for line numbers. On all three
+  machines their sections are the same size as before, and on macOS
+  chan_scaling's instructions are the same.
 
 ### Fixed
 
@@ -26786,7 +26829,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 27,353-line library and nothing else. Every other
+  written against iyi's own 28,110-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -740,7 +740,7 @@ step "failure proof: a collection let go after its threads are released leaves t
 mkdir -p released/iyi
 cp "$REPO"/src/iyi/*.iyi released/iyi/
 awk '/^            @@collecting = false$/ && !moved { moved = 1; next }
-  moved && !put && /^            IyiRuntimeLock\.unlock$/ {
+  moved && !put && /^            unlock_released$/ {
     print
     print "            window = now_ns + 10000000000_u64"
     print "            while now_ns < window"

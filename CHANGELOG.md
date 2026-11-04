@@ -293,6 +293,26 @@
   panics inside its stop is run too, and the copy whose panic keeps the
   priority is caught. Linux and darwin are unchanged.
 
+- **A collection no longer waits for the threads it releases to run
+  again.** A stop's release waited for every thread it had stopped to
+  leave its park, so the collecting thread - a request's - spun until the
+  last of them had a processor. The next stop waits for that instead,
+  before it clears the words they read. On Windows 11, 12 logical
+  processors, a thread parked inside the allocator and held off its
+  processor by another program kept each collection 403-410 ms past its
+  stop, 25-28 without the wait. A thread a stop parks in the runtime
+  lock's spin now owes the next collection a try of the lock, and the
+  collection waits for those tries before it takes the lock, 2 ms at
+  most: without that, a thread collecting in a loop retook the lock
+  before the threads it released had tried it, and the storm of
+  `bench/thread_exercise.sh` 7h hung 5 runs of 5 on Linux (12 vCPU),
+  where it now makes its 3,200 threads in 1.3-1.6 s. Step 4e holds the
+  release, with a copy that waits again; 7h holds the turns, with a copy
+  that skips the wait. Step 4b's lock ratio is printed and no longer
+  bounded: under the new lock path no broken copy of the lock crossed
+  the bound (spin-only 2.4-3.5 times one thread, against the runtime's
+  2.0), and 4c holds what the lock's yield is for.
+
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with
   are the library Crystal shipped at 0.1.0 (SPEC.md I.4), not what
@@ -26594,7 +26614,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 27,173-line library and nothing else. Every other
+  written against iyi's own 27,284-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

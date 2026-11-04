@@ -5191,6 +5191,15 @@ done about it:
   the deadlock and each task fails `cancelled`; they are `spawn_serial`,
   and the Mutex names it again. The gate holds, with all eleven broken
   copies caught.
+- `thread_floor`'s exact darwin list, run on `mt/next` on macOS 26.6
+  (Apple M2 Pro, 10 cores, the user's machine), found `_close`, which it
+  did not name. Part 6's growth reaches it
+  from every program: the panic path makes a fiber ready, `ready` wakes a
+  worker and with none idle starts one (`IyiWorkers.wake_one`, `grow`),
+  and the thread `IyiThread.start` makes closes its kqueue when it ends
+  (`IyiScheduler.retire_thread`) - the chain read off the probe's IR,
+  from `main` to `close`, in a program that starts no task. It is the
+  runtime's name there now, as it is the pool's in `runtime_exercise`'s.
 
 `std_signal_exercise`, `std_mutex_exercise` and `root_exercise` failed
 too, and failed the same way when run with the old prelude through

@@ -1121,7 +1121,7 @@ module Iyi
         path << "`#{named.use}`"
         where = named.state.is_a?(Const) ? "the constant" : "the class variable"
         return "the block reaches #{where} `#{named.label} : #{named.type}` through #{path.join(" → ")}, and it is not Share: #{why}; " \
-               "if every thread may reach it safely, say why on it with `@[SafeReach(\"...\")]` (SPEC.md III.4.4)"
+               "if every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on it with `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)"
       end
       nil
     end
@@ -1548,7 +1548,7 @@ module Iyi
         path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
         path << "`#{named.use}`"
         where = named.state.is_a?(Const) ? "the constant" : "the class variable"
-        instead = "Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on #{where}: `@[SafeReach(\"...\")]`"
+        instead = "Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on #{where}: `@[SafeReach(\"...\")]`, which the compiler proves"
         # A list that is only read - iyi-web's `CONTENT_CODINGS : Array(String)`
         # - is the commonest case, and has a third way out that needs no claim.
         if (list = share_reach_list(named.type))

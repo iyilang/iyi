@@ -5456,7 +5456,7 @@ describe "Semantic: iyi" do
         infos = reach_warnings.call(code)
         infos.size.should eq(1)
         infos[0].should start_with("warning in line #{line}\n")
-        infos[0].should contain("Warning: the block spawn(parallel: true) runs on another thread reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on the constant: `@[SafeReach(\"...\")]` (SPEC.md III.4.4)")
+        infos[0].should contain("Warning: the block spawn(parallel: true) runs on another thread reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on the constant: `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)")
       end
 
       it "warns for the block a @[Share] def keeps" do
@@ -5630,7 +5630,7 @@ describe "Semantic: iyi" do
           end
           CODE
         infos.size.should eq(1)
-        infos[0].should contain("reaches `@@db : Database` (not Share) through `Registry.ask` → `@@db.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on the class variable: `@[SafeReach(\"...\")]` (SPEC.md III.4.4)")
+        infos[0].should contain("reaches `@@db : Database` (not Share) through `Registry.ask` → `@@db.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on the class variable: `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)")
       end
 
       it "is silenced by @[SafeReach] on a class variable" do
@@ -5844,7 +5844,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               both
               nil
             end
@@ -5862,13 +5862,13 @@ describe "Semantic: iyi" do
               end
 
               g = G
-              g.spawn_parallel do
+              g.spawn(parallel: true) do
                 both
                 nil
               end
               CODE
           end
-          ex.message.not_nil!.should contain("writes it (`Database#query_one` assigns `@total`, in `@total = 1`), and it may run once a parallel task has started, behind no lock the compiler can name: the block `spawn_parallel` runs as a parallel task, at x.iyi:")
+          ex.message.not_nil!.should contain("writes it (`Database#query_one` assigns `@total`, in `@total = 1`), and it may run once a parallel task has started, behind no lock the compiler can name: the block `spawn(parallel: true)` runs as a parallel task, at x.iyi:")
           ex.message.not_nil!.should contain(", which calls `both`. SafeReach is proven when")
         end
 
@@ -5888,7 +5888,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               note
               nil
             end
@@ -5906,7 +5906,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               note
               nil
             end
@@ -5932,7 +5932,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               limit
               nil
             end
@@ -5956,7 +5956,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               GUARD.lock { |bag| note }
               GUARD.get { |bag| rows }
               nil
@@ -5978,7 +5978,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               GUARD.lock { |bag| note }
               OTHER.lock { |bag| note }
               nil
@@ -6002,7 +6002,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               GUARD.lock { |bag| note }
               rows
               nil
@@ -6021,7 +6021,7 @@ describe "Semantic: iyi" do
 
             guard = Guard.new { Bag.new }
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               guard.lock { |bag| note }
               nil
             end
@@ -6045,7 +6045,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               rows
               nil
             end
@@ -6065,7 +6065,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               rows
               nil
             end
@@ -6083,7 +6083,7 @@ describe "Semantic: iyi" do
             end
 
             def launch : Nil
-              G.spawn_parallel do
+              G.spawn(parallel: true) do
                 rows
                 nil
               end
@@ -6106,11 +6106,31 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               rows
               nil
             end
             later.call
+            CODE
+        end
+
+        it "is refused when a proc answers the state and its caller writes it" do
+          assert_error(owning + reach_stub + ledger + <<-CODE, "answers it from a proc the proof does not follow", filename: "x.iyi")
+            @[SafeReach("filled at startup, then only read")]
+            QUIET = Ledger.new
+
+            handed = -> { QUIET }
+
+            def rows : Int32
+              QUIET.rows
+            end
+
+            g = G
+            g.spawn(parallel: true) do
+              rows
+              nil
+            end
+            handed.call.add
             CODE
         end
 
@@ -6135,7 +6155,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               both
               nil
             end
@@ -6193,7 +6213,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn_parallel do
+            g.spawn(parallel: true) do
               Registry.note
               Registry.rows
               nil

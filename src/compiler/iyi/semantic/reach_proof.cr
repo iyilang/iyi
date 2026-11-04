@@ -135,8 +135,11 @@ module Iyi
 
     # How a value reaches a write: the callable writes it itself (*how*), or
     # hands it to slot *slot* of *callee*, or to slot *slot* of every
-    # literal of *proc_type*.
-    record Cause, callee : Callable? = nil, slot : Int32 = 0, proc_type : Type? = nil, how : String? = nil
+    # literal of *proc_type*. An *escape* keeps a copy where the walk
+    # cannot follow it - stored in a field or in memory, answered from a
+    # proc - so whatever writes through the copy may do so anywhere,
+    # later.
+    record Cause, callee : Callable? = nil, slot : Int32 = 0, proc_type : Type? = nil, how : String? = nil, escape : Bool = false
 
     # One place a body may write a root: what the root is, why, the
     # expression as written and what it does with the root (*suffix*),
@@ -221,7 +224,8 @@ module Iyi
     @statement_starts = [] of Bool
     @first_start = Int32::MAX
     @first_start_at : Location? = nil
-    @written = {} of {Int32, Int32} => {Callable?, Int32, Event}
+    @written = Written.new
+    @escaped = Written.new
     @state_out = {} of Int32 => Set(UInt64)
 
     def initialize(@program : Program, @root : ASTNode)
@@ -331,6 +335,14 @@ module Iyi
     def share?(type : Type) : Bool
       @share.fetch(type) { @share[type] = declared_share?(type, 0) }
     end
+
+    # Share read in full, structure included: asked only of a value a
+    # callable whose writes are read stores away, so of a few types.
+    def deep_share?(type : Type) : Bool
+      @deep_share.fetch(type) { @deep_share[type] = share?(type) || Iyi::Share.shareable?(type) }
+    end
+
+    @deep_share = {} of Type => Bool
 
     private def declared_share?(type : Type, depth : Int32) : Bool
       return false if depth > 8
@@ -717,22 +729,22 @@ module Iyi
 
     # --- what each callable writes ----------------------------------------
 
+    alias Written = Hash({Int32, Int32}, {Callable?, Int32, Event})
+
     # (callable, slot) -> how it is written: the callee and slot it is
     # handed to, or nil when the body writes it itself; and the event.
+    # Twice: every write, and only the escapes - a copy kept where the
+    # walk cannot follow it, through which anything may write later.
     private def compute_written : Nil
       reverse = {} of {Int32, Int32} => Array({Callable, Int32, Event})
-      queue = Deque({Int32, Int32}).new
+      seeds = [] of {Int32, Int32, Event}
       @callables.each do |callable|
         callable.events.each do |event|
           root = event.root
           next unless root.kind.slot?
           cause = event.cause
-          if how = cause.how
-            key = {callable.id, root.slot}
-            unless @written.has_key?(key)
-              @written[key] = {nil, 0, event}
-              queue << key
-            end
+          if cause.how
+            seeds << {callable.id, root.slot, event}
           elsif callee = cause.callee
             (reverse[{callee.id, cause.slot}] ||= [] of {Callable, Int32, Event}) << {callable, root.slot, event}
           elsif type = cause.proc_type
@@ -742,23 +754,37 @@ module Iyi
           end
         end
       end
+      spread(@written, seeds, reverse, false)
+      spread(@escaped, seeds, reverse, true)
+    end
+
+    private def spread(into : Written, seeds : Array({Int32, Int32, Event}), reverse : Hash({Int32, Int32}, Array({Callable, Int32, Event})), escapes : Bool) : Nil
+      queue = Deque({Int32, Int32}).new
+      seeds.each do |(id, slot, event)|
+        next if escapes && !event.cause.escape
+        key = {id, slot}
+        next if into.has_key?(key)
+        into[key] = {nil, 0, event}
+        queue << key
+      end
       while key = queue.shift?
         reverse[key]?.try &.each do |(caller, slot, event)|
           caller_key = {caller.id, slot}
-          next if @written.has_key?(caller_key)
-          @written[caller_key] = {@callables[key[0]], key[1], event}
+          next if into.has_key?(caller_key)
+          into[caller_key] = {@callables[key[0]], key[1], event}
           queue << caller_key
         end
       end
     end
 
-    private def fired?(cause : Cause) : Bool
-      return true if cause.how
+    private def fired?(cause : Cause, escapes : Bool) : Bool
+      return !escapes || cause.escape if cause.how
+      map = escapes ? @escaped : @written
       if callee = cause.callee
-        return @written.has_key?({callee.id, cause.slot})
+        return map.has_key?({callee.id, cause.slot})
       end
       if type = cause.proc_type
-        return literals_of(type).any? { |literal| @written.has_key?({literal.id, cause.slot}) }
+        return literals_of(type).any? { |literal| map.has_key?({literal.id, cause.slot}) }
       end
       false
     end
@@ -766,19 +792,20 @@ module Iyi
     # How a cause writes, for a message: the callees it goes through and
     # what the last one does, `Array#<<` → `Array#push` → `Pointer#[]=`,
     # which writes the memory it points at.
-    private def explain(cause : Cause) : String
+    private def explain(cause : Cause, escapes : Bool) : String
       return cause.how.not_nil! if cause.how
+      map = escapes ? @escaped : @written
       start = if callee = cause.callee
                 {callee.id, cause.slot}
               else
-                literal = literals_of(cause.proc_type.not_nil!).find { |lit| @written.has_key?({lit.id, cause.slot}) }
+                literal = literals_of(cause.proc_type.not_nil!).find { |lit| map.has_key?({lit.id, cause.slot}) }
                 {literal.not_nil!.id, cause.slot}
               end
       path = [] of String
       key = start
       how = ""
       16.times do
-        entry = @written[key]?
+        entry = map[key]?
         break unless entry
         path << "`#{@callables[key[0]].label}`" unless path.last? == "`#{@callables[key[0]].label}`"
         callee, slot, event = entry
@@ -827,7 +854,7 @@ module Iyi
 
     # --- the verdict -------------------------------------------------------
 
-    record Write, event : Event, callable : Callable, init : Bool, free : Bool, locks : Array(Lock)
+    record Write, event : Event, callable : Callable, init : Bool, free : Bool, locks : Array(Lock), escape : Bool = false
 
     private def context_of(callable : Callable, origin : Origin?) : {Bool, Bool, Array(Lock)}
       if origin
@@ -850,9 +877,15 @@ module Iyi
         callable.events.each do |event|
           next if event.root.kind.slot?
           next unless states_of(event.root).includes?(key)
-          next unless fired?(event.cause)
-          init, free, locks = context_of(callable, event.origin)
-          writes << Write.new(event, callable, init, free, locks)
+          if fired?(event.cause, escapes: true)
+            # A copy kept out of the walk's sight may be written through
+            # anywhere, whenever: before the first task, or under a lock,
+            # the keeping proves nothing about the writes.
+            writes << Write.new(event, callable, false, true, [] of Lock, escape: true)
+          elsif fired?(event.cause, escapes: false)
+            init, free, locks = context_of(callable, event.origin)
+            writes << Write.new(event, callable, init, free, locks)
+          end
         end
       end
       writes.sort_by! { |write| location_key(write.event.at) }
@@ -861,6 +894,9 @@ module Iyi
       return nil if writes.all? { |write| !write.free && write.locks.empty? }
 
       if bad = writes.find(&.free)
+        if bad.escape
+          return refusal(claim, bad, "whatever writes through that copy may do so anywhere, once a parallel task has started")
+        end
         return refusal(claim, bad, "it may run once a parallel task has started, behind no lock the compiler can name: #{where_free(bad.callable, bad.event.origin)}")
       end
 
@@ -886,9 +922,10 @@ module Iyi
     PROOFS = "SafeReach is proven when the state's type is Share (a `Mutex`, an `Atomic`, a `List`, a value nothing writes), when every write - and every read once a parallel task may run - is behind one lock the compiler can name (a `Mutex#lock` on a constant or a class variable), or when every write comes before the first parallel task can start: in its initializer, at module init, or in top-level code before the first spawn (SPEC.md III.4.4)"
 
     private def refusal(claim : ReachClaim, write : Write, why : String) : String
-      cause = explain(write.event.cause)
+      cause = explain(write.event.cause, write.escape)
       what = cause.empty? ? "" : " (#{cause})"
-      "@[SafeReach] on `#{claim.label}` is refused: nothing proves every thread may reach it safely. #{text_of(write.event)} in #{write.callable.named} at #{show(write.event.at)} writes it#{what}, and #{why}. #{PROOFS}"
+      verb = write.escape ? "keeps a copy of it where the proof cannot follow" : "writes it"
+      "@[SafeReach] on `#{claim.label}` is refused: nothing proves every thread may reach it safely. #{text_of(write.event)} in #{write.callable.named} at #{show(write.event.at)} #{verb}#{what}, and #{why}. #{PROOFS}"
     end
 
     # An event's expression as a message spells it: a call that takes a
@@ -1304,6 +1341,20 @@ module Iyi
         event(roots, Cause.new(how: how), node, at, suffix)
       end
 
+      # An event for a copy kept where the walk cannot follow it.
+      private def escape(roots : Set(Root), how : String, node : ASTNode, at : Location?, suffix : String = "") : Nil
+        event(roots, Cause.new(how: how, escape: true), node, at, suffix)
+      end
+
+      # What storing *value* keeps: nothing when its type is Share, read in
+      # full - a value nothing writes once it is made, an array of which
+      # `ROUTES.select` copies - since nothing can write through the copy.
+      private def stored(value : ASTNode) : Set(Root)
+        found = roots(value)
+        return found if found.empty?
+        (type = value.type?) && @proof.deep_share?(type) ? EMPTY : found
+      end
+
       # --- visits --------------------------------------------------------
 
       def visit(node : Expressions) : Bool
@@ -1398,7 +1449,7 @@ module Iyi
             direct(roots(target.obj), "assigns `#{target.name}`", node, node.location)
           end
           if slot_roots = escaping(target, node.value)
-            direct(slot_roots, "stores it", node, node.location)
+            escape(slot_roots, "stores it", node, node.location)
           end
         end
         node.value.accept self
@@ -1410,7 +1461,7 @@ module Iyi
       # the original.
       private def escaping(target : ASTNode, value : ASTNode) : Set(Root)?
         return nil if target.is_a?(Var)
-        found = roots(value)
+        found = stored(value)
         found.empty? ? nil : found
       end
 
@@ -1551,7 +1602,7 @@ module Iyi
               # A value stored escapes as one stored in a field does: what
               # reads it back and writes through it writes the original,
               # so `[WORDS].first << "x"` writes `WORDS`.
-              node.args.each { |arg| direct(roots(arg), "stores it in memory", node, at) }
+              node.args.each { |arg| escape(stored(arg), "stores it in memory", node, at) }
             end
             next
           end
@@ -1570,7 +1621,7 @@ module Iyi
             if slot = slot_of(target, index, count)
               event(arg_roots, Cause.new(callee: callee, slot: slot), node, at, ", which is handed it")
             else
-              direct(arg_roots, "hands it to a parameter the proof cannot follow", node, at, ", which is handed it")
+              escape(arg_roots, "hands it to a parameter the proof cannot follow", node, at, ", which is handed it")
             end
           end
           # A block whose value the callee writes, through what its
@@ -1597,13 +1648,13 @@ module Iyi
         return unless events? && @full
         if type.is_a?(ProcInstanceType)
           answer = type.return_type
-          return if answer.nil_type? || answer.void? || @proof.share?(answer)
+          return if answer.nil_type? || answer.void? || @proof.share?(answer) || @proof.deep_share?(answer)
         end
         state = outward(roots(body))
         if returns
           Returns.each(body) { |exp, yielded| state.concat(outward(roots(exp))) unless yielded }
         end
-        direct(state, "answers it from a proc the proof does not follow", node, at) unless state.empty?
+        escape(state, "answers it from a proc the proof does not follow", node, at) unless state.empty?
       end
 
       # The parameter call argument *index* binds, counted from 1 (0 is

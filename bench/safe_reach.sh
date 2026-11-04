@@ -22,8 +22,11 @@
 #      Its broken copies: one task writes outside the lock, refused naming
 #      the write; one reads outside it, refused naming the read.
 #   4. (c) Every write at module init, before the first parallel task,
-#      then only read: accepted. Its broken copy writes once more after
-#      the group that starts the tasks: refused, naming that statement.
+#      then only read: accepted. Its broken copies: one writes once more
+#      after the group that starts the tasks, refused naming that
+#      statement; one keeps a copy at module init (`COPIES = [TABLE]`)
+#      and writes through it later, refused naming the copy, since a
+#      copy kept where the proof cannot follow may be written anywhere.
 #   5. `@[UnsafeReach]`, the claim nothing checks, in a file that uses
 #      `Pointer`: accepted for the program step 1 refuses. Its broken copy,
 #      the same program without a `Pointer`: refused, since the unsafe
@@ -102,13 +105,13 @@ def ask(n : Int64) : Int64
 end
 
 group do |g|
-  g.spawn_parallel { ask(1_i64) }
-  g.spawn_parallel { ask(2_i64) }
+  g.spawn(parallel: true) { ask(1_i64) }
+  g.spawn(parallel: true) { ask(2_i64) }
 end
 IYI
 refused unguarded '@[SafeReach] on `DATABASE` is refused' \
   '`DATABASE.query_one(n)` in `ask` at unguarded.iyi:18:12 writes it (`Database#query_one` assigns `@total`' \
-  'the block `spawn_parallel` runs as a parallel task, at unguarded.iyi:22:5, which calls `ask`'
+  'the block `spawn(parallel: true)` runs as a parallel task, at unguarded.iyi:22:5, which calls `ask`'
 
 # ── 2. (a) A Share type ───────────────────────────────────────────────────
 step "(a) a Share type is accepted"
@@ -123,8 +126,8 @@ def bump : Int64
 end
 
 group do |g|
-  g.spawn_parallel { bump }
-  g.spawn_parallel { bump }
+  g.spawn(parallel: true) { bump }
+  g.spawn(parallel: true) { bump }
 end
 IYI
 accepted counted
@@ -170,11 +173,11 @@ def first_size : Int32
 end
 
 group do |g|
-  g.spawn_parallel do
+  g.spawn(parallel: true) do
     LOCK.lock { |_| keep("a") }
     0
   end
-  g.spawn_parallel do
+  g.spawn(parallel: true) do
     LOCK.get { |_| first_size }
   end
 end
@@ -186,14 +189,14 @@ derive locked locked_write '
 { print }'
 refused locked_write '@[SafeReach] on `TABLE` is refused' \
   '`TABLE.add(row)` in `keep`' '`Table#add` → `Array#<<`' \
-  'the block `spawn_parallel` runs as a parallel task, at locked_write.iyi:37:5, which calls `keep`'
+  'the block `spawn(parallel: true)` runs as a parallel task, at locked_write.iyi:37:5, which calls `keep`'
 derive locked locked_read '
 /^module locked$/ { print "module locked_read"; next }
 /LOCK.get \{ \|_\| first_size \}/ { print "    first_size"; next }
 { print }'
 refused locked_read '@[SafeReach] on `TABLE` is refused' \
   "writes it behind \`LOCK\`'s lock, but \`TABLE\` is read at locked_read.iyi:29:3, with no lock" \
-  'the block `spawn_parallel` runs as a parallel task, at locked_read.iyi:37:5, which calls `first_size`'
+  'the block `spawn(parallel: true)` runs as a parallel task, at locked_read.iyi:37:5, which calls `first_size`'
 
 # ── 4. (c) Before the first parallel task ─────────────────────────────────
 step "(c) every write at module init, then only read, is accepted"
@@ -224,8 +227,8 @@ def first_size : Int32
 end
 
 group do |g|
-  g.spawn_parallel { first_size }
-  g.spawn_parallel { first_size }
+  g.spawn(parallel: true) { first_size }
+  g.spawn(parallel: true) { first_size }
 end
 IYI
 accepted startup
@@ -236,6 +239,14 @@ END { print "TABLE.add(\"late\")" }'
 refused startup_late '@[SafeReach] on `TABLE` is refused' \
   '`TABLE.add("late")` in the program'"'"'s top level at startup_late.iyi:30:7' \
   'after the statement at startup_late.iyi:26:1 may start the first parallel task'
+derive startup startup_copied '
+/^module startup$/ { print "module startup_copied"; next }
+/^TABLE.add\("world"\)$/ { print; print "COPIES = [TABLE]"; next }
+{ print }
+END { print "COPIES.first.add(\"late\")" }'
+refused startup_copied '@[SafeReach] on `TABLE` is refused' \
+  'keeps a copy of it where the proof cannot follow (`Pointer#[]=` stores it in memory' \
+  'whatever writes through that copy may do so anywhere'
 
 # ── 5. UnsafeReach, where it is allowed ───────────────────────────────────
 step "@[UnsafeReach] is kept for a file that uses Pointer"

@@ -857,10 +857,12 @@
     end
 
     {% if flag?(:win32) %}
-      # The stopping thread runs at Windows' highest priority from the
-      # start of its stop until the runtime lock is let go after its
-      # release, the pause between included, and is put back then
-      # (`raise_stopper`, `lower_stopper`, `IyiMark.unlock_released`).
+      # The stopping thread runs at Windows' highest priority from before
+      # it takes the runtime lock for a collection until it lets that
+      # lock go after its release, the pause between included, and is
+      # put back then (`raise_stopper`, `lower_stopper`, `IyiMark.collect`,
+      # `IyiMark.unlock_released`). A stop that is not a collection's
+      # thread's - a helper's - raises at the stop.
       # A stop here is that thread's own loop of `SuspendThread` and
       # `ResumeThread`, and a thread above it on its processor held the
       # world stopped until it let go: in iyiturkiye on a saturated machine
@@ -881,7 +883,7 @@
       @@stopper_id : Int32 = 0_i32
       @@stopper_raised = false
 
-      private def self.raise_stopper : Nil
+      def self.raise_stopper : Nil
         me = LibC.GetCurrentThread
         priority = LibC.GetThreadPriority(me)
         return if priority >= THREAD_PRIORITY_HIGHEST

@@ -855,8 +855,14 @@ IYI
     step "failure proof: a stopping thread left at its priority is held by the burst"
     mkdir -p level/iyi
     cp "$REPO"/src/iyi/*.iyi level/iyi/
+    # Every raise taken out: the stop's own, and the collection's before
+    # it takes the runtime lock - at its start, again after a wait for a
+    # collection beside the program, and after each debt walk
+    # (`IyiMark.collect`, `IyiMark.collect_if_due`).
     awk '/^        raise_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
       "$REPO/src/iyi/thread.iyi" > level/iyi/thread.iyi || { echo "the stop's raise is not in thread.iyi any more"; exit 1; }
+    awk '/^ *IyiThread\.raise_stopper$/ { found++; next } { print } END { if (found != 4) exit 3 }' \
+      "$REPO/src/iyi/prelude.iyi" > level/iyi/prelude.iyi || { echo "the collection's four raises are not in the prelude any more"; exit 1; }
     if ! IYI_PATH="$WORK/level${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -o stopping-level > build-level.log 2>&1; then
       cat build-level.log; exit 1
     fi

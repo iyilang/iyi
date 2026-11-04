@@ -6763,8 +6763,17 @@ require "./file"
         epoch = @@epoch
         arena = claim_slice(0_u64, 0)
         return false if arena < 4_u64
+        # The walk at the thread's own priority on Windows, as before a
+        # collection: it is raised only while it holds the lock
+        # (`IyiMark.collect`).
         IyiRuntimeLock.unlock
+        {% if flag?(:win32) && flag?(:x86_64) %}
+          IyiThread.lower_stopper
+        {% end %}
         batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)
+        {% if flag?(:win32) && flag?(:x86_64) %}
+          IyiThread.raise_stopper
+        {% end %}
         IyiRuntimeLock.lock
         index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
         IyiHeap.class_lock(index)
@@ -7902,9 +7911,14 @@ require "./file"
           # before this collection takes it (`IyiThread.await_turns`).
           IyiThread.await_turns
         {% end %}
+        {% if flag?(:win32) && flag?(:x86_64) %}
+          # Raised before the lock, and so for as long as it holds it, to
+          # the release (`IyiThread.raise_stopper`, `IyiMark.collect`).
+          IyiThread.raise_stopper
+        {% end %}
         IyiRuntimeLock.lock
         if allocated_since < budget || @@collecting
-          IyiRuntimeLock.unlock
+          unlock_released
           return
         end
         @@collecting = true
@@ -7968,18 +7982,37 @@ require "./file"
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           IyiThread.await_turns
         {% end %}
+        # On Windows the thread is raised before it takes the lock and
+        # stays so to the release (`unlock_released`), not from its stop:
+        # a thread above it on its processor held the lock as long as it
+        # ran, and everything from the lock to the stop holds it. Beside
+        # bench/thread_exercise.sh's burst, one level above normal for 100
+        # ms at a time on the collecting thread's processor, 9 of 15 runs
+        # on windows-2025's 4-processor runners had a thread wait 53 to
+        # 107 ms for the lock, 100 to 107 in all but two, with the raise
+        # at the stop (debug run 41794057208); raised once the collection
+        # was decided, the lock already held, 1 of 16 still waited 100 ms
+        # (debug run 41795743763).
+        {% if flag?(:win32) && flag?(:x86_64) %}
+          IyiThread.raise_stopper
+        {% end %}
         IyiRuntimeLock.lock
         # A collection already running beside the program is finished by
         # its helper; this one waits for it rather than racing it, and
-        # says so if it is overdue (`watch_overdue`).
+        # says so if it is overdue (`watch_overdue`). It waits at its own
+        # priority, and is raised again once it is its turn: a raised spin
+        # would stand above the helper it waits for, on a shared processor.
         spins = 0_u64
         while @@collecting
-          IyiRuntimeLock.unlock
+          unlock_released
           spin_pause
           spins = spins + 1_u64
           watch_overdue(worker) if spins & (OVERDUE_SPINS - 1_u64) == 0_u64
           IyiRuntimeLock.lock
         end
+        {% if flag?(:win32) && flag?(:x86_64) %}
+          IyiThread.raise_stopper
+        {% end %}
         @@collecting = true
         make_holder_bell
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}

@@ -20,7 +20,8 @@
 #     the lock and the one-thread twin; a captured local the block assigns.
 #   * The speedup on a CPU-bound sum, release build, best of three: four
 #     workers (or as many as there are cores) at least 0.5 times as many
-#     times faster than one.
+#     times faster than one, counting the cores that compute, not their
+#     SMT threads.
 #   * Negative proofs: copies of std/parallel that drop the last chunk,
 #     that put the chunks back in the wrong order, that start one task,
 #     that go on past a known failure, and that say nothing of the
@@ -68,6 +69,26 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) CORES="${NUMBER_OF_PROCESSORS:-1}" ;;
   *) CORES="$(nproc)" ;;
 esac
+
+# The cores that compute it: the sum keeps a core's arithmetic busy, and
+# the second SMT thread on a core adds none of its own. On ubuntu-24.04's
+# runner, an AMD EPYC 9V45 with 2 cores of 2 threads (4 CPUs), the release
+# build's sum took 50.8 to 51.1 ms on one worker and 25.0 to 25.9 ms on
+# two, three and four alike, three fresh runs each (CI job 126403714590),
+# where `bench/parallel_exercise.sh`'s tasks, whose loop leaves a core room
+# for its sibling, scaled 3.85x on four; the floor of 0.5 x 4 had failed
+# at 1.93x (run 41767883229). Never more than the CPUs this process may
+# run on, which is what `nproc` and the pool count.
+case "$(uname -s)" in
+  Darwin) PHYS="$(sysctl -n hw.physicalcpu)" ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    PHYS="$(powershell -NoProfile -Command '(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum' 2>/dev/null | tr -d '\r')" ;;
+  *) PHYS="$(lscpu -p=core,socket 2>/dev/null | grep -v '^#' | sort -u | grep -c .)" ;;
+esac
+case "$PHYS" in
+  '' | *[!0-9]* | 0) PHYS="$CORES" ;;
+esac
+[ "$PHYS" -gt "$CORES" ] && PHYS="$CORES"
 
 build_and_run() { # build_and_run <label> <name> <build flags...>; runs with the environment given
   local label="$1" name="$2"
@@ -202,18 +223,21 @@ best_us() { # best_us <workers> <binary> <workload> <n>: the best of three runs'
 }
 K=4
 [ "$CORES" -lt "$K" ] && K="$CORES"
-echo "== the speedup: a CPU-bound sum of 4,000,000 elements, release build, best of three, $CORES cores here"
-if [ "$CORES" -lt 2 ]; then
+# The floor is half of what the cores that compute could give.
+F="$K"
+[ "$PHYS" -lt "$F" ] && F="$PHYS"
+echo "== the speedup: a CPU-bound sum of 4,000,000 elements, release build, best of three, $CORES cores here, $PHYS of them whole cores"
+if [ "$F" -lt 2 ]; then
   echo "  one core here: nothing to scale onto, so the ratio is not held"
 elif [ "$status" -eq 0 ]; then
   ONE="$(best_us 1 "$WORK/release" sum 4000000)" || status=1
   MANY="$(best_us "$K" "$WORK/release" sum 4000000)" || status=1
   if [ "$status" -eq 0 ]; then
     ratio="$(awk -v a="$ONE" -v b="$MANY" 'BEGIN { printf "%.2f", a / b }')"
-    if awk -v one="$ONE" -v many="$MANY" -v k="$K" 'BEGIN { exit !(many > 0 && one / many >= 0.5 * k) }'; then
-      echo "  $K workers: $MANY us against one worker's $ONE us, ${ratio}x, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.5 * k }')x"
+    if awk -v one="$ONE" -v many="$MANY" -v f="$F" 'BEGIN { exit !(many > 0 && one / many >= 0.5 * f) }'; then
+      echo "  $K workers: $MANY us against one worker's $ONE us, ${ratio}x, over the floor of $(awk -v f="$F" 'BEGIN { printf "%.1f", 0.5 * f }')x"
     else
-      echo "  $K workers took $MANY us against one worker's $ONE us, ${ratio}x: under 0.5 x $K, which is not parallel"
+      echo "  $K workers took $MANY us against one worker's $ONE us, ${ratio}x: under 0.5 x $F, which is not parallel"
       status=1
     fi
   fi

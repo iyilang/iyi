@@ -28,6 +28,15 @@
 # crash, a panic and a deadlock are all failures that name their file. A
 # test that neither exits nor fails is killed at the deadline (`--timeout`,
 # 60 s default), because a harness that can hang is not a harness.
+#
+# `--chaos` is for the bugs the compiler cannot rule out (SPEC.md
+# III.4.17): it builds each test with `-Diyi_chaos` and runs it under the
+# chaos scheduler once per seed - `--chaos-runs` of them, 100 unless told,
+# from a seed drawn here, or exactly the one `--chaos=SEED` names - with
+# `IYI_WORKERS=1` unless the environment sets it, so that every task runs
+# on one thread and the seed alone decides the order. A test that fails
+# on a seed is reported with it and stops there, and `--chaos=SEED` runs
+# that schedule again.
 class Iyi::Command
   # The longest `--timeout`: what Windows' waitable timer can count, in
   # 100 ns ticks held in an `Int64` - 922,337,203,684 s, some 29,000 years.
@@ -37,11 +46,17 @@ class Iyi::Command
   # Windows, and did not in the next.
   private MAX_TEST_WAIT = (Int64::MAX // 10_000_000 - 1).to_f
 
+  # How many seeds `--chaos` runs a test under when not told.
+  private CHAOS_RUNS = 100
+
   private def test
     as_json = false
     timeout = 60.0
     paths = [] of String
     affected = [] of String
+    chaos = false
+    chaos_seed : UInt64? = nil
+    chaos_runs : Int32? = nil
 
     while option = options.shift?
       case option
@@ -70,6 +85,25 @@ class Iyi::Command
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
         end
         affected << value
+      when "--chaos"
+        chaos = true
+      when .starts_with?("--chaos=")
+        value = option.lchop("--chaos=")
+        # A seed is what a failing run printed: decimal digits, all of it,
+        # below 2^64. `to_u64?` alone would take a leading `+` and spaces
+        # around the number, which no run prints.
+        digits = !value.empty? && value.each_char.all?(&.ascii_number?)
+        chaos_seed = (value.to_u64? if digits) || abort! "--chaos= takes a seed, a decimal number below 2^64, not '#{value}'", :USAGE_ERROR
+        chaos = true
+      when "--chaos-runs"
+        value = options.shift?
+        abort! "--chaos-runs takes a number of runs", :USAGE_ERROR unless value
+        runs = value.to_i?
+        unless runs && runs > 0
+          abort! "--chaos-runs takes a number of runs, at least 1, not '#{value}'", :USAGE_ERROR
+        end
+        chaos_runs = runs
+        chaos = true
       when "--help", "-h"
         puts test_usage
         exit
@@ -173,7 +207,18 @@ class Iyi::Command
       exit
     end
 
-    results = files.map { |file| run_one_test(file, timeout) }
+    # The seeds: the one asked for and those after it, or from a seed
+    # drawn here, which the summary names so that the whole run can be
+    # made again. One worker unless the environment says otherwise: on
+    # more, the pool's threads are real and a seed names no schedule.
+    plan : {UInt64, Int32}? = nil
+    workers = ENV["IYI_WORKERS"]?.presence || "1"
+    if chaos
+      first = chaos_seed || Random.rand(1_u64..9_999_999_999_u64)
+      plan = {first, chaos_runs || (chaos_seed ? 1 : CHAOS_RUNS)}
+    end
+
+    results = files.map { |file| run_one_test(file, timeout, plan, workers) }
     failed = results.count { |result| result[:status] != "pass" }
 
     if as_json
@@ -186,6 +231,10 @@ class Iyi::Command
                   json.field "file", result[:file]
                   json.field "status", result[:status]
                   json.field "seconds", result[:seconds]
+                  if seed = result[:seed]
+                    json.field "chaos_seed", seed
+                    json.field "chaos_run", result[:run]
+                  end
                   json.field "output", result[:output] unless result[:output].empty?
                 end
               end
@@ -194,6 +243,15 @@ class Iyi::Command
           json.field "passed", results.size - failed
           json.field "failed", failed
           json.field "skipped", skipped
+          if plan
+            json.field "chaos" do
+              json.object do
+                json.field "first_seed", plan[0]
+                json.field "runs", plan[1]
+                json.field "workers", workers
+              end
+            end
+          end
           # The caller asked for a selective run and did not get one. In
           # data, because the caller that passes `--affected` is usually a
           # program.
@@ -218,8 +276,18 @@ class Iyi::Command
     else
       results.each do |result|
         next if result[:status] == "pass"
-        STDOUT << result[:file] << ": " << result[:status] << '\n'
+        STDOUT << result[:file] << ": " << result[:status]
+        if (seed = result[:seed]) && plan
+          STDOUT << " (chaos seed " << seed << ", run " << result[:run] << " of " << plan[1] << ')'
+        end
+        STDOUT << '\n'
         result[:output].each_line { |line| STDOUT << "  " << line << '\n' }
+        if seed = result[:seed]
+          STDOUT << "  reproduce: " << Command.program_name << " test --chaos=" << seed << ' ' << result[:file] << '\n'
+          if workers != "1"
+            STDOUT << "  (IYI_WORKERS=" << workers << ": the pool's threads are real, and the seed does not name one schedule)\n"
+          end
+        end
       end
       unless manifest_changed.empty?
         puts "#{manifest_changed.join(", ")} changed, so every test ran: the " \
@@ -234,7 +302,13 @@ class Iyi::Command
              "a file that is gone cannot be proven untouched by anything"
       end
       tail = skipped.zero? ? "" : ", #{skipped} skipped"
-      puts "#{results.size - failed} passed, #{failed} failed#{tail}" + (failed.zero? ? "" : " — a failing test prints above")
+      chaos_tail = ""
+      if plan
+        last = plan[0] &+ (plan[1] - 1).to_u64
+        chaos_tail = plan[1] == 1 ? " — chaos seed #{plan[0]}" : " — chaos seeds #{plan[0]} to #{last}"
+        chaos_tail += ", IYI_WORKERS=#{workers}" if workers != "1"
+      end
+      puts "#{results.size - failed} passed, #{failed} failed#{tail}#{chaos_tail}" + (failed.zero? ? "" : " — a failing test prints above")
     end
 
     exit 1 unless failed.zero?
@@ -314,7 +388,10 @@ class Iyi::Command
     File.dirname(path)
   end
 
-  private def run_one_test(file : String, deadline : Float64) : {file: String, status: String, seconds: Float64, output: String}
+  # The test built once, then run once - or, under `--chaos`, once per seed
+  # of *chaos* (the first seed and how many) until one fails. *seed* and
+  # *run* name the schedule a chaos failure came from; nil and 0 otherwise.
+  private def run_one_test(file : String, deadline : Float64, chaos : {UInt64, Int32}?, workers : String) : {file: String, status: String, seconds: Float64, output: String, seed: UInt64?, run: Int32}
     started = Time.instant
     output = IO::Memory.new
 
@@ -324,18 +401,56 @@ class Iyi::Command
     # %TEMP%.
     binary = File.tempname("iyi-test", {{ flag?(:win32) ? ".exe" : nil }})
     begin
+      arguments = ["build", file, "-o", binary]
+      arguments << "-Diyi_chaos" if chaos
       build_status = Process.run(
         Process.executable_path.not_nil!,
-        ["build", file, "-o", binary],
+        arguments,
         output: output, error: output,
       )
       unless build_status.success?
-        return {file: file, status: "does not build", seconds: elapsed(started), output: output.to_s}
+        return {file: file, status: "does not build", seconds: elapsed(started), output: output.to_s, seed: nil, run: 0}
       end
 
-      process = Process.new(binary, output: output, error: output)
-      tree = TestTree.new(process)
-      running = tree
+      unless chaos
+        status, evidence = run_built_test(binary, deadline, output, nil)
+        return {file: file, status: status, seconds: elapsed(started), output: evidence, seed: nil, run: 0}
+      end
+
+      # What the build printed is the start of every run's evidence, as it
+      # is of a plain run's.
+      built = output.to_s
+      first, runs = chaos
+      environment = {"IYI_CHAOS" => first.to_s, "IYI_WORKERS" => workers}
+      runs.times do |index|
+        seed = first &+ index.to_u64
+        environment["IYI_CHAOS"] = seed.to_s
+        ran = IO::Memory.new
+        ran << built
+        status, evidence = run_built_test(binary, deadline, ran, environment)
+        next if status == "pass"
+        return {file: file, status: status, seconds: elapsed(started), output: evidence, seed: seed, run: index + 1}
+      end
+      {file: file, status: "pass", seconds: elapsed(started), output: "", seed: nil, run: runs}
+    ensure
+      File.delete?(binary)
+      # And what the link wrote beside it: MSVC's `.pdb`, and on darwin the
+      # `.dwarf` dsymutil makes, which the new check found there too.
+      {% if flag?(:win32) %}
+        File.delete?(binary.rchop(".exe") + ".pdb")
+      {% elsif flag?(:darwin) %}
+        File.delete?("#{binary}.dwarf")
+      {% end %}
+    end
+  end
+
+  # One run of a built test, its output into *output*: the verdict, and
+  # the evidence a failure shows - empty for a pass. *environment* is laid
+  # over this process's own.
+  private def run_built_test(binary : String, deadline : Float64, output : IO::Memory, environment : Hash(String, String)?) : {String, String}
+    process = Process.new(binary, env: environment, output: output, error: output)
+    tree = TestTree.new(process)
+    begin
       done = ::Channel(Process::Status).new
       spawn { done.send(process.wait) }
       select
@@ -349,7 +464,7 @@ class Iyi::Command
           evidence += "\n" unless evidence.empty? || evidence.ends_with?('\n')
           evidence += Command.death_sentence(status) + "\n"
         end
-        {file: file, status: verdict, seconds: elapsed(started), output: status.success? ? "" : evidence}
+        {verdict, status.success? ? "" : evidence}
       when timeout(deadline.seconds)
         # The test and whatever it started: its output is copied through
         # a pipe, and `wait` waits for that pipe's end, which a child the
@@ -359,18 +474,10 @@ class Iyi::Command
         # child never ends hung `iyi test` for good.
         tree.terminate
         done.receive
-        {file: file, status: "hung: killed at #{deadline}s", seconds: elapsed(started), output: output.to_s}
+        {"hung: killed at #{deadline}s", output.to_s}
       end
     ensure
-      running.try &.close
-      File.delete?(binary)
-      # And what the link wrote beside it: MSVC's `.pdb`, and on darwin the
-      # `.dwarf` dsymutil makes, which the new check found there too.
-      {% if flag?(:win32) %}
-        File.delete?(binary.rchop(".exe") + ".pdb")
-      {% elsif flag?(:darwin) %}
-        File.delete?("#{binary}.dwarf")
-      {% end %}
+      tree.close
     end
   end
 
@@ -431,7 +538,7 @@ class Iyi::Command
 
   private def test_usage
     <<-USAGE
-    Usage: #{Command.program_name} test [--json] [--timeout SECONDS] [--affected FILE]... [paths]
+    Usage: #{Command.program_name} test [--json] [--timeout SECONDS] [--affected FILE]... [--chaos[=SEED]] [--chaos-runs N] [paths]
 
     Runs every `*_test.iyi` under the given paths (default: `.`). A test is
     a plain iyi program: exit 0 is a pass, anything else is a failure that
@@ -442,6 +549,18 @@ class Iyi::Command
     The closure is read by parsing, so selection costs milliseconds; a
     deleted file turns the discount off, because nothing can prove the
     tests that imported it unaffected.
+
+    `--chaos` builds each test for the chaos scheduler and runs it once per
+    seed, `--chaos-runs N` seeds (100 unless given) from one drawn at
+    random: the order its tasks run in, where one is preempted, which
+    `select` arm and which waiter go first all come from the seed, so a
+    test that passes only because its tasks happened to run in one order
+    fails on some seed. A failure names its seed, and `--chaos=SEED` runs
+    that schedule again (one run, or N from SEED with `--chaos-runs`).
+    Every task runs on one thread (`IYI_WORKERS=1`) unless the environment
+    sets IYI_WORKERS; on more, the threads are real and a seed names no
+    schedule. What a seed does not decide: when a sleep or a timeout ends,
+    when I/O answers, and threads a test starts itself (SPEC.md III.4.17).
     USAGE
   end
 end

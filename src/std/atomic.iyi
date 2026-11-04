@@ -73,21 +73,33 @@ struct ::Atomic(T)
 
   # The word, read once, atomic and nothing more.
   def get_relaxed : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.load(pointerof(@value), :monotonic, false)
   end
 
   # The word, read once; nothing after the read moves before it.
   def get_acquire : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.load(pointerof(@value), :acquire, false)
   end
 
   # The word, written once, atomic and nothing more.
   def set_relaxed(value : T) : Nil
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.store(pointerof(@value), value, :monotonic, false)
   end
 
   # The word, written once; nothing before the write moves after it.
   def set_release(value : T) : Nil
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.store(pointerof(@value), value, :release, false)
   end
 
@@ -95,14 +107,23 @@ struct ::Atomic(T)
   # answers what the word held before, as the prelude's do.
   {% for suffix, ordering in {relaxed: :monotonic, acquire: :acquire, release: :release, acq_rel: :acquire_release} %}
     def add_{{suffix}}(value : T) : T
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.at_atomic
+      {% end %}
       IyiAtomic.rmw(:add, pointerof(@value), value, {{ordering}}, false)
     end
 
     def sub_{{suffix}}(value : T) : T
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.at_atomic
+      {% end %}
       IyiAtomic.rmw(:sub, pointerof(@value), value, {{ordering}}, false)
     end
 
     def swap_{{suffix}}(value : T) : T
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.at_atomic
+      {% end %}
       IyiAtomic.rmw(:xchg, pointerof(@value), value, {{ordering}}, false)
     end
   {% end %}
@@ -111,44 +132,71 @@ struct ::Atomic(T)
   # `expected` it now holds `desired`; answers what the word held and
   # whether the exchange happened.
   def compare_and_set_relaxed(expected : T, desired : T) : Tuple(T, Bool)
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.cmpxchg(pointerof(@value), expected, desired, :monotonic, :monotonic)
   end
 
   def compare_and_set_acquire(expected : T, desired : T) : Tuple(T, Bool)
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.cmpxchg(pointerof(@value), expected, desired, :acquire, :acquire)
   end
 
   def compare_and_set_release(expected : T, desired : T) : Tuple(T, Bool)
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.cmpxchg(pointerof(@value), expected, desired, :release, :monotonic)
   end
 
   def compare_and_set_acq_rel(expected : T, desired : T) : Tuple(T, Bool)
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.cmpxchg(pointerof(@value), expected, desired, :acquire_release, :acquire)
   end
 
   # `word &= value`; answers what the word held before.
   def and(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.rmw(:and, pointerof(@value), value, :sequentially_consistent, false)
   end
 
   # `word = ~(word & value)`; answers what the word held before.
   def nand(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.rmw(:nand, pointerof(@value), value, :sequentially_consistent, false)
   end
 
   # `word |= value`; answers what the word held before.
   def bitwise_or(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.rmw(:or, pointerof(@value), value, :sequentially_consistent, false)
   end
 
   # `word ^= value`; answers what the word held before.
   def xor(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.rmw(:xor, pointerof(@value), value, :sequentially_consistent, false)
   end
 
   # `word = max(word, value)`, signed or unsigned as `T` is; answers what
   # the word held before.
   def max(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     {% if T == UInt8 || T == UInt64 %}
       IyiAtomic.rmw(:umax, pointerof(@value), value, :sequentially_consistent, false)
     {% else %}
@@ -159,6 +207,9 @@ struct ::Atomic(T)
   # `word = min(word, value)`, signed or unsigned as `T` is; answers what
   # the word held before.
   def min(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     {% if T == UInt8 || T == UInt64 %}
       IyiAtomic.rmw(:umin, pointerof(@value), value, :sequentially_consistent, false)
     {% else %}

@@ -1,0 +1,599 @@
+# iyi: the chaos scheduler - SPEC.md III.4.17. Required only by a build
+# with `-Diyi_chaos`, which is what `iyi test --chaos` makes, so a program
+# built without it carries none of this: no field, no branch, no call.
+#
+# The compiler rules out memory races (III.4.4), which leaves one kind of
+# concurrency bug a test can pass by luck: a logical ordering race, where
+# the program is right only because its tasks happened to run in one
+# order - a check of an `Atomic` and the act on it with another task
+# between them, a value read before the task that writes it was joined.
+# Here the runtime's scheduling choices are made from a seeded stream,
+# so a test run over many seeds meets many orders, and a seed that fails
+# names its schedule: run again with it, it fails the same way.
+#
+# **What is chosen.** With `IYI_WORKERS=1`, which `iyi test --chaos` sets,
+# every task runs on the program's one thread and the schedule is the
+# stream's alone ("simulated" below):
+#
+#   - which ready task runs next, at every park (`pick`);
+#   - whether the running task is preempted at a synchronising operation:
+#     an `Atomic`'s verb (std/atomic's and std/mutex's included, through
+#     the prelude's `Atomic`), a channel's send, receive, close, select or
+#     non-blocking half, a spawn and a task's `value` (`point`);
+#   - whether it is preempted at a loop's back-edge, on a countdown drawn
+#     from the stream (`back_edge`);
+#   - which task parked on a word a wake readies, and in what order
+#     (`IyiScheduler.chaos_wake_on`), which is std/mutex's hand-over;
+#   - which arm of a `select` is tried first when more than one is ready
+#     (`arm`).
+#
+# A task the compiler would run in parallel (a `spawn` it placed on the
+# pool, `spawn(parallel: true)`) runs on this thread as a unit of its own
+# (`IyiChaosUnit`), so the interleavings two cores could produce are the
+# ones met here: tasks of different units take turns at any of the points
+# above. Tasks of one unit still take turns only at parks, oldest first,
+# as the language promises them (III.4.15, part 2): the scheduler never
+# puts a task between two operations of a unit-mate.
+#
+# Every synchronising operation is a point because the compiler's rule
+# makes that enough: a program with no data race behaves as some
+# interleaving of its synchronising operations (the DRF-SC theorem, and
+# `Atomic` has one ordering, sequentially consistent - III.4.10), so a
+# switch between two plain reads can show nothing a switch at the next
+# operation could not.
+#
+# **Two strategies, chosen by the seed.** Half the seeds walk at random:
+# at each point the running task is preempted with a probability of one
+# in 2, 4, 8 or 16, and a choice of task is uniform over the units that
+# may run. The other half are PCT (Burckhardt, Kothari, Musuvathi and
+# Nagarakatte, "A Randomized Scheduler with Probabilistic Guarantees of
+# Finding Bugs", ASPLOS 2010): each unit gets a random priority, the
+# highest that may run always runs, and at d - 1 steps drawn from the
+# first k the running unit drops below every other - which finds a bug of
+# depth d in one run of n·k^(d-1) at worst. d is 1, 2 or 3 and k a power
+# of two from 8 to 16,384, drawn per seed, since a run's length is not
+# known before it ends. A unit that stays highest through 1,024 steps in
+# a row - a spin waiting for a lower one - is dropped below the rest, or
+# PCT would starve the task it waits for.
+#
+# **Reproducible, and what is not.** Simulated, the schedule is a function
+# of the seed and of what the program does: no decision reads a clock, an
+# address or another thread. What a program reads from outside is not
+# the seed's: a sleep or a timeout ends when the clock says, an I/O
+# wait when the kernel answers, and a thread of the program's own
+# (`IyiThread.start`) runs beside this one, not in its schedule. A run
+# whose order turns on those can differ with the same seed. With
+# `IYI_WORKERS` above 1 the pool's threads are real ("threads" below):
+# each draws from a stream of its own, seeded from the seed and the order
+# the threads first drew, to pick the worker a steal starts at, to give a
+# parallel task's worker up at a point or at a back-edge the monitor
+# flagged, to order a `select`'s arms and a word's wakes - more orders
+# than the plain pool meets, and no promise of meeting one again.
+#
+# `IYI_CHAOS=SEED` turns it on in a build that has it; `IYI_CHAOS_TRACE`
+# set as well prints, as the program ends, the seed, the strategy and the
+# schedule's hash - a fold of every choice made - which is how
+# bench/chaos_exercise.sh shows two runs of one seed took one schedule.
+{% if flag?(:gc_none) || flag?(:gc_boehm) %}
+  {% raise "-Diyi_chaos needs the default runtime: its scheduler is the one a chaos build drives, and -Dgc_none and -Dgc_boehm have no pool to simulate (SPEC.md III.4.17)" %}
+{% end %}
+
+# A unit as the chaos scheduler sees it: the tasks that take turns only at
+# parks - the main thread's, or a parallel task's and the tasks its block
+# spawns in its unit. Its PCT priority, and the mark a choice puts on it
+# so that one walk of the run queue finds each unit's candidate.
+class IyiChaosUnit
+  getter id : UInt64
+  property priority : UInt64
+  property stamp : UInt64
+  property slot : Int32
+
+  def initialize(@id : UInt64, @priority : UInt64)
+    @stamp = 0_u64
+    @slot = 0
+  end
+end
+
+class IyiChaos
+  # `@@mode`: not read yet, off (a chaos build run without `IYI_CHAOS`),
+  # the one-thread simulation, or real threads.
+  UNREAD    = 0
+  OFF       = 1
+  SIMULATED = 2
+  THREADS   = 3
+
+  # splitmix64's increment, and FNV-1a's offset basis and prime.
+  GOLDEN    = 0x9E3779B97F4A7C15_u64
+  FNV_BASIS = 0xCBF29CE484222325_u64
+  FNV_PRIME =      0x100000001B3_u64
+
+  # PCT's priorities: a unit's first is above `HIGH`; the i-th change
+  # point drops the running unit to `LOW + d - i`; a unit dropped for
+  # spinning goes below that, one under the last one dropped.
+  HIGH       = 0x10000000000_u64
+  LOW        =      0x100000_u64
+  SPIN_STEPS =          1024_u64
+
+  @@mode : Int32 = 0
+  @@seed : UInt64 = 0_u64
+  @@stream : UInt64 = 0_u64
+  @@pct : Bool = false
+  @@odds : UInt64 = 2_u64
+  @@depth : UInt64 = 1_u64
+  @@horizon : UInt64 = 8_u64
+  @@change_one : UInt64 = 0_u64
+  @@change_two : UInt64 = 0_u64
+  @@changed : UInt64 = 0_u64
+  @@floor : UInt64 = 0_u64
+  @@edge_mean : UInt64 = 16_u64
+  @@edge_left : UInt64 = 1_u64
+  @@steps : UInt64 = 0_u64
+  @@yields : UInt64 = 0_u64
+  @@picks : UInt64 = 0_u64
+  @@schedule : UInt64 = 0_u64
+  @@units : UInt64 = 0_u64
+  @@root : IyiChaosUnit?
+  @@last_unit : UInt64 = 0_u64
+  @@streak : UInt64 = 0_u64
+  @@candidates : Array(IyiFiber)?
+  @@generation : UInt64 = 0_u64
+  @@trace : Bool = false
+  @@reported : Bool = false
+  @@threads_seen : UInt64 = 0_u64
+  # The thread the simulation runs on: the main thread, which `start`
+  # marks before the program's first line.
+  @[ThreadLocal]
+  @@here : Bool = false
+  @[ThreadLocal]
+  @@thread_stream : UInt64 = 0_u64
+  @[ThreadLocal]
+  @@thread_seeded : Bool = false
+
+  # Read once, on the main thread, before the program's own code runs
+  # (`__iyi_program`): the seed, the strategy it draws, and on one worker
+  # the back-edge word raised for good on this thread, so that every
+  # checked loop calls `back_edge`.
+  def self.start : Nil
+    return unless @@mode == UNREAD
+    text = Program.env("IYI_CHAOS")
+    unless text.is_a?(String) && text.bytesize > 0
+      @@mode = OFF
+      return
+    end
+    @@seed = seed_of(text)
+    @@stream = @@seed
+    @@schedule = FNV_BASIS
+    @@trace = Program.env("IYI_CHAOS_TRACE").is_a?(String)
+    @@here = true
+    # Every parameter from the stream, so a seed names all of them.
+    @@pct = draw % 2_u64 == 1_u64
+    @@odds = 2_u64.unsafe_shl(draw % 4_u64)
+    @@depth = 1_u64 &+ draw % 3_u64
+    @@horizon = 8_u64.unsafe_shl(draw % 12_u64)
+    @@change_one = 1_u64 &+ draw % @@horizon
+    @@change_two = 1_u64 &+ draw % @@horizon
+    @@floor = LOW
+    @@edge_mean = 16_u64.unsafe_shl(draw % 7_u64)
+    @@edge_left = 1_u64 &+ draw % (@@edge_mean &* 2_u64)
+    fold(@@pct ? 1_u64 : 0_u64)
+    fold(@@odds)
+    fold(@@depth)
+    fold(@@horizon)
+    @@root = IyiChaosUnit.new(0_u64, fresh_priority)
+    if IyiWorkers.resolved == 1
+      @@mode = SIMULATED
+      IyiWorkers.chaos_raise
+    else
+      @@mode = THREADS
+    end
+  end
+
+  # The seed as the decimal number it is written as, wrapping past 64
+  # bits; anything else is refused by name rather than read as 0.
+  private def self.seed_of(text : String) : UInt64
+    bytes = text.to_unsafe
+    value = 0_u64
+    index = 0
+    while index < text.bytesize
+      digit = bytes[index]
+      unless digit >= 48_u8 && digit <= 57_u8
+        raise "IYI_CHAOS is a seed, a decimal number, not '#{text}' (SPEC.md III.4.17)"
+      end
+      value = value &* 10_u64 &+ (digit - 48_u8).to_u64
+      index = index + 1
+    end
+    value
+  end
+
+  # Whether this thread's schedule is the simulation's.
+  def self.simulated? : Bool
+    @@mode == SIMULATED && @@here
+  end
+
+  def self.active? : Bool
+    @@mode >= SIMULATED
+  end
+
+  # The one source of every choice: splitmix64 over the seed on the
+  # simulated thread, over the thread's own stream elsewhere. A draw of 0
+  # is the plain scheduler's choice at every call site below - the head of
+  # the run queue, no preemption, the first arm, the oldest waiter - which
+  # is what bench/chaos_exercise.sh's copy with the stream ignored shows.
+  def self.draw : UInt64
+    if @@mode == SIMULATED && @@here
+      state = @@stream &+ GOLDEN
+      @@stream = state
+      return mix(state)
+    end
+    unless @@thread_seeded
+      ordinal = Pointer(Atomic(UInt64)).new(pointerof(@@threads_seen).address).value.add(1_u64)
+      @@thread_stream = @@seed ^ mix(ordinal &+ 1_u64)
+      @@thread_seeded = true
+    end
+    state = @@thread_stream &+ GOLDEN
+    @@thread_stream = state
+    mix(state)
+  end
+
+  def self.mix(word : UInt64) : UInt64
+    z = word
+    z = (z ^ z.unsafe_shr(30_u64)) &* 0xBF58476D1CE4E5B9_u64
+    z = (z ^ z.unsafe_shr(27_u64)) &* 0x94D049BB133111EB_u64
+    z ^ z.unsafe_shr(31_u64)
+  end
+
+  # A number below *bound*, from the stream.
+  def self.below(bound : Int32) : Int32
+    (draw % bound.to_u64).to_i32
+  end
+
+  private def self.fold(value : UInt64) : Nil
+    @@schedule = (@@schedule ^ value) &* FNV_PRIME
+  end
+
+  private def self.fresh_priority : UInt64
+    HIGH &+ (draw & 0xFFFFFFFF_u64)
+  end
+
+  # The unit *fiber* takes turns in; a fiber made before it had one - the
+  # main fiber - is the root unit's.
+  def self.unit_of(fiber : IyiFiber) : IyiChaosUnit
+    unit = fiber.chaos_unit
+    return unit if unit.is_a?(IyiChaosUnit)
+    root = @@root
+    root = IyiChaosUnit.new(0_u64, HIGH) unless root.is_a?(IyiChaosUnit)
+    @@root = root
+    fiber.chaos_unit = root
+    root
+  end
+
+  # A task spawned into its spawner's unit (`IyiGroup#in_unit`).
+  def self.adopt(fiber : IyiFiber) : Nil
+    return unless simulated?
+    fiber.chaos_unit = unit_of(IyiScheduler.current)
+  end
+
+  # A task the compiler or the program put on the pool, kept on this
+  # thread as a unit of its own; and a point at once, since such a task
+  # may start beside its spawner.
+  def self.parallel_task(task : IyiTask(T)) : IyiTask(T) forall T
+    @@units = @@units &+ 1_u64
+    task.fiber.chaos_unit = IyiChaosUnit.new(@@units, fresh_priority)
+    point
+    task
+  end
+
+  # ── Points ───────────────────────────────────────────────────────────
+
+  # A synchronising operation is about to run: maybe another unit first.
+  # Inside `Atomic`'s verbs this is `at_atomic`, which the compiler drops
+  # from the copy of them the runtime calls (`CodeGenVisitor#visit(Call)`):
+  # the runtime's own atomics are its locks and queues, and a switch inside
+  # one would park a task holding them.
+  def self.point : Nil
+    mode = @@mode
+    if mode == SIMULATED
+      step(false) if @@here
+    elsif mode == THREADS
+      thread_point
+    end
+  end
+
+  def self.at_atomic : Nil
+    point
+  end
+
+  # One step of the simulation: counted, PCT's change points applied, and
+  # the running task preempted when the strategy says so. Not before a
+  # second unit exists, since a task preempted holding the only unit runs
+  # again at once; not while the program is ending, nor in a fiber the
+  # runtime is moving, nor with the scheduler's lock held - none of which
+  # a program's own operation meets, since the runtime's are not points.
+  # A back-edge's step (*edge*) is computing, not waiting, so it does not
+  # count towards PCT's spin.
+  private def self.step(edge : Bool) : Nil
+    return if @@units == 0_u64
+    fiber = IyiScheduler.current
+    return unless fiber.state == IyiFiberState::Running
+    return if IyiScheduler.exiting? || IyiSchedLock.held_here?
+    unit = unit_of(fiber)
+    @@steps = @@steps &+ 1_u64
+    if unit.id != @@last_unit
+      @@last_unit = unit.id
+      @@streak = 0_u64
+    elsif !edge
+      @@streak = @@streak &+ 1_u64
+    end
+    if @@pct
+      steps = @@steps
+      if @@changed &+ 1_u64 < @@depth && (steps == @@change_one || steps == @@change_two)
+        @@changed = @@changed &+ 1_u64
+        unit.priority = LOW &+ @@depth &- @@changed
+      end
+      drop(unit) if @@streak >= SPIN_STEPS
+      return unless outranked?(IyiScheduler.state, unit)
+    else
+      return unless draw % @@odds == @@odds &- 1_u64
+    end
+    @@yields = @@yields &+ 1_u64
+    fold(0xFFFFFFFF00000000_u64 | @@steps)
+    fiber.chaos_held = true
+    IyiScheduler.enqueue(fiber)
+    IyiScheduler.reschedule
+  end
+
+  # PCT: below every unit there is, for a unit that ran too long alone.
+  private def self.drop(unit : IyiChaosUnit) : Nil
+    @@floor = @@floor &- 1_u64
+    unit.priority = @@floor
+    @@streak = 0_u64
+  end
+
+  # PCT: whether a unit other than *unit* waits with a higher priority.
+  private def self.outranked?(st : IyiSchedulerState, unit : IyiChaosUnit) : Bool
+    walk = st.run_head
+    while walk.is_a?(IyiFiber)
+      other = unit_of(walk)
+      return true if other.id != unit.id && other.priority > unit.priority
+      walk = walk.next_run
+    end
+    false
+  end
+
+  # A loop's back-edge on the simulated thread, whose word stays raised:
+  # one step once the countdown drawn from the stream runs out. True when
+  # it was the simulation's, so `IyiWorkers.preempted` does nothing more.
+  def self.back_edge : Bool
+    return false unless @@mode == SIMULATED && @@here
+    return true if @@units == 0_u64
+    left = @@edge_left
+    if left > 1_u64
+      @@edge_left = left &- 1_u64
+      return true
+    end
+    @@edge_left = 1_u64 &+ draw % (@@edge_mean &* 2_u64)
+    step(true)
+    true
+  end
+
+  # ── Choosing the next task ───────────────────────────────────────────
+
+  # The next fiber this thread runs, out of its run queue: the plain
+  # queue's head off the simulation, and on it one unit's candidate - the
+  # fiber preempted holding the unit, or else the unit's oldest - chosen
+  # at random, or by PCT's priority.
+  def self.pick(st : IyiSchedulerState) : IyiFiber?
+    return IyiScheduler.dequeue(st) unless @@mode == SIMULATED && @@here
+    head = st.run_head
+    return nil unless head.is_a?(IyiFiber)
+    candidates = @@candidates
+    unless candidates.is_a?(Array(IyiFiber))
+      candidates = Array(IyiFiber).new(16)
+      @@candidates = candidates
+    end
+    generation = @@generation &+ 1_u64
+    @@generation = generation
+    count = 0
+    walk = head
+    while walk.is_a?(IyiFiber)
+      unit = unit_of(walk)
+      if unit.stamp != generation
+        unit.stamp = generation
+        unit.slot = count
+        if count < candidates.size
+          candidates[count] = walk
+        else
+          candidates << walk
+        end
+        count = count + 1
+      elsif walk.chaos_held
+        candidates[unit.slot] = walk
+      end
+      walk = walk.next_run
+    end
+    chosen = candidates[0]
+    if count > 1
+      if @@pct
+        # A unit picked again and again at its own parks - a spin on
+        # `sleep(0)` - drops as one spinning on an operation does.
+        if @@streak >= SPIN_STEPS
+          index = 0
+          while index < count
+            spinner = unit_of(candidates[index])
+            drop(spinner) if spinner.id == @@last_unit
+            index = index + 1
+          end
+        end
+        best = 0
+        index = 1
+        while index < count
+          best = index if unit_of(candidates[index]).priority > unit_of(candidates[best]).priority
+          index = index + 1
+        end
+        chosen = candidates[best]
+      else
+        chosen = candidates[below(count)]
+      end
+      @@picks = @@picks &+ 1_u64
+      fold(unit_of(chosen).id)
+      fold(count.to_u64)
+    end
+    take_out(st, chosen)
+    chosen.chaos_held = false
+    unit = unit_of(chosen)
+    if unit.id == @@last_unit
+      @@streak = @@streak &+ 1_u64
+    else
+      @@last_unit = unit.id
+      @@streak = 0_u64
+    end
+    chosen
+  end
+
+  private def self.take_out(st : IyiSchedulerState, chosen : IyiFiber) : Nil
+    previous : IyiFiber? = nil
+    walk = st.run_head
+    while walk.is_a?(IyiFiber)
+      if walk.object_id == chosen.object_id
+        following = walk.next_run
+        if previous.is_a?(IyiFiber)
+          previous.next_run = following
+        else
+          st.run_head = following
+        end
+        st.run_tail = previous if following.is_a?(Nil)
+        walk.next_run = nil
+        return
+      end
+      previous = walk
+      walk = walk.next_run
+    end
+  end
+
+  # ── The rest of the choices ──────────────────────────────────────────
+
+  # The arm of a `select` over *arms* tried first, or -1 off chaos.
+  def self.arm(arms : Int32) : Int32
+    return -1 unless active?
+    return -1 if @@mode == SIMULATED && !@@here
+    below(arms)
+  end
+
+  # Whether a wake on a word chooses its waiters (`chaos_wake_on`).
+  def self.chooses_wakes? : Bool
+    return false unless active?
+    @@mode == THREADS || @@here
+  end
+
+  # The worker a steal starts looking at, or -1 for the pool's own turn.
+  def self.steal_start(count : Int64) : Int64
+    return -1_i64 unless @@mode == THREADS
+    (draw % count.to_u64).to_i64
+  end
+
+  # Real threads: a parallel task's worker given up, at a point and at a
+  # back-edge the monitor flagged, one time in the seed's odds. Anywhere
+  # else a point gives the core up instead: a fiber of a thread outside
+  # the pool takes turns with its thread's others only at parks.
+  private def self.thread_point : Nil
+    return unless draw % @@odds == @@odds &- 1_u64
+    st = IyiScheduler.state
+    fiber = IyiScheduler.current
+    return unless fiber.state == IyiFiberState::Running
+    return if IyiScheduler.exiting? || IyiSchedLock.held_here? || IyiRuntimeLock.held?
+    root = st.root
+    if st.worker && fiber.unit.is_a?(IyiUnit) && !fiber.homebound && !(root.is_a?(IyiFiber) && root.object_id == fiber.object_id)
+      IyiWorkers.chaos_give_up(st, fiber)
+    else
+      IyiThread.yield_cpu
+    end
+  end
+
+  def self.forced_turn? : Bool
+    @@mode == THREADS && draw % @@odds == @@odds &- 1_u64
+  end
+
+  # ── The end ──────────────────────────────────────────────────────────
+
+  # With `IYI_CHAOS_TRACE` set: the seed, the strategy and the schedule,
+  # on standard error as the program ends (`__iyi_flush_std`), once.
+  def self.report : Nil
+    return unless @@trace && !@@reported && active?
+    @@reported = true
+    strategy = @@pct ? "pct depth #{@@depth} over #{@@horizon} steps" : "random walk 1 in #{@@odds}"
+    text = if @@mode == SIMULATED
+             "iyi chaos: seed #{@@seed}, #{strategy}, #{@@steps} points, #{@@yields} preemptions, #{@@picks} choices, schedule #{@@schedule.to_s(16)}\n"
+           else
+             "iyi chaos: seed #{@@seed}, #{strategy}, real threads: no schedule to name\n"
+           end
+    __iyi_write(2, text.to_unsafe.as(Void*), text.bytesize.to_u64)
+  end
+end
+
+class IyiWorkers
+  # The back-edge word of this thread raised, for the simulation: the
+  # thread-local, or on x86-64 Windows the TEB slot, which is
+  # `ArbitraryUserPointer` while no pool has claimed one - and none does
+  # under the simulation, which starts no pool.
+  def self.chaos_raise : Nil
+    {% if flag?(:win32) && flag?(:x86_64) && !flag?(:preempt_check_accessor) %}
+      Pointer(UInt64).new(IyiRoots.current_teb &+ @@preempt_slot).value = 1_u64
+    {% else %}
+      @@preempt = 1_u64
+    {% end %}
+  end
+
+  def self.chaos_give_up(st : IyiSchedulerState, fiber : IyiFiber) : Nil
+    give_up(st, fiber)
+  end
+end
+
+class IyiScheduler
+  # `wake_on` with the waiters chosen from the stream: up to *count* of
+  # those parked on *word*, each drawn from the ones left, readied in the
+  # order drawn. A draw of 0 each time is the plain wake's oldest-first.
+  def self.chaos_wake_on(word : Pointer(Atomic(UInt64)), count : Int32) : Nil
+    heads = @@lot_heads
+    tails = @@lot_tails
+    return unless heads.is_a?(Array(IyiWaiter?)) && tails.is_a?(Array(IyiWaiter?))
+    bucket = lot_bucket(word.address)
+    lock = lot_lock(bucket)
+    IyiChanLock.lock(lock)
+    parked = [] of IyiWaiter
+    node = heads[bucket]
+    while node.is_a?(IyiWaiter)
+      parked << node if node.slot == word.address
+      node = node.next_node
+    end
+    woken = 0
+    chain : IyiFiber? = nil
+    last : IyiFiber? = nil
+    while woken < count && parked.size > 0
+      index = IyiChaos.below(parked.size)
+      chosen = parked[index]
+      while index + 1 < parked.size
+        parked[index] = parked[index + 1]
+        index = index + 1
+      end
+      parked.pop
+      lot_unlink(heads, tails, bucket, chosen)
+      if chosen.claim
+        fiber = chosen.fiber
+        fiber.next_run = nil
+        if last.is_a?(IyiFiber)
+          last.next_run = fiber
+        else
+          chain = fiber
+        end
+        last = fiber
+        woken = woken + 1
+      end
+    end
+    IyiChanLock.unlock(lock)
+    while chain.is_a?(IyiFiber)
+      following = chain.next_run
+      ready(chain, false)
+      chain = following
+    end
+  end
+end

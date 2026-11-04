@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 27,368 lines, of which 4,650 are the library held to the 4,650 ceiling (6,688 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 134,796 lines, none of it written in iyi |
+| iyi's own prelude | 28,125 lines, of which 4,650 are the library held to the 4,650 ceiling (6,699 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 134,960 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 27,368 lines
+> "No standard library worth the name" is still true of iyi's own 28,125 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 27,368 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 28,125 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -297,13 +297,15 @@ was libc's `printf`, its scheduler leaned on libevent, and none of those
 was in the count. iyi's prelude now carries all three itself - the
 collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
-`thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
+`thread.iyi`, with the chaos scheduler that drives the scheduler from a
+seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),
+the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
 **4,650 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,038 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,049 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,688 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,699 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -424,7 +426,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,038 lines**
+exists for the same reason — the platform floor measures **2,049 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -1028,8 +1030,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 134,796 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 27,368-line own prelude + 126,231 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 134,960 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 28,125-line own prelude + 126,288 in std |
 | Specs | 21,146 lines | 16,475 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -2642,7 +2644,7 @@ hook, and the prelude's own definition of it is untouched. Compile-time
 `responds_to?` works unchanged, which the error message is entitled to claim
 because it is tested.
 
-### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14); a plain `spawn` in parallel where it is proven safe PROPOSED (III.4.15); one spawn verb, and a spawn kept in its unit said where the author looks BUILT (III.4.16)**
+### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14); a plain `spawn` in parallel where it is proven safe PROPOSED (III.4.15); one spawn verb, and a spawn kept in its unit said where the author looks BUILT (III.4.16); ordering races found by seed, `iyi test --chaos`, BUILT (III.4.17)**
 
 This is the section where the design either beats Go or does not, so it is worth
 being blunt about where Go actually loses. Not goroutines: they are cheap, the
@@ -5483,6 +5485,269 @@ line 6, and none on line 7's `serial: true`. `bench/spawn_eligible.sh` and
 `bench/parallel_exercise.sh` also hold on macOS 26.6, Apple M2 Pro, 10 cores
 (the user's machine), in 33 s and 209 s, and on Windows 11, 12 logical
 processors (the user's machine), in 55 s and 272 s.
+
+#### III.4.17 Ordering races, found by seed: **BUILT — `iyi test --chaos[=SEED] [--chaos-runs N]`, a scheduler whose every choice is drawn from a seed, in a build that asks for it and in no other**
+
+III.4.4 makes a memory race a compile error. That leaves the bug a test
+passes by luck: a *logical ordering race*, a program right only because its
+tasks happened to run in one order - a check of an `Atomic` and the act on
+it with another task between them, or a value read before the task that
+writes it was joined. Every memory access in such a program is
+synchronised, and the order it depends on is one the language never
+promised. On the pool the window is nanoseconds, and the test passes run
+after run. This section adds a way to run a test under many orders, and to
+get the same order back from a number.
+
+**1. The verb.** `iyi test --chaos` builds each test with `-Diyi_chaos` and
+runs it once per seed: 100 seeds unless `--chaos-runs N` says how many,
+starting at a seed drawn at random. `--chaos=SEED` runs exactly that seed,
+or N seeds from it with `--chaos-runs`. `--chaos=` takes decimal digits
+below 2^64 and nothing else, and `--chaos-runs` a count of at least one.
+Each run sets `IYI_CHAOS=SEED`, and sets `IYI_WORKERS=1` unless the
+environment already sets it. A test's runs stop at its first failure,
+which is reported with the seed and the line that runs it again:
+
+```
+bench/chaos_claim.iyi: fail (chaos seed 6, run 6 of 100)
+  reproduce: iyi test --chaos=6 bench/chaos_claim.iyi
+two leaders: 2 tasks found the slot empty, and task 1 wrote last
+0 passed, 1 failed — chaos seeds 1 to 100 — a failing test prints above
+```
+
+The summary names the seeds, so a run with a drawn seed can be made again
+whole. `--json` carries `chaos_seed` and `chaos_run` on a failed test, and a
+`chaos` object (`first_seed`, `runs`, `workers`) on the run. A program built
+with `-Diyi_chaos` and run without `IYI_CHAOS` schedules as a plain build
+does. With `IYI_CHAOS_TRACE` set as well, it prints the seed, the strategy
+and a hash of every choice made as it ends:
+
+```
+iyi chaos: seed 6, random walk 1 in 2, 13 points, 6 preemptions, 4 choices, schedule 2f3a4336168015eb
+```
+
+**2. What a seed chooses.** With one worker every task runs on the
+program's one thread, and the seed decides the schedule
+(`src/iyi/chaos.iyi`):
+
+- which ready task runs next, at every park (`IyiChaos.pick`, called where
+  the scheduler took the run queue's head);
+- whether the running task is preempted at a *point*: an `Atomic`'s verb
+  (the prelude's, std/atomic's, and through them std/mutex's), a channel's
+  `send`, `receive`, `close`, `receive_ready?`, `take_now`, `send_ready?`
+  and `put_now`, a `select` and a non-blocking `select`, a parallel task's
+  spawn, and a task's `value`;
+- whether it is preempted at a loop's back-edge, after a countdown drawn
+  from the seed;
+- which tasks parked on a word a wake readies, and in what order
+  (`IyiScheduler.chaos_wake_on`, the path std/mutex hands its lock over
+  on);
+- which arm of a `select` is tried first when several are ready.
+
+The points are enough because the compiler's rule makes them enough. A
+program with no data race behaves as some interleaving of its
+synchronising operations (the DRF-SC theorem), and `Atomic` has one
+ordering, sequentially consistent (III.4.10). A switch between two plain
+reads therefore shows nothing that a switch at the next synchronising
+operation could not.
+
+The prelude's `Atomic` verbs become points in `chaos_points.iyi`. Each verb
+there calls `IyiChaos.at_atomic` and then `previous_def`, so `atomic.iyi`
+is untouched and the two cannot drift apart. The runtime's own atomics
+are not points. They are its locks, its queues and its wake words, and a
+switch inside one would park a task holding them. The compiler drops
+`IyiChaos.at_atomic` from every def it compiles as the runtime's
+(`CodeGenVisitor#visit(Call)`), including a library def's copy that the
+runtime calls. `chaos.iyi` joins `IYI_RUNTIME_FILES`, and
+`chaos_points.iyi` does not, so the program's copies keep their points. A
+chaos build marks runtime defs as a preempting build does. Like
+`concurrency.iyi` and `thread.iyi`, the two files are the scheduler's,
+and stay outside the library count that I.4 holds to its ceiling.
+
+**3. Units, so that the language's promise holds.** A task the compiler
+would run in parallel - an eligible `g.spawn` (III.4.15) or a
+`g.spawn(parallel: true)` - runs on the one thread as a *unit* of its own
+(`IyiChaosUnit`), so the interleavings two cores could produce are among
+the ones a seed can choose: tasks of different units take turns at any
+point. Tasks of one unit still take turns only at parks, as III.4.15
+part 2 promises them. The scheduler chooses among units: the fiber
+preempted while holding a unit, or else the unit's oldest. It never puts a
+task between two operations of a unit-mate, and never starts one before
+its spawner parks. A program cannot fail under `--chaos` by an order the
+language rules out.
+
+Top-level code checks at its back-edges in a chaos build, as a def's code
+does. The main thread is never a pool worker, so nothing else preempts it,
+and here it carries every task. `IyiChaos.start` raises that thread's
+preempt word for good before the program's first line (on x86-64 Windows,
+the TEB slot no pool has claimed). Each back-edge then reaches
+`IyiChaos.back_edge`, which counts down before taking a step.
+
+**4. Two strategies, chosen by the seed.** Every parameter comes from one
+splitmix64 stream over the seed, and half the seeds use each strategy:
+
+- *A random walk.* At each point the running task is preempted with odds
+  of 1 in 2, 4, 8 or 16, and the next unit is chosen uniformly.
+- *PCT* (Burckhardt, Kothari, Musuvathi and Nagarakatte, "A Randomized
+  Scheduler with Probabilistic Guarantees of Finding Bugs", ASPLOS 2010).
+  Each unit gets a random priority, and the highest that can run always
+  runs. At d - 1 steps drawn from the first k, the running unit drops below
+  every other. That finds a bug of depth d in one run of n·k^(d-1) at
+  worst. d is 1, 2 or 3, and k is a power of two from 8 to 16,384, drawn
+  per seed, since a run's length is not known before it ends. A unit that
+  stays highest through 1,024 steps in a row - a spin waiting for a lower
+  one - is dropped below the rest, or PCT would starve the task it waits
+  for.
+
+The two find different bugs, which is why both are used. Over seeds 1 to
+1,000, with one worker, on Linux x86-64 with 12 vCPUs shared with other
+jobs:
+
+| Test | Caught | Random walk | PCT, d = 1 | PCT, d = 2 | PCT, d = 3 |
+|---|---|---|---|---|---|
+| `bench/chaos_claim.iyi`, a check-then-act | 63 of 1,000 | 54 of 484 | 0 of 170 | 5 of 153 | 4 of 193 |
+| `bench/chaos_join.iyi`, a missing join | 57 of 1,000 | 0 of 484 | 45 of 170 | 9 of 153 | 3 of 193 |
+
+The check-then-act needs a preemption between the load and the store,
+which the walk makes often and PCT at depth 1 never makes. The missing
+join needs the reader's unit to run its 2,000,000-iteration loop through
+before the writer's starts. A walk preempts the reader long before that,
+and a priority does it at once. About 6% of seeds catch each. If seeds
+were independent draws, the default 100 would miss the claim with odds of
+0.937^100, 0.15%, and the join with 0.943^100, 0.3%. The same two tests
+built plain and run on the default 12-worker pool, 1,000 times each on the
+same machine, failed 0 times each.
+
+**5. What a seed reproduces, and what it does not.** With one worker the
+schedule is a function of the seed and of what the program does: no
+choice reads a clock, an address or another thread. What a program reads
+from outside is not the seed's to decide. A sleep or a timeout ends when
+the clock says, an I/O wait ends when the kernel answers, and an
+`IyiThread.start` thread runs beside the schedule, not in it. A run whose
+order turns on those can differ under one seed. std/mutex decides
+starvation by its retake count alone under `-Diyi_chaos`, never by its
+1 ms clock, so that its hand-over stays the seed's.
+
+With `IYI_WORKERS` above 1 the pool's threads are real. Each draws from a
+stream of its own, seeded from the seed and the order in which the
+threads first drew. The streams choose the worker a steal starts at,
+whether a parallel task's worker is given up at a point or at a back-edge
+the monitor flagged, a `select`'s first arm, and a word's wake order.
+That meets more orders than the plain pool does, and promises none of them
+again. `iyi test` says so beside a failure under it. With
+`IYI_WORKERS=4` on the same Linux machine, `chaos_claim` failed under 37
+of 200 seeds.
+`-Diyi_chaos` is refused on wasm32-wasi (III.4.12), and with `-Dgc_none`
+or `-Dgc_boehm`, neither of which has a scheduler for it to drive.
+
+**6. Off is nothing.** Every hook is behind `{% if flag?(:iyi_chaos) %}`,
+and `chaos.iyi` and `chaos_points.iyi` are required only under it. A
+build without the flag therefore has no field, no branch and no call of
+the scheduler's.
+`bench/chaos_exercise.sh` step 1 holds that on every machine it runs on.
+A plain build's IR names nothing of `IyiChaos`, and the `-Diyi_chaos`
+build's names it on 297 lines on Linux and 306 on macOS and Windows.
+The servers and channels measured elsewhere show the same. Release builds
+(`--no-debug`) of `bench/web_cores.iyi` and `bench/chan_scaling.iyi` were
+made with the base tree and compiler (`04256414f`), and with this branch's
+at `c97091384`, whose `atomic.iyi` carried the points behind the flag
+before `chaos_points.iyi` took them out; a plain build compiles neither.
+On Linux, built from paths of equal length, the two have the same IR line
+for line. The only differences are source line numbers in names and
+constants, `__temp` hashes and the numbering of constants. The
+executables' sections are the same size on all three machines:
+
+| | Linux x86-64, text / data / bss | macOS arm64, `__TEXT` | Windows x86-64, file |
+|---|---|---|---|
+| web_cores | 1,865,633 / 1,208 / 1,584 | 2,031,616 | 1,810,944 |
+| chan_scaling | 231,523 / 608 / 1,080 | 245,760 | 219,648 |
+
+On macOS, chan_scaling's disassembly is the same 53,698 lines before and
+after. It differs only in names carrying source line numbers and in two
+`adrp` page offsets. Timed anyway, before and after interleaved, as
+median / best: chan_scaling over five rounds of 1,000,000 at 4 workers;
+web_cores over five rounds of wrk on Linux and three of oha on macOS and
+Windows, 32 connections, 5 s a run.
+
+| | before | after |
+|---|---|---|
+| **Linux x86-64, 12 vCPUs, shared** | | |
+| web_cores, 8 workers, `check_version` req/s | 276,409 / 288,667 | 276,367 / 296,137 |
+| web_cores, 8 workers, `order` req/s | 219,338 / 224,653 | 216,114 / 234,357 |
+| chan_scaling `pingpong`, M ops/s | 25.0 / 28.2 | 28.6 / 30.9 |
+| chan_scaling `mutexes`, M ops/s | 61.5 / 69.0 | 56.9 / 67.7 |
+| **macOS 26.6, Apple M2 Pro, 10 cores (the user's machine)** | | |
+| web_cores, 10 workers, `check_version` req/s | 104,640 / 107,838 | 104,429 / 104,464 |
+| web_cores, 10 workers, `order` req/s | 103,192 / 104,567 | 102,640 / 103,225 |
+| chan_scaling `pingpong`, M ops/s | 20.8 / 21.3 | 21.2 / 21.3 |
+| chan_scaling `mutexes`, M ops/s | 46.2 / 53.1 | 44.3 / 46.0 |
+| **Windows 11, 12 logical processors (the user's machine)** | | |
+| web_cores, 12 workers, `check_version` req/s | 104,815 / 115,356 | 112,689 / 118,090 |
+| web_cores, 12 workers, `order` req/s | 113,388 / 121,109 | 103,242 / 118,070 |
+| chan_scaling `pingpong`, M ops/s | 22.7 / 29.8 | 26.4 / 33.2 |
+| chan_scaling `mutexes`, M ops/s | 44.8 / 54.9 | 46.2 / 51.1 |
+
+The instructions are the same, so these differences are noise, and they
+go in both directions. The largest is Windows' `order`, 9% slower at the
+median and 3% at the best, against `check_version` 8% faster at the
+median on the same runs. macOS's `mutexes` medians are 4% apart, and its
+five rounds overlap: 45.4 to 53.1 before, 42.7 to 46.0 after.
+
+**7. The gate.** `bench/chaos_exercise.sh`:
+
+1. A plain build names nothing of the scheduler in its IR, and a chaos
+   build does.
+2. `chaos_claim` and `chaos_join` built plain pass at least 39 of 40 runs
+   on the machine's own pool.
+3. `iyi test --chaos=1 --chaos-runs 100` catches each. The `--chaos=SEED`
+   line it prints fails again, and five traced runs of the seed print the
+   same output and the same schedule hash.
+4. A seed drawn by `iyi test --chaos --chaos-runs 200` catches the claim,
+   and fails again when named.
+5. `bench/chaos_exercise.iyi` runs under seeds 1 to 30, twice each. It
+   has three parallel units, two unit-mates, a mutex, a `wait_for`, a
+   buffered channel and a two-arm `select`. Every run holds the unit
+   rules, each event arrives once, and the mutex counts every update. Each
+   seed's two runs are byte-identical, schedule hash included. The 30
+   seeds meet at least 20 orders and both arms. Parallel units start
+   before the spawner parks under some seeds and not under others.
+6. Five broken copies of the scheduler, each caught at the check that
+   names it:
+   - the stream ignored, every draw 0, which is the plain scheduler's
+     choice everywhere: it catches neither bug in 100 seeds;
+   - the seed not honoured, the stream seeded from the clock: one seed's
+     two runs differ;
+   - units ignored: a unit-mate runs before its spawner parks;
+   - parallel tasks left in their spawner's unit: no seed starts one
+     early;
+   - the scheduler left in a plain build: the plain IR names it.
+
+| | Linux x86-64, 12 vCPUs, shared | macOS 26.6, Apple M2 Pro, 10 cores (the user's machine) | Windows 11, 12 logical processors (the user's machine) |
+|---|---|---|---|
+| plain runs failed | claim 0 of 40, join 0 of 40 | claim 0 of 40, join 0 of 40 | claim 0 of 40, join 0 of 40 |
+| claim caught | seed 6 | seed 6 | seed 6 |
+| join caught | seed 42 | seed 42 | seed 42 |
+| drawn seed caught, and again | 5406980917, run 10 of 200 | 876659240, run 35 | 9656272590, run 41 |
+| 30 seeds of the exercise | 28 orders; a unit early under 27 seeds, late under 3 | the same | the same |
+| broken copies | 5 of 5 caught | 5 of 5 | 5 of 5 |
+| wall time | 36 s | 23 s | 42 s |
+
+(Run at `7ab239979`. The first commit, with the points inline in
+`atomic.iyi`, printed the same seeds and schedules on all three.)
+
+The seed names the same schedule on every machine. Seed 6 is a random
+walk at 1 in 2, 13 points, 6 preemptions and 4 choices, with schedule
+`2f3a4336168015eb`. Seed 42 is PCT at depth 1 over 32 steps, 1,953
+points, 1 preemption and 2 choices, with schedule `c358ff992036ee50`.
+All three machines printed both hashes alike. Nothing in the stream
+depends on the target, so a seed a CI runner prints reproduces at a
+developer's desk.
+
+**8. Left.** A seed is a schedule only on one worker. On more, the pool's
+threads decide and a seed only stirs them. Recording the threads' choices
+and replaying them would make a threads-mode failure reproducible, and is
+not built. Neither strategy alone catches both test bugs, and ~6% a seed
+is low for bugs this small. Deeper PCT or a seeded mix of the two are the
+obvious next measurements.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
@@ -12217,7 +12482,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 27,368-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 28,125-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

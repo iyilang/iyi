@@ -162,11 +162,14 @@ def prelude_library_lines() -> int:
     (Boehm's libgc; the block between two marks in prelude.iyi), the
     scheduler and kernel thread (pthreads and libevent, beyond the 183 lines
     the ceiling already carries for fibers), and the float printer and parser
-    (libc's printf and strtod). Second, every platform's floor
-    (`platform_floor_lines`), which is the rule SPEC.md I.4 settled after
-    Windows: 0.1.0's own floor was libc and was not in its 3,734 either, so
-    counting iyi's kernel32, syscall and libSystem arms compared a library
-    that carries its floor against one that did not.
+    (libc's printf and strtod). The chaos scheduler, which drives that
+    scheduler from a seed under `-Diyi_chaos` (`chaos.iyi`, and its points
+    in `Atomic`'s verbs, `chaos_points.iyi`; SPEC.md III.4.17), is the
+    scheduler's too, and only `iyi test --chaos` builds it. Second, every
+    platform's floor (`platform_floor_lines`), which is the rule SPEC.md I.4
+    settled after Windows: 0.1.0's own floor was libc and was not in its
+    3,734 either, so counting iyi's kernel32, syscall and libSystem arms
+    compared a library that carries its floor against one that did not.
 
     `library_with_floor` is the same walk without that second exclusion, and
     is stated beside this everywhere this is, because a reader opening
@@ -179,7 +182,7 @@ def library_with_floor_lines() -> int:
     """The library with every platform's floor still in it: the number a
     reader counts by opening the files. See `prelude_library_lines`."""
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
-    outside = {"concurrency.iyi", "thread.iyi", "float.iyi"}
+    outside = {"concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi"}
     total = 0
     for path in files:
         lines = path.read_text().splitlines()
@@ -225,7 +228,7 @@ def platform_floor_lines(only: str | None = None) -> int:
     *only* narrows it to the arms naming one flag, for the breakdown.
     """
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
-    outside = {"concurrency.iyi", "thread.iyi", "float.iyi"}
+    outside = {"concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi"}
     total = 0
     for path in files:
         if path.name in outside:

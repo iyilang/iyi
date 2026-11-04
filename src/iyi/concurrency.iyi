@@ -584,6 +584,14 @@ class IyiFiber
   # allocations in crystal-metric's Threadring. Reused only once no
   # queue holds it.
   property spare_waiter : IyiWaiter?
+  {% if flag?(:iyi_chaos) %}
+    # The unit the chaos scheduler counts this fiber in, and whether it
+    # was preempted at a point holding that unit (SPEC.md III.4.17).
+    @chaos_unit : IyiChaosUnit? = nil
+    @chaos_held : Bool = false
+    property chaos_unit : IyiChaosUnit?
+    property chaos_held : Bool
+  {% end %}
 
   # 256 KiB of stack and one guard page under it, so running off the end
   # is a fault at a page rather than a quiet corruption of a neighbour's
@@ -2483,7 +2491,11 @@ class IyiScheduler
     end
     while true
       take_mail(st) if st.mail?
-      fiber = dequeue(st)
+      {% if flag?(:iyi_chaos) %}
+        fiber = IyiChaos.pick(st)
+      {% else %}
+        fiber = dequeue(st)
+      {% end %}
       if fiber.is_a?(IyiFiber)
         {% if flag?(:win32) %}
           left_idle(st)
@@ -3645,6 +3657,9 @@ class IyiScheduler
   # does not use, and readied once the list's lock is let go, as a
   # channel's are (`Channel#take_woken`).
   def self.wake_on(word : Pointer(Atomic(UInt64)), count : Int32) : Nil
+    {% if flag?(:iyi_chaos) %}
+      return chaos_wake_on(word, count) if IyiChaos.chooses_wakes?
+    {% end %}
     heads = @@lot_heads
     tails = @@lot_tails
     return unless heads.is_a?(Array(IyiWaiter?)) && tails.is_a?(Array(IyiWaiter?))
@@ -5588,6 +5603,10 @@ class IyiWorkers
     count = word(pointerof(@@listed_count)).value.get
     return nil if count < 2_i64
     start = (@@turn.to_i64 &+ 1_i64) % count
+    {% if flag?(:iyi_chaos) %}
+      drawn = IyiChaos.steal_start(count)
+      start = drawn if drawn >= 0_i64
+    {% end %}
     index = 0_i64
     while index < count
       victim = listed_at((start &+ index) % count)
@@ -5839,6 +5858,9 @@ class IyiWorkers
   # worker up, as a thread the kernel preempts holding one does: a task
   # waiting for it parks on the lock's word rather than spin (std/mutex).
   def self.preempted : Nil
+    {% if flag?(:iyi_chaos) %}
+      return if IyiChaos.back_edge
+    {% end %}
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       {% if flag?(:win32) && flag?(:x86_64) && !flag?(:preempt_check_accessor) %}
         st = IyiScheduler.state
@@ -5874,6 +5896,9 @@ class IyiWorkers
       # worker was busy is paid here (`grow`).
       wake_one if st.ring_size > 0_u64
       pay
+      {% if flag?(:iyi_chaos) %}
+        return give_up(st, fiber) if !fiber.homebound && IyiChaos.forced_turn?
+      {% end %}
       give_up(st, fiber) if turn_wanted?(st, fiber)
     {% end %}
   end
@@ -6501,6 +6526,9 @@ end
 # output was empty all three ways. A failed write here is a panic like any
 # other write's. The targets without tasks define it beside their `exit`.
 def __iyi_flush_std : Nil
+  {% if flag?(:iyi_chaos) %}
+    IyiChaos.report
+  {% end %}
   STDOUT.flush
   STDERR.flush
 end
@@ -6616,6 +6644,9 @@ class IyiTask(T)
   end
 
   def value : T | Panicked
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     IyiScheduler.join(@fiber)
     # III.1.4, literal: reading the panicked task's value *catches* the
     # panic — it arrives as the error value it became at the boundary,
@@ -6719,6 +6750,9 @@ class IyiGroup
     fiber = IyiFiber.new
     fiber.home = IyiScheduler.state
     fiber.unit = IyiScheduler.current.unit
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.adopt(fiber)
+    {% end %}
     task = IyiTask(T).new(fiber)
     runner = self
     install(fiber) do
@@ -6751,11 +6785,17 @@ class IyiGroup
     # on one thread, as before. Private: nothing but the compiler, which
     # has checked the block, may call it.
     private def spawn_pooled(&block : -> T) : IyiTask(T) forall T
+      {% if flag?(:iyi_chaos) %}
+        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+      {% end %}
       return in_unit(&block) unless IyiWorkers.parallel?
       on_pool(&block)
     end
 
     private def on_pool(&block : -> T) : IyiTask(T) forall T
+      {% if flag?(:iyi_chaos) %}
+        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+      {% end %}
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
       IyiWorkers.start
@@ -7068,6 +7108,9 @@ class Channel(T)
   end
 
   def send(value : T) : Nil | ChannelClosed | Cancelled
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     fiber = IyiScheduler.current
     lock
     if fiber.cancelled
@@ -7113,6 +7156,9 @@ class Channel(T)
   # A woken park that was handed nothing takes its node out of the queue,
   # so a cancelled one leaves nothing behind.
   def receive : T | ChannelClosed | Cancelled
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     fiber = IyiScheduler.current
     lock
     while true
@@ -7145,6 +7191,9 @@ class Channel(T)
   # side — a receiver finds the buffer, then `ChannelClosed`; a sender
   # finds its box still full.
   def close : Nil
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     lock
     @closed = true
     while wake_receiver
@@ -7187,6 +7236,9 @@ class Channel(T)
   # Whether a receive would not park now: an answer that may be old by
   # the time it is read.
   def receive_ready? : Bool
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     lock
     ready = @closed || @count > 0 || sender_waiting?
     unlock
@@ -7198,6 +7250,9 @@ class Channel(T)
   # to take, and asking is a bug the call panics over; `select` with an
   # `else` arm is the receive that may find nothing.
   def take_now : T | ChannelClosed
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     lock
     answer = take_held
     woken = take_woken
@@ -7234,6 +7289,9 @@ class Channel(T)
   # Whether a send would not park now: an answer that may be old by the
   # time it is read.
   def send_ready? : Bool
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     lock
     ready = @closed || @count < @capacity || receiver_waiting?
     unlock
@@ -7245,6 +7303,9 @@ class Channel(T)
   # room, and asking is a bug the call panics over; `select` with an
   # `else` arm is the send that may not happen.
   def put_now(value : T) : Nil | ChannelClosed
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     lock
     answer = put_held(value)
     woken = take_woken
@@ -7496,6 +7557,9 @@ class Channel(T)
   # so no arm's channel changes between the look and the act, nor while
   # the arms park; the park lets go of them all.
   def self.select(actions : U, bound : Int32) forall U
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     fiber = IyiScheduler.current
     locks = IyiChanLock.words(actions)
     words = pointerof(locks).as(Pointer(UInt64))
@@ -7506,6 +7570,23 @@ class Channel(T)
         IyiChanLock.unlock_all(words, held)
         return cancelled_answer(bound)
       end
+      {% if flag?(:iyi_chaos) %}
+        # The chaos scheduler's arm tried first (SPEC.md III.4.17); the
+        # rest in order below, where this one, missed, misses again.
+        chaos_arm = IyiChaos.arm({{ U.size }})
+        {% for i in 0...U.size %}
+          if chaos_arm == {{ i }}
+            happened{{ i }} = !actions[{{ i }}].refused?
+            answer{{ i }} = actions[{{ i }}].execute
+            unless answer{{ i }}.is_a?(IyiMissed)
+              woken = actions[{{ i }}].take_woken
+              IyiChanLock.unlock_all(words, held)
+              Channel.wake(woken)
+              return { {{ i }}, answer{{ i }}, happened{{ i }} }
+            end
+          end
+        {% end %}
+      {% end %}
       {% for i in 0...U.size %}
         happened{{ i }} = !actions[{{ i }}].refused?
         answer{{ i }} = actions[{{ i }}].execute
@@ -7546,6 +7627,9 @@ class Channel(T)
   # No arm ready answers -1, which the expansion's case meets with the
   # program's own `else`.
   def self.non_blocking_select(actions : U, bound : Int32) forall U
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     fiber = IyiScheduler.current
     locks = IyiChanLock.words(actions)
     words = pointerof(locks).as(Pointer(UInt64))
@@ -7555,6 +7639,21 @@ class Channel(T)
       IyiChanLock.unlock_all(words, held)
       return cancelled_answer(bound)
     end
+    {% if flag?(:iyi_chaos) %}
+      chaos_arm = IyiChaos.arm({{ U.size }})
+      {% for i in 0...U.size %}
+        if chaos_arm == {{ i }}
+          happened{{ i }} = !actions[{{ i }}].refused?
+          answer{{ i }} = actions[{{ i }}].execute
+          unless answer{{ i }}.is_a?(IyiMissed)
+            woken = actions[{{ i }}].take_woken
+            IyiChanLock.unlock_all(words, held)
+            Channel.wake(woken)
+            return { {{ i }}, answer{{ i }}, happened{{ i }} }
+          end
+        end
+      {% end %}
+    {% end %}
     {% for i in 0...U.size %}
       happened{{ i }} = !actions[{{ i }}].refused?
       answer{{ i }} = actions[{{ i }}].execute

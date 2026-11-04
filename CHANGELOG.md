@@ -179,6 +179,33 @@
   holds such a class's arena through four short epochs, against a broken
   copy.
 
+- **A build compiles its units on threads of their own, the largest
+  first, and parses the files a program imports ahead of the walk that
+  reads them (SPEC.md IV.7).** Each unit's module is now verified,
+  written as bitcode and compared with the cache on a codegen thread and
+  compiled in the context it was built in, instead of the main thread
+  writing every unit's bitcode in turn for workers that read it back;
+  the workers are threads rather than fibers of the default context, and
+  the largest units start first. And up to four threads parse the files
+  a program imports and requires, and the files those name, while the
+  top-level pass does the rest; the pass takes a parse only of the bytes
+  it read itself, and a parse's warnings where it would have made them.
+  Wall time of a debug build of samples/iyi/cores.iyi, best / median of
+  five interleaved builds, before both, after the first, after both:
+  cold 1.435 / 1.534 s, 1.165 / 1.182 and 1.087 / 1.123, warm 0.989 /
+  1.031, 0.869 / 0.877 and 0.742 / 0.830 on Linux (12 vCPU VM); cold
+  1.132 / 1.163, 0.903 / 0.909 and 0.869 / 0.871, warm 0.773 / 0.778,
+  0.639 / 0.642 and 0.610 / 0.612 on macOS 26.6, Apple M2 Pro, 10 cores
+  (the user's machine); cold 2.777 / 2.845, 2.466 / 2.643 and 2.413 /
+  2.449, warm 1.923 / 2.006, 1.635 / 1.685 and 1.592 / 1.629 on Windows
+  11, 12 logical processors (the user's machine). The top-level pass
+  alone went from 0.140 s to 0.084 (median) on Linux, 0.107 to 0.066 on
+  the M2 and 0.251 to 0.166 on Windows, for 0.04-0.11 s more processor
+  time. The objects are the same bytes, and peak memory went down:
+  1,037-1,039 MB to 954-955 on Linux, 1,005 to 937 on the M2, a working
+  set of 1,063-1,066 to 999-1,002 on Windows. `--threads 1` keeps both
+  on one thread.
+
 ### Gates
 
 - **concurrent_mark.sh's wake-boost proof fires whatever the machine.**

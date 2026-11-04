@@ -4,6 +4,22 @@
 
 ### Changed
 
+- **Many producers into one channel no longer queue at its lock.** Every
+  task waiting for a channel's lock read it between each of the holder's
+  writes; now one of them spins on it and the rest look every 512 pauses
+  on x86-64, or 2,048 `isb`s on arm64, Go's spinbit lock without its
+  sleep. `bench/chan_scaling.iyi`'s `fanin`, 2, 4, 8 and 12 producers
+  into one channel of 128 (10 on the M2), millions of values a second
+  before, after and Go's twin's: on Linux x86_64 (12 vCPU, shared, best
+  of 9) 22.7/16.1/9.0/9.4, 58.2/39.9/25.3/30.2 and 36.4/30.3/23.4/26.0;
+  on Windows 11, 12 logical processors (the user's machine, best of 7)
+  14.7/18.4/10.7/6.6, 43.4/34.7/27.0/28.5 and 17.5/15.7/14.7/12.9; on
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine, best of 7)
+  19.8/4.1/4.5/4.3, 53.5/30.4/19.7/18.6 and 20.5/13.8/9.1/8.1. The
+  scheduler's lock and the lists `std/mutex` parks in spin as before:
+  waiting long there too cut Windows' twelve tasks on one mutex from
+  26.7 to 17.9 million updates a second.
+
 - **Linux reads its clocks through the vDSO.** The runtime's monotonic
   clock, the collector's pause clock and std/time's `Time.monotonic` and
   `Time.utc` each made a `clock_gettime` syscall, 64 to 65 ns a read on
@@ -26800,7 +26816,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 27,528-line library and nothing else. Every other
+  written against iyi's own 27,604-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

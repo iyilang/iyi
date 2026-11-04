@@ -5171,6 +5171,26 @@ done about it:
   `String` and ran at once on two workers. The step is about the order of
   one unit, so they are `spawn_serial`, and the gate holds there and on
   Linux.
+- On `mt/next`, where this met std/mutex's starvation mode,
+  `std_mutex_exercise` ended under "what it refuses" with "deadlock:
+  every fiber is blocked", and its two-worker steps after it never ran,
+  plain or `--release`. The twenty tasks that park inside the lock and
+  the queue's producer capture only the Mutex, so they ran on the pool,
+  whose threads stay once it starts; `Mutex.alone?`, which refuses a wait
+  nothing could end only while the program has one thread, read more than
+  one, and the wait parked until the scheduler named the deadlock, which
+  the step's `assert_panics` does not catch. The twenty tasks are about
+  one thread's critical section, so they are `spawn_serial`. The
+  refusals now run after them, before "cancelled while it waits", whose
+  holder and failing sibling are the first spawns on the pool - not
+  first, where the copy "a lock taken while it is held" failed at the
+  refusal rather than at the count of lost increments it names - and the
+  run asks for its two workers before that, since `IyiWorkers.count`
+  refuses a new size once the pool has started. The script's deadlock on
+  one thread ran both its tasks on the pool too, where the scheduler names
+  the deadlock and each task fails `cancelled`; they are `spawn_serial`,
+  and the Mutex names it again. The gate holds, with all eleven broken
+  copies caught.
 
 `std_signal_exercise`, `std_mutex_exercise` and `root_exercise` failed
 too, and failed the same way when run with the old prelude through

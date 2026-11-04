@@ -32,10 +32,10 @@ end
 # worker is free and the third starts at once. A waiter that held its
 # worker - asleep in the kernel, as the lock's waiters once slept when
 # their thread had nothing else - left the third nowhere to start until
-# the release. Last in the run, since the pool's threads are there for
-# good once it starts and the refusals before it count threads; and on its
-# own under `-- parks`, which is how bench/std_mutex_exercise.sh runs it
-# against a copy whose waiter holds its worker.
+# the release. Last in the run, on a pool of two the run asks for where it
+# starts; and on its own under `-- parks`, which is how
+# bench/std_mutex_exercise.sh runs it against a copy whose waiter holds its
+# worker.
 def waiter_parks : Nil
   puts "\n== a waiter parks, and its worker runs other tasks"
   IyiWorkers.count = 2
@@ -89,8 +89,8 @@ end
 # wakes the waiter, and the holder, running, has the lock back before the
 # waiter does; a waiter that has waited 1 ms is handed the lock instead
 # (`Mutex::STARVE_NS`). Without the handoff it waited out every one of the
-# holder's 600 holds. Last, beside `waiter_parks`, for the same reason, and
-# alone under `-- starves`.
+# holder's 600 holds. Last, beside `waiter_parks`, and alone under
+# `-- starves`.
 def waiter_starves : Nil
   puts "\n== a waiter the holder keeps taking the lock back from"
   IyiWorkers.count = 2
@@ -141,6 +141,12 @@ if Program.args.includes?("starves")
   exit(0)
 end
 
+# Two workers, which `waiter_parks` and `waiter_starves` count on, asked
+# for before anything starts the pool: the plain spawns under "cancelled
+# while it waits" start it (SPEC.md III.4.15), and its size does not
+# change once it has started - asked for later, the count is refused.
+IyiWorkers.count = 2
+
 puts "== a value behind a lock"
 names = Mutex.new { [] of String }
 names.lock { |list| list << "ada" }.or_panic
@@ -158,12 +164,15 @@ puts "  lock, get and update; a String answer and a number replaced"
 # Twenty tasks on one thread each read, park and write fifty times. The park
 # inside the block is what makes it a critical section on one thread: without
 # the lock another task runs between the read and the write, and its
-# increment is lost.
+# increment is lost. Their block captures only the Mutex, which is `Share`,
+# and a plain `spawn` ran them on the pool, where the step is no longer
+# about one thread; `spawn_serial` keeps them on this one (SPEC.md
+# III.4.15, part 5).
 puts "\n== tasks that park while they hold it"
 tally = Mutex.new { [0] }
 group do |g|
   20.times do
-    g.spawn do
+    g.spawn_serial do
       50.times do
         tally.lock do |cell|
           seen = cell[0]
@@ -231,6 +240,33 @@ holder.join
 assert_true(got == 7, "the waiter read #{got}, not what the holder wrote before it released")
 assert_true(waited >= 100, "the waiter came through after #{waited} ms, before the holder's 150 ms were up")
 puts "  the waiter read what the holder wrote, once it released"
+
+# The refusals come before the first step whose spawns run on the pool,
+# while the program has one thread: the wait nothing could end is refused
+# only there (`Mutex.alone?`). A plain `spawn` whose block captures only
+# `Share` values - the holder and the failing sibling under "cancelled
+# while it waits" - runs on the pool (SPEC.md III.4.15), and the pool's
+# threads stay for good once it starts. Last, as they were, the wait
+# parked until the scheduler named the deadlock, which its `assert_panics`
+# does not catch, and the run ended there.
+puts "\n== what it refuses"
+said = assert_panics("already holds the lock") do
+  count.lock { |n| count.lock { |m| m } }
+end
+assert_true(!count.locked?, "the panic released the lock it held")
+assert_true(count.get { |n| n }.or_panic == 3, "and the value is as it was")
+assert_panics("boom") do
+  names.lock { |list| raise "boom" }
+end
+assert_true(!names.locked?, "a panic inside the block released the lock")
+names.lock { |list| list << "linus" }.or_panic
+assert_true(names.get { |list| list.size }.or_panic == 3, "and the next lock took it")
+puts "  a second lock by its holder panics, and a panicking block releases"
+said_alone = assert_panics("nothing is left to change the value") do
+  count.wait_for { |n| n > 100 ? n : nil }
+end
+assert_true(!count.locked?, "the refused wait holds no lock")
+puts "  a wait nothing could end panics, naming why"
 
 # A failing sibling cancels a task waiting for the lock, and its block does
 # not run; the holder's own sleep is cancelled too, and its release frees
@@ -331,25 +367,6 @@ group do |g|
 end
 assert_true(outcome_never == "cancelled", "a wait nothing ends, its sibling failed: #{outcome_never}")
 puts "  a queue between tasks and one between threads, a wait its thread slept through in its poller, and a cancelled one"
-
-puts "\n== what it refuses"
-said = assert_panics("already holds the lock") do
-  count.lock { |n| count.lock { |m| m } }
-end
-assert_true(!count.locked?, "the panic released the lock it held")
-assert_true(count.get { |n| n }.or_panic == 3, "and the value is as it was")
-assert_panics("boom") do
-  names.lock { |list| raise "boom" }
-end
-assert_true(!names.locked?, "a panic inside the block released the lock")
-names.lock { |list| list << "linus" }.or_panic
-assert_true(names.get { |list| list.size }.or_panic == 3, "and the next lock took it")
-puts "  a second lock by its holder panics, and a panicking block releases"
-said_alone = assert_panics("nothing is left to change the value") do
-  count.wait_for { |n| n > 100 ? n : nil }
-end
-assert_true(!count.locked?, "the refused wait holds no lock")
-puts "  a wait nothing could end panics, naming why"
 
 waiter_parks
 waiter_starves

@@ -85,6 +85,13 @@
   `thread_exercise`, `concurrency_exercise` (its two-panics step among
   them) and `parallel_exercise`, and in `std_http_exercise`'s copy that
   serves a connection on the accepting thread (SPEC.md III.4.15, part 8).
+  `std_mutex_exercise`, run where std/mutex and this meet, ended at
+  "deadlock: every fiber is blocked": the pool its plain spawns started
+  left its refusal of a wait nothing could end, which only a one-thread
+  program makes, waiting instead. Its twenty tasks parking inside the lock
+  and its deadlock on one thread spawn with `spawn_serial`, the refusals
+  run before the first step that starts the pool, and the run asks for its
+  two workers before anything does.
 
 - **The pool starts one worker and grows to the work.** The first
   parallel task, from `spawn_parallel`, `Server.serve` or an eligible

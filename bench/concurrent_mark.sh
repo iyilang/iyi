@@ -866,6 +866,15 @@ mkdir -p boosted/iyi
 cp "$REPO"/src/iyi/*.iyi boosted/iyi/
 awk '{ if ($0 ~ /^ *LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/) { print "        # the helpers keep the boost"; next } print }' "$REPO/src/iyi/thread.iyi" > boosted/iyi/thread.iyi
 cmp -s boosted/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "the awk found nothing to change"; exit 1; }
+# The collection's raises taken out too, as they were when this proof was
+# measured: the collecting thread is raised before it takes the runtime
+# lock (`IyiMark.collect`, `IyiMark.collect_if_due`), and so it wakes the
+# helpers already at the highest priority, where a boosted helper does
+# not preempt it. With those raises in, the copy lost 0 wakes of 256 in
+# each of three runs held to two processors beside a spinner (run
+# 41800443380, windows-2025). The stop's own raise stays, as it was.
+awk '/^ *IyiThread\.raise_stopper$/ { found++; next } { print } END { if (found != 4) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > boosted/iyi/prelude.iyi || { echo "the collection's four raises are not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/boosted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o boosted-run > build-boosted.log 2>&1; then
   cat build-boosted.log; exit 1
 fi

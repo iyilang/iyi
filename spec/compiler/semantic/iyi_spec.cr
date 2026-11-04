@@ -4969,9 +4969,19 @@ describe "Semantic: iyi" do
 
       it "takes each placement spelled with the literal true" do
         assert_type(verb_stub + <<-CODE, filename: "x.iyi") { nil_type }
-          log = [] of Int32
-          G.spawn { log << 1; 0 }
-          G.spawn(serial: true) { log << 2; 0 }
+          class Log
+            def initialize
+              @n = 0
+            end
+
+            def n=(value : Int32)
+              @n = value
+            end
+          end
+
+          log = Log.new
+          G.spawn { log.n = 1; 0 }
+          G.spawn(serial: true) { log.n = 2; 0 }
           G.spawn(parallel: true) { 3 }
           CODE
       end
@@ -5013,9 +5023,19 @@ describe "Semantic: iyi" do
       end
 
       it "refuses a capture that is not Share under parallel: true, as spawn_parallel did" do
-        assert_error(verb_stub + <<-CODE, "the block spawn(parallel: true) runs on another thread captures `log : Array(Int32)`, which is not Share", filename: "x.iyi")
-          log = [] of Int32
-          G.spawn(parallel: true) { log << 1; 0 }
+        assert_error(verb_stub + <<-CODE, "the block spawn(parallel: true) runs on another thread captures `log : Log`, which is not Share", filename: "x.iyi")
+          class Log
+            def initialize
+              @n = 0
+            end
+
+            def n=(value : Int32)
+              @n = value
+            end
+          end
+
+          log = Log.new
+          G.spawn(parallel: true) { log.n = 1; 0 }
           CODE
       end
     end

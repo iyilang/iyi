@@ -49,7 +49,12 @@
   (12 vCPU, shared): 25.8 million updates a second with one pair, 37.6
   with the stores relaxed, 43.3 with the count skipped too; twelve pairs
   73.6, 106.6 and 111.9; `mutex`, twelve tasks on one, 21.6, 32.0 and
-  40.1. `bench/std_mutex_exercise.sh` proves a waiter counted after its
+  40.1. With the entry below as well, median of 5: on Windows 11, 12
+  logical processors (the user's machine), one pair 22.4 to 37.6 million
+  and twelve tasks on one 21.3 to 34.8; on macOS 26.6, an M2 Pro with 10
+  cores (the user's machine), one pair 36.4 and 35.3, where the stores
+  were `stlr` either way, and four pairs 36.2 to 45.9.
+  `bench/std_mutex_exercise.sh` proves a waiter counted after its
   release hangs the exercise.
 
 - **A `std/mutex` waiter that starves is handed the lock.** A task that
@@ -65,7 +70,9 @@
   running holder until the monitor preempts it, and in 0.14 and 0.50 ms
   with the pool calling an idle worker for a hand-off from a running
   task. On macOS 26.6, an M2 Pro with 10 cores (the user's machine), 41.9
-  ms and 3.0 s before, median of 5, and 1.6 ms after.
+  ms and 3.0 s before, median of 5, and 1.6 ms after; on Windows 11, 12
+  logical processors (the user's machine), 181 ms and 3.0 s before, 4.6
+  and 9.1 ms after, 0.20 and 0.54 ms with the hand-off call.
   `bench/std_mutex_exercise.sh` has the step, a waiter beside 1 ms holds
   (599 ms before), with a broken copy each for a waiter that never
   starves and a release that frees the lock where it hands it over.
@@ -78,7 +85,12 @@
   after against Go's -34 to 17; the rest is the hold's clock, a
   clock_gettime syscall where Go reads the vDSO. On the M2, median of 5,
   after against Go: 59/55 at one pair, 61/95 at two, 136/392 at four,
-  231/507 at eight.
+  231/507 at eight. On the Windows machine, median of 7, `over_ns`
+  before and after: 194/149 at one pair, 206/157 at two, 258/213 at four,
+  303/318 at eight; the park, the wake and the switch 16, -69, 30 and 30
+  ns after, Go's -22, -3, 277 and 216. Go's monotonic clock moved too
+  coarsely there for the hold - 1.84 ms an update - and its twin spins a
+  count measured at start instead.
 
 ### Fixed
 

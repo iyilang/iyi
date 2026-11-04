@@ -376,23 +376,43 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
   LLVM module, so LLVM sees the whole program, and then cuts it into
   partitions of about 20,000 instructions, each optimised and compiled on
   a thread of its own (`ReleasePartition`). A partition gets its own copy
-  of the small functions its code calls and of the constants it reads, as
-  LLVM's ThinLTO imports them, done through the C API because that is all
-  Windows' `LLVM-C.dll` exports. `samples/iyi/cores.iyi` (std/http and
-  TLS), cold, one module against partitions: 22.17 s against 8.31 s on
-  macOS 26.6, Apple M2 Pro, 10 cores (the user's machine); 25.94 s against
-  11.78 s on Windows 11, 12 logical processors (the user's machine); 20.52
-  s against 6.68 s on a shared 12-vCPU Linux VM. The programs it builds
-  ran within noise of the one-module build on the M2 Pro (best of 11
-  interleaved runs: bcrypt, SHA-256, JSON, ChaCha20-Poly1305, sorting
-  strings, and `bench/runtime.py`'s four, 0.98x to 1.03x). **Not yet on
-  Windows**: on the 12-processor machine above, best of 15 interleaved,
-  `bench/runtime.py`'s arithmetic ran 1.43x its one-module time, JSON
-  1.10x and the hash 1.08x, while bcrypt and SHA-256 held at 1.00x. The cut is a
-  function of the program, so the objects are the same on one thread and
-  on twelve. `IYI_RELEASE_PARTITIONS=1` keeps the one module.
-  `bench/release_cores.sh` holds the cores, the output and the objects,
-  each against a broken copy.
+  of the functions of up to 100 instructions its code calls and of the
+  constants it reads, as LLVM's ThinLTO imports them, done through the C
+  API because that is all Windows' `LLVM-C.dll` exports: a local copy of a
+  local function, an `available_externally` one of an external function
+  such as `__iyi_new`, and none of what LLVM may not inline. A copy the
+  inliner turns down is compiled anyway, so the limit is what the build
+  costs: `samples/iyi/cores.iyi` (std/http and TLS), cold, took 19.1 s as
+  one module against 5.76 s cut at 100 and 7.55 s at 300 on a shared
+  12-vCPU Linux VM, and 21.37 s against 7.06 s and 8.27 s on macOS 26.6,
+  Apple M2 Pro, 10 cores (the user's machine). The programs it builds ran
+  within noise of the one-module build on the M2 Pro, best of 15
+  interleaved runs: bcrypt, SHA-256, ChaCha20-Poly1305 and
+  `bench/runtime.py`'s four from 0.97x to 1.01x, and JSON 1.028x, where
+  the same JSON binary run twice on Linux differed by 4%. **Windows keeps
+  one module by default**: on Windows 11, 12 logical processors (the
+  user's machine), 25.01 s against 7.81 s cut, the hash at 1.00x and
+  bcrypt, SHA-256 and ChaCha20-Poly1305 within 1.2%, but JSON at 1.068x
+  and 1.083x in two runs. `IYI_RELEASE_PARTITIONS=0` cuts it there too.
+
+  Two causes of the Windows numbers are found. LLVM 23, which Windows
+  builds with, added a value kind before `Instruction`, so every
+  instruction read as an unnamed kind and the cut took every local
+  function for reached from elsewhere and made it external: 819 functions
+  in the hash benchmark's binary against 254 for one module, and the hash
+  at 1.07x. `LLVM::Value::Kind` has the kind now, and the binary has 317.
+  The arithmetic benchmark's 1.43x was where its loop landed: the same
+  instructions, at offset 16 of a 64-byte line in the cut build and 32 in
+  the one module. The loop alone, at each offset, ran 0.32 s from offset 0
+  to 12, 0.43 s from 13 to 16 and 0.30 s from 17 on, the same on Windows
+  and on Linux; which offset a build draws moves with any change before
+  the loop, and LLVM's branch alignment (`-x86-align-branch`) left the
+  cut build's at 1.43x. The cut is a function of the program, so the
+  objects are the same on one thread and on twelve.
+  `IYI_RELEASE_PARTITIONS=1` keeps the one module and
+  `IYI_RELEASE_IMPORT=0` copies nothing. `bench/release_cores.sh` holds
+  the cores, the output, the objects and the inlining across the cut, each
+  against a broken copy.
 
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and

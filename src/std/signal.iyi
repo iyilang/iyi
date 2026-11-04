@@ -28,8 +28,9 @@
 # the console, logging off and shutting down are `TERM`; the other signals
 # have no Windows event, and are refused there by name.
 #
-# One fiber waits at a time - two at once are refused by the poller's own
-# rule, one reader per descriptor.
+# One fiber waits at a time, whichever thread it runs on - a second is
+# refused by name, "two fibers reading one fd", the poller's own rule of
+# one reader per descriptor.
 #
 # `Signal.each` is a task's handler: its block runs for each arrival, in
 # the task, until the task is cancelled - the other library's `trap`, owned
@@ -116,6 +117,30 @@ class SignalWaiter
   @@pending = 0_u64
   # The signals whose handler is installed, one bit each.
   @@installed = 0_u64
+  # One `wait` at a time in the process, from its first look at the
+  # pending bits to its answer. The poller's rule of one reader per
+  # descriptor is each thread's own: a plain `spawn` runs on the pool
+  # where it can (SPEC.md III.4.15), and two tasks waiting on two workers
+  # parked on two pollers, neither refused. Each drained the pipe in
+  # turn, a signal woke one of them, and with none sent both waited for
+  # good - the exercise's two waiters hung in 5 of 30 runs on Linux
+  # (12 vCPUs), and in its shard on CI (job 126414632680).
+  @@waiting = ::Atomic(UInt64).new(0_u64)
+  # Held around every read and write of the words this class keeps - the
+  # pending and installed bits, the pipe or the console handler - so that
+  # a `wait` on one thread and an `ignore` on another take turns. Held for
+  # a few calls, never across a park; the signal and console handlers
+  # touch none of those words, and never take it.
+  @@guard = ::Atomic(UInt64).new(0_u64)
+
+  # The block's answer, run holding `@@guard`.
+  private def self.guarded(&)
+    until @@guard.compare_and_set(0_u64, 1_u64)[1]
+      IyiThread.spin_pause
+    end
+    defer @@guard.set(0_u64)
+    yield
+  end
 
   def self.listed(signals : Tuple) : Array(Signal)
     list = [] of Signal
@@ -136,25 +161,29 @@ class SignalWaiter
     {% if flag?(:win32) %}
       what = ignored ? "ignore" : "reset"
       raise "Signal.#{what}: Windows can #{what} INT (Ctrl-C and Ctrl-Break) alone, not #{signal}" unless signal == Signal::INT
-      # The handler drops what it is told to ignore, answering "handled";
-      # with INT neither ignored nor named it answers 0, and Windows' own
-      # default - the end of the process - is taken. Installed here for
-      # the first, so an ignore needs no `wait` before it.
-      install(0_u64)
-      @@ignored.set(ignored ? @@ignored.get | bit : @@ignored.get & (0xFFFFFFFFFFFFFFFF_u64 ^ bit))
-      @@named.set(@@named.get & (0xFFFFFFFFFFFFFFFF_u64 ^ bit))
-      # The handler's thread may set another signal's bit meanwhile.
-      while true
-        seen = @@arrived.get
-        break if seen & bit == 0_u64 || @@arrived.compare_and_set(seen, seen & (0xFFFFFFFFFFFFFFFF_u64 ^ bit))[1]
-      end
-    {% else %}
-      @@installed = @@installed & (0xFFFFFFFFFFFFFFFF_u64 ^ bit)
-      disposition(signal.value, ignored ? 1_u64 : 0_u64)
-      # Its bytes still in the pipe are read into the pending bits first.
-      drain if @@read_fd >= 0
     {% end %}
-    @@pending = @@pending & (0xFFFFFFFFFFFFFFFF_u64 ^ bit)
+    guarded do
+      {% if flag?(:win32) %}
+        # The handler drops what it is told to ignore, answering "handled";
+        # with INT neither ignored nor named it answers 0, and Windows' own
+        # default - the end of the process - is taken. Installed here for
+        # the first, so an ignore needs no `wait` before it.
+        install(0_u64)
+        @@ignored.set(ignored ? @@ignored.get | bit : @@ignored.get & (0xFFFFFFFFFFFFFFFF_u64 ^ bit))
+        @@named.set(@@named.get & (0xFFFFFFFFFFFFFFFF_u64 ^ bit))
+        # The handler's thread may set another signal's bit meanwhile.
+        while true
+          seen = @@arrived.get
+          break if seen & bit == 0_u64 || @@arrived.compare_and_set(seen, seen & (0xFFFFFFFFFFFFFFFF_u64 ^ bit))[1]
+        end
+      {% else %}
+        @@installed = @@installed & (0xFFFFFFFFFFFFFFFF_u64 ^ bit)
+        disposition(signal.value, ignored ? 1_u64 : 0_u64)
+        # Its bytes still in the pipe are read into the pending bits first.
+        drain if @@read_fd >= 0
+      {% end %}
+      @@pending = @@pending & (0xFFFFFFFFFFFFFFFF_u64 ^ bit)
+    end
   end
 
   {% if flag?(:win32) %}
@@ -184,12 +213,16 @@ class SignalWaiter
       {% end %}
       wanted = wanted | 1_u64.unsafe_shl(signal.value.to_u64)
     end
-    install(wanted)
+    raise "two fibers reading one fd" unless @@waiting.compare_and_set(0_u64, 1_u64)[1]
+    defer @@waiting.set(0_u64)
+    guarded { install(wanted) }
     while true
-      {% if flag?(:win32) %}
-        @@pending = @@pending | @@arrived.swap(0_u64)
-      {% end %}
-      taken = take(signals)
+      taken = guarded do
+        {% if flag?(:win32) %}
+          @@pending = @@pending | @@arrived.swap(0_u64)
+        {% end %}
+        take(signals)
+      end
       return taken if taken
       waited = park
       return waited if waited.is_a?(Cancelled)
@@ -393,7 +426,7 @@ class SignalWaiter
     private def self.park : Nil | Cancelled
       waited = IyiScheduler.wait_readable_current(@@read_fd)
       return waited if waited.is_a?(Cancelled)
-      drain
+      guarded { drain }
       nil
     end
 

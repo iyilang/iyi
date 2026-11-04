@@ -325,6 +325,21 @@
 
 ### Fixed
 
+- **A second `Signal.wait` is refused whichever thread it is on.** One
+  fiber waits for signals at a time, and the second was refused by the
+  poller's rule of one reader per descriptor, which is each thread's
+  own. Two plain spawns that capture nothing run on the pool, and where
+  they landed on two workers both parked on the signal pipe, neither
+  refused; with no signal sent, both waited for good - 5 of 30 runs of
+  `bench/std_signal_exercise.sh`'s two waiters on Linux (12 vCPUs), and
+  its CI shard. `std/signal` counts its waits across the process now,
+  and refuses the second with the same "two fibers reading one fd" - 60
+  of 60 runs, and 40 of 40 with one waiter on the main thread and one on
+  the pool. Its pending and installed bits and its pipe are behind a
+  lock of their own, so a `wait` on one thread and an `ignore` on
+  another take turns. The exercise runs the two on two threads too, and
+  its broken copy without the count hangs there, on Linux and darwin.
+
 - **A connection's answer in the poller of a held worker is taken by an
   idle one (Linux, darwin).** Each worker keeps its own epoll or kqueue
   and looked at it only when its task parked or a back-edge check called

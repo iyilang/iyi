@@ -179,6 +179,19 @@
   holds such a class's arena through four short epochs, against a broken
   copy.
 
+- **On x86 an innermost loop starts on a 32-byte boundary.** LLVM aligns
+  every loop to 16; `-x86-experimental-pref-innermost-loop-alignment` is
+  set once a process. Where a hot loop lands decides how fast it runs:
+  `bench/runtime.py`'s arithmetic, cut into partitions, drew a slow
+  offset and ran 1.29x its one-module time, best of 30 interleaved on a
+  shared 12-vCPU Linux VM, and 0.99x aligned. What is left is 0 against
+  32 in a 64-byte line, 1.07x in one cut on Windows 11, 12 logical
+  processors (the user's machine); aligning to 64 put every build at 0,
+  the slower of the two there, 1.07x against the 32-aligned one module.
+  The padding is 1.5% of `samples/iyi/cores.iyi`'s text on Linux,
+  1480302 bytes to 1502862, and 1.1% of its binary on Windows, 1871360
+  to 1891840.
+
 ### Gates
 
 - **concurrent_mark.sh's wake-boost proof fires whatever the machine.**

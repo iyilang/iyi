@@ -4167,7 +4167,28 @@ module Iyi
       create_target_machine
     end
 
+    # iyi: on x86 an innermost loop starts on a 32-byte boundary, where LLVM
+    # aligns every loop to 16. Where a hot loop lands decides how fast it
+    # runs, and any change before it moves it: `bench/runtime.py`'s
+    # arithmetic loop, the same instructions, ran 0.32 s at offsets 0 to 12
+    # of a 64-byte line, 0.43 s at 13 to 16 and 0.30 s from 17 on. Cut into
+    # partitions it drew one of the slow offsets, 1.29x its one-module time
+    # best of 30 interleaved on a shared 12-vCPU Linux VM, and aligned the
+    # same cut ran 0.99x. What alignment leaves is 0 against 32: 1.07x in
+    # one cut on Windows 11, 12 logical processors (the user's machine).
+    # The padding is 1.5% of `samples/iyi/cores.iyi`'s text on Linux,
+    # 1480302 bytes to 1502862, and 1.1% of its binary on Windows. LLVM's
+    # own option, there since LLVM 12 and read as code is generated; parsed
+    # once a process, before its first target machine.
+    @@loops_aligned = false
+
     def create_target_machine
+      {% unless LibLLVM::IS_LT_120 %}
+        if !@@loops_aligned && @codegen_target.architecture.in?("x86_64", "i386")
+          @@loops_aligned = true
+          LLVM.parse_command_line_options({"", "-x86-experimental-pref-innermost-loop-alignment=5"})
+        end
+      {% end %}
       @codegen_target.to_target_machine(@mcpu || "", @mattr || "", @optimization_mode, @mcmodel)
     rescue ex : ArgumentError
       stderr.print colorize("Error: ").red.bold

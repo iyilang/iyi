@@ -102,9 +102,6 @@ symbols() {
     sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' |
     awk '{ print $NF }' |
     sed -e 's/^_//' |
-    # glibc's `__environ` alias and `environ` are one datum, whichever the
-    # libc links, folded as `bench/dependency_floor.sh` folds them.
-    sed -e 's/^_environ$/environ/' |
     grep -v '^$' |
     sort -u
 }
@@ -285,17 +282,15 @@ echo "== what root discovery asks the machine for"
 # `memset`, `realloc`, the file calls) are gone from the list, because an
 # entry nothing uses is a check without teeth.
 #
-# Two names are the pool's, not root discovery's: this program spawns, and
-# a spawn is the pool's now (parallel by default). Linux adds `environ`,
-# the C runtime's exported global, which the first spawn reads the pool's
-# size, `IYI_WORKERS`, through, as `bench/dependency_floor.sh` records it
-# for `Program.env`. darwin adds `close`, which the pool's growth brings
-# to every program there (`bench/thread_floor.sh` says by which chain);
-# macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine) printed it and
-# no `environ`.
+# darwin adds `close`, which is not root discovery's: the pool's growth
+# brings it to every program there (`bench/thread_floor.sh` says by which
+# chain), and macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine)
+# printed it here. This program's one task is `spawn_serial` (the fiber
+# root step says why), so it starts no pool and Linux reads no
+# `IYI_WORKERS`: no `environ`.
 case "$(uname -s)" in
   Linux)
-    allowed_symbols="$FLOOR_BASE_LINUX __data_start _end environ"
+    allowed_symbols="$FLOOR_BASE_LINUX __data_start _end"
     if ! command -v readelf >/dev/null 2>&1; then
       echo "  readelf is required on Linux to read NEEDED entries" >&2
       exit 2
@@ -379,11 +374,10 @@ echo
 echo "== the other platform's code, compiled and audited"
 # Not run. What this says is that the branch this machine does not take still
 # compiles, that its inline assembly assembles for both architectures, and that
-# it leaves exactly the symbols named above: the linker's three, and the
-# pool's `environ`.
+# it leaves exactly the two symbols named above.
 case "$(uname -s)" in
   Linux) other_targets="x86_64-darwin aarch64-darwin" ; other_expect="" ;;
-  *)     other_targets="x86_64-linux-gnu aarch64-linux-gnu" ; other_expect="__data_start __ehdr_start _end environ" ;;
+  *)     other_targets="x86_64-linux-gnu aarch64-linux-gnu" ; other_expect="__data_start __ehdr_start _end" ;;
 esac
 if [ -z "$NM" ]; then
   echo "  no nm here, so what these objects leave undefined is unmeasured; they still have to compile"

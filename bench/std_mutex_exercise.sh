@@ -245,25 +245,44 @@ prove_broken "a cancelled waiter whose block runs anyway" "not Cancelled" \
   '    if refused = acquire
       return refused
     end
-    defer release
+    register_release
     block.call(@value)
+    run_release
     nil
   end
 
   # The block'"'"'s answer' '    acquire
-    defer release
+    register_release
     block.call(@value)
+    run_release
     nil
   end
 
   # The block'"'"'s answer'
 prove_broken "a block that does not release" "already holds the lock" \
-  '    defer release
+  '    register_release
     block.call(@value)
+    run_release
     nil
   end
 
   # The block'"'"'s answer' '    block.call(@value)
+    nil
+  end
+
+  # The block'"'"'s answer'
+# A release not registered with the task's cleanups (`register_release`):
+# the lock is let go after the block, and kept by a block that panics -
+# first by the second lock its holder refuses.
+prove_broken "a release a panic does not run" "the panic released the lock it held" \
+  '    register_release
+    block.call(@value)
+    run_release
+    nil
+  end
+
+  # The block'"'"'s answer' '    block.call(@value)
+    release
     nil
   end
 
@@ -278,11 +297,11 @@ prove_broken "a release not counted as a change" hangs \
 # once did: its own release reads nobody waiting and skips the count, and
 # the waiter spins as above.
 prove_broken "a waiter counted after its release" hangs \
-  '    defer release
-    answer = block.call(@value)
+  '    answer = block.call(@value)
     @change_waiters.add(1_u64) if answer.nil?
+    run_release
 ' '    answer = block.call(@value)
-    release
+    run_release
     @change_waiters.add(1_u64) if answer.nil?
 '
 # The refusal of a wait nothing could end, taken out: the task parks, and

@@ -4,6 +4,23 @@
 
 ### Changed
 
+- **A `std/mutex` lock allocates nothing.** Its release was registered
+  for a panic in the block by a `defer`, a node and a closure made each
+  time; a Mutex now makes its node once and registers that, and its link
+  is written only when it changes, so tasks taking turns at a lock do not
+  pass the node's line between their cores. An uncontended update went
+  from 16-18 ns to 11-12 (Go's `sync.Mutex`: 8), and
+  `bench/chan_scaling.iyi`'s `held` shape, the nanoseconds an update loses
+  beyond its 20 us hold at 1, 2, 4 and 8 pairs, least of 7 interleaved:
+  on Linux x86_64 (12 vCPU, shared) 195/203/195/492 before, 145/123/151/395
+  after, Go's twin 137/222/364/473; on macOS 26.6, an M2 Pro with 10 cores
+  (the user's machine) 57/57/164/374, 13/17/74/208 and 58/83/399/550; on
+  Windows 11, 12 logical processors (the user's machine) 159/225/271/298
+  and 86/153/131/151 (Go's twin holds by a calibrated spin there, so its
+  figures do not compare). Tasks on one Mutex, millions of updates a
+  second at 4 and 12 (10 on the M2): 44.8/35.3 to 64.9/43.9 on Linux,
+  36.0/32.6 to 68.1/36.3 on the M2, 36.2/28.2 to 67.8/73.1 on Windows.
+
 - **Many producers into one channel no longer queue at its lock.** Every
   task waiting for a channel's lock read it between each of the holder's
   writes; now one of them spins on it and the rest look every 512 pauses
@@ -26816,7 +26833,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 27,604-line library and nothing else. Every other
+  written against iyi's own 27,628-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

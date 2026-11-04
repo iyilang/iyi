@@ -6550,9 +6550,27 @@ end
 # what is left on the list when a panic arrives is exactly what did not
 # get to clean up.
 def __iyi_defer_push(cleanup : Proc(Nil)) : Nil
+  __iyi_defer_push_node(IyiDeferNode.new(cleanup))
+end
+
+# A node its caller made once and registers each time it needs the
+# cleanup, never twice at once: std/mutex's release, where a `defer` was
+# two allocations, the node and its block's closure, around every block
+# a Mutex runs (`Mutex#register_release`). Its link is written only when
+# it changes and taken down when it is popped, so the tasks taking turns
+# at a lock, with nothing registered below it, read the node and never
+# write it: written each time, it was one more line passed between their
+# cores with the lock's own. A panic's drain leaves the link, which the
+# next push puts right.
+def __iyi_defer_push_node(node : IyiDeferNode) : Nil
   fiber = IyiScheduler.current
-  node = IyiDeferNode.new(cleanup)
-  node.next_node = fiber.defers
+  below = fiber.defers
+  linked = node.next_node
+  if below.is_a?(IyiDeferNode)
+    node.next_node = below unless linked.is_a?(IyiDeferNode) && linked.object_id == below.object_id
+  elsif linked.is_a?(IyiDeferNode)
+    node.next_node = nil
+  end
   fiber.defers = node
 end
 
@@ -6560,7 +6578,9 @@ def __iyi_defer_pop_run : Nil
   fiber = IyiScheduler.current
   node = fiber.defers
   return unless node.is_a?(IyiDeferNode)
-  fiber.defers = node.next_node
+  below = node.next_node
+  fiber.defers = below
+  node.next_node = nil if below.is_a?(IyiDeferNode)
   node.run
 end
 

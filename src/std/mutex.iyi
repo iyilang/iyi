@@ -46,8 +46,8 @@
 # ever release or change the value - panics saying that too, in the task
 # that waits; a deadlock anywhere else is the scheduler's to name, as it
 # names one on a channel. A panic inside the block releases the lock as
-# it leaves (`defer`), so a task that dies does not take the lock with
-# it.
+# it leaves (a cleanup registered as `defer` registers one), so a task
+# that dies does not take the lock with it.
 #
 # The lock is not fair, until a waiter starves: a task arriving as it is
 # released may take it ahead of one that waited, which is what keeps a
@@ -80,6 +80,8 @@ pub class Mutex(T)
   @change_waiters : Atomic(UInt64)
   # Waiters that have starved, which a release hands the lock to.
   @starving : Atomic(UInt64)
+  # The release as a registered cleanup, made once (`register_release`).
+  @release_node : IyiDeferNode
 
   # Spins before a waiter parks, while the holder may be running.
   SPINS     =   100
@@ -109,6 +111,7 @@ pub class Mutex(T)
     @changes = Atomic(UInt64).new(0_u64)
     @change_waiters = Atomic(UInt64).new(0_u64)
     @starving = Atomic(UInt64).new(0_u64)
+    @release_node = IyiDeferNode.new(-> { release })
   end
 
   # Runs the block with the value, the lock held; answers nil, or
@@ -117,8 +120,9 @@ pub class Mutex(T)
     if refused = acquire
       return refused
     end
-    defer release
+    register_release
     block.call(@value)
+    run_release
     nil
   end
 
@@ -128,8 +132,10 @@ pub class Mutex(T)
     if refused = acquire
       return refused
     end
-    defer release
-    block.call(@value)
+    register_release
+    answer = block.call(@value)
+    run_release
+    answer
   end
 
   # The value replaced by the block's answer, with the lock held: what a
@@ -139,8 +145,9 @@ pub class Mutex(T)
     if refused = acquire
       return refused
     end
-    defer release
+    register_release
     @value = block.call(@value)
+    run_release
     nil
   end
 
@@ -176,10 +183,50 @@ pub class Mutex(T)
   # before the release, with the lock still held, which is what lets a
   # release with nobody counted skip the count (`release`).
   private def held(block : T -> R?) : R? forall R
-    defer release
+    register_release
     answer = block.call(@value)
     @change_waiters.add(1_u64) if answer.nil?
+    run_release
     answer
+  end
+
+  # The lock just taken: its release registered with the task's cleanups,
+  # so a panic in the block lets it go on its way out, as a `defer
+  # release` would. A `defer` makes its node and its block's closure
+  # each time it is entered; this node is the Mutex's own, and a task
+  # holds the lock once at most (`acquire`), so it is registered once at
+  # a time (`__iyi_defer_push_node`). A 20 us hold in a block with a
+  # `defer` overran by 90 to 135 ns more than in one without, a node made
+  # once 50 to 60 (interleaved, 20,000 each, Linux x86_64, 12 vCPU,
+  # shared), where a loop of nothing but updates took 16 to 18 ns each.
+  #
+  # bench/chan_scaling.iyi before and with this: `held`, the least
+  # nanoseconds an update lost beyond its 20 us hold at 1/2/4/8 pairs,
+  # and Go's twin; `mutex`, millions of updates a second by tasks on one
+  # Mutex, and `mutexes`, by pairs on a Mutex each. Best of interleaved
+  # runs, 7 (`mutexes` 5):
+  #
+  #   Linux x86_64, 12 vCPU, shared: held 195/203/195/492 to 145/123/151/395
+  #     (Go 137/222/364/473); mutex 4/12 tasks 44.8/35.3 to 64.9/43.9;
+  #     mutexes 1/4/12 pairs 50.1/53.5/98.6 to 86.5/306.6/678.9
+  #   macOS 26.6, M2 Pro, 10 cores (the user's machine): held 57/57/164/374
+  #     to 13/17/74/208 (Go 58/83/399/550); mutex 4/10 36.0/32.6 to
+  #     68.1/36.3; mutexes 1/4/10 39.0/55.5/58.0 to 83.6/313.8/179.2
+  #   Windows 11, 12 logical processors (the user's machine): held
+  #     159/225/271/298 to 86/153/131/151; mutex 4/12 36.2/28.2 to
+  #     67.8/73.1; mutexes 1/4/12 41.0/35.6/90.1 to 77.8/235.8/474.2
+  #
+  # Most of what pairs gain is a holder taking its lock back before its
+  # partner wakes: written by every push, the node was one more line the
+  # two cores passed between them, and on the M2 four pairs made 25.6
+  # million updates a second with it against 330.7 without.
+  private def register_release : Nil
+    __iyi_defer_push_node(@release_node)
+  end
+
+  # The registered release, taken off the task's cleanups and run.
+  private def run_release : Nil
+    __iyi_defer_pop_run
   end
 
   # Parks until the count of releases is past *mine*, the one this task's

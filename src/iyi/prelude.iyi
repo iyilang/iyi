@@ -10830,6 +10830,10 @@ end
     IyiDefers.push(IyiDeferNode.new(cleanup))
   end
 
+  def __iyi_defer_push_node(node : IyiDeferNode) : Nil
+    IyiDefers.push(node)
+  end
+
   def __iyi_defer_pop_run : Nil
     IyiDefers.pop_run
   end

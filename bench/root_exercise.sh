@@ -285,11 +285,14 @@ echo "== what root discovery asks the machine for"
 # `memset`, `realloc`, the file calls) are gone from the list, because an
 # entry nothing uses is a check without teeth.
 #
-# Both add `environ`, which is not root discovery's: this program spawns,
-# and a spawn is the pool's now (parallel by default), whose size the
-# first spawn reads from `IYI_WORKERS` in the environment, the C runtime's
-# exported global, as `bench/dependency_floor.sh` records it for
-# `Program.env`.
+# Two names are the pool's, not root discovery's: this program spawns, and
+# a spawn is the pool's now (parallel by default). Linux adds `environ`,
+# the C runtime's exported global, which the first spawn reads the pool's
+# size, `IYI_WORKERS`, through, as `bench/dependency_floor.sh` records it
+# for `Program.env`. darwin adds `close`, which the pool's growth brings
+# to every program there (`bench/thread_floor.sh` says by which chain);
+# macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine) printed it and
+# no `environ`.
 case "$(uname -s)" in
   Linux)
     allowed_symbols="$FLOOR_BASE_LINUX __data_start _end environ"
@@ -310,7 +313,7 @@ case "$(uname -s)" in
     windows_floor=yes
     ;;
   *)
-    allowed_symbols="$FLOOR_BASE_DARWIN environ"
+    allowed_symbols="$FLOOR_BASE_DARWIN close"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"

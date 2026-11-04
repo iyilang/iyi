@@ -85,51 +85,57 @@ def waiter_parks : Nil
 end
 
 # Two workers: a holder that takes the lock again the moment it lets it go,
-# 1 ms a hold, and a waiter on the other worker asking five times in a
-# row. Each release wakes the waiter, and the holder, running, has the
-# lock back before the waiter does; a waiter that has waited 1 ms is
-# handed the lock instead (`Mutex::STARVE_NS`). Without the handoff it
-# waited out every one of the holder's holds, 599 ms of 600 on Linux.
-# Last, beside `waiter_parks`, and alone under `-- starves`.
+# 1 ms a hold, and a waiter on the other worker asking five times. Each
+# release wakes the waiter, and the holder, running, has the lock back
+# before the waiter does; a waiter that has waited 1 ms is handed the lock
+# instead (`Mutex::STARVE_NS`). Without the handoff it waited out every
+# one of the holder's holds, 599 ms of 600 on Linux. Last, beside
+# `waiter_parks`, and alone under `-- starves`.
 #
 # Five asks, each held to 150 ms, because without the handoff a waiter
 # can still find the lock free, where the holder is held up between a
 # release and its next take: on windows-2025's 4-processor runners 2 of
 # 20 runs of the copy that never starves, asking once, had it after 50
 # and 127 ms, the rest after 256 to 626 (debug run 41795743763), and the
-# copy passed in CI (job 126414108481). With the handoff the one ask took
-# 2 to 3 ms there, and on Windows 11, 12 logical processors (the user's
-# machine), where the copy's 20 took 257 to 605 ms. The holder stops
-# after 3,000 holds, so the copy's first ask that is not let in early
-# ends there.
+# copy passed in CI (job 126414108481). Five asks in a row were no
+# better, 2 of 40 runs of the copy passing (debug run 41799930288): the
+# waiter that had the lock once is the running thread at its release,
+# the holder the one woken, and the next four asks took the lock back as
+# the holder had. So each ask waits first for the holder to take the
+# lock twice more, and asks against a holder that is retaking it. With
+# the handoff the one ask took 2 to 3 ms there, and on Windows 11, 12
+# logical processors (the user's machine), where the copy's 20 took 257
+# to 605 ms. The holder stops after 3,000 holds, so the copy's first ask
+# that is not let in early ends there.
 def waiter_starves : Nil
   puts "\n== a waiter the holder keeps taking the lock back from"
   IyiWorkers.count = 2
   gate = Mutex.new { [0] }
-  holding = Atomic(Int64).new(0_i64)
+  holds = Atomic(Int64).new(0_i64)
   done = Atomic(Int64).new(0_i64)
+  stopped = Atomic(Int64).new(0_i64)
   longest = Atomic(Int64).new(-1_i64)
   group do |g|
     g.spawn_parallel do
-      holds = 0
-      while done.get == 0_i64 && holds < 3000
+      while done.get == 0_i64 && holds.get < 3000_i64
         gate.lock do |cell|
-          holding.set(1_i64)
           began = __iyi_monotonic_ns
           while __iyi_monotonic_ns - began < 1_000_000_i64
             IyiThread.spin_pause
           end
           cell[0] = cell[0] + 1
         end.or_panic
-        holds = holds + 1
+        holds.add(1_i64)
       end
+      stopped.set(1_i64)
       0
-    end
-    while holding.get == 0_i64
-      sleep(1)
     end
     g.spawn_parallel do
       5.times do
+        mark = holds.get
+        while holds.get < mark + 2_i64 && stopped.get == 0_i64
+          sleep(1)
+        end
         asked = now_ms
         gate.lock { |cell| cell[0] = cell[0] + 1 }.or_panic
         waited = now_ms - asked
@@ -140,7 +146,7 @@ def waiter_starves : Nil
     end
   end
   assert_true(longest.get >= 0_i64 && longest.get < 150_i64, "a waiter asking five times had the lock after #{longest.get} ms at the longest, the holder taking it back each time it let it go")
-  puts "  a waiter the holder kept taking the lock back from had it within 150 ms, five times in a row"
+  puts "  a waiter the holder kept taking the lock back from had it within 150 ms, five times"
 end
 
 if Program.args.includes?("parks")

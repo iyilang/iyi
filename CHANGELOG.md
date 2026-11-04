@@ -4,6 +4,35 @@
 
 ### Changed
 
+- **`@[SafeReach]` is proven, not trusted (SPEC.md III.4.4).** The mark
+  on a constant or a class variable quieted the reach warning and let a
+  spawn that reaches the state run in parallel, and nothing checked it:
+  `bench/parallel_exercise.sh` carried a constant whose method assigned a
+  field from two parallel tasks under the claim. The compiler now accepts
+  the mark only when (a) the state's type is `Share`, (b) every write,
+  and every read once a parallel task may run, is behind one `Mutex#lock`
+  on a constant or a class variable (or a prelude `IyiSchedLock` or
+  `IyiRuntimeLock` bracket), or (c) every write comes before the first
+  parallel task can start; anything else refuses the annotation, naming a
+  write that breaks it, how it writes and where it may run from. A copy
+  of the state kept where the proof cannot follow it - stored in an
+  array or a field, answered from a proc - is refused wherever it is
+  kept. A program that compiled may now be refused: the ways out are a
+  `Share` type (`Mutex`, `Atomic`, `List`), moving the writes before the
+  first spawn, one `Mutex` around every write and read, or, in src/iyi or
+  in a file that already uses `Pointer`, the new `@[UnsafeReach("why")]`,
+  taken on trust. In this repository `bench/reuse_integrity.iyi` keeps its
+  pairs in a `Mutex`, `bench/parallel_exercise.sh`'s `Database` builds its
+  rows in `initialize` and is only read, and `bench/arena_exercise.iyi`
+  and `bench/thread_exercise.iyi` say `@[UnsafeReach]` beside their
+  `Pointer`s. No external code carries the mark: iyi-db has none,
+  iyi-pg's CHANGELOG and iyi-web's README mention it in prose, and the
+  website excerpts `samples/iyi/cores.iyi`, still proven. The proof adds
+  0.09 to 0.10 s and 15 MB of RSS to a 1.9 to 2.3 s `iyi check` of a small
+  server with three claims, and 0.10 to 0.11 s and 20 MB to 2.5 to 2.7 s on
+  iyi-web's `examples/security.iyi` given two (Linux, 12 vCPU, three runs
+  each); as first written it took 3.87 s and grew RSS to 4,069 MB.
+
 - **Each channel has a lock of its own, and so does each list a
   `std/mutex` waiter parks in.** Every channel was behind the runtime's
   one scheduler lock, and tasks talking on channels of their own on
@@ -223,6 +252,14 @@
   copy.
 
 ### Gates
+
+- **`bench/safe_reach.sh` holds the SafeReach proof (SPEC.md III.4.4).**
+  The issue's unguarded write is refused, where the compiler before
+  checked it clean; (a), (b) and (c) are each accepted beside broken
+  copies refused - a counter class, a write and a read outside the lock,
+  a write after the first spawn and a copy kept at module init; and
+  `@[UnsafeReach]` is accepted beside a `Pointer` and refused without
+  one. It runs in CI's Linux job.
 
 - **concurrent_mark.sh's wake-boost proof fires whatever the machine.**
   The proof gives the mark's helpers back the boost a satisfied wait

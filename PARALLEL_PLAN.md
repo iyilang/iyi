@@ -88,10 +88,11 @@ to 352 ms against Go's 152 to 260, and its peak working set 430 MB against
 system does not know which values stay put.
 
 Risks, named now: it is a redesign of the collector and allocator, and every
-hole in the `Share` proof becomes a hole in the heap split. `Pointer` and
-`@[SafeReach]` both let a program claim what the compiler did not check, and
-both need a rule before this starts. It begins as a prototype that is
-measured, and is kept or dropped on the numbers.
+hole in the `Share` proof becomes a hole in the heap split. `@[SafeReach]`
+is proven now (SPEC.md III.4.4); `Pointer`, and `@[UnsafeReach]`, kept for
+src/iyi and for files that use `Pointer`, still let a program claim what
+the compiler did not check, and need a rule before this starts. It begins
+as a prototype that is measured, and is kept or dropped on the numbers.
 
 ## Deliberately not done
 

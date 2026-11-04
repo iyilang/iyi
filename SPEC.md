@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 27,368 lines, of which 4,650 are the library held to the 4,650 ceiling (6,688 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 133,001 lines, none of it written in iyi |
+| compiler | 134,796 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 133,001 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 134,796 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 27,368-line own prelude + 126,231 in std |
-| Specs | 21,146 lines | 16,044 for iyi |
+| Specs | 21,146 lines | 16,475 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2735,7 +2735,7 @@ the group. That is `errgroup`'s behaviour, typed and built in. The group stays
 cancelled: a task spawned on it after the failure starts cancelled, where one
 spawned 10 ms after it slept its full 2,000 ms, and the group's join with it.
 
-#### III.4.4 Data races are a compile error, and R-3 is why that is affordable: **BUILT, gating the block a thread runs**
+#### III.4.4 Data races are a compile error, and R-3 is why that is affordable: **BUILT, gating the block a thread runs; a `@[SafeReach]` claim proven, not trusted, BUILT**
 
 A marker trait, `Share`, decided structurally: a type is shareable if every
 field is shareable and none is mutable, or if it is a synchronised type that
@@ -2914,7 +2914,8 @@ Array(String)`, the commonest case - is told it can be a `List`, which is
 that knows its state is safe says so on the declaration, with the reason
 as the claim: `@[SafeReach("set once at startup, then only read")]` on a
 constant or a class variable quiets the warning for it alone, and never
-the refusal of a block that names it. The warning is a build's and
+the refusal of a block that names it - and the compiler proves the claim,
+or refuses it (below). The warning is a build's and
 `iyi check`'s, and `--error-on-warnings` makes it a failure in either.
 Held by `spec/compiler/semantic/iyi_spec.cr` (fifteen shapes: the issue's
 program with its exact text, a `@[Share]` def's block, a direct naming
@@ -2936,10 +2937,111 @@ walk itself 3.4 to 4.2 ms, of a main semantic stage of about 1.4 s.
 Gathering costs nothing measurable: `iyi check` of iyiturkiye took 4.12
 to 5.78 s warning 1251 times and 3.94 to 4.22 s warning 37 times, three
 runs each, interleaved (Linux, a 12-vCPU QEMU guest with 11 GB).
-In this tree the walk found three benches whose threads reach a class
-variable one at a time, each joined before the next starts or before the
-main thread reads it, or each writing its own reserved slot; each is
-marked with that reason.
+
+**A `@[SafeReach]` claim is proven, not trusted: BUILT.** The mark quiets
+the warning for its state and lets a plain spawn that reaches the state
+run in parallel (III.4.15), so it says every thread may reach the state
+safely. Until this was built nothing checked that: `bench/parallel_exercise.sh`
+carried a constant whose one method assigned a field from two parallel
+tasks, under the claim that one task asked at a time. The compiler now
+proves the claim once the cleanup has typed the whole program
+(`ReachProof`), and accepts it when one of three things holds:
+
+- **(a)** the state's type is `Share`: an `Atomic`, a `Mutex(T)`, a
+  `Channel`, a `List`, or a value nothing writes once it is made, by the
+  structural rule above;
+- **(b)** every write to it is behind one lock the compiler can name - the
+  block of a `Mutex#lock` (or of another method of an
+  `@[Share(owns: true)]` type) whose receiver is a constant or a class
+  variable, or a bracket `IyiSchedLock.lock ... IyiSchedLock.unlock` (or
+  `IyiRuntimeLock`'s, its `begin ... ensure X.unlock end` form included)
+  written in the prelude - and so is every read that may run once a
+  parallel task can, since a lock around the writer is no protection to a
+  reader beside it. Writes behind two different locks are refused: they do
+  not exclude each other;
+- **(c)** every write comes before the first parallel task can start: in
+  the constant's initializer, at module init, or in top-level code before
+  the first statement that may start one - a group's spawn of any
+  spelling, `IyiThread.start`, or a call to a `@[Share]` def, written
+  outside std and the prelude - and in the defs only such code calls.
+
+Anything else refuses the annotation itself, naming one write that breaks
+it, how it writes and where it may run from: ``@[SafeReach] on `DATABASE`
+is refused: nothing proves every thread may reach it safely.
+`DATABASE.query_one(n)` in `ask` at unguarded.iyi:18:12 writes it
+(`Database#query_one` assigns `@total`, in `@total = @total + 1`), and it
+may run once a parallel task has started, behind no lock the compiler can
+name: the block `spawn(parallel: true)` runs as a parallel task, at
+unguarded.iyi:22:5, which calls `ask` ``, followed by the three ways to be
+accepted. What writes is found through std and the prelude too, since
+`Array#<<` writes its receiver only through `Pointer#[]=`: whether a def
+may write its receiver, a parameter or its block's value - a field
+assigned, memory set through a pointer, an address taken, a value handed
+to a C function - through every call that passes the value on. A value
+derived from the state is the state: a call's answer that is not `Share`
+and may be the receiver or an argument, a local holding it, a block's
+argument, a def that answers it - so `held = SETTINGS.ports; held.clear`
+is a write of `SETTINGS`. A copy kept where the walk cannot follow it -
+stored in a field or in memory (`COPIES = [TABLE]`), or answered from a
+proc (`-> { TABLE }`) - is refused wherever it is kept, at module init
+too, since whatever writes through the copy may do so anywhere and later;
+a stored value whose type is `Share` keeps nothing. A block kept to run
+later (a captured block, a proc) runs anywhere, as does the block a
+parallel task runs, and a def the proof cannot place runs anywhere.
+
+**The escape hatch.** A case genuinely beyond the proof says
+`@[UnsafeReach("why")]`, taken on trust as the mark used to be. It is
+allowed in the prelude and runtime (`src/iyi`, the directory that holds
+`prelude.iyi`, and not std beneath it) **or** in a file that already uses
+`Pointer` - names it, or takes an address with `pointerof` - either one
+being enough: a file that already handles raw memory is already outside
+what the compiler proves, and says so. Anywhere else it is refused,
+pointing at `@[SafeReach]` and at the `Share` types; one state may not
+carry both marks.
+
+**Where the repository stands.** No `SafeReach` is in `src/iyi` or
+`src/std`, so no `UnsafeReach` is either. `samples/iyi/cores.iyi`'s
+`GREETING` and `bench/spawn_eligible.sh`'s `LIMITS` are proven by (c), as
+is `bench/parallel_exercise.sh`'s `Database`, which now builds its rows in
+`initialize` and is only read after. `bench/reuse_integrity.iyi` keeps its
+pairs in `KEPT = Mutex.new { [] of Pair }`, `Share` by (a).
+`bench/arena_exercise.iyi`'s `Thinned.@@kept` and
+`bench/thread_exercise.iyi`'s `Ledgers.@@all`, whose threads write
+reserved slots one at a time, are `@[UnsafeReach]` in files that use
+`Pointer`. Held by `spec/compiler/semantic/iyi_spec.cr` (eighteen shapes
+under "a SafeReach claim": a write through a call, the field and block it
+names, a class variable through its getter, a local alias; (a) accepted;
+(b) accepted, and refused for a second lock, an unlocked read and a lock
+whose receiver is not a constant or class variable; (c) accepted, and
+refused for a write after the start, with a def that starts a task as the
+start, for a write in a proc kept to run later, and for a proc answering
+the state; `UnsafeReach` refused without `Pointer` and trusted with it;
+both marks refused; the prelude bracket taken in the prelude alone) and by
+`bench/safe_reach.sh`, in CI's Linux job: the issue's unguarded write
+refused, which the compiler before this checked clean; (a), (b) and (c)
+each accepted beside broken copies refused - a counter class for (a), a
+write and a read outside the lock for (b), a write after the start and a
+copy kept at module init for (c); `UnsafeReach` accepted beside `Pointer`
+and refused without it.
+
+**What it costs.** The proof runs only when a program has a `SafeReach`
+on state whose type is not `Share` by what it declares. It reads every
+callable the program may run once, for its calls alone, and what writes
+only from where the claimed state is: the callables that name it or call
+one answering it, and the callees they hand it to, slot by slot. On a
+small server with three claims (`Server.serve` and a `Hash`, an `Array`
+and a settings object) it took 0.10 s and 15 MB of RSS beside a 1.9 to
+2.3 s `iyi check`; on iyi-web's `examples/security.iyi` given two claims,
+0.10 to 0.11 s and 20 MB beside 2.5 to 2.7 s (`--stats`, three runs each,
+Linux, a 12-vCPU QEMU guest with 11 GB). As first written, reading every
+def's writes and asking the structural `Share` rule of every type it met,
+the first program's proof took 3.87 s and grew RSS from 515 MB to
+4,069 MB.
+
+Not modelled: a constant read before its declaration, initialised where
+it is first read; a claim on state imported from a `.iyimod` artifact,
+untested. A plain `spawn` counts as a start, whether or not III.4.15
+moves it, since where it runs depends on the claims being proven.
 
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,
@@ -4968,6 +5070,10 @@ thread may reach it safely" - a claim about the constant or class
 variable, not about one block - and a claim that held for every
 `spawn(parallel: true)` block reaching the state and not for a spawn reaching the
 same state through the same call would be two meanings for one sentence.
+The claim is proven, not trusted (III.4.4): a write the proof cannot
+place before the first parallel task or behind one named lock refuses the
+mark, so a spawn moved on its strength reaches state no thread writes
+unsafely.
 What the walk does not enter it does not enter for either verb: std and
 the prelude, whose state is theirs to keep safe at their own boundaries,
 which is what `spawn(parallel: true)` and `Server.serve` already stand on.
@@ -5248,7 +5354,8 @@ no spawn of the server's moved, which these three rounds do not explain.
 **10. Settled, and what is left.**
 
 - `@[SafeReach]` keeps making a spawn eligible (part 1), as it makes a
-  `spawn(parallel: true)` block pass.
+  `spawn(parallel: true)` block pass, now that the claim is proven
+  (III.4.4).
 - A program that assumed spawn order (part 8) says so with
   `spawn(serial: true)` where the order is the step's subject; none of those
   assumptions was in std.

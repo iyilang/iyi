@@ -5419,6 +5419,25 @@ describe "Semantic: iyi" do
 
       reach_warnings = ->(code : String) { semantic(code, filename: "x.iyi").program.warnings.infos }
 
+      # A type that is not Share - `add` assigns its field - with a reader:
+      # what a SafeReach claim the compiler can prove is made on.
+      ledger = <<-LEDGER
+        class Ledger
+          def initialize
+            @rows = 0
+          end
+
+          def add : Nil
+            @rows = 1
+          end
+
+          def rows : Int32
+            @rows
+          end
+        end
+
+        LEDGER
+
       it "warns at the block, naming the constant, its type, why and the path" do
         code = reach_stub + <<-CODE
           def ask_twice : Int64
@@ -5512,12 +5531,13 @@ describe "Semantic: iyi" do
       end
 
       it "is silenced by @[SafeReach] for that constant alone" do
-        infos = reach_warnings.call(reach_stub + <<-CODE)
+        infos = reach_warnings.call(reach_stub + ledger + <<-CODE)
           @[SafeReach("set once at startup, then only read")]
-          QUIET = Database.new
+          QUIET = Ledger.new
+          QUIET.add
 
           def both : Int64
-            QUIET.query_one(1_i64)
+            QUIET.rows
             ask(2_i64)
           end
 
@@ -5614,16 +5634,21 @@ describe "Semantic: iyi" do
       end
 
       it "is silenced by @[SafeReach] on a class variable" do
-        infos = reach_warnings.call(reach_stub + <<-CODE)
+        infos = reach_warnings.call(reach_stub + ledger + <<-CODE)
           class Registry
-            @[SafeReach("one thread at a time, joined before anything reads it")]
-            @@db = Database.new
+            @[SafeReach("filled at startup, then only read")]
+            @@db = Ledger.new
 
-            def self.ask : Int64
-              @@db.query_one(1_i64)
+            def self.fill : Nil
+              @@db.add
+            end
+
+            def self.ask : Int32
+              @@db.rows
             end
           end
 
+          Registry.fill
           g = G
           g.spawn(parallel: true) do
             Registry.ask
@@ -5801,6 +5826,392 @@ describe "Semantic: iyi" do
           infos[1].should contain("reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value")
         ensure
           FileUtils.rm_rf(root)
+        end
+      end
+
+      # `@[SafeReach]` proven, not trusted (`ReachProof`): accepted when the
+      # state is Share (a), when every write and every later read is behind
+      # one lock (b), or when every write comes before the first parallel
+      # task (c); refused otherwise, naming a write that breaks it.
+      describe "a SafeReach claim" do
+        it "is refused when a parallel block writes the state through a call" do
+          assert_error(reach_stub + <<-CODE, "@[SafeReach] on `QUIET` is refused: nothing proves every thread may reach it safely. `QUIET.query_one(1_i64)` in `both` at x.iyi:", filename: "x.iyi")
+            @[SafeReach("set once at startup, then only read")]
+            QUIET = Database.new
+
+            def both : Int64
+              QUIET.query_one(1_i64)
+            end
+
+            g = G
+            g.spawn_parallel do
+              both
+              nil
+            end
+            CODE
+        end
+
+        it "names the field the write assigns and the block it runs from" do
+          ex = expect_raises(TypeException) do
+            semantic(reach_stub + <<-CODE, filename: "x.iyi")
+              @[SafeReach("set once at startup, then only read")]
+              QUIET = Database.new
+
+              def both : Int64
+                QUIET.query_one(1_i64)
+              end
+
+              g = G
+              g.spawn_parallel do
+                both
+                nil
+              end
+              CODE
+          end
+          ex.message.not_nil!.should contain("writes it (`Database#query_one` assigns `@total`, in `@total = 1`), and it may run once a parallel task has started, behind no lock the compiler can name: the block `spawn_parallel` runs as a parallel task, at x.iyi:")
+          ex.message.not_nil!.should contain(", which calls `both`. SafeReach is proven when")
+        end
+
+        it "is refused for a class variable written through the getter that answers it" do
+          assert_error(reach_stub + ledger + <<-CODE, "@[SafeReach] on `@@db` is refused: nothing proves every thread may reach it safely. `Registry.db.add` in `note` at x.iyi:", filename: "x.iyi")
+            class Registry
+              @[SafeReach("one thread at a time")]
+              @@db = Ledger.new
+
+              def self.db : Ledger
+                @@db
+              end
+            end
+
+            def note : Nil
+              Registry.db.add
+            end
+
+            g = G
+            g.spawn_parallel do
+              note
+              nil
+            end
+            CODE
+        end
+
+        it "is refused for a write through a local that holds the state" do
+          assert_error(reach_stub + ledger + <<-CODE, "@[SafeReach] on `QUIET` is refused: nothing proves every thread may reach it safely. `held.add` in `note`", filename: "x.iyi")
+            @[SafeReach("set once at startup, then only read")]
+            QUIET = Ledger.new
+
+            def note : Nil
+              held = QUIET
+              held.add
+            end
+
+            g = G
+            g.spawn_parallel do
+              note
+              nil
+            end
+            CODE
+        end
+
+        it "is accepted on a Share type (a)" do
+          infos = reach_warnings.call(reach_stub + <<-CODE)
+            class Limit
+              def initialize(@limit : Int32)
+              end
+
+              def limit : Int32
+                @limit
+              end
+            end
+
+            @[SafeReach("nothing writes it once it is made")]
+            LIMIT = Limit.new(4)
+
+            def limit : Int32
+              LIMIT.limit
+            end
+
+            g = G
+            g.spawn_parallel do
+              limit
+              nil
+            end
+            CODE
+          infos.should be_empty
+        end
+
+        it "is accepted when every write and every later read is behind one lock (b)" do
+          infos = reach_warnings.call(owning + reach_stub + ledger + <<-CODE)
+            GUARD = Guard.new { Bag.new }
+
+            @[SafeReach("every write and every read is behind GUARD")]
+            QUIET = Ledger.new
+
+            def note : Nil
+              QUIET.add
+            end
+
+            def rows : Int32
+              QUIET.rows
+            end
+
+            g = G
+            g.spawn_parallel do
+              GUARD.lock { |bag| note }
+              GUARD.get { |bag| rows }
+              nil
+            end
+            CODE
+          infos.should be_empty
+        end
+
+        it "is refused when a write is behind a second lock (b)" do
+          assert_error(owning + reach_stub + ledger + <<-CODE, "is behind `OTHER`'s lock, and `QUIET.add` at x.iyi:", filename: "x.iyi")
+            GUARD = Guard.new { Bag.new }
+            OTHER = Guard.new { Bag.new }
+
+            @[SafeReach("every write is behind a lock")]
+            QUIET = Ledger.new
+
+            def note : Nil
+              QUIET.add
+            end
+
+            g = G
+            g.spawn_parallel do
+              GUARD.lock { |bag| note }
+              OTHER.lock { |bag| note }
+              nil
+            end
+            CODE
+        end
+
+        it "is refused when a read beside the locked writes takes no lock (b)" do
+          assert_error(owning + reach_stub + ledger + <<-CODE, "@[SafeReach] on `QUIET` is refused: `QUIET.add` at x.iyi:", filename: "x.iyi")
+            GUARD = Guard.new { Bag.new }
+
+            @[SafeReach("every write is behind GUARD")]
+            QUIET = Ledger.new
+
+            def note : Nil
+              QUIET.add
+            end
+
+            def rows : Int32
+              QUIET.rows
+            end
+
+            g = G
+            g.spawn_parallel do
+              GUARD.lock { |bag| note }
+              rows
+              nil
+            end
+            CODE
+        end
+
+        it "is refused when the lock's receiver is not a constant or a class variable (b)" do
+          assert_error(owning + reach_stub + ledger + <<-CODE, "behind `guard`'s lock, which the compiler cannot name", filename: "x.iyi")
+            @[SafeReach("every write is behind a lock")]
+            QUIET = Ledger.new
+
+            def note : Nil
+              QUIET.add
+            end
+
+            guard = Guard.new { Bag.new }
+            g = G
+            g.spawn_parallel do
+              guard.lock { |bag| note }
+              nil
+            end
+            CODE
+        end
+
+        it "is accepted when every write comes before the first parallel task (c)" do
+          infos = reach_warnings.call(reach_stub + ledger + <<-CODE)
+            @[SafeReach("filled at startup, then only read")]
+            QUIET = Ledger.new
+
+            def fill : Nil
+              QUIET.add
+            end
+
+            fill
+            QUIET.add
+
+            def rows : Int32
+              QUIET.rows
+            end
+
+            g = G
+            g.spawn_parallel do
+              rows
+              nil
+            end
+            rows
+            CODE
+          infos.should be_empty
+        end
+
+        it "is refused when a write comes after the first parallel task may start (c)" do
+          assert_error(reach_stub + ledger + <<-CODE, "`QUIET.add` in the program's top level at x.iyi:", filename: "x.iyi")
+            @[SafeReach("filled at startup, then only read")]
+            QUIET = Ledger.new
+            QUIET.add
+
+            def rows : Int32
+              QUIET.rows
+            end
+
+            g = G
+            g.spawn_parallel do
+              rows
+              nil
+            end
+            QUIET.add
+            CODE
+        end
+
+        it "counts a def that starts a task as the start (c)" do
+          assert_error(reach_stub + ledger + <<-CODE, "after the statement at x.iyi:", filename: "x.iyi")
+            @[SafeReach("filled at startup, then only read")]
+            QUIET = Ledger.new
+
+            def rows : Int32
+              QUIET.rows
+            end
+
+            def launch : Nil
+              G.spawn_parallel do
+                rows
+                nil
+              end
+            end
+
+            launch
+            QUIET.add
+            CODE
+        end
+
+        it "is refused when a write at startup sits in a proc kept to run later (c)" do
+          assert_error(owning + reach_stub + ledger + <<-CODE, "a proc, which may run whenever it is called", filename: "x.iyi")
+            @[SafeReach("filled at startup, then only read")]
+            QUIET = Ledger.new
+
+            later = -> { QUIET.add }
+
+            def rows : Int32
+              QUIET.rows
+            end
+
+            g = G
+            g.spawn_parallel do
+              rows
+              nil
+            end
+            later.call
+            CODE
+        end
+
+        it "refuses @[UnsafeReach] in a file that does not use Pointer" do
+          assert_error(reach_stub + <<-CODE, "@[UnsafeReach] on `QUIET` is not allowed here", filename: "x.iyi")
+            @[UnsafeReach("one task asks at a time")]
+            QUIET = Database.new
+            CODE
+        end
+
+        it "takes @[UnsafeReach] on trust in a file that uses Pointer" do
+          infos = reach_warnings.call(reach_stub + <<-CODE)
+            @[UnsafeReach("one task asks at a time")]
+            QUIET = Database.new
+
+            def both : Int64
+              QUIET.query_one(1_i64)
+            end
+
+            def raw(at : Pointer(UInt8)) : Pointer(UInt8)
+              at
+            end
+
+            g = G
+            g.spawn_parallel do
+              both
+              nil
+            end
+            CODE
+          infos.should be_empty
+        end
+
+        it "refuses both marks on one state" do
+          assert_error(reach_stub + <<-CODE, "is marked both @[SafeReach] and @[UnsafeReach]", filename: "x.iyi")
+            class Registry
+              @[SafeReach("one")]
+              @@db = Database.new
+
+              def self.ask : Int64
+                @@db.query_one(1_i64)
+              end
+
+              @[UnsafeReach("two")]
+              @@db = Database.new
+            end
+            CODE
+        end
+
+        # A bracket `IyiSchedLock.lock ... IyiSchedLock.unlock` is a lock
+        # in the prelude's own files, and nowhere else.
+        it "takes a prelude bracket as a lock, in the prelude alone (b)" do
+          root = File.tempname("iyi-bracket")
+          Dir.mkdir_p(File.join(root, "iyi"))
+          File.write(File.join(root, "iyi", "prelude.iyi"), "")
+          code = <<-CODE
+            class IyiSchedLock
+              def self.lock : Nil
+              end
+
+              def self.unlock : Nil
+              end
+            end
+
+            class Registry
+              @[SafeReach("written and read behind the scheduler's lock")]
+              @@ledger = Ledger.new
+
+              def self.note : Nil
+                IyiSchedLock.lock
+                @@ledger.add
+                IyiSchedLock.unlock
+              end
+
+              def self.rows : Int32
+                IyiSchedLock.lock
+                rows = @@ledger.rows
+                IyiSchedLock.unlock
+                rows
+              end
+            end
+
+            g = G
+            g.spawn_parallel do
+              Registry.note
+              Registry.rows
+              nil
+            end
+            CODE
+          begin
+            semantic(parse(reach_stub + ledger + code, filename: File.join(root, "iyi", "sched.iyi")), warnings: WarningCollection.new)
+            expect_raises(TypeException, /`@@ledger.add` in `Registry.note`/) do
+              semantic(parse(reach_stub + ledger + code, filename: File.join(root, "sched.iyi")), warnings: WarningCollection.new)
+            end
+            late = code.sub("@@ledger.add\n    IyiSchedLock.unlock", "IyiSchedLock.unlock\n    @@ledger.add")
+            late.should_not eq(code)
+            expect_raises(TypeException, /`@@ledger.add` in `Registry.note`/) do
+              semantic(parse(reach_stub + ledger + late, filename: File.join(root, "iyi", "sched.iyi")), warnings: WarningCollection.new)
+            end
+          ensure
+            FileUtils.rm_rf(root)
+          end
         end
       end
     end

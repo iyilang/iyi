@@ -102,13 +102,14 @@ module Iyi
       Facts.new(scanner.named, scanner.calls)
     end
 
-    # The reason `@[SafeReach("...")]` on a constant or a class variable
-    # gives: one string with something in it, since the reason is the
-    # claim, and a bare mark would document nothing.
+    # The reason `@[SafeReach("...")]` or `@[UnsafeReach("...")]` on a
+    # constant or a class variable gives: one string with something in it,
+    # since the reason is the claim, and a bare mark would document nothing.
     def self.claim(ann : Annotation, what : String) : String
       reason = ann.args.first?
       unless ann.args.size == 1 && ann.named_args.nil? && reason.is_a?(StringLiteral) && !reason.value.blank?
-        ann.raise "SafeReach takes one string, the reason every thread may reach #{what} through a call: `@[SafeReach(\"set once at startup, then only read\")]`"
+        name = ann.path.names.last
+        ann.raise "#{name} takes one string, the reason every thread may reach #{what} through a call: `@[#{name}(\"set once at startup, then only read\")]`"
       end
       reason.value
     end

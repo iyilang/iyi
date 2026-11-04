@@ -7,7 +7,8 @@
 # and its block may capture only what is `Share` (III.4.4). std/http's
 # `Server.serve` puts each connection on that pool, so its block is checked
 # the same way. When a block reaches module state through a call, the
-# compiler warns, and `@[SafeReach("why")]` on the state says why it is safe.
+# compiler warns, and `@[SafeReach("why")]` on the state says why it is
+# safe - a claim the compiler proves, or refuses naming the write.
 module samples/cores
 
 import std/http::{HTTP, Response, Server}
@@ -71,7 +72,9 @@ paths = Mutex.new { [] of String }
 # A parallel block that names `GREETING` is refused, because an `Array` is
 # not `Share`. One that only calls `greeting` used to compile with nothing
 # said; now the compiler warns at the block, naming the path. This constant
-# is set before the server starts and only read afterwards, so it says so.
+# is set before the server starts and only read afterwards, so it says so,
+# and the compiler checks it: nothing writes `GREETING` once a parallel
+# task can start (SPEC.md III.4.4).
 @[SafeReach("set once before the server starts, then only read")]
 GREETING = ["hello", "from", "every", "core"]
 

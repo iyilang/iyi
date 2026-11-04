@@ -74,7 +74,9 @@
 #      a loop's local are refused, each by name. A block that reaches a
 #      constant that is not Share through a def it calls is warned about
 #      with the path, a failed build under `--error-on-warnings`; its
-#      copy with the constant marked `@[SafeReach]` builds clean under it.
+#      copy with the constant marked `@[SafeReach]` builds clean under it,
+#      the constant built at startup and only read, which the compiler
+#      proves (bench/safe_reach.sh holds what it refuses).
 #      Two blocks reaching it are one warning, counting the other.
 #   7. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: a cross-thread wake that does not ring (a lost
@@ -726,22 +728,26 @@ end'
 # 1251 warnings about 37 constants, each once per route that reached
 # it, on Linux; gathered they are 37. Its broken copy
 # has the second block left out, and says nothing of another block.
+# The clean copy's `Database` is built at startup and only read: its
+# claim is one the compiler proves. This copy once assigned a field in
+# `query_one`, from both tasks, under the claim that one task asked,
+# and passed; that claim is refused now (bench/safe_reach.sh).
 step "a parallel block reaching a constant through a call is warned about"
 cat > reaches.iyi <<'IYI'
 module reaches
 
 class Database
   def initialize
-    @total = 0
+    @rows = [] of Int64
+    @rows << 7_i64
   end
 
   def query_one(n : Int64) : Int64
-    @total += 1
-    n
+    @rows[0] + n
   end
 end
 
-@[SafeReach("the gate's clean copy: one task asks, and the program says so")]
+@[SafeReach("the gate's clean copy: built at startup, and every task only reads it")]
 DATABASE = Database.new
 
 def ask(n : Int64) : Int64

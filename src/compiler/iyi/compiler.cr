@@ -3364,7 +3364,7 @@ module Iyi
       units = llvm_modules.map do |type_name, info|
         llvm_mod = info.mod
         llvm_mod.target = target_triple
-        CompilationUnit.new(self, program, type_name, llvm_mod, output_dir, bc_flags_changed)
+        CompilationUnit.new(self, program, type_name, llvm_mod, output_dir, bc_flags_changed, verify: !single_module)
       end
 
       # iyi: one optimised module is cut into partitions that are optimised
@@ -4056,26 +4056,61 @@ module Iyi
       unit.finish_partitions
     end
 
+    # iyi: two rounds on the same threads. Measured on samples/iyi/cores.iyi,
+    # a debug build from a cold cache on Linux (12 vCPU VM, release compiler,
+    # `IYI_PROF=1` and five interleaved builds per row, 2026-11-04).
+    #
+    # The first prepares every unit (`CompilationUnit#prepare`): verifies its
+    # module, writes its bitcode and compares that with the cache's. Crystal
+    # did the last two on the main thread, one unit after another, feeding the
+    # workers as it went, and then had each worker read the bitcode back into a
+    # fresh context before compiling, because its modules once shared contexts.
+    # Here each has its own (`CodeGenVisitor#type_module`), so a worker
+    # compiles the module the visitor built. Writing 404 units' bitcode was
+    # 155 ms of the main thread, and verifying them 64 ms more before it; the
+    # round that does both takes 25 ms. Reading the bitcode back cost 38 ms of
+    # the stage (0.361 s against 0.323, best of five).
+    #
+    # The second compiles the units whose bitcode changed, the largest first.
+    # The order they came in is the order the visitor met their types, and
+    # left the largest unit (`Std::Tls::TlsClient`, 212 ms of a 3.3 s round)
+    # to start whenever it came up. Bitcode size is the measure of a unit's
+    # work that is known before it starts, and taking the largest first is
+    # what bounds a round by its largest unit rather than by where that unit
+    # stood: in the order they came the stage took 0.373 s, largest first
+    # 0.323.
+    #
+    # What is written does not change: a unit's object is a function of its
+    # module alone, and the order only decides which thread writes it. The
+    # 404 objects of the build are the same bytes as before the change.
     private def mt_codegen(units, n_threads)
-      # We generate the bitcode in the main thread because LLVM contexts
-      # must be unique per compilation unit, but we share different contexts
-      # across many modules (or rely on the global context); trying to
-      # codegen in parallel would segfault!
-      #
-      # Luckily generating the bitcode is quick and once the bitcode is
-      # generated we don't need the global LLVM contexts anymore but can
-      # parse the bitcode in an isolated context and we can parallelize the
-      # slowest part: the optimization pass & compiling the object file.
-      prepare = ->(unit : CompilationUnit) { unit.generate_bitcode; nil }
-      mt_run(units, n_threads, prepare) { |unit| unit.compile(isolate_context: true) }
+      Prof.span("bc+obj: prepare") { mt_run(units, n_threads, progress: false, &.prepare) }
+      compiled = units.select(&.compiles?)
+      @progress_tracker.stage_progress += units.size - compiled.size
+      compiled = compiled.map_with_index { |unit, index| {unit, index} }
+        .sort_by! { |(unit, index)| {-unit.bitcode_size, index} }
+        .map(&.[0])
+      Prof.span("bc+obj: compile") { mt_run(compiled, n_threads, &.compile) }
     end
 
-    # *jobs* done by *work* on *n_threads* fibers of the default execution
-    # context, each first handed to *prepare* on this thread.
-    private def mt_run(jobs : Array(T), n_threads, prepare : Proc(T, Nil)? = nil, &work : T ->) forall T
-      channel = Channel(T).new(n_threads * 2)
-      wg = WaitGroup.new
-      mutex = Sync::Mutex.new
+    # *jobs* done by *work* on *n_threads* threads of their own, taken in the
+    # order given, each counted in the stage's progress when *progress* is
+    # set.
+    #
+    # iyi: threads of their own (`Fiber::ExecutionContext::Isolated`), each
+    # taking the next index from one counter, rather than fibers of the
+    # default context receiving from a channel. A fiber the channel wakes is
+    # queued on the waking thread, and the default context wakes another
+    # thread to steal it only when none is spinning (`Parallel#wake_scheduler`):
+    # the round that prepares samples/iyi/cores.iyi's 405 units, 171 ms of
+    # work all told and none of it over 8 ms, took 103 ms on 12 vCPUs (Linux,
+    # VM) and as long whatever count of fibers it was given (2, 4, 8 and 12:
+    # 139, 136, 141 and 140 ms), so about two ran at once. On threads it takes
+    # 25 ms, and the whole stage went from 0.605 s to 0.323 (best of five
+    # cold builds).
+    private def mt_run(jobs : Array(T), n_threads, progress = true, &work : T ->) forall T
+      following = Atomic(Int32).new(0)
+      mutex = Thread::Mutex.new
 
       # iyi: kept, and raised after the workers are done.
       #
@@ -4085,33 +4120,31 @@ module Iyi
       # codegen failure told as a link failure, and it cost an hour of reading
       # linker output. The forking path already reports its workers' failures;
       # this is the same, for the threads.
-      failure = nil.as(Exception?)
+      #
+      # The first job's failure in *jobs*' order, not the first to happen:
+      # which thread fails first is the machine's choice, and two builds of
+      # one broken program have to say the same thing.
+      failure = nil.as({Int32, Exception}?)
 
-      n_threads.times do
-        wg.spawn do
-          while job = channel.receive?
+      workers = Array.new(n_threads.clamp(..jobs.size)) do |worker|
+        Fiber::ExecutionContext::Isolated.new("codegen-#{worker}") do
+          while (index = following.add(1)) < jobs.size
             begin
-              work.call(job)
+              work.call(jobs[index])
             rescue ex
-              # Kept receiving rather than returning: a worker that stops
-              # leaves the sender blocked on a channel nobody drains.
-              mutex.synchronize { failure ||= ex }
+              mutex.synchronize do
+                failure = {index, ex} if failure.nil? || index < failure.not_nil![0]
+              end
               next
             end
-            mutex.synchronize { @progress_tracker.stage_progress += 1 }
+            mutex.synchronize { @progress_tracker.stage_progress += 1 } if progress
           end
         end
       end
+      workers.each &.wait
 
-      jobs.each do |job|
-        prepare.try &.call(job)
-        channel.send(job)
-      end
-      channel.close
-
-      wg.wait
-
-      if ex = failure
+      if found = failure
+        ex = found[1]
         raise CompilerError.new("a codegen thread failed: #{ex.message} (#{ex.class})")
       end
     end
@@ -4395,13 +4428,20 @@ module Iyi
       property? reused_previous_compilation = false
       getter object_extension : String
       @memory_buffer : LLVM::MemoryBuffer?
+      @must_compile : Bool?
+      # The bytes of the unit's bitcode, which is what `mt_codegen` orders
+      # units by: known once `prepare` has run.
+      getter bitcode_size = 0
       @object_name : String?
       @bc_name : String?
       @preempt_flag : String?
       @plan : ReleasePartition::Plan?
 
+      # *verify*: whether `prepare` verifies the module, which it does for a
+      # unit per type; one module is verified by `CodeGenVisitor#finish`.
       def initialize(@compiler : Compiler, program : Program, @name : String,
-                     @llvm_mod : LLVM::Module, @output_dir : String, @bc_flags_changed : Bool)
+                     @llvm_mod : LLVM::Module, @output_dir : String, @bc_flags_changed : Bool,
+                     @verify : Bool = false)
         @name = "_main" if @name == ""
         @original_name = @name
         @name = String.build do |str|
@@ -4430,7 +4470,28 @@ module Iyi
       end
 
       def generate_bitcode
-        @memory_buffer ||= llvm_mod.write_bitcode_to_memory_buffer
+        @memory_buffer ||= llvm_mod.write_bitcode_to_memory_buffer.tap do |buffer|
+          @bitcode_size = buffer.to_slice.size
+        end
+      end
+
+      # iyi: everything that happens to the module the visitor built before it
+      # is compiled: verified, when the visitor did not, its bitcode written,
+      # and that compared with the last build's, which decides whether it is
+      # compiled at all. It touches this unit's module alone, and that module
+      # has a context of its own (`CodeGenVisitor#type_module`), so any thread
+      # may run it, every unit's at once (`mt_codegen`).
+      def prepare : Nil
+        return unless @must_compile.nil?
+        @llvm_mod.verify if @verify
+        @must_compile = must_compile?
+      end
+
+      # Whether `compile` will write an object rather than reuse the last
+      # build's. Asks `prepare` first.
+      def compiles? : Bool
+        prepare
+        @must_compile.not_nil!
       end
 
       # To compile a file we first generate a `.bc` file and then create an
@@ -4450,9 +4511,8 @@ module Iyi
       # interrupted while the `.o` file is being generated, leading to a
       # corrupted file that later would cause compilation issues. Moving a file
       # is an atomic operation so no corrupted `.o` file should be generated.
-      def compile(isolate_context = false)
-        if must_compile?
-          isolate_module_context if isolate_context
+      def compile
+        if compiles?
           update_bitcode_cache
           compile_to_object
         else
@@ -4483,7 +4543,7 @@ module Iyi
       # whole module's bitcode is what is compared: the partitions are a
       # function of it.
       def prepare_partitions : Bool
-        unless must_compile?
+        unless compiles?
           @reused_previous_compilation = true
           return false
         end
@@ -4558,13 +4618,6 @@ module Iyi
         memory_buffer.dispose unless changed
 
         changed
-      end
-
-      # Parse the previously generated bitcode into the LLVM module using a
-      # dedicated context, so we can safely optimize & compile the module in
-      # multiple threads (llvm contexts can't be shared across threads).
-      private def isolate_module_context
-        @llvm_mod = LLVM::Module.parse(@memory_buffer.not_nil!, LLVM::Context.new)
       end
 
       private def update_bitcode_cache

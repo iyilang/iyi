@@ -276,6 +276,11 @@
     def self.stop : Pointer(Atomic(UInt64))
       Pointer(Atomic(UInt64)).new(@@page)
     end
+
+    # The idle-pool step's count of tasks arrived, the page's second word.
+    def self.arrived : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(@@page + 8_u64)
+    end
   end
 
   def busy_until_stopped : Nil
@@ -554,8 +559,23 @@
   # take. Asserted everywhere for the idle pool, on Windows for the busy.
   if cores >= 3_u64
     IyiWorkers.count = cores.to_i32
+    # Every worker started first: the pool starts a worker only while none
+    # is idle (SPEC.md III.4.15, part 6), so a task a worker that returns
+    # at once can leave all but two unstarted, and this step then read "2
+    # of 12 workers waiting". Each task spins until all have arrived, up to
+    # two seconds, so each lands on a thread of its own.
+    Busy.arrived.value.set(0_u64)
     group do |g|
-      cores.to_i32.times { g.spawn_parallel { 0 } }
+      cores.to_i32.times do
+        g.spawn_parallel do
+          Busy.arrived.value.add(1_u64)
+          until_ns = IyiMark.now_ns + 2000000000_u64
+          while Busy.arrived.value.get < cores && IyiMark.now_ns < until_ns
+            IyiThread.spin_pause
+          end
+          0
+        end
+      end
     end
     deadline = IyiMark.now_ns + 5000000000_u64
     # A spin, not a sleep: this thread asleep would be counted waiting.

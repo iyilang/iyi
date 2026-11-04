@@ -105,6 +105,9 @@ no live chunk hands the whole mapping back to the kernel — the class's
 free list stripped first, the arena unlinked from the heap's own walk,
 then the `munmap` — with one warm arena per class kept as the cushion
 that spares a spike-then-idle program the mmap on its next allocation.
+A class nobody has refilled for three collections and a second is
+past needing one: its cache lets the empty arena go, and its idle pages
+go cold whatever the warm budget (`IyiMark.class_idle?`).
 And the pauses have numbers rather than adjectives: a collection times
 itself on the kernel's own monotonic clock (a raw syscall on Linux into a
 page of the collector's own, libSystem's `clock_gettime_nsec_np` on

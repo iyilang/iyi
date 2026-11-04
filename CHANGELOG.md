@@ -51,6 +51,58 @@
   and for one while every worker runs a task, on Windows; one broken
   copy counts the waiting workers again and one counts every worker of
   a started pool free, and each is caught.
+- **A plain `spawn` runs in parallel where the compiler can prove it
+  safe (SPEC.md III.4.15, proposed).** A `g.spawn { }` whose block
+  passes every check `spawn_parallel`'s does, and whose walk of the
+  module state it reaches through calls finds nothing that is not
+  `Share` other than state marked `@[SafeReach]`, is a parallel task of
+  its own unit on the pool. Any other spawn stays in its spawner's unit,
+  as before. Nothing that compiled stops compiling, and there are no new
+  warnings. `--explain-spawn` on `build`, `check` and `run` writes a note
+  for each spawn: `spawn runs in parallel`, or `spawn stays in its
+  spawner's unit:` followed by the refusal that kept it there, which
+  names the capture. `--explain-spawn-std` adds std's spawns. `-f json`
+  marks these notes `"severity": "note"`, and the language server shows
+  the same verdict as an inlay hint. `g.spawn_serial { }` keeps a task in
+  its unit whatever it captures. `IYI_WORKERS=1` keeps every eligible
+  spawn on one thread and the pool unstarted. The pool starts at the
+  first eligible spawn, with one worker (the entry below). Of the spawns
+  that bench/ and samples/ programs reach, 125 locations now run in
+  parallel, 289 stay serial and 6 differ by instantiation. All 12 of
+  std's spawns stay serial. `bench/spawn_eligible.sh` holds the
+  placement, the unit, the opt-out, one worker and the notes, with a
+  broken copy caught for each. `bench/spawn_fanout.iyi` hashes 31 MiB in
+  64 plain spawns. It runs in 99 ms on one worker and 12 ms on twelve on
+  Linux (12 vCPUs), in 158 ms on one and 20 ms on ten on macOS 26.6
+  (Apple M2 Pro, 10 cores, the user's machine), and in 95 ms on one and
+  10 ms on twelve on Windows 11 (12 logical processors, the user's
+  machine). `bench/web_cores.iyi`'s server, whose connections std
+  spawns, held: best of three interleaved, `check_version` 119,836 req/s
+  before and 118,532 after on the M2 at ten workers, 117,313 and 114,976
+  on the Windows machine at twelve. Gate steps that tested a
+  unit's order or one thread's turns, and depended on spawns staying
+  in their unit, spawn with `spawn_serial`: in `runtime_exercise`,
+  `thread_exercise`, `concurrency_exercise` (its two-panics step among
+  them) and `parallel_exercise`, and in `std_http_exercise`'s copy that
+  serves a connection on the accepting thread (SPEC.md III.4.15, part 8).
+
+- **The pool starts one worker and grows to the work.** The first
+  parallel task, from `spawn_parallel`, `Server.serve` or an eligible
+  `spawn`, started every worker at once. It now starts one, and another
+  only when a task is waiting and no worker is idle to take it, up to
+  `IyiWorkers.count`, one on its way at a time, as Go starts a thread
+  from `wakep`. On a shared 12-vCPU Linux machine, a program whose one
+  eligible spawn prints a line took 2.46 ms on twelve workers and now
+  takes 0.68 ms, against 0.44 ms with the spawn serial. One eligible
+  spawn followed by the main thread building 200 lists of 20,000
+  strings peaked at 82 MB resident on twelve workers, and now peaks at 17
+  to 28 MB, because the collector's budget floor counts threads.
+  `bench/spawn_fanout.iyi` runs as fast as before: 10 ms on twelve
+  workers, 96 ms on one. `IyiWorkers.launched` says how many have
+  started. `bench/spawn_eligible.sh`'s `grows` step holds that one spawn
+  starts one worker and four tasks running at once start four, and
+  catches a pool that starts whole and one that never grows (SPEC.md
+  III.4.15, part 6).
 
 ### Gates
 
@@ -90,7 +142,96 @@
   allocates, 3.8 times. `bench/std_parallel_exercise.sh` holds it, with
   five broken copies caught by name.
 
+- **A `std/mutex` lock and its release are two locked instructions, from
+  seven.** The holder's task and thread were four sequentially consistent
+  stores, an `xchg` each on x86_64, and neither orders anything: one
+  tells a task whether it holds the lock already, the other is a hint
+  for spinning. They are relaxed, through `IyiAtomic` inside std/mutex,
+  and `Atomic` keeps its one ordering. Every release also counted itself
+  a change for `wait_for`, a `lock xadd`; a waiter now counts itself as
+  waiting before its own release, with the lock held, so a release that
+  reads no waiter under the lock skips the count and the wake, and the
+  window a waiter counted after its release left - a release reading 0
+  first, the waiter parking on a count it never moved - is closed (the
+  proof is beside `release`). `bench/chan_scaling.iyi`'s `mutexes`, a
+  mutex to each pair of tasks, median of 5 interleaved on Linux x86_64
+  (12 vCPU, shared): 25.8 million updates a second with one pair, 37.6
+  with the stores relaxed, 43.3 with the count skipped too; twelve pairs
+  73.6, 106.6 and 111.9; `mutex`, twelve tasks on one, 21.6, 32.0 and
+  40.1. With the entry below as well, median of 5: on Windows 11, 12
+  logical processors (the user's machine), one pair 22.4 to 37.6 million
+  and twelve tasks on one 21.3 to 34.8; on macOS 26.6, an M2 Pro with 10
+  cores (the user's machine), one pair 36.4 and 35.3, where the stores
+  were `stlr` either way, and four pairs 36.2 to 45.9.
+  `bench/std_mutex_exercise.sh` proves a waiter counted after its
+  release hangs the exercise.
+
+- **A `std/mutex` waiter that starves is handed the lock.** A task that
+  let the lock go and took it straight back, running while the waiter it
+  woke was still waking, kept it for as long as it went on: beside a
+  holder taking it back after every 20 us hold, a waiter waited 611 ms,
+  all 30,000 holds, on Linux x86_64 (12 vCPU, shared), and 3.0 s beside
+  100 us holds. A waiter that has waited 1 ms, or been woken 4 times to
+  find the lock taken again, now starves, and the next release hands it
+  the lock rather than letting it go, Go's `sync.Mutex` starvation mode;
+  until a waiter starves the lock goes to whoever takes it first. The
+  same waiter has it in 7.3 and 7.1 ms, two wakes each queued behind the
+  running holder until the monitor preempts it, and in 0.14 and 0.50 ms
+  with the pool calling an idle worker for a hand-off from a running
+  task. On macOS 26.6, an M2 Pro with 10 cores (the user's machine), 41.9
+  ms and 3.0 s before, median of 5, and 1.6 ms after; on Windows 11, 12
+  logical processors (the user's machine), 181 ms and 3.0 s before, 4.6
+  and 9.1 ms after, 0.20 and 0.54 ms with the hand-off call.
+  `bench/std_mutex_exercise.sh` has the step, a waiter beside 1 ms holds
+  (599 ms before), with a broken copy each for a waiter that never
+  starves and a release that frees the lock where it hands it over.
+  `bench/chan_scaling.iyi`'s `held`, two tasks taking turns on each of W
+  mutexes with 20 us holds, against its Go twin on `sync.Mutex`, `over_ns`
+  before, after and Go's, median of 7 interleaved on Linux: 281/263/110
+  at one pair, 307/287/151 at two, 356/301/189 at four, 454/566/239 at
+  eight. The park, the wake and the switch, `over_ns` less the new
+  `floor_ns` (the same updates with nothing waiting), are -2 to 41 ns
+  after against Go's -34 to 17; the rest is the hold's clock, a
+  clock_gettime syscall where Go reads the vDSO. On the M2, median of 5,
+  after against Go: 59/55 at one pair, 61/95 at two, 136/392 at four,
+  231/507 at eight. On the Windows machine, median of 7, `over_ns`
+  before and after: 194/149 at one pair, 206/157 at two, 258/213 at four,
+  303/318 at eight; the park, the wake and the switch 16, -69, 30 and 30
+  ns after, Go's -22, -3, 277 and 216. Go's monotonic clock moved too
+  coarsely there for the hold - 1.84 ms an update - and its twin spins a
+  count measured at start instead.
+
 ### Fixed
+
+- **A connection's answer in the poller of a held worker is taken by an
+  idle one (Linux, darwin).** Each worker keeps its own epoll or kqueue
+  and looked at it only when its task parked or a back-edge check called
+  it to, so a worker held where no check is - the runtime, the
+  collector, a `@[NoPreempt]` def - or left by the kernel in its ready
+  queue kept its connections' news until it came back: an answer sent
+  while its reader's worker was held 100 ms with preemption off was read
+  98 ms later, three workers idle, on Linux (12 vCPUs) and on macOS 26.6
+  (an M2 Pro with 10 cores). The pool's monitor now asks the poller of a
+  running worker with io waiters that has not looked at it for a
+  millisecond, without waiting and taking nothing, and with news there
+  calls an idle worker, which takes the waiters off that worker's lists
+  and runs them: the answer is read on another worker in 0.4 to 5.0 ms
+  on Linux. A worker's io list, slots and sleep heap are behind its
+  lists lock on every platform, as Windows' were, held by the owner from
+  the second-waiter check through the registration, and the io
+  functions take the state they change rather than the caller's. The
+  epoll event each wait and narrowing built is in its frame now, not a
+  16-byte heap block. `bench/parallel_migrate.iyi`'s heldio step holds
+  the answer to 20 ms in `bench/parallel_exercise.sh`, and its failure
+  proof takes the monitor's call away. A worker's idle wait still takes
+  its own news before it says it is busy, so a deadlock's walk reads only
+  what an idle worker said, and a taker that empties the lists of one
+  that went idle meanwhile rings it to say again. Said busy first, as on
+  Windows, 32 tasks each making 100 queries in turn on 12 workers, with
+  the database's process on all 12 vCPUs, had a request p99 of 69 to 83
+  ms and 38 to 91 queries over 20 ms in 8 s, against 58 to 65 ms and 0
+  to 2 with the order kept and 59 to 66 ms and 0 to 3 before the change
+  (Linux, five runs each, interleaved).
 
 - **A task handed over by a task that computes on starts on an idle
   worker.** A send, a `Mutex` let go or any other wake from a running
@@ -337,6 +478,38 @@
   straight after one the churn triggered counted the two threads that
   filled a slice in between, an 8 MiB budget, once on Windows 11, 12
   logical processors (the user's machine).
+
+- **A size class the program stopped allocating in gives its memory
+  back.** Issue #145's app on twelve workers kept every size class's
+  pages from the endpoints before: after its 11 endpoints one after
+  another it held 617 arenas (thirteen threads' fill arenas in about 47
+  classes, none ever released) and 208 MB resident. The arenas were 195
+  MB of it: 18 MB of chunk tables and 176 MB of chunk pages, against 4.4
+  MB live and 133 MB counted warm idle. Fiber stacks were 1.2 MB and
+  images 6.8 MB. A class no cache has refilled for three collections and
+  at least a second now keeps no warm pages, and its empty arenas are
+  let go by their caches and unmapped. The same run ended with 432
+  arenas and 182 MB, 63 MB of it warm idle.
+
+  Against the branch before it, 2 interleaved rounds, on Windows 11, 12
+  logical processors (the user's machine): peak working set 205 MB
+  against 222; requests a second 613.4 against 615.4 and p99 161.5
+  against 159.8 ms at the geometric mean, app CPU 4.42 against 4.43 ms a
+  request. `bench/release_pages.iyi`, whose handler asks for the same
+  classes every epoch, held there (best of 3, 4.03M against 3.84M a
+  second, peak 100-103 MB against 101-104) and on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine; 1.51M against 1.51M).
+
+  The rest of the gap to goturkiye's 53-129 MB is structural. The epoch
+  allocates up to the budget, 28-52 MB at the floor of 4 MiB for each
+  allocating thread, and the sweep keeps another budget's worth (plus
+  #150's carry-over) warm for the next one; goturkiye under
+  `GODEBUG=gctrace=1` ran a 16-24 MB goal on 7-11 MB live in #145's
+  campaign, Windows 11, 12 logical processors (the user's machine).
+  `bench/sweep_exercise.sh` checks it both ways: a class idle
+  for four short epochs keeps its warm pages, and past a second it keeps
+  none and maps no arena. Each direction has a broken copy that fails,
+  and so does a copy whose cache keeps the arena.
 
 ### Known
 
@@ -26421,7 +26594,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,629-line library and nothing else. Every other
+  written against iyi's own 27,173-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

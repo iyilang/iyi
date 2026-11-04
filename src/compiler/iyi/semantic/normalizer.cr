@@ -356,12 +356,13 @@ module Iyi
 
     # The statement's own spawn, when the statement is exactly a direct one:
     # `g.spawn { }` bare, or assigned to a variable or an underscore. A
-    # parallel task (`g.spawn_parallel { }`, SPEC.md III.4.13) is a task of
-    # the group like any other, and takes its slot the same way.
+    # parallel task (`g.spawn_parallel { }`, SPEC.md III.4.13) and one held
+    # in its unit (`g.spawn_serial { }`, III.4.15) are tasks of the group
+    # like any other, and take their slots the same way.
     private def iyi_direct_spawn(statement : ASTNode, group_name : String) : Call?
       target = statement.is_a?(Assign) ? statement.value : statement
       return nil unless target.is_a?(Call)
-      return nil unless (target.name == "spawn" || target.name == "spawn_parallel") && target.block
+      return nil unless target.name.in?("spawn", "spawn_serial", "spawn_parallel") && target.block
       receiver = target.obj
       return nil unless receiver.is_a?(Var) && receiver.name == group_name
       # The spawn's own block must not smuggle the group out either.

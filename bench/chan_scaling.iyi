@@ -26,8 +26,9 @@
 #   lock every core wants at once.
 # - `held`: W pairs on W mutexes, each update holding its lock 20 us, so
 #   the waiter parks: ROUNDS / 100 updates a task, and `over_ns` is what
-#   a pair loses per update beyond the hold - the park, the wake and the
-#   switch.
+#   a pair loses per update beyond the hold. `floor_ns` is the same
+#   updates made by one task a mutex, so nothing waits, run just before:
+#   `over_ns` less `floor_ns` is the park, the wake and the switch.
 #
 # Every answer is checked - each round trip's value, each producer's
 # order and sum, each mutex's count - so a value lost or handed twice
@@ -203,24 +204,41 @@ import std/mutex::{Mutex}
   # nearly every lock waits out the other task's hold parked: a pair can
   # do no better than one update per `HOLD_NS`, and what it loses beyond
   # that is the park, the wake and the switch (`over_ns`). A hundredth of
-  # ROUNDS each, since every update is 20 us.
-  def held(workers : Int32, rounds : Int64) : Int64
+  # ROUNDS each, since every update is 20 us; one task a mutex
+  # (`held_floor`) makes both tasks' share.
+  def held(workers : Int32, rounds : Int64, tasks : Int32 = 2) : Int64
     locks = [] of Mutex(Int64)
     group do |g|
       handles = [] of IyiTask(Int64)
       workers.times do
         lock = Mutex.new { 0_i64 }
         locks << lock
-        handles << g.spawn_parallel { bump_held(lock, rounds) }
-        handles << g.spawn_parallel { bump_held(lock, rounds) }
+        tasks.times do
+          handles << g.spawn_parallel { bump_held(lock, rounds * 2_i64 // tasks.to_i64) }
+        end
       end
       handles.each { |handle| joined("held", handle) }
     end
     locks.each do |lock|
       count = lock.get { |n| n }.or_panic
-      fail("held: a pair's mutex counted #{count}, not #{rounds * 2_i64}") unless count == rounds * 2_i64
+      fail("held: a mutex counted #{count}, not #{rounds * 2_i64}") unless count == rounds * 2_i64
     end
     workers.to_i64 * rounds * 2_i64
+  end
+
+  # The held shape's updates with one task a mutex, so nothing waits: what
+  # an update costs beyond `HOLD_NS` with no park in it, in nanoseconds.
+  # Most of it is the hold's own clock. On Linux x86_64 (12 vCPU, shared)
+  # the hold alone, no lock, overran 20 us by 203-212 ns: a
+  # `__iyi_monotonic_ns` is a clock_gettime syscall, 60 ns a read, where
+  # Go's `time.Since` reads the vDSO. The floor takes that out of the
+  # comparison with Go. A first pass of two updates a mutex starts the
+  # pool's threads, which the floor timed in it came out above `over_ns`.
+  def held_floor(workers : Int32, rounds : Int64) : Int64
+    held(workers, 1_i64, 1)
+    started = __iyi_monotonic_ns
+    held(workers, rounds, 1)
+    (__iyi_monotonic_ns - started) // (rounds * 2_i64) - HOLD_NS
   end
 
   def held_rounds(rounds : Int64) : Int64
@@ -248,12 +266,13 @@ import std/mutex::{Mutex}
   shapes = arguments.size == 3 ? [arguments[2]] : ["pingpong", "fanin", "mutexes", "mutex", "held"]
   IyiWorkers.count = workers
   shapes.each do |shape|
+    floor = shape == "held" ? held_floor(workers, held_rounds(rounds)) : 0_i64
     started = __iyi_monotonic_ns
     ops = run(shape, workers, rounds)
     wall = (__iyi_monotonic_ns - started) // 1000_i64
     wall = 1_i64 if wall < 1_i64
     line = "shape=#{shape} workers=#{workers} rounds=#{rounds} ops=#{ops} wall_us=#{wall} ops_per_s=#{ops * 1000000_i64 // wall}"
-    line = line + " over_ns=#{wall * 1000_i64 // (held_rounds(rounds) * 2_i64) - HOLD_NS}" if shape == "held"
+    line = line + " over_ns=#{wall * 1000_i64 // (held_rounds(rounds) * 2_i64) - HOLD_NS} floor_ns=#{floor}" if shape == "held"
     puts line unless quiet
   end
   puts "chan scaling: every round trip, fan-in order and mutex count read back as sent" if quiet

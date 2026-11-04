@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 26,629 lines, of which 4,650 are the library held to the 4,650 ceiling (6,688 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 131,646 lines, none of it written in iyi |
+| iyi's own prelude | 27,173 lines, of which 4,650 are the library held to the 4,650 ceiling (6,688 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 131,941 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 26,629 lines
+> "No standard library worth the name" is still true of iyi's own 27,173 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 26,629 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 27,173 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1028,8 +1028,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 131,646 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 26,629-line own prelude + 126,069 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 131,941 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 27,173-line own prelude + 126,198 in std |
 | Specs | 21,146 lines | 15,941 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -2642,7 +2642,7 @@ hook, and the prelude's own definition of it is untouched. Compile-time
 `responds_to?` works unchanged, which the error message is entitled to claim
 because it is tested.
 
-### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14)**
+### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14); a plain `spawn` in parallel where it is proven safe PROPOSED (III.4.15)**
 
 This is the section where the design either beats Go or does not, so it is worth
 being blunt about where Go actually loses. Not goroutines: they are cheap, the
@@ -3752,9 +3752,10 @@ stopped thread's sp, as before; on Windows the switch writes the fiber's
 own StackBase, StackLimit and DeallocationStack into the TEB of the thread
 it lands on (`__iyi_ctx_swap`), so a frame's probes grow the fiber's stack
 on any worker; an io wait is registered per wait on the waiting thread's
-epoll or kqueue, and on Windows every thread takes completions off the
-process's one port and the fiber off the io list of the thread it parked
-on (part 5); a cancel finds the thread whose sleep heap or
+epoll or kqueue, whose news an idle worker takes while that thread is held
+elsewhere, and on Windows every thread takes completions off the
+process's one port, each taking the fiber off the io list of the thread
+it parked on (part 5); a cancel finds the thread whose sleep heap or
 poller holds the task by an id the task writes there (`IyiFiber#listed_on`);
 and a socket closed on another thread than its reader's - by a sibling on
 another worker, or by the main thread - wakes the read parked on it through
@@ -3822,10 +3823,47 @@ task's thread's — the fd is registered with that thread's epoll or
 kqueue, per wait, as it always was. A woken task may resume on another
 worker (part 1), and its next wait registers there. A shared poller would
 have saved a file descriptor per worker; what a poller per worker costs
-instead is part 1's open end: a worker busy computing looks at its own
-poller only when it parks, or when part 9's check calls it to. The worker
-owns its poller, its sleep heap and its stacks, and nothing of them is
-locked.
+instead is a worker that runs without looking at it. One busy computing
+looks only when it parks, or when part 9's check calls it to; one held
+where no check is - the runtime's own code, the collector's, a
+`@[NoPreempt]` def - or left by the kernel in its ready queue does not
+look at all, and a connection's answer waited in its poller until it came
+back: 98 ms beside a 100 ms `@[NoPreempt]` hold with three workers idle,
+on Linux (12 vCPUs) and on macOS 26.6 (an M2 Pro with 10 cores) alike.
+
+So another worker takes it, Go's netpoller being any thread's to poll.
+At each look (part 9), the pool's monitor asks the poller of a running
+worker that has io waiters and has not looked at it for a millisecond,
+while some worker is idle, without waiting and from its own thread: a
+level-triggered poll takes nothing, darwin's doorbell, an `EV_CLEAR`
+event the poll does take, is rung again, and an eventfd is not read. With
+news there it marks the worker and calls an idle one
+(`IyiWorkers.held_io?`), which polls that poller itself, takes each
+waiter it finds off the worker's io list, slots, sleep heap and listing,
+narrows the fd's registration, and wakes the waiters into its own ring
+(`IyiScheduler.take_held`). A worker's io list, slots and sleep heap are
+behind its *lists lock* on every platform now (`IyiScheduler.lists_lock`,
+below), held by the owner from the check that refuses a second waiter
+through the registration and the listing (`wait_posix`), and by the taker
+from its poll until the last waiter it found is off the lists, so an
+event it reads cannot be stale against a waiter the owner parked
+meanwhile. Nothing allocates under it: the slots grow, and the owners'
+table maps its chunk, before the owner takes it (`io_room`).
+`bench/parallel_migrate.iyi`'s heldio step holds the answer to within 20
+ms; it is read on another worker in 0.4 to 5.0 ms on Linux, the
+monitor's 5 ms tick and the call.
+
+A worker's idle wait still takes its own poller's news and its expired
+sleepers before it says it is busy (`end_idle`), unlike Windows' below,
+so a deadlock's walk reads only what each idle thread said when it went
+idle, as before (`all_quiet?`): one that takes anything in its wait had
+a waiter or a sleeper then. A taker that empties the lists of a worker
+that went idle meanwhile, saying it had waiters, rings it to look and say
+again. Busy first, as on Windows, cost the loop that asks most of the
+machine: 32 tasks each making 100 queries in turn on 12 workers, the
+database's process on all 12 vCPUs of the Linux machine, had a request
+p99 of 69 to 83 ms and 38 to 91 queries over 20 ms in 8 s, against 58
+to 65 ms and 0 to 2 with the order kept (five runs each, interleaved).
 
 Windows had the same shape, a completion port per scheduler thread, and
 it cost more there: a completion is not readiness that any poller may be
@@ -3852,8 +3890,8 @@ shape now (`runtime/netpoll_windows.go`): one port for the process
   names the thread it parks on; the thread that takes the packet takes
   the fiber off that thread's io list, out of its sleep heap and its
   listing, under that thread's *lists lock* (`IyiScheduler.lists_lock`,
-  which every change to a Windows thread's io list and sleep heap holds,
-  a leaf under the other locks), and wakes it where it is: a fiber that
+  which every change to a thread's io list and sleep heap holds, a leaf
+  under the other locks), and wakes it where it is: a fiber that
   may move into this worker's ring, where a steal may take it, any other
   home. Go readies what its netpoller found the same way, wherever the
   poll ran (`injectglist`). A deadlock's walk reads a Windows thread's
@@ -3946,9 +3984,11 @@ no wake is lost between the look and the wait, and a busy thread is never
 rung. A cancel of a task parked on another thread sets its flag and is
 delivered to the task's own thread, which takes it out of its own sleep
 heap or poller; nothing else touches another thread's private lists, save
-on Windows, where a thread that takes a completion takes its fiber off the
-io list and sleep heap of the thread it parked on, under that thread's
-lists lock (part 5). Groups, the joiner chains, the inboxes and the
+a thread that takes a completion on Windows, which takes its fiber off the
+io list and sleep heap of the thread it parked on, and a worker that takes
+a held worker's news on Linux and darwin, which takes its waiters off that
+worker's the same way, each under that thread's lists lock (part 5).
+Groups, the joiner chains, the inboxes and the
 pool's queues are behind **one runtime-wide scheduler lock**, taken only
 once a second scheduler thread exists — a program with one pays a load
 and a branch. Channels were behind it too, and are not now: each channel
@@ -4050,7 +4090,11 @@ preemption word at its back-edge, and a monitor raises the word.
   quantum. A word raised after a task's last back-edge, as it answered
   and parked, stayed up before, and the task switched in next gave the
   worker up at its first back-edge into the preempted tasks' queue below
-  (measured in `IyiScheduler.switch_to`'s comment).
+  (measured in `IyiScheduler.switch_to`'s comment). The same look calls
+  an idle worker for the fibers in the ring of a worker one task has held
+  a tick, and on Linux and darwin for the news in the poller of any
+  running worker that has not looked at it for a millisecond, which the
+  idle worker takes (part 5).
 - *What the slow half does.* It hands on what waits on the worker - its
   poller's news without waiting, its expired sleepers, its mail - into its
   ring and calls an idle worker, which steals them; that alone answers the
@@ -4878,6 +4922,309 @@ task found (`starts no element past a failure it knows of`), and that leave
   chunks today; which deserve a name is a question of use.
 - *Plain `spawn` in a chunk.* A task a chunk's block spawns joins that
   chunk's unit and runs one at a time with it, as in any parallel task.
+#### III.4.15 Where a plain `spawn` runs: **PROPOSED for 0.21.0 — in parallel where the compiler can prove it safe, in its spawner's unit otherwise; built on `mt/spawn`**
+
+III.4.13 part 2 kept `g.spawn` where it was - a task of its spawner's
+unit, interleaving at parks - and turned down a spawn the compiler makes
+parallel "whenever its captures happen to be `Share`", because the check
+stops at the block's own text: module state a method the block calls
+touches is warned about, not refused, and such a spawn would race that
+state with nothing but a warning saying so. This section takes that
+alternative up again with the objection answered, as the direction for
+0.21.0: a plain `spawn` runs in parallel across the pool wherever the
+compiler can prove that safe, and stays in its unit otherwise. Nothing that
+compiles today may stop compiling, and nothing a program could rely on
+about memory may change.
+
+**1. The rule.** A `g.spawn { }` call is *eligible* when
+
+- its block is written at the call - `g.spawn(&work)` is not, since what a
+  proc captured is not written in its type (the refusal `spawn_parallel`
+  makes, III.4.4);
+- the block passes every check `spawn_parallel`'s block is held to, the
+  same code asking the same questions (`Iyi::Share.reason`): each value
+  it captures is `Share`, a captured local is assigned once - not by the
+  block, not after the spawn, not in a loop or a block that spawns again -
+  `self` is `Share` when the block reaches it, and each constant and class
+  variable it names is `Share`, a class variable not written after its
+  initializer; and
+- the walk of the module state it reaches through the defs it calls
+  (`ShareReach`, III.4.4), which a parallel block is only *warned* about,
+  comes back with nothing whose type is not `Share`.
+
+The third condition is what answers part 2's objection: where
+`spawn_parallel` asked for parallelism and is told about what it reaches,
+a plain spawn asked for nothing, and is moved only when nothing is there to
+tell. State marked `@[SafeReach("why")]` does not keep a spawn serial. The
+mark's claim, in the words the warning asks for it with, is that "every
+thread may reach it safely" - a claim about the constant or class
+variable, not about one block - and a claim that held for every
+`spawn_parallel` block reaching the state and not for a spawn reaching the
+same state through the same call would be two meanings for one sentence.
+What the walk does not enter it does not enter for either verb: std and
+the prelude, whose state is theirs to keep safe at their own boundaries,
+which is what `spawn_parallel` and `Server.serve` already stand on.
+
+**2. Otherwise, the unit, exactly as before.** A spawn that is not
+eligible runs the body `spawn` always ran: a task of its spawner's unit,
+on its spawner's thread outside the pool, never at the same instant as
+its spawner or another task of the unit, and not before its spawner parks.
+Everything the compiler does not classify is in this case too, by
+construction rather than by a list: only a call the cleanup proved
+eligible is pointed anywhere else (part 3), so a forwarded proc, a build
+with no threads and any spawn the cleanup never reaches run as they did.
+III.4.5's "a task appending to a module-level `Array` compiles and runs"
+stays true: such a task names, or reaches, state that is not `Share`, and
+stays in its unit.
+
+**3. Where it is decided, and how a call is pointed.** After typing, in
+the cleanup (`CleanupTransformer#classify_spawn`), at the same place
+`check_share_boundary` refuses a `spawn_parallel` block: the block's
+closure and the final types of what it captured are known there and not
+before. `IyiGroup#spawn` carries one line that never runs, `return
+spawn_pooled(&block) if false`, so that every `T` it is typed for types the
+private `spawn_pooled` beside it, with the same signature; an eligible
+call is pointed at that instance, and the branch on `false` is dropped
+before code generation. Nothing is typed after the typer has finished, and
+a program whose spawns all stay serial carries the line and none of the
+pool's code: a release build of one serial spawn is 412,640 bytes against
+412,240 before (Linux x86-64). `spawn_pooled` is private, so no program
+can call it past the check. A def typed for two `T`s classifies each
+instance's call, and the two can differ.
+
+Whether a program's loops check for preemption (III.4.13, part 9) was
+asked of the typed defs - `IyiWorkers.start` typed anywhere - and every
+program that spawns now types it, on the line that never runs; it is
+asked of the code the cleanup keeps instead (`Program#iyi_pool_reached?`),
+so a program whose spawns all stay serial still has no checks.
+
+**4. Seeing which it was.** Through the channels a program already has, and
+no new warning: `--error-on-warnings` builds do not change. `iyi build`,
+`iyi check` and `iyi run` take `--explain-spawn`, which writes a note for
+each of the program's spawns, after the warnings' output and in the same
+place - `file:line:column: note: spawn runs in parallel: ...`, or `spawn
+stays in its spawner's unit: ` followed by the refusal `spawn_parallel`
+would have made, which names the capture (`the block captures `log :
+Array(Int32)`, which is not Share: ...`), the constant and the path to
+it, or the line of the assignment. `--explain-spawn-std` adds std's and
+the prelude's own spawns. Under `-f json` each note is a frame marked
+`"severity": "note"` in the array warnings are in. A note is not counted
+as a warning, and a build that asked for none prints none. The language
+server shows the same verdict as an inlay hint after `spawn` - `parallel`,
+or `in its unit` with the reason as its tooltip - computed off its typed
+tree without the cleanup (`CleanupTransformer#spawn_reason_for`).
+
+**5. Order, and the way out: `spawn_serial`.** Before, a spawned task did
+not run until its spawner parked, and tasks of a unit took turns only at
+parks. An eligible task may start at once, on another core, beside its
+spawner. For memory nothing changes: every value both sides reach is
+`Share`, so no read is torn and no write lost. What changes is order, which
+is logic: a spawner that writes an `Atomic` after the spawn, counting on
+the task not having run yet, may find the task already read the old value;
+a spawner that sends on a buffered channel and then spawns the task that
+drains it is unaffected, but one that spawns the drainer first and counts
+on it not draining before the sends are all in is not. A program that
+depends on such an order says so with `g.spawn_serial { }`, which is
+today's `spawn` whatever the block captures. A verb rather than a named
+argument because the language already spells where a task runs as a verb -
+part 2 of III.4.13, "the door is its own verb", `spawn_parallel` - and
+`g.spawn(serial: true)` would have a `false` that means nothing an absent
+argument does not, and a non-literal value the compiler could not decide
+on. The three read as one set: `spawn` the compiler places, `spawn_serial`
+always in the unit, `spawn_parallel` always on the pool, refused when its
+block is not `Share`. The typed group takes `spawn_serial` as a direct
+spawn, as it takes the other two (III.4.9).
+
+**6. The pool, started at the first eligible spawn and grown to the work.**
+The pool starts where `spawn_parallel` starts it, at the first eligible
+spawn that goes to the pool, and not before: a program none of whose spawns
+is eligible has no pool and no new thread. `IYI_WORKERS=1`, or
+`IyiWorkers.count = 1` before the first parallel task, keeps an eligible
+spawn in its spawner's unit and the pool unstarted, so a program held to one
+worker is a program on one thread, as before (`IyiWorkers.parallel?`; the
+count read once, not an environment lookup at every spawn).
+
+It starts with one worker, and starts another only when a task is waiting
+and no worker is idle to take it (`IyiWorkers.grow`), up to the count, as Go
+starts a thread from `wakep` when no idle one is parked. One is on its way
+at a time: a new worker holds the token of the one worker out looking until
+its first look, so a burst of spawns starts one, and that one, finding a
+task with more waiting, starts the next. `IyiThread.start` takes the
+scheduler's lock and allocates, so a thread holding that lock, or the
+monitor's own thread, owes the start instead, and the next worker to look,
+task to give its worker up at a back-edge, or spawn to let the lock go pays
+it.
+`IyiWorkers.launched` reads how many have started.
+
+Started whole, the pool cost a small program a thread a worker. On the
+shared 12-vCPU Linux machine, load 2 to 2.4, release builds, the mean of 200
+runs interleaved: one spawn that prints a line took 0.44 ms a process with
+the spawn serial, and with it eligible 0.45 ms on one worker, 0.89 on two,
+1.10 on four and 2.46 on twelve with the pool started whole; grown to the
+work, 0.68 ms on two, four or twelve - one worker and the monitor. A program
+that allocates paid more: the collector's budget is floored at
+`MIN_BUDGET`, 4 MiB, for every thread (`IyiMark.next_budget`). One eligible
+spawn of nothing, then the main thread building 200 lists of 20,000 short
+strings, peaked at 82 MB resident on twelve workers in each of three runs
+with the pool started whole, and at 17 to 28 MB grown to the work, against
+11 to 13 MB with `IYI_WORKERS=1`. Part 9's fan-out took the same time
+either way, the best of two runs of best of five: 95 and 96 ms on one
+worker, 48 and 48 on two, 24 and 24 on four, 13 and 13 on eight, 10 and 10
+on twelve.
+`bench/spawn_eligible.sh` holds it on a pool of four: one spawn starts one
+worker, 200 spawns made and joined one at a time at most three, and four
+tasks running at one instant all four; a pool that starts every worker at
+once, and one that never starts a second, are each caught.
+
+**7. With the rest of III.4.** An eligible task is a task of its group
+like any other: joined at the scope's end, cancelled with it, its failure
+the group's under III.4.3, its answer through `value` - which need not be
+`Share`, as a parallel task's need not (III.4.13, part 3) - and typed by
+`end!`. A cancel reaches it on whichever worker it is on, and a panic stops
+at its boundary and is printed, as `spawn_parallel`'s do. A spawn inside a
+parallel task is placed by the same rule: an eligible one is a unit of its
+own, and may run beside its parent; one that is not joins its parent's
+unit, as before. A spawn on a pool worker goes into that worker's queue,
+one on a thread outside the pool into the injection queue. Under
+`-Dgc_none` and `-Dgc_boehm`, where `spawn_parallel` is refused, `spawn`
+has no line pointing at the pool and every spawn stays serial; its note
+says why.
+
+**8. The audit: what the new default moves, and what it broke.**
+`iyi check --explain-spawn-std` over every program under `bench/` and
+`samples/` that spawns or serves (141 programs, one of which did not
+compile and showed the bug fixed before this was written: a `Proc(T)`
+parameter binds no `T` for a block that never returns), counted by the
+place the spawn is written:
+
+| Where | Parallel | In its unit | Differs by instantiation |
+|---|---|---|---|
+| std (autocert 5, http 4, process 2, socket 1) | 0 | 12 | 0 |
+| prelude (`testing.iyi`'s `assert_panics`) | 0 | 1 | 0 |
+| bench/ | 120 | 286 | 6 |
+| samples/ | 5 | 3 | 0 |
+
+All of std's spawns stay serial, each for a capture that is not `Share`:
+a connection's `IyiSocket`, a `ServeStop`, the autocert flight records, a
+`ProcessChild`, an `Array` of outcomes, a forwarded `Proc`. A server's
+connections, a process's pipes and autocert's renewals run as they did,
+so `bench/web_cores.py` has no spawn of std's to move. Every place counted
+parallel captures only atomics, channels of `Share` values, strings and
+integers, and reaches nothing through a call that is not `Share`.
+
+The gates run against the new default on the shared Linux machine, each
+through the machine's one heavy slot. `socket_exercise`, and the std
+siblings `process`, `sse`, `websocket`, `tls`, `json`, `log`, `router`,
+`file`, `regex`, `autocert`, `fileserver`, `cookie`, `csv` and `dir`,
+held. These did not, and they are part 5's evidence, each with what was
+done about it:
+
+- `runtime_exercise` step 11, "rendezvous FIFO: expected 123, got 312":
+  three spawns that send 1, 2 and 3 on one channel, counting on parking in
+  the order spawned. They capture only the channel, so each ran on its own
+  worker and the sends raced. The step tests the order, so its senders
+  are `spawn_serial` now, and the step holds. The same gate's floor then
+  read `environ`, the pool's, and lists it, as `parallel_exercise`'s does.
+- `thread_exercise`, "registry: 12 fibers of 8 finished threads are still
+  registered": tasks spawned inside `IyiThread.start` blocks left for the
+  pool, so the fibers outlived the threads the check counts them by. The
+  step is about a thread's own fibers, so they are `spawn_serial`, and
+  the gate holds.
+- `concurrency_exercise`'s dependency floor: spawns there are eligible,
+  the pool starts, and `environ` is on the link line. It is the pool's,
+  as `parallel_exercise`'s floor lists it, and the floor lists it now
+  with that reason. Then two of its broken copies passed - "a send node
+  allocated for every park" (step 16b, which counts what a park costs
+  tasks taking turns on one thread, ran its ring of tasks on the pool)
+  and "an io waiter found by walking every waiter" (step 0b's 2,000
+  parked readers, capturing only a descriptor, parked on the workers'
+  pollers and not beside the round trips on the main thread's) - and a
+  run failed "rendezvous select: select first:1;then second:2;" (step
+  12b's two senders, each on a worker, raced to park). Those, and the steps
+  whose subject is one thread's order or turns - the FIFO senders (11),
+  the select woken by its deadline and a sender at once (16a), the
+  receipt read after a later sender parks (16c) and the ping-pong beside
+  a sleeper (21) - spawn with `spawn_serial` now, and the gate holds
+  with every copy caught: the send node at 39 bytes a message, the io
+  walk at 13 times the round trips' time.
+- `parallel_exercise`'s broken copy `closeshome` was not caught. Under
+  `-Dparallel_closes_home` its seventeenth read is meant to be a task of
+  the main thread's own; its block captures only `Share` values, so it
+  ran on the pool. It is `spawn_serial`, and the copy is caught again.
+- `std_http_exercise`'s copy "a connection served on the thread that
+  accepted it" was not caught. The copy spelled the connection's spawn
+  `g.spawn` for "on the accepting thread", and the block, which
+  `spawn_parallel` takes, is eligible, so the copy served every request
+  on a worker as the real code does (`--explain-spawn-std` notes it
+  "spawn runs in parallel"). On master's CI the same check catches it
+  (run 41668221971, "caught: FAIL answered on the accepting thread: yes,
+  not no"), so this change, and not the shared machine's load, made it
+  pass. The copy spells it `g.spawn_serial` now, and is caught.
+- On macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine),
+  `runtime_exercise`'s darwin floor printed `_close` and `_environ`, the
+  pool's, which only the Linux floor had listed; it lists both now.
+  `concurrency_exercise.sh` did not run there at all: the note on
+  `environ` sat inside the Linux floor's `$( )`, and macOS's bash 3.2
+  refused the script with a syntax error 150 lines on. Moved above it,
+  the script ran, and its step "a group's join re-raises the first task
+  that panicked" joined with "second" named: both spawns capture only a
+  `String` and ran at once on two workers. The step is about the order of
+  one unit, so they are `spawn_serial`, and the gate holds there and on
+  Linux.
+
+`std_signal_exercise`, `std_mutex_exercise` and `root_exercise` failed
+too, and failed the same way when run with the old prelude through
+`IYI_PATH`, so this change did not cause those failures either.
+
+No std code was changed: none of std's own spawns moved, and every
+failure above was a test program's assumption about where or in what
+order its spawns ran.
+
+**9. What it buys.** `bench/spawn_fanout.iyi`, 31 MiB hashed by 64 plain
+spawns whose blocks capture a `String`, two integers and a `List`, best of
+five rounds, with the answer the same at every count:
+
+| Workers | Linux, 12 vCPUs, load 6 | macOS 26.6, Apple M2 Pro, 10 cores (the user's machine) | Windows 11, 12 logical processors (the user's machine) |
+|---|---|---|---|
+| 1 | 99 ms | 158 ms | 95 ms |
+| 2 | 50 ms | 81 ms | 47 ms |
+| 4 | 25 ms | 41 ms | 24 ms |
+| 8 | 14 ms | 23 ms | 13 ms |
+| 12 (Linux, Windows), 10 (macOS) | 12 ms | 20 ms | 10 ms |
+
+That is 8.3× on twelve workers on Linux, 7.9× on ten on macOS and 9.5×
+on twelve on Windows, where the same source before ran on one thread
+whatever the count.
+
+A server, whose connections std spawns and part 8 found serial, should
+not move, and `bench/web_cores.iyi`'s pooled server did not: release
+builds of `mt/next` (before) and this branch rebased on it (after),
+interleaved, best of three rounds, requests a second:
+
+| Endpoint | macOS, 10 workers, wrk -t4 -c32: before | after | Windows, 12 workers, oha -c32: before | after |
+|---|---|---|---|---|
+| `check_version` | 119,836 | 118,532 | 117,313 | 114,976 |
+| `order` | 116,259 | 116,150 | 98,565 | 104,937 |
+| `login` | 170 | 171 | - | - |
+
+(macOS 26.6, Apple M2 Pro, 10 cores, and Windows 11, 12 logical
+processors, both the user's machines.) On macOS every pair is within 1.1%,
+and each endpoint's rounds overlap. On Windows `check_version`'s did too,
+103,050 to 117,313 before and 107,760 to 114,976 after; `order`'s did
+not, 96,646 to 98,565 before and 103,130 to 104,937 after, 6% faster with
+no spawn of the server's moved, which these three rounds do not explain.
+
+**10. Settled, and what is left.**
+
+- `@[SafeReach]` keeps making a spawn eligible (part 1), as it makes a
+  `spawn_parallel` block pass.
+- A program that assumed spawn order (part 8) says so with
+  `spawn_serial` where the order is the step's subject; none of those
+  assumptions was in std.
+- The pool grows to the work (part 6), built here.
+- Left: the budget floor counting only threads that allocated since the
+  last collection, so that idle workers cost no heap. This goes to the
+  working-set work.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
@@ -11606,7 +11953,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 26,629-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 27,173-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

@@ -4176,8 +4176,12 @@ module Iyi
     # 404 objects of the build are the same bytes as before the change.
     private def mt_codegen(units, n_threads)
       Prof.span("bc+obj: prepare") { mt_run(units, n_threads, progress: false, &.prepare) }
-      compiled = units.select(&.compiles?)
-      @progress_tracker.stage_progress += units.size - compiled.size
+      compiled, reused = units.partition(&.compiles?)
+      # A unit whose bitcode did not change still goes through `compile`,
+      # which writes no object for it: that is what marks it reused for
+      # `--stats` and writes its `.ll` under `--emit llvm-ir`.
+      reused.each(&.compile)
+      @progress_tracker.stage_progress += reused.size
       compiled = compiled.map_with_index { |unit, index| {unit, index} }
         .sort_by! { |(unit, index)| {-unit.bitcode_size, index} }
         .map(&.[0])

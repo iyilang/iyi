@@ -82,7 +82,10 @@ case "$(uname -s)" in
   Darwin)
     # `_fstat64` is the runtime's read asking whether standard input is a
     # regular file, which kqueue never says has reached its end.
-    allowed='___error|__tlv_bootstrap|_backtrace|_backtrace_symbols_fd|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|_thread_switch|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_exit|_fstat64|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_os_sync_wait_on_address|_os_sync_wake_by_address_all|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
+    # `_environ` and `_close` are the pool's, as in the Linux branch below:
+    # macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine) listed both
+    # once the exercise's eligible spawns started it.
+    allowed='___error|__tlv_bootstrap|_backtrace|_backtrace_symbols_fd|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|_thread_switch|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_close|_environ|_exit|_fstat64|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_os_sync_wait_on_address|_os_sync_wake_by_address_all|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
     added="$(nm -u exercise | sed -e 's/^ *//' | awk '{ print $NF }' |
       grep -E -cv "^($allowed)\$")"
     extra_libs="$(otool -L exercise | sed -n '2,$p' | awk '{ print $1 }' |
@@ -97,7 +100,11 @@ case "$(uname -s)" in
   *)
     added="$(nm -u exercise |
       sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
-      grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main)$' |
+      # `environ`: the exercise's spawns whose blocks capture only `Share`
+      # values run on the pool (SPEC.md III.4.15), whose start reads
+      # `IYI_WORKERS` from the environment, as bench/parallel_exercise.sh's
+      # floor says.
+      grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main|environ|__environ)$' |
       grep -cv '^\s*$')"
     if [ "$added" -ne 0 ]; then
       echo "the runtime put $added undefined symbols back on the link line:"

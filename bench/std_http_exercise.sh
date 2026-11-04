@@ -1352,9 +1352,12 @@ PY
       return
     end
     serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, IyiWorkers.count)' "workers: 1, the threads that answered"
+  # `spawn_serial`, not `spawn`: the block passes every check
+  # `spawn_parallel`'s does, so a plain `spawn` of it runs on the pool
+  # (SPEC.md III.4.15), and that copy answered every request on a worker.
   parallel_breaks "a connection served on the thread that accepted it" \
     '    g.spawn_parallel do
-      client = IyiSocket.new(fd, family)' '    g.spawn do
+      client = IyiSocket.new(fd, family)' '    g.spawn_serial do
       client = IyiSocket.new(fd, family)' "answered on the accepting thread"
   parallel_breaks "a stop that never reaches a connection on another worker" \
     '            stop.close

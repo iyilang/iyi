@@ -2838,11 +2838,14 @@ module Iyi::Lsp
                 end
               end
               json.field "label", hint.label
-              json.field "kind", hint.kind
+              # A spawn's note has no LSP kind: it is neither a type nor a
+              # parameter name.
+              json.field "kind", hint.kind unless hint.kind == InlayVisitor::KIND_NOTE
+              json.field "tooltip", hint.tooltip if hint.tooltip
               json.field "paddingRight", true if hint.kind == InlayVisitor::KIND_PARAMETER
               # `total : Int32`, the way the formatter writes it — not
               # `total: Int32`, which reads as different syntax.
-              json.field "paddingLeft", true if hint.kind == InlayVisitor::KIND_TYPE
+              json.field "paddingLeft", true if hint.kind.in?(InlayVisitor::KIND_TYPE, InlayVisitor::KIND_NOTE)
             end
           end
         end

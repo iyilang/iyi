@@ -422,6 +422,13 @@ jobs:
       - name: Tasks across cores (III.4.13)
         run: bash bench/parallel_exercise.sh
 
+      # III.4.15: a plain spawn whose block captures only Share values runs
+      # beside its siblings on the pool, one that captures the parent's
+      # Array stays in its unit, spawn_serial stays too, and
+      # --explain-spawn names the capture; broken copies of each caught.
+      - name: Where a plain spawn runs (III.4.15)
+        run: bash bench/spawn_eligible.sh
+
       # A pool's workers allocating from their own caches, refilled under
       # their size class's lock: cells read back whole through collections,
       # the sweep's chunks reused, no chunk on two lists, every list empty
@@ -1477,6 +1484,9 @@ jobs:
       - name: Tasks across cores (III.4.13)
         run: bash bench/parallel_exercise.sh
 
+      - name: Where a plain spawn runs (III.4.15)
+        run: bash bench/spawn_eligible.sh
+
       # The same shape on kqueue, where the event entry is 32 bytes
       # rather than 12 and the buffer the collector could not see is
       # 512 rather than 192.
@@ -2250,6 +2260,7 @@ jobs:
           bash bench/reuse_integrity.sh
           bash bench/concurrency_exercise.sh
           bash bench/parallel_exercise.sh
+          bash bench/spawn_eligible.sh
           bash bench/library_boundaries.sh
           bash bench/up_to_date.sh
 

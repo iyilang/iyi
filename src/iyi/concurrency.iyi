@@ -4993,11 +4993,13 @@ end
 # ── The pool — III.4.13 ────────────────────────────────────────────────
 #
 # The worker threads parallel tasks run on: `IyiThread`s of the runtime's
-# own, each a scheduler like any thread's, started at the first
-# `spawn_parallel` - a program without one has no pool. A parallel task
-# waits here until a worker starts it: in the queue of the worker whose
-# task spawned it, or in the injection queue when a thread outside the
-# pool did, and a worker with nothing of its own steals from another's.
+# own, each a scheduler like any thread's. The first starts at the first
+# parallel task - a program without one has no pool - and each other only
+# when a task is waiting and no worker is idle to take it (`grow`). A
+# parallel task waits here until a worker starts it: in the queue of the
+# worker whose task spawned it, or in the injection queue when a thread
+# outside the pool did, and a worker with nothing of its own steals from
+# another's.
 #
 # Once started, a parallel task and the tasks `spawn` starts inside it
 # (its unit, `IyiUnit`) run wherever a worker is free. A runnable one is
@@ -5019,10 +5021,19 @@ end
 # a send, a lock let go - does, since that task may compute on
 # (`handed_on?`).
 class IyiWorkers
-  # `count=`'s answer, 0 when the program did not ask; the number started,
+  # `count=`'s answer, 0 when the program did not ask; the pool's size,
   # 0 before the pool is.
   @@asked : Int32 = 0
   @@started : Int32 = 0
+  # `resolved`'s answer as `parallel?` last read it, 0 before it has.
+  @@wanted : Int32 = 0
+  # Worker threads started so far, at most `@@started` (`grow`); 1 when
+  # one was wanted where none could be started, on a thread holding a
+  # lock `IyiThread.start` takes or on the monitor's (`pay`); and how many
+  # times that happened.
+  @@launched : Int64 = 0_i64
+  @@owed : Int64 = 0_i64
+  @@owes : UInt64 = 0_u64
   @@inject_head : IyiFiber?
   @@inject_tail : IyiFiber?
   # Started fibers that may move, runnable and in no worker's ring: woken
@@ -5113,9 +5124,10 @@ class IyiWorkers
     raise "IyiWorkers.count: a pool has at least one worker, not #{workers}" if workers < 1
     started = @@started
     if started > 0 && workers != started
-      raise "IyiWorkers.count: the pool started with #{started} workers, and it does not grow or shrink once it has"
+      raise "IyiWorkers.count: the pool started with a size of #{started} workers, and its size does not change once it has"
     end
     @@asked = workers
+    @@wanted = 0
     workers
   end
 
@@ -5130,6 +5142,30 @@ class IyiWorkers
   # Whether the pool has started (`start`).
   def self.started? : Bool
     @@started > 0
+  end
+
+  # The worker threads started so far: one at the pool's start, and more
+  # only while none is idle (`grow`), up to `count`.
+  def self.launched : Int32
+    word(pointerof(@@launched)).value.get.to_i32
+  end
+
+  # Whether an eligible `spawn` (SPEC.md III.4.15) goes to the pool: a
+  # pool of more than one worker, started or still to start. One worker
+  # keeps such a spawn in its spawner's unit and the pool unstarted, so
+  # `IYI_WORKERS=1` is a program on one thread. The count the pool would
+  # start with is kept once read, since before the pool starts it is an
+  # environment lookup, and a program held to one worker asks it at every
+  # spawn; `count=` forgets it.
+  def self.parallel? : Bool
+    started = @@started
+    return started > 1 if started > 0
+    wanted = @@wanted
+    if wanted == 0
+      wanted = resolved
+      @@wanted = wanted
+    end
+    wanted > 1
   end
 
   # The worker whose state's id is *id*, or nil: the pool's list read
@@ -5164,7 +5200,8 @@ class IyiWorkers
     {% end %}
   end
 
-  # The workers, started once, on the thread of the first parallel spawn.
+  # The pool, started once, on the thread of the first parallel spawn,
+  # with one worker: the rest start as the work asks for them (`grow`).
   # Each worker is an `IyiThread`, which is what makes the collector stop
   # and scan it as it stops and scans any thread (III.4.11).
   def self.start : Nil
@@ -5179,6 +5216,11 @@ class IyiWorkers
       @@started = workers
       @@workers = Array(IyiSchedulerState).new(workers)
       @@listed = Pointer(UInt64).malloc(workers.to_u64)
+      # The first worker comes up looking, as every worker `grow` starts
+      # does: the pushes behind the first start no other until it finds
+      # a task and calls for the next (`stop_spinning`).
+      word(pointerof(@@launched)).value.set(1_i64)
+      word(pointerof(@@spinning)).value.add(1_i64)
       IyiSchedLock.unlock
       claim_preempt_slot
       {% if flag?(:win32) %}
@@ -5200,11 +5242,7 @@ class IyiWorkers
         # kernel left waiting would have held.
         LibC.SetProcessPriorityBoost(LibC.GetCurrentProcess, 1_i32)
       {% end %}
-      index = 0
-      while index < workers
-        IyiThread.start { IyiWorkers.work }
-        index = index + 1
-      end
+      IyiThread.start { IyiWorkers.work }
       start_monitor
     {% end %}
   end
@@ -5231,6 +5269,9 @@ class IyiWorkers
       {% end %}
       IyiSchedLock.lock
       st.worker = true
+      # Started holding the one token of a worker out looking (`start`,
+      # `grow`), which its first look gives back.
+      st.spinning = true
       listed = @@workers
       listed << st if listed.is_a?(Array(IyiSchedulerState))
       slot = word(pointerof(@@listed_count)).value.get
@@ -5238,6 +5279,7 @@ class IyiWorkers
       word(pointerof(@@listed_count)).value.add(1_i64)
       IyiSchedLock.unlock
       while true
+        pay
         fiber = IyiScheduler.worker_next(st)
         if fiber.is_a?(IyiFiber)
           stop_spinning(st, true)
@@ -5259,7 +5301,8 @@ class IyiWorkers
 
   # A parallel task, made `Runnable`, into the spawning worker's own queue
   # or, from a thread outside the pool, the injection queue; and one idle
-  # worker rung to come and take it. Lock held.
+  # worker rung to come and take it, or with none to ring, one more
+  # started (`grow`). Lock held.
   def self.push(fiber : IyiFiber) : Nil
     fiber.state = IyiFiberState::Runnable
     fiber.next_run = nil
@@ -5295,6 +5338,7 @@ class IyiWorkers
       end
       index = index + 1
     end
+    grow
   end
 
   # The next fiber for worker *st* from the queues behind the lock, or
@@ -5616,11 +5660,15 @@ class IyiWorkers
   end
 
   # One idle worker rung to come and steal, unless one is already out
-  # looking or none is idle: the spinner that finds work calls the next
+  # looking; with none idle, or every idle one already rung, one more
+  # started (`grow`). The spinner that finds work calls the next
   # (`stop_spinning`), and one that finds none goes back to sleep. Takes
   # the lock unless this thread holds it.
   def self.wake_one : Nil
-    return if word(pointerof(@@idle)).value.get <= 0_i64
+    if word(pointerof(@@idle)).value.get <= 0_i64
+      grow
+      return
+    end
     return unless word(pointerof(@@spinning)).value.compare_and_set(0_i64, 1_i64)[1]
     held = IyiSchedLock.held_here?
     IyiSchedLock.lock unless held
@@ -5643,6 +5691,64 @@ class IyiWorkers
     end
     word(pointerof(@@spinning)).value.sub(1_i64) unless rung
     IyiSchedLock.unlock unless held
+    # Every idle worker already rung, each for a fiber of its own: one
+    # more is started, as where none is idle.
+    grow unless rung
+  end
+
+  # One more worker, called for where none is idle: the pool starts with
+  # one (`start`) and grows towards `count` only while every worker it has
+  # is busy, as Go starts an M from `wakep` when no idle one is parked.
+  # One at a time: the new worker holds the token of the one worker out
+  # looking until its first look, so a burst of pushes starts one, and
+  # that one, finding a task, calls for the next (`stop_spinning`).
+  #
+  # `IyiThread.start` takes the scheduler's lock and the runtime's, and
+  # allocates, so a thread holding either, or the monitor's, which is no
+  # program thread, owes the start instead (`@@owed`), and the next worker
+  # to look, task to give its worker up at a back-edge, or parallel spawn
+  # to let go of the lock pays it (`pay`). The runtime's lock says only
+  # that some thread holds it, so it is waited for a moment first: the
+  # starter of the worker calling here holds it through its clone
+  # (`IyiThread.start`) while the new worker is already looking.
+  def self.grow : Nil
+    return if word(pointerof(@@launched)).value.get >= @@started.to_i64
+    return unless word(pointerof(@@spinning)).value.compare_and_set(0_i64, 1_i64)[1]
+    if IyiSchedLock.held_here? || IyiScheduler.state_id == 0_u64 || !runtime_lock_free?
+      word(pointerof(@@spinning)).value.sub(1_i64)
+      word(pointerof(@@owed)).value.set(1_i64)
+      Pointer(Atomic(UInt64)).new(pointerof(@@owes).address).value.add(1_u64)
+      return
+    end
+    word(pointerof(@@launched)).value.add(1_i64)
+    IyiThread.start { IyiWorkers.work }
+  end
+
+  # Whether the runtime's lock is free, waited for up to 100 us: another
+  # thread lets it go in that, and one this thread holds is never let go
+  # here, so the start is owed then.
+  private def self.runtime_lock_free? : Bool
+    return true unless IyiRuntimeLock.held?
+    until_ns = __iyi_monotonic_ns + 100_000_i64
+    while IyiRuntimeLock.held?
+      return false if __iyi_monotonic_ns >= until_ns
+      IyiThread.spin_pause
+    end
+    true
+  end
+
+  # Starts `grow` owed rather than made, in all: what the exercise names
+  # when the pool did not grow.
+  def self.owes : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@owes).address).value.get
+  end
+
+  # A start `grow` owed, called for again: an idle worker rung if one has
+  # come since, or the worker started. Without a lock.
+  def self.pay : Nil
+    return if word(pointerof(@@owed)).value.get == 0_i64
+    return unless word(pointerof(@@owed)).value.compare_and_set(1_i64, 0_i64)[1]
+    wake_one
   end
 
   # A worker rung to look has looked: it is out of the count, and one
@@ -5761,8 +5867,10 @@ class IyiWorkers
       end
       # What the poll woke is in this worker's ring: an idle worker is
       # called for it, even for one fiber, which `push_runnable` leaves
-      # for the worker itself to run next.
+      # for the worker itself to run next. A worker start owed while every
+      # worker was busy is paid here (`grow`).
       wake_one if st.ring_size > 0_u64
+      pay
       give_up(st, fiber) if turn_wanted?(st, fiber)
     {% end %}
   end
@@ -6026,13 +6134,13 @@ class IyiWorkers
   # Every worker idle and nothing waiting: the monitor says it is parked,
   # under the lock a worker leaving its wait takes, and waits until that
   # worker takes the word back (`take_monitor_wake`). Not before every
-  # worker has come up: one that finds a task the moment it starts never
-  # waits, so never leaves a wait to wake the monitor - the unit step's
-  # task was never preempted that way, on a pool of one.
+  # worker started has come up: one that finds a task the moment it
+  # starts never waits, so never leaves a wait to wake the monitor - the
+  # unit step's task was never preempted that way, on a pool of one.
   private def self.park_monitor : Nil
     IyiSchedLock.lock
     count = word(pointerof(@@listed_count)).value.get
-    quiet = count == @@started.to_i64 && !work_waiting?
+    quiet = count == word(pointerof(@@launched)).value.get && !work_waiting?
     index = 0_i64
     while quiet && index < count
       quiet = false unless listed_at(index).idle
@@ -6558,12 +6666,39 @@ class IyiGroup
   # group acts on (III.4.3): the first cancels the siblings, and the task
   # it is told on is `first_failure`, which the typed group answers. A
   # task a cancelled one starts, or one a cancelled group starts, is
-  # cancelled from its first wait on. It never runs at the same instant as
-  # its spawner: on a thread outside the pool it runs on that thread for
-  # its whole life, and inside a parallel task it joins that task's unit
-  # (`IyiUnit`), whose fibers may each resume on another worker but never
-  # two at once.
+  # cancelled from its first wait on.
+  #
+  # Where it runs is the compiler's decision, per call (SPEC.md III.4.15):
+  # a block every capture of which is `Share`, and that reaches no module
+  # state that is not, may run on another core, and the compiler points
+  # such a call at `spawn_pooled`; every other call runs this body, and
+  # the task stays in its spawner's unit, as `spawn_serial`'s does.
   def spawn(&block : -> T) : IyiTask(T) forall T
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      # Never taken. The line is here so that `spawn_pooled` is typed for
+      # every `T` this def is, which is what lets the compiler point an
+      # eligible call at it after typing (`CleanupTransformer#
+      # classify_spawn`); a branch on `false` is dropped before codegen.
+      return spawn_pooled(&block) if false
+    {% end %}
+    in_unit(&block)
+  end
+
+  # A task that stays in its spawner's unit whatever its block captures:
+  # it never runs at the same instant as its spawner or as any other task
+  # of the unit, and it does not run until its spawner parks, as every
+  # `spawn` did before 0.21.0 (SPEC.md III.4.15, part 5). On a thread
+  # outside the pool it runs on that thread for its whole life; inside a
+  # parallel task it joins that task's unit (`IyiUnit`), whose fibers may
+  # each resume on another worker but never two at once.
+  def spawn_serial(&block : -> T) : IyiTask(T) forall T
+    in_unit(&block)
+  end
+
+  # The two starts take the block as `spawn` does, `-> T`: a `Proc(T)`
+  # parameter binds no `T` for a block that never returns, and
+  # `g.spawn_parallel { raise "boom" }` stopped compiling.
+  private def in_unit(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
@@ -6591,6 +6726,21 @@ class IyiGroup
     # values, as the block a thread runs may (III.4.4,
     # `CleanupTransformer#check_share_boundary`).
     def spawn_parallel(&block : -> T) : IyiTask(T) forall T
+      on_pool(&block)
+    end
+
+    # :nodoc: — a `spawn` the compiler found eligible (SPEC.md III.4.15):
+    # a parallel task of its own unit, on a pool of more than one worker.
+    # On one worker, `IYI_WORKERS=1` or `IyiWorkers.count = 1`, it stays in
+    # its spawner's unit, so a program held to one worker runs its spawns
+    # on one thread, as before. Private: nothing but the compiler, which
+    # has checked the block, may call it.
+    private def spawn_pooled(&block : -> T) : IyiTask(T) forall T
+      return in_unit(&block) unless IyiWorkers.parallel?
+      on_pool(&block)
+    end
+
+    private def on_pool(&block : -> T) : IyiTask(T) forall T
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
       IyiWorkers.start
@@ -6608,6 +6758,9 @@ class IyiGroup
       IyiSchedLock.lock
       IyiWorkers.push(fiber)
       IyiSchedLock.unlock
+      # A worker the push found none idle for, started now the lock is let
+      # go (`IyiWorkers.grow`).
+      IyiWorkers.pay
       task
     end
   {% else %}

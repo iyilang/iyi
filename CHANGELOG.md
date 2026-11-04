@@ -51,6 +51,58 @@
   and for one while every worker runs a task, on Windows; one broken
   copy counts the waiting workers again and one counts every worker of
   a started pool free, and each is caught.
+- **A plain `spawn` runs in parallel where the compiler can prove it
+  safe (SPEC.md III.4.15, proposed).** A `g.spawn { }` whose block
+  passes every check `spawn_parallel`'s does, and whose walk of the
+  module state it reaches through calls finds nothing that is not
+  `Share` other than state marked `@[SafeReach]`, is a parallel task of
+  its own unit on the pool. Any other spawn stays in its spawner's unit,
+  as before. Nothing that compiled stops compiling, and there are no new
+  warnings. `--explain-spawn` on `build`, `check` and `run` writes a note
+  for each spawn: `spawn runs in parallel`, or `spawn stays in its
+  spawner's unit:` followed by the refusal that kept it there, which
+  names the capture. `--explain-spawn-std` adds std's spawns. `-f json`
+  marks these notes `"severity": "note"`, and the language server shows
+  the same verdict as an inlay hint. `g.spawn_serial { }` keeps a task in
+  its unit whatever it captures. `IYI_WORKERS=1` keeps every eligible
+  spawn on one thread and the pool unstarted. The pool starts at the
+  first eligible spawn, with one worker (the entry below). Of the spawns
+  that bench/ and samples/ programs reach, 125 locations now run in
+  parallel, 289 stay serial and 6 differ by instantiation. All 12 of
+  std's spawns stay serial. `bench/spawn_eligible.sh` holds the
+  placement, the unit, the opt-out, one worker and the notes, with a
+  broken copy caught for each. `bench/spawn_fanout.iyi` hashes 31 MiB in
+  64 plain spawns. It runs in 99 ms on one worker and 12 ms on twelve on
+  Linux (12 vCPUs), in 158 ms on one and 20 ms on ten on macOS 26.6
+  (Apple M2 Pro, 10 cores, the user's machine), and in 95 ms on one and
+  10 ms on twelve on Windows 11 (12 logical processors, the user's
+  machine). `bench/web_cores.iyi`'s server, whose connections std
+  spawns, held: best of three interleaved, `check_version` 119,836 req/s
+  before and 118,532 after on the M2 at ten workers, 117,313 and 114,976
+  on the Windows machine at twelve. Gate steps that tested a
+  unit's order or one thread's turns, and depended on spawns staying
+  in their unit, spawn with `spawn_serial`: in `runtime_exercise`,
+  `thread_exercise`, `concurrency_exercise` (its two-panics step among
+  them) and `parallel_exercise`, and in `std_http_exercise`'s copy that
+  serves a connection on the accepting thread (SPEC.md III.4.15, part 8).
+
+- **The pool starts one worker and grows to the work.** The first
+  parallel task, from `spawn_parallel`, `Server.serve` or an eligible
+  `spawn`, started every worker at once. It now starts one, and another
+  only when a task is waiting and no worker is idle to take it, up to
+  `IyiWorkers.count`, one on its way at a time, as Go starts a thread
+  from `wakep`. On a shared 12-vCPU Linux machine, a program whose one
+  eligible spawn prints a line took 2.46 ms on twelve workers and now
+  takes 0.68 ms, against 0.44 ms with the spawn serial. One eligible
+  spawn followed by the main thread building 200 lists of 20,000
+  strings peaked at 82 MB resident on twelve workers, and now peaks at 17
+  to 28 MB, because the collector's budget floor counts threads.
+  `bench/spawn_fanout.iyi` runs as fast as before: 10 ms on twelve
+  workers, 96 ms on one. `IyiWorkers.launched` says how many have
+  started. `bench/spawn_eligible.sh`'s `grows` step holds that one spawn
+  starts one worker and four tasks running at once start four, and
+  catches a pool that starts whole and one that never grows (SPEC.md
+  III.4.15, part 6).
 
 ### Gates
 
@@ -26451,7 +26503,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,944-line library and nothing else. Every other
+  written against iyi's own 27,097-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

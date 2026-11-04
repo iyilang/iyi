@@ -42,13 +42,13 @@
 #      and the collection's yield taken out a run never ends.
 #  4d. On Windows, a process one level above normal computes in bursts on
 #      the stopping thread's processor while that thread collects in a
-#      loop, and no stop lasts past the bound; with the stop's raise of
-#      its thread's priority taken out, stops last a burst. A thread
-#      taking the runtime lock beside them never waits past its bound;
-#      with the priority put back inside the release rather than after
-#      the lock, waits last a burst. A panic inside a stop puts the
-#      priority back; with `raise`'s lowering taken out, the thread
-#      keeps it.
+#      loop, and no more than three stops last past the bound; with the
+#      stop's raise of its thread's priority taken out, stops last a
+#      burst. A thread taking the runtime lock beside them never waits
+#      past its bound; with the priority put back inside the release
+#      rather than after the lock, waits last a burst. A panic inside a
+#      stop puts the priority back; with `raise`'s lowering taken out,
+#      the thread keeps it.
 #   5. Failure proof: the thread-root walk removed from a copy of the
 #      prelude, and a thread's list — reachable from its stopped frames
 #      alone — is swept out from under it; the program exits 1 naming the
@@ -644,7 +644,8 @@ esac
 # shipped build's longest stop 0.7 to 1.9 ms (3.1 ms alone, no burst),
 # and with the raise taken out, or on the build before it, 100.3 to
 # 103.1 ms in every run, the stops 73 to 93% of the run against 7%. The
-# bound is 20 ms.
+# bound is 20 ms, and three stops a run may pass it (`stopping.iyi` says
+# why).
 #
 # The priority is put back after the runtime lock is let go, not at the
 # end of the release: the drop is where the burst takes the processor,
@@ -757,12 +758,16 @@ system = 0_u64
 ::LibC.GetProcessAffinityMask(::LibC.GetCurrentProcess, pointerof(mask), pointerof(system))
 elsewhere = mask ^ shared
 # As many threads that compute as the other processors hold beside the
-# taker, up to four: a taker that shares a processor with one waits out
-# that thread's quantum, a lock it never asked for. On windows-2025's
-# 4-processor runners four computed on the 3 processors left with the
-# taker, and five runs of five had 2 to 11 waits past 50 ms, the longest
-# 102 to 611 ms (debug job 126403714389); CI run 41778179340 had 17, the
-# longest 303 ms. Windows 11, 12 logical processors (the user's machine),
+# taker and one left idle, up to four: a taker that shares a processor
+# with one waits out that thread's quantum, a lock it never asked for. On
+# windows-2025's 4-processor runners four computed on the 3 processors
+# left with the taker, and five runs of five had 2 to 11 waits past 50
+# ms, the longest 102 to 611 ms (debug job 126403714389); CI run
+# 41778179340 had 17, the longest 303 ms. Two beside the taker, filling
+# the three, still left the taker waiting out the runner's own threads:
+# its longest wait 0.2 to 41 ms in 45 runs on three runners, against 0.2
+# to 1.6 ms with one beside it and a processor idle (debug run
+# 41812323963). Windows 11, 12 logical processors (the user's machine),
 # leaves 11 for the five.
 others = 0
 bits = elsewhere
@@ -770,7 +775,7 @@ while bits != 0_u64
   others = others + 1 if bits & 1_u64 != 0_u64
   bits = bits.unsafe_shr(1_u64)
 end
-computes = others - 1
+computes = others - 2
 computes = 4 if computes > 4
 computes = 0 if computes < 0
 IyiMark.workers = 0_u64
@@ -800,9 +805,15 @@ end
 share = (IyiThread.stop_ns - stop_ns) * 100_u64 // (IyiMark.now_ns - started)
 flag.stop.set(1_i64)
 threads.each { |thread| thread.join }
-fail("stop: #{over} of #{collections} stops beside a burst on the stopping thread's processor took past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us") if over > 0
+# A stray stop past the bound is a stopped thread's, not the burst's: in
+# the 45 runs above, 3 stops passed 15 ms, one of them 28.6 ms, and each
+# spent all but 12 us in one `GetThreadContext`, waiting for a thread on
+# another processor to take its suspend; CI's runs had one stop of 24 to
+# 33 ms in a run. The burst holds dozens: with the raises taken out, 21 to
+# 33 stops of 100 to 142 ms a run in 18 runs there. So up to three pass.
+fail("stop: #{over} of #{collections} stops beside a burst on the stopping thread's processor took past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us") if over > 3
 fail("lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections took past #{lock_bound // 1000000_u64} ms, the longest #{flag.waited.get // 1000_i64} us") if flag.waits.get > 0_i64
-puts "stop: #{collections} stops of #{threads.size} threads beside a burst on the stopping thread's processor, #{share}% of the run in stops, the longest #{longest // 1000_u64} us, held to #{bound // 1000000_u64} ms"
+puts "stop: #{collections} stops of #{threads.size} threads beside a burst on the stopping thread's processor, #{share}% of the run in stops, #{over} past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us"
 puts "lock: the longest wait for the runtime lock beside them #{flag.waited.get // 1000_i64} us, held to #{lock_bound // 1000000_u64} ms"
 IYI
     shared=$(( NUMBER_OF_PROCESSORS - 1 ))

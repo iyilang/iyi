@@ -815,11 +815,15 @@ IYI
     sed 's/^/  /' stopping.txt
 
     step "failure proof: a priority put back inside the release holds the runtime lock through the burst"
+    # The copy lowers the priority where the release ends, after its last
+    # `ResumeThread`, where it was lowered before. The release waited there
+    # for the resumed threads to count out, and this copy found its end by
+    # that wait; the release waits for nobody now (`resume_others`) and
+    # ends by leaving the count owed to the next stop, `@@owed`.
     mkdir -p inside/iyi
     cp "$REPO"/src/iyi/*.iyi inside/iyi/
-    awk '{ print } /^        while word\(page \+ IYI_TC_RESUMED\)\.value\.get < @@deferred\.to_u64$/ { waiting = 1 }
-      waiting && /^        end$/ { print "        lower_stopper"; waiting = 0; moved++ } END { if (moved != 1) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > inside/iyi/thread.iyi || { echo "the release's wait is not in thread.iyi any more"; exit 1; }
+    awk '{ print } /^        @@owed = @@deferred$/ { print "        lower_stopper"; moved++ } END { if (moved != 1) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > inside/iyi/thread.iyi || { echo "the release's end is not in thread.iyi any more"; exit 1; }
     awk '/^          IyiThread\.lower_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
       "$REPO/src/iyi/prelude.iyi" > inside/iyi/prelude.iyi || { echo "the lowering after the lock is not in the prelude any more"; exit 1; }
     if ! IYI_PATH="$WORK/inside${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -o stopping-inside > build-inside.log 2>&1; then

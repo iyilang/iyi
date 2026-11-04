@@ -627,6 +627,171 @@ else
   fi
 fi
 
+# The two retentions a conservative stack scan cannot avoid by itself, and
+# the targeted fixes iyi has for each (GC_DESIGN.md, "Precise Stack Roots:
+# Measured, and Not Taken"). In both, a 64 MB string nobody keeps any more
+# is kept by a word that only looks like a pointer into it.
+#
+# * The loader's junk: a frame laid over the stack an earlier one left,
+#   with a slot it never writes, holds that frame's word. Here the earlier
+#   frame is the program's own (`play_loader`), so the word is an address
+#   in the string every run; on macos-15 it was dyld's under `main`. The
+#   fix is `__iyi_enter`'s: zero the stack under a frame before the frame
+#   is laid over it, done here by the top level, 16 KiB under its own
+#   stack pointer.
+# * The clock: an integer the program does keep, live in a frame across
+#   the collection, whose value falls inside the string (an integer at
+#   0x49f9af3be did, on macos-15, in bench/concurrency_exercise.iyi). The
+#   fix is that exercise's: a step that reads the clock runs in a `def` of
+#   its own, so the number goes with that frame before anything collects.
+#   Asserted in the optimised build: the debug build's frames keep a slot
+#   of the `def`'s too, and kept the string in 5 runs of 5 on both
+#   machines below.
+#
+# Each fix is asserted (the string is freed), and each case without its
+# fix is the broken copy, which must keep the string: that is the scan
+# being conservative, and it is the outcome precise stack maps would
+# change, at which point the broken copy's assertion turns into the
+# check. Measured 5 runs of 5 for each build on Linux x86_64 (12 vCPU,
+# shared) and on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+# machine): 64,050,705 bytes kept without the fix every time, 50,696 to
+# 50,712 with it. Elsewhere, where the stack clear's reach and a frame's
+# layout were not measured (Windows' `__chkstk` and committed limit,
+# aarch64 Linux under emulation), the step says so instead.
+echo
+echo "== a word that only looks like a pointer keeps 64 MB, and each fix takes it back"
+cat > "$WORK/retention.iyi" <<'IYI'
+import std/static_array
+import std/gc::{GC}
+
+# An address inside a 64 MB string nobody keeps, as an integer.
+@[NoInline]
+def dropped_string_word : UInt64
+  s = "r" * 64000000
+  s.to_unsafe.address &+ 32000000_u64
+end
+
+@[NoInline]
+def kept_now : UInt64
+  GC.collect
+  GC.stats.bytes_kept_by_last_sweep
+end
+
+@[NoInline]
+def nonzero(words : Pointer(UInt64), count : Int32) : Int32
+  found = 0
+  index = 0
+  while index < count
+    found = found + 1 if words[index] != 0_u64
+    index = index + 1
+  end
+  found
+end
+
+@[NoInline]
+def use_word(word : UInt64) : Int32
+  word == 0_u64 ? 1 : 0
+end
+
+# The loader's part: a frame that leaves its words on the stack and returns.
+@[NoInline]
+def play_loader : Int32
+  words = uninitialized UInt64[512]
+  word = dropped_string_word
+  index = 0
+  while index < 512
+    words[index] = word
+    index = index + 1
+  end
+  nonzero(pointerof(words).as(Pointer(UInt64)), 512)
+end
+
+# The program's: a frame laid over them, with a slot it never writes, live
+# across the collection.
+@[NoInline]
+def run_over_it : UInt64
+  untouched = uninitialized UInt64[512]
+  kept = kept_now
+  left = nonzero(pointerof(untouched).as(Pointer(UInt64)), 512)
+  puts "words left in the slot: #{left}"
+  kept
+end
+
+@[NoInline]
+def reading_in_a_def : Int32
+  reading = dropped_string_word
+  use_word(reading)
+end
+
+kept = 0_u64
+{% if flag?(:case_clock) %}
+  {% if flag?(:case_fixed) %}
+    reading_in_a_def
+    kept = kept_now
+  {% else %}
+    reading = dropped_string_word
+    kept = kept_now
+    use_word(reading)
+  {% end %}
+{% else %}
+  play_loader
+  {% if flag?(:case_fixed) %}
+    high = uninitialized UInt64
+    {% if flag?(:x86_64) %}
+      asm("movq %rsp, $0" : "=r"(high) :: : "volatile")
+    {% else %}
+      asm("mov $0, sp" : "=r"(high) :: : "volatile")
+    {% end %}
+    low = high - 16384_u64
+    while low < high
+      Pointer(UInt64).new(low).value = 0_u64
+      low = low + 8_u64
+    end
+  {% end %}
+  kept = run_over_it
+{% end %}
+puts "kept: #{kept} bytes"
+__iyi_exit(kept < 16777216_u64 ? 0 : 1)
+IYI
+retention_run() { # retention_run <label> [build flags]
+  local label="$1"
+  shift
+  if ! "$IYI" build "$@" -o "$WORK/retention-$label" "$WORK/retention.iyi" > "$WORK/retention-$label.log" 2>&1; then
+    echo "  $label: build failed"; sed -n '1,12p' "$WORK/retention-$label.log"; status=1; return 2
+  fi
+  "$WORK/retention-$label" > "$WORK/retention-$label.out" 2>&1
+}
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64 | Darwin/arm64) RETENTION_MEASURED=yes ;;
+  *) RETENTION_MEASURED=no ;;
+esac
+if [ "$EXERCISED" = no ]; then
+  echo "  the collector's allocator is not the default here, so nothing is kept or freed to check"
+  unmeasured=$((unmeasured + 1))
+elif [ "$RETENTION_MEASURED" = no ]; then
+  echo "  measured on Linux x86_64 and darwin arm64 only, so unmeasured on $(uname -s)/$(uname -m)"
+  unmeasured=$((unmeasured + 1))
+else
+  for case_ in "loader plain" "loader release" "clock release"; do
+    set -- $case_
+    name="$1" flags=""
+    [ "$2" = release ] && flags="--release"
+    if retention_run "$name-$2-fixed" $flags "-Dcase_$name" -Dcase_fixed &&
+       grep -q '^kept: ' "$WORK/retention-$name-$2-fixed.out"; then
+      echo "  $name, $2, with the fix: $(grep '^kept: ' "$WORK/retention-$name-$2-fixed.out")"
+    else
+      echo "  $name, $2, with the fix: FAIL:"; sed 's/^/    /' "$WORK/retention-$name-$2-fixed.out" | tail -3; status=1
+    fi
+    retention_run "$name-$2-held" $flags "-Dcase_$name"
+    if [ $? -eq 1 ] && grep -q '^kept: [0-9]\{8,\} bytes' "$WORK/retention-$name-$2-held.out"; then
+      echo "  failure proof: without it the conservative scan exits 1 at \"$(grep '^kept: ' "$WORK/retention-$name-$2-held.out")\""
+    else
+      echo "  failure proof: without the fix the string was freed anyway, so this proves nothing"
+      sed 's/^/    /' "$WORK/retention-$name-$2-held.out" | tail -3; status=1
+    fi
+  done
+fi
+
 echo
 if [ "$status" -ne 0 ]; then
   echo "Roots: something above failed."

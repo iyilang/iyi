@@ -7907,19 +7907,38 @@ require "./file"
             # over already, this thread owns the rest, and `finish_stopped`
             # cleared the flag before it released the threads.
             if start_concurrent
-              IyiRuntimeLock.unlock
+              unlock_released
               return
             end
-            IyiRuntimeLock.unlock
+            unlock_released
             wake_sweep_round
             return
           end
         {% end %}
         collect_locked(false)
-        IyiRuntimeLock.unlock
+        unlock_released
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           wake_sweep_round
           IyiThread.yield_to_stopped
+        {% end %}
+      end
+
+      # The runtime lock let go after a collection's stop and release, and
+      # then, on Windows, the stopping thread's priority put back
+      # (`IyiThread.lower_stopper`) - after, not inside the release: the
+      # drop is where Windows hands the processor to whatever waits above
+      # the lowered thread, and a thread descheduled there held the lock
+      # every released thread's next refill waits for. In iyiturkiye on a
+      # saturated machine (Windows 11, 12 logical processors, the user's
+      # machine), lowered at the end of the release, every release past
+      # 5 ms - 24 of them over six endpoints, two rounds, 12 to 179 ms -
+      # was spent after the last `ResumeThread`, at the drop, the
+      # collecting thread's cycle count moving about 0.001 a nanosecond
+      # there against 4.25 while it marks.
+      def self.unlock_released : Nil
+        IyiRuntimeLock.unlock
+        {% if flag?(:win32) && flag?(:x86_64) %}
+          IyiThread.lower_stopper
         {% end %}
       end
 
@@ -7954,7 +7973,7 @@ require "./file"
           close_sweep_round
         {% end %}
         collect_locked(true)
-        IyiRuntimeLock.unlock
+        unlock_released
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           IyiThread.yield_to_stopped
         {% end %}
@@ -8387,7 +8406,7 @@ require "./file"
             flush_live(w)
             if attempts < FINISH_RETRIES && unfinished
               IyiThread.resume_others(others)
-              IyiRuntimeLock.unlock
+              unlock_released
               retry = now_ns - started
               retries_ns = retries_ns + retry
               longest_retry = retry if retry > longest_retry
@@ -8465,7 +8484,7 @@ require "./file"
             @@pause_max = longest if longest > @@pause_max
             @@pause_total = @@pause_total + total
             @@concurrent_collections = @@concurrent_collections + 1_u64
-            IyiRuntimeLock.unlock
+            unlock_released
             wake_sweep_round
             return generation
           end

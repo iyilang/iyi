@@ -24,7 +24,7 @@ tar -xzf iyi-0.20.0-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,150 KB prelude, the 4,960 KB of `src/std` that `import std/...`
+iyi's own 1,151 KB prelude, the 4,960 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`

@@ -858,8 +858,9 @@
 
     {% if flag?(:win32) %}
       # The stopping thread runs at Windows' highest priority from the
-      # start of its stop to the end of its release, the pause between
-      # included, and is put back after (`raise_stopper`, `lower_stopper`).
+      # start of its stop until the runtime lock is let go after its
+      # release, the pause between included, and is put back then
+      # (`raise_stopper`, `lower_stopper`, `IyiMark.unlock_released`).
       # A stop here is that thread's own loop of `SuspendThread` and
       # `ResumeThread`, and a thread above it on its processor held the
       # world stopped until it let go: in iyiturkiye on a saturated machine
@@ -889,9 +890,11 @@
         @@stopper_raised = LibC.SetThreadPriority(me, THREAD_PRIORITY_HIGHEST) != 0
       end
 
-      # The raise put back, by the thread that made it and by no other: the
-      # release's thread, and `raise`'s for a panic inside a stop, which ends
-      # only its task and leaves the thread to run the tasks after it.
+      # The raise put back, by the thread that made it and by no other:
+      # after the collection lets the runtime lock go
+      # (`IyiMark.unlock_released` says why not inside the release), and
+      # in `raise` for a panic inside a stop, which ends only its task and
+      # leaves the thread to run the tasks after it.
       def self.lower_stopper : Nil
         return unless @@stopper_raised && @@stopper_id == LibC.GetCurrentThreadId
         @@stopper_raised = false
@@ -1053,7 +1056,6 @@
         # themselves out.
         resume_suspended(@@line)
         @@owed = @@deferred
-        lower_stopper
       {% else %}
         {% if flag?(:linux) %}
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (page + IYI_TC_RESUME).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)

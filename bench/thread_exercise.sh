@@ -43,9 +43,12 @@
 #  4d. On Windows, a process one level above normal computes in bursts on
 #      the stopping thread's processor while that thread collects in a
 #      loop, and no stop lasts past the bound; with the stop's raise of
-#      its thread's priority taken out, stops last a burst. A panic inside
-#      a stop puts the priority back; with `raise`'s lowering taken out,
-#      the thread keeps it.
+#      its thread's priority taken out, stops last a burst. A thread
+#      taking the runtime lock beside them never waits past its bound;
+#      with the priority put back inside the release rather than after
+#      the lock, waits last a burst. A panic inside a stop puts the
+#      priority back; with `raise`'s lowering taken out, the thread
+#      keeps it.
 #   5. Failure proof: the thread-root walk removed from a copy of the
 #      prelude, and a thread's list — reachable from its stopped frames
 #      alone — is swept out from under it; the program exits 1 naming the
@@ -642,6 +645,14 @@ esac
 # and with the raise taken out, or on the build before it, 100.3 to
 # 103.1 ms in every run, the stops 73 to 93% of the run against 7%. The
 # bound is 20 ms.
+#
+# The priority is put back after the runtime lock is let go, not at the
+# end of the release: the drop is where the burst takes the processor,
+# and a thread descheduled there holds the lock. A fifth thread takes the
+# lock in a loop on the other processors and keeps its longest wait.
+# Five interleaved runs: 0.3 to 16.8 ms, none past 20, and with the drop
+# put back at the end of the release, 100.1 to 102.6 ms, 36 or 37 waits
+# past 20 ms in each run. The bound is 50 ms.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     if [ "${NUMBER_OF_PROCESSORS:-1}" -lt 2 ]; then
@@ -685,10 +696,14 @@ module stopping
 class Flag
   getter stop : Atomic(Int64)
   getter held : Atomic(Int64)
+  getter waited : Atomic(Int64)
+  getter waits : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
     @held = Atomic(Int64).new(0_i64)
+    @waited = Atomic(Int64).new(0_i64)
+    @waits = Atomic(Int64).new(0_i64)
   end
 end
 
@@ -711,10 +726,31 @@ def compute(flag : Flag, mask : UInt64) : Nil
   end
 end
 
+# Takes the runtime lock in a loop on the processors *mask* names,
+# computing 20 us between turns, and keeps its longest wait and how many
+# waits passed *bound*.
+def taker(flag : Flag, mask : UInt64, bound : UInt64) : Nil
+  Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, mask)
+  flag.held.add(1_i64)
+  while flag.stop.get == 0_i64
+    asked = IyiMark.now_ns
+    IyiRuntimeLock.lock
+    took = IyiMark.now_ns - asked
+    IyiRuntimeLock.unlock
+    flag.waits.add(1_i64) if took > bound
+    flag.waited.set(took.to_i64) if took.to_i64 > flag.waited.get
+    ends = IyiMark.now_ns + 20000_u64
+    while IyiMark.now_ns < ends
+    end
+  end
+end
+
 # The processor the first argument numbers is the stopping thread's, and
-# the burst's; the threads it stops compute on every other one.
+# the burst's; the threads it stops run on every other one. The second
+# and third are the bounds on a stop and on a wait for the lock, in ms.
 processor = Program.args[0].to_i
 bound = Program.args[1].to_i.to_u64 * 1000000_u64
+lock_bound = Program.args[2].to_i.to_u64 * 1000000_u64
 shared = 1_u64.unsafe_shl(processor.to_u64)
 mask = 0_u64
 system = 0_u64
@@ -724,7 +760,8 @@ IyiMark.workers = 0_u64
 flag = Flag.new
 threads = [] of IyiThread
 4.times { threads << IyiThread.start { compute(flag, elsewhere) } }
-while flag.held.get < 4_i64
+threads << IyiThread.start { taker(flag, elsewhere, lock_bound) }
+while flag.held.get < 5_i64
   IyiThread.yield_cpu
 end
 Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, shared)
@@ -747,7 +784,9 @@ share = (IyiThread.stop_ns - stop_ns) * 100_u64 // (IyiMark.now_ns - started)
 flag.stop.set(1_i64)
 threads.each { |thread| thread.join }
 fail("stop: #{over} of #{collections} stops beside a burst on the stopping thread's processor took past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us") if over > 0
+fail("lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections took past #{lock_bound // 1000000_u64} ms, the longest #{flag.waited.get // 1000_i64} us") if flag.waits.get > 0_i64
 puts "stop: #{collections} stops of #{threads.size} threads beside a burst on the stopping thread's processor, #{share}% of the run in stops, the longest #{longest // 1000_u64} us, held to #{bound // 1000000_u64} ms"
+puts "lock: the longest wait for the runtime lock beside them #{flag.waited.get // 1000_i64} us, held to #{lock_bound // 1000000_u64} ms"
 IYI
     shared=$(( NUMBER_OF_PROCESSORS - 1 ))
     # `./$1` beside the burst, its output in `$2`.
@@ -756,7 +795,7 @@ IYI
       MSYS_NO_PATHCONV=1 cmd /c start "" /b burst.exe "$shared" 100 > burst.txt 2>&1
       for wait in $(seq 1 100); do [ -f burst-ready ] && break; sleep 0.1; done
       [ -f burst-ready ] || { echo "the burst did not start"; exit 1; }
-      timeout -k 5 120 "./$1" "$shared" 20 > "$2" 2>&1
+      timeout -k 5 120 "./$1" "$shared" 20 50 > "$2" 2>&1
       touch burst-stop
       sleep 1
       taskkill //F //IM burst.exe > /dev/null 2>&1
@@ -774,6 +813,23 @@ IYI
       echo "beside a burst:"; cat stopping.txt; exit 1
     fi
     sed 's/^/  /' stopping.txt
+
+    step "failure proof: a priority put back inside the release holds the runtime lock through the burst"
+    mkdir -p inside/iyi
+    cp "$REPO"/src/iyi/*.iyi inside/iyi/
+    awk '{ print } /^        while word\(page \+ IYI_TC_RESUMED\)\.value\.get < @@deferred\.to_u64$/ { waiting = 1 }
+      waiting && /^        end$/ { print "        lower_stopper"; waiting = 0; moved++ } END { if (moved != 1) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > inside/iyi/thread.iyi || { echo "the release's wait is not in thread.iyi any more"; exit 1; }
+    awk '/^          IyiThread\.lower_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/prelude.iyi" > inside/iyi/prelude.iyi || { echo "the lowering after the lock is not in the prelude any more"; exit 1; }
+    if ! IYI_PATH="$WORK/inside${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -o stopping-inside > build-inside.log 2>&1; then
+      cat build-inside.log; exit 1
+    fi
+    beside_burst stopping-inside inside.txt
+    if ! grep -q '^FAIL: lock:' inside.txt; then
+      echo "the lock check did not fire:"; cat inside.txt; exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock:' inside.txt)"
 
     step "failure proof: a stopping thread left at its priority is held by the burst"
     mkdir -p level/iyi
@@ -836,7 +892,7 @@ IYI
     step "failure proof: a panic inside a stop that keeps the priority is caught"
     mkdir -p unlowered/iyi
     cp panicking/iyi/*.iyi unlowered/iyi/
-    awk '/^ *IyiThread\.lower_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+    awk '/^      IyiThread\.lower_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
       "$REPO/src/iyi/prelude.iyi" > unlowered/iyi/prelude.iyi || { echo "the panic's lowering is not in the prelude any more"; exit 1; }
     if ! IYI_PATH="$WORK/unlowered${PSEP}$REPO/src" "$IYI" build --release panicky.iyi -o panicky-unlowered > build-unlowered.log 2>&1; then
       cat build-unlowered.log; exit 1

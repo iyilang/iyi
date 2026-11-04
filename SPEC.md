@@ -5366,6 +5366,10 @@ that moved nothing. Each with a broken copy caught: of the runtime,
 `IYI_SPAWN_BROKEN` as `IYI_RELEASE_IMPORT=0` is `release_cores.sh`'s, a
 reason that names no module, `iyi check` silent unasked, no line for a
 moved spawn, and `spawn_parallel` answered as any undefined method.
+`IYI_SPAWN_BROKEN` is the gate's and nobody else's: a test-only switch,
+read once, that turns one of these mechanisms off (`remote`, `fallback`,
+`moves`, `retired`, comma-separated) and is empty in every other run; no
+program and no build is meant to set it.
 `bench/lsp_session.py` step 23s holds the inlay hints.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**

@@ -47,18 +47,23 @@
   machine) single calls in that loop took 148 to 214 ms, and of the
   stops past 2 ms in three runs, 17 of 145 passed 10 ms on master. The
   stopping thread now runs at `THREAD_PRIORITY_HIGHEST` from the start
-  of the stop to the end of its release, and is put back after, or at a
-  panic raised inside the stop. Raised, 4 of 127 passed 10 ms, the
-  longest 33 ms, and the longest single call took 26 us; the geometric
-  mean of the endpoints' p99 was 289 ms, against 306 without the raise
-  and 290 on master.
+  of the stop until it lets the runtime lock go after the release, and
+  is put back then, or at a panic raised inside the stop. Raised, 4 of
+  127 passed 10 ms, the longest 33 ms, and the longest single call took
+  26 us; the geometric mean of the endpoints' p99 was 289 ms, against
+  306 without the raise and 290 on master. Put back at the end of the
+  release instead, the drop was where the thread was descheduled, the
+  lock still held: every release past 5 ms in six endpoints' two rounds,
+  24 of them, 12 to 179 ms, was spent after the last `ResumeThread`.
   `bench/thread_exercise.sh` collects in a loop beside a process one
   level above normal that computes 100 ms at a time on the stopping
   thread's processor, and holds every stop to 20 ms: five interleaved
   runs there gave 0.7 to 1.9 ms with the raise and 100.3 to 103.1 ms in
-  every run without it, and the copy without it is caught. A copy that
-  panics inside its stop is run too, and the copy whose panic keeps the
-  priority is caught. Linux and darwin are unchanged.
+  every run without it. A thread beside them taking the runtime lock in
+  a loop is held to 50 ms a wait: 0.3 to 16.8 ms in five runs, and 100.1
+  to 102.6 ms in every run with the priority put back inside the
+  release. Both broken copies are caught, and so is a copy whose panic
+  inside a stop keeps the priority. Linux and darwin are unchanged.
 
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with
@@ -26243,7 +26248,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,854-line library and nothing else. Every other
+  written against iyi's own 25,875-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

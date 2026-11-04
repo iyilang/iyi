@@ -987,13 +987,31 @@ module Iyi
     def text_of(event : Event) : String
       node = event.node
       text = if node.is_a?(Call) && (node.block || node.block_arg)
-               node.obj ? "`#{node.obj.to_s.gsub(/\s+/, " ")[0, 60]}.#{node.name} { ... }`" : "`#{node.name} { ... }`"
+               node.obj ? "`#{one_line(node.obj.to_s)[0, 60]}.#{node.name} { ... }`" : "`#{node.name} { ... }`"
              else
-               plain = node.to_s.gsub(/\s+/, " ")
+               plain = one_line(node.to_s)
                plain = "#{plain[0, 77]}..." if plain.size > 80
                "`#{plain}`"
              end
       "#{text}#{event.suffix}"
+    end
+
+    # Each run of whitespace as one space, by hand: a regex literal here
+    # put pcre2 on the compiler's link line, and the release job's floor
+    # build, which has no libpcre2-8, failed to link (CI run 41860072716).
+    private def one_line(text : String) : String
+      String.build(text.bytesize) do |io|
+        spaced = false
+        text.each_char do |char|
+          if char.ascii_whitespace?
+            io << ' ' unless spaced
+            spaced = true
+          else
+            io << char
+            spaced = false
+          end
+        end
+      end
     end
 
     # Where a callable runs anywhere from: the callers back to the origin.

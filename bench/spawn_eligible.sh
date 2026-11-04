@@ -37,6 +37,15 @@
 #      a spawn of a module's artifact, because the module it imports
 #      changed, prints one line naming the spawn, each way, and nothing
 #      when nothing moved. `iyi mod dump` lists the artifact's spawns.
+#      Across an artifact (SPEC.md III.4.15): a spawn whose block calls a
+#      function of a module read from its `.iyimod`, which has no bodies,
+#      is placed by what the artifact recorded that function reaches: one
+#      that appends to the module's unguarded `Array` stays in its unit
+#      and loses no append on four workers, one that reads state under a
+#      `@[SafeReach]` only the module's initialiser writes runs in
+#      parallel, and one that reaches state under a claim the producing
+#      program proved of its own calls stays in its unit, through a call
+#      or through a body that travelled.
 #   5. Failure proofs against broken copies, each caught at the named
 #      check. Of the runtime: an eligible spawn left in its unit, an
 #      ineligible one sent to the pool, `serial: true` sent to the pool,
@@ -45,7 +54,12 @@
 #      that starts every worker at once, and one that never starts a
 #      second. Of the compiler, through `IYI_SPAWN_BROKEN`: no module named
 #      in a reason, no note from `iyi check` unasked, no line for a moved
-#      spawn, and `spawn_parallel` answered as any undefined method.
+#      spawn, `spawn_parallel` answered as any undefined method, an
+#      artifact written without what its functions reach (whose consumer
+#      must keep every spawn calling into it in its unit, naming the
+#      module), a function read from an artifact taken to reach nothing,
+#      and an artifact that takes every proven claim to hold for every
+#      importer.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -358,6 +372,127 @@ if ! moved back.log 9 "$to_pool"; then
 fi
 echo "  $(grep -m1 ': note: ' back.log | sed 's/^.*note: //' | cut -c1-200)"
 
+step "a spawn whose block calls into a module read from its artifact is placed by what the artifact recorded"
+# The module is compiled from source once, by `first.iyi`, which calls
+# every function so its artifact holds each one's machine code; `app.iyi`
+# is then built against the artifact, which has the declarations and not
+# the bodies. Before the artifact recorded what each function reaches,
+# the spawn at line 8 ran in parallel and lost appends: 19,870 to 19,952
+# of 20,000 on four workers (Linux).
+mkdir -p reach/dep
+cat > reach/dep/counter.iyi <<'IYI'
+module dep/counter
+
+SEEN = [] of Int32
+
+@[SafeReach("filled by this module's initialiser, then only read")]
+NAMES = [] of String
+NAMES << "first"
+
+pub class Registry
+  @[SafeReach("registered at startup, then only read")]
+  @@noted = [] of Int32
+
+  def self.register(n : Int32) : Nil
+    @@noted << n
+  end
+
+  def self.count(&block : -> Nil) : Int32
+    block.call
+    @@noted.size
+  end
+end
+
+pub def note(n : Int32) : Nil
+  SEEN << n
+end
+
+pub def total : Int32
+  SEEN.size
+end
+
+pub def names : Int32
+  NAMES.size
+end
+IYI
+cat > reach/first.iyi <<'IYI'
+module main
+
+import dep/counter::{note, total, names, Registry}
+
+Registry.register(1)
+note(1)
+puts total + names + Registry.count { nil }
+IYI
+cat > reach/app.iyi <<'IYI'
+module main
+
+import dep/counter::{note, total, names, Registry}
+
+seen = Atomic(Int32).new(0)
+group do |g|
+  20000.times do |i|
+    g.spawn { note(i); nil }
+  end
+  g.spawn { seen.add(names); nil }
+  g.spawn { Registry.register(2); nil }
+  g.spawn { seen.add(Registry.count { nil }); nil }
+end
+puts total
+IYI
+if ! (cd reach && "$IYI" build --emit-iyimod mods -o first first.iyi) > reach-first.log 2>&1 || [ -s reach-first.log ]; then
+  echo "the build writing dep/counter's artifact failed, or printed something:"; cat reach-first.log; exit 1
+fi
+if ! (cd reach && IYI_SPAWN_BROKEN=reaches "$IYI" build --emit-iyimod bare -o first first.iyi) > reach-bare.log 2>&1; then
+  echo "the build writing the artifact without its reaches failed:"; cat reach-bare.log; exit 1
+fi
+"$IYI" mod dump reach/mods/dep/counter.iyimod > reach-dump.log 2>&1
+for want in 'note reaches the constant `SEEN : Array(Int32)` (module `dep/counter`) through `SEEN.<<`' \
+  'register reaches the class variable `@@noted : Array(Int32)` (module `dep/counter`) through `@@noted.<<`'; do
+  if ! grep -qF "$want" reach-dump.log; then
+    echo "mod dump does not record \"$want\":"; cat reach-dump.log; exit 1
+  fi
+done
+if grep -qF 'names reaches' reach-dump.log; then
+  echo "mod dump records names, which reads only what the initialiser fills:"; cat reach-dump.log; exit 1
+fi
+echo "  mod dump: $(grep -m1 -F 'note reaches' reach-dump.log | sed 's/^ *//')"
+against() { # log, artifact directory, environment...
+  local log="$1" mods="$2"
+  shift 2
+  (cd reach && env "$@" "$IYI" build --use-iyimod "$mods" --explain-spawn -o app app.iyi) > "$log" 2>&1
+}
+placed() { # log, line, expected text
+  grep -F "app.iyi:$2:" "$1" | grep -qF "$3"
+}
+seen_unit='spawn stays in its spawner'"'"'s unit: the block reaches the constant `SEEN : Array(Int32)` (module `dep/counter`) through `note` → `SEEN.<<`, and it is not Share'
+claimed='the block reaches the class variable `@@noted : Array(Int32)` (module `dep/counter`) through `Registry.register` → `@@noted.<<`'
+travelled='the block reaches the class variable `@@noted : Array(Int32)` through `Registry.count` → `@@noted.size`'
+unknown='dep/counter arrived as an artifact that does not record what its functions reach of module state'
+against reach-app.log mods || { echo "the build against the artifact failed:"; cat reach-app.log; exit 1; }
+for check in "8|$seen_unit" "10|spawn runs in parallel" "11|$claimed" "12|$travelled"; do
+  if ! placed reach-app.log "${check%%|*}" "${check#*|}"; then
+    echo "line ${check%%|*} was not placed with \"${check#*|}\":"; cat reach-app.log; exit 1
+  fi
+  echo "  line ${check%%|*}: $(grep -m1 -F "app.iyi:${check%%|*}:" reach-app.log | sed 's/^.*note: //' | cut -c1-160)"
+done
+for run in 1 2 3; do
+  if ! got=$(cd reach && timeout -k 5 120 ./app --workers=4) || [ "$got" != 20000 ]; then
+    echo "the program built against the artifact lost appends on run $run: $got of 20000"; exit 1
+  fi
+done
+echo "  20000 of 20000 appends, three runs on four workers"
+if ! "$IYI" mod dump reach/bare/dep/counter.iyimod | grep -qF 'reaches       (not recorded)'; then
+  echo "the artifact written without its reaches still records them"; exit 1
+fi
+against reach-unknown.log bare || { echo "the build against the artifact without reaches failed:"; cat reach-unknown.log; exit 1; }
+for line in 8 10 11; do
+  if ! placed reach-unknown.log "$line" "$unknown"; then
+    echo "line $line, calling into an artifact that does not say what it reaches, was not kept in its unit naming dep/counter:"; cat reach-unknown.log; exit 1
+  fi
+done
+echo "  without the record, lines 8, 10 and 11 stay in their unit: $(grep -m1 -F 'app.iyi:10:' reach-unknown.log | sed 's/^.*unit: //' | cut -c1-120)"
+
 # ── 5. Failure proofs ─────────────────────────────────────────────────────
 # Of the runtime: each a copy of src/iyi with concurrency.iyi changed,
 # built against through IYI_PATH; nothing in the tree is touched.
@@ -460,5 +595,28 @@ if IYI_SPAWN_BROKEN=retired refused old.iyi '`spawn_parallel` is gone' retired-b
   echo "the copy that names no spelling was not caught:"; cat retired-broken.log; exit 1
 fi
 echo "  caught: \"$(grep -m1 -o "undefined method 'spawn_parallel'[^.]*" retired-broken.log)\""
+
+step "failure proof: an artifact that does not say what its functions reach"
+if placed reach-unknown.log 8 "$seen_unit"; then
+  echo "the artifact without its reaches was not caught:"; cat reach-unknown.log; exit 1
+fi
+echo "  caught: line 8 reads \"$(grep -m1 -F 'app.iyi:8:' reach-unknown.log | sed 's/^.*note: //' | cut -c1-110)\""
+
+step "failure proof: a function read from an artifact taken to reach nothing"
+against reach-headers.log mods IYI_SPAWN_BROKEN=headers || { echo "the build failed:"; cat reach-headers.log; exit 1; }
+if placed reach-headers.log 8 "$seen_unit"; then
+  echo "the copy that reads no record was not caught:"; cat reach-headers.log; exit 1
+fi
+echo "  caught: line 8 reads \"$(grep -m1 -F 'app.iyi:8:' reach-headers.log | sed 's/^.*note: //' | cut -c1-60)\", and the program printed $(cd reach && timeout -k 5 120 ./app --workers=4) of 20000"
+
+step "failure proof: an artifact that takes every proven claim to hold for every importer"
+if ! (cd reach && IYI_SPAWN_BROKEN=robust "$IYI" build --emit-iyimod trusting -o first first.iyi) > reach-trusting.log 2>&1; then
+  echo "the build writing the trusting artifact failed:"; cat reach-trusting.log; exit 1
+fi
+against reach-robust.log trusting || { echo "the build failed:"; cat reach-robust.log; exit 1; }
+if placed reach-robust.log 11 "$claimed"; then
+  echo "the artifact that trusts every claim was not caught:"; cat reach-robust.log; exit 1
+fi
+echo "  caught: line 11 reads \"$(grep -m1 -F 'app.iyi:11:' reach-robust.log | sed 's/^.*note: //' | cut -c1-60)\""
 
 echo "== spawn eligibility: every check held"

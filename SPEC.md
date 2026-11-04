@@ -3040,10 +3040,28 @@ def's writes and asking the structural `Share` rule of every type it met,
 the first program's proof took 3.87 s and grew RSS from 515 MB to
 4,069 MB.
 
-Not modelled: a constant read before its declaration, initialised where
-it is first read; a claim on state imported from a `.iyimod` artifact,
-untested. A plain `spawn` counts as a start, whether or not III.4.15
-moves it, since where it runs depends on the claims being proven.
+A constant read before its declaration is initialised where it is first
+read, and the proof places its initialiser at the declaration. That is
+sound in both directions, which `bench/safe_reach.sh` keeps: an
+initialiser declared before the first parallel task has run by then -
+at the declaration, or at an earlier read, which is earlier still - and
+one declared after it is already a write after the first task, refused
+when it writes claimed state (`startup_early.iyi` accepted,
+`startup_before.iyi` refused). Measured on Linux with an initialiser
+that prints: `EARLY = f("early")` printed between the statements around
+it, and `LATE`, read by a call above its declaration, printed at that
+read. The top level the proof reads is the tree after III.5 has spliced
+the modules' initialisers in, which is the order codegen runs them in.
+
+A claim on state a module read from a `.iyimod` declares is proven by
+the build that wrote the artifact, for that program; a consumer has the
+declarations and not the bodies that write the state, and the claim does
+not cross. The artifact records the state as reached by the functions
+that reach it unless the claim holds for every importer - a `Share` type,
+an `UnsafeReach`, or writes only in the module's own initialiser (III.4.15,
+"Across an artifact"). A plain `spawn` counts as a start, whether or not
+III.4.15 moves it, since where it runs depends on the claims being
+proven.
 
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,
@@ -5079,6 +5097,50 @@ unsafely.
 What the walk does not enter it does not enter for either verb: std and
 the prelude, whose state is theirs to keep safe at their own boundaries,
 which is what `spawn(parallel: true)` and `Server.serve` already stand on.
+
+**Across an artifact: BUILT.** A module built against another's `.iyimod`
+has the other's declarations and not its bodies (IV.1g), and the walk
+stopped at them: a function of the dependency read as a body that reached
+nothing. A spawn whose block called `note`, which appended to the
+dependency's unguarded `SEEN : Array(Int32)`, was placed in parallel, and
+on four workers 19,870 to 19,952 of 20,000 appends survived (five runs,
+Linux), where the same program built from source kept the spawn in its
+unit and printed 20,000. The artifact now records, per function, the
+module state the walk from it finds that is not safe for every thread
+(`Section::Reaches`, IV.1): the state, its type, the module declaring it,
+the path and why it is not `Share`. A consumer's walk reads that record
+where the body is not, so the spawn stays in its unit with the reason the
+source build gives and the module named, and the program prints 20,000.
+The record is in the artifact's interface hash, since a dependent's
+placement is compiled from it. Functions are named by the type that
+declares them and their name, so overloads share one record: a consumer
+may keep a spawn in its unit that the source build would move, and never
+the other way. An artifact without the section - written by no build of
+this compiler, since the format is v60 - keeps every spawn calling into
+it in its unit, naming the module and asking for it to be built again.
+
+A `@[SafeReach]` on the dependency's state was proven by the build that
+wrote the artifact, of where *that* program calls the module's functions
+from; a consumer may call them from a parallel task, and cannot prove the
+claim again without the bodies that write the state. Before this, a
+dependency whose `register` appended to a claimed `NOTED` was proven by a
+program that registered at startup, and a consumer spawning `register`
+ran it in parallel and lost appends (19,926 to 19,938 of 20,000 on four
+workers, Linux) where its source build refused the claim. So the
+producing build leaves out of `Reaches` only state under a claim that
+holds for every importer: a `Share` type, an `UnsafeReach`, or a state
+written only by statements of the module's own initialiser before any
+parallel task, kept nowhere, answered by no function and, for a
+constant, not exported. State under any other claim is recorded as
+reached, the record saying the claim was proven only for the program that
+wrote the artifact. The claim itself does not cross: the annotation does
+not travel with a constant or a class variable, so a body that travelled
+and names the state reads it as unclaimed. A crystal shard's boundary
+(`iyi bind`) has no `Reaches` section and is read as not known.
+`bench/spawn_eligible.sh` gates all of it beside broken copies through
+`IYI_SPAWN_BROKEN`: an artifact written without the section, a function
+from an artifact read as reaching nothing, and an artifact that takes
+every proven claim to hold for every importer.
 
 **2. Otherwise, the unit, exactly as before.** A spawn that is not
 eligible runs the body `spawn` always ran: a task of its spawner's unit,
@@ -8628,6 +8690,16 @@ in the module ran when the artifact was built - the def it is in, its
 block's text hashed, whether it ran in parallel and why not - so that the
 next build of the module can say which spawn a change elsewhere moved
 (III.4.16), and `iyi mod dump` can list them. It is outside every hash.
+
+`Reaches` (67, v60) is for a consumer's spawn placement (III.4.15). It
+records, for each function the module's object code holds, the module
+state the walk from its body finds that is not safe for every thread of
+every importer - the state, its type and module, the path, and why - and
+the `@[SafeReach]` claims on the module's own state that hold in every
+importer. It is always written, empty or not, because its absence means
+"not known" and keeps every spawn calling into the module in its unit, and
+it is in the interface hash, because a dependent's placement is compiled
+from it. `iyi mod dump` prints it.
 
 Fields were meant to be in that second list and are not, which is worth saying
 plainly because the reason is a bug rather than a change of mind. A consumer

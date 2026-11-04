@@ -253,6 +253,24 @@
 
 ### Gates
 
+- **`bench/spawn_eligible.sh` places spawns that call into an artifact
+  (SPEC.md III.4.15).** A dependency compiled once to its `.iyimod` and a
+  program built against it: the spawn calling the dependency's unguarded
+  append stays in its unit and the program prints 20,000 of 20,000 on
+  four workers, three runs; the one reading state only the dependency's
+  initialiser writes runs in parallel; and state under a claim proven
+  only for the program that wrote the artifact keeps its spawns in their
+  unit, through a call and through a body that travelled. Its broken
+  copies are caught: an artifact without the record, whose consumer
+  keeps every spawn calling into it in its unit naming the module; a
+  function from an artifact read as reaching nothing, which places the
+  spawn in parallel again and printed 19,927 of 20,000 (Linux x86-64,
+  12 vCPU, shared); and an artifact
+  that takes every proven claim to hold for every importer.
+  `bench/safe_reach.sh` adds a constant whose initializer writes claimed
+  state: declared before the first parallel task and first read by a
+  task, accepted; declared after, refused.
+
 - **`bench/safe_reach.sh` holds the SafeReach proof (SPEC.md III.4.4).**
   The issue's unguarded write is refused, where the compiler before
   checked it clean; (a), (b) and (c) are each accepted beside broken
@@ -488,6 +506,31 @@
   chan_scaling's instructions are the same.
 
 ### Fixed
+
+- **A spawn that calls into a module read from its `.iyimod` is no
+  longer placed in parallel blind (SPEC.md III.4.15).** A module built
+  against an artifact has the dependency's declarations and not its
+  bodies, and the walk that decides whether a plain `g.spawn` may run in
+  parallel read each of the dependency's functions as reaching nothing.
+  A spawn whose block called a dependency's `note`, which appended to
+  the dependency's unguarded `SEEN : Array(Int32)`, ran in parallel and
+  kept 19,870 to 19,952 of 20,000 appends on four workers (five runs,
+  Linux x86-64, 12 vCPU, shared), where the same program built from
+  source kept it in its unit. The artifact now records what each
+  function reaches that is not safe for every thread
+  (`Section::Reaches`, format v60, so v59 artifacts are rebuilt), the
+  consumer's walk reads it where the body is not, and the program prints
+  20,000; the reason names the module. A `@[SafeReach]` on the
+  dependency's state was trusted the same way: a claim proven by the
+  program that wrote the artifact, which called `register` only at
+  startup, let a consumer's spawn run `register` in parallel and keep
+  19,926 to 19,938 of 20,000. Such state is recorded as reached unless
+  the claim holds for every importer (a `Share` type, an `UnsafeReach`,
+  or writes only in the module's own initialiser). An artifact with no
+  record, such as an `iyi bind` boundary, keeps every spawn calling into
+  it in its unit, naming the module. Migration: none; a spawn into a
+  dependency that writes unguarded state now stays in its unit, as it
+  does from source, and `--explain-spawn` says why.
 
 - **On Windows a collecting thread is raised before it takes the
   runtime lock, not at its stop.** Everything from the lock to the stop

@@ -102,6 +102,9 @@ symbols() {
     sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' |
     awk '{ print $NF }' |
     sed -e 's/^_//' |
+    # glibc's `__environ` alias and `environ` are one datum, whichever the
+    # libc links, folded as `bench/dependency_floor.sh` folds them.
+    sed -e 's/^_environ$/environ/' |
     grep -v '^$' |
     sort -u
 }
@@ -281,9 +284,15 @@ echo "== what root discovery asks the machine for"
 # `memset`, so a call resolves to the program's own. The stale names (`malloc`,
 # `memset`, `realloc`, the file calls) are gone from the list, because an
 # entry nothing uses is a check without teeth.
+#
+# Both add `environ`, which is not root discovery's: this program spawns,
+# and a spawn is the pool's now (parallel by default), whose size the
+# first spawn reads from `IYI_WORKERS` in the environment, the C runtime's
+# exported global, as `bench/dependency_floor.sh` records it for
+# `Program.env`.
 case "$(uname -s)" in
   Linux)
-    allowed_symbols="$FLOOR_BASE_LINUX __data_start _end"
+    allowed_symbols="$FLOOR_BASE_LINUX __data_start _end environ"
     if ! command -v readelf >/dev/null 2>&1; then
       echo "  readelf is required on Linux to read NEEDED entries" >&2
       exit 2
@@ -301,7 +310,7 @@ case "$(uname -s)" in
     windows_floor=yes
     ;;
   *)
-    allowed_symbols="$FLOOR_BASE_DARWIN"
+    allowed_symbols="$FLOOR_BASE_DARWIN environ"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"
@@ -367,10 +376,11 @@ echo
 echo "== the other platform's code, compiled and audited"
 # Not run. What this says is that the branch this machine does not take still
 # compiles, that its inline assembly assembles for both architectures, and that
-# it leaves exactly the two symbols named above.
+# it leaves exactly the symbols named above: the linker's three, and the
+# pool's `environ`.
 case "$(uname -s)" in
   Linux) other_targets="x86_64-darwin aarch64-darwin" ; other_expect="" ;;
-  *)     other_targets="x86_64-linux-gnu aarch64-linux-gnu" ; other_expect="__data_start __ehdr_start _end" ;;
+  *)     other_targets="x86_64-linux-gnu aarch64-linux-gnu" ; other_expect="__data_start __ehdr_start _end environ" ;;
 esac
 if [ -z "$NM" ]; then
   echo "  no nm here, so what these objects leave undefined is unmeasured; they still have to compile"
@@ -490,6 +500,13 @@ prove_fails "the stack named, not held" named_stack "maps parser: the mapping ho
 # its first collection died there with "no [stack] line" (now "no mapping
 # ... holds the program's arguments": the line is found by the argv it
 # holds).
+#
+# The tasks are `spawn_serial`, as a program on one worker spawns them. A
+# plain spawn is parallel by default, and the pool it starts registers the
+# main thread, whose line reads the stack's end then (thread.iyi), before
+# the first task's stack is mapped: the one-buffer copy below found the
+# stack with 3,000 tasks parked and 6,242 lines in the maps file, and
+# proved nothing.
 echo
 echo "== the main stack is found past thousands of task stacks"
 cat > "$WORK/tasks.iyi" <<'IYI'
@@ -498,7 +515,7 @@ parked = Channel(Int32).new
 seen = 0
 group do |g|
   3000.times do
-    g.spawn do
+    g.spawn_serial do
       case parked.receive
       in Int32         then it
       in ChannelClosed then 0
@@ -506,7 +523,7 @@ group do |g|
       end
     end
   end
-  g.spawn do
+  g.spawn_serial do
     IyiMark.collect
     seen = 1
     parked.close

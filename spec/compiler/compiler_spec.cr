@@ -683,8 +683,9 @@ describe "Compiler" do
           Iyi::Command.run ["build"].concat(program_flags_options)
             .concat(["floor.iyi", "-o", File.expand_path("floor")])
 
-          # The C runtime template's six, and nothing of the runtime's own:
-          # the scheduler, the poller and the switch are raw syscalls and asm.
+          # The C runtime template's six, and of the runtime's own only the
+          # environment (below): the scheduler, the poller and the switch are
+          # raw syscalls and asm.
           #
           # `abort` is the template's, not iyi's, and the way to see that is to
           # link an empty C program the same way: `int main(void){return 0;}`
@@ -695,10 +696,18 @@ describe "Compiler" do
           # is only `puts "ok"`, with no channel, group or spawn, brings it in
           # too. glibc's crt reaches it, so it belongs here with that reason
           # rather than being read as a dependency iyi took on.
+          #
+          # `environ` is the pool's: these spawns run on it (parallel by
+          # default), and the first reads its size, `IYI_WORKERS`, from the
+          # environment, the C runtime's exported global, as
+          # bench/dependency_floor.sh records it for `Program.env`. Which of
+          # `environ` and glibc's `__environ` alias a binary names is the
+          # libc's choice: CI's names the first, a newer glibc the second,
+          # read here as `_environ`.
           symbols = undefined_symbols(File.expand_path("floor"))
           template = ["ITM_deregisterTMCloneTable", "ITM_registerTMCloneTable",
                       "_cxa_finalize", "_gmon_start__", "_libc_start_main",
-                      "abort"]
+                      "abort", "environ", "_environ"]
           (symbols - template).should be_empty
         end
       end

@@ -3351,7 +3351,7 @@ module Iyi
         # iyi: recursion's checks go in before optimisation (SPEC.md
         # III.4.13, part 9; `PreemptChecks.mark_recursion`).
         if program.iyi_preempt_flag
-          PreemptChecks.mark_recursion(modules.values.map(&.mod), program.iyi_preempt_funs)
+          Prof.span("  codegen: mark recursion") { PreemptChecks.mark_recursion(modules.values.map(&.mod), program.iyi_preempt_funs) }
         end
         modules
       end

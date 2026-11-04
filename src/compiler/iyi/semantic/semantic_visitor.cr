@@ -1426,8 +1426,8 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         parser.iyi_package_name = @program.iyi_record_module_package(module_path,
           @program.iyi_root_package_name_for(module_path, filename))
       end
-      parsed_nodes = parser.parse
-      parsed_nodes = @program.normalize(parsed_nodes, inside_exp: false)
+      parsed_nodes = Prof.span("import: parse") { parser.parse }
+      parsed_nodes = Prof.span("import: normalize") { @program.normalize(parsed_nodes, inside_exp: false) }
       iyi_at_top_level { parsed_nodes.accept self }
     rescue ex : InvalidByteSequenceError
       # Wherever the byte is. `new_parser` decodes the first character and

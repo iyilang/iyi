@@ -33,7 +33,7 @@ arch="$(uname -m)"
 case "$os-$arch" in
   Linux-x86_64) target=linux-x86_64 ;;
   Darwin-arm64) target=darwin-arm64 ;;
-  *) die "no release for $os $arch: releases ship linux-x86_64 and darwin-arm64, see README.md (Getting it) to build from source" ;;
+  *) die "no release for $os $arch: releases ship linux-x86_64 and darwin-arm64, see INSTALL.md (From source) to build from source" ;;
 esac
 
 if [ -z "$version" ]; then

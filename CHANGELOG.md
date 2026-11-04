@@ -335,24 +335,42 @@
   LLVM module, so LLVM sees the whole program, and then cuts it into
   partitions of about 20,000 instructions, each optimised and compiled on
   a thread of its own (`ReleasePartition`). A partition gets its own copy
-  of the functions of up to 100 instructions its code calls and of the
-  constants it reads, as LLVM's ThinLTO imports them, done through the C
-  API because that is all Windows' `LLVM-C.dll` exports: a local copy of a
-  local function, an `available_externally` one of an external function
-  such as `__iyi_new`, and none of what LLVM may not inline. A copy the
-  inliner turns down is compiled anyway, so the limit is what the build
-  costs: `samples/iyi/cores.iyi` (std/http and TLS), cold, took 19.1 s as
-  one module against 5.76 s cut at 100 and 7.55 s at 300 on a shared
-  12-vCPU Linux VM, and 21.37 s against 7.06 s and 8.27 s on macOS 26.6,
-  Apple M2 Pro, 10 cores (the user's machine). The programs it builds ran
-  within noise of the one-module build on the M2 Pro, best of 15
-  interleaved runs: bcrypt, SHA-256, ChaCha20-Poly1305 and
-  `bench/runtime.py`'s four from 0.97x to 1.01x, and JSON 1.028x, where
-  the same JSON binary run twice on Linux differed by 4%. **Windows keeps
-  one module by default**: on Windows 11, 12 logical processors (the
-  user's machine), 25.01 s against 7.81 s cut, the hash at 1.00x and
-  bcrypt, SHA-256 and ChaCha20-Poly1305 within 1.2%, but JSON at 1.068x
-  and 1.083x in two runs. `IYI_RELEASE_PARTITIONS=0` cuts it there too.
+  of the functions its code calls and of the constants it reads, as LLVM's
+  ThinLTO imports them, done through the C API because that is all
+  Windows' `LLVM-C.dll` exports: a local copy of a local function of up to
+  100 instructions, an `available_externally` one of up to 300 of any
+  other, such as `__iyi_new`, there only to be inlined, and none of what
+  LLVM may not inline. A local function that one function alone calls
+  goes with that function, to its partition and into every copy of it,
+  since one module inlines it whatever its size, and what LLVM must
+  inline (`alwaysinline`, such as the collector's `IyiMark.barrier_word`)
+  is copied whatever its size. A copy the inliner turns down is compiled
+  anyway, so the limits are what the build costs: `samples/iyi/cores.iyi`
+  (std/http and TLS), cold, took 22.45 s of processor in 22.45 s as one
+  module against 35.78 s in 7.87 s cut on a shared 12-vCPU Linux VM,
+  20.75 s in 22.24 s against 34.72 s in 7.94 s on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine), and 29.83 s in 30.65 s against
+  50.37 s in 12.14 s on Windows 11, 12 logical processors (the user's
+  machine). On the M2 Pro the programs it builds ran within 1.2% of the
+  one-module build, best of 45 interleaved runs: bcrypt, SHA-256,
+  ChaCha20-Poly1305 and `bench/runtime.py`'s four from 0.98x to 1.00x,
+  and JSON 1.012x, where the one-module binary against itself ran 1.001x.
+  **Windows keeps one module by default**: there the seven ran from 0.98x
+  to 1.01x, but JSON 1.015x, and 1.033x as the median of three bests of
+  15, where the one-module binary against itself ran 0.995x and 1.002x.
+  `IYI_RELEASE_PARTITIONS=0` cuts it there too.
+
+  What the cut still costs JSON is what ThinLTO's costs: a local function
+  reached from another partition is promoted, 86 of them in JSON's, and
+  loses what one module proves of it, such as `Int64#to_s`'s base being
+  10 to 16, and the chance to be dropped once inlined; and a copy with one
+  call in its partition is inlined where one module, seeing every caller,
+  keeps it whole. Copying locals only `available_externally` ran JSON
+  1.029x on the M2 Pro. Attributes inferred over the whole module before
+  the cut (`function-attrs`) took it to 1.009x, but ChaCha20-Poly1305 from
+  0.98x to 1.04x and JSON on Windows to 1.07x; constants propagated over
+  it first (`mem2reg`, `ipsccp`) left JSON where it was and cost
+  ChaCha20-Poly1305 5%.
 
   Two causes of the Windows numbers are found. LLVM 23, which Windows
   builds with, added a value kind before `Instruction`, so every
@@ -366,16 +384,19 @@
   to 12, 0.43 s from 13 to 16 and 0.30 s from 17 on, the same on Windows
   and on Linux; which offset a build draws moves with any change before
   the loop, and LLVM's branch alignment (`-x86-align-branch`) left the
-  cut build's at 1.43x. The cut is a function of the program, so the
-  objects are the same on one thread and on twelve.
-  `IYI_RELEASE_PARTITIONS=1` keeps the one module and
-  `IYI_RELEASE_IMPORT=0` copies nothing. `bench/release_cores.sh` holds
-  the cores, the output, the objects and the inlining across the cut, each
-  against a broken copy. On `mt/next`, `bench/concurrent_mark.sh`'s copy
-  whose barrier shades nothing passed when cut, 8 runs of 8 on Linux: the
-  loop that reads the payload's colour held it where the second stop's
-  conservative scan found it. That read is in a frame of its own now, as
-  the move was, and the cut copy lost round 0's payload in 5 runs of 5.
+  cut build's at 1.43x. Innermost loops now start on a 32-byte boundary
+  on x86, so that loop lands at 0 or 32. The cut is a function of the
+  program, so the objects are the same on one thread and on twelve.
+  `IYI_RELEASE_PARTITIONS=1` keeps the one module, and
+  `IYI_RELEASE_IMPORT` and `IYI_RELEASE_INLINE` set the two limits.
+  `bench/release_cores.sh` holds the cores, the output, the objects and
+  the inlining across the cut, each against a broken copy, and the
+  `available_externally` copies against a build with none. On `mt/next`,
+  `bench/concurrent_mark.sh`'s copy whose barrier shades nothing passed
+  when cut, 8 runs of 8 on Linux: the loop that reads the payload's
+  colour held it where the second stop's conservative scan found it. That
+  read is in a frame of its own now, as the move was, and the cut copy
+  lost round 0's payload in 5 runs of 5.
 
 ### Fixed
 

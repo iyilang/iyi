@@ -23,8 +23,11 @@
 #      calls `__iyi_new` - external, called by every `new` - or
 #      `IyiHeap.cache` - a thread-local's reader, inline assembly on Linux:
 #      every partition inlined its copy, as one module inlines every call
-#      to them. The broken copy copies nothing (`IYI_RELEASE_IMPORT=0`),
-#      and has to be caught calling them.
+#      to them. Two broken copies: one copies nothing
+#      (`IYI_RELEASE_IMPORT=0 IYI_RELEASE_INLINE=0`) and has to be caught
+#      calling either; one has no `available_externally` copies
+#      (`IYI_RELEASE_INLINE=0`), the only kind an external function gets,
+#      and has to be caught calling `__iyi_new`.
 #
 # Exits non-zero if any check fails or any broken copy passes.
 set -u
@@ -185,7 +188,7 @@ else
   else
     echo "inlined: $new partitions call __iyi_new and $cache IyiHeap.cache across the cut"; status=1
   fi
-  if ! objects no-import 4 IYI_RELEASE_IMPORT=0; then
+  if ! objects no-import 4 IYI_RELEASE_IMPORT=0 IYI_RELEASE_INLINE=0; then
     echo "  broken copy, nothing copied: the build failed"; status=1
   else
     new=$(calling no-import "$NEW") cache=$(calling no-import "$CACHE")
@@ -193,6 +196,16 @@ else
       echo "  broken copy, nothing copied: $new partitions call __iyi_new, $cache IyiHeap.cache - caught"
     else
       echo "  broken copy, nothing copied: no call across the cut - not caught"; status=1
+    fi
+  fi
+  if ! objects no-inline 4 IYI_RELEASE_INLINE=0; then
+    echo "  broken copy, no available_externally copy: the build failed"; status=1
+  else
+    new=$(calling no-inline "$NEW")
+    if [ "$new" -gt 0 ]; then
+      echo "  broken copy, no available_externally copy: $new partitions call __iyi_new - caught"
+    else
+      echo "  broken copy, no available_externally copy: no partition calls __iyi_new - not caught"; status=1
     fi
   fi
 fi

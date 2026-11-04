@@ -3169,10 +3169,12 @@ module Iyi
     # count anywhere.
     #
     # Windows keeps the one module unless told: there the JSON benchmark
-    # still ran 1.068x and 1.083x its one-module time cut at the default,
-    # best of 15 interleaved, on Windows 11, 12 logical processors (the
-    # user's machine), against 1.028x on macOS 26.6, Apple M2 Pro, 10 cores
-    # (the user's machine).
+    # still ran 1.015x its one-module time cut at the default, best of 45
+    # interleaved runs, and the median of three bests of 15 was 1.033x, on
+    # Windows 11, 12 logical processors (the user's machine), where the
+    # same one-module binary run against itself came out at 0.995x and
+    # 1.002x. On macOS 26.6, Apple M2 Pro, 10 cores (the user's machine),
+    # 1.012x and 1.011x.
     private def release_partitions : Int32?
       if count = ENV["IYI_RELEASE_PARTITIONS"]?.try(&.to_i?)
         return count == 0 ? nil : count.clamp(1, ReleasePartition::MAX_PARTITIONS)
@@ -3181,11 +3183,20 @@ module Iyi
     end
 
     # iyi: the largest function, in instructions before optimisation, a
-    # partition gets a copy of to inline (`ReleasePartition::IMPORT_LIMIT`),
-    # when `IYI_RELEASE_IMPORT` says. `0` copies nothing, which is the broken
-    # copy `bench/release_cores.sh` holds the import against.
+    # partition gets a local copy of to inline
+    # (`ReleasePartition::IMPORT_LIMIT`), when `IYI_RELEASE_IMPORT` says.
     private def release_import : Int32
       ENV["IYI_RELEASE_IMPORT"]?.try(&.to_i?).try { |limit| Math.max(limit, 0) } || ReleasePartition::IMPORT_LIMIT
+    end
+
+    # iyi: the same for an `available_externally` copy
+    # (`ReleasePartition::INLINE_LIMIT`), when `IYI_RELEASE_INLINE` says.
+    # `IYI_RELEASE_IMPORT=0 IYI_RELEASE_INLINE=0` copies nothing but what
+    # LLVM must inline and what goes with a copy, and `IYI_RELEASE_INLINE=0`
+    # nothing external: the broken copies `bench/release_cores.sh` holds the
+    # import against.
+    private def release_inline : Int32
+      ENV["IYI_RELEASE_INLINE"]?.try(&.to_i?).try { |limit| Math.max(limit, 0) } || ReleasePartition::INLINE_LIMIT
     end
 
     private def new_program(sources)
@@ -3374,7 +3385,7 @@ module Iyi
       {% unless LibLLVM::IS_LT_130 %}
         if single_module && !@cross_compile && @emit_targets.none? && !@optimization_mode.o0? && units.size == 1
           @progress_tracker.stage("Codegen (partition)") do
-            units.first.partition(release_partitions, release_import)
+            units.first.partition(release_partitions, release_import, release_inline)
           end
         end
       {% end %}
@@ -4486,9 +4497,9 @@ module Iyi
       # stand in for it: each is optimised and compiled on its own, and their
       # objects are what links. Nothing changes when the module is too small
       # to be worth cutting.
-      def partition(count : Int32?, import_limit : Int32) : Nil
+      def partition(count : Int32?, import_limit : Int32, inline_limit : Int32) : Nil
         named = @preempt_flag.try { |flag| PreemptChecks.named(flag) } || [] of String
-        @plan = ReleasePartition.plan(llvm_mod, count, named, import_limit)
+        @plan = ReleasePartition.plan(llvm_mod, count, named, import_limit, inline_limit)
       end
 
       def partitions : Int32

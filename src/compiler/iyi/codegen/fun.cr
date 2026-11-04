@@ -291,7 +291,7 @@ class Iyi::CodeGenVisitor
       context.block_context = nil
       context.indirect_return = nil
       context.iyi_preempt = !iyi_runtime_copy && iyi_preemptible?(target_def)
-      context.iyi_runtime = iyi_runtime_copy || (iyi_preempt_on? && iyi_runtime_def?(target_def))
+      context.iyi_runtime = iyi_runtime_copy || ((iyi_preempt_on? || iyi_chaos?) && iyi_runtime_def?(target_def))
 
       @llvm_mod = fun_module_info.mod
       @llvm_context = @llvm_mod.context

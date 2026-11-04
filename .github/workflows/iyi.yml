@@ -436,6 +436,9 @@ jobs:
       - name: Where a plain spawn runs (III.4.15)
         run: bash bench/spawn_eligible.sh
 
+      - name: The chaos scheduler in iyi test (III.4.17)
+        run: bash bench/chaos_exercise.sh
+
       # A pool's workers allocating from their own caches, refilled under
       # their size class's lock: cells read back whole through collections,
       # the sweep's chunks reused, no chunk on two lists, every list empty
@@ -1494,6 +1497,9 @@ jobs:
       - name: Where a plain spawn runs (III.4.15)
         run: bash bench/spawn_eligible.sh
 
+      - name: The chaos scheduler in iyi test (III.4.17)
+        run: bash bench/chaos_exercise.sh
+
       # The same shape on kqueue, where the event entry is 32 bytes
       # rather than 12 and the buffer the collector could not see is
       # 512 rather than 192.
@@ -2271,6 +2277,7 @@ jobs:
           bash bench/concurrency_exercise.sh
           bash bench/parallel_exercise.sh
           bash bench/spawn_eligible.sh
+          bash bench/chaos_exercise.sh
           bash bench/library_boundaries.sh
           bash bench/up_to_date.sh
 

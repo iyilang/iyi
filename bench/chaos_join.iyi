@@ -1,0 +1,46 @@
+# A missing join, for the chaos scheduler (SPEC.md III.4.17): one task
+# reads another's answer without waiting for that task.
+#
+#   ./bin/iyi test bench/chaos_join.iyi                 # passes, nearly always
+#   ./bin/iyi test --chaos=1 --chaos-runs 100 bench/chaos_join.iyi
+#
+# The writer adds its answer to an `Atomic`; the reader computes for a
+# while and then reads it. Both blocks capture only atomics, so the
+# compiler runs both in parallel (III.4.15), and nothing in the language
+# makes the writer go first: the reader should be handed the answer -
+# a channel the writer sends on - or read it after the group has joined
+# both. The writer is spawned first and its work is one instruction, so on
+# the pool it is done long before the reader's loop is, and on one thread
+# in the order spawned it runs first too; under `--chaos` a seed that
+# runs the reader through its loop before the writer starts - PCT's, when
+# the reader's unit outranks the writer's - finds it.
+
+module bench/chaos_join
+
+answer = Atomic(Int64).new(0_i64)
+seen = Atomic(Int64).new(-1_i64)
+work = Atomic(UInt64).new(0_u64)
+group do |g|
+  g.spawn do
+    answer.add(42_i64)
+    nil
+  end
+  g.spawn do
+    # The reader's own work: a loop, whose back-edges are where the
+    # scheduler may preempt it.
+    hash = 0_u64
+    index = 0
+    while index < 2_000_000
+      hash = hash &* 6364136223846793005_u64 &+ index.to_u64
+      index = index + 1
+    end
+    work.set(hash)
+    seen.set(answer.get)
+    nil
+  end
+end
+if seen.get != 42_i64
+  print "the reader saw #{seen.get}, before the writer that adds 42 had run (work #{work.get % 10_u64})\n"
+  exit(1)
+end
+print "the reader saw 42 (work #{work.get % 10_u64})\n"

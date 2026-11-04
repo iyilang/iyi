@@ -391,6 +391,12 @@ module Iyi
       alloca_vars @program.vars, @program
 
       emit_vars_debug_info(@program.vars) if @debug.variables?
+
+      # iyi: in a chaos build the program's top-level code checks at its
+      # loops' back-edges as a def's code does (SPEC.md III.4.17): the main
+      # thread is never a pool worker, so nothing preempts it elsewhere, but
+      # the chaos scheduler runs every task on it and preempts there.
+      @context.iyi_preempt = iyi_chaos? && iyi_preempt_on?
     end
 
     getter llvm_context
@@ -2400,6 +2406,7 @@ module Iyi
       # and the link ended on an undefined symbol.
       old_iyi_closure_host = @iyi_closure_host
       @iyi_closure_host = nil
+      old_iyi_preempt = context.iyi_preempt?
 
       clear_current_debug_location if @debug.line_numbers?
 
@@ -2420,6 +2427,7 @@ module Iyi
       @iyi_closure_host = old_iyi_closure_host
       context.fun = old_fun
       context.fun_type = old_fun_type
+      context.iyi_preempt = old_iyi_preempt
       set_current_debug_location old_debug_location if @debug.line_numbers?
 
       block_value
@@ -2438,6 +2446,10 @@ module Iyi
       context.fun = func.func
       context.fun_type = type
       context.fun.linkage = LLVM::Linkage::Internal if iyi_internalise?
+      # A chaos build's top-level code checks (`initialize`); what is
+      # defined here is the compiler's own - an initializer, a `~match` -
+      # which may run inside the runtime, and never checks there.
+      context.iyi_preempt = false if iyi_chaos?
       if needs_alloca
         new_entry_block
         yield func.func
@@ -2968,8 +2980,30 @@ module Iyi
 
     private def iyi_preempt_wanted? : Bool
       return false unless @program.iyi_prelude? && @program.iyi_exported_owners.empty?
-      return false unless @program.iyi_pool_reached?
+      return false unless @program.iyi_pool_reached? || iyi_chaos?
       !iyi_preempt_word.nil?
+    end
+
+    # iyi: a build for the chaos scheduler (`-Diyi_chaos`, SPEC.md
+    # III.4.17), which `iyi test --chaos` makes. Its loops check at their
+    # back-edges whether or not a pool is reached, since the scheduler
+    # preempts at them on the program's one thread; and the runtime's code
+    # is told from the program's whether or not they do, since a chaos
+    # point is dropped from the runtime's copy of a library def (`visit(Call)`).
+    def iyi_chaos? : Bool
+      on = @iyi_chaos
+      return on unless on.nil?
+      @iyi_chaos = @program.has_flag?("iyi_chaos")
+    end
+
+    @iyi_chaos : Bool?
+
+    # iyi: whether *target_def* is `IyiChaos.at_atomic`, the point an
+    # `Atomic` verb makes under `-Diyi_chaos` (`visit(Call)`).
+    def iyi_chaos_atomic_point?(target_def : Def) : Bool
+      return false unless target_def.name == "at_atomic"
+      owner = target_def.owner
+      owner.metaclass? && owner.instance_type.to_s == "IyiChaos"
     end
 
     # The worker's preemption word, `IyiWorkers.@@preempt`: a thread-local
@@ -3003,7 +3037,7 @@ module Iyi
     # runtime, with a worker's structures half changed or a reference to
     # one worker's state held across a move to another. The prelude's
     # other files are a library, and check as a program's own code does.
-    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi"}
+    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi"}
 
     @iyi_runtime_files = {} of String => Bool
 

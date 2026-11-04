@@ -55,28 +55,48 @@ struct Atomic(T)
     {% end %}
   end
 
+  # Under `-Diyi_chaos` each verb is first a point where the chaos
+  # scheduler may run another task (SPEC.md III.4.17): in the program's
+  # copy of these defs only, since the compiler drops `at_atomic` from the
+  # copy the runtime calls (`CodeGenVisitor#visit(Call)`).
+
   # The word, read once, ordered.
   def get : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.load(pointerof(@value), :sequentially_consistent, false)
   end
 
   # The word, written once, ordered.
   def set(value : T) : Nil
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.store(pointerof(@value), value, :sequentially_consistent, false)
   end
 
   # `word += value`; answers what the word held before.
   def add(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.rmw(:add, pointerof(@value), value, :sequentially_consistent, false)
   end
 
   # `word -= value`; answers what the word held before.
   def sub(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.rmw(:sub, pointerof(@value), value, :sequentially_consistent, false)
   end
 
   # `word = value`; answers what the word held before.
   def swap(value : T) : T
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.rmw(:xchg, pointerof(@value), value, :sequentially_consistent, false)
   end
 
@@ -84,6 +104,9 @@ struct Atomic(T)
   # word held, and whether the exchange happened; a retry loop feeds the
   # first back in as its next `expected`.
   def compare_and_set(expected : T, desired : T) : Tuple(T, Bool)
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.at_atomic
+    {% end %}
     IyiAtomic.cmpxchg(pointerof(@value), expected, desired, :sequentially_consistent, :sequentially_consistent)
   end
 end

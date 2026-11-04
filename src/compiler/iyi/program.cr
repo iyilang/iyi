@@ -386,6 +386,47 @@ module Iyi
     # tried after the entry's directory.
     property iyi_header_root : String? = nil
 
+    # iyi: the directory the program's own module paths are resolved from:
+    # the project root a tool set, else the entry file's.
+    def iyi_import_root : String?
+      iyi_project_root || filename.try { |name| File.dirname(name) }
+    end
+
+    # iyi: the directories an import's path is resolved from, in the order
+    # they are tried: the import root, then the root the entry's own header
+    # names (IV.6 read backwards: that is how `iyi check app/greeter.iyi` — or
+    # a migrated module built on its own — resolves `import app/formal` the
+    # way a build from the project root would; after the entry's directory,
+    # never instead of it), then `IYI_PATH`. Inside a package only `IYI_PATH`
+    # is asked: what reaches there from a package is iyi's standard library
+    # (`SemanticVisitor#resolve_package`), and a module of the same name in
+    # the consuming project is not it.
+    def iyi_import_roots(inside_package : Bool = false) : Array(String)
+      roots = [] of String
+      unless inside_package
+        iyi_import_root.try { |root| roots << root }
+        iyi_header_root.try { |root| roots << root }
+      end
+      roots.concat(iyi_path.entries)
+    end
+
+    # iyi: the files `import a/b` may be, in the order they are tried: each
+    # root's `a/b.iyi` and then its `a/b.cr`, so an iyi module can shadow a
+    # Crystal file of the same name during the transition. Each in the
+    # platform's spelling (`Iyi.native_path`): the module path's `/` went
+    # into the file name as it was, and on Windows every place an imported
+    # file is named - a diagnostic, `check -f json`, `fix --json` - named
+    # `C:\proj\app/deep/util.iyi`, which a tool matching paths does not match
+    # to `C:\proj\app\deep\util.iyi`.
+    def iyi_import_candidates(path : String, inside_package : Bool) : Array(String)
+      candidates = [] of String
+      iyi_import_roots(inside_package).each do |root|
+        candidates << Iyi.native_path(File.join(root, "#{path}.iyi"))
+        candidates << Iyi.native_path(File.join(root, "#{path}.cr"))
+      end
+      candidates
+    end
+
     # iyi: whether this build is writing artifacts as well as reading them
     # (SPEC.md IV.3). Set by the compiler from `--emit-iyimod`.
     #
@@ -1440,6 +1481,24 @@ module Iyi
     # warnings with this program.
     def new_parser(source : String, var_scopes = [Set(String).new])
       Parser.new(source, string_pool, var_scopes, warnings)
+    end
+
+    # iyi: how many threads parse ahead of the top-level pass (`ParseAhead`);
+    # below 2, none do. Set by the compiler from `--threads`.
+    property parse_ahead_threads = 0
+
+    # iyi: the parse ahead of the top-level pass running now, if one is.
+    property parse_ahead : ParseAhead? = nil
+
+    # iyi: *filename*'s nodes, read as *source*, with *parser* set up for it:
+    # parsed ahead when that was the same parse (`ParseAhead#parse`), else
+    # here.
+    def parse_file(parser : Parser, filename : String, source : String) : ASTNode
+      if ahead = @parse_ahead
+        ahead.parse(parser, filename, source)
+      else
+        parser.parse
+      end
     end
 
     # Returns a `LiteralExpander` useful to expand literal like arrays and hashes

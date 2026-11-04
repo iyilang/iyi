@@ -422,6 +422,7 @@ module Iyi
       program.iyi_file_overrides = @iyi_file_overrides
       program.iyi_project_root = @iyi_project_root
       program.iyi_header_root = @iyi_header_root
+      program.parse_ahead_threads = @n_threads.clamp(..ParseAhead::THREADS)
       program.color = color?
       program.stdout = stdout
       program.show_error_trace = show_error_trace?
@@ -3210,6 +3211,7 @@ module Iyi
       program.iyi_file_overrides = @iyi_file_overrides
       program.iyi_project_root = @iyi_project_root
       program.iyi_header_root = @iyi_header_root
+      program.parse_ahead_threads = @n_threads.clamp(..ParseAhead::THREADS)
       program.optimization_mode = @optimization_mode
       program.iyi_module_dir = @use_iyimod
       program.iyi_prefers_source = @iyi_prefers_source

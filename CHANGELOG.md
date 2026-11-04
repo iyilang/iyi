@@ -181,6 +181,32 @@
 
 ### Gates
 
+- **root_exercise.sh holds the two retentions conservative stack scanning
+  cannot avoid by itself, and the fix for each.** In each, a 64 MB
+  string nobody keeps is held by a word that only looks like a pointer
+  into it. In the first the word is a frame's, left under a slot that a
+  frame laid over it never writes, as dyld's words were under `main` on
+  macos-15. In the second it is an integer kept live in the top level's
+  frame, like the clock reading that kept step 16e's string in
+  bench/concurrency_exercise.iyi. Each fix must free the string:
+  zeroing the stack under a frame before it is used, as `__iyi_enter`
+  does, and reading the clock in a `def` of its own. Without its fix,
+  each case must keep the string. That is the scan being conservative,
+  and it is what precise roots would change. Measured 5 runs of 5 per
+  build on Linux x86_64 (12 vCPU, shared) and on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine): 64,050,705 bytes kept without the
+  fix, 50,696 to 50,712 with it. Other platforms report the step as
+  unmeasured.
+
+  Precise roots themselves were measured and are not taken; GC_DESIGN.md's
+  "Precise Stack Roots: Measured, and Not Taken" has the numbers. With
+  LLVM statepoints, on iyi's own optimised IR, JSON ran 1.047 to 1.050x
+  on the M2 Pro tracking pointers alone, and 1.080x once the allocator's
+  integer addresses were roots too, against a bar of 1.03x. web_cores'
+  `.text` grew 15.3% on Linux and 7.1% on the M2 Pro, with a stack map
+  1.3 to 1.8 times the code beside it, and LLVM's code generation took
+  19 to 37% longer. A shadow stack ran JSON 1.52x.
+
 - **concurrent_mark.sh's wake-boost proof fires whatever the machine.**
   The proof gives the mark's helpers back the boost a satisfied wait
   brings and expects the wake check to catch them preempting the

@@ -2516,3 +2516,366 @@ diff /tmp/expected.txt /tmp/actual.txt > /dev/null || {
 **Parallel marking as a built-in design principle (Stage 1), not an add-on (Stage 7).**
 
 The object header's mark word, the tri-color invariant, the write barrier infrastructure, and the work queue are all designed in Stage 1 to support concurrent marking. If parallel marking were an afterthought (added in Stage 7 by redesigning the mark representation), the cost would be a rewrite of Stages 1 to 6. By designing for parallelism from the start, Stage 7 is an implementation detail (adding worker threads), not a redesign. This is the difference between owning a collector and reimplementing gcry's single-threaded shape.
+
+---
+
+## Precise Stack Roots: Measured, and Not Taken
+
+Every thread and fiber stack is scanned conservatively (Stage 3): each
+word between a stack's pointer and its top that falls inside a live
+chunk keeps that chunk. Two retentions came from that.
+
+* **The loader's words.** A slot of `__iyi_main`'s frame that the
+  program never wrote still held dyld's word. On macos-15 it lay inside
+  `bench/concurrency_exercise.iyi` step 16e's 64 MB string, and 61 MiB
+  were kept in 25 runs of 40.
+* **The clock.** An integer the program kept on purpose did the same: a
+  clock reading at 0x49f9af3be, live in the top level's frame, kept
+  that string in 2 of 720 runs.
+
+A heap per unit (PARALLEL_PLAN layer 4) wants exact roots as well. This
+section is the measurement behind not building precise stack roots now
+(slice n9/precise, 2026-11-04). The prototype is not in the tree. The
+two retentions are, as gate steps that fail on conservative scanning
+(see "What is in the tree" below).
+
+### The options
+
+* **(a) Statepoints and stack maps.** LLVM's
+  `rewrite-statepoints-for-gc` (RS4GC) turns every call in a function
+  marked `gc "<strategy>"` into a `gc.statepoint`. The statepoint lists
+  the references live across the call, and code generation records
+  where each one is, per call site, in `.llvm_stackmaps`
+  (`__LLVM_STACKMAPS,__llvm_stackmaps` on darwin).
+  * The C API has `LLVMSetGC` and `LLVMGetGC`.
+  * The pass registry `LLVMRunPasses` reads knows
+    `rewrite-statepoints-for-gc`, `place-safepoints` and
+    `shadow-stack-gc-lowering` by name.
+  * A strategy of iyi's own (`GCStrategy`) needs C++, which Windows'
+    `LLVM-C.dll` cannot take. The built-in `statepoint-example` strategy
+    treats `addrspace(1)` as managed, and it worked from `opt-21` on a
+    micro test. It was not tried through iyi's own pass string or the
+    static 20.1.2 build. A static link may drop its registration, since
+    nothing in the C API references LLVM's built-in GCs. **[not
+    measured]**
+  * Stack maps were emitted for x86_64-linux, x86_64-windows-msvc,
+    aarch64-linux and arm64-macos, with a local `__LLVM_StackMaps`
+    table symbol per object.
+* **(b) A shadow stack.** One frame per function, holding every pointer
+  live across a call, chained from a thread-local head. The experiment
+  wrote its own, Linux x86-64 only, rather than use LLVM's
+  `shadow-stack-gc-lowering`.
+* **(c) Hybrid.** iyi-compiled frames precise, while C and runtime
+  frames, signal frames and a stopped thread's registers stay
+  conservative. The prototype of (a) already had that shape: the
+  prelude's runtime (`__iyi*`, `Iyi*`, prelude.iyi, concurrency.iyi,
+  thread.iyi) is left unmarked.
+
+### How it was measured
+
+The prototype was built off the tree, on the IR iyi itself optimises
+(`IYI_RELEASE_PARTITIONS=1 iyi build --release --emit llvm-ir`).
+
+* A driver linked against LLVM runs the variant's passes, then `-O3`
+  PIC code generation, then the link iyi does. On the M2 Pro, iyi's own
+  binary and the driver's `base` timed within about 2% of each other.
+* The strategy is `iyi`: statepoints, RS4GC, and `addrspace(1)` as the
+  managed space.
+* Every non-runtime function is marked, and its heap pointers are moved
+  to `addrspace(1)`. Stack, global and inline-asm pointers stay in 0.
+* The variants:
+  * `base`: no GC lowering.
+  * `sp`: pointers only.
+  * `spp`: `sp`, plus the allocator's addresses held as integers, made
+    roots.
+  * `spi`: `spp`, plus every 64-bit integer loaded or extracted. This is
+    an upper bound, because it includes ordinary integers.
+  * `spreg`: `sp` with `-max-registers-for-gc-values=8`.
+  * `shadow`: option (b).
+  * `basefp`: frame pointers on.
+* The programs:
+  * `bench/runtime.py`'s four (arithmetic, array, hash, strings).
+  * Trees, objects, JSON and bcrypt.
+  * `bench/web_cores.iyi`: its three endpoints served through wrk, 4
+    threads and 32 connections, http, by one worker and by a pool of
+    four.
+  * `samples/iyi/cores.iyi`, std/http and TLS, for size and compile
+    time.
+
+Every variant's output matched `base`'s. The web builds answered every
+endpoint with the same bytes.
+
+### What LLVM would not do, and what was done instead
+
+1. **Inline-asm calls.** They crash RS4GC in `findBaseDefiningValue`
+   (`__iyi_monotonic_ns`'s `syscall`). They are marked
+   `gc-leaf-function`.
+2. **Two other RS4GC crashes.** An alloca reaching a call crashed it
+   (`raise`'s call stack), and so did the `addrspace(257)` loads x86
+   uses for `%fs`/`%gs`. Both are avoided by moving only heap pointers
+   to `addrspace(1)`.
+3. **A call whose return value the target demotes to a hidden pointer
+   cannot be a statepoint.** That is more than three leaves on x86-64,
+   where `{ i32, [3 x i64] }` gives "Cannot select: store ... undef",
+   and more than eight on aarch64, both Linux and darwin. This was
+   measured with `llc-21` for each N of `{ i32, [N x i64] }` and
+   `[N x i64]`.
+   * iyi's unions are exactly that shape. 145 functions and 1,053 calls
+     of cores.iyi return one, and 128 and 970 of web_cores.iyi on Linux.
+   * The prototype demotes them itself: an out-pointer, and a stack
+     slot in the caller loaded after the call. That is neutral on its
+     own: cores.iyi's `.text` went from 1,480,558 to 1,479,442 bytes,
+     and its code generation from 6.13 to 6.16 s.
+4. **`invoke`, iyi's `rescue`.** It needs nothing more once the
+   demotion is in. With the 8 of 866 functions in cores.iyi that hold
+   one marked too, the build ran with `base`'s output.
+
+### Typing pointers is not precise for iyi
+
+A word-sized integer live across a call in a non-runtime function is
+sometimes a reference. The pass counted them:
+
+| program | pointers | i64 from a pointer | i64 loaded or extracted | other i64 | functions |
+|---|---:|---:|---:|---:|---:|
+| trees | 28 | 5 | 0 | 14 | 6 |
+| json | 275 | 28 | 0 | 95 | 31 |
+| bcrypt | 43 | 15 | 0 | 27 | 14 |
+| cores.iyi | 7,314 | 648 | 886 | 4,948 | 684 |
+
+* "From a pointer" is the inlined allocator, whose `IyiHeap.take`
+  answers `UInt64`.
+* "Loaded or extracted" includes union payloads, which are
+  `[N x i64]`: a payload is a reference or not depending on the tag.
+* The stack slots RS4GC does not track hold references too: anything
+  `pointerof` reaches, `byval` structs, and the demoted returns' slots.
+  These would have to be reported as regions to scan conservatively.
+  **[not measured]**
+
+So a sound build needs code generation to type those values (the
+allocator's answer as a pointer, and a union's payload by its tag).
+`spp` and `spi` bracket what that costs.
+
+### Run time
+
+Ratios against `base`, best of N interleaved runs, all outputs
+identical.
+
+**Linux x86_64** (12 vCPU, shared, LLVM 21.1.8, load average 2.6 to 9
+over the runs). Two runs of the same binaries differ by 3 to 5% here.
+
+| program | sp, run 2 (best of 11) | sp, run 3 (best of 11) | spp, run 3 | shadow, run 2 |
+|---|---:|---:|---:|---:|
+| arithmetic | 1.024 | 1.008 | 0.999 | 0.998 |
+| array | 1.047 | 0.992 | 0.990 | 1.061 |
+| bcrypt | 0.989 | 0.996 | 0.994 | 0.998 |
+| hash | 1.030 | 1.005 | 1.013 | 1.029 |
+| json | 0.980 | 0.993 | 0.975 | 1.541 |
+| objects | 0.962 | 0.975 | 1.014 | 1.296 |
+| strings | 1.029 | 1.055 | 1.056 | 0.978 |
+| trees | 0.992 | 1.007 | 0.993 | 1.156 |
+
+`basefp` cost arithmetic 1.33 to 1.34x. Statepoints do not need frame
+pointers.
+
+**macOS 26.6, Apple M2 Pro, 10 cores (the user's machine)** (LLVM
+20.1.2 static, load average 1.2 to 4.4), best of 15:
+
+| program | sp | spp | spreg |
+|---|---:|---:|---:|
+| arithmetic | 1.000 | 1.001 | 1.000 |
+| array | 0.965 | 0.951 | 0.969 |
+| bcrypt | 1.001 | 1.000 | 1.002 |
+| hash | 0.988 | 0.998 | 0.992 |
+| json | **1.047** | **1.080** | **1.068** |
+| objects | 1.001 | 0.994 | 1.043 |
+| strings | 1.009 | 0.997 | 0.988 |
+| trees | 0.963 | 0.965 | 0.975 |
+
+JSON's `sp` was also 1.050 (best of 15) and 1.047 (best of 21) in two
+earlier runs on the same machine.
+
+**web_cores**, requests a second, best of 3 interleaved:
+
+| server, endpoint | Linux base | sp | spi | M2 Pro base | sp | spi | spreg |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 worker, login | 27 | 0.999 | 0.995 | 20 | 0.994 | 1.000 | 0.999 |
+| 1 worker, check_version | 54,160 | 0.950 | 0.938 | 76,836 | 0.981 | 0.978 | 0.971 |
+| 1 worker, order | 35,732 | 0.930 | 0.969 | 61,516 | 0.969 | 0.968 | 0.950 |
+| 4 workers, login | 104 | 0.991 | 0.987 | 75 | 0.999 | 0.994 | 1.003 |
+| 4 workers, check_version | 212,118 | 0.967 | 0.950 | 128,318 | 0.993 | 0.995 | 0.997 |
+| 4 workers, order | 143,523 | 1.008 | 0.960 | 123,236 | 1.003 | 1.006 | 1.000 |
+
+### Code size
+
+`.text` bytes, and the stack map beside it:
+
+| program, machine | base | sp | spp | spi | stack map (sp) |
+|---|---:|---:|---:|---:|---:|
+| json, Linux | 202,814 | 208,830 (+3.0%) | 209,918 | 209,918 | 80,896 |
+| json, M2 Pro | 175,012 | 179,636 (+2.6%) | | | 122,080 |
+| the other seven, Linux | 139,806 to 160,270 | +0.5 to +0.7% | | | 6,112 to 11,960 |
+| web_cores, Linux | 1,418,270 | 1,635,728 (+15.3%) | 1,669,408 (+17.7%) | 1,691,040 (+19.2%) | 2,158,056 |
+| web_cores, M2 Pro | 1,338,444 | 1,432,884 (+7.1%) | 1,448,720 (+8.2%) | 1,453,596 (+8.6%) | 2,602,816 |
+| cores.iyi, Linux | 1,480,558 | 1,792,598 (+21.1%) | 1,835,222 (+24.0%) | 1,871,826 (+26.4%) | 2,664,360 |
+
+* The small programs are mostly runtime, which is unmarked. A program
+  made of std/http and TLS is not.
+* In those programs the stack map is 1.3 to 1.8 times the new code, and
+  `.text` and map together come to 2.7 to 3.0 times the old `.text`.
+* `spreg` grew web_cores' `.text` by 30.9% on Linux and 18.9% on the
+  M2 Pro: more registers are saved around calls.
+
+### Compile time
+
+**Linux, rewrite plus code generation.** These are four interleaved
+pairs on the one-module IR.
+
+* cores.iyi:
+  * `base` took 6.13, 7.14, 6.99 and 6.58 s.
+  * `sp` took 8.06, 8.74, 9.20 and 9.01 s.
+  * That is +22 to +37%, with peak memory going from 189 to 273 MB.
+  * RS4GC itself took 0.28 to 0.35 s.
+* web_cores.iyi:
+  * `base` took 5.94, 6.33, 6.10 and 6.10 s.
+  * `sp` took 7.55, 7.78, 8.16 and 7.79 s.
+  * That is +23 to +34%, with peak memory going from 193 to 246 MB.
+* On the small programs RS4GC took 2 to 19 ms.
+
+**The M2 Pro.** web_cores' code generation went from 6.64 s to
+7.88 s (+19%) for `sp`, and to 8.07 s (+22%) and 8.20 s (+24%) for
+`spp` and `spi`. Peak memory went from 394 to 581 MB.
+
+**Against a whole build.** The figures are for cores.iyi with this
+branch's compiler, a non-release build, on Linux.
+
+* `--no-codegen` took 2.44 s.
+* One module took 24.8 s wall, of which LLVM (`bc+obj`) was 22.6 s. The
+  1.6 to 2.4 s that `sp` adds is +6 to +10% of that.
+* The default partitioned build took 7.84 s wall, with `bc+obj` at
+  5.88 s wall and 40.6 s of CPU. It was not run through the prototype.
+  **[INFERENCE]** If code generation is the same share of the LLVM work
+  there as in one module (6.6 to 7.1 of 22.6 s), +28% of it adds about
+  3.4 s of CPU to 40.6 s, so about +8%.
+
+### Stops, preemption, fibers, partitions and toolchains
+
+**A stack map is valid only at a statepoint, which is a call.**
+
+* A collecting thread is always at one: its own frames are calls into
+  `GC.collect`, and allocation stops inside `IyiHeap.take`.
+* A thread stopped by signal (Linux, darwin) or `SuspendThread`
+  (Windows, `IyiThread.capture_thread_registers`) is stopped at any pc.
+* There are two ways to handle such a thread:
+  * Roll it forward to its next safepoint: the handler only marks it,
+    and it parks at its next poll. The back-edge checks of
+    `preempt_checks.cr` are such polls, and so is every call. A thread
+    in a long C call has every iyi frame of it at a call already.
+  * Option (c): scan its top frame and registers conservatively, and
+    every frame under them precisely.
+* (c) keeps a conservative window one frame deep per stopped thread.
+  Both recorded retentions were on the collecting thread's own stack,
+  so (c) would still have fixed both.
+* Walking frames without frame pointers needs each function's stack
+  size, which the map records, and an unwinder (`.eh_frame`) for the
+  runtime and C frames between iyi frames.
+
+**Preemption checks.** `PreemptChecks.run` inserts the back-edge checks
+after optimisation (compiler.cr). RS4GC has to run after it, so that
+the slow path's `__iyi_preempt` call becomes a statepoint. Its spills
+are then on the slow path only.
+
+**Fibers.** A parked fiber's `saved_sp` is inside the runtime's switch,
+which is a call. Every iyi frame above it is at a statepoint, so its
+stack is precise apart from the runtime's own frames.
+
+**Partitions.** Each partition's object has its own local
+`__LLVM_StackMaps`, and the linker concatenates the sections.
+
+* ELF gives `__start_`/`__stop_` symbols only to sections named as C
+  identifiers (GNU ld's documented rule; `.llvm_stackmaps` starts with
+  a dot), so a runtime cannot find the tables that way. **[not
+  measured]**
+* Each partition would need to register its table, or the section
+  would need renaming after code generation.
+* On Linux PIE the section carries `R_X86_64_64` relocations in a
+  read-only section. `ld` warned "relocation in read-only section" and
+  made the binary `DT_TEXTREL`. The tables would have to move to a
+  RELRO section.
+
+**LLVM on CI** (20.1.2 static on macOS, 21 on Linux, 23 on Windows).
+
+* RS4GC and statepoint lowering behaved the same on 20.1.2 (the M2 Pro)
+  and 21.1.8 (Linux), apart from the demotion limits above.
+* LLVM 23, which Windows builds with, was not tried. Neither was a
+  strategy chosen through the C API alone, which is all Windows'
+  `LLVM-C.dll` exports.
+
+### Decision: not now
+
+The bar was at most 3% run time and 10% compile time.
+
+* **Run time fails the bar even unsound.**
+  * JSON runs 1.047 to 1.050x on the M2 Pro with pointers alone, in
+    three runs. It runs 1.080x once the allocator's integer addresses
+    are roots (`spp`), which a sound build needs at least.
+  * web_cores' light endpoints lose 2 to 3% on one worker on the M2
+    Pro, and up to 7% on Linux (one row of four gained 0.8%), where the
+    noise is about the same size.
+  * The shadow stack (b) is far worse: JSON 1.52 to 1.54x, objects
+    1.30 to 1.33x, trees 1.16 to 1.24x.
+* **Code size fails, though the brief set no bar for it.** Real
+  programs' code grows 7 to 26%, and their stack maps are larger than
+  their code: code and map come to 2.7 to 3.0 times the old code.
+* **Compile time is at the bar.** It is +6 to +10% of a one-module
+  build measured, and about +8% partitioned (estimated), with LLVM's
+  code generation itself +19 to +37%.
+* **The prototype is not sound yet.** Making it sound means typed
+  integers and union payloads in code generation, conservative scanning
+  of the untracked slots, a frame walker with an unwinder, a stop that
+  reaches a safepoint, and table registration for partitions. Every one
+  of those adds cost to numbers that are already over the bar.
+
+So the collector stays conservative. The retentions it causes are
+handled one at a time, as both measured ones already are.
+
+### What would change the answer
+
+* **A need for exact roots that a targeted fix cannot meet.** That
+  means a heap per unit (layer 4) whose ownership checks must not see
+  false references, or a moving collector. A moving collector is what
+  statepoints' relocation is for. A non-moving one pays for the spills
+  and uses none of the relocation.
+* **Cheaper statepoints.** Lowering that keeps references in
+  callee-saved registers without the extra saves would help, as would
+  LLVM's demotion limit being lifted. `spreg` did not help: JSON ran
+  1.068x and the code grew more.
+* **Compressed tables.** The stack maps converted at link time to a
+  table of iyi's own would cut the size cost. LLVM's version 3 format
+  takes 12 bytes or more per live value per call site. **[not
+  measured]**
+* **Frontend typing.** With references typed in iyi's own code
+  generation instead of inferred after optimisation, `spp`'s cost on
+  JSON could be measured again on equal terms. If it comes out under
+  3%, the run-time objection goes.
+* **Partial precision instead of exact roots.** A per-call-site map of
+  dead stack slots could answer the retention cases without exact
+  roots: the collector would skip the slots instead of reading their
+  roots. **[not measured]**
+
+### What is in the tree
+
+`bench/root_exercise.sh`'s step "a word that only looks like a pointer
+keeps 64 MB, and each fix takes it back" has two cases, each built and
+run with and without its fix.
+
+* **The loader's words.** A frame laid over one that left a word into a
+  dropped 64 MB string, in a slot it never writes. The fix is
+  `__iyi_enter`'s: zero the stack under a frame before it is used.
+* **The clock.** An integer into the string, live in the top level's
+  frame across the collection. The fix is a `def` of its own.
+
+Each fix must free the string. Each case without its fix must keep it:
+64,050,705 bytes against 50,696 to 50,712, 5 runs of 5 on Linux x86_64
+and on macOS 26.6, Apple M2 Pro, 10 cores (the user's machine). Keeping
+it is conservative scanning failing the case. If precise roots are ever
+built, that assertion becomes the check.

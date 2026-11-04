@@ -455,7 +455,20 @@
     end
     threads_now = IyiThread.program_threads
     busy_floor = IyiMark::MIN_BUDGET * 4_u64
+    # The most of the budgets the next ten collections leave: the floor
+    # counts the threads that filled a slice in the epoch, and on a
+    # machine with fewer cores than the four threads one can sit out a
+    # whole epoch. macos-15's 3-core runners left 12582912 bytes, three
+    # threads' floor, in the plain build and in the release one (job
+    # 126454537193); twelve vCPUs and the 4-processor Linux and Windows
+    # runners left the four's. Held to 3 of 12 vCPUs on Linux (taskset),
+    # the one budget read failed 6 runs of 12, and the most of ten 0.
     budget_busy = IyiMark.budget
+    while IyiMark.collections < busy_from + 13_u64
+      sleep(1)
+      budget = IyiMark.budget
+      budget_busy = budget if budget > budget_busy
+    end
     let_go.add(1_u64)
     while stopped.get < 4_u64
       sleep(1)
@@ -467,7 +480,7 @@
     let_go.add(1_u64)
     together.each { |thread| thread.join }
     if budget_busy < busy_floor
-      raise "floor: a collection while four threads allocated, #{count(threads_now)} registered, left a #{count(budget_busy)}-byte budget, under #{count(busy_floor)}, so the floor does not grow with the threads"
+      raise "floor: ten collections while four threads allocated, #{count(threads_now)} registered, left a #{count(budget_busy)}-byte budget at the most, under #{count(busy_floor)}, so the floor does not grow with the threads"
     end
     if budget_idle >= IyiMark::MIN_BUDGET * registered
       raise "floor: a collection with #{count(registered)} threads registered and none of them allocating left a #{count(budget_idle)}-byte budget, so threads that allocate nothing raise the floor"

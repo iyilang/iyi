@@ -142,6 +142,65 @@
   allocates, 3.8 times. `bench/std_parallel_exercise.sh` holds it, with
   five broken copies caught by name.
 
+- **A `std/mutex` lock and its release are two locked instructions, from
+  seven.** The holder's task and thread were four sequentially consistent
+  stores, an `xchg` each on x86_64, and neither orders anything: one
+  tells a task whether it holds the lock already, the other is a hint
+  for spinning. They are relaxed, through `IyiAtomic` inside std/mutex,
+  and `Atomic` keeps its one ordering. Every release also counted itself
+  a change for `wait_for`, a `lock xadd`; a waiter now counts itself as
+  waiting before its own release, with the lock held, so a release that
+  reads no waiter under the lock skips the count and the wake, and the
+  window a waiter counted after its release left - a release reading 0
+  first, the waiter parking on a count it never moved - is closed (the
+  proof is beside `release`). `bench/chan_scaling.iyi`'s `mutexes`, a
+  mutex to each pair of tasks, median of 5 interleaved on Linux x86_64
+  (12 vCPU, shared): 25.8 million updates a second with one pair, 37.6
+  with the stores relaxed, 43.3 with the count skipped too; twelve pairs
+  73.6, 106.6 and 111.9; `mutex`, twelve tasks on one, 21.6, 32.0 and
+  40.1. With the entry below as well, median of 5: on Windows 11, 12
+  logical processors (the user's machine), one pair 22.4 to 37.6 million
+  and twelve tasks on one 21.3 to 34.8; on macOS 26.6, an M2 Pro with 10
+  cores (the user's machine), one pair 36.4 and 35.3, where the stores
+  were `stlr` either way, and four pairs 36.2 to 45.9.
+  `bench/std_mutex_exercise.sh` proves a waiter counted after its
+  release hangs the exercise.
+
+- **A `std/mutex` waiter that starves is handed the lock.** A task that
+  let the lock go and took it straight back, running while the waiter it
+  woke was still waking, kept it for as long as it went on: beside a
+  holder taking it back after every 20 us hold, a waiter waited 611 ms,
+  all 30,000 holds, on Linux x86_64 (12 vCPU, shared), and 3.0 s beside
+  100 us holds. A waiter that has waited 1 ms, or been woken 4 times to
+  find the lock taken again, now starves, and the next release hands it
+  the lock rather than letting it go, Go's `sync.Mutex` starvation mode;
+  until a waiter starves the lock goes to whoever takes it first. The
+  same waiter has it in 7.3 and 7.1 ms, two wakes each queued behind the
+  running holder until the monitor preempts it, and in 0.14 and 0.50 ms
+  with the pool calling an idle worker for a hand-off from a running
+  task. On macOS 26.6, an M2 Pro with 10 cores (the user's machine), 41.9
+  ms and 3.0 s before, median of 5, and 1.6 ms after; on Windows 11, 12
+  logical processors (the user's machine), 181 ms and 3.0 s before, 4.6
+  and 9.1 ms after, 0.20 and 0.54 ms with the hand-off call.
+  `bench/std_mutex_exercise.sh` has the step, a waiter beside 1 ms holds
+  (599 ms before), with a broken copy each for a waiter that never
+  starves and a release that frees the lock where it hands it over.
+  `bench/chan_scaling.iyi`'s `held`, two tasks taking turns on each of W
+  mutexes with 20 us holds, against its Go twin on `sync.Mutex`, `over_ns`
+  before, after and Go's, median of 7 interleaved on Linux: 281/263/110
+  at one pair, 307/287/151 at two, 356/301/189 at four, 454/566/239 at
+  eight. The park, the wake and the switch, `over_ns` less the new
+  `floor_ns` (the same updates with nothing waiting), are -2 to 41 ns
+  after against Go's -34 to 17; the rest is the hold's clock, a
+  clock_gettime syscall where Go reads the vDSO. On the M2, median of 5,
+  after against Go: 59/55 at one pair, 61/95 at two, 136/392 at four,
+  231/507 at eight. On the Windows machine, median of 7, `over_ns`
+  before and after: 194/149 at one pair, 206/157 at two, 258/213 at four,
+  303/318 at eight; the park, the wake and the switch 16, -69, 30 and 30
+  ns after, Go's -22, -3, 277 and 216. Go's monotonic clock moved too
+  coarsely there for the hold - 1.84 ms an update - and its twin spins a
+  count measured at start instead.
+
 ### Fixed
 
 - **A connection's answer in the poller of a held worker is taken by an

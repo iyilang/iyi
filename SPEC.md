@@ -2642,7 +2642,7 @@ hook, and the prelude's own definition of it is untouched. Compile-time
 `responds_to?` works unchanged, which the error message is entitled to claim
 because it is tested.
 
-### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14)**
+### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14); a plain `spawn` in parallel where it is proven safe PROPOSED (III.4.15)**
 
 This is the section where the design either beats Go or does not, so it is worth
 being blunt about where Go actually loses. Not goroutines: they are cheap, the
@@ -5116,6 +5116,17 @@ done about it:
   (run 41668221971, "caught: FAIL answered on the accepting thread: yes,
   not no"), so this change, and not the shared machine's load, made it
   pass. The copy spells it `g.spawn_serial` now, and is caught.
+- On macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine),
+  `runtime_exercise`'s darwin floor printed `_close` and `_environ`, the
+  pool's, which only the Linux floor had listed; it lists both now.
+  `concurrency_exercise.sh` did not run there at all: the note on
+  `environ` sat inside the Linux floor's `$( )`, and macOS's bash 3.2
+  refused the script with a syntax error 150 lines on. Moved above it,
+  the script ran, and its step "a group's join re-raises the first task
+  that panicked" joined with "second" named: both spawns capture only a
+  `String` and ran at once on two workers. The step is about the order of
+  one unit, so they are `spawn_serial`, and the gate holds there and on
+  Linux.
 
 `std_signal_exercise`, `std_mutex_exercise` and `root_exercise` failed
 too, and failed the same way when run with the old prelude through
@@ -5129,28 +5140,46 @@ order its spawns ran.
 spawns whose blocks capture a `String`, two integers and a `List`, best of
 five rounds, with the answer the same at every count:
 
-| Workers | Linux, 12 vCPUs, load 6 | macOS 26.6, Apple M2 Pro, 10 cores (the user's machine) |
-|---|---|---|
-| 1 | 99 ms | 158 ms |
-| 2 | 50 ms | 81 ms |
-| 4 | 25 ms | 41 ms |
-| 8 | 14 ms | 23 ms |
-| 12 (Linux), 10 (macOS) | 12 ms | 20 ms |
+| Workers | Linux, 12 vCPUs, load 6 | macOS 26.6, Apple M2 Pro, 10 cores (the user's machine) | Windows 11, 12 logical processors (the user's machine) |
+|---|---|---|---|
+| 1 | 99 ms | 158 ms | 95 ms |
+| 2 | 50 ms | 81 ms | 47 ms |
+| 4 | 25 ms | 41 ms | 24 ms |
+| 8 | 14 ms | 23 ms | 13 ms |
+| 12 (Linux, Windows), 10 (macOS) | 12 ms | 20 ms | 10 ms |
 
-That is 8.3× on twelve workers and 7.9× on ten, where the same source
-before ran on one thread whatever the count.
+That is 8.3× on twelve workers on Linux, 7.9× on ten on macOS and 9.5×
+on twelve on Windows, where the same source before ran on one thread
+whatever the count.
 
-**10. Open questions.**
+A server, whose connections std spawns and part 8 found serial, should
+not move, and `bench/web_cores.iyi`'s pooled server did not: release
+builds of `mt/next` (before) and this branch rebased on it (after),
+interleaved, best of three rounds, requests a second:
 
-- Should `@[SafeReach]` keep making a spawn eligible (part 1)? It is
-  honoured here.
-- The bench and gate programs that assumed spawn order (part 8): mark each
-  `spawn_serial`, or fix the assumption?
-- A pool that grows to the work, as Go starts its threads, rather than
-  starting whole (part 6). This is being built on `mt/spawn` as its own
-  change.
-- The budget floor counting only threads that allocated since the last
-  collection, so that idle workers cost no heap. This goes to the
+| Endpoint | macOS, 10 workers, wrk -t4 -c32: before | after | Windows, 12 workers, oha -c32: before | after |
+|---|---|---|---|---|
+| `check_version` | 119,836 | 118,532 | 117,313 | 114,976 |
+| `order` | 116,259 | 116,150 | 98,565 | 104,937 |
+| `login` | 170 | 171 | - | - |
+
+(macOS 26.6, Apple M2 Pro, 10 cores, and Windows 11, 12 logical
+processors, both the user's machines.) On macOS every pair is within 1.1%,
+and each endpoint's rounds overlap. On Windows `check_version`'s did too,
+103,050 to 117,313 before and 107,760 to 114,976 after; `order`'s did
+not, 96,646 to 98,565 before and 103,130 to 104,937 after, 6% faster with
+no spawn of the server's moved, which these three rounds do not explain.
+
+**10. Settled, and what is left.**
+
+- `@[SafeReach]` keeps making a spawn eligible (part 1), as it makes a
+  `spawn_parallel` block pass.
+- A program that assumed spawn order (part 8) says so with
+  `spawn_serial` where the order is the step's subject; none of those
+  assumptions was in std.
+- The pool grows to the work (part 6), built here.
+- Left: the budget floor counting only threads that allocated since the
+  last collection, so that idle workers cost no heap. This goes to the
   working-set work.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**

@@ -73,13 +73,18 @@
   placement, the unit, the opt-out, one worker and the notes, with a
   broken copy caught for each. `bench/spawn_fanout.iyi` hashes 31 MiB in
   64 plain spawns. It runs in 99 ms on one worker and 12 ms on twelve on
-  Linux (12 vCPUs), and in 158 ms on one and 20 ms on ten on macOS 26.6
-  (Apple M2 Pro, 10 cores, the user's machine). Gate steps that tested a
+  Linux (12 vCPUs), in 158 ms on one and 20 ms on ten on macOS 26.6
+  (Apple M2 Pro, 10 cores, the user's machine), and in 95 ms on one and
+  10 ms on twelve on Windows 11 (12 logical processors, the user's
+  machine). `bench/web_cores.iyi`'s server, whose connections std
+  spawns, held: best of three interleaved, `check_version` 119,836 req/s
+  before and 118,532 after on the M2 at ten workers, 117,313 and 114,976
+  on the Windows machine at twelve. Gate steps that tested a
   unit's order or one thread's turns, and depended on spawns staying
   in their unit, spawn with `spawn_serial`: in `runtime_exercise`,
-  `thread_exercise`, `concurrency_exercise` and `parallel_exercise`,
-  and in `std_http_exercise`'s copy that serves a connection on the
-  accepting thread (SPEC.md III.4.15, part 8).
+  `thread_exercise`, `concurrency_exercise` (its two-panics step among
+  them) and `parallel_exercise`, and in `std_http_exercise`'s copy that
+  serves a connection on the accepting thread (SPEC.md III.4.15, part 8).
 
 - **The pool starts one worker and grows to the work.** The first
   parallel task, from `spawn_parallel`, `Server.serve` or an eligible

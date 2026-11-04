@@ -165,7 +165,11 @@ prove_fails() {
   local label="$1" dir="$2" phrase="$3" script="$4" file="${5:-prelude.iyi}" program="${6:-collect_trigger.iyi}" limit="${7:-}"
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
-  awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"
+  if ! awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"; then
+    echo "  $label: what the copy changes is not in $file any more"
+    status=1
+    return
+  fi
   if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/$program" \
        >"$WORK/$dir/build.log" 2>&1; then
@@ -250,9 +254,16 @@ prove_fails "floor counts idle threads" idlefloor "floor:" \
 
 # The debt's assist removed: a slice that finds a collection triggered
 # runs on as it did, and four threads churning together with no helper
-# sweep none of the debt the triggering thread pays.
+# sweep none of the debt the triggering thread pays. Both of the assist's
+# calls go: the slice's past the budget, and the hold's past the ceiling.
+# With the hold's left in, a thread that reached the ceiling while the
+# collection's thread paid the debt swept it there: held to 3 cores on
+# Linux (12 vCPUs), the copy passed 5 of 10 runs, 12 to 62 slices swept,
+# and it passed on darwin arm64's 3-core runner (run 41800443380). With
+# both out it failed 20 of 20 held to 3 cores, and the shipped runtime
+# swept 435 to 1202 slices in 10.
 prove_fails "debt never assisted" noassist "debt:" \
-  '{ sub(/sweep_assist if total >= budget/, "# removed"); print }' prelude.iyi debt_assist.iyi
+  '{ if (sub(/sweep_assist if total >= budget/, "# removed")) found++; if (sub(/^            sweep_assist$/, "            nil")) found++; print } END { if (found != 2) exit 3 }' prelude.iyi debt_assist.iyi
 
 # The collection's ceiling removed: a slice that finds a collection under
 # way past the budget allocates on, as every slice did, and twelve

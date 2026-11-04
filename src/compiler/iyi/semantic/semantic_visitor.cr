@@ -2289,21 +2289,47 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     annotations.try(&.first?).try &.doc
   end
 
-  # Whether a class variable is `@[ThreadLocal]`, and the reason its
-  # `@[SafeReach("...")]` gives (SPEC.md III.4.4), if it has one.
-  def check_class_var_annotations : {Bool, String?}
+  # Whether a class variable is `@[ThreadLocal]`, and its
+  # `@[SafeReach("...")]` or `@[UnsafeReach("...")]` (SPEC.md III.4.4), if
+  # it has one, with whether it is the unsafe one; `iyi_mark_class_var_reach`
+  # records it on the variable.
+  def check_class_var_annotations : {Bool, {Annotation, Bool}?}
     thread_local = false
-    safe_reach = nil
+    reach = nil
     process_annotations(@annotations) do |annotation_type, ann|
       if annotation_type == @program.thread_local_annotation
         thread_local = true
       elsif annotation_type == @program.safe_reach_annotation
-        safe_reach = ShareReach.claim(ann, "this class variable")
+        reach = {ann, false}
+      elsif annotation_type == @program.unsafe_reach_annotation
+        reach = {ann, true}
       else
-        ann.raise "class variables can only be annotated with ThreadLocal or SafeReach"
+        ann.raise "class variables can only be annotated with ThreadLocal, SafeReach or UnsafeReach"
       end
     end
-    {thread_local, safe_reach}
+    {thread_local, reach}
+  end
+
+  def iyi_mark_class_var_reach(var : MetaTypeVar, reach : {Annotation, Bool}?) : Nil
+    return unless reach
+    ann, unsafe = reach
+    iyi_mark_reach(var, "this class variable", ann, unsafe)
+  end
+
+  # The claim `@[SafeReach("why")]` or `@[UnsafeReach("why")]` makes for a
+  # constant or a class variable: its reason quiets the reach warning
+  # (`ShareReach`), and the program keeps the claim for `ReachProof`, which
+  # proves a `SafeReach` once every def is typed and refuses an
+  # `UnsafeReach` written where it is not allowed. One state takes one of
+  # the two.
+  def iyi_mark_reach(state : Const | MetaTypeVar, what : String, ann : Annotation, unsafe : Bool) : Nil
+    reason = ShareReach.claim(ann, what)
+    label = state.name
+    if (earlier = @program.iyi_reach_claim?(state)) && earlier.unsafe? != unsafe
+      ann.raise "`#{label}` is marked both @[SafeReach] and @[UnsafeReach]; it takes one: SafeReach when the compiler can prove it, UnsafeReach where it cannot and that is allowed (SPEC.md III.4.4)"
+    end
+    state.iyi_safe_reach = reason
+    @program.iyi_claim_reach(ReachClaim.new(state, label, reason, ann, unsafe))
   end
 
   def check_allowed_in_lib(node, type = node.type.instance_type)

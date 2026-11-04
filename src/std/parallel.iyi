@@ -9,14 +9,14 @@
 # `each_parallel`, `map_parallel`, `sum_parallel` and `reduce_parallel` on
 # a `List(T)` (std/list), an `Array(T)` and an integer `Range`: the
 # elements are cut into chunks, and as many parallel tasks as the pool
-# has workers (`g.spawn_parallel`, III.4.13) take the chunks one at a
+# has workers (`g.spawn(parallel: true)`, III.4.13) take the chunks one at a
 # time from a shared count until none is left, so a worker that finishes
 # early takes more. The caller waits in the tasks' group, so a caller on
 # a worker - inside a parallel task, or inside another `map_parallel` -
 # gives its worker to the chunks while it waits.
 #
 # What the compiler asks, at the call: the block may capture only `Share`
-# values, as `spawn_parallel`'s block may, and what the method hands the
+# values, as `spawn(parallel: true)`'s block may, and what the method hands the
 # block - the elements - must be `Share` too, since chunks on several
 # workers read them at once (`@[Share(elements: ...)]`). The sequence the
 # chunks read must not change under them either: a `List` and a range
@@ -221,7 +221,7 @@ pub class ParallelRun
         started = [] of IyiTask(Array({Int64, Array(U)}))
         count = 0
         while count < tasks
-          started << g.spawn_parallel do
+          started << g.spawn(parallel: true) do
             done = [] of {Int64, Array(U)}
             while !IyiScheduler.current.cancelled
               at = taken.add(1_i64)
@@ -296,7 +296,7 @@ pub class ParallelRun
         started = [] of IyiTask({Int64, Array(R)})
         count = 0
         while count < tasks
-          started << g.spawn_parallel do
+          started << g.spawn(parallel: true) do
             first = size
             failure = Array(R).new(1)
             while !IyiScheduler.current.cancelled
@@ -381,7 +381,7 @@ pub class ParallelRun
         started = [] of IyiTask(Array({Int64, U}))
         count = 0
         while count < tasks
-          started << g.spawn_parallel do
+          started << g.spawn(parallel: true) do
             done = [] of {Int64, U}
             while !IyiScheduler.current.cancelled
               at = taken.add(1_i64)
@@ -445,7 +445,7 @@ pub class ParallelRun
         started = [] of IyiTask(Array({Int64, T}))
         count = 0
         while count < tasks
-          started << g.spawn_parallel do
+          started << g.spawn(parallel: true) do
             done = [] of {Int64, T}
             while !IyiScheduler.current.cancelled
               at = taken.add(1_i64)

@@ -265,7 +265,7 @@ def nested : Nil
   check(inner == (0...40).map { |i| i }, "a map_parallel inside another's block answers as one thread does")
   {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
     answer = group do |g|
-      task = g.spawn_parallel { (1..1000).sum_parallel { |i| i } }
+      task = g.spawn(parallel: true) { (1..1000).sum_parallel { |i| i } }
       task.value
     end
     check(answer == 500500, "a sum_parallel inside a parallel task answers as one thread does")

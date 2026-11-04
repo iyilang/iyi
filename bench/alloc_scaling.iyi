@@ -134,7 +134,7 @@
   group do |g|
     handles = [] of IyiTask(Int64)
     workers.times do |t|
-      handles << g.spawn_parallel { work(t.to_i64, rounds) }
+      handles << g.spawn(parallel: true) { work(t.to_i64, rounds) }
     end
     handles.each do |handle|
       value = handle.value

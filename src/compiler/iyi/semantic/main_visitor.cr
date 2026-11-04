@@ -470,7 +470,7 @@ module Iyi
         class_var = lookup_class_var(var)
         var.var = class_var
         class_var.thread_local = true if thread_local
-        class_var.iyi_safe_reach = safe_reach if safe_reach
+        iyi_mark_class_var_reach(class_var, safe_reach)
 
         node.type = @program.nil
       when Path
@@ -554,7 +554,7 @@ module Iyi
 
         class_var = visit_class_var var
         class_var.thread_local = true if thread_local
-        class_var.iyi_safe_reach = safe_reach if safe_reach
+        iyi_mark_class_var_reach(class_var, safe_reach)
       else
         raise "Bug: unexpected var type: #{var.class}"
       end
@@ -694,7 +694,7 @@ module Iyi
 
       var = visit_class_var node
       var.thread_local = true if thread_local
-      var.iyi_safe_reach = safe_reach if safe_reach
+      iyi_mark_class_var_reach(var, safe_reach)
 
       false
     end
@@ -1096,7 +1096,7 @@ module Iyi
         var = lookup_class_var(target)
         target.var = var
         var.thread_local = true if thread_local
-        var.iyi_safe_reach = safe_reach if safe_reach
+        iyi_mark_class_var_reach(var, safe_reach)
         return
       end
 
@@ -1105,7 +1105,7 @@ module Iyi
       var = lookup_class_var(target)
       target.var = var
       var.thread_local = true if thread_local
-      var.iyi_safe_reach = safe_reach if safe_reach
+      iyi_mark_class_var_reach(var, safe_reach)
       # iyi: a write after the initializer, for the thread gate.
       var.iyi_written ||= {node.as(ASTNode), @typed_def}
 

@@ -4,6 +4,35 @@
 
 ### Changed
 
+- **`@[SafeReach]` is proven, not trusted (SPEC.md III.4.4).** The mark
+  on a constant or a class variable quieted the reach warning and let a
+  spawn that reaches the state run in parallel, and nothing checked it:
+  `bench/parallel_exercise.sh` carried a constant whose method assigned a
+  field from two parallel tasks under the claim. The compiler now accepts
+  the mark only when (a) the state's type is `Share`, (b) every write,
+  and every read once a parallel task may run, is behind one `Mutex#lock`
+  on a constant or a class variable (or a prelude `IyiSchedLock` or
+  `IyiRuntimeLock` bracket), or (c) every write comes before the first
+  parallel task can start; anything else refuses the annotation, naming a
+  write that breaks it, how it writes and where it may run from. A copy
+  of the state kept where the proof cannot follow it - stored in an
+  array or a field, answered from a proc - is refused wherever it is
+  kept. A program that compiled may now be refused: the ways out are a
+  `Share` type (`Mutex`, `Atomic`, `List`), moving the writes before the
+  first spawn, one `Mutex` around every write and read, or, in src/iyi or
+  in a file that already uses `Pointer`, the new `@[UnsafeReach("why")]`,
+  taken on trust. In this repository `bench/reuse_integrity.iyi` keeps its
+  pairs in a `Mutex`, `bench/parallel_exercise.sh`'s `Database` builds its
+  rows in `initialize` and is only read, and `bench/arena_exercise.iyi`
+  and `bench/thread_exercise.iyi` say `@[UnsafeReach]` beside their
+  `Pointer`s. No external code carries the mark: iyi-db has none,
+  iyi-pg's CHANGELOG and iyi-web's README mention it in prose, and the
+  website excerpts `samples/iyi/cores.iyi`, still proven. The proof adds
+  0.09 to 0.10 s and 15 MB of RSS to a 1.9 to 2.3 s `iyi check` of a small
+  server with three claims, and 0.10 to 0.11 s and 20 MB to 2.5 to 2.7 s on
+  iyi-web's `examples/security.iyi` given two (Linux, 12 vCPU, three runs
+  each); as first written it took 3.87 s and grew RSS to 4,069 MB.
+
 - **Each channel has a lock of its own, and so does each list a
   `std/mutex` waiter parks in.** Every channel was behind the runtime's
   one scheduler lock, and tasks talking on channels of their own on
@@ -55,7 +84,7 @@
 
 - **A plain `spawn` runs in parallel where the compiler can prove it
   safe (SPEC.md III.4.15, proposed).** A `g.spawn { }` whose block
-  passes every check `spawn_parallel`'s does, and whose walk of the
+  passes every check `spawn(parallel: true)`'s does, and whose walk of the
   module state it reaches through calls finds nothing that is not
   `Share` other than state marked `@[SafeReach]`, is a parallel task of
   its own unit on the pool. Any other spawn stays in its spawner's unit,
@@ -65,7 +94,7 @@
   spawner's unit:` followed by the refusal that kept it there, which
   names the capture. `--explain-spawn-std` adds std's spawns. `-f json`
   marks these notes `"severity": "note"`, and the language server shows
-  the same verdict as an inlay hint. `g.spawn_serial { }` keeps a task in
+  the same verdict as an inlay hint. `g.spawn(serial: true) { }` keeps a task in
   its unit whatever it captures. `IYI_WORKERS=1` keeps every eligible
   spawn on one thread and the pool unstarted. The pool starts at the
   first eligible spawn, with one worker (the entry below). Of the spawns
@@ -83,7 +112,7 @@
   before and 118,532 after on the M2 at ten workers, 117,313 and 114,976
   on the Windows machine at twelve. Gate steps that tested a
   unit's order or one thread's turns, and depended on spawns staying
-  in their unit, spawn with `spawn_serial`: in `runtime_exercise`,
+  in their unit, spawn with `spawn(serial: true)`: in `runtime_exercise`,
   `thread_exercise`, `concurrency_exercise` (its two-panics step among
   them) and `parallel_exercise`, and in `std_http_exercise`'s copy that
   serves a connection on the accepting thread (SPEC.md III.4.15, part 8).
@@ -91,12 +120,55 @@
   "deadlock: every fiber is blocked": the pool its plain spawns started
   left its refusal of a wait nothing could end, which only a one-thread
   program makes, waiting instead. Its twenty tasks parking inside the lock
-  and its deadlock on one thread spawn with `spawn_serial`, the refusals
+  and its deadlock on one thread spawn with `spawn(serial: true)`, the refusals
   run before the first step that starts the pool, and the run asks for its
   two workers before anything does.
 
+- **One spawn verb: `g.spawn { }`, `g.spawn(parallel: true) { }` and
+  `g.spawn(serial: true) { }` (SPEC.md III.4.16).** `spawn_parallel` and
+  `spawn_serial` are gone. A call to either is a compile error naming
+  the new spelling - "`spawn_parallel` is gone: one verb starts a task
+  now. Write `g.spawn(parallel: true) { }`" - and carries it as an edit,
+  so `iyi fix` rewrites `g.spawn_parallel do` and `g.spawn_serial do`
+  where the call has a block and no parentheses. `parallel: true` is
+  held to everything `spawn_parallel` was, with the same refusals, now
+  worded `the block spawn(parallel: true) runs on another thread`. The
+  argument takes the literal `true`: `parallel: false`, a value only
+  known at run time, and both arguments at once are refused. The
+  typed group takes each spelling. The repository's 173 call sites were
+  moved, std's included; std/http's connections and std/parallel's
+  chunks run as before. The rename leaves the runtime's paths as they
+  were, and `bench/web_cores.py`'s server says so: on macOS 26.6, Apple
+  M2 Pro, 10 cores (the user's machine), 10 workers, best of 3
+  interleaved 5 s rounds, `check_version` answered 104,591 req/s before
+  and 104,868 after, `order` 103,420 and 103,597; on Windows 11, 12
+  logical processors (the user's machine), 12 workers, 6 interleaved 8 s
+  rounds, the medians were 129,533 and 131,692 req/s for `check_version`
+  and 135,045 and 136,016 for `order`, within the rounds' own spread
+  (124,921 to 145,595).
+
+- **A spawn kept in its unit is said where the author looks (SPEC.md
+  III.4.16).** `iyi check` notes, unasked, each `g.spawn` the compiler
+  kept in its spawner's unit in a file under the project's root, with
+  what kept it there; a note is not a warning, so `--error-on-warnings`
+  is unchanged, and `g.spawn(serial: true)` says the unit is meant and
+  takes no note. `iyi build` prints nothing new. The reason names the
+  module that declared a type in its chain: `Dep::Config::Config's field
+  @hits (module `dep/config`) is assigned in `bump``. The language
+  server's hint after a plain `spawn` reads `parallel` or `in its unit: `
+  and the reason's first clause. A `.iyimod` records where each spawn of
+  its module ran (`iyi mod dump` lists them, under `spawns`), and a build
+  that rewrites it prints one note for each spawn that moved since, each
+  way: `spawn in `App::Work.crunch` ran in parallel when app/work was last
+  built, and stays in its spawner's unit now: ...`. The new section is
+  outside the hashes and the format version is unchanged.
+  `bench/spawn_eligible.sh` holds each spelling, the refusals and the
+  fix, the remote reason and the rebuild's line, with a broken copy of
+  the runtime or of the compiler (`IYI_SPAWN_BROKEN`) caught for each;
+  `bench/lsp_session.py` step 23s holds the hints.
+
 - **The pool starts one worker and grows to the work.** The first
-  parallel task, from `spawn_parallel`, `Server.serve` or an eligible
+  parallel task, from `spawn(parallel: true)`, `Server.serve` or an eligible
   `spawn`, started every worker at once. It now starts one, and another
   only when a task is waiting and no worker is idle to take it, up to
   `IyiWorkers.count`, one on its way at a time, as Go starts a thread
@@ -180,6 +252,14 @@
   copy.
 
 ### Gates
+
+- **`bench/safe_reach.sh` holds the SafeReach proof (SPEC.md III.4.4).**
+  The issue's unguarded write is refused, where the compiler before
+  checked it clean; (a), (b) and (c) are each accepted beside broken
+  copies refused - a counter class, a write and a read outside the lock,
+  a write after the first spawn and a copy kept at module init; and
+  `@[UnsafeReach]` is accepted beside a `Pointer` and refused without
+  one. It runs in CI's Linux job.
 
 - **concurrent_mark.sh's wake-boost proof fires whatever the machine.**
   The proof gives the mark's helpers back the boost a satisfied wait
@@ -26786,7 +26866,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 27,353-line library and nothing else. Every other
+  written against iyi's own 27,368-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

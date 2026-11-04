@@ -535,7 +535,7 @@ module Iyi
     property iyi_prelude_dir : String? = nil
 
     # iyi: whether code the cleanup kept calls `IyiWorkers.start` - a
-    # `spawn_parallel`, or a `spawn` it found eligible (SPEC.md III.4.15) -
+    # `spawn(parallel: true)`, or a `spawn` it found eligible (SPEC.md III.4.15) -
     # which is what makes a program's loops check for preemption
     # (`CodeGenVisitor#iyi_preempt_on?`). Asked of the kept code rather
     # than of the typed defs: every program that spawns types the pool's
@@ -1415,6 +1415,10 @@ module Iyi
       # written where the state is. It quiets the warning that walk gives
       # (SPEC.md III.4.4), never the refusal of a block that names it itself.
       types["SafeReach"] = @safe_reach_annotation = AnnotationType.new self, self, "SafeReach"
+      # iyi: `@[UnsafeReach("why")]` is the old, unchecked claim, kept for
+      # the prelude and runtime and for a file that already uses `Pointer`:
+      # what `ReachProof` cannot prove there is said to be unsafe by name.
+      types["UnsafeReach"] = @unsafe_reach_annotation = AnnotationType.new self, self, "UnsafeReach"
 
       # iyi: the marker that makes a union member an error member (SPEC.md
       # III.1.1). Created here rather than declared in the prelude because the
@@ -1748,7 +1752,7 @@ module Iyi
                      always_inline_annotation naked_annotation returns_twice_annotation
                      raises_annotation primitive_annotation call_convention_annotation
                      flags_annotation link_annotation extern_annotation deprecated_annotation experimental_annotation
-                     share_annotation no_preempt_annotation safe_reach_annotation error_trait) %}
+                     share_annotation no_preempt_annotation safe_reach_annotation unsafe_reach_annotation error_trait) %}
       def {{name.id}}
         @{{name.id}}.not_nil!
       end

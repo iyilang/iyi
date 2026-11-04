@@ -638,7 +638,7 @@ wrong = 0
 group do |g|
   handles = [] of IyiTask(UInt64)
   WORKERS.times do |k|
-    handles << g.spawn_parallel { share(k) }
+    handles << g.spawn(parallel: true) { share(k) }
   end
   k = 0
   while k < WORKERS

@@ -45,7 +45,7 @@ def waiter_parks : Nil
   started_at = Atomic(Int64).new(0_i64)
   spawned_at = 0_i64
   group do |g|
-    g.spawn_parallel do
+    g.spawn(parallel: true) do
       gate.lock do |cell|
         holding.set(1_i64)
         began = __iyi_monotonic_ns
@@ -59,7 +59,7 @@ def waiter_parks : Nil
     while holding.get == 0_i64
       sleep(1)
     end
-    g.spawn_parallel do
+    g.spawn(parallel: true) do
       waiting.set(1_i64)
       gate.lock { |cell| cell[0] = cell[0] + 1 }.or_panic
       0
@@ -70,7 +70,7 @@ def waiter_parks : Nil
     # Past the waiter's spin, and parked.
     sleep(20)
     spawned_at = now_ms
-    g.spawn_parallel do
+    g.spawn(parallel: true) do
       started_at.set(now_ms)
       0
     end
@@ -118,7 +118,7 @@ def waiter_starves : Nil
   stopped = Atomic(Int64).new(0_i64)
   longest = Atomic(Int64).new(-1_i64)
   group do |g|
-    g.spawn_parallel do
+    g.spawn(parallel: true) do
       while done.get == 0_i64 && holds.get < 3000_i64
         gate.lock do |cell|
           began = __iyi_monotonic_ns
@@ -132,7 +132,7 @@ def waiter_starves : Nil
       stopped.set(1_i64)
       0
     end
-    g.spawn_parallel do
+    g.spawn(parallel: true) do
       5.times do
         mark = holds.get
         while holds.get < mark + 2_i64 && stopped.get == 0_i64
@@ -188,13 +188,13 @@ puts "  lock, get and update; a String answer and a number replaced"
 # the lock another task runs between the read and the write, and its
 # increment is lost. Their block captures only the Mutex, which is `Share`,
 # and a plain `spawn` ran them on the pool, where the step is no longer
-# about one thread; `spawn_serial` keeps them on this one (SPEC.md
+# about one thread; `spawn(serial: true)` keeps them on this one (SPEC.md
 # III.4.15, part 5).
 puts "\n== tasks that park while they hold it"
 tally = Mutex.new { [0] }
 group do |g|
   20.times do
-    g.spawn_serial do
+    g.spawn(serial: true) do
       50.times do
         tally.lock do |cell|
           seen = cell[0]

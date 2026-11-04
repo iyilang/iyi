@@ -4,16 +4,19 @@
 #   x = parse(input)        →  x: Parser::Result = parse(input)
 #   move(3, 7)              →  move(x: 3, y: 7)
 #   g.spawn { sum(part) }   →  g.spawn parallel { sum(part) }
+#   g.spawn { log << 1 }    →  g.spawn in its unit: the block captures `log : Array(Int32)`, which is not Share { log << 1 }
 #
 # A type hint lands after a bare assignment's target — an assignment
 # that spells its type already says it. A parameter hint lands before a
 # positional literal argument — a variable passed by name documents
-# itself, a bare `3` does not. A spawn hint lands after `spawn`, saying
-# where the compiler decided the task runs (SPEC.md III.4.15):
-# `parallel`, or `in its unit` with the capture that kept it there as
-# the hint's tooltip. Instantiations dedupe by position: a generic def
-# typed many ways is still one line of source, and a spawn one of whose
-# instantiations stays in its unit is hinted as staying.
+# itself, a bare `3` does not. A spawn hint lands after a plain `spawn`,
+# saying where the compiler decided the task runs (SPEC.md III.4.15,
+# III.4.16): `parallel`, or `in its unit: ` and the first clause of what
+# kept it there, the whole reason as the hint's tooltip. A spawn that
+# spells its placement, `parallel: true` or `serial: true`, is hinted
+# nothing: the text says it. Instantiations dedupe by position: a generic
+# def typed many ways is still one line of source, and a spawn one of
+# whose instantiations stays in its unit is hinted as staying.
 require "../syntax/ast"
 require "../compiler"
 require "../tools/typed_def_processor"
@@ -61,10 +64,41 @@ module Iyi::Lsp
       @in_def = nil
       result.node.accept self
       @spawns.each do |(line, column), reason|
-        @hints << Hint.new(line, column, reason ? "in its unit" : "parallel", KIND_NOTE, reason)
+        label = reason ? "in its unit: #{InlayVisitor.spawn_clause(reason)}" : "parallel"
+        @hints << Hint.new(line, column, label, KIND_NOTE, reason)
       end
       hints.sort_by! { |hint| {hint.line, hint.column} }
       hints
+    end
+
+    # The reason's first clause, which is what a reader scanning the line
+    # wants - what is captured or reached, and that it is not Share - and
+    # not the chain after it, which the tooltip carries: everything before
+    # its first ": " outside backticks (`log : Array(Int32)` is a name and
+    # its type, not a clause's end), past a leading "line N: ", and cut at
+    # a word near 100 characters.
+    def self.spawn_clause(reason : String) : String
+      body = reason
+      lead = ""
+      if body.starts_with?("line ") && (colon = body.index(": ")) && body[5...colon].to_i?
+        lead = body[0, colon + 2]
+        body = body[(colon + 2)..]
+      end
+      quoted = false
+      ends = body.size
+      body.each_char_with_index do |char, index|
+        quoted = !quoted if char == '`'
+        if !quoted && char == ':' && body[index + 1]? == ' '
+          ends = index
+          break
+        end
+      end
+      clause = body[0, ends]
+      if clause.size > 100
+        cut = clause.rindex(' ', 100) || 100
+        clause = "#{clause[0, cut]}…"
+      end
+      lead + clause
     end
 
     def process_typed_def(typed_def : Def) : Nil

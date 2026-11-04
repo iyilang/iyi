@@ -34,14 +34,17 @@ for its non-`Share` data.
 
 This is Swift 6's isolation model without its annotation load: the domains are
 inferred, not declared. The price of inference is that one capture can flip a
-`spawn` to serial without a word, so the compiler says why on request: the
-capture that kept it serial and why that capture is not `Share`. No new
-warning by default, so `--error-on-warnings` builds keep building.
+`spawn` to serial from a distance, so the compiler says so where the author
+looks (SPEC.md III.4.16): `iyi check` notes each spawn kept in its unit with
+the capture, field and module that kept it there, the language server hints
+it, and a rebuild that moves a library's spawn prints one line naming it. No
+new warning, so `--error-on-warnings` builds keep building.
 
 What changes for an eligible `spawn` is ordering, not memory safety: today a
 child does not run until its spawner parks, and once eligible it may start at
-once on another core. A program that wants the old ordering for one spawn
-says so with an explicit opt-out.
+once on another core. One verb carries both answers: `g.spawn(serial: true)`
+keeps the old ordering for one spawn and `g.spawn(parallel: true)` asks for
+the pool; `spawn_serial` and `spawn_parallel` are gone (III.4.16).
 
 Measured starting point (master decc9f1fb): `spawn` appears at 27 sites in
 src/std, 14 in iyi-db, 18 in iyi-pg and 467 in bench/. Every one is audited
@@ -49,12 +52,14 @@ for an ordering assumption before the default changes.
 
 Being built on branch `mt/spawn`.
 
-### 2. Structured concurrency as the default (0.21)
+### 2. Structured concurrency: already the only kind (BUILT)
 
 Go's most costly gap is the goroutine that belongs to nothing: it leaks, it
-cannot be cancelled, and its error goes nowhere. iyi has `IyiGroup`, where a
-task has an owner, cancellation flows down and errors flow up as values. The
-plan makes a task without an owner the exception the program has to ask for.
+cannot be cancelled, and its error goes nowhere. iyi has had no such task
+since III.4.1: there is no bare spawn, a task is started inside an
+`IyiGroup` whose block cannot be left until every task in it has finished,
+cancellation flows down and errors flow up as values. Nothing is left to
+build in this layer; it is listed so the plan reads whole.
 
 ### 3. Data parallelism as a library (0.21)
 
@@ -83,10 +88,11 @@ to 352 ms against Go's 152 to 260, and its peak working set 430 MB against
 system does not know which values stay put.
 
 Risks, named now: it is a redesign of the collector and allocator, and every
-hole in the `Share` proof becomes a hole in the heap split. `Pointer` and
-`@[SafeReach]` both let a program claim what the compiler did not check, and
-both need a rule before this starts. It begins as a prototype that is
-measured, and is kept or dropped on the numbers.
+hole in the `Share` proof becomes a hole in the heap split. `@[SafeReach]`
+is proven now (SPEC.md III.4.4); `Pointer`, and `@[UnsafeReach]`, kept for
+src/iyi and for files that use `Pointer`, still let a program claim what
+the compiler did not check, and need a rule before this starts. It begins
+as a prototype that is measured, and is kept or dropped on the numbers.
 
 ## Deliberately not done
 
@@ -99,7 +105,7 @@ measured, and is kept or dropped on the numbers.
 
 | release | content |
 |---|---|
-| 0.21 | parallel-by-default `spawn` (layer 1); structured groups as the default (layer 2); `each_parallel` / `map_parallel` (layer 3); the runtime work below |
+| 0.21 | parallel-by-default `spawn` (layer 1); `each_parallel` / `map_parallel` (layer 3); the runtime work below. Structured groups (layer 2) are already the only kind (III.4.1) |
 | 0.22 | a seeded, reproducible chaos scheduler in `iyi test` for logical races. The compiler already rules out memory races; what is left is ordering, and a deterministic schedule fuzzer finds it more surely than a race detector does |
 | 0.23+ | a heap per unit (layer 4), prototype first and decided by measurement |
 

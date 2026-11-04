@@ -73,6 +73,12 @@ class Iyi::Program
     # they reach is warned about once, with how many blocks reach it
     # (SPEC.md III.4.4).
     @cleanup_transformer.try &.report_share_reach
+    # And every `@[SafeReach]` is proven, or refused naming the write that
+    # breaks it (`ReachProof`, SPEC.md III.4.4): the whole typed program is
+    # final only once the cleanup has met every def.
+    if cleanup && !iyi_reach_claims.empty?
+      @progress_tracker.stage("Semantic (reach proof)") { ReachProof.run(self, result) }
+    end
     # And every spawn is classified (III.4.15): `--explain-spawn`'s notes.
     iyi_note_spawns
 

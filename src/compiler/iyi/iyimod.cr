@@ -221,7 +221,28 @@ module Iyi::IyiMod
     # that text. See `SourcePosition`. 65, beside `Layouts`, for the reason
     # `Layouts` gives for 64.
     SourcePositions = 65
+
+    # iyi: where each `g.spawn` written in the module runs, as the build that
+    # wrote the artifact placed it (SPEC.md III.4.16). Not read to compile
+    # anything: a build that rewrites the artifact compares its own verdicts
+    # with these and prints a line for each spawn that moved, and
+    # `iyi mod dump` lists them. Outside the hashes, since no consumer's
+    # code depends on it. 66, beside `SourcePositions`, for `Layouts`'
+    # reason.
+    Spawns = 66
   end
+
+  # One `g.spawn` written in a module, and where the build placed it
+  # (SPEC.md III.4.16). *owner* is the def it is written in, as a reader
+  # names it (`App::Work.crunch`; empty at the module's top level), and
+  # *digest* its block's text, hashed: the two name the spawn across builds,
+  # where its line moves with every edit above it. *line* and *column* say
+  # where it was this time. *parallel* is whether every instantiation ran
+  # it in parallel, *asked* whether it spelled its placement
+  # (`parallel: true`, `serial: true`), and *reason* why it stays in its
+  # spawner's unit, empty when it does not.
+  record SpawnRecord, owner : String, digest : String, line : Int32, column : Int32,
+    parallel : Bool, asked : Bool, reason : String
 
   # A regex literal's constant: the name its object code reads, and what a
   # consumer has to build under that name.
@@ -1524,6 +1545,10 @@ module Iyi::IyiMod
     # source hash already answers for. See `Section::Inputs`.
     property inputs : Array(String)
 
+    # Where each spawn written in the module runs (SPEC.md III.4.16). See
+    # `Section::Spawns`.
+    property spawns = [] of SpawnRecord
+
     def initialize(@module_name, @source_path, @compiler_version, @target_triple,
                    @flags, @imports, @usings = [] of String, @exports = Exports.empty,
                    @object_code = [] of ObjectUnit, @has_initialiser = false,
@@ -1577,6 +1602,12 @@ module Iyi::IyiMod
     end
 
     sections << {Section::Exports, encode_exports(artifact)}
+
+    # After the declarations, for `iyi mod dump` and the next build of this
+    # module, which compares its own verdicts with these.
+    unless artifact.spawns.empty?
+      sections << {Section::Spawns, encode_spawns(artifact.spawns)}
+    end
 
     # Between the declarations and the machine code, which is where it belongs:
     # a front-end reader needs it and a linker does not.
@@ -1799,6 +1830,39 @@ module Iyi::IyiMod
                     "compiler; rebuild it with `--emit-iyimod`")
   end
 
+  # The spawns the artifact at *path* recorded (`Section::Spawns`), with the
+  # flags and target it was built for, which say whether its verdicts and a
+  # new build's are about the same program: a build under `-Dgc_none` has
+  # no threads and places every spawn in its unit. Reads the header and the
+  # one section and seeks past the rest. Nil for a file this compiler
+  # cannot read - another format, a damaged one - which the build that asks
+  # is about to replace anyway.
+  def self.read_spawns(path : String) : {Array(String), String, Array(SpawnRecord)}?
+    File.open(path, "rb") do |file|
+      table = read_table(file, path)
+      header = nil
+      spawns = [] of SpawnRecord
+      table.each do |(kind, length, sum)|
+        section = Section.from_value?(kind)
+        unless section == Section::Header || section == Section::Spawns
+          file.skip length
+          next
+        end
+        payload = Bytes.new(length)
+        file.read_fully?(payload) || return nil
+        verify(path, section, payload, sum)
+        if section == Section::Header
+          header = decode_header(payload)
+        else
+          spawns = decode_spawns(payload)
+        end
+      end
+      header ? {header[:flags], header[:target_triple], spawns} : nil
+    end
+  rescue Error | IO::Error
+    nil
+  end
+
   # Reads the artifact at *path*.
   #
   # Rejects rather than migrates: a file from another format or compiler version
@@ -1835,6 +1899,7 @@ module Iyi::IyiMod
       hashes = Hashes.empty
       layouts = [] of {String, TypeLayout}
       inputs = [] of String
+      spawns = [] of SpawnRecord
       positions = {bodies: {} of String => Array(SourcePosition), initialiser: [] of SourcePosition}
 
       table.each do |(kind, length, sum)|
@@ -1875,6 +1940,7 @@ module Iyi::IyiMod
         when Section::Inputs          then inputs = decode_strings(payload)
         when Section::SymbolLiterals  then symbol_literals = decode_strings(payload)
         when Section::SourcePositions then positions = decode_source_positions(payload)
+        when Section::Spawns          then spawns = decode_spawns(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -1885,7 +1951,7 @@ module Iyi::IyiMod
         raise Error.new("#{path} has no header section")
       end
 
-      Artifact.new(header[:module_name], header[:source_path], header[:compiler_version],
+      artifact = Artifact.new(header[:module_name], header[:source_path], header[:compiler_version],
         header[:target_triple], header[:flags], imports[:imports], imports[:usings], exports,
         object_code, header[:has_initialiser], mono_bodies, initialiser, type_ids,
         hashes, constants, macro_bodies, requires, header[:crystal_library],
@@ -1894,6 +1960,8 @@ module Iyi::IyiMod
         top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals,
         declarations_only: header[:declarations_only], package_name: header[:package_name],
         body_positions: positions[:bodies], initialiser_positions: positions[:initialiser])
+      artifact.spawns = spawns
+      artifact
     end
   rescue ex : Error
     raise ex
@@ -1992,6 +2060,17 @@ module Iyi::IyiMod
         io.puts "  #{render_impl_header(record)}"
         record.assoc_types.each { |(name, answer)| io.puts "    type #{name} = #{answer}" }
         record.methods.each { |signature| io.puts "    #{render_signature(signature)}" }
+      end
+    end
+
+    # Only when there are any, so a module that spawns nothing dumps as it
+    # did before the section existed.
+    unless artifact.spawns.empty?
+      io.puts "spawns"
+      artifact.spawns.each do |record|
+        where = record.owner.empty? ? "(top level)" : record.owner
+        verdict = record.parallel ? "parallel" : "in its unit: #{record.reason}"
+        io.puts "  #{where} #{record.line}:#{record.column} #{verdict}#{record.asked ? " (asked)" : ""}"
       end
     end
 
@@ -3504,6 +3583,32 @@ module Iyi::IyiMod
 
   private def self.decode_strings(payload : Bytes) : Array(String)
     read_strings(IO::Memory.new(payload))
+  end
+
+  private def self.encode_spawns(records : Array(SpawnRecord)) : Bytes
+    io = IO::Memory.new
+    io.write_bytes records.size.to_u32, FORMAT
+    records.each do |record|
+      write_string io, record.owner
+      write_string io, record.digest
+      io.write_bytes record.line, FORMAT
+      io.write_bytes record.column, FORMAT
+      io.write_bytes((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8), FORMAT)
+      write_string io, record.reason
+    end
+    io.to_slice
+  end
+
+  private def self.decode_spawns(payload : Bytes) : Array(SpawnRecord)
+    io = IO::Memory.new(payload)
+    Array(SpawnRecord).new(io.read_bytes(UInt32, FORMAT)) do
+      owner = read_string(io)
+      digest = read_string(io)
+      line = io.read_bytes(Int32, FORMAT)
+      column = io.read_bytes(Int32, FORMAT)
+      bits = io.read_bytes(UInt8, FORMAT)
+      SpawnRecord.new(owner, digest, line, column, bits & 1 != 0, bits & 2 != 0, read_string(io))
+    end
   end
 
   private def self.decode_mono_bodies(payload : Bytes) : Hash(String, String)

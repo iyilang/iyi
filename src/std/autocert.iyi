@@ -41,7 +41,7 @@
 # up to an hour - so a name the CA will not issue for is not asked for on
 # every handshake. The manager's state is plain fields changed between
 # its tasks' parks: it is for one thread's tasks, as std/http's server's
-# connections are, and `Share` keeps it out of a block `spawn_parallel`
+# connections are, and `Share` keeps it out of a block `spawn(parallel: true)`
 # runs.
 #
 # **On every worker.** `frozen_tls_config` is `tls_config` frozen

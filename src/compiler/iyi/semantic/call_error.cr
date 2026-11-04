@@ -1502,10 +1502,32 @@ class Iyi::Call
     end
   end
 
+  # iyi: the two spawn verbs one verb replaced (SPEC.md III.4.16), each
+  # with the spelling that does what it did.
+  IYI_RETIRED_SPAWNS = {
+    "spawn_parallel" => {"spawn(parallel: true)", "runs the task on the pool and refuses a capture that is not Share, as `spawn_parallel` did"},
+    "spawn_serial"   => {"spawn(serial: true)", "keeps the task in its spawner's unit whatever it captures, as `spawn_serial` did"},
+  }
+
+  # `g.spawn_parallel { }` on a group: a compile error that names the new
+  # spelling, and carries it as the edit when the call is the shape the
+  # edit fits - a block written at the call and no parentheses - so `iyi
+  # fix` turns `g.spawn_parallel do` into `g.spawn(parallel: true) do`.
+  private def iyi_raise_retired_spawn(owner, def_name : String, owner_trace) : Nil
+    retired = IYI_RETIRED_SPAWNS[def_name]?
+    return unless retired && owner.to_s == "IyiGroup" && !SPAWN_BROKEN.includes?("retired")
+    spelling, what = retired
+    fits = block && !block_arg && args.empty? && !has_parentheses? && named_args.nil?
+    raise "`#{def_name}` is gone: one verb starts a task now. Write `g.#{spelling} { }`, which #{what}; " \
+          "`g.spawn { }` lets the compiler place it (SPEC.md III.4.16)",
+      owner_trace, suggestion: fits ? spelling : nil
+  end
+
   private def raise_undefined_method(owner, def_name, obj)
     check_macro_wrong_number_of_arguments(owner, def_name)
 
     owner_trace = obj.try &.find_owner_trace(owner.program, owner)
+    iyi_raise_retired_spawn(owner, def_name, owner_trace) if obj
     # A receiver other than `self` reaches no private def, so it is offered
     # none (`Type#lookup_similar_def`).
     outside = scope? if obj && !(obj.is_a?(Var) && obj.name == "self")

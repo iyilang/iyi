@@ -83,8 +83,8 @@ import std/mutex::{Mutex}
       workers.times do
         there = Channel(Int64).new
         back = Channel(Int64).new
-        handles << g.spawn_parallel { ping(there, back, rounds) }
-        handles << g.spawn_parallel { pong(there, back, rounds) }
+        handles << g.spawn(parallel: true) { ping(there, back, rounds) }
+        handles << g.spawn(parallel: true) { pong(there, back, rounds) }
       end
       handles.each { |handle| wrong = wrong &+ joined("pingpong", handle) }
     end
@@ -123,9 +123,9 @@ import std/mutex::{Mutex}
     taken = 0_i64
     group do |g|
       handles = [] of IyiTask(Int64)
-      consumer = g.spawn_parallel { consume(fan, workers, rounds) }
+      consumer = g.spawn(parallel: true) { consume(fan, workers, rounds) }
       workers.times do |who|
-        handles << g.spawn_parallel { produce(fan, who.to_i64, rounds) }
+        handles << g.spawn(parallel: true) { produce(fan, who.to_i64, rounds) }
       end
       handles.each { |handle| joined("fanin", handle) }
       taken = joined("fanin", consumer)
@@ -150,8 +150,8 @@ import std/mutex::{Mutex}
       workers.times do
         lock = Mutex.new { 0_i64 }
         locks << lock
-        handles << g.spawn_parallel { bump(lock, rounds) }
-        handles << g.spawn_parallel { bump(lock, rounds) }
+        handles << g.spawn(parallel: true) { bump(lock, rounds) }
+        handles << g.spawn(parallel: true) { bump(lock, rounds) }
       end
       handles.each { |handle| joined("mutexes", handle) }
     end
@@ -167,7 +167,7 @@ import std/mutex::{Mutex}
     group do |g|
       handles = [] of IyiTask(Int64)
       workers.times do
-        handles << g.spawn_parallel { bump(lock, rounds) }
+        handles << g.spawn(parallel: true) { bump(lock, rounds) }
       end
       handles.each { |handle| joined("mutex", handle) }
     end
@@ -214,7 +214,7 @@ import std/mutex::{Mutex}
         lock = Mutex.new { 0_i64 }
         locks << lock
         tasks.times do
-          handles << g.spawn_parallel { bump_held(lock, rounds * 2_i64 // tasks.to_i64) }
+          handles << g.spawn(parallel: true) { bump_held(lock, rounds * 2_i64 // tasks.to_i64) }
         end
       end
       handles.each { |handle| joined("held", handle) }

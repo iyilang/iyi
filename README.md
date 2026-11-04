@@ -139,12 +139,15 @@ thrown away and why.
   `std/format`, `std/tls`). `std/tls` has not been audited and is not to be
   called secure until it is; [SECURITY_REVIEW_TLS.md](SECURITY_REVIEW_TLS.md)
   is an automated review, not that audit.
-- Concurrency (`group`/`spawn`, `spawn_parallel`, `Channel`, cancellation;
-  SPEC.md III.4) runs on Linux (x86_64, aarch64), macOS arm64 and Windows
-  x86-64, and not on wasm32. `spawn` keeps a task on its own thread, for work
-  that waits; `spawn_parallel` runs it on a pool of one worker per core, for
-  work that computes, and may capture only `Share` values. std/http's
-  `Server.serve` uses the pool by default
+- Concurrency (`group`/`spawn`, `Channel`, cancellation; SPEC.md III.4) runs
+  on Linux (x86_64, aarch64), macOS arm64 and Windows x86-64, and not on
+  wasm32. One verb starts a task: `g.spawn { }` runs it on a pool of one
+  worker per core where the compiler can prove that safe and on the
+  spawner's own thread otherwise, and `iyi check` notes each one it kept
+  there, with why; `g.spawn(parallel: true)` asks for the pool, for work
+  that computes, and may capture only `Share` values; `g.spawn(serial:
+  true)` keeps the task on its spawner's thread. std/http's `Server.serve`
+  uses the pool by default
   ([BENCHMARKS.md](BENCHMARKS.md#a-web-servers-cores-issue-145) measures it
   against Go).
 - Dependencies resolve and pin (`iyi.mod`, `iyi get`, `iyi.sum`; SPEC.md
@@ -299,8 +302,8 @@ published list requires, a plain build with iyi's own prelude links the
 platform's C library and nothing else: no libgc, no libevent, no openssl, no
 zlib ([INSTALL.md](INSTALL.md#what-a-program-depends-on) has each platform). A
 program links only what it uses, and
-iyi's own library is 27,353 lines, written to be linked that way. That
-library is 1,154 KB on disk beside the binary.
+iyi's own library is 27,368 lines, written to be linked that way. That
+library is 1,155 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
 and move with the platform; `python3 bench/machine_probe.py` prints your
@@ -471,7 +474,7 @@ Twenty-eight programs in [`samples/iyi`](samples/iyi). Twenty document a
 part of the design: `hello` (traits and `impl`), `modules` (`import` across
 files), `generics`, `errors`, `collections`, `immutable` (a shareable
 collection), `init_order`, `webapp`, `workers` (a pool and a typed pair of
-tasks), `cores` (`spawn_parallel`, a server on every core, `@[SafeReach]`),
+tasks), `cores` (`spawn(parallel: true)`, a server on every core, `@[SafeReach]`),
 `derive`, `files`, `formatting`, `format` (format strings), `enums`,
 `io` (standard input a line at a time), `socket` (TCP on loopback), and
 `std_iterator`, `std_text` and `std_time`. `calc` is a language. The other
@@ -546,7 +549,7 @@ $ curl localhost:3000/json
 traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
 of them work in a program that requires a shard, and R-2 still refuses an
 export that does not write its types. What changes is what the program *has*:
-Crystal's standard library instead of 27,353 lines of iyi's own prelude.
+Crystal's standard library instead of 27,368 lines of iyi's own prelude.
 
 **One class of names is unreachable.** `!` in iyi propagates an error, so a
 method whose name ends in one cannot be called from a `.iyi` file. Crystal's
@@ -618,7 +621,7 @@ not the library.
 
 ## What is not here
 
-- **iyi's own library is 27,353 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 27,368 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`.** `gets`, `read_all`, `write` and `flush`
   on the streams; `File.read`, `File.write`, `File.exists?`, `File.delete`
   and `File.open(path, mode)`. Its collections carry a method because a
@@ -627,7 +630,7 @@ not the library.
 - **wasm32 has no concurrency runtime.** A `group` there fails to compile
   rather than run sequentially.
 - **Only the threads and parallel tasks are gated by `Share`.** A block passed
-  to `IyiThread.start`, `spawn_parallel` or a def marked `@[Share]` (std/http's
+  to `IyiThread.start`, `spawn(parallel: true)` or a def marked `@[Share]` (std/http's
   `Server.serve`, unless given `workers: 1`) may capture only `Share` values;
   a `spawn` is not gated, and one outside the pool is never preempted; a
   parallel task gives its worker up after 5 to 10 ms of computing.
@@ -654,7 +657,7 @@ not the library.
 | [BENCHMARKS.md](BENCHMARKS.md) | the build, run-time and server measurements, with their machines and commands |
 | [`samples/iyi`](samples/iyi) | twenty-eight programs: twenty documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 27,353 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 27,368 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, and not counted against the prelude's size limit (SPEC.md I.4) |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/`](bench/) | every script a number in these documents names |

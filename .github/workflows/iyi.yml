@@ -431,10 +431,18 @@ jobs:
 
       # III.4.15: a plain spawn whose block captures only Share values runs
       # beside its siblings on the pool, one that captures the parent's
-      # Array stays in its unit, spawn_serial stays too, and
+      # Array stays in its unit, spawn(serial: true) stays too, and
       # --explain-spawn names the capture; broken copies of each caught.
       - name: Where a plain spawn runs (III.4.15)
         run: bash bench/spawn_eligible.sh
+
+      # III.4.4: a `@[SafeReach]` the compiler cannot prove is refused,
+      # naming the write - one from two parallel tasks, one beside a lock,
+      # one after the first task starts - and a Share type, writes behind
+      # one lock and writes before the first task are each accepted; an
+      # `@[UnsafeReach]` outside a file that uses Pointer is refused.
+      - name: SafeReach is proven, not trusted (III.4.4)
+        run: bash bench/safe_reach.sh
 
       # A pool's workers allocating from their own caches, refilled under
       # their size class's lock: cells read back whole through collections,

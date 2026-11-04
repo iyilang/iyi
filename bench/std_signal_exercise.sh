@@ -324,8 +324,8 @@ module main
 import std/signal::{Signal}
 
 group do |g|
-  g.spawn_parallel { Signal.wait(Signal::INT); 0 }
-  g.spawn_serial { Signal.wait(Signal::INT); 0 }
+  g.spawn(parallel: true) { Signal.wait(Signal::INT); 0 }
+  g.spawn(serial: true) { Signal.wait(Signal::INT); 0 }
   0
 end
 puts "two waiters on two threads were let in"

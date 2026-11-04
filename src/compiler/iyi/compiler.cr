@@ -762,7 +762,11 @@ module Iyi
         # generated code had just written (IV.3).
         artifact.hashes = IyiMod.hashes_for(artifact, File.read(filename))
 
-        {File.join(dir, "#{module_name}.iyimod"), artifact}
+        path = File.join(dir, "#{module_name}.iyimod")
+        artifact.spawns = collect_iyi_spawns(program, filename)
+        note_iyi_spawn_moves(program, path, artifact) unless module_name.includes?('.')
+
+        {path, artifact}
       end
 
       # Now that every module in this build has been hashed, each edge can say
@@ -782,6 +786,72 @@ module Iyi
       end
 
       prepared
+    end
+
+    # iyi: the spawns written in *filename*, as the cleanup placed them, for
+    # the artifact's `Spawns` (SPEC.md III.4.16): one record per place, in
+    # the order they are written, in parallel only if every instantiation
+    # of the def it is in ran it so, with the first reason one did not.
+    private def collect_iyi_spawns(program : Program, filename : String) : Array(IyiMod::SpawnRecord)
+      by_place = {} of {Int32, Int32} => IyiMod::SpawnRecord
+      program.iyi_spawn_sites.each do |site|
+        location = site.location.expanded_location || site.location
+        next unless location.filename == filename
+        key = {location.line_number, location.column_number}
+        reason = site.reason || ""
+        if known = by_place[key]?
+          next unless known.parallel && !site.parallel?
+          by_place[key] = known.copy_with(parallel: false, reason: reason)
+        else
+          by_place[key] = IyiMod::SpawnRecord.new(site.owner, site.digest, key[0], key[1], site.parallel?, site.asked, reason)
+        end
+      end
+      by_place.keys.sort!.map { |key| by_place[key] }
+    end
+
+    # iyi: a spawn this build placed other than the build that last wrote
+    # the module's artifact did (SPEC.md III.4.16), as one note each: the
+    # cliff a spawn falls off when a type it captures, declared in a module
+    # it imports, stops being Share - a change made elsewhere, and silent
+    # until now. Said in both directions, since a spawn that starts running
+    # in parallel may start beside its spawner and break an order the code
+    # relied on. A spawn is matched by the def it is written in and its
+    # block's text, the n-th of those alike, so a spawn whose text was
+    # edited is a new one and not a move; one that spelled its placement
+    # cannot move. An artifact built under other flags or for another
+    # target describes another program, and is not compared.
+    private def note_iyi_spawn_moves(program : Program, path : String, artifact : IyiMod::Artifact) : Nil
+      return if artifact.spawns.empty? || !File.file?(path) || SPAWN_BROKEN.includes?("moves")
+      before = IyiMod.read_spawns(path)
+      return unless before
+      flags, target, records = before
+      return unless flags == artifact.flags && target == artifact.target_triple
+      earlier = iyi_spawns_by_name(records)
+      iyi_spawns_by_name(artifact.spawns).each do |name, now|
+        was = earlier[name]?
+        next unless was && !was.asked && !now.asked && was.parallel != now.parallel
+        where = now.owner.empty? ? "at #{artifact.module_name}'s top level" : "in `#{now.owner}`"
+        location = Location.new(artifact.source_path, now.line, now.column)
+        if was.parallel
+          program.warnings.add_note(location, "spawn #{where} ran in parallel when #{artifact.module_name} was last built, and stays in its spawner's unit now: #{now.reason}")
+        else
+          program.warnings.add_note(location, "spawn #{where} stayed in its spawner's unit when #{artifact.module_name} was last built, and runs in parallel now: it may start beside its spawner, and `serial: true` keeps it where it was (SPEC.md III.4.16)")
+        end
+      end
+    end
+
+    # Each record by the name it keeps across builds: the def it is
+    # written in, its block's text, and which of those alike it is.
+    private def iyi_spawns_by_name(records : Array(IyiMod::SpawnRecord)) : Hash({String, String, Int32}, IyiMod::SpawnRecord)
+      seen = Hash({String, String}, Int32).new(0)
+      named = {} of {String, String, Int32} => IyiMod::SpawnRecord
+      records.each do |record|
+        next if record.digest.empty?
+        index = seen[{record.owner, record.digest}]
+        seen[{record.owner, record.digest}] = index + 1
+        named[{record.owner, record.digest, index}] = record
+      end
+      named
     end
 
     # iyi: the object code of a namespace `tool bind` wrote a boundary for.

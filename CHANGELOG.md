@@ -92,6 +92,36 @@
 
 ### Fixed
 
+- **A connection's answer in the poller of a held worker is taken by an
+  idle one (Linux, darwin).** Each worker keeps its own epoll or kqueue
+  and looked at it only when its task parked or a back-edge check called
+  it to, so a worker held where no check is - the runtime, the
+  collector, a `@[NoPreempt]` def - or left by the kernel in its ready
+  queue kept its connections' news until it came back: an answer sent
+  while its reader's worker was held 100 ms with preemption off was read
+  98 ms later, three workers idle, on Linux (12 vCPUs) and on macOS 26.6
+  (an M2 Pro with 10 cores). The pool's monitor now asks the poller of a
+  running worker with io waiters that has not looked at it for a
+  millisecond, without waiting and taking nothing, and with news there
+  calls an idle worker, which takes the waiters off that worker's lists
+  and runs them: the answer is read on another worker in 0.4 to 5.0 ms
+  on Linux. A worker's io list, slots and sleep heap are behind its
+  lists lock on every platform, as Windows' were, held by the owner from
+  the second-waiter check through the registration, and the io
+  functions take the state they change rather than the caller's. The
+  epoll event each wait and narrowing built is in its frame now, not a
+  16-byte heap block. `bench/parallel_migrate.iyi`'s heldio step holds
+  the answer to 20 ms in `bench/parallel_exercise.sh`, and its failure
+  proof takes the monitor's call away. A worker's idle wait still takes
+  its own news before it says it is busy, so a deadlock's walk reads only
+  what an idle worker said, and a taker that empties the lists of one
+  that went idle meanwhile rings it to say again. Said busy first, as on
+  Windows, 32 tasks each making 100 queries in turn on 12 workers, with
+  the database's process on all 12 vCPUs, had a request p99 of 69 to 83
+  ms and 38 to 91 queries over 20 ms in 8 s, against 58 to 65 ms and 0
+  to 2 with the order kept and 59 to 66 ms and 0 to 3 before the change
+  (Linux, five runs each, interleaved).
+
 - **A task handed over by a task that computes on starts on an idle
   worker.** A send, a `Mutex` let go or any other wake from a running
   parallel task put the woken task in its waker's ring and called nobody
@@ -26421,7 +26451,8 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 26,629-line library and nothing else. Every other
+  written against iyi's own 26,944-line library and nothing else. Every other
+  written against iyi's own 26,944-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

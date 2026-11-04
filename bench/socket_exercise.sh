@@ -356,7 +356,10 @@ case "$(uname -s)" in
   *)
 mkdir -p "$WORK/onewaiter/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/onewaiter/iyi/"
-awk '{ sub(/raise "two fibers #\{direction == 1 \? "reading" : "writing"\} one fd" if others & direction != 0/, "raise \"two fibers waiting on one fd\" if others != 0"); print }' \
+awk '/def self\.wait_posix\(fd/ { inwait = 1 }
+     inwait && /^    if others & direction != 0$/ { print "    if others != 0"; next }
+     inwait && /^      raise "two fibers #\{direction == 1 \? "reading" : "writing"\} one fd"$/ { print "      raise \"two fibers waiting on one fd\""; inwait = 0; next }
+     { print }' \
   "$REPO/src/iyi/concurrency.iyi" > "$WORK/onewaiter/iyi/concurrency.iyi"
 if cmp -s "$REPO/src/iyi/concurrency.iyi" "$WORK/onewaiter/iyi/concurrency.iyi"; then
   echo "  one waiter per fd: the patch changed nothing"

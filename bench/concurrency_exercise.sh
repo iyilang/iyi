@@ -753,7 +753,7 @@ sleep_proof "a send node handed out before its sender read it" unread_sender \
 case "$(uname -s)" in
   Linux)
     sleep_proof "an io waiter found by walking every waiter" walked_io \
-      '/^    index < slots.size \? slots\[index\] : nil$/ { print "    found_waiter = nil"; print "    walk = state.io_head"; print "    while walk.is_a?(IyiFiber)"; print "      found_waiter = walk if walk.wait_fd == fd && walk.wait_dir == direction"; print "      walk = walk.next_io"; print "    end"; print "    found_waiter"; found = 1; next }
+      '/^    index < slots.size \? slots\[index\] : nil$/ { print "    found_waiter = nil"; print "    walk = st.io_head"; print "    while walk.is_a?(IyiFiber)"; print "      found_waiter = walk if walk.wait_fd == fd && walk.wait_dir == direction"; print "      walk = walk.next_io"; print "    end"; print "    found_waiter"; found = 1; next }
        { print } END { if (!found) exit 3 }' \
       'FAIL: io: 5000 round trips'
     ;;

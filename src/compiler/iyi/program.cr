@@ -412,7 +412,7 @@ module Iyi
 
     # iyi: the files `import a/b` may be, in the order they are tried: each
     # root's `a/b.iyi` and then its `a/b.cr`, so an iyi module can shadow a
-    # Crystal file of the same name during the transition. Each in the
+    # `.cr` file of the same name during the transition. Each in the
     # platform's spelling (`Iyi.native_path`): the module path's `/` went
     # into the file name as it was, and on Windows every place an imported
     # file is named - a diagnostic, `check -f json`, `fix --json` - named

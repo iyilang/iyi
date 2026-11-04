@@ -1,6 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.20.1 — 2026-11-04
+
+**Fixes found by soaking 0.20.0 on every core: a darwin server a client
+could kill, two compiler crashes and a miscompile around NoReturn
+blocks, a collector crash on aarch64 and a fault that hung instead of
+ending, and Windows builds that picked up the wrong DLL.** A darwin
+server was killed by SIGPIPE when a client reset its connection before
+the accept, nine times in seventy seconds of adversarial load; every
+send now says `MSG_NOSIGNAL`. A collection
+that stopped a thread at the first instruction of a new task scanned
+past that task's stack, and crashed 9 of 23 runs of a test on an M2; a
+memory fault inside a collection hung the process instead of ending it.
+A block kept by a def, such as iyi-web's `get "/boom" do raise ... end`,
+stopped the compiler with a TypeCastError when its body passed a NoReturn
+value to a call, and a proc whose body did so panicked "can't execute"
+without running. std/http's stop no longer panics under a
+`stream_bodies` block waiting on its body, and an answer made while the
+server stops, or that the server will close after, says
+`Connection: close`. On Windows a stale DLL in the shared build cache no
+longer stands beside a new program, and `-Dgc_none`/`-Dgc_boehm` builds
+that read standard input or link libgc build and start.
 
 ### Fixed
 
@@ -65,6 +85,33 @@
   `{ |x| block.call(x).to_s }`. A spec in
   `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
 
+- **So does a kept block whose body is more than that call.** The fix
+  above typed the block's proc from the body cleanup leaves, and cleanup
+  leaves no type on a body it cuts at its NoReturn expression: a line
+  before the call, `{ |y| puts "x"; wrap(raise "x") }`, the value
+  assigned first, `{ |y| v = raise "x"; v.to_s }`, or the call in both
+  branches of an `if`. Each still stopped the compiler with "Cast from
+  Nil to Iyi::ProcInstanceType failed" (bindings.cr:622), in a block
+  `Kept.of`, `SharedProc.of` or any `&block : Int32 -> String` keeps. No
+  way out of such a body returns, so its proc is NoReturn, which is what
+  a block with no type is everywhere else. A spec in
+  `spec/compiler/semantic/iyi_spec.cr` compiles the three shapes.
+
+- **A proc whose body gives a call a NoReturn value runs that body.**
+  iyi-web's `get "/boom", workers: 1 do ... raise "..." end` answered
+  500 with "iyi: panic: can't execute `route_answer(block.call(ctx))`"
+  in its log, and the route never ran: not the line before its `raise`,
+  not the `raise`. A call given a NoReturn argument, `wrap(block.call(x))`
+  with the block `Proc(Int32, NoReturn)`, is never typed, which left the
+  proc's def without a type, and cleanup replaced the whole body of such
+  a proc with that panic, where a def's body is cleaned up instead: the
+  call becomes the arguments up to the NoReturn one. A proc's body now
+  is too, so `->(x : Int32) : String { puts "ran"; wrap(block.call(x)) }`
+  prints "ran", calls the block and panics with the block's message, or
+  exits with the block's `exit` status. Inherited from Crystal, whose
+  1.21 raises the same "can't execute". A spec in
+  `spec/compiler/compiler_spec.cr` runs the shape.
+
 - **A DLL beside a Windows program is the one the program was linked
   against.** The compiler copies each DLL a program links beside it, and
   kept any file already there by that name (Crystal's #14315, so that a
@@ -104,22 +151,6 @@
   with only the system directory on PATH, and refuses a copy of the
   prelude that does not name the DLL.
 
-### Known
-
-- **0.20.0's Windows light-endpoint loss is the load generator sharing
-  every processor, not the shared completion port.** On Windows 11 with
-  12 logical processors (the user's machine), interleaved best of 3
-  against 0d8922efd, the commit before the shared port: `check_version`
-  and `order` at twelve workers answer 0.89 and 0.94 of it only when oha
-  runs on all 12 processors beside them. Given processors of its own, the
-  shared port answers 9-12% more (6 or 12 workers on 6 processors, oha on
-  the other 6) and 19-36% more with oha held to 4. Kernel traces put the
-  port's own cost level (ntoskrnl 22.6 against 22.9 us a request); under
-  that co-location the workers seldom idle, so the port is drained in
-  batches of 7 by 1 ms polls, and both the server (+3.5 us) and oha
-  (+5.5 to +6 us) spend more CPU a request. Keeping a connection on its
-  worker without stalling it would take per-worker ports again, which is
-  not a patch.
 - **A darwin server is no longer killed by SIGPIPE when a client resets
   its connection before the accept.** darwin's sockets were kept from
   SIGPIPE by SO_NOSIGPIPE, set as each was accepted; on a connection its
@@ -150,6 +181,7 @@
   `bench/std_http_stop.iyi` stops a server under two such blocks, one
   answering a string and one a stream; the gate counts the panics, and a
   copy without either guard is caught.
+
 - **An answer the server makes while it stops says `Connection: close`,
   and a body the stop cut short is not answered 400.** An answer in
   progress at a stop went out `keep-alive` and the connection closed
@@ -159,6 +191,7 @@
   client for the server's going, in place of the close a client may
   retry on. `bench/std_http_parallel.iyi`'s stop holds both, with a
   broken copy of each.
+
 - **A `stream_bodies` answer says `Connection: close` when the server
   will close after it.** A block that left more of a body than the
   server reads past (`Server::MAX_DRAIN`, by the body's
@@ -171,32 +204,23 @@
   Both now say `close`, and no `100 Continue` follows an answer.
   `bench/std_http_exercise.sh`'s close cases hold both, plain and over
   std/tls, with a broken copy of each.
-- **So does a kept block whose body is more than that call.** The fix
-  above typed the block's proc from the body cleanup leaves, and cleanup
-  leaves no type on a body it cuts at its NoReturn expression: a line
-  before the call, `{ |y| puts "x"; wrap(raise "x") }`, the value
-  assigned first, `{ |y| v = raise "x"; v.to_s }`, or the call in both
-  branches of an `if`. Each still stopped the compiler with "Cast from
-  Nil to Iyi::ProcInstanceType failed" (bindings.cr:622), in a block
-  `Kept.of`, `SharedProc.of` or any `&block : Int32 -> String` keeps. No
-  way out of such a body returns, so its proc is NoReturn, which is what
-  a block with no type is everywhere else. A spec in
-  `spec/compiler/semantic/iyi_spec.cr` compiles the three shapes.
 
-- **A proc whose body gives a call a NoReturn value runs that body.**
-  iyi-web's `get "/boom", workers: 1 do ... raise "..." end` answered
-  500 with "iyi: panic: can't execute `route_answer(block.call(ctx))`"
-  in its log, and the route never ran: not the line before its `raise`,
-  not the `raise`. A call given a NoReturn argument, `wrap(block.call(x))`
-  with the block `Proc(Int32, NoReturn)`, is never typed, which left the
-  proc's def without a type, and cleanup replaced the whole body of such
-  a proc with that panic, where a def's body is cleaned up instead: the
-  call becomes the arguments up to the NoReturn one. A proc's body now
-  is too, so `->(x : Int32) : String { puts "ran"; wrap(block.call(x)) }`
-  prints "ran", calls the block and panics with the block's message, or
-  exits with the block's `exit` status. Inherited from Crystal, whose
-  1.21 raises the same "can't execute". A spec in
-  `spec/compiler/compiler_spec.cr` runs the shape.
+### Known
+
+- **0.20.0's Windows light-endpoint loss is the load generator sharing
+  every processor, not the shared completion port.** On Windows 11 with
+  12 logical processors (the user's machine), interleaved best of 3
+  against 0d8922efd, the commit before the shared port: `check_version`
+  and `order` at twelve workers answer 0.89 and 0.94 of it only when oha
+  runs on all 12 processors beside them. Given processors of its own, the
+  shared port answers 9-12% more (6 or 12 workers on 6 processors, oha on
+  the other 6) and 19-36% more with oha held to 4. Kernel traces put the
+  port's own cost level (ntoskrnl 22.6 against 22.9 us a request); under
+  that co-location the workers seldom idle, so the port is drained in
+  batches of 7 by 1 ms polls, and both the server (+3.5 us) and oha
+  (+5.5 to +6 us) spend more CPU a request. Keeping a connection on its
+  worker without stalling it would take per-worker ports again, which is
+  not a patch.
 
 ## 0.20.0 — 2026-11-02
 

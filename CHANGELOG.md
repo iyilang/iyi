@@ -4,6 +4,20 @@
 
 ### Changed
 
+- **Linux reads its clocks through the vDSO.** The runtime's monotonic
+  clock, the collector's pause clock and std/time's `Time.monotonic` and
+  `Time.utc` each made a `clock_gettime` syscall, 64 to 65 ns a read on
+  Linux x86_64 (12 vCPU, shared, kvm-clock); they call the
+  `clock_gettime` the kernel maps into every process, found through the
+  auxiliary vector and the vDSO's own symbol table as Go's runtime finds
+  it, 17 to 18 ns a read, with the syscall behind it where there is no
+  vDSO. No libc symbol is bound, so the dependency floor is unchanged.
+  The scheduler's sleep queue, its timers and the preemption monitor read
+  this clock. `bench/chan_scaling.iyi`'s `held` shape, which holds a
+  mutex 20 us by watching the clock, lost 303, 355, 413 and 1,169 ns an
+  update beyond the hold at 1, 2, 4 and 8 pairs and loses 200, 239, 314
+  and 529 (least of five interleaved runs, same machine).
+
 - **Each channel has a lock of its own, and so does each list a
   `std/mutex` waiter parks in.** Every channel was behind the runtime's
   one scheduler lock, and tasks talking on channels of their own on
@@ -26786,7 +26800,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 27,353-line library and nothing else. Every other
+  written against iyi's own 27,528-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

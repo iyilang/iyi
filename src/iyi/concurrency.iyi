@@ -344,14 +344,11 @@ def __iyi_monotonic_ns : Int64
   {% elsif flag?(:darwin) %}
     LibC.clock_gettime_nsec_np(4).to_i64
   {% else %}
-    # The timespec in this frame: a heap block here was an allocation
+    # Through the vDSO (`IyiClock`), with the syscall behind it. The
+    # timespec is in that frame: a heap block here was an allocation
     # every time anything read the clock, the scheduler's sleep queue
     # included.
-    spec = uninitialized UInt64[2]
-    words = pointerof(spec).as(Pointer(UInt64))
-    result = __iyi_conc_syscall3(IYI_SYS_CLOCK_GETTIME, 1_i64, words.address.to_i64, 0_i64)
-    raise "clock_gettime failed" if result < 0
-    words[0].to_i64 * 1000000000_i64 + words[1].to_i64
+    IyiClock.monotonic_ns.to_i64
   {% end %}
 end
 

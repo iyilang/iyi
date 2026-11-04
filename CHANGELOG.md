@@ -325,6 +325,23 @@
 
 ### Fixed
 
+- **On Windows a collecting thread is raised before it takes the
+  runtime lock, not at its stop.** Everything from the lock to the stop
+  holds it, and a thread above the collector on its processor held the
+  lock for as long as it ran: beside `bench/thread_exercise.sh`'s burst,
+  one level above normal for 100 ms at a time on the collecting thread's
+  processor, 9 of 15 runs on windows-2025's 4-processor runners had a
+  thread wait 53 to 107 ms for the lock (debug run 41794057208). Raised
+  once the collection was decided, the lock already held, 3 of 24 still
+  waited, 54 to 100 ms (debug run 41795743763); the thread is raised
+  before the lock now, lowered for each debt walk, and waits at its own
+  priority for a collection running beside the program. With the raise
+  at the decision, on Windows 11, 12 logical processors (the user's
+  machine), 8 runs of 8 held, and the exercise's copies were caught in
+  each: the priority put back inside the release with 36 or 37 waits
+  past 50 ms a run, and with no raise 28 to 34 stops past 20 ms. The
+  exercise's no-raise copy takes out the collection's raises too.
+
 - **A second `Signal.wait` is refused whichever thread it is on.** One
   fiber waits for signals at a time, and the second was refused by the
   poller's rule of one reader per descriptor, which is each thread's
@@ -26728,7 +26745,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 27,318-line library and nothing else. Every other
+  written against iyi's own 27,353-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

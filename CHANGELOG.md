@@ -571,6 +571,10 @@
   send now says MSG_NOSIGNAL, as Linux's has. `bench/socket_exercise.iyi`
   writes to a connection reset before its accept, and on darwin the gate
   builds a copy whose send drops the flag and sees it killed (exit 141).
+  The gate runs with SIGPIPE at its default: the macos-15 runners start
+  their steps with it ignored, every write to a gone peer there was a
+  quiet EPIPE, and that copy exited 0 in 10 runs of 10 (141 in 10 of 10
+  with the signal reset; debug job 126320045389).
 
 - **A stopping server's `stream_bodies` block that waits on its body no
   longer panics.** The stop closes a connection waiting on its client

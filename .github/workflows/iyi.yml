@@ -2006,12 +2006,16 @@ jobs:
   # Windows package, whose `lib` carries `LLVM-C.dll` and the
   # `llvm_VERSION` beside it — this fork needs no `llvm-config` on the
   # msvc path and the package ships none.
-  # Two hours: it took 64 to 88 minutes in green runs, the release build at
-  # its end the longest step, and was cut off at ninety inside that build
-  # (job 118116750685 on lsp/shutdown).
+  # Two and a half hours: it took 64 to 88 minutes in green runs, the
+  # release build at its end the longest step, and was cut off at ninety
+  # inside that build (job 118116750685 on lsp/shutdown). v0.20.1's green
+  # job took 116 minutes, 12 of them the zip's build (job 126378458286);
+  # with `bench/release_cores.sh` among the editor's surfaces, 6 minutes
+  # more, two mt/next runs reached the zip at 117 minutes and were cut
+  # off at 120 inside it (jobs 126476749691, 126525853590).
   windows-native:
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 150
     name: "iyi, built and run on Windows"
     steps:
       - uses: actions/checkout@v7

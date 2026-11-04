@@ -9,7 +9,10 @@
 #   * `stats` moves the way the collector does: `bytes_since_collection`
 #     climbs with allocation and is zero right after `collect`; `collections`
 #     counts every collection; the sweep after garbage reports bytes freed;
-#     `mapped_bytes` is at least one arena and only grows.
+#     `mapped_bytes` is at least one arena, and does not shrink within a
+#     second: a class's empty arenas go back once nobody has refilled it
+#     for three collections and a second (`IyiMark.class_idle?`), and the
+#     check stands under 134 ms into the run on Linux.
 #   * `disable` holds the trigger through allocation that would have
 #     collected; `enable` lets it run again; `collect` works while disabled.
 #   * `stats` reads whole lists beside threads that allocate: two seconds

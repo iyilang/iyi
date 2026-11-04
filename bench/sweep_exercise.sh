@@ -170,7 +170,13 @@ prove_fails "idle classes kept warm" idlewarm "idle class:" \
 # A class idle after a few epochs however short: four collections back
 # to back hand its pages back.
 prove_fails "idle by epochs alone" idleshort "idle class:" \
-  '{ if ($0 ~ /^          @@epoch_ns - IyiHeap\.read64\(line \+ IyiHeap::CLASS_USED_NS\) >= IDLE_NS$/) { print "          true"; found = 1; next } print } END { if (!found) exit 3 }'
+  '{ if ($0 ~ /^          @@epoch_ns - used_ns >= IDLE_NS$/) { print "          true"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# A class refilled only in the first epoch read at its stamp of 0, which
+# every clock reading is more than a second past: its arenas go back three
+# collections in, however short.
+prove_fails "the first epoch's classes idle at once" idlefirst "idle class:" \
+  '{ if ($0 ~ /^        used_ns = @@first_turn_ns if used_ns == 0_u64$/) { print "        # removed"; found = 1; next } print } END { if (!found) exit 3 }'
 
 # An idle class's empty arena kept by its cache as every fill arena was:
 # its pages go cold but the mapping, its header and its tables stay.

@@ -7270,16 +7270,28 @@ require "./file"
       IDLE_EPOCHS = 3_u64
       IDLE_NS = 1000000000_u64
       @@epoch_ns : UInt64 = 0_u64
+      @@first_turn_ns : UInt64 = 0_u64
 
       # When this epoch began, read by the refill for its stamp.
       def self.epoch_ns : UInt64
         @@epoch_ns
       end
 
+      # The first epoch has no start on record (`@@epoch_ns` is 0 until
+      # the first turn), so a class refilled only in it carries a stamp of
+      # 0, which every clock reading is more than a second past: three
+      # collections in, it was idle however short they were. Measured on
+      # Linux, `bench/std_gc_exercise.iyi` mapped 160 MiB of arenas before
+      # its first collection and 112 MiB thirteen collections and under
+      # 134 ms later. Such a class was refilled before the first turn, and
+      # that is the moment it is counted used at (`bench/sweep_exercise.iyi`,
+      # check 6c).
       def self.class_idle?(chunk : UInt64) : Bool
         line = IyiHeap.class_line(IyiHeap.class_index(chunk))
+        used_ns = IyiHeap.read64(line + IyiHeap::CLASS_USED_NS)
+        used_ns = @@first_turn_ns if used_ns == 0_u64
         @@epoch - IyiHeap.read64(line + IyiHeap::CLASS_USED) >= IDLE_EPOCHS &&
-          @@epoch_ns - IyiHeap.read64(line + IyiHeap::CLASS_USED_NS) >= IDLE_NS
+          @@epoch_ns - used_ns >= IDLE_NS
       end
 
       # A run of idle pages `[low, high)` the slice met, left by an earlier
@@ -7423,6 +7435,7 @@ require "./file"
         @@reopened_cold = reopened_cold
         @@epoch = @@epoch + 1_u64
         @@epoch_ns = now_ns
+        @@first_turn_ns = @@epoch_ns if @@first_turn_ns == 0_u64
         @@epoch_flag = (@@epoch & 1_u64) * IyiHeap::EPOCH_FLAG
         @@swept = 0_u64
         @@kept = 0_u64

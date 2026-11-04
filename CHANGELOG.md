@@ -171,7 +171,13 @@
   `bench/sweep_exercise.sh` checks it both ways: a class idle
   for four short epochs keeps its warm pages, and past a second it keeps
   none and maps no arena. Each direction has a broken copy that fails,
-  and so does a copy whose cache keeps the arena.
+  and so does a copy whose cache keeps the arena. A class refilled only
+  before the first collection is counted used at that collection: the
+  first epoch has no start on record, its stamp of 0 read as more than a
+  second old, and `bench/std_gc_exercise.iyi`'s 160 MiB of arenas fell to
+  112 MiB thirteen collections and under 134 ms in on Linux. Check 6c
+  holds such a class's arena through four short epochs, against a broken
+  copy.
 
 ### Gates
 

@@ -86,6 +86,7 @@
     IS_LT_190 = {{compare_versions(LibLLVM::VERSION, "19.0.0") < 0}}
     IS_LT_200 = {{compare_versions(LibLLVM::VERSION, "20.0.0") < 0}}
     IS_LT_210 = {{compare_versions(LibLLVM::VERSION, "21.0.0") < 0}}
+    IS_LT_230 = {{compare_versions(LibLLVM::VERSION, "23.0.0") < 0}}
   end
 {% end %}
 {% unless flag?(:win32) %}

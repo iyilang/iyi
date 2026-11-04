@@ -6,6 +6,27 @@ describe LLVM do
     LLVM.version.should eq LibLLVM::VERSION
   end
 
+  # iyi: LLVM 23 added a kind between `ConstantInt` and `ConstantFP`, and
+  # every kind after it read as the one before.
+  it "names a value's kind as the LLVM it links does" do
+    context = LLVM::Context.new
+    mod = context.new_module("kinds")
+    int32 = context.int32
+    func = mod.functions.add("f", [] of LLVM::Type, int32)
+    asm_type = LLVM::Type.function([] of LLVM::Type, int32)
+    assembly = LLVM::Function.from_value(asm_type.inline_asm("", "=r"))
+    call = nil.as(LLVM::Value?)
+    func.basic_blocks.append("entry") do |builder|
+      call = builder.call(asm_type, assembly, [] of LLVM::Value)
+      builder.ret call.not_nil!
+    end
+    func.kind.should eq(LLVM::Value::Kind::Function)
+    int32.const_int(1).kind.should eq(LLVM::Value::Kind::ConstantInt)
+    context.double.const_double(1.0).kind.should eq(LLVM::Value::Kind::ConstantFP)
+    assembly.to_value.kind.should eq(LLVM::Value::Kind::InlineAsm)
+    call.not_nil!.kind.should eq(LLVM::Value::Kind::Instruction)
+  end
+
   describe ".normalize_triple" do
     it "works" do
       LLVM.normalize_triple("x86_64-apple-macos").should eq("x86_64-apple-macos")

@@ -4,6 +4,7 @@ require "colorize"
 require "crystal/digest/md5"
 require "./optimization_mode"
 require "./wasm_roots"
+require "./release_partition"
 require "./preempt_checks"
 require "./mod/installer"
 {% if flag?(:msvc) %}
@@ -3160,6 +3161,33 @@ module Iyi
       @optimization_mode.o3? && @single_module
     end
 
+    # iyi: how many partitions an optimised single module is cut into, when
+    # `IYI_RELEASE_PARTITIONS` says; otherwise nil, and the module's size
+    # decides (`ReleasePartition.partition_count`). `1` keeps the one module
+    # of every build before partitioning, which is the broken copy
+    # `bench/release_cores.sh` holds the default against; `0` is the size's
+    # count anywhere.
+    #
+    # Windows keeps the one module unless told: there the JSON benchmark
+    # still ran 1.068x and 1.083x its one-module time cut at the default,
+    # best of 15 interleaved, on Windows 11, 12 logical processors (the
+    # user's machine), against 1.028x on macOS 26.6, Apple M2 Pro, 10 cores
+    # (the user's machine).
+    private def release_partitions : Int32?
+      if count = ENV["IYI_RELEASE_PARTITIONS"]?.try(&.to_i?)
+        return count == 0 ? nil : count.clamp(1, ReleasePartition::MAX_PARTITIONS)
+      end
+      1 if @codegen_target.win32?
+    end
+
+    # iyi: the largest function, in instructions before optimisation, a
+    # partition gets a copy of to inline (`ReleasePartition::IMPORT_LIMIT`),
+    # when `IYI_RELEASE_IMPORT` says. `0` copies nothing, which is the broken
+    # copy `bench/release_cores.sh` holds the import against.
+    private def release_import : Int32
+      ENV["IYI_RELEASE_IMPORT"]?.try(&.to_i?).try { |limit| Math.max(limit, 0) } || ReleasePartition::IMPORT_LIMIT
+    end
+
     private def new_program(sources)
       @program = program = Program.new
       program.iyi_prelude = prelude.ends_with?("iyi/prelude")
@@ -3315,10 +3343,11 @@ module Iyi
       # collector's globals - and an artifact's object code refers to them by
       # name from outside that module, so `a + b` in an imported module's
       # body was `undefined reference to '__iyi_raise_overflow'` at link.
+      single_module = @cross_compile || !@emit_targets.none? ||
+                      (@single_module && @emit_iyimod.nil? && program.iyi_artifact_objects.empty?)
       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
         modules = program.codegen node, debug: debug, frame_pointers: frame_pointers,
-          single_module: @cross_compile || !@emit_targets.none? ||
-                         (@single_module && @emit_iyimod.nil? && program.iyi_artifact_objects.empty?)
+          single_module: single_module
         # iyi: recursion's checks go in before optimisation (SPEC.md
         # III.4.13, part 9; `PreemptChecks.mark_recursion`).
         if program.iyi_preempt_flag
@@ -3337,6 +3366,18 @@ module Iyi
         llvm_mod.target = target_triple
         CompilationUnit.new(self, program, type_name, llvm_mod, output_dir, bc_flags_changed)
       end
+
+      # iyi: one optimised module is cut into partitions that are optimised
+      # on as many cores (`ReleasePartition`). Not for a cross-compile or an
+      # `--emit`, which each answer with the one module's file, and not
+      # where the partitions would need LLVM's legacy pass manager.
+      {% unless LibLLVM::IS_LT_130 %}
+        if single_module && !@cross_compile && @emit_targets.none? && !@optimization_mode.o0? && units.size == 1
+          @progress_tracker.stage("Codegen (partition)") do
+            units.first.partition(release_partitions, release_import)
+          end
+        end
+      {% end %}
 
       {% if LibLLVM::IS_LT_170 %}
         # initialize the legacy pass manager once in the main thread/process
@@ -3853,22 +3894,26 @@ module Iyi
     end
 
     private def codegen(program, units : Array(CompilationUnit), output_filename, output_dir)
-      object_names = units.map &.object_filename
+      object_names = units.flat_map &.object_filenames
       object_names.concat write_iyi_artifact_objects(program, output_dir)
 
       @progress_tracker.stage("Codegen (bc+obj)") do
-        @progress_tracker.stage_progress_total = units.size
-
-        n_threads = @n_threads.clamp(1..units.size)
-
-        if n_threads == 1
-          sequential_codegen(units)
+        if units.size == 1 && units.first.partitioned?
+          partitioned_codegen(units.first)
         else
-          parallel_codegen(units, n_threads)
-        end
+          @progress_tracker.stage_progress_total = units.size
 
-        if units.size == 1
-          units.first.emit(@emit_targets, emit_base_filename || output_filename)
+          n_threads = @n_threads.clamp(1..units.size)
+
+          if n_threads == 1
+            sequential_codegen(units)
+          else
+            parallel_codegen(units, n_threads)
+          end
+
+          if units.size == 1
+            units.first.emit(@emit_targets, emit_base_filename || output_filename)
+          end
         end
       end
 
@@ -3987,8 +4032,48 @@ module Iyi
       {% end %}
     end
 
+    # iyi: the partitions of one optimised module (`ReleasePartition`), on as
+    # many threads as there are partitions or `--threads` allows. Each reads
+    # the module's bitcode into a context of its own, so nothing is shared
+    # but the bitcode, which nobody writes.
+    private def partitioned_codegen(unit)
+      @progress_tracker.stage_progress_total = unit.partitions
+      if unit.prepare_partitions
+        partitions = Array.new(unit.partitions) { |index| index }
+        n_threads = @n_threads.clamp(1..unit.partitions)
+        {% if !flag?(:without_mt) %}
+          if n_threads > 1
+            raise "LLVM isn't multithreaded and cannot fork compiler in multithread mode." unless LLVM.multithreaded?
+            mt_run(partitions, n_threads) { |index| unit.compile_partition(index) }
+            partitions.clear
+          end
+        {% end %}
+        partitions.each do |index|
+          unit.compile_partition(index)
+          @progress_tracker.stage_progress += 1
+        end
+      end
+      unit.finish_partitions
+    end
+
     private def mt_codegen(units, n_threads)
-      channel = Channel(CompilationUnit).new(n_threads * 2)
+      # We generate the bitcode in the main thread because LLVM contexts
+      # must be unique per compilation unit, but we share different contexts
+      # across many modules (or rely on the global context); trying to
+      # codegen in parallel would segfault!
+      #
+      # Luckily generating the bitcode is quick and once the bitcode is
+      # generated we don't need the global LLVM contexts anymore but can
+      # parse the bitcode in an isolated context and we can parallelize the
+      # slowest part: the optimization pass & compiling the object file.
+      prepare = ->(unit : CompilationUnit) { unit.generate_bitcode; nil }
+      mt_run(units, n_threads, prepare) { |unit| unit.compile(isolate_context: true) }
+    end
+
+    # *jobs* done by *work* on *n_threads* fibers of the default execution
+    # context, each first handed to *prepare* on this thread.
+    private def mt_run(jobs : Array(T), n_threads, prepare : Proc(T, Nil)? = nil, &work : T ->) forall T
+      channel = Channel(T).new(n_threads * 2)
       wg = WaitGroup.new
       mutex = Sync::Mutex.new
 
@@ -4004,9 +4089,9 @@ module Iyi
 
       n_threads.times do
         wg.spawn do
-          while unit = channel.receive?
+          while job = channel.receive?
             begin
-              unit.compile(isolate_context: true)
+              work.call(job)
             rescue ex
               # Kept receiving rather than returning: a worker that stops
               # leaves the sender blocked on a channel nobody drains.
@@ -4018,19 +4103,9 @@ module Iyi
         end
       end
 
-      units.each do |unit|
-        # We generate the bitcode in the main thread because LLVM contexts
-        # must be unique per compilation unit, but we share different contexts
-        # across many modules (or rely on the global context); trying to
-        # codegen in parallel would segfault!
-        #
-        # Luckily generating the bitcode is quick and once the bitcode is
-        # generated we don't need the global LLVM contexts anymore but can
-        # parse the bitcode in an isolated context and we can parallelize the
-        # slowest part: the optimization pass & compiling the object file.
-        unit.generate_bitcode
-
-        channel.send(unit)
+      jobs.each do |job|
+        prepare.try &.call(job)
+        channel.send(job)
       end
       channel.close
 
@@ -4323,6 +4398,7 @@ module Iyi
       @object_name : String?
       @bc_name : String?
       @preempt_flag : String?
+      @plan : ReleasePartition::Plan?
 
       def initialize(@compiler : Compiler, program : Program, @name : String,
                      @llvm_mod : LLVM::Module, @output_dir : String, @bc_flags_changed : Bool)
@@ -4385,33 +4461,94 @@ module Iyi
         dump_llvm_ir
       end
 
+      # iyi: cuts the module into partitions (`ReleasePartition`), which then
+      # stand in for it: each is optimised and compiled on its own, and their
+      # objects are what links. Nothing changes when the module is too small
+      # to be worth cutting.
+      def partition(count : Int32?, import_limit : Int32) : Nil
+        named = @preempt_flag.try { |flag| PreemptChecks.named(flag) } || [] of String
+        @plan = ReleasePartition.plan(llvm_mod, count, named, import_limit)
+      end
+
+      def partitions : Int32
+        @plan.try(&.count) || 1
+      end
+
+      def partitioned? : Bool
+        !@plan.nil?
+      end
+
+      # Whether the partitions have to be compiled, on the main thread before
+      # any is, with the bitcode cache brought up to date when they do. The
+      # whole module's bitcode is what is compared: the partitions are a
+      # function of it.
+      def prepare_partitions : Bool
+        unless must_compile?
+          @reused_previous_compilation = true
+          return false
+        end
+        object_names.each { |name| File.delete?(name) }
+        File.write(bc_name, @memory_buffer.not_nil!.to_slice)
+        true
+      end
+
+      # Partition *index*, read from the module's bitcode into a context of
+      # its own, optimised and written to its object. Safe on any thread.
+      def compile_partition(index : Int32) : Nil
+        plan = @plan.not_nil!
+        object_name = object_names[index]
+        temporary_object_name = "#{object_name}.tmp"
+        target_machine = compiler.create_target_machine
+        mod = ReleasePartition.materialize(@memory_buffer.not_nil!, plan, index, target_machine)
+        begin
+          compiler.optimize mod, target_machine
+          WasmRoots.run(mod) if compiler.codegen_target.architecture == "wasm32"
+          compiler.preempt_checks mod, @preempt_flag
+          mod.print_to_file "#{@output_dir}/#{@name}.part#{index}.ll" if compiler.dump_ll?
+          target_machine.emit_obj_to_file mod, temporary_object_name
+          File.rename(temporary_object_name, object_name)
+        rescue ex
+          raise CompilerError.new(
+            "#{ex.message} while writing #{temporary_object_name} for partition #{index} of unit #{@name}")
+        ensure
+          LibLLVM.dispose_context(mod.context)
+        end
+      end
+
+      def finish_partitions : Nil
+        @memory_buffer.try &.dispose
+      end
+
       private def must_compile?
         memory_buffer = generate_bitcode
 
         return true unless compiler.emit_targets.none?
         return true if @bc_flags_changed
         return true unless File.exists?(bc_name)
-        return true unless File.exists?(object_name)
 
-        # If the user cancelled a previous compilation
-        # it might be that the .o file is empty
-        return true if File.size(object_name) == 0
+        object_names.each do |object_name|
+          return true unless File.exists?(object_name)
 
-        # iyi: or that it is short, or that it is not an object at all.
-        # The line above guards the one corruption this cache was known
-        # to produce; the cache produces others. A directory deleted
-        # mid-codegen by another build's cleanup (see
-        # `CacheDir#directory_in_use?`, which exists because that
-        # happened), a full disk, a killed process between `emit_obj` and
-        # `File.rename` - each leaves bytes that are not an object, and
-        # every later build linked them: `ld.lld: error: <file>:1:
-        # unknown directive: garbage`, forever, until somebody thought to
-        # run `clear_cache`. A cache is a cache. Anything in it that we
-        # did not write is a miss.
-        unless object_file_intact?
-          STDERR.puts "#{Iyi::Command.program_name}: #{object_name} was in the cache but is not an object file; compiling it again"
-          STDERR.flush
-          return true
+          # If the user cancelled a previous compilation
+          # it might be that the .o file is empty
+          return true if File.size(object_name) == 0
+
+          # iyi: or that it is short, or that it is not an object at all.
+          # The line above guards the one corruption this cache was known
+          # to produce; the cache produces others. A directory deleted
+          # mid-codegen by another build's cleanup (see
+          # `CacheDir#directory_in_use?`, which exists because that
+          # happened), a full disk, a killed process between `emit_obj` and
+          # `File.rename` - each leaves bytes that are not an object, and
+          # every later build linked them: `ld.lld: error: <file>:1:
+          # unknown directive: garbage`, forever, until somebody thought to
+          # run `clear_cache`. A cache is a cache. Anything in it that we
+          # did not write is a miss.
+          unless object_file_intact?(object_name)
+            STDERR.puts "#{Iyi::Command.program_name}: #{object_name} was in the cache but is not an object file; compiling it again"
+            STDERR.flush
+            return true
+          end
         end
 
         memory_io = IO::Memory.new(memory_buffer.to_slice)
@@ -4483,6 +4620,21 @@ module Iyi
         @name + @object_extension
       end
 
+      # The objects this unit links: its own, or one per partition, named
+      # with the count so that a cut into a different number never reuses
+      # another cut's objects.
+      def object_filenames : Array(String)
+        if plan = @plan
+          Array.new(plan.count) { |index| "#{@name}.part#{index}of#{plan.count}#{@object_extension}" }
+        else
+          [object_filename]
+        end
+      end
+
+      def object_names : Array(String)
+        object_filenames.map { |filename| Iyi.relative_filename("#{@output_dir}/#{filename}") }
+      end
+
       def temporary_object_name
         Iyi.relative_filename("#{@output_dir}/#{object_filename}.tmp")
       end
@@ -4493,7 +4645,7 @@ module Iyi
       # be, the target's machine number; a guess that refused a good object
       # would recompile the world on every build, so that is the whole of
       # the COFF test.
-      private def object_file_intact? : Bool
+      private def object_file_intact?(object_name : String) : Bool
         header = Bytes.new(4)
         # `read_fully?` rather than `read`, which is allowed to answer with
         # fewer bytes than it was asked for: a short read is not a verdict

@@ -175,11 +175,14 @@ end
     def self.read(clock : Int32) : UInt64
       stamp = uninitialized LibIyiClock::Timespec
       call = @@vdso
-      if call == 0_u64
+      # `find` walks past argv, which `__iyi_main` sets: a read before it,
+      # in `__iyi_program` under the chaos scheduler, takes the syscall and
+      # leaves the lookup to the first read after.
+      if call == 0_u64 && ARGV_UNSAFE.address != 0_u64
         call = find
         @@vdso = call
       end
-      if call != 1_u64
+      if call > 1_u64
         # A proc is its function and its closure; this one closes over
         # nothing, so it is called as the C function it is.
         cell = {call, 0_u64}

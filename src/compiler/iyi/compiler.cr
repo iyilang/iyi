@@ -3248,10 +3248,12 @@ module Iyi
     # count anywhere.
     #
     # Windows keeps the one module unless told: there the JSON benchmark
-    # still ran 1.068x and 1.083x its one-module time cut at the default,
-    # best of 15 interleaved, on Windows 11, 12 logical processors (the
-    # user's machine), against 1.028x on macOS 26.6, Apple M2 Pro, 10 cores
-    # (the user's machine).
+    # still ran 1.015x its one-module time cut at the default, best of 45
+    # interleaved runs, and the median of three bests of 15 was 1.033x, on
+    # Windows 11, 12 logical processors (the user's machine), where the
+    # same one-module binary run against itself came out at 0.995x and
+    # 1.002x. On macOS 26.6, Apple M2 Pro, 10 cores (the user's machine),
+    # 1.012x and 1.011x.
     private def release_partitions : Int32?
       if count = ENV["IYI_RELEASE_PARTITIONS"]?.try(&.to_i?)
         return count == 0 ? nil : count.clamp(1, ReleasePartition::MAX_PARTITIONS)
@@ -3260,11 +3262,20 @@ module Iyi
     end
 
     # iyi: the largest function, in instructions before optimisation, a
-    # partition gets a copy of to inline (`ReleasePartition::IMPORT_LIMIT`),
-    # when `IYI_RELEASE_IMPORT` says. `0` copies nothing, which is the broken
-    # copy `bench/release_cores.sh` holds the import against.
+    # partition gets a local copy of to inline
+    # (`ReleasePartition::IMPORT_LIMIT`), when `IYI_RELEASE_IMPORT` says.
     private def release_import : Int32
       ENV["IYI_RELEASE_IMPORT"]?.try(&.to_i?).try { |limit| Math.max(limit, 0) } || ReleasePartition::IMPORT_LIMIT
+    end
+
+    # iyi: the same for an `available_externally` copy
+    # (`ReleasePartition::INLINE_LIMIT`), when `IYI_RELEASE_INLINE` says.
+    # `IYI_RELEASE_IMPORT=0 IYI_RELEASE_INLINE=0` copies nothing but what
+    # LLVM must inline and what goes with a copy, and `IYI_RELEASE_INLINE=0`
+    # nothing external: the broken copies `bench/release_cores.sh` holds the
+    # import against.
+    private def release_inline : Int32
+      ENV["IYI_RELEASE_INLINE"]?.try(&.to_i?).try { |limit| Math.max(limit, 0) } || ReleasePartition::INLINE_LIMIT
     end
 
     private def new_program(sources)
@@ -3454,7 +3465,7 @@ module Iyi
       {% unless LibLLVM::IS_LT_130 %}
         if single_module && !@cross_compile && @emit_targets.none? && !@optimization_mode.o0? && units.size == 1
           @progress_tracker.stage("Codegen (partition)") do
-            units.first.partition(release_partitions, release_import)
+            units.first.partition(release_partitions, release_import, release_inline)
           end
         end
       {% end %}
@@ -4280,7 +4291,28 @@ module Iyi
       create_target_machine
     end
 
+    # iyi: on x86 an innermost loop starts on a 32-byte boundary, where LLVM
+    # aligns every loop to 16. Where a hot loop lands decides how fast it
+    # runs, and any change before it moves it: `bench/runtime.py`'s
+    # arithmetic loop, the same instructions, ran 0.32 s at offsets 0 to 12
+    # of a 64-byte line, 0.43 s at 13 to 16 and 0.30 s from 17 on. Cut into
+    # partitions it drew one of the slow offsets, 1.29x its one-module time
+    # best of 30 interleaved on a shared 12-vCPU Linux VM, and aligned the
+    # same cut ran 0.99x. What alignment leaves is 0 against 32: 1.07x in
+    # one cut on Windows 11, 12 logical processors (the user's machine).
+    # The padding is 1.5% of `samples/iyi/cores.iyi`'s text on Linux,
+    # 1480302 bytes to 1502862, and 1.1% of its binary on Windows. LLVM's
+    # own option, there since LLVM 12 and read as code is generated; parsed
+    # once a process, before its first target machine.
+    @@loops_aligned = false
+
     def create_target_machine
+      {% unless LibLLVM::IS_LT_120 %}
+        if !@@loops_aligned && @codegen_target.architecture.in?("x86_64", "i386")
+          @@loops_aligned = true
+          LLVM.parse_command_line_options({"", "-x86-experimental-pref-innermost-loop-alignment=5"})
+        end
+      {% end %}
       @codegen_target.to_target_machine(@mcpu || "", @mattr || "", @optimization_mode, @mcmodel)
     rescue ex : ArgumentError
       stderr.print colorize("Error: ").red.bold
@@ -4605,9 +4637,9 @@ module Iyi
       # stand in for it: each is optimised and compiled on its own, and their
       # objects are what links. Nothing changes when the module is too small
       # to be worth cutting.
-      def partition(count : Int32?, import_limit : Int32) : Nil
+      def partition(count : Int32?, import_limit : Int32, inline_limit : Int32) : Nil
         named = @preempt_flag.try { |flag| PreemptChecks.named(flag) } || [] of String
-        @plan = ReleasePartition.plan(llvm_mod, count, named, import_limit)
+        @plan = ReleasePartition.plan(llvm_mod, count, named, import_limit, inline_limit)
       end
 
       def partitions : Int32

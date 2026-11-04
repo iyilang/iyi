@@ -16,13 +16,16 @@
 #
 # * every defined function has exactly one partition that **owns** it, and
 #   every global variable is owned by partition 0;
-# * a partition also gets its own copy of the small functions its code calls,
-#   wherever they are owned, and of the constants it reads. LLVM inlines and
-#   folds those as it would in one module, so the call into
-#   `Array#unsafe_fetch` still disappears and a type id is still a constant.
-#   A copy of a local function is local to the partition; a copy of an
-#   external one, `__iyi_new` that every `new` calls, is
-#   `available_externally`, there to be inlined and dropped after;
+# * a partition also gets its own copy of the functions its code calls,
+#   wherever they are owned, and of the constants it reads, so that LLVM
+#   inlines and folds them as it would in one module: the call into
+#   `Array#unsafe_fetch` still disappears and a type id is still a
+#   constant. A local function nothing but a call names gets a local copy,
+#   up to `IMPORT_LIMIT`; any other, `__iyi_new` that every `new` calls
+#   among them, an `available_externally` one, up to `INLINE_LIMIT`, there
+#   to be inlined and dropped after. A local that one function alone
+#   calls, which one module inlines whatever its size, goes with that
+#   function: into its partition and into every copy of it;
 # * whatever is local to the module and still reached from a partition that
 #   does not own it is **promoted**: given a name of its own and hidden
 #   external linkage, so the partitions link to each other and to nothing
@@ -41,18 +44,29 @@ module Iyi::ReleasePartition
   # save in balance.
   MAX_PARTITIONS = 32
 
-  # A callee is imported when it has at most this many instructions before
-  # optimisation, and a callee of an imported function at `IMPORT_DECAY`
-  # times its caller's limit, as ThinLTO decays its own. A copy the inliner
-  # turns down is optimised and compiled anyway, once in every partition
-  # that has it. `samples/iyi/cores.iyi` on a shared 12-vCPU Linux VM: at
-  # 300, 42.1 s of processor in 7.55 s and 3.23 MB of text; at 100, 28.1 s
-  # in 5.76 s and 2.28 MB; at 50, 21.4 s in 5.25 s and 1.89 MB; the one
-  # module, 19.0 s in 19.1 s and 1.90 MB. At 50 the JSON benchmark ran
-  # 1.065x its one-module time on macOS 26.6, Apple M2 Pro, 10 cores (the
-  # user's machine), best of 15 interleaved, against 1.028x at 100.
+  # A local copy is made of a callee of at most this many instructions
+  # before optimisation, counted with what one module would inline into it
+  # (`whole_size`), and of a callee of a copy at `IMPORT_DECAY` times its
+  # caller's limit, as ThinLTO decays its own. A copy the inliner turns
+  # down is optimised and compiled anyway, once in every partition that has
+  # it. With one limit for both kinds of copy, `samples/iyi/cores.iyi` on a
+  # shared 12-vCPU Linux VM: at 300, 42.1 s of processor in 7.55 s and 3.23
+  # MB of text; at 100, 28.1 s in 5.76 s and 2.28 MB; at 50, 21.4 s in 5.25
+  # s and 1.89 MB; the one module, 19.0 s in 19.1 s and 1.90 MB. At 50 the
+  # JSON benchmark ran 1.065x its one-module time on macOS 26.6, Apple M2
+  # Pro, 10 cores (the user's machine), best of 15 interleaved, against
+  # 1.028x at 100.
   IMPORT_LIMIT = 100
   IMPORT_DECAY = 0.7
+
+  # The limit for an `available_externally` copy, which may be larger: the
+  # owner's definition answers every call the copy is not inlined into, so
+  # the copy costs a partition its optimisation and nothing in the binary.
+  # On the M2 Pro, median of three bests of 15 out of 45 interleaved runs,
+  # the JSON benchmark ran 1.032x its one-module time at 100 and 1.016x at
+  # 300, and `samples/iyi/cores.iyi` built in 7.14 s on 29.01 s of
+  # processor at 100 against 7.90 s on 34.93 s at 300.
+  INLINE_LIMIT = 300
 
   # Appended to a promoted name. Promotion happens once, before the module
   # is written for the partitions, so every partition reads the same name.
@@ -65,14 +79,15 @@ module Iyi::ReleasePartition
     # Per function, in module order: its owning partition, or -1 for a
     # declaration.
     getter owner : Array(Int32)
-    # Per partition: the positions of the functions it gets a copy of.
-    getter imports : Array(Array(Int32))
-    # Per function: whether a copy of it is `available_externally`, there
-    # only to be inlined, because the function is external and its owner's
-    # definition answers every call the copy does not take (`copyable?`).
-    getter external : Array(Bool)
+    # Per partition: the positions of the functions it gets a local copy of.
+    getter copies : Array(Array(Int32))
+    # Per partition: the positions of the functions it gets an
+    # `available_externally` copy of, there only to be inlined: the owner's
+    # definition, external or promoted, answers every call the copy does
+    # not take.
+    getter inline_only : Array(Array(Int32))
 
-    def initialize(@count, @owner, @imports, @external)
+    def initialize(@count, @owner, @copies, @inline_only)
     end
   end
 
@@ -83,7 +98,7 @@ module Iyi::ReleasePartition
   # optimisation (`PreemptChecks.named`), which keeps its name.
   # *import_limit* is `IMPORT_LIMIT` unless a build says otherwise.
   def self.plan(mod : LLVM::Module, count : Int32? = nil, named : Array(String) = [] of String,
-                import_limit : Int32 = IMPORT_LIMIT) : Plan?
+                import_limit : Int32 = IMPORT_LIMIT, inline_limit : Int32 = INLINE_LIMIT) : Plan?
     return nil if count == 1
     functions = [] of LibLLVM::ValueRef
     position = {} of UInt64 => Int32
@@ -96,33 +111,54 @@ module Iyi::ReleasePartition
 
     sizes = Array(Int32).new(functions.size, 0)
     callees = Array(Array(Int32)).new(functions.size) { [] of Int32 }
-    copyable = Array(Bool).new(functions.size, false)
-    external = Array(Bool).new(functions.size, false)
+    local_copy = Array(Bool).new(functions.size, false)
+    inline_copy = Array(Bool).new(functions.size, false)
+    always = Array(Bool).new(functions.size, false)
     total = 0_i64
     never_inlined = {"noinline", "naked"}.map { |name| LibLLVM.get_enum_attribute_kind_for_name(name, name.bytesize) }
+    always_inlined = LibLLVM.get_enum_attribute_kind_for_name("alwaysinline", 12)
     functions.each_with_index do |function, index|
       next if declaration?(function)
       size, labels = scan(function, position, callees[index])
       sizes[index] = size
       total += size
-      external[index] = LibLLVM.get_linkage(function).external?
-      copyable[index] = !labels && inlinable?(function, never_inlined) &&
-                        (external[index] || (local?(function) && only_called?(function)))
+      next if labels || !inlinable?(function, never_inlined)
+      local = local?(function)
+      local_copy[index] = local && only_called?(function)
+      inline_copy[index] = local || LibLLVM.get_linkage(function).external?
+      always[index] = !LibLLVM.get_enum_attribute_at_index(function, LLVM::AttributeIndex::FunctionIndex, always_inlined).null?
     end
 
     count ||= partition_count(total)
     return nil if count < 2
 
-    owner = assign(functions, sizes, total, count)
-    imports = Array(Array(Int32)).new(count) { |partition| import_list(partition, owner, sizes, callees, copyable, import_limit) }
+    inner = inner_callees(callees, local_copy)
+    whole = Array(Int32).new(functions.size, -1)
+    functions.each_index { |index| whole_size(index, sizes, inner, whole) }
+    owner = assign(functions, sizes, total, count, inner)
+    lists = Array.new(count) do |partition|
+      import_list(partition, owner, whole, callees, inner, local_copy, inline_copy, always, import_limit, inline_limit)
+    end
+    copies = lists.map(&.[0])
+    inline_only = lists.map(&.[1])
 
-    importers = Array(Array(Int32)?).new(functions.size, nil)
-    imports.each_with_index do |list, partition|
-      list.each { |index| (importers[index] ||= [] of Int32) << partition }
+    copied_by = Array(Array(Int32)?).new(functions.size, nil)
+    present_in = Array(Array(Int32)?).new(functions.size, nil)
+    copies.each_with_index do |list, partition|
+      list.each { |index| (copied_by[index] ||= [] of Int32) << partition }
+    end
+    lists.each_with_index do |(copy_list, inline_list), partition|
+      copy_list.each { |index| (present_in[index] ||= [] of Int32) << partition }
+      inline_list.each { |index| (present_in[index] ||= [] of Int32) << partition }
     end
 
-    promote(mod, position, owner, importers, named)
-    Plan.new(count, owner, imports, external)
+    promote(mod, position, owner, copied_by, present_in, named)
+    inline_only.each do |list|
+      list.each do |index|
+        raise "BUG: an available_externally copy of a function its owner does not export" if local?(functions[index])
+      end
+    end
+    Plan.new(count, owner, copies, inline_only)
   end
 
   def self.partition_count(instructions : Int64) : Int32
@@ -220,43 +256,139 @@ module Iyi::ReleasePartition
     linkage.internal? || linkage.private?
   end
 
+  # Per function, its *inner* callees: the local functions it alone calls
+  # and nothing but a call names (`only_called?`). One module inlines a
+  # local's last call whatever its size, so to one module an inner callee
+  # is part of its caller.
+  private def self.inner_callees(callees, local_copy) : Array(Array(Int32))
+    caller = Array(Int32).new(callees.size, -1)
+    callees.each_with_index do |list, from|
+      list.each do |callee|
+        next if callee == from
+        caller[callee] = caller[callee] == -1 ? from : -2
+      end
+    end
+    inner = Array(Array(Int32)).new(callees.size) { [] of Int32 }
+    caller.each_with_index do |from, index|
+      inner[from] << index if from >= 0 && local_copy[index]
+    end
+    inner
+  end
+
+  # *index*'s instructions with those of its inner callees, theirs with
+  # theirs: its size once one module has inlined them.
+  private def self.whole_size(index, sizes, inner, whole) : Int32
+    known = whole[index]
+    return known if known >= 0
+    # Locals that call only each other, and nothing else does, count once.
+    whole[index] = sizes[index]
+    size = sizes[index]
+    inner[index].each { |callee| size += whole_size(callee, sizes, inner, whole) }
+    whole[index] = size
+  end
+
   # Contiguous runs of the module's functions, of about equal size. Codegen
   # emits a function where it is first called, so a run is mostly a caller
   # and what it calls, which keeps both the imports and the promotions few.
-  private def self.assign(functions, sizes, total, count) : Array(Int32)
+  #
+  # An inner callee goes with its caller, wherever the run would have put
+  # it, since a partition can inline it only where its caller is. The two
+  # are placed as one, at the first of them, so the runs keep their sizes.
+  # Moved instead to where most of its callers were, up to 8 times over,
+  # the locals unbalanced the JSON benchmark's three partitions to 19451,
+  # 12861 and 10599 instructions (14245, 14274 and 14392 placed as one),
+  # and `samples/iyi/cores.iyi`'s build took 12.47 s against 9.11 s on
+  # Windows 11, 12 logical processors (the user's machine).
+  private def self.assign(functions, sizes, total, count, inner) : Array(Int32)
+    group = Array(Int32).new(functions.size) { |index| index }
+    root = ->(index : Int32) do
+      top = index
+      while group[top] != top
+        top = group[top]
+      end
+      while (up = group[index]) != top
+        group[index] = top
+        index = up
+      end
+      top
+    end
+    inner.each_with_index do |list, from|
+      list.each do |callee|
+        mine, theirs = root.call(callee), root.call(from)
+        group[mine] = theirs unless mine == theirs
+      end
+    end
+    group_size = Array(Int64).new(functions.size, 0_i64)
+    functions.each_index { |index| group_size[root.call(index)] += sizes[index] }
+
     owner = Array(Int32).new(functions.size, -1)
+    placed = Array(Int32).new(functions.size, -1)
     before = 0_i64
     functions.each_index do |index|
-      size = sizes[index]
-      next if size == 0
-      owner[index] = Math.min(count - 1, ((before + size // 2) * count // total).to_i32)
-      before += size
+      next if sizes[index] == 0
+      top = root.call(index)
+      if placed[top] < 0
+        size = group_size[top]
+        placed[top] = Math.min(count - 1, ((before + size // 2) * count // total).to_i32)
+        before += size
+      end
+      owner[index] = placed[top]
     end
     owner
   end
 
-  # What *partition* gets a copy of: the functions of at most
-  # *import_limit* instructions its own code calls, then theirs at a decayed
-  # limit, keeping for each function the largest limit it was reached at.
-  private def self.import_list(partition, owner, sizes, callees, copyable, import_limit) : Array(Int32)
+  # What *partition* gets a copy of: the functions its own code calls, then
+  # theirs at `IMPORT_DECAY` times their caller's limits, keeping for each
+  # function the largest limits it was reached at. A function is measured
+  # whole (`whole_size`), and its inner callees come with it as local
+  # copies: copied without them, its copy called the owner's, which then
+  # had to be promoted, and one module's inlining of them was lost in the
+  # owner as well. Of the rest, a local copy of a local function nothing
+  # but a call names, within *import_limit*; an `available_externally`
+  # copy of any other, within *inline_limit*. What LLVM must inline
+  # (`alwaysinline`) is copied whatever its size, and does not decay what
+  # it calls: inlined, its calls are its caller's.
+  private def self.import_list(partition, owner, whole, callees, inner, local_copy, inline_copy, always,
+                               import_limit, inline_limit) : {Array(Int32), Array(Int32)}
     best = {} of Int32 => Float64
+    forced = Set(Int32).new
     work = [] of {Int32, Float64}
-    consider = ->(index : Int32, limit : Float64) do
-      return if owner[index] == partition || owner[index] < 0 || !copyable[index]
-      return if sizes[index] > limit
-      return if (seen = best[index]?) && seen >= limit
-      best[index] = limit
-      work << {index, limit}
+    take = ->(index : Int32, scale : Float64) do
+      best[index] = scale
+      work << {index, scale}
+    end
+    consider = ->(index : Int32, scale : Float64) do
+      return if owner[index] == partition || owner[index] < 0
+      return if (seen = best[index]?) && seen >= scale
+      size = whole[index]
+      return unless (local_copy[index] && (always[index] || size <= import_limit * scale)) ||
+                    (inline_copy[index] && (always[index] || size <= inline_limit * scale))
+      take.call(index, scale)
     end
     owner.each_with_index do |owning, index|
       next unless owning == partition
-      callees[index].each { |callee| consider.call(callee, import_limit.to_f) }
+      callees[index].each { |callee| consider.call(callee, 1.0) }
     end
     until work.empty?
-      index, limit = work.pop
-      callees[index].each { |callee| consider.call(callee, limit * IMPORT_DECAY) }
+      index, scale = work.pop
+      inner[index].each do |callee|
+        next if owner[callee] == partition
+        forced << callee
+        take.call(callee, scale) unless (seen = best[callee]?) && seen >= scale
+      end
+      scale *= IMPORT_DECAY unless always[index]
+      callees[index].each { |callee| consider.call(callee, scale) }
     end
-    best.keys.sort!
+    copies = [] of Int32
+    inline_only = [] of Int32
+    best.keys.sort!.each do |index|
+      if local_copy[index] && (always[index] || forced.includes?(index) || whole[index] <= import_limit * best[index])
+        copies << index
+      else
+        inline_only << index
+      end
+    end
+    {copies, inline_only}
   end
 
   # Every local function or global that a partition other than its owner
@@ -271,7 +403,7 @@ module Iyi::ReleasePartition
   # x86-64 Linux the preemption word was internal, the checks went into
   # partition 1 by name and linked to nothing: `undefined reference to
   # 'IyiWorkers::preempt'`.
-  private def self.promote(mod, position, owner, importers, named) : Nil
+  private def self.promote(mod, position, owner, copied_by, present_in, named) : Nil
     anonymous = 0
     each_definition(mod) do |value, is_function|
       next unless local?(value)
@@ -279,7 +411,7 @@ module Iyi::ReleasePartition
       unless named.includes?(name)
         index = is_function ? position[value.address] : nil
         home = index ? owner[index] : 0
-        next unless reached_elsewhere?(value, index, home, position, owner, importers)
+        next unless reached_elsewhere?(value, index, home, position, owner, copied_by, present_in)
         name = "__iyi_part_anonymous.#{anonymous += 1}" if name.empty?
         name += PROMOTED
         LibLLVM.set_value_name2(value, name, name.bytesize)
@@ -309,21 +441,22 @@ module Iyi::ReleasePartition
 
   # Whether *value*, owned by partition *home*, is named by code that ends up
   # in another partition. *index* is its position when it is a function,
-  # for the calls a partition has a copy of it for.
-  private def self.reached_elsewhere?(value, index, home, position, owner, importers) : Bool
+  # for the calls a partition has a local copy of it for; an
+  # `available_externally` copy may leave the call to the owner's.
+  private def self.reached_elsewhere?(value, index, home, position, owner, copied_by, present_in) : Bool
     use = LibLLVM.get_first_use(value)
     until use.null?
       user = LibLLVM.get_user(use)
       case LibLLVM.get_value_kind(user)
       when .instruction?
         function = LibLLVM.get_basic_block_parent(LibLLVM.get_instruction_parent(user))
-        copied = index && direct_call?(user, value) ? importers[index] : nil
-        return true if in_elsewhere?(function, home, position, owner, importers, copied)
+        copied = index && direct_call?(user, value) ? copied_by[index] : nil
+        return true if in_elsewhere?(function, home, position, owner, present_in, copied)
       when .function?
         # A personality, a prefix: the function that names it.
-        return true if in_elsewhere?(user, home, position, owner, importers, nil)
+        return true if in_elsewhere?(user, home, position, owner, present_in, nil)
       when .constant_expr?, .constant_array?, .constant_struct?, .constant_vector?, .block_address?
-        return true if reached_elsewhere?(user, nil, home, position, owner, importers)
+        return true if reached_elsewhere?(user, nil, home, position, owner, copied_by, present_in)
       else
         # A global's initialiser, or anything not foreseen here.
         return true
@@ -334,13 +467,14 @@ module Iyi::ReleasePartition
   end
 
   # Whether *function* has a body in a partition other than *home* - its
-  # owner's, or one with a copy - that is not one of *copied*, the
-  # partitions with a copy of what is being asked about.
-  private def self.in_elsewhere?(function, home, position, owner, importers, copied) : Bool
+  # owner's, or one with a copy of either kind (*present_in*) - that is not
+  # one of *copied*, the partitions with a local copy of what is being
+  # asked about.
+  private def self.in_elsewhere?(function, home, position, owner, present_in, copied) : Bool
     return true unless index = position[function.address]?
     owning = owner[index]
     return true if owning != home && !copied.try(&.includes?(owning))
-    importers[index].try &.each do |partition|
+    present_in[index].try &.each do |partition|
       return true if partition != home && !copied.try(&.includes?(partition))
     end
     false
@@ -367,24 +501,26 @@ module Iyi::ReleasePartition
       raise "BUG: partition #{partition} could not read the module's bitcode"
     end
 
-    imported = Array(Bool).new(plan.owner.size, false)
-    plan.imports[partition].each { |index| imported[index] = true }
+    copied = Array(Bool).new(plan.owner.size, false)
+    plan.copies[partition].each { |index| copied[index] = true }
+    inlined = Array(Bool).new(plan.owner.size, false)
+    plan.inline_only[partition].each { |index| inlined[index] = true }
 
     # A body this partition neither owns nor copies goes, through LLVM's
-    # own pass for it and before anything reads it. A copy of a local is
-    # local here: every call to it in this partition is to the copy, and
-    # nothing else names it (`only_called?`). A copy of an external
-    # function stays whole through that pass, which would take its body,
-    # and is `available_externally` once the partition is linked.
+    # own pass for it and before anything reads it. A local copy of a local
+    # is local here: every call to it in this partition is to the copy, and
+    # nothing else names it (`only_called?`). An `available_externally`
+    # copy stays whole through that pass, which would take its body, and is
+    # made one once the partition is linked.
     inline_only = [] of String
     index = 0
     fn = LibLLVM.get_first_function(lazy)
     until fn.null?
       owner = plan.owner[index]? || raise "BUG: partition #{partition} read more functions than its plan has"
       if owner >= 0 && owner != partition
-        if imported[index] && plan.external[index]
+        if inlined[index]
           inline_only << String.new(LibLLVM.get_value_name2(fn, out length), length)
-        elsif imported[index]
+        elsif copied[index]
           LibLLVM.set_linkage(fn, LLVM::Linkage::Internal)
           LibLLVM.set_visibility(fn, LLVM::Visibility::Default)
         else

@@ -756,12 +756,29 @@ mask = 0_u64
 system = 0_u64
 ::LibC.GetProcessAffinityMask(::LibC.GetCurrentProcess, pointerof(mask), pointerof(system))
 elsewhere = mask ^ shared
+# As many threads that compute as the other processors hold beside the
+# taker, up to four: a taker that shares a processor with one waits out
+# that thread's quantum, a lock it never asked for. On windows-2025's
+# 4-processor runners four computed on the 3 processors left with the
+# taker, and five runs of five had 2 to 11 waits past 50 ms, the longest
+# 102 to 611 ms (debug job 126403714389); CI run 41778179340 had 17, the
+# longest 303 ms. Windows 11, 12 logical processors (the user's machine),
+# leaves 11 for the five.
+others = 0
+bits = elsewhere
+while bits != 0_u64
+  others = others + 1 if bits & 1_u64 != 0_u64
+  bits = bits.unsafe_shr(1_u64)
+end
+computes = others - 1
+computes = 4 if computes > 4
+computes = 0 if computes < 0
 IyiMark.workers = 0_u64
 flag = Flag.new
 threads = [] of IyiThread
-4.times { threads << IyiThread.start { compute(flag, elsewhere) } }
+computes.times { threads << IyiThread.start { compute(flag, elsewhere) } }
 threads << IyiThread.start { taker(flag, elsewhere, lock_bound) }
-while flag.held.get < 5_i64
+while flag.held.get < computes.to_i64 + 1_i64
   IyiThread.yield_cpu
 end
 Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, shared)

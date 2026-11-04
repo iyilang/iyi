@@ -52,12 +52,14 @@ for an ordering assumption before the default changes.
 
 Being built on branch `mt/spawn`.
 
-### 2. Structured concurrency as the default (0.21)
+### 2. Structured concurrency: already the only kind (BUILT)
 
 Go's most costly gap is the goroutine that belongs to nothing: it leaks, it
-cannot be cancelled, and its error goes nowhere. iyi has `IyiGroup`, where a
-task has an owner, cancellation flows down and errors flow up as values. The
-plan makes a task without an owner the exception the program has to ask for.
+cannot be cancelled, and its error goes nowhere. iyi has had no such task
+since III.4.1: there is no bare spawn, a task is started inside an
+`IyiGroup` whose block cannot be left until every task in it has finished,
+cancellation flows down and errors flow up as values. Nothing is left to
+build in this layer; it is listed so the plan reads whole.
 
 ### 3. Data parallelism as a library (0.21)
 
@@ -102,7 +104,7 @@ measured, and is kept or dropped on the numbers.
 
 | release | content |
 |---|---|
-| 0.21 | parallel-by-default `spawn` (layer 1); structured groups as the default (layer 2); `each_parallel` / `map_parallel` (layer 3); the runtime work below |
+| 0.21 | parallel-by-default `spawn` (layer 1); `each_parallel` / `map_parallel` (layer 3); the runtime work below. Structured groups (layer 2) are already the only kind (III.4.1) |
 | 0.22 | a seeded, reproducible chaos scheduler in `iyi test` for logical races. The compiler already rules out memory races; what is left is ordering, and a deterministic schedule fuzzer finds it more surely than a race detector does |
 | 0.23+ | a heap per unit (layer 4), prototype first and decided by measurement |
 

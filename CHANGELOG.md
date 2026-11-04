@@ -108,7 +108,15 @@
   known at run time, and both arguments at once are refused. The
   typed group takes each spelling. The repository's 173 call sites were
   moved, std's included; std/http's connections and std/parallel's
-  chunks run as before.
+  chunks run as before. The rename leaves the runtime's paths as they
+  were, and `bench/web_cores.py`'s server says so: on macOS 26.6, Apple
+  M2 Pro, 10 cores (the user's machine), 10 workers, best of 3
+  interleaved 5 s rounds, `check_version` answered 104,591 req/s before
+  and 104,868 after, `order` 103,420 and 103,597; on Windows 11, 12
+  logical processors (the user's machine), 12 workers, 6 interleaved 8 s
+  rounds, the medians were 129,533 and 131,692 req/s for `check_version`
+  and 135,045 and 136,016 for `order`, within the rounds' own spread
+  (124,921 to 145,595).
 
 - **A spawn kept in its unit is said where the author looks (SPEC.md
   III.4.16).** `iyi check` notes, unasked, each `g.spawn` the compiler
@@ -26821,7 +26829,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 27,353-line library and nothing else. Every other
+  written against iyi's own 27,368-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

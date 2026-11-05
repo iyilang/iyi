@@ -73,15 +73,18 @@ accepted() {
 }
 
 # refused NAME TEXT...: the check fails, with every TEXT in what it says.
+# Windows spells a module's file `dep\table.iyi` where TEXT says
+# `dep/table.iyi`, so what it says is read with `/` for `\`.
 refused() {
   local name="$1"
   shift
   if "$IYI" check "$name.iyi" > "$name.log" 2>&1; then
     echo "$name.iyi checked clean, and its claim does not hold:"; cat "$name.log"; exit 1
   fi
+  tr '\\' '/' < "$name.log" > "$name.said"
   local text
   for text in "$@"; do
-    if ! grep -qF -- "$text" "$name.log"; then
+    if ! grep -qF -- "$text" "$name.said"; then
       echo "$name.iyi was refused, but not with \"$text\":"; cat "$name.log"; exit 1
     fi
   done

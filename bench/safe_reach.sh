@@ -38,7 +38,10 @@
 #      naming that call as the first start. A start in a module the
 #      writer's module neither imports nor is imported by, run first by
 #      the program's import order: accepted. Its broken copy, the writer's
-#      module importing it: refused, naming that module's spawn.
+#      module importing it: refused, naming that module's spawn. A start
+#      reached only through a block of the importer's, which std's proc
+#      calls are taken to run: accepted. Its broken copy, the block in the
+#      writer's module: refused, naming the module's `LOCK` as the start.
 #   5. `@[UnsafeReach]`, the claim nothing checks, in a file that uses
 #      `Pointer`: accepted for the program step 1 refuses. Its broken copy,
 #      the same program without a `Pointer`: refused, since the unsafe
@@ -442,6 +445,86 @@ awk '/^module dep\/table$/ { print; print ""; print "import dep/busy::{ready}"; 
 (cd order_imports && refused app '@[SafeReach] on `TABLE` is refused' \
   '`TABLE.add("hello")` in the program'"'"'s top level at dep/table.iyi:21:7' \
   'after the statement at dep/busy.iyi:8:1 may start the first parallel task') || exit 1
+
+step "(c) a block of the importer's is no start in the module it imports"
+# A proc call reaches every literal of its type, so std's `IyiDeferNode#run`
+# (`raise` → `IyiScheduler.panic_current` runs the defers) reaches every
+# `-> Nil` block, and `Mutex.new`'s initializer reaches `raise` through its
+# release node. A block of the program's that starts a group so made
+# `LOCK = Mutex.new { 0 }` in `dep/table` a start, refusing the claim its
+# initialiser writes after it, while the build that wrote the artifact,
+# without such a block, proved it and recorded it as holding for every
+# importer (`bench/spawn_fuzz.py`, seeds 75, 2046, 2054, 2248, 2256, 2364
+# and 2388). The program's block exists only once `dep/table`'s
+# initialiser has run: accepted. Its broken copy, the same block in
+# `dep/table`, which every program importing it has: refused, naming
+# `LOCK`.
+mkdir -p nested/dep
+cat > nested/dep/table.iyi <<'IYI'
+module dep/table
+
+import std/mutex::{Mutex}
+
+class Table
+  def initialize
+    @rows = [] of String
+  end
+
+  def add(row : String) : Nil
+    @rows << row
+  end
+
+  def first_size : Int32
+    @rows[0].size
+  end
+end
+
+LOCK = Mutex.new { 0 }
+
+@[SafeReach("filled at module init, then only read")]
+TABLE = Table.new
+TABLE.add("hello")
+
+pub def first_size : Int32
+  TABLE.first_size
+end
+
+pub def count(n : Int32) : Int32
+  LOCK.lock { |_| n }
+  n
+end
+
+pub def fan(t : Int32) : Nil
+  group do |g|
+    t.times { g.spawn(parallel: true) { count(1); nil } }
+  end
+end
+IYI
+cat > nested/app.iyi <<'IYI'
+module main
+
+import dep/table::{first_size, fan}
+
+seen = Atomic(Int32).new(0)
+group do |g|
+  g.spawn(parallel: true) { seen.add(first_size) }
+  g.spawn { fan(2); nil }
+end
+puts seen.get
+IYI
+(cd nested && accepted app) || exit 1
+cp -r nested nested_own
+cat >> nested_own/dep/table.iyi <<'IYI'
+
+pub def nest : Nil
+  group do |g|
+    g.spawn { fan(2); nil }
+  end
+end
+IYI
+(cd nested_own && refused app '@[SafeReach] on `TABLE` is refused' \
+  '`TABLE.add("hello")` in the program'"'"'s top level at dep/table.iyi:23:7' \
+  'after the statement at dep/table.iyi:19:1 may start the first parallel task') || exit 1
 
 # ── 5. UnsafeReach, where it is allowed ───────────────────────────────────
 step "@[UnsafeReach] is kept for a file that uses Pointer"

@@ -3068,7 +3068,16 @@ code names none of the statement's state, and its tasks are joined before
 the statement runs. Taking the program's first start for every statement
 made a claim written only by its module's initialiser hold in one
 importer and not another, while the artifact had recorded it as holding
-for every importer (`bench/safe_reach.sh`'s `order/`).
+for every importer (`bench/safe_reach.sh`'s `order/`). The same holds
+of the code a statement reaches a start through: a module's statement
+counts a start only through code of its own module, of those it imports
+and of std, never through the code of a module importing it, which runs
+only after its initialiser. A proc call reaches every literal of its
+type, so std's `IyiDeferNode#run`, which `raise` reaches, reached a
+block of the program's that started a group, and `LOCK = Mutex.new { 0 }`
+in a module became a start in a program with such a block and not in
+the one that wrote the module's artifact (`bench/safe_reach.sh`'s
+`nested/`).
 
 A claim on state a module read from a `.iyimod` declares is proven by
 the build that wrote the artifact, for that program; a consumer has the

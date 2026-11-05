@@ -713,17 +713,80 @@ module Iyi
       end
 
       main = @main.not_nil!
+      files = statement_files
+      seen_from = {} of String => Set(Int32)
       main.sites.each do |site|
         next if @dead_statements.includes?(site.stmt)
-        @statement_starts[site.stmt] = true if site.stmt >= 0 && site.callee.starts?
+        next unless site.stmt >= 0 && site.callee.starts?
+        if seen = module_starts(files[site.stmt]?, callers, proc_callers, literal_type, seen_from)
+          next unless seen.includes?(site.callee.id)
+        end
+        @statement_starts[site.stmt] = true
       end
       main.proc_sites.each do |site|
         next if @dead_statements.includes?(site.stmt)
-        if site.stmt >= 0 && literals_of(site.type).any?(&.starts?)
+        next unless site.stmt >= 0
+        seen = module_starts(files[site.stmt]?, callers, proc_callers, literal_type, seen_from)
+        if literals_of(site.type).any? { |literal| literal.starts? && (seen.nil? || seen.includes?(literal.id)) }
           @statement_starts[site.stmt] = true
         end
       end
-      settle_starts
+      settle_starts(files)
+    end
+
+    # The file each top-level statement is written in.
+    private def statement_files : Array(String?)
+      Array(String?).new(@statement_starts.size) do |index|
+        @statement_locations[index]?.try { |at| (at.expanded_location || at).filename.as?(String) }
+      end
+    end
+
+    # The callables that may start a parallel task through code a
+    # statement of the module *file* can run: the module's own, that of
+    # the modules it imports at any depth, and std's; nil for a file that
+    # sees every start (the program's own, or one no module path names).
+    # A start through code of a module it does not import - a proc
+    # literal of the program's, called by std's `IyiDeferNode#run`
+    # because a proc of its type is, or a method a subclass of the
+    # program's overrides - runs that module's code, which exists only
+    # once its initialiser has run: after this one when it imports this
+    # module, and when it does not, the task it starts names none of
+    # this module's state (`settle_starts`). Counting it made
+    # `LOCK = Mutex.new { 0 }` a start (`Mutex#initialize` → `release` →
+    # ... → `raise` → `IyiDeferNode#run` → a proc of the program whose
+    # block nests a group), and refused a claim the module's initialiser
+    # writes after it in a program with such a block, while the build that
+    # wrote the module's artifact, without one, proved it and recorded it
+    # as holding for every importer (`bench/spawn_fuzz.py`, seeds 75 and
+    # 2046). What one module sees is the same in every program that
+    # imports it, which is what lets its artifact say so.
+    private def module_starts(file : String?, callers : Hash(Int32, Array(Callable)), proc_callers : Hash(Type, Array(Callable)),
+                              literal_type : Hash(Int32, Type), cache : Hash(String, Set(Int32))) : Set(Int32)?
+      return nil unless file && file != @program.filename && @program.iyi_module_paths.has_key?(file)
+      cache[file] ||= begin
+        visible = imported_by(file)
+        reach = @program.iyi_share_reach
+        allowed = ->(callable : Callable) do
+          at = callable.a_def.try(&.location) || callable.body.location
+          written = at.try { |place| (place.expanded_location || place).filename.as?(String) }
+          written.nil? || written == file || visible.includes?(written) || reach.std_at?(at)
+        end
+        found = Set(Int32).new
+        queue = Deque(Callable).new
+        @callables.each do |callable|
+          queue << callable if callable.direct_start? && allowed.call(callable) && found.add?(callable.id)
+        end
+        while callable = queue.shift?
+          mark = ->(caller : Callable) do
+            queue << caller if caller.starts? && allowed.call(caller) && found.add?(caller.id)
+          end
+          callers[callable.id]?.try &.each { |caller| mark.call(caller) }
+          if (type = literal_type[callable.id]?)
+            proc_callers[type]?.try &.each { |caller| mark.call(caller) }
+          end
+        end
+        found
+      end
     end
 
     # A statement of a module's initialiser runs before the initialisers
@@ -744,10 +807,7 @@ module Iyi
     # other way, proved it - and left it out of `Reaches` as holding for
     # every importer (`robust?`), so the two builds disagreed about the same
     # module (`bench/spawn_fuzz.py`).
-    private def settle_starts : Nil
-      files = Array(String?).new(@statement_starts.size) do |index|
-        @statement_locations[index]?.try { |at| (at.expanded_location || at).filename.as?(String) }
-      end
+    private def settle_starts(files : Array(String?)) : Nil
       starts = [] of Int32
       @start_before = Array.new(@statement_starts.size, Int32::MAX)
       @statement_starts.each_with_index do |starts_here, index|

@@ -694,6 +694,18 @@
   artifact's `Reaches`, the consumer's build from source refused it. A
   statement now sees the starts of its own module and those it imports.
 
+- **A block of the importer's no longer makes a module's statement a
+  start (SPEC.md III.4.4).** A proc call reaches every literal of its
+  type, so std's `IyiDeferNode#run`, which `raise` reaches, reached any
+  `-> Nil` block of the program that started a group, and through it
+  `Mutex.new`'s initializer: a module's `LOCK = Mutex.new { 0 }` became
+  a start, and the claim its initialiser wrote after it was refused, in
+  a program with such a block, while the build that wrote the module's
+  artifact, without one, proved the claim for every importer. A module's
+  statement now counts a start only through its own module's code, its
+  imports' and std's. Found by `bench/spawn_fuzz.py` (seeds 75, 2046,
+  2054, 2248, 2256, 2364, 2388).
+
 - **`iyi fix` over several files counts every file it rewrote.** Its
   last line, `N files: M rewritten`, counted the files whose `using` it
   rewrote and no other: moving iyi-db off `spawn_parallel`, the run

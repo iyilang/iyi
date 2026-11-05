@@ -345,15 +345,12 @@
   artifacts; the artifact build may keep a spawn in its unit that the
   source build runs in parallel and never the other way, and both print
   on four workers what one worker prints. CI runs seeds 0-59 in at most
-  four minutes, and three broken copies of the artifact side through
-  `IYI_SPAWN_BROKEN`, each caught on a seed clean without it. Run by hand on Linux, 1,330
-  seeds across the generator's versions at about 2.3 s a seed, it found
-  the four fixes below. It still finds a disagreement, not fixed and not
-  in the gate's seeds (seed 75 too, not analysed): in seeds 2046, 2054, 2248, 2256, 2364 and 2388
-  the build from source counts a module's own `LK1 = Mutex.new { 0 }` as
-  a statement that may start a parallel task, refusing a claim its
-  initialiser writes after it, while the producing build proved the claim
-  for every importer; the cause is not isolated.
+  four minutes, and four broken copies of the artifact side through
+  `IYI_SPAWN_BROKEN`, each caught on a seed clean without it. Run by hand
+  on Linux, 1,330 seeds across the generator's versions at about 2.3 s a
+  seed found the first four fixes below, and seeds 75, 2046, 2054, 2248,
+  2256, 2364 and 2388 the fifth; seeds 3000-5999 with every fix found
+  nothing, at 2.6 s a seed.
 
 - **`bench/spawn_eligible.sh` places spawns that call into an artifact
   (SPEC.md III.4.15).** A dependency compiled once to its `.iyimod` and a

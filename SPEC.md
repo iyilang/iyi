@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 28,403 lines, of which 4,650 are the library held to the 4,650 ceiling (6,906 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 136,237 lines, none of it written in iyi |
+| compiler | 136,239 lines, none of it written in iyi |
 | artifact format | `.iyimod` v60, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1030,7 +1030,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 136,237 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 136,239 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 28,403-line own prelude + 126,311 in std |
 | Specs | 21,146 lines | 16,647 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -5131,12 +5131,14 @@ whose block interpolated a value whose `to_s` appended to an unguarded
 `Array` ran in parallel and lost appends - 8,095 to 8,100 of 8,102 on four
 workers (Linux), found by `bench/spawn_fuzz.py` - where it now stays in
 its unit, the reason naming the std def on the path (``through
-`String.interpolation` → `Shown#to_s` → `SHOWN.<<` ``). What each std def
-calls back is read once per compilation (`ShareReach#exits_of`); on
-`bench/std_http_exercise.iyi` `iyi check --explain-spawn` went from 1.58
-and 1.68 s to 1.84 and 1.74 s and from 667 to 679 MB of RSS, and
-on iyi-web's examples, whose spawns are std's, it moved within noise
-(Linux, a 12-vCPU QEMU guest with 11 GB).
+`String.interpolation` → `Shown#to_s` → `SHOWN.<<` ``). What std calls
+back is settled once per compilation, a strongly connected part of std's
+call graph at a time (`ShareReach#exits_of`); on
+`bench/std_http_exercise.iyi` `iyi check --explain-spawn` takes 1.92 s
+and 663 MB to the 1.86 s and 652 MB of a walk that stops at std, where
+searching std again from every def a block calls took 2.06 s (medians of
+ten), and on iyi-web's examples, whose spawns are std's, it moved within
+noise (Linux, a 12-vCPU QEMU guest with 11 GB).
 
 **Across an artifact: BUILT.** A module built against another's `.iyimod`
 has the other's declarations and not its bodies (IV.1g), and the walk

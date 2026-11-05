@@ -28,8 +28,14 @@
 #      spawn compiled into its artifact in parallel on a claim its
 #      producer alone proved (`claimed`, seed 109).
 #
-# Seeds and minutes are `SPAWN_FUZZ_SEEDS` and `SPAWN_FUZZ_MINUTES`;
-# 1,330 seeds were run by hand on Linux, in chunks under 20 minutes.
+# Seeds and minutes are `SPAWN_FUZZ_SEEDS` and `SPAWN_FUZZ_MINUTES`.
+# 1,330 seeds were run by hand on Linux across the generator's versions,
+# and seeds 3000-5999 with the fix for seeds 75 and 2046 found nothing
+# (7,867 s, in chunks under 20 minutes). On Linux (12 vCPU) seeds 0-59
+# took 148 s and the whole gate 170 s; CI's samples job ran this gate's
+# neighbour `parallel_exercise.sh` in 1.02 to 1.45 times its 191 s there
+# (runs 41921220664, 41831854057, 41868801917), so the gate adds about 3
+# to 4 minutes to a job that took 46 to 78 of its 90.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

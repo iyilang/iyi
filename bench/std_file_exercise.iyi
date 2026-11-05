@@ -324,6 +324,10 @@ symlinks_allowed = true
   target_wide = __iyi_wide_path(f1.to_unsafe)
   symlinks_allowed = probe_wide.address != 0_u64 && target_wide.address != 0_u64 &&
                      Std::File::LibKernel32.CreateSymbolicLinkW(probe_wide, target_wide, 0x2_u32) != 0_u8
+  # The capability probe is itself a link in the sandbox. Remove it while
+  # its target still exists, including when the exercise owns the sandbox.
+  File.delete(probe) if symlinks_allowed
+  assert_true !Dir.children(sandbox).includes?("std_file_ex_probe.txt"), "the symlink capability probe leaves no entry"
 {% end %}
 if symlinks_allowed
   File.symlink(f1, fsym)

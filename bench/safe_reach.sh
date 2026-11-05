@@ -31,7 +31,14 @@
 #      first parallel task and first read by a task: accepted, since the
 #      initializer runs at the declaration. Its broken copy, the same
 #      constant declared after the tasks, which a task's read initializes:
-#      refused, naming the write in the initializer's call.
+#      refused, naming the write in the initializer's call. A def that
+#      spawns, declared above the writes and called after them: accepted,
+#      since a declaration starts nothing (R-2c's probe of it never runs).
+#      Its broken copy, the same def called above the writes: refused,
+#      naming that call as the first start. A start in a module the
+#      writer's module neither imports nor is imported by, run first by
+#      the program's import order: accepted. Its broken copy, the writer's
+#      module importing it: refused, naming that module's spawn.
 #   5. `@[UnsafeReach]`, the claim nothing checks, in a file that uses
 #      `Pointer`: accepted for the program step 1 refuses. Its broken copy,
 #      the same program without a `Pointer`: refused, since the unsafe
@@ -312,6 +319,129 @@ END { print "EARLY = fill" }'
 refused startup_before '@[SafeReach] on `TABLE` is refused' \
   '`TABLE.add("hello")` in `fill`' \
   'it may run once a parallel task has started'
+
+step "(c) a def that spawns starts nothing until it is called"
+# R-2c types every fully declared def at its definition through a probe
+# that calls it under `if false`, prepended to the program; the proof read
+# the probe of `scan` as the first statement that may start a parallel
+# task, and refused this program, naming `TABLE.add("hello")` as written
+# after the statement at `def scan` (met building `bench/spawn_fuzz.py`:
+# any module with a fully declared def that spawned refused every claim
+# written at module init).
+cat > startup_def.iyi <<'IYI'
+module startup_def
+
+class Table
+  def initialize
+    @rows = [] of String
+  end
+
+  def add(row : String) : Nil
+    @rows << row
+  end
+
+  def first_size : Int32
+    @rows[0].size
+  end
+end
+
+@[SafeReach("filled at module init, then only read")]
+TABLE = Table.new
+
+def first_size : Int32
+  TABLE.first_size
+end
+
+def scan : Int32
+  seen = Atomic(Int32).new(0)
+  group do |g|
+    g.spawn(parallel: true) { seen.add(first_size) }
+    g.spawn(parallel: true) { seen.add(first_size) }
+  end
+  seen.get
+end
+
+TABLE.add("hello")
+TABLE.add("world")
+puts scan
+IYI
+accepted startup_def
+derive startup_def startup_def_early '
+/^module startup_def$/ { print "module startup_def_early"; next }
+/^TABLE.add\("hello"\)$/ { print "puts scan" }
+{ print }'
+refused startup_def_early '@[SafeReach] on `TABLE` is refused' \
+  '`TABLE.add("hello")` in the program'"'"'s top level at startup_def_early.iyi:34:7' \
+  'after the statement at startup_def_early.iyi:33:1 may start the first parallel task'
+
+step "(c) a start in a module the writer's module does not import comes before nothing it writes"
+# A module's initialiser runs after the modules it imports and before
+# those importing it; where it falls among the others is each program's
+# import order. `dep/busy`'s spawn, which `app.iyi` imports first, made
+# `dep/table`'s `TABLE.add("hello")` a write after the first parallel
+# task, while a program importing them the other way proved the claim -
+# and wrote `dep/table`'s artifact without `TABLE` in what it reaches, as
+# a claim that holds for every importer (found by `bench/spawn_fuzz.py`,
+# seed 2364). `dep/busy` names nothing of `dep/table`, and its tasks are
+# joined before `dep/table`'s initialiser runs: accepted. Its broken
+# copy, `dep/table` importing `dep/busy`: refused, naming the spawn.
+mkdir -p order/dep
+cat > order/dep/table.iyi <<'IYI'
+module dep/table
+
+class Table
+  def initialize
+    @rows = [] of String
+  end
+
+  def add(row : String) : Nil
+    @rows << row
+  end
+
+  def first_size : Int32
+    @rows[0].size
+  end
+end
+
+@[SafeReach("filled at module init, then only read")]
+TABLE = Table.new
+TABLE.add("hello")
+
+pub def first_size : Int32
+  TABLE.first_size
+end
+IYI
+cat > order/dep/busy.iyi <<'IYI'
+module dep/busy
+
+pub def ready : Int32
+  1
+end
+
+done = Atomic(Int32).new(0)
+group do |g|
+  g.spawn(parallel: true) { done.add(ready) }
+end
+IYI
+cat > order/app.iyi <<'IYI'
+module main
+
+import dep/busy::{ready}
+import dep/table::{first_size}
+
+seen = Atomic(Int32).new(0)
+group do |g|
+  g.spawn(parallel: true) { seen.add(first_size) }
+  g.spawn(parallel: true) { seen.add(ready) }
+end
+puts seen.get
+IYI
+(cd order && accepted app) || exit 1
+cp -r order order_imports
+awk '/^module dep\/table$/ { print; print ""; print "import dep/busy::{ready}"; next } { print }' order/dep/table.iyi > order_imports/dep/table.iyi
+(cd order_imports && refused app '@[SafeReach] on `TABLE` is refused' \
+  '`TABLE.add("hello")` in the program'"'"'s top level at dep/table.iyi:21:7' \
+  'after the statement at dep/busy.iyi:8:1 may start the first parallel task') || exit 1
 
 # ── 5. UnsafeReach, where it is allowed ───────────────────────────────────
 step "@[UnsafeReach] is kept for a file that uses Pointer"

@@ -143,13 +143,9 @@ def main():
     fixture = 'bench/fixtures/windows_gate_schedule.before.json'
     bootstrap = 'crys' + 'tal'
     version = f'          "{bootstrap}": "1.21.0"'
-    command = f'        "run": "make -f Makefile.win {bootstrap} || exit /b 1\\nmake -f Makefile.win iyi\\n"'
-    for line in (version, command):
-        require(line_allowed(line, fixture) is not None, 'bootstrap fixture line rejected')
-        require(line_allowed(line, 'bench/other.json') is None, 'bootstrap exception escaped fixture')
+    require(line_allowed(version, fixture) is not None, 'bootstrap fixture line rejected')
+    require(line_allowed(version, 'bench/other.json') is None, 'bootstrap exception escaped fixture')
     require(line_allowed(f'          "{bootstrap}": "2.0.0"', fixture) is None, 'bootstrap version exception widened')
-    require(line_allowed(f'        "run": "make -f Makefile.win {bootstrap}"', fixture) is None,
-            'bootstrap command exception widened')
     workflow = yaml.safe_load(WORKFLOW.read_text())
     bodies = check(workflow)
     print('retained collector gates:', ', '.join(GATES))

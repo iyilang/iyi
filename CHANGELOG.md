@@ -351,6 +351,7 @@
   seed found the first four fixes below, and seeds 75, 2046, 2054, 2248,
   2256, 2364 and 2388 the fifth; seeds 3000-5999 with every fix found
   nothing, at 2.6 s a seed.
+
 - **`bench/ensure_park.sh` holds an `ensure` that parks while an
   exception passes, on Windows.** `bench/ensure_park.cr` raises through
   seven kinds of ensure that park (`Fiber.yield`, `sleep`, a channel, a
@@ -742,6 +743,7 @@
   and `db/database_test.iyi` were warned that their parallel blocks reach
   state that is not Share, as they were in 0.20.1. Both build from the
   artifacts as from source now. Migration: none.
+
 - **On Windows an `ensure` that parks its fiber while an exception
   passes through it no longer aborts the process.** Crystal code the
   fork builds for x86_64-windows-msvc, `iyi.exe` included, ran an

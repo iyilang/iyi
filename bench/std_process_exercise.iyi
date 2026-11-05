@@ -572,7 +572,7 @@ group do |g|
     case found
     when ProcessResult
       fail("the program found on a quoted entry said #{found.stdout.inspect}") unless found.stdout == "değer-日本\n"
-      puts "  found and ran from #{quoted}"
+      puts "  found and ran from the quoted non-ASCII PATH entry"
     when ProcessError
       fail("a quoted PATH entry was not searched: #{found.message}")
     else

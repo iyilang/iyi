@@ -98,6 +98,9 @@ second="$(run_json "$WORK/basic" .)"
 if [ "$(printf '%s' "$second" | json_cached)" != 2 ]; then
   printf 'unchanged run details: %s\n' "$second" >&2
   (cd "$WORK/basic" && "$IYI" test --cached --explain .) >&2 || true
+  if (cd "$WORK/basic" && "$IYI" build other_test.iyi -Diyi_observe --stale-key "$WORK/rg3.json" -o "$WORK/rg3-probe"); then
+    python3 -c 'import json,sys; print("RG3 sites:", json.load(open(sys.argv[1])).get("rg3"))' "$WORK/rg3.json" >&2
+  fi
 fi
 expect_eq "$(printf '%s' "$second" | json_cached)" 2 "unchanged run"
 rm -rf "$CACHE/tests-v1"

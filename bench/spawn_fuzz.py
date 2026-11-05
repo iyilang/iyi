@@ -514,9 +514,10 @@ def first_text(rng, leaves, mids, cells):
 
 # ── the oracle ─────────────────────────────────────────────────────────────
 
-NOTE = re.compile(r"^(?P<file>[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): note: spawn (?P<rest>.*)$")
+# A file is relative, or absolute with a drive on Windows (`C:\...`).
+NOTE = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): note: spawn (?P<rest>.*)$")
 DUMP_SPAWN = re.compile(r"^  (?P<owner>.+?) (?P<line>\d+):(?P<col>\d+) (?P<verdict>parallel|in its unit: .*?)( \(asked\))?$")
-REFUSED = re.compile(r"^In (?P<file>[^\s:]+):(?P<line>\d+):\d+$")
+REFUSED = re.compile(r"^In (?P<file>(?:[A-Za-z]:)?[^\s:]+):(?P<line>\d+):\d+$")
 
 
 # `IYI_SPAWN_BROKEN` for the producing build and the build from artifacts
@@ -546,7 +547,7 @@ def notes_of(log, root):
         if not m:
             continue
         path = os.path.relpath(m["file"], root) if os.path.isabs(m["file"]) else m["file"]
-        path = re.sub(r"^\.\./(src|prod)/", "", path)
+        path = re.sub(r"^\.\./(src|prod)/", "", path.replace("\\", "/"))
         placed[(path, int(m["line"]), int(m["col"]))] = m["rest"]
     return placed
 
@@ -606,7 +607,7 @@ def dump_spawns(iyi, mods):
             if not name.endswith(".iyimod"):
                 continue
             path = os.path.join(dirpath, name)
-            module = os.path.relpath(path, mods)[: -len(".iyimod")]
+            module = os.path.relpath(path, mods)[: -len(".iyimod")].replace("\\", "/")
             rc, log = iyi_run(iyi, ["mod", "dump", path], mods, artifact_side=True)
             inside = False
             for line in log.splitlines():

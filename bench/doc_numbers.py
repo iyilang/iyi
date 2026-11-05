@@ -326,7 +326,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("prelude", r"standard library instead of ([\d,]+)", "README.md", 1),
     ("prelude", r"iyi's own prelude \| ([\d,]+) lines", "SPEC.md", 1),
     ("prelude_library", r"of which ([\d,]+) are the library held to the", "SPEC.md", 1),
-    ("platform_floor", r"the platform floor measures \*\*([\d,]+) lines\*\*", "SPEC.md", 1),
+    ("platform_floor", r"[Tt]he platform floor measures \*\*([\d,]+) lines\*\*", "SPEC.md", 1),
     ("platform_floor", r"floor of ([\d,]+) lines", "SPEC.md", 1),
     ("library_with_floor", r"([\d,]+) with every platform's floor", "SPEC.md", 1),
     ("library_with_floor", r"pening `src/iyi/` counts ([\d,]+)", "SPEC.md", 1),
@@ -356,7 +356,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("prelude_kb", r"beside `bin/iyi` is ([\d,]+) KB", "Makefile", 1),
     ("prelude_kb", r"ships only iyi's own ([\d,]+) KB", "Makefile", 1),
     ("prelude_kb", r"its own, and it is ([\d,]+) KB", "Makefile", 1),
-    ("bang_names", r"standard library has \*\*([\d,]+) such names\*\*", "README.md", 1),
+    ("bang_names", r"standard library has \*\*([\d,]+) such names\*\*", "README.md", 2),
     ("generated", r"edit one module in a ([\d,]+)-line project", "README.md", 1),
     ("generated", r"reads all ([\d,]+) lines\s+again", "README.md", 1),
     # The same generated project, quoted seven more times in SPEC.md — the

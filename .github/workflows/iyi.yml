@@ -2427,19 +2427,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The standard library's gates and the collector's, on Windows, in a job
-  # of their own: `bench/std_exercise.sh` runs every module's exercise from
-  # source and from its artifacts, each with its oracle and its failure
-  # proofs, and took 34 minutes on a Windows machine - more than the job
-  # above has left. The same build, then the gates. They ran on Linux and
-  # darwin only, and on Windows seven of them failed: python oracles that
-  # wrote CRLF, proofs that edited another platform's arm, a floor read
-  # with tools this platform does not have, and the collector's own
-  # exercises refusing a platform whose collector they had never been
-  # asked about.
-  # Two and a half hours: it took 56, 74 and 89 minutes on master and
-  # integration/0.20, and was cut off at ninety on a branch (job
-  # 119640679755) while its socket exercise was still going.
+  # The foundation runs on its own Windows runner. The collector and socket
+  # gates run in windows-gates alongside this job; module exercises remain
+  # in windows-std-siblings. Keep the existing timeout until the new schedule
+  # has been measured across completed runs.
   windows-std:
     runs-on: windows-2025
     timeout-minutes: 150

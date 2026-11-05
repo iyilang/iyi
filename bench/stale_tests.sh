@@ -95,6 +95,10 @@ step 1 "unchanged receipts hit after semantic analysis"
 first="$(run_json "$WORK/basic" .)"
 expect_eq "$(printf '%s' "$first" | json_cached)" 0 "recording run"
 second="$(run_json "$WORK/basic" .)"
+if [ "$(printf '%s' "$second" | json_cached)" != 2 ]; then
+  printf 'unchanged run details: %s\n' "$second" >&2
+  (cd "$WORK/basic" && "$IYI" test --cached --explain .) >&2 || true
+fi
 expect_eq "$(printf '%s' "$second" | json_cached)" 2 "unchanged run"
 rm -rf "$CACHE/tests-v1"
 after_delete="$(run_json "$WORK/basic" .)"

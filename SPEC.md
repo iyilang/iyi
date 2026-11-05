@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 28,403 lines, of which 4,650 are the library held to the 4,650 ceiling (6,906 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 135,914 lines, none of it written in iyi |
+| compiler | 136,239 lines, none of it written in iyi |
 | artifact format | `.iyimod` v60, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1030,9 +1030,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 135,914 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 136,239 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 28,403-line own prelude + 126,311 in std |
-| Specs | 21,146 lines | 16,568 for iyi |
+| Specs | 21,146 lines | 16,647 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2780,7 +2780,8 @@ trust half is `@[Share]` on a declaration, meaning shareable whenever the
 type arguments are, whatever the fields do: `Atomic(T)` carries it, and
 `src/std/list.iyi`'s `List(T)` carries it, the list this section
 said should stay short. The marker travels: a producer writes `@[Share]`
-into the artifact declaration of every type it found shareable, and a
+into the artifact declaration of every type it found shareable, exported
+or kept private (a body that travels reaches the private ones), and a
 consumer reads that and never recomputes — the bodies that said no field
 is assigned are not in the artifact, so an imported type without the
 marker is refused with the artifact as the reason. What it gates is the
@@ -3052,6 +3053,31 @@ that prints: `EARLY = f("early")` printed between the statements around
 it, and `LATE`, read by a call above its declaration, printed at that
 read. The top level the proof reads is the tree after III.5 has spliced
 the modules' initialisers in, which is the order codegen runs them in.
+That tree begins with R-2c's definition-site probes, one call of each
+fully declared def under `if false`, which never runs. The proof reads
+them for the defs they call, so a def nothing else calls is still read,
+and does not count one as a statement that may start a parallel task: it
+did, and a program with a fully declared def that spawned refused every
+claim written at module init, naming the write as after the statement at
+that `def` (`bench/safe_reach.sh`'s `startup_def.iyi`, met building
+`bench/spawn_fuzz.py`). A def that spawns starts a task where it is
+called. And a statement sees the starts of its own module and of the
+modules it imports, at any depth, and not those of a module unrelated to
+it that the program's import order happened to run first: that module's
+code names none of the statement's state, and its tasks are joined before
+the statement runs. Taking the program's first start for every statement
+made a claim written only by its module's initialiser hold in one
+importer and not another, while the artifact had recorded it as holding
+for every importer (`bench/safe_reach.sh`'s `order/`). The same holds
+of the code a statement reaches a start through: a module's statement
+counts a start only through code of its own module, of those it imports
+and of std, never through the code of a module importing it, which runs
+only after its initialiser. A proc call reaches every literal of its
+type, so std's `IyiDeferNode#run`, which `raise` reaches, reached a
+block of the program's that started a group, and `LOCK = Mutex.new { 0 }`
+in a module became a start in a program with such a block and not in
+the one that wrote the module's artifact (`bench/safe_reach.sh`'s
+`nested/`).
 
 A claim on state a module read from a `.iyimod` declares is proven by
 the build that wrote the artifact, for that program; a consumer has the
@@ -5098,6 +5124,21 @@ unsafely.
 What the walk does not enter it does not enter for either verb: std and
 the prelude, whose state is theirs to keep safe at their own boundaries,
 which is what `spawn(parallel: true)` and `Server.serve` already stand on.
+It passes through them, though, to what they call back of the program's
+own: an interpolation asks the value's `to_s`, `Array#includes?` asks
+`==`, and either may write the program's state. Stopping at std, a spawn
+whose block interpolated a value whose `to_s` appended to an unguarded
+`Array` ran in parallel and lost appends - 8,095 to 8,100 of 8,102 on four
+workers (Linux), found by `bench/spawn_fuzz.py` - where it now stays in
+its unit, the reason naming the std def on the path (``through
+`String.interpolation` → `Shown#to_s` → `SHOWN.<<` ``). What std calls
+back is settled once per compilation, a strongly connected part of std's
+call graph at a time (`ShareReach#exits_of`); on
+`bench/std_http_exercise.iyi` `iyi check --explain-spawn` takes 1.92 s
+and 663 MB to the 1.86 s and 652 MB of a walk that stops at std, where
+searching std again from every def a block calls took 2.06 s (medians of
+ten), and on iyi-web's examples, whose spawns are std's, it moved within
+noise (Linux, a 12-vCPU QEMU guest with 11 GB).
 
 **Across an artifact: BUILT.** A module built against another's `.iyimod`
 has the other's declarations and not its bodies (IV.1g), and the walk
@@ -5138,10 +5179,32 @@ wrote the artifact. The claim itself does not cross: the annotation does
 not travel with a constant or a class variable, so a body that travelled
 and names the state reads it as unclaimed. A Crystal shard's boundary
 (`iyi bind`) has no `Reaches` section and is read as not known.
+
+The same holds of the module's own spawns, which the artifact carries as
+machine code to every importer: one the producing build placed in
+parallel on a claim it proved only for itself would run in parallel in a
+consumer that breaks the claim. A module whose `fill` spawned tasks
+appending behind a lock to a claimed `ROWS` was written with those tasks
+in parallel, and a consumer appending through the module's unlocked `add`
+beside them - which its own build from source refused the claim for -
+lost appends (39,299 of 40,000 on four workers, Linux; found by
+`bench/spawn_fuzz.py`). So a build that writes artifacts places a spawn
+written in one of those modules in parallel on a claim only when the
+claim holds for every importer; otherwise the spawn goes back to its
+unit once the proof has run, before code is generated, saying why
+(`Program#iyi_settle_claimed_spawns`). The producing program's own binary
+is the same code, and keeps the same spawn in its unit.
+
 `bench/spawn_eligible.sh` gates all of it beside broken copies through
 `IYI_SPAWN_BROKEN`: an artifact written without the section, a function
-from an artifact read as reaching nothing, and an artifact that takes
-every proven claim to hold for every importer.
+from an artifact read as reaching nothing, an artifact that takes every
+proven claim to hold for every importer, and one whose own spawns stand
+on a claim proven for its producer alone. `bench/spawn_fuzz.sh` holds the
+whole of it differentially: generated programs of two and three levels of
+modules, each built from source and from artifacts, where the artifact
+build may keep a spawn in its unit that the source build runs in parallel
+and never the other way, and both builds' output on four workers must be
+what one worker prints.
 
 **2. Otherwise, the unit, exactly as before.** A spawn that is not
 eligible runs the body `spawn` always ran: a task of its spawner's unit,

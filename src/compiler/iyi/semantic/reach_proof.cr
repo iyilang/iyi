@@ -222,8 +222,18 @@ module Iyi
     @occurrences = [] of Occurrence
     @prelude = {} of String => Bool
     @statement_starts = [] of Bool
-    @first_start = Int32::MAX
-    @first_start_at : Location? = nil
+    # The top-level statements that never run: `if false`, which is how
+    # R-2c's definition-site probes call each fully declared def once
+    # (`DefinitionTyping`), prepended to the program. They are read for
+    # the defs they call, so a def only a probe calls is still read, and
+    # are not a start: a probe calling a def that spawns made statement 0
+    # the first parallel task, and refused every claim written at module
+    # init after it (`bench/spawn_fuzz.py`).
+    @dead_statements = Set(Int32).new
+    # For each top-level statement, the first statement at or before it
+    # that may start a parallel task its module can see (`settle_starts`),
+    # or `Int32::MAX`.
+    @start_before = [] of Int32
     @written = Written.new
     @escaped = Written.new
     @state_out = {} of Int32 => Set(UInt64)
@@ -311,7 +321,7 @@ module Iyi
           return false if fired?(event.cause, escapes: true)
           next unless fired?(event.cause, escapes: false)
           origin = event.origin
-          return false unless origin && origin.kind.top_level? && origin.index < @first_start
+          return false unless origin && origin.kind.top_level? && before_start?(origin.index)
           written = event.at.try { |place| (place.expanded_location || place).filename }
           return false unless written == file
         end
@@ -488,7 +498,7 @@ module Iyi
     end
 
     def note_statement_start(index : Int32) : Nil
-      @statement_starts[index] = true if index >= 0
+      @statement_starts[index] = true if index >= 0 && !@dead_statements.includes?(index)
     end
 
     # Every callable the program may run, read once for its calls, where
@@ -497,6 +507,10 @@ module Iyi
       statements = [] of ASTNode
       flatten(@root, statements)
       @statement_starts = Array.new(statements.size, false)
+      statements.each_with_index do |statement, index|
+        cond = statement.as?(If).try(&.cond)
+        @dead_statements << index if cond.is_a?(BoolLiteral) && !cond.value
+      end
       main = Callable.new(@callables.size, @root, [] of String, "the program's top level", nil, false)
       main.statements = statements
       @callables << main
@@ -699,16 +713,139 @@ module Iyi
       end
 
       main = @main.not_nil!
+      files = statement_files
+      seen_from = {} of String => Set(Int32)
       main.sites.each do |site|
-        @statement_starts[site.stmt] = true if site.stmt >= 0 && site.callee.starts?
+        next if @dead_statements.includes?(site.stmt)
+        next unless site.stmt >= 0 && site.callee.starts?
+        if seen = module_starts(files[site.stmt]?, callers, proc_callers, literal_type, seen_from)
+          next unless seen.includes?(site.callee.id)
+        end
+        @statement_starts[site.stmt] = true
       end
       main.proc_sites.each do |site|
-        if site.stmt >= 0 && literals_of(site.type).any?(&.starts?)
+        next if @dead_statements.includes?(site.stmt)
+        next unless site.stmt >= 0
+        seen = module_starts(files[site.stmt]?, callers, proc_callers, literal_type, seen_from)
+        if literals_of(site.type).any? { |literal| literal.starts? && (seen.nil? || seen.includes?(literal.id)) }
           @statement_starts[site.stmt] = true
         end
       end
-      @first_start = @statement_starts.index(true) || Int32::MAX
-      @first_start_at = @statement_locations[@first_start]? if @first_start != Int32::MAX
+      settle_starts(files)
+    end
+
+    # The file each top-level statement is written in.
+    private def statement_files : Array(String?)
+      Array(String?).new(@statement_starts.size) do |index|
+        @statement_locations[index]?.try { |at| (at.expanded_location || at).filename.as?(String) }
+      end
+    end
+
+    # The callables that may start a parallel task through code a
+    # statement of the module *file* can run: the module's own, that of
+    # the modules it imports at any depth, and std's; nil for a file that
+    # sees every start (the program's own, or one no module path names).
+    # A start through code of a module it does not import - a proc
+    # literal of the program's, called by std's `IyiDeferNode#run`
+    # because a proc of its type is, or a method a subclass of the
+    # program's overrides - runs that module's code, which exists only
+    # once its initialiser has run: after this one when it imports this
+    # module, and when it does not, the task it starts names none of
+    # this module's state (`settle_starts`). Counting it made
+    # `LOCK = Mutex.new { 0 }` a start (`Mutex#initialize` → `release` →
+    # ... → `raise` → `IyiDeferNode#run` → a proc of the program whose
+    # block nests a group), and refused a claim the module's initialiser
+    # writes after it in a program with such a block, while the build that
+    # wrote the module's artifact, without one, proved it and recorded it
+    # as holding for every importer (`bench/spawn_fuzz.py`, seeds 75 and
+    # 2046). What one module sees is the same in every program that
+    # imports it, which is what lets its artifact say so.
+    private def module_starts(file : String?, callers : Hash(Int32, Array(Callable)), proc_callers : Hash(Type, Array(Callable)),
+                              literal_type : Hash(Int32, Type), cache : Hash(String, Set(Int32))) : Set(Int32)?
+      return nil unless file && file != @program.filename && @program.iyi_module_paths.has_key?(file)
+      cache[file] ||= begin
+        visible = imported_by(file)
+        reach = @program.iyi_share_reach
+        allowed = ->(callable : Callable) do
+          at = callable.a_def.try(&.location) || callable.body.location
+          written = at.try { |place| (place.expanded_location || place).filename.as?(String) }
+          written.nil? || written == file || visible.includes?(written) || reach.std_at?(at)
+        end
+        found = Set(Int32).new
+        queue = Deque(Callable).new
+        @callables.each do |callable|
+          queue << callable if callable.direct_start? && allowed.call(callable) && found.add?(callable.id)
+        end
+        while callable = queue.shift?
+          mark = ->(caller : Callable) do
+            queue << caller if caller.starts? && allowed.call(caller) && found.add?(caller.id)
+          end
+          callers[callable.id]?.try &.each { |caller| mark.call(caller) }
+          if (type = literal_type[callable.id]?)
+            proc_callers[type]?.try &.each { |caller| mark.call(caller) }
+          end
+        end
+        found
+      end
+    end
+
+    # A statement of a module's initialiser runs before the initialisers
+    # of the modules importing it and after those of the modules it
+    # imports, and in an order among the others that each program's
+    # imports decide. A task started by a module it neither imports nor is
+    # imported by cannot reach its state - that code names none of it - and
+    # is joined by its group before the next statement runs, or is a thread
+    # whose work the module's state reaches only once code importing it
+    # hands it some, after its initialiser. So the start that matters to a
+    # statement is the first at or before it in its own module or in one it
+    # imports, at any depth; a statement whose file is not a module this
+    # build read from source, the program's top level included, sees every
+    # start. Taking the program's first start for every statement refused
+    # a claim written only by its module's initialiser in a program whose
+    # imports ran an unrelated module's `LOCK = Mutex.new { 0 }` first,
+    # while the build that wrote the module's artifact, importing them the
+    # other way, proved it - and left it out of `Reaches` as holding for
+    # every importer (`robust?`), so the two builds disagreed about the same
+    # module (`bench/spawn_fuzz.py`).
+    private def settle_starts(files : Array(String?)) : Nil
+      starts = [] of Int32
+      @start_before = Array.new(@statement_starts.size, Int32::MAX)
+      @statement_starts.each_with_index do |starts_here, index|
+        starts << index if starts_here
+        if first = starts.find { |start| sees?(files[index], files[start]) }
+          @start_before[index] = first
+        end
+      end
+    end
+
+    # Whether a statement written in *file* may run beside a task a
+    # statement written in *start* started.
+    private def sees?(file : String?, start : String?) : Bool
+      return true if file.nil? || start.nil? || file == start
+      modules = @program.iyi_module_paths
+      return true unless modules.has_key?(file) && modules.has_key?(start) && file != @program.filename
+      imported_by(file).includes?(start)
+    end
+
+    # Every file *file* imports, at any depth.
+    private def imported_by(file : String) : Set(String)
+      @imported_by[file] ||= begin
+        found = Set(String).new
+        queue = (@program.iyi_module_imports[file]? || [] of String).dup
+        while other = queue.pop?
+          next unless found.add?(other)
+          @program.iyi_module_imports[other]?.try { |more| queue.concat(more) }
+        end
+        found
+      end
+    end
+
+    @imported_by = {} of String => Set(String)
+
+    # Whether the top-level statement at *index* runs before any parallel
+    # task it may run beside has started.
+    private def before_start?(index : Int32) : Bool
+      (@start_before[index]? || Int32::MAX) == Int32::MAX
     end
 
     @statement_locations = [] of Location?
@@ -742,7 +879,7 @@ module Iyi
     private def origin_context(origin : Origin) : {Bool, Bool, Lock?}
       case origin.kind
       when .top_level?
-        origin.index < @first_start ? {true, false, nil} : {false, true, nil}
+        before_start?(origin.index) ? {true, false, nil} : {false, true, nil}
       when .locked?
         {false, false, origin.lock}
       else
@@ -1033,7 +1170,7 @@ module Iyi
 
     private def origin_text(origin : Origin) : String
       if origin.kind.top_level?
-        "#{origin.text} at #{show(origin.at)}, after the statement at #{show(@first_start_at)} may start the first parallel task"
+        "#{origin.text} at #{show(origin.at)}, after the statement at #{show(@statement_locations[@start_before[origin.index]? || Int32::MAX]?)} may start the first parallel task"
       elsif at = origin.at
         "#{origin.text}, at #{show(at)}"
       else
@@ -1042,13 +1179,15 @@ module Iyi
     end
 
     # A place as the error's own header spells it: relative to the working
-    # directory when it is beneath it.
+    # directory when it is beneath it (`Iyi.relative_filename`). Chopping
+    # `Dir.current + "/"` never matched on Windows, which spells both with
+    # `\`, so the header said `unguarded.iyi:14:1` and the refusal
+    # `C:\Users\...\unguarded.iyi:18:12` (`bench/safe_reach.sh`, Windows
+    # 11).
     def show(location : Location?) : String
       file, line, column = source_place(location)
       return "an unknown place" if file.empty?
-      here = Dir.current + "/"
-      file = file[here.size..] if file.starts_with?(here)
-      "#{file}:#{line}:#{column}"
+      "#{Iyi.relative_filename(file)}:#{line}:#{column}"
     end
 
     # The file, line and column a location was written at. Code an inline

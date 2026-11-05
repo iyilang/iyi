@@ -105,10 +105,16 @@ class Iyi::Command
 
     analysis = Lsp::Analysis.new
     single = files.size == 1
-    clean = files.map { |file| fix_file(file, json_mode, analysis, rewrites[file]? || [] of {Int32, Int32, String, String}, single) }
+    # Each file's edits, starting with its `using` rewrite's; `fix_file`
+    # appends the did-you-mean edits it applies. The summary counts a file
+    # either rewrote: it counted the `using` rewrites alone, and a run that
+    # moved two files off `spawn_parallel` said "0 rewritten".
+    edits = files.map { |file| rewrites[file]? || [] of {Int32, Int32, String, String} }
+    clean = files.zip(edits).map { |file, applied| fix_file(file, json_mode, analysis, applied, single) }
     unless json_mode || single
       broken = clean.count(false)
-      puts "#{files.size} files: #{rewrites.size} rewritten, #{broken == 0 ? "every one clean" : "#{broken} still reporting an error"}"
+      rewritten = edits.count { |applied| !applied.empty? }
+      puts "#{files.size} files: #{rewritten} rewritten, #{broken == 0 ? "every one clean" : "#{broken} still reporting an error"}"
     end
     exit clean.all? ? 0 : 1
   end

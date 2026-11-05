@@ -1846,20 +1846,7 @@ module Iyi
         assoc_types = [] of String
       end
 
-      # iyi: the `Share` marker travels with the declaration (SPEC.md
-      # III.4.4): a type this build found shareable is exported wearing
-      # `@[Share]`, and a consumer trusts that rather than recomputing
-      # something it cannot — the bodies that said no field is assigned
-      # outside `initialize` are not in the artifact. Only a struct or a
-      # class has fields to be shareable over; a trait, alias or lib does
-      # not carry the marker.
-      annotations = [] of String
-      if type.is_a?(ClassType) && Iyi::Share.shareable?(type)
-        # An owning type says so, or its consumer would read it as trusted
-        # only when its arguments are, and `Mutex(Array(Int32))` would stop
-        # being Share at the artifact's edge.
-        annotations << (type.iyi_share_owns? ? "@[Share(owns: true)]" : "@[Share]")
-      end
+      annotations = iyi_share_marker(type)
       # And `@[Primitive(:ReferenceStorageType)]`, which is not decoration
       # either: the annotation is what makes the compiler create this
       # declaration as the special type whose size is the instance size of
@@ -2167,7 +2154,14 @@ module Iyi
           supertraits: [] of String,
           fields: collect_iyi_fields(declared),
           class_vars: collect_iyi_class_vars(declared),
-          annotations: iyi_read_annotations(declared),
+          # The Share marker as an exported type wears it: a private type is
+          # still reached by a body that travels, and by the reach a spawn's
+          # walk follows through one (iyi-db's `AROUND_HOOKS`, an
+          # `AroundHooks` of a `Mutex` and an `Atomic`, read by every query),
+          # and without the marker the consumer read it as not Share - a
+          # plain spawn that runs in parallel built from source stayed in its
+          # unit built from the artifact, and `spawn(parallel: true)` warned.
+          annotations: iyi_share_marker(declared) + iyi_read_annotations(declared),
           methods: iyi_carried_methods(program, filename, container, declared),
           visibility: declared.private? ? "private" : "",
           types: iyi_carried_types(program, filename, declared, path: container),
@@ -2440,7 +2434,7 @@ module Iyi
     #
     # Not the compiler's own, which `Program` declares at the top: each does
     # something besides being read, and the ones a declaration needs are
-    # written by their own rules (`@[Share]` in `iyi_type_declaration`,
+    # written by their own rules (`@[Share]` in `iyi_share_marker`,
     # `@[Flags]` on an enum, `@[Link]` on a lib). The path is an edge, for
     # `inheritance_order`: an annotation has to be declared above the type it
     # is written over.
@@ -2457,6 +2451,21 @@ module Iyi
         end
       end
       written
+    end
+
+    # iyi: the `Share` marker travels with the declaration (SPEC.md
+    # III.4.4): a type this build found shareable is written wearing
+    # `@[Share]`, exported or carried, and a consumer trusts that rather
+    # than recomputing something it cannot — the bodies that said no field
+    # is assigned outside `initialize` are not in the artifact. Only a
+    # struct or a class has fields to be shareable over; a trait, alias or
+    # lib does not carry the marker.
+    private def iyi_share_marker(type : Type) : Array(String)
+      return [] of String unless type.is_a?(ClassType) && Iyi::Share.shareable?(type)
+      # An owning type says so, or its consumer would read it as trusted
+      # only when its arguments are, and `Mutex(Array(Int32))` would stop
+      # being Share at the artifact's edge.
+      [type.iyi_share_owns? ? "@[Share(owns: true)]" : "@[Share]"]
     end
 
     # One side of a type's methods — its own, or its metaclass's.

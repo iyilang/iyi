@@ -444,6 +444,15 @@ jobs:
       - name: SafeReach is proven, not trusted (III.4.4)
         run: bash bench/safe_reach.sh
 
+      # III.4.15: generated programs of two and three levels of modules,
+      # each built from source and from its dependencies' artifacts; the
+      # artifact build never runs a spawn in parallel that the source
+      # build keeps in its unit, and both print on four workers what one
+      # worker prints. Fixed seeds, at most four minutes; three broken
+      # copies of the artifact side each caught on a seed.
+      - name: Spawn placement from artifacts, fuzzed (III.4.15)
+        run: bash bench/spawn_fuzz.sh
+
       - name: The chaos scheduler in iyi test (III.4.17)
         run: bash bench/chaos_exercise.sh
 
@@ -2276,7 +2285,9 @@ jobs:
       # proof takes the switch's restore of them out. And Crystal's library
       # bound as boundaries: `JSON`, `INI` and `XML` read Windows'
       # file-private `ConsoleUtils` in object code that travels, which the
-      # consumer could not name and so never emitted.
+      # consumer could not name and so never emitted. And SafeReach's
+      # proof, whose refusals spelled the places they name in full on
+      # Windows while the header beside them spelled them relative.
       - name: The gates that carry Windows code, on Windows
         shell: bash
         run: |
@@ -2289,6 +2300,7 @@ jobs:
           bash bench/concurrency_exercise.sh
           bash bench/parallel_exercise.sh
           bash bench/spawn_eligible.sh
+          bash bench/safe_reach.sh
           bash bench/chaos_exercise.sh
           bash bench/library_boundaries.sh
           bash bench/up_to_date.sh

@@ -338,6 +338,20 @@
 
 ### Gates
 
+- **`bench/spawn_fuzz.sh`: spawn placement from source and from
+  artifacts, compared over generated programs (SPEC.md III.4.15).**
+  `bench/spawn_fuzz.py` generates by seed programs of two and three levels
+  of modules and builds each from source and from its dependencies'
+  artifacts; the artifact build may keep a spawn in its unit that the
+  source build runs in parallel and never the other way, and both print
+  on four workers what one worker prints. CI runs seeds 0-59 in at most
+  four minutes, and four broken copies of the artifact side through
+  `IYI_SPAWN_BROKEN`, each caught on a seed clean without it. Run by hand
+  on Linux, 1,330 seeds across the generator's versions at about 2.3 s a
+  seed found the first four fixes below, and seeds 75, 2046, 2054, 2248,
+  2256, 2364 and 2388 the fifth; seeds 3000-5999 with every fix found
+  nothing, at 2.6 s a seed.
+
 - **`bench/spawn_eligible.sh` places spawns that call into an artifact
   (SPEC.md III.4.15).** A dependency compiled once to its `.iyimod` and a
   program built against it: the spawn calling the dependency's unguarded
@@ -637,6 +651,84 @@
   chan_scaling's instructions are the same.
 
 ### Fixed
+
+- **A spawn that reaches module state through what std calls back stays
+  in its unit (SPEC.md III.4.15).** The walk deciding whether a plain
+  `g.spawn` may run in parallel stopped at std, and so at the program's
+  own defs std calls: an interpolation's `to_s`, `Array#includes?`'s
+  `==`. A spawn interpolating a value whose `to_s` appended to an
+  unguarded `Array` ran in parallel and lost appends (8,095 to 8,100 of
+  8,102 on four workers; `bench/spawn_eligible.sh`'s copy with the walk
+  stopping at std printed 18,541 of 40,000; Linux). The walk now passes
+  through std to what it calls back; std's own state is still std's. `iyi
+  check --explain-spawn` of `bench/std_http_exercise.iyi`, medians of
+  ten: 1.86 s and 652 MB with the walk stopping at std, 1.92 s and 663 MB
+  passing through it (Linux, 12 vCPU). A spawn
+  that ran in parallel may now stay in its unit, and `iyi check` says
+  why. Found by `bench/spawn_fuzz.py`.
+
+- **A module's own spawn is not compiled into its artifact in parallel
+  on a claim its producer alone proved (SPEC.md III.4.15).** A build
+  writing `.iyimod`s placed a spawn in one of those modules in parallel
+  on a `@[SafeReach]` it proved for itself; the artifact carried that
+  code to consumers that break the claim. `bench/spawn_eligible.sh`'s
+  `fill`, whose tasks append behind a lock, beside a consumer appending
+  through the module's unlocked `add`, printed 39,299 of 40,000 on four
+  workers (Linux); 40,000 now. Such a spawn goes back to its unit unless
+  the claim holds for every importer; the producing program's own binary
+  is the same code and keeps it there too. Found by `bench/spawn_fuzz.py`.
+
+- **A def that spawns no longer counts as a start where it is declared
+  (SPEC.md III.4.4).** R-2c's definition-site probes, `if false` calls
+  prepended to the program, were read as statements that may start a
+  parallel task: a program with a fully declared def that spawned refused
+  every `@[SafeReach]` written at module init. Such programs now compile.
+
+- **A start in a module the writer's module does not import no longer
+  refuses its initialiser's writes (SPEC.md III.4.4).** The proof took the
+  program's first start for every statement, so whether a claim written
+  only by its module's initialiser held depended on the importer's import
+  order: the producing build proved it and left the state out of the
+  artifact's `Reaches`, the consumer's build from source refused it. A
+  statement now sees the starts of its own module and those it imports.
+
+- **A block of the importer's no longer makes a module's statement a
+  start (SPEC.md III.4.4).** A proc call reaches every literal of its
+  type, so std's `IyiDeferNode#run`, which `raise` reaches, reached any
+  `-> Nil` block of the program that started a group, and through it
+  `Mutex.new`'s initializer: a module's `LOCK = Mutex.new { 0 }` became
+  a start, and the claim its initialiser wrote after it was refused, in
+  a program with such a block, while the build that wrote the module's
+  artifact, without one, proved the claim for every importer. A module's
+  statement now counts a start only through its own module's code, its
+  imports' and std's. Found by `bench/spawn_fuzz.py` (seeds 75, 2046,
+  2054, 2248, 2256, 2364, 2388).
+
+- **A `@[SafeReach]` refusal on Windows names its places relative to the
+  working directory, as its header does.** The header said
+  `unguarded.iyi:14:1` and the write it named
+  `C:\Users\...\unguarded.iyi:18:12`; both are relative now, as on Linux
+  and macOS (`bench/safe_reach.sh`, now run on Windows too).
+
+- **`iyi fix` over several files counts every file it rewrote.** Its
+  last line, `N files: M rewritten`, counted the files whose `using` it
+  rewrote and no other: moving iyi-db off `spawn_parallel`, the run
+  printed seven `fixed ...: spawn_parallel -> spawn(parallel: true)`
+  lines in two files and then `27 files: 0 rewritten, 1 still reporting
+  an error`. It says `2 rewritten` now. `bench/verbs_exercise.sh` holds a
+  directory moved off `spawn_parallel` to `2 files: 1 rewritten`.
+
+- **A module's private types carry their `Share` marker into its
+  `.iyimod` (SPEC.md III.4.4).** A type the producer found shareable was
+  written wearing `@[Share]` only when the module exported it; a private
+  one, which a body that travels still reaches, arrived bare and read as
+  not Share. iyi-db's `AROUND_HOOKS`, an `AroundHooks` of a `Mutex` and an
+  `Atomic` that every query reads, did: built against db's artifacts,
+  `manual/load.iyi`'s plain spawn at line 42, which runs in parallel built
+  from source, stayed in its spawner's unit, and `db/parallel_test.iyi`
+  and `db/database_test.iyi` were warned that their parallel blocks reach
+  state that is not Share, as they were in 0.20.1. Both build from the
+  artifacts as from source now. Migration: none.
 
 - **A spawn that calls into a module read from its `.iyimod` is no
   longer placed in parallel blind (SPEC.md III.4.15).** A module built

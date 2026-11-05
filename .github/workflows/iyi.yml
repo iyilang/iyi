@@ -1019,6 +1019,9 @@ jobs:
           uv venv --python 3.14 /opt/oracle
           uv pip install --python /opt/oracle/bin/python -q cryptography pillow h2
           echo /opt/oracle/bin >> "$GITHUB_PATH"
+      - name: Windows gate scheduling contract
+        if: matrix.shard == 4
+        run: uv run --no-project --python /opt/oracle/bin/python --with PyYAML==6.0.3 python bench/windows_gate_schedule.py
       # std/acme's gate places whole orders with Let's Encrypt's test CA,
       # Pebble, which it builds with `go install` - and skips, saying so,
       # where there is no Go, as there was none in this container. No

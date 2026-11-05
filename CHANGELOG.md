@@ -638,6 +638,18 @@
 
 ### Fixed
 
+- **A module's private types carry their `Share` marker into its
+  `.iyimod` (SPEC.md III.4.4).** A type the producer found shareable was
+  written wearing `@[Share]` only when the module exported it; a private
+  one, which a body that travels still reaches, arrived bare and read as
+  not Share. iyi-db's `AROUND_HOOKS`, an `AroundHooks` of a `Mutex` and an
+  `Atomic` that every query reads, did: built against db's artifacts,
+  `manual/load.iyi`'s plain spawn at line 42, which runs in parallel built
+  from source, stayed in its spawner's unit, and `db/parallel_test.iyi`
+  and `db/database_test.iyi` were warned that their parallel blocks reach
+  state that is not Share, as they were in 0.20.1. Both build from the
+  artifacts as from source now. Migration: none.
+
 - **A spawn that calls into a module read from its `.iyimod` is no
   longer placed in parallel blind (SPEC.md III.4.15).** A module built
   against an artifact has the dependency's declarations and not its

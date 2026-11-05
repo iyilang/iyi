@@ -46,6 +46,7 @@
 module std/regex
 
 import std/unicode::{Unicode}
+import std/list::{List}
 
 # A pattern that is alternatives of fixed-length runs of byte classes, and
 # nothing else: no quantifier, group, anchor or `\\` class escape. Each run
@@ -68,21 +69,27 @@ import std/unicode::{Unicode}
 # masks a byte for all the runs at once. The first run to end marks the
 # leftmost start, and since every run is as long, the span is the same
 # whichever of them it was.
+#
+# Nothing here is written after `new`, which is what lets a compiled
+# pattern cross threads (`Share`, SPEC.md III.4.4): the byte tables are
+# the bytes of a `String`, which nothing writes once it is made and which
+# is read through `to_unsafe` as the text is, and the rest are `List`s.
 class RxRuns
-  @tables : Pointer(UInt8)
-  @starts : Array(Int32)
-  @lengths : Array(Int32)
-  @first : Pointer(UInt8)
+  # Each run's tables, 256 bytes an atom, the runs one after another in
+  # the order written, and each run's length in atoms.
+  @tables : String
+  @lengths : List(Int32)
+  @first : String
   # The automaton, when the shape allows it: a mask of atoms per byte, the
   # runs' first atoms, their last atoms, and the common length; zero length
-  # when it does not.
-  @masks : Pointer(UInt64)
+  # and no masks when it does not.
+  @masks : List(UInt64)
   @heads : UInt64
   @tails : UInt64
   @width : Int32
 
-  def initialize(@tables : Pointer(UInt8), @starts : Array(Int32), @lengths : Array(Int32), @first : Pointer(UInt8))
-    @masks = Pointer(UInt64).new(0_u64)
+  def initialize(@tables : String, @lengths : List(Int32), @first : String)
+    @masks = List(UInt64).new([] of UInt64)
     @heads = 0_u64
     @tails = 0_u64
     @width = 0
@@ -90,10 +97,10 @@ class RxRuns
     return if @lengths.any? { |length| length != width }
     atoms = width * @lengths.size
     return if atoms > 64
-    masks = Pointer(UInt64).malloc(256_u64)
+    masks = Array(UInt64).new(256, 0_u64)
     atom = 0
     while atom < atoms
-      table = @tables + (atom * 256).to_i64
+      table = @tables.to_unsafe + (atom * 256).to_i64
       bit = 1_u64.unsafe_shl(atom.to_u64)
       byte = 0
       while byte < 256
@@ -108,7 +115,7 @@ class RxRuns
       @tails = @tails | 1_u64.unsafe_shl((a * width + width - 1).to_u64)
       a = a + 1
     end
-    @masks = masks
+    @masks = List(UInt64).new(masks)
     @width = width
   end
 
@@ -120,7 +127,6 @@ class RxRuns
     atoms_bound = n
     tables = Pointer(UInt8).malloc((atoms_bound * 256).to_u64)
     first = Pointer(UInt8).malloc(256_u64)
-    starts = [] of Int32
     lengths = [] of Int32
     i = 0
     atoms = 0
@@ -172,7 +178,6 @@ class RxRuns
         atoms = atoms + 1
       end
       return nil if atoms == start
-      starts << start * 256
       lengths << atoms - start
       head = tables + (start * 256).to_i64
       k = 0
@@ -184,7 +189,12 @@ class RxRuns
       i = i + 1
       return nil if i >= n
     end
-    new(tables, starts, lengths, first)
+    new(bytes(tables, atoms * 256), List(Int32).new(lengths), bytes(first, 256))
+  end
+
+  # *count* bytes from *from*, kept as a string's, which nothing writes.
+  private def self.bytes(from : Pointer(UInt8), count : Int32) : String
+    String.new(count) { |into| into.copy_from(from, count) }
   end
 
   private def self.clear(table : Pointer(UInt8)) : Nil
@@ -195,11 +205,10 @@ class RxRuns
     end
   end
 
-  # Whether run *a* matches *src* at *i*, the text being *n* bytes.
-  private def run_at?(src : Pointer(UInt8), n : Int32, i : Int32, a : Int32) : Bool
-    length = @lengths.to_unsafe[a]
+  # Whether the run of *length* tables from *table* matches *src* at *i*,
+  # the text being *n* bytes.
+  private def run_at?(src : Pointer(UInt8), n : Int32, i : Int32, table : Pointer(UInt8), length : Int32) : Bool
     return false if i + length > n
-    table = @tables + @starts.to_unsafe[a].to_i64
     j = 0
     while j < length
       return false if table[src[i + j].to_i32] == 0_u8
@@ -209,19 +218,29 @@ class RxRuns
     true
   end
 
-  # The first match at or after *from*, as byte offsets.
+  # The first match at or after *from*, as byte offsets. The runs' tables
+  # lie one after another in the order written, so each run's first is
+  # found by stepping past the run before: one checked read of a `List` a
+  # run. With a list of where each run began read beside it, two a run,
+  # scanning 2 MB of words and DNA for `[cgt]gggtaaa|tttac|ab` took 5.4 ms
+  # where raw memory took 4.0; stepping, 4.19 against raw memory's 4.22.
   def search(text : String, from : Int32) : {Int32, Int32}?
     return shift_and(text, from) if @width > 0
     n = text.bytesize
     src = text.to_unsafe
-    first = @first
-    alts = @starts.size
+    first = @first.to_unsafe
+    tables = @tables.to_unsafe
+    lengths = @lengths
+    alts = lengths.size
     i = from
     while i < n
       if first[src[i].to_i32] != 0_u8
+        table = tables
         a = 0
         while a < alts
-          return {i, i + @lengths.to_unsafe[a]} if run_at?(src, n, i, a)
+          length = lengths[a]
+          return {i, i + length} if run_at?(src, n, i, table, length)
+          table = table + (length * 256).to_i64
           a = a + 1
         end
       end
@@ -248,9 +267,12 @@ class RxRuns
 
   # Whether some run spans the whole of *text*, as `match?` asks.
   def whole?(text : String) : Bool
+    table = @tables.to_unsafe
     a = 0
-    while a < @starts.size
-      return true if @lengths[a] == text.bytesize && run_at?(text.to_unsafe, text.bytesize, 0, a)
+    while a < @lengths.size
+      length = @lengths[a]
+      return true if length == text.bytesize && run_at?(text.to_unsafe, text.bytesize, 0, table, length)
+      table = table + (length * 256).to_i64
       a = a + 1
     end
     false
@@ -499,6 +521,14 @@ pub struct Regex
     end
   end
 
+  # A compiled pattern is `Share` (SPEC.md III.4.4), so one constant may
+  # be matched from every worker at once: a match reads the pattern and
+  # writes none of it - the thread lists and capture positions it steps
+  # are an `RxRun` each match makes for itself - and every part is kept
+  # where nothing could write it, the machine's states in `List`s, the
+  # byte tables in strings. Held in `Array`s, which nothing wrote after
+  # the compile either, the type was refused, and a program reaching one
+  # from a parallel block was warned about it.
   @nfa : RxNfa
   # The pattern's own text when it holds no operator at all - `B`, `ggt`,
   # `tHa` - found by comparing bytes, the way a string is searched, rather
@@ -514,9 +544,9 @@ pub struct Regex
   @options : Options
   # Each group's name, nil for an unnamed one; group 0, the whole match,
   # is first and has none.
-  @names : Array(String?)
+  @names : List(String?)
 
-  def initialize(@nfa : RxNfa, @literal : String?, @runs : RxRuns?, @source : String, @options : Options, @names : Array(String?))
+  def initialize(@nfa : RxNfa, @literal : String?, @runs : RxRuns?, @source : String, @options : Options, @names : List(String?))
   end
 
   # The machine is compiled first either way: it is what refuses a pattern
@@ -531,7 +561,7 @@ pub struct Regex
     plain = options.value == 0 && !pattern.includes?("\u{FFFD}")
     literal = plain ? literal_of(pattern) : nil
     runs = plain && literal.nil? ? RxRuns.parse(pattern) : nil
-    new(nfa, literal, runs, pattern, options, compiler.names)
+    new(nfa, literal, runs, pattern, options, List(String?).new(compiler.names))
   end
 
   # The other library's name for `compile`.
@@ -890,6 +920,10 @@ end
 # The machine's states, as `kind`, `arg`, `out1` and `out2` side by side.
 # A class is an ASCII bitmap in two words and, for the characters past
 # ASCII, sorted ranges searched by halves.
+#
+# Made by `RxBuilder#freeze` once the compiler has added and patched every
+# state, and written by nothing after: every field is a `List` or a number
+# set in `new`, which is what makes a compiled `Regex` Share.
 class RxNfa
   # A character, `arg` its code point.
   CHAR = 0
@@ -915,6 +949,78 @@ class RxNfa
   # `$` under `m`: the end of the text or just before a newline.
   LINE_END = 12
 
+  getter kind : List(Int32)
+  getter arg : List(Int32)
+  getter out1 : List(Int32)
+  getter out2 : List(Int32)
+  getter start : Int32
+  getter count : Int32
+  @low : List(UInt64)
+  @high : List(UInt64)
+  @ranges : List(List(Int32))
+
+  def initialize(@kind : List(Int32), @arg : List(Int32), @out1 : List(Int32), @out2 : List(Int32), @start : Int32, @count : Int32, @low : List(UInt64), @high : List(UInt64), @ranges : List(List(Int32)))
+  end
+
+  def class_has?(id : Int32, cp : Int32) : Bool
+    if cp < 64
+      return @low[id].unsafe_shr(cp.to_u64) & 1_u64 != 0_u64
+    end
+    if cp < 128
+      return @high[id].unsafe_shr((cp - 64).to_u64) & 1_u64 != 0_u64
+    end
+    ranges = @ranges[id]
+    low = 0
+    high = ranges.size // 2
+    while low < high
+      middle = (low + high) // 2
+      if ranges[2 * middle + 1] < cp
+        low = middle + 1
+      else
+        high = middle
+      end
+    end
+    low < ranges.size // 2 && ranges[2 * low] <= cp
+  end
+
+  def self.consumes?(kind : Int32) : Bool
+    kind == CHAR || kind == ANY_BUT_NEWLINE || kind == CLASS || kind == ANY
+  end
+
+  # The leftmost-first match at or after `from`; an empty match at
+  # `forbid` does not count.
+  def search_from(text : String, from : Int32, forbid : Int32 = -1) : {Int32, Int32}?
+    run = RxRun.new(self, text, 2)
+    run.search(from, false, forbid) ? run.span : nil
+  end
+
+  # A match of the whole text, or nil.
+  def full(text : String) : {Int32, Int32}?
+    run = RxRun.new(self, text, 2)
+    run.search(0, true, -1) ? run.span : nil
+  end
+
+  # The leftmost-first match at or after `from` with the first *slots*
+  # capture positions, two a group.
+  def capture(text : String, from : Int32, forbid : Int32, slots : Int32) : Array(Int32)?
+    run = RxRun.new(self, text, slots)
+    run.search(from, false, forbid) ? run.slots : nil
+  end
+
+  # The leftmost-first match that begins at `from` and nowhere else, with
+  # the first *slots* capture positions. No thread starts after `from`, so
+  # the run ends as soon as the threads that did start have all died: the
+  # cost is the match's length, not the rest of the text's.
+  def capture_at(text : String, from : Int32, slots : Int32) : Array(Int32)?
+    run = RxRun.new(self, text, slots)
+    run.search(from, false, -1, true) ? run.slots : nil
+  end
+end
+
+# The machine while `RxCompiler` builds it: states added, and their outs
+# patched in place as the fragments around them are parsed, then frozen
+# into the `RxNfa` the matches read.
+class RxBuilder
   getter kind : Array(Int32)
   getter arg : Array(Int32)
   getter out1 : Array(Int32)
@@ -975,33 +1081,7 @@ class RxNfa
     @low << low
     @high << high
     @ranges << past
-    add(CLASS, @low.size - 1)
-  end
-
-  def class_has?(id : Int32, cp : Int32) : Bool
-    if cp < 64
-      return @low.to_unsafe[id].unsafe_shr(cp.to_u64) & 1_u64 != 0_u64
-    end
-    if cp < 128
-      return @high.to_unsafe[id].unsafe_shr((cp - 64).to_u64) & 1_u64 != 0_u64
-    end
-    ranges = @ranges.to_unsafe[id]
-    data = ranges.to_unsafe
-    low = 0
-    high = ranges.size // 2
-    while low < high
-      middle = (low + high) // 2
-      if data[2 * middle + 1] < cp
-        low = middle + 1
-      else
-        high = middle
-      end
-    end
-    low < ranges.size // 2 && data[2 * low] <= cp
-  end
-
-  def self.consumes?(kind : Int32) : Bool
-    kind == CHAR || kind == ANY_BUT_NEWLINE || kind == CLASS || kind == ANY
+    add(RxNfa::CLASS, @low.size - 1)
   end
 
   def patch(id : Int32, out1 : Int32, out2 : Int32 = -1) : Nil
@@ -1009,33 +1089,11 @@ class RxNfa
     @out2[id] = out2
   end
 
-  # The leftmost-first match at or after `from`; an empty match at
-  # `forbid` does not count.
-  def search_from(text : String, from : Int32, forbid : Int32 = -1) : {Int32, Int32}?
-    run = RxRun.new(self, text, 2)
-    run.search(from, false, forbid) ? run.span : nil
-  end
-
-  # A match of the whole text, or nil.
-  def full(text : String) : {Int32, Int32}?
-    run = RxRun.new(self, text, 2)
-    run.search(0, true, -1) ? run.span : nil
-  end
-
-  # The leftmost-first match at or after `from` with the first *slots*
-  # capture positions, two a group.
-  def capture(text : String, from : Int32, forbid : Int32, slots : Int32) : Array(Int32)?
-    run = RxRun.new(self, text, slots)
-    run.search(from, false, forbid) ? run.slots : nil
-  end
-
-  # The leftmost-first match that begins at `from` and nowhere else, with
-  # the first *slots* capture positions. No thread starts after `from`, so
-  # the run ends as soon as the threads that did start have all died: the
-  # cost is the match's length, not the rest of the text's.
-  def capture_at(text : String, from : Int32, slots : Int32) : Array(Int32)?
-    run = RxRun.new(self, text, slots)
-    run.search(from, false, -1, true) ? run.slots : nil
+  # The machine as built, copied where nothing writes it.
+  def freeze : RxNfa
+    ranges = Array(List(Int32)).new(@ranges.size)
+    @ranges.each { |pairs| ranges << List(Int32).new(pairs) }
+    RxNfa.new(List(Int32).new(@kind), List(Int32).new(@arg), List(Int32).new(@out1), List(Int32).new(@out2), @start, @count, List(UInt64).new(@low), List(UInt64).new(@high), List(List(Int32)).new(ranges))
   end
 end
 
@@ -1414,7 +1472,7 @@ class RxCompiler
   @src : Pointer(UInt8)
   @n : Int32
   @i : Int32
-  @nfa : RxNfa
+  @nfa : RxBuilder
   @depth : Int32
   # How many times the counts enclosing the cursor copy what it parses.
   @copies : Int32
@@ -1444,7 +1502,7 @@ class RxCompiler
     @src = @pat.to_unsafe
     @n = @pat.bytesize
     @i = 0
-    @nfa = RxNfa.new
+    @nfa = RxBuilder.new
     @depth = 0
     @copies = 1
     @stamp = [] of Int32
@@ -1501,7 +1559,7 @@ class RxCompiler
     match = @nfa.add(RxNfa::MATCH)
     patch_outs(frag, match)
     @nfa.start = frag[0]
-    @nfa
+    @nfa.freeze
   end
 
   # A fragment: its first state, and the states whose next out is still

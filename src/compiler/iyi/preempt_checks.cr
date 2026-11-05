@@ -52,6 +52,10 @@ module Iyi::PreemptChecks
   # at every back-edge (`-Dpreempt_check_accessor`, `Compiler#preempt_checks`).
   class_property? accessor_only = false
 
+  # darwin's anchor made in the entry block, as it was before `Loops`
+  # (`-Dpreempt_anchor_entry`, `Compiler#preempt_checks`).
+  class_property? anchor_at_entry = false
+
   # *flag* is the preemption word's global (`IyiWorkers::preempt`), and the
   # thread-local accessor is `*` and that name.
   def self.run(mod : LLVM::Module, flag : String, linux : Bool, aarch64 : Bool) : Nil
@@ -70,14 +74,43 @@ module Iyi::PreemptChecks
       end
       calls = entries[fn.address]?
       unless latches.empty? && calls.nil?
-        anchor = entry_value(mod, builder, ctx, fn, flag, linux, aarch64)
-        latches.each { |latch| check(mod, builder, ctx, latch, LibLLVM.get_basic_block_terminator(latch), flag, linux, aarch64, anchor) }
+        sites = latches.map { |latch| {latch, LibLLVM.get_basic_block_terminator(latch)} }
         if calls
+          # The instruction after each call that is not itself one: two
+          # functions on a cycle inlined one into the other leave their
+          # calls side by side, and the first call's next instruction was
+          # the second, erased before its check went in - a check on a
+          # freed instruction, which crashed the compiler on
+          # bench/std_http_latency.iyi in --release. Two calls in a row
+          # make one check.
+          erased = calls.map(&.address).to_set
+          seen = Set(UInt64).new
           calls.each do |call|
             following = LibLLVM.get_next_instruction(call)
-            LibLLVM.instruction_erase_from_parent(call)
-            check(mod, builder, ctx, LibLLVM.get_instruction_parent(following), following, flag, linux, aarch64, anchor)
+            while erased.includes?(following.address)
+              following = LibLLVM.get_next_instruction(following)
+            end
+            sites << {LibLLVM.get_instruction_parent(following), following} if seen.add?(following.address)
           end
+          calls.each { |call| LibLLVM.instruction_erase_from_parent(call) }
+        end
+        # Every anchor first, on the function as optimisation left it, and
+        # then every check, which splits the blocks it is in.
+        anchors = if placed?(mod, linux, aarch64)
+                    loops = Loops.new(fn)
+                    made = {} of UInt64 => LLVM::Value
+                    sites.map do |block, _|
+                      spot = loops.outside(block)
+                      made.put_if_absent(spot.try(&.address) || 0_u64) { entry_value(mod, builder, ctx, fn, flag, linux, aarch64, spot) }
+                    end
+                  else
+                    anchor = entry_value(mod, builder, ctx, fn, flag, linux, aarch64, nil)
+                    sites.map { anchor }
+                  end
+        # A check's block is asked where it is now: one check before it
+        # may have moved its instruction into a block of its own.
+        sites.each_with_index do |(_, first), index|
+          check(mod, builder, ctx, LibLLVM.get_instruction_parent(first), first, flag, linux, aarch64, anchors[index])
         end
       end
       fn = LibLLVM.get_next_function(fn)
@@ -320,7 +353,8 @@ module Iyi::PreemptChecks
   end
 
   # What every check in function *fn* starts from, made once in its entry
-  # block: on Linux the word's offset from the thread pointer, a link-time
+  # block, or on darwin arm64 at the end of *spot* (`Loops#outside`): on
+  # Linux the word's offset from the thread pointer, a link-time
   # constant the same on every thread; on x86-64 Windows the word's
   # offset from `%gs`, a TEB slot the pool claims (`IyiWorkers::preempt_slot`,
   # the flag's global and `_slot`); on darwin arm64 a pair, the index of
@@ -338,7 +372,21 @@ module Iyi::PreemptChecks
   # the block this thread's slot holds. A worker has read the word before
   # it runs a task (`preempt_word`), so a task that resumes on another
   # worker finds a block in that worker's slot.
-  private def self.entry_value(mod, builder, ctx, fn, flag, linux, aarch64) : LLVM::Value
+  #
+  # That call was in the entry block once, and every call of a function
+  # with a loop paid it, whether the loop ran or not: `String::Builder#<<`,
+  # whose loops a short string never enters, at every append. On an M2
+  # Pro (macOS 26.6, release, best of seven, eleven interleaved rounds,
+  # load 3 to 18) a join of 1,000,000 strings took 1.37x to 1.43x what it
+  # took with the library unchecked. It is made where the outermost loop
+  # around the checks it serves is entered, so a loop that never runs
+  # costs nothing and an inner loop's entries from its outer one make no
+  # call: the join then took 1.08x to 1.18x over three such runs, and a
+  # sort of 1,000,000 `Int64`s 1.08x to 1.14x against 1.10x to 1.12x
+  # before. What is left is the check's own read; one that loaded a plain
+  # global instead, a probe that preempts nothing, cost the sort 1.05x to
+  # 1.07x and the join 1.07x to 1.12x.
+  private def self.entry_value(mod, builder, ctx, fn, flag, linux, aarch64, spot) : LLVM::Value
     entry = LibLLVM.get_first_basic_block(fn)
     LibLLVM.position_builder_before(builder, LibLLVM.get_first_instruction(entry))
     int64 = ctx.int64
@@ -356,11 +404,14 @@ module Iyi::PreemptChecks
       slot_global = mod.globals[slot_name]? || LLVM::Value.new(LibLLVM.add_global(mod, int64, slot_name))
       return builder.load(int64, slot_global)
     end
+    # The accessor's answer is a slot in the frame, in the entry block
+    # where LLVM keeps a frame's slots; the rest goes at the end of *spot*.
+    answer = builder.alloca(ctx.pointer)
+    LibLLVM.position_builder_before(builder, LibLLVM.get_basic_block_terminator(spot)) if spot
     global_value = thread_local(mod, flag, int64, LLVM::ThreadLocalMode::GeneralDynamic)
     descriptor = pure_asm(builder, ctx, int64, "adrp $0, ${1:c}@TLVPPAGE\n\tldr $0, [$0, ${1:c}@TLVPPAGEOFF]", global_value)
     key_address = builder.int2ptr(builder.add(descriptor, int64.const_int(8)), ctx.pointer)
     slot = builder.zext(builder.load(ctx.int32, key_address), int64)
-    answer = builder.alloca(ctx.pointer)
     accessor_type = LLVM::Type.function([ctx.pointer], ctx.void)
     builder.call accessor_type, accessor(mod, flag, accessor_type), [answer]
     word_address = builder.ptr2int(builder.load(ctx.pointer, answer), int64)
@@ -444,5 +495,136 @@ module Iyi::PreemptChecks
 
   private def self.windows?(mod) : Bool
     String.new(LibLLVM.get_target(mod)).includes?("windows")
+  end
+
+  # Whether a check's anchor goes where its loops are entered rather than
+  # in the entry block: darwin arm64's, the one that calls the accessor
+  # (`entry_value`). Linux's is a constant and Windows' one load, and they
+  # stay where they were measured.
+  private def self.placed?(mod, linux, aarch64) : Bool
+    !linux && aarch64 && !windows?(mod) && !accessor_only? && !anchor_at_entry?
+  end
+
+  # A function's natural loops, found from its dominator tree, for where
+  # an anchor goes (`outside`).
+  private class Loops
+    @blocks = [] of LibLLVM::BasicBlockRef
+    @order = {} of UInt64 => Int32
+    @predecessors = [] of Array(Int32)
+    @idom = [] of Int32
+    # Each header's loop: the blocks of every back-edge to it.
+    @bodies = {} of Int32 => Set(Int32)
+
+    def initialize(fn : LibLLVM::ValueRef)
+      number(fn)
+      dominators
+      @blocks.each_with_index do |block, index|
+        each_successor(block) do |successor|
+          header = @order[successor.address]
+          next unless dominates?(header, index)
+          body = @bodies[header] ||= Set{header}
+          stack = [index]
+          until stack.empty?
+            at = stack.pop
+            next unless body.add?(at)
+            @predecessors[at].each { |predecessor| stack << predecessor }
+          end
+        end
+      end
+    end
+
+    # The block whose end an anchor for a check in *block* goes at: the
+    # one way into the outermost loop around *block*, or that loop
+    # header's immediate dominator where there are more ways in. Nil for
+    # a block in no loop, whose anchor goes in the entry block.
+    def outside(block : LibLLVM::BasicBlockRef) : LibLLVM::BasicBlockRef?
+      return nil unless at = @order[block.address]?
+      header = -1
+      size = 0
+      @bodies.each do |head, body|
+        next unless body.size > size && body.includes?(at)
+        header = head
+        size = body.size
+      end
+      return nil if header < 0
+      body = @bodies[header]
+      ways = @predecessors[header].reject { |predecessor| body.includes?(predecessor) }
+      @blocks[ways.size == 1 ? ways[0] : @idom[header]]
+    end
+
+    private def each_successor(block, &) : Nil
+      terminator = LibLLVM.get_basic_block_terminator(block)
+      return if terminator.null?
+      LibLLVM.get_num_successors(terminator).times { |at| yield LibLLVM.get_successor(terminator, at) }
+    end
+
+    # The blocks reached from the entry, numbered in reverse postorder,
+    # and each one's predecessors among them.
+    private def number(fn) : Nil
+      entry = LibLLVM.get_first_basic_block(fn)
+      postorder = [] of LibLLVM::BasicBlockRef
+      seen = Set{entry.address}
+      stack = [{entry, 0}]
+      until stack.empty?
+        block, at = stack.last
+        terminator = LibLLVM.get_basic_block_terminator(block)
+        if !terminator.null? && at < LibLLVM.get_num_successors(terminator)
+          stack[-1] = {block, at + 1}
+          successor = LibLLVM.get_successor(terminator, at)
+          stack << {successor, 0} if seen.add?(successor.address)
+        else
+          postorder << stack.pop[0]
+        end
+      end
+      @blocks = postorder.reverse!
+      @blocks.each_with_index { |block, index| @order[block.address] = index }
+      @predecessors = Array(Array(Int32)).new(@blocks.size) { [] of Int32 }
+      @blocks.each_with_index do |block, index|
+        each_successor(block) { |successor| @predecessors[@order[successor.address]] << index }
+      end
+    end
+
+    # Cooper, Harvey and Kennedy's "A Simple, Fast Dominance Algorithm":
+    # each block's immediate dominator by number, the entry its own.
+    private def dominators : Nil
+      @idom = Array(Int32).new(@blocks.size, -1)
+      @idom[0] = 0
+      changed = true
+      while changed
+        changed = false
+        (1...@blocks.size).each do |index|
+          found = -1
+          @predecessors[index].each do |predecessor|
+            next if @idom[predecessor] < 0
+            found = found < 0 ? predecessor : meet(predecessor, found)
+          end
+          next if found == @idom[index]
+          @idom[index] = found
+          changed = true
+        end
+      end
+    end
+
+    private def meet(a : Int32, b : Int32) : Int32
+      while a != b
+        while a > b
+          a = @idom[a]
+        end
+        while b > a
+          b = @idom[b]
+        end
+      end
+      a
+    end
+
+    # Whether block *a* dominates block *b*, by number: *b*'s chain of
+    # immediate dominators, each numbered before the block below it,
+    # reaches *a*.
+    private def dominates?(a : Int32, b : Int32) : Bool
+      while b > a
+        b = @idom[b]
+      end
+      b == a
+    end
   end
 end

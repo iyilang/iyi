@@ -43,11 +43,27 @@ pub def serve(client : IyiSocket) : UInt64
     # operations. Between two of them - the read answered, the write not
     # yet armed - the fiber's field is all that holds it, so a collection
     # is made exactly there and the OVERLAPPED asked about.
+    #
+    # Found freed, the run ends here with `__iyi_exit`, not a panic.
+    # From this point the heap is corrupt by design. Every fiber's
+    # OVERLAPPED is a chunk the allocator may have handed to another
+    # object, and the kernel still writes into it. A freed one's owner
+    # word, the scheduler thread its packet is for, holds whatever the
+    # chunk's new owner wrote there, and the thread that takes the
+    # packet off the port reads that word (`IyiScheduler.take_packet`).
+    # A panic cancels the sibling tasks and its join waits for them, and
+    # a cancelled operation is waited out until its packet comes. With
+    # the word garbage, the packet was dropped and the join never ended.
+    # The run printed its panic line and timed out instead of exiting 1:
+    # exit 124 in job 123987176637, and 2 runs in 10 on the user's
+    # Windows 11 machine (12 logical processors), where a debug line in
+    # `take_packet` named the two packets it dropped.
     {% if flag?(:win32) %}
       IyiMark.collect
       overlapped = IyiScheduler.current.wait_overlapped.address
       if IyiMark.flags(overlapped) & IyiHeap::FREE_FLAG != 0
-        raise "FAIL: a collection between a connection's read and its write freed the OVERLAPPED the write hands the kernel"
+        print "FAIL: a collection between a connection's read and its write freed the OVERLAPPED the write hands the kernel\n"
+        __iyi_exit(1)
       end
     {% end %}
     client.write("reply-" + request.size.to_s)

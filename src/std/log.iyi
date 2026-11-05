@@ -23,6 +23,18 @@
 # Logging is synchronous: the entry is written before the call returns,
 # in the calling thread, with no queue between.
 #
+# **Threads.** A logger is `Share` (SPEC.md III.4.4), so `LOG =
+# Log.for("app")` may be reached from a parallel block, a server's
+# handler or a route, and every worker logs through it at once. Its level
+# is an `Atomic`, so a call below it costs one load per logger up to the
+# one that has a level; its backend and its children are behind locks;
+# and each backend writes behind its own, a line at a time, so the lines
+# of twelve workers never cut into one another. A backend or formatter
+# of your own is held to the same: it must be Share - a class with no
+# fields, or its state behind a `Mutex` (std/mutex) - and one that is
+# not is refused where std/log hands a backend to its lock, naming the
+# field.
+#
 # **Data.** An entry carries keys and values besides its message, from
 # three places, each over the one before:
 #
@@ -44,6 +56,7 @@ module std/log
 import std/time::{Time}
 import std/tuple
 import std/mutex::{Mutex}
+import std/list::{List}
 
 pub enum Severity
   Trace  = 0
@@ -115,10 +128,34 @@ pub struct Entry
   getter message : String
   getter timestamp : Time
   # The task's context, the logger's bound data and the call's own, in
-  # that order, a later key's value over an earlier's.
-  getter data : Hash(String, String)
+  # that order, a later key's value over an earlier's in the earlier's
+  # place, as a `Hash` keeps them. Kept as pairs, which nothing writes once
+  # the entry is made, so an entry is `Share` and goes into a
+  # `MemoryBackend`'s lock from any thread; `data` is a hash of them.
+  getter pairs : List({String, String})
 
-  def initialize(@source : String, @severity : Severity, @message : String, @timestamp : Time = Time.utc, @data : Hash(String, String) = {} of String => String)
+  NO_PAIRS = List({String, String}).new([] of {String, String})
+
+  def initialize(@source : String, @severity : Severity, @message : String, @timestamp : Time = Time.utc, data : Hash(String, String) = {} of String => String)
+    @pairs = data.empty? ? NO_PAIRS : Entry.pairs_of(data)
+  end
+
+  # The data, as a hash of the caller's own.
+  def data : Hash(String, String)
+    found = {} of String => String
+    i = 0
+    while i < @pairs.size
+      pair = @pairs[i]
+      found[pair[0]] = pair[1]
+      i = i + 1
+    end
+    found
+  end
+
+  protected def self.pairs_of(data : Hash(String, String)) : List({String, String})
+    pairs = Array({String, String}).new(data.size)
+    data.each { |key, value| pairs << {key, value} }
+    List({String, String}).new(pairs)
   end
 end
 
@@ -150,21 +187,16 @@ end
 
 pub abstract class Formatter
   abstract def format(entry : Entry) : String
-
-  def format(entry : Entry, io : IO) : Nil
-    io.write(format(entry))
-    io.write("\n")
-  end
 end
 
 pub class DefaultFormatter < Formatter
   def format(entry : Entry) : String
     head = "#{entry.timestamp.to_rfc3339(6)} #{entry.severity.label}"
     text = entry.source.empty? ? "#{head} - #{entry.message}" : "#{head} - #{entry.source}: #{entry.message}"
-    return text if entry.data.empty?
-    pairs = [] of String
-    entry.data.each { |key, value| pairs << "#{key}=#{quoted(value)}" }
-    "#{text} -- #{pairs.join(" ")}"
+    return text if entry.pairs.empty?
+    written = Array(String).new(entry.pairs.size)
+    entry.pairs.each { |pair| written << "#{pair[0]}=#{quoted(pair[1])}" }
+    "#{text} -- #{written.join(" ")}"
   end
 
   # A value as it is, unless a reader could not tell where it ends.
@@ -179,45 +211,89 @@ pub abstract class Backend
   abstract def close : Nil
 end
 
+# Each entry as one line to an IO: formatted in the calling thread, then
+# written with its newline holding the backend's lock, so the lines of
+# workers logging at once come out whole, never one inside another.
+# Twelve workers writing 100,000 lines each to one file through it as it
+# was, writing to the IO itself with no lock, left 2,563 to 4,378 of the
+# 1.2 million torn or lost in five runs, at 1,008 ns a line between them;
+# through it locked none, at 864 (--release, x86_64 Linux, 12 cores).
+#
+# The `IO` handed to `new` is not Share - its buffer is written in place,
+# and two threads writing one tear what they write - so the backend keeps
+# a handle of its own on the IO's descriptor behind its `Mutex`, as
+# `AsyncBackend`'s thread does, and flushes it after every line. What the
+# program writes to that IO itself goes out when the IO flushes, which
+# STDOUT and STDERR do at every write.
 pub class IOBackend < Backend
-  property formatter : Formatter
-  getter io : IO
+  getter formatter : Formatter
+  @out : Mutex(IyiIO)
 
-  def initialize(@io : IO, @formatter : Formatter = DefaultFormatter.new)
+  def initialize(io : IO, @formatter : Formatter = DefaultFormatter.new)
+    handle = io.handle
+    raise "IOBackend: the IO has no descriptor to write to" if handle < 0_i64
+    @out = Mutex.new { IyiIO.new(handle) }
   end
 
   def write(entry : Entry) : Nil
-    @formatter.format(entry, @io)
-    @io.flush
+    line = @formatter.format(entry)
+    while true
+      return unless @out.lock { |io| IOBackend.put(io, line) }.is_a?(Cancelled)
+    end
   end
 
+  # The line and its end into the buffer, then out in one write.
+  protected def self.put(io : IyiIO, line : String) : Nil
+    io.write(line)
+    io.write("\n")
+    io.flush
+  end
+
+  # Nothing is held back: each line was written as it came.
   def close : Nil
-    @io.flush
   end
 end
 
+# The entries, kept for a test to read back, behind a lock: the workers of
+# a parallel test may all log to one.
 pub class MemoryBackend < Backend
-  property formatter : Formatter
-  getter entries : Array(Entry)
+  getter formatter : Formatter
+  @store : Mutex(Array(Entry))
 
   def initialize(@formatter : Formatter = DefaultFormatter.new)
-    @entries = [] of Entry
+    @store = Mutex.new { [] of Entry }
   end
 
   def write(entry : Entry) : Nil
-    @entries << entry
+    while true
+      done = @store.lock do |entries|
+        entries << entry
+      end
+      return unless done.is_a?(Cancelled)
+    end
   end
 
   def close : Nil
+  end
+
+  # The entries written so far, oldest first: a copy, since the backend's
+  # own are behind its lock, where another thread may be adding one.
+  def entries : Array(Entry)
+    while true
+      held = @store.get { |entries| List(Entry).new(entries) }
+      return held.to_a unless held.is_a?(Cancelled)
+    end
   end
 
   # The entries as the formatter would have written them.
   def output : Array(String)
-    @entries.map { |e| @formatter.format(e) }
+    entries.map { |e| @formatter.format(e) }
   end
 
   def clear : Nil
-    @entries = [] of Entry
+    while true
+      return unless @store.update { |_| [] of Entry }.is_a?(Cancelled)
+    end
   end
 end
 
@@ -233,27 +309,42 @@ end
 #
 # `close` waits for every queued entry to be written and the thread to
 # end; an entry written after it is refused. Entries queued when a program
-# ends without `close` are lost, which the block form rules out. The
-# backend is the thread that made it's, as every object not Share is.
+# ends without `close` are lost, which the block form rules out. Any
+# thread may write to the backend, and close it: it is Share, as every
+# backend is.
 #
 # A thread needs the collector and a target with threads: under
 # `-Dgc_none` or `-Dgc_boehm`, or on another target, `new` refuses.
 pub class AsyncBackend < Backend
-  property formatter : Formatter
+  getter formatter : Formatter
   @queue : Mutex(AsyncQueue)
-  @closed : Bool
-  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-    @writer : IyiThread? = nil
-  {% end %}
+  # 1 once `close` has begun.
+  @closed : Atomic(UInt8)
 
   def initialize(io : IO = STDOUT, @formatter : Formatter = DefaultFormatter.new)
     @queue = Mutex.new { AsyncQueue.new }
-    @closed = false
+    @closed = Atomic(UInt8).new(0_u8)
     handle = io.handle
     raise "AsyncBackend: the IO has no descriptor to write to" if handle < 0_i64
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+      # The writer is kept in the queue, behind the lock, where `close`
+      # joins it: an `IyiThread` is not Share, and the field that held it
+      # made this backend, and every logger it was set on, not Share.
       queue = @queue
-      @writer = IyiThread.start do
+      while true
+        break unless queue.lock { |q| q.writer = AsyncBackend.writer(queue, handle) }.is_a?(Cancelled)
+      end
+    {% else %}
+      raise "AsyncBackend: this build has no threads to write with (the collector's threads, on Linux, darwin arm64 and Windows x86_64)"
+    {% end %}
+  end
+
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+    # The thread writing what *queue* holds to *handle* until the queue is
+    # closed and drained; marking the queue finished is the last it does
+    # under the lock.
+    protected def self.writer(queue : Mutex(AsyncQueue), handle : Int64) : IyiThread
+      IyiThread.start do
         out = IyiIO.new(handle)
         while true
           batch = queue.wait_for { |q| q.take }
@@ -261,14 +352,15 @@ pub class AsyncBackend < Backend
           raise "AsyncBackend: the writer thread was cancelled" if batch.is_a?(Cancelled)
           out.write(batch[0])
           out.flush
-          break if batch[1]
+          if batch[1]
+            queue.lock { |q| q.finish }
+            break
+          end
         end
         nil
       end
-    {% else %}
-      raise "AsyncBackend: this build has no threads to write with (the collector's threads, on Linux, darwin arm64 and Windows x86_64)"
-    {% end %}
-  end
+    end
+  {% end %}
 
   # A backend for the block, closed and drained when the block ends.
   def self.open(io : IO = STDOUT, formatter : Formatter = DefaultFormatter.new, &block : AsyncBackend -> R) : R forall R
@@ -278,7 +370,7 @@ pub class AsyncBackend < Backend
   end
 
   def write(entry : Entry) : Nil
-    raise "AsyncBackend: an entry written after close" if @closed
+    raise "AsyncBackend: an entry written after close" if @closed.get != 0_u8
     line = @formatter.format(entry) + "\n"
     while true
       return unless @queue.lock { |q| q.push(line) }.is_a?(Cancelled)
@@ -286,27 +378,33 @@ pub class AsyncBackend < Backend
   end
 
   def close : Nil
-    return if @closed
-    @closed = true
+    return if @closed.swap(1_u8) != 0_u8
     while true
       break unless @queue.lock { |q| q.close }.is_a?(Cancelled)
     end
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-      if writer = @writer
-        writer.join
+      while true
+        break unless @queue.wait_for { |q| q.join_once_finished }.is_a?(Cancelled)
       end
     {% end %}
   end
 end
 
-# The lines an `AsyncBackend` has queued, behind its Mutex.
+# The lines an `AsyncBackend` has queued, and its writer, behind its Mutex.
 class AsyncQueue
   @lines : Array(String)
   @closed : Bool
+  # Set by the writer once the last batch is written; it takes the lock
+  # no more after that.
+  @finished : Bool
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+    property writer : IyiThread? = nil
+  {% end %}
 
   def initialize
     @lines = [] of String
     @closed = false
+    @finished = false
   end
 
   def push(line : String) : Nil
@@ -325,22 +423,60 @@ class AsyncQueue
     @lines = [] of String
     {text, @closed}
   end
+
+  def finish : Nil
+    @finished = true
+  end
+
+  # True once the writer has finished, and joined here, with the lock
+  # held: it takes the lock no more, so the join waits only for it to
+  # end. Nil before, which `close` waits through.
+  def join_once_finished : Bool?
+    return nil unless @finished
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+      if writer = @writer
+        writer.join
+      end
+    {% end %}
+    true
+  end
 end
 
 pub class Logger
   getter source : String
-  @level : Severity?
-  @backend : Backend?
+  # This logger's own level, a severity's value, or `INHERIT` to hand the
+  # decision to its parent: an atomic, so `level=` on one thread and a
+  # call on another read one whole word, and a call below the level costs
+  # a load for each logger up to the one that has a level - 2.0 ns a
+  # `debug` to a child of the root at Info, where the plain field it was
+  # took 1.7 (the median of five runs of 50 million, --release, x86_64
+  # Linux).
+  @own_level : Atomic(Int32)
+  # This logger's own backend, nil for its parent's, behind a lock, since
+  # a reference has no atomic; and whether it has one, so a call takes
+  # only the lock of the logger whose backend it writes to. That lock and
+  # the backend's are what an entry written costs more: 652 ns a line to
+  # a file through an `IOBackend` on one thread, where the fields and the
+  # IO without a lock took 569 (the medians of five runs of 400,000).
+  @own_backend : Mutex(Backend?)
+  @has_backend : Atomic(UInt8)
   @parent : Logger?
-  @children : Hash(String, Logger)
+  # The children `for` has made, by name, behind a lock, so two workers
+  # asking for one name at once are answered the one logger.
+  @children : Mutex(Hash(String, Logger))
   # What `bind` gave this logger, on every entry it and its children write.
   @bound : Metadata?
 
+  INHERIT = -1
+
   def initialize(@source : String, level : Severity? = nil, backend : Backend? = nil, parent : Logger? = nil, bound : Metadata? = nil)
-    @level = level
-    @backend = backend
+    @own_level = Atomic(Int32).new(level ? level.value : INHERIT)
+    # Upcast, or the Mutex is one of the argument's own class.
+    held = backend.as(Backend?)
+    @own_backend = Mutex.new { held }
+    @has_backend = Atomic(UInt8).new(backend ? 1_u8 : 0_u8)
     @parent = parent
-    @children = Hash(String, Logger).new
+    @children = Mutex.new { {} of String => Logger }
     @bound = bound
   end
 
@@ -355,41 +491,68 @@ pub class Logger
   # This logger's own level, or the nearest ancestor's; Info at a root
   # never given one.
   def level : Severity
-    if l = @level
-      l
-    elsif p = @parent
-      p.level
-    else
-      Severity::Info
+    Severity.new(level_value)
+  end
+
+  protected def level_value : Int32
+    logger = self
+    while true
+      own = logger.own_level_value
+      return own if own != INHERIT
+      parent = logger.parent
+      return Severity::Info.value unless parent
+      logger = parent
     end
+  end
+
+  protected def own_level_value : Int32
+    @own_level.get
+  end
+
+  protected def parent : Logger?
+    @parent
   end
 
   # nil hands the decision back to the parent.
   def level=(lvl : Severity?) : Nil
-    @level = lvl
+    @own_level.set(lvl ? lvl.value : INHERIT)
   end
 
   def own_level : Severity?
-    @level
+    own = @own_level.get
+    own == INHERIT ? nil : Severity.new(own)
   end
 
   # This logger's own backend, or the nearest ancestor's; nil silences.
   def backend : Backend?
-    if b = @backend
-      b
-    elsif p = @parent
-      p.backend
-    else
-      nil
+    logger = self
+    while true
+      if found = logger.own_backend
+        return found
+      end
+      parent = logger.parent
+      return nil unless parent
+      logger = parent
     end
   end
 
   def backend=(b : Backend?) : Nil
-    @backend = b
+    held = b.as(Backend?)
+    while true
+      done = @own_backend.update do |_|
+        @has_backend.set(held ? 1_u8 : 0_u8)
+        held
+      end
+      return unless done.is_a?(Cancelled)
+    end
   end
 
   def own_backend : Backend?
-    @backend
+    return nil if @has_backend.get == 0_u8
+    while true
+      found = @own_backend.get { |b| b }
+      return found unless found.is_a?(Cancelled)
+    end
   end
 
   # The logger for *child_name* under this one, created on first ask;
@@ -406,30 +569,30 @@ pub class Logger
   end
 
   protected def get_or_create_child(name : String) : Logger
-    if child = @children[name]?
-      return child
+    while true
+      found = @children.get { |children| children[name]? || (children[name] = Logger.new(child_source(name), nil, nil, self)) }
+      return found unless found.is_a?(Cancelled)
     end
+  end
 
-    # Only the root drops the dot: a child named "" under it has an empty
-    # source too, and `Log.for(".a")` answered "a", the source of another
-    # logger.
-    child_source = @parent.nil? && @source.empty? ? name : "#{@source}.#{name}"
-    child = Logger.new(child_source, nil, nil, self)
-    @children[name] = child
-    child
+  # Only the root drops the dot: a child named "" under it has an empty
+  # source too, and `Log.for(".a")` answered "a", the source of another
+  # logger.
+  private def child_source(name : String) : String
+    @parent.nil? && @source.empty? ? name : "#{@source}.#{name}"
   end
 
   # None is a level and not a severity: an entry logged at None was
   # written by a logger set to None, the one level meant to write nothing.
   def log(severity : Severity, message : String, **data) : Nil
-    return if severity < level || severity == Severity::None
+    return if severity.value < level_value || severity == Severity::None
     if b = backend
       b.write(Entry.new(@source, severity, message, Time.utc, entry_data(data)))
     end
   end
 
   def log(severity : Severity, **data, &block : -> String) : Nil
-    return if severity < level || severity == Severity::None
+    return if severity.value < level_value || severity == Severity::None
     if b = backend
       b.write(Entry.new(@source, severity, block.call, Time.utc, entry_data(data)))
     end
@@ -539,16 +702,14 @@ end
 
 # The root logger and the calls that go straight to it.
 pub class Log
-  @@root : Logger?
+  # Made by the first read, whichever thread makes it: a class variable's
+  # initialiser runs once (`__iyi_once`). A nil checked and then filled
+  # could make a root for each of two workers logging first, and the
+  # loggers made under the one that lost would follow no `setup`.
+  @@root : Logger = Logger.new("", Severity::Info, IOBackend.new(STDOUT))
 
   def self.root : Logger
-    if r = @@root
-      r
-    else
-      logger = Logger.new("", Severity::Info, IOBackend.new(STDOUT))
-      @@root = logger
-      logger
-    end
+    @@root
   end
 
   # Reconfigures the root in place, so loggers obtained earlier follow.

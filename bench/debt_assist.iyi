@@ -1,0 +1,59 @@
+# A triggered collection's debt, swept by every thread past the budget.
+#
+#   ./bin/iyi run bench/debt_assist.iyi
+#
+# A collection sweeps every arena the last epoch left unswept before it
+# stops anything (`IyiMark.sweep_one_before_stop`), on the thread whose
+# slice triggered it. Every other thread's slice found `@@collecting` up
+# and allocated on: in issue #145's app on twelve workers (Windows 11, 12
+# logical processors), on `/api/v1/`, the triggering thread swept a
+# median of 380 arenas before its stop, 15 ms at the median and up to
+# 844 ms, while the others allocated up to 514 MB past an 8.7 MB budget.
+# Now a slice that finds
+# a collection triggered and the count past the budget sweeps slices of
+# that debt itself (`IyiMark.sweep_assist`) before it allocates on.
+#
+# Four threads churn garbage across sixteen size classes - a fill arena
+# of each thread's own in each, so every collection has some sixty-four
+# arenas of debt - with no helper, so no round sweeps beside them and the
+# debt is the triggering thread's and the assists' alone. The run exits 1
+# by name if no slice swept any of it.
+#
+# bench/collect_trigger.sh runs it, and a copy of the runtime with the
+# assist removed, which it catches.
+
+module bench/debt_assist
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  # Garbage across sixteen size classes: sixteen bytes to 512 in steps of
+  # sixteen, nothing kept.
+  def churn_classes(bytes : UInt64) : Nil
+    burned = 0_u64
+    size = 16_u64
+    while burned < bytes
+      block = Pointer(UInt8).malloc(size)
+      block.value = 1_u8
+      burned = burned + size
+      size = size >= 512_u64 ? 16_u64 : size + 16_u64
+    end
+  end
+
+  IyiMark.workers = 0_u64
+  together = [] of IyiThread
+  4.times do
+    together << IyiThread.start do
+      churn_classes(67108864_u64)
+      nil
+    end
+  end
+  together.each { |thread| thread.join }
+  IyiMark.settle
+  assists = IyiMark.sweep_assists
+  if assists == 0_u64
+    print "FAIL: debt: four threads churned 256 MiB across sixteen classes through #{IyiMark.collections} collections, the triggering threads swept #{IyiMark.debt_paid_before_stop} arenas of debt before their stops, and no slice past the budget swept any of it\n"
+    __iyi_exit(1)
+  end
+  puts "debt: four threads churned 256 MiB across sixteen classes through #{IyiMark.collections} collections; the triggering threads swept #{IyiMark.debt_paid_before_stop} arenas before their stops, the threads past the budget #{assists} slices beside them"
+{% else %}
+  puts "the debt's assist needs the collector's threads (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64); nothing to exercise here"
+{% end %}

@@ -19,13 +19,14 @@
 # written out, because "nothing else" is what they assert.
 #
 # darwin: libSystem is the platform's only stable interface, so the prelude
-# (write, read, exit, pipe), the poller (kqueue, kevent, its clock), the
+# (write, read, exit), the poller (kqueue, kevent, its clock), the
 # collector (mmap, munmap, the stack base and dyld's image for root
-# discovery), the thread layer (pthread_*, sigaction, sigaltstack,
-# sysctlbyname, the one thread-local), errno's `__error` and the panic
-# path (backtrace to capture frames, dladdr to name each, dprintf to write
-# it) are all its symbols.
-FLOOR_BASE_DARWIN="__error _tlv_bootstrap backtrace dladdr dprintf clock_gettime_nsec_np exit kevent kqueue mmap mprotect munmap pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read sigaction sigaltstack sysctlbyname write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+# discovery, and the park of the mark helpers and of a stopped thread,
+# os_sync_wait_on_address and os_sync_wake_by_address_all), the thread
+# layer (pthread_*, sigaction, sigaltstack, sysctlbyname, the one
+# thread-local), errno's `__error` and the panic path (backtrace to
+# capture frames, dladdr to name each, dprintf to write it) are its symbols.
+FLOOR_BASE_DARWIN="__error _tlv_bootstrap backtrace dladdr dprintf clock_gettime_nsec_np exit kevent kqueue mmap mprotect munmap os_sync_wait_on_address os_sync_wake_by_address_all pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read sigaction sigaltstack sysctlbyname write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
 
 # Linux: the prelude issues raw syscalls and adds no symbol of its own; what
 # a program carries is what the C runtime's start files leave undefined.

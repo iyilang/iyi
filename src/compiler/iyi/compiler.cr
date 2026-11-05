@@ -3437,9 +3437,10 @@ module Iyi
       bc_flags_changed = true
       current_bc_flags = "#{@codegen_target}|#{@mcpu}|#{@mattr}|#{@link_flags}|#{@mcmodel}"
       # iyi: the back-edge checks go in after the bitcode is compared, so
-      # the flag that changes their form changes no bitcode, and a build
-      # with it reused the objects of one without (`preempt_checks`).
+      # the flags that change their form change no bitcode, and a build
+      # with one reused the objects of one without (`preempt_checks`).
       current_bc_flags += "|preempt_check_accessor" if @flags.includes?("preempt_check_accessor")
+      current_bc_flags += "|preempt_anchor_entry" if @flags.includes?("preempt_anchor_entry")
       bc_flags_filename = "#{output_dir}/bc_flags#{optimization_mode.suffix}"
       if File.file?(bc_flags_filename)
         previous_bc_flags = File.read(bc_flags_filename).strip
@@ -3554,7 +3555,11 @@ module Iyi
       program.each_dll_path do |path, found|
         if found
           dest = File.join(output_directory, File.basename(path))
-          File.copy(path, dest) unless File.exists?(dest)
+          begin
+            place_dll(path, dest)
+          rescue ex : File::Error
+            stderr << "Warning: " << dest << " is not the DLL the program was linked against (" << path << ") and could not be replaced: " << ex.message << '\n'
+          end
         else
           not_found ||= [] of String
           not_found << path
@@ -3565,6 +3570,43 @@ module Iyi
         stderr << "Warning: The following DLLs are required at run time, but Crystal is unable to locate them in IYI_LIBRARY_PATH, the compiler's directory, or PATH: "
         not_found.sort!.join(stderr, ", ")
       end
+    end
+
+    # iyi: a DLL already beside the program is kept only when it is the one
+    # the link resolved. Crystal's #14315 kept whatever stood there by that
+    # name, so that a DLL a running program holds did not fail the write,
+    # and so it kept an older build's DLL too. `crystal spec` and `iyi run`
+    # link into the cache directory, and `iyi test` into %TEMP%, one each
+    # for the machine: on Windows 11, 12 logical processors (the user's
+    # machine) the cache's LLVM-C.dll, 53,079,552 bytes and copied there on
+    # 2026-09-17, stood beside the compiler spec program linked against
+    # .build's, 55,308,800 bytes (LLVM 23.1.1), which then died before its
+    # first line with 0xC0000139, STATUS_ENTRYPOINT_NOT_FOUND - "Process
+    # terminated abnormally, the cause is unknown" from `crystal spec` - and
+    # passed with .build's DLL beside it. The copy carries its source's
+    # modification time, so the same size and time is the same DLL, at two
+    # stats a build. A loaded DLL refuses a delete but not a rename, so one
+    # a running program holds is moved aside, and the asides a replacement
+    # left before go once nothing holds them.
+    private def place_dll(source : String, dest : String) : Nil
+      info = File.info(source)
+      if existing = File.info?(dest)
+        return if existing.size == info.size && existing.modification_time == info.modification_time
+
+        directory = File.dirname(dest)
+        aside = "#{File.basename(dest)}.old-"
+        Dir.each_child(directory) do |name|
+          next unless name.starts_with?(aside)
+          File.delete?(File.join(directory, name)) rescue nil
+        end
+        begin
+          File.delete(dest)
+        rescue File::Error
+          File.rename(dest, "#{dest}.old-#{Process.pid}")
+        end
+      end
+      File.copy(source, dest)
+      File.utime(info.modification_time, info.modification_time, dest)
     end
 
     private def cross_compile(program, units, output_filename)
@@ -4275,11 +4317,15 @@ module Iyi
     # optimisation so they keep no loop from being vectorised (SPEC.md
     # III.4.13, part 9; `PreemptChecks`). `-Dpreempt_check_accessor` builds
     # darwin's and Windows' checks as they were first, an accessor call at
-    # every back-edge: the broken copy bench/parallel_exercise.sh shows its
-    # tight-loop bound refusing.
+    # every back-edge: the broken copy bench/parallel_exercise.sh catches in
+    # the release build's IR, its tight loops' checks calling the accessor.
+    # `-Dpreempt_anchor_entry` makes darwin's anchor in the entry block, as
+    # it was before it moved to where loops are entered: the broken copy
+    # the same gate's short-copy step catches calling the accessor there.
     protected def preempt_checks(llvm_mod, flag : String?) : Nil
       return unless flag
       PreemptChecks.accessor_only = @flags.includes?("preempt_check_accessor")
+      PreemptChecks.anchor_at_entry = @flags.includes?("preempt_anchor_entry")
       PreemptChecks.run(llvm_mod, flag, @codegen_target.linux?, @codegen_target.architecture == "aarch64")
     end
 

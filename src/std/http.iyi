@@ -42,7 +42,9 @@
 # `Response`. By default the body is read whole before the block runs;
 # with `stream_bodies: true` the block reads `request.body_io` itself, and
 # what it leaves unread is read past, up to a megabyte, or the connection
-# closed. An answer is a `String`, written with its length; an `IyiIO`,
+# closed - its answer saying `Connection: close` when the body's length
+# is past that megabyte, or the client still waits for the `100 Continue`
+# it asked for. An answer is a `String`, written with its length; an `IyiIO`,
 # copied out and closed (with its length when the block gave a
 # `Content-Length`, chunked otherwise); a `Response.stream { |w| ... }`
 # whose block writes as it goes; or a `Response.upgrade`, after whose 101
@@ -314,6 +316,12 @@ class Conn
   # Whether the other end closed its side.
   def ended? : Bool
     @ended
+  end
+
+  # Whether `serve` has stopped: its listener closed, or on a worker of the
+  # pool the connection's `ServeStop`. No read starts after it (`fill`).
+  def stopped? : Bool
+    (listener = @listener) ? listener.closed? : false
   end
 
   def available : Int32
@@ -824,6 +832,19 @@ pub class BodyReader
     true
   end
 
+  # Whether a server reading past the rest of this body, so that the next
+  # request starts where it should, would close instead: its length says
+  # more than *limit* bytes are left, or its client still waits for the
+  # `100 Continue` its `Expect` asked for - which, written after the
+  # answer, the client reads as its next request's, and the body it
+  # holds back is then waited for. A chunked body's rest is not known
+  # until it is read.
+  def left_past?(limit : Int64) : Bool
+    return false if @finished
+    return true if @hello
+    @kind == LENGTH && @left > limit
+  end
+
   # The body's coding undone from here on: `Envelope::Gzip` for gzip,
   # `Envelope::Zlib` for HTTP's deflate - which some servers send as the
   # bare stream instead, without zlib's two bytes of header, so the first
@@ -1212,7 +1233,15 @@ pub class BodyWriter
   end
 
   private def send(text : String) : Bool
-    got = @socket.write(text)
+    socket = @socket
+    # A server's stop closes a connection whose `Response.stream` block
+    # waits on the request's body (`Conn#close_for_stop`); the write after
+    # it is cancelled, as that read was, not `IyiSocket#write`'s panic.
+    if socket.is_a?(IyiSocket) && socket.closed?
+      @fault = Cancelled.new
+      return false
+    end
+    got = socket.write(text)
     case got
     in Int32
       true
@@ -1888,8 +1917,9 @@ pub struct Server
   # as its descriptor and family, which are `Share`, and is made again on
   # the worker; the accepting thread never touches its own object again.
   # A poller's registration is made per wait on the waiting thread's, and
-  # on Windows a handle is moved to the waiting thread's port, so the
-  # descriptor carries nothing of the thread that accepted it.
+  # on Windows a handle is on the process's one port, whose packets any
+  # thread takes, so the descriptor carries nothing of the thread that
+  # accepted it.
   #
   # Beside the connection, on its worker, a watcher waits for *stopping*
   # to close and does there what `serve`'s accept loop does on its own
@@ -2017,9 +2047,11 @@ pub struct Server
           in String
             req = Request.new(head.method, head.path, head.query, head.headers, body, head.version, remote)
           in HTTPError
-            # A client that went is not answered; one that sent a body that
-            # is not one is told why.
-            return false if conn.ended?
+            # A client that went is not answered, nor one whose body the
+            # stop cut short - told "400 the body ended after 500 of its
+            # 1000 bytes", it was blamed for the server's going; one that
+            # sent a body that is not one is told why.
+            return false if conn.ended? || conn.stopped?
             refuse(conn.transport, body)
             return true
           in Cancelled
@@ -2031,9 +2063,25 @@ pub struct Server
         req.tls_resumed = conn.resumed?
         req.peer_certificates = peer
         response = handler.call(req)
+        # A block that read its body itself (`stream_bodies`) may have had
+        # the connection closed under that read by the stop
+        # (`close_for_stop`): its answer has nowhere to go - written, it
+        # was `IyiSocket#write`'s panic on the closed socket - and a
+        # stream it answers with is closed as a written one is.
+        if conn.socket.closed?
+          if source = response.source
+            source.close
+          end
+          return false
+        end
         # Writing the answer waits as the client reads it, a pause at a time.
         conn.no_deadline
-        unless answered?(conn, response, req, head.close, compress)
+        # An answer the connection closes after says so: one made while
+        # the server stops, or whose block left more of the body than is
+        # read past for the next request (`left_past?`), went out
+        # `keep-alive`, and a client that took it at its word sent its
+        # next request into the close.
+        unless answered?(conn, response, req, head.close || conn.stopped? || reader.left_past?(MAX_DRAIN.to_i64), compress)
           # A client that said `close` sends no further request (RFC 9112
           # section 9.6): its request read whole and nothing after it,
           # nothing of the client's is left to come, and the close waits

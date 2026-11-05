@@ -999,15 +999,19 @@ group do |g|
     # More than a megabyte unread is not read for as long as it comes: the
     # connection closes after the answer.
     # The body is sent after the answer, and the connection ends once a
-    # megabyte of it has been read past, where the whole 4 MB was waited for.
+    # megabyte of it has been read past, where the whole of it was waited
+    # for. Chunked, so that its length is not known when the answer goes: one
+    # whose `Content-Length` is past the megabyte is answered `Connection:
+    # close` and never read past (bench/std_http_exercise.sh's close cases).
     much = IyiSocket.connect("127.0.0.1", stream_port).or_panic
-    much.write("POST /ignore HTTP/1.1\r\nHost: x\r\nContent-Length: 4000000\r\n\r\n").or_panic
-    assert_str "ignored", HTTP.parse_response(read_response(much)).body, "a block that leaves 4 MB unread is answered"
+    much.write("POST /ignore HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n").or_panic
+    assert_str "ignored", HTTP.parse_response(read_response(much)).body, "a block that leaves a chunked body past a megabyte unread is answered"
     much.read_timeout_ms = 8000
     much_started = __iyi_monotonic_ns
     # What the server leaves unread when it closes may reset the
-    # connection under the write; either way the write ends.
-    much.write("z" * 1200000)
+    # connection under the write; either way the write ends. Twelve chunks
+    # of 100,000 bytes, and no last chunk.
+    much.write(("186a0\r\n" + "z" * 100000 + "\r\n") * 12)
     while true
       drained = much.read(65536)
       break unless drained.is_a?(String)

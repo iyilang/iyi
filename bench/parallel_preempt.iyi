@@ -25,11 +25,25 @@
 #           ones: a fast request whose connection waits in the poller of a
 #           worker busy with a slow one is answered within 80 ms, where it
 #           waited the 100 ms out before.
+#   poller  the server shape's claim with its window held: one connection
+#           waits in the poller of the pool's one worker while that worker
+#           computes a request that runs until the connection's own request
+#           is answered, or a second has passed; the answer comes within
+#           80 ms. A slow half that does not poll answers it at the second.
+#   fresh   a task switched in after one that held its worker 30 ms with
+#           no check in its loop, on a pool of one, runs its first
+#           millisecond without giving the worker up, beside a task queued
+#           behind it: the word the monitor raised for the one before is
+#           not its. With the word left up it gave the worker up at its
+#           first back-edge.
 #   period  the monitor's period, its looks over a task computing half a
-#           second on a pool of one, held to 4 to 10.5 ms; and the quantum,
-#           two such tasks taking turns on the one worker, held to 20 ms. A
-#           Windows monitor waiting on the system timer's tick (11.2 to
-#           12.3 ms apart on a GitHub runner) fails it.
+#           second on a pool of one, held to 4 to 10.5 ms (8 on Windows);
+#           and the quantum, two such tasks taking turns on the one worker,
+#           held to three of the looks the same run measured. A Windows
+#           monitor waiting on the system timer's tick (10.1 to 14.3 ms
+#           apart in 56 runs on GitHub's runners) fails the first, and a
+#           monitor that waits three looks unchanged rather than one the
+#           second.
 #   tight   what the check costs a tight loop: four loops timed against
 #           `@[NoPreempt]` twins of themselves, interleaved, best of seven,
 #           each ratio held to 2x.
@@ -64,7 +78,11 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # Integer work with nothing to allocate and no call in its loop: a
-  # xorshift walk.
+  # xorshift walk. It and the tight step's other loops, and their twins, are
+  # `@[NoInline]`: bench/parallel_exercise.sh reads the checks of each in
+  # the release build's IR by the def's name, which inlined into the step's
+  # block it would not have.
+  @[NoInline]
   def spin(rounds : Int64, seed : UInt64) : UInt64
     x = seed | 1_u64
     i = 0_i64
@@ -78,6 +96,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # The same walk, never preempted.
+  @[NoInline]
   @[NoPreempt]
   def spin_np(rounds : Int64, seed : UInt64) : UInt64
     x = seed | 1_u64
@@ -102,6 +121,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # A sum LLVM vectorises, and its twin.
+  @[NoInline]
   def sum(values : Array(Int64), times : Int32) : Int64
     total = 0_i64
     t = 0
@@ -117,6 +137,7 @@ import std/socket::{IyiSocket, SocketError}
     total
   end
 
+  @[NoInline]
   @[NoPreempt]
   def sum_np(values : Array(Int64), times : Int32) : Int64
     total = 0_i64
@@ -135,6 +156,7 @@ import std/socket::{IyiSocket, SocketError}
 
   # The same sum through `times` and `each`, whose loops are the prelude's
   # and check because they are inlined into this def.
+  @[NoInline]
   def sum_each(values : Array(Int64), times : Int32) : Int64
     total = 0_i64
     times.times do
@@ -143,6 +165,7 @@ import std/socket::{IyiSocket, SocketError}
     total
   end
 
+  @[NoInline]
   @[NoPreempt]
   def sum_each_np(values : Array(Int64), times : Int32) : Int64
     total = 0_i64
@@ -153,6 +176,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # A table-driven CRC-32, a loop of dependent loads.
+  @[NoInline]
   def crc(table : Array(UInt32), data : Array(UInt8), times : Int32) : UInt32
     c = 0xFFFFFFFF_u32
     t = 0
@@ -168,6 +192,7 @@ import std/socket::{IyiSocket, SocketError}
     c ^ 0xFFFFFFFF_u32
   end
 
+  @[NoInline]
   @[NoPreempt]
   def crc_np(table : Array(UInt32), data : Array(UInt8), times : Int32) : UInt32
     c = 0xFFFFFFFF_u32
@@ -421,6 +446,134 @@ import std/socket::{IyiSocket, SocketError}
     say "server: 28 connections of 0.2 ms requests beside 4 of 100 ms on #{IyiWorkers.count} workers: the slowest fast request took #{fast.max_ms} ms, #{fast.over20} of #{fast.count} over 20 ms; the slow ones at most #{slow.max_ms} ms"
   end
 
+  # ── poller ───────────────────────────────────────────────────────────
+  # The server shape's claim, held open rather than met by chance. There a
+  # fast request waits in a busy worker's poller only when its connection
+  # happened to park on the worker a slow request then landed on, and the
+  # wait is what was left of that request's 100 ms: the copy whose slow
+  # half does not poll read 76 to 141 ms in eight runs on macOS 26.6,
+  # Apple M2 Pro, 10 cores (the user's machine), three of them under the
+  # 80 ms bound. Here one worker and two connections make it certain: a
+  # fast connection's server has answered once and parked on its next
+  # read in the worker's poller, the worker takes the slow connection's
+  # request, and that request computes until the fast one has been
+  # answered, or POLLER_HOLD_MS if it never is. The fast request is sent
+  # once the slow one is computing, and the worker holds nothing else, so
+  # only the back-edge's poll hands it on: answered within FAST_BOUND_MS,
+  # or at POLLER_HOLD_MS. The M2 answered in 11.1 to 11.2 ms over ten
+  # runs, and the copy at 999 ms in five of five.
+  POLLER_HOLD_MS = 1000_i64
+
+  def poller(per_ms : Int64) : Nil
+    fail("poller: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    computing = Atomic(Int64).new(0_i64)
+    answered = Atomic(Int64).new(0_i64)
+    took_us = 0_i64
+    group do |g|
+      g.spawn do
+        2.times do
+          client = listener.accept
+          fail("poller: accept answered #{client}") unless client.is_a?(IyiSocket)
+          fd = client.fd
+          family = client.family
+          g.spawn_parallel do
+            socket = IyiSocket.new(fd, family)
+            while true
+              got = socket.read(64)
+              break unless got.is_a?(String) && !got.empty?
+              x = spin(per_ms // 5_i64, 5_u64)
+              if got.starts_with?("b")
+                computing.set(1_i64)
+                since = __iyi_monotonic_ns
+                while answered.get == 0_i64 && elapsed_ms(since) < POLLER_HOLD_MS
+                  x = spin(per_ms, x)
+                end
+              end
+              socket.write(x == 0_u64 ? "K" : "k")
+            end
+            socket.close
+            0
+          end
+        end
+        0
+      end
+      slow = IyiSocket.connect("127.0.0.1", port, 5000)
+      fail("poller: connect answered #{slow}") unless slow.is_a?(IyiSocket)
+      fast = IyiSocket.connect("127.0.0.1", port, 5000)
+      fail("poller: connect answered #{fast}") unless fast.is_a?(IyiSocket)
+      fast.write("c")
+      fast.read(8)
+      slow.write("b")
+      while computing.get == 0_i64
+        sleep(1)
+      end
+      s = __iyi_monotonic_ns
+      fast.write("c")
+      fast.read(8)
+      took_us = (__iyi_monotonic_ns - s) // 1000_i64
+      answered.set(1_i64)
+      slow.read(8)
+      slow.close
+      fast.close
+    end
+    if took_us // 1000_i64 > FAST_BOUND_MS
+      fail("poller: a fast request took #{took_us // 1000_i64} ms, its connection in the poller of the one worker while that worker computed, past #{FAST_BOUND_MS} ms")
+    end
+    say "poller: a fast request whose connection waited in the poller of the one worker, busy computing, was answered in #{took_us} us"
+  end
+
+  # ── fresh ────────────────────────────────────────────────────────────
+  # A task switched in begins a quantum of its own. On a pool of one, a
+  # task holds the worker FRESH_HOLD_MS with no check in its loop, across
+  # the monitor's looks, so the worker's word is raised, and ends; the
+  # task queued behind it computes a millisecond in FRESH_SLICES slices,
+  # with a third queued behind it for a give-up to hand the worker to.
+  # Raised for that second task, the word comes only once the monitor has
+  # seen the switch count stand from one look to the next, never under
+  # PERIOD_FLOOR_US into its run; a give-up sooner is on the word left up
+  # for the task before. In the server shape that word gave a fast
+  # request's task up behind every preempted slow one
+  # (`IyiScheduler.switch_to`). FRESH_ROUNDS rounds, each failing by
+  # itself.
+  FRESH_ROUNDS  = 10
+  FRESH_HOLD_MS = 30_i64
+  FRESH_SLICES  = 20
+
+  def fresh(per_ms : Int64) : Nil
+    fail("fresh: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    preempts = IyiWorkers.preempts
+    FRESH_ROUNDS.times do |round|
+      gave_us = Atomic(Int64).new(-1_i64)
+      group do |g|
+        g.spawn_parallel do
+          spin_np(FRESH_HOLD_MS * per_ms, 17_u64) == 0_u64 ? 1 : 0
+        end
+        g.spawn_parallel do
+          start = __iyi_monotonic_ns
+          before = IyiWorkers.preempts
+          x = 19_u64
+          FRESH_SLICES.times do
+            at = __iyi_monotonic_ns
+            x = spin(per_ms // FRESH_SLICES.to_i64, x)
+            gave_us.set((at - start) // 1000_i64) if gave_us.get < 0_i64 && IyiWorkers.preempts != before
+          end
+          x == 0_u64 ? 1 : 0
+        end
+        g.spawn_parallel do
+          0
+        end
+      end
+      gave = gave_us.get
+      if gave >= 0_i64 && gave < PERIOD_FLOOR_US
+        fail("fresh: round #{round + 1}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up #{gave} us into its run, under the monitor's #{PERIOD_FLOOR_US} us")
+      end
+    end
+    given = IyiWorkers.preempts - preempts
+    say "fresh: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check ran its first ms through, #{FRESH_ROUNDS} rounds (#{given} preemptions)"
+  end
+
   # ── period ───────────────────────────────────────────────────────────
   # The monitor's period, and the quantum it makes. A task computing half a
   # second on a pool of one, and the monitor's looks over it: every look
@@ -430,15 +583,40 @@ import std/socket::{IyiSocket, SocketError}
   # move and the next sees it stand. Linux, darwin and Windows looked every
   # 5.1 to 6.3 ms and took turns of 10.2 to 12.3 ms on the machines
   # measured (SPEC.md III.4.13); a Windows wait that ends on the system
-  # timer's tick looked every 11.2 to 12.3 ms, and 14.3 in CI's run of
-  # that broken copy, and a wait that ends at once would spin the monitor.
-  # The bound sits between the two: darwin's three-core runners, sharing
-  # their cores with the task the monitor watches, looked every 6.3, 8.9
-  # and 9.0 ms in three CI runs (the last, job 122004173378, past the 9 ms
-  # this bound was), and no run of the timer-tick copy came under 11.2.
+  # timer's tick looked every 11.2 to 12.3 ms there, and a wait that ends
+  # at once would spin the monitor.
+  #
+  # The look's bound sits between the two. darwin's three-core runners,
+  # sharing their cores with the task the monitor watches, looked every
+  # 6.3, 8.9 and 9.0 ms in three CI runs (the last, job 122004173378, past
+  # the 9 ms this bound was), and 7.1 to 8.9 ms in the 7 runs of macos-15
+  # in CI's logs. Windows' looks end on a high-resolution timer: its
+  # runners read 5.14 to 5.42 ms in 101 runs. The timer-tick copy read
+  # 10.6 to 14.3 ms in 36, and in job 124885593140 came under 10.5: it
+  # passed the look and was caught only by the 20 ms the turn was then
+  # held to, at turns of 20845 us, about two of its looks. It read 10.1 to
+  # 13.1 ms in 20 runs of debug jobs 124913849506 and 124922160886, where
+  # the real looks read 5.15 to 5.30. So on Windows the bound is 8 ms,
+  # half again the slowest real look and under four fifths of the copy's
+  # quickest.
+  #
+  # The quantum is two looks wherever the looks are, so it is held to
+  # QUANTUM_LOOKS of the ones this run measured, not to a time a slow
+  # runner's looks stretch it towards: Windows took 1.91 to 2.09 looks a
+  # turn in those 101 runs, and darwin 1.52 to 2.52 in 15 on macos-14 and
+  # macos-15, where looks of up to 8.9 ms made turns of up to 17.2 ms,
+  # 2.8 ms under the 20 ms the turn was held to. In the debug jobs,
+  # macos-15 took 1.61 to 2.25 looks a turn in 44 runs (124913849625 and
+  # 124922160678) and windows-2025 1.94 to 2.03 in 40. A monitor that
+  # raises the word after three unchanged looks rather than one takes
+  # four looks a turn, and fails it.
   PERIOD_FLOOR_US   =  4000_i64
-  PERIOD_BOUND_US   = 10500_i64
-  QUANTUM_BOUND_US  = 20000_i64
+  {% if flag?(:win32) %}
+    PERIOD_BOUND_US = 8000_i64
+  {% else %}
+    PERIOD_BOUND_US = 10500_i64
+  {% end %}
+  QUANTUM_LOOKS     =     3_i64
 
   def period(per_ms : Int64) : Nil
     fail("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
@@ -473,8 +651,8 @@ import std/socket::{IyiSocket, SocketError}
     turns = (IyiWorkers.preempts - preempts).to_i64
     fail("period: two tasks computing on one worker took no turns in #{total} us") if turns == 0_i64
     quantum = total // (turns + 1_i64)
-    if quantum > QUANTUM_BOUND_US
-      fail("period: two tasks computing on one worker took turns of #{quantum} us, past #{QUANTUM_BOUND_US} us")
+    if quantum > QUANTUM_LOOKS * us
+      fail("period: two tasks computing on one worker took turns of #{quantum} us, past #{QUANTUM_LOOKS} of the #{us} us looks")
     end
     say "period: the monitor looked every #{us} us over #{looks} looks; two tasks computing on one worker took #{turns} turns of #{quantum} us"
   end
@@ -485,10 +663,19 @@ import std/socket::{IyiSocket, SocketError}
   # TIGHT_BOUND thousandths. The check is a read or two and a branch per
   # turn. On GitHub's x86-64 runners the vectorised sums run at one of two
   # speeds, about 32 or 48 ms, and a checked one at the slower: 1.46 to
-  # 1.49x on Windows, and the same through `each` 1.51x on Linux, whose
-  # unchecked `sum` came in at the slower speed too, 1.001x. A check that
-  # calls the accessor at every turn - darwin and Windows had it - cost
-  # those sums 3.4 to 5.8 times their twins there. Twice is between.
+  # 1.50x on Windows (`sum` 1.503x in CI job 121231000410), and through
+  # `each` 1.51x on Linux, whose unchecked `sum` came in at the slower speed
+  # too, 1.001x. A windows-2025 runner then took a checked sum about 54 ms
+  # against 31: `each` 1.745x to 1.762x over eight runs as master builds
+  # it, `sum` 1.252x to 1.265x inlined and 1.744x to 1.755x `@[NoInline]`
+  # (CI job 122916661258). Windows 11 on 12 logical processors (the
+  # user's machine) measured every loop 0.98x to 1.08x, either way. The
+  # bound is twice, room of an eighth above that runner's worst. It says
+  # what the check costs, not which check it is: one that calls the
+  # accessor at every turn, as darwin's and Windows' did at first, cost
+  # those sums 3.4 to 5.8 times their twins there, but 1.776x and 1.828x on
+  # the Windows runner of CI job 122792275988, about what the cheap check
+  # cost on another. bench/parallel_exercise.sh tells the two in the IR.
   TIGHT_BOUND = 2000_i64
 
   def tight : Nil
@@ -532,7 +719,7 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  STEPS = ["slice", "unit", "server", "period", "tight"]
+  STEPS = ["slice", "unit", "server", "poller", "fresh", "period", "tight"]
 
   # With no arguments, the steps that hold on a pool of one and take
   # seconds, there: slice, unit and period, which wants the pool of one.
@@ -555,6 +742,8 @@ import std/socket::{IyiSocket, SocketError}
     when "slice"  then slice(per_ms)
     when "unit"   then unit(per_ms)
     when "server" then server(per_ms)
+    when "poller" then poller(per_ms)
+    when "fresh"  then fresh(per_ms)
     when "period" then period(per_ms)
     when "tight"  then tight
     end

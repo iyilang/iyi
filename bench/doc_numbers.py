@@ -350,15 +350,15 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # sentence said v19 while the compiler wrote v51.
     ("iyimod_format", r"`\.iyimod` v([\d,]+), checksum per section", "SPEC.md", 1),
     ("prelude_kb", r"library is ([\d,]+) KB on disk", "README.md", 1),
-    ("prelude_kb", r"iyi's own ([\d,]+) KB prelude", "README.md", 1),
-    ("std_kb", r"the ([\d,]+) KB of `src/std`", "README.md", 1),
+    ("prelude_kb", r"iyi's own ([\d,]+) KB prelude", "INSTALL.md", 1),
+    ("std_kb", r"the ([\d,]+) KB of `src/std`", "INSTALL.md", 1),
     ("std_kb", r"the directory's ([\d,]+) KB is a second", "Makefile", 1),
     ("prelude_kb", r"beside `bin/iyi` is ([\d,]+) KB", "Makefile", 1),
     ("prelude_kb", r"ships only iyi's own ([\d,]+) KB", "Makefile", 1),
     ("prelude_kb", r"its own, and it is ([\d,]+) KB", "Makefile", 1),
     ("bang_names", r"standard library has \*\*([\d,]+) such names\*\*", "README.md", 1),
     ("generated", r"edit one module in a ([\d,]+)-line project", "README.md", 1),
-    ("generated", r"on the same ([\d,]+) lines", "README.md", 1),
+    ("generated", r"reads all ([\d,]+) lines\s+again", "README.md", 1),
     # The same generated project, quoted seven more times in SPEC.md — the
     # numbers table at the top of it included — and every one of the seven said
     # 7,208 while the generator emitted 7,207. The two rows above name

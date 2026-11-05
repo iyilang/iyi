@@ -36,10 +36,19 @@ module Iyi
   class ShareReach
     # A constant or class variable a body names: *state* is the constant or
     # the class variable's cell, *label* how the source spells it, *use* the
-    # expression it is used in (`DATABASE.query_one`).
-    record Named, state : Const | MetaTypeVar, label : String, type : Type, use : String do
+    # expression it is used in (`DATABASE.query_one`), *at* where that
+    # expression is.
+    record Named, state : Const | MetaTypeVar, label : String, type : Type, use : String, at : Location? do
       def key : UInt64
         state.object_id
+      end
+
+      # Where the state is declared: a constant's assignment, and for a
+      # class variable, which only its class's own code can name, the
+      # place it is named.
+      def declared : Location?
+        state = self.state
+        state.is_a?(Const) ? (state.locations.try(&.first?) || state.value.location) : at
       end
     end
 
@@ -55,6 +64,7 @@ module Iyi
       @facts.compare_by_identity
       @std_files = {} of String => Bool
       @std_dirs = {} of String => Bool
+      @packages = {} of String => {String, String}?
     end
 
     # Everything the block whose body is *block_def*'s reaches through the
@@ -129,11 +139,41 @@ module Iyi
     # under `bin/iyi` that prefix matched none of std's files as the defs'
     # locations spell them, and the walk entered std's own `Server.serve`.
     def std?(node : ASTNode) : Bool
-      file = node.location.try(&.original_filename)
+      std_at?(node.location)
+    end
+
+    # Whether *location* is in std or the prelude, as `std?` reads it.
+    def std_at?(location : Location?) : Bool
+      file = location.try(&.original_filename)
       return false unless file
       @std_files.fetch(file) do
         @std_files[file] = std_dir?(File.dirname(File.expand_path(file)))
       end
+    end
+
+    # The package whose checkout holds *location*'s file, as `{module
+    # path, file inside the checkout}` (`{"github.com/iyilang/db",
+    # "db/core.iyi"}`), from the program's requirements (*table*,
+    # `Program#iyi_mod_table`, absolute directories, a replacement's too);
+    # nil for a file of the program's own. The warning says it, since a
+    # dependency's constant is fixed in the dependency: iyiturkiye's 1251
+    # warnings on Linux were 1057 about iyi-pg's, iyi-db's and iyi-web's
+    # constants, two of them `TLS_VERSIONS` and `DECODERS`, which read as
+    # std's with nothing to say whose they were.
+    def package_at(location : Location?, table : Array({String, String})) : {String, String}?
+      file = location.try(&.original_filename)
+      return nil unless file
+      @packages.fetch(file) do
+        path = ::Path[File.expand_path(file)].to_posix.to_s
+        row = table.find do |(prefix, dir)|
+          !prefix.starts_with?(Mod::Installer::SHORT_NAME) && path.starts_with?(checkout_root(dir))
+        end
+        @packages[file] = row.try { |(prefix, dir)| {prefix, path[checkout_root(dir).size..]} }
+      end
+    end
+
+    private def checkout_root(dir : String) : String
+      ::Path[File.expand_path(dir)].to_posix.to_s.rchop('/') + "/"
     end
 
     private def std_dir?(dir : String) : Bool
@@ -168,11 +208,11 @@ module Iyi
         case obj = node.obj
         when Path
           if (const = obj.target_const) && (type = obj.type?)
-            note(const, obj.to_s, type, "#{obj}.#{node.name}")
+            note(const, obj.to_s, type, "#{obj}.#{node.name}", obj.location)
           end
         when ClassVar
           if (var = obj.var?) && !var.thread_local? && (type = var.type?)
-            note(var, obj.name, type, "#{obj.name}.#{node.name}")
+            note(var, obj.name, type, "#{obj.name}.#{node.name}", obj.location)
           end
         end
         true
@@ -180,14 +220,14 @@ module Iyi
 
       def visit(node : Path) : Bool
         if (const = node.target_const) && (type = node.type?)
-          note(const, node.to_s, type, node.to_s)
+          note(const, node.to_s, type, node.to_s, node.location)
         end
         false
       end
 
       def visit(node : ClassVar) : Bool
         if (var = node.var?) && !var.thread_local? && (type = var.type?)
-          note(var, node.name, type, node.name)
+          note(var, node.name, type, node.name, node.location)
         end
         false
       end
@@ -223,10 +263,13 @@ module Iyi
       # A constant std declares is std's to keep safe, as its defs are:
       # `STDOUT.puts` in a function a parallel block called warned that
       # `STDOUT : IyiIO` is not Share while `puts`, which writes the same
-      # stream from inside std, said nothing.
-      private def note(state : Const | MetaTypeVar, label : String, type : Type, use : String) : Nil
-        return if state.is_a?(Const) && @reach.std?(state.value)
-        @named << Named.new(state, label, type, use) if @keys.add?(state.object_id)
+      # stream from inside std, said nothing. Read off the constant's
+      # declaration, which is where it was written whatever the cleanup
+      # makes of its value.
+      private def note(state : Const | MetaTypeVar, label : String, type : Type, use : String, at : Location?) : Nil
+        return unless @keys.add?(state.object_id)
+        named = Named.new(state, label, type, use, at)
+        @named << named unless state.is_a?(Const) && @reach.std_at?(named.declared)
       end
     end
   end

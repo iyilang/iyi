@@ -527,9 +527,15 @@ end
     fun GetFileType(h_file : Void*) : Int32
     fun CancelSynchronousIo(h_thread : Void*) : Int32
     # The mark helpers' waking without the boost Windows gives a thread
-    # whose wait is satisfied (`IyiThread.start_helper` says why).
+    # whose wait is satisfied (`IyiThread.start_helper` says why), and the
+    # process's, once its pool starts (`IyiWorkers.start`).
     fun SetThreadPriorityBoost(h_thread : Void*, disable_priority_boost : Int32) : Int32
+    fun SetProcessPriorityBoost(h_process : Void*, disable_priority_boost : Int32) : Int32
     fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
+    # A scheduler thread's doorbell: an auto-reset event its idle wait
+    # names beside the port (`IyiScheduler.ensure_doorbell`).
+    fun CreateEventW(lp_event_attributes : Void*, b_manual_reset : Int32, b_initial_state : Int32, lp_name : UInt16*) : Void*
+    fun SetEvent(h_event : Void*) : Int32
     fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
     fun WaitForMultipleObjects(n_count : Int32, lp_handles : Void*, b_wait_all : Int32,
                                dw_milliseconds : Int32) : Int32
@@ -1370,6 +1376,14 @@ require "./file"
   # library, and it is what lets a homebrew-installed collector link on
   # darwin, where `-lgc` alone has no search path that finds it.
   @[Link("gc", pkg_config: "bdw-gc")]
+  # And on Windows the DLL that link imports, named as `gc/boehm.cr` names
+  # it, so that the compiler puts it beside the program (`copy_dlls`). It
+  # was not named: the program imported gc.dll and found it only on PATH,
+  # and with no other copy of the DLL there it exited 0xC0000135,
+  # STATUS_DLL_NOT_FOUND, before its first line.
+  {% if flag?(:win32) %}
+    @[Link(dll: "gc.dll")]
+  {% end %}
   lib LibGC
     fun init = GC_init
     fun malloc = GC_malloc(size : UInt64) : Void*
@@ -1569,6 +1583,10 @@ require "./file"
         # uses on the concurrency targets and the same declaration, so the
         # two `lib` reopenings agree the way `mmap`'s do.
         fun clock_gettime_nsec_np(clock_id : Int32) : UInt64
+        # The mark helpers' park (`IyiMark.wait_generation`): libSystem's
+        # public futex, macOS 14.4 and later.
+        fun os_sync_wait_on_address(address : Void*, value : UInt64, size : UInt64, flags : UInt32) : Int32
+        fun os_sync_wake_by_address_all(address : Void*, size : UInt64, flags : UInt32) : Int32
       end
 
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
@@ -4924,8 +4942,10 @@ require "./file"
       POOL_PIECE_END = 1024_u64
       POOL_PIECES = 1088_u64
       POOL_REUSED = 1152_u64
-      # Windows' helpers asleep on the semaphore, counted so a wake
-      # releases one count per sleeper (`wake_helpers`).
+      # The helpers asleep in their park on Windows and darwin, counted so
+      # a wake knows who is there: Windows releases one count of its
+      # semaphore per sleeper, and darwin makes no call when there is
+      # nobody to wake (`wake_helpers`).
       POOL_SLEEPERS = 1216_u64
       # When the mark in flight is next reported as overdue, or 0 when no
       # mark is in flight (`watch_overdue`).
@@ -6042,8 +6062,8 @@ require "./file"
       # How many helpers a mark may use. Set before the first collection;
       # the default is the core count less one, capped at fifteen, and 0
       # marks alone. A count past the cores is the cores less one: a
-      # helper past the cores has no core to run on, and on darwin, where
-      # a parked helper spins, fifteen of them on three cores held the
+      # helper past the cores has no core to run on, and on darwin, when a
+      # parked helper spun, fifteen of them on three cores held the
       # parallel mark's exercise past its five minutes.
       def self.workers=(count : UInt64) : Nil
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
@@ -6148,15 +6168,35 @@ require "./file"
       # and its every-collection stop went from tens of microseconds to
       # milliseconds when the helpers stopped spinning. Collections come
       # in bursts, so a helper that spins for the length of one stays hot
-      # through the burst and sleeps between them. The spin is fifty
-      # microseconds by the clock: it was 20,000 pause hints, which is
-      # fifty microseconds where a hint is 2.5 ns, and a hint is not that
-      # everywhere - on a twelve-core Windows machine it was 20 ns, the
-      # spin 400 us, and churn's collections, one every half millisecond,
-      # never let a helper without work park: eleven helpers held eight
-      # cores spinning, and churn ran 0.162 s against 0.068 marked alone.
+      # through the burst and sleeps between them. The spin is by the
+      # clock, fifty microseconds on Linux and Windows: it was 20,000
+      # pause hints, which is fifty microseconds where a hint is 2.5 ns,
+      # and a hint is not that everywhere - on a twelve-core Windows
+      # machine it was 20 ns, the spin 400 us, and churn's collections,
+      # one every half millisecond, never let a helper without work park:
+      # eleven helpers held eight cores spinning, and churn ran 0.162 s
+      # against 0.068 marked alone.
       # The clock is read once every SPIN_CHECK hints.
-      SPIN_BEFORE_PARK_NS = 50000_u64
+      #
+      # darwin's spin is a quarter of a millisecond, chosen from spins of
+      # fifty microseconds to five milliseconds, the helpers parking after
+      # it (`wait_generation`). On a ten-core M2 Pro (macOS
+      # 26.6), best of five, the long spins took the program's cores:
+      # binary trees 0.135 s at fifty, 0.144 at 250, 0.173 at a
+      # millisecond and 0.274 at five, and bench/web_cores.iyi's
+      # check_version at eight workers 115,279, 114,495, 104,986 and
+      # 81,834 requests a second. On CI's three-core macos-14, nine runs
+      # each, the short ones parked a helper between a burst's collections
+      # and woke it late: binary trees' median 0.257 s at fifty, 0.230 at
+      # a hundred, 0.205 at 250 and 0.224 at a millisecond, where helpers
+      # that never parked read 0.199. A quarter millisecond is near the
+      # best of each: 7% behind fifty on the M2's binary trees, level on
+      # its churn and requests, and the best median on three cores.
+      {% if flag?(:darwin) %}
+        SPIN_BEFORE_PARK_NS = 250000_u64
+      {% else %}
+        SPIN_BEFORE_PARK_NS = 50000_u64
+      {% end %}
       SPIN_CHECK = 1024_u64
 
       def self.spin_for_generation(word : Pointer(Atomic(UInt64)), seen : UInt64) : UInt64
@@ -6171,9 +6211,9 @@ require "./file"
         end
       end
 
-      # A round's permits are SWEEP_HELPERS; on Linux that many helpers
-      # are woken and each takes one, on darwin every helper spins awake
-      # and the first that many do.
+      # A round's permits are SWEEP_HELPERS; every helper is woken, or
+      # finds the generation turned in its spin before the park, and the
+      # first that many take one.
       def self.take_sweep_permit : Bool
         word = pool_word(POOL_SWEEP_PERMITS)
         while true
@@ -6281,35 +6321,72 @@ require "./file"
           wake_helpers
         end
       {% else %}
-        # darwin has no futex: a helper spins on the generation with a
-        # yield between reads, which costs no name on the floor.
-        # darwin's helpers spin on the generation, and it is a hot spin -
-        # `yield` there is the ARM hint, not a syscall. Measured and kept:
-        # a park was built for them, a pipe per helper (there is no futex
-        # on darwin, and a signal handler may call `read` but not
-        # `os_unfair_lock_lock`), and on CI's three-core runner it cost
+        # darwin's helpers spin SPIN_BEFORE_PARK_NS on the generation, as
+        # Linux's and Windows' do, and then sleep on the word itself in
+        # `os_sync_wait_on_address`, libSystem's public futex: the kernel
+        # sleeps the helper only while the word still holds the generation
+        # it waits past, so a turn between its read and its sleep is not
+        # slept through, and one `os_sync_wake_by_address_all` wakes every
+        # sleeper. The sleepers count is Windows' protocol, and here it
+        # spares the wake its call when nobody sleeps: a helper counts
+        # itself before it reads the word and the collector turns the word
+        # before it reads the count, both locked read-modify-writes, so
+        # either the helper sees the new generation or the collector sees
+        # the sleeper.
+        #
+        # They spun on the word forever before, `yield` being the ARM hint
+        # and not a syscall, and an idle program held a core per helper:
+        # bench/web_cores.iyi's server, idle after a second of load, used
+        # 88.9 s of CPU in ten seconds with nine helpers on a ten-core M2
+        # Pro (macOS 26.6) and 19.9 with two on CI's three-core macos-14,
+        # and uses 0.0 on both parked. Under load the spinners had the
+        # workers' cores: check_version at eight workers answered 64,331
+        # requests a second on the M2 and 114,495 parked, p99 44.7 ms
+        # against 0.92, and binary trees ran 0.281 s against 0.144. The
+        # park refused before, a pipe per helper, slept between every
+        # collection with no spin first, and cost the three-core runner
         # binary trees 1.07 s against the spin's 0.23 and churn 0.19
-        # against 0.075. A parked helper has to be woken and then
-        # scheduled before it marks, and on a machine with three cores
-        # that is the mark's latency; a spinning helper is at the pool the
-        # instant the generation turns, and the core it burns while idle
-        # is worth less than the mark it delays. Linux's futex park costs
-        # microseconds and keeps its cores, which is why the platforms
-        # differ here at all.
+        # against 0.075; with the spin first, nine runs each there, binary
+        # trees' median is 0.205 s against the spinners' 0.199 and churn's
+        # 0.075 against 0.078.
+        #
+        # The futex is public from macOS 14.4, and a program built on
+        # macOS 14 says it runs on 14.0 (`minos` 14.0 on macos-14, 14.8), so it
+        # now needs 14.4 there. `__ulock_wait`, the private call beneath
+        # it (a parked helper's frame under `sample` is `__ulock_wait2`),
+        # is the same futex without the 14.4, but a program built here
+        # would carry a private name. A Mach semaphore is public
+        # everywhere, but it is four names (`mach_task_self_` among them)
+        # and a trap per sleeper in the wake, which the program's own
+        # thread pays. A condition variable is ruled out by the stop: no
+        # caller of the wake runs in a signal handler - the stop's handler
+        # only parks its thread on this same futex (`IyiThread.park`) - but
+        # a program thread can be stopped inside the wake, since
+        # `wake_sweep_round` runs after the runtime lock is let go, and a
+        # thread parked holding the condition's mutex would hold the
+        # collector's next wake. The futex's wake checks its arguments and
+        # calls `__ulock_wake`, read off its disassembly: one system call,
+        # holding nothing.
         def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
+          spun = spin_for_generation(word, seen)
+          return spun if spun != seen
+          sleepers = pool_word(POOL_SLEEPERS)
+          sleepers.value.add(1_u64)
           while (now = word.value.get) == seen
-            IyiThread.yield_cpu
+            LibC.os_sync_wait_on_address(word.as(Void*), seen, 8_u64, 0_u32)
           end
+          sleepers.value.sub(1_u64)
           now
         end
 
-        # Nothing to wake: a darwin helper is spinning on the generation,
-        # which the caller has already turned.
         def self.wake_helpers : Nil
+          return if pool_word(POOL_SLEEPERS).value.get == 0_u64
+          LibC.os_sync_wake_by_address_all(pool_word(POOL_GENERATION).as(Void*), 8_u64, 0_u32)
         end
 
         def self.wake_some_helpers(count : UInt64) : Nil
+          wake_helpers
         end
       {% end %}
       {% else %}
@@ -6745,9 +6822,9 @@ require "./file"
         # after the release finds helpers coming rather than sweep alone.
         # The wake itself comes after the lock is released - a thread
         # woken may preempt the waker, and seven helpers woken inside the
-        # stop made a 90 us pause 1.6 ms. SWEEP_HELPERS of the parked
-        # helpers are woken, and each takes a permit; on darwin every
-        # helper spins awake and the first SWEEP_HELPERS take one.
+        # stop made a 90 us pause 1.6 ms. The parked helpers are woken,
+        # every platform waking them all, and the first SWEEP_HELPERS take
+        # a permit.
         def self.open_sweep_round : Nil
           return if @@helpers == 0_u64 || @@sweep_left == 0_u64
           open_mark_permits(0_u64)
@@ -7382,11 +7459,27 @@ require "./file"
         @@growth
       end
 
-      # The survivors grown by the percentage, floored at MIN_BUDGET so a
-      # small program pays nothing.
+      # The survivors grown by the percentage, floored at MIN_BUDGET for
+      # every thread the program registered, so a small program pays
+      # nothing and a collection's fixed price is bought with allocation.
+      # That price grows with the threads, not with the live set: each
+      # thread's cache has a fill arena of its own in every class it
+      # allocates in, a collection sweeps every arena before it marks
+      # (`sweep_one_before_stop`) and stops every thread twice. Issue
+      # #145's app on twelve workers (Windows 11, 12 logical processors,
+      # 11 endpoints, best of 3) kept 3-5 MB live on a 6-10 MB budget:
+      # 4.5-21 collections a second, a median of 380 arenas swept before
+      # each on `/api/v1/`. Floored at 52 MB for its 13 threads, 0.8-8 a
+      # second, and
+      # app CPU per request 4.57 ms at the geometric mean against 5.20
+      # (Go's 4.59), 596.0 requests a second against 571.3.
       def self.next_budget(survived : UInt64) : UInt64
         grown = survived.unsafe_div(100_u64) * @@growth
-        grown < MIN_BUDGET ? MIN_BUDGET : grown
+        floor = MIN_BUDGET
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+          floor = MIN_BUDGET * IyiThread.program_threads
+        {% end %}
+        grown < floor ? floor : grown
       end
 
       def self.auto=(value : Bool) : Nil
@@ -7404,12 +7497,49 @@ require "./file"
       # under the lock, because two threads can cross the budget in the
       # same instant and the second must not collect a heap the first just
       # swept.
+      #
+      # A slice that finds a collection already triggered and the count
+      # past the budget sweeps with it (`sweep_assist`) rather than run
+      # on: the triggering thread pays the last epoch's debt before it
+      # stops anything, and every other thread allocated free beside it:
+      # on #145's `/api/v1/`, 15-19 ms of debt at the median and up to 844 ms,
+      # with up to 514 MB allocated past an 8.7 MB budget meanwhile.
+      # With the assist and the floor, `/api/v1/`'s debt was 3.9 ms at the
+      # median and 54 ms at most against 18.6 and 428 in the same
+      # sitting, 67 MB past the budget at most against 290, and the peak
+      # working set over 11 endpoints 424 MB against 811 (best of 3).
       def self.pressure(size : UInt64) : Nil
         total = IyiHeap.allocated_word.value.add(size) + size
-        return if @@collecting
+        if @@collecting
+          sweep_assist if total >= budget
+          return
+        end
         return unless @@auto
         return if total < budget
         collect_if_due
+      end
+
+      @@sweep_assists : UInt64 = 0_u64
+
+      # The debt's assist: while a triggered collection's thread sweeps
+      # what the last epoch left (`sweep_one_before_stop`), a thread past
+      # the budget sweeps slices of it too, each handed to its class's
+      # centre (`sweep_one`), until the mark has begun, a stop is asked
+      # for, or every arena left is swept or inside another walker's
+      # slice - Go's gcStart has every goroutine that crosses the trigger
+      # sweep the spans left before the cycle begins. Inside the
+      # allocator's bracket, as every allocating thread's sweep is.
+      def self.sweep_assist : Nil
+        while @@collecting && LibIyiGCTable.__iyi_marking == 0_u8
+          break if IyiHeap.stop_requested?
+          break if sweep_one(0_u64) != 1_u64
+          Pointer(Atomic(UInt64)).new(pointerof(@@sweep_assists).address).value.add(1_u64)
+        end
+      end
+
+      # Slices the debt's assists swept, in all, for the exercises.
+      def self.sweep_assists : UInt64
+        @@sweep_assists
       end
 
       def self.collect_if_due : Nil
@@ -9909,6 +10039,63 @@ end
     end
   end
 {% end %}
+
+# The stack under `main` is the loader's: dyld, or ld.so and the C
+# runtime's start, ran there before `main`, and `__iyi_main`'s frame -
+# every top-level local of the program - is laid over what they left. A
+# slot of it the program never writes is scanned with the loader's word
+# still in it, and the collector keeps whatever that word names. On
+# macos-15 (macOS 15.8.2, a three-core M1 virtual machine) dyld left
+# 2,209 nonzero words down to 21,696 bytes under `main`, the same in 40
+# runs, and Linux x86_64's start 453, 5,352 bytes deep. In
+# bench/concurrency_exercise.iyi four bytes of that frame were never
+# written and the `Int32` beside them was left at 4, and the word the
+# two made - 0x4_9b47bd00 on one runner, the low half dyld's - lay inside
+# the 64 MB string step 16e's rendezvous check had mapped there: 61 MiB
+# kept in 25 runs of 40 on that runner, and in none of 40 with the stack
+# under `main` zeroed. 64 KiB, three times dyld's depth, from this
+# frame's own stack pointer down, since this calls on and keeps nothing
+# under it: a leaf that cleared it left its own frame and red zone the
+# loader's, 22 words of them in the probe's array. A word
+# already zero is only read, since much of the stretch is pages nothing
+# has touched, and a store would make each the process's. Windows stops
+# at the committed limit, under which the guard page faults. The stack
+# pointer is read here rather than by a call, whose frame would lie
+# between its answer and this one. The loop calls nothing, as
+# `IyiRoots.clear_dead_stack`'s does not.
+@[NoInline]
+fun __iyi_enter(argc : Int32, argv : UInt8**) : Nil
+  {% if !flag?(:gc_boehm) && !flag?(:gc_none) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32)) %}
+    high = uninitialized UInt64
+    {% if flag?(:x86_64) %}
+      asm("movq %rsp, $0" : "=r"(high) :: : "volatile")
+    {% else %}
+      asm("mov $0, sp" : "=r"(high) :: : "volatile")
+    {% end %}
+    low = high - 65536_u64
+    {% if flag?(:win32) %}
+      limit = IyiRoots.stack_limit
+      low = limit if low < limit
+    {% end %}
+    while low < high
+      spot = Pointer(UInt64).new(low)
+      spot.value = 0_u64 if spot.value != 0_u64
+      low = low + 8_u64
+    end
+  {% end %}
+  __iyi_program(argc, argv)
+end
+
+# `__iyi_main`'s frame, made after `__iyi_enter` has zeroed the stack it
+# goes on. Called from there itself, --release could inline it, and its
+# frame would be `__iyi_enter`'s, made before the clear: called from
+# `main`, it was inlined, and the probe's array in bench/root_exercise.sh
+# read 458 of the loader's words through it on Linux x86_64.
+@[NoInline]
+fun __iyi_program(argc : Int32, argv : UInt8**) : Nil
+  LibIyiMain.__iyi_main(argc, argv)
+end
+
 # ── end of the memory layer ─────────────────────────────────────────────
 
 # The three symbols an `ensure` names and a `defer` links: a personality,
@@ -10851,7 +11038,8 @@ fun main(argc : Int32, argv : UInt8**) : Int32
   {% if flag?(:win32) %}
     __iyi_win_install_fault_handler
   {% end %}
-  {% if flag?(:iyi_observe) %} Std::Observe.start {% end %}; LibIyiMain.__iyi_main(argc, argv)
+  {% if flag?(:iyi_observe) %} Std::Observe.start {% end %}
+  __iyi_enter(argc, argv)
   # Named `test` cases keep going past a failure, so the program's own code
   # ends normally and the exit status is theirs to give (testing.iyi).
   status = IyiTestCases.verdict

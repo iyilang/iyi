@@ -56,24 +56,35 @@ negative frees a live one. `bench/mark_exercise.sh` proves the precision
 differentially and proves the check fails when the lookup is disabled.
 
 The stack is conservative too, and an optimised build decides what is on
-it. Two ways a dead structure stayed marked were measured and closed. A
+it. Three ways a dead structure stayed marked were measured and closed. A
 helper the top level called once was inlined into `__iyi_main`, whose
 frame lives as long as the program, and its array spilled to a slot of
 that frame nothing wrote again: 312 MB stayed marked through three
 `GC.collect` under --release, where a debug build freed it all. The
 compiler keeps a call the top level makes once out of line
-(`keep_call_out_of_main`, codegen/call.cr). And the collector's own
+(`keep_call_out_of_main`, codegen/call.cr). The collector's own
 frames are built over what earlier, deeper calls left on the stack, so a
 slot one of them never wrote held a returned helper's 32 MB array:
 `IyiMark.collect` zeroes 2 KiB of dead stack under itself first, as
-Boehm's `GC_clear_a_few_frames` does. Two cases stay open, both
+Boehm's `GC_clear_a_few_frames` does. And `__iyi_main`'s frame is laid
+over the stack the loader ran on before `main` - dyld left 2,209 words
+down to 21,696 bytes under it on macos-15, Linux x86_64's start 5,352
+bytes deep - so a slot of it the program never wrote held the loader's
+word: on macos-15 four bytes dyld wrote, beside an `Int32` the top level
+left at 4, made a word inside a 64 MB string, and
+bench/concurrency_exercise.iyi's rendezvous check found 61 MiB kept in
+25 runs of 40 on one runner. `main` enters the program through
+`__iyi_enter`, which zeroes the 64 KiB under itself before
+`__iyi_main`'s frame is made. Two cases stay open, both
 measured. A helper inlined into a top-level *loop* can leave its last
 pass's structure in that frame (156 MB after a two-pass loop of the same
 helper), because keeping calls in a loop out of line cost a loop of a
 small function 2.6 times its time (613 ms against 240). And a debug
 build's own `collect` frame sits above the zeroed stretch, where a
-stale word kept the 32 MB. `bench/root_exercise.sh` checks both closed
-cases in its --release run.
+stale word kept the 32 MB. `bench/root_exercise.sh` checks the first two
+closed cases in its --release run, and the third with a top-level array
+the program never writes, which reads zero plain and --release and holds
+the loader's words in a copy of the prelude that zeroes nothing.
 
 Stage 6 sweeps what this stage decided, and the collector runs *itself*: an
 allocation-pressure trigger in the allocator's one funnel runs a collection
@@ -353,21 +364,49 @@ A collection takes the runtime lock first, so no thread it stops can
 be holding it; then signals every other registered thread and waits
 for each to count itself in. The handler copies the interrupted
 general registers out of the ucontext onto the thread's line, records
-sp and pc, and parks — futex on Linux, a pipe per thread on darwin —
-and the collector scans each stopped thread's spill and its stack from
-that sp to the top of whichever mapping holds it, the thread's own or
-a fiber's, found by asking every fiber. Two threads are not parked
-where they stand, and both are the Go rule this document reached from
-the allocator's side: one inside `IyiHeap.take` — between reading a
-cache list's head and popping it, a stop would leave a chunk claimed
-by nobody the sweep could then unmap — finds the handler leaving a
-request on its cache page and parks itself on the way out, spilling
-its own callee-saved registers; and one spinning for the runtime lock
-parks inside the spin, where it holds nothing. `SA_RESTART` restarts
-the syscalls a stop interrupts, and the poller already read EINTR as
-a wakeup with no news. A thread's last act returns its cache to the
-centre, lets its fill arenas go, and leaves the list a stop walks;
-the stop that began before it left waited for it.
+sp and pc, and parks — on a futex, the kernel's on Linux and libSystem's
+on darwin — and the collector scans each stopped thread's spill and its
+stack from that sp to the top of whichever mapping holds it, the
+thread's own or a fiber's, found by asking every fiber. Two threads are
+not parked where they stand, and both are the Go rule this document
+reached from the allocator's side: one inside `IyiHeap.take` — between
+reading a cache list's head and popping it, a stop would leave a chunk
+claimed by nobody the sweep could then unmap — finds the handler
+leaving a request on its cache page and parks itself on the way out,
+spilling its own callee-saved registers; and one spinning for the
+runtime lock parks inside the spin, where it holds nothing.
+`SA_RESTART` restarts the syscalls a stop interrupts, and the poller
+already read EINTR as a wakeup with no news. A thread's last act
+returns its cache to the centre, lets its fill arenas go, and leaves
+the list a stop walks; the stop that began before it left waited for
+it. Its first act is the mirror, and the platforms differ there. On
+Linux the line is linked, the tid in it, before `clone` returns, and a
+stop that signals the thread before its first instruction finds the
+line by that tid. On darwin a thread links its own line, after its
+first touch of a thread-local: dyld makes a thread's thread-locals
+there, one `calloc` of the image's block, and the stop's handler reads
+two of them (the line and the heap's cache). Linked by its parent
+before `pthread_create`, a thread could take the stop's signal inside
+that `calloc`; the handler's read made the block again and took the
+lock the interrupted call held, and on macOS 26.6 (the M2 Pro)
+libplatform killed the process ("Trying to recursively lock an
+os_unfair_lock") - `bench/thread_exercise.sh`'s switching program in 5
+runs of 130, and threads born beside a thread collecting in a loop
+(its step 7d) in 19 of 20, each inside 4 s. No stop names a darwin
+thread before that touch now, and the handler is never the one to make
+the block. Linux's block is mapped and copied by the parent before
+`clone`, and its thread-locals are loads that allocate nothing;
+Windows' stop runs no code on the thread it suspends, and the loader
+hands a thread its TLS array when it creates it. A thread's stack top,
+which bounds the scan of its stack, is the other thing a stop needs
+before the thread holds anything: the parent writes Linux's before
+`clone`, and a darwin thread writes `pthread_get_stackaddr_np`'s as its
+first store. It wrote it after `IyiStackGuard.install`'s allocation,
+and a stop in between scanned that stack from sp up to 0: the eager
+sweep in `GC.collect`'s pause freed the thread's first chunk, the
+thread's stores into it wrote over the free batch it went onto, and the
+centre's next pop faulted - 13 runs of 342 of step 7d on macos-15's
+three cores, before the thread-local fix as after it.
 
 What the build found, and what it decided. The trigger's count moved
 off the class variable onto the centre's atomic, folded per cache
@@ -1458,7 +1497,8 @@ live churn 0.095 against 0.091 at 173 MB resident against 187. That is
 where the release was cut.
 
 What the wall time was not, each measured: the helpers' park (the pipe
-was built, measured and refused; they spin as they did), the
+was built, measured and refused; they spun as they did until the
+bounded spin and the futex below), the
 thread-local (Mach-O keeps its accessor), the two hangs found on
 few-core machines (both fixed, both in this document's Stage 8 and 9
 sections), the 16-kilobyte page against `RELEASE_PAGES` (churn hands
@@ -1471,6 +1511,78 @@ once the wait is a slice. The mark's thread was not the wall either -
 it reads the same under both rules - but it was darwin's longest
 *pause*, and the rule is the measured bound there now: "Which thread a
 mark runs on is measured, not estimated" above has the numbers.
+
+**darwin's helpers park: a bounded spin, then the public futex.** The
+spin they kept had a price the race could not show: an idle program
+held a core per helper. `bench/web_cores.iyi`'s server, idle after a
+second of load, used 88.9 s of CPU in ten seconds of wall on a ten-core
+M2 Pro (macOS 26.6, nine helpers) and 19.9 s on CI's three-core
+macos-14 (two), and `sample` found the helpers in
+`IyiMark::helper_main`; under load the spinners had the workers' cores.
+darwin's helpers now do what Windows' do: spin `SPIN_BEFORE_PARK_NS` on
+the generation by the clock, then sleep - on the generation word itself,
+in `os_sync_wait_on_address`, the kernel comparing the word before it
+sleeps the helper, and the collector's wake is one
+`os_sync_wake_by_address_all`, made only when the sleepers count says
+somebody sleeps. Interleaved against the spinning helpers, best of five
+on the M2 and best (median) of nine on the three-core runner:
+
+| | M2 Pro, spinning | M2 Pro, parked | macos-14, spinning | macos-14, parked |
+|---|---|---|---|---|
+| idle CPU over 10 s after load | 88.9 s | 0.0 s | 19.9 s | 0.0 s |
+| check_version, 8 workers | 64,331 req/s, p99 44.7 ms | 114,495, p99 0.92 ms | 37,743 (33,385) | 40,870 (37,366) |
+| binary trees | 0.281 s | 0.144 s | 0.177 s (0.199) | 0.192 s (0.205) |
+| churn | 0.076 s | 0.060 s | 0.067 s (0.078) | 0.064 s (0.075) |
+
+The spin is darwin's own, a quarter of a millisecond, chosen from
+fifty microseconds to five milliseconds: on the M2 a long spin is cores
+the program wanted (binary trees 0.135 s at fifty, 0.173 at one
+millisecond, 0.274 at five; check_version 115,279, 104,986 and 81,834),
+and on three cores a short one parks a helper between a burst's
+collections and wakes it late (binary trees' median 0.257 s at fifty,
+0.230 at a hundred, 0.205 at 250). The pipe refused before parked
+between every collection with no spin first, and cost the three-core
+runner binary trees 1.07 s against 0.23; with the spin first the cost
+there is the table's. One cost seemed to stay on the M2:
+`concurrent_mark`'s stopped mark of a 200,000-cell chain, five explicit
+collections back to back with the mark alone, read 2.6 ms a pause
+beside spinning helpers and 5.1 to 6.0 ms beside parked ones in the
+interleaved runs above. It is not the park's. The gate's own program,
+built both ways and run alternately, reads 2,592 to 2,615 µs a pause
+parked and 2,594 to 2,656 spinning, each after a first run of 5.1 to
+6.6 ms, and no sweep is paid inside any of those pauses (the
+guess was that a parked sweep round left the next stop arenas to
+sweep; the count of them is zero both ways). The second stop beside
+the program fell, from 108 µs to 10.1 ms across five runs to about
+300 µs [INFERENCE: its threads no longer wait behind nine spinners for
+a core]. The wake is the program's own thread's: at most 25 µs on the
+M2.
+
+Why this futex. It is public from macOS 14.4, and a program built on
+macOS 14 says it runs on 14.0 (`minos` 14.0 on CI's macos-14 runner,
+14.8.9; 26.0 on the M2), so iyi's darwin programs need 14.4 now. A weak
+import, the old spin its fallback where the name is absent, would keep
+14.0 to 14.3, and iyi has no weak linkage: no annotation declares one and
+codegen gives a `lib` function no linkage but the external one, so the
+floor is stated (README, SPEC.md III.9) rather than worked around.
+`__ulock_wait`, the private call beneath it - a parked helper's frame
+under `sample` is `__ulock_wait2`, and the wake's disassembly is a call
+to `__ulock_wake` -
+is the same futex without the 14.4, but every program would carry a
+private name, which this document refused for the stop's park. A Mach
+semaphore is public everywhere, four names with `mach_task_self_`, and a
+trap per sleeper in a wake the program's thread pays. A condition
+variable is ruled out by the stop: no caller of the wake runs in a
+signal handler, but a program thread can be stopped inside the wake
+(`wake_sweep_round` runs after the runtime lock is let go), and a thread
+parked holding the condition's mutex would hold the collector's next
+wake. `bench/parallel_mark.sh` holds the property on all three
+platforms: a second of sleep after the marks costs the process under a
+tenth of a core's second (0 ms on Linux, Windows and both Macs). The
+same second read 8.6 to 8.9 s with nine helpers on the M2 under the
+forever spin, and the gate's copy whose spin never gives up reads 8.8 s
+with nine there, 2.0 s with two on macos-14, 3.0 s with three on
+windows-2025 and 9.2 s with eleven on a twelve-core Linux machine.
 
 **This machine's cores are not alike, and the race's numbers move
 with placement.** The Ryzen AI 9 465 has four Zen 5 cores and six Zen
@@ -1522,6 +1634,24 @@ therefore held as an exact list by `bench/thread_floor.sh`: the
 runtime's twelve names, plus these eight — the five above, `pipe` and
 `read`, and `__tlv_bootstrap` — with each refused variant held to a
 list of its own.
+
+The pipe did not survive the runtime. Each thread's pipe was made when
+the thread was and never closed, two descriptors for every thread a
+program ever started, and under a terminal's `ulimit -n` of 256 five
+hundred short-lived threads died at "pipe failed" (macOS 26.6, Apple M2
+Pro, 10 cores, the user's machine). Once the mark helpers needed macOS
+14.4 for libSystem's public futex, the stop could park on it as Linux's
+does on the kernel's: `os_sync_wait_on_address` on the one release
+word, released by one `os_sync_wake_by_address_all`. Its disassembly
+is an argument check and one `__ulock_wait2` system call, holding no
+lock and writing nothing but errno on a failure, which the handler puts
+back — as safe there as `read`, without POSIX's list to say so. It is
+the probe's park now, and costs the floor no name, since the helpers'
+park already carries both: a thread's names are six, the five above and
+`__tlv_bootstrap`. One thread's best resume in the probe was 0.21 µs
+against the pipe's 1.75, and 10.5 and 14.6 µs against 12.5 and 19.3
+for 4 and 8 threads, in one run of each on the M2; `-Dtf_park_pipe`
+keeps the pipe measured.
 
 Go's stop was weighed too, and it is the one this probe cannot build
 without the compiler's help. Go's handler blocks nowhere: it
@@ -1628,7 +1758,8 @@ to 2.2. Resume is worse still past 4 threads: 3 ms mean for 8 against
 returns only once its target has been through a core and stopped, and
 the next begins after it, where N `pthread_kill`s are queued at once
 and the handlers stop in parallel as their threads get a core. So
-Stage 4's darwin stop is the signal and the per-thread pipe, and its
+Stage 4's darwin stop is the signal and a park the stop releases at
+once - the per-thread pipe then, libSystem's futex since - and its
 register capture is the handler's `ucontext`, as on Linux.
 
 **Owner's Decision:** Own the garbage collector. Concurrency, parallelism, and performance control are the reasons. gcry is prior art: measurements, design hints, and a record of what has already been tried and cost what. iyi writes the heap, the STW mechanism, root discovery, and finalizers from scratch.

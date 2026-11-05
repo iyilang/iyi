@@ -1,0 +1,119 @@
+# Work on every core - SPEC.md III.4.13, as a person writes it.
+#
+#   ./bin/iyi run samples/iyi/cores.iyi
+#
+# `spawn` is a task on the thread that spawned it, and its block may touch
+# anything; `spawn_parallel` is a task a pool of workers runs on any core,
+# and its block may capture only what is `Share` (III.4.4). std/http's
+# `Server.serve` puts each connection on that pool, so its block is checked
+# the same way. When a block reaches module state through a call, the
+# compiler warns, and `@[SafeReach("why")]` on the state says why it is safe.
+module samples/cores
+
+import std/http::{HTTP, Response, Server}
+import std/socket::{IyiSocket}
+import std/mutex::{Mutex}
+
+def collatz_steps(n : Int64) : Int64
+  steps = 0_i64
+  while n != 1
+    n = n % 2 == 0 ? n // 2 : 3 * n + 1
+    steps += 1
+  end
+  steps
+end
+
+# 1. `spawn` and `spawn_parallel`.
+#
+# The tasks `spawn` starts share their spawner's thread, so they may append
+# to an `Array` they captured. The tasks `spawn_parallel` starts run on
+# whichever core is free; each answers its own value, and a task's answer
+# need not be `Share`, because it is handed over once, after the task ends.
+seen = [] of Int64
+group do |g|
+  (1..3).each do |n|
+    g.spawn do
+      seen << collatz_steps(n.to_i64)
+      0
+    end
+  end
+end
+puts seen.sorted # => [0, 1, 7]
+
+longest = 0_i64
+group do |g|
+  handles = [] of IyiTask(Int64)
+  4.times do |part|
+    handles << g.spawn_parallel do
+      best = 0_i64
+      start = part.to_i64 * 25_000 + 1
+      (start..start + 24_999).each { |n| best = collatz_steps(n) if collatz_steps(n) > best }
+      best
+    end
+  end
+  handles.each do |handle|
+    steps = handle.value
+    longest = steps if steps.is_a?(Int64) && steps > longest
+  end
+end
+puts longest # => 350, the longest chain below 100,000
+
+# 2. State the pool may share.
+#
+# A counter that every core adds to is an `Atomic`; an `Array` that every
+# core appends to sits behind a `Mutex`. Both are `Share`, so a parallel
+# block may capture them.
+hits = Atomic(Int64).new(0_i64)
+paths = Mutex.new { [] of String }
+
+# 3. Module state a call reaches.
+#
+# A parallel block that names `GREETING` is refused, because an `Array` is
+# not `Share`. One that only calls `greeting` used to compile with nothing
+# said; now the compiler warns at the block, naming the path. This constant
+# is set before the server starts and only read afterwards, so it says so.
+@[SafeReach("set once before the server starts, then only read")]
+GREETING = ["hello", "from", "every", "core"]
+
+def greeting : String
+  GREETING.join(" ")
+end
+
+# 4. A server on every core.
+#
+# `Server.serve` runs each connection on the pool's workers, so its block is
+# checked as `spawn_parallel`'s is. It stops through a channel: closing the
+# listener from inside the block would capture it, and `/stop` may arrive on
+# any worker. `workers: 1` keeps the one-thread server, whose block may
+# capture anything.
+listener = IyiSocket.listen("127.0.0.1", 0)
+base = "http://127.0.0.1:#{listener.local_port}"
+stop = Channel(Int32).new(1)
+group do |g|
+  g.spawn do
+    stop.receive
+    listener.close
+    0
+  end
+  g.spawn do
+    Server.serve(listener) do |req|
+      hits.add(1_i64)
+      path = req.path
+      paths.lock { |list| list << path }
+      if path == "/stop"
+        stop.send(0)
+        Response.new(200, "bye")
+      else
+        Response.new(200, greeting)
+      end
+    end
+    0
+  end
+  g.spawn do
+    puts HTTP.get(base + "/").or_panic.body # => hello from every core
+    HTTP.get(base + "/stop").or_panic
+    0
+  end
+end
+puts hits.get                          # => 2
+paths.lock { |list| puts list.sorted } # => ["/", "/stop"]

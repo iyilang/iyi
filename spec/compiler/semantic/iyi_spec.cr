@@ -5143,6 +5143,101 @@ describe "Semantic: iyi" do
           swapped_value(Counter.new, workers: 1)
           CODE
       end
+
+      # iyi-web's `get "/boom" do raise ... end`: a route block that only
+      # raises makes the handler's block `Proc(Context, NoReturn)`, and the
+      # router's `@[Share(serial: workers)]` def passes what it answers to a
+      # generic def inside the block it hands `SharedProc.of`. A call given
+      # a NoReturn argument is never typed, so that block's proc was left
+      # without a type, and code generation stopped on it with a cast from
+      # Nil.
+      it "compiles a kept block whose body passes a NoReturn block result to a def" do
+        codegen(<<-CODE, filename: "x.iyi")
+          struct Kept(A, R)
+            def initialize(@proc : Proc(A, R))
+            end
+
+            @[Share]
+            def self.of(&block : A -> R) : Kept(A, R)
+              new(block)
+            end
+
+            def call(argument : A) : R
+              @proc.call(argument)
+            end
+          end
+
+          def fire : NoReturn
+            while true
+            end
+          end
+
+          def wrap(r : R) : String forall R
+            "wrapped"
+          end
+
+          @[Share(serial: workers)]
+          def reg(*, workers : Int32? = nil, &block : Int32 -> B) : Nil forall B
+            kept = Kept(Int32, String).of { |x| wrap(block.call(x)) }
+            kept.call(1)
+            nil
+          end
+
+          reg { |x| fire }
+          CODE
+      end
+
+      # The same block with a line before that call, with the NoReturn
+      # value assigned first, or with the call in both branches of an `if`:
+      # the cleanup cuts a list of expressions at its NoReturn one and
+      # leaves the list, and the `if`, untyped, so the proc still had no
+      # type to take from its body, and code generation stopped on the same
+      # cast from Nil.
+      it "compiles a kept block whose body is cut at a NoReturn value" do
+        codegen(<<-CODE, filename: "x.iyi")
+          struct Kept(A, R)
+            def initialize(@proc : Proc(A, R))
+            end
+
+            @[Share]
+            def self.of(&block : A -> R) : Kept(A, R)
+              new(block)
+            end
+
+            def call(argument : A) : R
+              @proc.call(argument)
+            end
+          end
+
+          def fire : NoReturn
+            while true
+            end
+          end
+
+          def wrap(r : R) : String forall R
+            "wrapped"
+          end
+
+          first = Kept(Int32, String).of do |x|
+            wrap(x)
+            wrap(fire)
+          end
+          first.call(1)
+          second = Kept(Int32, String).of do |x|
+            v = fire
+            wrap(v)
+          end
+          second.call(1)
+          third = Kept(Int32, String).of do |x|
+            if x > 0
+              wrap(fire)
+            else
+              wrap(fire)
+            end
+          end
+          third.call(1)
+          CODE
+      end
     end
 
     # #148: a parallel block that reaches a constant through the defs it
@@ -5444,6 +5539,123 @@ describe "Semantic: iyi" do
           warnings = WarningCollection.new
           semantic(Expressions.new([std, user] of ASTNode), warnings: warnings)
           warnings.infos.should be_empty
+        ensure
+          FileUtils.rm_rf(root)
+        end
+      end
+
+      # One warning per piece of state, at the first block that reaches it,
+      # with the count of the others: iyiturkiye's 91 warned blocks gave
+      # 1251 warnings about 37 constants, each once per block reaching it.
+      it "warns once for state many blocks reach, counting the others" do
+        code = reach_stub + <<-CODE
+          TALLY = Database.new
+
+          def tally : Int64
+            TALLY.query_one(1_i64)
+          end
+
+          g = G
+          g.spawn_parallel do
+            ask(1_i64)
+            nil
+          end
+          g.spawn_parallel do
+            ask(2_i64)
+            tally
+            nil
+          end
+          g.spawn_parallel do
+            ask(3_i64)
+            nil
+          end
+          CODE
+        first = code.lines.index!(&.includes?("g.spawn_parallel do")) + 1
+        second = first + 4
+        infos = reach_warnings.call(code)
+        infos.size.should eq(2)
+        infos[0].should start_with("warning in line #{first}\n")
+        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`, as do 2 other parallel blocks: Database's field @total is assigned in `query_one`.")
+        infos[1].should start_with("warning in line #{second}\n")
+        infos[1].should contain("reaches `TALLY : Database` (not Share) through `tally` → `TALLY.query_one`: ")
+        infos[1].should_not contain("other parallel block")
+      end
+
+      it "counts one other block in the singular" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          g = G
+          g.spawn_parallel do
+            ask(1_i64)
+            nil
+          end
+          g.spawn_parallel do
+            ask(2_i64)
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("through `ask` → `DATABASE.query_one`, as does 1 other parallel block: ")
+      end
+
+      it "fails --error-on-warnings with the one warning" do
+        warnings = WarningCollection.new
+        warnings.error_on_warnings = true
+        semantic(parse(reach_stub + <<-CODE, filename: "x.iyi"), warnings: warnings)
+          g = G
+          g.spawn_parallel do
+            ask(1_i64)
+            nil
+          end
+          g.spawn_parallel do
+            ask(2_i64)
+            nil
+          end
+          CODE
+        warnings.reports.size.should eq(1)
+        warnings.error_on_warnings?.should be_true
+      end
+
+      # A dependency's constant is changed in the dependency: the warning
+      # names the package and the file in its checkout, from the program's
+      # requirements (`Program#iyi_mod_table`).
+      it "names the package a reached constant is declared in" do
+        root = File.tempname("iyi-reach-pkg")
+        Dir.mkdir_p(File.join(root, "pool"))
+        begin
+          package = parse(<<-PKG, filename: File.join(root, "pool", "core.iyi"))
+            class Store
+              def initialize
+                @n = 0
+              end
+
+              def take : Int32
+                @n = 1
+              end
+            end
+
+            STORE = Store.new
+
+            def pkg_take : Int32
+              STORE.take
+            end
+            PKG
+          user = parse(reach_stub + <<-CODE, filename: "x.iyi")
+            g = G
+            g.spawn_parallel do
+              pkg_take
+              ask(1_i64)
+              nil
+            end
+            CODE
+          program = Program.new
+          program.color = false
+          program.warnings = WarningCollection.new
+          program.iyi_mod_table = [{"example.com/me/pool", root}, {"@pool", "example.com/me/pool"}]
+          program.semantic(program.normalize(Expressions.new([package, user] of ASTNode)))
+          infos = program.warnings.infos
+          infos.size.should eq(2)
+          infos[0].should contain("reaches `STORE : Store` (not Share) through `pkg_take` → `STORE.take`: Store's field @n is assigned in `take`. `STORE` is the package example.com/me/pool's at pool/core.iyi:11, so the change goes there. Keep the value behind a `Mutex`")
+          infos[1].should contain("reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value")
         ensure
           FileUtils.rm_rf(root)
         end

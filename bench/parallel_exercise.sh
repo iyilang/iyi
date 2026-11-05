@@ -22,18 +22,30 @@
 #      cancel and a close from a sibling or the main thread that find it,
 #      frames 120 KiB deep; tasks parked on one worker finish in under
 #      twice the ideal, woken from the main thread and from a worker; and a
-#      task joining a thread leaves its worker to its child.
+#      task joining a thread leaves its worker to its child. On Windows,
+#      bench/completions_taken.iyi holds the process's one completion port
+#      at twelve workers: a task's socket answered while the worker it
+#      parked on computes with preemption off is read on another worker
+#      within 250 ms; and the process's priority boost is off once the pool
+#      has started.
 #      bench/parallel_preempt.iyi then holds preemption at loop back-edges
 #      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
 #      request beside a task computing with no call in its loop wait no
-#      more than 100 ms, 80 for the request; a preempted task keeps its
-#      unit's token; the monitor looks every 4 to 10.5 ms and the quantum is
-#      at most 20 ms; and a tight loop costs at most twice what its
-#      `@[NoPreempt]` twin does. Its failure proofs are with step 7's: a
-#      `@[NoPreempt]` loop, a monitor that never raises the word, a Windows
-#      monitor on the system timer's tick, a check that calls the
-#      accessor (darwin and Windows), a slow half that does not poll, and a
-#      preempted task that gives its unit's token away.
+#      more than 100 ms, 80 for the request, in the server shape and with
+#      the request's window held open on one worker; a preempted task
+#      keeps its unit's token; a task switched in after one that held its
+#      worker past a look begins its own quantum; the monitor looks every
+#      4 to 10.5 ms (8 on Windows) and the quantum is at most three of
+#      those looks; a tight loop costs at most twice what its
+#      `@[NoPreempt]` twin does; and the release build's IR shows each
+#      tight loop's checks reading the worker's word through the thread
+#      pointer, none calling its thread-local accessor. Its failure proofs
+#      are with step 7's: a `@[NoPreempt]` loop, a monitor that never
+#      raises the word, a Windows monitor on the system timer's tick, a
+#      monitor that raises it after three unchanged looks, a check that
+#      calls the accessor (darwin and Windows), a slow half that does not
+#      poll, a word left raised for the task before, and a preempted task
+#      that gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. The speedup, measured: CPU-bound tasks on one worker and on several,
@@ -42,29 +54,37 @@
 #      The table for 1, 2, 4 and 8 workers (as far as the cores go) is
 #      printed for the record.
 #   5. A deadlock across threads - a parallel task waiting on a channel
-#      nobody sends on - is named, not hung.
+#      nobody sends on - is named, not hung. And bench/panic_exit.iyi
+#      ends the process with tasks parked on the poller, on twelve
+#      workers and on the main thread alone: a task's panic and the main
+#      task's panic each exit 1, and a task's `exit(3)` exits 3, inside
+#      the program's watchdog's 5 s.
 #   6. `Share` gates the parallel block at compile time: a captured
 #      `Array`, a `Channel` of arrays, a local assigned after the spawn, and
 #      a loop's local are refused, each by name. A block that reaches a
 #      constant that is not Share through a def it calls is warned about
 #      with the path, a failed build under `--error-on-warnings`; its
 #      copy with the constant marked `@[SafeReach]` builds clean under it.
+#      Two blocks reaching it are one warning, counting the other.
 #   7. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: a cross-thread wake that does not ring (a lost
 #      wakeup), a steal that leaves the task in its victim's queue (a task
 #      handed out twice), a cancel that is never delivered to the thread a
 #      sleeping task is on, a cancel that skips tasks still waiting in the
-#      pool (a cancelled task run as if it were not), and `take_now` and
-#      `put_now` without the scheduler's lock; the race step's add made
-#      a plain load and store, which loses adds only when tasks really run
-#      at the same instant; and for the moves of step 2 - a thread-local
-#      read as it was before a park, one read as it was before a loop
-#      whose back-edge check moved the task, a collector that skips a fiber
-#      on its way between workers, an io wait a cancel cannot find, a close
-#      posted to nobody, a read made on the thread that closes its socket,
-#      a pool that never steals a started task, tasks woken back onto the
-#      worker they parked on as they were before tasks moved, and a join
-#      held in the kernel.
+#      pool (a cancelled task run as if it were not), a cancel that leaves
+#      an io wait parked (a panic that never ends its program), and
+#      `take_now` and `put_now` without the scheduler's lock; the race
+#      step's add made a plain load and store, which loses adds only when
+#      tasks really run at the same instant; and for the moves of step 2 -
+#      a thread-local read as it was before a park, one read as it was
+#      before a loop whose back-edge check moved the task, a collector that
+#      skips a fiber on its way between workers, an io wait a cancel cannot
+#      find, a close posted to nobody, a read made on the thread that
+#      closes its socket, a pool that never steals a started task, tasks
+#      woken back onto the worker they parked on as they were before tasks
+#      moved, and a join held in the kernel; and on Windows a port whose
+#      packets only the worker their task parked on runs, and a pool that
+#      leaves the priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 4's floor refuses the ratio that comes out.
 set -u
@@ -140,33 +160,104 @@ for build in plain release; do
   fi
   sed 's/^/  /' "migrated-$build.txt"
 done
+# ── 2a. Windows' one completion port, twice ──────────────────────────────
+# bench/completions_taken.iyi at twelve workers: a task's socket answered
+# while the worker it parked on computes with preemption off is read on
+# another worker within 250 ms, and the process's priority boost is off
+# once the pool has started (SPEC.md III.4.13, part 5).
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    for build in plain release; do
+      step "the process's one completion port and its boost, $build build"
+      flag=""
+      [ "$build" = release ] && flag="--release"
+      if ! "$IYI" build $flag "$REPO/bench/completions_taken.iyi" -o "taken-$build" > "build-taken-$build.log" 2>&1; then
+        echo "build failed:"; tail -20 "build-taken-$build.log"; exit 1
+      fi
+      timeout -k 5 300 "./taken-$build" boost taken --workers=12 > "taken-$build.txt" 2>&1
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q 'every property held' "taken-$build.txt"; then
+        echo "the completion port exercise failed (exit $code):"; cat "taken-$build.txt"; exit 1
+      fi
+      grep -v 'every property held' "taken-$build.txt" | sed 's/^/  /'
+    done ;;
+  *)
+    step "the process's one completion port and its boost"
+    echo "  Windows' alone: a poller here is the waiting worker's epoll or kqueue" ;;
+esac
+
 # ── 2b. Preemption at loop back-edges, twice ─────────────────────────────
 # bench/parallel_preempt.iyi: a task computing with no call in its loop
 # no longer holds a short task, a sleeper or a connection behind it past
 # 100 ms (80 for a fast request in the server shape); a preempted task
-# keeps its unit's token; the monitor looks every 4 to 10.5 ms and two tasks
-# on one worker take turns of 20 ms at most; and the tight loops cost at
-# most twice what their `@[NoPreempt]` twins cost.
+# keeps its unit's token; a task switched in is not given up on the word
+# raised for the one before it; the monitor looks every 4 to 10.5 ms (8
+# on Windows) and two tasks on one worker take turns of at most three of
+# those looks; the tight loops cost at most twice what their
+# `@[NoPreempt]` twins cost; and their checks read the word through the
+# thread pointer, in the release build's IR, which it writes for that.
 PREEMPT_WORKERS=8
 [ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
 # The server shape's clients are the program's own main thread, which on
-# Windows, by every sign, waits for a core behind workers holding all of
-# them: on a 4-core GitHub runner, 4 workers made the slowest fast request 64 to 99
-# ms, 760 to 897 of 11,200 over 20 ms, with the monitor's tick at 5 ms and
-# at the system timer's alike, and 3 workers made it 36 to 49 ms, 119 to
-# 142 over 20. darwin's 3 workers on 3 cores made it 26 to 50 ms.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    [ "$CORES" -gt 1 ] && [ "$PREEMPT_WORKERS" -ge "$CORES" ] && PREEMPT_WORKERS=$((CORES - 1)) ;;
-esac
+# a machine of few cores, by every sign, waits for a core behind workers
+# holding all of them: on a 4-core GitHub Windows runner, 4 workers made
+# the slowest fast request 64 to 99 ms, 760 to 897 of 11,200 over 20 ms,
+# with the monitor's tick at 5 ms and at the system timer's alike, and 3
+# workers made it 36 to 49 ms, 119 to 142 over 20. darwin's 3 workers on
+# 3 cores made it 26 to 50 ms.
+#
+# Three left the main thread one core and none for anything else the
+# machine runs. GitHub's 4-core Windows runners come in two speeds: the
+# job's runtime exercises take 486 to 658 s or 688 to 738 s, and on the
+# slower the plain `spin` runs a sixth slower than its calibration (the
+# period step's 111 to 121 looks, where the faster takes 86 to 99). There
+# the plain build's server step read 36 to 63 ms, 286 to 427 over 20, in
+# 13 jobs, then 157 and 159 ms, 2753 and 1682 over (CI jobs 123312302895
+# and 123350279733); a commit master has since merged read 102 ms, 2504
+# over, with its ticker 61 ms late (123170544267). Windows 11, 12 logical
+# processors (the user's machine), held to 4 by `start /affinity F` with
+# a shell loop busy on one of them, made the same shape: 3 workers 59 to
+# 104 ms, 914 to 1364 over 20, in 24 runs, master's binary and this one
+# alike, the poller step before it or not; 2 workers 26 to 31 ms, 123 to
+# 300 over, in 20. So Windows was left two cores, the main thread's and a
+# spare: on 2 workers CI read 27 to 31 ms plain, 409 to 458 over,
+# and 27 to 37 release, 250 to 303 over, in four jobs, three of them on
+# the slower runner (123506061763, 123575207812, 123639425845; and
+# 123702042367). The 4 slow connections still outnumber the workers, so
+# a fast request is answered beside them only by a preemption. On 2
+# workers master then failed at 83 ms on the slower runner (job
+# 124117601245). Traced on that Windows 11 machine, held to 4 with one
+# busy, its slowest requests were not waiting for a core: each was a fast
+# task given up at its first back-edge on the word raised for the task
+# before it, which the switch now lowers (`IyiScheduler.switch_to`, and
+# the fresh step). There, master's 20 runs each read 24 to 43 ms plain
+# and 22 to 38 release, and the lowered word's 23 to 29 and 22 to 31.
+#
+# darwin's three-core runners, where 3 workers took every core, then
+# starved the same way: 24 to 46 ms in the 13 macos-14 and macos-15 runs
+# in CI's logs, and then 87 and 85 ms, 356 and 138 over 20, in two of
+# the three macos-15 runs of master 7cdb1271a's soak (jobs 124862458037
+# and 124885593220; the third read 44 ms, 197 over). Left two cores
+# there, 1 worker made it worse, not better: 54 to 100 ms, 2951 to 5466
+# over 20, failing 4 of 10 runs (debug job 124913849625), as every fast
+# request then waits behind the slow ones' turns on the one worker. So a
+# machine of four cores or fewer runs 2 workers: two cores left on 4, one
+# on 3. On 2 workers, ten debug runs on macos-15 read 37 to 55 ms
+# plain, 654 to 1044 over 20, and 31 to 50 release, 542 to 1068 over, and
+# windows-2025's 10 read 24 to 33 plain and 23 to 47 release (jobs
+# 124922160678 and 124922160886); Linux here, 12 vCPUs held to 4 by
+# `taskset`, read 32 and 33 ms. The 4 slow connections outnumber the
+# workers, so a fast request is still answered only by a preemption.
+[ "$CORES" -le 4 ] && [ "$PREEMPT_WORKERS" -gt 2 ] && PREEMPT_WORKERS=2
 for build in plain release; do
   step "preemption at loop back-edges, $build build"
   flag=""
-  [ "$build" = release ] && flag="--release"
+  [ "$build" = release ] && flag="--release --emit llvm-ir"
+  # shellcheck disable=SC2086 # the flags are words
   if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
   fi
-  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "server --workers=$PREEMPT_WORKERS"; do
+  for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "poller --workers=1" "fresh --workers=1" "server --workers=$PREEMPT_WORKERS"; do
     # shellcheck disable=SC2086 # the step and its count are words
     timeout -k 5 300 "./preempt-$build" $run > "preempted-$build.txt" 2>&1
     code=$?
@@ -183,6 +274,93 @@ if [ "$code" -ne 0 ] || ! grep -q 'every property held' tight.txt; then
   echo "the tight loops failed (exit $code):"; cat tight.txt; exit 1
 fi
 grep '^tight' tight.txt | sed 's/^/  /'
+
+# The checks at the tight step's loops' back-edges in an IR file, as
+# `--emit llvm-ir` writes it after they went in (`PreemptChecks`): the
+# loops of bench/parallel_preempt.iyi's `spin`, `sum`, `sum_each` and
+# `crc`, each `@[NoInline]` so that it is a function of its own. A check is
+# the block that branches to a block calling `__iyi_preempt`, that block's
+# one predecessor, and it reads the worker's word through the thread
+# pointer - `%gs:off` on x86-64 Windows (address space 256), `%fs:off` on
+# x86-64 Linux (257), `tpidrro_el0` on darwin arm64, `tpidr_el0` on arm64
+# Linux - or by calling the word's thread-local accessor,
+# `*IyiWorkers::preempt`, at every turn. darwin's entry block calls the
+# accessor once for the offset, and is no check. A line per loop, and exit
+# 1 at a loop that is not there, one with no check, and one with a check
+# that does not read the thread pointer. The timing above cannot tell the
+# accessor's checks from these: on the Windows runner of CI job
+# 122792275988 they cost `sum` 1.776x and `each` 1.828x, where the thread
+# pointer's cost them 1.049x and 1.108x, and the bound was twice.
+tight_checks() { # IR file
+  awk '
+    BEGIN {
+      split("spin sum sum_each crc", order, " ")
+      for (i = 1; i <= 4; i++) wanted[order[i]] = 1
+      split("%gs:off|%fs:off|tpidrro_el0|tpidr_el0|accessor|another way", kinds, "|")
+    }
+    /^define / {
+      line = $0
+      gsub(/\.3A\./, ":", line)
+      gsub(/\.3C\./, "<", line)
+      fn = ""
+      if (match(line, /ParallelPreempt::[a-z_]+</)) {
+        name = substr(line, RSTART + 17, RLENGTH - 18)
+        if (name in wanted) { fn = name; found[fn] = 1; block = "%entry"; pred = "" }
+      }
+      next
+    }
+    fn == "" { next }
+    /^}/ { fn = ""; next }
+    /^[^ \t]/ {
+      block = "%" substr($0, 1, index($0, ":") - 1)
+      at = index($0, "; preds = ")
+      pred = at ? substr($0, at + 10) : ""
+      sub(/[ \t]+$/, "", pred)
+      next
+    }
+    index($0, "call void @__iyi_preempt()") { checks[fn] = checks[fn] + 1; check[fn, checks[fn]] = pred; next }
+    index($0, "@\"*IyiWorkers::preempt\"(") || index($0, "@.2A.IyiWorkers.3A..3A.preempt(") { how[fn, block] = "accessor"; next }
+    how[fn, block] == "accessor" { next }
+    /load volatile i64, ptr addrspace\(256\)/ { how[fn, block] = "%gs:off"; next }
+    /load volatile i64, ptr addrspace\(257\)/ { how[fn, block] = "%fs:off"; next }
+    /tpidrro_el0/ { how[fn, block] = "tpidrro_el0"; next }
+    /tpidr_el0/ { how[fn, block] = "tpidr_el0"; next }
+    END {
+      for (i = 1; i <= 4; i++) {
+        fn = order[i]
+        if (!(fn in found)) { fails = fails "FAIL: tight checks: " fn " is not a function of the IR\n"; continue }
+        n = checks[fn] + 0
+        if (n == 0) { fails = fails "FAIL: tight checks: " fn " checks at no back-edge\n"; continue }
+        split("", counts)
+        for (k = 1; k <= n; k++) {
+          kind = how[fn, check[fn, k]]
+          if (kind == "") kind = "another way"
+          counts[kind] = counts[kind] + 1
+        }
+        said = ""
+        for (k = 1; k <= 6; k++) {
+          kind = kinds[k]
+          if (!(kind in counts)) continue
+          word = kind == "accessor" ? "calling the accessor" : (kind == "another way" ? "reading the word another way" : "reading " kind)
+          said = said ", " counts[kind] " " word
+        }
+        print fn ": " n " back-edge check" (n == 1 ? "" : "s") said
+        if ("accessor" in counts) fails = fails "FAIL: tight checks: " fn ": " counts["accessor"] " of " n " back-edge checks call the thread-local accessor *IyiWorkers::preempt\n"
+        else if ("another way" in counts) fails = fails "FAIL: tight checks: " fn ": " counts["another way"] " of " n " back-edge checks read the word neither through the thread pointer nor by the accessor\n"
+      }
+      printf "%s", fails
+      exit (fails != "")
+    }
+  ' "$1"
+}
+step "how the tight loops' checks read the worker's word, release build"
+if ! tight_checks preempt-release.ll > reads.txt 2>&1; then
+  echo "the tight loops' checks are not the thread pointer's:"; cat reads.txt; exit 1
+fi
+sed 's/^/  /' reads.txt
+if [ "$(uname -s)" = Linux ]; then
+  echo "  the check on Linux never calls the accessor: \`-Dpreempt_check_accessor\` builds the same code"
+fi
 
 # ── 2c. Preemption inside the library, std and recursion, twice ──────────
 # bench/parallel_preempt_lib.iyi: a sort, a copy, a hash's growth, a join,
@@ -204,6 +382,90 @@ for build in plain release; do
   fi
   grep -v 'every property held' "preemptedlib-$build.txt" | sed 's/^/  /'
 done
+
+# A short copy's checks, in the release IR of bench/parallel_preempt_lib.iyi's
+# `copy_bytes`, `Pointer#copy_from` as a function of its own. Its loop of
+# runs checks between runs; a copy of one run or less takes no such loop.
+# With the check at that loop's latch every copy read the word once,
+# however short: a join of 1,000,000 short strings, two copies a string,
+# read it three times a string, and cost 9.5 to 10.7% over the same
+# program with the library unchecked (Linux here, release, load 3 to 4.5).
+# So some path from the entry must reach a block that copies and go on to
+# a return through no check. And on darwin, where what a check reads
+# through is made by calling the word's accessor, that call must not be in
+# the entry block: there `String::Builder#<<` paid it at every append, and
+# the join cost 1.37x to 1.43x the unchecked one (an M2 Pro, load 3 to
+# 17; `PreemptChecks.entry_value`). A check is the block that calls
+# `__iyi_preempt` and the blocks that branch to it. Exit 1 at a function
+# that is not there, one with no check at all - a long copy must still
+# give its worker up - one whose every copy passes a check, and one whose
+# entry calls the accessor.
+copy_checks() { # IR file
+  awk '
+    function label(text) {
+      if (substr(text, 1, 1) == "\"") return "%" substr(text, 1, index(substr(text, 2), "\"") + 1)
+      return "%" substr(text, 1, index(text, ":") - 1)
+    }
+    /^define / {
+      line = $0
+      gsub(/\.3A\./, ":", line)
+      gsub(/\.3C\./, "<", line)
+      inside = (line ~ /ParallelPreemptLib::copy_bytes</)
+      if (inside) { found = 1; block = "%entry"; blocks[block] = 1 }
+      next
+    }
+    !inside { next }
+    /^}/ { inside = 0; next }
+    /^[^ \t]/ { block = label($0); blocks[block] = 1; next }
+    {
+      rest = $0
+      while (match(rest, /label %("[^"]*"|[-a-zA-Z$._0-9]+)/)) {
+        to = substr(rest, RSTART + 6, RLENGTH - 6)
+        edges[block, ++count[block]] = to
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
+    index($0, "call void @__iyi_preempt()") { slow[block] = 1; checks++ }
+    /^  store / { stores[block] = 1 }
+    /^  ret / { returns[block] = 1 }
+    block == "%entry" && (index($0, "@\"*IyiWorkers::preempt\"(") || index($0, "@.2A.IyiWorkers.3A..3A.preempt(")) { accessor = 1 }
+    END {
+      if (!found) { print "FAIL: copy checks: copy_bytes is not a function of the IR"; exit 1 }
+      if (checks == 0) { print "FAIL: copy checks: copy_bytes checks at no back-edge, so a long copy holds its worker"; exit 1 }
+      for (b in blocks) {
+        checking[b] = slow[b]
+        for (k = 1; k <= count[b]; k++) if (slow[edges[b, k]]) checking[b] = 1
+      }
+      # From the entry through no check, and back from a return through none.
+      queue[1] = "%entry"; reached["%entry"] = 1; n = 1
+      for (i = 1; i <= n; i++) {
+        b = queue[i]
+        for (k = 1; k <= count[b]; k++) {
+          to = edges[b, k]
+          if (!(to in reached) && !checking[to]) { reached[to] = 1; queue[++n] = to }
+        }
+      }
+      do {
+        grew = 0
+        for (b in blocks) {
+          if (checking[b] || (b in leaves)) continue
+          if (returns[b]) { leaves[b] = 1; grew = 1; continue }
+          for (k = 1; k <= count[b]; k++) if (edges[b, k] in leaves) { leaves[b] = 1; grew = 1; break }
+        }
+      } while (grew)
+      free = 0
+      for (b in stores) if ((b in reached) && (b in leaves)) free++
+      print "copy_bytes: " checks " check" (checks == 1 ? "" : "s") " between runs, " free " copying block" (free == 1 ? "" : "s") " a short copy reaches and returns from past none"
+      if (free == 0) { print "FAIL: copy checks: every copy in copy_bytes passes a check before it returns, however short"; exit 1 }
+      if (accessor) { print "FAIL: copy checks: the entry block of copy_bytes calls the thread-local accessor *IyiWorkers::preempt, which every copy then pays"; exit 1 }
+    }
+  ' "$1"
+}
+step "a short copy passes no check, release build"
+if ! copy_checks preemptlib-release.ll > copies.txt 2>&1; then
+  echo "a short copy checks:"; cat copies.txt; exit 1
+fi
+sed 's/^/  /' copies.txt
 
 # The runtime's own functions, and every function they reach by a direct
 # call, hold no check (bench/preempt_audit.py), read from the release
@@ -235,8 +497,8 @@ fi
 #   darwin   the runtime's list (bench/thread_exercise.sh spells it out),
 #            the thread floor's names a started thread costs -
 #            `pthread_create`, `pthread_kill` and `sigaction` for the
-#            thread and the stop, `pipe`/`read`/`write` for the stop's
-#            park, and `close` for a retiring thread's kqueue
+#            thread and the stop, whose park is the futex already on the
+#            list, and `close` for a retiring thread's kqueue
 #            (`IyiScheduler.retire_thread`, linked with every thread
 #            body) - and `_environ` for `IYI_WORKERS`. The doorbell is an
 #            `EVFILT_USER` change through `kevent`, already on the list,
@@ -265,8 +527,8 @@ case "$(uname -s)" in
     ;;
   Darwin)
     [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _dladdr _dprintf _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
-    thread='_close _pipe _pthread_kill _read'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _dladdr _dprintf _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    thread='_close _pthread_kill'
     pool='_environ'
     allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
     for bin in exercise-plain exercise-release; do
@@ -362,6 +624,41 @@ if [ "$code" -ne 1 ] || ! grep -q 'deadlock: every fiber is blocked' deadlock.tx
 fi
 echo "  exits 1: $(grep -m1 'deadlock' deadlock.txt)"
 
+# ── 4a. A panic or an exit ends the process ──────────────────────────────
+# bench/panic_exit.iyi: tasks parked on the poller (reads nobody answers,
+# an accept nobody connects to) beside sleepers and channel receivers. The
+# program is then ended three ways: a task's panic, the main task's panic,
+# and a task's `exit(3)`. Each runs on twelve workers and on the main
+# thread alone. The program's watchdog names a run still going 5 s after
+# its start, which is a cancel that left some wait parked and the join
+# waiting on it. The timeout here is for an exit that never ends. The
+# first run is the virus scanner's first look at a new binary, 11.1 s for
+# one program on the user's Windows 11 machine (12 logical processors),
+# so it is not one of the timed runs.
+step "a panic or an exit ends the process with tasks parked on the poller"
+if ! "$IYI" build "$REPO/bench/panic_exit.iyi" -o panic_exit > build-panic-exit.log 2>&1; then
+  echo "build failed:"; tail -20 build-panic-exit.log; exit 1
+fi
+timeout -k 5 60 ./panic_exit > /dev/null 2>&1
+for workers in 12 0; do
+  where="on 12 workers"
+  [ "$workers" = 0 ] && where="on the main thread"
+  for mode in task-panic main-panic task-exit; do
+    case "$mode" in
+      task-panic) want=1 said='iyi: panic: a task panicked: ' ;;
+      main-panic) want=1 said="iyi: panic: the main task's panic" ;;
+      task-exit) want=3 said='' ;;
+    esac
+    timeout -k 5 10 ./panic_exit "$mode" --workers="$workers" > panic-exit.txt 2>&1
+    code=$?
+    if [ "$code" -ne "$want" ] || grep -q '^FAIL: ' panic-exit.txt || { [ -n "$said" ] && ! grep -qF "$said" panic-exit.txt; }; then
+      echo "$mode $where exited $code, not $want (124 is an exit that never ended):"; cat panic-exit.txt; exit 1
+    fi
+    ended="$(grep -m1 'every task ended' panic-exit.txt | sed 's/^[a-z-]*: every task ended /, every task ended /')"
+    echo "  $mode $where: exits $code$ended"
+  done
+done
+
 # ── 5. Share gates the parallel block ─────────────────────────────────────
 step "Share gates what a parallel task's block captures"
 refused() { # name, expected text, program body
@@ -409,7 +706,11 @@ end'
 # about at the block, with the path, by a build and by `check`, and
 # `--error-on-warnings` makes the warning a failure. The broken copy is
 # the clean one with the mark taken off, and the check that passes the
-# marked copy catches it.
+# marked copy catches it. Two blocks reach `DATABASE`, and that is one
+# warning at the first, counting the second: iyiturkiye's routes gave
+# 1251 warnings about 37 constants, each once per route that reached
+# it, on Linux; gathered they are 37. Its broken copy
+# has the second block left out, and says nothing of another block.
 step "a parallel block reaching a constant through a call is warned about"
 cat > reaches.iyi <<'IYI'
 module reaches
@@ -434,6 +735,7 @@ end
 
 group do |g|
   g.spawn_parallel { ask(1_i64) }
+  g.spawn_parallel { ask(2_i64) }
 end
 IYI
 awk '/^@\[SafeReach/ { next } /^module reaches$/ { print "module reaches_bare"; next } { print }' reaches.iyi > reaches_bare.iyi
@@ -447,7 +749,10 @@ echo "  checks under --error-on-warnings: DATABASE marked @[SafeReach]"
 if ! "$IYI" build reaches_bare.iyi -o reaches_bare > build-reaches-bare.log 2>&1; then
   echo "a warning stopped a build without --error-on-warnings:"; cat build-reaches-bare.log; exit 1
 fi
-want='the block spawn_parallel runs on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`'
+want='the block spawn_parallel runs on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`, as does 1 other parallel block: '
+if [ "$(grep -c 'reaches `DATABASE' build-reaches-bare.log)" != 1 ]; then
+  echo "two blocks reaching DATABASE were not one warning:"; cat build-reaches-bare.log; exit 1
+fi
 if ! grep -qF "$want" build-reaches-bare.log; then
   echo "the block reaching DATABASE through ask was not warned about:"; cat build-reaches-bare.log; exit 1
 fi
@@ -458,7 +763,19 @@ if ! grep -qF "$want" check-reaches-strict.log; then
   echo "check failed the program, but not for the warning:"; cat check-reaches-strict.log; exit 1
 fi
 echo "  broken copy, the mark taken off: warned by the build, and failed by check --error-on-warnings"
-echo "  warned: $(grep -m1 -F "$want" build-reaches-bare.log | sed 's/^Warning: //' | cut -c1-150)"
+echo "  warned once for two blocks: $(grep -m1 -F "$want" build-reaches-bare.log | sed 's/^Warning: //' | cut -c1-190)"
+awk '/ask\(2_i64\)/ { next } /^module reaches_bare$/ { print "module reaches_lone"; next } { print }' reaches_bare.iyi > reaches_lone.iyi
+if cmp -s reaches_bare.iyi reaches_lone.iyi; then
+  echo "the awk for reaches_lone found nothing to change"; exit 1
+fi
+if ! "$IYI" check reaches_lone.iyi > check-reaches-lone.log 2>&1; then
+  echo "check failed a program it only warns about:"; cat check-reaches-lone.log; exit 1
+fi
+if grep -qF "$want" check-reaches-lone.log || grep -qF 'other parallel block' check-reaches-lone.log \
+  || ! grep -qF 'through `ask` → `DATABASE.query_one`: ' check-reaches-lone.log; then
+  echo "one block reaching DATABASE was not warned about alone:"; cat check-reaches-lone.log; exit 1
+fi
+echo "  broken copy, the second block left out: warned with no other block counted"
 
 # ── 7. Failure proofs: broken copies of the runtime ──────────────────────
 # Each a copy of src/iyi with one file changed - concurrency.iyi unless
@@ -511,6 +828,16 @@ caught undelivered 'cancel: still waiting after 5000 ms' cancel --watch=5000
 step "failure proof: a cancel that skips tasks waiting in the pool runs them uncancelled"
 broken unflagged '/def self.cancel\(fiber/ { incancel = 1 } incancel && /^    fiber.cancelled = true$/ { print "    fiber.cancelled = true unless fiber.home.is_a?(Nil)"; incancel = 0; next } { print }'
 caught unflagged 'tasks waiting in the pool ran uncancelled' cancel --watch=60000
+
+step "failure proof: a cancel that leaves an io wait parked keeps a panicking program running"
+# The cancel ends no io wait, so a task parked on a read nobody answers is
+# parked for good, and the panic's join waits on it. This is how master
+# bcefa35fc's server_load copy hung after its panic line in job
+# 123987176637: a cancelled read's packet was dropped, and nothing else
+# could wake it.
+broken parkedio '/^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "    elsif false"; next } { print }' concurrency.iyi panic_exit
+caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=12
+caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=0
 
 step "failure proof: take_now and put_now without the scheduler's lock lose and repeat values across workers"
 # Two threads changing one channel's ring and queues at once end the step
@@ -577,7 +904,7 @@ else
   step "failure proof: an io wait that does not say whose poller holds it is never cancelled"
   case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      broken unlistedio '/def self.park_overlapped_current\(/ { inpark = 1 } inpark && /^    listed\(fiber, waiting_out\)$/ { inpark = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+      broken unlistedio '/def self.park_overlapped_current\(/ { inpark = 1 } inpark && /^    fiber\.list_on\(st\.object_id\) if @@shared && fiber\.unit\.is_a\?\(IyiUnit\)$/ { inpark = 0; next } { print }' concurrency.iyi parallel_migrate ;;
     *)
       broken unlistedio '/def self.wait_posix\(fd/ { inwait = 1 } inwait && /^    listed\(fiber\)$/ { inwait = 0; next } { print }' concurrency.iyi parallel_migrate ;;
   esac
@@ -586,7 +913,7 @@ else
   step "failure proof: a close posted to no thread leaves a read on another worker parked"
   case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      echo "  a close on Windows ends the posted read, whose completion its own port takes: there is nothing to post" ;;
+      echo "  a close on Windows ends the posted read, whose completion any thread takes off the port: there is nothing to post" ;;
     *)
       broken noclose '/def self.wake_closed\(fd/ { inclose = 1 } inclose && /^      return unless @@shared$/ { print "      return"; inclose = 0; next } { print }' concurrency.iyi parallel_migrate
       caught noclose 'closes: still waiting after 5000 ms' closes --watch=5000 ;;
@@ -630,6 +957,11 @@ step "failure proof: a monitor that never raises a worker's word preempts nothin
 broken noflag '/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
 caught noflag 'slice: a short task waited' slice --workers=1
 
+# Caught at its look, which the period step holds to 8 ms on Windows: the
+# copy read 10.1 to 13.1 ms in 20 runs of debug jobs 124913849506 and
+# 124922160886, and 15.6 and 16.0 on Windows 11, 12 logical processors
+# (the user's machine), held to 4. Against the 10.5 ms every platform was
+# held to, it passed the look in master's soak (job 124885593140).
 step "failure proof: a Windows monitor that waits on the system timer looks too seldom"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
@@ -639,23 +971,90 @@ case "$(uname -s)" in
     echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
 esac
 
-step "failure proof: a check that calls the thread-local accessor at every back-edge costs a tight loop"
+# The turn is held to three of the period step's own looks. This copy
+# took 3.45 to 4.35 looks a turn in 16 runs on macos-15 and 3.84 to 4.02
+# in 20 on windows-2025 (debug jobs 124913849625 and 124922160678,
+# 124913849506 and 124922160886), 3.88 to 4.21 in three here on Linux,
+# and 4.02 and 3.96 on Windows 11, 12 logical processors (the user's
+# machine), held to 4; the real monitor's turns took 1.61 to 2.25 looks
+# in those debug jobs.
+step "failure proof: a monitor that raises a worker's word after three unchanged looks makes turns of four"
+broken slowturn '/^  PREEMPT_TICKS   =       1_u64$/ { print "  PREEMPT_TICKS   =       3_u64"; next } { print }' concurrency.iyi parallel_preempt
+caught slowturn 'period: two tasks computing on one worker took turns of' period --workers=1
+
+# The accessor's checks are caught in the IR, where they are calls of
+# `*IyiWorkers::preempt` however fast the runner is. By the clock the
+# copy's `sum` measured 5.351x and 5.409x on macos-14 runners, but 1.776x
+# on the windows-2025 one of CI job 122792275988, under the bound of twice
+# it had to pass, and the thread pointer's checks measured `each` up to
+# 1.762x on another windows-2025 runner (CI job 122916661258): no bound
+# between the two holds on every runner. So the copy's timing is not a
+# proof any more, and is not run.
+step "failure proof: a check that calls the thread-local accessor at every back-edge"
 if [ "$(uname -s)" = Linux ]; then
-  echo "  the check on Linux never called the accessor: the copy builds the same code, so there is nothing to fail"
+  echo "  the check on Linux never calls the accessor: the copy builds the same code, so there is nothing to fail"
 else
-  if ! "$IYI" build --release -Dpreempt_check_accessor "$REPO/bench/parallel_preempt.iyi" -o accessor-run > build-accessor.log 2>&1; then
+  if ! "$IYI" build --release --emit llvm-ir -Dpreempt_check_accessor "$REPO/bench/parallel_preempt.iyi" -o accessor-run > build-accessor.log 2>&1; then
     echo "the accessor build failed:"; tail -20 build-accessor.log; exit 1
   fi
-  caught accessor 'tight: sum:' tight --workers=1
+  if tight_checks accessor-run.ll > accessor.txt 2>&1; then
+    echo "the broken copy accessor was not caught by the tight loops' checks:"; cat accessor.txt; exit 1
+  fi
+  if ! grep -q '^FAIL: tight checks: .* call the thread-local accessor' accessor.txt; then
+    echo "the tight loops' checks failed the accessor copy some other way:"; cat accessor.txt; exit 1
+  fi
+  sed '/^FAIL: /d; s/^/  /' accessor.txt
+  echo "  exits 1 at \"$(grep -m1 '^FAIL: ' accessor.txt | sed 's/^FAIL: //')\""
 fi
 
 step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"
-if [ "$CORES" -lt 2 ]; then
-  echo "  one core here: no idle worker takes what the poll would hand over, so the proof is not run"
-else
-  broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
-  caught nopoll 'server: a fast request took' server --workers="$PREEMPT_WORKERS"
-fi
+# Caught by the poller step, whose window is held: the server shape's
+# copy waited only when a connection happened to park on a worker a slow
+# request then took, and passed three of eight runs under its 80 ms bound,
+# at 76 to 78 ms, on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+# machine). Windows' port is the process's, and in the server shape an
+# idle worker takes what the busy one's poll would have; the poller
+# step's pool of one has no idle worker, so only the poll hands the
+# answer on. On Windows 11, 12 logical processors (the user's machine),
+# the copy answered at 999 to 1001 ms in ten runs of ten, where the
+# gate's own poller step read 7.0 to 9.1 ms in six.
+broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
+caught nopoll 'poller: a fast request took' poller --workers=1
+
+step "failure proof: a word the monitor raised for the task before preempts the task switched in after it"
+# The switch lowers the word no more: the task the fresh step switches
+# in after a 30 ms hold with no check gives its worker up at its first
+# back-edge, round 1 of 10. Master's runtime did so 0 to 1 us into the
+# task in three runs of three on Windows 11, 12 logical processors (the
+# user's machine), and 0 us in three of three on Linux here (12 vCPUs);
+# the lowered word ran 10 rounds of 10 through with no preemption on
+# both, plain and on Windows release too. In this gate's first runs the
+# copy was caught at round 1, 0 us in, on that Windows machine at 12
+# processors and held to 4, on Linux here and on macOS 26.6, Apple M2
+# Pro, 10 cores (the user's machine), and the fresh step held 10 rounds
+# with no preemption, plain and release, on each.
+broken stale '/^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
+caught stale 'fresh: round ' fresh --workers=1
+
+step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # Every task woken from a packet is woken onto the worker it parked on,
+    # as a port per worker that no other worker takes from would wake it.
+    broken nocross '/^        wake_completed\(fiber\)$/ { print "        fiber.homebound = true if owner.object_id != state.object_id" } { print }' concurrency.iyi completions_taken
+    caught nocross 'answer, sent while its worker computed, was read' taken --workers=12 ;;
+  *)
+    echo "  Windows' alone, as the port is" ;;
+esac
+
+step "failure proof: a pool that leaves Windows' priority boost on"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    broken boosted '/^        LibC\.SetProcessPriorityBoost\(LibC\.GetCurrentProcess, 1_i32\)$/ { next } { print }' concurrency.iyi completions_taken
+    caught boosted "boost: the process's priority boost is on" boost --workers=12 ;;
+  *)
+    echo "  Windows' alone: the boost is its scheduler's" ;;
+esac
 
 step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
 broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt
@@ -670,6 +1069,38 @@ broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.
 for proof in sort copy rehash join; do
   caught libruntime "$proof: a short task waited" "$proof" --workers=1
 done
+
+# The two halves of `copy_checks`, broken: `Pointer#copy_from` with no way
+# around its loop of runs, as it was, and darwin's anchor in the entry
+# block (`-Dpreempt_anchor_entry`), which only darwin's makes by a call.
+step "failure proof: a copy whose every run goes through the loop of runs checks however short it is"
+mkdir -p copyruns/iyi
+cp "$REPO"/src/iyi/*.iyi copyruns/iyi/
+awk '/^    return copy_run\(source, count\) if count <= 1048576$/ { next } { print }' \
+  "$REPO/src/iyi/string.iyi" > copyruns/iyi/string.iyi
+cmp -s copyruns/iyi/string.iyi "$REPO/src/iyi/string.iyi" && { echo "the awk for copyruns found nothing to change"; exit 1; }
+if ! IYI_PATH="$WORK/copyruns${PSEP}$REPO/src" "$IYI" build --release --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o copyruns-run > build-copyruns.log 2>&1; then
+  echo "the copyruns copy failed to build:"; tail -20 build-copyruns.log; exit 1
+fi
+if copy_checks copyruns-run.ll > copyruns.txt 2>&1; then
+  echo "the broken copy copyruns was not caught by the short-copy checks:"; cat copyruns.txt; exit 1
+fi
+grep -q '^FAIL: copy checks: every copy' copyruns.txt || { echo "the short-copy checks failed copyruns some other way:"; cat copyruns.txt; exit 1; }
+echo "  exits 1 at \"$(grep -m1 '^FAIL: ' copyruns.txt | sed 's/^FAIL: //')\""
+
+step "failure proof: darwin's anchor in the entry block calls the accessor at every copy"
+if [ "$(uname -s)" != Darwin ]; then
+  echo "  the anchor here is a constant or a load and calls nothing: the copy builds the same code, so there is nothing to fail"
+else
+  if ! "$IYI" build --release --emit llvm-ir -Dpreempt_anchor_entry "$REPO/bench/parallel_preempt_lib.iyi" -o anchorentry-run > build-anchorentry.log 2>&1; then
+    echo "the anchor-at-entry build failed:"; tail -20 build-anchorentry.log; exit 1
+  fi
+  if copy_checks anchorentry-run.ll > anchorentry.txt 2>&1; then
+    echo "the broken copy anchorentry was not caught by the short-copy checks:"; cat anchorentry.txt; exit 1
+  fi
+  grep -q '^FAIL: copy checks: the entry block' anchorentry.txt || { echo "the short-copy checks failed anchorentry some other way:"; cat anchorentry.txt; exit 1; }
+  echo "  exits 1 at \"$(grep -m1 '^FAIL: ' anchorentry.txt | sed 's/^FAIL: //')\""
+fi
 
 step "failure proof: a recursion marked @[NoPreempt] holds its worker for its whole computation"
 if ! "$IYI" build -Dpreempt_off "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then

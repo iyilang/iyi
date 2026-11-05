@@ -7526,9 +7526,9 @@ require "./file"
       # the budget sweeps slices of it too, each handed to its class's
       # centre (`sweep_one`), until the mark has begun, a stop is asked
       # for, or every arena left is swept or inside another walker's
-      # slice - Go's gcStart has every goroutine that crosses the trigger
-      # sweep the spans left before the cycle begins. Inside the
-      # allocator's bracket, as every allocating thread's sweep is.
+      # slice. Like Go's gcStart, each allocating thread helps sweep,
+      # inside the allocator's bracket.
+      @[Effect(:collector)]
       def self.sweep_assist : Nil
         while @@collecting && LibIyiGCTable.__iyi_marking == 0_u8
           break if IyiHeap.stop_requested?

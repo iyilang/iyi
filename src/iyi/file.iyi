@@ -34,8 +34,7 @@ class File
   end
 
   # The mode as bits: 1 read, 2 write, 4 create, 8 truncate, 16 append.
-  # "b" goes after the letter, before or after the "+", once, as Crystal
-  # spells it.
+  # "b" goes after the letter, before or after the "+", once, as Crystal spells it.
   private def self.open_flags(mode : String) : Int32
     case mode
     when "r", "rb"          then 1
@@ -91,7 +90,7 @@ class File
       fun GetFileSizeEx(handle : Void*, size : Int64*) : Int32
     end
 
-    private def self.size_of(fd : Int64) : Int64
+    @[Effect(:primitive)]; private def self.size_of(fd : Int64) : Int64
       size = 0_i64
       LibFile.GetFileSizeEx(Pointer(Void).new(fd.to_u64), pointerof(size)) == 0 ? -1_i64 : size
     end

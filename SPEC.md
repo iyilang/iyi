@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | The library held to the 4,650-line ceiling, plus the platform floor, collector, scheduler and float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | Written in Crystal |
+| iyi's own prelude | 25,853 lines, of which 4,650 are the library held to the 4,650-line ceiling (6,725 with every platform's floor), plus the collector, scheduler and float printer |
+| compiler | 140,649 lines, none of it written in iyi |
 | artifact format | `.iyimod` v59, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own prelude
+> "No standard library worth the name" is still true of iyi's own 25,853 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 25,853 lines,
+primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -297,11 +298,11 @@ was in the count. iyi's prelude now carries all three itself - the
 collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
-are most of its lines. The figure held to the ceiling is the library, measured
-by `bench/doc_numbers.py` as everything under `src/iyi/` except those three and
-every platform's floor. The floor comprises the arms behind `flag?(:win32)`,
-`flag?(:linux)`, `flag?(:darwin)` and `flag?(:wasm32)`, as explained below.
-Opening `src/iyi/` includes the floor and runtime as well as the library.
+are most of its lines. The figure held to the ceiling is the library:
+**4,650 lines** of the 25,853, measured by `bench/doc_numbers.py` as everything
+under `src/iyi/` except those three and every platform's floor of 2,075 lines.
+Opening `src/iyi/` counts 6,725 with those platform floors and without the
+collector, scheduler and float printer.
 
 **And the prelude measures in two units, which is one sentence worth
 writing down.** A *character* is what `size`, `each_char`, `ljust` and
@@ -416,11 +417,11 @@ calls by a new name, and each carries the sentence that says why — which is
 where most of the 1,040 lines are.
 
 **And the whole breach was that floor, measured by the script rather than
-by hand.** The platform floor comprises the lines inside a macro conditional
-whose condition names an OS, architecture or ABI flag, including every arm.
-Of the 4,803 lines counted that day, 1,871 were in that floor. Windows was its
-largest arm, reflecting the paths, console handling and integer division that
-need platform-specific implementations.
+by hand.** The platform floor measures **2,075 lines** today, comprising the
+lines inside a macro conditional whose condition names an OS, architecture or
+ABI flag, including every arm. Of the 4,803 lines counted that day, 1,871 were
+in that floor. Windows was its largest arm, reflecting the paths, console
+handling and integer division that need platform-specific implementations.
 
 The first writing of this paragraph counted by hand and gave two figures
 that did not agree: 624 lines for Windows' arms and a library of 3,618,
@@ -1021,9 +1022,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | own prelude and std |
-| Specs | 21,146 lines | specs for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 140,649 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 25,853-line own prelude + 127,083 in std |
+| Specs | 21,146 lines | 16,223 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |

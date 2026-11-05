@@ -6289,7 +6289,7 @@ require "./file"
         # and the next wait takes it, reads the word, and sleeps again.
         @@doorbell : UInt64 = 0_u64
 
-        def self.doorbell : Void*
+        @[Effect(:collector)]; def self.doorbell : Void*
           # Made by `start_helpers`, under the runtime lock, before any
           # helper exists to wait on it.
           if @@doorbell == 0_u64
@@ -6299,7 +6299,7 @@ require "./file"
           Pointer(Void).new(@@doorbell)
         end
 
-        def self.wait_generation(seen : UInt64) : UInt64
+        @[Effect(:collector)]; def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
           spun = spin_for_generation(word, seen)
           return spun if spun != seen
@@ -6312,7 +6312,7 @@ require "./file"
           now
         end
 
-        def self.wake_helpers : Nil
+        @[Effect(:collector)]; def self.wake_helpers : Nil
           asleep = pool_word(POOL_SLEEPERS).value.get
           LibC.ReleaseSemaphore(doorbell, asleep.unsafe_to_i32, nil) if asleep > 0_u64
         end
@@ -6367,7 +6367,7 @@ require "./file"
         # collector's next wake. The futex's wake checks its arguments and
         # calls `__ulock_wake`, read off its disassembly: one system call,
         # holding nothing.
-        def self.wait_generation(seen : UInt64) : UInt64
+        @[Effect(:collector)]; def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
           spun = spin_for_generation(word, seen)
           return spun if spun != seen
@@ -6380,7 +6380,7 @@ require "./file"
           now
         end
 
-        def self.wake_helpers : Nil
+        @[Effect(:collector)]; def self.wake_helpers : Nil
           return if pool_word(POOL_SLEEPERS).value.get == 0_u64
           LibC.os_sync_wake_by_address_all(pool_word(POOL_GENERATION).as(Void*), 8_u64, 0_u32)
         end

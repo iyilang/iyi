@@ -4881,6 +4881,85 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A private type is carried rather than exported, and wears the marker
+  # all the same: a body that travels reaches it, and a consumer's reach
+  # walk asks of it what it asks of an exported one. iyi-db's
+  # `AROUND_HOOKS`, an `AroundHooks` of a `Mutex` and an `Atomic` read by
+  # every query, arrived bare: built from db's artifacts, a plain spawn that
+  # runs in parallel built from source stayed in its unit, and every
+  # `spawn(parallel: true)` that queried was warned about it.
+  it "carries a private type's Share marker, so a travelling body's reach sees it" do
+    with_tempdir("iyimod_share_private") do
+      Dir.mkdir_p "dep"
+      File.write "dep/hooks.iyi", <<-IYI
+        module dep/hooks
+
+        class Hooks
+          @count : Atomic(Int32)
+
+          def initialize
+            @count = Atomic(Int32).new(0)
+          end
+
+          def any? : Bool
+            @count.get > 0
+          end
+        end
+
+        class Tally
+          @count : Int32
+
+          def initialize
+            @count = 0
+          end
+
+          def bump : Nil
+            @count = 1
+          end
+        end
+
+        HOOKS = Hooks.new
+
+        pub def busy?(x : T) : Bool forall T
+          HOOKS.any?
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import dep/hooks::{busy?}
+
+        group do |g|
+          g.spawn(parallel: true) { busy?(1) }
+        end
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.no_codegen = true
+      producer.compile source, File.expand_path("unused")
+      producer.warnings.reports.should be_empty
+
+      types = Iyi::IyiMod.read(File.join("mods", "dep", "hooks.iyimod")).exports.types
+      types.find! { |candidate| candidate.name == "Hooks" }.annotations.should eq ["@[Share]"]
+      types.find! { |candidate| candidate.name == "Tally" }.annotations.should eq [] of String
+
+      File.delete "dep/hooks.iyi"
+
+      # Read back from the artifact alone, `Hooks` is Share: the block that
+      # reaches `HOOKS` through `busy?`'s body is not warned about.
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.no_codegen = true
+      consumer.compile source, File.expand_path("unused")
+      consumer.warnings.reports.map(&.to_s).should eq [] of String
+    end
+  end
+
   # An owning type travels as one: read back as `@[Share]` alone it would be
   # Share only when its argument is, and `Guard(Counter)` - the escape the
   # marker exists for - would stop being Share at the artifact's edge.

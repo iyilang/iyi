@@ -26,7 +26,11 @@
 #      warnings: `--error-on-warnings` passes and `-f json` marks them
 #      `"severity": "note"`. Unasked, `iyi check` notes each spawn the
 #      compiler kept in its unit and no other, and `iyi build` prints
-#      nothing.
+#      nothing. What std calls back is walked too: a spawn interpolating a
+#      value whose `to_s` appends to an unguarded `Array`, or asking
+#      `Array#includes?` of values whose `==` does, stays in its unit,
+#      named through the std def that calls back, and loses no append on
+#      four workers.
 #   3. The one verb: `spawn_parallel` and `spawn_serial`, on a group and in
 #      a typed group, are compile errors naming the new spelling; `iyi fix`
 #      rewrites both, and the program runs. `parallel: false`, a value the
@@ -45,7 +49,10 @@
 #      `@[SafeReach]` only the module's initialiser writes runs in
 #      parallel, and one that reaches state under a claim the producing
 #      program proved of its own calls stays in its unit, through a call
-#      or through a body that travelled.
+#      or through a body that travelled. And a module's own spawn, compiled
+#      into its artifact, that the producing program could run in parallel
+#      only on such a claim stays in its unit in the artifact: a consumer
+#      appending without the lock beside it loses no append.
 #   5. Failure proofs against broken copies, each caught at the named
 #      check. Of the runtime: an eligible spawn left in its unit, an
 #      ineligible one sent to the pool, `serial: true` sent to the pool,
@@ -59,7 +66,9 @@
 #      must keep every spawn calling into it in its unit, naming the
 #      module), a function read from an artifact taken to reach nothing,
 #      and an artifact that takes every proven claim to hold for every
-#      importer.
+#      importer; a walk that stops at std (`callbacks`), and an artifact
+#      whose own spawns stand on a claim proven for its producer alone
+#      (`claimed`).
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -187,6 +196,59 @@ if ! "$IYI" build explained.iyi -o explained > built.log 2>&1 || [ -s built.log 
   echo "build printed something, or failed:"; cat built.log; exit 1
 fi
 echo "  build: nothing printed"
+
+step "what std calls back of the program's own is walked"
+# The walk stopped at std, whose state is std's to keep safe, and so at
+# what std calls back: an interpolation asks the value's `to_s`, and
+# `Array#includes?` asks `==`. Both spawns ran in parallel and lost
+# appends (8,095 to 8,100 of 8,102 on four workers, Linux; found by
+# `bench/spawn_fuzz.py`, seeds 27 and 34).
+cat > callback.iyi <<'IYI'
+module callback
+
+SHOWN = [] of Int32
+
+class Shown
+  def to_s : String
+    SHOWN << 1
+    "s"
+  end
+end
+
+class Key
+  def ==(other : Key) : Bool
+    SHOWN << 1
+    true
+  end
+end
+
+group do |g|
+  4.times do
+    g.spawn { 5000.times { "#{Shown.new}" }; nil }
+  end
+  4.times do
+    g.spawn { 5000.times { [Key.new].includes?(Key.new) }; nil }
+  end
+end
+puts SHOWN.size
+IYI
+callback_to_s='`Shown#to_s` → `SHOWN.<<`, and it is not Share'
+callback_eq='`Array#includes?` → `Key#==` → `SHOWN.<<`, and it is not Share'
+if ! "$IYI" build --explain-spawn -o callback callback.iyi > callback.log 2>&1; then
+  echo "the build failed:"; cat callback.log; exit 1
+fi
+for check in "21|$callback_to_s" "24|$callback_eq"; do
+  if ! grep -F "callback.iyi:${check%%|*}:" callback.log | grep -qF "${check#*|}"; then
+    echo "line ${check%%|*} was not kept in its unit through \"${check#*|}\":"; cat callback.log; exit 1
+  fi
+  echo "  line ${check%%|*}: $(grep -m1 -F "callback.iyi:${check%%|*}:" callback.log | sed 's/^.*note: //' | cut -c1-150)"
+done
+for run in 1 2 3; do
+  if ! got=$(timeout -k 5 120 ./callback --workers=4) || [ "$got" != 40000 ]; then
+    echo "the program lost appends on run $run: $got of 40000"; exit 1
+  fi
+done
+echo "  40000 of 40000 appends, three runs on four workers"
 
 # ── 3. The one verb ───────────────────────────────────────────────────────
 step "spawn_parallel and spawn_serial are compile errors naming the new spelling"
@@ -493,6 +555,90 @@ for line in 8 10 11; do
 done
 echo "  without the record, lines 8, 10 and 11 stay in their unit: $(grep -m1 -F 'app.iyi:10:' reach-unknown.log | sed 's/^.*unit: //' | cut -c1-120)"
 
+step "a module's own spawn standing on a claim its producer alone proved stays in its unit in the artifact"
+# `fill`'s tasks reach `ROWS` through `locked_add`, behind `LOCK`, and
+# `first.iyi` writes `ROWS` only there: the claim holds for it, and its
+# build ran the tasks in parallel. The artifact carries that machine code
+# to every importer, and `app.iyi` appends through `add`, outside the
+# lock, which its own build from source refuses the claim for. Before
+# this, `fill`'s tasks ran in parallel beside that append (found by
+# `bench/spawn_fuzz.py`).
+mkdir -p claimed/dep
+cat > claimed/dep/ledger.iyi <<'IYI'
+module dep/ledger
+
+import std/mutex::{Mutex}
+
+LOCK = Mutex.new { 0 }
+
+@[SafeReach("every write and every read is behind LOCK")]
+ROWS = [] of Int32
+
+pub def add(n : Int32) : Nil
+  ROWS << n
+end
+
+def size_now : Int32
+  ROWS.size
+end
+
+pub def locked_add(n : Int32) : Nil
+  LOCK.lock { |_| add(n) }
+  nil
+end
+
+pub def total : Int32
+  LOCK.get { |_| size_now }.as(Int32)
+end
+
+pub def fill(tasks : Int32, each : Int32) : Nil
+  group do |g|
+    tasks.times do
+      g.spawn { each.times { |i| locked_add(i) }; nil }
+    end
+  end
+end
+IYI
+cat > claimed/first.iyi <<'IYI'
+module main
+
+import dep/ledger::{locked_add, total, fill}
+
+locked_add(1)
+fill(2, 10)
+puts total
+IYI
+cat > claimed/app.iyi <<'IYI'
+module main
+
+import dep/ledger::{add, fill, total}
+
+group do |g|
+  g.spawn { fill(4, 5000); nil }
+  g.spawn { 20000.times { |i| add(i) }; nil }
+end
+puts total
+IYI
+if ! (cd claimed && "$IYI" build --emit-iyimod mods -o first first.iyi) > claimed-first.log 2>&1 || [ -s claimed-first.log ]; then
+  echo "the producing build failed, or printed something:"; cat claimed-first.log; exit 1
+fi
+claimed_unit='Dep::Ledger.fill 30:9 in its unit: the block reaches the constant `ROWS : Array(Int32)` through `locked_add` → `add` → `ROWS.<<`'
+claimed_why='its @[SafeReach] is proven for this program and not for every program importing the module'
+"$IYI" mod dump claimed/mods/dep/ledger.iyimod > claimed-dump.log 2>&1
+if ! grep -qF "$claimed_unit" claimed-dump.log || ! grep -qF "$claimed_why" claimed-dump.log; then
+  echo "the artifact does not record fill's spawn in its unit, on a claim proven for its producer alone:"; cat claimed-dump.log; exit 1
+fi
+echo "  mod dump: $(grep -m1 -F 'Dep::Ledger.fill' claimed-dump.log | sed 's/^ *//' | cut -c1-140)"
+if ! (cd claimed && "$IYI" build --use-iyimod mods -o app app.iyi) > claimed-app.log 2>&1; then
+  echo "the build against the artifact failed:"; cat claimed-app.log; exit 1
+fi
+for run in 1 2 3; do
+  if ! got=$(cd claimed && timeout -k 5 120 ./app --workers=4) || [ "$got" != 40000 ]; then
+    echo "the program built against the artifact lost appends on run $run: $got of 40000"; exit 1
+  fi
+done
+echo "  40000 of 40000 appends, three runs on four workers"
+
 # ── 5. Failure proofs ─────────────────────────────────────────────────────
 # Of the runtime: each a copy of src/iyi with concurrency.iyi changed,
 # built against through IYI_PATH; nothing in the tree is touched.
@@ -618,5 +764,25 @@ if placed reach-robust.log 11 "$claimed"; then
   echo "the artifact that trusts every claim was not caught:"; cat reach-robust.log; exit 1
 fi
 echo "  caught: line 11 reads \"$(grep -m1 -F 'app.iyi:11:' reach-robust.log | sed 's/^.*note: //' | cut -c1-60)\""
+
+step "failure proof: a walk that stops at std"
+if ! IYI_SPAWN_BROKEN=callbacks "$IYI" build --explain-spawn -o callback_broken callback.iyi > callback-broken.log 2>&1; then
+  echo "the build failed:"; cat callback-broken.log; exit 1
+fi
+if grep -F 'callback.iyi:21:' callback-broken.log | grep -qF "$callback_to_s"; then
+  echo "the walk that stops at std was not caught:"; cat callback-broken.log; exit 1
+fi
+echo "  caught: line 21 reads \"$(grep -m1 -F 'callback.iyi:21:' callback-broken.log | sed 's/^.*note: //' | cut -c1-40)\", and the program printed $(timeout -k 5 120 ./callback_broken --workers=4) of 40000"
+
+step "failure proof: an artifact whose own spawns stand on a claim proven for its producer alone"
+if ! (cd claimed && IYI_SPAWN_BROKEN=claimed "$IYI" build --emit-iyimod trusting -o first first.iyi) > claimed-broken.log 2>&1; then
+  echo "the build writing the artifact failed:"; cat claimed-broken.log; exit 1
+fi
+"$IYI" mod dump claimed/trusting/dep/ledger.iyimod > claimed-broken-dump.log 2>&1
+if grep -qF "$claimed_unit" claimed-broken-dump.log; then
+  echo "the artifact whose spawns stand on its producer's claim was not caught:"; cat claimed-broken-dump.log; exit 1
+fi
+(cd claimed && "$IYI" build --use-iyimod trusting -o app_trusting app.iyi) > claimed-trusting.log 2>&1
+echo "  caught: the artifact reads \"$(grep -m1 -F 'Dep::Ledger.fill' claimed-broken-dump.log | sed 's/^ *//')\", and the program printed $(cd claimed && timeout -k 5 120 ./app_trusting --workers=4 2>&1 | tail -1) of 40000"
 
 echo "== spawn eligibility: every check held"

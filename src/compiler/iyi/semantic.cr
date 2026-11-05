@@ -79,6 +79,10 @@ class Iyi::Program
     if cleanup && !iyi_reach_claims.empty?
       @progress_tracker.stage("Semantic (reach proof)") { ReachProof.run(self, result) }
     end
+    # A spawn of a module this build writes an artifact for, placed in
+    # parallel on a claim that holds only for this program, goes back to
+    # its unit (III.4.15).
+    iyi_settle_claimed_spawns unless iyi_claimed_spawns.empty?
     # And every spawn is classified (III.4.15): `--explain-spawn`'s notes.
     iyi_note_spawns
 

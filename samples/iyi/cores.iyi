@@ -2,9 +2,11 @@
 #
 #   ./bin/iyi run samples/iyi/cores.iyi
 #
-# `spawn` is a task on the thread that spawned it, and its block may touch
-# anything; `spawn(parallel: true)` is a task a pool of workers runs on any core,
-# and its block may capture only what is `Share` (III.4.4). std/http's
+# `spawn` is a task the compiler places: on a pool of workers, on any core,
+# where it can prove that safe, and on the thread that spawned it otherwise
+# (III.4.15, III.4.16). `spawn(parallel: true)` asks for the pool, and its
+# block may capture only what is `Share` (III.4.4); `spawn(serial: true)`
+# keeps the task on its spawner's thread whatever it captures. std/http's
 # `Server.serve` puts each connection on that pool, so its block is checked
 # the same way. When a block reaches module state through a call, the
 # compiler warns, and `@[SafeReach("why")]` on the state says why it is
@@ -26,10 +28,12 @@ end
 
 # 1. `spawn` and `spawn(parallel: true)`.
 #
-# The tasks `spawn` starts share their spawner's thread, so they may append
-# to an `Array` they captured. The tasks `spawn(parallel: true)` starts run on
-# whichever core is free; each answers its own value, and a task's answer
-# need not be `Share`, because it is handed over once, after the task ends.
+# These `spawn`s append to an `Array` they captured, which is not `Share`, so
+# the compiler keeps them on their spawner's thread, where they take turns
+# and nothing is raced; `iyi check` notes each one, with why. The tasks
+# `spawn(parallel: true)` starts run on whichever core is free; each answers
+# its own value, and a task's answer need not be `Share`, because it is
+# handed over once, after the task ends.
 seen = [] of Int64
 group do |g|
   (1..3).each do |n|

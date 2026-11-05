@@ -664,8 +664,9 @@
   8,102 on four workers; `bench/spawn_eligible.sh`'s copy with the walk
   stopping at std printed 18,541 of 40,000; Linux). The walk now passes
   through std to what it calls back; std's own state is still std's. `iyi
-  check --explain-spawn` of `bench/std_http_exercise.iyi`: 1.58 and 1.68 s
-  before, 1.84 and 1.74 s after, 667 to 679 MB (Linux, 12 vCPU). A spawn
+  check --explain-spawn` of `bench/std_http_exercise.iyi`, medians of
+  ten: 1.86 s and 652 MB with the walk stopping at std, 1.92 s and 663 MB
+  passing through it (Linux, 12 vCPU). A spawn
   that ran in parallel may now stay in its unit, and `iyi check` says
   why. Found by `bench/spawn_fuzz.py`.
 

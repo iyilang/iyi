@@ -178,24 +178,81 @@ module Iyi
     # unguarded `Array` ran in parallel and lost appends (8,095 to 8,100 of
     # 8,102 on four workers, Linux; `bench/spawn_fuzz.py` seed 27). std's
     # own state is still std's to keep safe: only the defs it calls that
-    # are not its own come out. Kept per def, since every block that
-    # prints goes through the same few. `IYI_SPAWN_BROKEN=callbacks`
-    # answers none, the walk as it was.
+    # are not its own come out. `IYI_SPAWN_BROKEN=callbacks` answers none,
+    # the walk as it was.
+    #
+    # Kept for every std def the search passes, not only the one asked
+    # about: what a def of std calls back is what it calls of the
+    # program's and what each std def it calls calls back, so the search
+    # settles std's call graph one strongly connected part at a time
+    # (Tarjan's), each def once. `iyi check --explain-spawn` of
+    # `bench/std_http_exercise.iyi`, medians of ten (Linux, 12 vCPU):
+    # 2.06 s searching std again from every def a block calls, 1.92 s
+    # settling it once, 1.86 s with no callbacks at all; 661, 663 and 652
+    # MB.
     private def exits_of(std_def : Def) : Array(Def)
-      @exits.fetch(std_def) do
+      if exits = @exits[std_def]?
+        return exits
+      end
+      return @exits[std_def] = NO_EXITS if SPAWN_BROKEN.includes?("callbacks")
+      settle_exits(std_def)
+      @exits[std_def]
+    end
+
+    NO_EXITS = [] of Def
+
+    private def settle_exits(root : Def) : Nil
+      index = {} of Def => Int32
+      index.compare_by_identity
+      low = {} of Def => Int32
+      low.compare_by_identity
+      open = [] of Def
+      on_open = Set(Def).new.compare_by_identity
+      frames = [] of {Def, Int32}
+      enter = ->(a_def : Def) do
+        index[a_def] = low[a_def] = index.size
+        open << a_def
+        on_open << a_def
+        frames << {a_def, 0}
+      end
+      enter.call(root)
+      while frame = frames.last?
+        a_def, next_call = frame
+        std_calls = facts_of(a_def).std_calls
+        if next_call < std_calls.size
+          frames[-1] = {a_def, next_call + 1}
+          callee = std_calls[next_call]
+          next if @exits.has_key?(callee)
+          if seen = index[callee]?
+            low[a_def] = Math.min(low[a_def], seen) if on_open.includes?(callee)
+          else
+            enter.call(callee)
+          end
+          next
+        end
+        frames.pop
+        if parent = frames.last?
+          low[parent[0]] = Math.min(low[parent[0]], low[a_def])
+        end
+        next unless low[a_def] == index[a_def]
+        part = Set(Def).new.compare_by_identity
+        while member = open.pop?
+          on_open.delete(member)
+          part << member
+          break if member.same?(a_def)
+        end
         exits = [] of Def
-        unless SPAWN_BROKEN.includes?("callbacks")
-          visited = Set(Def).new.compare_by_identity
-          visited << std_def
-          queue = Deque(Def).new
-          queue << std_def
-          while a_def = queue.shift?
-            facts = facts_of(a_def)
-            facts.calls.each { |target| exits << target if visited.add?(target) }
-            facts.std_calls.each { |target| queue << target if visited.add?(target) }
+        added = Set(Def).new.compare_by_identity
+        part.each do |member|
+          facts = facts_of(member)
+          facts.calls.each { |target| exits << target if added.add?(target) }
+          facts.std_calls.each do |callee|
+            next if part.includes?(callee)
+            @exits[callee].each { |target| exits << target if added.add?(target) }
           end
         end
-        @exits[std_def] = exits
+        settled = exits.empty? ? NO_EXITS : exits
+        part.each { |member| @exits[member] = settled }
       end
     end
 

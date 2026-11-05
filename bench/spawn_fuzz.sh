@@ -23,10 +23,10 @@
 #      alone (`IYI_SPAWN_BROKEN`), each caught as a VIOLATION on a seed
 #      that is clean without it: a walk that stops at std (`callbacks`,
 #      seed 10), a function read from an artifact taken to reach nothing
-#      (`headers`, seed 1), and an artifact that takes every proven claim
-#      to hold for every importer (`robust`, seed 66). `claimed` is caught
-#      by `bench/spawn_eligible.sh`: the first seed catching it here, 75,
-#      shows a VIOLATION without it too, which is not analysed yet.
+#      (`headers`, seed 1), an artifact that takes every proven claim to
+#      hold for every importer (`robust`, seed 66), and a module's own
+#      spawn compiled into its artifact in parallel on a claim its
+#      producer alone proved (`claimed`, seed 109).
 #
 # Seeds and minutes are `SPAWN_FUZZ_SEEDS` and `SPAWN_FUZZ_MINUTES`;
 # 1,330 seeds were run by hand on Linux, in chunks under 20 minutes.
@@ -61,5 +61,6 @@ cd "$WORK" || exit 1
 proof callbacks 10 "a walk that stops at std"
 proof headers 1 "a function read from an artifact taken to reach nothing"
 proof robust 66 "an artifact that takes every proven claim to hold for every importer"
+proof claimed 109 "a module's own spawn compiled in parallel on a claim its producer alone proved"
 
 echo "== spawn placement from artifacts: never more parallel than from source"

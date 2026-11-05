@@ -2285,7 +2285,9 @@ jobs:
       # proof takes the switch's restore of them out. And Crystal's library
       # bound as boundaries: `JSON`, `INI` and `XML` read Windows'
       # file-private `ConsoleUtils` in object code that travels, which the
-      # consumer could not name and so never emitted.
+      # consumer could not name and so never emitted. And SafeReach's
+      # proof, whose refusals spelled the places they name in full on
+      # Windows while the header beside them spelled them relative.
       - name: The gates that carry Windows code, on Windows
         shell: bash
         run: |
@@ -2298,6 +2300,7 @@ jobs:
           bash bench/concurrency_exercise.sh
           bash bench/parallel_exercise.sh
           bash bench/spawn_eligible.sh
+          bash bench/safe_reach.sh
           bash bench/chaos_exercise.sh
           bash bench/library_boundaries.sh
           bash bench/up_to_date.sh

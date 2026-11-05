@@ -707,6 +707,12 @@
   imports' and std's. Found by `bench/spawn_fuzz.py` (seeds 75, 2046,
   2054, 2248, 2256, 2364, 2388).
 
+- **A `@[SafeReach]` refusal on Windows names its places relative to the
+  working directory, as its header does.** The header said
+  `unguarded.iyi:14:1` and the write it named
+  `C:\Users\...\unguarded.iyi:18:12`; both are relative now, as on Linux
+  and macOS (`bench/safe_reach.sh`, now run on Windows too).
+
 - **`iyi fix` over several files counts every file it rewrote.** Its
   last line, `N files: M rewritten`, counted the files whose `using` it
   rewrote and no other: moving iyi-db off `spawn_parallel`, the run

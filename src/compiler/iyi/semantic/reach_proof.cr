@@ -1179,13 +1179,15 @@ module Iyi
     end
 
     # A place as the error's own header spells it: relative to the working
-    # directory when it is beneath it.
+    # directory when it is beneath it (`Iyi.relative_filename`). Chopping
+    # `Dir.current + "/"` never matched on Windows, which spells both with
+    # `\`, so the header said `unguarded.iyi:14:1` and the refusal
+    # `C:\Users\...\unguarded.iyi:18:12` (`bench/safe_reach.sh`, Windows
+    # 11).
     def show(location : Location?) : String
       file, line, column = source_place(location)
       return "an unknown place" if file.empty?
-      here = Dir.current + "/"
-      file = file[here.size..] if file.starts_with?(here)
-      "#{file}:#{line}:#{column}"
+      "#{Iyi.relative_filename(file)}:#{line}:#{column}"
     end
 
     # The file, line and column a location was written at. Code an inline

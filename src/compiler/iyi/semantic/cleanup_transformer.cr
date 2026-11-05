@@ -10,9 +10,12 @@ module Iyi
   # `moves` prints no line for a spawn a rebuild moved, `retired` answers
   # `spawn_parallel` as any undefined method, `reaches` writes an artifact
   # without what its functions reach (`IyiMod::Section::Reaches`),
-  # `headers` reads a function from an artifact as reaching nothing, and
+  # `headers` reads a function from an artifact as reaching nothing,
   # `robust` writes an artifact that leaves out state under any claim its
-  # build proved, as if every claim held for every importer.
+  # build proved, as if every claim held for every importer, `callbacks`
+  # walks no def std calls back (`ShareReach#exits_of`), and `claimed`
+  # leaves a module's spawn in parallel on a claim proven for its producer
+  # alone (`Program#iyi_settle_claimed_spawns`).
   # Read once; empty in every other run.
   SPAWN_BROKEN = (ENV["IYI_SPAWN_BROKEN"]? || "").split(',')
 
@@ -31,10 +34,49 @@ module Iyi
     end
   end
 
+  # iyi: a spawn the cleanup moved to the pool on the strength of a
+  # `@[SafeReach]` its block reaches through a call, in a build that writes
+  # artifacts: the call, the `spawn` def it was pointed away from, its
+  # site's index in `Program#iyi_spawn_sites`, and each claim it stood on,
+  # by the state's `object_id`, with the reason it stays in its unit if
+  # that claim does not hold for every importer (`Program#iyi_settle_claimed_spawns`).
+  record ClaimedSpawn, node : Call, spawn_def : Def, site : Int32, claims : Array({UInt64, String})
+
   class Program
     # Every spawn site the cleanup classified, in the order it met them;
     # one per instantiation of the def the call is in.
     getter iyi_spawn_sites = [] of SpawnSite
+
+    # The spawns placed in parallel on a claim, in a build that writes
+    # artifacts (`ClaimedSpawn`).
+    getter iyi_claimed_spawns = [] of ClaimedSpawn
+
+    # A spawn compiled into a module's artifact runs in every program that
+    # imports the module, and a `@[SafeReach]` this build proved holds for
+    # this program: another may call the module's writer from a parallel
+    # task, or after its first. So a spawn written in a module this build
+    # writes an artifact for runs in parallel on a claim only when the
+    # claim holds for every importer (`ReachProof#robust?`); otherwise it
+    # goes back to its unit, here, once the proof has run and before code
+    # is generated. Before this, a module whose `scan_all` spawned tasks
+    # reading a `SEEN` claimed behind a lock was written with those tasks
+    # in parallel, and a consumer appending to `SEEN` through an unlocked
+    # function - which its own build from source refused the claim for -
+    # ran beside them (`bench/spawn_fuzz.py`, SPEC.md III.4.15).
+    # `IYI_SPAWN_BROKEN=claimed` leaves every such spawn in parallel.
+    def iyi_settle_claimed_spawns : Nil
+      return if SPAWN_BROKEN.includes?("claimed")
+      @iyi_claimed_spawns.each do |claimed|
+        site = @iyi_spawn_sites[claimed.site]
+        location = site.location.expanded_location || site.location
+        file = location.filename
+        next unless file.is_a?(String) && file != @filename && @iyi_module_paths.has_key?(file)
+        held = claimed.claims.find { |(key, _)| !@iyi_reach_robust.includes?(key) }
+        next unless held
+        claimed.node.target_defs = [claimed.spawn_def]
+        @iyi_spawn_sites[claimed.site] = site.copy_with(reason: held[1])
+      end
+    end
 
     # The notes on spawns, once the cleanup has met every spawn: one per
     # place and verdict, since a def typed for two `T`s classified its
@@ -667,10 +709,17 @@ module Iyi
           end
           check_spawn_placement(node, target_defs[0])
           check_share_boundary(node, target_defs[0])
-          classify_spawn(node, target_defs[0])
+          original = target_defs[0]
+          classify_spawn(node, original)
           # An eligible spawn now names `spawn_pooled`, whose body is the
-          # one to transform below.
+          # one to transform below; one placed there on a claim may go
+          # back to `spawn` once the claim is proven
+          # (`Program#iyi_settle_claimed_spawns`), so that body is
+          # transformed too.
           target_defs = node.target_defs.not_nil!
+          if (claimed = @program.iyi_claimed_spawns.last?) && claimed.node.same?(node) && !target_defs.includes?(original)
+            target_defs = target_defs + [original]
+          end
         end
 
         current_def = @current_def
@@ -904,9 +953,16 @@ module Iyi
         asked = true
       end
       return unless location
+      if placement.placed? && reason.nil? && !@spawn_claims.empty? && @program.iyi_rewrites_artifacts
+        @program.iyi_claimed_spawns << ClaimedSpawn.new(node, target_def, @program.iyi_spawn_sites.size, @spawn_claims.dup)
+      end
       @program.iyi_spawn_sites << SpawnSite.new(location, reason, @program.iyi_share_reach.std_at?(location),
         asked, spawn_owner_label, @program.iyi_rewrites_artifacts ? spawn_digest(node) : "")
     end
+
+    # The claims the spawn being classified stood on, as `ClaimedSpawn`
+    # keeps them.
+    @spawn_claims = [] of {UInt64, String}
 
     NO_THREADS   = "a build under -Dgc_none or -Dgc_boehm has no threads (SPEC.md III.4.13)"
     ASKED_SERIAL = "`serial: true` keeps it there (SPEC.md III.4.16)"
@@ -1084,6 +1140,7 @@ module Iyi
     # module (`@reason_from`, SPEC.md III.4.16), since that is where a
     # spawn that ran in parallel is moved back from.
     private def spawn_serial_reason(node : Call) : String?
+      @spawn_claims.clear
       if forwarded = node.block_arg
         return "the block is a proc, `&#{forwarded}`, and what a proc captured is not written in its type"
       end
@@ -1122,11 +1179,16 @@ module Iyi
         if named.is_a?(IyiMod::ReachRecord)
           return remote_reach_reason(named, path)
         end
-        next if named.state.iyi_safe_reach
         why = Iyi::Share.reason(named.type, @reason_from)
         next unless why
         path << "`#{named.use}`"
         where = named.state.is_a?(Const) ? "the constant" : "the class variable"
+        if named.state.iyi_safe_reach
+          @spawn_claims << {named.key, "the block reaches #{where} `#{named.label} : #{named.type}` through #{path.join(" → ")}, and it is not Share: #{why}; " \
+                                       "its @[SafeReach] is proven for this program and not for every program importing the module, and this spawn is compiled into the module's artifact, which every such program runs: " \
+                                       "a claim holds for every importer when every write is a statement of the module's own initialiser, nothing keeps a copy, no function answers the state and a constant is not exported (SPEC.md III.4.15)"}
+          next
+        end
         return "the block reaches #{where} `#{named.label} : #{named.type}` through #{path.join(" → ")}, and it is not Share: #{why}; " \
                "if every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on it with `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)"
       end

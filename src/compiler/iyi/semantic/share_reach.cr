@@ -98,8 +98,10 @@ module Iyi
       end
     end
 
-    # What one body names and the defs it calls, in the order written.
-    record Facts, named : Array(Named), calls : Array(Def)
+    # What one body names, the defs it calls that the walk enters, and the
+    # defs of std and the prelude it calls, which the walk passes through
+    # for what they call back (`exits_of`).
+    record Facts, named : Array(Named), calls : Array(Def), std_calls : Array(Def)
 
     # A named thing the walk found, and the defs that lead to it from the
     # block: the first is one the block calls, the last the one naming it.
@@ -111,6 +113,8 @@ module Iyi
     def initialize(@program : Program)
       @facts = {} of Def => Facts
       @facts.compare_by_identity
+      @exits = {} of Def => Array(Def)
+      @exits.compare_by_identity
       @std_files = {} of String => Bool
       @std_dirs = {} of String => Bool
       @packages = {} of String => {String, String}?
@@ -124,18 +128,20 @@ module Iyi
       start = scan(block_def.body)
       seen = Set(UInt64).new
       start.named.each { |named| seen << named.key }
-      walk(start.calls, seen)
+      walk(start, seen)
     end
 
-    # The walk from *calls*, past what *seen* holds. A function read from
-    # an artifact has no body here (SPEC.md IV.1g): what it reaches is
-    # what its artifact recorded when the body was there, and the walk
-    # does not go past it.
-    private def walk(calls : Array(Def), seen : Set(UInt64)) : Array(Found)
+    # The walk from what *start* calls, past what *seen* holds. A function
+    # read from an artifact has no body here (SPEC.md IV.1g): what it
+    # reaches is what its artifact recorded when the body was there, and
+    # the walk does not go past it. A def of std or the prelude is passed
+    # through to the program's own defs it calls back, each on the path
+    # after it: `Array#includes?` → `Key#==`.
+    private def walk(start : Facts, seen : Set(UInt64)) : Array(Found)
       remote = Set({String, String}).new
       visited = Set(Def).new.compare_by_identity
       queue = Deque({Def, Array(Def)}).new
-      calls.each { |target| queue << {target, [target]} if visited.add?(target) }
+      enqueue(start, [] of Def, visited, queue)
       found = [] of Found
       while entry = queue.shift?
         a_def, path = entry
@@ -149,11 +155,48 @@ module Iyi
         facts.named.each do |named|
           found << Found.new(named, path) if seen.add?(named.key)
         end
-        facts.calls.each do |target|
-          queue << {target, path + [target]} if visited.add?(target)
-        end
+        enqueue(facts, path, visited, queue)
       end
       found
+    end
+
+    private def enqueue(facts : Facts, path : Array(Def), visited : Set(Def), queue : Deque({Def, Array(Def)})) : Nil
+      facts.calls.each do |target|
+        queue << {target, path + [target]} if visited.add?(target)
+      end
+      facts.std_calls.each do |std_def|
+        exits_of(std_def).each do |target|
+          queue << {target, path + [std_def, target]} if visited.add?(target)
+        end
+      end
+    end
+
+    # The program's own defs *std_def*, written in std or the prelude, may
+    # call back through std alone: an `==` that `Array#includes?` asks, a
+    # `to_s` an interpolation asks. The walk stopped at std, and a spawn
+    # whose block interpolated a value whose `to_s` appended to an
+    # unguarded `Array` ran in parallel and lost appends (8,095 to 8,100 of
+    # 8,102 on four workers, Linux; `bench/spawn_fuzz.py` seed 27). std's
+    # own state is still std's to keep safe: only the defs it calls that
+    # are not its own come out. Kept per def, since every block that
+    # prints goes through the same few. `IYI_SPAWN_BROKEN=callbacks`
+    # answers none, the walk as it was.
+    private def exits_of(std_def : Def) : Array(Def)
+      @exits.fetch(std_def) do
+        exits = [] of Def
+        unless SPAWN_BROKEN.includes?("callbacks")
+          visited = Set(Def).new.compare_by_identity
+          visited << std_def
+          queue = Deque(Def).new
+          queue << std_def
+          while a_def = queue.shift?
+            facts = facts_of(a_def)
+            facts.calls.each { |target| exits << target if visited.add?(target) }
+            facts.std_calls.each { |target| queue << target if visited.add?(target) }
+          end
+        end
+        @exits[std_def] = exits
+      end
     end
 
     # A def read from an artifact with no body under it: the module's
@@ -205,7 +248,7 @@ module Iyi
         seen = Set(UInt64).new
         found = [] of Found
         own.named.each { |named| found << Found.new(named, [] of Def) if seen.add?(named.key) }
-        found.concat walk(own.calls, seen)
+        found.concat walk(own, seen)
         found.each do |entry|
           record = summary_record(key, entry, file)
           records << record if record && recorded.add?({key, record.module_name, record.label})
@@ -277,14 +320,16 @@ module Iyi
       end
     end
 
+    # A def of std or the prelude is read for its calls alone: what it
+    # names is std's to keep safe.
     private def facts_of(a_def : Def) : Facts
-      @facts[a_def] ||= scan(a_def.body)
+      @facts[a_def] ||= scan(a_def.body, names: walks?(a_def))
     end
 
-    private def scan(body : ASTNode) : Facts
-      scanner = Scanner.new(self)
+    private def scan(body : ASTNode, names : Bool = true) : Facts
+      scanner = Scanner.new(self, names)
       body.accept scanner
-      Facts.new(scanner.named, scanner.calls)
+      Facts.new(scanner.named, scanner.calls, scanner.std_calls)
     end
 
     # The reason `@[SafeReach("...")]` or `@[UnsafeReach("...")]` on a
@@ -370,15 +415,17 @@ module Iyi
     end
 
     # One body's facts: every constant and class variable it names, once
-    # each, and every def it calls that the walk enters. Macro code and the
-    # nodes the typer expanded are read as their expansions, the blocks
-    # given to calls as part of the body, and a proc's body too, since the
-    # block may call it.
+    # each (none for std's, *names* false), every def it calls that the
+    # walk enters, and every def of std it calls. Macro code and the nodes
+    # the typer expanded are read as their expansions, the blocks given to
+    # calls as part of the body, and a proc's body too, since the block may
+    # call it.
     class Scanner < Visitor
       getter named = [] of Named
       getter calls = [] of Def
+      getter std_calls = [] of Def
 
-      def initialize(@reach : ShareReach)
+      def initialize(@reach : ShareReach, @names : Bool = true)
         @keys = Set(UInt64).new
         @defs = Set(Def).new.compare_by_identity
       end
@@ -389,7 +436,8 @@ module Iyi
           return false
         end
         node.target_defs.try &.each do |target|
-          @calls << target if @reach.walks?(target) && @defs.add?(target)
+          next unless @defs.add?(target)
+          (@reach.walks?(target) ? @calls : @std_calls) << target
         end
         case obj = node.obj
         when Path
@@ -453,7 +501,7 @@ module Iyi
       # declaration, which is where it was written whatever the cleanup
       # makes of its value.
       private def note(state : Const | MetaTypeVar, label : String, type : Type, use : String, at : Location?) : Nil
-        return unless @keys.add?(state.object_id)
+        return unless @names && @keys.add?(state.object_id)
         named = Named.new(state, label, type, use, at)
         @named << named unless state.is_a?(Const) && @reach.std_at?(named.declared)
       end

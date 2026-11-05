@@ -397,7 +397,13 @@ os_unfair_lock") - `bench/thread_exercise.sh`'s switching program in 5
 runs of 130, and threads born beside a thread collecting in a loop
 (its step 7d) in 19 of 20, each inside 4 s. No stop names a darwin
 thread before that touch now, and the handler is never the one to make
-the block. Linux's block is mapped and copied by the parent before
+the block. The thread counts its line where it links it, too: counted
+by its parent, a thread yet to link was one a stop's count held and its
+walk never found, and a collection in that instant released nobody,
+cleared the counts the last release's threads leave by, and left the
+next stop waiting for them for good - 3 hangs in 276 plain runs of
+`bench/std_gc_exercise.iyi` on the M2 (step 7j makes the instant at
+will). Linux's block is mapped and copied by the parent before
 `clone`, and its thread-locals are loads that allocate nothing;
 Windows' stop runs no code on the thread it suspends, and the loader
 hands a thread its TLS array when it creates it. A thread's stack top,

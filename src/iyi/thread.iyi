@@ -366,8 +366,9 @@
     # darwin child is named by no stop until it has written it (`run`).
     @[ThreadLocal]
     @@line : UInt64 = 0_u64
-    # Every line, from the newest; the control page; the count of threads
-    # a stop must hear from besides the stopper; the handler, once.
+    # Every line, from the newest; the control page; how many lines the
+    # list holds, which is how a stop knows whether anybody but itself is
+    # there to hear from (`stop_others`); the handler, once.
     @@lines : UInt64 = 0_u64
     @@control : UInt64 = 0_u64
     @@count : Int64 = 0_i64
@@ -496,8 +497,25 @@
       __iyi_mmap(IYI_THREAD_LINE).address
     end
 
-    # Link a line for the stops, under the lock: a stop takes the same
-    # lock before it walks.
+    # Link a line for the stops, and count it, under the lock: a stop
+    # takes the same lock before it walks. The count is the list's and no
+    # more, on every platform: a darwin child links and counts its own
+    # line (`run`), and `start` counted it before. A thread `start` had
+    # counted and that had yet to link was one a stop's early return
+    # counted and its walk never found: a collection in that instant got
+    # past the return, cleared the counts the last release's threads
+    # leave by, signalled nobody, and so released nobody and left the
+    # last release's debt standing - and the next stop waited for those
+    # threads to count themselves out of a count it had just seen
+    # cleared, for good. bench/std_gc_exercise.iyi's main thread
+    # allocates as soon as it has started three threads, and on macOS
+    # 26.6, an M2 Pro with 10 cores, its plain build hung so in 3 runs
+    # of 276, and a copy that wrote the stop's counts out once it had
+    # waited 5 s in 3 runs of 302: each time the stop before was the main
+    # thread's, finding no line but its own, and the hung one waited for
+    # the 3 the release before it had owed (the soak of mt/next at
+    # ad0712a65). 7j of bench/thread_exercise.sh makes that instant at
+    # will.
     def self.link(line : UInt64) : Nil
       IyiRuntimeLock.lock
       IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
@@ -595,7 +613,7 @@
         IyiRuntimeLock.unlock
         raise "clone failed: #{result}" if result < 0
       {% elsif flag?(:darwin) %}
-        # Counted here and linked by the thread itself, once `@@line` is
+        # Linked and counted by the thread itself, once `@@line` is
         # written (`run`), so no stop signals it before. Created under the
         # lock all the same: `pthread_create` writes the handle into the
         # line after the thread exists, and the thread's own link waits on
@@ -603,7 +621,6 @@
         IyiRuntimeLock.lock
         result = LibC.pthread_create(Pointer(UInt64).new(line + IYI_TL_HANDLE), Pointer(Void).new(0_u64),
           Pointer(Void).new(thread_entry), Pointer(Void).new(line))
-        @@count = @@count + 1_i64 if result == 0
         IyiRuntimeLock.unlock
         raise "pthread_create failed: #{result}" if result != 0
       {% elsif flag?(:win32) %}
@@ -693,11 +710,11 @@
       # handler's read made the block again, took the lock the
       # interrupted call held, and libplatform killed the process
       # ("Trying to recursively lock an os_unfair_lock"). So the thread
-      # links its own line now, with its thread-locals made: no stop names
-      # it before, and nothing it did before allocates from the heap or
-      # holds a pointer into it.
+      # links and counts its own line now (`link`), with its thread-locals
+      # made: no stop names it before, and nothing it did before allocates
+      # from the heap or holds a pointer into it.
       {% if flag?(:darwin) %}
-        link_own(line)
+        link(line)
       {% end %}
       # An alternate signal stack is a thread's own, so a stack overflow on
       # this thread has somewhere to say so (`IyiStackGuard`).
@@ -1369,14 +1386,6 @@
       {counted ? 0_i64 &- turn : turn, since}
     end
 
-
-    # darwin's child joining the stop's list (`run`): `start` counted it.
-    def self.link_own(line : UInt64) : Nil
-      IyiRuntimeLock.lock
-      IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
-      @@lines = line
-      IyiRuntimeLock.unlock
-    end
 
     # This thread's line, from the thread-local or, on Linux in the
     # instant before a child names its own, by its tid. A darwin thread

@@ -638,6 +638,27 @@
 
 ### Fixed
 
+- **On macOS a collection straight after a thread's start no longer
+  leaves the next one waiting forever.** A thread there links its line
+  into the list a stop walks itself, once its thread-locals are made,
+  and `IyiThread.start` had counted it before it got there. A collection
+  in between - `bench/std_gc_exercise.iyi`'s main thread allocates as
+  soon as it has started three threads - counted a thread its walk never
+  found: it cleared the counts the threads of the last release leave by,
+  stopped nobody and so released nobody, and the next stop waited, the
+  runtime lock held, for those threads to count out of a count it had
+  cleared. On macOS 26.6, an Apple M2 Pro with 10 cores (the user's
+  machine), that program's plain build hung so in 3 runs of 276, and
+  once in the darwin-std-siblings shard that runs it. The thread counts
+  its line where it links it now, and the same program ran 433 runs
+  there without a hang. Linux and Windows link and count a thread in its
+  parent under one lock and never had the gap: 154 runs on Linux (12
+  vCPU) and 500 on Windows 11 (12 logical processors) ended.
+  `bench/thread_exercise.sh` step 7j collects straight after each start,
+  which on the M2 landed before the thread's link in all 2,000 rounds of
+  each of 10 runs, and with the count back in `start` it hangs 5 runs of
+  5.
+
 - **A spawn that calls into a module read from its `.iyimod` is no
   longer placed in parallel blind (SPEC.md III.4.15).** A module built
   against an artifact has the dependency's declarations and not its
@@ -27083,7 +27104,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,403-line library and nothing else. Every other
+  written against iyi's own 28,412-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -351,6 +351,19 @@
   seed found the first four fixes below, and seeds 75, 2046, 2054, 2248,
   2256, 2364 and 2388 the fifth; seeds 3000-5999 with every fix found
   nothing, at 2.6 s a seed.
+- **`bench/ensure_park.sh` holds an `ensure` that parks while an
+  exception passes, on Windows.** `bench/ensure_park.cr` raises through
+  seven kinds of ensure that park (`Fiber.yield`, `sleep`, a channel, a
+  contended mutex, the ensure after a rescue that raised again, after a
+  rescue that did not match, and nested ensures), 8 fibers x 400 rounds
+  on one thread and four of them 16 x 200 on four threads, and requires
+  every exception to arrive as the same object carrying the same
+  callstack array. Its broken copy is the old funclet codegen itself,
+  the same program built by the bootstrap Crystal: it passes the
+  control, an ensure that does not park, and fails all seven (0xC0000409,
+  which Git's bash reports as exit 127). 19 s on Windows 11, 12 logical
+  processors (the user's machine); run by CI's windows-gates job, and
+  reported unmeasured elsewhere, since the funclet is MSVC's alone.
 
 - **`bench/spawn_eligible.sh` places spawns that call into an artifact
   (SPEC.md III.4.15).** A dependency compiled once to its `.iyimod` and a
@@ -729,6 +742,29 @@
   and `db/database_test.iyi` were warned that their parallel blocks reach
   state that is not Share, as they were in 0.20.1. Both build from the
   artifacts as from source now. Migration: none.
+- **On Windows an `ensure` that parks its fiber while an exception
+  passes through it no longer aborts the process.** Crystal code the
+  fork builds for x86_64-windows-msvc, `iyi.exe` included, ran an
+  `ensure` inside the C++ catch funclet and re-raised with
+  `_CxxThrowException(NULL, NULL)`, which rethrows the C++ runtime's
+  per-thread current exception. An ensure that switched fibers there
+  (`Fiber.yield`, `sleep`, a channel, a contended mutex) left that state
+  to the next fiber on the thread: two fibers raising through an ensure
+  that yields aborted with 0xC0000409 in 3 runs of 3 on one thread, one
+  fiber alone passed, and each of seven ways of reaching an ensure
+  aborted 3 of 3 at 8 fibers (Windows 11, 12 logical processors, the
+  user's machine). The catch pad now takes the exception object, leaves
+  the funclet with `catchret`, runs the ensure as ordinary code and
+  throws the same object again, so it keeps its identity and its
+  callstack: all seven pass 3 of 3, and on four threads. iyi programs
+  were not affected: a panic unwinds by registry and nothing throws, so
+  a `defer`'s funclet is never entered, and a `defer` that sleeps and
+  waits on a channel while four tasks panic passed 1,200 of 1,200, three
+  runs each with `IYI_WORKERS=1` and the default, before the fix and
+  after. Elsewhere nothing changes: x86_64-linux IR for a program with
+  every one of those ensures is the same but for the compiler's own
+  version strings, and on Windows the change emits only blocks an
+  exception enters. Migration: none.
 
 - **A spawn that calls into a module read from its `.iyimod` is no
   longer placed in parallel blind (SPEC.md III.4.15).** A module built

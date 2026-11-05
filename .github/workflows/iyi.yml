@@ -2733,6 +2733,15 @@ jobs:
           bash bench/defer_cost.sh
           bash bench/windows_exercise.sh
 
+      # An `ensure` that parks its fiber while an exception passes through
+      # it: the compiler ran ensures inside MSVC's catch funclet, and two
+      # fibers parking there aborted the process with 0xC0000409. The
+      # broken copy is the same program built by the bootstrap Crystal
+      # installed above, whose codegen is the old funclet one.
+      - name: An ensure that parks while an exception passes, on Windows
+        shell: bash
+        run: bash bench/ensure_park.sh
+
       - name: Boundaries and floors, on Windows
         shell: bash
         run: |

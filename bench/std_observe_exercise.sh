@@ -200,8 +200,8 @@ echo "  thread depth isolation observed: IYI_FRAME_PROBE recorded while helper h
 
 echo "== deterministic rendezvous regression: mutation proof (probe can fail)"
 PATCH_DIR="$WORK/patched"
-mkdir -p "$PATCH_DIR"
-cp -R "$REPO/src" "$PATCH_DIR/src"
+mkdir -p "$PATCH_DIR/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$PATCH_DIR/src/"
 OBSERVE_PATH="$PATCH_DIR/src/std/observe.iyi"
 
 # Delete the @[ThreadLocal] line directly above @@thread_depth
@@ -689,8 +689,8 @@ fi
 echo "  boundary B-a observed: raw thread body ENV read recorded with END(0)"
 
 PATCH_DIR_BA="$WORK/patched_ba"
-mkdir -p "$PATCH_DIR_BA"
-cp -R "$REPO/src" "$PATCH_DIR_BA/src"
+mkdir -p "$PATCH_DIR_BA/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$PATCH_DIR_BA/src/"
 THREAD_PATH="$PATCH_DIR_BA/src/iyi/thread.iyi"
 
 awk '
@@ -766,8 +766,8 @@ fi
 echo "  boundary B-b observed: panic defer ENV read recorded with END(0)"
 
 PATCH_DIR_BB="$WORK/patched_bb"
-mkdir -p "$PATCH_DIR_BB"
-cp -R "$REPO/src" "$PATCH_DIR_BB/src"
+mkdir -p "$PATCH_DIR_BB/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$PATCH_DIR_BB/src/"
 CONC_PATH_BB="$PATCH_DIR_BB/src/iyi/concurrency.iyi"
 
 awk '
@@ -856,8 +856,8 @@ fi
 echo "  boundary B-c observed: depth 1->0 survived scheduler fiber transition"
 
 PATCH_DIR_BC="$WORK/patched_bc"
-mkdir -p "$PATCH_DIR_BC"
-cp -R "$REPO/src" "$PATCH_DIR_BC/src"
+mkdir -p "$PATCH_DIR_BC/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$PATCH_DIR_BC/src/"
 CONC_PATH_BC="$PATCH_DIR_BC/src/iyi/concurrency.iyi"
 
 awk '

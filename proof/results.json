@@ -157,7 +157,7 @@
       "command": "bash bench/migrate_gate.sh",
       "status": "pass",
       "exit_code": 0,
-      "summary": "iyi migrate on Crystal fixture, compilation of migrated modules, 16 lines output match, artifact emission, failure proofs; migrate gate: passed."
+      "summary": "iyi migrate on a Crystal fixture, compilation of migrated modules, 16 lines output match, artifact emission, failure proofs; migrate gate: passed."
     }
   ],
   "rg17": {

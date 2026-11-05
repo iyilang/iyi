@@ -1246,6 +1246,22 @@ elif ! (cd "$WORK/mig" && "$IYI" fix .) 2>&1 | grep -q "3 files: 0 rewritten, ev
 else
   echo "  fix over a directory: every using rewritten in one run, and the second run changes nothing"
 fi
+# The summary counts every file the run rewrote, whatever the edit: it
+# counted the `using` rewrites alone, and a directory moved off
+# `spawn_parallel` - 0.21.0's migration, iyi-db's two files - said
+# "0 rewritten" under the lines that rewrote them.
+mkdir -p "$WORK/migspawn"
+printf 'group do |g|\n  g.spawn_parallel do\n    1\n  end\nend\nputs "ran"\n' > "$WORK/migspawn/main.iyi"
+printf 'puts "clean"\n' > "$WORK/migspawn/other.iyi"
+if ! (cd "$WORK/migspawn" && "$IYI" fix .) > "$WORK/migspawn.txt" 2>&1 ||
+   ! grep -q "2 files: 1 rewritten, every one clean" "$WORK/migspawn.txt" ||
+   [ "$("$IYI" run "$WORK/migspawn/main.iyi" 2>&1)" != "ran" ]; then
+  echo "  fix over a directory: a did-you-mean edit was not counted as a rewrite"
+  sed 's/^/    /' "$WORK/migspawn.txt"
+  status=1
+else
+  echo "  fix over a directory: a file rewritten by a did-you-mean edit is counted"
+fi
 # A `using` folded into its import in a CRLF file left two blank lines
 # where the LF file is left one - only `\n` was a blank line's ending - and
 # `fmt --check` then refused the file the rewrite had written.

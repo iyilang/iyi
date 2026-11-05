@@ -638,6 +638,14 @@
 
 ### Fixed
 
+- **`iyi fix` over several files counts every file it rewrote.** Its
+  last line, `N files: M rewritten`, counted the files whose `using` it
+  rewrote and no other: moving iyi-db off `spawn_parallel`, the run
+  printed seven `fixed ...: spawn_parallel -> spawn(parallel: true)`
+  lines in two files and then `27 files: 0 rewritten, 1 still reporting
+  an error`. It says `2 rewritten` now. `bench/verbs_exercise.sh` holds a
+  directory moved off `spawn_parallel` to `2 files: 1 rewritten`.
+
 - **A module's private types carry their `Share` marker into its
   `.iyimod` (SPEC.md III.4.4).** A type the producer found shareable was
   written wearing `@[Share]` only when the module exported it; a private

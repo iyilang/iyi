@@ -338,6 +338,23 @@
 
 ### Gates
 
+- **`bench/spawn_fuzz.sh`: spawn placement from source and from
+  artifacts, compared over generated programs (SPEC.md III.4.15).**
+  `bench/spawn_fuzz.py` generates by seed programs of two and three levels
+  of modules and builds each from source and from its dependencies'
+  artifacts; the artifact build may keep a spawn in its unit that the
+  source build runs in parallel and never the other way, and both print
+  on four workers what one worker prints. CI runs seeds 0-59 in at most
+  four minutes, and three broken copies of the artifact side through
+  `IYI_SPAWN_BROKEN`, each caught on a seed clean without it. Run by hand on Linux, 1,330
+  seeds across the generator's versions at about 2.3 s a seed, it found
+  the four fixes below. It still finds a disagreement, not fixed and not
+  in the gate's seeds (seed 75 too, not analysed): in seeds 2046, 2054, 2248, 2256, 2364 and 2388
+  the build from source counts a module's own `LK1 = Mutex.new { 0 }` as
+  a statement that may start a parallel task, refusing a claim its
+  initialiser writes after it, while the producing build proved the claim
+  for every importer; the cause is not isolated.
+
 - **`bench/spawn_eligible.sh` places spawns that call into an artifact
   (SPEC.md III.4.15).** A dependency compiled once to its `.iyimod` and a
   program built against it: the spawn calling the dependency's unguarded
@@ -637,6 +654,45 @@
   chan_scaling's instructions are the same.
 
 ### Fixed
+
+- **A spawn that reaches module state through what std calls back stays
+  in its unit (SPEC.md III.4.15).** The walk deciding whether a plain
+  `g.spawn` may run in parallel stopped at std, and so at the program's
+  own defs std calls: an interpolation's `to_s`, `Array#includes?`'s
+  `==`. A spawn interpolating a value whose `to_s` appended to an
+  unguarded `Array` ran in parallel and lost appends (8,095 to 8,100 of
+  8,102 on four workers; `bench/spawn_eligible.sh`'s copy with the walk
+  stopping at std printed 18,541 of 40,000; Linux). The walk now passes
+  through std to what it calls back; std's own state is still std's. `iyi
+  check --explain-spawn` of `bench/std_http_exercise.iyi`: 1.58 and 1.68 s
+  before, 1.84 and 1.74 s after, 667 to 679 MB (Linux, 12 vCPU). A spawn
+  that ran in parallel may now stay in its unit, and `iyi check` says
+  why. Found by `bench/spawn_fuzz.py`.
+
+- **A module's own spawn is not compiled into its artifact in parallel
+  on a claim its producer alone proved (SPEC.md III.4.15).** A build
+  writing `.iyimod`s placed a spawn in one of those modules in parallel
+  on a `@[SafeReach]` it proved for itself; the artifact carried that
+  code to consumers that break the claim. `bench/spawn_eligible.sh`'s
+  `fill`, whose tasks append behind a lock, beside a consumer appending
+  through the module's unlocked `add`, printed 39,299 of 40,000 on four
+  workers (Linux); 40,000 now. Such a spawn goes back to its unit unless
+  the claim holds for every importer; the producing program's own binary
+  is the same code and keeps it there too. Found by `bench/spawn_fuzz.py`.
+
+- **A def that spawns no longer counts as a start where it is declared
+  (SPEC.md III.4.4).** R-2c's definition-site probes, `if false` calls
+  prepended to the program, were read as statements that may start a
+  parallel task: a program with a fully declared def that spawned refused
+  every `@[SafeReach]` written at module init. Such programs now compile.
+
+- **A start in a module the writer's module does not import no longer
+  refuses its initialiser's writes (SPEC.md III.4.4).** The proof took the
+  program's first start for every statement, so whether a claim written
+  only by its module's initialiser held depended on the importer's import
+  order: the producing build proved it and left the state out of the
+  artifact's `Reaches`, the consumer's build from source refused it. A
+  statement now sees the starts of its own module and those it imports.
 
 - **`iyi fix` over several files counts every file it rewrote.** Its
   last line, `N files: M rewritten`, counted the files whose `using` it

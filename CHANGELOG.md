@@ -944,7 +944,19 @@
   machine), 8 runs of 8 held, and the exercise's copies were caught in
   each: the priority put back inside the release with 36 or 37 waits
   past 50 ms a run, and with no raise 28 to 34 stops past 20 ms. The
-  exercise's no-raise copy takes out the collection's raises too.
+  exercise's no-raise copy takes out the collection's raises too. Each
+  thread puts its own raise back: the record of what to put back was one
+  for the program, the last raiser's, so of the threads that crossed the
+  budget or collected at once all but one kept the highest priority for
+  good. `bench/mark_stall.iyi` at twelve workers ended each of 30 runs
+  with 8 to 11 of its 14 threads raised and made 89,327 to 387,547
+  requests in its 10 s, against none raised and 320,668 to 554,078 with a
+  record per thread (Windows 11, 12 logical processors held to 4, the
+  user's machine). What led here: on a four-processor CI runner its tasks
+  allocated 60 MiB in five seconds, under the budget, and
+  `bench/concurrent_mark.sh` failed the run as a stall (job
+  128104679578). The exercise raises threads together and catches a copy
+  with one record.
 
 - **A second `Signal.wait` is refused whichever thread it is on.** One
   fiber waits for signals at a time, and the second was refused by the
@@ -27349,7 +27361,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,442-line library and nothing else. Every other
+  written against iyi's own 28,449-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -48,7 +48,10 @@
 #      past its bound; with the priority put back inside the release
 #      rather than after the lock, waits last a burst. A panic inside a
 #      stop puts the priority back; with `raise`'s lowering taken out,
-#      the thread keeps it.
+#      the thread keeps it. Threads that raise together for collections,
+#      crossing the budget at once or collecting at once, each put their
+#      own back; with one record of the raise for them all, a thread
+#      keeps it.
 #   5. Failure proof: the thread-root walk removed from a copy of the
 #      prelude, and a thread's list — reachable from its stopped frames
 #      alone — is swept out from under it; the program exits 1 naming the
@@ -945,6 +948,129 @@ IYI
       echo "the panic check did not fire:"; cat unlowered.txt; exit 1
     fi
     printf '  says "%s"\n' "$(grep -m1 '^FAIL: panic:' unlowered.txt)"
+
+    # Every thread a collection raised puts its own priority back,
+    # however many raised together. The raise comes before the runtime
+    # lock, and threads that cross the budget at once, or collect at once,
+    # all raise and wait for the lock in turn. What to put back was one
+    # record for the program, the last raiser's, and every other raiser
+    # found another thread's id there and kept the highest priority for
+    # good: bench/mark_stall.iyi at twelve workers ended each of 30 runs
+    # with 8, 10 or 11 of its 14 threads raised, and made 89,327 to
+    # 387,547 requests in its 10 s, against 320,668 to 554,078 and none
+    # raised with a record per thread (Windows 11, 12 logical processors
+    # held to 4, the user's machine). On a four-processor CI runner its
+    # tasks allocated 60 MiB in five seconds, under the budget, and
+    # concurrent_mark.sh failed the run as a stall (job 128104679578).
+    # Here eight threads churn, and then four collect twenty times each
+    # at once. On that machine, held to 4, the runtime before kept 3 of
+    # the 4 collectors raised in each of 20 runs, and 1 to 7 of the 8
+    # churners; per thread, none in 20.
+    step "threads that raise together for collections each put their own priority back"
+    cat > raisers.iyi <<'IYI'
+module raisers
+
+# Threads crossing the budget together, then threads collecting together:
+# each reads its priority as it starts and again as it ends, and counts
+# itself if the two differ.
+class Tally
+  @count : Atomic(Int64)
+
+  def initialize
+    @count = Atomic(Int64).new(0_i64)
+  end
+
+  def add(value : Int64) : Nil
+    @count.add(value)
+  end
+
+  def count : Int64
+    @count.get
+  end
+end
+
+def priority : Int32
+  ::LibC.GetThreadPriority(::LibC.GetCurrentThread)
+end
+
+# Garbage a string at a time, flat out.
+def churn(strings : Int32) : Int64
+  kept = 0_i64
+  i = 0
+  while i < strings
+    kept = kept &+ "churn #{i}".bytesize.to_i64
+    i = i + 1
+  end
+  kept
+end
+
+CHURNERS   = 8
+COLLECTORS = 4
+ROUNDS     = 20
+
+before = IyiMark.collections
+churners_raised = Tally.new
+collectors_raised = Tally.new
+go = Tally.new
+threads = [] of IyiThread
+CHURNERS.times do
+  threads << IyiThread.start do
+    was = priority
+    churn(1000000)
+    churners_raised.add(1_i64) if priority != was
+    nil
+  end
+end
+threads.each { |thread| thread.join }
+churned = IyiMark.collections - before
+threads = [] of IyiThread
+COLLECTORS.times do
+  threads << IyiThread.start do
+    was = priority
+    while go.count == 0_i64
+      IyiThread.spin_pause
+    end
+    ROUNDS.times { IyiMark.collect }
+    collectors_raised.add(1_i64) if priority != was
+    nil
+  end
+end
+go.add(1_i64)
+threads.each { |thread| thread.join }
+if churners_raised.count != 0_i64 || collectors_raised.count != 0_i64
+  print "FAIL: raise: #{churners_raised.count} of #{CHURNERS} threads churning through #{churned} collections, and #{collectors_raised.count} of #{COLLECTORS} collecting #{ROUNDS} times each together, kept the stop's priority\n"
+  __iyi_exit(1)
+end
+print "raise: #{CHURNERS} threads churning through #{churned} collections, and #{COLLECTORS} collecting #{ROUNDS} times each together, every one at its own priority after\n"
+IYI
+    if ! "$IYI" build --release raisers.iyi -o raisers > build-raisers.log 2>&1; then
+      cat build-raisers.log; exit 1
+    fi
+    if ! timeout -k 5 60 ./raisers > raisers.txt 2>&1 || ! grep -q '^raise:' raisers.txt; then
+      echo "threads raised together:"; cat raisers.txt; exit 1
+    fi
+    echo "  $(grep -m1 '^raise:' raisers.txt)"
+
+    # The record the program's again: the raise's two words without their
+    # `@[ThreadLocal]`. A thread collecting waits at the lock raised while
+    # another holds it, so every collector but the last to lower finds
+    # the record already put back: 20 runs of 20 on the machine above.
+    step "failure proof: one record of the raise for every thread leaves a thread raised"
+    mkdir -p shared/iyi
+    cp "$REPO"/src/iyi/*.iyi shared/iyi/
+    awk '/^      @\[ThreadLocal\]$/ { held = $0; next }
+      held != "" { if ($0 ~ /^      @@stopper_(priority|raised) /) removed++; else print held; held = "" }
+      { print } END { if (removed != 2) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > shared/iyi/thread.iyi || { echo "the raise's thread-local record is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/shared${PSEP}$REPO/src" "$IYI" build --release raisers.iyi -o raisers-shared > build-shared.log 2>&1; then
+      cat build-shared.log; exit 1
+    fi
+    timeout -k 5 60 ./raisers-shared > shared.txt 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: raise:' shared.txt; then
+      echo "one record for every thread was not caught (exit $code):"; cat shared.txt; exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: raise:' shared.txt)"
     ;;
 esac
 

@@ -718,7 +718,6 @@ end
     # The stopping thread's priority, raised over a stop and put back after
     # its release or at a panic, by the thread that raised it
     # (`IyiThread.raise_stopper`).
-    fun GetCurrentThreadId : Int32
     fun GetThreadPriority(hThread : Void*) : Int32
     fun SetThreadPriority(hThread : Void*, nPriority : Int32) : Int32
     fun SuspendThread(hThread : Void*) : Int32

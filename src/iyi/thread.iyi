@@ -895,17 +895,25 @@
       # Windows only: a POSIX stop is a signal per thread, and an
       # unprivileged Linux thread cannot raise its own priority; neither
       # was measured. A thread already at the highest or above is left so.
+      #
+      # What a raise put back is each thread's own, a thread-local: the
+      # raise comes before the runtime lock, and the threads that cross the
+      # budget together all raise and then wait for the lock in turn. One
+      # record for the program, as it was, was the last raiser's, and
+      # every other raiser found another thread's id there at its
+      # `lower_stopper` and kept the highest priority for the rest of the
+      # program.
       THREAD_PRIORITY_HIGHEST = 2_i32
+      @[ThreadLocal]
       @@stopper_priority : Int32 = 0_i32
-      @@stopper_id : Int32 = 0_i32
-      @@stopper_raised = false
+      @[ThreadLocal]
+      @@stopper_raised : Bool = false
 
       def self.raise_stopper : Nil
         me = LibC.GetCurrentThread
         priority = LibC.GetThreadPriority(me)
         return if priority >= THREAD_PRIORITY_HIGHEST
         @@stopper_priority = priority
-        @@stopper_id = LibC.GetCurrentThreadId
         @@stopper_raised = LibC.SetThreadPriority(me, THREAD_PRIORITY_HIGHEST) != 0
       end
 
@@ -915,7 +923,7 @@
       # in `raise` for a panic inside a stop, which ends only its task and
       # leaves the thread to run the tasks after it.
       def self.lower_stopper : Nil
-        return unless @@stopper_raised && @@stopper_id == LibC.GetCurrentThreadId
+        return unless @@stopper_raised
         @@stopper_raised = false
         LibC.SetThreadPriority(LibC.GetCurrentThread, @@stopper_priority)
       end

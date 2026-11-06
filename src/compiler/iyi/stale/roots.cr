@@ -126,7 +126,7 @@ module Iyi::Stale
     # Map the spelling used for lookup, without resolving or collapsing any
     # path components. Those components can themselves be symbolic links.
     def map_lookup(path : String) : RootPath
-      {{"src", @src}, {"toolchain", @toolchain}, {"pkg", @pkg}, {"scratch", @scratch}}.each do |name, base|
+      { {"src", @src}, {"toolchain", @toolchain}, {"pkg", @pkg}, {"scratch", @scratch} }.each do |name, base|
         next if base.empty?
         return RootPath.new(name, "") if path == base
         separator = ::Path::SEPARATORS[0].to_s

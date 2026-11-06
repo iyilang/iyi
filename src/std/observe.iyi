@@ -1441,7 +1441,7 @@ end
 
 {% if flag?(:win32) %}
   @[Effect(:observation_channel)]
-  private def windows_identity(path : String) : {{UInt64, UInt64, UInt64}?, Int32}
+  private def windows_identity(path : String) : { {UInt64, UInt64, UInt64}?, Int32}
     wide = __iyi_wide_path(path.to_unsafe)
     return {nil, -1} if wide.address == 0_u64
     handle = LibC.CreateFileW(wide, 0, 7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
@@ -1450,7 +1450,7 @@ end
     ok = LibKernel32.GetFileInformationByHandleEx(handle, 18, pointerof(info).as(Void*), sizeof(LibKernel32::FileIdInfo).to_u32)
     LibC.CloseHandle(handle)
     return {nil, -1} if ok == 0 || (info.id_low == 0_u64 && info.id_high == 0_u64)
-    {{info.volume, info.id_low, info.id_high}, 0}
+    { {info.volume, info.id_low, info.id_high}, 0}
   end
 
   private def windows_root?(path : String) : ::Bool

@@ -482,6 +482,22 @@
   threads at under a tenth of the slowest rate the runtime made beside
   it.
 
+- **thread_exercise.sh's copy without the wait for the lock waiters'
+  turns is caught by the stops it begins owing them, not by its rate.**
+  How fast the copy runs is the box's load: on Linux (12 vCPU) beside 8
+  busy loops it ended 10 runs of 10 at 262 to 877 threads a second
+  against the runtime's slowest 1,288 to 1,785, and the gate failed two
+  of its own runs on that machine with the copy at 147 and 155 a second.
+  The runtime counts the stops that begin while a thread the stop
+  before parked in the lock's spin has yet to try it
+  (`IyiThread.owing_stops`), and the waits for those tries that ran
+  out (`IyiThread.turn_waits_out`); 7h asks on Linux for no more of the
+  first than the second. The copy began 86 to 464,783 such stops a run
+  with no wait run out, alone, beside 8 busy loops and beside 11, and
+  hung or was caught 36 runs of 36; the runtime passed 108 runs of 108,
+  making its 3,200 threads in 1.27 to 1.92 s alone, as at every merge
+  since ad0712a65 (1.25 to 1.68 s).
+
 - **chaos_exercise.sh: `iyi test --chaos` catches a check-then-act and a
   missing join, and their seeds reproduce.** Both bugs pass 40 of 40
   plain runs on the machine's pool. `--chaos=1 --chaos-runs 100` catches
@@ -27349,7 +27365,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,442-line library and nothing else. Every other
+  written against iyi's own 28,464-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -40,9 +40,19 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# The wrapper in bin is a posix shell script, so a caller with a compiler of
-# its own names it through the environment.
-CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
+# The fork's compiler is the `iyi` the job built: `bin/iyi` runs
+# `.build/iyi` and nothing else. Not `bin/crystal`, which runs the bootstrap
+# on PATH when there is no `.build/crystal` - darwin's job builds only `make
+# iyi-tarball` - and the "fixed" build was then the old spelling, 1,486 of
+# 6,348 symbols with an `@` (CI job 128047375530). A caller with a compiler
+# of its own names it through the environment, and one that is not the
+# fork is refused rather than read.
+IYI="${IYI:-$REPO/bin/iyi}"
+# Whether a compiler is the fork: its version line starts `iyi `, and the
+# bootstrap's names the other language.
+is_fork() { # is_fork <compiler...>
+  "$@" --version 2>/dev/null | tr -d '\r' | sed -n 1p | grep -q '^iyi '
+}
 # The broken copy's compiler: the Crystal the fork is bootstrapped with.
 BOOTSTRAP="${CRYSTAL_BOOTSTRAP_COMPILER:-crystal}"
 WORK="$(mktemp -d)"
@@ -201,9 +211,11 @@ build() { # build <label> <compiler...>; leaves $WORK/<label>.exe and $WORK/<lab
 }
 
 echo "== the fork's compiler =="
-if ! build fixed "$CRYSTAL"; then
+if ! is_fork "$IYI"; then
+  fail "$IYI is not the fork's compiler (its version line: $("$IYI" --version 2>&1 | sed -n 1p)), so what it writes says nothing about the fork's spelling"
+elif ! build fixed "$IYI"; then
   sed -n '1,20p' "$WORK/fixed.log"
-  fail "the program did not build with $CRYSTAL"
+  fail "the program did not build with $IYI"
 else
   got="$("$WORK/fixed.exe" 2>&1)"
   [ "$got" = "$WANT" ] || fail "the program printed '$got', wanted $WANT"
@@ -254,6 +266,12 @@ elif ! build broken env -u CRYSTAL_PATH -u CRYSTAL_HAS_WRAPPER "$BOOTSTRAP"; the
   sed -n '1,20p' "$WORK/broken.log"
   fail "the program did not build with the bootstrap ($BOOTSTRAP)"
 else
+  # The refusal above, held against the compiler it is there to refuse.
+  if is_fork env -u CRYSTAL_PATH -u CRYSTAL_HAS_WRAPPER "$BOOTSTRAP"; then
+    fail "the bootstrap ($BOOTSTRAP) passes for the fork's compiler, so the refusal does not refuse it"
+  else
+    echo "  failure proof: the bootstrap is refused as the fork's compiler ($("$BOOTSTRAP" --version 2>&1 | tr -d '\r' | sed -n 1p))"
+  fi
   defined_symbols "$WORK/broken-cache" > "$WORK/broken.symbols"
   at="$(grep -c '@' "$WORK/broken.symbols")"
   if [ "$at" -gt 0 ]; then

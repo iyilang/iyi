@@ -686,6 +686,7 @@
   worker's first empty look 200 ms before its count - where one spawn
   starts one worker, and the same copy with the token given back first
   started a second in 20 runs of 20 on each of the three machines.
+
 - **`Term.read_password` turns echo off before it writes the prompt.**
   Since 0.18.0 it wrote the prompt to standard error first and turned
   echo off after, so a key typed at the sight of the prompt and before

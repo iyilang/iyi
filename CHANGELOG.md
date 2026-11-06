@@ -790,6 +790,22 @@
   every one of those ensures is the same but for the compiler's own
   version strings, and on Windows the change emits only blocks an
   exception enters. Migration: none.
+- **On Linux a `$` in `--link-flags` reaches the linker without a
+  backslash.** The compiler links by itself from a template it reads out
+  of what `cc -###` prints, and `cc` prints a `$`, `"` or `\` escaped
+  between double quotes; `Process.parse_arguments_posix` kept a
+  backslash there before every character, where a shell drops it before
+  `$`, `` ` ``, `"`, `\` and a newline. `-Wl,-rpath,\$ORIGIN/../lib`,
+  the Makefile's own flag, became the RPATH `\$ORIGIN/../lib`, which
+  names no directory: on Linux (12 vCPU) `make iyi-tarball` against the
+  system's shared LLVM 21 bundled ten libraries beside the binaries, and
+  its check refused the package because `iyi` and `iyi-daemon` loaded
+  all ten from `/usr/lib/x86_64-linux-gnu`. CI's tarball links a static
+  LLVM and bundles nothing, so the wrong RPATH loaded nothing there. A
+  template cached by an earlier compiler is not reused. Specs: three
+  `parse_arguments_posix` examples, and a program built with
+  `--link-flags=-Wl,-rpath,\$ORIGIN/…` carries the path with no
+  backslash before it.
 
 - **On macOS a collection straight after a thread's start no longer
   leaves the next one waiting forever.** A thread there links its line

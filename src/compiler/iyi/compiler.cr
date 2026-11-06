@@ -3783,8 +3783,11 @@ module Iyi
 
     # The linker command the driver would have built, as {linker, before, after}.
     private def iyi_link_template(link_flags, lib_flags)
+      # The trailing number is the template's format: 2 since a `$`, `"` or `\`
+      # the driver printed escaped stopped keeping its backslash, so a template
+      # written by a compiler that kept it is not read as this one's.
       key = ::Crystal::Digest::MD5.hexdigest(
-        "#{DEFAULT_LINKER}\n#{link_flags}\n#{lib_flags}\n#{codegen_target}\n1")
+        "#{DEFAULT_LINKER}\n#{link_flags}\n#{lib_flags}\n#{codegen_target}\n2")
       # One file per set of flags, rather than one file: two programs in a
       # directory that link different libraries would otherwise take turns
       # overwriting each other's answer and asking the driver again each time.
@@ -3890,7 +3893,7 @@ module Iyi
     # try it. Called after a direct link failed and the driver succeeded.
     private def iyi_disable_direct_link(link_flags, lib_flags) : Nil
       key = ::Crystal::Digest::MD5.hexdigest(
-        "#{DEFAULT_LINKER}\n#{link_flags}\n#{lib_flags}\n#{codegen_target}\n1")
+        "#{DEFAULT_LINKER}\n#{link_flags}\n#{lib_flags}\n#{codegen_target}\n2")
       # An empty fingerprint, which is what a template with no inputs has: the
       # reader computes the same for this file and so believes it.
       File.write(CacheDir.instance.join("link-template-#{key}"), "#{key}\n\nunusable") rescue nil

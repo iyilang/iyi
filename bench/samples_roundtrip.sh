@@ -298,7 +298,7 @@ reach "reading it --release" use-release --release --use-iyimod modsr
 # `impl_block` linked no further than `Kit::Lib::B#walk<&Proc(Int32, Nil)>`
 # and Enumerable's `map` said "can't use yield inside a proc literal";
 # `abstract_generic` came back as `pub abstract generic class GA(T)`;
-# `empty_body` ended on `G(Int32)@G(T)#noop:Nil`; `field_default` was refused
+# `empty_body` ended on `G(Int32)^G(T)#noop:Nil`; `field_default` was refused
 # for "code inside a type body that has to run"; `hooks` said `undefined
 # method 'kind' for Main::Mine`; `macro_def` put `class ::Main::User` in
 # the library's artifact - `superclass mismatch for class Main::User`; and
@@ -630,7 +630,7 @@ travel supertrait true
 # And a method the build writing the artifact never called, which the
 # artifact declares and has no machine code for (SPEC.md IV.1g). It is
 # refused naming the module; it was a link error naming a mangled symbol,
-# `.2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`.
+# `.2A.Kit.3A..3A.Lib.5E.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`.
 cat > "$TRAVEL/unreached/kit/lib.iyi" <<'IYI'
 module kit/lib
 

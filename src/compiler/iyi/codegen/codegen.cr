@@ -1059,7 +1059,7 @@ module Iyi
       # A proc literal is otherwise emitted into `_main`, and the unit that
       # creates one refers to it from there — which is fine for a program and
       # not for an artifact: the router's unit called
-      # `~procProc(Context, String)@kemal/router.iyi:211` and the producing
+      # `~procProc(Context, String)^kemal/router.iyi:211` and the producing
       # build had left the definition in a module nothing carries. Nor could
       # the consumer make its own, because the name has the file and line it
       # was written on in it and the consumer reads declarations under another
@@ -1100,7 +1100,16 @@ module Iyi
         # object code names its procs after the source, and a body compiled
         # here is not that code.
         filename = location.read_from.as(String)
-        fun_literal_name = Iyi.safe_mangling(@program, "~proc#{type}@#{Iyi.relative_filename(filename)}:#{location.line_number}")
+        # Joined with `SYMBOL_JOIN`, and the type and the path written as text
+        # a person chose: a quoted `NamedTuple` key in the type, a package's
+        # `@v1.0.0` directory in the path (`Iyi.symbol_text`).
+        fun_literal_name = Iyi.safe_mangling(@program, String.build do |str|
+          str << "~proc"
+          Iyi.symbol_text(str, type.to_s)
+          str << SYMBOL_JOIN
+          Iyi.symbol_text(str, Iyi.relative_filename(filename))
+          str << ':' << location.line_number
+        end)
       else
         proc_name = false
         fun_literal_name = "~fun_literal"

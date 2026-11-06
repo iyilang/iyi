@@ -64,8 +64,8 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 28,442 lines, of which 4,650 are the library held to the 4,650 ceiling (6,906 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 136,286 lines, none of it written in iyi |
-| artifact format | `.iyimod` v60, checksum per section |
+| compiler | 136,370 lines, none of it written in iyi |
+| artifact format | `.iyimod` v61, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
@@ -1030,7 +1030,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 136,286 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 136,370 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 28,442-line own prelude + 126,324 in std |
 | Specs | 21,146 lines | 16,647 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -9015,6 +9015,43 @@ type, its name, its argument types and its return type, escaped: no counter,
 no path, no hash of the build. Two builds that agree on the types agree on the
 name, which is what lets one build's object file be linked by another's.
 
+*A symbol has no `@` in it.* An inherited method's symbol names the type it was
+called on and the type that wrote it, `*Derived^Base#hi<Int32>:Int32`, and a
+proc literal's names its type and the file and line it was written at,
+`~procProc(Int32, Int32)^src/a.iyi:3`. Both were joined with `@`, Crystal's
+spelling, and GNU ld reads `name@suffix` in a definition as a symbol version:
+every distinct suffix became a version definition of the executable. The
+loader keeps 15 bits of a version index, so past 32,767 of them a library's
+versions are read as the program's own. Built at 9f0d82076 and linked with GNU
+ld 2.46, `std_spec` defined 39,376; glibc 2.34's index was 39,384, read back as
+6,616, and the program stopped before `main` on `__libc_start_main` wanting
+version `Object::==<Pointer(SpecEnumFlags).class>:Bool`. The compiler built by
+that compiler defined 24,553 (Linux). lld drops the suffix instead, so a
+backtrace or a profiler reading its symbol table named every method an array
+inherits `*Array(Int32)`.
+
+The join is `^` because neither side of it can hold one. Before it is a type;
+after it a type and then the method's name past `#` or `::`, or a file and a
+line. The type names in the 41,263 joined symbols the compiler defined use
+letters, digits, a space and `_ : ( ) , + | * .` of their own; what else they
+held, `/ - " \ '`, was text a person wrote: a file's path, because a
+file-private def, class variable or constant is owned by its file, or a quoted
+`NamedTuple` key. That text, and a `Symbol`'s name in the global a unit reads
+it from, is written with `%`, `@` and `^` percent-escaped (`%25`, `%40`,
+`%5E`): the join is never the person's, two texts that differ give two names,
+and a dependency's files, which live under `<cache>/mod/<path>@v<version>`,
+give no `@` either. ELF, Mach-O and wasm take any byte but NUL in a name; on
+MSVC every punctuation of a method's or a proc's name was already spelled
+`.XX.`, and the join is `.5E.` where `@` was `.40.`.
+
+The same `std_spec` linked with GNU ld now defines no version and passes,
+17,804 examples, 0 failures, 30 pending, and the compiler built by itself
+defines its 41,263 joined symbols with no `@` and no version (Linux; 41,265 on
+macOS). `.iyimod` v61 is the cutover: a v60 artifact's object code defines the
+old names and is refused. `bench/symbol_names.sh` reads every symbol the
+objects of a program with one of each family define, and the bootstrap
+Crystal's old spelling is its broken copy.
+
 *A type id is already an external reference.* Type ids are integers assigned by
 a global pass, so a module compiled alone cannot know its own. The obvious
 reading is that separate compilation is therefore impossible without a format
@@ -9155,11 +9192,11 @@ own comment describes.
 methods among the ones with no single symbol to key on, because each is
 compiled once per *including* type. The producer emits one only for the
 including types its own code instantiated: `db` has
-`*DB::Connection+@DB::Disposable#close` and two more because `db`'s code
+`*DB::Connection+^DB::Disposable#close` and two more because `db`'s code
 closes all three of its `Disposable`s, and a module whose includers the shard
 never uses has none. `module Gen` with a `def next_pair` and a `class Fixed`
 that includes it linked on nothing —
-`*Gen::Fixed@Gen#next_pair:Tuple(UInt32, UInt32)`, undefined.
+`*Gen::Fixed^Gen#next_pair:Tuple(UInt32, UInt32)`, undefined.
 
 The keep file is the other half of the same fact. These methods are declared
 as the module's, and an iyi module header is `extend self`, so a consumer reads
@@ -9386,7 +9423,7 @@ because reading a constant is what initialises it.
 *A module's proc literals*: **fixed, and not by carrying a list.** `add_route`
 builds `->(ctx : Context) { block.call(ctx).into_body }`, and the symbol for it
 is named after the file and line it was written on,
-`~procProc(Context, String)@kemal/router.iyi:211`. A proc literal is emitted
+`~procProc(Context, String)^kemal/router.iyi:211`. A proc literal is emitted
 into `_main`, so the router's unit referred to a definition in a module the
 artifact does not carry; and a name with a source location in it is one the
 consumer could not have reproduced either, since its declarations arrive under

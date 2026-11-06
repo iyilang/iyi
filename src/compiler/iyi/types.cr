@@ -1496,6 +1496,17 @@ module Iyi
     def metaclass
       self
     end
+
+    # iyi: in a symbol the file's path is text a person chose, and a
+    # dependency's files live under `<cache>/mod/<path>@v<version>`
+    # (`Iyi.symbol_text`).
+    def to_s_with_options(io : IO, skip_union_parens : Bool = false, generic_args : Bool = true, codegen : Bool = false) : Nil
+      if codegen
+        Iyi.symbol_text(io, @name)
+      else
+        super
+      end
+    end
   end
 
   # Abstract base type for classes and structs
@@ -3015,7 +3026,12 @@ module Iyi
     def to_s_with_options(io : IO, skip_union_parens : Bool = false, generic_args : Bool = true, codegen : Bool = false) : Nil
       io << "NamedTuple("
       @entries.join(io, ", ") do |entry|
-        Symbol.quote_for_named_argument(io, entry.name)
+        if codegen
+          # iyi: a quoted key is text a person chose (`Iyi.symbol_text`).
+          Iyi.symbol_text(io, Symbol.quote_for_named_argument(entry.name))
+        else
+          Symbol.quote_for_named_argument(io, entry.name)
+        end
         io << ": "
         entry_type = entry.type
         entry_type = entry_type.devirtualize unless codegen

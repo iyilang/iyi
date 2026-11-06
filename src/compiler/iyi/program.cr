@@ -764,7 +764,7 @@ module Iyi
     #
     # Every rule that tried to derive this from the shape of a def was wrong on
     # one side or the other: guessing "the artifact has it" left
-    # `Kemal::FilterHandler@Reference::new` undefined, guessing the reverse made
+    # `Kemal::FilterHandler^Reference::new` undefined, guessing the reverse made
     # it a duplicate, and compiling a private copy in the consumer put the
     # definition where `_main` could not see it. So the producer says what it
     # emitted.

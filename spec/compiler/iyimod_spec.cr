@@ -3202,7 +3202,7 @@ describe Iyi::IyiMod do
   #   as `square<Int32>:Shape+`, where the producer, whose body returns
   #   exactly a `Square`, wrote the answer it had;
   # * the **receiver** — `shape.twice` on a `Shape+` is dispatched through a
-  #   unit of its own, `Shape+@Shape#twice`, and the producer emits the ones
+  #   unit of its own, `Shape+^Shape#twice`, and the producer emits the ones
   #   its own program dispatched virtually;
   # * the **parameter** — `doubled(shape : Shape)` was asked for as
   #   `doubled<Shape+>`.
@@ -3302,7 +3302,7 @@ describe Iyi::IyiMod do
   # include ObjectExtensions; end` over a `Colorize::Object(T)` — so a
   # consumer reading it from its artifact was told `undefined method
   # 'colorize' for String`, and once that was found, `undefined reference
-  # to Object(String)@Object(T)#to_s`.
+  # to Object(String)^Object(T)#to_s`.
   it "carries the bodies of a module it included into a type it does not own" do
     with_tempdir("iyimod_stencilled_module") do
       Dir.mkdir_p "boot"

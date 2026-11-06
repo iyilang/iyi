@@ -887,6 +887,16 @@ jobs:
       - name: The dependency floor
         run: bash bench/dependency_floor.sh
 
+      # And what the symbols themselves are called. GNU ld reads an `@` in a
+      # definition as a symbol version, and `std_spec` had 39,376 of them:
+      # the loader keeps 15 bits of a version index and the program stopped
+      # before `main` on `__libc_start_main` (SPEC.md IV.1g). The objects are
+      # read, and the executable is linked with GNU ld and must define no
+      # version; the bootstrap compiler, which still joins with `@`, is the
+      # broken copy.
+      - name: No symbol has an @ in it (IV.1g)
+        run: bash bench/symbol_names.sh
+
       - name: The build tool floor
         run: bash bench/build_tool_floor.sh
 
@@ -1528,6 +1538,11 @@ jobs:
 
       - name: The dependency floor (III.9)
         run: bash bench/dependency_floor.sh
+
+      # Mach-O's reading of an `@` is nobody's business but the linker's, and
+      # the objects are what the compiler wrote (SPEC.md IV.1g).
+      - name: No symbol has an @ in it, on darwin (IV.1g)
+        run: bash bench/symbol_names.sh
 
       - name: The build tool floor
         run: bash bench/build_tool_floor.sh
@@ -2232,6 +2247,13 @@ jobs:
       - name: The dependency floor, on Windows (III.9)
         shell: bash
         run: bash bench/dependency_floor.sh
+
+      # COFF objects, read with the same `dumpbin`. A method's name is spelled
+      # `.XX.` here, `@` as `.40.`, so the broken copy is caught by the
+      # globals that carry a file's path as written (SPEC.md IV.1g).
+      - name: No symbol has an @ in it, on Windows (IV.1g)
+        shell: bash
+        run: bash bench/symbol_names.sh
 
       # The module contract, on the platform whose paths are the reason to
       # ask. `mod context` resolves imports through `IYI_PATH` and a

@@ -338,6 +338,19 @@
 
 ### Gates
 
+- **`bench/symbol_names.sh`: no symbol the compiler defines has an `@`
+  (SPEC.md IV.1g).** A program with one of each family - an inherited
+  method and class method, a proc literal in the main file and one under a
+  `pkg@v1.0.0` directory, that file's private def, class variable and
+  constant, a quoted `NamedTuple` key and a `Symbol` - is built and every
+  symbol its objects define is read: none may carry an `@`, each family
+  must be there under its new name, and on Linux the executable is linked
+  with GNU ld and must define no symbol version. The broken copy is the
+  same program from the bootstrap Crystal, which still joins with `@`:
+  1,829 such symbols and 1,388 version definitions on Linux, 1,709 on
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine). Linux, darwin
+  and Windows jobs.
+
 - **`bench/spawn_fuzz.sh`: spawn placement from source and from
   artifacts, compared over generated programs (SPEC.md III.4.15).**
   `bench/spawn_fuzz.py` generates by seed programs of two and three levels
@@ -665,6 +678,30 @@
   chan_scaling's instructions are the same.
 
 ### Fixed
+
+- **A large program links with GNU ld, because no symbol has an `@` in
+  it (SPEC.md IV.1g).** An inherited method was `*Derived@Base#hi` and a
+  proc literal `~procProc(Int32, Int32)@src/a.iyi:3`, and GNU ld reads
+  every `@` in a definition as a symbol version. Built at 9f0d82076 and
+  linked with GNU ld 2.46, `std_spec` defined 39,376 versions; the loader
+  keeps 15 bits of an index, glibc 2.34's 39,384 was read as 6,616, and
+  the program stopped before `main`: `undefined symbol:
+  __libc_start_main, version Object::==<Pointer(SpecEnumFlags).class>:Bool`
+  (Linux). lld cut the names at the `@` instead, so a backtrace or a
+  profiler reading the symbol table saw `*Array(Int32)` for every method an
+  array inherits. Symbols now join with `^` - `*Derived^Base#hi`,
+  `~procProc(Int32, Int32)^src/a.iyi:3` - and text a person wrote inside
+  one (a file's path, so every file of a dependency under
+  `<cache>/mod/<path>@v<version>`, a quoted `NamedTuple` key, a `Symbol`'s
+  name) has `%`, `@` and `^` written `%25`, `%40` and `%5E`; MSVC's
+  `.XX.` spelling is unchanged and the join is `.5E.`. Names in a
+  full-information backtrace, `nm`, `perf` and the like read so. The same
+  `std_spec` linked with GNU ld defines no version and passes, 17,804
+  examples, 0 failures, 30 pending, and the compiler built by itself
+  defines none of its 41,263 joined symbols with an `@` (Linux; 41,265 on
+  macOS 26.6, an M2 Pro with 10 cores, the user's machine). `.iyimod` is
+  v61: a v60 artifact's object code defines the old names and is refused
+  and rebuilt.
 
 - **One spawn starts one worker, also when it lands as that worker
   first goes idle (SPEC.md III.4.15, part 6).** A worker the pool starts

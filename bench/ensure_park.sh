@@ -43,7 +43,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # its own names it through the environment.
 CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
 # The broken copy's compiler: the Crystal the fork is bootstrapped with.
-BOOTSTRAP="${BOOTSTRAP_CRYSTAL:-crystal}"
+BOOTSTRAP="${CRYSTAL_BOOTSTRAP_COMPILER:-crystal}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 # A native compiler cannot resolve this shell's own path mapping.
@@ -92,7 +92,7 @@ else
   done
 fi
 
-echo "== the broken copy: the old funclet codegen, from the bootstrap Crystal =="
+echo "== the broken copy: the old funclet codegen, from the Crystal bootstrap =="
 if ! command -v "$BOOTSTRAP" > /dev/null 2>&1; then
   fail "no bootstrap compiler '$BOOTSTRAP' on the PATH to build the broken copy with"
 elif ! env -u CRYSTAL_PATH -u CRYSTAL_HAS_WRAPPER "$BOOTSTRAP" build --no-color -o "$WORK/broken.exe" \

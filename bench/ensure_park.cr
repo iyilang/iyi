@@ -119,8 +119,8 @@ if SHAPE == "channel"
   end
 end
 
-# The bootstrap Crystal that builds the broken copy may have no execution
-# contexts; the broken copy runs on one thread, which needs none.
+# The broken copy, built by the Crystal bootstrap, may have no execution
+# contexts; it runs on one thread, which needs none.
 {% if Fiber.has_constant?(:ExecutionContext) %}
   CONTEXT = THREADS > 1 ? Fiber::ExecutionContext::Parallel.new("ensure_park", THREADS) : nil
 {% else %}

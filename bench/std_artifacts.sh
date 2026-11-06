@@ -37,7 +37,7 @@ fi
 IYI="${IYI:-$REPO/bin/iyi}"
 receipt=${STD_ARTIFACT_RECEIPT:-}
 if [ -n "$receipt" ]; then
-  case "$receipt" in /*) ;; *) receipt="$PWD/$receipt" ;; esac
+  case "$receipt" in /*|[A-Za-z]:/*) ;; *) receipt="$PWD/$receipt" ;; esac
   revision=${STD_ARTIFACT_REVISION:-}; run_id=${STD_ARTIFACT_RUN_ID:-}; compiler_hash=${STD_ARTIFACT_COMPILER_SHA256:-}
   [ -n "$revision" ] && [ -n "$run_id" ] && [ -n "$compiler_hash" ] || { echo 'receipt metadata is required' >&2; exit 2; }
   tab=$(printf '\t')

@@ -12,7 +12,6 @@ require "./profile"
   end
 {% end %}
 
-
 module Iyi::Stale
   record Observation,
     task : UInt64,
@@ -332,7 +331,6 @@ module Iyi::Stale
               end
             end
           elsif kind_str == "file_stat"
-
             answer = compute_answer(kind_str, root, keyer) do |enc|
               enc.bool(present != 0)
               enc.uint(ftype.to_u64)
@@ -511,7 +509,7 @@ module Iyi::Stale
 
     # Replay observations against current state.
     # Returns the first mismatch string or nil if all match.
-    def self.replay(observations : Array(Observation), keyer : Keyer, roots : Roots = Roots.new(Dir.current)) : String?
+    def self.replay(observations : Array(Observation), keyer : Keyer, roots : Roots = Roots.new(Dir.current, "", "", "")) : String?
       program_env : Hash(String, String)? = nil
       observations.each do |obs|
         case obs.kind

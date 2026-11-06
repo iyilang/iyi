@@ -101,6 +101,7 @@ import std/slice::{Slice, Bytes}
       change_time : Int64
       attributes : UInt32
     end
+
     struct FileStandardInfo
       allocation_size : Int64
       end_of_file : Int64
@@ -108,11 +109,13 @@ import std/slice::{Slice, Bytes}
       delete_pending : UInt8
       directory : UInt8
     end
+
     struct FileIdInfo
       volume : UInt64
       id_low : UInt64
       id_high : UInt64
     end
+
     fun GetFileInformationByHandleEx(handle : Void*, info_class : Int32, info : Void*, size : UInt32) : Int32
     fun GetComputerNameW(buf : UInt16*, size : UInt32*) : Int32
     fun GetFinalPathNameByHandleW(handle : Void*, path : UInt16*, count : Int32, flags : Int32) : Int32
@@ -1082,6 +1085,7 @@ pub def current_host : String
     "localhost"
   {% end %}
 end
+
 {% if flag?(:win32) %}
   @[Effect(:observation_channel)]
   private def windows_real_path(path : String) : {String?, Int32}
@@ -1125,7 +1129,6 @@ private def lookup_path(path : String) : String
     path.starts_with?("/") ? path : current_cwd + "/" + path
   {% end %}
 end
-
 
 @[Effect(:observation_channel)]
 pub def safe_real_path(path : String) : String
@@ -1441,7 +1444,7 @@ end
 
 {% if flag?(:win32) %}
   @[Effect(:observation_channel)]
-  private def windows_identity(path : String) : { {UInt64, UInt64, UInt64}?, Int32}
+  private def windows_identity(path : String) : { {UInt64, UInt64, UInt64}?, Int32 }
     wide = __iyi_wide_path(path.to_unsafe)
     return {nil, -1} if wide.address == 0_u64
     handle = LibC.CreateFileW(wide, 0, 7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
@@ -1450,7 +1453,7 @@ end
     ok = LibKernel32.GetFileInformationByHandleEx(handle, 18, pointerof(info).as(Void*), sizeof(LibKernel32::FileIdInfo).to_u32)
     LibC.CloseHandle(handle)
     return {nil, -1} if ok == 0 || (info.id_low == 0_u64 && info.id_high == 0_u64)
-    { {info.volume, info.id_low, info.id_high}, 0}
+    { {info.volume, info.id_low, info.id_high}, 0 }
   end
 
   private def windows_root?(path : String) : ::Bool

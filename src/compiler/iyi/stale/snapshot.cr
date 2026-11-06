@@ -359,7 +359,6 @@ module Iyi::Stale
         )
       end
 
-
       # 4. Namespace and target matching
       if snapshot.namespace != namespace
         return ImportResult.new(
@@ -813,7 +812,6 @@ module Iyi::Stale
       unless snapshots.all? { |snap| snap.format == "iyi-test-index" && snap.version == FORMAT_VERSION && snap.records.all? { |rec| rec.version == FORMAT_VERSION && Trace.supported?(rec.trace.observations) } }
         return UnionResult.new(success: false, error: "unsupported snapshot contract", snapshot: nil)
       end
-
 
       first = snapshots.first
       if snapshots.size == 1

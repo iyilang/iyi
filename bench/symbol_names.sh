@@ -161,9 +161,17 @@ defined_symbols() { # defined_symbols <cache dir>
       Darwin) nm -U "$object" 2>/dev/null | cut -d' ' -f3- ;;
       MINGW* | MSYS* | CYGWIN* | Windows_NT)
         # `008 00000000 SECT3  notype ()    External     | name`; an undefined
-        # one says UNDEF where the section is.
+        # one says UNDEF where the section is. Left out: the names of the
+        # MSVC C++ ABI, which LLVM gives a catch funclet (`?catch$6@?0?<the
+        # function>@4HA`) and the exception tables `primitives.cr` writes
+        # for `raise` (`??_R0PEAX@8`, `_CT??_R0PEAX@88`), and its constant
+        # pool's `__real@<hex>`. There `@` is that ABI's own decoration, the
+        # name is the one vcruntime and link.exe expect, and COFF has no
+        # symbol versions: 68 of 5,256 in this program, the rest none
+        # (Windows 11, 12 logical processors, the user's machine).
         "$DUMPBIN" -nologo -symbols "$object" 2>/dev/null | tr -d '\r' |
-          grep ' SECT[0-9A-F]* ' | sed -n 's/^[^|]*| \(.*\)$/\1/p' ;;
+          grep ' SECT[0-9A-F]* ' | sed -n 's/^[^|]*| \(.*\)$/\1/p' |
+          grep -vE '^(\?|_CT\?\?|_CTA[0-9]\?\?|_TI[0-9]\?|__(real|xmm|ymm|zmm)@)' ;;
       *) nm --defined-only "$object" 2>/dev/null | cut -d' ' -f3- ;;
     esac
   done

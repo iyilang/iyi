@@ -140,12 +140,14 @@ ir_audit() { # ir_audit <ir file> ; prints failures, returns 1 on any
       ok=1
     fi
   done
-  # The unsigned max/min compare unsigned; the signed ones signed.
-  if ! grep -A12 'define.*Atomic(UInt64)@Atomic(T)#max<UInt64>' "$ir" | grep -qE 'icmp ugt|atomicrmw umax'; then
+  # The unsigned max/min compare unsigned; the signed ones signed. (`^` is
+  # the symbol's join, SPEC.md IV.1g, and a basic regex reads one anywhere
+  # but first as itself.)
+  if ! grep -A12 'define.*Atomic(UInt64)^Atomic(T)#max<UInt64>' "$ir" | grep -qE 'icmp ugt|atomicrmw umax'; then
     echo "  UInt64#max did not emit an unsigned compare"
     ok=1
   fi
-  if ! grep -A12 'define.*Atomic(Int64)@Atomic(T)#max<Int64>' "$ir" | grep -qE 'icmp sgt|atomicrmw max'; then
+  if ! grep -A12 'define.*Atomic(Int64)^Atomic(T)#max<Int64>' "$ir" | grep -qE 'icmp sgt|atomicrmw max'; then
     echo "  Int64#max did not emit a signed compare"
     ok=1
   fi

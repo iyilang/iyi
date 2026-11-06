@@ -22,6 +22,54 @@ module Iyi
     filename
   end
 
+  # iyi: the character a symbol joins two names with, and never `@` (SPEC.md
+  # IV.1g, *A symbol has no `@` in it*).
+  #
+  # An inherited method is `*Derived^Base#hi` and a proc literal is
+  # `~procProc(Int32, Int32)^src/a.iyi:3`. Both were joined with `@`, which
+  # GNU ld reads as a symbol version: every distinct suffix in a definition
+  # became a version definition of the executable, and the loader keeps 15
+  # bits of a version index. `std_spec` had 39,368 of them on Linux, so glibc
+  # 2.34's index was 39,376, read back as 6,608, and the link failed on
+  # `__libc_start_main` wanting version `spec/std/option_parser_spec.cr:273`.
+  # lld drops the suffix instead and leaves `*Array(Int32)` for every method
+  # an array inherits. The compiler itself defined 41,263 such symbols at
+  # 9f0d82076 (40,901 inherited methods and 362 procs, Linux).
+  #
+  # `^` because neither side of it can hold one. Before it is a type and
+  # after it a type (a method) or a file and a line (a proc). The type names
+  # in those 41,263 symbols use letters, digits and `_`, `:`, `(`, `)`, ` `,
+  # `,`, `+`, `|`, `*` and `.` of their own; everything else in them, `/`,
+  # `-`, `"`, `\` and `'`, was text a person wrote — a file's path, a quoted
+  # `NamedTuple` key — and that goes through `symbol_text`, which escapes
+  # `^`. A method's own name comes after `#` or `::`, past the join. Every
+  # target takes it as written: ELF, Mach-O and wasm symbols are any bytes
+  # but NUL, and on MSVC `safe_mangling` spells it `.5E.` as it spelled `@`
+  # `.40.`.
+  SYMBOL_JOIN = '^'
+
+  # Writes *text*, which somebody other than the compiler chose, into a
+  # symbol: a file's path (a private def's owner, a proc literal's place), a
+  # quoted `NamedTuple` key, a `Symbol`'s name. `@` is escaped for the reason
+  # above, and the package cache is where it is common: every file of a
+  # dependency lives under `<cache>/mod/<path>@v<version>`. `^` is escaped so
+  # that `SYMBOL_JOIN` is never the person's, and `%` so that the escape is
+  # one: two texts that differ give two names, `a@b` and `a%40b` included.
+  def self.symbol_text(io : IO, text : String) : Nil
+    unless text.each_byte.any? &.unsafe_chr.in?('%', '@', '^')
+      io << text
+      return
+    end
+    text.each_char do |char|
+      case char
+      when '%' then io << "%25"
+      when '@' then io << "%40"
+      when '^' then io << "%5E"
+      else          io << char
+      end
+    end
+  end
+
   # iyi: whether *name* names a variable this compiler wrote rather than one
   # somebody typed.
   #

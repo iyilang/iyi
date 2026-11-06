@@ -112,7 +112,7 @@ class Iyi::CodeGenVisitor
   #
   # The type that *defines* the method, not the one it was called through. A
   # method is instantiated per receiver in an ordinary build, so calling an
-  # inherited `tag` on a `Derived` asks for `*Shard::Derived@Shard::Base#tag`
+  # inherited `tag` on a `Derived` asks for `*Shard::Derived^Shard::Base#tag`
   # — and a boundary has one symbol per method, the one the producer emitted
   # against `Base`. The consumer asked for an instantiation nobody made.
   #
@@ -142,8 +142,8 @@ class Iyi::CodeGenVisitor
     # A *module*'s method is the same exception one word over, and for the same
     # reason: it is compiled once per *including* type, so there is no single
     # symbol to key on. `db` writes `module Disposable` with a `close` in it,
-    # and its artifact defines `*DB::Connection+@DB::Disposable#close`,
-    # `*DB::Statement+@…` and `*DB::ResultSet+@…` — one apiece. Keyed on the
+    # and its artifact defines `*DB::Connection+^DB::Disposable#close`,
+    # `*DB::Statement+^…` and `*DB::ResultSet+^…` — one apiece. Keyed on the
     # module the consumer asked for `*DB::Disposable#close`, which is nobody's.
     return self_type if defining.instance_type.module?
 
@@ -154,7 +154,7 @@ class Iyi::CodeGenVisitor
     # The *virtual* form, because that is what the producer's build gave it. A
     # value of a class something inherits from is held as that class's virtual
     # type, so the one symbol behind `Base#tag` is
-    # `*Shard::Base+@Shard::Base#tag` and not `*Shard::Base#tag`. For a class
+    # `*Shard::Base+^Shard::Base#tag` and not `*Shard::Base#tag`. For a class
     # nothing inherits from the two are the same type, which is why this reads
     # as a no-op everywhere else.
     defining.responds_to?(:virtual_type) ? defining.virtual_type : defining
@@ -341,7 +341,7 @@ class Iyi::CodeGenVisitor
       # build reached (SPEC.md IV.1g), so a method that build never called is
       # declared in it and compiled nowhere — and left to the linker the
       # program ended on `LNK2019 unresolved external symbol` and a mangled
-      # `.2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`,
+      # `.2A.Kit.3A..3A.Lib.5E.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`,
       # naming no module. Refused here, where the module is still known.
       if target_def.iyi_from_artifact? && !compiled_elsewhere && !is_fun_literal &&
          !target_def.is_a?(External)

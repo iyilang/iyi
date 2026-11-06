@@ -84,7 +84,13 @@ module Iyi::IyiMod
   # placed in parallel and lost appends: 19,870 to 19,952 of 20,000 at 4
   # workers on Linux. A v59 artifact is refused and rebuilt rather than
   # read as reaching nothing.
-  FORMAT_VERSION = 60_u32
+  # v61: nothing in the file's own layout changed, but the symbols its
+  # object code defines and its `Symbols` section lists are spelled without
+  # `@` (`Iyi::SYMBOL_JOIN`, `Iyi.symbol_text`): an inherited method is
+  # `*Derived^Base#hi` where a v60 artifact defines `*Derived@Base#hi`, so
+  # a consumer would ask for names a v60 artifact does not have and learn
+  # it from the linker. A v60 artifact is refused and rebuilt.
+  FORMAT_VERSION = 61_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -1414,7 +1420,7 @@ module Iyi::IyiMod
     #
     # Three rules were tried before this and each was wrong on one side.
     # Assuming the artifact has whatever its types could answer left
-    # `Kemal::FilterHandler@Reference::new` undefined; assuming the reverse made
+    # `Kemal::FilterHandler^Reference::new` undefined; assuming the reverse made
     # it a duplicate symbol; compiling a private copy in the consumer put the
     # definition where `_main` could not see it. A list is not a rule and does
     # not have a wrong side.
@@ -2983,7 +2989,7 @@ module Iyi::IyiMod
     # Whether a body travelled is the key's question, and the reader cannot
     # ask it: `DeclarationMarker` tells a header from a body by whether there
     # is one, so `def noop : Nil` with nothing in it came back as a header and
-    # the consumer's link ended on `G(Int32)@G(T)#noop:Nil` — and on every
+    # the consumer's link ended on `G(Int32)^G(T)#noop:Nil` — and on every
     # generic struct's `initialize`, every empty trait default and every
     # empty block-taking def, each listed in `MonoBodies`.
     if body = bodies[key]?

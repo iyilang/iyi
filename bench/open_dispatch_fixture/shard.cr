@@ -18,7 +18,7 @@
 # print `first mine end`. This is the miniature of the defect an application
 # hit: kemal's handler chain is `@next : HTTP::Handler | Nil`, every
 # middleware a person writes joins that set, and
-# `Kemal::InitHandler@HTTP::Handler#call_next` matched none of its cases, fell
+# `Kemal::InitHandler^HTTP::Handler#call_next` matched none of its cases, fell
 # through to the `Proc` arm of the union and jumped through a pointer that was
 # never a function — a segfault on the first request, behind a front end that
 # compiled clean.

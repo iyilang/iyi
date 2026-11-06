@@ -1028,7 +1028,7 @@ module Iyi
         # answering for the whole of `unit_names` — so an artifact could
         # *claim* a symbol it did not carry. `db` claims
         # `*DB::SessionMethods::UnpreparedQuery(DB::Connection+,
-        # DB::Statement+)@…#build<String>`, a generic's instantiation whose
+        # DB::Statement+)^…#build<String>`, a generic's instantiation whose
         # object file is nobody's, and a consumer reading that claim skipped
         # compiling one of its own: `undefined symbol`, about a method whose
         # body was in the declarations all along.
@@ -1673,7 +1673,7 @@ module Iyi
     #
     # A value of a class that something inherits from is held as that class's
     # *virtual* type, and codegen puts the methods reached through one in a
-    # module of their own — `*Shard::Base+@Shard::Base#describe` lives in
+    # module of their own — `*Shard::Base+^Shard::Base#describe` lives in
     # `Shard::Base+`, not in `Shard::Base`. Naming only the plain form carried
     # the wrong half: the artifact held a `Shard::Base` unit with the
     # constructor in it and left every inherited method behind, and a consumer
@@ -2528,7 +2528,7 @@ module Iyi
           # expanded again for each receiver a call reaches: a consumer's
           # `class User < Model` is a receiver this build never saw, so only
           # its own expansion can answer. Kept behind, `type_name` was a header
-          # and the consumer's link ended on `Model+@Model#type_name:String`,
+          # and the consumer's link ended on `Model+^Model#type_name:String`,
           # where the source build printed `Main::User`.
           if (travels || IyiMod.caller_instantiated?(item.def) || item.def.iyi_open_travel? ||
              item.def.macro_def? || iyi_widened_parameters?(type, item.def) ||
@@ -2546,7 +2546,7 @@ module Iyi
     # generic type's method exists once per instantiation, and instantiations
     # belong to whoever writes them. A trait's default is stencilled onto the
     # implementing type, which the producer has never heard of —
-    # `Samples::Collections::Nums@Std::Enumerable::Enumerable#to_a` is not a
+    # `Samples::Collections::Nums^Std::Enumerable::Enumerable#to_a` is not a
     # symbol any producer could have emitted under any name.
     private def iyi_bodies_travel?(type : Type) : Bool
       type.is_a?(GenericType) || type.is_a?(TraitType)
@@ -2563,7 +2563,7 @@ module Iyi
     # result is in the prelude's, which is not this module's to ship.
     # `std/colorize` is nothing but that — `class ::Object; include
     # ObjectExtensions; end` — and the link ended on
-    # `String@Std::Colorize::Colorize::ObjectExtensions#colorize`.
+    # `String^Std::Colorize::Colorize::ObjectExtensions#colorize`.
     #
     # Asked of the *namespace* and not of the file. A reopen counts as a
     # location, so `class ::Object` written here put this file among
@@ -2618,7 +2618,7 @@ module Iyi
       # choice, not by any property a consumer can see —
       # `std/colorize`'s whole surface is `Colorize::Object(T)` nested
       # inside an exported module, and the link ended on
-      # `Object(String)@Object(T)#to_s`.
+      # `Object(String)^Object(T)#to_s`.
       travels = iyi_bodies_travel?(type)
       # And a module this file included into a type declared elsewhere has
       # no unit of its own for its instance methods — see
@@ -2701,10 +2701,10 @@ module Iyi
     # * the **receiver**, because a method on a class something inherits from
     #   is reached through the virtual type wherever a declaration names the
     #   base — `@sink : Sink` holds a `Sink+` — and codegen puts those calls
-    #   in a unit of their own, `Sink+@Sink#take`. The producer emits the
+    #   in a unit of their own, `Sink+^Sink#take`. The producer emits the
     #   ones its own program dispatched virtually and no others, so
     #   `std/io`'s `Reader` has two subclasses and the link ended on
-    #   `Reader+@Std::Io::Reader#read_all`;
+    #   `Reader+^Std::Io::Reader#read_all`;
     # * the **return**, because it is in the name too. A consumer types a
     #   call from the declaration's return annotation and holds the answer as
     #   its virtual type, so `def self.new_element(name : String) : Node`

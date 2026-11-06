@@ -607,7 +607,7 @@ echo "$out" | grep -qE 'at.*src[/\\]iyi' && fail "a prelude panic named a librar
 # resolver, which is the next step's subject; on the Linux raw-syscall
 # runtime capture is not built yet.
 if [ "$(uname -s)" = Darwin ]; then
-  echo "$out" | grep -qE "index\.iyi|Index@Index::go|Index::go" \
+  echo "$out" | grep -qE "index\.iyi|Index::go" \
     || fail "library panic named no frame in the program: $out"
 fi
 step "a panic the library raises names no library line, prelude or std"
@@ -661,7 +661,7 @@ EOF
     [ "$code" = 1 ] || fail "the named-frames panic exited $code, wanted 1"
     echo "$out" | grep -q "^iyi: panic: named frames" || fail "no panic line: $out"
     # Each platform names a frame in the form its debug information holds:
-    # darwin's Mach-O symbol is the mangled `*Named@Named::inner<Int32>:Int32`
+    # darwin's Mach-O symbol is the mangled `*Named^Named::inner<Int32>:Int32`
     # and Windows' PDB procedure record is the display name `inner`, so the
     # pattern asks for the function's own name followed by the file and a
     # line and does not pin either spelling.

@@ -405,8 +405,8 @@ echo "  8-thread race verified: exact counts, written_first=1, 0 self-reads, tai
 
 echo "== concurrent recorder: mutation proof (nolock discriminates <= 5 attempts)"
 MUT_NOLOCK_DIR="$WORK/mut_nolock"
-mkdir -p "$MUT_NOLOCK_DIR"
-cp -R "$REPO/src" "$MUT_NOLOCK_DIR/src"
+mkdir -p "$MUT_NOLOCK_DIR/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$MUT_NOLOCK_DIR/src/"
 MUT_OBSERVE="$MUT_NOLOCK_DIR/src/std/observe.iyi"
 
 "$PY" -c "
@@ -1049,8 +1049,8 @@ echo "  case g passed: rename scratch/a -> scratch/b => 3, 1"
 
 echo "== endpoint entry rule: mutation proof (entry => safe_real_path makes a inside 1 and fails)"
 MUT_ENTRY_DIR="$WORK/mut_entry"
-mkdir -p "$MUT_ENTRY_DIR"
-cp -R "$REPO/src" "$MUT_ENTRY_DIR/src"
+mkdir -p "$MUT_ENTRY_DIR/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$MUT_ENTRY_DIR/src/"
 MUT_OBSERVE_FILE="$MUT_ENTRY_DIR/src/std/observe.iyi"
 
 cat << 'EOF' > "$WORK/mutate_entry.py"

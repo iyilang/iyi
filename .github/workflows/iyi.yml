@@ -3590,3 +3590,27 @@ jobs:
           name: iyi-vscode
           path: editors/vscode/*.vsix
           retention-days: 7
+
+  format-patch:
+    needs: build
+    runs-on: ubuntu-24.04
+    container:
+      image: crystallang/crystal:1.21.0-build
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - name: Produce formatting patch
+        run: |
+          chmod +x .build/crystal
+          ./bin/crystal tool format src/compiler/iyi/stale/snapshot.cr src/compiler/iyi/stale/trace.cr src/std/observe.iyi spec/compiler/stale/trace_spec.cr src/compiler/iyi/stale/roots.cr src/compiler/iyi/stale/toolchain.cr src/compiler/iyi/stale/store.cr
+          git diff -- src/compiler/iyi/stale/snapshot.cr src/compiler/iyi/stale/trace.cr src/std/observe.iyi spec/compiler/stale/trace_spec.cr src/compiler/iyi/stale/roots.cr src/compiler/iyi/stale/toolchain.cr src/compiler/iyi/stale/store.cr > /tmp/format.patch
+      - uses: actions/upload-artifact@v5
+        with:
+          name: format-patch
+          path: /tmp/format.patch
+          if-no-files-found: error

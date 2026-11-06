@@ -939,6 +939,13 @@ def map_obs_to_repo_path(obs, test_entry, repo_root):
         return combined
     return os.path.normpath(obs_path)
 
+def changed_observation(obs, repo_path):
+    if repo_path in changed_files or obs.get('path') in changed_files:
+        return True
+    if obs.get('kind') == 'path_binding':
+        return any(repo_path.startswith(changed + os.sep) for changed in changed_files)
+    return False
+
 master_records = {}
 for r in master_data.get('records', []):
     rid = extract_test_id(r)
@@ -983,7 +990,7 @@ for tid, t in cached_tests.items():
             if not is_file_observation(obs):
                 continue
             repo_path = map_obs_to_repo_path(obs, t, repo)
-            if repo_path in changed_files or obs.get('path') in changed_files:
+            if changed_observation(obs, repo_path):
                 errors.append(f\"Hit test {tid_str} observed changed file {repo_path}\")
 
 # Direction 2: Reject equal-build eligible unchanged-files miss
@@ -1022,7 +1029,7 @@ for tid, t in cached_tests.items():
             if not is_file_observation(obs):
                 continue
             repo_path = map_obs_to_repo_path(obs, t, repo)
-            if repo_path in changed_files or obs.get('path') in changed_files:
+            if changed_observation(obs, repo_path):
                 has_changed_input = True
                 break
 
@@ -1362,6 +1369,20 @@ assert_negative('git-diff-check', ['--master-snapshot', snap_binding, '--cached-
 assert_positive('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_hit, '--changed-files', empty_diff, '--repo', empty_repo])
 assert_positive('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_miss, '--changed-files', diff_changed, '--repo', empty_repo])
 assert_negative('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_miss, '--changed-files', empty_diff, '--repo', empty_repo], 'has equal build and unchanged observed inputs but missed')
+
+# Retargeting an intermediate directory link also changes the binding.
+binding_snapshot['records'][0]['trace']['observations'][0]['path'] = 'alias/input'
+with open(snap_binding, 'w') as f:
+    json.dump(binding_snapshot, f)
+diff_link = os.path.join(work, 'diff_link.txt')
+with open(diff_link, 'w') as f:
+    f.write('pkg/alias\n')
+assert_negative('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_hit, '--changed-files', diff_link, '--repo', empty_repo], 'observed changed file')
+assert_positive('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_miss, '--changed-files', diff_link, '--repo', empty_repo])
+with open(diff_link, 'w') as f:
+    f.write('pkg/alias-other\n')
+assert_positive('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_hit, '--changed-files', diff_link, '--repo', empty_repo])
+assert_negative('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_miss, '--changed-files', diff_link, '--repo', empty_repo], 'has equal build and unchanged observed inputs but missed')
 
 # Direction 2: Profile changed miss passes (exclusion)
 f_gd_prof = os.path.join(work, 'gd_prof.json')

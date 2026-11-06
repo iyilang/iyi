@@ -402,9 +402,37 @@ EOF
 
 RACE_TRACE="$WORK/race_trace.bin"
 rm -f "$RACE_TRACE"
-IYI_OBSERVE="$RACE_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC" -- "$RACE_ROOT"
+TMPDIR="$SCRATCH_DIR" IYI_OBSERVE="$RACE_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC" -- "$RACE_ROOT"
 "$PY" "$WORK/validate_race_trace.py" "$RACE_TRACE"
 echo "  8-thread race verified: exact counts, written_first=1, 0 self-reads, taints 33/34 deduplicated, post-taints dropped, END last"
+
+echo "== recorder mutation proof: written-path suppression is load bearing"
+MUT_WRITTEN_DIR="$WORK/mut_written"
+mkdir -p "$MUT_WRITTEN_DIR/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$MUT_WRITTEN_DIR/src/"
+"$PY" - "$MUT_WRITTEN_DIR/src/std/observe.iyi" << 'EOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    source = f.read()
+old = "if !@@enabled || @@tainted || @@failed || @@written_paths.includes?(real)"
+if source.count(old) != 2:
+    raise SystemExit("FAIL: expected file and directory written-path guards")
+with open(path, "w") as f:
+    f.write(source.replace(old, "if !@@enabled || @@tainted || @@failed", 1))
+EOF
+MUT_WRITTEN_TRACE="$WORK/mut_written_trace.bin"
+TMPDIR="$SCRATCH_DIR" IYI_PATH="$MUT_WRITTEN_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_WRITTEN_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC" -- "$RACE_ROOT"
+if "$PY" "$WORK/validate_race_trace.py" "$MUT_WRITTEN_TRACE" >"$WORK/mut_written.out" 2>&1; then
+  echo "FAIL: removing written-path suppression passed the race validator"
+  exit 1
+fi
+if ! grep -q "expected 0 type01 records" "$WORK/mut_written.out"; then
+  cat "$WORK/mut_written.out"
+  echo "FAIL: mutation failed for a reason other than missing written-path suppression"
+  exit 1
+fi
+echo "  removing written-path suppression is caught by the FILE-record assertion"
 
 echo "== concurrent recorder: mutation proof (nolock discriminates <= 5 attempts)"
 MUT_NOLOCK_DIR="$WORK/mut_nolock"
@@ -440,7 +468,7 @@ MUTATION_FAILED=0
 for attempt in 1 2 3 4 5; do
   MUT_RACE_TRACE="$WORK/mut_race_trace_$attempt.bin"
   rm -f "$MUT_RACE_TRACE"
-  if ! IYI_PATH="$MUT_NOLOCK_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_RACE_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC" -- "$RACE_ROOT" >/dev/null 2>&1; then
+  if ! IYI_PATH="$MUT_NOLOCK_DIR/src${PSEP}$REPO/samples/iyi" TMPDIR="$SCRATCH_DIR" IYI_OBSERVE="$MUT_RACE_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC" -- "$RACE_ROOT" >/dev/null 2>&1; then
     MUTATION_FAILED=1
     break
   fi

@@ -94,6 +94,26 @@ import std/slice::{Slice, Bytes}
   # `__iyi_win_env_unset`): a second declaration of `GetCurrentDirectoryW`
   # here, with other parameter types, is a redefinition the compiler refuses.
   lib LibKernel32
+    struct FileBasicInfo
+      creation_time : Int64
+      access_time : Int64
+      write_time : Int64
+      change_time : Int64
+      attributes : UInt32
+    end
+    struct FileStandardInfo
+      allocation_size : Int64
+      end_of_file : Int64
+      links : UInt32
+      delete_pending : UInt8
+      directory : UInt8
+    end
+    struct FileIdInfo
+      volume : UInt64
+      id_low : UInt64
+      id_high : UInt64
+    end
+    fun GetFileInformationByHandleEx(handle : Void*, info_class : Int32, info : Void*, size : UInt32) : Int32
     fun GetComputerNameW(buf : UInt16*, size : UInt32*) : Int32
     fun GetFinalPathNameByHandleW(handle : Void*, path : UInt16*, count : Int32, flags : Int32) : Int32
   end
@@ -343,6 +363,16 @@ private def unlock_recorder : Nil
   # RECORD_UNLOCK_END
 end
 
+private def fail_observation : Nil
+  if @@recording
+    @@failed = true
+  else
+    lock_recorder
+    @@failed = true
+    unlock_recorder
+  end
+end
+
 pub def recording_here? : ::Bool
   @@recording
 end
@@ -439,7 +469,7 @@ pub def file(kind : UInt8, path : String, open_flags : UInt32 = 0_u32) : Nil
   if writer
     writer.begin_record(0x01_u8, task_id)
     writer.write_u8(kind)
-    writer.write_str(path)
+    writer.write_str(lookup_path(path))
     writer.write_str(real)
     writer.write_str(cwd_str)
     writer.write_u32(open_flags)
@@ -490,7 +520,7 @@ pub def dir_list(path : String, names : Array(String)) : Nil
   writer = @@writer
   if writer
     writer.begin_record(0x02_u8, task_id)
-    writer.write_str(path)
+    writer.write_str(lookup_path(path))
     writer.write_str(real)
     writer.write_str(cwd_str)
     writer.write_u32(names.size.to_u32)
@@ -1054,31 +1084,47 @@ pub def current_host : String
 end
 {% if flag?(:win32) %}
   @[Effect(:observation_channel)]
-  private def windows_real_path(path : String) : String | Nil
+  private def windows_real_path(path : String) : {String?, Int32}
     wide = __iyi_wide_path(path.to_unsafe)
-    return nil if wide.address == 0_u64
+    return {nil, -1} if wide.address == 0_u64
     handle = LibC.CreateFileW(wide, 0, 7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
-    return nil if handle.address &+ 1_u64 == 0_u64
-    room = 32768
+    return {nil, LibC.GetLastError} if handle.address &+ 1_u64 == 0_u64
+    room = 512
     full = Pointer(UInt16).malloc(room.to_u64)
-    written = LibKernel32.GetFinalPathNameByHandleW(handle, full, room - 1, 0)
+    written = LibKernel32.GetFinalPathNameByHandleW(handle, full, room, 0)
+    if written >= room && written < 32768
+      room = written + 1
+      full = Pointer(UInt16).malloc(room.to_u64)
+      written = LibKernel32.GetFinalPathNameByHandleW(handle, full, room, 0)
+    end
     LibC.CloseHandle(handle)
-    return nil if written <= 0 || written >= room
-    resolved = full
-    if written >= 4 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16 && full[3] == 92_u16
-      if written > 8 && full[4] == 85_u16 && full[5] == 78_u16 && full[6] == 67_u16 && full[7] == 92_u16
-        resolved = full + 6
-        resolved[0] = 92_u16
-        resolved[1] = 92_u16
-      else
-        resolved = full + 4
+    return {nil, -1} if written <= 0 || written >= room
+    size = __iyi_utf8_size_from_wide(full)
+    return {nil, -1} if size <= 0
+    result = String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(full, t, size) }
+    special = false
+    result.split('\\').each do |part|
+      special = true if part.ends_with?(".") || part.ends_with?(" ")
+    end
+    unless special
+      if result.starts_with?("\\\\?\\UNC\\")
+        return {"\\\\" + result[8, result.bytesize - 8], 0}
+      elsif result.starts_with?("\\\\?\\") && result.bytesize >= 7 && result.to_unsafe[5] == 58_u8
+        return {result[4, result.bytesize - 4], 0}
       end
     end
-    size = __iyi_utf8_size_from_wide(resolved)
-    return nil if size <= 0
-    String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(resolved, t, size) }
+    {result, 0}
   end
 {% end %}
+
+@[Effect(:observation_channel)]
+private def lookup_path(path : String) : String
+  {% if flag?(:win32) %}
+    normalize_path(path)
+  {% else %}
+    path.starts_with?("/") ? path : current_cwd + "/" + path
+  {% end %}
+end
 
 
 @[Effect(:observation_channel)]
@@ -1103,17 +1149,26 @@ pub def safe_real_path(path : String) : String
       end
     end
   {% elsif flag?(:win32) %}
-    real = windows_real_path(path)
+    absolute = normalize_path(path)
+    return "" if absolute.empty?
+    real, error = windows_real_path(absolute)
     return real unless real.nil?
-    dir = dirname_of(path)
-    if dir != path
-      real_dir = windows_real_path(dir)
+    if error == 2
+      wide = __iyi_wide_path(absolute.to_unsafe)
+      if wide.address == 0_u64 || LibC.GetFileAttributesW(wide) != -1 || LibC.GetLastError != 2
+        fail_observation
+        return ""
+      end
+      dir = dirname_of(absolute)
+      real_dir, _ = windows_real_path(dir)
       unless real_dir.nil?
-        fname = path.starts_with?(dir) ? path[dir.bytesize, path.bytesize - dir.bytesize] : path
+        fname = absolute[dir.bytesize, absolute.bytesize - dir.bytesize]
         candidate = ends_with_separator?(real_dir) || (fname.bytesize > 0 && is_separator?(fname.to_unsafe[0])) ? real_dir + fname : real_dir + "\\" + fname
         return normalize_path(candidate)
       end
     end
+    fail_observation
+    return ""
   {% end %}
 
   p = path
@@ -1159,6 +1214,11 @@ pub def safe_real_path_relative_to(path : String, base_dir : String) : String
   if path_absolute?(path)
     return safe_real_path(path)
   end
+  {% if flag?(:win32) %}
+    if path.bytesize >= 2 && path.to_unsafe[1] == 58_u8
+      return safe_real_path(path)
+    end
+  {% end %}
 
   base = base_dir.empty? ? current_cwd : base_dir
   candidate = ends_with_separator?(base) ? (base + path) : (base + "/" + path)
@@ -1170,8 +1230,7 @@ pub def safe_real_path_relative_to(path : String, base_dir : String) : String
       return c_str(res)
     end
   {% elsif flag?(:win32) %}
-    real = windows_real_path(candidate)
-    return real unless real.nil?
+    return safe_real_path(candidate)
   {% end %}
 
   normalize_path(candidate)
@@ -1215,13 +1274,27 @@ end
 private def normalize_path(path : String) : String
   {% if flag?(:win32) %}
     wide = __iyi_wide_path(path.to_unsafe)
-    return path if wide.address == 0_u64
-    room = 32768
+    if wide.address == 0_u64
+      fail_observation
+      return ""
+    end
+    room = 512
     full = Pointer(UInt16).malloc(room.to_u64)
     written = LibC.GetFullPathNameW(wide, room, full, Pointer(Pointer(UInt16)).new(0_u64))
-    return path if written <= 0 || written >= room
+    if written >= room && written < 32768
+      room = written + 1
+      full = Pointer(UInt16).malloc(room.to_u64)
+      written = LibC.GetFullPathNameW(wide, room, full, Pointer(Pointer(UInt16)).new(0_u64))
+    end
+    if written <= 0 || written >= room
+      fail_observation
+      return ""
+    end
     size = __iyi_utf8_size_from_wide(full)
-    return path if size <= 0
+    if size <= 0
+      fail_observation
+      return ""
+    end
     return String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(full, t, size) }
   {% end %}
   parts = path.split('/')
@@ -1320,6 +1393,34 @@ private def stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
     else
       {0_u8, 0_u8, 0_u64, 0_i64}
     end
+  {% elsif flag?(:win32) %}
+    wide = __iyi_wide_path(real.to_unsafe)
+    if wide.address == 0_u64
+      fail_observation
+      return {0_u8, 0_u8, 0_u64, 0_i64}
+    end
+    handle = LibC.CreateFileW(wide, 0, 7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
+    if handle.address &+ 1_u64 == 0_u64
+      error = LibC.GetLastError
+      fail_observation unless error == 2
+      return {0_u8, 0_u8, 0_u64, 0_i64}
+    end
+    basic = uninitialized LibKernel32::FileBasicInfo
+    standard = uninitialized LibKernel32::FileStandardInfo
+    basic_ok = LibKernel32.GetFileInformationByHandleEx(handle, 0, pointerof(basic).as(Void*), sizeof(LibKernel32::FileBasicInfo).to_u32)
+    standard_ok = LibKernel32.GetFileInformationByHandleEx(handle, 1, pointerof(standard).as(Void*), sizeof(LibKernel32::FileStandardInfo).to_u32)
+    LibC.CloseHandle(handle)
+    if basic_ok == 0 || standard_ok == 0 || basic.write_time < 0_i64 || standard.delete_pending != 0_u8 || standard.end_of_file < 0_i64
+      fail_observation
+      return {0_u8, 0_u8, 0_u64, 0_i64}
+    end
+    ticks = basic.write_time - 116444736000000000_i64
+    if ticks < -92233720368547758_i64 || ticks > 92233720368547758_i64
+      fail_observation
+      return {0_u8, 0_u8, 0_u64, 0_i64}
+    end
+    type = standard.directory == 0_u8 ? 1_u8 : 2_u8
+    {1_u8, type, standard.end_of_file.to_u64, ticks * 100_i64}
   {% else %}
     {0_u8, 0_u8, 0_u64, 0_i64}
   {% end %}
@@ -1338,11 +1439,70 @@ private def mode_to_ftype(mode : Int64) : UInt8
   end
 end
 
+{% if flag?(:win32) %}
+  @[Effect(:observation_channel)]
+  private def windows_identity(path : String) : {{UInt64, UInt64, UInt64}?, Int32}
+    wide = __iyi_wide_path(path.to_unsafe)
+    return {nil, -1} if wide.address == 0_u64
+    handle = LibC.CreateFileW(wide, 0, 7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
+    return {nil, LibC.GetLastError} if handle.address &+ 1_u64 == 0_u64
+    info = uninitialized LibKernel32::FileIdInfo
+    ok = LibKernel32.GetFileInformationByHandleEx(handle, 18, pointerof(info).as(Void*), sizeof(LibKernel32::FileIdInfo).to_u32)
+    LibC.CloseHandle(handle)
+    return {nil, -1} if ok == 0 || (info.id_low == 0_u64 && info.id_high == 0_u64)
+    {{info.volume, info.id_low, info.id_high}, 0}
+  end
+
+  private def windows_root?(path : String) : ::Bool
+    bytes = path.to_unsafe
+    if path.bytesize == 3 && bytes[1] == 58_u8 && is_separator?(bytes[2])
+      return true
+    end
+    if path.starts_with?("\\\\?\\") && path.bytesize == 7 && bytes[5] == 58_u8 && is_separator?(bytes[6])
+      return true
+    end
+    prefix = if path.starts_with?("\\\\?\\UNC\\")
+               8
+             elsif path.starts_with?("\\\\") && !path.starts_with?("\\\\?\\")
+               2
+             else
+               return false
+             end
+    separators = 0
+    i = prefix
+    while i < path.bytesize
+      separators += 1 if is_separator?(bytes[i]) && i + 1 < path.bytesize
+      i += 1
+    end
+    separators <= 1
+  end
+{% end %}
+
 private def is_under_scratch?(real : String) : ::Bool
   scratch = @@scratch
   return false if scratch.nil? || scratch.empty?
   {% if flag?(:win32) %}
-    real == scratch || real.starts_with?(ends_with_separator?(scratch) ? scratch : scratch + "\\")
+    scratch_id, _ = windows_identity(scratch)
+    if scratch_id.nil?
+      fail_observation
+      return false
+    end
+    candidate = real
+    loop do
+      id, error = windows_identity(candidate)
+      if id.nil?
+        if error != 2 || candidate != real
+          fail_observation
+          return false
+        end
+      elsif id == scratch_id
+        return true
+      end
+      return false if windows_root?(candidate)
+      parent = dirname_of(candidate)
+      return false if parent == candidate || parent.bytesize >= candidate.bytesize
+      candidate = parent
+    end
   {% else %}
     real == scratch || real.starts_with?(ends_with_separator?(scratch) ? scratch : scratch + "/")
   {% end %}

@@ -884,6 +884,58 @@ if [ "$FIRST_LINE" != "0" ]; then
   exit 1
 fi
 echo "  mutation proof B-c passed: removing transfer gave 0 first"
+
+if [ "$WINDOWS" = 1 ]; then
+  echo "== Windows observation: existing and absent metadata"
+  META_SRC="$WORK/observe_meta.iyi"
+  cat << 'EOF' > "$META_SRC"
+module test/observe_meta
+import std/observe
+Std::Observe.file(2_u8, Program.args[0])
+Std::Observe.file(3_u8, Program.args[1])
+EOF
+  META_FILE="$WORK/observe_meta_input"
+  META_ABSENT="$WORK/observe_meta_absent"
+  "$PY" -c 'import os,sys; p=sys.argv[1]; open(p,"wb").write(b"observe"); os.utime(p, ns=(1700000000123456700,1700000000123456700))' "$META_FILE"
+  rm -f "$META_ABSENT"
+  META_TRACE="$WORK/observe_meta_trace"
+  IYI_OBSERVE="$META_TRACE" TMPDIR="$SCRATCH_DIR" "$IYI" run -Diyi_observe "$META_SRC" -- "$META_FILE" "$META_ABSENT"
+  "$PY" - "$META_TRACE" "$META_FILE" "$META_ABSENT" << 'EOF'
+import os, struct, sys
+data = open(sys.argv[1], "rb").read()
+found = {}
+pos = 0
+ended = False
+while pos < len(data):
+    size, = struct.unpack_from("<I", data, pos)
+    record = data[pos + 4:pos + 4 + size]
+    if len(record) != size:
+        raise SystemExit("FAIL: truncated observation record")
+    pos += 4 + size
+    if record[0] == 0x7f:
+        ended = True
+    if record[0] != 1:
+        continue
+    off = 10
+    fields = []
+    for _ in range(3):
+        n, = struct.unpack_from("<I", record, off)
+        off += 4
+        fields.append(record[off:off+n].decode("utf-8"))
+        off += n
+    flags, present, kind, length, mtime = struct.unpack_from("<IBBQq", record, off)
+    found[os.path.normcase(fields[0])] = (present, kind, length, mtime)
+if not ended:
+    raise SystemExit("FAIL: observation did not complete")
+existing = found.get(os.path.normcase(os.path.abspath(sys.argv[2])))
+missing = found.get(os.path.normcase(os.path.abspath(sys.argv[3])))
+expected = (1, 1, 7, os.stat(sys.argv[2]).st_mtime_ns)
+if existing != expected or missing != (0, 0, 0, 0):
+    raise SystemExit(f"FAIL: Windows metadata existing={existing} expected={expected} missing={missing}")
+print("  existing file size and subsecond mtime, and absent entry, recorded")
+EOF
+fi
+
 echo "== endpoint entry rule: behavioral fixtures (symlink, rename, hardlink)"
 ARGV_OP_SRC="$WORK/argv_op.iyi"
 cat << 'EOF' > "$ARGV_OP_SRC"

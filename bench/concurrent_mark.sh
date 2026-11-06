@@ -570,12 +570,33 @@ cmp -s unmapped/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk f
 if ! IYI_PATH="$WORK/unmapped${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o unmapped-run > build-unmapped.log 2>&1; then
   cat build-unmapped.log; exit 1
 fi
-timeout -k 5 300 ./unmapped-run > unmapped.txt 2>&1
-code=$?
-if [ "$code" -ne 1 ] || ! grep -q "large: a block outgrown under a mark was unmapped" unmapped.txt; then
-  echo "the large block check did not fire (exit $code):"; tail -3 unmapped.txt; exit 1
+# The broken copy reaches its check only in a run that outgrows a block
+# under a mark, and darwin's CI runner seldom does: its program run said
+# "0 of 48" (run 42045629555) and "1 of 48" (run 41921220664). In run
+# 42171849010 the program reached 3 of 8 and the copy after it passed,
+# which a copy does only when no block is outgrown under a mark, since
+# its first such block fails it. The M2 (macOS 26.6, Apple M2 Pro, 10
+# cores, the user's machine) reached 0 of 48 in 20 runs of the copy and
+# 5 of the program. A run of the copy that says it reached too few proves
+# nothing either way, so it is run again, three runs in all; if none
+# reaches the check the proof is said to be unmeasured here, as it is
+# when the program itself reaches too few, and a run that reaches it and
+# passes fails the gate.
+unmapped_runs=0
+code=0
+while [ "$unmapped_runs" -lt 3 ]; do
+  timeout -k 5 300 ./unmapped-run > unmapped.txt 2>&1
+  code=$?
+  unmapped_runs=$((unmapped_runs + 1))
+  [ "$code" -eq 0 ] && grep -q "too few to check" unmapped.txt || break
+done
+if [ "$code" -eq 0 ] && grep -q "too few to check" unmapped.txt; then
+  echo "  not run: the broken copy outgrew too few blocks under a mark here in $unmapped_runs runs, $(grep -m1 'too few to check' unmapped.txt | sed 's/^large: //')"
+elif [ "$code" -ne 1 ] || ! grep -q "large: a block outgrown under a mark was unmapped" unmapped.txt; then
+  echo "the large block check did not fire (exit $code, run $unmapped_runs):"; tail -3 unmapped.txt; exit 1
+else
+  printf '  exits 1 on run %s at "%s"\n' "$unmapped_runs" "$(grep -m1 'large: a block outgrown' unmapped.txt)"
 fi
-printf '  exits 1 at "%s"\n' "$(grep -m1 'large: a block outgrown' unmapped.txt)"
 fi
 
 step "failure proof: a small live set given the thousand-object bound goes beside the program"

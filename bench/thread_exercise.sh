@@ -82,6 +82,10 @@
 #      lock kills the process with SIGSEGV; with the fault handler's
 #      default action built in a heap block again, the process outlives
 #      the fault.
+#  7j. On darwin, a collection straight after a thread's start, before the
+#      thread has linked its line, stops nobody and leaves the next stop
+#      nothing to wait for; with the thread counted in `start` again, a
+#      run hangs.
 #
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
@@ -2409,8 +2413,8 @@ IYI
     mkdir -p unborn/iyi
     cp "$REPO"/src/iyi/*.iyi unborn/iyi/
     awk "$probe"' /^        result = LibC\.pthread_create\(Pointer\(UInt64\)\.new\(line \+ IYI_TL_HANDLE\), / {
-        print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"; print "        @@lines = line"; found++ }
-      /^        link_own\(line\)$/ { found++; next }
+        print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"; print "        @@lines = line"; print "        @@count = @@count + 1_i64"; found++ }
+      /^        link\(line\)$/ { found++; next }
       /^      line = own_line$/ { print; probe("      "); found++; next }
       { print } END { if (found != 3) exit 3 }' \
       "$REPO/src/iyi/thread.iyi" > unborn/iyi/thread.iyi || { echo "the start's pthread_create, the thread's own link or the handler's line is not in thread.iyi any more"; exit 1; }
@@ -2891,6 +2895,110 @@ case "$(uname -s)" in
         echo "with the hint back, the storm beside the busy processes kept $beside threads a second of $alone alone"; exit 1
       fi
     fi
+    ;;
+esac
+
+# ── 7j. darwin: a stop counts only the lines it can name ─────────────────
+# A darwin thread links its own line (7d), and `start` counted it before
+# it had: a collection in between got past the stop's early return on the
+# count, cleared the counts the last release's threads leave by, found
+# no line but its own, and released nobody - and the next stop waited for
+# the last release's threads to count out of the count it had seen
+# cleared, forever. The thread counts its line where it links it now
+# (`IyiThread.link`). The program starts a thread and collects at once,
+# which lands in that instant whenever the thread has yet to run that
+# far, then collects until a stop has named the thread; the proof counts
+# the thread in `start` again, and a run hangs.
+# On macOS 26.6, an M2 Pro with 10 cores, each of the 2,000 collections in
+# each of 10 runs landed before its thread had linked its line, and every
+# run ended inside a second; the copy that counts in `start` hung 5 runs
+# of 5 until a 30 s timeout. Linux links a thread in its parent before
+# `clone`, under the lock the count is taken under, and there the program
+# found the line linked at all 2,000 (12 vCPU), so the step is darwin's.
+case "$(uname -s)" in
+  Darwin)
+    step "darwin: a collection between a thread's start and its link stops nobody, and the next waits for nothing: three runs, and every one ends"
+    cat > unlinked.iyi <<'IYI'
+module unlinked
+
+import std/gc::{GC}
+
+class Gate
+  getter go : Atomic(Int64)
+
+  def initialize
+    @go = Atomic(Int64).new(0_i64)
+  end
+end
+
+def hold(gate : Gate) : Nil
+  while gate.go.get == 0_i64
+  end
+end
+
+# A thread started and a collection at once, which stops nobody if the
+# thread has yet to link its line (answers 1 then); then collections until
+# one has stopped the thread, the first of them a stop that waits for the
+# threads the release before it let go.
+def round_of(gate : Gate) : Int32
+  thread = IyiThread.start { hold(gate) }
+  stops = IyiThread.stops
+  GC.collect
+  early = IyiThread.stops == stops ? 1 : 0
+  stopped = IyiThread.stopped
+  while IyiThread.stopped == stopped
+    GC.collect
+  end
+  gate.go.set(1_i64)
+  thread.join
+  early
+end
+
+rounds = Program.args[0].to_i
+deadline = __iyi_monotonic_ns + Program.args[1].to_i.to_i64 * 1_000_000_000_i64
+early = 0
+round = 0
+while round < rounds && (round < 20 || __iyi_monotonic_ns < deadline)
+  early = early + round_of(Gate.new)
+  round = round + 1
+end
+puts "ok rounds=#{round} early=#{early} stops=#{IyiThread.stops}"
+IYI
+    if ! "$IYI" build unlinked.iyi -o unlinked > build-unlinked.log 2>&1; then
+      cat build-unlinked.log; exit 1
+    fi
+    run=1
+    early=0
+    while [ "$run" -le 3 ]; do
+      ( timeout -k 5 60 ./unlinked 2000 5 > unlinked.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^ok rounds=[0-9]* early=[0-9]* ' unlinked.txt; then
+        echo "run $run exited $code:"; tail -3 unlinked.txt; exit 1
+      fi
+      echo "  $(sed 's/^ok //' unlinked.txt)"
+      early=$((early + $(sed -n 's/^ok rounds=[0-9]* early=\([0-9]*\) .*/\1/p' unlinked.txt)))
+      run=$((run + 1))
+    done
+    if [ "$early" -eq 0 ]; then
+      echo "no collection of three runs landed before its thread linked its line: the step proves nothing here"; exit 1
+    fi
+
+    step "failure proof: the thread counted by start before it links its line, as it was, and a run hangs"
+    mkdir -p counted/iyi
+    cp "$REPO"/src/iyi/*.iyi counted/iyi/
+    awk '/^          Pointer\(Void\)\.new\(thread_entry\), Pointer\(Void\)\.new\(line\)\)$/ { print; print "        @@count = @@count + 1_i64 if result == 0"; found++; next }
+      /^        link\(line\)$/ { print "        IyiRuntimeLock.lock"; print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"; print "        @@lines = line"; print "        IyiRuntimeLock.unlock"; found++; next }
+      { print } END { if (found != 2) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > counted/iyi/thread.iyi || { echo "darwin's pthread_create in start or the thread's own link is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/counted${PSEP}$REPO/src" "$IYI" build unlinked.iyi -o counted-run > build-counted.log 2>&1; then
+      cat build-counted.log; exit 1
+    fi
+    ( timeout -k 5 30 ./counted-run 2000 5 > counted.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -ne 124 ]; then
+      echo "with the thread counted by start, a run exited $code rather than hanging:"; tail -3 counted.txt; exit 1
+    fi
+    echo "  the run hung until the 30 s timeout (exit 124)"
     ;;
 esac
 

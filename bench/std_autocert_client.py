@@ -191,17 +191,19 @@ class Pebble:
 class Served:
     """One `serve` process of the exercise, and its log."""
 
-    def __init__(self, setup, label, pebble, cache, hosts, challenges, roots=None, parallel=False):
+    def __init__(self, setup, label, pebble, cache, hosts, challenges, roots=None, parallel=False, workers=None):
         self.ready = os.path.join(setup["work"], f"{label}.ready")
         if os.path.exists(self.ready):
             os.remove(self.ready)
         self.out = os.path.join(setup["work"], f"{label}.out")
         # ROOTS, which the manager checks each chain to: Pebble's own root
         # unless another is given.
+        # *workers*, the pool size the environment asks for (IYI_WORKERS).
+        env = dict(os.environ, IYI_WORKERS=str(workers)) if workers else None
         self.process = subprocess.Popen(
             [setup["exercise"], "serve", pebble.directory, setup["minica"], roots or pebble.root, cache, str(setup["tls_port"]),
              str(setup["http_port"]), ",".join(hosts), ",".join(challenges), self.ready] + (["parallel"] if parallel else []),
-            stdout=open(self.out, "w"), stderr=subprocess.STDOUT)
+            stdout=open(self.out, "w"), stderr=subprocess.STDOUT, env=env)
         # The exercise tries a port held after the last server for a minute.
         deadline = time.time() + 90
         while not os.path.exists(self.ready):
@@ -448,7 +450,10 @@ class Scenario:
         # the manager put the challenge in. Then ten more, answered from
         # the certificates the workers read, with no order.
         cache = os.path.join(self.setup["work"], "parallel-cache")
-        server = Served(self.setup, "parallel", self.a, cache, ["p.autocert.example"], ["tls-alpn-01"], parallel=True)
+        # Under IYI_WORKERS=2, so the pool a spawn starts before `serve`
+        # differs from serve's four on every machine, CI's four-vCPU
+        # runners included: a size asked for after that spawn panics.
+        server = Served(self.setup, "parallel", self.a, cache, ["p.autocert.example"], ["tls-alpn-01"], parallel=True, workers=2)
         try:
             for round in ("first", "held"):
                 before = self.a.orders()
@@ -469,6 +474,14 @@ class Scenario:
                 for t in threads:
                     t.join()
                 made = self.a.orders() - before
+                if round == "first":
+                    # Its own check, so that a server that died is not
+                    # read as any of the failures below.
+                    up = server.process.poll() is None
+                    held(up, "on four workers, the server stays up beside the pool its first spawn started",
+                         "IYI_WORKERS=2, serve(workers: 4)" if up else f"exited {server.process.returncode}: {open(server.out).read()[-240:]}")
+                    if not up:
+                        return
                 serials = [r[0] for r in results if r and not r[0].startswith("error")]
                 workers = {r[1] for r in results if r and r[1].startswith("worker ")}
                 errors = [r[0] for r in results if r and r[0].startswith("error")][:1]

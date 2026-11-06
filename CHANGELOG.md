@@ -790,6 +790,7 @@
   every one of those ensures is the same but for the compiler's own
   version strings, and on Windows the change emits only blocks an
   exception enters. Migration: none.
+
 - **On Linux a `$` in `--link-flags` reaches the linker without a
   backslash.** The compiler links by itself from a template it reads out
   of what `cc -###` prints, and `cc` prints a `$`, `"` or `\` escaped

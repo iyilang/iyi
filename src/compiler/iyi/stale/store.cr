@@ -244,6 +244,7 @@ module Iyi::Stale
           begin
             scontent = File.read(sfile)
             snap = Snapshot.from_json(scontent)
+            next unless snap.format == "iyi-test-index" && snap.version == FORMAT_VERSION
             snap.records.each { |r| r.namespace = snap.namespace }
             snapshots << snap
           rescue
@@ -288,8 +289,8 @@ module Iyi::Stale
               if receipt.test == test && receipt.contradicted
                 result << receipt
               end
-            rescue
-            end
+            rescue ex
+              raise "cannot inspect receipt blocker #{fpath}: #{ex.message}"
           end
         end
       end
@@ -305,9 +306,8 @@ module Iyi::Stale
             if mask.test == test
               result << mask.to_receipt
             end
-          rescue
-            # Masks are never deleted as corrupt
-          end
+          rescue ex
+            raise "cannot inspect mask #{fpath}: #{ex.message}"
         end
       end
 

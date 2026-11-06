@@ -5,6 +5,8 @@ require "./machine_key"
 require "./roots"
 
 module Iyi::Stale
+  FORMAT_VERSION = 2
+
   # Test identifier: (root "src", path relative to entry root)
   record TestId, root : String, path : String do
     include JSON::Serializable
@@ -198,7 +200,7 @@ module Iyi::Stale
       @profile : ReceiptProfile,
       @trace : ReceiptTrace,
       @explain : Hash(String, String) = Hash(String, String).new,
-      @version : Int32 = 1,
+      @version : Int32 = FORMAT_VERSION,
       @mode : String = "local",
       @newest : String = "pass",
       @seq : UInt64 = 0_u64,
@@ -274,7 +276,7 @@ module Iyi::Stale
     end
 
     def pass? : Bool
-      @newest == "pass"
+      @version == FORMAT_VERSION && @newest == "pass"
     end
   end
 
@@ -285,6 +287,7 @@ module Iyi::Stale
     property build : ReceiptBuild
     property profile : ReceiptProfile
     property trace : ReceiptTrace
+    property version : Int32 = 1
     @[JSON::Field(ignore: true)]
     property signature : String = ""
 
@@ -294,6 +297,7 @@ module Iyi::Stale
       @profile : ReceiptProfile,
       @trace : ReceiptTrace,
       @signature : String = "",
+      @version : Int32 = FORMAT_VERSION,
     )
     end
 
@@ -304,7 +308,7 @@ module Iyi::Stale
         profile: @profile,
         trace: @trace,
         explain: Hash(String, String).new,
-        version: 1,
+        version: @version,
         mode: "portable",
         newest: "pass",
         seq: 0_u64,
@@ -336,7 +340,7 @@ module Iyi::Stale
       @ref : String? = nil,
       @producer : Hash(String, JSON::Any)? = nil,
       @format : String = "iyi-test-index",
-      @version : Int32 = 1,
+      @version : Int32 = FORMAT_VERSION,
     )
     end
   end

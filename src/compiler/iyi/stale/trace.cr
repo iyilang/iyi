@@ -2,6 +2,16 @@ require "crystal/digest/sha256"
 require "./encoding"
 require "./roots"
 require "./profile"
+{% if flag?(:win32) %}
+  require "c/fileapi"
+  require "c/handleapi"
+
+  @[Link("kernel32")]
+  lib LibStalePath
+    fun GetFinalPathNameByHandleW(handle : Void*, path : UInt16*, length : UInt32, flags : UInt32) : UInt32
+  end
+{% end %}
+
 
 module Iyi::Stale
   record Observation,
@@ -91,6 +101,60 @@ module Iyi::Stale
         keyer.k(raw)
       else
         raw
+      end
+    end
+
+    private def self.resolved_path(path : String) : String
+      {% if flag?(:win32) %}
+        handle = LibC.CreateFileW(Crystal::System.to_wstr(path), LibC::FILE_READ_ATTRIBUTES,
+          LibC::FILE_SHARE_READ | LibC::FILE_SHARE_WRITE | LibC::FILE_SHARE_DELETE,
+          nil, LibC::OPEN_EXISTING, LibC::FILE_FLAG_BACKUP_SEMANTICS, LibC::HANDLE.null)
+        if handle == LibC::INVALID_HANDLE_VALUE
+          raise File::Error.from_winerror("Cannot resolve path", file: path)
+        end
+        begin
+          capacity = 512
+          loop do
+            buffer = Slice(UInt16).new(capacity)
+            length = LibStalePath.GetFinalPathNameByHandleW(handle.as(Void*), buffer.to_unsafe, capacity.to_u32, 0_u32)
+            raise File::Error.from_winerror("Cannot resolve path", file: path) if length == 0
+            if length < capacity
+              resolved = String.from_utf16(buffer[0, length.to_i])
+              # Only ordinary DOS/UNC names can lose their extended prefix.
+              if resolved.starts_with?("\\\\?\\") && !resolved.split('\\').any? { |part| part.ends_with?(".") || part.ends_with?(" ") }
+                if resolved.starts_with?("\\\\?\\UNC\\")
+                  return "\\\\" + resolved[8..]
+                elsif resolved.size >= 7 && resolved[5] == ':'
+                  return resolved[4..]
+                end
+              end
+              return resolved
+            end
+            raise "Resolved path exceeds Windows limit" if length >= 32768
+            capacity = length.to_i + 1
+          end
+        ensure
+          LibC.CloseHandle(handle)
+        end
+      {% else %}
+        File.realpath(path)
+      {% end %}
+    end
+
+    # Resolve the name again, including intermediate links. For an absent last
+    # component, only a resolved parent and a genuinely absent entry suffice.
+    def self.binding_target(lookup : String) : String
+      resolved_path(lookup)
+    rescue ex : File::NotFoundError
+      raise ex if File.info?(lookup, follow_symlinks: false)
+      File.join(resolved_path(File.dirname(lookup)), File.basename(lookup))
+    end
+
+    def self.binding_answer(root : String, path : String, roots : Roots, keyer : Keyer) : Digest
+      target = roots.map(binding_target(roots.resolve(root, path)))
+      compute_answer("path_binding", root, keyer) do |enc|
+        enc.str(target.root)
+        enc.str(target.path)
       end
     end
 
@@ -200,33 +264,55 @@ module Iyi::Stale
                      when 1_u8 then "file_read"
                      when 2_u8 then "file_stat"
                      when 3_u8 then "file_exists"
-                     else           "file_#{kind_byte}"
+                     else
+                       return TraceResult.new(complete: false, incomplete_reason: "unknown file observation kind #{kind_byte}")
                      end
+
+          lookup = roots.map_lookup(given)
+          binding = compute_answer("path_binding", lookup.root, keyer) do |enc|
+            enc.str(root)
+            enc.str(rel_path)
+          end
+          observations << Observation.new(task, "path_binding", lookup.root, lookup.path, binding)
+          if check_disk_after_exit
+            begin
+              a3_mismatches << "path binding changed during run: #{given}" if binding_answer(lookup.root, lookup.path, roots, keyer) != binding
+            rescue ex
+              return TraceResult.new(complete: false, incomplete_reason: "cannot resolve path binding #{given}: #{ex.message}")
+            end
+          end
+
+          if check_disk_after_exit
+            begin
+              info = File.info?(real)
+              if present == 0
+                a3_mismatches << "file created during run: #{real}" if info
+              elsif info.nil?
+                a3_mismatches << "file missing after exit: #{real}"
+              else
+                current_type = case info.type
+                               when .file?      then 1_u8
+                               when .directory? then 2_u8
+                               when .symlink?   then 3_u8
+                               else                  0_u8
+                               end
+                if current_type != ftype || info.size.to_u64 != size || info.modification_time.to_unix_ns.to_i64 != mtime_ns
+                  a3_mismatches << "file metadata changed during run: #{real}"
+                end
+              end
+            rescue ex
+              return TraceResult.new(complete: false, incomplete_reason: "cannot inspect file #{real}: #{ex.message}")
+            end
+          end
 
           # Post-exit check and answer computation
           if kind_str == "file_read"
-            # Hash file content after exit
             content_hash = StaticArray(UInt8, 32).new(0_u8)
-            file_exists_now = File.exists?(real)
-
-            if check_disk_after_exit
-              if present != 0
-                if !file_exists_now
-                  a3_mismatches << "file missing after exit: #{real}"
-                else
-                  info = File.info?(real)
-                  if info && (info.size.to_u64 != size)
-                    a3_mismatches << "file size changed during run: #{real} (was #{size}, now #{info.size})"
-                  end
-                  begin
-                    bytes = File.read(real).to_slice
-                    content_hash = hash_bytes(bytes)
-                  rescue
-                    content_hash = hash_bytes(Bytes.empty)
-                  end
-                end
-              elsif file_exists_now
-                a3_mismatches << "file created during run: #{real}"
+            if present != 0
+              begin
+                content_hash = hash_bytes(File.read(real).to_slice)
+              rescue ex
+                return TraceResult.new(complete: false, incomplete_reason: "cannot read file #{real}: #{ex.message}")
               end
             end
 
@@ -242,12 +328,6 @@ module Iyi::Stale
               end
             end
           elsif kind_str == "file_stat"
-            if check_disk_after_exit && present != 0
-              info = File.info?(real)
-              if info && (info.size.to_u64 != size)
-                a3_mismatches << "file size changed during run: #{real} (was #{size}, now #{info.size})"
-              end
-            end
 
             answer = compute_answer(kind_str, root, keyer) do |enc|
               enc.bool(present != 0)
@@ -284,6 +364,20 @@ module Iyi::Stale
           rel_path = rp.path
           if root == "scratch" || written_paths.includes?(real)
             next
+          end
+
+          lookup = roots.map_lookup(given)
+          binding = compute_answer("path_binding", lookup.root, keyer) do |enc|
+            enc.str(root)
+            enc.str(rel_path)
+          end
+          observations << Observation.new(task, "path_binding", lookup.root, lookup.path, binding)
+          if check_disk_after_exit
+            begin
+              a3_mismatches << "path binding changed during run: #{given}" if binding_answer(lookup.root, lookup.path, roots, keyer) != binding
+            rescue ex
+              return TraceResult.new(complete: false, incomplete_reason: "cannot resolve path binding #{given}: #{ex.message}")
+            end
           end
 
           answer = compute_answer("dir_list", root, keyer) do |enc|
@@ -404,22 +498,33 @@ module Iyi::Stale
       TraceResult.new(complete: false, incomplete_reason: "missing trace file: #{ex.message}")
     end
 
+    def self.supported?(observations : Array(Observation)) : Bool
+      observations.all? do |obs|
+        {"path_binding", "file_read", "file_stat", "file_exists", "dir_list",
+         "env_get", "env_all", "cwd", "taint"}.includes?(obs.kind)
+      end
+    end
+
     # Replay observations against current state.
     # Returns the first mismatch string or nil if all match.
     def self.replay(observations : Array(Observation), keyer : Keyer, roots : Roots = Roots.new(Dir.current)) : String?
       program_env : Hash(String, String)? = nil
       observations.each do |obs|
         case obs.kind
+        when "path_binding"
+          if binding_answer(obs.root, obs.path, roots, keyer) != obs.answer
+            return "run: #{obs.path} path binding changed"
+          end
         when "file_read"
           target = roots.resolve(obs.root, obs.path)
-          exists = File.exists?(target)
+          info = File.info?(target)
+          exists = !info.nil?
           content_hash = StaticArray(UInt8, 32).new(0_u8)
           ftype = 0_u8
           size = 0_u64
           open_flags = 0_u32
 
           if exists
-            info = File.info?(target)
             if info
               size = info.size.to_u64
               ftype = case info.type
@@ -429,11 +534,7 @@ module Iyi::Stale
                       else                  0_u8
                       end
             end
-            begin
-              content_hash = hash_bytes(File.read(target).to_slice)
-            rescue
-              content_hash = hash_bytes(Bytes.empty)
-            end
+            content_hash = hash_bytes(File.read(target).to_slice)
           end
 
           current_ans = compute_answer(obs.kind, obs.root, keyer) do |enc|
@@ -453,13 +554,13 @@ module Iyi::Stale
           end
         when "file_stat"
           target = roots.resolve(obs.root, obs.path)
-          exists = File.exists?(target)
+          info = File.info?(target)
+          exists = !info.nil?
           ftype = 0_u8
           size = 0_u64
           mtime_ns = 0_i64
 
           if exists
-            info = File.info?(target)
             if info
               size = info.size.to_u64
               mtime_ns = info.modification_time.to_unix_ns.to_i64
@@ -484,7 +585,7 @@ module Iyi::Stale
           end
         when "file_exists"
           target = roots.resolve(obs.root, obs.path)
-          exists = File.exists?(target)
+          exists = !File.info?(target).nil?
           current_ans = compute_answer(obs.kind, obs.root, keyer) do |enc|
             enc.bool(exists)
           end
@@ -494,7 +595,7 @@ module Iyi::Stale
           end
         when "dir_list"
           target = roots.resolve(obs.root, obs.path)
-          names = Dir.children(target).sort rescue [] of String
+          names = Dir.children(target).sort
           current_ans = compute_answer("dir_list", obs.root, keyer) do |enc|
             enc.list(names.size) do |l|
               names.each { |item| l.str(item) }
@@ -544,10 +645,14 @@ module Iyi::Stale
         when "taint"
           # Taints represent non-reusable operations
           return "run: #{obs.path} tainted"
+        else
+          return "run: unsupported observation #{obs.kind}"
         end
       end
 
       nil
+    rescue ex
+      "run: replay failed: #{ex.message}"
     end
 
     def self.compute_env_all_digest(keyer : Keyer, env : Hash(String, String)) : StaticArray(UInt8, 32)

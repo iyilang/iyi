@@ -54,7 +54,7 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
       TraceSpecHelpers.write_str(p, "/workspace/project/data.txt")
       TraceSpecHelpers.write_str(p, "/workspace/project")
       p.write_bytes(0_u32, IO::ByteFormat::LittleEndian)         # open_flags
-      p.write_byte(1_u8)                                         # present
+      p.write_byte(0_u8)                                         # absent fixture
       p.write_byte(1_u8)                                         # ftype (regular file)
       p.write_bytes(100_u64, IO::ByteFormat::LittleEndian)       # size
       p.write_bytes(123456789_i64, IO::ByteFormat::LittleEndian) # mtime_ns
@@ -346,6 +346,98 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
       Iyi::Stale::Trace.replay(obs, keyer, roots_local).should eq("run: cwd sub is gone")
 
       Dir.delete(tmp_dir)
+    end
+  end
+
+  describe "lookup binding" do
+    it "rejects retargeted file and directory links while the old targets remain" do
+      dir = File.join(Dir.tempdir, "iyi_binding_#{Process.pid}")
+      Dir.mkdir_p(File.join(dir, "old"))
+      Dir.mkdir_p(File.join(dir, "new"))
+      old_file = File.join(dir, "old", "input")
+      new_file = File.join(dir, "new", "input")
+      File.write(old_file, "same")
+      File.write(new_file, "same")
+      file_link = File.join(dir, "file-link")
+      dir_link = File.join(dir, "dir-link")
+      File.symlink(old_file, file_link)
+      File.symlink(File.join(dir, "old"), dir_link)
+      roots = Iyi::Stale::Roots.new(src: dir, toolchain: "", pkg: "", scratch: "")
+      keyer = Iyi::Stale::Keyer.portable
+      info = File.info(old_file)
+
+      file_trace = IO::Memory.new
+      file_trace.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_FILE, 0_u64) do |p|
+        p.write_byte(1_u8)
+        TraceSpecHelpers.write_str(p, file_link)
+        TraceSpecHelpers.write_str(p, Iyi::Stale::Trace.binding_target(old_file))
+        TraceSpecHelpers.write_str(p, dir)
+        p.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+        p.write_byte(1_u8)
+        p.write_byte(1_u8)
+        p.write_bytes(info.size.to_u64, IO::ByteFormat::LittleEndian)
+        p.write_bytes(info.modification_time.to_unix_ns.to_i64, IO::ByteFormat::LittleEndian)
+      end)
+      file_trace.write(TraceSpecHelpers.encode_end(0))
+      file_result = Iyi::Stale::Trace.parse(file_trace.rewind, roots, keyer)
+      file_result.complete.should be_true
+      file_result.a3_mismatches.should be_empty
+      Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should be_nil
+
+      # A same-size file with a different observed timestamp fails the A3
+      # post-exit guard even if its bytes still match.
+      stale_meta = IO::Memory.new
+      stale_meta.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_FILE, 0_u64) do |p|
+        p.write_byte(2_u8)
+        TraceSpecHelpers.write_str(p, file_link)
+        TraceSpecHelpers.write_str(p, Iyi::Stale::Trace.binding_target(old_file))
+        TraceSpecHelpers.write_str(p, dir)
+        p.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+        p.write_byte(1_u8)
+        p.write_byte(1_u8)
+        p.write_bytes(info.size.to_u64, IO::ByteFormat::LittleEndian)
+        p.write_bytes(info.modification_time.to_unix_ns.to_i64 - 1, IO::ByteFormat::LittleEndian)
+      end)
+      stale_meta.write(TraceSpecHelpers.encode_end(0))
+      Iyi::Stale::Trace.parse(stale_meta.rewind, roots, keyer).a3_mismatches.should_not be_empty
+
+      dir_trace = IO::Memory.new
+      dir_trace.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_DIR, 0_u64) do |p|
+        TraceSpecHelpers.write_str(p, dir_link)
+        TraceSpecHelpers.write_str(p, Iyi::Stale::Trace.binding_target(File.join(dir, "old")))
+        TraceSpecHelpers.write_str(p, dir)
+        p.write_bytes(1_u32, IO::ByteFormat::LittleEndian)
+        TraceSpecHelpers.write_str(p, "input")
+      end)
+      dir_trace.write(TraceSpecHelpers.encode_end(0))
+      dir_result = Iyi::Stale::Trace.parse(dir_trace.rewind, roots, keyer)
+      dir_result.complete.should be_true
+      Iyi::Stale::Trace.replay(dir_result.observations, keyer, roots).should be_nil
+
+      File.delete(file_link)
+      File.symlink(new_file, file_link)
+      Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should_not be_nil
+      File.delete(dir_link)
+      File.symlink(File.join(dir, "new"), dir_link)
+      Iyi::Stale::Trace.replay(dir_result.observations, keyer, roots).should_not be_nil
+      File.read(old_file).should eq("same")
+      File.delete(file_link)
+      File.symlink(old_file, file_link)
+      Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should be_nil
+      File.write(old_file, "else")
+      File.utime(info.access_time, info.modification_time, old_file)
+      Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should_not be_nil
+    ensure
+      FileUtils.rm_r(dir) if dir && Dir.exists?(dir)
+    end
+
+    it "rejects unknown observations and unreadable directory replays" do
+      keyer = Iyi::Stale::Keyer.portable
+      answer = Iyi::Stale.d("test") { |enc| enc.str("x") }
+      unknown = Iyi::Stale::Observation.new(0_u64, "future_kind", "abs", "x", answer)
+      Iyi::Stale::Trace.replay([unknown], keyer).should contain("unsupported observation")
+      missing = Iyi::Stale::Observation.new(0_u64, "dir_list", "abs", File.join(Dir.tempdir, "iyi-no-such-dir-#{Process.pid}"), answer)
+      Iyi::Stale::Trace.replay([missing], keyer).should contain("replay failed")
     end
   end
 

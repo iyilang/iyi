@@ -243,6 +243,11 @@ describe "Iyi::Stale S8: Portable Snapshots" do
         res2 = Iyi::Stale::Snapshot.import(store, "dev", bad_ver, ctx)
         res2.success?.should be_false
         res2.error.not_nil!.should contain("unsupported version")
+
+        File.write(bad_ver, %({"format": "iyi-test-index", "version": 1, "namespace": "dev", "target": "x86_64-linux-gnu", "records": []}))
+        old = Iyi::Stale::Snapshot.import(store, "dev", bad_ver, ctx)
+        old.success?.should be_false
+        old.error.not_nil!.should contain("unsupported version")
       end
     end
 
@@ -253,13 +258,13 @@ describe "Iyi::Stale S8: Portable Snapshots" do
         ctx = Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu")
 
         ns_file = File.join(cache_root, "ns.json")
-        File.write(ns_file, %({"format": "iyi-test-index", "version": 1, "namespace": "prod", "target": "x86_64-linux-gnu", "records": []}))
+        File.write(ns_file, %({"format": "iyi-test-index", "version": 2, "namespace": "prod", "target": "x86_64-linux-gnu", "records": []}))
         res = Iyi::Stale::Snapshot.import(store, "dev", ns_file, ctx)
         res.success?.should be_false
         res.error.not_nil!.should contain("namespace mismatch")
 
         target_file = File.join(cache_root, "target.json")
-        File.write(target_file, %({"format": "iyi-test-index", "version": 1, "namespace": "dev", "target": "aarch64-darwin", "records": []}))
+        File.write(target_file, %({"format": "iyi-test-index", "version": 2, "namespace": "dev", "target": "aarch64-darwin", "records": []}))
         res2 = Iyi::Stale::Snapshot.import(store, "dev", target_file, ctx)
         res2.success?.should be_false
         res2.error.not_nil!.should contain("target mismatch")

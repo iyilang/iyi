@@ -242,8 +242,12 @@ module Iyi::Stale
           end
 
           matching_blockers = blockers.select do |rec|
-            rec.profile.fp == current_profile.fp &&
-              Trace.replay(rec.trace.observations, keyer_for(rec, keyer_local), roots).nil?
+            rec.version != FORMAT_VERSION || !Trace.supported?(rec.trace.observations) ||
+              (rec.profile.fp == current_profile.fp &&
+                Trace.replay(rec.trace.observations, keyer_for(rec, keyer_local), roots).nil?)
+          end
+          if blockers.any? { |rec| rec.version != FORMAT_VERSION || !Trace.supported?(rec.trace.observations) }
+            valid.clear
           end
 
           block_rules = matching_blockers.map { |b| KeyFile::StaleRule.new(b.mode, b.build.build) }
@@ -551,7 +555,7 @@ module Iyi::Stale
                     profile: current_profile,
                     trace: r_trace,
                     explain: mode_build.explain,
-                    version: 1,
+                    version: FORMAT_VERSION,
                     mode: "local",
                     newest: "pass"
                   )

@@ -460,6 +460,8 @@
     @@stops : UInt64 = 0_u64
     @@stopped : UInt64 = 0_u64
     @@stop_ns : UInt64 = 0_u64
+    @@owing_stops : UInt64 = 0_u64
+    @@turn_waits_out : UInt64 = 0_u64
 
     # The running thread's stack top, 0 for an unregistered thread, whose
     # stack is the base `IyiRoots` discovered.
@@ -484,6 +486,23 @@
     # all: the stop half of every pause, on the collector's clock.
     def self.stop_ns : UInt64
       @@stop_ns
+    end
+
+    # Stops that began while a thread the stop before had parked in the
+    # runtime lock's spin still owed its try of the lock, and waits for
+    # those tries that ran their whole `TURN_WAIT_NS` out (`await_turns`).
+    # A stop owing turns parks threads again before they have tried the
+    # lock once, which the wait is there to prevent; it follows a wait
+    # that ran out, or a collection that never waited. On Linux the
+    # storm of bench/thread_exercise.sh (7h) asks for no more of the
+    # first than of the second, and a runtime without the wait began 86
+    # to 464,783 a run on 12 vCPUs.
+    def self.owing_stops : UInt64
+      @@owing_stops
+    end
+
+    def self.turn_waits_out : UInt64
+      @@turn_waits_out
     end
 
     # The program's own threads: every registered one, and the main
@@ -1009,6 +1028,7 @@
       {% end %}
       started = IyiMark.now_ns
       page = control
+      @@owing_stops = @@owing_stops + 1_u64 if word(page + IYI_TC_TURNS).value.get != 0_u64
       # The last stop's threads out of their park before its words are
       # cleared: one still inside reads the release word, and cleared
       # under it, the release it was given is taken back. On Windows the
@@ -1231,6 +1251,8 @@
       while turns.value.get != 0_u64 && IyiMark.now_ns < ends
         yield_cpu
       end
+      # Not under the lock: two collections can wait at once.
+      word(pointerof(@@turn_waits_out).address).value.add(1_u64) if turns.value.get != 0_u64
     end
 
     # The cores this process may run on: what the marker sizes its

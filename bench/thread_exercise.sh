@@ -2836,7 +2836,7 @@ esac
 # thousands of stops are where a sleeping stopper is all but certain.
 case "$(uname -s)" in
   Linux | Darwin)
-    step "threads born sixteen at a time beside a thread collecting in a loop, its stops asleep on their counts: three runs, and every one ends"
+    step "threads born sixteen at a time beside a thread collecting in a loop, its stops asleep on their counts: three runs, every one ends, and on Linux no more stops begin owing turns than waits for them ran out"
     cat > asleep.iyi <<'IYI'
 module asleep
 
@@ -2880,24 +2880,27 @@ took = (__iyi_monotonic_ns - started_ns) // 1_000_000_i64
 flag.stop.set(1_i64)
 stormer.join
 raise "born #{flag.born.get} of #{started}" if flag.born.get != started
-puts "ok born=#{started} ms=#{took} stops=#{IyiThread.stops}"
+puts "ok born=#{started} ms=#{took} stops=#{IyiThread.stops} owing=#{IyiThread.owing_stops} outwaited=#{IyiThread.turn_waits_out}"
 IYI
     if ! "$IYI" build asleep.iyi -o asleep > build-asleep.log 2>&1; then
       cat build-asleep.log; exit 1
     fi
+    # A stop that begins while a thread the stop before parked in the
+    # runtime lock's spin still owes its try of the lock follows a wait
+    # for that try that ran out, on Linux, which the proof below holds
+    # to: `owing` no more than `outwaited`.
+    owed() { sed -n "s/^ok .* $1=\([0-9]*\).*/\1/p" "$2"; }
     run=1
-    slowest=""
     while [ "$run" -le 3 ]; do
       ( timeout -k 5 60 ./asleep 200 10 > asleep.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
-      if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* ' asleep.txt; then
+      if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* .* owing=[0-9]* outwaited=[0-9]*$' asleep.txt; then
         echo "run $run exited $code:"; tail -3 asleep.txt; exit 1
       fi
       echo "  $(sed 's/^ok //' asleep.txt)"
-      born="$(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' asleep.txt)"
-      ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' asleep.txt)"
-      rate=$((born * 1000 / (ms + 1)))
-      if [ -z "$slowest" ] || [ "$rate" -lt "$slowest" ]; then slowest=$rate; fi
+      if [ "$(uname -s)" = Linux ] && [ "$(owed owing asleep.txt)" -gt "$(owed outwaited asleep.txt)" ]; then
+        echo "run $run began $(owed owing asleep.txt) stops owing turns, after $(owed outwaited asleep.txt) waits for them ran out"; exit 1
+      fi
       run=$((run + 1))
     done
 
@@ -2922,18 +2925,27 @@ IYI
     # waits for nobody, and without that wait the thread collecting in a
     # loop takes the runtime lock back before the threads it released
     # from the lock's spin have tried it, and they never get it. The copy
-    # returns from the wait at once. On Linux (12 vCPU) it hung 5 runs of
-    # 5 past 30 s, where the runtime made its 3,200 threads in 1.3 to
-    # 1.4 s. On ubuntu-24.04's 4-core runners it made the program's
-    # floor of 320 threads in 28.3 s, under the timeout (run 41800443380),
-    # and held to 4 cores of that machine in 14.7 to 22.8 s, 6 runs of 6,
-    # where the runtime made its 3,200 in 1.28 to 1.34 s: so a run that
-    # ends is caught too, at under a tenth of the slowest rate the runtime
-    # made above. darwin's spinners give their core away (7i), and there
-    # the same copy made its threads in 1.6 to 1.7 s, 3 runs of 3 on the
-    # M2, so the proof is Linux's.
+    # returns from the wait at once, and a run hangs, or ends having
+    # begun stops owing turns that no wait ran out for. Whether it ends
+    # is the box's: a collector preempted between its release and its
+    # next lock is a turn for the threads it released. It ended on
+    # ubuntu-24.04's 4-core runners in 28.3 s (run 41800443380), and on
+    # Linux (12 vCPU, 7h run alone at a load average of 3.1 to 5.5) it
+    # hung 8 runs of 20 past 30 s and ended 12 at 10 to 45 threads a
+    # second, where the runtime made 3,200 in 1.27 to 1.92 s;
+    # beside 8 busy loops it ended 10 of 10 at 262 to 877 a second, the
+    # runtime's slowest 1,288 to 1,785 in the same runs; beside 11, 6 of 6
+    # at 268 to 311 against the runtime's 292 to 367. The rate this proof
+    # held to, a tenth of the runtime's, let all 16 loaded runs through.
+    # The owing count did not: the copy began 164,689 to 464,783 stops
+    # owing turns alone, 6,147 to 52,692 beside 8 loops, 86 to 311
+    # beside 11, with no wait run out, and the runtime began 0 to 15,
+    # never more than its waits that ran out, 108 runs of 108. darwin's
+    # spinners give their core away (7i), and there the same copy made
+    # its threads in 1.6 to 1.7 s, 3 runs of 3 on the M2, so the proof
+    # is Linux's.
     if [ "$(uname -s)" = Linux ]; then
-      step "failure proof: no wait for the released lock waiters' turns, and a run hangs or crawls"
+      step "failure proof: no wait for the released lock waiters' turns, and a run hangs or begins stops owing turns"
       mkdir -p unowed/iyi
       cp "$REPO"/src/iyi/*.iyi unowed/iyi/
       awk '/^      return if turns\.value\.get == 0_u64$/ { print "      return"; found = 1; next } { print } END { if (!found) exit 3 }' \
@@ -2945,14 +2957,11 @@ IYI
       code=$?
       if [ "$code" -eq 124 ]; then
         echo "  the run hung until the 30 s timeout (exit 124)"
-      elif [ "$code" -eq 0 ] && grep -q '^ok born=[0-9]* ms=[0-9]* ' unowed.txt; then
-        born="$(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' unowed.txt)"
-        ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' unowed.txt)"
-        rate=$((born * 1000 / (ms + 1)))
-        if [ $((rate * 10)) -ge "$slowest" ]; then
-          echo "with the wait for the turns taken out, a run made $rate threads a second, not under a tenth of the runtime's $slowest:"; tail -3 unowed.txt; exit 1
+      elif [ "$code" -eq 0 ] && grep -q '^ok born=[0-9]* ms=[0-9]* .* owing=[0-9]* outwaited=[0-9]*$' unowed.txt; then
+        if [ "$(owed owing unowed.txt)" -le "$(owed outwaited unowed.txt)" ]; then
+          echo "with the wait for the turns taken out, a run began no more stops owing turns than waits for them ran out:"; tail -3 unowed.txt; exit 1
         fi
-        echo "  the run made $rate threads a second, against $slowest at the slowest above"
+        echo "  the run ended, $(sed 's/^ok //' unowed.txt)"
       else
         echo "with the wait for the turns taken out, a run exited $code:"; tail -3 unowed.txt; exit 1
       fi

@@ -434,6 +434,13 @@ def line_allowed(line: str, rel: str = "") -> str | None:
     if (rel == "bench/fixtures/windows_gate_schedule.before.json"
             and line.strip() == '"crystal": "1.21.0"'):
         return "the Windows workflow's bootstrap compiler, captured before rescheduling"
+    # The artifact schedule verifier quotes the actual Windows bootstrap command
+    # and checks the bootstrap action's pinned input. Allow only those exact lines.
+    if rel == "bench/std_artifact_schedule.py" and line.strip() in {
+        'BUILD_RUN = "make -f Makefile.win crystal || exit /b 1\\nmake -f Makefile.win iyi"',
+        'require(len(crystal) == 1 and crystal[0].get("with", {}).get("crystal") == "1.21.0", f"{name}: bootstrap toolchain")',
+    }:
+        return "the Windows artifact scheduler's exact bootstrap contract"
     for rx, why in LINE_RES:
         if rx.search(line):
             return why

@@ -198,6 +198,40 @@ def reject(fn, label):
         return
     raise Invalid("negative control accepted: " + label)
 
+def require_lf(data):
+    require(b"\r" not in data and data.startswith(b"#!/usr/bin/env bash\n"),
+            "fake compiler must have an LF-only shebang and lines")
+
+
+def validate_calls(lines, names, shard, count, phase):
+    observed = collections.Counter()
+    for line in lines:
+        args = line.split("\t")
+        require(args and args[0] == "build", "malformed compiler invocation")
+        emit = args.count("--emit-iyimod")
+        consume = args.count("--use-iyimod")
+        require(emit + consume == 1, "compiler invocation has no unique stage")
+        codegen = args.count("--no-codegen")
+        target_count = args.count("--target")
+        require(codegen <= 1 and target_count <= 1, "duplicate compiler flags")
+        target = args[args.index("--target") + 1] if target_count else "host"
+        source = "bench/" + args[-1].replace("\\", "/").rsplit("/", 1)[-1]
+        observed[("emit" if emit else "consume", target, codegen, source)] += 1
+    owned = [name for index, name in expected(names, count) if index == shard]
+    targets = ("host",) if phase == "native" else TARGETS
+    wanted = collections.Counter((stage, target, int(phase == "cross"), source)
+                                 for source in owned for target in targets
+                                 for stage in ("emit", "consume"))
+    require(observed == wanted, "observed compiler calls do not match assigned units")
+
+
+def check_observed_calls(path, names, shard, count, phase):
+    lines = path.read_text(encoding="utf-8").splitlines()
+    validate_calls(lines, names, shard, count, phase)
+    require(lines, "compiler call log is empty")
+    reject(lambda: validate_calls(lines[1:], names, shard, count, phase), "omitted observed compiler call")
+    reject(lambda: validate_calls(lines + lines[:1], names, shard, count, phase), "duplicated observed compiler call")
+
 
 def fixture_checks(root):
     helper = root / "bench/std_artifacts.sh"
@@ -233,13 +267,18 @@ def fixture_checks(root):
         shutil.copy2(filter_file, empty / "bench/darwin_frames.sh")
         require(run_helper(empty, "--plan", 1).returncode != 0, "helper accepted empty inventory")
         compiler = repo / "fake-compiler"
-        compiler.write_text(FAKE_COMPILER, encoding="utf-8")
+        compiler.write_bytes(FAKE_COMPILER.encode("utf-8"))
+        written_compiler = compiler.read_bytes()
+        require_lf(written_compiler)
+        reject(lambda: require_lf(written_compiler.replace(b"\n", b"\r\n")), "CRLF fake compiler")
         compiler.chmod(0o755)
         env = os.environ.copy()
         env.update(IYI=posix(compiler), STD_ARTIFACT_REVISION=REVISION, STD_ARTIFACT_RUN_ID=RUN_ID, STD_ARTIFACT_COMPILER_SHA256=COMPILER, STD_ARTIFACT_RECEIPT=posix(repo / "receipt"), FAKE_LOG=posix(repo / "calls"))
         for phase in ("native", "cross"):
+            (repo / "calls").unlink(missing_ok=True)
             result = run_helper(repo, phase, 1, 1, env=env)
             require(result.returncode == 0, "fixture execution failed: " + result.stdout)
+            check_observed_calls(repo / "calls", names, 1, 1, phase)
         receipts([repo / "receipt"], names, REVISION, RUN_ID, COMPILER, 1)
         original_receipt = (repo / "receipt").read_text(encoding="utf-8").splitlines()
         cross_rows = [row for row in original_receipt if row.startswith("unit\tcross\t")]
@@ -260,8 +299,10 @@ def fixture_checks(root):
             shard_paths.append(path)
             env["STD_ARTIFACT_RECEIPT"] = posix(path)
             for phase in ("native", "cross"):
+                (repo / "calls").unlink(missing_ok=True)
                 result = run_helper(repo, phase, shard, SHARDS, env=env)
                 require(result.returncode == 0, "sharded execution failed: " + result.stdout)
+                check_observed_calls(repo / "calls", names, shard, SHARDS, phase)
         receipts(shard_paths, names, REVISION, RUN_ID, COMPILER, SHARDS)
         reject(lambda: receipts(shard_paths[:-1], names, REVISION, RUN_ID, COMPILER, SHARDS), "missing shard")
         reject(lambda: receipts(shard_paths[:-1] + [shard_paths[0]], names, REVISION, RUN_ID, COMPILER, SHARDS), "duplicate shard")
@@ -300,8 +341,6 @@ def fixture_checks(root):
         written = repo / "written.json"
         require(write_manifest(payload, REVISION, RUN_ID, "1", written) == files[".build/iyi.exe"], "writer disagrees with the compiler hash")
         manifest(written, payload, REVISION, RUN_ID, "1", files[".build/iyi.exe"])
-        calls = (repo / "calls").read_text(encoding="utf-8")
-        require("--emit-iyimod" in calls and "--use-iyimod" in calls and all(t in calls for t in TARGETS), "missing fake compiler calls")
         for failure in ("emit", "consume", "exit", "output"):
             (repo / "receipt").unlink(missing_ok=True)
             (repo / "calls").unlink(missing_ok=True)
@@ -332,7 +371,9 @@ def fixture_checks(root):
 
 
 FAKE_COMPILER = r'''#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FAKE_LOG"
+printf '%s' "$1" >> "$FAKE_LOG"
+printf '\t%s' "${@:2}" >> "$FAKE_LOG"
+printf '\n' >> "$FAKE_LOG"
 source="${@: -1}"
 case "$*" in *--emit-iyimod*) stage=emit;; *--use-iyimod*) stage=consume;; *) exit 22;; esac
 if [[ "${FAKE_FAILURE:-}" == "$stage" && "$source" == *std_alpha_exercise.iyi ]]; then exit 11; fi

@@ -142,6 +142,15 @@ def main():
     require(line_allowed(version, fixture) is not None, 'bootstrap fixture line rejected')
     require(line_allowed(version, 'bench/other.json') is None, 'bootstrap exception escaped fixture')
     require(line_allowed(f'          "{bootstrap}": "2.0.0"', fixture) is None, 'bootstrap version exception widened')
+    artifact = 'bench/std_artifact_schedule.py'
+    source_lines = (ROOT / artifact).read_text().splitlines()
+    command = next(line for line in source_lines if line.startswith('BUILD_RUN = '))
+    pin = next(line for line in source_lines if 'bootstrap toolchain' in line)
+    for line, changed in ((command, command.replace('Makefile.win', 'Makefile.other')),
+                          (pin, pin.replace('1.21.0', '2.0.0'))):
+        require(line_allowed(line, artifact) is not None, 'artifact bootstrap line rejected')
+        require(line_allowed(line, 'bench/other.py') is None, 'artifact bootstrap exception escaped its file')
+        require(line_allowed(changed, artifact) is None, 'artifact bootstrap exception widened')
     workflow = yaml.safe_load(WORKFLOW.read_text())
     bodies = check(workflow)
     print('retained collector gates:', ', '.join(GATES))

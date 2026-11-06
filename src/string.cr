@@ -3084,7 +3084,19 @@ class String
     # If the character size of both strings differs, they cannot be equal.
     # We need to exclude the case that @length of either string might not have
     # been calculated (indicated by `0`).
-    return false if @length != other.@length && @length != 0 && other.@length != 0
+    #
+    # iyi: each length is read once. `#size` fills a zero `@length` in, and
+    # the compiler's parse-ahead workers (SPEC.md IV.7b) count the characters
+    # of strings the walk is comparing: read twice, `other.@length` was 0 for
+    # the first test and the count for the second, and equal bytes compared
+    # unequal, `undefined macro method 'ArrayLiteral#includes?'` in 3 of
+    # 37,722 builds of Windows CI run 42087347632. `spec/std/string_spec.cr`'s
+    # thread refilling one string's count while the other compares it got 403
+    # to 1,430 unequal of 10,000,000 compares with both reads, in five runs
+    # of a build without `--release` (Linux, 12 vCPU VM).
+    length = @length
+    other_length = other.@length
+    return false if length != other_length && length != 0 && other_length != 0
 
     # All meta data matches up, so we need to compare byte-by-byte.
     to_unsafe.memcmp(other.to_unsafe, bytesize) == 0

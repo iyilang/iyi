@@ -1,5 +1,6 @@
 require "./spec_helper"
 require "../support/string"
+require "../support/thread"
 require "spec/helpers/iterate"
 require "spec/helpers/string"
 
@@ -638,6 +639,29 @@ describe "String" do
 
   it "compares strings: same size, different string" do
     "foo".should_not eq("bar")
+  end
+
+  # iyi: the compiler's parse-ahead workers count the characters of strings
+  # the walk compares (`#size` fills a zero `@length` in). `==` read the
+  # other string's `@length` twice, and 0 then the count made equal bytes
+  # compare unequal; here a thread empties and refills one string's count
+  # while this one compares it.
+  it "compares strings: same string while another thread counts its characters" do
+    literal = "includes?"
+    counted = String.new("includes?".to_slice)
+    header = counted.as(Int32*)
+    stop = Atomic(Bool).new(false)
+    thread = new_thread do
+      until stop.get(:relaxed)
+        header[2] = 0
+        counted.size
+      end
+    end
+    unequal = 0
+    10_000_000.times { unequal += 1 unless literal == counted }
+    stop.set(true, :relaxed)
+    thread.join
+    unequal.should eq(0)
   end
 
   it "interpolates string" do

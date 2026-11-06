@@ -10959,7 +10959,13 @@ workers. Four is where the stage stopped getting faster on Linux: none 0.128
 / 0.086, eight 0.084 / 0.087, while its processor time grew with every worker
 (0.13–0.14 s, 0.17–0.19, 0.19–0.22, 0.23–0.24). The walk still waits 12–20 ms
 at the start, for `prelude.iyi` and its first requires, when there is nothing
-else it could be doing.
+else it could be doing. The walk and a worker can hold the same string: a
+worker's string pool keeps the strings of files the walk has taken, and
+`String#size` fills a string's character count in on whichever thread first
+asks. The compiler's `String#==` reads each string's count once, so a count a
+worker fills in mid-compare cannot make equal names unequal; read twice, it
+did, and `"includes?"` failed to match itself in 3 of 37,722 builds on Windows
+CI (run 42087347632) and in builds on Linux.
 
 What the two did, as wall time of the whole build, best / median, five
 interleaved builds per row of cores.iyi and three of iyi-web's

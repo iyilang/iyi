@@ -666,6 +666,29 @@
 
 ### Fixed
 
+- **Equal strings no longer compare unequal while another thread counts
+  one's characters (SPEC.md IV.7b).** A compiler built without
+  `--release` stopped now and then at `undefined macro method
+  'ArrayLiteral#includes?'` in std's `primitives.iyi`: 3 of 37,722 builds
+  on Windows CI (run 42087347632, windows-2025), and on Linux an
+  aarch64-linux-gnu `--emit-iyimod` build of `std_benchmark_exercise` in
+  a soak and a native build of a pool program. The parse-ahead workers
+  keep the strings of the files the walk has taken in their string pools,
+  `String#size` fills a string's character count in on whichever thread
+  asks first, and the compiler's `String#==` read the other string's count
+  twice, so a worker filling it in between the two reads made
+  `"includes?"` unequal to the same nine bytes. A probe in the comparison
+  recorded that each of the three times: the count 9 on both sides, equal
+  bytes and an equal compare just after. `==` reads each count once now.
+  In the same run the arms where the walk parsed every file itself
+  (37,578 builds) or the workers parsed nothing (25,414) missed none.
+  `spec/std/string_spec.cr` compares a string while a thread empties and
+  refills its count: 403 to 1,430 unequal of 10,000,000 with the old `==`
+  in five runs, none now (Linux, 12 vCPU VM). Crystal 1.22.1's own `==`
+  missed 2 to 132 times in 10,000,000 built without `--release` and none
+  in five runs built with it (macOS 26.6, Apple M2 Pro, 10 cores, the
+  user's machine).
+
 - **A spawn that reaches module state through what std calls back stays
   in its unit (SPEC.md III.4.15).** The walk deciding whether a plain
   `g.spawn` may run in parallel stopped at std, and so at the program's

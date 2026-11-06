@@ -93,13 +93,48 @@ else
 fi
 
 echo
-echo "== twelve workers allocating flat out peak within four budgets"
+# One run's peak is a draw with a long tail: it is the largest epoch's,
+# and an epoch is as large as its collection is slow. Single runs went
+# past the bound of four budgets, 192 MiB, at every commit from ad0712a65
+# to 12f085712, and none of them moved the distribution: held to 4 of
+# Windows 11's 12 logical processors (the user's machine), the runtimes
+# of ad0712a65, a43f52139 (8b482f97e's too) and 12f085712 (ea40ef2c8's
+# and dcd048158's too) under one compiler peaked at 124 to 236 MiB,
+# medians 161 to 166, past the bound in 2 to 4 runs of 30 each, and with
+# every thread's raise put back by itself at 129 to 209, 3 of 45; on
+# macOS 26.6, an M2 Pro with 10 cores (the user's machine), ad0712a65,
+# a43f52139, 8b482f97e, ea40ef2c8 and 12f085712 each built as itself
+# peaked at 147 to 206 MiB, medians 171 to 175, past it in 17 runs of
+# 400, and a byte-for-byte copy of 12f085712's program in 2 of 50 against
+# its own 3 of 50; on Linux (12 vCPU held to 4) the three runtimes at 157
+# to 200, past it in 0 to 2 runs of 40 each. CI's single runs since
+# ad0712a65 - 137, 141, 181 and 201 MiB on Windows' four-processor
+# runners, 168, 168 and 193 on darwin's three-core ones - are draws from
+# the same. The bound's own evidence was 3 to 5 runs a machine
+# (bench/working_set.iyi), and the step takes the best of three runs, as
+# the proof below gives its copy three: a run within the bound passes
+# it, and a run that fails anything else fails it at once.
+echo "== twelve workers allocating flat out peak within four budgets, the best of three runs"
 if ! "$IYI" build --release -o "$WORK/working" "$REPO/bench/working_set.iyi" >"$WORK/working.build.log" 2>&1; then
   echo "  the working-set program did not build"; sed -n '1,12p' "$WORK/working.build.log"; status=1
-elif ! "$WORK/working" >"$WORK/working.out" 2>&1 || ! grep -q "^working set:" "$WORK/working.out"; then
-  echo "  the working-set program failed:"; sed 's/^/  /' "$WORK/working.out"; status=1
 else
-  sed 's/^/  /' "$WORK/working.out"
+  held=""
+  for run in 1 2 3; do
+    "$WORK/working" >"$WORK/working.out" 2>&1
+    code=$?
+    if [ "$code" -eq 0 ] && grep -q "^working set:" "$WORK/working.out"; then
+      held="$run"; break
+    fi
+    if ! grep -q "^FAIL: working set: .* past four budgets" "$WORK/working.out"; then
+      echo "  the working-set program failed run $run (exit $code):"; sed 's/^/  /' "$WORK/working.out"; held="failed"; status=1; break
+    fi
+    echo "  run $run: $(grep -m1 '^FAIL: working set:' "$WORK/working.out")"
+  done
+  if [ -z "$held" ]; then
+    echo "  the working-set program went past the bound in all three runs"; status=1
+  elif [ "$held" != failed ]; then
+    echo "  run $held: $(grep -m1 '^working set:' "$WORK/working.out")"
+  fi
 fi
 
 echo
@@ -269,11 +304,16 @@ prove_fails "debt never assisted" noassist "debt:" \
 # The collection's ceiling removed: a slice that finds a collection under
 # way past the budget allocates on, as every slice did, and twelve
 # workers peak past four budgets. Built for release as the step above
-# runs it, and given three runs, since the peak is the largest epoch's
-# and an epoch is as large as its collection is slow - on Windows 11, 12
-# logical processors (the user's machine), the runtime without the
-# ceiling peaked at 231 to 248 MiB in 5 runs on a 52 MiB budget, past
-# four of them; the bound is four of the twelve workers' 48 MiB floor.
+# runs it, and run three times, as the step above takes the best of
+# three: it is caught when all three go past the bound. Without the
+# ceiling, on Windows 11, 12 logical processors (the user's machine), the
+# runtime peaked at 217 to 285 MiB in 15 runs (601 to 873 held to 4
+# processors, where the runtime as it is peaked at 135 to 209, and 148 to
+# 164 on all 12); on macOS 26.6, an M2 Pro with 10 cores (the user's
+# machine), 420 to 569 in 15; on Linux (12 vCPU) 406 to 685 in 10, and
+# 437 to 627 held to 4. Before the ceiling went in it peaked at 231 to
+# 248 in 5 runs on that Windows machine on a 52 MiB budget; the bound is
+# four of the twelve workers' 48 MiB floor.
 mkdir -p "$WORK/noceiling/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/noceiling/iyi/"
 if ! awk '{ if ($0 ~ /^ *hold if total >= ceiling$/) { print "# removed"; removed++; next } print } END { if (removed != 2) exit 3 }' \
@@ -283,18 +323,21 @@ elif ! IYI_PATH="$WORK/noceiling${PSEP}$REPO/src" "$IYI" build --release \
        -o "$WORK/noceiling/program" "$REPO/bench/working_set.iyi" >"$WORK/noceiling/build.log" 2>&1; then
   echo "  the ceiling never holds: the patched prelude did not build"; sed -n '1,12p' "$WORK/noceiling/build.log"; status=1
 else
-  caught=""
+  peaks=""
+  held=""
   for run in 1 2 3; do
     "$WORK/noceiling/program" >"$WORK/noceiling/out" 2>&1
-    if [ $? -ne 0 ] && grep -q "^FAIL: working set:" "$WORK/noceiling/out"; then
-      caught="$run"; break
+    if [ $? -ne 0 ] && grep -q "^FAIL: working set: .* past four budgets" "$WORK/noceiling/out"; then
+      peaks="$peaks $(sed -n 's/^FAIL: working set: [0-9]* workers peaked at \([0-9]*\) MiB.*/\1/p' "$WORK/noceiling/out")"
+    else
+      held="$run"; break
     fi
   done
-  if [ -z "$caught" ]; then
-    echo "  the ceiling never holds: three runs stayed within the bound, so it does not test this"
+  if [ -n "$held" ]; then
+    echo "  the ceiling never holds: run $held did not go past the bound, so the best of three does not test this"
     sed -n '$p' "$WORK/noceiling/out"; status=1
   else
-    printf '  the ceiling never holds: run %s exits 1 at "%s"\n' "$caught" "$(grep -m1 '^FAIL: working set:' "$WORK/noceiling/out")"
+    printf '  the ceiling never holds: all three runs exit 1, peaking at%s MiB, the last at "%s"\n' "$(printf '%s' "$peaks" | sed 's/ \([0-9]*\)/ \1,/g; s/,$//')" "$(grep -m1 '^FAIL: working set:' "$WORK/noceiling/out")"
   fi
 fi
 

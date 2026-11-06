@@ -25,8 +25,9 @@
 # `WORKERS ROUNDS` runs another shape; the bound is the same. Every
 # answer is checked too, as alloc_scaling checks it.
 #
-# bench/collect_trigger.sh runs it, and a copy of the runtime with the
-# ceiling removed, which it catches.
+# bench/collect_trigger.sh runs it, the best of three runs, and a copy of
+# the runtime with the ceiling removed, which goes past the bound in all
+# three.
 
 module bench/working_set
 

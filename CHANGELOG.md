@@ -456,6 +456,19 @@
   well it failed 10 of 10 there and 20 of 20 on Linux (debug run
   41812323963).
 
+- **collect_trigger.sh's working set is the best of three runs.**
+  Twelve workers' peak resident set is held to four budgets of 48 MiB,
+  and single runs went past that at every commit from ad0712a65 on, none
+  of them moving the distribution: held to 4 of Windows 11's 12 logical
+  processors (the user's machine) 124 to 236 MiB, past it in 2 to 4 runs
+  of 30 a runtime; on macOS 26.6, an M2 Pro with 10 cores (the user's
+  machine), 147 to 206, past it in 17 runs of 400 over five commits; on
+  Linux held to 4, in 0 to 2 of 40. CI read 201 on Windows and 193 on
+  darwin (run 42279517248). A run within the bound passes the step, and
+  the copy without the ceiling must go past it in all three of its runs:
+  217 to 873 MiB on the Windows machine, 420 to 569 on the M2, 406 to
+  685 on Linux.
+
 - **std_mutex's starving waiter asks five times, each against a holder
   retaking the lock.** Asked five times in a row, the copy that never
   starves still passed 2 of 40 runs on windows-2025: a waiter that had

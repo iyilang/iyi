@@ -666,6 +666,27 @@
 
 ### Fixed
 
+- **One spawn starts one worker, also when it lands as that worker
+  first goes idle (SPEC.md III.4.15, part 6).** A worker the pool starts
+  holds the token of the one worker out looking, so that the spawns
+  behind it start no other, and it gave the token back before it counted
+  itself idle: a spawn landing between its empty look and its count found
+  no worker idle and the token free, and started a second worker for one
+  task. `bench/spawn_eligible.sh`'s `grows` failed so on a darwin CI
+  runner (run 42187717533), and in 17 of 8,000 runs on Linux (12 vCPU,
+  shared); none of 8,000 on macOS 26.6, an M2 Pro with 10 cores, or of
+  2,000 on Windows 11, 12 logical processors (the user's machines). A
+  worker now counts itself idle, then gives the token back and looks once
+  more, as Go's `findRunnable` drops `nmspinning` only after `pidleput`,
+  and one that finds work there takes a token again so that it calls the
+  next: none of 6,000 Linux runs failed, interleaved with 6,000 of the old
+  runtime that failed 11 times, and none of 6,000 on the M2 or 1,000 on
+  Windows. The step now also holds that window open in a copy of the
+  runtime - the main thread waits 50 ms after the pool's start, the first
+  worker's first empty look 200 ms before its count - where one spawn
+  starts one worker, and the same copy with the token given back first
+  started a second in 20 runs of 20 on each of the three machines.
+
 - **Equal strings no longer compare unequal while another thread counts
   one's characters (SPEC.md IV.7b).** A compiler built without
   `--release` stopped now and then at `undefined macro method
@@ -27274,7 +27295,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,412-line library and nothing else. Every other
+  written against iyi's own 28,442-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

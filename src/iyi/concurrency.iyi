@@ -2370,6 +2370,23 @@ class IyiScheduler
   # push, and this one reads the queues after its count, so one of the
   # two sees the other (`IyiWorkers.wake_one`). A deadlock it finds is
   # rung to a thread outside the pool to name.
+  #
+  # A worker out looking gives its token back here, after its count and
+  # before that last look, as Go's `findRunnable` drops `nmspinning` only
+  # after `pidleput` and then looks again. A push puts its task down
+  # before it reads the count and the token, and calls nobody when it
+  # finds the token taken, so whoever holds the token must look after
+  # it: a worker before its look finds the task and calls the next
+  # (`IyiWorkers.stop_spinning`), and one between an empty look and its
+  # count still holds the token, gives it back only after the count, and
+  # finds the task in the look after that. And a push that finds none
+  # idle and the token free starts a worker (`IyiWorkers.grow`), so none
+  # may stand between its empty look and its count with the token given
+  # back: given back first, the one spawn of `bench/spawn_eligible.sh`'s
+  # `grows`, landing there on a darwin CI runner (run 42187717533),
+  # started a second worker for its one task. A worker whose last look
+  # finds work takes a token again (`IyiWorkers.spin_again`), so that its
+  # find calls the next: the pushes that saw it holding one called nobody.
   def self.idle_worker(st : IyiSchedulerState) : Nil
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       ensure_doorbell(st)
@@ -2387,9 +2404,12 @@ class IyiScheduler
       st.handoff_backoff = 0_u64
       st.quiet = quiet
       IyiWorkers.count_idle(1_i64)
+      looking = st.spinning
+      IyiWorkers.stop_spinning(st, false)
       if IyiWorkers.work_waiting?
         st.idle = false
         IyiWorkers.count_idle(-1_i64)
+        IyiWorkers.spin_again(st) if looking
         IyiSchedLock.unlock
         return
       end
@@ -5309,7 +5329,8 @@ class IyiWorkers
       @@listed = Pointer(UInt64).malloc(workers.to_u64)
       # The first worker comes up looking, as every worker `grow` starts
       # does: the pushes behind the first start no other until it finds
-      # a task and calls for the next (`stop_spinning`).
+      # a task and calls for the next (`stop_spinning`), or has counted
+      # itself idle (`IyiScheduler.idle_worker`).
       word(pointerof(@@launched)).value.set(1_i64)
       word(pointerof(@@spinning)).value.add(1_i64)
       IyiSchedLock.unlock
@@ -5361,7 +5382,8 @@ class IyiWorkers
       IyiSchedLock.lock
       st.worker = true
       # Started holding the one token of a worker out looking (`start`,
-      # `grow`), which its first look gives back.
+      # `grow`), which it gives back when a look finds a task, or once it
+      # has counted itself idle (`IyiScheduler.idle_worker`).
       st.spinning = true
       listed = @@workers
       listed << st if listed.is_a?(Array(IyiSchedulerState))
@@ -5380,7 +5402,6 @@ class IyiWorkers
           root.state = IyiFiberState::Pooled
           IyiScheduler.switch_to(fiber)
         else
-          stop_spinning(st, false)
           IyiScheduler.release_unit(st)
           IyiScheduler.idle_worker(st)
         end
@@ -5795,8 +5816,9 @@ class IyiWorkers
   # one (`start`) and grows towards `count` only while every worker it has
   # is busy, as Go starts an M from `wakep` when no idle one is parked.
   # One at a time: the new worker holds the token of the one worker out
-  # looking until its first look, so a burst of pushes starts one, and
-  # that one, finding a task, calls for the next (`stop_spinning`).
+  # looking until its look finds a task or it has counted itself idle, so
+  # a burst of pushes starts one, and that one, finding a task, calls for
+  # the next (`stop_spinning`).
   #
   # `IyiThread.start` takes the scheduler's lock and the runtime's, and
   # allocates, so a thread holding either, or the monitor's, which is no
@@ -5853,6 +5875,14 @@ class IyiWorkers
     st.spinning = false
     word(pointerof(@@spinning)).value.sub(1_i64)
     wake_one if found && work_waiting?
+  end
+
+  # A worker that gave its token back as it went idle, and found work on
+  # the look after (`IyiScheduler.idle_worker`), out looking again, as Go's
+  # `becomeSpinning` after `findRunnable`'s second look. Lock held.
+  def self.spin_again(st : IyiSchedulerState) : Nil
+    st.spinning = true
+    word(pointerof(@@spinning)).value.add(1_i64)
   end
 
   # ── Preemption at loop back-edges (SPEC.md III.4.13, part 9) ─────────

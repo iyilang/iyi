@@ -17,7 +17,9 @@
 #      the main thread and no pool starts, while `spawn(parallel: true)`
 #      tasks run on the pool's worker. On a pool of four, in a process of
 #      its own, one spawn starts one worker, spawns joined one at a time at
-#      most three, and four tasks running at one instant all four.
+#      most three, and four tasks running at one instant all four; one
+#      spawn still starts one worker when it lands, every time, between
+#      the worker's first empty look and its idle count.
 #   2. The explanation: `--explain-spawn` notes each spawn, naming the
 #      capture that kept one in its unit - a captured `Array`, a local
 #      assigned in the loop that spawns, a constant reached through a call
@@ -58,17 +60,18 @@
 #      ineligible one sent to the pool, `serial: true` sent to the pool,
 #      `parallel: true` left in the unit, `spawn_parallel` kept as an
 #      alias, a pool of one that starts for eligible spawns anyway, a pool
-#      that starts every worker at once, and one that never starts a
-#      second. Of the compiler, through `IYI_SPAWN_BROKEN`: no module named
-#      in a reason, no note from `iyi check` unasked, no line for a moved
-#      spawn, `spawn_parallel` answered as any undefined method, an
-#      artifact written without what its functions reach (whose consumer
-#      must keep every spawn calling into it in its unit, naming the
-#      module), a function read from an artifact taken to reach nothing,
-#      and an artifact that takes every proven claim to hold for every
-#      importer; a walk that stops at std (`callbacks`), and an artifact
-#      whose own spawns stand on a claim proven for its producer alone
-#      (`claimed`).
+#      that starts every worker at once, one that never starts a second,
+#      and a worker that gives back the token of the one out looking
+#      before it counts itself idle. Of the compiler, through
+#      `IYI_SPAWN_BROKEN`: no module named in a reason, no note from `iyi
+#      check` unasked, no line for a moved spawn, `spawn_parallel`
+#      answered as any undefined method, an artifact written without what
+#      its functions reach (whose consumer must keep every spawn calling
+#      into it in its unit, naming the module), a function read from an
+#      artifact taken to reach nothing, and an artifact that takes every
+#      proven claim to hold for every importer; a walk that stops at std
+#      (`callbacks`), and an artifact whose own spawns stand on a claim
+#      proven for its producer alone (`claimed`).
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -698,6 +701,70 @@ caught wholepool 'grows: one eligible spawn started 4 of' grows --workers=4
 step "failure proof: a pool that never starts a second worker"
 broken nevergrows '/^  def self.grow : Nil$/ { print; print "    return"; next } { print }'
 caught nevergrows 'grows: 4 eligible spawns running at one instant started 1 of' grows --workers=4
+
+# A worker the pool starts holds the token of the one out looking until
+# its look finds a task or it has counted itself idle
+# (`IyiScheduler.idle_worker`), so a push between its empty look and its
+# count finds the token taken and starts nobody, and the look after the
+# count finds the task. The token went back before the count, and
+# `grows`'s one spawn, landing there, found none idle and the token free
+# and started a second worker: on a darwin CI runner (run 42187717533),
+# in 17 of 8,000 runs on Linux (12 vCPU, shared), and in none of 8,000 on
+# macOS 26.6, Apple M2 Pro, 10 cores, or 2,000 on Windows 11, 12 logical
+# processors (the user's machines). No count of runs proves that, so the
+# window is held open: the main thread waits 50 ms after the pool's start
+# before its push, and the first worker's first empty look waits 200 ms
+# before it counts itself idle. Held open in every worker's first look,
+# the wait also let `grows`'s four tasks all arrive on fewer workers, time
+# sliced, and its last check failed one run of 20 on the Windows machine
+# with the token held through the wait. Given back first, the copy below
+# started a second worker in 20 runs of 20 on each of the three machines,
+# owing the start each time; with the same waits before the token went
+# back, 20 of 20 held on each.
+step "a spawn landing between a worker's empty look and its idle count starts no second worker"
+mkdir -p widened/iyi
+cp "$REPO"/src/iyi/*.iyi widened/iyi/
+awk '/^  def self\.work : Nil$/ { inwork = 1 }
+  inwork && /^      while true$/ { print "      widened = slot != 0_i64"; inwork = 0; a = 1 }
+  /^          IyiScheduler\.idle_worker\(st\)$/ {
+    print "          unless widened"
+    print "            widened = true"
+    print "            until_ns = __iyi_monotonic_ns + 200_000_000_i64"
+    print "            while __iyi_monotonic_ns < until_ns"
+    print "              IyiThread.spin_pause"
+    print "            end"
+    print "          end"
+    b = 1 }
+  /^      start_monitor$/ { print
+    print "      until_ns = __iyi_monotonic_ns + 50_000_000_i64"
+    print "      while __iyi_monotonic_ns < until_ns"
+    print "        IyiThread.spin_pause"
+    print "      end"
+    c = 1; next }
+  { print } END { if (!a || !b || !c) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > widened/iyi/concurrency.iyi ||
+  { echo "the worker's look and the pool's start this step holds open are not in the runtime any more"; exit 1; }
+if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o widened-run > build-widened.log 2>&1; then
+  echo "the widened copy failed to build:"; tail -20 build-widened.log; exit 1
+fi
+for run in 1 2 3; do
+  timeout -k 5 120 ./widened-run grows --workers=4 > widened.txt 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' widened.txt; then
+    echo "  run $run of 3 with the look held open failed (exit $code):"; cat widened.txt; exit 1
+  fi
+done
+echo "  three runs with the look held open: $(grep -m1 '^grows: one' widened.txt | sed 's/,.*//')"
+
+step "failure proof: the token given back before the idle count"
+mkdir -p early/iyi
+cp "$REPO"/src/iyi/*.iyi early/iyi/
+awk '/^          IyiScheduler\.release_unit\(st\)$/ { print "          stop_spinning(st, false)"; found = 1 }
+  { print } END { if (!found) exit 3 }' widened/iyi/concurrency.iyi > early/iyi/concurrency.iyi ||
+  { echo "the worker's way to idle this proof reorders is not in the runtime any more"; exit 1; }
+if ! IYI_PATH="$WORK/early${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o early-run > build-early.log 2>&1; then
+  echo "the broken copy early failed to build:"; tail -20 build-early.log; exit 1
+fi
+caught early 'grows: one eligible spawn started 2 of' grows --workers=4
 
 step "failure proof: spawn_parallel kept as an alias"
 mkdir -p alias/iyi

@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 28,412 lines, of which 4,650 are the library held to the 4,650 ceiling (6,906 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 28,442 lines, of which 4,650 are the library held to the 4,650 ceiling (6,906 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 136,286 lines, none of it written in iyi |
 | artifact format | `.iyimod` v60, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 28,412 lines
+> "No standard library worth the name" is still true of iyi's own 28,442 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 28,412 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 28,442 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1031,7 +1031,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 136,286 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,412-line own prelude + 126,311 in std |
+| Library | 8,161 lines (3,551 of it core) | 28,442-line own prelude + 126,311 in std |
 | Specs | 21,146 lines | 16,647 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -5284,12 +5284,19 @@ It starts with one worker, and starts another only when a task is waiting
 and no worker is idle to take it (`IyiWorkers.grow`), up to the count, as Go
 starts a thread from `wakep` when no idle one is parked. One is on its way
 at a time: a new worker holds the token of the one worker out looking until
-its first look, so a burst of spawns starts one, and that one, finding a
-task with more waiting, starts the next. `IyiThread.start` takes the
-scheduler's lock and allocates, so a thread holding that lock, or the
-monitor's own thread, owes the start instead, and the next worker to look,
-task to give its worker up at a back-edge, or spawn to let the lock go pays
-it.
+its look finds a task or it has counted itself idle, so a burst of spawns
+starts one, and that one, finding a task with more waiting, starts the
+next. The token goes back after the idle count and before one more look,
+as Go's `findRunnable` drops `nmspinning` only after `pidleput`: a spawn
+between the empty look and the count finds the token taken and starts
+nobody, and the look after the count finds its task; a worker that finds
+one there takes a token again, so that it calls the next. Given back before
+the count, as it first was, the token was free while the worker was not yet
+idle, and that spawn started a second worker for one task.
+`IyiThread.start` takes the scheduler's lock and allocates, so a thread
+holding that lock, or the monitor's own thread, owes the start instead, and
+the next worker to look, task to give its worker up at a back-edge, or spawn
+to let the lock go pays it.
 `IyiWorkers.launched` reads how many have started.
 
 Started whole, the pool cost a small program a thread a worker. On the
@@ -5308,9 +5315,11 @@ either way, the best of two runs of best of five: 95 and 96 ms on one
 worker, 48 and 48 on two, 24 and 24 on four, 13 and 13 on eight, 10 and 10
 on twelve.
 `bench/spawn_eligible.sh` holds it on a pool of four: one spawn starts one
-worker, 200 spawns made and joined one at a time at most three, and four
-tasks running at one instant all four; a pool that starts every worker at
-once, and one that never starts a second, are each caught.
+worker, also when it lands, every time, between the worker's first empty
+look and its idle count; 200 spawns made and joined one at a time start at
+most three, and four tasks running at one instant all four. A pool that
+starts every worker at once, one that never starts a second, and a worker
+that gives the token back before its idle count are each caught.
 
 **7. With the rest of III.4.** An eligible task is a task of its group
 like any other: joined at the scope's end, cancelled with it, its failure
@@ -12785,7 +12794,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 28,412-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 28,442-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

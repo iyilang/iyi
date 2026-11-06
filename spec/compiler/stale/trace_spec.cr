@@ -37,11 +37,18 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
   )
 
   it "maps paths to logical roots correctly" do
-    roots.map("/workspace/project/src/main.iyi").should eq(Iyi::Stale::RootPath.new("src", "src/main.iyi"))
-    roots.map("/opt/iyi/share/iyi/src/iyi/prelude.iyi").should eq(Iyi::Stale::RootPath.new("toolchain", "iyi/prelude.iyi"))
-    roots.map("/cache/mod/foo-1.0/lib.iyi").should eq(Iyi::Stale::RootPath.new("pkg", "foo-1.0/lib.iyi"))
-    roots.map("/tmp/scratch-123/temp_out.txt").should eq(Iyi::Stale::RootPath.new("scratch", "temp_out.txt"))
-    roots.map("/etc/passwd").should eq(Iyi::Stale::RootPath.new("abs", Iyi::Stale::Roots.real("/etc/passwd")))
+    base = File.join(Dir.tempdir, "iyi-trace-roots")
+    src = File.join(base, "project")
+    toolchain = File.join(base, "toolchain")
+    pkg = File.join(base, "pkg")
+    scratch = File.join(base, "scratch")
+    native_roots = Iyi::Stale::Roots.new(src: src, toolchain: toolchain, pkg: pkg, scratch: scratch)
+    native_roots.map(File.join(src, "src", "main.iyi")).should eq(Iyi::Stale::RootPath.new("src", "src/main.iyi"))
+    native_roots.map(File.join(toolchain, "iyi", "prelude.iyi")).should eq(Iyi::Stale::RootPath.new("toolchain", "iyi/prelude.iyi"))
+    native_roots.map(File.join(pkg, "foo-1.0", "lib.iyi")).should eq(Iyi::Stale::RootPath.new("pkg", "foo-1.0/lib.iyi"))
+    native_roots.map(File.join(scratch, "temp_out.txt")).should eq(Iyi::Stale::RootPath.new("scratch", "temp_out.txt"))
+    outside = File.join(base, "outside")
+    native_roots.map(outside).should eq(Iyi::Stale::RootPath.new("abs", Iyi::Stale::Roots.real(outside)))
   end
 
   it "maps lookup names under a Unicode root without losing bytes" do
@@ -395,7 +402,7 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
       dir_link = File.join(dir, "dir-link")
       File.symlink(old_file, file_link)
       File.symlink(File.join(dir, "old"), dir_link)
-      roots = Iyi::Stale::Roots.new(src: dir, toolchain: "", pkg: "", scratch: "")
+      binding_roots = Iyi::Stale::Roots.new(src: dir, toolchain: "", pkg: "", scratch: "")
       keyer = Iyi::Stale::Keyer.portable
       info = File.info(old_file)
 
@@ -412,10 +419,10 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
         p.write_bytes(info.modification_time.to_unix_ns.to_i64, IO::ByteFormat::LittleEndian)
       end)
       file_trace.write(TraceSpecHelpers.encode_end(0))
-      file_result = Iyi::Stale::Trace.parse(file_trace.rewind, roots, keyer)
+      file_result = Iyi::Stale::Trace.parse(file_trace.rewind, binding_roots, keyer)
       file_result.complete.should be_true
       file_result.a3_mismatches.should be_empty
-      Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should be_nil
+      Iyi::Stale::Trace.replay(file_result.observations, keyer, binding_roots).should be_nil
 
       # A same-size file with a different observed timestamp fails the A3
       # post-exit guard even if its bytes still match.
@@ -432,7 +439,7 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
         p.write_bytes(info.modification_time.to_unix_ns.to_i64 - 1, IO::ByteFormat::LittleEndian)
       end)
       stale_meta.write(TraceSpecHelpers.encode_end(0))
-      Iyi::Stale::Trace.parse(stale_meta.rewind, roots, keyer).a3_mismatches.should_not be_empty
+      Iyi::Stale::Trace.parse(stale_meta.rewind, binding_roots, keyer).a3_mismatches.should_not be_empty
 
       dir_trace = IO::Memory.new
       dir_trace.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_DIR, 0_u64) do |p|
@@ -443,23 +450,23 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
         TraceSpecHelpers.write_str(p, "input")
       end)
       dir_trace.write(TraceSpecHelpers.encode_end(0))
-      dir_result = Iyi::Stale::Trace.parse(dir_trace.rewind, roots, keyer)
+      dir_result = Iyi::Stale::Trace.parse(dir_trace.rewind, binding_roots, keyer)
       dir_result.complete.should be_true
-      Iyi::Stale::Trace.replay(dir_result.observations, keyer, roots).should be_nil
+      Iyi::Stale::Trace.replay(dir_result.observations, keyer, binding_roots).should be_nil
 
       File.delete(file_link)
       File.symlink(new_file, file_link)
-      Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should_not be_nil
+      Iyi::Stale::Trace.replay(file_result.observations, keyer, binding_roots).should_not be_nil
       File.delete(dir_link)
       File.symlink(File.join(dir, "new"), dir_link)
-      Iyi::Stale::Trace.replay(dir_result.observations, keyer, roots).should_not be_nil
+      Iyi::Stale::Trace.replay(dir_result.observations, keyer, binding_roots).should_not be_nil
       File.read(old_file).should eq("same")
       File.delete(file_link)
       File.symlink(old_file, file_link)
-      Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should be_nil
+      Iyi::Stale::Trace.replay(file_result.observations, keyer, binding_roots).should be_nil
       File.write(old_file, "else")
       File.utime(info.modification_time, info.modification_time, old_file)
-      Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should_not be_nil
+      Iyi::Stale::Trace.replay(file_result.observations, keyer, binding_roots).should_not be_nil
     ensure
       FileUtils.rm_r(dir) if dir && Dir.exists?(dir)
     end

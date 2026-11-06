@@ -68,6 +68,11 @@ module Iyi::DefinitionTyping
     "#{WITNESS_PREFIX}#{trait_type.to_s.gsub("::", "_")}"
   end
 
+  # A witness name inside a carried union or generic reference. Compiled once
+  # through Iyi::Rx, the compiler's own engine, so this file is not one of the
+  # reasons pcre2 stays on the link line (SPEC.md III.10).
+  WITNESS_NAME = Rx::Pattern.compile("#{WITNESS_PREFIX}[\\p{L}\\p{M}\\p{N}_]+")
+
   def self.append_probes(program : Program, node : ASTNode) : Nil
     return unless node.is_a?(Expressions)
     runner = Runner.new(program)
@@ -156,11 +161,10 @@ module Iyi::DefinitionTyping
     private def restore_artifact_witnesses : Nil
       wanted = Set(String).new
       @program.iyi_artifact_phantom_types.each { |name| wanted << name }
-      witness_name = Regex.new("#{Regex.escape(WITNESS_PREFIX)}[\\p{L}\\p{M}\\p{N}_]+")
       @program.iyi_artifact_refs.each do |ref|
         # Besides direct type ids, matches can carry witness names inside a
         # union or a generic. They must be restored before naming that match.
-        ref.name.scan(witness_name) { |match| wanted << match[0] }
+        Rx.scan(ref.name, WITNESS_NAME).each { |match| wanted << match[0].not_nil! }
       end
       return if wanted.empty?
       queue = [] of Type

@@ -44,6 +44,39 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
     roots.map("/etc/passwd").should eq(Iyi::Stale::RootPath.new("abs", Iyi::Stale::Roots.real("/etc/passwd")))
   end
 
+  it "maps lookup names under a Unicode root without losing bytes" do
+    root = File.join(Dir.tempdir, "iyi-é-root-#{Process.pid}")
+    Dir.mkdir_p(root)
+    unicode_roots = Iyi::Stale::Roots.new(src: root, toolchain: "", pkg: "", scratch: "")
+    base = Iyi::Stale::Roots.real(root)
+    unicode_roots.map_lookup(File.join(base, "child.txt")).should eq(Iyi::Stale::RootPath.new("src", "child.txt"))
+  ensure
+    Dir.delete(root) if root && Dir.exists?(root)
+  end
+
+  {% if flag?(:unix) %}
+    it "recognizes character devices in post-exit metadata" do
+      path = "/dev/null"
+      info = File.info(path)
+      trace = IO::Memory.new
+      trace.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_FILE, 0_u64) do |p|
+        p.write_byte(3_u8)
+        TraceSpecHelpers.write_str(p, path)
+        TraceSpecHelpers.write_str(p, path)
+        TraceSpecHelpers.write_str(p, "/")
+        p.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+        p.write_byte(1_u8)
+        p.write_byte(4_u8)
+        p.write_bytes(info.size.to_u64, IO::ByteFormat::LittleEndian)
+        p.write_bytes(info.modification_time.to_unix_ns.to_i64, IO::ByteFormat::LittleEndian)
+      end)
+      trace.write(TraceSpecHelpers.encode_end(0))
+      result = Iyi::Stale::Trace.parse(trace.rewind, roots, Iyi::Stale::Keyer.portable)
+      result.complete.should be_true
+      result.a3_mismatches.should be_empty
+    end
+  {% end %}
+
   it "parses a complete trace with all record types" do
     io = IO::Memory.new
 

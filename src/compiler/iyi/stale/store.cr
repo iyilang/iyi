@@ -291,6 +291,7 @@ module Iyi::Stale
               end
             rescue ex
               raise "cannot inspect receipt blocker #{fpath}: #{ex.message}"
+            end
           end
         end
       end
@@ -308,6 +309,7 @@ module Iyi::Stale
             end
           rescue ex
             raise "cannot inspect mask #{fpath}: #{ex.message}"
+          end
         end
       end
 

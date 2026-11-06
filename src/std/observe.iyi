@@ -725,7 +725,7 @@ pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : Strin
       link_dir = dirname_of(link)
       pointee = safe_real_path_relative_to(path, link_dir)
 
-      link_in_scratch = !link.empty? && is_under_scratch?(link)
+      link_in_scratch = !link.empty? && entry_under_scratch?(link)
       pointee_in_scratch = !pointee.empty? && is_under_scratch?(pointee)
 
       inside_scratch = (link_in_scratch && pointee_in_scratch) ? 1_u8 : 0_u8
@@ -753,8 +753,8 @@ pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : Strin
       source = safe_real_path_entry(path)
       dest = safe_real_path_entry(target)
 
-      source_in_scratch = !source.empty? && is_under_scratch?(source)
-      dest_in_scratch = !dest.empty? && is_under_scratch?(dest)
+      source_in_scratch = !source.empty? && entry_under_scratch?(source)
+      dest_in_scratch = !dest.empty? && entry_under_scratch?(dest)
 
       inside_scratch = (source_in_scratch && dest_in_scratch) ? 1_u8 : 0_u8
 
@@ -779,9 +779,9 @@ pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : Strin
       source_real = safe_real_path(path)
       dest_entry = safe_real_path_entry(target)
 
-      source_entry_in_scratch = !source_entry.empty? && is_under_scratch?(source_entry)
+      source_entry_in_scratch = !source_entry.empty? && entry_under_scratch?(source_entry)
       source_real_in_scratch = !source_real.empty? && is_under_scratch?(source_real)
-      dest_entry_in_scratch = !dest_entry.empty? && is_under_scratch?(dest_entry)
+      dest_entry_in_scratch = !dest_entry.empty? && entry_under_scratch?(dest_entry)
 
       inside_scratch = (source_entry_in_scratch && source_real_in_scratch && dest_entry_in_scratch) ? 1_u8 : 0_u8
 
@@ -1477,6 +1477,14 @@ end
     separators <= 1
   end
 {% end %}
+
+private def entry_under_scratch?(path : String) : ::Bool
+  {% if flag?(:win32) %}
+    is_under_scratch?(dirname_of(path))
+  {% else %}
+    is_under_scratch?(path)
+  {% end %}
+end
 
 private def is_under_scratch?(real : String) : ::Bool
   scratch = @@scratch

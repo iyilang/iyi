@@ -14,52 +14,45 @@ module Iyi::Stale
     record StatKey, path : String, dev : UInt64, ino : UInt64, size : Int64, mtime : Int64, ctime : Int64
 
     # Digest of compiler, LLVM and linker driver metadata, cached via C4 memo.
-    def self.digest(cache_root : String, executable_path : String? = nil) : Digest
+    def self.digest(cache_root : String, executable_path : String? = nil, linker_override : String? = nil) : Digest
       compiler_path = resolve_compiler_path(executable_path)
-      c_stat = file_stat_key(compiler_path)
-
       llvm_path, llvm_is_shared = resolve_llvm_lib(compiler_path)
-      l_stat = llvm_is_shared ? file_stat_key(llvm_path) : nil
+      linker_path = linker_override ? File.realpath(linker_override) : resolve_linker_path
 
-      linker_path = resolve_linker_path
-      k_stat = file_stat_key(linker_path)
-
-      memo_key = Stale.d("toolchain_memo") do |enc|
-        if c_stat
-          encode_stat(enc, c_stat)
-        else
-          enc.str(compiler_path)
-        end
-
-        if l_stat
-          encode_stat(enc, l_stat)
-        else
-          enc.str("static")
-        end
-
-        if k_stat
-          encode_stat(enc, k_stat)
-        else
-          enc.str(linker_path)
-        end
-      end
-
+      # Windows file metadata does not provide a usable memo identity. Hash the
+      # inputs on every check rather than trusting a path or synthetic ID.
       memo_dir = File.join(cache_root, "tests-v1", "toolchain")
-      memo_file = File.join(memo_dir, "#{Stale.hex(memo_key)}.json")
-
-      if File.file?(memo_file)
-        begin
-          content = File.read(memo_file)
-          if hex_val = extract_json_field(content, "toolchain")
-            return Stale.parse_hex(hex_val)
+      memo_file = nil
+      {% if flag?(:unix) %}
+        c_stat = file_stat_key(compiler_path)
+        l_stat = llvm_is_shared ? file_stat_key(llvm_path) : nil
+        k_stat = file_stat_key(linker_path)
+        if c_stat && k_stat && (!llvm_is_shared || l_stat)
+          memo_key = Stale.d("toolchain_memo") do |enc|
+            encode_stat(enc, c_stat)
+            if l_stat
+              encode_stat(enc, l_stat)
+            else
+              enc.str("static")
+            end
+            encode_stat(enc, k_stat)
           end
-        rescue
-          # Corrupt memo; fall through to recompute
+          memo_file = File.join(memo_dir, "#{Stale.hex(memo_key)}.json")
+          if File.file?(memo_file)
+            begin
+              content = File.read(memo_file)
+              if hex_val = extract_json_field(content, "toolchain")
+                return Stale.parse_hex(hex_val)
+              end
+            rescue
+              # Corrupt memo; fall through to recompute.
+            end
+          end
         end
-      end
+      {% end %}
 
       compiler_sha = file_sha256(compiler_path)
-      llvm_sha = (llvm_is_shared && File.file?(llvm_path)) ? file_sha256(llvm_path) : nil
+      llvm_sha = llvm_is_shared ? file_sha256(llvm_path) : nil
       linker_ver = linker_version_first_line(linker_path)
       linker_sha = file_sha256(linker_path)
 
@@ -91,26 +84,24 @@ module Iyi::Stale
         enc.digest(linker_sha)
       end
 
-      write_memo_atomic(memo_dir, memo_file, toolchain_digest, compiler_sha, llvm_path, llvm_sha, linker_path, linker_ver, linker_sha)
+      if memo_file
+        write_memo_atomic(memo_dir, memo_file, toolchain_digest, compiler_sha, llvm_path, llvm_sha, linker_path, linker_ver, linker_sha)
+      end
 
       toolchain_digest
     end
 
     def self.file_sha256(path : String) : Digest
       hasher = Crystal::Digest::SHA256.new
-      if File.file?(path)
-        File.open(path, "rb") do |f|
-          buffer = uninitialized UInt8[65536]
-          while (bytes_read = f.read(buffer.to_slice)) > 0
-            hasher.update(buffer.to_slice[0, bytes_read])
-          end
+      File.open(path, "rb") do |f|
+        buffer = uninitialized UInt8[65536]
+        while (bytes_read = f.read(buffer.to_slice)) > 0
+          hasher.update(buffer.to_slice[0, bytes_read])
         end
       end
       res = uninitialized StaticArray(UInt8, 32)
       hasher.final(res.to_slice)
       res
-    rescue
-      StaticArray(UInt8, 32).new(0_u8)
     end
 
     private def self.resolve_compiler_path(executable_path : String?) : String
@@ -190,10 +181,7 @@ module Iyi::Stale
           nil
         end
       {% else %}
-        # Windows' LibC has no `_stat64` binding; File.info carries no device
-        # or inode there, so the key is size and time.
-        info = File.info(path)
-        StatKey.new(path, 0_u64, 0_u64, info.size, info.modification_time.to_unix, info.modification_time.to_unix)
+        nil
       {% end %}
     rescue
       nil

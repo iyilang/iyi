@@ -131,7 +131,7 @@ module Iyi::Stale
         return RootPath.new(name, "") if path == base
         separator = ::Path::SEPARATORS[0].to_s
         prefix = base.ends_with?(separator) ? base : base + separator
-        return RootPath.new(name, path[prefix.bytesize..]) if path.starts_with?(prefix)
+        return RootPath.new(name, path.byte_slice(prefix.bytesize, path.bytesize - prefix.bytesize)) if path.starts_with?(prefix)
       end
       RootPath.new("abs", path)
     end

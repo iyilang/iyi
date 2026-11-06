@@ -257,9 +257,12 @@ fi
 
 echo "== concurrent recorder: 8 raw threads race, deduplication, taints, and post-taint drop"
 RACE_SRC="$WORK/recorder_race.iyi"
+RACE_ROOT="$WORK/recorder_race"
+for thread in 0 1 2 3 4 5 6 7; do mkdir -p "$RACE_ROOT/$thread"; done
 cat << 'EOF' > "$RACE_SRC"
 module test/recorder_race
 import std/observe
+root = Program.args[0]
 
 ready = Atomic(Int32).new(0_i32)
 go = Atomic(Int32).new(0_i32)
@@ -274,7 +277,7 @@ threads = Array(IyiThread).new(8)
     end
 
     2000.times do |i|
-      path = "/iyi-recorder-race/#{t}/#{i}"
+      path = "#{root}/#{t}/#{i}"
       Std::Observe.file_write(1_u8, path)
       Std::Observe.file(1_u8, path)
       env_name = "IYI_RACE_#{t}_#{i}"
@@ -297,7 +300,7 @@ threads = Array(IyiThread).new(8)
 
     # After-taint envget + filewrite (must be dropped by recorder)
     Std::Observe.env_get("AFTER_TAINT_#{t}", "v")
-    Std::Observe.file_write(1_u8, "/iyi-recorder-race/after/#{t}")
+    Std::Observe.file_write(1_u8, "#{root}/AFTER_TAINT/#{t}")
     nil
   end
 end
@@ -399,7 +402,7 @@ EOF
 
 RACE_TRACE="$WORK/race_trace.bin"
 rm -f "$RACE_TRACE"
-IYI_OBSERVE="$RACE_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC"
+IYI_OBSERVE="$RACE_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC" -- "$RACE_ROOT"
 "$PY" "$WORK/validate_race_trace.py" "$RACE_TRACE"
 echo "  8-thread race verified: exact counts, written_first=1, 0 self-reads, taints 33/34 deduplicated, post-taints dropped, END last"
 
@@ -437,7 +440,7 @@ MUTATION_FAILED=0
 for attempt in 1 2 3 4 5; do
   MUT_RACE_TRACE="$WORK/mut_race_trace_$attempt.bin"
   rm -f "$MUT_RACE_TRACE"
-  if ! IYI_PATH="$MUT_NOLOCK_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_RACE_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC" >/dev/null 2>&1; then
+  if ! IYI_PATH="$MUT_NOLOCK_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_RACE_TRACE" "$IYI" run -Diyi_observe "$RACE_SRC" -- "$RACE_ROOT" >/dev/null 2>&1; then
     MUTATION_FAILED=1
     break
   fi
@@ -934,6 +937,38 @@ if existing != expected or missing != (0, 0, 0, 0):
     raise SystemExit(f"FAIL: Windows metadata existing={existing} expected={expected} missing={missing}")
 print("  existing file size and subsecond mtime, and absent entry, recorded")
 EOF
+  FAIL_SRC="$WORK/observe_worker_failure.iyi"
+  cat << 'EOF' > "$FAIL_SRC"
+module test/observe_worker_failure
+import std/observe
+path = Program.args[0]
+worker = IyiThread.start do
+  Std::Observe.file(3_u8, path)
+  nil
+end
+worker.join
+puts "child completed"
+EOF
+  FAIL_TRACE="$WORK/observe_worker_failure_trace"
+  FAIL_OUTPUT="$(IYI_OBSERVE="$FAIL_TRACE" TMPDIR="$SCRATCH_DIR" "$IYI" run -Diyi_observe "$FAIL_SRC" -- "$WORK/missing_parent/file")"
+  if [ "$FAIL_OUTPUT" != "child completed" ]; then
+    echo "FAIL: observer failure changed the child result"
+    exit 1
+  fi
+  "$PY" - "$FAIL_TRACE" << 'EOF'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+pos = 0
+while pos < len(data):
+    size, = struct.unpack_from("<I", data, pos)
+    record = data[pos + 4:pos + 4 + size]
+    if len(record) != size:
+        raise SystemExit("FAIL: truncated observation record")
+    if record[0] == 0x7f:
+        raise SystemExit("FAIL: worker observation failure produced END")
+    pos += 4 + size
+print("  unresolved worker observation left no END and did not alter the child result")
+EOF
 fi
 
 echo "== endpoint entry rule: behavioral fixtures (symlink, rename, hardlink)"
@@ -1032,6 +1067,16 @@ rm -f "$TRACE_A"
 TMPDIR="$SCRATCH_FIXTURE" IYI_OBSERVE="$TRACE_A" "$WORK/argv_op" symlink "$DATA_FIXTURE" "$LINK_A"
 "$PY" "$WORK/decode_07.py" "$TRACE_A" 6 0 "$ENTRY_A"
 echo "  case a passed: shared/link -> scratch/data => 6, 0, entry(shared/link)"
+
+# A link entry outside scratch is external even when it points at scratch itself.
+LINK_DIR="$SHARED_FIXTURE/link_to_scratch"
+rm -f "$LINK_DIR"
+ENTRY_DIR="$("$PY" "$WORK/entry.py" "$LINK_DIR")"
+TRACE_DIR="$WORK/trace_link_to_scratch.bin"
+rm -f "$TRACE_DIR"
+TMPDIR="$SCRATCH_FIXTURE" IYI_OBSERVE="$TRACE_DIR" "$WORK/argv_op" symlink "$SCRATCH_FIXTURE" "$LINK_DIR"
+"$PY" "$WORK/decode_07.py" "$TRACE_DIR" 6 0 "$ENTRY_DIR"
+echo "  shared link to scratch directory stays external"
 
 
 # b: scratch/l2 -> data => 6, 1

@@ -1,242 +1,175 @@
 require "crystal/digest/sha256"
-require "./encoding"
-require "../config"
-require "json"
 
 module Iyi::Stale
-  # Flipped to false when RG1 is green on master CI
-  EXECUTABLE_IN_TOOLCHAIN = true
+  alias Digest = StaticArray(UInt8, 32)
 
-  # Flipped to false when RG7 is green on master CI
-  THREADS_IN_BEHAVIOR = true
+  # D(tag, x) = SHA-256("iyi.stale.v1." + tag + "\0" + enc(x))
+  def self.d(tag : String, & : Encoder ->) : Digest
+    hasher = Crystal::Digest::SHA256.new
+    hasher.update("iyi.stale.v1.")
+    hasher.update(tag)
+    hasher.update(Slice[0_u8])
+    encoder = Encoder.new(hasher)
+    yield encoder
+    res = uninitialized StaticArray(UInt8, 32)
+    hasher.final(res.to_slice)
+    res
+  end
 
-  module Toolchain
-    record StatKey, path : String, dev : UInt64, ino : UInt64, size : Int64, mtime : Int64, ctime : Int64
+  class Encoder # streams into SHA-256; every value self-delimiting
+    getter encoded_bytes : Int64
 
-    # Digest of compiler, LLVM and linker driver metadata, cached via C4 memo.
-    def self.digest(cache_root : String, executable_path : String? = nil, linker_override : String? = nil) : Digest
-      compiler_path = resolve_compiler_path(executable_path)
-      llvm_path, llvm_is_shared = resolve_llvm_lib(compiler_path)
-      linker_path = linker_override ? File.realpath(linker_override) : resolve_linker_path
-
-      # Windows file metadata does not provide a usable memo identity. Hash the
-      # inputs on every check rather than trusting a path or synthetic ID.
-      memo_dir = File.join(cache_root, "tests-v1", "toolchain")
-      memo_file = nil
-      {% if flag?(:unix) %}
-        c_stat = file_stat_key(compiler_path)
-        l_stat = llvm_is_shared ? file_stat_key(llvm_path) : nil
-        k_stat = file_stat_key(linker_path)
-        if c_stat && k_stat && (!llvm_is_shared || l_stat)
-          memo_key = Stale.d("toolchain_memo") do |enc|
-            encode_stat(enc, c_stat)
-            if l_stat
-              encode_stat(enc, l_stat)
-            else
-              enc.str("static")
-            end
-            encode_stat(enc, k_stat)
-          end
-          memo_file = File.join(memo_dir, "#{Stale.hex(memo_key)}.json")
-          if File.file?(memo_file)
-            begin
-              content = File.read(memo_file)
-              if hex_val = extract_json_field(content, "toolchain")
-                return Stale.parse_hex(hex_val)
-              end
-            rescue
-              # Corrupt memo; fall through to recompute.
-            end
-          end
-        end
-      {% end %}
-
-      compiler_sha = file_sha256(compiler_path)
-      llvm_sha = llvm_is_shared ? file_sha256(llvm_path) : nil
-      linker_ver = linker_version_first_line(linker_path)
-      linker_sha = file_sha256(linker_path)
-
-      toolchain_digest = Stale.d("toolchain") do |enc|
-        if bi = Config.build_inputs
-          enc.str(bi)
-        else
-          enc.absent
-        end
-
-        enc.str(Config.iyi_version)
-        enc.str(Config.description)
-
-        if EXECUTABLE_IN_TOOLCHAIN
-          enc.digest(compiler_sha)
-        else
-          enc.absent
-        end
-
-        if llvm_is_shared && llvm_sha
-          enc.str(llvm_path)
-          enc.digest(llvm_sha)
-        else
-          enc.str("static")
-        end
-
-        enc.str(linker_path)
-        enc.str(linker_ver)
-        enc.digest(linker_sha)
-      end
-
-      if memo_file
-        write_memo_atomic(memo_dir, memo_file, toolchain_digest, compiler_sha, llvm_path, llvm_sha, linker_path, linker_ver, linker_sha)
-      end
-
-      toolchain_digest
+    def initialize(@hasher : Crystal::Digest::SHA256)
+      @encoded_bytes = 0_i64
     end
 
-    def self.file_sha256(path : String) : Digest
-      hasher = Crystal::Digest::SHA256.new
-      File.open(path, "rb") do |f|
-        buffer = uninitialized UInt8[65536]
-        while (bytes_read = f.read(buffer.to_slice)) > 0
-          hasher.update(buffer.to_slice[0, bytes_read])
-        end
-      end
-      res = uninitialized StaticArray(UInt8, 32)
-      hasher.final(res.to_slice)
-      res
+    def str(s : String) # 0x01 u64be(bytesize) utf8 bytes
+      write_prefix_and_u64(0x01_u8, s.bytesize.to_u64)
+      @hasher.update(s.to_slice)
+      @encoded_bytes += s.bytesize
     end
 
-    private def self.resolve_compiler_path(executable_path : String?) : String
-      if executable_path
-        return File.realpath(executable_path)
-      end
-      if p = Process.executable_path
-        return File.realpath(p)
-      end
-      if p = Config.exec_path
-        candidate = File.join(p, "iyi")
-        return File.realpath(candidate) if File.exists?(candidate)
-        candidate_exe = File.join(p, "iyi.exe")
-        return File.realpath(candidate_exe) if File.exists?(candidate_exe)
-      end
-      "iyi"
+    def bytes(b : Bytes) # 0x02 u64be(size) bytes
+      write_prefix_and_u64(0x02_u8, b.size.to_u64)
+      @hasher.update(b)
+      @encoded_bytes += b.size
     end
 
-    private def self.resolve_llvm_lib(compiler_path : String) : {String, Bool}
-      {% if flag?(:unix) %}
-        begin
-          fn = ->LibLLVM.create_context
-          if LibC.dladdr(fn.pointer, out info) != 0 && info.dli_fname
-            fname = String.new(info.dli_fname)
-            if !fname.empty? && File.exists?(fname)
-              real = File.realpath(fname)
-              if real != compiler_path
-                return {real, true}
-              end
-            end
-          end
-        rescue
-        end
-        {"static", false}
-      {% elsif flag?(:win32) %}
-        {"static", false}
-      {% else %}
-        {"static", false}
-      {% end %}
+    def int(i : Int64) # 0x03 8 bytes big-endian two's complement
+      write_prefix_and_u64(0x03_u8, i.to_u64!)
     end
 
-    private def self.resolve_linker_path : String
-      driver = {% if flag?(:win32) && !flag?(:gnu) %}
-                 Compiler::MSVC_LINKER
-               {% else %}
-                 Compiler::DEFAULT_LINKER
-               {% end %}
-      if path = Process.find_executable(driver)
-        return File.realpath(path)
-      end
-      driver
+    def uint(u : UInt64) # 0x04 8 bytes big-endian
+      write_prefix_and_u64(0x04_u8, u)
     end
 
-    private def self.linker_version_first_line(linker_path : String) : String
-      io = IO::Memory.new
-      status = Process.run(linker_path, ["--version"], output: io, error: io) rescue nil
-      if status && status.success?
-        io.to_s.lines.first?.try(&.strip) || ""
+    def bool(b : Bool) # 0x05 0x00 | 0x01
+      buf = uninitialized UInt8[2]
+      buf[0] = 0x05_u8
+      buf[1] = b ? 0x01_u8 : 0x00_u8
+      @hasher.update(buf.to_slice)
+      @encoded_bytes += 2
+    end
+
+    def absent # 0x06
+      @hasher.update(Slice[0x06_u8])
+      @encoded_bytes += 1
+    end
+
+    def digest(x : Digest) # 0x07 32 raw bytes
+      @hasher.update(Slice[0x07_u8])
+      @hasher.update(x.to_slice)
+      @encoded_bytes += 33
+    end
+
+    def list(n : Int, &) # 0x08 u64be(n), then the block writes n values
+      write_prefix_and_u64(0x08_u8, n.to_u64)
+      yield self
+    end
+
+    def list(n : Int) : Nil
+      write_prefix_and_u64(0x08_u8, n.to_u64)
+    end
+
+    def tag(name : String) # 0x09 u64be(bytesize) bytes (node and type class tags)
+      write_prefix_and_u64(0x09_u8, name.bytesize.to_u64)
+      @hasher.update(name.to_slice)
+      @encoded_bytes += name.bytesize
+    end
+
+    private def write_prefix_and_u64(prefix : UInt8, val : UInt64) : Nil
+      buf = uninitialized UInt8[9]
+      buf[0] = prefix
+      IO::ByteFormat::BigEndian.encode(val, buf.to_slice[1, 8])
+      @hasher.update(buf.to_slice)
+      @encoded_bytes += 9
+    end
+  end
+
+  def self.hmac(key : Bytes, data : Bytes) : Digest # RFC 2104, block 64
+    k_buf = StaticArray(UInt8, 64).new(0_u8)
+    if key.size > 64
+      hashed_key = Crystal::Digest::SHA256.digest(key)
+      k_buf.to_slice[0, 32].copy_from(hashed_key.to_slice)
+    else
+      k_buf.to_slice[0, key.size].copy_from(key)
+    end
+
+    k_ipad = uninitialized UInt8[64]
+    k_opad = uninitialized UInt8[64]
+    64.times do |i|
+      k_ipad[i] = k_buf[i] ^ 0x36_u8
+      k_opad[i] = k_buf[i] ^ 0x5c_u8
+    end
+
+    inner_hasher = Crystal::Digest::SHA256.new
+    inner_hasher.update(k_ipad.to_slice)
+    inner_hasher.update(data)
+    inner_digest = uninitialized UInt8[32]
+    inner_hasher.final(inner_digest.to_slice)
+
+    outer_hasher = Crystal::Digest::SHA256.new
+    outer_hasher.update(k_opad.to_slice)
+    outer_hasher.update(inner_digest.to_slice)
+    res = uninitialized StaticArray(UInt8, 32)
+    outer_hasher.final(res.to_slice)
+    res
+  end
+
+  struct Keyer # K()
+    @mode : String
+    @key : Bytes?
+
+    def self.local(key : Bytes) : Keyer
+      new("local", key.dup)
+    end
+
+    def self.portable : Keyer
+      new("portable", nil)
+    end
+
+    def initialize(@mode : String, @key : Bytes?)
+    end
+
+    def k(x : Digest) : Digest # HMAC(machine key, x) | x
+      if @mode == "local"
+        Iyi::Stale.hmac(@key.not_nil!, x.to_slice)
       else
-        ""
+        x
       end
     end
 
-    private def self.file_stat_key(path : String) : StatKey?
-      return nil unless File.exists?(path)
-      {% if flag?(:unix) %}
-        if LibC.stat(path, out stat) == 0
-          {% if flag?(:darwin) %}
-            mtime = stat.st_mtimespec.tv_sec.to_i64
-            ctime = stat.st_ctimespec.tv_sec.to_i64
-          {% else %}
-            mtime = stat.st_mtim.tv_sec.to_i64
-            ctime = stat.st_ctim.tv_sec.to_i64
-          {% end %}
-          StatKey.new(path, stat.st_dev.to_u64, stat.st_ino.to_u64, stat.st_size.to_i64, mtime, ctime)
-        else
-          nil
-        end
-      {% else %}
-        nil
-      {% end %}
-    rescue
-      nil
+    def mode : String # "local" | "portable"
+      @mode
     end
+  end
 
-    private def self.encode_stat(enc : Encoder, s : StatKey)
-      enc.str(s.path)
-      enc.uint(s.dev)
-      enc.uint(s.ino)
-      enc.int(s.size)
-      enc.int(s.mtime)
-      enc.int(s.ctime)
+  def self.hex(x : Digest) : String
+    x.to_slice.hexstring
+  end
+
+  def self.parse_hex(s : String) : Digest
+    raise ArgumentError.new("Expected 64 hex characters, got #{s.size}") unless s.size == 64
+    res = uninitialized StaticArray(UInt8, 32)
+    bytes = s.to_slice
+    32.times do |i|
+      hi = hex_char_to_val(bytes[i * 2])
+      lo = hex_char_to_val(bytes[i * 2 + 1])
+      res[i] = ((hi << 4) | lo).to_u8
     end
+    res
+  end
 
-    private def self.write_memo_atomic(memo_dir : String, memo_file : String, toolchain_digest : Digest,
-                                       compiler_sha : Digest, llvm_path : String, llvm_sha : Digest?,
-                                       linker_path : String, linker_ver : String, linker_sha : Digest)
-      Dir.mkdir_p(memo_dir)
-      tmp_file = "#{memo_file}.tmp.#{Process.pid}.#{Random.rand(100000)}"
-      json_str = String.build do |io|
-        io << "{\n"
-        io << "  \"toolchain\": \"" << Stale.hex(toolchain_digest) << "\",\n"
-        io << "  \"compiler_sha256\": \"" << Stale.hex(compiler_sha) << "\",\n"
-        io << "  \"llvm_path\": \"" << llvm_path << "\",\n"
-        if llvm_sha
-          io << "  \"llvm_sha256\": \"" << Stale.hex(llvm_sha) << "\",\n"
-        else
-          io << "  \"llvm_sha256\": null,\n"
-        end
-        io << "  \"linker_path\": \"" << linker_path << "\",\n"
-        io << "  \"linker_version\": \"" << linker_ver.gsub('"', "\\\"") << "\",\n"
-        io << "  \"linker_sha256\": \"" << Stale.hex(linker_sha) << "\"\n"
-        io << "}\n"
-      end
-
-      File.open(tmp_file, "w") do |f|
-        f.write(json_str.to_slice)
-        f.flush
-        {% if flag?(:unix) %}
-          f.fsync
-        {% end %}
-      end
-
-      File.rename(tmp_file, memo_file)
-    rescue
-      File.delete(tmp_file) if tmp_file rescue nil
-    end
-
-    # The memo is JSON this module wrote. Parsed as JSON rather than matched
-    # with a regex: a Regex links pcre2 into the compiler, which
-    # bench/dependency_floor.sh forbids.
-    private def self.extract_json_field(json : String, field : String) : String?
-      JSON.parse(json)[field]?.try(&.as_s?)
-    rescue JSON::ParseException
-      nil
+  private def self.hex_char_to_val(byte : UInt8) : UInt8
+    case byte
+    when 48_u8..57_u8 # '0'..'9'
+      byte - 48_u8
+    when 97_u8..102_u8 # 'a'..'f'
+      byte - 87_u8
+    when 65_u8..70_u8 # 'A'..'F'
+      byte - 55_u8
+    else
+      raise ArgumentError.new("Invalid hex character: #{byte.chr.inspect}")
     end
   end
 end

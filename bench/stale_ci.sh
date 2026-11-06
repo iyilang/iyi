@@ -911,7 +911,7 @@ def is_file_observation(obs):
     root = obs.get('root', '')
     if root in ('abs', 'host', 'scratch', 'env'):
         return False
-    return kind.startswith('file_') or kind == 'dir_list' or kind == 'file'
+    return kind.startswith('file_') or kind in ('dir_list', 'file', 'path_binding')
 
 def map_obs_to_repo_path(obs, test_entry, repo_root):
     obs_root = obs.get('root', '')
@@ -1348,6 +1348,20 @@ assert_negative('git-diff-check', ['--master-snapshot', snap_gd, '--cached-json'
 
 # Direction 2: Changed tracked input miss passes
 assert_positive('git-diff-check', ['--master-snapshot', snap_gd, '--cached-json', f_gd_miss, '--changed-files', diff_changed, '--repo', empty_repo])
+
+# A changed lookup binding is a changed input even if its old target is unchanged.
+with open(snap_gd) as f:
+    binding_snapshot = json.load(f)
+binding_snapshot['records'][0]['trace']['observations'] = [
+    {'kind': 'path_binding', 'root': 'src', 'path': 'data.txt'}
+]
+snap_binding = os.path.join(work, 'snap_binding.json')
+with open(snap_binding, 'w') as f:
+    json.dump(binding_snapshot, f)
+assert_negative('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_hit, '--changed-files', diff_changed, '--repo', empty_repo], 'observed changed file')
+assert_positive('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_hit, '--changed-files', empty_diff, '--repo', empty_repo])
+assert_positive('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_miss, '--changed-files', diff_changed, '--repo', empty_repo])
+assert_negative('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_miss, '--changed-files', empty_diff, '--repo', empty_repo], 'has equal build and unchanged observed inputs but missed')
 
 # Direction 2: Profile changed miss passes (exclusion)
 f_gd_prof = os.path.join(work, 'gd_prof.json')

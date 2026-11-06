@@ -291,10 +291,14 @@ module Iyi::Stale
                 a3_mismatches << "file missing after exit: #{real}"
               else
                 current_type = case info.type
-                               when .file?      then 1_u8
-                               when .directory? then 2_u8
-                               when .symlink?   then 3_u8
-                               else                  0_u8
+                               when .file?             then 1_u8
+                               when .directory?        then 2_u8
+                               when .symlink?          then 3_u8
+                               when .character_device? then 4_u8
+                               when .block_device?     then 5_u8
+                               when .pipe?             then 6_u8
+                               when .socket?           then 7_u8
+                               else                         0_u8
                                end
                 if current_type != ftype || info.size.to_u64 != size || info.modification_time.to_unix_ns.to_i64 != mtime_ns
                   a3_mismatches << "file metadata changed during run: #{real}"

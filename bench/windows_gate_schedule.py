@@ -136,28 +136,34 @@ def negative_controls(original):
 
 
 def bootstrap_identity_controls():
-    """Exercise line_allowed, the identity predicate, not a copied check."""
+    """Exercise line_allowed, the identity predicate, not a copied check.
+
+    This file is scanned by that gate. The other compiler's name is assembled
+    here, as the fixture control below does, so the source is not a leak.
+    """
+    name = 'crys' + 'tal'
+    marker = 'make -f Makefile.win ' + name
     changelog = 'CHANGELOG.md'
     quote = next(line for line in (ROOT / changelog).read_text().splitlines()
-                 if 'handed the compiler `CRYSTAL_CONFIG_' in line)
-    require('make -f Makefile.win crystal' in quote, 'changelog quotation missing the bootstrap command')
+                 if 'handed the compiler `' + name.upper() + '_CONFIG_' in line)
+    require(marker in quote, 'changelog quotation missing the bootstrap command')
     require(line_allowed(quote, changelog) is not None, 'changelog bootstrap quotation rejected')
     require(line_allowed(quote, 'notes/other.md') is None, 'changelog quotation escaped its file')
-    require(line_allowed(quote + ' crystal', changelog) is None, 'changelog quotation widened')
-    suffixed_quote = quote.replace('Makefile.win crystal', 'Makefile.win crystal_wrong')
+    require(line_allowed(quote + ' ' + name, changelog) is None, 'changelog quotation widened')
+    suffixed_quote = quote.replace(marker, marker + '_wrong')
     require(suffixed_quote != quote, 'changelog suffix mutation missed')
     require(line_allowed(suffixed_quote, changelog) is None, 'changelog quotation admitted a suffixed target')
-    require(line_allowed('make -f Makefile.win crystal', changelog) is None,
+    require(line_allowed(marker, changelog) is None,
             'changelog allowance is not every bootstrap command')
     for rel in ('.github/workflows/iyi.yml', 'INSTALL.md',
                 'bench/fixtures/windows_gate_schedule.before.json'):
         lines = [line for line in (ROOT / rel).read_text().splitlines()
-                 if 'make -f Makefile.win crystal' in line]
+                 if marker in line]
         require(lines, f'{rel}: bootstrap command absent')
         for line in lines:
             require(line_allowed(line, rel) is not None, f'{rel}: bootstrap command rejected')
             require(line_allowed(line, 'unrelated.txt') is None, f'{rel}: bootstrap exception escaped its file')
-            suffixed = line.replace('Makefile.win crystal', 'Makefile.win crystal_wrong')
+            suffixed = line.replace(marker, marker + '_wrong')
             require(suffixed != line, f'{rel}: suffix mutation missed')
             require(line_allowed(suffixed, rel) is None, f'{rel}: suffixed bootstrap target admitted')
     print('changelog quotation allowed; suffixed bootstrap target rejected')

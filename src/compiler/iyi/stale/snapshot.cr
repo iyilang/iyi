@@ -241,7 +241,7 @@ module Iyi::Stale
           profile: chosen.profile,
           trace: twin.trace,
           explain: twin.explain,
-          version: 1,
+          version: FORMAT_VERSION,
           mode: "portable",
           newest: "pass",
           seq: 0_u64,
@@ -265,7 +265,7 @@ module Iyi::Stale
 
       snapshot = Snapshot.new(
         format: "iyi-test-index",
-        version: 1,
+        version: FORMAT_VERSION,
         namespace: namespace,
         repository: ctx.resolved_repository,
         workflow: ctx.resolved_workflow,
@@ -342,7 +342,7 @@ module Iyi::Stale
         )
       end
 
-      if snapshot.version != 1
+      if snapshot.version != FORMAT_VERSION
         return ImportResult.new(
           success: false,
           error: "unsupported version: #{snapshot.version}",
@@ -350,6 +350,15 @@ module Iyi::Stale
           imported_path: nil
         )
       end
+      unless snapshot.records.all? { |rec| rec.version == FORMAT_VERSION && Trace.supported?(rec.trace.observations) }
+        return ImportResult.new(
+          success: false,
+          error: "unsupported receipt or observation contract",
+          snapshot: nil,
+          imported_path: nil
+        )
+      end
+
 
       # 4. Namespace and target matching
       if snapshot.namespace != namespace
@@ -801,6 +810,10 @@ module Iyi::Stale
           snapshot: nil
         )
       end
+      unless snapshots.all? { |snap| snap.format == "iyi-test-index" && snap.version == FORMAT_VERSION && snap.records.all? { |rec| rec.version == FORMAT_VERSION && Trace.supported?(rec.trace.observations) } }
+        return UnionResult.new(success: false, error: "unsupported snapshot contract", snapshot: nil)
+      end
+
 
       first = snapshots.first
       if snapshots.size == 1

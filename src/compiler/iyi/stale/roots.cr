@@ -123,13 +123,27 @@ module Iyi::Stale
       RootPath.new("abs", abs_path)
     end
 
+    # Map the spelling used for lookup, without resolving or collapsing any
+    # path components. Those components can themselves be symbolic links.
+    def map_lookup(path : String) : RootPath
+      {{"src", @src}, {"toolchain", @toolchain}, {"pkg", @pkg}, {"scratch", @scratch}}.each do |name, base|
+        next if base.empty?
+        return RootPath.new(name, "") if path == base
+        separator = ::Path::SEPARATORS[0].to_s
+        prefix = base.ends_with?(separator) ? base : base + separator
+        return RootPath.new(name, path[prefix.bytesize..]) if path.starts_with?(prefix)
+      end
+      RootPath.new("abs", path)
+    end
+
     def resolve(root : String, path : String) : String
       case root
       when "src"       then File.join(@src, path)
       when "toolchain" then !@toolchain.empty? ? File.join(@toolchain, path) : path
       when "pkg"       then !@pkg.empty? ? File.join(@pkg, path) : path
       when "scratch"   then !@scratch.empty? ? File.join(@scratch, path) : path
-      else                  path
+      when "abs"       then path
+      else                  raise "unsupported root: #{root}"
       end
     end
   end

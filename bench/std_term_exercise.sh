@@ -7,8 +7,10 @@
 # a pseudo-terminal from Python's `pty` module - raw mode really is raw (a
 # byte arrives without a newline, Ctrl-C is a byte and not a signal, CR
 # stays CR), echo off really does not echo, a password is read without
-# being shown, the previous termios is back after each block and after a
-# panic in one (Python's `tcgetattr` and `stty -g` before and after), and
+# being shown and its prompt is written only once echo is off (the program
+# stopped at its mode change by job control), the previous termios is back
+# after each block and after a panic in one (Python's `tcgetattr` and
+# `stty -g` before and after), and
 # `Term.size` follows the TIOCSWINSZ this side sets, as `stty size` and
 # `os.get_terminal_size` do; checks the mode bits against Python's own
 # termios constants; checks what the module refuses by its exact panic
@@ -106,7 +108,13 @@ sys.stdout.reconfigure(line_buffering=True)
 # read after it, and every check of the mode left behind failed there. It
 # catches SIGINT and SIGQUIT with a handler, which exec puts back to the
 # default, so Ctrl-C still reaches the program; it writes the program's pid
-# and then its exit status, and waits to be killed.
+# and then its exit status, and waits to be killed. Asked for `background`,
+# it runs the program in a process group of its own instead, outside the
+# terminal's foreground group, with SIGTTOU at its default (stop) and not
+# blocked, and writes `stopped N` when a signal N stops the program: a
+# background process that changes the terminal's mode is stopped by the
+# kernel before the change is made (Linux's `tty_check_change`, darwin's
+# `ttioctl`), while its writes go through as long as TOSTOP is off.
 HERE = os.path.dirname(os.path.abspath(__file__))
 LEADER = os.path.join(HERE, "leader.py")
 with open(LEADER, "w") as leader:
@@ -114,12 +122,24 @@ with open(LEADER, "w") as leader:
 signal.signal(signal.SIGINT, lambda number, frame: None)
 signal.signal(signal.SIGQUIT, lambda number, frame: None)
 status = sys.argv[1]
-child = subprocess.Popen(sys.argv[2:])
+background = sys.argv[2] == "background"
+
+def own_group():
+    os.setpgid(0, 0)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTTOU])
+
+if background:
+    signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+child = subprocess.Popen(sys.argv[3:], preexec_fn=own_group if background else None)
 with open(status + ".pid", "w") as f:
     f.write(str(child.pid))
-code = child.wait()
+if background:
+    _, raw = os.waitpid(child.pid, os.WUNTRACED)
+    said = f"stopped {os.WSTOPSIG(raw)}" if os.WIFSTOPPED(raw) else f"ended {raw}"
+else:
+    said = str(child.wait())
 with open(status + ".part", "w") as f:
-    f.write(str(code))
+    f.write(said)
 os.rename(status + ".part", status)
 while True:
     time.sleep(60)
@@ -165,7 +185,7 @@ def stty_kernel_free(text):
 
 
 class Pty:
-    def __init__(self, mode, rows=24, cols=80):
+    def __init__(self, mode, rows=24, cols=80, background=False):
         self.master, self.slave = os.openpty()
         set_size(self.slave, rows, cols)
         # VMIN and VTIME away from a fresh pty's 1 and 0, which canonical
@@ -174,6 +194,9 @@ class Pty:
         start = termios.tcgetattr(self.slave)
         start[6][termios.VMIN] = b"\x05"
         start[6][termios.VTIME] = b"\x03"
+        # TOSTOP off, as a fresh pty has it, said rather than assumed: the
+        # background run counts on the program's writes going through.
+        start[3] &= ~termios.TOSTOP
         termios.tcsetattr(self.slave, termios.TCSANOW, start)
         self.before = termios.tcgetattr(self.slave)
         self.before_stty = stty_g(self.slave)
@@ -184,8 +207,14 @@ class Pty:
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
         # The leader's status file: the program's exit, once it has one.
-        self.status = os.path.join(HERE, f"status-{next(RUNS)}")
-        self.proc = subprocess.Popen([sys.executable, LEADER, self.status, PROGRAM, mode],
+        # Named by this driver's pid as well: every driver run shares the
+        # gate's scratch directory, and a broken copy's run, numbering from
+        # 0 again, found the file the plain run's first program had left and
+        # took that program's exit for its own before its own program had
+        # written a byte.
+        self.status = os.path.join(HERE, f"status-{os.getpid()}-{next(RUNS)}")
+        self.proc = subprocess.Popen([sys.executable, LEADER, self.status,
+                                      "background" if background else "foreground", PROGRAM, mode],
                                      stdin=self.slave, stdout=self.slave, stderr=self.slave,
                                      start_new_session=True, preexec_fn=controlling)
         self.seen = b""
@@ -238,16 +267,30 @@ class Pty:
         while not os.path.exists(self.status) and time.monotonic() < deadline:
             time.sleep(0.02)
         if not os.path.exists(self.status):
-            try:
-                os.kill(int(open(self.status + ".pid").read()), signal.SIGKILL)
-            except (OSError, ValueError):
-                pass
+            self.kill_program()
             later = time.monotonic() + 5.0
             while not os.path.exists(self.status) and time.monotonic() < later:
                 time.sleep(0.02)
         code = int(open(self.status).read()) if os.path.exists(self.status) else None
         self.quiet_for(0.2)
         return code
+
+    # A background run's `stopped N` or `ended STATUS`, from its leader;
+    # None, and the program killed, when it says neither within *timeout*.
+    def stopped(self, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while not os.path.exists(self.status) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not os.path.exists(self.status):
+            self.kill_program()
+            return None
+        return open(self.status).read()
+
+    def kill_program(self):
+        try:
+            os.kill(int(open(self.status + ".pid").read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
 
     def restored(self, label):
         # Read while the leader holds the terminal. One that cannot be read
@@ -389,6 +432,37 @@ if wanted("noecho"):
     code = p.finish()
     check("the noecho program exits 0", code == 0, f"exit {code}")
     p.restored("noecho")
+    p.close()
+
+if wanted("password-order"):
+    print("== read_password turns echo off before it prompts")
+    # The program runs in a background process group (see the leader), so
+    # the kernel stops it with SIGTTOU at its mode change, before the change
+    # is made. What it wrote before asking for the change is then in the
+    # terminal's output queue, and a mark this side writes on the slave
+    # after the stop queues behind it: what the master reads before the mark
+    # is exactly what the program wrote before the change. An order, read
+    # with no timing in it - a prompt written first is there on every run,
+    # however slow the machine, and one written after the change never is.
+    # Seeing the prompt and then reading the mode, as the next section does,
+    # catches a prompt written first only when the program is slow to make
+    # the change: darwin CI run 42187717533 saw that once, with the mode
+    # unchanged and the typed password echoed, in a build the --release run
+    # beside it passed. The copy that prompts first, 200 runs of each
+    # section: caught here in all 200, by the next section in none (Linux,
+    # 12 vCPU VM, and macOS 26.6, Apple M2 Pro).
+    p = Pty("password", background=True)
+    state = p.stopped()
+    if check("the program is stopped by SIGTTOU at its mode change", state == f"stopped {signal.SIGTTOU}",
+             f"{state}, seen {p.seen!r}"):
+        check("and the mode is not changed yet", flags(p.now()) == flags(p.before),
+              f"lflag {hex(p.before[3])} -> {hex(p.now()[3])}")
+        mark = b"[the program stopped here]"
+        os.write(p.slave, mark)
+        p.read_until(mark)
+        written = p.seen.split(mark, 1)[0]
+        check("the prompt is written only once echo is off", b"Password" not in written, repr(written))
+    p.kill_program()
     p.close()
 
 if wanted("password"):
@@ -670,6 +744,13 @@ prove_broken "a refusal that is not reported" "raw refuses a pipe and does not r
 ' ''
 prove_broken "the prompt on standard output" "a password piped in is read" plain \
   'STDERR.write(prompt) unless prompt.empty?' 'STDOUT.write(prompt) unless prompt.empty?'
+# The order 0.18.0 to 0.20.1 shipped: the prompt written, then echo off.
+prove_broken "the prompt written before echo is off" "FAIL: the prompt is written only once echo is off" password-order \
+  '    line = with_mode(STDIN, PASSWORD, "turn echo off") do
+      ask(prompt)
+      STDIN.read_line(chomp: true)' '    ask(prompt)
+    line = with_mode(STDIN, PASSWORD, "turn echo off") do
+      STDIN.read_line(chomp: true)'
 prove_broken "raw mode that keeps ICANON" "FAIL: a byte arrives without a newline" raw \
   'clear(mode, 3, ECHO | ECHONL | ICANON | ISIG | IEXTEN)' 'clear(mode, 3, ECHO | ECHONL | ISIG | IEXTEN)'
 prove_broken "raw mode that keeps ISIG" "FAIL: Ctrl-C is byte 3, not a signal" raw \

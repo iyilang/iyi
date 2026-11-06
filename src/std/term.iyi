@@ -76,16 +76,20 @@
 # block is not thrown away; TCSAFLUSH, Python's `getpass` choice, would
 # discard it.
 #
-# `Term.read_password(prompt)` writes the prompt to standard error — not
-# standard output, which is the program's data, and the stream Python's
-# `getpass` falls back to — reads a line from standard input with echo off,
-# writes the newline the terminal did not echo, and answers the line
-# without its line ending; nil at the end of the input (Ctrl-D on an empty
-# line). Standard input that is not a terminal is read as it is: a pipe
-# echoes nothing, so `echo secret | prog` is how a script hands a program a
-# password, as Python's `getpass` allows. A terminal that answers TCGETS
-# and then refuses the change panics with the reason, because reading the
-# password anyway would show it on the screen.
+# `Term.read_password(prompt)` turns echo off, then writes the prompt to
+# standard error — not standard output, which is the program's data, and
+# the stream Python's `getpass` falls back to — reads a line from standard
+# input, writes the newline the terminal did not echo, and answers the
+# line without its line ending; nil at the end of the input (Ctrl-D on an
+# empty line). Echo goes off before the prompt is written, as `getpass`
+# orders it: a terminal echoes a key when it arrives, so a person who
+# starts typing at the sight of the prompt would otherwise see the first
+# keys of the password if they beat the mode change. Standard input that
+# is not a terminal is read as it is: a pipe echoes nothing, so `echo
+# secret | prog` is how a script hands a program a password, as Python's
+# `getpass` allows. A terminal that answers TCGETS and then refuses the
+# change panics with the reason, and without the prompt, because reading
+# the password anyway would show it on the screen.
 #
 # How the platform is reached, in the neighbouring modules' way and with
 # no C library added: on Linux the `ioctl` system call by hand (16 on
@@ -336,16 +340,25 @@ pub struct Term
     with_mode(io, NO_ECHO, "turn echo off") { yield }
   end
 
-  # Writes *prompt* to standard error and reads a line from standard input
-  # with echo off, then writes the newline the terminal did not echo.
-  # Answers the line without its line ending, or nil at the end of the
-  # input. Standard input that is not a terminal is read as it is.
+  # Turns echo off, writes *prompt* to standard error and reads a line
+  # from standard input, then writes the newline the terminal did not
+  # echo. Answers the line without its line ending, or nil at the end of
+  # the input. Standard input that is not a terminal is read as it is.
   def self.read_password(prompt : String = "") : String?
-    STDERR.write(prompt) unless prompt.empty?
-    return STDIN.read_line(chomp: true) unless tty?(STDIN)
-    line = with_mode(STDIN, PASSWORD, "turn echo off") { STDIN.read_line(chomp: true) }
+    unless tty?(STDIN)
+      ask(prompt)
+      return STDIN.read_line(chomp: true)
+    end
+    line = with_mode(STDIN, PASSWORD, "turn echo off") do
+      ask(prompt)
+      STDIN.read_line(chomp: true)
+    end
     STDERR.write("\n") unless line.is_a?(TermError)
     line.or_panic
+  end
+
+  private def self.ask(prompt : String) : Nil
+    STDERR.write(prompt) unless prompt.empty?
   end
 
   # The one place a mode is changed: saved, changed, the block run, and

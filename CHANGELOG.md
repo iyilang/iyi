@@ -686,6 +686,22 @@
   worker's first empty look 200 ms before its count - where one spawn
   starts one worker, and the same copy with the token given back first
   started a second in 20 runs of 20 on each of the three machines.
+- **`Term.read_password` turns echo off before it writes the prompt.**
+  Since 0.18.0 it wrote the prompt to standard error first and turned
+  echo off after, so a key typed at the sight of the prompt and before
+  the change was echoed: the start of a password could show on the
+  screen. The plain build's run of `bench/std_term_exercise.sh` on darwin
+  CI (run 42187717533, job 127791920345) typed on seeing the prompt, read
+  the local flags still at 0x5cb and saw `hunter2` echoed, while the
+  `--release` build in the same job held all 69 checks. Echo goes off
+  first now, as Python's `getpass` orders it, and a terminal that refuses
+  the change panics without the prompt. The gate runs the program in a
+  background process group, where the kernel stops it with SIGTTOU at
+  its mode change before the change is made, and checks that no prompt
+  has been written by then. The copy that prompts first is caught there
+  in 200 of 200 runs; the old check, reading the mode on seeing the
+  prompt, caught it in 0 of 200 (Linux, 12 vCPU VM; the same 200 and 0
+  of 200 on macOS 26.6, Apple M2 Pro, 10 cores, the user's machine).
 
 - **Equal strings no longer compare unequal while another thread counts
   one's characters (SPEC.md IV.7b).** A compiler built without

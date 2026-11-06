@@ -184,7 +184,12 @@ class Pty:
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
         # The leader's status file: the program's exit, once it has one.
-        self.status = os.path.join(HERE, f"status-{next(RUNS)}")
+        # Named by this driver's pid as well: every driver run shares the
+        # gate's scratch directory, and a broken copy's run, numbering from
+        # 0 again, found the file the plain run's first program had left and
+        # took that program's exit for its own before its own program had
+        # written a byte.
+        self.status = os.path.join(HERE, f"status-{os.getpid()}-{next(RUNS)}")
         self.proc = subprocess.Popen([sys.executable, LEADER, self.status, PROGRAM, mode],
                                      stdin=self.slave, stdout=self.slave, stderr=self.slave,
                                      start_new_session=True, preexec_fn=controlling)

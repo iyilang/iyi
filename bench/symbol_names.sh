@@ -8,11 +8,12 @@
 # inherited method was `*Derived@Base#hi` and a proc literal
 # `~procProc(Int32, Int32)@main.cr:3`. Every distinct suffix became a version
 # definition of the executable, the loader keeps 15 bits of a version index,
-# and `std_spec` had 39,368 of them: glibc 2.34's index was 39,376, read back
-# as 6,608, and the link failed on `__libc_start_main` wanting version
-# `spec/std/option_parser_spec.cr:273` (Linux, GNU ld 2.46). lld drops the
-# suffix instead, and every method an array inherits was `*Array(Int32)` in
-# the symbol table. The compiler joins those names with `^` now and escapes
+# and `std_spec` built at 9f0d82076 had 39,376 of them: glibc 2.34's index
+# was 39,384, read back as 6,616, and the program stopped before `main` on
+# `__libc_start_main` wanting version `Object::==<Pointer(SpecEnumFlags).
+# class>:Bool` (Linux, GNU ld 2.46). lld drops the suffix instead, and every
+# method an array inherits was `*Array(Int32)` in the symbol table. The
+# compiler joins those names with `^` now and escapes
 # the `@` of text a person wrote — a file's path, a quoted `NamedTuple` key,
 # a `Symbol`'s name — as `%40` (`Iyi::SYMBOL_JOIN`, `Iyi.symbol_text`).
 #
@@ -30,7 +31,7 @@
 # what the compiler wrote. On Linux the executable is then linked with GNU
 # ld (`-fuse-ld=bfd`) and must define no symbol version at all.
 #
-# The broken copy is the old spelling itself: the bootstrap Crystal the fork
+# The broken copy is the old spelling itself: the bootstrap compiler the fork
 # is built with still joins with `@`, so the same program built by it must
 # be caught by the same reader. MSVC spells every punctuation of a method's
 # or a proc's name as `.XX.`, `@` as `.40.`, so there the broken copy is

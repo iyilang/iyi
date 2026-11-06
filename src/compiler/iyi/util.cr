@@ -29,12 +29,13 @@ module Iyi
   # `~procProc(Int32, Int32)^src/a.iyi:3`. Both were joined with `@`, which
   # GNU ld reads as a symbol version: every distinct suffix in a definition
   # became a version definition of the executable, and the loader keeps 15
-  # bits of a version index. `std_spec` had 39,368 of them on Linux, so glibc
-  # 2.34's index was 39,376, read back as 6,608, and the link failed on
-  # `__libc_start_main` wanting version `spec/std/option_parser_spec.cr:273`.
-  # lld drops the suffix instead and leaves `*Array(Int32)` for every method
-  # an array inherits. The compiler itself defined 41,263 such symbols at
-  # 9f0d82076 (40,901 inherited methods and 362 procs, Linux).
+  # bits of a version index. Built at 9f0d82076 and linked with GNU ld 2.46,
+  # `std_spec` had 39,376 of them, so glibc 2.34's index was 39,384, read
+  # back as 6,616, and the program stopped before `main` on
+  # `__libc_start_main` wanting version `Object::==<Pointer(SpecEnumFlags).
+  # class>:Bool` (Linux). lld drops the suffix instead and leaves
+  # `*Array(Int32)` for every method an array inherits. The compiler itself
+  # defined 41,263 such symbols (40,901 inherited methods and 362 procs).
   #
   # `^` because neither side of it can hold one. Before it is a type and
   # after it a type (a method) or a file and a line (a proc). The type names

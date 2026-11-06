@@ -888,11 +888,12 @@ jobs:
         run: bash bench/dependency_floor.sh
 
       # And what the symbols themselves are called. GNU ld reads an `@` in a
-      # definition as a symbol version, and `std_spec` had 39,368 of them:
-      # the loader keeps 15 bits of a version index and the link failed on
-      # `__libc_start_main` (SPEC.md IV.1g). The objects are read, and the
-      # executable is linked with GNU ld and must define no version; the
-      # bootstrap Crystal, which still joins with `@`, is the broken copy.
+      # definition as a symbol version, and `std_spec` had 39,376 of them:
+      # the loader keeps 15 bits of a version index and the program stopped
+      # before `main` on `__libc_start_main` (SPEC.md IV.1g). The objects are
+      # read, and the executable is linked with GNU ld and must define no
+      # version; the bootstrap compiler, which still joins with `@`, is the
+      # broken copy.
       - name: No symbol has an @ in it (IV.1g)
         run: bash bench/symbol_names.sh
 

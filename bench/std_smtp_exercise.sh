@@ -17,6 +17,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
@@ -264,7 +265,7 @@ session() {
   done
   if [ ! -s "$WORK/port" ]; then
     echo "  $2: the server did not start: $(tail -1 "$WORK/server.err")"
-    kill "$pid" 2>/dev/null
+    end_process "$pid"
     return 1
   fi
   timeout 60 "$1" client "$(cat "$WORK/port")" "$2" "$3" >"$WORK/client.out" 2>&1

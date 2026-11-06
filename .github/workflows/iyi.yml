@@ -2627,8 +2627,16 @@ jobs:
   # where a green shard 1's siblings take 43 to 56: run so on a Windows
   # machine, std/tls hung on a broken copy's server whose TERM MSYS had lost
   # while still starting it, and was stopped at its 50 minutes, the shard at
-  # 84 (bench/std_tls_exercise.sh, stop_server). What then ends the runner
-  # is not measured; that the gate no longer hangs is.
+  # 84 (bench/std_tls_exercise.sh, stop_server). That hang was real, and
+  # not what lost the runners: shard 1 went on losing them, 19 of 124 jobs
+  # from 10-27 to 11-06 (shard 2 4 of 126, shards 3 and 4 none), and GitHub
+  # fails a runner 45 minutes after it last heard from it, so they went
+  # quiet 20 to 47 minutes into the step, inside std/tls's broken copies.
+  # Those stopped servers 327 times in one run on a Windows machine, and
+  # bash's `kill` to a native
+  # program also ends any process whose stale parent pid the program holds
+  # - the runner's agent among them (bench/end_process.sh, which the stops
+  # go through now).
   windows-std-siblings:
     runs-on: windows-2022
     timeout-minutes: 120

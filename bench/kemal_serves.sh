@@ -27,6 +27,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 # The gate runs whatever compiler the caller names; `bin/iyi` is a shell
 # wrapper, and on Windows the caller has to point at the built exe itself.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -64,7 +65,7 @@ PORT_ARTIFACT=31882
 # gate measured.
 stop_server() {
   [ -z "${SERVER_PID:-}" ] && return
-  { kill -9 "$SERVER_PID"; wait "$SERVER_PID"; } 2>/dev/null
+  { end_process "$SERVER_PID" KILL; wait "$SERVER_PID"; } 2>/dev/null
   SERVER_PID=""
 }
 

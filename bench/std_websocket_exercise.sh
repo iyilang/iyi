@@ -19,6 +19,7 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/darwin_frames.sh"
+. "$REPO/bench/end_process.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -633,7 +634,7 @@ if [ -n "$port" ]; then
     status=1
   fi
 fi
-kill "$serve_pid" 2>/dev/null
+end_process "$serve_pid"
 
 echo
 echo "== the client against a Python server"
@@ -968,7 +969,7 @@ PY
       status=1
     fi
   fi
-  kill "$wss_pid" 2>/dev/null
+  end_process "$wss_pid"
   if [ -s "$WORK/ws-server.py" ]; then
     TLS_CERT="$WORK/wss/chain.pem" TLS_KEY="$WORK/wss/key.pem" HOST=localhost timeout 120 "$PY" "$WORK/ws-server.py" > "$WORK/wss-pyserver.out" 2>&1 &
     py_pid=$!
@@ -1039,7 +1040,7 @@ PY
       else
         echo "  an upgrade that hands over the bare socket under TLS is caught: $(grep -m1 -E 'FAIL|Error' "$WORK/bare-client.out" | sed 's/^ *//' | cut -c1-100)"
       fi
-      kill "$bare_pid" 2>/dev/null
+      end_process "$bare_pid"
     fi
   fi
 fi

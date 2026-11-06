@@ -91,6 +91,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 # The compiler, overridable: `bin/iyi` is a POSIX shell wrapper, and on
 # Windows the caller is the only one who knows where the real binary is.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -2858,7 +2859,7 @@ case "$(uname -s)" in
           fi
           ( timeout -k 5 60 "./$1" 200 10 > rates.txt 2>&1; exit $? ) 2> /dev/null
           code=$?
-          [ -n "$busy" ] && { kill $busy; wait $busy 2> /dev/null; }
+          [ -n "$busy" ] && { for b in $busy; do end_process "$b"; done; wait $busy 2> /dev/null; }
           if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* ' rates.txt; then
             echo "$1, $way, run $run exited $code:"; tail -3 rates.txt; exit 1
           fi

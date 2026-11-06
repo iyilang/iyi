@@ -5,6 +5,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -275,7 +276,7 @@ else
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     status=1
-    kill "$serve_pid" 2>/dev/null
+    end_process "$serve_pid"
   else
     if command -v curl >/dev/null 2>&1; then
       curl -sN --max-time 10 "http://127.0.0.1:$port/events" > "$WORK/curl.events" 2>/dev/null
@@ -350,7 +351,7 @@ PY
     then
       wait "$serve_pid"
     else
-      kill "$serve_pid" 2>/dev/null
+      end_process "$serve_pid"
       status=1
     fi
   fi

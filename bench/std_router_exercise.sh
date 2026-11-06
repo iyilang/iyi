@@ -12,6 +12,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -316,7 +317,7 @@ else
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     status=1
-    kill "$serve_pid" 2>/dev/null
+    end_process "$serve_pid"
   elif PORT="$port" "$PY" - <<'PY'
 import os, sys, http.client
 c = http.client.HTTPConnection("127.0.0.1", int(os.environ["PORT"]), timeout=10)
@@ -362,7 +363,7 @@ PY
   then
     wait "$serve_pid"
   else
-    kill "$serve_pid" 2>/dev/null
+    end_process "$serve_pid"
     status=1
   fi
 fi

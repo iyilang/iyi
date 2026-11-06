@@ -1292,7 +1292,12 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 'on a free list' unrooted.txt)"
 # `NtTerminateProcess`, and neither `timeout` nor `Stop-Process` could end
 # it; on a runner this proof hung until the job was cancelled at 81
 # minutes - and with `TerminateProcess` 0 in 1,150 hung. A run is a
-# fraction of a second.
+# fraction of a second. A run ends by exit 1 at the check that names the
+# node on a free list, or at the runtime's "iyi: out of memory": this copy
+# sweeps live lists, and a thread that reads a swept node can ask for a
+# size made of garbage - run 53 of 200 did so on a runner (CI job
+# 128176433783), and it ended, which is what this loop is here to prove.
+# The single run above still has to name the free list.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "failure proof, again: two hundred runs, and every one ends"
@@ -1300,7 +1305,7 @@ case "$(uname -s)" in
     while [ "$again" -le 200 ]; do
       timeout -k 5 30 ./unrooted 8 > unrooted-again.txt 2>&1
       code=$?
-      if [ "$code" -ne 1 ] || ! grep -q "on a free list" unrooted-again.txt; then
+      if [ "$code" -ne 1 ] || ! grep -qE "on a free list|^iyi: out of memory$" unrooted-again.txt; then
         echo "run $again exited $code:"; tail -3 unrooted-again.txt; exit 1
       fi
       again=$((again + 1))

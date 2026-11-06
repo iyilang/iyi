@@ -435,9 +435,9 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
       keyer = Iyi::Stale::Keyer.portable
       answer = Iyi::Stale.d("test") { |enc| enc.str("x") }
       unknown = Iyi::Stale::Observation.new(0_u64, "future_kind", "abs", "x", answer)
-      Iyi::Stale::Trace.replay([unknown], keyer).should contain("unsupported observation")
+      Iyi::Stale::Trace.replay([unknown], keyer).not_nil!.should contain("unsupported observation")
       missing = Iyi::Stale::Observation.new(0_u64, "dir_list", "abs", File.join(Dir.tempdir, "iyi-no-such-dir-#{Process.pid}"), answer)
-      Iyi::Stale::Trace.replay([missing], keyer).should contain("replay failed")
+      Iyi::Stale::Trace.replay([missing], keyer).not_nil!.should contain("replay failed")
     end
   end
 

@@ -59,6 +59,12 @@
   them with `--emit-iyimod`. The prelude analysed ahead by the build daemon
   does not restore witnesses yet.
 
+- **Two pointers compare equal when they hold the same address.** `Pointer`
+  had no `==`, so `Object#==` answered false for `p == p`, for two `Void*`
+  of one address and for two null pointers, and a pointer key was never
+  found in a `Hash`. Held by
+  `spec/compiler/codegen/iyi_case_equality_spec.cr`.
+
 ## 0.20.1 — 2026-11-04
 
 **Fixes found by soaking 0.20.0 on every core: a darwin server a client

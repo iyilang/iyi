@@ -767,6 +767,7 @@
   every one of those ensures is the same but for the compiler's own
   version strings, and on Windows the change emits only blocks an
   exception enters. Migration: none.
+
 - **On macOS a collection straight after a thread's start no longer
   leaves the next one waiting forever.** A thread there links its line
   into the list a stop walks itself, once its thread-locals are made,

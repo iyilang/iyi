@@ -159,12 +159,13 @@ end_all() {
   local list p
   list="$(descendants "$pid")"
   for p in $list; do
-    if [ "$windows" -eq 1 ]; then
-      taskkill //F //T //PID "$(cat "/proc/$p/winpid" 2>/dev/null)" > /dev/null 2>&1
-    fi
-    kill -KILL "$p" 2>/dev/null
+    end_process "$p" KILL
   done
 }
+
+# What the gate left running is ended by end_process: on Windows, bash's
+# own `kill` ends a native program's stranger with it.
+. "$(dirname "$0")/end_process.sh"
 
 deadline=$((started + minutes * 60))
 while kill -0 "$pid" 2>/dev/null; do

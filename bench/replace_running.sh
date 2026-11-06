@@ -25,6 +25,7 @@ case "$(uname -s)" in
 esac
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 IYI="${IYI:-$REPO/.build/iyi.exe}"
 WORK="$(mktemp -d)"
 status=0
@@ -56,7 +57,7 @@ start_session() {
 # end of its input. A signal from this shell does not reach a native
 # program through its MSYS pid.
 stop_session() {
-  kill "$feeder" 2>/dev/null
+  end_process "$feeder"
   wait "$session" 2>/dev/null
 }
 

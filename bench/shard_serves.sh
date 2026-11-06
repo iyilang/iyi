@@ -23,6 +23,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -54,7 +55,7 @@ KEMAL_VERSION="1.12.0"
 PORT=31871
 
 cleanup() {
-  [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null
+  [ -n "${SERVER_PID:-}" ] && end_process "$SERVER_PID"
   wait "${SERVER_PID:-}" 2>/dev/null
 }
 trap cleanup EXIT

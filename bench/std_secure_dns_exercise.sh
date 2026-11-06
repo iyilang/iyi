@@ -20,11 +20,12 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 SERVER_PID=""
 cleanup() {
-  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+  [ -n "$SERVER_PID" ] && end_process "$SERVER_PID"
   rm -rf "$WORK"
 }
 trap cleanup EXIT

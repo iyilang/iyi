@@ -52,6 +52,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 # The compiler, overridable: `bin/iyi` is a POSIX shell wrapper, and on
 # Windows the caller is the only one who knows where the real binary is.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -1099,7 +1100,7 @@ case "$(uname -s)" in
       else
         echo "  a program rebuilt while it runs: build $rebuilt, it said '$said'"; sed -n '1,3p' busy.log; status=1
       fi
-      kill "$running" 2>/dev/null; wait "$running" 2>/dev/null
+      end_process "$running"; wait "$running" 2>/dev/null
     else
       echo "  the busy program did not build:"; sed -n '1,3p' busy.log; status=1
     fi

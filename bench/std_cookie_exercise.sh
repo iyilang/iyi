@@ -5,6 +5,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -162,7 +163,7 @@ else
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     status=1
-    kill "$serve_pid" 2>/dev/null
+    end_process "$serve_pid"
   elif PORT="$port" "$PY" - <<'PY'
 import os, sys, urllib.request, http.cookiejar
 base = f"http://127.0.0.1:{os.environ['PORT']}"
@@ -187,7 +188,7 @@ PY
   then
     wait "$serve_pid"
   else
-    kill "$serve_pid" 2>/dev/null
+    end_process "$serve_pid"
     status=1
   fi
 fi

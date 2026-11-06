@@ -22,8 +22,10 @@ WORK="$(mktemp -d)"
 # and a half hours later. A TERM to this shell alone ends them once the
 # command in the foreground has ended, as bash runs a trap. They are
 # found by their parents in one table of every process: /proc's ppid on
-# Windows, which is Git bash's view, with `taskkill /T` for what a native
-# program started in turn; one `ps` elsewhere. A walk that asked `pgrep`
+# Windows, which is Git bash's view, one `ps` elsewhere, and each is ended
+# by end_process. What a native program started in turn is not Git bash's
+# to see and is not reached: `taskkill /T`, which reached it, walks parent
+# pids as bash's `kill` does (bench/end_process.sh). A walk that asked `pgrep`
 # parent by parent started a process under the gate with each question,
 # found it, and never ended.
 case "$(uname -s)" in
@@ -51,13 +53,10 @@ gate_children() {
   CHILDREN="${list# $$ }"
 }
 end_children() {
-  local round p w
+  local round p
   for round in 1 2; do
     gate_children
     for p in $CHILDREN; do
-      if [ "$windows" -eq 1 ] && { read -r w < "/proc/$p/winpid"; } 2>/dev/null; then
-        taskkill //F //T //PID "$w" >/dev/null 2>&1
-      fi
       end_process "$p" KILL
     done
   done

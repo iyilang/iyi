@@ -187,8 +187,30 @@ def write_manifest(payload, revision, run_id, attempt, output):
     return files[".build/iyi.exe"]
 
 
+def bash_executable():
+    # Windows Python resolves `bash` to System32's WSL launcher. Hosted
+    # windows-2025 has no distribution, so the launcher exits before the helper
+    # plans a shard. The workflow step uses Git Bash; invoke that binary.
+    chosen = os.environ.get("STD_ARTIFACT_BASH")
+    if chosen:
+        return chosen
+    if os.name != "nt":
+        return "bash"
+    skipped = ("\\system32\\bash.exe", "\\sysnative\\bash.exe")
+    candidates = [str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe")]
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidates.append(str(Path(directory) / "bash.exe"))
+    for candidate in candidates:
+        folded = candidate.replace("/", "\\").lower()
+        if folded.endswith(skipped):
+            continue
+        if Path(candidate).is_file():
+            return candidate
+    return "bash"
+
+
 def run_helper(root, *args, env=None):
-    return subprocess.run(["bash", posix(root / "bench/std_artifacts.sh"), *map(str, args)], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return subprocess.run([bash_executable(), posix(root / "bench/std_artifacts.sh"), *map(str, args)], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
 def reject(fn, label):
@@ -365,7 +387,7 @@ def fixture_checks(root):
         env["FAKE_NONZERO"] = "1"
         (repo / "receipt").unlink(missing_ok=True)
         require(run_helper(repo, "native", 1, 1, env=env).returncode == 0, "matching nonzero status rejected")
-        frame = subprocess.run(["bash", "-c", '. "$1"; without_frames', "_", posix(filter_file)], input=b'0   program  0x000000010299550c symbol + 1\n4   program  0x12ab keep\nnonframe \xff\n', stdout=subprocess.PIPE, check=True)
+        frame = subprocess.run([bash_executable(), "-c", '. "$1"; without_frames', "_", posix(filter_file)], input=b'0   program  0x000000010299550c symbol + 1\n4   program  0x12ab keep\nnonframe \xff\n', stdout=subprocess.PIPE, check=True)
         require(frame.stdout == b'4   program  0x12ab keep\nnonframe \xff\n', "frame filter lost nonframes or bytes")
     require(all(digest(p) == value for p, value in before.items()), "checker changed inspected source")
 
@@ -556,7 +578,7 @@ def aggregate_checks(body):
             env = dict(os.environ)
             env.update(RESULT_BUILD="success", RESULT_CORE="success", RESULT_ARTIFACTS="success", REVISION=REVISION, RUN_ID=RUN_ID, COMPILER_SHA256=COMPILER)
             env.update(changes)
-            return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", body], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).returncode
+            return subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", body], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).returncode
 
         require(gate(fixture("complete")) == 0, "aggregate rejected complete receipts")
         for key in ("RESULT_BUILD", "RESULT_CORE", "RESULT_ARTIFACTS"):

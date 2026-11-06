@@ -338,7 +338,9 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r'"Crystal" *<<|"Crystal", is_optimised|io << "Crystal "', "the DWARF producer and version banner naming upstream"),
     (r"\b(compiled|interpreted|valid|future|in) Crystal\b", "a sentence about the other language"),
     (r"Crystal (only ever|refuses|injects|module|needs|repository|path)", "a sentence about the other language"),
-    (r"crystal (was compiled|code|repository)|in crystal\b|\.crystal\b", "a sentence about the other language"),
+    # `in` is a word, not a suffix. Without the boundary, `Makefile.win crystal`
+    # matched `in crystal` and the Windows bootstrap command was allowed in any file.
+    (r"crystal (was compiled|code|repository)|\bin crystal\b|\.crystal\b", "a sentence about the other language"),
     (r"Crystal source files", "the formatter's description of `.cr` input"),
     (r"\$crystal|\$CRYSTAL\b|\$\{CRYSTAL\}|regex crystal", "a shell variable and a type-name list"),
     (r"Crystal (resolves|infers|compiles|writes|builds|already|narrows|standard library)", "a sentence about the other language"),
@@ -441,6 +443,14 @@ def line_allowed(line: str, rel: str = "") -> str | None:
         'require(len(crystal) == 1 and crystal[0].get("with", {}).get("crystal") == "1.21.0", f"{name}: bootstrap toolchain")',
     }:
         return "the Windows artifact scheduler's exact bootstrap contract"
+    # The same command is run or quoted in these files. Name them, so a copy in
+    # another file is still a leak. `Makefile.win` itself is a path exemption.
+    if "make -f Makefile.win crystal" in line and rel in {
+        ".github/workflows/iyi.yml",
+        "INSTALL.md",
+        "bench/fixtures/windows_gate_schedule.before.json",
+    }:
+        return "the Windows bootstrap build command, where that command is run or quoted"
     for rx, why in LINE_RES:
         if rx.search(line):
             return why

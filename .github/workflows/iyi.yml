@@ -2610,7 +2610,8 @@ jobs:
   # from 10-27 to 11-06 (shard 2 4 of 126, shards 3 and 4 none), and GitHub
   # fails a runner 45 minutes after it last heard from it, so they went
   # quiet 20 to 47 minutes into the step, inside std/tls's broken copies.
-  # Those stop about 250 servers a run, and bash's `kill` to a native
+  # Those stopped servers 327 times in one run on a Windows machine, and
+  # bash's `kill` to a native
   # program also ends any process whose stale parent pid the program holds
   # - the runner's agent among them (bench/end_process.sh, which the stops
   # go through now).

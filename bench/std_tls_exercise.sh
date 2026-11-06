@@ -2496,12 +2496,14 @@ echo "== a stop ends the server and no other process"
 # kept their step times inside this gate's broken copies (as the build
 # step's time places them, against the nine green jobs' own): not a hang,
 # which the 50-minute sibling limit would have ended in a log. What the
-# broken copies do there that little else does is stop servers, about 250
-# a run, and on Windows bash's `kill` is MSYS's exit_process_tree: the
-# program and every process whose recorded parent pid is the program's,
-# found by that pid alone. A process whose parent ended keeps that pid, and
-# Windows hands it out again; when a server holds the pid, its stop ends
-# the stranger too - and on a runner the agent is one (bench/end_process.sh).
+# broken copies do there that little else does is stop servers: 327 times
+# with bash's `kill` in one run on a Windows machine (Windows 11, 12 logical
+# processors held to 4), 269 distinct pids. On Windows that `kill` is MSYS's
+# exit_process_tree: the program and every process whose recorded parent
+# pid is the program's, found by that pid alone. A process whose parent
+# ended keeps that pid, and Windows hands it out again; when a server holds
+# the pid, its stop ends the stranger too - on a runner, the agent
+# (bench/end_process.sh).
 # end_process ends a native program with taskkill on its own pid. A child
 # records its parent's pid as such a stranger does, so a stop that leaves a
 # Python program's child running is one that cannot reach a stranger; bash's

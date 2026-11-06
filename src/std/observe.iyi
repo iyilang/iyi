@@ -95,6 +95,7 @@ import std/slice::{Slice, Bytes}
   # here, with other parameter types, is a redefinition the compiler refuses.
   lib LibKernel32
     fun GetComputerNameW(buf : UInt16*, size : UInt32*) : Int32
+    fun GetFinalPathNameByHandleW(handle : Void*, path : UInt16*, count : Int32, flags : Int32) : Int32
   end
 {% end %}
 
@@ -1051,6 +1052,34 @@ pub def current_host : String
     "localhost"
   {% end %}
 end
+{% if flag?(:win32) %}
+  @[Effect(:observation_channel)]
+  private def windows_real_path(path : String) : String | Nil
+    wide = __iyi_wide_path(path.to_unsafe)
+    return nil if wide.address == 0_u64
+    handle = LibC.CreateFileW(wide, 0, 7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
+    return nil if handle.address &+ 1_u64 == 0_u64
+    room = 32768
+    full = Pointer(UInt16).malloc(room.to_u64)
+    written = LibKernel32.GetFinalPathNameByHandleW(handle, full, room - 1, 0)
+    LibC.CloseHandle(handle)
+    return nil if written <= 0 || written >= room
+    resolved = full
+    if written >= 4 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16 && full[3] == 92_u16
+      if written > 8 && full[4] == 85_u16 && full[5] == 78_u16 && full[6] == 67_u16 && full[7] == 92_u16
+        resolved = full + 6
+        resolved[0] = 92_u16
+        resolved[1] = 92_u16
+      else
+        resolved = full + 4
+      end
+    end
+    size = __iyi_utf8_size_from_wide(resolved)
+    return nil if size <= 0
+    String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(resolved, t, size) }
+  end
+{% end %}
+
 
 @[Effect(:observation_channel)]
 pub def safe_real_path(path : String) : String
@@ -1073,10 +1102,22 @@ pub def safe_real_path(path : String) : String
         return normalize_path(candidate)
       end
     end
+  {% elsif flag?(:win32) %}
+    real = windows_real_path(path)
+    return real unless real.nil?
+    dir = dirname_of(path)
+    if dir != path
+      real_dir = windows_real_path(dir)
+      unless real_dir.nil?
+        fname = path.starts_with?(dir) ? path[dir.bytesize, path.bytesize - dir.bytesize] : path
+        candidate = ends_with_separator?(real_dir) || (fname.bytesize > 0 && is_separator?(fname.to_unsafe[0])) ? real_dir + fname : real_dir + "\\" + fname
+        return normalize_path(candidate)
+      end
+    end
   {% end %}
 
   p = path
-  unless p.starts_with?("/")
+  unless path_absolute?(p)
     p = current_cwd + "/" + p
   end
   normalize_path(p)
@@ -1128,6 +1169,9 @@ pub def safe_real_path_relative_to(path : String, base_dir : String) : String
     if res.address != 0_u64
       return c_str(res)
     end
+  {% elsif flag?(:win32) %}
+    real = windows_real_path(candidate)
+    return real unless real.nil?
   {% end %}
 
   normalize_path(candidate)
@@ -1169,6 +1213,17 @@ private def dirname_of(path : String) : String
 end
 
 private def normalize_path(path : String) : String
+  {% if flag?(:win32) %}
+    wide = __iyi_wide_path(path.to_unsafe)
+    return path if wide.address == 0_u64
+    room = 32768
+    full = Pointer(UInt16).malloc(room.to_u64)
+    written = LibC.GetFullPathNameW(wide, room, full, Pointer(Pointer(UInt16)).new(0_u64))
+    return path if written <= 0 || written >= room
+    size = __iyi_utf8_size_from_wide(full)
+    return path if size <= 0
+    return String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(full, t, size) }
+  {% end %}
   parts = path.split('/')
   res = [] of String
   parts.each do |part|
@@ -1286,5 +1341,9 @@ end
 private def is_under_scratch?(real : String) : ::Bool
   scratch = @@scratch
   return false if scratch.nil? || scratch.empty?
-  real == scratch || real.starts_with?(scratch.ends_with?("/") ? scratch : scratch + "/")
+  {% if flag?(:win32) %}
+    real == scratch || real.starts_with?(ends_with_separator?(scratch) ? scratch : scratch + "\\")
+  {% else %}
+    real == scratch || real.starts_with?(ends_with_separator?(scratch) ? scratch : scratch + "/")
+  {% end %}
 end

@@ -257,6 +257,34 @@ puts "  CRC-64 of the check value, of nothing, and in pieces, cut anywhere"
 # the pass in a plain build. A release build turns the pass into vector
 # code, so the ratio means nothing there and is not asked.
 {% unless flag?(:release) %}
+  # Wall-clock pauses can make the reference byte sum look artificially slow,
+  # hiding a per-byte reduction. On Linux x86-64 measure this thread's CPU
+  # time instead; keep the existing clock on the other targets.
+  {% if flag?(:linux) && flag?(:x86_64) %}
+    lib DigestCostClock
+      struct Timespec
+        sec : Int64
+        nsec : Int64
+      end
+    end
+  {% end %}
+
+  def digest_cost_now_ns : UInt64
+    {% if flag?(:linux) && flag?(:x86_64) %}
+      stamp = uninitialized DigestCostClock::Timespec
+      result = uninitialized Int64
+      # clock_gettime(CLOCK_THREAD_CPUTIME_ID = 3), x86-64 Linux syscall 228.
+      asm("syscall" : "={rax}"(result)
+                    : "{rax}"(228_i64), "{rdi}"(3_i64), "{rsi}"(pointerof(stamp))
+                    : "rcx", "r11", "memory"
+                    : "volatile")
+      raise "digest cost: thread CPU clock failed" unless result == 0
+      stamp.sec.to_u64 * 1000000000_u64 + stamp.nsec.to_u64
+    {% else %}
+      IyiMark.now_ns
+    {% end %}
+  end
+
   def byte_sum(s : String) : UInt32
     p = s.to_unsafe
     sum = 0_u32
@@ -276,19 +304,20 @@ puts "  CRC-64 of the check value, of nothing, and in pieces, cut anywhere"
   # The best of seven, not three: under a second busy process the best of
   # three still read Adler-32 at 4.3 and 6.4 byte sums, 2 runs in 12.
   7.times do |k|
-    t0 = IyiMark.now_ns
+    t0 = digest_cost_now_ns
     seen = seen ^ byte_sum(sample)
-    t1 = IyiMark.now_ns
+    t1 = digest_cost_now_ns
     seen = seen ^ CRC32.checksum(sample)
-    t2 = IyiMark.now_ns
+    t2 = digest_cost_now_ns
     seen = seen ^ Adler32.checksum(sample)
-    t3 = IyiMark.now_ns
+    t3 = digest_cost_now_ns
     best_sum = (t1 - t0).to_i64 if k == 0 || (t1 - t0).to_i64 < best_sum
     best_crc = (t2 - t1).to_i64 if k == 0 || (t2 - t1).to_i64 < best_crc
     best_adler = (t3 - t2).to_i64 if k == 0 || (t3 - t2).to_i64 < best_adler
   end
   assert_true best_crc < best_sum * 6, "crc cost: #{best_crc * 10 // best_sum}/10 of a byte sum (#{seen})"
-  # Adler-32 is 1.3 byte sums on x86_64, and reduced every byte 7.
+  # Linux x86-64 CPU-time samples: healthy 1.56..1.73, per-byte
+  # reduction 6.10..6.31, including shared-CPU contention (CI 42206904370).
   assert_true best_adler < best_sum * 4, "adler cost: #{best_adler * 10 // best_sum}/10 of a byte sum"
   # Named without its measurements: `bench/std_exercise.sh` runs this from
   # source and from artifacts and compares what it prints.

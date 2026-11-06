@@ -157,10 +157,13 @@ describe "Iyi::Stale S2: behavior key, toolchain digest, refused modes" do
         d2 = Iyi::Stale::Toolchain.digest(cache_dir)
         d1.should eq(d2)
 
-        # Memo file was created under tests-v1/toolchain/
         memo_dir = File.join(cache_dir, "tests-v1", "toolchain")
-        Dir.exists?(memo_dir).should be_true
-        Dir.children(memo_dir).should_not be_empty
+        {% if flag?(:unix) %}
+          Dir.exists?(memo_dir).should be_true
+          Dir.children(memo_dir).should_not be_empty
+        {% else %}
+          Dir.exists?(memo_dir).should be_false
+        {% end %}
 
         # Different executable yields different digest
         with_tempfile("dummy_exe_1") do |exe1|
@@ -178,6 +181,42 @@ describe "Iyi::Stale S2: behavior key, toolchain digest, refused modes" do
         end
       end
     end
+  end
+
+  describe "Stale::Toolchain required inputs" do
+    it "does not turn an unreadable input into a digest" do
+      with_tempfile("missing_toolchain_dir") do |dir|
+        Dir.mkdir_p(dir)
+        expect_raises(File::Error) do
+          Iyi::Stale::Toolchain.file_sha256(File.join(dir, "missing"))
+        end
+      end
+    end
+
+    {% if flag?(:win32) %}
+      it "rehashes a copied linker after a same-size edit with restored mtime" do
+        with_tempfile("stale_toolchain_cache") do |cache_dir|
+          Dir.mkdir_p(cache_dir)
+          with_tempfile("linker_original") do |original|
+            with_tempfile("linker_copy") do |linker|
+              File.write(original, "linker fixture A")
+              File.copy(original, linker)
+              timestamp = Time.utc(2020, 1, 2)
+              File.utime(timestamp, timestamp, linker)
+
+              first = Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker)
+              Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker).should eq(first)
+              Dir.exists?(File.join(cache_dir, "tests-v1", "toolchain")).should be_false
+
+              File.write(linker, "linker fixture B")
+              File.utime(timestamp, timestamp, linker)
+              File.info(linker).modification_time.should eq(timestamp)
+              Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker).should_not eq(first)
+            end
+          end
+        end
+      end
+    {% end %}
   end
 
   describe "Config.build_inputs" do

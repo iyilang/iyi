@@ -1383,6 +1383,13 @@ with open(diff_link, 'w') as f:
     f.write('pkg/alias-other\n')
 assert_positive('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_hit, '--changed-files', diff_link, '--repo', empty_repo])
 assert_negative('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_miss, '--changed-files', diff_link, '--repo', empty_repo], 'has equal build and unchanged observed inputs but missed')
+binding_snapshot['records'][0]['trace']['observations'][0]['path'] = 'alias-other/input'
+with open(snap_binding, 'w') as f:
+    json.dump(binding_snapshot, f)
+with open(diff_link, 'w') as f:
+    f.write('pkg/alias\n')
+assert_positive('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_hit, '--changed-files', diff_link, '--repo', empty_repo])
+assert_negative('git-diff-check', ['--master-snapshot', snap_binding, '--cached-json', f_gd_miss, '--changed-files', diff_link, '--repo', empty_repo], 'has equal build and unchanged observed inputs but missed')
 
 # Direction 2: Profile changed miss passes (exclusion)
 f_gd_prof = os.path.join(work, 'gd_prof.json')

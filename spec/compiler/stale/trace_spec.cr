@@ -458,7 +458,7 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
       File.symlink(old_file, file_link)
       Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should be_nil
       File.write(old_file, "else")
-      File.utime(info.access_time, info.modification_time, old_file)
+      File.utime(info.modification_time, info.modification_time, old_file)
       Iyi::Stale::Trace.replay(file_result.observations, keyer, roots).should_not be_nil
     ensure
       FileUtils.rm_r(dir) if dir && Dir.exists?(dir)

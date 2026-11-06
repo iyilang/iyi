@@ -5,6 +5,9 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# Its servers and clients are ended by end_process: on Windows, bash's own
+# `kill` ends a native program's stranger with it (bench/end_process.sh).
+. "$REPO/bench/end_process.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -55,7 +58,7 @@ end_children() {
       if [ "$windows" -eq 1 ] && { read -r w < "/proc/$p/winpid"; } 2>/dev/null; then
         taskkill //F //T //PID "$w" >/dev/null 2>&1
       fi
-      kill -KILL "$p" 2>/dev/null
+      end_process "$p" KILL
     done
   done
 }
@@ -75,13 +78,13 @@ trap 'exit 129' HUP
 # bash and the server running, as the sibling limit had.
 stop_server() {
   local pid="$1" i
-  kill "$pid" 2>/dev/null
+  end_process "$pid"
   for i in $(seq 1 600); do
     if ! kill -0 "$pid" 2>/dev/null; then
       wait "$pid" 2>/dev/null
       return 0
     fi
-    [ $((i % 10)) -eq 0 ] && kill -9 "$pid" 2>/dev/null
+    [ $((i % 10)) -eq 0 ] && end_process "$pid" KILL
     sleep 0.1
   done
   echo "  FAIL: a server, pid $pid, outlived a minute of TERM and KILL"
@@ -290,11 +293,11 @@ if "$IYI" build -o "$WORK/server" "$REPO/bench/std_http_server.iyi" >"$WORK/serv
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     sed -n '1,5p' "$WORK/server.out" | sed 's/^/    /'
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
     status=1
   elif [ -z "$PY" ]; then
     echo "  skipped: no working python3, so its http.client was not run against the server"
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
   elif PORT="$port" "$PY" - <<'PY'
 import http.client, os, shutil, subprocess, sys, gzip, zlib
 try:
@@ -377,7 +380,7 @@ PY
     grep -q "^stopped$" "$WORK/server.out" || { echo "  the server did not return from serve"; status=1; }
   else
     echo "  Python's client and the server disagree"
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
     status=1
   fi
 else
@@ -1939,7 +1942,7 @@ h2_stop() {
   elif command -v curl >/dev/null 2>&1; then
     curl -s "http://127.0.0.1:$H2PORT/quit" >/dev/null 2>&1
   fi
-  ( sleep 10; kill "$H2PID" 2>/dev/null ) &
+  ( sleep 10; end_process "$H2PID" ) &
   wait "$H2PID" 2>/dev/null
 }
 

@@ -15,10 +15,9 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 BASE = json.loads((ROOT / 'bench/fixtures/windows_gate_schedule.before.json').read_text())
 WORKFLOW = ROOT / '.github/workflows/iyi.yml'
-JOBS = ('windows-std', 'windows-gates')
+DEST = 'windows-gates'
 COLLECTOR = "The collector's gates, on Windows"
 SOCKET = 'Sockets, on Windows'
-FOUNDATION = "The standard library's foundation, on Windows"
 GUARD = "${{ !cancelled() && steps.compiler.outcome == 'success' }}"
 GATES = ['arena_exercise.sh', 'root_exercise.sh', 'mark_exercise.sh',
          'sweep_exercise.sh', 'collect_trigger.sh', 'thread_exercise.sh',
@@ -43,33 +42,32 @@ def named(steps, name):
 
 def check(workflow):
     jobs = workflow['jobs']
-    for name in JOBS:
-        job = jobs[name]
-        require(job.get('runs-on') == 'windows-2025', f'{name}: runner')
-        require('needs' not in job, f'{name}: serial needs')
-        require(job.get('timeout-minutes') == (150 if name == 'windows-std' else 90), f'{name}: timeout')
-        require(not job.get('continue-on-error'), f'{name}: continue-on-error')
-        for step in job['steps']:
-            require('continue-on-error' not in step, f'{name}: continue-on-error')
-            uses = step.get('uses', '').lower()
-            require('cache' not in uses and 'artifact' not in uses, f'{name}: shared artifact/cache')
-    donor = jobs['windows-std']['steps']
-    dest = jobs['windows-gates']['steps']
+    dest_job = jobs[DEST]
+    dest = dest_job['steps']
+    require(dest_job.get('runs-on') == 'windows-2025', f'{DEST}: runner')
+    require('needs' not in dest_job, f'{DEST}: serial needs')
+    require(dest_job.get('timeout-minutes') == 90, f'{DEST}: timeout')
+    require(not dest_job.get('continue-on-error'), f'{DEST}: continue-on-error')
+    for step in dest:
+        require('continue-on-error' not in step, f'{DEST}: continue-on-error')
+        uses = step.get('uses', '').lower()
+        require('cache' not in uses and 'artifact' not in uses, f'{DEST}: shared artifact/cache')
+    for name, job in jobs.items():
+        if name != DEST:
+            require(not any(s.get('name') in (COLLECTOR, SOCKET) for s in job.get('steps', [])), f'{name}: moved gates outside {DEST}')
     collector = named(dest, COLLECTOR)
     socket = named(dest, SOCKET)
-    foundation = named(donor, FOUNDATION)
-    require(not any(s.get('name') in (COLLECTOR, SOCKET) for s in donor), 'moved gates remain in windows-std')
     require(dest[-2:] == [collector, socket], 'collector/socket placement or order')
     for step in (collector, socket):
         require(step.get('if') == GUARD, f"{step['name']}: guard")
         require(set(step) == {'name', 'if', 'shell', 'run'}, f"{step['name']}: unexpected fields")
     builds = [s for s in dest if s.get('id') == 'compiler']
     require(len(builds) == 1 and builds[0].get('name') == "Build the fork's compiler, then `iyi`", 'compiler build id')
-    require(foundation.get('env', {}).get('STD_SIBLINGS') == '0', 'foundation STD_SIBLINGS')
-    require(sum('bash bench/std_exercise.sh' in s.get('run', '') for job in JOBS for s in jobs[job]['steps']) == 1, 'foundation invocation count')
+    foundation = [name for name, job in jobs.items() if str(job.get('runs-on', '')).startswith('windows') for s in job.get('steps', []) if 'bash bench/std_exercise.sh' in s.get('run', '')]
+    require(foundation == ['windows-std-core'], 'foundation runs once, in windows-std-core')
     expected = copy.deepcopy(BASE)
     old_donor = expected['windows-std']['steps']
-    old_dest = expected['windows-gates']['steps']
+    old_dest = expected[DEST]['steps']
     old_collector = named(old_donor, COLLECTOR)
     old_socket = named(old_donor, SOCKET)
     require(inventory([collector]) == inventory([old_collector]), 'collector command inventory or bound')
@@ -80,12 +78,10 @@ def check(workflow):
         step['if'] = GUARD
         old_dest.append(step)
     named(old_dest, "Build the fork's compiler, then `iyi`")['id'] = 'compiler'
-    expected['windows-std']['name'] = 'The standard library foundation, gated on Windows'
-    expected['windows-gates']['name'] = 'The language and collector gates, on Windows'
-    for name in JOBS:
-        require(jobs[name] == expected[name], f'{name}: job or step inventory')
+    expected[DEST]['name'] = 'The language and collector gates, on Windows'
+    require(dest_job == expected[DEST], f'{DEST}: job or step inventory')
     needs = jobs['release']['needs']
-    require(all(name in needs for name in JOBS), 'release needs windows-std and windows-gates')
+    require('windows-std' in needs and DEST in needs, 'release needs windows-std and windows-gates')
     return collector['run'], socket['run']
 
 

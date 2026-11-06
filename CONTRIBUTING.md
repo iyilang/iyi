@@ -36,8 +36,10 @@ The last one is the claim taken literally: it builds the samples, deletes the
 imported modules' source, builds them again from the artifacts, and compares
 what the two programs print.
 
-Windows CI runs the foundation in `windows-std` and the language, collector,
-and socket gates in `windows-gates`. To measure scheduling changes, compare
+Windows CI builds the compiler once in `windows-std-build`, runs the foundation's
+core in `windows-std-core`, runs the artifact sweeps in four `windows-std-artifacts`
+shards, and gates them all in `windows-std`. The language, collector, and socket
+gates stay in `windows-gates`. To measure scheduling changes, compare
 successful push runs from the same repository and runner labels, including
 workflow elapsed time, job pickup and execution, and individual gate durations.
 

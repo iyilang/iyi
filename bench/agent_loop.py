@@ -975,7 +975,30 @@ def main():
         try:
             reply = rpc("tools/call", {"name": "check", "arguments": {"file": "app.iyi"}}, 13)
         finally:
-            os.rename(aside, binary)
+            try:
+                # Windows can keep the renamed image open for the server's
+                # lifetime. The response above is the proof; stop and reap the
+                # server before putting its executable back.
+                if sys.platform == "win32":
+                    if server.poll() is None:
+                        try:
+                            rpc("exit")
+                        except Exception:
+                            pass
+                    try:
+                        server.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            server.kill()
+                        except Exception:
+                            pass
+                        try:
+                            server.wait(timeout=5)
+                        except Exception:
+                            pass
+            finally:
+                if os.path.exists(aside):
+                    os.rename(aside, binary)
         answered = reply is not None and "result" in reply and reply["result"]["isError"] is False
         step("mcp answers after its binary is renamed, as a rebuild on Windows does",
              answered and json.loads(reply["result"]["content"][0]["text"]) == [],

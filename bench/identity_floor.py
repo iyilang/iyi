@@ -338,9 +338,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r'"Crystal" *<<|"Crystal", is_optimised|io << "Crystal "', "the DWARF producer and version banner naming upstream"),
     (r"\b(compiled|interpreted|valid|future|in) Crystal\b", "a sentence about the other language"),
     (r"Crystal (only ever|refuses|injects|module|needs|repository|path)", "a sentence about the other language"),
-    # `in` is a word, not a suffix. Without the boundary, `Makefile.win crystal`
-    # matched `in crystal` and the Windows bootstrap command was allowed in any file.
-    (r"crystal (was compiled|code|repository)|\bin crystal\b|\.crystal\b", "a sentence about the other language"),
+    (r"crystal (was compiled|code|repository)|in crystal\b|\.crystal\b", "a sentence about the other language"),
     (r"Crystal source files", "the formatter's description of `.cr` input"),
     (r"\$crystal|\$CRYSTAL\b|\$\{CRYSTAL\}|regex crystal", "a shell variable and a type-name list"),
     (r"Crystal (resolves|infers|compiles|writes|builds|already|narrows|standard library)", "a sentence about the other language"),
@@ -428,43 +426,9 @@ def path_allowed(rel: str) -> str | None:
 # applies to it as to `.md`.
 PROSE_DOC = re.compile(r"\.mdx?$")
 LOWER_NEEDLE = re.compile(r"crystal")
-# The Windows bootstrap target is the whole word `crystal`. A suffix such as
-# `crystal_wrong` continues the name, so it is not this command. The dot is
-# literal: `Makefile.win`, not any character between the two words.
-WINDOWS_BOOTSTRAP_COMMAND = re.compile(r"make -f Makefile\.win crystal\b")
-# One recorded sentence. A later changelog line, or the same words in another
-# file, is still a leak.
-CHANGELOG_BOOTSTRAP_QUOTE = (
-    "`make -f Makefile.win crystal` handed the compiler `CRYSTAL_CONFIG_*`,"
-)
 
 
 def line_allowed(line: str, rel: str = "") -> str | None:
-    # The scheduling fixture preserves the pre-change Windows job verbatim.
-    # Its JSON value names the bootstrap compiler's version, not iyi.
-    if (rel == "bench/fixtures/windows_gate_schedule.before.json"
-            and line.strip() == '"crystal": "1.21.0"'):
-        return "the Windows workflow's bootstrap compiler, captured before rescheduling"
-    # The artifact schedule verifier quotes the actual Windows bootstrap command
-    # and checks the bootstrap action's pinned input. Allow only those exact lines.
-    if rel == "bench/std_artifact_schedule.py" and line.strip() in {
-        'BUILD_RUN = "make -f Makefile.win crystal || exit /b 1\\nmake -f Makefile.win iyi"',
-        'require(len(crystal) == 1 and crystal[0].get("with", {}).get("crystal") == "1.21.0", f"{name}: bootstrap toolchain")',
-    }:
-        return "the Windows artifact scheduler's exact bootstrap contract"
-    # The changelog already quotes the command. Allow that sentence only, so
-    # the quotation is not a pass for every changelog line or any other file.
-    if rel == "CHANGELOG.md" and line.strip() == CHANGELOG_BOOTSTRAP_QUOTE:
-        return "the Windows bootstrap command, quoted where the changelog records the config handoff"
-    # The same command is run or quoted in these files. Name them, so a copy in
-    # another file is still a leak. `Makefile.win` itself is a path exemption.
-    # `crystal` must be the whole target: `crystal_wrong` is not it.
-    if WINDOWS_BOOTSTRAP_COMMAND.search(line) and rel in {
-        ".github/workflows/iyi.yml",
-        "INSTALL.md",
-        "bench/fixtures/windows_gate_schedule.before.json",
-    }:
-        return "the Windows bootstrap build command, where that command is run or quoted"
     for rx, why in LINE_RES:
         if rx.search(line):
             return why

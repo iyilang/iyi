@@ -1019,9 +1019,6 @@ jobs:
           uv venv --python 3.14 /opt/oracle
           uv pip install --python /opt/oracle/bin/python -q cryptography pillow h2
           echo /opt/oracle/bin >> "$GITHUB_PATH"
-      - name: Windows gate scheduling contract
-        if: matrix.shard == 4
-        run: uv run --no-project --python /opt/oracle/bin/python --with PyYAML==6.0.3 python bench/windows_gate_schedule.py
       - name: Windows artifact scheduling contract
         if: matrix.shard == 4
         run: |

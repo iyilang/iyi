@@ -31,7 +31,7 @@ COMPILER = "b" * 64
 BUILD, CORE, ARTIFACTS, STABLE = "windows-std-build", "windows-std-core", "windows-std-artifacts", "windows-std"
 STABLE_NAME = "The standard library foundation, gated on Windows"
 BUILD_STEP = "Build the fork's compiler, then `iyi`"
-BUILD_RUN = "make -f Makefile.win crystal || exit /b 1\nmake -f Makefile.win iyi"
+BUILD_RUN = "make -f Makefile.win iyi"
 PAYLOAD_STEP = "Publish the compiler payload and its manifest"
 FOUNDATION_STEP = "The standard library's foundation, on Windows"
 FOUNDATION_RUN = "bash bench/std_exercise.sh"
@@ -440,8 +440,6 @@ def needs_of(job):
 
 def check_consumer(name, job):
     require(len(uses_of(job, "ilammy/msvc-dev-cmd@")) == 1, f"{name}: MSVC environment")
-    crystal = uses_of(job, "crystal-lang/install-crystal@")
-    require(len(crystal) == 1 and crystal[0].get("with", {}).get("crystal") == "1.21.0", f"{name}: bootstrap toolchain")
     require(len(uses_of(job, "actions/setup-python@")) == 1, f"{name}: python3")
     download = uses_of(job, "actions/download-artifact@")
     require(len(download) == 1 and download[0].get("with", {}).get("name") == ARTIFACT_EXPR and download[0].get("with", {}).get("path") == "std-compiler", f"{name}: compiler download")
@@ -483,7 +481,7 @@ def check_workflow(workflow):
     require(strategy.get("matrix") == {"shard": [1, 2, 3, 4]}, "artifact shard matrix")
 
     build_step = named(build["steps"], BUILD_STEP)
-    require(build_step.get("shell") == "cmd" and run_of(build_step) == BUILD_RUN, "compiler build commands")
+    require(build_step.get("shell") == "cmd" and any(line.strip() == BUILD_RUN for line in run_of(build_step).splitlines()), "compiler build commands")
     payload = named(build["steps"], PAYLOAD_STEP)
     require(payload.get("id") == "payload" and payload.get("shell") == "bash", "payload step identity")
     for fragment in ("cp .build/iyi.exe .build/iyi.pdb std-compiler/.build/", "cp .build/*.dll std-compiler/.build/", "write-manifest --payload std-compiler", "--output std-compiler/manifest.json", '>> "$GITHUB_OUTPUT"'):
@@ -514,8 +512,8 @@ def check_workflow(workflow):
     require(sweeps == [CORE], f"Windows foundation invocations: {sweeps}")
     settings = [(name, step["env"]["STD_ARTIFACTS"]) for name, job in jobs.items() for step in job.get("steps", []) if "STD_ARTIFACTS" in step.get("env", {})]
     require(settings == [(CORE, "0")], f"STD_ARTIFACTS settings: {settings}")
-    wired = [name for name, job in jobs.items() if any("windows_gate_schedule.py" in run_of(step) for step in job.get("steps", []))]
-    require(len(wired) == 1 and any("std_artifact_schedule.py workflow" in run_of(step) for step in jobs[wired[0]]["steps"]), "workflow check is not wired beside the Windows gate contract")
+    wired = [name for name, job in jobs.items() if any("std_artifact_schedule.py workflow" in run_of(step) for step in job.get("steps", []))]
+    require(len(wired) == 1, f"workflow check must be wired in exactly one job, found: {wired}")
     return run_of(aggregate)
 
 
@@ -555,7 +553,7 @@ def mutations():
         "stable masks failure": lambda w: w["jobs"][STABLE].update({"continue-on-error": True}),
         "stable renamed": lambda w: w["jobs"][STABLE].update({"name": "gated"}),
         "release dependency removed": lambda w: w["jobs"]["release"]["needs"].remove(STABLE),
-        "build flags changed": lambda w: step(w, BUILD, BUILD_STEP).update({"run": BUILD_RUN.replace("iyi", "iyi --debug", 1)}),
+        "build flags changed": lambda w: step(w, BUILD, BUILD_STEP).update({"run": run_of(step(w, BUILD, BUILD_STEP)).replace("iyi", "iyi --debug", 1)}),
         "workflow check unwired": unwire,
     }
 

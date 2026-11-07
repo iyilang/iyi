@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 28,503 lines, of which 4,650 are the library held to the 4,650 ceiling (6,905 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 136,370 lines, none of it written in iyi |
+| iyi's own prelude | 28,663 lines, of which 4,650 are the library held to the 4,650 ceiling (6,905 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 136,515 lines, none of it written in iyi |
 | artifact format | `.iyimod` v61, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 28,503 lines
+> "No standard library worth the name" is still true of iyi's own 28,663 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 28,503 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 28,663 lines,
 primitives included, of which the library is 4,650.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1030,9 +1030,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 136,370 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,503-line own prelude + 126,332 in std |
-| Specs | 21,146 lines | 16,647 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 136,515 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 28,663-line own prelude + 126,423 in std |
+| Specs | 21,146 lines | 16,735 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2644,7 +2644,7 @@ hook, and the prelude's own definition of it is untouched. Compile-time
 `responds_to?` works unchanged, which the error message is entitled to claim
 because it is tested.
 
-### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14); a plain `spawn` in parallel where it is proven safe PROPOSED (III.4.15); one spawn verb, and a spawn kept in its unit said where the author looks BUILT (III.4.16); ordering races found by seed, `iyi test --chaos`, BUILT (III.4.17)**
+### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14); a plain `spawn` in parallel where it is proven safe PROPOSED (III.4.15); one spawn verb, and a spawn kept in its unit said where the author looks BUILT (III.4.16); ordering races found by seed, `iyi test --chaos`, BUILT (III.4.17); units named, `unit: :same`, `unit: :new` and `Unit(T)`, BUILT (III.4.18)**
 
 This is the section where the design either beats Go or does not, so it is worth
 being blunt about where Go actually loses. Not goroutines: they are cheap, the
@@ -2683,16 +2683,21 @@ end
 and a signature that leaves it out is refused with that sentence. III.4.9
 is how the group comes to answer the type.
 
-**One verb, `spawn`, placed three ways (III.4.16).** `g.spawn { }` lets the
-compiler place the task: on the pool's workers where it can prove that safe,
-on the spawner's thread, taking turns with its siblings at every park,
-otherwise (III.4.15). `g.spawn(serial: true) { }` keeps the task on the
-spawner's thread whatever it captures: the choice for work whose order
-against its spawner matters, and its block may capture anything.
-`g.spawn(parallel: true) { }` runs it on the pool's workers, one per core,
-for work that computes, and its block may capture only `Share` values
-(III.4.4, III.4.13). std/http's `Server.serve` puts each connection on the
-pool by default; `workers: 1` keeps a server on one thread.
+**One verb, `spawn`, placed by naming a unit (III.4.16, III.4.18).** A
+*unit* is a set of tasks of which at most one runs at any instant and
+which switch only where one parks; its tasks may share values that are not
+`Share`. `g.spawn { }` lets the compiler place the task: in a unit of its
+own, on the pool's workers, where it can prove that safe, and in its
+spawner's unit, taking turns with its unit-mates at every park, otherwise
+(III.4.15). `g.spawn(unit: :same) { }` keeps the task in its spawner's
+unit whatever it captures: the choice for work whose order against its
+spawner matters, and its block may capture anything.
+`g.spawn(unit: :new) { }` runs it in a unit of its own on the pool's
+workers, one per core, for work that computes, and its block may capture
+only `Share` values (III.4.4, III.4.13). `g.spawn(in: u) { |value| }` runs
+it in the unit of a `Unit` value `u`, which owns a value only its tasks
+reach (III.4.18). std/http's `Server.serve` puts each connection in a unit
+of its own by default; `workers: 1` keeps a server on one thread.
 
 **This is `defer` again, and that is the argument for it.** III.1.4 built a
 cleanup that runs on a normal exit, on a `!` propagation, and on an unwind, by
@@ -2793,7 +2798,7 @@ level at a time — ``captures `items :
 Array(Int32)`, which is not Share: Array(Int32)'s field @size is assigned
 in `unsafe_set_size` ``. The channel's `T : Share` (III.4.6) is the
 trust `@[Share]` on `Channel(T)` gives since a channel crosses threads
-(III.4.13), and the block `spawn(parallel: true)` runs is gated as a thread's
+(III.4.13), and the block `spawn(unit: :new)` runs is gated as a thread's
 is. So is the block of a def marked `@[Share]`: the mark says the block
 the def keeps may run on other threads, several at once, and every block
 given to it is checked where it is written - std/http's
@@ -2825,7 +2830,7 @@ the second (twelve workers matching one constant answer as one thread),
 each with a copy that fails. Inside a `@[Share]` def its block, a
 `Proc`, is the one non-`Share` value a parallel block may capture or be
 given as `&block`, while the def leaves it as given; any other proc
-passed as a block to a boundary - `g.spawn(parallel: true, &work)`,
+passed as a block to a boundary - `g.spawn(unit: :new, &work)`,
 `m.lock(&work)` - is refused, since nothing saw what it captured, and
 before it was refused such a call compiled whatever `work` closed over.
 Held by `spec/compiler/semantic/iyi_spec.cr`
@@ -2880,12 +2885,12 @@ where a program keeps its database pool: a parallel block calling `ask`,
 which ran `DATABASE.query_one`, compiled silently, and an application on
 iyi-web reaching its pool through 193 call sites, all in model functions,
 mixed rows between requests at 12 workers. The block of `IyiThread.start`,
-of `spawn(parallel: true)` and of a `@[Share]` def is walked through the typed
+of `spawn(unit: :new)` and of a `@[Share]` def is walked through the typed
 call graph - every def it calls, every target of a virtual call, a
 recursive def once - and every constant and class variable met whose type
 is not `Share` is one warning, at the first block that reaches it, by that
 block's shortest path, counting the other blocks that reach it:
-``the block spawn(parallel: true) runs on another thread reaches
+``the block spawn(unit: :new) runs in a unit of its own, on another thread reaches
 `DATABASE : Main::Database` (not Share) through `ask` →
 `DATABASE.query_one`, as does 1 other parallel block: Main::Database's
 field @total is assigned in `query_one` ``. Warned once per block, as
@@ -2974,7 +2979,7 @@ is refused: nothing proves every thread may reach it safely.
 `DATABASE.query_one(n)` in `ask` at unguarded.iyi:18:12 writes it
 (`Database#query_one` assigns `@total`, in `@total = @total + 1`), and it
 may run once a parallel task has started, behind no lock the compiler can
-name: the block `spawn(parallel: true)` runs as a parallel task, at
+name: the block `spawn(unit: :new)` runs as a parallel task, at
 unguarded.iyi:22:5, which calls `ask` ``, followed by the three ways to be
 accepted. What writes is found through std and the prelude too, since
 `Array#<<` writes its receiver only through `Pointer#[]=`: whether a def
@@ -3152,11 +3157,14 @@ behind a synchronised type. The Kemal port did by hand what this makes checked,
 and Part V.5's question about the interaction between concurrency and
 module-level mutable state is answered: there is no interaction, because the
 combination does not compile. A *task* is not a thread, and that half is
-settled the other way: tasks `g.spawn` starts share their group's thread
-and interleave only at parks (III.4.8), so `Share` does not gate them, and
-a task appending to a module-level `Array` compiles and runs. A task
-`g.spawn(parallel: true)` starts may run on another core, and its block is
-gated as a thread's is (III.4.13).
+settled the other way: the tasks of one unit (III.4.18) never run at the
+same instant and interleave only at parks (III.4.8), so `Share` does not
+gate them, and a task of its spawner's unit - `g.spawn(unit: :same)`, or a
+plain `g.spawn` the compiler keeps there - appending to a module-level
+`Array` compiles and runs. A task `g.spawn(unit: :new)` starts is a unit
+of its own and may run on another core, so its block is gated as a
+thread's is (III.4.13), and so is the block `g.spawn(in: u)` runs in a
+`Unit`'s unit (III.4.18).
 
 #### III.4.6 What carries over from Crystal, and what does not
 
@@ -3840,7 +3848,7 @@ WASI 0.2/0.3 component-model async execution supporting stackful fibers directly
 Neither a sequential imitation nor a post-link bytecode transformation is
 acceptable.
 
-#### III.4.13 Tasks across cores: **BUILT — `spawn(parallel: true)`, a pool of workers that steal started tasks from each other; `Share` gates its block**
+#### III.4.13 Tasks across cores: **BUILT — `spawn(unit: :new)`, a pool of workers that steal started tasks from each other; `Share` gates its block**
 
 0.18.0 ended with "the scheduler that spreads tasks across cores comes after
 this release". Until this section every task ran on the thread that spawned
@@ -3916,15 +3924,16 @@ these after hundreds of moves, plain and release, with broken copies caught
 by name.
 
 **2. The door is asked for at the call, and `Share` gates it as it gates a
-thread.** Built as a verb of its own, `spawn_parallel`, and spelled
-`g.spawn(parallel: true) { }` since III.4.16 made the three verbs one.
-`g.spawn(parallel: true) { }` is a task of the group like any other — joined at the
+thread.** Built as a verb of its own, `spawn_parallel`, spelled
+`g.spawn(parallel: true) { }` when III.4.16 made the three verbs one, and
+`g.spawn(unit: :new) { }` since III.4.18 named the unit a task runs in.
+`g.spawn(unit: :new) { }` is a task of the group like any other — joined at the
 scope's end, cancelled with it, its answer through `value`, typed by `end!`
 (III.4.9) — whose block may run on another core. `g.spawn` did not change
 here: a task on the spawner's thread, interleaving at parks only, with no
 `Share` gate, so III.4.5's "a task appending to a module-level `Array`
 compiles and runs" stays true of it (III.4.15 later lets the compiler move
-a plain spawn it can prove safe; `g.spawn(serial: true)` is the spawn this
+a plain spawn it can prove safe; `g.spawn(unit: :same)` is the spawn this
 paragraph describes). The parallel block is checked by the compiler
 exactly as `IyiThread.start`'s is (III.4.4): every value it captures must be
 `Share`, a captured local must be assigned once — not by the block, not
@@ -3941,7 +3950,7 @@ at the same pair: `spawn` demands `Send` and work-steals, `spawn_local`
 demands nothing and stays.
 
 A task `g.spawn` starts *inside* a parallel task belongs to that task's
-unit (`IyiUnit`): the parent and the child may share the parent's
+unit (`IyiUnit`, III.4.18): the parent and the child may share the parent's
 non-`Share` locals, as any task and its spawner may, so no two tasks of a
 unit run at the same instant - a worker holds the unit's token from its
 switch to one of them until it switches to another unit's task or to none -
@@ -3971,7 +3980,7 @@ usually the one waiting in the join. A program sets the count with
 `IyiWorkers.count = n` before its first parallel task; a count asked for
 after the pool has started, and different from it, is refused by panic,
 since the pool does not shrink. The workers start at the first
-`spawn(parallel: true)`, so a program without one has no pool and no new thread.
+`spawn(unit: :new)`, so a program without one has no pool and no new thread.
 
 **5. A poller per worker on Linux and darwin; on Windows, one completion
 port for the process.** On Linux and darwin an IO wait is the waiting
@@ -4532,7 +4541,7 @@ large buffer, which `String::Builder` grows by - is not preempted, nor is
 the allocator's clearing of a chunk it reuses, 1 MiB at most; a large
 block is not cleared at all. wasm32 has no runtime (III.4.12) and no pool,
 and a build under `-Dgc_none` or `-Dgc_boehm`, which has no `IyiThread`,
-refuses `spawn(parallel: true)` at compile time rather than run it on one thread.
+refuses `spawn(unit: :new)` at compile time rather than run it on one thread.
 
 **A task waiting in the kernel holds no worker.** A contended `Mutex` parks
 the task on the lock's word (`IyiScheduler.park_on`, a futex for tasks;
@@ -4572,7 +4581,7 @@ table `IYI_WORKERS` is read from on Linux and darwin.
 core whatever the machine had: the Açık Türkiye port never passed 178%
 CPU on twelve vCPUs where its Go port reached 1,117%. The pooled server
 came first as a second method beside `serve`; 0.20.0 made it `serve`
-itself. `serve` starts each connection with `spawn(parallel: true)` on a pool
+itself. `serve` starts each connection with `spawn(unit: :new)` on a pool
 of *workers* - `IyiWorkers.count` by default, so `IYI_WORKERS` or the
 cores - and accepts on the calling thread; `workers: 1` is the one
 thread `serve` used to be, every connection a `g.spawn` beside the
@@ -4840,7 +4849,7 @@ PARALLEL_PLAN.md's third layer. Most of the speed a program gets from more
 cores is in a loop, not in a `spawn`, and III.4.13 left the loop to the
 program: cut the work, start a parallel task a piece, join, put the answers
 back together. This section is that, written once, as std code over
-`spawn(parallel: true)`, the way Rust's Rayon is a library over its pool.
+`spawn(unit: :new)`, the way Rust's Rayon is a library over its pool.
 
 ```
 import std/parallel
@@ -4871,7 +4880,7 @@ a program writes.
 
 **2. What the compiler asks: the block and the elements are `Share`.** The
 block runs on several workers at once, so it is checked as
-`spawn(parallel: true)`'s is (III.4.4, III.4.13 part 2): every value it captures
+`spawn(unit: :new)`'s is (III.4.4, III.4.13 part 2): every value it captures
 `Share`, every captured local assigned once. The methods are `@[Share]`
 defs, std/http's `serve` mechanism, so the refusal names the call. What a
 method hands its block crosses as well: the elements are read by chunks on
@@ -4909,7 +4918,7 @@ is two numbers, so they are read where they are; an `Array` is copied into
 a `List` first, the copy std/list already calls "the honest price of not
 having" a borrow checker. Without `elements:` the copy is still refused
 for a non-`Share` element, but inside std, by the capture check on
-`spawn(parallel: true)`'s block (`source : Std::List::List(Counter)`), which is
+`spawn(unit: :new)`'s block (`source : Std::List::List(Counter)`), which is
 the gate's proof that the sentence at the call is the new check's.
 
 **3. Chunking.** *n* elements are cut into chunks of `grain` elements, or,
@@ -4996,7 +5005,7 @@ block and a `sum_parallel` in a parallel task.
 
 **8. One worker, and no threads.** With `IYI_WORKERS=1`, with one chunk, and
 in a build under `-Dgc_none` or `-Dgc_boehm` - which refuses
-`spawn(parallel: true)` at compile time (III.4.13) - the chunks run one after
+`spawn(unit: :new)` at compile time (III.4.13) - the chunks run one after
 another on the caller and no pool starts. The answers, errors, panics and
 cancellation are the same; the program compiles the same, `Share` checks
 included, on every collector. The cost against the sequential twin is the
@@ -5095,9 +5104,9 @@ about memory may change.
 **1. The rule.** A `g.spawn { }` call is *eligible* when
 
 - its block is written at the call - `g.spawn(&work)` is not, since what a
-  proc captured is not written in its type (the refusal `spawn(parallel: true)`
+  proc captured is not written in its type (the refusal `spawn(unit: :new)`
   makes, III.4.4);
-- the block passes every check `spawn(parallel: true)`'s block is held to, the
+- the block passes every check `spawn(unit: :new)`'s block is held to, the
   same code asking the same questions (`Iyi::Share.reason`): each value
   it captures is `Share`, a captured local is assigned once - not by the
   block, not after the spawn, not in a loop or a block that spawns again -
@@ -5109,13 +5118,13 @@ about memory may change.
   comes back with nothing whose type is not `Share`.
 
 The third condition is what answers part 2's objection: where
-`spawn(parallel: true)` asked for parallelism and is told about what it reaches,
+`spawn(unit: :new)` asked for parallelism and is told about what it reaches,
 a plain spawn asked for nothing, and is moved only when nothing is there to
-tell. State marked `@[SafeReach("why")]` does not keep a spawn serial. The
+tell. State marked `@[SafeReach("why")]` does not keep a spawn in its spawner's unit. The
 mark's claim, in the words the warning asks for it with, is that "every
 thread may reach it safely" - a claim about the constant or class
 variable, not about one block - and a claim that held for every
-`spawn(parallel: true)` block reaching the state and not for a spawn reaching the
+`spawn(unit: :new)` block reaching the state and not for a spawn reaching the
 same state through the same call would be two meanings for one sentence.
 The claim is proven, not trusted (III.4.4): a write the proof cannot
 place before the first parallel task or behind one named lock refuses the
@@ -5123,7 +5132,7 @@ mark, so a spawn moved on its strength reaches state no thread writes
 unsafely.
 What the walk does not enter it does not enter for either verb: std and
 the prelude, whose state is theirs to keep safe at their own boundaries,
-which is what `spawn(parallel: true)` and `Server.serve` already stand on.
+which is what `spawn(unit: :new)` and `Server.serve` already stand on.
 It passes through them, though, to what they call back of the program's
 own: an interpolation asks the value's `to_s`, `Array#includes?` asks
 `==`, and either may write the program's state. Stopping at std, a spawn
@@ -5220,15 +5229,15 @@ stays in its unit.
 
 **3. Where it is decided, and how a call is pointed.** After typing, in
 the cleanup (`CleanupTransformer#classify_spawn`), at the same place
-`check_share_boundary` refuses a `spawn(parallel: true)` block: the block's
+`check_share_boundary` refuses a `spawn(unit: :new)` block: the block's
 closure and the final types of what it captured are known there and not
 before. `IyiGroup#spawn` carries one line that never runs, `return
 spawn_pooled(&block) if false`, so that every `T` it is typed for types the
 private `spawn_pooled` beside it, with the same signature; an eligible
 call is pointed at that instance, and the branch on `false` is dropped
 before code generation. Nothing is typed after the typer has finished, and
-a program whose spawns all stay serial carries the line and none of the
-pool's code: a release build of one serial spawn is 412,640 bytes against
+a program whose spawns all stay in their spawner's unit carries the line and none of the
+pool's code: a release build of one spawn kept in its unit is 412,640 bytes against
 412,240 before (Linux x86-64). `spawn_pooled` is private, so no program
 can call it past the check. A def typed for two `T`s classifies each
 instance's call, and the two can differ.
@@ -5237,14 +5246,15 @@ Whether a program's loops check for preemption (III.4.13, part 9) was
 asked of the typed defs - `IyiWorkers.start` typed anywhere - and every
 program that spawns now types it, on the line that never runs; it is
 asked of the code the cleanup keeps instead (`Program#iyi_pool_reached?`),
-so a program whose spawns all stay serial still has no checks.
+so a program whose spawns all stay in their spawner's unit still has no checks.
 
 **4. Seeing which it was.** Through the channels a program already has, and
 no new warning: `--error-on-warnings` builds do not change. `iyi build`,
 `iyi check` and `iyi run` take `--explain-spawn`, which writes a note for
 each of the program's spawns, after the warnings' output and in the same
-place - `file:line:column: note: spawn runs in parallel: ...`, or `spawn
-stays in its spawner's unit: ` followed by the refusal `spawn(parallel: true)`
+place - `file:line:column: note: spawn runs in parallel, in a unit of its
+own: ...`, or `spawn stays in its spawner's unit (SPEC.md III.4.18): `
+followed by the refusal `spawn(unit: :new)`
 would have made, which names the capture (`the block captures `log :
 Array(Int32)`, which is not Share: ...`), the constant and the path to
 it, or the line of the assignment. `--explain-spawn-std` adds std's and
@@ -5256,7 +5266,7 @@ hint after `spawn`, computed off its typed tree without the cleanup
 said unasked: `iyi check`'s note for each spawn kept in its unit, and the
 line a rebuild prints when a spawn moves.
 
-**5. Order, and the way out: `spawn(serial: true)`.** Before, a spawned task did
+**5. Order, and the way out: `spawn(unit: :same)`.** Before, a spawned task did
 not run until its spawner parked, and tasks of a unit took turns only at
 parks. An eligible task may start at once, on another core, beside its
 spawner. For memory nothing changes: every value both sides reach is
@@ -5266,13 +5276,14 @@ the task not having run yet, may find the task already read the old value;
 a spawner that sends on a buffered channel and then spawns the task that
 drains it is unaffected, but one that spawns the drainer first and counts
 on it not draining before the sends are all in is not. A program that
-depends on such an order says so with `g.spawn(serial: true) { }`, which is
+depends on such an order says so with `g.spawn(unit: :same) { }`, which is
 the `spawn` of before 0.21.0 whatever the block captures. This part first
 built it as a third verb, `spawn_serial`, beside `spawn_parallel`, and
-argued against the named argument; III.4.16 reverses that, and says why.
+argued against the named argument; III.4.16 reverses that, and says why,
+and III.4.18 names the unit the argument picks.
 
 **6. The pool, started at the first eligible spawn and grown to the work.**
-The pool starts where `spawn(parallel: true)` starts it, at the first eligible
+The pool starts where `spawn(unit: :new)` starts it, at the first eligible
 spawn that goes to the pool, and not before: a program none of whose spawns
 is eligible has no pool and no new thread. `IYI_WORKERS=1`, or
 `IyiWorkers.count = 1` before the first parallel task, keeps an eligible
@@ -5302,7 +5313,7 @@ to let the lock go pays it.
 Started whole, the pool cost a small program a thread a worker. On the
 shared 12-vCPU Linux machine, load 2 to 2.4, release builds, the mean of 200
 runs interleaved: one spawn that prints a line took 0.44 ms a process with
-the spawn serial, and with it eligible 0.45 ms on one worker, 0.89 on two,
+the spawn kept in its unit, and with it eligible 0.45 ms on one worker, 0.89 on two,
 1.10 on four and 2.46 on twelve with the pool started whole; grown to the
 work, 0.68 ms on two, four or twelve - one worker and the monitor. A program
 that allocates paid more: the collector's budget is floored at
@@ -5326,13 +5337,13 @@ like any other: joined at the scope's end, cancelled with it, its failure
 the group's under III.4.3, its answer through `value` - which need not be
 `Share`, as a parallel task's need not (III.4.13, part 3) - and typed by
 `end!`. A cancel reaches it on whichever worker it is on, and a panic stops
-at its boundary and is printed, as `spawn(parallel: true)`'s do. A spawn inside a
+at its boundary and is printed, as `spawn(unit: :new)`'s do. A spawn inside a
 parallel task is placed by the same rule: an eligible one is a unit of its
 own, and may run beside its parent; one that is not joins its parent's
 unit, as before. A spawn on a pool worker goes into that worker's queue,
 one on a thread outside the pool into the injection queue. Under
-`-Dgc_none` and `-Dgc_boehm`, where `spawn(parallel: true)` is refused, `spawn`
-has no line pointing at the pool and every spawn stays serial; its note
+`-Dgc_none` and `-Dgc_boehm`, where `spawn(unit: :new)` is refused, `spawn`
+has no line pointing at the pool and every spawn stays in its spawner's unit; its note
 says why.
 
 **8. The audit: what the new default moves, and what it broke.**
@@ -5349,7 +5360,7 @@ place the spawn is written:
 | bench/ | 120 | 286 | 6 |
 | samples/ | 5 | 3 | 0 |
 
-All of std's spawns stay serial, each for a capture that is not `Share`:
+All of std's spawns stay in their spawner's unit, each for a capture that is not `Share`:
 a connection's `IyiSocket`, a `ServeStop`, the autocert flight records, a
 `ProcessChild`, an `Array` of outcomes, a forwarded `Proc`. A server's
 connections, a process's pipes and autocert's renewals run as they did,
@@ -5368,12 +5379,12 @@ done about it:
   three spawns that send 1, 2 and 3 on one channel, counting on parking in
   the order spawned. They capture only the channel, so each ran on its own
   worker and the sends raced. The step tests the order, so its senders
-  are `spawn(serial: true)` now, and the step holds. The same gate's floor then
+  are `spawn(unit: :same)` now, and the step holds. The same gate's floor then
   read `environ`, the pool's, and lists it, as `parallel_exercise`'s does.
 - `thread_exercise`, "registry: 12 fibers of 8 finished threads are still
   registered": tasks spawned inside `IyiThread.start` blocks left for the
   pool, so the fibers outlived the threads the check counts them by. The
-  step is about a thread's own fibers, so they are `spawn(serial: true)`, and
+  step is about a thread's own fibers, so they are `spawn(unit: :same)`, and
   the gate holds.
 - `concurrency_exercise`'s dependency floor: spawns there are eligible,
   the pool starts, and `environ` is on the link line. It is the pool's,
@@ -5389,22 +5400,22 @@ done about it:
   whose subject is one thread's order or turns - the FIFO senders (11),
   the select woken by its deadline and a sender at once (16a), the
   receipt read after a later sender parks (16c) and the ping-pong beside
-  a sleeper (21) - spawn with `spawn(serial: true)` now, and the gate holds
+  a sleeper (21) - spawn with `spawn(unit: :same)` now, and the gate holds
   with every copy caught: the send node at 39 bytes a message, the io
   walk at 13 times the round trips' time.
 - `parallel_exercise`'s broken copy `closeshome` was not caught. Under
   `-Dparallel_closes_home` its seventeenth read is meant to be a task of
   the main thread's own; its block captures only `Share` values, so it
-  ran on the pool. It is `spawn(serial: true)`, and the copy is caught again.
+  ran on the pool. It is `spawn(unit: :same)`, and the copy is caught again.
 - `std_http_exercise`'s copy "a connection served on the thread that
   accepted it" was not caught. The copy spelled the connection's spawn
   `g.spawn` for "on the accepting thread", and the block, which
-  `spawn(parallel: true)` takes, is eligible, so the copy served every request
+  `spawn(unit: :new)` takes, is eligible, so the copy served every request
   on a worker as the real code does (`--explain-spawn-std` notes it
   "spawn runs in parallel"). On master's CI the same check catches it
   (run 41668221971, "caught: FAIL answered on the accepting thread: yes,
   not no"), so this change, and not the shared machine's load, made it
-  pass. The copy spells it `g.spawn(serial: true)` now, and is caught.
+  pass. The copy spells it `g.spawn(unit: :same)` now, and is caught.
 - On macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine),
   `runtime_exercise`'s darwin floor printed `_close` and `_environ`, the
   pool's, which only the Linux floor had listed; it lists both now.
@@ -5414,7 +5425,7 @@ done about it:
   the script ran, and its step "a group's join re-raises the first task
   that panicked" joined with "second" named: both spawns capture only a
   `String` and ran at once on two workers. The step is about the order of
-  one unit, so they are `spawn(serial: true)`, and the gate holds there and on
+  one unit, so they are `spawn(unit: :same)`, and the gate holds there and on
   Linux.
 - On `mt/next`, where this met std/mutex's starvation mode,
   `std_mutex_exercise` ended under "what it refuses" with "deadlock:
@@ -5425,7 +5436,7 @@ done about it:
   nothing could end only while the program has one thread, read more than
   one, and the wait parked until the scheduler named the deadlock, which
   the step's `assert_panics` does not catch. The twenty tasks are about
-  one thread's critical section, so they are `spawn(serial: true)`. The
+  one thread's critical section, so they are `spawn(unit: :same)`. The
   refusals now run after them, before "cancelled while it waits", whose
   holder and failing sibling are the first spawns on the pool - not
   first, where the copy "a lock taken while it is held" failed at the
@@ -5433,7 +5444,7 @@ done about it:
   run asks for its two workers before that, since `IyiWorkers.count`
   refuses a new size once the pool has started. The script's deadlock on
   one thread ran both its tasks on the pool too, where the scheduler names
-  the deadlock and each task fails `cancelled`; they are `spawn(serial: true)`,
+  the deadlock and each task fails `cancelled`; they are `spawn(unit: :same)`,
   and the Mutex names it again. The gate holds, with all eleven broken
   copies caught.
 - `thread_floor`'s exact darwin list, run on `mt/next` on macOS 26.6
@@ -5470,7 +5481,7 @@ That is 8.3× on twelve workers on Linux, 7.9× on ten on macOS and 9.5×
 on twelve on Windows, where the same source before ran on one thread
 whatever the count.
 
-A server, whose connections std spawns and part 8 found serial, should
+A server, whose connections std spawns and part 8 found kept in their unit, should
 not move, and `bench/web_cores.iyi`'s pooled server did not: release
 builds of `mt/next` (before) and this branch rebased on it (after),
 interleaved, best of three rounds, requests a second:
@@ -5491,17 +5502,17 @@ no spawn of the server's moved, which these three rounds do not explain.
 **10. Settled, and what is left.**
 
 - `@[SafeReach]` keeps making a spawn eligible (part 1), as it makes a
-  `spawn(parallel: true)` block pass, now that the claim is proven
+  `spawn(unit: :new)` block pass, now that the claim is proven
   (III.4.4).
 - A program that assumed spawn order (part 8) says so with
-  `spawn(serial: true)` where the order is the step's subject; none of those
+  `spawn(unit: :same)` where the order is the step's subject; none of those
   assumptions was in std.
 - The pool grows to the work (part 6), built here.
 - Left: the budget floor counting only threads that allocated since the
   last collection, so that idle workers cost no heap. This goes to the
   working-set work.
 
-#### III.4.16 One spawn verb, and no silent cliff: **BUILT — `g.spawn { }`, `g.spawn(parallel: true) { }` and `g.spawn(serial: true) { }`; a spawn kept in its unit is noted by `iyi check`, named down to the field and module that kept it, and a rebuild that moves one says so**
+#### III.4.16 One spawn verb, and no silent cliff: **BUILT — `g.spawn { }`, `g.spawn(unit: :new) { }` and `g.spawn(unit: :same) { }`; a spawn kept in its unit is noted by `iyi check`, named down to the field and module that kept it, and a rebuild that moves one says so**
 
 III.4.15 left three verbs: `spawn`, which the compiler places, `spawn_serial`,
 always in the unit, and `spawn_parallel`, always on the pool. Two problems
@@ -5514,23 +5525,32 @@ printed. This section is one verb, and that cliff said where the author
 looks.
 
 **1. One verb, the placement an argument.** `g.spawn { }` is the task the
-compiler places by III.4.15's rule. `g.spawn(parallel: true) { }` asks for
-the pool, and its block is held to everything `spawn_parallel`'s was
-(III.4.4, III.4.13), refused with the same sentences, whose subject now
-reads `the block spawn(parallel: true) runs on another thread`.
-`g.spawn(serial: true) { }` keeps the task in its spawner's unit whatever
-its block captures. III.4.15 part 5 chose a verb over the argument for two
-reasons: a `false` would mean nothing an absent argument does not, and a
-value the compiler cannot read would leave it nothing to decide on. Both
-are refused instead, at the call (`CleanupTransformer#check_spawn_placement`):
+compiler places by III.4.15's rule. `g.spawn(unit: :new) { }` asks for a
+unit of its own on the pool, and its block is held to everything
+`spawn_parallel`'s was (III.4.4, III.4.13), refused with the same
+sentences, whose subject now reads `the block spawn(unit: :new) runs in a
+unit of its own, on another thread`. `g.spawn(unit: :same) { }` keeps the
+task in its spawner's unit whatever its block captures. This section
+first spelled the two `parallel: true` and `serial: true`; III.4.18
+renamed them, before any release, for the unit each names, and refuses
+the old spellings. III.4.15 part 5 chose a verb over the argument for two
+reasons: a value that means nothing an absent argument does not, and a
+value the compiler cannot read, which would leave it nothing to decide
+on. Both are refused instead, at the call
+(`CleanupTransformer#check_spawn_placement`):
 
-- `parallel: false` and `serial: false`: "asks for nothing that leaving it
-  out does not: write `g.spawn { }` and the compiler places the task, or
-  `serial: true` to keep it in its spawner's unit";
-- a value that is not the literal `true`: "`serial:` takes the literal
-  `true`: where a task runs is settled when the program compiles, and
-  `ordered` is known only when it runs";
-- both at once: "a spawn is placed one way".
+- a symbol other than `:same` or `:new`: "`unit: :later` names no unit:
+  `unit: :same` keeps the task in its spawner's unit, and `unit: :new`
+  runs it in a unit of its own; or leave it out and let the compiler place
+  the task";
+- a value that is not a literal: "`unit:` takes `:same` or `:new` as
+  written: where a task runs is settled when the program compiles, and
+  `where` is known only when it runs";
+- `unit: :new` under `-Dgc_none` or `-Dgc_boehm`: "`unit: :new` needs
+  threads, and a build under -Dgc_none or -Dgc_boehm has none";
+- two placements at once: "a spawn is placed one way: `in: u` runs it in
+  the `Unit` u's unit, `unit: :same` in its spawner's and `unit: :new` in
+  one of its own".
 
 What is left reads as one verb with one question answered at the call.
 The typed group (III.4.9) takes each spelling as a direct spawn.
@@ -5538,37 +5558,43 @@ The typed group (III.4.9) takes each spelling as a direct spawn.
 **2. A clean cutover.** `spawn_parallel` and `spawn_serial` are gone from
 `IyiGroup`. A call to either on a group is a compile error that names the
 spelling that does what it did - "`spawn_parallel` is gone: one verb starts
-a task now. Write `g.spawn(parallel: true) { }`, which runs the task on the
-pool and refuses a capture that is not Share, as `spawn_parallel` did" -
-raised where an undefined method would be (`Call#iyi_raise_retired_spawn`),
-in a typed group too. Where the call has the shape the edit fits, a block
-written at it and no parentheses, the error carries the new spelling as its
-edit, so `iyi fix` rewrites `g.spawn_parallel do` as `g.spawn(parallel:
-true) do` and the program runs. The repository's own 173 call sites, in
-std, the samples, `bench/` and the specs, were moved with it.
+a task now. Write `g.spawn(unit: :new) { }`, which runs the task in a unit
+of its own and refuses a capture that is not Share, as `spawn_parallel`
+did" - raised where an undefined method would be
+(`Call#iyi_raise_retired_spawn`), in a typed group too. Where the call has
+the shape the edit fits, a block written at it and no parentheses, the
+error carries the new spelling as its edit, so `iyi fix` rewrites
+`g.spawn_parallel do` as `g.spawn(unit: :new) do` and the program runs.
+The repository's own 173 call sites, in std, the samples, `bench/` and the
+specs, were moved with it.
 
 **3. The cliff, said.** Four places, none of them a warning, so
 `--error-on-warnings` builds do not change:
 
 - *The reason names the module.* When a spawn stays in its unit, its
-  reason is the refusal `parallel: true` would have made, and a type in
+  reason is the refusal `unit: :new` would have made, and a type in
   that chain declared by another module is said with the module:
   `the block captures `config : Dep::Config::Config`, which is not Share:
   Dep::Config::Config's field @hits (module `dep/config`) is assigned in
   `bump``. A field inherited from a superclass is said with the module
   that declared it. The module is named only in a spawn's reason; the
-  refusals of `parallel: true` and of a thread's block are unchanged.
+  refusals of `unit: :new` and of a thread's block are unchanged. Where
+  the unit is what makes the code safe - a captured local assigned, a
+  module-level cell written - the reason says the sharing is "safe within
+  one unit and a data race across two", and its advice opens "To run it
+  in a unit of its own, ...".
 - *`iyi check` notes each spawn the compiler kept in its unit*, unasked,
   in a file under the project's root - not std's, the prelude's, or a
   dependency's outside it: `file:line:column: note: spawn stays in its
-  spawner's unit: ...`. A spawn in parallel is not noted, and neither is
-  one that spelled its placement: `serial: true` is how a program says the
-  unit is meant. `--explain-spawn` still notes every spawn. `iyi build`
-  prints nothing new.
-- *The language server* hints after a plain `spawn`: `parallel`, or
-  `in its unit: ` and the reason's first clause (`in its unit: the block
-  captures `log : Array(Int32)`, which is not Share`), the whole reason as
-  the tooltip. A spawn that spelled its placement is hinted nothing; its
+  spawner's unit (SPEC.md III.4.18): ...`. A spawn in parallel is not
+  noted, and neither is one that spelled its placement: `unit: :same` is
+  how a program says the unit is meant. `--explain-spawn` still notes
+  every spawn. `iyi build` prints nothing new.
+- *The language server* hints after a plain `spawn`: `in a unit of its
+  own`, or `in its spawner's unit: ` and the reason's first clause (`in
+  its spawner's unit: the block captures `log : Array(Int32)`, which is
+  not Share`), the whole reason as the tooltip, followed by what a unit is
+  (III.4.18). A spawn that spelled its placement is hinted nothing; its
   text says it.
 - *An artifact records where each spawn ran* (`Section::Spawns`, IV.1).
   A `.iyimod` lists every `g.spawn` written in its module: the def it is
@@ -5579,10 +5605,11 @@ std, the samples, `bench/` and the specs, were moved with it.
   a module whose import changed is compiled again - compares its own
   verdicts with the record before it writes, and prints one note for each
   spawn that moved: `spawn in `App::Work.crunch` ran in parallel when
-  app/work was last built, and stays in its spawner's unit now: ` and the
-  reason, or, the other way, `stayed in its spawner's unit when app/work
-  was last built, and runs in parallel now: it may start beside its
-  spawner, and `serial: true` keeps it where it was`. The other way is
+  app/work was last built, and stays in its spawner's unit now (SPEC.md
+  III.4.18): ` and the reason, or, the other way, `stayed in its
+  spawner's unit when app/work was last built, and runs in parallel now,
+  in a unit of its own: it may start beside its spawner, and `unit: :same`
+  keeps it where it was`. The other way is
   said too because it is the one that changes order. A spawn is matched
   across builds by its def, its block's text and which of those alike it
   is, so an edit above it does not move it and an edit to it makes it a
@@ -5597,26 +5624,31 @@ An entry module is never an artifact, so its own spawns are not recorded:
 whose spawns are the ones an upgrade moves from a distance, are.
 
 **4. Held.** `bench/spawn_eligible.sh`, on the shared 12-vCPU Linux machine:
-four `spawn(parallel: true)` tasks running at one instant, and on a pool of
+four `spawn(unit: :new)` tasks running at one instant, and on a pool of
 one on the pool's worker where a plain spawn of the same block stays on the
-main thread; `serial: true` in its unit; the notes, `-f json`'s seven frames,
+main thread; `unit: :same` in its unit; the notes, `-f json`'s seven frames,
 `iyi check`'s three unasked notes of seven spawns, `iyi build` silent; both
-old verbs refused, in a typed group too, `-f json` carrying the edit and
-`iyi fix` making the program run; the four refusals of part 1; the remote
-reason; and the rebuild's line each way, once, and none after a rebuild
-that moved nothing. Each with a broken copy caught: of the runtime,
-`parallel: true` left in its unit, `serial: true` sent to the pool and
-`spawn_parallel` kept as an alias; of the compiler, through
-`IYI_SPAWN_BROKEN` as `IYI_RELEASE_IMPORT=0` is `release_cores.sh`'s, a
-reason that names no module, `iyi check` silent unasked, no line for a
-moved spawn, and `spawn_parallel` answered as any undefined method.
+old verbs and both old placements refused, in a typed group too, `-f json`
+carrying the edit and `iyi fix` making the program run; the refusals of
+part 1; the remote reason; and the rebuild's line each way, once, and none
+after a rebuild that moved nothing. Each with a broken copy caught: of the
+runtime, `unit: :new` left in its unit, `unit: :same` sent to the pool,
+and `spawn_parallel` or `serial:` kept as an alias; of the compiler,
+through `IYI_SPAWN_BROKEN` as `IYI_RELEASE_IMPORT=0` is
+`release_cores.sh`'s, a reason that names no module, `iyi check` silent
+unasked, no line for a moved spawn, and `spawn_parallel` or `serial:`
+answered as any undefined method or parameter.
 `IYI_SPAWN_BROKEN` is the gate's and nobody else's: a test-only switch,
 read once, that turns one of these mechanisms off (`remote`, `fallback`,
-`moves`, `retired`, comma-separated) and is empty in every other run; no
-program and no build is meant to set it.
-`bench/lsp_session.py` step 23s holds the inlay hints: `parallel` on line 5,
-``in its unit: the block captures `log : Array(Int32)`, which is not Share`` on
-line 6, and none on line 7's `serial: true`. `bench/spawn_eligible.sh` and
+`moves`, `retired`, `unit-capture`, `unit-answer`, comma-separated) and is
+empty in every other run; no program and no build is meant to set it.
+`bench/lsp_session.py` step 23s holds the inlay hints: `in a unit of its
+own` on line 9, ``in its spawner's unit: the block captures `log :
+Array(Int32)`, which is not Share`` on line 10, the definition of a unit in
+both tooltips, and none on line 11's `unit: :same` or line 12's `in:
+counts`; step 23u, the hovers on `Unit` and on `spawn(in:)`. When this
+section was built, as `parallel: true` and `serial: true`,
+`bench/spawn_eligible.sh` and
 `bench/parallel_exercise.sh` also hold on macOS 26.6, Apple M2 Pro, 10 cores
 (the user's machine), in 33 s and 209 s, and on Windows 11, 12 logical
 processors (the user's machine), in 55 s and 272 s.
@@ -5700,7 +5732,7 @@ and stay outside the library count that I.4 holds to its ceiling.
 
 **3. Units, so that the language's promise holds.** A task the compiler
 would run in parallel - an eligible `g.spawn` (III.4.15) or a
-`g.spawn(parallel: true)` - runs on the one thread as a *unit* of its own
+`g.spawn(unit: :new)` - runs on the one thread as a *unit* of its own
 (`IyiChaosUnit`), so the interleavings two cores could produce are among
 the ones a seed can choose: tasks of different units take turns at any
 point. Tasks of one unit still take turns only at parks, as III.4.15
@@ -5708,7 +5740,9 @@ part 2 promises them. The scheduler chooses among units: the fiber
 preempted while holding a unit, or else the unit's oldest. It never puts a
 task between two operations of a unit-mate, and never starts one before
 its spawner parks. A program cannot fail under `--chaos` by an order the
-language rules out.
+language rules out. A `Unit` (III.4.18) is one chaos unit, shared by all
+its tasks and by none of its spawners', so its tasks take turns only at
+parks and may start before the code that spawned them parks.
 
 Top-level code checks at its back-edges in a chaos build, as a def's code
 does. The main thread is never a pool worker, so nothing else preempts it,
@@ -5856,6 +5890,13 @@ five rounds overlap: 45.4 to 53.1 before, 42.7 to 46.0 after.
      early;
    - the scheduler left in a plain build: the plain IR names it.
 
+   III.4.18 added a `Unit` to the exercise, whose tasks must start before
+   the spawner parks under some seeds and not others, and two broken
+   copies: a `Unit`'s tasks each given a chaos unit of their own, caught
+   when two of them run between each other's operations, and a `Unit`'s
+   tasks left in their spawner's unit, caught when no seed starts one
+   early. The table below was measured before them.
+
 | | Linux x86-64, 12 vCPUs, shared | macOS 26.6, Apple M2 Pro, 10 cores (the user's machine) | Windows 11, 12 logical processors (the user's machine) |
 |---|---|---|---|
 | plain runs failed | claim 0 of 40, join 0 of 40 | claim 0 of 40, join 0 of 40 | claim 0 of 40, join 0 of 40 |
@@ -5883,6 +5924,219 @@ and replaying them would make a threads-mode failure reproducible, and is
 not built. Neither strategy alone catches both test bugs, and ~6% a seed
 is low for bugs this small. Deeper PCT or a seeded mix of the two are the
 obvious next measurements.
+
+#### III.4.18 Units: **BUILT — a defined term; `g.spawn(unit: :same)` and `g.spawn(unit: :new)` in place of `serial: true` and `parallel: true`; `Unit(T)` in `std/unit`, whose tasks `g.spawn(in: u)` starts, interleaving where they park**
+
+Every section above leans on a word none of them defined. The notes said
+a spawn "stays in its spawner's unit", III.4.1 said `serial: true` kept a
+task "on the spawner's thread", which inside a parallel task it does not,
+and a note for a spawn its unit made safe called the code "a data race"
+and asked for a lock. And a program could not make a unit of its own that
+owns state: the actor shape was rebuilt by hand each time, a parallel
+task whose children share its locals and a channel that carries the asks
+(`std/autocert`'s `answer_ask`, std/http's connection, iyi-web's
+server). This section defines the term, names the two spellings after
+it, and gives the unit a value: `Unit(T)`.
+
+**1. What a unit is.** A *unit* is a set of tasks of which at most one
+runs at any instant, and which switch only where one parks. There are
+three kinds:
+
+- *a thread outside the pool*: the main thread, and each `IyiThread`
+  (III.4.11), with the tasks started on it in its unit;
+- *a unit of its own*: a task `g.spawn(unit: :new)` starts, or a plain
+  `g.spawn` the compiler places there (III.4.15), with every task started
+  in it in its unit, at any depth;
+- *a `Unit` value*: the tasks `g.spawn(in: u)` starts in `u`, and those
+  they start in their unit.
+
+Three promises hold of every unit. No two of its tasks run at the same
+instant: on the pool a worker holds the unit's token from its switch to
+one of them until it switches to another unit's task or to none, and a
+task preempted at a back-edge keeps it (III.4.13). Its tasks switch only
+where one parks - a channel's send or receive, a `select`, a join, a
+`sleep`, a lock, a read or write that waits. And a task spawned into its
+spawner's unit does not start before its spawner parks (III.4.15 part
+2). A unit is not a thread: a pool unit's tasks may each resume on
+another worker, never two at once.
+
+**2. What a unit's tasks may share, and what crosses between units.**
+Inside a unit, anything: a captured local, assigned or not, a module-level
+`Array` two tasks append to, a value that is not `Share`. No lock is
+needed, since nothing runs between two of a task's operations unless it
+parks. Between units, only `Share` (III.4.4): what a block that starts
+another unit captures - `g.spawn(unit: :new)`'s, `g.spawn(in: u)`'s,
+`IyiThread.start`'s - and the constants and class variables it names; a
+channel's elements; what a `Mutex` block captures and answers. A task's
+answer is handed over once, at the join: a `unit: :new` task's may be any
+type, since the task has ended by then (III.4.13 part 3), and a `Unit`'s
+task's must be `Share`, since the `Unit` lives on (part 4). A spawn the
+compiler keeps in its spawner's unit is one whose block would share such a
+cell across two units, and its note says so: ``the block assigns `total`,
+a local of the code that spawned the task, so the task and its spawner
+share one mutable cell: safe within one unit and a data race across two
+(SPEC.md III.4.4). To run it in a unit of its own, keep the value in an
+`Atomic`, or behind a `Mutex` (std/mutex)``.
+
+**3. The spellings name the unit.** A spawn says which unit its task
+joins, or lets the compiler choose:
+
+| Written | The task's unit | Its block may capture |
+|---|---|---|
+| `g.spawn { }` | a unit of its own where the compiler proves that safe, its spawner's otherwise (III.4.15) | anything; what it captures decides |
+| `g.spawn(unit: :same) { }` | its spawner's | anything |
+| `g.spawn(unit: :new) { }` | a unit of its own, on the pool | `Share` only |
+| `g.spawn(in: u) { \|value\| }` | the `Unit` `u`'s | `Share` only |
+
+III.4.16 built the first two placements as `serial: true` and
+`parallel: true`. They named a property neither has: `serial: true` was
+never serial with anything but its unit, and a `parallel: true` task's
+children are not parallel with it. 0.20.1 had neither, so the rename broke
+no released program, and it is a clean cutover with no alias. Each old
+spelling is one compile error at the argument that names the new one -
+"`serial:` is gone: a spawn names its unit now. Write `g.spawn(unit:
+:same) { }`, which keeps the task in its spawner's unit whatever it
+captures; `g.spawn { }` lets the compiler place it (SPEC.md III.4.16,
+III.4.18)", and for `parallel:` "Write `g.spawn(unit: :new) { }`, which
+runs the task in a unit of its own and refuses a capture that is not
+Share" - carrying the edit when the argument is the literal `true` on one
+line, so `iyi fix` rewrites the call (`Call#iyi_raise_retired_placement`).
+`unit:` takes the literals `:same` and `:new` and nothing else, refused
+as III.4.16 part 1 lists. A `:same` spawn does not start the pool: the
+compiler points a `:new` call at `IyiGroup#spawn_new` once it has read
+the literal, as it points an eligible plain spawn at `spawn_pooled`.
+
+**4. `Unit(T)`.** A value only one unit's tasks reach, one task at a time:
+the actor without the mailbox, whose messages are the tasks.
+
+```
+import std/unit::{Unit}
+
+counts = Unit.new { {} of String => Int32 }
+group do |g|
+  words.each { |w| g.spawn(in: counts) { |hits| hits[w] = (hits[w]? || 0) + 1; 0 } }
+end
+total = 0
+group do |g|
+  size = g.spawn(in: counts) { |hits| hits.size }
+  total = size.value.or(0)
+end
+```
+
+- `Unit.new { value }` makes a `Unit(U)` owning what the block answers.
+  The block is the value's way in, so it may capture only `Share` values,
+  checked as an owning type's block is (III.4.4).
+- `g.spawn(in: u) { |value| }` is a task of `g` - joined, cancelled and
+  failed by `g`'s scope as every task is (III.4.1-III.4.3) - that runs in
+  `u`'s unit and is handed the value. Its block may capture only `Share`
+  values: ``the block spawn(in: counts) runs in another unit captures
+  `log : Array(Int32)`, which is not Share: ...``, since the spawner may
+  be outside `u` and a captured array would be within reach of the value
+  and of another unit at once. What it answers must be `Share`:
+  ``spawn(in: counts) answers `Hash(String, Int32)`, which is not Share:
+  ...; what a task of a Unit answers leaves the unit while the unit lives
+  on, and the unit no longer guards it. Answer a Share value - a count, a
+  copy's numbers, a String (SPEC.md III.4.18)``, the rule `Mutex#get`'s
+  answer is held to. `in:` with `unit:` is refused: "a spawn is placed one
+  way".
+- Nothing else is handed the value: `IyiGroup::Unit(T)` keeps it behind a
+  `protected` accessor only `IyiGroup` reads. So `Unit(T)` is
+  `@[Share(owns: true)]` for any `T`, as `Mutex(T)` is, and a `Unit` may be
+  captured by any task, thread or `Unit` block. What the checks do not see
+  is a method the block calls that stores the value somewhere global: the
+  edge `Mutex` and the thread check have too.
+- The value is handed by what it is: a class, an `Array`, a `Hash` by
+  reference, so a task's change is the next task's value; a struct is
+  handed as a copy, so a value tasks change is a class that holds it.
+- A task `g.spawn(in: u)` starts may itself spawn with `unit: :same`, and
+  that task is in `u`'s unit and may be handed what its spawner holds.
+- There is no `Unit.current`. It would need values for the units nobody
+  made - the main thread, each `IyiThread` - and `g.spawn(in:
+  Unit.current)` would still have to refuse what is not `Share`, since the
+  compiler cannot know the spawner is in that unit: a weaker
+  `unit: :same`.
+
+**5. A `Unit`'s tasks interleave where they park.** One task that parks
+lets another of the same `Unit` run before it resumes, as unit-mates
+always may; Swift's actors reenter the same way. So what must hold of the
+value holds at every park, not only at a task's end, and a value read
+before a park may have changed after it:
+
+```
+account = Unit.new { [100] }
+ready = Channel(Int32).new
+group do |g|
+  g.spawn(in: account) do |a|
+    seen = a[0]
+    ready.receive          # parks: the other task of `account` may run here
+    a[0] = seen - 10       # wrong: 90 overwrites its 70; `a[0] -= 10` here makes 60
+    a[0]
+  end
+  g.spawn(in: account) do |a|
+    a[0] -= 30
+    ready.send(1)
+    0
+  end
+end
+```
+
+The other choice, holding the unit across a park as a lock is held, is
+Erlang's non-reentrant process and `Mutex`'s blocking, and it deadlocks
+the first time a task waits on a channel only a unit-mate fills; a
+program that wants an update whole across a park makes it after the park,
+or behind a `Mutex`.
+
+**6. A panic does not poison.** A task of a `Unit` that panics dies alone
+and answers `Panicked`, as any task does (III.1.4). The `Unit` is
+released and its next task runs; what the panicking task changed of the
+value stays changed. A `Mutex` is not poisoned either.
+
+**7. Where a `Unit`'s tasks run.** On a pool of more than one worker, on
+whichever worker is free, taking the `Unit`'s token (`IyiUnit`) as a
+parallel task's children do. On one worker (`IYI_WORKERS=1`,
+`IyiWorkers.count = 1`) every task of every `Unit` runs on the main
+thread, whichever thread spawned it, and takes turns there at parks with
+the main thread's other tasks; no pool starts. One worker is then one
+thread for a `Unit` too (III.4.15 part 6), and an `IyiThread` and the
+main thread never run two tasks of one `Unit` at once, which running each
+on its spawner's thread would. Which of the two is settled at the
+`Unit`'s first task and kept, so a pool sized after it does not split its
+tasks across the main thread and the workers. Under `-Dgc_none` and
+`-Dgc_boehm`, which have no threads, a `Unit`'s task joins its spawner's
+unit. Under `--chaos` each `Unit` is one chaos unit of its own (III.4.17
+part 3).
+
+**8. Toward a heap per unit.** PARALLEL_PLAN.md's layer 4 gives each unit
+a heap it collects alone. This section is the boundary that needs: a value
+that is not `Share` never leaves its unit, except a `unit: :new` task's
+answer at its join, the one crossing a heap per unit would have to
+promote or merge. A `Unit`'s answers are `Share`, so nothing crosses out
+of it, and a long-lived `Unit` is a heap's natural root. An actor
+*declaration* - a class whose instances are units - is not built: it is
+sugar over `Unit(T)` at several times its compiler cost (two views of
+`self`, a hop per method call), and waits for `Unit`'s callers and a
+layer 4 prototype to say whether units must be declared.
+
+**9. Held.** `bench/std_unit_exercise.sh`, plain and `--release`: on
+four workers, eight tasks of one `Unit` spawned from two units run one at
+a time on pool workers and the value holds all eight appends; a task that
+parks on a channel lets its unit-mate run and reads the value's size as 1
+before the park and 2 after, in an order the channels fix; a task that
+panics answers `Panicked` and the four tasks after it run and see its
+append; on a pool of one, a `Unit`'s tasks spawned from an `IyiThread`
+run on the main thread and no pool starts. The compiler refuses a
+`spawn(in:)` block capturing what is not `Share`, a task answering what
+is not `Share`, `Unit.new`'s block capturing what is not `Share`, two
+placements at once, and the value reached from outside its tasks. Broken
+copies, each caught at the check that names it: a `Unit` whose tasks
+each take a unit of their own, one whose tasks run on the spawner's
+thread on a pool of one, and through `IYI_SPAWN_BROKEN` the capture check
+removed (`unit-capture`) and the answer check removed (`unit-answer`).
+`bench/spawn_eligible.sh` holds the old spellings refused with `iyi fix`
+making the program run, with a broken copy that keeps `serial:` as an
+alias; `bench/chaos_exercise.sh` holds a `Unit` under seeds (III.4.17);
+`bench/lsp_session.py` steps 23s and 23u hold the hints, the definition
+in their tooltips, and the hovers on `Unit` and `spawn(in:)`.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
@@ -8770,9 +9024,9 @@ state the walk from its body finds that is not safe for every thread of
 every importer - the state, its type and module, the path, and why - and
 the `@[SafeReach]` claims on the module's own state that hold in every
 importer. It is always written, empty or not, because its absence means
-"not known" and keeps every spawn calling into the module in its unit, and
-it is in the interface hash, because a dependent's placement is compiled
-from it. `iyi mod dump` prints it.
+"not known" and keeps every spawn calling into the module in its spawner's
+unit (III.4.18), and it is in the interface hash, because a dependent's
+placement is compiled from it. `iyi mod dump` prints it.
 
 Fields were meant to be in that second list and are not, which is worth saying
 plainly because the reason is a bug rather than a change of mind. A consumer
@@ -12831,7 +13085,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 28,503-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 28,663-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

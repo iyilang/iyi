@@ -130,23 +130,24 @@
 
 - **A plain `spawn` runs in parallel where the compiler can prove it
   safe (SPEC.md III.4.15, proposed).** A `g.spawn { }` whose block
-  passes every check `spawn(parallel: true)`'s does, and whose walk of the
+  passes every check `spawn(unit: :new)`'s does, and whose walk of the
   module state it reaches through calls finds nothing that is not
   `Share` other than state marked `@[SafeReach]`, is a parallel task of
   its own unit on the pool. Any other spawn stays in its spawner's unit,
   as before. Nothing that compiled stops compiling, and there are no new
   warnings. `--explain-spawn` on `build`, `check` and `run` writes a note
-  for each spawn: `spawn runs in parallel`, or `spawn stays in its
-  spawner's unit:` followed by the refusal that kept it there, which
-  names the capture. `--explain-spawn-std` adds std's spawns. `-f json`
-  marks these notes `"severity": "note"`, and the language server shows
-  the same verdict as an inlay hint. `g.spawn(serial: true) { }` keeps a task in
-  its unit whatever it captures. `IYI_WORKERS=1` keeps every eligible
-  spawn on one thread and the pool unstarted. The pool starts at the
-  first eligible spawn, with one worker (the entry below). Of the spawns
-  that bench/ and samples/ programs reach, 125 locations now run in
-  parallel, 289 stay serial and 6 differ by instantiation. All 12 of
-  std's spawns stay serial. `bench/spawn_eligible.sh` holds the
+  for each spawn: `spawn runs in parallel, in a unit of its own`, or
+  `spawn stays in its spawner's unit (SPEC.md III.4.18):` followed by the
+  refusal that kept it there, which names the capture.
+  `--explain-spawn-std` adds std's spawns. `-f json` marks these notes
+  `"severity": "note"`, and the language server shows the same verdict as
+  an inlay hint. `g.spawn(unit: :same) { }` keeps a task in its unit
+  whatever it captures. `IYI_WORKERS=1` keeps every eligible spawn on one
+  thread and the pool unstarted. The pool starts at the first eligible
+  spawn, with one worker (the entry below). Of the spawns that bench/ and
+  samples/ programs reach, 125 locations now run in parallel, 289 stay in
+  their spawner's unit and 6 differ by instantiation. All 12 of std's
+  spawns stay in their spawner's unit. `bench/spawn_eligible.sh` holds the
   placement, the unit, the opt-out, one worker and the notes, with a
   broken copy caught for each. `bench/spawn_fanout.iyi` hashes 31 MiB in
   64 plain spawns. It runs in 99 ms on one worker and 12 ms on twelve on
@@ -158,7 +159,7 @@
   before and 118,532 after on the M2 at ten workers, 117,313 and 114,976
   on the Windows machine at twelve. Gate steps that tested a
   unit's order or one thread's turns, and depended on spawns staying
-  in their unit, spawn with `spawn(serial: true)`: in `runtime_exercise`,
+  in their unit, spawn with `spawn(unit: :same)`: in `runtime_exercise`,
   `thread_exercise`, `concurrency_exercise` (its two-panics step among
   them) and `parallel_exercise`, and in `std_http_exercise`'s copy that
   serves a connection on the accepting thread (SPEC.md III.4.15, part 8).
@@ -166,26 +167,27 @@
   "deadlock: every fiber is blocked": the pool its plain spawns started
   left its refusal of a wait nothing could end, which only a one-thread
   program makes, waiting instead. Its twenty tasks parking inside the lock
-  and its deadlock on one thread spawn with `spawn(serial: true)`, the refusals
+  and its deadlock on one thread spawn with `spawn(unit: :same)`, the refusals
   run before the first step that starts the pool, and the run asks for its
   two workers before anything does.
 
-- **One spawn verb: `g.spawn { }`, `g.spawn(parallel: true) { }` and
-  `g.spawn(serial: true) { }` (SPEC.md III.4.16).** `spawn_parallel` and
-  `spawn_serial` are gone. A call to either is a compile error naming
-  the new spelling - "`spawn_parallel` is gone: one verb starts a task
-  now. Write `g.spawn(parallel: true) { }`" - and carries it as an edit,
-  so `iyi fix` rewrites `g.spawn_parallel do` and `g.spawn_serial do`
-  where the call has a block and no parentheses. `parallel: true` is
-  held to everything `spawn_parallel` was, with the same refusals, now
-  worded `the block spawn(parallel: true) runs on another thread`. The
-  argument takes the literal `true`: `parallel: false`, a value only
-  known at run time, and both arguments at once are refused. The
-  typed group takes each spelling. The repository's 173 call sites were
-  moved, std's included; std/http's connections and std/parallel's
-  chunks run as before. The rename leaves the runtime's paths as they
-  were, and `bench/web_cores.py`'s server says so: on macOS 26.6, Apple
-  M2 Pro, 10 cores (the user's machine), 10 workers, best of 3
+- **One spawn verb: `g.spawn { }`, `g.spawn(unit: :new) { }` and
+  `g.spawn(unit: :same) { }` (SPEC.md III.4.16, III.4.18).**
+  `spawn_parallel` and `spawn_serial` are gone. A call to either is a
+  compile error naming the new spelling - "`spawn_parallel` is gone: one
+  verb starts a task now. Write `g.spawn(unit: :new) { }`" - and carries
+  it as an edit, so `iyi fix` rewrites `g.spawn_parallel do` and
+  `g.spawn_serial do` where the call has a block and no parentheses.
+  `unit: :new` is held to everything `spawn_parallel` was, with the same
+  refusals, now worded `the block spawn(unit: :new) runs in a unit of its
+  own, on another thread`. The argument takes the literal `:same` or
+  `:new`: another symbol, a value only known at run time, `unit: :new`
+  under `-Dgc_none` or `-Dgc_boehm`, and two placements at once are
+  refused. The typed group takes each spelling. The repository's 173 call
+  sites were moved, std's included; std/http's connections and
+  std/parallel's chunks run as before. The rename leaves the runtime's
+  paths as they were, and `bench/web_cores.py`'s server says so: on macOS
+  26.6, Apple M2 Pro, 10 cores (the user's machine), 10 workers, best of 3
   interleaved 5 s rounds, `check_version` answered 104,591 req/s before
   and 104,868 after, `order` 103,420 and 103,597; on Windows 11, 12
   logical processors (the user's machine), 12 workers, 6 interleaved 8 s
@@ -197,24 +199,58 @@
   III.4.16).** `iyi check` notes, unasked, each `g.spawn` the compiler
   kept in its spawner's unit in a file under the project's root, with
   what kept it there; a note is not a warning, so `--error-on-warnings`
-  is unchanged, and `g.spawn(serial: true)` says the unit is meant and
+  is unchanged, and `g.spawn(unit: :same)` says the unit is meant and
   takes no note. `iyi build` prints nothing new. The reason names the
   module that declared a type in its chain: `Dep::Config::Config's field
   @hits (module `dep/config`) is assigned in `bump``. The language
-  server's hint after a plain `spawn` reads `parallel` or `in its unit: `
-  and the reason's first clause. A `.iyimod` records where each spawn of
-  its module ran (`iyi mod dump` lists them, under `spawns`), and a build
-  that rewrites it prints one note for each spawn that moved since, each
-  way: `spawn in `App::Work.crunch` ran in parallel when app/work was last
-  built, and stays in its spawner's unit now: ...`. The new section is
-  outside the hashes and the format version is unchanged.
-  `bench/spawn_eligible.sh` holds each spelling, the refusals and the
-  fix, the remote reason and the rebuild's line, with a broken copy of
-  the runtime or of the compiler (`IYI_SPAWN_BROKEN`) caught for each;
-  `bench/lsp_session.py` step 23s holds the hints.
+  server's hint after a plain `spawn` reads `in a unit of its own` or `in
+  its spawner's unit: ` and the reason's first clause. A `.iyimod` records
+  where each spawn of its module ran (`iyi mod dump` lists them, under
+  `spawns`), and a build that rewrites it prints one note for each spawn
+  that moved since, each way: `spawn in `App::Work.crunch` ran in parallel
+  when app/work was last built, and stays in its spawner's unit now
+  (SPEC.md III.4.18): ...`. The new section is outside the hashes and the
+  format version is unchanged. `bench/spawn_eligible.sh` holds each
+  spelling, the refusals and the fix, the remote reason and the rebuild's
+  line, with a broken copy of the runtime or of the compiler
+  (`IYI_SPAWN_BROKEN`) caught for each; `bench/lsp_session.py` step 23s
+  holds the hints.
+
+- **A spawn names its unit: `g.spawn(unit: :same)` and
+  `g.spawn(unit: :new)` replace `serial: true` and `parallel: true`
+  (SPEC.md III.4.18).** Breaking for builds of `mt/next` only: 0.20.1 had
+  neither spelling. A *unit* is now defined - a set of tasks of which at
+  most one runs at any instant and which switch only where one parks: the
+  main thread or an `IyiThread` with its tasks, a `unit: :new` task with
+  the tasks it starts, or a `Unit` value - and the spellings name it.
+  There is no alias: `serial:` and `parallel:` are each one compile error
+  naming the new spelling, "`serial:` is gone: a spawn names its unit
+  now. Write `g.spawn(unit: :same) { }`, which keeps the task in its
+  spawner's unit whatever it captures; `g.spawn { }` lets the compiler
+  place it (SPEC.md III.4.16, III.4.18)", carrying the edit when the
+  argument is the literal `true`, so `iyi fix` rewrites the call. A
+  program that only asks for `:same` starts no pool. Every in-repo
+  caller moved: bench, the specs, the samples, std, README and
+  PARALLEL_PLAN.md.
+
+- **The spawn notes say what a unit makes safe.** A spawn kept in its
+  spawner's unit because its block shares a cell - a captured local it
+  assigns, a module-level value it writes - was told "a data race" and
+  asked for a lock, though the unit made it safe. The reason now reads
+  "share one mutable cell: safe within one unit and a data race across
+  two (SPEC.md III.4.4). To run it in a unit of its own, keep the value
+  in an `Atomic`, ...". The notes cite III.4.18 (`spawn stays in its
+  spawner's unit (SPEC.md III.4.18): ...`, `spawn runs in a unit of its
+  own: `unit: :new` asks for it, ...`, `spawn runs in parallel, in a unit
+  of its own: ...`), and so do the rebuild notes, `iyi mod dump` (`in its
+  spawner's unit: ...`), `iyi check --help` and `--explain-spawn`'s help.
+  The language server's hint after a plain `spawn` reads `in a unit of
+  its own` or `in its spawner's unit: ...`, and its tooltip ends with
+  the definition of a unit. `unit: :new`'s refusals open `the block
+  spawn(unit: :new) runs in a unit of its own, on another thread`.
 
 - **The pool starts one worker and grows to the work.** The first
-  parallel task, from `spawn(parallel: true)`, `Server.serve` or an eligible
+  parallel task, from `spawn(unit: :new)`, `Server.serve` or an eligible
   `spawn`, started every worker at once. It now starts one, and another
   only when a task is waiting and no worker is idle to take it, up to
   `IyiWorkers.count`, one on its way at a time, as Go starts a thread
@@ -347,6 +383,26 @@
   place unless `STD_PLATFORMS=0`, which is how the Linux and Windows
   foundation jobs leave it to `std-platforms` and `windows-std-platforms`;
   darwin-std runs it in place. The release job waits on both.
+
+- **`bench/std_unit_exercise.sh`: a `Unit`'s tasks run one at a time,
+  interleave where they park, survive a panic, and on one worker run on
+  the main thread (SPEC.md III.4.18).** Plain and `--release`, on four
+  workers and on one, with the compiler's five refusals of a block that
+  reaches a `Unit`'s value, and four broken copies each caught at the
+  check that names it: a `Unit` whose tasks each take a unit of their
+  own, one whose tasks run on the spawner's thread on a pool of one, and
+  `IYI_SPAWN_BROKEN=unit-capture` and `unit-answer`, the compiler's two
+  checks removed. `bench/spawn_eligible.sh` adds the old spellings'
+  refusal and `iyi fix`, with broken copies that keep `serial:` as an
+  alias and that drop the refusal; `bench/chaos_exercise.sh` adds a
+  `Unit` whose tasks must start before the spawner parks under some seeds
+  and not others, with copies that give each of its tasks a chaos unit
+  and that leave them in the spawner's; `bench/lsp_session.py` step 23s
+  holds the definition in the hints' tooltips and step 23u the hovers on
+  `Unit` and on `spawn(in:)`. `bench/std_http_exercise.sh` builds a
+  `workers: 1` server whose block appends to an array, whose connections
+  std/http spells `unit: :same`, and refuses the copy that puts them in
+  units of their own, for the socket its block captures.
 
 - **`bench/symbol_names.sh`: no symbol the compiler defines has an `@`
   (SPEC.md IV.1g).** A program with one of each family - an inherited
@@ -538,6 +594,33 @@
   `+7` and ` 7`, and a `--chaos-runs` below 1.
 
 ### Added
+
+- **`Unit(T)` in `std/unit`: a value only one unit's tasks reach (SPEC.md
+  III.4.18).** `Unit.new { {} of String => Int32 }` makes a `Unit` owning
+  what the block answers, and `g.spawn(in: u) { |hits| ... }` starts a task
+  of `g` in `u`'s unit, handed the value: never at the same instant as
+  another of `u`'s tasks, interleaving with them where one parks, as
+  Swift's actors do, so a value read before a park may have changed after
+  it. The compiler holds the block to `Share` captures (``the block
+  spawn(in: counts) runs in another unit captures `log : Array(Int32)`,
+  which is not Share: ...``) and its answer to `Share` (``spawn(in:
+  counts) answers `Hash(String, Int32)`, which is not Share: ...``), and
+  refuses `in:` with `unit:`; so `Unit(T)` is `Share` for any `T`, as
+  `Mutex(T)` is. A task that panics answers `Panicked` and does not
+  poison the `Unit`. On more than one worker its tasks run on the pool;
+  on one worker, on the main thread, whichever thread spawned them, so
+  one worker stays one thread. There is no `Unit.current`. Ten thousand
+  tasks given to one `Unit` from the main thread, against ten thousand
+  `spawn(unit: :new)` tasks, on four workers (`bench/std_unit_exercise.sh`
+  counts both and bounds neither), took per task: on Linux (12 vCPUs,
+  shared), in five runs, 5133 to 6686 ns against 3904 to 6889 plain and
+  3376 to 4442 against 2249 to 4142 with `--release`; on macOS 26.6,
+  Apple M2 Pro, 10 cores (the user's machine), in four runs, 3011 to 4140
+  against 2483 to 2707 plain and 5224 to 6630 against 1124 to 1231 with
+  `--release`, where a `Unit`'s tasks cost four to six times a unit of
+  their own; on Windows 11, 12 logical processors (the user's machine),
+  built by Crystal 1.21.0, in one run, 5618 against 6359 plain and 4369
+  against 3948 with `--release`.
 
 - **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,
   PROPOSED).** `each_parallel`, `map_parallel`, `sum_parallel` and
@@ -894,8 +977,8 @@
 - **`iyi fix` over several files counts every file it rewrote.** Its
   last line, `N files: M rewritten`, counted the files whose `using` it
   rewrote and no other: moving iyi-db off `spawn_parallel`, the run
-  printed seven `fixed ...: spawn_parallel -> spawn(parallel: true)`
-  lines in two files and then `27 files: 0 rewritten, 1 still reporting
+  printed seven `fixed ...: spawn_parallel -> ...` lines in two files
+  and then `27 files: 0 rewritten, 1 still reporting
   an error`. It says `2 rewritten` now. `bench/verbs_exercise.sh` holds a
   directory moved off `spawn_parallel` to `2 files: 1 rewritten`.
 
@@ -27430,7 +27513,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,503-line library and nothing else. Every other
+  written against iyi's own 28,663-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

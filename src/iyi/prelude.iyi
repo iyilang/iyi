@@ -4447,29 +4447,37 @@ require "./file"
       # writes is scanned with that stale word in it: the dead helper in
       # `bench/root_exercise.iyi` built 32 MB, returned, and the next
       # `IyiMark.collect` under --release still marked all of it, reached
-      # from a word 184 bytes under the caller's stack pointer. Two KiB is
+      # from a word 184 bytes under the caller's stack pointer. Called from
+      # the caller's frame (`IyiMark.collect` is always inlined), so every
+      # frame the collection lays down goes over zeroes. Two KiB is
       # several times the deepest collector stack measured (448 bytes, a
       # debug build). On Windows the committed limit bounds it, because a
-      # touch below the guard page faults. A debug build's own `collect`
-      # frame is above the cleared stretch and can still hold such a word.
+      # touch below the guard page faults. A debug build inlines nothing,
+      # and its own `collect` frame is above the cleared stretch and can
+      # still hold such a word.
       # The loop calls nothing: a store through `IyiHeap.write64`, not
       # inlined in a `--release --emit-iyimod` build, pushed its return
-      # address into the stretch it was clearing and returned to 0. Off
-      # Windows the 128 bytes under the stack pointer are the red zone a
-      # leaf like this one may keep its locals in, so they are left alone.
+      # address into the stretch it was clearing and returned to 0. Nor
+      # does the arithmetic around it, which wraps rather than checks: the
+      # call an overflow check keeps for its failure gave this function a
+      # frame, 40 bytes on Windows (that call's home space), between the
+      # caller's stack pointer and the one read here, and nothing cleared
+      # those. Off Windows the 128 bytes under the stack pointer are the
+      # red zone a leaf like this one may keep its locals in, so they are
+      # left alone.
       @[NoInline]
       def self.clear_dead_stack : Nil
         high = stack_pointer
         {% unless flag?(:win32) %}
-          high = high - 128_u64
+          high = high &- 128_u64
         {% end %}
-        low = high - 2048_u64
+        low = high &- 2048_u64
         {% if flag?(:win32) %}
           low = stack_limit if low < stack_limit
         {% end %}
         while low < high
           Pointer(UInt64).new(low).value = 0_u64
-          low = low + 8_u64
+          low = low &+ 8_u64
         end
       end
 
@@ -8168,8 +8176,32 @@ require "./file"
       # The verb: a program that calls this wants its memory back now, so
       # the sweep is eager here — every arena, the large list — where the
       # trigger's collections leave the sweep to the allocator.
+      #
+      # Always inlined, so the dead stack is cleared from the caller's
+      # frame and every frame of the collection's own (`collect_cleared`,
+      # never inlined) is built over zeroes. Out of line, as the top
+      # level's calls are (codegen/call.cr, `keep_call_out_of_main`),
+      # `collect`'s own frame sat above the cleared stretch, over the
+      # stack the program's last call had used, and a word of it nothing
+      # wrote was scanned with that call's value still in it. When the
+      # stopper's priority became two thread-locals (df97721d4), each
+      # reached through an accessor that writes its address to a slot of
+      # the caller's, that frame grew from 64 to 160 bytes, and its lowest
+      # word - home space for its own calls, which none of them writes -
+      # came to lie on the word of bench/root_exercise.iyi's dead helper
+      # that held the helper's array: 33,566,736 bytes kept in 30 --release
+      # runs of 30 built by LLVM 20.1.7, as the windows-2025 runners'
+      # Crystal 1.21.0 builds (CI jobs 128176433783 and 128229123908),
+      # where LLVM 23.1.1's layout of the same source freed them in 30 of
+      # 30 (Windows 11, 12 logical processors, the user's machine).
+      @[AlwaysInline]
       def self.collect : Nil
         IyiRoots.clear_dead_stack
+        collect_cleared
+      end
+
+      @[NoInline]
+      def self.collect_cleared : Nil
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           IyiThread.await_turns
         {% end %}

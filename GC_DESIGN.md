@@ -65,9 +65,14 @@ compiler keeps a call the top level makes once out of line
 (`keep_call_out_of_main`, codegen/call.cr). The collector's own
 frames are built over what earlier, deeper calls left on the stack, so a
 slot one of them never wrote held a returned helper's 32 MB array:
-`IyiMark.collect` zeroes 2 KiB of dead stack under itself first, as
-Boehm's `GC_clear_a_few_frames` does. And `__iyi_main`'s frame is laid
-over the stack the loader ran on before `main` - dyld left 2,209 words
+`IyiMark.collect` zeroes 2 KiB of dead stack first, as Boehm's
+`GC_clear_a_few_frames` does, from its caller's frame: it is always
+inlined, so no frame of the collection's own sits above the zeroed
+stretch. Out of line, its frame grew to 160 bytes when the stopper's
+priority became two thread-locals, and its lowest word, which nothing
+writes, kept the same 32 MB on Windows under LLVM 20.1.7. And
+`__iyi_main`'s frame is laid over the stack the loader ran on before
+`main` - dyld left 2,209 words
 down to 21,696 bytes under it on macos-15, Linux x86_64's start 5,352
 bytes deep - so a slot of it the program never wrote held the loader's
 word: on macos-15 four bytes dyld wrote, beside an `Int32` the top level

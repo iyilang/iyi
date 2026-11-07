@@ -198,8 +198,9 @@ echo "== the same program with optimisation on"
 # register check names its own premises and fails when one is gone, so this
 # run is not a formality: it is the one that would catch the ordering that
 # lets the optimiser reuse the register before the scan reaches it. The
-# dead-helper check is asserted only here, where `IyiMark.collect` is
-# inlined into the program's frame and zeroes everything under it.
+# dead-helper check is asserted only here (and only on Windows), where
+# `IyiMark.collect`, always inlined, clears the dead stack from the
+# program's frame and the collection's frames are all built under it.
 build_and_run "release" roots-release --release
 if [ "$EXERCISED" = no ]; then
   echo "  nothing was exercised here, so the optimised run is unmeasured too"
@@ -416,14 +417,15 @@ done
 
 echo
 echo "== the checks fail when the mechanism is removed"
-# Two mechanisms, each removed from a copy of the prelude that is then built
+# Each mechanism below is removed from a copy of the prelude that is then built
 # against through IYI_PATH. Nothing in the tree is modified. Each build must
 # produce a program that fails, and fails at the check that names the removed
 # mechanism, because a check that passes either way measures nothing.
 prove_fails() {
-  # $1 label, $2 directory name, $3 expected phrase, rest: the awk program
-  local label="$1" dir="$2" phrase="$3"
-  shift 3
+  # $1 label, $2 directory name, $3 expected phrase, $4 the awk program
+  # (which may exit non-zero to say it found nothing to change), rest: build flags
+  local label="$1" dir="$2" phrase="$3" program="$4"
+  shift 4
   if [ "$EXERCISED" = no ]; then
     echo "  $label: the exercise has nothing to run here, so this proof is unmeasured"
     unmeasured=$((unmeasured + 1))
@@ -431,8 +433,12 @@ prove_fails() {
   fi
   mkdir -p "$WORK/$dir/iyi"
   cp "$REPO"/src/iyi/*.iyi "$WORK/$dir/iyi/"
-  awk "$1" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
-  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
+  if ! awk "$program" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"; then
+    echo "  $label: the copy's awk found nothing in the prelude to take out"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build "$@" \
        -o "$WORK/$dir/program" "$REPO/bench/root_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched prelude did not build"
@@ -488,6 +494,38 @@ prove_fails "no fiber walk" nofiber "fiber root:" '
 prove_fails "the stack named, not held" named_stack "maps parser: the mapping holding" '
   { sub(/if probe != 0_u64$/, "if false"); print }
 '
+
+# The dead stack under a collection, not cleared at all, and cleared from
+# the collection's own frame rather than its caller's - `IyiMark.collect`'s
+# body out of line with the clear inside it, as it was when the stopper's
+# two thread-locals (df97721d4) grew that frame from 64 to 160 bytes and
+# laid its lowest word, which nothing writes, on a word still holding the
+# helper's array (CI jobs 128176433783 and 128229123908). The program
+# fills the kilobyte under its own frame with the helper's address first,
+# so either copy keeps the 32 MB whatever word the frames' layout leaves
+# unwritten: 20 runs of 20 each, built by LLVM 20.1.7 and by 23.1.1
+# (Windows 11, 12 logical processors, the user's machine). The check is
+# asserted in the optimised build on Windows only (bench/root_exercise.iyi
+# says why), so the copies are run there.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "no dead-stack clear" dead_noclear "bytes the helper built were still marked" '
+      /^        IyiRoots\.clear_dead_stack$/ { found = found + 1; next }
+                                             { print }
+      END                                    { if (found != 1) exit 3 }
+    ' --release
+    prove_fails "the dead stack cleared under the collection, not its caller" dead_inframe "bytes the helper built were still marked" '
+      /^        IyiRoots\.clear_dead_stack$/    { found = found + 1; next }
+                                                { print }
+      /^      def self\.collect_cleared : Nil$/ { print "        IyiRoots.clear_dead_stack"; found = found + 1 }
+      END                                       { if (found != 2) exit 3 }
+    ' --release
+    ;;
+  *)
+    echo "  the dead stack's two copies: the check is asserted in the optimised build on Windows only, so unmeasured on $(uname -s)"
+    unmeasured=$((unmeasured + 1))
+    ;;
+esac
 
 # The main stack's top, found after the program has spawned thousands of
 # tasks: two mappings each, a stack and its guard, before the first

@@ -708,6 +708,27 @@
 
 ### Fixed
 
+- **`GC.collect` clears the dead stack from its caller's frame, so what
+  a returned helper built is freed whatever the frames' layout.** A
+  collection zeroes 2 KiB of dead stack before it scans, and did so from
+  its own frame, which is not inlined into the top level and whose words
+  above the cleared stretch were scanned all the same. Once the stopper's
+  priority became two thread-locals, that frame grew from 64 to 160
+  bytes, and its lowest word, which nothing writes, lay on a word of
+  `bench/root_exercise.iyi`'s dead helper that still held the helper's
+  array: 33,566,736 bytes kept in every --release run on the
+  windows-2025 runners (CI jobs 128176433783 and 128229123908) and in 30
+  runs of 30 built by the same LLVM 20.1.7 on Windows 11, 12 logical
+  processors (the user's machine), where LLVM 23.1.1's layout of the
+  same source freed them in 30 of 30. `GC.collect` and the runtime's
+  `IyiMark.collect` are now always inlined, so the clear runs from the
+  caller's frame and every frame of the collection is built over
+  zeroes, and the clear itself keeps no frame. The exercise now fills
+  the kilobyte under its frame with the helper's address before it
+  collects: this runtime frees the 32 MB in 20 runs of 20, and a runtime
+  without the clear, or clearing from the collection's own frame, keeps
+  it in 20 of 20, built by LLVM 20.1.7 or 23.1.1 alike.
+
 - **A large program links with GNU ld, because no symbol has an `@` in
   it (SPEC.md IV.1g).** An inherited method was `*Derived@Base#hi` and a
   proc literal `~procProc(Int32, Int32)@src/a.iyi:3`, and GNU ld reads
@@ -27390,7 +27411,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,471-line library and nothing else. Every other
+  written against iyi's own 28,503-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

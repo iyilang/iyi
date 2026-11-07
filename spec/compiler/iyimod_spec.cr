@@ -5840,7 +5840,6 @@ end
 # consumer's numbering is its own, and a module's requires are not the
 # consumer's. All three have answers, so the combination is now supported and
 # these are what keeps it working.
-
 describe "a module compiled against Crystal's library" do
   it "travels through a .iyimod and links, replaying its requires" do
     with_tempdir("iyimod_crystal_library") do

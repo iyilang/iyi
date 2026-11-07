@@ -429,6 +429,13 @@ module Iyi
       end
 
       begin
+        # Definition typing does not run here: `Program#semantic` calls
+        # `DefinitionTyping.append_probes` between these two passes, and this
+        # path does not. So an imported artifact's witnesses are not restored.
+        # Under `--use-iyimod` a witness the producer numbered stays an
+        # unmatchable phantom id, which keeps dispatch but not a trait-valued
+        # field's layout, and a carried union or generic match naming one is
+        # refused when `semantic_after_top_level` resolves the deferred refs.
         node, processor = program.top_level_semantic(node, processor: pre.processor)
         node = program.semantic_after_top_level(
           Expressions.from([pre.node, node] of ASTNode), processor,

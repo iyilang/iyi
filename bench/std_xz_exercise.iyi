@@ -334,8 +334,8 @@ assert_true spent < 524288_u64, "a kilobyte with a 64 MiB dictionary allocated #
 puts "  a kilobyte written with a 64 MiB dictionary allocates under 512 KiB"
 
 args = Program.args
-if args.size > 0
-  dir = args[0]
+if args.size > 1 && args[0] == "data"
+  dir = args[1]
 
   puts "\n== against python's lzma"
   File.read("#{dir}/manifest.txt").split('\n').each do |line|

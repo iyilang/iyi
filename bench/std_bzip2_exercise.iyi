@@ -562,8 +562,8 @@ refused(second, "block 2 starts with neither", "a second stream whose block is b
 puts "  every corrupt stream above refused whole, a piece at a time, and on every read after"
 
 args = Program.args
-if args.size > 0
-  dir = args[0]
+if args.size > 1 && args[0] == "data"
+  dir = args[1]
   # The corrupt streams, for Python to refuse as well (the .sh).
   File.write("#{dir}/bad_block_crc.bz2", Bits.new(good).set(80, 1, Bits.new(good).get(80, 1) ^ 1).to_s)
   cb2 = Bits.new(good)

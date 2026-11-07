@@ -28,6 +28,8 @@
 # crash, a panic and a deadlock are all failures that name their file. A
 # test that neither exits nor fails is killed at the deadline (`--timeout`,
 # 60 s default), because a harness that can hang is not a harness.
+require "../stale/runner"
+
 class Iyi::Command
   # The longest `--timeout`: what Windows' waitable timer can count, in
   # 100 ns ticks held in an `Int64` - 922,337,203,684 s, some 29,000 years.
@@ -42,7 +44,12 @@ class Iyi::Command
     timeout = 60.0
     paths = [] of String
     affected = [] of String
-
+    cached = false
+    fresh = false
+    explain = false
+    shard = nil : String?
+    import_indices = [] of String
+    export_indices = [] of String
     while option = options.shift?
       case option
       when "--json"
@@ -70,6 +77,24 @@ class Iyi::Command
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
         end
         affected << value
+      when "--cached"
+        cached = true
+      when "--fresh"
+        fresh = true
+      when "--explain"
+        explain = true
+      when "--shard"
+        value = options.shift?
+        abort! "--shard takes K/N", :USAGE_ERROR unless value
+        shard = value
+      when "--import-index"
+        value = options.shift?
+        abort! "--import-index takes NS=FILE", :USAGE_ERROR unless value
+        import_indices << value
+      when "--export-index"
+        value = options.shift?
+        abort! "--export-index takes NS=FILE", :USAGE_ERROR unless value
+        export_indices << value
       when "--help", "-h"
         puts test_usage
         exit
@@ -82,6 +107,10 @@ class Iyi::Command
         paths << option
       end
     end
+    if cached && fresh
+      abort! "cannot pass both --cached and --fresh", :USAGE_ERROR
+    end
+
     paths << "." if paths.empty?
 
     files = [] of String
@@ -171,6 +200,27 @@ class Iyi::Command
         puts "0 to run, #{skipped} skipped: no test's imports reach the change"
       end
       exit
+    end
+    if cached || fresh || explain || shard || !import_indices.empty? || !export_indices.empty?
+      runner = Iyi::Stale::Runner.new(
+        files: files,
+        paths: paths,
+        as_json: as_json,
+        timeout: timeout,
+        affected: affected,
+        cached: cached,
+        fresh: fresh,
+        explain: explain,
+        shard: shard,
+        import_indices: import_indices,
+        export_indices: export_indices,
+        skipped: skipped,
+        discount_off: discount_off,
+        manifest_changed: manifest_changed,
+        unimported: unimported
+      )
+      runner.run
+      return
     end
 
     results = files.map { |file| run_one_test(file, timeout) }
@@ -333,7 +383,7 @@ class Iyi::Command
         return {file: file, status: "does not build", seconds: elapsed(started), output: output.to_s}
       end
 
-      process = Process.new(binary, output: output, error: output)
+      process = Process.new(binary, output: output, error: output, new_pgroup: true)
       tree = TestTree.new(process)
       running = tree
       done = ::Channel(Process::Status).new
@@ -378,10 +428,12 @@ class Iyi::Command
   # object the program is put in as soon as it runs; elsewhere the program
   # alone. [INFERENCE] A child a test starts on Linux or darwin outlives
   # the kill and holds the pipe the same way; unmeasured there.
-  private class TestTree
+  class TestTree
     @process : Process
     {% if flag?(:win32) %}
       @job : LibC::HANDLE = LibC::HANDLE.null
+    {% else %}
+      @pgid : Int64? = nil
     {% end %}
 
     def initialize(@process : Process)
@@ -401,6 +453,8 @@ class Iyi::Command
           return
         end
         @job = job
+      {% else %}
+        @pgid = @process.pid
       {% end %}
     end
 
@@ -410,6 +464,14 @@ class Iyi::Command
           LibC.TerminateJobObject(@job, 1)
           LibC.CloseHandle(@job)
           @job = LibC::HANDLE.null
+          return
+        end
+      {% else %}
+        if pgid = @pgid
+          begin
+            Process.signal(Signal::KILL, -pgid)
+          rescue
+          end
           return
         end
       {% end %}
@@ -431,17 +493,26 @@ class Iyi::Command
 
   private def test_usage
     <<-USAGE
-    Usage: #{Command.program_name} test [--json] [--timeout SECONDS] [--affected FILE]... [paths]
+    Usage: #{Command.program_name} test [--json] [--timeout SECONDS] [--affected FILE]...
+                                        [--cached | --fresh] [--explain] [--shard K/N]
+                                        [--import-index NS=FILE]... [--export-index NS=FILE]... [paths]
 
     Runs every `*_test.iyi` under the given paths (default: `.`). A test is
     a plain iyi program: exit 0 is a pass, anything else is a failure that
     prints its own evidence. `--json` reports the run as data.
 
     `--affected FILE` (repeatable) runs only the tests whose transitive
-    import closure contains a named file — name every file you changed.
+    import closure contains a named file: name every file you changed.
     The closure is read by parsing, so selection costs milliseconds; a
     deleted file turns the discount off, because nothing can prove the
     tests that imported it unaffected.
+
+    `--cached` reuses passing test results when code and observed inputs match.
+    `--fresh` forces execution and records new receipts.
+    `--explain` prints decision lines explaining hits and misses.
+    `--shard K/N` runs shard K of N shards dealt round-robin.
+    `--import-index NS=FILE` imports verified test receipts for namespace NS.
+    `--export-index NS=FILE` exports test receipts for namespace NS (requires --fresh).
     USAGE
   end
 end

@@ -376,10 +376,15 @@ def against_pairs(path : String, name : String, source : String, least : Int32, 
 end
 
 args = Program.args
-against(args[0], "exp", "Arm's", 300000) { |x| Math.exp(x) } if args.size > 0
-if args.size > 1
+data_args = if args.size > 0 && args[0] == "data"
+              args[1, args.size - 1]
+            else
+              [] of String
+            end
+against(data_args[0], "exp", "Arm's", 300000) { |x| Math.exp(x) } if data_args.size > 0
+if data_args.size > 1
   puts "\n== pow against Arm's pow, bit for bit"
-  triples = File.read(args[1])
+  triples = File.read(data_args[1])
   words = triples.to_unsafe.as(Pointer(UInt64))
   cases = triples.bytesize // 24
   index = 0
@@ -395,39 +400,39 @@ if args.size > 1
   assert_true cases > 200000, "the pow oracle had #{cases} cases"
   puts "  #{cases} pairs, every power Arm's to the last bit"
 end
-against(args[2], "log", "Arm's", 200000) { |x| Math.log(x) } if args.size > 2
-against(args[3], "exp2", "Arm's", 150000) { |x| Math.exp2(x) } if args.size > 3
-against(args[4], "log2", "Arm's", 150000) { |x| Math.log2(x) } if args.size > 4
-against(args[5], "log10", "glibc's", 150000) { |x| Math.log10(x) } if args.size > 5
-against(args[6], "expm1", "glibc's", 150000) { |x| Math.expm1(x) } if args.size > 6
-against(args[7], "log1p", "glibc's", 150000) { |x| Math.log1p(x) } if args.size > 7
-against(args[8], "sinh", "glibc's", 250000) { |x| Math.sinh(x) } if args.size > 8
-against(args[9], "cosh", "glibc's", 250000) { |x| Math.cosh(x) } if args.size > 9
-against(args[10], "tanh", "glibc's", 250000) { |x| Math.tanh(x) } if args.size > 10
-against(args[11], "erf", "glibc's", 200000) { |x| Math.erf(x) } if args.size > 11
-against(args[12], "erfc", "glibc's", 200000) { |x| Math.erfc(x) } if args.size > 12
-against(args[13], "asinh", "glibc's", 200000) { |x| Math.asinh(x) } if args.size > 13
-against(args[14], "acosh", "glibc's", 200000) { |x| Math.acosh(x) } if args.size > 14
-against(args[15], "atanh", "glibc's", 200000) { |x| Math.atanh(x) } if args.size > 15
+against(data_args[2], "log", "Arm's", 200000) { |x| Math.log(x) } if data_args.size > 2
+against(data_args[3], "exp2", "Arm's", 150000) { |x| Math.exp2(x) } if data_args.size > 3
+against(data_args[4], "log2", "Arm's", 150000) { |x| Math.log2(x) } if data_args.size > 4
+against(data_args[5], "log10", "glibc's", 150000) { |x| Math.log10(x) } if data_args.size > 5
+against(data_args[6], "expm1", "glibc's", 150000) { |x| Math.expm1(x) } if data_args.size > 6
+against(data_args[7], "log1p", "glibc's", 150000) { |x| Math.log1p(x) } if data_args.size > 7
+against(data_args[8], "sinh", "glibc's", 250000) { |x| Math.sinh(x) } if data_args.size > 8
+against(data_args[9], "cosh", "glibc's", 250000) { |x| Math.cosh(x) } if data_args.size > 9
+against(data_args[10], "tanh", "glibc's", 250000) { |x| Math.tanh(x) } if data_args.size > 10
+against(data_args[11], "erf", "glibc's", 200000) { |x| Math.erf(x) } if data_args.size > 11
+against(data_args[12], "erfc", "glibc's", 200000) { |x| Math.erfc(x) } if data_args.size > 12
+against(data_args[13], "asinh", "glibc's", 200000) { |x| Math.asinh(x) } if data_args.size > 13
+against(data_args[14], "acosh", "glibc's", 200000) { |x| Math.acosh(x) } if data_args.size > 14
+against(data_args[15], "atanh", "glibc's", 200000) { |x| Math.atanh(x) } if data_args.size > 15
 # CORE-MATH's own, correctly rounded: glibc 2.43's are IBM's, which are
 # not quite, and differ from these for about 5 arguments in 10,000.
-against(args[16], "atan", "CORE-MATH's", 150000) { |x| Math.atan(x) } if args.size > 16
-against(args[17], "asin", "CORE-MATH's", 150000) { |x| Math.asin(x) } if args.size > 17
-against(args[18], "acos", "CORE-MATH's", 150000) { |x| Math.acos(x) } if args.size > 18
-against(args[19], "lgamma", "glibc's", 150000) { |x| Math.lgamma(x) } if args.size > 19
-against(args[20], "tgamma", "glibc's", 150000) { |x| Math.tgamma(x) } if args.size > 20
-against(args[21], "tan", "CORE-MATH's", 200000) { |x| Math.tan(x) } if args.size > 21
-against(args[22], "sin", "CORE-MATH's", 200000) { |x| Math.sin(x) } if args.size > 22
-against(args[23], "cos", "CORE-MATH's", 200000) { |x| Math.cos(x) } if args.size > 23
+against(data_args[16], "atan", "CORE-MATH's", 150000) { |x| Math.atan(x) } if data_args.size > 16
+against(data_args[17], "asin", "CORE-MATH's", 150000) { |x| Math.asin(x) } if data_args.size > 17
+against(data_args[18], "acos", "CORE-MATH's", 150000) { |x| Math.acos(x) } if data_args.size > 18
+against(data_args[19], "lgamma", "glibc's", 150000) { |x| Math.lgamma(x) } if data_args.size > 19
+against(data_args[20], "tgamma", "glibc's", 150000) { |x| Math.tgamma(x) } if data_args.size > 20
+against(data_args[21], "tan", "CORE-MATH's", 200000) { |x| Math.tan(x) } if data_args.size > 21
+against(data_args[22], "sin", "CORE-MATH's", 200000) { |x| Math.sin(x) } if data_args.size > 22
+against(data_args[23], "cos", "CORE-MATH's", 200000) { |x| Math.cos(x) } if data_args.size > 23
 # The Bessel functions, fdlibm's as glibc carries them, on CORE-MATH's sin
 # and cos, which are iyi's: the oracle is named for the C function.
-against(args[24], "besselj0", "glibc's", 120000) { |x| Math.besselj0(x) } if args.size > 24
-against(args[25], "besselj1", "glibc's", 120000) { |x| Math.besselj1(x) } if args.size > 25
-against(args[26], "bessely0", "glibc's", 120000) { |x| Math.bessely0(x) } if args.size > 26
-against(args[27], "bessely1", "glibc's", 120000) { |x| Math.bessely1(x) } if args.size > 27
-if args.size > 29
+against(data_args[24], "besselj0", "glibc's", 120000) { |x| Math.besselj0(x) } if data_args.size > 24
+against(data_args[25], "besselj1", "glibc's", 120000) { |x| Math.besselj1(x) } if data_args.size > 25
+against(data_args[26], "bessely0", "glibc's", 120000) { |x| Math.bessely0(x) } if data_args.size > 26
+against(data_args[27], "bessely1", "glibc's", 120000) { |x| Math.bessely1(x) } if data_args.size > 27
+if data_args.size > 29
   puts "\n== jn and yn against glibc's, bit for bit"
-  [{args[28], true}, {args[29], false}].each do |pair|
+  [{data_args[28], true}, {data_args[29], false}].each do |pair|
     triples = File.read(pair[0])
     words = triples.to_unsafe.as(Pointer(UInt64))
     cases = triples.bytesize // 24
@@ -448,11 +453,11 @@ end
 # CORE-MATH's own cbrt and hypot, correctly rounded: glibc 2.43's cbrt is
 # not - it differs from this for about half the arguments - and its
 # hypot is, but for pairs of subnormals.
-against(args[30], "cbrt", "CORE-MATH's", 100000) { |x| Math.cbrt(x) } if args.size > 30
-against_pairs(args[31], "hypot", "CORE-MATH's", 100000) { |x, y| Math.hypot(x, y) } if args.size > 31
+against(data_args[30], "cbrt", "CORE-MATH's", 100000) { |x| Math.cbrt(x) } if data_args.size > 30
+against_pairs(data_args[31], "hypot", "CORE-MATH's", 100000) { |x, y| Math.hypot(x, y) } if data_args.size > 31
 # CORE-MATH's atan2, correctly rounded; glibc 2.43's is IBM's, an ulp
 # away for 12,077 of 1,748,883 pairs of the port's.
-against_pairs(args[32], "atan2", "CORE-MATH's", 200000) { |y, x| Math.atan2(y, x) } if args.size > 32
+against_pairs(data_args[32], "atan2", "CORE-MATH's", 200000) { |y, x| Math.atan2(y, x) } if data_args.size > 32
 
 # `bench/std_math_fma.py`'s cases, named by the environment because they
 # need python and no C compiler: quadruples a, b, c and a * b + c taken

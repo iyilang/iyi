@@ -66,7 +66,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  "$WORK/$name" "$VECTORS" >"$WORK/$name.out" 2>&1
+  "$WORK/$name" "data" "$VECTORS" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -169,7 +169,7 @@ elif ! cut_vectors "$WORK/test-vectors.json" "$WORK/subset.json" subset >/dev/nu
   status=1
 elif ! cut_vectors "$WORK/test-vectors.json" "$WORK/every.json" every; then
   status=1
-elif "$WORK/hpke-release" "$WORK/every.json" >"$WORK/every.out" 2>&1; then
+elif "$WORK/hpke-release" "data" "$WORK/every.json" >"$WORK/every.out" 2>&1; then
   FETCHED=1
   echo "  cut by the vendored rule, the file is the vendored subset, value for value"
   grep -A1 '^== rfc 9180 vectors' "$WORK/every.out" | grep '^  [0-9]' | sed 's/^  /  checked: /'
@@ -332,7 +332,7 @@ PY
   then
     echo "  the $2 patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_hpke_exercise.iyi" -- "$VECTORS" >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_hpke_exercise.iyi" -- "data" "$VECTORS" >"$WORK/mut.out" 2>&1; then
     echo "  the exercise PASSED on $2"
     status=1
   elif grep -qF "$3" "$WORK/mut.out"; then

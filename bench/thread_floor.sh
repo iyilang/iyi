@@ -161,14 +161,9 @@ case "$(uname -s)" in
     # kernel threads sized by `hw.ncpu`, and the concurrent mark's second
     # stop registers the main thread, installs the stop's handler and
     # signals with `pthread_kill`. The refused variants carry them for the
-    # same reason - the Mach one included, whose own stop never signals -
-    # so the four sit in the runtime's list, not the probe's. So do the
-    # helpers' park and wake, `_os_sync_wait_on_address` and
-    # `_os_sync_wake_by_address_all`, which the runtime's stop and the
-    # probe's park on too (bench/dependency_floor.sh says why those two).
-    # `_pipe` and `_read` were the runtime's while a stopped thread parked
-    # in `read` on a pipe of its own, and left with that park.
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    # same reason, including the Mach variant. The helpers and stopped
+    # threads park and wake on libSystem's os_sync address primitives.
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _dladdr _dprintf _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
     thread='__tlv_bootstrap _pthread_join _pthread_threadid_np'
     # The refused parks: a pipe per thread, `pipe` and `read`; the lock's
     # two calls; and `sigsuspend` alone. The Mach stop swaps the stop for
@@ -200,7 +195,9 @@ case "$(uname -s)" in
         exit 1
       fi
     done
-    echo "  the runtime's $(echo $runtime | wc -w | tr -d ' ') names, the thread's $(echo $thread | wc -w | tr -d ' '), libSystem alone, plain and release; each refused variant to its own list"
+    runtime_count="$(echo $runtime | wc -w | tr -d ' ')"
+    thread_count="$(echo $thread | wc -w | tr -d ' ')"
+    echo "  the runtime's $runtime_count names, the thread's $thread_count, libSystem alone, plain and release; each refused variant to its own list"
     ;;
 esac
 

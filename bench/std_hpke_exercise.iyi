@@ -444,9 +444,9 @@ check HpkeSuite.from_ids(0x11, 2, 0xffff).to_s == "DHKEM(P-384, HKDF-SHA384), HK
 puts "  3 KEMs, 3 KDFs and 4 AEADs; P-521, X448 and the post-quantum KEMs refused by id"
 
 # With a file, every vector of it; with none, the vectors embedded above.
-unless args.empty?
-  puts "\n== rfc 9180 vectors (#{args[0].split('/').last})"
-  run_vectors(JSON.parse(File.read(args[0])), "vector")
+if args.size > 1 && args[0] == "data"
+  puts "\n== rfc 9180 vectors (#{args[1].split('/').last})"
+  run_vectors(JSON.parse(File.read(args[1])), "vector")
 end
 
 puts "\n== embedded rfc 9180 vectors"

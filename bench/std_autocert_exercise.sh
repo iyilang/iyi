@@ -96,9 +96,16 @@ local_run() {
   "$1" "$2" >"$3" 2>&1
 }
 
+# run_own <name> <cache dir> <out>: local_run on the binary `build <name>` wrote.
+run_own() {
+  local name="$1"
+  rm -rf "$2"
+  "$WORK/$name" "$2" >"$3" 2>&1
+}
+
 echo "== the std/autocert exercise, plain build"
 if build autocert-plain; then
-  local_run "$WORK/autocert-plain" "$WORK/local-cache" "$WORK/plain.out"
+  run_own autocert-plain "$WORK/local-cache" "$WORK/plain.out"
   code=$?
   sed 's/^/  /' "$WORK/plain.out"
   if [ "$code" -ne 0 ] || ! grep -q "ALL CHECKS PASSED" "$WORK/plain.out"; then
@@ -122,7 +129,7 @@ done
 echo
 echo "== the same program with optimisation on (--release)"
 if build autocert-release --release; then
-  local_run "$WORK/autocert-release" "$WORK/release-cache" "$WORK/release.out"
+  run_own autocert-release "$WORK/release-cache" "$WORK/release.out"
   if grep -q "ALL CHECKS PASSED" "$WORK/release.out"; then
     echo "  ALL CHECKS PASSED"
   else

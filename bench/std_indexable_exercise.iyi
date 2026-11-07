@@ -380,7 +380,7 @@ assert_true([1, 2, 3].product == 6, "product stays the multiplicative fold")
 puts "mutable surface: all passed"
 
 # 5. Probe triggers when invoked with an argument for failure proof testing
-if Program.args.size > 0
+if Program.args.size > 0 && Program.args[0].starts_with?("probe_")
   mode = Program.args[0]
   case mode
   when "probe_positive_out_of_range"

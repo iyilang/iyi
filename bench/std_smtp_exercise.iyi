@@ -208,8 +208,8 @@ def client(port : Int32, scenario : String, roots : String) : Nil
   puts "quit: #{said(smtp.quit)}"
 end
 
-if Program.args.size > 0
-  client(Program.args[1].to_i, Program.args[2], Program.args.size > 3 ? Program.args[3] : "") if Program.args[0] == "client"
+if Program.args.size > 0 && Program.args[0] == "client"
+  client(Program.args[1].to_i, Program.args[2], Program.args.size > 3 ? Program.args[3] : "")
   exit 0
 end
 

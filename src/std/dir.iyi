@@ -89,6 +89,7 @@ import std/file::{File}
       SYS_UNLINKAT   =  35_i64
     {% end %}
 
+    @[Effect(:primitive)]
     def self.sys(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -198,6 +199,7 @@ pub class Dir
     yield d
   end
 
+  @[Effect(:stdio)]
   private def open_dir(dir_path : String) : Void*
     {% if flag?(:darwin) || flag?(:linux) %}
       p = LibC.opendir(Dir.c_str(dir_path))
@@ -235,6 +237,7 @@ pub class Dir
     {% end %}
   end
 
+  @[Effect(:dir_stream)]
   def read : String?
     raise "Cannot read from closed Dir" if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -291,6 +294,7 @@ pub class Dir
     {% end %}
   end
 
+  @[Effect(:stdio)]
   def rewind : self
     raise "Cannot rewind closed Dir" if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -315,6 +319,7 @@ pub class Dir
     self
   end
 
+  @[Effect(:stdio)]
   def close : Nil
     return if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -336,6 +341,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def entries : Array(String)
     res = [] of String
     rewind
@@ -354,6 +360,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def children : Array(String)
     res = [] of String
     each_child do |entry|
@@ -384,6 +391,7 @@ pub class Dir
     cd(path)
   end
 
+  @[Effect(:cwd)]
   def self.cd(path : String | Path) : String
     target = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -472,6 +480,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def self.entries(dirname : String | Path) : Array(String)
     Dir.open(dirname) do |dir|
       return dir.entries
@@ -487,6 +496,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def self.children(dirname : String | Path) : Array(String)
     Dir.open(dirname) do |dir|
       return dir.children
@@ -494,6 +504,7 @@ pub class Dir
     [] of String
   end
 
+  @[Effect(:file_exists)]
   def self.exists?(path : String | Path) : Bool
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -526,6 +537,7 @@ pub class Dir
     true
   end
 
+  @[Effect(:file_write, :mkdir)]
   def self.mkdir(path : String | Path, mode : Int32 = 0o777) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -544,6 +556,7 @@ pub class Dir
     {% end %}
   end
 
+  @[Effect(:file_write, :mkdir)]
   def self.mkdir_p(path : String | Path, mode : Int32 = 0o777) : Nil
     p_str = path.to_s
     return if exists?(p_str)
@@ -592,6 +605,7 @@ pub class Dir
     raise "Cannot create directory: #{p_str}#{refusal}" unless exists?(p_str)
   end
 
+  @[Effect(:file_write, :delete)]
   def self.delete(path : String | Path) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -607,6 +621,7 @@ pub class Dir
     {% end %}
   end
 
+  @[Effect(:file_write, :delete)]
   def self.delete?(path : String | Path) : Bool
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -629,6 +644,7 @@ pub class Dir
     # retry and goes back when the retry still refuses, so a directory
     # this could not remove is not a directory this left writable. It
     # is the same shape the prelude's `__iyi_unlink` has for a file.
+    @[Effect(:file_write, :delete)]
     private def self.remove_directory(wide : Pointer(UInt16)) : Bool
       return true if LibKernel32.RemoveDirectoryW(wide) != 0
       return false if LibKernel32.GetLastError != 5

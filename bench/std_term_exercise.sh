@@ -156,11 +156,29 @@ def kernel_free(attrs):
 
 
 def stty_kernel_free(text):
-    # `stty -g` is iflag:oflag:cflag:lflag:... in hex on both platforms.
+    # `stty -g` format differs by platform:
+    # - BSD (darwin's /bin/stty): gfmt1:cflag=hex:iflag=hex:lflag=hex:...
+    # - GNU (coreutils stty): iflag:oflag:cflag:lflag:... in hex
     fields = text.split(":")
-    if len(fields) > 3 and KERNEL_LFLAG:
-        fields[3] = format(int(fields[3], 16) & ~KERNEL_LFLAG, "x")
-    return ":".join(fields)
+    if fields and fields[0] == "gfmt1":
+        if KERNEL_LFLAG:
+            for i, f in enumerate(fields):
+                if f.startswith("lflag="):
+                    try:
+                        name, val = f.split("=", 1)
+                        fields[i] = f"{name}={format(int(val, 16) & ~KERNEL_LFLAG, 'x')}"
+                    except ValueError:
+                        pass
+                    break
+        return ":".join(fields)
+    elif len(fields) > 3:
+        if KERNEL_LFLAG:
+            try:
+                fields[3] = format(int(fields[3], 16) & ~KERNEL_LFLAG, "x")
+            except ValueError:
+                return text
+        return ":".join(fields)
+    return text
 
 
 

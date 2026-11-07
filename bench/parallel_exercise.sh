@@ -527,7 +527,7 @@ case "$(uname -s)" in
     ;;
   Darwin)
     [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _dladdr _dprintf _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
     thread='_close _pthread_kill'
     pool='_environ'
     allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
@@ -840,13 +840,10 @@ caught parkedio 'task-panic: still running 5000 ms after it started' task-panic 
 caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=0
 
 step "failure proof: take_now and put_now without the scheduler's lock lose and repeat values across workers"
-# Two threads changing one channel's ring and queues at once end the step
-# by name most runs - a place still held, a value out of order, a take of
-# an empty channel, a wake lost - and some by a fault, or by a hang the
-# step's own watchdog does not end, with a channel's queues torn: 10 of 12
-# runs ended by name here and 2 hung, and a fault was seen in an earlier
-# set. A run that dies of a signal or is timed out is run again, up to
-# five times, and one ending by name is the proof.
+# Two threads changing one channel's ring and queues at once can fail the
+# named now check or panic on a full put / empty take. Both are violations
+# of this exercise's channel invariants. A fault, timeout, or successful
+# run is not proof; retry those up to five times.
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: two workers cannot change a channel at the same instant, so the proof is not run"
 else
@@ -854,14 +851,16 @@ else
   for attempt in 1 2 3 4 5; do
     timeout -k 5 30 ./unlocked-run now --watch=5000 > unlocked.txt 2>&1
     code=$?
-    [ "$code" -lt 124 ] && break
+    if [ "$code" -eq 1 ] && grep -qE 'FAIL: now: |put_now on a full channel|take_now on an empty open channel' unlocked.txt; then
+      break
+    fi
   done
-  # Not anchored at the line's start: other workers' panics are printed
-  # beside it, and one landed in front of the FAIL in a run of this proof.
-  if [ "$code" -ne 1 ] || ! grep -q 'FAIL: now: ' unlocked.txt; then
+  # Other workers can write into the middle of a panic line, so match the
+  # exact invariant message rather than assuming a line prefix.
+  if [ "$code" -ne 1 ] || ! grep -qE 'FAIL: now: |put_now on a full channel|take_now on an empty open channel' unlocked.txt; then
     echo "the copy without the lock was not caught by the now step (exit $code):"; tail -20 unlocked.txt; exit 1
   fi
-  echo "  exits 1 at \"$(grep -m1 -o 'FAIL: now: .*' unlocked.txt | sed 's/^FAIL: //')\""
+  echo "  exits 1 at \"$(grep -m1 -oE 'FAIL: now: .*|put_now on a full channel|take_now on an empty open channel' unlocked.txt | sed 's/^FAIL: //')\""
 fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"

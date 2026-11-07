@@ -180,6 +180,11 @@ module Iyi
     end
 
     def visit(node : Path)
+      if target_type = node.target_type
+        node.type = check_type_in_type_args(target_type.remove_alias_if_simple).devirtualize
+        return false
+      end
+
       lookup_scope = @path_lookup || @scope || @current_type
 
       # If the lookup scope is a generic type, like Foo(T), we don't
@@ -228,6 +233,7 @@ module Iyi
         end
 
         node.target_const = type
+        type.iyi_runtime_read = true
         node.bind_to type.value
       when Type
         # We devirtualize the type because in an expression like

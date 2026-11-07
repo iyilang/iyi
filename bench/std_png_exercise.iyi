@@ -373,7 +373,12 @@ def own_samples(px : Array(Array(Int32)), depth : Int32) : String
   io.to_s
 end
 
-work = Program.args.size > 0 ? Program.args[0] : ""
+args = Program.args
+work = if args.size > 1 && args[0] == "data"
+         args[1]
+       else
+         ""
+       end
 gate = !work.empty?
 
 LAYOUTS = [Layout::Gray, Layout::GrayAlpha, Layout::RGB, Layout::RGBA]

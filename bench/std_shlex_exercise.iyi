@@ -174,8 +174,8 @@ while rounds < 3000
 end
 puts "  #{rounds} generated argument lists split back from their join"
 
-if Program.args.size > 0
-  dir = Program.args[0]
+if Program.args.size > 1 && Program.args[0] == "data"
+  dir = Program.args[1]
   puts "== against python's shlex"
   agreed = 0
   refused = 0

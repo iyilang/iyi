@@ -15,6 +15,8 @@ require "./semantic/*"
 # - check recursive structs (RecursiveStructChecker): check that structs are not recursive (impossible to codegen)
 
 class Iyi::Program
+  getter iyi_spliced_module_inits : Tuple(Array(ASTNode), ASTNode)? = nil
+
   # Runs semantic analysis on the given node, returning a node
   # that's typed. In the process types and methods are defined in
   # this program.
@@ -101,6 +103,7 @@ class Iyi::Program
   # rather than recompute them.
   def top_level_semantic(node, main_visitor : MainVisitor = MainVisitor.new(self),
                          processor : TypeDeclarationProcessor? = nil)
+    @iyi_spliced_module_inits = nil
     # A top-level pass is running, whatever an earlier one concluded. The flag
     # guards `TypeNode#instance_vars` and `#has_inner_pointers?` in macros, which
     # must refuse to answer until instance variables are declared. Leaving it set
@@ -154,6 +157,14 @@ class Iyi::Program
       end
     end
 
+    if has_flag?("iyi_observe")
+      @progress_tracker.stage("Semantic (observers)") do
+        Prof.span("observers") do
+          Iyi::Semantic::Observers.run(self)
+        end
+      end
+    end
+
     self.top_level_semantic_complete = true
 
     {node, processor}
@@ -171,31 +182,56 @@ class Iyi::Program
   # The entry file is not in the list — it is the program's own code, and being
   # last is exactly rule 1 applied to it.
   private def splice_iyi_module_initialisers(node : ASTNode) : ASTNode
-    inits = @iyi_module_inits
-    return node if inits.empty?
+    loaded = @iyi_module_inits
+    return node if loaded.empty?
     @iyi_module_inits = [] of ASTNode
 
-    inits = reorder_iyi_module_initialisers(inits) unless has_flag?("release")
+    inits = has_flag?("release") ? loaded : reorder_iyi_module_initialisers(loaded)
 
     expressions = node.is_a?(Expressions) ? node.expressions : [node] of ASTNode
 
-    # The program's own code starts after the entry's *header block*: the
-    # prelude require the compiler prepended, the `module` line, the
-    # `require`s and the `import` lines (II.3 rule 4 makes that
-    # block line-shaped). It used to be "the first node that is not a
-    # `Require`", which under an `.iyi` entry is the module header —
-    # so an entry's own `require "pg"` was spliced *after* the imported
-    # modules' initialisers, and a shard whose top-level code registers
-    # something ran after the module that used it. Crystal's semantics
-    # are that a `require` runs where it is written, and an entry writes
-    # its requires above everything.
-    index = expressions.index do |exp|
+    index = iyi_module_inits_index(expressions)
+    block = Expressions.from(inits)
+    expressions.insert(index, block)
+    @iyi_spliced_module_inits = {loaded, block}
+
+    node.is_a?(Expressions) ? node : Expressions.new(expressions)
+  end
+
+  # The program's own code starts after the entry's *header block*: the
+  # prelude require the compiler prepended, the `module` line, the
+  # `require`s and the `import` lines (II.3 rule 4 makes that
+  # block line-shaped). It used to be "the first node that is not a
+  # `Require`", which under an `.iyi` entry is the module header —
+  # so an entry's own `require "pg"` was spliced *after* the imported
+  # modules' initialisers, and a shard whose top-level code registers
+  # something ran after the module that used it. Crystal's semantics
+  # are that a `require` runs where it is written, and an entry writes
+  # its requires above everything.
+  private def iyi_module_inits_index(expressions : Array(ASTNode)) : Int32
+    expressions.index do |exp|
       !(exp.is_a?(Require) || exp.is_a?(ModuleHeader) || exp.is_a?(ImportDecl) ||
         exp.is_a?(UsingDecl) || exp.is_a?(Nop))
     end || expressions.size
-    expressions.insert(index, Expressions.from(inits))
+  end
 
-    node.is_a?(Expressions) ? node : Expressions.new(expressions)
+  def iyi_rejoin_module_initialisers(prelude_node : ASTNode, prelude_inits : Tuple(Array(ASTNode), ASTNode)?, entry_node : ASTNode) : ASTNode
+    return entry_node unless prelude_inits
+    prelude_loaded, prelude_block = prelude_inits
+    prelude_node.as(Expressions).expressions.reject!(&.same?(prelude_block)) # absent on a second in-process adoption
+    expressions = entry_node.is_a?(Expressions) ? entry_node.expressions : [entry_node] of ASTNode
+    loaded = prelude_loaded.dup
+    index = nil
+    if entry_inits = @iyi_spliced_module_inits
+      entry_loaded, entry_block = entry_inits
+      index = expressions.index(&.same?(entry_block)) || raise "BUG: the entry's initialisers are not where they were spliced"
+      expressions.delete_at(index)
+      loaded.concat(entry_loaded)
+    end
+    index ||= iyi_module_inits_index(expressions)
+    inits = has_flag?("release") ? loaded : reorder_iyi_module_initialisers(loaded)
+    expressions.insert(index, Expressions.from(inits))
+    entry_node.is_a?(Expressions) ? entry_node : Expressions.new(expressions)
   end
 
   # iyi: reorders independent modules (SPEC.md III.5 rule 2).

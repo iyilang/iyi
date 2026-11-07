@@ -248,7 +248,7 @@ check MlKem768::CIPHERTEXT_SIZE == 1088 && MlKem768::SHARED_SECRET_SIZE == 32, "
 puts "  1184, 2400, 1088 and 32 bytes"
 
 # With a file, every case of it; with none, the cases embedded above.
-acvp(JSON.parse(File.read(args[0]))) unless args.empty?
+acvp(JSON.parse(File.read(args[1]))) if args.size > 1 && args[0] == "data"
 
 # ML-KEM.KeyGen_internal, ML-KEM.Encaps_internal and Decaps_internal
 # against the embedded ACVP cases, then FIPS 203 section 7.2's modulus

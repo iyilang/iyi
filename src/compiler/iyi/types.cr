@@ -3727,6 +3727,9 @@ module Iyi
     # Is this constant accessed with pointerof(...)?
     property? pointer_read = false
 
+    # An unread predefined constant is in neither the executable nor the key.
+    property? iyi_runtime_read = false
+
     property visitor : MainVisitor?
 
     def initialize(program, namespace, name, @value)

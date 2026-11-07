@@ -290,6 +290,7 @@ pub struct Term
     size(fd.to_i64)
   end
 
+  @[Effect(:stdio)]
   def self.size(fd : Int64) : {Int32, Int32}?
     return nil if fd < 0_i64
     rows = 0
@@ -385,12 +386,14 @@ pub struct Term
     end
 
     # 0, or the reason `GetLastError` gives.
+    @[Effect(:stdio)]
     private def self.get_mode(fd : Int64, into : UInt8*) : Int32
       return 0 if ::LibC.GetConsoleMode(__iyi_std_handle(fd), into.as(Int32*)) != 0
       code = ::LibC.GetLastError
       code == 0 ? 6 : code
     end
 
+    @[Effect(:stdio)]
     private def self.set_mode(fd : Int64, from : UInt8*) : Int32
       return 0 if ::LibC.SetConsoleMode(__iyi_std_handle(fd), from.as(Int32*).value) != 0
       code = ::LibC.GetLastError
@@ -436,16 +439,19 @@ pub struct Term
 
     {% if flag?(:linux) %}
       # 0, or the errno the kernel answered.
+      @[Effect(:stdio)]
       private def self.get_mode(fd : Int64, into : UInt8*) : Int32
         result = ioctl(fd, TCGETS, into.as(Void*))
         result < 0_i64 ? (0_i64 - result).to_i32 : 0
       end
 
+      @[Effect(:stdio)]
       private def self.set_mode(fd : Int64, from : UInt8*) : Int32
         result = ioctl(fd, TCSETS, from.as(Void*))
         result < 0_i64 ? (0_i64 - result).to_i32 : 0
       end
 
+      @[Effect(:stdio)]
       private def self.ioctl(fd : Int64, request : Int64, argument : Void*) : Int64
         result = uninitialized Int64
         {% if flag?(:x86_64) %}
@@ -463,12 +469,14 @@ pub struct Term
       end
     {% else %}
       # 0, or errno.
+      @[Effect(:stdio)]
       private def self.get_mode(fd : Int64, into : UInt8*) : Int32
         return 9 if fd > 2147483647_i64
         LibC.tcgetattr(fd.to_i32, into.as(Void*)) == 0 ? 0 : LibC.error_location.value
       end
 
       # TCSANOW is 0.
+      @[Effect(:stdio)]
       private def self.set_mode(fd : Int64, from : UInt8*) : Int32
         return 9 if fd > 2147483647_i64
         LibC.tcsetattr(fd.to_i32, 0, from.as(Void*)) == 0 ? 0 : LibC.error_location.value

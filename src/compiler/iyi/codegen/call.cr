@@ -31,6 +31,8 @@ class Iyi::CodeGenVisitor
       else
         codegen_call_with_block(node, block, owner, call_args)
       end
+    elsif node.target_def.iyi_observer_body_inlined?
+      codegen_call_with_block(node, nil, owner, call_args)
     else
       codegen_call(node, node.target_def, owner, call_args)
     end
@@ -351,12 +353,14 @@ class Iyi::CodeGenVisitor
       #
       # that is, when assigning to a variable with the same name as
       # a block argument (no shadowing here)
-      undef_vars block.vars, block
-      alloca_non_closured_vars block.vars, block
+      if block
+        undef_vars block.vars, block
+        alloca_non_closured_vars block.vars, block
+      end
 
       with_cloned_context do |old_context|
         context.block = block
-        context.block_context = old_context
+        context.block_context = block ? old_context : nil
         context.vars = LLVMVars.new
         context.type = self_type
         context.reset_closure

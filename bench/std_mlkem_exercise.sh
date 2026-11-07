@@ -65,7 +65,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  "$WORK/$name" "$VECTORS" >"$WORK/$name.out" 2>&1
+  "$WORK/$name" "data" "$VECTORS" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -150,7 +150,7 @@ with open(sys.argv[3], "w", newline="\n") as f:
 print("  " + ", ".join(f"{len(v)} {k}" for k, v in out.items()))
 PY
   status=1
-elif "$WORK/mlkem-release" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
+elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
   grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
 else
   tail -3 "$WORK/acvp-all.out" | sed 's/^/  /'
@@ -449,7 +449,7 @@ PY
   then
     echo "  the $1 patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_mlkem_exercise.iyi" -- "$VECTORS" >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_mlkem_exercise.iyi" -- "data" "$VECTORS" >"$WORK/mut.out" 2>&1; then
     echo "  the exercise PASSED on $1"
     status=1
   elif grep -qF "$2" "$WORK/mut.out"; then

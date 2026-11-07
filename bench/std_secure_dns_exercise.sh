@@ -84,7 +84,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  timeout -k 5 180 "$WORK/$name" "$SRV" >"$WORK/$name.out" 2>&1
+  timeout -k 5 180 "$WORK/$name" "data" "$SRV" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   grep -v '^answer ' "$WORK/$name.out" | sed 's/^/  /'
   if [ "$exit_code" -ne 0 ]; then
@@ -288,7 +288,7 @@ PY
     status=1
     return
   fi
-  timeout -k 5 120 "$WORK/$dir/program" "$SRV" >"$WORK/$dir/out" 2>&1
+  timeout -k 5 120 "$WORK/$dir/program" "data" "$SRV" >"$WORK/$dir/out" 2>&1
   local code=$?
   if [ "$code" -eq 0 ]; then
     echo "  $label: the exercise PASSED on a broken module"

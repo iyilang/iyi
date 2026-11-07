@@ -605,14 +605,15 @@ def connect(port : String, roots : String?) : Nil
   puts "closed #{ws.close_code} #{ws.close_reason}"
 end
 
-if Program.args.size > 0
-  args = Program.args
+args = Program.args
+if args.size > 0
   if args[0] == "serve"
     serve(args.size > 2 ? TlsServerConfig.from_pem(File.read(args[1]), File.read(args[2])).or_panic : nil)
+    exit 0
   elsif args[0] == "connect"
     connect(args[1], args.size > 2 ? args[2] : nil)
+    exit 0
   end
-  exit 0
 end
 
 puts "== handshake"

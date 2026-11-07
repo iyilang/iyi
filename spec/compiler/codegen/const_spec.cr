@@ -568,4 +568,11 @@ describe "Codegen: const" do
       CONST.nil?
       CODE
   end
+
+  it "reads Crystal::VERSION" do
+    run(<<-CODE).to_string.should eq(Iyi::Config.version)
+      require "prelude"
+      Crystal::VERSION
+      CODE
+  end
 end

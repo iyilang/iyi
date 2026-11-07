@@ -298,13 +298,8 @@ records, along with the one pause the design does not bound.
 published list requires, a plain build with iyi's own prelude links the
 platform's C library and nothing else: no libgc, no libevent, no openssl, no
 zlib ([INSTALL.md](INSTALL.md#what-a-program-depends-on) has each platform). A
-program links only what it uses, and
-iyi's own library is 25,763 lines, written to be linked that way. That
-library is 1,080 KB on disk beside the binary.
-
-<sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
-and move with the platform; `python3 bench/machine_probe.py` prints your
-machine beside three reference timings.</sup>
+program links only what it uses, and iyi's own library is 25,853 lines, written
+to be linked that way. That library is 1,088 KB on disk beside the binary.
 
 ## Getting started
 
@@ -352,13 +347,174 @@ vim.lsp.enable("iyi")
 ```
 
 Any LSP client works the same way: command `iyi lsp`, filetype `.iyi`;
-[`editors/`](editors/) carries a VS Code extension and configs for Helix and
-Zed. Diagnostics arrive on every keystroke from a real compile of the module
-alone — 36 ms p50 / 55 ms p95 across the sample corpus
-(`bench/lsp_latency.py`). Completion, references, rename and hover ride the
-typed graph, and two requests beyond the protocol, `iyi/contextPack` and
-`iyi/surface`, return what the CLI prints. A session rests at about 100 MB
-(`bench/lsp_memory.py`), and `iyi tool format` formats.
+`editors/` carries a VS Code extension and configs for Helix and Zed.
+Diagnostics arrive on every keystroke from a real compile of the module alone —
+36 ms p50 / 55 ms p95 across the sample corpus (`bench/lsp_latency.py`).
+Completion, references, rename and hover ride the typed graph, and two requests
+beyond the protocol, `iyi/contextPack` and `iyi/surface`, return what the CLI
+prints. The compiler carries no collector, so the server compiles in a worker
+process it replaces from time to time, and a session rests at about 100 MB
+(`bench/lsp_memory.py`). `iyi tool format` formats source.
+
+### Your first module, and then the rule that matters
+
+Two files. `app/greeter.iyi` is a module, and its path is its file's path:
+
+```crystal
+module app/greeter
+
+pub def polite(name : String) : String
+  "Hello, #{name}."
+end
+```
+
+`main.iyi` imports it, and names what it wants in scope on the same line. The
+library does not get to put them there:
+
+```crystal
+module main
+
+import app/greeter::{polite}
+
+puts polite("world")
+```
+
+```console
+$ iyi run main.iyi
+Hello, world.
+```
+
+Now the part the language is for. Build it once, keeping each module's
+artifact, then **delete the library's source** and build again:
+
+```console
+$ iyi build --emit-iyimod mods -o hello main.iyi
+$ rm -r app                                     # the library, gone
+$ iyi build --use-iyimod mods -o hello main.iyi
+$ ./hello
+Hello, world.
+```
+
+The second build never sees `polite`'s body. It reads
+`mods/app/greeter.iyimod`, which carries the declarations it type-checks
+against and the machine code it links, and that is R-1: a module compiles
+against what its imports *say*, not against what they *do*.
+
+### What a program depends on
+
+A plain build with iyi's own prelude links the platform's C library and
+nothing else from the thirteen libraries Crystal's published list requires:
+no libgc, no libevent, no openssl, no zlib. On Linux the object
+itself asks libc for nothing, since the prelude issues its own syscalls; the
+linked executable still references the C toolchain's startup objects. On macOS
+it links `libSystem`, Apple's only supported interface. The collector is iyi's
+own and adds no library; `-Dgc_boehm` swaps in bdw-gc and `-Dgc_none` a bump
+allocator that never frees. `bench/dependency_floor.sh` holds all of this, on
+own-prelude builds; a `--crystal` build links Crystal's library and whatever
+its shards pull.
+
+**On Linux the binary can travel as one file.** `iyi build --static` passes
+`-static` to the C toolchain and the result has no dynamic loader at all: copy
+it to a bare Linux and run it. macOS has no static libc, so there the default
+build links `libSystem` alone and still copies to another Mac. A Windows build
+imports `kernel32` (plus `advapi32` and `ws2_32` for entropy or sockets), the
+dynamic Visual C++ runtime and five UCRT façades; `--static` changes nothing
+there. A wasm32 build is one self-contained module already.
+
+## The library a program has
+
+A prelude is a library, and the rules are the language. Those are two different
+things, so a program can keep one and change the other.
+
+**`iyi build --crystal` gives a program Crystal's standard library**, and there
+`require` means what it means in Crystal. This is a Kemal server, and it runs:
+
+```crystal
+module site
+
+require "kemal"
+
+get "/" do |env|
+  "Hello from an iyi program"
+end
+
+get "/json" do |env|
+  env.response.content_type = "application/json"
+  {message: "iyi"}.to_json
+end
+
+Kemal.run
+```
+
+```console
+$ iyi build --crystal -o site site.iyi
+$ ./site &
+$ curl localhost:3000/json
+{"message":"iyi"}
+```
+
+**Nothing about the language changes.** The module header, `import`, `pub`,
+traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
+of them work in a program that requires a shard, and R-2 still refuses an
+export that does not write its types. What changes is what the program *has*:
+Crystal's current standard library instead of iyi's own prelude.
+
+**One name is unreachable, and it is a class of names.** `!` in iyi propagates
+an error, so a method whose name ends in one cannot be called from a `.iyi`
+file. Crystal's standard library has **50 such names**, `not_nil!`, `sort!`,
+`map!`, `select!` and `uniq!` among them. What replaces them is what Crystal
+writes anyway when it wants a copy or a narrowing:
+
+```crystal
+a = a.sort              # rather than a.sort!
+if home = maybe         # rather than maybe.not_nil!
+  ...
+end
+maybe.as(String)        # or this
+```
+
+Shard code is `.cr` and unaffected; this is only about the lines you write.
+
+**What it costs is R-1, for that dependency.** A required shard is read from
+source, so your edit loop pays for it the way Crystal's does. Your own modules
+still get artifacts — `--crystal` and `--use-iyimod` work together, and there
+is exactly one copy of the library in the result:
+
+```console
+$ iyi build --crystal --emit-iyimod mods -o site site.iyi
+$ iyi build --crystal --use-iyimod mods -o site site.iyi
+```
+
+On a twelve-module app the modules cost 0.16 s from source and nothing from
+artifacts, against 3.1 s for Crystal's library itself, which every build reads
+from source. **`iyi daemon` removes some of that**: it holds the library
+analysed between builds, about 0.3 s off the front end for roughly 200 MB of
+memory, and more when your dependencies are named in a prelude file of your own:
+
+```console
+$ iyi daemon start &
+$ iyi daemon build --crystal -o site site.iyi
+$ iyi daemon build --prelude ./_prelude.cr -o site site.iyi   # _prelude.cr requires "prelude" and "kemal"
+```
+
+Set `CRYSTAL_DAEMON_SOCKET` and an ordinary `iyi build` goes through it too,
+falling back to a normal build when nothing is listening.
+
+**The two libraries do not mix.** A `.iyimod` records which one it was built
+against, and importing across is refused by name: `String` is a different type
+in each, and a mixed program would link anyway.
+
+**Nine shards were swept through it**, each built as an iyi program and as a
+Crystal one: `kemal`, `db`, `ameba`, `habitat`, `baked_file_system`, `radix`,
+`sqlite3`, the standard library's own `json`/`yaml`/`uri`/`http`, and a program
+that round-trips `JSON::Serializable`. All nine behave the same in both
+languages. One needed a word changed, and it was the rule working: `habitat`'s
+macro reaches a type in your module by name, so the class needs `pub`.
+
+**The compiler links LLVM, the C++ runtime and libc.** On the released Linux
+binary LLVM is inside it, and the loader is asked for libstdc++ (shipped in
+`lib/`), libgcc_s, libm and libc. pcre2 is gone: macro-level regex runs on
+iyi's own engine, and `bench/dependency_floor.sh` forbids `libpcre` outright.
 
 ## More of the language
 
@@ -546,7 +702,7 @@ $ curl localhost:3000/json
 traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
 of them work in a program that requires a shard, and R-2 still refuses an
 export that does not write its types. What changes is what the program *has*:
-Crystal's standard library instead of 25,763 lines of iyi's own prelude.
+Crystal's standard library instead of 25,853 lines of iyi's own prelude.
 
 **One class of names is unreachable.** `!` in iyi propagates an error, so a
 method whose name ends in one cannot be called from a `.iyi` file. Crystal's
@@ -618,7 +774,7 @@ not the library.
 
 ## What is not here
 
-- **iyi's own library is 25,763 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 25,853 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`.** `gets`, `read_all`, `write` and `flush`
   on the streams; `File.read`, `File.write`, `File.exists?`, `File.delete`
   and `File.open(path, mode)`. Its collections carry a method because a
@@ -654,8 +810,8 @@ not the library.
 | [BENCHMARKS.md](BENCHMARKS.md) | the build, run-time and server measurements, with their machines and commands |
 | [`samples/iyi`](samples/iyi) | twenty-eight programs: twenty documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 25,763 lines. `--crystal` swaps it for Crystal's |
-| [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, and not counted against the prelude's size limit (SPEC.md I.4) |
+| [`src/iyi`](src/iyi) | iyi's own library, 25,853 lines. `--crystal` swaps it for Crystal's |
+| [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's size limit (SPEC.md I.4) |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/`](bench/) | every script a number in these documents names |
 | [GC_DESIGN.md](GC_DESIGN.md) | the collector |

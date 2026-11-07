@@ -811,8 +811,8 @@ end
 puts "  #{mixed.bytesize} bytes in pieces of 0 to 12,000 at levels 0, 1, 6 and 9 in three envelopes, each read back as it was written"
 
 args = Program.args
-if args.size > 0
-  dir = args[0]
+if args.size > 1 && args[0] == "data"
+  dir = args[1]
   puts "\n== against zlib"
   names = ["text", "zeros", "bytes", "random", "far", "source"]
   levels = ["0", "1", "6", "9"]

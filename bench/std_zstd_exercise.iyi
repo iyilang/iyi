@@ -410,8 +410,8 @@ end
 puts "  headers, blocks, tables and checksums that do not hold, and every cut of a frame, refused by name"
 
 args = Program.args
-if args.size > 0
-  dir = args[0]
+if args.size > 1 && args[0] == "data"
+  dir = args[1]
   entries = File.read(dir + "/index.txt").lines.map { |l| l.split('\t') }
 
   puts "\n== against python's zstd"

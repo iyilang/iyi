@@ -19,6 +19,41 @@
 
 ## 0.20.1 — 2026-11-04
 
+- **Bench: std/autocert's exercise runs its own builds by the path it built them to.** `bench/std_autocert_exercise.sh` runs its plain and release binaries as `"$WORK/$name"` from a new `run_own <name>`, rather than passing their paths to `local_run`, so each run can be matched to its build in the driver's own text. Arguments, environment, output files, exit status and verdicts are unchanged; `local_run` still runs the artifact consumer and broken copies.
+
+- **Fix (spec): select TCP fixture ports across both address families.** Keep each IPv4 candidate bound while checking an IPv6-only wildcard bind, advancing only when that port is already in use. The dual-stack and refused-connect fixtures use the shared allocator without changing their assertions or timeouts.
+
+- **Fix (bench): separate search roots for import candidate shadowing in stale testing.** In `bench/stale_tests.sh` row 3, place candidate modules under dedicated `earlier` and `later` `IYI_PATH` entries with no project-root copy so the entry directory does not preempt resolver order. Verifies that an earlier search path without a candidate hits as a locator-only change, while a shadowed definition with an altered body misses and is named in the explanation.
+
+- **Fix (runtime): classify `IyiHeap.release_run` as collector work under stale testing observation.** Calling `__iyi_release_pages` inside `release_run` without an `@[Effect(:collector)]` annotation recorded an unclassified external runtime call, marking every observed test run not reusable under RG3. Classifying `release_run` matches its callers (`close_run`, `age_idle`) and preserves receipt reuse on second runs.
+
+- **Compiler: omit unread predefined constants from codegen and stale build keys.** Predefined constants (`Crystal::*`) are initialized at startup and included in reach signatures only when referenced by typed code. `ARGC_UNSAFE` and `ARGV_UNSAFE` remain initialized unconditionally. Reading an uninitialized predefined constant in codegen raises an internal compiler bug.
+
+- **Fix (bench): recognize BSD and GNU `stty -g` formats in std/term exercise.** On Darwin, BSD `/bin/stty -g` outputs `gfmt1:cflag=hex:...:lflag=hex:...` rather than GNU coreutils colon-separated hex fields. The pseudo-terminal driver now parses both formats when masking the kernel-managed `PENDIN` flag on Darwin, leaving unknown text unchanged.
+
+- **Darwin panic dependency floor records `dladdr` and `dprintf` replacing `backtrace_symbols_fd` (SPEC.md III.9).** Commit 68c53c352 resolved boundary return addresses at `addr - 1` using `dladdr` and formatted panic frames to stderr with `dprintf` instead of `backtrace_symbols_fd`. The Darwin dependency floor (`bench/floor_base.sh`, `bench/dependency_floor.sh`, and exercise gates) updates its permitted symbol lists accordingly to match libSystem's interface without linking additional libraries. (Note: `dprintf` is not documented by Darwin as async-signal-safe).
+
+- **Fix (compiler): Darwin host target matches the linker's deployment target.** LLVM derives the default target from the Darwin kernel version, which can run ahead of the OS release (e.g. Darwin 27.0.0 maps to macOS 28.0 on macOS 27.0.1 with SDK 27.0). On Darwin, the compiler checks `MACOSX_DEPLOYMENT_TARGET` first, then resolves the component-wise minimum of the macOS SDK version (`SDKSettings.json`) and the OS product version (`sysctlbyname("kern.osproductversion")`), keeping LLVM's default only if neither is available. This aligns object file deployment targets with Clang's linker rules and prevents `ld: warning: object file ... was built for newer 'macOS' version` linker warnings on Darwin.
+
+- **Fix (compiler): inlined observed effect bodies eliminate synthetic backtrace frames.** Under `-Diyi_observe`, each renamed `__iyi_effect_*` body is emitted directly inside its wrapper in every build that has the body (source, producer, and consumer of a travelled body), with matching reach-walk and call-path encoding. Panics under observation match normal-build backtraces without synthetic wrapper or implementation frames. An observed `--use-iyimod` build under `IYI_WARM=1` now reads the prelude's std artifacts without import-wall refusals resolving internal type ID references (resolving `"std/time" numbers \`Array(Std::Time::Location::Zone)\`, and this build cannot name it`).
+- **Fix (runtime): correct frame boundary symbol lookup in Darwin panics.** When a panic or NoReturn call is the last instruction of a function, the return address on the stack sits at offset 0 of the next function. The Darwin runtime backtrace resolves boundary frames with offset 0 by inspecting the caller symbol at `addr - 1` while preserving fiber entry start markers and raw address formats.
+
+- **Fix (compiler): observed artifact emission supports operator effect defs.** An observed build of a module with an operator-named `@[Effect]` def (such as `[]=` or `[]?`) renames the wrapped implementation with hex-encoded operator bytes rather than raw punctuation, so that serializing declarations into `.iyimod` artifacts preserves valid source text that consumer builds parse and adopt without syntax errors.
+
+- **Native stale testing for `iyi test`: opt-in `--cached` reuses passing receipts on equal build keys and replayed observations.** An observation build records run-time reads and effects, and the compiler hashes the reached call path (`CallPathFp`), linked object units, link environment, and compiler environment before codegen. A test that touches clock, entropy, timers, network, processes, signals, runtime timing, directory streams, host state, raw pointers, or shared writes outside its scratch directory runs fresh. In a census of 141 programs (27 sample programs and 114 standard library exercises), 87 of 141 (61.7%) were reusable on a second run, and static build keys were reusable for 138 of 141 (97.9%).
+
+  Repairs cover lost scratch paths, reads of self-written environment variables, cold/warm compiler-environment keys, frame-depth isolation and transfer across threads and fibers, program callbacks during runtime frames, and concurrent observation writes. The recorder serializes records and deduplication state through a leaf CAS lock and reuses its encoding buffer.
+
+  Four exercise fixes, each found by the equivalence and census runs on one macOS machine: `std_dns_exercise` skips its Happy Eyeballs races when a full listener resets SYNs instead of dropping them; `std_digest_exercise` times the best of seven, and `std_big_exercise` judges the pass whose division-to-product ratio is smallest, timed back to back, since both timing checks failed under load; and `std_tar_exercise` writes absolute names past 100 bytes through pax records, which a long `TMPDIR` needs.
+
+- **Semantic backtrace equivalence for Darwin artifact verification.** Output comparison in standard library exercise gates (`bench/std_exercise.sh`, `bench/std_toml_exercise.sh`, `bench/std_websocket_exercise.sh`, `bench/std_big_exercise.sh`, and `bench/stale_equivalence.sh`) evaluates ordered semantic frames via `bench/frames_equivalent.py` when direct byte comparison fails on Darwin. Comparisons verify equal frame counts, positions, indices, images, and canonicalized function names while abstracting layout addresses, function size offsets, `~iyi` copy suffixes, and compiler proc numbers, with plain-vs-optimized comparisons verifying non-frame text and frame sequence structure.
+
+- **A refused TCP connect from a `--crystal` program on macOS 27 reported
+  success, and now raises `Socket::ConnectError`.** Non-blocking
+  `Socket#connect` on Unix waited for writability and retried `connect(2)`
+  treating `EISCONN` as success, hiding connection failures. The socket
+  error state is now inspected via `SO_ERROR` without retrying connect
+  (crystal-lang/crystal#17436, #17619).
 **Fixes found by soaking 0.20.0 on every core: a darwin server a client
 could kill, two compiler crashes and a miscompile around NoReturn
 blocks, a collector crash on aarch64 and a fault that hung instead of
@@ -41,6 +76,16 @@ that read standard input or link libgc build and start.
 
 ### Fixed
 
+- `bench/std_tls_exercise.sh` reads the alert s_server took from the
+  std/tls client once s_server has written it, five seconds at most,
+  before killing it. Two of darwin's stapling checks found no alert in
+  CI job 122532136003, the log holding the port probe's line alone:
+  s_server writes the alert after it reads it, and a client gone as soon
+  as its alert was sent left the gate to kill s_server first. With
+  s_server at nice 19 beside a busy loop on its CPU (Linux), such a
+  client's alert was written in 0 of 50 runs killed at once and in 50 of
+  50 awaited. The stapling checks waited for nothing, and `client_alert`
+  slept 300 ms.
 - **README no longer calls Crystal 0.1.0's library Crystal's standard
   library.** The 8,161 lines it compared iyi's 25,763-line prelude with
   are the library Crystal shipped at 0.1.0 (SPEC.md I.4), not what
@@ -416,7 +461,6 @@ heavy endpoints (246-352 ms against 152-260) and its peak working set
   taken off.
 
 ### Added
-
 - **A shared block that reaches module state through a call is warned
   about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and
   of a `@[Share]` def - `Server.serve`'s, a router's - was checked only
@@ -26232,7 +26276,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,763-line library and nothing else. Every other
+  written against iyi's own 25,853-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

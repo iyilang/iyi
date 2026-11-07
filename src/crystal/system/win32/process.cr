@@ -255,7 +255,7 @@ struct Crystal::System::Process
     {new_handle, dup_handle}
   end
 
-  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, &)
+  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, new_pgroup : Bool = false, &)
     startup_info = LibC::STARTUPINFOW.new
     startup_info.cb = sizeof(LibC::STARTUPINFOW)
     startup_info.dwFlags = LibC::STARTF_USESTDHANDLES

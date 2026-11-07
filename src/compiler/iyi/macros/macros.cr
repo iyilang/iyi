@@ -275,8 +275,11 @@ class Iyi::Program
       err_io = IO::Memory.new
       declared = "#{compiled_file}.inputs-#{Process.pid}-#{@@run_inputs_count += 1}"
       started = BuildInputs.now
-      status = Process.run(compiled_file, args: args, output: out_io, error: err_io, env: {RUN_INPUTS => declared})
-      inputs = read_run_inputs(declared)
+      status, inputs = BuildInputs.pause_if_env_only do
+        s = Process.run(compiled_file, args: args, output: out_io, error: err_io, env: {RUN_INPUTS => declared})
+        inp = read_run_inputs(declared)
+        {s, inp}
+      end
       BuildInputs.current.try &.run_declared(filename, inputs, started)
       MacroRunResult.new(out_io.to_s, err_io.to_s, status, inputs)
     end

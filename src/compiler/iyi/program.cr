@@ -137,6 +137,7 @@ module Iyi
     # that unit — its own imports, then onward only through `pub import`
     # edges. Anchored at the node, which is the line to fix.
     def iyi_check_import_reach(node : ASTNode, resolved : Type) : Nil
+      return if node.is_a?(Path) && node.iyi_synthetic?
       unit = iyi_walled_unit?(node.location, resolved)
       return unless unit
 
@@ -433,6 +434,11 @@ module Iyi
     # unless `--emit-iyimod` asked for artifacts.
     getter iyi_exported_owners = Set(Type).new
 
+    property stale_recorder : Iyi::Stale::Recorder? = nil
+    property stale_reach : Iyi::Stale::Reach? = nil
+    property stale_closure_result : Iyi::Effects::ClosureResult? = nil
+    property stale_check_result : Iyi::Stale::CheckResult? = nil
+
     # iyi: true when the owners above are a `--iyi-keep` namespace, the fill
     # build `iyi bind` runs. A boundary's declarations write every parameter
     # at the type the keep file instantiates it at, so a parameter the shard
@@ -494,6 +500,10 @@ module Iyi
 
     def raise_cast_failed_name
       abi_name("raise_cast_failed")
+    end
+
+    def raise_closure_to_c_name
+      abi_name("raise_closure_to_c")
     end
 
     def malloc_name
@@ -972,10 +982,7 @@ module Iyi
         if ref.match
           iyi_artifact_match_types[ref.name] = iyi_match_type_named(ref.name)
         else
-          parser = new_parser(ref.name)
-          parser.next_token
-          type_node = parser.parse_bare_proc_type
-          parser.check :EOF
+          type_node = iyi_artifact_type_node(ref.name)
           # Reaching what the module keeps to itself, which is what these names
           # are made of: `Array(Router::RouteDefinition)` names a `private
           # record` and the artifact carries it as one. R-2b is not weakened by
@@ -1034,6 +1041,31 @@ module Iyi
             MESSAGE
         end
       end
+    end
+
+    private class IyiArtifactNameMarker < Visitor
+      def visit(node : Path)
+        node.iyi_synthetic = true
+        false
+      end
+
+      def visit(node : ASTNode)
+        true
+      end
+    end
+
+    # iyi: Parses a type name read from an artifact for type ID numbering or match
+    # dispatch (SPEC.md:4833). Nobody writes this name; it is parsed with filename
+    # "", which equals the adopted prelude's placeholder. Cold builds never wall
+    # these names, and marking each parsed Path synthetic ensures adopted prelude
+    # builds resolve artifact-referenced types without import-wall refusals.
+    private def iyi_artifact_type_node(name : String) : ASTNode
+      parser = new_parser(name)
+      parser.next_token
+      type_node = parser.parse_bare_proc_type
+      parser.check :EOF
+      type_node.accept(IyiArtifactNameMarker.new)
+      type_node
     end
 
     # iyi: one match type, from the name its symbol carries.
@@ -1099,10 +1131,7 @@ module Iyi
     end
 
     private def iyi_match_named_type(body : String) : Type
-      parser = new_parser(body)
-      parser.next_token
-      type_node = parser.parse_bare_proc_type
-      parser.check :EOF
+      type_node = iyi_artifact_type_node(body)
       lookup_type(type_node, include_private: true)
     end
 
@@ -1164,7 +1193,7 @@ module Iyi
 
     # All created unions in a program, indexed by an array of opaque
     # ids of each type in the union. The array (the key) is sorted
-    # by this opaque id.
+    # Nil first, then by canonical name (to_s), breaking ties by opaque id.
     #
     # A program caches them this way so a union of `String | Int32`
     # or `Int32 | String` is represented by a single, unique type
@@ -1367,6 +1396,8 @@ module Iyi
 
       argc_unsafe.no_init_flag = true
       argv_unsafe.no_init_flag = true
+      argc_unsafe.iyi_runtime_read = true
+      argv_unsafe.iyi_runtime_read = true
 
       predefined_constants << argc_unsafe
       predefined_constants << argv_unsafe
@@ -1380,6 +1411,7 @@ module Iyi
 
       # Built-in annotations
       types["AlwaysInline"] = @always_inline_annotation = AnnotationType.new self, self, "AlwaysInline"
+      types["Effect"] = @effect_annotation = AnnotationType.new self, self, "Effect"
       types["CallConvention"] = @call_convention_annotation = AnnotationType.new self, self, "CallConvention"
       types["Extern"] = @extern_annotation = AnnotationType.new self, self, "Extern"
       types["Flags"] = @flags_annotation = AnnotationType.new self, self, "Flags"
@@ -1628,14 +1660,24 @@ module Iyi
       when 1
         types.first
       else
-        types.sort_by! &.opaque_id
+        types = types.is_a?(Array(Type)) ? types : types.map(&.as(Type))
+        types.sort! do |t1, t2|
+          if t1.nil_type?
+            t2.nil_type? ? 0 : -1
+          elsif t2.nil_type?
+            1
+          else
+            cmp = t1.to_s <=> t2.to_s
+            cmp == 0 ? (t1.opaque_id <=> t2.opaque_id) : cmp
+          end
+        end
         opaque_ids = types.map(&.opaque_id)
         unions[opaque_ids] ||= make_union_type(types, opaque_ids)
       end
     end
 
-    private def make_union_type(types, opaque_ids)
-      # NilType has opaque_id == 0
+    private def make_union_type(types : Array(Type), opaque_ids)
+      # NilType has opaque_id == 0, and Nil is always first in opaque_ids if present
       has_nil = opaque_ids.first == 0
 
       if has_nil
@@ -1652,16 +1694,8 @@ module Iyi
           end
         end
 
-        # Remove the Nil type now and later insert it at the end
+        # Remove the Nil type now and insert it at the end of union_types
         nil_type = types.shift
-      end
-
-      # Sort by name so a same union type, say `Int32 | String`, always is named that
-      # way, regardless of the actual order of the types. However, we always put
-      # Nil at the end, inside the `nil_type` check.
-      types.sort_by! &.to_s
-
-      if nil_type
         types.push nil_type
 
         if types.all?(&.reference_like?)
@@ -1722,7 +1756,8 @@ module Iyi
       dependency_printer = compiler.try(&.dependency_printer)
 
       filenames.each do |filename|
-        unseen_file = requires.add?(filename)
+        canonical_filename = File.expand_path(filename)
+        unseen_file = requires.add?(canonical_filename)
 
         dependency_printer.try(&.enter_file(filename, unseen_file))
 
@@ -1744,7 +1779,7 @@ module Iyi
                      uint8 uint16 uint32 uint64 uint128 float float32 float64 string symbol pointer enumerable indexable
                      array static_array exception tuple named_tuple proc union enum range slice regex crystal
                      packed_annotation thread_local_annotation no_inline_annotation target_feature_annotation
-                     always_inline_annotation naked_annotation returns_twice_annotation
+                     always_inline_annotation effect_annotation naked_annotation returns_twice_annotation
                      raises_annotation primitive_annotation call_convention_annotation
                      flags_annotation link_annotation extern_annotation deprecated_annotation experimental_annotation
                      share_annotation no_preempt_annotation safe_reach_annotation error_trait) %}

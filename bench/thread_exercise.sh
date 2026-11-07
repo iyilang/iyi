@@ -177,7 +177,7 @@ case "$(uname -s)" in
     # and close for a finished thread's kqueue
     # (`IyiScheduler.retire_thread`). Nothing else.
     step "dependency floor: what threads cost darwin, by name"
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _dladdr _dprintf _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
     thread='_close _pthread_create _pthread_join _pthread_kill'
     for bin in threads threads-release; do
       allowed="$(printf '%s\n' $runtime $thread | sort -u)"

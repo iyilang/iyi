@@ -748,6 +748,7 @@ pub struct Path
 
   {% if flag?(:win32) %}
     # Text that is not UTF-8 has no UTF-16 to fold, and is folded as ASCII.
+    @[Effect(:memory)]
     private def self.native_fold(s : String) : String?
       wide = __iyi_win_env_wide(s.to_unsafe, s.bytesize)
       return nil if wide.address == 0_u64

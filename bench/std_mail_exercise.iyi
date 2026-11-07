@@ -241,12 +241,14 @@ if Program.args.size > 0
   case Program.args[0]
   when "build"
     build(Program.args[1], Program.args[2])
+    exit 0
   when "parse"
     describe(Program.args[1], Program.args[2].to_i)
+    exit 0
   when "codec"
     codec(Program.args[1])
+    exit 0
   end
-  exit 0
 end
 
 puts "== quoted-printable, RFC 2045 section 6.7"

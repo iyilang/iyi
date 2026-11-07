@@ -178,9 +178,9 @@ assert_str "w69999", Regex.compile("\\b(?:#{words(70000)})\\b").find("x w69999 y
 puts "  5,000 words in a task, leftmost-first, and 70,000 on the main stack"
 
 args = Program.args
-if args.size > 0
+if args.size > 1 && args[0] == "data"
   puts "\n== against Python's re"
-  text = File.read(args[0])
+  text = File.read(args[1])
   lines = [] of String
   start = 0
   i = 0
@@ -237,9 +237,9 @@ end
 # answers, and `String#gsub` with a replacement naming the groups, on
 # patterns with groups and flags and on text past ASCII, against Python's
 # `re` - leftmost-first as RE2 is, so the groups are the ones RE2 reports.
-if args.size > 1
+if args.size > 2 && args[0] == "data"
   puts "\n== groups and flags against Python's re"
-  text = File.read(args[1])
+  text = File.read(args[2])
   cases = 0
   start = 0
   i = 0

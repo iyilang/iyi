@@ -14,6 +14,9 @@
 set -euo pipefail
 
 IYI=${IYI:-./bin/iyi}
+if [ "$(uname -s)" = Darwin ]; then
+  export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-$(xcrun --show-sdk-version 2>/dev/null || echo 27.0)}
+fi
 work=$(mktemp -d /tmp/iyi-panics.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 
@@ -984,5 +987,160 @@ EOF
   echo "$out" | grep -q "custom resolver:.*frames" || fail "custom resolver hook was not called: $out"
   step "a panic resolver hook formats frames when installed"
 fi
+
+# ── 12. cast failure and closure-to-C panics call runtime raise funs ───────
+cat > "$work/cast_generic.iyi" <<'EOF'
+class Box(T)
+  def initialize(@val : T)
+  end
+end
+
+def get_box(cond : Bool) : Box(Int32) | Box(String)
+  cond ? Box(Int32).new(1) : Box(String).new("a")
+end
+
+b = get_box(true)
+b.as(Box(String))
+EOF
+run "$work/cast_generic.iyi"
+[ "$code" = 1 ] || fail "cast_generic exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Box(Int32) to Box(String) failed, at .*/cast_generic\.iyi:11:1:11" ||
+  fail "cast_generic panic missing or mismatched: $out"
+step "generic instance cast failure panics with exact message and site"
+
+cat > "$work/cast_nested_generic.iyi" <<'EOF'
+class Box(T)
+  def initialize(@val : T)
+  end
+end
+
+def get_box(cond : Bool) : Box(Box(Int32)) | Box(Box(String))
+  cond ? Box(Box(Int32)).new(Box(Int32).new(1)) : Box(Box(String)).new(Box(String).new("a"))
+end
+
+b = get_box(true)
+b.as(Box(Box(String)))
+EOF
+run "$work/cast_nested_generic.iyi"
+[ "$code" = 1 ] || fail "cast_nested_generic exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Box(Box(Int32)) to Box(Box(String)) failed, at .*/cast_nested_generic\.iyi:11:1:11" ||
+  fail "cast_nested_generic panic missing or mismatched: $out"
+step "nested generic cast failure panics with exact message and site"
+
+cat > "$work/cast_union.iyi" <<'EOF'
+def get_val(cond : Bool) : Int32 | String
+  cond ? "hello" : 42
+end
+
+x = get_val(true)
+x.as(Int32)
+EOF
+run "$work/cast_union.iyi"
+[ "$code" = 1 ] || fail "cast_union exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from String to Int32 failed, at .*/cast_union\.iyi:6:1:6" ||
+  fail "cast_union panic missing or mismatched: $out"
+step "union member cast failure panics with exact message and site"
+
+cat > "$work/cast_subclass.iyi" <<'EOF'
+class Base; end
+class Sub1 < Base; end
+class Sub2 < Base; end
+
+def get_obj(cond : Bool) : Base
+  cond ? Sub1.new : Sub2.new
+end
+
+x = get_obj(true)
+x.as(Sub2)
+EOF
+run "$work/cast_subclass.iyi"
+[ "$code" = 1 ] || fail "cast_subclass exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Sub1 to Sub2 failed, at .*/cast_subclass\.iyi:10:1:10" ||
+  fail "cast_subclass panic missing or mismatched: $out"
+step "virtual subclass cast failure panics with exact message and site"
+
+cat > "$work/cast_nilable.iyi" <<'EOF'
+def get_nilable(cond : Bool) : String?
+  cond ? nil : "hello"
+end
+
+x = get_nilable(true)
+x.as(String)
+EOF
+run "$work/cast_nilable.iyi"
+[ "$code" = 1 ] || fail "cast_nilable exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Nil to String failed, at .*/cast_nilable\.iyi:6:1:6" ||
+  fail "cast_nilable panic missing or mismatched: $out"
+step "nilable cast failure panics with exact message and site"
+
+cat > "$work/cast_struct.iyi" <<'EOF'
+struct Pt1
+  def initialize(@x : Int32)
+  end
+end
+
+struct Pt2
+  def initialize(@y : Int32)
+  end
+end
+
+def get_struct(cond : Bool) : Pt1 | Pt2
+  cond ? Pt1.new(1) : Pt2.new(2)
+end
+
+x = get_struct(true)
+x.as(Pt2)
+EOF
+run "$work/cast_struct.iyi"
+[ "$code" = 1 ] || fail "cast_struct exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Pt1 to Pt2 failed, at .*/cast_struct\.iyi:16:1:16" ||
+  fail "cast_struct panic missing or mismatched: $out"
+step "struct cast failure panics with exact message and site"
+
+cat > "$work/cast_module.iyi" <<'EOF'
+module Mod; end
+
+class Foo
+  include Mod
+end
+
+class Bar
+  include Mod
+end
+
+def get_mod(cond : Bool) : Mod
+  cond ? Foo.new : Bar.new
+end
+
+x = get_mod(true)
+x.as(Bar)
+EOF
+run "$work/cast_module.iyi"
+[ "$code" = 1 ] || fail "cast_module exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Foo to Bar failed, at .*/cast_module\.iyi:16:1:16" ||
+  fail "cast_module panic missing or mismatched: $out"
+step "module-typed value cast failure panics with exact message and site"
+
+cat > "$work/closure_to_c.iyi" <<'EOF'
+lib LibC
+  fun atexit(cb : -> Void) : Int32
+end
+
+c = 10
+cb = ->{ c }
+LibC.atexit(cb)
+EOF
+run "$work/closure_to_c.iyi"
+[ "$code" = 1 ] || fail "closure_to_c exit was $code, wanted 1"
+echo "$out" | grep -q "^iyi: panic: passing a closure to C is not allowed" ||
+  fail "closure_to_c panic missing message: $out"
+echo "$out" | grep -q "at ??:0" ||
+  fail "closure_to_c panic missing site: $out"
+step "passing a closure to C is refused with exact message and unknown location site"
+
+DUMP=1 "$IYI" build -o "$work/cast_dump_bin" "$work/cast_union.iyi" > "$work/dump.out" 2>&1
+grep -q "__iyi_raise_cast_failed" "$work/dump.out" ||
+  fail "DUMP=1 did not show call to __iyi_raise_cast_failed: $(cat "$work/dump.out")"
+step "DUMP=1 shows a call to __iyi_raise_cast_failed"
 
 echo "panics gate: every step held"

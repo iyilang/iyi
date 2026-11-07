@@ -148,6 +148,11 @@ class Iyi::Type
     end
 
     def lookup_type_var?(node : Path)
+      if node.iyi_synthetic?
+        if target = node.target_type
+          return target
+        end
+      end
       # Check if the Path begins with a free variable
       if !node.global? && (free_var = @free_vars.try &.[node.names.first]?)
         if node.names.size == 1
@@ -178,7 +183,7 @@ class Iyi::Type
       # `pub import`s. Only on authoritative lookups: a speculative one
       # (`@raise` off — overload matching trying restrictions) must
       # keep its answer, not acquire a new way to fail.
-      if @raise && type.is_a?(Type) && !type_var_name?(node)
+      if @raise && type.is_a?(Type) && !type_var_name?(node) && !node.iyi_synthetic?
         @root.program.iyi_check_import_reach(node, type)
       end
 

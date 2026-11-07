@@ -219,12 +219,13 @@ while chars <= 253
 end
 puts "wire_padding: ok"
 
-if Program.args.empty?
+args = Program.args
+if !(args.size > 1 && args[0] == "data")
   puts "no server directory given: the sections over the network are bench/std_secure_dns_exercise.sh's"
   exit 0
 end
 
-dir = Program.args[0]
+dir = args[1]
 dot_port = File.read(dir + "/dot.port").to_i
 doh_port = File.read(dir + "/doh.port").to_i
 udp_port = File.read(dir + "/udp.port").to_i

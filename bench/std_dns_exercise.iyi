@@ -826,14 +826,26 @@ def happy_eyeballs : Nil
   he_port = live.local_port
   full = IyiSocket.listen(hole, he_port, 1)
   stuffed = [] of IyiSocket
+  # The connect that stops the stuffing says how the full listener treats a
+  # SYN: a drop times out, which the races need; a reset or a refusal comes
+  # back at once, and then the first address fails fast instead of hanging.
+  stopped : SocketError? = nil
   while stuffed.size < 300
     filler = IyiSocket.connect(hole, he_port, timeout_ms: 300)
-    break unless filler.is_a?(IyiSocket)
+    unless filler.is_a?(IyiSocket)
+      stopped = filler.as(SocketError)
+      break
+    end
     stuffed << filler
   end
+  sections = ["he_blackhole", "he_family", "he_fds", "he_deadline", "he_cancel"]
   if stuffed.size == 300
-    ["he_blackhole", "he_family", "he_fds", "he_deadline", "he_cancel"].each do |section|
+    sections.each do |section|
       puts "#{section}: skipped, #{hole}'s listener took 300 connections with a backlog of one and never stopped taking them"
+    end
+  elsif (failure = stopped) && !failure.timed_out?
+    sections.each do |section|
+      puts "#{section}: skipped, #{hole}'s full listener answers a SYN instead of dropping it"
     end
   else
     he_races(he, has_six, hole, live, he_port)

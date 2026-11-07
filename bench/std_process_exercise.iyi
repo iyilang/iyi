@@ -82,6 +82,7 @@ end
 # ── The child ────────────────────────────────────────────────────────────
 args = Program.args
 if mode = args[0]?
+  is_child = true
   case mode
   when "lines"
     # Answers each line as it comes, so its parent can talk to it while it
@@ -217,10 +218,12 @@ if mode = args[0]?
   when "breakaway"
     stdout.write("#{breakaway_start}\n")
   else
-    fail("no child mode #{mode}")
+    is_child = false
   end
-  stdout.flush
-  __iyi_exit(0)
+  if is_child
+    stdout.flush
+    __iyi_exit(0)
+  end
 end
 
 # ── The parent ───────────────────────────────────────────────────────────
@@ -569,7 +572,7 @@ group do |g|
     case found
     when ProcessResult
       fail("the program found on a quoted entry said #{found.stdout.inspect}") unless found.stdout == "değer-日本\n"
-      puts "  found and ran from #{quoted}"
+      puts "  found and ran from the quoted non-ASCII PATH entry"
     when ProcessError
       fail("a quoted PATH entry was not searched: #{found.message}")
     else

@@ -7,10 +7,12 @@
 
 module samples/files
 
-path = "iyi-files-sample.txt"
+dir = Program.args[0]?
+path = dir ? "#{dir}/iyi-files-sample.txt" : "iyi-files-sample.txt"
+missing = dir ? "#{dir}/iyi-files-sample-missing.txt" : "iyi-files-sample-missing.txt"
 File.write(path, "hello from iyi\n")
 puts File.read(path)
 puts File.exists?(path)
-puts File.exists?("iyi-files-sample-missing.txt")
+puts File.exists?(missing)
 File.delete(path)
 puts File.exists?(path)

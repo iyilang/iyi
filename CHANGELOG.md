@@ -10,10 +10,9 @@
   among the trait's implementers. A consumer without the module's source had
   no witness: object code that matched a union containing it, such as
   `is_a?(Value)` on a `Value | Bool` field, was refused with "this build
-  cannot name it", and a trait-valued field forwarded through a generic body
-  the consumer recompiles could be read with a different layout from the
-  producer's. Artifacts now record the witnesses of the traits their module
-  declares, and the consumer restores them before typing its own bodies.
+  cannot name it". Artifacts now record the witnesses of the traits their
+  module declares, and the consumer restores them before typing its own
+  bodies, so it numbers and lays out the trait as the producer did.
   Artifacts emitted by earlier compilers do not carry that record: rebuild
   them with `--emit-iyimod`. The prelude analysed ahead by the build daemon
   does not restore witnesses yet.

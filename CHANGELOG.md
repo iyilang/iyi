@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **On Linux, C called from a parallel task or an `IyiThread` runs on a
+  thread libc made** (#158). The pool's threads were a raw `clone` with
+  a TLS block made from the executable's PT_TLS and none of libc's
+  thread state, so a `lib` function that reached for it answered wrong
+  or faulted: `pthread_self` answered 0, `strerror` died of SIGSEGV, and
+  `errno` was written below the block. A program whose code outside the
+  prelude calls a C function, or that imports an artifact whose code
+  does, now starts its threads and the collector's mark helpers with
+  `pthread_create` on the same 1 MiB mapping and guard page, and joins
+  with `pthread_join`; the compiler answers `IyiThread.program_calls_c?`
+  once the whole program is typed, so a program that calls no C still
+  starts them with `clone` and names nothing on the link line. A program
+  that binds C with `lib LibC` on Linux can no longer bind
+  `pthread_create`, `pthread_join` or the three `pthread_attr_` calls
+  with signatures other than the runtime's, as on darwin.
+
 ## 0.20.1 — 2026-11-04
 
 **Fixes found by soaking 0.20.0 on every core: a darwin server a client
@@ -26215,7 +26235,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 25,763-line library and nothing else. Every other
+  written against iyi's own 25,848-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

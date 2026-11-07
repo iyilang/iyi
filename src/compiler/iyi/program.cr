@@ -534,6 +534,53 @@ module Iyi
     # half of that rule answers instead.
     property iyi_prelude_dir : String? = nil
 
+    # iyi: whether code written outside the prelude calls a C function — a
+    # `lib` fun that is neither an LLVM intrinsic nor a variable. Set where
+    # such a call is typed (`Call#recalculate_lib_call`).
+    #
+    # It decides how a Linux thread is made (`IyiThread.program_calls_c?`).
+    # The main thread is libc's, started by `__libc_start_main`; a raw
+    # `clone` gets a TLS block made from the executable's PT_TLS and no
+    # thread control block, so C that reaches its own thread state there —
+    # `pthread_self` answered 0, `strerror` faulted, `errno` was written
+    # outside the block (issue #158) — runs on nothing. A program that calls
+    # C has libc's thread names already; one that does not keeps the floor.
+    property? iyi_calls_c = false
+
+    # Whether the program runs C: its own calls, or a `lib` an imported
+    # artifact's object code calls into, which this build never typed.
+    def iyi_runs_c? : Bool
+      @iyi_calls_c || iyi_artifact_calls_c?(@types)
+    end
+
+    private def iyi_artifact_calls_c?(types) : Bool
+      return false if iyi_artifact_libs.empty? || types.nil?
+      types.each_value.any? { |type| iyi_artifact_lib_calls_c?(type) || iyi_artifact_calls_c?(type.types?) }
+    end
+
+    private def iyi_artifact_lib_calls_c?(type : Type) : Bool
+      return false unless type.is_a?(LibType) && iyi_artifact_libs.includes?(type.to_s)
+      defs = type.defs
+      return false unless defs
+      defs.each_value.any? { |overloads| overloads.any? { |item| iyi_c_function?(item.def) } }
+    end
+
+    # A `lib` fun whose machine code is C's: not a variable, and not an LLVM
+    # intrinsic, which is an instruction rather than a call.
+    def iyi_c_function?(target : Def) : Bool
+      target.is_a?(External) && !target.external_var? && !target.real_name.starts_with?("llvm.")
+    end
+
+    # Whether *location* is in one of the prelude's own files, following a
+    # macro expansion back to its source.
+    def iyi_prelude_location?(location : Location?) : Bool
+      return false unless dir = @iyi_prelude_dir
+      prefix = "#{::Path[dir].to_posix}/"
+      !!location.try(&.expanded_location).try(&.read_from.as?(String)).try do |filename|
+        ::Path[filename].to_posix.to_s.starts_with?(prefix)
+      end
+    end
+
     # iyi: the global of the pool's preemption word, `IyiWorkers::preempt`,
     # once codegen has marked a loop's back-edge for the check
     # (`CodeGenVisitor#iyi_back_edge`); nil in a program with no pool. The

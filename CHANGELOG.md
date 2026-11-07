@@ -20,6 +20,19 @@
   `pthread_create`, `pthread_join` or the three `pthread_attr_` calls
   with signatures other than the runtime's, as on darwin.
 
+- **A module consumed from its `.iyimod` keeps the definition witnesses its
+  producer typed against (#118).** Definition typing gives a trait a witness
+  type in the build that typed a def restricted to it, and that witness is
+  among the trait's implementers. A consumer without the module's source had
+  no witness: object code that matched a union containing it, such as
+  `is_a?(Value)` on a `Value | Bool` field, was refused with "this build
+  cannot name it". Artifacts now record the witnesses of the traits their
+  module declares, and the consumer restores them before typing its own
+  bodies, so it numbers and lays out the trait as the producer did.
+  Artifacts emitted by earlier compilers do not carry that record: rebuild
+  them with `--emit-iyimod`. The prelude analysed ahead by the build daemon
+  does not restore witnesses yet.
+
 ## 0.20.1 — 2026-11-04
 
 **Fixes found by soaking 0.20.0 on every core: a darwin server a client

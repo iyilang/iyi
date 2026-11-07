@@ -718,6 +718,15 @@
 
 ### Fixed
 
+- **The language server's hover shows the doc comment of a declaration
+  written under an annotation.** It read the `#` lines straight above the
+  declaration and stopped at an `@[...]` line, so a documented type or
+  def with an annotation - `std/unit`'s `Unit` among them - hovered as
+  its signature alone; the annotations between the comment and the
+  declaration are now stepped over. `bench/lsp_session.py` step 23u, the
+  hover on `Unit`, failed on Linux with `Unit`'s doc comment in place and
+  holds with the fix.
+
 - **`GC.collect` clears the dead stack from its caller's frame, so what
   a returned helper built is freed whatever the frames' layout.** A
   collection zeroes 2 KiB of dead stack before it scans, and did so from

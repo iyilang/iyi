@@ -64,6 +64,9 @@
 
 module std/unit
 
+# A value that only one unit's tasks reach, one task at a time: the block
+# `Unit.new` runs makes it, and `g.spawn(in: u) { |value| }` runs a task of
+# `g` in its unit, handed it (the header above; SPEC.md III.4.18).
 @[Share(owns: true)]
 pub class Unit(T) < IyiGroup::Unit(T)
   # A `Unit` owning the value *block* makes. The block may capture only

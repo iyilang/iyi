@@ -1355,12 +1355,17 @@ module Iyi::Lsp
     end
 
     # The `#` lines immediately above a definition — the doc comment,
-    # rendered as the markdown it already is.
+    # rendered as the markdown it already is. Annotations between the
+    # comment and the definition (`@[Share(owns: true)]` above
+    # `std/unit`'s `Unit`) are stepped over, as the doc generator does.
     private def doc_above(filename : String, line : Int32) : String
       text = document_text(filename) || (File.file?(filename) ? File.read(filename) : "")
       lines = text.lines
       docs = [] of String
       index = line - 2
+      while index >= 0 && lines[index]?.try(&.strip.starts_with?("@["))
+        index -= 1
+      end
       while index >= 0
         stripped = lines[index]?.try(&.strip)
         break unless stripped && stripped.starts_with?('#')

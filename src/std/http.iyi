@@ -1813,6 +1813,12 @@ pub struct Server
   # once - "two fibers reading one fd" - and the others by none, and their
   # clients waited forever.
   #
+  # The connection runs in the accept loop's unit, spelled `unit: :same`:
+  # its block holds the server's `idle` table and the handler, which the
+  # one thread's connections share between their parks and which are not
+  # `Share`, so `unit: :new` here is refused at compile time
+  # (bench/std_http_exercise.sh keeps that copy).
+  #
   # The connection runs in a group of its own whose answer is read, so a
   # block that panics ends its own connection - its defers close it, and the
   # panic is printed where it happened - and nothing else, which is what
@@ -1820,7 +1826,7 @@ pub struct Server
   # cancelled every other connection and the accept loop and panicked "a
   # task panicked": one request whose block failed took the server down.
   private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, Conn), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : TlsServerConfig | TlsFrozenServerConfig | Nil, request_timeout_ms : Int32, slots : Channel(Int32)?) : Nil
-    g.spawn do
+    g.spawn(unit: :same) do
       group do |own|
         served = own.spawn do
           handle(client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms)

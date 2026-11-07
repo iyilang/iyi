@@ -243,6 +243,36 @@ refuses "a chunked body cut inside a chunk" chunk_cut "HTTP: chunked body ends i
 refuses "a status that is not a number" status_text "HTTP: not a status line" \
   'HTTP.parse_response("HTTP/1.1 OK\r\n\r\n").status'
 
+echo
+echo "== a one-thread server's connections stay in its unit"
+# `workers: 1` serves each connection with `g.spawn(unit: :same)`
+# (std/http's spawn_handler): the block holds the accepted socket, the
+# server's idle table and a handler that need not be Share, all of the one
+# thread's. A server whose block appends to an array builds; the copy whose
+# connections go to `unit: :new` is refused at compile time, naming the
+# socket the block captures, so a server that went parallel there is
+# caught before it runs rather than by a race it may not lose.
+mkdir -p "$WORK/unitnew/std"
+printf 'module main\n\nimport std/http::{Response, Server}\nimport std/socket::{IyiSocket}\n\nseen = [] of String\nlistener = IyiSocket.listen("127.0.0.1", 0)\nServer.serve(listener, workers: 1) do |req|\n  seen << req.path\n  Response.new(200, "ok")\nend\nputs seen.size\n' > "$WORK/one_thread.iyi"
+sed 's/^    g\.spawn(unit: :same) do$/    g.spawn(unit: :new) do/' "$REPO/src/std/http.iyi" > "$WORK/unitnew/std/http.iyi"
+if ! "$IYI" build -o "$WORK/one_thread" "$WORK/one_thread.iyi" > "$WORK/one_thread.build" 2>&1; then
+  echo "  a workers: 1 server whose block appends to an array did not build"
+  sed -n '1,8p' "$WORK/one_thread.build"
+  status=1
+elif cmp -s "$REPO/src/std/http.iyi" "$WORK/unitnew/std/http.iyi"; then
+  echo "  the copy that puts each connection in a unit of its own changed nothing, so it proves nothing"
+  status=1
+elif IYI_PATH="$WORK/unitnew${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/one_thread_new" "$WORK/one_thread.iyi" > "$WORK/one_thread_new.build" 2>&1; then
+  echo "  the copy whose connections run in units of their own built: nothing holds spawn_handler to unit: :same"
+  status=1
+elif ! grep -q "spawn(unit: :new) runs in a unit of its own, on another thread captures .client : Std::Socket::IyiSocket., which is not Share" "$WORK/one_thread_new.build"; then
+  echo "  the copy whose connections run in units of their own was refused, but not for the socket"
+  sed -n '1,8p' "$WORK/one_thread_new.build"
+  status=1
+else
+  echo "  a workers: 1 server whose block appends to an array builds; with its connections in units of their own it is refused: the block captures \`client : Std::Socket::IyiSocket\`, which is not Share"
+fi
+
 # The first line a server printed, which is its port, once it has printed
 # it. The wait is for the process to start running: on Windows, Defender
 # checks an exe it has not seen before the exe's first launch runs, and its

@@ -475,6 +475,8 @@ echo "== every std module exercise runs from artifacts as it runs from source"
 # the failure this is most worth catching.
 if [ "${STD_ARTIFACTS:-1}" = 1 ]; then
   if ! bash "$REPO/bench/std_artifacts.sh" native; then status=1; fi
+else
+  echo "  left to bench/std_artifacts.sh (STD_ARTIFACTS=0)"
 fi
 # The filter above (bench/darwin_frames.sh) leaves out a frame, whichever
 # binary it names, and nothing else: a panic's message beside it, a line
@@ -539,6 +541,8 @@ echo "== and on the platforms this runner is not"
 # five: the whole sweep over four targets is a minute.
 if [ "${STD_ARTIFACTS:-1}" = 1 ]; then
   if ! bash "$REPO/bench/std_artifacts.sh" cross; then status=1; fi
+else
+  echo "  left to bench/std_artifacts.sh (STD_ARTIFACTS=0)"
 fi
 
 echo

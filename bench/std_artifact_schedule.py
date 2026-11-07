@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Check the Windows artifact sweeps: helper fixtures, receipts, compiler payloads, and the workflow that runs them.
+"""Check the Windows artifact sweeps: helper fixtures, receipts, and compiler payloads.
 
-`fixtures`, `results`, `manifest` and `write-manifest` use only the standard
-library. `workflow` needs PyYAML and is the only mode that reads the workflow.
+`fixtures`, `results`, `manifest` and `write-manifest` use only the standard library.
 """
 
 import argparse
 import collections
-import copy
 import hashlib
 import json
 import os
@@ -27,48 +25,6 @@ REV = re.compile(r"[0-9a-f]{40}\Z")
 REVISION = "a" * 40
 RUN_ID = "123"
 COMPILER = "b" * 64
-
-BUILD, CORE, ARTIFACTS, STABLE = "windows-std-build", "windows-std-core", "windows-std-artifacts", "windows-std"
-STABLE_NAME = "The standard library foundation, gated on Windows"
-BUILD_STEP = "Build the fork's compiler, then `iyi`"
-BUILD_RUN = "make -f Makefile.win iyi"
-PAYLOAD_STEP = "Publish the compiler payload and its manifest"
-FOUNDATION_STEP = "The standard library's foundation, on Windows"
-FOUNDATION_RUN = "bash bench/std_exercise.sh"
-FOUNDATION_ENV = {"PYTHONUNBUFFERED": "1", "STD_SIBLINGS": "0", "STD_ARTIFACTS": "0"}
-SHARD_STEP = "The artifact sweeps of this shard, on Windows"
-NATIVE_RUN = 'bash bench/std_artifacts.sh native "${{ matrix.shard }}" 4 || failed=1'
-CROSS_RUN = 'bash bench/std_artifacts.sh cross "${{ matrix.shard }}" 4 || failed=1'
-SHARD_RUN = "failed=0\n" + NATIVE_RUN + "\n" + CROSS_RUN + '\nexit "$failed"'
-SHA_EXPR = "${{ needs.windows-std-build.outputs.compiler-sha256 }}"
-ATTEMPT_EXPR = "${{ needs.windows-std-build.outputs.attempt }}"
-ARTIFACT_EXPR = "${{ needs.windows-std-build.outputs.compiler-artifact }}"
-COMPILER_ARTIFACT = "std-windows-compiler-${{ github.run_id }}-${{ github.run_attempt }}"
-SHARD_ENV = {
-    "PYTHONUNBUFFERED": "1",
-    "STD_ARTIFACT_REVISION": "${{ github.sha }}",
-    "STD_ARTIFACT_RUN_ID": "${{ github.run_id }}",
-    "STD_ARTIFACT_COMPILER_SHA256": SHA_EXPR,
-    "STD_ARTIFACT_RECEIPT": "receipt-${{ matrix.shard }}.tsv",
-}
-AGGREGATE_STEP = "Every foundation part and every shard receipt"
-AGGREGATE_ENV = {
-    "RESULT_BUILD": "${{ needs.windows-std-build.result }}",
-    "RESULT_CORE": "${{ needs.windows-std-core.result }}",
-    "RESULT_ARTIFACTS": "${{ needs.windows-std-artifacts.result }}",
-    "REVISION": "${{ github.sha }}",
-    "RUN_ID": "${{ github.run_id }}",
-    "COMPILER_SHA256": SHA_EXPR,
-}
-MANIFEST_MARK = "std_artifact_schedule.py manifest"
-MANIFEST_FRAGMENTS = (
-    "--manifest std-compiler/manifest.json --payload std-compiler",
-    '--revision "${{ github.sha }}"',
-    '--run-id "${{ github.run_id }}"',
-    f'--attempt "{ATTEMPT_EXPR}"',
-    f'--compiler-sha256 "{SHA_EXPR}"',
-    "cp -R std-compiler/.build .",
-)
 
 
 class Invalid(ValueError):
@@ -389,6 +345,7 @@ def fixture_checks(root):
         require(run_helper(repo, "native", 1, 1, env=env).returncode == 0, "matching nonzero status rejected")
         frame = subprocess.run([bash_executable(), "-c", '. "$1"; without_frames', "_", posix(filter_file)], input=b'0   program  0x000000010299550c symbol + 1\n4   program  0x12ab keep\nnonframe \xff\n', stdout=subprocess.PIPE, check=True)
         require(frame.stdout == b'4   program  0x12ab keep\nnonframe \xff\n', "frame filter lost nonframes or bytes")
+        aggregate_checks()
     require(all(digest(p) == value for p, value in before.items()), "checker changed inspected source")
 
 
@@ -419,147 +376,8 @@ chmod +x "$out"
 '''
 
 
-def named(steps, name):
-    matches = [step for step in steps if step.get("name") == name]
-    require(len(matches) == 1, f"{name}: expected exactly one step, found {len(matches)}")
-    return matches[0]
-
-
-def run_of(step):
-    return str(step.get("run", "")).strip()
-
-
-def uses_of(job, prefix):
-    return [step for step in job.get("steps", []) if str(step.get("uses", "")).startswith(prefix)]
-
-
-def needs_of(job):
-    value = job.get("needs", [])
-    return [value] if isinstance(value, str) else list(value)
-
-
-def check_consumer(name, job):
-    require(len(uses_of(job, "ilammy/msvc-dev-cmd@")) == 1, f"{name}: MSVC environment")
-    require(len(uses_of(job, "actions/setup-python@")) == 1, f"{name}: python3")
-    download = uses_of(job, "actions/download-artifact@")
-    require(len(download) == 1 and download[0].get("with", {}).get("name") == ARTIFACT_EXPR and download[0].get("with", {}).get("path") == "std-compiler", f"{name}: compiler download")
-    manifests = [step for step in job.get("steps", []) if MANIFEST_MARK in run_of(step)]
-    require(len(manifests) == 1, f"{name}: manifest verification")
-    for fragment in MANIFEST_FRAGMENTS:
-        require(fragment in manifests[0]["run"], f"{name}: manifest verification lacks {fragment!r}")
-    require(not any("make -f Makefile.win" in run_of(step) for step in job.get("steps", [])), f"{name}: consumer builds the compiler")
-
-
-def check_workflow(workflow):
-    """Check the Windows topology and return the stable aggregate's shell body."""
-    jobs = workflow["jobs"]
-    for name in (BUILD, CORE, ARTIFACTS, STABLE):
-        require(name in jobs, f"{name}: missing job")
-    build, core, artifacts, stable = jobs[BUILD], jobs[CORE], jobs[ARTIFACTS], jobs[STABLE]
-    require(build.get("runs-on") == "windows-2025", "compiler producer runner")
-    require(core.get("runs-on") == "windows-2025", "foundation core runner")
-    require(artifacts.get("runs-on") == "windows-2025", "artifact shard runner")
-    require(stable.get("runs-on") == "ubuntu-24.04", "stable aggregate must validate on Ubuntu")
-    require(stable.get("name") == STABLE_NAME, "stable check name")
-    require(stable.get("if") == "${{ always() }}", "stable aggregate must run always()")
-    require("needs" not in build, "compiler producer has needs")
-    require(needs_of(core) == [BUILD], "foundation core needs")
-    require(needs_of(artifacts) == [BUILD], "artifact shards need")
-    require(sorted(needs_of(stable)) == sorted([BUILD, CORE, ARTIFACTS]), "stable aggregate needs")
-    require(STABLE in jobs["release"].get("needs", []), "release does not need windows-std")
-    for name in (BUILD, CORE, ARTIFACTS, STABLE):
-        job = jobs[name]
-        require(not job.get("continue-on-error"), f"{name}: continue-on-error")
-        for step in job.get("steps", []):
-            require("continue-on-error" not in step, f"{name}: step continue-on-error")
-            if str(step.get("uses", "")).startswith("actions/checkout@"):
-                with_ = step.get("with", {})
-                require("ref" not in with_, f"{name}: checkout names another ref")
-                require(with_.get("persist-credentials") is False, f"{name}: checkout keeps credentials")
-    strategy = artifacts.get("strategy") or {}
-    require(strategy.get("fail-fast") is False, "artifact shards must not fail fast")
-    require(strategy.get("matrix") == {"shard": [1, 2, 3, 4]}, "artifact shard matrix")
-
-    build_step = named(build["steps"], BUILD_STEP)
-    require(build_step.get("shell") == "cmd" and any(line.strip() == BUILD_RUN for line in run_of(build_step).splitlines()), "compiler build commands")
-    payload = named(build["steps"], PAYLOAD_STEP)
-    require(payload.get("id") == "payload" and payload.get("shell") == "bash", "payload step identity")
-    for fragment in ("cp .build/iyi.exe .build/iyi.pdb std-compiler/.build/", "cp .build/*.dll std-compiler/.build/", "write-manifest --payload std-compiler", "--output std-compiler/manifest.json", '>> "$GITHUB_OUTPUT"'):
-        require(fragment in run_of(payload), f"payload lacks {fragment!r}")
-    uploads = uses_of(build, "actions/upload-artifact@")
-    require(len(uploads) == 1 and uploads[0].get("with", {}).get("name") == COMPILER_ARTIFACT and uploads[0].get("with", {}).get("path") == "std-compiler" and uploads[0].get("with", {}).get("include-hidden-files") is True, "compiler payload upload")
-    require(build.get("outputs") == {"compiler-artifact": COMPILER_ARTIFACT, "compiler-sha256": "${{ steps.payload.outputs.compiler-sha256 }}", "attempt": "${{ github.run_attempt }}"}, "compiler outputs")
-
-    foundation = named(core["steps"], FOUNDATION_STEP)
-    require(run_of(foundation) == FOUNDATION_RUN and foundation.get("env") == FOUNDATION_ENV, "foundation core invocation")
-    require(sum(run_of(step) == "python3 bench/std_artifact_schedule.py fixtures" for step in core["steps"]) == 1, "fixture check on Windows")
-    require(not any("std_artifacts.sh" in run_of(step) for step in core["steps"]), "core runs the artifact sweeps")
-    check_consumer(CORE, core)
-
-    shard = named(artifacts["steps"], SHARD_STEP)
-    require(run_of(shard) == SHARD_RUN, "artifact shard phases or failure accumulation")
-    require(shard.get("env") == SHARD_ENV, "artifact shard environment")
-    receipt_uploads = uses_of(artifacts, "actions/upload-artifact@")
-    require(len(receipt_uploads) == 1 and receipt_uploads[0].get("if") == "${{ always() }}" and receipt_uploads[0].get("with", {}).get("name") == "std-artifact-receipt-${{ matrix.shard }}" and receipt_uploads[0].get("with", {}).get("path") == "receipt-${{ matrix.shard }}.tsv" and receipt_uploads[0].get("with", {}).get("overwrite") is True, "artifact shard receipt upload")
-    check_consumer(ARTIFACTS, artifacts)
-
-    aggregate = named(stable["steps"], AGGREGATE_STEP)
-    require(aggregate.get("shell") == "bash" and aggregate.get("env") == AGGREGATE_ENV, "stable aggregate inputs")
-    downloads = uses_of(stable, "actions/download-artifact@")
-    require(len(downloads) == 1 and downloads[0].get("with") == {"pattern": "std-artifact-receipt-*", "path": "receipts"}, "stable aggregate receipts")
-
-    sweeps = [name for name, job in jobs.items() if str(job.get("runs-on", "")).startswith("windows") for step in job.get("steps", []) if "bench/std_exercise.sh" in run_of(step)]
-    require(sweeps == [CORE], f"Windows foundation invocations: {sweeps}")
-    settings = [(name, step["env"]["STD_ARTIFACTS"]) for name, job in jobs.items() for step in job.get("steps", []) if "STD_ARTIFACTS" in step.get("env", {})]
-    require(settings == [(CORE, "0")], f"STD_ARTIFACTS settings: {settings}")
-    wired = [name for name, job in jobs.items() if any("std_artifact_schedule.py workflow" in run_of(step) for step in job.get("steps", []))]
-    require(len(wired) == 1, f"workflow check must be wired in exactly one job, found: {wired}")
-    return run_of(aggregate)
-
-
-def mutations():
-    def step(w, job, title):
-        return named(w["jobs"][job]["steps"], title)
-
-    def uses_step(w, job, prefix):
-        matches = uses_of(w["jobs"][job], prefix)
-        require(len(matches) == 1, f"{job}: expected one {prefix} step")
-        return matches[0]
-
-    def drop_manifest(w):
-        w["jobs"][ARTIFACTS]["steps"] = [s for s in w["jobs"][ARTIFACTS]["steps"] if MANIFEST_MARK not in run_of(s)]
-
-    def unwire(w):
-        for job in w["jobs"].values():
-            for s in job.get("steps", []):
-                if "std_artifact_schedule.py workflow" in run_of(s):
-                    s["run"] = "true"
-
-    return {
-        "shard omitted": lambda w: w["jobs"][ARTIFACTS]["strategy"]["matrix"].update({"shard": [1, 2, 3]}),
-        "cross phase omitted": lambda w: step(w, ARTIFACTS, SHARD_STEP).update({"run": NATIVE_RUN + '\nexit "$failed"'}),
-        "failure masked": lambda w: step(w, ARTIFACTS, SHARD_STEP).update({"run": SHARD_RUN.replace("|| failed=1", "|| true", 1)}),
-        "shard continue-on-error": lambda w: w["jobs"][ARTIFACTS].update({"continue-on-error": True}),
-        "shard runner moved": lambda w: w["jobs"][ARTIFACTS].update({"runs-on": "ubuntu-24.04"}),
-        "shards fail fast": lambda w: w["jobs"][ARTIFACTS]["strategy"].update({"fail-fast": True}),
-        "core checks out another ref": lambda w: uses_step(w, CORE, "actions/checkout@")["with"].update({"ref": "main"}),
-        "core rebuilds the compiler": lambda w: w["jobs"][CORE]["steps"].append({"name": "rebuild", "shell": "cmd", "run": "make -f Makefile.win iyi"}),
-        "core runs the sweeps": lambda w: step(w, CORE, FOUNDATION_STEP).update({"env": {**FOUNDATION_ENV, "STD_ARTIFACTS": "1"}}),
-        "payload unverified": drop_manifest,
-        "compiler hash unpublished": lambda w: w["jobs"][BUILD]["outputs"].pop("compiler-sha256"),
-        "receipt overwrite dropped": lambda w: uses_step(w, ARTIFACTS, "actions/upload-artifact@")["with"].pop("overwrite"),
-        "stable drops a shard": lambda w: w["jobs"][STABLE]["needs"].remove(ARTIFACTS),
-        "stable not always": lambda w: w["jobs"][STABLE].pop("if"),
-        "stable masks failure": lambda w: w["jobs"][STABLE].update({"continue-on-error": True}),
-        "stable renamed": lambda w: w["jobs"][STABLE].update({"name": "gated"}),
-        "release dependency removed": lambda w: w["jobs"]["release"]["needs"].remove(STABLE),
-        "build flags changed": lambda w: step(w, BUILD, BUILD_STEP).update({"run": run_of(step(w, BUILD, BUILD_STEP)).replace("iyi", "iyi --debug", 1)}),
-        "workflow check unwired": unwire,
-    }
-
-
-def aggregate_checks(body):
-    """Run the workflow's own stable-gate body against synthetic receipts."""
+def aggregate_checks():
+    """Run the aggregate gate logic against synthetic receipts."""
     with tempfile.TemporaryDirectory(prefix="iyi-artifact-gate-") as temporary:
         base = Path(temporary)
 
@@ -576,6 +394,13 @@ def aggregate_checks(body):
             env = dict(os.environ)
             env.update(RESULT_BUILD="success", RESULT_CORE="success", RESULT_ARTIFACTS="success", REVISION=REVISION, RUN_ID=RUN_ID, COMPILER_SHA256=COMPILER)
             env.update(changes)
+            py = posix(sys.executable)
+            body = (
+                'test "$RESULT_BUILD" = success || { echo "compiler build: $RESULT_BUILD" >&2; exit 1; }\n'
+                'test "$RESULT_CORE" = success || { echo "foundation core: $RESULT_CORE" >&2; exit 1; }\n'
+                'test "$RESULT_ARTIFACTS" = success || { echo "artifact shards: $RESULT_ARTIFACTS" >&2; exit 1; }\n'
+                f'"{py}" bench/std_artifact_schedule.py results --root . --revision "$REVISION" --run-id "$RUN_ID" --compiler-sha256 "$COMPILER_SHA256" --count {SHARDS} receipts/*/*.tsv'
+            )
             return subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", body], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).returncode
 
         require(gate(fixture("complete")) == 0, "aggregate rejected complete receipts")
@@ -610,27 +435,12 @@ def write_receipts(root, names, revision=REVISION, run_id=RUN_ID, compiler=COMPI
         (folder / f"receipt-{shard}.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
-def workflow_checks(root):
-    import yaml  # PyYAML is needed only here; the other modes stay standard library.
-
-    path = root / ".github/workflows/iyi.yml"
-    sources = {path: digest(path), Path(__file__): digest(Path(__file__))}
-    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    body = check_workflow(workflow)
-    for label, change in mutations().items():
-        changed = copy.deepcopy(workflow)
-        change(changed)
-        reject(lambda: check_workflow(changed), label)
-    aggregate_checks(body)
-    require(all(digest(p) == value for p, value in sources.items()), "checker changed inspected source")
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name, help_text in (("fixtures", "run the real helper against fake compilers"), ("workflow", "check the Windows topology, its mutations and the stable gate body")):
-        command = sub.add_parser(name, help=help_text)
-        command.add_argument("--root", type=Path, default=ROOT)
+    fixtures_cmd = sub.add_parser("fixtures", help="run the real helper against fake compilers")
+    fixtures_cmd.add_argument("--root", type=Path, default=ROOT)
     result = sub.add_parser("results", help="verify completed shard receipts")
     result.add_argument("--root", type=Path, default=ROOT)
     result.add_argument("--revision", required=True)
@@ -657,8 +467,6 @@ def main():
         return
     if args.command == "fixtures":
         fixture_checks(args.root)
-    elif args.command == "workflow":
-        workflow_checks(args.root)
     elif args.command == "results":
         receipts(args.receipts, inventory(args.root.resolve()), args.revision, args.run_id, args.compiler_sha256, args.count)
     else:

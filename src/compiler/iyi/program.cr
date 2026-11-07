@@ -620,12 +620,12 @@ module Iyi
     # iyi: the witness types an imported artifact's object code refers to a
     # type id of and this build does not have, by name.
     #
-    # Definition-site typing (R-2c) gives a trait a witness type in the build
-    # that typed a def restricted to it, and the witness implements the trait,
-    # so every dispatch over the trait that build compiled tests for it. No
-    # value ever has that type - its probe sits under `if false` - so the
-    # consumer defines the id as one no type has rather than refusing the
-    # module over a type that exists only to be typed against.
+    # Definition-site typing (R-2c) adds witnesses to a trait's implementers,
+    # which can change both dispatch and trait-valued field/call layouts.
+    # Consumers restore supported witnesses as real types before typing their
+    # own bodies, preserving the producer's representation. These names are
+    # the fallback for witnesses that cannot be restored: codegen defines an
+    # unmatchable id for them. Compound matches must resolve to real types.
     getter iyi_artifact_phantom_types = Set(String).new
 
     # iyi: one name an imported artifact's object code refers to, waiting for
@@ -963,7 +963,7 @@ module Iyi
     # scope of the question: a type id is resolved from a definition in *this
     # program*, not from whatever had been read by the time one artifact was
     # opened. See `IyiArtifactRef`.
-    def resolve_iyi_artifact_refs : Nil
+    def resolve_iyi_artifact_refs(defer_witness_matches : Bool = false) : Nil
       refs = @iyi_artifact_refs
       return if refs.empty?
       @iyi_artifact_refs = [] of IyiArtifactRef
@@ -1002,6 +1002,13 @@ module Iyi
         # `iyi_artifact_phantom_types`.
         if !ref.match && ref.name.starts_with?(DefinitionTyping::WITNESS_PREFIX)
           iyi_artifact_phantom_types << ref.name
+        elsif ref.match && defer_witness_matches && ref.name.includes?(DefinitionTyping::WITNESS_PREFIX)
+          # A carried match can name a witness as a member of a union or a
+          # generic argument. Its declaration is restored by definition typing
+          # after the ordinary imported declarations have been processed.
+          # Keep the full reference, then resolve it strictly after restoration;
+          # treating the union as a phantom would lose its real runtime members.
+          @iyi_artifact_refs << ref
         elsif ref.match
           ref.node.raise <<-MESSAGE
             "#{ref.module_name}" matches against `#{ref.name}`, and this build cannot name it

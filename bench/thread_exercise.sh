@@ -2,7 +2,14 @@
 # Drives bench/thread_exercise.iyi: kernel threads under the collector —
 # GC_DESIGN.md Stage 4, the stop-the-world, built (src/iyi/thread.iyi).
 #
-#     bash bench/thread_exercise.sh
+#     bash bench/thread_exercise.sh [again | but-again]
+#
+# With no argument every step runs. `again` runs the plain build's ten
+# more runs of step 1 alone, and `but-again` every step but those, so a
+# caller that bounds each gate can give the two halves a bound each:
+# Windows' collector job does. On windows-2025's four cores the ten runs
+# took 388 and 454 s of the whole's 802 s (job 128265739456) and of the
+# 900 s at which its bound of 15 minutes ended it (job 128494833123).
 #
 # Seven steps, and the fifth and sixth are failure proofs, because a gate
 # that cannot fail is not a gate; the seventh, Windows' own and one of
@@ -93,6 +100,12 @@
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
 
+part="${1:-}"
+case "$part" in
+  "" | again | but-again) ;;
+  *) echo "usage: bash bench/thread_exercise.sh [again | but-again]" >&2; exit 2 ;;
+esac
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/end_process.sh"
 # The compiler, overridable: `bin/iyi` is a POSIX shell wrapper, and on
@@ -136,19 +149,21 @@ step "threads under the collector, plain build"
 if ! "$IYI" build "$REPO/bench/thread_exercise.iyi" -o threads > build.log 2>&1; then
   cat build.log; exit 1
 fi
-if ! timeout -k 5 300 ./threads 8 > answers.txt 2>&1; then
-  cat answers.txt; exit 1
-fi
-grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
+if [ "$part" != again ]; then
+  if ! timeout -k 5 300 ./threads 8 > answers.txt 2>&1; then
+    cat answers.txt; exit 1
+  fi
+  grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
-step "threads under the collector, release build"
-if ! "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o threads-release > build-release.log 2>&1; then
-  cat build-release.log; exit 1
+  step "threads under the collector, release build"
+  if ! "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o threads-release > build-release.log 2>&1; then
+    cat build-release.log; exit 1
+  fi
+  if ! timeout -k 5 300 ./threads-release 8 > answers-release.txt 2>&1; then
+    cat answers-release.txt; exit 1
+  fi
+  grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
 fi
-if ! timeout -k 5 300 ./threads-release 8 > answers-release.txt 2>&1; then
-  cat answers-release.txt; exit 1
-fi
-grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
 
 # The plain build, ten more times. A death here is a failure whatever it
 # says: on a Windows runner the exercise died once in sixty of a guard-page
@@ -156,17 +171,24 @@ grep -q 'every property held' answers-release.txt || { cat answers-release.txt; 
 # first line, so one run passing proved nothing. The registry check in
 # the exercise is the deterministic half of the same fix; this is the
 # half that turns the rare death into a red step.
-step "the plain build, ten more runs, and every one ends well"
-again=1
-while [ "$again" -le 10 ]; do
-  timeout -k 5 300 ./threads 8 > again.txt 2>&1
-  code=$?
-  if [ "$code" -ne 0 ] || ! grep -q 'every property held' again.txt; then
-    echo "run $again exited $code:"; tail -5 again.txt; exit 1
-  fi
-  again=$((again + 1))
-done
-echo "  ten of ten"
+if [ "$part" != but-again ]; then
+  step "the plain build, ten more runs, and every one ends well"
+  again=1
+  while [ "$again" -le 10 ]; do
+    timeout -k 5 300 ./threads 8 > again.txt 2>&1
+    code=$?
+    if [ "$code" -ne 0 ] || ! grep -q 'every property held' again.txt; then
+      echo "run $again exited $code:"; tail -5 again.txt; exit 1
+    fi
+    again=$((again + 1))
+  done
+  echo "  ten of ten"
+fi
+if [ "$part" = again ]; then
+  echo "workdir $WORK"
+  echo "thread exercise: the plain build's ten more runs held"
+  exit 0
+fi
 
 # ── 2. The floor ──────────────────────────────────────────────────────────
 case "$(uname -s)" in

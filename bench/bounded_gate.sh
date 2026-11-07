@@ -30,7 +30,9 @@ if [ "$#" -lt 2 ]; then
 fi
 minutes="$1"
 shift
-gate="$1"
+# The gate's name is its arguments too: one script run in halves, each
+# under a bound of its own, is two gates.
+gate="$*"
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) windows=1 ;;

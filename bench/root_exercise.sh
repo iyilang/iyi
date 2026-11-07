@@ -286,7 +286,7 @@ echo "== what root discovery asks the machine for"
 # darwin adds `close`, which is not root discovery's: the pool's growth
 # brings it to every program there (`bench/thread_floor.sh` says by which
 # chain), and macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine)
-# printed it here. This program's one task is `spawn(serial: true)` (the fiber
+# printed it here. This program's one task is `spawn(unit: :same)` (the fiber
 # root step says why), so it starts no pool and Linux reads no
 # `IYI_WORKERS`: no `environ`.
 case "$(uname -s)" in
@@ -536,7 +536,7 @@ esac
 # ... holds the program's arguments": the line is found by the argv it
 # holds).
 #
-# The tasks are `spawn(serial: true)`, as a program on one worker spawns them. A
+# The tasks are `spawn(unit: :same)`, as a program on one worker spawns them. A
 # plain spawn is parallel by default, and the pool it starts registers the
 # main thread, whose line reads the stack's end then (thread.iyi), before
 # the first task's stack is mapped: the one-buffer copy below found the
@@ -550,7 +550,7 @@ parked = Channel(Int32).new
 seen = 0
 group do |g|
   3000.times do
-    g.spawn(serial: true) do
+    g.spawn(unit: :same) do
       case parked.receive
       in Int32         then it
       in ChannelClosed then 0
@@ -558,7 +558,7 @@ group do |g|
       end
     end
   end
-  g.spawn(serial: true) do
+  g.spawn(unit: :same) do
     IyiMark.collect
     seen = 1
     parked.close

@@ -342,11 +342,11 @@ import std/socket::{IyiSocket, SocketError}
       near_family = near_families[c]
       far_fd = far_fds[c]
       far_family = far_families[c]
-      g.spawn(parallel: true) do
+      g.spawn(unit: :new) do
         client(near_fd, near_family, c, until_ns, requests, bytes, hold)
         0
       end
-      g.spawn(parallel: true) do
+      g.spawn(unit: :new) do
         echo(far_fd, far_family)
         0
       end

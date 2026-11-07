@@ -4887,7 +4887,7 @@ describe Iyi::IyiMod do
   # `AROUND_HOOKS`, an `AroundHooks` of a `Mutex` and an `Atomic` read by
   # every query, arrived bare: built from db's artifacts, a plain spawn that
   # runs in parallel built from source stayed in its unit, and every
-  # `spawn(parallel: true)` that queried was warned about it.
+  # `spawn(unit: :new)` that queried was warned about it.
   it "carries a private type's Share marker, so a travelling body's reach sees it" do
     with_tempdir("iyimod_share_private") do
       Dir.mkdir_p "dep"
@@ -4930,7 +4930,7 @@ describe Iyi::IyiMod do
         import dep/hooks::{busy?}
 
         group do |g|
-          g.spawn(parallel: true) { busy?(1) }
+          g.spawn(unit: :new) { busy?(1) }
         end
         IYI
 

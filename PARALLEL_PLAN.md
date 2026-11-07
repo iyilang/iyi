@@ -42,8 +42,8 @@ new warning, so `--error-on-warnings` builds keep building.
 
 What changes for an eligible `spawn` is ordering, not memory safety: today a
 child does not run until its spawner parks, and once eligible it may start at
-once on another core. One verb carries both answers: `g.spawn(serial: true)`
-keeps the old ordering for one spawn and `g.spawn(parallel: true)` asks for
+once on another core. One verb carries both answers: `g.spawn(unit: :same)`
+keeps the old ordering for one spawn and `g.spawn(unit: :new)` asks for
 the pool; `spawn_serial` and `spawn_parallel` are gone (III.4.16).
 
 Measured starting point (master decc9f1fb): `spawn` appears at 27 sites in

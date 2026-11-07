@@ -516,7 +516,7 @@ def first_text(rng, leaves, mids, cells):
 
 # A file is relative, or absolute with a drive on Windows (`C:\...`).
 NOTE = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[^\s:][^:]*):(?P<line>\d+):(?P<col>\d+): note: spawn (?P<rest>.*)$")
-DUMP_SPAWN = re.compile(r"^  (?P<owner>.+?) (?P<line>\d+):(?P<col>\d+) (?P<verdict>parallel|in its unit: .*?)( \(asked\))?$")
+DUMP_SPAWN = re.compile(r"^  (?P<owner>.+?) (?P<line>\d+):(?P<col>\d+) (?P<verdict>parallel|in its spawner's unit: .*?)( \(asked\))?$")
 REFUSED = re.compile(r"^In (?P<file>(?:[A-Za-z]:)?[^\s:]+):(?P<line>\d+):\d+$")
 
 
@@ -620,13 +620,13 @@ def dump_spawns(iyi, mods):
                     m = DUMP_SPAWN.match(line)
                     if m:
                         verdict = m["verdict"]
-                        rest = "runs in parallel" if verdict == "parallel" else "stays in its spawner's unit: " + verdict[len("in its unit: "):]
+                        rest = "runs in parallel" if verdict == "parallel" else "stays in its spawner's unit (SPEC.md III.4.18): " + verdict[len("in its spawner's unit: "):]
                         placed[(module + ".iyi", int(m["line"]), int(m["col"]))] = rest
     return placed
 
 
 def parallel(rest):
-    return rest.startswith("runs in parallel")
+    return rest.startswith(("runs in parallel", "runs in a unit of its own", "runs in the Unit"))
 
 
 def run_binary(path, cwd, workers, timeout=60):

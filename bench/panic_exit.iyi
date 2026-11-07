@@ -68,7 +68,7 @@ import std/socket::{IyiSocket, SocketError}
   # The parked tasks and the ending, spawned one way or the other: the
   # block a parallel task runs is checked for what it captures, so it is
   # written out at each spawn rather than passed along as a proc.
-  {% for kind in [{"spawn", "spawn"}, {"parallel", "spawn(parallel: true)"}] %}
+  {% for kind in [{"spawn", "spawn"}, {"parallel", "spawn(unit: :new)"}] %}
     def ends_{{kind[0].id}}(g : IyiGroup, mode : String, near : Array(Int32), far : Array(Int32), listening : Int32, never : Channel(Int32)) : Nil
       PAIRS.times do |index|
         a = near[index]

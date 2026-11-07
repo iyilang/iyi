@@ -1888,7 +1888,7 @@ module Iyi
         at = node.name_location || node.location
         if target
           if @proof.parallel_start?(target)
-            return Origin.new(Origin::Kind::Parallel, "the block `#{spelled(target.name)}` runs as a parallel task", at: at)
+            return Origin.new(Origin::Kind::Parallel, "the block `#{spelled(node, target.name)}` runs as a parallel task", at: at)
           end
           owner = target.owner
           if owning?(owner)
@@ -1903,11 +1903,18 @@ module Iyi
         Origin.new(Origin::Kind::Stored, "a block kept to run later", at: at)
       end
 
-      # A spawn as it is written: the def `spawn:parallel` that
-      # `g.spawn(parallel: true)` expands to by that spelling.
-      private def spelled(name : String) : String
-        verb, _, flag = name.partition(':')
-        flag.empty? ? verb : "#{verb}(#{flag}: true)"
+      # A spawn as it is written, from the def the cleanup left the call
+      # on, whose named arguments it has made positional by now:
+      # `spawn_new` is `g.spawn(unit: :new)` pointed there, `spawn:unit`
+      # the def `g.spawn(unit: :same)` expands to by that spelling, and
+      # `spawn:in` the one `g.spawn(in: u)` does.
+      private def spelled(node : Call, name : String) : String
+        case name
+        when "spawn_new"  then "spawn(unit: :new)"
+        when "spawn:unit" then "spawn(unit: #{node.args.first? || ":same"})"
+        when "spawn:in"   then "spawn(in: #{node.args.first? || "u"})"
+        else                   name.partition(':').first
+        end
       end
 
       private def owning?(owner : Type) : Bool

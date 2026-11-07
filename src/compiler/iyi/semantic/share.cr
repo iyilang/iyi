@@ -20,7 +20,8 @@
 # cannot say whether the body assigns.
 #
 # What it gates today: the block `IyiThread.start` captures (III.4.11), the
-# block `IyiGroup#spawn(parallel: true)` captures (III.4.13), and the block an
+# block `IyiGroup#spawn(unit: :new)` captures (III.4.13), the block
+# `IyiGroup#spawn(in: u)` captures (III.4.18), and the block an
 # owning type's method runs (`Mutex#lock` and the rest), in
 # `CleanupTransformer`. A channel crosses threads as a trusted type,
 # `@[Share]` on `Channel(T)`: shareable whenever its element type is.

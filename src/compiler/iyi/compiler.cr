@@ -842,9 +842,9 @@ module Iyi
         where = now.owner.empty? ? "at #{artifact.module_name}'s top level" : "in `#{now.owner}`"
         location = Location.new(artifact.source_path, now.line, now.column)
         if was.parallel
-          program.warnings.add_note(location, "spawn #{where} ran in parallel when #{artifact.module_name} was last built, and stays in its spawner's unit now: #{now.reason}")
+          program.warnings.add_note(location, "spawn #{where} ran in parallel when #{artifact.module_name} was last built, and stays in its spawner's unit now (SPEC.md III.4.18): #{now.reason}")
         else
-          program.warnings.add_note(location, "spawn #{where} stayed in its spawner's unit when #{artifact.module_name} was last built, and runs in parallel now: it may start beside its spawner, and `serial: true` keeps it where it was (SPEC.md III.4.16)")
+          program.warnings.add_note(location, "spawn #{where} stayed in its spawner's unit when #{artifact.module_name} was last built, and runs in parallel now, in a unit of its own: it may start beside its spawner, and `unit: :same` keeps it where it was (SPEC.md III.4.16)")
         end
       end
     end
@@ -2160,7 +2160,7 @@ module Iyi
           # `AroundHooks` of a `Mutex` and an `Atomic`, read by every query),
           # and without the marker the consumer read it as not Share - a
           # plain spawn that runs in parallel built from source stayed in its
-          # unit built from the artifact, and `spawn(parallel: true)` warned.
+          # unit built from the artifact, and `spawn(unit: :new)` warned.
           annotations: iyi_share_marker(declared) + iyi_read_annotations(declared),
           methods: iyi_carried_methods(program, filename, container, declared),
           visibility: declared.private? ? "private" : "",

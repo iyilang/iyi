@@ -7,7 +7,7 @@
 # The compiler decides per call: a block every capture of which is `Share`,
 # reaching no module state that is not, runs as a parallel task of its own
 # unit; any other stays in its spawner's unit, as every spawn did before.
-# `spawn(serial: true)` keeps a task in its unit and `spawn(parallel: true)`
+# `spawn(unit: :same)` keeps a task in its unit and `spawn(unit: :new)`
 # puts it on the pool, whatever the compiler would have decided.
 #
 #   together  four spawns whose blocks capture only atomics, from the main
@@ -23,15 +23,15 @@
 #             how many of the unit's tasks are running, and the parent
 #             spins too before it joins; the most ever running is one, and
 #             the array holds the four appends.
-#   serial    the same with `spawn(serial: true)` and blocks that capture only
+#   serial    the same with `spawn(unit: :same)` and blocks that capture only
 #             atomics, which `spawn` would have run in parallel: one at a
 #             time, from inside a parallel task and from the main thread.
-#   asked     the four of `together` spawned with `parallel: true`: all
+#   asked     the four of `together` spawned with `unit: :new`: all
 #             running at one instant.
 #   one       on a pool of one, eligible spawns stay on the spawner's
 #             thread, one at a time, and the pool never starts.
 #   askedone  on a pool of one, run in its own process: four
-#             `spawn(parallel: true)` tasks run on the pool's worker and not
+#             `spawn(unit: :new)` tasks run on the pool's worker and not
 #             on the main thread, where a plain spawn of the same blocks
 #             (`one`) stays.
 #   grows     run first in its process: the pool starts one worker for one
@@ -87,7 +87,7 @@ import std/int
 
   def nested : Nil
     group do |g|
-      g.spawn(parallel: true) do
+      g.spawn(unit: :new) do
         together("nested")
         0
       end
@@ -99,7 +99,7 @@ import std/int
     most = Atomic(Int64).new(0_i64)
     total = Atomic(Int64).new(0_i64)
     group do |g|
-      g.spawn(parallel: true) do
+      g.spawn(unit: :new) do
         appended = [] of Int64
         group do |inner|
           TASKS.times do |i|
@@ -140,14 +140,14 @@ import std/int
     puts "unit: #{TOGETHER} spawns appending to their parent's array ran one at a time in its unit"
   end
 
-  # The most `spawn(serial: true)` tasks, and their spawner, ever running at one
+  # The most `spawn(unit: :same)` tasks, and their spawner, ever running at one
   # instant.
   def serial_round : Int64
     running = Atomic(Int64).new(0_i64)
     most = Atomic(Int64).new(0_i64)
     group do |g|
       TASKS.times do
-        g.spawn(serial: true) do
+        g.spawn(unit: :same) do
           now = running.add(1_i64) + 1_i64
           seen = most.get
           while now > seen
@@ -178,19 +178,19 @@ import std/int
   def serial : Nil
     inside = Atomic(Int64).new(0_i64)
     group do |g|
-      g.spawn(parallel: true) do
+      g.spawn(unit: :new) do
         inside.set(serial_round)
         0
       end
     end
     if inside.get != 1_i64
-      fail("serial: #{inside.get} spawn(serial: true) tasks were running at one instant inside a parallel task")
+      fail("serial: #{inside.get} spawn(unit: :same) tasks were running at one instant inside a parallel task")
     end
     outside = serial_round
     if outside != 1_i64
-      fail("serial: #{outside} spawn(serial: true) tasks were running at one instant on the main thread")
+      fail("serial: #{outside} spawn(unit: :same) tasks were running at one instant on the main thread")
     end
-    puts "serial: spawn(serial: true) kept #{TOGETHER} tasks that capture only atomics in their unit, one at a time, inside a parallel task and on the main thread"
+    puts "serial: spawn(unit: :same) kept #{TOGETHER} tasks that capture only atomics in their unit, one at a time, inside a parallel task and on the main thread"
   end
 
   def one : Nil
@@ -221,13 +221,13 @@ import std/int
     puts "one: on a pool of one, #{TOGETHER} eligible spawns ran on the main thread, one at a time, and no pool started"
   end
 
-  # The four of `together`, asked onto the pool with `parallel: true`.
+  # The four of `together`, asked onto the pool with `unit: :new`.
   def asked : Nil
     arrived = Atomic(Int64).new(0_i64)
     missed = Atomic(Int64).new(0_i64)
     group do |g|
       TASKS.times do
-        g.spawn(parallel: true) do
+        g.spawn(unit: :new) do
           arrived.add(1_i64)
           until_ns = __iyi_monotonic_ns + WAIT_NS
           while arrived.get < TOGETHER && __iyi_monotonic_ns < until_ns
@@ -238,25 +238,25 @@ import std/int
       end
     end
     if missed.get != 0_i64
-      fail("asked: #{missed.get} of #{TOGETHER} spawn(parallel: true) tasks waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
+      fail("asked: #{missed.get} of #{TOGETHER} spawn(unit: :new) tasks waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
     end
-    puts "asked: #{TOGETHER} spawn(parallel: true) tasks were all running at one instant"
+    puts "asked: #{TOGETHER} spawn(unit: :new) tasks were all running at one instant"
   end
 
-  # On a pool of one, `parallel: true` still goes to the pool, where a
+  # On a pool of one, `unit: :new` still goes to the pool, where a
   # plain spawn of the same block stays on its spawner's thread (`one`).
   def askedone : Nil
     away = Atomic(Int64).new(0_i64)
     group do |g|
       TASKS.times do
-        g.spawn(parallel: true) do
+        g.spawn(unit: :new) do
           away.add(1_i64) if IyiScheduler.state.worker
           0
         end
       end
     end
-    fail("askedone: #{TOGETHER - away.get} of #{TOGETHER} spawn(parallel: true) tasks ran on the spawner's thread on a pool of one") if away.get != TOGETHER
-    puts "askedone: on a pool of one, #{TOGETHER} spawn(parallel: true) tasks ran on the pool's worker"
+    fail("askedone: #{TOGETHER - away.get} of #{TOGETHER} spawn(unit: :new) tasks ran on the spawner's thread on a pool of one") if away.get != TOGETHER
+    puts "askedone: on a pool of one, #{TOGETHER} spawn(unit: :new) tasks ran on the pool's worker"
   end
 
   # The pool starts its workers as the work asks for them. One spawn,

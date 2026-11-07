@@ -8,27 +8,31 @@ module Iyi
   # off, as `IYI_RELEASE_IMPORT=0` is `release_cores.sh`'s: `remote` names
   # no module in a reason, `fallback` gives `iyi check` no note unasked,
   # `moves` prints no line for a spawn a rebuild moved, `retired` answers
-  # `spawn_parallel` as any undefined method, `reaches` writes an artifact
+  # `spawn_parallel` as any undefined method and `serial: true` as any
+  # missing parameter, `reaches` writes an artifact
   # without what its functions reach (`IyiMod::Section::Reaches`),
   # `headers` reads a function from an artifact as reaching nothing,
   # `robust` writes an artifact that leaves out state under any claim its
   # build proved, as if every claim held for every importer, `callbacks`
   # walks no def std calls back (`ShareReach#exits_of`), and `claimed`
   # leaves a module's spawn in parallel on a claim proven for its producer
-  # alone (`Program#iyi_settle_claimed_spawns`).
+  # alone (`Program#iyi_settle_claimed_spawns`). And `bench/std_unit_exercise.sh`'s
+  # (SPEC.md III.4.18): `unit-capture` lets `spawn(in: u)`'s block capture
+  # what is not Share, and `unit-answer` lets its task answer what is not.
   # Read once; empty in every other run.
   SPAWN_BROKEN = (ENV["IYI_SPAWN_BROKEN"]? || "").split(',')
 
   # iyi: a `g.spawn` the cleanup classified (SPEC.md III.4.15): where its
   # name is written, why it stays in its spawner's unit (nil when it runs
-  # in parallel), and whether std or the prelude wrote it. *asked* is a
-  # spawn that spelled its placement, `parallel: true` or `serial: true`
-  # (III.4.16), which no change elsewhere can move. *owner* is the def the
-  # spawn is written in, as a reader names it (`App::Work.crunch`; empty at
-  # a module's top level), and *digest* the block's text, hashed: the
-  # spawn's name in a module's artifact (`IyiMod::SpawnRecord`).
+  # in a unit of its own), and whether std or the prelude wrote it.
+  # *asked* is a spawn that spelled its placement, `unit: :new`, `unit:
+  # :same` or `in: u` (III.4.16, III.4.18), which no change elsewhere can
+  # move, and *into* the `Unit` an `in:` names, as written. *owner* is the
+  # def the spawn is written in, as a reader names it (`App::Work.crunch`;
+  # empty at a module's top level), and *digest* the block's text, hashed:
+  # the spawn's name in a module's artifact (`IyiMod::SpawnRecord`).
   record SpawnSite, location : Location, reason : String?, std : Bool,
-    asked : Bool = false, owner : String = "", digest : String = "" do
+    asked : Bool = false, owner : String = "", digest : String = "", into : String? = nil do
     def parallel? : Bool
       reason.nil?
     end
@@ -98,11 +102,13 @@ module Iyi
         next if level.fallback? && (site.asked || site.parallel? || !iyi_own_file?(location.filename))
         next unless seen.add?({location.to_s, site.reason})
         if reason = site.reason
-          @warnings.add_note(location, "spawn stays in its spawner's unit: #{reason}")
+          @warnings.add_note(location, "spawn stays in its spawner's unit (SPEC.md III.4.18): #{reason}")
+        elsif into = site.into
+          @warnings.add_note(location, "spawn runs in the Unit `#{into}`: `in:` asks for it, every capture is Share, and so is what it answers (SPEC.md III.4.18)")
         elsif site.asked
-          @warnings.add_note(location, "spawn runs in parallel: `parallel: true` asks for it, and every capture is Share (SPEC.md III.4.16)")
+          @warnings.add_note(location, "spawn runs in a unit of its own: `unit: :new` asks for it, and every capture is Share (SPEC.md III.4.16)")
         else
-          @warnings.add_note(location, "spawn runs in parallel: every capture is Share, and nothing it reaches is module state that is not (SPEC.md III.4.15)")
+          @warnings.add_note(location, "spawn runs in parallel, in a unit of its own: every capture is Share, and nothing it reaches is module state that is not (SPEC.md III.4.15)")
         end
       end
     end
@@ -782,10 +788,14 @@ module Iyi
     end
 
     # iyi: a block that crosses a `Share` boundary may capture only `Share`
-    # values (SPEC.md III.4.4). Four blocks cross one. `IyiThread.start { }`'s
-    # runs on another thread (III.4.11), and `g.spawn(parallel: true) { }`'s
-    # may (III.4.13): a parallel task is started by whichever pool worker is
-    # free, so it is held to exactly what a thread's block is. A def marked
+    # values (SPEC.md III.4.4). Five blocks cross one. `IyiThread.start { }`'s
+    # runs on another thread (III.4.11), and `g.spawn(unit: :new) { }`'s
+    # may (III.4.13): a task in a unit of its own is started by whichever
+    # pool worker is free, so it is held to exactly what a thread's block
+    # is. `g.spawn(in: u) { }`'s runs in the unit of the `Unit` *u*
+    # (III.4.18), which the spawner may be outside of - the compiler cannot
+    # know - so it is held to the same, and what its task answers, which
+    # leaves *u*'s unit while *u* lives on, must be Share too. A def marked
     # `@[Share]` keeps a block that may run on other threads, several at
     # once - std/http's `Server.serve` - and its blocks are held to the
     # same, unless the call passes its `serial` parameter the literal 1
@@ -808,10 +818,17 @@ module Iyi
       return if serial_call?(node, target_def)
       check_share_crossing(node, target_def)
       check_share_elements(node, target_def)
+      placement = CleanupTransformer.spawn_placement(node, target_def)
+      if placement.try(&.in_unit?)
+        check_unit_answer(node) unless SPAWN_BROKEN.includes?("unit-answer")
+        return if SPAWN_BROKEN.includes?("unit-capture")
+      end
       thread = if target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiThread"
                  THREAD_BOUNDARY
-               elsif CleanupTransformer.spawn_placement(node, target_def).try(&.parallel?)
+               elsif placement.try(&.own_unit?)
                  PARALLEL_BOUNDARY
+               elsif placement.try(&.in_unit?)
+                 unit_boundary(node)
                elsif target_def.iyi_share_block?
                  shared_block_boundary(owner, target_def)
                end
@@ -922,34 +939,46 @@ module Iyi
     end
 
     # iyi: where a `g.spawn { }` runs, decided here, after typing (SPEC.md
-    # III.4.15): on the pool, as a parallel task of its own unit, when the
-    # block would pass every check `spawn(parallel: true)`'s block is held
-    # to - its captures, `self`, the constants and class variables it names
-    # - and the module state it reaches through the defs it calls, which a
-    # parallel block is only warned about, holds nothing that is not
-    # Share, save state its declaration claims is safe from any thread
+    # III.4.15): on the pool, in a unit of its own, when the block would
+    # pass every check `spawn(unit: :new)`'s block is held to - its
+    # captures, `self`, the constants and class variables it names - and
+    # the module state it reaches through the defs it calls, which such a
+    # block is only warned about, holds nothing that is not Share, save
+    # state its declaration claims is safe from any thread
     # (`@[SafeReach]`). Such a call is pointed at `IyiGroup#spawn_pooled`,
     # typed for the same `T` beside it; any other stays on `spawn`'s own
     # body, in its spawner's unit, exactly as every spawn ran before.
-    # Nothing is refused or warned about: the verdict, and for a serial
-    # one the first check that kept it there, is kept for the notes and
-    # the artifact (`Program#iyi_spawn_sites`). A spawn that spelled its
-    # placement (III.4.16) is kept too, as asked.
+    # Nothing is refused or warned about: the verdict, and for one kept in
+    # its unit the first check that kept it there, is kept for the notes
+    # and the artifact (`Program#iyi_spawn_sites`). A spawn that spelled
+    # its placement (III.4.16, III.4.18) is kept too, as asked, and one
+    # that asked for `unit: :new` is pointed at `IyiGroup#spawn_new` here,
+    # the def `spawn(*, unit)` types beside itself, with its argument
+    # dropped: the literal has said all it says.
     private def classify_spawn(node : Call, target_def : Def) : Nil
       placement = CleanupTransformer.spawn_placement(node, target_def)
       return unless placement
       location = node.name_location || node.location
+      into = nil
       case placement
       in .placed?
-        pooled = pooled_spawn(target_def)
+        pooled = typed_beside(target_def, "spawn_pooled")
         reason = pooled ? spawn_serial_reason(node) : NO_THREADS
         node.target_defs = [pooled] if pooled && reason.nil?
         asked = false
-      in .parallel?
+      in .own_unit?
+        if new_unit = typed_beside(target_def, "spawn_new")
+          node.target_defs = [new_unit]
+          node.named_args = nil
+        end
         reason = nil
         asked = true
-      in .serial?
-        reason = ASKED_SERIAL
+      in .same_unit?
+        reason = ASKED_SAME
+        asked = true
+      in .in_unit?
+        into = node.named_args.try(&.find(&.name.==("in"))).try(&.value.to_s)
+        reason = nil
         asked = true
       end
       return unless location
@@ -957,35 +986,40 @@ module Iyi
         @program.iyi_claimed_spawns << ClaimedSpawn.new(node, target_def, @program.iyi_spawn_sites.size, @spawn_claims.dup)
       end
       @program.iyi_spawn_sites << SpawnSite.new(location, reason, @program.iyi_share_reach.std_at?(location),
-        asked, spawn_owner_label, @program.iyi_rewrites_artifacts ? spawn_digest(node) : "")
+        asked, spawn_owner_label, @program.iyi_rewrites_artifacts ? spawn_digest(node) : "", into)
     end
 
     # The claims the spawn being classified stood on, as `ClaimedSpawn`
     # keeps them.
     @spawn_claims = [] of {UInt64, String}
 
-    NO_THREADS   = "a build under -Dgc_none or -Dgc_boehm has no threads (SPEC.md III.4.13)"
-    ASKED_SERIAL = "`serial: true` keeps it there (SPEC.md III.4.16)"
+    NO_THREADS = "a build under -Dgc_none or -Dgc_boehm has no threads (SPEC.md III.4.13)"
+    ASKED_SAME = "`unit: :same` keeps it there (SPEC.md III.4.16)"
 
-    # How a call to `IyiGroup#spawn` places its task (SPEC.md III.4.16):
-    # written plain, the compiler places it; `parallel: true` and
-    # `serial: true` say where. Asked of the call's named arguments, which
-    # the cleanup turns into positional ones only after this.
+    # How a call to `IyiGroup#spawn` places its task (SPEC.md III.4.16,
+    # III.4.18): written plain, the compiler places it; `unit: :new` asks
+    # for a unit of its own, `unit: :same` for the spawner's, and `in: u`
+    # for the `Unit` *u*'s. Asked of the call's named arguments, which the
+    # cleanup turns into positional ones only after this.
     enum SpawnPlacement
       Placed
-      Parallel
-      Serial
+      OwnUnit
+      SameUnit
+      InUnit
     end
 
     # The placement *node* spells, when it calls `IyiGroup#spawn`; nil for
-    # any other call. A call naming both arguments is refused before this
-    # is asked (`check_spawn_placement`).
+    # any other call. A call naming two placements, or a `unit:` that is
+    # not `:same` or `:new` as written, is refused before this is asked
+    # (`check_spawn_placement`).
     def self.spawn_placement(node : Call, target_def : Def) : SpawnPlacement?
       owner = target_def.owner
       return nil unless target_def.name.split(':').first == "spawn" && !owner.metaclass? && owner.to_s == "IyiGroup"
       named = node.named_args
       return SpawnPlacement::Placed if named.nil? || named.empty?
-      named.any?(&.name.==("parallel")) ? SpawnPlacement::Parallel : SpawnPlacement::Serial
+      return SpawnPlacement::InUnit if named.any?(&.name.==("in"))
+      value = named.find(&.name.==("unit")).try(&.value)
+      value.is_a?(SymbolLiteral) && value.value == "new" ? SpawnPlacement::OwnUnit : SpawnPlacement::SameUnit
     end
 
     # Whether *target_def* is `IyiGroup#spawn` written plain, the call the
@@ -995,25 +1029,61 @@ module Iyi
       target_def.name == "spawn" && !owner.metaclass? && owner.to_s == "IyiGroup"
     end
 
-    # iyi: `parallel:` and `serial:` take the literal `true` (SPEC.md
-    # III.4.16). Where a task runs is settled when the program compiles, so
-    # a value known only when it runs cannot say; `false` says nothing that
-    # leaving the argument out does not; and a task is placed one way.
+    # iyi: `unit:` takes `:same` or `:new` as written (SPEC.md III.4.16).
+    # Where a task runs is settled when the program compiles, so a value
+    # known only when it runs cannot say; a symbol that is neither names no
+    # unit; `:new` needs threads; and a task is placed one way.
     private def check_spawn_placement(node : Call, target_def : Def) : Nil
       placement = CleanupTransformer.spawn_placement(node, target_def)
       return unless placement && !placement.placed?
       named = node.named_args.not_nil!
       if named.size > 1
-        node.raise "a spawn is placed one way: `parallel: true` runs it on the pool, and `serial: true` keeps it in its spawner's unit. Write one of them, or neither and let the compiler place it (SPEC.md III.4.16)"
+        node.raise "a spawn is placed one way: `in: u` runs it in the `Unit` u's unit, `unit: :same` in its spawner's and `unit: :new` in one of its own. Write one of them, or none and let the compiler place it (SPEC.md III.4.16)"
       end
-      argument = named.first
-      value = argument.value
-      other = argument.name == "parallel" ? "`serial: true` to keep it in its spawner's unit" : "`parallel: true` to run it on the pool"
-      if value.is_a?(BoolLiteral)
-        return if value.value
-        value.raise "`#{argument.name}: false` asks for nothing that leaving it out does not: write `g.spawn { }` and the compiler places the task, or #{other} (SPEC.md III.4.16)"
+      return if placement.in_unit?
+      value = named.first.value
+      if value.is_a?(SymbolLiteral)
+        case value.value
+        when "same"
+          return
+        when "new"
+          return unless @program.has_flag?("gc_none") || @program.has_flag?("gc_boehm")
+          value.raise "`unit: :new` needs threads, and a build under -Dgc_none or -Dgc_boehm has none: a thread would race the bump pointer, or be one Boehm never heard of (SPEC.md III.4.13)"
+        end
+        value.raise "`unit: #{value}` names no unit: `unit: :same` keeps the task in its spawner's unit, and `unit: :new` runs it in a unit of its own; or leave it out and let the compiler place the task (SPEC.md III.4.16)"
       end
-      value.raise "`#{argument.name}:` takes the literal `true`: where a task runs is settled when the program compiles, and `#{value}` is known only when it runs. Write `#{argument.name}: true`, or leave it out and let the compiler place the task (SPEC.md III.4.16)"
+      value.raise "`unit:` takes `:same` or `:new` as written: where a task runs is settled when the program compiles, and `#{value}` is known only when it runs. Write `unit: :same` or `unit: :new`, or leave it out and let the compiler place the task (SPEC.md III.4.16)"
+    end
+
+    # iyi: what a task of a `Unit` answers leaves the unit while the unit
+    # lives on (SPEC.md III.4.18), as what `Mutex#get` answers leaves the
+    # lock: it must be Share, or `{ |hits| hits }` hands the value the
+    # `Unit` owns to its spawner, outside the unit.
+    private def check_unit_answer(node : Call) : Nil
+      task = node.type?
+      return unless task.is_a?(GenericClassInstanceType)
+      answer = task.type_vars["T"]?.try(&.type?)
+      return unless answer
+      if why = Iyi::Share.reason(answer, @reason_from)
+        node.raise "#{spelled_unit_spawn(node)} answers `#{answer}`, which is not Share: #{why}; what a task of a Unit answers leaves the unit while the unit lives on, and the unit no longer guards it. Answer a Share value - a count, a copy's numbers, a String (SPEC.md III.4.18)"
+      end
+    end
+
+    # `spawn(in: counts)`, as the call wrote its `Unit`.
+    private def spelled_unit_spawn(node : Call) : String
+      into = node.named_args.try(&.find(&.name.==("in"))).try(&.value.to_s) || "u"
+      "spawn(in: #{into})"
+    end
+
+    # The boundary a `spawn(in: u)` block crosses: from its spawner's unit
+    # into *u*'s, which the spawner may not be in.
+    private def unit_boundary(node : Call) : ShareBoundary
+      ShareBoundary.new(
+        subject: "the block #{spelled_unit_spawn(node)} runs in another unit",
+        local_owner: "a local of the code that spawned the task, so the task and its spawner",
+        pair: "the task and the code that spawned it",
+        again: "spawns the task again",
+        after: "the task was spawned")
     end
 
     # The def a spawn is written in, as a reader names it: `App::Work.crunch`
@@ -1079,23 +1149,26 @@ module Iyi
       end
     end
 
-    # The `spawn_pooled` instance `spawn`'s never-taken line typed beside
-    # *spawn_def*, read before the cleanup drops that line, and kept per
-    # instance; nil under `-Dgc_none` and `-Dgc_boehm`, where `spawn` has
-    # no such line.
-    private def pooled_spawn(spawn_def : Def) : Def?
+    # The instance of *name* - `spawn_pooled`, `spawn_new` - that a spawn
+    # def's never-taken line typed beside *spawn_def*, read before the
+    # cleanup drops that line, and kept per instance; nil under `-Dgc_none`
+    # and `-Dgc_boehm`, where the def has no such line.
+    private def typed_beside(spawn_def : Def, name : String) : Def?
       @pooled_spawns.fetch(spawn_def) do
-        finder = PooledSpawnFinder.new
+        finder = TypedBesideFinder.new(name)
         spawn_def.body.accept finder
         @pooled_spawns[spawn_def] = finder.found
       end
     end
 
-    class PooledSpawnFinder < Visitor
+    class TypedBesideFinder < Visitor
       getter found : Def?
 
+      def initialize(@name : String)
+      end
+
       def visit(node : Call) : Bool
-        if node.name == "spawn_pooled" && (targets = node.target_defs) && targets.size == 1
+        if node.name == @name && (targets = node.target_defs) && targets.size == 1
           @found = targets.first
         end
         @found.nil?
@@ -1211,12 +1284,18 @@ module Iyi
       "`@[SafeReach(\"...\")]` on it in #{record.module_name} says why, which the compiler proves (SPEC.md III.4.4)"
     end
 
+    # The checks a plain spawn's block is asked (`spawn_serial_reason`),
+    # whose refusal is a note's reason rather than an error: the spawn
+    # stays in its spawner's unit, where a shared cell is safe (SPEC.md
+    # III.4.18), so the words say it would race only across two units.
     SPAWN_BOUNDARY = ShareBoundary.new(
       subject: "the block",
       local_owner: "a local of the code that spawned the task, so the task and its spawner",
       pair: "the task and the code that spawned it",
       again: "spawns the task again",
-      after: "the task was spawned")
+      after: "the task was spawned",
+      race: "safe within one unit and a data race across two",
+      lead: "To run it in a unit of its own, ")
 
     # The owning type a method belongs to, its class method or its
     # instance's: `Mutex` for `Mutex.new` and for `Mutex(Array(Int32))#lock`.
@@ -1255,8 +1334,10 @@ module Iyi
     # iyi: who the two parties to a shared cell are, in the sentences the
     # thread check and the parallel task's check refuse one with; *alone*,
     # for a def with a `serial` parameter, the other way out its refusals
-    # name: "pass `workers: 1` so the block runs on one thread".
-    record ShareBoundary, subject : String, local_owner : String, pair : String, again : String, after : String, alone : String = ""
+    # name: "pass `workers: 1` so the block runs on one thread"; *race*,
+    # what sharing the cell is, and *lead*, what the advice opens with.
+    record ShareBoundary, subject : String, local_owner : String, pair : String, again : String, after : String, alone : String = "",
+      race : String = "a data race", lead : String = ""
 
     THREAD_BOUNDARY = ShareBoundary.new(
       subject: "the block IyiThread.start runs on another thread",
@@ -1266,7 +1347,7 @@ module Iyi
       after: "the thread has started")
 
     PARALLEL_BOUNDARY = ShareBoundary.new(
-      subject: "the block spawn(parallel: true) runs on another thread",
+      subject: "the block spawn(unit: :new) runs in a unit of its own, on another thread",
       local_owner: "a local of the code that spawned the task, so the task and its spawner",
       pair: "the task and the code that spawned it",
       again: "spawns the task again",
@@ -1377,7 +1458,7 @@ module Iyi
       end
     end
 
-    # iyi: a proc passed as the block - `g.spawn(parallel: true, &work)` - was not
+    # iyi: a proc passed as the block - `g.spawn(unit: :new, &work)` - was not
     # written at the call, so nothing here saw what it captured, and its
     # type cannot say: such a call compiled whatever `work` closed over.
     # Refused at every boundary, owning types' included, with one
@@ -1443,6 +1524,12 @@ module Iyi
       boundary.alone.empty? ? "" : ", or #{boundary.alone}"
     end
 
+    # The advice's first word, *verb*, after the boundary's lead: "Keep",
+    # or for a spawn kept in its unit "To run it in a unit of its own, keep".
+    private def advise(boundary : ShareBoundary, verb : String) : String
+      boundary.lead.empty? ? verb.capitalize : "#{boundary.lead}#{verb}"
+    end
+
     # iyi: a captured local is one cell on the heap, and the thread and the
     # code that started it both reach that cell. A Share type makes the
     # value safe to read from two threads, not the cell safe to write: `count
@@ -1462,7 +1549,7 @@ module Iyi
       inside = CaptureAssignments.new(@program, meta, nil, a_def.vars)
       a_def.body.accept inside
       if first = inside.assigns.first?
-        first[0].raise "#{boundary.subject} assigns `#{name}`, #{boundary.local_owner} share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
+        first[0].raise "#{boundary.subject} assigns `#{name}`, #{boundary.local_owner} share one mutable cell: #{boundary.race} (SPEC.md III.4.4). #{advise(boundary, "keep")} the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       end
 
       scope = meta.context
@@ -1473,8 +1560,8 @@ module Iyi
       outside = CaptureAssignments.new(@program, meta, start, vars)
       body.try &.accept(outside)
       line = start.location.try(&.line_number)
-      advice = "so #{boundary.pair} share one mutable cell: a data race (SPEC.md III.4.4). " \
-               "Capture a local that is assigned once (a block's own locals are new on every call), " \
+      advice = "so #{boundary.pair} share one mutable cell: #{boundary.race} (SPEC.md III.4.4). " \
+               "#{advise(boundary, "capture")} a local that is assigned once (a block's own locals are new on every call), " \
                "or keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       # Not found, or found assigned nowhere: the walk does not know this
       # scope, and the typer's answer stands.
@@ -1543,7 +1630,7 @@ module Iyi
     def check_thread_class_vars_share(a_def : Def, boundary : ShareBoundary) : Nil
       named = NamedClassVars.new
       a_def.body.accept named
-      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
+      advice = "so every thread that reaches it shares one mutable cell: #{boundary.race} (SPEC.md III.4.5). #{advise(boundary, "keep")} the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       named.vars.each do |class_var, var|
         next if var.thread_local?
         if assign = named.assigns[var]?
@@ -1709,8 +1796,8 @@ module Iyi
     end
 
     @share_reach_gathered = {} of UInt64 => ShareReachWarning
-    # `spawn_pooled` by the `spawn` instance it was typed beside
-    # (`pooled_spawn`); by identity, since a def's `==` compares its text.
+    # `spawn_pooled` or `spawn_new` by the spawn def instance it was typed
+    # beside (`typed_beside`); by identity, since a def's `==` compares its text.
     @pooled_spawns = ({} of Def => Def?).compare_by_identity
 
     # The assignments to one variable in a body, each with the loops,

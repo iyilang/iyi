@@ -2583,37 +2583,57 @@ def main():
          param_hint["position"] == {"line": 6, "character": 14},
          f"{len(hints)} hint(s): {[h['label'] for h in hints]}")
 
-    # 23s. inlayHint after a plain `spawn` (SPEC.md III.4.16): `parallel`
-    #      where the compiler placed it on the pool, `in its unit: ` and
-    #      the first clause of the reason where it kept it in its unit,
-    #      the whole reason as the tooltip, and nothing after a spawn that
-    #      spelled its placement.
+    # 23s. inlayHint after a plain `spawn` (SPEC.md III.4.16, III.4.18):
+    #      `in a unit of its own` where the compiler placed it on the pool,
+    #      `in its spawner's unit: ` and the first clause of the reason
+    #      where it kept it in its unit, the whole reason and what a unit is
+    #      as the tooltip, and nothing after a spawn that spelled its
+    #      placement, a `Unit`'s included. Hover on `spawn(in:)` and on
+    #      `Unit` says what each is in units.
     spawns_text = ("module spawns\n"
+                   "\n"
+                   "import std/unit::{Unit}\n"
                    "\n"
                    "done = Atomic(Int32).new(0)\n"
                    "log = [] of Int32\n"
+                   "counts = Unit.new { [] of Int32 }\n"
                    "group do |g|\n"
                    "  g.spawn { done.add(1) }\n"
                    "  g.spawn { log << 1; 0 }\n"
-                   "  g.spawn(serial: true) { done.add(1) }\n"
+                   "  g.spawn(unit: :same) { done.add(1) }\n"
+                   "  g.spawn(in: counts) { |c| c << 1; 0 }\n"
                    "end\n")
     spawns_uri = opened(c, work, "spawns.iyi", spawns_text)
     reply = c.send("textDocument/inlayHint",
                    {"textDocument": {"uri": spawns_uri},
                     "range": {"start": {"line": 0, "character": 0},
-                              "end": {"line": 9, "character": 0}}})
+                              "end": {"line": 13, "character": 0}}})
     hints = reply["result"] or []
-    after_spawn = {line: at(spawns_text, line, "spawn") + len("spawn") for line in (5, 6, 7)}
+    after_spawn = {line: at(spawns_text, line, "spawn") + len("spawn") for line in (8, 9, 10, 11)}
     placed = {h["position"]["line"]: h for h in hints
               if h["position"]["line"] in after_spawn
               and h["position"]["character"] == after_spawn[h["position"]["line"]]}
-    unit_label = "in its unit: the block captures `log : Array(Int32)`, which is not Share"
-    step("23s", "inlayHint says where each plain spawn runs, and why one stays in its unit",
-         5 in placed and placed[5]["label"] == "parallel" and
-         6 in placed and placed[6]["label"] == unit_label and
-         "Array(Int32)'s field" in placed[6].get("tooltip", "") and
-         7 not in placed,
+    unit_label = "in its spawner's unit: the block captures `log : Array(Int32)`, which is not Share"
+    definition = "A unit is a set of tasks of which at most one runs at any instant"
+    step("23s", "inlayHint names the unit each plain spawn runs in, and why one stays in its spawner's",
+         8 in placed and placed[8]["label"] == "in a unit of its own" and
+         definition in placed[8].get("tooltip", "") and
+         9 in placed and placed[9]["label"] == unit_label and
+         "Array(Int32)'s field" in placed[9].get("tooltip", "") and
+         definition in placed[9].get("tooltip", "") and
+         10 not in placed and 11 not in placed,
          f"{[(line, h['label']) for line, h in sorted(placed.items())]}")
+    reply = c.send("textDocument/hover",
+                   {"textDocument": {"uri": spawns_uri},
+                    "position": {"line": 6, "character": at(spawns_text, 6, "Unit") + 1}})
+    unit_doc = (reply["result"] or {}).get("contents", {}).get("value", "")
+    reply = c.send("textDocument/hover",
+                   {"textDocument": {"uri": spawns_uri},
+                    "position": {"line": 11, "character": at(spawns_text, 11, "spawn") + 1}})
+    spawn_doc = (reply["result"] or {}).get("contents", {}).get("value", "")
+    step("23u", "hover on Unit and on spawn(in:) says what each is in units",
+         "only one unit's tasks reach" in unit_doc and "runs in the `Unit`" in spawn_doc,
+         f"Unit: {unit_doc[:80]!r}; spawn(in:): {spawn_doc[:80]!r}")
 
     # 24. typeDefinition: from the local to where String is declared.
     reply = c.send("textDocument/typeDefinition",

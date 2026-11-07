@@ -1505,10 +1505,10 @@ class Iyi::Command
       compiler.warnings.exclude_lib_path = false
       compiler.warnings.exclude_path(f)
     end
-    # iyi: where each `g.spawn` runs, and what kept a serial one in its
-    # unit (SPEC.md III.4.15): notes, not warnings, so they never fail a
-    # build. `-std` adds std's and the prelude's own spawns.
-    opts.on("--explain-spawn", "Note where each spawn runs: in parallel, or in its spawner's unit and why") do
+    # iyi: where each `g.spawn` runs, and what kept one in its spawner's
+    # unit (SPEC.md III.4.15, III.4.18): notes, not warnings, so they never
+    # fail a build. `-std` adds std's and the prelude's own spawns.
+    opts.on("--explain-spawn", "Note where each spawn runs: in parallel in a unit of its own, or in its spawner's unit and why") do
       compiler.warnings.explain_spawn = Iyi::WarningCollection::ExplainSpawn::Program unless compiler.warnings.explain_spawn.all?
     end
     opts.on("--explain-spawn-std", "As --explain-spawn, and std's and the prelude's spawns too") do

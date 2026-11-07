@@ -4,16 +4,17 @@
 # that concurrency rather than sequence is the poller — a fiber that would
 # block parks itself and the scheduler runs another, so two tasks' waits
 # overlap on one thread. What makes it parallelism is the pool (III.4.13):
-# `spawn(parallel: true)` hands a task to worker threads, each a scheduler of its
-# own, and a parallel task that parks may resume on whichever worker is
-# free, the tasks it spawned with it (`IyiUnit`).
+# `spawn(unit: :new)` hands a task to worker threads, each a scheduler of
+# its own, and a task that parks may resume on whichever worker is free,
+# the tasks it spawned with it: a unit (`IyiUnit`, SPEC.md III.4.18).
 #
 # The public surface, and it is deliberately all of it:
 #
 #   group do |g|              # III.4.1: concurrency is introduced by a scope
 #     t = g.spawn { work() }  # placed by the compiler: III.4.15; no bare spawn exists
-#     u = g.spawn(parallel: true) { crunch() }  # a task on a worker: III.4.13
-#     v = g.spawn(serial: true) { step() }      # in this thread's unit: III.4.16
+#     u = g.spawn(unit: :new) { crunch() }  # a unit of its own, on a worker: III.4.13
+#     v = g.spawn(unit: :same) { step() }   # in its spawner's unit: III.4.18
+#     w = g.spawn(in: counts) { |c| c.size } # in a `Unit` (std/unit): III.4.18
 #   end                       # the block cannot be left until every task is done
 #   t.value                   # joins, then answers what the block returned
 #   sleep(ms)                 # Nil | Cancelled
@@ -34,10 +35,10 @@
 # free. Where no answer can carry `Cancelled`, the task stops instead and
 # its defers run (`IyiScheduler.stop_current`).
 #
-# `Share` (III.4.4) gates the block `spawn(parallel: true)` runs, as it
-# gates the block a thread runs; a plain `spawn`'s block runs on the pool
-# only where it would pass the same gate (III.4.15), and shares its
-# spawner's unit otherwise (III.4.5). Panics at task boundaries (III.1.4) live at
+# `Share` (III.4.4) gates the block `spawn(unit: :new)` runs, as it gates
+# the block a thread runs; a plain `spawn`'s block runs on the pool only
+# where it would pass the same gate (III.4.15), and shares its spawner's
+# unit otherwise (III.4.5, III.4.18). Panics at task boundaries (III.1.4) live at
 # the bottom of the scheduler: a panicking task drains its defers, tells
 # its group, and dies alone, on whichever thread it ran.
 #
@@ -444,11 +445,12 @@ class IyiFiber
   # task not started yet, which is waiting in the pool. A fiber of no
   # unit never changes it.
   property home : IyiSchedulerState?
-  # Spawned on the pool, by `spawn(parallel: true)` or an eligible
-  # `spawn`: started by whichever worker is free.
+  # Spawned on the pool, by `spawn(unit: :new)`, an eligible `spawn` or
+  # `spawn(in:)`: started by whichever worker is free.
   property parallel : Bool
-  # The parallel task this fiber belongs to, itself or the one whose
-  # block spawned it (`IyiUnit`); nil for a fiber that never moves.
+  # The unit this fiber belongs to on the pool (SPEC.md III.4.18): a
+  # parallel task's, its own or the one whose block spawned it, or a
+  # `Unit`'s (std/unit); nil for a fiber that never moves.
   property unit : IyiUnit?
   # Woken onto its home only: a `select` with a timeout arm is in its
   # home's sleep heap while a channel may wake it from any thread, and it
@@ -934,17 +936,20 @@ class IyiFiber
   end
 end
 
-# A parallel task and every task `spawn` started inside it, at any depth
-# (SPEC.md III.4.13). Those tasks may share the parallel task's
-# non-`Share` locals, as any task and its spawner may, so no two of them
-# may run at the same instant - and each of them parks on one worker and
-# may resume on another. What keeps them apart is this token: a worker
-# holds it from its switch to one of them until it switches to a fiber
-# of another unit or to none, and a fiber whose unit another worker holds
-# waits on the unit's list until that worker lets go, then goes to the
-# run queue of the worker that let go. Taking and giving are an exchange
-# and a store; the list is behind the scheduler's lock, and only a unit
-# with two of its fibers runnable on two workers at once ever uses it.
+# A unit on the pool (SPEC.md III.4.18): a parallel task and every task
+# `spawn` started inside it, at any depth (III.4.13), or every task a
+# `Unit` (std/unit, `IyiGroup::Unit`) was given and the tasks they started,
+# for as long as the `Unit` lives. Those tasks may share non-`Share`
+# values - the parallel task's locals, the `Unit`'s value - as any task
+# and its spawner may, so no two of them may run at the same instant -
+# and each of them parks on one worker and may resume on another. What
+# keeps them apart is this token: a worker holds it from its switch to
+# one of them until it switches to a fiber of another unit or to none,
+# and a fiber whose unit another worker holds waits on the unit's list
+# until that worker lets go, then goes to the run queue of the worker
+# that let go. Taking and giving are an exchange and a store; the list
+# is behind the scheduler's lock, and only a unit with two of its fibers
+# runnable on two workers at once ever uses it.
 class IyiUnit
   # The id of the worker's state holding it, 0 when none does, or
   # `YIELDED` while a fiber of it that gave its worker up at a loop's
@@ -1738,12 +1743,25 @@ class IyiScheduler
   # The lists `park_on` waits in are made here too, before the second
   # thread exists, so every other thread finds them made.
   def self.expect_thread : Nil
-    state
+    here = state
+    # The first thread started is started from the program's first: the
+    # main thread's state, which a `Unit` held to one worker runs its
+    # tasks on (`main_state`).
+    @@main_state = here unless @@shared
     @@shared = true
     make_lot
     IyiSchedLock.lock
     @@coming = @@coming + 1_i64
     IyiSchedLock.unlock
+  end
+
+  @@main_state : IyiSchedulerState?
+
+  # The main thread's state: this thread's while no other has started.
+  def self.main_state : IyiSchedulerState
+    main = @@main_state
+    return main if main.is_a?(IyiSchedulerState)
+    state
   end
 
   # The new thread's first act: its state, made, and its count as coming
@@ -6785,6 +6803,59 @@ class IyiTask(T)
 end
 
 class IyiGroup
+  # :nodoc: — what std/unit's `Unit(T)` is (SPEC.md III.4.18): a value, and
+  # the unit that alone reaches it. `g.spawn(in: u)` runs its block in that
+  # unit with the value (`IyiGroup#spawn(*, in)`), and nothing else is ever
+  # handed the value - `iyi_value` is protected, so only `IyiGroup` reads
+  # it - which is what lets std/unit declare `Unit(T)` `Share` for any `T`,
+  # as `Mutex(T)` is.
+  class Unit(T)
+    @value : T
+    @unit : IyiUnit
+    # Where its tasks run, settled at its first and kept for its life:
+    # `UNPLACED`, `POOL`, or `MAIN` - one worker, the main thread. Settled
+    # once because a pool sized after it (`IyiWorkers.count=`) would
+    # otherwise run its later tasks on workers beside its earlier ones on
+    # the main thread.
+    @placed : Atomic(UInt64)
+    {% if flag?(:iyi_chaos) %}
+      # Its tasks' chaos unit, made at its first task (`IyiChaos.adopt_into`).
+      @iyi_chaos_unit : IyiChaosUnit? = nil
+      property iyi_chaos_unit : IyiChaosUnit?
+    {% end %}
+
+    UNPLACED = 0_u64
+    POOL     = 1_u64
+    MAIN     = 2_u64
+
+    protected def initialize(@value : T)
+      @unit = IyiUnit.new
+      @placed = Atomic(UInt64).new(UNPLACED)
+    end
+
+    protected def iyi_value : T
+      @value
+    end
+
+    protected def iyi_unit : IyiUnit
+      @unit
+    end
+
+    # Whether its tasks run on the pool: on a pool of more than one worker,
+    # as an eligible spawn does (`IyiWorkers.parallel?`), asked at its first
+    # task; the first of two threads to ask settles it for both.
+    protected def iyi_on_pool? : Bool
+      placed = @placed.get
+      if placed == UNPLACED
+        wanted = IyiWorkers.parallel? ? POOL : MAIN
+        placed = @placed.compare_and_set(UNPLACED, wanted)[1] ? wanted : @placed.get
+      end
+      placed == POOL
+    end
+  end
+end
+
+class IyiGroup
   @live : Int32
   getter first_failure : UInt64
   @first_child : IyiFiber?
@@ -6825,15 +6896,16 @@ class IyiGroup
   # task a cancelled one starts, or one a cancelled group starts, is
   # cancelled from its first wait on.
   #
-  # One verb, three placements (SPEC.md III.4.16). Written plain, where
-  # it runs is the compiler's decision, per call (III.4.15): a block
-  # every capture of which is `Share`, and that reaches no module state
-  # that is not, may run on another core, and the compiler points such a
-  # call at `spawn_pooled`; every other call runs this body, and the task
-  # stays in its spawner's unit, as `spawn(serial: true)`'s does.
-  # `parallel: true` asks for the pool and `serial: true` for the unit;
-  # each takes the literal `true` and nothing else
-  # (`CleanupTransformer#check_spawn_placement`).
+  # One verb, four placements (SPEC.md III.4.16, III.4.18). Written
+  # plain, where it runs is the compiler's decision, per call (III.4.15):
+  # a block every capture of which is `Share`, and that reaches no module
+  # state that is not, may run on another core, and the compiler points
+  # such a call at `spawn_pooled`; every other call runs this body, and
+  # the task stays in its spawner's unit, as `spawn(unit: :same)`'s does.
+  # `unit: :new` asks for a unit of its own and `unit: :same` for the
+  # spawner's; each is written as that literal and nothing else
+  # (`CleanupTransformer#check_spawn_placement`). `in: u` runs the task in
+  # the `Unit` *u* (std/unit).
   def spawn(&block : -> T) : IyiTask(T) forall T
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       # Never taken. The line is here so that `spawn_pooled` is typed for
@@ -6845,28 +6917,68 @@ class IyiGroup
     in_unit(&block)
   end
 
-  # `g.spawn(serial: true) { }`: a task that stays in its spawner's unit
-  # whatever its block captures. It never runs at the same instant as its
+  # `g.spawn(unit: :same) { }` and `g.spawn(unit: :new) { }`.
+  #
+  # `:same`: a task that stays in its spawner's unit whatever its block
+  # captures (SPEC.md III.4.18). It never runs at the same instant as its
   # spawner or as any other task of the unit, and it does not run until
-  # its spawner parks, as every `spawn` did before 0.21.0 (SPEC.md
-  # III.4.15, part 5). On a thread outside the pool it runs on that
-  # thread for its whole life; inside a parallel task it joins that
-  # task's unit (`IyiUnit`), whose fibers may each resume on another
-  # worker but never two at once.
-  def spawn(*, serial : Bool, &block : -> T) : IyiTask(T) forall T
+  # its spawner parks, as every `spawn` did before 0.21.0 (III.4.15, part
+  # 5). On a thread outside the pool it runs on that thread for its whole
+  # life; inside a task on the pool it joins that task's unit
+  # (`IyiUnit`), whose fibers may each resume on another worker but never
+  # two at once. This body is that.
+  #
+  # `:new`: a task in a unit of its own, which may run on another core
+  # (III.4.13): `spawn_new`, which the compiler points the call at once it
+  # has read the literal (`CleanupTransformer#classify_spawn`), as it
+  # points an eligible plain call at `spawn_pooled`. The line below is
+  # never taken and is there so that `spawn_new` is typed for every `T`;
+  # a branch on `false` is dropped before codegen, so a program that only
+  # ever asks for `:same` starts no pool. What the compiler asks of the
+  # block is what it asks of a thread's (III.4.4): its captures must be
+  # `Share`, and module state a call reaches is warned about.
+  def spawn(*, unit : Symbol, &block : -> T) : IyiTask(T) forall T
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      return spawn_new(&block) if false
+    {% end %}
     in_unit(&block)
+  end
+
+  # `g.spawn(in: u) { |value| }`: a task of this group - joined, cancelled
+  # and failed as any of its tasks - that runs in the `Unit` *u* (std/unit,
+  # SPEC.md III.4.18), one at a time with *u*'s other tasks and switching
+  # among them only where one parks, and is handed the value *u* owns.
+  # The compiler holds the block to what a thread's is (its captures are
+  # `Share`) and its answer to what `Mutex#get`'s is (`Share`, since it
+  # leaves the unit while the unit lives on).
+  def spawn(*, in owner : Unit(S), &block : S -> T) : IyiTask(T) forall S, T
+    value = owner.iyi_value
+    # Named outside the `{% if %}`: a block parameter read only inside one
+    # is not captured.
+    work = -> { block.call(value) }
+    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+      # One thread: every task is a unit-mate of every other already.
+      in_unit(&work)
+    {% else %}
+      if owner.iyi_on_pool?
+        pooled(owner.iyi_unit, &work)
+      else
+        on_main(owner, &work)
+      end
+    {% end %}
   end
 
   # Both placements at once, which the compiler refuses at the call
   # (`CleanupTransformer#check_spawn_placement`); declared so that the
   # refusal names the two arguments rather than listing overloads.
-  def spawn(*, parallel : Bool, serial : Bool, &block : -> T) : IyiTask(T) forall T
-    in_unit(&block)
+  def spawn(*, in owner : Unit(S), unit : Symbol, &block : S -> T) : IyiTask(T) forall S, T
+    value = owner.iyi_value
+    in_unit { block.call(value) }
   end
 
-  # The two starts take the block as `spawn` does, `-> T`: a `Proc(T)`
+  # The starts take the block as `spawn` does, `-> T`: a `Proc(T)`
   # parameter binds no `T` for a block that never returns, and
-  # `g.spawn(parallel: true) { raise "boom" }` stopped compiling.
+  # `g.spawn(unit: :new) { raise "boom" }` stopped compiling.
   private def in_unit(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
@@ -6889,18 +7001,6 @@ class IyiGroup
   end
 
   {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-    # `g.spawn(parallel: true) { }`: a task that may run on another core
-    # (SPEC.md III.4.13). It waits in the pool until a worker is free, and
-    # from then on runs on whichever worker is free whenever it is
-    # runnable, with the tasks it spawns (`IyiUnit`). Everything else is
-    # `spawn`'s - the scope, the cancel, the failure policy, the answer
-    # through `value`. What differs is what the compiler asks of the
-    # block: it may capture only `Share` values, as the block a thread
-    # runs may (III.4.4, `CleanupTransformer#check_share_boundary`).
-    def spawn(*, parallel : Bool, &block : -> T) : IyiTask(T) forall T
-      on_pool(&block)
-    end
-
     # :nodoc: — a `spawn` the compiler found eligible (SPEC.md III.4.15):
     # a parallel task of its own unit, on a pool of more than one worker.
     # On one worker, `IYI_WORKERS=1` or `IyiWorkers.count = 1`, it stays in
@@ -6915,16 +7015,34 @@ class IyiGroup
       on_pool(&block)
     end
 
+    # :nodoc: — `g.spawn(unit: :new) { }`, which the compiler points here
+    # (`spawn(*, unit)`): a task in a unit of its own that may run on
+    # another core (SPEC.md III.4.13, III.4.18). It waits in the pool until
+    # a worker is free, and from then on runs on whichever worker is free
+    # whenever it is runnable, with the tasks it spawns (`IyiUnit`).
+    # Everything else is `spawn`'s - the scope, the cancel, the failure
+    # policy, the answer through `value`. Named `spawn_` so that the proof
+    # of `@[SafeReach]`, which runs after the call is pointed here, counts
+    # its block as a parallel start (`ReachProof#parallel_start?`).
+    private def spawn_new(&block : -> T) : IyiTask(T) forall T
+      on_pool(&block)
+    end
+
     private def on_pool(&block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
         return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
       {% end %}
+      pooled(IyiUnit.new, &block)
+    end
+
+    # A task of *unit* on the pool: a new unit's first, or a `Unit`'s.
+    private def pooled(unit : IyiUnit, &block : -> T) : IyiTask(T) forall T
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
       IyiWorkers.start
       fiber = IyiFiber.new
       fiber.parallel = true
-      fiber.unit = IyiUnit.new
+      fiber.unit = unit
       task = IyiTask(T).new(fiber)
       runner = self
       install(fiber) do
@@ -6941,9 +7059,35 @@ class IyiGroup
       IyiWorkers.pay
       task
     end
-  {% else %}
-    def spawn(*, parallel : Bool, &block : -> T) : IyiTask(T) forall T
-      \{% raise "spawn(parallel: true) needs threads, and a build under -Dgc_none or -Dgc_boehm has none: a thread would race the bump pointer, or be one Boehm never heard of (SPEC.md III.4.13)" %}
+
+    # A task of a `Unit` held to one worker (`Unit#iyi_on_pool?`):
+    # on the main thread, whichever thread spawns it, so that one worker is
+    # one thread for a `Unit` too (SPEC.md III.4.15 part 6, III.4.18), and
+    # an `IyiThread` and the main thread never run two of its tasks at
+    # once. It never moves, and takes turns with the main thread's other
+    # tasks at parks. Under the chaos scheduler it takes turns as the
+    # `Unit`'s own chaos unit, as a parallel task does as its own.
+    private def on_main(owner : Unit(S), &block : -> T) : IyiTask(T) forall S, T
+      raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
+      IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
+      fiber = IyiFiber.new
+      fiber.home = IyiScheduler.main_state
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.adopt_into(fiber, owner)
+      {% end %}
+      task = IyiTask(T).new(fiber)
+      runner = self
+      install(fiber) do
+        value = block.call
+        task.finish(value)
+        runner.finished(fiber, value.is_a?(::Error))
+      end
+      adopt(fiber)
+      IyiScheduler.ready(fiber, false)
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.point
+      {% end %}
+      task
     end
   {% end %}
 

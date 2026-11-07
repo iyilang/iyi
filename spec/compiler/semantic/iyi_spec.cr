@@ -4837,10 +4837,10 @@ describe "Semantic: iyi" do
     # SPEC.md III.4.13: a parallel task's block may run on another core,
     # and is held to what a thread's block is. The stub stands in for the
     # prelude's group, known by its owner's name as the thread is.
-    describe "the block spawn(parallel: true) runs" do
+    describe "the block spawn(unit: :new) runs" do
       group_stub = <<-STUB
         class IyiGroup
-          def spawn(*, parallel : Bool, &block : -> T) : Nil forall T
+          def spawn(*, unit : Symbol, &block : -> T) : Nil forall T
             keep = block
             nil
           end
@@ -4865,7 +4865,7 @@ describe "Semantic: iyi" do
           name = "seven"
           totals = Totals.new(4)
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             totals.limit
             n
             name
@@ -4874,7 +4874,7 @@ describe "Semantic: iyi" do
       end
 
       it "refuses a captured value that is not shareable, by name" do
-        assert_error(group_stub + <<-CODE, "the block spawn(parallel: true) runs on another thread captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=` (SPEC.md III.4.4)", filename: "x.iyi")
+        assert_error(group_stub + <<-CODE, "the block spawn(unit: :new) runs in a unit of its own, on another thread captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=` (SPEC.md III.4.4)", filename: "x.iyi")
           class Counter
             def initialize
               @count = 0
@@ -4887,7 +4887,7 @@ describe "Semantic: iyi" do
 
           counter = Counter.new
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             counter.count = 1
             nil
           end
@@ -4895,10 +4895,10 @@ describe "Semantic: iyi" do
       end
 
       it "refuses a captured local assigned after the spawn" do
-        assert_error(group_stub + <<-CODE, "`count` is assigned here, after the task was spawned, and the block spawn(parallel: true) runs on another thread", filename: "x.iyi")
+        assert_error(group_stub + <<-CODE, "`count` is assigned here, after the task was spawned, and the block spawn(unit: :new) runs in a unit of its own, on another thread", filename: "x.iyi")
           count = 1
           g = G
-          g.spawn(parallel: true) { count }
+          g.spawn(unit: :new) { count }
           count = 2
           CODE
       end
@@ -4909,14 +4909,14 @@ describe "Semantic: iyi" do
           going = true
           while going
             seed = 10
-            g.spawn(parallel: true) { seed }
+            g.spawn(unit: :new) { seed }
             going = false
           end
           CODE
       end
 
       it "refuses a constant the block names whose type is not shareable" do
-        assert_error(group_stub + <<-CODE, "the block spawn(parallel: true) runs on another thread names the constant `TALLY : Tally`, which is not Share: Tally's field @total is assigned in `bump` (SPEC.md III.4.5)", filename: "x.iyi")
+        assert_error(group_stub + <<-CODE, "the block spawn(unit: :new) runs in a unit of its own, on another thread names the constant `TALLY : Tally`, which is not Share: Tally's field @total is assigned in `bump` (SPEC.md III.4.5)", filename: "x.iyi")
           class Tally
             def initialize
               @total = 0
@@ -4929,7 +4929,7 @@ describe "Semantic: iyi" do
 
           TALLY = Tally.new
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             TALLY.bump
             nil
           end
@@ -4937,29 +4937,77 @@ describe "Semantic: iyi" do
       end
     end
 
-    # SPEC.md III.4.16: one verb. A placement is asked for with the literal
-    # `true`, and the two verbs it replaced are compile errors naming it.
+    # SPEC.md III.4.16, III.4.18: one verb. A placement names a unit -
+    # `unit: :same`, `unit: :new` as written, or `in: u` for a `Unit` - and
+    # the two verbs and two placements it replaced are compile errors naming
+    # the new spelling.
     describe "the one spawn verb" do
       verb_stub = <<-STUB
+        struct Proc
+          @[Primitive(:proc_call)]
+          @[Raises]
+          def call(*args : *T) : R
+          end
+        end
+
+        class Task(T)
+        end
+
         class IyiGroup
+          class Unit(T)
+            @value : T
+
+            protected def initialize(@value : T)
+            end
+
+            protected def iyi_value : T
+              @value
+            end
+          end
+
           def spawn(&block : -> T) : Nil forall T
             keep = block
             nil
           end
 
-          def spawn(*, serial : Bool, &block : -> T) : Nil forall T
+          def spawn(*, unit : Symbol, &block : -> T) : Nil forall T
             keep = block
             nil
           end
 
-          def spawn(*, parallel : Bool, &block : -> T) : Nil forall T
+          def spawn(*, in owner : Unit(S), &block : S -> T) : Task(T) forall S, T
             keep = block
-            nil
+            Task(T).new
           end
 
-          def spawn(*, parallel : Bool, serial : Bool, &block : -> T) : Nil forall T
+          def spawn(*, in owner : Unit(S), unit : Symbol, &block : S -> T) : Task(T) forall S, T
             keep = block
-            nil
+            Task(T).new
+          end
+        end
+
+        @[Share(owns: true)]
+        class Unit(T) < IyiGroup::Unit(T)
+          def self.new(&block : -> U) : Unit(U) forall U
+            Unit(U).build(block.call)
+          end
+
+          protected def self.build(value : T) : Unit(T)
+            new(value)
+          end
+        end
+
+        class Log
+          def initialize
+            @n = 0
+          end
+
+          def n=(value : Int32)
+            @n = value
+          end
+
+          def n : Int32
+            @n
           end
         end
 
@@ -4967,75 +5015,115 @@ describe "Semantic: iyi" do
 
         STUB
 
-      it "takes each placement spelled with the literal true" do
+      it "takes each placement as written" do
         assert_type(verb_stub + <<-CODE, filename: "x.iyi") { nil_type }
-          class Log
-            def initialize
-              @n = 0
-            end
-
-            def n=(value : Int32)
-              @n = value
-            end
-          end
-
           log = Log.new
           G.spawn { log.n = 1; 0 }
-          G.spawn(serial: true) { log.n = 2; 0 }
-          G.spawn(parallel: true) { 3 }
+          G.spawn(unit: :same) { log.n = 2; 0 }
+          G.spawn(unit: :new) { 3 }
           CODE
       end
 
       it "refuses spawn_parallel, naming the new spelling" do
-        assert_error(verb_stub + <<-CODE, "`spawn_parallel` is gone: one verb starts a task now. Write `g.spawn(parallel: true) { }`", filename: "x.iyi")
+        assert_error(verb_stub + <<-CODE, "`spawn_parallel` is gone: one verb starts a task now. Write `g.spawn(unit: :new) { }`", filename: "x.iyi")
           G.spawn_parallel { 1 }
           CODE
       end
 
       it "refuses spawn_serial, naming the new spelling" do
-        assert_error(verb_stub + <<-CODE, "`spawn_serial` is gone: one verb starts a task now. Write `g.spawn(serial: true) { }`", filename: "x.iyi")
+        assert_error(verb_stub + <<-CODE, "`spawn_serial` is gone: one verb starts a task now. Write `g.spawn(unit: :same) { }`", filename: "x.iyi")
           G.spawn_serial do
             1
           end
           CODE
       end
 
-      it "refuses parallel: false as asking for nothing" do
-        assert_error(verb_stub + <<-CODE, "`parallel: false` asks for nothing that leaving it out does not", filename: "x.iyi")
-          G.spawn(parallel: false) { 1 }
+      it "refuses serial: true, naming unit: :same" do
+        assert_error(verb_stub + <<-CODE, "`serial:` is gone: a spawn names its unit now. Write `g.spawn(unit: :same) { }`", filename: "x.iyi")
+          G.spawn(serial: true) { 1 }
+          CODE
+      end
+
+      it "refuses parallel: true, naming unit: :new" do
+        assert_error(verb_stub + <<-CODE, "`parallel:` is gone: a spawn names its unit now. Write `g.spawn(unit: :new) { }`", filename: "x.iyi")
+          G.spawn(parallel: true) { 1 }
+          CODE
+      end
+
+      it "refuses a symbol that names no unit" do
+        assert_error(verb_stub + <<-CODE, "`unit: :other` names no unit: `unit: :same` keeps the task in its spawner's unit, and `unit: :new` runs it in a unit of its own", filename: "x.iyi")
+          G.spawn(unit: :other) { 1 }
           CODE
       end
 
       it "refuses a placement the compiler cannot read" do
-        assert_error(verb_stub + <<-CODE, "`serial:` takes the literal `true`: where a task runs is settled when the program compiles, and `ordered` is known only when it runs", filename: "x.iyi")
-          def ordered : Bool
-            true
+        assert_error(verb_stub + <<-CODE, "`unit:` takes `:same` or `:new` as written: where a task runs is settled when the program compiles, and `ordered` is known only when it runs", filename: "x.iyi")
+          def ordered : Symbol
+            :same
           end
 
-          G.spawn(serial: ordered) { 1 }
+          G.spawn(unit: ordered) { 1 }
           CODE
       end
 
-      it "refuses both placements at once" do
+      it "refuses unit: :new without threads" do
+        assert_error(verb_stub + <<-CODE, "`unit: :new` needs threads, and a build under -Dgc_none or -Dgc_boehm has none", filename: "x.iyi", flags: "gc_none")
+          G.spawn(unit: :new) { 1 }
+          CODE
+      end
+
+      it "refuses two placements at once" do
         assert_error(verb_stub + <<-CODE, "a spawn is placed one way", filename: "x.iyi")
-          G.spawn(parallel: true, serial: true) { 1 }
+          counts = Unit.new { Log.new }
+          G.spawn(in: counts, unit: :same) { |c| c.n }
           CODE
       end
 
-      it "refuses a capture that is not Share under parallel: true, as spawn_parallel did" do
-        assert_error(verb_stub + <<-CODE, "the block spawn(parallel: true) runs on another thread captures `log : Log`, which is not Share", filename: "x.iyi")
-          class Log
-            def initialize
-              @n = 0
-            end
-
-            def n=(value : Int32)
-              @n = value
-            end
-          end
-
+      it "refuses a capture that is not Share under unit: :new, as spawn_parallel did" do
+        assert_error(verb_stub + <<-CODE, "the block spawn(unit: :new) runs in a unit of its own, on another thread captures `log : Log`, which is not Share", filename: "x.iyi")
           log = Log.new
-          G.spawn(parallel: true) { log.n = 1; 0 }
+          G.spawn(unit: :new) { log.n = 1; 0 }
+          CODE
+      end
+
+      it "runs a Unit's task on its value, with Share captures and a Share answer" do
+        assert_type(verb_stub + <<-CODE, filename: "x.iyi") { generic_class("Task", int32) }
+          counts = Unit.new { Log.new }
+          step = 2
+          G.spawn(in: counts) { |c| c.n = step; 0 }
+          G.spawn(in: counts) { |c| c.n }
+          CODE
+      end
+
+      it "refuses a Unit's block a capture that is not Share" do
+        assert_error(verb_stub + <<-CODE, "the block spawn(in: counts) runs in another unit captures `log : Log`, which is not Share", filename: "x.iyi")
+          counts = Unit.new { Log.new }
+          log = Log.new
+          G.spawn(in: counts) { |c| log.n = c.n; 0 }
+          CODE
+      end
+
+      it "refuses a Unit's task an answer that is not Share" do
+        assert_error(verb_stub + <<-CODE, "spawn(in: counts) answers `Log`, which is not Share", filename: "x.iyi")
+          counts = Unit.new { Log.new }
+          G.spawn(in: counts) { |c| c }
+          CODE
+      end
+
+      it "refuses Unit.new's block a capture that is not Share" do
+        assert_error(verb_stub + <<-CODE, "the block Unit.new makes the Unit's value in captures `log : Log`, which is not Share", filename: "x.iyi")
+          log = Log.new
+          Unit.new { log }
+          CODE
+      end
+
+      it "lets a thread capture a Unit of a value that is not Share" do
+        assert_type(verb_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          counts = Unit.new { Log.new }
+          G.spawn(unit: :new) do
+            G.spawn(in: counts) { |c| c.n }
+            nil
+          end
           CODE
       end
     end
@@ -5045,7 +5133,7 @@ describe "Semantic: iyi" do
     describe "the block a @[Share] def keeps" do
       group_stub = <<-STUB
         class IyiGroup
-          def spawn(*, parallel : Bool, &block : -> T) : Nil forall T
+          def spawn(*, unit : Symbol, &block : -> T) : Nil forall T
             keep = block
             nil
           end
@@ -5065,11 +5153,11 @@ describe "Semantic: iyi" do
 
         @[Share]
         def everywhere(&work : -> Int32) : Nil
-          G.spawn(parallel: true) do
+          G.spawn(unit: :new) do
             kept = work
             1
           end
-          G.spawn(parallel: true, &work)
+          G.spawn(unit: :new, &work)
           nil
         end
 
@@ -5110,22 +5198,22 @@ describe "Semantic: iyi" do
       end
 
       it "refuses a proc passed on as the block of a parallel task" do
-        assert_error(group_stub + <<-CODE, "the block spawn(parallel: true) runs on another thread is given a proc, `&q`", filename: "x.iyi")
+        assert_error(group_stub + <<-CODE, "the block spawn(unit: :new) runs in a unit of its own, on another thread is given a proc, `&q`", filename: "x.iyi")
           counter = Counter.new
           q = ->do
             counter.count = 1
             1
           end
-          G.spawn(parallel: true, &q)
+          G.spawn(unit: :new, &q)
           CODE
       end
 
       it "takes the def's block on trust only while the def leaves it as given" do
-        assert_error(group_stub + <<-CODE, "the block spawn(parallel: true) runs on another thread is given a proc, `&work`", filename: "x.iyi")
+        assert_error(group_stub + <<-CODE, "the block spawn(unit: :new) runs in a unit of its own, on another thread is given a proc, `&work`", filename: "x.iyi")
           @[Share]
           def swapped(&work : -> Int32) : Nil
             work = ->{ 1 }
-            G.spawn(parallel: true, &work)
+            G.spawn(unit: :new, &work)
             nil
           end
 
@@ -5139,7 +5227,7 @@ describe "Semantic: iyi" do
       serial_stub = group_stub + <<-STUB
         @[Share(serial: workers, crossing: {config: "Pass a frozen one"})]
         def serve(config : C = nil, workers : Int32 = 4, &work : -> Int32) : Nil forall C
-          G.spawn(parallel: true) do
+          G.spawn(unit: :new) do
             kept = work
             1
           end
@@ -5211,7 +5299,7 @@ describe "Semantic: iyi" do
       elements_stub = group_stub + <<-STUB
         @[Share(elements: "Make them Share, or use `each`, which stays on one thread")]
         def each_parallel(item : T, &work : T -> Int32) : Nil forall T
-          G.spawn(parallel: true) do
+          G.spawn(unit: :new) do
             kept = work
             1
           end
@@ -5250,7 +5338,7 @@ describe "Semantic: iyi" do
       value_stub = group_stub + <<-STUB
         @[Share(serial: workers, crossing: {handler: "Make it Share"})]
         def serve_value(handler : H, workers : Int32 = 4) : Nil forall H
-          G.spawn(parallel: true) do
+          G.spawn(unit: :new) do
             kept = handler
             1
           end
@@ -5276,7 +5364,7 @@ describe "Semantic: iyi" do
           @[Share(serial: workers, crossing: {handler: "Make it Share"})]
           def swapped_value(handler : H, workers : Int32 = 4) : Nil forall H
             handler = Counter.new
-            G.spawn(parallel: true) do
+            G.spawn(unit: :new) do
               kept = handler
               1
             end
@@ -5390,7 +5478,7 @@ describe "Semantic: iyi" do
     describe "what a shared block reaches through the defs it calls" do
       reach_stub = <<-STUB
         class IyiGroup
-          def spawn(*, parallel : Bool, &block : -> T) : Nil forall T
+          def spawn(*, unit : Symbol, &block : -> T) : Nil forall T
             keep = block
             nil
           end
@@ -5446,24 +5534,24 @@ describe "Semantic: iyi" do
           end
 
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             ask(1_i64)
             ask_twice
             nil
           end
           CODE
-        line = code.lines.index!(&.includes?("g.spawn(parallel: true) do")) + 1
+        line = code.lines.index!(&.includes?("g.spawn(unit: :new) do")) + 1
         infos = reach_warnings.call(code)
         infos.size.should eq(1)
         infos[0].should start_with("warning in line #{line}\n")
-        infos[0].should contain("Warning: the block spawn(parallel: true) runs on another thread reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on the constant: `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)")
+        infos[0].should contain("Warning: the block spawn(unit: :new) runs in a unit of its own, on another thread reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on the constant: `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)")
       end
 
       it "warns for the block a @[Share] def keeps" do
         infos = reach_warnings.call(reach_stub + <<-CODE)
           @[Share]
           def everywhere(&work : -> Int64) : Nil
-            G.spawn(parallel: true) do
+            G.spawn(unit: :new) do
               kept = work
               1
             end
@@ -5477,12 +5565,12 @@ describe "Semantic: iyi" do
       end
 
       it "still refuses a block that names the constant, marked or not" do
-        assert_error(reach_stub + <<-CODE, "the block spawn(parallel: true) runs on another thread names the constant `QUIET : Database`, which is not Share", filename: "x.iyi")
+        assert_error(reach_stub + <<-CODE, "the block spawn(unit: :new) runs in a unit of its own, on another thread names the constant `QUIET : Database`, which is not Share", filename: "x.iyi")
           @[SafeReach("set once at startup, then only read")]
           QUIET = Database.new
 
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             QUIET.query_one(1_i64)
             nil
           end
@@ -5522,7 +5610,7 @@ describe "Semantic: iyi" do
           end
 
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             touch
             nil
           end
@@ -5542,7 +5630,7 @@ describe "Semantic: iyi" do
           end
 
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             both
             nil
           end
@@ -5575,7 +5663,7 @@ describe "Semantic: iyi" do
           end
 
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             outer(2)
             nil
           end
@@ -5604,7 +5692,7 @@ describe "Semantic: iyi" do
 
           DbStore.new
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             MemStore.new.as(Store).get
             nil
           end
@@ -5624,7 +5712,7 @@ describe "Semantic: iyi" do
           end
 
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             Registry.ask
             nil
           end
@@ -5650,7 +5738,7 @@ describe "Semantic: iyi" do
 
           Registry.fill
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             Registry.ask
             nil
           end
@@ -5698,7 +5786,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               std_take
               mine
               nil
@@ -5724,21 +5812,21 @@ describe "Semantic: iyi" do
           end
 
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             ask(1_i64)
             nil
           end
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             ask(2_i64)
             tally
             nil
           end
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             ask(3_i64)
             nil
           end
           CODE
-        first = code.lines.index!(&.includes?("g.spawn(parallel: true) do")) + 1
+        first = code.lines.index!(&.includes?("g.spawn(unit: :new) do")) + 1
         second = first + 4
         infos = reach_warnings.call(code)
         infos.size.should eq(2)
@@ -5752,11 +5840,11 @@ describe "Semantic: iyi" do
       it "counts one other block in the singular" do
         infos = reach_warnings.call(reach_stub + <<-CODE)
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             ask(1_i64)
             nil
           end
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             ask(2_i64)
             nil
           end
@@ -5770,11 +5858,11 @@ describe "Semantic: iyi" do
         warnings.error_on_warnings = true
         semantic(parse(reach_stub + <<-CODE, filename: "x.iyi"), warnings: warnings)
           g = G
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             ask(1_i64)
             nil
           end
-          g.spawn(parallel: true) do
+          g.spawn(unit: :new) do
             ask(2_i64)
             nil
           end
@@ -5809,7 +5897,7 @@ describe "Semantic: iyi" do
             PKG
           user = parse(reach_stub + <<-CODE, filename: "x.iyi")
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               pkg_take
               ask(1_i64)
               nil
@@ -5844,7 +5932,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               both
               nil
             end
@@ -5862,13 +5950,13 @@ describe "Semantic: iyi" do
               end
 
               g = G
-              g.spawn(parallel: true) do
+              g.spawn(unit: :new) do
                 both
                 nil
               end
               CODE
           end
-          ex.message.not_nil!.should contain("writes it (`Database#query_one` assigns `@total`, in `@total = 1`), and it may run once a parallel task has started, behind no lock the compiler can name: the block `spawn(parallel: true)` runs as a parallel task, at x.iyi:")
+          ex.message.not_nil!.should contain("writes it (`Database#query_one` assigns `@total`, in `@total = 1`), and it may run once a parallel task has started, behind no lock the compiler can name: the block `spawn(unit: :new)` runs as a parallel task, at x.iyi:")
           ex.message.not_nil!.should contain(", which calls `both`. SafeReach is proven when")
         end
 
@@ -5888,7 +5976,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               note
               nil
             end
@@ -5906,7 +5994,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               note
               nil
             end
@@ -5932,7 +6020,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               limit
               nil
             end
@@ -5956,7 +6044,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               GUARD.lock { |bag| note }
               GUARD.get { |bag| rows }
               nil
@@ -5978,7 +6066,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               GUARD.lock { |bag| note }
               OTHER.lock { |bag| note }
               nil
@@ -6002,7 +6090,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               GUARD.lock { |bag| note }
               rows
               nil
@@ -6021,7 +6109,7 @@ describe "Semantic: iyi" do
 
             guard = Guard.new { Bag.new }
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               guard.lock { |bag| note }
               nil
             end
@@ -6045,7 +6133,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               rows
               nil
             end
@@ -6065,7 +6153,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               rows
               nil
             end
@@ -6083,7 +6171,7 @@ describe "Semantic: iyi" do
             end
 
             def launch : Nil
-              G.spawn(parallel: true) do
+              G.spawn(unit: :new) do
                 rows
                 nil
               end
@@ -6106,7 +6194,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               rows
               nil
             end
@@ -6126,7 +6214,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               rows
               nil
             end
@@ -6155,7 +6243,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               both
               nil
             end
@@ -6213,7 +6301,7 @@ describe "Semantic: iyi" do
             end
 
             g = G
-            g.spawn(parallel: true) do
+            g.spawn(unit: :new) do
               Registry.note
               Registry.rows
               nil

@@ -276,9 +276,9 @@ module Iyi::IyiMod
   # *digest* its block's text, hashed: the two name the spawn across builds,
   # where its line moves with every edit above it. *line* and *column* say
   # where it was this time. *parallel* is whether every instantiation ran
-  # it in parallel, *asked* whether it spelled its placement
-  # (`parallel: true`, `serial: true`), and *reason* why it stays in its
-  # spawner's unit, empty when it does not.
+  # it in parallel, in a unit of its own, *asked* whether it spelled its
+  # placement (`unit: :new`, `unit: :same`, `in: u`), and *reason* why it
+  # stays in its spawner's unit (SPEC.md III.4.18), empty when it does not.
   record SpawnRecord, owner : String, digest : String, line : Int32, column : Int32,
     parallel : Bool, asked : Bool, reason : String
 
@@ -2125,7 +2125,7 @@ module Iyi::IyiMod
       io.puts "spawns"
       artifact.spawns.each do |record|
         where = record.owner.empty? ? "(top level)" : record.owner
-        verdict = record.parallel ? "parallel" : "in its unit: #{record.reason}"
+        verdict = record.parallel ? "parallel" : "in its spawner's unit: #{record.reason}"
         io.puts "  #{where} #{record.line}:#{record.column} #{verdict}#{record.asked ? " (asked)" : ""}"
       end
     end

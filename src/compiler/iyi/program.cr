@@ -576,7 +576,7 @@ module Iyi
     property iyi_prelude_dir : String? = nil
 
     # iyi: whether code the cleanup kept calls `IyiWorkers.start` - a
-    # `spawn(parallel: true)`, or a `spawn` it found eligible (SPEC.md III.4.15) -
+    # `spawn(unit: :new)`, or a `spawn` it found eligible (SPEC.md III.4.15) -
     # which is what makes a program's loops check for preemption
     # (`CodeGenVisitor#iyi_preempt_on?`). Asked of the kept code rather
     # than of the typed defs: every program that spawns types the pool's

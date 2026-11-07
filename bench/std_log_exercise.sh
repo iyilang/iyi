@@ -254,7 +254,7 @@ died = 0
 group do |g|
   handles = [] of IyiTask(Int32)
   WORKERS.times do |k|
-    handles << g.spawn(parallel: true) { burst(k) }
+    handles << g.spawn(unit: :new) { burst(k) }
   end
   handles.each { |handle| died = died + 1 unless handle.value == PER }
 end

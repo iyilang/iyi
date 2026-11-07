@@ -773,7 +773,7 @@ done
 # it on darwin arm64, whose pages are that size) - and hands it to the
 # scheduler's pool, so the task it spawns next runs on it; the task
 # checks that it did. The pool is the giving thread's, so the task is
-# `spawn(serial: true)`: a plain spawn, parallel by default, ran on a worker,
+# `spawn(unit: :same)`: a plain spawn, parallel by default, ran on a worker,
 # on a stack of that worker's, on Linux and on macos-15. On Windows a
 # fiber stack carries its own writable
 # memory under the guard: the 16 KB of committed slack at
@@ -845,7 +845,7 @@ end
   base = floored_stack
   IyiScheduler.give_stack(base)
   group do |g|
-    g.spawn(serial: true) do
+    g.spawn(unit: :same) do
       if IyiScheduler.current_stack_top != base + IyiFiber::STACK_BYTES
         puts "the task ran on a stack other than the floored one"
       else

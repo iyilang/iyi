@@ -30,7 +30,7 @@
 # read), and interim 1xx answers are read past.
 #
 # **The server.** `Server.serve(listener) { |request| Response }`: a
-# task per connection on the pool `spawn(parallel: true)` starts, one worker per
+# task per connection on the pool `spawn(unit: :new)` starts, one worker per
 # core by default, its block checked by the compiler as a parallel task's
 # is; `workers: 1` serves on the calling thread alone, the block
 # unchecked. Each connection is kept alive across
@@ -1642,7 +1642,7 @@ pub struct Server
   CAP_CHECK_MS = 250
 
   # Serve `listener` until it is closed, on *workers* threads: each
-  # connection is a task on the pool `spawn(parallel: true)` starts (SPEC.md
+  # connection is a task on the pool `spawn(unit: :new)` starts (SPEC.md
   # III.4.13), started by whichever worker is free and served there to
   # its end, while the thread that called this accepts. The block runs on
   # the connection's worker, once per request, on several workers at
@@ -1845,7 +1845,7 @@ pub struct Server
   # count in an `Atomic`, a pool or a cache behind a `Mutex`, a
   # `SharedRouter` for a `Router`, or `workers: 1`, under which any value
   # with that `call` is served on the calling thread, a `Router`
-  # included. What the check does not see is the edge `spawn(parallel: true)`
+  # included. What the check does not see is the edge `spawn(unit: :new)`
   # has too: a method the handler calls that writes a module's state. A
   # struct handler is copied into each connection's task, and an `Atomic`
   # in it with it: what the connections share is a class, or held by
@@ -1928,7 +1928,7 @@ pub struct Server
   # group is `spawn_handler`'s, so a handler that panics ends its own
   # connection alone. *tls*, the frozen config, crosses with it.
   private def self.spawn_pooled_handler(g : IyiGroup, fd : Int32, family : Int32, handler : H, stopping : Channel(Int32), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32, slots : Channel(Int32)?, tls : C) : Nil forall H, C
-    g.spawn(parallel: true) do
+    g.spawn(unit: :new) do
       client = IyiSocket.new(fd, family)
       stop = ServeStop.new
       idle = {} of UInt64 => Conn

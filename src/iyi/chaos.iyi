@@ -28,12 +28,13 @@
 #     (`arm`).
 #
 # A task the compiler would run in parallel (a `spawn` it placed on the
-# pool, `spawn(parallel: true)`) runs on this thread as a unit of its own
-# (`IyiChaosUnit`), so the interleavings two cores could produce are the
-# ones met here: tasks of different units take turns at any of the points
-# above. Tasks of one unit still take turns only at parks, oldest first,
-# as the language promises them (III.4.15, part 2): the scheduler never
-# puts a task between two operations of a unit-mate.
+# pool, `spawn(unit: :new)`) runs on this thread as a unit of its own
+# (`IyiChaosUnit`), and a `Unit`'s tasks (std/unit, `spawn(in:)`) as that
+# `Unit`'s one chaos unit, so the interleavings two cores could produce
+# are the ones met here: tasks of different units take turns at any of
+# the points above. Tasks of one unit still take turns only at parks,
+# oldest first, as the language promises them (III.4.18): the scheduler
+# never puts a task between two operations of a unit-mate.
 #
 # Every synchronising operation is a point because the compiler's rule
 # makes that enough: a program with no data race behaves as some
@@ -78,9 +79,10 @@
   {% raise "-Diyi_chaos needs the default runtime: its scheduler is the one a chaos build drives, and -Dgc_none and -Dgc_boehm have no pool to simulate (SPEC.md III.4.17)" %}
 {% end %}
 
-# A unit as the chaos scheduler sees it: the tasks that take turns only at
-# parks - the main thread's, or a parallel task's and the tasks its block
-# spawns in its unit. Its PCT priority, and the mark a choice puts on it
+# A unit as the chaos scheduler sees it (SPEC.md III.4.18): the tasks
+# that take turns only at parks - the main thread's, a parallel task's
+# and the tasks its block spawns in its unit, or a `Unit`'s. Its PCT
+# priority, and the mark a choice puts on it
 # so that one walk of the run queue finds each unit's candidate.
 class IyiChaosUnit
   getter id : UInt64
@@ -281,6 +283,20 @@ class IyiChaos
     task.fiber.chaos_unit = IyiChaosUnit.new(@@units, fresh_priority)
     point
     task
+  end
+
+  # A task of a `Unit` (`IyiGroup#on_main`), simulated: in that `Unit`'s
+  # chaos unit, made at its first task, so its tasks take turns with each
+  # other only at parks and with every other unit at any point.
+  def self.adopt_into(fiber : IyiFiber, owner : IyiGroup::Unit(S)) : Nil forall S
+    return unless @@mode == SIMULATED
+    unit = owner.iyi_chaos_unit
+    unless unit.is_a?(IyiChaosUnit)
+      @@units = @@units &+ 1_u64
+      unit = IyiChaosUnit.new(@@units, fresh_priority)
+      owner.iyi_chaos_unit = unit
+    end
+    fiber.chaos_unit = unit
   end
 
   # ── Points ───────────────────────────────────────────────────────────

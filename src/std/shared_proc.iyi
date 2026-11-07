@@ -16,7 +16,7 @@
 #
 #     doubled = SharedProc(Int32, Int32).of { |n| n * 2 }
 #     group do |g|
-#       4.times { |i| g.spawn(parallel: true) { doubled.call(i) } }
+#       4.times { |i| g.spawn(unit: :new) { doubled.call(i) } }
 #     end
 #
 # A def that keeps a block and is itself `@[Share]` - std/http's

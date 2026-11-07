@@ -303,7 +303,7 @@ elif IYI_PATH="$WORK/silent${PSEP}$REPO/src" "$IYI" build --no-codegen -o "$WORK
 elif grep -qF "Array#map_parallel hands its block" "$WORK/silent/build.log"; then
   echo "  the copy still refused at the call, so the element check is not what the sentence comes from"
   status=1
-elif ! grep -qF "the block spawn(parallel: true) runs on another thread captures \`source : Std::List::List(Counter)\`" "$WORK/silent/build.log"; then
+elif ! grep -qF "the block spawn(unit: :new) runs in a unit of its own, on another thread captures \`source : Std::List::List(Counter)\`" "$WORK/silent/build.log"; then
   echo "  the copy was refused, but not by the capture check inside std/parallel:"
   grep -m1 "^Error" "$WORK/silent/build.log" | sed 's/^/    /'
   status=1

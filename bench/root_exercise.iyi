@@ -480,7 +480,7 @@
   # reachable only from a fiber the scheduler holds. The channel dance is
   # what pins the timeline: `ready.receive` parks main so the fiber runs
   # as far as its own `ready.send`, after which its saved stack holds
-  # `keep` and the walk can ask about it. The task is `spawn(serial: true)`: the
+  # `keep` and the walk can ask about it. The task is `spawn(unit: :same)`: the
   # walk is the collector's, which runs with every other thread stopped,
   # and here it runs beside them, so the fiber stays on this thread, in
   # this unit, where the walk reads a fiber nothing is running. A plain
@@ -492,7 +492,7 @@
     ready = Channel(Int32).new
     release = Channel(Int32).new
     group do |g|
-      g.spawn(serial: true) do
+      g.spawn(unit: :same) do
         keep = Pointer(UInt8).malloc(96_u64)
         Tally.want(keep.address)
         ready.send(1)

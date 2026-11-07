@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Where a `spawn` runs (SPEC.md III.4.15, III.4.16): one verb. Written
-# plain, in parallel where the compiler can prove it safe and in its
-# spawner's unit otherwise; `parallel: true` asks for the pool and
-# `serial: true` for the unit; and a spawn kept in its unit, or moved
-# by a change elsewhere, is said where the author looks.
+# Where a `spawn` runs (SPEC.md III.4.15, III.4.16, III.4.18): one verb.
+# Written plain, in parallel where the compiler can prove it safe and in
+# its spawner's unit otherwise; `unit: :new` asks for a unit of its own
+# and `unit: :same` for the spawner's; and a spawn kept in its unit, or
+# moved by a change elsewhere, is said where the author looks.
 #
 #     bash bench/spawn_eligible.sh
 #
@@ -11,10 +11,10 @@
 #      four spawns whose blocks capture only atomics are all running at
 #      one instant, from the main thread and from inside a parallel task;
 #      four that append to their parent's `Array` stay in its unit, one at
-#      a time; four `spawn(serial: true)` tasks that capture only atomics
-#      stay in theirs; and four `spawn(parallel: true)` tasks are all
+#      a time; four `spawn(unit: :same)` tasks that capture only atomics
+#      stay in theirs; and four `spawn(unit: :new)` tasks are all
 #      running at one instant. On a pool of one, eligible spawns stay on
-#      the main thread and no pool starts, while `spawn(parallel: true)`
+#      the main thread and no pool starts, while `spawn(unit: :new)`
 #      tasks run on the pool's worker. On a pool of four, in a process of
 #      its own, one spawn starts one worker, spawns joined one at a time at
 #      most three, and four tasks running at one instant all four; one
@@ -34,10 +34,11 @@
 #      named through the std def that calls back, and loses no append on
 #      four workers.
 #   3. The one verb: `spawn_parallel` and `spawn_serial`, on a group and in
-#      a typed group, are compile errors naming the new spelling; `iyi fix`
-#      rewrites both, and the program runs. `parallel: false`, a value the
-#      compiler cannot read, both arguments at once, and a capture that is
-#      not Share under `parallel: true` are refused.
+#      a typed group, and `serial: true` and `parallel: true`, are compile
+#      errors naming the new spelling; `iyi fix` rewrites all four, and the
+#      program runs. A symbol that names no unit, a value the compiler
+#      cannot read, two placements at once, and a capture that is not
+#      Share under `unit: :new` are refused.
 #   4. The cliff, said: a spawn kept in its unit by a type another module
 #      declares names that module and the field; and a rebuild that moves
 #      a spawn of a module's artifact, because the module it imports
@@ -57,15 +58,15 @@
 #      appending without the lock beside it loses no append.
 #   5. Failure proofs against broken copies, each caught at the named
 #      check. Of the runtime: an eligible spawn left in its unit, an
-#      ineligible one sent to the pool, `serial: true` sent to the pool,
-#      `parallel: true` left in the unit, `spawn_parallel` kept as an
+#      ineligible one sent to the pool, `unit: :same` sent to the pool,
+#      `unit: :new` left in the unit, `spawn_parallel` or `serial:` kept as an
 #      alias, a pool of one that starts for eligible spawns anyway, a pool
 #      that starts every worker at once, one that never starts a second,
 #      and a worker that gives back the token of the one out looking
 #      before it counts itself idle. Of the compiler, through
 #      `IYI_SPAWN_BROKEN`: no module named in a reason, no note from `iyi
-#      check` unasked, no line for a moved spawn, `spawn_parallel`
-#      answered as any undefined method, an artifact written without what
+#      check` unasked, no line for a moved spawn, `spawn_parallel` and
+#      `serial: true` answered as any undefined method or parameter, an artifact written without what
 #      its functions reach (whose consumer must keep every spawn calling
 #      into it in its unit, naming the module), a function read from an
 #      artifact taken to reach nothing, and an artifact that takes every
@@ -150,8 +151,8 @@ group do |g|
     g.spawn { i }
     i = i + 1
   end
-  g.spawn(serial: true) { done.add(1) }
-  g.spawn(parallel: true) { done.add(1) }
+  g.spawn(unit: :same) { done.add(1) }
+  g.spawn(unit: :new) { done.add(1) }
 end
 IYI
 explain() { # log, line, expected text
@@ -164,12 +165,12 @@ if ! "$IYI" check --explain-spawn --error-on-warnings explained.iyi > explain.lo
   echo "check --explain-spawn --error-on-warnings failed a program with no warning:"; cat explain.log; exit 1
 fi
 explain explain.log 29 'spawn runs in parallel'
-explain explain.log 30 'spawn stays in its spawner'"'"'s unit: the block captures `log : Array(Int32)`, which is not Share'
+explain explain.log 30 'spawn stays in its spawner'"'"'s unit (SPEC.md III.4.18): the block captures `log : Array(Int32)`, which is not Share'
 explain explain.log 31 'the block reaches the constant `LEDGER : Explained::Ledger` through `record` → `LEDGER.add`'
 explain explain.log 32 'spawn runs in parallel'
 explain explain.log 35 'line 36: `i` is assigned here, in a loop or a block that spawns the task again'
-explain explain.log 38 'spawn stays in its spawner'"'"'s unit: `serial: true` keeps it there'
-explain explain.log 39 'spawn runs in parallel: `parallel: true` asks for it'
+explain explain.log 38 'spawn stays in its spawner'"'"'s unit (SPEC.md III.4.18): `unit: :same` keeps it there'
+explain explain.log 39 'spawn runs in a unit of its own: `unit: :new` asks for it'
 if grep -q 'Warning' explain.log; then
   echo "a plain spawn was warned about:"; cat explain.log; exit 1
 fi
@@ -284,12 +285,12 @@ refused() { # file, expected text, log
     echo "$1 was not refused with \"$2\":"; cat "$3"; return 1
   fi
 }
-refused old.iyi '`spawn_parallel` is gone: one verb starts a task now. Write `g.spawn(parallel: true) { }`' old.log || exit 1
+refused old.iyi '`spawn_parallel` is gone: one verb starts a task now. Write `g.spawn(unit: :new) { }`' old.log || exit 1
 echo "  $(grep -m1 -o 'old.iyi:5:[0-9]*' old.log): spawn_parallel"
-refused old_typed.iyi '`spawn_serial` is gone: one verb starts a task now. Write `g.spawn(serial: true) { }`' old_typed.log || exit 1
+refused old_typed.iyi '`spawn_serial` is gone: one verb starts a task now. Write `g.spawn(unit: :same) { }`' old_typed.log || exit 1
 echo "  $(grep -m1 -o 'old_typed.iyi:4:[0-9]*' old_typed.log): spawn_serial, in a typed group"
-if ! "$IYI" check -f json old.iyi > old.json 2>&1; grep -qF '"suggested_edit"' old.json && grep -qF 'spawn(parallel: true)' old.json; then
-  echo "  -f json carries the edit: spawn(parallel: true)"
+if ! "$IYI" check -f json old.iyi > old.json 2>&1; grep -qF '"suggested_edit"' old.json && grep -qF 'spawn(unit: :new)' old.json; then
+  echo "  -f json carries the edit: spawn(unit: :new)"
 else
   echo "-f json carried no edit for spawn_parallel:"; cat old.json; exit 1
 fi
@@ -297,7 +298,7 @@ cp old.iyi fixed.iyi
 if ! "$IYI" fix fixed.iyi > fix.log 2>&1; then
   echo "iyi fix failed:"; cat fix.log; exit 1
 fi
-if ! grep -qF 'g.spawn(parallel: true) { done.add(1) }' fixed.iyi || ! grep -qF 'g.spawn(serial: true) do' fixed.iyi; then
+if ! grep -qF 'g.spawn(unit: :new) { done.add(1) }' fixed.iyi || ! grep -qF 'g.spawn(unit: :same) do' fixed.iyi; then
   echo "iyi fix did not write the new spellings:"; cat fixed.iyi; exit 1
 fi
 if ! "$IYI" run fixed.iyi > fixed.txt 2>&1 || [ "$(cat fixed.txt)" != 3 ]; then
@@ -305,14 +306,47 @@ if ! "$IYI" run fixed.iyi > fixed.txt 2>&1 || [ "$(cat fixed.txt)" != 3 ]; then
 fi
 echo "  iyi fix: both rewritten, and the program runs"
 
-step "a placement is the literal true, one of them, and parallel: true is Share-gated"
+step "serial: true and parallel: true are compile errors naming unit: :same and unit: :new"
+cat > placed_old.iyi <<'IYI'
+module placed_old
+
+done = Atomic(Int32).new(0)
+group do |g|
+  g.spawn(serial: true) { done.add(1) }
+  g.spawn(parallel: true) do
+    done.add(2)
+  end
+end
+puts done.get
+IYI
+refused placed_old.iyi '`serial:` is gone: a spawn names its unit now. Write `g.spawn(unit: :same) { }`' placed_old.log || exit 1
+echo "  $(grep -m1 -o 'placed_old.iyi:5:[0-9]*' placed_old.log): serial: true"
+sed 's/serial: true/unit: :same/' placed_old.iyi > placed_new.iyi
+refused placed_new.iyi '`parallel:` is gone: a spawn names its unit now. Write `g.spawn(unit: :new) { }`' placed_new.log || exit 1
+echo "  $(grep -m1 -o 'placed_new.iyi:6:[0-9]*' placed_new.log): parallel: true"
+cp placed_old.iyi placed_fixed.iyi
+if ! "$IYI" fix placed_fixed.iyi > placed_fix.log 2>&1; then
+  echo "iyi fix failed:"; cat placed_fix.log; exit 1
+fi
+if ! grep -qF 'g.spawn(unit: :same) { done.add(1) }' placed_fixed.iyi || ! grep -qF 'g.spawn(unit: :new) do' placed_fixed.iyi; then
+  echo "iyi fix did not write unit: :same and unit: :new:"; cat placed_fixed.iyi; exit 1
+fi
+if ! "$IYI" run placed_fixed.iyi > placed_fixed.txt 2>&1 || [ "$(cat placed_fixed.txt)" != 3 ]; then
+  echo "the fixed program did not run to 3:"; cat placed_fixed.txt; exit 1
+fi
+echo "  iyi fix: both rewritten, and the program runs"
+
+step "a placement is :same or :new as written, one of them, and unit: :new is Share-gated"
 cat > placed.iyi <<'IYI'
 module placed
 
-def ordered : Bool
-  true
+import std/unit::{Unit}
+
+def ordered : Symbol
+  :same
 end
 
+counts = Unit.new { 0 }
 log = [] of Int32
 group do |g|
   g.spawn(PLACEMENT) { 1 }
@@ -323,10 +357,10 @@ placement() { # argument, expected text
   refused "placed_$4.iyi" "$2" "placed_$4.log" || exit 1
   echo "  $1: $(grep -m1 -F "$2" "placed_$4.log" | sed 's/^.*Error: //; s/^ *//' | cut -c1-110)"
 }
-placement 'parallel: false' '`parallel: false` asks for nothing that leaving it out does not' '{ 1 }' false
-placement 'serial: ordered' '`serial:` takes the literal `true`' '{ 1 }' unread
-placement 'parallel: true, serial: true' 'a spawn is placed one way' '{ 1 }' both
-placement 'parallel: true' 'the block spawn(parallel: true) runs on another thread captures `log : Array(Int32)`, which is not Share' '{ log << 1; 0 }' unshared
+placement 'unit: :here' '`unit: :here` names no unit' '{ 1 }' other
+placement 'unit: ordered' '`unit:` takes `:same` or `:new` as written' '{ 1 }' unread
+placement 'in: counts, unit: :same' 'a spawn is placed one way' '{ |c| c }' both
+placement 'unit: :new' 'the block spawn(unit: :new) runs in a unit of its own, on another thread captures `log : Array(Int32)`, which is not Share' '{ log << 1; 0 }' unshared
 
 # ── 4. The cliff, said ────────────────────────────────────────────────────
 step "a spawn kept in its unit by another module's type names the module and the field"
@@ -410,7 +444,7 @@ echo "  mod dump: $(grep -m1 'App::Work.crunch' dump.log | sed 's/^ *//')"
 moved() { # log, line, expected text
   [ "$(grep -c ': note: ' "$1")" = 1 ] && grep -F "work.iyi:$2:" "$1" | grep -qF "$3"
 }
-to_unit='spawn in `App::Work.crunch` ran in parallel when app/work was last built, and stays in its spawner'"'"'s unit now: the block captures `config : Dep::Config::Config`, which is not Share: Dep::Config::Config'"'"'s field @hits (module `dep/config`) is assigned in `bump`'
+to_unit='spawn in `App::Work.crunch` ran in parallel when app/work was last built, and stays in its spawner'"'"'s unit now (SPEC.md III.4.18): the block captures `config : Dep::Config::Config`, which is not Share: Dep::Config::Config'"'"'s field @hits (module `dep/config`) is assigned in `bump`'
 to_pool='spawn in `App::Work.crunch` stayed in its spawner'"'"'s unit when app/work was last built, and runs in parallel now'
 cp config_bumped.iyi cliff/dep/config.iyi
 rebuild moved.log || { echo "the rebuild failed:"; cat moved.log; exit 1; }
@@ -530,7 +564,7 @@ against() { # log, artifact directory, environment...
 placed() { # log, line, expected text
   grep -F "app.iyi:$2:" "$1" | grep -qF "$3"
 }
-seen_unit='spawn stays in its spawner'"'"'s unit: the block reaches the constant `SEEN : Array(Int32)` (module `dep/counter`) through `note` → `SEEN.<<`, and it is not Share'
+seen_unit='spawn stays in its spawner'"'"'s unit (SPEC.md III.4.18): the block reaches the constant `SEEN : Array(Int32)` (module `dep/counter`) through `note` → `SEEN.<<`, and it is not Share'
 claimed='the block reaches the class variable `@@noted : Array(Int32)` (module `dep/counter`) through `Registry.register` → `@@noted.<<`'
 travelled='the block reaches the class variable `@@noted : Array(Int32)` through `Registry.count` → `@@noted.size`'
 unknown='dep/counter arrived as an artifact that does not record what its functions reach of module state'
@@ -625,7 +659,7 @@ IYI
 if ! (cd claimed && "$IYI" build --emit-iyimod mods -o first first.iyi) > claimed-first.log 2>&1 || [ -s claimed-first.log ]; then
   echo "the producing build failed, or printed something:"; cat claimed-first.log; exit 1
 fi
-claimed_unit='Dep::Ledger.fill 30:9 in its unit: the block reaches the constant `ROWS : Array(Int32)` through `locked_add` → `add` → `ROWS.<<`'
+claimed_unit='Dep::Ledger.fill 30:9 in its spawner'"'"'s unit: the block reaches the constant `ROWS : Array(Int32)` through `locked_add` → `add` → `ROWS.<<`'
 claimed_why='its @[SafeReach] is proven for this program and not for every program importing the module'
 "$IYI" mod dump claimed/mods/dep/ledger.iyimod > claimed-dump.log 2>&1
 if ! grep -qF "$claimed_unit" claimed-dump.log || ! grep -qF "$claimed_why" claimed-dump.log; then
@@ -681,14 +715,14 @@ step "failure proof: an ineligible spawn sent to the pool"
 broken madeparallel '/^  def spawn\(&block/ { inspawn = 1 } inspawn && /^    in_unit\(&block\)$/ { print "    on_pool(&block)"; inspawn = 0; next } { print }'
 caught madeparallel 'tasks of one unit were running at one instant' unit --workers=4
 
-step "failure proof: serial: true sent to the pool"
-broken optoutignored '/^  def spawn\(\*, serial : Bool, &block/ { inserial = 1 } inserial && /^    in_unit\(&block\)$/ { print "    on_pool(&block)"; inserial = 0; next } { print }'
-caught optoutignored 'spawn(serial: true) tasks were running at one instant' serial --workers=4
+step "failure proof: unit: :same sent to the pool"
+broken optoutignored '/^  def spawn\(\*, unit : Symbol, &block/ { inserial = 1 } inserial && /^    in_unit\(&block\)$/ { print "    on_pool(&block)"; inserial = 0; next } { print }'
+caught optoutignored 'spawn(unit: :same) tasks were running at one instant' serial --workers=4
 
-step "failure proof: parallel: true left in its unit"
-broken askedignored '/^    def spawn\(\*, parallel : Bool, &block/ { inasked = 1 } inasked && /^      on_pool\(&block\)$/ { print "      in_unit(&block)"; inasked = 0; next } { print }'
-caught askedignored 'spawn(parallel: true) tasks waited 2000 ms for the others and left alone' asked --workers=4
-caught askedignored 'spawn(parallel: true) tasks ran on the spawner'"'"'s thread on a pool of one' askedone --workers=1
+step "failure proof: unit: :new left in its unit"
+broken askedignored '/^    private def spawn_new\(&block/ { inasked = 1 } inasked && /^      on_pool\(&block\)$/ { print "      in_unit(&block)"; inasked = 0; next } { print }'
+caught askedignored 'spawn(unit: :new) tasks waited 2000 ms for the others and left alone' asked --workers=4
+caught askedignored 'spawn(unit: :new) tasks ran on the spawner'"'"'s thread on a pool of one' askedone --workers=1
 
 step "failure proof: a pool of one that starts for eligible spawns"
 broken oneignored '/^  def self.parallel\? : Bool$/ { print; print "    return true"; next } { print }'
@@ -769,7 +803,7 @@ caught early 'grows: one eligible spawn started 2 of' grows --workers=4
 step "failure proof: spawn_parallel kept as an alias"
 mkdir -p alias/iyi
 cp "$REPO"/src/iyi/*.iyi alias/iyi/
-awk '/^    def spawn\(\*, parallel : Bool, &block/ { print "    def spawn_parallel(&block : -> T) : IyiTask(T) forall T"; print "      on_pool(&block)"; print "    end"; print "" } { print }' \
+awk '/^    private def spawn_new\(&block/ { print "    def spawn_parallel(&block : -> T) : IyiTask(T) forall T"; print "      on_pool(&block)"; print "    end"; print "" } { print }' \
   "$REPO/src/iyi/concurrency.iyi" > alias/iyi/concurrency.iyi
 if cmp -s alias/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi"; then
   echo "the awk for alias found nothing to change"; exit 1
@@ -778,6 +812,19 @@ if IYI_PATH="$WORK/alias${PSEP}$REPO/src" refused old.iyi '`spawn_parallel` is g
   echo "the alias copy was not caught:"; cat alias.log; exit 1
 fi
 echo "  caught: with the alias, spawn_parallel at old.iyi:5 is not refused ($(grep -m1 -o 'old.iyi:[0-9]*' alias.log || echo 'it compiled'))"
+
+step "failure proof: serial: kept as an alias"
+mkdir -p serial_alias/iyi
+cp "$REPO"/src/iyi/*.iyi serial_alias/iyi/
+awk '/^  def spawn\(\*, unit : Symbol, &block/ { print "  def spawn(*, serial : Bool, &block : -> T) : IyiTask(T) forall T"; print "    in_unit(&block)"; print "  end"; print "" } { print }' \
+  "$REPO/src/iyi/concurrency.iyi" > serial_alias/iyi/concurrency.iyi
+if cmp -s serial_alias/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi"; then
+  echo "the awk for serial_alias found nothing to change"; exit 1
+fi
+if IYI_PATH="$WORK/serial_alias${PSEP}$REPO/src" refused placed_old.iyi '`serial:` is gone' serial_alias.log > /dev/null; then
+  echo "the serial: alias copy was not caught:"; cat serial_alias.log; exit 1
+fi
+echo "  caught: with the alias, serial: true at placed_old.iyi:5 is not refused ($(grep -m1 -o 'placed_old.iyi:[0-9]*' serial_alias.log || echo 'it compiled'))"
 
 # Of the compiler: `IYI_SPAWN_BROKEN` turns one mechanism off each.
 step "failure proof: a reason that names no module"
@@ -808,6 +855,12 @@ if IYI_SPAWN_BROKEN=retired refused old.iyi '`spawn_parallel` is gone' retired-b
   echo "the copy that names no spelling was not caught:"; cat retired-broken.log; exit 1
 fi
 echo "  caught: \"$(grep -m1 -o "undefined method 'spawn_parallel'[^.]*" retired-broken.log)\""
+
+step "failure proof: serial: true answered as any missing parameter"
+if IYI_SPAWN_BROKEN=retired refused placed_old.iyi '`serial:` is gone' retired-placement.log > /dev/null; then
+  echo "the copy that names no spelling was not caught:"; cat retired-placement.log; exit 1
+fi
+echo "  caught: \"$(grep -m1 -o "no parameter named 'serial'" retired-placement.log || grep -m1 'Error' retired-placement.log)\""
 
 step "failure proof: an artifact that does not say what its functions reach"
 if placed reach-unknown.log 8 "$seen_unit"; then

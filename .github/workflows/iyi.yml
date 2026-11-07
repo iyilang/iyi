@@ -433,7 +433,7 @@ jobs:
 
       # III.4.15: a plain spawn whose block captures only Share values runs
       # beside its siblings on the pool, one that captures the parent's
-      # Array stays in its unit, spawn(serial: true) stays too, and
+      # Array stays in its unit, spawn(unit: :same) stays too, and
       # --explain-spawn names the capture; broken copies of each caught.
       - name: Where a plain spawn runs (III.4.15)
         run: bash bench/spawn_eligible.sh

@@ -3,17 +3,18 @@
 #
 #   x = parse(input)        →  x: Parser::Result = parse(input)
 #   move(3, 7)              →  move(x: 3, y: 7)
-#   g.spawn { sum(part) }   →  g.spawn parallel { sum(part) }
-#   g.spawn { log << 1 }    →  g.spawn in its unit: the block captures `log : Array(Int32)`, which is not Share { log << 1 }
+#   g.spawn { sum(part) }   →  g.spawn in a unit of its own { sum(part) }
+#   g.spawn { log << 1 }    →  g.spawn in its spawner's unit: the block captures `log : Array(Int32)`, which is not Share { log << 1 }
 #
 # A type hint lands after a bare assignment's target — an assignment
 # that spells its type already says it. A parameter hint lands before a
 # positional literal argument — a variable passed by name documents
 # itself, a bare `3` does not. A spawn hint lands after a plain `spawn`,
-# saying where the compiler decided the task runs (SPEC.md III.4.15,
-# III.4.16): `parallel`, or `in its unit: ` and the first clause of what
-# kept it there, the whole reason as the hint's tooltip. A spawn that
-# spells its placement, `parallel: true` or `serial: true`, is hinted
+# saying which unit the compiler decided the task runs in (SPEC.md
+# III.4.15, III.4.18): `in a unit of its own`, or `in its spawner's
+# unit: ` and the first clause of what kept it there, with the whole
+# reason and what a unit is as the hint's tooltip. A spawn that spells
+# its placement, `unit: :new`, `unit: :same` or `in: u`, is hinted
 # nothing: the text says it. Instantiations dedupe by position: a generic
 # def typed many ways is still one line of source, and a spawn one of
 # whose instantiations stays in its unit is hinted as staying.
@@ -64,12 +65,22 @@ module Iyi::Lsp
       @in_def = nil
       result.node.accept self
       @spawns.each do |(line, column), reason|
-        label = reason ? "in its unit: #{InlayVisitor.spawn_clause(reason)}" : "parallel"
-        @hints << Hint.new(line, column, label, KIND_NOTE, reason)
+        label = reason ? "in its spawner's unit: #{InlayVisitor.spawn_clause(reason)}" : "in a unit of its own"
+        tooltip = reason ? "#{reason}\n\n#{UNIT_DEFINITION}" : "#{PARALLEL_TOOLTIP}\n\n#{UNIT_DEFINITION}"
+        @hints << Hint.new(line, column, label, KIND_NOTE, tooltip)
       end
       hints.sort_by! { |hint| {hint.line, hint.column} }
       hints
     end
+
+    # What a unit is, under every spawn hint's reason (SPEC.md III.4.18).
+    UNIT_DEFINITION = "A unit is a set of tasks of which at most one runs at any instant, and which switch only where one parks: " \
+                      "its tasks may share values that are not Share. A spawn runs in its spawner's unit, in a unit of its own, " \
+                      "or in a `Unit` it names (SPEC.md III.4.18)."
+
+    # Why a spawn runs in a unit of its own, the compiler's words for it.
+    PARALLEL_TOOLTIP = "Every capture is Share, and nothing it reaches is module state that is not, so the compiler runs it " \
+                       "in a unit of its own, in parallel with its spawner (SPEC.md III.4.15)."
 
     # The reason's first clause, which is what a reader scanning the line
     # wants - what is captured or reached, and that it is not Share - and
@@ -144,8 +155,8 @@ module Iyi::Lsp
       true
     end
 
-    # A `g.spawn`: one verdict per place, a serial one winning over a
-    # parallel one from another instantiation.
+    # A `g.spawn`: one verdict per place, one kept in its spawner's unit
+    # winning over one in a unit of its own from another instantiation.
     private def spawn_hint(node : Call, defs : Array(Def)) : Nil
       return unless CleanupTransformer.spawn_def?(defs.first)
       program = @program

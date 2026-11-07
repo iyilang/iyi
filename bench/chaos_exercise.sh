@@ -25,8 +25,9 @@
 #   5. One seed, one schedule; many seeds, many: bench/chaos_exercise.iyi
 #      under seeds 1 to 30, twice each, holds every property each time,
 #      each seed's two runs print the same lines and schedule, the 30 meet
-#      at least 20 orders and both arms of a `select`, and parallel units
-#      start before the spawner parks under some seeds and not others.
+#      at least 20 orders and both arms of a `select`, and parallel units,
+#      and a `Unit`'s tasks (SPEC.md III.4.18), start before the spawner
+#      parks under some seeds and not others.
 #   6. Broken copies of the scheduler, each caught at the check that names
 #      it: the stream ignored (every draw 0, which is the plain
 #      scheduler's choice everywhere) finds neither bug; the seed not
@@ -34,8 +35,10 @@
 #      schedule twice; units ignored (any task chosen, a unit-mate's
 #      included) runs a task between a unit-mate's operations or before
 #      its spawner parks; parallel tasks left in their spawner's unit
-#      never start before it parks; and a point left in a build without
-#      the flag names the scheduler in its IR.
+#      never start before it parks; a `Unit`'s tasks given a chaos unit
+#      each run between each other's operations; a `Unit`'s tasks given
+#      none, left in the spawner's, never start before it parks; and a
+#      point left in a build without the flag names the scheduler in its IR.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -119,11 +122,13 @@ caught() { # prelude, label, source
 
 # Step 5 under one prelude: answers 1, saying why, when a property fails.
 seeds() { # prelude, label
-  local prelude="$1" label="$2" seed orders early late lefts rights
+  local prelude="$1" label="$2" seed orders early late unit_early unit_late lefts rights
   build "exercise-$label" "$prelude" "$REPO/bench/chaos_exercise.iyi" -Diyi_chaos || { echo "$label: the exercise did not build:"; tail -20 "build-exercise-$label.log"; return 1; }
   : > "orders-$label.txt"
   early=0
   late=0
+  unit_early=0
+  unit_late=0
   for seed in $(seq 1 30); do
     for twice in a b; do
       IYI_CHAOS="$seed" IYI_CHAOS_TRACE=1 IYI_WORKERS=1 timeout -k 5 120 "./exercise-$label$EXE" > "seed-$label-$seed-$twice.txt" 2>&1
@@ -135,10 +140,15 @@ seeds() { # prelude, label
       echo "$label: seed $seed's two runs differ:"; diff "seed-$label-$seed-a.txt" "seed-$label-$seed-b.txt"; return 1
     fi
     grep "^order " "seed-$label-$seed-a.txt" >> "orders-$label.txt"
-    if grep -q "started before the spawner parked: 0$" "seed-$label-$seed-a.txt"; then
+    if grep -q "parallel units started before the spawner parked: 0$" "seed-$label-$seed-a.txt"; then
       late=$((late + 1))
     else
       early=$((early + 1))
+    fi
+    if grep -q "^Unit tasks started before the spawner parked: 0$" "seed-$label-$seed-a.txt"; then
+      unit_late=$((unit_late + 1))
+    else
+      unit_early=$((unit_early + 1))
     fi
   done
   orders="$(sort -u "orders-$label.txt" | wc -l | tr -d ' ')"
@@ -146,9 +156,11 @@ seeds() { # prelude, label
   rights="$(cat seed-"$label"-*-a.txt | grep -c "^left arms [0-2] of 3")"
   [ "$early" -gt 0 ] || { echo "$label: no seed started a parallel unit before the spawner parked"; return 1; }
   [ "$late" -gt 0 ] || { echo "$label: every seed started a parallel unit before the spawner parked"; return 1; }
+  [ "$unit_early" -gt 0 ] || { echo "$label: no seed started a Unit's task before the spawner parked"; return 1; }
+  [ "$unit_late" -gt 0 ] || { echo "$label: every seed started a Unit's task before the spawner parked"; return 1; }
   [ "$orders" -ge 20 ] || { echo "$label: 30 seeds met $orders orders, not 20"; return 1; }
   [ "$lefts" -gt 0 ] && [ "$rights" -gt 0 ] || { echo "$label: a select took one arm only ($lefts runs with a left arm, $rights with a right)"; return 1; }
-  echo "  $label: 30 seeds, each run twice alike: $orders orders, a parallel unit started before the spawner parked under $early seeds and not under $late"
+  echo "  $label: 30 seeds, each run twice alike: $orders orders, a parallel unit started before the spawner parked under $early seeds and not under $late, a Unit's task under $unit_early and not under $unit_late"
 }
 
 # ── 1. Off is nothing ─────────────────────────────────────────────────────
@@ -238,6 +250,16 @@ step "broken copy: a parallel task left in its spawner's unit"
 broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiChaosUnit.new\(@@units, fresh_priority\)$/ { next } { print }'
 seeds "$WORK/leftinunit" leftinunit > leftinunit.txt 2>&1
 expect_caught leftinunit "no seed started a parallel unit before the spawner parked"
+
+step "broken copy: a Unit's tasks each given a chaos unit of their own"
+broken unitsplit chaos.iyi '/^    unless unit.is_a\?\(IyiChaosUnit\)$/ { print "    unless false"; next } { print }'
+seeds "$WORK/unitsplit" unitsplit > unitsplit.txt 2>&1
+expect_caught unitsplit "tasks of one Unit ran between each other's operations"
+
+step "broken copy: a Unit's tasks left in their spawner's unit"
+broken unitleft chaos.iyi '/^    fiber.chaos_unit = unit$/ { print "    fiber.chaos_unit = unit_of(IyiScheduler.current)"; next } { print }'
+seeds "$WORK/unitleft" unitleft > unitleft.txt 2>&1
+expect_caught unitleft "no seed started a Unit's task before the spawner parked"
 
 step "broken copy: the scheduler left in a build without the flag"
 broken pointleft prelude.iyi '/^  {% if flag\?\(:iyi_chaos\) %}$/ && !done { print "  {% if true %}"; done = 1; next } { print }'

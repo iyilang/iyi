@@ -42,10 +42,10 @@ class Iyi::Command
         Each `g.spawn` the compiler kept in its spawner's unit, in a
         file under the project's root, gets a note saying what kept it
         there - `file:line:column: note: spawn stays in its spawner's
-        unit: ...` - so a spawn that could not run in parallel is seen
-        before it is measured. `g.spawn(serial: true)` says the unit is
-        meant, and takes no note; `--explain-spawn` notes every spawn.
-        A note is not a warning.
+        unit (SPEC.md III.4.18): ...` - so a spawn that could not run in
+        parallel is seen before it is measured. `g.spawn(unit: :same)`
+        says the unit is meant, and takes no note; `--explain-spawn`
+        notes every spawn. A note is not a warning.
 
         Under `-f json` standard error holds one JSON array whatever
         ends the run: a warning is a frame marked `"severity":

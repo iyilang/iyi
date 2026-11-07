@@ -1,0 +1,82 @@
+# `Unit(T)`: a value that only one unit's tasks reach, one task at a time.
+# SPEC.md III.4.18. A unit is a set of tasks of which at most one runs at
+# any instant and which switch only where one parks; a `Unit` is one you
+# make and give tasks to, with a value it owns that no other code reaches.
+# It is the actor without the mailbox: the tasks are the messages.
+#
+#     import std/unit::{Unit}
+#
+#     counts = Unit.new { {} of String => Int32 }
+#     group do |g|
+#       words.each { |w| g.spawn(in: counts) { |hits| hits[w] = (hits[w]? || 0) + 1; 0 } }
+#     end
+#     total = 0
+#     group do |g|
+#       size = g.spawn(in: counts) { |hits| hits.size }
+#       total = size.value.or(0)
+#     end
+#
+# **A task of the group, in the Unit's unit.** `g.spawn(in: u) { |value| }`
+# is a task of `g`, joined, cancelled and failed by `g`'s scope as every
+# task is (III.4.1-III.4.3). It runs in `u`'s unit and is handed the value
+# `u` owns: never at the same instant as another of `u`'s tasks, and on a
+# pool of more than one worker on whichever worker is free. A task it
+# spawns with `unit: :same`, or a plain `spawn` the compiler keeps in its
+# unit, is in `u`'s unit too and may share the value. With one worker
+# (`IYI_WORKERS=1`) every task of every `Unit` runs on the main thread,
+# whichever thread spawned it, so one worker is one thread.
+#
+# **Tasks interleave where they park.** One task of a `Unit` that parks -
+# a channel's receive, a `sleep`, a join, a lock - lets another of its
+# tasks run before it resumes, as unit-mates always may; Swift's actors
+# do the same. A value read before a park may have changed after it, so
+# what must hold of the value holds at every park, not only at a task's
+# end:
+#
+#     g.spawn(in: account) do |a|
+#       seen = a.balance
+#       sleep(1)                   # another task of `account` may run here
+#       a.balance = seen - 10      # wrong: write `a.balance -= 10` after the park
+#       0
+#     end
+#
+# **Only the Unit's tasks reach the value, and the compiler checks every
+# block.** The value is made by the block `Unit.new` runs, so nothing
+# outside holds it, and is handed only to the blocks `spawn(in:)` runs.
+# Those blocks may capture only `Share` values - a captured array would be
+# within reach of the value and of another unit at once - and what such a
+# task answers must be `Share`, since it leaves the unit while the unit
+# lives on. A block that breaks either is refused where it is written,
+# naming the variable or the answer (`CleanupTransformer#check_share_boundary`).
+# So `Unit(T)` is `Share` for any `T`, as `Mutex(T)` is: a `Unit` may be
+# captured by any task, thread or `Unit` block. What the check does not see
+# is a method the block calls that stores the value somewhere global; that
+# is the same edge `Mutex` and the thread check have.
+#
+# **A panic releases the Unit.** A task of a `Unit` that panics dies alone,
+# as any task does (III.1.4); the `Unit` is not poisoned, and its next
+# task runs. What the panicking task changed of the value stays changed.
+#
+# **The value is handed by what it is.** A class, an `Array`, a `Hash` is
+# handed by reference, so a task's change is the next task's value. A
+# struct - an `Int32`, a `Tuple` - is handed as a copy, so own a class
+# that holds it when tasks must change it.
+
+module std/unit
+
+@[Share(owns: true)]
+pub class Unit(T) < IyiGroup::Unit(T)
+  # A `Unit` owning the value *block* makes. The block may capture only
+  # `Share` values: it is the value's way in (`CleanupTransformer#check_share_boundary`).
+  def self.new(&block : -> U) : Unit(U) forall U
+    Unit(U).build(block.call)
+  end
+
+  protected def self.build(value : T) : Unit(T)
+    new(value)
+  end
+
+  private def initialize(value : T)
+    super(value)
+  end
+end

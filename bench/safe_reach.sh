@@ -123,13 +123,13 @@ def ask(n : Int64) : Int64
 end
 
 group do |g|
-  g.spawn(parallel: true) { ask(1_i64) }
-  g.spawn(parallel: true) { ask(2_i64) }
+  g.spawn(unit: :new) { ask(1_i64) }
+  g.spawn(unit: :new) { ask(2_i64) }
 end
 IYI
 refused unguarded '@[SafeReach] on `DATABASE` is refused' \
   '`DATABASE.query_one(n)` in `ask` at unguarded.iyi:18:12 writes it (`Database#query_one` assigns `@total`' \
-  'the block `spawn(parallel: true)` runs as a parallel task, at unguarded.iyi:22:5, which calls `ask`'
+  'the block `spawn(unit: :new)` runs as a parallel task, at unguarded.iyi:22:5, which calls `ask`'
 
 # ── 2. (a) A Share type ───────────────────────────────────────────────────
 step "(a) a Share type is accepted"
@@ -144,8 +144,8 @@ def bump : Int64
 end
 
 group do |g|
-  g.spawn(parallel: true) { bump }
-  g.spawn(parallel: true) { bump }
+  g.spawn(unit: :new) { bump }
+  g.spawn(unit: :new) { bump }
 end
 IYI
 accepted counted
@@ -191,11 +191,11 @@ def first_size : Int32
 end
 
 group do |g|
-  g.spawn(parallel: true) do
+  g.spawn(unit: :new) do
     LOCK.lock { |_| keep("a") }
     0
   end
-  g.spawn(parallel: true) do
+  g.spawn(unit: :new) do
     LOCK.get { |_| first_size }
   end
 end
@@ -207,14 +207,14 @@ derive locked locked_write '
 { print }'
 refused locked_write '@[SafeReach] on `TABLE` is refused' \
   '`TABLE.add(row)` in `keep`' '`Table#add` → `Array#<<`' \
-  'the block `spawn(parallel: true)` runs as a parallel task, at locked_write.iyi:37:5, which calls `keep`'
+  'the block `spawn(unit: :new)` runs as a parallel task, at locked_write.iyi:37:5, which calls `keep`'
 derive locked locked_read '
 /^module locked$/ { print "module locked_read"; next }
 /LOCK.get \{ \|_\| first_size \}/ { print "    first_size"; next }
 { print }'
 refused locked_read '@[SafeReach] on `TABLE` is refused' \
   "writes it behind \`LOCK\`'s lock, but \`TABLE\` is read at locked_read.iyi:29:3, with no lock" \
-  'the block `spawn(parallel: true)` runs as a parallel task, at locked_read.iyi:37:5, which calls `first_size`'
+  'the block `spawn(unit: :new)` runs as a parallel task, at locked_read.iyi:37:5, which calls `first_size`'
 
 # ── 4. (c) Before the first parallel task ─────────────────────────────────
 step "(c) every write at module init, then only read, is accepted"
@@ -245,8 +245,8 @@ def first_size : Int32
 end
 
 group do |g|
-  g.spawn(parallel: true) { first_size }
-  g.spawn(parallel: true) { first_size }
+  g.spawn(unit: :new) { first_size }
+  g.spawn(unit: :new) { first_size }
 end
 IYI
 accepted startup
@@ -312,8 +312,8 @@ end
 EARLY = fill
 
 group do |g|
-  g.spawn(parallel: true) { early }
-  g.spawn(parallel: true) { first_size }
+  g.spawn(unit: :new) { early }
+  g.spawn(unit: :new) { first_size }
 end
 IYI
 accepted startup_early
@@ -361,8 +361,8 @@ end
 def scan : Int32
   seen = Atomic(Int32).new(0)
   group do |g|
-    g.spawn(parallel: true) { seen.add(first_size) }
-    g.spawn(parallel: true) { seen.add(first_size) }
+    g.spawn(unit: :new) { seen.add(first_size) }
+    g.spawn(unit: :new) { seen.add(first_size) }
   end
   seen.get
 end
@@ -426,7 +426,7 @@ end
 
 done = Atomic(Int32).new(0)
 group do |g|
-  g.spawn(parallel: true) { done.add(ready) }
+  g.spawn(unit: :new) { done.add(ready) }
 end
 IYI
 cat > order/app.iyi <<'IYI'
@@ -437,8 +437,8 @@ import dep/table::{first_size}
 
 seen = Atomic(Int32).new(0)
 group do |g|
-  g.spawn(parallel: true) { seen.add(first_size) }
-  g.spawn(parallel: true) { seen.add(ready) }
+  g.spawn(unit: :new) { seen.add(first_size) }
+  g.spawn(unit: :new) { seen.add(ready) }
 end
 puts seen.get
 IYI
@@ -499,7 +499,7 @@ end
 
 pub def fan(t : Int32) : Nil
   group do |g|
-    t.times { g.spawn(parallel: true) { count(1); nil } }
+    t.times { g.spawn(unit: :new) { count(1); nil } }
   end
 end
 IYI
@@ -510,7 +510,7 @@ import dep/table::{first_size, fan}
 
 seen = Atomic(Int32).new(0)
 group do |g|
-  g.spawn(parallel: true) { seen.add(first_size) }
+  g.spawn(unit: :new) { seen.add(first_size) }
   g.spawn { fan(2); nil }
 end
 puts seen.get

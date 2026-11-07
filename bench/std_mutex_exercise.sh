@@ -154,7 +154,7 @@ refuse_build value_constructor "private method 'new' called" \
 
 echo
 echo "== a deadlock on one thread is said, not waited out"
-# The two tasks are `spawn(serial: true)`: each block captures only the Mutex,
+# The two tasks are `spawn(unit: :same)`: each block captures only the Mutex,
 # which is `Share`, and a plain `spawn` put them on the pool, where the
 # deadlock is no longer one thread's and the scheduler names it instead
 # ("deadlock: every fiber is blocked"), each task then failing `cancelled`.
@@ -165,13 +165,13 @@ import std/mutex::{Mutex}
 
 m = Mutex.new { [0] }
 group do |g|
-  g.spawn(serial: true) do
+  g.spawn(unit: :same) do
     # A channel nobody else holds: the block may not capture one that is
     # not Share, so the holder makes its own, and waits on it for good.
     m.lock { |a| a[0] = Channel(Int32).new.receive.or_panic }.or_panic
     0
   end
-  g.spawn(serial: true) do
+  g.spawn(unit: :same) do
     m.lock { |a| a[0] = 1 }.or_panic
     0
   end

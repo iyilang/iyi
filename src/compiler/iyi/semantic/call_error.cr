@@ -411,6 +411,9 @@ class Iyi::Call
       raise_undefined_method(owner, def_name, obj)
     end
 
+    # iyi: `g.spawn(serial: true)`, named by what it is now.
+    iyi_raise_retired_placement(owner, def_name)
+
     # If we made a lookup without the special rule for literals,
     # and we have literals in the call, try again with that special rule.
     if !with_autocast && (args.any?(&.supports_autocast? number_autocast) ||
@@ -1505,14 +1508,14 @@ class Iyi::Call
   # iyi: the two spawn verbs one verb replaced (SPEC.md III.4.16), each
   # with the spelling that does what it did.
   IYI_RETIRED_SPAWNS = {
-    "spawn_parallel" => {"spawn(parallel: true)", "runs the task on the pool and refuses a capture that is not Share, as `spawn_parallel` did"},
-    "spawn_serial"   => {"spawn(serial: true)", "keeps the task in its spawner's unit whatever it captures, as `spawn_serial` did"},
+    "spawn_parallel" => {"spawn(unit: :new)", "runs the task in a unit of its own and refuses a capture that is not Share, as `spawn_parallel` did"},
+    "spawn_serial"   => {"spawn(unit: :same)", "keeps the task in its spawner's unit whatever it captures, as `spawn_serial` did"},
   }
 
   # `g.spawn_parallel { }` on a group: a compile error that names the new
   # spelling, and carries it as the edit when the call is the shape the
   # edit fits - a block written at the call and no parentheses - so `iyi
-  # fix` turns `g.spawn_parallel do` into `g.spawn(parallel: true) do`.
+  # fix` turns `g.spawn_parallel do` into `g.spawn(unit: :new) do`.
   private def iyi_raise_retired_spawn(owner, def_name : String, owner_trace) : Nil
     retired = IYI_RETIRED_SPAWNS[def_name]?
     return unless retired && owner.to_s == "IyiGroup" && !SPAWN_BROKEN.includes?("retired")
@@ -1521,6 +1524,37 @@ class Iyi::Call
     raise "`#{def_name}` is gone: one verb starts a task now. Write `g.#{spelling} { }`, which #{what}; " \
           "`g.spawn { }` lets the compiler place it (SPEC.md III.4.16)",
       owner_trace, suggestion: fits ? spelling : nil
+  end
+
+  # iyi: the two placements a spawn spelled before it named its unit
+  # (SPEC.md III.4.16, III.4.18), each with the spelling that does what it
+  # did. Never released, so neither is an alias.
+  IYI_RETIRED_PLACEMENTS = {
+    "serial"   => {"unit: :same", "keeps the task in its spawner's unit whatever it captures"},
+    "parallel" => {"unit: :new", "runs the task in a unit of its own and refuses a capture that is not Share"},
+  }
+
+  # `g.spawn(serial: true) { }`: a compile error at the argument that names
+  # its new spelling, and carries it as the edit when the argument is the
+  # literal `true` on one line, so `iyi fix` turns `serial: true` into
+  # `unit: :same`. Asked before the overloads are listed, since no
+  # overload is the answer.
+  private def iyi_raise_retired_placement(owner, def_name : String) : Nil
+    return unless def_name == "spawn" && owner.to_s == "IyiGroup" && !SPAWN_BROKEN.includes?("retired")
+    named_args.try &.each do |named|
+      retired = IYI_RETIRED_PLACEMENTS[named.name]?
+      next unless retired
+      spelling, what = retired
+      value = named.value
+      start = named.location
+      finish = value.location
+      size = if value.is_a?(BoolLiteral) && value.value && start && finish && start.line_number == finish.line_number
+               finish.column_number + "true".size - start.column_number
+             end
+      named.raise "`#{named.name}:` is gone: a spawn names its unit now. Write `g.spawn(#{spelling}) { }`, which #{what}; " \
+                  "`g.spawn { }` lets the compiler place it (SPEC.md III.4.16, III.4.18)",
+        suggestion: size ? spelling : nil, size: size
+    end
   end
 
   private def raise_undefined_method(owner, def_name, obj)

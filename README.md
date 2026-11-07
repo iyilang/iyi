@@ -144,7 +144,7 @@ thrown away and why.
   wasm32. One verb starts a task: `g.spawn { }` runs it on a pool of one
   worker per core where the compiler can prove that safe and on the
   spawner's own thread otherwise, and `iyi check` notes each one it kept
-  there, with why; `g.spawn(parallel: true)` asks for the pool, for work
+  there, with why; `g.spawn(unit: :new)` asks for the pool, for work
   that computes, and may capture only `Share` values; `g.spawn(serial:
   true)` keeps the task on its spawner's thread. std/http's `Server.serve`
   uses the pool by default
@@ -477,7 +477,7 @@ Twenty-eight programs in [`samples/iyi`](samples/iyi). Twenty document a
 part of the design: `hello` (traits and `impl`), `modules` (`import` across
 files), `generics`, `errors`, `collections`, `immutable` (a shareable
 collection), `init_order`, `webapp`, `workers` (a pool and a typed pair of
-tasks), `cores` (`spawn(parallel: true)`, a server on every core, `@[SafeReach]`),
+tasks), `cores` (`spawn(unit: :new)`, a server on every core, `@[SafeReach]`),
 `derive`, `files`, `formatting`, `format` (format strings), `enums`,
 `io` (standard input a line at a time), `socket` (TCP on loopback), and
 `std_iterator`, `std_text` and `std_time`. `calc` is a language. The other
@@ -633,7 +633,7 @@ not the library.
 - **wasm32 has no concurrency runtime.** A `group` there fails to compile
   rather than run sequentially.
 - **Only the threads and parallel tasks are gated by `Share`.** A block passed
-  to `IyiThread.start`, `spawn(parallel: true)` or a def marked `@[Share]` (std/http's
+  to `IyiThread.start`, `spawn(unit: :new)` or a def marked `@[Share]` (std/http's
   `Server.serve`, unless given `workers: 1`) may capture only `Share` values;
   a `spawn` is not gated, and one outside the pool is never preempted; a
   parallel task gives its worker up after 5 to 10 ms of computing.

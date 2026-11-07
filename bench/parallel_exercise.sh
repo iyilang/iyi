@@ -624,7 +624,7 @@ module paralleldeadlock
 
 never = Channel(Int32).new
 group do |g|
-  g.spawn(parallel: true) do
+  g.spawn(unit: :new) do
     never.receive
     0
   end
@@ -688,20 +688,20 @@ refused() { # name, expected text, program body
   fi
   echo "  refused: $(grep -m1 -F "$2" "$1.log" | sed 's/^ *//' | cut -c1-150)"
 }
-refused shares_array 'the block spawn(parallel: true) runs on another thread captures `items : Array(Int32)`, which is not Share' '
+refused shares_array 'the block spawn(unit: :new) runs in a unit of its own, on another thread captures `items : Array(Int32)`, which is not Share' '
 items = [1, 2, 3]
 group do |g|
-  g.spawn(parallel: true) { items.size }
+  g.spawn(unit: :new) { items.size }
 end'
 refused shares_channel_of_arrays 'captures `lists : Channel(Array(Int32))`, which is not Share' '
 lists = Channel(Array(Int32)).new(1)
 group do |g|
-  g.spawn(parallel: true) { lists.close }
+  g.spawn(unit: :new) { lists.close }
 end'
 refused assigns_after '`count` is assigned here, after the task was spawned' '
 def launch(g : IyiGroup) : Nil
   count = 1
-  g.spawn(parallel: true) { count + 1 }
+  g.spawn(unit: :new) { count + 1 }
   count = 2
 end
 
@@ -713,7 +713,7 @@ group do |g|
   i = 0
   while i < 4
     seed = i * 10
-    g.spawn(parallel: true) { seed + 1 }
+    g.spawn(unit: :new) { seed + 1 }
     i = i + 1
   end
 end'
@@ -755,8 +755,8 @@ def ask(n : Int64) : Int64
 end
 
 group do |g|
-  g.spawn(parallel: true) { ask(1_i64) }
-  g.spawn(parallel: true) { ask(2_i64) }
+  g.spawn(unit: :new) { ask(1_i64) }
+  g.spawn(unit: :new) { ask(2_i64) }
 end
 IYI
 awk '/^@\[SafeReach/ { next } /^module reaches$/ { print "module reaches_bare"; next } { print }' reaches.iyi > reaches_bare.iyi
@@ -770,7 +770,7 @@ echo "  checks under --error-on-warnings: DATABASE marked @[SafeReach]"
 if ! "$IYI" build reaches_bare.iyi -o reaches_bare > build-reaches-bare.log 2>&1; then
   echo "a warning stopped a build without --error-on-warnings:"; cat build-reaches-bare.log; exit 1
 fi
-want='the block spawn(parallel: true) runs on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`, as does 1 other parallel block: '
+want='the block spawn(unit: :new) runs in a unit of its own, on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`, as does 1 other parallel block: '
 if [ "$(grep -c 'reaches `DATABASE' build-reaches-bare.log)" != 1 ]; then
   echo "two blocks reaching DATABASE were not one warning:"; cat build-reaches-bare.log; exit 1
 fi

@@ -2982,7 +2982,7 @@ module Iyi
     # iyi: whether this program's loops check for preemption at their
     # back-edges (SPEC.md III.4.13, part 9): a program with a worker pool,
     # which is a program whose kept code calls `IyiWorkers.start` - every
-    # `spawn(parallel: true)` does, and every `spawn` the compiler found eligible
+    # `spawn(unit: :new)` does, and every `spawn` the compiler found eligible
     # (III.4.15; `Program#iyi_pool_reached?`). The flag is only ever raised
     # on a pool worker, so a program without one would pay for checks that
     # never fire, and carries none. A build writing artifacts carries none

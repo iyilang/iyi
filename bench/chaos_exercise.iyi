@@ -5,17 +5,20 @@
 #   ./bin/iyi build -Diyi_chaos bench/chaos_exercise.iyi -o chaos
 #   IYI_CHAOS=7 IYI_CHAOS_TRACE=1 IYI_WORKERS=1 ./chaos
 #
-# Three parallel units and two tasks of the main thread's unit, meeting at
-# every kind of point the scheduler chooses at: an `Atomic`'s verbs, a
-# buffered channel's sends, a `select` with both arms ready, a `Mutex`'s
-# update and a `wait_for` woken through a word, loops' back-edges, and a
-# task's `value`. It prints the order the events reached one channel in,
-# which arm each `select` took, and how many parallel units had started
+# Three parallel units, two tasks of the main thread's unit and two tasks
+# of a `Unit` (std/unit, SPEC.md III.4.18), meeting at every kind of point
+# the scheduler chooses at: an `Atomic`'s verbs, a buffered channel's
+# sends, a `select` with both arms ready, a `Mutex`'s update and a
+# `wait_for` woken through a word, loops' back-edges, and a task's `value`.
+# It prints the order the events reached one channel in, which arm each
+# `select` took, and how many parallel units and `Unit` tasks had started
 # before the spawner first parked, and it checks what the scheduler
 # promises however it chooses:
 #
 #   - a task of the spawner's unit does not run before the spawner parks,
 #     nor between two operations of a unit-mate (III.4.15, part 2);
+#   - a task of the `Unit` does not run between two operations of another
+#     of its tasks (III.4.18);
 #   - every event arrives, each once, and the mutex counted every update.
 #
 # bench/chaos_exercise.sh runs it under many seeds, twice each: one seed's
@@ -25,6 +28,7 @@
 module bench/chaos_exercise
 
 import std/mutex::{Mutex}
+import std/unit::{Unit}
 
 def fail(message : String) : NoReturn
   print "FAIL: #{message}\n"
@@ -70,6 +74,13 @@ crowded = Atomic(Int32).new(0)
 # the main thread's unit.
 log = [] of Int32
 before_park = 0
+# A `Unit` and two tasks of it: each may run before the spawner parks,
+# being of another unit, and neither runs between the other's operations.
+tally = Unit.new { [] of Int32 }
+unit_starts = Channel(Int32).new(8)
+unit_inside = Atomic(Int32).new(0)
+unit_crowded = Atomic(Int32).new(0)
+unit_before_park = 0
 
 group do |g|
   parallel_unit(g, 1, events, counter, left, right, starts)
@@ -91,6 +102,18 @@ group do |g|
       nil
     end
   end
+  2.times do |k|
+    g.spawn(in: tally) do |t|
+      unit_starts.send(k)
+      unit_inside.add(1)
+      # Points: another unit may run here, never another task of `tally`.
+      unit_crowded.add(1) if unit_inside.get > 1
+      t << k
+      events.send(200 + k)
+      unit_inside.sub(1)
+      0
+    end
+  end
   # The spawner's own points and back-edges before it parks: the unit's
   # two tasks may not have started, the parallel ones may have.
   turns = 0
@@ -103,29 +126,42 @@ group do |g|
     starts.receive
     before_park = before_park + 1
   end
+  while unit_starts.receive_ready?
+    unit_starts.receive
+    unit_before_park = unit_before_park + 1
+  end
   value = waiter.value
   fail("the waiter woke to #{value}, not to the three updates") unless value.is_a?(Int32) && value >= 3
 end
 
 fail("unit-mates ran between each other's operations #{crowded.get} times") if crowded.get != 0
 fail("the unit's tasks ran #{log.size} times, not 2") if log.size != 2
+fail("tasks of one Unit ran between each other's operations #{unit_crowded.get} times") if unit_crowded.get != 0
 total = counter.get { |n| n }.or_panic
 fail("the mutex counted #{total} updates, not 3") if total != 3
+tallied = 0
+group do |g|
+  size = g.spawn(in: tally) { |t| t.size }.value
+  tallied = size if size.is_a?(Int32)
+end
+fail("the Unit's tasks left #{tallied} values, not 2") if tallied != 2
 
 order = [] of Int32
-while order.size < 11
+while order.size < 13
   got = events.receive
   fail("an event channel answered #{got}") unless got.is_a?(Int32)
   order << got
 end
-fail("an event arrived twice: #{order.join(",")}") if order.uniq.size != 11
+fail("an event arrived twice: #{order.join(",")}") if order.uniq.size != 13
 [1, 2, 3].each do |id|
   unless order.includes?(id * 10 + 1) && order.includes?(id * 10 + 4)
     fail("unit #{id}'s first or last event is missing: #{order.join(",")}")
   end
 end
 fail("a unit task's event is missing: #{order.join(",")}") unless order.includes?(100) && order.includes?(101)
+fail("a Unit task's event is missing: #{order.join(",")}") unless order.includes?(200) && order.includes?(201)
 arms = order.count { |e| e % 10 == 2 }
 print "order #{order.join(",")}\n"
 print "left arms #{arms} of 3, parallel units started before the spawner parked: #{before_park}\n"
+print "Unit tasks started before the spawner parked: #{unit_before_park}\n"
 print "every property held\n"

@@ -212,7 +212,7 @@ import std/password::{Bcrypt}
     answer = Atomic(Int64).new(0_i64)
     preempts = IyiWorkers.preempts
     group do |g|
-      g.spawn(parallel: true) do
+      g.spawn(unit: :new) do
         answer.set(run_op(name, clock))
         0
       end
@@ -221,7 +221,7 @@ import std/password::{Bcrypt}
       end
       sleep(20)
       asked = __iyi_monotonic_ns
-      g.spawn(parallel: true) do
+      g.spawn(unit: :new) do
         waited.set(elapsed_ms(asked))
         0
       end
@@ -255,7 +255,7 @@ import std/password::{Bcrypt}
 
   def cost : Nil
     group do |g|
-      g.spawn(parallel: true) do
+      g.spawn(unit: :new) do
         values = scrambled(1_000_000, 88172645463325252_u64)
         best_of("sort of 1,000,000 Int64") do
           copy = values.dup
@@ -323,7 +323,7 @@ import std/password::{Bcrypt}
   end
   mixed = Atomic(Int64).new(0_i64)
   group do |g|
-    g.spawn(parallel: true) do
+    g.spawn(unit: :new) do
       h = 7_u64
       100.times { h = mix(h) &+ 1_u64 }
       mixed.set(h.unsafe_to_i64)

@@ -429,11 +429,6 @@ LOWER_NEEDLE = re.compile(r"crystal")
 
 
 def line_allowed(line: str, rel: str = "") -> str | None:
-    # The scheduling fixture preserves the pre-change Windows job verbatim.
-    # Its JSON value names the bootstrap compiler's version, not iyi.
-    if (rel == "bench/fixtures/windows_gate_schedule.before.json"
-            and line.strip() == '"crystal": "1.21.0"'):
-        return "the Windows workflow's bootstrap compiler, captured before rescheduling"
     for rx, why in LINE_RES:
         if rx.search(line):
             return why

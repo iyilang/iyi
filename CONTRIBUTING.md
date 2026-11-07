@@ -36,11 +36,6 @@ The last one is the claim taken literally: it builds the samples, deletes the
 imported modules' source, builds them again from the artifacts, and compares
 what the two programs print.
 
-Windows CI runs the foundation in `windows-std` and the language, collector,
-and socket gates in `windows-gates`. To measure scheduling changes, compare
-successful push runs from the same repository and runner labels, including
-workflow elapsed time, job pickup and execution, and individual gate durations.
-
 ## What this repository expects of a change
 
 **A number, where the change is about speed.** `bench/build_speed.py` prints the

@@ -44,16 +44,39 @@ def run(*args, cwd=None):
 
 
 def reap_and_restore_binary(server, aside, binary, rpc_exit=None, is_win32=None, timeout=10, kill_timeout=5):
-    """Reap the running MCP server on Windows before restoring its binary image."""
+    """Reap the running MCP server on Windows before restoring its binary image.
+
+    Windows can keep the renamed image open for the server's lifetime, causing
+    WinError 32 if restored while the process is alive. The response from check
+    is the proof; stop and reap the server before putting its executable back.
+
+    A nested try/finally ensures os.rename(aside, binary) executes unconditionally
+    even if rpc_exit raises or server.wait times out. On timeout, the server is
+    terminated with kill() before restoring. If aside is absent, os.rename fails
+    loudly with FileNotFoundError rather than silently skipping restoration.
+    """
     if is_win32 is None:
         is_win32 = (sys.platform == "win32")
-    # Pre-fix behavior from PR157 (dc68e7b5f): unhandled rpc_exit and unhandled wait
-    # without nested try/finally, and guarded aside check.
-    if is_win32 and server is not None:
-        if server.poll() is None and rpc_exit is not None:
-            rpc_exit()
-        server.wait(timeout=timeout)
-    if os.path.exists(aside):
+    try:
+        if is_win32 and server is not None:
+            if server.poll() is None:
+                if rpc_exit is not None:
+                    try:
+                        rpc_exit()
+                    except Exception:
+                        pass
+            try:
+                server.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    server.kill()
+                except Exception:
+                    pass
+                try:
+                    server.wait(timeout=kill_timeout)
+                except Exception:
+                    pass
+    finally:
         os.rename(aside, binary)
 
 

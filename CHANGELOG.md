@@ -374,6 +374,23 @@
 
 ### Gates
 
+- **`bench/thread_exercise.sh` runs on Windows in two halves, each under
+  a bound of its own.** On windows-2025's four cores the whole took 802 s
+  of its 900 s bound (CI job 128265739456), and the next run was ended at
+  the bound (job 128494833123). 388 and 454 s of those were the plain
+  build's ten more runs of step 1, 39 to 45 s a run, where the user's
+  Windows 11 machine held to four of its 12 logical processors takes 2.3
+  s: most of a run there is the exercise's eight threads on four cores,
+  50,592 ns per allocation in the release build against 133 ns with four
+  threads. `bash bench/thread_exercise.sh again` runs those ten runs
+  alone and `but-again` every other step; the Windows collector job
+  bounds each half to 15 minutes, which the two jobs' steps put at 393 to
+  469 s and 414 to 467 s, and Linux and darwin still run the whole. The
+  failure proof that reads the allocator's word before the context counts
+  a hung run at 30 s rather than 120: its copy hung 8 runs in 28 on that
+  machine, and a hung run had spun 107 s in job 128494833123 when the
+  bound ended the gate.
+
 - **`bench/std_platforms.sh`: every std exercise read from its own
   artifacts for darwin, Windows, aarch64 and musl, in jobs of its own.**
   The section of `bench/std_exercise.sh` it was took 2,794 s of the

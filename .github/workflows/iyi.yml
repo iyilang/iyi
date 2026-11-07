@@ -2611,16 +2611,22 @@ jobs:
       # was still running. Fifteen minutes is over three times the longest
       # gate's 4 min 33 s in master's green job 120284541992; a gate past
       # it is ended with its processes and their threads printed, and the
-      # gates after it still run.
+      # gates after it still run. bench/thread_exercise.sh runs as two
+      # halves under a bound each: whole, it grew to 802 s (job
+      # 128265739456) and was ended at the bound (job 128494833123), 388
+      # and 454 s of it the plain build's ten more runs.
       - name: The collector's gates, on Windows
         shell: bash
         run: |
           failed=""
           for gate in bench/arena_exercise.sh bench/root_exercise.sh \
                       bench/mark_exercise.sh bench/sweep_exercise.sh \
-                      bench/collect_trigger.sh bench/thread_exercise.sh \
+                      bench/collect_trigger.sh \
+                      "bench/thread_exercise.sh but-again" \
+                      "bench/thread_exercise.sh again" \
                       bench/parallel_mark.sh bench/concurrent_mark.sh; do
-            bash bench/bounded_gate.sh 15 "$gate" || failed="$failed $gate"
+            # Unquoted: a half's name is the script and its argument.
+            bash bench/bounded_gate.sh 15 $gate || failed="$failed $gate"
           done
           [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
 

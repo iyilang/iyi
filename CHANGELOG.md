@@ -338,6 +338,16 @@
 
 ### Gates
 
+- **`bench/std_platforms.sh`: every std exercise read from its own
+  artifacts for darwin, Windows, aarch64 and musl, in jobs of its own.**
+  The section of `bench/std_exercise.sh` it was took 2,794 s of the
+  Windows std job's 127 minutes on a slow windows-2025 runner (CI job
+  128265739456; the job's limit is 150) and 2,175 to 2,222 s of the Linux
+  std job's 75 to 77 (limit 90). `bench/std_exercise.sh` still runs it in
+  place unless `STD_PLATFORMS=0`, which is how the Linux and Windows
+  foundation jobs leave it to `std-platforms` and `windows-std-platforms`;
+  darwin-std runs it in place. The release job waits on both.
+
 - **`bench/symbol_names.sh`: no symbol the compiler defines has an `@`
   (SPEC.md IV.1g).** A program with one of each family - an inherited
   method and class method, a proc literal in the main file and one under a

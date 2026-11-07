@@ -30,8 +30,10 @@ name: iyi
 #                    `src/crystal/system` is invisible here until somebody
 #   binary           the thing a person downloads, unpacked somewhere else
 #   std              the native standard library (src/std/): its foundation here,
-#                    its modules' exercises in the std-siblings shards (and the
-#                    windows- and darwin- shards beside their own jobs)
+#                    its modules' exercises in the std-siblings shards, its
+#                    exercises read for other platforms in std-platforms (and
+#                    the windows- and darwin- shards and windows-std-platforms
+#                    beside their own jobs)
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -972,7 +974,10 @@ jobs:
 
   # Ninety minutes: it took 50 and 52 on master, 59 on integration/0.20
   # with its new modules, and was cut off at sixty there (job
-  # 119218729131).
+  # 119218729131). It had grown to 75 to 77 of the ninety (jobs
+  # 127915910948, 128177183684, 128229582584, 128266194144), 36 to 37 of
+  # them in "and on the platforms this runner is not", which is the
+  # std-platforms job below now.
   std:
     needs: build
     runs-on: ubuntu-24.04
@@ -992,16 +997,44 @@ jobs:
       - name: Build iyi binary
         run: make -o .build/crystal iyi
       # The foundation's own sections; the modules' exercises are the
-      # std-siblings shards below, side by side.
+      # std-siblings shards below, side by side, and every exercise read
+      # for other platforms is the std-platforms job.
       - name: The standard library foundation
         env:
           STD_SIBLINGS: "0"
+          STD_PLATFORMS: "0"
         run: bash bench/std_exercise.sh
       # crystal-metric's port: twenty-six benchmarks that check their own
       # answers against the Crystal program's, over one program that uses
       # the library together; four broken modules prove it can fail.
       - name: crystal-metric's port answers as Crystal does
         run: bash bench/metric_port.sh
+
+  # Every std exercise read from its own artifacts for darwin, Windows,
+  # aarch64 and musl (bench/std_platforms.sh), beside the foundation: a
+  # section of it took 2,175 to 2,222 s of the std job's 4,520 to 4,626
+  # (the four jobs named above it). Sixty minutes, over half again the
+  # longest of those with this job's own build.
+  std-platforms:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "Every std exercise from its artifacts, for the platforms this runner is not"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build iyi binary
+        run: make -o .build/crystal iyi
+      - name: Every std exercise, read for darwin, Windows, aarch64 and musl
+        run: bash bench/std_platforms.sh
 
   # Every module's own exercise, in four shards (bench/std_siblings.sh).
   # One after another they ran past the std job's hour: 39 of 91 had run at
@@ -1830,6 +1863,11 @@ jobs:
   # took 34 minutes and the job was cut off at ninety (job 124324684065)
   # in "and on the platforms this runner is not", which took 24 minutes
   # on macos-14 (job 123810587348) and had run 24 when it was cancelled.
+  # It still runs that section in place, where Linux and Windows hand it to
+  # a job of their own (bench/std_platforms.sh): 54 to 75 minutes in the
+  # last ten green runs (1,785 s of job 128265739304's 3,841 in it), and a
+  # seventh macOS job would wait for a runner - in run 42327393858 shard 2
+  # above started at 02:40:54, three seconds after shard 1 ended.
   darwin-std:
     runs-on: macos-15
     env:
@@ -2527,7 +2565,11 @@ jobs:
   # asked about.
   # Two and a half hours: it took 56, 74 and 89 minutes on master and
   # integration/0.20, and was cut off at ninety on a branch (job
-  # 119640679755) while its socket exercise was still going.
+  # 119640679755) while its socket exercise was still going. It had grown
+  # to 75 minutes on a fast runner and 127 on a slow one (jobs
+  # 127915909866, 128265739456), 1,595 and 2,794 s of them in "and on the
+  # platforms this runner is not", which is the windows-std-platforms job
+  # below now: what is left took 49 and 80 minutes in those two jobs.
   windows-std:
     runs-on: windows-2025
     timeout-minutes: 150
@@ -2583,12 +2625,14 @@ jobs:
           [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
 
       # The foundation's own sections; the modules' exercises are the
-      # windows-std-siblings shards below.
+      # windows-std-siblings shards below, and every exercise read for
+      # other platforms is the windows-std-platforms job.
       - name: The standard library's foundation, on Windows
         shell: bash
         env:
           PYTHONUNBUFFERED: "1"
           STD_SIBLINGS: "0"
+          STD_PLATFORMS: "0"
         run: bash bench/std_exercise.sh
 
       # The socket gate, which the sweep above does not reach (its name is
@@ -2597,6 +2641,48 @@ jobs:
       - name: Sockets, on Windows
         shell: bash
         run: bash bench/socket_exercise.sh
+
+  # Every std exercise read from its own artifacts for darwin, Windows,
+  # aarch64 and musl (bench/std_platforms.sh), by the Windows compiler,
+  # beside the job above: in it the section took 1,595 s on a fast runner
+  # and 2,794 on a slow one (jobs 127915909866, 128265739456), with the
+  # build 111 and 180. Ninety minutes, under twice the slow one's 50.
+  # On windows-2025, where those were measured.
+  windows-std-platforms:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    name: "Every std exercise from its artifacts, for the platforms this runner is not, on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: Every std exercise, read for darwin, Windows, aarch64 and musl
+        shell: bash
+        run: bash bench/std_platforms.sh
 
   # Every module's own exercise on Windows, in four shards
   # (bench/std_siblings.sh): one after another, with the collector's gates
@@ -3360,9 +3446,9 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
-            samples, lsp-positions, std, std-siblings, targets, cross-objects, cross-run, wasi-run,
-            windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
-            windows-std-siblings, windows-gates, windows-compiler-specs,
+            samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
+            wasi-run, windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
+            windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
             wasm32-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 15

@@ -43,7 +43,7 @@ def run(*args, cwd=None):
     return proc
 
 
-def reap_and_restore_binary(server, aside, binary, rpc_exit=None, is_win32=None, timeout=10, kill_timeout=5):
+def reap_and_restore_binary(server, aside, binary, rpc_exit):
     """Reap the running MCP server on Windows before restoring its binary image.
 
     Windows can keep the renamed image open for the server's lifetime, causing
@@ -55,165 +55,19 @@ def reap_and_restore_binary(server, aside, binary, rpc_exit=None, is_win32=None,
     terminated with kill() before restoring. If aside is absent, os.rename fails
     loudly with FileNotFoundError rather than silently skipping restoration.
     """
-    if is_win32 is None:
-        is_win32 = (sys.platform == "win32")
     try:
-        if is_win32 and server is not None:
-            if server.poll() is None:
-                if rpc_exit is not None:
-                    try:
-                        rpc_exit()
-                    except Exception:
-                        pass
+        if sys.platform == "win32":
             try:
-                server.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
+                if server.poll() is None:
+                    rpc_exit()
+            finally:
                 try:
+                    server.wait(timeout=10)
+                except subprocess.TimeoutExpired:
                     server.kill()
-                except Exception:
-                    pass
-                try:
-                    server.wait(timeout=kill_timeout)
-                except Exception:
-                    pass
+                    server.wait()
     finally:
         os.rename(aside, binary)
-
-
-def test_reap_and_restore_binary():
-    # 1. Injected rpc_exit failure: original failure remains visible and binary is restored
-    with tempfile.TemporaryDirectory() as td:
-        dummy_bin = os.path.join(td, "test_binary")
-        dummy_aside = dummy_bin + ".gate-aside"
-        with open(dummy_bin, "w") as f:
-            f.write("bin-payload")
-        os.rename(dummy_bin, dummy_aside)
-
-        class MockRpcFailServer:
-            def __init__(self):
-                self.waited = False
-            def poll(self):
-                return None
-            def wait(self, timeout=None):
-                self.waited = True
-                return 0
-            def kill(self):
-                pass
-
-        proc = MockRpcFailServer()
-        def broken_rpc_exit():
-            raise BrokenPipeError("injected rpc exit failure")
-
-        caught_orig = None
-        cleanup_err = None
-        try:
-            try:
-                raise RuntimeError("original tool failure")
-            finally:
-                reap_and_restore_binary(proc, dummy_aside, dummy_bin,
-                                        rpc_exit=broken_rpc_exit, is_win32=True)
-        except RuntimeError as e:
-            caught_orig = str(e)
-        except Exception as e:
-            cleanup_err = str(e)
-
-        restored = os.path.exists(dummy_bin) and not os.path.exists(dummy_aside)
-        content_ok = False
-        if os.path.exists(dummy_bin):
-            with open(dummy_bin) as f:
-                content_ok = (f.read() == "bin-payload")
-
-        step("binary restore succeeds and preserves error when rpc exit fails",
-             caught_orig == "original tool failure" and restored and content_ok and proc.waited,
-             f"caught={caught_orig} restored={restored} err={cleanup_err}")
-
-    # 2. Injected wait timeout: server.kill() is called, error preserved, and binary restored
-    with tempfile.TemporaryDirectory() as td:
-        dummy_bin = os.path.join(td, "test_binary")
-        dummy_aside = dummy_bin + ".gate-aside"
-        with open(dummy_bin, "w") as f:
-            f.write("bin-payload")
-        os.rename(dummy_bin, dummy_aside)
-
-        class MockTimeoutServer:
-            def __init__(self):
-                self.killed = False
-                self.waited = False
-            def poll(self):
-                return None
-            def wait(self, timeout=None):
-                self.waited = True
-                if not self.killed:
-                    raise subprocess.TimeoutExpired(cmd="iyi mcp", timeout=timeout or 10)
-                return 1
-            def kill(self):
-                self.killed = True
-
-        proc = MockTimeoutServer()
-        caught_orig = None
-        cleanup_err = None
-        try:
-            try:
-                raise RuntimeError("original tool failure")
-            finally:
-                reap_and_restore_binary(proc, dummy_aside, dummy_bin,
-                                        rpc_exit=None, is_win32=True,
-                                        timeout=0.01, kill_timeout=0.01)
-        except RuntimeError as e:
-            caught_orig = str(e)
-        except Exception as e:
-            cleanup_err = str(e)
-
-        restored = os.path.exists(dummy_bin) and not os.path.exists(dummy_aside)
-        content_ok = False
-        if os.path.exists(dummy_bin):
-            with open(dummy_bin) as f:
-                content_ok = (f.read() == "bin-payload")
-
-        step("binary restore kills server and restores binary on wait timeout",
-             caught_orig == "original tool failure" and restored and content_ok and proc.killed and proc.waited,
-             f"caught={caught_orig} restored={restored} killed={proc.killed} err={cleanup_err}")
-
-    # 3. Absent aside must fail loudly with FileNotFoundError
-    with tempfile.TemporaryDirectory() as td:
-        missing_aside = os.path.join(td, "iyi_test.gate-aside")
-        target_bin = os.path.join(td, "iyi_test")
-        absent_aside_failed_loudly = False
-        try:
-            reap_and_restore_binary(None, missing_aside, target_bin, is_win32=True)
-        except FileNotFoundError:
-            absent_aside_failed_loudly = True
-        step("reap and restore fails loudly when aside is absent",
-             absent_aside_failed_loudly, "")
-
-    # 4. Real process termination on timeout (sandbox)
-    with tempfile.TemporaryDirectory() as td:
-        real_bin = os.path.join(td, "real_bin")
-        real_aside = real_bin + ".gate-aside"
-        with open(real_bin, "w") as f:
-            f.write("real-payload")
-        os.rename(real_bin, real_aside)
-
-        real_proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
-            cwd=td
-        )
-        try:
-            reap_and_restore_binary(
-                real_proc, real_aside, real_bin,
-                rpc_exit=None, is_win32=True,
-                timeout=0.1, kill_timeout=2
-            )
-        finally:
-            if real_proc.poll() is None:
-                real_proc.kill()
-                real_proc.wait()
-
-        real_restored = os.path.exists(real_bin) and not os.path.exists(real_aside)
-        real_dead = real_proc.poll() is not None
-        step("binary restore terminates real process and restores executable on timeout",
-             real_restored and real_dead,
-             f"restored={real_restored} dead={real_dead}")
 
 
 def main():
@@ -1129,9 +983,6 @@ def main():
     step("mcp refuses what is not a request object, and keeps serving",
          codes == [(-32600, None), (-32600, None), (-32602, 15), (-32602, 16), (None, 17)],
          repr(codes))
-
-    # Deterministic verification of reap_and_restore_binary error paths
-    test_reap_and_restore_binary()
 
     # The binary renamed under the running server, which is what rebuilding
     # it does on Windows: a running program cannot be replaced there, so

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**The Windows foundation's artifact sweeps run in four shards.** One Windows
+job builds the compiler and publishes it with a manifest. The foundation core
+and four artifact shards verify that compiler, and `windows-std` passes only
+when every part succeeded and every shard's receipt accounts for its units
+exactly once. The checks, their inventory and their verdicts are unchanged.
+
 ### Fixed
 
 - **A module consumed from its `.iyimod` keeps the definition witnesses its

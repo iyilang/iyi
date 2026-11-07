@@ -1019,6 +1019,11 @@ jobs:
           uv venv --python 3.14 /opt/oracle
           uv pip install --python /opt/oracle/bin/python -q cryptography pillow h2
           echo /opt/oracle/bin >> "$GITHUB_PATH"
+      - name: Windows artifact scheduling contract
+        if: matrix.shard == 4
+        run: |
+          uv run --no-project --python /opt/oracle/bin/python --with PyYAML==6.0.3 python bench/std_artifact_schedule.py workflow
+          uv run --no-project --python /opt/oracle/bin/python python bench/std_artifact_schedule.py fixtures
       # std/acme's gate places whole orders with Let's Encrypt's test CA,
       # Pebble, which it builds with `go install` - and skips, saying so,
       # where there is no Go, as there was none in this container. No
@@ -2424,14 +2429,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The foundation runs on its own Windows runner. The collector and socket
-  # gates run in windows-gates alongside this job; module exercises remain
-  # in windows-std-siblings. Keep the existing timeout until the new schedule
-  # has been measured across completed runs.
-  windows-std:
+  # The standard library's foundation, on Windows, in four jobs. The compiler is
+  # built once and published with a manifest. windows-std-core runs the foundation
+  # without the artifact sweeps, and windows-std-artifacts runs the sweeps in four
+  # shards; each verifies the same compiler and writes a receipt. windows-std is
+  # the stable check release needs. It fails unless every part succeeded and every
+  # shard's receipt accounts for its units exactly once. The collector and socket
+  # gates stay in windows-gates.
+  windows-std-build:
+    name: "The compiler for the standard library, built on Windows"
     runs-on: windows-2025
-    timeout-minutes: 150
-    name: "The standard library foundation, gated on Windows"
+    timeout-minutes: 60
+    outputs:
+      compiler-artifact: std-windows-compiler-${{ github.run_id }}-${{ github.run_attempt }}
+      compiler-sha256: ${{ steps.payload.outputs.compiler-sha256 }}
+      attempt: ${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -2460,14 +2472,188 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
-      # The foundation's own sections; the modules' exercises are the
-      # windows-std-siblings shards below.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Publish the compiler payload and its manifest
+        id: payload
+        shell: bash
+        run: |
+          set -eu
+          rm -rf std-compiler
+          mkdir -p std-compiler/.build
+          cp .build/iyi.exe .build/iyi.pdb std-compiler/.build/
+          cp .build/*.dll std-compiler/.build/
+          sha=$(python3 bench/std_artifact_schedule.py write-manifest --payload std-compiler --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output std-compiler/manifest.json)
+          echo "compiler-sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: std-windows-compiler-${{ github.run_id }}-${{ github.run_attempt }}
+          path: std-compiler
+          include-hidden-files: true
+          if-no-files-found: error
+
+  windows-std-core:
+    name: "The standard library's foundation core, on Windows"
+    needs: windows-std-build
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: The published compiler, downloaded
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.windows-std-build.outputs.compiler-artifact }}
+          path: std-compiler
+
+      - name: Verify the compiler payload's manifest
+        shell: bash
+        run: |
+          set -eu
+          python3 bench/std_artifact_schedule.py manifest --manifest std-compiler/manifest.json --payload std-compiler --revision "${{ github.sha }}" --run-id "${{ github.run_id }}" --attempt "${{ needs.windows-std-build.outputs.attempt }}" --compiler-sha256 "${{ needs.windows-std-build.outputs.compiler-sha256 }}"
+          cp -R std-compiler/.build .
+
+      - name: The artifact sweep helper, against fake compilers
+        shell: bash
+        run: python3 bench/std_artifact_schedule.py fixtures
+
       - name: The standard library's foundation, on Windows
         shell: bash
         env:
           PYTHONUNBUFFERED: "1"
           STD_SIBLINGS: "0"
+          STD_ARTIFACTS: "0"
         run: bash bench/std_exercise.sh
+
+  windows-std-artifacts:
+    name: "The standard library's artifact sweeps on Windows, shard ${{ matrix.shard }} of 4"
+    needs: windows-std-build
+    runs-on: windows-2025
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: The published compiler, downloaded
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.windows-std-build.outputs.compiler-artifact }}
+          path: std-compiler
+
+      - name: Verify the compiler payload's manifest
+        shell: bash
+        run: |
+          set -eu
+          python3 bench/std_artifact_schedule.py manifest --manifest std-compiler/manifest.json --payload std-compiler --revision "${{ github.sha }}" --run-id "${{ github.run_id }}" --attempt "${{ needs.windows-std-build.outputs.attempt }}" --compiler-sha256 "${{ needs.windows-std-build.outputs.compiler-sha256 }}"
+          cp -R std-compiler/.build .
+
+      - name: The artifact sweeps of this shard, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          STD_ARTIFACT_REVISION: ${{ github.sha }}
+          STD_ARTIFACT_RUN_ID: ${{ github.run_id }}
+          STD_ARTIFACT_COMPILER_SHA256: ${{ needs.windows-std-build.outputs.compiler-sha256 }}
+          STD_ARTIFACT_RECEIPT: receipt-${{ matrix.shard }}.tsv
+        run: |
+          failed=0
+          bash bench/std_artifacts.sh native "${{ matrix.shard }}" 4 || failed=1
+          bash bench/std_artifacts.sh cross "${{ matrix.shard }}" 4 || failed=1
+          exit "$failed"
+
+      - name: This shard's receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: std-artifact-receipt-${{ matrix.shard }}
+          path: receipt-${{ matrix.shard }}.tsv
+          if-no-files-found: error
+          overwrite: true
+
+  # The stable check release needs. It runs on Ubuntu because its work is result
+  # validation: all compiler and exercise execution stays on Windows-2025.
+  windows-std:
+    name: "The standard library foundation, gated on Windows"
+    if: ${{ always() }}
+    needs: [windows-std-build, windows-std-core, windows-std-artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: std-artifact-receipt-*
+          path: receipts
+
+      - name: Every foundation part and every shard receipt
+        shell: bash
+        env:
+          RESULT_BUILD: ${{ needs.windows-std-build.result }}
+          RESULT_CORE: ${{ needs.windows-std-core.result }}
+          RESULT_ARTIFACTS: ${{ needs.windows-std-artifacts.result }}
+          REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          COMPILER_SHA256: ${{ needs.windows-std-build.outputs.compiler-sha256 }}
+        run: |
+          test "$RESULT_BUILD" = success || { echo "compiler build: $RESULT_BUILD" >&2; exit 1; }
+          test "$RESULT_CORE" = success || { echo "foundation core: $RESULT_CORE" >&2; exit 1; }
+          test "$RESULT_ARTIFACTS" = success || { echo "artifact shards: $RESULT_ARTIFACTS" >&2; exit 1; }
+          python3 bench/std_artifact_schedule.py results --root . --revision "$REVISION" --run-id "$RUN_ID" --compiler-sha256 "$COMPILER_SHA256" --count 4 receipts/*/*.tsv
 
 
   # Every module's own exercise on Windows, in four shards

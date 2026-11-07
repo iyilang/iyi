@@ -13,6 +13,7 @@
 # Exits non-zero if any check fails.
 
 set -u
+case "${STD_ARTIFACTS:-1}" in 0|1) ;; *) echo "STD_ARTIFACTS must be 0 or 1" >&2; exit 2 ;; esac
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/darwin_frames.sh"
@@ -472,87 +473,9 @@ echo "== every std module exercise runs from artifacts as it runs from source"
 # The output is compared and not merely the exit status: a program that
 # links against the wrong body runs fine and answers differently, which is
 # the failure this is most worth catching.
-unconsumable=""
-for source in "$REPO"/bench/std_*_exercise.iyi; do
-  name="$(basename "$source" .iyi)"
-  work="$WORK/r1/$name"
-  mkdir -p "$work/mods"
-  if ! (cd "$work" && "$IYI" build --emit-iyimod mods -o from-source "$source") \
-       > "$work/emit.log" 2>&1; then
-    unconsumable="$unconsumable $name"
-    why="$(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
-    # A failure with no Error line was seen twice, under a loaded machine,
-    # and its log was gone with the work directory: name its last lines.
-    [ -n "$why" ] || why="no Error line; it ended: $(tail -3 "$work/emit.log" | tr '\n' ' ' | cut -c1-200)"
-    echo "  $name: cannot write its artifacts: $why"
-    continue
-  fi
-  (cd "$work" && "$IYI" build --use-iyimod mods -o from-artifact "$source") \
-    > "$work/use.log" 2>&1
-  use_status=$?
-  if [ "$use_status" -ne 0 ]; then
-    unconsumable="$unconsumable $name"
-    # A failure with no such line printed the name and nothing after it:
-    # std_compress_exercise did, once, and the next runs consumed it
-    # cleanly. The status and the log's last line say what it was.
-    said="$(grep -m1 -E 'Error|BUG|undefined' "$work/use.log")"
-    [ -n "$said" ] || said="exits $use_status: $(tail -n 1 "$work/use.log")"
-    echo "  $name: $(printf '%s' "$said" | cut -c1-140)"
-    continue
-  fi
-  "$work/from-source" > "$work/source.out" 2>&1
-  source_status=$?
-  "$work/from-artifact" > "$work/artifact.out" 2>&1
-  artifact_status=$?
-  if [ "$source_status" -ne "$artifact_status" ]; then
-    unconsumable="$unconsumable $name"
-    echo "  $name: exits $artifact_status from its artifacts and $source_status from source"
-    # The end of the run that failed, which is where its check is named:
-    # the head of the one that passed said nothing about why.
-    failed_out="$work/source.out"
-    [ "$artifact_status" -ne 0 ] && failed_out="$work/artifact.out"
-    tail -n 6 "$failed_out" | sed 's/^/    /'
-    continue
-  fi
-  # Four exercises print something no two builds can agree on, and for them
-  # the exit status is the whole of the promise: each raises on its own
-  # assertions, so a wrong answer is a non-zero exit either way.
-  #
-  #   * `std_big_exercise` prints how long three exponentiations took, for
-  #     its driver to set beside Python's, and raises if the fast one is
-  #     not three times the old.
-  #   * `std_gc_exercise` prints how many bytes a collection freed, which
-  #     is a property of what the build allocated and not of the program.
-  #   * `std_time_exercise` prints the clock.
-  #   * `std_weak_ref_exercise` prints how many targets a conservative root
-  #     still reached - a register's leftover, which two builds allocate
-  #     differently - and how many reads four threads made beside the
-  #     collector in two seconds.
-  #
-  # Named rather than guessed at. A rule that decided this by running the
-  # binary twice would pass the clock and still fail the collector, whose
-  # two runs agree with each other and not across builds.
-  case "$name" in
-    std_big_exercise | std_gc_exercise | std_time_exercise | std_weak_ref_exercise)
-      continue
-      ;;
-  esac
-  # Without darwin's frames under a task's panic (bench/darwin_frames.sh).
-  without_frames < "$work/source.out" > "$work/source.cmp"
-  without_frames < "$work/artifact.out" > "$work/artifact.cmp"
-  if ! cmp -s "$work/source.cmp" "$work/artifact.cmp"; then
-    unconsumable="$unconsumable $name"
-    echo "  $name: runs differently from its artifacts"
-    diff "$work/source.cmp" "$work/artifact.cmp" | sed -n '1,6p' | sed 's/^/    /'
-  fi
-done
-if [ -n "$unconsumable" ]; then
-  echo "  FAIL: cannot be consumed as artifacts:$unconsumable"
-  status=1
-else
-  echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
+if [ "${STD_ARTIFACTS:-1}" = 1 ]; then
+  if ! bash "$REPO/bench/std_artifacts.sh" native; then status=1; fi
 fi
-
 # The filter above (bench/darwin_frames.sh) leaves out a frame, whichever
 # binary it names, and nothing else: a panic's message beside it, a line
 # that starts with a number and a name, one with a shorter hexadecimal
@@ -614,30 +537,8 @@ echo "== and on the platforms this runner is not"
 # `--no-codegen` because the answer is what a consumer's front end
 # resolves, and because it costs half a second per exercise instead of
 # five: the whole sweep over four targets is a minute.
-unportable=""
-for target in aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do
-  for source in "$REPO"/bench/std_*_exercise.iyi; do
-    name="$(basename "$source" .iyi)"
-    work="$WORK/cross/$target/$name"
-    mkdir -p "$work/mods"
-    if ! (cd "$work" && "$IYI" build --no-codegen --target "$target" \
-            --emit-iyimod mods -o out "$source") > "$work/emit.log" 2>&1; then
-      unportable="$unportable $target/$name"
-      echo "  $target $name: cannot write its artifacts: $(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-120)"
-      continue
-    fi
-    if ! (cd "$work" && "$IYI" build --no-codegen --target "$target" \
-            --use-iyimod mods -o out2 "$source") > "$work/use.log" 2>&1; then
-      unportable="$unportable $target/$name"
-      echo "  $target $name: $(grep -m1 -E 'Error|BUG' "$work/use.log" | cut -c1-120)"
-    fi
-  done
-done
-if [ -n "$unportable" ]; then
-  echo "  FAIL: cannot be consumed on another platform:$unportable"
-  status=1
-else
-  echo "  every exercise reads its own artifacts on darwin, windows, aarch64 and musl"
+if [ "${STD_ARTIFACTS:-1}" = 1 ]; then
+  if ! bash "$REPO/bench/std_artifacts.sh" cross; then status=1; fi
 fi
 
 echo

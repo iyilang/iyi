@@ -1517,17 +1517,32 @@ case "$(uname -s)" in
     if ! IYI_PATH="$WORK/early${PSEP}$REPO/src" "$IYI" build switching.iyi -o early-run > build-early.log 2>&1; then
       cat build-early.log; exit 1
     fi
+    # A run that hangs is caught as a fault is, and a hang is the copy's
+    # as often: held to four processors on the user's Windows 11 machine
+    # (12 logical processors), 28 runs died of a memory fault 8 times,
+    # hung until a 120 s timeout 8 times, and kept their lists 12; in job
+    # 128494833123 a run hung 107 s, one thread spinning and the rest
+    # suspended, until the gate's bound ended it. The timeout is 30 s, as
+    # in the other proofs here that a run hangs: the copy above, whose
+    # lists hold, ran 20 runs in 0.28 to 0.80 s each on the same machine,
+    # and its step, five runs and their build, took 6.0 and 6.9 s on
+    # windows-2025 (jobs 128265739456 and 128494833123).
     caught=0
     run=1
     while [ "$caught" -eq 0 ] && [ "$run" -le 60 ]; do
-      timeout -k 5 120 ./early-run > early.txt 2>&1
+      timeout -k 5 30 ./early-run > early.txt 2>&1
+      code=$?
       grep -q '^wrong=0$' early.txt || caught=$run
       run=$((run + 1))
     done
     if [ "$caught" -eq 0 ]; then
       echo "sixty runs reading the allocator's word before the context all kept their lists"; exit 1
     fi
-    printf '  run %s of up to sixty: "%s"\n' "$caught" "$(grep -m1 -E '^wrong=|memory fault' early.txt | cut -d. -f1)"
+    if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+      printf '  run %s of up to sixty: hung until the 30 s timeout (exit %s)\n' "$caught" "$code"
+    else
+      printf '  run %s of up to sixty: "%s"\n' "$caught" "$(grep -m1 -E '^wrong=|memory fault' early.txt | cut -d. -f1)"
+    fi
     ;;
 esac
 

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Gates
+
+- **A pull request runs the fast part of CI; the merge queue, master and
+  the nightly run the whole of it.** Every pull request ran all 39 jobs,
+  about twenty runner-hours, a README edit as much as a compiler change,
+  on a plan that runs twenty jobs at once: a run took 93 to 192 minutes,
+  and one job of #118's waited 112 for a runner. `scripts/ci_plan.py` now
+  picks the jobs: a pull request runs the Linux build, the specs, the rules
+  gate, the cross-compiled Windows binaries and the docs gates; only docs
+  runs the docs gates alone, and only `bench/` the jobs that name the
+  changed files. A push to a branch other than master runs nothing, and a
+  manual dispatch runs everything. `iyi, built and run on Windows`, the
+  critical path at a median of 105 minutes, is three jobs that run beside
+  each other, and `result` is one check that every selected job passed.
+
 ### Fixed
 
 - **A module consumed from its `.iyimod` keeps the definition witnesses its

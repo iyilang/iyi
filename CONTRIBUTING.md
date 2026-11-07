@@ -36,6 +36,13 @@ The last one is the claim taken literally: it builds the samples, deletes the
 imported modules' source, builds them again from the artifacts, and compares
 what the two programs print.
 
+A pull request runs the fast part of it, about half an hour, and less when it
+touches only docs or only `bench/`; `scripts/ci_plan.py` says which jobs and
+why. The whole of it, the samples round trip and every Windows and darwin job
+included, runs in the merge queue, on every push to master, and nightly. A
+push to any other branch runs nothing: open a pull request, or run the
+workflow on the branch from the Actions tab for the whole of it.
+
 ## What this repository expects of a change
 
 **A number, where the change is about speed.** `bench/build_speed.py` prints the

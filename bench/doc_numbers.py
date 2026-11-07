@@ -144,15 +144,17 @@ def measured() -> dict[str, int]:
     }
 
 
-# The other language's 0.1.0 core library: 3,551 lines of core files plus 183
-# of fibers over pthreads, remeasured from that tree (SPEC.md I.4). The number
-# iyi's own library is held under, and a check rather than a habit since the
-# night Windows' floor walked 508 lines over it and nothing failed.
-CEILING = 3_734
+# The number iyi's own library is held under (SPEC.md I.4). It was the other
+# language's 0.1.0 core library - 3,551 lines of core files plus 183 of fibers
+# over pthreads - until the 0.18 collections and assertions took the library
+# past it and the owner raised it to 4,650 rather than move them behind an
+# import. A check rather than a habit since the night Windows' floor walked
+# 508 lines over it and nothing failed.
+CEILING = 4_650
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 3,734-line ceiling: the library
+    """The figure SPEC.md holds to the 4,650-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's
@@ -213,7 +215,7 @@ def platform_floor_lines(only: str | None = None) -> int:
     the same reason. Measured over exactly what `prelude_library_lines`
     counts, so the two subtract.
 
-    SPEC.md I.4 holds the library to 3,734 lines and records that Windows
+    SPEC.md I.4 held the library to 3,734 lines and records that Windows
     breached it. This is the number that says what closing the breach by
     rule rather than by rewrite would cost, and it is measured rather than
     counted by hand: the two figures the breach was first written with
@@ -348,15 +350,15 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # sentence said v19 while the compiler wrote v51.
     ("iyimod_format", r"`\.iyimod` v([\d,]+), checksum per section", "SPEC.md", 1),
     ("prelude_kb", r"library is ([\d,]+) KB on disk", "README.md", 1),
-    ("prelude_kb", r"iyi's own ([\d,]+) KB prelude", "README.md", 1),
-    ("std_kb", r"the ([\d,]+) KB of `src/std`", "README.md", 1),
+    ("prelude_kb", r"iyi's own ([\d,]+) KB prelude", "INSTALL.md", 1),
+    ("std_kb", r"the ([\d,]+) KB of `src/std`", "INSTALL.md", 1),
     ("std_kb", r"the directory's ([\d,]+) KB is a second", "Makefile", 1),
     ("prelude_kb", r"beside `bin/iyi` is ([\d,]+) KB", "Makefile", 1),
     ("prelude_kb", r"ships only iyi's own ([\d,]+) KB", "Makefile", 1),
     ("prelude_kb", r"its own, and it is ([\d,]+) KB", "Makefile", 1),
     ("bang_names", r"standard library has \*\*([\d,]+) such names\*\*", "README.md", 1),
     ("generated", r"edit one module in a ([\d,]+)-line project", "README.md", 1),
-    ("generated", r"on the same ([\d,]+) lines", "README.md", 1),
+    ("generated", r"reads all ([\d,]+) lines\s+again", "README.md", 1),
     # The same generated project, quoted seven more times in SPEC.md — the
     # numbers table at the top of it included — and every one of the seven said
     # 7,208 while the generator emitted 7,207. The two rows above name

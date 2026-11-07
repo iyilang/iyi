@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Exercises `std/yaml`: YAML 1.2 core schema, dump, anchors, merge, refusals.
+# Exercises `std/yaml`: YAML 1.2 core schema, dump, anchors, merge, refusals,
+# and `derive yaml_serializable`, whose output Python's `yaml` must read to
+# the data the same value is as JSON.
 #
 #     bash bench/std_yaml_exercise.sh
 set -u
@@ -56,7 +58,8 @@ build_and_run() {
   fi
   "$WORK/$name" >"$WORK/$name.out" 2>&1
   local exit_code=$?
-  sed 's/^/  /' "$WORK/$name.out"
+  # The corpus lines are for the Python comparison below, not the reader.
+  grep -v '^CORPUS ' "$WORK/$name.out" | sed 's/^/  /'
   if [ "$exit_code" -ne 0 ]; then
     echo "$label: exited $exit_code"
     status=1
@@ -74,13 +77,13 @@ fi
 
 echo
 echo "== every yaml section reported"
-for phrase in "== scalars and collections" "== dump round trip" "== anchors, aliases, merge" "== streams and typed keys" "== what the reader refuses"; do
+for phrase in "== scalars and collections" "== dump round trip" "== anchors, aliases, merge" "== streams and typed keys" "== what the reader refuses" "== derive yaml_serializable"; do
   if ! grep -q "$phrase" "$WORK/yaml-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  scalars, dump, anchors, streams and refusals all reported"
+[ "$status" -eq 0 ] && echo "  scalars, dump, anchors, streams, refusals and the derive all reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -89,6 +92,95 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/yaml-release.out" 2>/dev/null; then
   echo "release: missing pass sentinel"
   status=1
 fi
+
+# PyYAML is a YAML 1.1 reader, and the one most programs on the other end
+# of a file use: each corpus line is a derived value written by `to_json`
+# and by `to_yaml`, and Python's `yaml` must read the YAML (through
+# libyaml's loader too, when it is built in) to what its `json` reads the
+# JSON to. Answers 0 when every line agrees, 1 on a mismatch, 2 with no
+# corpus, 3 when PyYAML is not installed.
+compare_corpus() {
+  CORPUS="$1" "$PY" - <<'PY'
+import json, os, sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(3)
+loaders = [yaml.SafeLoader] + ([yaml.CSafeLoader] if getattr(yaml, "__with_libyaml__", False) else [])
+lines = [l for l in open(os.environ["CORPUS"], encoding="utf-8").read().split("\n") if l.startswith("CORPUS ")]
+if not lines:
+    sys.exit(2)
+bad = 0
+for n, line in enumerate(lines, 1):
+    j, y = line[len("CORPUS "):].split("\t")
+    want, text = json.loads(j), json.loads(y)
+    for loader in loaders:
+        try:
+            got = yaml.load(text, Loader=loader)
+        except yaml.YAMLError as error:
+            bad += 1
+            print(f"    record {n}, {loader.__name__}: refused, {str(error).splitlines()[0]}")
+            continue
+        if got != want:
+            bad += 1
+            keys = [k for k in want if not isinstance(got, dict) or got.get(k) != want[k]]
+            print(f"    record {n}, {loader.__name__}: differs at {keys}")
+print(f"    {len(lines)} records, {len(loaders)} loader(s): {'all equal' if bad == 0 else str(bad) + ' differ'}")
+sys.exit(1 if bad else 0)
+PY
+}
+
+echo
+echo "== Python's yaml reads what to_yaml writes to the data to_json writes"
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3 to read the corpus"
+else
+  compare_corpus "$WORK/yaml-plain.out"
+  case $? in
+    0) ;;
+    3) echo "  skipped: PyYAML is not installed (pip install pyyaml), so no other reader is asked" ;;
+    2) echo "  the exercise printed no corpus"; status=1 ;;
+    *) echo "  PyYAML read the YAML to other data"; status=1 ;;
+  esac
+fi
+
+# A refusal is a panic ending the program, and its sentence is the whole
+# of what the person reading it gets: each is run as its own program and
+# its exact sentence checked.
+echo
+echo "== what the derive refuses, each in its own program"
+refuse_program() {
+  local name="$1" sentence="$2" body="$3"
+  cat >"$WORK/refuse_$name.iyi" <<IYI
+module refuse_$name
+
+import std/yaml::{YAML, yaml_serializable}
+
+struct Spot
+  getter x : Float64
+  getter name : String
+
+  derive yaml_serializable
+end
+
+$body
+puts "accepted"
+IYI
+  if "$IYI" run "$WORK/refuse_$name.iyi" >"$WORK/refuse_$name.out" 2>&1; then
+    echo "  accepted: $body"
+    status=1
+  elif ! grep -qxF "iyi: panic: $sentence" "$WORK/refuse_$name.out"; then
+    echo "  refused, but not with \"$sentence\":"
+    sed 's/^/    /' "$WORK/refuse_$name.out"
+    status=1
+  else
+    echo "  $sentence"
+  fi
+}
+refuse_program missing 'YAML for Spot has no key "name"' 'Spot.from_yaml("x: 1\n")'
+refuse_program sequence 'expected a mapping for Spot, not a sequence' 'Spot.from_yaml("- 1\n")'
+refuse_program kind 'expected a float, not a string' 'Spot.from_yaml("x: one\nname: a\n")'
+refuse_program uint64 'the UInt64 18446744073709551615 is past 9223372036854775807, the largest integer YAML reads back' 'puts YAML.to_yaml(18446744073709551615_u64)'
 
 echo
 echo "== proving the checks can fail when a repeated key is accepted"
@@ -296,6 +388,54 @@ prove_caught secondtag "a second tag replaces the first" \
 prove_caught secondanchor "a second anchor in a flow collection replaces the first" \
   'refusal of "[&a &b 1, *a]' \
   $'the `!!int`.\n        fail("a second anchor", pos) unless anchor.nil?' $'the `!!int`.\n        nil'
+
+# The derive's checks, each proven by a copy of the module with the site
+# that makes it hold patched away.
+prove_caught missingkey "a missing key reads as null" \
+  "a missing field refused by name" \
+  '        raise "YAML for #{ {{ declaration[:name] }} } has no key #{ {{ field[:name][1..] }}.inspect }" if yaml_found_{{ field[:name][1..].id }}.nil?' \
+  '        yaml_found_{{ field[:name][1..].id }} = ::Std::Yaml::Any.new(nil) if yaml_found_{{ field[:name][1..].id }}.nil?'
+prove_caught nulldefault "a null replaces a default its type does not admit" \
+  "a null for a field with a default its type does not admit keeps the default" \
+  'if !yaml_found_{{ field[:name][1..].id }}.nil? && !yaml_found_{{ field[:name][1..].id }}.null?' \
+  'if !yaml_found_{{ field[:name][1..].id }}.nil?'
+prove_caught nilable "a missing key for a nilable field is refused" \
+  "a missing key for a nilable field without a default holds nil" \
+  '\{% elsif {{ field[:type].nilable? }} %}' '\{% elsif false %}'
+prove_caught mapping "a derived type read from a sequence is refused as the Any refuses it" \
+  "a sequence refused where a derived type is read" \
+  'yaml.as_h? || raise "expected a mapping for' 'yaml.as_h || raise "expected a mapping for'
+prove_caught int32 "an integer past Int32 is narrowed" \
+  "an integer past Int32 refused" \
+  'raise "integer #{v} out of Int32 range" if v < -2147483648_i64 || v > 2147483647_i64' 'nil'
+prove_caught uint64 "a UInt64 past Int64 is written" \
+  "a UInt64 past Int64 refused when written" \
+  'if val > 9223372036854775807_u64' 'if false'
+prove_caught keys "a hash's keys are written as text" \
+  "Any, integer keys, nil entries and an empty array written" \
+  'pairs[to_any(key)] = to_any(item)' 'pairs[Any.new(key.to_s)] = to_any(item)'
+prove_caught quote11 "a string a 1.1 reader takes for another kind is written plain" \
+  "\"yes\" and \"22:30\" are quoted when written" \
+  $'    return false if other_in_1_1?(text, bytes, size)\n' ''
+
+# The Python comparison is proven by the same broken copy: written plain,
+# `yes` reads as True and `22:30` as 1350 to PyYAML, and the corpus is
+# printed before any check of the derive can stop the program.
+echo
+echo "== proving the Python comparison can fail when 1.1 lookalikes are written plain"
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+elif [ ! -f "$WORK/quote11.out" ]; then
+  echo "  the broken copy was not run"
+  status=1
+else
+  compare_corpus "$WORK/quote11.out" >"$WORK/quote11.compare" 2>&1
+  case $? in
+    1) echo "  PyYAML read the broken copy's YAML to other data:"; sed 's/^/  /' "$WORK/quote11.compare" ;;
+    3) echo "  skipped: PyYAML is not installed" ;;
+    *) echo "  the comparison did not catch the broken copy"; cat "$WORK/quote11.compare"; status=1 ;;
+  esac
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

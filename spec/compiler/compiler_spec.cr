@@ -73,6 +73,33 @@ describe "Compiler" do
     end
   end
 
+  # iyi: a build that finds nothing changed since its output was built leaves
+  # the output as it is and compiles nothing (SPEC.md V.9 (e)); `--force`
+  # builds anyway. Asked of the output's time because a skipped build does
+  # not link, and a link writes the file again. bench/up_to_date.sh is the
+  # gate for each kind of input; this is the verb's contract, in process.
+  # An iyi program, because one on Crystal's prelude runs `pkg-config` from
+  # a macro (`src/gc/boehm.cr`), which turns the check off for it.
+  it "leaves a current output as it is, and builds it again under --force" do
+    with_tempdir("iyi-up-to-date") do
+      File.write "main.iyi", "module main\n\nputs \"Hello!\"\n"
+      path = File.expand_path("prog#{{{ flag?(:win32) ? ".exe" : "" }}}")
+      # A new array each time: `Command` shifts the verb off the one it is given.
+      args = -> { ["build", "main.iyi", "-o", path] }
+      Iyi::Command.run args.call
+      built = File.info(path).modification_time
+
+      # With `-s`, which says why when the check found something changed: the
+      # first Windows run of this rebuilt, and said nothing of what it saw.
+      Iyi::Command.run args.call + ["-s"]
+      File.info(path).modification_time.should eq built
+
+      Iyi::Command.run args.call + ["--force"]
+      File.info(path).modification_time.should_not eq built
+      Process.capture(path).should eq("Hello!\n")
+    end
+  end
+
   # iyi: the linker probe is asked once per `PATH`, not once per build.
   #
   # Before linking, the compiler searches `PATH` for `mold` and then for
@@ -235,6 +262,34 @@ describe "Compiler" do
       iyi_compiler.compile(source, File.expand_path("plain"))
       Process.capture(File.expand_path("aliased"))
         .should eq Process.capture(File.expand_path("plain"))
+    end
+  end
+
+  # iyi: a DLL standing beside the output under the name of one the program
+  # links is replaced when it is not the DLL the link resolved. It was kept:
+  # the cache directory's LLVM-C.dll from an older build stood beside every
+  # compiler spec program on the user's Windows machine, and each died
+  # before its first line with 0xC0000139. Here a gc.dll that is not one,
+  # beside a program on Crystal's prelude, whose collector is libgc's and
+  # names gc.dll (`src/gc/boehm.cr`); kept, the program does not start.
+  it "replaces a DLL beside the output that is not the one the link resolved" do
+    {% unless flag?(:msvc) %}
+      pending! "only the msvc link puts the DLLs a program needs beside it"
+    {% end %}
+
+    with_tempdir("iyi-stale-dll") do
+      File.write "hello.cr", %(puts "hello"\n)
+      source = Iyi::Compiler::Source.new(File.expand_path("hello.cr"), File.read("hello.cr"))
+      File.write "gc.dll", "an older build's gc.dll"
+
+      result = create_spec_compiler.compile(source, File.expand_path("hello.exe"))
+
+      resolved = nil
+      result.program.each_dll_path do |path, found|
+        resolved = path if found && File.basename(path).compare("gc.dll", case_insensitive: true) == 0
+      end
+      File.read("gc.dll").should eq File.read(resolved.should_not be_nil)
+      Process.capture(File.expand_path("hello.exe")).should eq "hello\n"
     end
   end
 
@@ -469,6 +524,49 @@ describe "Compiler" do
         status = Process.run(File.expand_path("dir"), error: error)
         status.success?.should be_false
         error.to_s.should contain "cannot read adir: it is a directory"
+      end
+    end
+  end
+
+  # iyi: a proc literal whose body gives a call a NoReturn value. With the
+  # block `Proc(Int32, NoReturn)`, `wrap(block.call(x))` is a call inference
+  # never types, which left the proc's def untyped, and the cleanup replaced
+  # such a proc's whole body with a "can't execute" panic: nothing in it ran,
+  # not the block and not the line before it. iyi-web's `get "/boom",
+  # workers: 1 do ... raise ... end` is that proc, and its log line named
+  # `route_answer(block.call(ctx))` instead of the route's own panic.
+  describe "a proc whose body gives a call a NoReturn value" do
+    it "runs the body and the block, and panics with the block's message" do
+      with_tempdir("iyi-proc-no-return-argument") do
+        File.write "proc.iyi", <<-'IYI'
+          def wrap(r : R) : String forall R
+            "wrapped"
+          end
+
+          def reg(&block : Int32 -> B) : Nil forall B
+            pr = ->(x : Int32) : String do
+              puts "the proc ran"
+              wrap(block.call(x))
+            end
+            puts pr.call(1)
+          end
+
+          reg do |x|
+            puts "the block ran"
+            raise "fire"
+          end
+          IYI
+        source = Iyi::Compiler::Source.new(
+          File.expand_path("proc.iyi"), File.read("proc.iyi"))
+        iyi_compiler.compile(source, File.expand_path("proc"))
+
+        output = IO::Memory.new
+        error = IO::Memory.new
+        status = Process.run(File.expand_path("proc"), output: output, error: error)
+        status.success?.should be_false
+        output.to_s.should eq("the proc ran\nthe block ran\n")
+        error.to_s.should contain "iyi: panic: fire"
+        error.to_s.should_not contain "can't execute"
       end
     end
   end

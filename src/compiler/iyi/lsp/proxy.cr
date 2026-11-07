@@ -222,6 +222,15 @@ module Iyi::Lsp
             bury(worker)
           end
         when timeout(RETIRE_IDLE)
+          # A worker that owes something and has died without its pipe
+          # closing: a process it started still holds that pipe (on
+          # Windows every child inherits it), so no end of stream is
+          # coming, and whoever waits on it is told now rather than
+          # when that process ends (`dead?`).
+          if (worker = @worker) && !worker.idle? && dead?(worker)
+            bury(worker)
+            next
+          end
           # Nothing on either side for two seconds: the person is
           # reading. Spend it on a fresh worker rather than on their
           # next keystroke - or, when the last one was replaced on the
@@ -531,6 +540,14 @@ module Iyi::Lsp
     # never retired.
     private def post(body : Bytes, id : JSON::Any?, request : Bool = true) : Nil
       worker = @worker
+      # Dead, and its pipe still open: the frame would be written into a
+      # pipe a process the worker started is holding, and nobody would
+      # ever read it. It goes to a successor instead, as a frame the
+      # pipe refused does (`dead?`).
+      if worker && dead?(worker)
+        bury(worker, retry: body, id: id, request: request)
+        return
+      end
       unless worker
         unless worker = spawn_worker
           # There is no compiler to run any more — the binary this
@@ -552,7 +569,7 @@ module Iyi::Lsp
       return if write_frame(worker, body)
       # The pipe is gone: the worker died before it read this. Bury it,
       # and give the frame to its successor — the client asked once.
-      bury(worker, retry: body, id: id)
+      bury(worker, retry: body, id: id, request: request)
     end
 
     # ── The worker's frames ──────────────────────────────────────────────
@@ -704,10 +721,13 @@ module Iyi::Lsp
       end.to_slice
     end
 
-    # A worker's stdout closed. Whoever was waiting is told by the code
-    # the protocol has for "the server broke", because the alternative is
-    # a client waiting forever for a process that no longer exists.
-    private def bury(worker : Worker, retry : Bytes? = nil, id : JSON::Any? = nil) : Nil
+    # A worker's stdout closed, or its process ended with the pipe still
+    # open (`dead?`). Whoever was waiting is told by the code the
+    # protocol has for "the server broke", because the alternative is a
+    # client waiting forever for a process that no longer exists. A frame
+    # the dead worker never read (*retry*) goes to its successor as it
+    # came, a client's answer to a server request still unregistered.
+    private def bury(worker : Worker, retry : Bytes? = nil, id : JSON::Any? = nil, request : Bool = true) : Nil
       return unless worker.same?(@worker)
       status = worker.process.wait rescue nil
       @worker = nil
@@ -725,7 +745,23 @@ module Iyi::Lsp
         next if retry && id && key == id.to_json
         refuse(key, status)
       end
-      post(retry, id) if retry
+      post(retry, id, request) if retry
+    end
+
+    # Whether the worker has exited, asked of the process rather than of
+    # its pipe. The end of the worker's stdout is how its death usually
+    # arrives, and it does not arrive while another process holds that
+    # pipe: a macro's `system` starts one, and on Windows every handle
+    # the worker could hand on is inherited by it, the worker's own stdin
+    # and stdout among them. A worker killed during a macro's `ping` left
+    # the proxy with no worker and a request written into the dead one's
+    # stdin, unanswered for the 180 s the session gate waited (Windows
+    # CI, step 73c); reproduced on Linux by a `sleep` that opens the
+    # worker's two pipes through `/proc`, it was unanswered until the
+    # `sleep` ended. One probe of the process a frame: `kill(pid, 0)`, or
+    # `GetExitCodeProcess` on Windows.
+    private def dead?(worker : Worker) : Bool
+      worker.process.terminated?
     end
 
     # ── Retirement ───────────────────────────────────────────────────────

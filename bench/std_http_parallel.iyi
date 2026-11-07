@@ -1,0 +1,589 @@
+# std/http's `Server.serve` with its default workers: connections
+# answered on the pool's workers, not on the thread that accepts them,
+# and stopped as `workers: 1` stops; and under `workers: 1`, on the
+# accepting thread alone.
+#
+#   ./bin/iyi run bench/std_http_parallel.iyi
+#   ./bin/iyi build --release bench/std_http_parallel.iyi -o par
+#   ./par speed serve|parallel WORKERS PORTFILE
+#
+# Four workers. Eight clients connect and send a request that computes
+# for a while before the server has accepted any of them, so each
+# connection's task finds its request waiting and holds the worker that
+# started it until it answers: the answers must name more than one
+# thread, and none the accepting one's. A handler that panics ends its
+# own connection, and the next connection is answered. Then the stop: a
+# client holding a kept-alive connection between requests, one whose
+# request is being answered, and one whose answer is waiting on it to
+# read, each of the last two with a request half sent behind it, while
+# another asks the handler to stop - the handler sends on a channel, and
+# a task on the accepting thread closes the listener. The answers in
+# progress are written, the one made at the stop saying `Connection:
+# close`; the requests half sent are closed on, not answered 400 as if
+# their clients had cut them short; the idle connection is closed, and
+# `serve` returns. Every step runs
+# under a watchdog, so a stop that never reaches a connection on another
+# thread is a named failure rather than a hung job. A line that is not
+# what it should be is followed by "FAIL <check>: <found>, not
+# <wanted>", and the run ends "ALL CHECKS PASSED" or exits 1. The panic
+# the third step makes is printed by its task, as any is.
+#
+# Then `workers: 1`: four clients connect and ask before anything
+# accepts, and every answer must name the accepting thread; the block
+# appends to an `Array`, which is not `Share`, and closes its listener
+# itself, both of which the compiler refuses on more than one worker.
+#
+# Then the same server over TLS, `tls: config.frozen`, on a listener of
+# its own. Eight clients connect before anything accepts and send their
+# ClientHello, then a request that computes: answered on more than one
+# worker, none of them the accepting thread. An HTTPClient offering h2
+# alone is answered HTTP/2, one offering http/1.1 alone HTTP/1.1. A
+# ticket is taken from a connection on one worker, which is then kept
+# computing for a second while a second connection offers the ticket:
+# that one starts on another worker, since the first holds its own, and
+# must resume there - the one set of ticket keys every worker shares. On
+# Windows every other worker is held first, so the ticket is sealed on
+# the one left (the check says why). A
+# client presenting a certificate is seen presenting it, and an
+# encrypted ClientHello (ECH) is taken. Then the stop: a kept-alive
+# connection reads close_notify from its worker, not a truncation, and
+# `serve` returns. The TLS identity is std_http_resume.iyi's
+# test PKI, an Ed25519 leaf for localhost.
+
+module bench/std_http_parallel
+
+import std/http::{HTTPClient, HTTPError, Request, Response, Server}
+import std/socket::{IyiSocket, SocketError}
+import std/tls::{TlsClient, TlsConfig, TlsEchKey, TlsError, TlsIdentity, TlsServerConfig, TlsSession}
+import std/x509::{Certificate}
+import std/file::{File}
+
+# std_http_resume.iyi's test PKI: a root, and a leaf for localhost it
+# signed, Ed25519, valid from 2025 to 9999. The leaf's key guards nothing
+# but these tests.
+LEAF_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBQzCB9qADAgECAgEDMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowFDESMBAGA1UEAwwJ\n" \
+           "bG9jYWxob3N0MCowBQYDK2VwAyEAOeskudtTVi76JObK6QHqJy6M7PaEu/aLlC5H\n" \
+           "B5OLks+jZjBkMBQGA1UdEQQNMAuCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAAMB0G\n" \
+           "A1UdDgQWBBQN8ZJay/U7zf07disj78hKukvGAjAfBgNVHSMEGDAWgBSNjkTWVhBs\n" \
+           "a874Ao2cPFX4w4saajAFBgMrZXADQQAcAgj9qe58GnzceRkYfxyfNHxmqWOgDJkn\n" \
+           "b3rO1pz+8OCRioO1P+BhFa1FR/FMHSH9bOFEKfXfy3Nwr+y+GkMM\n" \
+           "-----END CERTIFICATE-----\n"
+ROOT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBJDCB16ADAgECAgEBMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowGTEXMBUGA1UEAwwO\n" \
+           "aXlpIGJlbmNoIHJvb3QwKjAFBgMrZXADIQCQIEeX9suXr4DL8DiLdBUfoWaJU+Hv\n" \
+           "7JhN3IpqspsuOqNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYw\n" \
+           "HQYDVR0OBBYEFI2ORNZWEGxrzvgCjZw8VfjDixpqMAUGAytlcANBAFEfpUf437+b\n" \
+           "PwJvPGD/gB0zIegp6+3cJzF42Tx6Hj8tIJgdtXVKA58EXmitGetqb788+xoJ49My\n" \
+           "4Wc3L1uxxAI=\n" \
+           "-----END CERTIFICATE-----\n"
+KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
+          "MC4CAQAwBQYDK2VwBCIEIOYKs3OzEJYJ/j+ZQYLoAU929MQeanF9kupAR9HpeHJ8\n" \
+          "-----END PRIVATE KEY-----\n"
+
+# The answer to `/huge`: far past what the sockets between the two ends
+# hold while the client reads nothing, so that its write waits.
+HUGE = 32000000
+
+# A computation that holds its worker until *until_ns*: no check at its
+# loop's back-edge, so nothing else runs there and no completion is taken
+# there until it ends (the Windows arm of the ticket check below).
+@[NoPreempt]
+def pinned(until_ns : Int64) : UInt64
+  x = 7_u64
+  while __iyi_monotonic_ns < until_ns
+    x = x ^ x.unsafe_shl(13_u64)
+    x = x ^ x.unsafe_shr(7_u64)
+    x = x ^ x.unsafe_shl(17_u64)
+  end
+  x
+end
+
+# Integer work with nothing to park on: a xorshift walk.
+def spin(rounds : Int64) : UInt64
+  x = 7_u64
+  i = 0_i64
+  while i < rounds
+    x = x ^ x.unsafe_shl(13_u64)
+    x = x ^ x.unsafe_shr(7_u64)
+    x = x ^ x.unsafe_shl(17_u64)
+    i = i + 1
+  end
+  x
+end
+
+# What the server's block answers with, `Share` by its fields: a channel
+# of Ints, which crosses threads. The block captures it, and the compiler
+# checks that it may (`serve` is `@[Share]`).
+class Answers
+  @stop : Channel(Int32)
+
+  def initialize(@stop : Channel(Int32))
+  end
+
+  def call(request : Request) : Response
+    case request.path
+    when "/spin"
+      sum = spin(20000000_i64)
+      Response.new(200, "#{IyiScheduler.state.object_id} #{sum}")
+    when "/panic"
+      raise "a handler that panics, on purpose"
+    when "/slow"
+      sleep(300)
+      Response.new(200, "slow")
+    when "/huge"
+      # More than the sockets between the two ends hold, so its write
+      # waits on a client that does not read.
+      Response.new(200, "x" * HUGE)
+    when "/stop"
+      @stop.send(0)
+      Response.new(200, "stopping")
+    when "/where"
+      Response.new(200, "#{IyiScheduler.state.object_id} #{request.version} #{request.tls_resumed? ? "resumed" : "new"} peer=#{(leaf = request.peer_certificates.first?) ? leaf.subject_name : "none"}")
+    when "/pin"
+      # Milliseconds from the query, held with preemption off.
+      query = request.query
+      ms = query.is_a?(String) ? query.to_i.to_i64 : 1000_i64
+      sum = pinned(__iyi_monotonic_ns + ms * 1000000_i64)
+      Response.new(200, "#{IyiScheduler.state.object_id} #{sum}")
+    when "/hold"
+      # A second of work that never parks: the worker is held as long.
+      until_ns = __iyi_monotonic_ns + 1000000000_i64
+      sum = 0_u64
+      while __iyi_monotonic_ns < until_ns
+        sum = sum &+ spin(10000_i64)
+      end
+      Response.new(200, "#{IyiScheduler.state.object_id} #{sum}")
+    else
+      Response.new(200, "here")
+    end
+  end
+end
+
+def check(label : String, got : String, wanted : String, failures : Array(String)) : Nil
+  puts "#{label}: #{got}"
+  return if got == wanted
+  puts "FAIL #{label}: #{got}, not #{wanted}"
+  failures << label
+end
+
+def connect(port : Int32) : IyiSocket
+  socket = IyiSocket.connect("127.0.0.1", port, 5000)
+  raise "connect: #{socket}" unless socket.is_a?(IyiSocket)
+  # Past every watchdog below: a connection the stop never reaches is
+  # the watchdog's to name, not a read timeout's to end as "ended".
+  socket.read_timeout_ms = 30000
+  socket
+end
+
+def send(socket : IyiSocket, path : String) : Nil
+  socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+end
+
+# The body of the answer to the request last sent on *socket*, or
+# "ended" when the connection ends before a whole one comes.
+def answer(socket : IyiSocket) : String
+  heard = ""
+  while true
+    at = heard.index("\r\n\r\n")
+    if at
+      length = 0
+      heard[0, at].split("\r\n").each do |line|
+        length = line[15, line.bytesize - 15].strip.to_i if line.downcase.starts_with?("content-length:")
+      end
+      return heard[at + 4, length] if heard.bytesize >= at + 4 + length
+    end
+    got = socket.read(4096)
+    return "ended" unless got.is_a?(String) && !got.empty?
+    heard = heard + got
+  end
+end
+
+def ask(socket : IyiSocket, path : String) : String
+  send(socket, path)
+  answer(socket)
+end
+
+# A GET of *path* on *socket* with a POST behind it whose body is half
+# sent: 500 bytes of the 1000 its head promises.
+def send_with_half_behind(socket : IyiSocket, path : String) : Nil
+  socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\nPOST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1000\r\n\r\n" + "b" * 500)
+end
+
+# What *socket* is sent until it ends, read as answers: the first one's
+# body, its `Connection`, and what came after it - "nothing", or the
+# next answer's status line.
+def to_the_end(socket : IyiSocket) : {String, String, String}
+  pieces = [] of String
+  while true
+    got = socket.read(65536)
+    break unless got.is_a?(String) && !got.empty?
+    pieces << got
+  end
+  heard = pieces.join
+  at = heard.index("\r\n\r\n")
+  return {"ended", "-", "-"} unless at
+  length = 0
+  connection = "-"
+  heard[0, at].split("\r\n").each do |line|
+    length = line[15, line.bytesize - 15].strip.to_i if line.downcase.starts_with?("content-length:")
+    connection = line[11, line.bytesize - 11].strip if line.downcase.starts_with?("connection:")
+  end
+  ends = at + 4 + length
+  return {"#{heard.bytesize - at - 4} of #{length} bytes", connection, "-"} if heard.bytesize < ends
+  after = heard.bytesize == ends ? "nothing" : heard[ends, heard.bytesize - ends].split("\r\n").first
+  {heard[at + 4, length], connection, after}
+end
+
+# *name* under a watchdog: a task that sleeps *ms* and fails the run by
+# name unless the step ends first.
+def watched(name : String, ms : Int32, &block : -> Nil) : Nil
+  group do |w|
+    w.spawn do
+      waited = sleep(ms)
+      unless waited.is_a?(Cancelled)
+        puts "FAIL #{name}: still waiting after #{ms} ms"
+        exit 1
+      end
+      0
+    end
+    block.call
+    w.cancel_children
+  end
+end
+
+# A TLS client of *port*'s, as localhost, over a socket connected here.
+def tls_over(socket : IyiSocket, config : TlsConfig, session : TlsSession? = nil) : TlsClient
+  got = TlsClient.over(socket, "localhost", config, 10000, session: session)
+  raise "TLS: #{got.message}" if got.is_a?(TlsError)
+  got
+end
+
+def tls_config(roots : Array(Certificate), alpn : Array(String)) : TlsConfig
+  config = TlsConfig.new
+  config.roots = roots
+  config.alpn = alpn
+  config
+end
+
+# `answer` over TLS: the body, or how the connection ended -
+# "close_notify" when the server said it was done, "ended: <why>" when
+# the connection ended any other way.
+def tls_answer(tls : TlsClient) : String
+  heard = ""
+  while true
+    at = heard.index("\r\n\r\n")
+    if at
+      length = 0
+      heard[0, at].split("\r\n").each do |line|
+        length = line[15, line.bytesize - 15].strip.to_i if line.downcase.starts_with?("content-length:")
+      end
+      return heard[at + 4, length] if heard.bytesize >= at + 4 + length
+    end
+    got = tls.read(4096)
+    return "ended: #{got.message}" if got.is_a?(TlsError)
+    return "close_notify" if got.empty?
+    heard = heard + got
+  end
+end
+
+def tls_ask(tls : TlsClient, path : String) : String
+  tls.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+  tls_answer(tls)
+end
+
+# What an HTTPClient was answered, or why not.
+def said(got : Response | HTTPError | SocketError | Cancelled) : String
+  case got
+  in Response
+    got.body
+  in HTTPError
+    got.message
+  in SocketError
+    got.message
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# `speed`: the measurement, not a check. An HTTPS server on a port of its
+# own, written to PORTFILE, under `serve` with `workers: 1` or with
+# WORKERS workers, with this program's test PKI, until it is killed.
+# `/work` computes (`spin(200000)`) and answers a few bytes; `/` answers
+# a few bytes. Driven by wrk over kept-alive connections (SPEC.md
+# III.4.13 has the numbers and how they were taken).
+speed_args = Program.args
+if speed_args.size >= 4 && speed_args[0] == "speed"
+  IyiWorkers.count = speed_args[2].to_i
+  measured = TlsServerConfig.from_pem(LEAF_PEM + ROOT_PEM, KEY_PEM).or_panic
+  measured.alpn = ["http/1.1"]
+  serving = IyiSocket.listen("127.0.0.1", 0)
+  File.write(speed_args[3], "#{serving.local_port}\n")
+  if speed_args[1] == "parallel"
+    Server.serve(serving, tls: measured.frozen) do |request|
+      request.path == "/work" ? Response.new(200, "#{spin(200000_i64) & 0xFF_u64}") : Response.new(200, "here")
+    end
+  else
+    Server.serve(serving, tls: measured, workers: 1) do |request|
+      request.path == "/work" ? Response.new(200, "#{spin(200000_i64) & 0xFF_u64}") : Response.new(200, "here")
+    end
+  end
+  exit 0
+end
+
+IyiWorkers.count = 4
+listener = IyiSocket.listen("127.0.0.1", 0)
+port = listener.local_port
+accepting = IyiScheduler.state.object_id
+stop = Channel(Int32).new(1)
+failures = [] of String
+returned = false
+
+# Connected and asked before anything accepts: the kernel holds both.
+early = [] of IyiSocket
+8.times do
+  socket = connect(port)
+  send(socket, "/spin")
+  early << socket
+end
+
+watched("the whole run", 60000) do
+  group do |g|
+    g.spawn do
+      stop.receive
+      listener.close
+      0
+    end
+    g.spawn do
+      answers = Answers.new(stop)
+      Server.serve(listener) { |request| answers.call(request) }
+      returned = true
+      0
+    end
+    g.spawn do
+      threads = [] of String
+      watched("eight answers", 30000) do
+        early.each { |socket| threads << answer(socket).split(" ").first }
+      end
+      distinct = threads.uniq
+      check("threads that answered", distinct.size > 1 ? "more than one" : "#{distinct.size}", "more than one", failures)
+      check("answered on the accepting thread", distinct.includes?(accepting.to_s) ? "yes" : "no", "no", failures)
+      early.each(&.close)
+
+      watched("a handler that panics", 10000) do
+        panicking = connect(port)
+        check("a handler that panics", ask(panicking, "/panic"), "ended", failures)
+        panicking.close
+        after = connect(port)
+        check("the next connection", ask(after, "/"), "here", failures)
+        after.close
+      end
+
+      watched("the stop", 10000) do
+        # An answer whose write waits on a client that reads nothing until
+        # the server has stopped, with a request half sent behind it.
+        huge = connect(port)
+        send_with_half_behind(huge, "/huge")
+        idle = connect(port)
+        check("kept alive", ask(idle, "/"), "here", failures)
+        slow = connect(port)
+        send_with_half_behind(slow, "/slow")
+        sleep(50)
+        stopper = connect(port)
+        check("asked to stop", ask(stopper, "/stop"), "stopping", failures)
+        made, said, after = to_the_end(slow)
+        check("the answer being made at the stop", made, "slow", failures)
+        check("the answer being made at the stop, its Connection", said, "close", failures)
+        check("a request half sent behind it, on the stop", after, "nothing", failures)
+        check("the kept-alive connection, on the stop", answer(idle), "ended", failures)
+        made, said, after = to_the_end(huge)
+        check("an answer the stop waited to write", made.bytesize == HUGE ? "whole" : made, "whole", failures)
+        check("a request half sent behind that answer, on the stop", after, "nothing", failures)
+        stopper.close
+        slow.close
+        idle.close
+        huge.close
+      end
+      0
+    end
+  end
+end
+check("serve returned", returned ? "yes" : "no", "yes", failures)
+
+# `workers: 1`: the accepting thread alone, and a block the compiler
+# does not check. Asked before anything accepts, as above.
+alone = IyiSocket.listen("127.0.0.1", 0)
+alone_port = alone.local_port
+heard = [] of String
+early_alone = [] of IyiSocket
+4.times do
+  socket = connect(alone_port)
+  send(socket, "/where")
+  early_alone << socket
+end
+watched("the run under workers: 1", 30000) do
+  group do |g|
+    g.spawn do
+      Server.serve(alone, workers: 1) do |request|
+        heard << request.path
+        alone.close if request.path == "/stop"
+        Response.new(200, "#{IyiScheduler.state.object_id}")
+      end
+      0
+    end
+    g.spawn do
+      threads = early_alone.map { |socket| answer(socket) }
+      early_alone.each(&.close)
+      distinct = threads.uniq
+      check("workers: 1, the threads that answered", distinct == [accepting.to_s] ? "the accepting thread alone" : "#{distinct.size}, not all the accepting one", "the accepting thread alone", failures)
+      stopper = connect(alone_port)
+      ask(stopper, "/stop")
+      stopper.close
+      check("workers: 1, the requests the block recorded", heard.size.to_s, "5", failures)
+      0
+    end
+  end
+end
+
+# The same server over TLS: a frozen config, which every worker reads.
+roots = Certificate.from_pem(ROOT_PEM).or_panic
+settings = TlsServerConfig.from_pem(LEAF_PEM + ROOT_PEM, KEY_PEM).or_panic
+settings.alpn = ["h2", "http/1.1"]
+settings.client_roots = roots
+settings.client_required = false
+settings.ech_keys = [TlsEchKey.generate("localhost").or_panic]
+frozen = settings.frozen
+tls_listener = IyiSocket.listen("127.0.0.1", 0)
+tls_port = tls_listener.local_port
+tls_stop = Channel(Int32).new(1)
+tls_returned = false
+plain = tls_config(roots, ["http/1.1"])
+
+# Connected before anything accepts; each sends its ClientHello as its
+# task first runs, before the server's.
+early_tls = [] of IyiSocket
+8.times { early_tls << connect(tls_port) }
+
+watched("the TLS run", 60000) do
+  group do |g|
+    first_threads = Channel(String).new(8)
+    early_tls.each do |socket|
+      g.spawn do
+        tls = tls_over(socket, plain)
+        first_threads.send(tls_ask(tls, "/spin").split(" ").first)
+        tls.close
+        0
+      end
+    end
+    g.spawn do
+      tls_stop.receive
+      tls_listener.close
+      0
+    end
+    g.spawn do
+      answers = Answers.new(tls_stop)
+      Server.serve(tls_listener, tls: frozen) { |request| answers.call(request) }
+      tls_returned = true
+      0
+    end
+    g.spawn do
+      threads = [] of String
+      watched("eight answers over TLS", 30000) do
+        8.times do
+          got = first_threads.receive
+          threads << got if got.is_a?(String)
+        end
+      end
+      distinct = threads.uniq
+      check("threads that answered over TLS", distinct.size > 1 ? "more than one" : "#{distinct.size}", "more than one", failures)
+      check("answered over TLS on the accepting thread", distinct.includes?(accepting.to_s) ? "yes" : "no", "no", failures)
+
+      watched("h2 and http/1.1 by ALPN", 20000) do
+        h2 = said(HTTPClient.new(idle: 0, tls: tls_config(roots, ["h2"])).get("https://localhost:#{tls_port}/where"))
+        check("a client offering h2", h2.split(" ")[1]? || h2, "HTTP/2", failures)
+        h1 = said(HTTPClient.new(idle: 0, tls: tls_config(roots, ["http/1.1"])).get("https://localhost:#{tls_port}/where"))
+        check("a client offering http/1.1", h1.split(" ")[1]? || h1, "HTTP/1.1", failures)
+      end
+
+      watched("a ticket resumed on another worker", 20000) do
+        # On Windows a connection's task resumes on whichever worker takes
+        # its read's completion off the process's one port (SPEC.md
+        # III.4.13, part 5), so the worker that answered a request is not
+        # the one its connection's next request runs on, and a busy
+        # worker holds nothing for it: /hold, sent after the ticket, ran
+        # on another worker than the ticket's, and that one started the
+        # resuming connection. So every worker but one is first held with
+        # preemption off (/pin), and the ticket is sealed on the one left;
+        # that one is then held longest, by the ticket's own connection,
+        # whose request it alone can take, and the others are free again
+        # when the second connection offers the ticket. Eight resumptions
+        # in a row instead, with no worker held, were sealed and opened on
+        # the same worker often enough that a copy of std/tls whose
+        # workers keep ticket keys of their own resumed all eight in 1 run
+        # of 6 on the user's Windows 11 machine with 12 logical
+        # processors; held this way, the check passed 6 runs of 6 there
+        # and that copy failed it 10 of 10.
+        pins = [] of TlsClient
+        {% if flag?(:win32) %}
+          (IyiWorkers.count - 1).times { pins << tls_over(connect(tls_port), plain) }
+          pins.each { |pin| pin.write("GET /pin?1000 HTTP/1.1\r\nHost: localhost\r\n\r\n") }
+          sleep(100)
+        {% end %}
+        session = TlsSession.new
+        issuer = tls_over(connect(tls_port), plain, session)
+        issued = tls_ask(issuer, "/where").split(" ")
+        check("the ticket's first connection", issued[2]? || "no answer", "new", failures)
+        # The worker that sent the ticket kept busy, so the next connection
+        # is started by another.
+        {% if flag?(:win32) %}
+          issuer.write("GET /pin?3000 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+          sleep(1300)
+        {% else %}
+          issuer.write("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n")
+          sleep(100)
+        {% end %}
+        resumer = tls_over(connect(tls_port), plain, session)
+        resumed = tls_ask(resumer, "/where").split(" ")
+        check("the resuming connection's worker", resumed[0]? == issued[0]? ? "the ticket's" : "another", "another", failures)
+        check("a ticket resumed on another worker", "#{resumed[2]? || "no answer"}, the client says #{resumer.resumed? ? "resumed" : "not resumed"}", "resumed, the client says resumed", failures)
+        held = tls_answer(issuer).split(" ")
+        check("the held worker", held[0]? == issued[0]? ? "the ticket's" : "another", "the ticket's", failures)
+        pins.each do |pin|
+          tls_answer(pin)
+          pin.close
+        end
+        resumer.close
+        issuer.close
+      end
+
+      watched("a client's certificate and ECH", 20000) do
+        presenting = tls_config(roots, ["http/1.1"])
+        presenting.identity = TlsIdentity.from_pem(LEAF_PEM, KEY_PEM).or_panic
+        mtls = tls_over(connect(tls_port), presenting)
+        check("a client's certificate, on a worker", tls_ask(mtls, "/where").split(" ")[3]? || "no answer", "peer=CN=localhost", failures)
+        mtls.close
+        hidden = tls_config(roots, ["http/1.1"])
+        hidden.ech_configs = frozen.ech_config_list
+        ech = tls_over(connect(tls_port), hidden)
+        check("an encrypted ClientHello, on a worker", "#{ech.ech_accepted? ? "taken" : "turned down"}, #{tls_ask(ech, "/where").split(" ")[1]? || "no answer"}", "taken, HTTP/1.1", failures)
+        ech.close
+      end
+
+      watched("the TLS stop", 10000) do
+        idle = tls_over(connect(tls_port), plain)
+        check("kept alive over TLS", tls_ask(idle, "/where").split(" ")[1]? || "no answer", "HTTP/1.1", failures)
+        stopper = tls_over(connect(tls_port), plain)
+        check("asked to stop over TLS", tls_ask(stopper, "/stop"), "stopping", failures)
+        check("the kept-alive TLS connection, on the stop", tls_answer(idle), "close_notify", failures)
+        stopper.close
+        idle.close
+      end
+      0
+    end
+  end
+end
+check("serve over TLS returned", tls_returned ? "yes" : "no", "yes", failures)
+exit 1 unless failures.empty?
+puts "ALL CHECKS PASSED"

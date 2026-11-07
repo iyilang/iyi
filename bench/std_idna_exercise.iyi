@@ -1,0 +1,241 @@
+# Exercises `std/idna`: Punycode (RFC 3492) and host names to and from
+# their ASCII form (IDNA2008, RFC 5891 and 5892). The comparisons with
+# Python's codecs and the `idna` package are bench/std_idna_exercise.sh's.
+#
+# Run via:
+#     ./bin/iyi run bench/std_idna_exercise.iyi
+
+module bench/std_idna_exercise
+
+import std/idna::{Punycode, PunycodeError, IDNA, IdnaError, IdnaProperty}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def text_of(points : Array(Int32)) : String
+  String.build { |io| points.each { |point| io << point.unsafe_chr } }
+end
+
+def decoded(text : String, msg : String) : String
+  value = Punycode.decode(text)
+  raise "ASSERTION FAILED: #{msg}: refused with #{value.message.inspect}" if value.is_a?(PunycodeError)
+  value
+end
+
+def refused(value : String | PunycodeError, phrase : String, msg : String) : Nil
+  if value.is_a?(PunycodeError)
+    raise "ASSERTION FAILED: #{msg}\n  expected #{phrase.inspect}\n  got      #{value.message.inspect}" unless value.message == phrase
+  else
+    raise "ASSERTION FAILED: #{msg}: accepted as #{value.inspect}"
+  end
+end
+
+def ascii(name : String, expected : String, msg : String) : Nil
+  value = IDNA.to_ascii(name)
+  raise "ASSERTION FAILED: #{msg}: refused with #{value.message.inspect}" if value.is_a?(IdnaError)
+  assert_str expected, value, msg
+end
+
+def unicode(name : String, expected : String, msg : String) : Nil
+  value = IDNA.to_unicode(name)
+  raise "ASSERTION FAILED: #{msg}: refused with #{value.message.inspect}" if value.is_a?(IdnaError)
+  assert_str expected, value, msg
+end
+
+def refused_name(name : String, phrase : String, msg : String) : Nil
+  [IDNA.to_ascii(name), IDNA.to_unicode(name)].each do |value|
+    if value.is_a?(IdnaError)
+      raise "ASSERTION FAILED: #{msg}\n  expected #{phrase.inspect}\n  got      #{value.message.inspect}" unless value.message == phrase
+    else
+      raise "ASSERTION FAILED: #{msg}: accepted as #{value.inspect}"
+    end
+  end
+end
+
+# The RFC's encodings with the case flags of their extended part dropped:
+# sample I writes one digit upper-case to say what case the letter it
+# encodes was, which section 7.1 marks and an encoder need not write.
+def flags_dropped(text : String) : String
+  last = -1
+  i = 0
+  while i < text.bytesize
+    last = i if text.to_unsafe[i] == 45_u8
+    i = i + 1
+  end
+  last < 0 ? text.downcase : text[0, last + 1] + text[last + 1, text.bytesize - last - 1].downcase
+end
+
+puts "== punycode rfc 3492 samples"
+# Section 7.1, every sample, the code points as the RFC lists them.
+SAMPLES = [
+  {"A", [0x0644, 0x064A, 0x0647, 0x0645, 0x0627, 0x0628, 0x062A, 0x0643, 0x0644, 0x0645, 0x0648, 0x0634, 0x0639, 0x0631, 0x0628, 0x064A, 0x061F], "egbpdaj6bu4bxfgehfvwxn"},
+  {"B", [0x4ED6, 0x4EEC, 0x4E3A, 0x4EC0, 0x4E48, 0x4E0D, 0x8BF4, 0x4E2D, 0x6587], "ihqwcrb4cv8a8dqg056pqjye"},
+  {"C", [0x4ED6, 0x5011, 0x7232, 0x4EC0, 0x9EBD, 0x4E0D, 0x8AAA, 0x4E2D, 0x6587], "ihqwctvzc91f659drss3x8bo0yb"},
+  {"D", [0x0050, 0x0072, 0x006F, 0x010D, 0x0070, 0x0072, 0x006F, 0x0073, 0x0074, 0x011B, 0x006E, 0x0065, 0x006D, 0x006C, 0x0075, 0x0076, 0x00ED, 0x010D, 0x0065, 0x0073, 0x006B, 0x0079], "Proprostnemluvesky-uyb24dma41a"},
+  {"E", [0x05DC, 0x05DE, 0x05D4, 0x05D4, 0x05DD, 0x05E4, 0x05E9, 0x05D5, 0x05D8, 0x05DC, 0x05D0, 0x05DE, 0x05D3, 0x05D1, 0x05E8, 0x05D9, 0x05DD, 0x05E2, 0x05D1, 0x05E8, 0x05D9, 0x05EA], "4dbcagdahymbxekheh6e0a7fei0b"},
+  {"F", [0x092F, 0x0939, 0x0932, 0x094B, 0x0917, 0x0939, 0x093F, 0x0928, 0x094D, 0x0926, 0x0940, 0x0915, 0x094D, 0x092F, 0x094B, 0x0902, 0x0928, 0x0939, 0x0940, 0x0902, 0x092C, 0x094B, 0x0932, 0x0938, 0x0915, 0x0924, 0x0947, 0x0939, 0x0948, 0x0902], "i1baa7eci9glrd9b2ae1bj0hfcgg6iyaf8o0a1dig0cd"},
+  {"G", [0x306A, 0x305C, 0x307F, 0x3093, 0x306A, 0x65E5, 0x672C, 0x8A9E, 0x3092, 0x8A71, 0x3057, 0x3066, 0x304F, 0x308C, 0x306A, 0x3044, 0x306E, 0x304B], "n8jok5ay5dzabd5bym9f0cm5685rrjetr6pdxa"},
+  {"H", [0xC138, 0xACC4, 0xC758, 0xBAA8, 0xB4E0, 0xC0AC, 0xB78C, 0xB4E4, 0xC774, 0xD55C, 0xAD6D, 0xC5B4, 0xB97C, 0xC774, 0xD574, 0xD55C, 0xB2E4, 0xBA74, 0xC5BC, 0xB9C8, 0xB098, 0xC88B, 0xC744, 0xAE4C], "989aomsvi5e83db1d2a355cv1e0vak1dwrv93d5xbh15a0dt30a5jpsd879ccm6fea98c"},
+  {"I", [0x043F, 0x043E, 0x0447, 0x0435, 0x043C, 0x0443, 0x0436, 0x0435, 0x043E, 0x043D, 0x0438, 0x043D, 0x0435, 0x0433, 0x043E, 0x0432, 0x043E, 0x0440, 0x044F, 0x0442, 0x043F, 0x043E, 0x0440, 0x0443, 0x0441, 0x0441, 0x043A, 0x0438], "b1abfaaepdrnnbgefbaDotcwatmq2g4l"},
+  {"J", [0x0050, 0x006F, 0x0072, 0x0071, 0x0075, 0x00E9, 0x006E, 0x006F, 0x0070, 0x0075, 0x0065, 0x0064, 0x0065, 0x006E, 0x0073, 0x0069, 0x006D, 0x0070, 0x006C, 0x0065, 0x006D, 0x0065, 0x006E, 0x0074, 0x0065, 0x0068, 0x0061, 0x0062, 0x006C, 0x0061, 0x0072, 0x0065, 0x006E, 0x0045, 0x0073, 0x0070, 0x0061, 0x00F1, 0x006F, 0x006C], "PorqunopuedensimplementehablarenEspaol-fmd56a"},
+  {"K", [0x0054, 0x1EA1, 0x0069, 0x0073, 0x0061, 0x006F, 0x0068, 0x1ECD, 0x006B, 0x0068, 0x00F4, 0x006E, 0x0067, 0x0074, 0x0068, 0x1EC3, 0x0063, 0x0068, 0x1EC9, 0x006E, 0x00F3, 0x0069, 0x0074, 0x0069, 0x1EBF, 0x006E, 0x0067, 0x0056, 0x0069, 0x1EC7, 0x0074], "TisaohkhngthchnitingVit-kjcr8268qyxafd2f1b9g"},
+  {"L", [0x0033, 0x5E74, 0x0042, 0x7D44, 0x91D1, 0x516B, 0x5148, 0x751F], "3B-ww4c5e180e575a65lsy2b"},
+  {"M", [0x5B89, 0x5BA4, 0x5948, 0x7F8E, 0x6075, 0x002D, 0x0077, 0x0069, 0x0074, 0x0068, 0x002D, 0x0053, 0x0055, 0x0050, 0x0045, 0x0052, 0x002D, 0x004D, 0x004F, 0x004E, 0x004B, 0x0045, 0x0059, 0x0053], "-with-SUPER-MONKEYS-pc58ag80a8qai00g7n9n"},
+  {"N", [0x0048, 0x0065, 0x006C, 0x006C, 0x006F, 0x002D, 0x0041, 0x006E, 0x006F, 0x0074, 0x0068, 0x0065, 0x0072, 0x002D, 0x0057, 0x0061, 0x0079, 0x002D, 0x305D, 0x308C, 0x305E, 0x308C, 0x306E, 0x5834, 0x6240], "Hello-Another-Way--fc4qua05auwb3674vfr0b"},
+  {"O", [0x3072, 0x3068, 0x3064, 0x5C4B, 0x6839, 0x306E, 0x4E0B, 0x0032], "2-u9tlzr9756bt3uc0v"},
+  {"P", [0x004D, 0x0061, 0x006A, 0x0069, 0x3067, 0x004B, 0x006F, 0x0069, 0x3059, 0x308B, 0x0035, 0x79D2, 0x524D], "MajiKoi5-783gue6qz075azm5e"},
+  {"Q", [0x30D1, 0x30D5, 0x30A3, 0x30FC, 0x0064, 0x0065, 0x30EB, 0x30F3, 0x30D0], "de-jg4avhby1noc0d"},
+  {"R", [0x305D, 0x306E, 0x30B9, 0x30D4, 0x30FC, 0x30C9, 0x3067], "d9juau41awczczp"},
+  {"S", [0x002D, 0x003E, 0x0020, 0x0024, 0x0031, 0x002E, 0x0030, 0x0030, 0x0020, 0x003C, 0x002D], "-> $1.00 <--"},
+]
+SAMPLES.each do |sample|
+  text = text_of(sample[1])
+  assert_str flags_dropped(sample[2]), Punycode.encode(text), "rfc 3492 sample #{sample[0]} encodes"
+  assert_str text, decoded(sample[2], "rfc 3492 sample #{sample[0]} decodes"), "rfc 3492 sample #{sample[0]} decodes"
+end
+assert_str "bcher-kva", Punycode.encode("bücher"), "bücher encodes"
+assert_str "abc-", Punycode.encode("abc"), "an all-basic string ends with its delimiter"
+assert_str "", Punycode.encode(""), "the empty string encodes to nothing"
+assert_str "", decoded("", "nothing decodes"), "nothing decodes to the empty string"
+assert_str "bücher", decoded("bcher-KVA", "digits in either case"), "digits are read in either case"
+puts "  section 7.1's #{SAMPLES.size} samples encode and decode; digits in either case"
+
+puts "\n== punycode refusals"
+refused Punycode.decode("bücher"), "Punycode: byte 1 is 0xC3, which is not ASCII", "a byte that is not ASCII"
+refused Punycode.decode("abc-d!e"), "Punycode: '!' at byte 5 is not a base-36 digit", "a byte that is not a digit"
+refused Punycode.decode("-abc"), "Punycode: '-' at byte 0 is not a base-36 digit", "a delimiter that delimits nothing"
+refused Punycode.decode("a-9"), "Punycode: the input ends inside a number", "input that ends inside a number"
+refused Punycode.decode("99999999999999999999"), "Punycode: the number at byte 17 overflows", "overflow"
+refused Punycode.decode("dn32h"), "Punycode: the number ending at byte 4 is code point U+12DE83, past U+10FFFF", "a code point past U+10FFFF"
+refused Punycode.decode("ib9b"), "Punycode: the number ending at byte 3 is U+D800, a surrogate, which UTF-8 does not hold", "a surrogate"
+assert_str "\u{10FFFF}", decoded("dn32g", "U+10FFFF decodes"), "U+10FFFF, the last code point, decodes"
+puts "  not ASCII, not a digit, cut short, overflow, past U+10FFFF and a surrogate are refused"
+
+puts "\n== punycode round trips"
+# A fixed pseudo-random walk over ASCII, Latin, CJK and the astral planes.
+seed = 20261015_i64
+cases = 0
+400.times do |n|
+  points = [] of Int32
+  (n % 40).times do
+    seed = (seed &* 6364136223846793005_i64 &+ 1442695040888963407_i64) & 0x7FFFFFFFFFFFFFFF_i64
+    pick = (seed >> 33).to_i32
+    point = case pick % 4
+            when 0 then 32 + pick % 95
+            when 1 then 0xA0 + pick % 0x500
+            when 2 then 0x4E00 + pick % 0x5000
+            else        0x10000 + pick % 0xFFFF0
+            end
+    points << point
+  end
+  text = text_of(points)
+  assert_str text, decoded(Punycode.encode(text), "round trip #{n}"), "round trip #{n}"
+  cases = cases + 1
+end
+# A delta past 32 bits: U+10FFFF after 3,000 basic code points is
+# (0x10FFFF - 128) * 3001, about 3.3 billion, in one number.
+long = "a" * 3000 + "\u{10FFFF}"
+assert_str long, decoded(Punycode.encode(long), "a delta past 32 bits"), "a delta past 32 bits round-trips"
+puts "  #{cases} strings and one whose delta is past 32 bits read back"
+
+puts "\n== to_ascii"
+ascii "bücher.example", "xn--bcher-kva.example", "bücher"
+ascii "münchen.de", "xn--mnchen-3ya.de", "münchen"
+ascii "例え.テスト", "xn--r8jz45g.xn--zckzah", "例え.テスト"
+ascii "例え。テスト", "xn--r8jz45g.xn--zckzah", "an ideographic full stop separates labels"
+ascii "例え．テスト｡", "xn--r8jz45g.xn--zckzah.", "full-width stops and a trailing one"
+ascii "пример.испытание", "xn--e1afmkfd.xn--80akhbyknj4f", "Cyrillic"
+ascii "παράδειγμα.δοκιμή", "xn--hxajbheg2az3al.xn--jxalpdlp", "Greek"
+ascii "مثال.إختبار", "xn--mgbh0fb.xn--kgbechtv", "Arabic"
+ascii "실례.테스트", "xn--9n2bp8q.xn--9t4b11yi5a", "Hangul"
+ascii "faß.de", "xn--fa-hia.de", "ß is itself, not ss"
+ascii "Bücher.EXAMPLE.", "xn--bcher-kva.example.", "ASCII letters lower-cased, a trailing dot kept"
+ascii "XN--BCHER-KVA.de", "xn--bcher-kva.de", "an A-label lower-cased"
+ascii "Example.COM", "example.com", "an ASCII name lower-cased"
+ascii "_dmarc.example.com", "_dmarc.example.com", "an underscore label"
+ascii "127.0.0.1", "127.0.0.1", "an IPv4 address"
+puts "  real IDN names, stops, case, trailing dots"
+
+puts "\n== to_unicode"
+unicode "xn--bcher-kva.example", "bücher.example", "an A-label decoded"
+unicode "XN--R8JZ45G.xn--zckzah", "例え.テスト", "A-labels in any case"
+unicode "Bücher.Example.", "bücher.example.", "a U-label kept, ASCII lower-cased"
+unicode "例え。テスト", "例え.テスト", "the stops written as dots"
+["bücher.example", "例え.テスト", "пример.испытание", "مثال.إختبار", "faß.de", "col·lecció.cat"].each do |name|
+  there = IDNA.to_ascii(name)
+  raise "ASSERTION FAILED: #{name} refused" if there.is_a?(IdnaError)
+  unicode there, name, "#{name} comes back from #{there}"
+end
+puts "  A-labels decoded, and names come back from their ASCII form"
+
+puts "\n== labels refused"
+refused_name "", "IDNA: the name is empty", "an empty name"
+refused_name ".", "IDNA: the name is empty", "the root alone"
+refused_name "a..b", "IDNA: label 2 of \"a..b\" is empty", "an empty label"
+refused_name ".a", "IDNA: label 1 of \".a\" is empty", "a leading dot"
+refused_name "-a.com", "IDNA: label \"-a\" begins with a hyphen", "a leading hyphen"
+refused_name "a-.com", "IDNA: label \"a-\" ends with a hyphen", "a trailing hyphen"
+refused_name "ab--c.com", "IDNA: label \"ab--c\" has \"--\" at its third and fourth characters and is not an A-label", "-- at three and four"
+refused_name "üb--c.com", "IDNA: label \"üb--c\" has \"--\" at its third and fourth characters and is not an A-label", "-- at three and four in a U-label"
+refused_name "a b.com", "IDNA: label \"a b\" holds ' ', which a host name does not", "a space"
+refused_name "a/b.com", "IDNA: label \"a/b\" holds '/', which a host name does not", "a slash"
+refused_name "xn--abc-.com", "IDNA: label \"xn--abc-\" is not an A-label: it decodes to \"abc\", which is all ASCII", "a fake A-label"
+refused_name "xn--.com", "IDNA: label \"xn--\" is not an A-label: it decodes to \"\", which is all ASCII", "an empty A-label"
+refused_name "xn--a-9.com", "IDNA: label \"xn--a-9\" is not an A-label: Punycode: the input ends inside a number", "an A-label that does not decode"
+refused_name "xn--ib9b.com", "IDNA: label \"xn--ib9b\" is not an A-label: Punycode: the number ending at byte 3 is U+D800, a surrogate, which UTF-8 does not hold", "an A-label of a surrogate"
+refused_name "BÜCHER.de", "IDNA: label \"BÜCHER\" holds U+00DC, which IDNA2008 does not allow; case folding and NFKC make it \"ü\", which UTS #46 would map it to and this module does not", "upper case is not mapped"
+refused_name "ｅｘａｍｐｌｅ.com", "IDNA: label \"ｅｘａｍｐｌｅ\" holds U+FF45, which IDNA2008 does not allow; case folding and NFKC make it \"e\", which UTS #46 would map it to and this module does not", "full width is not mapped"
+refused_name "ﬁ.example", "IDNA: label \"ﬁ\" holds U+FB01, which IDNA2008 does not allow; case folding and NFKC make it \"fi\", which UTS #46 would map it to and this module does not", "a ligature is not mapped"
+refused_name "☃.net", "IDNA: label \"☃\" holds U+2603, which IDNA2008 does not allow", "a symbol"
+refused_name "xn--n3h.net", "IDNA: label \"xn--n3h\" holds U+2603, which IDNA2008 does not allow", "a symbol as an A-label"
+refused_name "u\u0308.de", "IDNA: label \"u\u0308\" is not in NFC; its NFC form is \"ü\"", "not NFC"
+refused_name "\u0301a.de", "IDNA: label \"\u0301a\" begins with the combining mark U+0301", "a leading combining mark"
+refused_name "a\u200Db.de", "IDNA: label #{"a\u200Db".inspect} holds U+200D, a joiner whose context rule needs Joining_Type and Virama, which this module does not carry; it refuses the joiners", "a joiner"
+refused_name "\u0378.com", "IDNA: label \"\u0378\" holds U+0378, which Unicode 17.0.0 has not assigned", "an unassigned code point"
+bad = String.new(3) { |b| b[0] = 97_u8; b[1] = 0xFF_u8; b[2] = 98_u8 }
+refused_name bad, "IDNA: #{bad.inspect} is not UTF-8", "bytes that are not UTF-8"
+puts "  empty labels, hyphens, bytes, fake A-labels, what UTS #46 would map, symbols, NFC, marks, joiners"
+
+puts "\n== lengths"
+ascii "a" * 63 + ".com", "a" * 63 + ".com", "a 63-octet label"
+refused_name "a" * 64 + ".com", "IDNA: label \"#{"a" * 64}\" is 64 octets, past the 63 a DNS label holds", "a 64-octet label"
+# 62 octets of UTF-8, 68 of A-label: the limit is the ASCII form's.
+refused_name "a" * 60 + "ü.de", "IDNA: label \"xn--#{"a" * 60}-3hg\" is 68 octets, past the 63 a DNS label holds", "a U-label whose A-label is long"
+name253 = (["a" * 63] * 3).join(".") + "." + "a" * 61
+ascii name253, name253, "a 253-octet name"
+ascii name253 + ".", name253 + ".", "a 253-octet name and its trailing dot"
+refused_name name253 + "a", "IDNA: the name is 254 octets in ASCII, past the 253 a DNS name holds", "a 254-octet name"
+# 149 octets of UTF-8, 399 of A-labels: the limit is the ASCII form's.
+short = (["ü"] * 50).join(".")
+refused_name short, "IDNA: the name is 399 octets in ASCII, past the 253 a DNS name holds", "a name long only in ASCII"
+puts "  63 and 253 octets taken, 64 and 254 refused, counted in the ASCII form"
+
+puts "\n== context rules"
+ascii "col·lecció.cat", "xn--collecci-ioa91d.cat", "a middle dot between two l"
+refused_name "a·b.cat", "IDNA: label \"a·b\" holds U+00B7 where RFC 5892's context rule for it does not allow it", "a middle dot elsewhere"
+ascii "κ͵α.gr", "xn--wva4jza.gr", "a keraia before Greek"
+refused_name "a͵.gr", "IDNA: label \"a͵\" holds U+0375 where RFC 5892's context rule for it does not allow it", "a keraia at the end"
+ascii "א׳ב.il", "xn--4dbc5h.il", "a geresh after Hebrew"
+refused_name "a׳.il", "IDNA: label \"a׳\" holds U+05F3 where RFC 5892's context rule for it does not allow it", "a geresh after Latin"
+ascii "ア・カ.jp", "xn--ccks3v.jp", "a katakana middle dot among katakana"
+refused_name "a・b.jp", "IDNA: label \"a・b\" holds U+30FB where RFC 5892's context rule for it does not allow it", "a katakana middle dot among Latin"
+refused_name "ب٠۱.eg", "IDNA: label \"ب٠۱\" holds U+0660 where RFC 5892's context rule for it does not allow it", "Arabic-Indic digits of both kinds"
+puts "  appendix A.3 to A.9, each met and broken"
+
+puts "\n== property"
+[{'a', IdnaProperty::PValid}, {'-', IdnaProperty::PValid}, {'A', IdnaProperty::Disallowed}, {'_', IdnaProperty::Disallowed},
+ {'ß', IdnaProperty::PValid}, {'ς', IdnaProperty::PValid}, {'ü', IdnaProperty::PValid}, {'Ü', IdnaProperty::Disallowed},
+ {'\u00B7', IdnaProperty::ContextO}, {'\u0660', IdnaProperty::ContextO}, {'\u200C', IdnaProperty::ContextJ},
+ {'\u0640', IdnaProperty::Disallowed}, {'\u3007', IdnaProperty::PValid}, {'\u1100', IdnaProperty::Disallowed},
+ {'\u20D0', IdnaProperty::Disallowed}, {'\u034F', IdnaProperty::Disallowed}, {'\u0378', IdnaProperty::Unassigned},
+ {'\uFDD0', IdnaProperty::Disallowed}, {'\u{1CCF0}', IdnaProperty::Disallowed}, {'☃', IdnaProperty::Disallowed}].each do |pair|
+  assert_true IDNA.property(pair[0]) == pair[1], "#{IDNA.u_plus(pair[0].ord.to_i64)} is #{pair[1]}, not #{IDNA.property(pair[0])}"
+end
+puts "  exceptions, LDH, joiners, unstable, ignorable, jamo, blocks, unassigned"
+
+puts "\nALL CHECKS PASSED"

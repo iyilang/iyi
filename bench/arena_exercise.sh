@@ -146,7 +146,7 @@ build_and_run "default, release" exercise-gc-release "$REPO/bench/arena_exercise
 echo
 echo "== every arena check reported"
 # The huge-page check reads /proc, so it reports on Linux only.
-for check in "size classes:" "addressability:" "clearing:" "reuse:" "traversal:" "large:" $( [ "$(uname -s)" = Linux ] && echo "huge:" ); do
+for check in "alignment: small and large" "size classes:" "addressability:" "clearing:" "reuse:" "traversal:" "large:" $( [ "$(uname -s)" = Linux ] && echo "huge:" ); do
   if ! grep -q "$check" "$WORK/exercise-gc.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
@@ -233,6 +233,49 @@ if [ "$(uname -s)" = Linux ]; then
   esac
 fi
 
+# Large objects 16-aligned: the padding word taken back out, so a large
+# object begins 8 past a boundary again. Every platform.
+echo
+echo "== a large object 8 bytes off a 16-byte boundary fails by name"
+mkdir -p "$WORK/align8/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/align8/iyi/"
+awk '{ if ($0 ~ /^      LARGE_USER = 32_u64$/) { print "      LARGE_USER = 24_u64"; next } if ($0 ~ /^      LARGE_HEAD = 24_u64$/) { print "      LARGE_HEAD = 16_u64"; next } print }' "$REPO/src/iyi/prelude.iyi" > "$WORK/align8/iyi/prelude.iyi"
+if cmp -s "$WORK/align8/iyi/prelude.iyi" "$REPO/src/iyi/prelude.iyi"; then
+  echo "  the awk found nothing to change"; status=1
+elif ! IYI_PATH="$WORK/align8${PSEP}$REPO/src" "$IYI" build -o "$WORK/align8/program" "$REPO/bench/arena_exercise.iyi" >"$WORK/align8/build.log" 2>&1; then
+  echo "  the patched prelude did not build"; sed -n '1,12p' "$WORK/align8/build.log"; status=1
+else
+  "$WORK/align8/program" >"$WORK/align8/out" 2>&1
+  if grep -q "panic: alignment: [0-9]* bytes\( grown\)\? at 8 past 16" "$WORK/align8/out"; then
+    echo "  caught at \"$(grep -m1 'panic: alignment' "$WORK/align8/out" | sed 's/^iyi: panic: //')\""
+  else
+    echo "  the exercise did not fail at the alignment check:"; sed -n '$p' "$WORK/align8/out"; status=1
+  fi
+fi
+
+# A cold run is zero on a chunk's head page only, and the carve clears a
+# chunk it hands out from its second page on: taken back out, a block from
+# a cold run reads what its last owner left past its first page. Codegen
+# cleared every `Pointer.malloc` after the call until SPEC.md III.4.13
+# part 9's change, which is what hid this.
+echo
+echo "== a carve that trusts a cold run past a chunk's first page fails by name"
+mkdir -p "$WORK/coldtail/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/coldtail/iyi/"
+awk '{ if ($0 ~ /^          clear_block\(second, cursor &\+ chunk &- second\) if cursor &\+ chunk > second$/) { print "          # removed"; next } print }' "$REPO/src/iyi/prelude.iyi" > "$WORK/coldtail/iyi/prelude.iyi"
+if cmp -s "$WORK/coldtail/iyi/prelude.iyi" "$REPO/src/iyi/prelude.iyi"; then
+  echo "  the awk found nothing to change"; status=1
+elif ! IYI_PATH="$WORK/coldtail${PSEP}$REPO/src" "$IYI" build -o "$WORK/coldtail/program" "$REPO/bench/arena_exercise.iyi" >"$WORK/coldtail/build.log" 2>&1; then
+  echo "  the patched prelude did not build"; sed -n '1,12p' "$WORK/coldtail/build.log"; status=1
+else
+  "$WORK/coldtail/program" >"$WORK/coldtail/out" 2>&1
+  if grep -q "panic: clearing: a [0-9]*-byte block carved from a cold run read" "$WORK/coldtail/out"; then
+    echo "  caught at \"$(grep -m1 'panic: clearing' "$WORK/coldtail/out" | sed 's/^iyi: panic: //')\""
+  else
+    echo "  the exercise did not fail at the cold-run check:"; sed -n '$p' "$WORK/coldtail/out"; status=1
+  fi
+fi
+
 echo
 echo "== the allocation floor, measured against the -Dgc_iyi binary"
 # The default program floor is `bench/dependency_floor.sh`'s to state, and it
@@ -243,7 +286,10 @@ echo "== the allocation floor, measured against the -Dgc_iyi binary"
 # libSystem as the interface and raw syscalls as not a stable ABI), minus the
 # file calls no exercise makes, plus `clock_gettime`, which is the exercise
 # program's own stopwatch rather than the allocator's and is not on any
-# sample's line. The list is exact and every entry is used: `malloc`,
+# sample's line, and `pthread_join` and `close`, which arrived with the
+# cold-run check's two kernel threads (`Thinned`, filled and taken up on
+# threads of their own) and are the check's join, not the allocator's. The
+# list is exact and every entry is used: `malloc`,
 # `memset` and `realloc` were here from before the collector became the
 # default and would have let a fallback to libSystem's allocator pass; the
 # kqueue, clock and dyld names arrived with the concurrency runtime and the
@@ -263,7 +309,7 @@ case "$(uname -s)" in
     # kernel32's `VirtualAlloc` and `VirtualFree`, so it may add none.
     allowed_symbols=""
     ;;
-  *) allowed_symbols="__error _tlv_bootstrap backtrace backtrace_symbols_fd pipe pthread_create pthread_kill sigaction sigaltstack sysctlbyname read _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime clock_gettime_nsec_np exit kevent kqueue mmap munmap pthread_get_stackaddr_np pthread_self write" ;;
+  *) allowed_symbols="__error _tlv_bootstrap backtrace backtrace_symbols_fd pthread_create pthread_join pthread_kill sigaction sigaltstack sysctlbyname read close _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime clock_gettime_nsec_np exit kevent kqueue mmap munmap os_sync_wait_on_address os_sync_wake_by_address_all pthread_get_stackaddr_np pthread_self write" ;;
 esac
 allowed_libs="libSystem libc.so ld-linux libgcc_s"
 

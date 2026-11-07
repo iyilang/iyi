@@ -130,16 +130,27 @@ pub class UdpSocket
   # second bind of a held port failed on Windows, measured, and went
   # through on Linux [INFERENCE: not run here].
   def self.bind(host : String, port : Int32) : UdpSocket
+    bound = bind?(host, port)
+    raise bound.message if bound.is_a?(SocketError)
+    bound
+  end
+
+  # `bind`, with a refused bind answered rather than raised: the port
+  # held, reserved (Windows' excluded ranges answer "access denied"), or
+  # the address not this machine's - so a program can pick another. An
+  # error's `message` is the sentence `bind` raises.
+  def self.bind?(host : String, port : Int32) : UdpSocket | SocketError
     addr, addrlen, family = make_sockaddr(host, port)
     fd = __sys_socket(family)
-    raise "cannot create UDP socket" if fd < 0
+    return SocketError.new("create UDP socket", IyiSocket.__sys_code(fd.to_i64)) if fd < 0
 
     bound = __sys_bind(fd, addr, addrlen)
     if bound < 0
       # Read before the close, which may leave its own errno.
+      code = IyiSocket.__sys_code(bound.to_i64)
       why = refusal(bound.to_i64, false)
       IyiSocket.__sys_close(fd)
-      raise "cannot bind UDP socket to #{IyiSocket.endpoint(host, port)}: #{why}"
+      return SocketError.new("bind UDP socket to #{IyiSocket.endpoint(host, port)}", code, nil, why)
     end
 
     UdpSocket.new(fd, family)
@@ -828,9 +839,6 @@ pub class UdpSocket
     POLLRDNORM = 0x0100_i16
     # SIO_UDP_CONNRESET, the ioctl that turns off the report below.
     SIO_UDP_CONNRESET = 0x9800000c_u32
-    # WSA_IO_INCOMPLETE: what the read below answers while the operation it
-    # is asked about is still under way.
-    WSA_IO_INCOMPLETE = 996
 
     # This module's own bindings, the way each arm in this file has its own
     # `lib LibC`: `std/socket`'s block declares the stream calls it needs and
@@ -861,7 +869,8 @@ pub class UdpSocket
                       routine : Void*) : Int32
       fun WSAGetOverlappedResult(s : UInt64, overlapped : Void*, transferred : Int32*,
                                  wait : Int32, flags : Int32*) : Int32
-      fun WSAPoll(fdarray : PollFd*, nfds : Int32, timeout : Int32) : Int32
+      # `Void*`, as `std/socket` declares it: one symbol, one signature.
+      fun WSAPoll(fdarray : Void*, nfds : Int32, timeout : Int32) : Int32
 
       # Both are kept on the caller's frame rather than the heap: the kernel
       # reads and writes them after a post, while the fiber is parked, and a
@@ -912,7 +921,7 @@ pub class UdpSocket
       LibWs2_32.WSAIoctl(s, SIO_UDP_CONNRESET, pointerof(off).as(Void*), 4,
         Pointer(Void).new(0_u64), 0, pointerof(returned), Pointer(Void).new(0_u64),
         Pointer(Void).new(0_u64))
-      s.unsafe_to_i32
+      IyiSocket.__sys_made(s)
     end
 
     def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : Int32) : Int32
@@ -1019,7 +1028,7 @@ pub class UdpSocket
     # request, and on a socket tied to a completion port the operation is not
     # over when it returns: measured here, the status stays STATUS_PENDING
     # and the descriptor, the caller's address and the OVERLAPPED are the
-    # kernel's until the completion packet is taken *off the port* — the
+    # kernel's until the completion packet is taken *off the port* — a
     # poller's `GetQueuedCompletionStatus` is what writes them. The same
     # measurement on an unassociated socket had the status written by
     # `CancelIoEx` itself, which is why this is not obvious. So
@@ -1028,15 +1037,11 @@ pub class UdpSocket
     # and the socket handle it falls back to is never signalled for a socket
     # on a port — it hung forever on the first cancelled receive tried.
     #
-    # What ends the operation is the poller, so the frame parks once more and
-    # lets it. `IyiScheduler.cancel` has already unregistered this fiber,
-    # which is what would have left the packet to be dropped; parking puts it
-    # back, and the wake means the dequeue has happened. Asked first, because
-    # a completion the poller delivered *before* the cancel is already over
-    # and no second packet is coming — parking on one would never wake.
+    # What ends the operation is a poller, so the frame parks once more and
+    # lets it, and a packet some thread took already answers that park at
+    # once (std/socket's `__sys_overlapped_await` says why the status is
+    # not the question).
     def self.__sys_overlapped_await(s : UInt64, ov : Pointer(UInt8)) : Int64
-      result = __sys_overlapped_result(s, ov)
-      return result if result != -(WSA_IO_INCOMPLETE.to_i64)
       IyiScheduler.park_overlapped_current
       __sys_overlapped_result(s, ov)
     end
@@ -1063,7 +1068,7 @@ pub class UdpSocket
     # epoll and kqueue arms do with theirs.
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       entry = LibWs2_32::PollFd.new(fd: __sys_handle(fd), events: POLLRDNORM, revents: 0_i16)
-      LibWs2_32.WSAPoll(pointerof(entry), 1, timeout_ms) > 0
+      LibWs2_32.WSAPoll(pointerof(entry).as(Void*), 1, timeout_ms) > 0
     end
 
     def self.__is_eagain(res : Int64) : ::Bool

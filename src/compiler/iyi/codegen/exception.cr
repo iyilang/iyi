@@ -338,9 +338,8 @@ class Iyi::CodeGenVisitor
     # is itself, and loading through it would be wrong.
     return value unless value.type.kind.pointer?
 
-    llvm_value_type = llvm_type(type)
-    copy = alloca llvm_value_type
-    store load(llvm_value_type, value), copy
+    copy = alloca llvm_type(type)
+    store_value value, type, copy, fresh: true
     copy
   end
 

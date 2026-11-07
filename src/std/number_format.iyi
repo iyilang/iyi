@@ -1,0 +1,352 @@
+# Numbers as people read them: digits in groups, and quantities with a
+# prefix.
+#
+#     import std/number_format::{BinaryPrefixFormat}
+#
+#     1234567.format                          # => "1,234,567"
+#     1234.5678.format(decimal_places: 2)     # => "1,234.57"
+#     1234.5.format(',', '.')                 # => "1.234,5"
+#     1_234_567.humanize                      # => "1.23M"
+#     0.000_012.humanize                      # => "12µ"
+#     1536.humanize_bytes                     # => "1.5KiB"
+#     1536.humanize_bytes(format: BinaryPrefixFormat::JEDEC)   # => "1.5KB"
+#
+# **Exact.** Every rounding is of the value the number holds, half to
+# even, on `std/format`'s bignum: `1.005.format(decimal_places: 2)` is
+# "1.00", because the double is 1.00499999999999989..., and 2.5 rounds to
+# "2". A float with no places asked for prints its shortest digits, the
+# ones `to_s` prints, written out in full: `1e20.format` is
+# "100,000,000,000,000,000,000.0". A number that prints as zero carries no
+# sign. NaN and the infinities print as `to_s` prints them.
+#
+# **`humanize`** keeps *precision* significant digits by default and
+# trims the zeros after them: 1000 is "1k", 1234 "1.23k", 999,999 "1M".
+# With `significant: false` *precision* is the places after the point,
+# kept as written. The SI prefixes run from q (10^-30) to Q (10^30); past
+# them the digits grow, grouped: 1e40 is "10,000,000,000Q".
+#
+# **`humanize_bytes`** divides by 1024: IEC's KiB, MiB, ... EiB by
+# default, JEDEC's KB, MB, ... EB on request. Under 1024 a count is whole
+# bytes, "1023B".
+#
+# Two differences from the other library's methods of these names: IEC's
+# kilo is written `KiB`, as IEC 80000-13 writes it, where the other
+# library writes `kiB`; and the trimmed zeros take the point with them,
+# "1k" where it writes "1.0k".
+#
+# What each refuses, by panic: a group under 1, negative decimal places,
+# a precision under 1 significant digit or under 0 places.
+
+module std/number_format
+
+import std/int
+import std/float
+import std/format
+
+# Which binary prefixes `humanize_bytes` writes.
+pub enum BinaryPrefixFormat
+  # KiB, MiB, GiB, TiB, PiB, EiB.
+  IEC
+  # KB, MB, GB, TB, PB, EB, each a power of 1024.
+  JEDEC
+end
+
+struct ::Number
+  # The number with its integer digits in groups of *group*, *delimiter*
+  # between them and *separator* before the fraction. *decimal_places*
+  # rounds to that many places, half to even; nil keeps an integer whole
+  # and a float's shortest digits. *only_significant* drops the fraction's
+  # trailing zeros, and the separator if nothing is left.
+  def format(separator : ::Char = '.', delimiter : ::Char = ',', decimal_places : Int32? = nil, *, group : Int32 = 3, only_significant : ::Bool = false) : ::String
+    Std::NumberFormat::NumberText.format(self, separator, delimiter, decimal_places, group, only_significant)
+  end
+
+  # The number scaled to an SI prefix, with *precision* significant
+  # digits (or, with `significant: false`, places), *unit_separator*
+  # between it and the prefix.
+  def humanize(precision : Int32 = 3, separator : ::Char = '.', delimiter : ::Char = ',', *, significant : ::Bool = true, unit_separator : ::String = "") : ::String
+    Std::NumberFormat::NumberText.humanize(self, precision, separator, delimiter, significant, unit_separator)
+  end
+end
+
+struct ::Int
+  # A count of bytes scaled by powers of 1024, as `humanize` scales by
+  # 1000.
+  def humanize_bytes(precision : Int32 = 3, separator : ::Char = '.', *, significant : ::Bool = true, unit_separator : ::String = "", format : Std::NumberFormat::BinaryPrefixFormat = Std::NumberFormat::BinaryPrefixFormat::IEC) : ::String
+    Std::NumberFormat::NumberText.humanize_bytes(self, precision, separator, significant, unit_separator, format)
+  end
+end
+
+module NumberText
+  # From q (10^-30) to Q (10^30), one per power of a thousand.
+  SI_PREFIXES = ["q", "r", "y", "z", "a", "f", "p", "n", "µ", "m", "", "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q"]
+  IEC_UNITS   = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"]
+  JEDEC_UNITS = ["B", "KB", "MB", "GB", "TB", "PB", "EB"]
+
+  def self.format(value : ::Int, separator : ::Char, delimiter : ::Char, places : Int32?, group : Int32, only_significant : ::Bool) : ::String
+    check_format(places, group)
+    text = value.to_s
+    negative = text.starts_with?('-')
+    digits = negative ? text[1, text.bytesize - 1] : text
+    fraction = ""
+    if count = places
+      fraction = "0" * count unless only_significant
+    end
+    assemble(negative, digits, fraction, separator, delimiter, group)
+  end
+
+  def self.format(value : Float32, separator : ::Char, delimiter : ::Char, places : Int32?, group : Int32, only_significant : ::Bool) : ::String
+    check_format(places, group)
+    # The single's own shortest digits; widened, its places are exact.
+    return float_text(value.to_s, separator, delimiter, group, only_significant) if places.nil?
+    format(value.to_f64, separator, delimiter, places, group, only_significant)
+  end
+
+  def self.format(value : Float64, separator : ::Char, delimiter : ::Char, places : Int32?, group : Int32, only_significant : ::Bool) : ::String
+    check_format(places, group)
+    return value.to_s unless finite?(value)
+    if count = places
+      fixed = IyiFloatText.format_fixed(value < 0.0 ? 0.0 - value : value, count)
+      point = fixed.index('.')
+      whole = point ? fixed[0, point] : fixed
+      fraction = point ? fixed[point + 1, fixed.bytesize - point - 1] : ""
+      fraction = trim_zeros(fraction) if only_significant
+      return assemble(value < 0.0, whole, fraction, separator, delimiter, group)
+    end
+    float_text(value.to_s, separator, delimiter, group, only_significant)
+  end
+
+  private def self.check_format(places : Int32?, group : Int32) : Nil
+    raise "Number#format: group must be at least 1, not #{group}" if group < 1
+    if count = places
+      raise "Number#format: decimal_places must be at least 0, not #{count}" if count < 0
+    end
+  end
+
+  # `to_s`'s shortest digits, "1.25e-7" or "1234.5", written out in full.
+  private def self.float_text(text : ::String, separator : ::Char, delimiter : ::Char, group : Int32, only_significant : ::Bool) : ::String
+    return text if text == "NaN" || text == "Infinity" || text == "-Infinity"
+    negative = text.starts_with?('-')
+    text = text[1, text.bytesize - 1] if negative
+    exponent = 0
+    if mark = text.index('e')
+      exponent = text[mark + 1, text.bytesize - mark - 1].to_i
+      text = text[0, mark]
+    end
+    point = text.index('.') || text.bytesize
+    digits = text[0, point] + (point < text.bytesize ? text[point + 1, text.bytesize - point - 1] : "")
+    point = point + exponent
+    if point <= 0
+      whole = "0"
+      fraction = "0" * (0 - point) + digits
+    elsif point >= digits.bytesize
+      whole = digits + "0" * (point - digits.bytesize)
+      fraction = ""
+    else
+      whole = digits[0, point]
+      fraction = digits[point, digits.bytesize - point]
+    end
+    whole = trim_leading_zeros(whole)
+    fraction = trim_zeros(fraction)
+    fraction = "0" if fraction.empty? && !only_significant
+    assemble(negative, whole, fraction, separator, delimiter, group)
+  end
+
+  def self.humanize(value : ::Int, precision : Int32, separator : ::Char, delimiter : ::Char, significant : ::Bool, unit_separator : ::String) : ::String
+    negative, magnitude = magnitude_of(value)
+    return "0" if magnitude == 0_u64
+    scaled(negative, magnitude, 0, magnitude.to_s.bytesize - 1, precision, separator, delimiter, significant, unit_separator)
+  end
+
+  def self.humanize(value : Float32, precision : Int32, separator : ::Char, delimiter : ::Char, significant : ::Bool, unit_separator : ::String) : ::String
+    humanize(value.to_f64, precision, separator, delimiter, significant, unit_separator)
+  end
+
+  def self.humanize(value : Float64, precision : Int32, separator : ::Char, delimiter : ::Char, significant : ::Bool, unit_separator : ::String) : ::String
+    check_precision("Number#humanize", precision, significant)
+    return value.to_s unless finite?(value)
+    return "0" if value == 0.0
+    bits = IyiFloatText.bits_of(value)
+    exponent_bits = bits.unsafe_shr(52_u64) & 2047_u64
+    fraction = bits & 4503599627370495_u64
+    f = exponent_bits == 0_u64 ? fraction : fraction | 4503599627370496_u64
+    e = exponent_bits == 0_u64 ? -1074 : exponent_bits.to_i64.to_i32 - 1075
+    # 0.d1d2... x 10^k: the decimal exponent of the leading digit is k - 1,
+    # or one less when the shortest digits rounded up to a power of ten;
+    # `scaled` corrects it.
+    k = IyiFloatText.dragon4(value < 0.0 ? 0.0 - value : value)[2]
+    scaled(value < 0.0, f, e, k - 1, precision, separator, delimiter, significant, unit_separator)
+  end
+
+  def self.humanize_bytes(value : ::Int, precision : Int32, separator : ::Char, significant : ::Bool, unit_separator : ::String, format : Std::NumberFormat::BinaryPrefixFormat) : ::String
+    check_precision("Int#humanize_bytes", precision, significant)
+    units = format == Std::NumberFormat::BinaryPrefixFormat::IEC ? IEC_UNITS : JEDEC_UNITS
+    negative, magnitude = magnitude_of(value)
+    sign = negative ? "-" : ""
+    return sign + magnitude.to_s + unit_separator + "B" if magnitude < 1024_u64
+    power = 0
+    while power < 6 && magnitude.unsafe_shr((10 * (power + 1)).to_u64) != 0_u64
+      power = power + 1
+    end
+    while true
+      e = 0 - 10 * power
+      if significant
+        lead = magnitude.unsafe_shr((10 * power).to_u64).to_s.bytesize - 1
+        digits, low = significant_digits(magnitude, e, lead, precision)
+      else
+        digits = IyiFloatText.scaled_digits(magnitude, e, precision)
+        low = 0 - precision
+      end
+      whole, fraction = place(digits, low)
+      # Rounded up to a whole 1024: the next unit's 1.
+      if power < 6 && whole.to_i >= 1024
+        power = power + 1
+        next
+      end
+      fraction = trim_zeros(fraction) if significant
+      return sign + whole + (fraction.empty? ? "" : separator.to_s + fraction) + unit_separator + units[power]
+    end
+  end
+
+  # *magnitude* x 2^*e*, its leading digit at 10^*lead* or near it, as
+  # humanize writes it.
+  private def self.scaled(negative : ::Bool, magnitude : UInt64, e : Int32, lead : Int32, precision : Int32, separator : ::Char, delimiter : ::Char, significant : ::Bool, unit_separator : ::String) : ::String
+    check_precision("Number#humanize", precision, significant)
+    if significant
+      digits, low = significant_digits(magnitude, e, lead, precision)
+      lead = low + precision - 1
+      prefix = prefix_of(lead)
+      whole, fraction = place(digits, low - prefix)
+      fraction = trim_zeros(fraction)
+    else
+      # The leading digit's place, from a value rounded to one digit, which
+      # may have rounded up to the power of ten above it: one prefix lower
+      # is the value's own if it stays under a thousand there.
+      prefix = prefix_of(significant_digits(magnitude, e, lead, 1)[1])
+      if prefix > -30
+        lower = IyiFloatText.scaled_digits(magnitude, e, precision - prefix + 3)
+        prefix = prefix - 3 if place(lower, 0 - precision)[0].bytesize <= 3
+      end
+      while true
+        digits = IyiFloatText.scaled_digits(magnitude, e, precision - prefix)
+        whole, fraction = place(digits, 0 - precision)
+        # Rounded up to a whole thousand: the next prefix's 1.
+        if prefix < 30 && whole.bytesize > 3
+          prefix = prefix + 3
+          next
+        end
+        break
+      end
+    end
+    symbol = SI_PREFIXES[prefix // 3 + 10]
+    text = (negative ? "-" : "") + group_digits(whole, delimiter, 3)
+    text = text + separator.to_s + fraction unless fraction.empty?
+    symbol.empty? ? text : text + unit_separator + symbol
+  end
+
+  # *precision* significant digits of *magnitude* x 2^*e*, rounded half to
+  # even, and the power of ten of the last one. *lead* is where the first
+  # digit is thought to be; a guess off is put right here.
+  private def self.significant_digits(magnitude : UInt64, e : Int32, lead : Int32, precision : Int32) : {::String, Int32}
+    while true
+      low = lead - precision + 1
+      digits = IyiFloatText.scaled_digits(magnitude, e, 0 - low)
+      if digits.bytesize > precision
+        lead = lead + 1
+      elsif digits.bytesize < precision
+        lead = lead - 1
+      elsif power_of_ten?(digits)
+        # "10...0" is also what a value whose first digit is a place lower
+        # rounds up to - 1023.5 KiB is 0.99951 MiB, and at four digits a
+        # guess of the ones place made it "1000", 1 MiB. Rounded at that
+        # lower place, such a value still has *precision* digits.
+        below = IyiFloatText.scaled_digits(magnitude, e, 1 - low)
+        return below.bytesize == precision ? {below, low - 1} : {digits, low}
+      else
+        return {digits, low}
+      end
+    end
+  end
+
+  private def self.power_of_ten?(digits : ::String) : ::Bool
+    digits.to_unsafe[0] == 49_u8 && all_zero?(digits[1, digits.bytesize - 1])
+  end
+
+  # The power of a thousand at or below 10^*lead*, within q and Q.
+  private def self.prefix_of(lead : Int32) : Int32
+    prefix = lead >= 0 ? (lead // 3) * 3 : 0 - ((2 - lead) // 3) * 3
+    prefix < -30 ? -30 : (prefix > 30 ? 30 : prefix)
+  end
+
+  # *digits* x 10^*low* as its whole part and its fraction.
+  private def self.place(digits : ::String, low : Int32) : {::String, ::String}
+    return {digits + "0" * low, ""} if low >= 0
+    point = digits.bytesize + low
+    return {"0", "0" * (0 - point) + digits} if point <= 0
+    {digits[0, point], digits[point, digits.bytesize - point]}
+  end
+
+  private def self.check_precision(what : ::String, precision : Int32, significant : ::Bool) : Nil
+    if significant && precision < 1
+      raise "#{what}: precision must be at least 1 significant digit, not #{precision}"
+    elsif precision < 0
+      raise "#{what}: precision must be at least 0 places, not #{precision}"
+    end
+  end
+
+  # The sign, and the size as a UInt64 - the least integer's too.
+  private def self.magnitude_of(value : ::Int) : {::Bool, UInt64}
+    return {false, value.to_u64} if value >= 0
+    {true, (value + 1).abs.to_u64 + 1_u64}
+  end
+
+  private def self.finite?(value : Float64) : ::Bool
+    IyiFloatText.bits_of(value).unsafe_shr(52_u64) & 2047_u64 != 2047_u64
+  end
+
+  private def self.assemble(negative : ::Bool, whole : ::String, fraction : ::String, separator : ::Char, delimiter : ::Char, group : Int32) : ::String
+    zero = all_zero?(whole) && all_zero?(fraction)
+    text = (negative && !zero ? "-" : "") + group_digits(whole, delimiter, group)
+    fraction.empty? ? text : text + separator.to_s + fraction
+  end
+
+  private def self.group_digits(digits : ::String, delimiter : ::Char, group : Int32) : ::String
+    return digits if digits.bytesize <= group
+    ::String.build do |io|
+      first = digits.bytesize % group
+      first = group if first == 0
+      io << digits[0, first]
+      at = first
+      while at < digits.bytesize
+        io << delimiter
+        io << digits[at, group]
+        at = at + group
+      end
+    end
+  end
+
+  private def self.trim_zeros(fraction : ::String) : ::String
+    stop = fraction.bytesize
+    while stop > 0 && fraction.to_unsafe[stop - 1] == 48_u8
+      stop = stop - 1
+    end
+    fraction[0, stop]
+  end
+
+  private def self.trim_leading_zeros(whole : ::String) : ::String
+    start = 0
+    while start < whole.bytesize - 1 && whole.to_unsafe[start] == 48_u8
+      start = start + 1
+    end
+    whole[start, whole.bytesize - start]
+  end
+
+  private def self.all_zero?(digits : ::String) : ::Bool
+    index = 0
+    while index < digits.bytesize
+      return false if digits.to_unsafe[index] != 48_u8
+      index = index + 1
+    end
+    true
+  end
+end

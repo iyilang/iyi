@@ -25,15 +25,13 @@ puts "5. #{Boot::Registry.greeting}"
 # What this sample does not promise
 # ---------------------------------------------------------------------------
 #
-# * The order of two modules that do not import each other. Rule 2 says that
-#   order is *unobservable*, not merely unspecified — a module can only name
-#   what it imports (R-1), reach what that module exports (R-2), and reopen
-#   nothing (R-3), so an initialiser has nothing of an unrelated module to
-#   look at. Nothing here prints from two independent modules, because that
-#   would be documenting an order the spec refuses to have — and debug builds
-#   shuffle it, so the documentation would be wrong most of the time. Build
-#   with `--release` to get the load order back, or `IYI_INIT_SEED=1` to get
-#   the same shuffled one twice.
+# * The order of two modules that do not import each other. Rule 2 leaves it
+#   unspecified, and output that changes with it is the bug. Nothing here
+#   prints from two independent modules, because that would be documenting an
+#   order the spec refuses to have — and debug builds do not keep the load
+#   order: they take the ready module whose path hashes lowest, the same
+#   order on every build. Build with `--release` to get the load order back,
+#   or with `IYI_INIT_SEED=1` to see another hashed one.
 #
 # * Anything about the second `import` above. `boot/config` was already loaded
 #   by `boot/registry`, so naming it here adds an edge and nothing else: a

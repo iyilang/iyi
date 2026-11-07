@@ -64,11 +64,14 @@ class Iyi::Path
     # iyi: a package module reached by the name it had before 0.15.2, when
     # a package's modules stopped sharing one namespace: `Colors` of
     # `example.com/liba/colors` is `Liba::Colors` now. The first segment is
-    # the edit, so `iyi fix` moves a program across.
-    if !global? && (moved = iyi_package_module_name(type.program, names.first))
-      self.raise("undefined constant #{self}\n`#{names.first}` is `#{moved}`: a package's modules live under " \
+    # the edit, so `iyi fix` moves a program across. `::Colors` too: a
+    # package's `pub macro` that names its module absolutely, built in a
+    # consumer, is where that spelling meets this.
+    if moved = iyi_package_module_name(type.program, names.first)
+      lead = global? ? "::" : ""
+      self.raise("undefined constant #{self}\n`#{lead}#{names.first}` is `#{lead}#{moved}`: a package's modules live under " \
                  "the package's name, so two packages' modules of one name are two modules (SPEC.md III.7). " \
-                 "Did you mean '#{moved}'?", suggestion: moved, size: names.first.size)
+                 "Did you mean '#{lead}#{moved}'?", suggestion: "#{lead}#{moved}", size: lead.size + names.first.size)
     end
 
     # iyi: the name is usually not missing, it is out of reach - a type a
@@ -368,7 +371,7 @@ class Iyi::Call
     # Also consider private top-level defs
     if owner.is_a?(Program)
       location = self.location
-      if location && (filename = location.original_filename)
+      if location && (filename = location.original_read_from)
         private_defs = owner.file_module?(filename).try &.lookup_defs(def_name)
         defs.concat(private_defs) if private_defs
       end
@@ -920,6 +923,15 @@ class Iyi::Call
   private def check_argument_type_mismatch(def_arg, index_or_name, arg_type, match_context, arguments_type_mismatch)
     restricted = arg_type.restrict(def_arg, match_context)
 
+    # iyi: a literal, or a number variable, that the parameter takes by a
+    # cast is not where the call fails. Its restriction is the cast's type
+    # and never its own, so the comparison below called it a partial match:
+    # `max(2, x)` with `x : Int64` against `(Float64, Float64)` and
+    # `(Float32, Float32)` said "expected argument #1 ... to be Float32 or
+    # Float64, not Int32" about the `2` both overloads take, and nothing
+    # about the `x` neither does.
+    return if restricted && arg_type.is_a?(AutocastType)
+
     arg_type = arg_type.remove_literal
     return if restricted == arg_type
 
@@ -1024,7 +1036,7 @@ class Iyi::Call
     return false unless type.is_a?(NamedType)
     location = type.locations.try(&.first?)
     return true unless location
-    filename = location.filename
+    filename = location.read_from
     return false unless filename.is_a?(String)
     # The posix reading, for the platform whose paths are spelled with `\`:
     # `iyi doc` asked the same question the same way and on Windows
@@ -1304,7 +1316,7 @@ class Iyi::Call
     # Declared in a file of the program's: the compiler's own types and the
     # macro-made integers have no such file, the library's are under it.
     declared = ->(other : Type) do
-      file = other.locations.try(&.first?).try(&.filename)
+      file = other.locations.try(&.first?).try(&.read_from)
       file.is_a?(String) && !Iyi.library_source?(file)
     end
     others = [] of Type
@@ -1318,7 +1330,7 @@ class Iyi::Call
       shadowed = type
     end
     return nil unless shadow.is_a?(InstanceVarContainer) && shadowed && shadow.all_instance_vars.empty?
-    return nil unless (location = shadow.locations.try(&.first?)) && (file = location.filename).is_a?(String)
+    return nil unless (location = shadow.locations.try(&.first?)) && (file = location.read_from).is_a?(String)
     top = shadowed.namespace.is_a?(Program)
     shown = top ? "::#{type.name}" : shadowed.to_s
     add = if top

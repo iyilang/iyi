@@ -1,0 +1,577 @@
+# Internationalized domain names: Punycode (RFC 3492) and host names
+# carried to and from their ASCII form label by label (IDNA2008: RFC 5890,
+# 5891 and 5892).
+#
+# `Punycode.encode` writes any string as the ASCII Punycode of its code
+# points, the basic ones first and a `-` after them when there are any,
+# exactly as RFC 3492 section 6.3 does (`"bücher"` is `"bcher-kva"`);
+# `Punycode.decode` undoes it and answers a `PunycodeError` for input that
+# is not Punycode: a byte that is not ASCII, a byte in the extended part
+# that is not a base-36 digit, input that ends inside a number, a number
+# that overflows, and a code point past U+10FFFF or a surrogate, which no
+# UTF-8 string holds. The arithmetic is 64-bit with the overflow checks of
+# section 6.4, so whatever `encode` writes `decode` reads back, however
+# long; Python's codec has unbounded integers and refuses the same inputs
+# another way, as a code point out of range or a number cut short.
+#
+# `IDNA.to_ascii` turns a host name into the one DNS looks up:
+# `"bücher.example"` is `"xn--bcher-kva.example"`. `IDNA.to_unicode` goes
+# the other way. Both split at `.` and the three other full stops UTS #46
+# and Python's codecs treat as one (U+3002, U+FF0E, U+FF61), keep one
+# trailing dot, and check every label whichever form it came in:
+#   * an ASCII label is lower-cased, and holds letters, digits, `-` and
+#     `_` (the underscore labels of SRV and DMARC records, which RFC 5890
+#     section 2.3.1 leaves outside IDNA rather than forbids);
+#   * no label begins or ends with a hyphen, and only an `xn--` label has
+#     `--` at its third and fourth characters (RFC 5891 section 4.2.3.1);
+#   * an `xn--` label is an A-label: it decodes, what it decodes to is not
+#     all ASCII, and that passes the checks a U-label does (section 5.4);
+#   * a label with other characters is a U-label: in NFC (section 5.3),
+#     not beginning with a combining mark (4.2.3.2), and every code point
+#     PVALID under RFC 5892, or CONTEXTO with its context rule met
+#     (appendix A.3 to A.9). The RFC 5892 property is derived here, by the
+#     RFC's own rules (section 3), from the general categories, case
+#     folding and normalization `std/unicode` carries, rather than read
+#     from a table: `IDNA.property` answers it;
+#   * a label is at most 63 octets in its ASCII form, the name at most
+#     253 without its trailing dot (RFC 1034 section 3.1).
+# What fails is an `IdnaError` naming the label and the code point.
+#
+# What is not done, plainly:
+#   * No UTS #46 mapping. A label is checked as it is given, its ASCII
+#     letters lower-cased and nothing else: `"BÜCHER.de"`, a full-width
+#     `"ｅｘａｍｐｌｅ"` and `"ﬁ.example"` are refused, naming the code
+#     point UTS #46 would have mapped and what case folding and NFKC make
+#     of it, where a browser maps them first. Nor is a name normalized:
+#     `"u" + U+0308` is refused as not NFC rather than composed to `ü`.
+#   * No transitional processing: `ß` and `ς` are themselves, as IDNA2008
+#     and UTS #46 non-transitional have them (`"faß.de"` is
+#     `"xn--fa-hia.de"`; IDNA2003, Python's `idna` codec, made it
+#     `"fass.de"`).
+#   * CONTEXTJ (ZWNJ U+200C, ZWJ U+200D): their rules need the Joining_Type
+#     and Virama properties, which `std/unicode` does not carry, so a label
+#     holding either is refused, including the ones those rules accept.
+#   * The Bidi rule of RFC 5893 is not checked: it needs Bidi_Class, which
+#     `std/unicode` does not carry either. A right-to-left label that RFC
+#     5893 refuses (`"0א"` beginning with a European digit) is accepted.
+#   * Symbols and emoji are DISALLOWED in IDNA2008 and refused (`"☃.net"`,
+#     even written `"xn--n3h.net"`), where a WHATWG URL parser takes them.
+#
+# Pure computation: no platform, no clock, no randomness; `std/uri` builds
+# `URI.ascii_host` on it.
+
+module std/idna
+
+import std/unicode::{Unicode}
+
+# What `Punycode.decode` answers for input that is not Punycode.
+pub struct PunycodeError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for PunycodeError
+  def message : String
+    @message
+  end
+end
+
+# What `IDNA.to_ascii`, `IDNA.to_unicode` and `URI.ascii_host` answer for a
+# name they cannot carry: the sentence names the label and why.
+pub struct IdnaError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for IdnaError
+  def message : String
+    @message
+  end
+end
+
+# The derived property of RFC 5892 section 2: whether a code point may
+# appear in a U-label (PValid), only in a context (ContextJ, ContextO), not
+# at all (Disallowed), or is unassigned in the Unicode `std/unicode` holds.
+pub enum IdnaProperty
+  PValid
+  ContextJ
+  ContextO
+  Disallowed
+  Unassigned
+end
+
+# RFC 3492's bootstring with its Punycode parameters (section 5).
+pub struct Punycode
+  BASE         =  36_i64
+  TMIN         =   1_i64
+  TMAX         =  26_i64
+  SKEW         =  38_i64
+  DAMP         = 700_i64
+  INITIAL_BIAS =  72_i64
+  INITIAL_N    = 128_i64
+  # Section 6.4 checks every step against the largest integer the decoder
+  # holds. 64 bits rather than the RFC's suggested 32: an encoder of 64
+  # bits never comes near it for a string an Int32 can size, so every
+  # encoding reads back.
+  MAXINT = 0x7FFFFFFFFFFFFFFF_i64
+
+  # The Punycode of *text*'s code points (section 6.3). Total: every
+  # string has one. Bytes that are not UTF-8 are read as `each_char` reads
+  # them, U+FFFD each.
+  def self.encode(text : String) : String
+    points = [] of Int64
+    text.each_char { |char| points << char.ord.to_i64 }
+    String.build(text.bytesize + 8) do |io|
+      basic = 0_i64
+      points.each do |point|
+        if point < 128_i64
+          io.write_byte(point.to_u8)
+          basic = basic + 1_i64
+        end
+      end
+      io.write_byte(45_u8) if basic > 0_i64
+      n = INITIAL_N
+      delta = 0_i64
+      bias = INITIAL_BIAS
+      h = basic
+      total = points.size.to_i64
+      while h < total
+        # The smallest code point not yet written.
+        m = MAXINT
+        j = 0
+        while j < points.size
+          m = points[j] if points[j] >= n && points[j] < m
+          j = j + 1
+        end
+        delta = delta + (m - n) * (h + 1_i64)
+        n = m
+        j = 0
+        while j < points.size
+          c = points[j]
+          delta = delta + 1_i64 if c < n
+          if c == n
+            q = delta
+            k = BASE
+            while true
+              t = threshold(k, bias)
+              break if q < t
+              io.write_byte(digit(t + (q - t) % (BASE - t)))
+              q = (q - t) // (BASE - t)
+              k = k + BASE
+            end
+            io.write_byte(digit(q))
+            bias = adapt(delta, h + 1_i64, h == basic)
+            delta = 0_i64
+            h = h + 1_i64
+          end
+          j = j + 1
+        end
+        delta = delta + 1_i64
+        n = n + 1_i64
+      end
+    end
+  end
+
+  # The string *text* is the Punycode of (section 6.2), or the reason it
+  # is none. Digits are read in either case; basic code points are kept
+  # in the case they were written.
+  def self.decode(text : String) : String | PunycodeError
+    bytes = text.to_unsafe
+    size = text.bytesize
+    last = -1
+    i = 0
+    while i < size
+      byte = bytes[i]
+      return PunycodeError.new("Punycode: byte #{i} is 0x#{byte.to_s(16).upcase}, which is not ASCII") if byte >= 128_u8
+      last = i if byte == 45_u8
+      i = i + 1
+    end
+    output = [] of Int64
+    # The basic code points are the ones before the last delimiter, and
+    # the extended part starts after it only when there were any: a `-`
+    # at the start delimits nothing and is read as a digit, which it is
+    # not (section 6.2; Python's codec skips it).
+    at = 0
+    if last > 0
+      j = 0
+      while j < last
+        output << bytes[j].to_i64
+        j = j + 1
+      end
+      at = last + 1
+    end
+    n = INITIAL_N
+    index = 0_i64
+    bias = INITIAL_BIAS
+    while at < size
+      old = index
+      w = 1_i64
+      k = BASE
+      while true
+        return PunycodeError.new("Punycode: the input ends inside a number") if at >= size
+        value = digit_value(bytes[at])
+        return PunycodeError.new("Punycode: #{bytes[at].unsafe_chr.inspect} at byte #{at} is not a base-36 digit") if value < 0_i64
+        return PunycodeError.new("Punycode: the number at byte #{at} overflows") if value > (MAXINT - index) // w
+        index = index + value * w
+        t = threshold(k, bias)
+        at = at + 1
+        break if value < t
+        return PunycodeError.new("Punycode: the number at byte #{at - 1} overflows") if w > MAXINT // (BASE - t)
+        w = w * (BASE - t)
+        k = k + BASE
+      end
+      count = output.size.to_i64 + 1_i64
+      bias = adapt(index - old, count, old == 0_i64)
+      return PunycodeError.new("Punycode: the number ending at byte #{at - 1} overflows") if index // count > MAXINT - n
+      n = n + index // count
+      index = index % count
+      if n > 0x10FFFF_i64
+        return PunycodeError.new("Punycode: the number ending at byte #{at - 1} is code point #{IDNA.u_plus(n)}, past U+10FFFF")
+      end
+      if n >= 0xD800_i64 && n <= 0xDFFF_i64
+        return PunycodeError.new("Punycode: the number ending at byte #{at - 1} is #{IDNA.u_plus(n)}, a surrogate, which UTF-8 does not hold")
+      end
+      output << 0_i64
+      j = output.size - 1
+      while j > index
+        output[j] = output[j - 1]
+        j = j - 1
+      end
+      output[index.to_i32] = n
+      index = index + 1_i64
+    end
+    String.build(size + 8) do |io|
+      output.each { |point| io << point.to_i32.unsafe_chr }
+    end
+  end
+
+  # Section 6.1.
+  private def self.adapt(delta : Int64, points : Int64, first : Bool) : Int64
+    delta = first ? delta // DAMP : delta // 2_i64
+    delta = delta + delta // points
+    k = 0_i64
+    while delta > ((BASE - TMIN) * TMAX) // 2_i64
+      delta = delta // (BASE - TMIN)
+      k = k + BASE
+    end
+    k + ((BASE - TMIN + 1_i64) * delta) // (delta + SKEW)
+  end
+
+  private def self.threshold(k : Int64, bias : Int64) : Int64
+    if k <= bias + TMIN
+      TMIN
+    elsif k >= bias + TMAX
+      TMAX
+    else
+      k - bias
+    end
+  end
+
+  # `a`-`z` for 0-25 and `0`-`9` for 26-35, lower case as Python and the
+  # RFC's own sample code write them.
+  private def self.digit(value : Int64) : UInt8
+    value < 26_i64 ? (value + 97_i64).to_u8 : (value + 22_i64).to_u8
+  end
+
+  private def self.digit_value(byte : UInt8) : Int64
+    if byte >= 97_u8 && byte <= 122_u8
+      (byte - 97_u8).to_i64
+    elsif byte >= 65_u8 && byte <= 90_u8
+      (byte - 65_u8).to_i64
+    elsif byte >= 48_u8 && byte <= 57_u8
+      (byte - 22_u8).to_i64
+    else
+      -1_i64
+    end
+  end
+end
+
+# Host names to and from the ASCII form DNS looks up, IDNA2008's way, label
+# by label; the header says what is checked and what is not.
+pub struct IDNA
+  # A label is at most 63 octets and a name at most 255 on the wire, 253
+  # written without its trailing dot (RFC 1034 section 3.1).
+  MAX_LABEL =  63
+  MAX_NAME  = 253
+
+  # The name as DNS looks it up: every U-label as its `xn--` A-label,
+  # every ASCII label lower-cased.
+  def self.to_ascii(name : String) : String | IdnaError
+    convert(name, true)
+  end
+
+  # The name as a person reads it: every A-label decoded, every ASCII
+  # label lower-cased; checked as `to_ascii` checks it.
+  def self.to_unicode(name : String) : String | IdnaError
+    convert(name, false)
+  end
+
+  # RFC 5892's derived property of *char* (section 3), computed in the
+  # order the RFC gives: the exceptions (section 2.6), unassigned code
+  # points, the LDH characters, the joiners, and then a letter, digit or
+  # mark that neither case folding nor NFKC changes, that is not default
+  # ignorable, white space or a noncharacter, and not in the ignorable
+  # blocks or old Hangul jamo. Everything else is Disallowed.
+  def self.property(char : Char) : IdnaProperty
+    cp = char.ord
+    exception = exception(cp)
+    return exception if exception
+    category = Unicode.general_category(char)
+    return IdnaProperty::Unassigned if category == "Cn" && !noncharacter?(cp)
+    return IdnaProperty::PValid if cp == 45 || (cp >= 48 && cp <= 57) || (cp >= 97 && cp <= 122)
+    return IdnaProperty::ContextJ if cp == 0x200C || cp == 0x200D
+    # Every rule after this one answers Disallowed but LetterDigits, so a
+    # code point outside it - a surrogate among them, which no string can
+    # fold - is Disallowed at once.
+    letter_digit = category == "Ll" || category == "Lu" || category == "Lo" || category == "Nd" ||
+                   category == "Lm" || category == "Mn" || category == "Mc"
+    return IdnaProperty::Disallowed unless letter_digit
+    return IdnaProperty::Disallowed if unstable(char)
+    return IdnaProperty::Disallowed if default_ignorable?(cp)
+    # IgnorableBlocks: Combining Diacritical Marks for Symbols, Musical
+    # Symbols, Ancient Greek Musical Notation.
+    return IdnaProperty::Disallowed if (cp >= 0x20D0 && cp <= 0x20FF) || (cp >= 0x1D100 && cp <= 0x1D24F)
+    # OldHangulJamo: the conjoining jamo, Hangul_Syllable_Type L, V and T.
+    return IdnaProperty::Disallowed if (cp >= 0x1100 && cp <= 0x11FF) || (cp >= 0xA960 && cp <= 0xA97C) ||
+                                       (cp >= 0xD7B0 && cp <= 0xD7C6) || (cp >= 0xD7CB && cp <= 0xD7FB)
+    IdnaProperty::PValid
+  end
+
+  # `U+00FC`: four hex digits at least, upper case.
+  def self.u_plus(cp : Int64) : String
+    "U+" + cp.to_s(16).upcase.rjust(4, '0')
+  end
+
+  # RFC 5892 section 2.6: the code points whose property is fixed by name.
+  private def self.exception(cp : Int32) : IdnaProperty?
+    case cp
+    when 0x00DF, 0x03C2, 0x06FD, 0x06FE, 0x0F0B, 0x3007
+      IdnaProperty::PValid
+    when 0x00B7, 0x0375, 0x05F3, 0x05F4, 0x30FB
+      IdnaProperty::ContextO
+    when 0x0640, 0x07FA, 0x302E, 0x302F, 0x3031, 0x3032, 0x3033, 0x3034, 0x3035, 0x303B
+      IdnaProperty::Disallowed
+    else
+      (cp >= 0x0660 && cp <= 0x0669) || (cp >= 0x06F0 && cp <= 0x06F9) ? IdnaProperty::ContextO : nil
+    end
+  end
+
+  # Noncharacter_Code_Point: U+FDD0..U+FDEF and the last two of every plane.
+  private def self.noncharacter?(cp : Int32) : Bool
+    (cp >= 0xFDD0 && cp <= 0xFDEF) || (cp & 0xFFFE) == 0xFFFE
+  end
+
+  # Default_Ignorable_Code_Point (DerivedCoreProperties.txt, Unicode 17),
+  # the part of RFC 5892's IgnorableProperties a letter, digit or mark can
+  # be in: White_Space and the noncharacters never are.
+  private def self.default_ignorable?(cp : Int32) : Bool
+    cp == 0x00AD || cp == 0x034F || cp == 0x061C || (cp >= 0x115F && cp <= 0x1160) ||
+      (cp >= 0x17B4 && cp <= 0x17B5) || (cp >= 0x180B && cp <= 0x180F) || (cp >= 0x200B && cp <= 0x200F) ||
+      (cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2060 && cp <= 0x206F) || cp == 0x3164 ||
+      (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0xFEFF || cp == 0xFFA0 || (cp >= 0xFFF0 && cp <= 0xFFF8) ||
+      (cp >= 0x1BCA0 && cp <= 0x1BCA3) || (cp >= 0x1D173 && cp <= 0x1D17A) || (cp >= 0xE0000 && cp <= 0xE0FFF)
+  end
+
+  # RFC 5892's Unstable (section 2.3): what NFKC, case folding and NFKC
+  # again make of *char*, or nil when that is *char* itself. It is what
+  # UTS #46 would map the character to, near enough to name in a refusal.
+  private def self.unstable(char : Char) : String?
+    text = char.to_s
+    folded = Unicode.normalize(Unicode.foldcase(Unicode.normalize(text, Unicode::NormalizationForm::NFKC)), Unicode::NormalizationForm::NFKC)
+    folded == text ? nil : folded
+  end
+
+  private def self.ascii?(text : String) : Bool
+    bytes = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return false if bytes[i] >= 128_u8
+      i = i + 1
+    end
+    true
+  end
+
+  private def self.chars_of(text : String) : Array(Char)
+    chars = [] of Char
+    text.each_char { |char| chars << char }
+    chars
+  end
+
+  # The labels between the four full stops UTS #46 maps to `.`.
+  private def self.split(name : String) : Array(String)
+    labels = [] of String
+    current = String::Builder.new
+    name.each_char do |char|
+      cp = char.ord
+      if cp == 0x2E || cp == 0x3002 || cp == 0xFF0E || cp == 0xFF61
+        labels << current.to_s
+        current = String::Builder.new
+      else
+        current << char
+      end
+    end
+    labels << current.to_s
+    labels
+  end
+
+  private def self.convert(name : String, ascii : Bool) : String | IdnaError
+    return IdnaError.new("IDNA: #{name.inspect} is not UTF-8") unless Unicode.valid?(name)
+    labels = split(name)
+    trailing = labels.size > 1 && labels.last.empty?
+    labels.pop if trailing
+    return IdnaError.new("IDNA: the name is empty") if labels.size == 1 && labels[0].empty?
+    a_labels = [] of String
+    u_labels = [] of String
+    i = 0
+    while i < labels.size
+      text = labels[i]
+      return IdnaError.new("IDNA: label #{i + 1} of #{name.inspect} is empty") if text.empty?
+      pair = label(text)
+      return pair if pair.is_a?(IdnaError)
+      a_labels << pair[0]
+      u_labels << pair[1]
+      i = i + 1
+    end
+    written = a_labels.join(".")
+    if written.bytesize > MAX_NAME
+      return IdnaError.new("IDNA: the name is #{written.bytesize} octets in ASCII, past the #{MAX_NAME} a DNS name holds")
+    end
+    (ascii ? written : u_labels.join(".")) + (trailing ? "." : "")
+  end
+
+  # One label as its A-label and its U-label (the same lower-cased text
+  # for an ASCII label), or why it is neither.
+  private def self.label(text : String) : Tuple(String, String) | IdnaError
+    lower = text.downcase
+    if ascii?(lower)
+      if lower.starts_with?("xn--")
+        decoded = Punycode.decode(lower[4, lower.bytesize - 4])
+        return IdnaError.new("IDNA: label #{text.inspect} is not an A-label: #{decoded.message}") if decoded.is_a?(PunycodeError)
+        if ascii?(decoded)
+          return IdnaError.new("IDNA: label #{text.inspect} is not an A-label: it decodes to #{decoded.inspect}, which is all ASCII")
+        end
+        # Section 5.4 asks that what an A-label decodes to encode back to
+        # it. Punycode is one-to-one (RFC 3492 section 1) and the label is
+        # lower-cased already, so with a decoder as strict as this one the
+        # comparison cannot fail, and it is not made; the gate holds the
+        # round trip instead.
+        refused = u_label_error(decoded, text)
+        return refused if refused
+        long = too_long(lower)
+        return long if long
+        return {lower, decoded}
+      end
+      bytes = lower.to_unsafe
+      j = 0
+      while j < lower.bytesize
+        b = bytes[j]
+        unless (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8) || b == 45_u8 || b == 95_u8
+          return IdnaError.new("IDNA: label #{text.inspect} holds #{b.unsafe_chr.inspect}, which a host name does not")
+        end
+        j = j + 1
+      end
+      refused = hyphen_error(chars_of(lower), text)
+      return refused if refused
+      long = too_long(lower)
+      return long if long
+      return {lower, lower}
+    end
+    refused = u_label_error(lower, text)
+    return refused if refused
+    written = "xn--" + Punycode.encode(lower)
+    long = too_long(written)
+    return long if long
+    {written, lower}
+  end
+
+  private def self.too_long(written : String) : IdnaError?
+    return nil if written.bytesize <= MAX_LABEL
+    IdnaError.new("IDNA: label #{written.inspect} is #{written.bytesize} octets, past the #{MAX_LABEL} a DNS label holds")
+  end
+
+  # RFC 5891 section 4.2.3.1.
+  private def self.hyphen_error(chars : Array(Char), shown : String) : IdnaError?
+    return IdnaError.new("IDNA: label #{shown.inspect} begins with a hyphen") if chars[0] == '-'
+    return IdnaError.new("IDNA: label #{shown.inspect} ends with a hyphen") if chars[chars.size - 1] == '-'
+    if chars.size >= 4 && chars[2] == '-' && chars[3] == '-'
+      return IdnaError.new("IDNA: label #{shown.inspect} has \"--\" at its third and fourth characters and is not an A-label")
+    end
+    nil
+  end
+
+  # Why *label*, a lower-cased U-label, is not one; nil when it is.
+  # *shown* is the label as the caller wrote it.
+  private def self.u_label_error(label : String, shown : String) : IdnaError?
+    unless Unicode.normalized?(label)
+      return IdnaError.new("IDNA: label #{shown.inspect} is not in NFC; its NFC form is #{Unicode.normalize(label).inspect}")
+    end
+    chars = chars_of(label)
+    refused = hyphen_error(chars, shown)
+    return refused if refused
+    if Unicode.mark?(chars[0])
+      return IdnaError.new("IDNA: label #{shown.inspect} begins with the combining mark #{u_plus(chars[0].ord.to_i64)}")
+    end
+    i = 0
+    while i < chars.size
+      char = chars[i]
+      named = "IDNA: label #{shown.inspect} holds #{u_plus(char.ord.to_i64)}"
+      case property(char)
+      when IdnaProperty::Disallowed
+        mapped = unstable(char)
+        if mapped
+          return IdnaError.new("#{named}, which IDNA2008 does not allow; case folding and NFKC make it #{mapped.inspect}, which UTS #46 would map it to and this module does not")
+        end
+        return IdnaError.new("#{named}, which IDNA2008 does not allow")
+      when IdnaProperty::Unassigned
+        return IdnaError.new("#{named}, which Unicode #{Unicode::VERSION} has not assigned")
+      when IdnaProperty::ContextJ
+        return IdnaError.new("#{named}, a joiner whose context rule needs Joining_Type and Virama, which this module does not carry; it refuses the joiners")
+      when IdnaProperty::ContextO
+        unless context_o?(chars, i)
+          return IdnaError.new("#{named} where RFC 5892's context rule for it does not allow it")
+        end
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  # RFC 5892 appendix A.3 to A.9.
+  private def self.context_o?(chars : Array(Char), i : Int32) : Bool
+    cp = chars[i].ord
+    if cp == 0x00B7
+      # MIDDLE DOT, between two `l`s (Catalan's `l·l`).
+      i > 0 && i + 1 < chars.size && chars[i - 1] == 'l' && chars[i + 1] == 'l'
+    elsif cp == 0x0375
+      # GREEK LOWER NUMERAL SIGN, before a Greek character.
+      i + 1 < chars.size && Unicode.script(chars[i + 1]) == "Greek"
+    elsif cp == 0x05F3 || cp == 0x05F4
+      # HEBREW GERESH and GERSHAYIM, after a Hebrew character.
+      i > 0 && Unicode.script(chars[i - 1]) == "Hebrew"
+    elsif cp == 0x30FB
+      # KATAKANA MIDDLE DOT, in a label with Hiragana, Katakana or Han.
+      chars.any? do |other|
+        script = Unicode.script(other)
+        other.ord != 0x30FB && (script == "Hiragana" || script == "Katakana" || script == "Han")
+      end
+    elsif cp >= 0x0660 && cp <= 0x0669
+      # ARABIC-INDIC DIGITS, not with the extended ones.
+      !chars.any? { |other| other.ord >= 0x06F0 && other.ord <= 0x06F9 }
+    else
+      # EXTENDED ARABIC-INDIC DIGITS, not with the plain ones.
+      !chars.any? { |other| other.ord >= 0x0660 && other.ord <= 0x0669 }
+    end
+  end
+end

@@ -1,0 +1,2116 @@
+# TOML 1.0.0 (https://toml.io/en/v1.0.0), read and written in iyi alone:
+# a reader that answers a document as an `Any` or a `TOMLError` saying
+# what is wrong and where, a writer whose text reads back to the value it
+# was given, and `derive toml_serializable`.
+#
+# What it reads, which is all of 1.0.0:
+#   * Keys bare (`A-Za-z0-9_-`, digits alone too, always a string),
+#     quoted as a basic or a literal string (the empty `""` included), and
+#     dotted, with blanks around the dots.
+#   * Basic strings with the nine escapes the format has (`\b`, `\t`,
+#     `\n`, `\f`, `\r`, `\"`, `\\`, `\uXXXX`, `\UXXXXXXXX`, the last two
+#     naming a Unicode scalar value), literal strings, and the multi-line
+#     forms of both: the line break right after the opening `"""` or `'''`
+#     is dropped, a line-ending backslash drops the blanks and line breaks
+#     after it, and one or two quotes may stand just before the closing
+#     three. A CRLF inside a multi-line string is read as LF, as the spec
+#     allows and Python's `tomllib` does.
+#   * Integers decimal (`+`/`-`, no leading zero but `0`, `+0` and `-0`),
+#     `0x`, `0o` and `0b` (no sign, leading zeros allowed), an underscore
+#     only between two digits, into an `Int64`; floats with a fraction, an
+#     exponent or both (a digit on each side of the point), `inf` and
+#     `nan` with either sign, into a `Float64`, the nearest double to the
+#     decimal (the prelude's `String#to_f` rounds correctly).
+#   * `true` and `false`.
+#   * Offset date-times, local date-times, local dates and local times,
+#     each a `TOMLDateTime` that keeps its kind. `T`, `t` or a space
+#     between date and time, `Z`/`z` or `+HH:MM`/`-HH:MM` for the offset.
+#     Fractional seconds are kept to the nanosecond; digits past the ninth
+#     are dropped, which the spec allows ("truncated, not rounded").
+#   * Arrays of anything, mixed, across lines, with comments and a
+#     trailing comma; inline tables, on one line, closed to extension.
+#   * `[table]` and `[[array.of.tables]]` headers, with blanks inside the
+#     brackets, and the tables dotted keys open.
+#
+# Why its own date-time type and not std/time's `Time`: three of the four
+# kinds are not instants (a local date-time has no zone, a local date no
+# time, a local time no date), and an offset date-time keeps the offset it
+# was written with, which a `Time` turned to UTC would lose and `dump`
+# would then not write back. And std/time reads the clock and the zone
+# files, which this module, pure computation over a `String`, has no
+# reason to reach. `TOMLDateTime#unix_seconds` gives an offset date-time's
+# instant to whoever wants a `Time` of it.
+#
+# What it refuses, each a `TOMLError` naming the line and the column
+# (counted in characters, from 1) where the trouble is:
+#   * Text that is not UTF-8, and a byte order mark (the grammar has none,
+#     and `tomllib` refuses one too).
+#   * A control character other than tab in a comment or a string
+#     (U+0000-U+0008, U+000A-U+001F, U+007F), a CR not before an LF, a
+#     line break in a single-line string, an escape the format does not
+#     have (TOML 1.1's `\e` and `\xHH` among them) or one naming a
+#     surrogate or past U+10FFFF, a string that does not close, six or
+#     more quotes closing a multi-line string.
+#   * A key with no value or a value with no key, a key/value pair
+#     followed by more than a comment on its line, a bare key with a
+#     character outside its set, a multi-line string as a key.
+#   * An integer with a leading zero, a doubled, leading or trailing
+#     underscore, a sign on `0x`/`0o`/`0b`, an uppercase prefix, or a value
+#     past the `Int64` range (the spec requires the refusal; `tomllib`
+#     reads any size, so the gate compares these as this reader's own); a
+#     float with no digit on one side of its point (`.7`, `7.`, `3.e+20`).
+#   * A date that is not one (February 30th, month 13, hour 24, minute or
+#     second 60 - a leap second is refused, as `tomllib`'s datetime does),
+#     a time without its seconds (allowed only from TOML 1.1), an offset
+#     past 23:59, a date-time missing a part.
+#   * An array or an inline table that does not close, a missing comma, a
+#     trailing comma or a line break in an inline table.
+#   * Every redefinition the spec forbids: a key given twice (`a` and
+#     `"a"` are one key), a `[table]` declared twice, a `[table]` header
+#     naming a table that dotted keys made, dotted keys adding to a table
+#     a `[header]` declared or to one dotted keys made under another
+#     header, a header or dotted key going into an inline table or an
+#     array written as a value, `[[x]]` where `x` is a table or a static
+#     array, `[x]` where `x` is an array of tables, a value where a table
+#     is. A header may still go into a table dotted keys made
+#     (`[fruit.apple.texture]` after `apple.color = "red"` under
+#     `[fruit]`), and a super-table may be declared after its sub-table.
+#     These follow the spec's text and its examples, and where the text is
+#     silent, what `tomllib` does: dotted keys may add to a table a header
+#     made only on the way to another (`[a.b.c]` then `[a]` `b.d = 1`),
+#     and once they have, that table may not be declared by a header.
+#   * Nesting past DEPTH_LIMIT levels, counting tables, arrays and inline
+#     tables alike, so `==`, `dump` and `hash` over any value this reader
+#     answers stay within a task's stack.
+#
+# `TOML.parse(text)` answers `Any | TOMLError`; `TOML.parse?(text)` answers
+# nil where `parse` answers the error, as `JSON.parse?` and `YAML.parse?`
+# do. Neither panics on anything a document says. `TOML.parse(text).or_panic`
+# panics with the sentence, and `TOML.from_toml` panics as
+# `YAML.from_yaml` does.
+#
+# `TOML.dump(value)` writes a table as TOML that this reader and `tomllib`
+# read to an equal value: a table's plain keys first, as `key = value`,
+# then each sub-table under a `[header]` and each non-empty array whose
+# items are all tables as `[[header]]` entries; other arrays and tables
+# inside arrays are written inline. Keys are bare where the bare set
+# allows and quoted otherwise; strings are basic strings, with `"`, `\`
+# and every control character escaped (so no string spans lines); floats
+# are the shortest text that reads back as the same double, `inf`, `-inf`
+# and `nan` as TOML spells them. A value that is not a table cannot be a
+# document and is refused, a panic: that is the program's mistake.
+#
+# `derive toml_serializable` makes a type read and write itself as a
+# table, a key per field, as std/yaml's `derive yaml_serializable` does:
+# `to_toml`, `self.from_toml(text)`, `initialize(toml : Any)` and the
+# `ToTOML` trait's `to_toml_any`. TOML has no null: a nil field is left
+# out when written and a missing key reads as nil where the field admits
+# it; a nil anywhere else (inside an array, as a hash value) cannot be
+# written and is refused by name.
+#
+# `Any` holds a value: `raw` is the union, `as_x`/`as_x?` are the pairs,
+# `[]`/`[]?`/`dig`/`dig?` walk it, `==` is structural (two NaNs are equal,
+# a document that says `nan` twice says the same thing) and `hash` agrees
+# with it. As in std/yaml, every test of the union goes through
+# `Any#kind`, which tests the reference types first.
+
+module std/toml
+
+# What is wrong with a document, and where: `line` and `column` count from
+# 1, a column in characters. `message` is "<reason> at line L, column C".
+pub struct TOMLError
+  getter reason : String
+  getter line : Int32
+  getter column : Int32
+
+  def initialize(@reason : String, @line : Int32, @column : Int32)
+  end
+
+  def to_s : String
+    message
+  end
+end
+
+impl Error for TOMLError
+  def message : String
+    "#{@reason} at line #{@line}, column #{@column}"
+  end
+end
+
+# A TOML date, time or date-time, with its kind. An offset date-time has
+# every field and `offset_minutes` (0 for `Z`); a local date-time every
+# field but the offset; a local date the date fields alone, a local time
+# the time fields alone, the others 0. Two values are equal when their kind
+# and every field are: `07:32:00Z` and `08:32:00+01:00` are one instant
+# written two ways, and this keeps which way (`unix_seconds` says they are
+# the same instant).
+pub struct TOMLDateTime
+  OFFSET_DATE_TIME = 0
+  LOCAL_DATE_TIME  = 1
+  LOCAL_DATE       = 2
+  LOCAL_TIME       = 3
+
+  getter kind : Int32
+  getter year : Int32
+  getter month : Int32
+  getter day : Int32
+  getter hour : Int32
+  getter minute : Int32
+  getter second : Int32
+  getter nanosecond : Int32
+  getter offset_minutes : Int32
+
+  # Fields that do not make a value of the kind are the caller's mistake,
+  # refused with what is wrong; `problem` says it without panicking.
+  def initialize(@kind : Int32, @year : Int32, @month : Int32, @day : Int32, @hour : Int32, @minute : Int32, @second : Int32, @nanosecond : Int32, @offset_minutes : Int32)
+    wrong = TOMLDateTime.problem(@kind, @year, @month, @day, @hour, @minute, @second, @nanosecond, @offset_minutes)
+    raise "TOMLDateTime: #{wrong}" unless wrong.nil?
+  end
+
+  def self.offset_date_time(year : Int32, month : Int32, day : Int32, hour : Int32, minute : Int32, second : Int32, nanosecond : Int32 = 0, offset_minutes : Int32 = 0) : TOMLDateTime
+    new(OFFSET_DATE_TIME, year, month, day, hour, minute, second, nanosecond, offset_minutes)
+  end
+
+  def self.local_date_time(year : Int32, month : Int32, day : Int32, hour : Int32, minute : Int32, second : Int32, nanosecond : Int32 = 0) : TOMLDateTime
+    new(LOCAL_DATE_TIME, year, month, day, hour, minute, second, nanosecond, 0)
+  end
+
+  def self.local_date(year : Int32, month : Int32, day : Int32) : TOMLDateTime
+    new(LOCAL_DATE, year, month, day, 0, 0, 0, 0, 0)
+  end
+
+  def self.local_time(hour : Int32, minute : Int32, second : Int32, nanosecond : Int32 = 0) : TOMLDateTime
+    new(LOCAL_TIME, 0, 0, 0, hour, minute, second, nanosecond, 0)
+  end
+
+  # Nil when the fields make a value of `kind`, else what is wrong with
+  # them, as the reader and `new` both say it.
+  def self.problem(kind : Int32, year : Int32, month : Int32, day : Int32, hour : Int32, minute : Int32, second : Int32, nanosecond : Int32, offset_minutes : Int32) : String?
+    return "the kind #{kind} is none of the four" if kind < OFFSET_DATE_TIME || kind > LOCAL_TIME
+    if kind == LOCAL_TIME
+      return "a local time has no date" unless year == 0 && month == 0 && day == 0
+    else
+      return "the year #{year} is not 0 to 9999" if year < 0 || year > 9999
+      return "the month #{month} is not 1 to 12" if month < 1 || month > 12
+      last = days_in_month(year, month)
+      return "the day #{day} is not in #{pad(year, 4)}-#{pad(month, 2)}, which has #{last} days" if day < 1 || day > last
+    end
+    if kind == LOCAL_DATE
+      return "a local date has no time" unless hour == 0 && minute == 0 && second == 0 && nanosecond == 0
+    else
+      return "the hour #{hour} is not 0 to 23" if hour < 0 || hour > 23
+      return "the minute #{minute} is not 0 to 59" if minute < 0 || minute > 59
+      return "the second #{second} is not 0 to 59" if second < 0 || second > 59
+      return "the nanosecond #{nanosecond} is not 0 to 999999999" if nanosecond < 0 || nanosecond > 999_999_999
+    end
+    if kind == OFFSET_DATE_TIME
+      return "the offset #{offset_minutes} minutes is past 23:59" if offset_minutes < -1439 || offset_minutes > 1439
+    else
+      return "only an offset date-time has an offset" unless offset_minutes == 0
+    end
+    nil
+  end
+
+  def self.leap_year?(year : Int32) : Bool
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+  end
+
+  def self.days_in_month(year : Int32, month : Int32) : Int32
+    return 29 if month == 2 && leap_year?(year)
+    return 28 if month == 2
+    return 30 if month == 4 || month == 6 || month == 9 || month == 11
+    31
+  end
+
+  # `value` in decimal with zeros in front to `width` digits.
+  def self.pad(value : Int32, width : Int32) : String
+    text = value.to_s
+    while text.bytesize < width
+      text = "0" + text
+    end
+    text
+  end
+
+  def offset? : Bool
+    @kind == OFFSET_DATE_TIME
+  end
+
+  def local_date_time? : Bool
+    @kind == LOCAL_DATE_TIME
+  end
+
+  def local_date? : Bool
+    @kind == LOCAL_DATE
+  end
+
+  def local_time? : Bool
+    @kind == LOCAL_TIME
+  end
+
+  def kind_name : String
+    if @kind == OFFSET_DATE_TIME
+      "an offset date-time"
+    elsif @kind == LOCAL_DATE_TIME
+      "a local date-time"
+    elsif @kind == LOCAL_DATE
+      "a local date"
+    else
+      "a local time"
+    end
+  end
+
+  # Seconds since 1970-01-01T00:00:00Z of an offset date-time, the
+  # fraction left in `nanosecond`. The other three kinds name no instant.
+  def unix_seconds : Int64
+    raise "TOMLDateTime: #{kind_name} names no instant; only an offset date-time has unix seconds" unless offset?
+    # Days from the civil date, Howard Hinnant's `days_from_civil`.
+    y = @year.to_i64 - (@month <= 2 ? 1_i64 : 0_i64)
+    era = (y >= 0 ? y : y - 399) // 400
+    yoe = y - era * 400
+    mp = @month > 2 ? @month - 3 : @month + 9
+    doy = (153 * mp + 2) // 5 + @day - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    days = era * 146097 + doe - 719468
+    days * 86400 + @hour * 3600 + @minute * 60 + @second - @offset_minutes.to_i64 * 60
+  end
+
+  # As TOML writes it (RFC 3339 for an offset date-time): `T` between
+  # date and time, `Z` for a zero offset, the fraction with its trailing
+  # zeros dropped and left out when it is zero.
+  def to_s : String
+    text = String::Builder.new
+    if @kind != LOCAL_TIME
+      text << TOMLDateTime.pad(@year, 4) << "-" << TOMLDateTime.pad(@month, 2) << "-" << TOMLDateTime.pad(@day, 2)
+    end
+    text << "T" if @kind == OFFSET_DATE_TIME || @kind == LOCAL_DATE_TIME
+    if @kind != LOCAL_DATE
+      text << TOMLDateTime.pad(@hour, 2) << ":" << TOMLDateTime.pad(@minute, 2) << ":" << TOMLDateTime.pad(@second, 2)
+      if @nanosecond != 0
+        digits = TOMLDateTime.pad(@nanosecond, 9)
+        count = 9
+        while digits.to_unsafe[count - 1] == 48_u8
+          count = count - 1
+        end
+        text << "." << digits[0, count]
+      end
+    end
+    if @kind == OFFSET_DATE_TIME
+      if @offset_minutes == 0
+        text << "Z"
+      else
+        minutes = @offset_minutes < 0 ? -@offset_minutes : @offset_minutes
+        text << (@offset_minutes < 0 ? "-" : "+") << TOMLDateTime.pad(minutes // 60, 2) << ":" << TOMLDateTime.pad(minutes % 60, 2)
+      end
+    end
+    text.to_s
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  def ==(other : TOMLDateTime) : Bool
+    @kind == other.kind && @year == other.year && @month == other.month && @day == other.day &&
+      @hour == other.hour && @minute == other.minute && @second == other.second &&
+      @nanosecond == other.nanosecond && @offset_minutes == other.offset_minutes
+  end
+
+  def !=(other : TOMLDateTime) : Bool
+    !(self == other)
+  end
+
+  def hash : Int32
+    {@kind, @year, @month, @day, @hour, @minute, @second, @nanosecond, @offset_minutes}.hash
+  end
+end
+
+# The value a document holds. A document is a table: `TOML.parse` answers
+# an `Any` whose `raw` is a `Hash(String, Any)`.
+pub struct Any
+  KIND_BOOL     = 0
+  KIND_INT      = 1
+  KIND_FLOAT    = 2
+  KIND_STRING   = 3
+  KIND_DATETIME = 4
+  KIND_ARRAY    = 5
+  KIND_TABLE    = 6
+
+  alias Type = Bool | Int64 | Float64 | String | TOMLDateTime | Array(Any) | Hash(String, Any)
+
+  getter raw : Type
+
+  def initialize(@raw : Type)
+  end
+
+  def initialize(value : Int32)
+    @raw = value.to_i64
+  end
+
+  # Which member of the union `raw` is, as one of the KIND_ constants.
+  # Reference types are tested first, for the reason std/yaml's header
+  # gives.
+  def kind : Int32
+    r = @raw
+    if r.is_a?(Array(Any))
+      KIND_ARRAY
+    elsif r.is_a?(Hash(String, Any))
+      KIND_TABLE
+    elsif r.is_a?(String)
+      KIND_STRING
+    elsif r.is_a?(TOMLDateTime)
+      KIND_DATETIME
+    elsif r.is_a?(Int64)
+      KIND_INT
+    elsif r.is_a?(Float64)
+      KIND_FLOAT
+    else
+      KIND_BOOL
+    end
+  end
+
+  # The name of the kind, for the sentences below.
+  def kind_name : String
+    k = kind
+    if k == KIND_ARRAY
+      "an array"
+    elsif k == KIND_TABLE
+      "a table"
+    elsif k == KIND_STRING
+      "a string"
+    elsif k == KIND_DATETIME
+      @raw.as(TOMLDateTime).kind_name
+    elsif k == KIND_INT
+      "an integer"
+    elsif k == KIND_FLOAT
+      "a float"
+    else
+      "a boolean"
+    end
+  end
+
+  def as_bool : Bool
+    raise "expected a boolean, not #{kind_name}" unless kind == KIND_BOOL
+    @raw.as(Bool)
+  end
+
+  def as_bool? : Bool?
+    kind == KIND_BOOL ? @raw.as(Bool) : nil
+  end
+
+  def as_i : Int64
+    raise "expected an integer, not #{kind_name}" unless kind == KIND_INT
+    @raw.as(Int64)
+  end
+
+  def as_i? : Int64?
+    kind == KIND_INT ? @raw.as(Int64) : nil
+  end
+
+  # A float, or an integer widened to one.
+  def as_f : Float64
+    k = kind
+    return @raw.as(Float64) if k == KIND_FLOAT
+    return @raw.as(Int64).to_f64 if k == KIND_INT
+    raise "expected a float, not #{kind_name}"
+  end
+
+  def as_f? : Float64?
+    k = kind
+    return @raw.as(Float64) if k == KIND_FLOAT
+    return @raw.as(Int64).to_f64 if k == KIND_INT
+    nil
+  end
+
+  def as_s : String
+    raise "expected a string, not #{kind_name}" unless kind == KIND_STRING
+    @raw.as(String)
+  end
+
+  def as_s? : String?
+    kind == KIND_STRING ? @raw.as(String) : nil
+  end
+
+  def as_datetime : TOMLDateTime
+    raise "expected a date or time, not #{kind_name}" unless kind == KIND_DATETIME
+    @raw.as(TOMLDateTime)
+  end
+
+  def as_datetime? : TOMLDateTime?
+    kind == KIND_DATETIME ? @raw.as(TOMLDateTime) : nil
+  end
+
+  def as_a : Array(Any)
+    raise "expected an array, not #{kind_name}" unless kind == KIND_ARRAY
+    @raw.as(Array(Any))
+  end
+
+  def as_a? : Array(Any)?
+    kind == KIND_ARRAY ? @raw.as(Array(Any)) : nil
+  end
+
+  def as_h : Hash(String, Any)
+    raise "expected a table, not #{kind_name}" unless kind == KIND_TABLE
+    @raw.as(Hash(String, Any))
+  end
+
+  def as_h? : Hash(String, Any)?
+    kind == KIND_TABLE ? @raw.as(Hash(String, Any)) : nil
+  end
+
+  # Items of an array, keys of a table, characters of a string.
+  def size : Int32
+    k = kind
+    return @raw.as(Array(Any)).size if k == KIND_ARRAY
+    return @raw.as(Hash(String, Any)).size if k == KIND_TABLE
+    return @raw.as(String).size if k == KIND_STRING
+    raise "#{kind_name} has no size"
+  end
+
+  def [](key : String) : Any
+    h = as_h
+    found = h[key]?
+    raise "no such key #{key.inspect}" if found.nil?
+    found
+  end
+
+  def []?(key : String) : Any?
+    h = as_h?
+    return nil if h.nil?
+    h[key]?
+  end
+
+  def [](index : Int32) : Any
+    as_a[index]
+  end
+
+  def []?(index : Int32) : Any?
+    a = as_a?
+    return nil if a.nil?
+    a[index]?
+  end
+
+  def dig?(key : String | Int32) : Any?
+    step?(key)
+  end
+
+  def dig?(key : String | Int32, *rest : String | Int32) : Any?
+    v = step?(key)
+    return nil if v.nil?
+    v.dig?(*rest)
+  end
+
+  def dig(key : String | Int32) : Any
+    step(key)
+  end
+
+  def dig(key : String | Int32, *rest : String | Int32) : Any
+    step(key).dig(*rest)
+  end
+
+  private def step?(key : String | Int32) : Any?
+    if key.is_a?(String)
+      self[key]?
+    else
+      self[key]?
+    end
+  end
+
+  private def step(key : String | Int32) : Any
+    if key.is_a?(String)
+      self[key]
+    else
+      self[key]
+    end
+  end
+
+  # Structural: same kind, same value; a table equals a table with the
+  # same pairs in any order. `1` and `1.0` are different values, two NaNs
+  # the same one, and `0.0` equals `-0.0` as the doubles do. Arrays and
+  # tables are compared in methods of their own and scalars in a third,
+  # so the frames a deep value recurses through stay small: with all of
+  # it here, comparing two arrays nested 100 deep overflowed a task's
+  # stack in a plain build.
+  def ==(other : Any) : Bool
+    k = kind
+    return false unless k == other.kind
+    return same_items?(other) if k == KIND_ARRAY
+    return same_pairs?(other) if k == KIND_TABLE
+    same_scalar?(other, k)
+  end
+
+  private def same_items?(other : Any) : Bool
+    a = @raw.as(Array(Any))
+    b = other.raw.as(Array(Any))
+    return false unless a.size == b.size
+    i = 0
+    while i < a.size
+      return false unless a[i] == b[i]
+      i = i + 1
+    end
+    true
+  end
+
+  private def same_pairs?(other : Any) : Bool
+    a = @raw.as(Hash(String, Any))
+    b = other.raw.as(Hash(String, Any))
+    return false unless a.size == b.size
+    a.each do |key, value|
+      found = b[key]?
+      return false if found.nil?
+      return false unless found == value
+    end
+    true
+  end
+
+  private def same_scalar?(other : Any, k : Int32) : Bool
+    if k == KIND_STRING
+      @raw.as(String) == other.raw.as(String)
+    elsif k == KIND_DATETIME
+      @raw.as(TOMLDateTime) == other.raw.as(TOMLDateTime)
+    elsif k == KIND_INT
+      @raw.as(Int64) == other.raw.as(Int64)
+    elsif k == KIND_FLOAT
+      x = @raw.as(Float64)
+      y = other.raw.as(Float64)
+      x == y || (x != x && y != y)
+    else
+      @raw.as(Bool) == other.raw.as(Bool)
+    end
+  end
+
+  def !=(other : Any) : Bool
+    !(self == other)
+  end
+
+  # Agrees with `==`: a table's hash does not depend on its order, `0.0`
+  # and `-0.0` share one and so do all NaNs. Mixed as std/yaml's `Any`
+  # mixes, for the spread that file measured.
+  def hash : Int32
+    k = kind
+    if k == KIND_ARRAY
+      @raw.as(Array(Any)).hash
+    elsif k == KIND_TABLE
+      pairs = @raw.as(Hash(String, Any))
+      value = 0
+      pairs.each { |key, item| value = value &+ {key, item}.hash }
+      {value, pairs.size}.hash
+    elsif k == KIND_STRING
+      @raw.as(String).hash
+    elsif k == KIND_DATETIME
+      @raw.as(TOMLDateTime).hash
+    elsif k == KIND_INT
+      @raw.as(Int64).hash
+    elsif k == KIND_FLOAT
+      f = @raw.as(Float64)
+      return 3 if f == 0.0
+      return 5 if f != f
+      bits = IyiFloatText.bits_of(f)
+      ((bits ^ bits.unsafe_shr(32_u64)) & 0x7FFFFFFF_u64).to_i32
+    else
+      @raw.as(Bool) ? 1 : 2
+    end
+  end
+
+  # A string as itself, anything else as `inspect` writes it.
+  def to_s : String
+    kind == KIND_STRING ? @raw.as(String) : inspect
+  end
+
+  # A value as TOML writes it inline: strings quoted and escaped, floats
+  # as `dump` spells them, tables as inline tables.
+  def inspect : String
+    Writer.new.inline_text(self)
+  end
+end
+
+# One key of a table while the reader builds it: a value written in the
+# text (a scalar, an array or an inline table, all closed to headers and
+# dotted keys), a table headers and dotted keys may open, or an array of
+# tables `[[...]]` appends to.
+class Slot
+  VALUE  = 0
+  TABLE  = 1
+  TABLES = 2
+
+  getter kind : Int32
+  getter value : Any
+  getter table : Table?
+  getter tables : Array(Table)?
+
+  def initialize(@kind : Int32, @value : Any, @table : Table?, @tables : Array(Table)?)
+  end
+
+  def self.value(value : Any) : Slot
+    new(VALUE, value, nil, nil)
+  end
+
+  def self.table(table : Table) : Slot
+    new(TABLE, Any.new(false), table, nil)
+  end
+
+  def self.tables(first : Table) : Slot
+    new(TABLES, Any.new(false), nil, [first])
+  end
+
+  def to_any : Any
+    t = @table
+    return t.to_any unless t.nil?
+    list = @tables
+    return Any.new(list.map { |item| item.to_any }) unless list.nil?
+    @value
+  end
+end
+
+# A table being built, and what the redefinition rules need to know of it:
+# whether a `[header]` declared it (`explicit`), and whether dotted keys
+# made it or went through it (`dotted`). A table a header made only on
+# the way to another has neither. Dotted keys may go through a table
+# that is not `explicit`, and a header may declare one that is neither.
+# The spec's other rule - dotted keys under one header may not add to a
+# table dotted keys under another made - needs no record of its own: a
+# header is declared once, so two sections reaching one table by dotted
+# keys would have to go through a table one of them declared, or one the
+# other's dotted keys made and a header then declared, and both of those
+# are refused here. 20,000 random documents of headers, arrays of tables,
+# dotted keys and inline values over three key names, compared against
+# `tomllib`, found no document the two read differently.
+class Table
+  getter slots : Hash(String, Slot)
+  getter depth : Int32
+  property explicit : Bool
+  property dotted : Bool
+
+  def initialize(@depth : Int32, @explicit : Bool, @dotted : Bool)
+    @slots = Hash(String, Slot).new
+  end
+
+  def to_any : Any
+    pairs = Hash(String, Any).new
+    @slots.each { |key, slot| pairs[key] = slot.to_any }
+    Any.new(pairs)
+  end
+end
+
+# Reads one document. Each step answers what it read or the `TOMLError`
+# that stops the read, passed up with `!`; nothing is raised inside.
+class Reader
+  # Deep enough for any document a person wrote, and shallow enough that
+  # reading the deepest value this answers, and `==`, `hash`, `dump` and
+  # `inspect` over it, run in a task's 256 KB stack with room left for
+  # whatever called them. Measured in a plain build, with the limit
+  # lifted: inline tables nested 110 deep read in a task and 120 ran out
+  # of stack; arrays, 160 and 200. At 64 the deepest inline table uses a
+  # little over half of what overflowed. `bench/std_toml_exercise.iyi`
+  # reads, compares, hashes, dumps and inspects values DEPTH_LIMIT deep,
+  # each kind of nesting, in a task.
+  DEPTH_LIMIT = 64
+
+  @bytes : Pointer(UInt8)
+  @size : Int32
+  @pos : Int32
+  @root : Table
+  @current : Table
+  # The current header's key, for the sentences.
+  @path : Array(String)
+
+  def initialize(text : String)
+    @bytes = text.to_unsafe
+    @size = text.bytesize
+    @pos = 0
+    @root = Table.new(0, true, false)
+    @current = @root
+    @path = [] of String
+  end
+
+  def document : Any | TOMLError
+    utf8!
+    while true
+      skip_blanks
+      break if @pos >= @size
+      b = @bytes[@pos]
+      if b == 10_u8 || b == 13_u8
+        line_end!
+      elsif b == 35_u8
+        line_end!
+      elsif b == 91_u8
+        header!
+        line_end!
+      else
+        pair(@current, @path)!
+        line_end!
+      end
+    end
+    @root.to_any
+  end
+
+  # The error for `reason` at byte `at`: its line, and its column counted
+  # in characters (a UTF-8 continuation byte is not one).
+  private def fail(reason : String, at : Int32) : TOMLError
+    at = @size if at > @size
+    line = 1
+    column = 1
+    i = 0
+    while i < at
+      b = @bytes[i]
+      if b == 10_u8
+        line = line + 1
+        column = 1
+      elsif (b & 192_u8) != 128_u8
+        column = column + 1
+      end
+      i = i + 1
+    end
+    TOMLError.new(reason, line, column)
+  end
+
+  # What is at byte `at`, for a sentence.
+  private def found(at : Int32) : String
+    return "the end of the document" if at >= @size
+    b = @bytes[at]
+    return "a line break" if b == 10_u8 || b == 13_u8
+    return "a tab" if b == 9_u8
+    return "the control character U+#{b.to_s(16).upcase.rjust(4, '0')}" if b < 32_u8 || b == 127_u8
+    return "'#{b.unsafe_chr}'" if b < 128_u8
+    "'#{Reader.text_of(@bytes + at, sequence_size(b))}'"
+  end
+
+  # `count` bytes at `source`, as a string of their own.
+  def self.text_of(source : Pointer(UInt8), count : Int32) : String
+    String.new(count) { |target| target.copy_from(source, count) }
+  end
+
+  private def sequence_size(b : UInt8) : Int32
+    return 4 if b >= 0xF0_u8
+    return 3 if b >= 0xE0_u8
+    2
+  end
+
+  # The whole text is UTF-8 (RFC 3629: no overlong form, no surrogate,
+  # nothing past U+10FFFF), and does not start with a byte order mark.
+  private def utf8 : Nil | TOMLError
+    if @size >= 3 && @bytes[0] == 0xEF_u8 && @bytes[1] == 0xBB_u8 && @bytes[2] == 0xBF_u8
+      return fail("a byte order mark, which a TOML document does not start with", 0)
+    end
+    i = 0
+    while i < @size
+      b = @bytes[i]
+      if b < 0x80_u8
+        i = i + 1
+        next
+      end
+      need = 0
+      low = 0x80_u8
+      high = 0xBF_u8
+      if b >= 0xC2_u8 && b <= 0xDF_u8
+        need = 1
+      elsif b >= 0xE0_u8 && b <= 0xEF_u8
+        need = 2
+        low = 0xA0_u8 if b == 0xE0_u8
+        high = 0x9F_u8 if b == 0xED_u8
+      elsif b >= 0xF0_u8 && b <= 0xF4_u8
+        need = 3
+        low = 0x90_u8 if b == 0xF0_u8
+        high = 0x8F_u8 if b == 0xF4_u8
+      else
+        return fail("the byte 0x#{b.to_s(16).upcase}, which is not UTF-8", i)
+      end
+      j = 1
+      while j <= need
+        if i + j >= @size
+          return fail("a UTF-8 sequence cut short by the end of the document", i)
+        end
+        c = @bytes[i + j]
+        lo = j == 1 ? low : 0x80_u8
+        hi = j == 1 ? high : 0xBF_u8
+        return fail("the byte 0x#{b.to_s(16).upcase} followed by 0x#{c.to_s(16).upcase}, which is not UTF-8", i) if c < lo || c > hi
+        j = j + 1
+      end
+      i = i + need + 1
+    end
+    nil
+  end
+
+  private def skip_blanks : Nil
+    while @pos < @size && (@bytes[@pos] == 32_u8 || @bytes[@pos] == 9_u8)
+      @pos = @pos + 1
+    end
+  end
+
+  # A comment from its `#` to the line break, which is left for the
+  # caller. A control character but tab is refused in one.
+  private def comment : Nil | TOMLError
+    @pos = @pos + 1
+    while @pos < @size
+      b = @bytes[@pos]
+      return nil if b == 10_u8
+      return nil if b == 13_u8 && @pos + 1 < @size && @bytes[@pos + 1] == 10_u8
+      if (b < 32_u8 && b != 9_u8) || b == 127_u8
+        return fail("#{found(@pos)} in a comment", @pos)
+      end
+      @pos = @pos + 1
+    end
+    nil
+  end
+
+  # Blanks, a comment, and the line break (LF or CRLF) or the end of the
+  # document: what must follow a key/value pair or a header.
+  private def line_end : Nil | TOMLError
+    skip_blanks
+    comment! if @pos < @size && @bytes[@pos] == 35_u8
+    return nil if @pos >= @size
+    b = @bytes[@pos]
+    if b == 10_u8
+      @pos = @pos + 1
+      return nil
+    end
+    if b == 13_u8 && @pos + 1 < @size && @bytes[@pos + 1] == 10_u8
+      @pos = @pos + 2
+      return nil
+    end
+    return fail("a carriage return not followed by a line feed", @pos) if b == 13_u8
+    fail("#{found(@pos)} after the end of a statement, where the line should end", @pos)
+  end
+
+  # Blanks, comments and line breaks, as an array may hold between items.
+  private def skip_space : Nil | TOMLError
+    while @pos < @size
+      b = @bytes[@pos]
+      if b == 32_u8 || b == 9_u8 || b == 10_u8
+        @pos = @pos + 1
+      elsif b == 13_u8
+        return fail("a carriage return not followed by a line feed", @pos) unless @pos + 1 < @size && @bytes[@pos + 1] == 10_u8
+        @pos = @pos + 2
+      elsif b == 35_u8
+        comment!
+      else
+        return nil
+      end
+    end
+    nil
+  end
+
+  private def bare?(b : UInt8) : Bool
+    (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8) || b == 95_u8 || b == 45_u8
+  end
+
+  # A key: its parts, and where each starts, into the two arrays.
+  private def key(parts : Array(String), starts : Array(Int32)) : Nil | TOMLError
+    while true
+      skip_blanks
+      starts << @pos
+      parts << simple_key!
+      skip_blanks
+      break unless @pos < @size && @bytes[@pos] == 46_u8
+      @pos = @pos + 1
+    end
+    nil
+  end
+
+  private def simple_key : String | TOMLError
+    return fail("a key expected, and the document ended", @pos) if @pos >= @size
+    b = @bytes[@pos]
+    if b == 34_u8
+      if @pos + 2 < @size && @bytes[@pos + 1] == 34_u8 && @bytes[@pos + 2] == 34_u8
+        return fail("a multi-line string cannot be a key", @pos)
+      end
+      return basic_string
+    end
+    if b == 39_u8
+      if @pos + 2 < @size && @bytes[@pos + 1] == 39_u8 && @bytes[@pos + 2] == 39_u8
+        return fail("a multi-line string cannot be a key", @pos)
+      end
+      return literal_string
+    end
+    return fail("#{found(@pos)} cannot start a key", @pos) unless bare?(b)
+    start = @pos
+    while @pos < @size && bare?(@bytes[@pos])
+      @pos = @pos + 1
+    end
+    Reader.text_of(@bytes + start, @pos - start)
+  end
+
+  # The dotted name of the first `count` parts of `path` + `parts`.
+  private def name(path : Array(String), parts : Array(String), count : Int32) : String
+    text = String::Builder.new
+    first = true
+    path.each do |part|
+      text << "." unless first
+      text << Writer.key_text(part)
+      first = false
+    end
+    i = 0
+    while i < count
+      text << "." unless first
+      text << Writer.key_text(parts[i])
+      first = false
+      i = i + 1
+    end
+    text.to_s
+  end
+
+  # Why the value in `slot` cannot be gone into as a table.
+  private def closed(slot : Slot, what : String) : String
+    value = slot.value
+    return "the inline table #{what} is closed: no header or dotted key adds to it" if value.kind == Any::KIND_TABLE
+    return "the array #{what} was written as a value, which no header or dotted key adds to" if value.kind == Any::KIND_ARRAY
+    "#{what} is #{value.kind_name}, not a table"
+  end
+
+  # `key = value`, into `table`, whose header's key is `path`.
+  private def pair(table : Table, path : Array(String)) : Nil | TOMLError
+    parts = [] of String
+    starts = [] of Int32
+    key(parts, starts)!
+    unless @pos < @size && @bytes[@pos] == 61_u8
+      return no_equals(path, parts)
+    end
+    @pos = @pos + 1
+    skip_blanks
+    item = value(table.depth + parts.size)!
+    place(table, path, parts, starts, item)
+  end
+
+  # Puts `item` at the dotted key `parts` (which start at `starts`) of
+  # `table`, opening the tables on the way as the rules allow.
+  private def place(table : Table, path : Array(String), parts : Array(String), starts : Array(Int32), item : Any) : Nil | TOMLError
+    t = table
+    i = 0
+    while i < parts.size - 1
+      slot = t.slots[parts[i]]?
+      if slot.nil?
+        child = Table.new(t.depth + 1, false, true)
+        t.slots[parts[i]] = Slot.table(child)
+        t = child
+      else
+        child = slot.table
+        if child.nil?
+          what = name(path, parts, i + 1)
+          return fail("#{what} is an array of tables, which dotted keys do not add to", starts[i]) if slot.kind == Slot::TABLES
+          return fail(closed(slot, what), starts[i])
+        end
+        if child.explicit
+          return fail("dotted keys add to the table #{name(path, parts, i + 1)}, which a [#{name(path, parts, i + 1)}] header declared", starts[i])
+        end
+        child.dotted = true
+        t = child
+      end
+      i = i + 1
+    end
+    last = parts[parts.size - 1]
+    unless t.slots[last]?.nil?
+      return fail("the key #{name(path, parts, parts.size)} is defined twice", starts[parts.size - 1])
+    end
+    t.slots[last] = Slot.value(item)
+    nil
+  end
+
+  # `[key]` or `[[key]]`, which the following pairs go into.
+  private def header : Nil | TOMLError
+    start = @pos
+    array = @pos + 1 < @size && @bytes[@pos + 1] == 91_u8
+    @pos = @pos + (array ? 2 : 1)
+    parts = [] of String
+    starts = [] of Int32
+    key(parts, starts)!
+    closer = array ? "]]" : "]"
+    unless @pos < @size && @bytes[@pos] == 93_u8 && (!array || (@pos + 1 < @size && @bytes[@pos + 1] == 93_u8))
+      return fail("#{found(@pos)} where the header's #{closer} should be", @pos)
+    end
+    @pos = @pos + closer.bytesize
+    empty = [] of String
+    if parts.size > DEPTH_LIMIT
+      return fail("a header #{parts.size} keys deep, past the #{DEPTH_LIMIT} levels this reader nests", start)
+    end
+    t = @root
+    i = 0
+    while i < parts.size - 1
+      slot = t.slots[parts[i]]?
+      if slot.nil?
+        child = Table.new(t.depth + 1, false, false)
+        t.slots[parts[i]] = Slot.table(child)
+        t = child
+      else
+        child = slot.table
+        list = slot.tables
+        if !child.nil?
+          t = child
+        elsif !list.nil?
+          t = list[list.size - 1]
+        else
+          return fail(closed(slot, name(empty, parts, i + 1)), starts[i])
+        end
+      end
+      i = i + 1
+    end
+    last = parts[parts.size - 1]
+    whole = name(empty, parts, parts.size)
+    slot = t.slots[last]?
+    target = t
+    if array
+      if slot.nil?
+        target = Table.new(t.depth + 1, true, false)
+        t.slots[last] = Slot.tables(target)
+      else
+        list = slot.tables
+        if !list.nil?
+          target = Table.new(t.depth + 1, true, false)
+          list << target
+        elsif slot.kind == Slot::TABLE
+          return fail("[[#{whole}]] names the table #{whole}, not an array of tables", starts[parts.size - 1])
+        else
+          return fail(closed(slot, whole), starts[parts.size - 1])
+        end
+      end
+    else
+      if slot.nil?
+        target = Table.new(t.depth + 1, true, false)
+        t.slots[last] = Slot.table(target)
+      else
+        child = slot.table
+        if child.nil?
+          return fail("[#{whole}] names an array of tables, which [[#{whole}]] adds to", starts[parts.size - 1]) if slot.kind == Slot::TABLES
+          return fail(closed(slot, whole), starts[parts.size - 1])
+        end
+        return fail("the table [#{whole}] is declared twice", starts[parts.size - 1]) if child.explicit
+        return fail("[#{whole}] declares a table dotted keys made", starts[parts.size - 1]) if child.dotted
+        child.explicit = true
+        target = child
+      end
+    end
+    @current = target
+    @path = parts
+    nil
+  end
+
+  # A value, `depth` levels down from the document. Only arrays and
+  # inline tables come back here, so this and they are kept small and
+  # what reads a scalar is a frame of its own: with the scalars read in
+  # this method, a plain build's task overflowed its 256 KB stack at
+  # about 80 nested arrays.
+  private def value(depth : Int32) : Any | TOMLError
+    return fail("a value expected, and the document ended", @pos) if @pos >= @size
+    if depth > DEPTH_LIMIT
+      return too_deep(depth)
+    end
+    b = @bytes[@pos]
+    return array(depth) if b == 91_u8
+    return inline_table(depth) if b == 123_u8
+    scalar
+  end
+
+  # The sentences of the methods a nested value recurses through, built
+  # here so that their frames do not hold what building them takes.
+  private def too_deep(depth : Int32) : TOMLError
+    fail("a value #{depth} levels deep, past the #{DEPTH_LIMIT} this reader nests", @pos)
+  end
+
+  private def no_equals(path : Array(String), parts : Array(String)) : TOMLError
+    fail("#{found(@pos)} after the key #{name(path, parts, parts.size)}, where '=' should be", @pos)
+  end
+
+  private def unexpected(rest : String) : TOMLError
+    fail("#{found(@pos)}#{rest}", @pos)
+  end
+
+  private def scalar : Any | TOMLError
+    b = @bytes[@pos]
+    if b == 34_u8
+      if @pos + 2 < @size && @bytes[@pos + 1] == 34_u8 && @bytes[@pos + 2] == 34_u8
+        return Any.new(multiline_basic!)
+      end
+      return Any.new(basic_string!)
+    end
+    if b == 39_u8
+      if @pos + 2 < @size && @bytes[@pos + 1] == 39_u8 && @bytes[@pos + 2] == 39_u8
+        return Any.new(multiline_literal!)
+      end
+      return Any.new(literal_string!)
+    end
+    return Any.new(true) if word?("true")
+    return Any.new(false) if word?("false")
+    if digit?(@pos) && digit?(@pos + 1) && digit?(@pos + 2) && digit?(@pos + 3) && byte?(@pos + 4, 45_u8)
+      return date_time
+    end
+    return date_time if digit?(@pos) && digit?(@pos + 1) && byte?(@pos + 2, 58_u8)
+    return number if b == 43_u8 || b == 45_u8 || b == 105_u8 || b == 110_u8 || (b >= 48_u8 && b <= 57_u8)
+    fail("#{found(@pos)} cannot start a value", @pos)
+  end
+
+  private def word?(text : String) : Bool
+    n = text.bytesize
+    return false if @pos + n > @size
+    i = 0
+    while i < n
+      return false unless @bytes[@pos + i] == text.to_unsafe[i]
+      i = i + 1
+    end
+    @pos = @pos + n
+    true
+  end
+
+  private def digit?(at : Int32) : Bool
+    at < @size && @bytes[at] >= 48_u8 && @bytes[at] <= 57_u8
+  end
+
+  private def byte?(at : Int32, b : UInt8) : Bool
+    at < @size && @bytes[at] == b
+  end
+
+  # Two (or four) digits at `at`, as a number.
+  private def digits(at : Int32, count : Int32) : Int32
+    value = 0
+    i = 0
+    while i < count
+      value = value * 10 + (@bytes[at + i] - 48_u8).to_i32
+      i = i + 1
+    end
+    value
+  end
+
+  private def all_digits?(at : Int32, count : Int32) : Bool
+    i = 0
+    while i < count
+      return false unless digit?(at + i)
+      i = i + 1
+    end
+    true
+  end
+
+  # A local date, a local or offset date-time, or a local time.
+  private def date_time : Any | TOMLError
+    start = @pos
+    year = 0
+    month = 0
+    day = 0
+    dated = false
+    if byte?(@pos + 4, 45_u8)
+      unless all_digits?(@pos, 4) && all_digits?(@pos + 5, 2) && byte?(@pos + 7, 45_u8) && all_digits?(@pos + 8, 2)
+        return fail("a date is written YYYY-MM-DD", start)
+      end
+      year = digits(@pos, 4)
+      month = digits(@pos + 5, 2)
+      day = digits(@pos + 8, 2)
+      @pos = @pos + 10
+      dated = true
+      # A time follows after `T`, `t`, or a space and a digit: a space and
+      # anything else ends the value, and is the line's business.
+      if byte?(@pos, 84_u8) || byte?(@pos, 116_u8) || (byte?(@pos, 32_u8) && digit?(@pos + 1))
+        @pos = @pos + 1
+      else
+        wrong = TOMLDateTime.problem(TOMLDateTime::LOCAL_DATE, year, month, day, 0, 0, 0, 0, 0)
+        return fail("#{wrong}", start) unless wrong.nil?
+        return Any.new(TOMLDateTime.local_date(year, month, day))
+      end
+    end
+    unless all_digits?(@pos, 2) && byte?(@pos + 2, 58_u8) && all_digits?(@pos + 3, 2)
+      return fail("a time is written HH:MM:SS", @pos)
+    end
+    hour = digits(@pos, 2)
+    minute = digits(@pos + 3, 2)
+    unless byte?(@pos + 5, 58_u8) && all_digits?(@pos + 6, 2)
+      return fail("a time without its seconds, which TOML 1.0 does not allow", @pos)
+    end
+    second = digits(@pos + 6, 2)
+    @pos = @pos + 8
+    nanosecond = 0
+    if byte?(@pos, 46_u8)
+      @pos = @pos + 1
+      return fail("a '.' in a time with no digit after it", @pos - 1) unless digit?(@pos)
+      scale = 100_000_000
+      while digit?(@pos)
+        nanosecond = nanosecond + (@bytes[@pos] - 48_u8).to_i32 * scale
+        scale = scale // 10
+        @pos = @pos + 1
+      end
+    end
+    kind = dated ? TOMLDateTime::LOCAL_DATE_TIME : TOMLDateTime::LOCAL_TIME
+    offset = 0
+    if dated
+      if byte?(@pos, 90_u8) || byte?(@pos, 122_u8)
+        kind = TOMLDateTime::OFFSET_DATE_TIME
+        @pos = @pos + 1
+      elsif byte?(@pos, 43_u8) || byte?(@pos, 45_u8)
+        sign = @bytes[@pos] == 45_u8 ? -1 : 1
+        unless all_digits?(@pos + 1, 2) && byte?(@pos + 3, 58_u8) && all_digits?(@pos + 4, 2)
+          return fail("an offset is written +HH:MM or -HH:MM", @pos)
+        end
+        oh = digits(@pos + 1, 2)
+        om = digits(@pos + 4, 2)
+        return fail("the offset hour #{oh} is not 0 to 23", @pos) if oh > 23
+        return fail("the offset minute #{om} is not 0 to 59", @pos) if om > 59
+        offset = sign * (oh * 60 + om)
+        kind = TOMLDateTime::OFFSET_DATE_TIME
+        @pos = @pos + 6
+      end
+    end
+    wrong = TOMLDateTime.problem(kind, year, month, day, hour, minute, second, nanosecond, offset)
+    return fail("#{wrong}", start) unless wrong.nil?
+    Any.new(TOMLDateTime.new(kind, year, month, day, hour, minute, second, nanosecond, offset))
+  end
+
+  private def radix_digit(b : UInt8, radix : Int32) : Int32
+    d = -1
+    if b >= 48_u8 && b <= 57_u8
+      d = (b - 48_u8).to_i32
+    elsif b >= 97_u8 && b <= 102_u8
+      d = (b - 87_u8).to_i32
+    elsif b >= 65_u8 && b <= 70_u8
+      d = (b - 55_u8).to_i32
+    end
+    d < radix ? d : -1
+  end
+
+  # Where a run of digits in `radix`, an underscore only between two of
+  # them, ends after `at`; -1 when there is no digit at `at` or an
+  # underscore is out of place.
+  private def digit_run(at : Int32, stop : Int32, radix : Int32) : Int32
+    return -1 unless at < stop && radix_digit(@bytes[at], radix) >= 0
+    i = at + 1
+    while i < stop
+      b = @bytes[i]
+      if b == 95_u8
+        return -1 unless i + 1 < stop && radix_digit(@bytes[i + 1], radix) >= 0
+        i = i + 2
+      elsif radix_digit(b, radix) >= 0
+        i = i + 1
+      else
+        return i
+      end
+    end
+    i
+  end
+
+  # An integer or a float. The token is every byte a number can hold;
+  # what it holds is then checked against the grammar as a whole.
+  private def number : Any | TOMLError
+    start = @pos
+    stop = @pos
+    while stop < @size
+      b = @bytes[stop]
+      break unless bare?(b) || b == 43_u8 || b == 46_u8
+      stop = stop + 1
+    end
+    token = Reader.text_of(@bytes + start, stop - start)
+    i = start
+    negative = false
+    signed = false
+    if @bytes[i] == 43_u8 || @bytes[i] == 45_u8
+      negative = @bytes[i] == 45_u8
+      signed = true
+      i = i + 1
+    end
+    rest = stop - i
+    if rest == 3 && (@bytes[i] == 105_u8 || @bytes[i] == 110_u8)
+      word = Reader.text_of(@bytes + i, 3)
+      if word == "inf"
+        @pos = stop
+        return Any.new(negative ? -1.0 / 0.0 : 1.0 / 0.0)
+      end
+      if word == "nan"
+        @pos = stop
+        return Any.new(0.0 / 0.0)
+      end
+    end
+    if rest >= 2 && @bytes[i] == 48_u8 && (@bytes[i + 1] == 120_u8 || @bytes[i + 1] == 111_u8 || @bytes[i + 1] == 98_u8)
+      radix = @bytes[i + 1] == 120_u8 ? 16 : (@bytes[i + 1] == 111_u8 ? 8 : 2)
+      return fail("a sign before #{token}, which only a decimal number may have", start) if signed
+      finish = digit_run(i + 2, stop, radix)
+      return fail("#{token} is not a number", start) unless finish == stop
+      value = 0_u64
+      j = i + 2
+      while j < stop
+        d = radix_digit(@bytes[j], radix)
+        if d >= 0
+          return fail("#{token} is past 9223372036854775807, the largest TOML integer", start) if value > (9223372036854775807_u64 - d.to_u64) // radix.to_u64
+          value = value * radix.to_u64 + d.to_u64
+        end
+        j = j + 1
+      end
+      @pos = stop
+      return Any.new(value.to_i64)
+    end
+    whole = digit_run(i, stop, 10)
+    return fail("#{token} is not a number", start) if whole < 0
+    if @bytes[i] == 48_u8 && whole > i + 1
+      return fail("#{token} has a leading zero, which only 0 may", start)
+    end
+    j = whole
+    float = false
+    if j < stop && @bytes[j] == 46_u8
+      j = digit_run(j + 1, stop, 10)
+      return fail("#{token} needs a digit after its '.'", start) if j < 0
+      float = true
+    end
+    if j < stop && (@bytes[j] == 101_u8 || @bytes[j] == 69_u8)
+      j = j + 1
+      j = j + 1 if j < stop && (@bytes[j] == 43_u8 || @bytes[j] == 45_u8)
+      j = digit_run(j, stop, 10)
+      return fail("#{token} needs digits in its exponent", start) if j < 0
+      float = true
+    end
+    return fail("#{token} is not a number", start) unless j == stop
+    @pos = stop
+    if float
+      text = String::Builder.new
+      k = start
+      k = k + 1 if @bytes[k] == 43_u8
+      while k < stop
+        text.write_byte(@bytes[k]) unless @bytes[k] == 95_u8
+        k = k + 1
+      end
+      return Any.new(text.to_s.to_f)
+    end
+    limit = negative ? 9223372036854775808_u64 : 9223372036854775807_u64
+    value = 0_u64
+    k = i
+    while k < stop
+      b = @bytes[k]
+      unless b == 95_u8
+        d = (b - 48_u8).to_u64
+        if value > (limit - d) // 10_u64
+          return fail("#{token} is outside -9223372036854775808 to 9223372036854775807, the TOML integers", start)
+        end
+        value = value * 10_u64 + d
+      end
+      k = k + 1
+    end
+    return Any.new(value.to_i64) unless negative
+    return Any.new(-9223372036854775807_i64 - 1_i64) if value == 9223372036854775808_u64
+    Any.new(-value.to_i64)
+  end
+
+  # `[`...`]`: values separated by commas, with blanks, line breaks and
+  # comments anywhere between them, and a comma after the last allowed.
+  private def array(depth : Int32) : Any | TOMLError
+    start = @pos
+    @pos = @pos + 1
+    items = [] of Any
+    while true
+      skip_space!
+      return fail("an array that does not close", start) if @pos >= @size
+      if @bytes[@pos] == 93_u8
+        @pos = @pos + 1
+        break
+      end
+      items << value(depth + 1)!
+      skip_space!
+      return fail("an array that does not close", start) if @pos >= @size
+      b = @bytes[@pos]
+      if b == 44_u8
+        @pos = @pos + 1
+      elsif b == 93_u8
+        @pos = @pos + 1
+        break
+      else
+        return unexpected(" between the items of an array, where ',' or ']' should be")
+      end
+    end
+    Any.new(items)
+  end
+
+  # `{`...`}`: key/value pairs separated by commas, on one line, with no
+  # comma after the last. Its keys follow the rules a table section's
+  # keys do (dotted keys may build tables in it), and once closed it is a
+  # value: nothing adds to it.
+  private def inline_table(depth : Int32) : Any | TOMLError
+    start = @pos
+    @pos = @pos + 1
+    table = Table.new(depth, false, false)
+    empty = [] of String
+    skip_blanks
+    if @pos < @size && @bytes[@pos] == 125_u8
+      @pos = @pos + 1
+      return table.to_any
+    end
+    while true
+      skip_blanks
+      return fail("an inline table that does not close", start) if @pos >= @size
+      if @bytes[@pos] == 10_u8 || @bytes[@pos] == 13_u8
+        return fail("a line break in an inline table, which stays on one line", @pos)
+      end
+      return fail("a comma after the last pair of an inline table", @pos) if @bytes[@pos] == 125_u8
+      pair(table, empty)!
+      skip_blanks
+      return fail("an inline table that does not close", start) if @pos >= @size
+      b = @bytes[@pos]
+      if b == 44_u8
+        @pos = @pos + 1
+      elsif b == 125_u8
+        @pos = @pos + 1
+        break
+      elsif b == 10_u8 || b == 13_u8
+        return fail("a line break in an inline table, which stays on one line", @pos)
+      else
+        return unexpected(" between the pairs of an inline table, where ',' or '}' should be")
+      end
+    end
+    table.to_any
+  end
+
+  private def control?(b : UInt8) : Bool
+    (b < 32_u8 && b != 9_u8) || b == 127_u8
+  end
+
+  # The `count` hexadecimal digits at `at`, -1 when they are not; eight
+  # of them can pass Int32, so the sum is an Int64.
+  private def hex_value(at : Int32, count : Int32) : Int64
+    value = 0_i64
+    i = 0
+    while i < count
+      return -1_i64 unless at + i < @size
+      d = radix_digit(@bytes[at + i], 16)
+      return -1_i64 if d < 0
+      value = value * 16 + d
+      i = i + 1
+    end
+    value
+  end
+
+  private def write_codepoint(text : String::Builder, point : Int32) : Nil
+    if point < 0x80
+      text.write_byte(point.to_u8)
+    elsif point < 0x800
+      text.write_byte((0xC0 | (point >> 6)).to_u8)
+      text.write_byte((0x80 | (point & 0x3F)).to_u8)
+    elsif point < 0x10000
+      text.write_byte((0xE0 | (point >> 12)).to_u8)
+      text.write_byte((0x80 | ((point >> 6) & 0x3F)).to_u8)
+      text.write_byte((0x80 | (point & 0x3F)).to_u8)
+    else
+      text.write_byte((0xF0 | (point >> 18)).to_u8)
+      text.write_byte((0x80 | ((point >> 12) & 0x3F)).to_u8)
+      text.write_byte((0x80 | ((point >> 6) & 0x3F)).to_u8)
+      text.write_byte((0x80 | (point & 0x3F)).to_u8)
+    end
+  end
+
+  # The escape at `@pos` (its backslash), written to `text`.
+  private def escape(text : String::Builder) : Nil | TOMLError
+    return fail("a string that does not close", @pos) if @pos + 1 >= @size
+    e = @bytes[@pos + 1]
+    simple = 0_u8
+    if e == 98_u8
+      simple = 8_u8
+    elsif e == 116_u8
+      simple = 9_u8
+    elsif e == 110_u8
+      simple = 10_u8
+    elsif e == 102_u8
+      simple = 12_u8
+    elsif e == 114_u8
+      simple = 13_u8
+    elsif e == 34_u8
+      simple = 34_u8
+    elsif e == 92_u8
+      simple = 92_u8
+    end
+    if simple != 0_u8
+      text.write_byte(simple)
+      @pos = @pos + 2
+      return nil
+    end
+    if e == 117_u8 || e == 85_u8
+      count = e == 117_u8 ? 4 : 8
+      point = hex_value(@pos + 2, count)
+      return fail("\\#{e.unsafe_chr} takes #{count} hexadecimal digits", @pos) if point < 0
+      if (point >= 0xD800 && point <= 0xDFFF) || point > 0x10FFFF
+        return fail("\\#{e.unsafe_chr}#{Reader.text_of(@bytes + @pos + 2, count)} is not a Unicode scalar value", @pos)
+      end
+      write_codepoint(text, point.to_i32)
+      @pos = @pos + 2 + count
+      return nil
+    end
+    shown = e >= 33_u8 && e < 127_u8 ? "\\#{e.unsafe_chr}" : "'\\' followed by #{found(@pos + 1)}"
+    fail("#{shown} is not an escape TOML has", @pos)
+  end
+
+  # `"`...`"`, escapes read.
+  private def basic_string : String | TOMLError
+    start = @pos
+    @pos = @pos + 1
+    text = String::Builder.new
+    run = @pos
+    while true
+      return fail("a string that does not close", start) if @pos >= @size
+      b = @bytes[@pos]
+      if b == 34_u8
+        text.write(@bytes + run, @pos - run)
+        @pos = @pos + 1
+        return text.to_s
+      elsif b == 92_u8
+        text.write(@bytes + run, @pos - run)
+        escape(text)!
+        run = @pos
+      elsif b == 10_u8 || b == 13_u8
+        return fail("a line break in a single-line string", @pos)
+      elsif control?(b)
+        return fail("#{found(@pos)} in a string, where it must be escaped", @pos)
+      else
+        @pos = @pos + 1
+      end
+    end
+  end
+
+  # `'`...`'`, as written.
+  private def literal_string : String | TOMLError
+    start = @pos
+    @pos = @pos + 1
+    while true
+      return fail("a string that does not close", start) if @pos >= @size
+      b = @bytes[@pos]
+      if b == 39_u8
+        @pos = @pos + 1
+        return Reader.text_of(@bytes + start + 1, @pos - start - 2)
+      elsif b == 10_u8 || b == 13_u8
+        return fail("a line break in a single-line string", @pos)
+      elsif control?(b)
+        return fail("#{found(@pos)} in a literal string, which cannot hold it", @pos)
+      end
+      @pos = @pos + 1
+    end
+  end
+
+  # After an opening `"""` or `'''`: a line break right there is dropped.
+  private def skip_first_break : Nil
+    if byte?(@pos, 10_u8)
+      @pos = @pos + 1
+    elsif byte?(@pos, 13_u8) && byte?(@pos + 1, 10_u8)
+      @pos = @pos + 2
+    end
+  end
+
+  # At a run of `quote`: how many, and whether they close the string
+  # (three or more; one or two of them may be the string's own).
+  private def quote_run(quote : UInt8) : Int32
+    n = 0
+    while @pos + n < @size && @bytes[@pos + n] == quote
+      n = n + 1
+    end
+    n
+  end
+
+  # `"""`...`"""`.
+  private def multiline_basic : String | TOMLError
+    start = @pos
+    @pos = @pos + 3
+    skip_first_break
+    text = String::Builder.new
+    while true
+      return fail("a multi-line string that does not close", start) if @pos >= @size
+      b = @bytes[@pos]
+      if b == 34_u8
+        n = quote_run(34_u8)
+        if n >= 3
+          return fail("#{n} quotes closing a multi-line string, where five is the most", @pos) if n > 5
+          i = 3
+          while i < n
+            text.write_byte(34_u8)
+            i = i + 1
+          end
+          @pos = @pos + n
+          return text.to_s
+        end
+        i = 0
+        while i < n
+          text.write_byte(34_u8)
+          i = i + 1
+        end
+        @pos = @pos + n
+      elsif b == 92_u8
+        after = @pos + 1
+        while after < @size && (@bytes[after] == 32_u8 || @bytes[after] == 9_u8)
+          after = after + 1
+        end
+        if after < @size && (@bytes[after] == 10_u8 || (@bytes[after] == 13_u8 && after + 1 < @size && @bytes[after + 1] == 10_u8))
+          # A line-ending backslash: it, the blanks and every line break
+          # and blank after it up to the next text go.
+          @pos = after
+          while @pos < @size
+            c = @bytes[@pos]
+            if c == 32_u8 || c == 9_u8 || c == 10_u8
+              @pos = @pos + 1
+            elsif c == 13_u8 && byte?(@pos + 1, 10_u8)
+              @pos = @pos + 2
+            else
+              break
+            end
+          end
+        else
+          escape(text)!
+        end
+      elsif b == 10_u8
+        text.write_byte(10_u8)
+        @pos = @pos + 1
+      elsif b == 13_u8
+        return fail("a carriage return not followed by a line feed", @pos) unless byte?(@pos + 1, 10_u8)
+        text.write_byte(10_u8)
+        @pos = @pos + 2
+      elsif control?(b)
+        return fail("#{found(@pos)} in a string, where it must be escaped", @pos)
+      else
+        run = @pos
+        while @pos < @size
+          c = @bytes[@pos]
+          break if c == 34_u8 || c == 92_u8 || c == 10_u8 || c == 13_u8 || control?(c)
+          @pos = @pos + 1
+        end
+        text.write(@bytes + run, @pos - run)
+      end
+    end
+  end
+
+  # `'''`...`'''`.
+  private def multiline_literal : String | TOMLError
+    start = @pos
+    @pos = @pos + 3
+    skip_first_break
+    text = String::Builder.new
+    while true
+      return fail("a multi-line string that does not close", start) if @pos >= @size
+      b = @bytes[@pos]
+      if b == 39_u8
+        n = quote_run(39_u8)
+        if n >= 3
+          return fail("#{n} apostrophes closing a multi-line literal string, where five is the most", @pos) if n > 5
+          i = 3
+          while i < n
+            text.write_byte(39_u8)
+            i = i + 1
+          end
+          @pos = @pos + n
+          return text.to_s
+        end
+        i = 0
+        while i < n
+          text.write_byte(39_u8)
+          i = i + 1
+        end
+        @pos = @pos + n
+      elsif b == 10_u8
+        text.write_byte(10_u8)
+        @pos = @pos + 1
+      elsif b == 13_u8
+        return fail("a carriage return not followed by a line feed", @pos) unless byte?(@pos + 1, 10_u8)
+        text.write_byte(10_u8)
+        @pos = @pos + 2
+      elsif control?(b)
+        return fail("#{found(@pos)} in a literal string, which cannot hold it", @pos)
+      else
+        run = @pos
+        while @pos < @size
+          c = @bytes[@pos]
+          break if c == 39_u8 || c == 10_u8 || c == 13_u8 || control?(c)
+          @pos = @pos + 1
+        end
+        text.write(@bytes + run, @pos - run)
+      end
+    end
+  end
+end
+
+# Writes a table as TOML the reader reads back.
+class Writer
+  @out : String::Builder
+
+  def initialize
+    @out = String::Builder.new
+  end
+
+  def document(value : Any) : String
+    raise "TOML.dump: a document is a table, not #{value.kind_name}" unless value.kind == Any::KIND_TABLE
+    section(value.as_h, [] of String)
+    @out.to_s
+  end
+
+  def inline_text(value : Any) : String
+    inline(value)
+    @out.to_s
+  end
+
+  # A key bare where the bare set allows, else a basic string.
+  def self.key_text(key : String) : String
+    return quoted(key) if key.empty?
+    bytes = key.to_unsafe
+    i = 0
+    while i < key.bytesize
+      b = bytes[i]
+      unless (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8) || b == 95_u8 || b == 45_u8
+        return quoted(key)
+      end
+      i = i + 1
+    end
+    key
+  end
+
+  # A basic string: `"` and `\` escaped, every control character too
+  # (the five with a short escape by it, the rest as `\u00XX`), the rest
+  # as it is.
+  def self.quoted(text : String) : String
+    out = String::Builder.new(text.bytesize + 2)
+    out.write_byte(34_u8)
+    bytes = text.to_unsafe
+    run = 0
+    i = 0
+    n = text.bytesize
+    while i < n
+      b = bytes[i]
+      if b == 34_u8 || b == 92_u8 || b < 32_u8 || b == 127_u8
+        out.write(bytes + run, i - run)
+        if b == 34_u8
+          out << "\\\""
+        elsif b == 92_u8
+          out << "\\\\"
+        elsif b == 8_u8
+          out << "\\b"
+        elsif b == 9_u8
+          out << "\\t"
+        elsif b == 10_u8
+          out << "\\n"
+        elsif b == 12_u8
+          out << "\\f"
+        elsif b == 13_u8
+          out << "\\r"
+        else
+          out << "\\u00" << (b < 16_u8 ? "0" : "") << b.to_s(16).upcase
+        end
+        run = i + 1
+      end
+      i = i + 1
+    end
+    out.write(bytes + run, n - run)
+    out.write_byte(34_u8)
+    out.to_s
+  end
+
+  # A float as the reader reads it back: the prelude's shortest
+  # round-tripping text (`1.5`, `1.0e+20`, `5.0e-324`, always a point or an
+  # exponent), and TOML's spellings of the three that are not numbers.
+  def self.float_text(f : Float64) : String
+    return "nan" if f != f
+    return "inf" if f > 1.7976931348623157e308
+    return "-inf" if f < -1.7976931348623157e308
+    f.to_s
+  end
+
+  # An array written as `[[...]]` entries: one with items, every one a
+  # table.
+  private def table_array?(value : Any) : Bool
+    return false unless value.kind == Any::KIND_ARRAY
+    items = value.as_a
+    return false if items.empty?
+    items.all? { |item| item.kind == Any::KIND_TABLE }
+  end
+
+  private def header_text(path : Array(String)) : String
+    path.map { |part| Writer.key_text(part) }.join(".")
+  end
+
+  # A table's own pairs, then its sub-tables and arrays of tables, each
+  # under its header.
+  private def section(pairs : Hash(String, Any), path : Array(String)) : Nil
+    pairs.each do |key, value|
+      next if value.kind == Any::KIND_TABLE || table_array?(value)
+      @out << Writer.key_text(key) << " = "
+      inline(value)
+      @out << "\n"
+    end
+    pairs.each do |key, value|
+      if value.kind == Any::KIND_TABLE
+        inner = path.dup
+        inner << key
+        @out << "\n" unless @out.empty?
+        @out << "[" << header_text(inner) << "]\n"
+        section(value.as_h, inner)
+      elsif table_array?(value)
+        inner = path.dup
+        inner << key
+        value.as_a.each do |item|
+          @out << "\n" unless @out.empty?
+          @out << "[[" << header_text(inner) << "]]\n"
+          section(item.as_h, inner)
+        end
+      end
+    end
+  end
+
+  def inline(value : Any) : Nil
+    k = value.kind
+    if k == Any::KIND_ARRAY
+      @out << "["
+      first = true
+      value.as_a.each do |item|
+        @out << ", " unless first
+        inline(item)
+        first = false
+      end
+      @out << "]"
+    elsif k == Any::KIND_TABLE
+      pairs = value.as_h
+      if pairs.empty?
+        @out << "{}"
+        return
+      end
+      @out << "{ "
+      first = true
+      pairs.each do |key, item|
+        @out << ", " unless first
+        @out << Writer.key_text(key) << " = "
+        inline(item)
+        first = false
+      end
+      @out << " }"
+    elsif k == Any::KIND_STRING
+      @out << Writer.quoted(value.as_s)
+    elsif k == Any::KIND_DATETIME
+      @out << value.as_datetime.to_s
+    elsif k == Any::KIND_INT
+      @out << value.as_i.to_s
+    elsif k == Any::KIND_FLOAT
+      @out << Writer.float_text(value.as_f)
+    else
+      @out << (value.as_bool ? "true" : "false")
+    end
+  end
+end
+
+# What `TOML.write_value` and `TOML.to_any` take besides the built-in
+# types: a value whose type implements it, as a `derive
+# toml_serializable` type does.
+pub trait ToTOML
+  abstract def to_toml_any : Any
+end
+
+# `derive toml_serializable`, in a struct or class whose fields are written
+# with their types: the type reads and writes itself as a TOML table, a
+# key per field, named as the field is.
+#
+#     pub struct Coord
+#       getter x : Float64
+#       getter name : String
+#       derive toml_serializable
+#     end
+#
+#     Coord.from_toml("x = 1.5\nname = \"a\"\n").x   # => 1.5
+#     coord.to_toml                                 # => "x = 1.5\nname = \"a\"\n"
+#
+# It is std/yaml's `derive yaml_serializable` over TOML, field for field:
+# a value is read and written as `TOML.read_value` and `TOML.to_any` take
+# its type (Bool, Int32, Int64, UInt8, UInt64, Float64, String,
+# `TOMLDateTime`, `Any`, an `Array` or a `Hash(String, _)` of them,
+# another derived type, each of them or nil). TOML has no null, so a nil
+# field is not written, and a missing key is read as YAML's derive reads
+# one: a field with a default keeps it, a nilable field holds nil, and any
+# other is refused by name. A key the type has no field for is passed
+# over. A type that is several writes `derive serializable,
+# yaml_serializable, toml_serializable`: what this one generates shares no
+# method with theirs (`to_toml`, `from_toml`, `to_toml_any` and
+# `initialize(toml : Any)` of this module's `Any`).
+pub macro toml_serializable(declaration)
+  impl ::Std::Toml::ToTOML for {{ declaration[:name].id }}
+    def to_toml_any : ::Std::Toml::Any
+      toml_pairs = Hash(String, ::Std::Toml::Any).new
+      {% for field in declaration[:fields] %}
+        unless {{ field[:name].id }}.nil?
+          toml_pairs[{{ field[:name][1..] }}] = ::Std::Toml::TOML.to_any({{ field[:name].id }})
+        end
+      {% end %}
+      ::Std::Toml::Any.new(toml_pairs)
+    end
+  end
+
+  def to_toml : String
+    ::Std::Toml::TOML.dump(to_toml_any)
+  end
+
+  def self.from_toml(text : String) : self
+    ::Std::Toml::TOML.from_toml(text, self)
+  end
+
+  def initialize(toml : ::Std::Toml::Any)
+    toml_pairs = toml.as_h? || raise "expected a table for #{ {{ declaration[:name] }} }, not #{toml.kind_name}"
+    # As std/yaml's derive: each field's type is asked of the field
+    # (`typeof`), and whether it has a default is asked of the type when
+    # this method is compiled. A key is there or not; TOML has no null.
+    {% for field in declaration[:fields] %}
+      toml_found_{{ field[:name][1..].id }} = toml_pairs[{{ field[:name][1..] }}]?
+      \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
+        {% if field[:type].nilable? %}
+          unless toml_found_{{ field[:name][1..].id }}.nil?
+            {{ field[:name].id }} = ::Std::Toml::TOML.read_value(toml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }} || raise("")))
+          end
+        {% else %}
+          unless toml_found_{{ field[:name][1..].id }}.nil?
+            {{ field[:name].id }} = ::Std::Toml::TOML.read_value(toml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }}))
+          end
+        {% end %}
+      \{% elsif {{ field[:type].nilable? }} %}
+        {{ field[:name].id }} = toml_found_{{ field[:name][1..].id }}.nil? ? nil : ::Std::Toml::TOML.read_value(toml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }} || raise("")))
+      \{% else %}
+        raise "TOML for #{ {{ declaration[:name] }} } has no key #{ {{ field[:name][1..] }}.inspect }" if toml_found_{{ field[:name][1..].id }}.nil?
+        {{ field[:name].id }} = ::Std::Toml::TOML.read_value(toml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }}))
+      \{% end %}
+    {% end %}
+  end
+end
+
+pub struct TOML
+  # The document `text` holds, a table, or what is wrong with it.
+  def self.parse(text : String) : Any | TOMLError
+    Reader.new(text).document
+  end
+
+  # The document, or nil where `parse` answers a `TOMLError`.
+  def self.parse?(text : String) : Any?
+    answer = Reader.new(text).document
+    answer.is_a?(TOMLError) ? nil : answer
+  end
+
+  # TOML for a table, ending in a line break unless the table is empty.
+  def self.dump(value : Any) : String
+    Writer.new.document(value)
+  end
+
+  # TOML for any table `to_any` makes of `obj`, as `dump` writes it.
+  def self.to_toml(obj : T) : String forall T
+    dump(to_any(obj))
+  end
+
+  # The document `text` holds, read into `type`: `Bool`, `Int32`, `Int64`,
+  # `UInt8`, `UInt64`, `Float64`, `String`, `TOMLDateTime`, `Any`, a type
+  # with `derive toml_serializable`, one of those or nil, or an `Array` or a
+  # `Hash(String, _)` of those. Text that is not TOML panics with the
+  # `TOMLError`'s sentence; a value of another kind, or an integer outside
+  # the type, is refused.
+  def self.from_toml(text : String, type : T.class) : T forall T
+    read_value(parse(text).or_panic, type)
+  end
+
+  # The `Any` a value is written as. TOML has no null: a nil is refused
+  # here, named, and a derived type leaves a nil field out before it gets
+  # this far. Taken out before the rest dispatches, for the reason
+  # std/json's `write_or_null` gives.
+  def self.to_any(val : T) : Any forall T
+    if val.nil?
+      raise "TOML has no null, so a nil cannot be written"
+    else
+      write_value(val)
+    end
+  end
+
+  def self.write_value(val : Bool) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Int32) : Any
+    Any.new(val.to_i64)
+  end
+
+  def self.write_value(val : Int64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : UInt8) : Any
+    Any.new(val.to_i64)
+  end
+
+  # A TOML integer is an `Int64`: a `UInt64` past it cannot be written.
+  def self.write_value(val : UInt64) : Any
+    raise "the UInt64 #{val} is past 9223372036854775807, the largest TOML integer" if val > 9223372036854775807_u64
+    Any.new(val.to_i64)
+  end
+
+  def self.write_value(val : Float64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : String) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : TOMLDateTime) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Any) : Any
+    val
+  end
+
+  def self.write_value(val : Array(T)) : Any forall T
+    Any.new(val.map { |item| to_any(item) })
+  end
+
+  # TOML keys are strings, so a hash is written when its keys are.
+  def self.write_value(val : Hash(String, V)) : Any forall V
+    pairs = Hash(String, Any).new
+    val.each { |key, item| pairs[key] = to_any(item) }
+    Any.new(pairs)
+  end
+
+  def self.write_value(val : T) : Any forall T : ToTOML
+    val.to_toml_any
+  end
+
+  def self.read_value(value : Any, type : Bool.class) : Bool
+    value.as_bool
+  end
+
+  def self.read_value(value : Any, type : Int32.class) : Int32
+    v = value.as_i
+    raise "integer #{v} out of Int32 range" if v < -2147483648_i64 || v > 2147483647_i64
+    v.to_i32
+  end
+
+  def self.read_value(value : Any, type : Int64.class) : Int64
+    value.as_i
+  end
+
+  def self.read_value(value : Any, type : UInt8.class) : UInt8
+    v = value.as_i
+    raise "integer #{v} out of UInt8 range" if v < 0_i64 || v > 255_i64
+    v.to_u8
+  end
+
+  def self.read_value(value : Any, type : UInt64.class) : UInt64
+    v = value.as_i
+    raise "integer #{v} out of UInt64 range" if v < 0_i64
+    v.to_u64
+  end
+
+  # A float, or an integer widened to one: `y = 2` is the Float64 2.0.
+  def self.read_value(value : Any, type : Float64.class) : Float64
+    value.as_f
+  end
+
+  def self.read_value(value : Any, type : String.class) : String
+    value.as_s
+  end
+
+  def self.read_value(value : Any, type : TOMLDateTime.class) : TOMLDateTime
+    value.as_datetime
+  end
+
+  def self.read_value(value : Any, type : Any.class) : Any
+    value
+  end
+
+  def self.read_value(value : Any, type : Array(T).class) : Array(T) forall T
+    value.as_a.map { |item| read_value(item, T) }
+  end
+
+  def self.read_value(value : Any, type : Hash(String, V).class) : Hash(String, V) forall V
+    h = Hash(String, V).new
+    value.as_h.each { |key, item| h[key] = read_value(item, V) }
+    h
+  end
+
+  # A type that reads itself, the `initialize(toml)` a `derive
+  # toml_serializable` wrote; a type that admits nil reads as the other
+  # type, since a value that is there is never null.
+  def self.read_value(value : Any, type : T.class) : T forall T
+    {% if T.nilable? %}
+      read_value(value, typeof(nil.as(T) || raise("")))
+    {% else %}
+      T.new(value)
+    {% end %}
+  end
+end

@@ -1,13 +1,21 @@
-# UUID version 4, RFC 4122, written in iyi.
+# UUIDs, RFC 9562 (which replaced RFC 4122), written in iyi.
 #
-# Sixteen random bytes, then version 4 and the RFC 4122 variant bits.
-# `UUID.v4` answers the hyphenated form; `parse` reads it back, or the
-# 32 digits with no hyphens, and panics on a length, hyphen or hex digit
-# that is not one.
+# `UUID.v4` is 122 random bits with version 4 and the RFC variant bits;
+# `UUID.v7` is the Unix time in milliseconds in its first 48 bits, then
+# version 7, then random bits, so that UUIDs made later sort later - the
+# kind a database index wants as a key. Every random bit comes from
+# `Random::Secure`, the operating system's entropy: a UUID is often a
+# name nobody else may guess, and the PCG generator `v4` drew from before
+# is built for speed, not to keep its state from someone reading it.
+#
+# Either answers the hyphenated form through `to_s`; `parse` reads it
+# back, or the 32 digits with no hyphens, and panics on a length, hyphen
+# or hex digit that is not one.
 
 module std/uuid
 
 import std/random::{Random}
+import std/time::{Time}
 
 pub struct UUID
   @bytes : Array(UInt8)
@@ -28,15 +36,56 @@ pub struct UUID
     @bytes = owned
   end
 
+  # Sixteen bytes from the operating system, six bits of them then set to
+  # say version 4 and the RFC variant. Drawn from `Random.new`, they were
+  # sixteen outputs of a fresh PCG generator: every UUID was a function of
+  # the generator's 127 bits of state, and PCG makes no promise that its
+  # outputs do not give that state away, where a version 4 UUID promises
+  # 122 bits nobody can predict.
   def self.v4 : UUID
-    rng = Random.new
-    bytes = Array(UInt8).new(16) { 0_u8 }
+    bytes = Random::Secure.random_bytes(16)
+    bytes[6] = (bytes[6] & 0x0f_u8) | 0x40_u8
+    bytes[8] = (bytes[8] & 0x3f_u8) | 0x80_u8
+    new(owned: bytes)
+  end
+
+  # The millisecond `v7` last stamped and the 12-bit counter beside it.
+  @@v7_ms = 0_i64
+  @@v7_counter = 0
+
+  # RFC 9562 version 7: 48 bits of Unix milliseconds, big-endian, then the
+  # version, 12 bits of `rand_a`, the variant and 62 random bits.
+  #
+  # Two UUIDs from one millisecond would sort at random by their random
+  # bits, so `rand_a` is a counter here (the RFC's "fixed bit-length
+  # dedicated counter", section 6.2 method 1): a new millisecond starts it
+  # at a random 11 bits, leaving at least 2,048 steps before it runs out,
+  # and every UUID in the same millisecond, or one the clock stepped back
+  # into, counts one up from the last. Past 4,095 the stamp moves on a
+  # millisecond early, as the RFC allows. Each UUID this process makes
+  # therefore sorts after the one before it, as bytes and as text; the
+  # 62 bits after the counter are random every time, so two processes in
+  # one millisecond still do not collide.
+  def self.v7 : UUID
+    bytes = Random::Secure.random_bytes(16)
+    now = Time.utc.to_unix_ms
+    if now > @@v7_ms
+      @@v7_ms = now
+      @@v7_counter = ((bytes[6].to_i32 & 7) << 8) | bytes[7].to_i32
+    elsif @@v7_counter < 4095
+      @@v7_counter = @@v7_counter + 1
+    else
+      @@v7_ms = @@v7_ms + 1_i64
+      @@v7_counter = ((bytes[6].to_i32 & 7) << 8) | bytes[7].to_i32
+    end
+    ms = @@v7_ms.to_u64
     i = 0
-    while i < 16
-      bytes[i] = (rng.next_u & 255_u32).to_u8
+    while i < 6
+      bytes[i] = ((ms >> ((5 - i) * 8)) & 255_u64).to_u8
       i = i + 1
     end
-    bytes[6] = (bytes[6] & 0x0f_u8) | 0x40_u8
+    bytes[6] = (0x70 | (@@v7_counter >> 8)).to_u8
+    bytes[7] = (@@v7_counter & 255).to_u8
     bytes[8] = (bytes[8] & 0x3f_u8) | 0x80_u8
     new(owned: bytes)
   end

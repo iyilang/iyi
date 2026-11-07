@@ -357,6 +357,48 @@ grep -q "no test's imports reach the change" affected_file.log || {
 }
 rm -f app/pkg_test.iyi app/untouched.iyi
 
+# ── 5e. A package's module has one name in its own build and a consumer's ─
+# A consumer's build puts a package's modules under the package's name;
+# the package's own build put them at the root, so `codec.iyi` of
+# `iyi-web` was `::Codec` there and `::IyiWeb::Codec` here, and a `pub
+# macro` - which expands in the caller's file and so names the module
+# absolutely - had no spelling that built in both (#132). Both builds name
+# it `::IyiWeb::Codec` now, from source and from an artifact. The old
+# spelling still builds the package, with a warning that names the new
+# one, and `iyi fix` makes the edit where the source writes it.
+step "a package's module is one name in its own build and a consumer's"
+mkdir -p onename/lib onename/app
+printf 'module example.test/user/iyi-web\n' > onename/lib/iyi.mod
+printf 'module codec\n\npub def shout(s : String) : String\n  s.upcase\nend\n' > onename/lib/codec.iyi
+loud() { printf 'module dsl\n\npub import codec\n\npub macro loud(x)\n  %s.shout({{ x }})\nend\n' "$1" > onename/lib/dsl.iyi; }
+loud ::IyiWeb::Codec
+printf 'module inside\n\nimport dsl::*\n\nputs loud("inside")\n' > onename/lib/inside.iyi
+printf 'module app\n\nrequire example.test/user/iyi-web v0.1.0 as web\n\nreplace example.test/user/iyi-web => ../lib\n' > onename/app/iyi.mod
+printf 'module app\n\nimport web/dsl::*\n\nputs loud("consumer")\n' > onename/app/app.iyi
+(cd onename/lib && "$IYI" run inside.iyi) > onename_inside.log 2>&1
+grep -qx INSIDE onename_inside.log || { echo "::IyiWeb::Codec did not build in the package's own file:"; cat onename_inside.log; exit 1; }
+(cd onename/app && "$IYI" run app.iyi) > onename_app.log 2>&1
+grep -qx CONSUMER onename_app.log || { echo "::IyiWeb::Codec did not build in the consumer:"; cat onename_app.log; exit 1; }
+(cd onename/lib && "$IYI" build --emit-iyimod mods inside.iyi -o inside) > onename_emit.log 2>&1 || {
+  echo "the package's own emitting build failed:"; tail -4 onename_emit.log; exit 1;
+}
+"$IYI" mod dump onename/lib/mods/codec.iyimod | grep -q '^package *iyi_web$' || {
+  echo "codec's artifact does not say the package name it was written under:"; "$IYI" mod dump onename/lib/mods/codec.iyimod | head -4; exit 1;
+}
+(cd onename/lib && "$IYI" run --use-iyimod mods inside.iyi) > onename_mods.log 2>&1
+grep -qx INSIDE onename_mods.log || { echo "::IyiWeb::Codec did not build from the artifacts:"; cat onename_mods.log; exit 1; }
+# The name the package's own build had: it still builds there, and warns.
+loud ::Codec
+(cd onename/lib && "$IYI" run inside.iyi) > onename_old.log 2>&1
+grep -qx INSIDE onename_old.log || { echo "::Codec no longer builds the package:"; cat onename_old.log; exit 1; }
+grep -q 'Warning: `::Codec` is `::IyiWeb::Codec`' onename_old.log || { echo "::Codec built without a warning:"; cat onename_old.log; exit 1; }
+(cd onename/app && "$IYI" run app.iyi) > onename_old_app.log 2>&1 && { echo "::Codec built in a consumer"; exit 1; }
+grep -q "Did you mean '::IyiWeb::Codec'" onename_old_app.log || { echo "the consumer's refusal does not name ::IyiWeb::Codec:"; cat onename_old_app.log; exit 1; }
+printf 'import codec\n\nputs ::Codec.shout("fixed")\n' > onename/lib/direct.iyi
+(cd onename/lib && "$IYI" fix direct.iyi) > onename_fix.log 2>&1 || { echo "iyi fix did not end clean:"; cat onename_fix.log; exit 1; }
+grep -q '^puts ::IyiWeb::Codec.shout("fixed")$' onename/lib/direct.iyi || { echo "iyi fix did not write ::IyiWeb::Codec:"; cat onename/lib/direct.iyi; exit 1; }
+echo "  ::IyiWeb::Codec in both builds and from artifacts; ::Codec warns in the package, is refused in the consumer, and iyi fix rewrites it"
+
 # ── 6. The context pack: surfaces, no bodies ──────────────────────────────
 step "mod context prints every import's exact surface"
 (cd app && "$IYI" mod context main.iyi) > context.txt 2>&1 || { cat context.txt; exit 1; }

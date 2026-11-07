@@ -1,0 +1,356 @@
+# Exercises `std/user`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_user_exercise.iyi
+#
+# On its own it checks what it can know without another program: the
+# current user is an account the lookups find again, root is uid 0, a name
+# and an id nobody has are nil, and the passwd and group files below read
+# as `User.parse` and `Group.parse` read them. bench/std_user_exercise.sh
+# hands it the rest through the environment:
+#
+#   USER_EXPECT          a file of what Python's `pwd`, `grp` and
+#                        `os.getgrouplist` (or `getent` and `id`) answer,
+#                        one lookup a line, tab-separated; every line is
+#                        asked here and must agree
+#   USER_FIXTURE_DIR     a directory to write the fixture files and the
+#                        lookups' transcript into, for Go's `os/user`
+#                        reader to read the same files and answer the same
+#                        queries
+#   USER_FIXTURE_SYSTEM  set when the module was patched to read the
+#                        fixture files as /etc/passwd and /etc/group: the
+#                        lookups must then answer what the parsers answer
+
+module bench/std_user_exercise
+
+import std/user::{User, Group}
+import std/env::{ENV}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# What a lookup the check depends on found; nobody is a failed check.
+def found(user : User?) : User
+  raise "ASSERTION FAILED: a lookup the check depends on found nobody" if user.nil?
+  user
+end
+
+def found(group : Group?) : Group
+  raise "ASSERTION FAILED: a group lookup the check depends on found none" if group.nil?
+  group
+end
+
+def digits?(text : String) : Bool
+  return false if text.empty?
+  text.each_char { |char| return false if char < '0' || char > '9' }
+  true
+end
+
+# A user as one line: the fields Go's `User` has, in its order.
+def show(user : User?) : String
+  return "nil" if user.nil?
+  "#{user.name}|#{user.id}|#{user.group_id}|#{user.full_name}|#{user.home}"
+end
+
+def show_group(group : Group?) : String
+  return "nil" if group.nil?
+  "#{group.name}|#{group.id}"
+end
+
+# A user as the oracle file writes one: every field, tab-separated.
+def fields(user : User?) : String
+  return "nil" if user.nil?
+  "#{user.name}\t#{user.id}\t#{user.group_id}\t#{user.full_name}\t#{user.home}\t#{user.shell}"
+end
+
+def group_fields(group : Group?) : String
+  return "nil" if group.nil?
+  "#{group.name}\t#{group.id}\t#{group.members.join(",")}"
+end
+
+# The fixture. Its first half is the lines Go's pure-Go reader
+# (`os/user/lookup_unix.go`) has a rule for, each kept or skipped as that
+# rule says, and the gate holds this program's transcript of it against
+# Go's own. The second half is where this module follows glibc instead
+# (an id compared as a number, ids past 32 bits or signed, a group listed
+# twice), asserted here and kept out of the queries Go answers.
+PASSWD = "# the accounts, as passwd(5) holds them\n" \
+         "root:x:0:0:root:/root:/bin/bash\n" \
+         "\n" \
+         "   spaced:x:1001:1001:Spaced Out,Room 1,,:/home/spaced:/bin/sh   \n" \
+         "ada:x:1002:1002:Ada Lovelace,Analytical Engine,,:/home/ada:/bin/zsh\n" \
+         "+nis:x:1003:1003:::\n" \
+         "-gone:x:1004:1004:::\n" \
+         ":x:1005:1005:no name:/:/bin/sh\n" \
+         "baduid:x:12a:1006::/home/baduid:/bin/sh\n" \
+         "badgid:x:1007:abc::/home/badgid:/bin/sh\n" \
+         "short:x:1008:1008::/home/short\n" \
+         "ada:x:1009:1009:Second Ada:/home/ada2:/bin/sh\n" \
+         "dupid:x:1002:1002:Same Id:/home/dupid:/bin/sh\n" \
+         "crlf:x:1010:1010:Carriage:/home/crlf:/bin/sh\r\n" \
+         "colons:x:1011:1011:Colon Shell:/home/colons:/bin/sh:-l\n" \
+         "empty:x:1012:1012:::\n" \
+         "  # an indented comment:x:1013:1013:::\n" \
+         "zero:x:0020:0030:Zero Padded:/home/zero:/bin/sh\n" \
+         "big:x:4294967296:1:Too Big:/home/big:/bin/sh\n" \
+         "signed:x:+21:1:Signed:/home/signed:/bin/sh\n" \
+         "max:x:4294967295:4294967295:Max:/home/max:/bin/sh\n" \
+         "bea:x:2000:2000:Bea:/home/bea:/bin/sh\n"
+
+GROUPS = "# the groups, as group(5) holds them\n" \
+         "root:x:0:\n" \
+         "ada:x:1002:\n" \
+         "staff:x:50:ada,spaced\n" \
+         " wheel:x:10:spaced,ada,root \n" \
+         "+nisgroup:x:60:ada\n" \
+         "-minus:x:61:ada\n" \
+         ":x:62:ada\n" \
+         "badgid:x:6x:ada\n" \
+         "short:x:63\n" \
+         "empty:x:64:\n" \
+         "trailing:x:65:ada,\n" \
+         "twice:x:70:bea\n" \
+         "again:x:70:bea\n" \
+         "colon:x:71:bea,x:y\n"
+
+# The queries Go answers too: every name and id of the first half, the
+# skipped lines' included, and some nobody has.
+QUERIES = [
+  "user-name root", "user-name spaced", "user-name ada", "user-name nis", "user-name +nis",
+  "user-name -gone", "user-name gone", "user-name baduid", "user-name badgid", "user-name short",
+  "user-name dupid", "user-name crlf", "user-name colons", "user-name empty", "user-name nobody-here",
+  "user-name ",
+  "user-id 0", "user-id 1001", "user-id 1002", "user-id 1003", "user-id 1004", "user-id 1005",
+  "user-id 1006", "user-id 1007", "user-id 1008", "user-id 1009", "user-id 1010", "user-id 1011",
+  "user-id 1012", "user-id 1013", "user-id 12a", "user-id 99999",
+  "group-name root", "group-name ada", "group-name staff", "group-name wheel", "group-name nisgroup",
+  "group-name +nisgroup", "group-name minus", "group-name badgid", "group-name short",
+  "group-name empty", "group-name trailing", "group-name nobody-here",
+  "group-id 0", "group-id 1002", "group-id 50", "group-id 10", "group-id 60", "group-id 61",
+  "group-id 62", "group-id 63", "group-id 64", "group-id 65", "group-id 6x", "group-id 99999",
+]
+
+# A lookup in the fixture: through the lookups themselves when the module
+# reads the fixture as the system's files, through the parsers otherwise.
+def user_by_name(name : String, system : Bool) : User?
+  return User.find_by_name(name) if system
+  User.parse(PASSWD).find { |user| user.name == name }
+end
+
+def user_by_id(id : String, system : Bool) : User?
+  return User.find_by_id(id) if system
+  User.parse(PASSWD).find { |user| user.id == id }
+end
+
+def group_by_name(name : String, system : Bool) : Group?
+  return Group.find_by_name(name) if system
+  Group.parse(GROUPS).find { |group| group.name == name }
+end
+
+def group_by_id(id : String, system : Bool) : Group?
+  return Group.find_by_id(id) if system
+  Group.parse(GROUPS).find { |group| group.id == id }
+end
+
+def group_ids_of(user : User, system : Bool) : Array(String)
+  system ? user.group_ids : user.group_ids(Group.parse(GROUPS))
+end
+
+# Each query and its answer, one a line, as the gate's Go program writes
+# them; a user found by name is followed by the groups it is in.
+def transcript(system : Bool) : String
+  lines = [] of String
+  QUERIES.each do |query|
+    space = query.index(' ') || 0
+    kind = query[0, space]
+    value = query[space + 1, query.bytesize - space - 1]
+    case kind
+    when "user-name"
+      user = user_by_name(value, system)
+      lines << "#{query} -> #{show(user)}"
+      lines << "groups #{value} -> #{group_ids_of(user, system).join(",")}" if user
+    when "user-id"
+      lines << "#{query} -> #{show(user_by_id(value, system))}"
+    when "group-name"
+      lines << "#{query} -> #{show_group(group_by_name(value, system))}"
+    else
+      lines << "#{query} -> #{show_group(group_by_id(value, system))}"
+    end
+  end
+  lines.join("\n") + "\n"
+end
+
+def fixture_checks(system : Bool) : Nil
+  # Each check comes before the others that would also fail when the code
+  # it watches breaks, so a broken module fails at the check naming it;
+  # the lines kept, in order, are asked last.
+  assert_str "1002", found(user_by_name("ada", system)).id, "the first ada line wins"
+  assert_str "Ada Lovelace", found(user_by_name("ada", system)).full_name, "full_name is the GECOS field's first part"
+  assert_str "/bin/zsh", found(user_by_name("ada", system)).shell, "the shell is the seventh field"
+  assert_str "/home/ada", found(user_by_name("ada", system)).home, "the home is the sixth field"
+  assert_str "root|0|0|root|/root", show(user_by_name("root", system)), "a plain line"
+  assert_str "spaced|1001|1001|Spaced Out|/home/spaced", show(user_by_name("spaced", system)), "a line with blank space around it is trimmed"
+  assert_str "/bin/sh", found(user_by_name("spaced", system)).shell, "the trailing blank space is not the shell's"
+  assert_str "ada", found(user_by_id("1002", system)).name, "the first line with uid 1002 wins"
+  assert_str "Second Ada", found(user_by_id("1009", system)).full_name, "the second ada line is found by its id"
+  assert_str "nil", show(user_by_name("+nis", system)), "a +name line is skipped"
+  assert_str "nil", show(user_by_name("nis", system)), "and its name without the + is not found"
+  assert_str "nil", show(user_by_id("1003", system)), "nor its id"
+  assert_str "nil", show(user_by_name("-gone", system)), "a -name line is skipped"
+  assert_str "nil", show(user_by_id("1005", system)), "a line with no name is skipped"
+  assert_str "nil", show(user_by_name("baduid", system)), "a uid that is not a number is skipped"
+  assert_str "nil", show(user_by_name("badgid", system)), "a gid that is not a number is skipped"
+  assert_str "nil", show(user_by_name("short", system)), "a line of six fields is skipped"
+  assert_str "nil", show(user_by_id("1013", system)), "an indented comment is a comment"
+  assert_str "/bin/sh", found(user_by_name("crlf", system)).shell, "a CRLF line's shell has no CR"
+  assert_str "/bin/sh:-l", found(user_by_name("colons", system)).shell, "the shell is the rest of the line, colons and all"
+  assert_str "empty|1012|1012||", show(user_by_name("empty", system)), "empty fields are empty strings"
+  assert_str "", found(user_by_name("empty", system)).shell, "an empty shell is the empty string"
+
+  # Where glibc is followed and Go is not.
+  assert_str "zero|20|30|Zero Padded|/home/zero", show(user_by_id("20", system)), "an id with leading zeros is the number"
+  if system
+    assert_str "zero", show(User.find_by_id("0020")).split('|')[0], "find_by_id compares numbers, not text"
+    assert_str "zero", show(User.find_by_id("020")).split('|')[0], "find_by_id compares numbers, not text"
+  end
+  assert_str "nil", show(user_by_name("big", system)), "a uid past 32 bits is skipped"
+  assert_str "nil", show(user_by_name("signed", system)), "a signed uid is skipped"
+  assert_str "max|4294967295|4294967295|Max|/home/max", show(user_by_name("max", system)), "the largest 32-bit uid is a uid"
+  bea = found(user_by_name("bea", system))
+  assert_str "2000,70,71", group_ids_of(bea, system).join(","), "group_ids holds a gid once, primary first"
+
+  assert_str "staff|50", show_group(group_by_name("staff", system)), "a group by name"
+  assert_str "ada,spaced", found(group_by_name("staff", system)).members.join(","), "a group's members"
+  assert_str "spaced,ada,root", found(group_by_name("wheel", system)).members.join(","), "a group line with blank space around it is trimmed"
+  assert_str "", found(group_by_name("empty", system)).members.join(","), "a group with no members has none"
+  assert_str "ada", found(group_by_name("trailing", system)).members.join(","), "an empty member name is dropped"
+  assert_str "bea,x:y", found(group_by_name("colon", system)).members.join(","), "a member list is the rest of the line"
+  assert_str "twice|70", show_group(group_by_id("70", system)), "the first group with an id wins"
+  assert_str "nil", show_group(group_by_name("+nisgroup", system)), "a +group line is skipped"
+  assert_str "nil", show_group(group_by_name("minus", system)), "a -group line is skipped"
+  assert_str "nil", show_group(group_by_id("62", system)), "a group with no name is skipped"
+  assert_str "nil", show_group(group_by_name("badgid", system)), "a gid that is not a number is skipped"
+  assert_str "nil", show_group(group_by_name("short", system)), "a group line of three fields is skipped"
+  ada = found(user_by_name("ada", system))
+  assert_str "1002,50,10,65", group_ids_of(ada, system).join(","), "group_ids is the primary group, then each listing the user"
+  assert_str "0,10", group_ids_of(found(user_by_name("root", system)), system).join(","), "a member last in a list is found"
+
+  users = User.parse(PASSWD)
+  assert_str "root spaced ada ada dupid crlf colons empty zero max bea", users.map(&.name).join(" "), "the passwd lines kept, in order"
+  groups = Group.parse(GROUPS)
+  assert_str "root ada staff wheel empty trailing twice again colon", groups.map(&.name).join(" "), "the group lines kept, in order"
+end
+
+{% unless flag?(:win32) %}
+  puts "== the current user"
+  me = User.current
+  assert_true !me.name.empty?, "the current user has a name"
+  assert_true digits?(me.id), "the current user's id is a number (#{me.id})"
+  again = User.find_by_id(me.id)
+  if again
+    assert_str fields(me), fields(again), "current is find_by_id of its own id"
+    assert_str fields(me), fields(User.find_by_name(me.name)), "and find_by_name of its own name"
+  end
+  ids = me.group_ids
+  # Asked of the list rather than its first element: a root with no other
+  # group, left without its primary one, panicked on the index instead.
+  assert_str me.group_id, ids.first? || "(none)", "group_ids starts with the primary group"
+  ids.each_with_index do |id, index|
+    assert_true ids.index(id) == index, "group_ids holds #{id} once"
+  end
+  puts "  #{me.name} (#{me.id}), groups #{ids.join(",")}"
+
+  puts "== root"
+  root = found(User.find_by_id("0"))
+  assert_str "0", found(User.find_by_name(root.name)).id, "root found by name is uid 0"
+  assert_str fields(root), fields(User.find_by_id("00")), "an id is compared as a number"
+  root_group = found(Group.find_by_id("0"))
+  assert_str "0", root_group.id, "gid 0 is a group"
+  puts "  #{root.name}, home #{root.home}, group #{root_group.name}"
+
+  puts "== missing names and ids are nil"
+  assert_true User.find_by_name("").nil?, "the empty name is nobody's"
+  assert_true User.find_by_name("root\0").nil?, "a name with a NUL is nobody's"
+  assert_true User.find_by_name("no-such-user-iyi-#{me.id}x").nil?, "a made-up name is nobody's"
+  assert_true User.find_by_id("").nil?, "the empty id is nobody's"
+  assert_true User.find_by_id("abc").nil?, "an id that is not a number is nobody's"
+  assert_true User.find_by_id("-1").nil?, "a signed id is nobody's"
+  assert_true User.find_by_id("4294967296").nil?, "an id past 32 bits is nobody's"
+  assert_true User.find_by_id("99999999999999999999999").nil?, "an id past 64 bits is nobody's"
+  assert_true Group.find_by_name("").nil?, "the empty group name is nobody's"
+  assert_true Group.find_by_name("no-such-group-iyi").nil?, "a made-up group is nobody's"
+  assert_true Group.find_by_id("x1").nil?, "a group id that is not a number is nobody's"
+  puts "  nil each time"
+{% end %}
+
+puts "== the fixture, as the parsers read it"
+fixture_checks(false)
+puts "  #{User.parse(PASSWD).size} accounts and #{Group.parse(GROUPS).size} groups kept"
+
+dir = ENV["USER_FIXTURE_DIR"]?
+if dir
+  File.write("#{dir}/passwd", PASSWD)
+  File.write("#{dir}/group", GROUPS)
+  File.write("#{dir}/queries", QUERIES.join("\n") + "\n")
+  File.write("#{dir}/transcript", transcript(false))
+  puts "  fixture and transcript written to #{dir}"
+end
+
+if ENV["USER_FIXTURE_SYSTEM"]?
+  puts "== the lookups, reading the fixture as the system's files"
+  fixture_checks(true)
+  assert_str transcript(false), transcript(true), "the lookups answer every query as the parsers do"
+  puts "  every query answered as the parsers answer it"
+end
+
+expect = ENV["USER_EXPECT"]?
+puts "== another program agrees"
+if expect
+  checked = 0
+  File.read(expect).split('\n').each do |line|
+    next if line.empty?
+    parts = line.split('\t')
+    kind = parts[0]
+    want = parts[2, parts.size - 2]
+    case kind
+    when "current"
+      me = User.current
+      assert_str want[0, 6].join("\t"), fields(me), "current is pwd.getpwuid(os.getuid())"
+      assert_str want[6], me.group_ids.join(","), "current's group_ids is os.getgrouplist"
+    when "current-fallback"
+      me = User.current
+      assert_str want[0, 6].join("\t"), fields(me), "current falls back to the kernel's ids, $USER and $HOME"
+      assert_str want[6], me.group_ids.join(","), "the fallback's group_ids is its gid"
+    when "user-name"
+      user = User.find_by_name(parts[1])
+      assert_str want[0, 6].join("\t"), fields(user), "find_by_name(#{parts[1].inspect}) is pwd.getpwnam"
+      assert_str want[6], found(user).group_ids.join(","), "group_ids of #{parts[1].inspect} is os.getgrouplist"
+    when "user-id"
+      assert_str want.join("\t"), fields(User.find_by_id(parts[1])), "find_by_id(#{parts[1].inspect}) is pwd.getpwuid"
+    when "group-name"
+      assert_str want.join("\t"), group_fields(Group.find_by_name(parts[1])), "Group.find_by_name(#{parts[1].inspect}) is grp.getgrnam"
+    when "group-id"
+      assert_str want.join("\t"), group_fields(Group.find_by_id(parts[1])), "Group.find_by_id(#{parts[1].inspect}) is grp.getgrgid"
+    when "missing-user-name"
+      assert_true User.find_by_name(parts[1]).nil?, "find_by_name(#{parts[1].inspect}) is nil, as pwd.getpwnam raises KeyError"
+    when "missing-user-id"
+      assert_true User.find_by_id(parts[1]).nil?, "find_by_id(#{parts[1].inspect}) is nil, as pwd.getpwuid raises KeyError"
+    when "missing-group-name"
+      assert_true Group.find_by_name(parts[1]).nil?, "Group.find_by_name(#{parts[1].inspect}) is nil, as grp.getgrnam raises KeyError"
+    else
+      assert_true Group.find_by_id(parts[1]).nil?, "Group.find_by_id(#{parts[1].inspect}) is nil, as grp.getgrgid raises KeyError"
+    end
+    checked = checked + 1
+  end
+  assert_true checked > 0, "the expectations file holds lookups"
+  puts "  #{checked} lookups agree"
+else
+  puts "  nothing to compare against"
+end
+
+puts "ALL CHECKS PASSED"

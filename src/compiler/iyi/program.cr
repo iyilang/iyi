@@ -109,6 +109,10 @@ module Iyi
     # any other module's, because that order is over modules and not over text.
     getter iyi_module_initialiser_source = {} of String => String
 
+    # iyi: where the nodes of each module's initialiser were written, beside
+    # `iyi_module_initialiser_source` (`IyiMod::SourcePosition`).
+    getter iyi_module_initialiser_positions = {} of String => Array(IyiMod::SourcePosition)
+
     # iyi: which modules each file imports, by absolute filename (SPEC.md
     # III.5 rule 2). `iyi_module_inits` is one order the DAG allows; these are
     # the edges, which is what makes every *other* order it allows computable.
@@ -171,7 +175,7 @@ module Iyi
       end
       return unless unit.is_a?(NamedType)
 
-      unit_file = unit.as?(ModuleType).try(&.iyi_unit_file) || unit.locations.try(&.first?).try(&.filename).as?(String)
+      unit_file = unit.as?(ModuleType).try(&.iyi_unit_file) || unit.locations.try(&.first?).try(&.read_from).as?(String)
       return unless unit_file && iyi_imported_files.includes?(unit_file)
 
       # Code a macro expanded was written in the file that expanded it, the
@@ -181,15 +185,18 @@ module Iyi
       # beside `std/bool`, `def self.remove_directory : Bool` there was
       # "must return Std::Bool but it is returning Bool", while the same
       # line outside the `{% if %}` meant the type.
-      writer = location.try(&.original_filename)
+      #
+      # The file it was read from, which is what the edges are keyed on: a
+      # mono body or initialiser read from an artifact is located in its
+      # module's source (`IyiMod::SourcePosition`), and asked of that path the
+      # walk found no edges, so `Tuple(DnsMessage, String)` in a body
+      # `std/socket` ships met `Std::Tuple`, a module std/socket never
+      # imports: "Std::Tuple is not a generic type".
+      writer = location.try(&.original_read_from)
       return unless writer
       return if writer == unit_file
       # Only writers this build read as files: the entry and everything
-      # imported (artifact declaration replays included — their path is
-      # an edge value). A mono body or initialiser replayed out of an
-      # artifact carries its *far machine's* source path; it was checked
-      # when its own module built, and refusing it here would sanction
-      # code nobody on this machine wrote.
+      # imported (artifact replays included — their path is an edge value).
       return unless writer == filename || iyi_imported_files.includes?(writer)
       return if iyi_reachable_files(writer).includes?(unit_file)
 
@@ -282,6 +289,53 @@ module Iyi
     # semantic runs (SPEC.md III.7). Empty when the program has no manifest,
     # which is every program until it writes one.
     property iyi_mod_table = [] of {String, String}
+
+    # iyi: the program's own package — `{module path, directory}` of the
+    # `iyi.mod` at its root (`Compiler.entry_root_of`) — when it has one.
+    # A package's modules live under its name in a consumer's build
+    # (III.7), and they live there in the package's own build too:
+    # `codec.iyi` of `github.com/x/iyi-web` is `IyiWeb::Codec` in both, so
+    # a `pub macro` that names it absolutely names it in both. It was
+    # `::Codec` in its own build, and no spelling worked in both.
+    property iyi_root_package : {String, String}? = nil
+
+    # The name the program's own modules live under: the manifest's last
+    # segment (`Mod::ModFile.package_name`), or nil.
+    def iyi_root_package_name : String?
+      @iyi_root_package.try { |(path, _)| Mod::ModFile.package_name(path) }
+    end
+
+    # The module paths of the program's own package read under its name -
+    # from source or from an artifact - with that name, so the rest of the
+    # compiler maps a path to its type the way the parse did. An artifact
+    # carries the name it was written under (`IyiMod::Artifact#package_name`).
+    getter iyi_module_packages = {} of String => String
+
+    # The package name *module_path* lives under in this build, when the
+    # module is one of the program's own package's: the file it is read
+    # from is `<package root>/<module_path>.iyi`. A module on `IYI_PATH`,
+    # std's included, is not the package's, and nor is a dependency's,
+    # which `SemanticVisitor#resolve_package` names by its own manifest.
+    def iyi_root_package_name_for(module_path : String, filename : String) : String?
+      return nil unless (root = @iyi_root_package) && (name = iyi_root_package_name)
+      return nil if module_path.includes?('.')
+      return nil unless Iyi.same_file?(File.join(root[1], "#{module_path}.iyi"), filename)
+      name
+    end
+
+    # Records that *module_path* was read under *package*, and answers it:
+    # what the parser is handed.
+    def iyi_record_module_package(module_path : String, package : String?) : String?
+      return nil unless package
+      @iyi_module_packages[module_path] = package
+      # The root name this module had before its own package's build named
+      # it so (`Program#iyi_moved_package_item`).
+      head = module_path.partition('/')[0]
+      @iyi_moved_package_heads << head.camelcase if package == iyi_root_package_name && head != package
+      package
+    end
+
+    @iyi_moved_package_heads = Set(String).new
 
     # iyi: editor buffers, keyed by the absolute path the file would have —
     # `iyi lsp` compiles what the person sees, saved or not. Consulted in
@@ -379,6 +433,15 @@ module Iyi
     # unless `--emit-iyimod` asked for artifacts.
     getter iyi_exported_owners = Set(Type).new
 
+    # iyi: true when the owners above are a `--iyi-keep` namespace, the fill
+    # build `iyi bind` runs. A boundary's declarations write every parameter
+    # at the type the keep file instantiates it at, so a parameter the shard
+    # left untyped or wrote as a trait has one symbol and the producer
+    # defines it; an `--emit-iyimod` artifact writes the parameter as it was
+    # written, and the instantiations are the caller's
+    # (`IyiMod.untyped_parameter?`, `IyiMod.open_parameter?`).
+    property? iyi_fills_boundary = false
+
     # iyi: true when this program was built against iyi's own prelude.
     #
     # `require` is refused in a `.iyi` file because there is no standard
@@ -470,6 +533,17 @@ module Iyi
     # `--crystal`, where the library is the other language's and the `.cr`
     # half of that rule answers instead.
     property iyi_prelude_dir : String? = nil
+
+    # iyi: the global of the pool's preemption word, `IyiWorkers::preempt`,
+    # once codegen has marked a loop's back-edge for the check
+    # (`CodeGenVisitor#iyi_back_edge`); nil in a program with no pool. The
+    # checks go in after optimisation (`PreemptChecks`).
+    property iyi_preempt_flag : String? = nil
+
+    # iyi: the name of every function codegen made whose loops check, which
+    # is where a call cycle gets a check at its entry too
+    # (`PreemptChecks.mark_recursion`).
+    getter iyi_preempt_funs = [] of String
 
     # iyi: the types each object-code unit refers to a type id of, by unit name
     # (SPEC.md IV.1g).
@@ -769,8 +843,31 @@ module Iyi
     # artifact knows which library to build it with.
     IYI_REGEX_CONST_PREFIX = "$Regex:iyi:"
 
-    def self.iyi_regex_const_name(pattern : String) : String
-      "#{IYI_REGEX_CONST_PREFIX}#{::Crystal::Digest::MD5.hexdigest("#{pattern.bytesize}:#{pattern}")}"
+    # The flags are in the digest because they are in the pattern's meaning:
+    # `/a/` and `/a/i` in one program are two constants. Only when there are
+    # any, so a literal without flags keeps the name every artifact written
+    # before flags existed already refers to; and behind an `f`, so the two
+    # kinds of key can never spell each other - one without flags starts
+    # with the pattern's length, a digit.
+    def self.iyi_regex_const_name(pattern : String, options : RegexOptions = RegexOptions::None) : String
+      key = "#{pattern.bytesize}:#{pattern}"
+      key = "f#{options.value}:#{key}" unless options.value == 0
+      "#{IYI_REGEX_CONST_PREFIX}#{::Crystal::Digest::MD5.hexdigest(key)}"
+    end
+
+    # iyi: what an iyi regex literal's constant is built with, by the
+    # expander and again by a consumer rebuilding the constant from an
+    # artifact: `Std::Regex::Regex.compile` of the pattern, and its flags as
+    # `Std::Regex::Regex::Options` of the same number when it has any. The
+    # numbers are the other library's on both sides, which is what lets them
+    # pass through unchanged. *at* is the node or location every part is
+    # placed at.
+    def self.iyi_regex_compile_call(value : ASTNode, options : RegexOptions, at) : Call
+      regex = Path.global(["Std", "Regex", "Regex"]).at(at)
+      return Call.new(regex, "compile", value).at(at) if options.value == 0
+      flags = Call.new(Path.global(["Std", "Regex", "Regex", "Options"]).at(at), "new",
+        NumberLiteral.new(options.value.to_s).at(at)).at(at)
+      Call.new(regex, "compile", value, flags).at(at)
     end
 
     # iyi: the imports' names each file's module unit writes, by absolute
@@ -810,6 +907,10 @@ module Iyi
     # code in `ObjectCode`.
     getter iyi_mono_bodies = {} of String => Hash(String, String)
 
+    # iyi: where the nodes of each body in `iyi_mono_bodies` were written, by
+    # the same two keys (`IyiMod::SourcePosition`).
+    getter iyi_mono_body_positions = {} of String => Hash(String, Array(IyiMod::SourcePosition))
+
     # iyi: the defs whose bodies travel because their machine code enumerates an
     # open type's members, by the location each was written at (SPEC.md III.6).
     #
@@ -838,13 +939,18 @@ module Iyi
     # indistinguishable from any other ancestor.
     getter iyi_impls = {} of String => Array(IyiMod::ImplRecord)
 
-    # iyi: the type a module path denotes — `"app/greeter"` to `App::Greeter`.
+    # iyi: the type a module path denotes — `"app/greeter"` to `App::Greeter`,
+    # and a module of the program's own package under the package's name
+    # (`iyi_module_packages`), as its header was parsed.
     #
     # Resolved by segment rather than remembered, which is only safe because
     # IV.6 #6 made the path-to-name mapping injective: two module paths cannot
-    # denote one type, so this lookup cannot answer for the wrong module.
+    # denote one type, so this lookup cannot answer for the wrong module. The
+    # package rule has one exception, the same in every build: `iyi-web`
+    # holding both `codec.iyi` and `iyi_web/codec.iyi` names both `IyiWeb::Codec`.
     def iyi_module_type(module_path : String) : ModuleType?
-      module_path.split('/').reduce(self.as(ModuleType?)) do |scope, segment|
+      segments = Parser.iyi_package_segments(@iyi_module_packages[module_path]?, module_path.split('/'))
+      segments.reduce(self.as(ModuleType?)) do |scope, segment|
         return nil unless scope
         scope.types?.try(&.[]?(segment.camelcase)).as?(ModuleType)
       end
@@ -1297,6 +1403,17 @@ module Iyi
       # every type it found shareable, and a consumer reads that and never
       # recomputes: the bodies that would tell it are not in the artifact.
       types["Share"] = @share_annotation = AnnotationType.new self, self, "Share"
+      # iyi: `@[NoPreempt]` on a def keeps the back-edge check out of its
+      # body and of the blocks inlined into it (SPEC.md III.4.13, part 9):
+      # a loop there is never where a parallel task gives its worker up.
+      types["NoPreempt"] = @no_preempt_annotation = AnnotationType.new self, self, "NoPreempt"
+      # iyi: `@[SafeReach("why")]` on a constant or a class variable is the
+      # program's word that every thread may reach it through the defs a
+      # shared block calls - set once and then only read, or guarded some
+      # other way the type does not show - and the reason is the claim,
+      # written where the state is. It quiets the warning that walk gives
+      # (SPEC.md III.4.4), never the refusal of a block that names it itself.
+      types["SafeReach"] = @safe_reach_annotation = AnnotationType.new self, self, "SafeReach"
 
       # iyi: the marker that makes a union member an error member (SPEC.md
       # III.1.1). Created here rather than declared in the prelude because the
@@ -1630,7 +1747,7 @@ module Iyi
                      always_inline_annotation naked_annotation returns_twice_annotation
                      raises_annotation primitive_annotation call_convention_annotation
                      flags_annotation link_annotation extern_annotation deprecated_annotation experimental_annotation
-                     share_annotation error_trait) %}
+                     share_annotation no_preempt_annotation safe_reach_annotation error_trait) %}
       def {{name.id}}
         @{{name.id}}.not_nil!
       end
@@ -1731,7 +1848,7 @@ module Iyi
     # the prefix `__temp_cd6ae5dd_*`. This localizes the impact on incremental
     # object file generation to all types defined or reopened in that same file.
     def new_temp_var_name(node : ASTNode) : String
-      if filename = node.location.try(&.original_filename)
+      if filename = node.location.try(&.original_read_from)
         # the parser creates `Location`s with an empty filename by default,
         # assume they are equivalent to `nil` to make compiler specs less noisy
         unless filename == ""
@@ -1805,7 +1922,7 @@ module Iyi
     def check_private(node)
       return nil unless node.visibility.private?
 
-      filename = node.location.try &.original_filename
+      filename = node.location.try &.original_read_from
       return nil unless filename
 
       file_module(filename)

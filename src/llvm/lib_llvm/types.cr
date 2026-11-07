@@ -8,6 +8,7 @@ lib LibLLVM
   type TypeRef = Void*
   type ValueRef = Void*
   type BasicBlockRef = Void*
+  type UseRef = Void*
   type MetadataRef = Void*
   type BuilderRef = Void*
   type DIBuilderRef = Void*

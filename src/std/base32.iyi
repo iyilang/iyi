@@ -1,0 +1,227 @@
+# Base32, RFC 4648 section 6, and Base32hex, section 7, written in iyi.
+#
+#     import std/base32::{Base32, Base32Hex, Base32Error}
+#
+#     Base32.encode("foobar")                  # "MZXW6YTBOI======"
+#     Base32.encode("foobar", padding: false)  # "MZXW6YTBOI"
+#     Base32.decode("mzxw6ytboi")              # the six bytes, or a Base32Error
+#     Base32Hex.encode("foobar")               # "CPNMUOJ1E8======"
+#
+# What is encoded is a `String`, whose bytes are taken, or an
+# `Array(UInt8)`; what is decoded is an `Array(UInt8)`, because a base32
+# text is most often a key (an `otpauth://` secret, a DNSSEC NSEC3 hash in
+# Base32hex), and a key is bytes and seldom UTF-8.
+#
+# `encode` writes the upper-case alphabet, padded with `=` to a multiple of
+# eight characters unless `padding: false` is asked for (section 3.2 lets
+# a specification leave it out, and the Key URI format TOTP secrets are
+# handed around in does). `decode` reads either case, and padding is
+# optional, but where there is any it must be the whole of it: the text
+# then a multiple of eight characters long and the last group closed by
+# exactly the `=` its data characters leave over. What is not base32 is a
+# `Base32Error` naming what and where, never bytes made up or dropped:
+#   * a byte outside the alphabet (section 3.3: "MUST reject"), and that
+#     includes whitespace and line breaks, which this does not skip;
+#   * data after the padding;
+#   * padding that is too short, too long, or closes no group;
+#   * a last group of 1, 3 or 6 characters, which ends on no whole byte;
+#   * a last character that sets bits past the data (section 3.5): "MB"
+#     and "MA" would both be "`f`" if those bits were ignored, and a
+#     decoder that ignores them lets one byte string have many encodings.
+#     The sentence names the canonical character.
+# Python's `base64.b32decode` agrees with the first four (with
+# `casefold=True` for lower case, and the text padded) and ignores the
+# fifth; the gate holds that line exactly.
+#
+# A character at a time each way: the texts this is for are tens of bytes,
+# and the word-at-a-time loops std/base64 needed for megabytes would be
+# code nothing here measures.
+#
+# Pure computation: no platform, no clock, no randomness.
+
+module std/base32
+
+# What `decode` answers for a text that is not base32.
+pub struct Base32Error
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for Base32Error
+  def message : String
+    @message
+  end
+end
+
+# RFC 4648 section 6: `A` to `Z` then `2` to `7`, the digits 0 and 1 left
+# out for looking like O and I. Section 7's Base32hex: `0` to `9` then `A`
+# to `V`, which keeps encoded texts in the order of the bytes they encode.
+# Each written once, for the encoder and the decoder both.
+BASE32_ALPHABET    = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+BASE32HEX_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+
+# A data character's value, by byte, in either case; -1 for everything
+# else.
+BASE32_VALUES    = Base32Codec.values_of(BASE32_ALPHABET)
+BASE32HEX_VALUES = Base32Codec.values_of(BASE32HEX_ALPHABET)
+
+# RFC 4648 section 6, the alphabet authenticator secrets are written in.
+pub struct Base32
+  def self.encode(data : String | Array(UInt8), padding : Bool = true) : String
+    Base32Codec.encode(data, BASE32_ALPHABET, padding)
+  end
+
+  def self.decode(text : String) : Array(UInt8) | Base32Error
+    Base32Codec.decode(text, BASE32_VALUES, BASE32_ALPHABET, "base32")
+  end
+end
+
+# RFC 4648 section 7, the extended-hex alphabet: what DNSSEC's NSEC3
+# records (RFC 5155) write their hashed names in.
+pub struct Base32Hex
+  def self.encode(data : String | Array(UInt8), padding : Bool = true) : String
+    Base32Codec.encode(data, BASE32HEX_ALPHABET, padding)
+  end
+
+  def self.decode(text : String) : Array(UInt8) | Base32Error
+    Base32Codec.decode(text, BASE32HEX_VALUES, BASE32HEX_ALPHABET, "base32hex")
+  end
+end
+
+struct Base32Codec
+  def self.encode(data : String | Array(UInt8), alphabet : String, padding : Bool) : String
+    src, n = bytes_of(data)
+    table = alphabet.to_unsafe
+    # Eight characters for every five bytes; the last group's characters
+    # are its bits rounded up to fives, and padding brings it to eight.
+    chars = (n.to_i64 * 8 + 4) // 5
+    size = padding ? (n.to_i64 + 4) // 5 * 8 : chars
+    String.new(size.to_i32) do |dst|
+      acc = 0
+      bits = 0
+      o = 0
+      i = 0
+      while i < n
+        acc = ((acc << 8) | src[i].to_i32) & 0xFFF
+        bits = bits + 8
+        while bits >= 5
+          bits = bits - 5
+          dst[o] = table[(acc >> bits) & 31]
+          o = o + 1
+        end
+        i = i + 1
+      end
+      if bits > 0
+        dst[o] = table[(acc << (5 - bits)) & 31]
+        o = o + 1
+      end
+      while o < size
+        dst[o] = 61_u8
+        o = o + 1
+      end
+    end
+  end
+
+  def self.decode(text : String, values : Array(Int32), alphabet : String, name : String) : Array(UInt8) | Base32Error
+    src = text.to_unsafe
+    n = text.bytesize
+    table = values.to_unsafe
+    # The data characters run to the first `=`, and everything after it
+    # must be `=`.
+    data = 0
+    while data < n && src[data] != 61_u8
+      v = table[src[data].to_i32]
+      return Base32Error.new("#{name}: byte #{data} is #{show(src[data])}, which is not in the alphabet") if v < 0
+      data = data + 1
+    end
+    j = data
+    while j < n
+      if src[j] != 61_u8
+        return Base32Error.new("#{name}: byte #{j} is #{show(src[j])}, which is not in the alphabet") if table[src[j].to_i32] < 0
+        return Base32Error.new("#{name}: data after the padding, at byte #{j}")
+      end
+      j = j + 1
+    end
+    rest = data % 8
+    # Five bits a character: 2, 4, 5 and 7 characters are 1, 2, 3 and 4
+    # bytes with 2, 4, 1 and 3 bits over; 1, 3 and 6 end inside a byte.
+    if rest == 1 || rest == 3 || rest == 6
+      return Base32Error.new("#{name}: a last group of #{count(rest, "data character")} ends on no whole byte")
+    end
+    pads = n - data
+    wanted = (8 - rest) % 8
+    if pads > 0 && wanted == 0
+      return Base32Error.new("#{name}: #{count(pads, "padding character")} after #{count(data, "data character")}, whose groups are already whole")
+    end
+    if pads > 0 && pads != wanted
+      return Base32Error.new("#{name}: #{count(pads, "padding character")} after #{count(data, "data character")}, where #{wanted} close the group")
+    end
+    over = rest * 5 % 8
+    if over > 0
+      last = table[src[data - 1].to_i32]
+      clean = last & (31 ^ ((1 << over) - 1))
+      if clean != last
+        return Base32Error.new("#{name}: the last data character, #{show(src[data - 1])} at byte #{data - 1}, sets bits past the data; canonically it is '#{alphabet[clean]}'")
+      end
+    end
+    answer = Array(UInt8).new(data * 5 // 8, 0_u8)
+    acc = 0
+    bits = 0
+    o = 0
+    i = 0
+    while i < data
+      acc = ((acc << 5) | table[src[i].to_i32]) & 0xFFF
+      bits = bits + 5
+      if bits >= 8
+        bits = bits - 8
+        answer[o] = ((acc >> bits) & 255).to_u8
+        o = o + 1
+      end
+      i = i + 1
+    end
+    answer
+  end
+
+  private def self.count(n : Int32, noun : String) : String
+    n == 1 ? "1 " + noun : "#{n} #{noun}s"
+  end
+
+  # A byte as the sentence names it: a printable one quoted, any other in
+  # hexadecimal.
+  private def self.show(b : UInt8) : String
+    if b >= 33_u8 && b <= 126_u8
+      "'" + b.unsafe_chr.to_s + "'"
+    else
+      digits = "0123456789ABCDEF"
+      "0x" + digits[b.to_i32 >> 4].to_s + digits[b.to_i32 & 15].to_s
+    end
+  end
+
+  private def self.bytes_of(data : String | Array(UInt8)) : {Pointer(UInt8), Int32}
+    if data.is_a?(String)
+      {data.to_unsafe, data.bytesize}
+    else
+      {data.to_unsafe, data.size}
+    end
+  end
+
+  protected def self.values_of(alphabet : String) : Array(Int32)
+    chars = alphabet.to_unsafe
+    values = Array(Int32).new(256, -1)
+    k = 0
+    while k < 32
+      c = chars[k]
+      values[c.to_i32] = k
+      # Letters read in either case.
+      values[c.to_i32 + 32] = k if c >= 65_u8 && c <= 90_u8
+      k = k + 1
+    end
+    values
+  end
+end

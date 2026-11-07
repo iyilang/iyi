@@ -45,7 +45,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
 
     location = node.location
     filename = node.string
-    relative_to = location.try &.original_filename
+    relative_to = location.try &.original_read_from
 
     # iyi: `require "json"` in a `.iyi` file used to load Crystal's standard
     # library and fail somewhere inside it, on a syntax this parser does not
@@ -217,7 +217,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     path = iyi_expand_short_name(node, written)
     node.path = path.split('/') unless path == written
     location = node.location
-    relative_to = location.try &.original_filename
+    relative_to = location.try &.original_read_from
 
     # iyi: a package import (SPEC.md III.7). The manifest's prefix table is
     # asked first — longest prefix first, so `/v2` is a different module —
@@ -870,6 +870,18 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       unless IyiMod.digest(File.read(source)) == summary.hashes.source
         return "#{source} has changed since it was written"
       end
+
+      # The names it was written under. A module of the program's own
+      # package lives under the package's name, which is iyi.mod's to say,
+      # and a manifest that names another package - or one written beside
+      # a module that had none - renames every type the artifact declares
+      # without touching the file the hash above is of.
+      expected = @program.iyi_root_package_name_for(module_path, source) || ""
+      unless summary.package_name == expected
+        was = summary.package_name.empty? ? "outside any package" : "under the package name `#{summary.package_name}`"
+        now = expected.empty? ? "outside any package" : "under `#{expected}`"
+        return "it was written #{was}, and this build reads \"#{module_path}\" #{now}"
+      end
     end
 
     summary.imports.each do |edge|
@@ -1010,9 +1022,21 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # records the far end's hashes whichever way the far end arrived (IV.3).
     @program.iyi_artifact_hashes[artifact.module_name] = artifact.hashes
 
-    source = String.build { |io| IyiMod.declarations(artifact, io) }
+    # With the places the travelling bodies and the initialiser were written,
+    # so their nodes are located in the module's source and not in this
+    # rendering of it (`IyiMod::SourcePosition`): a macro's
+    # `@caller.first.filename`, an error and the debug info answer as they
+    # do when the module is built from source. Every node keeps the artifact
+    # as `Location#artifact`, which is what decisions about the file this
+    # build read ask (`Location#read_from`).
+    io = IO::Memory.new
+    pragmas = {} of Int32 => Array(Lexer::LocPragma)
+    travelled = IyiMod.declarations(artifact, io, pragmas, artifact_path)
+    source = io.to_s
     parser = @program.new_parser(source)
     parser.filename = artifact_path
+    parser.artifact = artifact_path
+    parser.macro_expansion_pragmas = pragmas unless pragmas.empty?
     # In the language of the module they came from, which the artifact's
     # name does not say: `.iyimod` is no extension the lexer knows, so an
     # iyi module's declarations were read by the other language's rules,
@@ -1025,9 +1049,16 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # module of the other language, where a module is a mixin. See the parser's
     # module header and `Artifact#module_extends_self`.
     parser.iyi_module_extends_written = true
+    # Under the package name it was written under, which its object code's
+    # symbols already spell (`Artifact#package_name`): a module of a
+    # package's own build is `IyiWeb::Codec` read back too.
+    parser.iyi_package_name = @program.iyi_record_module_package(artifact.module_name, artifact.package_name.presence)
     # The path is where these declarations came from and not a file anyone can
     # read them out of, so the text goes where an error will look for it.
     Iyi.register_iyi_declarations artifact_path, source
+    # And the lines its travelling code came from, for a source that is not
+    # here to show them from.
+    travelled.each { |filename, lines| Iyi.register_travelled_lines filename, lines }
     @iyi_importing << artifact_path
     # Where this module was written, for a `run` inside a macro that
     # travelled — see `Program#iyi_artifact_source_paths`.
@@ -1069,6 +1100,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         top_source = String.build { |io| IyiMod.top_level_declarations(artifact, io) }
         top_path = "#{artifact_path} (top level)"
         top_parser = @program.new_parser(top_source)
+        top_parser.artifact = top_path
         top_parser.filename = top_path
         top_parser.iyi = true if iyi_declarations
         Iyi.register_iyi_declarations top_path, top_source
@@ -1273,9 +1305,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       options = RegexOptions.new(regex.options.to_i32)
       value =
         if regex.name.starts_with?(Program::IYI_REGEX_CONST_PREFIX)
-          # An iyi module's literal, rebuilt the way it was built.
-          Call.new(Path.global(["Std", "Regex", "Regex"]).at(location), "compile",
-            StringLiteral.new(regex.pattern).at(location)).at(location)
+          # An iyi module's literal, rebuilt the way it was built, its flags
+          # included: without them `/a/i` read from an artifact would match
+          # only `a`.
+          Program.iyi_regex_compile_call(StringLiteral.new(regex.pattern).at(location), options, location)
         else
           Call.new(
             Path.global("Regex").at(location), "new",
@@ -1382,8 +1415,16 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       parser.wants_doc = @program.wants_doc?
       # Only the package's own files: a std module a package imports is
       # loaded while the package is still on the stack, and is std's.
-      if (current = @iyi_package_stack.last?) && iyi_inside_checkout?(filename, current[1])
-        parser.iyi_package_name = Mod::ModFile.package_name(current[0])
+      # The program's own package names its modules the same way, so a
+      # module of it is one name in its own build and in a consumer's.
+      if current = @iyi_package_stack.last?
+        if iyi_inside_checkout?(filename, current[1])
+          parser.iyi_package_name = Mod::ModFile.package_name(current[0])
+        end
+      else
+        module_path = node.path.join('/')
+        parser.iyi_package_name = @program.iyi_record_module_package(module_path,
+          @program.iyi_root_package_name_for(module_path, filename))
       end
       parsed_nodes = parser.parse
       parsed_nodes = @program.normalize(parsed_nodes, inside_exp: false)
@@ -1408,8 +1449,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # separately whether any runnable code is somewhere this cannot reach —
     # which is what a consumer has to be refused over rather than given a
     # module that half sets itself up.
-    source = iyi_initialiser_source(parsed_nodes)
-    @program.iyi_module_initialiser_source[filename] = source unless source.empty?
+    source, positions = iyi_initialiser_source(parsed_nodes)
+    unless source.empty?
+      @program.iyi_module_initialiser_source[filename] = source
+      @program.iyi_module_initialiser_positions[filename] = positions
+    end
     @program.iyi_module_initialisers << filename if iyi_uncarried_initialiser?(parsed_nodes)
     FileNode.new(parsed_nodes, filename)
   end
@@ -1540,10 +1584,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # `iyi_uncarried_initialiser?` still sees it.
   #
   # In text order, because that is the order III.5 gives a module's own code.
-  private def iyi_initialiser_source(node : ASTNode) : String
+  # With where each node of it was written (`IyiMod::SourcePosition`).
+  private def iyi_initialiser_source(node : ASTNode) : {String, Array(IyiMod::SourcePosition)}
     statements = [] of ASTNode
     iyi_collect_initialiser node, statements
-    statements.join('\n', &.to_s)
+    IyiMod.located_source(statements)
   end
 
   private def iyi_collect_initialiser(node : ASTNode, statements : Array(ASTNode)) : Nil
@@ -2244,16 +2289,21 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     annotations.try(&.first?).try &.doc
   end
 
-  def check_class_var_annotations
+  # Whether a class variable is `@[ThreadLocal]`, and the reason its
+  # `@[SafeReach("...")]` gives (SPEC.md III.4.4), if it has one.
+  def check_class_var_annotations : {Bool, String?}
     thread_local = false
+    safe_reach = nil
     process_annotations(@annotations) do |annotation_type, ann|
       if annotation_type == @program.thread_local_annotation
         thread_local = true
+      elsif annotation_type == @program.safe_reach_annotation
+        safe_reach = ShareReach.claim(ann, "this class variable")
       else
-        ann.raise "class variables can only be annotated with ThreadLocal"
+        ann.raise "class variables can only be annotated with ThreadLocal or SafeReach"
       end
     end
-    thread_local
+    {thread_local, safe_reach}
   end
 
   def check_allowed_in_lib(node, type = node.type.instance_type)

@@ -29,7 +29,9 @@ name: iyi
 #                    by cross-compiling: an edit to `src/lib_c` or
 #                    `src/crystal/system` is invisible here until somebody
 #   binary           the thing a person downloads, unpacked somewhere else
-#   std              the native standard library (src/std/) and its module exercises
+#   std              the native standard library (src/std/): its foundation here,
+#                    its modules' exercises in the std-siblings shards (and the
+#                    windows- and darwin- shards beside their own jobs)
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -210,6 +212,72 @@ jobs:
         env:
           CRYSTAL_WORKERS: 1
 
+  # And the question from a position nobody chose. The samples job's
+  # soak asks one hover after each abuse; this asks every cursor question
+  # at thousands of positions across `src/std`, including the two shapes
+  # the answers were wrong on — a macro directive line and a local
+  # assignment, where a variable an arm this target does not take has no
+  # type and a visitor read it anyway. Eighteen internal errors were found
+  # that way and nothing had asked. A job of its own: it grows with the
+  # library, and took 22 to 41 of the samples job's 90 minutes.
+  #
+  # In four shards (`lsp_positions.py --shard`), dealt by each module's
+  # measured weight. Whole, the sweep took 37 to 71 minutes in ten green
+  # runs of 2026-10-23 to 10-25 and was cut off past 72 of the job's 75
+  # then in four (master's 120891621408 among them), on runners of uneven
+  # speed; it was dealt three ways on 10-26.
+  #
+  # Three were not enough. In 39 green shard jobs of 13 master runs,
+  # 2026-10-26 to 10-30, the sweep step took 14.0 to 24.7 minutes in
+  # shard 1, 13.8 to 25.2 in shard 2 and 16.2 to 28.0 in shard 3, and the
+  # job about 3 more; master's 1ae9e94db had shard 1 cut off at 45 (job
+  # 124118534818, its step 42 minutes in, its log never kept), and the
+  # rerun passed in 24.7. The runners, not the sweep: each job's modules
+  # are slower by one factor, 0.57 to 1.24 of the median job, and divided
+  # by it each shard cost the same over those four days (shard 1 1,149 s
+  # on a median runner on 10-26 and 1,197 on 10-30, std/http asked 40
+  # questions more; shards 2 and 3 1,422 to 1,472 and 1,632 to 1,671).
+  # On one Linux workstation shard 1 took 726 and 740 s at c1fe669cf, where
+  # it was dealt, and 780 and 748 at 1ae9e94db, interleaved, and the front
+  # end's stages over std/http are level (Semantic (main) 0.743 s against
+  # 0.738, best of five); the reach walk (#148) is in cleanup, which the
+  # server does not run. The cut-off shard costs 1,197 s on a median
+  # runner, so its runner was at least 2.1 times the median, or it hung.
+  #
+  # Dealt four ways by those jobs' own seconds, the heaviest shard is
+  # 1,079 s on a median runner: 22 minutes at the slowest green job's
+  # 1.24 and about 25 with its setup, 56% of forty-five, where three
+  # dealt the same way would take 33 (73%). At the cut-off job's 2.1 it
+  # would end in about 41, inside the limit, and forty-five still ends a
+  # hang.
+  lsp-positions:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "Every cursor question, everywhere in the library, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi` and its daemon
+        run: make -o .build/crystal iyi iyi-daemon
+      # Unbuffered, so a shard that stops says where it was.
+      - name: Every cursor question, everywhere in the library
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python3 bench/lsp_positions.py 200 --shard ${{ matrix.shard }}/4
+
   samples:
     needs: build
     runs-on: ubuntu-24.04
@@ -221,6 +289,9 @@ jobs:
     # and 51. `lsp_positions.py`, which asks a cursor question every 200
     # lines of every module in `src/std` and grows with it, took 15, 16 and
     # 23 minutes in those that finished and 28 to 31 in those cancelled.
+    # At 90 the job took 87 on most runs and was cancelled at 90 on
+    # 2026-10-16, `lsp_positions.py` 22 to 41 minutes of it: that step is
+    # now the `lsp-positions` job's, run beside this one.
     timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
@@ -326,6 +397,11 @@ jobs:
       - name: Build the samples again with their modules' source deleted
         run: bash bench/samples_roundtrip.sh
 
+      # V.9 (e): a build with nothing changed compiles nothing, and each kind
+      # of input a build reads, changed, builds again and prints the change.
+      - name: A build with nothing changed is up to date, and only then
+        run: bash bench/up_to_date.sh
+
       # III.4, built in III.4.8's order: a scheduler, cancellable blocking
       # primitives, then `group` and `Channel`. Two arms because the context
       # switch is naked asm and the optimiser is what corrupted it once; two
@@ -335,6 +411,25 @@ jobs:
 
       - name: The runtime exercise holds III.4's properties
         run: bash bench/runtime_exercise.sh
+
+      # III.4.13: tasks across cores. Parallel tasks on the pool, each kept
+      # by the worker that started it, values through channels across
+      # threads, cancels delivered to the thread a task is on, the
+      # speedup held to a floor of 0.6 per worker, `Share` refusing what a
+      # parallel block may not capture, and broken copies of the runtime -
+      # a lost wakeup, a task handed out twice, a cancel never delivered -
+      # each caught by name.
+      - name: Tasks across cores (III.4.13)
+        run: bash bench/parallel_exercise.sh
+
+      # A pool's workers allocating from their own caches, refilled under
+      # their size class's lock: cells read back whole through collections,
+      # the sweep's chunks reused, no chunk on two lists, every list empty
+      # after a collection, no cache left by an ended thread - and broken
+      # copies (lists kept across a collection, a class's lock or a walk
+      # claim that excludes nobody, an unretired cache), each caught.
+      - name: The allocator's caches and its centre per class
+        run: bash bench/alloc_cache.sh
 
       # The shape those primitives are actually used in: a fiber per
       # connection, both halves parked on the poller, and a collection
@@ -400,6 +495,13 @@ jobs:
       # names and eight broken methods of a copied prelude.
       - name: Arrays, hashes and sets at their edges
         run: bash bench/collections_exercise.sh
+
+      # The assertions a test is written in, with no import: each one held
+      # and failed, its message naming the values and the caller's line,
+      # named cases running past a failure to an exit of 1, and every check
+      # proved able to fail against a patched copy of the prelude.
+      - name: The prelude's assertions
+        run: bash bench/assertions_exercise.sh
 
       # And what the commands say when they refuse. Every case is a mistake
       # a person makes at the command line, and the claim is one sentence
@@ -486,6 +588,12 @@ jobs:
       # read inside its band — the corrected prediction is in SPEC.md.
       - name: The edit-rebuild loop stays cheap
         run: python3 bench/rebuild_speed.py
+
+      # A rebuild with nothing changed compiles nothing, `_main` included:
+      # debug builds ordered module initialisers at random, and every
+      # build was a slightly different program (#141).
+      - name: A rebuild with nothing changed reuses every object
+        run: python3 bench/rebuild_reuse.py
 
       # R-2c types every written def at its definition, and the probes that
       # do it merged their variables into the program's, one probe after
@@ -598,15 +706,8 @@ jobs:
       - name: The language server does not flinch
         run: python3 bench/lsp_soak.py
 
-      # And the question from a position nobody chose. The soak above asks
-      # one hover after each abuse; this asks every cursor question at
-      # thousands of positions across `src/std`, including the two shapes
-      # the answers were wrong on — a macro directive line and a local
-      # assignment, where a variable an arm this target does not take has
-      # no type and a visitor read it anyway. Eighteen internal errors
-      # were found that way and nothing here had asked.
-      - name: Every cursor question, everywhere in the library
-        run: python3 bench/lsp_positions.py
+      # Every cursor question at every 200th line of the library is the
+      # `lsp-positions` job's, beside this one.
 
       # The server is two processes because `iyi` carries no collector: a
       # proxy that keeps the protocol and the buffers, and a worker that
@@ -825,10 +926,13 @@ jobs:
       - name: The numbers the docs quote from a measurement
         run: python3 bench/measured_numbers.py
 
+  # Ninety minutes: it took 50 and 52 on master, 59 on integration/0.20
+  # with its new modules, and was cut off at sixty there (job
+  # 119218729131).
   std:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The native standard library and its module exercises"
@@ -843,13 +947,94 @@ jobs:
       - run: chmod +x .build/crystal
       - name: Build iyi binary
         run: make -o .build/crystal iyi
-      - name: The standard library foundation and discovered exercises
+      # The foundation's own sections; the modules' exercises are the
+      # std-siblings shards below, side by side.
+      - name: The standard library foundation
+        env:
+          STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
       # crystal-metric's port: twenty-six benchmarks that check their own
       # answers against the Crystal program's, over one program that uses
       # the library together; four broken modules prove it can fail.
       - name: crystal-metric's port answers as Crystal does
         run: bash bench/metric_port.sh
+
+  # Every module's own exercise, in four shards (bench/std_siblings.sh).
+  # One after another they ran past the std job's hour: 39 of 91 had run at
+  # sixty minutes, std/http's proofs alone thirteen of them, on top of the
+  # foundation's twenty-five. Interleaved, each shard carries a quarter:
+  # in three, the shard with std/http - 21 minutes of HTTPS under two
+  # certificates and its proofs - ran past 45. And at 45 a shard was cut
+  # off with three runs of this workflow at once (a tag's, master's and the
+  # branch's): the same shard took 29 to 45 minutes in four runs, so it
+  # has the hour Windows' shards have. And ninety, as Windows' now do: on
+  # tls/mlkem shard 3 reached std/tls after forty minutes, and std/tls's
+  # broken copies, grown with the hybrid's, ran it past sixty. Interleaved
+  # by sorted place, shard 2 then held std/http, std/big, std/websocket and
+  # std/autocert: 4,641 s of siblings on Linux in run 39840302846, where
+  # shard 4 held 838. The shards are dealt by weight now, the seconds each
+  # sibling took in that run (bench/std_siblings.sh's WEIGHTS): added up
+  # from the same logs, the heaviest shard holds 2,580 s on Linux, 2,875
+  # on darwin and 2,936 on Windows, where it held 4,641, 4,509 and 4,019.
+  # The limits stay until a run dealt so has been measured.
+  std-siblings:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: crystallang/crystal:1.21.0-build
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build iyi binary
+        run: make -o .build/crystal iyi
+      # The crypto modules' gates hold them to OpenSSL through Python's
+      # cryptography - signatures, chains, a TLS server - and skip that
+      # half, saying so, where it is missing. It was missing here. And the
+      # gates hold their modules to Python 3.14: `compression.zstd` and
+      # zipfile's Zstandard are 3.14's, `ipaddress`'s registries and
+      # `shlex`, `email` and liblzma answer otherwise in 3.12, which is the
+      # container's, and std/png's oracle is Pillow. uv brings 3.14 into a
+      # container that has no setup-python. std/secure_dns's gate asks dig
+      # (`+tls`, `+https`) the questions its scripted servers answer, and
+      # its HTTP/2 server is the `h2` package's; without either it skips
+      # that part, saying so, so a dnsutils the mirror lacks is not fatal.
+      - name: Python 3.14 with cryptography, Pillow and h2, and dig, for the oracles
+        run: |
+          apt-get update -qq && apt-get install -y -qq python3 python3-pip > /dev/null
+          apt-get install -y -qq dnsutils > /dev/null || echo "no dnsutils here: dig goes unasked"
+          python3 -m pip install -q --break-system-packages uv
+          uv python install 3.14
+          uv venv --python 3.14 /opt/oracle
+          uv pip install --python /opt/oracle/bin/python -q cryptography pillow h2
+          echo /opt/oracle/bin >> "$GITHUB_PATH"
+      # std/acme's gate places whole orders with Let's Encrypt's test CA,
+      # Pebble, which it builds with `go install` - and skips, saying so,
+      # where there is no Go, as there was none in this container. No
+      # `go.sum` here to key a cache on, so none is asked for.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: The module exercises of this shard
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+      # std/tls's reads and writes against OpenSSL, each set against its
+      # cipher's own rate on the same machine (bench/tls_speed.sh): a share
+      # needs no shard but one.
+      - name: std/tls's throughput, against its cipher's
+        if: matrix.shard == 4
+        run: bash bench/tls_speed.sh
 
   targets:
     needs: build
@@ -1005,6 +1190,20 @@ jobs:
           # arm64 kernel under emulation in cross-run.
           ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
             -o cross/threads-aarch64 bench/thread_exercise.iyi
+          # Tasks across cores, the aarch64 arm: the doorbell's eventfd2 by
+          # aarch64's number, the scheduler's lock and its atomics in
+          # ldaxr/stlxr, workers by the runtime's own `clone`.
+          ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
+            -o cross/parallel-aarch64 bench/parallel_exercise.iyi
+          # Thread-locals of a task that moves, the aarch64 arm, released:
+          # read after a park and after a loop whose back-edge check moved
+          # the task, where `llvm.read_register`, the thread pointer read
+          # this arm had before its volatile `mrs`, was hoisted out of the
+          # loop. The hoisted copy is the step's failure proof.
+          ./bin/iyi build --release --cross-compile --target aarch64-linux-gnu \
+            -o cross/migrate-aarch64 bench/parallel_migrate.iyi
+          ./bin/iyi build --release -Dparallel_hoisted_tls --cross-compile \
+            --target aarch64-linux-gnu -o cross/hoisted-aarch64 bench/parallel_migrate.iyi
           # std/process's Linux arm on the other instruction set and the
           # other libc: `clone`, `execve`, `pipe2`, `pidfd_open` and `wait4`
           # by syscall, with aarch64's numbers, which the native Linux job
@@ -1013,6 +1212,13 @@ jobs:
             -o cross/process-aarch64 bench/std_process_exercise.iyi
           ./bin/iyi build --cross-compile --target x86_64-linux-musl \
             -o cross/process-musl bench/std_process_exercise.iyi
+          # std/debug's own stack walk on the other instruction set - its
+          # register numbers and its capture are aarch64's - and linked
+          # against the other libc's start files.
+          ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
+            -o cross/debug-aarch64 bench/std_debug_cross.iyi
+          ./bin/iyi build --cross-compile --target x86_64-linux-musl \
+            -o cross/debug-musl bench/std_debug_cross.iyi
 
           # The Windows probe: the two shapes whose output has been seen wrong,
           # a case conversion and a number rendered into a string — then the
@@ -1089,13 +1295,24 @@ jobs:
             cc conc-musl.o -o conc-musl &&
             ./conc-musl > conc.txt &&
             cc process-musl.o -o process-musl &&
-            timeout 300 ./process-musl > process.txt 2>&1
+            timeout 300 ./process-musl > process.txt 2>&1 &&
+            cc debug-musl.o -o debug-musl &&
+            { ./debug-musl > debug-musl.txt 2>&1; true; }
           ' || status=$?
-          echo "== process.txt"; cat cross/process.txt 2>/dev/null || echo "(not written)"
+          for out in process debug-musl; do
+            echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
+          done
           [ "${status:-0}" -eq 0 ]
           diff cross/expected.txt cross/got.txt && echo "musl: same output"
           grep -q "every property held" cross/conc.txt && echo "musl: III.4 held"
-          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "musl: std/process held"
+          # A failed `&&` list stops a `bash -e` step only when it is the
+          # last command, so these two say so themselves.
+          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "musl: std/process held" || exit 1
+          # The panic is the program's exit; the trace is what is checked.
+          { grep -qE "^0 +[^ ]*gamma[^ ]* at .*std_debug_cross\.iyi:15:" cross/debug-musl.txt &&
+            grep -qE "^1 +[^ ]*beta[^ ]* at .*std_debug_cross\.iyi:20:" cross/debug-musl.txt &&
+            grep -qE "^2 +[^ ]*alpha[^ ]* at .*std_debug_cross\.iyi:24:" cross/debug-musl.txt &&
+            echo "musl: std/debug named every frame"; } || exit 1
 
       # Every program's output goes to a file and the chain stops at the
       # first failure, which is why a red run here used to say nothing but
@@ -1116,10 +1333,18 @@ jobs:
               timeout 120 ./floor-aarch64 2 20 > floor.txt 2>&1 &&
               gcc threads-aarch64.o -o threads-aarch64 &&
               timeout 300 ./threads-aarch64 4 > threads.txt 2>&1 &&
+              gcc parallel-aarch64.o -o parallel-aarch64 &&
+              timeout 900 ./parallel-aarch64 --watch=300000 > parallel.txt 2>&1 &&
+              gcc migrate-aarch64.o -o migrate-aarch64 &&
+              timeout 600 ./migrate-aarch64 channels loops --watch=300000 > migrate.txt 2>&1 &&
+              gcc hoisted-aarch64.o -o hoisted-aarch64 &&
+              { timeout 300 ./hoisted-aarch64 loops > hoisted.txt 2>&1; echo "exit $?" >> hoisted.txt; true; } &&
               gcc process-aarch64.o -o process-aarch64 &&
-              timeout 300 ./process-aarch64 > process.txt 2>&1
+              timeout 300 ./process-aarch64 > process.txt 2>&1 &&
+              gcc debug-aarch64.o -o debug-aarch64 &&
+              { timeout 120 ./debug-aarch64 > debug-aarch64.txt 2>&1; true; }
             ' || status=$?
-          for out in got conc floor threads process; do
+          for out in got conc floor threads parallel migrate hoisted process debug-aarch64; do
             echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
           done
           [ "${status:-0}" -eq 0 ]
@@ -1129,7 +1354,16 @@ jobs:
           # kernel's ABI and the asm, which is what this arm is for.
           grep -q "every property held" cross/floor.txt && echo "aarch64: the thread floor held"
           grep -q "every property held" cross/threads.txt && echo "aarch64: threads under the collector held"
-          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "aarch64: std/process held"
+          grep -q "every property held" cross/parallel.txt && echo "aarch64: tasks across cores held"
+          grep -q "every property held" cross/migrate.txt && echo "aarch64: thread-locals after a park and after a loop's back-edge check held" || exit 1
+          { grep -qF "a thread-local read after a loop's back-edge check named another thread" cross/hoisted.txt &&
+            grep -qx "exit 1" cross/hoisted.txt &&
+            echo "aarch64: a thread-local read hoisted out of a loop was caught"; } || exit 1
+          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "aarch64: std/process held" || exit 1
+          { grep -qE "^0 +[^ ]*gamma[^ ]* at .*std_debug_cross\.iyi:15:" cross/debug-aarch64.txt &&
+            grep -qE "^1 +[^ ]*beta[^ ]* at .*std_debug_cross\.iyi:20:" cross/debug-aarch64.txt &&
+            grep -qE "^2 +[^ ]*alpha[^ ]* at .*std_debug_cross\.iyi:24:" cross/debug-aarch64.txt &&
+            echo "aarch64: std/debug named every frame"; } || exit 1
 
   # darwin arm64 is a run target now (SPEC.md III.4.8): the concurrency
   # runtime's kqueue arm, the panic registry and every sample run natively on
@@ -1146,7 +1380,20 @@ jobs:
   # directory (BSD cp's trailing-slash reading of `src/*/`) and only
   # unpacking it somewhere else could have caught that.
   darwin:
-    runs-on: macos-14
+    # macos-15, pinned. GitHub retires macos-14 on 2026-11-02, and its
+    # scheduled brownouts cancelled every darwin job of two master runs
+    # before then (job 124229745795). The numbers that name macos-14 in
+    # these comments and the documents were measured there: a three-core
+    # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
+    runs-on: macos-15
+    # A runner builds for its own major version, which on macos-15 is 15.0:
+    # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
+    # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
+    # collector's futex (README.md, GC_DESIGN.md), so everything the darwin
+    # jobs compile - the static LLVM, the compiler and every gate's program -
+    # is built for it, and the unpacked tarball is held to it below.
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
     # Ninety, and the number is this job's own measurement rather than a
     # guess: the run before this one took 54m32s of a sixty-minute bound,
     # and 34 of those minutes are two steps nothing can shorten - building
@@ -1169,8 +1416,14 @@ jobs:
       # beside Crystal's compiler). brew's llvm is not asked for: the
       # compiler this job ships links the static one built below, and
       # the Crystal bootstrap brings whatever LLVM it needs for itself.
+      # What the runner is, in every log: the jobs' times and the gates'
+      # numbers are this machine's.
       - name: Install the bootstrap toolchain
         run: |
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          xcodebuild -version
+          python3 --version
           brew install crystal coreutils pkgconf
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
@@ -1182,8 +1435,11 @@ jobs:
       # Now it links a static minimal LLVM, and with the collector off the
       # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
-      # SDK it was compiled against; cached on the recipe's hash and the
-      # platform, so the build is paid once per recipe change. `$HOME`
+      # SDK it was compiled against; cached on the recipe's hash, the
+      # platform, the image and the deployment target, so the build is paid
+      # once per recipe or image change (28 minutes on macos-14, job
+      # 115861374075; 25 to 37 in the six darwin jobs of macos-15's first
+      # run, 41131916587). `$HOME`
       # rather than `/tmp`: darwin's `/tmp` is a symlink into `/private`,
       # and a cache path should not depend on how a symlink is archived.
       - name: Restore the static LLVM
@@ -1191,7 +1447,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
@@ -1215,6 +1471,11 @@ jobs:
 
       - name: The concurrency gate (III.4)
         run: bash bench/concurrency_exercise.sh
+
+      # III.4.13 on kqueue: the doorbell a worker rings another with is an
+      # EVFILT_USER event there, and the workers are libSystem's pthreads.
+      - name: Tasks across cores (III.4.13)
+        run: bash bench/parallel_exercise.sh
 
       # The same shape on kqueue, where the event entry is 32 bytes
       # rather than 12 and the buffer the collector could not see is
@@ -1305,20 +1566,6 @@ jobs:
           bash bench/reuse_integrity.sh
           bash bench/collect_trigger.sh
 
-      # The standard library's own gates, on the platform the darwin tarball
-      # is shipped for. The std job runs all of them on Linux and nothing
-      # ran them here, which is the same gap the collector's five had — and
-      # it cost the same way: run on a darwin machine, six of them were red.
-      # One was the module's (`File.touch` set "now" whatever second it was
-      # given, because darwin's branch passed `utimes` a null), five were
-      # the gates' own (a Python 3.11 oracle, an IR audit reading aarch64's
-      # lowering, two floor lists that predated backtraces, proofs that
-      # patched a branch this platform never compiles). Every one had been
-      # green on Linux for a release. `std_exercise.sh` drives the whole
-      # set and fails on any of them, and the gate-per-module rule with it.
-      - name: The native standard library and its module exercises
-        run: bash bench/std_exercise.sh
-
       # `std/socket`'s gate is named from before the `std_` prefix, so the
       # sweep above never ran it, and its darwin arm - libSystem's calls,
       # kqueue's two filters, a `sockaddr` with a length byte - was
@@ -1358,6 +1605,9 @@ jobs:
       - name: Samples, from artifacts (R-1)
         run: bash bench/samples_roundtrip.sh
 
+      - name: Up to date, and only then (V.9 (e))
+        run: bash bench/up_to_date.sh
+
       - name: Token boundaries and the transport soak (III.8)
         run: |
           python3 bench/lsp_token_boundaries.py
@@ -1386,6 +1636,24 @@ jobs:
           printf 'order = ""\nch = Channel(Int32).new\ngroup do |g|\n  g.spawn do\n    value = ch.receive\n    order = order + (value.is_a?(Int32) ? value.to_s : "?")\n    0\n  end\n  g.spawn do\n    sleep(10)\n    order = order + "a"\n    ch.send(7)\n    0\n  end\nend\nputs order\n' > conc.iyi
           test "$(env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi run conc.iyi)" = "a7"
           echo "the kqueue runtime runs out of the tarball"
+
+      # Built for the floor, and the check has its broken copy: the same
+      # sample built without the deployment target says the runner's own
+      # version, which this check must tell apart from 14.4.
+      - name: The tarball runs on macOS 14.4
+        run: |
+          minos() { otool -l "$1" | awk '$1 == "minos" { print $2; exit }'; }
+          for bin in iyi iyi-daemon; do
+            got=$(minos "/tmp/unpacked/bin/$bin")
+            [ "$got" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "bin/$bin says minos '$got', not $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+            echo "bin/$bin runs on macOS $got and later"
+          done
+          cd /tmp
+          env -u MACOSX_DEPLOYMENT_TARGET -u IYI_PATH -u CRYSTAL_PATH \
+            /tmp/unpacked/bin/iyi build -o /tmp/host_minos /tmp/unpacked/share/iyi/samples/hello.iyi
+          got=$(minos /tmp/host_minos)
+          [ -n "$got" ] && [ "$got" != "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "a build without the target says minos '$got': the check above tells nothing apart"; exit 1; }
+          echo "a build without the target says minos $got, which the check refuses"
 
       # The native standard library, out of the same tarball. `import std/text`
       # is a line a program writes, so it has to resolve from what was
@@ -1435,6 +1703,104 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+  # Every module's own exercise on darwin, in four shards
+  # (bench/std_siblings.sh), each building its own compiler from the same
+  # cached static LLVM: as one step of the job above they ran it past its
+  # hundred and twenty minutes, seventy of them in that step alone. A
+  # shard has a hundred and five: on integration/0.19 shard 4 was cut off
+  # at seventy-five, std/http alone 27 minutes of it and std/big 14.
+  darwin-std-siblings:
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+    timeout-minutes: 105
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises on darwin, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: Build `iyi`
+        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Python's cryptography and Pillow, for the oracles
+        run: python3 -m pip install -q cryptography pillow
+      - name: The module exercises of this shard, on darwin
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+
+  # The standard library's own gates, on the platform the darwin tarball
+  # is shipped for. The std job runs all of them on Linux and nothing
+  # ran them here, which is the same gap the collector's five had — and
+  # it cost the same way: run on a darwin machine, six of them were red.
+  # One was the module's (`File.touch` set "now" whatever second it was
+  # given, because darwin's branch passed `utimes` a null), five were
+  # the gates' own (a Python 3.11 oracle, an IR audit reading aarch64's
+  # lowering, two floor lists that predated backtraces, proofs that
+  # patched a branch this platform never compiles). Every one had been
+  # green on Linux for a release. `std_exercise.sh` drives the whole
+  # set and fails on any of them, and the gate-per-module rule with it.
+  # The foundation's own sections; the modules' exercises are the
+  # darwin-std-siblings shards above.
+  #
+  # A job of its own, building its own compiler as the shards do: as a
+  # step of the darwin job it took 51 to 54 of that job's minutes, and
+  # the job, 116 minutes in a green run on feat/m-thread (job
+  # 121411796955), was cut off at its 120 by the next (job 121530482309),
+  # its build 5 minutes slower on that runner and every gate it reached
+  # green. A hundred and twenty since, for a run that finds no static
+  # LLVM in the cache and builds it: on the first macos-15 run the build
+  # took 34 minutes and the job was cut off at ninety (job 124324684065)
+  # in "and on the platforms this runner is not", which took 24 minutes
+  # on macos-14 (job 123810587348) and had run 24 when it was cancelled.
+  darwin-std:
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+    timeout-minutes: 120
+    name: "The native standard library's foundation, on darwin"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: Build `iyi`
+        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      - name: The native standard library's foundation
+        env:
+          STD_SIBLINGS: "0"
+        run: bash bench/std_exercise.sh
 
   # A Windows binary, run twenty times, and every run held to the right
   # answer. Three things used to happen: it printed the right answer, it
@@ -1620,9 +1986,12 @@ jobs:
   # Windows package, whose `lib` carries `LLVM-C.dll` and the
   # `llvm_VERSION` beside it — this fork needs no `llvm-config` on the
   # msvc path and the package ships none.
+  # Two hours: it took 64 to 88 minutes in green runs, the release build at
+  # its end the longest step, and was cut off at ninety inside that build
+  # (job 118116750685 on lsp/shutdown).
   windows-native:
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 120
     name: "iyi, built and run on Windows"
     steps:
       - uses: actions/checkout@v7
@@ -1741,6 +2110,9 @@ jobs:
       #                      bench/arena_exercise.sh asserts and a tally
       #                      cannot
       #   wasm32_exercise    a wasm32 program
+      #   std_debug_cross    its pass is a panic, whose trace cross-run
+      #                      reads on aarch64 and musl; Windows' own trace
+      #                      is bench/panics.sh's
       #
       # The sockets came off this list when `std/socket` and `std/udp` got
       # their Winsock arms, and `std_file_exercise` came off it when the
@@ -1755,7 +2127,7 @@ jobs:
           # it - a line two seconds in - and an empty stdin is its failure.
           $skip = @(
             "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
-            "stdin_park.iyi"
+            "stdin_park.iyi", "std_debug_cross.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
@@ -1877,7 +2249,9 @@ jobs:
           bash bench/migrate_gate.sh
           bash bench/reuse_integrity.sh
           bash bench/concurrency_exercise.sh
+          bash bench/parallel_exercise.sh
           bash bench/library_boundaries.sh
+          bash bench/up_to_date.sh
 
       # And the rest of what an editor and an agent are handed. Every
       # sample again from its modules' artifacts alone (R-1), the agent
@@ -2060,9 +2434,12 @@ jobs:
   # with tools this platform does not have, and the collector's own
   # exercises refusing a platform whose collector they had never been
   # asked about.
+  # Two and a half hours: it took 56, 74 and 89 minutes on master and
+  # integration/0.20, and was cut off at ninety on a branch (job
+  # 119640679755) while its socket exercise was still going.
   windows-std:
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 150
     name: "The standard library and the collector, gated on Windows"
     steps:
       - uses: actions/checkout@v7
@@ -2095,22 +2472,32 @@ jobs:
       # And the parallel mark and the mark beside the program: Windows'
       # helpers park on a kernel32 semaphore between collections, and the
       # second stop is a helper's, suspending every registered thread.
+      # Each gate under a bound of its own (bench/bounded_gate.sh): job
+      # 120284584748 sat in bench/sweep_exercise.sh from its first line to
+      # the job's cancel at 150 minutes, and its log could not say what
+      # was still running. Fifteen minutes is over three times the longest
+      # gate's 4 min 33 s in master's green job 120284541992; a gate past
+      # it is ended with its processes and their threads printed, and the
+      # gates after it still run.
       - name: The collector's gates, on Windows
         shell: bash
         run: |
-          bash bench/arena_exercise.sh
-          bash bench/root_exercise.sh
-          bash bench/mark_exercise.sh
-          bash bench/sweep_exercise.sh
-          bash bench/collect_trigger.sh
-          bash bench/thread_exercise.sh
-          bash bench/parallel_mark.sh
-          bash bench/concurrent_mark.sh
+          failed=""
+          for gate in bench/arena_exercise.sh bench/root_exercise.sh \
+                      bench/mark_exercise.sh bench/sweep_exercise.sh \
+                      bench/collect_trigger.sh bench/thread_exercise.sh \
+                      bench/parallel_mark.sh bench/concurrent_mark.sh; do
+            bash bench/bounded_gate.sh 15 "$gate" || failed="$failed $gate"
+          done
+          [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
 
-      - name: The standard library's gates, on Windows
+      # The foundation's own sections; the modules' exercises are the
+      # windows-std-siblings shards below.
+      - name: The standard library's foundation, on Windows
         shell: bash
         env:
           PYTHONUNBUFFERED: "1"
+          STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
 
       # The socket gate, which the sweep above does not reach (its name is
@@ -2119,6 +2506,96 @@ jobs:
       - name: Sockets, on Windows
         shell: bash
         run: bash bench/socket_exercise.sh
+
+  # Every module's own exercise on Windows, in four shards
+  # (bench/std_siblings.sh): one after another, with the collector's gates
+  # and the foundation before them, they ran past this job's ninety minutes.
+  # A shard has ninety too: shard 3 took 49 to 58 minutes in green runs and
+  # was cut off at sixty on master, and a branch whose std/tls gate grew
+  # took shard 2 past sixty-five. Two hours, and fifty minutes a sibling:
+  # with two broken copies at a time on Windows (below), std/http's broken
+  # copies alone took 1,479 s there (integration/0.20, job 119078192918),
+  # past the thirty-five a sibling had.
+  # On windows-2022, as the collector and runtime jobs are. On windows-2025
+  # these shards, and once the job above, lost their runner ("lost
+  # communication with the server") eleven times, in no particular sibling:
+  # jobs 118492675680, 118598972995, 118855592816, 119293164185,
+  # 119406415714, 119550880710, 119648405209, 119673160400, 119732732855,
+  # 119732732924 and 119825970801. The shards that finished
+  # (bench/std_siblings.sh traces them) kept 7,623 MB of 16,378 free and
+  # 30 GB of disk at their worst, and the most connections in TIME_WAIT
+  # were 6,028, in a shard that did not lose its runner. A heavy job losing
+  # its runner on windows-2025 and not on windows-2022 is reported in
+  # github.com/orgs/community/discussions/173431. The job above stays on
+  # windows-2025: on 2022 its proof that helpers woken with Windows' wake
+  # boost hold the program's thread did not fire in ten runs (job
+  # 119973055363).
+  # On windows-2022 shard 1 lost its runner seven times in two days (jobs
+  # 122184178930, 122344814090, 122604891994, 122689159690, 122696158968,
+  # 122727878119 and 122981462617), each 81 to 95 minutes into its step,
+  # where a green shard 1's siblings take 43 to 56: run so on a Windows
+  # machine, std/tls hung on a broken copy's server whose TERM MSYS had lost
+  # while still starting it, and was stopped at its 50 minutes, the shard at
+  # 84 (bench/std_tls_exercise.sh, stop_server). What then ends the runner
+  # is not measured; that the gate no longer hangs is.
+  windows-std-siblings:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises on Windows, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      # Python 3.14, as on Linux: a gate asks for `python3` first, which
+      # setup-python's Windows build has beside `python`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Python's cryptography and Pillow, for the oracles
+        shell: bash
+        run: |
+          python -m pip install -q cryptography pillow
+          python3 --version
+      # Two broken copies at a time, not four: three Windows shards lost
+      # their runner ("lost communication with the server") deep into a
+      # shard holding std/tls or std/http, whose copies build and serve four
+      # at once on a 4-core runner (jobs 118492675680, 118598972995,
+      # 118855592816); none of the Linux or darwin shards did.
+      - name: The module exercises of this shard, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          MUT_JOBS: "2"
+          SIBLING_MINUTES: "50"
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
   # The gates the Linux job runs that no Windows job did: the runtime's
   # own exercises, the boundaries bound from Crystal's library, the floors,
@@ -2197,6 +2674,7 @@ jobs:
           bash bench/enum_exercise.sh
           bash bench/float_text.sh
           bash bench/collections_exercise.sh
+          bash bench/assertions_exercise.sh
           bash bench/runtime_exercise.sh
           bash bench/server_load.sh
           bash bench/defer_cost.sh
@@ -2225,6 +2703,7 @@ jobs:
           python bench/context_pack.py
           python bench/generic_boundary.py
           python bench/rebuild_speed.py
+          python bench/rebuild_reuse.py
 
       # The race, for the record, as darwin's job runs it: the same three
       # programs under iyi's collector, Boehm and Go on this runner. It
@@ -2474,22 +2953,56 @@ jobs:
           mkdir -p room && tar -xzf dist/*.tar.gz -C room
           IYI="$PWD/room/bin/iyi" bash bench/wasm32_exercise.sh
 
+  # Built on the oldest glibc it promises, not on the image the other jobs
+  # use. A binary asks the loader for the newest symbol version its build
+  # machine's headers and libraries handed it, and 0.18.0's came out of
+  # `crystallang/crystal:1.21.0-build`, which is Ubuntu 24.04: `fmod` at
+  # GLIBC_2.38, `__isoc23_strtol` (24.04's headers rename `strtol` to it),
+  # `arc4random` at 2.36, and a bundled libstdc++ asking for the same. It
+  # died on Ubuntu 22.04 before `main`, with `GLIBC_2.38' not found`, and
+  # every gate passed it because each one ran on 24.04. glibc is backward
+  # compatible only: what links on 20.04 (2.31) runs on 20.04, Debian 11,
+  # RHEL 9 and everything newer, so 20.04 is the floor and `clean-room`
+  # runs the tarball there.
+  #
+  # Nothing from the `build` job crosses over: its `.build/crystal` is a
+  # 24.04 binary and cannot start here. The bootstrap is Crystal's own
+  # static Linux release, the one that image unpacks into `/usr`, and the
+  # fork's compiler is built from it here before `iyi` is.
   binary:
-    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     container:
-      image: crystallang/crystal:1.21.0-build
+      image: ubuntu:20.04
     name: "The iyi binary and its tarball"
+    # The gates below build `--crystal` programs out of the tarball, and
+    # Crystal's library links `-lgc`: 20.04's libgc-dev is bdwgc 7.6, which
+    # lacks `GC_get_my_stackbottom` and `GC_set_stackbottom`, so `-lgc`
+    # resolves to the 8.x `libgc.a` Crystal's bootstrap put in
+    # `/usr/lib/crystal`, as the 24.04 image's libgc-dev answered it before.
+    env:
+      LIBRARY_PATH: /usr/lib/crystal
     steps:
+      # Before the checkout, so it is a git checkout: without git on the
+      # PATH `actions/checkout` downloads a snapshot, and the Makefile reads
+      # the commit and SOURCE_DATE_EPOCH out of git. `lld` because the
+      # Makefile links with `ld.lld` when there is one, as the 24.04 image
+      # did: GNU ld drops the `-lstdc++` Crystal names before LLVM's
+      # archives (`--as-needed`, nothing needs it yet) and then cannot
+      # resolve `operator new` for them. `pkg-config` and `libyaml-dev` are
+      # for the `--crystal` sample's `require "yaml"`.
+      - name: The floor's toolchain and Crystal's bootstrap
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential lld git curl ca-certificates xz-utils \
+            pkg-config libyaml-dev > /dev/null
+          curl -fsSL https://github.com/crystal-lang/crystal/releases/download/1.21.0/crystal-1.21.0-1-linux-x86_64.tar.gz \
+            | tar -xz -C /usr --strip-components=1
+          crystal --version
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v5
-        with:
-          name: crystal
-          path: .build
-      - run: chmod +x .build/crystal
 
       # The tarball's LLVM is the static minimal one, built by
       # `scripts/build-static-llvm.sh` — Crystal's own recipe, measured
@@ -2498,26 +3011,38 @@ jobs:
       # reaches, every optional dependency OFF — so the 179 MB closure the
       # package used to carry (libLLVM and its libedit, libxml2, libicu,
       # libncursesw, libzstd) never comes into existence, and `lib/` is
-      # libgc and libstdc++ at 3.4 MB. Built here, in this container,
+      # libstdc++ alone. Built here, in this container,
       # because a static archive must be linked by the glibc it was compiled
       # against — an archive built on a newer machine is a link error or a
       # silent binary-for-newer-glibc on this one. Cached on the recipe
-      # file's own hash and the runner's platform: editing the recipe is
-      # what invalidates the cache, the platform token keeps a darwin
-      # archive from ever being restored here (keys are repository-wide,
-      # not per runner), and the roughly-an-hour build is paid once per
-      # recipe change, not per push.
+      # file's own hash, the runner's platform and this job's image: editing
+      # the recipe is what invalidates the cache, the platform token keeps a
+      # darwin archive from ever being restored here (keys are
+      # repository-wide, not per runner), and the image token keeps the
+      # archive 24.04 built — GLIBC_2.38 in every object — from being
+      # restored onto the floor. The image is written twice, here and in
+      # `container:`, because a container's image cannot read `env`. The
+      # roughly-an-hour build is paid once per recipe change, not per push.
       - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@v4
         with:
           path: /tmp/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-ubuntu20.04-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      # 20.04's cmake is 3.16 and LLVM 20 asks for 3.20: Kitware's own
+      # build, which runs on any glibc this old, and only on a miss. LLVM's
+      # cmake also wants python3, which the bare image does not have.
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
-          apt-get update -qq && apt-get install -y -qq cmake curl xz-utils > /dev/null
-          bash scripts/build-static-llvm.sh /tmp/llvm-static
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 > /dev/null
+          mkdir -p /opt/cmake
+          curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-linux-x86_64.tar.gz \
+            | tar -xz -C /opt/cmake --strip-components=1
+          PATH="/opt/cmake/bin:$PATH" bash scripts/build-static-llvm.sh /tmp/llvm-static
+
+      - name: Build the compiler on the floor
+        run: make crystal LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
 
       # `iyi-tarball` alone, and the missing word is the whole of it. The target
       # carries `release := 1` and make applies that to what it builds *for this
@@ -2525,7 +3050,7 @@ jobs:
       # found it up to date by file times and refused to package it. Which is
       # the guard working: an unoptimised release is what it was added to stop.
       - name: Build `iyi` and package it
-        run: make -o .build/crystal iyi-tarball LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
+        run: make iyi-tarball LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
 
       # What a person who downloads it does: unpack it somewhere else and run a
       # program. Nothing here may need this checkout, a IYI_PATH, or a
@@ -2624,9 +3149,11 @@ jobs:
   # in the environment that built it — where the libLLVM it linked against
   # is exactly the one it needs, so "unpack somewhere else and run" proved
   # the library path and nothing about the loader. This unpacks it in a
-  # bare `ubuntu:24.04` with a C toolchain and nothing else: no LLVM, no
+  # bare `ubuntu:20.04` with a C toolchain and nothing else: no LLVM, no
   # no bootstrap compiler, no iyi. If the package lacks what the loader wants,
-  # this is where it says so.
+  # this is where it says so. 20.04 because it is the glibc the `binary` job
+  # promises (2.31): 0.18.0 passed this room on 24.04 and could not start
+  # on 22.04, every symbol it asked for being one 24.04 has.
   #
   # `gcc` is installed on purpose and it is the honest prerequisite: iyi
   # links through `cc`, so a machine that cannot compile C cannot finish
@@ -2658,7 +3185,7 @@ jobs:
         run: |
           printf 'module hi\n\nputs "hello from a machine with nothing on it"\n' \
             > room/hi.iyi
-          docker run --rm -v "$PWD/room:/iyi" ubuntu:24.04 sh -c '
+          docker run --rm -v "$PWD/room:/iyi" ubuntu:20.04 sh -c '
             set -e
             apt-get update -qq && apt-get install -y -qq gcc > /dev/null
             /iyi/bin/iyi version
@@ -2724,10 +3251,10 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs,
-            samples, std, targets, cross-objects, cross-run, wasi-run,
+    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
+            samples, lsp-positions, std, std-siblings, targets, cross-objects, cross-run, wasi-run,
             windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
-            windows-gates, windows-compiler-specs,
+            windows-std-siblings, windows-gates, windows-compiler-specs,
             wasm32-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 15

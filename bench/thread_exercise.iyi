@@ -153,6 +153,7 @@
   # back, and the check that names the fault read the ledger through
   # zeros. The global's array is a root in every build.
   class Ledgers
+    @[SafeReach("reserved to its full size before any thread starts; each thread writes only its own slot, and nothing grows it while they run")]
     @@all : Array(Ledger?) = [] of Ledger?
 
     def self.reserve(count : Int32) : Nil
@@ -340,6 +341,10 @@
 
   # ── 1. Threads, collections, live lists ────────────────────────────────
   before = IyiMark.collections
+  # The main thread's own fiber is made first: a join parks the joining
+  # task (`IyiThread#join`), and the first park makes the main thread's,
+  # which belongs to no thread that finishes.
+  IyiScheduler.current
   fibers_before = registered_fibers
   threads = start_threads(count)
   # The main thread churns beside them and holds a list of its own.

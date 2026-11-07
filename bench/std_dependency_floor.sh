@@ -65,10 +65,11 @@ trap 'rm -rf "$WORK"' EXIT
 # Crystal's thirteen, plus the spellings a linker actually emits.
 ANCESTOR_LIBS="bdw-gc libgc libevent compiler-rt pcre pcre2 gmp iconv crypto ssl xml2 yaml zlib libz LLVM ffi"
 
-# The platform libc, and nothing else. Same rule as ALLOWED_LIBS_PROGRAM in
-# bench/dependency_floor.sh, because a std module is a program's dependency and
+# The platform libc, and on darwin the trusted roots' two frameworks. Same
+# rule as ALLOWED_LIBS_PROGRAM in bench/dependency_floor.sh (its reasons in
+# bench/floor_base.sh), because a std module is a program's dependency and
 # inherits a program's floor.
-ALLOWED_LIBS="libSystem libc.so ld-linux libgcc_s"
+ALLOWED_LIBS="libSystem libc.so ld-linux libgcc_s Security CoreFoundation"
 
 # Measured floor, on this branch's base. Both numbers matter: see failure
 # mode 2. They are a floor and not a target, so they rise as the remaining

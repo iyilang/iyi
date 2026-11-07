@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every uuid section reported"
-for phrase in "== parse" "== hash"; do
+for phrase in "== parse" "== hash" "== v4" "== v7"; do
   if ! grep -q "$phrase" "$WORK/uuid-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -235,6 +235,79 @@ PY
       status=1
     fi
   fi
+fi
+
+echo
+echo "== proving the random bits come from Random::Secure"
+# Each case writes a patched std/random and/or std/uuid and names what the
+# exercise must then do: pass, or fail at the check written for it. The
+# control case seeds every `Random.new` with one constant and must still
+# pass, which only a v4 that does not draw from `Random.new` can; the same
+# constant with v4 drawing from a PCG generator again, as it did, must be
+# caught by its repeats. A secure source that answers nothing, a v7 whose
+# counter stands still and a v7 stamped with the wrong version must each
+# be caught as well.
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  for label in control pcg constant counter version7; do
+    rm -rf "$WORK/patched"
+    mkdir -p "$WORK/patched/std"
+    expect="$(PROOF="$label" "$PY" - <<PY
+import os
+from pathlib import Path
+random_src = Path("$REPO/src/std/random.iyi").read_text()
+uuid_src = Path("$REPO/src/std/uuid.iyi").read_text()
+constant_seed = ("new(entropy, entropy)", "new(1_u64, 1_u64)")
+pcg_v4 = ("    bytes = Random::Secure.random_bytes(16)\n    bytes[6] = (bytes[6] & 0x0f_u8) | 0x40_u8",
+          "    rng = Random.new\n    bytes = Array(UInt8).new(16) { (rng.next_u & 255_u32).to_u8 }\n"
+          "    bytes[6] = (bytes[6] & 0x0f_u8) | 0x40_u8")
+silent = ("    return if count == 0\n", "    return\n")
+cases = {
+    "control": ([constant_seed], [], "PASS"),
+    "pcg": ([constant_seed], [pcg_v4], "v4 UUIDs repeat"),
+    "constant": ([silent], [], "v4 UUIDs repeat"),
+    "counter": ([], [("@@v7_counter = @@v7_counter + 1", "@@v7_counter = @@v7_counter + 0")], "v7 sorts after the one before it"),
+    "version7": ([], [("bytes[6] = (0x70 | ", "bytes[6] = (0x40 | ")], "v7 version"),
+}
+random_patches, uuid_patches, expect = cases[os.environ["PROOF"]]
+for patches, src, name in ((random_patches, random_src, "random"), (uuid_patches, uuid_src, "uuid")):
+    if not patches:
+        continue
+    for old, new in patches:
+        if src.count(old) != 1:
+            raise SystemExit(f"patch site missing or not unique in {name}: {old!r}")
+        src = src.replace(old, new, 1)
+    Path(f"$WORK/patched/std/{name}.iyi").write_text(src)
+print(expect)
+PY
+)"
+    if [ $? -ne 0 ]; then
+      echo "  $label: the patch did not apply"
+      status=1
+      continue
+    fi
+    IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_uuid_exercise.iyi" >"$WORK/mut-source.out" 2>&1
+    code=$?
+    if [ "$expect" = "PASS" ]; then
+      if [ "$code" -eq 0 ] && grep -q "ALL CHECKS PASSED" "$WORK/mut-source.out"; then
+        echo "  $label: every Random.new seeded alike, and v4 is still unique - it does not draw from Random.new"
+      else
+        echo "  $label: the exercise failed with every Random.new seeded alike, so v4 still draws from it"
+        sed -n '1,3p' "$WORK/mut-source.out" | sed 's/^/    /'
+        status=1
+      fi
+    elif [ "$code" -eq 0 ]; then
+      echo "  $label: the exercise PASSED on a broken module"
+      status=1
+    elif ! grep -qF -- "$expect" "$WORK/mut-source.out"; then
+      echo "  $label: failed, but not at the check written for it ($expect):"
+      sed -n '1,3p' "$WORK/mut-source.out" | sed 's/^/    /'
+      status=1
+    else
+      echo "  $label: caught - $(grep -m1 'panic' "$WORK/mut-source.out" | sed 's/^iyi: panic: //' | cut -c1-110)"
+    fi
+  done
 fi
 
 echo

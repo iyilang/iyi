@@ -15,13 +15,16 @@
 #   t.join                          # Nil; the thread has exited
 #
 # What a thread is not, said here rather than found: it is not a task. No
-# group owns it, nothing cancels it, no channel crosses it — `Channel` is
-# one thread's, and `Share` (SPEC.md III.4.4) is what will say so at
-# compile time. What crosses threads today is `Atomic(T)` and memory the
-# program keeps straight itself. A thread gets a scheduler state and a heap
-# cache of its own on first touch, so it may spawn fibers and it allocates
-# without a lock; the world it shares is the centre behind the runtime's
-# one lock, and the collector, which stops it.
+# group owns it and nothing cancels it. What crosses threads is what
+# `Share` (SPEC.md III.4.4) lets the block capture: `Atomic(T)`, state
+# behind a `Mutex(T)` (std/mutex), immutable values, a `Channel(T)` of
+# `Share` values (III.4.13), and memory the program keeps straight
+# itself. A thread gets a scheduler state when it starts and a heap cache
+# on first touch, so it may spawn fibers and it allocates without a lock;
+# the world it shares is the centre behind the runtime's one lock, the
+# scheduler's lock its wakes cross threads under, and the collector,
+# which stops it. The pool parallel tasks run on (III.4.13) is threads of
+# this kind, started by the runtime.
 #
 # **The stop, and what is not stopped.** A collection takes the runtime
 # lock, signals every other registered thread, and waits for each to count
@@ -66,9 +69,9 @@
   #      start and cleared by it at exit; the pthread_t on darwin
   # +8   the next line, from IyiThread.first_line
   # +16  the thread's own stack: its low address, 0 when unknown (darwin)
-  # +24  its top: the mapping's end on Linux, a first-frame local's address
-  #      on darwin — everything above it is libSystem's, holding nothing
-  # +32  darwin: the park pipe, read end low, write end high
+  # +24  its top: the mapping's end on Linux, `pthread_get_stackaddr_np`'s
+  #      on darwin, written by the thread before anything it does allocates
+  # +32  unused
   # +40  where the thread stopped: sp
   # +48  pc
   # +56  the thread's IyiThread object, raw, for the child to find its body
@@ -82,7 +85,6 @@
   IYI_TL_NEXT    =   8_u64
   IYI_TL_LOW     =  16_u64
   IYI_TL_TOP     =  24_u64
-  IYI_TL_PARK    =  32_u64
   IYI_TL_SP      =  40_u64
   IYI_TL_PC      =  48_u64
   IYI_TL_OBJECT  =  56_u64
@@ -307,17 +309,15 @@
   {% elsif flag?(:darwin) %}
     # darwin: libSystem's thread, by name, the exact list the thread floor
     # measured — `pthread_create`, `pthread_join`, `pthread_kill`,
-    # `sigaction`, and a pipe per thread to park on, because `read` is on
-    # POSIX's list of what a handler may call and `os_unfair_lock_lock`,
-    # which measured a little faster, is not.
+    # `sigaction` — and the park, which is Linux's on libSystem's public
+    # futex (`park`): `os_sync_wait_on_address` and
+    # `os_sync_wake_by_address_all`, declared in prelude.iyi beside the
+    # mark helpers' park, which needs the same macOS 14.4.
     lib LibC
       fun pthread_create(thread : UInt64*, attributes : Void*, start : Void*, argument : Void*) : Int32
       fun pthread_join(thread : Void*, value : Void*) : Int32
       fun pthread_kill(thread : Void*, signal : Int32) : Int32
       fun sigaction(signal : Int32, action : Void*, previous : Void*) : Int32
-      fun pipe(fds : Int32*) : Int32
-      fun read(fd : Int32, buffer : Void*, count : UInt64) : Int64
-      fun write(fd : Int32, buffer : Void*, count : UInt64) : Int64
       fun sysctlbyname(name : UInt8*, old : Void*, old_size : UInt64*, new : Void*, new_size : UInt64) : Int32
     end
 
@@ -346,8 +346,9 @@
 
   class IyiThread
     # This thread's line; 0 on a thread nobody registered, which is the
-    # main thread before the first `start`, and a child in the instant
-    # before its first instruction — both found by handle then.
+    # main thread before the first `start`, and on Linux a child in the
+    # instant before its first instruction, found by its tid then. A
+    # darwin child is named by no stop until it has written it (`run`).
     @[ThreadLocal]
     @@line : UInt64 = 0_u64
     # Every line, from the newest; the control page; the count of threads
@@ -370,8 +371,11 @@
     @line : UInt64
     @proc : Proc(Nil)
     property next_thread : IyiThread?
+    # 1 once the body has returned, which a join parks on (`join`).
+    @ended : Atomic(UInt64)
 
     def initialize(@line : UInt64, @proc : Proc(Nil))
+      @ended = Atomic(UInt64).new(0_u64)
     end
 
     def line : UInt64
@@ -507,7 +511,9 @@
 
     # The main thread's line, made when the first thread is: its handle
     # and its stack top, which `IyiRoots` found. `@@line` on the thread
-    # that calls `start` is then never 0.
+    # that calls `start` is then never 0. Its read below, if no thread-local
+    # was touched on this thread before, is where darwin makes them all
+    # (`run`): before `link` names the line, so no stop's handler does.
     def self.register_current : Nil
       return if @@line != 0
       line = new_line
@@ -515,7 +521,6 @@
         IyiHeap.write64(line + IYI_TL_HANDLE, __iyi_conc_syscall3(IYI_SYS_GETTID, 0_i64, 0_i64, 0_i64).to_u64)
       {% elsif flag?(:darwin) %}
         IyiHeap.write64(line + IYI_TL_HANDLE, LibC.pthread_self.address)
-        IyiThread.make_park(line)
       {% elsif flag?(:win32) %}
         real_handle = Pointer(Void).new(0_u64)
         LibC.DuplicateHandle(Pointer(Void).new(0xFFFFFFFFFFFFFFFF_u64), LibC.GetCurrentThread,
@@ -543,6 +548,11 @@
     def self.start(proc : Proc(Nil)) : IyiThread
       register_current
       install_handler
+      # A second scheduler thread is coming: from here fibers on two
+      # threads may wake each other, and the scheduler's lock is taken
+      # (SPEC.md III.4.13). Said before the thread exists, so it never
+      # runs a fiber the lock does not cover.
+      IyiScheduler.expect_thread
       line = new_line
       thread = IyiThread.new(line, proc)
       IyiHeap.write64(line + IYI_TL_OBJECT, thread.object_id)
@@ -567,13 +577,15 @@
         IyiRuntimeLock.unlock
         raise "clone failed: #{result}" if result < 0
       {% elsif flag?(:darwin) %}
-        make_park(line)
+        # Counted here and linked by the thread itself, once `@@line` is
+        # written (`run`), so no stop signals it before. Created under the
+        # lock all the same: `pthread_create` writes the handle into the
+        # line after the thread exists, and the thread's own link waits on
+        # this lock, so the handle is there before a stop can read it.
         IyiRuntimeLock.lock
-        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
-        @@lines = line
-        @@count = @@count + 1_i64
         result = LibC.pthread_create(Pointer(UInt64).new(line + IYI_TL_HANDLE), Pointer(Void).new(0_u64),
           Pointer(Void).new(thread_entry), Pointer(Void).new(line))
+        @@count = @@count + 1_i64 if result == 0
         IyiRuntimeLock.unlock
         raise "pthread_create failed: #{result}" if result != 0
       {% elsif flag?(:win32) %}
@@ -634,7 +646,41 @@
     # list, run it, leave the stop's list, and return into the exit the
     # clone asm (or pthread) performs.
     def self.run(line : UInt64) : Nil
+      # darwin: the stack's top before anything here allocates. It was
+      # written below `IyiStackGuard.install`, whose `stack_t` is a heap
+      # chunk, and a stop between that allocation and the three stores
+      # scanned this stack from sp up to 0 - nothing. `GC.collect` sweeps
+      # inside its pause, so the unmarked chunk went onto a free batch
+      # there, and the stores after it wrote the batch's chain: the
+      # centre's next pop of the class read address 0x10008, the
+      # `stack_t`'s 65,536 plus 8, and the process died of SIGSEGV.
+      # Threads born sixteen at a time beside a thread collecting in a
+      # loop (bench/thread_exercise.sh, 7d) died so on macos-15's three
+      # cores in 6 of 115 runs of 3,200 threads before the fix below
+      # (`@@line`'s) and 5 of 103 after it; with the top first, in none of
+      # 128. The top is `pthread_get_stackaddr_np`'s, as the main thread's
+      # is, rather than a local's address in this frame: the scan covers
+      # `run`'s own frame whole.
+      {% if flag?(:darwin) %}
+        IyiHeap.write64(line + IYI_TL_TOP, IyiRoots.discover_stack_base)
+      {% end %}
       @@line = line
+      # darwin makes a thread's thread-locals at its first touch of one:
+      # the store above, where dyld `calloc`s one block for every
+      # `@[ThreadLocal]` in the image (three `__thread` variables in C sat
+      # in one 128-byte block on macOS 26.6), the two the stop's handler
+      # reads among them - `@@line` and the heap's `@@cache`. The parent
+      # linked this line before `pthread_create`, so a stop could signal
+      # the thread inside that `calloc`, under libmalloc's lock; the
+      # handler's read made the block again, took the lock the
+      # interrupted call held, and libplatform killed the process
+      # ("Trying to recursively lock an os_unfair_lock"). So the thread
+      # links its own line now, with its thread-locals made: no stop names
+      # it before, and nothing it did before allocates from the heap or
+      # holds a pointer into it.
+      {% if flag?(:darwin) %}
+        link_own(line)
+      {% end %}
       # An alternate signal stack is a thread's own, so a stack overflow on
       # this thread has somewhere to say so (`IyiStackGuard`).
       {% unless flag?(:win32) %}
@@ -655,15 +701,16 @@
         guarantee = 16384_i32
         LibC.SetThreadStackGuarantee(pointerof(guarantee))
       {% end %}
-      {% if flag?(:darwin) %}
-        here = uninitialized UInt64
-        IyiHeap.write64(line + IYI_TL_TOP, pointerof(here).address)
-      {% elsif flag?(:win32) %}
+      {% if flag?(:win32) %}
         IyiHeap.write64(line + IYI_TL_TOP, IyiRoots.discover_stack_base)
         # Before the body runs, so the first stop that names this line
         # reads a cache and not a zero (see `suspend_others`).
         IyiHeap.write64(line + IYI_TL_CACHE, IyiHeap.cache_page)
       {% end %}
+      # Its scheduler state, made before the body runs: a deadlock's walk
+      # of the states counts this thread as coming until it has one, and
+      # as busy from then until it waits in its own poller (III.4.13).
+      IyiScheduler.adopt_thread
       # Found and taken off the list under the lock, which every writer of
       # the list holds; from here this frame roots the body. Left on it,
       # every thread ever started kept its block's captures: 2,000 threads
@@ -687,6 +734,10 @@
       IyiRuntimeLock.unlock
       raise "a thread started with no body" unless thread.is_a?(IyiThread)
       thread.proc.call
+      # The body is over: a join waiting on it is woken here, parked
+      # rather than held in the kernel (`join`), and what the join still
+      # waits for in the kernel is the retire below and the exit.
+      thread.finish
       # The fibers go first, while the stack they name is still this
       # thread's (`IyiScheduler.retire_thread`).
       IyiScheduler.retire_thread
@@ -699,14 +750,30 @@
       unlink(line)
     end
 
+    # :nodoc: — `run`'s, once the body has returned: every join parked
+    # on it woken.
+    def finish : Nil
+      @ended.set(1_u64)
+      IyiScheduler.wake_on(pointerof(@ended), 0x7FFFFFFF)
+    end
+
     # Waits for the thread to end, then unmaps its line; a thread joined
     # already answers at once. A second join on Windows waited on, and
     # closed, whatever handle had the first one's value by then: with a
     # thread started after the first join and sleeping 2 s, it took 2,000
     # ms, and that thread's own join then returned on the closed handle.
+    #
+    # The body's run is waited for parked (`IyiScheduler.park_on`), so the
+    # thread joining runs its other tasks meanwhile - a pool worker joining
+    # one held every task in its ring in the kernel with it - and the
+    # kernel's join then waits only for the end `finish` is followed by.
+    # A cancel does not end the wait, which has no `Cancelled` to answer.
     def join : Nil
       line = @line
       return if line == 0
+      while @ended.get == 0_u64
+        IyiScheduler.park_on(pointerof(@ended), 0_u64, false)
+      end
       {% if flag?(:linux) %}
         while (tid = IyiThread.word(line + IYI_TL_HANDLE).value.get) != 0_u64
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (line + IYI_TL_HANDLE).to_i64, IYI_FUTEX_WAIT, tid.to_i64, 0_i64, 0_i64, 0_i64)
@@ -770,14 +837,6 @@
         # Windows uses SuspendThread / ResumeThread directly
       {% end %}
     end
-
-    {% if flag?(:darwin) %}
-      def self.make_park(line : UInt64) : Nil
-        fds = Pointer(Int32).malloc(2_u64)
-        raise "pipe failed" if LibC.pipe(fds) != 0
-        IyiHeap.write64(line + IYI_TL_PARK, fds[1].to_i64.to_u64.unsafe_shl(32_u64) | fds[0].to_i64.to_u64)
-      end
-    {% end %}
 
     {% if flag?(:win32) %}
       # Windows has no signal to deliver: the thread that stops the others
@@ -916,15 +975,13 @@
         {% if flag?(:linux) %}
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (page + IYI_TC_RESUME).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
         {% else %}
-          byte = 1_u8
-          cursor = @@lines
-          while cursor != 0
-            if cursor != @@line
-              fd = IyiHeap.read64(cursor + IYI_TL_PARK).unsafe_shr(32_u64).to_i32
-              LibC.write(fd, pointerof(byte).as(Void*), 1_u64)
-            end
-            cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
-          end
+          # The wake answers -1 with errno ENOENT when no thread has
+          # reached its wait yet, and this runs inside an allocation, which
+          # may fall between a failed call of the program's and its look
+          # at errno.
+          errno = LibC.error_location.value
+          LibC.os_sync_wake_by_address_all(Pointer(Void).new(page + IYI_TC_RESUME), 8_u64, 0_u32)
+          LibC.error_location.value = errno
         {% end %}
         while word(page + IYI_TC_RESUMED).value.get < others.to_u64
           yield_cpu
@@ -1000,8 +1057,10 @@
         # darwin's `yield` is the ARM hint, not a syscall: it gives the
         # core's other hardware thread a turn and nothing to the
         # scheduler, so a loop around it is a hot spin. Where a thread has
-        # nothing to do until somebody tells it, `park_pipe_wait` is the
-        # answer; this remains for the short spins.
+        # nothing to do until somebody tells it, it parks - a stopped
+        # thread on the stop's release word (`park`), a mark helper on the
+        # generation word (`IyiMark.wait_generation`); this remains for
+        # the short spins.
         asm("yield" :::: "volatile")
       {% end %}
     end
@@ -1058,22 +1117,31 @@
     end
 
 
-    # This thread's line, from the thread-local or, in the instant before
-    # a child names its own, by its handle.
+    # darwin's child joining the stop's list (`run`): `start` counted it.
+    def self.link_own(line : UInt64) : Nil
+      IyiRuntimeLock.lock
+      IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
+      @@lines = line
+      IyiRuntimeLock.unlock
+    end
+
+    # This thread's line, from the thread-local or, on Linux in the
+    # instant before a child names its own, by its tid. A darwin thread
+    # wrote it before any stop could name it.
     def self.own_line : UInt64
       line = @@line
-      return line if line != 0
       {% if flag?(:linux) %}
+        return line if line != 0
         handle = __iyi_conc_syscall3(IYI_SYS_GETTID, 0_i64, 0_i64, 0_i64).to_u64
+        cursor = @@lines
+        while cursor != 0
+          return cursor if IyiHeap.read64(cursor + IYI_TL_HANDLE) == handle
+          cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+        end
+        0_u64
       {% else %}
-        handle = LibC.pthread_self.address
+        line
       {% end %}
-      cursor = @@lines
-      while cursor != 0
-        return cursor if IyiHeap.read64(cursor + IYI_TL_HANDLE) == handle
-        cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
-      end
-      0_u64
     end
 
     # The handler. Inside the allocator, leave the request and return:
@@ -1105,7 +1173,7 @@
       end
       IyiHeap.write64(line + IYI_TL_SP, sp)
       IyiHeap.write64(line + IYI_TL_PC, pc)
-      park(line)
+      park
     end
 
     # A voluntary stop, from `take`'s exit or the lock's spin: the
@@ -1151,10 +1219,34 @@
       here = uninitialized UInt64
       IyiHeap.write64(line + IYI_TL_SP, pointerof(here).address)
       IyiHeap.write64(line + IYI_TL_PC, 0_u64)
-      park(line)
+      park
     end
 
-    def self.park(line : UInt64) : Nil
+    # Counted in, held until the stopper lets every parked thread go at
+    # once, counted out. On Linux and darwin the hold is a futex on the
+    # release word: the kernel sleeps the thread only while the word
+    # still reads 0, so a release between the look and the sleep is not
+    # slept through, and one wake releases every thread parked.
+    #
+    # darwin parked on a pipe per thread, made when the thread was and
+    # never closed, and released by a write to each: two descriptors for
+    # every thread a program ever started, so under a terminal's
+    # `ulimit -n` of 256 bench/collect_trigger.sh's five hundred
+    # short-lived threads died at "pipe failed", and thread_exercise's at
+    # "kqueue failed" when the pipes had left a thread's poller one
+    # descriptor short. libSystem's futex is public from macOS 14.4, which
+    # the mark helpers' park already needs. Here it runs in the stop's
+    # signal handler, where `read` had POSIX's promise and this has none
+    # in writing; what it does is read off its disassembly (macOS 26.6):
+    # it checks its arguments and makes the one `__ulock_wait2` system
+    # call, holding no lock and touching nothing but the word and, when
+    # it fails, errno - which is what made `read` safe here too. A handler
+    # that changes errno changes it under the code it interrupted, between
+    # a failed call and its look at errno, so errno is put back. And a
+    # wait answers EFAULT at once when the word's page is not resident
+    # (an untouched word did, in C on the M2); the loop's read brings the
+    # page back and waits again.
+    def self.park : Nil
       page = control
       word(page + IYI_TC_SUSPENDED).value.add(1_u64)
       {% if flag?(:linux) %}
@@ -1162,10 +1254,11 @@
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (page + IYI_TC_RESUME).to_i64, IYI_FUTEX_WAIT, 0_i64, 0_i64, 0_i64, 0_i64)
         end
       {% elsif flag?(:darwin) %}
-        byte = uninitialized UInt8
-        fd = (IyiHeap.read64(line + IYI_TL_PARK) & 0xFFFFFFFF_u64).to_i32
-        while LibC.read(fd, pointerof(byte).as(Void*), 1_u64) != 1_i64
+        errno = LibC.error_location.value
+        while word(page + IYI_TC_RESUME).value.get == 0_u64
+          LibC.os_sync_wait_on_address(Pointer(Void).new(page + IYI_TC_RESUME), 0_u64, 8_u64, 0_u32)
         end
+        LibC.error_location.value = errno
       {% elsif flag?(:win32) %}
         while word(page + IYI_TC_RESUME).value.get == 0_u64
           yield_cpu

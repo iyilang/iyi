@@ -1,0 +1,81 @@
+# Exercises std/system_roots: the operating system's trusted roots, read.
+#
+# With no argument: the platform's own store - at least one root, each
+# certificate once - and then `$SSL_CERT_FILE` and `$SSL_CERT_DIR` over
+# files written here: a bundle holding a root twice beside a broken block,
+# a directory of two files, and a bundle with no certificate in it, which
+# is refused. The mode the gate script drives:
+#   fingerprints  the platform store's certificates, one SHA-256 of each
+#                 DER a line, sorted, then `unreadable N`.
+
+import std/system_roots::{SystemRoots}
+import std/x509::{Certificate, X509Error}
+import std/env::{ENV}
+import std/dir::{Dir}
+import std/file::{File}
+import std/digest::{SHA256}
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+def hex(bytes : Array(UInt8)) : String
+  String.build do |io|
+    bytes.each do |b|
+      io << "0123456789abcdef"[b.to_i32 >> 4]
+      io << "0123456789abcdef"[b.to_i32 & 15]
+    end
+  end
+end
+
+ROOT_ONE = "-----BEGIN CERTIFICATE-----\nMIIBSTCB8aADAgECAhQWhkufqlF7b3mMBvZ/8D0fKAklmDAKBggqhkjOPQQDAjAb\nMRkwFwYDVQQDDBBGaXh0dXJlIFJvb3QgT25lMB4XDTI2MDEwMTAwMDAwMFoXDTQ2\nMDEwMTAwMDAwMFowGzEZMBcGA1UEAwwQRml4dHVyZSBSb290IE9uZTBZMBMGByqG\nSM49AgEGCCqGSM49AwEHA0IABILKhThMDDqgDuXAs+1PZBbsOLAZAlLu0ZuJbsgb\nMV8xHFv+9Brw5M0+5KVTYBWJqX2gEY6MSu7k5x2nqaj+ARqjEzARMA8GA1UdEwEB\n/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgCSE7ziC7j6CEGdQGNwiol1O1XyDi\nz3162d1cp6/PgfMCIDwNZMPpK3/ikQJ9u7QNHykwOkHErt6Mg/iWtlJn9+k6\n-----END CERTIFICATE-----\n"
+ROOT_TWO = "-----BEGIN CERTIFICATE-----\nMIIBSjCB8aADAgECAhR/hHylWAuY7mS5QJPCq/5pOgzwbTAKBggqhkjOPQQDAjAb\nMRkwFwYDVQQDDBBGaXh0dXJlIFJvb3QgVHdvMB4XDTI2MDEwMTAwMDAwMFoXDTQ2\nMDEwMTAwMDAwMFowGzEZMBcGA1UEAwwQRml4dHVyZSBSb290IFR3bzBZMBMGByqG\nSM49AgEGCCqGSM49AwEHA0IABLVTv8jR8Q4IhQS8NzTL4UpH/KzWNQuprNcIhig4\nSQDkPeDAGy0kpjvzKt1XeAdMQ9i+GLKjijfMctG2karRqwqjEzARMA8GA1UdEwEB\n/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIhAJpJHf47/LJGUaqJMgc7quWxDvib\nnLOv05dGx55YRFaIAiB+vM4X1U8O8zZ7LsgT7Jp20mQxTE1XNkpEtq9gdDYuHg==\n-----END CERTIFICATE-----\n"
+
+ENV.delete("SSL_CERT_FILE")
+ENV.delete("SSL_CERT_DIR")
+
+if Program.args.size > 0 && Program.args[0] == "fingerprints"
+  store = SystemRoots.load.or_panic
+  store.certificates.map { |c| hex(SHA256.hash_bytes(c.raw)) }.sorted.each { |f| puts f }
+  puts "unreadable #{store.unreadable}"
+  exit 0
+end
+
+puts "== the platform's own store"
+store = SystemRoots.load.or_panic
+check store.certificates.size > 0, "no roots from #{store.source}"
+fingerprints = store.certificates.map { |c| hex(SHA256.hash_bytes(c.raw)) }
+check fingerprints.uniq.size == fingerprints.size, "a root twice in #{store.source}"
+puts "  #{store.certificates.size} roots from #{store.source}, #{store.unreadable} unreadable"
+
+puts "== roots named by $SSL_CERT_FILE and $SSL_CERT_DIR"
+# A fresh name from the system's randomness, and the directory beside it.
+token = File.tempfile("iyi-roots")
+work = token + ".d"
+Dir.mkdir_p(work + "/dir")
+bundle = work + "/bundle.pem"
+File.write(bundle, "a comment\n" + ROOT_ONE + ROOT_ONE + "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+ENV["SSL_CERT_FILE"] = bundle
+named = SystemRoots.load.or_panic
+check named.certificates.size == 1, "a root written twice read #{named.certificates.size} times"
+check named.unreadable == 1, "a broken block counted #{named.unreadable} times, not once"
+check named.certificates[0].subject_name == "CN=Fixture Root One", "the bundle's root: #{named.certificates[0].subject_name}"
+check named.source.includes?(bundle), "the source names the file: #{named.source}"
+File.write(work + "/dir/a.pem", ROOT_ONE)
+File.write(work + "/dir/b.crt", ROOT_TWO)
+File.write(work + "/dir/notes.txt", "not a certificate\n")
+ENV["SSL_CERT_DIR"] = work + "/dir"
+both = SystemRoots.load.or_panic
+check both.certificates.map(&.subject_name).sorted == ["CN=Fixture Root One", "CN=Fixture Root Two"], "a file and a directory: #{both.certificates.map(&.subject_name)}"
+ENV.delete("SSL_CERT_DIR")
+File.write(bundle, "no certificates here\n")
+none = SystemRoots.load
+check none.is_a?(X509Error) && none.message.includes?("no root certificates in"), "a bundle with no root refused"
+ENV.delete("SSL_CERT_FILE")
+["/dir/a.pem", "/dir/b.crt", "/dir/notes.txt", "/bundle.pem"].each { |f| File.delete(work + f) }
+Dir.delete(work + "/dir")
+Dir.delete(work)
+File.delete(token)
+puts "  a root kept once, a broken block counted, a directory read, an empty bundle refused"
+
+puts "\nALL CHECKS PASSED"

@@ -1,0 +1,631 @@
+# Users and groups: who this program runs as, and the accounts and groups
+# the machine knows by name or by number.
+#
+#     import std/user::{User, Group}
+#
+#     me = User.current                    # name, id, group_id, home, shell
+#     User.find_by_name("root")            # a User, or nil
+#     User.find_by_id("0")                 # the same, by number
+#     Group.find_by_name("wheel")          # name, id, members
+#     me.group_ids                         # ["1000", "4", "27", ...]
+#
+# The other library's `System::User` and `System::Group`, and Go's
+# `os/user`: the same records and the same lookups, with Crystal's names
+# for the fields. An id is a `String`, as both keep it, because that is
+# what Windows' is (a SID) and what a lookup is handed back; on Linux and
+# darwin it is the number written in decimal, `"0"` for root. A name or
+# an id nobody has is nil, never a panic, because both arrive from outside
+# - a configuration file, a request - and a missing account is data.
+#
+# `full_name` is the GECOS field up to its first comma: the field is "a
+# comma separated list of personal data where the first item is the full
+# name" by convention only, and Go and the other library both cut it
+# there; `"Ada Lovelace,Room 4,,"` is `"Ada Lovelace"`. `group_ids` is the
+# user's primary group first, then every group that lists the user as a
+# member, each once and in the order the group file has them: what glibc's
+# `getgrouplist` answers, and so Python's `os.getgrouplist`, and `id -G`.
+#
+# On Linux the answer is the files, `/etc/passwd` and `/etc/group`, read
+# and parsed here on every lookup, because no libc is linked to ask
+# (prelude.iyi says why). The NSS modules `nsswitch.conf` may name after
+# `files` - LDAP, sssd, systemd's dynamic users - are *not* consulted, and
+# an account only they know is nil here though `getent` finds it. Go's
+# pure-Go reader (`os/user`'s `lookup_unix.go`, built without cgo) makes
+# the same choice for the same reason, and its rules for a line are the
+# rules here: blank space trimmed from both ends, a blank line or one
+# starting `#` skipped, a name that is empty or starts with `+` or `-`
+# (NIS compat entries, which glibc's files backend does not find by name
+# either) skipped, a user line of fewer than seven fields or a group line
+# of fewer than four skipped, and an id that is not a number skipped. The
+# first line that matches wins, as glibc's does. Where Go and glibc
+# disagree this follows glibc, which is what every other program on the
+# machine reads through: an id is compared as a number, so `"0010"` in the
+# file is uid 10 and is found by `find_by_id("10")` (Go compares the text),
+# an id past `uid_t`'s 32 bits or with a sign is not a number (Go's `Atoi`
+# takes both), and a group file's membership is read from every group line
+# (Go's group listing skips a line with a colon among its members). A file
+# that cannot be read is a file with no accounts in it.
+#
+# `User.current` is the *real* user id, `getuid(2)` - what Go's
+# `user.Current`, Python's `os.getuid` and `id -u` answer - looked up as
+# `find_by_id` would. A process whose uid the files do not have (a
+# container started as `--user 4000`) is still running as somebody, so it
+# answers what Go's pure-Go `Current` falls back to: the uid and the
+# kernel's gid, `$USER` for the name and `$HOME` for the home, with no
+# full name and no shell. Without `$USER` there is nothing to call that
+# user, and that is a panic naming the uid, never a made-up name.
+#
+# On darwin the answers are libSystem's `getpwuid_r`, `getpwnam_r`,
+# `getgrgid_r`, `getgrnam_r` and `getgrouplist`, which are Directory
+# Services' and not a file's, and `getuid` and `getgid`: Go asks the same
+# calls there, cgo or not. A buffer the call finds too small (`ERANGE`) is
+# doubled and asked again, up to a mebibyte.
+#
+# On Windows only the current user is answered. Its name is advapi32's
+# `GetUserNameW`, the account name alone (Go writes `DOMAIN\name`, which
+# takes `LookupAccountSidW` to build); its id and group id are the SIDs of
+# the process token's user and primary group, in `S-1-5-21-...` form,
+# which is what Go answers; its home is `%USERPROFILE%`, which Windows
+# sets at logon to the directory `GetUserProfileDirectoryW` answers -
+# that call is userenv.dll's, which an iyi program does not link (the
+# floor in bench/floor_base.sh lists the DLLs one may). The full name is
+# netapi32's `NetUserGetInfo` and is `""` here (Go answers the account
+# name in its place when it cannot ask); Windows has no login shell, so
+# that is `""` too. Every other lookup - by name, by id, a group, a
+# user's groups - is the account database netapi32 answers, and panics
+# on Windows saying so: a program that needs another account there has
+# to be told it cannot have one, not handed nil for an account that
+# exists.
+
+module std/user
+
+import std/int
+import std/env::{ENV}
+
+{% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32) %}
+  {% raise "std/user asks the operating system who a user is, and this target has none to ask: " \
+           "Linux, darwin and Windows do." %}
+{% end %}
+
+{% if flag?(:darwin) %}
+  # libSystem's reentrant lookups. A struct passwd is 72 bytes on darwin's
+  # 64-bit ABI and a struct group 32; the fields are read at their offsets
+  # in `UserFiles`.
+  lib LibC
+    fun getuid : UInt32
+    fun getgid : UInt32
+    fun getpwuid_r(uid : UInt32, record : Void*, buffer : UInt8*, size : UInt64, result : Void**) : Int32
+    fun getpwnam_r(name : UInt8*, record : Void*, buffer : UInt8*, size : UInt64, result : Void**) : Int32
+    fun getgrgid_r(gid : UInt32, record : Void*, buffer : UInt8*, size : UInt64, result : Void**) : Int32
+    fun getgrnam_r(name : UInt8*, record : Void*, buffer : UInt8*, size : UInt64, result : Void**) : Int32
+    fun getgrouplist(name : UInt8*, base : Int32, groups : Int32*, count : Int32*) : Int32
+  end
+{% elsif flag?(:win32) %}
+  # The account name and the process token's SIDs are advapi32's, which a
+  # program already links for `RtlGenRandom` (std/random); `LocalFree`,
+  # which releases the string `ConvertSidToStringSidW` allocates, is
+  # kernel32's, which the prelude links.
+  @[Link("advapi32")]
+  lib LibAdvapi32
+    fun GetUserNameW(buffer : UInt16*, size : UInt32*) : Int32
+    fun OpenProcessToken(process : Void*, access : UInt32, token : Void**) : Int32
+    fun GetTokenInformation(token : Void*, klass : Int32, information : Void*, length : UInt32, returned : UInt32*) : Int32
+    fun ConvertSidToStringSidW(sid : Void*, text : UInt16**) : Int32
+  end
+
+  lib LibC
+    fun LocalFree(memory : Void*) : Void*
+  end
+{% end %}
+
+# An account: what `/etc/passwd`, Directory Services or Windows hold for
+# one user.
+pub struct User
+  # The login name: `"root"`, `"ada"`.
+  getter name : String
+  # The user id: a decimal number on Linux and darwin, a SID on Windows.
+  getter id : String
+  # The id of the user's primary group, in the same form.
+  getter group_id : String
+  # The GECOS field up to its first comma; `""` where it is empty.
+  getter full_name : String
+  # The home directory.
+  getter home : String
+  # The login shell; `""` where none is set, and on Windows.
+  getter shell : String
+
+  def initialize(@name : String, @id : String, @group_id : String, @full_name : String, @home : String, @shell : String)
+  end
+
+  # The user this program runs as: the real user id's account. Panics
+  # only when the system has no account for that id *and* `$USER` does
+  # not name one.
+  def self.current : User
+    {% if flag?(:win32) %}
+      UserFiles.windows_current
+    {% else %}
+      {% if flag?(:linux) %}
+        uid = UserFiles.sys0(UserFiles::SYS_GETUID).to_u32
+        gid = UserFiles.sys0(UserFiles::SYS_GETGID).to_u32
+        source = "/etc/passwd"
+      {% else %}
+        uid = LibC.getuid
+        gid = LibC.getgid
+        source = "getpwuid_r"
+      {% end %}
+      found = find_by_id(uid.to_s)
+      return found if found
+      # Go's pure-Go `Current` falls back the same way: the ids are the
+      # kernel's, the name and home the login's environment.
+      name = ENV["USER"]?
+      if name.nil? || name.empty?
+        raise "User.current: uid #{uid} is not in #{source}, and $USER is not set to name it"
+      end
+      User.new(name, uid.to_s, gid.to_s, "", ENV["HOME"]? || "", "")
+    {% end %}
+  end
+
+  # The account called *name*, or nil when there is none.
+  def self.find_by_name(name : String) : User?
+    {% if flag?(:win32) %}
+      raise "User.find_by_name is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if name.bytesize >= 0
+      nil.as(User?)
+    {% else %}
+      # No account name holds a NUL, and darwin would read the bytes in
+      # front of one as the name asked for.
+      return nil if name.empty? || name.includes?("\0")
+      {% if flag?(:linux) %}
+        found = nil
+        UserFiles.each_line(UserFiles::PASSWD) do |line|
+          entry = parse_line(line)
+          if entry && entry.name == name
+            found = entry
+            break
+          end
+        end
+        found
+      {% else %}
+        UserFiles.darwin_user(name, 0_u32)
+      {% end %}
+    {% end %}
+  end
+
+  # The account whose user id is *id*, or nil when there is none or *id*
+  # is not a user id. On Linux and darwin an id is compared as the number
+  # it is: `"0"` and `"00"` are both root.
+  def self.find_by_id(id : String) : User?
+    {% if flag?(:win32) %}
+      raise "User.find_by_id is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if id.bytesize >= 0
+      nil.as(User?)
+    {% else %}
+      number = UserFiles.decimal(id)
+      return nil if number.nil?
+      {% if flag?(:linux) %}
+        wanted = number.to_s
+        found = nil
+        UserFiles.each_line(UserFiles::PASSWD) do |line|
+          entry = parse_line(line)
+          if entry && entry.id == wanted
+            found = entry
+            break
+          end
+        end
+        found
+      {% else %}
+        UserFiles.darwin_user(nil, number)
+      {% end %}
+    {% end %}
+  end
+
+  # Every account in *text*, written as `/etc/passwd` is
+  # (`name:password:uid:gid:gecos:home:shell`), in the order it has them,
+  # and without the lines a lookup skips: what the Linux lookups read, for
+  # a file of the caller's - a container image's, a chroot's.
+  def self.parse(text : String) : Array(User)
+    users = [] of User
+    text.split('\n').each do |line|
+      entry = parse_line(line)
+      users << entry if entry
+    end
+    users
+  end
+
+  # The ids of the groups this user is in: its primary group first, then
+  # every other the system lists it in, each once.
+  def group_ids : Array(String)
+    {% if flag?(:win32) %}
+      raise "User#group_ids is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if name.bytesize >= 0
+      [] of String
+    {% elsif flag?(:linux) %}
+      group_ids(Group.parse(UserFiles.read(UserFiles::GROUP) || ""))
+    {% else %}
+      ids = [group_id]
+      base = UserFiles.decimal(group_id)
+      return ids if base.nil? || name.includes?("\0")
+      UserFiles.darwin_group_ids(name, base).each do |gid|
+        ids << gid unless ids.includes?(gid)
+      end
+      ids
+    {% end %}
+  end
+
+  # The ids of the groups out of *groups* this user is in, its primary
+  # group first, each once: what `group_ids` answers on Linux, for a group
+  # file the caller read and handed to `Group.parse`.
+  def group_ids(groups : Array(Group)) : Array(String)
+    ids = [group_id]
+    groups.each do |group|
+      ids << group.id if group.members.includes?(name) && !ids.includes?(group.id)
+    end
+    ids
+  end
+
+  # One `/etc/passwd` line, or nil for a line the lookups skip: blank, a
+  # comment, fewer than seven fields, a name empty or starting `+` or `-`,
+  # or a uid or gid that is not a number. The shell is the rest of the
+  # line, colons and all, as glibc reads it.
+  protected def self.parse_line(raw : String) : User?
+    line = raw.strip
+    return nil if line.empty? || line.starts_with?('#')
+    fields = line.split(':')
+    return nil if fields.size < 7
+    name = fields[0]
+    return nil if name.empty? || name.starts_with?('+') || name.starts_with?('-')
+    uid = UserFiles.decimal(fields[2])
+    gid = UserFiles.decimal(fields[3])
+    return nil if uid.nil? || gid.nil?
+    shell = fields.size == 7 ? fields[6] : fields[6, fields.size - 6].join(":")
+    User.new(name, uid.to_s, gid.to_s, UserFiles.first_gecos(fields[4]), fields[5], shell)
+  end
+end
+
+# A group: its name, its id, and the accounts listed as its members. A
+# user whose *primary* group this is need not be listed, and usually is
+# not: `User#group_ids` is the question that counts both.
+pub struct Group
+  # The group's name: `"wheel"`.
+  getter name : String
+  # The group id: a decimal number on Linux and darwin.
+  getter id : String
+  # The names listed in the group, in the order they are listed.
+  getter members : Array(String)
+
+  def initialize(@name : String, @id : String, @members : Array(String))
+  end
+
+  # The group called *name*, or nil when there is none.
+  def self.find_by_name(name : String) : Group?
+    {% if flag?(:win32) %}
+      raise "Group.find_by_name is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if name.bytesize >= 0
+      nil.as(Group?)
+    {% else %}
+      return nil if name.empty? || name.includes?("\0")
+      {% if flag?(:linux) %}
+        found = nil
+        UserFiles.each_line(UserFiles::GROUP) do |line|
+          entry = parse_line(line)
+          if entry && entry.name == name
+            found = entry
+            break
+          end
+        end
+        found
+      {% else %}
+        UserFiles.darwin_group(name, 0_u32)
+      {% end %}
+    {% end %}
+  end
+
+  # The group whose id is *id*, or nil when there is none or *id* is not a
+  # group id; compared as a number, as `User.find_by_id` compares.
+  def self.find_by_id(id : String) : Group?
+    {% if flag?(:win32) %}
+      raise "Group.find_by_id is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if id.bytesize >= 0
+      nil.as(Group?)
+    {% else %}
+      number = UserFiles.decimal(id)
+      return nil if number.nil?
+      {% if flag?(:linux) %}
+        wanted = number.to_s
+        found = nil
+        UserFiles.each_line(UserFiles::GROUP) do |line|
+          entry = parse_line(line)
+          if entry && entry.id == wanted
+            found = entry
+            break
+          end
+        end
+        found
+      {% else %}
+        UserFiles.darwin_group(nil, number)
+      {% end %}
+    {% end %}
+  end
+
+  # Every group in *text*, written as `/etc/group` is
+  # (`name:password:gid:member,member`), in order, without the lines a
+  # lookup skips.
+  def self.parse(text : String) : Array(Group)
+    groups = [] of Group
+    text.split('\n').each do |line|
+      entry = parse_line(line)
+      groups << entry if entry
+    end
+    groups
+  end
+
+  # One `/etc/group` line, or nil for a line the lookups skip: blank, a
+  # comment, fewer than four fields, a name empty or starting `+` or `-`,
+  # or a gid that is not a number. The members are the rest of the line
+  # split at commas, empty names dropped, as glibc's list parser drops
+  # them.
+  protected def self.parse_line(raw : String) : Group?
+    line = raw.strip
+    return nil if line.empty? || line.starts_with?('#')
+    fields = line.split(':')
+    return nil if fields.size < 4
+    name = fields[0]
+    return nil if name.empty? || name.starts_with?('+') || name.starts_with?('-')
+    gid = UserFiles.decimal(fields[2])
+    return nil if gid.nil?
+    list = fields.size == 4 ? fields[3] : fields[3, fields.size - 3].join(":")
+    Group.new(name, gid.to_s, list.split(',').reject(&.empty?))
+  end
+end
+
+# What `User` and `Group` share: reading the files on Linux, the number
+# rule for an id, and the platform calls.
+struct UserFiles
+  # The lookups that panic on Windows panic under a condition that always
+  # holds, then answer a value of their declared type, so each keeps on
+  # Windows the type it has elsewhere. A method's machine code is named by
+  # the type its body has: a body that is only a panic is NoReturn, and a
+  # build from std/user's artifact, which names the call by the declared
+  # type, looked for code the artifact's own build had named otherwise
+  # (`User#group_ids` on Windows; SPEC.md IV.1g).
+
+  PASSWD = "/etc/passwd"
+  GROUP  = "/etc/group"
+
+  # The largest `uid_t` and `gid_t`, which are 32 bits on every target
+  # here.
+  ID_MAX = 4294967295_i64
+
+  # *text* as a user or group id: decimal digits only, at least one, no
+  # sign and no space, and no larger than 32 bits hold. nil otherwise.
+  def self.decimal(text : String) : UInt32?
+    return nil if text.empty? || text.bytesize > 20
+    value = 0_i64
+    text.each_char do |char|
+      return nil if char < '0' || char > '9'
+      value = value * 10_i64 + (char.ord - '0'.ord).to_i64
+      return nil if value > ID_MAX
+    end
+    value.to_u32
+  end
+
+  # The GECOS field's first comma-separated part.
+  def self.first_gecos(gecos : String) : String
+    comma = gecos.index(',')
+    comma ? gecos[0, comma] : gecos
+  end
+
+  # Each line of the file at *path*; nothing when it cannot be read.
+  def self.each_line(path : String, & : String -> Nil) : Nil
+    text = read(path)
+    return if text.nil?
+    text.split('\n').each { |line| yield line }
+  end
+
+  # The bytes before the first NUL at *text*; `""` for a null pointer.
+  def self.c_text(text : Pointer(UInt8)) : String
+    return "" if text.address == 0_u64
+    length = 0
+    while text[length] != 0_u8
+      length = length + 1
+    end
+    String.new(length) { |target| target.copy_from(text, length) }
+  end
+
+  {% if flag?(:linux) %}
+    {% if flag?(:x86_64) %}
+      SYS_GETUID = 102_i64
+      SYS_GETGID = 104_i64
+    {% else %}
+      SYS_GETUID = 174_i64
+      SYS_GETGID = 176_i64
+    {% end %}
+
+    # A syscall with no arguments; `getuid` and `getgid` cannot fail.
+    def self.sys0(number : Int64) : Int64
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(number)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(number)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      result
+    end
+
+    # A whole file, or nil when it cannot be opened or read. Read until
+    # the kernel answers 0, a read a signal interrupted asked again.
+    def self.read(path : String) : String?
+      fd = __iyi_open_read(path.to_unsafe)
+      return nil if fd < 0_i64
+      held = 0
+      capacity = 16384
+      buffer = Pointer(UInt8).malloc(capacity.to_u64)
+      while true
+        if held == capacity
+          grown = Pointer(UInt8).malloc((capacity * 2).to_u64)
+          grown.copy_from(buffer, held)
+          buffer = grown
+          capacity = capacity * 2
+        end
+        got = __iyi_file_read(fd, (buffer + held.to_i64).as(Void*), (capacity - held).to_u64)
+        if got > 0_i64
+          held = held + got.to_i32
+        elsif got == 0_i64
+          break
+        elsif got != -4_i64
+          __iyi_close(fd)
+          return nil
+        end
+      end
+      __iyi_close(fd)
+      String.new(held) { |target| target.copy_from(buffer, held) }
+    end
+  {% else %}
+    # The files are Linux's answer only; darwin and Windows are asked.
+    def self.read(path : String) : String?
+      nil
+    end
+  {% end %}
+
+  {% if flag?(:darwin) %}
+    # ERANGE: the buffer is too small for the record's strings.
+    ERANGE = 34
+
+    # The account called *name*, or with uid *uid* when *name* is nil.
+    # Any answer but a record - not found, or an error of the directory -
+    # is nil.
+    def self.darwin_user(name : String?, uid : UInt32) : User?
+      size = 4096
+      while size <= 1048576
+        record = Pointer(UInt8).malloc(72_u64)
+        buffer = Pointer(UInt8).malloc(size.to_u64)
+        result = Pointer(Void).new(0_u64)
+        code = name ? LibC.getpwnam_r(name.to_unsafe, record.as(Void*), buffer, size.to_u64, pointerof(result)) : LibC.getpwuid_r(uid, record.as(Void*), buffer, size.to_u64, pointerof(result))
+        if code == ERANGE
+          size = size * 2
+          next
+        end
+        return nil if code != 0 || result.address == 0_u64
+        # struct passwd: pw_name 0, pw_passwd 8, pw_uid 16, pw_gid 20,
+        # pw_change 24, pw_class 32, pw_gecos 40, pw_dir 48, pw_shell 56.
+        return User.new(c_text(record.as(Pointer(UInt8)*)[0]),
+          (record + 16_i64).as(UInt32*)[0].to_s,
+          (record + 20_i64).as(UInt32*)[0].to_s,
+          first_gecos(c_text((record + 40_i64).as(Pointer(UInt8)*)[0])),
+          c_text((record + 48_i64).as(Pointer(UInt8)*)[0]),
+          c_text((record + 56_i64).as(Pointer(UInt8)*)[0]))
+      end
+      nil
+    end
+
+    # The group called *name*, or with gid *gid* when *name* is nil.
+    def self.darwin_group(name : String?, gid : UInt32) : Group?
+      size = 4096
+      while size <= 1048576
+        record = Pointer(UInt8).malloc(32_u64)
+        buffer = Pointer(UInt8).malloc(size.to_u64)
+        result = Pointer(Void).new(0_u64)
+        code = name ? LibC.getgrnam_r(name.to_unsafe, record.as(Void*), buffer, size.to_u64, pointerof(result)) : LibC.getgrgid_r(gid, record.as(Void*), buffer, size.to_u64, pointerof(result))
+        if code == ERANGE
+          size = size * 2
+          next
+        end
+        return nil if code != 0 || result.address == 0_u64
+        # struct group: gr_name 0, gr_passwd 8, gr_gid 16, gr_mem 24, a
+        # NULL-terminated array of names.
+        members = [] of String
+        list = (record + 24_i64).as(Pointer(Pointer(UInt8))*)[0]
+        if list.address != 0_u64
+          index = 0
+          while list[index].address != 0_u64
+            members << c_text(list[index])
+            index = index + 1
+          end
+        end
+        return Group.new(c_text(record.as(Pointer(UInt8)*)[0]), (record + 16_i64).as(UInt32*)[0].to_s, members)
+      end
+      nil
+    end
+
+    # `getgrouplist` for *name* with primary group *base*: -1 and the count
+    # it needs when the array is too small, which is grown and asked again.
+    def self.darwin_group_ids(name : String, base : UInt32) : Array(String)
+      ids = [] of String
+      # darwin's getgrouplist takes the gid as an `int`: the same 32 bits
+      # read signed, so `nobody`'s 4294967294 goes as -2. `to_i32` checked
+      # the value and panicked on it.
+      bits = base
+      signed = pointerof(bits).as(Int32*).value
+      room = 64
+      while room <= 65536
+        groups = Pointer(Int32).malloc(room.to_u64)
+        count = room
+        if LibC.getgrouplist(name.to_unsafe, signed, groups, pointerof(count)) >= 0
+          index = 0
+          while index < count
+            id = groups[index]
+            ids << pointerof(id).as(UInt32*).value.to_s
+            index = index + 1
+          end
+          return ids
+        end
+        room = count > room ? count : room * 2
+      end
+      ids
+    end
+  {% end %}
+
+  {% if flag?(:win32) %}
+    # TOKEN_QUERY, and the two TOKEN_INFORMATION_CLASS values asked for.
+    TOKEN_QUERY         = 8_u32
+    TOKEN_USER          =     1
+    TOKEN_PRIMARY_GROUP =     5
+
+    def self.windows_current : User
+      size = 257_u32
+      wide = Pointer(UInt16).malloc(size.to_u64)
+      # ERROR_INSUFFICIENT_BUFFER (122), with the size needed in *size*.
+      while LibAdvapi32.GetUserNameW(wide, pointerof(size)) == 0
+        error = ::LibC.GetLastError
+        raise "User.current: GetUserNameW answered error #{error}" if error != 122
+        wide = Pointer(UInt16).malloc(size.to_u64)
+      end
+      token = Pointer(Void).new(0_u64)
+      if LibAdvapi32.OpenProcessToken(::LibC.GetCurrentProcess, TOKEN_QUERY, pointerof(token)) == 0
+        raise "User.current: OpenProcessToken answered error #{::LibC.GetLastError}"
+      end
+      id = token_sid(token, TOKEN_USER)
+      group_id = token_sid(token, TOKEN_PRIMARY_GROUP)
+      ::LibC.CloseHandle(token)
+      User.new(wide_text(wide), id, group_id, "", ENV["USERPROFILE"]? || "", "")
+    end
+
+    # The SID a token's TOKEN_USER or TOKEN_PRIMARY_GROUP holds, as text.
+    # Both structures start with the SID's pointer. Asked with no buffer
+    # first, for the size.
+    def self.token_sid(token : Void*, klass : Int32) : String
+      needed = 0_u32
+      LibAdvapi32.GetTokenInformation(token, klass, Pointer(Void).new(0_u64), 0_u32, pointerof(needed))
+      information = Pointer(UInt8).malloc((needed + 8_u32).to_u64)
+      if LibAdvapi32.GetTokenInformation(token, klass, information.as(Void*), needed, pointerof(needed)) == 0
+        raise "User.current: GetTokenInformation answered error #{::LibC.GetLastError}"
+      end
+      sid = information.as(Pointer(Void)*)[0]
+      text = Pointer(UInt16).new(0_u64)
+      if LibAdvapi32.ConvertSidToStringSidW(sid, pointerof(text)) == 0
+        raise "User.current: ConvertSidToStringSidW answered error #{::LibC.GetLastError}"
+      end
+      answer = wide_text(text)
+      LibC.LocalFree(text.as(Void*))
+      answer
+    end
+
+    # A NUL-terminated UTF-16 string as UTF-8.
+    def self.wide_text(wide : UInt16*) : String
+      bytes = __iyi_utf8_size_from_wide(wide)
+      raise "User.current: Windows answered a name that is not UTF-16" if bytes == 0
+      String.new(bytes - 1) { |target| __iyi_utf8_bytes_from_wide(wide, target, bytes) }
+    end
+  {% end %}
+end

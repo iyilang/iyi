@@ -1,0 +1,1533 @@
+# Authenticated encryption, written in iyi: AES (FIPS 197) and AES-GCM
+# (NIST SP 800-38D), ChaCha20 and Poly1305, and the two together as
+# ChaCha20-Poly1305 (RFC 8439).
+#
+#     import std/aead::{AesGcm, ChaCha20Poly1305, AeadError}
+#
+#     box = AesGcm.new(key)                  # 16, 24 or 32 bytes
+#     sealed = box.seal(nonce, plaintext, aad)
+#     box.open(nonce, sealed, aad)           # the plaintext, or an AeadError
+#
+# `seal` answers the ciphertext with the 16-byte tag after it, RFC 5116's
+# layout and the one Python's `cryptography` (AESGCM, ChaCha20Poly1305)
+# and Go's `crypto/cipher` use, so what one seals the other opens. `open`
+# checks the tag before it decrypts a byte, compares it in constant time,
+# and answers an `AeadError`, a value, when it does not match: sealed
+# bytes come from outside, and a forged or damaged one is not a bug in the
+# program reading it. The additional data is authenticated and not
+# encrypted; it defaults to none. `seal` and `open` keep their working
+# state on the stack and change nothing in the object, so one `AesGcm` or
+# `ChaCha20Poly1305` serves any number of threads. `AES` (a block at a
+# time, both directions), `ChaCha20` (a key stream XORed over data as it
+# arrives) and `Poly1305` (a one-time MAC) are there for a construction
+# of the caller's own; the last two are streams, and one caller's.
+#
+# A key, a nonce, a plaintext or additional data is a `String`, whose
+# bytes are taken, or an `Array(UInt8)`; what comes back is a `String` of
+# bytes. The key and the nonce are the caller's: nothing here draws a
+# random number, so this module reaches no clock and no entropy source
+# (`iyi mod reach`), and a program picks its nonces from `Random::Secure`
+# or a counter. A nonce must never be used twice under one key: GCM gives
+# away its hash key, and both give away the XOR of the two plaintexts.
+#
+# Refused with a sentence, as the caller's mistake: a key of the wrong
+# size (AES 16, 24 or 32 bytes; ChaCha20 and Poly1305 32), a nonce that
+# is not 12 bytes, an AES block that is not 16, a ChaCha20 stream run past
+# its 32-bit block counter, and a Poly1305 used after its `final`. GCM's
+# nonce is 96 bits only: SP 800-38D (§5.2.1.1) recommends implementations
+# keep to that length, and any other is hashed into a starting counter
+# that can land on another nonce's.
+#
+# Side channels. A table-lookup AES indexes its tables with key and data
+# bytes, and which cache lines it touched can be measured from another
+# process on the same machine. This one has no table: it is BearSSL's
+# `aes_ct64` (Thomas Pornin), four blocks at a time bitsliced into eight
+# 64-bit words, its S-box the 115-gate circuit of Boyar and Peralta
+# (eprint 2009/191), and the key schedule goes through the same circuit.
+# GHASH is BearSSL's `ghash_ctmul64`: carry-less multiplication done with
+# integer multiplies on operands with holes in them, so no branch and no
+# address depends on a secret; that holds where a 64-bit multiply takes
+# the same time for every operand, which it does on x86_64 and on
+# AArch64's application cores. ChaCha20 and Poly1305 are additions,
+# rotations and XORs (Poly1305 in 26-bit limbs, as poly1305-donna writes
+# it), with the final reduction chosen by a mask. Every tag is compared
+# by OR-ing the differences of all sixteen bytes.
+#
+# The price of no tables is speed. Measured on one x86_64 Linux machine (a
+# QEMU virtual CPU with AES-NI and without carry-less multiply), --release,
+# sealing 16 MiB, the best of five on a machine other jobs shared:
+# AES-128-GCM 274 MB/s, AES-256-GCM 224 MB/s and ChaCha20-Poly1305 849
+# MB/s, against 926, 916 and 1516 MB/s from Python's `cryptography`
+# (OpenSSL, using AES-NI). Before fixslicing, four-block GHASH and the
+# inlined rounds, the same run gave 233 and 190 MB/s for AES-GCM; a plain
+# build sealed 42, 34 and 93 MB/s then. Bitsliced AES does the work of
+# four blocks for any count from one to four, so one block alone costs
+# what four do. Two things were tried and dropped, each slower measured
+# here: Poly1305 in 44-bit limbs with `UInt128` products (3,400 MB/s
+# against the 26-bit limbs' 3,800) and ChaCha20 four blocks at a time in
+# lanes the compiler was to vectorise (it did not; 720 MB/s sealed).
+#
+# What this is not: a key exchange, a signature or TLS; nor a way to keep
+# a key out of memory - keys, round keys and key streams live in the
+# collected heap and on the stack, and nothing wipes them.
+
+# bench/ct_timing.sh, `open` of a tag wrong in its first byte against one
+# wrong in its last (an early-exit compare would tell them apart): AES-GCM
+# |t| = 2.0 to 4.4, ChaCha20-Poly1305 4.2 to 4.9, over 50,000 to 100,000.
+# In the --release assembly both `open`s compare the 16 tag bytes as one
+# vector (`pcmpeqb`) and branch once, on the verdict.
+
+module std/aead
+
+import std/int
+
+# What `open` answers for sealed bytes it will not open: shorter than a
+# tag, or whose tag does not match.
+pub struct AeadError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for AeadError
+  def message : String
+    @message
+  end
+end
+
+# The AES block cipher, FIPS 197: a 16, 24 or 32-byte key (10, 12 or 14
+# rounds), one 16-byte block at a time, either way. On its own it is a
+# building block; a message wants a mode, `AesGcm`.
+pub class AES
+  @rounds : Int32
+  @keys : Pointer(UInt64)
+
+  def initialize(key : String | Array(UInt8))
+    bytes, size = AeadBytes.of(key)
+    raise "AES: a key is 16, 24 or 32 bytes, not #{size}" unless size == 16 || size == 24 || size == 32
+    @keys = Pointer(UInt64).malloc(AesCore::KEY_WORDS)
+    @rounds = AesCore.expand(bytes, size, @keys)
+  end
+
+  # FIPS 197's Cipher: 16 bytes in, 16 out.
+  def encrypt_block(block : String | Array(UInt8)) : String
+    src = AeadBytes.exactly(block, 16, "AES: a block")
+    String.new(16) { |buf| AesCore.encrypt(@keys, @rounds, src, buf, 1) }
+  end
+
+  # FIPS 197's InvCipher: the block `encrypt_block` answered, back.
+  def decrypt_block(block : String | Array(UInt8)) : String
+    src = AeadBytes.exactly(block, 16, "AES: a block")
+    String.new(16) { |buf| AesCore.decrypt(@keys, @rounds, src, buf, 1) }
+  end
+end
+
+# AES in Galois/Counter Mode, NIST SP 800-38D: CTR encryption from the
+# counter after the nonce's own, and a 128-bit tag that is GHASH over the
+# additional data and the ciphertext, each padded to a block, and their
+# lengths in bits, XORed with the key stream of the nonce's counter
+# block. The nonce is 12 bytes, and the counter block is it and a 32-bit
+# counter that starts at 1 (§7.1).
+pub class AesGcm
+  @rounds : Int32
+  @keys : Pointer(UInt64)
+  # H, the hash key, AES of the zero block, and H^2, H^3 and H^4, each
+  # kept as BearSSL keeps H: its low and high halves, their XOR, and the
+  # three bit-reversed, six words a power from H up (`Ghash.prepare`).
+  @powers : Pointer(UInt64)
+
+  def initialize(key : String | Array(UInt8))
+    bytes, size = AeadBytes.of(key)
+    raise "AesGcm: a key is 16, 24 or 32 bytes, not #{size}" unless size == 16 || size == 24 || size == 32
+    keys = Pointer(UInt64).malloc(AesCore::KEY_WORDS)
+    rounds = AesCore.expand(bytes, size, keys)
+    zero = uninitialized StaticArray(UInt64, 2)
+    words = pointerof(zero).as(Pointer(UInt64))
+    words[0] = 0_u64
+    words[1] = 0_u64
+    h = words.as(Pointer(UInt8))
+    AesCore.encrypt(keys, rounds, h, h, 1)
+    h1 = AeadBytes.be64(h)
+    h0 = AeadBytes.be64(h + 8_i64)
+    powers = Pointer(UInt64).malloc(24_u64)
+    Ghash.prepare(powers, h1, h0)
+    p1 = h1
+    p0 = h0
+    k = 1
+    while k < 4
+      z0, z1, z2, z0h, z1h, z2h = Ghash.parts(p1, p0, powers)
+      p1, p0 = Ghash.reduce(z0, z1, z2, z0h, z1h, z2h)
+      Ghash.prepare(powers + (k * 6).to_i64, p1, p0)
+      k = k + 1
+    end
+    @keys = keys
+    @rounds = rounds
+    @powers = powers
+  end
+
+  # The ciphertext of *plaintext*, as long as it, and the 16-byte tag.
+  def seal(nonce : String | Array(UInt8), plaintext : String | Array(UInt8), aad : String | Array(UInt8) = "") : String
+    n = AeadBytes.exactly(nonce, 12, "AesGcm: a nonce")
+    pt, size = AeadBytes.of(plaintext)
+    ad, ad_size = AeadBytes.of(aad)
+    String.new(size + 16) do |buf|
+      ctr(n, pt, buf, size)
+      tag(n, ad, ad_size, buf, size, buf + size.to_i64)
+    end
+  end
+
+  # The plaintext *sealed* came from, when its tag is the one this key,
+  # *nonce* and *aad* give; else an `AeadError`, and nothing decrypted.
+  def open(nonce : String | Array(UInt8), sealed : String | Array(UInt8), aad : String | Array(UInt8) = "") : String | AeadError
+    n = AeadBytes.exactly(nonce, 12, "AesGcm: a nonce")
+    ct, total = AeadBytes.of(sealed)
+    ad, ad_size = AeadBytes.of(aad)
+    return AeadError.new("AesGcm: #{total} bytes cannot be sealed: the tag alone is 16") if total < 16
+    size = total - 16
+    want = uninitialized StaticArray(UInt64, 2)
+    expected = pointerof(want).as(Pointer(UInt8))
+    tag(n, ad, ad_size, ct, size, expected)
+    unless AeadBytes.same_tag?(expected, ct + size.to_i64)
+      return AeadError.new("AesGcm: the tag does not match: the sealed bytes, the additional data, the nonce or the key is not what was sealed")
+    end
+    String.new(size) { |buf| ctr(n, ct, buf, size) }
+  end
+
+  # *size* bytes from *src* to *dst*, XORed with the key stream of the
+  # counter blocks from 2 on (§7.1: the first, 1, is the tag's), four
+  # blocks to an AES call, which is what the bitsliced cipher does at
+  # once.
+  private def ctr(nonce : Pointer(UInt8), src : Pointer(UInt8), dst : Pointer(UInt8), size : Int32) : Nil
+    counters = uninitialized StaticArray(UInt8, 64)
+    blocks = pointerof(counters).as(Pointer(UInt8))
+    pad = uninitialized StaticArray(UInt8, 64)
+    stream = pointerof(pad).as(Pointer(UInt8))
+    b = 0
+    while b < 4
+      (blocks + (b * 16).to_i64).copy_from(nonce, 12)
+      b = b + 1
+    end
+    counter = 2_u32
+    done = 0
+    while done < size
+      left = size - done
+      take = left < 64 ? left : 64
+      count = (take + 15) // 16
+      b = 0
+      while b < count
+        AeadBytes.put_be32(blocks + (b * 16 + 12).to_i64, counter)
+        counter = counter &+ 1_u32
+        b = b + 1
+      end
+      AesCore.encrypt(@keys, @rounds, blocks, stream, count)
+      AeadBytes.xor(src + done.to_i64, stream, dst + done.to_i64, take)
+      done = done + take
+    end
+  end
+
+  # The tag of *size* bytes of ciphertext at *ct* into *dst* (§7.1 steps
+  # 5 and 6).
+  private def tag(nonce : Pointer(UInt8), aad : Pointer(UInt8), aad_size : Int32, ct : Pointer(UInt8), size : Int32, dst : Pointer(UInt8)) : Nil
+    state = uninitialized StaticArray(UInt64, 2)
+    y = pointerof(state).as(Pointer(UInt64))
+    y[0] = 0_u64
+    y[1] = 0_u64
+    ghash(y, aad, aad_size)
+    ghash(y, ct, size)
+    sizes = uninitialized StaticArray(UInt64, 2)
+    lengths = pointerof(sizes).as(Pointer(UInt8))
+    AeadBytes.put_be64(lengths, aad_size.to_u64 &* 8_u64)
+    AeadBytes.put_be64(lengths + 8_i64, size.to_u64 &* 8_u64)
+    ghash(y, lengths, 16)
+    first = uninitialized StaticArray(UInt64, 2)
+    j0 = pointerof(first).as(Pointer(UInt8))
+    j0.copy_from(nonce, 12)
+    AeadBytes.put_be32(j0 + 12_i64, 1_u32)
+    AesCore.encrypt(@keys, @rounds, j0, j0, 1)
+    AeadBytes.put_be64(dst, y[0] ^ AeadBytes.be64(j0))
+    AeadBytes.put_be64(dst + 8_i64, y[1] ^ AeadBytes.be64(j0 + 8_i64))
+  end
+
+  # GHASH (§6.4) of *count* bytes into the running value *y* (its high
+  # word first), the last block padded with zeros. Each block is a
+  # multiplication by H in GF(2^128), BearSSL's `br_ghash_ctmul64`: the
+  # 128-bit product by Karatsuba from three 64-bit carry-less products,
+  # each of those from its low half and, through bit reversal, its high
+  # half, and the 256 bits reduced by the field's polynomial,
+  # x^128 + x^7 + x^2 + x + 1, in GCM's reflected bit order. Four whole
+  # blocks at a time are one step, Y' = (Y + X1) H^4 + X2 H^3 + X3 H^2 +
+  # X4 H: everything after the six carry-less products is linear, so the
+  # four products' pieces are summed first and the bit reversals, the
+  # shift and the reduction done once for the four.
+  private def ghash(y : Pointer(UInt64), data : Pointer(UInt8), count : Int32) : Nil
+    hp = @powers
+    y1 = y[0]
+    y0 = y[1]
+    done = 0
+    while count - done >= 64
+      at = data + done.to_i64
+      z0, z1, z2, z0h, z1h, z2h = Ghash.parts(y1 ^ AeadBytes.be64(at), y0 ^ AeadBytes.be64(at + 8_i64), hp + 18_i64)
+      a0, a1, a2, a0h, a1h, a2h = Ghash.parts(AeadBytes.be64(at + 16_i64), AeadBytes.be64(at + 24_i64), hp + 12_i64)
+      b0, b1, b2, b0h, b1h, b2h = Ghash.parts(AeadBytes.be64(at + 32_i64), AeadBytes.be64(at + 40_i64), hp + 6_i64)
+      c0, c1, c2, c0h, c1h, c2h = Ghash.parts(AeadBytes.be64(at + 48_i64), AeadBytes.be64(at + 56_i64), hp)
+      y1, y0 = Ghash.reduce(z0 ^ a0 ^ b0 ^ c0, z1 ^ a1 ^ b1 ^ c1, z2 ^ a2 ^ b2 ^ c2,
+        z0h ^ a0h ^ b0h ^ c0h, z1h ^ a1h ^ b1h ^ c1h, z2h ^ a2h ^ b2h ^ c2h)
+      done = done + 64
+    end
+    while done < count
+      at = data + done.to_i64
+      left = count - done
+      if left >= 16
+        y1 = y1 ^ AeadBytes.be64(at)
+        y0 = y0 ^ AeadBytes.be64(at + 8_i64)
+      else
+        y1 = y1 ^ AeadBytes.be64_upto(at, left)
+        y0 = y0 ^ AeadBytes.be64_upto(at + 8_i64, left - 8) if left > 8
+      end
+      z0, z1, z2, z0h, z1h, z2h = Ghash.parts(y1, y0, hp)
+      y1, y0 = Ghash.reduce(z0, z1, z2, z0h, z1h, z2h)
+      done = done + 16
+    end
+    y[0] = y1
+    y[1] = y0
+  end
+end
+
+# The ChaCha20 stream cipher, RFC 8439 §2.4: a 32-byte key, a 12-byte
+# nonce and a 32-bit block counter, which starts at *counter*. `xor`
+# answers its data XORed with the key stream and carries on from where
+# it stopped, so a message XORed in pieces is the message XORed whole;
+# the same call decrypts. The counter is the RFC's 32 bits, 256 GiB of
+# key stream; a stream run past block 2^32 - 1 is refused rather than
+# wrapped onto key stream already used.
+pub class ChaCha20
+  @state : Pointer(UInt32)
+  @stream : Pointer(UInt8)
+  @used : Int32
+  @counter : UInt64
+
+  def initialize(key : String | Array(UInt8), nonce : String | Array(UInt8), counter : UInt32 = 0_u32)
+    k = AeadBytes.exactly(key, 32, "ChaCha20: a key")
+    n = AeadBytes.exactly(nonce, 12, "ChaCha20: a nonce")
+    @state = Pointer(UInt32).malloc(16_u64)
+    ChaChaCore.start(@state, k, n)
+    @stream = Pointer(UInt8).malloc(64_u64)
+    @used = 64
+    @counter = counter.to_u64
+  end
+
+  def xor(data : String | Array(UInt8)) : String
+    src, count = AeadBytes.of(data)
+    String.new(count) { |buf| xor(src, buf, count) }
+  end
+
+  # *count* bytes from *src* to *dst*, which may be the same bytes.
+  def xor(src : Pointer(UInt8), dst : Pointer(UInt8), count : Int32) : Nil
+    raise "ChaCha20: a negative count of bytes: #{count}" if count < 0
+    done = 0
+    while done < count
+      next_block if @used == 64
+      left = count - done
+      take = 64 - @used
+      take = left if left < take
+      AeadBytes.xor(src + done.to_i64, @stream + @used.to_i64, dst + done.to_i64, take)
+      @used = @used + take
+      done = done + take
+    end
+  end
+
+  private def next_block : Nil
+    if @counter > 0xffffffff_u64
+      raise "ChaCha20: the key stream ends at block 2^32 - 1; RFC 8439's counter is 32 bits and is not wrapped"
+    end
+    @state[12] = @counter.unsafe_to_u32
+    ChaChaCore.block(@state, @stream)
+    @counter = @counter + 1_u64
+    @used = 0
+  end
+end
+
+# Poly1305, RFC 8439 §2.5: a 16-byte MAC under a 32-byte one-time key, r
+# (clamped) and s. One key authenticates one message: a second message
+# under it lets whoever sees both tags forge a third, which is why the
+# AEAD derives a fresh key from each nonce, and why there is no `reset`.
+# `Poly1305.mac(key, data)` is one piece; `new`, `update` as the message
+# arrives, `final` once is the same in pieces. A tag someone sent is
+# compared with std/crypto's `Subtle.constant_time_compare`, not `==`.
+pub class Poly1305
+  @state : Pointer(UInt64)
+  @buffer : Pointer(UInt8)
+  @fill : Int32
+  @finished : Bool
+
+  def initialize(key : String | Array(UInt8))
+    k = AeadBytes.exactly(key, 32, "Poly1305: a key")
+    @state = Pointer(UInt64).malloc(PolyCore::WORDS)
+    PolyCore.start(@state, k)
+    @buffer = Pointer(UInt8).malloc(16_u64)
+    @fill = 0
+    @finished = false
+  end
+
+  def self.mac(key : String | Array(UInt8), data : String | Array(UInt8)) : String
+    new(key).update(data).final
+  end
+
+  def update(data : String | Array(UInt8)) : self
+    bytes, count = AeadBytes.of(data)
+    update(bytes, count)
+  end
+
+  def update(data : Pointer(UInt8), count : Int32) : self
+    raise "Poly1305: update after final; a key authenticates one message" if @finished
+    raise "Poly1305: a negative count of bytes: #{count}" if count < 0
+    done = 0
+    if @fill > 0
+      take = 16 - @fill
+      take = count if count < take
+      (@buffer + @fill.to_i64).copy_from(data, take)
+      @fill = @fill + take
+      done = take
+      if @fill == 16
+        PolyCore.blocks(@state, @buffer, 16, PolyCore::FULL)
+        @fill = 0
+      end
+    end
+    whole = (count - done) & ~15
+    PolyCore.blocks(@state, data + done.to_i64, whole, PolyCore::FULL)
+    done = done + whole
+    if done < count
+      @buffer.copy_from(data + done.to_i64, count - done)
+      @fill = count - done
+    end
+    self
+  end
+
+  # The 16-byte tag. A last block shorter than 16 bytes carries its own
+  # 1 bit after its bytes (§2.5.1), rather than the 2^128 of a whole one.
+  def final : String
+    raise "Poly1305: final called twice; a key authenticates one message" if @finished
+    @finished = true
+    if @fill > 0
+      @buffer[@fill] = 1_u8
+      i = @fill + 1
+      while i < 16
+        @buffer[i] = 0_u8
+        i = i + 1
+      end
+      PolyCore.blocks(@state, @buffer, 16, 0_u64)
+    end
+    String.new(16) { |buf| PolyCore.finish(@state, buf) }
+  end
+end
+
+# ChaCha20 and Poly1305 as an AEAD, RFC 8439 §2.8: the Poly1305 key is
+# the first 32 bytes of block 0's key stream, the plaintext is encrypted
+# from block 1, and the tag covers the additional data and the
+# ciphertext, each padded with zeros to 16 bytes, then their lengths as
+# 64-bit little-endian numbers.
+pub class ChaCha20Poly1305
+  @key : Pointer(UInt8)
+
+  def initialize(key : String | Array(UInt8))
+    @key = Pointer(UInt8).malloc(32_u64)
+    @key.copy_from(AeadBytes.exactly(key, 32, "ChaCha20Poly1305: a key"), 32)
+  end
+
+  # The ciphertext of *plaintext*, as long as it, and the 16-byte tag.
+  def seal(nonce : String | Array(UInt8), plaintext : String | Array(UInt8), aad : String | Array(UInt8) = "") : String
+    words = uninitialized StaticArray(UInt32, 16)
+    state = pointerof(words).as(Pointer(UInt32))
+    ChaChaCore.start(state, @key, AeadBytes.exactly(nonce, 12, "ChaCha20Poly1305: a nonce"))
+    pt, size = AeadBytes.of(plaintext)
+    ad, ad_size = AeadBytes.of(aad)
+    String.new(size + 16) do |buf|
+      ChaChaCore.xor(state, 1_u32, pt, buf, size)
+      tag(state, ad, ad_size, buf, size, buf + size.to_i64)
+    end
+  end
+
+  # The plaintext *sealed* came from, when its tag is the one this key,
+  # *nonce* and *aad* give; else an `AeadError`, and nothing decrypted.
+  def open(nonce : String | Array(UInt8), sealed : String | Array(UInt8), aad : String | Array(UInt8) = "") : String | AeadError
+    words = uninitialized StaticArray(UInt32, 16)
+    state = pointerof(words).as(Pointer(UInt32))
+    ChaChaCore.start(state, @key, AeadBytes.exactly(nonce, 12, "ChaCha20Poly1305: a nonce"))
+    ct, total = AeadBytes.of(sealed)
+    ad, ad_size = AeadBytes.of(aad)
+    return AeadError.new("ChaCha20Poly1305: #{total} bytes cannot be sealed: the tag alone is 16") if total < 16
+    size = total - 16
+    want = uninitialized StaticArray(UInt64, 2)
+    expected = pointerof(want).as(Pointer(UInt8))
+    tag(state, ad, ad_size, ct, size, expected)
+    unless AeadBytes.same_tag?(expected, ct + size.to_i64)
+      return AeadError.new("ChaCha20Poly1305: the tag does not match: the sealed bytes, the additional data, the nonce or the key is not what was sealed")
+    end
+    String.new(size) { |buf| ChaChaCore.xor(state, 1_u32, ct, buf, size) }
+  end
+
+  # §2.8's tag of *size* bytes of ciphertext at *ct*, into *dst*.
+  private def tag(state : Pointer(UInt32), aad : Pointer(UInt8), aad_size : Int32, ct : Pointer(UInt8), size : Int32, dst : Pointer(UInt8)) : Nil
+    block = uninitialized StaticArray(UInt8, 64)
+    one_time = pointerof(block).as(Pointer(UInt8))
+    state[12] = 0_u32
+    ChaChaCore.block(state, one_time)
+    words = uninitialized StaticArray(UInt64, 14)
+    mac = pointerof(words).as(Pointer(UInt64))
+    PolyCore.start(mac, one_time)
+    PolyCore.padded(mac, aad, aad_size)
+    PolyCore.padded(mac, ct, size)
+    sizes = uninitialized StaticArray(UInt64, 2)
+    lengths = pointerof(sizes).as(Pointer(UInt8))
+    AeadBytes.put_le64(lengths, aad_size.to_u64)
+    AeadBytes.put_le64(lengths + 8_i64, size.to_u64)
+    PolyCore.blocks(mac, lengths, 16, PolyCore::FULL)
+    PolyCore.finish(mac, dst)
+  end
+end
+
+# AES as BearSSL's `aes_ct64.c` writes it. Four blocks are bitsliced into
+# eight 64-bit words: word i holds bit i of all 64 bytes, and inside each
+# byte lane of a word the four blocks alternate, so one pass of the
+# S-box's gates substitutes all 64 bytes at once, ShiftRows is a fixed
+# shuffle of bit groups, and MixColumns rotations of whole words. The
+# round keys are bitsliced the same way, eight words a round, a key
+# repeated in all four lanes.
+#
+# Encryption is fixsliced (Adomnicai and Peyrin, "Fixslicing AES-like
+# ciphers", TCHES 2021/1, as RustCrypto's `fixslice64` writes it on this
+# same layout): ShiftRows is not done round by round. After j rounds
+# without it the state is SR^-j of the true one, which SubBytes does not
+# mind, MixColumns is met as SR^-j MC SR^j - the same sums with each
+# column's row i taken from i j columns along, one more rotation in the
+# words - and each round key is given SR^-j once, when it is expanded.
+# ShiftRows' four powers come round again every four rounds, so the
+# state is put right with one SR^2 before the last round for AES-128 and
+# AES-256 and needs nothing for AES-192. ShiftRows was some 20
+# instructions a word, eight words a round; the column rotations cost a
+# few, and in one round of four none. Decryption keeps the plain round
+# order and its own copy of the keys.
+struct AesCore
+  # Round keys for the longest key: 15 rounds' worth of eight words, then
+  # the same again with SR^-j applied, for encryption.
+  KEY_WORDS = 240_u64
+  FIXSLICED =     120
+
+  # *size* bytes of *key* expanded into *keys* (FIPS 197 §5.2); answers
+  # the number of rounds.
+  def self.expand(key : Pointer(UInt8), size : Int32, keys : Pointer(UInt64)) : Int32
+    nk = size // 4
+    rounds = nk + 6
+    total = (rounds + 1) * 4
+    schedule = uninitialized StaticArray(UInt32, 60)
+    w = pointerof(schedule).as(Pointer(UInt32))
+    slices = uninitialized StaticArray(UInt64, 8)
+    q = pointerof(slices).as(Pointer(UInt64))
+    i = 0
+    while i < nk
+      w[i] = AeadBytes.le32(key + (i * 4).to_i64)
+      i = i + 1
+    end
+    # The words are little-endian, so RotWord is a rotation right by a
+    # byte, and Rcon is in the low byte.
+    rcon = 1_u32
+    tmp = w[nk - 1]
+    j = 0
+    while i < total
+      if j == 0
+        tmp = sub_word(q, tmp.unsafe_shl(24) | tmp.unsafe_shr(8)) ^ rcon
+        rcon = rcon.unsafe_shl(1) ^ (rcon.unsafe_shr(7) &* 0x11b_u32)
+      elsif nk > 6 && j == 4
+        tmp = sub_word(q, tmp)
+      end
+      tmp = tmp ^ w[i - nk]
+      w[i] = tmp
+      i = i + 1
+      j = j + 1
+      j = 0 if j == nk
+    end
+    r = 0
+    while r <= rounds
+      interleave_in(q, 0, w[r * 4], w[r * 4 + 1], w[r * 4 + 2], w[r * 4 + 3])
+      q[1] = q[0]
+      q[2] = q[0]
+      q[3] = q[0]
+      q[5] = q[4]
+      q[6] = q[4]
+      q[7] = q[4]
+      ortho(q)
+      (keys + (r * 8).to_i64).copy_from(q, 8)
+      # Round r of the fixsliced cipher meets the state SR^-(r mod 4) of
+      # the true one; the last round's key is met after the SR^2 that
+      # puts it right, so it is the plain key.
+      if r < rounds
+        turn = 0
+        while turn < (r & 3)
+          inv_shift_rows(q)
+          turn = turn + 1
+        end
+      end
+      (keys + (FIXSLICED + r * 8).to_i64).copy_from(q, 8)
+      r = r + 1
+    end
+    rounds
+  end
+
+  # *count* blocks, one to four, from *src* to *dst*, which may be the
+  # same bytes (FIPS 197 §5.1), fixsliced: round r's MixColumns is the
+  # variant for SR^(r mod 4), and the round keys are the ones `expand` set
+  # aside for it.
+  def self.encrypt(keys : Pointer(UInt64), rounds : Int32, src : Pointer(UInt8), dst : Pointer(UInt8), count : Int32) : Nil
+    slices = uninitialized StaticArray(UInt64, 8)
+    q = pointerof(slices).as(Pointer(UInt64))
+    k = keys + FIXSLICED.to_i64
+    load(q, src, count)
+    add_round_key(q, k)
+    round = 1
+    while true
+      sbox(q)
+      mix_columns(q, 1)
+      add_round_key(q, k + (round * 8).to_i64)
+      round = round + 1
+      break if round == rounds
+      sbox(q)
+      mix_columns(q, 2)
+      add_round_key(q, k + (round * 8).to_i64)
+      round = round + 1
+      break if round == rounds
+      sbox(q)
+      mix_columns(q, 3)
+      add_round_key(q, k + (round * 8).to_i64)
+      round = round + 1
+      break if round == rounds
+      sbox(q)
+      mix_columns(q, 0)
+      add_round_key(q, k + (round * 8).to_i64)
+      round = round + 1
+      break if round == rounds
+    end
+    # rounds - 1 rounds left SR^-((rounds - 1) mod 4), and the last round
+    # adds its own ShiftRows: 10 and 14 rounds need SR^2, 12 none.
+    shift_rows_twice(q) if rounds & 3 == 2
+    sbox(q)
+    add_round_key(q, k + (rounds * 8).to_i64)
+    store(q, dst, count)
+  end
+
+  # The inverse cipher (FIPS 197 §5.3), the same round keys in reverse.
+  def self.decrypt(keys : Pointer(UInt64), rounds : Int32, src : Pointer(UInt8), dst : Pointer(UInt8), count : Int32) : Nil
+    slices = uninitialized StaticArray(UInt64, 8)
+    q = pointerof(slices).as(Pointer(UInt64))
+    load(q, src, count)
+    add_round_key(q, keys + (rounds * 8).to_i64)
+    round = rounds - 1
+    while round > 0
+      inv_shift_rows(q)
+      inv_sbox(q)
+      add_round_key(q, keys + (round * 8).to_i64)
+      inv_mix_columns(q)
+      round = round - 1
+    end
+    inv_shift_rows(q)
+    inv_sbox(q)
+    add_round_key(q, keys)
+    store(q, dst, count)
+  end
+
+  # SubWord for the key schedule, through the same gates as the blocks.
+  private def self.sub_word(q : Pointer(UInt64), x : UInt32) : UInt32
+    q[0] = x.to_u64
+    i = 1
+    while i < 8
+      q[i] = 0_u64
+      i = i + 1
+    end
+    ortho(q)
+    sbox(q)
+    ortho(q)
+    q[0].unsafe_to_u32
+  end
+
+  private def self.load(q : Pointer(UInt64), src : Pointer(UInt8), count : Int32) : Nil
+    b = 0
+    while b < 4
+      if b < count
+        at = src + (b * 16).to_i64
+        interleave_in(q, b, AeadBytes.le32(at), AeadBytes.le32(at + 4_i64), AeadBytes.le32(at + 8_i64), AeadBytes.le32(at + 12_i64))
+      else
+        q[b] = 0_u64
+        q[b + 4] = 0_u64
+      end
+      b = b + 1
+    end
+    ortho(q)
+  end
+
+  private def self.store(q : Pointer(UInt64), dst : Pointer(UInt8), count : Int32) : Nil
+    ortho(q)
+    b = 0
+    while b < count
+      at = dst + (b * 16).to_i64
+      AeadBytes.put_le32(at, gather(q[b]))
+      AeadBytes.put_le32(at + 4_i64, gather(q[b + 4]))
+      AeadBytes.put_le32(at + 8_i64, gather(q[b].unsafe_shr(8)))
+      AeadBytes.put_le32(at + 12_i64, gather(q[b + 4].unsafe_shr(8)))
+      b = b + 1
+    end
+  end
+
+  # A block's four words spread into words *b* and *b* + 4, a byte to
+  # every other byte lane, ready for `ortho`.
+  private def self.interleave_in(q : Pointer(UInt64), b : Int32, w0 : UInt32, w1 : UInt32, w2 : UInt32, w3 : UInt32) : Nil
+    q[b] = spread(w0) | spread(w2).unsafe_shl(8)
+    q[b + 4] = spread(w1) | spread(w3).unsafe_shl(8)
+  end
+
+  private def self.spread(w : UInt32) : UInt64
+    x = w.to_u64
+    x = (x | x.unsafe_shl(16)) & 0x0000ffff0000ffff_u64
+    (x | x.unsafe_shl(8)) & 0x00ff00ff00ff00ff_u64
+  end
+
+  private def self.gather(x : UInt64) : UInt32
+    x = x & 0x00ff00ff00ff00ff_u64
+    x = (x | x.unsafe_shr(8)) & 0x0000ffff0000ffff_u64
+    (x | x.unsafe_shr(16)).unsafe_to_u32
+  end
+
+  # The 8x8 bit transpose in every byte lane, between bytes and bit
+  # slices; it is its own inverse.
+  private def self.ortho(q : Pointer(UInt64)) : Nil
+    swap(q, 0, 1, 0x5555555555555555_u64, 1)
+    swap(q, 2, 3, 0x5555555555555555_u64, 1)
+    swap(q, 4, 5, 0x5555555555555555_u64, 1)
+    swap(q, 6, 7, 0x5555555555555555_u64, 1)
+    swap(q, 0, 2, 0x3333333333333333_u64, 2)
+    swap(q, 1, 3, 0x3333333333333333_u64, 2)
+    swap(q, 4, 6, 0x3333333333333333_u64, 2)
+    swap(q, 5, 7, 0x3333333333333333_u64, 2)
+    swap(q, 0, 4, 0x0f0f0f0f0f0f0f0f_u64, 4)
+    swap(q, 1, 5, 0x0f0f0f0f0f0f0f0f_u64, 4)
+    swap(q, 2, 6, 0x0f0f0f0f0f0f0f0f_u64, 4)
+    swap(q, 3, 7, 0x0f0f0f0f0f0f0f0f_u64, 4)
+  end
+
+  private def self.swap(q : Pointer(UInt64), i : Int32, j : Int32, low : UInt64, s : Int32) : Nil
+    a = q[i]
+    b = q[j]
+    high = low.unsafe_shl(s)
+    q[i] = (a & low) | (b & low).unsafe_shl(s)
+    q[j] = (a & high).unsafe_shr(s) | (b & high)
+  end
+
+  private def self.add_round_key(q : Pointer(UInt64), k : Pointer(UInt64)) : Nil
+    q[0] = q[0] ^ k[0]
+    q[1] = q[1] ^ k[1]
+    q[2] = q[2] ^ k[2]
+    q[3] = q[3] ^ k[3]
+    q[4] = q[4] ^ k[4]
+    q[5] = q[5] ^ k[5]
+    q[6] = q[6] ^ k[6]
+    q[7] = q[7] ^ k[7]
+  end
+
+  # The S-box, all 64 bytes at once: Boyar and Peralta's circuit, a top
+  # linear layer of 23 XORs, the inversion's 32 ANDs and 30 XORs, and a
+  # bottom linear layer of 30 (four of them XNORs), 115 gates with no
+  # table and no branch. x0 is the high bit.
+  private def self.sbox(q : Pointer(UInt64)) : Nil
+    x0 = q[7]
+    x1 = q[6]
+    x2 = q[5]
+    x3 = q[4]
+    x4 = q[3]
+    x5 = q[2]
+    x6 = q[1]
+    x7 = q[0]
+
+    y14 = x3 ^ x5
+    y13 = x0 ^ x6
+    y9 = x0 ^ x3
+    y8 = x0 ^ x5
+    t0 = x1 ^ x2
+    y1 = t0 ^ x7
+    y4 = y1 ^ x3
+    y12 = y13 ^ y14
+    y2 = y1 ^ x0
+    y5 = y1 ^ x6
+    y3 = y5 ^ y8
+    t1 = x4 ^ y12
+    y15 = t1 ^ x5
+    y20 = t1 ^ x1
+    y6 = y15 ^ x7
+    y10 = y15 ^ t0
+    y11 = y20 ^ y9
+    y7 = x7 ^ y11
+    y17 = y10 ^ y11
+    y19 = y10 ^ y8
+    y16 = t0 ^ y11
+    y21 = y13 ^ y16
+    y18 = x0 ^ y16
+
+    t2 = y12 & y15
+    t3 = y3 & y6
+    t4 = t3 ^ t2
+    t5 = y4 & x7
+    t6 = t5 ^ t2
+    t7 = y13 & y16
+    t8 = y5 & y1
+    t9 = t8 ^ t7
+    t10 = y2 & y7
+    t11 = t10 ^ t7
+    t12 = y9 & y11
+    t13 = y14 & y17
+    t14 = t13 ^ t12
+    t15 = y8 & y10
+    t16 = t15 ^ t12
+    t17 = t4 ^ t14
+    t18 = t6 ^ t16
+    t19 = t9 ^ t14
+    t20 = t11 ^ t16
+    t21 = t17 ^ y20
+    t22 = t18 ^ y19
+    t23 = t19 ^ y21
+    t24 = t20 ^ y18
+
+    t25 = t21 ^ t22
+    t26 = t21 & t23
+    t27 = t24 ^ t26
+    t28 = t25 & t27
+    t29 = t28 ^ t22
+    t30 = t23 ^ t24
+    t31 = t22 ^ t26
+    t32 = t31 & t30
+    t33 = t32 ^ t24
+    t34 = t23 ^ t33
+    t35 = t27 ^ t33
+    t36 = t24 & t35
+    t37 = t36 ^ t34
+    t38 = t27 ^ t36
+    t39 = t29 & t38
+    t40 = t25 ^ t39
+
+    t41 = t40 ^ t37
+    t42 = t29 ^ t33
+    t43 = t29 ^ t40
+    t44 = t33 ^ t37
+    t45 = t42 ^ t41
+    z0 = t44 & y15
+    z1 = t37 & y6
+    z2 = t33 & x7
+    z3 = t43 & y16
+    z4 = t40 & y1
+    z5 = t29 & y7
+    z6 = t42 & y11
+    z7 = t45 & y17
+    z8 = t41 & y10
+    z9 = t44 & y12
+    z10 = t37 & y3
+    z11 = t33 & y4
+    z12 = t43 & y13
+    z13 = t40 & y5
+    z14 = t29 & y2
+    z15 = t42 & y9
+    z16 = t45 & y14
+    z17 = t41 & y8
+
+    t46 = z15 ^ z16
+    t47 = z10 ^ z11
+    t48 = z5 ^ z13
+    t49 = z9 ^ z10
+    t50 = z2 ^ z12
+    t51 = z2 ^ z5
+    t52 = z7 ^ z8
+    t53 = z0 ^ z3
+    t54 = z6 ^ z7
+    t55 = z16 ^ z17
+    t56 = z12 ^ t48
+    t57 = t50 ^ t53
+    t58 = z4 ^ t46
+    t59 = z3 ^ t54
+    t60 = t46 ^ t57
+    t61 = z14 ^ t57
+    t62 = t52 ^ t58
+    t63 = t49 ^ t58
+    t64 = z4 ^ t59
+    t65 = t61 ^ t62
+    t66 = z1 ^ t63
+    s0 = t59 ^ t63
+    s6 = t56 ^ ~t62
+    s7 = t48 ^ ~t60
+    t67 = t64 ^ t65
+    s3 = t53 ^ t66
+    s4 = t51 ^ t66
+    s5 = t47 ^ t65
+    s1 = t64 ^ ~s3
+    s2 = t55 ^ ~t67
+
+    q[7] = s0
+    q[6] = s1
+    q[5] = s2
+    q[4] = s3
+    q[3] = s4
+    q[2] = s5
+    q[1] = s6
+    q[0] = s7
+  end
+
+  # The inverse S-box from the forward one: S(x) is the affine map A of
+  # x's inverse, so S^-1(y) = A^-1(S(A^-1(y))).
+  private def self.inv_sbox(q : Pointer(UInt64)) : Nil
+    inv_affine(q)
+    sbox(q)
+    inv_affine(q)
+  end
+
+  private def self.inv_affine(q : Pointer(UInt64)) : Nil
+    q0 = ~q[0]
+    q1 = ~q[1]
+    q2 = q[2]
+    q3 = q[3]
+    q4 = q[4]
+    q5 = ~q[5]
+    q6 = ~q[6]
+    q7 = q[7]
+    q[7] = q1 ^ q4 ^ q6
+    q[6] = q0 ^ q3 ^ q5
+    q[5] = q7 ^ q2 ^ q4
+    q[4] = q6 ^ q1 ^ q3
+    q[3] = q5 ^ q0 ^ q2
+    q[2] = q4 ^ q7 ^ q1
+    q[1] = q3 ^ q6 ^ q0
+    q[0] = q2 ^ q5 ^ q7
+  end
+
+  # SR^2: a row is 16 bits of a word (four columns of four blocks), and
+  # row r moves by 2r columns, so rows 0 and 2 stay and rows 1 and 3 trade
+  # their two bytes.
+  private def self.shift_rows_twice(q : Pointer(UInt64)) : Nil
+    i = 0
+    while i < 8
+      x = q[i]
+      q[i] = (x & 0x0000ffff0000ffff_u64) |
+             (x & 0x00ff000000ff0000_u64).unsafe_shl(8) |
+             (x & 0xff000000ff000000_u64).unsafe_shr(8)
+      i = i + 1
+    end
+  end
+
+  private def self.inv_shift_rows(q : Pointer(UInt64)) : Nil
+    i = 0
+    while i < 8
+      x = q[i]
+      q[i] = (x & 0x000000000000ffff_u64) |
+             (x & 0x000000000fff0000_u64).unsafe_shl(4) |
+             (x & 0x00000000f0000000_u64).unsafe_shr(12) |
+             (x & 0x000000ff00000000_u64).unsafe_shl(8) |
+             (x & 0x0000ff0000000000_u64).unsafe_shr(8) |
+             (x & 0x000f000000000000_u64).unsafe_shl(12) |
+             (x & 0xfff0000000000000_u64).unsafe_shr(4)
+      i = i + 1
+    end
+  end
+
+  # Each column times {03}x^3 + {01}x^2 + {01}x + {02} on a state that is
+  # SR^-turn of the true one. For turn 0 that is BearSSL's: b is every
+  # row moved up one (a rotation by 16), c = q + b, and the column is b +
+  # 2c + c moved up two (a rotation by 32), multiplying by {02} feeding
+  # the top bit slice into slices 0, 1, 3 and 4 (x^8 = x^4 + x^3 + x + 1).
+  # For another turn, row i + 1 of a column is read turn columns along
+  # and row i + 2 two turns along (`rows_up`, `rows_up_two`).
+  @[AlwaysInline]
+  private def self.mix_columns(q : Pointer(UInt64), turn : Int32) : Nil
+    q0 = q[0]
+    q1 = q[1]
+    q2 = q[2]
+    q3 = q[3]
+    q4 = q[4]
+    q5 = q[5]
+    q6 = q[6]
+    q7 = q[7]
+    b0 = rows_up(q0, turn)
+    b1 = rows_up(q1, turn)
+    b2 = rows_up(q2, turn)
+    b3 = rows_up(q3, turn)
+    b4 = rows_up(q4, turn)
+    b5 = rows_up(q5, turn)
+    b6 = rows_up(q6, turn)
+    b7 = rows_up(q7, turn)
+    c0 = q0 ^ b0
+    c1 = q1 ^ b1
+    c2 = q2 ^ b2
+    c3 = q3 ^ b3
+    c4 = q4 ^ b4
+    c5 = q5 ^ b5
+    c6 = q6 ^ b6
+    c7 = q7 ^ b7
+    q[0] = b0 ^ c7 ^ rows_up_two(c0, turn)
+    q[1] = b1 ^ c0 ^ c7 ^ rows_up_two(c1, turn)
+    q[2] = b2 ^ c1 ^ rows_up_two(c2, turn)
+    q[3] = b3 ^ c2 ^ c7 ^ rows_up_two(c3, turn)
+    q[4] = b4 ^ c3 ^ c7 ^ rows_up_two(c4, turn)
+    q[5] = b5 ^ c4 ^ rows_up_two(c5, turn)
+    q[6] = b6 ^ c5 ^ rows_up_two(c6, turn)
+    q[7] = b7 ^ c6 ^ rows_up_two(c7, turn)
+  end
+
+  # Row i + 1 of each column, turn columns along: a rotation by 16 + 4 turn
+  # for the columns that do not wrap within their row, by 4 turn for the
+  # ones that do. *turn* is a constant at every call.
+  @[AlwaysInline]
+  private def self.rows_up(x : UInt64, turn : Int32) : UInt64
+    case turn
+    when 1
+      (rotr(x, 20) & 0x0fff0fff0fff0fff_u64) | (rotr(x, 4) & 0xf000f000f000f000_u64)
+    when 2
+      (rotr(x, 24) & 0x00ff00ff00ff00ff_u64) | (rotr(x, 8) & 0xff00ff00ff00ff00_u64)
+    when 3
+      (rotr(x, 28) & 0x000f000f000f000f_u64) | (rotr(x, 12) & 0xfff0fff0fff0fff0_u64)
+    else
+      rotr(x, 16)
+    end
+  end
+
+  # Row i + 2 of each column, 2 turn columns along: for an odd turn two
+  # columns, a rotation by 40 or 24; for an even one none, a rotation by 32.
+  @[AlwaysInline]
+  private def self.rows_up_two(x : UInt64, turn : Int32) : UInt64
+    if turn & 1 == 1
+      (rotr(x, 40) & 0x00ff00ff00ff00ff_u64) | (rotr(x, 24) & 0xff00ff00ff00ff00_u64)
+    else
+      rotr32(x)
+    end
+  end
+
+  @[AlwaysInline]
+  private def self.rotr(x : UInt64, n : Int32) : UInt64
+    x.unsafe_shr(n) | x.unsafe_shl(64 - n)
+  end
+
+  # Each column times {0b}x^3 + {0d}x^2 + {09}x + {0e}, the same way.
+  private def self.inv_mix_columns(q : Pointer(UInt64)) : Nil
+    q0 = q[0]
+    q1 = q[1]
+    q2 = q[2]
+    q3 = q[3]
+    q4 = q[4]
+    q5 = q[5]
+    q6 = q[6]
+    q7 = q[7]
+    r0 = q0.unsafe_shr(16) | q0.unsafe_shl(48)
+    r1 = q1.unsafe_shr(16) | q1.unsafe_shl(48)
+    r2 = q2.unsafe_shr(16) | q2.unsafe_shl(48)
+    r3 = q3.unsafe_shr(16) | q3.unsafe_shl(48)
+    r4 = q4.unsafe_shr(16) | q4.unsafe_shl(48)
+    r5 = q5.unsafe_shr(16) | q5.unsafe_shl(48)
+    r6 = q6.unsafe_shr(16) | q6.unsafe_shl(48)
+    r7 = q7.unsafe_shr(16) | q7.unsafe_shl(48)
+    q[0] = q5 ^ q6 ^ q7 ^ r0 ^ r5 ^ r7 ^ rotr32(q0 ^ q5 ^ q6 ^ r0 ^ r5)
+    q[1] = q0 ^ q5 ^ r0 ^ r1 ^ r5 ^ r6 ^ r7 ^ rotr32(q1 ^ q5 ^ q7 ^ r1 ^ r5 ^ r6)
+    q[2] = q0 ^ q1 ^ q6 ^ r1 ^ r2 ^ r6 ^ r7 ^ rotr32(q0 ^ q2 ^ q6 ^ r2 ^ r6 ^ r7)
+    q[3] = q0 ^ q1 ^ q2 ^ q5 ^ q6 ^ r0 ^ r2 ^ r3 ^ r5 ^ rotr32(q0 ^ q1 ^ q3 ^ q5 ^ q6 ^ q7 ^ r0 ^ r3 ^ r5 ^ r7)
+    q[4] = q1 ^ q2 ^ q3 ^ q5 ^ r1 ^ r3 ^ r4 ^ r5 ^ r6 ^ r7 ^ rotr32(q1 ^ q2 ^ q4 ^ q5 ^ q7 ^ r1 ^ r4 ^ r5 ^ r6)
+    q[5] = q2 ^ q3 ^ q4 ^ q6 ^ r2 ^ r4 ^ r5 ^ r6 ^ r7 ^ rotr32(q2 ^ q3 ^ q5 ^ q6 ^ r2 ^ r5 ^ r6 ^ r7)
+    q[6] = q3 ^ q4 ^ q5 ^ q7 ^ r3 ^ r5 ^ r6 ^ r7 ^ rotr32(q3 ^ q4 ^ q6 ^ q7 ^ r3 ^ r6 ^ r7)
+    q[7] = q4 ^ q5 ^ q6 ^ r4 ^ r6 ^ r7 ^ rotr32(q4 ^ q5 ^ q7 ^ r4 ^ r7)
+  end
+
+  private def self.rotr32(x : UInt64) : UInt64
+    x.unsafe_shl(32) | x.unsafe_shr(32)
+  end
+end
+
+# GHASH's 64-bit pieces, from BearSSL's `ghash_ctmul64.c`.
+struct Ghash
+  # The low 64 bits of the carry-less product of *x* and *y*. Each is
+  # cut into four sets of bits four apart, and each pair of sets
+  # multiplied with the integer multiply: a pair's terms land on bits of
+  # one residue mod 4, and at most fifteen of them meet at any bit below
+  # the top four (sixteen only up there, where the carry leaves the
+  # word), so a sum's carries never reach the next bit of its residue,
+  # and the masks keep only the parity, which is the XOR.
+  def self.bmul64(x : UInt64, y : UInt64) : UInt64
+    x0 = x & 0x1111111111111111_u64
+    x1 = x & 0x2222222222222222_u64
+    x2 = x & 0x4444444444444444_u64
+    x3 = x & 0x8888888888888888_u64
+    y0 = y & 0x1111111111111111_u64
+    y1 = y & 0x2222222222222222_u64
+    y2 = y & 0x4444444444444444_u64
+    y3 = y & 0x8888888888888888_u64
+    z0 = (x0 &* y0) ^ (x1 &* y3) ^ (x2 &* y2) ^ (x3 &* y1)
+    z1 = (x0 &* y1) ^ (x1 &* y0) ^ (x2 &* y3) ^ (x3 &* y2)
+    z2 = (x0 &* y2) ^ (x1 &* y1) ^ (x2 &* y0) ^ (x3 &* y3)
+    z3 = (x0 &* y3) ^ (x1 &* y2) ^ (x2 &* y1) ^ (x3 &* y0)
+    (z0 & 0x1111111111111111_u64) | (z1 & 0x2222222222222222_u64) |
+      (z2 & 0x4444444444444444_u64) | (z3 & 0x8888888888888888_u64)
+  end
+
+  # *x* with its 64 bits in the opposite order.
+  def self.rev64(x : UInt64) : UInt64
+    x = (x & 0x5555555555555555_u64).unsafe_shl(1) | (x.unsafe_shr(1) & 0x5555555555555555_u64)
+    x = (x & 0x3333333333333333_u64).unsafe_shl(2) | (x.unsafe_shr(2) & 0x3333333333333333_u64)
+    x = (x & 0x0f0f0f0f0f0f0f0f_u64).unsafe_shl(4) | (x.unsafe_shr(4) & 0x0f0f0f0f0f0f0f0f_u64)
+    x = (x & 0x00ff00ff00ff00ff_u64).unsafe_shl(8) | (x.unsafe_shr(8) & 0x00ff00ff00ff00ff_u64)
+    x = (x & 0x0000ffff0000ffff_u64).unsafe_shl(16) | (x.unsafe_shr(16) & 0x0000ffff0000ffff_u64)
+    x.unsafe_shl(32) | x.unsafe_shr(32)
+  end
+
+  # A power of H laid out for `parts` at *dst*: its low half, high half,
+  # their XOR, and the three bit-reversed.
+  def self.prepare(dst : Pointer(UInt64), hi : UInt64, lo : UInt64) : Nil
+    dst[0] = lo
+    dst[1] = hi
+    dst[2] = lo ^ hi
+    dst[3] = rev64(lo)
+    dst[4] = rev64(hi)
+    dst[5] = dst[3] ^ dst[4]
+  end
+
+  # The six carry-less products of (*y1*, *y0*), high word first, and the
+  # power of H at *h*: the low halves', the high halves' and their sums'
+  # (Karatsuba), each once as it is and once bit-reversed, which gives
+  # the product's upper 64 bits. Nothing past them depends on H, and it
+  # is all linear, so sums of these can be taken before `reduce`.
+  @[AlwaysInline]
+  def self.parts(y1 : UInt64, y0 : UInt64, h : Pointer(UInt64)) : {UInt64, UInt64, UInt64, UInt64, UInt64, UInt64}
+    y0r = rev64(y0)
+    y1r = rev64(y1)
+    {bmul64(y0, h[0]), bmul64(y1, h[1]), bmul64(y0 ^ y1, h[2]),
+     bmul64(y0r, h[3]), bmul64(y1r, h[4]), bmul64(y0r ^ y1r, h[5])}
+  end
+
+  # The 256-bit product from `parts`' pieces, reduced to the 128-bit
+  # value, high word first.
+  @[AlwaysInline]
+  def self.reduce(z0 : UInt64, z1 : UInt64, z2 : UInt64, z0h : UInt64, z1h : UInt64, z2h : UInt64) : {UInt64, UInt64}
+    z2 = z2 ^ z0 ^ z1
+    z2h = z2h ^ z0h ^ z1h
+    z0h = rev64(z0h).unsafe_shr(1)
+    z1h = rev64(z1h).unsafe_shr(1)
+    z2h = rev64(z2h).unsafe_shr(1)
+    v0 = z0
+    v1 = z0h ^ z2
+    v2 = z1 ^ z2h
+    v3 = z1h
+    # The bit order is reflected, so the 255-bit product is one bit
+    # short at the top; a shift left makes it 256.
+    v3 = v3.unsafe_shl(1) | v2.unsafe_shr(63)
+    v2 = v2.unsafe_shl(1) | v1.unsafe_shr(63)
+    v1 = v1.unsafe_shl(1) | v0.unsafe_shr(63)
+    v0 = v0.unsafe_shl(1)
+    v2 = v2 ^ v0 ^ v0.unsafe_shr(1) ^ v0.unsafe_shr(2) ^ v0.unsafe_shr(7)
+    v1 = v1 ^ v0.unsafe_shl(63) ^ v0.unsafe_shl(62) ^ v0.unsafe_shl(57)
+    v3 = v3 ^ v1 ^ v1.unsafe_shr(1) ^ v1.unsafe_shr(2) ^ v1.unsafe_shr(7)
+    v2 = v2 ^ v1.unsafe_shl(63) ^ v1.unsafe_shl(62) ^ v1.unsafe_shl(57)
+    {v3, v2}
+  end
+end
+
+# The ChaCha20 block function, RFC 8439 §2.3, on a state of sixteen
+# words: four constants, the key, the counter (word 12) and the nonce.
+struct ChaChaCore
+  def self.start(state : Pointer(UInt32), key : Pointer(UInt8), nonce : Pointer(UInt8)) : Nil
+    # "expand 32-byte k", little-endian.
+    state[0] = 0x61707865_u32
+    state[1] = 0x3320646e_u32
+    state[2] = 0x79622d32_u32
+    state[3] = 0x6b206574_u32
+    i = 0
+    while i < 8
+      state[4 + i] = AeadBytes.le32(key + (i * 4).to_i64)
+      i = i + 1
+    end
+    state[12] = 0_u32
+    state[13] = AeadBytes.le32(nonce)
+    state[14] = AeadBytes.le32(nonce + 4_i64)
+    state[15] = AeadBytes.le32(nonce + 8_i64)
+  end
+
+  # *count* bytes from *src* to *dst* XORed with the key stream from
+  # block *counter* on.
+  def self.xor(state : Pointer(UInt32), counter : UInt32, src : Pointer(UInt8), dst : Pointer(UInt8), count : Int32) : Nil
+    pad = uninitialized StaticArray(UInt8, 64)
+    stream = pointerof(pad).as(Pointer(UInt8))
+    done = 0
+    while done < count
+      state[12] = counter
+      block(state, stream)
+      counter = counter &+ 1_u32
+      left = count - done
+      take = left < 64 ? left : 64
+      AeadBytes.xor(src + done.to_i64, stream, dst + done.to_i64, take)
+      done = done + take
+    end
+  end
+
+  # The 64 bytes of key stream for the state as it is: twenty rounds,
+  # columns then diagonals, in locals, then the state added back.
+  def self.block(state : Pointer(UInt32), dst : Pointer(UInt8)) : Nil
+    x0 = state[0]
+    x1 = state[1]
+    x2 = state[2]
+    x3 = state[3]
+    x4 = state[4]
+    x5 = state[5]
+    x6 = state[6]
+    x7 = state[7]
+    x8 = state[8]
+    x9 = state[9]
+    x10 = state[10]
+    x11 = state[11]
+    x12 = state[12]
+    x13 = state[13]
+    x14 = state[14]
+    x15 = state[15]
+    double_round = 0
+    while double_round < 10
+      # Columns.
+      x0 = x0 &+ x4
+      x12 = rotl(x12 ^ x0, 16)
+      x8 = x8 &+ x12
+      x4 = rotl(x4 ^ x8, 12)
+      x0 = x0 &+ x4
+      x12 = rotl(x12 ^ x0, 8)
+      x8 = x8 &+ x12
+      x4 = rotl(x4 ^ x8, 7)
+      x1 = x1 &+ x5
+      x13 = rotl(x13 ^ x1, 16)
+      x9 = x9 &+ x13
+      x5 = rotl(x5 ^ x9, 12)
+      x1 = x1 &+ x5
+      x13 = rotl(x13 ^ x1, 8)
+      x9 = x9 &+ x13
+      x5 = rotl(x5 ^ x9, 7)
+      x2 = x2 &+ x6
+      x14 = rotl(x14 ^ x2, 16)
+      x10 = x10 &+ x14
+      x6 = rotl(x6 ^ x10, 12)
+      x2 = x2 &+ x6
+      x14 = rotl(x14 ^ x2, 8)
+      x10 = x10 &+ x14
+      x6 = rotl(x6 ^ x10, 7)
+      x3 = x3 &+ x7
+      x15 = rotl(x15 ^ x3, 16)
+      x11 = x11 &+ x15
+      x7 = rotl(x7 ^ x11, 12)
+      x3 = x3 &+ x7
+      x15 = rotl(x15 ^ x3, 8)
+      x11 = x11 &+ x15
+      x7 = rotl(x7 ^ x11, 7)
+      # Diagonals.
+      x0 = x0 &+ x5
+      x15 = rotl(x15 ^ x0, 16)
+      x10 = x10 &+ x15
+      x5 = rotl(x5 ^ x10, 12)
+      x0 = x0 &+ x5
+      x15 = rotl(x15 ^ x0, 8)
+      x10 = x10 &+ x15
+      x5 = rotl(x5 ^ x10, 7)
+      x1 = x1 &+ x6
+      x12 = rotl(x12 ^ x1, 16)
+      x11 = x11 &+ x12
+      x6 = rotl(x6 ^ x11, 12)
+      x1 = x1 &+ x6
+      x12 = rotl(x12 ^ x1, 8)
+      x11 = x11 &+ x12
+      x6 = rotl(x6 ^ x11, 7)
+      x2 = x2 &+ x7
+      x13 = rotl(x13 ^ x2, 16)
+      x8 = x8 &+ x13
+      x7 = rotl(x7 ^ x8, 12)
+      x2 = x2 &+ x7
+      x13 = rotl(x13 ^ x2, 8)
+      x8 = x8 &+ x13
+      x7 = rotl(x7 ^ x8, 7)
+      x3 = x3 &+ x4
+      x14 = rotl(x14 ^ x3, 16)
+      x9 = x9 &+ x14
+      x4 = rotl(x4 ^ x9, 12)
+      x3 = x3 &+ x4
+      x14 = rotl(x14 ^ x3, 8)
+      x9 = x9 &+ x14
+      x4 = rotl(x4 ^ x9, 7)
+      double_round = double_round + 1
+    end
+    AeadBytes.put_le32(dst, x0 &+ state[0])
+    AeadBytes.put_le32(dst + 4_i64, x1 &+ state[1])
+    AeadBytes.put_le32(dst + 8_i64, x2 &+ state[2])
+    AeadBytes.put_le32(dst + 12_i64, x3 &+ state[3])
+    AeadBytes.put_le32(dst + 16_i64, x4 &+ state[4])
+    AeadBytes.put_le32(dst + 20_i64, x5 &+ state[5])
+    AeadBytes.put_le32(dst + 24_i64, x6 &+ state[6])
+    AeadBytes.put_le32(dst + 28_i64, x7 &+ state[7])
+    AeadBytes.put_le32(dst + 32_i64, x8 &+ state[8])
+    AeadBytes.put_le32(dst + 36_i64, x9 &+ state[9])
+    AeadBytes.put_le32(dst + 40_i64, x10 &+ state[10])
+    AeadBytes.put_le32(dst + 44_i64, x11 &+ state[11])
+    AeadBytes.put_le32(dst + 48_i64, x12 &+ state[12])
+    AeadBytes.put_le32(dst + 52_i64, x13 &+ state[13])
+    AeadBytes.put_le32(dst + 56_i64, x14 &+ state[14])
+    AeadBytes.put_le32(dst + 60_i64, x15 &+ state[15])
+  end
+
+  private def self.rotl(x : UInt32, n : Int32) : UInt32
+    x.unsafe_shl(n) | x.unsafe_shr(32 - n)
+  end
+end
+
+# Poly1305's arithmetic as poly1305-donna's 32-bit code does it: the
+# accumulator h and the key's r in five 26-bit limbs, products in 64
+# bits, mod 2^130 - 5. The state is fourteen words: r (0 to 4), h (5 to
+# 9) and s, the key's second half, as four 32-bit words (10 to 13).
+struct PolyCore
+  WORDS = 14_u64
+  # 2^128 in the top limb: the bit every whole 16-byte block gets above
+  # its bytes (RFC 8439 §2.5.1).
+  FULL = 0x1000000_u64
+
+  def self.start(st : Pointer(UInt64), key : Pointer(UInt8)) : Nil
+    # r clamped (§2.5): the top four bits of bytes 3, 7, 11 and 15 and
+    # the bottom two of bytes 4, 8 and 12 cleared, here in the limbs'
+    # masks.
+    st[0] = AeadBytes.le32(key).to_u64 & 0x3ffffff_u64
+    st[1] = AeadBytes.le32(key + 3_i64).to_u64.unsafe_shr(2) & 0x3ffff03_u64
+    st[2] = AeadBytes.le32(key + 6_i64).to_u64.unsafe_shr(4) & 0x3ffc0ff_u64
+    st[3] = AeadBytes.le32(key + 9_i64).to_u64.unsafe_shr(6) & 0x3f03fff_u64
+    st[4] = AeadBytes.le32(key + 12_i64).to_u64.unsafe_shr(8) & 0x00fffff_u64
+    i = 5
+    while i < 10
+      st[i] = 0_u64
+      i = i + 1
+    end
+    st[10] = AeadBytes.le32(key + 16_i64).to_u64
+    st[11] = AeadBytes.le32(key + 20_i64).to_u64
+    st[12] = AeadBytes.le32(key + 24_i64).to_u64
+    st[13] = AeadBytes.le32(key + 28_i64).to_u64
+  end
+
+  # *count* bytes, a multiple of 16, each block added to h with *top*
+  # above it and h multiplied by r. The limbs are left partly reduced,
+  # below 2^27, which is what keeps the products under 2^64.
+  def self.blocks(st : Pointer(UInt64), data : Pointer(UInt8), count : Int32, top : UInt64) : Nil
+    mask = 0x3ffffff_u64
+    r0 = st[0]
+    r1 = st[1]
+    r2 = st[2]
+    r3 = st[3]
+    r4 = st[4]
+    # 2^130 = 5 mod p, so a limb past the top wraps around times five.
+    s1 = r1 &* 5_u64
+    s2 = r2 &* 5_u64
+    s3 = r3 &* 5_u64
+    s4 = r4 &* 5_u64
+    h0 = st[5]
+    h1 = st[6]
+    h2 = st[7]
+    h3 = st[8]
+    h4 = st[9]
+    done = 0
+    while done < count
+      m = data + done.to_i64
+      h0 = h0 &+ (AeadBytes.le32(m).to_u64 & mask)
+      h1 = h1 &+ (AeadBytes.le32(m + 3_i64).to_u64.unsafe_shr(2) & mask)
+      h2 = h2 &+ (AeadBytes.le32(m + 6_i64).to_u64.unsafe_shr(4) & mask)
+      h3 = h3 &+ (AeadBytes.le32(m + 9_i64).to_u64.unsafe_shr(6) & mask)
+      h4 = h4 &+ (AeadBytes.le32(m + 12_i64).to_u64.unsafe_shr(8) | top)
+      d0 = h0 &* r0 &+ h1 &* s4 &+ h2 &* s3 &+ h3 &* s2 &+ h4 &* s1
+      d1 = h0 &* r1 &+ h1 &* r0 &+ h2 &* s4 &+ h3 &* s3 &+ h4 &* s2
+      d2 = h0 &* r2 &+ h1 &* r1 &+ h2 &* r0 &+ h3 &* s4 &+ h4 &* s3
+      d3 = h0 &* r3 &+ h1 &* r2 &+ h2 &* r1 &+ h3 &* r0 &+ h4 &* s4
+      d4 = h0 &* r4 &+ h1 &* r3 &+ h2 &* r2 &+ h3 &* r1 &+ h4 &* r0
+      c = d0.unsafe_shr(26)
+      h0 = d0 & mask
+      d1 = d1 &+ c
+      c = d1.unsafe_shr(26)
+      h1 = d1 & mask
+      d2 = d2 &+ c
+      c = d2.unsafe_shr(26)
+      h2 = d2 & mask
+      d3 = d3 &+ c
+      c = d3.unsafe_shr(26)
+      h3 = d3 & mask
+      d4 = d4 &+ c
+      c = d4.unsafe_shr(26)
+      h4 = d4 & mask
+      h0 = h0 &+ c &* 5_u64
+      c = h0.unsafe_shr(26)
+      h0 = h0 & mask
+      h1 = h1 &+ c
+      done = done + 16
+    end
+    st[5] = h0
+    st[6] = h1
+    st[7] = h2
+    st[8] = h3
+    st[9] = h4
+  end
+
+  # *count* bytes as the AEAD feeds them (§2.8): whole blocks, and the
+  # rest padded with zeros to a whole block.
+  def self.padded(st : Pointer(UInt64), data : Pointer(UInt8), count : Int32) : Nil
+    whole = count & ~15
+    blocks(st, data, whole, FULL)
+    return if whole == count
+    last = uninitialized StaticArray(UInt64, 2)
+    words = pointerof(last).as(Pointer(UInt64))
+    words[0] = 0_u64
+    words[1] = 0_u64
+    tail = words.as(Pointer(UInt8))
+    tail.copy_from(data + whole.to_i64, count - whole)
+    blocks(st, tail, 16, FULL)
+  end
+
+  # h reduced mod 2^130 - 5 and s added mod 2^128, the tag, into *dst*.
+  # Whether h is past p is a mask from the sign of h - p, not a branch.
+  def self.finish(st : Pointer(UInt64), dst : Pointer(UInt8)) : Nil
+    mask = 0x3ffffff_u64
+    h0 = st[5]
+    h1 = st[6]
+    h2 = st[7]
+    h3 = st[8]
+    h4 = st[9]
+    c = h1.unsafe_shr(26)
+    h1 = h1 & mask
+    h2 = h2 &+ c
+    c = h2.unsafe_shr(26)
+    h2 = h2 & mask
+    h3 = h3 &+ c
+    c = h3.unsafe_shr(26)
+    h3 = h3 & mask
+    h4 = h4 &+ c
+    c = h4.unsafe_shr(26)
+    h4 = h4 & mask
+    h0 = h0 &+ c &* 5_u64
+    c = h0.unsafe_shr(26)
+    h0 = h0 & mask
+    h1 = h1 &+ c
+    # g = h + 5 - 2^130, which is h - p.
+    g0 = h0 &+ 5_u64
+    c = g0.unsafe_shr(26)
+    g0 = g0 & mask
+    g1 = h1 &+ c
+    c = g1.unsafe_shr(26)
+    g1 = g1 & mask
+    g2 = h2 &+ c
+    c = g2.unsafe_shr(26)
+    g2 = g2 & mask
+    g3 = h3 &+ c
+    c = g3.unsafe_shr(26)
+    g3 = g3 & mask
+    g4 = h4 &+ c &- 0x4000000_u64
+    # All ones when g did not go below zero, so g is h mod p.
+    keep_g = g4.unsafe_shr(63) &- 1_u64
+    keep_h = ~keep_g
+    h0 = (h0 & keep_h) | (g0 & keep_g)
+    h1 = (h1 & keep_h) | (g1 & keep_g)
+    h2 = (h2 & keep_h) | (g2 & keep_g)
+    h3 = (h3 & keep_h) | (g3 & keep_g)
+    h4 = (h4 & keep_h) | (g4 & keep_g)
+    w0 = (h0 | h1.unsafe_shl(26)) & 0xffffffff_u64
+    w1 = (h1.unsafe_shr(6) | h2.unsafe_shl(20)) & 0xffffffff_u64
+    w2 = (h2.unsafe_shr(12) | h3.unsafe_shl(14)) & 0xffffffff_u64
+    w3 = (h3.unsafe_shr(18) | h4.unsafe_shl(8)) & 0xffffffff_u64
+    f = w0 &+ st[10]
+    AeadBytes.put_le32(dst, f.unsafe_to_u32)
+    f = w1 &+ st[11] &+ f.unsafe_shr(32)
+    AeadBytes.put_le32(dst + 4_i64, f.unsafe_to_u32)
+    f = w2 &+ st[12] &+ f.unsafe_shr(32)
+    AeadBytes.put_le32(dst + 8_i64, f.unsafe_to_u32)
+    f = w3 &+ st[13] &+ f.unsafe_shr(32)
+    AeadBytes.put_le32(dst + 12_i64, f.unsafe_to_u32)
+  end
+end
+
+struct AeadBytes
+  def self.of(data : String | Array(UInt8)) : {Pointer(UInt8), Int32}
+    if data.is_a?(String)
+      {data.to_unsafe, data.bytesize}
+    else
+      {data.to_unsafe, data.size}
+    end
+  end
+
+  # *data*'s bytes, which must be *size* of them; *what* names them in
+  # the refusal.
+  def self.exactly(data : String | Array(UInt8), size : Int32, what : String) : Pointer(UInt8)
+    bytes, count = of(data)
+    raise "#{what} is #{size} bytes, not #{count}" unless count == size
+    bytes
+  end
+
+  # Whether the 16 bytes at *a* and *b* are the same, in a time that
+  # does not depend on where they differ: every byte is read and the
+  # differences gathered with `|`, as std/crypto's `Subtle` does, here
+  # on the tag where it lies rather than on a copy.
+  def self.same_tag?(a : Pointer(UInt8), b : Pointer(UInt8)) : Bool
+    diff = 0_u8
+    i = 0
+    while i < 16
+      diff = diff | (a[i] ^ b[i])
+      i = i + 1
+    end
+    diff == 0_u8
+  end
+
+  def self.xor(a : Pointer(UInt8), b : Pointer(UInt8), dst : Pointer(UInt8), count : Int32) : Nil
+    i = 0
+    while i < count
+      dst[i] = a[i] ^ b[i]
+      i = i + 1
+    end
+  end
+
+  def self.le32(p : Pointer(UInt8)) : UInt32
+    p[0].to_u32 | p[1].to_u32.unsafe_shl(8) | p[2].to_u32.unsafe_shl(16) | p[3].to_u32.unsafe_shl(24)
+  end
+
+  def self.put_le32(p : Pointer(UInt8), v : UInt32) : Nil
+    p[0] = v.unsafe_to_u8
+    p[1] = v.unsafe_shr(8).unsafe_to_u8
+    p[2] = v.unsafe_shr(16).unsafe_to_u8
+    p[3] = v.unsafe_shr(24).unsafe_to_u8
+  end
+
+  def self.put_be32(p : Pointer(UInt8), v : UInt32) : Nil
+    p[0] = v.unsafe_shr(24).unsafe_to_u8
+    p[1] = v.unsafe_shr(16).unsafe_to_u8
+    p[2] = v.unsafe_shr(8).unsafe_to_u8
+    p[3] = v.unsafe_to_u8
+  end
+
+  def self.put_le64(p : Pointer(UInt8), v : UInt64) : Nil
+    put_le32(p, v.unsafe_to_u32)
+    put_le32(p + 4_i64, v.unsafe_shr(32).unsafe_to_u32)
+  end
+
+  def self.be64(p : Pointer(UInt8)) : UInt64
+    p[0].to_u64.unsafe_shl(56) | p[1].to_u64.unsafe_shl(48) | p[2].to_u64.unsafe_shl(40) | p[3].to_u64.unsafe_shl(32) |
+      p[4].to_u64.unsafe_shl(24) | p[5].to_u64.unsafe_shl(16) | p[6].to_u64.unsafe_shl(8) | p[7].to_u64
+  end
+
+  # Eight bytes big-endian, of which only the first *count* are read and
+  # the rest are zeros: a last block shorter than 16 bytes, padded.
+  def self.be64_upto(p : Pointer(UInt8), count : Int32) : UInt64
+    v = 0_u64
+    i = 0
+    while i < 8
+      v = v.unsafe_shl(8) | (i < count ? p[i].to_u64 : 0_u64)
+      i = i + 1
+    end
+    v
+  end
+
+  def self.put_be64(p : Pointer(UInt8), v : UInt64) : Nil
+    put_be32(p, v.unsafe_shr(32).unsafe_to_u32)
+    put_be32(p + 4_i64, v.unsafe_to_u32)
+  end
+end

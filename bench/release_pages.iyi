@@ -1,0 +1,159 @@
+# Where the sweep hands cold pages back, how often, and what it costs
+# (issue #150).
+#
+#   ./bin/iyi build --release -Dgc_release_timing bench/release_pages.iyi -o release_pages
+#   ./release_pages run WORKERS SECONDS
+#   ./release_pages serve WORKERS PORTFILE
+#
+# `run` drives `bench/web_cores.iyi`'s check_version handler in-process on
+# WORKERS parallel tasks for SECONDS and prints one line: requests a
+# second, collections, the sweep's release calls (`IyiHeap.release_run`)
+# in all and those made by a thread inside the allocator rather than a
+# helper, the time spent in them when the build has `-Dgc_release_timing`,
+# the pages released, reopened (warm ones among them) and kept warm, and
+# the peak working set on Windows; on Linux `/usr/bin/time -v` reads the
+# peak from outside. `serve` answers check_version over HTTP on WORKERS of
+# the pool's, writes its port to PORTFILE, and answers GET /stats with the
+# same counters as they stand, for a driver that loads it with wrk or oha
+# and subtracts. The numbers it gave are in `IyiMark.warm_pages`.
+#
+# With no arguments it runs two workers briefly, checks every answer and
+# prints a fixed line.
+
+module bench/release_pages
+
+import std/http::{Request, Response, Server}
+import std/socket::{IyiSocket}
+import std/json::{JSON}
+import std/file::{File}
+
+{% if flag?(:win32) %}
+  lib LibPeak
+    fun GetCurrentProcess : Void*
+    fun K32GetProcessMemoryInfo(process : Void*, counters : UInt64*, size : UInt32) : Int32
+  end
+
+  # PROCESS_MEMORY_COUNTERS: two DWORDs, then PeakWorkingSetSize.
+  def peak_kb : String
+    counters = Pointer(UInt64).malloc(9_u64)
+    counters.value = 72_u64
+    return "?" if LibPeak.K32GetProcessMemoryInfo(LibPeak.GetCurrentProcess, counters, 72_u32) == 0
+    (counters[1] // 1024_u64).to_s
+  end
+{% else %}
+  # Read from outside the process here: `/usr/bin/time -v` on Linux.
+  def peak_kb : String
+    "?"
+  end
+{% end %}
+
+def version_number(text : String) : Int64
+  parts = text.split(".")
+  number = 0_i64
+  i = 0
+  while i < 3
+    part = parts.size > i ? parts[i].to_i? : nil
+    number = number * 1000_i64 + (part || 0).to_i64
+    i = i + 1
+  end
+  number
+end
+
+def check_version(request : Request) : Response
+  form = request.form
+  platform = form["platform"]? || ""
+  latest = platform == "ios" ? "2.4.1" : "2.4.0"
+  minimum = "2.0.0"
+  have = version_number(form["version"]? || "0")
+  body = JSON.build do |b|
+    b.object do
+      b.field("platform", platform)
+      b.field("latest", latest)
+      b.field("minimum", minimum)
+      b.field("update", have < version_number(latest))
+      b.field("forced", have < version_number(minimum))
+    end
+  end
+  Response.new(200, body, {"Content-Type" => "application/json"})
+end
+
+def counters : String
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+    "collections=#{IyiMark.collections} release_calls=#{IyiHeap.release_calls} release_calls_inside=#{IyiHeap.release_calls_inside} release_us=#{IyiHeap.release_ns // 1000_u64} pages_released=#{IyiHeap.pages_released} pages_reopened=#{IyiHeap.pages_reopened} pages_rewarmed=#{IyiHeap.pages_rewarmed} pages_retained=#{IyiHeap.pages_retained} peak_kb=#{peak_kb}"
+  {% else %}
+    "no collector on this target"
+  {% end %}
+end
+
+def answer(request : Request) : Response
+  return Response.new(200, counters) if request.path == "/stats"
+  check_version(request)
+end
+
+# One task's requests, 64 at a time, `rounds` of them or until the
+# deadline: the query varies so the answers do, and each is read back.
+# Answers how many were made and how many read back wrong.
+def work(task : Int64, deadline : Int64, rounds : Int64) : Array(Int64)
+  done = 0_i64
+  wrong = 0_i64
+  while (rounds > 0_i64 && done < rounds) || (rounds == 0_i64 && __iyi_monotonic_ns < deadline)
+    i = 0
+    while i < 64
+      ios = (done + i) % 2 == 0
+      query = "platform=#{ios ? "ios" : "android"}&version=2.#{(done + task) % 6}.#{i % 10}"
+      got = check_version(Request.new("GET", "/check_version", query, {} of String => String, ""))
+      update = 2000000_i64 + ((done + task) % 6) * 1000_i64 + (i % 10).to_i64 < (ios ? 2004001_i64 : 2004000_i64)
+      wrong = wrong + 1_i64 unless got.status == 200 && got.body.includes?("\"update\":#{update}")
+      i = i + 1
+    end
+    done = done + 64_i64
+  end
+  [done, wrong]
+end
+
+args = Program.args
+if args.size == 3 && args[0] == "serve"
+  IyiWorkers.count = args[1].to_i
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[2], "#{listener.local_port}\n")
+  Server.serve(listener) { |request| answer(request) }
+  exit 0
+end
+
+quiet = args.empty?
+unless quiet || (args.size == 3 && args[0] == "run")
+  puts "usage: release_pages run WORKERS SECONDS | serve WORKERS PORTFILE"
+  exit 1
+end
+workers = quiet ? 2 : args[1].to_i
+seconds = quiet ? 0_i64 : args[2].to_i64
+IyiWorkers.count = workers
+started = __iyi_monotonic_ns
+deadline = started + seconds * 1000000000_i64
+total = 0_i64
+wrong = 0_i64
+group do |g|
+  handles = [] of IyiTask(Array(Int64))
+  workers.times do |t|
+    handles << g.spawn_parallel { work(t.to_i64, deadline, quiet ? 2048_i64 : 0_i64) }
+  end
+  handles.each do |handle|
+    value = handle.value
+    if value.is_a?(Array(Int64))
+      total = total + value[0]
+      wrong = wrong + value[1]
+    else
+      wrong = wrong + 1_i64
+    end
+  end
+end
+wall = __iyi_monotonic_ns - started
+if wrong != 0_i64
+  puts "FAIL: #{wrong} of #{total} answers read back wrong"
+  exit 1
+end
+if quiet
+  puts "release pages: every answer read back as built"
+else
+  puts "workers=#{workers} wall_ms=#{wall // 1000000_i64} requests=#{total} per_s=#{total * 1000000000_i64 // wall} #{counters}"
+end

@@ -1,0 +1,436 @@
+# FileUtils: the operations on files and trees that are made of several
+# calls - copy a file, copy a tree, remove a tree, move a file or a tree
+# to another device, compare two files - under Crystal's name for them.
+#
+#     import std/file_utils::{FileUtils}
+#
+#     FileUtils.cp("app.conf", "backup/")      # backup/app.conf, mode kept
+#     FileUtils.cp_r("assets", "dist/assets")
+#     FileUtils.mv("dist", "/mnt/release/dist") # a rename, or a copy across devices
+#     FileUtils.rm_rf("dist")
+#     FileUtils.compare_file("a.bin", "b.bin")  # => true when the bytes agree
+#
+# Why a module of its own and not more of `std/file` and `std/dir`: those
+# two are the platform's single calls, each one a syscall on Linux, a
+# libSystem function on darwin and a kernel32 one on Windows, with the
+# platform arms beside each other (`File.rename`, `File.symlink`,
+# `Dir.mkdir`). Everything here is a walk or a loop over those calls, it
+# needs both modules where each of them needs at most the other's one
+# helper, and it binds nothing new: it reaches the OS through `std/file`,
+# `std/dir` and the prelude's descriptor calls `File.open` itself reads
+# with (`__iyi_open_file`, `__iyi_file_read`, `__iyi_file_write`), so it
+# compiles for every target those do and has no platform arm of its own.
+# The other library keeps the same split - `File` and `Dir` for the calls,
+# `FileUtils` for the trees - and a program ported from it finds the
+# names where it looks. What `std/file` and `std/dir` already have is not
+# repeated: `File.symlink`, `File.symlink?`, `File.readlink` and
+# `Dir.mkdir_p` are the ones to call.
+#
+# Failures are `std/file`'s: a call the platform refuses panics with a
+# sentence that starts `Cannot copy`, `Cannot remove` or `Cannot move`,
+# names the paths, and says which of them was refused - the same shape
+# `Cannot rename a to b` and `Cannot remove directory: d` have, and those
+# two panic out of here unchanged when it is their call that was refused.
+# A copy or a move that panics part way leaves its source as it was:
+# a move removes the source only after the whole copy is in.
+#
+# `cp` copies one file's bytes and its permission bits - the nine
+# `rwxrwxrwx` bits `File.info` reads, the one read-only bit on Windows -
+# as `cp` and Python's `shutil.copy` do; owner and times are not copied.
+# The destination may be a directory, and the file goes into it under its
+# own name. A source that is a link is followed, as `cp` follows one; a
+# source and destination that are one file are refused before anything
+# is opened, since opening the destination to write empties it, and that
+# is the source. The bytes go across in pieces of PIECE (64 KiB) through
+# one buffer, never a whole file in memory: a 64 MiB copy allocates that
+# buffer and a few path strings - 64 KiB, measured with `GC.stats` by the
+# gate, which holds it under 256 KiB. Measured on tmpfs (x86_64 Linux,
+# `--release`, three runs): 256 MiB copied in 0.05-0.08 s at 1.7 MB
+# resident, where coreutils `cp` took 0.06-0.10 s at 2.6 MB, and
+# compared in 0.04-0.07 s where `cmp` took 0.06-0.09 s. `cp`'s
+# `copy_file_range` would spare the trip through user space, but it is a
+# Linux call alone, and the loop already keeps `cp`'s pace here.
+#
+# `cp_r` copies a tree the way `cp -R` does, which is Python's
+# `shutil.copytree(..., symlinks=True)`: a directory is made and filled,
+# then given its source's permission bits (filled first, so a read-only
+# source directory still gets its contents); a file is `cp`; a link is
+# made again as a link with the same target text, never followed - so a
+# link out of the tree stays a link out of it and a link to its own
+# parent is not a copy without end. A FIFO, a socket or a device is
+# refused by name: opening a FIFO to read waits for a writer that may
+# never come. A destination that is a directory takes the source under
+# its own name, as `cp` does, and one that is inside the source is
+# refused before anything is made.
+#
+# `rm_r` removes a tree and never follows a link: the link is what is
+# removed, and what it named is not touched - a link inside the tree to a
+# directory outside it leaves that directory and everything in it as
+# they were, which the gate checks. The path's own trailing separator is
+# dropped first, because POSIX resolves `link/` to the directory the link
+# names, and `rm -rf link/` is the well-known way to empty someone else's
+# directory. Each directory is listed whole before anything in it is
+# removed, so the listing is not read while it shrinks. A directory the
+# user may not write gives up none of its entries, and `rm_r` stops at it
+# with `Dir.delete`'s refusal, as `rm -r` and `shutil.rmtree` stop.
+# `rm_rf` is the same with a path that is not there accepted; any other
+# refusal still panics, since there is no rescue to swallow one with and
+# a removal that silently did not happen is the worse answer.
+#
+# `mv` is a rename where one can be: same device, one call, atomic. Across
+# devices - `EXDEV`, which `rename(2)` answers and `File.rename` reports
+# only as a refusal - the two devices are asked for first (`File.info`'s
+# `dev`, the volume serial on Windows) and the source is copied with
+# `cp_r`'s rules and then removed with `rm_r`'s, which is what `mv` and
+# `shutil.move` do. Where rename would replace, the copy replaces: a file
+# onto a file, a directory onto an empty directory; a directory onto a
+# file, a directory onto one that is not empty, and a file onto a
+# directory are refused, as `rename(2)` refuses them. A source the copy
+# could not remove afterwards - in a read-only directory, or holding one
+# with entries - is refused before anything is copied: measured, the
+# copy went in, the removal stopped at the read-only directory, and the
+# tree was left whole in one place and half in the other, which is
+# where `mv` and `shutil.move` leave it too.
+#
+# `compare_file` reads both files a piece at a time and stops at the
+# first difference; files of different sizes are different without a
+# read, and one file under two names is equal without one. It is the
+# chunked twin of `File.same_content?`, which reads both files whole.
+#
+# Left out: preserving owners and times (`cp -p`), following links
+# within a tree (`cp -L`), and a guard against removing `/`.
+
+module std/file_utils
+
+import std/path::{Path}
+import std/file::{File}
+import std/dir::{Dir}
+
+pub struct FileUtils
+  # The size of one piece of a copy or a comparison: what `cp` and
+  # `shutil` use for a regular file (Python's COPY_BUFSIZE is 64 KiB on
+  # Linux), big enough that the read and write calls cost nothing beside
+  # the bytes.
+  PIECE = 65536
+
+  # Copies the file *src* to *dst*, its bytes and its permission bits. A
+  # *dst* that is a directory receives the file under its own name.
+  def self.cp(src : String | Path, dst : String | Path) : Nil
+    s = src.to_s
+    d = dst.to_s
+    info = File.info?(s)
+    raise "Cannot copy #{s} to #{d}: #{s} does not exist" unless info
+    raise "Cannot copy #{s} to #{d}: #{s} is a directory, which cp_r copies" if info.directory?
+    target = Dir.exists?(d) ? File.join(d, File.basename(s)) : d
+    raise "Cannot copy #{s} to #{target}: they are the same file" if File.same?(s, target)
+    copy_file(s, target, info.permissions.value)
+  end
+
+  # Copies *src* - a file, a link or a whole tree - to *dst*, links as
+  # links. A *dst* that is a directory receives *src* under its own name;
+  # a directory already at the target is filled, as `cp -R` fills one.
+  # `link/`, with its separator, is the directory the link names, as
+  # `cp -R link/ x` copies that directory: a copy takes nothing away.
+  def self.cp_r(src : String | Path, dst : String | Path) : Nil
+    s = src.to_s
+    d = dst.to_s
+    # `link/` is asked of the directory it names. POSIX's lstat does that
+    # for a trailing separator itself; Windows answers the link, and the
+    # copy was a link where the directory was asked for.
+    named = s.ends_with?("/") || s.ends_with?(File::SEPARATOR_STRING)
+    info = File.info?(s, follow_symlinks: named)
+    raise "Cannot copy #{s} to #{d}: #{s} does not exist" unless info
+    target = Dir.exists?(d) ? File.join(d, File.basename(s)) : d
+    if info.directory?
+      parent = File.dirname(target)
+      raise "Cannot copy #{s} to #{target}: the directory #{parent} does not exist" unless Dir.exists?(parent)
+      # Real paths both, so `.`, `..` and a link in either spelling are
+      # the same directory: copying a tree into itself would list each
+      # copy it has just made and copy it again.
+      root = File.real_path(s)
+      landing = File.join(File.real_path(parent), File.basename(target))
+      inside = root.ends_with?(File::SEPARATOR_STRING) ? root : root + File::SEPARATOR_STRING
+      if landing == root || landing.starts_with?(inside)
+        raise "Cannot copy #{s} to #{target}: #{target} is inside the tree being copied"
+      end
+    elsif info.file? && File.same?(s, target)
+      raise "Cannot copy #{s} to #{target}: they are the same file"
+    end
+    copy_entry(s, target, info)
+  end
+
+  # Removes *path*: a file, a link (not what it names), or a directory
+  # and everything under it. A path that is not there is refused.
+  def self.rm_r(path : String | Path) : Nil
+    p = bare(path.to_s)
+    info = File.info?(p, follow_symlinks: false)
+    raise "Cannot remove #{p}: it does not exist" unless info
+    remove_entry(p, info)
+  end
+
+  # `rm_r`, with a path that is not there accepted.
+  def self.rm_rf(path : String | Path) : Nil
+    p = bare(path.to_s)
+    info = File.info?(p, follow_symlinks: false)
+    remove_entry(p, info) if info
+  end
+
+  # Moves *src* to *dst*: a rename on one device, a copy and a removal
+  # across two. A *dst* that is a directory receives *src* under its own
+  # name. `link/` moves the link, as `rm_r` removes it: moving takes the
+  # source away, and the directory a link names is not the caller's.
+  def self.mv(src : String | Path, dst : String | Path) : Nil
+    s = bare(src.to_s)
+    d = dst.to_s
+    info = File.info?(s, follow_symlinks: false)
+    raise "Cannot move #{s} to #{d}: #{s} does not exist" unless info
+    target = Dir.exists?(d) ? File.join(d, File.basename(s)) : d
+    parent = File.dirname(target)
+    landing = File.info?(parent)
+    raise "Cannot move #{s} to #{target}: the directory #{parent} does not exist" unless landing && landing.directory?
+    # An identity of 0 is none (Windows, a path it could not open), and
+    # then the rename is asked, which on Windows copies a file across
+    # volumes itself.
+    if info.dev == landing.dev || info.dev == 0_i64 || landing.dev == 0_i64
+      File.rename(s, target)
+      return
+    end
+    there = File.info?(target, follow_symlinks: false)
+    if there
+      if info.directory?
+        raise "Cannot move #{s} to #{target}: #{target} is not a directory" unless there.directory?
+        raise "Cannot move #{s} to #{target}: #{target} is a directory that is not empty" unless Dir.empty?(target)
+      else
+        raise "Cannot move #{s} to #{target}: #{target} is a directory" if there.directory?
+        # Replaced, as rename replaces it: written through, a link at the
+        # target would have its target overwritten and stay a link.
+        File.delete(target)
+      end
+    end
+    # What the copy could not then remove is refused before the copy: a
+    # read-only directory gives up none of its entries, and found after
+    # the copy it left the tree in both places and the source half gone
+    # (measured; `mv` and `shutil.move` stop the same way). Windows lets
+    # the owner remove under its read-only attribute (`Dir.delete`), so
+    # the question is a POSIX one.
+    {% unless flag?(:win32) %}
+      holder = File.dirname(s)
+      stuck = File.writable?(holder) ? (info.directory? ? locked_directory(s) : nil) : holder
+      raise "Cannot move #{s} to #{target}: #{stuck} is read-only, so the source could not be removed after the copy" if stuck
+    {% end %}
+    copy_entry(s, target, info)
+    remove_entry(s, info)
+  end
+
+  # The first directory under *path*, itself included, that holds
+  # entries it may not give up; links are not followed.
+  private def self.locked_directory(path : String) : String?
+    names = Dir.children(path)
+    return nil if names.empty?
+    return path unless File.writable?(path)
+    names.each do |name|
+      child = File.join(path, name)
+      child_info = File.info?(child, follow_symlinks: false)
+      if child_info && child_info.directory?
+        stuck = locked_directory(child)
+        return stuck if stuck
+      end
+    end
+    nil
+  end
+
+  # Whether the files *a* and *b* hold the same bytes, read a piece at a
+  # time up to the first difference.
+  def self.compare_file(a : String | Path, b : String | Path) : Bool
+    pa = a.to_s
+    pb = b.to_s
+    ia = File.info?(pa)
+    ib = File.info?(pb)
+    raise "Cannot compare #{pa} with #{pb}: #{pa} is not a file" unless ia && ia.file?
+    raise "Cannot compare #{pa} with #{pb}: #{pb} is not a file" unless ib && ib.file?
+    return true if ia.same_file?(ib)
+    return false if ia.size != ib.size
+    left = open_read(pa, "Cannot compare #{pa} with #{pb}")
+    right = __iyi_open_file(c_path(pb), true, false, false, false, false, 0)
+    if right < 0_i64
+      __iyi_close(left)
+      raise "Cannot compare #{pa} with #{pb}: #{pb} could not be opened"
+    end
+    mine = Pointer(UInt8).malloc(PIECE.to_u64)
+    theirs = Pointer(UInt8).malloc(PIECE.to_u64)
+    same = true
+    while same
+      got = read_piece(left, mine)
+      had = got > 0_i64 ? read_full(right, theirs, got) : read_piece(right, theirs)
+      if got < 0_i64 || had < 0_i64
+        __iyi_close(left)
+        __iyi_close(right)
+        raise "Cannot compare #{pa} with #{pb}: a read failed"
+      end
+      break if got == 0_i64 && had == 0_i64
+      same = got == had && equal?(mine, theirs, got)
+    end
+    __iyi_close(left)
+    __iyi_close(right)
+    same
+  end
+
+  # One entry of a tree, by what *info* says it is without following it.
+  private def self.copy_entry(from : String, to : String, info : File::Info) : Nil
+    if info.symlink?
+      File.symlink(File.readlink(from), to)
+    elsif info.directory?
+      Dir.mkdir(to) unless Dir.exists?(to)
+      Dir.children(from).each do |name|
+        child = File.join(from, name)
+        child_info = File.info?(child, follow_symlinks: false)
+        raise "Cannot copy #{child}: it was removed while the tree was copied" unless child_info
+        copy_entry(child, File.join(to, name), child_info)
+      end
+      File.chmod(to, info.permissions.value)
+    elsif info.file?
+      copy_file(from, to, info.permissions.value)
+    else
+      kind = if info.type.pipe?
+               "FIFO"
+             elsif info.type.socket?
+               "socket"
+             elsif info.type.device?
+               "device"
+             else
+               "file of a kind this does not know"
+             end
+      raise "Cannot copy #{from}: it is a #{kind}, not a file, a directory or a link"
+    end
+  end
+
+  private def self.remove_entry(path : String, info : File::Info) : Nil
+    if info.directory?
+      # Listed whole first: the listing is not read while it shrinks.
+      Dir.children(path).each do |name|
+        child = File.join(path, name)
+        child_info = File.info?(child, follow_symlinks: false)
+        remove_entry(child, child_info) if child_info
+      end
+      Dir.delete(path)
+    else
+      File.delete(path)
+    end
+  end
+
+  # The bytes of *from* into *to*, created or emptied, then *to* given
+  # *mode*: a file that was there keeps its own mode through the open, and
+  # one that was made got the umask's share of it.
+  private def self.copy_file(from : String, to : String, mode : Int32) : Nil
+    source = open_read(from, "Cannot copy #{from} to #{to}")
+    sink = __iyi_open_file(c_path(to), false, true, true, true, false, mode)
+    if sink < 0_i64
+      __iyi_close(source)
+      raise "Cannot copy #{from} to #{to}: #{to} could not be opened for writing"
+    end
+    buffer = Pointer(UInt8).malloc(PIECE.to_u64)
+    while true
+      got = read_piece(source, buffer)
+      break if got == 0_i64
+      if got < 0_i64
+        __iyi_close(source)
+        __iyi_close(sink)
+        raise "Cannot copy #{from} to #{to}: reading #{from} failed"
+      end
+      done = 0_i64
+      while done < got
+        put = __iyi_file_write(sink, (buffer + done).as(Void*), (got - done).to_u64)
+        next if put == -4_i64
+        if put <= 0_i64
+          __iyi_close(source)
+          __iyi_close(sink)
+          raise "Cannot copy #{from} to #{to}: writing #{to} failed, the device full or refusing it"
+        end
+        done = done + put
+      end
+    end
+    __iyi_close(source)
+    __iyi_close(sink)
+    File.chmod(to, mode)
+  end
+
+  private def self.open_read(path : String, doing : String) : Int64
+    fd = __iyi_open_file(c_path(path), true, false, false, false, false, 0)
+    raise "#{doing}: #{path} could not be opened for reading" if fd < 0_i64
+    fd
+  end
+
+  # One read, asked again when a signal interrupted it (-4, EINTR, which
+  # only the Linux syscall answers as a value).
+  private def self.read_piece(fd : Int64, buffer : Pointer(UInt8)) : Int64
+    while true
+      got = __iyi_file_read(fd, buffer.as(Void*), PIECE.to_u64)
+      return got unless got == -4_i64
+    end
+    0_i64
+  end
+
+  # *want* bytes, or fewer only at the end of the file.
+  private def self.read_full(fd : Int64, buffer : Pointer(UInt8), want : Int64) : Int64
+    have = 0_i64
+    while have < want
+      got = __iyi_file_read(fd, (buffer + have).as(Void*), (want - have).to_u64)
+      next if got == -4_i64
+      return got if got < 0_i64
+      break if got == 0_i64
+      have = have + got
+    end
+    have
+  end
+
+  # Eight bytes at a time, the rest one at a time: the prelude has no
+  # `memcmp`, and a byte loop over 64 MiB is eight times the work.
+  # *count* is at most PIECE, so an Int32 indexes it.
+  private def self.equal?(a : Pointer(UInt8), b : Pointer(UInt8), count : Int64) : Bool
+    n = count.to_i32
+    words = n // 8
+    wa = a.as(Pointer(UInt64))
+    wb = b.as(Pointer(UInt64))
+    i = 0
+    while i < words
+      return false if wa[i] != wb[i]
+      i = i + 1
+    end
+    i = words * 8
+    while i < n
+      return false if a[i] != b[i]
+      i = i + 1
+    end
+    true
+  end
+
+  # *path* without its trailing separators, the root and a Windows drive's
+  # `C:\` kept: `link/` is the directory the link names to every call that
+  # resolves a path, and `rm_r("link/")` emptied it.
+  private def self.bare(path : String) : String
+    n = path.bytesize
+    bytes = path.to_unsafe
+    while n > 1 && separator?(bytes[n - 1])
+      break if {{ flag?(:win32) }} && bytes[n - 2] == 58_u8
+      n = n - 1
+    end
+    n == path.bytesize ? path : path[0, n]
+  end
+
+  private def self.separator?(byte : UInt8) : Bool
+    {% if flag?(:win32) %}
+      byte == 47_u8 || byte == 92_u8
+    {% else %}
+      byte == 47_u8
+    {% end %}
+  end
+
+  private def self.c_path(path : String) : UInt8*
+    n = path.bytesize
+    raise "path contains a NUL byte" if path.byte_index("\u0000")
+    buffer = Pointer(UInt8).malloc((n + 1).to_u64)
+    buffer.copy_from(path.to_unsafe, n)
+    buffer[n] = 0_u8
+    buffer
+  end
+end

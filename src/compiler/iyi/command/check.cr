@@ -43,7 +43,8 @@ class Iyi::Command
         ends the run: a warning is a frame marked `"severity":
         "warning"`, after the error's frames when there is one, and a
         refusal with no place in a file - no such file, bytes that are
-        not text - is a frame whose `line` is null.
+        not text - is a frame whose `line` is null. `--error-on-warnings`
+        makes a warning exit 1, as it does a build.
         USAGE
       exit
     end
@@ -60,7 +61,7 @@ class Iyi::Command
       return check_affected
     end
 
-    compile_no_codegen "check"
+    compile_no_codegen "check", warning_options: true
 
     # Nothing to print on success: the verdict is the exit code, the
     # same contract `test` and `vet` keep. Errors never reach this line —

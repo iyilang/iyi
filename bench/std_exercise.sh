@@ -15,6 +15,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/darwin_frames.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -297,16 +298,22 @@ echo "== the library is iyi all the way down"
 # (`open`, `mmap`, `munmap`, `lseek`, `close`). Every one of those is in
 # libSystem, the platform libc `bench/dependency_floor.sh` already permits, so
 # this costs no library: a program importing `std/debug` still links
-# libSystem and nothing else, which the floor checks separately.
+# libSystem and nothing else, which the floor checks separately. On Linux it
+# walks the stack itself, reading the registers with `asm` and the image
+# through the linker's `__ehdr_start`, and maps `/proc/self/exe` through the
+# prelude's raw syscalls: libc is asked for nothing there.
 #
 # `file`, `dir` and `udp` are platform modules of `socket`'s shape: raw
 # syscalls on Linux, libSystem on darwin, and the floor names every symbol
 # they add there.
 #
-# `random` joined them for Windows alone: `/dev/urandom` is a file on the
+# `random` joined them for Windows first: `/dev/urandom` is a file on the
 # POSIX targets and there is no such path there, so its win32 arm asks the
 # OS for the bytes. Before that arm, `Random.new` panicked on Windows and
-# took `std/uuid`, `Array#sample` and `#shuffle` with it.
+# took `std/uuid`, `Array#sample` and `#shuffle` with it. `Random::Secure`
+# then made it a platform module everywhere: `getrandom` by syscall on
+# Linux, `arc4random_buf` from libSystem on darwin, WASI's `random_get` on
+# wasm32.
 #
 # `signal` installs a handler, which is the platform's act and nobody
 # else's: `rt_sigaction` on Linux, `sigaction` and `pipe` from libSystem on
@@ -315,6 +322,26 @@ echo "== the library is iyi all the way down"
 # `process` starts a program, which is the platform's act too: `clone` and
 # `execve` by syscall on Linux, `posix_spawn` from libSystem on darwin,
 # `CreateProcessW` from kernel32 on Windows.
+#
+# `system` asks the machine about itself, and `term` sets a terminal's
+# mode: `uname`, `sched_getaffinity` and `ioctl` by syscall on Linux,
+# `gethostname`, `getpagesize`, `sysctlbyname`, `tcgetattr`, `tcsetattr`
+# and `ioctl` from libSystem on darwin, and kernel32's own calls on
+# Windows - there is no other place a host name, a CPU mask or a termios
+# comes from.
+#
+# `user` asks who an account is: `getuid` and `getgid` by syscall on Linux,
+# which reads `/etc/passwd` and `/etc/group` itself; `getpwuid_r`,
+# `getpwnam_r`, `getgrgid_r`, `getgrnam_r` and `getgrouplist` from
+# libSystem on darwin, where Directory Services and not a file answers;
+# and advapi32's `GetUserNameW` and the process token's SIDs on Windows.
+# An account database is the operating system's, and has no other door.
+#
+# `system_roots` reads the roots the operating system trusts: a bundle file
+# on Linux, which needs no binding, Security.framework's anchors and trust
+# settings in CoreFoundation's containers on darwin, and crypt32's ROOT and
+# Disallowed stores on Windows. A trust store is the platform's, and on
+# those two it is behind those interfaces alone.
 #
 # Every other module is iyi over the prelude's own intrinsics: no `lib`,
 # no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
@@ -325,15 +352,21 @@ echo "== the library is iyi all the way down"
 # only once a program reaches it and links libyaml, and a declaration nothing
 # reaches yet is exactly what this loop exists to name. So they are checked
 # too, against the libraries the platform supplies.
-PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32'
+PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32|LibCrypt32|LibSecurity|LibCoreFoundation'
 # The `@[Link]`s an exempt module may carry: the DLLs Windows itself ships,
 # named in SPEC.md III.10's inventory. `std/random` is here for `advapi32` —
-# the OS entropy `Random.new` seeds from is `RtlGenRandom`, and Windows has
-# no kernel32 name for it — and `std/socket` and `std/udp` for `ws2_32`,
-# because Winsock is the whole of Windows' network interface and a socket
-# call has nowhere else to come from. Everything else in this list reaches
-# the platform through a `lib` block alone.
-PLATFORM_LINKS='@\[Link\("(kernel32|advapi32|ws2_32)"\)\]'
+# the OS entropy `Random::Secure` reads is `RtlGenRandom`, and Windows has
+# no kernel32 name for it — and `std/socket` for it too, the registry its
+# resolver reads the name servers from, and `std/user` for the account name
+# and the process token's SIDs (`GetUserNameW`, `OpenProcessToken`,
+# `GetTokenInformation`, `ConvertSidToStringSidW`), which are advapi32's
+# and nobody else's; `std/socket` and `std/udp` for `ws2_32`, because
+# Winsock is the whole of Windows' network interface and a socket call has
+# nowhere else to come from; `std/system_roots` for `crypt32` and darwin's
+# Security and CoreFoundation frameworks, the trust stores' only doors.
+# Everything else in this list reaches the platform through a `lib` block
+# alone.
+PLATFORM_LINKS='@\[Link\(("(kernel32|advapi32|ws2_32|crypt32)"|framework: "(Security|CoreFoundation)")\)\]'
 reaching=""
 foreign=""
 for source in "$REPO"/src/std/*.iyi; do
@@ -342,7 +375,7 @@ for source in "$REPO"/src/std/*.iyi; do
     # `std/path` folds a Windows name's case the way NTFS does, which is
     # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
     # and `c:\ä` two names.
-    socket|time|debug|file|dir|udp|random|signal|process|path)
+    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.
@@ -481,26 +514,36 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
     tail -n 6 "$failed_out" | sed 's/^/    /'
     continue
   fi
-  # Two exercises print something no two builds can agree on, and for them
+  # Four exercises print something no two builds can agree on, and for them
   # the exit status is the whole of the promise: each raises on its own
   # assertions, so a wrong answer is a non-zero exit either way.
   #
+  #   * `std_big_exercise` prints how long three exponentiations took, for
+  #     its driver to set beside Python's, and raises if the fast one is
+  #     not three times the old.
   #   * `std_gc_exercise` prints how many bytes a collection freed, which
   #     is a property of what the build allocated and not of the program.
   #   * `std_time_exercise` prints the clock.
+  #   * `std_weak_ref_exercise` prints how many targets a conservative root
+  #     still reached - a register's leftover, which two builds allocate
+  #     differently - and how many reads four threads made beside the
+  #     collector in two seconds.
   #
   # Named rather than guessed at. A rule that decided this by running the
   # binary twice would pass the clock and still fail the collector, whose
   # two runs agree with each other and not across builds.
   case "$name" in
-    std_gc_exercise | std_time_exercise)
+    std_big_exercise | std_gc_exercise | std_time_exercise | std_weak_ref_exercise)
       continue
       ;;
   esac
-  if ! cmp -s "$work/source.out" "$work/artifact.out"; then
+  # Without darwin's frames under a task's panic (bench/darwin_frames.sh).
+  without_frames < "$work/source.out" > "$work/source.cmp"
+  without_frames < "$work/artifact.out" > "$work/artifact.cmp"
+  if ! cmp -s "$work/source.cmp" "$work/artifact.cmp"; then
     unconsumable="$unconsumable $name"
     echo "  $name: runs differently from its artifacts"
-    diff "$work/source.out" "$work/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+    diff "$work/source.cmp" "$work/artifact.cmp" | sed -n '1,6p' | sed 's/^/    /'
   fi
 done
 if [ -n "$unconsumable" ]; then
@@ -508,6 +551,30 @@ if [ -n "$unconsumable" ]; then
   status=1
 else
   echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
+fi
+
+# The filter above (bench/darwin_frames.sh) leaves out a frame, whichever
+# binary it names, and nothing else: a panic's message beside it, a line
+# that starts with a number and a name, one with a shorter hexadecimal
+# number, and a byte that is not UTF-8 stay, so a difference there is
+# still a difference.
+kept="$(printf '%s\n' "iyi: panic: refused" \
+  "3 from-source answers" \
+  "4   from-source                         0x12ab answered")"
+printf '%s\n' "iyi: panic: refused" \
+  "0   from-source                         0x000000010299550c *Std::Cookie::Cookie#to_set_cookie:String + 356" \
+  "1   libsystem_c.dylib                   0x0000000180001234 abort + 12" \
+  "3 from-source answers" \
+  "12  toml-plain                          0x0000000100c0447c ~procProc(Nil) + 92" \
+  "4   from-source                         0x12ab answered" > "$WORK/frames.in"
+printf '%s\n' "$kept" > "$WORK/frames.want"
+printf 'after \377 a byte\n' | tee -a "$WORK/frames.in" >> "$WORK/frames.want"
+if without_frames < "$WORK/frames.in" > "$WORK/frames.out" && cmp -s "$WORK/frames.want" "$WORK/frames.out"; then
+  echo "  darwin's frames are left out of the comparison, and nothing else is"
+else
+  echo "  FAIL: the frame filter left out more or less than the frames:"
+  LC_ALL=C sed 's/^/    /' "$WORK/frames.out"
+  status=1
 fi
 
 echo
@@ -609,19 +676,12 @@ fi
 
 echo
 echo "== discovering and running sibling std exercises"
-found_siblings=0
-for sibling in "$REPO"/bench/std_*_exercise.sh; do
-  [ -f "$sibling" ] || continue
-  [ "$(basename "$sibling")" = "std_exercise.sh" ] && continue
-  found_siblings=$((found_siblings + 1))
-  echo "-- running sibling: $(basename "$sibling")"
-  if ! bash "$sibling"; then
-    echo "FAIL: sibling $(basename "$sibling") failed"
-    status=1
-  fi
-done
-if [ "$found_siblings" -eq 0 ]; then
-  echo "  (no sibling exercises found yet)"
+# Every module's own exercise, through bench/std_siblings.sh, which CI runs
+# in shards side by side instead: `STD_SIBLINGS=0` leaves them to it.
+if [ "${STD_SIBLINGS:-1}" = 0 ]; then
+  echo "  left to bench/std_siblings.sh (STD_SIBLINGS=0)"
+elif ! bash "$REPO/bench/std_siblings.sh"; then
+  status=1
 fi
 
 echo

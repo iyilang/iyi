@@ -1,0 +1,125 @@
+# Exercises `std/mime`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_mime_exercise.iyi
+#
+# With an argument `table` it prints the table as `.ext type` lines
+# instead, which bench/std_mime_exercise.sh compares with Python's.
+
+module bench/std_mime_exercise
+
+import std/mime::{MIME}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String?, actual : String?, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+if Program.args.size > 0 && Program.args[0] == "table"
+  MIME::TABLE.each { |entry| puts ".#{entry[0]} #{entry[1]}" }
+  exit 0
+end
+
+puts "== round trip"
+MIME::TABLE.each do |entry|
+  ext = "." + entry[0]
+  type = MIME.from_extension?(ext)
+  assert_str entry[1], type, "#{ext} maps to its type"
+  exts = MIME.extensions(entry[1])
+  assert_true exts.includes?(ext), "#{entry[1]} lists #{ext}"
+  exts.each { |e| assert_str entry[1], MIME.from_extension?(e), "#{e} maps back to #{entry[1]}" }
+end
+assert_true MIME.extensions("text/html") == [".htm", ".html"], "text/html extensions sorted"
+assert_true MIME.extensions("TEXT/HTML; charset=utf-8") == [".htm", ".html"], "extensions ignore case and params"
+assert_true MIME.extensions("image/jpeg") == [".jpeg", ".jpg"], "image/jpeg extensions"
+assert_true MIME.extensions("application/x-unknown").empty?, "unknown type has no extensions"
+assert_true MIME.extensions("nonsense").empty?, "unparsable type has no extensions"
+copy = MIME.extensions("text/html")
+copy << ".bogus"
+assert_true MIME.extensions("text/html").size == 2, "extensions is a copy"
+puts "  #{MIME::TABLE.size} extensions"
+
+puts "== names"
+assert_str "text/html", MIME.from_extension?("html"), "bare word"
+assert_str "text/html", MIME.from_extension?(".HTML"), "upper dotted"
+assert_str "text/html", MIME.from_extension?("index.HTML"), "upper file name"
+assert_str "image/jpeg", MIME.from_extension?("Photo.JpEg"), "mixed case"
+assert_str "application/gzip", MIME.from_extension?("a/b.tar.gz"), "multi-dot by last"
+assert_str "application/gzip", MIME.from_extension?("dir.d/archive.tar.gz"), "dotted directory"
+assert_str "text/javascript", MIME.from_extension?("C:\\www\\app.min.js"), "backslash path"
+assert_str nil, MIME.from_extension?("dir.d/README"), "base name without dot"
+assert_str nil, MIME.from_extension?("README"), "no extension"
+assert_str nil, MIME.from_extension?("file."), "trailing dot"
+assert_str nil, MIME.from_extension?(""), "empty"
+assert_str nil, MIME.from_extension?(".unknownext"), "unknown"
+assert_str nil, MIME.from_extension?("a.tar.gz/"), "trailing slash"
+assert_str "application/octet-stream", MIME.from_extension("blob.xyz"), "default"
+assert_str "text/plain", MIME.from_extension("blob.xyz", "text/plain"), "given default"
+assert_str "text/css", MIME.from_extension("site.css", "text/plain"), "known ignores default"
+
+puts "== parse"
+parsed = MIME.parse?("text/html")
+assert_true !parsed.nil?, "plain type parses"
+if parsed
+  assert_str "text/html", parsed[0], "plain essence"
+  assert_true parsed[1].empty?, "no params"
+end
+parsed = MIME.parse?("  Text/HTML ;Charset=UTF-8;  q=0.5\t ")
+if parsed
+  assert_str "text/html", parsed[0], "essence lowercased"
+  assert_str "UTF-8", parsed[1]["charset"]?, "param name lowercased, value kept"
+  assert_str "0.5", parsed[1]["q"]?, "second param"
+else
+  assert_true false, "whitespace parses"
+end
+parsed = MIME.parse?("multipart/form-data; boundary=\"a b;c=\\\"d\\\\\"")
+if parsed
+  assert_str "a b;c=\"d\\", parsed[1]["boundary"]?, "quoted with escapes"
+else
+  assert_true false, "quoted parses"
+end
+parsed = MIME.parse?("a/b; x=\"\"; y=1;; ;")
+if parsed
+  assert_str "", parsed[1]["x"]?, "empty quoted"
+  assert_str "1", parsed[1]["y"]?, "after empty params"
+else
+  assert_true false, "empty params parse"
+end
+parsed = MIME.parse?("a/b; x=1; X=2")
+if parsed
+  assert_str "2", parsed[1]["x"]?, "last of a repeated name"
+else
+  assert_true false, "repeated parses"
+end
+["", "text", "text/", "/html", "te xt/html", "text/ht ml", "text/html; charset", "text/html; =x",
+ "text/html; a=", "text/html; a = b", "text/html; a=\"open", "text/html; a=\"x\\", "text/html; a=b c",
+ "text/html junk", "text/html; a=\"x\"y", "t(e)xt/html", "text/html; a=\"\u0001\""].each do |bad|
+  assert_true MIME.parse?(bad).nil?, "refuses #{bad.inspect}"
+end
+assert_true !MIME.parse?("text/html;").nil?, "trailing semicolon is an empty parameter"
+
+puts "== compressible"
+["text/html", "text/css; charset=utf-8", "TEXT/PLAIN", "application/json", "text/javascript",
+ "application/javascript", "application/xml", "image/svg+xml", "application/ld+json",
+ "application/manifest+json", "application/atom+xml", "application/wasm", "font/ttf"].each do |t|
+  assert_true MIME.compressible?(t), "#{t} compressible"
+end
+["image/png", "image/jpeg", "image/webp", "video/mp4", "audio/mpeg", "application/zip",
+ "application/gzip", "font/woff2", "font/woff", "application/pdf", "application/octet-stream", "nonsense"].each do |t|
+  assert_true !MIME.compressible?(t), "#{t} not compressible"
+end
+
+puts "== charset"
+assert_str "text/html; charset=utf-8", MIME.with_charset("text/html"), "text gets charset"
+assert_str "application/json; charset=utf-8", MIME.with_charset("application/json"), "json gets charset"
+assert_str "text/javascript; charset=utf-8", MIME.with_charset("text/javascript"), "js gets charset"
+assert_str "image/svg+xml; charset=utf-8", MIME.with_charset("image/svg+xml"), "+xml gets charset"
+assert_str "text/html; charset=latin1", MIME.with_charset("text/html; charset=latin1"), "existing charset kept"
+assert_str "text/plain; CHARSET=\"x\"", MIME.with_charset("text/plain; CHARSET=\"x\""), "charset any case"
+assert_str "image/png", MIME.with_charset("image/png"), "binary untouched"
+assert_str "garbage", MIME.with_charset("garbage"), "unparsable untouched"
+
+puts "ALL CHECKS PASSED"

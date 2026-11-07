@@ -1,0 +1,232 @@
+# Exercises `std/shlex`: splitting, quoting and joining shell words held
+# to what Python 3.14's `shlex.split`, `shlex.quote` and `shlex.join`
+# answer, and `split(join(args)) == args` for generated arguments.
+#
+#     IYI_PATH=src:samples/iyi ./bin/iyi run bench/std_shlex_exercise.iyi
+#
+# Given a directory, it also reads the corpus bench/std_shlex_exercise.sh
+# wrote there with Python's `shlex`, answers every line of it, and writes
+# its own `join` of each argument list beside it for `/bin/sh` to read.
+
+module bench/std_shlex_exercise
+
+import std/shlex::{Shlex, ShlexError}
+import std/file::{File}
+
+def check(cond : Bool, what : String) : Nil
+  raise "ASSERTION FAILED: #{what}" unless cond
+end
+
+def check_str(expected : String, actual : String, what : String) : Nil
+  raise "ASSERTION FAILED: #{what}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# The words of *text*, each inspected, or the error's message.
+def shown(text : String, comments : Bool = false) : String
+  got = Shlex.split(text, comments)
+  return "error: #{got.message}" if got.is_a?(ShlexError)
+  got.map { |w| w.inspect }.join(" ")
+end
+
+def splits(text : String, expected : Array(String), what : String, comments : Bool = false) : Nil
+  check_str expected.map { |w| w.inspect }.join(" "), shown(text, comments), what
+end
+
+# Park and Miller's generator: the same numbers from every build.
+class Rng
+  def initialize(@state : Int64)
+  end
+
+  def below(n : Int32) : Int32
+    @state = (@state * 48271_i64) % 2147483647_i64
+    (@state % n.to_i64).to_i32
+  end
+end
+
+def hex_value(c : UInt8) : Int32
+  c <= 57_u8 ? (c - 48_u8).to_i32 : (c - 87_u8).to_i32
+end
+
+def unhex(text : String) : String
+  raw = text.to_unsafe
+  String.new(text.bytesize // 2) do |p|
+    i = 0
+    while i < text.bytesize // 2
+      p[i] = (hex_value(raw[2 * i]) * 16 + hex_value(raw[2 * i + 1])).to_u8
+      i += 1
+    end
+  end
+end
+
+def hex(text : String) : String
+  digits = "0123456789abcdef".to_unsafe
+  raw = text.to_unsafe
+  String.build(text.bytesize * 2) do |io|
+    i = 0
+    while i < text.bytesize
+      io.write_byte(digits[(raw[i] >> 4).to_i32])
+      io.write_byte(digits[(raw[i] & 15_u8).to_i32])
+      i += 1
+    end
+  end
+end
+
+# The fields of a corpus line after the first *skip*, each "w" and hex.
+def corpus_words(fields : Array(String), skip : Int32) : Array(String)
+  words = [] of String
+  k = skip
+  while k < fields.size
+    words << unhex(fields[k][1, fields[k].bytesize - 1])
+    k += 1
+  end
+  words
+end
+
+puts "== splitting"
+splits "a b  c", ["a", "b", "c"], "blanks separate words"
+splits " \t\r\nx\n", ["x"], "space, tab, CR and LF are blanks"
+splits "", [] of String, "no text, no words"
+splits " \t ", [] of String, "blanks alone, no words"
+splits "a;b|c&&d >e", ["a;b|c&&d", ">e"], "operators are letters"
+splits "é 中'文 字'", ["é", "中文 字"], "UTF-8 passes through"
+splits "$HOME ~ *.c `x`", ["$HOME", "~", "*.c", "`x`"], "no expansion"
+splits "a\fb\vc", ["a\fb\vc"], "form feed and vertical tab are not blanks"
+puts "  plain words split as shlex.split splits them"
+
+puts "== single quotes"
+splits "'a b'c", ["a bc"], "single quotes keep blanks and join on"
+splits "'a\\b\"c'", ["a\\b\"c"], "single quotes keep backslashes"
+splits "'' ''", ["", ""], "two empty quotes are two empty words"
+splits "a'' ''b", ["a", "b"], "empty quotes beside letters add nothing"
+splits "'a\nb'", ["a\nb"], "a line feed inside single quotes is kept"
+puts "  single quotes as POSIX 2.2.2"
+
+puts "== double quotes"
+splits "\"a\\\"b\\\\c\\$d\"", ["a\"b\\c\\$d"], "inside double quotes a backslash takes only \" and \\"
+splits "\"a\\\nb\"", ["a\\\nb"], "inside double quotes a backslash before a line feed is kept"
+splits "\"\"", [""], "an empty pair of double quotes is a word"
+splits "\"x\"'y'z\\ w", ["xyz w"], "quotes and escapes join into one word"
+splits "\"it's\"", ["it's"], "a single quote inside double quotes"
+puts "  double quotes as Python's shlex"
+
+puts "== backslashes"
+splits "a\\ b \\x", ["a b", "x"], "a backslash keeps the byte after it"
+splits "a\\\nb", ["a\nb"], "a backslash keeps a line feed"
+splits "\\'\\\"\\\\", ["'\"\\"], "a backslash before quotes and itself"
+splits "\\é", ["é"], "a backslash before a UTF-8 character"
+puts "  backslashes as POSIX 2.2.1"
+
+puts "== comments"
+splits "a#b c", ["a#b", "c"], "without comments # is a letter"
+splits "a#b c", ["a"], "a # inside a word ends it with comments", true
+splits "#x\ny # z", ["y"], "comments run to the line feed", true
+splits "\"x\"#y\nz", ["x", "z"], "a comment after a quote ends the word", true
+splits "'#' \"#\" \\#", ["#", "#", "#"], "a quoted # is a letter with comments", true
+splits "''#", [""], "an empty quoted word before a comment stays", true
+puts "  comments as shlex.split(s, comments=True)"
+
+puts "== refused as a value"
+{ {"\"abc", "shlex: no closing quotation: the \" at byte 0 is never closed", 0},
+ {"ab'c", "shlex: no closing quotation: the ' at byte 2 is never closed", 2},
+ {"abc\\", "shlex: no escaped character: the backslash at byte 3 ends the text", 3},
+ {"x \"ab\\", "shlex: no escaped character: the backslash at byte 5 ends the text", 5},
+ {"a \"b\" 'c", "shlex: no closing quotation: the ' at byte 6 is never closed", 6},
+ {"# 'x", "shlex: no closing quotation: the ' at byte 2 is never closed", 2},
+}.each do |row|
+  got = Shlex.split(row[0])
+  check got.is_a?(ShlexError), "refused: #{row[0].inspect}"
+  if got.is_a?(ShlexError)
+    check_str row[1], got.message, "refused: the sentence for #{row[0].inspect}"
+    check row[2] == got.offset, "refused: the offset for #{row[0].inspect}"
+  end
+end
+check_str "", shown("# 'x", true), "a quote inside a comment is not read"
+puts "  unclosed quotes and final backslashes are ShlexError values"
+
+puts "== quoting"
+{ {"", "''"}, {"abc", "abc"}, {"a b", "'a b'"}, {"it's", "'it'\"'\"'s'"},
+ {"é", "'é'"}, {"a:b,c=d@e%f+g/h.i-j_k", "a:b,c=d@e%f+g/h.i-j_k"},
+ {"$x", "'$x'"}, {"~", "'~'"}, {"!", "'!'"}, {"a\nb", "'a\nb'"}, {"''", "''\"'\"''\"'\"''"},
+ {"0189AZaz", "0189AZaz"}, {"[", "'['"}, {"^", "'^'"}, {"`", "'`'"}, {";", "';'"},
+}.each do |row|
+  check_str row[1], Shlex.quote(row[0]), "quote: #{row[0].inspect}"
+end
+check_str "a '' 'b'\"'\"'c' 'd e'", Shlex.join(["a", "", "b'c", "d e"]), "join: quoted with spaces"
+check_str "", Shlex.join([] of String), "join: no arguments"
+puts "  quote and join as Python 3.14's"
+
+puts "== join and back"
+pieces = ["a", " ", "'", "\"", "\\", "\n", "\t", "#", "$", "é", "", "x y", "''", "\\'", "*", "%"]
+rng = Rng.new(20261018_i64)
+rounds = 0
+while rounds < 3000
+  args = [] of String
+  (rng.below(5) + 1).times do
+    arg = String.build { |io| rng.below(6).times { io << pieces[rng.below(pieces.size)] } }
+    args << arg
+  end
+  joined = Shlex.join(args)
+  back = Shlex.split(joined)
+  check back.is_a?(Array(String)) && back == args, "split(join(args)) is args: #{args.inspect} joined #{joined.inspect}"
+  back = Shlex.split(joined, true)
+  check back.is_a?(Array(String)) && back == args, "split(join(args), comments) is args: #{args.inspect}"
+  rounds += 1
+end
+puts "  #{rounds} generated argument lists split back from their join"
+
+if Program.args.size > 0
+  dir = Program.args[0]
+  puts "== against python's shlex"
+  agreed = 0
+  refused = 0
+  File.read("#{dir}/split.txt").split('\n').each do |line|
+    next if line.empty?
+    fields = line.split('\t')
+    text = unhex(fields[1])
+    comments = fields[0] == "c"
+    got = Shlex.split(text, comments)
+    if fields.size > 2 && fields[2].starts_with?("!")
+      check got.is_a?(ShlexError), "split as shlex.split: #{text.inspect} is refused (#{fields[2]})"
+      if got.is_a?(ShlexError)
+        kind = got.message.starts_with?("shlex: no closing quotation") ? "!quote" : "!escape"
+        check_str fields[2], kind, "split as shlex.split: #{text.inspect} refused for the same reason"
+      end
+      refused += 1
+    else
+      check got.is_a?(Array(String)), "split as shlex.split: #{text.inspect} splits (comments #{comments})"
+      if got.is_a?(Array(String))
+        want = corpus_words(fields, 2)
+        check_str want.map { |w| w.inspect }.join(" "), got.map { |w| w.inspect }.join(" "),
+          "split as shlex.split: #{text.inspect} (comments #{comments})"
+      end
+    end
+    agreed += 1
+  end
+  puts "  #{agreed} texts split as shlex.split split them, #{refused} of them refused"
+  quoted = 0
+  File.read("#{dir}/quote.txt").split('\n').each do |line|
+    next if line.empty?
+    fields = line.split('\t')
+    check_str unhex(fields[1]), Shlex.quote(unhex(fields[0])), "quote as shlex.quote: #{unhex(fields[0]).inspect}"
+    quoted += 1
+  end
+  puts "  #{quoted} arguments quoted as shlex.quote quotes them"
+  joined = 0
+  mine = String.build do |io|
+    File.read("#{dir}/join.txt").split('\n').each do |line|
+      next if line.empty?
+      fields = line.split('\t')
+      args = corpus_words(fields, 1)
+      line_out = Shlex.join(args)
+      check_str unhex(fields[0]), line_out, "join as shlex.join: #{args.inspect}"
+      back = Shlex.split(line_out)
+      check back.is_a?(Array(String)) && back == args, "split(join(args)) is args on the corpus: #{args.inspect}"
+      io << hex(line_out) << '\n'
+      joined += 1
+    end
+  end
+  File.write("#{dir}/mine.txt", mine)
+  puts "  #{joined} argument lists joined as shlex.join joins them, and split back"
+end
+
+puts "ALL CHECKS PASSED"

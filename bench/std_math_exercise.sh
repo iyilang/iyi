@@ -716,6 +716,11 @@ mutate "erf of a single answered as a double" '  def self.erf(value : Float32) :
     erf(value.to_f64)'
 mutate "gcd on the positive side" 'x = signed && a > 0 ? zero - a : a' 'x = a.abs'
 mutate "gcd of an unsigned pair on the negative side" 'signed = zero &- 1 < zero' 'signed = true'
+mutate "max of integers answering the smaller" '      a < b ? b : a' '      a < b ? a : b'
+mutate "min of integers answering the larger" '      b < a ? b : a' '      b < a ? a : b'
+mutate "max of doubles compared as integers are, blind to NaN" '{% if T == ::Float64 || T == ::Float32 %}
+      ieee_max(a, b)' '{% if false %}
+      ieee_max(a, b)'
 
 echo
 if [ "$status" -eq 0 ]; then

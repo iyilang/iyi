@@ -18,7 +18,7 @@ def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
 end
 
 import std/udp::{UdpSocket, Datagram, IPv4Address, Bytes}
-import std/socket::{IyiSocket}
+import std/socket::{IyiSocket, SocketError}
 
 puts "== address parsing"
 ip = IyiSocket.parse_ip("127.0.0.1")
@@ -82,6 +82,25 @@ assert_str "self datagram", self_dg.text, "self datagram text"
 assert_str "127.0.0.1", self_dg.host, "self datagram sender host"
 assert_int server_port, self_dg.port, "self datagram sender port is own port"
 puts "  OS assigns port 0, send_to and receive_from report sender address"
+
+puts "\n== a refused bind answered, and another port taken"
+# `bind?` answers a refusal where `bind` raises it, so a program can go on
+# to another port: what a test server on Windows needs, whose excluded
+# port ranges refuse a bind as "access denied".
+holder = UdpSocket.bind("127.0.0.1", 0)
+refused = UdpSocket.bind?("127.0.0.1", holder.local_port)
+assert_true refused.is_a?(SocketError), "a held port's bind? answers a SocketError"
+if refused.is_a?(SocketError)
+  assert_str "cannot bind UDP socket to 127.0.0.1:#{holder.local_port}: the address is in use", refused.message, "bind?'s refusal says what bind raises"
+end
+taken = UdpSocket.bind?("127.0.0.1", 0)
+assert_true taken.is_a?(UdpSocket), "bind? of a free port answers the socket"
+if taken.is_a?(UdpSocket)
+  assert_true taken.local_port > 0 && taken.local_port != holder.local_port, "bind?'s socket has its own port"
+  taken.close
+end
+holder.close
+puts "  bind? answers a refusal, and binds a free port"
 
 puts "\n== connected sockets"
 c1 = UdpSocket.bind("127.0.0.1", 0)

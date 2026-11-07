@@ -1,0 +1,168 @@
+# The prelude's assertions - what a test is written in, with no import.
+#
+#     bash bench/assertions_exercise.sh
+#
+# Every assertion is driven both ways here: holding, it returns (and gives
+# back what it promises - the error `assert_error` narrowed, the value
+# `assert_ok` narrowed, the message `assert_panics` caught), and failing,
+# it panics with a message that names the assertion, the caller's words,
+# what was expected and what came.
+#
+# A failing assertion is a panic, so it is caught where III.1.4 says a
+# panic is caught - reading the value of a task it ended - by `panic_of`
+# below, written here with `group` and `Panicked` directly. Not with
+# `assert_panics`, which is one of the things under test: an assertion
+# checked with itself passes when it is broken. For the same reason the
+# checks are `check`, a comparison and an exit, and not `assert_eq`.
+#
+# The site a failure names (`at file:line`) is printed by `raise` beside
+# the message rather than in it, and a named case's verdict is the exit
+# status, so both belong to the driver.
+module main
+
+def check(ok : Bool, label : String) : Nil
+  return if ok
+  puts "check failed: " + label
+  __iyi_exit(1)
+end
+
+# The panic the block ended with, or "" when it ended without one.
+def panic_of(&block : -> _) : String
+  said = ""
+  group do |g|
+    task = g.spawn do
+      block.call
+      0
+    end
+    outcome = task.value
+    said = outcome.message if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+# Every line of *want* is in *said*, so a check reads like the output.
+def says(said : String, want : Array(String)) : Bool
+  want.all? { |line| said.includes?(line) }
+end
+
+struct NotFound
+  getter name : String
+
+  def initialize(@name : String)
+  end
+end
+
+impl Error for NotFound
+  def message : String
+    "no " + name + " here"
+  end
+end
+
+struct Refused
+  def initialize
+  end
+end
+
+impl Error for Refused
+  def message : String
+    "refused"
+  end
+end
+
+def look(name : String) : Int32 | NotFound | Refused
+  return Refused.new if name == "secret"
+  name == "x" ? 42 : NotFound.new(name)
+end
+
+# ---- assert_eq and assert_ne
+assert_eq 4, 2 + 2
+assert_eq "ab", "a" + "b", "concatenation"
+assert_eq [1, 2], [1] + [2]
+assert_ne 4, 5
+said = panic_of { assert_eq 4, 5, "the sum" }
+check said.starts_with?("assert_eq failed: the sum\n"), "assert_eq: unequal values panic with its name and the caller's words, not " + said.inspect
+check says(said, ["  expected: 4\n", "    actual: 5"]), "assert_eq: both values are shown, not " + said.inspect
+said = panic_of { assert_eq "4", 4 }
+check said == "assert_eq failed\n  expected: \"4\"\n    actual: 4", "assert_eq: values are shown inspected, a string quoted, not " + said.inspect
+said = panic_of { assert_eq "one\ntwo\nthree", "one\nTWO\nthree" }
+check says(said, ["  first difference, line 2:\n", "    expected: \"two\"\n", "      actual: \"TWO\""]), "assert_eq: two texts of lines name the first line that differs, not " + said.inspect
+said = panic_of { assert_eq "one\ntwo", "one" }
+check says(said, ["first difference, line 2:", "expected: \"two\"", "actual: nothing: the text ends after line 1"]), "assert_eq: a text that ends early says so, not " + said.inspect
+said = panic_of { assert_eq "one", "one two" }
+check !said.includes?("first difference"), "assert_eq: one-line texts are shown whole, with no line diff, not " + said.inspect
+said = panic_of { assert_ne "same", "same", "twins" }
+check says(said, ["assert_ne failed: twins\n", "expected anything but: \"same\"", "actual: \"same\""]), "assert_ne: equal values panic and show the value, not " + said.inspect
+puts "  assert_eq and assert_ne: held"
+
+# ---- assert_nil
+assert_nil nil
+maybe = [1, 2].index(3)
+assert_nil maybe
+said = panic_of { assert_nil [1, 2].index(2), "no index" }
+check says(said, ["assert_nil failed: no index\n", "  expected: nil\n", "    actual: 1"]), "assert_nil: a value panics and is shown, not " + said.inspect
+puts "  assert_nil: held"
+
+# ---- assert_in_delta
+assert_in_delta 0.3, 0.1 + 0.2, 1e-12
+assert_in_delta 1, 1.25, 0.25
+assert_in_delta 2.0, 2.0, 0.0
+said = panic_of { assert_in_delta 1.0, 1.5, 0.25, "close enough" }
+check says(said, ["assert_in_delta failed: close enough\n", "  expected: 1.0 within 0.25\n", "    actual: 1.5, off by 0.5"]), "assert_in_delta: a distance past delta panics with it, not " + said.inspect
+nan = 0.0 / 0.0
+said = panic_of { assert_in_delta nan, nan, 1.0 }
+check said.starts_with?("assert_in_delta failed"), "assert_in_delta: a NaN is within no distance of itself, not " + said.inspect
+said = panic_of { assert_in_delta 1.0, 1.0, -1.0 }
+check said == "assert_in_delta takes a distance of zero or more, and -1.0 is not one", "assert_in_delta: a negative distance is refused by name, not " + said.inspect
+puts "  assert_in_delta: held"
+
+# ---- assert_includes
+assert_includes [1, 2, 3], 2
+assert_includes "haystack", "st"
+seen = Set(String).new
+seen.add("a")
+assert_includes seen, "a"
+said = panic_of { assert_includes [1, 2], 3, "the third" }
+check says(said, ["assert_includes failed: the third\n", "  collection: [1, 2]\n", "     missing: 3"]), "assert_includes: a missing element panics with both, not " + said.inspect
+said = panic_of { assert_includes "haystack", "needle" }
+check says(said, ["collection: \"haystack\"", "missing: \"needle\""]), "assert_includes: a missing piece of a string, not " + said.inspect
+puts "  assert_includes: held"
+
+# ---- assert_error and assert_ok, over an error union
+missing = assert_error(NotFound) { look("y") }
+check missing.name == "y", "assert_error: the error comes back narrowed, its fields readable"
+check missing.message == "no y here", "assert_error: the error's own message is readable"
+found = assert_ok { look("x") }
+check found + 1 == 43, "assert_ok: the value comes back with the errors narrowed away"
+said = panic_of { assert_error(NotFound, "wanted a miss") { look("x") } }
+check says(said, ["assert_error failed: wanted a miss\n", "  expected: an error of type Main::NotFound\n", "    actual: 42"]), "assert_error: a value where an error was due panics and shows it, not " + said.inspect
+said = panic_of { assert_error(NotFound) { look("secret") } }
+check says(said, ["expected: an error of type Main::NotFound", "actual: Main::Refused (an error: \"refused\")"]), "assert_error: an error of another type is named with its message, not " + said.inspect
+said = panic_of { assert_ok("looked up") { look("z") } }
+check says(said, ["assert_ok failed: looked up\n", "  expected: a value, not an error\n", "    actual: Main::NotFound (an error: \"no z here\")"]), "assert_ok: an error panics and names its type and message, not " + said.inspect
+puts "  assert_error and assert_ok: held"
+
+# ---- assert_panics
+# Inside `panic_of` too, so that an `assert_panics` that sees no panic is a
+# check that fails here rather than a panic that ends the program.
+caught = ""
+missed = panic_of { caught = assert_panics { [1, 2][5] } }
+check missed.empty?, "assert_panics: a panicking block passes it, not " + missed.inspect
+check caught.includes?("out of range"), "assert_panics: the panic's message comes back, not " + caught.inspect
+caught = assert_panics("bad input") { raise "a bad input, refused" }
+check caught == "a bad input, refused", "assert_panics: a panic with the words asked for passes"
+caught = assert_panics("expected: 4") { assert_eq 4, 5 }
+check caught.starts_with?("assert_eq failed"), "assert_panics: another assertion's failure is a panic it catches"
+said = panic_of { assert_panics("should") { 1 + 1 } }
+check says(said, ["assert_panics failed\n", "  expected: a panic saying \"should\"\n", "    actual: the block ended without one"]), "assert_panics: a block that does not panic fails it, not " + said.inspect
+said = panic_of { assert_panics("other words", "the refusal") { raise "these words" } }
+check says(said, ["assert_panics failed: the refusal\n", "  expected: a panic saying \"other words\"\n", "    actual: a panic saying \"these words\""]), "assert_panics: a panic with other words fails it, both shown, not " + said.inspect
+puts "  assert_panics: held"
+
+# ---- assert, unchanged
+assert 1 < 2, "ordered"
+said = panic_of { assert 2 < 1, "ordered" }
+check said == "assertion failed: ordered", "assert: its message is what it was, not " + said.inspect
+puts "  assert: held"
+
+puts "all assertion checks passed"

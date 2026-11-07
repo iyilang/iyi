@@ -1,0 +1,478 @@
+# Terminals: whether a stream is one, how big it is, and the two modes a
+# program asks a terminal for — raw, and echo off — for the length of a
+# block, with the previous mode put back however the block ends.
+#
+#     import std/term::{Term}
+#
+#     rows, columns = Term.size || {24, 80}
+#     key = Term.raw { STDIN.read_bytes(1) }.or_panic
+#     secret = Term.read_password("Password: ")
+#
+# `Term.tty?(io)` (or a descriptor) asks the question the prelude's
+# `__iyi_isatty` already answers for `std/colorize`, and is that function
+# rather than a second copy of it: TCGETS refused or not on Linux,
+# libSystem's `isatty` on darwin, `GetConsoleMode` answering at all on
+# Windows. Only Windows' standard handles go through the prelude there —
+# its probe is cached per standard stream — and any other handle, a
+# `CONIN$` opened by hand, is asked directly.
+#
+# `Term.size` answers `{rows, columns}`, in that order because it is the
+# order the kernel's `struct winsize` and `stty size` give them: TIOCGWINSZ
+# on Linux and darwin, and on Windows the visible window of the console
+# screen buffer (`srWindow`, as Go's x/term reads it — the buffer itself is
+# thousands of rows of scrollback). With no stream given it asks standard
+# output, then standard error, then standard input, and the first terminal
+# answers: `prog | less` still learns the width of the terminal it is
+# running in. Nil is no terminal on any of them, and also a terminal that
+# says 0 by 0 — a pseudo-terminal nobody set a size on answers exactly
+# that, and a program dividing by the width should be told it does not
+# know rather than handed a zero.
+#
+# `Term.raw(io = STDIN) { }` puts the terminal in raw mode, runs the block
+# and answers its value; `Term.no_echo(io = STDIN) { }` turns echo off in
+# the same way. The mode the terminal had before is saved and written back
+# by a `defer`, so it is restored when the block returns, when a `!` in it
+# returns early and when it panics — the panic path runs pending defers
+# before the task dies (SPEC.md III.1.4), which is what Crystal's
+# `begin/ensure` around the same calls gives `IO#raw`. A stream that is
+# not a terminal is a `TermError` and the block does not run: standard
+# input redirected from a file is a condition a program meets, not a
+# mistake in it. A closed stream is a mistake and panics. A signal that
+# ends the process runs no cleanup, here as in Go; inside `raw` that does
+# not arise from the keyboard, because Ctrl-C is a byte there.
+#
+# The flag sets are the two references' own, cited so a reader can check
+# each bit:
+#
+#   * raw: the termios(3) manpage's `cfmakeraw`, which Go's x/term
+#     `makeRaw` (term_unix.go) and Crystal's `FileDescriptor.cfmakeraw`
+#     (src/crystal/system/unix/file_descriptor.cr) both write out by hand —
+#     input IGNBRK BRKINT PARMRK ISTRIP INLCR IGNCR ICRNL IXON off, output
+#     OPOST off, local ECHO ECHONL ICANON ISIG IEXTEN off, CSIZE and PARENB
+#     cleared and CS8 set, VMIN 1 and VTIME 0: a read answers as soon as one
+#     byte has arrived, Ctrl-C and Ctrl-Z are bytes, CR is not turned into
+#     NL and NL is not turned into CR NL on the way out. Python's
+#     `tty.cfmakeraw` clears more (IXANY, IXOFF, NOFLSH, TOSTOP, …) and is
+#     not followed. Windows: Go's and Crystal's console mode,
+#     ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT and ENABLE_PROCESSED_INPUT off and
+#     ENABLE_VIRTUAL_TERMINAL_INPUT on, so arrow keys arrive as the escape
+#     sequences a POSIX terminal sends.
+#   * echo off: Crystal's `IO#noecho` set — ECHO, ECHOE, ECHOK and ECHONL
+#     off and nothing else, so the terminal still reads a line and still
+#     answers Ctrl-C with SIGINT. ECHONL matters: left on, a canonical
+#     terminal echoes the newline it was told not to echo the line before.
+#     Windows: ENABLE_ECHO_INPUT off.
+#   * a password: echo off as above, plus what Go's `readPassword` forces on
+#     — ICANON, ISIG, ICRNL — so a password is read as a line even from a
+#     terminal a caller left in raw mode, and the Enter key's CR arrives as
+#     the NL a line ends at. Windows: ENABLE_ECHO_INPUT off,
+#     ENABLE_LINE_INPUT and ENABLE_PROCESSED_INPUT on. Go turns line input
+#     off there and edits the line itself; here the console's own line
+#     editing is kept, because `STDIN` reads a Windows console a line at a
+#     time through `ReadConsoleW` already.
+#
+# Every change is made at once (TCSANOW: TCSETS on Linux, `tcsetattr` with
+# TCSANOW on darwin), as Go and the other library make it, so input typed ahead of the
+# block is not thrown away; TCSAFLUSH, Python's `getpass` choice, would
+# discard it.
+#
+# `Term.read_password(prompt)` writes the prompt to standard error — not
+# standard output, which is the program's data, and the stream Python's
+# `getpass` falls back to — reads a line from standard input with echo off,
+# writes the newline the terminal did not echo, and answers the line
+# without its line ending; nil at the end of the input (Ctrl-D on an empty
+# line). Standard input that is not a terminal is read as it is: a pipe
+# echoes nothing, so `echo secret | prog` is how a script hands a program a
+# password, as Python's `getpass` allows. A terminal that answers TCGETS
+# and then refuses the change panics with the reason, because reading the
+# password anyway would show it on the screen.
+#
+# How the platform is reached, in the neighbouring modules' way and with
+# no C library added: on Linux the `ioctl` system call by hand (16 on
+# x86_64, 29 on aarch64), TCGETS 0x5401, TCSETS 0x5402 and TIOCGWINSZ
+# 0x5413 from <asm-generic/ioctls.h> — x86_64 and aarch64 share the
+# asm-generic numbers, flag values and the 36-byte `struct termios`
+# (four 32-bit flag words, `c_line`, nineteen control characters, so VTIME
+# is byte 22 and VMIN byte 23). On darwin libSystem's `tcgetattr` and
+# `tcsetattr`, because Apple documents no stable system call interface,
+# and `ioctl` for TIOCGWINSZ 0x40087468 (`_IOR('t', 104, struct winsize)`,
+# Go's x/sys zerrors_darwin_arm64.go); darwin's `struct termios` is 72
+# bytes — four 64-bit flag words, twenty control characters, VMIN at 16 and
+# VTIME at 17, then two speeds — and its flag values are BSD's, not
+# Linux's (ECHONL is 0x10, ICANON 0x100, CS8 0x300). On Windows kernel32's
+# `GetConsoleMode`, `SetConsoleMode` and `GetConsoleScreenBufferInfo`.
+
+module std/term
+
+{% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32) %}
+  {% raise "std/term reaches the terminal through Linux's ioctl, darwin's libSystem or Windows' console " \
+           "calls, and this target has none of them." %}
+{% end %}
+
+{% if flag?(:darwin) %}
+  lib LibC
+    fun tcgetattr(fd : Int32, termios : Void*) : Int32
+    fun tcsetattr(fd : Int32, actions : Int32, termios : Void*) : Int32
+    # Variadic, as Apple declares it: arm64 darwin passes a variadic
+    # argument on the stack, where a fixed third parameter would be in a
+    # register `ioctl` never reads.
+    fun ioctl(fd : Int32, request : UInt64, ...) : Int32
+    # std/socket's own spelling: one C symbol bound with two signatures is
+    # refused, and a program importing both would not compile.
+    fun error_location = __error : Int32*
+  end
+{% elsif flag?(:win32) %}
+  lib LibKernel32
+    # `info` is a CONSOLE_SCREEN_BUFFER_INFO, 22 bytes: dwSize and
+    # dwCursorPosition (two COORDs), wAttributes, then srWindow — Left, Top,
+    # Right, Bottom, 16 bits each, at byte 10 — and dwMaximumWindowSize.
+    fun GetConsoleScreenBufferInfo(handle : Void*, info : Void*) : Int32
+  end
+{% end %}
+
+# A terminal that could not be put in the mode asked for, and the
+# platform's error number for why: errno on Linux and darwin, the
+# `GetLastError` code on Windows.
+pub struct TermError
+  getter operation : String
+  getter fd : Int64
+  getter code : Int32
+
+  def initialize(@operation : String, @fd : Int64, @code : Int32, @terminal : Bool)
+  end
+
+  # The stream is not a terminal: ENOTTY (25 on Linux and darwin) from
+  # TCGETS or `tcgetattr`; on Windows `GetConsoleMode` refusing it at all,
+  # which is the test for a console whatever code it leaves.
+  def not_a_terminal? : Bool
+    !@terminal
+  end
+
+  def reason : String
+    return "not a terminal" if not_a_terminal?
+    {% if flag?(:win32) %}
+      return "the handle is not valid" if @code == 6
+    {% else %}
+      return "not an open descriptor" if @code == 9
+      return "the terminal refused it: an input/output error" if @code == 5
+    {% end %}
+    "error #{@code}"
+  end
+
+  def stream : String
+    return "standard input" if @fd == 0_i64
+    return "standard output" if @fd == 1_i64
+    return "standard error" if @fd == 2_i64
+    "descriptor #{@fd}"
+  end
+end
+
+impl Error for TermError
+  def message : String
+    "cannot #{operation} on #{stream}: #{reason}"
+  end
+end
+
+pub struct Term
+  # Bytes enough for the largest saved mode: darwin's 72-byte termios.
+  STATE = 72
+
+  # Which change `with_mode` makes.
+  RAW      = 0
+  NO_ECHO  = 1
+  PASSWORD = 2
+
+  {% if flag?(:linux) %}
+    TCGETS     = 0x5401_i64
+    TCSETS     = 0x5402_i64
+    TIOCGWINSZ = 0x5413_i64
+  {% elsif flag?(:darwin) %}
+    TIOCGWINSZ = 0x40087468_u64
+  {% end %}
+
+  {% if flag?(:linux) %}
+    # <asm-generic/termbits.h> and termbits-common.h.
+    IGNBRK =    0x1
+    BRKINT =    0x2
+    PARMRK =    0x8
+    ISTRIP =   0x20
+    INLCR  =   0x40
+    IGNCR  =   0x80
+    ICRNL  =  0x100
+    IXON   =  0x400
+    OPOST  =    0x1
+    CSIZE  =   0x30
+    CS8    =   0x30
+    PARENB =  0x100
+    ISIG   =    0x1
+    ICANON =    0x2
+    ECHO   =    0x8
+    ECHOE  =   0x10
+    ECHOK  =   0x20
+    ECHONL =   0x40
+    IEXTEN = 0x8000
+    # Flag words are 32 bits apart; the control characters start at 17.
+    FLAG_STRIDE = 4
+    VMIN_AT     = 17 + 6
+    VTIME_AT    = 17 + 5
+  {% elsif flag?(:darwin) %}
+    # <sys/termios.h>, the values Crystal's lib_c/aarch64-darwin carries.
+    IGNBRK =    0x1
+    BRKINT =    0x2
+    PARMRK =    0x8
+    ISTRIP =   0x20
+    INLCR  =   0x40
+    IGNCR  =   0x80
+    ICRNL  =  0x100
+    IXON   =  0x200
+    OPOST  =    0x1
+    CSIZE  =  0x300
+    CS8    =  0x300
+    PARENB = 0x1000
+    ISIG   =   0x80
+    ICANON =  0x100
+    ECHO   =    0x8
+    ECHOE  =    0x2
+    ECHOK  =    0x4
+    ECHONL =   0x10
+    IEXTEN =  0x400
+    # Flag words are 64 bits apart, every flag in the low half of each,
+    # which is the half a little-endian Int32 read reaches; the control
+    # characters start at 32.
+    FLAG_STRIDE = 8
+    VMIN_AT     = 32 + 16
+    VTIME_AT    = 32 + 17
+  {% elsif flag?(:win32) %}
+    ENABLE_PROCESSED_INPUT        =   0x1
+    ENABLE_LINE_INPUT             =   0x2
+    ENABLE_ECHO_INPUT             =   0x4
+    ENABLE_VIRTUAL_TERMINAL_INPUT = 0x200
+  {% end %}
+
+  # Whether *io* is a terminal.
+  def self.tty?(io : IO) : Bool
+    return false if io.closed?
+    tty?(io.handle)
+  end
+
+  # Whether descriptor *fd* is a terminal — on Windows, a standard
+  # stream's number or a handle's value, as `IO#handle` answers it.
+  def self.tty?(fd : Int32) : Bool
+    tty?(fd.to_i64)
+  end
+
+  def self.tty?(fd : Int64) : Bool
+    return false if fd < 0_i64
+    {% if flag?(:win32) %}
+      return __iyi_isatty(fd.to_i32) if fd <= 2_i64
+      mode = 0
+      ::LibC.GetConsoleMode(Pointer(Void).new(fd.to_u64), pointerof(mode)) != 0
+    {% else %}
+      return false if fd > 2147483647_i64
+      __iyi_isatty(fd.to_i32)
+    {% end %}
+  end
+
+  # `{rows, columns}` of the terminal on standard output, standard error
+  # or standard input, the first that is one; nil when none is, or when
+  # the terminal does not know its size (0 by 0).
+  def self.size : {Int32, Int32}?
+    size(1_i64) || size(2_i64) || size(0_i64)
+  end
+
+  # `{rows, columns}` of the terminal *io* is, or nil.
+  def self.size(io : IO) : {Int32, Int32}?
+    return nil if io.closed?
+    size(io.handle)
+  end
+
+  def self.size(fd : Int32) : {Int32, Int32}?
+    size(fd.to_i64)
+  end
+
+  def self.size(fd : Int64) : {Int32, Int32}?
+    return nil if fd < 0_i64
+    rows = 0
+    columns = 0
+    {% if flag?(:win32) %}
+      info = uninitialized UInt8[24]
+      bytes = pointerof(info).as(UInt8*)
+      return nil if LibKernel32.GetConsoleScreenBufferInfo(__iyi_std_handle(fd), bytes.as(Void*)) == 0
+      columns = signed16(bytes + 14) - signed16(bytes + 10) + 1
+      rows = signed16(bytes + 16) - signed16(bytes + 12) + 1
+    {% else %}
+      return nil if fd > 2147483647_i64
+      # `struct winsize`: ws_row, ws_col, then two pixel counts, 16 bits
+      # each.
+      winsize = uninitialized UInt8[8]
+      bytes = pointerof(winsize).as(UInt8*)
+      {% if flag?(:linux) %}
+        return nil if ioctl(fd, TIOCGWINSZ, bytes.as(Void*)) < 0_i64
+      {% else %}
+        return nil if LibC.ioctl(fd.to_i32, TIOCGWINSZ, bytes.as(Void*)) != 0
+      {% end %}
+      rows = bytes[0].to_i32 | (bytes[1].to_i32 << 8)
+      columns = bytes[2].to_i32 | (bytes[3].to_i32 << 8)
+    {% end %}
+    return nil if rows <= 0 || columns <= 0
+    {rows, columns}
+  end
+
+  # Runs the block with *io*'s terminal in raw mode and answers its value:
+  # every byte is the program's as it is typed — no line to wait for, no
+  # echo, no signal from Ctrl-C, no CR to NL — and output is written
+  # without NL becoming CR NL. The previous mode is restored when the
+  # block ends, however it ends. A `TermError`, and the block not run,
+  # when *io* is not a terminal or the terminal refuses the change.
+  def self.raw(io : IO = STDIN, &block : -> T) : T | TermError forall T
+    with_mode(io, RAW, "enter raw mode") { yield }
+  end
+
+  # Runs the block with echo off on *io*'s terminal and answers its value;
+  # lines are still read as lines and Ctrl-C is still a signal. The
+  # previous mode is restored when the block ends, however it ends. A
+  # `TermError`, and the block not run, when *io* is not a terminal.
+  def self.no_echo(io : IO = STDIN, &block : -> T) : T | TermError forall T
+    with_mode(io, NO_ECHO, "turn echo off") { yield }
+  end
+
+  # Writes *prompt* to standard error and reads a line from standard input
+  # with echo off, then writes the newline the terminal did not echo.
+  # Answers the line without its line ending, or nil at the end of the
+  # input. Standard input that is not a terminal is read as it is.
+  def self.read_password(prompt : String = "") : String?
+    STDERR.write(prompt) unless prompt.empty?
+    return STDIN.read_line(chomp: true) unless tty?(STDIN)
+    line = with_mode(STDIN, PASSWORD, "turn echo off") { STDIN.read_line(chomp: true) }
+    STDERR.write("\n") unless line.is_a?(TermError)
+    line.or_panic
+  end
+
+  # The one place a mode is changed: saved, changed, the block run, and
+  # the saved mode written back by a `defer`, which the panic path runs
+  # too. The saved mode is the terminal's own bytes, read back verbatim,
+  # so whatever this module does not know about — speeds, other control
+  # characters, darwin's upper flag halves — returns as it was.
+  private def self.with_mode(io : IO, change : Int32, operation : String, &block : -> T) : T | TermError forall T
+    raise "Term: cannot #{operation} on a closed stream" if io.closed?
+    fd = io.handle
+    saved = Pointer(UInt8).malloc(STATE.to_u64)
+    code = get_mode(fd, saved)
+    {% if flag?(:win32) %}
+      return TermError.new(operation, fd, code, false) if code != 0
+    {% else %}
+      return TermError.new(operation, fd, code, code != 25) if code != 0
+    {% end %}
+    changed = Pointer(UInt8).malloc(STATE.to_u64)
+    changed.copy_from(saved, STATE)
+    apply(changed, change)
+    code = set_mode(fd, changed)
+    return TermError.new(operation, fd, code, true) if code != 0
+    defer set_mode(fd, saved)
+    yield
+  end
+
+  {% if flag?(:win32) %}
+    private def self.apply(mode : UInt8*, change : Int32) : Nil
+      word = mode.as(Int32*)
+      if change == RAW
+        word.value = (word.value & ((ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT) ^ -1)) | ENABLE_VIRTUAL_TERMINAL_INPUT
+      elsif change == NO_ECHO
+        word.value = word.value & (ENABLE_ECHO_INPUT ^ -1)
+      else
+        word.value = (word.value & (ENABLE_ECHO_INPUT ^ -1)) | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT
+      end
+    end
+
+    # 0, or the reason `GetLastError` gives.
+    private def self.get_mode(fd : Int64, into : UInt8*) : Int32
+      return 0 if ::LibC.GetConsoleMode(__iyi_std_handle(fd), into.as(Int32*)) != 0
+      code = ::LibC.GetLastError
+      code == 0 ? 6 : code
+    end
+
+    private def self.set_mode(fd : Int64, from : UInt8*) : Int32
+      return 0 if ::LibC.SetConsoleMode(__iyi_std_handle(fd), from.as(Int32*).value) != 0
+      code = ::LibC.GetLastError
+      code == 0 ? 6 : code
+    end
+
+    # A SHORT, sign and all, from two little-endian bytes.
+    private def self.signed16(at : UInt8*) : Int32
+      value = at[0].to_i32 | (at[1].to_i32 << 8)
+      value >= 0x8000 ? value - 0x10000 : value
+    end
+  {% else %}
+    private def self.flag(mode : UInt8*, word : Int32) : Int32*
+      (mode + word * FLAG_STRIDE).as(Int32*)
+    end
+
+    private def self.clear(mode : UInt8*, word : Int32, bits : Int32) : Nil
+      flag(mode, word).value = flag(mode, word).value & (bits ^ -1)
+    end
+
+    private def self.set(mode : UInt8*, word : Int32, bits : Int32) : Nil
+      flag(mode, word).value = flag(mode, word).value | bits
+    end
+
+    # Words: 0 input, 1 output, 2 control, 3 local.
+    private def self.apply(mode : UInt8*, change : Int32) : Nil
+      if change == RAW
+        clear(mode, 0, IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON)
+        clear(mode, 1, OPOST)
+        clear(mode, 3, ECHO | ECHONL | ICANON | ISIG | IEXTEN)
+        clear(mode, 2, CSIZE | PARENB)
+        set(mode, 2, CS8)
+        mode[VMIN_AT] = 1_u8
+        mode[VTIME_AT] = 0_u8
+      else
+        clear(mode, 3, ECHO | ECHOE | ECHOK | ECHONL)
+        if change == PASSWORD
+          set(mode, 3, ICANON | ISIG)
+          set(mode, 0, ICRNL)
+        end
+      end
+    end
+
+    {% if flag?(:linux) %}
+      # 0, or the errno the kernel answered.
+      private def self.get_mode(fd : Int64, into : UInt8*) : Int32
+        result = ioctl(fd, TCGETS, into.as(Void*))
+        result < 0_i64 ? (0_i64 - result).to_i32 : 0
+      end
+
+      private def self.set_mode(fd : Int64, from : UInt8*) : Int32
+        result = ioctl(fd, TCSETS, from.as(Void*))
+        result < 0_i64 ? (0_i64 - result).to_i32 : 0
+      end
+
+      private def self.ioctl(fd : Int64, request : Int64, argument : Void*) : Int64
+        result = uninitialized Int64
+        {% if flag?(:x86_64) %}
+          asm("syscall" : "={rax}"(result)
+                        : "{rax}"(16_i64), "{rdi}"(fd), "{rsi}"(request), "{rdx}"(argument)
+                        : "rcx", "r11", "memory"
+                        : "volatile")
+        {% else %}
+          asm("svc #0" : "={x0}"(result)
+                       : "{x8}"(29_i64), "{x0}"(fd), "{x1}"(request), "{x2}"(argument)
+                       : "memory"
+                       : "volatile")
+        {% end %}
+        result
+      end
+    {% else %}
+      # 0, or errno.
+      private def self.get_mode(fd : Int64, into : UInt8*) : Int32
+        return 9 if fd > 2147483647_i64
+        LibC.tcgetattr(fd.to_i32, into.as(Void*)) == 0 ? 0 : LibC.error_location.value
+      end
+
+      # TCSANOW is 0.
+      private def self.set_mode(fd : Int64, from : UInt8*) : Int32
+        return 9 if fd > 2147483647_i64
+        LibC.tcsetattr(fd.to_i32, 0, from.as(Void*)) == 0 ? 0 : LibC.error_location.value
+      end
+    {% end %}
+  {% end %}
+end

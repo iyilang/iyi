@@ -13,6 +13,18 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# How a task fails the group that a task waiting for a lock is in.
+pub struct LockStop
+  def initialize
+  end
+end
+
+impl Error for LockStop
+  def message : String
+    "the waiting task's sibling failed"
+  end
+end
+
 import std/file::{File}
 import std/dir::{Dir}
 import std/gc::{GC}
@@ -441,6 +453,113 @@ assert_str "78", sio.read_bytes(2), "seek: pos="
 sio.close
 File.delete(fseek)
 puts "  seek and pos read a file from where they say"
+
+# Two opens of one file are two holders, in one process as in two.
+puts "\n== locks"
+flock_path = sandbox + "/std_file_ex_lock"
+File.write(flock_path, "")
+holder = File.open(flock_path, "r+")
+other = File.open(flock_path, "r+")
+holder.flock_exclusive.or_panic
+assert_true !other.try_flock_exclusive && !other.try_flock_shared, "locks: an exclusive lock keeps another open file out"
+holder.flock_unlock
+assert_true other.try_flock_shared, "locks: unlocked, another file takes it"
+assert_true holder.try_flock_shared, "locks: shared locks are held together"
+assert_true !holder.try_flock_exclusive, "locks: an exclusive lock is refused while another file shares"
+holder.flock_unlock
+other.flock_unlock
+lock_order = [] of String
+group do |g|
+  g.spawn do
+    holder.flock_exclusive.or_panic
+    lock_order << "held"
+    sleep(100)
+    lock_order << "released"
+    holder.flock_unlock
+    0
+  end
+  g.spawn do
+    sleep(10)
+    other.flock_exclusive.or_panic
+    lock_order << "taken"
+    other.flock_unlock
+    0
+  end
+end
+assert_true lock_order == ["held", "released", "taken"], "locks: a lock another task holds is waited for, #{lock_order}"
+holder.flock_exclusive.or_panic
+lock_outcome = ""
+group do |g|
+  g.spawn do
+    got = other.flock_exclusive
+    lock_outcome = got.is_a?(Cancelled) ? "cancelled" : "taken"
+    0
+  end
+  g.spawn do
+    sleep(30)
+    LockStop.new
+  end
+end
+assert_true lock_outcome == "cancelled", "locks: a wait whose task is cancelled answers Cancelled, not #{lock_outcome}"
+holder.close
+assert_true other.try_flock_exclusive, "locks: closing the file gave the lock back"
+other.flock_unlock
+assert_panics("inside the lock") { other.flock_exclusive { raise "inside the lock" } }
+File.open(flock_path, "r+") { |probe| assert_true probe.try_flock_exclusive, "locks: a block that panics unlocks" }
+other.close
+File.delete(flock_path)
+puts "  exclusive and shared locks between two opens, a wait, a cancelled wait, and a lock given back on close"
+
+puts "\n== open modes"
+fmode = sandbox + "/std_file_ex_modes.txt"
+File.delete(fmode) if File.exists?(fmode)
+File.open(fmode, "a") { |io| io.print "one" }
+File.open(fmode, "ab") { |io| io.print "two" }
+assert_str "onetwo", File.read(fmode), "append twice keeps both writes"
+aio = File.open(fmode, "a")
+aio.seek(0)
+aio.print "three"
+aio.close
+assert_str "onetwothree", File.read(fmode), "append after a seek still appends"
+File.write(fmode, "abcdef")
+rio = File.open(fmode, "r+")
+rio.print "XY"
+rio.seek(4)
+rio.print "Z"
+rio.close
+assert_str "XYcdZf", File.read(fmode), "r+ overwrites in place without truncating"
+rio = File.open(fmode, "rb+")
+assert_str "XYc", rio.read_bytes(3), "r+ reads from the start"
+rio.close
+wio = File.open(fmode, "w+")
+assert_true wio.read_bytes(10) == "", "w+ truncates"
+wio.print "fresh"
+wio.seek(0)
+assert_str "fresh", wio.read_bytes(10), "w+ reads back what it wrote"
+wio.close
+aio = File.open(fmode, "a+")
+assert_str "fre", aio.read_bytes(3), "a+ reads from the start"
+aio.print "!"
+aio.seek(0)
+assert_str "fresh!", aio.read_bytes(10), "a+ appends at the end"
+assert_true aio.pos == 6_i64, "a+ pos after reading to the end"
+aio.close
+File.delete(fmode)
+{% if flag?(:win32) %}
+  # Windows keeps the owner's write bit alone, as FILE_ATTRIBUTE_READONLY.
+  File.open(fmode, "w", 4096, 0o444) { |io| io.print "x" }
+  assert_true (File.info(fmode).permissions.value & 0o200) == 0, "perm honoured on creation"
+  File.chmod(fmode, 0o644)
+{% else %}
+  File.open(fmode, "w", 4096, 0o600) { |io| io.print "x" }
+  assert_true (File.info(fmode).permissions.value & 0o777) == 0o600, "perm honoured on creation"
+  File.chmod(fmode, 0o644)
+  File.open(fmode, "a", 4096, 0o600) { |io| io.print "y" }
+  assert_true (File.info(fmode).permissions.value & 0o777) == 0o644, "perm leaves a file already there alone"
+{% end %}
+assert_true File.read(fmode).starts_with?("x"), "a file created with perm holds its write"
+File.delete(fmode)
+puts "  every open mode reads and writes where Crystal's does"
 
 puts "\n== delete"
 File.delete(f1)

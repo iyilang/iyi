@@ -48,6 +48,12 @@ crystal-build - Compile a Crystal program
 *-f* text|json, *--format* text|json::
   Format of output. Defaults to text. The json format can be used to get a more
   parser-friendly output.
+*--force*::
+  Build even when nothing the output was built from has changed. By default a
+  build that finds its output current - every file, directory listing and
+  environment value the last build of it read, the compiler, the command line
+  and the output itself as they were - says it is up to date and compiles
+  nothing. *-s* says why a build was not skipped.
 *--error-trace*::
   Show full error trace. Disabled by default, as the full trace usually makes
   error messages less readable and may not always deliver relevant information.

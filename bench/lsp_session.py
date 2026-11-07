@@ -20,6 +20,7 @@ document highlight, folding, workspace symbols, prepareRename,
 semantic tokens, inlay hints, type definition, and formatting.
 """
 
+import collections
 import json
 import os
 import pathlib
@@ -69,6 +70,17 @@ def watchdog(seconds):
                         except Exception as error:  # noqa: BLE001 - a report, not a check
                             kids = f"unlisted ({error})"
                         print(f"  server {proc.pid} running, its children {kids}", flush=True)
+                        # Where each one is waiting: darwin's `sample` reads
+                        # every thread's stack for a second, symbols and all.
+                        if sys.platform == "darwin" and isinstance(kids, list):
+                            for pid in [proc.pid, *kids]:
+                                sampled = subprocess.run(["sample", str(pid), "1", "-mayDie"],
+                                                         capture_output=True, text=True, timeout=30)
+                                stack = [line for line in sampled.stdout.splitlines()
+                                         if "+" in line and ("iyi" in line or "Lsp" in line or "Fiber" in line)]
+                                print(f"  {pid}'s busiest frames:", flush=True)
+                                for line in stack[:40]:
+                                    print(f"    {line.strip()[:160]}", flush=True)
                 for proc in LIVE:
                     proc.kill()
                 os._exit(1)
@@ -154,6 +166,12 @@ def children(pid):
     names every process's parent, which is the same question."""
     if os.name == "nt":
         return nt_children(pid)
+    if sys.platform == "darwin":
+        # BSD ps has no --ppid, and asked for it answered nothing at all:
+        # every darwin dump said "its children []", and a kill found none.
+        listed = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True)
+        pairs = [line.split() for line in listed.stdout.splitlines()]
+        return [int(p[0]) for p in pairs if len(p) == 2 and p[1] == str(pid)]
     listed = subprocess.run(["ps", "-o", "pid=", "--ppid", str(pid)],
                             capture_output=True, text=True)
     return [int(line) for line in listed.stdout.split() if line.isdigit()]
@@ -239,10 +257,69 @@ class Client:
         that compiles. `("lsp", "--worker")` is that child alone, which
         is the single-process shape `lsp_memory.py --direct` measures to
         show what the split is worth."""
+        self.argv = argv
+        # The server's stderr is read here, echoed as it comes and its last
+        # lines kept, so that a server that closes its stdout is reported
+        # with what it said last (`closed`). Inherited, it went straight to
+        # the runner's log, where nothing tied it to the failure: Windows CI
+        # job 120203398014 ended on "server closed the pipe" alone.
         self.proc = subprocess.Popen(
-            [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+        self.started = time.monotonic()
+        self.stderr_tail = collections.deque(maxlen=40)
+        self.stderr_reader = threading.Thread(target=self.keep_stderr, daemon=True)
+        self.stderr_reader.start()
         LIVE.append(self.proc)
         self.next_id = 0
+
+    def keep_stderr(self):
+        for line in iter(self.proc.stderr.readline, b""):
+            text = line.decode("utf-8", "replace").rstrip("\r\n")
+            self.stderr_tail.append(text)
+            print(text, file=sys.stderr, flush=True)
+
+    def closed(self):
+        """Why the server's stdout ended, as far as the gate can see: which
+        server, its exit status, how long it had run, the last request
+        sent, and the end of its stderr.
+
+        Windows CI job 120203398014 printed "server closed the pipe" and
+        nothing more, 60 ms after step 73k. The server that closed it was
+        not 73k's, which the gate was done with before it printed 73k, but
+        the fresh `iyi lsp` the next step had just started: in five passing
+        Windows runs that step (72a) printed 40 to 43 ms after 73k. Its
+        stderr, inherited, put nothing in the log, and its exit status,
+        which says whether the proxy ended its own session (0 or 1) or the
+        process was ended under it (a signal, or an NTSTATUS on Windows),
+        was never read."""
+        ended = time.monotonic() - self.started
+        try:
+            code = self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            code = None
+        # A worker or a process it started holds the same stderr and can
+        # outlive the server, so the tail is waited for briefly, not to
+        # its end.
+        self.stderr_reader.join(2)
+        if code is None:
+            status = "is still running 5 s later"
+        elif code < 0:
+            status = f"was killed by signal {-code}"
+        elif code > 0xFFFF:
+            status = f"exited 0x{code:08X}"
+        else:
+            status = f"exited {code}"
+        report = [f"server closed the pipe: `iyi {' '.join(self.argv)}` (pid {self.proc.pid}) {status}, "
+                  f"its stdout ended {ended:.2f} s after it started; the last request sent: "
+                  f"{LAST.get('sent', '(none)')}"]
+        tail = list(self.stderr_tail)
+        if tail:
+            report.append(f"  the last {len(tail)} line(s) of its stderr:")
+            report.extend(f"    {line}" for line in tail)
+        else:
+            report.append("  its stderr: nothing")
+        return "\n".join(report)
 
     def send(self, method, params, wait=True):
         self.next_id += 1
@@ -274,11 +351,14 @@ class Client:
 
     def request_nowait(self, method, params):
         """A request whose answer is read later — how a cancel gets to
-        overtake it."""
+        overtake it. Named to the watchdog like any request: unnamed, a
+        darwin hang on step 74a's hover was reported as its `didChange`,
+        the frame before it."""
         self.next_id += 1
         message = {"jsonrpc": "2.0", "method": method, "params": params,
                    "id": self.next_id}
         body = json.dumps(message).encode()
+        LAST["sent"] = f"{method} #{self.next_id}"
         self.proc.stdin.write(
             b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
         self.proc.stdin.flush()
@@ -323,7 +403,7 @@ class Client:
         while True:
             line = self.proc.stdout.readline()
             if not line:
-                raise SystemExit("server closed the pipe")
+                raise SystemExit(self.closed())
             line = line.strip()
             if not line:
                 break
@@ -868,21 +948,15 @@ def fuzz_steps(c, work):
          len(got) == 2 and got[0][0] == 2 and got[0][1] <= 6 and got[1] == (3, 0), str(got))
 
 
-def kill_workers(c):
-    """Kill the proxy's workers - its children started from its own
-    binary, not a console host Windows may have given it - and whatever
-    each of them started, and wait for them to be gone. A process a
-    compile started (a macro's `system`) holds the worker's pipes on
-    Windows, where handles are inherited, and the proxy reads no death
-    until it ends too. Returns how many workers there were; none where
-    children cannot be listed, and the step that asked reports itself
-    unmeasured."""
-    import signal
+def workers_of(c):
+    """The proxy's workers: its children started from its own binary, not
+    a console host Windows may have given it. None where a binary cannot
+    be read from a pid (darwin has no /proc), and the step that asked
+    reports itself unmeasured."""
     try:
         own = os.path.normcase(process_binary(c.proc.pid))
     except OSError:
-        # darwin has no /proc to read a binary from: unmeasured there.
-        return 0
+        return None
     found = []
     for pid in children(c.proc.pid):
         try:
@@ -890,16 +964,36 @@ def kill_workers(c):
                 found.append(pid)
         except OSError:
             continue
+    return found
+
+
+def kill_workers(c):
+    """Kill the proxy's workers and whatever each of them started, and
+    wait for them to be gone. A process a compile started (a macro's
+    `system`) holds the worker's pipes on Windows, where handles are
+    inherited; the proxy asks the process whether its worker is alive
+    (steps 73j and 73k), and these are killed so that none outlives the
+    step that started it. Returns how many workers there were; none where
+    children cannot be listed, and the step that asked reports itself
+    unmeasured."""
+    import signal
+    found = workers_of(c)
+    if found is None:
+        return 0
+    # Killed a generation at a time, and the killed listed again: a worker
+    # that started a process after the list was taken and before its kill
+    # left that one running with its pipes (Windows CI: the proxy waited
+    # 180 s with no worker, a `ping` orphaned to the end of the job).
     doomed, pending = [], list(found)
     while pending:
-        pid = pending.pop()
-        doomed.append(pid)
-        pending.extend(children(pid))
-    for pid in reversed(doomed):
-        try:
-            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
-        except OSError:
-            pass
+        for pid in pending:
+            try:
+                os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+            except OSError:
+                pass
+        doomed.extend(pending)
+        time.sleep(0.2)
+        pending = [k for pid in doomed for k in children(pid) if k not in doomed]
     deadline = time.monotonic() + 10
     while any(pid in children(c.proc.pid) for pid in found) and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -996,6 +1090,237 @@ def buffer_steps(c):
               "unmeasured here, the workers are killed on Windows only", flush=True)
 
 
+def descendants(pid):
+    """Every process *pid* started, and every one they started."""
+    found, pending = [], children(pid)
+    while pending:
+        kid = pending.pop()
+        found.append(kid)
+        pending.extend(children(kid))
+    return found
+
+
+def holders(worker):
+    """The processes *worker* started that hold its stdout: on Windows
+    every child of a worker, which inherits each handle the worker could
+    hand on (its own stdin and stdout among them) - the `cmd.exe` a
+    macro's `system` runs; on Linux the ones whose stdout is the
+    worker's pipe, read back through /proc."""
+    found = descendants(worker)
+    if os.name == "nt":
+        named = []
+        for pid in found:
+            try:
+                if os.path.basename(process_binary(pid)).lower() == "cmd.exe":
+                    named.append(pid)
+            except OSError:
+                continue
+        return named
+    try:
+        pipe = os.readlink(f"/proc/{worker}/fd/1")
+    except OSError:
+        return []
+    held = []
+    for pid in found:
+        try:
+            if os.readlink(f"/proc/{pid}/fd/1") == pipe:
+                held.append(pid)
+        except OSError:
+            continue
+    return held
+
+
+def answer_within(client, request_id, seconds):
+    """The answer to *request_id*, or None where none came in *seconds*.
+    A wait that is the claim: a server that never answers fails the step
+    here, by name, instead of holding the session until the watchdog."""
+    got = {}
+
+    def read():
+        # A closed pipe raises `SystemExit` here, on a thread, where Python
+        # drops it without a word: the server's end went unreported, and
+        # the step saw no answer. The report is printed instead.
+        try:
+            got["message"] = client.wait_for(lambda m: m.get("id") == request_id)
+        except SystemExit as closed:
+            print(closed, flush=True)
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(seconds)
+    return got.get("message")
+
+
+def orphan_steps():
+    """73j and 73k. A worker that dies while a process it started holds its
+    pipes. The proxy learned of a worker's death only from its stdout
+    closing, and a process the worker started keeps it open: on Windows
+    every child inherits the worker's stdin and stdout, so a worker killed
+    during a macro's `ping` left the proxy with no worker and a request
+    written into the dead one's stdin, unanswered for the 180 s the
+    watchdog waited (Windows CI, the step after 73b).
+
+    The hold is a macro's `system` that writes a file the gate names and
+    then waits on a pipe the gate keeps open until the step is over: on
+    Windows `cmd`, which holds the worker's pipes by inheritance from the
+    start, reading a named pipe; on Linux a shell that opens the worker's
+    two pipes through /proc before it writes the file, reading a FIFO. The
+    file is the gate's proof that the worker is inside that compile, and
+    nothing else compiles that text. The step used to take a `ping` or
+    `sleep` found under the worker as that proof, and hold an outline
+    queued behind a buffer's compile: a Windows run (39222552559) found
+    one, killed the worker, and had the outline answered before the kill,
+    so whatever was found, the worker was not inside the compile then.
+    The held request is now the compile itself, a pull. The worker alone
+    is killed, and the holders are left running until the step is over.
+
+    The wait used to be a minute by its own clock, `ping -n 61` on
+    Windows and `sleep 60` on Linux. Twice on master's CI (jobs
+    122939534975 and 124281113104) these steps took 97 and 98 s from step
+    73c's line to 73k's, where 122 passing Windows runs took 2.7 to 3.2 s,
+    and by the kill the ping had ended: the pull was answered clean
+    (`items: []`), nothing held the worker's pipes, and the worker was
+    gone (WinError 87 for its pid). What held the gate up is not in
+    either log. Held up 92 s after listing 73k's worker, a Linux gate
+    with the `sleep` failed 73k the same way, and with the FIFO it held.
+    A wait the gate ends cannot end first."""
+    if os.name != "nt" and not sys.platform.startswith("linux"):
+        for label, name in (("73j", "a request after a worker died with its pipes held is answered"),
+                            ("73k", "a request the worker died holding, its pipes held, is refused")):
+            print(f"step {label} {name}: unmeasured here, no process a worker starts holds its "
+                  "stdout but on Windows (inherited) and Linux (through /proc)", flush=True)
+        return
+    import signal
+    own = tempfile.mkdtemp(prefix="iyi-lsp-orphan")
+    o = Client()
+    o.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    o.send("initialized", {}, wait=False)
+    other_uri = opened(o, own, "other.iyi", "def other\nend\n")
+    left = []
+
+    # The pipes the holds wait on, let go of when the step is over: named
+    # pipes on Windows, and on Linux the gate's ends of FIFOs.
+    pipes, fifos = [], []
+
+    def held_text(name):
+        """A module whose compile writes *name*.started under the gate's
+        directory, holding the worker's pipes by then, and waits until
+        the gate lets go of a pipe."""
+        mark = os.path.join(own, f"{name}.started")
+        if os.name == "nt":
+            pipe = r"\\.\pipe\%s-%s" % (os.path.basename(own), name)
+            pipes.append(nt_pipe(pipe))
+            # `set /p` and not `type`: `type` was refused a pipe of one
+            # instance nothing else had opened ("All pipe instances are
+            # busy"), and `set /p` waited on it until it was closed.
+            hold = f'cmd /c type nul > "{mark}" & set /p held=< "{pipe}"'
+        else:
+            # Held open for writing by the gate alone, so `read` waits until
+            # the gate closes it - or dies, which closes it too. Read-write,
+            # so this open does not wait for the reader; Linux allows that
+            # on a FIFO (fifo(7)), and only Linux runs these steps.
+            fifo = os.path.join(own, f"{name}.held")
+            os.mkfifo(fifo)
+            fifos.append(os.open(fifo, os.O_RDWR))
+            hold = (f"exec </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null; "
+                    f"touch '{mark}'; read held < '{fifo}'")
+        return mark, f"module {name}\n\n{{% system({json.dumps(hold)}) %}}\nputs 1\n"
+
+    def inside(mark):
+        """Wait for *mark*: the worker is then inside the compile that
+        writes it. The worker and the processes holding its stdout, or
+        None where the compile did not get there in 30 s."""
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not os.path.exists(mark):
+            time.sleep(0.05)
+        workers = workers_of(o) or []
+        if not os.path.exists(mark) or len(workers) != 1:
+            return None, []
+        held = holders(workers[0])
+        left.extend(descendants(workers[0]))
+        return workers[0], held
+
+    # A worker already gone when the kill lands is reported rather than
+    # raised: Windows answered the kill with WinError 87 (no such process)
+    # on master's CI (job 122939534975), and the traceback ended the
+    # session before 73k could say what the request got. The step's own
+    # verdict - the answer, and its code - is what judges it either way.
+    gone_first = []
+
+    def kill_alone(worker):
+        try:
+            os.kill(worker, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            gone_first.append(worker)
+        deadline = time.monotonic() + 10
+        while worker in children(o.proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+    # 73j. The worker dies inside a buffer's compile, with no request in
+    #      flight, and the next request is about another file: written
+    #      into the dead worker's stdin, it was never read. It goes to a
+    #      successor now.
+    mark, text = held_text("slow")
+    slow_uri = file_uri(os.path.join(own, "slow.iyi"))
+    o.send("textDocument/didOpen", {"textDocument": {
+        "uri": slow_uri, "languageId": "iyi", "version": 1, "text": text}}, wait=False)
+    worker, held = inside(mark)
+    after = None
+    if worker:
+        kill_alone(worker)
+        started = time.monotonic()
+        after = answer_within(o, o.request_nowait("textDocument/documentSymbol",
+                                                  {"textDocument": {"uri": other_uri}}), 10)
+        after_took = time.monotonic() - started
+        o.send("textDocument/didClose", {"textDocument": {"uri": slow_uri}}, wait=False)
+    # 73k. The worker dies inside the request itself: a pull of a file no
+    #      buffer holds, whose compile is the hold. The request is refused
+    #      (-32603) as one a worker died holding is, where it waited for
+    #      the holder to end. Not asked after a 73j left unanswered: that
+    #      wait's reader still holds the pipe.
+    second, second_held, refused = None, [], None
+    if not worker or after is not None:
+        mark, text = held_text("slower")
+        slower = os.path.join(own, "slower.iyi")
+        with open(slower, "w", encoding="utf-8") as f:
+            f.write(text)
+        queued = o.request_nowait("textDocument/diagnostic", {"textDocument": {"uri": file_uri(slower)}})
+        second, second_held = inside(mark)
+    if second:
+        kill_alone(second)
+        started = time.monotonic()
+        refused = answer_within(o, queued, 10)
+        refused_took = time.monotonic() - started
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            pass
+    for kernel, handle in pipes:
+        kernel.CloseHandle(handle)
+    for writer in fifos:
+        os.close(writer)
+    stuck = (worker and after is None) or (second and refused is None)
+    if not stuck and answer_within(o, o.request_nowait("shutdown", {}), 10):
+        o.send("exit", {}, wait=False)
+        o.proc.wait(timeout=10)
+    else:
+        o.proc.kill()
+    shutil.rmtree(own, ignore_errors=True)
+    step("73j", "a request after a worker died with its pipes held is answered",
+         bool(worker) and bool(held) and after is not None and "result" in after,
+         "the held compile did not start within 30 s" if not worker else
+         f"{len(held)} holder(s); "
+         f"{'no answer' if after is None else 'an outline' if 'result' in after else json.dumps(after.get('error'))[:70]} "
+         f"in {after_took:.1f} s{', the worker gone before the kill' if worker in gone_first else ''}")
+    step("73k", "a request the worker died holding, its pipes held, is refused",
+         bool(second) and bool(second_held) and refused is not None
+         and refused.get("error", {}).get("code") == -32603,
+         "the held request's compile did not start within 30 s" if not second else
+         f"{len(second_held)} holder(s); "
+         f"{'no answer' if refused is None else json.dumps(refused.get('error') or refused.get('result'))[:70]} "
+         f"in {refused_took:.1f} s{', the worker gone before the kill' if second in gone_first else ''}")
+
+
 def restore_binary(backup, binary):
     """Put the binary step 46 moved aside back. A Windows runner refused
     the rename back once with "being used by another process", the
@@ -1014,6 +1339,25 @@ def restore_binary(backup, binary):
             time.sleep(0.2)
 
 
+def nt_pipe(path):
+    """A named pipe at *path* that nothing is written to: a reader that
+    opens it waits until this side closes it, then reads as empty. The
+    kernel32 that closes it, and its handle."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+    kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
+    kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    # Outbound, bytes, one instance. A reader connects to it before this
+    # side has asked for one, and reads until it is closed.
+    handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return kernel, handle
+
+
 def held_open(work, seconds):
     """A path a macro's `read_file` waits on for *seconds*, then reads
     as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
@@ -1021,17 +1365,8 @@ def held_open(work, seconds):
     go of, the path is gone, and a later compile of the same text
     fails at once rather than waiting again."""
     if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.CreateNamedPipeW.restype = wintypes.HANDLE
-        kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
-        kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         path = r"\\.\pipe\iyi-lsp-held-%d" % os.getpid()
-        # Outbound, bytes, one instance. A reader connects to it before
-        # this side has asked for one, and reads until it is closed.
-        handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+        kernel, handle = nt_pipe(path)
 
         def release():
             time.sleep(seconds)
@@ -2077,9 +2412,17 @@ def main():
         s.send("exit", {}, wait=False)
         s.proc.wait(timeout=10)
         return best
-    small, large = symbol_seconds(500), symbol_seconds(2000)
+    # One pair of timings is one sample of a shared machine: a Windows
+    # runner once took longer than six times over the 2,000 files on a
+    # build that changed nothing here (job 119640679891). So a pair over
+    # the bound is measured again, up to twice, before it counts; the
+    # quadratic listing above measured nine times, well clear of six.
+    for attempt in range(3):
+        small, large = symbol_seconds(500), symbol_seconds(2000)
+        if large < 6 * small:
+            break
     step("70d", "workspace/symbol takes time linear in the workspace", large < 6 * small,
-         "2,000 files held under six times 500's")
+         f"2,000 files held under six times 500's: {large * 1000:.0f} ms against {small * 1000:.0f} ms")
 
     # 18k. The URIs an answer names are URIs: the client's own for a file
     #      it has open, and for any other one a percent-encoded URI that
@@ -3583,6 +3926,7 @@ def main():
          [d["range"]["start"]["line"] for d in items if "nope" in d["message"]] == [2],
          f"{len(items)} item(s): {items and items[0]['message'][:50]}")
     buffer_steps(c)
+    orphan_steps()
     traits_disk_and_completion()
     held_verdict_step()
     # 53. shutdown/exit: the server leaves when told, not before — and

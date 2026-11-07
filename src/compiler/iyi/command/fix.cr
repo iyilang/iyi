@@ -172,13 +172,18 @@ class Iyi::Command
       # Definition-site typing is the compiler's own rule now, so this
       # plain compile already reaches uncalled bodies — fix and check
       # cannot disagree about what clean means.
-      _, diags = analysis.check(path, text, {} of String => String)
-      if diags.empty?
+      result, diags = analysis.check(path, text, {} of String => String)
+      diag = diags.first?
+      # A file that compiles can still carry an edit the compiler made a
+      # warning rather than an error - a name that compiles in this build
+      # alone (`Program#iyi_moved_package_path`). Only one written in this
+      # file: a warning inside a macro's expansion edits no file here.
+      diag ||= result.try { |compiled| fix_warning_edit(compiled.program, path) }
+      unless diag
         remaining = nil
         break
       end
 
-      diag = diags.first
       # Asked with a diagnostic in hand, so a capped run names what is left
       # rather than reporting nothing at all.
       if applied.size >= edit_cap
@@ -295,5 +300,18 @@ class Iyi::Command
     end
 
     remaining.nil?
+  end
+
+  # The first warning *program* carries with an edit in *path*, as the
+  # diagnostic the loop applies.
+  private def fix_warning_edit(program : Program, path : String) : Lsp::Diag?
+    program.warnings.reports.each do |report|
+      next unless report.is_a?(TypeException) && (replacement = report.suggestion) && report.size > 0
+      file, line, column, expansion = report.true_location(report.line_number, report.column_number)
+      next unless line && expansion.nil? && Iyi.same_file?(file, path)
+      return Lsp::Diag.new(line, column, report.size, report.message.to_s, nil,
+        [] of {String, Int32, Int32, String}, replacement)
+    end
+    nil
   end
 end

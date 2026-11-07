@@ -1,0 +1,324 @@
+# System: what the machine this program runs on is called, how many CPUs
+# the program may run on, and how large a memory page is.
+#
+# `System.hostname` and `System.cpu_count` are the two calls the other
+# library's `System` module carries (`src/system.cr`), and
+# `System.page_size` is the one its runtime asks `getpagesize` for and
+# keeps to itself; a program sizing a buffer or an `mmap` to the page wants
+# the same number, so it is public here. Nothing else that module has is
+# missing, and nothing it does not have is added.
+#
+# Each answer comes from the platform the way the rest of std reaches it:
+# raw syscalls on Linux, where no libc is linked (prelude.iyi says why),
+# libSystem on darwin, kernel32 on Windows.
+#
+# `hostname` is the kernel's node name. On Linux that is `uname(2)`'s
+# `nodename`, which is what glibc's `gethostname` and so Python's
+# `socket.gethostname()` read, and the same string as
+# `/proc/sys/kernel/hostname`; on darwin it is libSystem's `gethostname`;
+# on Windows `GetComputerNameExW(ComputerNameDnsHostname)`, the name DNS
+# knows the machine by, as the other library asks for, converted from
+# UTF-16. It is read every time, because `sethostname` may change it while
+# the program runs.
+#
+# `cpu_count` is the number of CPUs *this process may run on*, not the
+# number the machine has: a program sizing a pool of workers by the
+# machine's count and held to one core by `taskset -c 0`, a cgroup cpuset
+# or `start /affinity 1` starts eleven threads to fight over one, which is
+# what the runtime's marker did on Windows before it counted the mask
+# (`core_count` in src/iyi/thread.iyi measured 3,077 ms against 178). So on
+# Linux it is the bits of `sched_getaffinity(2)` - Python's
+# `len(os.sched_getaffinity(0))` - and only when the kernel refuses that
+# call the online count in `/sys/devices/system/cpu/online`, which is what
+# glibc's `get_nprocs` and so `os.cpu_count()` read. darwin has no affinity
+# a process can be held to, and answers `hw.activecpu`, the processors the
+# scheduler is using now, then `hw.logicalcpu`. Windows counts the process
+# affinity mask, and a process spread across processor groups has no single
+# mask (the call answers 0), so there it is `GetActiveProcessorCount` over
+# every group. It is read every time, because the mask can be changed under
+# a running program (`taskset -p`).
+#
+# `page_size` is the kernel's: on Linux `AT_PAGESZ` out of the auxiliary
+# vector the kernel handed the program, read from `/proc/self/auxv`, which
+# is the number glibc's `sysconf(_SC_PAGESIZE)` answers. It is not 4096 by
+# assumption: aarch64 kernels are built with 16 KiB and 64 KiB pages too,
+# and Apple silicon's are 16 KiB. darwin asks `getpagesize`, Windows
+# `GetSystemInfo`'s `dwPageSize` (not `dwAllocationGranularity`, which is
+# 64 KiB and the granularity of `VirtualAlloc`, not of a page). It cannot
+# change while a process lives, so it is read once.
+#
+# None of the three has an error to hand back: `uname`, `gethostname`,
+# `getpagesize` and `GetSystemInfo` do not fail for a valid buffer, and a
+# process with no CPU to run on is not running. What remains is a kernel
+# that refuses calls every program makes - a sandbox hiding
+# `sched_getaffinity` *and* `/sys`, or a Linux without `/proc`, which the
+# collector already cannot run on (it reads `/proc/self/maps` for the
+# stack's base) - and that is a panic naming what was refused, never a
+# made-up count.
+
+module std/system
+
+{% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32) %}
+  {% raise "std/system asks the operating system for its hostname, CPU count and page size, and this target " \
+           "has none to ask: Linux, darwin and Windows do." %}
+{% end %}
+
+{% if flag?(:darwin) %}
+  # `sysctlbyname` with the signature src/iyi/thread.iyi already binds it
+  # with: one C symbol bound with two signatures is refused.
+  lib LibC
+    fun gethostname(name : UInt8*, length : UInt64) : Int32
+    fun getpagesize : Int32
+    fun sysctlbyname(name : UInt8*, old : Void*, old_size : UInt64*, new : Void*, new_size : UInt64) : Int32
+  end
+{% elsif flag?(:win32) %}
+  # kernel32, which the prelude's `LibC` already links. `GetProcessAffinityMask`
+  # as src/iyi/thread.iyi binds it.
+  lib LibC
+    fun GetComputerNameExW(format : Int32, buffer : UInt16*, size : Int32*) : Int32
+    fun GetSystemInfo(info : Void*) : Void
+    fun GetProcessAffinityMask(process : Void*, process_mask : UInt64*, system_mask : UInt64*) : Int32
+  end
+{% end %}
+
+pub struct System
+  @@page_size = 0
+
+  # The name of the machine, as the kernel holds it: `"build-07"`, or
+  # `"host.example.org"` where it was set to a fully qualified name.
+  def self.hostname : String
+    {% if flag?(:linux) %}
+      # struct utsname is six fields of 65 bytes, `nodename` the second;
+      # the kernel NUL-terminates every one.
+      buffer = Pointer(UInt8).malloc(390_u64)
+      got = sys(SYS_UNAME, buffer.address.to_i64, 0_i64, 0_i64)
+      raise "System.hostname: uname answered #{got}" if got != 0_i64
+      c_text(buffer + 65_i64, 65)
+    {% elsif flag?(:darwin) %}
+      # MAXHOSTNAMELEN is 256, terminator included; a name that long is
+      # truncated without one, so the last byte is kept a zero.
+      buffer = Pointer(UInt8).malloc(257_u64)
+      if LibC.gethostname(buffer, 256_u64) != 0
+        raise "System.hostname: gethostname refused a 256-byte buffer"
+      end
+      c_text(buffer, 256)
+    {% else %}
+      # Asked with no buffer first: ERROR_MORE_DATA (234) and the size the
+      # name needs, terminator included, in UTF-16 units. Asked again if
+      # the name grew in between. On success the size is the characters
+      # written, terminator left out.
+      size = 0
+      wide = Pointer(UInt16).new(0_u64)
+      while LibC.GetComputerNameExW(1, wide, pointerof(size)) == 0
+        error = ::LibC.GetLastError
+        raise "System.hostname: GetComputerNameExW answered error #{error}" if error != 234
+        wide = Pointer(UInt16).malloc((size + 1).to_u64)
+      end
+      return "" if wide.address == 0_u64
+      wide[size] = 0_u16
+      bytes = __iyi_utf8_size_from_wide(wide)
+      raise "System.hostname: Windows answered a name that is not UTF-16" if bytes == 0
+      String.new(bytes - 1) { |target| __iyi_utf8_bytes_from_wide(wide, target, bytes) }
+    {% end %}
+  end
+
+  # How many CPUs this process may run on: never more than the machine
+  # has, fewer when the process is held to some of them.
+  def self.cpu_count : Int32
+    {% if flag?(:linux) %}
+      count = affinity_count
+      return count if count > 0
+      online = online_count
+      return online if online > 0
+      raise "System.cpu_count: the kernel answered neither sched_getaffinity nor /sys/devices/system/cpu/online"
+    {% elsif flag?(:darwin) %}
+      count = sysctl_int("hw.activecpu")
+      count = sysctl_int("hw.logicalcpu") if count <= 0
+      raise "System.cpu_count: sysctl answered neither hw.activecpu nor hw.logicalcpu" if count <= 0
+      count
+    {% else %}
+      mask = 0_u64
+      system = 0_u64
+      count = 0
+      if LibC.GetProcessAffinityMask(::LibC.GetCurrentProcess, pointerof(mask), pointerof(system)) != 0
+        while mask != 0_u64
+          count = count + (mask & 1_u64).to_i32
+          mask = mask.unsafe_shr(1_u64)
+        end
+      end
+      # 0xFFFF is ALL_PROCESSOR_GROUPS.
+      count = ::LibC.GetActiveProcessorCount(0xFFFF_u16) if count == 0
+      raise "System.cpu_count: Windows answered no affinity mask and no active processors" if count <= 0
+      count
+    {% end %}
+  end
+
+  # The size of a memory page in bytes: 4096 on most machines, 16384 on
+  # Apple silicon and on some aarch64 Linux kernels, 65536 on others.
+  def self.page_size : Int32
+    cached = @@page_size
+    return cached if cached > 0
+    {% if flag?(:linux) %}
+      size = auxv_page_size
+      raise "System.page_size: /proc/self/auxv holds no AT_PAGESZ" if size <= 0
+      @@page_size = size
+    {% elsif flag?(:darwin) %}
+      @@page_size = LibC.getpagesize
+    {% else %}
+      # SYSTEM_INFO is 48 bytes on x86_64; dwPageSize is the DWORD at 4,
+      # read as the Int32 it is for any page size Windows has.
+      info = Pointer(Int32).malloc(12_u64)
+      LibC.GetSystemInfo(info.as(Void*))
+      @@page_size = info[1]
+    {% end %}
+    @@page_size
+  end
+
+  # The bytes before the first NUL in the *limit* bytes at *text*.
+  private def self.c_text(text : Pointer(UInt8), limit : Int32) : String
+    length = 0
+    while length < limit && text[length] != 0_u8
+      length = length + 1
+    end
+    String.new(length) { |target| target.copy_from(text, length) }
+  end
+
+  {% if flag?(:linux) %}
+    {% if flag?(:x86_64) %}
+      SYS_UNAME             =  63_i64
+      SYS_SCHED_GETAFFINITY = 204_i64
+    {% else %}
+      SYS_UNAME             = 160_i64
+      SYS_SCHED_GETAFFINITY = 123_i64
+    {% end %}
+
+    # AT_PAGESZ, the auxiliary vector's tag for the page size (elf.h).
+    AT_PAGESZ = 6_u64
+
+    private def self.sys(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(number), "{rdi}"(a), "{rsi}"(b), "{rdx}"(c)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(number), "{x0}"(a), "{x1}"(b), "{x2}"(c)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      result
+    end
+
+    # The bits set in this process's affinity mask, or 0 when the kernel
+    # refuses the call. The kernel answers -EINVAL for a buffer smaller
+    # than its own mask (`nr_cpu_ids` bits, rounded up to a long), not a
+    # truncated mask, so the buffer starts at 1,024 CPUs and doubles until
+    # it fits; a kernel built for more CPUs than 1,024 is real (SGI UV,
+    # NR_CPUS=8192 in distribution configs). On success the answer is the
+    # bytes the kernel wrote, and only those are counted.
+    private def self.affinity_count : Int32
+      bytes = 128
+      while bytes <= 1048576
+        mask = Pointer(UInt64).malloc(bytes.to_u64 // 8_u64)
+        got = sys(SYS_SCHED_GETAFFINITY, 0_i64, bytes.to_i64, mask.address.to_i64)
+        if got > 0_i64
+          # The kernel writes whole longs.
+          count = 0
+          index = 0
+          while index < got.to_i32 // 8
+            word = mask[index]
+            while word != 0_u64
+              count = count + (word & 1_u64).to_i32
+              word = word.unsafe_shr(1_u64)
+            end
+            index = index + 1
+          end
+          return count
+        end
+        return 0 if got != -22_i64
+        bytes = bytes * 2
+      end
+      0
+    end
+
+    # The CPUs online, out of `/sys/devices/system/cpu/online`: a list of
+    # ranges and single numbers, `0-7` or `0,2-5,8`. 0 when it cannot be
+    # read or does not parse.
+    private def self.online_count : Int32
+      text = read_small("/sys/devices/system/cpu/online")
+      return 0 if text.nil?
+      count = 0
+      text.strip.split(',').each do |part|
+        dash = part.index('-')
+        if dash
+          first = part[0, dash].to_i?
+          last = part[dash + 1, part.bytesize - dash - 1].to_i?
+          return 0 if first.nil? || last.nil? || last < first
+          count = count + (last - first + 1)
+        else
+          return 0 if part.to_i?.nil?
+          count = count + 1
+        end
+      end
+      count
+    end
+
+    # AT_PAGESZ out of `/proc/self/auxv`: (tag, value) pairs of 64-bit
+    # words on both x86_64 and aarch64, ending at tag 0. 0 when the file
+    # cannot be read or has no such entry.
+    private def self.auxv_page_size : Int32
+      text = read_small("/proc/self/auxv")
+      return 0 if text.nil?
+      words = text.to_unsafe.as(UInt64*)
+      pairs = text.bytesize // 16
+      index = 0
+      while index < pairs
+        tag = words[index * 2]
+        return 0 if tag == 0_u64
+        return words[index * 2 + 1].to_i32 if tag == AT_PAGESZ
+        index = index + 1
+      end
+      0
+    end
+
+    # A whole small file from /proc or /sys, or nil when it cannot be
+    # opened or read. Those files report a size of 0 to `stat` and are read
+    # until the kernel answers 0; a read a signal interrupted is asked again.
+    private def self.read_small(path : String) : String?
+      fd = __iyi_open_read(path.to_unsafe)
+      return nil if fd < 0_i64
+      held = 0
+      capacity = 4096
+      buffer = Pointer(UInt8).malloc(capacity.to_u64)
+      while true
+        if held == capacity
+          grown = Pointer(UInt8).malloc((capacity * 2).to_u64)
+          grown.copy_from(buffer, held)
+          buffer = grown
+          capacity = capacity * 2
+        end
+        got = __iyi_file_read(fd, (buffer + held.to_i64).as(Void*), (capacity - held).to_u64)
+        if got > 0_i64
+          held = held + got.to_i32
+        elsif got == 0_i64
+          break
+        elsif got != -4_i64
+          __iyi_close(fd)
+          return nil
+        end
+      end
+      __iyi_close(fd)
+      String.new(held) { |target| target.copy_from(buffer, held) }
+    end
+  {% elsif flag?(:darwin) %}
+    # A 32-bit integer sysctl by name, or 0 when the name is not there.
+    private def self.sysctl_int(name : String) : Int32
+      value = 0_i32
+      size = 4_u64
+      result = LibC.sysctlbyname(name.to_unsafe, pointerof(value).as(Void*), pointerof(size), Pointer(Void).new(0_u64), 0_u64)
+      result == 0 ? value : 0
+    end
+  {% end %}
+end

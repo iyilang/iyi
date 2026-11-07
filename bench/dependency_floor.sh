@@ -112,10 +112,11 @@ COMPILER="$REPO/.build/iyi"
 # `pthread_create` and `sysctlbyname` joined with the parallel marker
 # (Stage 7): the collector starts its helpers as kernel threads of its own
 # and sizes them by `hw.ncpu`. `pipe` joined with the concurrent mark
-# (Stage 9): helper 0 takes the mark's second stop, which stops the main
-# thread, so the main thread registers a line - and on darwin a line's park
-# is a pipe - the first time a mark runs beside it, and `sigaction`
-# joins with it, the stop's handler installed then. `madvise` left when
+# (Stage 9), when helper 0's second stop registered the main thread and a
+# line's park on darwin was a pipe, and left every program's list when the
+# park became the futex (`IyiThread.park`): the pipes were never closed,
+# two descriptors for every thread a program started. `sigaction` joined
+# with it, the stop's handler installed then. `madvise` left when
 # the sweep's release of dead pages became a fresh `mmap` over the run:
 # its advice, `MADV_FREE_REUSABLE`, kept the bytes, and a fresh object
 # carved there read them. `mprotect` joined with the first
@@ -147,8 +148,8 @@ COMPILER="$REPO/.build/iyi"
 # mkdir, rmdir) and `std/udp` (sendto, recvfrom) joined the way `IyiSocket`
 # did: libSystem is darwin's interface, and on Linux each is a raw syscall
 # the object does not name. What the modules declare but their gates never
-# reach (fstat64, chown) is not on the list; the floor is
-# what a program leaves undefined, not what a module could ask.
+# reach (chown) is not on the list; the floor is what a program leaves
+# undefined, not what a module could ask.
 # `fcntl` and `getsockopt` joined when the socket started parking: every
 # socket is O_NONBLOCK now, and a connect that is in progress reads
 # SO_ERROR when the poller says it finished. Linux does both by syscall.
@@ -174,8 +175,24 @@ COMPILER="$REPO/.build/iyi"
 # attributes that go with it (the child's three streams, its directory, an
 # empty signal mask), waits for it with `waitpid`, ends a cancelled one with
 # `kill`, and finds its own executable with `_NSGetExecutablePath`: all
-# libSystem's. Linux spells the same with `clone`, `execve`, `wait4`, `kill`
-# and `/proc/self/exe`, by syscall.
+# libSystem's. A child's piped stream is a `pipe`, as `std/signal`'s
+# self-pipe is. Linux spells the same with `clone`, `execve`, `wait4`,
+# `kill`, `pipe2` and `/proc/self/exe`, by syscall. `Process.exec` is
+# `posix_spawn` with POSIX_SPAWN_SETEXEC, keeping the three streams by
+# `posix_spawn_file_actions_addinherit_np`, and `Process.pid` is `getpid`;
+# Linux's are `execve` and `getpid`, by syscall.
+# `std/system` asks libSystem for the host name (`gethostname`) and the
+# page size (`getpagesize`), and `std/term` reads and sets a terminal's
+# mode and size (`tcgetattr`, `tcsetattr`, `ioctl`); Linux spells the
+# same with `uname`, `/proc/self/auxv` and `ioctl` by syscall.
+# `getpeername` joined with `IyiSocket#remote_address`, the other end's
+# name as `getsockname` gives this end's; Linux's is a syscall.
+# `std/user` asks libSystem who an account is: `getuid` and `getgid` for
+# this process, `getpwuid_r`, `getpwnam_r`, `getgrgid_r` and `getgrnam_r`
+# for a user or a group by id or name, and `getgrouplist` for a user's
+# groups. darwin's accounts are Directory Services', which these calls are
+# the door to; Linux spells the same with `getuid` and `getgid` by syscall
+# and reads `/etc/passwd` and `/etc/group` itself.
 # The eight 128-bit helpers - `__divti3`, `__modti3`, `__udivti3`,
 # `__umodti3` and the four int-to-float conversions - are calls LLVM makes
 # for a division or conversion no instruction does, and arrived when
@@ -183,7 +200,58 @@ COMPILER="$REPO/.build/iyi"
 # the optimiser cannot see. libSystem re-exports compiler-rt, which
 # defines them; Linux links libgcc's copies into the program; Windows has
 # neither and the prelude's win32 arm defines them itself.
-ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill _NSGetExecutablePath"
+# `fstat64` came back off that unreached list for a hang: a program
+# reading a regular file as standard input waits on kqueue before each
+# read, and kqueue's EVFILT_READ never fires at a file's end, so darwin
+# asks whether standard input is a regular file and reads it unwaited
+# (`bench/std_io_exercise.sh` holds it). Every program that reads a
+# stream - standard input, a pipe, a socket - links the name, and only
+# standard input makes the call; Linux's epoll refuses a regular file
+# and says the same by syscall.
+# `os_sync_wait_on_address` and `os_sync_wake_by_address_all` joined with
+# the mark helpers' park (GC_DESIGN.md, "darwin's helpers park"): a helper
+# with no work spins SPIN_BEFORE_PARK_NS and then sleeps on the
+# generation word, where it had spun on that word forever and an idle
+# program held every core. They are libSystem's public futex, in
+# `FLOOR_BASE_DARWIN` because every program's collector reaches them.
+# `__ulock_wait`, the private call they wrap, was the other futex; a
+# Mach semaphore was the other public park, four names with
+# `mach_task_self_` and a trap per sleeper woken. Linux's park is the
+# futex syscall and Windows' kernel32's semaphore, so neither list moved.
+ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawn_file_actions_addinherit_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask pipe waitpid kill getpid _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist fstat64"
+# `std/system_roots` reads the roots darwin trusts, which are kept behind
+# Security.framework and nowhere else - no file holds them - and arrive in
+# CoreFoundation's containers: the anchors and the administrator's and
+# user's trust settings, each certificate's DER, and the release of every
+# copy. Linux reads a bundle file instead; Windows asks crypt32.
+ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN SecTrustCopyAnchorCertificates SecTrustSettingsCopyCertificates SecTrustSettingsCopyTrustSettings SecCertificateCopyData CFArrayGetCount CFArrayGetValueAtIndex CFDataGetBytePtr CFDataGetLength CFDictionaryGetValue CFNumberGetValue CFRelease CFStringCreateWithCString"
+# `flock` is an open file's whole-file lock, `IyiIO#flock_*` in std/file:
+# libSystem's call, which Linux makes as a system call and Windows as
+# kernel32's `LockFileEx`.
+ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN flock"
+# `shutdown` is a socket's half-close, `IyiSocket#close_write` in
+# std/socket: libSystem's POSIX call, nothing new to the machine, which
+# Linux makes as a system call and Windows as ws2_32's `shutdown`, already
+# imported for `close`. The fuzz exercise's scripted peers reach it.
+ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN shutdown"
+# `memset_pattern16` is LLVM's, not the library's: the loop-idiom pass
+# turns a loop storing one value that is not a byte repeated into a call
+# to libSystem's 16-byte pattern fill, the way it turns a zeroing loop into
+# a memset. The loop is std/compress's `Inflater#initialize` filling the
+# fixed distance code's thirty lengths with 5 (120 bytes, pattern i32 5),
+# which a --release program reaching it - `cores-release`, through
+# std/http's `BodyReader#read` - inlines and the pass rewrites. It is
+# library code, not the runtime that clears its own memory, so the call
+# stays. The fill dates from std/compress's DEFLATE (6c9f29160) and went
+# unseen because the std exercises build plain and no sample reached it
+# until `samples/iyi/cores.iyi` (release/0.20.0-prep):
+# `std_compress_exercise --release` names it on master 88bb3a0e5 too, and
+# its plain build does not. LLVM 20.1.2, CI's and tmac's, makes the call;
+# 21.1.8 cross-compiling the same exercise for arm64-apple-macosx15.0
+# stores the fill as vectors and names nothing, so an LLVM bump may report
+# it no longer needed. LLVM offers the call on Apple targets only, so
+# Linux and Windows keep the loop.
+ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN memset_pattern16"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.
@@ -380,9 +448,10 @@ imports_audit() { # imports_audit <program> <binary>
   for dll in $extra; do
     echo "THE FLOOR MOVED: $program imports $dll"
   done
-  echo "A program iyi builds may import the process interface, OS entropy, Winsock
-and the MSVC runtime, each with a reason in SPEC.md III.10. Another DLL is a
-dependency being taken on, and it needs a reason there before a line here."
+  echo "A program iyi builds may import the process interface, OS entropy, Winsock,
+the certificate stores and the MSVC runtime, each with a reason in SPEC.md
+III.10. Another DLL is a dependency being taken on, and it needs a reason
+there before a line here."
   status=1
 }
 
@@ -565,9 +634,21 @@ while IFS= read -r annotation; do
     '@[Link("kernel32")]') ;;
     '@[Link(ldflags: "msvcrt.lib ucrt.lib vcruntime.lib")]') ;;
     '@[Link("gc", pkg_config: "bdw-gc")]') ;;
+    # The same opt-in collector on Windows, named by its DLL so the compiler
+    # copies gc.dll beside a `-Dgc_boehm` program, as Crystal's own binding
+    # does; without it such a program found the DLL only on PATH and exited
+    # 0xC0000135 where none was there. No library is added: it is the file
+    # the line above already links against.
+    '@[Link(dll: "gc.dll")]') ;;
     # Windows has no kernel32 name for OS entropy: `RtlGenRandom` lives in
     # advapi32, which ships with every Windows the way kernel32 does, and
-    # `std/random` is its one caller (SPEC.md III.10's inventory says so).
+    # `std/random` calls it; `std/socket` reads the registry there for the
+    # name servers Windows was configured with, which the platform's own
+    # resolver API would have taken iphlpapi or dnsapi to ask (SPEC.md
+    # III.10's inventory says so); `std/user` asks it for the account name
+    # (`GetUserNameW`) and the process token's SIDs, which are advapi32's
+    # alone, and leaves netapi32's account database and userenv's profile
+    # call unlinked.
     '@[Link("advapi32")]') ;;
     # Windows' sockets are Winsock's: `ws2_32` is the platform's network
     # interface the way kernel32 is its process interface, it ships with
@@ -576,6 +657,14 @@ while IFS= read -r annotation; do
     # `AcceptEx` and `ConnectEx` are mswsock's exports reached through
     # `WSAIoctl`, so they add no second annotation.
     '@[Link("ws2_32")]') ;;
+    # The trusted roots are each platform's own, kept where only its own
+    # interface reaches: crypt32's stores on Windows, Security.framework's
+    # anchors and trust settings on darwin with CoreFoundation's containers
+    # around them. `std/system_roots` is their only caller (SPEC.md
+    # III.10's inventory says so); Linux's are a file.
+    '@[Link("crypt32")]') ;;
+    '@[Link(framework: "Security")]') ;;
+    '@[Link(framework: "CoreFoundation")]') ;;
     *)
       echo "  THE FLOOR MOVED: the library declares $annotation"
       echo "  A library iyi ships links the platform libc and, opt-in, a"

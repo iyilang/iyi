@@ -49,8 +49,15 @@ cd "$WORK" || exit 1
 
 status=0
 
+# Each sample writes and reads its own directory of artifacts. An emitting
+# build writes every module it imports, from what that build compiled, so
+# one shared directory let a later sample rewrite an earlier one's: once
+# `std/time` imported `std/list`, `std_time` wrote `std/iterator`'s artifact
+# from a build that never made a `Stop`, and `std_iterator` read that one.
+# The claim here is per program - its own modules' artifacts, their source
+# gone - so the directory is too.
 for sample in $SAMPLES; do
-  if ! "$IYI" build --emit-iyimod mods -o "from-source-$sample" "$sample.iyi" >"emit-$sample.log" 2>&1; then
+  if ! "$IYI" build --emit-iyimod "mods-$sample" -o "from-source-$sample" "$sample.iyi" >"emit-$sample.log" 2>&1; then
     echo "$sample: writing artifacts failed"
     tail -5 "emit-$sample.log"
     status=1
@@ -65,7 +72,7 @@ rm -rf app std boot kemal
 
 for sample in $SAMPLES; do
   [ -f "from-source-$sample" ] || continue
-  if ! "$IYI" build --use-iyimod mods -o "from-artifact-$sample" "$sample.iyi" >"use-$sample.log" 2>&1; then
+  if ! "$IYI" build --use-iyimod "mods-$sample" -o "from-artifact-$sample" "$sample.iyi" >"use-$sample.log" 2>&1; then
     echo "$sample: building from artifacts failed"
     tail -12 "use-$sample.log"
     status=1
@@ -323,7 +330,7 @@ travel() { # travel <case> <expected output>, with $TRAVEL/<case>/{kit/lib.iyi,m
     echo "travel: $name answers from its artifact as from source"
   fi
 }
-mkdir -p "$TRAVEL"/{impl_block,abstract_generic,empty_body,field_default,hooks,macro_def,annotated,unreached}/kit
+mkdir -p "$TRAVEL"/{impl_block,abstract_generic,empty_body,field_default,virtual_class_var,hooks,macro_def,annotated,unreached}/kit
 cat > "$TRAVEL/impl_block/kit/lib.iyi" <<'IYI'
 module kit/lib
 
@@ -446,6 +453,42 @@ import kit/lib::*
 puts A.new.describe
 IYI
 travel field_default "7 0"
+# A class variable read through a virtual owner: `look` and `count` are
+# called on `Base+` and `Base+.class` because `Sub < Base`, so the module's
+# object code calls `~Kit::Lib::Base+::table:read` and its metaclass twin,
+# which are main-module functions. `main` reads no class variable itself,
+# so nothing but the artifact's record can tell it to define them.
+cat > "$TRAVEL/virtual_class_var/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class Base
+  @@table = [3, 4]
+
+  def look : Int32
+    @@table[0]
+  end
+
+  def self.count : Int32
+    @@table.size
+  end
+end
+
+pub class Sub < Base
+end
+
+pub def answer : String
+  items = [Base.new, Sub.new] of Base
+  "#{items.map(&.look)} #{items.map { |item| item.class.count }}"
+end
+IYI
+cat > "$TRAVEL/virtual_class_var/main.iyi" <<'IYI'
+module main
+
+import kit/lib::{answer}
+
+puts answer
+IYI
+travel virtual_class_var "[3, 3] [2, 2]"
 cat > "$TRAVEL/hooks/kit/lib.iyi" <<'IYI'
 module kit/lib
 
@@ -744,6 +787,205 @@ else
       status=1
     fi
   done
+fi
+
+# And a def with an untyped parameter, which is a `forall` nobody named:
+# its instantiations are the caller's (SPEC.md IV.1g, issue #134). The
+# layout is the issue's: `lib/thing` derives `serializable` and imports a
+# package, so it has no artifact to be read from and every build compiles
+# it from source, while `std/json` beside it is read from its artifact.
+# Built twice, each build writing and reading the same directory, the way
+# an incremental loop runs. `std/json`'s `write_or_null(val, b : Builder)`
+# stayed behind as a header and its instantiation at `Item` went into
+# `std/json`'s `JSON` unit, which called `Item#to_json`: the second build
+# linked that unit, compiled `lib/thing` from source with nothing of its
+# own calling `to_json`, and the link ended on
+# `*Lib::Thing::Item#to_json<Std::Json::Builder>:Nil`.
+PKG="$WORK/untyped"
+mkdir -p "$PKG/pkg" "$PKG/lib"
+printf 'module art2\n\nrequire example.com/pkg v0.1.0\n\nreplace example.com/pkg => ./pkg\n' > "$PKG/iyi.mod"
+printf 'module example.com/pkg\n' > "$PKG/pkg/iyi.mod"
+printf 'module pkg\n\npub def label : String\n  "item"\nend\n' > "$PKG/pkg/pkg.iyi"
+cat > "$PKG/lib/thing.iyi" <<'IYI'
+module lib/thing
+
+import std/json::{JSON, serializable}
+import example.com/pkg
+
+pub struct Item
+  getter name : String
+
+  derive serializable
+
+  def initialize
+    @name = Pkg.label
+  end
+end
+IYI
+cat > "$PKG/lib/render.iyi" <<'IYI'
+module lib/render
+
+import std/json::{JSON}
+import lib/thing::{Item}
+
+pub def render : String
+  JSON.to_json([Item.new])
+end
+IYI
+printf 'module main\n\nimport lib/render::{render}\n\nputs render\n' > "$PKG/main.iyi"
+untyped_ok=1
+for build in first second; do
+  if ! (cd "$PKG" && "$IYI" build --emit-iyimod mods --use-iyimod mods -o "$build" main.iyi) > "$PKG/$build.log" 2>&1; then
+    echo "untyped: the $build build writing and reading artifacts failed"
+    grep -m3 -E "error|Error|undefined" "$PKG/$build.log"
+    untyped_ok=0
+  elif [ "$("$PKG/$build" 2>&1 | tr -d '\r')" != '[{"name":"item"}]' ]; then
+    echo "untyped: the $build build printed '$("$PKG/$build" 2>&1)'"
+    untyped_ok=0
+  fi
+done
+if [ "$untyped_ok" = 1 ]; then
+  echo "untyped: a serializable type in a module importing a package builds twice from std/json's artifact"
+else
+  status=1
+fi
+
+# And a parameter written as a trait, which is a bounded `forall` nobody
+# named. `kit/lib`'s `area_of(x : Shape)` called at `lib/thing`'s `Tri`
+# put `area_of<Lib::Thing::Tri>` in `kit/lib`'s unit, calling `Tri#area`.
+# The next program, in the same directory, imports both and no longer calls
+# `area_of`: `kit/lib` is read from its artifact, `lib/thing` is compiled
+# from source, nothing compiles `Tri#area`, and the link ended on
+# `*Lib::Thing::Tri#area:Int32`.
+BOUND="$WORK/bounded"
+mkdir -p "$BOUND/kit" "$BOUND/lib"
+cp -r "$PKG/iyi.mod" "$PKG/pkg" "$BOUND/"
+cat > "$BOUND/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub trait Shape
+  abstract def area : Int32
+end
+
+pub def area_of(x : Shape) : Int32
+  x.area + 1
+end
+IYI
+cat > "$BOUND/lib/thing.iyi" <<'IYI'
+module lib/thing
+
+import kit/lib::{Shape}
+import example.com/pkg
+
+pub struct Tri
+  getter name : String
+
+  def initialize
+    @name = Pkg.label
+  end
+end
+
+impl Shape for Tri
+  def area : Int32
+    @name.size
+  end
+end
+IYI
+printf 'module main\n\nimport kit/lib::{area_of}\nimport lib/thing::{Tri}\n\nputs area_of(Tri.new)\n' > "$BOUND/first.iyi"
+printf 'module main\n\nimport kit/lib::{area_of}\nimport lib/thing::{Tri}\n\nputs Tri.new.name\n' > "$BOUND/second.iyi"
+bounded_ok=1
+for build in first second; do
+  expected=5
+  [ "$build" = second ] && expected=item
+  if ! (cd "$BOUND" && "$IYI" build --emit-iyimod mods --use-iyimod mods -o "$build" "$build.iyi") > "$BOUND/$build.log" 2>&1; then
+    echo "bounded: the $build program writing and reading artifacts failed"
+    grep -m3 -E "error|Error|undefined" "$BOUND/$build.log"
+    bounded_ok=0
+  elif [ "$("$BOUND/$build" 2>&1 | tr -d '\r')" != "$expected" ]; then
+    echo "bounded: the $build program printed '$("$BOUND/$build" 2>&1)'"
+    bounded_ok=0
+  fi
+done
+if [ "$bounded_ok" = 1 ]; then
+  echo "bounded: a trait-typed parameter's instantiation at another module's type stays out of kit/lib's artifact"
+else
+  status=1
+fi
+
+# And a travelling body that asks where it was written (issue #140). The
+# layout is the issue's: `lib/page`'s `forall` `greet` calls
+# `Eiy.render("../views/greet.eiy")`, whose macro reads the template beside
+# `@caller.first.filename`. Read back from `mods/lib/page.iyimod`, the body
+# was located in the artifact, and the build that read it ended on
+# `cannot read mods/lib/../views/greet.eiy`. Both of the issue's sequences:
+# a build writing artifacts and then one reading them too, and two builds
+# each writing and reading from an empty directory. The body has a `defer`
+# too: a travelling body comes back as text, its `defer` as the `ensure` it
+# was lowered to, and once the body was located in its `.iyi` the refusal
+# of `ensure` in iyi source took it for one a person wrote, which refused
+# 19 std exercises' artifacts until a node read from an artifact said so
+# by a mark of its own (`Location#artifact`) rather than by its filename.
+EIY="$WORK/eiyart"
+mkdir -p "$EIY/lib" "$EIY/views"
+printf 'module eiyart\n' > "$EIY/iyi.mod"
+cat > "$EIY/lib/page.iyi" <<'IYI'
+module lib/page
+
+import std/eiy::{Eiy}
+
+# A `forall` def: the caller instantiates it, so its body travels in the artifact.
+pub def greet(name : T) : String forall T
+  said = [] of String
+  defer said << "done"
+  Eiy.render("../views/greet.eiy")
+end
+IYI
+printf 'Hello, <%%= name %%>!' > "$EIY/views/greet.eiy"
+printf 'module main\n\nimport lib/page::{greet}\n\nputs greet("world")\n' > "$EIY/main.iyi"
+eiy_ok=1
+for sequence in emit-then-both both-twice; do
+  rm -rf "$EIY/mods"
+  for build in first second; do
+    flags="--emit-iyimod mods --use-iyimod mods"
+    [ "$sequence" = emit-then-both ] && [ "$build" = first ] && flags="--emit-iyimod mods"
+    # shellcheck disable=SC2086
+    if ! (cd "$EIY" && "$IYI" build $flags -o "$build" main.iyi) > "$EIY/$sequence-$build.log" 2>&1; then
+      echo "eiy: the $build build of $sequence failed"
+      grep -m3 -E "error|Error|cannot read" "$EIY/$sequence-$build.log"
+      eiy_ok=0
+    elif [ "$("$EIY/$build" 2>&1 | tr -d '\r')" != 'Hello, world!' ]; then
+      echo "eiy: the $build build of $sequence printed '$("$EIY/$build" 2>&1)'"
+      eiy_ok=0
+    fi
+  done
+done
+# And an error inside a travelling body, which names the line of the source
+# the body was written on rather than a line of the artifact's rendering.
+cat > "$EIY/lib/sized.iyi" <<'IYI'
+module lib/sized
+
+pub def sized(x : T) : Int32 forall T
+  x.size + 1
+end
+IYI
+printf 'module main\n\nimport lib/sized::{sized}\n\nputs sized("abc")\n' > "$EIY/sized.iyi"
+printf 'module main\n\nimport lib/sized::{sized}\n\nputs sized(2)\n' > "$EIY/unsized.iyi"
+if ! (cd "$EIY" && "$IYI" build --emit-iyimod mods -o sized sized.iyi) > "$EIY/sized.log" 2>&1; then
+  echo "eiy: lib/sized failed to write its artifact"
+  grep -m3 -E "error|Error" "$EIY/sized.log"
+  eiy_ok=0
+else
+  (cd "$EIY" && "$IYI" build --use-iyimod mods -o unsized unsized.iyi) > "$EIY/unsized.log" 2>&1
+  if ! grep -q -E "^In (.*[/\\\\])?lib[/\\\\]sized\.iyi:4:5" "$EIY/unsized.log"; then
+    echo "eiy: an error in a body read from lib/sized's artifact is not at lib/sized.iyi:4:5"
+    grep -m3 -E "^In |Error" "$EIY/unsized.log"
+    eiy_ok=0
+  fi
+fi
+if [ "$eiy_ok" = 1 ]; then
+  echo "eiy: a travelling body's Eiy.render and its errors are located in its source, both build sequences"
+else
+  status=1
 fi
 
 echo "workdir $WORK"

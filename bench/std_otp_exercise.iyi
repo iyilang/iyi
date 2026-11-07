@@ -1,0 +1,167 @@
+# Exercises `std/otp`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_otp_exercise.iyi
+
+module bench/std_otp_exercise
+
+import std/otp::{HOTP, TOTP, OTPAuth, OTPAlgorithm, OTPError}
+import std/time::{Time}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def bytes(text : String) : Array(UInt8)
+  Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] }
+end
+
+# What a parse answered, as one string: the URI written again with the
+# fields that are not in it, or the error's sentence after "error: ".
+def said(answer : OTPAuth | OTPError) : String
+  if answer.is_a?(OTPError)
+    "error: " + answer.message
+  else
+    "#{answer.to_s} account=#{answer.account} issuer=#{answer.issuer}"
+  end
+end
+
+sha1_seed = bytes("12345678901234567890")
+sha256_seed = bytes("12345678901234567890123456789012")
+sha512_seed = bytes("1234567890123456789012345678901234567890123456789012345678901234")
+
+puts "== HOTP, RFC 4226 appendix D"
+# The six-digit values, and the 31-bit numbers truncation picked before
+# they were cut to six (the appendix's "Truncated Decimal"), written as
+# ten digits.
+hotp = ["755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583", "399871", "520489"]
+truncated = ["1284755224", "1094287082", "0137359152", "1726969429", "1640338314", "0868254676", "1918287922", "0082162583", "0673399871", "0645520489"]
+10.times do |count|
+  assert_str hotp[count], HOTP.code(sha1_seed, count.to_i64), "RFC 4226 count #{count}"
+  assert_str truncated[count], HOTP.code(sha1_seed, count.to_i64, 10), "RFC 4226 count #{count}, truncated"
+end
+puts "  the ten counts, six digits and the truncated number"
+
+puts "\n== TOTP, RFC 6238 appendix B"
+times = [59_i64, 1111111109_i64, 1111111111_i64, 1234567890_i64, 2000000000_i64, 20000000000_i64]
+sha1 = ["94287082", "07081804", "14050471", "89005924", "69279037", "65353130"]
+sha256 = ["46119246", "68084774", "67062674", "91819424", "90698825", "77737706"]
+sha512 = ["90693936", "25091201", "99943326", "93441116", "38618901", "47863826"]
+times.each_with_index do |t, i|
+  assert_str sha1[i], TOTP.code(sha1_seed, t, 30, 8), "RFC 6238 SHA1 at #{t}"
+  assert_str sha256[i], TOTP.code(sha256_seed, t, 30, 8, OTPAlgorithm::SHA256), "RFC 6238 SHA256 at #{t}"
+  assert_str sha512[i], TOTP.code(sha512_seed, t, 30, 8, OTPAlgorithm::SHA512), "RFC 6238 SHA512 at #{t}"
+end
+# Six digits are the last six of eight, and a step of 60 is the counter
+# halved: the same code at twice the time.
+assert_str "287082", TOTP.code(sha1_seed, 59_i64), "RFC 6238 SHA1 at 59, six digits"
+assert_str "07081804", TOTP.code(sha1_seed, 2222222218_i64, 60, 8), "a step of 60"
+puts "  the six times under SHA1, SHA256 and SHA512, eight digits"
+
+puts "\n== verify"
+t = 1111111109_i64
+now_code = TOTP.code(sha1_seed, t)
+ahead = TOTP.code(sha1_seed, t + 30_i64)
+behind = TOTP.code(sha1_seed, t - 30_i64)
+two_ahead = TOTP.code(sha1_seed, t + 60_i64)
+two_behind = TOTP.code(sha1_seed, t - 60_i64)
+assert_true TOTP.verify(sha1_seed, now_code, t), "the code for the time verifies"
+assert_true TOTP.verify(sha1_seed, ahead, t), "a code one step ahead verifies"
+assert_true TOTP.verify(sha1_seed, behind, t), "a code one step behind verifies"
+assert_true !TOTP.verify(sha1_seed, two_ahead, t), "a code two steps ahead does not verify"
+assert_true !TOTP.verify(sha1_seed, two_behind, t), "a code two steps behind does not verify"
+assert_true TOTP.verify(sha1_seed, now_code, t, 0), "window 0: the code for the time verifies"
+assert_true !TOTP.verify(sha1_seed, ahead, t, 0), "window 0: a code one step ahead does not verify"
+assert_true TOTP.verify(sha1_seed, two_behind, t, 2), "window 2: a code two steps behind verifies"
+# The edges of a step: 1111111109 is the 37037036th, which runs from
+# 1111111080 to 1111111109, so a second later is the next.
+assert_true TOTP.verify(sha1_seed, now_code, 1111111080_i64, 0), "the first second of the step"
+assert_true !TOTP.verify(sha1_seed, now_code, 1111111110_i64, 0), "the first second of the next step"
+assert_true !TOTP.verify(sha1_seed, now_code.rjust(7, '0'), t), "a code of the wrong length does not verify"
+assert_true !TOTP.verify(sha1_seed, "", t), "an empty code does not verify"
+assert_true !TOTP.verify(sha1_seed, now_code, t, 1, 30, 6, OTPAlgorithm::SHA256), "a code under another hash does not verify"
+assert_true TOTP.verify(sha256_seed, "68084774", t, 1, 30, 8, OTPAlgorithm::SHA256), "eight digits under SHA256"
+# Near the epoch the window reaches back past counter 0, which has no
+# step before it.
+assert_true TOTP.verify(sha1_seed, "755224", 10_i64), "the first step, from inside it"
+assert_true TOTP.verify(sha1_seed, "755224", 40_i64), "the first step, from the second"
+puts "  the step either side and not two, windows of 0 and 2, step edges, wrong lengths"
+
+puts "\n== the clock"
+# The code now is the code for the second read before or after it.
+before = Time.utc.to_unix
+code = TOTP.now(sha1_seed)
+after = Time.utc.to_unix
+assert_true code == TOTP.code(sha1_seed, before) || code == TOTP.code(sha1_seed, after), "TOTP.now is the code for the clock's time"
+assert_true TOTP.verify(sha1_seed, code, after), "TOTP.now verifies against the clock"
+assert_true before > 1700000000_i64, "the clock is past 2023"
+puts "  TOTP.now is the code for Time.utc"
+
+puts "\n== otpauth URIs"
+# "Hello!" and DEADBEEF: the secret the key URI format's own example
+# carries.
+secret = bytes("Hello!") + [0xDE_u8, 0xAD_u8, 0xBE_u8, 0xEF_u8]
+built = OTPAuth.totp(secret, "alice@google.com", "Example")
+assert_str "otpauth://totp/Example:alice%40google.com?secret=JBSWY3DPEHPK3PXP&issuer=Example", built.to_s, "the key URI format's example"
+full = OTPAuth.totp(sha512_seed, "jo bloggs+2@example.com", "ACME Co.", OTPAlgorithm::SHA512, 8, 60)
+assert_str "otpauth://totp/ACME%20Co.:jo%20bloggs%2B2%40example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA&issuer=ACME%20Co.&algorithm=SHA512&digits=8&period=60", full.to_s, "a TOTP URI with every parameter"
+counted = OTPAuth.hotp(sha1_seed, "bob", 42_i64, "", OTPAlgorithm::SHA256)
+assert_str "otpauth://hotp/bob?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=42&algorithm=SHA256", counted.to_s, "an HOTP URI with no issuer"
+assert_str "otpauth://totp/%C3%9Cber%20AG:z%C3%BCrich?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=%C3%9Cber%20AG", OTPAuth.totp(sha1_seed, "zürich", "Über AG").to_s, "UTF-8 escaped byte by byte"
+
+[built, full, counted].each do |auth|
+  back = OTPAuth.parse(auth.to_s)
+  raise "ASSERTION FAILED: #{auth.to_s} parsed back: #{back.message}" if back.is_a?(OTPError)
+  assert_str auth.to_s, back.to_s, "parsed back and written again"
+  assert_str auth.account, back.account, "the account parsed back"
+  assert_str auth.issuer, back.issuer, "the issuer parsed back"
+  assert_true auth.secret == back.secret, "the secret parsed back"
+  assert_true auth.algorithm == back.algorithm && auth.digits == back.digits && auth.period == back.period, "the parameters parsed back"
+  assert_true auth.counter == back.counter, "the counter parsed back"
+end
+parsed = OTPAuth.parse(full.to_s)
+if parsed.is_a?(OTPAuth)
+  assert_str "38618901", TOTP.code(parsed.secret, 4000000000_i64, parsed.period, parsed.digits, parsed.algorithm), "a parsed URI makes RFC 6238's code"
+end
+puts "  built against hand-written strings, and parsed back"
+
+# What a reader meets from other writers.
+assert_str "otpauth://totp/Example:alice%40google.com?secret=JBSWY3DPEHPK3PXP&issuer=Example account=alice@google.com issuer=Example",
+  said(OTPAuth.parse("OTPAUTH://TOTP/Example%3A%20%20alice@google.com?secret=jbswy3dpehpk3pxp&issuer=Example&image=https%3A%2F%2Fexample.com%2Fl.png")),
+  "%3A, spaces before the account, a lower-case secret, an unknown parameter"
+assert_str "otpauth://totp/ACME%20Co:alice?secret=JBSWY3DPEE&issuer=ACME%20Co account=alice issuer=ACME Co",
+  said(OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEE%3D%3D%3D%3D%3D%3D&issuer=ACME+Co")),
+  "an issuer from the parameter alone, + as a space, a padded secret"
+assert_str "otpauth://totp/Big:alice?secret=JBSWY3DPEHPK3PXP&issuer=Big account=alice issuer=Big",
+  said(OTPAuth.parse("otpauth://totp/Big:alice?secret=JBSWY3DPEHPK3PXP")),
+  "an issuer from the label alone"
+assert_str "otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&digits=7 account=alice issuer=",
+  said(OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&algorithm=sha1&digits=7&period=30&")),
+  "defaults written out, in lower case, and a trailing &"
+puts "  the label's colon escaped, case, + and padding, unknown parameters"
+
+assert_str "error: otpauth: the URI does not begin with otpauth://", said(OTPAuth.parse("https://example.com/?secret=JBSWY3DPEHPK3PXP")), "another scheme"
+assert_str "error: otpauth: the type is \"motp\", not totp or hotp", said(OTPAuth.parse("otpauth://motp/alice?secret=JBSWY3DPEHPK3PXP")), "another type"
+assert_str "error: otpauth: no label after the type", said(OTPAuth.parse("otpauth://totp")), "no label"
+assert_str "error: otpauth: the label names no account", said(OTPAuth.parse("otpauth://totp/Example:?secret=JBSWY3DPEHPK3PXP")), "no account"
+assert_str "error: otpauth: no secret parameter", said(OTPAuth.parse("otpauth://totp/alice?issuer=Example")), "no secret"
+assert_str "error: otpauth: the secret is empty", said(OTPAuth.parse("otpauth://totp/alice?secret=")), "an empty secret"
+assert_str "error: otpauth: the secret is not base32: base32: byte 4 is '1', which is not in the alphabet", said(OTPAuth.parse("otpauth://totp/alice?secret=JBSW1")), "a secret that is not base32"
+assert_str "error: otpauth: the label's issuer \"Example\" and the issuer parameter \"Other\" differ", said(OTPAuth.parse("otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&issuer=Other")), "issuers that disagree"
+assert_str "error: otpauth: the algorithm is \"MD5\", not SHA1, SHA256 or SHA512", said(OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&algorithm=MD5")), "another algorithm"
+assert_str "error: otpauth: digits must be from 6 to 10, not 4", said(OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&digits=4")), "four digits"
+assert_str "error: otpauth: digits is \"six\", not a number", said(OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&digits=six")), "digits in words"
+assert_str "error: otpauth: the period must be at least 1 second, not 0", said(OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&period=0")), "a period of 0"
+assert_str "error: otpauth: the period is 99999999999, past 2147483647", said(OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&period=99999999999")), "a period past an Int32"
+assert_str "error: otpauth: an hotp URI needs a counter parameter", said(OTPAuth.parse("otpauth://hotp/alice?secret=JBSWY3DPEHPK3PXP")), "hotp without a counter"
+assert_str "error: otpauth: the counter is \"-1\", not a number", said(OTPAuth.parse("otpauth://hotp/alice?secret=JBSWY3DPEHPK3PXP&counter=-1")), "a negative counter"
+assert_str "error: otpauth: the secret parameter appears twice", said(OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&secret=GEZDGNBV")), "a second secret"
+assert_str "error: otpauth: the % at byte 5 of the label is not followed by two hexadecimal digits", said(OTPAuth.parse("otpauth://totp/alice%4?secret=JBSWY3DPEHPK3PXP")), "a broken escape"
+assert_str "error: otpauth: the account \"a:b\" holds a colon", said(OTPAuth.parse("otpauth://totp/x:a%3Ab?secret=JBSWY3DPEHPK3PXP")), "a second colon"
+puts "  each URI it cannot read named as an error value"
+
+puts "\nALL CHECKS PASSED"

@@ -1002,10 +1002,9 @@ class Iyi::CodeGenVisitor
       call_arg = check_proc_is_not_closure(call_arg, field_type)
     end
 
-    value = to_rhs call_arg, field_type
     field_pointer = yield(field_type)
     iyi_with_write_barrier(field_pointer, field_type) do
-      store value, field_pointer
+      store_value call_arg, field_type, field_pointer
     end
 
     original_call_arg
@@ -1124,6 +1123,19 @@ class Iyi::CodeGenVisitor
     type_id(type.metaclass)
   end
 
+  # iyi: `~metaclass` is defined in the main module the first time code
+  # in this build asks a virtual type for its class. An artifact's object
+  # code that asks declares the function and leaves it to the program's
+  # main module, which defined it only when the program's own code had
+  # asked too: `import std/password::{Scrypt}` and one call to it linked
+  # with "undefined reference to `~metaclass'" from std/digest's own
+  # `#{self.class}`, under `--use-iyimod` alone. A build that links
+  # artifacts defines it whatever its own code asked.
+  def iyi_define_metaclass_fun : Nil
+    name = "~metaclass"
+    create_metaclass_fun(name) unless typed_fun?(@main_mod, name)
+  end
+
   def codegen_primitive_proc_call(node, target_def, call_args)
     location = @call_location
     set_current_debug_location(location) if location && @debug.line_numbers?
@@ -1143,7 +1155,7 @@ class Iyi::CodeGenVisitor
       proc_arg_type = proc_type.arg_types[i]
       target_def_arg_type = target_def.args[i].type
       args[i] = arg = upcast args[i], proc_arg_type, target_def_arg_type
-      closure_args << to_rhs(arg, proc_arg_type)
+      closure_args << (passed_indirectly?(proc_arg_type) ? arg : to_rhs(arg, proc_arg_type))
     end
 
     fun_ptr = builder.extract_value closure_ptr, 0

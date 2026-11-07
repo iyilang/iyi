@@ -1,0 +1,66 @@
+# Exercises `std/shared_proc`: a proc any thread may call, made only from a
+# block checked where it is written.
+#
+#     ./bin/iyi run bench/std_shared_proc_exercise.iyi
+#
+# A `SharedProc` called from eight parallel tasks, one kept in a struct a
+# parallel task is given, and one handed on by a `@[Share]` def's `&block`.
+# What the compiler refuses is `bench/std_shared_proc_exercise.sh`'s to
+# show: a run cannot print what does not build.
+
+module bench/std_shared_proc_exercise
+
+import std/shared_proc::{SharedProc}
+
+failed = false
+check = ->(label : String, ok : Bool) do
+  puts "#{ok ? "ok" : "FAIL"}: #{label}"
+  failed = true unless ok
+  nil
+end
+
+puts "== called from parallel tasks"
+factor = 3
+tripled = SharedProc(Int32, Int32).of { |n| n * factor }
+answers = Channel(Int32).new(8)
+group do |g|
+  8.times do |i|
+    g.spawn_parallel { answers.send(tripled.call(i)) }
+  end
+end
+sum = 0
+8.times { sum += answers.receive.as(Int32) }
+check.call "eight tasks on the pool called one SharedProc: 3 * (0 + ... + 7) = 84, got #{sum}", sum == 84
+
+puts "== kept in a value a parallel task is given"
+
+struct Table
+  getter name : String
+  getter rule : SharedProc(String, String)
+
+  def initialize(@name, @rule)
+  end
+end
+
+table = Table.new("shout", SharedProc(String, String).of { |text| text.upcase })
+shouted = Channel(String).new(1)
+group do |g|
+  g.spawn_parallel { shouted.send(table.rule.call("hi")) }
+end
+got = shouted.receive.as(String)
+check.call "a struct holding a SharedProc crossed to a worker and answered #{got.inspect}", got == "HI"
+
+puts "== handed on by a @[Share] def's own block"
+@[Share]
+def kept(&block : Int32 -> Int32) : SharedProc(Int32, Int32)
+  SharedProc(Int32, Int32).of(&block)
+end
+
+plus = 10
+added = kept { |n| n + plus }
+check.call "the def's block, checked where it was given, answered #{added.call(5)}", added.call(5) == 15
+
+if failed
+  exit 1
+end
+puts "ALL CHECKS PASSED"

@@ -4,10 +4,11 @@
 # A test is a plain iyi program named `*_test.iyi`: it asserts by exiting
 # non-zero, exactly the contract every gate in `bench/` already runs on,
 # because this repository's own culture is the framework. No DSL, no
-# matchers, no registry — a program that prints what failed and exits 1 is
-# a failing test, and one that exits 0 passed. The prelude's `assert` is
-# that in one word: a false condition panics with the message and the
-# site, which is a program printing what failed and exiting 1.
+# registry — a program that prints what failed and exits 1 is a failing
+# test, and one that exits 0 passed. The prelude's `assert` is that in one
+# word, and `assert_eq` and its family say more of it: a failed check
+# panics with the values and the site. `test "name" { }` runs named cases
+# to the same exit code, so this verb still reads nothing but that.
 #
 #     iyi test              # every *_test.iyi under the current directory
 #     iyi test dir file.iyi # these, recursing into directories

@@ -594,7 +594,7 @@ module Iyi
           elsif obj_type && obj_type.extern? && node.name.ends_with?('=')
             check_args_are_not_closure node, "can't set closure as C #{obj_type.type_desc} member"
           end
-          check_thread_captures_share(node, target_defs[0])
+          check_share_boundary(node, target_defs[0])
         end
 
         current_def = @current_def
@@ -646,23 +646,81 @@ module Iyi
       node
     end
 
-    # iyi: `IyiThread.start { }`'s block runs on another thread, so every
-    # value it captures must be `Share` (SPEC.md III.4.4, III.4.11). The
-    # block became a proc when the call was typed, and the proc's def knows
-    # which of the enclosing variables it closed over; each one's type is
-    # asked, and `self` too when the block reached an instance variable or
-    # called one of self's methods receiverless.
-    def check_thread_captures_share(node : Call, target_def : Def)
-      return unless target_def.name == "start"
+    # iyi: a block that crosses a `Share` boundary may capture only `Share`
+    # values (SPEC.md III.4.4). Four blocks cross one. `IyiThread.start { }`'s
+    # runs on another thread (III.4.11), and `IyiGroup#spawn_parallel { }`'s
+    # may (III.4.13): a parallel task is started by whichever pool worker is
+    # free, so it is held to exactly what a thread's block is. A def marked
+    # `@[Share]` keeps a block that may run on other threads, several at
+    # once - std/http's `Server.serve` - and its blocks are held to the
+    # same, unless the call passes its `serial` parameter the literal 1
+    # (`workers: 1`), which keeps the def on the caller's thread. And the block
+    # a method of an owning type runs (`@[Share(owns: true)]`, `Mutex#lock`
+    # and the rest) reaches the value the type keeps behind its lock: what
+    # the block captures would come within reach of that value, so it must
+    # be Share, and what the call answers leaves the lock, so it must be
+    # Share too. That is what lets `Mutex(Array(Int32))` be Share although
+    # `Array(Int32)` is not: nothing but these blocks reaches the array.
+    #
+    # The block became a proc when the call was typed, and the proc's def
+    # knows which of the enclosing variables it closed over; each one's type
+    # is asked, and `self` too when the block reached an instance variable
+    # or called one of self's methods receiverless.
+    def check_share_boundary(node : Call, target_def : Def)
       owner = target_def.owner
-      return unless owner.metaclass? && owner.instance_type.to_s == "IyiThread"
+      # `Server.serve(..., workers: 1)`: the def runs on the caller's thread
+      # alone, and nothing it is given crosses.
+      return if serial_call?(node, target_def)
+      check_share_crossing(node, target_def)
+      thread = if target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiThread"
+                 THREAD_BOUNDARY
+               elsif target_def.name == "spawn_parallel" && !owner.metaclass? && owner.to_s == "IyiGroup"
+                 PARALLEL_BOUNDARY
+               elsif target_def.iyi_share_block?
+                 shared_block_boundary(owner, target_def)
+               end
+      owning = thread ? nil : share_owning_type(owner)
+      return unless thread || owning
+      if owning
+        name = owning.to_s.split("::").last.split('(').first
+        subject = if owner.metaclass?
+                    "the block #{name}.#{target_def.name} makes the #{name}'s value in"
+                  else
+                    "the block #{name}##{target_def.name} runs behind the #{name}'s lock"
+                  end
+      else
+        subject = thread.not_nil!.subject
+      end
+      check_forwarded_block(node, subject)
       block = node.block
       return unless block
       fun_literal = block.fun_literal
       return unless fun_literal.is_a?(ProcLiteral)
       a_def = fun_literal.def
-      check_thread_constants_share(a_def)
-      check_thread_class_vars_share(a_def)
+
+      if owning
+        name = owning.to_s.split("::").last.split('(').first
+        consequence = "whatever the block can reach, the value behind the lock can reach, and the lock no longer guards it (SPEC.md III.4.4)"
+        # What the call answers has left the lock: a constructor answers
+        # the owning type itself, which is Share, and a method that answers
+        # the block's value must answer one that is.
+        if !owner.metaclass? && (answer = node.type?)
+          if why = Iyi::Share.reason(answer)
+            node.raise "#{name}##{target_def.name} answers `#{answer}`, which is not Share: #{why}; what a block behind the #{name}'s lock answers leaves the lock, and the lock no longer guards it. Answer a Share value - a count, a copy's numbers, a String - or use `lock`, which answers nil (SPEC.md III.4.4)"
+          end
+        end
+        check_share_constants(a_def, subject, consequence)
+        check_share_class_var_types(a_def, subject, consequence)
+      elsif thread
+        consequence = "(SPEC.md III.4.4)"
+        # A def with a `serial` parameter: a lock, or that parameter's 1.
+        unless thread.alone.empty?
+          consequence = "(SPEC.md III.4.4); or #{thread.alone}"
+        end
+        check_thread_constants_share(a_def, thread)
+        check_thread_class_vars_share(a_def, thread)
+        check_share_reach(block, a_def, thread)
+      end
       return unless a_def.closure?
 
       vars = a_def.vars
@@ -684,10 +742,19 @@ module Iyi
           next if meta.belongs_to?(a_def)
           type = meta.type?
           next unless type
+          # The block of the `@[Share]` def this call is in: checked where
+          # it was given, and a proc, which no type can say that of.
+          next if trusted_share_block?(captured.name)
           if why = Iyi::Share.reason(type)
-            captured.raise "the block IyiThread.start runs on another thread captures `#{captured.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.4)"
+            if thread && !thread.alone.empty?
+              captured.raise "#{subject} captures `#{captured.name} : #{type}`, which is not Share: #{why}. Put it behind a lock, a `Mutex(#{type})` (std/mutex), or #{thread.alone} (SPEC.md III.4.4)"
+            end
+            captured.raise "#{subject} captures `#{captured.name} : #{type}`, which is not Share: #{why}#{owning ? "; " : " "}#{consequence}"
           end
-          check_thread_capture_assigned_once(node, captured, meta, a_def)
+          # A block behind a lock runs in the task that called it, so a
+          # local it assigns is that task's alone; only a thread's block
+          # and a parallel task's share the cell.
+          check_thread_capture_assigned_once(node, captured, meta, a_def, thread) if thread
         end
       end
 
@@ -701,11 +768,202 @@ module Iyi
         if self_type = @current_def.try(&.owner)
           unless self_type.is_a?(Program) || self_type.metaclass?
             if why = Iyi::Share.reason(self_type)
-              block.raise "the block IyiThread.start runs on another thread captures `self : #{self_type}`, which is not Share: #{why} (SPEC.md III.4.4)"
+              block.raise "#{subject} captures `self : #{self_type}`, which is not Share: #{why}#{owning ? "; " : " "}#{consequence}"
             end
           end
         end
       end
+    end
+
+    # The owning type a method belongs to, its class method or its
+    # instance's: `Mutex` for `Mutex.new` and for `Mutex(Array(Int32))#lock`.
+    private def share_owning_type(owner : Type) : Type?
+      type = owner.metaclass? ? owner.instance_type : owner
+      type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
+      type.iyi_share_owns? ? type : nil
+    end
+
+    # A constant or a class variable a block behind a lock names is a way
+    # out of it and a way in, as a captured variable is: its type must be
+    # Share. Whether another thread writes the cell is the thread check's
+    # question, not this one's.
+    def check_share_constants(a_def : Def, subject : String, consequence : String) : Nil
+      named = NamedConstants.new
+      a_def.body.accept named
+      named.paths.each do |path, type|
+        if why = Iyi::Share.reason(type)
+          path.raise "#{subject} names the constant `#{path} : #{type}`, which is not Share: #{why}; #{consequence}"
+        end
+      end
+    end
+
+    def check_share_class_var_types(a_def : Def, subject : String, consequence : String) : Nil
+      named = NamedClassVars.new
+      a_def.body.accept named
+      named.vars.each do |class_var, var|
+        type = var.type?
+        next unless type
+        if why = Iyi::Share.reason(type)
+          class_var.raise "#{subject} names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why}; #{consequence}"
+        end
+      end
+    end
+
+    # iyi: who the two parties to a shared cell are, in the sentences the
+    # thread check and the parallel task's check refuse one with; *alone*,
+    # for a def with a `serial` parameter, the other way out its refusals
+    # name: "pass `workers: 1` so the block runs on one thread".
+    record ShareBoundary, subject : String, local_owner : String, pair : String, again : String, after : String, alone : String = ""
+
+    THREAD_BOUNDARY = ShareBoundary.new(
+      subject: "the block IyiThread.start runs on another thread",
+      local_owner: "a local of the code that started the thread, so the two threads",
+      pair: "the thread and the code that started it",
+      again: "starts the thread again",
+      after: "the thread has started")
+
+    PARALLEL_BOUNDARY = ShareBoundary.new(
+      subject: "the block spawn_parallel runs on another thread",
+      local_owner: "a local of the code that spawned the task, so the task and its spawner",
+      pair: "the task and the code that spawned it",
+      again: "spawns the task again",
+      after: "the task was spawned")
+
+    # The block a `@[Share]` def keeps, in the words its refusals use: the
+    # def by its type's short name, as an owning type's are.
+    private def shared_block_boundary(owner : Type, target_def : Def) : ShareBoundary
+      called = share_called(owner, target_def)
+      serial = target_def.iyi_share_serial
+      ShareBoundary.new(
+        subject: "the block #{called} keeps, which may run on other threads",
+        local_owner: "a local of the code that gave #{called} its block, so the block and that code",
+        pair: "the block and the code that gave it",
+        again: "gives the block again",
+        after: "the block was given",
+        alone: serial ? "pass `#{serial}: 1` so the block runs on one thread" : "")
+    end
+
+    # The def as its caller wrote it: an expansion for named arguments is
+    # named `serve:tls`, and the refusal says `Server.serve`.
+    private def share_called(owner : Type, target_def : Def) : String
+      type = owner.metaclass? ? owner.instance_type : owner
+      short = type.to_s.split('(').first.split("::").last
+      name = target_def.name.split(':').first
+      if type.is_a?(Program)
+        name
+      elsif owner.metaclass?
+        "#{short}.#{name}"
+      else
+        "#{short}##{name}"
+      end
+    end
+
+    # The argument a call gives the parameter named *param* (by its
+    # external name): named, or by position; nil when the default stands.
+    private def share_argument(node : Call, target_def : Def, param : String) : ASTNode?
+      if named = node.named_args.try &.find(&.name.==(param))
+        return named.value
+      end
+      index = target_def.args.index { |arg| arg.external_name == param }
+      index ? node.args[index]? : nil
+    end
+
+    # iyi: a call to a def with `@[Share(serial: workers)]` that passes the
+    # literal `1` for that parameter: the def runs what it was given on the
+    # caller's thread, so neither its block nor its crossing arguments are
+    # asked anything. A variable that holds 1 is asked, since the compiler
+    # cannot know it does.
+    private def serial_call?(node : Call, target_def : Def) : Bool
+      param = target_def.iyi_share_serial
+      return false unless param
+      value = share_argument(node, target_def, param)
+      value.is_a?(NumberLiteral) && (value.kind.signed_int? || value.kind.unsigned_int?) && value.integer_value == 1
+    end
+
+    # iyi: the arguments a `@[Share(crossing: ...)]` def hands to other
+    # threads - std/http's `Server.serve(tls:)`, read by every worker -
+    # must be Share, as a captured value is; the refusal is made at the
+    # argument, with the def's own sentence for what to pass instead.
+    private def check_share_crossing(node : Call, target_def : Def) : Nil
+      crossing = target_def.iyi_share_crossing
+      return unless crossing
+      serial = target_def.iyi_share_serial
+      crossing.each do |param, instead|
+        value = share_argument(node, target_def, param)
+        next unless value
+        type = value.type?
+        next unless type
+        if why = Iyi::Share.reason(type)
+          alone = serial ? ", or pass `#{serial}: 1` so it stays on one thread" : ""
+          value.raise "#{share_called(target_def.owner, target_def)} hands `#{param} : #{type}` to other threads, several at once, and it is not Share: #{why}. #{instead}#{alone} (SPEC.md III.4.4)"
+        end
+      end
+    end
+
+    # iyi: a proc passed as the block - `g.spawn_parallel(&work)` - was not
+    # written at the call, so nothing here saw what it captured, and its
+    # type cannot say: such a call compiled whatever `work` closed over.
+    # Refused at every boundary, owning types' included, with one
+    # exception: the block of the `@[Share]` def the call is in, which was
+    # checked where that def was given it.
+    private def check_forwarded_block(node : Call, subject : String) : Nil
+      forwarded = node.block_arg
+      return unless forwarded
+      return if forwarded.is_a?(Var) && trusted_share_block?(forwarded.name)
+      forwarded.raise "#{subject} is given a proc, `&#{forwarded}`, and what a proc captured is not written in its type: give it the block itself, written here, so what it captures is checked (SPEC.md III.4.4)"
+    end
+
+    # Whether *name* is the block parameter of the `@[Share]` def being
+    # transformed, or one of its `crossing:` parameters, never assigned in
+    # it: what a boundary inside that def takes on trust, since every
+    # block and every crossing argument given to the def was checked at
+    # the call. A call its `serial:` parameter's literal 1 exempted was
+    # not, and the def answers for that: it must not reach the boundary
+    # when its serial parameter is 1 (std/http's `Server.serve` serves
+    # such a call on its own thread).
+    private def trusted_share_block?(name : String) : Bool
+      current = @current_def
+      return false unless current
+      block_arg = current.block_arg
+      kept = current.iyi_share_block? && block_arg && block_arg.name == name
+      crossing = current.iyi_share_crossing
+      crossed = crossing && current.args.any? { |arg| arg.name == name && crossing.has_key?(arg.external_name) }
+      return false unless kept || crossed
+      assigned = AssignedNames.new
+      current.body.accept assigned
+      !assigned.names.includes?(name)
+    end
+
+    # Every local a body assigns, by any spelling.
+    class AssignedNames < Visitor
+      getter names = Set(String).new
+
+      def visit(node : Assign) : Bool
+        target = node.target
+        @names << target.name if target.is_a?(Var)
+        true
+      end
+
+      def visit(node : OpAssign) : Bool
+        target = node.target
+        @names << target.name if target.is_a?(Var)
+        true
+      end
+
+      def visit(node : MultiAssign) : Bool
+        node.targets.each { |target| @names << target.name if target.is_a?(Var) }
+        true
+      end
+
+      def visit(node : ASTNode) : Bool
+        true
+      end
+    end
+
+    # The other way out a refusal at a `serial` def's block names, after a
+    # comma; nothing at any other boundary.
+    private def or_alone(boundary : ShareBoundary) : String
+      boundary.alone.empty? ? "" : ", or #{boundary.alone}"
     end
 
     # iyi: a captured local is one cell on the heap, and the thread and the
@@ -718,15 +976,16 @@ module Iyi
     # in a loop or a block that starts the thread again, and no block or
     # proc that may run later. A variable the typer never saw assigned
     # after a closure took it, in a `while`, or from a block or a proc is
-    # not `mutably_closured`, and needs no walk.
-    def check_thread_capture_assigned_once(start : Call, captured : Var, meta : MetaVar, a_def : Def)
+    # not `mutably_closured`, and needs no walk. A parallel task's block is
+    # the same cell on two threads, and asked the same.
+    def check_thread_capture_assigned_once(start : Call, captured : Var, meta : MetaVar, a_def : Def, boundary : ShareBoundary)
       return unless meta.mutably_closured?
 
       name = captured.name
       inside = CaptureAssignments.new(@program, meta, nil, a_def.vars)
       a_def.body.accept inside
       if first = inside.assigns.first?
-        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`"
+        first[0].raise "#{boundary.subject} assigns `#{name}`, #{boundary.local_owner} share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       end
 
       scope = meta.context
@@ -737,29 +996,26 @@ module Iyi
       outside = CaptureAssignments.new(@program, meta, start, vars)
       body.try &.accept(outside)
       line = start.location.try(&.line_number)
-      # Only `Atomic`: the advice also said "or behind a `Mutex`", and iyi
-      # has none to keep a value behind (`Mutex.new` is an undefined
-      # constant).
-      advice = "so the thread and the code that started it share one mutable cell: a data race (SPEC.md III.4.4). " \
+      advice = "so #{boundary.pair} share one mutable cell: a data race (SPEC.md III.4.4). " \
                "Capture a local that is assigned once (a block's own locals are new on every call), " \
-               "or keep the value in an `Atomic`"
+               "or keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       # Not found, or found assigned nowhere: the walk does not know this
       # scope, and the typer's answer stands.
       unless outside.found_start? && !outside.assigns.empty?
-        captured.raise "the block IyiThread.start runs on another thread captures `#{name}`, which is assigned again after the capture, or inside a loop or a block, #{advice}"
+        captured.raise "#{boundary.subject} captures `#{name}`, which is assigned again after the capture, or inside a loop or a block, #{advice}"
       end
 
       outside.assigns.each do |assign, regions, after|
         why =
           if regions.any? { |region| outside.start_regions.any?(&.same?(region)) }
-            "in a loop or a block that starts the thread again"
+            "in a loop or a block that #{boundary.again}"
           elsif regions.any? { |region| region.is_a?(ProcLiteral) || (region.is_a?(Block) && region.fun_literal) }
-            "in a block or a proc that may run after the thread has started"
+            "in a block or a proc that may run after #{boundary.after}"
           elsif after
-            "after the thread has started"
+            "after #{boundary.after}"
           end
         next unless why
-        assign.raise "`#{name}` is assigned here, #{why}, and the block IyiThread.start runs on another thread (line #{line}) captures it, #{advice}"
+        assign.raise "`#{name}` is assigned here, #{why}, and #{boundary.subject} (line #{line}) captures it, #{advice}"
       end
     end
 
@@ -771,12 +1027,12 @@ module Iyi
     # block, its inlined blocks and its procs name is asked what a captured
     # variable is. One that a method the block calls reads is reached
     # through the call, and is not seen here.
-    def check_thread_constants_share(a_def : Def) : Nil
+    def check_thread_constants_share(a_def : Def, boundary : ShareBoundary) : Nil
       named = NamedConstants.new
       a_def.body.accept named
       named.paths.each do |path, type|
         if why = Iyi::Share.reason(type)
-          path.raise "the block IyiThread.start runs on another thread names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+          path.raise "#{boundary.subject} names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)#{or_alone(boundary)}"
         end
       end
     end
@@ -807,14 +1063,14 @@ module Iyi
     # the typer reached - is one cell every thread that names it shares,
     # refused as a captured local assigned after the start is. A
     # thread-local one is every thread's own, and neither.
-    def check_thread_class_vars_share(a_def : Def) : Nil
+    def check_thread_class_vars_share(a_def : Def, boundary : ShareBoundary) : Nil
       named = NamedClassVars.new
       a_def.body.accept named
-      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`"
+      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)#{or_alone(boundary)}"
       named.vars.each do |class_var, var|
         next if var.thread_local?
         if assign = named.assigns[var]?
-          assign.raise "the block IyiThread.start runs on another thread assigns `#{class_var.name}`, a class variable, #{advice}"
+          assign.raise "#{boundary.subject} assigns `#{class_var.name}`, a class variable, #{advice}"
         end
         if written = var.iyi_written
           write, in_def = written
@@ -825,12 +1081,12 @@ module Iyi
                   else
                     "outside it"
                   end
-          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name}`, which is written after its initializer (#{where}), #{advice}"
+          class_var.raise "#{boundary.subject} names the class variable `#{class_var.name}`, which is written after its initializer (#{where}), #{advice}"
         end
         type = var.type?
         next unless type
         if why = Iyi::Share.reason(type)
-          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+          class_var.raise "#{boundary.subject} names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)#{or_alone(boundary)}"
         end
       end
     end
@@ -865,6 +1121,92 @@ module Iyi
         true
       end
     end
+
+    # iyi: module state the block reaches through the defs it calls, which
+    # the checks above, reading the block's own text, do not see: a
+    # parallel block calling `ask`, which ran `DATABASE.query_one` on a pool
+    # that assumes one thread, compiled silently, and at 12 workers a
+    # request was answered another's rows (#148). A warning rather than a
+    # refusal: whether a call is really made, or the state is set once and
+    # only read after, is not something the walk can tell, and a program
+    # that knows says so on the constant or class variable with
+    # `@[SafeReach("why")]`. The walk is `ShareReach`'s.
+    #
+    # Each piece of state is one warning, at the first block that reaches
+    # it, by that block's shortest path, counting the other blocks that
+    # reach it too; `report_share_reach` writes them once every block is
+    # checked. Warned once per block, iyiturkiye's 91 warned blocks gave
+    # 1251 warnings about 37 constants (`iyi check`, Linux): iyi-db's `LOG`
+    # was 88 of them, and the app's own pool, `SQL`, 88 more; gathered,
+    # they are 37. A block where warnings are not reported
+    # (`--exclude-warnings`, `lib`) is not counted either.
+    def check_share_reach(block : Block, a_def : Def, boundary : ShareBoundary) : Nil
+      reach = @program.iyi_share_reach
+      return if reach.std?(block)
+      return if @program.warnings.ignore_warning_due_to_location?(block.location)
+      reach.reach(a_def).each do |found|
+        named = found.named
+        next if named.state.iyi_safe_reach
+        if gathered = @share_reach_gathered[named.key]?
+          gathered.blocks << block.location.to_s
+          next
+        end
+        why = Iyi::Share.reason(named.type)
+        next unless why
+        path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
+        path << "`#{named.use}`"
+        where = named.state.is_a?(Const) ? "the constant" : "the class variable"
+        instead = "Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on #{where}: `@[SafeReach(\"...\")]`"
+        # A list that is only read - iyi-web's `CONTENT_CODINGS : Array(String)`
+        # - is the commonest case, and has a third way out that needs no claim.
+        if (list = share_reach_list(named.type))
+          instead = "If it is only read, make it a `#{list}` (std/list), which is Share. #{instead}"
+        end
+        # A package's state is changed in the package, which the program
+        # cannot do: the warning says whose it is and where.
+        if (package = reach.package_at(named.declared, @program.iyi_mod_table))
+          prefix, file = package
+          at = named.state.is_a?(Const) ? named.declared.try { |declared| " at #{file}:#{declared.line_number}" } : nil
+          instead = "`#{named.label}` is the package #{prefix}'s#{at}, so the change goes there. #{instead}"
+        end
+        head = "#{boundary.subject} reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}"
+        tail = ": #{why}. #{instead} (SPEC.md III.4.4)"
+        @share_reach_gathered[named.key] = ShareReachWarning.new(block, head, tail, Set{block.location.to_s})
+      end
+    end
+
+    # One warning being gathered: the first block to reach the state, the
+    # text either side of the count of the others, and every block, by its
+    # location, that reaches it - one block typed for two instantiations is
+    # one block.
+    record ShareReachWarning, block : Block, head : String, tail : String, blocks : Set(String)
+
+    # The gathered warnings, one per piece of state, in the order their
+    # first blocks were checked. Called once every block is checked
+    # (`Program#semantic_after_top_level`); a warning is never written twice.
+    def report_share_reach : Nil
+      @share_reach_gathered.each_value do |gathered|
+        others = gathered.blocks.size - 1
+        count = case others
+                when 0 then ""
+                when 1 then ", as does 1 other parallel block"
+                else        ", as do #{others} other parallel blocks"
+                end
+        @program.warnings.add_warning(gathered.block, "#{gathered.head}#{count}#{gathered.tail}")
+      end
+      @share_reach_gathered.clear
+    end
+
+    # `List(String)` for an `Array(String)` whose elements are Share: the
+    # immutable list a read-only array can become. Nil for anything else.
+    private def share_reach_list(type : Type) : String?
+      return nil unless type.is_a?(GenericClassInstanceType) && type.generic_type == @program.array
+      element = type.type_vars["T"]?.try(&.type?)
+      return nil unless element && Iyi::Share.shareable?(element)
+      "List(#{element})"
+    end
+
+    @share_reach_gathered = {} of UInt64 => ShareReachWarning
 
     # The assignments to one variable in a body, each with the loops,
     # blocks and procs around it and whether it comes after the call that
@@ -1140,12 +1482,40 @@ module Iyi
     end
 
     def transform(node : ProcLiteral)
-      body = node.def.body
-      if node.def.no_returns? && !body.type?
-        node.def.body = untyped_expression(body)
-      else
-        node.def.body = node.def.body.transform(self)
+      # iyi: a proc's body is transformed as a def's is, typed or not. One
+      # with no type, in a proc whose def inference left without one (and so
+      # NoReturn), was replaced whole with a `can't execute` raise; but a call
+      # given a NoReturn argument is never typed either, and it runs. With
+      # the block `Proc(Int32, NoReturn)`, `->(x : Int32) : String {
+      # wrap(block.call(x)) }` panicked with "can't execute `wrap(block.call(
+      # x))`" without calling the block, so neither its side effects nor its
+      # own panic happened. The transform rewrites that call to the
+      # arguments up to the NoReturn one, and an expression that has no
+      # type at all to that same raise, so the proc runs what was written.
+      node.def.body = node.def.body.transform(self)
+
+      # iyi: a block a def keeps can end up with a body that has a type only
+      # now. A call given a NoReturn argument, `wrap(block.call(x))` where
+      # the block is `Proc(Int32, NoReturn)`, is never typed, so the block's
+      # def and its proc were left without one while the call that keeps the
+      # block went on with the type its block parameter declares; the call
+      # was rewritten above to the arguments up to the NoReturn one, which
+      # are typed. Type the proc from that body, as inference would have,
+      # or code generation finds a kept block with no proc type. Only a
+      # block's proc: nothing is bound to it, so setting its type here
+      # cannot start inference again in a node that observes it.
+      #
+      # A body still without a type is one no way out of which returns:
+      # inference types a node from any dependency that has a type. The
+      # cleanup cuts a list of expressions at its first NoReturn one and
+      # leaves the list untyped, `puts "x"; wrap(block.call(y))` and
+      # `v = raise "x"; v.to_s` both, so such a block is NoReturn, which is
+      # what FixMissingTypes calls a block with no type.
+      if node.from_block? && !node.type?
+        node.def.set_type(node.def.body.type? || @program.no_return)
+        node.update
       end
+
       node
     end
 

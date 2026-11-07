@@ -1,0 +1,206 @@
+# The assertions a test is written in, past `assert` (prelude.iyi), with no
+# import: a test is a whole `*_test.iyi` program that exits 0 to pass, and
+# `iyi test` reads nothing but that exit and, on a failure, the output. So
+# every assertion here is a panic, like `assert`'s, whose message carries
+# the evidence - what was expected, what came, and the caller's line, which
+# `raise` prints because the site is passed down from a `__FILE__`/`__LINE__`
+# default the compiler fills in where the assertion is written.
+#
+# `assert(a == b)` said "assertion failed" and nothing else, so the first
+# thing a failing test asked of its reader was to add a `puts` and run it
+# again. A failure names its values now:
+#
+#     iyi: panic: assert_eq failed: the sum
+#       expected: 4
+#         actual: 5
+#       at sum_test.iyi:3
+
+# The panic every assertion here ends in: a headline naming the assertion
+# and the caller's own words, then the evidence, at the caller's site.
+def __iyi_assert_fail(assertion : String, message : String, evidence : String, file : String, line : Int32) : NoReturn
+  headline = assertion + " failed"
+  headline = headline + ": " + message unless message.empty?
+  raise(headline + "\n" + evidence, file, line)
+end
+
+# Two texts of more than one line differ somewhere a reader cannot find
+# by eye in two quoted strings hundreds of characters long, so the first
+# line that differs is named and shown on its own.
+def __iyi_first_difference(expected : String, actual : String) : String
+  wanted = expected.split('\n')
+  came = actual.split('\n')
+  at = 0
+  while at < wanted.size && at < came.size && wanted[at] == came[at]
+    at = at + 1
+  end
+  shown_wanted = at < wanted.size ? wanted[at].inspect : "nothing: the text ends after line " + wanted.size.to_s
+  shown_came = at < came.size ? came[at].inspect : "nothing: the text ends after line " + came.size.to_s
+  "\n  first difference, line " + (at + 1).to_s + ":\n    expected: " + shown_wanted + "\n      actual: " + shown_came
+end
+
+# Equal by `==`, or a panic showing both values as `inspect` writes them.
+def assert_eq(expected, actual, message : String = "", file : String = __FILE__, line : Int32 = __LINE__) : Nil
+  return if expected == actual
+  evidence = "  expected: " + expected.inspect + "\n    actual: " + actual.inspect
+  if expected.is_a?(String) && actual.is_a?(String) && (expected.includes?("\n") || actual.includes?("\n"))
+    evidence = evidence + __iyi_first_difference(expected, actual)
+  end
+  __iyi_assert_fail("assert_eq", message, evidence, file, line)
+end
+
+# Different by `==`: the one value both sides hold is the evidence.
+def assert_ne(unexpected, actual, message : String = "", file : String = __FILE__, line : Int32 = __LINE__) : Nil
+  return unless unexpected == actual
+  __iyi_assert_fail("assert_ne", message, "  expected anything but: " + unexpected.inspect + "\n                 actual: " + actual.inspect, file, line)
+end
+
+# `assert value.nil?` said only that it was not; this says what it was.
+def assert_nil(value, message : String = "", file : String = __FILE__, line : Int32 = __LINE__) : Nil
+  return if value.is_a?(Nil)
+  __iyi_assert_fail("assert_nil", message, "  expected: nil\n    actual: " + value.inspect, file, line)
+end
+
+# Floats are compared within a distance, never with `==`: `0.1 + 0.2` is
+# not `0.3`. A NaN is within no distance of anything, itself included, and
+# a negative or NaN distance is a mistake in the test, refused by name
+# rather than read as a comparison that can never hold.
+def assert_in_delta(expected, actual, delta, message : String = "", file : String = __FILE__, line : Int32 = __LINE__) : Nil
+  wanted = expected.to_f64
+  came = actual.to_f64
+  within = delta.to_f64
+  unless within >= 0.0
+    raise("assert_in_delta takes a distance of zero or more, and " + within.to_s + " is not one", file, line)
+  end
+  off = (came - wanted).abs
+  return if off <= within
+  __iyi_assert_fail("assert_in_delta", message, "  expected: " + wanted.to_s + " within " + within.to_s + "\n    actual: " + came.to_s + ", off by " + off.to_s, file, line)
+end
+
+# Whatever the collection's own `includes?` answers: an element of an
+# `Array` or a `Set`, a piece of a `String`.
+def assert_includes(collection, item, message : String = "", file : String = __FILE__, line : Int32 = __LINE__) : Nil
+  return if collection.includes?(item)
+  __iyi_assert_fail("assert_includes", message, "  collection: " + collection.inspect + "\n     missing: " + item.inspect, file, line)
+end
+
+# An error is a member of a union (SPEC.md III.1.1), so a test of the
+# failure path asks which member the block answered. The error is given
+# back, narrowed, for the test to read its message; anything else - a
+# value, or an error of another type - is the evidence.
+def assert_error(type : E.class, message : String = "", file : String = __FILE__, line : Int32 = __LINE__, &) : E forall E
+  value = yield
+  return value if value.is_a?(E)
+  __iyi_assert_fail("assert_error", message, "  expected: an error of type " + E.to_s + "\n    actual: " + __iyi_describe_outcome(value), file, line)
+end
+
+# The success path's twin: the block answers no error member, and its
+# value comes back with the errors narrowed away, so a test can go on
+# with it as `.or_panic` would - but with the error shown, and the site.
+def assert_ok(message : String = "", file : String = __FILE__, line : Int32 = __LINE__, &)
+  value = yield
+  if value.is_a?(::Error)
+    __iyi_assert_fail("assert_ok", message, "  expected: a value, not an error\n    actual: " + __iyi_describe_outcome(value), file, line)
+  else
+    value
+  end
+end
+
+# An error by its type and its own sentence, which `inspect` alone does
+# not give (a struct inspects as its name); any other value by `inspect`.
+def __iyi_describe_outcome(value) : String
+  if value.is_a?(::Error)
+    value.class.to_s + " (an error: " + value.message.inspect + ")"
+  else
+    value.inspect
+  end
+end
+
+{% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+  # A panic ends its task, and reading a panicked task's value is where it
+  # is caught (III.1.4): the block runs as the one task of a group of its
+  # own, and its handle's `Panicked` is the panic, observed. The panic
+  # still prints its `iyi: panic:` line as it happens, because a panic
+  # prints at the point of the bug before anything knows it will be read.
+  # The message comes back for the test to read further.
+  def assert_panics(containing : String? = nil, message : String = "", file : String = __FILE__, line : Int32 = __LINE__, &block : -> _) : String
+    said = nil
+    group do |g|
+      task = g.spawn do
+        block.call
+        0
+      end
+      outcome = task.value
+      said = outcome.message if outcome.is_a?(Panicked)
+      0
+    end
+    if said.is_a?(String)
+      if containing.is_a?(String) && !said.includes?(containing)
+        __iyi_assert_fail("assert_panics", message, "  expected: a panic saying " + containing.inspect + "\n    actual: a panic saying " + said.inspect, file, line)
+      end
+      return said
+    end
+    __iyi_assert_fail("assert_panics", message, "  expected: a panic" + (containing.is_a?(String) ? " saying " + containing.inspect : "") + "\n    actual: the block ended without one", file, line)
+  end
+
+  # A named case, run as a task of its own so that a failing assertion ends
+  # the case and not the program: the cases after it still run, each says
+  # `ok - name` or `FAIL - name`, and the program exits 1 when it ends if
+  # any failed (`fun main` asks `IyiTestCases.verdict`), which is the one
+  # thing `iyi test` reads. The failure's evidence is the panic's own lines,
+  # printed above the case's verdict.
+  def test(name : String, &block : -> _) : Nil
+    STDOUT.flush
+    said = nil
+    group do |g|
+      task = g.spawn do
+        block.call
+        0
+      end
+      outcome = task.value
+      said = outcome.message if outcome.is_a?(Panicked)
+      0
+    end
+    IyiTestCases.record(name, said.nil?)
+  end
+{% else %}
+  # Where no task can end alone, a panic ends the program, and there is no
+  # boundary to read one at: a test of a panic cannot be written, so a build
+  # that asks for one says so rather than run a test that can only fail. A
+  # macro, as `group` is on wasm32 (prelude.iyi), because a refusal in a
+  # method body is raised whether anything calls it or not, and refused
+  # every program for this target.
+  macro assert_panics(*args, **kwargs, &block)
+    \{% raise "assert_panics needs a task to catch the panic in, and this target has no concurrency runtime (SPEC.md III.4): a panic here ends the program" %}
+  end
+
+  # The case runs in the program itself: a failing assertion ends the
+  # program, exit 1, which is still the verdict `iyi test` reads - the
+  # cases after it do not run.
+  def test(name : String, &block : -> _) : Nil
+    STDOUT.flush
+    block.call
+    IyiTestCases.record(name, true)
+  end
+{% end %}
+
+# What the named cases came to, read by `fun main` once the program's own
+# code has ended: a program that ran no `test` answers as it always did.
+class IyiTestCases
+  @@ran = 0
+  @@failed = 0
+
+  def self.record(name : String, passed : Bool) : Nil
+    @@ran = @@ran + 1
+    @@failed = @@failed + 1 unless passed
+    STDOUT.puts((passed ? "ok - " : "FAIL - ") + name)
+    STDOUT.flush
+  end
+
+  # The program's exit status for its named cases: 0 when none failed, so
+  # a program without one is untouched, and 1 with a count when any did.
+  def self.verdict : Int32
+    return 0 if @@ran == 0
+    STDOUT.puts(@@ran.to_s + " named tests: " + (@@ran - @@failed).to_s + " passed, " + @@failed.to_s + " failed")
+    @@failed == 0 ? 0 : 1
+  end
+end

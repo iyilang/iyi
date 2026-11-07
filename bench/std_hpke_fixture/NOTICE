@@ -1,0 +1,47 @@
+rfc9180_vectors.json: the test vectors of RFC 9180 (Hybrid Public Key
+Encryption), Appendix A, a subset, as bench/std_hpke_exercise.sh reads
+them.
+
+Source: https://github.com/cfrg/draft-irtf-cfrg-hpke, commit
+5f503c564da00b0687b3de75f1dfbdfc4079ad31 (2021-05-24, "Add test
+vectors.", the last change to the file), the file test-vectors.json
+(sha256 61fc662f01996cd06d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6),
+of which RFC 9180's Appendix A prints a part.
+
+Changed by the iyi project, 2026-10-22: only the vectors of the suites
+std/hpke has were kept - DHKEM(P-256) 0x0010 and DHKEM(X25519) 0x0020
+(the file has none for DHKEM(P-384) 0x0011), HKDF-SHA256 0x0001 and
+HKDF-SHA512 0x0003 (none for HKDF-SHA384 0x0002), and every AEAD and mode,
+64 vectors in the file's order. Each keeps the fields its check reads
+(mode, the three ids, info, ikmR, ikmE, ikmS, skRm, skEm, skSm, pkRm, pkEm,
+pkSm, psk, psk_id, enc, shared_secret, key, base_nonce, and every export
+as it is) and drops key_schedule_context, secret and exporter_secret, which
+nothing outside the module can see. Of the 257 encryptions of a vector, the
+ones at sequence 0, 1, 2, 255 and 256 are kept as they are with their
+index added as "seq", and two fields are added: "count", how many the file
+lists, and "ciphertexts_sha256", the SHA-256 of all their ciphertexts
+concatenated in order, which the exercise checks every encryption it seals
+against. The cutting checked that each vector's encryptions are its one
+plaintext under aad "Count-i" at nonce base_nonce XOR i, which the
+exercise assumes for the ones not kept. bench/std_hpke_exercise.sh fetches
+the file whole from that commit when the network answers, checks its
+digest, cuts it again by the same rule and compares the result with this
+file value for value, and checks every encryption of every vector as well.
+
+The repository's CONTRIBUTING.md, under which the file was contributed:
+
+  This repository relates to activities in the Internet Engineering Task
+  Force (IETF). All material in this repository is considered
+  Contributions to the IETF Standards Process, as defined in the
+  intellectual property policies of IETF currently designated as BCP 78,
+  BCP 79 and the IETF Trust Legal Provisions (TLP) Relating to IETF
+  Documents (http://trustee.ietf.org/trust-legal-provisions.html).
+
+  [...] You agree to comply with all applicable IETF policies and
+  procedures, including, BCP 78, 79, the TLP, and the TLP rules regarding
+  code components (e.g. being subject to a Simplified BSD License) in
+  Contributions.
+
+RFC 9180: Copyright (c) 2022 IETF Trust and the persons identified as the
+document authors (Richard L. Barnes, Karthikeyan Bhargavan, Benjamin
+Lipp, Christopher A. Wood). All rights reserved.

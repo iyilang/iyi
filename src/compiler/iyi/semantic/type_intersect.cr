@@ -34,9 +34,18 @@ module Iyi
         common_descendent_including_types(type1, type2)
     end
 
+    # iyi: each member narrows the module on its own, and the answer is their
+    # union. `common_descendent_union` answers the whole module as soon as one
+    # member matches, so `Val.filter_by(String | Nil)` with `Val` implemented by
+    # `Nil`, `String` and `Int64` stayed `Val`, `x.as(String?)` was taken for an
+    # upcast, and the union's bits were read as the string's pointer.
     def self.common_descendent(type1 : NonGenericModuleType | GenericModuleInstanceType, type2 : UnionType)
-      common_descendent_union(type1, type2) ||
-        common_descendent_including_types(type1, type2)
+      types = type2.union_types.compact_map do |union_type|
+        common_descendent(type1, union_type)
+      end
+      return type1 if types.includes?(type1)
+
+      type1.program.type_merge_union_of(types)
     end
 
     def self.common_descendent(type1 : NonGenericModuleType | GenericModuleInstanceType, type2 : VirtualType)

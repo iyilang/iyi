@@ -38,6 +38,9 @@ lib LibLLVM
   fun get_module_identifier = LLVMGetModuleIdentifier(m : ModuleRef, len : SizeT*) : Char*
   fun set_module_identifier = LLVMSetModuleIdentifier(m : ModuleRef, ident : Char*, len : SizeT)
   fun set_target = LLVMSetTarget(m : ModuleRef, triple : Char*)
+  # iyi: the back-edge checks (src/compiler/iyi/preempt_checks.cr) read the
+  # module's triple to tell Windows from darwin.
+  fun get_target = LLVMGetTarget(m : ModuleRef) : Char*
   fun add_module_flag = LLVMAddModuleFlag(m : ModuleRef, behavior : ModuleFlagBehavior, key : Char*, key_len : SizeT, val : MetadataRef)
   fun dump_module = LLVMDumpModule(m : ModuleRef)
   fun print_module_to_file = LLVMPrintModuleToFile(m : ModuleRef, filename : Char*, error_message : Char**) : Bool
@@ -148,6 +151,7 @@ lib LibLLVM
   fun get_linkage = LLVMGetLinkage(global : ValueRef) : LLVM::Linkage
   fun set_linkage = LLVMSetLinkage(global : ValueRef, linkage : LLVM::Linkage)
   fun set_dll_storage_class = LLVMSetDLLStorageClass(global : ValueRef, class : LLVM::DLLStorageClass)
+  fun set_visibility = LLVMSetVisibility(global : ValueRef, viz : LLVM::Visibility)
 
   fun set_alignment = LLVMSetAlignment(v : ValueRef, bytes : UInt)
 
@@ -212,11 +216,44 @@ lib LibLLVM
   fun is_a_alloca_inst = LLVMIsAAllocaInst(val : ValueRef) : ValueRef
   fun is_a_get_element_ptr_inst = LLVMIsAGetElementPtrInst(val : ValueRef) : ValueRef
   fun is_a_bit_cast_inst = LLVMIsABitCastInst(val : ValueRef) : ValueRef
+  # iyi: wasm32's roots (src/compiler/iyi/wasm_roots.cr) walk each value's
+  # uses and each call, and store what a call may outlive into a slot.
+  fun is_a_call_inst = LLVMIsACallInst(val : ValueRef) : ValueRef
+  fun is_a_invoke_inst = LLVMIsAInvokeInst(val : ValueRef) : ValueRef
+  fun is_a_intrinsic_inst = LLVMIsAIntrinsicInst(val : ValueRef) : ValueRef
+  fun is_a_phi_node = LLVMIsAPHINode(val : ValueRef) : ValueRef
+  fun is_a_landing_pad_inst = LLVMIsALandingPadInst(val : ValueRef) : ValueRef
+  fun is_a_argument = LLVMIsAArgument(val : ValueRef) : ValueRef
+  fun get_instruction_parent = LLVMGetInstructionParent(inst : ValueRef) : BasicBlockRef
+  fun get_first_use = LLVMGetFirstUse(val : ValueRef) : UseRef
+  fun get_next_use = LLVMGetNextUse(u : UseRef) : UseRef
+  fun get_user = LLVMGetUser(u : UseRef) : ValueRef
+  fun position_builder_before = LLVMPositionBuilderBefore(builder : BuilderRef, instr : ValueRef)
+  fun get_basic_block_terminator = LLVMGetBasicBlockTerminator(bb : BasicBlockRef) : ValueRef
+  fun get_normal_dest = LLVMGetNormalDest(invoke_inst : ValueRef) : BasicBlockRef
+  fun get_num_successors = LLVMGetNumSuccessors(term : ValueRef) : UInt
+  fun get_successor = LLVMGetSuccessor(term : ValueRef, i : UInt) : BasicBlockRef
   fun get_operand = LLVMGetOperand(val : ValueRef, index : UInt) : ValueRef
   fun set_instr_param_alignment = LLVMSetInstrParamAlignment(instr : ValueRef, idx : AttributeIndex, align : UInt)
   fun add_call_site_attribute = LLVMAddCallSiteAttribute(c : ValueRef, idx : AttributeIndex, a : AttributeRef)
 
   fun add_incoming = LLVMAddIncoming(phi_node : ValueRef, incoming_values : ValueRef*, incoming_blocks : BasicBlockRef*, count : UInt)
+  # iyi: the back-edge checks (src/compiler/iyi/preempt_checks.cr) find a
+  # loop's latch by its loop metadata after optimisation, move the latch's
+  # terminator into a block of its own and point the successors' phis at
+  # it; codegen makes the self-referencing loop ID through a temporary.
+  fun get_metadata = LLVMGetMetadata(val : ValueRef, kind_id : UInt) : ValueRef
+  fun get_md_string = LLVMGetMDString(v : ValueRef, length : UInt*) : Char*
+  fun is_a_md_node = LLVMIsAMDNode(val : ValueRef) : ValueRef
+  fun temporary_md_node = LLVMTemporaryMDNode(c : ContextRef, mds : MetadataRef*, count : SizeT) : MetadataRef
+  fun instruction_remove_from_parent = LLVMInstructionRemoveFromParent(inst : ValueRef)
+  fun instruction_erase_from_parent = LLVMInstructionEraseFromParent(inst : ValueRef)
+  fun insert_into_builder = LLVMInsertIntoBuilder(builder : BuilderRef, instr : ValueRef)
+  fun move_basic_block_after = LLVMMoveBasicBlockAfter(bb : BasicBlockRef, move_pos : BasicBlockRef)
+  fun count_incoming = LLVMCountIncoming(phi_node : ValueRef) : UInt
+  fun get_incoming_value = LLVMGetIncomingValue(phi_node : ValueRef, index : UInt) : ValueRef
+  fun get_incoming_block = LLVMGetIncomingBlock(phi_node : ValueRef, index : UInt) : BasicBlockRef
+  fun replace_all_uses_with = LLVMReplaceAllUsesWith(old_val : ValueRef, new_val : ValueRef)
 
   fun create_builder_in_context = LLVMCreateBuilderInContext(c : ContextRef) : BuilderRef
   fun position_builder_at_end = LLVMPositionBuilderAtEnd(builder : BuilderRef, block : BasicBlockRef)
@@ -311,6 +348,8 @@ lib LibLLVM
   fun build_select = LLVMBuildSelect(BuilderRef, if : ValueRef, then : ValueRef, else : ValueRef, name : Char*) : ValueRef
   fun build_va_arg = LLVMBuildVAArg(BuilderRef, list : ValueRef, ty : TypeRef, name : Char*) : ValueRef
   fun build_extract_value = LLVMBuildExtractValue(BuilderRef, agg_val : ValueRef, index : UInt, name : Char*) : ValueRef
+  # iyi: the back-edge checks keep two values per function in one pair.
+  fun build_insert_value = LLVMBuildInsertValue(BuilderRef, agg_val : ValueRef, elt_val : ValueRef, index : UInt, name : Char*) : ValueRef
   fun build_fence = LLVMBuildFence(b : BuilderRef, ordering : LLVM::AtomicOrdering, single_thread : Bool, name : Char*) : ValueRef
   fun build_atomicrmw = LLVMBuildAtomicRMW(b : BuilderRef, op : LLVM::AtomicRMWBinOp, ptr : ValueRef, val : ValueRef, ordering : LLVM::AtomicOrdering, single_thread : Bool) : ValueRef
   fun build_atomic_cmp_xchg = LLVMBuildAtomicCmpXchg(b : BuilderRef, ptr : ValueRef, cmp : ValueRef, new : ValueRef, success_ordering : LLVM::AtomicOrdering, failure_ordering : LLVM::AtomicOrdering, single_thread : Bool) : ValueRef

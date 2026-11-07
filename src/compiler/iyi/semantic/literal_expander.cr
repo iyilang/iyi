@@ -382,37 +382,42 @@ module Iyi
 
     # iyi: a regex literal in an iyi program is `Regex.compile` from
     # `std/regex`, iyi's own linear-time engine, cached the way the other
-    # library's literal is: one constant per pattern, named for its text
-    # (SPEC.md IV.1g), so a literal in a loop compiles once. It was refused
-    # while iyi's library had no runtime `Regex`, and after `std/regex`
-    # arrived a program still had to spell every pattern as a string for
-    # `Regex.compile`. The engine takes no flags, so a literal with one is
-    # refused at the literal rather than compiled without it.
+    # library's literal is: one constant per pattern and flags, named for
+    # them (SPEC.md IV.1g), so a literal in a loop compiles once. It was
+    # refused while iyi's library had no runtime `Regex`, and after
+    # `std/regex` arrived a program still had to spell every pattern as a
+    # string for `Regex.compile`.
+    #
+    # The flags the lexer reads, `i`, `m` and `x`, are `Regex::Options` of
+    # the same numbers in `std/regex`, `m` meaning what it means in the other
+    # library (`^` and `$` at every line, and `.` taking a newline), so they
+    # pass through as the number. The engine took no flags at first and a
+    # flagged literal was refused here; now only a bit `std/regex` has no
+    # option for is, which the lexer never sets, and the check stays so a
+    # flag added to the lexer is refused rather than silently dropped.
+    IYI_REGEX_FLAGS = RegexOptions::IGNORE_CASE | RegexOptions::MULTILINE | RegexOptions::EXTENDED
+
     private def iyi_regex_literal(node : RegexLiteral) : ASTNode
       unless Program.iyi_std_regex_type(@program)
         node.raise "a regex literal is `Regex.compile` from `std/regex`, iyi's own engine, and nothing in this program imports it: `import std/regex::{Regex}`"
       end
-      unless node.options.value == 0
-        node.raise "`std/regex` takes no flags, so a regex literal cannot either: write the pattern for what the flag meant (`[Aa]` for a case, `(.|\\n)` for a line break)"
+      unless node.options.value & ~IYI_REGEX_FLAGS.value == 0
+        node.raise "`std/regex` has no flag for #{RegexOptions.new(node.options.value & ~IYI_REGEX_FLAGS.value)}: a regex literal takes `i`, `m` and `x`, and `(?s)`, `(?U)` and the rest are written in the pattern"
       end
 
       node_value = node.value
-      return iyi_regex_compile_call(node, node_value) unless node_value.is_a?(StringLiteral)
+      return Program.iyi_regex_compile_call(node_value, node.options, node) unless node_value.is_a?(StringLiteral)
 
       string = node_value.value
-      const_name = Program.iyi_regex_const_name(string)
+      const_name = Program.iyi_regex_const_name(string, node.options)
       if existing = @program.types[const_name]?
         const = existing.as(Const)
       else
-        const = Const.new(@program, @program, const_name, iyi_regex_compile_call(node, StringLiteral.new(string).at(node)))
+        const = Const.new(@program, @program, const_name, Program.iyi_regex_compile_call(StringLiteral.new(string).at(node), node.options, node))
         @program.types[const_name] = const
         @program.iyi_regex_constants[const_name] = {string, node.options}
       end
       Path.new(const_name).at(const.value)
-    end
-
-    private def iyi_regex_compile_call(node, value)
-      Call.new(Path.global(["Std", "Regex", "Regex"]).at(node), "compile", value).at(node)
     end
 
     private def regex_new_call(node, value)

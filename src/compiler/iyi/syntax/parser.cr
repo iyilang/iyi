@@ -189,8 +189,19 @@ module Iyi
     # live under the package's name (`Mod::ModFile.package_name`), so two
     # packages' `util`s are `Pa::Util` and `Pb::Util` and not one type. A
     # module whose path already begins with the name - `iyi_web/dsl` in
-    # `iyi-web` - is where it was.
+    # `iyi-web` - is where it was. Set for a package's files in a consumer's
+    # build and in the package's own alike, so a module has one name
+    # wherever it is compiled (`Program#iyi_root_package`).
     property iyi_package_name : String? = nil
+
+    # iyi: the namespace a module of *package* whose in-package path is
+    # *segments* lives in, as path segments. The one rule: the header's
+    # parse, an import's `::*` and `Program#iyi_module_type` all ask here,
+    # so the package's own build and a consumer's cannot name a module two
+    # ways.
+    def self.iyi_package_segments(package : String?, segments : Array(String)) : Array(String)
+      package && segments.first? != package ? [package] + segments : segments
+    end
 
     # Where the import being read ends; see `parse_import_path_segment`.
     @iyi_import_end : Location? = nil
@@ -338,10 +349,7 @@ module Iyi
         node.is_a?(UsingDecl) ? scopes << node : directives << node
       end
 
-      segments = header.path
-      if (package = @iyi_package_name) && segments.first? != package
-        segments = [package] + segments
-      end
+      segments = Parser.iyi_package_segments(@iyi_package_name, header.path)
       path = Path.new(segments.map(&.camelcase))
       path.at(header)
 
@@ -2625,7 +2633,7 @@ module Iyi
         end
         written = "#{@token.value}#{string_range(current_pos, stop)}"
         if written.includes?('\\')
-          written_end = Location.new(@filename, location.line_number, @token.column_number + written.size - 1)
+          written_end = Location.new(@filename, location.line_number, @token.column_number + written.size - 1, @artifact)
           refuse_import_path "path segments are separated by `/`", location, written_end, written.gsub('\\', '/')
         end
       end
@@ -5557,7 +5565,7 @@ module Iyi
       "todo"      => "`raise \"not yet\"` panics (SPEC.md III.1.4)",
       "vec"       => "an array is its literal, `[1, 2, 3]`, and an empty one says its type, `[] of Int32`",
       "assert"    => "`assert x == 1, \"why\"` panics when the condition is false",
-      "assert_eq" => "`assert a == b, \"why\"` panics when they differ",
+      "assert_eq" => "`assert_eq a, b, \"why\"` panics showing both values when they differ",
     }
 
     # iyi: whether the current `!` token has a space or tab right before it.

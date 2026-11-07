@@ -170,41 +170,96 @@ end
 #
 #     pub struct Coord
 #       getter x : Float64
+#       @[JSON::Field(key: "label")]
 #       getter name : String
 #       derive serializable
 #     end
 #
-#     Coord.from_json(%({"x": 1.5, "name": "a"})).x   # => 1.5
-#     coord.to_json                                   # => {"x":1.5,"name":"a"}
+#     Coord.from_json(%({"x": 1.5, "label": "a"})).x   # => 1.5
+#     coord.to_json                                    # => {"x":1.5,"label":"a"}
 #
 # A field's value is read and written as `JSON.read_value` and
-# `JSON.write_value` read and write its type: the built-in values, an
-# `Array` or `Hash(String, V)` of them, an `Any`, another serializable
-# type. A key the type has no field for is passed over; a field with no
-# key keeps its default when it is written with one, as does a field with
-# a default whose key holds `null` where its type does not admit nil; a
-# field with neither is refused by name unless its type admits `nil`,
-# which it then holds. It is what the other library's `include
+# `JSON.write_value` read and write its type: the built-in values, an enum,
+# an `Array` or `Hash(String, V)` of them, an `Any`, another serializable
+# type, a union of those (`String | Int64`). A key the type has no field
+# for is passed over; a field with no key keeps its default when it is
+# written with one, as does a field with a default whose key holds `null`
+# where its type does not admit nil; a field with neither is refused by
+# name unless its type admits `nil`, which it then holds.
+# `@[JSON::Field(...)]` renames a field, leaves it out either way, leaves
+# a nil one out, or reads and writes it through a converter (see
+# `JSON::Field`). It is what the other library's `include
 # JSON::Serializable` writes, and the derive runs once, in the type's own
 # module (SPEC.md II.4), so a consumer calls the methods without the macro.
+#
+# Each field's options are read off the type when its methods are compiled,
+# in one `begin` so what a field's annotation says is known to every line
+# after it; and refused there, with the field named, when they do not make
+# sense.
 pub macro serializable(declaration)
   impl ::Std::Json::ToJSON for {{ declaration[:name].id }}
     def to_json(json : ::Std::Json::Builder) : Nil
-      json.object do
+      \{% begin %}
+        \{% json_seen = [] of StringLiteral %}
         {% for field in declaration[:fields] %}
-          json.field({{ field[:name][1..] }})
-          {% if field[:type].nilable? %}
-            json_written = {{ field[:name].id }}
-            if json_written.nil?
-              json.null
-            else
-              ::Std::Json::JSON.write_value(json_written, json)
-            end
-          {% else %}
-            ::Std::Json::JSON.write_value({{ field[:name].id }}, json)
-          {% end %}
+          \{% json_ivar = @type.instance_vars.find { |ivar| ivar.name.stringify == {{ field[:name][1..] }} } %}
+          \{% json_ann = json_ivar ? json_ivar.annotation(::Std::Json::JSON::Field) : nil %}
+          \{% if json_ann %}
+            \{% unless json_ann.args.empty? %}
+              \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id } takes named options alone" %}
+            \{% end %}
+            \{% for json_option in json_ann.named_args.keys %}
+              \{% unless ["key", "ignore", "ignore_serialize", "ignore_deserialize", "emit_null", "converter"].includes?(json_option.stringify) %}
+                \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: #{json_option} is not an option (key, ignore, ignore_serialize, ignore_deserialize, emit_null, converter)" %}
+              \{% end %}
+            \{% end %}
+            \{% if json_ann[:key] && !json_ann[:key].is_a?(StringLiteral) %}
+              \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: key: is a string, not #{json_ann[:key]}" %}
+            \{% end %}
+          \{% end %}
+          \{% json_key = json_ann && json_ann[:key] ? json_ann[:key] : {{ field[:name][1..] }} %}
+          \{% json_converter = json_ann ? json_ann[:converter] : nil %}
+          \{% unless json_ann && (json_ann[:ignore] || json_ann[:ignore_serialize]) %}
+            \{% if json_seen.includes?(json_key) %}
+              \{% raise "#{@type} writes two fields as the key #{json_key}" %}
+            \{% end %}
+            \{% json_seen << json_key %}
+          \{% end %}
+          \{% json_write_{{ field[:name][1..].id }} = !(json_ann && (json_ann[:ignore] || json_ann[:ignore_serialize])) %}
+          \{% json_key_{{ field[:name][1..].id }} = json_key %}
+          \{% json_converter_{{ field[:name][1..].id }} = json_converter %}
+          \{% json_omit_null_{{ field[:name][1..].id }} = json_ann && json_ann[:emit_null] == false %}
         {% end %}
-      end
+        json.object do
+          {% for field in declaration[:fields] %}
+            \{% if json_write_{{ field[:name][1..].id }} %}
+              {% if field[:type].nilable? %}
+                json_written = {{ field[:name].id }}
+                if json_written.nil?
+                  \{% unless json_omit_null_{{ field[:name][1..].id }} %}
+                    json.field(\{{ json_key_{{ field[:name][1..].id }} }})
+                    json.null
+                  \{% end %}
+                else
+                  json.field(\{{ json_key_{{ field[:name][1..].id }} }})
+                  \{% if json_converter_{{ field[:name][1..].id }} %}
+                    \{{ json_converter_{{ field[:name][1..].id }} }}.to_json(json_written, json)
+                  \{% else %}
+                    ::Std::Json::JSON.write_value(json_written, json)
+                  \{% end %}
+                end
+              {% else %}
+                json.field(\{{ json_key_{{ field[:name][1..].id }} }})
+                \{% if json_converter_{{ field[:name][1..].id }} %}
+                  \{{ json_converter_{{ field[:name][1..].id }} }}.to_json({{ field[:name].id }}, json)
+                \{% else %}
+                  ::Std::Json::JSON.write_value({{ field[:name].id }}, json)
+                \{% end %}
+              {% end %}
+            \{% end %}
+          {% end %}
+        end
+      \{% end %}
     end
   end
 
@@ -222,61 +277,115 @@ pub macro serializable(declaration)
     # name reaches a type the way another module would. A field that may
     # be nil reads `null` as the nil and anything else as the other type,
     # which is the field's type with the nil taken out: `x || raise`.
-    {% for field in declaration[:fields] %}
-      json_value_{{ field[:name][1..].id }} = nil
-      json_found_{{ field[:name][1..].id }} = false
-    {% end %}
-    pull.read_object do |json_key|
-      {% if declaration[:fields].empty? %}
-        pull.skip
-      {% else %}
-        # `json_found_` tells a key that was not there, where a field
-        # keeps its default, from a `null`.
-        case json_key
-        {% for field in declaration[:fields] %}
-        when {{ field[:name][1..] }}
-          json_found_{{ field[:name][1..].id }} = true
-          {% if field[:type].nilable? %}
-            json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }} || raise("")))
-          {% else %}
-            # A `null` for a field with a default whose type does not admit
-            # nil is no value, and the field keeps its default, as the other
-            # library's derive reads it; it was refused as not the type.
-            \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
-              json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
-            \{% else %}
-              json_value_{{ field[:name][1..].id }} = ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+    \{% begin %}
+      \{% json_seen = [] of StringLiteral %}
+      \{% json_readable = 0 %}
+      {% for field in declaration[:fields] %}
+        \{% json_ivar = @type.instance_vars.find { |ivar| ivar.name.stringify == {{ field[:name][1..] }} } %}
+        \{% json_ann = json_ivar ? json_ivar.annotation(::Std::Json::JSON::Field) : nil %}
+        \{% if json_ann %}
+          \{% unless json_ann.args.empty? %}
+            \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id } takes named options alone" %}
+          \{% end %}
+          \{% for json_option in json_ann.named_args.keys %}
+            \{% unless ["key", "ignore", "ignore_serialize", "ignore_deserialize", "emit_null", "converter"].includes?(json_option.stringify) %}
+              \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: #{json_option} is not an option (key, ignore, ignore_serialize, ignore_deserialize, emit_null, converter)" %}
+            \{% end %}
+          \{% end %}
+          \{% if json_ann[:key] && !json_ann[:key].is_a?(StringLiteral) %}
+            \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: key: is a string, not #{json_ann[:key]}" %}
+          \{% end %}
+        \{% end %}
+        \{% json_key = json_ann && json_ann[:key] ? json_ann[:key] : {{ field[:name][1..] }} %}
+        \{% json_read = !(json_ann && (json_ann[:ignore] || json_ann[:ignore_deserialize])) %}
+        \{% if json_read %}
+          \{% if json_seen.includes?(json_key) %}
+            \{% raise "#{@type} reads two fields from the key #{json_key}" %}
+          \{% end %}
+          \{% json_seen << json_key %}
+          \{% json_readable = json_readable + 1 %}
+        \{% end %}
+        \{% json_read_{{ field[:name][1..].id }} = json_read %}
+        \{% json_key_{{ field[:name][1..].id }} = json_key %}
+        \{% json_converter_{{ field[:name][1..].id }} = json_ann ? json_ann[:converter] : nil %}
+        \{% json_default_{{ field[:name][1..].id }} = json_ivar && json_ivar.has_default_value? %}
+        json_value_{{ field[:name][1..].id }} = nil
+        json_found_{{ field[:name][1..].id }} = false
+      {% end %}
+      pull.read_object do |json_key|
+        \{% if json_readable == 0 %}
+          pull.skip
+        \{% else %}
+          # `json_found_` tells a key that was not there, where a field
+          # keeps its default, from a `null`.
+          case json_key
+          {% for field in declaration[:fields] %}
+            \{% if json_read_{{ field[:name][1..].id }} %}
+              when \{{ json_key_{{ field[:name][1..].id }} }}
+                json_found_{{ field[:name][1..].id }} = true
+                {% if field[:type].nilable? %}
+                  \{% if json_converter_{{ field[:name][1..].id }} %}
+                    json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : \{{ json_converter_{{ field[:name][1..].id }} }}.from_json(pull)
+                  \{% else %}
+                    json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }} || raise("")))
+                  \{% end %}
+                {% else %}
+                  # A `null` for a field with a default whose type does not
+                  # admit nil is no value, and the field keeps its default, as
+                  # the other library's derive reads it; it was refused as not
+                  # the type.
+                  \{% if json_default_{{ field[:name][1..].id }} %}
+                    \{% if json_converter_{{ field[:name][1..].id }} %}
+                      json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : \{{ json_converter_{{ field[:name][1..].id }} }}.from_json(pull)
+                    \{% else %}
+                      json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+                    \{% end %}
+                  \{% elsif json_converter_{{ field[:name][1..].id }} %}
+                    json_value_{{ field[:name][1..].id }} = \{{ json_converter_{{ field[:name][1..].id }} }}.from_json(pull)
+                  \{% else %}
+                    json_value_{{ field[:name][1..].id }} = ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+                  \{% end %}
+                {% end %}
             \{% end %}
           {% end %}
-        {% end %}
-        else
-          pull.skip
-        end
-      {% end %}
-    end
-    # A field written with a default (`@port : Int32 = 8080`) holds it
-    # already, so on a missing key, or a `null` its type does not admit, it
-    # keeps its default; a key that is there wins, `null` included where the
-    # type admits nil. Whether there is a default is asked of the type when
-    # this method is compiled, not of the declaration, which carries names
-    # and types only: the port was refused by name, and
-    # `@host : String? = "localhost"` was overwritten with nil.
-    {% for field in declaration[:fields] %}
-      \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
-        {% if field[:type].nilable? %}
-          {{ field[:name].id }} = json_value_{{ field[:name][1..].id }} if json_found_{{ field[:name][1..].id }}
-        {% else %}
+          else
+            pull.skip
+          end
+        \{% end %}
+      end
+      # A field written with a default (`@port : Int32 = 8080`) holds it
+      # already, so on a missing key, or a `null` its type does not admit, it
+      # keeps its default; a key that is there wins, `null` included where the
+      # type admits nil. Whether there is a default is asked of the type when
+      # this method is compiled, not of the declaration, which carries names
+      # and types only: the port was refused by name, and
+      # `@host : String? = "localhost"` was overwritten with nil. A field that
+      # is not read keeps its default, or is nil; one with neither cannot be
+      # made, and is refused when the type is compiled.
+      {% for field in declaration[:fields] %}
+        \{% if !json_read_{{ field[:name][1..].id }} %}
+          \{% if json_default_{{ field[:name][1..].id }} %}
+          \{% elsif {{ field[:type].nilable? }} %}
+            {{ field[:name].id }} = nil
+          \{% else %}
+            \{% raise "JSON::Field on #{@type}'s #{ {{ field[:name][1..] }}.id }: a field that is not read needs a default, or a type that admits nil" %}
+          \{% end %}
+        \{% elsif json_default_{{ field[:name][1..].id }} %}
+          {% if field[:type].nilable? %}
+            {{ field[:name].id }} = json_value_{{ field[:name][1..].id }} if json_found_{{ field[:name][1..].id }}
+          {% else %}
+            json_field_{{ field[:name][1..].id }} = json_value_{{ field[:name][1..].id }}
+            {{ field[:name].id }} = json_field_{{ field[:name][1..].id }} unless json_field_{{ field[:name][1..].id }}.nil?
+          {% end %}
+        \{% elsif {{ field[:type].nilable? }} %}
+          {{ field[:name].id }} = json_value_{{ field[:name][1..].id }}
+        \{% else %}
           json_field_{{ field[:name][1..].id }} = json_value_{{ field[:name][1..].id }}
-          {{ field[:name].id }} = json_field_{{ field[:name][1..].id }} unless json_field_{{ field[:name][1..].id }}.nil?
-        {% end %}
-      \{% elsif {{ field[:type].nilable? }} %}
-        {{ field[:name].id }} = json_value_{{ field[:name][1..].id }}
-      \{% else %}
-        json_field_{{ field[:name][1..].id }} = json_value_{{ field[:name][1..].id }}
-        raise "JSON for #{ {{ declaration[:name] }} } has no key #{ {{ field[:name][1..] }}.inspect }" if json_field_{{ field[:name][1..].id }}.nil?
-        {{ field[:name].id }} = json_field_{{ field[:name][1..].id }}
-      \{% end %}
-    {% end %}
+          raise "JSON for #{ {{ declaration[:name] }} } has no key #{ \{{ json_key_{{ field[:name][1..].id }} }}.inspect }" if json_field_{{ field[:name][1..].id }}.nil?
+          {{ field[:name].id }} = json_field_{{ field[:name][1..].id }}
+        \{% end %}
+      {% end %}
+    \{% end %}
   end
 end
 
@@ -2353,6 +2462,27 @@ pub class Builder
 end
 
 pub struct JSON
+  # How `derive serializable` writes and reads one field, the other
+  # library's `JSON::Field`:
+  #
+  #     @[JSON::Field(key: "userName")]
+  #     getter user_name : String
+  #
+  # * `key:` the object key, where it is not the field's own name;
+  # * `ignore: true` neither written nor read, `ignore_serialize: true` not
+  #   written, `ignore_deserialize: true` not read - a field that is not
+  #   read keeps its default, or is nil, and needs one or the other;
+  # * `emit_null: false` a nil field left out of the object. A nil field is
+  #   written as `null` otherwise, where the other library leaves it out
+  #   unless asked;
+  # * `converter:` a type whose `self.to_json(value, json : Builder)` writes
+  #   the field and `self.from_json(pull : PullParser)` reads it.
+  #
+  # An option it does not know, a key that is not a string, and two fields
+  # written under one key are refused when the type is compiled.
+  annotation Field
+  end
+
   # The document as an `Any`; panics with the line and column of the first
   # thing it refuses.
   def self.parse(input : String) : Any
@@ -2386,8 +2516,9 @@ pub struct JSON
   end
 
   # Any value `write_value` knows: `nil`, a `Bool`, a prelude integer, a
-  # `Float64`, a `String`, an `Any`, an `Array` or `Hash` of those, or a type
-  # that implements `ToJSON`; each of them or `nil`.
+  # `Float64`, a `String`, an `Any`, an enum, an `Array` or `Hash` of those,
+  # or a type that implements `ToJSON`; a union of them, written as the
+  # member it holds is.
   def self.to_json(obj : T) : String forall T
     build do |b|
       write_or_null(obj, b)
@@ -2489,15 +2620,122 @@ pub struct JSON
     key.to_s
   end
 
-  def self.write_value(val : T, b : Builder) : Nil forall T : ToJSON
-    val.to_json(b)
+  # A `ToJSON` value writes itself. An enum member is written as the other
+  # library writes one: its name underscored (`Color::DarkRed` is
+  # `"dark_red"`), and a `@[Flags]` enum as the array of its members'
+  # names; a value no member has is written as its number. Told apart here
+  # and not by an overload restricted to `Enum`, which a program built
+  # from this module's artifact read as a class and could not pass an enum
+  # to.
+  #
+  # A union is matched here whole, `T` the union itself, so
+  # `JSON.to_json(1.as(Int32 | String))` called `to_json` on an `Int32`
+  # and did not build (issue #135). A member with an overload of its own,
+  # an `Int32` or an `Array`, is sent there when the program runs, yet this
+  # is still compiled for the whole union, and reached for the rest: an
+  # enum, a `ToJSON` type. Each is written as it is alone, by
+  # `Object#__json_write` below.
+  def self.write_value(val : T, b : Builder) : Nil forall T
+    {% if T.union? %}
+      val.__json_write(b)
+    {% elsif T < ::Enum %}
+      write_enum(val, T, b)
+    {% else %}
+      val.to_json(b)
+    {% end %}
+  end
+
+  # The enum's own type as a free variable, which a bound cannot give: an
+  # `Enum` is a struct, and a bound is a trait (SPEC.md II.7).
+  private def self.write_enum(val, type : T.class, b : Builder) : Nil forall T
+    {% if T.annotation(Flags) %}
+      b.array do
+        T.values.each { |member| b.string(underscore(member.to_s)) if val.includes?(member) }
+      end
+    {% else %}
+      if member = T.from_value?(val.value)
+        b.string(underscore(member.to_s))
+      else
+        b.number(val.value.to_i64)
+      end
+    {% end %}
+  end
+
+  # `DarkRed` as `dark_red`, and `HTTPCode` as `http_code`: a capital starts
+  # a word after a small letter or a digit, or before one.
+  private def self.underscore(name : String) : String
+    bytes = name.to_unsafe
+    String.build do |text|
+      index = 0
+      while index < name.bytesize
+        byte = bytes[index]
+        if byte >= 65_u8 && byte <= 90_u8
+          if index > 0
+            before = bytes[index - 1]
+            after_small = index + 1 < name.bytesize && bytes[index + 1] >= 97_u8 && bytes[index + 1] <= 122_u8
+            small_before = (before >= 97_u8 && before <= 122_u8) || (before >= 48_u8 && before <= 57_u8)
+            capital_before = before >= 65_u8 && before <= 90_u8
+            text << '_' if small_before || (capital_before && after_small)
+          end
+          text << (byte + 32_u8).unsafe_chr
+        else
+          text << byte.unsafe_chr
+        end
+        index = index + 1
+      end
+    end
+  end
+
+  # A member's name as it is matched: small letters, no underscores, so
+  # `"dark_red"`, `"DarkRed"` and `"DARK_RED"` are one name.
+  private def self.enum_key(name : String) : String
+    bytes = name.to_unsafe
+    String.build do |text|
+      index = 0
+      while index < name.bytesize
+        byte = bytes[index]
+        if byte >= 65_u8 && byte <= 90_u8
+          text << (byte + 32_u8).unsafe_chr
+        elsif byte != 95_u8
+          text << byte.unsafe_chr
+        end
+        index = index + 1
+      end
+    end
+  end
+
+  # A member by its name, or by its number; a `@[Flags]` enum from the
+  # array of its members' names. Anything else is refused, naming the
+  # members there are.
+  private def self.read_enum(pull : PullParser, type : T.class) : T forall T
+    {% if T.annotation(Flags) %}
+      found = T.from_value?(0) || raise "#{T} has no member for no flags"
+      pull.read_begin_array
+      while !pull.kind.end_array?
+        found = found | enum_member(pull.read_string, T)
+      end
+      pull.read_end_array
+      found
+    {% else %}
+      if pull.kind.int?
+        number = pull.read_int
+        return T.from_value?(number) || raise "#{number} is no #{T} member's value (#{T.names.map { |name| underscore(name) }.join(", ")})"
+      end
+      enum_member(pull.read_string, T)
+    {% end %}
+  end
+
+  private def self.enum_member(text : String, type : T.class) : T forall T
+    wanted = enum_key(text)
+    T.values.each { |member| return member if enum_key(member.to_s) == wanted }
+    raise "#{text.inspect} is no #{T} member (#{T.names.map { |name| underscore(name) }.join(", ")})"
   end
 
   # The document read into `type`: `Nil`, `Bool`, `Int32`, `Int64`, `UInt8`,
-  # `UInt64`, `Float64`, `String`, `Any`, a type with `derive serializable`,
-  # one of those or `nil`, or an `Array` or `Hash(String, V)` of those. An
-  # integer outside the type is refused, as is anything after the root
-  # value.
+  # `UInt64`, `Float64`, `String`, `Any`, an enum, a type with `derive
+  # serializable`, a union of them as `read_union` reads one, or an `Array`
+  # or `Hash(String, V)` of those. An integer outside the type is refused,
+  # as is anything after the root value.
   def self.from_json(str : String, type : T.class) : T forall T
     pull = PullParser.new(str)
     value = read_value(pull, type)
@@ -2609,12 +2847,137 @@ pub struct JSON
   # anything else as the other type (`x || raise`, as the derive asks it),
   # the way `write_or_null` writes it. That was `T.new(pull)` too, and
   # `Int32 | Nil` has no such `new`, so `JSON.from_json("5", Int32?)` and
-  # `Array(Int32?)` did not build.
+  # `Array(Int32?)` did not build. Any other union is `read_union`'s.
   def self.read_value(pull : PullParser, type : T.class) : T forall T
     {% if T.nilable? %}
       pull.read_null? ? nil : read_value(pull, typeof(nil.as(T) || raise("")))
+    {% elsif T.union? %}
+      read_union(pull, T)
+    {% elsif T < ::Enum %}
+      read_enum(pull, T)
     {% else %}
       T.new(pull)
     {% end %}
+  end
+
+  # A union read by the kind of value the reader is on, as the other
+  # library reads one: a boolean into `Bool`; an integer into the first of
+  # `Int64`, `UInt64`, `Int32`, `UInt8` that holds it, then `Float64`; a
+  # float into `UInt64` when its text is an integer that type holds (the
+  # reader hands one past Int64 over as a float), then `Float64`; a string
+  # into `String`; an array into the `Array` member and an object into the
+  # `Hash` member. What none of those takes is read by the one other
+  # member - an enum, an `Any`, a derived type - which refuses it in its
+  # own words when it is not its kind.
+  #
+  # The other library tries each member in turn and takes the first that
+  # reads without raising. There is no rescue to go back with here, so a
+  # union where that would choose - two other members, two arrays, two
+  # hashes - is refused when it is compiled instead of guessed at. Its nil
+  # was taken out by `read_value` first.
+  #
+  # A member is reached by narrowing the union, not by writing its name
+  # out: a name is looked up from here, where a type of a module this one
+  # does not import is refused (SPEC.md R-1) and a program's private type
+  # is not found.
+  private def self.read_union(pull : PullParser, type : T.class) : T forall T
+    {% begin %}
+      {% members = T.union_types %}
+      {% has_bool = members.any? { |m| m == ::Bool } %}
+      {% has_i64 = members.any? { |m| m == ::Int64 } %}
+      {% has_u64 = members.any? { |m| m == ::UInt64 } %}
+      {% has_i32 = members.any? { |m| m == ::Int32 } %}
+      {% has_u8 = members.any? { |m| m == ::UInt8 } %}
+      {% has_f64 = members.any? { |m| m == ::Float64 } %}
+      {% has_string = members.any? { |m| m == ::String } %}
+      {% rest = members.reject { |m| m == ::Bool || m == ::Int64 || m == ::UInt64 || m == ::Int32 || m == ::UInt8 || m == ::Float64 || m == ::String } %}
+      {% arrays = rest.select { |m| m < ::Array } %}
+      {% hashes = rest.select { |m| m < ::Hash } %}
+      {% others = rest.reject { |m| m < ::Array || m < ::Hash } %}
+      {% clash = nil %}
+      {% if others.size > 1 %}
+        {% clash = others %}
+      {% elsif arrays.size > 1 %}
+        {% clash = arrays %}
+      {% elsif hashes.size > 1 %}
+        {% clash = hashes %}
+      {% end %}
+      {% if clash %}
+        {% raise "JSON cannot read #{T}: which of #{clash.join(" and ").id} a value is read into would be a guess, as there is no rescue to try one and go back. A union read from JSON has one Array, one Hash and one other member at most besides Bool, Int64, UInt64, Int32, UInt8, Float64 and String." %}
+      {% end %}
+      kind = pull.kind
+      {% if has_bool %}
+        return pull.read_bool if kind.bool?
+      {% end %}
+      {% if has_i64 %}
+        return pull.read_int if kind.int?
+      {% elsif has_u64 || has_i32 || has_u8 %}
+        if kind.int?
+          int = pull.int_value
+          {% if has_u64 %}
+            return read_value(pull, ::UInt64) if int >= 0_i64
+          {% end %}
+          {% if has_i32 %}
+            return read_value(pull, ::Int32) if int >= -2147483648_i64 && int <= 2147483647_i64
+          {% end %}
+          {% if has_u8 %}
+            return read_value(pull, ::UInt8) if int >= 0_i64 && int <= 255_i64
+          {% end %}
+        end
+      {% end %}
+      {% if has_u64 %}
+        return read_value(pull, ::UInt64) if kind.float? && integer_digits?(pull.raw_value) && digits_to_u64?(pull.raw_value)
+      {% end %}
+      {% if has_f64 %}
+        return pull.read_float if kind.int? || kind.float?
+      {% end %}
+      {% if has_string %}
+        return pull.read_string if kind.string?
+      {% end %}
+      {% if arrays.size == 1 %}
+        if kind.begin_array?
+          return read_value(pull, typeof(begin
+            member = uninitialized T
+            member.is_a?(::Array) ? member : raise("")
+          end))
+        end
+      {% end %}
+      {% if hashes.size == 1 %}
+        if kind.begin_object?
+          return read_value(pull, typeof(begin
+            member = uninitialized T
+            member.is_a?(::Hash) ? member : raise("")
+          end))
+        end
+      {% end %}
+      {% if others.size == 1 %}
+        read_value(pull, typeof(begin
+          member = uninitialized T
+          member.is_a?(::Bool | ::Int64 | ::UInt64 | ::Int32 | ::UInt8 | ::Float64 | ::String) || member.is_a?(::Array) || member.is_a?(::Hash) ? raise("") : member
+        end))
+      {% else %}
+        {% if has_u64 || has_i32 || has_u8 %}
+          if kind.int? || (kind.float? && integer_digits?(pull.raw_value))
+            raise "integer #{pull.raw_value} out of #{T} range at line #{pull.line_number}, column #{pull.column_number}"
+          end
+        {% end %}
+        raise "expected #{T}, got #{kind} at line #{pull.line_number}, column #{pull.column_number}"
+      {% end %}
+    {% end %}
+  end
+end
+
+# A union's value written by the member it holds: called on a union, a
+# method runs as the member's own type, so `self` here is that member and
+# `JSON.write_value` picks its overload as it would for the member alone.
+# `JSON.write_value` hands a union here.
+#
+# The members are not told apart by name. `Union`'s `T` named in a macro
+# was tried first, and a name is looked up from where it is written: from
+# this module, `Std::Time::Time` was refused as not imported here
+# (SPEC.md R-1), and a program's private type was an undefined constant.
+class ::Object
+  def __json_write(json : ::Std::Json::Builder) : Nil
+    ::Std::Json::JSON.write_value(self, json)
   end
 end

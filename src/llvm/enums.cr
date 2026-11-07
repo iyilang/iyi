@@ -214,6 +214,12 @@ module LLVM
     DLLExport
   end
 
+  enum Visibility
+    Default
+    Hidden
+    Protected
+  end
+
   enum ThreadLocalMode
     NotThreadLocal
     GeneralDynamic

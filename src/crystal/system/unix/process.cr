@@ -323,7 +323,7 @@ struct Crystal::System::Process
     {% if LibC.has_method?("execvpe") && !flag?("execvpe_impl") %}
       lock_write { LibC.execvpe(file, argv, envp) }
     {% else %}
-      execvpe_impl(file, argv, envp)
+      execvpe_impl(file) { |path| lock_write { LibC.execve(path, argv, envp) } }
     {% end %}
   end
 
@@ -333,7 +333,12 @@ struct Crystal::System::Process
   # we need to implement it ourselves.
   # This method runs between `fork` and `exec` and must be very cautious, such
   # as no memory allocations.
-  private def self.execvpe_impl(file : String, argv : LibC::Char**, envp : LibC::Char**)
+  #
+  # iyi: it yields each pathname to try, and the block tries it and leaves its
+  # error in `Errno.value`, so that `posix_spawn` searches `PATH` the same way
+  # (`spawn.cr`). A block that succeeds does not come back: `execve` replaces
+  # the process, and the spawning one `break`s.
+  private def self.execvpe_impl(file : String, &)
     if file.empty?
       Errno.value = Errno::ENOENT
       return
@@ -341,7 +346,7 @@ struct Crystal::System::Process
 
     # When file contains a slash, it's already a pathname that we should execute.
     if file.includes?("/")
-      lock_write { LibC.execve(file, argv, envp) }
+      yield file.to_unsafe
 
       # Glibc implements a fallback if execve fails with ENOEXEC which tries
       # executing `file` with `/bin/sh`. This is a legacy compatibility feature and
@@ -400,7 +405,7 @@ struct Crystal::System::Process
       builder += file.size
       builder[0] = 0
 
-      lock_write { LibC.execve(buffer.to_slice[0, buffer.size - builder.size], argv, envp) }
+      yield buffer.to_unsafe
 
       case Errno.value
       when Errno::EACCES

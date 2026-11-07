@@ -1,0 +1,184 @@
+# Exercises `std/number_format`.
+#
+#     ./bin/iyi run bench/std_number_format_exercise.iyi
+#     ./bin/iyi run bench/std_number_format_exercise.iyi oracle   # cases
+#
+# The plain run checks named examples and what the module refuses. With
+# `oracle` it prints random cases instead - doubles, singles, integers and
+# byte counts, each with what the module wrote - which
+# bench/std_number_format_exercise.sh recomputes in exact decimal
+# arithmetic.
+
+module bench/std_number_format_exercise
+
+import std/number_format::{BinaryPrefixFormat}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+# xorshift64*, seeded: the same cases every run.
+class Cases
+  @state = 0x9E3779B97F4A7C15_u64
+
+  def next : UInt64
+    x = @state
+    x = x ^ x.unsafe_shr(12_u64)
+    x = x ^ x.unsafe_shl(25_u64)
+    x = x ^ x.unsafe_shr(27_u64)
+    @state = x
+    x &* 0x2545F4914F6CDD1D_u64
+  end
+
+  def below(n : Int32) : Int32
+    (self.next % n.to_u64).to_i64.to_i32
+  end
+
+  # A finite double: a random significand under a random exponent, mostly
+  # within q..Q and past it, now and then a subnormal.
+  def double : UInt64
+    sign = self.next & 0x8000000000000000_u64
+    fraction = self.next & 4503599627370495_u64
+    exponent = below(10) == 0 ? below(2046).to_u64 : (1023 - 130 + below(280)).to_u64
+    sign | exponent.unsafe_shl(52_u64) | fraction
+  end
+end
+
+def double_of(bits : UInt64) : Float64
+  holder = Pointer(UInt64).malloc(1_u64)
+  holder.value = bits
+  Pointer(Float64).new(holder.address).value
+end
+
+def single_of(bits : UInt32) : Float32
+  holder = Pointer(UInt32).malloc(1_u64)
+  holder.value = bits
+  Pointer(Float32).new(holder.address).value
+end
+
+if Program.args.size > 0 && Program.args[0] == "oracle"
+  cases = Cases.new
+  2000.times do
+    bits = cases.double
+    x = double_of(bits)
+    places = cases.below(9)
+    digits = 1 + cases.below(7)
+    puts "FN #{bits} #{x.format}"
+    puts "FP #{bits} #{places} #{x.format(decimal_places: places)}"
+    puts "FS #{bits} #{places} #{x.format(decimal_places: places, only_significant: true)}"
+    puts "HS #{bits} #{digits} #{x.humanize(digits)}"
+    puts "HP #{bits} #{places % 5} #{x.humanize(places % 5, significant: false)}"
+  end
+  1000.times do
+    bits = (cases.next & 0xFFFFFFFF_u64).to_u32
+    bits = bits & 0x807FFFFF_u32 if bits.unsafe_shr(23_u32) & 255_u32 == 255_u32
+    puts "GN #{bits} #{single_of(bits).format}"
+  end
+  2000.times do
+    n = cases.next.unsafe_shr(cases.below(64).to_u64)
+    signed = (n.unsafe_shr(1_u64)).to_i64
+    signed = (0_i64 - signed) - 1_i64 if cases.below(2) == 0
+    digits = 1 + cases.below(7)
+    places = cases.below(5)
+    puts "IN #{signed} #{signed.format}"
+    puts "IH #{signed} #{digits} #{signed.humanize(digits)}"
+    puts "IP #{signed} #{places} #{signed.humanize(places, significant: false)}"
+    puts "BI #{n} #{digits} #{n.humanize_bytes(digits)}"
+    puts "BJ #{n} #{places} #{n.humanize_bytes(places, significant: false, format: BinaryPrefixFormat::JEDEC)}"
+  end
+  # Where rounding decides: powers of ten and their neighbours, exact ties
+  # (1250 at two digits, 0.125 at two places), values one step below a
+  # thousand that round into the next prefix, and byte counts at and half
+  # a unit past powers of 1024.
+  [1_i64, 15_i64, 25_i64, 35_i64, 125_i64, 1235_i64, 9995_i64, 99950_i64, 999500_i64].each do |m|
+    scale = 1_i64
+    while m * scale < 900_000_000_000_000_000_i64
+      [m * scale - 1_i64, m * scale, m * scale + 1_i64].each do |v|
+        4.times do |step|
+          puts "IH #{v} #{step + 1} #{v.humanize(step + 1)}"
+          puts "IP #{v} #{step} #{v.humanize(step, significant: false)}"
+        end
+      end
+      scale = scale * 10_i64
+    end
+  end
+  6.times do |power|
+    unit = 1_u64.unsafe_shl((10 * power).to_u64)
+    [1_u64, 1000_u64, 1023_u64, 1024_u64, 1536_u64].each do |m|
+      [m * unit - 1_u64, m * unit, m * unit + 1_u64, m * unit + unit // 2_u64].each do |v|
+        4.times do |step|
+          puts "BI #{v} #{step + 1} #{v.humanize_bytes(step + 1)}"
+          puts "BJ #{v} #{step} #{v.humanize_bytes(step, significant: false, format: BinaryPrefixFormat::JEDEC)}"
+        end
+      end
+    end
+  end
+  [0.125, 0.375, 2.5, 3.5, 1.005, 999.5, 9.995, 0.5, 123456.5, 1e21, 1e23, 9.999999999999999e22, 1e-30, 9.995e-31, 1e33, 5e-324, 1.7976931348623157e308].each do |magnitude|
+    [magnitude, 0.0 - magnitude].each do |x|
+      bits = IyiFloatText.bits_of(x)
+      puts "FN #{bits} #{x.format}"
+      4.times do |step|
+        puts "FP #{bits} #{step} #{x.format(decimal_places: step)}"
+        puts "FS #{bits} #{step} #{x.format(decimal_places: step, only_significant: true)}"
+        puts "HS #{bits} #{step + 1} #{x.humanize(step + 1)}"
+        puts "HP #{bits} #{step} #{x.humanize(step, significant: false)}"
+      end
+    end
+  end
+  # Doubles just under a power of ten, at many places: at one digit they
+  # round up to the power above, and the prefix is the one below it.
+  [999.9999999999999, 999999.9999999999, 9.999999999999999e-7, 9.999999999999999e29].each do |x|
+    bits = IyiFloatText.bits_of(x)
+    7.times do |step|
+      puts "HP #{bits} #{step + 10} #{x.humanize(step + 10, significant: false)}"
+    end
+  end
+  __iyi_exit(0)
+end
+
+puts "== digits in groups"
+assert_true(1234567.format == "1,234,567", "1234567 grouped is #{1234567.format}")
+assert_true(123.format == "123" && 1000.format == "1,000" && (-1000).format == "-1,000", "short and signed integers grouped")
+assert_true(1234.5678.format(decimal_places: 2) == "1,234.57", "1234.5678 to two places is #{1234.5678.format(decimal_places: 2)}")
+assert_true(1234.5.format(',', '.') == "1.234,5", "a comma separator and a point delimiter: #{1234.5.format(',', '.')}")
+assert_true(1234567.format(group: 4, delimiter: ' ') == "123 4567", "groups of four: #{1234567.format(group: 4, delimiter: ' ')}")
+assert_true(1.format(decimal_places: 2) == "1.00", "an integer to two places is #{1.format(decimal_places: 2)}")
+assert_true(1.005.format(decimal_places: 2) == "1.00" && 2.5.format(decimal_places: 0) == "2" && 3.5.format(decimal_places: 0) == "4", "places round the double's own value, half to even")
+assert_true(1e20.format == "100,000,000,000,000,000,000.0", "1e20 written out is #{1e20.format}")
+assert_true(1.25e-7.format == "0.000000125", "1.25e-7 written out is #{1.25e-7.format}")
+assert_true(1.0.format == "1.0" && 1.0.format(only_significant: true) == "1", "a float's point and its trimmed zero: #{1.0.format}")
+assert_true(1.5.format(decimal_places: 3, only_significant: true) == "1.5", "only the significant places of 1.500")
+assert_true((-0.0).format == "0.0" && (-0.001).format(decimal_places: 2) == "0.00", "a value that prints as zero has no sign: #{(-0.001).format(decimal_places: 2)}")
+assert_true(0.1_f32.format == "0.1", "a single prints its own shortest digits: #{0.1_f32.format}")
+assert_true((-9223372036854775807_i64 - 1).format == "-9,223,372,036,854,775,808", "the least Int64 grouped")
+puts "  integers and floats grouped, places rounded half to even, and no sign on a zero"
+
+puts "== scaled to a prefix"
+assert_true(1_234_567.humanize == "1.23M", "1234567 is #{1_234_567.humanize}")
+assert_true(1000.humanize == "1k" && 1234.humanize == "1.23k" && 123.humanize == "123", "a thousand is 1k, its zeros trimmed: #{1000.humanize}")
+assert_true(999_999.humanize == "1M" && 999.5.humanize == "1k", "a value that rounds up to a thousand takes the next prefix: #{999_999.humanize}")
+assert_true(0.000_012.humanize == "12µ" && 0.5.humanize == "500m", "below one, the small prefixes: #{0.000_012.humanize}")
+assert_true(1e40.humanize == "10,000,000,000Q" && 1e-40.humanize == "0.0000000001q", "past Q and q the digits grow: #{1e40.humanize}")
+assert_true(1234.humanize(2, significant: false) == "1.23k" && 999_999.humanize(1, significant: false) == "1.0M", "places after the point, kept: #{999_999.humanize(1, significant: false)}")
+assert_true(1234.humanize(unit_separator: " ") == "1.23 k" && (-1234).humanize == "-1.23k", "a unit separator, and a sign")
+assert_true(0.humanize == "0" && 0.0.humanize == "0", "zero has no prefix")
+puts "  SI prefixes from q to Q, significant digits or places, rounding into the next prefix"
+
+puts "== bytes"
+assert_true(1536.humanize_bytes == "1.5KiB", "1536 bytes are #{1536.humanize_bytes}")
+assert_true(1536.humanize_bytes(format: BinaryPrefixFormat::JEDEC) == "1.5KB", "and in JEDEC's units #{1536.humanize_bytes(format: BinaryPrefixFormat::JEDEC)}")
+assert_true(1023.humanize_bytes == "1023B" && 0.humanize_bytes == "0B", "under 1024 a count is whole bytes: #{1023.humanize_bytes}")
+assert_true(1048575.humanize_bytes(4) == "1MiB", "1048575 at four digits is #{1048575.humanize_bytes(4)}")
+assert_true(18446744073709551615_u64.humanize_bytes == "16EiB", "the largest UInt64 is #{18446744073709551615_u64.humanize_bytes}")
+assert_true(1536.humanize_bytes(2, significant: false, unit_separator: " ") == "1.50 KiB", "places kept, and a separator")
+puts "  powers of 1024 in IEC's and JEDEC's units, rounding into the next unit"
+
+puts "== what it refuses"
+assert_panics("group must be at least 1, not 0") { 1.format(group: 0) }
+assert_panics("decimal_places must be at least 0, not -1") { 1.5.format(decimal_places: -1) }
+assert_panics("precision must be at least 1 significant digit, not 0") { 1.humanize(0) }
+assert_panics("precision must be at least 0 places, not -1") { 1.5.humanize(-1, significant: false) }
+assert_panics("Int#humanize_bytes: precision must be at least 1 significant digit, not 0") { 1.humanize_bytes(0) }
+puts "  a group under 1, negative places, and a precision too small, each by name"
+
+puts "ALL CHECKS PASSED"

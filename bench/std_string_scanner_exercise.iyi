@@ -1,0 +1,443 @@
+# Exercises `std/string_scanner`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_string_scanner_exercise.iyi
+#
+# With `patterns` it prints the tokenizer's patterns, `kind<TAB>source`;
+# with `tokens PATH` it tokenizes each program in the file (separated by
+# byte 0x1E) and prints what it read; with `match_at PATH` it answers each
+# `pattern 0x1F text 0x1F byte` line with `begin end` or `-`.
+# bench/std_string_scanner_exercise.sh compares those with Python's `re`.
+
+module bench/std_string_scanner_exercise
+
+import std/regex::{Regex}
+import std/string_scanner::{StringScanner}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String?, actual : String?, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_int(expected : Int32?, actual : Int32?, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# What *block* panics with, run as a task of its own, or "answered".
+def panic_of(&block : -> _) : String
+  said = "answered"
+  group do |g|
+    task = g.spawn do
+      block.call
+      0
+    end
+    outcome = task.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+# A small language's tokens: numbers with a fraction and an exponent,
+# identifiers that may be written in any script, five keywords, strings
+# with backslash escapes, `#` comments, and operators longest first.
+struct Token
+  getter kind : String
+  getter text : String
+  getter at : Int32
+
+  def initialize(@kind : String, @text : String, @at : Int32)
+  end
+end
+
+# Source the tokenizer cannot read: a value, because the source is input.
+struct LexError
+  getter at : Int32
+  getter reason : String
+
+  def initialize(@reason : String, @at : Int32)
+  end
+end
+
+impl Error for LexError
+  def message : String
+    "#{@reason} at byte #{@at}"
+  end
+end
+
+def patterns : Array({String, Regex})
+  [
+    {"space", /[ \t\r\n]+|#[^\n]*/},
+    {"number", /[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?/},
+    {"ident", /[A-Za-z_À-鿿][A-Za-z0-9_À-鿿]*/},
+    {"string", /"(?:[^"\\\n]|\\.)*"/},
+    {"op", /==|!=|<=|>=|->|[-+*\/=<>(){},;]/},
+  ]
+end
+
+KEYWORDS = ["let", "fn", "if", "else", "print"]
+
+def tokenize(source : String) : Array(Token) | LexError
+  table = patterns
+  tokens = [] of Token
+  s = StringScanner.new(source)
+  while !s.eos?
+    at = s.offset
+    kind = ""
+    table.each do |entry|
+      if kind.empty? && s.scan(entry[1])
+        kind = entry[0]
+      end
+    end
+    if kind.empty?
+      return LexError.new("unterminated string", at) if s.check('"')
+      return LexError.new("unexpected #{s.peek(1).inspect}", at)
+    end
+    next if kind == "space"
+    text = s[0]
+    kind = "keyword" if kind == "ident" && KEYWORDS.includes?(text)
+    tokens << Token.new(kind, text, at)
+  end
+  tokens
+end
+
+def hex(text : String) : String
+  String.build do |io|
+    i = 0
+    while i < text.bytesize
+      io << text.to_unsafe[i].to_i32.to_s(16).rjust(2, '0')
+      i = i + 1
+    end
+  end
+end
+
+if Program.args.size > 0 && Program.args[0] == "patterns"
+  patterns.each { |entry| puts "#{entry[0]}\t#{entry[1].source}" }
+  exit 0
+end
+
+if Program.args.size > 1 && Program.args[0] == "tokens"
+  programs = File.read(Program.args[1]).split('\u001E')
+  k = 0
+  while k < programs.size
+    puts "== program #{k}"
+    result = tokenize(programs[k])
+    if result.is_a?(LexError)
+      puts "error #{result.reason.starts_with?("unterminated") ? "unterminated" : "unexpected"} #{result.at}"
+    else
+      result.each { |token| puts "#{token.kind} #{token.at} #{hex(token.text)}" }
+    end
+    k = k + 1
+  end
+  exit 0
+end
+
+if Program.args.size > 1 && Program.args[0] == "match_at"
+  File.read(Program.args[1]).split('\n').each do |line|
+    next if line.empty?
+    parts = line.split('\u001F')
+    found = Regex.compile(parts[0]).match_at(parts[1], parts[2].to_i)
+    puts found ? "#{found.byte_begin(0)} #{found.byte_end(0)}" : "-"
+  end
+  exit 0
+end
+
+puts "== the other library's scan, scan_until, skip and skip_until"
+s = StringScanner.new("this is a string")
+assert_str "this", s.scan(/\w+/), "scan a regex"
+assert_str " ", s.scan(' '), "scan a char"
+assert_str "is ", s.scan("is "), "scan a string"
+assert_str "a ", s.scan(/\w+\s/), "scan a regex again"
+assert_str "st", s.scan(2), "scan a count"
+assert_str "ring", s.scan(/\w+/), "scan to the end"
+
+s = StringScanner.new("test string")
+assert_str "test", s.scan(/\w+/), "scan test"
+assert_str nil, s.scan(/\w+/), "scan does not search ahead"
+assert_str nil, s.scan('s'), "nor for a char"
+assert_str nil, s.scan("string"), "nor for a string"
+assert_str " st", s.scan(/\s\w\w/), "scan from where the last left"
+assert_str "ring", s.scan(4), "scan 4"
+assert_str "", s.scan(/.*/), "an empty match at the end"
+assert_str nil, s.scan(1), "no character left"
+
+s = StringScanner.new("test string")
+assert_str "test ", s.scan_until(/t /), "scan_until a regex"
+assert_int 5, s.offset, "scan_until moves past the match"
+assert_str "str", s.scan_until("tr"), "scan_until a string"
+assert_int 8, s.offset, "offset 8"
+assert_str "in", s.scan_until('n'), "scan_until a char"
+assert_int 10, s.offset, "offset 10"
+s.offset = 8
+assert_str nil, s.scan_until(/tr/), "scan_until finds nothing behind it"
+assert_str nil, s.scan_until('r'), "nor a char"
+assert_str nil, s.scan_until("tr"), "nor a string"
+
+s = StringScanner.new("this is a string")
+assert_int 5, s.skip(/\w+\s/), "skip answers how far it moved"
+assert_int 5, s.offset, "skip moves"
+assert_str "this ", s[0]?, "skip records its match"
+assert_int nil, s.skip(/\d+/), "skip nothing"
+assert_int 5, s.offset, "and stay"
+assert_str nil, s[0]?, "and the failure is the last match"
+assert_int 1, s.skip('i'), "skip a char"
+assert_str "i", s[0]?, "skip char match"
+assert_int 2, s.skip("s "), "skip a string"
+assert_int 8, s.offset, "offset 8 after skip"
+assert_int 2, s.skip(/\w+\s/), "skip a regex"
+assert_int 5, s.skip(5), "skip a count"
+assert_int 15, s.offset, "offset 15"
+assert_str "strin", s[0]?, "skip count match"
+assert_int nil, s.skip(100), "skip too far"
+assert_int nil, s.skip(2), "skip two of one"
+assert_int 1, s.skip(1), "skip the last"
+assert_int nil, s.skip(1), "skip past the end"
+assert_int 0, s.skip(0), "skip nothing at the end"
+
+s = StringScanner.new("this is a string")
+assert_int nil, s.skip_until(/not/), "skip_until finds nothing"
+assert_int 0, s.offset, "and stays"
+assert_str nil, s[0]?, "and records nothing"
+assert_int 8, s.skip_until(/\sis\s/), "skip_until a regex"
+assert_str " is ", s[0]?, "the last match is the match, not what was skipped"
+assert_int 4, s.skip_until("st"), "skip_until a string"
+assert_int 12, s.offset, "offset 12"
+assert_int 4, s.skip_until("ng"), "skip_until to the end"
+assert_true s.eos?, "skip_until to eos"
+
+s = StringScanner.new("this is a string")
+assert_true !s.eos?, "not eos at the start"
+s.skip(/(\w+\s?){4}/)
+assert_true s.eos?, "eos at the end"
+puts "  scan, scan_until, skip, skip_until with a regex, a string, a char and a count"
+
+puts "\n== check, check_until, matches? and matched?"
+s = StringScanner.new("this is a string")
+s.offset = 5
+assert_str "is ", s.check(/\w+\s/), "check a regex"
+assert_int 5, s.offset, "check does not move"
+assert_str "is ", s[0], "check records its match"
+assert_str "i", s.check('i'), "check a char"
+assert_str "is a str", s.check("is a str"), "check a string"
+assert_str "is a", s.check(4), "check a count"
+assert_str nil, s.check(100), "check too far"
+assert_int 5, s.offset, "still 5"
+assert_str nil, s[0]?, "and no last match"
+s = StringScanner.new("test string")
+assert_str nil, s.check(/\d+/), "check no digits"
+assert_str nil, s.check('0'), "check no char"
+assert_str nil, s.check("01"), "check no string"
+assert_str "test str", s.check_until(/tr/), "check_until a regex"
+assert_str "test str", s.check_until('r'), "check_until a char"
+assert_str "test string", s.check_until("ng"), "check_until a string"
+assert_int 0, s.offset, "check_until does not move"
+s.offset = 8
+assert_str nil, s.check_until(/tr/), "check_until behind"
+s = StringScanner.new("this is")
+assert_int 4, s.matches?(/\w+/), "matches? a regex"
+assert_int 0, s.offset, "matches? does not move"
+assert_int 2, s.matches?("th"), "matches? a string"
+assert_int 1, s.matches?('t'), "matches? a char"
+assert_int nil, s.matches?("is"), "matches? only at the offset"
+
+s = StringScanner.new("sphinx of black quartz, judge my vow")
+assert_true !s.matched?, "nothing matched yet"
+s.check(1000)
+assert_true !s.matched?, "check 1000 does not match"
+s.check(10)
+assert_true s.matched?, "check 10 does"
+s.check(/Sphinx/)
+assert_true !s.matched?, "case matters"
+s.check(/sphinx/)
+assert_true s.matched?, "check sphinx"
+s.skip("nonsense")
+assert_true !s.matched?, "skip nonsense"
+s.skip("sphinx ")
+assert_true s.matched?, "skip sphinx"
+s.scan(/\d+/)
+assert_true !s.matched?, "scan digits"
+s.scan(/\w+/)
+assert_true s.matched?, "scan word"
+s.scan(1000)
+s.peek(10)
+assert_true !s.matched?, "peek leaves the last match alone"
+puts "  check, check_until, matches?, matched?"
+
+puts "\n== groups of the last match"
+s = StringScanner.new("Fri Dec 12 1975 14:39")
+date = /(?<wday>\w+) (?<month>\w+) (?<day>\d+)/
+assert_str "Fri Dec 12", s.scan(date), "scan with named groups"
+assert_str "Fri Dec 12", s[0], "group 0"
+assert_str "Fri", s[1], "group 1"
+assert_str "Dec", s[2], "group 2"
+assert_str "12", s[3], "group 3"
+assert_str "12", s[-1], "a negative group counts from the last"
+assert_str "Fri", s["wday"], "named wday"
+assert_str "Dec", s["month"]?, "named month"
+assert_str "12", s["day"], "named day"
+assert_str nil, s[5]?, "a group it does not have is nil"
+assert_str nil, s["something"]?, "a name it does not have is nil"
+assert_true panic_of { s[5] }.includes?("string_scanner: the last match has no group 5 (it has 3)"), "[] of a group it does not have panics"
+assert_true panic_of { s["something"] }.includes?("string_scanner: the last match has no group named 'something'"), "[] of a name it does not have panics"
+assert_str " ", s.scan(' '), "scan a char after groups"
+assert_str " ", s[0], "the char is group 0"
+assert_str nil, s[1]?, "and has no group 1"
+assert_str nil, s["wday"]?, "nor the old names"
+assert_true panic_of { s[1] }.includes?("string_scanner: the last match has no group 1 (it has 0)"), "[] of group 1 of a char panics"
+assert_str "1975", s.scan("1975"), "scan a string after groups"
+assert_str "1975", s[0], "the string is group 0"
+assert_true panic_of { s["something"] }.includes?("no group named 'something'"), "a string match has no names"
+s.scan(/this is not there/)
+assert_str nil, s[0]?, "no last match after a miss"
+assert_true panic_of { s[0] }.includes?("string_scanner: the last scan matched nothing, so it has no group 0"), "[] with no last match panics"
+s = StringScanner.new("b")
+s.scan(/(a)|(b)/)
+assert_str "b", s[2], "the group that took part"
+assert_str nil, s[1]?, "a group that took no part is nil"
+assert_true panic_of { s[1] }.includes?("string_scanner: group 1 took no part in the last match"), "[] of a group that took no part panics"
+s = StringScanner.new("key = value")
+assert_str "key = ", s.scan_until(/(?<eq>\s*=\s*)/), "scan_until with a group"
+assert_str " = ", s["eq"], "scan_until's groups are the match's"
+puts "  numbered, negative and named groups, [] and []? with and without a match"
+
+puts "\n== offset, rest, peek, reset, terminate"
+s = StringScanner.new("this is a string")
+assert_str "this is a string", s.string, "string"
+assert_str "this is a string", s.rest, "rest at the start"
+assert_int 0, s.offset, "offset 0"
+s.scan(/this is a /)
+assert_str "string", s.rest, "rest in the middle"
+s.scan(/string/)
+assert_str "", s.rest, "rest at the end"
+s = StringScanner.new("this is a string")
+s.offset = 5
+assert_str "is", s.scan(/\w+/), "offset= then scan"
+s.offset = 16
+assert_true s.eos?, "the end is an offset"
+assert_true panic_of { s.offset = -2 }.includes?("string_scanner: offset -2 is negative"), "a negative offset panics"
+assert_true panic_of { s.offset = 17 }.includes?("string_scanner: offset 17 is past the end of a string of 16 bytes"), "an offset past the end panics"
+s = StringScanner.new("this is a string")
+assert_str "this", s.peek(4), "peek"
+assert_str "this is", s.peek(7), "peek more"
+assert_int 0, s.offset, "peek does not move"
+assert_str "this is a string", s.peek(100), "peek past the end answers the rest"
+assert_true panic_of { s.peek(-1) }.includes?("string_scanner: negative lookahead count: -1"), "a negative peek panics"
+assert_true panic_of { s.scan(-10) }.includes?("string_scanner: negative lookahead count: -10"), "a negative scan panics"
+s.scan_until(/str/)
+assert_true !s[0]?.nil? && s.offset != 0, "something matched"
+s.reset
+assert_true s[0]?.nil? && s.offset == 0, "reset clears the match and the offset"
+s.scan_until(/str/)
+s.terminate
+assert_true s[0]?.nil? && s.eos?, "terminate clears the match and ends"
+puts "  string, rest, offset=, peek, reset, terminate"
+
+puts "\n== bytes and characters"
+s = StringScanner.new("テストの文字列")
+assert_str "テスト", s.scan(/\p{L}\p{L}\p{L}/), "a regex reads characters"
+assert_int 9, s.offset, "and the offset is bytes"
+assert_str nil, s.scan(/[a-z]+/), "no ASCII"
+assert_str nil, s.scan('ト'), "not the char behind"
+assert_str "の", s.scan('の'), "a char past ASCII"
+assert_str nil, s.scan(10), "ten characters are not left"
+assert_str "文字", s.scan(2), "a count is characters"
+assert_int 18, s.offset, "six bytes moved"
+assert_str nil, s.scan("不在"), "a string that is not there"
+assert_str "列", s.scan("列"), "the last character"
+s = StringScanner.new("これは文字列である")
+assert_int 9, s.skip(/\p{L}{3}/), "skip answers bytes"
+assert_str "これは", s[0]?, "skip's match"
+assert_int nil, s.skip(100), "skip 100 characters"
+assert_int 6, s.skip("文字"), "skip a string of two characters"
+assert_int 3, s.skip('列'), "skip a char of three bytes"
+assert_int 6, s.skip(2), "skip two characters"
+assert_str "であ", s[0]?, "the two characters"
+assert_int 0, s.skip(0), "skip none"
+assert_str "", s[0]?, "an empty match"
+assert_int 3, s.skip(1), "skip the last character"
+assert_true s.eos?, "at the end"
+s = StringScanner.new("これは文字列である")
+assert_str "これは", s.peek(3), "peek is characters"
+assert_str "これは文字列", s.peek(6), "peek six characters"
+assert_true panic_of { StringScanner.new("é").offset = 1 }.includes?("string_scanner: offset 1 is inside a character"), "an offset inside a character panics"
+bad = String.new(4) { |p| p[0] = 0x80_u8; p[1] = 0xC3_u8; p[2] = 0x28_u8; p[3] = 0xE2_u8 }
+t = StringScanner.new(bad)
+t.offset = 1
+t.offset = 2
+t.offset = 3
+t.offset = 1
+assert_true t.peek(2) == bad[1, 2], "a lead without its continuation is one character"
+assert_int 1, t.skip(1), "and is one byte long"
+cut = String.new(2) { |p| p[0] = 0xE2_u8; p[1] = 0x82_u8 }
+c = StringScanner.new(cut)
+c.offset = 1
+assert_int 1, c.offset, "a continuation after a cut-short lead begins a character"
+caret = StringScanner.new("ab")
+caret.offset = 1
+assert_true caret.scan(/^b/).nil? && caret.scan(/b/) == "b", "^ is the string's start, not the offset"
+w = StringScanner.new("ab")
+w.offset = 1
+assert_true w.scan(/\bb/).nil? && w.scan(/\Bb/) == "b", "\\b sees the byte before the offset"
+puts "  offsets in bytes, counts in characters, a byte that begins none is one"
+
+puts "\n== inspect"
+s = StringScanner.new("this is a string")
+assert_str "#<StringScanner 0/16 \"‣this …>", s.inspect, "inspect at the start"
+s.scan(/\w+\s/)
+assert_str "#<StringScanner 5/16 …s ‣is …>", s.inspect, "inspect after a word"
+s.scan(1)
+assert_str "#<StringScanner 6/16 … i‣s a…>", s.inspect, "inspect after one"
+s.scan(/\w+\s/)
+assert_str "#<StringScanner 8/16 …s ‣a s…>", s.inspect, "inspect in the middle"
+s.scan(/\w+\s\w+/)
+assert_str "#<StringScanner 16/16 …tring‣\">", s.inspect, "inspect at the end"
+s = StringScanner.new("hi")
+assert_str "#<StringScanner 0/2 \"‣hi\">", s.inspect, "a small string"
+s.scan(/\w/)
+assert_str "#<StringScanner 1/2 \"h‣i\">", s.inspect, "a small string, one in"
+s.scan(/\w/)
+assert_str "#<StringScanner 2/2 \"hi‣\">", s.inspect, "a small string at the end"
+s = StringScanner.new(" a\n\t ")
+s.skip(1)
+assert_str "#<StringScanner 1/5 \" ‣a\\n\\t \">", s.inspect, "escapes"
+s = StringScanner.new("\u0000\e")
+s.skip(1)
+assert_str "#<StringScanner 1/2 \"\\u0000‣\\e\">", s.inspect, "a NUL and an escape"
+s = StringScanner.new("これは文字列である")
+assert_str "#<StringScanner 0/27 \"‣これは文字…>", s.inspect, "multi-byte at the start"
+s.scan(1)
+assert_str "#<StringScanner 3/27 \"こ‣れは文字…>", s.inspect, "multi-byte one in"
+s.scan(1)
+s.scan(1)
+assert_str "#<StringScanner 9/27 …れは‣文字列…>", s.inspect, "multi-byte three in"
+s.scan(3)
+assert_str "#<StringScanner 18/27 …字列‣である\">", s.inspect, "multi-byte six in"
+s.terminate
+assert_str "#<StringScanner 27/27 …字列である‣\">", s.inspect, "multi-byte at the end"
+assert_str "#<StringScanner 0/0 \"‣\">", StringScanner.new("").inspect, "an empty string"
+puts "  the other library's inspect, offsets in bytes"
+
+puts "\n== a tokenizer"
+program = "let größe = 3.5e2 + foo_bar * (y - 2) # a comment\nprint \"hi \\\"there\\\"\\n\", größe >= 10 -> name;"
+result = tokenize(program)
+if result.is_a?(LexError)
+  raise "ASSERTION FAILED: the program tokenizes, not #{result.message}"
+end
+kinds = result.map { |token| token.kind }
+texts = result.map { |token| token.text }
+assert_true kinds == ["keyword", "ident", "op", "number", "op", "ident", "op", "op", "ident", "op", "number", "op",
+                      "keyword", "string", "op", "ident", "op", "number", "op", "ident", "op"], "token kinds: #{kinds}"
+assert_true texts[1] == "größe" && texts[3] == "3.5e2" && texts[13] == "\"hi \\\"there\\\"\\n\"" && texts[16] == ">=" && texts[18] == "->", "token texts: #{texts}"
+assert_int 4, result[1].at, "a token's byte offset"
+assert_int 52, result[12].at, "a token after a comment and a multi-byte name"
+unterminated = tokenize("let s = \"open")
+assert_true unterminated.is_a?(LexError) && unterminated.message == "unterminated string at byte 8", "an unterminated string is an error value: #{unterminated.inspect}"
+unexpected = tokenize("x = 1 @ 2")
+assert_true unexpected.is_a?(LexError) && unexpected.message == "unexpected \"@\" at byte 6", "an unknown character is an error value"
+assert_true tokenize("").is_a?(Array) && tokenize("  # only\n").is_a?(Array), "empty and comment-only sources tokenize to nothing"
+puts "  #{result.size} tokens, longest operator first, errors as values"
+
+puts "\nALL CHECKS PASSED"

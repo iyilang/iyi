@@ -1,0 +1,644 @@
+# OCSP responses read and checked (RFC 6960), and requests built, written
+# in iyi over std/asn1 and std/x509: what a TLS client asks of the
+# response a server staples beside its certificate.
+#
+#     import std/ocsp::{OcspResponse, OcspCertStatus, OcspError, Ocsp}
+#
+#     response = OcspResponse.parse(der).or_panic   # an OCSPResponse
+#     verdict = response.verify(leaf, issuer).or_panic
+#     verdict.status                                # Good, Revoked or Unknown
+#     request = Ocsp.request(leaf, issuer)          # an OCSPRequest's DER
+#
+# `OcspResponse.parse` reads an OCSPResponse: its responseStatus, and for a
+# successful one the BasicOCSPResponse - ResponseData (version, the
+# responder by name or by key hash, producedAt, each SingleResponse's
+# CertID, status, thisUpdate and nextUpdate, the nonce among its
+# extensions), the signature algorithm and signature, and the certificates
+# it carries, each read by std/x509. A responder that answered with no
+# response (tryLater, unauthorized, ...) is an `OcspError` carrying that
+# status. Everything else that is not RFC 6960's DER is an `OcspError`
+# naming it: a response type other than id-pkix-ocsp-basic, a version
+# written out where DER leaves the default v1 out, a time that is not a
+# GeneralizedTime, a CertStatus that is none of good, revoked and
+# unknown, a revocation reason CRLReason does not have, a CertID hashed by
+# something other than SHA-1 or SHA-2 or whose hashes are not that hash's
+# size, an extension twice, and a critical extension this does not
+# understand. A nonce is read and not judged: a stapled response is the
+# server's, fetched before any client asked, and carries none of the
+# client's.
+#
+# `verify(leaf, issuer, now)` checks, in this order, what OpenSSL's `ocsp
+# -verify` checks in it, so that a verdict is refused for the same reason:
+#   * the signature, by the issuer itself or by a delegated responder - a
+#     certificate the response carries, named by its responderID, issued
+#     and signed by the issuer, valid at *now*, carrying extKeyUsage with
+#     id-kp-OCSPSigning itself (anyExtendedKeyUsage is not it, as RFC 6960
+#     section 4.2.2.2 has it), allowed digitalSignature if it carries
+#     keyUsage, and with no critical extension this does not understand.
+#     Signatures are std/x509's: SHA-1 is refused as it is in a
+#     certificate, and so is an RSA key under `X509::MIN_RSA_BITS`;
+#   * a SingleResponse whose CertID is the leaf's: issuerNameHash the hash
+#     of the leaf's issuer name, issuerKeyHash the hash of the issuer's
+#     key, and serialNumber the leaf's;
+#   * its time: thisUpdate no later than *now* plus `Ocsp::SKEW_SECONDS`,
+#     and nextUpdate no earlier than *now* less it - OpenSSL's five minutes
+#     either way. RFC 6960 lets a response leave nextUpdate out, saying
+#     newer information is always there; a staple a server holds would
+#     then be good forever, so one without it is taken for
+#     `Ocsp::NO_NEXT_UPDATE_SECONDS` (a day) after its thisUpdate.
+# The answer is the status the response gives - revoked, with its time
+# and reason, and unknown are answers too, which the caller judges (std/tls
+# refuses both).
+#
+# A delegated responder's id-pkix-ocsp-nocheck extension is accepted, and
+# read (`Certificate#ocsp_nocheck`): it says the responder's own status is
+# not to be asked, and here it never is - with or without the extension,
+# as OpenSSL and Go take a responder. Asking would need the revocation
+# this module does not do (below), and the CA/Browser Forum's Baseline
+# Requirements have every delegated responder certificate carry it.
+#
+# `Ocsp.request` builds an OCSPRequest for one certificate, as `openssl
+# ocsp -issuer ... -cert ... -no_nonce -reqout` writes it (a nonce when one
+# is given): unsigned, version left out, the CertID under SHA-1 unless
+# another hash is asked for.
+#
+# Not done: no CRLs, and no fetching. A response is what the caller hands
+# in - in std/tls, what the server stapled - and nothing here asks a
+# responder over the network, follows a certificate's AIA, or keeps a
+# cache. The revocation of anything but the leaf is not asked: an
+# intermediate's status, which TLS 1.3 lets a server send, is not judged,
+# and neither is a delegated responder's (above).
+#
+# Pure computation over the bytes given: no platform, no clock unless
+# *now* is left out, no randomness (a request's nonce is the caller's).
+
+module std/ocsp
+
+import std/asn1::{Der, DerValue, DerTag, Asn1Error}
+import std/x509::{Certificate, X509, X509Error}
+import std/digest::{SHA1, SHA256, SHA384, SHA512}
+import std/time::{Time}
+
+# What reading or checking a response answers when it fails.
+pub struct OcspError
+  getter message : String
+  # The responseStatus of a responder that answered with no response: 1
+  # malformedRequest, 2 internalError, 3 tryLater, 5 sigRequired, 6
+  # unauthorized. Nil for every other refusal.
+  getter response_status : Int32?
+
+  def initialize(message : String, @response_status : Int32? = nil)
+    @message = "ocsp: #{message}"
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for OcspError
+  def message : String
+    @message
+  end
+end
+
+# What a SingleResponse says of a certificate (RFC 6960 section 4.2.1).
+pub enum OcspCertStatus
+  Good
+  Revoked
+  Unknown
+
+  def word : String
+    return "good" if self == OcspCertStatus::Good
+    self == OcspCertStatus::Revoked ? "revoked" : "unknown"
+  end
+end
+
+# The hashes a CertID is made under.
+pub enum OcspHash
+  SHA1
+  SHA256
+  SHA384
+  SHA512
+
+  def oid : String
+    return "1.3.14.3.2.26" if self == OcspHash::SHA1
+    return "2.16.840.1.101.3.4.2.1" if self == OcspHash::SHA256
+    self == OcspHash::SHA384 ? "2.16.840.1.101.3.4.2.2" : "2.16.840.1.101.3.4.2.3"
+  end
+
+  def size : Int32
+    return 20 if self == OcspHash::SHA1
+    return 32 if self == OcspHash::SHA256
+    self == OcspHash::SHA384 ? 48 : 64
+  end
+
+  def digest(data : Array(UInt8)) : Array(UInt8)
+    OcspDigest.of(self, data)
+  end
+
+  def self.from_oid(oid : String) : OcspHash?
+    return OcspHash::SHA1 if oid == OcspHash::SHA1.oid
+    return OcspHash::SHA256 if oid == OcspHash::SHA256.oid
+    return OcspHash::SHA384 if oid == OcspHash::SHA384.oid
+    return OcspHash::SHA512 if oid == OcspHash::SHA512.oid
+    nil
+  end
+end
+
+# A CertID (RFC 6960 section 4.1.1): the hash it is made under, the hashes
+# of the issuer's name and key, and the certificate's serial number (its
+# two's-complement bytes, as `Certificate#serial` holds it).
+pub struct OcspCertId
+  getter hash : OcspHash
+  getter issuer_name_hash : Array(UInt8)
+  getter issuer_key_hash : Array(UInt8)
+  getter serial : Array(UInt8)
+
+  def initialize(@hash : OcspHash, @issuer_name_hash : Array(UInt8), @issuer_key_hash : Array(UInt8), @serial : Array(UInt8))
+  end
+
+  # *leaf*'s CertID, *issuer* its issuer's certificate.
+  def self.of(leaf : Certificate, issuer : Certificate, hash : OcspHash = OcspHash::SHA1) : OcspCertId
+    OcspCertId.new(hash, hash.digest(leaf.issuer), hash.digest(issuer.public_key_bits), leaf.serial)
+  end
+
+  # Whether this is *leaf*'s CertID, *issuer* its issuer: the name hash
+  # over the leaf's issuer name, the key hash over the issuer's key, and
+  # the serial number the leaf's.
+  def matches?(leaf : Certificate, issuer : Certificate) : Bool
+    return false unless @serial == leaf.serial
+    @issuer_name_hash == @hash.digest(leaf.issuer) && @issuer_key_hash == @hash.digest(issuer.public_key_bits)
+  end
+
+  # Its DER: the hash's AlgorithmIdentifier with NULL parameters, as
+  # OpenSSL writes it.
+  def der : Array(UInt8)
+    algorithm = OcspDer.sequence(OcspDer.oid(@hash.oid) + [0x05_u8, 0x00_u8])
+    OcspDer.sequence(algorithm + OcspDer.tlv(0x04_u8, @issuer_name_hash) + OcspDer.tlv(0x04_u8, @issuer_key_hash) + OcspDer.tlv(0x02_u8, @serial))
+  end
+end
+
+# One SingleResponse (RFC 6960 section 4.2.1): a certificate's status,
+# when it was revoked and why (a CRLReason, nil when not given), and the
+# time the status is for.
+pub struct OcspSingleResponse
+  getter cert_id : OcspCertId
+  getter status : OcspCertStatus
+  getter revocation_time : Time?
+  getter revocation_reason : Int32?
+  getter this_update : Time
+  getter next_update : Time?
+
+  def initialize(@cert_id : OcspCertId, @status : OcspCertStatus, @revocation_time : Time?, @revocation_reason : Int32?,
+                 @this_update : Time, @next_update : Time?)
+  end
+end
+
+# What `OcspResponse#verify` answers: the status of the leaf, the
+# SingleResponse that gave it, and the certificate that signed - the
+# issuer, or a delegated responder.
+pub struct OcspVerdict
+  getter status : OcspCertStatus
+  getter single : OcspSingleResponse
+  getter signer : Certificate
+  getter delegated : Bool
+
+  def initialize(@status : OcspCertStatus, @single : OcspSingleResponse, @signer : Certificate, @delegated : Bool)
+  end
+end
+
+pub struct Ocsp
+  # The clock skew a response's times are allowed, either way: OpenSSL's
+  # `ocsp -validity_period` default.
+  SKEW_SECONDS = 300
+  # How long a response without nextUpdate is taken for, from its
+  # thisUpdate.
+  NO_NEXT_UPDATE_SECONDS = 86400
+  # The most certificates a response may carry: a responder needs one.
+  MAX_CERTIFICATES = 10
+
+  BASIC   = "1.3.6.1.5.5.7.48.1.1"
+  NONCE   = "1.3.6.1.5.5.7.48.1.2"
+  SIGNING = "1.3.6.1.5.5.7.3.9"
+
+  # An OCSPRequest (RFC 6960 section 4.1.1) for *leaf*, *issuer* its
+  # issuer's certificate: one Request, unsigned, and a nonce extension
+  # holding *nonce* when one is given.
+  def self.request(leaf : Certificate, issuer : Certificate, hash : OcspHash = OcspHash::SHA1, nonce : Array(UInt8)? = nil) : Array(UInt8)
+    list = OcspDer.sequence(OcspDer.sequence(OcspCertId.of(leaf, issuer, hash).der))
+    if nonce
+      extension = OcspDer.sequence(OcspDer.oid(NONCE) + OcspDer.tlv(0x04_u8, OcspDer.tlv(0x04_u8, nonce)))
+      list = list + OcspDer.tlv(0xA2_u8, OcspDer.sequence(extension))
+    end
+    OcspDer.sequence(OcspDer.sequence(list))
+  end
+
+  # A responseStatus by the name RFC 6960 gives it.
+  def self.status_name(status : Int64) : String
+    case status
+    when 0 then "successful"
+    when 1 then "malformedRequest"
+    when 2 then "internalError"
+    when 3 then "tryLater"
+    when 5 then "sigRequired"
+    when 6 then "unauthorized"
+    else        "status #{status}"
+    end
+  end
+
+  # A CRLReason by the name RFC 5280 section 5.3.1 gives it.
+  def self.reason_name(reason : Int32) : String
+    case reason
+    when  0 then "unspecified"
+    when  1 then "keyCompromise"
+    when  2 then "cACompromise"
+    when  3 then "affiliationChanged"
+    when  4 then "superseded"
+    when  5 then "cessationOfOperation"
+    when  6 then "certificateHold"
+    when  8 then "removeFromCRL"
+    when  9 then "privilegeWithdrawn"
+    when 10 then "aACompromise"
+    else         "reason #{reason}"
+    end
+  end
+end
+
+pub struct OcspResponse
+  # The whole OCSPResponse as it was read, and the ResponseData the
+  # signature is over.
+  getter raw : Array(UInt8)
+  getter tbs : Array(UInt8)
+  getter version : Int32
+  # The responderID: a Name's DER (byName), or the SHA-1 of the
+  # responder's key (byKey); one of the two is nil.
+  getter responder_name : Array(UInt8)?
+  getter responder_key_hash : Array(UInt8)?
+  getter produced_at : Time
+  getter responses : Array(OcspSingleResponse)
+  # The nonce extension's OCTET STRING, nil when absent.
+  getter nonce : Array(UInt8)?
+  # The signature algorithm's OID, and the signature.
+  getter signature_algorithm : String
+  getter signature : Array(UInt8)
+  # The certificates the response carries, for a delegated responder.
+  getter certificates : Array(Certificate)
+  @signature_parameters : DerValue?
+
+  def initialize(@raw : Array(UInt8), @tbs : Array(UInt8), @version : Int32, @responder_name : Array(UInt8)?, @responder_key_hash : Array(UInt8)?,
+                 @produced_at : Time, @responses : Array(OcspSingleResponse), @nonce : Array(UInt8)?, @signature_algorithm : String,
+                 @signature_parameters : DerValue?, @signature : Array(UInt8), @certificates : Array(Certificate))
+  end
+
+  # The OCSPResponse *der* holds (RFC 6960 section 4.2.1).
+  def self.parse(der : Array(UInt8)) : OcspResponse | OcspError
+    top = OcspAsn1.values(OcspAsn1.value(Der.parse(der))!.sequence)!
+    return OcspError.new("an OCSPResponse of #{top.size} values, not 1 or 2") unless top.size == 1 || top.size == 2
+    status = OcspAsn1.int(top[0].enumerated)!
+    unless status == 0
+      return OcspError.new("a responseStatus of 4, which RFC 6960 leaves unused") if status == 4 || status < 0 || status > 6
+      return OcspError.new("a responseStatus of #{Ocsp.status_name(status)} with responseBytes, which only a successful one carries") if top.size == 2
+      return OcspError.new("the responder answered #{Ocsp.status_name(status)} (#{status}), with no response", status.to_i32)
+    end
+    return OcspError.new("a successful OCSPResponse with no responseBytes") unless top.size == 2
+    bytes = OcspAsn1.values(OcspAsn1.value(top[1].explicit(0))!.sequence)!
+    return OcspError.new("a ResponseBytes of #{bytes.size} values, not 2") unless bytes.size == 2
+    type = OcspAsn1.text(bytes[0].oid)!
+    return OcspError.new("a response of type #{type}, where id-pkix-ocsp-basic is the one this reads") unless type == Ocsp::BASIC
+    basic = OcspAsn1.values(OcspAsn1.value(Der.parse(OcspAsn1.bytes(bytes[1].octet_string)!))!.sequence)!
+    return OcspError.new("a BasicOCSPResponse of #{basic.size} values, not 3 or 4") unless basic.size == 3 || basic.size == 4
+    algorithm = OcspAsn1.values(basic[1].sequence)!
+    return OcspError.new("a signature AlgorithmIdentifier of #{algorithm.size} values") unless algorithm.size == 1 || algorithm.size == 2
+    signature_algorithm = OcspAsn1.text(algorithm[0].oid)!
+    parameters = algorithm.size == 2 ? algorithm[1] : nil
+    signature = OcspAsn1.bytes(basic[2].bit_string)!
+    certificates = [] of Certificate
+    if basic.size == 4
+      carried = OcspAsn1.values(OcspAsn1.value(basic[3].explicit(0))!.sequence)!
+      return OcspError.new("a response carrying #{carried.size} certificates, past #{Ocsp::MAX_CERTIFICATES}") if carried.size > Ocsp::MAX_CERTIFICATES
+      carried.each_with_index do |value, i|
+        certificate = Certificate.parse(value.raw)
+        return OcspError.new("the response's certificate #{i}: #{certificate.message}") if certificate.is_a?(X509Error)
+        certificates << certificate
+      end
+    end
+
+    data = OcspAsn1.values(basic[0].sequence)!
+    if data.size > 0 && data[0].context?(0)
+      number = OcspAsn1.int(OcspAsn1.value(data[0].explicit(0))!.integer)!
+      return OcspError.new("a ResponseData of version #{number + 1}, where v1 is the one there is") unless number == 0
+      # X.690 section 11.5: DER leaves a value its DEFAULT out.
+      return OcspError.new("a ResponseData whose version v1 is written out, which DER leaves out as the default")
+    end
+    return OcspError.new("a ResponseData of #{data.size} values, not 3 or 4") unless data.size == 3 || data.size == 4
+    responder = data[0]
+    name = nil.as(Array(UInt8)?)
+    key_hash = nil.as(Array(UInt8)?)
+    if responder.context?(1) && responder.constructed?
+      written = OcspAsn1.value(responder.explicit(1))!
+      OcspAsn1.values(written.sequence)!
+      name = written.raw
+    elsif responder.context?(2) && responder.constructed?
+      hash = OcspAsn1.bytes(OcspAsn1.value(responder.explicit(2))!.octet_string)!
+      return OcspError.new("a responder key hash of #{hash.size} bytes, where SHA-1's is 20") unless hash.size == 20
+      key_hash = hash
+    else
+      return OcspError.new("a ResponderID that is #{responder.describe}, neither byName [1] nor byKey [2]")
+    end
+    produced_at = OcspAsn1.generalized(data[1], "producedAt")!
+    singles = OcspAsn1.values(data[2].sequence)!
+    return OcspError.new("a ResponseData with no SingleResponse") if singles.empty?
+    responses = [] of OcspSingleResponse
+    singles.each { |single| responses << read_single(single)! }
+    nonce = nil.as(Array(UInt8)?)
+    if data.size == 4
+      return OcspError.new("#{data[3].describe} where a ResponseData's extensions [1] belong") unless data[3].context?(1)
+      nonce = OcspAsn1.extensions(OcspAsn1.value(data[3].explicit(1))!, "responseExtensions")!
+    end
+    OcspResponse.new(der, basic[0].raw, 1, name, key_hash, produced_at, responses, nonce, signature_algorithm, parameters, signature, certificates)
+  end
+
+  private def self.read_single(single : DerValue) : OcspSingleResponse | OcspError
+    fields = OcspAsn1.values(single.sequence)!
+    return OcspError.new("a SingleResponse of #{fields.size} values, not 3 to 5") unless fields.size >= 3 && fields.size <= 5
+    cert_id = read_cert_id(fields[0])!
+    written = fields[1]
+    revoked_at = nil.as(Time?)
+    reason = nil.as(Int32?)
+    if written.context?(0) && !written.constructed? && written.content_size == 0
+      status = OcspCertStatus::Good
+    elsif written.context?(1) && written.constructed?
+      status = OcspCertStatus::Revoked
+      info = OcspAsn1.values(written.children)!
+      return OcspError.new("a RevokedInfo of #{info.size} values, not 1 or 2") unless info.size == 1 || info.size == 2
+      revoked_at = OcspAsn1.generalized(info[0], "revocationTime")!
+      if info.size == 2
+        code = OcspAsn1.int(OcspAsn1.value(info[1].explicit(0))!.enumerated)!
+        return OcspError.new("a revocation reason of #{code}, which CRLReason does not have") if code < 0 || code > 10 || code == 7
+        reason = code.to_i32
+      end
+    elsif written.context?(2) && !written.constructed? && written.content_size == 0
+      status = OcspCertStatus::Unknown
+    else
+      return OcspError.new("a CertStatus that is #{written.describe}, none of good [0], revoked [1] and unknown [2]")
+    end
+    this_update = OcspAsn1.generalized(fields[2], "thisUpdate")!
+    next_update = nil.as(Time?)
+    rest = 3
+    if rest < fields.size && fields[rest].context?(0)
+      next_update = OcspAsn1.generalized(OcspAsn1.value(fields[rest].explicit(0))!, "nextUpdate")!
+      rest = rest + 1
+    end
+    if rest < fields.size && fields[rest].context?(1)
+      OcspAsn1.extensions(OcspAsn1.value(fields[rest].explicit(1))!, "singleExtensions")!
+      rest = rest + 1
+    end
+    return OcspError.new("#{fields[rest].describe} where a SingleResponse ends") unless rest == fields.size
+    OcspSingleResponse.new(cert_id, status, revoked_at, reason, this_update, next_update)
+  end
+
+  private def self.read_cert_id(value : DerValue) : OcspCertId | OcspError
+    fields = OcspAsn1.values(value.sequence)!
+    return OcspError.new("a CertID of #{fields.size} values, not 4") unless fields.size == 4
+    algorithm = OcspAsn1.values(fields[0].sequence)!
+    return OcspError.new("a CertID's AlgorithmIdentifier of #{algorithm.size} values") unless algorithm.size == 1 || algorithm.size == 2
+    oid = OcspAsn1.text(algorithm[0].oid)!
+    hash = OcspHash.from_oid(oid)
+    return OcspError.new("a CertID hashed by #{oid}, which is none of SHA-1, SHA-256, SHA-384 and SHA-512") unless hash
+    if algorithm.size == 2
+      null = algorithm[1].null
+      return OcspError.new("a CertID's hash with parameters that are not NULL") if null.is_a?(Asn1Error)
+    end
+    name_hash = OcspAsn1.bytes(fields[1].octet_string)!
+    key_hash = OcspAsn1.bytes(fields[2].octet_string)!
+    unless name_hash.size == hash.size && key_hash.size == hash.size
+      return OcspError.new("a CertID whose hashes are #{name_hash.size} and #{key_hash.size} bytes, where the hash it names makes #{hash.size}")
+    end
+    serial = OcspAsn1.bytes(fields[3].integer_bytes)!
+    OcspCertId.new(hash, name_hash, key_hash, serial)
+  end
+
+  # The responderID, for a sentence.
+  def responder_text : String
+    if (hash = @responder_key_hash)
+      return "the key hashed to #{OcspAsn1.hex(hash)}"
+    end
+    name = @responder_name
+    "the name #{name ? OcspAsn1.describe_name(name) : "-"}"
+  end
+
+  # The SingleResponse for *leaf*, *issuer* its issuer, or nil.
+  def single_for(leaf : Certificate, issuer : Certificate) : OcspSingleResponse?
+    @responses.find { |single| single.cert_id.matches?(leaf, issuer) }
+  end
+
+  # The status this response gives *leaf*, *issuer* its issuer's
+  # certificate, checked at *now* (see the module's header); or why it
+  # gives none that can be taken.
+  def verify(leaf : Certificate, issuer : Certificate, now : Time = Time.utc, skew_seconds : Int32 = Ocsp::SKEW_SECONDS) : OcspVerdict | OcspError
+    unless leaf.issuer == issuer.subject
+      return OcspError.new("#{leaf.subject_name} was issued by #{leaf.issuer_name}, not #{issuer.subject_name}")
+    end
+    signed = signer(issuer, now)!
+    single = single_for(leaf, issuer)
+    return OcspError.new("no response here is for #{leaf.subject_name}, serial #{OcspAsn1.hex(leaf.serial)}") unless single
+    late = now.shift(seconds: skew_seconds.to_i64)
+    early = now.shift(seconds: -skew_seconds.to_i64)
+    if single.this_update > late
+      return OcspError.new("a response whose thisUpdate, #{single.this_update}, is past #{now} by more than #{skew_seconds} s")
+    end
+    if (next_update = single.next_update)
+      return OcspError.new("a response whose nextUpdate, #{next_update}, is before its thisUpdate, #{single.this_update}") if next_update < single.this_update
+      return OcspError.new("a response past its nextUpdate, #{next_update}, at #{now}") if next_update < early
+    elsif single.this_update.shift(seconds: Ocsp::NO_NEXT_UPDATE_SECONDS.to_i64) < early
+      return OcspError.new("a response with no nextUpdate whose thisUpdate, #{single.this_update}, is more than #{Ocsp::NO_NEXT_UPDATE_SECONDS} s before #{now}")
+    end
+    OcspVerdict.new(single.status, single, signed[0], signed[1])
+  end
+
+  # The certificate that signed this response, and whether it is a
+  # delegated responder: each candidate the responderID names - the issuer,
+  # then the certificates carried - tried in turn; or why none did.
+  private def signer(issuer : Certificate, now : Time) : {Certificate, Bool} | OcspError
+    failures = [] of String
+    ([issuer] + @certificates).each do |candidate|
+      next unless names?(candidate)
+      delegated = !(candidate.subject == issuer.subject && candidate.public_key_bits == issuer.public_key_bits)
+      problem = delegated ? delegate_error(candidate, issuer, now) : nil
+      problem = X509.signature_error(candidate.public_key, @signature_algorithm, @signature_parameters, @tbs, @signature, "the OCSP response", candidate.subject_name) unless problem
+      return {candidate, delegated} unless problem
+      failures << problem
+    end
+    return OcspError.new(failures[0]) unless failures.empty?
+    OcspError.new("no certificate here is the responder, #{responder_text}")
+  end
+
+  # Whether the responderID names *candidate*.
+  private def names?(candidate : Certificate) : Bool
+    if (hash = @responder_key_hash)
+      return SHA1.hash_bytes(candidate.public_key_bits) == hash
+    end
+    @responder_name == candidate.subject
+  end
+
+  # Why *responder* may not answer for *issuer*'s certificates at *now*
+  # (RFC 6960 section 4.2.2.2), or nil.
+  private def delegate_error(responder : Certificate, issuer : Certificate, now : Time) : String?
+    name = responder.subject_name
+    return "the responder #{name} was not issued by #{issuer.subject_name}, the CA it answers for" unless responder.issuer == issuer.subject
+    usages = responder.extended_key_usage
+    return "the responder #{name} is not allowed id-kp-OCSPSigning" unless usages && usages.includes?(Ocsp::SIGNING)
+    return "the responder #{name} is not valid at #{now}: from #{responder.not_before} to #{responder.not_after}" unless responder.valid_at?(now)
+    weak = X509.weak_key_error(responder)
+    return weak if weak
+    return "the responder #{name} carries critical extension #{responder.unhandled_critical[0]}, which this does not understand" unless responder.unhandled_critical.empty?
+    usage = responder.key_usage
+    return "the responder #{name} is not allowed digitalSignature" if usage && (usage >> Certificate::KEY_DIGITAL_SIGNATURE) & 1 == 0
+    problem = responder.signature_error(issuer)
+    problem ? "the responder #{name}: #{problem}" : nil
+  end
+end
+
+# std/asn1's errors as this one's, and the readers this module shares.
+struct OcspAsn1
+  def self.value(answer : DerValue | Asn1Error) : DerValue | OcspError
+    answer.is_a?(Asn1Error) ? OcspError.new(answer.message) : answer
+  end
+
+  def self.values(answer : Array(DerValue) | Asn1Error) : Array(DerValue) | OcspError
+    answer.is_a?(Asn1Error) ? OcspError.new(answer.message) : answer
+  end
+
+  def self.bytes(answer : Array(UInt8) | Asn1Error) : Array(UInt8) | OcspError
+    answer.is_a?(Asn1Error) ? OcspError.new(answer.message) : answer
+  end
+
+  def self.text(answer : String | Asn1Error) : String | OcspError
+    answer.is_a?(Asn1Error) ? OcspError.new(answer.message) : answer
+  end
+
+  def self.int(answer : Int64 | Asn1Error) : Int64 | OcspError
+    answer.is_a?(Asn1Error) ? OcspError.new(answer.message) : answer
+  end
+
+  def self.bool(answer : Bool | Asn1Error) : Bool | OcspError
+    answer.is_a?(Asn1Error) ? OcspError.new(answer.message) : answer
+  end
+
+  # A GeneralizedTime, the one form RFC 6960 writes its times in.
+  def self.generalized(value : DerValue, what : String) : Time | OcspError
+    return OcspError.new("a #{what} that is #{value.describe}, where RFC 6960 writes a GeneralizedTime") unless value.universal?(DerTag::GENERALIZED_TIME)
+    time = value.time
+    time.is_a?(Asn1Error) ? OcspError.new(time.message) : time
+  end
+
+  # Extensions (RFC 5280 section 4.1): each once, none critical that this
+  # does not understand; the nonce's OCTET STRING when there is one.
+  def self.extensions(value : DerValue, where : String) : Array(UInt8)? | OcspError
+    seen = [] of String
+    nonce = nil.as(Array(UInt8)?)
+    values(value.sequence)!.each do |extension|
+      fields = values(extension.sequence)!
+      return OcspError.new("an Extension of #{fields.size} values in #{where}") unless fields.size == 2 || fields.size == 3
+      oid = text(fields[0].oid)!
+      return OcspError.new("extension #{oid} twice in #{where}") if seen.includes?(oid)
+      seen << oid
+      critical = fields.size == 3 ? bool(fields[1].boolean)! : false
+      body = bytes(fields[fields.size - 1].octet_string)!
+      if oid == Ocsp::NONCE
+        # RFC 8954 section 2.1: Nonce ::= OCTET STRING.
+        inner = value(Der.parse(body))!
+        nonce = bytes(inner.octet_string)!
+      elsif critical
+        return OcspError.new("a critical extension #{oid} in #{where}, which this does not understand")
+      end
+    end
+    nonce
+  end
+
+  def self.hex(bytes : Array(UInt8)) : String
+    String.build do |io|
+      bytes.each do |b|
+        io << "0123456789abcdef"[b.to_i32 >> 4]
+        io << "0123456789abcdef"[b.to_i32 & 15]
+      end
+    end
+  end
+
+  # A Name's DER as a sentence names it, or its bytes when it is not one.
+  def self.describe_name(der : Array(UInt8)) : String
+    parts = [] of String
+    top = Der.parse(der)
+    return hex(der) if top.is_a?(Asn1Error)
+    rdns = top.sequence
+    return hex(der) if rdns.is_a?(Asn1Error)
+    rdns.each do |rdn|
+      attributes = rdn.children
+      return hex(der) if attributes.is_a?(Asn1Error)
+      attributes.each do |attribute|
+        pair = attribute.children
+        return hex(der) if pair.is_a?(Asn1Error) || pair.size != 2
+        text = pair[1].string
+        parts << (text.is_a?(Asn1Error) ? "#" + pair[1].describe : text)
+      end
+    end
+    parts.join(", ")
+  end
+end
+
+# The digest a CertID's hash names: apart from `OcspHash`, whose members
+# would otherwise be read for std/digest's classes of the same names.
+struct OcspDigest
+  def self.of(hash : OcspHash, data : Array(UInt8)) : Array(UInt8)
+    return SHA1.hash_bytes(data) if hash == OcspHash::SHA1
+    return SHA256.hash_bytes(data) if hash == OcspHash::SHA256
+    hash == OcspHash::SHA384 ? SHA384.hash_bytes(data) : SHA512.hash_bytes(data)
+  end
+end
+
+# The DER a request is written in: what `Ocsp.request` needs, and no more.
+struct OcspDer
+  def self.tlv(tag : UInt8, content : Array(UInt8)) : Array(UInt8)
+    size = content.size
+    return [tag, size.to_u8] + content if size < 128
+    length = [] of UInt8
+    n = size
+    while n > 0
+      length = [(n & 0xFF).to_u8] + length
+      n = n >> 8
+    end
+    [tag, (0x80 | length.size).to_u8] + length + content
+  end
+
+  def self.sequence(content : Array(UInt8)) : Array(UInt8)
+    tlv(0x30_u8, content)
+  end
+
+  def self.oid(dotted : String) : Array(UInt8)
+    arcs = dotted.split('.').map { |part| part.to_i.to_i64 }
+    body = [] of UInt8
+    arc(arcs[0] * 40 + arcs[1], body)
+    i = 2
+    while i < arcs.size
+      arc(arcs[i], body)
+      i = i + 1
+    end
+    tlv(0x06_u8, body)
+  end
+
+  # One subidentifier, base 128, most significant first.
+  private def self.arc(value : Int64, body : Array(UInt8)) : Nil
+    chunks = [(value & 0x7F).to_u8]
+    rest = value >> 7
+    while rest > 0
+      chunks << ((rest & 0x7F) | 0x80).to_u8
+      rest = rest >> 7
+    end
+    i = chunks.size - 1
+    while i >= 0
+      body << chunks[i]
+      i = i - 1
+    end
+  end
+end

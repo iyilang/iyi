@@ -1,0 +1,117 @@
+# Exercises `std/base32`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_base32_exercise.iyi
+
+module bench/std_base32_exercise
+
+import std/base32::{Base32, Base32Hex, Base32Error}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# What a decode answered, as one string: the bytes as text, or the
+# error's sentence after "error: ".
+def said(answer : Array(UInt8) | Base32Error) : String
+  if answer.is_a?(Base32Error)
+    "error: " + answer.message
+  else
+    String.new(answer.size) { |p| p.copy_from(answer.to_unsafe, answer.size) }
+  end
+end
+
+puts "== RFC 4648 section 10"
+vectors = [
+  {"", "", ""},
+  {"f", "MY======", "CO======"},
+  {"fo", "MZXQ====", "CPNG===="},
+  {"foo", "MZXW6===", "CPNMU==="},
+  {"foob", "MZXW6YQ=", "CPNMUOG="},
+  {"fooba", "MZXW6YTB", "CPNMUOJ1"},
+  {"foobar", "MZXW6YTBOI======", "CPNMUOJ1E8======"},
+]
+vectors.each do |v|
+  plain, b32, hex = v
+  assert_str b32, Base32.encode(plain), "RFC 4648 base32 #{plain.inspect}"
+  assert_str hex, Base32Hex.encode(plain), "RFC 4648 base32hex #{plain.inspect}"
+  assert_str plain, said(Base32.decode(b32)), "RFC 4648 base32 #{plain.inspect} decodes"
+  assert_str plain, said(Base32Hex.decode(hex)), "RFC 4648 base32hex #{plain.inspect} decodes"
+  # Without its padding, as the key URI format writes a secret.
+  bare = b32.split('=')[0]? || ""
+  assert_str bare, Base32.encode(plain, padding: false), "RFC 4648 base32 #{plain.inspect} unpadded"
+  assert_str plain, said(Base32.decode(bare)), "RFC 4648 base32 #{plain.inspect} decodes unpadded"
+  hex_bare = hex.split('=')[0]? || ""
+  assert_str hex_bare, Base32Hex.encode(plain, padding: false), "RFC 4648 base32hex #{plain.inspect} unpadded"
+  assert_str plain, said(Base32Hex.decode(hex_bare)), "RFC 4648 base32hex #{plain.inspect} decodes unpadded"
+end
+puts "  the seven strings of section 10, both alphabets, padded and not"
+
+puts "\n== round trips"
+every_byte = Array(UInt8).new(256) { |k| k.to_u8 }
+assert_str "AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWHA5DYPSAIJCEMSCKJRHFAUSUKZMFUXC6MBRGIZTINJWG44DSOR3HQ6T4P2AIFBEGRCFIZDUQSKKJNGE2TSPKBIVEU2UKVLFOWCZLJNVYXK6L5QGCYTDMRSWMZ3INFVGW3DNNZXXA4LSON2HK5TXPB4XU634PV7H7AEBQKBYJBMGQ6EITCULRSGY5D4QSGJJHFEVS2LZRGM2TOOJ3HU7UCQ2FI5EUWTKPKFJVKV2ZLNOV6YLDMVTWS23NN5YXG5LXPF5X274BQOCYPCMLRWHZDE4VS6MZXHM7UGR2LJ5JVOW27MNTWW33TO55X7A4HROHZHF43T6R2PK5PWO33XP6DY7F47U6X3PP6HZ7L57Z7P674======", Base32.encode(every_byte), "every byte value"
+assert_str "000G40O40K30E209185GO38E1S8124GJ2GAHC5OO34D1M70T3OFI08924CI2A9H750KIKAPC5KN2UC1H68PJ8D9M6SS3IEHR7GUJSFQ085146H258P3KGIAA9D64QJIFA18L4KQKALB5EM2PB9DLONAUBTG62OJ3CHIMCPR8D5L6MR3DDPNN0SBIEDQ7ATJNF1SNKURSFLV7V041GA1O91C6GU48J2KBHI6OT3SGI699754LIQBPH6CQJEE9R7KVK2GQ58T4KMJAFA59LALQPBDELUOB3CLJMIQRDDTON6TBNF5TNQVS1GE2OF2CBHM7P34SLIUCPN7CVK6HQB9T9LEMQVCDJMMRRJETTNV0S7HE7P75SRJUHQFATFMERRNFU3OV5SVKUNRFFU7PVBTVPVFUVS======", Base32Hex.encode(every_byte), "every byte value, base32hex"
+41.times do |len|
+  piece = every_byte[200 - len, len]
+  text = String.new(len) { |p| p.copy_from(piece.to_unsafe, len) }
+  assert_str text, said(Base32.decode(Base32.encode(piece))), "a round trip of #{len} bytes"
+  assert_str text, said(Base32.decode(Base32.encode(piece, padding: false))), "a round trip of #{len} bytes unpadded"
+  assert_str text, said(Base32.decode(Base32.encode(piece).downcase)), "a round trip of #{len} bytes in lower case"
+  assert_str text, said(Base32Hex.decode(Base32Hex.encode(piece))), "a base32hex round trip of #{len} bytes"
+  assert_str text, said(Base32Hex.decode(Base32Hex.encode(piece, padding: false).downcase)), "a base32hex round trip of #{len} bytes unpadded, lower case"
+  assert_true Base32.encode(piece).bytesize % 8 == 0, "a padded encoding of #{len} bytes is whole groups"
+end
+puts "  every byte value, both alphabets, every length to 40, either case, padded and not"
+
+puts "\n== what decode reads leniently"
+assert_str "foobar", said(Base32.decode("mzxw6ytboi======")), "lower case decodes"
+assert_str "foobar", said(Base32.decode("MzXw6YtBoI")), "mixed case decodes"
+assert_str "foobar", said(Base32Hex.decode("cpnmuoj1e8")), "lower case base32hex decodes"
+assert_str "", said(Base32.decode("")), "the empty text"
+puts "  either case, padding or none"
+
+puts "\n== what decode refuses, as a value"
+assert_str "error: base32: byte 1 is '*', which is not in the alphabet", said(Base32.decode("M*")), "a byte outside the alphabet"
+assert_str "error: base32: byte 4 is 0x20, which is not in the alphabet", said(Base32.decode("MZXW 6YQ=")), "a space"
+assert_str "error: base32: byte 8 is 0x0A, which is not in the alphabet", said(Base32.decode("MZXW6YTB\nMY======")), "a line break"
+assert_str "error: base32: byte 0 is '1', which is not in the alphabet", said(Base32.decode("1A======")), "a 1, which base32 leaves out"
+assert_str "error: base32hex: byte 0 is 'W', which is not in the alphabet", said(Base32Hex.decode("WA======")), "a W in base32hex"
+assert_str "error: base32: data after the padding, at byte 8", said(Base32.decode("MY======MY======")), "data after padding"
+assert_str "error: base32: byte 3 is '*', which is not in the alphabet", said(Base32.decode("MY=*====")), "a stray byte inside the padding"
+assert_str "error: base32: 2 padding characters after 5 data characters, where 3 close the group", said(Base32.decode("MZXW6==")), "short padding refused"
+assert_str "error: base32: 4 padding characters after 5 data characters, where 3 close the group", said(Base32.decode("MZXW6====")), "long padding refused"
+assert_str "error: base32: 1 padding character after 2 data characters, where 6 close the group", said(Base32.decode("MY=")), "one = refused"
+assert_str "error: base32: 8 padding characters after 8 data characters, whose groups are already whole", said(Base32.decode("MZXW6YTB========")), "a group of padding alone"
+assert_str "error: base32: 8 padding characters after 0 data characters, whose groups are already whole", said(Base32.decode("========")), "padding with no data"
+assert_str "error: base32: a last group of 1 data character ends on no whole byte", said(Base32.decode("M")), "a last group of 1"
+assert_str "error: base32: a last group of 3 data characters ends on no whole byte", said(Base32.decode("MZX")), "a last group of 3"
+assert_str "error: base32: a last group of 6 data characters ends on no whole byte", said(Base32.decode("MZXW6Y")), "a last group of 6"
+assert_str "error: base32: a last group of 1 data character ends on no whole byte", said(Base32.decode("MZXW6YTBO=======")), "a padded last group of 1"
+assert_str "error: base32: the last data character, 'Z' at byte 1, sets bits past the data; canonically it is 'Y'", said(Base32.decode("MZ")), "bits past the data"
+assert_str "error: base32: the last data character, 'z' at byte 1, sets bits past the data; canonically it is 'Y'", said(Base32.decode("mz======")), "bits past the data, lower case"
+assert_str "error: base32hex: the last data character, 'P' at byte 1, sets bits past the data; canonically it is 'O'", said(Base32Hex.decode("CP")), "bits past the data, base32hex"
+puts "  bytes outside the alphabet, data after padding, wrong padding, ragged groups, bits past the data"
+
+# Of the 1,024 texts of two characters, which can only be one byte, the
+# 256 whose last two bits are zero decode and no other does: a decoder
+# that ignored those bits would give every byte four encodings.
+alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+accepted = 0
+32.times do |a|
+  32.times do |b|
+    text = alphabet[a].to_s + alphabet[b].to_s
+    answer = Base32.decode(text)
+    unless answer.is_a?(Base32Error)
+      accepted = accepted + 1
+      assert_str text, Base32.encode(answer, padding: false), "#{text} decodes only to what encodes as it"
+    end
+  end
+end
+assert_true accepted == 256, "two-character texts: #{accepted} of 1024 decode, not the 256 canonical ones"
+puts "  of the 1,024 two-character texts, exactly the 256 canonical ones decode"
+
+puts "\nALL CHECKS PASSED"

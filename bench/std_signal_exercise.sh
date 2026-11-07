@@ -6,9 +6,12 @@
 # Proves the exercise holds plain and --release; that on Linux and darwin a
 # TERM sent from outside reaches the waiting fiber and the process ends on
 # its own last line, where without the module the same TERM kills it; that
-# a second fiber waiting beside the first is refused by name; and
-# that a broken module is caught both ways: a wait that never takes an
-# arrival, and a handler never installed.
+# a second fiber waiting beside the first is refused by name; that an
+# ignored signal leaves the process alive and a reset one ends it again;
+# and that a broken module is caught: a wait that never takes an arrival,
+# a handler never installed, a `Signal.each` that never runs its block, an
+# arrival an ignore did not drop, an ignore that keeps the default, and a
+# reset that keeps the signal ignored.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -98,6 +101,9 @@ for phrase in "Signal.wait answered INT, and the process lived" \
               "the next wait answered at once" \
               "two arrivals nobody waited for are one" \
               "one request served, the listener closed, the group joined" \
+              "ran its block for" \
+              "an arrival kept before the ignore was dropped" \
+              "left the process alive" \
               "the waiter left with Cancelled"; do
   if ! grep -q "$phrase" "$WORK/signal-plain.out" 2>/dev/null; then
     echo "  missing: $phrase"
@@ -212,6 +218,31 @@ else
     echo "  the waiting fiber took TERM and the process ended on its last line"
   fi
 fi
+
+# An ignored signal leaves the process alive, and after `Signal.reset` the
+# same signal ends it: TERM on Linux and darwin, which ends it as 143, and
+# on Windows a Ctrl-Break into its own console.
+echo
+echo "== a reset gives the signal its default back"
+reset_run() { # reset_run <name>: runs <name> reset; 0 when it held
+  # Not under `timeout`, which reports a child killed by TERM as 15; the
+  # run ends by itself 200 ms after the reset signal either way. In a
+  # subshell that waits for it, so bash's "Terminated" goes to the file.
+  ("$WORK/$1" reset; exit $?) >"$WORK/$1.reset.out" 2>&1
+  local code=$?
+  if ! grep -q "left the process alive" "$WORK/$1.reset.out"; then
+    echo "  the ignored signal ended it (exit $code)"
+    return 1
+  elif grep -q "outlived" "$WORK/$1.reset.out" || [ "$code" -eq 0 ]; then
+    echo "  the process outlived the reset signal (exit $code)"
+    return 1
+  elif [ "$WINDOWS" -eq 0 ] && [ "$code" -ne 143 ]; then
+    echo "  after the reset it ended $code, not by TERM (143)"
+    return 1
+  fi
+  echo "  an ignored signal left it alive, and after the reset the signal ended it (exit $code)"
+}
+reset_run signal-plain || { sed 's/^/    /' "$WORK/signal-plain.reset.out"; status=1; }
 
 # And a signal the program did not name keeps its default: waiting for TERM
 # alone, a Ctrl-Break still ends the process, as it ends one that waits for
@@ -360,6 +391,70 @@ else
       else
         echo "  a close read as INT is never TERM: Windows ended the process at its deadline (STATUS_CONTROL_C_EXIT)"
       fi
+    fi
+  fi
+
+  # The exercise has watchdogs; a limit, where `timeout` exists, is the
+  # backstop for a broken copy that hangs anyway.
+  LIMIT=""
+  command -v timeout >/dev/null 2>&1 && LIMIT="timeout -k 5 60"
+  # broken <name> <label> <old> <new> <said> [absent]: the exercise built
+  # on a copy with <old> replaced fails, says <said>, and never <absent>.
+  broken() {
+    local name="$1" label="$2" old="$3" new="$4" said="$5" absent="${6:-}"
+    if ! patched "$name" "$old" "$new"; then
+      echo "  the $label patch did not apply"
+      status=1
+      return
+    fi
+    build "$name" "$WORK/$name-std${PSEP}$IYI_PATH" || return
+    $LIMIT "$WORK/$name" >"$WORK/$name.out" 2>&1
+    local code=$?
+    if [ "$code" -eq 0 ]; then
+      echo "  the exercise PASSED with $label"
+      status=1
+    elif ! grep -q "$said" "$WORK/$name.out" || { [ -n "$absent" ] && grep -q "$absent" "$WORK/$name.out"; }; then
+      echo "  $label failed, but not where it should have (exit $code):"
+      tail -3 "$WORK/$name.out" | sed 's/^/    /'
+      status=1
+    else
+      echo "  $label is caught (exit $code)"
+    fi
+  }
+  broken neverhandled "a Signal.each that never runs its block" \
+    '      block.call(got)' '      nil' "FAIL: the handler saw"
+  if [ "$WINDOWS" -eq 0 ]; then
+    # The pipe not drained: the byte that arrived before the ignore is read
+    # by the next wait, which answers at once.
+    broken undropped "an arrival an ignore did not drop" \
+      '      drain if @@read_fd >= 0' '      nil' "FAIL: an arrival kept before the ignore"
+    broken unignored "an ignore that keeps the default" \
+      'disposition(signal.value, ignored ? 1_u64 : 0_u64)' 'disposition(signal.value, 0_u64)' \
+      "an arrival kept before the ignore was dropped" "left the process alive"
+    reset_old='disposition(signal.value, ignored ? 1_u64 : 0_u64)'
+    reset_new='disposition(signal.value, 1_u64)'
+  else
+    broken undropped "an arrival an ignore did not drop" \
+      '        break if seen & bit == 0_u64 || @@arrived.compare_and_set(seen, seen & (0xFFFFFFFFFFFFFFFF_u64 ^ bit))[1]' \
+      '        break' "FAIL: an arrival kept before the ignore"
+    broken unignored "an ignore that keeps the default" \
+      '      return 1 if @@ignored.get & bit != 0_u64' '      nil' \
+      "an arrival kept before the ignore was dropped" "left the process alive"
+    reset_old='@@ignored.set(ignored ? @@ignored.get | bit : @@ignored.get & (0xFFFFFFFFFFFFFFFF_u64 ^ bit))'
+    reset_new='@@ignored.set(@@ignored.get | bit)'
+  fi
+  # A reset that leaves the signal ignored: the process outlives it.
+  if ! patched stillignored "$reset_old" "$reset_new"; then
+    echo "  the patch did not apply"
+    status=1
+  elif build stillignored "$WORK/stillignored-std${PSEP}$IYI_PATH"; then
+    said="$(reset_run stillignored)"
+    if printf '%s\n' "$said" | grep -q "outlived the reset"; then
+      echo "  a reset that keeps the signal ignored is caught: the process outlived it"
+    else
+      echo "  a reset that keeps the signal ignored was not caught:"
+      printf '%s\n' "$said" | sed 's/^/  /'
+      status=1
     fi
   fi
 fi

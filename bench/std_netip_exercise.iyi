@@ -1,0 +1,286 @@
+# Exercises `std/netip`: addresses read and written by RFC 4291 and RFC
+# 5952, classified by the IANA special-purpose registries as Python 3.14
+# reads them, prefixes, subnets, and the prefix trie. The comparison with
+# Python's `ipaddress` over a generated corpus is
+# bench/std_netip_exercise.sh's.
+#
+# Run via:
+#     ./bin/iyi run bench/std_netip_exercise.iyi
+
+module bench/std_netip_exercise
+
+import std/netip::{IP, Prefix, PrefixSet, NetipError}
+import std/gc::{GC}
+import std/int
+
+def check(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def same(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def ip(text : String) : IP
+  value = IP.parse(text)
+  raise "ASSERTION FAILED: #{text.inspect} refused with #{value.message.inspect}" if value.is_a?(NetipError)
+  value
+end
+
+def prefix(text : String) : Prefix
+  value = Prefix.parse(text)
+  raise "ASSERTION FAILED: #{text.inspect} refused with #{value.message.inspect}" if value.is_a?(NetipError)
+  value
+end
+
+def refused(value : IP | Prefix | NetipError, phrase : String, msg : String) : Nil
+  if value.is_a?(NetipError)
+    same phrase, value.message, msg
+  else
+    raise "ASSERTION FAILED: #{msg}: accepted as #{value}"
+  end
+end
+
+def texts(values : Array(Prefix)) : String
+  values.map { |value| value.to_s }.join(" ")
+end
+
+puts "== rfc 4291 text forms"
+# Section 2.2: the three forms, and section 2.3's three ways to write one
+# prefix beside three that are not that prefix.
+[
+  {"ABCD:EF01:2345:6789:ABCD:EF01:2345:6789", "abcd:ef01:2345:6789:abcd:ef01:2345:6789"},
+  {"2001:DB8:0:0:8:800:200C:417A", "2001:db8::8:800:200c:417a"},
+  {"2001:DB8::8:800:200C:417A", "2001:db8::8:800:200c:417a"},
+  {"FF01:0:0:0:0:0:0:101", "ff01::101"},
+  {"FF01::101", "ff01::101"},
+  {"0:0:0:0:0:0:0:1", "::1"},
+  {"::1", "::1"},
+  {"0:0:0:0:0:0:0:0", "::"},
+  {"::", "::"},
+  {"0:0:0:0:0:0:13.1.68.3", "::d01:4403"},
+  {"::13.1.68.3", "::d01:4403"},
+  {"0:0:0:0:0:FFFF:129.144.52.38", "::ffff:129.144.52.38"},
+  {"::FFFF:129.144.52.38", "::ffff:129.144.52.38"},
+].each do |pair|
+  same pair[1], ip(pair[0]).to_s, "rfc 4291 2.2: #{pair[0]}"
+end
+cd30 = prefix("2001:0DB8:0000:CD30:0000:0000:0000:0000/60")
+same "2001:db8:0:cd30::/60", cd30.to_s, "rfc 4291 2.3: the prefix written in full"
+check cd30 == prefix("2001:0DB8::CD30:0:0:0:0/60") && cd30 == prefix("2001:0DB8:0:CD30::/60"), "rfc 4291 2.3: three texts, one prefix"
+["2001:0DB8:0:CD3/60", "2001:0DB8::CD30/60", "2001:0DB8::CD3/60"].each do |text|
+  check Prefix.parse(text).is_a?(NetipError), "rfc 4291 2.3: #{text} is not that prefix"
+end
+four = ip("192.0.2.33")
+check four.v4? && four.bit_length == 32 && four.to_u128 == 0xC0000221_u128, "dotted decimal is 32 bits"
+same "192.0.2.33", IP.v4(192_u8, 0_u8, 2_u8, 33_u8).to_s, "four octets make the address"
+same "192.0.2.33", IP.from_bytes([192_u8, 0_u8, 2_u8, 33_u8]).to_s, "four bytes make an IPv4 address"
+same "2001:db8::1", IP.from_bytes(ip("2001:db8::1").bytes).to_s, "sixteen bytes make an IPv6 address"
+check IP.v4(0xC0000221_u32) == four, "a 32-bit value makes the address"
+zoned = ip("fe80::1%eth0")
+same "eth0", zoned.zone || "", "a zone is kept"
+same "fe80::1%eth0", zoned.to_s, "a zone is written"
+check zoned != ip("fe80::1") && zoned != ip("fe80::1%eth1"), "a zone is part of an address's identity"
+check zoned.with_zone("") == ip("fe80::1") && ip("fe80::1").with_zone("eth0") == zoned, "with_zone sets and clears"
+same "fe80::1%2 x", ip("fe80::1%2 x").to_s, "a zone is any text without a '%'"
+check ip("::ffff:192.0.2.1").v6? && ip("::ffff:192.0.2.1") != ip("192.0.2.1"), "an IPv4-mapped address is IPv6"
+check ip("::ffff:192.0.2.1").ipv4_mapped == ip("192.0.2.1") && ip("::ffff:192.0.2.1").unmap == ip("192.0.2.1"), "a mapped address unmaps"
+check ip("192.0.2.1").ipv6_mapped == ip("::ffff:192.0.2.1"), "ipv6_mapped maps"
+check ip("::1").ipv4_mapped.nil? && ip("::1").unmap == ip("::1"), "only a mapped address unmaps"
+same "0000:0000:0000:0000:0000:ffff:192.0.2.1", ip("::ffff:192.0.2.1").exploded, "a mapped address explodes with its dotted tail"
+same "fe80:0000:0000:0000:0000:0000:0000:0001%eth0", zoned.exploded, "exploded keeps the zone"
+same "33.2.0.192.in-addr.arpa", four.reverse_pointer, "rfc 1035 3.5: in-addr.arpa"
+# RFC 3596 section 2.5's own example, its `IP6.ARPA` in lower case.
+same "b.a.9.8.7.6.5.0.4.0.0.0.3.0.0.0.2.0.0.0.1.0.0.0.0.0.0.0.1.2.3.4.ip6.arpa", ip("4321:0:1:2:3:4:567:89ab").reverse_pointer, "rfc 3596 2.5: ip6.arpa"
+
+puts "== rfc 5952 canonical text"
+# Section 2.1's eight texts of one address, then section 4's rules each.
+["2001:db8:0:0:1:0:0:1", "2001:0db8:0:0:1:0:0:1", "2001:db8::1:0:0:1", "2001:db8::0:1:0:0:1",
+ "2001:0db8::1:0:0:1", "2001:db8:0:0:1::1", "2001:db8:0000:0:1::1", "2001:DB8:0:0:1::1"].each do |text|
+  same "2001:db8::1:0:0:1", ip(text).to_s, "rfc 5952 2.1: #{text}"
+end
+same "2001:db8::1", ip("2001:0db8::0001").to_s, "rfc 5952 4.1: leading zeros dropped"
+same "2001:db8::2:1", ip("2001:db8:0:0:0:0:2:1").to_s, "rfc 5952 4.2.1: the run as short as it can be"
+same "2001:db8:0:1:1:1:1:1", ip("2001:db8:0:1:1:1:1:1").to_s, "rfc 5952 4.2.2: one zero group is not ::"
+same "2001:0:0:1::1", ip("2001:0:0:1:0:0:0:1").to_s, "rfc 5952 4.2.3: the longest run"
+same "2001:db8::1:0:0:1", ip("2001:db8:0:0:1:0:0:1").to_s, "rfc 5952 4.2.3: the first of two equal runs"
+same "2001:db8::abcd", ip("2001:DB8::ABCD").to_s, "rfc 5952 4.3: lower case"
+same "::ffff:192.0.2.1", ip("0:0:0:0:0:ffff:c000:201").to_s, "rfc 5952 5: an IPv4-mapped address is written dotted"
+same "1::", ip("1:0:0:0:0:0:0:0").to_s, "a run at the end"
+same "::1:0:0:0", ip("0:0:0:0:1:0:0:0").to_s, "a run at the start, longer than the one at the end"
+same "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", ip("FFFF:ffff:FFFF:ffff:FFFF:ffff:FFFF:ffff").to_s, "no zero groups"
+
+puts "== refused as a value"
+refused IP.parse(""), "netip: an empty string is not an address", "an empty string is refused"
+refused IP.parse("010.1.1.1"), "netip: \"010.1.1.1\" is not an IPv4 address: the octet \"010\" has a leading zero, which some readers take for octal", "a leading zero in an octet is refused"
+refused IP.parse("1.2.3.04"), "netip: \"1.2.3.04\" is not an IPv4 address: the octet \"04\" has a leading zero, which some readers take for octal", "a leading zero in the last octet is refused"
+refused IP.parse("1.2.3.256"), "netip: \"1.2.3.256\" is not an IPv4 address: the octet 256 is past 255", "an octet past 255 is refused"
+refused IP.parse("127.1"), "netip: \"127.1\" is not an IPv4 address: 2 octets, not four", "inet_aton's short form is refused"
+refused IP.parse("0x7f.0.0.1"), "netip: \"0x7f.0.0.1\" is not an IPv4 address: the octet \"0x7f\" is not decimal digits", "a hex octet is refused"
+refused IP.parse("1.2.3.4.5"), "netip: \"1.2.3.4.5\" is not an IPv4 address: more than four octets", "a fifth octet is refused"
+refused IP.parse("1.2..4"), "netip: \"1.2..4\" is not an IPv4 address: octet 3 is empty", "an empty octet is refused"
+refused IP.parse("1.2.3.0004"), "netip: \"1.2.3.0004\" is not an IPv4 address: the octet \"0004\" has more than three digits", "four digits are refused"
+refused IP.parse("1.2.3.4/32"), "netip: \"1.2.3.4/32\" is not an address: it holds a '/', which a prefix has and Prefix.parse reads", "a prefix is not an address"
+refused IP.parse("1.2.3.\u{0664}"), "netip: \"1.2.3.\u{0664}\" is not an IPv4 address: the octet \"\u{0664}\" is not decimal digits", "a digit outside ASCII is refused"
+refused IP.parse("1::2::3"), "netip: \"1::2::3\" is not an IPv6 address: more than one '::'", "two '::' are refused"
+refused IP.parse("12345::"), "netip: \"12345::\" is not an IPv6 address: the group \"12345\" has more than four digits", "five hex digits are refused"
+refused IP.parse("g::"), "netip: \"g::\" is not an IPv6 address: the group \"g\" is not hex digits", "a letter past f is refused"
+refused IP.parse("1:2:3:4:5:6:7"), "netip: \"1:2:3:4:5:6:7\" is not an IPv6 address: 7 groups and no '::', where eight are written without one", "seven groups are refused"
+refused IP.parse("1:2:3:4::5:6:7:8"), "netip: \"1:2:3:4::5:6:7:8\" is not an IPv6 address: '::' beside eight groups stands for none", "'::' standing for nothing is refused"
+refused IP.parse(":1:2:3:4:5:6:7"), "netip: \":1:2:3:4:5:6:7\" is not an IPv6 address: a leading ':' that is not part of '::'", "a lone leading colon is refused"
+refused IP.parse("1:2:3:4:5:6:7:"), "netip: \"1:2:3:4:5:6:7:\" is not an IPv6 address: a trailing ':' that is not part of '::'", "a lone trailing colon is refused"
+refused IP.parse("1:2:3:4:5:6:7:8:9"), "netip: \"1:2:3:4:5:6:7:8:9\" is not an IPv6 address: 9 groups and no '::', where eight are written without one", "nine groups are refused"
+refused IP.parse("::1.2.3.04"), "netip: \"::1.2.3.04\" is not an IPv6 address: the IPv4 tail \"1.2.3.04\": the octet \"04\" has a leading zero, which some readers take for octal", "a dotted tail is read strictly"
+refused IP.parse("1:2:3:4:5:6:7:1.2.3.4"), "netip: \"1:2:3:4:5:6:7:1.2.3.4\" is not an IPv6 address: 9 groups and no '::', where eight are written without one", "a dotted tail after seven groups is refused"
+refused IP.parse("0000:0000:0000:0000:0000:0000:0000:0000:0000:0"), "netip: \"0000:0000:0000:0000:0000:0000:0000:0000:0000:0\" is not an IPv6 address: 46 characters, past the 45 an IPv6 address is written in", "more than 45 characters"
+refused IP.parse("fe80::1%"), "netip: \"fe80::1%\" is not an IPv6 address: the zone after '%' is empty", "an empty zone is refused"
+refused IP.parse("fe80::1%a%b"), "netip: \"fe80::1%a%b\" is not an IPv6 address: the zone \"a%b\" holds a '%'", "a second '%' is refused"
+refused IP.parse("%eth0"), "netip: \"%eth0\" is not an IPv4 address: the octet \"%eth0\" is not decimal digits", "a zone alone is refused"
+refused IP.parse_v6("1.2.3.4"), "netip: \"1.2.3.4\" is not an IPv6 address: fewer than two colons", "parse_v6 reads IPv6 alone"
+refused IP.parse_v4("::1"), "netip: \"::1\" is not an IPv4 address: the octet \"::1\" is not decimal digits", "parse_v4 reads IPv4 alone"
+refused Prefix.parse("10.0.0.1/8"), "netip: \"10.0.0.1/8\" is not a prefix: host bits are set past /8; Prefix.parse(text, mask: true) clears them", "host bits are refused"
+refused Prefix.parse("10.0.0.0/33"), "netip: \"10.0.0.0/33\" is not a prefix: \"33\" is not a length from 0 to 32, a netmask or a hostmask", "a /33 is refused"
+refused Prefix.parse("::/129"), "netip: \"::/129\" is not a prefix: \"129\" is not a length from 0 to 128", "a /129 is refused"
+refused Prefix.parse("10.0.0.0/255.0.255.0"), "netip: \"10.0.0.0/255.0.255.0\" is not a prefix: \"255.0.255.0\" is not a length from 0 to 32, a netmask or a hostmask", "a mask with a hole is refused"
+refused Prefix.parse("10.0.0.0/+8"), "netip: \"10.0.0.0/+8\" is not a prefix: \"+8\" is not a length from 0 to 32, a netmask or a hostmask", "a signed length is refused"
+refused Prefix.parse("10.0.0.0/8/8"), "netip: \"10.0.0.0/8/8\" is not a prefix: it has more than one '/'", "two slashes are refused"
+refused Prefix.parse("fe80::%eth0/64"), "netip: \"fe80::%eth0/64\" is not a prefix: the address has a zone, and a prefix has none", "a zone in a prefix is refused"
+refused Prefix.parse("10.0.0.256/8"), "netip: \"10.0.0.256/8\" is not a prefix: \"10.0.0.256\" is not an IPv4 address: the octet 256 is past 255", "a prefix's address is read strictly"
+
+puts "== order, next and prev"
+sorted = ["::1", "10.0.0.1", "::ffff:10.0.0.1", "9.255.255.255", "fe80::1%b", "fe80::1", "fe80::1%a", "0.0.0.0"].map { |text| ip(text) }.sorted
+same "0.0.0.0 9.255.255.255 10.0.0.1 ::1 ::ffff:10.0.0.1 fe80::1 fe80::1%a fe80::1%b", sorted.map { |a| a.to_s }.join(" "), "IPv4 first, then by value, then by zone"
+check ip("10.0.0.1") < ip("10.0.0.2") && ip("10.0.0.2") > ip("10.0.0.1") && ip("255.255.255.255") < ip("::"), "the comparison operators agree"
+same "10.0.1.0", (ip("10.0.0.255").next || ip("::")).to_s, "next carries into the next octet"
+same "10.0.0.255", (ip("10.0.1.0").prev || ip("::")).to_s, "prev borrows"
+check ip("255.255.255.255").next.nil?, "255.255.255.255 has no next"
+check ip("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff").next.nil?, "the last IPv6 address has no next"
+check ip("0.0.0.0").prev.nil? && ip("::").prev.nil?, "the first address has no prev"
+same "::1:0:0:0", (ip("::ffff:ffff:ffff").next || ip("::")).to_s, "next carries across groups"
+same "fe80::2%eth0", (zoned.next || ip("::")).to_s, "next keeps the zone"
+table = {} of IP => Int32
+table[ip("10.0.0.1")] = 1
+table[ip("fe80::1%eth0")] = 2
+check table[ip("10.0.0.1")]? == 1 && table[ip("fe80::1%eth0")]? == 2 && table[ip("fe80::1")]?.nil?, "an address is a hash key, its zone part of it"
+
+puts "== iana special-purpose registries"
+# Every block of the IANA IPv4 and IPv6 Special-Purpose Address
+# Registries, by an address inside it, with whether the registry calls it
+# globally reachable - as Python 3.14 encodes it.
+[
+  {"0.1.2.3", false}, {"10.20.30.40", false}, {"100.64.0.1", false}, {"127.0.0.1", false},
+  {"169.254.1.1", false}, {"172.16.0.1", false}, {"172.32.0.1", true}, {"192.0.0.1", false},
+  {"192.0.0.8", false}, {"192.0.0.9", true}, {"192.0.0.10", true}, {"192.0.0.170", false},
+  {"192.0.0.171", false}, {"192.0.0.172", false}, {"192.0.2.1", false}, {"192.31.196.1", true},
+  {"192.52.193.1", true}, {"192.88.99.1", true}, {"192.168.1.1", false}, {"192.175.48.1", true},
+  {"198.18.0.1", false}, {"198.19.255.255", false}, {"198.20.0.0", true}, {"198.51.100.1", false},
+  {"203.0.113.1", false}, {"224.0.0.1", true}, {"240.0.0.1", false}, {"255.255.255.255", false},
+  {"8.8.8.8", true}, {"1.1.1.1", true},
+  {"::1", false}, {"::", false}, {"::ffff:8.8.8.8", true}, {"::ffff:10.0.0.1", false}, {"64:ff9b::1", true},
+  {"64:ff9b:1::1", false}, {"100::1", false}, {"100:0:0:1::1", true}, {"2001::1", false}, {"2001:1::1", true},
+  {"2001:1::2", true}, {"2001:1::3", false}, {"2001:2::1", false}, {"2001:3::1", true}, {"2001:4:112::1", true},
+  {"2001:10::1", false}, {"2001:20::1", true}, {"2001:30::1", true}, {"2001:200::1", true}, {"2001:db8::1", false},
+  {"2002::1", false}, {"2620:4f:8000::1", true}, {"3fff::1", false}, {"3fff:1000::1", true}, {"5f00::1", true},
+  {"fc00::1", false}, {"fe80::1", false}, {"fec0::1", true}, {"ff02::1", true}, {"2606:4700::1111", true},
+].each do |pair|
+  check ip(pair[0]).global? == pair[1], "#{pair[0]} is#{pair[1] ? "" : " not"} global"
+end
+check ip("192.0.0.9").global?, "192.0.0.9 is global"
+check !ip("100.64.0.1").global? && !ip("100.64.0.1").private?, "100.64.0.0/10 is neither global nor private"
+check !ip("3fff::1").global?, "3fff::/20 is documentation, not global"
+check ip("127.255.255.254").loopback? && ip("::1").loopback? && !ip("::2").loopback?, "loopback is 127/8 and ::1"
+check ip("0.0.0.0").unspecified? && ip("::").unspecified? && !ip("0.0.0.1").unspecified?, "unspecified is all zeros"
+check ip("169.254.0.0").link_local? && ip("febf::1").link_local? && !ip("fec0::1").link_local?, "link local is 169.254/16 and fe80::/10"
+check ip("239.255.255.255").multicast? && ip("ff00::").multicast? && !ip("240.0.0.0").multicast?, "multicast is 224/4 and ff00::/8"
+check ip("240.0.0.1").reserved? && ip("4000::").reserved? && !ip("2000::").reserved? && ip("fe00::").reserved?, "reserved is class E and RFC 4291's unassigned space"
+check ip("fec0::1").site_local? && !ip("fe80::1").site_local? && !ip("10.0.0.1").site_local?, "site local is fec0::/10, IPv6 alone"
+["10.0.0.0", "10.255.255.255", "172.16.0.0", "172.31.255.255", "192.168.0.0", "192.168.255.255", "fc00::", "fdff::1"].each do |text|
+  check ip(text).private?, "#{text} is private (RFC 1918, RFC 4193)"
+end
+["9.255.255.255", "11.0.0.0", "172.15.255.255", "172.32.0.0", "192.167.255.255", "192.169.0.0", "fe00::", "127.0.0.1", "169.254.1.1"].each do |text|
+  check !ip(text).private?, "#{text} is not private"
+end
+mapped = ip("::ffff:127.0.0.1")
+check mapped.loopback? && ip("::ffff:10.1.2.3").private? && ip("::ffff:169.254.1.1").link_local? && ip("::ffff:224.0.0.1").multicast? &&
+      ip("::ffff:0.0.0.0").unspecified? && ip("::ffff:240.0.0.1").reserved? && !ip("::ffff:fec0:0").site_local?,
+  "an IPv4-mapped address is classified as its IPv4 address"
+
+puts "== prefixes"
+ten = prefix("10.0.0.0/8")
+same "10.0.0.0 10.255.255.255 255.0.0.0 0.255.255.255", "#{ten.first} #{ten.last} #{ten.netmask} #{ten.hostmask}", "a /8's ends and masks"
+same "10.0.0.0/8", Prefix.parse("10.1.2.3/8", mask: true).as(Prefix).to_s, "mask: true clears host bits"
+same "10.0.0.0/24", prefix("10.0.0.0/255.255.255.0").to_s, "a netmask is a length"
+same "10.0.0.0/24", prefix("10.0.0.0/0.0.0.255").to_s, "a hostmask is a length"
+same "0.0.0.0/0", prefix("0.0.0.0/0.0.0.0").to_s, "0.0.0.0 as a mask is /0"
+same "10.0.0.0/32", prefix("10.0.0.0/255.255.255.255").to_s, "255.255.255.255 as a mask is /32"
+same "10.0.0.0/24", prefix("10.0.0.0/0024").to_s, "a length with leading zeros, as Python reads it"
+same "192.0.2.1/32", prefix("192.0.2.1").to_s, "an address alone is its own /32"
+same "::1/128", prefix("::1").to_s, "and its own /128"
+same "::ffff:10.0.0.0/104", prefix("::ffff:10.0.0.0/104").to_s, "a mapped prefix is written dotted"
+check ten.contains?(ip("10.255.255.255")) && !ten.contains?(ip("11.0.0.0")) && !ten.contains?(ip("9.255.255.255")), "a /8 holds its addresses"
+check !prefix("::/96").contains?(ip("1.2.3.4")) && !prefix("0.0.0.0/0").contains?(ip("::ffff:1.2.3.4")), "an IPv4 address is in no IPv6 prefix"
+check prefix("fe80::/64").contains?(ip("fe80::1%eth0")), "containment ignores a zone"
+check prefix("::/0").contains?(ip("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")) && prefix("0.0.0.0/0").contains?(ip("255.255.255.255")), "a /0 holds its family"
+check ten.contains?(prefix("10.1.0.0/16")) && !prefix("10.1.0.0/16").contains?(ten) && prefix("10.1.0.0/16").subnet_of?(ten), "a /16 is inside its /8"
+check ten.overlaps?(prefix("10.1.0.0/16")) && prefix("10.1.0.0/16").overlaps?(ten), "overlap is symmetric"
+check !ten.overlaps?(prefix("11.0.0.0/8")) && !ten.overlaps?(prefix("::/0")), "apart blocks do not overlap"
+host = Prefix.new(ip("192.0.2.7"), 24)
+same "192.0.2.7/24", host.to_s, "Prefix.new keeps host bits"
+same "192.0.2.0/24", host.masked.to_s, "masked clears them"
+check host != host.masked && host.contains?(ip("192.0.2.200")) && host.first == ip("192.0.2.0"), "a block with host bits answers for its masked block"
+same "192.0.2.0/24", ip("192.0.2.7").prefix(24).to_s, "IP#prefix masks"
+same "fe80::/10", ip("fe80::1%eth0").prefix(10).to_s, "IP#prefix leaves the zone behind"
+order = [prefix("10.0.0.0/16"), prefix("::/0"), prefix("10.0.0.0/8"), prefix("9.0.0.0/8"), prefix("0.0.0.0/0")].sorted
+same "0.0.0.0/0 9.0.0.0/8 10.0.0.0/8 10.0.0.0/16 ::/0", texts(order), "prefixes order by family, first address, then length"
+
+puts "== subnets and supernets"
+same "10.0.0.0/10 10.64.0.0/10 10.128.0.0/10 10.192.0.0/10", texts(ten.subnets(10)), "a /8 into /10"
+same "10.0.0.0/8", texts(ten.subnets(8)), "a /8 into /8 is itself"
+check ten.subnets(24).size == 65536 && ten.subnets(24)[65535] == prefix("10.255.255.0/24"), "a /8 into 65,536 /24s"
+same "10.255.255.255/32", ten.subnet(32, 16777215_u128).to_s, "subnet reaches the last /32"
+same "2001:db8:0:ffff::/64", prefix("2001:db8::/48").subnet(64, 65535_u128).to_s, "subnet of an IPv6 prefix"
+same "::/1 8000::/1", texts(prefix("::/0").subnets(1)), "the IPv6 space halved"
+same "10.0.0.0/7", ten.supernet.to_s, "a supernet is one bit shorter"
+same "0.0.0.0/0", ten.supernet(0).to_s, "the supernet of length 0"
+same "0.0.0.0/0", prefix("0.0.0.0/0").supernet.to_s, "a /0 is its own supernet"
+same "192.0.2.0/23", Prefix.new(ip("192.0.2.7"), 24).supernet(23).to_s, "a supernet is masked"
+
+puts "== prefix sets"
+set = PrefixSet.new([prefix("10.0.0.0/8"), prefix("10.1.0.0/16"), prefix("10.1.2.0/24"), prefix("2001:db8::/32"), prefix("0.0.0.0/0")])
+check set.size == 5 && !set.add(prefix("10.1.0.0/16")) && set.size == 5, "a prefix is held once"
+same "10.1.2.0/24", (set.lookup(ip("10.1.2.3")) || prefix("::/0")).to_s, "the longest prefix wins"
+same "10.1.0.0/16", (set.lookup(ip("10.1.3.3")) || prefix("::/0")).to_s, "the next longest after it"
+same "0.0.0.0/0", (set.lookup(ip("8.8.8.8")) || prefix("::/0")).to_s, "a /0 holds the rest"
+check set.lookup(ip("2001:db9::1")).nil? && set.contains?(ip("2001:db8:ffff::1%x")), "IPv6 apart from IPv4"
+check set.includes?(prefix("10.1.0.0/16")) && !set.includes?(prefix("10.2.0.0/16")), "includes? is the prefix itself"
+same "0.0.0.0/0 10.0.0.0/8 10.1.0.0/16 10.1.2.0/24 2001:db8::/32", texts(set.prefixes), "the prefixes in order"
+same "0.0.0.0/0 2001:db8::/32", texts(set.collapsed), "collapsed into the fewest"
+check set.delete(prefix("0.0.0.0/0")) && !set.delete(prefix("0.0.0.0/0")) && set.size == 4, "delete takes a prefix out once"
+check set.lookup(ip("8.8.8.8")).nil?, "a deleted prefix holds nothing"
+halves = PrefixSet.new([prefix("192.0.2.0/25"), prefix("192.0.2.128/26"), prefix("192.0.2.192/26"), prefix("192.0.3.0/24")])
+same "192.0.2.0/23", texts(halves.collapsed), "two halves collapse into their whole"
+check Prefix.parse("10.1.2.3/8", mask: true).as(Prefix).masked == prefix("10.0.0.0/8") && set.add(Prefix.new(ip("172.16.5.5"), 12)) && set.includes?(prefix("172.16.0.0/12")), "a set holds a prefix masked"
+check PrefixSet.new.empty? && PrefixSet.new.collapsed.empty? && PrefixSet.new.lookup(ip("::")).nil?, "an empty set holds nothing"
+
+puts "== allocation"
+# The questions an allowlist asks of every packet build nothing on the heap.
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  probe4 = ip("10.1.2.3")
+  probe6 = ip("2001:db8::1")
+  GC.disable
+  before = GC.stats.bytes_since_collection
+  hits = 0
+  10000.times do
+    hits = hits + 1 if set.lookup(probe4)
+    hits = hits + 1 if set.contains?(probe6)
+    hits = hits + 1 if probe4.global? || probe6.global? || probe4.private?
+    hits = hits + 1 if ten.contains?(probe4)
+  end
+  used = GC.stats.bytes_since_collection - before
+  GC.enable
+  check hits == 40000, "every probe answered"
+  check used == 0_u64, "lookup, contains? and the predicates allocate nothing (#{used} bytes over 40,000 calls)"
+  puts "  40,000 lookups, containments and classifications: #{used} bytes"
+{% end %}
+
+puts "\nALL CHECKS PASSED"

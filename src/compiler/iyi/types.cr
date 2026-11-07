@@ -31,6 +31,15 @@ module Iyi
     # for a type whose bodies it cannot see.
     property? iyi_share_trusted = false
 
+    # iyi: `@[Share(owns: true)]` (SPEC.md III.4.4): the synchronised type
+    # that owns its contents, shareable whatever its type arguments are,
+    # because nothing reaches what it holds except a block it runs - and
+    # every such block is checked where it is written (`CleanupTransformer
+    # #check_share_boundary`). `Mutex(T)` is the one; `Mutex(Array(T))` is
+    # Share although `Array(T)` is not. Implies `iyi_share_trusted`, and
+    # travels in an artifact as the same annotation.
+    property? iyi_share_owns = false
+
     def initialize(@program : Program)
     end
 
@@ -1741,6 +1750,21 @@ module Iyi
 
     # All matches. It's nil if `@match` is an exact match.
     @all_matches : Set(Type)?
+
+    # iyi: the matches as they stood before an overload was tried, put back
+    # when that overload fails on another argument (`Type#lookup_matches_without_parents`).
+    @saved_match : Type?
+    @saved_all_matches : Set(Type)?
+
+    def save_matches : Nil
+      @saved_match = @match
+      @saved_all_matches = @all_matches.dup
+    end
+
+    def restore_matches : Nil
+      @match = @saved_match
+      @all_matches = @saved_all_matches
+    end
 
     def set_exact_match(type)
       @match = type
@@ -3694,6 +3718,11 @@ module Iyi
     # Empty for a constant nobody wrote — the compiler's own `$Regex:0`, the
     # program's `ARGV_UNSAFE` — which is right: those are not a shard's to carry.
     property iyi_value_source : String = ""
+
+    # iyi: the reason `@[SafeReach("...")]` gives, when the constant has
+    # one: the program says every thread may reach it through a call, and
+    # the walk from a shared block does not warn about it (SPEC.md III.4.4).
+    property iyi_safe_reach : String? = nil
 
     # Is this constant accessed with pointerof(...)?
     property? pointer_read = false

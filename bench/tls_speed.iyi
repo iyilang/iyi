@@ -1,0 +1,84 @@
+module tls_speed
+
+# std/tls's throughput against its own cipher's, for bench/tls_speed.sh:
+#   tls_speed [cipher]                    the AEADs' rates, one way each:
+#                                         what a run with nothing asked does
+#   tls_speed pull <port> <roots> <path>  GET <path>, read to the end
+#   tls_speed push <port> <chain> <key> <ready> <MiB>
+#                                         serve one client <MiB> of writes
+# Each prints one line, `<what> <suite> <MB/s>`.
+
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsServer, TlsServerConfig}
+import std/x509::{Certificate}
+import std/socket::{IyiSocket}
+import std/aead::{AesGcm, ChaCha20Poly1305}
+import std/file::{File}
+import std/time::{Time}
+
+def seconds : Float64
+  Time.monotonic_nanoseconds.to_f64 / 1e9
+end
+
+def rate(bytes : Int64, since : Float64) : String
+  (bytes.to_f64 / (seconds - since) / 1e6).round(1).to_s
+end
+
+args = Program.args
+mode = args[0]? || "cipher"
+if mode == "cipher"
+  record = "x" * 16385
+  nonce = Array(UInt8).new(12, 2_u8)
+  rounds = 512
+  total = rounds.to_i64 * 16385_i64
+  gcm = AesGcm.new(Array(UInt8).new(16, 1_u8))
+  sealed = gcm.seal(nonce, record)
+  start = seconds
+  rounds.times { gcm.seal(nonce, record) }
+  puts "seal TLS_AES_128_GCM_SHA256 #{rate(total, start)}"
+  start = seconds
+  rounds.times { gcm.open(nonce, sealed) }
+  puts "open TLS_AES_128_GCM_SHA256 #{rate(total, start)}"
+  chacha = ChaCha20Poly1305.new(Array(UInt8).new(32, 1_u8))
+  sealed = chacha.seal(nonce, record)
+  start = seconds
+  rounds.times { chacha.seal(nonce, record) }
+  puts "seal TLS_CHACHA20_POLY1305_SHA256 #{rate(total, start)}"
+  start = seconds
+  rounds.times { chacha.open(nonce, sealed) }
+  puts "open TLS_CHACHA20_POLY1305_SHA256 #{rate(total, start)}"
+elsif mode == "pull"
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
+  raise "no connection" unless socket.is_a?(IyiSocket)
+  conn = TlsClient.over(socket, "localhost", config).or_panic
+  conn.write("GET /#{args[3]} HTTP/1.0\r\n\r\n")
+  start = seconds
+  total = 0_i64
+  while true
+    got = conn.read
+    raise got.message if got.is_a?(TlsError)
+    break if got.empty?
+    total = total + got.bytesize
+  end
+  puts "pull #{conn.cipher_suite} #{rate(total, start)}"
+elsif mode == "push"
+  config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
+  listener = IyiSocket.listen("127.0.0.1", args[1].to_i)
+  File.write(args[4], "ready")
+  socket = listener.accept
+  raise "no connection" unless socket.is_a?(IyiSocket)
+  conn = TlsServer.over(socket, config).or_panic
+  block = "x" * 16384
+  blocks = args[5].to_i * 64
+  start = seconds
+  blocks.times do
+    sent = conn.write(block)
+    raise sent.message if sent.is_a?(TlsError)
+  end
+  puts "push #{conn.cipher_suite} #{rate(blocks.to_i64 * 16384_i64, start)}"
+  conn.close
+else
+  STDERR.puts "usage: tls_speed cipher | pull <port> <roots> <path> | push <port> <chain> <key> <ready> <MiB>"
+  exit 2
+end

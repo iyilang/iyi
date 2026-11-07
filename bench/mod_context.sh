@@ -54,10 +54,14 @@ for source in "$REPO"/samples/iyi/*.iyi; do
     continue
   fi
   # Three ways the answer can be a hole rather than a surface. Each is a
-  # line `mod context` prints in place of the module's declarations.
-  if grep -qE "does not resolve|does not compile alone|no artifact carries" "$WORK/$name.txt"; then
+  # line `mod context` prints in place of the module's declarations,
+  # indented and in parentheses: matched there and nowhere else, because a
+  # module's own doc comments are printed too, and std/socket's say what
+  # happens when "a name that does not resolve" is connected to.
+  hole='^  \((does not resolve|does not compile alone|compiled, but no artifact carries)'
+  if grep -qE "$hole" "$WORK/$name.txt"; then
     ungrounded="$ungrounded $name"
-    grep -E "does not resolve|does not compile alone|no artifact carries" "$WORK/$name.txt" |
+    grep -E "$hole" "$WORK/$name.txt" |
       sed "s/^/  $name: /" | head -3
     status=1
     continue

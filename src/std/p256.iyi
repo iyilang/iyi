@@ -1,0 +1,876 @@
+# ECDSA signatures made on P-256 (FIPS 186-5, SEC 1, RFC 6979), and its
+# Diffie-Hellman (ECDH, SEC 1 section 3.3.1), written in iyi, in constant
+# time.
+#
+#     import std/p256::{P256PrivateKey}
+#     import std/ecdsa::{EcdsaHash, EcdsaError}
+#
+#     key = P256PrivateKey.from_pkcs8(der).or_panic     # or from_sec1, from_bytes
+#     signature = key.sign(EcdsaHash::SHA256, message)  # DER Ecdsa-Sig-Value
+#     key.public_key.verify(EcdsaHash::SHA256, message, signature)  # true
+#     key.public_point                    # 0x04, x, y: what a key share sends
+#     key.shared_secret(peer_point).or_panic  # x of [d]Q, 32 bytes
+#
+# std/ecdsa checks signatures on std/big's arithmetic, which takes as long
+# as its numbers make it: fine for public values, and a leak for a private
+# key, whose bits would show in how long each signature takes. This module
+# is the other half for P-256 alone, the curve a TLS server's certificate
+# is most often on and the one browsers take.
+#
+# Constant time, the way std/curve25519 is: nothing branches on a secret
+# and no memory index depends on one. Numbers modulo p (the field) and
+# modulo n (the group's order) are four 64-bit limbs in Montgomery form,
+# products taken in `UInt128`, the final subtraction chosen by a mask. The
+# points are projective, added and doubled by the complete formulas of
+# Renes, Costello and Batina (2016, algorithms 4 and 6 for a = -3), which
+# have no case to branch on - not the identity, not a point added to
+# itself. [k]P runs 64 windows of four bits, each four doublings and one
+# addition of a table entry read whole: all sixteen entries are read and
+# the one wanted kept by masks. Inversion is Fermat's, x^(m - 2), whose
+# exponent is public and fixed.
+#
+# [k]G, which every signature and every key's public point takes, reads a
+# fixed-base table of multiples of G instead (`P256Point.base_mult`), and
+# the field's inverse is an addition chain. Measured on one x86_64 Linux
+# machine other jobs shared, --release, the best of five runs of 100: a
+# SHA-256 signature took 31 microseconds (102 before the table, the
+# chain and the inlined field), ECDH 69 (89), against 14 and 28 from
+# Python's `cryptography` (OpenSSL).
+#
+# bench/ct_timing.sh, `sign` with one key, a fixed message against random
+# ones: |t| = 3.8 to 6.0 over 100,000 signatures. It put this at 16 to 24
+# before `P256BaseTable.pick`'s selectors were hidden from LLVM, which had
+# made them a branch on each nonce digit (see there). Later runs on the
+# same code, at load 6 to 7, put it at 10 to 19, with two fixed messages
+# at 1.2 to 1.9 and messages whose r and s match the fixed one's DER
+# lengths at 8 to 11. Timed a step at a time (100,000 samples, fixed
+# message against random, inputs read before the clock), the secret
+# steps are flat: [k]G with its affine x 2.8 to 6.1, k^-1 mod n 1.6 to
+# 5.0 (one cold run 17, not seen again in nine), s 6.8 to 10.3 and 1.7 to
+# 7.8 with only the message or only the nonce varying, and r and s
+# together, nonce derivation included, 3.0 to 5.3. The DER encoding
+# alone is at 100 to 212: `P256Der.integer` branches on r's and s's
+# leading bytes, which the signature shows, so a fixed message, whose
+# signature is always the same length, times apart from random ones. The
+# rest is where the inputs live: the same digest copied to 1,024 other
+# addresses puts an array concatenation at 8 to 59 and `from_bytes` at 37
+# to 63 with no value differing. bench/ct_timing.sh times `sign` against
+# messages whose r and s are as long in DER as the fixed one's.
+#
+# The nonce is RFC 6979's: HMAC over the hash the signature names, from
+# the private key and the message's hash, so one key and one message give
+# one signature and no random source is trusted with the key. Where the
+# RFC loops - a candidate k of n or more, an r or s of zero, each about
+# 2^-32 likely - the loop shows that it ran again, and nothing else.
+#
+# ECDH takes the peer's point uncompressed (0x04, x, y) and refuses one
+# that is not on the curve, or whose coordinates are not below p, before
+# any arithmetic with the private key: an invalid-curve point would draw d
+# out a residue at a time. The answer is x of [d]Q, as TLS 1.3's secp256r1
+# shares (RFC 8446 section 7.4.2) and every other user of SEC 1 take it.
+#
+# A private key is 32 bytes, d in [1, n - 1]: `from_bytes`, or read from
+# what OpenSSL and others write - PKCS #8's OneAsymmetricKey (RFC 5958,
+# RFC 5480's id-ecPublicKey with prime256v1) or SEC 1's ECPrivateKey (RFC
+# 5915), whose public key, when it carries one, must be d's.
+#
+# Pure computation: std/digest, std/crypto's HMAC, std/asn1, and std/ecdsa
+# for the public key and its checking.
+
+module std/p256
+
+import std/int
+import std/digest::{SHA256, SHA384, SHA512}
+import std/crypto::{HMAC}
+import std/asn1::{Der, DerValue, DerTag, Asn1Error}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+
+# A P-256 private key, and the public key that goes with it.
+pub struct P256PrivateKey
+  getter public_key : EcdsaPublicKey
+  # The public key's point, uncompressed: 0x04, then x and y, 32 bytes each.
+  getter public_point : Array(UInt8)
+  @d : P256Num
+
+  def initialize(@d : P256Num, @public_key : EcdsaPublicKey, @public_point : Array(UInt8))
+  end
+
+  # The key whose d is *bytes*, 32 big-endian, or why it is not one: not
+  # 32 bytes, or not in [1, n - 1].
+  def self.from_bytes(bytes : String | Array(UInt8)) : P256PrivateKey | EcdsaError
+    raw = bytes.is_a?(String) ? Array(UInt8).new(bytes.bytesize) { |i| bytes.to_unsafe[i] } : bytes
+    return EcdsaError.new("a P-256 private key is 32 bytes, not #{raw.size}") unless raw.size == 32
+    d = P256Num.from_bytes(raw, 0)
+    unless P256Num.below?(d, P256Num.n) && !d.zero?
+      return EcdsaError.new("a P-256 private key is a number from 1 to n - 1")
+    end
+    point = P256Point.base_mult(d).encoded
+    public = EcdsaPublicKey.from_point(EcdsaCurve::P256, point)
+    return public if public.is_a?(EcdsaError)
+    P256PrivateKey.new(d, public, point)
+  end
+
+  # ECDH: x of [d]Q for the peer's point Q, 32 bytes big-endian - or why
+  # *peer* is not a point of P-256 (checked before d is used).
+  def shared_secret(peer : Array(UInt8)) : Array(UInt8) | EcdsaError
+    q = P256Point.decode(peer)
+    return q if q.is_a?(EcdsaError)
+    P256Point.mult(q, @d).affine_x.to_bytes
+  end
+
+  # A PKCS #8 OneAsymmetricKey (RFC 5958) holding a P-256 key: version 0 or
+  # 1, the algorithm id-ecPublicKey with prime256v1, and an ECPrivateKey
+  # inside the privateKey OCTET STRING.
+  def self.from_pkcs8(der : Array(UInt8)) : P256PrivateKey | EcdsaError
+    top = Der.parse(der)
+    return EcdsaError.new("the private key: #{top.message}") if top.is_a?(Asn1Error)
+    fields = top.sequence
+    return EcdsaError.new("the private key: #{fields.message}") if fields.is_a?(Asn1Error)
+    return EcdsaError.new("the private key: a OneAsymmetricKey of #{fields.size} values") if fields.size < 3
+    version = fields[0].integer
+    return EcdsaError.new("the private key: version #{version}, not 0 or 1") unless version == 0_i64 || version == 1_i64
+    algorithm = fields[1].sequence
+    return EcdsaError.new("the private key: an AlgorithmIdentifier that is not a SEQUENCE") if algorithm.is_a?(Asn1Error) || algorithm.empty?
+    kind = algorithm[0].oid
+    return EcdsaError.new("the private key is for #{kind.is_a?(String) ? kind : "no OID"}, not id-ecPublicKey (1.2.840.10045.2.1)") unless kind == "1.2.840.10045.2.1"
+    return EcdsaError.new("the private key: an id-ecPublicKey with no named curve") unless algorithm.size == 2
+    curve = algorithm[1].oid
+    return EcdsaError.new("the private key is on #{curve.is_a?(String) ? curve : "no named curve"}, not prime256v1 (1.2.840.10045.3.1.7)") unless curve == P256Point::CURVE_OID
+    inner = fields[2].octet_string
+    return EcdsaError.new("the private key: #{inner.message}") if inner.is_a?(Asn1Error)
+    from_sec1(inner)
+  end
+
+  # SEC 1's ECPrivateKey (RFC 5915): version 1, the 32-byte private key,
+  # then optionally the curve ([0], which must be prime256v1) and the
+  # public key ([1], which must be the private key's).
+  def self.from_sec1(der : Array(UInt8)) : P256PrivateKey | EcdsaError
+    top = Der.parse(der)
+    return EcdsaError.new("the private key: #{top.message}") if top.is_a?(Asn1Error)
+    fields = top.sequence
+    return EcdsaError.new("the private key: #{fields.message}") if fields.is_a?(Asn1Error)
+    return EcdsaError.new("the private key: an ECPrivateKey of #{fields.size} values") if fields.size < 2
+    return EcdsaError.new("the private key: an ECPrivateKey whose version is not 1") unless fields[0].integer == 1_i64
+    secret = fields[1].octet_string
+    return EcdsaError.new("the private key: #{secret.message}") if secret.is_a?(Asn1Error)
+    key = from_bytes(secret)
+    return key if key.is_a?(EcdsaError)
+    i = 2
+    while i < fields.size
+      field = fields[i]
+      if field.context?(0)
+        named = field.explicit(0)
+        oid = named.is_a?(Asn1Error) ? named : named.oid
+        return EcdsaError.new("the private key names a curve that is not prime256v1") unless oid == P256Point::CURVE_OID
+      elsif field.context?(1)
+        bits = field.explicit(1)
+        return EcdsaError.new("the private key: its public key is not a BIT STRING") if bits.is_a?(Asn1Error)
+        point = bits.bit_string
+        return EcdsaError.new("the private key: its public key is not a BIT STRING") if point.is_a?(Asn1Error)
+        carried = EcdsaPublicKey.from_point(EcdsaCurve::P256, point)
+        return EcdsaError.new("the private key: its public key is not the private key's") unless carried.is_a?(EcdsaPublicKey) && carried.x == key.public_key.x && carried.y == key.public_key.y
+      else
+        return EcdsaError.new("the private key: #{field.describe} where a curve or a public key belongs")
+      end
+      i = i + 1
+    end
+    key
+  end
+
+  # The signature of *message* under *hash*: the DER of Ecdsa-Sig-Value,
+  # SEQUENCE { r INTEGER, s INTEGER }, as X.509 and TLS 1.3 carry it. The
+  # nonce is RFC 6979's, so the same key and message sign alike.
+  def sign(hash : EcdsaHash, message : String | Array(UInt8)) : Array(UInt8)
+    bytes = message.is_a?(String) ? Array(UInt8).new(message.bytesize) { |i| message.to_unsafe[i] } : message
+    r, s = sign_digest(hash, hash.digest(bytes))
+    P256Der.signature(r.to_bytes, s.to_bytes)
+  end
+
+  # r and s for the digest *h1* of a message, RFC 6979 section 3.2 for the
+  # nonce and SEC 1 section 4.1.3 for the rest.
+  private def sign_digest(hash : EcdsaHash, h1 : Array(UInt8)) : {P256Num, P256Num}
+    # bits2int: the hash's leftmost 256 bits; bits2octets: that mod n.
+    e = P256Num.reduce_once(P256Num.from_bytes(h1, 0), P256Num.n)
+    x = @d.to_bytes
+    h = e.to_bytes
+    size = h1.size
+    v = Array(UInt8).new(size, 1_u8)
+    k = Array(UInt8).new(size, 0_u8)
+    k = P256Hmac.mac(hash, k, v + [0_u8] + x + h)
+    v = P256Hmac.mac(hash, k, v)
+    k = P256Hmac.mac(hash, k, v + [1_u8] + x + h)
+    v = P256Hmac.mac(hash, k, v)
+    while true
+      v = P256Hmac.mac(hash, k, v)
+      candidate = P256Num.from_bytes(v, 0)
+      if P256Num.below?(candidate, P256Num.n) && !candidate.zero?
+        r = P256Num.reduce_once(P256Point.base_mult(candidate).affine_x, P256Num.n)
+        unless r.zero?
+          # s = k^-1 (e + r d) mod n, in Montgomery form throughout.
+          m = P256Modulus.order
+          km = m.to_mont(candidate)
+          rd = m.mul(m.to_mont(r), m.to_mont(@d))
+          s = m.from_mont(m.mul(m.inverse(km), m.add(m.to_mont(e), rd)))
+          return {r, s} unless s.zero?
+        end
+      end
+      k = P256Hmac.mac(hash, k, v + [0_u8])
+      v = P256Hmac.mac(hash, k, v)
+    end
+    {P256Num.zero, P256Num.zero}
+  end
+end
+
+# HMAC under the hash a signature names.
+struct P256Hmac
+  def self.mac(hash : EcdsaHash, key : Array(UInt8), data : Array(UInt8)) : Array(UInt8)
+    case hash
+    when EcdsaHash::SHA256 then HMAC.digest(SHA256, key, data)
+    when EcdsaHash::SHA384 then HMAC.digest(SHA384, key, data)
+    else                        HMAC.digest(SHA512, key, data)
+    end
+  end
+end
+
+# DER's Ecdsa-Sig-Value from two 32-byte big-endian numbers.
+struct P256Der
+  def self.signature(r : Array(UInt8), s : Array(UInt8)) : Array(UInt8)
+    body = integer(r) + integer(s)
+    [0x30_u8] + length(body.size) + body
+  end
+
+  # A positive INTEGER: leading zeros dropped, one put back when the top
+  # bit is set.
+  private def self.integer(bytes : Array(UInt8)) : Array(UInt8)
+    at = 0
+    while at < bytes.size - 1 && bytes[at] == 0_u8
+      at = at + 1
+    end
+    value = bytes[at, bytes.size - at]
+    value = [0_u8] + value if value[0] >= 0x80_u8
+    [0x02_u8] + length(value.size) + value
+  end
+
+  private def self.length(size : Int32) : Array(UInt8)
+    size < 128 ? [size.to_u8] : [0x81_u8, size.to_u8]
+  end
+end
+
+# A number below 2^256 as four 64-bit limbs, least significant first.
+struct P256Num
+  getter l0 : UInt64
+  getter l1 : UInt64
+  getter l2 : UInt64
+  getter l3 : UInt64
+
+  def initialize(@l0 : UInt64, @l1 : UInt64, @l2 : UInt64, @l3 : UInt64)
+  end
+
+  def self.zero : P256Num
+    new(0_u64, 0_u64, 0_u64, 0_u64)
+  end
+
+  # The field's prime p = 2^256 - 2^224 + 2^192 + 2^96 - 1.
+  def self.p : P256Num
+    new(0xffffffffffffffff_u64, 0x00000000ffffffff_u64, 0x0000000000000000_u64, 0xffffffff00000001_u64)
+  end
+
+  # The group's order n.
+  def self.n : P256Num
+    new(0xf3b9cac2fc632551_u64, 0xbce6faada7179e84_u64, 0xffffffffffffffff_u64, 0xffffffff00000000_u64)
+  end
+
+  # 32 big-endian bytes of *bytes* from *at*.
+  def self.from_bytes(bytes : Array(UInt8), at : Int32) : P256Num
+    new(word(bytes, at + 24), word(bytes, at + 16), word(bytes, at + 8), word(bytes, at))
+  end
+
+  private def self.word(bytes : Array(UInt8), at : Int32) : UInt64
+    w = 0_u64
+    i = 0
+    while i < 8
+      w = w.unsafe_shl(8) | bytes[at + i].to_u64
+      i = i + 1
+    end
+    w
+  end
+
+  def to_bytes : Array(UInt8)
+    bytes = Array(UInt8).new(32, 0_u8)
+    put(bytes, 0, @l3)
+    put(bytes, 8, @l2)
+    put(bytes, 16, @l1)
+    put(bytes, 24, @l0)
+    bytes
+  end
+
+  private def put(bytes : Array(UInt8), at : Int32, w : UInt64) : Nil
+    i = 0
+    while i < 8
+      bytes[at + i] = (w.unsafe_shr(56 - 8 * i) & 0xff_u64).to_u8
+      i = i + 1
+    end
+  end
+
+  # Whether every limb is zero, read without a branch per limb.
+  def zero? : Bool
+    (@l0 | @l1 | @l2 | @l3) == 0_u64
+  end
+
+  # Whether *a* < *m*: the borrow out of a - m.
+  def self.below?(a : P256Num, m : P256Num) : Bool
+    _, borrow = sub_raw(a, m)
+    borrow == 1_u64
+  end
+
+  # *a* minus *m* when *a* is not below it: a number below 2m taken below m.
+  def self.reduce_once(a : P256Num, m : P256Num) : P256Num
+    d, borrow = sub_raw(a, m)
+    choose(borrow, a, d)
+  end
+
+  # *a* when *bit* is 1, *b* when it is 0, by a mask.
+  @[AlwaysInline]
+  def self.choose(bit : UInt64, a : P256Num, b : P256Num) : P256Num
+    mask = 0_u64 &- bit
+    new((a.l0 & mask) | (b.l0 & ~mask), (a.l1 & mask) | (b.l1 & ~mask),
+      (a.l2 & mask) | (b.l2 & ~mask), (a.l3 & mask) | (b.l3 & ~mask))
+  end
+
+  # a - b and the borrow out of it, 0 or 1.
+  @[AlwaysInline]
+  def self.sub_raw(a : P256Num, b : P256Num) : {P256Num, UInt64}
+    d0 = a.l0 &- b.l0
+    c = borrow_of(a.l0, b.l0, 0_u64)
+    d1 = a.l1 &- b.l1 &- c
+    c = borrow_of(a.l1, b.l1, c)
+    d2 = a.l2 &- b.l2 &- c
+    c = borrow_of(a.l2, b.l2, c)
+    d3 = a.l3 &- b.l3 &- c
+    c = borrow_of(a.l3, b.l3, c)
+    {new(d0, d1, d2, d3), c}
+  end
+
+  # The borrow out of x - y - c, computed without a comparison: the top
+  # bit of (~x & y) | (~(x ^ y) & (x - y - c)) (Hacker's Delight 2-13).
+  @[AlwaysInline]
+  def self.borrow_of(x : UInt64, y : UInt64, c : UInt64) : UInt64
+    d = x &- y &- c
+    ((~x & y) | (~(x ^ y) & d)).unsafe_shr(63)
+  end
+end
+
+# Arithmetic modulo p or n in Montgomery form (R = 2^256): a number a is
+# held as a R mod m. Every operation runs the same steps whatever its
+# operands. The operations are inlined where they are used, so the point
+# formulas, which take `P256Modulus.field`, see p and -1/p (which is 1)
+# as constants, and a round of the product's reduction is written for p's
+# shape (`round`): one multiplication where the general one takes four.
+struct P256Modulus
+  getter m : P256Num
+  # -m^-1 mod 2^64, R mod m and R^2 mod m.
+  getter inv : UInt64
+  getter one : P256Num
+  getter r2 : P256Num
+
+  def initialize(@m : P256Num, @inv : UInt64, @one : P256Num, @r2 : P256Num)
+  end
+
+  def self.field : P256Modulus
+    new(P256Num.p, 0x0000000000000001_u64,
+      P256Num.new(0x0000000000000001_u64, 0xffffffff00000000_u64, 0xffffffffffffffff_u64, 0x00000000fffffffe_u64),
+      P256Num.new(0x0000000000000003_u64, 0xfffffffbffffffff_u64, 0xfffffffffffffffe_u64, 0x00000004fffffffd_u64))
+  end
+
+  def self.order : P256Modulus
+    new(P256Num.n, 0xccd1c8aaee00bc4f_u64,
+      P256Num.new(0x0c46353d039cdaaf_u64, 0x4319055258e8617b_u64, 0x0000000000000000_u64, 0x00000000ffffffff_u64),
+      P256Num.new(0x83244c95be79eea2_u64, 0x4699799c49bd6fa6_u64, 0x2845b2392b6bec59_u64, 0x66e12d94f3d95620_u64))
+  end
+
+  # a b R^-1 mod m, by coarsely integrated operand scanning (CIOS): four
+  # rounds of a times one limb of b, each followed by one limb's reduction.
+  @[AlwaysInline]
+  def mul(a : P256Num, b : P256Num) : P256Num
+    t0 = 0_u64
+    t1 = 0_u64
+    t2 = 0_u64
+    t3 = 0_u64
+    t4 = 0_u64
+    t0, t1, t2, t3, t4 = round(a, b.l0, t0, t1, t2, t3, t4)
+    t0, t1, t2, t3, t4 = round(a, b.l1, t0, t1, t2, t3, t4)
+    t0, t1, t2, t3, t4 = round(a, b.l2, t0, t1, t2, t3, t4)
+    t0, t1, t2, t3, t4 = round(a, b.l3, t0, t1, t2, t3, t4)
+    # t < 2m: m once more, taken when t4 carries or t - m does not borrow.
+    d, borrow = P256Num.sub_raw(P256Num.new(t0, t1, t2, t3), @m)
+    keep = t4 | (borrow ^ 1_u64)
+    P256Num.choose(keep & 1_u64, d, P256Num.new(t0, t1, t2, t3))
+  end
+
+  @[AlwaysInline]
+  private def round(a : P256Num, bi : UInt64, t0 : UInt64, t1 : UInt64, t2 : UInt64, t3 : UInt64, t4 : UInt64) : {UInt64, UInt64, UInt64, UInt64, UInt64}
+    w = a.l0.to_u128 &* bi.to_u128 &+ t0.to_u128
+    t0 = w.unsafe_to_u64
+    w = a.l1.to_u128 &* bi.to_u128 &+ t1.to_u128 &+ w.unsafe_shr(64)
+    t1 = w.unsafe_to_u64
+    w = a.l2.to_u128 &* bi.to_u128 &+ t2.to_u128 &+ w.unsafe_shr(64)
+    t2 = w.unsafe_to_u64
+    w = a.l3.to_u128 &* bi.to_u128 &+ t3.to_u128 &+ w.unsafe_shr(64)
+    t3 = w.unsafe_to_u64
+    w = t4.to_u128 &+ w.unsafe_shr(64)
+    t4 = w.unsafe_to_u64
+    t5 = w.unsafe_shr(64).unsafe_to_u64
+    if @inv == 1_u64
+      # p's own shape: q = t0, and q p + t has a zero low word, t1 + q 2^32
+      # next, t2, then t3 + q (2^64 - 2^32 + 1).
+      w = t1.to_u128 &+ t0.to_u128.unsafe_shl(32)
+      r0 = w.unsafe_to_u64
+      w = t2.to_u128 &+ w.unsafe_shr(64)
+      r1 = w.unsafe_to_u64
+      w = t0.to_u128 &* 0xffffffff00000001_u64.to_u128 &+ t3.to_u128 &+ w.unsafe_shr(64)
+      r2 = w.unsafe_to_u64
+      w = t4.to_u128 &+ w.unsafe_shr(64)
+      r3 = w.unsafe_to_u64
+      r4 = t5 &+ w.unsafe_shr(64).unsafe_to_u64
+      return {r0, r1, r2, r3, r4}
+    end
+    q = t0 &* @inv
+    w = q.to_u128 &* @m.l0.to_u128 &+ t0.to_u128
+    w = q.to_u128 &* @m.l1.to_u128 &+ t1.to_u128 &+ w.unsafe_shr(64)
+    r0 = w.unsafe_to_u64
+    w = q.to_u128 &* @m.l2.to_u128 &+ t2.to_u128 &+ w.unsafe_shr(64)
+    r1 = w.unsafe_to_u64
+    w = q.to_u128 &* @m.l3.to_u128 &+ t3.to_u128 &+ w.unsafe_shr(64)
+    r2 = w.unsafe_to_u64
+    w = t4.to_u128 &+ w.unsafe_shr(64)
+    r3 = w.unsafe_to_u64
+    r4 = t5 &+ w.unsafe_shr(64).unsafe_to_u64
+    {r0, r1, r2, r3, r4}
+  end
+
+  @[AlwaysInline]
+  def square(a : P256Num) : P256Num
+    mul(a, a)
+  end
+
+  # (a + b) mod m.
+  @[AlwaysInline]
+  def add(a : P256Num, b : P256Num) : P256Num
+    w = a.l0.to_u128 &+ b.l0.to_u128
+    s0 = w.unsafe_to_u64
+    w = a.l1.to_u128 &+ b.l1.to_u128 &+ w.unsafe_shr(64)
+    s1 = w.unsafe_to_u64
+    w = a.l2.to_u128 &+ b.l2.to_u128 &+ w.unsafe_shr(64)
+    s2 = w.unsafe_to_u64
+    w = a.l3.to_u128 &+ b.l3.to_u128 &+ w.unsafe_shr(64)
+    s3 = w.unsafe_to_u64
+    carry = w.unsafe_shr(64).unsafe_to_u64
+    sum = P256Num.new(s0, s1, s2, s3)
+    d, borrow = P256Num.sub_raw(sum, @m)
+    P256Num.choose((carry | (borrow ^ 1_u64)) & 1_u64, d, sum)
+  end
+
+  # (a - b) mod m: m added back by a mask when a - b borrows.
+  @[AlwaysInline]
+  def sub(a : P256Num, b : P256Num) : P256Num
+    d, borrow = P256Num.sub_raw(a, b)
+    mask = 0_u64 &- borrow
+    w = d.l0.to_u128 &+ (@m.l0 & mask).to_u128
+    r0 = w.unsafe_to_u64
+    w = d.l1.to_u128 &+ (@m.l1 & mask).to_u128 &+ w.unsafe_shr(64)
+    r1 = w.unsafe_to_u64
+    w = d.l2.to_u128 &+ (@m.l2 & mask).to_u128 &+ w.unsafe_shr(64)
+    r2 = w.unsafe_to_u64
+    w = d.l3.to_u128 &+ (@m.l3 & mask).to_u128 &+ w.unsafe_shr(64)
+    r3 = w.unsafe_to_u64
+    P256Num.new(r0, r1, r2, r3)
+  end
+
+  def to_mont(a : P256Num) : P256Num
+    mul(a, @r2)
+  end
+
+  def from_mont(a : P256Num) : P256Num
+    mul(a, P256Num.new(1_u64, 0_u64, 0_u64, 0_u64))
+  end
+
+  # a^-1 for *a* in Montgomery form, as a^(m - 2): the exponent's bits are
+  # m's, public, so the squarings and multiplications run in one order for
+  # every a.
+  def inverse(a : P256Num) : P256Num
+    e = P256Num.sub_raw(@m, P256Num.new(2_u64, 0_u64, 0_u64, 0_u64))[0]
+    result = @one
+    i = 255
+    while i >= 0
+      result = square(result)
+      word = i >= 192 ? e.l3 : (i >= 128 ? e.l2 : (i >= 64 ? e.l1 : e.l0))
+      result = mul(result, a) if word.unsafe_shr(i & 63) & 1_u64 == 1_u64
+      i = i - 1
+    end
+    result
+  end
+
+  # a^-1 mod p for *a* in the field's Montgomery form, a^(p - 2) by a
+  # fixed chain of 255 squarings and 12 products where `inverse` takes
+  # 255 and 128. p - 2 is, from the top, 32 ones, 31 zeros and a one, 96
+  # zeros, 62 ones, and 1101: so x_k = a^(2^k - 1) is built for k = 2, 3,
+  # 6, 12, 15, 30 and 32, and the exponent is shifted in a run at a time.
+  def self.field_inverse(a : P256Num) : P256Num
+    f = field
+    x2 = f.mul(f.square(a), a)
+    x3 = f.mul(f.square(x2), a)
+    x6 = f.mul(f.square_times(x3, 3), x3)
+    x12 = f.mul(f.square_times(x6, 6), x6)
+    x15 = f.mul(f.square_times(x12, 3), x3)
+    x30 = f.mul(f.square_times(x15, 15), x15)
+    x32 = f.mul(f.square_times(x30, 2), x2)
+    r = f.mul(f.square_times(x32, 32), a)
+    r = f.square_times(r, 96)
+    r = f.mul(f.square_times(r, 32), x32)
+    r = f.mul(f.square_times(r, 32), x32)
+    r = f.mul(f.square_times(r, 30), x30)
+    f.mul(f.square_times(r, 2), a)
+  end
+
+  def square_times(a : P256Num, n : Int32) : P256Num
+    i = 0
+    while i < n
+      a = square(a)
+      i = i + 1
+    end
+    a
+  end
+end
+
+# A point of P-256, y^2 = x^3 - 3x + b, in projective coordinates
+# (X : Y : Z), x = X/Z and y = Y/Z, each in the field's Montgomery form.
+# The identity is (0 : 1 : 0).
+struct P256Point
+  CURVE_OID = "1.2.840.10045.3.1.7"
+
+  getter x : P256Num
+  getter y : P256Num
+  getter z : P256Num
+
+  def initialize(@x : P256Num, @y : P256Num, @z : P256Num)
+  end
+
+  def self.identity : P256Point
+    new(P256Num.zero, P256Modulus.field.one, P256Num.zero)
+  end
+
+  # The base point G.
+  def self.base : P256Point
+    new(P256Num.new(0x79e730d418a9143c_u64, 0x75ba95fc5fedb601_u64, 0x79fb732b77622510_u64, 0x18905f76a53755c6_u64),
+      P256Num.new(0xddf25357ce95560a_u64, 0x8b4ab8e4ba19e45c_u64, 0xd2e88688dd21f325_u64, 0x8571ff1825885d85_u64),
+      P256Modulus.field.one)
+  end
+
+  # b, in Montgomery form.
+  def self.b : P256Num
+    P256Num.new(0xd89cdf6229c4bddf_u64, 0xacf005cd78843090_u64, 0xe5a220abf7212ed6_u64, 0xdc30061d04874834_u64)
+  end
+
+  # P + Q, algorithm 4 of Renes, Costello and Batina: complete, so the
+  # identity and P + P need no case of their own.
+  def +(q : P256Point) : P256Point
+    f = P256Modulus.field
+    b = P256Point.b
+    t0 = f.mul(@x, q.x)
+    t1 = f.mul(@y, q.y)
+    t2 = f.mul(@z, q.z)
+    t3 = f.add(@x, @y)
+    t4 = f.add(q.x, q.y)
+    t3 = f.mul(t3, t4)
+    t4 = f.add(t0, t1)
+    t3 = f.sub(t3, t4)
+    t4 = f.add(@y, @z)
+    x3 = f.add(q.y, q.z)
+    t4 = f.mul(t4, x3)
+    x3 = f.add(t1, t2)
+    t4 = f.sub(t4, x3)
+    x3 = f.add(@x, @z)
+    y3 = f.add(q.x, q.z)
+    x3 = f.mul(x3, y3)
+    y3 = f.add(t0, t2)
+    y3 = f.sub(x3, y3)
+    z3 = f.mul(b, t2)
+    x3 = f.sub(y3, z3)
+    z3 = f.add(x3, x3)
+    x3 = f.add(x3, z3)
+    z3 = f.sub(t1, x3)
+    x3 = f.add(t1, x3)
+    y3 = f.mul(b, y3)
+    t1 = f.add(t2, t2)
+    t2 = f.add(t1, t2)
+    y3 = f.sub(y3, t2)
+    y3 = f.sub(y3, t0)
+    t1 = f.add(y3, y3)
+    y3 = f.add(t1, y3)
+    t1 = f.add(t0, t0)
+    t0 = f.add(t1, t0)
+    t0 = f.sub(t0, t2)
+    t1 = f.mul(t4, y3)
+    t2 = f.mul(t0, y3)
+    y3 = f.mul(x3, z3)
+    y3 = f.add(y3, t2)
+    x3 = f.mul(t3, x3)
+    x3 = f.sub(x3, t1)
+    z3 = f.mul(t4, z3)
+    t1 = f.mul(t3, t0)
+    z3 = f.add(z3, t1)
+    P256Point.new(x3, y3, z3)
+  end
+
+  # 2P, algorithm 6 of Renes, Costello and Batina.
+  def double : P256Point
+    f = P256Modulus.field
+    b = P256Point.b
+    t0 = f.square(@x)
+    t1 = f.square(@y)
+    t2 = f.square(@z)
+    t3 = f.mul(@x, @y)
+    t3 = f.add(t3, t3)
+    z3 = f.mul(@x, @z)
+    z3 = f.add(z3, z3)
+    y3 = f.mul(b, t2)
+    y3 = f.sub(y3, z3)
+    x3 = f.add(y3, y3)
+    y3 = f.add(x3, y3)
+    x3 = f.sub(t1, y3)
+    y3 = f.add(t1, y3)
+    y3 = f.mul(x3, y3)
+    x3 = f.mul(x3, t3)
+    t3 = f.add(t2, t2)
+    t2 = f.add(t2, t3)
+    z3 = f.mul(b, z3)
+    z3 = f.sub(z3, t2)
+    z3 = f.sub(z3, t0)
+    t3 = f.add(z3, z3)
+    z3 = f.add(z3, t3)
+    t3 = f.add(t0, t0)
+    t0 = f.add(t3, t0)
+    t0 = f.sub(t0, t2)
+    t0 = f.mul(t0, z3)
+    y3 = f.add(y3, t0)
+    t0 = f.mul(@y, @z)
+    t0 = f.add(t0, t0)
+    z3 = f.mul(t0, z3)
+    x3 = f.sub(x3, z3)
+    z3 = f.mul(t0, t1)
+    z3 = f.add(z3, z3)
+    z3 = f.add(z3, z3)
+    P256Point.new(x3, y3, z3)
+  end
+
+  # [k]G for a secret k below n, from the fixed-base table of
+  # `P256BaseTable`: k is recoded into 64 signed digits in [-8, 8) and a
+  # carry c, k = sum of e_i 16^i + c 2^256, and since entry (j, m) of the
+  # table is (m + 1) 256^j G, the odd digits' sum is gathered first, taken
+  # times 16 by four doublings, and the even digits' sum and [c 2^256]G
+  # added: 65 additions and four doublings, where the window over G
+  # itself was 256 doublings and 64 additions. Each digit's entry is read
+  # from its row by masks, all eight touched, its sign applied by a mask;
+  # a zero digit adds the identity, as the complete formulas allow.
+  def self.base_mult(k : P256Num) : P256Point
+    table = P256BaseTable.get
+    digits = uninitialized UInt64[64]
+    e = pointerof(digits).as(Pointer(UInt64))
+    # A nibble is 0 to 15 and the carry in 0 or 1, so nibble + 8 is never
+    # negative and its fourth bit is the carry out; a digit taken down by
+    # 16 wraps to its two's complement, which `P256BaseTable.pick` reads.
+    carry = 0_u64
+    i = 0
+    while i < 64
+      limb = i >= 48 ? k.l3 : (i >= 32 ? k.l2 : (i >= 16 ? k.l1 : k.l0))
+      d = (limb.unsafe_shr((i & 15) * 4) & 15_u64) &+ carry
+      carry = (d &+ 8_u64).unsafe_shr(4)
+      e[i] = d &- carry.unsafe_shl(4)
+      i = i + 1
+    end
+    acc = P256Point.identity
+    i = 1
+    while i < 64
+      acc = acc + P256BaseTable.pick(table, i >> 1, e[i])
+      i = i + 2
+    end
+    acc = acc.double.double.double.double
+    i = 0
+    while i < 64
+      acc = acc + P256BaseTable.pick(table, i >> 1, e[i])
+      i = i + 2
+    end
+    acc + P256BaseTable.top(table, carry)
+  end
+
+  # [k]P for a secret k below n: 64 windows of four bits from the top,
+  # each four doublings and one addition of a table entry read whole.
+  def self.mult(point : P256Point, k : P256Num) : P256Point
+    entries = uninitialized P256Point[16]
+    table = pointerof(entries).as(Pointer(P256Point))
+    table[0] = P256Point.identity
+    i = 1
+    while i < 16
+      table[i] = table[i - 1] + point
+      i = i + 1
+    end
+    acc = P256Point.identity
+    w = 63
+    while w >= 0
+      acc = acc.double.double.double.double
+      limb = w >= 48 ? k.l3 : (w >= 32 ? k.l2 : (w >= 16 ? k.l1 : k.l0))
+      digit = limb.unsafe_shr((w & 15) * 4) & 15_u64
+      acc = acc + lookup(table, digit)
+      w = w - 1
+    end
+    acc
+  end
+
+  # table[digit], every entry read and the one wanted kept by masks.
+  private def self.lookup(table : Pointer(P256Point), digit : UInt64) : P256Point
+    x = P256Num.zero
+    y = P256Num.zero
+    z = P256Num.zero
+    i = 0
+    while i < 16
+      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)
+      entry = table[i]
+      x = P256Num.choose(bit, entry.x, x)
+      y = P256Num.choose(bit, entry.y, y)
+      z = P256Num.choose(bit, entry.z, z)
+      i = i + 1
+    end
+    P256Point.new(x, y, z)
+  end
+
+  # The point *bytes* encodes uncompressed (0x04, x, y), checked: each
+  # coordinate below p, and y^2 = x^3 - 3x + b. Public input, so the checks
+  # may branch.
+  def self.decode(bytes : Array(UInt8)) : P256Point | EcdsaError
+    unless bytes.size == 65 && bytes[0] == 4_u8
+      return EcdsaError.new("a P-256 point is 65 bytes, 0x04 and then x and y, not #{bytes.size} bytes starting #{bytes.empty? ? "-" : bytes[0].to_s}")
+    end
+    x = P256Num.from_bytes(bytes, 1)
+    y = P256Num.from_bytes(bytes, 33)
+    unless P256Num.below?(x, P256Num.p) && P256Num.below?(y, P256Num.p)
+      return EcdsaError.new("a P-256 point with a coordinate of p or more")
+    end
+    f = P256Modulus.field
+    xm = f.to_mont(x)
+    ym = f.to_mont(y)
+    right = f.add(f.sub(f.mul(f.square(xm), xm), f.add(f.add(xm, xm), xm)), P256Point.b)
+    return EcdsaError.new("a point that is not on P-256") unless f.square(ym).to_bytes == right.to_bytes
+    new(xm, ym, f.one)
+  end
+
+  # x / Z, out of Montgomery form.
+  def affine_x : P256Num
+    f = P256Modulus.field
+    f.from_mont(f.mul(@x, P256Modulus.field_inverse(@z)))
+  end
+
+  # The uncompressed encoding: 0x04, then x and y, 32 bytes each.
+  def encoded : Array(UInt8)
+    f = P256Modulus.field
+    zinv = P256Modulus.field_inverse(@z)
+    [4_u8] + f.from_mont(f.mul(@x, zinv)).to_bytes + f.from_mont(f.mul(@y, zinv)).to_bytes
+  end
+end
+
+# The fixed-base table `P256Point.base_mult` reads: 32 rows of eight
+# affine points, x then y in Montgomery form, entry (j, m) being
+# (m + 1) 256^j G, and [2^256]G after them for the recoding's carry. It
+# holds multiples of G, which is public, so nothing in it is secret; only
+# which entry is read is, and that is chosen by masks. The table is worked
+# out once, the first time it is wanted, and kept: 224 additions and 256
+# doublings, the 257 Z inverted together by Montgomery's trick (one
+# inversion and three products a point). Two threads that reach it first
+# both work it out and store the same table.
+struct P256BaseTable
+  ENTRIES = 257
+
+  @@table = Pointer(P256Num).new(0_u64)
+  # 0, read by `pick` through an atomic load (see there).
+  @@opaque = Atomic(UInt64).new(0_u64)
+
+  def self.get : Pointer(P256Num)
+    return @@table if @@table.address != 0_u64
+    f = P256Modulus.field
+    points = Pointer(P256Point).malloc(ENTRIES.to_u64)
+    p = P256Point.base
+    row = 0
+    while row < 32
+      acc = p
+      points[row * 8] = p
+      m = 1
+      while m < 8
+        acc = acc + p
+        points[row * 8 + m] = acc
+        m = m + 1
+      end
+      p = p.double.double.double.double.double.double.double.double
+      row = row + 1
+    end
+    points[256] = p
+    # Montgomery's trick: the running products of the Z, one inversion of
+    # the last, and each inverse unwound from it. No Z is zero: none of
+    # these points is the identity, the one point whose Z is.
+    before = Pointer(P256Num).malloc(ENTRIES.to_u64)
+    run = f.one
+    i = 0
+    while i < ENTRIES
+      before[i] = run
+      run = f.mul(run, points[i].z)
+      i = i + 1
+    end
+    inverse = P256Modulus.field_inverse(run)
+    table = Pointer(P256Num).malloc((ENTRIES * 2).to_u64)
+    i = ENTRIES - 1
+    while i >= 0
+      point = points[i]
+      zi = f.mul(inverse, before[i])
+      inverse = f.mul(inverse, point.z)
+      table[2 * i] = f.mul(point.x, zi)
+      table[2 * i + 1] = f.mul(point.y, zi)
+      i = i - 1
+    end
+    @@table = table
+    table
+  end
+
+  # Row *row*'s entry for the signed digit *digit* (-8 to 8, in two's
+  # complement): every entry of the row read and all but |digit|'s masked
+  # away, negated by a mask when the digit is, and the identity (0 : 1 : 0)
+  # for zero. Each selector is xored with a zero read by an atomic load,
+  # which LLVM cannot see the value of: with the selectors as they were,
+  # a --release build tested the digit against 1 to 8 with a conditional
+  # jump each (`xor`, `dec`, `js`), a branch on the nonce's digits, and
+  # bench/ct_timing.sh put P-256 signing at |t| = 16 to 24 over 100,000
+  # signatures, fixed message against random.
+  def self.pick(table : Pointer(P256Num), row : Int32, digit : UInt64) : P256Point
+    f = P256Modulus.field
+    zero = @@opaque.get
+    negative = digit.unsafe_shr(63) ^ zero
+    index = (digit ^ (0_u64 &- negative)) &+ negative
+    x = P256Num.zero
+    y = P256Num.zero
+    base = table + (row * 16).to_i64
+    j = 1
+    while j <= 8
+      bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63) ^ zero
+      x = P256Num.choose(bit, base[2 * j - 2], x)
+      y = P256Num.choose(bit, base[2 * j - 1], y)
+      j = j + 1
+    end
+    y = P256Num.choose(negative, f.sub(P256Num.zero, y), y)
+    nonzero = (index | (0_u64 &- index)).unsafe_shr(63) ^ zero
+    P256Point.new(x, P256Num.choose(nonzero, y, f.one), P256Num.choose(nonzero, f.one, P256Num.zero))
+  end
+
+  # [2^256]G when *carry* is 1, the identity when it is 0, by masks.
+  def self.top(table : Pointer(P256Num), carry : UInt64) : P256Point
+    f = P256Modulus.field
+    P256Point.new(P256Num.choose(carry, table[512], P256Num.zero), P256Num.choose(carry, table[513], f.one),
+      P256Num.choose(carry, f.one, P256Num.zero))
+  end
+end

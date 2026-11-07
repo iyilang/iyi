@@ -304,6 +304,35 @@
   raise "rounding: #{count(released)} pages of #{count(request)}-byte requests handed back in eight steady epochs, each asking a budget's worth" if released != 0
   puts "    rounding: eight epochs of a budget's worth of #{count(request)}-byte requests, and no page of theirs went back cold"
 
+  # 6b. An epoch can ask for more than the budget: a mark beside many
+  # workers runs as long as its helpers take, and the workers allocate all
+  # the while. The budget's worth of dead pages stays warm and the rest
+  # goes back cold, and the next epoch carves that rest again - a release
+  # and a fault a page for nothing, which twelve workers paid on 94-98% of
+  # what the sweep released (issue #150). What the carve takes back cold
+  # is kept warm the epoch after, so a churn asking twice its budget every
+  # epoch hands back a seventeenth of its excess once it has settled -
+  # under a quarter of it here, the excess every epoch without the
+  # carry-over.
+  request = 3000_u64
+  excess_pages = IyiMark.budget.unsafe_div(IyiHeap::PAGE)
+  epoch = 0
+  released_before = 0_u64
+  while epoch < 16
+    released_before = IyiHeap.pages_released if epoch == 8
+    asked = (IyiMark.budget * 2_u64).unsafe_div(request)
+    index = 0_u64
+    while index < asked
+      fresh(request)
+      index = index + 1_u64
+    end
+    IyiMark.collect
+    epoch = epoch + 1
+  end
+  released = IyiHeap.pages_released - released_before
+  raise "refault: #{count(released)} pages handed back in eight steady epochs of #{count(request)}-byte requests asking twice the budget, where the excess is #{count(excess_pages)} pages an epoch" if released * 4_u64 > excess_pages * 8_u64
+  puts "    refault: eight epochs asking twice the budget handed back under a quarter of their excess"
+
   # 7. A carve takes a page's worth of chunks: the first is the object,
   # the rest go onto the cache's list stamped free and this epoch's, so
   # the next allocations are pops rather than carves. A 120-byte class

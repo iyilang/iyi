@@ -1,0 +1,1114 @@
+# IP addresses and prefixes as values, the way Go's `net/netip` holds
+# them and Python's `ipaddress` reads and classifies them: no socket, no
+# resolver, nothing of the platform. `std/socket` connects to addresses;
+# this module is for what a program decides about one - is it loopback,
+# is it inside 10.0.0.0/8, which route of a table is the longest that
+# holds it - and it can be imported by code that must not reach the
+# network or the clock.
+#
+# `IP` is either family in one value: 32 or 128 bits, and for IPv6 a zone
+# (`fe80::1%eth0`, RFC 4007 section 11), which is kept, printed, and part
+# of `==` and of the order, as Go and Python keep it. An IPv4-mapped IPv6
+# address (`::ffff:192.0.2.1`, RFC 4291 section 2.5.5.2) is an IPv6
+# address, not equal to the IPv4 one, as in both of those; `unmap` and
+# `ipv4_mapped` take it apart and `ipv6_mapped` makes one.
+#
+# Reading is Python 3.14's `ip_address`, rule for rule, because Python's
+# rules are the strict ones and a program checking an allowlist must not
+# read an address another reader reads differently. IPv4 is four decimal
+# octets of one to three ASCII digits, none past 255 and none with a
+# leading zero: `010.0.0.1` is refused, because glibc's `inet_aton` reads
+# `010` as octal 8 (CVE-2021-29921, Python's bpo-36384), and so are the
+# shorthand forms `inet_aton` takes (`127.1`, `0x7f.1`). IPv6 is RFC 4291
+# section 2.2's text: eight groups of one to four hex digits, one `::` for
+# a run of zero groups, an IPv4 dotted tail in place of the last two, at
+# most 45 characters before the zone, and a zone that is not empty and
+# holds no second `%`. A `/` anywhere is refused: that is a prefix.
+#
+# Writing is RFC 5952 section 4: lower case, no leading zeros, the
+# longest run of two or more zero groups as `::` (the first of two equal
+# runs), a single zero group written `0`, and an IPv4-mapped address with
+# its dotted tail - what Python 3.14's `str` writes. `exploded` is every
+# group in four digits, and `reverse_pointer` the `in-addr.arpa` or
+# `ip6.arpa` name (RFC 1035 section 3.5, RFC 3596 section 2.5). For a
+# zoned address `exploded` keeps the zone, as Python 3.14.8 does, and
+# `reverse_pointer` leaves it out, a PTR name having no place for one;
+# 3.14.8 writes the zone reversed into the name. Python before 3.14.8
+# raised on both.
+#
+# Order is Go's `Addr.Compare`: IPv4 before IPv6, then by value, then by
+# zone; what Python's `get_mixed_type_key` sorts by, the zone added.
+# `next` and `prev` are the neighbouring address, nil past either end of
+# the family (Python raises there), the zone kept.
+#
+# Classification follows Python 3.14, whose `is_global` reads the IANA
+# IPv4 and IPv6 Special-Purpose Address Registries (RFC 6890 and its
+# updates): `global?` is false for every block the registry marks not
+# globally reachable, the exceptions inside them (192.0.0.9, 2001:3::/32,
+# and the rest) being global again, and for 100.64.0.0/10 (RFC 6598's
+# shared space, neither global nor private by Python's reading).
+# `loopback?`, `link_local?`, `multicast?`, `unspecified?`, `reserved?`
+# and `site_local?` are Python's predicates of those names. `private?` is
+# not Python's `is_private`, which means "not globally reachable": it is
+# Go's `IsPrivate`, RFC 1918's three IPv4 blocks and RFC 4193's fc00::/7,
+# the question "is this one of the networks people number their own
+# machines from". Every predicate of an IPv4-mapped address is the
+# predicate of the IPv4 address inside it, as Python 3.13 made it - but
+# `site_local?`, which Python reads off the IPv6 bits alone.
+#
+# `Prefix` is an address and a length - a CIDR block, RFC 4632. `parse`
+# reads what Python's `ip_network` reads: an address, then `/` and a
+# decimal length (leading zeros allowed, as Python allows them), or for
+# IPv4 a dotted netmask (`/255.255.255.0`) or hostmask (`/0.0.0.255`),
+# all ones and all zeros read as netmasks; with no `/`, the address
+# alone, at full length. Host bits set past the length are refused, as
+# Python's `strict=True` refuses them, unless `mask: true` asks for them
+# cleared. A zone is refused in a prefix, as Go refuses it, where Python
+# keeps it. `Prefix.new(ip, length)` keeps the host bits it is given, as
+# Go's `PrefixFrom` does, to hold an interface's address with its
+# network's length; `masked` clears them, and everything that answers
+# about the block - `first`, `last`, `contains?`, `overlaps?`, subnets,
+# supernets - answers about the masked one. Containment never crosses
+# families (an IPv4 address is in no IPv6 prefix, a mapped address in no
+# IPv4 one) and ignores a zone, as Python's `in` does. `subnets(m)`
+# answers at most 65,536 prefixes at once; `subnet(m, i)` reaches any one.
+#
+# `PrefixSet` holds prefixes of both families in a binary trie, one node
+# a bit: `lookup` answers the longest prefix holding an address, the
+# routing table's question, in at most 33 or 129 steps however many
+# prefixes it holds; `contains?` is an allowlist's question. Neither
+# allocates, nor do `Prefix#contains?` and the predicates: 40,000 of
+# those calls together allocated 0 bytes, plain and --release, measured
+# by the exercise. `collapsed` answers the fewest prefixes covering
+# exactly the same addresses, what Python's `collapse_addresses` answers
+# per family.
+#
+# What is wrong with text is a `NetipError` value naming the text and
+# why. What panics is a program's own mistake: a length outside 0 to 32
+# or 0 to 128, a zone given to an IPv4 address, a zone with a `%`, a byte
+# count that is neither 4 nor 16, a subnet length shorter than the prefix
+# or a supernet length longer.
+
+module std/netip
+
+import std/int
+import std/traits::{Comparable}
+
+# Why a text is not an address or a prefix: `message` names the text.
+pub struct NetipError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for NetipError
+  def message : String
+    @message
+  end
+end
+
+# An IPv4 or IPv6 address, an IPv6 one with its zone ("" for none).
+pub struct IP
+  # Two words, not one `UInt128`: a struct holding a `UInt128` wants 16-byte
+  # alignment, which an array's buffer past a few pages does not get, and
+  # an optimised build then reads it with an aligned load and faults -
+  # 65,536 subnets in an array, read back, ended in SIGSEGV under --release.
+  @high : UInt64
+  @low : UInt64
+  @v6 : ::Bool
+  @zone : String
+
+  protected def initialize(*, value : UInt128, v6 : ::Bool, zone : String)
+    @high = (value >> 64).to_u64
+    @low = (value & 0xFFFFFFFFFFFFFFFF_u128).to_u64
+    @v6 = v6
+    @zone = zone
+  end
+
+  # The IPv4 address *a*.*b*.*c*.*d*.
+  def self.v4(a : UInt8, b : UInt8, c : UInt8, d : UInt8) : IP
+    new(value: (a.to_u128 << 24) | (b.to_u128 << 16) | (c.to_u128 << 8) | d.to_u128, v6: false, zone: "")
+  end
+
+  # The IPv4 address whose 32 bits, network order, are *value*.
+  def self.v4(value : UInt32) : IP
+    new(value: value.to_u128, v6: false, zone: "")
+  end
+
+  # The IPv6 address whose 128 bits, network order, are *value*.
+  def self.v6(value : UInt128) : IP
+    new(value: value, v6: true, zone: "")
+  end
+
+  # Four bytes are an IPv4 address and sixteen an IPv6 one, network order,
+  # as `bytes` answers them.
+  def self.from_bytes(bytes : Array(UInt8)) : IP
+    raise "IP: #{bytes.size} bytes are no address; IPv4 is 4 and IPv6 is 16" unless bytes.size == 4 || bytes.size == 16
+    value = 0_u128
+    bytes.each { |byte| value = (value << 8) | byte.to_u128 }
+    new(value: value, v6: bytes.size == 16, zone: "")
+  end
+
+  # Either family, as Python's `ip_address` reads it: IPv4 when it is
+  # IPv4, else IPv6. Text with a colon can only be IPv6 and text without
+  # one only IPv4, so the refusal is the one family's that applies.
+  def self.parse(text : String) : IP | NetipError
+    return parse_v6(text) if NetipBits.find(text, 58_u8, 0) >= 0
+    parse_v4(text)
+  end
+
+  # Dotted decimal, four octets, Python's `IPv4Address`.
+  def self.parse_v4(text : String) : IP | NetipError
+    return NetipError.new("netip: an empty string is not an address") if text.empty?
+    if NetipBits.find(text, 47_u8, 0) >= 0
+      return NetipError.new("netip: #{text.inspect} is not an address: it holds a '/', which a prefix has and Prefix.parse reads")
+    end
+    read = NetipBits.read_v4(text)
+    return NetipError.new("netip: #{text.inspect} is not an IPv4 address: #{read}") if read.is_a?(String)
+    new(value: read, v6: false, zone: "")
+  end
+
+  # RFC 4291 text with an optional `%zone`, Python's `IPv6Address`.
+  def self.parse_v6(text : String) : IP | NetipError
+    return NetipError.new("netip: an empty string is not an address") if text.empty?
+    if NetipBits.find(text, 47_u8, 0) >= 0
+      return NetipError.new("netip: #{text.inspect} is not an address: it holds a '/', which a prefix has and Prefix.parse reads")
+    end
+    address = text
+    zone = ""
+    percent = NetipBits.find(text, 37_u8, 0)
+    if percent >= 0
+      address = text[0, percent]
+      zone = text[percent + 1, text.bytesize - percent - 1]
+      why = NetipBits.zone_refused(zone)
+      return NetipError.new("netip: #{text.inspect} is not an IPv6 address: #{why}") if why
+    end
+    read = NetipBits.read_v6(address)
+    return NetipError.new("netip: #{text.inspect} is not an IPv6 address: #{read}") if read.is_a?(String)
+    new(value: read, v6: true, zone: zone)
+  end
+
+  def v4? : ::Bool
+    !@v6
+  end
+
+  def v6? : ::Bool
+    @v6
+  end
+
+  # 32 or 128.
+  def bit_length : Int32
+    @v6 ? 128 : 32
+  end
+
+  # The address's bits, network order, in the low 32 for IPv4.
+  def to_u128 : UInt128
+    (@high.to_u128 << 64) | @low.to_u128
+  end
+
+  # The zone, or nil for none (and always for IPv4).
+  def zone : String?
+    @zone.empty? ? nil : @zone
+  end
+
+  # This address in *zone*, or with none for `""`. Python's rules for a
+  # zone hold: no `%` in it. IPv4 has no zones.
+  def with_zone(zone : String) : IP
+    raise "IP: #{to_s} is IPv4, which has no zones" unless @v6 || zone.empty?
+    why = zone.empty? ? nil : NetipBits.zone_refused(zone)
+    raise "IP: #{why}" if why
+    IP.new(value: to_u128, v6: @v6, zone: zone)
+  end
+
+  # Four or sixteen bytes, network order.
+  def bytes : Array(UInt8)
+    count = @v6 ? 16 : 4
+    result = Array(UInt8).new(count)
+    index = count - 1
+    while index >= 0
+      result << (to_u128 >> (index * 8)).unsafe_to_u8
+      index = index - 1
+    end
+    result
+  end
+
+  # The IPv4 address inside an IPv4-mapped one (`::ffff:a.b.c.d`), or nil.
+  def ipv4_mapped : IP?
+    return nil unless @v6 && (to_u128 >> 32) == 0xFFFF_u128
+    IP.new(value: to_u128 & 0xFFFFFFFF_u128, v6: false, zone: "")
+  end
+
+  # The IPv4 address inside an IPv4-mapped one, any other address itself.
+  def unmap : IP
+    ipv4_mapped || self
+  end
+
+  # `::ffff:a.b.c.d` for an IPv4 address (RFC 4291 section 2.5.5.2).
+  def ipv6_mapped : IP
+    raise "IP: #{to_s} is IPv6 already; ipv6_mapped maps IPv4" if @v6
+    IP.new(value: to_u128 | (0xFFFF_u128 << 32), v6: true, zone: "")
+  end
+
+  # The address after this one, nil after the family's last.
+  def next : IP?
+    return nil if to_u128 == max_value
+    IP.new(value: to_u128 &+ 1_u128, v6: @v6, zone: @zone)
+  end
+
+  # The address before this one, nil before the family's first.
+  def prev : IP?
+    return nil if to_u128 == 0_u128
+    IP.new(value: to_u128 &- 1_u128, v6: @v6, zone: @zone)
+  end
+
+  # The prefix of *length* bits holding this address, its host bits
+  # cleared and its zone left behind.
+  def prefix(length : Int32) : Prefix
+    NetipBits.check_length(self, length)
+    Prefix.new(IP.new(value: to_u128 & NetipBits.netmask(@v6, length), v6: @v6, zone: ""), length)
+  end
+
+  protected def max_value : UInt128
+    @v6 ? ~0_u128 : 0xFFFFFFFF_u128
+  end
+
+  # --- classification ---
+
+  # 127.0.0.0/8, ::1.
+  def loopback? : ::Bool
+    if v4 = v4_view
+      return NetipBits.within(v4, 0x7F000000_u128, 8, 32)
+    end
+    to_u128 == 1_u128
+  end
+
+  # 0.0.0.0, ::.
+  def unspecified? : ::Bool
+    if v4 = v4_view
+      return v4 == 0_u128
+    end
+    to_u128 == 0_u128
+  end
+
+  # 169.254.0.0/16 (RFC 3927), fe80::/10.
+  def link_local? : ::Bool
+    if v4 = v4_view
+      return NetipBits.within(v4, 0xA9FE0000_u128, 16, 32)
+    end
+    NetipBits.within(to_u128, 0xFE80_u128 << 112, 10, 128)
+  end
+
+  # 224.0.0.0/4, ff00::/8.
+  def multicast? : ::Bool
+    if v4 = v4_view
+      return NetipBits.within(v4, 0xE0000000_u128, 4, 32)
+    end
+    NetipBits.within(to_u128, 0xFF_u128 << 120, 8, 128)
+  end
+
+  # 240.0.0.0/4 (RFC 1112's class E), and for IPv6 the blocks RFC 4291
+  # section 2.4 leaves unassigned: Python's `is_reserved`.
+  def reserved? : ::Bool
+    if v4 = v4_view
+      return NetipBits.within(v4, 0xF0000000_u128, 4, 32)
+    end
+    NetipBits.listed(to_u128, NetipBits::RESERVED_V6, 128)
+  end
+
+  # fec0::/10, deprecated by RFC 3879; read off the IPv6 bits alone, as
+  # Python reads it, and never IPv4.
+  def site_local? : ::Bool
+    @v6 && NetipBits.within(to_u128, 0xFEC0_u128 << 112, 10, 128)
+  end
+
+  # RFC 1918 (10/8, 172.16/12, 192.168/16) and RFC 4193 (fc00::/7): the
+  # networks people number their own machines from, Go's `IsPrivate`.
+  def private? : ::Bool
+    if v4 = v4_view
+      return NetipBits.within(v4, 0x0A000000_u128, 8, 32) || NetipBits.within(v4, 0xAC100000_u128, 12, 32) || NetipBits.within(v4, 0xC0A80000_u128, 16, 32)
+    end
+    NetipBits.within(to_u128, 0xFC_u128 << 120, 7, 128)
+  end
+
+  # Globally reachable by the IANA special-purpose registries, as Python
+  # 3.14's `is_global` reads them.
+  def global? : ::Bool
+    if v4 = v4_view
+      return false if NetipBits.within(v4, 0x64400000_u128, 10, 32)
+      return !NetipBits.listed(v4, NetipBits::NOT_GLOBAL_V4, 32) || NetipBits.listed(v4, NetipBits::GLOBAL_V4, 32)
+    end
+    !NetipBits.listed(to_u128, NetipBits::NOT_GLOBAL_V6, 128) || NetipBits.listed(to_u128, NetipBits::GLOBAL_V6, 128)
+  end
+
+  # The 32 bits a predicate reads for IPv4: the address's own, or the
+  # ones inside an IPv4-mapped address; nil for any other IPv6.
+  private def v4_view : UInt128?
+    return to_u128 unless @v6
+    return to_u128 & 0xFFFFFFFF_u128 if (to_u128 >> 32) == 0xFFFF_u128
+    nil
+  end
+
+  # --- text ---
+
+  def to_s : String
+    return NetipBits.dotted(to_u128) unless @v6
+    text = if (to_u128 >> 32) == 0xFFFF_u128
+             "::ffff:" + NetipBits.dotted(to_u128 & 0xFFFFFFFF_u128)
+           else
+             NetipBits.hextets(to_u128)
+           end
+    @zone.empty? ? text : text + "%" + @zone
+  end
+
+  def to_s(io : IO) : Nil
+    io.write(to_s)
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  # Every IPv6 group in four digits (an IPv4-mapped tail kept dotted, as
+  # Python writes it); IPv4 as `to_s` writes it.
+  def exploded : String
+    return NetipBits.dotted(to_u128) unless @v6
+    text = String.build do |io|
+      index = 0
+      while index < 8
+        io << ':' if index > 0
+        io << NetipBits.hextet(to_u128, index).to_s(16).rjust(4, '0')
+        index = index + 1
+      end
+    end
+    text = text[0, 30] + NetipBits.dotted(to_u128 & 0xFFFFFFFF_u128) if (to_u128 >> 32) == 0xFFFF_u128
+    @zone.empty? ? text : text + "%" + @zone
+  end
+
+  # The name a PTR record for this address is under: `4.3.2.1.in-addr.arpa`,
+  # or thirty-two nibbles and `ip6.arpa`.
+  def reverse_pointer : String
+    String.build do |io|
+      if @v6
+        index = 0
+        while index < 32
+          io << ((to_u128 >> (index * 4)) & 15_u128).to_i32.to_s(16)
+          io << '.'
+          index = index + 1
+        end
+        io << "ip6.arpa"
+      else
+        index = 0
+        while index < 4
+          io << ((to_u128 >> (index * 8)) & 255_u128).to_i32
+          io << '.'
+          index = index + 1
+        end
+        io << "in-addr.arpa"
+      end
+    end
+  end
+
+  # --- comparison ---
+
+  # IPv4 first, then by value, then by zone (none first).
+  def <=>(other : IP) : Int32
+    return @v6 ? 1 : -1 if @v6 != other.v6?
+    return to_u128 < other.to_u128 ? -1 : 1 if to_u128 != other.to_u128
+    mine = @zone
+    theirs = other.zone || ""
+    return 0 if mine == theirs
+    mine < theirs ? -1 : 1
+  end
+
+  def ==(other : IP) : ::Bool
+    @v6 == other.v6? && to_u128 == other.to_u128 && @zone == (other.zone || "")
+  end
+
+  def hash : Int32
+    mix = to_u128.hash
+    mix = (mix &* 31) &+ (@v6 ? 1 : 0)
+    (mix &* 31) &+ @zone.hash
+  end
+end
+
+impl Comparable for IP
+  def <=>(other : self) : Int32
+    self <=> other
+  end
+end
+
+# An address and a length: a CIDR block (RFC 4632), with the address's
+# host bits as it was given them.
+pub struct Prefix
+  getter ip : IP
+  getter length : Int32
+
+  # *ip* and *length* as they are, host bits and all; `IP#prefix` clears
+  # them. A zoned address is refused: a block has no zone.
+  def initialize(@ip : IP, @length : Int32)
+    NetipBits.check_length(@ip, @length)
+    raise "Prefix: #{@ip} has a zone, and a prefix has none" if @ip.zone
+  end
+
+  # Python's `ip_network(text, strict: !mask)`, a zone refused.
+  def self.parse(text : String, mask : ::Bool = false) : Prefix | NetipError
+    slash = NetipBits.find(text, 47_u8, 0)
+    address = slash < 0 ? text : text[0, slash]
+    tail = slash < 0 ? nil : text[slash + 1, text.bytesize - slash - 1]
+    if slash >= 0 && NetipBits.find(text, 47_u8, slash + 1) >= 0
+      return NetipError.new("netip: #{text.inspect} is not a prefix: it has more than one '/'")
+    end
+    ip = IP.parse(address)
+    return NetipError.new("netip: #{text.inspect} is not a prefix: #{NetipBits.reason(ip.message)}") if ip.is_a?(NetipError)
+    if ip.zone
+      return NetipError.new("netip: #{text.inspect} is not a prefix: the address has a zone, and a prefix has none")
+    end
+    length = tail ? NetipBits.read_length(tail, ip.v6?) : ip.bit_length
+    if length < 0
+      return NetipError.new("netip: #{text.inspect} is not a prefix: #{tail.inspect} is not a length from 0 to #{ip.bit_length}#{ip.v6? ? "" : ", a netmask or a hostmask"}")
+    end
+    clear = ip.to_u128 & NetipBits.netmask(ip.v6?, length)
+    if clear != ip.to_u128
+      return NetipError.new("netip: #{text.inspect} is not a prefix: host bits are set past /#{length}; Prefix.parse(text, mask: true) clears them") unless mask
+      return ip.prefix(length)
+    end
+    Prefix.new(ip, length)
+  end
+
+  def v4? : ::Bool
+    @ip.v4?
+  end
+
+  def v6? : ::Bool
+    @ip.v6?
+  end
+
+  # 32 or 128.
+  def bit_length : Int32
+    @ip.bit_length
+  end
+
+  # This prefix with the address's host bits cleared.
+  def masked : Prefix
+    @ip.prefix(@length)
+  end
+
+  # The block's first address (Python's `network_address`).
+  def first : IP
+    NetipBits.ip(@ip.v6?, @ip.to_u128 & NetipBits.netmask(@ip.v6?, @length))
+  end
+
+  # The block's last address (Python's `broadcast_address`).
+  def last : IP
+    mask = NetipBits.netmask(@ip.v6?, @length)
+    NetipBits.ip(@ip.v6?, (@ip.to_u128 & mask) | (NetipBits.all_ones(@ip.v6?) & ~mask))
+  end
+
+  # The length as an address: `255.255.255.0` for a /24.
+  def netmask : IP
+    NetipBits.ip(@ip.v6?, NetipBits.netmask(@ip.v6?, @length))
+  end
+
+  # The host bits as an address: `0.0.0.255` for a /24.
+  def hostmask : IP
+    NetipBits.ip(@ip.v6?, NetipBits.all_ones(@ip.v6?) & ~NetipBits.netmask(@ip.v6?, @length))
+  end
+
+  # Whether *ip* is in the block: never across families, the zone not read.
+  def contains?(ip : IP) : ::Bool
+    return false if ip.v6? != @ip.v6?
+    mask = NetipBits.netmask(@ip.v6?, @length)
+    (ip.to_u128 & mask) == (@ip.to_u128 & mask)
+  end
+
+  # Whether all of *other* is in this block (Python's `supernet_of`).
+  def contains?(other : Prefix) : ::Bool
+    other.v6? == @ip.v6? && other.length >= @length && contains?(other.ip)
+  end
+
+  # Whether every address of this block is in *other*.
+  def subnet_of?(other : Prefix) : ::Bool
+    other.contains?(self)
+  end
+
+  # Whether the two blocks share an address: as blocks nest or are
+  # apart, one holds the other's first address or neither shares any.
+  def overlaps?(other : Prefix) : ::Bool
+    other.v6? == @ip.v6? && (contains?(other.ip) || other.contains?(@ip))
+  end
+
+  # The block one bit shorter; a /0 is its own.
+  def supernet : Prefix
+    @length == 0 ? masked : supernet(@length - 1)
+  end
+
+  # The block of *new_length* holding this one.
+  def supernet(new_length : Int32) : Prefix
+    raise "Prefix: a supernet of #{self} is shorter, and /#{new_length} is not" if new_length > @length || new_length < 0
+    @ip.prefix(new_length)
+  end
+
+  # How many /*new_length* blocks this one splits into, at most 65,536
+  # answered at once.
+  MAX_SUBNETS = 65536
+
+  # The /*new_length* blocks this one splits into, in order.
+  def subnets(new_length : Int32) : Array(Prefix)
+    check_subnet_length(new_length)
+    if new_length - @length > 16
+      raise "Prefix: #{self} into /#{new_length} is 2^#{new_length - @length} subnets, past the #{MAX_SUBNETS} subnets answers at once; subnet(new_length, index) reaches any one"
+    end
+    count = 1 << (new_length - @length)
+    result = Array(Prefix).new(count)
+    index = 0
+    while index < count
+      result << subnet(new_length, index.to_u128)
+      index = index + 1
+    end
+    result
+  end
+
+  # The *index*th /*new_length* block of this one, from 0.
+  def subnet(new_length : Int32, index : UInt128) : Prefix
+    check_subnet_length(new_length)
+    room = new_length - @length
+    if room < 128 && index >= (1_u128 << room)
+      raise "Prefix: #{self} has 2^#{room} subnets of /#{new_length}, and #{index} is past them"
+    end
+    base = @ip.to_u128 & NetipBits.netmask(@ip.v6?, @length)
+    Prefix.new(NetipBits.ip(@ip.v6?, base | (index << (bit_length - new_length))), new_length)
+  end
+
+  private def check_subnet_length(new_length : Int32) : Nil
+    if new_length < @length || new_length > bit_length
+      raise "Prefix: a subnet of #{self} is /#{@length} to /#{bit_length}, and /#{new_length} is not"
+    end
+  end
+
+  def to_s : String
+    "#{@ip}/#{@length}"
+  end
+
+  def to_s(io : IO) : Nil
+    io.write(to_s)
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  # IPv4 first, then by first address, then shorter first, then by the
+  # address as held - Python's order of networks, host bits after.
+  def <=>(other : Prefix) : Int32
+    return v6? ? 1 : -1 if v6? != other.v6?
+    mine = first.to_u128
+    theirs = other.first.to_u128
+    return mine < theirs ? -1 : 1 if mine != theirs
+    return @length < other.length ? -1 : 1 if @length != other.length
+    @ip <=> other.ip
+  end
+
+  def ==(other : Prefix) : ::Bool
+    @length == other.length && @ip == other.ip
+  end
+
+  def hash : Int32
+    (@ip.hash &* 31) &+ @length
+  end
+end
+
+impl Comparable for Prefix
+  def <=>(other : self) : Int32
+    self <=> other
+  end
+end
+
+# Prefixes of both families in a binary trie, one node a bit: node 0 is
+# the IPv4 root and node 1 the IPv6 one, and a node's children are made
+# after it, so each has a larger index than its parent - which is what
+# lets `collapsed` decide a node from its children in one backward pass.
+# A removed prefix leaves its nodes behind, unmarked.
+pub class PrefixSet
+  @zero : Array(Int32)
+  @one : Array(Int32)
+  @member : Array(::Bool)
+  @size : Int32
+
+  def initialize
+    @zero = [-1, -1]
+    @one = [-1, -1]
+    @member = [false, false]
+    @size = 0
+  end
+
+  def initialize(prefixes : Array(Prefix))
+    @zero = [-1, -1]
+    @one = [-1, -1]
+    @member = [false, false]
+    @size = 0
+    prefixes.each { |prefix| add(prefix) }
+  end
+
+  # How many prefixes the set holds.
+  def size : Int32
+    @size
+  end
+
+  def empty? : ::Bool
+    @size == 0
+  end
+
+  # Adds *prefix*, masked; false when it was there.
+  def add(prefix : Prefix) : ::Bool
+    node = prefix.v6? ? 1 : 0
+    value = prefix.ip.to_u128
+    top = prefix.bit_length - 1
+    depth = 0
+    while depth < prefix.length
+      bit = (value >> (top - depth)) & 1_u128
+      child = bit == 0_u128 ? @zero[node] : @one[node]
+      if child < 0
+        child = @member.size
+        @zero << -1
+        @one << -1
+        @member << false
+        if bit == 0_u128
+          @zero[node] = child
+        else
+          @one[node] = child
+        end
+      end
+      node = child
+      depth = depth + 1
+    end
+    return false if @member[node]
+    @member[node] = true
+    @size = @size + 1
+    true
+  end
+
+  # Removes *prefix*, masked; false when it was not there.
+  def delete(prefix : Prefix) : ::Bool
+    node = find(prefix)
+    return false if node < 0 || !@member[node]
+    @member[node] = false
+    @size = @size - 1
+    true
+  end
+
+  # Whether *prefix*, masked, is one of the set's - this prefix, not one
+  # holding it; `lookup(prefix.first)` asks that.
+  def includes?(prefix : Prefix) : ::Bool
+    node = find(prefix)
+    node >= 0 && @member[node]
+  end
+
+  # Whether some prefix of the set holds *ip*.
+  def contains?(ip : IP) : ::Bool
+    deepest(ip) >= 0
+  end
+
+  # The longest prefix of the set holding *ip*, or nil.
+  def lookup(ip : IP) : Prefix?
+    depth = deepest(ip)
+    return nil if depth < 0
+    ip.prefix(depth)
+  end
+
+  # Every prefix of the set, IPv4 first, in `Prefix` order.
+  def prefixes : Array(Prefix)
+    result = [] of Prefix
+    collect(0, 0, 0_u128, false, result, nil)
+    collect(1, 0, 0_u128, true, result, nil)
+    result
+  end
+
+  # The fewest prefixes holding exactly the addresses the set's do,
+  # IPv4 first, in order: Python's `collapse_addresses`, per family.
+  def collapsed : Array(Prefix)
+    full = Array(::Bool).new(@member.size, false)
+    node = @member.size - 1
+    while node >= 0
+      zero = @zero[node]
+      one = @one[node]
+      full[node] = @member[node] || (zero >= 0 && one >= 0 && full[zero] && full[one])
+      node = node - 1
+    end
+    result = [] of Prefix
+    collect(0, 0, 0_u128, false, result, full)
+    collect(1, 0, 0_u128, true, result, full)
+    result
+  end
+
+  # The node of *prefix*, masked, or -1.
+  private def find(prefix : Prefix) : Int32
+    node = prefix.v6? ? 1 : 0
+    value = prefix.ip.to_u128
+    top = prefix.bit_length - 1
+    depth = 0
+    while depth < prefix.length && node >= 0
+      node = ((value >> (top - depth)) & 1_u128) == 0_u128 ? @zero[node] : @one[node]
+      depth = depth + 1
+    end
+    node
+  end
+
+  # The length of the longest member holding *ip*, or -1.
+  private def deepest(ip : IP) : Int32
+    node = ip.v6? ? 1 : 0
+    value = ip.to_u128
+    bits = ip.bit_length
+    best = -1
+    depth = 0
+    while node >= 0
+      best = depth if @member[node]
+      break if depth == bits
+      node = ((value >> (bits - 1 - depth)) & 1_u128) == 0_u128 ? @zero[node] : @one[node]
+      depth = depth + 1
+    end
+    best
+  end
+
+  # Members (or, given *full*, the highest full nodes) below *node*, in
+  # order: a node before its children, the 0 side first.
+  private def collect(node : Int32, depth : Int32, value : UInt128, v6 : ::Bool, result : Array(Prefix), full : Array(::Bool)?) : Nil
+    bits = v6 ? 128 : 32
+    if full
+      if full[node]
+        result << Prefix.new(NetipBits.ip(v6, value << (bits - depth)), depth)
+        return
+      end
+    elsif @member[node]
+      result << Prefix.new(NetipBits.ip(v6, value << (bits - depth)), depth)
+    end
+    zero = @zero[node]
+    one = @one[node]
+    collect(zero, depth + 1, value << 1, v6, result, full) if zero >= 0
+    collect(one, depth + 1, (value << 1) | 1_u128, v6, result, full) if one >= 0
+  end
+end
+
+# The reading and writing beneath the three types above.
+struct NetipBits
+  # Python 3.14's `_IPv4Constants._private_networks`: the blocks the IANA
+  # IPv4 registry marks not globally reachable, and inside them the ones
+  # that are (`_private_networks_exceptions`).
+  NOT_GLOBAL_V4 = blocks([
+    "0.0.0.0/8",          # "this network"
+    "10.0.0.0/8",         # RFC 1918
+    "127.0.0.0/8",        # loopback
+    "169.254.0.0/16",     # link local
+    "172.16.0.0/12",      # RFC 1918
+    "192.0.0.0/24",       # IETF protocol assignments
+    "192.0.0.170/31",     # NAT64/DNS64 discovery
+    "192.0.2.0/24",       # TEST-NET-1
+    "192.168.0.0/16",     # RFC 1918
+    "198.18.0.0/15",      # benchmarking
+    "198.51.100.0/24",    # TEST-NET-2
+    "203.0.113.0/24",     # TEST-NET-3
+    "240.0.0.0/4",        # reserved
+    "255.255.255.255/32", # limited broadcast
+  ])
+  GLOBAL_V4 = blocks([
+    "192.0.0.9/32",  # Port Control Protocol anycast
+    "192.0.0.10/32", # TURN anycast
+  ])
+
+  # `_IPv6Constants._private_networks` and its exceptions.
+  NOT_GLOBAL_V6 = blocks([
+    "::1/128",        # loopback
+    "::/128",         # unspecified
+    "::ffff:0:0/96",  # IPv4-mapped
+    "64:ff9b:1::/48", # local-use IPv4/IPv6 translation
+    "100::/64",       # discard-only
+    "2001::/23",      # IETF protocol assignments
+    "2001:db8::/32",  # documentation
+    "2002::/16",      # 6to4
+    "3fff::/20",      # documentation (RFC 9637)
+    "fc00::/7",       # unique local
+    "fe80::/10",      # link local
+  ])
+  GLOBAL_V6 = blocks([
+    "2001:1::1/128",   # Port Control Protocol anycast
+    "2001:1::2/128",   # TURN anycast
+    "2001:3::/32",     # AMT
+    "2001:4:112::/48", # AS112-v6
+    "2001:20::/28",    # ORCHIDv2
+    "2001:30::/28",    # drone remote ID
+  ])
+
+  # `_IPv6Constants._reserved_networks`: RFC 4291's unassigned space.
+  RESERVED_V6 = blocks([
+    "::/8", "100::/8", "200::/7", "400::/6", "800::/5", "1000::/4", "4000::/3", "6000::/3",
+    "8000::/3", "a000::/3", "c000::/3", "e000::/4", "f000::/5", "f800::/6", "fe00::/9",
+  ])
+
+  # The tables above as prefixes, read by the module's own reader: text
+  # as the registries and Python write it, rather than bits by hand.
+  def self.blocks(texts : Array(String)) : Array(Prefix)
+    texts.map { |text| Prefix.parse(text).or_panic }
+  end
+
+  # Whether *value* is in the block *base*/*length* of a *bits*-bit family.
+  def self.within(value : UInt128, base : UInt128, length : Int32, bits : Int32) : ::Bool
+    (value >> (bits - length)) == (base >> (bits - length))
+  end
+
+  def self.listed(value : UInt128, blocks : Array(Prefix), bits : Int32) : ::Bool
+    blocks.any? { |block| within(value, block.ip.to_u128, block.length, bits) }
+  end
+
+  def self.all_ones(v6 : ::Bool) : UInt128
+    v6 ? ~0_u128 : 0xFFFFFFFF_u128
+  end
+
+  # The first *length* bits of the family set.
+  def self.netmask(v6 : ::Bool, length : Int32) : UInt128
+    all_ones(v6) & ~(all_ones(v6) >> length)
+  end
+
+  def self.ip(v6 : ::Bool, value : UInt128) : IP
+    v6 ? IP.v6(value) : IP.v4(value.to_u32)
+  end
+
+  def self.check_length(ip : IP, length : Int32) : Nil
+    if length < 0 || length > ip.bit_length
+      raise "Prefix: /#{length} for #{ip.v6? ? "an IPv6" : "an IPv4"} address; its length is 0 to #{ip.bit_length}"
+    end
+  end
+
+  # The byte offset of *byte* in *text* from *from*, or -1.
+  def self.find(text : String, byte : UInt8, from : Int32) : Int32
+    raw = text.to_unsafe
+    index = from
+    while index < text.bytesize
+      return index if raw[index] == byte
+      index = index + 1
+    end
+    -1
+  end
+
+  # A refusal's sentence without its `netip: ` head, to be part of another.
+  def self.reason(message : String) : String
+    message.starts_with?("netip: ") ? message[7, message.bytesize - 7] : message
+  end
+
+  # Why a zone is refused, or nil: Python's `_split_scope_id`.
+  def self.zone_refused(zone : String) : String?
+    return "the zone after '%' is empty" if zone.empty?
+    return "the zone #{zone.inspect} holds a '%'" if find(zone, 37_u8, 0) >= 0
+    nil
+  end
+
+  # Four octets, Python's `_parse_octet` for each: ASCII digits, one to
+  # three of them, no leading zero, at most 255. The answer is the 32
+  # bits, or why not.
+  def self.read_v4(text : String) : UInt128 | String
+    raw = text.to_unsafe
+    size = text.bytesize
+    return "an empty string is not an address" if size == 0
+    value = 0_u128
+    octets = 0
+    at = 0
+    while true
+      start = at
+      while at < size && raw[at] != 46_u8
+        at = at + 1
+      end
+      octets = octets + 1
+      return "more than four octets" if octets > 4
+      count = at - start
+      return "octet #{octets} is empty" if count == 0
+      octet = text[start, count]
+      number = 0
+      index = start
+      while index < at
+        return "the octet #{octet.inspect} is not decimal digits" unless raw[index] >= 48_u8 && raw[index] <= 57_u8
+        number = number * 10 + (raw[index] - 48_u8).to_i32 if index - start < 4
+        index = index + 1
+      end
+      return "the octet #{octet.inspect} has more than three digits" if count > 3
+      return "the octet #{octet.inspect} has a leading zero, which some readers take for octal" if count > 1 && raw[start] == 48_u8
+      return "the octet #{octet} is past 255" if number > 255
+      value = (value << 8) | number.to_u128
+      break if at == size
+      at = at + 1
+    end
+    return "#{octets} octets, not four" if octets < 4
+    value
+  end
+
+  # RFC 4291 text, zone already taken off: Python's
+  # `_BaseV6._ip_int_from_string`, step for step.
+  def self.read_v6(text : String) : UInt128 | String
+    return "the address before '%' is empty" if text.empty?
+    return "#{text.bytesize} characters, past the 45 an IPv6 address is written in" if text.bytesize > 45
+    parts = text.split(':')
+    return "fewer than two colons" if parts.size < 3
+    tail = parts[parts.size - 1]
+    if find(tail, 46_u8, 0) >= 0
+      four = read_v4(tail)
+      return "the IPv4 tail #{tail.inspect}: #{four}" if four.is_a?(String)
+      parts.pop
+      parts << ((four >> 16) & 0xFFFF_u128).to_i32.to_s(16)
+      parts << (four & 0xFFFF_u128).to_i32.to_s(16)
+    end
+    return "more than eight colons" if parts.size > 9
+    skip = -1
+    index = 1
+    while index < parts.size - 1
+      if parts[index].empty?
+        return "more than one '::'" if skip >= 0
+        skip = index
+      end
+      index = index + 1
+    end
+    high = 0
+    low = 0
+    skipped = 0
+    if skip >= 0
+      high = skip
+      low = parts.size - skip - 1
+      if parts[0].empty?
+        high = high - 1
+        return "a leading ':' that is not part of '::'" if high != 0
+      end
+      if parts[parts.size - 1].empty?
+        low = low - 1
+        return "a trailing ':' that is not part of '::'" if low != 0
+      end
+      skipped = 8 - high - low
+      return "'::' beside eight groups stands for none" if skipped < 1
+    else
+      return "#{parts.size} groups and no '::', where eight are written without one" if parts.size != 8
+      return "a leading ':' that is not part of '::'" if parts[0].empty?
+      return "a trailing ':' that is not part of '::'" if parts[7].empty?
+      high = 8
+    end
+    value = 0_u128
+    index = 0
+    while index < high
+      group = read_hextet(parts[index])
+      return group if group.is_a?(String)
+      value = (value << 16) | group
+      index = index + 1
+    end
+    value = value << (16 * skipped)
+    index = parts.size - low
+    while index < parts.size
+      group = read_hextet(parts[index])
+      return group if group.is_a?(String)
+      value = (value << 16) | group
+      index = index + 1
+    end
+    value
+  end
+
+  # One group: one to four hex digits.
+  def self.read_hextet(text : String) : UInt128 | String
+    return "an empty group" if text.empty?
+    raw = text.to_unsafe
+    value = 0_u128
+    index = 0
+    while index < text.bytesize
+      byte = raw[index]
+      digit = if byte >= 48_u8 && byte <= 57_u8
+                byte - 48_u8
+              elsif byte >= 97_u8 && byte <= 102_u8
+                byte - 87_u8
+              elsif byte >= 65_u8 && byte <= 70_u8
+                byte - 55_u8
+              else
+                return "the group #{text.inspect} is not hex digits"
+              end
+      value = (value << 4) | digit.to_u128 if index < 4
+      index = index + 1
+    end
+    return "the group #{text.inspect} has more than four digits" if text.bytesize > 4
+    value
+  end
+
+  # A prefix's length after its '/': Python's `_make_netmask`. Decimal
+  # digits alone (leading zeros allowed), at most the family's width; or,
+  # for IPv4, a dotted netmask (ones, then zeros) or hostmask (zeros, then
+  # ones), the two ambiguous masks read as netmasks. -1 when it is none.
+  def self.read_length(text : String, v6 : ::Bool) : Int32
+    bits = v6 ? 128 : 32
+    raw = text.to_unsafe
+    digits = text.bytesize > 0
+    number = 0
+    index = 0
+    while index < text.bytesize
+      if raw[index] >= 48_u8 && raw[index] <= 57_u8
+        number = number * 10 + (raw[index] - 48_u8).to_i32 if number <= bits
+      else
+        digits = false
+      end
+      index = index + 1
+    end
+    return number <= bits ? number : -1 if digits
+    return -1 if v6
+    mask = read_v4(text)
+    return -1 if mask.is_a?(String)
+    length = contiguous(mask)
+    return length if length >= 0
+    contiguous(mask ^ 0xFFFFFFFF_u128)
+  end
+
+  # The length of a 32-bit netmask, or -1 when the ones are not first.
+  private def self.contiguous(mask : UInt128) : Int32
+    length = 0
+    while length < 32 && ((mask >> (31 - length)) & 1_u128) == 1_u128
+      length = length + 1
+    end
+    (mask & 0xFFFFFFFF_u128) == netmask(false, length) ? length : -1
+  end
+
+  def self.dotted(value : UInt128) : String
+    "#{(value >> 24) & 255_u128}.#{(value >> 16) & 255_u128}.#{(value >> 8) & 255_u128}.#{value & 255_u128}"
+  end
+
+  # Group *index*, 0 to 7, of a 128-bit value.
+  def self.hextet(value : UInt128, index : Int32) : Int32
+    ((value >> (112 - 16 * index)) & 0xFFFF_u128).to_i32
+  end
+
+  # RFC 5952 section 4.2: the longest run of two or more zero groups as
+  # `::`, the first of equal runs.
+  def self.hextets(value : UInt128) : String
+    best = -1
+    best_size = 1
+    start = -1
+    index = 0
+    while index < 8
+      if hextet(value, index) == 0
+        start = index if start < 0
+        if index - start + 1 > best_size
+          best = start
+          best_size = index - start + 1
+        end
+      else
+        start = -1
+      end
+      index = index + 1
+    end
+    String.build do |io|
+      index = 0
+      while index < 8
+        if index == best
+          io << "::"
+          index = index + best_size
+          next
+        end
+        io << ':' if index > 0 && index != best + best_size
+        io << hextet(value, index).to_s(16)
+        index = index + 1
+      end
+    end
+  end
+end

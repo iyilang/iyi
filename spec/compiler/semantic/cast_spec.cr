@@ -83,6 +83,28 @@ describe "Semantic: cast" do
       CODE
   end
 
+  it "casts a module to a union of some of its includers" do
+    assert_type(<<-CODE) { nilable string }
+      module Moo
+      end
+
+      class String
+        include Moo
+      end
+
+      struct Nil
+        include Moo
+      end
+
+      struct Int64
+        include Moo
+      end
+
+      x = ("s" || nil || 1_i64).as(Moo)
+      x.as(String?)
+      CODE
+  end
+
   it "allows casting object to void pointer" do
     assert_type(<<-CODE) { pointer_of(void) }
       class Foo

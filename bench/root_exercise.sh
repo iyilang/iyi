@@ -275,10 +275,10 @@ echo "== what root discovery asks the machine for"
 # list is every darwin program's — the poller, its clock and errno, which the
 # panic path carries — plus one this program's own: `mprotect`, the guard
 # page of the fiber it spawns. `bzero` was here for a day: the compiler
-# zeroes every `Pointer.malloc` with an `llvm.memset`, the aarch64 back end
-# lowers one it will not inline (the 1.5 MiB object below) to a `bzero`
-# call, and the prelude now defines `bzero` the way it defines `memset`, so
-# the call resolves to the program's own. The stale names (`malloc`,
+# zeroed every `Pointer.malloc` with an `llvm.memset` then, the aarch64 back
+# end lowered one it would not inline (the 1.5 MiB object below) to a
+# `bzero` call, and the prelude now defines `bzero` the way it defines
+# `memset`, so a call resolves to the program's own. The stale names (`malloc`,
 # `memset`, `realloc`, the file calls) are gone from the list, because an
 # entry nothing uses is a check without teeth.
 case "$(uname -s)" in
@@ -545,6 +545,73 @@ case "$(uname -s)" in
     fi
     ;;
 esac
+
+# The stack the loader left under `main` - dyld's, or ld.so's and the C
+# runtime's start - is zeroed before `__iyi_main`'s frame is laid over it
+# (prelude.iyi, `main`). Every top-level local is in that frame, and a
+# slot of it the program never writes was scanned with the loader's word
+# in it: on macos-15 four such bytes and an `Int32` beside them made a word
+# inside step 16e's 64 MB string in bench/concurrency_exercise.iyi, and
+# the rendezvous check found 61 MiB kept in 25 runs of 40. A top-level
+# array the program never writes is 32 KiB of that frame, over all of what
+# the loader left (21,696 bytes deep on macos-15, 5,352 on Linux x86_64),
+# and reads zero; the prelude without the clear leaves the loader's words
+# in it. On Windows a frame of more than a page calls `__chkstk` from its
+# prologue before its `sub rsp`, and that call's return address and saved
+# register are the frame's top two words, the array's last two there (an
+# address in `__iyi_main`'s prologue and one on the stack): the program's
+# own, so the probe reads the 4,094 under them.
+echo
+echo "== the stack the loader left under main is zeroed"
+cat > "$WORK/loader.iyi" <<'IYI'
+@[NoInline]
+def loader_words(words : Pointer(UInt64), count : Int32) : Int32
+  found = 0
+  index = 0
+  while index < count
+    found = found + 1 if words[index] != 0_u64
+    index = index + 1
+  end
+  found
+end
+
+untouched = uninitialized UInt64[4096]
+read = {% if flag?(:win32) %}4094{% else %}4096{% end %}
+found = loader_words(pointerof(untouched).as(Pointer(UInt64)), read)
+puts "loader words: #{found} of #{read} in a top-level array the program never wrote"
+__iyi_exit(found == 0 ? 0 : 1)
+IYI
+loader_run() { # loader_run <label> <IYI_PATH> [build flags]
+  local label="$1" path="$2"
+  shift 2
+  if ! IYI_PATH="$path" "$IYI" build "$@" -o "$WORK/loader-$label" "$WORK/loader.iyi" > "$WORK/loader-$label.log" 2>&1; then
+    echo "  $label: build failed"; sed -n '1,12p' "$WORK/loader-$label.log"; status=1; return 2
+  fi
+  "$WORK/loader-$label" > "$WORK/loader-$label.out" 2>&1
+}
+for build in plain release; do
+  flags=""
+  [ "$build" = release ] && flags="--release"
+  if loader_run "$build" "$REPO/src" $flags && grep -q '^loader words: 0 of ' "$WORK/loader-$build.out"; then
+    printf '  %s: %s\n' "$build" "$(cat "$WORK/loader-$build.out")"
+  else
+    echo "  $build: FAIL:"; sed 's/^/    /' "$WORK/loader-$build.out" | tail -3; status=1
+  fi
+done
+mkdir -p "$WORK/noclear/iyi"
+cp "$REPO"/src/iyi/*.iyi "$WORK/noclear/iyi/"
+if ! awk '/^    low = high - 65536_u64$/ { print "    low = high"; found = found + 1; next } { print } END { if (found != 1) exit 3 }' \
+     "$REPO/src/iyi/prelude.iyi" > "$WORK/noclear/iyi/prelude.iyi"; then
+  echo "  the proof's awk found no clear in main to take out"; status=1
+else
+  loader_run noclear "$WORK/noclear${PSEP}$REPO/src"
+  if [ $? -eq 1 ] && grep -q '^loader words: [1-9]' "$WORK/loader-noclear.out"; then
+    echo "  failure proof: without the clear, exits 1 at \"$(cat "$WORK/loader-noclear.out")\""
+  else
+    echo "  failure proof: without the clear the array still read zero, so this proves nothing"
+    sed 's/^/    /' "$WORK/loader-noclear.out" | tail -3; status=1
+  fi
+fi
 
 echo
 if [ "$status" -ne 0 ]; then

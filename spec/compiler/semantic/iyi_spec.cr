@@ -4604,6 +4604,108 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # `@[Share(owns: true)]`: the synchronised type that owns its contents
+    # (`Mutex(T)`), Share whatever it holds, because only the blocks its
+    # methods run reach the value, and those blocks are checked instead.
+    owning = <<-OWNING
+      struct Proc
+        @[Primitive(:proc_call)]
+        @[Raises]
+        def call(*args : *T) : R
+        end
+      end
+
+      class Bag
+        def initialize
+          @n = 0
+        end
+
+        def add(k : Int32) : Nil
+          @n = k
+        end
+
+        def n : Int32
+          @n
+        end
+      end
+
+      @[Share(owns: true)]
+      class Guard(T)
+        @value : T
+
+        def self.new(&block : -> U) : Guard(U) forall U
+          Guard(U).build(block.call)
+        end
+
+        protected def self.build(value : T) : Guard(T)
+          new(value)
+        end
+
+        private def initialize(@value : T)
+        end
+
+        def lock(&block : T -> _) : Nil
+          block.call(@value)
+          nil
+        end
+
+        def get(&block : T -> R) : R forall R
+          block.call(@value)
+        end
+      end
+
+      OWNING
+
+    it "lets a thread capture an owning type of a value that is not Share" do
+      assert_type(stub + owning + <<-CODE, filename: "x.iyi") { int32 }
+        guard = Guard.new { Bag.new }
+        step = 2
+        IyiThread.start do
+          guard.lock { |bag| bag.add(step) }
+          nil
+        end
+        guard.get { |bag| bag.n }
+        CODE
+    end
+
+    it "refuses a block behind the lock that captures a value that is not Share" do
+      assert_error(stub + owning + <<-CODE, "the block Guard#lock runs behind the Guard's lock captures `other : Bag`, which is not Share: Bag's field @n is assigned in `add`; whatever the block can reach, the value behind the lock can reach", filename: "x.iyi")
+        guard = Guard.new { Bag.new }
+        other = Bag.new
+        guard.lock { |bag| other.add(bag.n) }
+        CODE
+    end
+
+    it "refuses an answer that is not Share leaving the lock" do
+      assert_error(stub + owning + <<-CODE, "Guard#get answers `Bag`, which is not Share: Bag's field @n is assigned in `add`; what a block behind the Guard's lock answers leaves the lock", filename: "x.iyi")
+        guard = Guard.new { Bag.new }
+        guard.get { |bag| bag }
+        CODE
+    end
+
+    it "refuses a constructor's block that hands in a value something else holds" do
+      assert_error(stub + owning + <<-CODE, "the block Guard.new makes the Guard's value in captures `other : Bag`, which is not Share", filename: "x.iyi")
+        other = Bag.new
+        Guard.new { other }
+        CODE
+    end
+
+    it "refuses a constant that is not Share named behind the lock" do
+      assert_error(stub + owning + <<-CODE, "the block Guard#lock runs behind the Guard's lock names the constant `KEPT : Bag`, which is not Share", filename: "x.iyi")
+        KEPT = Bag.new
+        guard = Guard.new { 1 }
+        guard.lock { |n| KEPT.add(n) }
+        CODE
+    end
+
+    it "refuses a Share argument it does not know" do
+      assert_error(<<-CODE, "unknown Share named argument, valid arguments are: 'owns'", filename: "x.iyi")
+        @[Share(own: true)]
+        class Box
+        end
+        CODE
+    end
+
     it "trusts a type marked @[Share] whatever its fields do" do
       assert_type(stub + <<-CODE, filename: "x.iyi") { nil_type }
         @[Share]
@@ -4729,6 +4831,912 @@ describe "Semantic: iyi" do
           v = 2
           nil
         end
+        CODE
+    end
+
+    # SPEC.md III.4.13: a parallel task's block may run on another core,
+    # and is held to what a thread's block is. The stub stands in for the
+    # prelude's group, known by its owner's name as the thread is.
+    describe "the block spawn_parallel runs" do
+      group_stub = <<-STUB
+        class IyiGroup
+          def spawn_parallel(&block : -> T) : Nil forall T
+            keep = block
+            nil
+          end
+        end
+
+        G = IyiGroup.new
+
+        STUB
+
+      it "lets it capture integers, strings and a value whose fields nothing assigns" do
+        assert_type(group_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          class Totals
+            def initialize(@limit : Int32)
+            end
+
+            def limit : Int32
+              @limit
+            end
+          end
+
+          n = 3
+          name = "seven"
+          totals = Totals.new(4)
+          g = G
+          g.spawn_parallel do
+            totals.limit
+            n
+            name
+          end
+          CODE
+      end
+
+      it "refuses a captured value that is not shareable, by name" do
+        assert_error(group_stub + <<-CODE, "the block spawn_parallel runs on another thread captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=` (SPEC.md III.4.4)", filename: "x.iyi")
+          class Counter
+            def initialize
+              @count = 0
+            end
+
+            def count=(value : Int32)
+              @count = value
+            end
+          end
+
+          counter = Counter.new
+          g = G
+          g.spawn_parallel do
+            counter.count = 1
+            nil
+          end
+          CODE
+      end
+
+      it "refuses a captured local assigned after the spawn" do
+        assert_error(group_stub + <<-CODE, "`count` is assigned here, after the task was spawned, and the block spawn_parallel runs on another thread", filename: "x.iyi")
+          count = 1
+          g = G
+          g.spawn_parallel { count }
+          count = 2
+          CODE
+      end
+
+      it "refuses a local of a loop that spawns again" do
+        assert_error(group_stub + <<-CODE, "in a loop or a block that spawns the task again", filename: "x.iyi")
+          g = G
+          going = true
+          while going
+            seed = 10
+            g.spawn_parallel { seed }
+            going = false
+          end
+          CODE
+      end
+
+      it "refuses a constant the block names whose type is not shareable" do
+        assert_error(group_stub + <<-CODE, "the block spawn_parallel runs on another thread names the constant `TALLY : Tally`, which is not Share: Tally's field @total is assigned in `bump` (SPEC.md III.4.5)", filename: "x.iyi")
+          class Tally
+            def initialize
+              @total = 0
+            end
+
+            def bump : Nil
+              @total = 1
+            end
+          end
+
+          TALLY = Tally.new
+          g = G
+          g.spawn_parallel do
+            TALLY.bump
+            nil
+          end
+          CODE
+      end
+    end
+
+    # SPEC.md III.4.13: `@[Share]` on a def says the block it keeps may run
+    # on other threads, several at once (std/http's `Server.serve`).
+    describe "the block a @[Share] def keeps" do
+      group_stub = <<-STUB
+        class IyiGroup
+          def spawn_parallel(&block : -> T) : Nil forall T
+            keep = block
+            nil
+          end
+        end
+
+        G = IyiGroup.new
+
+        class Counter
+          def initialize
+            @count = 0
+          end
+
+          def count=(value : Int32)
+            @count = value
+          end
+        end
+
+        @[Share]
+        def everywhere(&work : -> Int32) : Nil
+          G.spawn_parallel do
+            kept = work
+            1
+          end
+          G.spawn_parallel(&work)
+          nil
+        end
+
+        STUB
+
+      it "checks every block given to it, and lets the def capture and pass on that block" do
+        assert_type(group_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          n = 3
+          everywhere { n }
+          CODE
+      end
+
+      it "refuses a captured value that is not shareable, naming the def" do
+        assert_error(group_stub + <<-CODE, "everywhere keeps, which may run on other threads captures `counter : Counter`, which is not Share", filename: "x.iyi")
+          counter = Counter.new
+          everywhere do
+            counter.count = 1
+            1
+          end
+          CODE
+      end
+
+      it "refuses a captured local assigned after the block was given" do
+        assert_error(group_stub + <<-CODE, "`count` is assigned here, after the block was given", filename: "x.iyi")
+          count = 1
+          everywhere { count }
+          count = 2
+          CODE
+      end
+
+      it "refuses Share on a def that keeps no block" do
+        assert_error(<<-CODE, "Share on a def says the block it keeps may run on other threads, and `plain` keeps no block", filename: "x.iyi")
+          @[Share]
+          def plain(x : Int32) : Int32
+            x
+          end
+          CODE
+      end
+
+      it "refuses a proc passed on as the block of a parallel task" do
+        assert_error(group_stub + <<-CODE, "the block spawn_parallel runs on another thread is given a proc, `&q`", filename: "x.iyi")
+          counter = Counter.new
+          q = ->do
+            counter.count = 1
+            1
+          end
+          G.spawn_parallel(&q)
+          CODE
+      end
+
+      it "takes the def's block on trust only while the def leaves it as given" do
+        assert_error(group_stub + <<-CODE, "the block spawn_parallel runs on another thread is given a proc, `&work`", filename: "x.iyi")
+          @[Share]
+          def swapped(&work : -> Int32) : Nil
+            work = ->{ 1 }
+            G.spawn_parallel(&work)
+            nil
+          end
+
+          swapped { 1 }
+          CODE
+      end
+
+      # std/http's `Server.serve(..., workers: 1)`: `serial: workers` names
+      # the parameter whose literal 1 keeps a call on one thread, and
+      # `crossing:` the arguments handed to other threads.
+      serial_stub = group_stub + <<-STUB
+        @[Share(serial: workers, crossing: {config: "Pass a frozen one"})]
+        def serve(config : C = nil, workers : Int32 = 4, &work : -> Int32) : Nil forall C
+          G.spawn_parallel do
+            kept = work
+            1
+          end
+          nil
+        end
+
+        STUB
+
+      it "refuses a captured value that is not shareable, naming the lock and workers: 1" do
+        assert_error(serial_stub + <<-CODE, "the block serve keeps, which may run on other threads captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=`. Put it behind a lock, a `Mutex(Counter)` (std/mutex), or pass `workers: 1` so the block runs on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          counter = Counter.new
+          serve(workers: 8) do
+            counter.count = 1
+            1
+          end
+          CODE
+      end
+
+      it "takes anything under the literal 1" do
+        assert_type(serial_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          counter = Counter.new
+          count = 1
+          serve(counter, workers: 1) do
+            counter.count = 1
+            count = 2
+            1
+          end
+          CODE
+      end
+
+      it "checks a count in a variable, whatever it holds" do
+        assert_error(serial_stub + <<-CODE, "captures `counter : Counter`, which is not Share", filename: "x.iyi")
+          counter = Counter.new
+          one = 1
+          serve(workers: one) do
+            counter.count = 1
+            1
+          end
+          CODE
+      end
+
+      it "refuses a crossing argument that is not shareable, where it is passed" do
+        assert_error(serial_stub + <<-CODE, "serve hands `config : Counter` to other threads, several at once, and it is not Share: Counter's field @count is given a setter `count=`. Pass a frozen one, or pass `workers: 1` so it stays on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          serve(Counter.new) { 1 }
+          CODE
+      end
+
+      it "refuses a serial name that is no parameter" do
+        assert_error(<<-CODE, "Share's 'serial' names a parameter of `run`", filename: "x.iyi")
+          @[Share(serial: threads)]
+          def run(workers : Int32 = 1, &work : -> Int32) : Nil
+            nil
+          end
+          CODE
+      end
+
+      it "refuses a named argument a def's Share does not know" do
+        assert_error(<<-CODE, "unknown Share named argument on a def, valid arguments are: 'serial', 'crossing'", filename: "x.iyi")
+          @[Share(owns: true)]
+          def run(&work : -> Int32) : Nil
+            nil
+          end
+          CODE
+      end
+
+      # std/http's `Server.serve(listener, handler)`: a value crossing to
+      # the workers, which the def's own parallel block takes on trust.
+      value_stub = group_stub + <<-STUB
+        @[Share(serial: workers, crossing: {handler: "Make it Share"})]
+        def serve_value(handler : H, workers : Int32 = 4) : Nil forall H
+          G.spawn_parallel do
+            kept = handler
+            1
+          end
+          nil
+        end
+
+        STUB
+
+      it "refuses a handler value that is not shareable, at the argument" do
+        assert_error(value_stub + <<-CODE, "serve_value hands `handler : Counter` to other threads, several at once, and it is not Share: Counter's field @count is given a setter `count=`. Make it Share, or pass `workers: 1` so it stays on one thread (SPEC.md III.4.4)", filename: "x.iyi")
+          serve_value(Counter.new)
+          CODE
+      end
+
+      it "takes a handler value that is not shareable under the literal 1, its block trusting the parameter" do
+        assert_type(value_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          serve_value(Counter.new, workers: 1)
+          CODE
+      end
+
+      it "trusts a crossing parameter only while the def leaves it as given" do
+        assert_error(group_stub + <<-CODE, "captures `handler : Counter`, which is not Share", filename: "x.iyi")
+          @[Share(serial: workers, crossing: {handler: "Make it Share"})]
+          def swapped_value(handler : H, workers : Int32 = 4) : Nil forall H
+            handler = Counter.new
+            G.spawn_parallel do
+              kept = handler
+              1
+            end
+            nil
+          end
+
+          swapped_value(Counter.new, workers: 1)
+          CODE
+      end
+
+      # iyi-web's `get "/boom" do raise ... end`: a route block that only
+      # raises makes the handler's block `Proc(Context, NoReturn)`, and the
+      # router's `@[Share(serial: workers)]` def passes what it answers to a
+      # generic def inside the block it hands `SharedProc.of`. A call given
+      # a NoReturn argument is never typed, so that block's proc was left
+      # without a type, and code generation stopped on it with a cast from
+      # Nil.
+      it "compiles a kept block whose body passes a NoReturn block result to a def" do
+        codegen(<<-CODE, filename: "x.iyi")
+          struct Kept(A, R)
+            def initialize(@proc : Proc(A, R))
+            end
+
+            @[Share]
+            def self.of(&block : A -> R) : Kept(A, R)
+              new(block)
+            end
+
+            def call(argument : A) : R
+              @proc.call(argument)
+            end
+          end
+
+          def fire : NoReturn
+            while true
+            end
+          end
+
+          def wrap(r : R) : String forall R
+            "wrapped"
+          end
+
+          @[Share(serial: workers)]
+          def reg(*, workers : Int32? = nil, &block : Int32 -> B) : Nil forall B
+            kept = Kept(Int32, String).of { |x| wrap(block.call(x)) }
+            kept.call(1)
+            nil
+          end
+
+          reg { |x| fire }
+          CODE
+      end
+
+      # The same block with a line before that call, with the NoReturn
+      # value assigned first, or with the call in both branches of an `if`:
+      # the cleanup cuts a list of expressions at its NoReturn one and
+      # leaves the list, and the `if`, untyped, so the proc still had no
+      # type to take from its body, and code generation stopped on the same
+      # cast from Nil.
+      it "compiles a kept block whose body is cut at a NoReturn value" do
+        codegen(<<-CODE, filename: "x.iyi")
+          struct Kept(A, R)
+            def initialize(@proc : Proc(A, R))
+            end
+
+            @[Share]
+            def self.of(&block : A -> R) : Kept(A, R)
+              new(block)
+            end
+
+            def call(argument : A) : R
+              @proc.call(argument)
+            end
+          end
+
+          def fire : NoReturn
+            while true
+            end
+          end
+
+          def wrap(r : R) : String forall R
+            "wrapped"
+          end
+
+          first = Kept(Int32, String).of do |x|
+            wrap(x)
+            wrap(fire)
+          end
+          first.call(1)
+          second = Kept(Int32, String).of do |x|
+            v = fire
+            wrap(v)
+          end
+          second.call(1)
+          third = Kept(Int32, String).of do |x|
+            if x > 0
+              wrap(fire)
+            else
+              wrap(fire)
+            end
+          end
+          third.call(1)
+          CODE
+      end
+    end
+
+    # #148: a parallel block that reaches a constant through the defs it
+    # calls is warned about, with the path; one that names it is refused,
+    # as above. The issue's program kept its database pool in `DATABASE`
+    # and read it through `ask`, and compiled silently.
+    describe "what a shared block reaches through the defs it calls" do
+      reach_stub = <<-STUB
+        class IyiGroup
+          def spawn_parallel(&block : -> T) : Nil forall T
+            keep = block
+            nil
+          end
+        end
+
+        G = IyiGroup.new
+
+        class Database
+          def initialize
+            @total = 0
+          end
+
+          def query_one(n : Int64) : Int64
+            @total = 1
+            n
+          end
+        end
+
+        DATABASE = Database.new
+
+        def ask(n : Int64) : Int64
+          DATABASE.query_one(n)
+        end
+
+        STUB
+
+      reach_warnings = ->(code : String) { semantic(code, filename: "x.iyi").program.warnings.infos }
+
+      it "warns at the block, naming the constant, its type, why and the path" do
+        code = reach_stub + <<-CODE
+          def ask_twice : Int64
+            ask(2_i64)
+            ask(3_i64)
+          end
+
+          g = G
+          g.spawn_parallel do
+            ask(1_i64)
+            ask_twice
+            nil
+          end
+          CODE
+        line = code.lines.index!(&.includes?("g.spawn_parallel do")) + 1
+        infos = reach_warnings.call(code)
+        infos.size.should eq(1)
+        infos[0].should start_with("warning in line #{line}\n")
+        infos[0].should contain("Warning: the block spawn_parallel runs on another thread reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on the constant: `@[SafeReach(\"...\")]` (SPEC.md III.4.4)")
+      end
+
+      it "warns for the block a @[Share] def keeps" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          @[Share]
+          def everywhere(&work : -> Int64) : Nil
+            G.spawn_parallel do
+              kept = work
+              1
+            end
+            nil
+          end
+
+          everywhere { ask(1_i64) }
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("the block everywhere keeps, which may run on other threads reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`")
+      end
+
+      it "still refuses a block that names the constant, marked or not" do
+        assert_error(reach_stub + <<-CODE, "the block spawn_parallel runs on another thread names the constant `QUIET : Database`, which is not Share", filename: "x.iyi")
+          @[SafeReach("set once at startup, then only read")]
+          QUIET = Database.new
+
+          g = G
+          g.spawn_parallel do
+            QUIET.query_one(1_i64)
+            nil
+          end
+          CODE
+      end
+
+      it "does not warn for Share constants: an owning type, a trusted one, one whose fields nothing assigns" do
+        infos = reach_warnings.call(owning + reach_stub + <<-CODE)
+          @[Share]
+          class Cell
+            def initialize
+              @n = 0
+            end
+
+            def set(n : Int32) : Nil
+              @n = n
+            end
+          end
+
+          class Limit
+            def initialize(@limit : Int32)
+            end
+
+            def limit : Int32
+              @limit
+            end
+          end
+
+          GUARD = Guard.new { Bag.new }
+          CELL = Cell.new
+          LIMIT = Limit.new(4)
+
+          def touch : Int32
+            GUARD.lock { |bag| bag.add(1) }
+            CELL.set(2)
+            LIMIT.limit
+          end
+
+          g = G
+          g.spawn_parallel do
+            touch
+            nil
+          end
+          CODE
+        infos.should be_empty
+      end
+
+      it "is silenced by @[SafeReach] for that constant alone" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          @[SafeReach("set once at startup, then only read")]
+          QUIET = Database.new
+
+          def both : Int64
+            QUIET.query_one(1_i64)
+            ask(2_i64)
+          end
+
+          g = G
+          g.spawn_parallel do
+            both
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `both` → `ask` → `DATABASE.query_one`")
+      end
+
+      it "refuses SafeReach without a reason" do
+        assert_error(reach_stub + <<-CODE, "SafeReach takes one string, the reason every thread may reach `QUIET` through a call", filename: "x.iyi")
+          @[SafeReach]
+          QUIET = Database.new
+          CODE
+      end
+
+      it "follows a path through two defs and a recursive pair to the shortest one" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          def outer(n : Int32) : Int64
+            inner(n)
+          end
+
+          def inner(n : Int32) : Int64
+            inner(n)
+            again(n)
+          end
+
+          def again(n : Int32) : Int64
+            DATABASE.query_one(1_i64)
+            inner(n)
+          end
+
+          g = G
+          g.spawn_parallel do
+            outer(2)
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `outer` → `inner` → `again` → `DATABASE.query_one`")
+      end
+
+      it "walks every target of a virtual call" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          abstract class Store
+            abstract def get : Int64
+          end
+
+          class MemStore < Store
+            def get : Int64
+              1_i64
+            end
+          end
+
+          class DbStore < Store
+            def get : Int64
+              ask(1_i64)
+            end
+          end
+
+          DbStore.new
+          g = G
+          g.spawn_parallel do
+            MemStore.new.as(Store).get
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `DbStore#get` → `ask` → `DATABASE.query_one`")
+      end
+
+      it "warns for a class variable reached through a call" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          class Registry
+            @@db = Database.new
+
+            def self.ask : Int64
+              @@db.query_one(1_i64)
+            end
+          end
+
+          g = G
+          g.spawn_parallel do
+            Registry.ask
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("reaches `@@db : Database` (not Share) through `Registry.ask` → `@@db.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - it is set once and then only read, or guarded some other way - say why on the class variable: `@[SafeReach(\"...\")]` (SPEC.md III.4.4)")
+      end
+
+      it "is silenced by @[SafeReach] on a class variable" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          class Registry
+            @[SafeReach("one thread at a time, joined before anything reads it")]
+            @@db = Database.new
+
+            def self.ask : Int64
+              @@db.query_one(1_i64)
+            end
+          end
+
+          g = G
+          g.spawn_parallel do
+            Registry.ask
+            nil
+          end
+          CODE
+        infos.should be_empty
+      end
+
+      # std's own state is std's to keep safe: a def written beside the
+      # prelude is not walked - the class variable `std_take` reaches is
+      # never seen - and a constant declared there is not warned about when
+      # the program names it in a def of its own.
+      it "does not warn for state std keeps" do
+        root = File.tempname("iyi-reach")
+        Dir.mkdir_p(File.join(root, "iyi"))
+        File.write(File.join(root, "iyi", "prelude.iyi"), "")
+        begin
+          std = parse(<<-STD, filename: File.join(root, "std", "pool.iyi"))
+            class StdPool
+              def initialize
+                @n = 0
+              end
+
+              def take : Int32
+                @n = 1
+              end
+            end
+
+            STDPOOL = StdPool.new
+
+            class StdShelf
+              @@pool = StdPool.new
+
+              def self.take : Int32
+                @@pool.take
+              end
+            end
+
+            def std_take : Int32
+              StdShelf.take
+            end
+            STD
+          user = parse(reach_stub + <<-CODE, filename: "x.iyi")
+            def mine : Int32
+              STDPOOL.take
+            end
+
+            g = G
+            g.spawn_parallel do
+              std_take
+              mine
+              nil
+            end
+            CODE
+          warnings = WarningCollection.new
+          semantic(Expressions.new([std, user] of ASTNode), warnings: warnings)
+          warnings.infos.should be_empty
+        ensure
+          FileUtils.rm_rf(root)
+        end
+      end
+
+      # One warning per piece of state, at the first block that reaches it,
+      # with the count of the others: iyiturkiye's 91 warned blocks gave
+      # 1251 warnings about 37 constants, each once per block reaching it.
+      it "warns once for state many blocks reach, counting the others" do
+        code = reach_stub + <<-CODE
+          TALLY = Database.new
+
+          def tally : Int64
+            TALLY.query_one(1_i64)
+          end
+
+          g = G
+          g.spawn_parallel do
+            ask(1_i64)
+            nil
+          end
+          g.spawn_parallel do
+            ask(2_i64)
+            tally
+            nil
+          end
+          g.spawn_parallel do
+            ask(3_i64)
+            nil
+          end
+          CODE
+        first = code.lines.index!(&.includes?("g.spawn_parallel do")) + 1
+        second = first + 4
+        infos = reach_warnings.call(code)
+        infos.size.should eq(2)
+        infos[0].should start_with("warning in line #{first}\n")
+        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`, as do 2 other parallel blocks: Database's field @total is assigned in `query_one`.")
+        infos[1].should start_with("warning in line #{second}\n")
+        infos[1].should contain("reaches `TALLY : Database` (not Share) through `tally` → `TALLY.query_one`: ")
+        infos[1].should_not contain("other parallel block")
+      end
+
+      it "counts one other block in the singular" do
+        infos = reach_warnings.call(reach_stub + <<-CODE)
+          g = G
+          g.spawn_parallel do
+            ask(1_i64)
+            nil
+          end
+          g.spawn_parallel do
+            ask(2_i64)
+            nil
+          end
+          CODE
+        infos.size.should eq(1)
+        infos[0].should contain("through `ask` → `DATABASE.query_one`, as does 1 other parallel block: ")
+      end
+
+      it "fails --error-on-warnings with the one warning" do
+        warnings = WarningCollection.new
+        warnings.error_on_warnings = true
+        semantic(parse(reach_stub + <<-CODE, filename: "x.iyi"), warnings: warnings)
+          g = G
+          g.spawn_parallel do
+            ask(1_i64)
+            nil
+          end
+          g.spawn_parallel do
+            ask(2_i64)
+            nil
+          end
+          CODE
+        warnings.reports.size.should eq(1)
+        warnings.error_on_warnings?.should be_true
+      end
+
+      # A dependency's constant is changed in the dependency: the warning
+      # names the package and the file in its checkout, from the program's
+      # requirements (`Program#iyi_mod_table`).
+      it "names the package a reached constant is declared in" do
+        root = File.tempname("iyi-reach-pkg")
+        Dir.mkdir_p(File.join(root, "pool"))
+        begin
+          package = parse(<<-PKG, filename: File.join(root, "pool", "core.iyi"))
+            class Store
+              def initialize
+                @n = 0
+              end
+
+              def take : Int32
+                @n = 1
+              end
+            end
+
+            STORE = Store.new
+
+            def pkg_take : Int32
+              STORE.take
+            end
+            PKG
+          user = parse(reach_stub + <<-CODE, filename: "x.iyi")
+            g = G
+            g.spawn_parallel do
+              pkg_take
+              ask(1_i64)
+              nil
+            end
+            CODE
+          program = Program.new
+          program.color = false
+          program.warnings = WarningCollection.new
+          program.iyi_mod_table = [{"example.com/me/pool", root}, {"@pool", "example.com/me/pool"}]
+          program.semantic(program.normalize(Expressions.new([package, user] of ASTNode)))
+          infos = program.warnings.infos
+          infos.size.should eq(2)
+          infos[0].should contain("reaches `STORE : Store` (not Share) through `pkg_take` → `STORE.take`: Store's field @n is assigned in `take`. `STORE` is the package example.com/me/pool's at pool/core.iyi:11, so the change goes there. Keep the value behind a `Mutex`")
+          infos[1].should contain("reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value")
+        ensure
+          FileUtils.rm_rf(root)
+        end
+      end
+    end
+  end
+
+  # #136. A literal records each type it can be cast to while the overloads
+  # are tried, and that record is what calls a call ambiguous; the
+  # mismatch message is computed per argument. Both read the literal where
+  # the call failed on another argument.
+  describe "what a call with a literal says" do
+    float_pair = <<-CODE
+      def pick(a : Float64, b : Float64)
+        a
+      end
+
+      def pick(a : Float32, b : Float32)
+        a
+      end
+
+      CODE
+
+    it "takes the one overload the variable allows, not calling the literal ambiguous" do
+      # It was "ambiguous call, implicit cast of 2 matches all of Float64,
+      # Float32": the Float32 overload, which `x` rules out, had recorded
+      # Float32 for the literal before `x` failed it.
+      assert_type(float_pair + <<-CODE) { float64 }
+        x = 3
+        pick(2, x)
+        CODE
+    end
+
+    it "names the argument no overload takes" do
+      # It was "expected argument #1 to 'pick' to be Float32 or Float64,
+      # not Int32", about the literal both overloads take.
+      assert_error(float_pair + <<-CODE, "expected argument #2 to 'pick' to be Float32 or Float64, not Int64")
+        x = 3_i64
+        pick(2, x)
+        CODE
+    end
+
+    it "still calls a literal ambiguous when two overloads take the call" do
+      assert_error(float_pair + <<-CODE, "ambiguous call, implicit cast of 2 matches all of Float64, Float32")
+        pick(2, 5)
+        CODE
+    end
+
+    it "lets a literal before a variable take the type the variable binds" do
+      # It bound T to Int32 and refused the Int64, where `same(n, 2)` was
+      # an Int64.
+      assert_type(<<-CODE) { int64 }
+        def same(a : T, b : T) : T forall T
+          b
+        end
+
+        n = 3_i64
+        same(2, n)
+        CODE
+    end
+
+    it "keeps the written order's type where it matches" do
+      assert_type(<<-CODE) { int64 }
+        def same(a : T, b : T) : T forall T
+          b
+        end
+
+        x = 3
+        same(1_i64, x)
+        CODE
+    end
+
+    it "refuses a pair neither of which casts to the other" do
+      assert_error(<<-CODE, "expected argument #2 to 'same' to be Int64, not UInt64")
+        def same(a : T, b : T) : T forall T
+          b
+        end
+
+        x = 3_i64
+        y = 4_u64
+        same(x, y)
         CODE
     end
   end

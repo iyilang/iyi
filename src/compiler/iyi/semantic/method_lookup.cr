@@ -113,6 +113,30 @@ module Iyi
 
         exact_match = nil
 
+        # iyi: a literal records each type it can be cast to while an
+        # overload is tried, and the record is what says the call is
+        # ambiguous (`AutocastType#check_restriction_exception`). An overload
+        # that fails on another argument does not take the literal, so what
+        # it recorded is put back: `max(2, x)` with `x : Int32` against
+        # `(Float64, Float64)` and `(Float32, Float32)` is the Float64
+        # overload, and it was "ambiguous call, implicit cast of 2 matches
+        # all of Float64, Float32" because the Float32 overload, which `x`
+        # rules out, had added Float32 to the record.
+        autocast = signature.arg_types.any?(AutocastType) ||
+                   !!signature.named_args.try(&.any?(&.type.is_a?(AutocastType)))
+
+        # iyi: a free variable is bound by the first argument restricted to
+        # it, a number literal binding its own type, so `max(2, n)` with
+        # `n : Int64` against `max(a : T, b : T)` bound T to Int32 and then
+        # refused `n`, while `max(n, 2)` was an Int64. An overload with free
+        # variables that fails so is tried again with each later positional
+        # argument restricted first, the ones before it after the rest, and
+        # the first order that matches is the match: T is the type of the
+        # first argument every other one can be cast to. Only a failed
+        # overload is retried, so a call that matched in the written order
+        # keeps the type it had: `max(1_i64, x)` with `x : Int32` is an Int64.
+        rotations = autocast ? signature.arg_types.size : 0
+
         defs.each do |item|
           next if item.def.abstract?
 
@@ -126,7 +150,19 @@ module Iyi
           context.def_free_vars = item.def.free_vars
           context.bound_free_vars.try &.clear
 
+          save_autocast_matches(signature) if autocast
           match = signature.match(item, context)
+          if autocast && !match
+            restore_autocast_matches(signature)
+            if item.def.free_vars
+              (1...rotations).each do |first|
+                context.bound_free_vars.try &.clear
+                match = signature.match(item, context, first)
+                break if match
+                restore_autocast_matches(signature)
+              end
+            end
+          end
 
           next if exact_match
 
@@ -160,6 +196,24 @@ module Iyi
       Matches.new(matches_array, Cover.create(signature, matches_array), owner)
     end
 
+    private def save_autocast_matches(signature) : Nil
+      signature.arg_types.each { |type| save_autocast_match(type) }
+      signature.named_args.try &.each { |arg| save_autocast_match(arg.type) }
+    end
+
+    private def save_autocast_match(type) : Nil
+      type.save_matches if type.is_a?(AutocastType)
+    end
+
+    private def restore_autocast_matches(signature) : Nil
+      signature.arg_types.each { |type| restore_autocast_match(type) }
+      signature.named_args.try &.each { |arg| restore_autocast_match(arg.type) }
+    end
+
+    private def restore_autocast_match(type) : Nil
+      type.restore_matches if type.is_a?(AutocastType)
+    end
+
     def lookup_matches_with_modules(signature, owner = self, path_lookup = self, matches_array = nil, analyze_all = false)
       matches = lookup_matches_without_parents(signature, owner, path_lookup, matches_array, analyze_all: analyze_all)
       return matches unless matches.empty?
@@ -190,7 +244,10 @@ module Iyi
   end
 
   struct CallSignature
-    def match(def_metadata, context)
+    # *first*: the positional arguments before this index are restricted
+    # after the others, so that the argument at it binds the def's free
+    # variables (`Type#lookup_matches_without_parents`).
+    def match(def_metadata, context, first = 0)
       signature = self
 
       # If yieldness isn't the same there's no match
@@ -231,6 +288,7 @@ module Iyi
 
       matched_arg_types = nil
       matched_named_arg_types = nil
+      deferred = nil
 
       # If there's a restriction on a splat (that's not a splat restriction),
       # zero splatted args don't match
@@ -251,6 +309,14 @@ module Iyi
           next
         end
 
+        if arg_type_index < first
+          matched_arg_types ||= [] of Type
+          deferred ||= [] of {Arg, Int32, Type, Int32}
+          deferred << {arg, arg_index, arg_type, matched_arg_types.size}
+          matched_arg_types.push arg_type
+          next
+        end
+
         match_arg_type = arg_type.restrict(arg, context)
         if match_arg_type
           if !named_args && !splat_arg_types && match_arg_type.same?(arg_type) && arg_types.size == 1
@@ -264,6 +330,15 @@ module Iyi
           mandatory_args[arg_index] = true if mandatory_args
         else
           return nil
+        end
+      end
+
+      if deferred && matched_arg_types
+        deferred.each do |arg, arg_index, arg_type, slot|
+          match_arg_type = arg_type.restrict(arg, context)
+          return nil unless match_arg_type
+          matched_arg_types[slot] = match_arg_type
+          mandatory_args[arg_index] = true if mandatory_args
         end
       end
 

@@ -276,11 +276,22 @@ class Iyi::Command
         io << "}   # or `import " << written << "::*` for every name\n"
       end
       # A package module's qualified name is under the package's name, and
-      # nothing in its own `module` line below says so.
-      if qualified = mod_context_package_type(written)
+      # nothing in its own `module` line below says so - a dependency's,
+      # by the requirement, and the project's own package's, by the name
+      # its artifact was written under (`Artifact#package_name`).
+      if qualified = mod_context_package_type(written) || mod_context_own_package_type(artifact)
         io << "# qualified, the module is " << qualified << ": " << qualified << ".name\n"
       end
     end
+  end
+
+  # `IyiWeb::Codec` for `codec` of the project's own `iyi-web`; nil for a
+  # module of no package, or one whose path already begins with the name.
+  private def mod_context_own_package_type(artifact : IyiMod::Artifact) : String?
+    package = artifact.package_name
+    segments = artifact.module_name.split('/')
+    return nil if package.empty? || segments.first? == package
+    Parser.iyi_package_segments(package, segments).map(&.camelcase).join("::")
   end
 
   @mod_context_table = [] of {String, String}

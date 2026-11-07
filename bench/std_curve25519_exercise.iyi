@@ -1,0 +1,197 @@
+# Exercises `std/curve25519`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_curve25519_exercise.iyi
+
+module bench/std_curve25519_exercise
+
+import std/curve25519::{X25519, Ed25519, CurveError}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# Hex to raw bytes, and back.
+def b(hex : String) : String
+  p = hex.to_unsafe
+  String.new(hex.bytesize // 2) do |buf|
+    i = 0
+    while i < hex.bytesize // 2
+      hi = p[i * 2].to_i32
+      lo = p[i * 2 + 1].to_i32
+      hi = hi >= 97 ? hi - 87 : hi - 48
+      lo = lo >= 97 ? lo - 87 : lo - 48
+      buf[i] = (hi * 16 + lo).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def hex(s : String) : String
+  digits = "0123456789abcdef"
+  text = ""
+  p = s.to_unsafe
+  i = 0
+  while i < s.bytesize
+    x = p[i].to_i32
+    text = text + digits[x >> 4].to_s + digits[x & 15].to_s
+    i = i + 1
+  end
+  text
+end
+
+def bytes_of(s : String) : Array(UInt8)
+  p = s.to_unsafe
+  Array(UInt8).new(s.bytesize) { |i| p[i] }
+end
+
+def shared_hex(k : String, u : String) : String
+  got = X25519.shared(b(k), b(u))
+  got.is_a?(CurveError) ? "error: #{got.message}" : hex(got)
+end
+
+# RFC 7748 §5.2's two scalar-times-point vectors. The second u has its top
+# bit set, which the function masks; that u with the bit and without it
+# give one answer, asked before the vector so that a ladder which forgets
+# the mask fails at the check that says so.
+puts "== x25519 (rfc 7748 section 5.2)"
+assert_str "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
+  shared_hex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c"),
+  "rfc 7748 section 5.2 vector 1"
+assert_str shared_hex("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a413"),
+  shared_hex("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493"),
+  "the top bit of u is masked"
+assert_str "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957",
+  shared_hex("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493"),
+  "rfc 7748 section 5.2 vector 2"
+# p + 9 is not a canonical u, and RFC 7748 §5 says to take it mod p: 9.
+assert_str hex(X25519.public_key(b("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4"))),
+  shared_hex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", "f6ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+  "a u of p + 9 is read as 9"
+# The scalar is clamped here, so bits the clamp clears change nothing.
+assert_str shared_hex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c"),
+  shared_hex("a746e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449a44", "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c"),
+  "the scalar's clamped bits change nothing"
+puts "  two vectors, the masked bit, a non-canonical u, the clamp"
+
+# RFC 7748 §5.2's iteration: k = X25519(k, u), u = the old k, from k = u =
+# 9. The millionth is a release build's only: about 25 seconds there on
+# the machine this was written on, and minutes in a plain build.
+puts "\n== x25519 iterated (rfc 7748 section 5.2)"
+k = b("0900000000000000000000000000000000000000000000000000000000000000")
+u = k
+iterations = 0
+rounds = {{ flag?(:release) ? 1_000_000 : 1000 }}
+while iterations < rounds
+  r = X25519.shared(k, u).or_panic
+  u = k
+  k = r
+  iterations = iterations + 1
+  assert_str "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079", hex(k), "rfc 7748 after one iteration" if iterations == 1
+  assert_str "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51", hex(k), "rfc 7748 after 1,000 iterations" if iterations == 1000
+end
+{% if flag?(:release) %}
+  assert_str "7c3911e0ab2586fd864497297e575e6f3bc601c0883c30df5f4dd2d24f665424", hex(k), "rfc 7748 after 1,000,000 iterations"
+  puts "  1, 1,000 and 1,000,000 iterations"
+{% else %}
+  puts "  1 and 1,000 iterations (1,000,000 in a release build)"
+{% end %}
+
+puts "\n== x25519 diffie-hellman (rfc 7748 section 6.1)"
+alice = b("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+bob = b("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+assert_str "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a", hex(X25519.public_key(alice)), "alice's public key"
+assert_str "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f", hex(X25519.public_key(bob)), "bob's public key"
+assert_str "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", hex(X25519.shared(alice, X25519.public_key(bob)).or_panic), "alice's shared secret"
+assert_str "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", hex(X25519.shared(bob, X25519.public_key(alice)).or_panic), "bob's shared secret"
+assert_str hex(X25519.public_key(alice)), hex(X25519.public_key(bytes_of(alice))), "bytes for a string"
+puts "  both public keys and the shared secret, from either side"
+
+# A peer key of small order makes every secret zero (RFC 7748 §6.1): the
+# seven u-coordinates libsodium lists, non-canonical spellings of 0 and 1
+# among them, are refused as values. So is a key of the wrong size.
+puts "\n== x25519 refusals"
+[
+  "0000000000000000000000000000000000000000000000000000000000000000",
+  "0100000000000000000000000000000000000000000000000000000000000000",
+  "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+  "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+  "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+].each do |small|
+  assert_str "error: X25519: the shared secret is all zero bytes: the peer's public key is a point of small order (RFC 7748 section 6.1)",
+    shared_hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", small), "the small-order u #{small[0, 8]}... is refused"
+end
+assert_str "error: X25519: a public key is 32 bytes, not 31", shared_hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b"), "a public key one byte short"
+assert_str "error: X25519: a public key is 32 bytes, not 0", shared_hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", ""), "an empty public key"
+puts "  seven small-order points and two wrong sizes, each a CurveError"
+
+# RFC 8032 §7.1's five Ed25519 vectors: the public key from the seed, the
+# signature made, and that signature verified.
+puts "\n== ed25519 (rfc 8032 section 7.1)"
+[
+  {"test 1", "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "", "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"},
+  {"test 2", "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb", "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c", "72", "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"},
+  {"test 3", "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7", "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025", "af82", "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"},
+  {"test 1024", "f5e5767cf153319517630f226876b86c8160cc583bc013744c6bf255f5cc0ee5", "278117fc144c72340f67d0f2316e8386ceffbf2b2428c9c51fef7c597f1d426e", "08b8b2b733424243760fe426a4b54908632110a66c2f6591eabd3345e3e4eb98fa6e264bf09efe12ee50f8f54e9f77b1e355f6c50544e23fb1433ddf73be84d879de7c0046dc4996d9e773f4bc9efe5738829adb26c81b37c93a1b270b20329d658675fc6ea534e0810a4432826bf58c941efb65d57a338bbd2e26640f89ffbc1a858efcb8550ee3a5e1998bd177e93a7363c344fe6b199ee5d02e82d522c4feba15452f80288a821a579116ec6dad2b3b310da903401aa62100ab5d1a36553e06203b33890cc9b832f79ef80560ccb9a39ce767967ed628c6ad573cb116dbefefd75499da96bd68a8a97b928a8bbc103b6621fcde2beca1231d206be6cd9ec7aff6f6c94fcd7204ed3455c68c83f4a41da4af2b74ef5c53f1d8ac70bdcb7ed185ce81bd84359d44254d95629e9855a94a7c1958d1f8ada5d0532ed8a5aa3fb2d17ba70eb6248e594e1a2297acbbb39d502f1a8c6eb6f1ce22b3de1a1f40cc24554119a831a9aad6079cad88425de6bde1a9187ebb6092cf67bf2b13fd65f27088d78b7e883c8759d2c4f5c65adb7553878ad575f9fad878e80a0c9ba63bcbcc2732e69485bbc9c90bfbd62481d9089beccf80cfe2df16a2cf65bd92dd597b0707e0917af48bbb75fed413d238f5555a7a569d80c3414a8d0859dc65a46128bab27af87a71314f318c782b23ebfe808b82b0ce26401d2e22f04d83d1255dc51addd3b75a2b1ae0784504df543af8969be3ea7082ff7fc9888c144da2af58429ec96031dbcad3dad9af0dcbaaaf268cb8fcffead94f3c7ca495e056a9b47acdb751fb73e666c6c655ade8297297d07ad1ba5e43f1bca32301651339e22904cc8c42f58c30c04aafdb038dda0847dd988dcda6f3bfd15c4b4c4525004aa06eeff8ca61783aacec57fb3d1f92b0fe2fd1a85f6724517b65e614ad6808d6f6ee34dff7310fdc82aebfd904b01e1dc54b2927094b2db68d6f903b68401adebf5a7e08d78ff4ef5d63653a65040cf9bfd4aca7984a74d37145986780fc0b16ac451649de6188a7dbdf191f64b5fc5e2ab47b57f7f7276cd419c17a3ca8e1b939ae49e488acba6b965610b5480109c8b17b80e1b7b750dfc7598d5d5011fd2dcc5600a32ef5b52a1ecc820e308aa342721aac0943bf6686b64b2579376504ccc493d97e6aed3fb0f9cd71a43dd497f01f17c0e2cb3797aa2a2f256656168e6c496afc5fb93246f6b1116398a346f1a641f3b041e989f7914f90cc2c7fff357876e506b50d334ba77c225bc307ba537152f3f1610e4eafe595f6d9d90d11faa933a15ef1369546868a7f3a45a96768d40fd9d03412c091c6315cf4fde7cb68606937380db2eaaa707b4c4185c32eddcdd306705e4dc1ffc872eeee475a64dfac86aba41c0618983f8741c5ef68d3a101e8a3b8cac60c905c15fc910840b94c00a0b9d0", "0aab4c900501b3e24d7cdf4663326a3a87df5e4843b2cbdb67cbf6e460fec350aa5371b1508f9f4528ecea23c436d94b5e8fcd4f681e30a6ac00a9704a188a03"},
+  {"test sha(abc)", "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42", "ec172b93ad5e563bf4932c70e1245034c35467ef2efd4d64ebf819683467e2bf", "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f", "dc2a4459e7369633a52b1bf277839a00201009a3efbf3ecb69bea2186c26b58909351fc9ac90b3ecfdfbc7c66431e0303dca179c138ac17ad9bef1177331a704"},
+].each do |vector|
+  name, seed, public, message, signature = vector
+  assert_str public, hex(Ed25519.public_key(b(seed))), "rfc 8032 #{name}: the public key"
+  assert_str signature, hex(Ed25519.sign(b(seed), b(message))), "rfc 8032 #{name}: the signature"
+  assert_true Ed25519.verify(b(public), b(message), b(signature)), "rfc 8032 #{name}: the signature verifies"
+  assert_true !Ed25519.verify(b(public), b(message) + "x", b(signature)), "rfc 8032 #{name}: not for another message"
+end
+puts "  tests 1, 2, 3, 1024 and SHA(abc)"
+
+# What verification refuses, RFC 8032 §5.1.7 read strictly. TEST 1's own
+# key and signature are the base of each change.
+puts "\n== ed25519 strict verification"
+key = b("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+sig = b("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b")
+assert_true Ed25519.verify(key, "", sig), "test 1 verifies"
+assert_true Ed25519.verify(bytes_of(key), [] of UInt8, bytes_of(sig)), "bytes for strings"
+# The same S plus L is the same scalar mod L: a lax check would take it,
+# and the signature would have two spellings.
+assert_true !Ed25519.verify(key, "", b("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901554c8c7872aa064e049dbb3013fbf29380d25bf5f0595bbe24655141438e7a101b")), "a signature with S + L is refused"
+assert_true !Ed25519.verify(key, "", sig[0, 32] + b("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010")), "an S of exactly L is refused"
+assert_true !Ed25519.verify(key, "", sig[0, 63] + b("8b")), "an S with its top bit set is refused"
+assert_true !Ed25519.verify(key, "", sig[0, 63]) && !Ed25519.verify(key, "", sig + "x") && !Ed25519.verify(key[0, 31], "", sig) && !Ed25519.verify("", "", ""), "the wrong sizes answer false"
+assert_true !Ed25519.verify(key, "", b("e4") + sig[1, 63]) && !Ed25519.verify(key, "", sig[0, 40] + b("5a") + sig[41, 23]), "a changed R or S is refused"
+# R's last byte carries x's sign: flipped, it names -R, and the bytes no
+# longer match.
+assert_true !Ed25519.verify(key, "", sig[0, 31] + b("d5") + sig[32, 32]), "an R with x's sign flipped is refused"
+assert_true !Ed25519.verify(b("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"), "", sig), "test 2's key does not verify test 1's signature"
+# A key whose y has no x on the curve (y = 2) is not a point.
+assert_true !Ed25519.verify(b("0200000000000000000000000000000000000000000000000000000000000000"), "", sig), "a key that is not a point is refused"
+# The identity as the key: [k]A is the identity, so (enc([S]B), S) is a
+# signature of every message under it. RFC 8032 does not refuse a key of
+# small order and neither does this; what it refuses is a spelling of one
+# that is not canonical. OpenSSL, under Python's `cryptography`, takes
+# all three of these keys (the gate asks it).
+forged = b("ef4f62f8479733ad879cfaced3c89a9c39dd4fc795ef2efa1c3eafe4d729a0813930000000000000000000000000000000000000000000000000000000000000")
+assert_true Ed25519.verify(b("0100000000000000000000000000000000000000000000000000000000000000"), "any message", forged), "the identity's canonical encoding decodes"
+assert_true !Ed25519.verify(b("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"), "any message", forged), "a public key with y = p + 1 is refused"
+assert_true !Ed25519.verify(b("0100000000000000000000000000000000000000000000000000000000000080"), "any message", forged), "a public key of x = 0 with the sign bit set is refused"
+# R is compared as bytes with an encoding this module made, so an R that
+# is the identity spelled y = p + 1 does not match the identity's own.
+assert_true Ed25519.verify(b("0100000000000000000000000000000000000000000000000000000000000000"), "", b("0100000000000000000000000000000000000000000000000000000000000000" + "00" * 32)), "R = the identity with S = 0, canonical"
+assert_true !Ed25519.verify(b("0100000000000000000000000000000000000000000000000000000000000000"), "", b("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f" + "00" * 32)), "a non-canonical R is refused"
+# Signing and verifying round trip over a spread of message lengths, and
+# a signature does not carry to another seed.
+seed_a = b("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+seed_b = b("c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7")
+[0, 1, 31, 32, 63, 64, 111, 112, 127, 128, 129, 255, 1000].each do |n|
+  message = "m" * n
+  signed = Ed25519.sign(seed_a, message)
+  assert_true Ed25519.verify(Ed25519.public_key(seed_a), message, signed), "a #{n}-byte message signed and verified"
+  assert_true !Ed25519.verify(Ed25519.public_key(seed_b), message, signed), "a #{n}-byte message under another key"
+end
+puts "  S + L, S = L, sizes, changed bytes, non-points, non-canonical keys and R"
+
+puts "\nALL CHECKS PASSED"

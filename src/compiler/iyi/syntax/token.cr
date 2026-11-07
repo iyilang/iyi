@@ -274,6 +274,8 @@ module Iyi
     property line_number : Int32
     property column_number : Int32
     property filename : String | VirtualFile | Nil
+    # iyi: see `Location#artifact`.
+    property artifact : String? = nil
     property delimiter_state : DelimiterState
     property macro_state : MacroState
     property passed_backslash_newline : Bool
@@ -367,7 +369,7 @@ module Iyi
     @location : Location?
 
     def location
-      @location ||= Location.new(filename, line_number, column_number)
+      @location ||= Location.new(filename, line_number, column_number, artifact)
     end
 
     def location=(@location)
@@ -388,6 +390,7 @@ module Iyi
       @line_number = other.line_number
       @column_number = other.column_number
       @filename = other.filename
+      @artifact = other.artifact
       @delimiter_state = other.delimiter_state
       @macro_state = other.macro_state
       @doc_buffer = other.doc_buffer

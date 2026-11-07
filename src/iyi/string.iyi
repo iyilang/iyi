@@ -731,3 +731,18 @@ class String
     builder.to_s
   end
 end
+
+struct Pointer(T)
+  # Bytes, not elements: every caller here is copying string contents. A
+  # million a run (`copy_run`, prelude.iyi), and a check for preemption
+  # between runs (SPEC.md III.4.13, part 9); one run or less, none.
+  def copy_from(source : Pointer(T), count : Int32) : Nil
+    return copy_run(source, count) if count <= 1048576
+    index = 0
+    while index < count
+      run = count - index > 1048576 ? 1048576 : count - index
+      (self + index.to_i64).copy_run(source + index.to_i64, run)
+      index = index + run
+    end
+  end
+end

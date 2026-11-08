@@ -1684,6 +1684,15 @@ jobs:
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
 
+      # The refusals and the paths they name, on the volume that folds case
+      # by default and the BSD tools under the script: it ran on Linux and
+      # Windows only, and on a Mac `iyi run HDR/APP/MAIN.IYI` of a stored
+      # `main.iyi` was refused as a file "ends in `.IYI`" (the stored name
+      # was looked up on Windows alone) and `touch -d '2 hours ago'` was
+      # refused by BSD touch - three failures nothing here could see.
+      - name: What the verbs say when they refuse, on darwin
+        run: bash bench/verbs_exercise.sh
+
       # The same protocol edges on BSD sockets, where a peer that hangs
       # up mid-frame surfaces differently from Linux and the EPIPE path
       # that used to exit the daemon 0 is exactly the same code.

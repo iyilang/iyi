@@ -1080,7 +1080,10 @@ module Iyi::Lsp
       stripped = line.strip
       next if stripped.empty? || stripped.starts_with?('#')
       return nil unless index == line0 && Compiler.unsafe_mark_line?(stripped)
-      return stripped.match(/\A@\[Unsafe\("(.*)"\)\]\z/).try(&.[1])
+      # String operations, not a Regex: a regex links pcre2 into the
+      # compiler, which bench/dependency_floor.sh forbids.
+      return nil unless stripped.starts_with?("@[Unsafe(\"") && stripped.ends_with?("\")]")
+      return stripped[10...-3]
     end
     nil
   end

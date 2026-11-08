@@ -476,7 +476,9 @@ module Iyi
 
     # The expression as a message quotes it: one line, and short.
     private def snippet(node : ASTNode) : String
-      text = node.to_s.gsub(/\s+/, " ")
+      # `split` on whitespace, not a Regex, which would link pcre2 into
+      # the compiler (bench/dependency_floor.sh forbids it).
+      text = node.to_s.split.join(' ')
       text.size > 48 ? "#{text[0, 45]}..." : text
     end
 

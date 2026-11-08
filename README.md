@@ -483,7 +483,7 @@ something.
 R-1 is checked rather than asserted: `bash bench/samples_roundtrip.sh` builds
 the twelve samples that import anything, deletes every imported module's
 source, builds again from the artifacts and compares what the two programs
-print. CI runs it in the merge queue and on every push to master. An artifact is readable too —
+print. CI runs it on every push to master. An artifact is readable too —
 `iyi mod dump` prints one as text — and each section carries a checksum, so a
 truncated or damaged `.iyimod` is refused by name rather than compiled
 against.

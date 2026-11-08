@@ -73,6 +73,11 @@
 #      lock kills the process with SIGSEGV; with the fault handler's
 #      default action built in a heap block again, the process outlives
 #      the fault.
+#  7h. On Linux, a program that calls C calls it from sixteen parallel
+#      tasks and a started thread, through collections, and libc answers
+#      each of them as its own thread; the binary names `pthread_create`
+#      and `pthread_join`. With the compiler's answer replaced by a
+#      `false`, the threads are raw clones again and a run dies or says so.
 #
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
@@ -2176,6 +2181,110 @@ IYI
       echo "with the action in a heap block, a helper's fault exited $code:"; tail -3 heaped.txt; exit 1
     fi
     echo "  the process outlived its helper's fault by 5 s"
+    ;;
+esac
+
+# ── 7h. A program that calls C runs it on threads libc made ──────────────
+# The pool's threads were a raw `clone` with a TLS block made from the
+# executable's PT_TLS and none of libc's thread state, so C reaching for it
+# ran on nothing: `pthread_self` answered 0 on a worker and `strerror`
+# died of SIGSEGV (issue #158). A program whose own code calls C now gets
+# `pthread_create` threads (`IyiThread.program_calls_c?`); every worker
+# and a started thread answer libc's own questions through collections
+# that stop them, and the binary names `pthread_create` and
+# `pthread_join`, where step 2's binaries, which call no C, name neither.
+# With the compiler's answer replaced by a `false` the program cannot
+# see, the run dies or says what it lost.
+case "$(uname -s)" in
+  Linux)
+    step "C called from parallel tasks and a thread runs on libc's threads"
+    cat > calls_c.iyi <<'IYI'
+@[Link("c")]
+lib LibCalls
+  fun pthread_self : UInt64
+  fun strerror(code : Int32) : UInt8*
+  fun __errno_location : Int32*
+  fun close(fd : Int32) : Int32
+  fun strdup(text : UInt8*) : UInt8*
+  fun free(pointer : Void*) : Void
+end
+
+def same?(c : UInt8*, s : String) : Bool
+  bytes = s.to_unsafe
+  i = 0
+  while i < s.bytesize
+    return false if c[i] != bytes[i]
+    i += 1
+  end
+  c[i] == 0_u8
+end
+
+selfless = Atomic(Int64).new(0_i64)
+errno = Atomic(Int64).new(0_i64)
+text = Atomic(Int64).new(0_i64)
+done = Atomic(Int64).new(0_i64)
+main_self = LibCalls.pthread_self
+
+group do |g|
+  16.times do
+    g.spawn_parallel do
+      100.times do |i|
+        selfless.add(1_i64) if LibCalls.pthread_self == 0_u64 || LibCalls.pthread_self == main_self
+        LibCalls.close(-1)
+        errno.add(1_i64) if LibCalls.__errno_location.value != 9
+        text.add(1_i64) unless same?(LibCalls.strerror(2), "No such file or directory")
+        line = "line #{i}"
+        copy = LibCalls.strdup(line.to_unsafe)
+        text.add(1_i64) unless same?(copy, line)
+        LibCalls.free(copy.as(Void*))
+        IyiMark.collect if i % 25 == 0
+      end
+      done.add(1_i64)
+      nil
+    end
+  end
+end
+
+thread = IyiThread.start do
+  selfless.add(1_i64) if LibCalls.pthread_self == 0_u64 || LibCalls.pthread_self == main_self
+  nil
+end
+thread.join
+
+if done.get != 16 || selfless.get != 0 || errno.get != 0 || text.get != 0
+  puts "tasks #{done.get} of 16; pthread_self wrong #{selfless.get}, errno wrong #{errno.get}, strings wrong #{text.get}"
+  exit 1
+end
+puts "every property held, #{IyiThread.stops} stops"
+IYI
+    if ! "$IYI" build calls_c.iyi -o calls-c > build-calls-c.log 2>&1; then
+      cat build-calls-c.log; exit 1
+    fi
+    if ! timeout -k 5 120 ./calls-c > calls-c.txt 2>&1 || ! grep -q 'every property held' calls-c.txt; then
+      cat calls-c.txt; exit 1
+    fi
+    named=$(nm -u calls-c | sed -e 's/^ *[wU] *//' -e 's/@.*$//' | grep -cE '^(pthread_create|pthread_join)$')
+    if [ "$named" -ne 2 ]; then
+      echo "the program calls C and its threads are not libc's:"; nm -u calls-c; exit 1
+    fi
+    echo "  $(cat calls-c.txt)"
+
+    step "failure proof: the threads a raw clone again in a program that calls C"
+    mkdir -p cloned/iyi
+    cp "$REPO"/src/iyi/*.iyi cloned/iyi/
+    awk '/^    @\[Primitive\(:iyi_calls_c\)\]$/ { found++; next }
+      /^    def self\.program_calls_c\? : Bool$/ { print; print "      Pointer(UInt8).new(0_u64).address != 0_u64"; found++; next }
+      { print } END { if (found != 2) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > cloned/iyi/thread.iyi || { echo "the compiler's answer is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/cloned${PSEP}$REPO/src" "$IYI" build calls_c.iyi -o cloned-run > build-cloned.log 2>&1; then
+      cat build-cloned.log; exit 1
+    fi
+    ( timeout -k 5 120 ./cloned-run > cloned.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -eq 0 ] || grep -q 'every property held' cloned.txt; then
+      echo "with raw clones, C on the workers still held:"; cat cloned.txt; exit 1
+    fi
+    echo "  exit $code: $(tail -1 cloned.txt)"
     ;;
 esac
 

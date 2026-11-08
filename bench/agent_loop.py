@@ -43,6 +43,33 @@ def run(*args, cwd=None):
     return proc
 
 
+def reap_and_restore_binary(server, aside, binary, rpc_exit):
+    """Reap the running MCP server on Windows before restoring its binary image.
+
+    Windows can keep the renamed image open for the server's lifetime, causing
+    WinError 32 if restored while the process is alive. The response from check
+    is the proof; stop and reap the server before putting its executable back.
+
+    A nested try/finally ensures os.rename(aside, binary) executes unconditionally
+    even if rpc_exit raises or server.wait times out. On timeout, the server is
+    terminated with kill() before restoring. If aside is absent, os.rename fails
+    loudly with FileNotFoundError rather than silently skipping restoration.
+    """
+    try:
+        if sys.platform == "win32":
+            try:
+                if server.poll() is None:
+                    rpc_exit()
+            finally:
+                try:
+                    server.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait()
+    finally:
+        os.rename(aside, binary)
+
+
 def main():
     work = tempfile.mkdtemp(prefix="iyi-agent-loop")
     os.makedirs(os.path.join(work, "calc"))
@@ -975,7 +1002,7 @@ def main():
         try:
             reply = rpc("tools/call", {"name": "check", "arguments": {"file": "app.iyi"}}, 13)
         finally:
-            os.rename(aside, binary)
+            reap_and_restore_binary(server, aside, binary, rpc_exit=lambda: rpc("exit"))
         answered = reply is not None and "result" in reply and reply["result"]["isError"] is False
         step("mcp answers after its binary is renamed, as a rebuild on Windows does",
              answered and json.loads(reply["result"]["content"][0]["text"]) == [],

@@ -411,15 +411,19 @@
   I.4). Outside it, iyi-web (fourteen library modules), iyi-db (its
   `@[Share]` and `@[Share(owns: true)]` types and an `uninitialized`),
   iyi-pg (four modules marked, the rest moved to the safe calls),
-  iyi-metric (one) and iyiturkiye, which builds on the first three, need
-  marks or the safe calls before they build on 0.21.0. The check costs,
+  iyi-metric (one), jwt (`jwt/base64url` marked, `jwt/keys` moved to
+  `byte_at`) and iyiturkiye (three Crystal-format parsers marked, two
+  controllers moved to the safe calls, and releases of iyi-web, iyi-pg,
+  iyi-db and jwt that carry theirs) need marks or the safe calls before
+  they build on 0.21.0. The check costs,
   as `IYI_PROF=1`'s `main: unsafe check` against the whole `iyi check`
   (median of five), 14 ms of 285 for `samples/iyi/hello.iyi`, 239 of
   2,238 for `bench/std_fuzz_exercise.iyi` and 576 of 2,231 for
-  `bench/std_tls_exercise.iyi` on Linux (12 vCPU, shared), and 17 of
-  342, 300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical
-  processors (the user's machine): 5% of a small program's check, 10 to
-  26% of a large one's.
+  `bench/std_tls_exercise.iyi` on Linux (12 vCPU, shared), 17 of 342,
+  300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical processors
+  (the user's machine), and 12 of 243, 202 of 1,863 and 491 of 1,870 on
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine): 5% of a small
+  program's check, 10 to 26% of a large one's.
 
 ### Gates
 

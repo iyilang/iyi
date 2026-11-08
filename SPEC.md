@@ -9063,11 +9063,12 @@ pass, timed by `IYI_PROF=1` as `main: unsafe check`, against the whole
 `bench/std_fuzz_exercise.iyi` 239 ms of 2,238 and
 `bench/std_tls_exercise.iyi` 576 ms of 2,231 on Linux (12 vCPU, shared);
 17 of 342, 300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical
-processors (the user's machine). That is 5% of a small program's check
-and 10 to 26% of a large one's, TLS the most. A build pays the same walk
-beside code generation, which it does not touch, and the binary carries
-only the list of the program's own marked modules the fault message
-prints.
+processors (the user's machine); 12 of 243, 202 of 1,863 and 491 of 1,870
+on macOS 26.6, an M2 Pro with 10 cores (the user's machine). That is 5% of
+a small program's check and 10 to 26% of a large one's, TLS the most. A
+build pays the same walk beside code generation, which it does not touch,
+and the binary carries only the list of the program's own marked modules
+the fault message prints.
 
 **Granularity, said plainly.** The unit is the file: one `to_unsafe`
 makes a whole module unchecked. The answers are the unneeded-mark

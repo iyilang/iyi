@@ -324,7 +324,8 @@ else
        '    @out = Mutex.new { IyiIO.new(handle) }' '    @out = IyiIO.new(handle)' \
        '      return unless @out.lock { |io| IOBackend.put(io, line) }.is_a?(Cancelled)' '      return IOBackend.put(@out, line)' \
        'pub class IOBackend < Backend' '@[Share]
-pub class IOBackend < Backend'; then
+pub class IOBackend < Backend' \
+       $'\nmodule std/log\n' $'\n@[Unsafe("the broken copy claims IOBackend is Share without its lock, the race the exercise must catch")]\nmodule std/log\n'; then
     echo "  the unlocked patch did not apply"
     status=1
   elif ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/whole-unlocked" "$WORK/whole.iyi" > "$WORK/unlocked.build" 2>&1; then

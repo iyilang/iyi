@@ -239,7 +239,7 @@ grep -q 'stack overflow' deep.txt || { echo "the death is not the evidence:"; ca
 grep -q '"status":"fail"' deep.json && grep -q 'stack overflow' deep.json ||
   { echo "the data says nothing about the death:"; cat deep.json; exit 1; }
 rm deep_test.iyi
-printf 'module wild_test\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild_test.iyi
+printf '@[Unsafe("the test reads through a pointer to address 16 on purpose, the kill iyi test must count as a failure")]\nmodule wild_test\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild_test.iyi
 "$IYI" test wild_test.iyi > wild.txt 2>&1
 [ $? -eq 1 ] || { echo "a test the kernel killed was not a failure:"; cat wild.txt; exit 1; }
 grep -q 'memory fault' wild.txt || { echo "the kernel's kill is not the evidence:"; cat wild.txt; exit 1; }

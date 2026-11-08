@@ -443,7 +443,7 @@ refuses "bytes that are not text" "not a valid iyi source file" -- "$IYI" run bi
 # invalid memory access" about a language with no null to dereference.
 printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\nputs down(0)\n' > deep.iyi
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
-printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
+printf '@[Unsafe("the program reads through a pointer to address 16 on purpose, the kill iyi run must explain")]\nmodule wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
 # A generic struct holding a trait it implements, `Box(Show)` beside `impl
 # Show for Box(T) forall T`: the recursive-struct check never met
@@ -620,7 +620,7 @@ refuses "two traits' defaults answering one method" "and impl Column for User an
 # "Missing hash key: Wt (KeyError)" and a stack trace. A trait's
 # `initialize` is a default method like any other now, and an implementer
 # is made with it.
-printf 'pub trait Wt\n  def initialize(x : Int32)\n  end\nend\n\nstruct B\n  getter v : Int32 = 3\nend\n\nimpl Wt for B\nend\n\nlib LibQ\n  struct CS\n    a : Int32\n  end\nend\n\npub trait Tq\nend\n\nimpl Tq for LibQ::CS\n  def initialize\n  end\nend\n\nputs B.new(1).v\nputs LibQ::CS.new.a\n' > traitinit.iyi
+printf '@[Unsafe("an impl gives an initialize to a struct declared inside a lib, the C layout the check once crashed on")]\npub trait Wt\n  def initialize(x : Int32)\n  end\nend\n\nstruct B\n  getter v : Int32 = 3\nend\n\nimpl Wt for B\nend\n\nlib LibQ\n  struct CS\n    a : Int32\n  end\nend\n\npub trait Tq\nend\n\nimpl Tq for LibQ::CS\n  def initialize\n  end\nend\n\nputs B.new(1).v\nputs LibQ::CS.new.a\n' > traitinit.iyi
 if "$IYI" run traitinit.iyi > traitinit.out 2>&1 && [ "$(tr -d '\r' < traitinit.out)" = "$(printf '3\n0')" ]; then
   echo "  an initialize in a trait and in an impl for a lib struct makes the value"
 else

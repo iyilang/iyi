@@ -622,6 +622,7 @@ cd "$WORK" || exit 1
 mkdir -p "$WORK/libs/m"
 cd "$WORK/libs" || exit 1
 cat > m/netty.iyi <<'EOF'
+@[Unsafe("Box calls the C library's abs through a lib nested in the class, the binding the artifact must name")]
 module m/netty
 
 pub class Box

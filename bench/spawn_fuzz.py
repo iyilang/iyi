@@ -349,6 +349,10 @@ def module_text(mod, rng):
                 out += ["group do |g|", f"  g.spawn {{ read{cell.k}; nil }}", "end"]
                 started = True
             out.append(f"bump{cell.k}")
+    if mod.uses_pointer:
+        # The mark takes the blank line under the header, so every line
+        # below keeps the number the oracle reads refusals and spawns at.
+        out[0:2] = ['@[Unsafe("the module allocates through Pointer#malloc beside its UnsafeReach claim, the trust that claim stands on")]', out[0]]
     return "\n".join(out) + "\n"
 
 

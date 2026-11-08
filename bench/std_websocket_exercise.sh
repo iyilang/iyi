@@ -141,15 +141,15 @@ refuses() { # refuses <label> <name> <phrase> <statement>
   printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(grep -m1 -oF "$phrase" "$WORK/$name.out")"
 }
 refuses "text that is not UTF-8" text_bytes "WebSocket: send's text is not UTF-8; send_binary sends bytes" \
-  'ws.send(String.new(1) { |p| p[0] = 255_u8 })'
+  'ws.send(String.new([255_u8]))'
 refuses "a ping past 125 bytes" ping_long "WebSocket: a ping carries at most 125 bytes, not 200" \
-  'ws.ping(String.new(200) { |p| 200.times { |i| p[i] = 97_u8 } })'
+  'ws.ping("a" * 200)'
 refuses "close 1006" close_1006 "WebSocket: close code 1006 is not one an endpoint sends: 1000-1003, 1007-1014 or 3000-4999" \
   'ws.close(1006)'
 refuses "close 5000" close_5000 "WebSocket: close code 5000 is not one an endpoint sends" \
   'ws.close(5000)'
 refuses "a close reason past 123 bytes" reason_long "WebSocket: a close reason is at most 123 bytes, not 124" \
-  'ws.close(1000, String.new(124) { |p| 124.times { |i| p[i] = 97_u8 } })'
+  'ws.close(1000, "a" * 124)'
 refuses "a caller's Upgrade" own_upgrade "WebSocket: Upgrade is the handshake's own header" \
   'WebSocket.connect("ws://127.0.0.1:#{l.local_port}/", {"Upgrade" => "h2c"})'
 refuses "a negative limit" limit_negative "WebSocket: max_message is a count of bytes, not -1" \

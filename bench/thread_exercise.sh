@@ -332,6 +332,7 @@ grep -E '^threads:' answers-32.txt | sed 's/^/  /'
 # core by construction (below). Asserted on Windows, where it was
 # measured; printed everywhere.
 cat > crowd.iyi <<'IYI'
+@[Unsafe("on Windows the spinners pin and prioritize themselves through Windows' thread functions, a lib and C calls with pointerof answers")]
 module crowd
 
 class Counter
@@ -690,6 +691,7 @@ case "$(uname -s)" in
       echo "  the stop beside a burst needs a second processor for the threads it stops; this machine has ${NUMBER_OF_PROCESSORS:-1}: unmeasured here"
     else
     cat > burst.iyi <<'IYI'
+@[Unsafe("the burner pins itself to one processor and raises its priority by calling Windows' thread functions through a lib")]
 module burst
 
 import std/file::{File}
@@ -722,6 +724,7 @@ end
 puts "bursts: #{bursts}"
 IYI
     cat > stopping.iyi <<'IYI'
+@[Unsafe("each thread pins itself to its processors by calling Windows' SetThreadAffinityMask through a lib")]
 module stopping
 
 class Flag
@@ -921,6 +924,7 @@ IYI
     # runtime lock is the stop's still.
     step "a panic inside a stop puts the stopping thread's priority back"
     cat > panicky.iyi <<'IYI'
+@[Unsafe("the report writes through __iyi_write and reads the thread's priority from Windows, so it allocates nothing inside the stop")]
 module panicky
 
 def say(text : String) : Nil
@@ -990,6 +994,7 @@ IYI
     # churners; per thread, none in 20.
     step "threads that raise together for collections each put their own priority back"
     cat > raisers.iyi <<'IYI'
+@[Unsafe("each thread reads its own priority from Windows' GetThreadPriority, a C call")]
 module raisers
 
 # Threads crossing the budget together, then threads collecting together:
@@ -1112,6 +1117,7 @@ esac
 # after on twelve vCPUs, so it is printed there; darwin has no placing
 # to hold it by. Asserted on Windows; printed everywhere.
 cat > release.iyi <<'IYI'
+@[Unsafe("the held thread pins and deprioritizes itself through C calls and raw sched syscalls whose arguments live in Pointer#malloc memory")]
 module release
 
 import std/process::{Process, ChildProcess}
@@ -1364,6 +1370,7 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 'registry:' stale.txt | sed 's/^FAIL: /
 # collects every millisecond; each checks its list every 64 trips.
 step "a task a thread is switching into keeps its objects"
 cat > switching.iyi <<'IYI'
+@[Unsafe("the tallies live in a page from __iyi_mmap read as atomic words, so counting allocates nothing the collector sees")]
 module switching
 
 import std/gc::{GC}
@@ -1809,6 +1816,7 @@ echo "  refused by its field three ways: a mixin's method, {% if %} and a macro 
 # whose address a method other than `initialize` takes is mutable now.
 step "failure proof: a field given out by pointerof is not Share"
 cat > addressed.iyi <<'IYI'
+@[Unsafe("poke writes the counter through pointerof, the address the Share refusal must name")]
 class Counter
   def initialize(@n : Int32)
   end
@@ -2390,6 +2398,7 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "threads and tasks grow fresh stacks beside a thread collecting in a loop: three runs, and every one ends"
     cat > guard.iyi <<'IYI'
+@[Unsafe("each frame writes an uninitialized pad through pointerof so a fresh stack is touched as it grows")]
 class Shared
   getter stop : Atomic(Int64)
   getter grown : Atomic(Int64)
@@ -2821,6 +2830,7 @@ case "$(uname -s)" in
   Linux | Darwin)
     step "a mark helper's fault inside a collection kills the process"
     cat > wild.iyi <<'IYI'
+@[Unsafe("a mark helper is started on a function that writes to a wild address, the fault the gate wants inside a collection")]
 module wild
 
 # A helper's life here: the runtime lock taken, as a collection on a mark

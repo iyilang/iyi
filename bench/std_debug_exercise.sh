@@ -151,6 +151,7 @@ program = [0, 9, 2] + list((0x1000).to_bytes(8, "little")) + [3, 41, 5, 7, 1, 2,
 after_length = [3, 0] + list(len(header).to_bytes(4, "little")) + header + program
 table = list(len(after_length).to_bytes(4, "little")) + after_length
 open(sys.argv[2], "w").write(
+    "@[Unsafe(\"the lifted reader walks the line table through a Pointer(UInt8), handed the array's to_unsafe\")]\n" +
     "struct LineReader\n" + body + "\nend\n\n" +
     "table = [" + ", ".join("%d_u8" % b for b in table) + "]\n" +
     "puts LineReader.resolve_line(0x1004_u64, table.to_unsafe, table.size.to_i64).inspect\n")

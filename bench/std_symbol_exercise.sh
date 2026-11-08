@@ -186,8 +186,8 @@ prove_fails "inspect writes the escape byte by number" unnamed_escape \
 
 prove_fails "inspect leaves #{ to interpolate" raw_interpolation \
   "ASSERTION FAILED: inspect escapes interpolation" \
-  'string.to_unsafe[index + 1] == 123_u8' \
-  'string.to_unsafe[index + 1] == 0_u8'
+  'string.byte_at(index + 1) == 123_u8' \
+  'string.byte_at(index + 1) == 0_u8'
 
 echo
 if [ "$status" -ne 0 ]; then

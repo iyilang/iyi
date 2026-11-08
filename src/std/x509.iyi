@@ -1064,10 +1064,9 @@ struct X509Names
 
   def self.ipv6(text : String) : Array(UInt8)?
     gap = -1
-    p = text.to_unsafe
     i = 0
     while i + 1 < text.bytesize
-      if p[i] == 58_u8 && p[i + 1] == 58_u8
+      if text.byte_at(i) == 58_u8 && text.byte_at(i + 1) == 58_u8
         return nil if gap >= 0
         gap = i
         i = i + 2
@@ -1111,10 +1110,9 @@ struct X509Names
   private def self.number(text : String, base : Int32, width : Int32) : Int32?
     return nil if text.empty? || text.bytesize > width
     value = 0
-    p = text.to_unsafe
     i = 0
     while i < text.bytesize
-      b = p[i]
+      b = text.byte_at(i)
       digit = if b >= 48_u8 && b <= 57_u8
                 b.to_i32 - 48
               elsif base == 16 && b >= 97_u8 && b <= 102_u8
@@ -1163,17 +1161,16 @@ struct X509Pem
     padding = 0
     padding = 1 if text.ends_with?("=")
     padding = 2 if text.ends_with?("==")
-    p = text.to_unsafe
     i = 0
     while i < text.bytesize
-      b = p[i]
+      b = text.byte_at(i)
       letter = (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8)
       ok = letter || b == 43_u8 || b == 47_u8 || (b == 61_u8 && i >= text.bytesize - padding)
       return X509Error.new("a #{label} block with byte #{b} in its base64, at #{i}") unless ok
       i = i + 1
     end
     decoded = Base64.decode(text)
-    Array(UInt8).new(decoded.bytesize) { |k| decoded.to_unsafe[k] }
+    Array(UInt8).new(decoded.bytesize) { |k| decoded.byte_at(k) }
   end
 end
 
@@ -1570,10 +1567,9 @@ struct X509Der
     return false if rest.empty? || rest.bytesize > 253
     rest.split('.').all? do |label|
       ok = !label.empty? && label.bytesize <= 63 && !label.starts_with?("-") && !label.ends_with?("-")
-      p = label.to_unsafe
       i = 0
       while ok && i < label.bytesize
-        b = p[i]
+        b = label.byte_at(i)
         ok = (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8) || b == 45_u8
         i = i + 1
       end
@@ -1582,6 +1578,6 @@ struct X509Der
   end
 
   def self.bytes(text : String) : Array(UInt8)
-    Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] }
+    Array(UInt8).new(text.bytesize) { |i| text.byte_at(i) }
   end
 end

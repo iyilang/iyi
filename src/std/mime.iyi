@@ -20,6 +20,7 @@
 # file. Extensions are looked up by the last dot of the base name only,
 # so `a.tar.gz` is `application/gzip`, as every server answers it.
 
+@[Unsafe("types and extensions are matched by walking the bytes of their strings through a raw pointer")]
 module std/mime
 
 pub struct MIME

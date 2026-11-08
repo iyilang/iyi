@@ -53,6 +53,7 @@
 #
 # Pure computation: std/big's arithmetic, std/digest's hashes.
 
+@[Unsafe("the curve arithmetic works in word buffers it allocates and indexes itself, for speed")]
 module std/ecdsa
 
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}

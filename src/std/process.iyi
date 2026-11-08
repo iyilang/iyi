@@ -85,6 +85,7 @@
 # `Process.executable` is this program's own path, which is how a program
 # starts another copy of itself, and `Process.pid` its process id.
 
+@[Unsafe("children are started, waited for and talked to through the platform's raw calls and buffers")]
 module std/process
 
 # `::Bool` throughout: beside `import std/bool` a bare `Bool` here named

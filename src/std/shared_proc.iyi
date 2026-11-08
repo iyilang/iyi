@@ -25,6 +25,7 @@
 # where the def was given it, and it is the one proc a boundary takes on
 # trust. Any other `&proc` is refused there.
 
+@[Unsafe("a proc is trusted to cross tasks under @[Share] because the def it came from was checked to be shareable")]
 module std/shared_proc
 
 @[Share(owns: true)]

@@ -104,6 +104,7 @@
 # five, and writing 8-bit bodies: everything this writes is 7-bit but for
 # an RFC 6532 address, which `Message#utf8?` names for SMTPUTF8.
 
+@[Unsafe("headers and bodies are encoded by reading the bytes of strings through raw pointers")]
 module std/mail
 
 import std/digest::{SHA1}

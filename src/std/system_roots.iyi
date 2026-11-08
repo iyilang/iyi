@@ -39,6 +39,7 @@
 # std/x509 itself is pure computation, and a program that brings its own
 # roots does not link crypt32 or Security.framework.
 
+@[Unsafe("the trusted roots are read from the platform's certificate store through its C library")]
 module std/system_roots
 
 import std/x509::{Certificate, X509Error}

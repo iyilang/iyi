@@ -17,6 +17,7 @@
 # metadata never orders (`1.0.0+a` and `1.0.0+b` compare equal) but does
 # distinguish (`==` and `hash` read it), so a set of versions keeps both.
 
+@[Unsafe("a version's parts are checked by reading the bytes of their strings directly")]
 module std/semantic_version
 
 import std/traits::{Comparable}

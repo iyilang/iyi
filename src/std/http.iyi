@@ -145,6 +145,7 @@
 # refused by name; and a streamed answer in zstd, std/zstd's compressor
 # taking its input whole.
 
+@[Unsafe("requests and answers are read into byte buffers it allocates, grows and indexes itself")]
 module std/http
 
 import std/dns::{DnsError, DnsName, SvcbAnswer, SvcbRecord}

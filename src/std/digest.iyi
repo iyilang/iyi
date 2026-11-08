@@ -26,6 +26,7 @@
 # the low half of: `checksum(data, seed)`, or `update` in pieces and a
 # `digest` that can be asked midway.
 
+@[Unsafe("each hash reads its input and writes its digest through raw byte pointers, a block at a time, for speed")]
 module std/digest
 
 import std/int

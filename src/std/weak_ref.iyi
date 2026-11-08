@@ -23,6 +23,7 @@
 # and has no lifetime of its own to watch, so `WeakRef(Int32)` is refused
 # when it is compiled.
 
+@[Unsafe("the cell is a word the collector clears, read as a raw address and cast back to the object while it is alive")]
 module std/weak_ref
 
 pub class WeakRef(T)

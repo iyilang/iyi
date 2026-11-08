@@ -475,7 +475,7 @@ pub class Huffman
     bits_in_buf = 0_i32
     i = 0
     while i < input.bytesize
-      byte_val = input.to_unsafe[i].to_i32
+      byte_val = input.byte_at(i).to_i32
       code = HUFFMAN_CODES[byte_val]
       code_len = HUFFMAN_LENS[byte_val]
 
@@ -506,14 +506,7 @@ pub class Huffman
   end
 
   def self.encode(input : Bytes) : Bytes
-    # Convert slice to String without copying for encoding
-    str = String.new(input.size) do |b|
-      j = 0
-      while j < input.size
-        b[j] = input[j]
-        j = j + 1
-      end
-    end
+    str = String.new(input)
     encode(str)
   end
 
@@ -522,7 +515,7 @@ pub class Huffman
     total_bits = 0_i64
     i = 0
     while i < input.bytesize
-      byte_val = input.to_unsafe[i].to_i32
+      byte_val = input.byte_at(i).to_i32
       total_bits = total_bits + HUFFMAN_LENS[byte_val].to_i64
       i = i + 1
     end
@@ -571,13 +564,7 @@ pub class Huffman
       end
     end
 
-    String.new(out_chars.size) do |buf|
-      j = 0
-      while j < out_chars.size
-        buf[j] = out_chars[j]
-        j = j + 1
-      end
-    end
+    String.new(out_chars)
   end
 
   def self.decode(bytes : Bytes) : String | HpackError
@@ -850,14 +837,7 @@ pub class Decoder
       end
       {res, offset + str_len}
     else
-      s = String.new(str_len) do |buf|
-        j = 0
-        while j < str_len
-          buf[j] = payload[offset + j]
-          j = j + 1
-        end
-      end
-      {s, offset + str_len}
+      {String.new(payload[offset, str_len]), offset + str_len}
     end
   end
 end
@@ -987,7 +967,7 @@ pub class Encoder
       Integer.encode(raw_len.to_u64, 7, 0_u8, buffer)
       j = 0
       while j < raw_len
-        buffer << str.to_unsafe[j]
+        buffer << str.byte_at(j)
         j = j + 1
       end
     end

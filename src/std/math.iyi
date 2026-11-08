@@ -1,3 +1,4 @@
+@[Unsafe("square roots, signs and fused multiply-adds come from LLVM intrinsics declared as a C library")]
 module std/math
 
 # std/int for the small integers' comparisons and negation in gcd; std/float

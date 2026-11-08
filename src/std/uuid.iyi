@@ -103,17 +103,13 @@ pub struct UUID
   end
 
   def to_s : String
-    String.new(36) do |dst|
-      write_hex(dst, 0, 0, 4)
-      dst[8] = 45_u8
-      write_hex(dst, 9, 4, 2)
-      dst[13] = 45_u8
-      write_hex(dst, 14, 6, 2)
-      dst[18] = 45_u8
-      write_hex(dst, 19, 8, 2)
-      dst[23] = 45_u8
-      write_hex(dst, 24, 10, 6)
-    end
+    dst = Array(UInt8).new(36, 45_u8)
+    write_hex(dst, 0, 0, 4)
+    write_hex(dst, 9, 4, 2)
+    write_hex(dst, 14, 6, 2)
+    write_hex(dst, 19, 8, 2)
+    write_hex(dst, 24, 10, 6)
+    String.new(dst)
   end
 
   def bytes : Array(UInt8)
@@ -146,7 +142,7 @@ pub struct UUID
     (@bytes[6].to_i32 >> 4) & 15
   end
 
-  private def write_hex(dst : Pointer(UInt8), at : Int32, from : Int32, count : Int32) : Nil
+  private def write_hex(dst : Array(UInt8), at : Int32, from : Int32, count : Int32) : Nil
     i = 0
     while i < count
       b = @bytes[from + i].to_i32

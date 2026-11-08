@@ -5,6 +5,7 @@
 #
 # For example, sending Procs or context to C callbacks.
 
+@[Unsafe("box casts an object to a Void* for C to carry, and unbox casts the pointer C hands back to the object again")]
 module std/box
 
 pub class Box(T)

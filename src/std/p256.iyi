@@ -77,6 +77,7 @@
 # Pure computation: std/digest, std/crypto's HMAC, std/asn1, and std/ecdsa
 # for the public key and its checking.
 
+@[Unsafe("keys and points are read out of the bytes of strings through raw pointers")]
 module std/p256
 
 import std/int

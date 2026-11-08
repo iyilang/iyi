@@ -7,6 +7,7 @@
 # WARNING: `ReferenceStorage` is for manual memory management, such as
 # allocating an instance on the stack or with a custom arena allocator.
 
+@[Unsafe("an object is built in storage the caller provides, through the compiler's initialisation primitive")]
 module std/reference_storage
 
 class ::Reference
@@ -15,6 +16,7 @@ class ::Reference
     {% @type %}
   end
 
+  @[Unsafe(call: "address is memory the caller owns, sized and aligned for the type, and nothing else holds")]
   def self.unsafe_construct(address : Pointer, *args, **opts) : self
     obj = pre_initialize(address)
     obj.initialize(*args, **opts)

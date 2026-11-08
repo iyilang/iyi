@@ -53,6 +53,7 @@
 # asked to (`use_https_records`): to the endpoint they name, under the ECH
 # configuration (RFC 9848) they carry.
 
+@[Unsafe("names and messages are parsed by walking their bytes through a raw pointer")]
 module std/dns
 
 import std/slice::{Bytes, Slice}

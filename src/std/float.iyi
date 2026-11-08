@@ -30,6 +30,7 @@
 # is 255, NaN and the infinities are refused. Narrowing a double to a
 # single overflows to the infinity of its sign, as the single's own
 # arithmetic does, and so does `2.0_f32 ** 128`.
+@[Unsafe("conversions between the float widths and the integers are compiler primitives")]
 module std/float
 
 import std/int

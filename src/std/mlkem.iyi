@@ -90,6 +90,7 @@
 # with no early exit and keeps K or K-bar by masks; its conditional jumps
 # compare loop counters, constants and pointer ranges.
 
+@[Unsafe("keys and ciphertexts are read through raw byte pointers by the lattice arithmetic, for speed")]
 module std/mlkem
 
 import std/digest::{SHA3_256, SHA3_512, SHAKE128, SHAKE256}

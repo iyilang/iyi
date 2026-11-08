@@ -44,6 +44,7 @@
 # `csv` module reads what it writes, and it reads what Python's writes;
 # `bench/std_csv_exercise.sh` holds both directions on a generated corpus.
 
+@[Unsafe("the parser walks the bytes of the text through a raw pointer, for speed")]
 module std/csv
 
 pub struct CSV

@@ -132,7 +132,10 @@ echo
 echo "== a negative size is refused by name"
 gc_panics_with() { # gc_panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/gc::{GC}\n\nputs (%s).address\n' "$expression" > "$WORK/$name.iyi"
+  # Each verb answers a raw pointer, so the program is marked as one that
+  # handles raw memory (SPEC.md III.13); unmarked, all three were refused
+  # before they ran (darwin's std shard in CI run 42472342266).
+  printf '@[Unsafe("GC.malloc and GC.realloc answer raw pointers, and the program prints the address of the one it is given")]\nmodule main\n\nimport std/gc::{GC}\n\nputs (%s).address\n' "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"

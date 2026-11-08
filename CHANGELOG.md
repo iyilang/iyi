@@ -129,7 +129,7 @@
   a started pool free, and each is caught.
 
 - **A plain `spawn` runs in parallel where the compiler can prove it
-  safe (SPEC.md III.4.15, proposed).** A `g.spawn { }` whose block
+  safe (SPEC.md III.4.15).** A `g.spawn { }` whose block
   passes every check `spawn(unit: :new)`'s does, and whose walk of the
   module state it reaches through calls finds nothing that is not
   `Share` other than state marked `@[SafeReach]`, is a parallel task of
@@ -703,8 +703,8 @@
   built by Crystal 1.21.0, in one run, 5618 against 6359 plain and 4369
   against 3948 with `--release`.
 
-- **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,
-  PROPOSED).** `each_parallel`, `map_parallel`, `sum_parallel` and
+- **Data parallelism as a library: `std/parallel` (SPEC.md
+  III.4.14).** `each_parallel`, `map_parallel`, `sum_parallel` and
   `reduce_parallel` on a `List`, an `Array` and an `Int32` or `Int64`
   range cut the elements into chunks, eight a worker unless `grain:`
   names a chunk's size, and as many parallel tasks as there are workers
